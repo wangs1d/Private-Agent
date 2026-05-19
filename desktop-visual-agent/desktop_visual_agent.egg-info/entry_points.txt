@@ -1,0 +1,2 @@
+[console_scripts]
+desktop-visual-agent = desktop_visual_agent.__main__:main

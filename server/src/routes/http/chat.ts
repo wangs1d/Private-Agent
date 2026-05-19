@@ -1,0 +1,183 @@
+import type { FastifyInstance } from "fastify";
+
+import {
+  chatScheduleDraftBodySchema,
+  chatSkillEnabledBodySchema,
+  chatSkillsQuerySchema,
+} from "../../schemas/api.js";
+import type { HttpRouteDeps } from "./types.js";
+
+function resolveActorKey(q: Record<string, unknown> | undefined): string | undefined {
+  const userId = typeof q?.userId === "string" ? q.userId : undefined;
+  const sessionId = typeof q?.sessionId === "string" ? q.sessionId : undefined;
+  return userId?.trim() || sessionId?.trim() || undefined;
+}
+
+function buildToolsResponse(
+  deps: Pick<HttpRouteDeps, "toolRegistry" | "skillManager" | "worldService">,
+  sessionId?: string,
+) {
+  const { toolRegistry, skillManager, worldService } = deps;
+  const skillNames = new Set(skillManager.list(true).map((s) => s.name));
+  /** 代码注册的工具（含 `agent.*`、`world.doudizhu.*` 等），排除与 Skill 同名的条目。 */
+  const codeTools = toolRegistry.list().filter((name) => !skillNames.has(name));
+  let skills = skillManager.list(true);
+  const sid = sessionId?.trim();
+  if (sid) {
+    const owned = new Set(worldService.getOrCreateRoom(sid, sid).ownedSkillIds);
+    skills = skills.filter((s) => s.kind !== "community" || owned.has(s.name));
+  }
+  return {
+    tools: codeTools,
+    skills: skills.map((s) => ({
+      name: s.name,
+      displayName: s.displayName,
+      description: s.description,
+      version: s.version,
+      tags: s.tags,
+      icon: s.icon,
+      kind: s.kind,
+    })),
+  };
+}
+
+/**
+ * 当前 Actor 可见的全部 Skill（含已禁用）；与 `/chat/tools` 相同的社区技能过滤规则。
+ */
+function buildSkillsLibraryResponse(
+  deps: Pick<HttpRouteDeps, "skillManager" | "worldService">,
+  actorKey?: string,
+) {
+  const { skillManager, worldService } = deps;
+  let manifests = skillManager.list(false);
+  const sid = actorKey?.trim();
+  if (sid) {
+    const owned = new Set(worldService.getOrCreateRoom(sid, sid).ownedSkillIds);
+    manifests = manifests.filter((s) => s.kind !== "community" || owned.has(s.name));
+  } else {
+    manifests = manifests.filter((s) => s.kind !== "community");
+  }
+  const enabledCount = manifests.filter((s) => s.enabled !== false).length;
+  return {
+    ok: true as const,
+    actorScoped: Boolean(sid),
+    items: manifests.map((s) => {
+      const kind = s.kind ?? "builtin";
+      return {
+        name: s.name,
+        displayName: s.displayName,
+        description: s.description,
+        version: s.version,
+        tags: s.tags,
+        icon: s.icon,
+        kind,
+        enabled: s.enabled !== false,
+        source: kind === "community" ? ("community" as const) : ("builtin" as const),
+        sourceLabel: kind === "community" ? "技能商店" : "内置",
+      };
+    }),
+    stats: {
+      total: manifests.length,
+      enabled: enabledCount,
+      disabled: manifests.length - enabledCount,
+    },
+  };
+}
+
+/**
+ * 聊天主域：工具/Skill 列表、入口元数据；WebSocket 仍为根路径 `/ws`。
+ * 保留 `GET /tools` 与主域 `GET /chat/tools` 行为一致（兼容旧客户端）。
+ */
+export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
+  const { toolRegistry, skillManager, worldService, scheduleIntentService } = deps;
+  const toolsDeps = { toolRegistry, skillManager, worldService };
+
+  app.get("/chat", async () => ({
+    domain: "chat",
+    websocketPath: "/ws",
+    toolsPath: "/chat/tools",
+    legacyToolsPath: "/tools",
+    skillsLibraryPath: "/chat/skills",
+    desktopBridgeSyncPath: "/chat/desktop-bridge/sync",
+  }));
+
+  app.get("/chat/desktop-bridge/sync", async (request, reply) => {
+    const q = request.query as Record<string, unknown> | undefined;
+    const actorKey = resolveActorKey(q);
+    if (!actorKey) {
+      return reply.code(400).send({ ok: false, message: "需要 userId 或 sessionId" });
+    }
+    const { desktopBridgeCoordinator } = deps;
+    if (!desktopBridgeCoordinator.isBridgeFeatureEnabled()) {
+      return {
+        ok: true,
+        bridgeFeatureEnabled: false,
+        bridgeOnline: false,
+        updatedAt: null,
+        lastTask: null,
+      };
+    }
+    const body = desktopBridgeCoordinator.getSyncPayload(actorKey);
+    return { ok: true, bridgeFeatureEnabled: true, ...body };
+  });
+
+  app.get("/chat/tools", async (request) => {
+    const q = request.query as Record<string, unknown> | undefined;
+    return buildToolsResponse(toolsDeps, resolveActorKey(q));
+  });
+
+  app.get("/tools", async (request) => {
+    const q = request.query as Record<string, unknown> | undefined;
+    return buildToolsResponse(toolsDeps, resolveActorKey(q));
+  });
+
+  app.get("/chat/skills", async (request, reply) => {
+    const parsed = chatSkillsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const q = parsed.data;
+    const actorKey = q.userId?.trim() || q.sessionId?.trim();
+    const libDeps = { skillManager, worldService };
+    return buildSkillsLibraryResponse(libDeps, actorKey || undefined);
+  });
+
+  app.patch("/chat/skills/enabled", async (request, reply) => {
+    const parsed = chatSkillEnabledBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { skillName, enabled, sessionId, userId } = parsed.data;
+    const actorKey = userId?.trim() || sessionId?.trim();
+    const manifest = skillManager.get(skillName);
+    if (!manifest) {
+      return reply.code(404).send({ ok: false, message: "Skill 不存在" });
+    }
+    const kind = manifest.kind ?? "builtin";
+    if (kind === "community") {
+      if (!actorKey) {
+        return reply
+          .code(400)
+          .send({ ok: false, message: "切换社区技能状态须带上 userId 或 sessionId" });
+      }
+      const owned = new Set(worldService.getOrCreateRoom(actorKey, actorKey).ownedSkillIds);
+      if (!owned.has(skillName)) {
+        return reply.code(403).send({ ok: false, message: "未拥有该社区技能" });
+      }
+    }
+    skillManager.setEnabled(skillName, enabled);
+    return { ok: true, skillName, enabled };
+  });
+
+  app.post("/chat/schedule-draft", async (request, reply) => {
+    const parsed = chatScheduleDraftBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const draft = await scheduleIntentService.parse(parsed.data.sessionId, parsed.data.text);
+    if (!draft) {
+      return reply.code(200).send({ ok: true, matched: false });
+    }
+    return { ok: true, matched: true, draft };
+  });
+}

@@ -1,0 +1,9 @@
+windows_dist/
+
+desktop-visual-agent/.venv/
+
+node_modules/
+**/node_modules/
+**/dist/
+*.log
+*.tmp

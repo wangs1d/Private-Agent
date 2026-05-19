@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/*.json
+data/social-media/
+*.log
+.env
+.DS_Store
+Thumbs.db

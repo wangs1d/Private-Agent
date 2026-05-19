@@ -1,0 +1,312 @@
+import { z } from "zod";
+
+const visionSourceKindSchema = z.enum(["device_camera", "external_stream", "agent_attachment"]);
+
+/** WebSocket `chat.user_message` 可选附带视觉帧（与 {@link sanitizeVisionFramesFromWire} 对齐）。 */
+export const visionFrameWireSchema = z.object({
+  sourceKind: visionSourceKindSchema,
+  sourceId: z.string().max(160).optional(),
+  mimeType: z.string().min(3).max(120),
+  dataBase64: z.string().min(1),
+  capturedAt: z.string().max(64).optional(),
+});
+
+export const userMessageSchema = z
+  .object({
+    /** 兼容旧客户端；与 `userId` 同时存在时以 `userId` 为稳定用户标识 */
+    sessionId: z.string().min(1),
+    /** 稳定用户 id（推荐）；缺省时行为同仅发 `sessionId` */
+    userId: z.string().min(1).optional(),
+    messageId: z.string().min(1),
+    /** 可与 `visionFrames` 二选一：仅有图时允许空串，由服务端补默认提示 */
+    text: z.string(),
+    timestamp: z.string().min(1),
+    visionFrames: z.array(visionFrameWireSchema).max(16).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const hasText = data.text.trim().length > 0;
+    const hasVision = (data.visionFrames?.length ?? 0) > 0;
+    if (!hasText && !hasVision) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "需要非空 text 或至少一帧 visionFrames",
+        path: ["text"],
+      });
+    }
+  });
+
+export const walletRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  requestId: z.string().min(1),
+  action: z.enum(["freeze", "debit", "refund", "purchase"]),
+  amount: z.number().positive(),
+  meta: z.record(z.unknown()).optional(),
+});
+
+/** Agent World HTTP/WS 校验：实现位于根目录包 `agent-world/schemas.ts` */
+export {
+  worldDoudizhuCreateBodySchema,
+  worldDoudizhuJoinBodySchema,
+  worldDoudizhuLeaveBodySchema,
+  worldDoudizhuListQuerySchema,
+  worldDoudizhuTableQuerySchema,
+  worldDoudizhuWsTableSchema,
+  worldLeisureBodySchema,
+  worldMarketContractCreateBodySchema,
+  worldMarketContractDeliverBodySchema,
+  worldMarketContractRejectBodySchema,
+  worldMarketContractsQuerySchema,
+  worldMarketContractSessionBodySchema,
+  worldPurchaseBodySchema,
+  worldRegisterAgentQuickBodySchema,
+  worldRegisterChallengeBodySchema,
+  worldRegisterVerifyBodySchema,
+  worldSessionQuerySchema,
+  worldSkillUploadBodySchema,
+} from "@private-ai-agent/agent-world";
+
+export const agentInboxQuerySchema = z.object({
+  sessionId: z.string().min(1),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+});
+
+export const agentPairBodySchema = z.object({
+  sessionId: z.string().min(1),
+  code: z.string().min(1).max(256),
+});
+
+export const agentUnpairBodySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+export const agentPairStatusQuerySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+/** WebSocket：AIP 投递 */
+export const aipDispatchWsSchema = z.object({
+  toSessionId: z.string().min(1),
+  envelope: z.record(z.unknown()),
+  /** 可选：与当前主会话用户消息关联（同 `chat.user_message.messageId`） */
+  chatUserMessageId: z.string().min(1).optional(),
+});
+
+export const agentAipStateQuerySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+function accountActorRefine(data: { userId?: string; sessionId?: string }, ctx: z.RefinementCtx): void {
+  const u = data.userId?.trim() ?? "";
+  const s = data.sessionId?.trim() ?? "";
+  if (!u && !s) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "userId 或 sessionId 至少填一项",
+      path: ["userId"],
+    });
+  }
+}
+
+export const accountRegisterBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    displayName: z.string().min(1).max(120),
+  })
+  .superRefine(accountActorRefine);
+
+export const accountMeQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** 发起邮箱验证码注册 */
+export const accountEmailRegisterStartBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    displayName: z.string().min(1).max(120),
+  })
+  .superRefine(accountActorRefine);
+
+/** 查询占位收件箱（拉取验证码） */
+export const accountEmailRegisterPendingQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** 提交验证码完成注册 */
+export const accountEmailRegisterVerifyBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    code: z.string().regex(/^\d{6}$/, "须为 6 位数字验证码"),
+  })
+  .superRefine(accountActorRefine);
+
+/** 邮件网关 Inbound Webhook（真实收信回调） */
+export const accountEmailInboundBodySchema = z.object({
+  to: z.string().min(1),
+  text: z.string().optional(),
+  html: z.string().optional(),
+  subject: z.string().optional(),
+});
+
+export const scheduleTaskCreateBodySchema = z
+  .object({
+    sessionId: z.string().min(1),
+    title: z.string().min(1).max(120),
+    description: z.string().min(1).max(2000),
+    kind: z.enum(["reminder", "action", "weather_brief"]),
+    runAt: z.string().min(1),
+    recurrence: z.enum(["none", "daily", "weekly"]).default("none"),
+    timezone: z.string().min(1).optional(),
+    reminderMessage: z.string().min(1).max(500).optional(),
+    action: z
+      .object({
+        url: z.string().url(),
+        method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+        headers: z.record(z.string()).optional(),
+        body: z.unknown().optional(),
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.kind === "reminder" && !data.reminderMessage) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reminderMessage"],
+        message: "提醒任务必须提供 reminderMessage",
+      });
+    }
+    if (data.kind === "action" && !data.action?.url) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["action", "url"],
+        message: "动作任务必须提供 action.url",
+      });
+    }
+  });
+
+export const scheduleTaskUpdateBodySchema = z.object({
+  title: z.string().min(1).max(120).optional(),
+  description: z.string().min(1).max(2000).optional(),
+  runAt: z.string().min(1).optional(),
+  recurrence: z.enum(["none", "daily", "weekly"]).optional(),
+  timezone: z.string().min(1).optional(),
+  reminderMessage: z.string().min(1).max(500).optional(),
+  action: z
+    .object({
+      url: z.string().url(),
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+      headers: z.record(z.string()).optional(),
+      body: z.unknown().optional(),
+    })
+    .optional(),
+  status: z.enum(["active", "paused", "cancelled"]).optional(),
+});
+
+export const scheduleTaskListQuerySchema = z.object({
+  sessionId: z.string().min(1),
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
+
+export const scheduleTaskRunsQuerySchema = z.object({
+  taskId: z.string().uuid(),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+});
+
+export const weatherCurrentQuerySchema = z.object({
+  latitude: z.coerce.number().gte(-90).lte(90),
+  longitude: z.coerce.number().gte(-180).lte(180),
+  timezone: z.string().min(1).optional(),
+  label: z.string().max(120).optional(),
+});
+
+export const weatherPrefsGetQuerySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+export const weatherPrefsPutBodySchema = z.object({
+  sessionId: z.string().min(1),
+  latitude: z.number().gte(-90).lte(90),
+  longitude: z.number().gte(-180).lte(180),
+  label: z.string().max(120).optional(),
+  timezone: z.string().min(1).optional(),
+  morningReminderEnabled: z.boolean().optional(),
+  /** 开启每日简报且尚无任务时必填：首次触发的 ISO 时间（须为未来） */
+  morningFirstRunAt: z.string().optional(),
+});
+
+/** 将已创建的 weather_brief 日程任务 id 写入天气偏好（需已保存过经纬度） */
+export const weatherLinkTaskBodySchema = z.object({
+  sessionId: z.string().min(1),
+  taskId: z.string().uuid(),
+});
+
+export const chatScheduleDraftBodySchema = z.object({
+  sessionId: z.string().min(1),
+  text: z.string().min(1).max(4000),
+});
+
+/** 技能库：列出当前 Actor 可见的 Skill（含已禁用项） */
+export const chatSkillsQuerySchema = z.object({
+  sessionId: z.string().optional(),
+  userId: z.string().optional(),
+});
+
+/** 技能库：切换启用状态（社区技能需已拥有） */
+export const chatSkillEnabledBodySchema = z.object({
+  skillName: z.string().min(1),
+  enabled: z.boolean(),
+  sessionId: z.string().optional(),
+  userId: z.string().optional(),
+});
+
+export const infoSearchQuerySchema = z.object({
+  q: z.string().min(1),
+  limit: z.coerce.number().int().positive().max(20).optional(),
+});
+
+export const infoNewsQuerySchema = z.object({
+  topic: z.string().min(1),
+  limit: z.coerce.number().int().positive().max(20).optional(),
+});
+
+export const infoReadBodySchema = z.object({
+  url: z.string().url(),
+});
+
+export const infoTrackCreateBodySchema = z.object({
+  sessionId: z.string().min(1),
+  name: z.string().min(1).max(120),
+  keywords: z.array(z.string().min(1)).min(1),
+  runAt: z.string().optional(),
+  recurrence: z.enum(["none", "daily", "weekly"]).optional(),
+});
+
+export const infoTrackListQuerySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+export const infoTrackRunBodySchema = z
+  .object({
+    topicId: z.string().uuid().optional(),
+    sessionId: z.string().min(1).optional(),
+    name: z.string().optional(),
+    mode: z.enum(["topic", "keywords"]).optional(),
+    keywords: z.array(z.string()).optional(),
+  })
+  .refine((v) => Boolean(v.topicId) || Boolean(v.keywords?.length), {
+    message: "topicId 或 keywords 至少提供一个",
+  });
+
+export const phoneMeQuerySchema = z.object({
+  sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
+});

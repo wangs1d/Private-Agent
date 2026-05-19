@@ -1,0 +1,83 @@
+# Private AI Agent — Web（Nginx 静态 + 反代） + API（Fastify）
+#
+# 启动：docker compose up -d --build
+# npm 源：默认 npmmirror；可在同目录 .env 写 NPM_REGISTRY=https://registry.npmjs.org
+# 访问：http://localhost （前端）；API 与 WebSocket 经同端口反代到后端
+#
+# 仅启动后端：docker compose up -d api
+#
+# 分布式 HTTP 限流（令牌桶 + 滑动窗口）：在 .env 或此处为 api 设置
+# HTTP_RATE_LIMIT_ENABLED=1；已预置 HTTP_RATE_LIMIT_REDIS_URL 指向下方 redis 服务。
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    expose:
+      - "6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      # Dockerfile 位于 server 目录；构建上下文需要根目录以支持 npm workspaces
+      # （server + agent-world + 根 package-lock.json）
+      dockerfile: server/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      AGENT_QDRANT_URL: http://qdrant:6333
+      # 限流默认关闭；设为 1 时启用并与 redis 服务共享配额
+      HTTP_RATE_LIMIT_REDIS_URL: redis://redis:6379
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_started
+    expose:
+      - "3000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ./client/web
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  app-data:
+  qdrant-data:
+  redis-data:

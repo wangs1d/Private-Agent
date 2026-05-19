@@ -1,0 +1,450 @@
+import type OpenAI from "openai";
+import type {
+  ChatCompletionMessageParam,
+  ChatCompletionMessageToolCall,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
+
+import { DOUDIZHU_CHAT_TOOLS } from "@private-ai-agent/agent-world";
+import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
+import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
+import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import type {
+  ChatToolExecutionContext,
+  StreamDeltaHandler,
+  ToolLoopAfterBatchInfo,
+  VisionFrame,
+} from "./types.js";
+
+const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
+
+type ToolAcc = { id: string; name: string; arguments: string };
+
+const DEFAULT_MAX_ROUNDS = 12;
+
+const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "search_web",
+      description: "联网搜索公开网页信息，返回标题、链接和摘要片段。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "integer", description: "返回数量，1-20，默认 8" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_web",
+      description: "读取指定网页正文并返回标题、摘要与纯文本内容。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "info.inspect_webpage",
+      description: "巡检网页：返回标题、摘要、内容预览、主要链接和同域链接，便于继续导航。",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string" } },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "info.navigate_site",
+      description: "从起始 URL 自动多层跟进链接，直到命中目标关键词页面（如注册入口）。",
+      parameters: {
+        type: "object",
+        properties: {
+          startUrl: { type: "string" },
+          goalKeywords: { type: "array", items: { type: "string" } },
+          maxDepth: { type: "integer", description: "默认 2，最大 5" },
+          maxPages: { type: "integer", description: "默认 20，最大 80" },
+          sameHostOnly: { type: "boolean", description: "默认 true" },
+        },
+        required: ["startUrl"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "weather.get_local",
+      description:
+        "获取当地天气与穿衣建议（Open-Meteo）。优先提供 latitude、longitude（来自浏览器定位）；或仅提供 city 由服务做地理编码。可选 timezone（IANA，默认 Asia/Shanghai）。",
+      parameters: {
+        type: "object",
+        properties: {
+          latitude: { type: "number" },
+          longitude: { type: "number" },
+          city: { type: "string", description: "城市名（与坐标二选一）" },
+          timezone: { type: "string" },
+          locationLabel: { type: "string", description: "展示用地点名" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** 对话中自动创建/查询日程与提醒的内置工具组（写入定时任务，非独立日历应用）。 */
+const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "calendar.create_from_text",
+      description:
+        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒（及动作、每日天气简报）：与聊天定时意图、`/chat/schedule-draft` 同一套解析。用户须包含时间与事项，例「明天 9:00 提醒我开会」「每天 7 点天气提醒」。成功返回 taskId；解析失败则 matched=false。",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "用户原句，含时间与事项" },
+          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "calendar.create_task",
+      description:
+        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          description: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["reminder", "action", "weather_brief"],
+            description: "weather_brief 需用户已在天气页保存定位后简报才有效",
+          },
+          runAt: { type: "string", description: "ISO-8601" },
+          recurrence: { type: "string", enum: ["none", "daily", "weekly"] },
+          timezone: { type: "string" },
+          reminderMessage: { type: "string", description: "仅 kind=reminder" },
+          action: {
+            type: "object",
+            description: "仅 kind=action",
+            properties: {
+              url: { type: "string" },
+              method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+            },
+          },
+          actionUrl: { type: "string", description: "与 action.url 二选一" },
+        },
+        required: ["title", "description", "kind", "runAt"],
+        additionalProperties: true,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "calendar.list_tasks",
+      description:
+        "【内置 Calendar】查询当前用户已创建的定时日程/提醒（含下次执行时间），便于在对话中确认或避免重复创建。",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "范围起点 ISO，可选" },
+          to: { type: "string", description: "范围终点 ISO，可选" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "phone.ensure_my_number",
+      description:
+        "仅当用户明确要求办理/申领虚拟电话时调用：分配或查询其 6 位虚拟号码。禁止在用户未要求时主动调用；不要用此工具「帮用户提前占号」。跨 Agent 拨打需配对时与中继规则一致。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "phone.virtual_call",
+      description:
+        "拨打 6 位虚拟号码：主叫须已申领号码（用户需先明确要求办理过虚拟号）。向目标推送「虚拟来电」并朗读 spokenMessage。ringStyle：reminder=提醒调；peer=联络他人（默认）。打给好友或本人自提醒均可。",
+      parameters: {
+        type: "object",
+        properties: {
+          toPhone: { type: "string", description: "6 位数字虚拟号码" },
+          spokenMessage: { type: "string", description: "对方将听到的播报正文（尽量简短清晰）" },
+          ringStyle: {
+            type: "string",
+            enum: ["peer", "reminder"],
+            description: "peer=联络其他 Agent；reminder=提醒风格",
+          },
+        },
+        required: ["toPhone", "spokenMessage"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+const VISION_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "vision.http_pull",
+      description:
+        "【服务端视觉】通过 HTTP(S) 抓取远程快照图像（如摄像头 MJPEG/快照接口）。抓取成功后图像会注入当前对话下一轮模型上下文用于识别场景。**请勿用于探测内网**（服务端默认阻断 localhost 与私网 IP；可对可信域名配置 AGENT_VISION_HTTP_PULL_ALLOW_HOSTS）。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "http(s) 图像快照完整 URL" },
+          sourceId: { type: "string", description: "可选稳定源标记（telemetry）" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision.periodic_start",
+      description:
+        "【服务端定时视觉】按固定间隔从给定 HTTP(S) 快照 URL 拉帧并向模型推送一轮「配图」巡检推理。**客户端 WebSocket 需在线**才能收到助手的 chunk/done。与单次 vision.http_pull 不同：此为服务端调度无需用户每次手动发送图像。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "快照 URL（同上约束）" },
+          intervalSeconds: {
+            type: "integer",
+            description: "间隔秒数（下限约 30s，可由环境变量收紧）",
+          },
+          prompt: {
+            type: "string",
+            description: "每轮发给模型的巡检文案（可选）",
+          },
+        },
+        required: ["url", "intervalSeconds"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision.periodic_stop",
+      description: "停止指定的定时视觉任务（需提供 vision.periodic_start 返回的 jobId）。",
+      parameters: {
+        type: "object",
+        properties: { jobId: { type: "string" } },
+        required: ["jobId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision.periodic_stop_all",
+      description: "停止当前会话用户的全部定时视觉任务。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision.periodic_list",
+      description: "列出当前会话用户的定时视觉任务（jobId、url、间隔与巡检文案）。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+];
+
+/** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。 */
+export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
+  return [
+    ...DOUDIZHU_CHAT_TOOLS,
+    ...AIP_CHAT_TOOLS,
+    ...INFO_WEB_CHAT_TOOLS,
+    ...CALENDAR_CHAT_TOOLS,
+    ...PHONE_CHAT_TOOLS,
+    ...VISION_CHAT_TOOLS,
+    ...getDesktopVisualChatTools(),
+  ];
+}
+
+/**
+ * OpenAI 兼容 Chat Completions：流式输出 + tool_calls 多轮执行（Kimi / OpenAI 共用）。
+ */
+export async function streamCompletionWithDoudizhuTools(
+  client: OpenAI,
+  model: string,
+  messages: ChatCompletionMessageParam[],
+  onDelta: StreamDeltaHandler,
+  ctx: ChatToolExecutionContext,
+  options?: {
+    maxRounds?: number;
+    tools?: ChatCompletionTool[];
+    onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
+  },
+): Promise<string> {
+  const maxRounds = options?.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const tools = options?.tools ?? getBuiltinAgentChatTools();
+  let lastAssistantText = "";
+
+  for (let round = 0; round < maxRounds; round++) {
+    const stream = await client.chat.completions.create({
+      model,
+      messages,
+      tools,
+      tool_choice: "auto",
+      stream: true,
+    });
+
+    let fullText = "";
+    const toolAcc = new Map<number, ToolAcc>();
+    let finishReason: string | null | undefined;
+
+    try {
+      for await (const part of stream) {
+        const choice = part.choices[0];
+        if (!choice) continue;
+        finishReason = choice.finish_reason ?? finishReason;
+        const d = choice.delta;
+        if (d?.content) {
+          fullText += d.content;
+          onDelta(d.content);
+        }
+        if (d?.tool_calls) {
+          for (const tc of d.tool_calls) {
+            const idx = tc.index ?? 0;
+            let acc = toolAcc.get(idx);
+            if (!acc) {
+              acc = { id: tc.id ?? "", name: "", arguments: "" };
+              toolAcc.set(idx, acc);
+            }
+            if (tc.id) acc.id = tc.id;
+            if (tc.function?.name) acc.name = tc.function.name;
+            if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+          }
+        }
+      }
+    } catch (e) {
+      throw e;
+    }
+
+    lastAssistantText = fullText;
+
+    if (finishReason !== "tool_calls" || toolAcc.size === 0) {
+      messages.push({
+        role: "assistant",
+        content: fullText || null,
+      });
+      return fullText;
+    }
+
+    const toolCalls: ChatCompletionMessageToolCall[] = [...toolAcc.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, v]) => ({
+        id: v.id || `call_${Math.random().toString(36).slice(2)}`,
+        type: "function" as const,
+        function: {
+          name: v.name,
+          arguments: v.arguments || "{}",
+        },
+      }));
+
+    messages.push({
+      role: "assistant",
+      content: fullText || null,
+      tool_calls: toolCalls,
+    });
+
+    const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
+    for (const tc of toolCalls) {
+      if (tc.type !== "function") continue;
+      const fn = tc.function;
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(fn.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      const exec = await ctx.executeTool(fn.name, args);
+      toolResults.push({ name: fn.name, ok: exec.ok });
+      let injectFrames: VisionFrame[] | undefined;
+      let resultForWire: Record<string, unknown>;
+      if (
+        exec.ok &&
+        exec.result &&
+        Array.isArray((exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY])
+      ) {
+        injectFrames = (exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY] as VisionFrame[];
+        resultForWire = { ...(exec.result as Record<string, unknown>) };
+        delete resultForWire[TOOL_RESULT_VISION_INJECT_KEY];
+      } else {
+        resultForWire = exec.result;
+      }
+      ctx.onToolExecuted?.({
+        toolName: fn.name,
+        input: args,
+        ok: exec.ok,
+        result: resultForWire,
+      });
+      const toolContent = JSON.stringify(
+        exec.ok ? resultForWire : { ok: false, error: exec.result.error ?? exec.result },
+      );
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: toolContent,
+      });
+      if (injectFrames?.length) {
+        messages.push({
+          role: "user",
+          content: openAiUserContentFromTurn({
+            text: "（以下为 vision.http_pull 抓取的远程图像帧；请客观描述画面并继续完成任务。）",
+            visionFrames: injectFrames,
+          }),
+        });
+      }
+    }
+    options?.onAfterToolBatch?.({
+      roundIndex: round,
+      assistantText: fullText,
+      toolResults,
+    });
+  }
+
+  return lastAssistantText;
+}

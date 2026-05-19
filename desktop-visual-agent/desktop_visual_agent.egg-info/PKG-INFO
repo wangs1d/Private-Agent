@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: desktop-visual-agent
+Version: 0.1.0
+Summary: Vision-language desktop control with pyautogui and pynput
+Requires-Python: >=3.11
+Requires-Dist: pyautogui>=0.9.54
+Requires-Dist: pynput>=1.7.6
+Requires-Dist: Pillow>=10.0.0
+Requires-Dist: httpx>=0.27.0

@@ -1,0 +1,23 @@
+{
+  "name": "private-ai-agent",
+  "private": true,
+  "workspaces": [
+    "server",
+    "agent-world",
+    "client/web",
+    "social-platform"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w private-ai-agent-server",
+    "build": "npm run build -w @private-ai-agent/agent-world && npm run build -w private-ai-agent-server && npm run build -w private-ai-agent-web",
+    "test": "npm run test -w private-ai-agent-server",
+    "agent-world": "npm run standalone -w @private-ai-agent/agent-world",
+    "server:dev": "npm run dev -w private-ai-agent-server",
+    "server:build": "npm run build -w private-ai-agent-server",
+    "web:dev": "npm run dev -w private-ai-agent-web",
+    "web:build": "npm run build -w private-ai-agent-web",
+    "social:dev": "npm run dev -w social-platform",
+    "social:build": "npm run build -w social-platform",
+    "start:full": "powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1"
+  }
+}

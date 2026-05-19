@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent World · 观战</title>
+    <!-- MapLibre GL JS - 开源的 Mapbox GL JS，支持真正的 3D 建筑 -->
+    <script src='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js'></script>
+    <link href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' rel='stylesheet' />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script>
+      // 检查 MapLibre GL 是否加载成功
+      window.addEventListener('load', function() {
+        if (typeof maplibregl === 'undefined') {
+          console.error('MapLibre GL failed to load from CDN');
+        } else {
+          console.log('MapLibre GL loaded successfully');
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>
