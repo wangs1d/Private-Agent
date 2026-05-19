@@ -1,2 +1,14 @@
 dist/
 node_modules/
+
+# Development documentation
+MIGRATION-CHECKLIST.md
+
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+tests/
+__tests__/
+vitest.config.ts

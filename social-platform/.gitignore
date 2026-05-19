@@ -6,3 +6,17 @@ data/social-media/
 .env
 .DS_Store
 Thumbs.db
+
+# Development documentation
+ARCHITECTURE.md
+PROJECT_SUMMARY.md
+QUICKSTART.md
+
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+test/
+tests/
+__tests__/

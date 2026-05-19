@@ -1,3 +1,15 @@
 .env
 node_modules/
 dist/
+
+# Development documentation
+SUBAGENT-REFACTORING.md
+
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+test/
+tests/
+__tests__/
