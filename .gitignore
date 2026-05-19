@@ -1,114 +1,256 @@
 # ============================================
 # Node.js & TypeScript
 # ============================================
+# Dependencies
 node_modules/
 **/node_modules/
-dist/
-**/dist/
-*.tsbuildinfo
-*.log
-*.tmp
-
-# Logs
-logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
-
-# Diagnostic reports
-report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
-
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Coverage
-coverage
-*.lcov
-.nyc_output
-
-# Dependency directories
 jspm_packages/
 bower_components/
 web_modules/
 
-# Cache directories
+# Build outputs
+dist/
+**/dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pnpm-debug.log*
+
+# Cache
 .npm
 .eslintcache
 .stylelintcache
 .node_repl_history
+.parcel-cache
+.cache
+.vite/
 
-# Output files
-*.tgz
-.yarn-integrity
-
-# Environment variables
+# Environment
 .env
 .env.*
 !.env.example
 
-# Build outputs
-cache
-.parcel-cache
-.next
-out
-.nuxt
-.output
-.vuepress/dist
-.temp
-.svelte-kit/
-**/.vitepress/dist
-**/.vitepress/cache
-.docusaurus
-.serverless/
-.fusebox/
-.dynamodb/
-.firebase/
+# Coverage
+coverage/
+*.lcov
+.nyc_output
 
-# Package managers
+# Package manager files
 .pnpm-store
-.pnp.*
+.yarn-integrity
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+.pnp.*
 
-# Vite files
+# Framework specific
+.next/
+out/
+.nuxt/
+.output/
+.vuepress/dist
+.temp/
+.svelte-kit/
+**/.vitepress/dist
+**/.vitepress/cache
+.docusaurus/
+.serverless/
+.fusebox/
+.dynamodb/
+.firebase/
+
+# Runtime
+pids
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Misc
+*.tgz
+*.tmp
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
-.vite/
 
 # ============================================
 # Flutter
 # ============================================
+# Dart/Flutter build
 .dart_tool/
+build/
+**/build/
+
+# Flutter plugins
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages
+
+# Pub cache
 .pub-cache/
 .pub/
+
+# IDE
 *.iml
-client/flutter_app/build/
+
+# iOS
+ios/Flutter/App.framework/
+ios/Flutter/Flutter.framework/
+ios/Flutter/flutter_export_environment.sh
+ios/Runner/GeneratedPluginRegistrant.*
+
+# Android
+android/app/release/
+android/app/build/
+android/.gradle/
+android/local.properties
+
+# macOS
+macos/Flutter/ephemeral/
+macos/Pods/
+
+# Windows
+windows/flutter/ephemeral/
+windows/build/
+
+# Linux
+linux/flutter/ephemeral/
 
 # ============================================
 # Python
 # ============================================
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-desktop-visual-agent/.venv/
-env/
+
+# Virtual environments
+.venv/
 venv/
 ENV/
+env/
+*/.venv/
+*/venv/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.myenv/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy-
+
+# Pyre type checker
+.pyre/
+
+# Project specific
+desktop-visual-agent/.venv/
 
 # ============================================
 # OS Files
