@@ -322,30 +322,33 @@ class _SchedulePageState extends State<SchedulePage> {
           ),
           // 在日历视图中添加日/周切换按钮
           if (_subTab == 0)
-            ToggleButtons(
-              isSelected: [_viewMode == 'day', _viewMode == 'week'],
-              onPressed: (int index) {
-                setState(() {
-                  _viewMode = index == 0 ? 'day' : 'week';
-                });
-              },
-              borderRadius: BorderRadius.circular(8),
-              selectedColor: cs.onSurface,
-              fillColor: cs.surfaceContainerHigh,
-              color: cs.onSurfaceVariant,
-              borderColor: cs.outline,
-              selectedBorderColor: cs.onSurface,
-              constraints: const BoxConstraints(minWidth: 48, minHeight: 32),
-              children: const <Widget>[
-                Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 10),
-                  child: Text('日', style: TextStyle(fontSize: 13)),
-                ),
-                Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 10),
-                  child: Text('周', style: TextStyle(fontSize: 13)),
-                ),
-              ],
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ToggleButtons(
+                isSelected: [_viewMode == 'day', _viewMode == 'week'],
+                onPressed: (int index) {
+                  setState(() {
+                    _viewMode = index == 0 ? 'day' : 'week';
+                  });
+                },
+                borderRadius: BorderRadius.circular(8),
+                selectedColor: cs.onSurface,
+                fillColor: cs.surfaceContainerHigh,
+                color: cs.onSurfaceVariant,
+                borderColor: cs.outline,
+                selectedBorderColor: cs.onSurface,
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 32),
+                children: const <Widget>[
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10),
+                    child: Text('日', style: TextStyle(fontSize: 13)),
+                  ),
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10),
+                    child: Text('周', style: TextStyle(fontSize: 13)),
+                  ),
+                ],
+              ),
             ),
           FilledButton(
             style: FilledButton.styleFrom(
@@ -414,15 +417,15 @@ class _SchedulePageState extends State<SchedulePage> {
   Widget _weekRangeControls(ThemeData theme) {
     final ColorScheme cs = theme.colorScheme;
     final DateTime today = _stripTime(DateTime.now());
-    
-    // 根据视图模式判断是否显示“回到今天/本周”按钮
+      
+    // 根据视图模式判断是否显示"回到今天/本周"按钮
     final bool isCurrentView;
     if (_viewMode == 'day') {
       isCurrentView = _focusedDay == today;
     } else {
       isCurrentView = !_weekStart.isAfter(today) && !today.isAfter(_weekStart.add(const Duration(days: 6)));
     }
-    
+      
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Row(
@@ -432,10 +435,9 @@ class _SchedulePageState extends State<SchedulePage> {
             color: cs.surfaceContainerLow,
             borderRadius: BorderRadius.circular(10),
             child: SizedBox(
-              width: 320, // 固定宽度，确保日期文本有足够空间
+              width: 380, // 固定总宽度，包含日期组件和回到按钮
               child: Row(
                 mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
                   IconButton(
                     tooltip: _viewMode == 'day' ? "上一天" : "上一周",
@@ -443,18 +445,16 @@ class _SchedulePageState extends State<SchedulePage> {
                     onPressed: () => _viewMode == 'day' ? _shiftDay(-1) : _shiftWeek(-1),
                     icon: Icon(Icons.chevron_left, color: cs.onSurface),
                   ),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Text(
-                        _viewMode == 'day'
-                            ? _formatDayLabel(_focusedDay)
-                            : _formatRangeLabel(_weekStart),
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          color: cs.onSurface,
-                          fontWeight: FontWeight.w500,
-                        ),
+                  SizedBox(
+                    width: 200,
+                    child: Text(
+                      _viewMode == 'day'
+                          ? _formatDayLabel(_focusedDay)
+                          : _formatRangeLabel(_weekStart),
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: cs.onSurface,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
@@ -464,24 +464,46 @@ class _SchedulePageState extends State<SchedulePage> {
                     onPressed: () => _viewMode == 'day' ? _shiftDay(1) : _shiftWeek(1),
                     icon: Icon(Icons.chevron_right, color: cs.onSurface),
                   ),
+                  // 固定占据空间，即使不显示按钮也保持布局稳定
+                  SizedBox(
+                    width: isCurrentView ? 0 : 100,
+                    child: isCurrentView
+                        ? null
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              Container(
+                                height: 24,
+                                width: 1,
+                                color: cs.outline.withValues(alpha: 0.3),
+                                margin: const EdgeInsets.only(right: 4),
+                              ),
+                              SizedBox(
+                                height: 28,
+                                child: OutlinedButton.icon(
+                                  onPressed: _viewMode == 'day' ? _goToToday : _goToCurrentWeek,
+                                  icon: Icon(_viewMode == 'day' ? Icons.today : Icons.calendar_today, size: 14),
+                                  label: Text(_viewMode == 'day' ? "今天" : "本周", style: const TextStyle(fontSize: 11)),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                    foregroundColor: cs.onSurfaceVariant,
+                                    side: BorderSide(color: cs.outline.withValues(alpha: 0.5)),
+                                    minimumSize: const Size(0, 0),
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
                 ],
               ),
             ),
           ),
-          if (!isCurrentView) ...<Widget>[
-            const SizedBox(width: 12),
-            OutlinedButton.icon(
-              onPressed: _viewMode == 'day' ? _goToToday : _goToCurrentWeek,
-              icon: Icon(_viewMode == 'day' ? Icons.today : Icons.calendar_today, size: 18),
-              label: Text(_viewMode == 'day' ? "回到今天" : "回到本周"),
-              style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );

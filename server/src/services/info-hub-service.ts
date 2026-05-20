@@ -2,6 +2,13 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 
+import {
+  fetchDomesticNews,
+  fetchDomesticTechNews,
+  searchBingChina,
+  type DomesticFetchOptions,
+} from "./domestic-web-providers.js";
+
 export type InfoSearchItem = {
   title: string;
   url: string;
@@ -138,34 +145,20 @@ export class InfoHubService {
     const keyword = query.trim();
     if (!keyword) return [];
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, limit)) : 8;
-    const provider = (process.env.INFO_SEARCH_PROVIDER ?? "jina").trim().toLowerCase();
-    const [web, hn] = await Promise.all([
-      provider === "duckduckgo"
-        ? this.searchWebByDuckDuckGo(keyword, boundedLimit)
-        : this.searchWebByJina(keyword, boundedLimit),
-      this.searchHackerNews(keyword, boundedLimit),
-    ]);
-    const merged = dedupeByUrl([...web, ...hn]).sort(sortBySourcePriority);
-    return merged.slice(0, boundedLimit);
+    const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent };
+
+    let web = await searchBingChina(keyword, boundedLimit, domesticOpts);
+    if (/科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword)) {
+      const tech = await fetchDomesticTechNews(keyword, Math.min(6, boundedLimit), domesticOpts);
+      web = dedupeByUrl([...web, ...tech]);
+    }
+    return web.sort(sortBySourcePriority).slice(0, boundedLimit);
   }
 
   async fetchNews(topic: string, limit = 8): Promise<InfoSearchItem[]> {
     const query = topic.trim();
     if (!query) return [];
-    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`;
-    const response = await fetch(rssUrl);
-    if (!response.ok) {
-      throw new Error(`新闻获取失败: ${response.status}`);
-    }
-    const xml = await response.text();
-    const items = parseRssItems(xml).slice(0, limit);
-    return items.map((item) => ({
-      title: item.title,
-      url: item.link,
-      snippet: item.description,
-      source: "Google News RSS",
-      publishedAt: item.pubDate,
-    }));
+    return fetchDomesticNews(query, limit, { userAgent: this.userAgent });
   }
 
   async readWebpage(url: string): Promise<{ title: string; content: string; summary: string }> {
@@ -303,22 +296,6 @@ export class InfoHubService {
   }
 
   private async fetchHtml(url: string): Promise<string> {
-    const mode = (process.env.INFO_WEB_READER_PROVIDER ?? "jina").trim().toLowerCase();
-    if (mode === "jina") {
-      const jinaUrl = `https://r.jina.ai/${url}`;
-      const response = await fetch(jinaUrl, {
-        headers: {
-          "user-agent": this.userAgent,
-          "x-no-cache": "true",
-        },
-      });
-      if (response.ok) {
-        const text = await response.text();
-        return `<html><head><title>${escapeHtmlForTag(
-          inferTitleFromText(text) || "Untitled",
-        )}</title></head><body><pre>${escapeHtmlForTag(text)}</pre></body></html>`;
-      }
-    }
     const response = await fetch(url, {
       headers: {
         "user-agent": this.userAgent,
@@ -330,96 +307,12 @@ export class InfoHubService {
     return await response.text();
   }
 
-  private async searchWebByDuckDuckGo(query: string, limit: number): Promise<InfoSearchItem[]> {
-    const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": this.userAgent,
-      },
-    });
-    if (!response.ok) return [];
-    const html = await response.text();
-    return extractDuckDuckGoResults(html).slice(0, limit);
-  }
-
-  private async searchWebByJina(query: string, limit: number): Promise<InfoSearchItem[]> {
-    const url = `https://s.jina.ai/${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": this.userAgent,
-        "x-no-cache": "true",
-      },
-    });
-    if (!response.ok) {
-      return this.searchWebByDuckDuckGo(query, limit);
-    }
-    const text = await response.text();
-    const items = extractJinaSearchResults(text);
-    if (items.length === 0) {
-      return this.searchWebByDuckDuckGo(query, limit);
-    }
-    return items.slice(0, limit);
-  }
-
-  private async searchHackerNews(query: string, limit: number): Promise<InfoSearchItem[]> {
-    const url = `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=${limit}`;
-    const response = await fetch(url);
-    if (!response.ok) return [];
-    const data = (await response.json()) as {
-      hits?: Array<{
-        title?: string;
-        url?: string;
-        story_text?: string;
-        created_at?: string;
-      }>;
-    };
-    return (data.hits ?? [])
-      .filter((h) => h.url && h.title)
-      .map((h) => ({
-        title: h.title ?? "Untitled",
-        url: h.url ?? "",
-        snippet: (h.story_text ?? "").slice(0, 180),
-        source: "Hacker News",
-        publishedAt: h.created_at,
-      }));
-  }
-
   private async readPageAsText(url: string): Promise<string> {
-    const mode = (process.env.INFO_WEB_READER_PROVIDER ?? "jina").trim().toLowerCase();
-    if (mode === "jina") {
-      const jinaUrl = `https://r.jina.ai/${url}`;
-      const response = await fetch(jinaUrl, {
-        headers: {
-          "user-agent": this.userAgent,
-          "x-no-cache": "true",
-        },
-      });
-      if (response.ok) {
-        return (await response.text()).slice(0, 12000);
-      }
-    }
     const html = await this.fetchHtml(url);
     return htmlToText(html).slice(0, 12000);
   }
 
   private async readPageContent(url: string): Promise<{ html: string; text: string }> {
-    const mode = (process.env.INFO_WEB_READER_PROVIDER ?? "jina").trim().toLowerCase();
-    if (mode === "jina") {
-      const jinaUrl = `https://r.jina.ai/${url}`;
-      const response = await fetch(jinaUrl, {
-        headers: {
-          "user-agent": this.userAgent,
-          "x-no-cache": "true",
-        },
-      });
-      if (response.ok) {
-        const text = await response.text();
-        const html = `<html><head><title>${escapeHtmlForTag(
-          inferTitleFromText(text) || "Untitled",
-        )}</title></head><body><pre>${escapeHtmlForTag(text)}</pre></body></html>`;
-        return { html, text: text.slice(0, 12000) };
-      }
-    }
     const html = await this.fetchHtml(url);
     const text = htmlToText(html).slice(0, 12000);
     return { html, text };
@@ -429,9 +322,8 @@ export class InfoHubService {
 function sortBySourcePriority(a: InfoSearchItem, b: InfoSearchItem): number {
   const rank = (source: string): number => {
     const normalized = source.trim().toLowerCase();
-    if (normalized.includes("jina")) return 0;
-    if (normalized.includes("duckduckgo")) return 1;
-    if (normalized.includes("hacker news")) return 2;
+    if (normalized.includes("必应") || normalized.includes("bing")) return 0;
+    if (normalized.includes("36") || normalized.includes("it之家") || normalized.includes("ithome")) return 1;
     return 9;
   };
   return rank(a.source) - rank(b.source);
@@ -481,25 +373,6 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#39;/g, "'");
 }
 
-function parseRssItems(xml: string): Array<{ title: string; link: string; description: string; pubDate?: string }> {
-  const items: Array<{ title: string; link: string; description: string; pubDate?: string }> = [];
-  const blocks = xml.match(/<item>[\s\S]*?<\/item>/g) ?? [];
-  for (const block of blocks) {
-    const title = extractXmlTag(block, "title");
-    const link = extractXmlTag(block, "link");
-    const description = extractXmlTag(block, "description");
-    const pubDate = extractXmlTag(block, "pubDate");
-    if (!title || !link) continue;
-    items.push({ title, link, description, pubDate });
-  }
-  return items;
-}
-
-function extractXmlTag(xml: string, tag: string): string {
-  const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i"));
-  return m ? decodeHtmlEntities(m[1].replace(/<!\[CDATA\[|\]\]>/g, "")).trim() : "";
-}
-
 function extractLinks(html: string, baseUrl: string): WebLinkItem[] {
   const out: WebLinkItem[] = [];
   const seen = new Set<string>();
@@ -530,74 +403,6 @@ function extractLinks(html: string, baseUrl: string): WebLinkItem[] {
   return out;
 }
 
-function extractDuckDuckGoResults(html: string): InfoSearchItem[] {
-  const out: InfoSearchItem[] = [];
-  const seen = new Set<string>();
-  const re =
-    /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?=<\/div>\s*<\/div>|\n\s*<div class="result__extras">)/gi;
-  let m: RegExpExecArray | null = null;
-  while ((m = re.exec(html))) {
-    const href = decodeHtmlEntities(m[1] ?? "").trim();
-    const title = decodeHtmlEntities((m[2] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-    const block = m[3] ?? "";
-    const snippetMatch = block.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a?>/i);
-    const snippetRaw = snippetMatch?.[1] ?? block;
-    const snippet = decodeHtmlEntities(
-      String(snippetRaw).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
-    ).slice(0, 220);
-    const direct = tryResolveDuckDuckGoTarget(href);
-    if (!direct || !title) continue;
-    if (seen.has(direct)) continue;
-    seen.add(direct);
-    out.push({
-      title,
-      url: direct,
-      snippet,
-      source: "DuckDuckGo",
-    });
-  }
-  return out;
-}
-
-function tryResolveDuckDuckGoTarget(rawHref: string): string | null {
-  const href = rawHref.trim();
-  if (!href) return null;
-  if (href.startsWith("http://") || href.startsWith("https://")) {
-    try {
-      const u = new URL(href);
-      if (u.hostname.includes("duckduckgo.com")) {
-        const encoded = u.searchParams.get("uddg");
-        if (!encoded) return null;
-        const decoded = decodeURIComponent(encoded);
-        const target = new URL(decoded);
-        if (target.protocol !== "http:" && target.protocol !== "https:") return null;
-        target.hash = "";
-        return target.toString();
-      }
-      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-      u.hash = "";
-      return u.toString();
-    } catch {
-      return null;
-    }
-  }
-  if (href.startsWith("/l/?")) {
-    try {
-      const wrapped = new URL(`https://duckduckgo.com${href}`);
-      const encoded = wrapped.searchParams.get("uddg");
-      if (!encoded) return null;
-      const decoded = decodeURIComponent(encoded);
-      const target = new URL(decoded);
-      if (target.protocol !== "http:" && target.protocol !== "https:") return null;
-      target.hash = "";
-      return target.toString();
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 function inferTitleFromText(text: string): string {
   const lines = text
     .split(/\r?\n/)
@@ -608,47 +413,3 @@ function inferTitleFromText(text: string): string {
   return lines[0].slice(0, 120);
 }
 
-function escapeHtmlForTag(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function extractJinaSearchResults(text: string): InfoSearchItem[] {
-  const blocks = text.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
-  const out: InfoSearchItem[] = [];
-  const seen = new Set<string>();
-  for (const block of blocks) {
-    const lines = block.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-    if (lines.length < 2) continue;
-    const urlLine = lines.find((line) => /^https?:\/\//i.test(line)) ?? "";
-    if (!urlLine) continue;
-    let url: URL;
-    try {
-      url = new URL(urlLine);
-    } catch {
-      continue;
-    }
-    url.hash = "";
-    const normalizedUrl = url.toString();
-    if (seen.has(normalizedUrl)) continue;
-    seen.add(normalizedUrl);
-    const title = lines[0].replace(/^\d+\.\s*/, "").slice(0, 180);
-    const snippet = lines
-      .slice(1)
-      .filter((x) => !/^https?:\/\//i.test(x))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .slice(0, 220);
-    out.push({
-      title: title || normalizedUrl,
-      url: normalizedUrl,
-      snippet,
-      source: "Jina Search",
-    });
-  }
-  return out;
-}

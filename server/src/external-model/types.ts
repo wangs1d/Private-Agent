@@ -56,6 +56,8 @@ export type AgentStreamOptions = {
   };
   /** 按会话已购技能合并进 LLM tools（内置 Skill + 已拥有社区 Skill） */
   chatToolsExtra?: ChatCompletionTool[];
+  /** 替换默认内置工具列表（子 Agent 按能力过滤时使用） */
+  chatToolsBuiltin?: ChatCompletionTool[];
 };
 
 /** 外部模型 function calling 与本地 ToolRegistry 之间的桥接。 */

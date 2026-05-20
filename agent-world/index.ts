@@ -78,7 +78,14 @@ export {
   WorldPartitionWsRegistry,
 } from "./services/world-partition-ws-registry.js";
 export type { PartitionPairingLike, WsSendLike } from "./services/world-partition-ws-registry.js";
-export { DOUDIZHU_CHAT_TOOLS, DOUDIZHU_TOOL_SYSTEM_SUFFIX } from "./doudizhu-chat-tools.js";
+export {
+  AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX,
+  DOUDIZHU_CHAT_TOOLS,
+  DOUDIZHU_TOOL_SYSTEM_SUFFIX,
+  GOMOKU_CHAT_TOOLS,
+  USER_AGENT_TOOL_SYSTEM_SUFFIX,
+  USER_FACING_AGENT_WORLD_CHAT_TOOLS,
+} from "./doudizhu-chat-tools.js";
 export * from "./schemas.js";
 export type {
   AuditServiceLike,

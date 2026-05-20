@@ -85,7 +85,7 @@ export class AgentCore {
           this.skillManager,
           {
             enableSubAgents: true,
-            maxParallelTasks: Number.parseInt(process.env.MAX_PARALLEL_SUBTASKS ?? "5", 10) || 5,
+            maxParallelTasks: Number.parseInt(process.env.MAX_PARALLEL_SUBTASKS ?? "3", 10) || 3,
             taskTimeoutMs: Number.parseInt(process.env.SUBTASK_TIMEOUT_MS ?? "60000", 10) || 60000,
             allowFallback: true,
           },
@@ -131,16 +131,13 @@ export class AgentCore {
     // 如果启用了多 Agent 协调器，使用主 Agent 进行任务分发
     if (this.masterAgentCoordinator) {
       try {
-        let progressMessages: string[] = [];
-        const onProgress = (message: string) => {
-          progressMessages.push(message);
-          opts?.onAssistantDelta?.(`\n${message}\n`);
-        };
-        
+        // 不使用进度回调，避免向用户显示处理过程
+        // 直接传递 onAssistantDelta 实现流式输出
         const result = await this.masterAgentCoordinator.orchestrateTask(
           actorId,
           text,
-          onProgress,
+          undefined, // 不传递 onProgress 回调
+          opts?.onAssistantDelta, // 传递流式输出回调
         );
         
         return { text: result, streamedChunks: true };

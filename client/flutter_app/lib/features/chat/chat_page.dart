@@ -16,6 +16,7 @@ class ChatPage extends StatefulWidget {
     this.onPickGalleryImage,
     this.onClearGalleryImages,
     this.onEnterVoiceMode,
+    this.isAgentProcessing = false,
   });
 
   final List<ChatMessage> messages;
@@ -29,6 +30,8 @@ class ChatPage extends StatefulWidget {
   final VoidCallback? onClearGalleryImages;
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
+  /// Agent是否正在处理中（流式输出）
+  final bool isAgentProcessing;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -89,6 +92,41 @@ class _ChatPageState extends State<ChatPage> {
       color: cs.surface,
       child: Column(
         children: <Widget>[
+          // Agent响应状态指示器（左上角）
+          if (widget.isAgentProcessing)
+            Container(
+              margin: const EdgeInsets.only(left: 12, top: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer.withOpacity(0.3),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: cs.primary.withOpacity(0.5),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    "Agent 思考中...",
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w500,
+                        ),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

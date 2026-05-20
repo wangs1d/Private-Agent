@@ -5,7 +5,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
-import { DOUDIZHU_CHAT_TOOLS } from "@private-ai-agent/agent-world";
+import { USER_FACING_AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
@@ -21,6 +21,35 @@ const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 type ToolAcc = { id: string; name: string; arguments: string };
 
 const DEFAULT_MAX_ROUNDS = 12;
+
+/** Moonshot Kimi 等端点仅允许字母数字下划线连字符，将 registry 名 `a.b` 映射为 `a_b`。 */
+function registryNameToApiToolName(name: string): string {
+  return name.replace(/\./g, "_");
+}
+
+function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
+  apiTools: ChatCompletionTool[];
+  resolveRegistryToolName: (apiName: string) => string;
+} {
+  const apiToRegistry = new Map<string, string>();
+  const apiTools = tools.map((tool) => {
+    if (tool.type !== "function" || !tool.function?.name) return tool;
+    const registryName = tool.function.name;
+    const apiName = registryNameToApiToolName(registryName);
+    apiToRegistry.set(apiName, registryName);
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        name: apiName,
+      },
+    };
+  });
+  return {
+    apiTools,
+    resolveRegistryToolName: (apiName) => apiToRegistry.get(apiName) ?? apiName,
+  };
+}
 
 const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -290,15 +319,60 @@ const VISION_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+/** 时钟工具：获取当前时间和日期信息（通过IP地址查询用户时区）。 */
+const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "clock.get_current_time",
+      description:
+        "获取当前时间（注册名 clock.get_current_time）。通过 IP 查询时区与城市，返回本地时间（精确到秒）、星期。用户问现在几点、当前时间时必须调用。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "clock.get_date",
+      description: "获取当前日期和星期。通过IP地址查询自动识别用户所在城市，返回当地日期信息。当用户询问今天几号、今天星期几时使用此工具。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "clock.format_timestamp",
+      description: "将 Unix 时间戳格式化为可读的本地时间（通过IP地址识别用户时区）。",
+      parameters: {
+        type: "object",
+        properties: {
+          timestamp: { type: "number", description: "Unix 时间戳（秒）" },
+        },
+        required: ["timestamp"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 /** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。 */
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
   return [
-    ...DOUDIZHU_CHAT_TOOLS,
+    ...USER_FACING_AGENT_WORLD_CHAT_TOOLS,
     ...AIP_CHAT_TOOLS,
     ...INFO_WEB_CHAT_TOOLS,
     ...CALENDAR_CHAT_TOOLS,
     ...PHONE_CHAT_TOOLS,
     ...VISION_CHAT_TOOLS,
+    ...CLOCK_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
   ];
 }
@@ -319,19 +393,21 @@ export async function streamCompletionWithDoudizhuTools(
   },
 ): Promise<string> {
   const maxRounds = options?.maxRounds ?? DEFAULT_MAX_ROUNDS;
-  const tools = options?.tools ?? getBuiltinAgentChatTools();
+  const registryTools = options?.tools ?? getBuiltinAgentChatTools();
+  const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
   let lastAssistantText = "";
 
   for (let round = 0; round < maxRounds; round++) {
     const stream = await client.chat.completions.create({
       model,
       messages,
-      tools,
+      tools: apiTools,
       tool_choice: "auto",
       stream: true,
     });
 
     let fullText = "";
+    let fullReasoning = "";
     const toolAcc = new Map<number, ToolAcc>();
     let finishReason: string | null | undefined;
 
@@ -341,6 +417,11 @@ export async function streamCompletionWithDoudizhuTools(
         if (!choice) continue;
         finishReason = choice.finish_reason ?? finishReason;
         const d = choice.delta;
+        const reasoningChunk =
+          (d as { reasoning_content?: string | null } | undefined)?.reasoning_content ?? "";
+        if (reasoningChunk) {
+          fullReasoning += reasoningChunk;
+        }
         if (d?.content) {
           fullText += d.content;
           onDelta(d.content);
@@ -388,7 +469,9 @@ export async function streamCompletionWithDoudizhuTools(
       role: "assistant",
       content: fullText || null,
       tool_calls: toolCalls,
-    });
+      // Kimi k2.5 等开启 thinking 时，带 tool_calls 的 assistant 消息须含 reasoning_content
+      reasoning_content: fullReasoning,
+    } as ChatCompletionMessageParam);
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
     for (const tc of toolCalls) {
@@ -400,8 +483,9 @@ export async function streamCompletionWithDoudizhuTools(
       } catch {
         args = {};
       }
-      const exec = await ctx.executeTool(fn.name, args);
-      toolResults.push({ name: fn.name, ok: exec.ok });
+      const registryToolName = resolveRegistryToolName(fn.name);
+      const exec = await ctx.executeTool(registryToolName, args);
+      toolResults.push({ name: registryToolName, ok: exec.ok });
       let injectFrames: VisionFrame[] | undefined;
       let resultForWire: Record<string, unknown>;
       if (
@@ -416,7 +500,7 @@ export async function streamCompletionWithDoudizhuTools(
         resultForWire = exec.result;
       }
       ctx.onToolExecuted?.({
-        toolName: fn.name,
+        toolName: registryToolName,
         input: args,
         ok: exec.ok,
         result: resultForWire,

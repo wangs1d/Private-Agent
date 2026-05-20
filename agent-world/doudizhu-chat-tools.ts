@@ -38,10 +38,8 @@ const WORLD_OPEN_REGISTRY_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/**
- * 供 Chat Completions `tools` 使用：开放式注册 + 斗地主（与 ToolRegistry 名称一致）。
- */
-export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
+/** 注册、房间、市场（用户与 Agent World 全量工具共用）。 */
+const AGENT_WORLD_CORE_CHAT_TOOLS: ChatCompletionTool[] = [
   ...WORLD_OPEN_REGISTRY_CHAT_TOOLS,
   {
     type: "function",
@@ -83,6 +81,90 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+];
+
+/** 五子棋：用户与 Agent 双人对战（与 ToolRegistry `world.gomoku.*` 一致）。 */
+export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.list_tables",
+      description: "列出当前五子棋桌（15x15，黑先白后，双人）。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.create_table",
+      description:
+        "创建五子棋桌，你执黑先行；邀请用户加入后开局。用户说想下棋、玩五子棋时优先调用。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.join",
+      description:
+        "加入五子棋桌：player=选手（用户通常执白后手），spectator=观战。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          role: { type: "string", enum: ["player", "spectator"] },
+        },
+        required: ["tableId", "role"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.play",
+      description: "在五子棋中落子；row/col 为 0–14。轮到你时调用。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          row: { type: "integer" },
+          col: { type: "integer" },
+        },
+        required: ["tableId", "row", "col"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.get_snapshot",
+      description: "获取五子棋桌当前棋盘与状态。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.gomoku.leave",
+      description: "离开五子棋桌。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+const AGENT_WORLD_A2A_CARD_GAME_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -326,6 +408,9 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+];
+
+const WORLD_SOCIAL_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -435,5 +520,46 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-export const DOUDIZHU_TOOL_SYSTEM_SUFFIX =
-  "\n\n【Agent World 开放式注册】若调用 world.doudizhu.* / world.zhajinhua.* / world.free_market.* / world.social.* 失败并提示未注册：优先 world.open_registry.get_challenge → 按 challenge.task 计算 SHA-256 → world.open_registry.submit；若服务端开启占位开关，可 world.open_registry.agent_quick 一键注册（仅开发/内网）。\n\n【游戏】用户只能通过对话表达意图。斗地主用 world.doudizhu.*；炸金花 3–6 人用 world.zhajinhua.*（注为世界点数，牌面 id 为「点数-花色」2–14 与 0–3，无王）。\n\n【互动平台】多 Agent 类推文：world.social.get_feed / post（https 或本地上传 mediaUrl）/ comment / like_toggle / upload_media（Base64）/ delete_post / report；HTTP 另有 GET 时间线、POST 上传、删帖、举报。用户端与 WebSocket 事件 world.social.* 对齐。\n\n你解析意图后调用工具并简要回复。";
+/** 与用户对话时可用的世界工具：核心 + 五子棋 + 社交（不含斗地主/炸金花）。 */
+export const USER_FACING_AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = [
+  ...AGENT_WORLD_CORE_CHAT_TOOLS,
+  ...GOMOKU_CHAT_TOOLS,
+  ...WORLD_SOCIAL_CHAT_TOOLS,
+];
+
+/**
+ * 供 Chat Completions `tools` 使用：含斗地主/炸金花（Agent World 内 Agent 间牌局）。
+ * 面向终端用户的对话请使用 `USER_FACING_AGENT_WORLD_CHAT_TOOLS`。
+ */
+export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
+  ...AGENT_WORLD_CORE_CHAT_TOOLS,
+  ...AGENT_WORLD_A2A_CARD_GAME_CHAT_TOOLS,
+  ...GOMOKU_CHAT_TOOLS,
+  ...WORLD_SOCIAL_CHAT_TOOLS,
+];
+
+const AGENT_WORLD_OPEN_REGISTRY_SUFFIX =
+  "\n\n【Agent World 开放式注册】若调用 world.gomoku.* / world.free_market.* / world.social.* 等失败并提示未注册：优先 world.open_registry.get_challenge → 按 challenge.task 计算 SHA-256 → world.open_registry.submit；若服务端开启占位开关，可 world.open_registry.agent_quick 一键注册（仅开发/内网）。";
+
+const USER_AGENT_GAME_SUFFIX =
+  "\n\n【与用户对战的游戏】仅五子棋：用户说想下棋、玩五子棋、来一局时，用 world.gomoku.create_table 开桌（你执黑），邀请用户加入（world.gomoku.join 执白）；对局中使用 world.gomoku.play 落子。不要向用户推荐或邀请玩斗地主、炸金花。";
+
+const AGENT_WORLD_A2A_GAME_SUFFIX =
+  "\n\n【Agent World 内 Agent 间牌局】斗地主 world.doudizhu.*、炸金花 world.zhajinhua.*（3–6 人，注为世界点数）仅供你与 Agent World 中其它 Agent 协调对战；终端用户不能作为选手入局，最多观战。";
+
+const WORLD_SOCIAL_SUFFIX =
+  "\n\n【互动平台】多 Agent 类推文：world.social.get_feed / post（https 或本地上传 mediaUrl）/ comment / like_toggle / upload_media（Base64）/ delete_post / report；HTTP 另有 GET 时间线、POST 上传、删帖、举报。用户端与 WebSocket 事件 world.social.* 对齐。\n\n你解析意图后调用工具并简要回复。";
+
+/** 注入主 Agent / 用户会话 system 的工具说明（不含 Agent 间牌局操作指引）。 */
+export const USER_AGENT_TOOL_SYSTEM_SUFFIX =
+  AGENT_WORLD_OPEN_REGISTRY_SUFFIX + USER_AGENT_GAME_SUFFIX + WORLD_SOCIAL_SUFFIX;
+
+/** 含斗地主/炸金花的完整说明（独立 Agent World 进程等场景）。 */
+export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX =
+  AGENT_WORLD_OPEN_REGISTRY_SUFFIX +
+  "\n\n【游戏】用户只能通过对话表达意图。与用户仅下五子棋 world.gomoku.*。斗地主 world.doudizhu.*；炸金花 3–6 人用 world.zhajinhua.*（注为世界点数，牌面 id 为「点数-花色」2–14 与 0–3，无王）。" +
+  AGENT_WORLD_A2A_GAME_SUFFIX +
+  WORLD_SOCIAL_SUFFIX;
+
+/** @deprecated 请使用 `USER_AGENT_TOOL_SYSTEM_SUFFIX`（用户对话）或 `AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX`（全量）。 */
+export const DOUDIZHU_TOOL_SYSTEM_SUFFIX = AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX;

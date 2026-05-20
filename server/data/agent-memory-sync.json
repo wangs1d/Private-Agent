@@ -1,7 +1,7 @@
 {
   "sessions": {
     "test-user-001": {
-      "revision": 4,
+      "revision": 6,
       "entries": {
         "important_dates": [
           {
@@ -39,12 +39,30 @@
             "type": "birthday",
             "relationship": "母亲",
             "createdAt": "2026-05-18T15:51:26.197Z"
+          },
+          {
+            "id": "dfcafb6d-04cd-4272-a794-068e27f43326",
+            "name": "妈妈",
+            "date": "05-20",
+            "year": 1970,
+            "type": "birthday",
+            "relationship": "母亲",
+            "createdAt": "2026-05-19T12:38:25.444Z"
+          },
+          {
+            "id": "67307e95-1c61-402f-9eb3-9021fb0eee7a",
+            "name": "妈妈",
+            "date": "05-20",
+            "year": 1970,
+            "type": "birthday",
+            "relationship": "母亲",
+            "createdAt": "2026-05-19T16:53:13.125Z"
           }
         ]
       }
     },
     "test-user-002": {
-      "revision": 4,
+      "revision": 6,
       "entries": {
         "important_dates": [
           {
@@ -78,6 +96,22 @@
             "type": "anniversary",
             "relationship": "配偶",
             "createdAt": "2026-05-18T15:51:26.206Z"
+          },
+          {
+            "id": "50f190f9-ab26-4d4d-83bb-dcb1fc8b528d",
+            "name": "结婚纪念日",
+            "date": "06-15",
+            "type": "anniversary",
+            "relationship": "配偶",
+            "createdAt": "2026-05-19T12:38:25.461Z"
+          },
+          {
+            "id": "d145ac6b-a100-4150-86e9-5b0c9bbe79af",
+            "name": "结婚纪念日",
+            "date": "06-15",
+            "type": "anniversary",
+            "relationship": "配偶",
+            "createdAt": "2026-05-19T16:53:13.170Z"
           }
         ]
       }
@@ -135,7 +169,7 @@
       }
     },
     "test-user-005": {
-      "revision": 4,
+      "revision": 6,
       "entries": {
         "important_dates": [
           {
@@ -165,6 +199,20 @@
             "date": "03-15",
             "type": "birthday",
             "createdAt": "2026-05-18T15:51:26.228Z"
+          },
+          {
+            "id": "2111a257-e5df-4f33-9357-b2bb4e0ac9b8",
+            "name": "测试生日",
+            "date": "03-15",
+            "type": "birthday",
+            "createdAt": "2026-05-19T12:38:25.512Z"
+          },
+          {
+            "id": "f8c70046-50bc-41ec-8eb8-39b2d312cbf7",
+            "name": "测试生日",
+            "date": "03-15",
+            "type": "birthday",
+            "createdAt": "2026-05-19T16:53:13.282Z"
           }
         ]
       }
@@ -187,6 +235,50 @@
             "date": "12-25",
             "type": "birthday",
             "createdAt": "2026-05-18T15:51:26.212Z"
+          }
+        ]
+      }
+    },
+    "test-user-get-dates-1779194305475": {
+      "revision": 2,
+      "entries": {
+        "important_dates": [
+          {
+            "id": "1d052c2d-f610-463b-a78f-243effc228e7",
+            "name": "爸爸",
+            "date": "08-15",
+            "year": 1968,
+            "type": "birthday",
+            "createdAt": "2026-05-19T12:38:25.475Z"
+          },
+          {
+            "id": "f67aca12-ffd4-409a-8042-f5efd129a00f",
+            "name": "好朋友生日",
+            "date": "12-25",
+            "type": "birthday",
+            "createdAt": "2026-05-19T12:38:25.479Z"
+          }
+        ]
+      }
+    },
+    "test-user-get-dates-1779209593198": {
+      "revision": 2,
+      "entries": {
+        "important_dates": [
+          {
+            "id": "7ccace15-31f5-4d3e-93e0-8f77e2001206",
+            "name": "爸爸",
+            "date": "08-15",
+            "year": 1968,
+            "type": "birthday",
+            "createdAt": "2026-05-19T16:53:13.198Z"
+          },
+          {
+            "id": "592becc0-ea70-4716-acf3-c0341cf4c82a",
+            "name": "好朋友生日",
+            "date": "12-25",
+            "type": "birthday",
+            "createdAt": "2026-05-19T16:53:13.202Z"
           }
         ]
       }

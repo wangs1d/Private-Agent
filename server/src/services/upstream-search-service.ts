@@ -147,19 +147,11 @@ export class UpstreamSearchService {
       return { provider: "none", items: [], notes: ["query 不能为空"] };
     }
     const boundedLimit = clamp(limit, 1, 20);
-    const notes: string[] = [];
-
-    const exa = await this.searchViaExaMcporter(keyword, boundedLimit);
-    if (exa.items.length > 0) {
-      return { provider: "exa-mcporter", items: exa.items, notes: exa.notes };
-    }
-    notes.push(...exa.notes);
-
-    const fallback = await this.infoHubService.search(keyword, boundedLimit);
+    const items = await this.infoHubService.search(keyword, boundedLimit);
     return {
-      provider: "jina-fallback",
-      items: fallback,
-      notes: [...notes, "已回退到内置 Jina/DuckDuckGo 搜索"],
+      provider: "domestic-bing-cn",
+      items,
+      notes: ["必应中国 RSS + 国内科技 RSS"],
     };
   }
 
@@ -436,29 +428,6 @@ export class UpstreamSearchService {
     };
   }
 
-  private async searchViaExaMcporter(query: string, limit: number): Promise<{
-    items: InfoSearchItem[];
-    notes: string[];
-  }> {
-    const notes: string[] = [];
-    const promptA = `exa.web_search_exa(query: ${JSON.stringify(query)}, num_results: ${limit})`;
-    const promptB = `exa.search(query: ${JSON.stringify(query)}, num_results: ${limit})`;
-    const attempts = [promptA, promptB];
-    for (const callExpr of attempts) {
-      const run = await this.runCommand(resolveBin("mcporter"), ["call", callExpr], 20000);
-      if (!run.ok) {
-        notes.push(formatFailure("mcporter", run));
-        continue;
-      }
-      const parsed = parseExaOutput(run.stdout);
-      if (parsed.length > 0) {
-        return { items: parsed.slice(0, limit), notes };
-      }
-      notes.push("mcporter 调用成功但未解析到 Exa 结果");
-    }
-    return { items: [], notes };
-  }
-
   private async callMcporterAttempts(
     callExprList: string[],
     timeoutMs: number,
@@ -513,82 +482,6 @@ function clamp(input: number, min: number, max: number): number {
 function formatFailure(name: string, run: CommandResult): string {
   const msg = run.stderr || run.stdout || "无错误输出";
   return `${name} 调用失败(${run.code}): ${msg.slice(0, 300)}`;
-}
-
-function parseExaOutput(raw: string): InfoSearchItem[] {
-  const text = String(raw ?? "").trim();
-  if (!text) return [];
-
-  const jsonRange = extractJsonRange(text);
-  if (jsonRange) {
-    try {
-      const parsed = JSON.parse(jsonRange) as unknown;
-      const asList = normalizeExaData(parsed);
-      if (asList.length > 0) return asList;
-    } catch {
-      // Ignore and fallback to line parser.
-    }
-  }
-
-  return parseLineBasedResults(text);
-}
-
-function extractJsonRange(input: string): string | null {
-  const start = input.indexOf("{");
-  const startArr = input.indexOf("[");
-  let begin = -1;
-  if (start >= 0 && startArr >= 0) begin = Math.min(start, startArr);
-  else begin = Math.max(start, startArr);
-  if (begin < 0) return null;
-  const endObj = input.lastIndexOf("}");
-  const endArr = input.lastIndexOf("]");
-  const end = Math.max(endObj, endArr);
-  if (end <= begin) return null;
-  return input.slice(begin, end + 1);
-}
-
-function normalizeExaData(parsed: unknown): InfoSearchItem[] {
-  if (Array.isArray(parsed)) {
-    return parsed.map(mapUnknownToInfo).filter((x): x is InfoSearchItem => x !== null);
-  }
-  if (!parsed || typeof parsed !== "object") return [];
-  const obj = parsed as Record<string, unknown>;
-  const candidates = [obj.results, obj.items, obj.data];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      const list = candidate.map(mapUnknownToInfo).filter((x): x is InfoSearchItem => x !== null);
-      if (list.length > 0) return list;
-    }
-  }
-  return [];
-}
-
-function mapUnknownToInfo(item: unknown): InfoSearchItem | null {
-  if (!item || typeof item !== "object") return null;
-  const obj = item as Record<string, unknown>;
-  const url = String(obj.url ?? obj.link ?? "").trim();
-  if (!url) return null;
-  const title = String(obj.title ?? obj.name ?? url).trim();
-  const snippet = String(obj.snippet ?? obj.summary ?? obj.text ?? "").trim().slice(0, 220);
-  return { title, url, snippet, source: "Exa" };
-}
-
-function parseLineBasedResults(text: string): InfoSearchItem[] {
-  const lines = text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const out: InfoSearchItem[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(/https?:\/\/\S+/i);
-    if (!m) continue;
-    const url = m[0];
-    if (seen.has(url)) continue;
-    seen.add(url);
-    const title = lines[i - 1]?.slice(0, 180) || url;
-    const snippet = lines[i + 1]?.slice(0, 220) || "";
-    out.push({ title, url, snippet, source: "Exa" });
-  }
-  return out;
 }
 
 function rawToItems(raw: string, source: string, platform: string): UnifiedSearchItem[] {

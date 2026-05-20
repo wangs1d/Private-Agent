@@ -6,9 +6,9 @@ import {
   buildLayeredSystemPrompt,
 } from "../../agent/prompt-builder.js";
 import {
-  getBuiltinAgentChatTools,
   streamCompletionWithDoudizhuTools,
 } from "../openai-compatible-tool-loop.js";
+import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 import type {
   AgentStreamOptions,
@@ -89,10 +89,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
 
     if (tools) {
       try {
-        const mergedTools = [
-          ...getBuiltinAgentChatTools(),
-          ...(streamOpts?.chatToolsExtra ?? []),
-        ];
+        const mergedTools = resolveChatToolsForStream(streamOpts);
         const full = await streamCompletionWithDoudizhuTools(
           this.client,
           this.model,

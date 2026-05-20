@@ -13,6 +13,7 @@ import { registerWeatherRoutes } from "./weather.js";
 import { registerPhoneRoutes } from "./phone.js";
 import {
   registerWorldDoudizhuRoutes,
+  registerWorldGomokuRoutes,
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
   registerWorldZhajinhuaRoutes,
@@ -38,6 +39,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWorldFreeMarketRoutes(app, deps);
   registerWorldDoudizhuRoutes(app, deps);
   registerWorldZhajinhuaRoutes(app, deps);
+  registerWorldGomokuRoutes(app, deps);
   registerWorldSocialRoutes(app, deps);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);

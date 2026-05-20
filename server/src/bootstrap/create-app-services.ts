@@ -5,8 +5,10 @@ import Fastify from "fastify";
 import {
   A2aOutsourcingService,
   DoudizhuService,
+  GomokuService,
   loadPersistedCommunitySkills,
   registerWorldDoudizhuTools,
+  registerWorldGomokuTools,
   registerWorldFreeMarketTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
@@ -54,6 +56,7 @@ import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
+import { registerClockTools } from "../tools/clock-tools.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
@@ -115,6 +118,7 @@ export async function createAppServices(): Promise<AppServices> {
   toolRegistry.setSkillManager(skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+  registerClockTools(toolRegistry);
   registerLifeTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
   registerCareReminderTools(toolRegistry, {
@@ -220,12 +224,15 @@ export async function createAppServices(): Promise<AppServices> {
   doudizhuService.attachWebSocketRegistry(wsConnectionRegistry);
   const zhaJinHuaService = new ZhaJinHuaService(worldService);
   zhaJinHuaService.attachWebSocketRegistry(wsConnectionRegistry);
+  const gomokuService = new GomokuService(worldService);
+  gomokuService.attachWebSocketRegistry(wsConnectionRegistry);
   const socialFeedService = new SocialFeedService(worldService);
   socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
   registerWorldOpenRegistryTools(toolRegistry, worldService);
   registerWorldRoomTools(toolRegistry, worldService);
   registerWorldDoudizhuTools(toolRegistry, doudizhuService);
   registerWorldZhajinhuaTools(toolRegistry, zhaJinHuaService);
+  registerWorldGomokuTools(toolRegistry, gomokuService);
   registerWorldSocialTools(toolRegistry, socialFeedService);
   registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
   toolRegistry.setWorldService(worldService);
@@ -321,6 +328,7 @@ export async function createAppServices(): Promise<AppServices> {
     a2aOutsourcingService,
     doudizhuService,
     zhaJinHuaService,
+    gomokuService,
     socialFeedService,
     agentRelayService,
     agentPairingService,

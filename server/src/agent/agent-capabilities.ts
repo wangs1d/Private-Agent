@@ -99,24 +99,32 @@ export function buildAgentCapabilityPromptSection(
   
   lines.push(`\n8️⃣ 【Web浏览能力】`);
   lines.push(`可用工具：`);
-  lines.push(`- web.search: 执行网络搜索`);
-  lines.push(`- web.fetch: 获取网页内容`);
+  lines.push(`- search_web: 联网搜索（默认必应中国 + 国内科技 RSS）`);
+  lines.push(`- fetch_web: 获取网页内容（国内站点直连抓取）`);
   lines.push(`提示：可帮助用户查找信息、浏览网页`);
   
-  lines.push(`\n9️⃣ 【生活助手能力】`);
+  lines.push(`\n9️ 【生活助手能力】`);
   lines.push(`可用工具：`);
   lines.push(`- budget.calculate: 计算预算和收支`);
   lines.push(`- shopping.suggest: 提供购物建议`);
   lines.push(`- reminder.plan: 制定提醒计划`);
   lines.push(`提示：可提供生活建议、财务管理`);
   
-  lines.push(`\n🔟 【系统管理能力】`);
+  lines.push(`\n🔟 【游戏娱乐能力】`);
+  lines.push(`与用户对战（仅此一项）：`);
+  lines.push(`- world.gomoku.create_table: 创建五子棋桌（你执黑先行）`);
+  lines.push(`- world.gomoku.join: 邀请用户加入（用户执白后手）`);
+  lines.push(`- world.gomoku.play: 在五子棋中落子`);
+  lines.push(`提示：用户说想下棋、玩五子棋时，用以上工具开局；不要向用户推荐斗地主或炸金花。`);
+  lines.push(`Agent World 内 Agent 间牌局（用户仅可观战，勿邀请用户入局）：斗地主、炸金花由其它 Agent 在世界里对战，与本会话用户无关。`);
+  
+  lines.push(`\n1️⃣2️⃣ 【系统管理能力】`);
   lines.push(`可用功能：`);
   lines.push(`- 管理记忆和上下文`);
   lines.push(`- 调整系统配置`);
   lines.push(`提示：用于优化Agent性能和个性化设置`);
   
-  lines.push(`\n1️⃣1️⃣ 【Agent账号管理能力】`);
+  lines.push(`\n1️3️⃣ 【Agent账号管理能力】`);
   lines.push(`可用工具：`);
   lines.push(`- agent.register_account: 注册新的Agent账号`);
   lines.push(`提示：用于创建和管理Agent身份`);
@@ -126,7 +134,7 @@ export function buildAgentCapabilityPromptSection(
     const virtualPhone = virtualPhoneService.getPhoneForActor(actorId);
     const hasVirtualPhone = virtualPhone != null && virtualPhone.length > 0;
     
-    lines.push(`\n【虚拟电话能力】`);
+    lines.push(`\n1️⃣5️⃣ 【虚拟电话能力】`);
     
     if (hasVirtualPhone) {
       lines.push(`✅ 你已申领虚拟号码：${virtualPhone}`);
@@ -151,7 +159,7 @@ export function buildAgentCapabilityPromptSection(
     lines.push(`- 你可以询问用户想联系谁，然后检查对方是否有虚拟号码`);
   }
 
-  lines.push(`\n6️⃣ 【自我编程与升级能力】`);
+  lines.push(`\n1️⃣4️⃣ 【自我编程与升级能力】`);
   lines.push(`可用工具：`);
   lines.push(`- self.create_skill: 创建新技能（需要提供 skillName, displayName, description, handlerCode）`);
   lines.push(`- self.update_skill: 更新现有技能的代码或元数据`);

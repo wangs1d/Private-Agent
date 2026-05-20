@@ -1,20 +1,28 @@
-import { DOUDIZHU_TOOL_SYSTEM_SUFFIX } from "@private-ai-agent/agent-world";
+import { USER_AGENT_TOOL_SYSTEM_SUFFIX } from "@private-ai-agent/agent-world";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 
 /**
- * 与 `DOUDIZHU_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
+ * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
  * 参考 Hermes `prompt_builder`：工具相关说明在单一处维护，避免各 Provider 分叉。
  */
 export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【Agent World 开放式注册】";
+export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
+
+const CLOCK_TOOL_SYSTEM_SUFFIX =
+  "\n\n【时钟】用户询问当前时间、日期、星期几时，必须调用 clock.get_current_time 或 clock.get_date（通过 IP 识别时区），禁止凭训练数据臆测时间。";
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  */
 export function appendAgentToolCallingSystemSuffix(systemContent: string): string {
-  if (systemContent.includes(AGENT_TOOL_SYSTEM_SUFFIX_MARKER)) {
-    return systemContent;
+  let out = systemContent;
+  if (!out.includes(AGENT_TOOL_SYSTEM_SUFFIX_MARKER)) {
+    out += USER_AGENT_TOOL_SYSTEM_SUFFIX;
   }
-  return systemContent + DOUDIZHU_TOOL_SYSTEM_SUFFIX;
+  if (!out.includes(CLOCK_TOOL_SYSTEM_SUFFIX_MARKER)) {
+    out += CLOCK_TOOL_SYSTEM_SUFFIX;
+  }
+  return out;
 }
 
 /**

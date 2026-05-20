@@ -6,7 +6,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ExternalChatProvider } from "../external-model/types.js";
+import { isSimpleDirectTask, requiresTaskDecomposition } from "../agent/simple-task.js";
+import { buildSubAgentChatTools } from "./master-agent-tool-filter.js";
+import type {
+  AgentStreamOptions,
+  ChatToolExecutionContext,
+  ExternalChatProvider,
+} from "../external-model/types.js";
+import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { SkillManager } from "../skills/index.js";
@@ -160,9 +167,10 @@ export class MasterAgentCoordinator {
       description: "处理个人生活事务：天气查询、日程安排、提醒设置、闹钟、个人健康管理等",
       keywords: ["天气", "日程", "提醒", "闹钟", "约会", "健身", "健康", "日历", "预约", "备忘录"],
       tools: [
-        ...allTools.filter(t => t.includes("calendar") || t.includes("schedule")),
-        ...allTools.filter(t => t.includes("weather")),
-        ...allTools.filter(t => t.includes("reminder") || t.includes("alarm")),
+        ...allTools.filter((t) => t.startsWith("clock.")),
+        ...allTools.filter((t) => t.includes("calendar") || t.includes("schedule")),
+        ...allTools.filter((t) => t.includes("weather")),
+        ...allTools.filter((t) => t.includes("reminder") || t.includes("alarm")),
       ],
     });
     
@@ -196,9 +204,9 @@ export class MasterAgentCoordinator {
       type: "entertainment",
       name: "娱乐助手",
       description: "处理娱乐活动：游戏、音乐、视频、休闲活动等",
-      keywords: ["游戏", "斗地主", "五子棋", "炸金花", "音乐", "视频", "电影", "娱乐", "休闲", "玩"],
+      keywords: ["游戏", "五子棋", "下棋", "音乐", "视频", "电影", "娱乐", "休闲", "玩"],
       tools: [
-        ...allTools.filter(t => t.includes("game") || t.includes("doudizhu") || t.includes("gomoku")),
+        ...allTools.filter(t => t.includes("gomoku")),
         ...allTools.filter(t => t.includes("music") || t.includes("video")),
       ],
     });
@@ -261,6 +269,7 @@ export class MasterAgentCoordinator {
     actorId: string,
     userMessage: string,
     onProgress?: (message: string) => void,
+    onAssistantDelta?: (delta: string) => void,
   ): Promise<string> {
     const startTime = Date.now();
     const taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -271,11 +280,21 @@ export class MasterAgentCoordinator {
     if (!this.config.enableSubAgents) {
       onProgress?.("使用单 Agent 模式处理");
       this.metrics.fallbackCount++;
-      return this.executeWithMasterOnly(actorId, userMessage);
+      return this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta);
+    }
+
+    if (isSimpleDirectTask(userMessage)) {
+      this.log(`⚡ Simple direct task (heuristic), master only`, { taskId });
+      return this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta);
+    }
+
+    if (!requiresTaskDecomposition(userMessage)) {
+      this.log(`⚡ Single-scope task, master only (no decomposition)`, { taskId });
+      return this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta);
     }
 
     try {
-      onProgress?.("🧠 主 Agent 分析任务中...");
+      // 不显示进度消息给用户
       
       // 步骤 1: 任务分解
       const decompStartTime = Date.now();
@@ -284,15 +303,16 @@ export class MasterAgentCoordinator {
       
       this.updateMetric('avgDecompositionTime', decompDuration);
       
-      // 如果任务简单，直接用主 Agent 处理
-      if (decomposed.subTasks.length <= 1) {
-        onProgress?.("任务较简单，直接处理");
-        this.log(`⚡ Simple task, using single agent mode`, { taskId });
-        return this.executeWithMasterOnly(actorId, userMessage);
+      // 无需子 Agent：0 个子任务或仅 1 个整体任务 → 主 Agent + 工具
+      if (decomposed.subTasks.length < 2) {
+        this.log(`⚡ No multi sub-agent dispatch`, {
+          taskId,
+          subTaskCount: decomposed.subTasks.length,
+        });
+        return this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta);
       }
 
       this.metrics.decomposedTasks++;
-      onProgress?.(`📋 任务已分解为 ${decomposed.subTasks.length} 个子任务`);
       this.log(`📋 Task decomposed`, { 
         taskId, 
         subTaskCount: decomposed.subTasks.length,
@@ -300,35 +320,34 @@ export class MasterAgentCoordinator {
         decompositionTime: decompDuration,
       });
       
-      // 步骤 2: 根据执行策略调度子 Agent
-      let result: string;
+      // 步骤 2: 子 Agent 执行，结构化报告回传主 Agent
+      let subResults: SubAgentResult[];
       const execStartTime = Date.now();
-      
+
       if (decomposed.executionStrategy === "parallel") {
         this.metrics.parallelExecutions++;
-        result = await this.executeParallel(actorId, decomposed, onProgress);
+        subResults = await this.executeParallel(actorId, decomposed, onProgress);
       } else if (decomposed.executionStrategy === "sequential") {
         this.metrics.sequentialExecutions++;
-        result = await this.executeSequential(actorId, decomposed, onProgress);
+        subResults = await this.executeSequential(actorId, decomposed, onProgress);
       } else {
         this.metrics.hybridExecutions++;
-        result = await this.executeHybrid(actorId, decomposed, onProgress);
+        subResults = await this.executeHybrid(actorId, decomposed, onProgress);
       }
-      
+
       const execDuration = Date.now() - execStartTime;
-      this.updateMetric('avgExecutionTime', execDuration);
-      
-      // 步骤 3: 结果汇总和优化
-      onProgress?.("📝 汇总结果中...");
+      this.updateMetric("avgExecutionTime", execDuration);
+
+      // 步骤 3: 主 Agent 根据子 Agent 报告生成对用户的最终回复（可跳过额外 LLM）
       const summaryStartTime = Date.now();
-      const finalResult = await this.summarizeResults(
+      const finalResult = await this.deliverSubAgentReportsToUser(
         actorId,
         userMessage,
-        decomposed,
-        result,
+        subResults,
+        onAssistantDelta,
       );
       const summaryDuration = Date.now() - summaryStartTime;
-      this.updateMetric('avgSummarizationTime', summaryDuration);
+      this.updateMetric("avgSummarizationTime", summaryDuration);
       
       const totalDuration = Date.now() - startTime;
       
@@ -372,38 +391,58 @@ export class MasterAgentCoordinator {
       this.metrics.successRate = this.calculateSuccessRate();
       
       if (this.config.allowFallback) {
-        onProgress?.("⚠️ 多 Agent 模式失败，降级到单 Agent 模式");
         this.metrics.fallbackCount++;
-        this.log(`⚠️ Fallback to single agent`, { taskId, error: error instanceof Error ? error.message : String(error) });
-        return this.executeWithMasterOnly(actorId, userMessage);
+        this.log(`️ Fallback to single agent`, { taskId, error: error instanceof Error ? error.message : String(error) });
+        return this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta);
       }
       
       throw error;
     }
   }
 
+  private buildToolContext(actorId: string): ChatToolExecutionContext {
+    return {
+      executeTool: (name, args) =>
+        this.toolRegistry.execute(name, args, { sessionId: actorId }),
+    };
+  }
+
+  private buildStreamOptions(actorId: string): AgentStreamOptions | undefined {
+    if (!this.worldService || !this.skillManager) return undefined;
+    const chatToolsExtra = buildSessionSkillChatTools(
+      actorId,
+      this.worldService,
+      this.skillManager,
+    );
+    if (!chatToolsExtra.length) return undefined;
+    return { chatToolsExtra };
+  }
+
   /**
-   * 使用主 Agent 单独执行（不分解任务）
+   * 使用主 Agent 单独执行（不分解任务，启用与聊天一致的 function calling）
    */
   private async executeWithMasterOnly(
     actorId: string,
     userMessage: string,
+    onAssistantDelta?: (delta: string) => void,
   ): Promise<string> {
-    // 调用外部模型提供商进行流式完成
     const sessionId = `master-${actorId}-${Date.now()}`;
     let fullText = "";
-    
+    const toolCtx = this.buildToolContext(actorId);
+    const streamOpts = this.buildStreamOptions(actorId);
+
     try {
       await this.masterProvider.streamCompletion(
         sessionId,
         { text: userMessage },
         (delta) => {
           fullText += delta;
+          onAssistantDelta?.(delta);
         },
-        undefined,
-        undefined,
+        toolCtx,
+        streamOpts,
       );
-      
+
       return fullText;
     } catch (error) {
       console.error("[MasterAgent] executeWithMasterOnly failed:", error);
@@ -466,20 +505,21 @@ export class MasterAgentCoordinator {
       );
       
       const parsed = this.parseDecompositionResponse(response);
-      
-      // 如果不需要分解，返回单个任务
+
+      if (parsed.needsDecomposition === false) {
+        return {
+          id: randomUUID(),
+          originalTask: userMessage,
+          subTasks: [],
+          executionStrategy: "sequential",
+        };
+      }
+
       if (!parsed.subTasks || parsed.subTasks.length === 0) {
         return {
           id: randomUUID(),
           originalTask: userMessage,
-          subTasks: [{
-            id: "task-0",
-            description: userMessage,
-            assignedAgent: "general",
-            priority: 5,
-            dependencies: [],
-            estimatedComplexity: "medium",
-          }],
+          subTasks: [],
           executionStrategy: "sequential",
         };
       }
@@ -495,18 +535,11 @@ export class MasterAgentCoordinator {
       };
     } catch (error) {
       console.error("[MasterAgent] decomposition failed:", error);
-      // 降级：返回单个通用任务
+      // 降级：不拆子任务，由主 Agent 直答
       return {
         id: randomUUID(),
         originalTask: userMessage,
-        subTasks: [{
-          id: "task-0",
-          description: userMessage,
-          assignedAgent: "general",
-          priority: 5,
-          dependencies: [],
-          estimatedComplexity: "medium",
-        }],
+        subTasks: [],
         executionStrategy: "sequential",
       };
     }
@@ -519,24 +552,23 @@ export class MasterAgentCoordinator {
     actorId: string,
     decomposed: DecomposedTask,
     onProgress?: (message: string) => void,
-  ): Promise<string> {
+  ): Promise<SubAgentResult[]> {
     onProgress?.("🚀 并行执行子任务...");
-    
+
     const results: SubAgentResult[] = [];
     const tasks = decomposed.subTasks;
-    
-    // 分批并行执行（限制并发数）
-    const batchSize = this.config.maxParallelTasks;
+    const batchSize = Math.max(1, this.config.maxParallelTasks);
+
     for (let i = 0; i < tasks.length; i += batchSize) {
       const batch = tasks.slice(i, i + batchSize);
-      onProgress?.(`执行批次 ${Math.floor(i / batchSize) + 1}/${Math.ceil(tasks.length / batchSize)}`);
-      
-      const batchPromises = batch.map(task => 
-        this.executeSubTask(actorId, task, onProgress)
+      onProgress?.(
+        `执行批次 ${Math.floor(i / batchSize) + 1}/${Math.ceil(tasks.length / batchSize)}`,
       );
-      
-      const batchResults = await Promise.allSettled(batchPromises);
-      
+
+      const batchResults = await Promise.allSettled(
+        batch.map((task) => this.executeSubTask(actorId, task, onProgress)),
+      );
+
       batchResults.forEach((result, idx) => {
         if (result.status === "fulfilled") {
           results.push(result.value);
@@ -546,13 +578,13 @@ export class MasterAgentCoordinator {
             taskId: batch[idx].id,
             agentType: batch[idx].assignedAgent,
             success: false,
-            result: `执行失败: ${result.reason}`,
+            result: `执行失败: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
           });
         }
       });
     }
-    
-    return this.formatParallelResults(results);
+
+    return results;
   }
 
   /**
@@ -562,25 +594,22 @@ export class MasterAgentCoordinator {
     actorId: string,
     decomposed: DecomposedTask,
     onProgress?: (message: string) => void,
-  ): Promise<string> {
+  ): Promise<SubAgentResult[]> {
     onProgress?.("📊 按顺序执行子任务...");
-    
+
     const results: SubAgentResult[] = [];
-    
-    // 按优先级排序
     const sortedTasks = [...decomposed.subTasks].sort((a, b) => b.priority - a.priority);
-    
+
     for (const task of sortedTasks) {
       onProgress?.(`执行: ${task.description.substring(0, 30)}...`);
       const result = await this.executeSubTask(actorId, task, onProgress);
       results.push(result);
-      
       if (!result.success) {
         onProgress?.(`⚠️ 任务 ${task.id} 执行失败，继续执行下一个`);
       }
     }
-    
-    return this.formatSequentialResults(results);
+
+    return results;
   }
 
   /**
@@ -590,34 +619,35 @@ export class MasterAgentCoordinator {
     actorId: string,
     decomposed: DecomposedTask,
     onProgress?: (message: string) => void,
-  ): Promise<string> {
-    // 简化实现：先执行无依赖的任务（并行），再执行有依赖的任务（串行）
-    const independentTasks = decomposed.subTasks.filter(t => t.dependencies.length === 0);
-    const dependentTasks = decomposed.subTasks.filter(t => t.dependencies.length > 0);
-    
-    let result = "";
-    
+  ): Promise<SubAgentResult[]> {
+    const independentTasks = decomposed.subTasks.filter((t) => t.dependencies.length === 0);
+    const dependentTasks = decomposed.subTasks.filter((t) => t.dependencies.length > 0);
+
+    const results: SubAgentResult[] = [];
+
     if (independentTasks.length > 0) {
       onProgress?.("🚀 并行执行独立任务...");
-      const parallelResult = await this.executeParallel(
-        actorId,
-        { ...decomposed, subTasks: independentTasks },
-        onProgress,
+      results.push(
+        ...(await this.executeParallel(
+          actorId,
+          { ...decomposed, subTasks: independentTasks },
+          onProgress,
+        )),
       );
-      result += parallelResult + "\n\n";
     }
-    
+
     if (dependentTasks.length > 0) {
       onProgress?.("📊 串行执行依赖任务...");
-      const sequentialResult = await this.executeSequential(
-        actorId,
-        { ...decomposed, subTasks: dependentTasks },
-        onProgress,
+      results.push(
+        ...(await this.executeSequential(
+          actorId,
+          { ...decomposed, subTasks: dependentTasks },
+          onProgress,
+        )),
       );
-      result += sequentialResult;
     }
-    
-    return result;
+
+    return results;
   }
 
   /**
@@ -643,9 +673,12 @@ export class MasterAgentCoordinator {
     onProgress?.(`[${capability.name}] 处理: ${task.description.substring(0, 40)}...`);
     
     try {
-      // 根据子 Agent 类型选择对应的工具执行
-      const result = await this.executeTaskWithTools(actorId, task, capability);
-      
+      const result = await this.withSubTaskTimeout(
+        this.executeTaskWithTools(actorId, task, capability),
+        this.config.taskTimeoutMs,
+        task.id,
+      );
+
       return {
         taskId: task.id,
         agentType: task.assignedAgent,
@@ -664,6 +697,29 @@ export class MasterAgentCoordinator {
     }
   }
 
+  private withSubTaskTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    taskId: string,
+  ): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`子任务 ${taskId} 超时（>${timeoutMs}ms）`));
+      }, timeoutMs);
+      promise.then(
+        (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      );
+    });
+  }
+
   /**
    * 使用工具执行子任务
    */
@@ -672,81 +728,128 @@ export class MasterAgentCoordinator {
     task: SubTask,
     capability: SubAgentCapability,
   ): Promise<string> {
-    // 构建针对该子任务的提示
-    const prompt = `
-你是${capability.name}。请完成以下任务：
+    const baseStreamOpts = this.buildStreamOptions(actorId);
+    const scopedBuiltin = buildSubAgentChatTools(
+      capability.tools,
+      baseStreamOpts?.chatToolsExtra,
+    );
+    const streamOpts: AgentStreamOptions = {
+      ...(baseStreamOpts ?? {}),
+      chatToolsBuiltin: scopedBuiltin,
+      chatToolsExtra: [],
+    };
 
-任务描述：${task.description}
+    const allowedList =
+      scopedBuiltin
+        .map((t) => (t.type === "function" ? t.function?.name : ""))
+        .filter(Boolean)
+        .join(", ") || "（无）";
 
-可用工具：${capability.tools.join(", ") || "无专用工具"}
+    const prompt = `你是「${capability.name}」子 Agent，向主 Agent 汇报，不要对用户寒暄。
 
-请使用合适的工具或直接回答来完成任务。如果需要调用工具，请说明要调用的工具和参数。
-`;
+子任务：${task.description}
+
+你只能使用以下工具（API 名为下划线形式，对应注册名中的点号）：
+${allowedList}
+
+请调用必要工具完成任务，最后用 3～8 句话给出【子Agent执行报告】：结论、关键数据、是否成功。不要编造未工具验证的信息。`;
 
     const sessionId = `subagent-${actorId}-${task.id}-${Date.now()}`;
     let fullText = "";
-    
-    try {
-      await this.masterProvider.streamCompletion(
-        sessionId,
-        { text: prompt },
-        (delta) => {
-          fullText += delta;
-        },
-        undefined,
-        undefined,
-      );
-      
-      return fullText;
-    } catch (error) {
-      console.error(`[MasterAgent] executeTaskWithTools failed for ${task.id}:`, error);
-      throw error;
-    }
+    const toolCtx = this.buildToolContext(actorId);
+
+    await this.masterProvider.streamCompletion(
+      sessionId,
+      { text: prompt },
+      (delta) => {
+        fullText += delta;
+      },
+      toolCtx,
+      streamOpts,
+    );
+
+    return fullText.trim();
   }
 
   /**
-   * 汇总结果
+   * 主 Agent 根据子 Agent 结构化报告生成对用户的回复（流式）。
    */
-  private async summarizeResults(
+  private async deliverSubAgentReportsToUser(
     actorId: string,
     originalTask: string,
-    decomposed: DecomposedTask,
-    rawResults: string,
+    subResults: SubAgentResult[],
+    onAssistantDelta?: (delta: string) => void,
   ): Promise<string> {
-    const prompt = `
-你是结果汇总专家。请将以下子任务的执行结果整合成一个连贯的回复。
+    const reports = this.formatSubAgentReportsForMaster(subResults);
 
-原始任务：${originalTask}
+    if (this.shouldSkipMasterSynthesis(subResults)) {
+      const direct = this.formatResultsForUser(subResults);
+      this.streamTextToUser(direct, onAssistantDelta);
+      return direct;
+    }
 
-子任务执行结果：
-${rawResults}
+    const prompt = `你是主 Agent。用户问题是：
+${originalTask}
 
-请用自然语言总结所有结果，确保：
-1. 回答完整覆盖原始任务的所有方面
-2. 逻辑清晰，条理分明
-3. 如果有失败的任务，说明原因和建议
-4. 语气友好专业
-`;
+以下是各专业子 Agent 向你提交的执行报告（请据此回答用户，勿重复寒暄）：
+${reports}
 
-    const sessionId = `summarize-${actorId}-${Date.now()}`;
+请整合成一段直接给用户的回复：覆盖所有子任务结论；若有失败则说明原因；条理清晰、语气自然。`;
+
+    const sessionId = `master-present-${actorId}-${Date.now()}`;
     let fullText = "";
-    
-    try {
-      await this.masterProvider.streamCompletion(
-        sessionId,
-        { text: prompt },
-        (delta) => {
-          fullText += delta;
-        },
-        undefined,
-        undefined,
-      );
-      
-      return fullText;
-    } catch (error) {
-      console.error("[MasterAgent] summarizeResults failed:", error);
-      // 降级：直接返回原始结果
-      return rawResults;
+
+    await this.masterProvider.streamCompletion(
+      sessionId,
+      { text: prompt },
+      (delta) => {
+        fullText += delta;
+        onAssistantDelta?.(delta);
+      },
+      undefined,
+      undefined,
+    );
+
+    return fullText.trim() || this.formatResultsForUser(subResults);
+  }
+
+  private shouldSkipMasterSynthesis(results: SubAgentResult[]): boolean {
+    if (process.env.MASTER_AGENT_FORCE_SYNTHESIS === "1") return false;
+    if (results.length === 0) return true;
+    if (results.length === 1 && results[0].success) return true;
+    if (
+      results.length <= 2 &&
+      results.every((r) => r.success) &&
+      new Set(results.map((r) => r.agentType)).size === 1
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private formatSubAgentReportsForMaster(results: SubAgentResult[]): string {
+    return results
+      .map(
+        (r) =>
+          `[报告 taskId=${r.taskId} agent=${r.agentType} success=${r.success}${r.executionTime != null ? ` ms=${r.executionTime}` : ""}]\n${r.result}`,
+      )
+      .join("\n\n---\n\n");
+  }
+
+  private formatResultsForUser(results: SubAgentResult[]): string {
+    return results
+      .map((r) => {
+        const head = `【${this.getAgentName(r.agentType)}】${r.success ? "" : "（未完成）"}`;
+        return `${head}\n${r.result}`;
+      })
+      .join("\n\n");
+  }
+
+  private streamTextToUser(text: string, onAssistantDelta?: (delta: string) => void): void {
+    if (!onAssistantDelta || !text) return;
+    const chunkSize = 24;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      onAssistantDelta(text.slice(i, i + chunkSize));
     }
   }
 
@@ -839,18 +942,6 @@ ${rawResults}
     }
     
     return suggestions;
-  }  /** 格式化并行执行结果 */
-  private formatParallelResults(results: SubAgentResult[]): string {
-    return results.map(r => 
-      `【${this.getAgentName(r.agentType)}】\n${r.result}\n`
-    ).join("\n");
-  }
-
-  /** 格式化串行执行结果 */
-  private formatSequentialResults(results: SubAgentResult[]): string {
-    return results.map((r, i) => 
-      `步骤 ${i + 1} 【${this.getAgentName(r.agentType)}】\n${r.result}\n`
-    ).join("\n");
   }
 
   /** 获取子 Agent 名称 */
@@ -862,6 +953,7 @@ ${rawResults}
 
   /** 解析分解响应 */
   private parseDecompositionResponse(response: string): {
+    needsDecomposition: boolean;
     executionStrategy: "sequential" | "parallel" | "hybrid";
     subTasks: Array<{
       description: string;
@@ -877,13 +969,19 @@ ${rawResults}
         throw new Error("No JSON found in response");
       }
       const parsed = JSON.parse(jsonMatch[0]);
+      const subTasks = Array.isArray(parsed.subTasks) ? parsed.subTasks : [];
+      const needsDecomposition =
+        parsed.needsDecomposition === true ||
+        (parsed.needsDecomposition !== false && subTasks.length >= 2);
       return {
+        needsDecomposition,
         executionStrategy: parsed.executionStrategy || "sequential",
-        subTasks: parsed.subTasks || [],
+        subTasks,
       };
     } catch (error) {
       console.error("[MasterAgent] Failed to parse decomposition:", error);
       return {
+        needsDecomposition: false,
         executionStrategy: "sequential",
         subTasks: [],
       };

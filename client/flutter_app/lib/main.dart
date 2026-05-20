@@ -72,6 +72,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _isInitialized = false;
   /// 是否需要显示注册页面
   bool _showRegistration = false;
+  /// Agent是否正在处理中（用于显示响应状态指示器）
+  bool _isAgentProcessing = false;
 
   @override
   void initState() {
@@ -162,6 +164,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           (event["payload"] as Map?)?.cast<String, dynamic>() ??
               <String, dynamic>{};
       if (type == "chat.assistant_chunk") {
+        // 开始接收流式输出时，标记为处理中
+        if (!_isAgentProcessing) {
+          setState(() => _isAgentProcessing = true);
+        }
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-chunk";
         final String chunk = payload["chunk"]?.toString() ?? "";
@@ -191,6 +197,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         });
       }
       if (type == "chat.assistant_done") {
+        // 处理完成，清除处理中状态
+        if (_isAgentProcessing) {
+          setState(() => _isAgentProcessing = false);
+        }
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-final";
         final String finalText = payload["finalText"]?.toString() ?? "";
@@ -971,6 +981,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               galleryPendingCount: _pendingGalleryFrames.length,
               onPickGalleryImage: _pickGalleryImage,
               onClearGalleryImages: _clearPendingGalleryFrames,
+              isAgentProcessing: _isAgentProcessing,
               onEnterVoiceMode: () {
                 // 在主页面上下文中执行导航
                 Navigator.of(context).push(
