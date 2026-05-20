@@ -19,6 +19,14 @@ export function isSimpleDirectTask(message: string): boolean {
     return true;
   }
 
+  // 单条定时提醒/叫醒（含中文「七点」或阿拉伯数字时刻）
+  if (
+    /提醒我|提醒|闹钟|叫我起床|起床|叫醒|定时提醒/.test(t) &&
+    /(\d{1,2})[:：]\d{2}|\d{1,2}\s*点|[零一二两三四五六七八九十]{1,3}\s*点/.test(t)
+  ) {
+    return true;
+  }
+
   return false;
 }
 

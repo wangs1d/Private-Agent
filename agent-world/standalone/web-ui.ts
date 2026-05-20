@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 
 const standaloneDir = dirname(fileURLToPath(import.meta.url));
-const webRoot = resolve(standaloneDir, "..", "web");
+const webRootCandidates = [
+  resolve(standaloneDir, "..", "web"),
+  resolve(standaloneDir, "..", "..", "web"),
+];
+const webRoot =
+  webRootCandidates.find((dir) => existsSync(join(dir, "index.html"))) ??
+  webRootCandidates[0];
 const assetsRoot = resolve(webRoot, "assets");
 
 /** 同源观战 SPA：`/`、`/assets/*`（在 API 路由之后注册）。 */

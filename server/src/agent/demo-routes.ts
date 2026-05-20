@@ -19,11 +19,11 @@ export function tryMatchDemoKeywordRoute(text: string): AgentReply | null {
       toolInput: { item: "手机", budget: 3000 },
     };
   }
-  if (lower.includes("提醒")) {
+  if (lower.includes("提醒") || lower.includes("起床") || lower.includes("闹钟")) {
     return {
-      text: "正在创建提醒计划。",
+      text: "正在为你创建定时提醒。",
       toolName: "reminder.plan",
-      toolInput: { subject: "待办事项", date: "明天 09:00" },
+      toolInput: { text: text.trim() },
     };
   }
   return null;

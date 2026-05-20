@@ -18,6 +18,7 @@ import {
   registerWorldRoutes,
   registerWorldZhajinhuaRoutes,
   registerWorldSocialRoutes,
+  registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -41,6 +42,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWorldZhajinhuaRoutes(app, deps);
   registerWorldGomokuRoutes(app, deps);
   registerWorldSocialRoutes(app, deps);
+  registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);

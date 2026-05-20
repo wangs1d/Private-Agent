@@ -141,9 +141,35 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "reminder.plan",
+      description:
+        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」须先问是否每天重复。成功返回 taskId、nextRunAt、recurrence。",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "用户原句，须含时间与提醒事项" },
+          subject: { type: "string", description: "可选，与 date 组合解析（无 text 时）" },
+          date: { type: "string", description: "可选，如「明天 09:00」（无 text 时）" },
+          runAt: { type: "string", description: "可选 ISO-8601，与 subject 结构化创建" },
+          recurrence: {
+            type: "string",
+            enum: ["none", "daily", "weekly"],
+            description: "默认 none；仅用户明确要每天/每周重复时才填 daily/weekly",
+          },
+          reminderMessage: { type: "string", description: "到点时展示的提醒文案" },
+          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "calendar.create_from_text",
       description:
-        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒（及动作、每日天气简报）：与聊天定时意图、`/chat/schedule-draft` 同一套解析。用户须包含时间与事项，例「明天 9:00 提醒我开会」「每天 7 点天气提醒」。成功返回 taskId；解析失败则 matched=false。",
+        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周，返回 needsRecurrenceConfirm=true，须先向用户确认后再创建。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」。成功返回 taskId；解析失败则 matched=false。",
       parameters: {
         type: "object",
         properties: {
@@ -172,7 +198,11 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "weather_brief 需用户已在天气页保存定位后简报才有效",
           },
           runAt: { type: "string", description: "ISO-8601" },
-          recurrence: { type: "string", enum: ["none", "daily", "weekly"] },
+          recurrence: {
+            type: "string",
+            enum: ["none", "daily", "weekly"],
+            description: "默认 none；勿在用户未要求时填 daily",
+          },
           timezone: { type: "string" },
           reminderMessage: { type: "string", description: "仅 kind=reminder" },
           action: {

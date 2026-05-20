@@ -453,6 +453,36 @@
       "reminderMessage": "明天是测试生日的生日！别忘了送上祝福哦 🎂",
       "createdAt": "2026-05-19T16:53:13.282Z",
       "updatedAt": "2026-05-19T16:53:13.282Z"
+    },
+    {
+      "taskId": "950b01bf-ffb4-42a5-aa9b-41596422a1d4",
+      "sessionId": "session-mvp-001",
+      "title": "起床提醒",
+      "description": "早上七点起床",
+      "kind": "reminder",
+      "recurrence": "daily",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-21T23:00:00.000Z",
+      "nextRunAt": "2026-05-21T23:00:00.000Z",
+      "status": "active",
+      "reminderMessage": "该起床啦！新的一天开始了~",
+      "createdAt": "2026-05-20T17:24:40.603Z",
+      "updatedAt": "2026-05-20T17:24:40.603Z"
+    },
+    {
+      "taskId": "8eefeb1b-cbec-429e-8483-4bbdad68e3e8",
+      "sessionId": "session-mvp-001",
+      "title": "起床提醒",
+      "description": "早上七点叫我起床",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-20T23:00:00.000Z",
+      "nextRunAt": "2026-05-20T23:00:00.000Z",
+      "status": "active",
+      "reminderMessage": "该起床啦！新的一天开始啦~ ☀️",
+      "createdAt": "2026-05-20T17:42:53.753Z",
+      "updatedAt": "2026-05-20T17:42:53.753Z"
     }
   ],
   "runs": [

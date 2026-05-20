@@ -1,5 +1,6 @@
 import type { GomokuService } from "../services/gomoku-service.js";
 import type { ToolRegistryLike } from "../host-types.js";
+import { buildGomokuTableUrl } from "../config/world-game-url.js";
 
 /**
  * Agent World 五子棋：用户与 Agent 对战工具。
@@ -22,10 +23,12 @@ export function registerWorldGomokuTools(registry: ToolRegistryLike, gomoku: Gom
     gomoku.assertAgentWorldEntry(context.sessionId);
     const r = gomoku.createTable(context.sessionId);
     if (!r.ok) throw new Error(r.reason);
+    const playUrl = buildGomokuTableUrl(r.table.tableId);
     return {
       ok: true,
       table: r.table,
-      message: "已创建五子棋桌，你执黑先行。等待对手加入后自动开始。",
+      playUrl,
+      message: `已创建五子棋桌，你执黑先行。请将 playUrl 发给用户加入（用户执白）：${playUrl}`,
     };
   });
 
@@ -42,13 +45,15 @@ export function registerWorldGomokuTools(registry: ToolRegistryLike, gomoku: Gom
         ? gomoku.joinAsPlayer(tableId, context.sessionId)
         : gomoku.joinSpectator(tableId, context.sessionId);
     if (!r.ok) throw new Error(r.reason);
+    const playUrl = buildGomokuTableUrl(tableId);
     return {
       ok: true,
       table: r.table,
+      playUrl,
       message:
         role === "player"
-          ? "已加入游戏，你执白棋（后手）。游戏已开始，等待对手落子。"
-          : "已进入观战席，可 world.gomoku.get_snapshot 或通过 WebSocket 订阅快照。",
+          ? `已加入游戏，你执白棋（后手）。对局链接：${playUrl}`
+          : `已进入观战席。观战链接：${playUrl}`,
     };
   });
 

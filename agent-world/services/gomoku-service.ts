@@ -44,9 +44,9 @@ export class GomokuService {
 
   constructor(private readonly worldService: WorldService) {}
 
-  /** 五子棋工具入口：须先完成开放式 Agent World 注册。 */
+  /** 五子棋入口：用户与 Agent 对战，无需 Agent World 注册。 */
   assertAgentWorldEntry(sessionId: string): void {
-    this.worldService.assertAgentWorldRegistered(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
   }
 
   /** 绑定 WebSocket 注册表后，状态变更会向在线会话推送 `world.gomoku.snapshot`。 */
@@ -72,7 +72,7 @@ export class GomokuService {
   }
 
   watchLobby(sessionId: string): void {
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
     this.lobbyWatchers.add(sessionId);
     this.sendLobbySnapshotToSession(sessionId);
   }
@@ -87,12 +87,12 @@ export class GomokuService {
 
   /** 将会话场景标为五子棋馆 */
   visitHall(sessionId: string): void {
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
   }
 
   /** 创建新桌（创建者默认执黑） */
   createTable(sessionId: string): { ok: true; table: GomokuTableSummary } | { ok: false; reason: string } {
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
     const id = newTableId();
     const t: Table = {
       id,
@@ -117,7 +117,7 @@ export class GomokuService {
     if (!t) return { ok: false, reason: "桌台不存在" };
     if (t.status !== "waiting") return { ok: false, reason: "游戏已开始或已结束" };
     
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
     t.spectators.delete(sessionId);
 
     // 如果已经是黑棋玩家
@@ -153,7 +153,7 @@ export class GomokuService {
     const t = this.tables.get(tableId);
     if (!t) return { ok: false, reason: "桌台不存在" };
 
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
     
     // 如果已是玩家，移除玩家身份
     if (t.blackPlayer === sessionId || t.whitePlayer === sessionId) {
@@ -236,7 +236,7 @@ export class GomokuService {
     const t = this.tables.get(tableId);
     if (!t) return { ok: false, reason: "桌台不存在" };
 
-    this.worldService.visitGomoku(sessionId);
+    this.worldService.enterGomokuLobby(sessionId);
     const snapshot = this.createSnapshot(t, sessionId);
     return { ok: true, snapshot };
   }

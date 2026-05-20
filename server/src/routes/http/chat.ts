@@ -174,10 +174,22 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const draft = await scheduleIntentService.parse(parsed.data.sessionId, parsed.data.text);
-    if (!draft) {
-      return reply.code(200).send({ ok: true, matched: false });
+    const intent = await scheduleIntentService.parseForCreate(
+      parsed.data.sessionId,
+      parsed.data.text,
+    );
+    if (!intent.matched) {
+      if ("needsRecurrenceConfirm" in intent && intent.needsRecurrenceConfirm) {
+        return {
+          ok: true,
+          matched: false,
+          needsRecurrenceConfirm: true,
+          hint: intent.hint,
+          draft: intent.draft,
+        };
+      }
+      return reply.code(200).send({ ok: true, matched: false, hint: intent.hint });
     }
-    return { ok: true, matched: true, draft };
+    return { ok: true, matched: true, draft: intent.draft };
   });
 }

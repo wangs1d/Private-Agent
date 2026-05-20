@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
+import { buildGomokuTableUrl } from "../config/world-game-url.js";
 import { replyIfWorldHttpMutationsForbidden } from "../config/world-http-mutations.js";
-import { replyIfWorldRegistrationRequired } from "../config/world-registration-gate.js";
 import type { HttpRouteDepsLike } from "../host-types.js";
 
 /**
@@ -14,8 +14,7 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     const query = request.query as Record<string, unknown>;
     const sessionId = String(query.sessionId ?? "");
     if (sessionId) {
-      if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
-      worldService.visitGomoku(sessionId);
+      worldService.enterGomokuLobby(sessionId);
     }
     return { ok: true, tables: gomokuService.listTables() };
   });
@@ -24,12 +23,15 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     if (replyIfWorldHttpMutationsForbidden(reply)) return;
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "");
-    if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
     const r = gomokuService.createTable(sessionId);
     if (!r.ok) {
       return reply.code(400).send({ ok: false, reason: r.reason });
     }
-    return { ok: true, table: r.table };
+    return {
+      ok: true,
+      table: r.table,
+      playUrl: buildGomokuTableUrl(r.table.tableId),
+    };
   });
 
   app.post("/world/gomoku/join", async (request, reply) => {
@@ -41,7 +43,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     if (!tableId) {
       return reply.code(400).send({ ok: false, reason: "缺少 tableId" });
     }
-    if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
     const r =
       role === "player"
         ? gomokuService.joinAsPlayer(tableId, sessionId)
@@ -49,7 +50,11 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     if (!r.ok) {
       return reply.code(400).send({ ok: false, reason: r.reason });
     }
-    return { ok: true, table: r.table };
+    return {
+      ok: true,
+      table: r.table,
+      playUrl: buildGomokuTableUrl(tableId),
+    };
   });
 
   app.post("/world/gomoku/play", async (request, reply) => {
@@ -65,7 +70,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     if (row < 0 || row >= 15 || col < 0 || col >= 15) {
       return reply.code(400).send({ ok: false, reason: "无效的落子位置" });
     }
-    if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
     const r = gomokuService.play(tableId, sessionId, row, col);
     if (!r.ok) {
       return reply.code(400).send({ ok: false, reason: r.reason });
@@ -81,7 +85,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
     if (!tableId) {
       return reply.code(400).send({ ok: false, reason: "缺少 tableId" });
     }
-    if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
     const r = gomokuService.leave(tableId, sessionId);
     if (!r.ok) {
       return reply.code(400).send({ ok: false, reason: r.reason });
@@ -92,7 +95,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
   app.get<{ Params: { tableId: string } }>('/world/gomoku/table/:tableId', async (request, reply) => {
     const query = request.query as Record<string, unknown>;
     const sessionId = String(query.sessionId ?? "");
-    if (replyIfWorldRegistrationRequired(reply, worldService, sessionId)) return;
     const r = gomokuService.getSnapshot(request.params.tableId, sessionId);
     if (!r.ok) {
       return reply.code(404).send({ ok: false, reason: r.reason });

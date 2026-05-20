@@ -1,5 +1,6 @@
 import type { DoudizhuService } from "../services/doudizhu-service.js";
 import type { ToolRegistryLike } from "../host-types.js";
+import { buildDoudizhuTableUrl } from "../config/world-game-url.js";
 import { worldMutationOpts } from "./world-tool-input.js";
 
 /**
@@ -24,7 +25,13 @@ export function registerWorldDoudizhuTools(registry: ToolRegistryLike, doudizhu:
     const stake = Number(input.stake ?? 0);
     const r = doudizhu.createTable(context.sessionId, stake);
     if (!r.ok) throw new Error(r.reason);
-    return { ok: true, table: r.table, message: "已开桌，创建者在座位 1；把 tableId 发给队友加入。" };
+    const watchUrl = buildDoudizhuTableUrl(r.table.tableId);
+    return {
+      ok: true,
+      table: r.table,
+      watchUrl,
+      message: `已开桌，创建者在座位 1。观战链接：${watchUrl}`,
+    };
   });
 
   registry.register("world.doudizhu.join", async (input, context) => {
@@ -47,10 +54,11 @@ export function registerWorldDoudizhuTools(registry: ToolRegistryLike, doudizhu:
     return {
       ok: true,
       table: r.table,
+      watchUrl: buildDoudizhuTableUrl(tableId),
       message:
         role === "player"
           ? "已加入选手席；满三人且世界点数足够则自动开局并扣注。"
-          : "已进入观战席，可 world.doudizhu.get_snapshot 或通过 WebSocket 订阅快照。",
+          : `已进入观战席。观战链接：${buildDoudizhuTableUrl(tableId)}`,
     };
   });
 

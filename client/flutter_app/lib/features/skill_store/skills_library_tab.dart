@@ -108,10 +108,12 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
   List<Map<String, dynamic>> _segmentBase() {
     return _items.where((Map<String, dynamic> e) {
       final String src = e["source"]?.toString() ?? "";
+      final String kind = e["kind"]?.toString() ?? "";
       if (_segment == _segAdded) {
         return src == "community";
       }
-      return src != "community";
+      // "我创建的" 标签页：排除系统内置技能 (builtin)，只显示用户创建的技能
+      return src != "community" && kind != "builtin";
     }).toList();
   }
 
@@ -192,7 +194,7 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
           child: Text(
             _segment == _segAdded
                 ? "从技能商店或世界中获得的技能；点「立即使用」即可在对话中启用。"
-                : "平台内置技能；你通过 Agent 自行创建并上架的技能将在后续版本单独归类展示。",
+                : "你通过 Agent 自行创建并上架的技能；系统内置技能不在此展示。",
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -272,7 +274,7 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
     if (_segment == _segAdded) {
       return "暂无从商店获得的技能。\n可在「技能商店」浏览，并由 Agent 在世界中获取。";
     }
-    return "暂无内置技能；若列表为空，请检查是否已登录主体或联系服务端配置。";
+    return "暂无你创建的技能；可通过 Agent 在世界中创建并上架新技能。";
   }
 }
 

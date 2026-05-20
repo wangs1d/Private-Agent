@@ -11,8 +11,11 @@ import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
 import "core/models/wallet_models.dart";
+import "core/services/schedule_api_client.dart";
+import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/ws_chat_service.dart";
+import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/chat/chat_page.dart";
@@ -44,6 +47,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
+  final ScheduleApiClient _scheduleApi =
+      ScheduleApiClient(baseUrl: ApiConfig.httpBase);
+  final ValueNotifier<int> _scheduleReloadSignal = ValueNotifier<int>(0);
   final TextEditingController _inputController = TextEditingController();
 
   /// `null` 尚未询问；`true` 随消息静默抓拍；`false` 仅文字。
@@ -54,6 +60,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   final List<ChatMessage> _messages = <ChatMessage>[];
   final Map<String, int> _assistantMessageIndexById = <String, int>{};
+  final Map<String, String> _pendingPlayUrlByTraceId = <String, String>{};
   final List<WalletLedgerItem> _ledger = <WalletLedgerItem>[];
   final List<AgentRelayMessage> _relayInbound = <AgentRelayMessage>[];
   double _balance = 1000;
@@ -163,6 +170,42 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       final Map<String, dynamic> payload =
           (event["payload"] as Map?)?.cast<String, dynamic>() ??
               <String, dynamic>{};
+      if (type == "error.event") {
+        if (_isAgentProcessing) {
+          setState(() => _isAgentProcessing = false);
+        }
+        final String message =
+            payload["message"]?.toString() ?? "服务器处理失败";
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(message)),
+          );
+        }
+      }
+      if (type == "tool.result") {
+        final Map<String, dynamic>? result =
+            (payload["result"] as Map?)?.cast<String, dynamic>();
+        final String? playUrl = PlayUrlUtils.fromToolResult(result);
+        if (playUrl != null) {
+          final String? traceId = payload["traceId"]?.toString();
+          if (traceId != null && traceId.isNotEmpty) {
+            _pendingPlayUrlByTraceId[traceId] = playUrl;
+            _attachPlayUrlToAssistantMessage("assistant-$traceId", playUrl);
+          }
+        }
+        final String toolName = payload["toolName"]?.toString() ?? "";
+        final bool toolOk = payload["ok"] == true;
+        if (toolOk && result != null) {
+          final bool synced = await upsertLocalScheduleFromToolResult(
+            _store,
+            toolName,
+            result,
+          );
+          if (synced) {
+            _scheduleReloadSignal.value += 1;
+          }
+        }
+      }
       if (type == "chat.assistant_chunk") {
         // 开始接收流式输出时，标记为处理中
         if (!_isAgentProcessing) {
@@ -171,12 +214,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-chunk";
         final String chunk = payload["chunk"]?.toString() ?? "";
+        final String? playUrl =
+            _playUrlForAssistantMessageId(messageId) ??
+                PlayUrlUtils.fromAssistantText(chunk);
         final ChatMessage assistantChunk = ChatMessage(
           messageId: messageId,
           sessionId: ApiConfig.effectiveActorId,
           role: "assistant",
           text: chunk,
           timestamp: DateTime.now(),
+          playUrl: playUrl,
         );
         setState(() {
           final int? idx = _assistantMessageIndexById[messageId];
@@ -192,6 +239,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               text: "${previous.text}$chunk",
               timestamp: previous.timestamp,
               attachmentImageCount: previous.attachmentImageCount,
+              playUrl: playUrl ?? previous.playUrl,
             );
           }
         });
@@ -204,14 +252,40 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-final";
         final String finalText = payload["finalText"]?.toString() ?? "";
-        final ChatMessage finalMessage = ChatMessage(
-          messageId: messageId,
-          sessionId: ApiConfig.effectiveActorId,
-          role: "assistant",
-          text: finalText,
-          timestamp: DateTime.now(),
-        );
-        await _store.saveMessage(finalMessage);
+        final String? traceKey = messageId.startsWith("assistant-")
+            ? messageId.substring("assistant-".length)
+            : null;
+        final String? playUrl =
+            (traceKey != null ? _pendingPlayUrlByTraceId.remove(traceKey) : null) ??
+                _playUrlForAssistantMessageId(messageId) ??
+                PlayUrlUtils.fromAssistantText(finalText);
+        final int? idx = _assistantMessageIndexById[messageId];
+        if (idx != null) {
+          setState(() {
+            final ChatMessage previous = _messages[idx];
+            _messages[idx] = ChatMessage(
+              messageId: previous.messageId,
+              sessionId: previous.sessionId,
+              role: previous.role,
+              text: finalText.isNotEmpty ? finalText : previous.text,
+              timestamp: previous.timestamp,
+              attachmentImageCount: previous.attachmentImageCount,
+              playUrl: playUrl ?? previous.playUrl,
+            );
+          });
+          await _store.saveMessage(_messages[idx]);
+        } else {
+          final ChatMessage finalMessage = ChatMessage(
+            messageId: messageId,
+            sessionId: ApiConfig.effectiveActorId,
+            role: "assistant",
+            text: finalText,
+            timestamp: DateTime.now(),
+            playUrl: playUrl,
+          );
+          await _store.saveMessage(finalMessage);
+        }
+        return;
       }
       if (type == "agent.peer_message") {
         final String messageId =
@@ -303,6 +377,37 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     });
   }
 
+  String? _playUrlForAssistantMessageId(String messageId) {
+    final String? traceKey = messageId.startsWith("assistant-")
+        ? messageId.substring("assistant-".length)
+        : null;
+    if (traceKey != null) {
+      final String? pending = _pendingPlayUrlByTraceId[traceKey];
+      if (pending != null) return pending;
+    }
+    final int? idx = _assistantMessageIndexById[messageId];
+    if (idx == null) return null;
+    return _messages[idx].playUrl;
+  }
+
+  void _attachPlayUrlToAssistantMessage(String messageId, String playUrl) {
+    final int? idx = _assistantMessageIndexById[messageId];
+    if (idx == null) return;
+    final ChatMessage previous = _messages[idx];
+    if (previous.playUrl == playUrl) return;
+    setState(() {
+      _messages[idx] = ChatMessage(
+        messageId: previous.messageId,
+        sessionId: previous.sessionId,
+        role: previous.role,
+        text: previous.text,
+        timestamp: previous.timestamp,
+        attachmentImageCount: previous.attachmentImageCount,
+        playUrl: playUrl,
+      );
+    });
+  }
+
   /// 首次在「无相册附件」的发送路径上询问一次；结果写入本地，之后不再弹窗。
   Future<void> _promptVisionConsentIfNeeded() async {
     if (_visionCameraConsent != null) {
@@ -386,6 +491,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _messages.add(userMessage);
       _inputController.clear();
+      _isAgentProcessing = true;
     });
     await _store.saveMessage(userMessage);
     final Map<String, dynamic> userMsg = <String, dynamic>{
@@ -426,6 +532,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       return;
     }
     setState(() => _tabIndex = index);
+    if (index == 2) {
+      _scheduleReloadSignal.value += 1;
+    }
   }
 
   /// 打开 Agent World 网页
@@ -996,7 +1105,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               },
             ),
             MailboxPage(api: _worldApi),
-            SchedulePage(store: _store),
+            SchedulePage(
+              store: _store,
+              scheduleApi: _scheduleApi,
+              sessionId: ApiConfig.effectiveActorId,
+              reloadListenable: _scheduleReloadSignal,
+            ),
             WalletPage(
               balance: _balance,
             ),

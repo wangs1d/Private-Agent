@@ -1,6 +1,6 @@
 # 五子棋对战技能
 
-我可以和你玩五子棋游戏（Gomoku）。当你想玩游戏时，我会创建游戏桌并邀请你加入。
+我可以和你玩五子棋游戏（Gomoku）。当你想玩游戏时，我会创建游戏桌并把**完整网页链接**发给你。
 
 ## 游戏规则
 
@@ -18,73 +18,45 @@
 
 ## 工具调用流程
 
-### 1. 创建游戏桌
+### 1. 创建游戏桌（无需 Agent World 注册）
 ```typescript
 world.gomoku.create_table()
 ```
 - 创建者默认执黑棋（先手）
-- 返回 tableId 用于后续操作
+- 返回 `playUrl`：用户打开此链接即可加入对局（执白）
 
-### 2. 等待对手加入
-用户需要加入游戏（作为白棋玩家）：
-```typescript
-world.gomoku.join({ tableId: "...", role: "player" })
-```
-- 两人到齐后自动开始游戏
+### 2. 用户加入
+用户点击 Agent 发来的 `playUrl`，网页会自动以白棋加入；**不要**只给用户 tableId 或工具调用说明。
 
 ### 3. 轮流落子
 当前回合的玩家执行落子：
 ```typescript
 world.gomoku.play({ tableId: "...", row: 7, col: 7 })
 ```
-- 验证是否是当前玩家的回合
-- 验证落子位置是否有效
-- 检查是否获胜
 
 ### 4. 获取游戏状态
-随时可以查看当前棋盘状态：
 ```typescript
 world.gomoku.get_snapshot({ tableId: "..." })
 ```
-
-### 5. 离开游戏
-```typescript
-world.gomoku.leave({ tableId: "..." })
-```
-- 游戏中途离开会结束对局
 
 ## 示例对话
 
 **用户**：我们来下五子棋吧
 
-**Agent**：好的！我来创建一个五子棋游戏桌。
+**Agent**：好的！我来开一桌，我执黑先行。
 
 *(调用 world.gomoku.create_table)*
 
-**Agent**：游戏桌已创建！我执黑棋先行。请点击这个链接加入游戏：`#/game/gomoku/{tableId}`
+**Agent**：请点击链接加入对局（你执白）：`http://127.0.0.1:3000/#/gomoku/gomoku_abc123`
 
-**用户**：*点击链接加入*
+**用户**：*点击链接*
 
-*(用户调用 world.gomoku.join)*
+**Agent**：游戏开始，我先落子…
 
-**Agent**：太好了！你执白棋。游戏现在开始，我先落子...
-
-*(Agent 思考后调用 world.gomoku.play)*
-
-**Agent**：我在 (7, 7) 落子。轮到你了，请选择你的落子位置。
+*(Agent 调用 world.gomoku.play)*
 
 ## 注意事项
 
-- 每次只能在一个游戏桌中进行游戏
-- 落子前请确认是你的回合
+- 五子棋**不需要** Agent World 注册
+- 必须把工具返回的 **playUrl 完整链接**发给用户
 - 坐标范围是 0-14，不要超出边界
-- 游戏结束后可以重新开始新的一局
-
-## WebSocket 订阅
-
-如果需要实时接收游戏状态更新，可以订阅：
-```typescript
-world.gomoku.subscribe_table({ tableId: "..." })
-```
-
-这将通过 WebSocket 推送 `world.gomoku.snapshot` 事件。

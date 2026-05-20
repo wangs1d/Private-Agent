@@ -1,4 +1,5 @@
 import "package:flutter/material.dart";
+import "package:url_launcher/url_launcher.dart";
 
 import "../../core/models/chat_models.dart";
 import "../../core/vision/vision_user_limits.dart";
@@ -41,6 +42,7 @@ class _ChatPageState extends State<ChatPage> {
   final SpeechService _speechService = SpeechService();
   bool _isListening = false;
   String _recognizedText = "";
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -50,8 +52,26 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   @override
+  void didUpdateWidget(covariant ChatPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 当消息列表长度变化时，自动滚动到底部
+    if (widget.messages.length != oldWidget.messages.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _speechService.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -82,6 +102,52 @@ class _ChatPageState extends State<ChatPage> {
         });
       },
     );
+  }
+
+  /// 将消息分组：用户消息 + 其后的流程提示消息
+  List<Map<String, dynamic>> _getGroupedMessages() {
+    final List<Map<String, dynamic>> groups = [];
+    int i = 0;
+    
+    while (i < widget.messages.length) {
+      final currentMessage = widget.messages[i];
+      
+      // 如果是用户消息
+      if (currentMessage.role == "user") {
+        ChatMessage? progressMsg;
+        
+        // 查找下一条消息是否是流程提示
+        if (i + 1 < widget.messages.length) {
+          final nextMessage = widget.messages[i + 1];
+          if (nextMessage.role != "user" && nextMessage.text.isNotEmpty) {
+            if (nextMessage.text.contains("正在") || 
+                nextMessage.text.contains("创建") || 
+                nextMessage.text.contains("处理") ||
+                nextMessage.text.contains("思考")) {
+              progressMsg = nextMessage;
+              i++; // 跳过这条流程消息
+            }
+          }
+        }
+        
+        groups.add({
+          'isUser': true,
+          'main': currentMessage,
+          'progress': progressMsg,
+        });
+      } else {
+        // 非用户消息（且不包含进度关键词），直接添加
+        groups.add({
+          'isUser': false,
+          'main': currentMessage,
+          'progress': null,
+        });
+      }
+      
+      i++;
+    }
+    
+    return groups;
   }
 
   @override
@@ -129,61 +195,112 @@ class _ChatPageState extends State<ChatPage> {
             ),
           Expanded(
             child: ListView.builder(
+              controller: _scrollController,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              itemCount: widget.messages.length,
+              itemCount: _getGroupedMessages().length,
               itemBuilder: (BuildContext context, int index) {
-                final ChatMessage message = widget.messages[index];
-                final bool isUser = message.role == "user";
+                final messageGroup = _getGroupedMessages()[index];
+                final bool isUser = messageGroup['isUser'] as bool;
+                final mainMessage = messageGroup['main'] as ChatMessage;
+                final progressMessage = messageGroup['progress'] as ChatMessage?;
+                
                 return Align(
                   alignment:
                       isUser ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Card(
-                    color: isUser
-                        ? cs.surfaceContainerHigh
-                        : cs.surfaceContainer,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(
-                        color: cs.outline.withOpacity(0.28),
-                      ),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          if (message.attachmentImageCount > 0)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 6),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: <Widget>[
-                                  Icon(
-                                    Icons.photo_camera_outlined,
-                                    size: 16,
-                                    color: Theme.of(context).colorScheme.primary,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    "配图 ×${message.attachmentImageCount}",
-                                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                          color: Theme.of(context).colorScheme.primary,
-                                        ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          Text(
-                            message.text,
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                  color: cs.onSurface,
-                                ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: 
+                        isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                    children: [
+                      Card(
+                        color: isUser
+                            ? cs.surfaceContainerHigh
+                            : cs.surfaceContainer,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(
+                            color: cs.outline.withOpacity(0.28),
                           ),
-                        ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              if (mainMessage.attachmentImageCount > 0)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 6),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: <Widget>[
+                                      Icon(
+                                        Icons.photo_camera_outlined,
+                                        size: 16,
+                                        color: Theme.of(context).colorScheme.primary,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        "配图 ×${mainMessage.attachmentImageCount}",
+                                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                              color: Theme.of(context).colorScheme.primary,
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              Text(
+                                mainMessage.text,
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      color: cs.onSurface,
+                                    ),
+                              ),
+                              if (!isUser && mainMessage.playUrl != null && mainMessage.playUrl!.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 10),
+                                  child: _GomokuPlayUrlCard(playUrl: mainMessage.playUrl!),
+                                ),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
+                      // 如果是用户消息，且有后续的流程提示，显示在下方左侧
+                      if (isUser && progressMessage != null)
+                        Container(
+                          margin: const EdgeInsets.only(top: 4, left: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: cs.primaryContainer.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: cs.primary.withOpacity(0.5),
+                              width: 1,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              SizedBox(
+                                width: 10,
+                                height: 10,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                  valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                progressMessage.text,
+                                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                      color: cs.primary,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
                   ),
                 );
               },
@@ -377,6 +494,68 @@ class _ChatPageState extends State<ChatPage> {
                 ),
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GomokuPlayUrlCard extends StatelessWidget {
+  const _GomokuPlayUrlCard({required this.playUrl});
+
+  final String playUrl;
+
+  Future<void> _open(BuildContext context) async {
+    final Uri uri = Uri.parse(playUrl);
+    final bool ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("无法打开对局链接：$playUrl")),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.primary.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.grid_on, size: 18, color: cs.primary),
+              const SizedBox(width: 6),
+              Text(
+                "五子棋对局",
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SelectableText(
+            playUrl,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFamily: "monospace",
+                  color: cs.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            onPressed: () => _open(context),
+            icon: const Icon(Icons.open_in_new, size: 18),
+            label: const Text("进入对局"),
           ),
         ],
       ),

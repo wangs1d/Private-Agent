@@ -73,10 +73,10 @@ class ApiConfig {
   );
 
   /// Agent World 网页地址（可用 `--dart-define=AGENT_WORLD_URL=` 覆盖）。
-  /// 默认指向 agent-world standalone 服务（端口 3333）
+  /// 默认与 [httpBase] 同源（主服务已挂载 Agent World 观战/五子棋 UI）。
   static const String agentWorldUrl = String.fromEnvironment(
     "AGENT_WORLD_URL",
-    defaultValue: "http://127.0.0.1:3333",
+    defaultValue: "http://127.0.0.1:3000",
   );
 
   /// Agent Link 社交网页地址（可用 `--dart-define=AGENT_LINK_URL=` 覆盖）。

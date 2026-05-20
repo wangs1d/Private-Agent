@@ -336,7 +336,6 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
       }
 
       if (event.type === AgentWorldClientEventType.WorldGomokuSubscribe) {
-        if (!ensureWorldRegistered()) return;
         const parsed = worldGomokuWsTableSchema.safeParse(event.payload);
         if (!parsed.success) {
           socket.send(
@@ -360,19 +359,16 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
       }
 
       if (event.type === AgentWorldClientEventType.WorldGomokuSubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
         gomokuService.watchLobby(boundSessionId);
         return;
       }
 
       if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
         gomokuService.unwatchLobby(boundSessionId);
         return;
       }
 
       if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribe) {
-        if (!ensureWorldRegistered()) return;
         const parsed = worldGomokuWsTableSchema.safeParse(event.payload);
         if (!parsed.success) {
           socket.send(

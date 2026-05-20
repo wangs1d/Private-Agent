@@ -25,11 +25,13 @@ import {
   canViewWorldPartition,
   resolveUnifiedMemoryActorId,
   type DoudizhuService,
+  type GomokuService,
   type SocialFeedService,
   type WorldPartitionWsRegistry,
   type WorldService,
   type ZhaJinHuaService,
   worldDoudizhuWsTableSchema,
+  worldGomokuWsTableSchema,
   worldPartitionAttachSchema,
   worldPartitionDetachSchema,
   worldSocialCommentPayloadSchema,
@@ -67,6 +69,7 @@ export type WsRouteDeps = {
   agentCore: AgentCore;
   doudizhuService: DoudizhuService;
   zhaJinHuaService: ZhaJinHuaService;
+  gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
@@ -87,6 +90,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     agentCore,
     doudizhuService,
     zhaJinHuaService,
+    gomokuService,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -371,105 +375,125 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             text: effectiveText,
           });
           let chunkSeq = 0;
-          const reply = await agentCore.handleUserMessage(msgActor, effectiveText, {
-            chatUserMessageId: data.messageId,
-            userId: data.userId,
-            ...(visionFrames?.length ? { visionFrames } : {}),
-            onAssistantDelta: (delta) => {
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ChatAssistantChunk,
-                  payload: {
-                    sessionId: msgActor,
-                    messageId: `assistant-${data.messageId}`,
-                    chunk: delta,
-                    sequence: chunkSeq++,
-                  },
-                }),
-              );
-            },
-            onExternalToolExecuted: (info) => {
+          const assistantMessageId = `assistant-${data.messageId}`;
+          const sendAssistantChunk = (chunk: string): void => {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ChatAssistantChunk,
+                payload: {
+                  sessionId: msgActor,
+                  messageId: assistantMessageId,
+                  chunk,
+                  sequence: chunkSeq++,
+                },
+              }),
+            );
+          };
+          try {
+            const reply = await agentCore.handleUserMessage(msgActor, effectiveText, {
+              chatUserMessageId: data.messageId,
+              userId: data.userId,
+              ...(visionFrames?.length ? { visionFrames } : {}),
+              onAssistantDelta: (delta) => {
+                sendAssistantChunk(delta);
+              },
+              onExternalToolExecuted: (info) => {
+                socket.send(
+                  JSON.stringify({
+                    type: ServerEventType.ToolCall,
+                    payload: {
+                      toolName: info.toolName,
+                      input: info.input,
+                      traceId: data.messageId,
+                    },
+                  }),
+                );
+                socket.send(
+                  JSON.stringify({
+                    type: ServerEventType.ToolResult,
+                    payload: {
+                      toolName: info.toolName,
+                      ok: info.ok,
+                      result: info.result,
+                      traceId: data.messageId,
+                    },
+                  }),
+                );
+              },
+            });
+            if (!reply.streamedChunks) {
+              const chunks = chunkText(reply.text, 12);
+              chunks.forEach((chunk) => {
+                sendAssistantChunk(chunk);
+              });
+            }
+
+            if (reply.toolName && reply.toolInput) {
               socket.send(
                 JSON.stringify({
                   type: ServerEventType.ToolCall,
                   payload: {
-                    toolName: info.toolName,
-                    input: info.input,
+                    toolName: reply.toolName,
+                    input: reply.toolInput,
                     traceId: data.messageId,
                   },
                 }),
               );
+              const startedAt = Date.now();
+              const toolResult = await agentCore.runToolIfNeeded(msgActor, reply, {
+                chatUserMessageId: data.messageId,
+                userId: data.userId,
+              });
               socket.send(
                 JSON.stringify({
                   type: ServerEventType.ToolResult,
                   payload: {
-                    toolName: info.toolName,
-                    ok: info.ok,
-                    result: info.result,
+                    toolName: reply.toolName,
+                    ok: toolResult.ok,
+                    result: toolResult.result ?? {},
                     traceId: data.messageId,
+                    durationMs: Date.now() - startedAt,
                   },
                 }),
               );
-            },
-          });
-          if (!reply.streamedChunks) {
-            const chunks = chunkText(reply.text, 12);
-            chunks.forEach((chunk, index) => {
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ChatAssistantChunk,
-                  payload: {
-                    sessionId: msgActor,
-                    messageId: `assistant-${data.messageId}`,
-                    chunk,
-                    sequence: index,
-                  },
-                }),
-              );
-            });
-          }
+            }
 
-          if (reply.toolName && reply.toolInput) {
+            const finalText =
+              reply.text.trim() ||
+              (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
+            if (!reply.text.trim() && chunkSeq === 0) {
+              sendAssistantChunk(finalText);
+            }
+
             socket.send(
               JSON.stringify({
-                type: ServerEventType.ToolCall,
+                type: ServerEventType.ChatAssistantDone,
                 payload: {
-                  toolName: reply.toolName,
-                  input: reply.toolInput,
-                  traceId: data.messageId,
+                  sessionId: msgActor,
+                  messageId: assistantMessageId,
+                  finalText,
+                  toolCalls: reply.toolName ? [reply.toolName] : [],
                 },
               }),
             );
-            const startedAt = Date.now();
-            const toolResult = await agentCore.runToolIfNeeded(msgActor, reply, {
-              chatUserMessageId: data.messageId,
-              userId: data.userId,
-            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[WS] chat.user_message failed:", err);
+            sendUnifiedError("CHAT_HANDLER_ERROR", msg, data.messageId);
+            const errText = `处理消息时出错：${msg}`;
+            sendAssistantChunk(errText);
             socket.send(
               JSON.stringify({
-                type: ServerEventType.ToolResult,
+                type: ServerEventType.ChatAssistantDone,
                 payload: {
-                  toolName: reply.toolName,
-                  ok: toolResult.ok,
-                  result: toolResult.result ?? {},
-                  traceId: data.messageId,
-                  durationMs: Date.now() - startedAt,
+                  sessionId: msgActor,
+                  messageId: assistantMessageId,
+                  finalText: errText,
+                  toolCalls: [],
                 },
               }),
             );
           }
-
-          socket.send(
-            JSON.stringify({
-              type: ServerEventType.ChatAssistantDone,
-              payload: {
-                sessionId: msgActor,
-                messageId: `assistant-${data.messageId}`,
-                finalText: reply.text,
-                toolCalls: reply.toolName ? [reply.toolName] : [],
-              },
-            }),
-          );
           return;
         }
 
@@ -852,6 +876,90 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           zhaJinHuaService.unwatchTable(zjhU.data.tableId, boundActorId);
+          return;
+        }
+
+        if (event.type === AgentWorldClientEventType.WorldGomokuSubscribe) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          const gomokuParsed = worldGomokuWsTableSchema.safeParse(event.payload);
+          if (!gomokuParsed.success) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "INVALID_GOMOKU_EVENT", message: gomokuParsed.error.message },
+              }),
+            );
+            return;
+          }
+          const gomokuR = gomokuService.watchTable(gomokuParsed.data.tableId, boundActorId);
+          if (!gomokuR.ok) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "GOMOKU_SUBSCRIBE_FAILED", message: gomokuR.reason },
+              }),
+            );
+          }
+          return;
+        }
+
+        if (event.type === AgentWorldClientEventType.WorldGomokuSubscribeLobby) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          gomokuService.watchLobby(boundActorId);
+          return;
+        }
+
+        if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribeLobby) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          gomokuService.unwatchLobby(boundActorId);
+          return;
+        }
+
+        if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribe) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          const gomokuUnsub = worldGomokuWsTableSchema.safeParse(event.payload);
+          if (!gomokuUnsub.success) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "INVALID_GOMOKU_EVENT", message: gomokuUnsub.error.message },
+              }),
+            );
+            return;
+          }
+          gomokuService.unwatchTable(gomokuUnsub.data.tableId, boundActorId);
           return;
         }
 

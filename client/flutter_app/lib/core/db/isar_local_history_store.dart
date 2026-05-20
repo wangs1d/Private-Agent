@@ -87,6 +87,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           text: map["text"] as String,
           timestamp: DateTime.parse(map["timestamp"] as String),
           attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
+          playUrl: map["playUrl"] as String?,
         );
       }).toList();
     }
@@ -312,6 +313,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           text: enc,
           timestamp: m.timestamp,
           attachmentImageCount: m.attachmentImageCount,
+          playUrl: m.playUrl,
         );
       }
     }
@@ -342,6 +344,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             text: _decryptFor(message.text, _userPin),
             timestamp: message.timestamp,
             attachmentImageCount: message.attachmentImageCount,
+            playUrl: message.playUrl,
           ),
         )
         .toList();
@@ -366,6 +369,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       text: encrypted,
       timestamp: message.timestamp,
       attachmentImageCount: message.attachmentImageCount,
+      playUrl: message.playUrl,
     );
     _messages.putIfAbsent(masked.sessionId, () => <ChatMessage>[]).add(masked);
     await _flush();
@@ -430,6 +434,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   "text": m.text,
                   "timestamp": m.timestamp.toIso8601String(),
                   "attachmentImageCount": m.attachmentImageCount,
+                  if (m.playUrl != null) "playUrl": m.playUrl,
                 },
               )
               .toList(),

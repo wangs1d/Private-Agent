@@ -6,9 +6,14 @@ import { resolveActorId } from "../agent/actor-id.js";
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
 import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
+import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
-function buildCreateInput(draft: ScheduleDraft, sessionId: string, timezone: string): CreateScheduleTaskInput {
+export function buildScheduleCreateInput(
+  draft: ScheduleDraft,
+  sessionId: string,
+  timezone: string,
+): CreateScheduleTaskInput {
   const tz = timezone.trim() || "Asia/Shanghai";
   if (draft.kind === "reminder") {
     return {
@@ -58,16 +63,14 @@ export function registerCalendarTools(
     if (!text) return { ok: false, error: "text 不能为空" };
     const sessionId = resolveActorId(context);
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
-    const draft = await scheduleIntentService.parse(sessionId, text);
-    if (!draft) {
-      return {
-        ok: true,
-        matched: false,
-        hint: "未能解析为日程。请包含具体时间（如明天 9:00、每天 7 点、7:30）与事项；天气简报请含「天气」等词。",
-      };
+    const parsed = await scheduleIntentService.parseForCreate(sessionId, text);
+    const guarded = toolResultFromScheduleParse(parsed);
+    if (!guarded.proceed) {
+      return guarded.result;
     }
+    const draft = guarded.draft;
     try {
-      const payload = buildCreateInput(draft, sessionId, tz);
+      const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
       return {
         ok: true,

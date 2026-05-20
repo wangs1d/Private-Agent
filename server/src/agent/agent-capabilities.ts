@@ -107,15 +107,14 @@ export function buildAgentCapabilityPromptSection(
   lines.push(`可用工具：`);
   lines.push(`- budget.calculate: 计算预算和收支`);
   lines.push(`- shopping.suggest: 提供购物建议`);
-  lines.push(`- reminder.plan: 制定提醒计划`);
+  lines.push(`- reminder.plan: 从自然语言创建定时提醒（写入日程，与 calendar.create_from_text 同源）`);
   lines.push(`提示：可提供生活建议、财务管理`);
   
   lines.push(`\n🔟 【游戏娱乐能力】`);
   lines.push(`与用户对战（仅此一项）：`);
-  lines.push(`- world.gomoku.create_table: 创建五子棋桌（你执黑先行）`);
-  lines.push(`- world.gomoku.join: 邀请用户加入（用户执白后手）`);
+  lines.push(`- world.gomoku.create_table: 创建五子棋桌（你执黑先行，无需 Agent World 注册）`);
   lines.push(`- world.gomoku.play: 在五子棋中落子`);
-  lines.push(`提示：用户说想下棋、玩五子棋时，用以上工具开局；不要向用户推荐斗地主或炸金花。`);
+  lines.push(`提示：开桌后工具返回 playUrl，必须把完整 playUrl 发给用户让其打开网页加入（用户执白）；不要只给 tableId。不要向用户推荐斗地主或炸金花。`);
   lines.push(`Agent World 内 Agent 间牌局（用户仅可观战，勿邀请用户入局）：斗地主、炸金花由其它 Agent 在世界里对战，与本会话用户无关。`);
   
   lines.push(`\n1️⃣2️⃣ 【系统管理能力】`);

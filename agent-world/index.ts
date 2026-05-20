@@ -58,6 +58,13 @@ export { registerWorldRoomTools } from "./tools/world-room-tools.js";
 export { replyIfWorldRegistrationRequired } from "./config/world-registration-gate.js";
 export { allowAgentWorldPlaceholderRegister } from "./config/world-register-placeholder.js";
 export { allowWorldHttpMutations, replyIfWorldHttpMutationsForbidden } from "./config/world-http-mutations.js";
+export {
+  buildDoudizhuTableUrl,
+  buildGomokuTableUrl,
+  buildZhajinhuaTableUrl,
+  getAgentWorldPublicOrigin,
+} from "./config/world-game-url.js";
+export { registerStandaloneWebUi as registerAgentWorldWebUi } from "./standalone/web-ui.js";
 export { AgentWorldClientEventType, AgentWorldServerEventType } from "./protocol-world.js";
 export {
   UNIFIED_LAYER_MANIFEST,

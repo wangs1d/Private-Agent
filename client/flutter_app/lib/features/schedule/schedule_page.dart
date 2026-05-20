@@ -1,10 +1,14 @@
+import "dart:async";
 import "dart:math" show max, min;
 import "dart:ui" as ui;
 
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
 import "../../core/db/isar_local_history_store.dart";
 import "../../core/models/schedule_models.dart";
+import "../../core/services/schedule_api_client.dart";
+import "../../core/services/schedule_reminder_sync.dart";
 import "../../core/theme/app_theme.dart";
 
 /// 日程：本地持久化事项（日历周视图 + 事项管理）。
@@ -12,9 +16,15 @@ class SchedulePage extends StatefulWidget {
   const SchedulePage({
     super.key,
     required this.store,
+    this.scheduleApi,
+    this.sessionId,
+    this.reloadListenable,
   });
 
   final IsarLocalHistoryStore store;
+  final ScheduleApiClient? scheduleApi;
+  final String? sessionId;
+  final ValueListenable<int>? reloadListenable;
 
   @override
   State<SchedulePage> createState() => _SchedulePageState();
@@ -64,7 +74,18 @@ class _SchedulePageState extends State<SchedulePage> {
   void initState() {
     super.initState();
     _focusedDay = _focusDayForWeek(_weekStart);
-    _reloadAll();
+    widget.reloadListenable?.addListener(_onExternalReload);
+    unawaited(_reloadAll());
+  }
+
+  @override
+  void dispose() {
+    widget.reloadListenable?.removeListener(_onExternalReload);
+    super.dispose();
+  }
+
+  void _onExternalReload() {
+    unawaited(_reloadAll());
   }
 
   DateTime _focusDayForWeek(DateTime monday) {
@@ -77,6 +98,15 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Future<void> _reloadAll() async {
+    final ScheduleApiClient? api = widget.scheduleApi;
+    final String? sessionId = widget.sessionId?.trim();
+    if (api != null && sessionId != null && sessionId.isNotEmpty) {
+      try {
+        await syncServerRemindersToLocal(widget.store, api, sessionId);
+      } catch (_) {
+        // 离线或主服务不可用时仍展示本地已缓存事项。
+      }
+    }
     final DateTime wEnd = _weekStart.add(const Duration(days: 7));
     final List<ScheduleEvent> weekList =
         await widget.store.listScheduleEventsInRange(_weekStart, wEnd);

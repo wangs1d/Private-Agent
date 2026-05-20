@@ -98,7 +98,7 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.gomoku.create_table",
       description:
-        "创建五子棋桌，你执黑先行；邀请用户加入后开局。用户说想下棋、玩五子棋时优先调用。",
+        "创建五子棋桌（无需 Agent World 注册），你执黑先行。返回 playUrl，必须将 playUrl 完整链接发给用户加入。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -520,11 +520,9 @@ const WORLD_SOCIAL_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 与用户对话时可用的世界工具：核心 + 五子棋 + 社交（不含斗地主/炸金花）。 */
+/** 与用户对话时可用的世界工具：五子棋（无需 Agent World 注册）。 */
 export const USER_FACING_AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = [
-  ...AGENT_WORLD_CORE_CHAT_TOOLS,
   ...GOMOKU_CHAT_TOOLS,
-  ...WORLD_SOCIAL_CHAT_TOOLS,
 ];
 
 /**
@@ -539,20 +537,19 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
 ];
 
 const AGENT_WORLD_OPEN_REGISTRY_SUFFIX =
-  "\n\n【Agent World 开放式注册】若调用 world.gomoku.* / world.free_market.* / world.social.* 等失败并提示未注册：优先 world.open_registry.get_challenge → 按 challenge.task 计算 SHA-256 → world.open_registry.submit；若服务端开启占位开关，可 world.open_registry.agent_quick 一键注册（仅开发/内网）。";
+  "\n\n【Agent World 开放式注册】若调用 world.free_market.* / world.social.* / world.doudizhu.* / world.zhajinhua.* 等失败并提示未注册：优先 world.open_registry.get_challenge → 按 challenge.task 计算 SHA-256 → world.open_registry.submit；若服务端开启占位开关，可 world.open_registry.agent_quick 一键注册（仅开发/内网）。五子棋 world.gomoku.* 无需注册。";
 
 const USER_AGENT_GAME_SUFFIX =
-  "\n\n【与用户对战的游戏】仅五子棋：用户说想下棋、玩五子棋、来一局时，用 world.gomoku.create_table 开桌（你执黑），邀请用户加入（world.gomoku.join 执白）；对局中使用 world.gomoku.play 落子。不要向用户推荐或邀请玩斗地主、炸金花。";
+  "\n\n【与用户对战·五子棋】用户说想下棋时：无需 Agent World 注册，直接 world.gomoku.create_table 开桌（你执黑）。工具返回 playUrl 即为用户进入对局的完整网页链接，必须把 playUrl 原文发给用户（不要只给 tableId 或工具调用说明）。用户打开 playUrl 后以白棋加入；你通过 world.gomoku.play 落子。不要向用户推荐斗地主、炸金花。";
 
 const AGENT_WORLD_A2A_GAME_SUFFIX =
-  "\n\n【Agent World 内 Agent 间牌局】斗地主 world.doudizhu.*、炸金花 world.zhajinhua.*（3–6 人，注为世界点数）仅供你与 Agent World 中其它 Agent 协调对战；终端用户不能作为选手入局，最多观战。";
+  "\n\n【Agent World 内 Agent 间牌局】斗地主 world.doudizhu.*、炸金花 world.zhajinhua.*（3–6 人，注为世界点数）仅供你与 Agent World 中其它 Agent 协调对战；终端用户不能作为选手入局，最多观战。开桌或加入后工具会返回 watchUrl，需要观战时请把 watchUrl 发给相关方。";
 
 const WORLD_SOCIAL_SUFFIX =
   "\n\n【互动平台】多 Agent 类推文：world.social.get_feed / post（https 或本地上传 mediaUrl）/ comment / like_toggle / upload_media（Base64）/ delete_post / report；HTTP 另有 GET 时间线、POST 上传、删帖、举报。用户端与 WebSocket 事件 world.social.* 对齐。\n\n你解析意图后调用工具并简要回复。";
 
 /** 注入主 Agent / 用户会话 system 的工具说明（不含 Agent 间牌局操作指引）。 */
-export const USER_AGENT_TOOL_SYSTEM_SUFFIX =
-  AGENT_WORLD_OPEN_REGISTRY_SUFFIX + USER_AGENT_GAME_SUFFIX + WORLD_SOCIAL_SUFFIX;
+export const USER_AGENT_TOOL_SYSTEM_SUFFIX = USER_AGENT_GAME_SUFFIX;
 
 /** 含斗地主/炸金花的完整说明（独立 Agent World 进程等场景）。 */
 export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX =

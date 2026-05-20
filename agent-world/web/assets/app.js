@@ -1120,8 +1120,17 @@ async function renderGomokuTable(tableId) {
   const httpOnce = await apiGet(
     `/world/gomoku/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
   );
-  if (httpOnce.ok && httpOnce.json?.ok && !snap) {
+  if (httpOnce.ok && httpOnce.json?.ok) {
     snap = httpOnce.json.snapshot;
+    if (snap?.role === "guest" && snap?.status === "waiting") {
+      const joinRes = await apiPost("/world/gomoku/join", { sessionId: sid, tableId, role: "player" });
+      if (joinRes.ok && joinRes.json?.ok) {
+        const again = await apiGet(
+          `/world/gomoku/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
+        );
+        if (again.ok && again.json?.ok) snap = again.json.snapshot;
+      }
+    }
     renderSnap();
   } else if (!snap) {
     el.innerHTML = friendlyError('牌桌快照获取失败');

@@ -1,6 +1,21 @@
+import { resolveActorId } from "../agent/actor-id.js";
+import {
+  inferRecurrenceFromUserText,
+  type ScheduleIntentService,
+} from "../services/schedule-intent-service.js";
+import type {
+  ScheduleRecurrence,
+  ScheduleTaskService,
+} from "../services/schedule-task-service.js";
+import { buildScheduleCreateInput } from "./calendar-tools.js";
+import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
-export function registerLifeTools(registry: ToolRegistry): void {
+export function registerLifeTools(
+  registry: ToolRegistry,
+  scheduleTaskService: ScheduleTaskService,
+  scheduleIntentService: ScheduleIntentService,
+): void {
   registry.register("budget.calculate", async (input) => {
     const income = Number(input.income ?? 0);
     const rent = Number(input.rent ?? 0);
@@ -25,14 +40,92 @@ export function registerLifeTools(registry: ToolRegistry): void {
     };
   });
 
-  registry.register("reminder.plan", async (input) => {
-    const subject = String(input.subject ?? "事项");
-    const date = String(input.date ?? "今日");
-    return {
-      summary: "提醒计划已生成",
-      subject,
-      date,
-      checklist: ["创建提醒", "提前1小时通知", "完成后归档"],
-    };
+  registry.register("reminder.plan", async (input, context) => {
+    const sessionId = resolveActorId(context);
+    const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    const text = String(input.text ?? "").trim();
+    const subject = String(input.subject ?? "").trim();
+    const date = String(input.date ?? "").trim();
+    const parseSource = text || [date, subject].filter(Boolean).join(" ").trim();
+
+    if (!parseSource) {
+      const runAt = String(input.runAt ?? "").trim();
+      const reminderMessage = String(input.reminderMessage ?? subject).trim() || "到点提醒";
+      if (!runAt || !subject) {
+        return {
+          ok: false,
+          error: "请提供 text（自然语言，含时间与事项），或同时提供 subject 与 date/runAt",
+        };
+      }
+      const runAtDate = new Date(runAt);
+      if (Number.isNaN(runAtDate.getTime())) {
+        return { ok: false, error: "runAt 须为有效 ISO-8601 时间" };
+      }
+      const recurrenceRaw = String(input.recurrence ?? "none").trim();
+      let recurrence: ScheduleRecurrence =
+        recurrenceRaw === "daily" || recurrenceRaw === "weekly" ? recurrenceRaw : "none";
+      const textForRecurrence = String(input.text ?? "").trim();
+      if (textForRecurrence) {
+        recurrence = inferRecurrenceFromUserText(textForRecurrence);
+      }
+      try {
+        const task = await scheduleTaskService.createTask({
+          sessionId,
+          title: subject,
+          description: subject,
+          kind: "reminder",
+          runAt: runAtDate.toISOString(),
+          recurrence,
+          timezone: tz,
+          reminderMessage,
+        });
+        return {
+          ok: true,
+          matched: true,
+          summary: "提醒已写入日程",
+          taskId: task.taskId,
+          title: task.title,
+          kind: task.kind,
+          nextRunAt: task.nextRunAt,
+          recurrence: task.recurrence,
+          reminderMessage,
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: msg };
+      }
+    }
+
+    const parsed = await scheduleIntentService.parseForCreate(sessionId, parseSource);
+    const guarded = toolResultFromScheduleParse(parsed);
+    if (!guarded.proceed) {
+      return guarded.result;
+    }
+    const draft = guarded.draft;
+    if (draft.kind !== "reminder") {
+      return {
+        ok: true,
+        matched: false,
+        hint: `解析为 ${draft.kind} 任务；若只需提醒请改用更明确的提醒表述，或使用 calendar.create_from_text。`,
+      };
+    }
+    try {
+      const payload = buildScheduleCreateInput(draft, sessionId, tz);
+      const task = await scheduleTaskService.createTask(payload);
+      return {
+        ok: true,
+        matched: true,
+        summary: "提醒已写入日程",
+        taskId: task.taskId,
+        title: task.title,
+        kind: task.kind,
+        nextRunAt: task.nextRunAt,
+        recurrence: task.recurrence,
+        reminderMessage: task.reminderMessage ?? draft.reminderMessage,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: msg };
+    }
   });
 }

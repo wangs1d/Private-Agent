@@ -631,6 +631,12 @@ export class WorldService {
     return s;
   }
 
+  /** 五子棋馆场景（用户与 Agent 对战，无需 Agent World 注册）。 */
+  enterGomokuLobby(sessionId: string): void {
+    const s = this.getOrCreate(sessionId);
+    s.sceneId = "gomoku";
+  }
+
   /**
    * 扣减世界点数（Agent World 内虚拟币）。余额不足时返回 false，不改变状态。
    * `roomId` 一般为玩家个人房（与 sessionId 相同）。

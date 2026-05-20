@@ -1,5 +1,6 @@
 import type { ZhaJinHuaService } from "../services/zhajinhua-service.js";
 import type { ToolRegistryLike } from "../host-types.js";
+import { buildZhajinhuaTableUrl } from "../config/world-game-url.js";
 import { worldMutationOpts } from "./world-tool-input.js";
 
 /**
@@ -24,7 +25,13 @@ export function registerWorldZhajinhuaTools(registry: ToolRegistryLike, zjh: Zha
     const stake = Number(input.stake ?? 0);
     const r = zjh.createTable(context.sessionId, stake);
     if (!r.ok) throw new Error(r.reason);
-    return { ok: true, table: r.table, message: "已开桌，创建者占最前空位；邀请他人 join 后由选手调用 start 开局。" };
+    const watchUrl = buildZhajinhuaTableUrl(r.table.tableId);
+    return {
+      ok: true,
+      table: r.table,
+      watchUrl,
+      message: `已开桌，创建者占最前空位。观战链接：${watchUrl}`,
+    };
   });
 
   registry.register("world.zhajinhua.join", async (input, context) => {
@@ -43,10 +50,11 @@ export function registerWorldZhajinhuaTools(registry: ToolRegistryLike, zjh: Zha
     return {
       ok: true,
       table: r.table,
+      watchUrl: buildZhajinhuaTableUrl(tableId),
       message:
         role === "player"
           ? "已加入选手席；满 3 人且准备好后由选手 start 扣底注发牌。"
-          : "已观战；可 get_snapshot 或 WebSocket 订阅。",
+          : `已观战。观战链接：${buildZhajinhuaTableUrl(tableId)}`,
     };
   });
 

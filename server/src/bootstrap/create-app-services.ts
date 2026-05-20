@@ -119,7 +119,6 @@ export async function createAppServices(): Promise<AppServices> {
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
   registerClockTools(toolRegistry);
-  registerLifeTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
   registerCareReminderTools(toolRegistry, {
     agentMemorySyncService,
@@ -276,6 +275,7 @@ export async function createAppServices(): Promise<AppServices> {
 
   const externalChat = createExternalChatProviderFromEnv();
   const scheduleIntentService = new ScheduleIntentService(externalChat);
+  registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   const agentCore = createAgentCore({
     toolRegistry,
@@ -357,6 +357,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentCore,
     doudizhuService,
     zhaJinHuaService,
+    gomokuService,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
