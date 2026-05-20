@@ -40,15 +40,17 @@ class _SchedulePageState extends State<SchedulePage> {
     "SUN",
   ];
 
-  /// 0：日历周视图；1：事项管理（仅今日列表）。
+  /// 0：日历日视图；1：日历周视图；2：事项管理（仅今日列表）。
   int _subTab = 0;
 
   DateTime _weekStart = _mondayOf(DateTime.now());
   DateTime _focusedDay = _stripTime(DateTime.now());
+  
+  /// 视图模式：'day' 为日视图，'week' 为周视图
+  String _viewMode = 'day';
 
   List<ScheduleEvent> _todayEvents = <ScheduleEvent>[];
   List<ScheduleEvent> _weekEvents = <ScheduleEvent>[];
-  bool _loading = true;
   String? _selectedEventId;
 
   static DateTime _stripTime(DateTime d) => DateTime(d.year, d.month, d.day);
@@ -75,10 +77,6 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Future<void> _reloadAll() async {
-    // 只在日历视图时显示加载状态
-    if (_subTab == 0) {
-      setState(() => _loading = true);
-    }
     final DateTime wEnd = _weekStart.add(const Duration(days: 7));
     final List<ScheduleEvent> weekList =
         await widget.store.listScheduleEventsInRange(_weekStart, wEnd);
@@ -90,10 +88,6 @@ class _SchedulePageState extends State<SchedulePage> {
     setState(() {
       _weekEvents = weekList;
       _todayEvents = todayList;
-      // 只在日历视图时重置加载状态
-      if (_subTab == 0) {
-        _loading = false;
-      }
     });
   }
 
@@ -114,6 +108,10 @@ class _SchedulePageState extends State<SchedulePage> {
     }
     return "${monday.year}年${monday.month}月${monday.day}日 - "
         "${sunday.year}年${sunday.month}月${sunday.day}日";
+  }
+
+  static String _formatDayLabel(DateTime day) {
+    return "${day.year}年${day.month}月${day.day}日";
   }
 
   Map<DateTime, List<ScheduleEvent>> _eventsByDay() {
@@ -144,10 +142,32 @@ class _SchedulePageState extends State<SchedulePage> {
     _reloadAll();
   }
 
+  void _shiftDay(int delta) {
+    setState(() {
+      _focusedDay = _focusedDay.add(Duration(days: delta));
+      // 如果焦点日期不在当前周范围内，更新周起始日期
+      final DateTime weekEnd = _weekStart.add(const Duration(days: 6));
+      if (_focusedDay.isBefore(_weekStart) || _focusedDay.isAfter(weekEnd)) {
+        _weekStart = _mondayOf(_focusedDay);
+      }
+      _selectedEventId = null;
+    });
+    _reloadAll();
+  }
+
   void _goToCurrentWeek() {
     setState(() {
       _weekStart = _mondayOf(DateTime.now());
       _focusedDay = _stripTime(DateTime.now());
+      _selectedEventId = null;
+    });
+    _reloadAll();
+  }
+
+  void _goToToday() {
+    setState(() {
+      _focusedDay = _stripTime(DateTime.now());
+      _weekStart = _mondayOf(_focusedDay);
       _selectedEventId = null;
     });
     _reloadAll();
@@ -300,6 +320,33 @@ class _SchedulePageState extends State<SchedulePage> {
               ],
             ),
           ),
+          // 在日历视图中添加日/周切换按钮
+          if (_subTab == 0)
+            ToggleButtons(
+              isSelected: [_viewMode == 'day', _viewMode == 'week'],
+              onPressed: (int index) {
+                setState(() {
+                  _viewMode = index == 0 ? 'day' : 'week';
+                });
+              },
+              borderRadius: BorderRadius.circular(8),
+              selectedColor: cs.onSurface,
+              fillColor: cs.surfaceContainerHigh,
+              color: cs.onSurfaceVariant,
+              borderColor: cs.outline,
+              selectedBorderColor: cs.onSurface,
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 32),
+              children: const <Widget>[
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 10),
+                  child: Text('日', style: TextStyle(fontSize: 13)),
+                ),
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 10),
+                  child: Text('周', style: TextStyle(fontSize: 13)),
+                ),
+              ],
+            ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: cs.onSurface,
@@ -367,7 +414,14 @@ class _SchedulePageState extends State<SchedulePage> {
   Widget _weekRangeControls(ThemeData theme) {
     final ColorScheme cs = theme.colorScheme;
     final DateTime today = _stripTime(DateTime.now());
-    final bool isCurrentWeek = !_weekStart.isAfter(today) && !today.isAfter(_weekStart.add(const Duration(days: 6)));
+    
+    // 根据视图模式判断是否显示“回到今天/本周”按钮
+    final bool isCurrentView;
+    if (_viewMode == 'day') {
+      isCurrentView = _focusedDay == today;
+    } else {
+      isCurrentView = !_weekStart.isAfter(today) && !today.isAfter(_weekStart.add(const Duration(days: 6)));
+    }
     
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -384,16 +438,18 @@ class _SchedulePageState extends State<SchedulePage> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
                   IconButton(
-                    tooltip: "上一周",
+                    tooltip: _viewMode == 'day' ? "上一天" : "上一周",
                     visualDensity: VisualDensity.compact,
-                    onPressed: () => _shiftWeek(-1),
+                    onPressed: () => _viewMode == 'day' ? _shiftDay(-1) : _shiftWeek(-1),
                     icon: Icon(Icons.chevron_left, color: cs.onSurface),
                   ),
                   Expanded(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: Text(
-                        _formatRangeLabel(_weekStart),
+                        _viewMode == 'day'
+                            ? _formatDayLabel(_focusedDay)
+                            : _formatRangeLabel(_weekStart),
                         textAlign: TextAlign.center,
                         style: theme.textTheme.titleSmall?.copyWith(
                           color: cs.onSurface,
@@ -403,21 +459,21 @@ class _SchedulePageState extends State<SchedulePage> {
                     ),
                   ),
                   IconButton(
-                    tooltip: "下一周",
+                    tooltip: _viewMode == 'day' ? "下一天" : "下一周",
                     visualDensity: VisualDensity.compact,
-                    onPressed: () => _shiftWeek(1),
+                    onPressed: () => _viewMode == 'day' ? _shiftDay(1) : _shiftWeek(1),
                     icon: Icon(Icons.chevron_right, color: cs.onSurface),
                   ),
                 ],
               ),
             ),
           ),
-          if (!isCurrentWeek) ...<Widget>[
+          if (!isCurrentView) ...<Widget>[
             const SizedBox(width: 12),
             OutlinedButton.icon(
-              onPressed: _goToCurrentWeek,
-              icon: const Icon(Icons.today, size: 18),
-              label: const Text("回到本周"),
+              onPressed: _viewMode == 'day' ? _goToToday : _goToCurrentWeek,
+              icon: Icon(_viewMode == 'day' ? Icons.today : Icons.calendar_today, size: 18),
+              label: Text(_viewMode == 'day' ? "回到今天" : "回到本周"),
               style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 shape: RoundedRectangleBorder(
@@ -426,6 +482,81 @@ class _SchedulePageState extends State<SchedulePage> {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _dayGrid(ThemeData theme) {
+    final Map<DateTime, List<ScheduleEvent>> byDay = _eventsByDay();
+    final DateTime today = _stripTime(DateTime.now());
+    final DateTime focusedDay = _stripTime(_focusedDay);
+    
+    // 获取当前聚焦日期的事项
+    final List<ScheduleEvent> events = byDay[focusedDay] ?? <ScheduleEvent>[];
+    
+    final Color headerBg = focusedDay == today
+        ? theme.colorScheme.surfaceContainerHigh
+        : theme.colorScheme.surfaceContainerLow;
+
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          // 日期标题
+          Container(
+            width: double.infinity,
+            color: headerBg,
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            child: Column(
+              children: <Widget>[
+                Text(
+                  "${_weekdayCn[focusedDay.weekday - 1]} / ${_weekdayEn[focusedDay.weekday - 1]}",
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "${focusedDay.year}年${focusedDay.month}月${focusedDay.day}日",
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // 事项列表
+          Expanded(
+            child: ColoredBox(
+              color: theme.colorScheme.surfaceContainerLowest
+                  .withValues(alpha: 0.65),
+              child: events.isEmpty
+                  ? Center(
+                      child: Text(
+                        '当天暂无事项',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                      children: events
+                          .map(
+                            (ScheduleEvent e) => Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: _scheduleCard(theme, e),
+                            ),
+                          )
+                          .toList(),
+                    ),
+            ),
+          ),
         ],
       ),
     );
@@ -441,7 +572,6 @@ class _SchedulePageState extends State<SchedulePage> {
     Widget dayColumn(int i) {
       final DateTime day = _weekStart.add(Duration(days: i));
       final bool isToday = _stripTime(day) == today;
-      final bool isFocused = _stripTime(day) == _stripTime(_focusedDay);
       final List<ScheduleEvent> events = byDay[_stripTime(day)] ?? <ScheduleEvent>[];
       final Color headerBg = isToday
           ? theme.colorScheme.surfaceContainerHigh
@@ -731,7 +861,11 @@ class _SchedulePageState extends State<SchedulePage> {
           _buildSubTabBar(theme),
           if (_subTab == 0) ...<Widget>[
             _weekRangeControls(theme),
-            _weekGrid(theme),
+            // 根据视图模式显示不同的网格
+            if (_viewMode == 'day')
+              _dayGrid(theme)
+            else
+              _weekGrid(theme),
           ] else
             Expanded(child: _managementView(theme)),
         ],

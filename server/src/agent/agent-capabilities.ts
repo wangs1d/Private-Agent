@@ -131,15 +131,15 @@ export function buildAgentCapabilityPromptSection(
     if (hasVirtualPhone) {
       lines.push(`✅ 你已申领虚拟号码：${virtualPhone}`);
       lines.push(`可用功能：`);
-      lines.push(`- virtual_phone.ensure_my_number: 查询/确认你的虚拟号码`);
+      lines.push(`- virtual-phone.ensure-my-number: 查询/确认你的虚拟号码`);
       lines.push(`- phone.virtual_call: 拨打其他Agent的虚拟号码进行语音通话`);
       lines.push(`- 可联系其他已配对的Agent，或给自己打电话作为提醒`);
     } else {
       lines.push(`⚠️ 你尚未申领虚拟号码`);
       lines.push(`可用功能：`);
-      lines.push(`- virtual_phone.ensure_my_number: 申领6位虚拟电话号码（用户明确要求时才可调用）`);
+      lines.push(`- virtual-phone.ensure-my-number: 申领6位虚拟电话号码（用户明确要求时才可调用）`);
       lines.push(`- 申领后可与其他Agent进行语音通话`);
-      lines.push(`提示：当用户说"帮我申请虚拟号码"时，调用 virtual_phone.ensure_my_number`);
+      lines.push(`提示：当用户说"帮我申请虚拟号码"时，调用 virtual-phone.ensure-my-number`);
     }
     
     // 添加关于其他Agent能力的说明
@@ -150,6 +150,25 @@ export function buildAgentCapabilityPromptSection(
     lines.push(`- 跨Agent拨打可能需要配对验证（取决于服务端配置）`);
     lines.push(`- 你可以询问用户想联系谁，然后检查对方是否有虚拟号码`);
   }
+
+  lines.push(`\n6️⃣ 【自我编程与升级能力】`);
+  lines.push(`可用工具：`);
+  lines.push(`- self.create_skill: 创建新技能（需要提供 skillName, displayName, description, handlerCode）`);
+  lines.push(`- self.update_skill: 更新现有技能的代码或元数据`);
+  lines.push(`- self.delete_skill: 删除自己创建的社区技能`);
+  lines.push(`- self.generate_skill: 智能生成技能代码（需要配置外部聊天提供商）`);
+  lines.push(`- self.analyze_capabilities: 分析当前能力缺口，提出改进建议`);
+  lines.push(`- self.detect_skill_need: 检测用户需求是否需要新技能`);
+  lines.push(`- self.analyze_improvements: 分析交互记录，生成改进建议`);
+  lines.push(`提示：当用户需要的功能不存在时，你可以主动创建新技能来扩展自己的能力`);
+  
+  lines.push(`\n💡 **重要能力说明**：`);
+  lines.push(`你拥有自我进化的能力！如果用户需要的功能当前没有，你可以：`);
+  lines.push(`1. 使用 self.analyze_capabilities 分析需要什么能力`);
+  lines.push(`2. 使用 self.generate_skill 智能生成技能代码（如果有外部聊天提供商）`);
+  lines.push(`3. 使用 self.create_skill 创建新技能`);
+  lines.push(`4. 或者手动编写代码后调用 self.create_skill`);
+  lines.push(`这样你就能不断学习和成长，适应用户的新需求！`);
 
   if (!owned.size && !state.agentWorldCredits) {
     lines.push("提示：在世界内挣点、购买技能后，此处会显示你的独特能力组合。");

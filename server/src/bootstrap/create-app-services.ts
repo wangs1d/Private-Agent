@@ -63,6 +63,9 @@ import { createDesktopVisualAgentFromEnv } from "../services/desktop-visual-agen
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
+import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
+import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { ServerEventType } from "../protocol.js";
 import { WeatherPrefsService } from "../services/weather-prefs-service.js";
 import { WeatherService } from "../services/weather-service.js";
@@ -299,6 +302,11 @@ export async function createAppServices(): Promise<AppServices> {
     localAgent: desktopVisualAgent,
     bridge: desktopBridgeCoordinator,
   });
+
+  // ========== 注册自我编程和智能生成工具 ==========
+  registerSelfProgrammingTools(toolRegistry, skillManager);
+  registerAISkillGenerationTools(toolRegistry, externalChat, skillManager);
+  registerSelfLearningTools(toolRegistry, externalChat, skillManager);
 
   registerHttpRoutes(app, {
     toolRegistry,

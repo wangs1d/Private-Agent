@@ -18,7 +18,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
    */
   const ensure_my_number: SkillDefinition = {
     metadata: {
-      name: "virtual_phone.ensure_my_number",
+      name: "virtual-phone.ensure-my-number",
       version: "1.0.0",
       displayName: "申领虚拟电话号码",
       description:
@@ -60,7 +60,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
    */
   const get_number_status: SkillDefinition = {
     metadata: {
-      name: "virtual_phone.get_status",
+      name: "virtual-phone.get-status",
       version: "1.0.0",
       displayName: "查询虚拟号码状态",
       description:
@@ -97,7 +97,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
    */
   const resolve_actor_by_phone: SkillDefinition = {
     metadata: {
-      name: "virtual_phone.resolve_actor",
+      name: "virtual-phone.resolve-actor",
       version: "1.0.0",
       displayName: "解析号码对应的Actor",
       description:

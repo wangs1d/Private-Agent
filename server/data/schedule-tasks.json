@@ -9,11 +9,12 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-19T00:00:00.000Z",
-      "nextRunAt": "2026-05-19T00:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "reminderMessage": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂",
       "createdAt": "2026-05-18T15:50:03.650Z",
-      "updatedAt": "2026-05-18T15:50:03.650Z"
+      "updatedAt": "2026-05-19T08:04:18.423Z",
+      "lastRunAt": "2026-05-19T08:04:18.423Z"
     },
     {
       "taskId": "b08894b4-adf5-4795-aeec-b39417f66bef",
@@ -84,11 +85,12 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-19T00:00:00.000Z",
-      "nextRunAt": "2026-05-19T00:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "reminderMessage": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂",
       "createdAt": "2026-05-18T15:50:33.942Z",
-      "updatedAt": "2026-05-18T15:50:33.942Z"
+      "updatedAt": "2026-05-19T08:04:18.423Z",
+      "lastRunAt": "2026-05-19T08:04:18.423Z"
     },
     {
       "taskId": "e38b2d77-cc20-48c4-9cdd-59630f20e7c0",
@@ -159,11 +161,12 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-19T00:00:00.000Z",
-      "nextRunAt": "2026-05-19T00:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "reminderMessage": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂",
       "createdAt": "2026-05-18T15:50:58.039Z",
-      "updatedAt": "2026-05-18T15:50:58.039Z"
+      "updatedAt": "2026-05-19T08:04:18.423Z",
+      "lastRunAt": "2026-05-19T08:04:18.423Z"
     },
     {
       "taskId": "e92218b9-7a74-4e34-834e-77a9353e0f5b",
@@ -234,11 +237,12 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-19T00:00:00.000Z",
-      "nextRunAt": "2026-05-19T00:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "reminderMessage": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂",
       "createdAt": "2026-05-18T15:51:26.199Z",
-      "updatedAt": "2026-05-18T15:51:26.199Z"
+      "updatedAt": "2026-05-19T08:04:18.424Z",
+      "lastRunAt": "2026-05-19T08:04:18.424Z"
     },
     {
       "taskId": "73d791d8-0054-4ccf-9475-968519b4b8a4",
@@ -301,5 +305,58 @@
       "updatedAt": "2026-05-18T15:51:26.228Z"
     }
   ],
-  "runs": []
+  "runs": [
+    {
+      "runId": "ff30de4c-daf8-41fd-839f-56187d464ef9",
+      "taskId": "bd2c1262-3547-40c1-b988-e1599beab2bb",
+      "plannedAt": "2026-05-19T00:00:00.000Z",
+      "startedAt": "2026-05-19T08:04:18.423Z",
+      "endedAt": "2026-05-19T08:04:18.423Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "妈妈的生日提醒",
+        "message": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂"
+      }
+    },
+    {
+      "runId": "1215ec30-74d2-4214-9659-778f22864624",
+      "taskId": "c4762803-8f8d-4f48-8198-beaab764b440",
+      "plannedAt": "2026-05-19T00:00:00.000Z",
+      "startedAt": "2026-05-19T08:04:18.423Z",
+      "endedAt": "2026-05-19T08:04:18.423Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "妈妈的生日提醒",
+        "message": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂"
+      }
+    },
+    {
+      "runId": "874f67f7-0b3c-46e3-afaf-f350f7c446c7",
+      "taskId": "4aa4a6bc-efae-4eec-af7d-4e9a42ecf7fe",
+      "plannedAt": "2026-05-19T00:00:00.000Z",
+      "startedAt": "2026-05-19T08:04:18.423Z",
+      "endedAt": "2026-05-19T08:04:18.423Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "妈妈的生日提醒",
+        "message": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂"
+      }
+    },
+    {
+      "runId": "f2e3cc76-14fe-4564-a272-df233360c77c",
+      "taskId": "738d4c82-c80b-43ff-b8f2-17fd27db1998",
+      "plannedAt": "2026-05-19T00:00:00.000Z",
+      "startedAt": "2026-05-19T08:04:18.423Z",
+      "endedAt": "2026-05-19T08:04:18.424Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "妈妈的生日提醒",
+        "message": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂"
+      }
+    }
+  ]
 }

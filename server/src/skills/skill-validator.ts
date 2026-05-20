@@ -17,7 +17,7 @@ export class SkillValidator {
     const errors: SkillValidationError[] = [];
 
     // 验证名称格式（必须是 namespace.action 格式）
-    if (!metadata.name || !/^[a-z][a-z0-9]*\.[a-z][a-z0-9_]*$/.test(metadata.name)) {
+    if (!metadata.name || !/^[a-z][a-z0-9-]*\.[a-z][a-z0-9_-]*$/.test(metadata.name)) {
       errors.push({
         field: "name",
         message: "Skill 名称必须符合 'namespace.action' 格式，如 'budget.calculate'",

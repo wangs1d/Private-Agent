@@ -108,10 +108,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
   app.get(
     "/ws",
     { websocket: true },
-    (connection) => {
+    (socket, request) => {
       let boundActorId: string | undefined;
       let initAsDesktopBridge = false;
-      const socket = connection.socket;
       socket.on("close", () => {
         const detached = worldPartitionWsRegistry.detachSocket(socket);
         if (detached) {
@@ -128,7 +127,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
       socket.on("message", async (raw: Buffer) => {
         const sendUnifiedError = (code: string, message: string, traceId?: string): void => {
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.ErrorEvent,
               payload: { code, message, traceId },
@@ -140,7 +139,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         try {
           event = JSON.parse(raw.toString()) as EventEnvelope;
         } catch {
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.ErrorEvent,
               payload: { code: "BAD_JSON", message: "无法解析事件 JSON" },
@@ -155,7 +154,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const userIdRaw = payload.userId != null ? String(payload.userId).trim() : "";
           const actorId = userIdRaw || sessionIdRaw;
           if (!actorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "BAD_SESSION_INIT", message: "需要 userId 或 sessionId" },
@@ -166,7 +165,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const isDesktopBridgeChannel = payload.desktopBridge === true;
           if (isDesktopBridgeChannel) {
             if (!userIdRaw) {
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ErrorEvent,
                   payload: {
@@ -178,7 +177,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               return;
             }
             if (!desktopBridgeCoordinator.isBridgeFeatureEnabled()) {
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ErrorEvent,
                   payload: {
@@ -205,7 +204,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             wsConnectionRegistry.register(actorId, socket);
           } else if (!desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.DesktopBridgeRegisterAck,
                 payload: { ok: true, actorId, mode: "userId" },
@@ -224,7 +223,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === ClientEventType.DesktopBridgeRegister) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -233,7 +232,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!initAsDesktopBridge) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -245,7 +244,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!desktopBridgeCoordinator.requiresRegisterToken()) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.DesktopBridgeRegisterAck,
                 payload: { ok: true, actorId: boundActorId, mode: "userId", note: "当前为无口令模式，已在 session.init 自动绑定" },
@@ -255,7 +254,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const token = String((event.payload as Record<string, unknown>).token ?? "").trim();
           if (!desktopBridgeCoordinator.verifyRegisterToken(token)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -267,7 +266,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           desktopBridgeCoordinator.bindExecutor(boundActorId, socket);
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.DesktopBridgeRegisterAck,
               payload: { ok: true, actorId: boundActorId, mode: "token" },
@@ -280,7 +279,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const pl = event.payload as Record<string, unknown>;
           const jobId = String(pl.jobId ?? "").trim();
           if (!jobId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "BAD_DESKTOP_BRIDGE_RESULT", message: "缺少 jobId" },
@@ -290,7 +289,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const ok = desktopBridgeCoordinator.completeFromSocket(socket, jobId, pl);
           if (!ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "DESKTOP_BRIDGE_JOB_UNKNOWN", message: "jobId 与当前连接不匹配或已结束" },
@@ -302,7 +301,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === ClientEventType.ChatUserMessage) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -311,7 +310,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (initAsDesktopBridge) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -324,7 +323,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsed = userMessageSchema.safeParse(event.payload);
           if (!parsed.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_CHAT_EVENT", message: parsed.error.message },
@@ -335,7 +334,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const data = parsed.data;
           const msgActor = resolveActorId({ userId: data.userId, sessionId: data.sessionId });
           if (msgActor !== boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "FORBIDDEN", message: "userId/sessionId 与当前连接不一致" },
@@ -347,7 +346,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           try {
             visionFrames = sanitizeVisionFramesFromWire(data.visionFrames);
           } catch (ve) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -377,7 +376,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             userId: data.userId,
             ...(visionFrames?.length ? { visionFrames } : {}),
             onAssistantDelta: (delta) => {
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ChatAssistantChunk,
                   payload: {
@@ -390,7 +389,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               );
             },
             onExternalToolExecuted: (info) => {
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ToolCall,
                   payload: {
@@ -400,7 +399,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                   },
                 }),
               );
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ToolResult,
                   payload: {
@@ -416,7 +415,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (!reply.streamedChunks) {
             const chunks = chunkText(reply.text, 12);
             chunks.forEach((chunk, index) => {
-              connection.socket.send(
+              socket.send(
                 JSON.stringify({
                   type: ServerEventType.ChatAssistantChunk,
                   payload: {
@@ -431,7 +430,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
 
           if (reply.toolName && reply.toolInput) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ToolCall,
                 payload: {
@@ -446,7 +445,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               chatUserMessageId: data.messageId,
               userId: data.userId,
             });
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ToolResult,
                 payload: {
@@ -460,7 +459,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
           }
 
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.ChatAssistantDone,
               payload: {
@@ -476,7 +475,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldPartitionAttach) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -485,7 +484,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -498,7 +497,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsedPa = worldPartitionAttachSchema.safeParse(event.payload);
           if (!parsedPa.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "VALIDATION_ERROR", message: parsedPa.error.message },
@@ -512,7 +511,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               ? worldService.getOrCreate(partitionId)
               : worldService.getExisting(partitionId);
           if (!state) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -525,7 +524,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!canViewWorldPartition(boundActorId, state.ownerSessionId, agentPairingService)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -538,7 +537,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           worldPartitionWsRegistry.attach(partitionId, boundActorId, socket);
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: AgentWorldServerEventType.WorldPartitionSnapshot,
               payload: { partitionId, revision: state.revision, state, traceId },
@@ -550,7 +549,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldPartitionDetach) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -560,7 +559,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsedPd = worldPartitionDetachSchema.safeParse(event.payload);
           if (!parsedPd.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "VALIDATION_ERROR", message: parsedPd.error.message },
@@ -571,7 +570,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const currentPartition = worldPartitionWsRegistry.getPartitionForSocket(socket);
           const requested = parsedPd.data.partitionId;
           if (requested && currentPartition && requested !== currentPartition) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -594,7 +593,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -603,7 +602,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -616,7 +615,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
           if (!parsed.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
@@ -626,7 +625,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const r = doudizhuService.watchTable(parsed.data.tableId, boundActorId);
           if (!r.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "DOUZHU_SUBSCRIBE_FAILED", message: r.reason },
@@ -638,7 +637,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribeLobby) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -647,7 +646,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -664,7 +663,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribeLobby) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -673,7 +672,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -690,7 +689,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -699,7 +698,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -712,7 +711,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
           if (!parsed.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
@@ -726,7 +725,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -735,7 +734,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -748,7 +747,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const zjhParsed = worldZhajinhuaWsTableSchema.safeParse(event.payload);
           if (!zjhParsed.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjhParsed.error.message },
@@ -758,7 +757,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const rZjh = zhaJinHuaService.watchTable(zjhParsed.data.tableId, boundActorId);
           if (!rZjh.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "ZHAJINHUA_SUBSCRIBE_FAILED", message: rZjh.reason },
@@ -770,7 +769,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribeLobby) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -779,7 +778,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -796,7 +795,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribeLobby) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -805,7 +804,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -822,7 +821,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -831,7 +830,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -844,7 +843,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const zjhU = worldZhajinhuaWsTableSchema.safeParse(event.payload);
           if (!zjhU.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjhU.error.message },
@@ -858,7 +857,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialSubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -867,7 +866,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -884,7 +883,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialUnsubscribe) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -898,7 +897,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialPost) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -907,7 +906,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -920,7 +919,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const socPost = worldSocialPostPayloadSchema.safeParse(event.payload);
           if (!socPost.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_SOCIAL_EVENT", message: socPost.error.message },
@@ -933,7 +932,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const mediaUrl = socPost.data.mediaUrl === undefined ? null : socPost.data.mediaUrl;
           const rSoc = socialFeedService.createPost(boundActorId, text, mediaType, mediaUrl);
           if (!rSoc.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SOCIAL_POST_FAILED", message: rSoc.reason },
@@ -946,7 +945,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialComment) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -955,7 +954,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -968,7 +967,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const socC = worldSocialCommentPayloadSchema.safeParse(event.payload);
           if (!socC.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_SOCIAL_EVENT", message: socC.error.message },
@@ -978,7 +977,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const rC = socialFeedService.addComment(boundActorId, socC.data.postId, socC.data.text);
           if (!rC.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SOCIAL_COMMENT_FAILED", message: rC.reason },
@@ -991,7 +990,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialLikeToggle) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -1000,7 +999,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -1013,7 +1012,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const socL = worldSocialLikePayloadSchema.safeParse(event.payload);
           if (!socL.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_SOCIAL_EVENT", message: socL.error.message },
@@ -1023,7 +1022,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const rL = socialFeedService.toggleLike(boundActorId, socL.data.postId);
           if (!rL.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SOCIAL_LIKE_FAILED", message: rL.reason },
@@ -1036,7 +1035,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialPostDelete) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -1045,7 +1044,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -1058,7 +1057,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const socDel = worldSocialPostDeletePayloadSchema.safeParse(event.payload);
           if (!socDel.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_SOCIAL_EVENT", message: socDel.error.message },
@@ -1068,7 +1067,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const rDel = socialFeedService.deletePost(boundActorId, socDel.data.postId);
           if (!rDel.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SOCIAL_DELETE_FAILED", message: rDel.reason },
@@ -1081,7 +1080,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === AgentWorldClientEventType.WorldSocialReport) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -1090,7 +1089,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: {
@@ -1103,7 +1102,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const socRep = worldSocialReportPayloadSchema.safeParse(event.payload);
           if (!socRep.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_SOCIAL_EVENT", message: socRep.error.message },
@@ -1113,7 +1112,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const rRep = socialFeedService.reportPost(boundActorId, socRep.data.postId, socRep.data.reason);
           if (!rRep.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SOCIAL_REPORT_FAILED", message: rRep.reason },
@@ -1126,7 +1125,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
 
         if (event.type === ClientEventType.AipDispatch) {
           if (!boundActorId) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
@@ -1136,7 +1135,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           const parsedAip = aipDispatchWsSchema.safeParse(event.payload);
           if (!parsedAip.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "VALIDATION_ERROR", message: parsedAip.error.message },
@@ -1151,7 +1150,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             chatUserMessageId: parsedAip.data.chatUserMessageId,
           });
           if (!rAip.ok) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "AIP_DISPATCH_FAILED", message: rAip.message },
@@ -1159,7 +1158,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.ToolResult,
               payload: {
@@ -1180,7 +1179,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         if (event.type === UnifiedClientEventType.Capabilities) {
           const parsedCap = unifiedCapabilitiesClientSchema.safeParse(event.payload);
           if (!parsedCap.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "VALIDATION_ERROR", message: parsedCap.error.message },
@@ -1188,7 +1187,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: UnifiedServerEventType.Capabilities,
               payload: {
@@ -1227,7 +1226,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedQ.data.requestId,
           );
           if (cached) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: UnifiedServerEventType.QuotaState,
                 payload: { ...cached, deduped: true },
@@ -1281,7 +1280,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedMp.data.requestId,
           );
           if (cached) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: UnifiedServerEventType.MemorySnapshot,
                 payload: { ...cached, deduped: true },
@@ -1308,7 +1307,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               parsedMp.data.requestId,
               failedPayload,
             );
-            connection.socket.send(
+            socket.send(
               JSON.stringify({ type: UnifiedServerEventType.MemorySnapshot, payload: failedPayload }),
             );
             return;
@@ -1350,7 +1349,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           const snapG = agentMemorySyncService.getSnapshot(memGetActor, parsedMg.data.keys);
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: UnifiedServerEventType.MemorySnapshot,
               payload: {
@@ -1389,7 +1388,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedHd.data.requestId,
           );
           if (cached) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: UnifiedServerEventType.HumanDirectiveAck,
                 payload: { ...cached, deduped: true },
@@ -1454,7 +1453,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const action = parsedGp.data.action;
           const allowed =
             action !== "world.http.mutation" || allowWorldHttpMutations();
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: UnifiedServerEventType.GovernanceAck,
               payload: {
@@ -1472,7 +1471,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         if (event.type === ClientEventType.WalletSimulateRequest) {
           const parsed = walletRequestSchema.safeParse(event.payload);
           if (!parsed.success) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
                 payload: { code: "INVALID_WALLET_EVENT", message: parsed.error.message },
@@ -1493,7 +1492,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             amount: data.amount,
             requestId: data.requestId,
           });
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: ServerEventType.WalletSimulateResult,
               payload: {
@@ -1511,7 +1510,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
-        connection.socket.send(
+        socket.send(
           JSON.stringify({
             type: ServerEventType.ErrorEvent,
             payload: { code: "UNKNOWN_EVENT", message: `未知事件: ${event.type}` },

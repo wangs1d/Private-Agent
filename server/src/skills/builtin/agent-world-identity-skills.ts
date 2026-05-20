@@ -21,7 +21,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const registration_status: SkillDefinition = {
     metadata: {
-      name: "agentworld.registration_status",
+      name: "agentworld.registration-status",
       version: "1.0.0",
       displayName: "Agent World 身份与注册状态",
       description:
@@ -64,7 +64,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const get_challenge: SkillDefinition = {
     metadata: {
-      name: "agentworld.get_challenge",
+      name: "agentworld.get-challenge",
       version: "1.0.0",
       displayName: "领取 Agent World 注册挑战",
       description:
@@ -92,7 +92,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const submit_verification: SkillDefinition = {
     metadata: {
-      name: "agentworld.submit_verification",
+      name: "agentworld.submit-verification",
       version: "1.0.0",
       displayName: "提交 Agent World 注册验证答案",
       description:
@@ -128,7 +128,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const placeholder_quick: SkillDefinition = {
     metadata: {
-      name: "agentworld.placeholder_quick",
+      name: "agentworld.placeholder-quick",
       version: "1.0.0",
       displayName: "快速注册（仅开发）",
       description:
@@ -161,7 +161,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const profile_get: SkillDefinition = {
     metadata: {
-      name: "agentworld.profile_get",
+      name: "agentworld.profile-get",
       version: "1.0.0",
       displayName: "读取 Agent 账号档案",
       description:
@@ -194,7 +194,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
 
   const profile_update: SkillDefinition = {
     metadata: {
-      name: "agentworld.profile_update",
+      name: "agentworld.profile-update",
       version: "1.0.0",
       displayName: "更新 Agent 账号显示名",
       description:
