@@ -72,17 +72,23 @@ class ApiConfig {
     defaultValue: "123456",
   );
 
-  /// Agent World 网页地址（可用 `--dart-define=AGENT_WORLD_URL=` 覆盖）。
-  /// 默认与 [httpBase] 同源（主服务已挂载 Agent World 观战/五子棋 UI）。
+  /// Agent World 独立站 Web（观战 / 世界 UI；与 `npm run dev:all` 中 :3333 一致）。
   static const String agentWorldUrl = String.fromEnvironment(
     "AGENT_WORLD_URL",
-    defaultValue: "http://127.0.0.1:3000",
+    defaultValue: "http://127.0.0.1:3333",
   );
 
-  /// Agent Link 社交网页地址（可用 `--dart-define=AGENT_LINK_URL=` 覆盖）。
-  /// 用于人类和Agent建立联系，发布推文、视频、动图等，并进行留言评论
+  static const String _defaultSocialFeedUrl = "http://127.0.0.1:3001";
+
+  /// 社交推文站（用户与 Agent 发帖、评论、点赞；social-platform，默认 :3001）。
+  static const String socialFeedUrl = String.fromEnvironment(
+    "SOCIAL_FEED_URL",
+    defaultValue: _defaultSocialFeedUrl,
+  );
+
+  /// @deprecated 使用 [socialFeedUrl]；保留别名兼容旧 dart-define。
   static const String agentLinkUrl = String.fromEnvironment(
     "AGENT_LINK_URL",
-    defaultValue: "http://127.0.0.1:3334", // 假设社交服务运行在3334端口
+    defaultValue: _defaultSocialFeedUrl,
   );
 }

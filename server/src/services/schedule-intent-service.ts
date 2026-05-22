@@ -5,7 +5,7 @@ export type ScheduleDraft = {
   description: string;
   kind: "reminder" | "action" | "weather_brief";
   runAt: string;
-  recurrence: "none" | "daily" | "weekly";
+  recurrence: "none" | "daily" | "weekly" | "yearly";
   reminderMessage?: string;
   action?: {
     url: string;
@@ -37,7 +37,7 @@ export class ScheduleIntentService {
     if (!draft) {
       return {
         matched: false,
-        hint: "未能解析时间或事项。请包含具体时刻，如「明天 9:00 提醒我开会」「早上七点叫我起床」。",
+        hint: "未能解析时间或事项。请包含具体时刻或相对时间，如「一分钟后提醒我吃药」「明天 9:00 提醒我开会」。",
       };
     }
     if (draft.kind === "reminder" && needsRecurrenceConfirmation(userText)) {
@@ -57,10 +57,11 @@ export class ScheduleIntentService {
   }
 
   private async resolveDraft(sessionId: string, userText: string): Promise<ScheduleDraft | null> {
+    const ruleDraft = this.parseByRule(userText);
+    if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
     const modelDraft = await this.parseByModel(sessionId, userText);
-    const draft = modelDraft ?? this.parseByRule(userText);
-    if (!draft) return null;
-    return applyRecurrenceFromUserText(userText, draft);
+    if (!modelDraft) return null;
+    return applyRecurrenceFromUserText(userText, modelDraft);
   }
 
   private async parseByModel(sessionId: string, userText: string): Promise<ScheduleDraft | null> {
@@ -70,8 +71,8 @@ export class ScheduleIntentService {
       "只返回 JSON，不要输出 markdown 或解释。",
       "若无法解析，返回 {\"ok\":false}。",
       "可解析格式示例：明天 09:00 提醒我开会；今天 18:00 调用 https://api.com/sync 同步；每天 7:00 天气提醒（kind 为 weather_brief）。",
-      "recurrence 规则：仅当用户明确说出「每天/每日/每周」等重复词时用 daily 或 weekly；明确单次（仅一次/明天/今天/后天）用 none。",
-      "若只有时刻与提醒事项、未说明单次或每天/每周，返回 {\"ok\":false,\"reason\":\"needs_recurrence\"}，不要猜测 recurrence。",
+      "recurrence 规则：仅当用户明确说出「每天/每日/每周/每年」等重复词时用 daily、weekly 或 yearly；明确单次（仅一次/明天/今天/后天）用 none。",
+      "若只有时刻与提醒事项、未说明单次或每天/每周/每年，返回 {\"ok\":false,\"reason\":\"needs_recurrence\"}，不要猜测 recurrence。",
       "若用户要「天气/气温/穿衣/带伞」类定时简报，kind 用 weather_brief，不要填 reminderMessage 或 action。",
       "JSON 结构：",
       "{",
@@ -81,7 +82,7 @@ export class ScheduleIntentService {
       '    "description": "string",',
       '    "kind": "reminder|action|weather_brief",',
       '    "runAt": "ISO-8601 string",',
-      '    "recurrence": "none|daily|weekly",',
+      '    "recurrence": "none|daily|weekly|yearly",',
       '    "reminderMessage": "string optional（仅 reminder）",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
@@ -131,15 +132,9 @@ export class ScheduleIntentService {
       };
     }
     if (isReminderIntent(normalized)) {
-      const reminderText =
-        normalized
-          .replace(
-            /(明天|今天|后天|每天|每周)?\s*(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)?\s*(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)/,
-            "",
-          )
-          .trim() || "到点提醒";
+      const reminderText = extractReminderSubject(normalized);
       return {
-        title: "AI 提醒任务",
+        title: reminderText,
         description: normalized,
         kind: "reminder",
         runAt: runAt.toISOString(),
@@ -176,7 +171,11 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   const runAt = String(v.runAt ?? "");
   const recurrence = v.recurrence;
   const validKind = kind === "reminder" || kind === "action" || kind === "weather_brief";
-  const validRecurrence = recurrence === "none" || recurrence === "daily" || recurrence === "weekly";
+  const validRecurrence =
+    recurrence === "none" ||
+    recurrence === "daily" ||
+    recurrence === "weekly" ||
+    recurrence === "yearly";
   if (!title || !description || !validKind || !validRecurrence) return null;
   const runAtDate = new Date(runAt);
   if (Number.isNaN(runAtDate.getTime())) return null;
@@ -207,7 +206,9 @@ function validateDraft(input: unknown): ScheduleDraft | null {
 /** 用户是否已明确单次或重复（明确则可直接创建，无需追问）。 */
 export function isRecurrenceExplicit(userText: string): boolean {
   const normalized = userText.trim();
+  if (parseRelativeDateTimeFromPrompt(normalized)) return true;
   if (inferRecurrenceFromUserText(normalized) !== "none") return true;
+  if (isAlarmStyleReminder(normalized) && parseDateTimeFromPrompt(normalized)) return true;
   if (
     /仅一次|就一次|单次|一次性的|仅此一次|只提醒一次|只叫一次|不要重复|不用每天|不重复|别重复/.test(
       normalized,
@@ -241,12 +242,27 @@ export function buildRecurrenceConfirmToolResult(draft: ScheduleDraft): Record<s
   };
 }
 
-/** 从用户原句推断重复规则（未明确重复词则单次 none）。 */
-export function inferRecurrenceFromUserText(userText: string): "none" | "daily" | "weekly" {
+/** 起床/闹钟类：用户未说「仅一次/明天」时默认每天重复，避免误拦创建。 */
+function isAlarmStyleReminder(text: string): boolean {
+  return /叫我起床|起床|闹钟|叫醒|定时叫/.test(text.trim());
+}
+
+/** 从用户原句推断重复规则（未明确重复词则单次 none；闹钟类默认可每天）。 */
+export function inferRecurrenceFromUserText(userText: string): "none" | "daily" | "weekly" | "yearly" {
   const normalized = userText.trim();
+  if (parseRelativeDateTimeFromPrompt(normalized)) return "none";
+  if (/每年|每一年|每逢|周年|生日/.test(normalized)) return "yearly";
   if (/每周|每星期|每个星期|礼拜/.test(normalized)) return "weekly";
   if (
     /每天|每日|天天|每个工作日|工作日每天|每天早晨|每天早上|每晚|每天晚上|夜里每天/.test(
+      normalized,
+    )
+  ) {
+    return "daily";
+  }
+  if (
+    isAlarmStyleReminder(normalized) &&
+    !/仅一次|就一次|单次|一次性的|仅此一次|只提醒一次|只叫一次|不要重复|不用每天|不重复|别重复|明天|后天|今天|今早|今晚|明早|明晚|大后天/.test(
       normalized,
     )
   ) {
@@ -263,7 +279,35 @@ function applyRecurrenceFromUserText(userText: string, draft: ScheduleDraft): Sc
 
 /** 闹钟/叫醒类意图（含口语「叫我起床」等，不必出现「提醒」二字） */
 function isReminderIntent(text: string): boolean {
-  return /提醒我|提醒一下|提醒|闹钟|叫我起床|起床|叫醒|叫我|定时叫|定时提醒/.test(text);
+  return /提醒我|提醒一下|提醒|闹钟|叫我起床|喊我起床|起床|叫醒|叫我|喊我|定时叫|定时提醒/.test(
+    text,
+  );
+}
+
+/** 从用户句中提取提醒事项（保留「喊我起床」等完整语义，不剥离「起床」）。 */
+export function extractReminderSubject(userText: string): string {
+  const normalized = userText.trim();
+  let rest = stripLeadingTimeExpression(normalized);
+  rest = rest.replace(/^[，,、；;。\s]+/, "");
+  rest = rest.replace(/^(请|帮我|把我)\s*/, "");
+  rest = rest.replace(/^提醒我\s*/, "");
+  rest = rest.replace(/^提醒一下\s*/, "");
+  rest = rest.replace(/^提醒\s*/, "");
+  rest = rest.replace(/\s*提醒我\s*$/, "");
+  rest = rest.replace(/\s+/g, " ").trim();
+  return rest || "到点提醒";
+}
+
+function stripLeadingTimeExpression(text: string): string {
+  const rel = text.match(
+    /^(?:半(?:个)?(?:小时|钟头)|\d+\s*秒(?:钟)?|[一二两三四五六七八九十]{1,3}|\d+)\s*(?:个)?(?:分钟|小时|钟头)(?:后|之后|以内)?|半(?:个)?(?:小时|钟头)(?:后|之后)?\s*/,
+  );
+  if (rel) return text.slice(rel[0].length);
+  const abs = text.match(
+    /^(?:(?:明天|今天|后天|大后天)\s*)?(?:(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)\s*)?(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)\s*/,
+  );
+  if (abs) return text.slice(abs[0].length);
+  return text;
 }
 
 /** 天气/穿衣类定时简报（与普通「提醒我」区分：须含下列关键词之一） */
@@ -379,7 +423,7 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
   }
 
   const cnPointOnly = text.match(
-    /(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)?\s*([零一二两三四五六七八九十廿]{1,4})\s*点(?!半)/,
+    /(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)?\s*([零一二两三四五六七八九十廿]{1,4})\s*点(?!半|[要摘分])/,
   );
   if (cnPointOnly) {
     const hours = parseChineseHourToken(cnPointOnly[1]!);
@@ -388,7 +432,7 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
     }
   }
 
-  const pointOnly = text.match(/(\d{1,2})\s*点(?!半)/);
+  const pointOnly = text.match(/(\d{1,2})\s*点(?!半|[要摘分])/);
   if (pointOnly) {
     const hours = Number(pointOnly[1]);
     if (validClock(hours, 0)) return { hours, minutes: 0 };
@@ -396,7 +440,61 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
   return null;
 }
 
+/** 供测试与即时提醒快路径：解析用户句中的可执行时间点（相对或绝对）。 */
+export function parseScheduleTimeFromPrompt(text: string): Date | null {
+  return parseDateTimeFromPrompt(text);
+}
+
+const RELATIVE_TIME_STRIP_RE =
+  /(?:半(?:个)?(?:小时|钟头)|\d+\s*秒(?:钟)?|[一二两三四五六七八九十]{1,3}|\d+)\s*(?:个)?(?:分钟|小时|钟头)(?:后|之后|以内)?|半(?:个)?(?:小时|钟头)(?:后|之后)?/g;
+
+function parseRelativeDateTimeFromPrompt(text: string): Date | null {
+  const normalized = text.trim();
+  const now = new Date();
+
+  if (/半(?:个)?(?:小时|钟头)(?:后|之后)?/.test(normalized)) {
+    return new Date(now.getTime() + 30 * 60 * 1000);
+  }
+
+  const secNum = normalized.match(/(\d+)\s*秒(?:钟)?(?:后|之后)?/);
+  if (secNum) {
+    const n = Number(secNum[1]);
+    if (n > 0 && n <= 86400) return new Date(now.getTime() + n * 1000);
+  }
+
+  const minNum = normalized.match(/(\d+)\s*分钟(?:后|之后|以内)?/);
+  if (minNum) {
+    const n = Number(minNum[1]);
+    if (n > 0 && n <= 10080) return new Date(now.getTime() + n * 60 * 1000);
+  }
+
+  const cnMin = normalized.match(
+    /([一二两三四五六七八九十]{1,3})\s*(?:个)?分钟(?:后|之后|以内)?/,
+  );
+  if (cnMin) {
+    const n = parseChineseHourToken(cnMin[1]!);
+    if (n != null && n > 0 && n <= 10080) return new Date(now.getTime() + n * 60 * 1000);
+  }
+
+  const hrNum = normalized.match(/(\d+)\s*小时(?:后|之后)?/);
+  if (hrNum) {
+    const n = Number(hrNum[1]);
+    if (n > 0 && n <= 168) return new Date(now.getTime() + n * 3600 * 1000);
+  }
+
+  const cnHr = normalized.match(/([一二两三四五六七八九十]{1,3})\s*(?:个)?小时(?:后|之后)?/);
+  if (cnHr) {
+    const n = parseChineseHourToken(cnHr[1]!);
+    if (n != null && n > 0 && n <= 168) return new Date(now.getTime() + n * 3600 * 1000);
+  }
+
+  return null;
+}
+
 function parseDateTimeFromPrompt(text: string): Date | null {
+  const relative = parseRelativeDateTimeFromPrompt(text);
+  if (relative) return relative;
+
   const hm = parseHourMinuteFromPrompt(text);
   if (!hm) return null;
   const { hours, minutes } = hm;

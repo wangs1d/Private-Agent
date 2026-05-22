@@ -1,9 +1,12 @@
 /**
- * 多 Agent 监控 API 路由
- * 提供性能指标查询、执行历史、优化建议等
+ * 主 Agent 委派监控 API（路径 `/api/multi-agent/*` 保留兼容）
  */
 
 import type { FastifyInstance } from "fastify";
+import {
+  isMasterAgentDelegationEnabled,
+  isMasterAgentDelegationVerbose,
+} from "../../agent/master-agent-delegate-env.js";
 import type { AgentCore } from "../../services/agent-core.js";
 
 export function registerMultiAgentMonitorRoutes(app: FastifyInstance, deps: { agentCore?: AgentCore }): void {
@@ -61,15 +64,18 @@ export function registerMultiAgentMonitorRoutes(app: FastifyInstance, deps: { ag
    * 获取整体状态
    */
   app.get("/api/multi-agent/status", async (request, reply) => {
+    const enabled = isMasterAgentDelegationEnabled();
     return {
       ok: true,
-      enabled: true,
-      message: "多 Agent 系统已启用（KIMI 模型作为主脑）",
+      enabled,
+      message: enabled ?
+        "主 Agent 委派已启用（主 Agent 通过 master_invoke_sub_agent 串行调用子 Agent）"
+      : "主 Agent 委派未启用",
       config: {
-        enableSubAgents: true,
-        maxParallelTasks: process.env.MAX_PARALLEL_SUBTASKS || "5",
+        enableSubAgents: enabled,
+        maxParallelTasks: "1",
         taskTimeoutMs: process.env.SUBTASK_TIMEOUT_MS || "60000",
-        verbose: process.env.MULTI_AGENT_VERBOSE === "true" || process.env.MULTI_AGENT_VERBOSE === "1",
+        verbose: isMasterAgentDelegationVerbose(),
       },
       timestamp: new Date().toISOString(),
     };

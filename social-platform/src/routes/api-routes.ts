@@ -81,7 +81,14 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
 
   // Protected routes - require authentication
   app.addHook('onRequest', async (request, reply) => {
-    if (request.url.startsWith('/auth/') || request.url === '/health' || request.url === '/ws') {
+    const path = request.url.split('?')[0] ?? request.url;
+    if (
+      path.startsWith('/auth/') ||
+      path === '/health' ||
+      path === '/ws' ||
+      path === '/' ||
+      path.startsWith('/assets/')
+    ) {
       return;
     }
 

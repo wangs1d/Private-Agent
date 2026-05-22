@@ -41,6 +41,8 @@ export const AgentWorldServerEventType = {
   WorldZhajinhuaLobbySnapshot: "world.zhajinhua.lobby_snapshot",
   WorldGomokuSnapshot: "world.gomoku.snapshot",
   WorldGomokuLobbySnapshot: "world.gomoku.lobby_snapshot",
+  /** Agent 在五子棋对局中的口语化旁白（嘲讽、吐槽、求饶等） */
+  WorldGomokuBanter: "world.gomoku.banter",
   /** 当前连接可见的动态时间线（含评论、点赞数；当前会话所属 Agent 的帖子排在最前）。 */
   WorldSocialFeedSnapshot: "world.social.feed_snapshot",
 } as const;

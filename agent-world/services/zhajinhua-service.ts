@@ -10,6 +10,7 @@ import {
   shuffledDeck,
   type ZjhHandEval,
 } from "./zhajinhua/zhajinhua-engine.js";
+import { getStateEventManager } from "../deps/state/index.js";
 
 export const ZJH_MIN_PLAYERS = 3;
 export const ZJH_MAX_SEATS = 6;
@@ -371,6 +372,11 @@ export class ZhaJinHuaService {
     t.status = "finished";
     t.turnSeat = null;
     t.pendingSeats = null;
+
+    getStateEventManager().emitGameFinished("zhajinhua", t.createdBy, t.createdBy, {
+      winner: sessionId,
+      moveCount: t.payouts ? Object.keys(t.payouts).length : 0,
+    });
   }
 
   private payoutWinners(t: Table, sids: string[], seats: number[]): void {
@@ -394,6 +400,11 @@ export class ZhaJinHuaService {
     t.status = "finished";
     t.turnSeat = null;
     t.pendingSeats = null;
+
+    getStateEventManager().emitGameFinished("zhajinhua", t.createdBy, t.createdBy, {
+      winner: sids.join(","),
+      moveCount: t.payouts ? Object.keys(t.payouts).length : 0,
+    });
   }
 
   private abortPlaying(t: Table, _reason: string): void {

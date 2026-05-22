@@ -5,6 +5,7 @@ import {
   chatSkillEnabledBodySchema,
   chatSkillsQuerySchema,
 } from "../../schemas/api.js";
+import { prefersChatWebHtml, readChatWebIndexHtml } from "./chat-web.js";
 import type { HttpRouteDeps } from "./types.js";
 
 function resolveActorKey(q: Record<string, unknown> | undefined): string | undefined {
@@ -92,14 +93,21 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   const { toolRegistry, skillManager, worldService, scheduleIntentService } = deps;
   const toolsDeps = { toolRegistry, skillManager, worldService };
 
-  app.get("/chat", async () => ({
-    domain: "chat",
-    websocketPath: "/ws",
-    toolsPath: "/chat/tools",
-    legacyToolsPath: "/tools",
-    skillsLibraryPath: "/chat/skills",
-    desktopBridgeSyncPath: "/chat/desktop-bridge/sync",
-  }));
+  app.get("/chat", async (request, reply) => {
+    const accept = request.headers.accept;
+    if (prefersChatWebHtml(typeof accept === "string" ? accept : accept?.[0])) {
+      void reply.type("text/html; charset=utf-8");
+      return readChatWebIndexHtml();
+    }
+    return {
+      domain: "chat",
+      websocketPath: "/ws",
+      toolsPath: "/chat/tools",
+      legacyToolsPath: "/tools",
+      skillsLibraryPath: "/chat/skills",
+      desktopBridgeSyncPath: "/chat/desktop-bridge/sync",
+    };
+  });
 
   app.get("/chat/desktop-bridge/sync", async (request, reply) => {
     const q = request.query as Record<string, unknown> | undefined;

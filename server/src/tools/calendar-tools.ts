@@ -75,11 +75,13 @@ export function registerCalendarTools(
       return {
         ok: true,
         matched: true,
+        summary: "日程已写入",
         taskId: task.taskId,
         title: task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         recurrence: task.recurrence,
+        reminderMessage: task.reminderMessage,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -98,13 +100,18 @@ export function registerCalendarTools(
     if (!title || !description || !runAt) {
       return { ok: false, error: "title、description、runAt（ISO 时间字符串）必填" };
     }
-    if (kindRaw !== "reminder" && kindRaw !== "action" && kindRaw !== "weather_brief") {
-      return { ok: false, error: "kind 须为 reminder、action 或 weather_brief" };
+    if (
+      kindRaw !== "reminder" &&
+      kindRaw !== "action" &&
+      kindRaw !== "weather_brief" &&
+      kindRaw !== "agent_task"
+    ) {
+      return { ok: false, error: "kind 须为 reminder、action、weather_brief 或 agent_task" };
     }
-    if (!["none", "daily", "weekly"].includes(recurrenceRaw)) {
-      return { ok: false, error: "recurrence 须为 none、daily 或 weekly" };
+    if (!["none", "daily", "weekly", "yearly"].includes(recurrenceRaw)) {
+      return { ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" };
     }
-    const recurrence = recurrenceRaw as "none" | "daily" | "weekly";
+    const recurrence = recurrenceRaw as "none" | "daily" | "weekly" | "yearly";
     try {
       if (kindRaw === "reminder") {
         const reminderMessage = String(input.reminderMessage ?? description).trim();
@@ -120,11 +127,14 @@ export function registerCalendarTools(
         });
         return {
           ok: true,
+          matched: true,
+          summary: "提醒已写入日程",
           taskId: task.taskId,
           title: task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           recurrence: task.recurrence,
+          reminderMessage: task.reminderMessage,
         };
       }
       if (kindRaw === "weather_brief") {
@@ -139,6 +149,35 @@ export function registerCalendarTools(
         });
         return {
           ok: true,
+          matched: true,
+          summary: "日程已写入",
+          taskId: task.taskId,
+          title: task.title,
+          kind: task.kind,
+          nextRunAt: task.nextRunAt,
+          recurrence: task.recurrence,
+        };
+      }
+      if (kindRaw === "agent_task") {
+        const agentTaskIn = input.agentTask as Record<string, unknown> | undefined;
+        const prompt = String(input.prompt ?? agentTaskIn?.prompt ?? description).trim();
+        if (!prompt) return { ok: false, error: "agent_task 任务需要提供 prompt 或 agentTask.prompt" };
+        const accessModeRaw = String(agentTaskIn?.accessMode ?? input.accessMode ?? "sandbox").trim();
+        const accessMode = accessModeRaw === "full" ? "full" : "sandbox";
+        const task = await scheduleTaskService.createTask({
+          sessionId,
+          title,
+          description,
+          kind: "agent_task",
+          runAt,
+          recurrence,
+          timezone,
+          agentTask: { prompt, accessMode },
+        });
+        return {
+          ok: true,
+          matched: true,
+          summary: "Agent 自动化任务已写入日程",
           taskId: task.taskId,
           title: task.title,
           kind: task.kind,
@@ -165,6 +204,8 @@ export function registerCalendarTools(
       });
       return {
         ok: true,
+        matched: true,
+        summary: "日程已写入",
         taskId: task.taskId,
         title: task.title,
         kind: task.kind,

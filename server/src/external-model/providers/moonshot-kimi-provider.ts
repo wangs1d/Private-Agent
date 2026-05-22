@@ -2,14 +2,15 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import {
-  appendAgentToolCallingSystemSuffix,
   buildLayeredSystemPrompt,
+  finalizeChatSystemPrompt,
 } from "../../agent/prompt-builder.js";
 import {
   streamCompletionWithDoudizhuTools,
 } from "../openai-compatible-tool-loop.js";
 import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
+import { getChatThreadStore } from "../chat-thread-store.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -20,6 +21,10 @@ import type {
 
 const SYSTEM_PROMPT =
   "You are Kimi, an AI assistant provided by Moonshot AI. You are proficient in Chinese and English conversations. You provide users with safe, helpful, and accurate answers. You will reject any requests involving terrorism, racism, or explicit content. Moonshot AI is a proper noun and should not be translated.";
+
+function kimiExtraBody(streamOpts?: AgentStreamOptions): Record<string, unknown> | undefined {
+  return streamOpts?.disableThinking ? { thinking: { type: "disabled" } } : undefined;
+}
 
 /**
  * Moonshot OpenAI 兼容 API（Kimi 模型）。
@@ -32,13 +37,12 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
 
   private readonly client: OpenAI | null;
   private readonly model: string;
-  private readonly history = new Map<string, ChatCompletionMessageParam[]>();
-  private readonly maxTurnMessages = 48;
+  private readonly threads = getChatThreadStore();
 
   constructor() {
     const apiKey = process.env.MOONSHOT_API_KEY?.trim();
     const baseURL = (process.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1").trim();
-    this.model = (process.env.MOONSHOT_MODEL ?? "kimi-k2.5").trim();
+    this.model = (process.env.MOONSHOT_MODEL ?? "moonshot-v1-8k").trim();
     this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
   }
 
@@ -47,24 +51,24 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
   }
 
   clearSession(sessionId: string): void {
-    this.history.delete(sessionId);
+    this.threads.clearSession(sessionId);
+  }
+
+  appendThreadTurn(
+    sessionId: string,
+    userTurn: ChatUserTurn,
+    assistantText: string,
+    maxThreadMessages?: number,
+  ): void {
+    this.threads.appendTurn(sessionId, SYSTEM_PROMPT, userTurn, assistantText, maxThreadMessages);
   }
 
   private thread(sessionId: string): ChatCompletionMessageParam[] {
-    let t = this.history.get(sessionId);
-    if (!t) {
-      t = [{ role: "system", content: SYSTEM_PROMPT }];
-      this.history.set(sessionId, t);
-    }
-    return t;
+    return this.threads.thread(sessionId, SYSTEM_PROMPT);
   }
 
-  private trimThread(msgs: ChatCompletionMessageParam[]): void {
-    if (msgs.length <= 1 + this.maxTurnMessages) return;
-    const sys = msgs[0];
-    const rest = msgs.slice(1).slice(-this.maxTurnMessages);
-    msgs.length = 0;
-    msgs.push(sys, ...rest);
+  private trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
+    this.threads.trimThread(msgs, maxMessages);
   }
 
   async streamCompletion(
@@ -77,34 +81,55 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     if (!this.client) {
       throw new Error("MOONSHOT_API_KEY is not set");
     }
-    const msgs = this.thread(sessionId);
-    let sysContent = buildLayeredSystemPrompt(SYSTEM_PROMPT, streamOpts?.promptContext?.memory);
-    if (tools) {
-      sysContent = appendAgentToolCallingSystemSuffix(sysContent);
-    }
-    msgs[0] = { role: "system", content: sysContent };
+    const ephemeral = streamOpts?.ephemeralTurn === true;
+    const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
     const startLen = msgs.length;
+
+    const overrideSys = streamOpts?.systemPromptOverride?.trim();
+    const baseContent = overrideSys
+      ? overrideSys
+      : buildLayeredSystemPrompt(SYSTEM_PROMPT, streamOpts?.promptContext?.memory);
+    const sysContent = finalizeChatSystemPrompt(baseContent, {
+      tools: Boolean(tools && !overrideSys),
+      masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+    });
+    if (ephemeral || msgs.length === 0) {
+      msgs.push({ role: "system", content: sysContent });
+    } else {
+      msgs[0] = { role: "system", content: sysContent };
+    }
     msgs.push({ role: "user", content: openAiUserContentFromTurn(userTurn) });
-    this.trimThread(msgs);
+    if (!ephemeral) {
+      this.trimThread(msgs, streamOpts?.maxThreadMessages);
+    }
+
+    const model = streamOpts?.modelOverride?.trim() || this.model;
 
     if (tools) {
       try {
         const mergedTools = resolveChatToolsForStream(streamOpts);
         const full = await streamCompletionWithDoudizhuTools(
           this.client,
-          this.model,
+          model,
           msgs,
           onDelta,
           tools,
           {
             onAfterToolBatch: streamOpts?.toolLoop?.onAfterToolBatch,
             tools: mergedTools,
+            maxRounds: streamOpts?.toolLoop?.maxRounds,
+            extraBody: kimiExtraBody(streamOpts),
           },
         );
-        this.trimThread(msgs);
+        if (!ephemeral) {
+          this.trimThread(msgs, streamOpts?.maxThreadMessages);
+          this.threads.afterTurnCompleted(sessionId, msgs);
+        }
         return full;
       } catch (e) {
-        msgs.length = startLen;
+        if (!ephemeral) {
+          msgs.length = startLen;
+        }
         throw e;
       }
     }
@@ -112,9 +137,10 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     let stream;
     try {
       stream = await this.client.chat.completions.create({
-        model: this.model,
+        model,
         messages: msgs,
         stream: true,
+        ...(kimiExtraBody(streamOpts) ? { extra_body: kimiExtraBody(streamOpts) } : {}),
       });
     } catch (e) {
       msgs.length = startLen;
@@ -136,7 +162,10 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     }
 
     msgs.push({ role: "assistant", content: full });
-    this.trimThread(msgs);
+    if (!ephemeral) {
+      this.trimThread(msgs, streamOpts?.maxThreadMessages);
+      this.threads.afterTurnCompleted(sessionId, msgs);
+    }
     return full;
   }
 }

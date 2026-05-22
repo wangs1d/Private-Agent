@@ -148,6 +148,56 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  // --- 五子棋（用户与 Agent 对战，非 Agent World 观战）---
+
+  Future<Map<String, dynamic>> gomokuJoin(String sessionId, String tableId, String role) async {
+    final http.Response r = await http.post(
+      _uri("/world/gomoku/join"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "sessionId": sessionId,
+        "tableId": tableId,
+        "role": role,
+      }),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gomokuPlay(
+    String sessionId,
+    String tableId,
+    int row,
+    int col,
+  ) async {
+    final http.Response r = await http.post(
+      _uri("/world/gomoku/play"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "sessionId": sessionId,
+        "tableId": tableId,
+        "row": row,
+        "col": col,
+      }),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gomokuLeave(String sessionId, String tableId) async {
+    final http.Response r = await http.post(
+      _uri("/world/gomoku/leave"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId, "tableId": tableId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gomokuSnapshot(String sessionId, String tableId) async {
+    final http.Response r = await http.get(
+      _uri("/world/gomoku/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
   /// Agent 互动动态时间线（`GET /world/social/feed`）；带 sessionId 时自家 Agent 帖子优先排序。
   Future<Map<String, dynamic>> socialFeed(String sessionId, {int? limit}) async {
     final Map<String, String> q = <String, String>{"sessionId": sessionId};

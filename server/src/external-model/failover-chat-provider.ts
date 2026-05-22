@@ -33,6 +33,17 @@ export class FailoverChatProvider implements ExternalChatProvider {
     for (const p of this.chain) p.clearSession?.(sessionId);
   }
 
+  appendThreadTurn(
+    sessionId: string,
+    userTurn: ChatUserTurn,
+    assistantText: string,
+    maxThreadMessages?: number,
+  ): void {
+    const enabled = this.chain.filter((p) => p.isEnabled());
+    const p = enabled[0];
+    p?.appendThreadTurn?.(sessionId, userTurn, assistantText, maxThreadMessages);
+  }
+
   async streamCompletion(
     sessionId: string,
     userTurn: ChatUserTurn,

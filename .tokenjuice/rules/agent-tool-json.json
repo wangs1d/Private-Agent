@@ -1,0 +1,26 @@
+{
+  "id": "private-ai-agent-tool-json",
+  "family": "generic-json",
+  "description": "Compact large JSON tool results from Private AI Agent registry tools",
+  "priority": 50,
+  "match": {
+    "toolNames": [
+      "web.fetch_page",
+      "web.search",
+      "schedule.list",
+      "schedule.create",
+      "world.list_rooms",
+      "aip.query",
+      "life.budget"
+    ]
+  },
+  "summarize": {
+    "head": 40,
+    "tail": 12
+  },
+  "transforms": {
+    "stripAnsi": true,
+    "dedupeAdjacent": true,
+    "trimEmptyEdges": true
+  }
+}

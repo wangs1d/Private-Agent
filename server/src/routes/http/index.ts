@@ -10,6 +10,7 @@ import { registerSystemRoutes } from "./system.js";
 import { registerScheduleRoutes } from "./schedule.js";
 import { registerWalletRoutes } from "./wallet.js";
 import { registerWeatherRoutes } from "./weather.js";
+import { registerGeoRoutes } from "./geo.js";
 import { registerPhoneRoutes } from "./phone.js";
 import {
   registerWorldDoudizhuRoutes,
@@ -20,6 +21,8 @@ import {
   registerWorldSocialRoutes,
   registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
+import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
+import { registerChatWeb } from "./chat-web.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -33,6 +36,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerInfoRoutes(app, deps);
   registerScheduleRoutes(app, deps);
   registerWeatherRoutes(app, deps);
+  registerGeoRoutes(app);
   registerPhoneRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
@@ -42,6 +46,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWorldZhajinhuaRoutes(app, deps);
   registerWorldGomokuRoutes(app, deps);
   registerWorldSocialRoutes(app, deps);
+  registerGomokuPlayWeb(app);
+  registerChatWeb(app);
   registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);

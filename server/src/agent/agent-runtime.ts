@@ -6,7 +6,7 @@ import { AgentCore } from "../services/agent-core.js";
 import type { SkillManager } from "../skills/index.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
-import type { NarrativeHybridRetrievalService } from "../services/narrative-hybrid-retrieval-service.js";
+import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 
@@ -22,7 +22,7 @@ export type AgentCoreDependencies = {
   hermesEvolutionLoopService?: HermesEvolutionLoopService | null;
   worldService?: WorldService | null;
   skillManager?: SkillManager | null;
-  narrativeHybrid?: NarrativeHybridRetrievalService | null;
+  narrativeMemory?: NarrativeMemoryPort | null;
   trajectorySkillPromotion?: TrajectorySkillPromotionService | null;
   virtualPhoneService?: VirtualPhoneService | null;
 };
@@ -39,7 +39,7 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.hermesEvolutionLoopService ?? null,
     deps.worldService ?? null,
     deps.skillManager ?? null,
-    deps.narrativeHybrid ?? null,
+    deps.narrativeMemory ?? null,
     deps.trajectorySkillPromotion ?? null,
     deps.virtualPhoneService ?? null,
   );

@@ -241,14 +241,14 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                       shape: BoxShape.circle,
                       gradient: RadialGradient(
                         colors: [
-                          _isRecognizing 
-                            ? Colors.purple.withOpacity(_opacityAnimation.value)
+                          _isRecognizing
+                            ? Colors.grey.withOpacity(_opacityAnimation.value)
                             : Colors.black.withOpacity(_opacityAnimation.value),
                           _isRecognizing
-                            ? const Color(0xFF4A148C).withOpacity(_opacityAnimation.value * 0.8)
+                            ? const Color(0xFF616161).withOpacity(_opacityAnimation.value * 0.8)
                             : const Color(0xFF1A1A1A).withOpacity(_opacityAnimation.value * 0.8),
                           _isRecognizing
-                            ? const Color(0xFF311B92).withOpacity(_opacityAnimation.value * 0.6)
+                            ? const Color(0xFF757575).withOpacity(_opacityAnimation.value * 0.6)
                             : const Color(0xFF0D0D0D).withOpacity(_opacityAnimation.value * 0.6),
                         ],
                         stops: const [0.0, 0.5, 1.0],
@@ -260,13 +260,13 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                           offset: const Offset(0, 10),
                         ),
                         BoxShadow(
-                          color: (_isRecognizing ? Colors.purple : Colors.white)
+                          color: (_isRecognizing ? Colors.grey : Colors.white)
                               .withOpacity(_opacityAnimation.value * 0.1),
                           blurRadius: 30,
                           spreadRadius: 5,
                         ),
                         BoxShadow(
-                          color: (_isRecognizing ? Colors.purple : Colors.white)
+                          color: (_isRecognizing ? Colors.grey : Colors.white)
                               .withOpacity(_opacityAnimation.value * 0.05),
                           blurRadius: 15,
                           offset: const Offset(0, -5),
@@ -277,7 +277,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                       child: Icon(
                         Icons.face,
                         size: 80,
-                        color: (_isRecognizing ? Colors.purple : Colors.white)
+                        color: (_isRecognizing ? Colors.grey : Colors.white)
                             .withOpacity(_opacityAnimation.value * 0.5),
                       ),
                     ),
@@ -307,7 +307,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                   Text(
                     '检测到: $_lastDetectedAction',
                     style: TextStyle(
-                      color: Colors.purple.withOpacity(0.8),
+                      color: Colors.grey.withOpacity(0.8),
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),

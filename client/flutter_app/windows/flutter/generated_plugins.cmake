@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   file_selector_windows
+  geolocator_windows
   isar_flutter_libs
   permission_handler_windows
   speech_to_text_windows

@@ -463,11 +463,12 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-21T23:00:00.000Z",
-      "nextRunAt": "2026-05-21T23:00:00.000Z",
+      "nextRunAt": "2026-05-22T23:00:00.000Z",
       "status": "active",
       "reminderMessage": "该起床啦！新的一天开始了~",
       "createdAt": "2026-05-20T17:24:40.603Z",
-      "updatedAt": "2026-05-20T17:24:40.603Z"
+      "updatedAt": "2026-05-22T06:29:22.115Z",
+      "lastRunAt": "2026-05-22T06:29:22.115Z"
     },
     {
       "taskId": "8eefeb1b-cbec-429e-8483-4bbdad68e3e8",
@@ -478,11 +479,60 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-20T23:00:00.000Z",
-      "nextRunAt": "2026-05-20T23:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "reminderMessage": "该起床啦！新的一天开始啦~ ☀️",
       "createdAt": "2026-05-20T17:42:53.753Z",
-      "updatedAt": "2026-05-20T17:42:53.753Z"
+      "updatedAt": "2026-05-21T07:57:14.174Z",
+      "lastRunAt": "2026-05-21T07:57:14.174Z"
+    },
+    {
+      "taskId": "f6644f18-6707-48f4-9245-d086fa2e07b7",
+      "sessionId": "session-mvp-001",
+      "title": "AI 提醒任务",
+      "description": "一分钟后提醒我吃药",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-21T11:48:46.614Z",
+      "nextRunAt": null,
+      "status": "completed",
+      "reminderMessage": "吃药",
+      "createdAt": "2026-05-21T11:47:46.615Z",
+      "updatedAt": "2026-05-21T11:48:47.605Z",
+      "lastRunAt": "2026-05-21T11:48:47.605Z"
+    },
+    {
+      "taskId": "c2e37255-e6b3-423b-81f7-0430a8092a8e",
+      "sessionId": "session-mvp-001",
+      "title": "AI 提醒任务",
+      "description": "一小时后喊我起床",
+      "kind": "reminder",
+      "recurrence": "daily",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-21T12:48:07.557Z",
+      "nextRunAt": "2026-05-22T12:48:07.557Z",
+      "status": "active",
+      "reminderMessage": "喊我",
+      "createdAt": "2026-05-21T11:48:07.557Z",
+      "updatedAt": "2026-05-21T14:04:04.726Z",
+      "lastRunAt": "2026-05-21T14:04:04.726Z"
+    },
+    {
+      "taskId": "75c715c9-b9df-4d5c-811f-d003cb42ef33",
+      "sessionId": "session-mvp-001",
+      "title": "吃药",
+      "description": "一分钟后提醒我吃药",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-21T15:47:43.044Z",
+      "nextRunAt": null,
+      "status": "completed",
+      "reminderMessage": "吃药",
+      "createdAt": "2026-05-21T15:46:43.045Z",
+      "updatedAt": "2026-05-21T15:47:43.167Z",
+      "lastRunAt": "2026-05-21T15:47:43.167Z"
     }
   ],
   "runs": [
@@ -536,6 +586,71 @@
         "type": "reminder",
         "title": "妈妈的生日提醒",
         "message": "明天是妈妈（母亲）的生日（即将57岁）！别忘了送上祝福哦 🎂"
+      }
+    },
+    {
+      "runId": "4fcf7d80-208a-48c0-bc88-844e8e5e24ad",
+      "taskId": "8eefeb1b-cbec-429e-8483-4bbdad68e3e8",
+      "plannedAt": "2026-05-20T23:00:00.000Z",
+      "startedAt": "2026-05-21T07:57:14.173Z",
+      "endedAt": "2026-05-21T07:57:14.173Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "起床提醒",
+        "message": "该起床啦！新的一天开始啦~ ☀️"
+      }
+    },
+    {
+      "runId": "bbf7de55-3910-404e-9a49-af49ee274eb2",
+      "taskId": "f6644f18-6707-48f4-9245-d086fa2e07b7",
+      "plannedAt": "2026-05-21T11:48:46.614Z",
+      "startedAt": "2026-05-21T11:48:47.605Z",
+      "endedAt": "2026-05-21T11:48:47.605Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "AI 提醒任务",
+        "message": "吃药"
+      }
+    },
+    {
+      "runId": "cc0c17fc-77bd-4420-9774-a88f207ca8f2",
+      "taskId": "c2e37255-e6b3-423b-81f7-0430a8092a8e",
+      "plannedAt": "2026-05-21T12:48:07.557Z",
+      "startedAt": "2026-05-21T14:04:04.726Z",
+      "endedAt": "2026-05-21T14:04:04.726Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "AI 提醒任务",
+        "message": "喊我"
+      }
+    },
+    {
+      "runId": "37506235-6d87-4caa-8485-4c17bfb4802e",
+      "taskId": "75c715c9-b9df-4d5c-811f-d003cb42ef33",
+      "plannedAt": "2026-05-21T15:47:43.044Z",
+      "startedAt": "2026-05-21T15:47:43.167Z",
+      "endedAt": "2026-05-21T15:47:43.167Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "吃药",
+        "message": "吃药"
+      }
+    },
+    {
+      "runId": "272f37ab-d124-4fa9-b0d4-edd4c6e8f2a3",
+      "taskId": "950b01bf-ffb4-42a5-aa9b-41596422a1d4",
+      "plannedAt": "2026-05-21T23:00:00.000Z",
+      "startedAt": "2026-05-22T06:29:22.114Z",
+      "endedAt": "2026-05-22T06:29:22.115Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "起床提醒",
+        "message": "该起床啦！新的一天开始了~"
       }
     }
   ]

@@ -436,7 +436,10 @@ class _FeaturedRow extends StatelessWidget {
       builder: (BuildContext context, BoxConstraints bc) {
         final bool stack = bc.maxWidth < 560;
         final Widget left = Container(
-          height: stack ? null : 140,
+          constraints: BoxConstraints(
+            minHeight: stack ? 100 : 160,
+            maxHeight: stack ? double.infinity : 160,
+          ),
           width: double.infinity,
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -489,7 +492,10 @@ class _FeaturedRow extends StatelessWidget {
                 : "@编辑推荐";
 
         final Widget right = Container(
-          height: stack ? null : 140,
+          constraints: BoxConstraints(
+            minHeight: stack ? 100 : 160,
+            maxHeight: stack ? double.infinity : 160,
+          ),
           width: double.infinity,
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -682,6 +688,7 @@ class _SkillMarketCard extends StatelessWidget {
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -729,7 +736,7 @@ class _SkillMarketCard extends StatelessWidget {
                           ),
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Text(
                       desc.isEmpty ? "—" : desc,
                       maxLines: 2,
@@ -739,7 +746,7 @@ class _SkillMarketCard extends StatelessWidget {
                         height: 1.35,
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(height: 4),
                     Row(
                       children: <Widget>[
                         Text(

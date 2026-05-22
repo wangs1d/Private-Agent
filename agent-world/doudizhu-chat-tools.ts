@@ -38,7 +38,167 @@ const WORLD_OPEN_REGISTRY_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 注册、房间、市场（用户与 Agent World 全量工具共用）。 */
+/** Agent World 自由市场：技能商店（须先完成开放式注册）。 */
+const WORLD_FREE_MARKET_SKILL_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.enter",
+      description:
+        "进入 Agent World 自由市场场景（技能商店与 A2A 外包同属此域）。须已完成 world.open_registry 注册；返回当前世界点数 agentWorldCredits。",
+      parameters: {
+        type: "object",
+        properties: {
+          roomId: { type: "string", description: "可选，共享房 wr-...；缺省为当前用户个人房" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.list_skill_listings",
+      description:
+        "列出技能商店可购目录（内置 skill + 社区上架 skill）。visit=true 时同时进入自由市场场景。返回 items（skillId、displayName、price、owned 等）与 agentWorldCredits。",
+      parameters: {
+        type: "object",
+        properties: {
+          visit: { type: "boolean", description: "为 true 时先进入自由市场再拉列表" },
+          roomId: { type: "string", description: "可选，共享房 wr-..." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.purchase_skill",
+      description:
+        "用世界点数为用户购买并启用某技能（扣 agentWorldCredits）。用户明确要求购买且同意扣点后再调用；大额或首次购买前应用自然语言确认。",
+      parameters: {
+        type: "object",
+        properties: {
+          skillId: { type: "string", description: "目录中的 skillId" },
+          roomId: { type: "string", description: "可选，共享房 wr-..." },
+          expectedRevision: { type: "integer", description: "可选，乐观并发 revision" },
+        },
+        required: ["skillId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** Agent World 自由市场：A2A 任务契约（与技能商店同属 world.free_market.*）。 */
+const WORLD_FREE_MARKET_A2A_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.list_contracts",
+      description: "列出 A2A 外包契约（filter: open 开放中 | mine 与我相关）。",
+      parameters: {
+        type: "object",
+        properties: {
+          filter: { type: "string", enum: ["open", "mine"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.create_contract",
+      description: "发布 A2A 任务契约（扣世界点数 escrow）。",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          specification: { type: "string" },
+          rewardCredits: { type: "number" },
+          assigneeSessionId: { type: "string", description: "可选，指定承接方" },
+        },
+        required: ["title", "specification", "rewardCredits"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.accept_contract",
+      description: "承接方接受契约。",
+      parameters: {
+        type: "object",
+        properties: { contractId: { type: "string" } },
+        required: ["contractId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.deliver_contract",
+      description: "承接方提交交付物。",
+      parameters: {
+        type: "object",
+        properties: {
+          contractId: { type: "string" },
+          deliverable: { type: "string" },
+        },
+        required: ["contractId", "deliverable"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.complete_contract",
+      description: "发布方确认完成并结算。",
+      parameters: {
+        type: "object",
+        properties: { contractId: { type: "string" } },
+        required: ["contractId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.reject_delivery",
+      description: "发布方拒绝交付并要求修改。",
+      parameters: {
+        type: "object",
+        properties: {
+          contractId: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["contractId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.free_market.cancel_contract",
+      description: "发布方取消契约。",
+      parameters: {
+        type: "object",
+        properties: { contractId: { type: "string" } },
+        required: ["contractId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** 注册、房间、点数审计（Agent World 核心）。 */
 const AGENT_WORLD_CORE_CHAT_TOOLS: ChatCompletionTool[] = [
   ...WORLD_OPEN_REGISTRY_CHAT_TOOLS,
   {
@@ -98,8 +258,18 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.gomoku.create_table",
       description:
-        "创建五子棋桌（无需 Agent World 注册），你执黑先行。返回 playUrl，必须将 playUrl 完整链接发给用户加入。",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
+        "创建五子棋桌（无需 Agent World 注册）。userColor 指定用户执子：black/white/random（默认 random）。返回 playUrl，请用户进入对局；轮到你时调用 world.gomoku.play。",
+      parameters: {
+        type: "object",
+        properties: {
+          userColor: {
+            type: "string",
+            enum: ["black", "white", "random"],
+            description: "用户执子颜色；用户说执黑/先手用 black，执白/后手用 white，未说明用 random",
+          },
+        },
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -520,43 +690,56 @@ const WORLD_SOCIAL_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 与用户对话时可用的世界工具：五子棋（无需 Agent World 注册）。 */
-export const USER_FACING_AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = [
-  ...GOMOKU_CHAT_TOOLS,
-];
+function dedupeChatToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
+  const seen = new Set<string>();
+  const out: ChatCompletionTool[] = [];
+  for (const tool of tools) {
+    if (tool.type !== "function" || !tool.function?.name) continue;
+    if (seen.has(tool.function.name)) continue;
+    seen.add(tool.function.name);
+    out.push(tool);
+  }
+  return out;
+}
 
 /**
- * 供 Chat Completions `tools` 使用：含斗地主/炸金花（Agent World 内 Agent 间牌局）。
- * 面向终端用户的对话请使用 `USER_FACING_AGENT_WORLD_CHAT_TOOLS`。
+ * Agent World 全量对话工具（单一模块，不按子功能拆分注册）。
+ * App 侧栏「Agent World」「技能商店」等同属此世界，统一 `world.*` 前缀。
  */
-export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
+export const AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = dedupeChatToolsByName([
   ...AGENT_WORLD_CORE_CHAT_TOOLS,
+  ...WORLD_FREE_MARKET_SKILL_CHAT_TOOLS,
+  ...WORLD_FREE_MARKET_A2A_CHAT_TOOLS,
+  ...WORLD_SOCIAL_CHAT_TOOLS,
   ...AGENT_WORLD_A2A_CARD_GAME_CHAT_TOOLS,
   ...GOMOKU_CHAT_TOOLS,
-  ...WORLD_SOCIAL_CHAT_TOOLS,
-];
+]);
 
-const AGENT_WORLD_OPEN_REGISTRY_SUFFIX =
-  "\n\n【Agent World 开放式注册】若调用 world.free_market.* / world.social.* / world.doudizhu.* / world.zhajinhua.* 等失败并提示未注册：优先 world.open_registry.get_challenge → 按 challenge.task 计算 SHA-256 → world.open_registry.submit；若服务端开启占位开关，可 world.open_registry.agent_quick 一键注册（仅开发/内网）。五子棋 world.gomoku.* 无需注册。";
+/** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */
+export const USER_FACING_AGENT_WORLD_CHAT_TOOLS = AGENT_WORLD_CHAT_TOOLS;
 
-const USER_AGENT_GAME_SUFFIX =
-  "\n\n【与用户对战·五子棋】用户说想下棋时：无需 Agent World 注册，直接 world.gomoku.create_table 开桌（你执黑）。工具返回 playUrl 即为用户进入对局的完整网页链接，必须把 playUrl 原文发给用户（不要只给 tableId 或工具调用说明）。用户打开 playUrl 后以白棋加入；你通过 world.gomoku.play 落子。不要向用户推荐斗地主、炸金花。";
+/** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */
+export const DOUDIZHU_CHAT_TOOLS = AGENT_WORLD_CHAT_TOOLS;
 
-const AGENT_WORLD_A2A_GAME_SUFFIX =
-  "\n\n【Agent World 内 Agent 间牌局】斗地主 world.doudizhu.*、炸金花 world.zhajinhua.*（3–6 人，注为世界点数）仅供你与 Agent World 中其它 Agent 协调对战；终端用户不能作为选手入局，最多观战。开桌或加入后工具会返回 watchUrl，需要观战时请把 watchUrl 发给相关方。";
+/** @deprecated 已并入 {@link AGENT_WORLD_CHAT_TOOLS} */
+export const WORLD_FREE_MARKET_USER_CHAT_TOOLS = WORLD_FREE_MARKET_SKILL_CHAT_TOOLS;
 
-const WORLD_SOCIAL_SUFFIX =
-  "\n\n【互动平台】多 Agent 类推文：world.social.get_feed / post（https 或本地上传 mediaUrl）/ comment / like_toggle / upload_media（Base64）/ delete_post / report；HTTP 另有 GET 时间线、POST 上传、删帖、举报。用户端与 WebSocket 事件 world.social.* 对齐。\n\n你解析意图后调用工具并简要回复。";
+const USER_AGENT_LINK_SUFFIX =
+  "\n\n【Agent Link · 好友联络】对应 App 侧栏「Agent Link」（与 Agent World 独立）。工具：agent.link.*；发消息 agent.send_to_peer / aip.dispatch。加好友前须用户同意。";
 
-/** 注入主 Agent / 用户会话 system 的工具说明（不含 Agent 间牌局操作指引）。 */
-export const USER_AGENT_TOOL_SYSTEM_SUFFIX = USER_AGENT_GAME_SUFFIX;
+/** Agent World 作为单一世界模块的说明（不按技能店/社交/牌局逐条拆分能力边界）。 */
+const USER_AGENT_AGENT_WORLD_SUFFIX =
+  "\n\n【Agent World · 统一世界模块】Agent World 是独立的多 Agent 网站/经济环境，与宿主钱包 wallet.*、日程、Agent Link 并列。App 里「Agent World」「技能商店」等入口都是同一世界的不同页面，**全部用 world.* 工具**，不要说「我没有技能商店/社交/牌局」。\n" +
+  "货币：世界点数 agentWorldCredits（≠ 用户真实资金钱包）。\n" +
+  "未注册：world.open_registry.get_challenge → submit（开发可 agent_quick）。\n" +
+  "已注册后按意图选用工具族（操作前优先 get_snapshot）：world.open_registry.* / world.room.* / world.free_market.*（技能商店、A2A 契约、点数审计）/ world.social.* / world.doudizhu.* / world.zhajinhua.* / world.gomoku.*（与用户下棋可无需注册）。\n" +
+  "扣点、购技能、发帖、发布契约前须用户同意。牌局类：用户一般可观战/协调，不当选手。";
 
-/** 含斗地主/炸金花的完整说明（独立 Agent World 进程等场景）。 */
-export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX =
-  AGENT_WORLD_OPEN_REGISTRY_SUFFIX +
-  "\n\n【游戏】用户只能通过对话表达意图。与用户仅下五子棋 world.gomoku.*。斗地主 world.doudizhu.*；炸金花 3–6 人用 world.zhajinhua.*（注为世界点数，牌面 id 为「点数-花色」2–14 与 0–3，无王）。" +
-  AGENT_WORLD_A2A_GAME_SUFFIX +
-  WORLD_SOCIAL_SUFFIX;
+/** 注入主 Agent / 用户会话 system 的工具说明。 */
+export const USER_AGENT_TOOL_SYSTEM_SUFFIX = USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX;
+
+/** 独立 Agent World 进程等场景（与宿主对话说明一致）。 */
+export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX = USER_AGENT_AGENT_WORLD_SUFFIX;
 
 /** @deprecated 请使用 `USER_AGENT_TOOL_SYSTEM_SUFFIX`（用户对话）或 `AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX`（全量）。 */
 export const DOUDIZHU_TOOL_SYSTEM_SUFFIX = AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX;

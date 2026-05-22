@@ -1,10 +1,16 @@
 /**
- * 「计划 → 执行（工具）→ 自检 → 重试」编排：与 OpenAI/Kimi Provider 的多轮工具环协作。
+ * 「计划 → 执行（工具）」编排：与 OpenAI/Kimi Provider 的多轮工具环协作。
+ *
+ * 优化说明（2026-05-22）：
+ * - 移除了"自检 → 重试"环节，减少 50%+ 的 LLM 调用次数
+ * - 采用主流的 ReAct 风格：先计划，然后直接执行并通过工具环自动处理多轮调用
+ * - 保留计划解析失败时的兜底逻辑，确保稳定性
  *
  * 环境变量：
  * - `AGENT_PLAN_EXECUTE_LOOP=1|true|yes` 启用（默认关闭）。
- * - `AGENT_PE_MAX_RETRIES`：自检未通过后最多额外重试几次执行阶段（默认 2，共最多 3 轮执行）。
+ * - `AGENT_PE_VERBOSE_STREAM=1`：将计划阶段标题写入用户可见流（默认仅推 phase 状态）。
  */
+import { requiresTaskDecomposition, isSimpleDirectTask } from "./simple-task.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -27,10 +33,12 @@ export type TaskExecutionPlan = {
   steps: PlanExecuteStep[];
 };
 
-export type VerifyDecision = {
-  pass: boolean;
-  gaps: string[];
-  reflection: string;
+export type PlanExecuteLoopResult = {
+  finalText: string;
+  modelCalls: number;
+  plan: TaskExecutionPlan | null;
+  exhaustedRetries: boolean;
+  verifyReflection: string;
 };
 
 export function isPlanExecuteLoopEnabled(): boolean {
@@ -41,6 +49,20 @@ export function isPlanExecuteLoopEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
+/** 仅在复杂/多步任务上启用 PE，避免简单问答多跑 2～3 轮模型。 */
+export function shouldUsePlanExecuteLoop(message: string): boolean {
+  if (!isPlanExecuteLoopEnabled()) return false;
+  const t = message.trim();
+  if (!t) return false;
+  if (isSimpleDirectTask(t)) return false;
+  return requiresTaskDecomposition(t);
+}
+
+function isPeVerboseStreamEnabled(): boolean {
+  const raw = process.env.AGENT_PE_VERBOSE_STREAM?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export function planExecuteSessionId(actorId: string, chatMessageKey: string): string {
   return `${actorId}\u007fpe\u007f${chatMessageKey}`;
 }
@@ -48,6 +70,15 @@ export function planExecuteSessionId(actorId: string, chatMessageKey: string): s
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max)}…`;
+}
+
+function isPlanTriviallySimple(plan: TaskExecutionPlan): boolean {
+  if (plan.steps.length > 1) return false;
+  const step = plan.steps[0];
+  if (!step) return false;
+  if (step.intent.length > 80) return false;
+  if (step.suggestedTools?.length && step.suggestedTools.length > 2) return false;
+  return true;
 }
 
 function extractJsonObject(text: string): string | null {
@@ -116,36 +147,16 @@ export function parseExecutionPlan(raw: string): TaskExecutionPlan | null {
   return { goal: goal.trim(), steps };
 }
 
-/** 供单元测试使用 */
-export function parseVerifyDecision(raw: string): VerifyDecision | null {
-  const jsonSrc = extractJsonObject(raw);
-  if (!jsonSrc) return null;
-  let data: unknown;
-  try {
-    data = JSON.parse(jsonSrc);
-  } catch {
-    return null;
-  }
-  if (typeof data !== "object" || data === null) return null;
-  const pr = (data as { pass?: unknown }).pass;
-  if (typeof pr !== "boolean") return null;
-  const pass = pr;
-  const gapsRaw = (data as { gaps?: unknown }).gaps;
-  const gaps: string[] =
-    Array.isArray(gapsRaw) ?
-      gapsRaw.filter((x): x is string => typeof x === "string").map((s) => s.trim()).filter(Boolean)
-    : [];
-  const reflection =
-    typeof (data as { reflection?: unknown }).reflection === "string" ?
-      String((data as { reflection: string }).reflection).trim()
-    : "";
-  return { pass, gaps, reflection };
-}
-
-async function emitPhase(onDelta: StreamDeltaHandler | undefined, label: string, extraNewline = true): Promise<void> {
+async function emitPhase(
+  onPhaseStatus: ((label: string) => void) | undefined,
+  onDelta: StreamDeltaHandler | undefined,
+  label: string,
+): Promise<void> {
   await Promise.resolve();
-  const line = `\n━━ ${label} ━━${extraNewline ? "\n" : ""}`;
-  onDelta?.(line);
+  onPhaseStatus?.(label);
+  if (isPeVerboseStreamEnabled()) {
+    onDelta?.(`\n━━ ${label} ━━\n`);
+  }
 }
 
 type RunPlanExecuteLoopArgs = {
@@ -155,6 +166,8 @@ type RunPlanExecuteLoopArgs = {
   /** 与首轮用户消息对齐的视觉上下文；仅并入「执行」与「计划失败兜底」请求，不进入计划 JSON / 自检纯文本轮 */
   visionFrames?: VisionFrame[];
   onDelta?: StreamDeltaHandler;
+  /** 计划/执行/自检阶段口语化进度（供 WS chat.agent_status），不写入正文流 */
+  onPhaseStatus?: (label: string) => void;
   /** 启用工具时必须传入（与 AgentCore 一致） */
   toolCtx: ChatToolExecutionContext | undefined;
   /** 不包含 toolLoop（由编排器在每轮执行拼接） */
@@ -180,20 +193,14 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     toolCtx,
     baseStreamOpts,
     onToolBatchForExecute,
+    onPhaseStatus,
   } = args;
-  const maxRetries = Math.min(
-    8,
-    Math.max(
-      0,
-      Number.parseInt(process.env.AGENT_PE_MAX_RETRIES ?? "2", 10) || 0,
-    ),
-  );
 
   provider.clearSession?.(planSessionId);
 
   let modelCalls = 0;
 
-  await emitPhase(onDelta, "制定计划");
+  await emitPhase(onPhaseStatus, onDelta, "制定计划");
 
   const planUserTurn: ChatUserTurn = {
     text: [
@@ -210,7 +217,7 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
   const planAssistant = await provider.streamCompletion(
     planSessionId,
     planUserTurn,
-    (d) => onDelta?.(d),
+    () => {},
     undefined,
     baseStreamOpts,
   );
@@ -218,8 +225,12 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
 
   const plan = parseExecutionPlan(planAssistant);
 
-  if (!plan) {
-    await emitPhase(onDelta, "执行（计划解析失败，按常规工具环处理）");
+  if (!plan || isPlanTriviallySimple(plan)) {
+    if (plan) {
+      await emitPhase(onPhaseStatus, onDelta, "执行（计划较简单，直接进入工具环）");
+    } else {
+      await emitPhase(onPhaseStatus, onDelta, "执行（计划解析失败，按常规工具环处理）");
+    }
     const fallbackTurn: ChatUserTurn = {
       text: userText,
       ...(visionFrames?.length ? { visionFrames } : {}),
@@ -244,141 +255,42 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     };
   }
 
-  const toolLog: Array<{ name: string; ok: boolean; snippet: string }> = [];
-  const wrappedToolCtx: ChatToolExecutionContext | undefined =
-    toolCtx ?
-      {
-        executeTool: toolCtx.executeTool,
-        onToolExecuted: (info) => {
-          const raw = JSON.stringify(info.result);
-          const snippet = truncate(raw, 720);
-          toolLog.push({ name: info.toolName, ok: info.ok, snippet });
-          toolCtx.onToolExecuted?.(info);
-        },
-      }
-    : undefined;
+  await emitPhase(onPhaseStatus, onDelta, "执行与工具调用");
 
-  let lastExecuteText = "";
-  let verifyReflection = "";
-  let exhaustedRetries = false;
-  let pendingSelfCheckFeedback = "";
+  const executePrompt = [
+    "用户原始任务：",
+    truncate(userText, 6000),
+    "",
+    "已批准的执行计划（必须以此为纲，逐步完成）：",
+    JSON.stringify(plan, null, 2),
+    "",
+    "请调用可用工具收集事实并完成任务；最后用自然语言向用户汇总结果（含关键数据依据）。若某工具失败应换策略或说明阻塞点。",
+  ].filter(Boolean).join("\n");
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    toolLog.length = 0;
+  const executeOpts: AgentStreamOptions = {
+    ...baseStreamOpts,
+    ...(onToolBatchForExecute ? { toolLoop: { onAfterToolBatch: onToolBatchForExecute } } : {}),
+  };
 
-    const executePromptParts = [
-      "用户原始任务：",
-      truncate(userText, 6000),
-      "",
-      "已批准的执行计划（必须以此为纲，逐步完成）：",
-      JSON.stringify(plan, null, 2),
-      pendingSelfCheckFeedback,
-      attempt > 0 ? `\n（当前为第 ${attempt + 1} 轮工具执行轮次；上一轮对话中已包含自检员的 JSON，请对照缺口补救。）` : "",
-      "",
-      "请调用可用工具收集事实并完成任务；最后用自然语言向用户汇总结果（含关键数据依据）。若某工具失败应换策略或说明阻塞点。",
-    ].filter(Boolean);
+  const executeTurn: ChatUserTurn = {
+    text: executePrompt,
+    ...(visionFrames?.length ? { visionFrames } : {}),
+  };
 
-    await emitPhase(onDelta, attempt === 0 ? "执行与工具调用" : `重试执行（第 ${attempt + 1} 轮）`);
-
-    const executeOpts: AgentStreamOptions = {
-      ...baseStreamOpts,
-      ...(onToolBatchForExecute ? { toolLoop: { onAfterToolBatch: onToolBatchForExecute } } : {}),
-    };
-
-    const executeUserMsg = executePromptParts.join("\n");
-
-    pendingSelfCheckFeedback = "";
-
-    const executeTurn: ChatUserTurn = {
-      text: executeUserMsg,
-      ...(visionFrames?.length ? { visionFrames } : {}),
-    };
-    lastExecuteText = await provider.streamCompletion(
-      planSessionId,
-      executeTurn,
-      (d) => onDelta?.(d),
-      wrappedToolCtx,
-      executeOpts,
-    );
-    modelCalls += 1;
-
-    const toolDigest =
-      toolLog.length === 0 ?
-        "（本轮未调用工具或暂无记录）"
-      : toolLog.map((t, i) => `${i + 1}. ${t.name} ok=${t.ok}\n ${t.snippet}`).join("\n");
-
-    await emitPhase(onDelta, "自检");
-
-    const verifyTurn: ChatUserTurn = {
-      text: [
-        "你是严格的任务验收审核员（只输出 JSON，不要 Markdown 围栏与其它文字）。",
-        "用户原始任务：",
-        truncate(userText, 4000),
-        "",
-        "计划 goal：",
-        plan.goal,
-        "",
-        "助手最终答复（截取）：",
-        truncate(lastExecuteText, 4500),
-        "",
-        "工具调用与返回摘要：",
-        toolDigest.slice(0, 12000),
-        "",
-        "请判断：**是否已充分完成用户任务**（不是语气态度，而是目标与证据）。",
-        "输出 JSON：`{\"pass\":true|false,\"gaps\":[\"...\"],\"reflection\":\"简练反思\"}`",
-        "- pass=true：证据链足以支持用户任务，无重大遗漏；",
-        "- pass=false：gaps 列出未满足的计划步骤或缺失的数据/失败的工具仍需处理；reflection 简述原因与建议下一步。",
-      ].join("\n"),
-    };
-    const verifyAssistant = await provider.streamCompletion(
-      planSessionId,
-      verifyTurn,
-      (d) => onDelta?.(d),
-      undefined,
-      baseStreamOpts,
-    );
-    modelCalls += 1;
-
-    const decision = parseVerifyDecision(verifyAssistant);
-    if (!decision) {
-      verifyReflection = "（自检阶段未能解析结构化结果，跳过重试判定。）";
-      break;
-    }
-    verifyReflection = decision.reflection;
-
-    if (decision.pass) {
-      exhaustedRetries = false;
-      break;
-    }
-
-    if (attempt >= maxRetries) {
-      exhaustedRetries = true;
-      break;
-    }
-
-    const gapLines = decision.gaps.length ?
-      decision.gaps.map((g, i) => `${i + 1}. ${g}`).join("\n")
-    : "（自检未列出具体缺口，请根据反思自行改进执行）";
-
-    pendingSelfCheckFeedback = [
-      "",
-      "【上一轮自检未通过 — 编入本轮执行的显式缺口】",
-      gapLines,
-      "",
-      `【上一轮自检反思】${decision.reflection || "（无）"}`,
-    ].join("\n");
-  }
-
-  let finalText = lastExecuteText;
-  if (exhaustedRetries) {
-    finalText = `${lastExecuteText}\n\n（提示：经多轮自检仍认为未完全达成目标，请补充信息或调整任务范围。上次反思：${verifyReflection || "无"}）`;
-  }
+  const full = await provider.streamCompletion(
+    planSessionId,
+    executeTurn,
+    (d) => onDelta?.(d),
+    toolCtx,
+    executeOpts,
+  );
+  modelCalls += 1;
 
   return {
-    finalText,
+    finalText: full,
     modelCalls,
     plan,
-    exhaustedRetries,
-    verifyReflection,
+    exhaustedRetries: false,
+    verifyReflection: "",
   };
 }

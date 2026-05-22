@@ -22,17 +22,28 @@ import {
   ZhaJinHuaService,
 } from "@private-ai-agent/agent-world";
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
+import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
 import { AgentAccountService } from "../services/agent-account-service.js";
 import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
+import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
+import {
+  formatAgentRuntimeConfigSummary,
+  getAgentRuntimeConfig,
+} from "../agent/agent-runtime-config.js";
 import { AgentEvolutionMemoryService } from "../services/agent-evolution-memory-service.js";
 import { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
 import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
+import { createNarrativeMemoryPort } from "../services/narrative-memory-port.js";
+import { getMemoryTreeRuntime } from "../memory-tree/index.js";
+import { compactObserveLine } from "../tokenjuice/compactor.js";
 import { TrajectoryPromotionPipeline, parseSkillPromotionPipelineMode } from "../services/skill-promotion-pipeline.js";
 import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
 import { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
+import { GomokuAgentTurnService } from "../services/gomoku-agent-turn-service.js";
+import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
 import { AuditService } from "../services/audit-service.js";
@@ -54,6 +65,7 @@ import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
+import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
@@ -70,6 +82,7 @@ import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { ServerEventType } from "../protocol.js";
+import { formatReminderDisplayMessage } from "../tools/schedule-user-reply.js";
 import { WeatherPrefsService } from "../services/weather-prefs-service.js";
 import { WeatherService } from "../services/weather-service.js";
 import { ComputeQuotaService } from "../services/compute-quota-service.js";
@@ -95,6 +108,7 @@ export async function createAppServices(): Promise<AppServices> {
   await app.register(multipart, { limits: { fileSize: 12 * 1024 * 1024 } });
 
   const sessionService = new SessionService();
+  await getChatThreadPersistence().load();
   const scheduleTaskService = new ScheduleTaskService();
   const weatherService = new WeatherService();
   const weatherPrefsService = new WeatherPrefsService();
@@ -159,6 +173,38 @@ export async function createAppServices(): Promise<AppServices> {
   const ttsService = new TtsService();
   const virtualPhoneService = new VirtualPhoneService(ttsService, wsConnectionRegistry, agentPairingService);
 
+  scheduleTaskService.setReminderHandler(async (task, message) => {
+    const displayMessage = formatReminderDisplayMessage(message);
+    wsConnectionRegistry.trySend(
+      task.sessionId,
+      JSON.stringify({
+        type: ServerEventType.ScheduleReminderFired,
+        payload: {
+          taskId: task.taskId,
+          title: task.title,
+          message: displayMessage,
+          reminderMessage: message,
+          recurrence: task.recurrence,
+          status: task.status,
+          nextRunAt: task.nextRunAt,
+        },
+      }),
+    );
+    const wakeLike = /起床|叫醒|喊我|叫我/.test(message) || /起床|叫醒|喊我/.test(task.description);
+    if (wakeLike) {
+      const phone = virtualPhoneService.getPhoneForActor(task.sessionId);
+      if (phone) {
+        void virtualPhoneService.placeCall({
+          fromActorId: task.sessionId,
+          toPhone: phone,
+          transcript: displayMessage,
+          ringStyle: "reminder",
+          initiatedBy: "agent",
+        });
+      }
+    }
+  });
+
   const aipService = new AipService(agentRelayService, wsConnectionRegistry, agentPairingService, auditService);
   const agentAccountService = new AgentAccountService();
   const emailRegistrationService = new EmailRegistrationService();
@@ -178,6 +224,7 @@ export async function createAppServices(): Promise<AppServices> {
   
   registerAgentAccountTools(toolRegistry, agentAccountService);
   registerWalletTools(toolRegistry);
+  registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
   registerAgentRelayTools(
     toolRegistry,
     agentRelayService,
@@ -237,7 +284,13 @@ export async function createAppServices(): Promise<AppServices> {
   toolRegistry.setWorldService(worldService);
 
   const evolutionMemory = new AgentEvolutionMemoryService(agentMemorySyncService);
-  const narrativeHybrid = createNarrativeHybridRetrievalDefault();
+  const memoryTreeRuntime = getMemoryTreeRuntime();
+  const legacyNarrativeHybrid = createNarrativeHybridRetrievalDefault();
+  const narrativeMemory = createNarrativeMemoryPort({
+    memoryTreeIngest: memoryTreeRuntime?.ingest ?? null,
+    memoryTreeRetrieval: memoryTreeRuntime?.retrieval ?? null,
+    legacy: legacyNarrativeHybrid,
+  });
 
   const pipelineMode = parseSkillPromotionPipelineMode();
   const skillPromoValidateDeps = { skillManager, skillMetadataValidator };
@@ -255,12 +308,22 @@ export async function createAppServices(): Promise<AppServices> {
 
   const hermesEvolutionLoopService = new HermesEvolutionLoopService(agentMemorySyncService, {
     onObserveForNarrative: (actorId, line) => {
-      void narrativeHybrid?.ingest(actorId, line, "hermes_observe").catch(() => {});
+      void (async () => {
+        const compacted = await compactObserveLine("hermes.observe", line);
+        await narrativeMemory?.ingest(actorId, compacted, "hermes:observe");
+      })().catch(() => {});
     },
   });
   worldService.setEvolutionHooks({
     onWorldCreditsCredited: (ev) => {
       evolutionMemory.appendWorldCreditLine(ev.actorSessionId, ev);
+      void narrativeMemory
+        ?.ingest(
+          ev.actorSessionId,
+          `世界入账 +${ev.amount}（${ev.reason}），余额 ${ev.balanceAfter}`,
+          "world:credits",
+        )
+        .catch(() => {});
     },
     onSkillPurchased: (ev) => {
       const m = skillManager.get(ev.skillId);
@@ -270,6 +333,13 @@ export async function createAppServices(): Promise<AppServices> {
         pricePaid: ev.pricePaid,
         balanceAfter: ev.balanceAfter,
       });
+      void narrativeMemory
+        ?.ingest(
+          ev.actorSessionId,
+          `购买技能「${m?.displayName ?? ev.skillId}」（${ev.skillId}）花费 ${ev.pricePaid} 点，余额 ${ev.balanceAfter}`,
+          "world:skill_purchase",
+        )
+        .catch(() => {});
     },
   });
 
@@ -277,6 +347,12 @@ export async function createAppServices(): Promise<AppServices> {
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
+  const promptContextBuilder = new PromptContextBuilder({
+    agentMemorySyncService,
+    worldService,
+    skillManager,
+    virtualPhoneService,
+  });
   const agentCore = createAgentCore({
     toolRegistry,
     externalChat,
@@ -285,10 +361,78 @@ export async function createAppServices(): Promise<AppServices> {
     hermesEvolutionLoopService,
     worldService,
     skillManager,
-    narrativeHybrid,
+    narrativeMemory,
     trajectorySkillPromotion,
     virtualPhoneService,
   });
+  scheduleTaskService.setAgentTaskHandler(async (task) => {
+    const prompt = task.agentTask?.prompt?.trim();
+    if (!prompt) {
+      throw new Error("Agent 自动化任务缺少 prompt");
+    }
+    const accessMode = task.agentTask?.accessMode ?? "sandbox";
+    wsConnectionRegistry.trySend(
+      task.sessionId,
+      JSON.stringify({
+        type: ServerEventType.ScheduleAgentTaskFired,
+        payload: {
+          taskId: task.taskId,
+          title: task.title,
+          status: "started",
+          prompt,
+        },
+      }),
+    );
+    const reply = await agentCore.handleUserMessage(task.sessionId, prompt, {
+      chatUserMessageId: `schedule:${task.taskId}:${Date.now()}`,
+      agentAccessMode: accessMode,
+      onAssistantDelta: (delta) => {
+        wsConnectionRegistry.trySend(
+          task.sessionId,
+          JSON.stringify({
+            type: ServerEventType.ChatAssistantChunk,
+            payload: {
+              messageId: task.taskId,
+              delta,
+              source: "schedule.agent_task",
+            },
+          }),
+        );
+      },
+    });
+    const toolRun = await agentCore.runToolIfNeeded(task.sessionId, reply, {
+      chatUserMessageId: `schedule:${task.taskId}:tool`,
+      agentAccessMode: accessMode,
+    });
+    const result = {
+      type: "agent_task",
+      ok: toolRun.ok,
+      title: task.title,
+      prompt,
+      text: reply.text,
+      toolName: reply.toolName,
+      toolResult: toolRun.result,
+    };
+    wsConnectionRegistry.trySend(
+      task.sessionId,
+      JSON.stringify({
+        type: ServerEventType.ScheduleAgentTaskFired,
+        payload: {
+          taskId: task.taskId,
+          title: task.title,
+          status: toolRun.ok ? "completed" : "failed",
+          result,
+        },
+      }),
+    );
+    return result;
+  });
+  new GomokuAgentTurnService(gomokuService, toolRegistry, externalChat, promptContextBuilder);
+
+  const proactiveCenter = new ProactiveAgentCenter(externalChat, promptContextBuilder);
+  proactiveCenter.start();
+
+  app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
   const visionPeriodicScheduler = new VisionPeriodicScheduler({
     agentCore,
@@ -363,6 +507,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
+    virtualPhoneService,
   });
 
   return {

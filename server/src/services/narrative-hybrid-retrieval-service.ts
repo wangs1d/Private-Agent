@@ -102,7 +102,7 @@ export class NarrativeHybridRetrievalService {
 
     const bmHits = this.bm(actorId).search(q, this.bmTop);
     let vecChunkIds: { id: string }[] = [];
-    if (this.qdrant.isEnabled() && this.embeddingKey) {
+    if (bmHits.length < this.fuseTop && this.qdrant.isEnabled() && this.embeddingKey) {
       try {
         const { vector } = await fetchOpenAiCompatibleEmbedding({
           apiKey: this.embeddingKey,

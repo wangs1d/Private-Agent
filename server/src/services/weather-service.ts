@@ -125,6 +125,17 @@ export async function geocodeCity(name: string): Promise<GeocodeHit | null> {
   return hit;
 }
 
+export type ReverseGeocodeHit = {
+  city: string;
+  district: string;
+  region: string;
+  country: string;
+  timezone: string;
+};
+
+/** @deprecated 使用 reverse-geocode-service */
+export { reverseGeocodeCoordinates } from "./reverse-geocode-service.js";
+
 export class WeatherService {
   async getBrief(
     latitude: number,

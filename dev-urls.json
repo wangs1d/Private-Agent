@@ -1,0 +1,16 @@
+{
+  "description": "本地开发默认 URL（与 start-with-agent-world.ps1 / npm run dev:all 一致）",
+  "server": {
+    "http": "http://127.0.0.1:3000",
+    "ws": "ws://127.0.0.1:3000/ws",
+    "chatWeb": "http://127.0.0.1:3000/chat"
+  },
+  "agentWorldStandalone": "http://127.0.0.1:3333",
+  "socialPlatform": "http://127.0.0.1:3001",
+  "flutterDartDefine": {
+    "HTTP_BASE": "http://127.0.0.1:3000",
+    "WS_URL": "ws://127.0.0.1:3000/ws",
+    "AGENT_WORLD_URL": "http://127.0.0.1:3333",
+    "AGENT_LINK_URL": "http://127.0.0.1:3001"
+  }
+}

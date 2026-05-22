@@ -29,7 +29,14 @@ export type { DoudizhuTableStatus, DoudizhuTableSummary } from "./services/doudi
 export { ZhaJinHuaService, ZJH_MAX_SEATS, ZJH_MIN_PLAYERS } from "./services/zhajinhua-service.js";
 export type { ZjhTableStatus, ZjhTableSummary } from "./services/zhajinhua-service.js";
 export { GomokuService } from "./services/gomoku-service.js";
-export type { GomokuTableStatus, GomokuTableSummary, GomokuSnapshot } from "./services/gomoku-service.js";
+export type {
+  GomokuAgentTurnHook,
+  GomokuAgentTurnRequest,
+  GomokuBanterLine,
+  GomokuTableStatus,
+  GomokuTableSummary,
+  GomokuSnapshot,
+} from "./services/gomoku-service.js";
 export { SocialFeedService } from "./services/social-feed-service.js";
 export type { SocialCommentRow, SocialMediaType, SocialPostRow, SocialReportRow } from "./services/social-feed-service.js";
 export {
@@ -86,12 +93,14 @@ export {
 } from "./services/world-partition-ws-registry.js";
 export type { PartitionPairingLike, WsSendLike } from "./services/world-partition-ws-registry.js";
 export {
+  AGENT_WORLD_CHAT_TOOLS,
   AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX,
   DOUDIZHU_CHAT_TOOLS,
   DOUDIZHU_TOOL_SYSTEM_SUFFIX,
   GOMOKU_CHAT_TOOLS,
   USER_AGENT_TOOL_SYSTEM_SUFFIX,
   USER_FACING_AGENT_WORLD_CHAT_TOOLS,
+  WORLD_FREE_MARKET_USER_CHAT_TOOLS,
 } from "./doudizhu-chat-tools.js";
 export * from "./schemas.js";
 export type {
@@ -107,3 +116,18 @@ export type {
   ToolRegistryLike,
   WsConnectionRegistryLike,
 } from "./host-types.js";
+export {
+  getStateEventManager,
+  resetStateEventManagerForTests,
+  StateEventManager,
+} from "./deps/state/index.js";
+export type {
+  GameFinishedPayload,
+  IStateManager,
+  StateChangeEvent,
+  StateChangeHandler,
+  StateEventType,
+  StateModule,
+  TaskCompletedPayload,
+  TransactionCompletedPayload,
+} from "./deps/state/types.js";

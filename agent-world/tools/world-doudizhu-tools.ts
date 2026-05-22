@@ -8,6 +8,16 @@ import { worldMutationOpts } from "./world-tool-input.js";
  * 终端用户不直连出牌；用户只在会话中提建议，由模型调用工具。前缀 `world.doudizhu.*`，见 `GET /chat/tools`。
  */
 export function registerWorldDoudizhuTools(registry: ToolRegistryLike, doudizhu: DoudizhuService): void {
+  // 🔴 注册状态连续性约束（见 .trae/rules/project_rules.md）
+  if ('registerStatefulModule' in registry) {
+    (registry as unknown as { registerStatefulModule: (config: import("../deps/tools/tool-registry.js").StatefulToolConfig) => void }).registerStatefulModule({
+      modulePrefix: "world.doudizhu",
+      snapshotToolName: "world.doudizhu.get_snapshot",
+      validStatuses: ["waiting", "bidding", "playing", "finished"],
+      mustReturnSnapshot: true,
+    });
+  }
+
   registry.register("world.doudizhu.list_tables", async (_input, context) => {
     doudizhu.assertAgentWorldEntry(context.sessionId);
     doudizhu.visitHall(context.sessionId);

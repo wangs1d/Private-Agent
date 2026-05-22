@@ -290,7 +290,7 @@ async function createAnnualReminderTask(
     description: reminderMessage,
     kind: "reminder",
     runAt: reminderDate.toISOString(),
-    recurrence: "none", // 暂时设为不重复，后续可以通过 yearly 支持
+    recurrence: "yearly",
     timezone: "Asia/Shanghai",
     reminderMessage,
   });

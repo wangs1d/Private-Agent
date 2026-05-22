@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { clientLocationWireSchema } from "../types/client-location.js";
+
 const visionSourceKindSchema = z.enum(["device_camera", "external_stream", "agent_attachment"]);
 
 /** WebSocket `chat.user_message` 可选附带视觉帧（与 {@link sanitizeVisionFramesFromWire} 对齐）。 */
@@ -22,6 +24,14 @@ export const userMessageSchema = z
     text: z.string(),
     timestamp: z.string().min(1),
     visionFrames: z.array(visionFrameWireSchema).max(16).optional(),
+    /** 被打断的回复上下文，用于整合到下一次回复中 */
+    interruptedContext: z.string().optional(),
+    /** 客户端 IP（前端未上报定位时的兜底） */
+    clientIp: z.string().optional(),
+    /** 前端 GPS / 浏览器定位（优先于 IP） */
+    clientLocation: clientLocationWireSchema.optional(),
+    /** 默认 `sandbox`；`full` 时允许桌面控制、钱包、自编程等高权限工具 */
+    agentAccessMode: z.enum(["sandbox", "full"]).optional(),
   })
   .superRefine((data, ctx) => {
     const hasText = data.text.trim().length > 0;
@@ -161,9 +171,9 @@ export const scheduleTaskCreateBodySchema = z
     sessionId: z.string().min(1),
     title: z.string().min(1).max(120),
     description: z.string().min(1).max(2000),
-    kind: z.enum(["reminder", "action", "weather_brief"]),
+    kind: z.enum(["reminder", "action", "weather_brief", "agent_task"]),
     runAt: z.string().min(1),
-    recurrence: z.enum(["none", "daily", "weekly"]).default("none"),
+    recurrence: z.enum(["none", "daily", "weekly", "yearly"]).default("none"),
     timezone: z.string().min(1).optional(),
     reminderMessage: z.string().min(1).max(500).optional(),
     action: z
@@ -172,6 +182,12 @@ export const scheduleTaskCreateBodySchema = z
         method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
         headers: z.record(z.string()).optional(),
         body: z.unknown().optional(),
+      })
+      .optional(),
+    agentTask: z
+      .object({
+        prompt: z.string().min(1).max(4000),
+        accessMode: z.enum(["sandbox", "full"]).optional(),
       })
       .optional(),
   })
@@ -190,13 +206,20 @@ export const scheduleTaskCreateBodySchema = z
         message: "动作任务必须提供 action.url",
       });
     }
+    if (data.kind === "agent_task" && !data.agentTask?.prompt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["agentTask", "prompt"],
+        message: "Agent 自动化任务必须提供 agentTask.prompt",
+      });
+    }
   });
 
 export const scheduleTaskUpdateBodySchema = z.object({
   title: z.string().min(1).max(120).optional(),
   description: z.string().min(1).max(2000).optional(),
   runAt: z.string().min(1).optional(),
-  recurrence: z.enum(["none", "daily", "weekly"]).optional(),
+  recurrence: z.enum(["none", "daily", "weekly", "yearly"]).optional(),
   timezone: z.string().min(1).optional(),
   reminderMessage: z.string().min(1).max(500).optional(),
   action: z
@@ -205,6 +228,12 @@ export const scheduleTaskUpdateBodySchema = z.object({
       method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
       headers: z.record(z.string()).optional(),
       body: z.unknown().optional(),
+    })
+    .optional(),
+  agentTask: z
+    .object({
+      prompt: z.string().min(1).max(4000),
+      accessMode: z.enum(["sandbox", "full"]).optional(),
     })
     .optional(),
   status: z.enum(["active", "paused", "cancelled"]).optional(),
@@ -287,7 +316,7 @@ export const infoTrackCreateBodySchema = z.object({
   name: z.string().min(1).max(120),
   keywords: z.array(z.string().min(1)).min(1),
   runAt: z.string().optional(),
-  recurrence: z.enum(["none", "daily", "weekly"]).optional(),
+  recurrence: z.enum(["none", "daily", "weekly", "yearly"]).optional(),
 });
 
 export const infoTrackListQuerySchema = z.object({

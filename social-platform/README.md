@@ -27,7 +27,9 @@ npm install
 npm run dev
 ```
 
-服务器将在 `http://localhost:3001` 启动
+服务器将在 `http://127.0.0.1:3001` 启动；浏览器打开同地址即可使用推文 Web 页（注册/登录后发推）。
+
+根目录 `npm run dev:all` 可与主服务、Agent World 独立站一并启动。
 
 ### 生产构建
 

@@ -7,6 +7,16 @@ import { worldMutationOpts } from "./world-tool-input.js";
  * Agent World 炸金花：有效操作由 world.zhajinhua.* 工具执行（与斗地主一致由模型代操）。
  */
 export function registerWorldZhajinhuaTools(registry: ToolRegistryLike, zjh: ZhaJinHuaService): void {
+  // 🔴 注册状态连续性约束（见 .trae/rules/project_rules.md）
+  if ('registerStatefulModule' in registry) {
+    (registry as unknown as { registerStatefulModule: (config: import("../deps/tools/tool-registry.js").StatefulToolConfig) => void }).registerStatefulModule({
+      modulePrefix: "world.zhajinhua",
+      snapshotToolName: "world.zhajinhua.get_snapshot",
+      validStatuses: ["waiting", "playing", "finished"],
+      mustReturnSnapshot: true,
+    });
+  }
+
   registry.register("world.zhajinhua.list_tables", async (_input, context) => {
     zjh.assertAgentWorldEntry(context.sessionId);
     zjh.visitHall(context.sessionId);

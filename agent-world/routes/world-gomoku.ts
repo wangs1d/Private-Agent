@@ -1,11 +1,11 @@
 import type { FastifyInstance } from "fastify";
 
 import { buildGomokuTableUrl } from "../config/world-game-url.js";
-import { replyIfWorldHttpMutationsForbidden } from "../config/world-http-mutations.js";
 import type { HttpRouteDepsLike } from "../host-types.js";
 
 /**
- * Agent World — 五子棋：用户与 Agent 双人对战，15x15 棋盘，黑先白后。
+ * Agent World — 五子棋 API：用户与 Agent 双人对战（15x15，黑先白后）。
+ * 用户 UI 在 `/play/gomoku/{tableId}`，不在 Agent World 观战 SPA。
  */
 export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteDepsLike): void {
   const { gomokuService, worldService } = deps;
@@ -20,10 +20,14 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
   });
 
   app.post("/world/gomoku/tables", async (request, reply) => {
-    if (replyIfWorldHttpMutationsForbidden(reply)) return;
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "");
-    const r = gomokuService.createTable(sessionId);
+    const raw = String(body.userColor ?? body.humanColor ?? "random").trim().toLowerCase();
+    const userColor =
+      raw === "black" || raw === "white" || raw === "random"
+        ? (raw as "black" | "white" | "random")
+        : "random";
+    const r = gomokuService.createTable(sessionId, { userColor });
     if (!r.ok) {
       return reply.code(400).send({ ok: false, reason: r.reason });
     }
@@ -35,7 +39,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
   });
 
   app.post("/world/gomoku/join", async (request, reply) => {
-    if (replyIfWorldHttpMutationsForbidden(reply)) return;
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "");
     const tableId = String(body.tableId ?? "");
@@ -58,7 +61,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
   });
 
   app.post("/world/gomoku/play", async (request, reply) => {
-    if (replyIfWorldHttpMutationsForbidden(reply)) return;
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "");
     const tableId = String(body.tableId ?? "");
@@ -78,7 +80,6 @@ export function registerWorldGomokuRoutes(app: FastifyInstance, deps: HttpRouteD
   });
 
   app.post("/world/gomoku/leave", async (request, reply) => {
-    if (replyIfWorldHttpMutationsForbidden(reply)) return;
     const body = request.body as Record<string, unknown>;
     const sessionId = String(body.sessionId ?? "");
     const tableId = String(body.tableId ?? "");

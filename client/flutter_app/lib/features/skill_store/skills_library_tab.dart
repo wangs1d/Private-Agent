@@ -384,6 +384,7 @@ class _MySkillCard extends StatelessWidget {
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
                       Row(
                         children: <Widget>[
@@ -406,7 +407,7 @@ class _MySkillCard extends StatelessWidget {
                         ],
                       ),
                       if (desc.isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 6),
+                        const SizedBox(height: 4),
                         Text(
                           desc,
                           maxLines: 2,

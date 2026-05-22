@@ -13,6 +13,8 @@ import type { SessionService } from "../services/session-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import { handleChatUserMessageEvent } from "./handlers/chat-user-message.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import {
   AgentWorldClientEventType,
@@ -47,15 +49,33 @@ import {
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
 } from "@private-ai-agent/agent-world";
-import { resolveActorId } from "../agent/actor-id.js";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
-import type { VisionFrame } from "../external-model/types.js";
-import { aipDispatchWsSchema, userMessageSchema, walletRequestSchema } from "../schemas/api.js";
-import { sanitizeVisionFramesFromWire } from "../vision/sanitize-vision-frames.js";
-import { chunkText } from "../utils/text.js";
+import { aipDispatchWsSchema, walletRequestSchema } from "../schemas/api.js";
+
+/**
+ * 从Fastify请求中获取客户端IP地址
+ */
+function getClientIp(request: any): string | undefined {
+  // 首先检查x-forwarded-for头（代理服务器设置）
+  const forwardedFor = request.headers?.["x-forwarded-for"];
+  if (forwardedFor) {
+    // x-forwarded-for可能包含多个IP，取第一个
+    const ips = forwardedFor.split(",");
+    return ips[0]?.trim();
+  }
+  
+  // 检查x-real-ip头
+  const realIp = request.headers?.["x-real-ip"];
+  if (realIp) {
+    return realIp.trim();
+  }
+  
+  // 最后使用socket.remoteAddress
+  return request.socket?.remoteAddress;
+}
 
 export type WsRouteDeps = {
   sessionService: SessionService;
@@ -75,6 +95,7 @@ export type WsRouteDeps = {
   agentMemorySyncService: AgentMemorySyncService;
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
+  virtualPhoneService: VirtualPhoneService;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -96,6 +117,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     agentMemorySyncService,
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
+    virtualPhoneService,
   } = deps;
 
   const broadcastPartitionPresence = (partitionId: string): void => {
@@ -115,6 +137,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     (socket, request) => {
       let boundActorId: string | undefined;
       let initAsDesktopBridge = false;
+      // 获取客户端IP地址
+      const clientIp = getClientIp(request);
       socket.on("close", () => {
         const detached = worldPartitionWsRegistry.detachSocket(socket);
         if (detached) {
@@ -147,6 +171,42 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             JSON.stringify({
               type: ServerEventType.ErrorEvent,
               payload: { code: "BAD_JSON", message: "无法解析事件 JSON" },
+            }),
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.VirtualPhoneUserCall) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const callPl = event.payload as Record<string, unknown>;
+          const toActorId = String(callPl.toActorId ?? "").trim();
+          const userMessage = String(callPl.userMessage ?? callPl.message ?? "").trim();
+          if (!toActorId) {
+            sendUnifiedError("BAD_PHONE_CALL", "缺少 toActorId（目标Agent ID）");
+            return;
+          }
+          const callResult = await virtualPhoneService.handleUserCallAgent({
+            fromUserId: boundActorId,
+            toActorId,
+            userMessage: userMessage || undefined,
+          });
+          if (!callResult.ok) {
+            sendUnifiedError("PHONE_CALL_FAILED", callResult.error ?? "呼叫失败");
+            return;
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.VirtualPhoneCallStatus,
+              payload: {
+                ok: true,
+                callId: callResult.callId,
+                status: "ringing",
+                toActorId,
+                message: "正在呼叫 Agent，请稍候…",
+              },
             }),
           );
           return;
@@ -304,196 +364,17 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         }
 
         if (event.type === ClientEventType.ChatUserMessage) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (initAsDesktopBridge) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "DESKTOP_BRIDGE_NO_CHAT",
-                  message: "桌面桥接连接不能发送 chat.user_message，请使用普通客户端聊天",
-                },
-              }),
-            );
-            return;
-          }
-          const parsed = userMessageSchema.safeParse(event.payload);
-          if (!parsed.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_CHAT_EVENT", message: parsed.error.message },
-              }),
-            );
-            return;
-          }
-          const data = parsed.data;
-          const msgActor = resolveActorId({ userId: data.userId, sessionId: data.sessionId });
-          if (msgActor !== boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "FORBIDDEN", message: "userId/sessionId 与当前连接不一致" },
-              }),
-            );
-            return;
-          }
-          let visionFrames: VisionFrame[] | undefined = undefined;
-          try {
-            visionFrames = sanitizeVisionFramesFromWire(data.visionFrames);
-          } catch (ve) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "INVALID_VISION",
-                  message: ve instanceof Error ? ve.message : String(ve),
-                },
-              }),
-            );
-            return;
-          }
-          const textTrim = data.text.trim();
-          const effectiveText =
-            textTrim ||
-            (visionFrames?.length ?
-              "（用户发送了摄像头/配图画面，请根据图像描述内容并回答。）"
-            : "");
-          await auditService.record({
-            type: ClientEventType.ChatUserMessage,
-            sessionId: msgActor,
-            userId: data.userId,
-            messageId: data.messageId,
-            text: effectiveText,
-          });
-          let chunkSeq = 0;
-          const assistantMessageId = `assistant-${data.messageId}`;
-          const sendAssistantChunk = (chunk: string): void => {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ChatAssistantChunk,
-                payload: {
-                  sessionId: msgActor,
-                  messageId: assistantMessageId,
-                  chunk,
-                  sequence: chunkSeq++,
-                },
-              }),
-            );
-          };
-          try {
-            const reply = await agentCore.handleUserMessage(msgActor, effectiveText, {
-              chatUserMessageId: data.messageId,
-              userId: data.userId,
-              ...(visionFrames?.length ? { visionFrames } : {}),
-              onAssistantDelta: (delta) => {
-                sendAssistantChunk(delta);
-              },
-              onExternalToolExecuted: (info) => {
-                socket.send(
-                  JSON.stringify({
-                    type: ServerEventType.ToolCall,
-                    payload: {
-                      toolName: info.toolName,
-                      input: info.input,
-                      traceId: data.messageId,
-                    },
-                  }),
-                );
-                socket.send(
-                  JSON.stringify({
-                    type: ServerEventType.ToolResult,
-                    payload: {
-                      toolName: info.toolName,
-                      ok: info.ok,
-                      result: info.result,
-                      traceId: data.messageId,
-                    },
-                  }),
-                );
-              },
-            });
-            if (!reply.streamedChunks) {
-              const chunks = chunkText(reply.text, 12);
-              chunks.forEach((chunk) => {
-                sendAssistantChunk(chunk);
-              });
-            }
-
-            if (reply.toolName && reply.toolInput) {
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ToolCall,
-                  payload: {
-                    toolName: reply.toolName,
-                    input: reply.toolInput,
-                    traceId: data.messageId,
-                  },
-                }),
-              );
-              const startedAt = Date.now();
-              const toolResult = await agentCore.runToolIfNeeded(msgActor, reply, {
-                chatUserMessageId: data.messageId,
-                userId: data.userId,
-              });
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ToolResult,
-                  payload: {
-                    toolName: reply.toolName,
-                    ok: toolResult.ok,
-                    result: toolResult.result ?? {},
-                    traceId: data.messageId,
-                    durationMs: Date.now() - startedAt,
-                  },
-                }),
-              );
-            }
-
-            const finalText =
-              reply.text.trim() ||
-              (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
-            if (!reply.text.trim() && chunkSeq === 0) {
-              sendAssistantChunk(finalText);
-            }
-
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ChatAssistantDone,
-                payload: {
-                  sessionId: msgActor,
-                  messageId: assistantMessageId,
-                  finalText,
-                  toolCalls: reply.toolName ? [reply.toolName] : [],
-                },
-              }),
-            );
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error("[WS] chat.user_message failed:", err);
-            sendUnifiedError("CHAT_HANDLER_ERROR", msg, data.messageId);
-            const errText = `处理消息时出错：${msg}`;
-            sendAssistantChunk(errText);
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ChatAssistantDone,
-                payload: {
-                  sessionId: msgActor,
-                  messageId: assistantMessageId,
-                  finalText: errText,
-                  toolCalls: [],
-                },
-              }),
-            );
-          }
+          await handleChatUserMessageEvent(
+            {
+              socket,
+              boundActorId: boundActorId ?? "",
+              initAsDesktopBridge,
+              clientIp,
+              sendUnifiedError,
+            },
+            event.payload,
+            { agentCore, auditService },
+          );
           return;
         }
 
@@ -1359,7 +1240,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedQ.data.requestId,
             payload,
           );
-          connection.socket.send(JSON.stringify({ type: UnifiedServerEventType.QuotaState, payload }));
+          socket.send(JSON.stringify({ type: UnifiedServerEventType.QuotaState, payload }));
           return;
         }
 
@@ -1433,7 +1314,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedMp.data.requestId,
             payload,
           );
-          connection.socket.send(JSON.stringify({ type: UnifiedServerEventType.MemorySnapshot, payload }));
+          socket.send(JSON.stringify({ type: UnifiedServerEventType.MemorySnapshot, payload }));
           return;
         }
 
@@ -1535,7 +1416,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             parsedHd.data.requestId,
             payload,
           );
-          connection.socket.send(JSON.stringify({ type: UnifiedServerEventType.HumanDirectiveAck, payload }));
+          socket.send(JSON.stringify({ type: UnifiedServerEventType.HumanDirectiveAck, payload }));
           return;
         }
 

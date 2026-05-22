@@ -22,6 +22,19 @@ export type PlaceVirtualCallParams = {
   initiatedBy: VirtualPhoneInitiator;
 };
 
+export type CallUserParams = {
+  fromActorId: string;
+  toUserId: string;
+  transcript: string;
+  ringStyle: VirtualPhoneRingStyle;
+};
+
+export type UserCallAgentParams = {
+  fromUserId: string;
+  toActorId: string;
+  userMessage?: string;
+};
+
 export class VirtualPhoneService {
   private readonly byActor = new Map<string, string>();
   private readonly byPhone = new Map<string, string>();
@@ -184,6 +197,104 @@ export class VirtualPhoneService {
       targetActorId,
       fromPhone,
     };
+  }
+
+  /**
+   * Agent 直接呼叫用户（无需用户有虚拟号码）。
+   * 通过 WebSocket 向用户的客户端推送来电事件，附带 TTS 语音。
+   * 用户可在接听后回复文字或语音，实现双向交互式通话。
+   */
+  async callUser(params: CallUserParams): Promise<{
+    ok: boolean;
+    callId?: string;
+    pushed?: boolean;
+    toUserId?: string;
+    fromPhone?: string;
+    error?: string;
+  }> {
+    const fromActorId = params.fromActorId.trim();
+    const toUserId = params.toUserId.trim();
+    if (!fromActorId) {
+      return { ok: false, error: "主叫方 Actor ID 无效" };
+    }
+    if (!toUserId) {
+      return { ok: false, error: "被叫用户 ID 无效" };
+    }
+    const fromPhone = this.byActor.get(fromActorId);
+    const ttsResult = await this.tts.synthesizeMp3Base64(params.transcript);
+    const callId = randomUUID();
+
+    const payload: Record<string, unknown> = {
+      callId,
+      fromActorId,
+      fromPhone: fromPhone ?? null,
+      toUserId,
+      transcript: params.transcript.trim(),
+      ringStyle: params.ringStyle,
+      initiatedBy: "agent" as const,
+      direction: "agent_to_user" as const,
+      tts: ttsResult.ok
+        ? { format: ttsResult.format, base64: ttsResult.base64 }
+        : { format: null, skippedReason: ttsResult.reason },
+      replyEnabled: true,
+    };
+
+    const pushed = this.wsRegistry.trySend(
+      toUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneIncoming,
+        payload,
+      }),
+    );
+
+    return {
+      ok: true,
+      callId,
+      pushed,
+      toUserId,
+      fromPhone: fromPhone ?? undefined,
+    };
+  }
+
+  /**
+   * 用户主动拨打 Agent（通过 WebSocket 或 HTTP 触发）。
+   * 向用户端推送「通话中」状态，同时通知 Agent 有用户来电。
+   * 返回 callId 供后续消息关联。
+   */
+  async handleUserCallAgent(params: UserCallAgentParams): Promise<{
+    ok: boolean;
+    callId?: string;
+    error?: string;
+  }> {
+    const fromUserId = params.fromUserId.trim();
+    const toActorId = params.toActorId.trim();
+    if (!fromUserId) {
+      return { ok: false, error: "用户 ID 无效" };
+    }
+    if (!toActorId) {
+      return { ok: false, error: "目标 Agent ID 无效" };
+    }
+    const toPhone = this.byActor.get(toActorId);
+    const callId = randomUUID();
+
+    const userPayload: Record<string, unknown> = {
+      callId,
+      toActorId,
+      toPhone: toPhone ?? null,
+      userMessage: (params.userMessage ?? "").trim(),
+      direction: "user_to_agent" as const,
+      status: "ringing" as const,
+    };
+
+    this.wsRegistry.trySend(
+      fromUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneCallStatus,
+        payload: userPayload,
+      }),
+    );
+
+    return { ok: true, callId };
   }
 }
 

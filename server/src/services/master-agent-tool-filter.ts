@@ -1,6 +1,8 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { buildMasterSubAgentDelegateChatTools } from "../agent/master-subagent-delegate-tools.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import type { SubAgentCapability } from "./master-agent-types.js";
 
 /** 各子 Agent 均可用的基础工具（注册名，带点号） */
 export const SUBAGENT_SHARED_REGISTRY_TOOLS = [
@@ -37,4 +39,18 @@ export function buildSubAgentChatTools(
     getBuiltinAgentChatTools(),
     new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web"]),
   );
+}
+
+/**
+ * 主 Agent 对话工具：全量内置工具 + 子 Agent 委派（master_invoke_sub_agent / master_list_sub_agents）。
+ */
+export function buildMasterAgentChatTools(
+  capabilities: Iterable<SubAgentCapability>,
+  chatToolsExtra: ChatCompletionTool[] = [],
+): ChatCompletionTool[] {
+  return [
+    ...getBuiltinAgentChatTools(),
+    ...buildMasterSubAgentDelegateChatTools(capabilities),
+    ...chatToolsExtra,
+  ];
 }

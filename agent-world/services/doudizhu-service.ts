@@ -13,6 +13,7 @@ import {
   startRunningGame,
   type RunningGame,
 } from "./doudizhu/doudizhu-engine.js";
+import { getStateEventManager } from "../deps/state/index.js";
 
 export type DoudizhuTableStatus = "waiting" | "playing" | "finished";
 
@@ -340,6 +341,12 @@ export class DoudizhuService {
     }
     t.payouts = payouts;
     t.status = "finished";
+
+    getStateEventManager().emitGameFinished("doudizhu", t.createdBy, t.createdBy, {
+      winner: winnerIsLandlord ? "landlord" : "farmers",
+      loser: winnerIsLandlord ? "farmers" : "landlord",
+      moveCount: t.payouts ? Object.keys(t.payouts).length : 0,
+    });
   }
 
   private abortPlaying(t: Table, _reason: string): void {

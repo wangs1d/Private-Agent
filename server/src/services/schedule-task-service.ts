@@ -1,9 +1,11 @@
 import { randomUUID } from "crypto";
+import { lookup } from "dns/promises";
 import { mkdir, readFile, writeFile } from "fs/promises";
+import { isIP } from "net";
 import { dirname, join } from "path";
 
-export type ScheduleRecurrence = "none" | "daily" | "weekly";
-export type ScheduleTaskKind = "reminder" | "action" | "weather_brief";
+export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly";
+export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_task";
 export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled";
 export type ScheduleRunStatus = "success" | "failed";
 
@@ -12,6 +14,11 @@ export type ScheduleActionConfig = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   headers?: Record<string, string>;
   body?: unknown;
+};
+
+export type ScheduleAgentTaskConfig = {
+  prompt: string;
+  accessMode?: "sandbox" | "full";
 };
 
 export type ScheduleTaskRecord = {
@@ -27,6 +34,7 @@ export type ScheduleTaskRecord = {
   status: ScheduleTaskStatus;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
+  agentTask?: ScheduleAgentTaskConfig;
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
@@ -58,6 +66,7 @@ export type CreateScheduleTaskInput = {
   timezone?: string;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
+  agentTask?: ScheduleAgentTaskConfig;
 };
 
 type UpdateScheduleTaskInput = {
@@ -68,10 +77,18 @@ type UpdateScheduleTaskInput = {
   timezone?: string;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
+  agentTask?: ScheduleAgentTaskConfig;
   status?: Extract<ScheduleTaskStatus, "active" | "paused" | "cancelled">;
 };
 
 export type WeatherBriefHandler = (task: ScheduleTaskRecord) => Promise<Record<string, unknown>>;
+
+export type ScheduleReminderHandler = (
+  task: ScheduleTaskRecord,
+  message: string,
+) => Promise<void>;
+
+export type AgentTaskHandler = (task: ScheduleTaskRecord) => Promise<Record<string, unknown>>;
 
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
@@ -79,6 +96,8 @@ export class ScheduleTaskService {
   private readonly runningTaskIds = new Set<string>();
   private tickHandle: NodeJS.Timeout | undefined;
   private weatherBriefHandler?: WeatherBriefHandler;
+  private reminderHandler?: ScheduleReminderHandler;
+  private agentTaskHandler?: AgentTaskHandler;
 
   private get persistPath(): string {
     return process.env.SCHEDULE_TASKS_FILE ?? join(process.cwd(), "data", "schedule-tasks.json");
@@ -89,6 +108,16 @@ export class ScheduleTaskService {
    */
   setWeatherBriefHandler(handler: WeatherBriefHandler | undefined): void {
     this.weatherBriefHandler = handler;
+  }
+
+  /** 由引导层注入：提醒到点时推送 WebSocket / 虚拟电话等。 */
+  setReminderHandler(handler: ScheduleReminderHandler | undefined): void {
+    this.reminderHandler = handler;
+  }
+
+  /** 由引导层注入：到点后让 Agent 执行一段自动化任务。 */
+  setAgentTaskHandler(handler: AgentTaskHandler | undefined): void {
+    this.agentTaskHandler = handler;
   }
 
   async load(): Promise<void> {
@@ -144,12 +173,16 @@ export class ScheduleTaskService {
     const to = range?.to ? new Date(range.to).getTime() : Number.POSITIVE_INFINITY;
     return Array.from(this.byTaskId.values())
       .filter((task) => task.sessionId === sessionId)
+      .filter((task) => task.status !== "cancelled")
       .filter((task) => {
-        if (!task.nextRunAt) return false;
-        const t = new Date(task.nextRunAt).getTime();
+        const anchor = task.nextRunAt ?? task.runAt;
+        if (!anchor) return false;
+        const t = new Date(anchor).getTime();
         return t >= from && t <= to;
       })
-      .sort((a, b) => (a.nextRunAt ?? "").localeCompare(b.nextRunAt ?? ""));
+      .sort((a, b) =>
+        (a.nextRunAt ?? a.runAt ?? "").localeCompare(b.nextRunAt ?? b.runAt ?? ""),
+      );
   }
 
   listRuns(taskId: string, limit = 20): ScheduleTaskRun[] {
@@ -163,7 +196,7 @@ export class ScheduleTaskService {
 
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {
     const runAt = this.parseRunAt(input.runAt);
-    this.validateKindPayload(input.kind, input.reminderMessage, input.action);
+    this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
     const now = new Date().toISOString();
     const task: ScheduleTaskRecord = {
       taskId: randomUUID(),
@@ -178,6 +211,7 @@ export class ScheduleTaskService {
       status: "active",
       reminderMessage: input.reminderMessage?.trim() || undefined,
       action: input.action,
+      agentTask: input.agentTask,
       createdAt: now,
       updatedAt: now,
     };
@@ -202,6 +236,7 @@ export class ScheduleTaskService {
       timezone: input.timezone?.trim() || task.timezone,
       reminderMessage: input.reminderMessage?.trim() || task.reminderMessage,
       action: input.action ?? task.action,
+      agentTask: input.agentTask ?? task.agentTask,
       updatedAt: new Date().toISOString(),
     };
     if (input.runAt) {
@@ -215,7 +250,7 @@ export class ScheduleTaskService {
         next.nextRunAt = null;
       }
     }
-    this.validateKindPayload(next.kind, next.reminderMessage, next.action);
+    this.validateKindPayload(next.kind, next.reminderMessage, next.action, next.agentTask);
     this.byTaskId.set(taskId, next);
     await this.persist();
     return next;
@@ -257,16 +292,22 @@ export class ScheduleTaskService {
     };
     try {
       if (task.kind === "reminder") {
+        const message = task.reminderMessage || task.description;
         run.output = {
           type: "reminder",
           title: task.title,
-          message: task.reminderMessage || task.description,
+          message,
         };
       } else if (task.kind === "weather_brief") {
         if (!this.weatherBriefHandler) {
           throw new Error("天气简报执行器未配置");
         }
         run.output = await this.weatherBriefHandler(task);
+      } else if (task.kind === "agent_task") {
+        if (!this.agentTaskHandler) {
+          throw new Error("Agent 自动化执行器未配置");
+        }
+        run.output = await this.agentTaskHandler(task);
       } else {
         run.output = await this.executeAction(task);
       }
@@ -281,6 +322,14 @@ export class ScheduleTaskService {
       list.push(run);
       this.runsByTaskId.set(task.taskId, list);
       await this.persist();
+      if (
+        task.kind === "reminder" &&
+        run.status === "success" &&
+        this.reminderHandler
+      ) {
+        const message = task.reminderMessage || task.description;
+        await this.reminderHandler(nextTaskState, message);
+      }
     }
   }
 
@@ -306,8 +355,10 @@ export class ScheduleTaskService {
     const anchor = new Date(updated.nextRunAt ?? updated.runAt);
     if (updated.recurrence === "daily") {
       anchor.setUTCDate(anchor.getUTCDate() + 1);
-    } else {
+    } else if (updated.recurrence === "weekly") {
       anchor.setUTCDate(anchor.getUTCDate() + 7);
+    } else {
+      anchor.setUTCFullYear(anchor.getUTCFullYear() + 1);
     }
     updated.nextRunAt = anchor.toISOString();
     return updated;
@@ -317,6 +368,7 @@ export class ScheduleTaskService {
     if (!task.action?.url) {
       throw new Error("action 任务缺少 url");
     }
+    await assertSafeActionUrl(task.action.url);
     const method = task.action.method ?? "POST";
     const res = await fetch(task.action.url, {
       method,
@@ -353,6 +405,7 @@ export class ScheduleTaskService {
     kind: ScheduleTaskKind,
     reminderMessage?: string,
     action?: ScheduleActionConfig,
+    agentTask?: ScheduleAgentTaskConfig,
   ): void {
     if (kind === "reminder" && !(reminderMessage?.trim() || "").length) {
       throw new Error("提醒任务必须提供 reminderMessage");
@@ -360,8 +413,60 @@ export class ScheduleTaskService {
     if (kind === "action" && !action?.url?.trim()) {
       throw new Error("动作任务必须提供 action.url");
     }
+    if (kind === "agent_task" && !(agentTask?.prompt?.trim() || "").length) {
+      throw new Error("Agent 自动化任务必须提供 agentTask.prompt");
+    }
     if (kind === "weather_brief") {
       return;
     }
   }
+}
+
+async function assertSafeActionUrl(rawUrl: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("action.url 格式无效");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("action.url 仅支持 http/https");
+  }
+  if (process.env.SCHEDULE_ACTION_ALLOW_PRIVATE === "1") {
+    return;
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+    throw new Error("action.url 默认禁止访问 localhost");
+  }
+  const addresses =
+    isIP(hostname) ?
+      [{ address: hostname }]
+    : await lookup(hostname, { all: true, verbatim: false });
+  if (addresses.some((entry) => isPrivateOrLocalAddress(entry.address))) {
+    throw new Error("action.url 默认禁止访问本机或内网地址");
+  }
+}
+
+function isPrivateOrLocalAddress(address: string): boolean {
+  if (address === "::1" || address === "0:0:0:0:0:0:0:1") return true;
+  const lower = address.toLowerCase();
+  if (lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) return true;
+  if (lower.startsWith("::ffff:")) {
+    return isPrivateOrLocalAddress(address.slice("::ffff:".length));
+  }
+  const parts = address.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
 }

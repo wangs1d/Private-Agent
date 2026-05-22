@@ -1,0 +1,53 @@
+/* 与 Flutter AppPalette 五子棋邀请色一致（灰褐，无紫色） */
+:root {
+  --gomoku-card-bg: #322d28;
+  --gomoku-card-border: #4a4540;
+  --gomoku-card-title: #e8e4e0;
+  --gomoku-card-body: #c8c0b8;
+  --gomoku-btn-bg: #403a35;
+  --gomoku-btn-fg: #e8e4e0;
+}
+
+.gomoku-invite {
+  max-width: 320px;
+  margin: 6px 0;
+  padding: 14px;
+  background: var(--gomoku-card-bg);
+  border: 1px solid var(--gomoku-card-border);
+  border-radius: 12px;
+}
+
+.gomoku-invite__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--gomoku-card-title);
+}
+
+.gomoku-invite__body {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--gomoku-card-body);
+}
+
+.gomoku-invite__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 20px;
+  background: var(--gomoku-btn-bg);
+  color: var(--gomoku-btn-fg);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.gomoku-invite__btn:hover {
+  filter: brightness(1.08);
+}

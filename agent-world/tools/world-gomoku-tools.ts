@@ -7,6 +7,16 @@ import { buildGomokuTableUrl } from "../config/world-game-url.js";
  * 前缀 `world.gomoku.*`，见 `GET /chat/tools`。
  */
 export function registerWorldGomokuTools(registry: ToolRegistryLike, gomoku: GomokuService): void {
+  // 🔴 注册状态连续性约束（见 .trae/rules/project_rules.md）
+  if ('registerStatefulModule' in registry) {
+    (registry as unknown as { registerStatefulModule: (config: import("../deps/tools/tool-registry.js").StatefulToolConfig) => void }).registerStatefulModule({
+      modulePrefix: "world.gomoku",
+      snapshotToolName: "world.gomoku.get_snapshot",
+      validStatuses: ["waiting", "playing", "finished"],
+      mustReturnSnapshot: true,
+    });
+  }
+
   registry.register("world.gomoku.list_tables", async (_input, context) => {
     gomoku.assertAgentWorldEntry(context.sessionId);
     gomoku.visitHall(context.sessionId);
@@ -15,20 +25,27 @@ export function registerWorldGomokuTools(registry: ToolRegistryLike, gomoku: Gom
       ok: true,
       summary: "已列出当前五子棋桌（内存态，重启清空）",
       tables,
-      hint: "双人游戏：创建者执黑先行，另一人加入后自动开始。",
+      hint: "双人游戏：开桌时 userColor 定用户黑白，另一人加入后自动开始。",
     };
   });
 
-  registry.register("world.gomoku.create_table", async (_input, context) => {
+  registry.register("world.gomoku.create_table", async (input, context) => {
     gomoku.assertAgentWorldEntry(context.sessionId);
-    const r = gomoku.createTable(context.sessionId);
+    const raw = String(input.userColor ?? input.humanColor ?? "random").trim().toLowerCase();
+    const userColor =
+      raw === "black" || raw === "white" || raw === "random"
+        ? (raw as "black" | "white" | "random")
+        : "random";
+    const r = gomoku.createTable(context.sessionId, { userColor });
     if (!r.ok) throw new Error(r.reason);
     const playUrl = buildGomokuTableUrl(r.table.tableId);
+    const human = r.table.humanColor === "black" ? "黑棋（先手）" : "白棋（后手）";
+    const agent = r.table.agentColor === "black" ? "黑棋（先手）" : "白棋（后手）";
     return {
       ok: true,
       table: r.table,
       playUrl,
-      message: `已创建五子棋桌，你执黑先行。请将 playUrl 发给用户加入（用户执白）：${playUrl}`,
+      message: `棋局已开好：用户${human}，Agent${agent}。客户端会展示「在 App 内进入对局」按钮，勿在回复中重复粘贴 playUrl。`,
     };
   });
 
@@ -52,8 +69,8 @@ export function registerWorldGomokuTools(registry: ToolRegistryLike, gomoku: Gom
       playUrl,
       message:
         role === "player"
-          ? `已加入游戏，你执白棋（后手）。对局链接：${playUrl}`
-          : `已进入观战席。观战链接：${playUrl}`,
+          ? "已加入对局，你执白棋（后手）。点击下方按钮进入对局。"
+          : "已进入观战席。点击下方按钮进入观战。",
     };
   });
 

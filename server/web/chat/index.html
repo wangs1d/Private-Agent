@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent 聊天 · 网页端</title>
+    <link rel="stylesheet" href="/chat/assets/styles.css" />
+    <link rel="stylesheet" href="/chat/assets/gomoku-invite.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <header class="header">Private AI Agent · 网页聊天</header>
+      <p class="status" id="status">初始化…</p>
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <input id="input" type="text" placeholder="发消息，例如：陪我玩五子棋" autocomplete="off" />
+        <button id="send" type="button" disabled>发送</button>
+      </div>
+    </div>
+    <script type="module" src="/chat/assets/app.js"></script>
+  </body>
+</html>

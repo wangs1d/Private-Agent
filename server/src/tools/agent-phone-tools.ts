@@ -53,4 +53,41 @@ export function registerAgentPhoneTools(registry: ToolRegistry, phone: VirtualPh
         : "已生成通话，但对方当前离线或未连接 WebSocket，无法实时振铃",
     };
   });
+
+  registry.register("phone.call_user", async (input, context) => {
+    const actorId = resolveActorId(context);
+    const toUserId = String(input.toUserId ?? input.userId ?? context.userId ?? context.sessionId ?? "").trim();
+    const spokenMessage = String(input.spokenMessage ?? input.message ?? input.transcript ?? "").trim();
+    const ringStyleRaw = String(input.ringStyle ?? "peer").trim().toLowerCase();
+    const ringStyle: VirtualPhoneRingStyle =
+      ringStyleRaw === "reminder" ? "reminder" : "peer";
+
+    if (!toUserId) throw new Error("缺少 toUserId / userId（被叫用户标识）");
+    if (!spokenMessage) throw new Error("缺少 spokenMessage（用户将听到的语音内容）");
+
+    const result = await phone.callUser({
+      fromActorId: actorId,
+      toUserId,
+      transcript: spokenMessage,
+      ringStyle,
+    });
+
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error ?? "呼叫用户失败",
+      };
+    }
+
+    return {
+      ok: true,
+      callId: result.callId,
+      pushed: result.pushed,
+      toUserId: result.toUserId,
+      fromPhone: result.fromPhone,
+      summary: result.pushed
+        ? `已向用户推送虚拟来电（含TTS语音），用户可在客户端接听并回复。${!result.fromPhone ? "提示：你尚未申领虚拟号码，显示为未知号码。" : ""}`
+        : "已生成通话请求，但用户当前离线，无法实时振铃",
+    };
+  });
 }

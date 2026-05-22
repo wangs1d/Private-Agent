@@ -8,7 +8,7 @@ export function getAgentWorldPublicOrigin(): string {
 }
 
 export function buildGomokuTableUrl(tableId: string): string {
-  return `${getAgentWorldPublicOrigin()}/#/gomoku/${encodeURIComponent(tableId)}`;
+  return `${getAgentWorldPublicOrigin()}/play/gomoku/${encodeURIComponent(tableId)}`;
 }
 
 export function buildDoudizhuTableUrl(tableId: string): string {

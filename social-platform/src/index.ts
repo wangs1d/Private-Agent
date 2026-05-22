@@ -6,6 +6,7 @@ import { AuthService } from './services/auth-service.js';
 import { SocialService } from './services/social-service.js';
 import { registerRoutes } from './routes/api-routes.js';
 import { registerWebSocket } from './routes/websocket-routes.js';
+import { registerSocialWebUi } from './routes/web-ui.js';
 
 async function start() {
   const app = Fastify({
@@ -31,6 +32,7 @@ async function start() {
   // Register routes
   registerRoutes(app, authService, socialService);
   registerWebSocket(app, authService, socialService);
+  registerSocialWebUi(app);
 
   // Start server
   const port = parseInt(process.env.PORT || '3001');
@@ -38,8 +40,9 @@ async function start() {
 
   try {
     await app.listen({ port, host });
-    console.log(`Social Platform server listening on http://${host}:${port}`);
-    console.log(`WebSocket available at ws://${host}:${port}/ws`);
+    const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+    console.log(`Social Platform  http://${displayHost}:${port}  （推文 Web + API）`);
+    console.log(`WebSocket          ws://${displayHost}:${port}/ws`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);

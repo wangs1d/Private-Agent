@@ -5,10 +5,11 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
-import { USER_FACING_AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
+import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import type {
   ChatToolExecutionContext,
   StreamDeltaHandler,
@@ -136,6 +137,153 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+/** 宿主 Agent 真实资金钱包（与 Agent World 世界点数无关）。 */
+const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "wallet.get_balance",
+      description: "查询当前用户绑定的真实资金钱包余额（CNY，只读）。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wallet.get_transactions",
+      description: "查询用户钱包交易记录，支持分页与类型过滤。",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", description: "返回条数，默认 20" },
+          offset: { type: "integer", description: "偏移，默认 0" },
+          type: {
+            type: "string",
+            enum: ["all", "income", "expense", "transfer"],
+            description: "交易类型过滤，默认 all",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wallet.transfer",
+      description: "在用户明确同意后，代其向其他 Agent 转账（recipientId 为对方 session/user id）。",
+      parameters: {
+        type: "object",
+        properties: {
+          recipientId: { type: "string", description: "收款方 Agent id" },
+          amount: { type: "number", description: "转账金额（CNY，须 > 0）" },
+          remark: { type: "string", description: "可选备注" },
+        },
+        required: ["recipientId", "amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wallet.recharge",
+      description: "在用户明确要求后，代其向钱包充值（演示/测试用）。",
+      parameters: {
+        type: "object",
+        properties: {
+          amount: { type: "number", description: "充值金额（CNY，须 > 0）" },
+        },
+        required: ["amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** Agent Link：好友列表、好友请求（与 App 侧栏「Agent Link」/ MailboxPage 对齐）。 */
+const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "agent.link.list_friends",
+      description: "列出当前用户的好友（Agent Link）。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent.link.list_friend_requests",
+      description: "列出好友请求。scope: all（默认）| incoming | outgoing。",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["all", "incoming", "outgoing"] },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent.link.send_friend_request",
+      description: "向另一用户发送好友请求（须用户明确要求）。",
+      parameters: {
+        type: "object",
+        properties: {
+          toActorId: { type: "string", description: "对方 userId/sessionId" },
+          message: { type: "string", description: "可选附言" },
+        },
+        required: ["toActorId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent.link.respond_friend_request",
+      description: "接受或拒绝收到的好友请求。",
+      parameters: {
+        type: "object",
+        properties: {
+          requestId: { type: "string" },
+          accept: { type: "boolean" },
+        },
+        required: ["requestId", "accept"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+const AGENT_RELAY_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "agent.send_to_peer",
+      description: "向好友或其它已配对 Agent 发送中继消息（可与 agent.link 好友配合）。",
+      parameters: {
+        type: "object",
+        properties: {
+          targetSessionId: { type: "string", description: "对方 sessionId" },
+          body: { type: "string", description: "消息正文" },
+          subject: { type: "string", description: "可选主题" },
+          traceId: { type: "string", description: "可选追踪 id" },
+        },
+        required: ["targetSessionId", "body"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 /** 对话中自动创建/查询日程与提醒的内置工具组（写入定时任务，非独立日历应用）。 */
 const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -153,7 +301,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           runAt: { type: "string", description: "可选 ISO-8601，与 subject 结构化创建" },
           recurrence: {
             type: "string",
-            enum: ["none", "daily", "weekly"],
+            enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周重复时才填 daily/weekly",
           },
           reminderMessage: { type: "string", description: "到点时展示的提醒文案" },
@@ -186,7 +334,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_task",
       description:
-        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。",
+        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）、Agent 自动化任务（agent_task）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。",
       parameters: {
         type: "object",
         properties: {
@@ -194,13 +342,13 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           description: { type: "string" },
           kind: {
             type: "string",
-            enum: ["reminder", "action", "weather_brief"],
-            description: "weather_brief 需用户已在天气页保存定位后简报才有效",
+            enum: ["reminder", "action", "weather_brief", "agent_task"],
+            description: "weather_brief 需用户已在天气页保存定位；agent_task 会在到点后让 Agent 执行 prompt",
           },
           runAt: { type: "string", description: "ISO-8601" },
           recurrence: {
             type: "string",
-            enum: ["none", "daily", "weekly"],
+            enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；勿在用户未要求时填 daily",
           },
           timezone: { type: "string" },
@@ -214,6 +362,15 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             },
           },
           actionUrl: { type: "string", description: "与 action.url 二选一" },
+          agentTask: {
+            type: "object",
+            description: "仅 kind=agent_task",
+            properties: {
+              prompt: { type: "string", description: "到点后交给 Agent 执行的自然语言任务" },
+              accessMode: { type: "string", enum: ["sandbox", "full"], description: "默认 sandbox" },
+            },
+          },
+          prompt: { type: "string", description: "agent_task 的快捷 prompt 字段" },
         },
         required: ["title", "description", "kind", "runAt"],
         additionalProperties: true,
@@ -367,6 +524,19 @@ const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "clock.get_user_location",
+      description:
+        "通过 IP 识别用户当前所在城市、省份/州、国家和时区。用户问「我在哪个城市」「我在哪」「当前位置」时必须调用。",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "clock.get_date",
       description: "获取当前日期和星期。通过IP地址查询自动识别用户所在城市，返回当地日期信息。当用户询问今天几号、今天星期几时使用此工具。",
       parameters: {
@@ -393,18 +563,24 @@ const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。 */
+/** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。结果带模块级缓存。 */
+let _builtinToolsCache: ChatCompletionTool[] | null = null;
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
-  return [
-    ...USER_FACING_AGENT_WORLD_CHAT_TOOLS,
+  if (_builtinToolsCache) return _builtinToolsCache;
+  _builtinToolsCache = [
+    ...AGENT_WORLD_CHAT_TOOLS,
     ...AIP_CHAT_TOOLS,
     ...INFO_WEB_CHAT_TOOLS,
+    ...WALLET_CHAT_TOOLS,
+    ...AGENT_LINK_CHAT_TOOLS,
+    ...AGENT_RELAY_CHAT_TOOLS,
     ...CALENDAR_CHAT_TOOLS,
     ...PHONE_CHAT_TOOLS,
     ...VISION_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
   ];
+  return _builtinToolsCache;
 }
 
 /**
@@ -420,6 +596,8 @@ export async function streamCompletionWithDoudizhuTools(
     maxRounds?: number;
     tools?: ChatCompletionTool[];
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
+    /** Moonshot Kimi：如 `{ thinking: { type: "disabled" } }` */
+    extraBody?: Record<string, unknown>;
   },
 ): Promise<string> {
   const maxRounds = options?.maxRounds ?? DEFAULT_MAX_ROUNDS;
@@ -434,6 +612,7 @@ export async function streamCompletionWithDoudizhuTools(
       tools: apiTools,
       tool_choice: "auto",
       stream: true,
+      ...(options?.extraBody ? { extra_body: options.extraBody } : {}),
     });
 
     let fullText = "";
@@ -504,6 +683,13 @@ export async function streamCompletionWithDoudizhuTools(
     } as ChatCompletionMessageParam);
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
+
+    type ToolCallWorkItem = {
+      tc: (typeof toolCalls)[number];
+      registryToolName: string;
+      parsedArgs: Record<string, unknown>;
+    };
+    const workItems: ToolCallWorkItem[] = [];
     for (const tc of toolCalls) {
       if (tc.type !== "function") continue;
       const fn = tc.function;
@@ -514,33 +700,57 @@ export async function streamCompletionWithDoudizhuTools(
         args = {};
       }
       const registryToolName = resolveRegistryToolName(fn.name);
-      const exec = await ctx.executeTool(registryToolName, args);
-      toolResults.push({ name: registryToolName, ok: exec.ok });
-      let injectFrames: VisionFrame[] | undefined;
-      let resultForWire: Record<string, unknown>;
-      if (
-        exec.ok &&
-        exec.result &&
-        Array.isArray((exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY])
-      ) {
-        injectFrames = (exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY] as VisionFrame[];
-        resultForWire = { ...(exec.result as Record<string, unknown>) };
-        delete resultForWire[TOOL_RESULT_VISION_INJECT_KEY];
-      } else {
-        resultForWire = exec.result;
-      }
-      ctx.onToolExecuted?.({
+      ctx.onToolExecuteStart?.({
         toolName: registryToolName,
         input: args,
-        ok: exec.ok,
-        result: resultForWire,
+        assistantPreamble: fullText.trim() || undefined,
       });
-      const toolContent = JSON.stringify(
-        exec.ok ? resultForWire : { ok: false, error: exec.result.error ?? exec.result },
-      );
+      workItems.push({ tc, registryToolName, parsedArgs: args });
+    }
+
+    const settledResults = await Promise.allSettled(
+      workItems.map(async (item) => {
+        const exec = await ctx.executeTool(item.registryToolName, item.parsedArgs);
+        let injectFrames: VisionFrame[] | undefined;
+        let resultForWire: Record<string, unknown>;
+        if (
+          exec.ok &&
+          exec.result &&
+          Array.isArray((exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY])
+        ) {
+          injectFrames = (exec.result as Record<string, unknown>)[TOOL_RESULT_VISION_INJECT_KEY] as VisionFrame[];
+          resultForWire = { ...(exec.result as Record<string, unknown>) };
+          delete resultForWire[TOOL_RESULT_VISION_INJECT_KEY];
+        } else {
+          resultForWire = exec.result;
+        }
+        const compacted = await compactToolOutputForLlm({
+          toolName: item.registryToolName,
+          ok: exec.ok,
+          result: exec.ok ? resultForWire : { error: exec.result.error ?? exec.result },
+        });
+        return { exec, compacted, injectFrames, resultForWire } as const;
+      }),
+    );
+
+    for (let i = 0; i < workItems.length; i++) {
+      const item = workItems[i];
+      const settled = settledResults[i];
+      const exec = settled.status === "fulfilled" ? settled.value.exec : { ok: false, result: { error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason) } };
+      const compacted = settled.status === "fulfilled" ? settled.value.compacted : { content: JSON.stringify(exec.result), rawBytes: 0, compactBytes: 0, compacted: false };
+      const injectFrames = settled.status === "fulfilled" ? settled.value.injectFrames : undefined;
+
+      toolResults.push({ name: item.registryToolName, ok: exec.ok });
+      ctx.onToolExecuted?.({
+        toolName: item.registryToolName,
+        input: item.parsedArgs,
+        ok: exec.ok,
+        result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
+      });
+      const toolContent = compacted.content;
       messages.push({
         role: "tool",
-        tool_call_id: tc.id,
+        tool_call_id: item.tc.id,
         content: toolContent,
       });
       if (injectFrames?.length) {

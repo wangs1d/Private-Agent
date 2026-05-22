@@ -9,6 +9,14 @@ export function allowWorldHttpMutations(): boolean {
   return process.env.ALLOW_WORLD_HTTP_MUTATIONS === "1";
 }
 
+/**
+ * 五子棋面向终端用户（Web 开桌/加入/落子），始终允许 HTTP 写操作。
+ * Agent 开桌走 `world.gomoku.create_table` 工具；用户打开 playUrl 后须能经 HTTP 执白落子。
+ */
+export function allowGomokuUserHttpMutations(): boolean {
+  return true;
+}
+
 /** 若禁止 HTTP 写操作则回复 403 并返回 true（调用方应 `return`）。 */
 export function replyIfWorldHttpMutationsForbidden(reply: FastifyReply): boolean {
   if (allowWorldHttpMutations()) return false;

@@ -13,3 +13,6 @@ SUBAGENT-REFACTORING.md
 test/
 tests/
 __tests__/
+!test/
+test/*
+!test/schedule-task-service.test.ts

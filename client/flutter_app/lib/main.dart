@@ -6,20 +6,25 @@ import "package:url_launcher/url_launcher.dart";
 
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
+import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/virtual_phone_incoming_dialog.dart";
+import "core/presentation/phone_dialer_page.dart";
 import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
+import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
+import "core/services/client_location_service.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/voice_mode_page.dart";
+import "features/gomoku/gomoku_page.dart";
 import "features/auth/phone_registration_page.dart";
 import "features/auth/biometric_registration_page.dart";
 import "core/vision/pick_gallery_vision.dart";
@@ -81,6 +86,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _showRegistration = false;
   /// Agent是否正在处理中（用于显示响应状态指示器）
   bool _isAgentProcessing = false;
+  /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
+  bool _fullComputerAccessEnabled = false;
+  /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
+  String? _agentStatusLine;
+  Timer? _assistantChunkFlushTimer;
+  Timer? _agentReplyWatchdog;
+  String? _pendingAssistantChunkMessageId;
+  String? _pendingAgentUserMessageId;
+  final StringBuffer _pendingAssistantChunkText = StringBuffer();
+  /// 记录被打断的回复内容，用于后续整合
+  final List<String> _interruptedResponses = <String>[];
+  static const Duration _agentReplyTimeout = Duration(minutes: 3);
 
   @override
   void initState() {
@@ -89,12 +106,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   Future<void> _bootstrap() async {
-    print('[Bootstrap] 开始初始化...');
     try {
       await _store.init();
-      print('[Bootstrap] Store 初始化完成');
     } catch (e) {
-      print('[Bootstrap] Store 初始化失败: $e');
       rethrow;
     }
     
@@ -106,31 +120,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           createdAt: DateTime.now(),
         ),
       );
-      print('[Bootstrap] Session 保存完成');
     } catch (e) {
-      print('[Bootstrap] Session 保存失败: $e');
       rethrow;
     }
     
     final List<ChatMessage> cachedMessages =
         await _store.listMessages(ApiConfig.effectiveActorId);
-    print('[Bootstrap] 加载了 ${cachedMessages.length} 条消息');
     
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
-    print('[Bootstrap] 加载了 ${cachedRelay.length} 条中继消息');
     
     final bool? visionConsent = await _store.getVisionCameraConsent();
-    print('[Bootstrap] Vision 同意状态: $visionConsent');
     
     // 检查是否已注册手机号
     final phoneNumber = await _store.getPreference('phoneNumber');
     final isPhoneRegistered = phoneNumber != null && phoneNumber.toString().isNotEmpty;
-    print('[Bootstrap] 手机号注册状态: $isPhoneRegistered');
     
     // 检查是否已完成生物特征注册
     final biometricStatus = await _store.getBiometricRegistrationStatus();
-    print('[Bootstrap] 生物特征注册状态: $biometricStatus');
     
     setState(() {
       _messages.addAll(cachedMessages);
@@ -144,35 +151,85 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _isInitialized = true;
       // 如果未注册手机号，显示注册页面
       _showRegistration = !isPhoneRegistered;
-      print('[Bootstrap] setState 完成, _isInitialized=$_isInitialized, _showRegistration=$_showRegistration');
     });
     
-    // 如果已注册手机号但未注册生物特征，弹出小弹窗
-    if (isPhoneRegistered && !biometricStatus) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showBiometricDialog();
+    _ws.onConnected = _sendSessionInit;
+    ClientLocationService.bindPreferences(
+      read: _store.getPreference,
+      write: _store.savePreference,
+    );
+    _ws.connect();
+
+    if (isPhoneRegistered) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!biometricStatus) {
+          await _showBiometricDialog();
+        }
+        if (mounted) {
+          await _promptLocationConsentIfNeeded();
+        }
       });
     }
-    
-    _ws.connect();
-    final Map<String, dynamic> sessionInit = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-      "deviceId": "local-device",
-      "userAlias": "owner",
-    };
-    final String uid = ApiConfig.userId.trim();
-    if (uid.isNotEmpty) {
-      sessionInit["userId"] = uid;
-    }
-    _ws.sendEvent("session.init", sessionInit);
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
       final Map<String, dynamic> payload =
           (event["payload"] as Map?)?.cast<String, dynamic>() ??
               <String, dynamic>{};
+      if (type == "connection_error") {
+        final bool hadPendingTurn =
+            _isAgentProcessing && _pendingAgentUserMessageId != null;
+        _disarmAgentReplyWatchdog();
+        if (hadPendingTurn) {
+          _handleAgentReplyTimeout(showSnackBar: false);
+        } else {
+          _pendingAgentUserMessageId = null;
+          if (_isAgentProcessing || _agentStatusLine != null) {
+            _clearAgentProcessingState();
+          }
+        }
+        final String message =
+            payload["message"]?.toString() ?? "无法连接到服务器";
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(
+              content: Text(message),
+              action: SnackBarAction(
+                label: "重试",
+                onPressed: _ws.retryConnect,
+              ),
+            ),
+          );
+        }
+      }
+      if (type == "ws_disconnected") {
+        if (_isAgentProcessing && _pendingAgentUserMessageId != null) {
+          _disarmAgentReplyWatchdog();
+          _handleAgentReplyTimeout(showSnackBar: false);
+        }
+        final String message =
+            payload["message"]?.toString() ?? "与服务器的连接已断开";
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(
+              content: Text(message),
+              action: SnackBarAction(
+                label: "重试",
+                onPressed: _ws.retryConnect,
+              ),
+            ),
+          );
+        }
+      }
       if (type == "error.event") {
-        if (_isAgentProcessing) {
-          setState(() => _isAgentProcessing = false);
+        // 与当前 chat 轮次无关的错误需立即解除「思考中」；CHAT_HANDLER_ERROR 仍会跟 assistant_done。
+        final String? traceId = payload["traceId"]?.toString();
+        final bool chatTurnError = traceId != null &&
+            traceId.isNotEmpty &&
+            traceId == _pendingAgentUserMessageId;
+        if (_isAgentProcessing && !chatTurnError) {
+          _disarmAgentReplyWatchdog();
+          _pendingAgentUserMessageId = null;
+          _clearAgentProcessingState();
         }
         final String message =
             payload["message"]?.toString() ?? "服务器处理失败";
@@ -180,6 +237,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             SnackBar(content: Text(message)),
           );
+        }
+      }
+      if (type == "tool.call") {
+        if (_isAgentProcessing) {
+          final String toolName = payload["toolName"]?.toString() ?? "";
+          final String? preamble =
+              payload["assistantPreamble"]?.toString().trim();
+          final String line = (preamble != null && preamble.isNotEmpty)
+              ? preamble
+              : _toolExecutionStatusLine(toolName);
+          _updateAgentStatusLine(line);
         }
       }
       if (type == "tool.result") {
@@ -206,68 +274,134 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
         }
       }
+      if (type == "schedule.tasks_changed") {
+        final String? nextRunAt = payload["nextRunAt"]?.toString();
+        final String? taskId = payload["taskId"]?.toString();
+        if (taskId != null &&
+            taskId.isNotEmpty &&
+            nextRunAt != null &&
+            nextRunAt.isNotEmpty) {
+          final DateTime? startAt = DateTime.tryParse(nextRunAt);
+          if (startAt != null) {
+            final String rawTitle = payload["reminderMessage"]?.toString().trim() ??
+                payload["title"]?.toString().trim() ??
+                "";
+            await _store.saveScheduleEvent(
+              ScheduleEvent(
+                id: taskId,
+                startAt: startAt.toLocal(),
+                title: rawTitle.isNotEmpty && rawTitle != "AI 提醒任务"
+                    ? rawTitle
+                    : "定时提醒",
+              ),
+            );
+          }
+        }
+        _scheduleReloadSignal.value += 1;
+      }
+      if (type == "schedule.reminder_fired") {
+        final String message = payload["message"]?.toString().trim() ?? "到点提醒";
+        final String taskId = payload["taskId"]?.toString() ?? "";
+        final String status = payload["status"]?.toString() ?? "";
+        final String? nextRunAt = payload["nextRunAt"]?.toString();
+        final String recurrence = payload["recurrence"]?.toString() ?? "none";
+        setState(() {
+          _messages.add(
+            ChatMessage(
+              messageId: "reminder-${taskId.isNotEmpty ? taskId : DateTime.now().millisecondsSinceEpoch}",
+              sessionId: ApiConfig.effectiveActorId,
+              role: "assistant",
+              text: "⏰ $message",
+              timestamp: DateTime.now(),
+            ),
+          );
+        });
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text("⏰ $message")),
+          );
+        }
+        if (taskId.isNotEmpty) {
+          if (status == "completed" || nextRunAt == null || nextRunAt.isEmpty) {
+            await _store.saveScheduleEvent(
+              ScheduleEvent(
+                id: taskId,
+                startAt: DateTime.now(),
+                title: payload["title"]?.toString().trim().isNotEmpty == true
+                    ? payload["title"]!.toString().trim()
+                    : message,
+                notes: "已完成",
+              ),
+            );
+          } else if (nextRunAt.isNotEmpty) {
+            final DateTime? startAt = DateTime.tryParse(nextRunAt);
+            if (startAt != null) {
+              await _store.saveScheduleEvent(
+                ScheduleEvent(
+                  id: taskId,
+                  startAt: startAt.toLocal(),
+                  title: payload["title"]?.toString().trim().isNotEmpty == true
+                      ? payload["title"]!.toString().trim()
+                      : message,
+                  notes: recurrence == "daily"
+                      ? "每天重复"
+                      : recurrence == "weekly"
+                          ? "每周重复"
+                          : "单次提醒",
+                ),
+              );
+            }
+          }
+        }
+        _scheduleReloadSignal.value += 1;
+      }
+      if (type == "chat.agent_status") {
+        final String line = payload["line"]?.toString().trim() ?? "";
+        if (line.isEmpty) return;
+        _updateAgentStatusLine(line, ensureProcessing: true);
+      }
       if (type == "chat.assistant_chunk") {
-        // 开始接收流式输出时，标记为处理中
+        _resetAgentReplyWatchdog();
         if (!_isAgentProcessing) {
           setState(() => _isAgentProcessing = true);
+        }
+        if (_isGenericAgentStatusLine(_agentStatusLine)) {
+          _updateAgentStatusLine("正在组织回复...");
         }
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-chunk";
         final String chunk = payload["chunk"]?.toString() ?? "";
-        final String? playUrl =
-            _playUrlForAssistantMessageId(messageId) ??
-                PlayUrlUtils.fromAssistantText(chunk);
-        final ChatMessage assistantChunk = ChatMessage(
-          messageId: messageId,
-          sessionId: ApiConfig.effectiveActorId,
-          role: "assistant",
-          text: chunk,
-          timestamp: DateTime.now(),
-          playUrl: playUrl,
-        );
-        setState(() {
-          final int? idx = _assistantMessageIndexById[messageId];
-          if (idx == null) {
-            _messages.add(assistantChunk);
-            _assistantMessageIndexById[messageId] = _messages.length - 1;
-          } else {
-            final ChatMessage previous = _messages[idx];
-            _messages[idx] = ChatMessage(
-              messageId: previous.messageId,
-              sessionId: previous.sessionId,
-              role: previous.role,
-              text: "${previous.text}$chunk",
-              timestamp: previous.timestamp,
-              attachmentImageCount: previous.attachmentImageCount,
-              playUrl: playUrl ?? previous.playUrl,
-            );
-          }
-        });
+        _enqueueAssistantChunk(messageId, chunk);
       }
       if (type == "chat.assistant_done") {
-        // 处理完成，清除处理中状态
-        if (_isAgentProcessing) {
-          setState(() => _isAgentProcessing = false);
-        }
+        _disarmAgentReplyWatchdog();
+        _flushAssistantChunks();
+        _clearAgentProcessingState();
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-final";
         final String finalText = payload["finalText"]?.toString() ?? "";
+        final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试。";
         final String? traceKey = messageId.startsWith("assistant-")
             ? messageId.substring("assistant-".length)
             : null;
         final String? playUrl =
             (traceKey != null ? _pendingPlayUrlByTraceId.remove(traceKey) : null) ??
                 _playUrlForAssistantMessageId(messageId) ??
-                PlayUrlUtils.fromAssistantText(finalText);
+                PlayUrlUtils.fromAssistantText(
+                  finalText.trim().isNotEmpty ? finalText : fallbackText,
+                );
         final int? idx = _assistantMessageIndexById[messageId];
         if (idx != null) {
           setState(() {
             final ChatMessage previous = _messages[idx];
+            final String nextText = finalText.trim().isNotEmpty
+                ? finalText
+                : (previous.text.trim().isNotEmpty ? previous.text : fallbackText);
             _messages[idx] = ChatMessage(
               messageId: previous.messageId,
               sessionId: previous.sessionId,
               role: previous.role,
-              text: finalText.isNotEmpty ? finalText : previous.text,
+              text: nextText,
               timestamp: previous.timestamp,
               attachmentImageCount: previous.attachmentImageCount,
               playUrl: playUrl ?? previous.playUrl,
@@ -279,12 +413,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             messageId: messageId,
             sessionId: ApiConfig.effectiveActorId,
             role: "assistant",
-            text: finalText,
+            text: finalText.trim().isNotEmpty ? finalText : fallbackText,
             timestamp: DateTime.now(),
             playUrl: playUrl,
           );
+          setState(() {
+            _messages.add(finalMessage);
+            _assistantMessageIndexById[messageId] = _messages.length - 1;
+          });
           await _store.saveMessage(finalMessage);
         }
+        _pendingAgentUserMessageId = null;
         return;
       }
       if (type == "agent.peer_message") {
@@ -336,10 +475,36 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               showVirtualPhoneIncomingDialog(
                 context: navCtx,
                 payload: payload,
+                onReply: (String replyText) {
+                  _sendUserMessage(replyText);
+                },
               ),
             );
           }
         });
+      }
+      if (type == "agent.phone.call_status") {
+        final String status = payload["status"]?.toString() ?? "unknown";
+        final String toActorId = payload["toActorId"]?.toString() ?? "";
+        String statusMsg = "";
+        switch (status) {
+          case "ringing":
+            statusMsg = "📞 正在呼叫 Agent${toActorId.isNotEmpty ? " ($toActorId)" : ""}…";
+            break;
+          case "connected":
+            statusMsg = "📞 已接通";
+            break;
+          case "ended":
+            statusMsg = "📞 通话已结束";
+            break;
+          default:
+            statusMsg = "📞 通话状态: $status";
+        }
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(statusMsg), duration: const Duration(seconds: 3)),
+          );
+        }
       }
       if (type == "desktop.bridge.sync") {
         final bool? on = payload["bridgeOnline"] as bool?;
@@ -388,6 +553,172 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final int? idx = _assistantMessageIndexById[messageId];
     if (idx == null) return null;
     return _messages[idx].playUrl;
+  }
+
+  void _enqueueAssistantChunk(String messageId, String chunk) {
+    if (chunk.isEmpty) return;
+    if (_pendingAssistantChunkMessageId != null &&
+        _pendingAssistantChunkMessageId != messageId) {
+      _flushAssistantChunks();
+    }
+    _pendingAssistantChunkMessageId = messageId;
+    _pendingAssistantChunkText.write(chunk);
+    _assistantChunkFlushTimer ??= Timer(const Duration(milliseconds: 32), () {
+      _assistantChunkFlushTimer = null;
+      _flushAssistantChunks();
+    });
+  }
+
+  void _flushAssistantChunks() {
+    _assistantChunkFlushTimer?.cancel();
+    _assistantChunkFlushTimer = null;
+    final String? messageId = _pendingAssistantChunkMessageId;
+    final String chunk = _pendingAssistantChunkText.toString();
+    _pendingAssistantChunkMessageId = null;
+    _pendingAssistantChunkText.clear();
+    if (messageId == null || chunk.isEmpty) return;
+
+    final String? playUrl =
+        _playUrlForAssistantMessageId(messageId) ??
+            PlayUrlUtils.fromAssistantText(chunk);
+    setState(() {
+      final int? idx = _assistantMessageIndexById[messageId];
+      if (idx == null) {
+        _messages.add(
+          ChatMessage(
+            messageId: messageId,
+            sessionId: ApiConfig.effectiveActorId,
+            role: "assistant",
+            text: chunk,
+            timestamp: DateTime.now(),
+            playUrl: playUrl,
+          ),
+        );
+        _assistantMessageIndexById[messageId] = _messages.length - 1;
+      } else {
+        final ChatMessage previous = _messages[idx];
+        _messages[idx] = ChatMessage(
+          messageId: previous.messageId,
+          sessionId: previous.sessionId,
+          role: previous.role,
+          text: "${previous.text}$chunk",
+          timestamp: previous.timestamp,
+          attachmentImageCount: previous.attachmentImageCount,
+          playUrl: playUrl ?? previous.playUrl,
+        );
+      }
+    });
+  }
+
+  void _clearAgentProcessingState() {
+    if (!_isAgentProcessing && _agentStatusLine == null) return;
+    setState(() {
+      _isAgentProcessing = false;
+      _agentStatusLine = null;
+    });
+  }
+
+  void _armAgentReplyWatchdog(String userMessageId) {
+    _pendingAgentUserMessageId = userMessageId;
+    _agentReplyWatchdog?.cancel();
+    _agentReplyWatchdog = Timer(_agentReplyTimeout, _handleAgentReplyTimeout);
+  }
+
+  void _resetAgentReplyWatchdog() {
+    if (_pendingAgentUserMessageId == null) return;
+    _agentReplyWatchdog?.cancel();
+    _agentReplyWatchdog = Timer(_agentReplyTimeout, _handleAgentReplyTimeout);
+  }
+
+  void _disarmAgentReplyWatchdog() {
+    _agentReplyWatchdog?.cancel();
+    _agentReplyWatchdog = null;
+  }
+
+  void _handleAgentReplyTimeout({bool showSnackBar = true}) {
+    if (!mounted) return;
+    final bool wasProcessing = _isAgentProcessing;
+    _flushAssistantChunks();
+    final String? userMessageId = _pendingAgentUserMessageId;
+    final String assistantMessageId = userMessageId != null
+        ? "assistant-$userMessageId"
+        : "assistant-timeout-${DateTime.now().microsecondsSinceEpoch}";
+    const String fallbackText = "抱歉，等待回复超时，请稍后重试。";
+    final int? idx = _assistantMessageIndexById[assistantMessageId];
+    if (idx != null) {
+      setState(() {
+        final ChatMessage previous = _messages[idx];
+        if (previous.text.trim().isEmpty) {
+          _messages[idx] = ChatMessage(
+            messageId: previous.messageId,
+            sessionId: previous.sessionId,
+            role: previous.role,
+            text: fallbackText,
+            timestamp: previous.timestamp,
+            attachmentImageCount: previous.attachmentImageCount,
+            playUrl: previous.playUrl,
+          );
+        }
+      });
+    } else if (wasProcessing || userMessageId != null) {
+      final ChatMessage timeoutMessage = ChatMessage(
+        messageId: assistantMessageId,
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: fallbackText,
+        timestamp: DateTime.now(),
+      );
+      setState(() {
+        _messages.add(timeoutMessage);
+        _assistantMessageIndexById[assistantMessageId] = _messages.length - 1;
+      });
+      unawaited(_store.saveMessage(timeoutMessage));
+    }
+    _clearAgentProcessingState();
+    _pendingAgentUserMessageId = null;
+    _disarmAgentReplyWatchdog();
+    if (showSnackBar && wasProcessing) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("Agent 回复超时，请检查网络或稍后重试")),
+      );
+    }
+  }
+
+  String _toolExecutionStatusLine(String toolName) {
+    const Map<String, String> labels = <String, String>{
+      "world.gomoku.create": "正在创建五子棋对局...",
+      "world.gomoku.play": "正在思考落子...",
+      "world.gomoku.status": "正在读取棋局状态...",
+      "schedule.create": "正在创建日程提醒...",
+      "schedule.list": "正在查询日程...",
+      "schedule.cancel": "正在取消日程...",
+      "agent.send_to_peer": "正在发送中继消息...",
+      "weather.query": "正在查询天气...",
+      "web.search": "正在搜索网络...",
+      "memory.search": "正在检索记忆...",
+      "skill.invoke": "正在调用技能...",
+    };
+    return labels[toolName] ?? "正在执行：$toolName";
+  }
+
+  bool _isGenericAgentStatusLine(String? line) {
+    if (line == null || line.trim().isEmpty) return true;
+    final String trimmed = line.trim();
+    return trimmed == "正在思考…" ||
+        trimmed == "正在思考..." ||
+        trimmed == "Agent 思考中...";
+  }
+
+  void _updateAgentStatusLine(String line, {bool ensureProcessing = false}) {
+    final String trimmed = line.trim();
+    if (trimmed.isEmpty) return;
+    _resetAgentReplyWatchdog();
+    setState(() {
+      if (ensureProcessing) {
+        _isAgentProcessing = true;
+      }
+      _agentStatusLine = trimmed;
+    });
   }
 
   void _attachPlayUrlToAssistantMessage(String messageId, String playUrl) {
@@ -466,7 +797,29 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(_pendingGalleryFrames.clear);
   }
 
+  void _sendSessionInit() {
+    final Map<String, dynamic> sessionInit = <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+      "deviceId": "local-device",
+      "userAlias": "owner",
+    };
+    final String uid = ApiConfig.userId.trim();
+    if (uid.isNotEmpty) {
+      sessionInit["userId"] = uid;
+    }
+    _ws.sendEvent("session.init", sessionInit);
+  }
+
   Future<void> _sendMessage() async {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("正在连接服务器，请稍后再发送")),
+        );
+      }
+      return;
+    }
     final String text = _inputController.text.trim();
 
     List<VisionWireFrame>? attachmentFrames;
@@ -477,6 +830,28 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
     if (text.isEmpty && attachmentFrames == null) {
       return;
+    }
+
+    // 如果Agent正在处理中，说明用户要打断当前回复
+    if (_isAgentProcessing) {
+      // 保存当前未完成的回复内容
+      if (_pendingAssistantChunkText.isNotEmpty) {
+        _interruptedResponses.add(_pendingAssistantChunkText.toString());
+        _pendingAssistantChunkText.clear();
+      }
+      
+      // 清除当前的流式响应状态
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      setState(() {
+        _isAgentProcessing = false;
+        _agentStatusLine = null;
+        _pendingAssistantChunkMessageId = null;
+      });
+      
+      // 取消定时器
+      _assistantChunkFlushTimer?.cancel();
+      _assistantChunkFlushTimer = null;
     }
 
     final int attachCount = attachmentFrames?.length ?? 0;
@@ -492,6 +867,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _messages.add(userMessage);
       _inputController.clear();
       _isAgentProcessing = true;
+      _agentStatusLine = "Agent 思考中...";
     });
     await _store.saveMessage(userMessage);
     final Map<String, dynamic> userMsg = <String, dynamic>{
@@ -507,7 +883,35 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (ApiConfig.userId.trim().isNotEmpty) {
       userMsg["userId"] = ApiConfig.userId.trim();
     }
-    _ws.sendEvent("chat.user_message", userMsg);
+    
+    // 前端 GPS 定位（优先于 IP 地理库）
+    final ClientLocationPayload? clientLocation =
+        await ClientLocationService.getCurrentLocation();
+    if (clientLocation != null) {
+      userMsg["clientLocation"] = clientLocation.toJson();
+    }
+    userMsg["agentAccessMode"] = _fullComputerAccessEnabled ? "full" : "sandbox";
+    
+    // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示）
+    if (_interruptedResponses.isNotEmpty) {
+      final String interruptedContext = _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
+      userMsg["interruptedContext"] = interruptedContext;
+      // 清空已整合的打断历史
+      _interruptedResponses.clear();
+    }
+    
+    _armAgentReplyWatchdog(userMessage.messageId);
+    final bool sent = _ws.sendEvent("chat.user_message", userMsg);
+    if (!sent) {
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      _clearAgentProcessingState();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("消息未发出：与服务器的连接尚未就绪")),
+        );
+      }
+    }
   }
 
   static const List<String> _kTabTitles = <String>[
@@ -517,7 +921,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     "钱包",
     "技能商店",
     "Agent World",
-    "", // 新的社交联系tab，名称待定
+    "社交推文",
   ];
 
   void _selectTab(int index) {
@@ -535,6 +939,29 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (index == 2) {
       _scheduleReloadSignal.value += 1;
     }
+  }
+
+  /// 打开五子棋对局（从 playUrl 或 tableId 解析）。
+  void _openGomokuGame(String playUrlOrTableId) {
+    final String? tableId = PlayUrlUtils.parseTableId(playUrlOrTableId);
+    if (tableId == null || tableId.isEmpty) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text("无法识别对局：$playUrlOrTableId")),
+      );
+      return;
+    }
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    Navigator.of(navCtx).push<void>(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => GomokuPage(
+          agentActorId: ApiConfig.effectiveActorId,
+          api: _worldApi,
+          ws: _ws,
+          tableId: tableId,
+        ),
+      ),
+    );
   }
 
   /// 打开 Agent World 网页
@@ -571,10 +998,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  /// 打开 Agent Link 社交网页
+  /// 打开社交推文站（social-platform）
   Future<void> _openAgentLinkWeb() async {
-    final Uri url = Uri.parse(ApiConfig.agentLinkUrl);
-    print('尝试打开 Agent Link 社交网页: $url'); // 调试信息
+    final Uri url = Uri.parse(ApiConfig.socialFeedUrl);
+    print('尝试打开社交推文站: $url');
     
     try {
       final bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
@@ -583,7 +1010,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text("无法打开 Agent Link 社交网页"),
+              content: Text("无法打开社交推文站，请先运行 npm run dev:all"),
               action: SnackBarAction(
                 label: '复制URL',
                 onPressed: () {
@@ -620,6 +1047,30 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
+  void _callAgentViaPhone(String agentId, String? message) {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("正在连接服务器，请稍后再试")),
+        );
+      }
+      return;
+    }
+    final Map<String, dynamic> callPayload = <String, dynamic>{
+      "toActorId": agentId,
+    };
+    if (message != null && message.isNotEmpty) {
+      callPayload["userMessage"] = message;
+    }
+    _ws.sendEvent("phone.user_call_agent", callPayload);
+    if (mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text("📞 正在呼叫 Agent: $agentId")),
+      );
+    }
+  }
+
   /// 显示生物特征注册页面
   void _showBiometricRegistration() {
     Navigator.of(_rootNavigatorKey.currentContext!).push(
@@ -637,6 +1088,29 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ),
       ),
     );
+  }
+
+  /// 根据网络 IP 展示推测位置，并询问是否开启 GPS 定位权限（灰色弹窗，仅询问一次）。
+  Future<void> _promptLocationConsentIfNeeded() async {
+    final bool? existing = await ClientLocationService.getLocationConsent();
+    if (existing != null) {
+      if (existing) {
+        unawaited(ClientLocationService.warmUpGpsIfConsented());
+      }
+      return;
+    }
+
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) {
+      return;
+    }
+
+    final bool? allow = await showLocationPermissionDialog(context: ctx);
+    final bool decided = allow ?? false;
+    await ClientLocationService.setLocationConsent(decided);
+    if (decided) {
+      await ClientLocationService.requestGpsAfterConsent();
+    }
   }
 
   /// 显示生物特征注册对话框
@@ -813,7 +1287,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       ),
       (Icons.storefront_outlined, Icons.storefront, "技能商店"),
       (Icons.public_outlined, Icons.public, "Agent World"),
-      (Icons.people_outline, Icons.people, ""), // 新的社交联系tab，名称待定
+      (Icons.people_outline, Icons.people, "社交推文"),
     ];
 
     return Material(
@@ -1001,12 +1475,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             setState(() {
               _showRegistration = false;
             });
-            // 注册完成后，检查是否需要显示生物特征注册
-            if (!_isBiometricRegistered) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                _showBiometricDialog();
-              });
-            }
+            WidgetsBinding.instance.addPostFrameCallback((_) async {
+              if (!_isBiometricRegistered) {
+                await _showBiometricDialog();
+              }
+              if (mounted) {
+                await _promptLocationConsentIfNeeded();
+              }
+            });
           },
         ),
       );
@@ -1056,6 +1532,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       AppBar(
                         automaticallyImplyLeading: false,
                         title: _buildAppBarTitle(),
+                        actions: <Widget>[
+                          IconButton(
+                            tooltip: "网络电话",
+                            icon: const Icon(Icons.phone_in_talk),
+                            onPressed: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute<PhoneDialerPage>(
+                                  builder: (BuildContext ctx) => PhoneDialerPage(
+                                    onCallSent: (String agentId, String? message) {
+                                      _callAgentViaPhone(agentId, message);
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ],
                       ),
                       Expanded(
                         child: MainPanel(
@@ -1091,6 +1584,25 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               onPickGalleryImage: _pickGalleryImage,
               onClearGalleryImages: _clearPendingGalleryFrames,
               isAgentProcessing: _isAgentProcessing,
+              agentStatusLine: _agentStatusLine,
+              onOpenGomoku: _openGomokuGame,
+              fullComputerAccessEnabled: _fullComputerAccessEnabled,
+              onToggleFullComputerAccess: () {
+                setState(() {
+                  _fullComputerAccessEnabled = !_fullComputerAccessEnabled;
+                });
+                if (!mounted) return;
+                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      _fullComputerAccessEnabled
+                          ? "已开启完全访问：Agent 可请求控制电脑等高权限操作"
+                          : "已切换为沙箱模式：高权限工具将被限制",
+                    ),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
               onEnterVoiceMode: () {
                 // 在主页面上下文中执行导航
                 Navigator.of(context).push(

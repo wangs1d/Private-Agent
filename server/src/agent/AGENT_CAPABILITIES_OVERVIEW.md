@@ -386,5 +386,26 @@ Agent 可以：
 
 ---
 
-**最后更新：** 2026-05-17  
-**版本：** v2.0 - 完整Agent能力认知系统
+## 记忆与压缩架构（OpenHuman 对齐）
+
+### Memory Tree（`server/src/memory-tree/`）
+
+- **热路径**：`canonicalize → chunk(≤3k) → SQLite + wiki Markdown → enqueue extract_chunk`
+- **三树**：Source（按 `sourceId`）、Topic（按实体 hotness）、Global（UTC 日摘要）
+- **后台任务**：`extract_chunk` / `append_buffer` / `seal` / `topic_route` / `digest_daily` / `flush_stale`
+- **检索**：BM25 + Qdrant + RRF → 注入 system 的 `narrativeRecall`（文案块：「Memory Tree 检索摘录」）
+- **KV 慢变量**：`AgentMemorySyncService` 仍负责人格/价值观/能力/`memory_summary`；`AGENT_KV_SUMMARY_APPEND_MODE=minimal` 时世界事件不再重复写 KV 流水
+
+### TokenJuice（`server/src/tokenjuice/`）
+
+- 工具环在写入 `role:tool` 前经 `compactToolOutputForLlm`（npm `tokenjuice` + 项目 `.tokenjuice/rules/`）
+- `AGENT_TOKENJUICE_ENABLED=0` 恢复全量 JSON（带硬截断兜底）
+
+### 统一端口
+
+- `NarrativeMemoryFacade`（`narrative-memory-port.ts`）对外 `ingest` / `buildNarrativeRecall`；Memory Tree 优先，可选 `AGENT_MEMORY_TREE_DUAL_WRITE_HYBRID` 双写 legacy hybrid
+
+---
+
+**最后更新：** 2026-05-21  
+**版本：** v2.1 - Memory Tree + TokenJuice

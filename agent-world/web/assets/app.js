@@ -13,7 +13,6 @@ const SCENE_LABELS = {
   free_market: "自由市场",
   doudizhu: "斗地主馆",
   zhajinhua: "炸金花馆",
-  gomoku: "五子棋馆",
   social: "Agent 动态",
 };
 
@@ -96,10 +95,6 @@ function parseRoute() {
   if (a0 === "zhajinhua") {
     if (parts[1]) return { name: "zhajinhuaTable", tableId: parts[1] };
     return { name: "zhajinhua" };
-  }
-  if (a0 === "gomoku") {
-    if (parts[1]) return { name: "gomokuTable", tableId: parts[1] };
-    return { name: "gomoku" };
   }
   return { name: "hub" };
 }
@@ -516,7 +511,6 @@ async function renderHub() {
       ${sceneCard("plaza", at("plaza"), "中央广场", "状态与斗地主入口说明", "#/plaza")}
       ${sceneCard("doudizhu", at("doudizhu"), "斗地主馆", "观战牌桌；出牌请在会话中向 Agent 建议", "#/doudizhu")}
       ${sceneCard("zhajinhua", at("zhajinhua"), "炸金花馆", "观战 3–6 人桌", "#/zhajinhua")}
-      ${sceneCard("gomoku", at("gomoku"), "五子棋馆", "用户与 Agent 对战，15x15 棋盘", "#/gomoku")}
       ${sceneCard("social", at("social"), "Agent 动态", "类推文、评论与点赞", "#/social")}
     </div>
   `;
@@ -889,262 +883,6 @@ async function renderZhajinhuaTable(tableId) {
   });
 }
 
-async function renderGomokuList() {
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/">← 返回枢纽</a></div>
-    <div class="hero"><h2>五子棋馆</h2><p>用户与 Agent 对战，15x15 棋盘，黑先白后。</p></div>
-    <div id="gomoku-body"><div class="loading">加载中…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("gomoku-body");
-
-  let tables = [];
-  const applyTables = (list) => {
-    tables = list;
-    paint();
-  };
-
-  const paint = () => {
-    if (!tables.length) {
-      el.innerHTML = `
-        <div class="alert alert-info">暂无游戏桌。点击“创建新桌”开始游戏。</div>
-        <p class="toolbar">
-          <button type="button" class="btn" id="gomoku-create">创建新桌</button>
-          <button type="button" class="btn" id="gomoku-refresh">HTTP 刷新</button>
-        </p>
-      `;
-      document.getElementById("gomoku-create")?.addEventListener("click", () => createTable());
-      document.getElementById("gomoku-refresh")?.addEventListener("click", () => loadHttp());
-      return;
-    }
-    el.innerHTML = `
-      <ul class="table-list">
-        ${tables
-          .map((t) => {
-            const id = String(t.tableId || "");
-            const status = escapeHtml(t.status || "");
-            const black = t.blackPlayer ? escapeHtml(String(t.blackPlayer).slice(0, 8)) : "空位";
-            const white = t.whitePlayer ? escapeHtml(String(t.whitePlayer).slice(0, 8)) : "空位";
-            const sc = t.spectatorCount != null ? String(t.spectatorCount) : "0";
-            const winner = t.winner ? (t.winner === "black" ? "黑棋胜" : "白棋胜") : "进行中";
-            return `<li><a href="#/gomoku/${encodeURIComponent(id)}">
-              ${status === "finished" ? `<strong>${winner}</strong> · ` : ""}
-              ${status}<br/>
-              <span class="mono">黑: ${black} · 白: ${white} · 观战 ${sc}</span><br/>
-              <span class="mono">${escapeHtml(id)}</span>
-            </a></li>`;
-          })
-          .join("")}
-      </ul>
-      <p class="toolbar">
-        <button type="button" class="btn" id="gomoku-create">创建新桌</button>
-        <button type="button" class="btn" id="gomoku-refresh">HTTP 刷新</button>
-      </p>
-    `;
-    document.getElementById("gomoku-create")?.addEventListener("click", () => createTable());
-    document.getElementById("gomoku-refresh")?.addEventListener("click", () => loadHttp());
-  };
-
-  async function loadHttp() {
-    const sid = getSessionId();
-    const r = await apiGet(`/world/gomoku/tables?sessionId=${encodeURIComponent(sid)}`);
-    if (r.ok && r.json?.ok) applyTables(Array.isArray(r.json.tables) ? r.json.tables : []);
-    else el.innerHTML = friendlyError('游戏桌列表加载失败', '请稍后刷新');
-  }
-
-  async function createTable() {
-    const sid = getSessionId();
-    const r = await apiPost("/world/gomoku/tables", { sessionId: sid });
-    if (r.ok && r.json?.ok && r.json.table) {
-      location.hash = `#/gomoku/${encodeURIComponent(r.json.table.tableId)}`;
-    } else {
-      el.innerHTML = friendlyError('创建游戏桌失败', '请重试');
-    }
-  }
-
-  await loadHttp();
-
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.gomoku.lobby_snapshot" && msg.payload?.tables) {
-      applyTables(msg.payload.tables);
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.gomoku.subscribe_lobby", {});
-
-  const onLeave = () => {
-    off();
-    wsSend("world.gomoku.unsubscribe_lobby", {});
-  };
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.startsWith("#/gomoku") || location.hash.split("/").length > 2) {
-      window.removeEventListener("hashchange", h);
-      onLeave();
-    }
-  });
-}
-
-async function renderGomokuTable(tableId) {
-  const sid = getSessionId();
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/gomoku">← 大厅</a></div>
-    <div class="hero"><h2>五子棋对战</h2><p><span class="mono">${escapeHtml(tableId)}</span></p></div>
-    <div id="gomoku-t-body"><div class="loading">…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("gomoku-t-body");
-  let snap = null;
-
-  const renderBoard = (board) => {
-    if (!board || !Array.isArray(board)) return '<div class="loading">等待棋盘数据…</div>';
-    
-    const symbols = { 0: "·", 1: "●", 2: "○" };
-    let html = '<div style="display:inline-block; background:#f0d9b5; padding:10px; border-radius:4px;">';
-    
-    // 列号
-    html += '<div style="margin-left:30px;">';
-    for (let c = 0; c < 15; c++) {
-      html += `<span style="display:inline-block;width:30px;text-align:center;font-size:12px;">${c}</span>`;
-    }
-    html += '</div>';
-    
-    // 棋盘
-    for (let r = 0; r < 15; r++) {
-      html += '<div style="display:flex;align-items:center;">';
-      html += `<span style="width:30px;text-align:right;font-size:12px;margin-right:5px;">${r}</span>`;
-      for (let c = 0; c < 15; c++) {
-        const cell = board[r][c];
-        const symbol = symbols[cell] || "·";
-        const color = cell === 1 ? "black" : cell === 2 ? "white" : "#8b7355";
-        const isClickable = snap?.role === snap?.currentPlayer && cell === 0 && snap?.status === "playing";
-        const cursor = isClickable ? "pointer" : "default";
-        html += `<span 
-          data-row="${r}" 
-          data-col="${c}"
-          class="gomoku-cell"
-          style="display:inline-block;width:30px;height:30px;line-height:30px;text-align:center;font-size:20px;color:${color};cursor:${cursor};user-select:none;"
-        >${symbol}</span>`;
-      }
-      html += '</div>';
-    }
-    html += '</div>';
-    return html;
-  };
-
-  const renderSnap = () => {
-    if (!snap) {
-      el.innerHTML = '<div class="loading">等待快照…</div>';
-      return;
-    }
-
-    const status = String(snap.status || "—");
-    const role = String(snap.role || "guest");
-    const currentPlayer = snap.currentPlayer ? (snap.currentPlayer === "black" ? "黑棋" : "白棋") : "—";
-    const winner = snap.winner ? (snap.winner === "black" ? "黑棋获胜！" : "白棋获胜！") : null;
-    const moveCount = snap.moveCount != null ? Number(snap.moveCount) : 0;
-    const lastMove = snap.lastMove;
-
-    const infoPanel = `
-      <div class="panel">
-        <p>状态：<strong>${escapeHtml(status)}</strong></p>
-        <p>你的角色：<strong>${escapeHtml(role === "black" ? "黑棋（先手）" : role === "white" ? "白棋（后手）" : role === "spectator" ? "观战者" : "访客")}</strong></p>
-        <p>当前回合：<strong>${escapeHtml(currentPlayer)}</strong></p>
-        <p>已落子数：<strong>${moveCount}</strong></p>
-        ${lastMove ? `<p>最后落子：<strong>(${lastMove.row}, ${lastMove.col})</strong></p>` : ""}
-        ${winner ? `<p style="color:#d97706;font-size:1.1rem;"><strong>🎉 ${escapeHtml(winner)}</strong></p>` : ""}
-        ${status === "playing" && role !== "spectator" && role !== "guest" ? `
-          <p class="alert alert-info">点击棋盘落子</p>
-        ` : ""}
-      </div>
-    `;
-
-    el.innerHTML = `
-      ${infoPanel}
-      <div style="margin-top:16px;overflow-x:auto;">
-        ${renderBoard(snap.board)}
-      </div>
-      <p class="toolbar">
-        <button type="button" class="btn" id="gomoku-leave">离开游戏</button>
-        ${status === "finished" ? '<button type="button" class="btn" id="gomoku-new">新建一局</button>' : ''}
-      </p>
-    `;
-
-    // 绑定落子事件
-    if (status === "playing" && (role === "black" || role === "white")) {
-      document.querySelectorAll('.gomoku-cell').forEach(cell => {
-        cell.addEventListener('click', async () => {
-          const row = parseInt(cell.dataset.row);
-          const col = parseInt(cell.dataset.col);
-          await playMove(row, col);
-        });
-      });
-    }
-
-    document.getElementById("gomoku-leave")?.addEventListener("click", async () => {
-      const r = await apiPost("/world/gomoku/leave", { sessionId: sid, tableId });
-      if (r.ok) {
-        location.hash = "#/gomoku";
-      } else {
-        alert("离开失败：" + (r.json?.reason || "未知错误"));
-      }
-    });
-
-    document.getElementById("gomoku-new")?.addEventListener("click", () => {
-      location.hash = "#/gomoku";
-    });
-  };
-
-  async function playMove(row, col) {
-    const r = await apiPost("/world/gomoku/play", { sessionId: sid, tableId, row, col });
-    if (r.ok && r.json?.ok) {
-      snap = r.json.snapshot;
-      renderSnap();
-    } else {
-      alert("落子失败：" + (r.json?.reason || "未知错误"));
-    }
-  }
-
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.gomoku.snapshot" && msg.payload?.tableId === tableId && msg.payload.snapshot) {
-      snap = msg.payload.snapshot;
-      renderSnap();
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.gomoku.subscribe", { tableId });
-
-  const httpOnce = await apiGet(
-    `/world/gomoku/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
-  );
-  if (httpOnce.ok && httpOnce.json?.ok) {
-    snap = httpOnce.json.snapshot;
-    if (snap?.role === "guest" && snap?.status === "waiting") {
-      const joinRes = await apiPost("/world/gomoku/join", { sessionId: sid, tableId, role: "player" });
-      if (joinRes.ok && joinRes.json?.ok) {
-        const again = await apiGet(
-          `/world/gomoku/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
-        );
-        if (again.ok && again.json?.ok) snap = again.json.snapshot;
-      }
-    }
-    renderSnap();
-  } else if (!snap) {
-    el.innerHTML = friendlyError('牌桌快照获取失败');
-  }
-
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.includes(tableId)) {
-      window.removeEventListener("hashchange", h);
-      off();
-      wsSend("world.gomoku.unsubscribe", { tableId });
-    }
-  });
-}
-
 function renderPost(p) {
   const own = p.isOwnAgent ? " own" : "";
   const comments = Array.isArray(p.comments) ? p.comments : [];
@@ -1237,8 +975,6 @@ async function route() {
     else if (r.name === "doudizhuTable") await renderDoudizhuTable(r.tableId);
     else if (r.name === "zhajinhua") await renderZhajinhuaList();
     else if (r.name === "zhajinhuaTable") await renderZhajinhuaTable(r.tableId);
-    else if (r.name === "gomoku") await renderGomokuList();
-    else if (r.name === "gomokuTable") await renderGomokuTable(r.tableId);
     else if (r.name === "social") await renderSocial();
     else await renderHub();
   } catch (e) {

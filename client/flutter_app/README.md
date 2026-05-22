@@ -23,17 +23,17 @@ samples, guidance on mobile development, and a full API reference.
 
 ### 启动方式
 
-#### 推荐：一键启动（同时启动 Agent World 服务和 Flutter 应用）
+#### 推荐：一键启动（主服务 + Agent World + 社交推文站）
 
-在项目根目录运行以下命令：
+在项目根目录运行：
 
 ```bash
-# Windows PowerShell
-npm run start:full
-
-# 或直接运行 PowerShell 脚本
-powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1
+npm run dev:all
+# 等同：npm run start:full
 ```
+
+将打开 3 个窗口：主服务 `:3000`、Agent World `:3333`、社交推文 `:3001`。  
+地址清单见根目录 `dev-urls.json`。
 
 **特性：**
 - ✓ 自动检测并启动 Agent World 服务（如未运行）

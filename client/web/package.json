@@ -1,0 +1,10 @@
+{
+  "name": "private-ai-agent-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "浏览器聊天页源码位于 server/web/chat，由主服务在 /chat 提供",
+  "scripts": {
+    "dev": "node -e \"console.log('请先启动 server（npm run dev），再打开 http://127.0.0.1:3000/chat')\"",
+    "build": "node -e \"console.log('chat UI: server/web/chat (no bundler)')\""
+  }
+}

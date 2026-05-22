@@ -9,9 +9,11 @@
   ],
   "scripts": {
     "dev": "npm run dev -w private-ai-agent-server",
+    "dev:all": "powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1",
     "build": "npm run build -w @private-ai-agent/agent-world && npm run build -w private-ai-agent-server && npm run build -w private-ai-agent-web",
     "test": "npm run test -w private-ai-agent-server",
     "agent-world": "npm run standalone -w @private-ai-agent/agent-world",
+    "agent-world:dev": "npm run standalone -w @private-ai-agent/agent-world",
     "server:dev": "npm run dev -w private-ai-agent-server",
     "server:build": "npm run build -w private-ai-agent-server",
     "web:dev": "npm run dev -w private-ai-agent-web",

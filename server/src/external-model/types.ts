@@ -34,11 +34,19 @@ export type AgentPromptMemoryContext = {
   persona?: string;
   values?: string;
   abilities?: string;
-  /** 个人房世界点数、已解锁技能等（非 UAP KV，由运行时拼装） */
+  /** 宿主 Agent 内置能力说明（钱包、日程、虚拟电话、子 Agent 委派等，非 UAP KV） */
+  agentCaps?: string;
+  /** Agent World 环境说明：注册、世界点数、自由市场、Agent 间对局等（非 UAP KV） */
   worldCaps?: string;
   /** BM25+Qdrant+RRF 融合后的履历/叙事摘录，供本轮推理引用 */
   narrativeRecall?: string;
   memorySummary?: string;
+  /** 用户打断的回复上下文，用于整合到下一次回复中 */
+  interruptedContext?: string;
+  /** 基于 IP 识别的用户所在地（注入 system，供位置相关问答使用） */
+  userLocation?: string;
+  /** Per-turn task profile and operating policy injected into the system prompt. */
+  taskContext?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -52,12 +60,44 @@ export type ToolLoopAfterBatchInfo = {
 export type AgentStreamOptions = {
   promptContext?: { memory?: AgentPromptMemoryContext };
   toolLoop?: {
+    /** 工具多轮上限；五子棋快路径建议 1 */
+    maxRounds?: number;
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
   };
+  /** 单轮快路径：不写入 provider 会话 thread（避免历史越积越慢） */
+  ephemeralTurn?: boolean;
+  /** 替换默认 system（跳过 UAP 记忆拼装，用于五子棋等低延迟场景） */
+  systemPromptOverride?: string;
+  /** 覆盖默认 chat 模型（如五子棋专用快模型） */
+  modelOverride?: string;
+  /** 限制 provider thread 保留的消息条数（不含 system）；五子棋建议 8–12 */
+  maxThreadMessages?: number;
+  /** Kimi k2.5+：关闭 thinking，降低 tool 落子延迟 */
+  disableThinking?: boolean;
   /** 按会话已购技能合并进 LLM tools（内置 Skill + 已拥有社区 Skill） */
-  chatToolsExtra?: ChatCompletionTool[];
-  /** 替换默认内置工具列表（子 Agent 按能力过滤时使用） */
   chatToolsBuiltin?: ChatCompletionTool[];
+  /** 替换默认内置工具列表（子 Agent 按能力过滤时使用） */
+  chatToolsExtra?: ChatCompletionTool[];
+  /** 主 Agent 通过 function calling 委派子 Agent（追加调度说明 + master_invoke_sub_agent 工具） */
+  masterSubAgentDelegate?: boolean;
+  /** 默认沙箱；`full` 时向 LLM 暴露高权限工具 */
+  agentAccessMode?: "sandbox" | "full";
+};
+
+/** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */
+export type ToolExecuteStartInfo = {
+  toolName: string;
+  input: Record<string, unknown>;
+  /** 模型在调用工具前输出的 assistant 文本（若有） */
+  assistantPreamble?: string;
+};
+
+/** 工具执行完成后 */
+export type ToolExecutedInfo = {
+  toolName: string;
+  input: Record<string, unknown>;
+  ok: boolean;
+  result: Record<string, unknown>;
 };
 
 /** 外部模型 function calling 与本地 ToolRegistry 之间的桥接。 */
@@ -66,12 +106,8 @@ export type ChatToolExecutionContext = {
     name: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-  onToolExecuted?: (info: {
-    toolName: string;
-    input: Record<string, unknown>;
-    ok: boolean;
-    result: Record<string, unknown>;
-  }) => void;
+  onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
+  onToolExecuted?: (info: ToolExecutedInfo) => void;
 };
 
 /**
@@ -101,4 +137,15 @@ export interface ExternalChatProvider {
 
   /** 可选：丢弃某会话的服务端侧对话记忆 */
   clearSession?(sessionId: string): void;
+
+  /**
+   * 可选：将已完成的一轮 user/assistant 写入服务端线程（不调用模型）。
+   * 用于 Plan-Execute 等使用临时 session 的路径，避免主会话丢失短期上下文。
+   */
+  appendThreadTurn?(
+    sessionId: string,
+    userTurn: ChatUserTurn,
+    assistantText: string,
+    maxThreadMessages?: number,
+  ): void;
 }

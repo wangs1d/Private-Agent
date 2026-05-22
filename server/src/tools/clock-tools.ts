@@ -1,260 +1,343 @@
 /**
+
  * 时钟工具：获取当前时间和日期信息
- * 通过 IP 地址查询用户所在时区，结合本地时间提供准确的时间信息
+
+ * 优先使用前端 GPS 定位，结合本地时间提供准确的时间信息
+
  */
+
+
+
+import {
+
+  formatUserLocationLabel,
+
+  resolveUserGeo,
+
+  type UserGeoInfo,
+
+} from "../services/user-location-service.js";
 
 import type { ToolRegistry } from "./tool-registry.js";
 
-export type UserTimezoneInfo = {
-  timezone: string;
-  country: string;
-  city: string;
-  ip: string;
-  source: "ip-api" | "ipwho.is";
-};
 
-const FETCH_TIMEOUT_MS = 5_000;
 
-async function fetchJsonWithTimeout(url: string): Promise<unknown | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      console.warn("[ClockTools] HTTP 查询失败:", url, response.status);
-      return null;
-    }
-    return (await response.json()) as unknown;
-  } catch (error) {
-    console.warn("[ClockTools] 查询异常:", url, error);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+export type { UserGeoInfo as UserTimezoneInfo } from "../services/user-location-service.js";
 
-async function fetchFromIpApi(): Promise<UserTimezoneInfo | null> {
-  const data = (await fetchJsonWithTimeout(
-    "http://ip-api.com/json/?fields=status,message,timezone,country,city,query",
-  )) as Record<string, string> | null;
-  if (!data) return null;
-  if (data.status === "fail") {
-    console.warn("[ClockTools] ip-api 失败:", data.message);
-    return null;
-  }
-  if (!data.timezone?.trim()) return null;
+export { resolveUserGeo as getUserTimezoneByIP } from "../services/user-location-service.js";
+
+
+
+function geoCtx(context: { clientIp?: string; clientLocation?: import("../types/client-location.js").ClientLocationWire }) {
+
   return {
-    timezone: data.timezone.trim(),
-    country: data.country ?? "",
-    city: data.city ?? "",
-    ip: data.query ?? "",
-    source: "ip-api",
+
+    clientIp: context.clientIp,
+
+    clientLocation: context.clientLocation,
+
   };
+
 }
 
-async function fetchFromIpWhoIs(): Promise<UserTimezoneInfo | null> {
-  const data = (await fetchJsonWithTimeout("https://ipwho.is/")) as Record<string, unknown> | null;
-  if (!data || data.success !== true) return null;
-  const tz = data.timezone as { id?: string } | string | undefined;
-  const timezone =
-    typeof tz === "string" ? tz.trim() : typeof tz?.id === "string" ? tz.id.trim() : "";
-  if (!timezone) return null;
-  return {
-    timezone,
-    country: String(data.country ?? ""),
-    city: String(data.city ?? ""),
-    ip: String(data.ip ?? ""),
-    source: "ipwho.is",
-  };
-}
 
-async function fetchFromIpApiCo(): Promise<UserTimezoneInfo | null> {
-  const data = (await fetchJsonWithTimeout("https://ipapi.co/json/")) as Record<string, unknown> | null;
-  if (!data || data.error) return null;
-  const timezone = String(data.timezone ?? "").trim();
-  if (!timezone) return null;
-  return {
-    timezone,
-    country: String(data.country_name ?? data.country ?? ""),
-    city: String(data.city ?? ""),
-    ip: String(data.ip ?? ""),
-    source: "ip-api",
-  };
-}
 
-async function fetchFromWorldTimeApi(): Promise<UserTimezoneInfo | null> {
-  const data = (await fetchJsonWithTimeout("https://worldtimeapi.org/api/ip")) as Record<
-    string,
-    unknown
-  > | null;
-  if (!data) return null;
-  const timezone = String(data.timezone ?? "").trim();
-  if (!timezone) return null;
-  return {
-    timezone,
-    country: "",
-    city: String(data.timezone ?? "").split("/").pop() ?? "",
-    ip: "",
-    source: "ip-api",
-  };
-}
-
-function timezoneFromEnv(): UserTimezoneInfo | null {
-  const tz = process.env.AGENT_CLOCK_DEFAULT_TIMEZONE?.trim();
-  if (!tz) return null;
-  return {
-    timezone: tz,
-    country: "",
-    city: tz,
-    ip: "",
-    source: "ip-api",
-  };
-}
-
-/**
- * 通过 IP 地址查询用户所在时区（多源降级；可用 AGENT_CLOCK_DEFAULT_TIMEZONE 跳过公网查询）。
- */
-export async function getUserTimezoneByIP(): Promise<UserTimezoneInfo | null> {
-  const fromEnv = timezoneFromEnv();
-  if (fromEnv) return fromEnv;
-
-  const chain = [fetchFromIpApi, fetchFromIpApiCo, fetchFromWorldTimeApi, fetchFromIpWhoIs];
-  for (const fn of chain) {
-    const hit = await fn();
-    if (hit) return hit;
-  }
-  return null;
-}
-
-/**
- * 格式化时间为指定时区的本地时间
- */
 function formatTimeInTimezone(
+
   date: Date,
+
   timezone: string,
+
   includeSeconds = true,
+
 ): string {
+
   const options: Intl.DateTimeFormatOptions = {
+
     timeZone: timezone,
+
     year: "numeric",
+
     month: "2-digit",
+
     day: "2-digit",
+
     hour: "2-digit",
+
     minute: "2-digit",
+
     hour12: false,
+
   };
+
+
 
   if (includeSeconds) {
+
     options.second = "2-digit";
+
   }
 
+
+
   return date.toLocaleString("zh-CN", options);
+
 }
 
-/**
- * 获取星期几
- */
+
+
 function getWeekdayInTimezone(date: Date, timezone: string): string {
+
   return date.toLocaleString("zh-CN", {
+
     timeZone: timezone,
+
     weekday: "long",
+
   });
+
 }
+
+
+
+function locationField(info: UserGeoInfo): string {
+
+  return formatUserLocationLabel(info);
+
+}
+
+
+
+function buildLocationToolResult(info: UserGeoInfo): Record<string, unknown> {
+
+  const label = locationField(info);
+
+  const sourceHint = info.source === "client-gps" || info.source === "bigdatacloud" || info.source === "amap"
+    ? "GPS 定位"
+    : "设备定位";
+
+  return {
+
+    ok: true,
+
+    city: info.city,
+
+    region: info.region,
+
+    country: info.country,
+
+    timezone: info.timezone,
+
+    location: label,
+
+    latitude: info.latitude,
+
+    longitude: info.longitude,
+
+    geoSource: info.source,
+
+    message: label
+
+      ? `根据${sourceHint}，您当前位于：${label}${info.timezone ? `（时区 ${info.timezone}）` : ""}`
+
+      : "暂时无法识别您的所在城市，请在 App 中开启定位权限后重试。",
+
+  };
+
+}
+
+
+
+function noLocationError(): Record<string, unknown> {
+
+  return {
+
+    ok: false,
+
+    error: "无法获取您的位置。请在 App/浏览器中开启定位权限，以便识别您所在的城市。",
+
+  };
+
+}
+
+
 
 export function registerClockTools(toolRegistry: ToolRegistry): void {
-  toolRegistry.register("clock.get_current_time", async () => {
+
+  toolRegistry.register("clock.get_user_location", async (_input, context) => {
+
+    const userInfo = await resolveUserGeo(geoCtx(context));
+
+    if (!userInfo || (!userInfo.city && !userInfo.region)) {
+
+      return noLocationError();
+
+    }
+
+    return buildLocationToolResult(userInfo);
+
+  });
+
+
+
+  toolRegistry.register("clock.get_current_time", async (_input, context) => {
+
     const now = new Date();
+
     const utc = now.toUTCString();
 
-    const userInfo = await getUserTimezoneByIP();
 
-    if (userInfo?.timezone) {
-      const localTime = formatTimeInTimezone(now, userInfo.timezone);
-      const weekday = getWeekdayInTimezone(now, userInfo.timezone);
 
-      return {
-        ok: true,
-        currentTime: {
-          utc,
-          local: localTime,
-          weekday,
-          timestamp: now.toISOString(),
-          unixTimestamp: Math.floor(now.getTime() / 1000),
-        },
-        timezone: userInfo.timezone,
-        location: `${userInfo.city}, ${userInfo.country}`.replace(/^, |, $/g, "").trim() || userInfo.timezone,
-        ip: userInfo.ip,
-        geoSource: userInfo.source,
-        message: `当前时间（${userInfo.city || userInfo.timezone}）：${localTime} ${weekday}`,
-      };
-    }
+    const userInfo = await resolveUserGeo(geoCtx(context));
 
-    const localTime = formatTimeInTimezone(now, "Asia/Shanghai");
-    const weekday = getWeekdayInTimezone(now, "Asia/Shanghai");
+    const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
+
+
+
+    const localTime = formatTimeInTimezone(now, timezone);
+
+    const weekday = getWeekdayInTimezone(now, timezone);
+
+    const label = userInfo ? locationField(userInfo) : timezone;
+
+
 
     return {
+
       ok: true,
+
       currentTime: {
+
         utc,
-        beijing: localTime,
+
+        local: localTime,
+
         weekday,
+
         timestamp: now.toISOString(),
+
         unixTimestamp: Math.floor(now.getTime() / 1000),
+
       },
-      timezone: "Asia/Shanghai (UTC+8)",
-      geoSource: "fallback",
-      message: `当前北京时间：${localTime} ${weekday}`,
+
+      timezone,
+
+      location: label,
+
+      geoSource: userInfo?.source ?? "fallback",
+
+      message: `当前时间（${userInfo?.city || label}）：${localTime} ${weekday}`,
+
     };
+
   });
 
-  toolRegistry.register("clock.get_date", async () => {
+
+
+  toolRegistry.register("clock.get_date", async (_input, context) => {
+
     const now = new Date();
 
-    const userInfo = await getUserTimezoneByIP();
-    const timezone = userInfo?.timezone || "Asia/Shanghai";
+
+
+    const userInfo = await resolveUserGeo(geoCtx(context));
+
+    const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
+
+
 
     const localDate = now.toLocaleString("zh-CN", {
+
       timeZone: timezone,
+
       year: "numeric",
+
       month: "long",
+
       day: "numeric",
+
       weekday: "long",
+
     });
 
+
+
+    const label = userInfo ? locationField(userInfo) : "Asia/Shanghai";
+
+
+
     return {
+
       ok: true,
+
       currentDate: localDate,
-      timezone: userInfo ? `${userInfo.city}, ${userInfo.country}` : "Asia/Shanghai",
+
+      timezone: label,
+
       geoSource: userInfo?.source ?? "fallback",
+
       timestamp: now.toISOString(),
+
       message: `今天日期（${userInfo?.city || "本地"}）：${localDate}`,
+
     };
+
   });
 
-  toolRegistry.register("clock.format_timestamp", async (input) => {
+
+
+  toolRegistry.register("clock.format_timestamp", async (input, context) => {
+
     const timestamp = Number(input.timestamp);
+
     if (!Number.isFinite(timestamp)) {
+
       return {
+
         ok: false,
+
         error: "时间戳必须是有效数字",
+
       };
+
     }
+
+
 
     const date = new Date(timestamp * 1000);
 
-    const userInfo = await getUserTimezoneByIP();
-    const timezone = userInfo?.timezone || "Asia/Shanghai";
+
+
+    const userInfo = await resolveUserGeo(geoCtx(context));
+
+    const timezone = userInfo?.timezone?.trim() || "Asia/Shanghai";
+
+
 
     const formatted = formatTimeInTimezone(date, timezone);
+
     const weekday = getWeekdayInTimezone(date, timezone);
 
+
+
     return {
+
       ok: true,
+
       formatted: `${formatted} ${weekday}`,
-      timezone: userInfo ? `${userInfo.city}, ${userInfo.country}` : "Asia/Shanghai",
+
+      timezone: userInfo ? locationField(userInfo) : "Asia/Shanghai",
+
       geoSource: userInfo?.source ?? "fallback",
+
       timestamp,
+
       isoString: date.toISOString(),
+
     };
+
   });
+
 }
+
+
