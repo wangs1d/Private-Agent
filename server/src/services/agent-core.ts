@@ -10,6 +10,10 @@ import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
 import type { HermesEvolutionLoopService } from "./hermes-evolution-loop-service.js";
+import type {
+  PersonalizationPromptSlice,
+  UserPersonalizationService,
+} from "./user-personalization/user-personalization-service.js";
 import {
   type TaskExecutionPlan,
   planExecuteSessionId,
@@ -35,6 +39,20 @@ import { routeLlmExecution, type LlmExecutionMode } from "../agent/task-router.j
 import type { AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
+import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
+
+export type MasterAgentDelegationSnapshot = {
+  enabled: boolean;
+  metrics: PerformanceMetrics | null;
+  subAgentMetrics: Record<string, SubAgentPerformanceMetrics> | null;
+  history: Array<unknown>;
+  suggestions: string[];
+  config: {
+    taskTimeoutMs: number;
+    techSubtaskTimeoutMs: number;
+    maxSubAgentInvocationsPerTurn: number;
+  } | null;
+};
 
 export type { AgentReply } from "../agent/types.js";
 
@@ -65,6 +83,7 @@ export class AgentCore {
     private readonly computeQuotaService: ComputeQuotaService | null = null,
     private readonly agentMemorySyncService: AgentMemorySyncService | null = null,
     private readonly hermesEvolutionLoopService: HermesEvolutionLoopService | null = null,
+    private readonly userPersonalizationService: UserPersonalizationService | null = null,
     private readonly worldService: WorldService | null = null,
     private readonly skillManager: SkillManager | null = null,
     private readonly narrativeMemory: NarrativeMemoryPort | null = null,
@@ -81,6 +100,8 @@ export class AgentCore {
       narrativeMemory: this.narrativeMemory,
       computeQuotaService: this.computeQuotaService,
       hermesEvolutionLoopService: this.hermesEvolutionLoopService,
+      userPersonalizationService: this.userPersonalizationService,
+      agentMemorySyncService: this.agentMemorySyncService,
     });
 
     if (this.externalChat?.isEnabled() && isMasterAgentDelegationEnabled()) {
@@ -93,6 +114,7 @@ export class AgentCore {
           enableSubAgents: true,
           maxParallelTasks: 1,
           taskTimeoutMs: cfg.subtaskTimeoutMs,
+          techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
           allowFallback: true,
         },
       );
@@ -111,12 +133,13 @@ export class AgentCore {
       return { text: fallback };
     }
 
-    const [narrativeRecall, userLocation] = await Promise.all([
+    const [narrativeRecall, userLocation, personalization] = await Promise.all([
       this.turnLifecycle.prepareNarrativeRecall(actorId, text),
       resolveUserLocationPrompt({
         clientIp: opts?.clientIp,
         clientLocation: opts?.clientLocation,
       }),
+      this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
     ]);
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
       actorId,
@@ -124,14 +147,21 @@ export class AgentCore {
       text,
     );
     const route = routeLlmExecution(text);
-    const orchestrateOpts = this.buildOrchestrateOpts(actorId, text, opts, narrativeRecall, trajCap);
+    const orchestrateOpts = this.buildOrchestrateOpts(
+      actorId,
+      text,
+      opts,
+      narrativeRecall,
+      personalization,
+      trajCap,
+    );
 
     try {
       if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
         const result = await this.masterAgentCoordinator.orchestrateTask(
           actorId,
           text,
-          undefined,
+          opts?.onAgentPhaseStatus,
           opts?.onAssistantDelta,
           orchestrateOpts,
         );
@@ -142,12 +172,14 @@ export class AgentCore {
           pePlan: null,
           peExhausted: false,
           trajCap,
+          messageId: opts?.chatUserMessageId,
         });
       }
 
       return await this.runStandardLlmPath(actorId, text, route.mode, opts, {
         narrativeRecall,
         userLocation,
+        personalization,
         trajCap,
         orchestrateToolCtx: orchestrateOpts,
       });
@@ -157,6 +189,7 @@ export class AgentCore {
         return await this.runStandardLlmPath(actorId, text, "direct_llm", opts, {
           narrativeRecall,
           userLocation,
+          personalization,
           trajCap,
           orchestrateToolCtx: orchestrateOpts,
         });
@@ -164,6 +197,37 @@ export class AgentCore {
       const msg = err instanceof Error ? err.message : String(err);
       return { text: `${this.externalChat.displayLabel} 调用失败：${msg}` };
     }
+  }
+
+  /** 主 Agent 委派监控快照（metrics / history / suggestions） */
+  getMasterAgentDelegationSnapshot(): MasterAgentDelegationSnapshot {
+    const cfg = getAgentRuntimeConfig().masterDelegation;
+    if (!this.masterAgentCoordinator) {
+      return {
+        enabled: false,
+        metrics: null,
+        subAgentMetrics: null,
+        history: [],
+        suggestions: ["主 Agent 委派未启用。设置 ENABLE_MASTER_AGENT_DELEGATION=1 并配置外部模型。"],
+        config: null,
+      };
+    }
+    return {
+      enabled: true,
+      metrics: this.masterAgentCoordinator.getMetricsSnapshot(),
+      subAgentMetrics: this.masterAgentCoordinator.getSubAgentMetricsSnapshot(),
+      history: this.masterAgentCoordinator.getExecutionHistory(),
+      suggestions: this.masterAgentCoordinator.getOptimizationSuggestions(),
+      config: {
+        taskTimeoutMs: cfg.subtaskTimeoutMs,
+        techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
+        maxSubAgentInvocationsPerTurn: cfg.maxSubAgentInvocationsPerTurn,
+      },
+    };
+  }
+
+  adjustMasterAgentConcurrency(_newMaxParallel: number): void {
+    this.masterAgentCoordinator?.adjustConcurrency(_newMaxParallel);
   }
 
   async runToolIfNeeded(
@@ -197,6 +261,7 @@ export class AgentCore {
     userText: string,
     opts: HandleUserMessageOptions | undefined,
     narrativeRecall: string | undefined,
+    personalization: PersonalizationPromptSlice,
     trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
@@ -217,6 +282,7 @@ export class AgentCore {
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
+      personalization,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onToolExecuted: (info: ToolExecutedInfo) => {
         trajCap?.observeToolExecuted({
@@ -240,6 +306,7 @@ export class AgentCore {
       userLocation?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
+      personalization: PersonalizationPromptSlice;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
@@ -264,6 +331,7 @@ export class AgentCore {
       narrativeRecall: ctx.narrativeRecall,
       interruptedContext: opts?.interruptedContext,
       userLocation: ctx.userLocation,
+      personalization: ctx.personalization,
       onToolLoopAfterBatch: onBatchWithEvolution,
     });
 
@@ -324,6 +392,7 @@ export class AgentCore {
       pePlan,
       peExhausted,
       trajCap: ctx.trajCap,
+      messageId: opts?.chatUserMessageId,
     });
   }
 
@@ -338,6 +407,7 @@ export class AgentCore {
       pePlan: TaskExecutionPlan | null;
       peExhausted: boolean;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
+      messageId?: string;
     },
   ): AgentReply {
     const trimmed = assistantText.trim();
@@ -363,6 +433,7 @@ export class AgentCore {
       planExecuteUsed: meta.planExecuteUsed,
       pePlan: meta.pePlan,
       peExhausted: meta.peExhausted,
+      messageId: meta.messageId,
     });
 
     return {

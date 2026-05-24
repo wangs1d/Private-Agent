@@ -2,6 +2,7 @@ import type { WorldService } from "@private-ai-agent/agent-world";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
+import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { AgentCore } from "../services/agent-core.js";
 import type { SkillManager } from "../skills/index.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
@@ -20,6 +21,7 @@ export type AgentCoreDependencies = {
   computeQuotaService: ComputeQuotaService | null;
   agentMemorySyncService?: AgentMemorySyncService | null;
   hermesEvolutionLoopService?: HermesEvolutionLoopService | null;
+  userPersonalizationService?: UserPersonalizationService | null;
   worldService?: WorldService | null;
   skillManager?: SkillManager | null;
   narrativeMemory?: NarrativeMemoryPort | null;
@@ -37,6 +39,7 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.computeQuotaService,
     deps.agentMemorySyncService ?? null,
     deps.hermesEvolutionLoopService ?? null,
+    deps.userPersonalizationService ?? null,
     deps.worldService ?? null,
     deps.skillManager ?? null,
     deps.narrativeMemory ?? null,

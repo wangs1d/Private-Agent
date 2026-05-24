@@ -3,12 +3,13 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { buildMasterSubAgentDelegateChatTools } from "../agent/master-subagent-delegate-tools.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
 import type { SubAgentCapability } from "./master-agent-types.js";
+import { filterLifeCapabilityTools } from "./subagent-life-tool-filter.js";
+import {
+  buildSubAgentAllowedRegistryNames,
+  SUBAGENT_SHARED_REGISTRY_TOOLS,
+} from "./subagent-chat-tool-allowlists.js";
 
-/** 各子 Agent 均可用的基础工具（注册名，带点号） */
-export const SUBAGENT_SHARED_REGISTRY_TOOLS = [
-  "clock.get_current_time",
-  "clock.get_date",
-] as const;
+export { SUBAGENT_SHARED_REGISTRY_TOOLS };
 
 export function filterChatToolsByRegistryNames(
   tools: ChatCompletionTool[],
@@ -21,23 +22,33 @@ export function filterChatToolsByRegistryNames(
 }
 
 /**
- * 按子 Agent 能力白名单生成 LLM tools（仅暴露 capability.tools + 共享 clock）。
+ * 按子 Agent 能力白名单生成 LLM tools（显式 allowlist + 共享 clock）。
+ * life 类型会按 taskText 二次过滤；general 暴露全量内置工具。
  */
 export function buildSubAgentChatTools(
-  capabilityToolNames: readonly string[],
+  capability: SubAgentCapability,
+  taskText = "",
   chatToolsExtra: ChatCompletionTool[] = [],
 ): ChatCompletionTool[] {
-  const allowed = new Set<string>([
-    ...SUBAGENT_SHARED_REGISTRY_TOOLS,
-    ...capabilityToolNames,
-  ]);
+  if (capability.type === "general") {
+    return [...getBuiltinAgentChatTools(), ...chatToolsExtra];
+  }
+
+  const allowed = buildSubAgentAllowedRegistryNames(
+    capability.type,
+    capability.tools,
+    taskText,
+    filterLifeCapabilityTools,
+  );
   const builtins = filterChatToolsByRegistryNames(getBuiltinAgentChatTools(), allowed);
   const extra = filterChatToolsByRegistryNames(chatToolsExtra, allowed);
   const merged = [...builtins, ...extra];
   if (merged.length > 0) return merged;
+
+  // 兜底：至少保留联网搜索，避免子 Agent 完全无工具
   return filterChatToolsByRegistryNames(
     getBuiltinAgentChatTools(),
-    new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web"]),
+    new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web", "fetch_web"]),
   );
 }
 

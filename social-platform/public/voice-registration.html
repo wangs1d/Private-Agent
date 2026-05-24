@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>声纹注册 · 生物特征验证</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a1e;
+      --bg-secondary: #2a2a2e;
+      --bg-tertiary: #35353a;
+      --text-primary: #e8e8ec;
+      --text-secondary: #a0a0a8;
+      --text-muted: #6b6b73;
+      --accent: #6b7280;
+      --accent-hover: #7c8490;
+      --border: #4a4a52;
+      --success: #10b981;
+      --error: #ef4444;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: linear-gradient(135deg, var(--bg-primary) 0%, #252529 50%, var(--bg-secondary) 100%);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* 背景装饰 */
+    body::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      right: -20%;
+      width: 80%;
+      height: 80%;
+      background: radial-gradient(circle, rgba(107, 114, 128, 0.08) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: absolute;
+      bottom: -30%;
+      left: -10%;
+      width: 60%;
+      height: 60%;
+      background: radial-gradient(circle, rgba(107, 114, 128, 0.05) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* 顶部导航 */
+    .header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 24px 40px;
+      border-bottom: 1px solid rgba(74, 74, 82, 0.3);
+      backdrop-filter: blur(10px);
+      background: rgba(26, 26, 30, 0.7);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--bg-tertiary) 100%);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+    }
+
+    .logo-icon svg {
+      width: 20px;
+      height: 20px;
+      fill: var(--text-primary);
+    }
+
+    .progress-container {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .step-indicator {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .step-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--bg-tertiary);
+      transition: all 0.3s ease;
+      position: relative;
+    }
+
+    .step-dot.active {
+      background: var(--accent);
+      transform: scale(1.4);
+      box-shadow: 0 0 12px rgba(107, 114, 128, 0.5);
+    }
+
+    .step-dot.completed {
+      background: var(--success);
+    }
+
+    .step-label {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      min-width: 120px;
+    }
+
+    /* 主内容区 */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      z-index: 10;
+      padding: 40px;
+      gap: 32px;
+    }
+
+    /* 标题区域 */
+    .title-section {
+      text-align: center;
+      max-width: 600px;
+    }
+
+    .title-main {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, var(--text-primary) 0%, var(--text-secondary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .title-sub {
+      font-size: 1.125rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* 录音区域 - 全屏核心 */
+    .recording-stage {
+      width: 100%;
+      max-width: 700px;
+      height: 400px;
+      background: linear-gradient(135deg, rgba(42, 42, 46, 0.8) 0%, rgba(53, 53, 58, 0.6) 100%);
+      border-radius: 24px;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(20px);
+      box-shadow: 
+        0 20px 60px rgba(0, 0, 0, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    .recording-stage::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: radial-gradient(circle at center, rgba(107, 114, 128, 0.15) 0%, transparent 70%);
+      opacity: 0;
+      transition: opacity 0.5s ease;
+    }
+
+    .recording-stage.recording::before {
+      opacity: 1;
+      animation: stagePulse 2s ease-in-out infinite;
+    }
+
+    @keyframes stagePulse {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 0.6; }
+    }
+
+    /* 麦克风按钮 - 超大尺寸 */
+    .mic-button-large {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+      border: 3px solid var(--border);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      z-index: 2;
+      margin-bottom: 32px;
+    }
+
+    .mic-button-large:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      transform: scale(1.08);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    }
+
+    .mic-button-large.recording {
+      background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+      border-color: var(--error);
+      animation: largeRecordPulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes largeRecordPulse {
+      0%, 100% { 
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+        transform: scale(1);
+      }
+      50% { 
+        box-shadow: 0 0 0 24px rgba(239, 68, 68, 0);
+        transform: scale(1.02);
+      }
+    }
+
+    .mic-button-large svg {
+      width: 64px;
+      height: 64px;
+      fill: var(--text-secondary);
+      transition: all 0.3s ease;
+    }
+
+    .mic-button-large:hover:not(:disabled) svg {
+      fill: var(--text-primary);
+    }
+
+    .mic-button-large.recording svg {
+      fill: var(--error);
+    }
+
+    /* 状态文字 */
+    .status-display {
+      text-align: center;
+      z-index: 2;
+    }
+
+    .status-title {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+
+    .status-hint {
+      font-size: 1rem;
+      color: var(--text-muted);
+    }
+
+    /* 波形显示 */
+    .waveform-display {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      height: 80px;
+      width: 300px;
+      margin-top: 24px;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.4s ease;
+    }
+
+    .waveform-display.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .wave-bar {
+      width: 6px;
+      background: linear-gradient(to top, var(--accent) 0%, var(--accent-hover) 100%);
+      border-radius: 3px;
+      transition: height 0.08s ease;
+    }
+
+    /* 倒计时 */
+    .countdown-timer {
+      font-size: 4rem;
+      font-weight: 700;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 4px;
+      margin-top: 16px;
+      opacity: 0;
+      transform: scale(0.8);
+      transition: all 0.3s ease;
+    }
+
+    .countdown-timer.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    /* 底部操作栏 */
+    .footer-actions {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      padding: 24px 40px;
+      border-top: 1px solid rgba(74, 74, 82, 0.3);
+      backdrop-filter: blur(10px);
+      background: rgba(26, 26, 30, 0.7);
+    }
+
+    .action-btn {
+      padding: 14px 32px;
+      border-radius: 12px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      font-family: inherit;
+      min-width: 160px;
+    }
+
+    .btn-skip {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-skip:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border-color: var(--accent);
+    }
+
+    .btn-next {
+      background: linear-gradient(135deg, var(--accent) 0%, #555c66 100%);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-next:hover:not(:disabled) {
+      background: linear-gradient(135deg, var(--accent-hover) 0%, #646c78 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .btn-next:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* 成功状态 */
+    .success-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      animation: fadeIn 0.5s ease;
+    }
+
+    .success-overlay.show {
+      display: flex;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .success-icon-large {
+      width: 120px;
+      height: 120px;
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.05) 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 32px;
+      border: 3px solid rgba(16, 185, 129, 0.4);
+      animation: successPop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    @keyframes successPop {
+      0% { transform: scale(0); }
+      100% { transform: scale(1); }
+    }
+
+    .success-icon-large svg {
+      width: 60px;
+      height: 60px;
+      fill: var(--success);
+    }
+
+    .success-title {
+      font-size: 2.5rem;
+      font-weight: 700;
+      color: var(--success);
+      margin-bottom: 12px;
+    }
+
+    .success-subtitle {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      margin-bottom: 48px;
+    }
+
+    /* 错误提示 */
+    .error-toast {
+      position: fixed;
+      top: 100px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: rgba(239, 68, 68, 0.95);
+      color: white;
+      padding: 16px 32px;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 500;
+      z-index: 200;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+      box-shadow: 0 8px 32px rgba(239, 68, 68, 0.4);
+      backdrop-filter: blur(10px);
+    }
+
+    .error-toast.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* 响应式 */
+    @media (max-width: 768px) {
+      .header {
+        padding: 16px 20px;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .title-main {
+        font-size: 1.75rem;
+      }
+
+      .recording-stage {
+        height: 320px;
+        max-width: 90%;
+      }
+
+      .mic-button-large {
+        width: 110px;
+        height: 110px;
+      }
+
+      .mic-button-large svg {
+        width: 48px;
+        height: 48px;
+      }
+
+      .status-title {
+        font-size: 1.25rem;
+      }
+
+      .countdown-timer {
+        font-size: 3rem;
+      }
+
+      .footer-actions {
+        padding: 16px 20px;
+      }
+
+      .action-btn {
+        min-width: 130px;
+        padding: 12px 24px;
+        font-size: 0.9rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+        </svg>
+      </div>
+      <span>生物特征认证</span>
+    </div>
+
+    <div class="progress-container">
+      <div class="step-indicator">
+        <div class="step-dot completed" id="step1"></div>
+        <div class="step-dot active" id="step2"></div>
+        <div class="step-dot" id="step3"></div>
+      </div>
+      <span class="step-label">步骤 1/2 · 声纹录制</span>
+    </div>
+  </header>
+
+  <!-- 主内容 -->
+  <main class="main-content">
+    <div class="title-section">
+      <h1 class="title-main">录制您的声音</h1>
+      <p class="title-sub">请清晰地说出您的身份信息，用于后续身份验证</p>
+    </div>
+
+    <div class="recording-stage" id="recordingStage">
+      <button class="mic-button-large" id="micButton" type="button">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+          <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+        </svg>
+      </button>
+
+      <div class="status-display">
+        <div class="status-title" id="statusTitle">点击开始录音</div>
+        <div class="status-hint" id="statusHint">准备说出："我是[您的用户名]"</div>
+      </div>
+
+      <div class="waveform-display" id="waveformDisplay">
+        <!-- 波形条会通过 JS 动态生成 -->
+      </div>
+
+      <div class="countdown-timer" id="timer">00:03</div>
+    </div>
+  </main>
+
+  <!-- 底部操作 -->
+  <footer class="footer-actions">
+    <button type="button" class="action-btn btn-skip" id="btnSkip">跳过此步</button>
+    <button type="button" class="action-btn btn-next" id="btnNext" disabled>下一步：人脸识别</button>
+  </footer>
+
+  <!-- 成功覆盖层 -->
+  <div class="success-overlay" id="successOverlay">
+    <div class="success-icon-large">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+      </svg>
+    </div>
+    <h2 class="success-title">声纹注册成功！</h2>
+    <p class="success-subtitle">您的声音样本已安全保存</p>
+    <button type="button" class="action-btn btn-next" id="btnGoToFace">继续人脸识别</button>
+  </div>
+
+  <!-- 错误提示 -->
+  <div class="error-toast" id="errorToast"></div>
+
+  <script>
+    const tokenKey = 'social_platform_token';
+    
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let recordingTimer = null;
+    let timeLeft = 3;
+    let animationId = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    function getAuthToken() {
+      return localStorage.getItem(tokenKey);
+    }
+
+    function authHeaders() {
+      const t = getAuthToken();
+      return t ? { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: { ...authHeaders(), ...(opts.headers || {}) }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.reason || data.error || res.statusText);
+      return data;
+    }
+
+    function updateStep(step) {
+      for (let i = 1; i <= 3; i++) {
+        const el = $(`step${i}`);
+        el.classList.remove('active', 'completed');
+        if (i < step) el.classList.add('completed');
+        else if (i === step) el.classList.add('active');
+      }
+
+      const labels = ['步骤 1/2 · 声纹录制', '步骤 2/2 · 人脸拍摄', '完成'];
+      document.querySelector('.step-label').textContent = labels[step - 1] || '';
+    }
+
+    function showError(msg) {
+      const toast = $('errorToast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 4000);
+    }
+
+    // 初始化波形
+    function initWaveform() {
+      const container = $('waveformDisplay');
+      container.innerHTML = '';
+      for (let i = 0; i < 25; i++) {
+        const bar = document.createElement('div');
+        bar.className = 'wave-bar';
+        bar.style.height = '20px';
+        container.appendChild(bar);
+      }
+    }
+
+    function startWaveformAnimation() {
+      const bars = $('#waveformDisplay').querySelectorAll('.wave-bar');
+      
+      function animate() {
+        bars.forEach((bar, index) => {
+          const delay = index * 0.05;
+          setTimeout(() => {
+            const height = Math.random() * 60 + 20;
+            bar.style.height = height + 'px';
+          }, delay * 1000);
+        });
+        
+        animationId = requestAnimationFrame(animate);
+      }
+      
+      animate();
+    }
+
+    function stopWaveformAnimation() {
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+      const bars = $('#waveformDisplay').querySelectorAll('.wave-bar');
+      bars.forEach(bar => bar.style.height = '20px');
+    }
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+          audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach(track => track.stop());
+          
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          await uploadVoicePrint(audioBlob);
+        };
+
+        mediaRecorder.start();
+
+        // 更新UI
+        $('micButton').classList.add('recording');
+        $('recordingStage').classList.add('recording');
+        $('statusTitle').textContent = '正在录音...';
+        $('statusHint').textContent = '请清晰地说话';
+        $('waveformDisplay').classList.add('visible');
+        $('timer').classList.add('visible');
+
+        initWaveform();
+        startWaveformAnimation();
+
+        timeLeft = 3;
+        updateTimerDisplay();
+        
+        recordingTimer = setInterval(() => {
+          timeLeft--;
+          updateTimerDisplay();
+          
+          if (timeLeft <= 0) {
+            stopRecording();
+          }
+        }, 1000);
+
+      } catch (err) {
+        console.error('Error accessing microphone:', err);
+        showError('无法访问麦克风，请检查权限设置');
+      }
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      }
+      
+      if (recordingTimer) {
+        clearInterval(recordingTimer);
+        recordingTimer = null;
+      }
+
+      $('micButton').classList.remove('recording');
+      $('recordingStage').classList.remove('recording');
+      stopWaveformAnimation();
+      
+      $('statusTitle').textContent = '处理中...';
+      $('statusHint').textContent = '正在保存声音样本';
+    }
+
+    function updateTimerDisplay() {
+      const seconds = Math.max(0, timeLeft);
+      $('timer').textContent = `00:0${seconds}`;
+    }
+
+    async function uploadVoicePrint(audioBlob) {
+      try {
+        const reader = new FileReader();
+        const base64Promise = new Promise((resolve) => {
+          reader.onload = () => {
+            const base64 = reader.result.split(',')[1];
+            resolve(base64);
+          };
+          reader.readAsDataURL(audioBlob);
+        });
+
+        const base64Data = await base64Promise;
+
+        $('statusTitle').textContent = '上传中...';
+        $('statusHint').textContent = '正在传输数据到服务器';
+        
+        await api('/biometric/voice', {
+          method: 'POST',
+          body: JSON.stringify({
+            audioData: base64Data,
+            mimeType: 'audio/webm'
+          })
+        });
+
+        showSuccess();
+        
+      } catch (err) {
+        console.error('Upload error:', err);
+        showError(err.message || '上传失败，请重试');
+        resetRecordingUI();
+      }
+    }
+
+    function showSuccess() {
+      $('successOverlay').classList.add('show');
+      updateStep(2);
+    }
+
+    function resetRecordingUI() {
+      $('micButton').classList.remove('recording');
+      $('recordingStage').classList.remove('recording');
+      $('statusTitle').textContent = '点击开始录音';
+      $('statusHint').textContent = '准备说出："我是[您的用户名]"';
+      $('waveformDisplay').classList.remove('visible');
+      $('timer').classList.remove('visible');
+      $('btnNext').disabled = false;
+      timeLeft = 3;
+      updateTimerDisplay();
+    }
+
+    // 事件绑定
+    $('micButton').addEventListener('click', () => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+
+    $('btnSkip').addEventListener('click', () => {
+      window.location.href = '/face-registration.html';
+    });
+
+    $('btnNext').addEventListener('click', () => {
+      window.location.href = '/face-registration.html';
+    });
+
+    $('btnGoToFace').addEventListener('click', () => {
+      window.location.href = '/face-registration.html';
+    });
+
+    // 检查登录状态
+    if (!getAuthToken()) {
+      window.location.href = '/';
+    }
+
+    // 初始化
+    initWaveform();
+  </script>
+</body>
+</html>

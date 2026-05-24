@@ -9,7 +9,10 @@ export function toolResultFromScheduleParse(
     return { proceed: true, draft: parsed.draft };
   }
   if ("needsRecurrenceConfirm" in parsed && parsed.needsRecurrenceConfirm) {
-    return { proceed: false, result: buildRecurrenceConfirmToolResult(parsed.draft) };
+    return {
+      proceed: false,
+      result: buildRecurrenceConfirmToolResult(parsed.draft, parsed.suggestion),
+    };
   }
   return {
     proceed: false,

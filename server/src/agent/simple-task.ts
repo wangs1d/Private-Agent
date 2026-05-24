@@ -1,5 +1,6 @@
-const MEMORY_RECALL_HINT_RE =
-  /生日|纪念日|记住|记得|之前|上次|说过|偏好|喜欢|讨厌|姓名|名字|叫啥|叫什么|档案|回忆|履历|历史|important|memory/i;
+import { shouldSkipNarrativeRecall } from "./memory-signal.js";
+
+export { shouldSkipNarrativeRecall };
 
 const DIRECT_CLOCK_RE =
   /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
@@ -18,14 +19,6 @@ export function isSimpleDirectTask(message: string): boolean {
   if (!t) return true;
   if (DIRECT_CLOCK_RE.test(t)) return true;
   if (RELATIVE_REMINDER_RE.test(t)) return true;
-  return false;
-}
-
-export function shouldSkipNarrativeRecall(message: string): boolean {
-  const t = message.trim();
-  if (!t) return true;
-  if (MEMORY_RECALL_HINT_RE.test(t)) return false;
-  if (t.length <= 16) return true;
   return false;
 }
 

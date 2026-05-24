@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 
 
 def _normalize_openai_base(url: str) -> str:
@@ -18,12 +20,46 @@ def _normalize_openai_base(url: str) -> str:
     return u
 
 
+async def _handle_screenshot(req: dict) -> dict:
+    """处理截图请求，返回 base64 编码的 PNG 图片数据。"""
+    try:
+        from desktop_visual_agent.runtime.capture import grab_screen_png
+
+        region = req.get("region")
+        region_t: tuple[int, int, int, int] | None = None
+        if region is not None:
+            if not isinstance(region, list) or len(region) != 4:
+                return {"ok": False, "error": "region must be [left, top, width, height]"}
+            region_t = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
+
+        png_bytes, (width, height) = grab_screen_png(region=region_t)
+        image_base64 = base64.b64encode(png_bytes).decode("ascii")
+
+        return {
+            "ok": True,
+            "imageBase64": image_base64,
+            "mimeType": "image/png",
+            "width": width,
+            "height": height,
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        logging.exception("screenshot failed")
+        return {"ok": False, "error": f"截图失败: {str(e)}"}
+
+
 async def _run() -> dict:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     line = sys.stdin.readline()
     if not line.strip():
         return {"ok": False, "error": "empty stdin"}
     req = json.loads(line)
+
+    action = req.get("action", "run_task")
+
+    if action == "screenshot":
+        return await _handle_screenshot(req)
+
     task = str(req.get("task", "")).strip()
     if not task:
         return {"ok": False, "error": "missing task"}
@@ -73,6 +109,7 @@ def main() -> None:
     sys.stdout.write(json.dumps(result, ensure_ascii=False))
     sys.stdout.write("\n")
     sys.stdout.flush()
+    sys.stderr.flush()
 
 
 if __name__ == "__main__":

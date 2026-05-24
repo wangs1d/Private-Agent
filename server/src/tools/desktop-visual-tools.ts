@@ -17,6 +17,35 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
   const allow = deps.localAgent.isEnabled() || deps.bridge.isBridgeFeatureEnabled();
   if (!allow) return;
 
+  registry.register("desktop.visual.screenshot", async (input, _ctx) => {
+    let region: [number, number, number, number] | undefined;
+    const r = input.region;
+    if (Array.isArray(r) && r.length === 4 && r.every((x) => typeof x === "number" && Number.isFinite(x))) {
+      region = [Math.floor(r[0]), Math.floor(r[1]), Math.floor(r[2]), Math.floor(r[3])];
+    }
+
+    if (deps.localAgent.isEnabled() && deps.localAgent.screenshot) {
+      const result = await deps.localAgent.screenshot({ region });
+      if (!result.ok) {
+        return { ok: false, error: result.error ?? "截图失败" };
+      }
+      return {
+        ok: true,
+        imageBase64: result.imageBase64,
+        mimeType: result.mimeType ?? "image/png",
+        width: result.width,
+        height: result.height,
+        capturedAt: result.capturedAt,
+        message: `已截取屏幕${region ? `区域 [${region.join(", ")}]` : ""}，尺寸 ${result.width}x${result.height}`,
+      };
+    }
+
+    return {
+      ok: false,
+      error: "桌面视觉 Agent 未启用或不支持截图（需要 DESKTOP_VISUAL_AGENT_ENABLED=1）",
+    };
+  });
+
   registry.register("desktop.visual.run_task", async (input, ctx) => {
     const task = typeof input.task === "string" ? input.task.trim() : "";
     if (!task) {

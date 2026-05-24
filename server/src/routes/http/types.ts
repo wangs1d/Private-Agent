@@ -27,6 +27,7 @@ import type { WeatherService } from "../../services/weather-service.js";
 import type { TtsService } from "../../services/tts-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
+import type { AgentCore } from "../../services/agent-core.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -57,4 +58,5 @@ export type HttpRouteDeps = {
   ttsService: TtsService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   friendService: FriendService;
+  agentCore?: AgentCore;
 };

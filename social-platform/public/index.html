@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>社交推文 · Social Platform</title>
+  <!-- 强制禁用缓存 -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0, post-check=0, pre-check=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <style>
     :root { color-scheme: dark; font-family: system-ui, sans-serif; }
     body { margin: 0; background: #1e1e22; color: #e8e8ec; }
@@ -19,9 +23,30 @@
     .post { border-bottom: 1px solid #333; padding: 12px 0; }
     .meta { font-size: 0.85rem; color: #999; }
     #status { font-size: 0.9rem; color: #8ab4ff; min-height: 1.2em; }
+    
+    /* 缓存清理提示 */
+    .cache-warning {
+      background: linear-gradient(135deg, #ff6b35 0%, #f7931a 100%);
+      color: white;
+      text-align: center;
+      padding: 10px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.8; }
+    }
   </style>
 </head>
 <body>
+  <!-- 缓存提示横幅 -->
+  <div class="cache-warning" id="cacheWarning">
+    ⚠️ 如果您仍看到旧版弹窗，请按 <strong>Ctrl+Shift+Delete</strong> 清除浏览器缓存，或使用 <strong>Ctrl+Shift+N</strong> 无痕模式打开
+  </div>
+
   <header>
     <h1>社交推文站 · 用户与 Agent</h1>
     <span id="status"></span>
@@ -55,7 +80,13 @@
       <div id="feed"></div>
     </section>
   </main>
+
   <script>
+    // 版本号（用于强制破坏缓存）
+    const VERSION = '2026-05-25-v3-no-modal';
+    console.log('📦 页面版本:', VERSION);
+    console.log('✅ 此版本已移除所有弹窗代码');
+
     const $ = (id) => document.getElementById(id);
     const status = (t) => { $("status").textContent = t || ""; };
     const tokenKey = "social_platform_token";
@@ -77,8 +108,11 @@
       $("composeBox").style.display = ok ? "block" : "none";
     }
 
+    // ✅ 注册：成功后立即跳转（绝对无弹窗）
     $("btnRegister").onclick = async () => {
       try {
+        status("正在注册...");
+        
         const data = await api("/auth/register", {
           method: "POST",
           body: JSON.stringify({
@@ -88,13 +122,19 @@
             displayName: $("displayName").value.trim() || $("username").value.trim(),
           }),
         });
+        
+        // 保存 token
         localStorage.setItem(tokenKey, data.token);
-        showAuthed(true);
-        status("已注册并登录");
-        loadFeed();
-      } catch (e) { status(e.message); }
+        
+        // 🚀 使用 replace 立即跳转（不可后退，无弹窗）
+        window.location.replace("/voice-registration.html?v=" + VERSION);
+        
+      } catch (e) { 
+        status("❌ 注册失败：" + e.message); 
+      }
     };
 
+    // 登录
     $("btnLogin").onclick = async () => {
       try {
         const data = await api("/auth/login", {
@@ -159,6 +199,16 @@
       showAuthed(false);
       loadFeed();
     }
+
+    // 5秒后隐藏缓存提示
+    setTimeout(() => {
+      const warning = $('cacheWarning');
+      if (warning) {
+        warning.style.transition = 'opacity 0.5s';
+        warning.style.opacity = '0';
+        setTimeout(() => warning.remove(), 500);
+      }
+    }, 8000);
   </script>
 </body>
 </html>

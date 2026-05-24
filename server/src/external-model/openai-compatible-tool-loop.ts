@@ -8,6 +8,7 @@ import type {
 import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
+import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import type {
@@ -22,6 +23,41 @@ const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 type ToolAcc = { id: string; name: string; arguments: string };
 
 const DEFAULT_MAX_ROUNDS = 12;
+
+/**
+ * 清理消息数组中的孤立 tool 消息（tool_call_id 不匹配任何 assistant 消息的 tool_calls）。
+ * 防止 Kimi/Moonshot 等 API 返回 "tool_call_id is not found" 错误。
+ */
+function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+  const validToolCallIds = new Set<string>();
+
+  for (const msg of messages) {
+    if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
+      const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
+      for (const tc of toolCalls) {
+        if (tc.id) validToolCallIds.add(tc.id);
+      }
+    }
+  }
+
+  return messages.filter((msg) => {
+    if (msg.role !== "tool") return true;
+    const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+    if (!tcId) {
+      console.warn("[openai-tool-loop] Dropping tool message with empty tool_call_id");
+      return false;
+    }
+    if (!validToolCallIds.has(tcId)) {
+      console.warn(
+        `[openai-tool-loop] Dropping orphan tool message: tool_call_id=${tcId} ` +
+        `(not found in any assistant message's tool_calls). ` +
+        `This prevents "tool_call_id is not found" API errors.`,
+      );
+      return false;
+    }
+    return true;
+  });
+}
 
 /** Moonshot Kimi 等端点仅允许字母数字下划线连字符，将 registry 名 `a.b` 映射为 `a_b`。 */
 function registryNameToApiToolName(name: string): string {
@@ -137,6 +173,43 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+const LIFE_ASSISTANT_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "budget.calculate",
+      description: "根据收入与各项支出计算剩余预算并给出建议。",
+      parameters: {
+        type: "object",
+        properties: {
+          income: { type: "number", description: "月收入" },
+          rent: { type: "number", description: "房租" },
+          food: { type: "number", description: "餐饮" },
+          transport: { type: "number", description: "交通" },
+        },
+        required: ["income"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shopping.suggest",
+      description: "根据商品与预算给出购物建议（比价决策辅助，不执行购买）。",
+      parameters: {
+        type: "object",
+        properties: {
+          item: { type: "string", description: "商品名称或品类" },
+          budget: { type: "number", description: "预算上限（元）" },
+        },
+        required: ["item"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 /** 宿主 Agent 真实资金钱包（与 Agent World 世界点数无关）。 */
 const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -199,6 +272,33 @@ const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
           amount: { type: "number", description: "充值金额（CNY，须 > 0）" },
         },
         required: ["amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wallet.purchase",
+      description:
+        "代用户消费/购物（须用户授权）。覆盖外卖、打车、酒店、电影票、网购、缴费、红包等50+类别。category 示例：food_delivery/taxi/hotel/movie/shopping/phone_bill/red_packet 等。",
+      parameters: {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            description:
+              "消费类别，如 food_delivery, taxi, hotel, movie, shopping, train, flight, phone_bill, red_packet, other 等",
+          },
+          amount: { type: "number", description: "消费金额（CNY，须 > 0）" },
+          description: { type: "string", description: "消费描述（订单摘要）" },
+          merchant: { type: "string", description: "商户/平台名称，如美团、滴滴、京东" },
+          orderDetails: {
+            type: "object",
+            description: "可选订单细节（商品名、数量等）",
+          },
+        },
+        required: ["category", "amount", "description"],
         additionalProperties: false,
       },
     },
@@ -291,7 +391,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "reminder.plan",
       description:
-        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」须先问是否每天重复。成功返回 taskId、nextRunAt、recurrence。",
+        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt、recurrence。",
       parameters: {
         type: "object",
         properties: {
@@ -302,7 +402,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           recurrence: {
             type: "string",
             enum: ["none", "daily", "weekly", "yearly"],
-            description: "默认 none；仅用户明确要每天/每周重复时才填 daily/weekly",
+            description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
           reminderMessage: { type: "string", description: "到点时展示的提醒文案" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
@@ -317,7 +417,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_from_text",
       description:
-        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周，返回 needsRecurrenceConfirm=true，须先向用户确认后再创建。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」。成功返回 taskId；解析失败则 matched=false。",
+        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周/连续，返回 needsRecurrenceConfirm=true，须先向用户确认后再创建。系统会智能分析任务类型并提供建议（含 suggestedQuestion、examples 等），请据此向用户提问。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」「接下来3天提醒我复习」。成功返回 taskId；解析失败则 matched=false。",
       parameters: {
         type: "object",
         properties: {
@@ -563,6 +663,30 @@ const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+/** Agent 能力详细查询工具（Layer 3）：system prompt 已包含行为规则和路由表（Layer 2），本工具用于获取某领域的完整能力描述和运行时状态。 */
+const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "agent.query_capabilities",
+      description:
+        "查询指定领域的完整能力描述和运行时状态。system prompt 中已有基础规则和路由表，本工具用于：①用户问「你能做什么」需展示完整清单时 ②需要某领域的详细工具说明/参数提示时 ③查看Agent World完整状态(社交推文站/技能商店/world.*工具族)时 ④确认虚拟电话号码等动态信息时。结果会保留在对话上下文供后续参考。",
+      parameters: {
+        type: "object",
+        properties: {
+          domain: {
+            type: "string",
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "self_programming", "agent_account", "world", "all"],
+            description:
+              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, self_programming=自我编程, agent_account=账号注册, world=Agent World。",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 /** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。结果带模块级缓存。 */
 let _builtinToolsCache: ChatCompletionTool[] | null = null;
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
@@ -571,6 +695,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...AGENT_WORLD_CHAT_TOOLS,
     ...AIP_CHAT_TOOLS,
     ...INFO_WEB_CHAT_TOOLS,
+    ...LIFE_ASSISTANT_CHAT_TOOLS,
     ...WALLET_CHAT_TOOLS,
     ...AGENT_LINK_CHAT_TOOLS,
     ...AGENT_RELAY_CHAT_TOOLS,
@@ -578,7 +703,9 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...PHONE_CHAT_TOOLS,
     ...VISION_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
+    ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
+    ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
   return _builtinToolsCache;
 }
@@ -606,9 +733,10 @@ export async function streamCompletionWithDoudizhuTools(
   let lastAssistantText = "";
 
   for (let round = 0; round < maxRounds; round++) {
+    const sanitizedMessages = sanitizeMessagesForApi(messages);
     const stream = await client.chat.completions.create({
       model,
-      messages,
+      messages: sanitizedMessages,
       tools: apiTools,
       tool_choice: "auto",
       stream: true,
@@ -640,10 +768,10 @@ export async function streamCompletionWithDoudizhuTools(
             const idx = tc.index ?? 0;
             let acc = toolAcc.get(idx);
             if (!acc) {
-              acc = { id: tc.id ?? "", name: "", arguments: "" };
+              acc = { id: "", name: "", arguments: "" };
               toolAcc.set(idx, acc);
             }
-            if (tc.id) acc.id = tc.id;
+            if (tc.id != null) acc.id = tc.id;
             if (tc.function?.name) acc.name = tc.function.name;
             if (tc.function?.arguments) acc.arguments += tc.function.arguments;
           }
@@ -665,14 +793,23 @@ export async function streamCompletionWithDoudizhuTools(
 
     const toolCalls: ChatCompletionMessageToolCall[] = [...toolAcc.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([, v]) => ({
-        id: v.id || `call_${Math.random().toString(36).slice(2)}`,
-        type: "function" as const,
-        function: {
-          name: v.name,
-          arguments: v.arguments || "{}",
-        },
-      }));
+      .map(([idx, v]) => {
+        if (!v.id) {
+          console.warn(
+            `[openai-tool-loop] tool_calls[${idx}].id is empty from stream; ` +
+            `fallback to random id. model=${model} name=${v.name}`,
+          );
+        }
+        const callId = v.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${idx}`;
+        return {
+          id: callId,
+          type: "function" as const,
+          function: {
+            name: v.name,
+            arguments: v.arguments || "{}",
+          },
+        };
+      });
 
     messages.push({
       role: "assistant",

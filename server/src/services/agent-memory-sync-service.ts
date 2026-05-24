@@ -17,6 +17,7 @@ export class AgentMemorySyncService {
   private readonly filePath: string;
   private data: PersistedShape = { sessions: {} };
   private persistChain: Promise<void> = Promise.resolve();
+  private readonly writeQueues = new Map<string, Promise<boolean>>();
 
   constructor(filePath?: string) {
     this.filePath = filePath ?? process.env.AGENT_MEMORY_SYNC_FILE ?? join(process.cwd(), "data", "agent-memory-sync.json");
@@ -89,6 +90,18 @@ export class AgentMemorySyncService {
    * `actorId` 通常为 `userId`，与 UAP 记忆分桶键一致。
    */
   appendMemorySummaryLine(actorId: string, line: string): boolean {
+    const existing = this.writeQueues.get(actorId) ?? Promise.resolve(true);
+    const next = existing.then(() => this.doAppendMemorySummaryLine(actorId, line));
+    this.writeQueues.set(actorId, next);
+    next.finally(() => {
+      if (this.writeQueues.get(actorId) === next) {
+        this.writeQueues.delete(actorId);
+      }
+    });
+    return true;
+  }
+
+  private doAppendMemorySummaryLine(actorId: string, line: string): boolean {
     const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
     const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
     const stamp = new Date().toISOString();

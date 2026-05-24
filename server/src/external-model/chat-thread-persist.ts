@@ -48,7 +48,25 @@ function tailMessages(
   maxMessages: number,
 ): ChatCompletionMessageParam[] {
   if (messages.length <= maxMessages) return messages;
-  return messages.slice(-maxMessages);
+  const tail = messages.slice(-maxMessages);
+
+  const validToolCallIds = new Set<string>();
+  for (const msg of tail) {
+    if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (tc.id) validToolCallIds.add(tc.id);
+      }
+    }
+  }
+
+  const filtered = tail.filter((msg) => {
+    if (msg.role !== "tool") return true;
+    const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+    if (!tcId) return false;
+    return validToolCallIds.has(tcId);
+  });
+
+  return filtered;
 }
 
 /**

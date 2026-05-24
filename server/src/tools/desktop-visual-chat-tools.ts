@@ -55,7 +55,29 @@ const DESKTOP_VISUAL_RUN_TASK_TOOL: ChatCompletionTool = {
   },
 };
 
+const DESKTOP_VISUAL_SCREENSHOT_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "desktop.visual.screenshot",
+    description:
+      "【桌面·截图】截取电脑屏幕（或指定区域）并返回 PNG 图片。可用于查看当前屏幕内容、获取界面信息、记录屏幕状态等场景。需要 DESKTOP_VISUAL_AGENT_ENABLED=1 或电脑桥接在线。",
+    parameters: {
+      type: "object",
+      properties: {
+        region: {
+          type: "array",
+          items: { type: "integer" },
+          minItems: 4,
+          maxItems: 4,
+          description: "可选截屏区域 [left, top, width, height]；省略则截取全屏",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
 export function getDesktopVisualChatTools(env: NodeJS.ProcessEnv = process.env): ChatCompletionTool[] {
   if (!isDesktopVisualControlChatToolsEnabled(env)) return [];
-  return [DESKTOP_VISUAL_RUN_TASK_TOOL];
+  return [DESKTOP_VISUAL_SCREENSHOT_TOOL, DESKTOP_VISUAL_RUN_TASK_TOOL];
 }

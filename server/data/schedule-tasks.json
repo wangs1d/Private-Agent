@@ -463,12 +463,12 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-21T23:00:00.000Z",
-      "nextRunAt": "2026-05-22T23:00:00.000Z",
+      "nextRunAt": "2026-05-24T23:00:00.000Z",
       "status": "active",
       "reminderMessage": "该起床啦！新的一天开始了~",
       "createdAt": "2026-05-20T17:24:40.603Z",
-      "updatedAt": "2026-05-22T06:29:22.115Z",
-      "lastRunAt": "2026-05-22T06:29:22.115Z"
+      "updatedAt": "2026-05-24T08:23:55.424Z",
+      "lastRunAt": "2026-05-24T08:23:55.424Z"
     },
     {
       "taskId": "8eefeb1b-cbec-429e-8483-4bbdad68e3e8",
@@ -511,12 +511,12 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-21T12:48:07.557Z",
-      "nextRunAt": "2026-05-22T12:48:07.557Z",
+      "nextRunAt": "2026-05-25T12:48:07.557Z",
       "status": "active",
       "reminderMessage": "喊我",
       "createdAt": "2026-05-21T11:48:07.557Z",
-      "updatedAt": "2026-05-21T14:04:04.726Z",
-      "lastRunAt": "2026-05-21T14:04:04.726Z"
+      "updatedAt": "2026-05-24T13:54:59.791Z",
+      "lastRunAt": "2026-05-24T13:54:59.791Z"
     },
     {
       "taskId": "75c715c9-b9df-4d5c-811f-d003cb42ef33",
@@ -533,6 +533,25 @@
       "createdAt": "2026-05-21T15:46:43.045Z",
       "updatedAt": "2026-05-21T15:47:43.167Z",
       "lastRunAt": "2026-05-21T15:47:43.167Z"
+    },
+    {
+      "taskId": "91513c9e-1d39-4e16-b4ea-14edc89b82f7",
+      "sessionId": "session-mvp-001",
+      "title": "科技新闻早报",
+      "description": "每天早上搜索并推送当天科技新闻",
+      "kind": "agent_task",
+      "recurrence": "daily",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-23T00:00:00.000Z",
+      "nextRunAt": "2026-05-25T00:00:00.000Z",
+      "status": "active",
+      "agentTask": {
+        "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
+        "accessMode": "sandbox"
+      },
+      "createdAt": "2026-05-22T17:18:33.457Z",
+      "updatedAt": "2026-05-24T08:24:22.571Z",
+      "lastRunAt": "2026-05-24T08:24:22.571Z"
     }
   ],
   "runs": [
@@ -628,6 +647,45 @@
       }
     },
     {
+      "runId": "7ed04340-e751-4cb0-b973-31782915a2dc",
+      "taskId": "c2e37255-e6b3-423b-81f7-0430a8092a8e",
+      "plannedAt": "2026-05-22T12:48:07.557Z",
+      "startedAt": "2026-05-22T12:48:07.587Z",
+      "endedAt": "2026-05-22T12:48:07.588Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "AI 提醒任务",
+        "message": "喊我"
+      }
+    },
+    {
+      "runId": "ba064b97-8d9c-4193-b54a-b51bc9f1bca7",
+      "taskId": "c2e37255-e6b3-423b-81f7-0430a8092a8e",
+      "plannedAt": "2026-05-23T12:48:07.557Z",
+      "startedAt": "2026-05-24T08:23:55.425Z",
+      "endedAt": "2026-05-24T08:23:55.425Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "AI 提醒任务",
+        "message": "喊我"
+      }
+    },
+    {
+      "runId": "827efebf-450c-4c83-9825-f31952b38010",
+      "taskId": "c2e37255-e6b3-423b-81f7-0430a8092a8e",
+      "plannedAt": "2026-05-24T12:48:07.557Z",
+      "startedAt": "2026-05-24T13:54:59.774Z",
+      "endedAt": "2026-05-24T13:54:59.789Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "AI 提醒任务",
+        "message": "喊我"
+      }
+    },
+    {
       "runId": "37506235-6d87-4caa-8485-4c17bfb4802e",
       "taskId": "75c715c9-b9df-4d5c-811f-d003cb42ef33",
       "plannedAt": "2026-05-21T15:47:43.044Z",
@@ -651,6 +709,62 @@
         "type": "reminder",
         "title": "起床提醒",
         "message": "该起床啦！新的一天开始了~"
+      }
+    },
+    {
+      "runId": "c64aead9-c6e9-45cb-81d3-57025c1181de",
+      "taskId": "950b01bf-ffb4-42a5-aa9b-41596422a1d4",
+      "plannedAt": "2026-05-22T23:00:00.000Z",
+      "startedAt": "2026-05-23T06:49:06.268Z",
+      "endedAt": "2026-05-23T06:49:06.268Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "起床提醒",
+        "message": "该起床啦！新的一天开始了~"
+      }
+    },
+    {
+      "runId": "c4310f63-4ee9-49f6-b5a1-38403fc2d25b",
+      "taskId": "950b01bf-ffb4-42a5-aa9b-41596422a1d4",
+      "plannedAt": "2026-05-23T23:00:00.000Z",
+      "startedAt": "2026-05-24T08:23:55.424Z",
+      "endedAt": "2026-05-24T08:23:55.424Z",
+      "status": "success",
+      "output": {
+        "type": "reminder",
+        "title": "起床提醒",
+        "message": "该起床啦！新的一天开始了~"
+      }
+    },
+    {
+      "runId": "79b93f37-e222-439a-86cd-047ac471e563",
+      "taskId": "91513c9e-1d39-4e16-b4ea-14edc89b82f7",
+      "plannedAt": "2026-05-23T00:00:00.000Z",
+      "startedAt": "2026-05-23T06:49:06.268Z",
+      "endedAt": "2026-05-23T06:49:30.775Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "科技新闻早报",
+        "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
+        "text": "## 📰 今日科技要点（5月23日）\n\n1. **SpaceX星舰第12次试飞成功** —— 为马斯克万亿IPO铺路，V3版本首次试飞完成\n\n2. **中国登月时间表确定** —— 2030年实现航天员登月，嫦娥七号下半年发射\n\n3. **DeepSeek-V4-Pro大降价** —— API价格永久调整为原定价的1/4\n\n4. **联想AI业务爆发** —— Q4利润大增479%，AI收入占比近四成\n\n5. **iPhone 17系列销量回升** —— 中国区累积激活超3000万台，全系降价奏效"
+      }
+    },
+    {
+      "runId": "d568abd6-3827-4662-a7a1-ffefb34d044d",
+      "taskId": "91513c9e-1d39-4e16-b4ea-14edc89b82f7",
+      "plannedAt": "2026-05-24T00:00:00.000Z",
+      "startedAt": "2026-05-24T08:23:55.425Z",
+      "endedAt": "2026-05-24T08:24:22.571Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "科技新闻早报",
+        "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
+        "text": "## 📰 今日科技要点（5月24日）\n\n1. **神舟二十三号今晚发射** —— 瞄准23:08发射，飞船大幅升级，预留国际访客接口，将开展中国首个太空人体研究计划\n\n2. **DeepSeek API大升级** —— 完成提速扩容，默认支持500并发；V4-Pro API永久降价至原价1/4\n\n3. **特斯拉FSD登陆中国** —— 监督版FSD官宣入华，售价6.4万元；小鹏称\"可能是唯一欢迎FSD入华的车企\"\n\n4. **小米新品密集发布** —— YU7 GT医疗车亮相赛道，17 Max发布（8000mAh+2亿像素），首款耳夹式耳机卖爆\n\n5. **华为技术突破** —— 自研DoB封装技术，绕过400层NAND造出122TB企业级SSD，未来计划245TB版本"
       }
     }
   ]

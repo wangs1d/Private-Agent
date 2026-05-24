@@ -159,6 +159,16 @@ async function emitPhase(
   }
 }
 
+function buildPhaseLabel(phase: string, detail?: { stepCount?: number; currentStep?: string; totalSteps?: number }): string {
+  const d = detail;
+  if (!d) return phase;
+  const parts = [phase];
+  if (d.stepCount != null && d.stepCount > 1) parts.push(`（共 ${d.stepCount} 步）`);
+  if (d.currentStep) parts.push(d.currentStep);
+  if (d.totalSteps != null && d.currentStep) parts.push(`[${d.currentStep}/${d.totalSteps}]`);
+  return parts.join("");
+}
+
 type RunPlanExecuteLoopArgs = {
   provider: ExternalChatProvider;
   planSessionId: string;
@@ -173,14 +183,6 @@ type RunPlanExecuteLoopArgs = {
   /** 不包含 toolLoop（由编排器在每轮执行拼接） */
   baseStreamOpts: AgentStreamOptions | undefined;
   onToolBatchForExecute?: ((info: ToolLoopAfterBatchInfo) => void) | undefined;
-};
-
-export type PlanExecuteLoopResult = {
-  finalText: string;
-  modelCalls: number;
-  plan: TaskExecutionPlan | null;
-  exhaustedRetries: boolean;
-  verifyReflection: string;
 };
 
 export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<PlanExecuteLoopResult> {
@@ -200,7 +202,7 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
 
   let modelCalls = 0;
 
-  await emitPhase(onPhaseStatus, onDelta, "制定计划");
+  await emitPhase(onPhaseStatus, onDelta, "🔍 正在分析任务，制定执行计划…");
 
   const planUserTurn: ChatUserTurn = {
     text: [
@@ -227,9 +229,9 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
 
   if (!plan || isPlanTriviallySimple(plan)) {
     if (plan) {
-      await emitPhase(onPhaseStatus, onDelta, "执行（计划较简单，直接进入工具环）");
+      await emitPhase(onPhaseStatus, onDelta, "⚡ 计划已确认，开始执行…");
     } else {
-      await emitPhase(onPhaseStatus, onDelta, "执行（计划解析失败，按常规工具环处理）");
+      await emitPhase(onPhaseStatus, onDelta, "⚡ 直接进入执行环节…");
     }
     const fallbackTurn: ChatUserTurn = {
       text: userText,
@@ -255,7 +257,11 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     };
   }
 
-  await emitPhase(onPhaseStatus, onDelta, "执行与工具调用");
+  await emitPhase(
+    onPhaseStatus,
+    onDelta,
+    `🔧 按计划执行中（${plan.steps.length} 步）…`,
+  );
 
   const executePrompt = [
     "用户原始任务：",

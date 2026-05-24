@@ -21,5 +21,8 @@
     "social:dev": "npm run dev -w social-platform",
     "social:build": "npm run build -w social-platform",
     "start:full": "powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1"
+  },
+  "dependencies": {
+    "ollama": "^0.5.18"
   }
 }

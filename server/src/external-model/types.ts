@@ -47,6 +47,14 @@ export type AgentPromptMemoryContext = {
   userLocation?: string;
   /** Per-turn task profile and operating policy injected into the system prompt. */
   taskContext?: string;
+  /** `USER_PROFILE.md` 摘录：长期用户画像 */
+  userProfile?: string;
+  /** 本轮语气与情绪适配指引（幽默/正式/温馨、安抚等） */
+  toneGuidance?: string;
+  /** 当日滚动摘要（跨 session 同日上下文，短期工作记忆 L1） */
+  dailyDigest?: string;
+  /** 后台记忆管理服务自动合成的用户长期画像（偏好/话题/意图/风险标记） */
+  userProfileSummary?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

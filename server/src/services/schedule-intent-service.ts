@@ -16,7 +16,15 @@ export type ScheduleDraft = {
 
 /** 工具/API 在创建前需向用户确认重复方式时的固定提示（给模型读 tool.result）。 */
 export const SCHEDULE_RECURRENCE_CONFIRM_HINT =
-  "用户尚未说明提醒是否重复。请先向用户确认：这是一次性提醒，还是每天/每周重复？在用户明确回答前不要创建提醒，也不要声称已设置成功。";
+  "用户尚未说明提醒是否重复。请先向用户确认：这是一次性提醒、每天重复、还是连续一段时间？在用户明确回答前不要创建提醒，也不要声称已设置成功。";
+
+export type TaskRecurrenceSuggestion = {
+  suggestedType: "once" | "daily" | "continuous" | "weekly" | "yearly";
+  confidence: "high" | "medium" | "low";
+  reason: string;
+  question: string;
+  examples?: string[];
+};
 
 export type ScheduleIntentParseResult =
   | { matched: true; draft: ScheduleDraft }
@@ -25,6 +33,7 @@ export type ScheduleIntentParseResult =
       needsRecurrenceConfirm: true;
       draft: ScheduleDraft;
       hint: string;
+      suggestion?: TaskRecurrenceSuggestion;
     }
   | { matched: false; hint: string };
 
@@ -41,11 +50,13 @@ export class ScheduleIntentService {
       };
     }
     if (draft.kind === "reminder" && needsRecurrenceConfirmation(userText)) {
+      const suggestion = analyzeTaskRecurrencePattern(userText, draft);
       return {
         matched: false,
         needsRecurrenceConfirm: true,
         draft,
         hint: SCHEDULE_RECURRENCE_CONFIRM_HINT,
+        suggestion,
       };
     }
     return { matched: true, draft };
@@ -230,15 +241,137 @@ export function needsRecurrenceConfirmation(userText: string): boolean {
   return !isRecurrenceExplicit(normalized);
 }
 
-export function buildRecurrenceConfirmToolResult(draft: ScheduleDraft): Record<string, unknown> {
-  return {
+export function buildRecurrenceConfirmToolResult(
+  draft: ScheduleDraft,
+  suggestion?: TaskRecurrenceSuggestion,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {
     ok: true,
     matched: false,
     needsRecurrenceConfirm: true,
     hint: SCHEDULE_RECURRENCE_CONFIRM_HINT,
-    suggestedQuestion: "这是一次性提醒，还是每天重复？",
     parsedNextRunAt: draft.runAt,
     parsedReminderMessage: draft.reminderMessage ?? draft.description,
+  };
+
+  if (suggestion) {
+    result.suggestedQuestion = suggestion.question;
+    result.suggestedType = suggestion.suggestedType;
+    result.confidence = suggestion.confidence;
+    result.reason = suggestion.reason;
+    if (suggestion.examples) {
+      result.examples = suggestion.examples;
+    }
+  } else {
+    result.suggestedQuestion = "这是一次性提醒，还是每天重复，或者连续一段时间（比如接下来3天）？";
+  }
+
+  return result;
+}
+
+/** 智能分析任务内容，推断最可能的重复类型并提供询问建议 */
+export function analyzeTaskRecurrencePattern(userText: string, draft: ScheduleDraft): TaskRecurrenceSuggestion {
+  const normalized = userText.trim();
+  const subject = (draft.reminderMessage ?? draft.description).trim();
+
+  const ONCE_PATTERNS = [
+    { pattern: /开会|会议|讨论|评审|汇报|演示|面试|约会|聚餐|吃饭|见面|拜访|签合同|交报告|提交|截止|deadline/i, reason: "这类任务通常有明确的时间点，一般只发生一次" },
+    { pattern: /买.*?票|订.*?房|预订|预约|挂号|取件|快递|发货/i, reason: "这类任务通常是一次性的具体事项" },
+    { pattern: /接.*?(人|机|孩子)|送.*?(人|机|孩子)|去.*?(机场|车站|医院)/i, reason: "接送类任务通常是一次性的行程安排" },
+    { pattern: /还书|还钱|还款|缴费|付.*?款|续费/i, reason: "支付/归还类任务通常有明确的单次时间点" },
+    { pattern: /生日.*?(派对|聚会|庆祝|礼物)|纪念.*?(日|活动)|节日.*?(准备|购物|安排)/i, reason: "特殊日期的活动通常是一次性的" },
+  ];
+
+  const DAILY_PATTERNS = [
+    { pattern: /吃药|服药|用药|喝药|胰岛素|打针/i, reason: "用药提醒通常需要每日重复" },
+    { pattern: /喝水|补水|运动|锻炼|健身|跑步|瑜伽|散步|冥想/i, reason: "健康习惯类提醒通常建议每日重复" },
+    { pattern: /打卡|签到|学习|背单词|阅读|写日记|记账/i, reason: "日常习惯养成类任务通常适合每日重复" },
+    { pattern: /喂.*?(宠物|猫|狗|鱼)|铲屎|遛狗/i, reason: "宠物照料通常需要每日重复" },
+    { pattern: /备份|同步|清理.*?(缓存|垃圾|邮件)|整理.*?(桌面|文件)/i, reason: "维护类任务通常建议定期重复" },
+  ];
+
+  const CONTINUOUS_PATTERNS = [
+    { pattern: /接下来.*?(\d+).*?(天|周|小时)|连续.*?(\d+).*?(天|周|小时)|持续.*?(\d+).*?(天|周|小时)/i, reason: "用户明确提到了持续时间" },
+    { pattern: /这周|本周|这几天|最近.*?几天/i, reason: "用户提到了一个时间段范围" },
+    { pattern: /疗程|训练计划|备考|复习|冲刺|项目.*?(周期|阶段)/i, reason: "这类任务通常需要在特定周期内连续执行" },
+  ];
+
+  for (const { pattern, reason } of ONCE_PATTERNS) {
+    if (pattern.test(normalized) || pattern.test(subject)) {
+      return {
+        suggestedType: "once",
+        confidence: "high",
+        reason,
+        question: `这个「${subject}」看起来像是一次性任务。${reason} 我应该设置为一次性提醒吗？`,
+        examples: [
+          "✅ 就设置一次性的",
+          "📅 其实我想每天重复",
+          "⏰ 接下来一周每天都提醒我",
+        ],
+      };
+    }
+  }
+
+  for (const { pattern, reason } of CONTINUOUS_PATTERNS) {
+    if (pattern.test(normalized) || pattern.test(subject)) {
+      const durationMatch = normalized.match(/(?:接下来|连续|持续)\s*(\d+)\s*(天|周|小时)/i);
+      const duration = durationMatch ? `${durationMatch[1]}${durationMatch[2]}` : "一段时间";
+      return {
+        suggestedType: "continuous",
+        confidence: "high",
+        reason,
+        question: `你提到了"${duration}"，是想在这段时间内每天重复提醒吗？`,
+        examples: [
+          `✅ 是的，${duration}内每天提醒`,
+          "🔄 改为每天长期重复",
+          "❌ 只需要一次就好",
+        ],
+      };
+    }
+  }
+
+  for (const { pattern, reason } of DAILY_PATTERNS) {
+    if (pattern.test(normalized) || pattern.test(subject)) {
+      return {
+        suggestedType: "daily",
+        confidence: "medium",
+        reason,
+        question: `这个「${subject}」看起来像是日常习惯。${reason} 你想设置为每天重复吗？`,
+        examples: [
+          "✅ 好的，每天重复",
+          "📅 这次只需要一次",
+          "📆 每周一到周五就行（工作日）",
+          "⏰ 接下来7天每天提醒我",
+        ],
+      };
+    }
+  }
+
+  if (isAlarmStyleReminder(normalized)) {
+    return {
+      suggestedType: "daily",
+      confidence: "high",
+      reason: "起床/闹钟类提醒通常是每天的日常需求",
+      question: "这是一个起床/闹钟提醒。你想设置为每天重复吗？（大多数人的闹钟都是每天响的）",
+      examples: [
+        "✅ 每天都响（推荐）",
+        "📅 只要明天一次",
+        "📆 仅工作日（周一到周五）",
+      ],
+    };
+  }
+
+  return {
+    suggestedType: "once",
+    confidence: "low",
+    reason: "未能从任务内容推断出明确的重复模式",
+    question: `关于「${subject}」的提醒，你想怎么设置重复方式？`,
+    examples: [
+      "📅 就这一次",
+      "🔄 每天重复",
+      "📆 每周重复",
+      "⏰ 接下来几天连续提醒",
+    ],
   };
 }
 

@@ -8,10 +8,18 @@ const _resolvedToolsCache = new Map<string, ChatCompletionTool[]>();
 const MAX_RESOLVED_TOOLS_CACHE = 32;
 
 function resolvedToolsCacheKey(streamOpts?: AgentStreamOptions): string {
-  const hasCustomBuiltin = !!streamOpts?.chatToolsBuiltin;
-  const extraNames = (streamOpts?.chatToolsExtra ?? []).map((t) => t.type === "function" ? t.function.name : t.type).join(",");
+  const builtinNames = (streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools())
+    .map((t) => (t.type === "function" ? t.function?.name ?? "" : t.type))
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  const extraNames = (streamOpts?.chatToolsExtra ?? [])
+    .map((t) => (t.type === "function" ? t.function?.name ?? "" : t.type))
+    .filter(Boolean)
+    .sort()
+    .join(",");
   const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
-  return `${hasCustomBuiltin ? "1" : "0"}|${extraNames}|${mode}`;
+  return `${builtinNames}|${extraNames}|${mode}`;
 }
 
 /** 合并内置与技能工具；子 Agent 可通过 `chatToolsBuiltin` 替换内置列表。带 LRU 风格缓存。 */

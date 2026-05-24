@@ -179,14 +179,27 @@ function cleanupOldMap() {
 
 function initAgentMap() {
   console.log('Initializing MapLibre GL map...');
-  
+
   // 先清理旧地图实例
   cleanupOldMap();
-  
-  if (!maplibregl) {
-    console.error('MapLibre GL library not loaded!');
-    document.getElementById('agent-map-container').innerHTML = 
-      '<div class="alert alert-warn">地图库加载失败，请检查网络连接</div>';
+
+  if (typeof maplibregl === 'undefined') {
+    console.warn('MapLibre GL library not loaded from CDN, showing fallback');
+    const container = document.getElementById('agent-map-container');
+    if (container) {
+      container.innerHTML = `
+        <div style="height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);border-radius:12px;border:1px solid #3a3a3a;">
+          <div style="font-size:48px;margin-bottom:16px;">🌍</div>
+          <div style="color:#888;font-size:14px;text-align:center;max-width:280px;line-height:1.6;">
+            Agent World 地图预览<br/>
+            <span style="color:#666;font-size:12px;">（需要网络连接加载地图库）</span>
+          </div>
+          <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+            <span style="padding:6px 12px;background:rgba(0,255,136,0.15);color:#00ff88;border-radius:6px;font-size:12px;">● 8 Agents 在线</span>
+            <span style="padding:6px 12px;background:rgba(255,170,0,0.15);color:#ffaa00;border-radius:6px;font-size:12px;">● 3 活跃中</span>
+          </div>
+        </div>`;
+    }
     return;
   }
   
@@ -302,25 +315,6 @@ function getPitchByZoom(zoom) {
     return { pitch: strategy.NATIONAL_LEVEL.pitch, level: '全国级别' };
   }
 }
-// 添加 3D 建筑层（如果样式中没有）
-function add3DBuildingsLayer() {
-  if (!agentMap) return;
-  
-  // Protomaps 样式已经包含了 3D 建筑层
-  // 这里可以检查并确认建筑层是否存在
-  const style = agentMap.getStyle();
-  const buildingLayer = style.layers.find(layer => 
-    layer.id === 'buildings' || 
-    (layer.type === 'fill-extrusion' && layer.source)
-  );
-  
-  if (buildingLayer) {
-    console.log('✅ 3D buildings layer found in style');
-  } else {
-    console.warn('⚠️ 3D buildings layer not found in style');
-  }
-}
-
 // 显示提示消息
 function showToast(message) {
   const toast = document.createElement('div');
@@ -489,8 +483,16 @@ async function renderHub() {
     return;
   }
 
-  // 初始化 Mapbox 3D 地球
-  initAgentMap();
+  // 初始化 Mapbox 3D 地球（非阻塞，失败不影响页面内容）
+  try {
+    initAgentMap();
+  } catch (mapErr) {
+    console.warn('地图初始化跳过:', mapErr?.message || mapErr);
+    const mapContainer = document.getElementById('agent-map-container');
+    if (mapContainer) {
+      mapContainer.innerHTML = '<div class="alert alert-info" style="height:200px;display:flex;align-items:center;justify-content:center;">🌍 地图预览不可用（CDN 加载失败或网络问题）</div>';
+    }
+  }
 
   const state = stRes.json.state || {};
   const sceneId = String(state.sceneId || "plaza");
@@ -504,7 +506,6 @@ async function renderHub() {
     <div class="stats">
       <div class="stat"><div class="k">当前场景</div><div class="v">${escapeHtml(sceneLabel)}</div></div>
       <div class="stat"><div class="k">世界点数</div><div class="v">${coins}</div></div>
-      <div class="stat"><div class="k">休闲次数</div><div class="v">${leisure}</div></div>
     </div>
     <h3 style="margin-top:24px;font-size:1rem;">查看场景</h3>
     <div class="nav-cards">
@@ -936,8 +937,32 @@ async function renderSocial() {
   if (r.ok && r.json?.ok && r.json.feed?.posts) {
     posts = r.json.feed.posts;
     paint();
+  } else if (r.status === 403 || r.json?.reason === "WORLD_REGISTRATION_REQUIRED") {
+    el.innerHTML = `
+      <div class="alert alert-warn" style="margin-bottom:16px;">
+        🔐 需要先注册 Agent World 才能查看动态
+      </div>
+      <div style="text-align:center;padding:24px 0;">
+        <button type="button" class="btn btn-primary" id="btn-quick-reg" style="font-size:1rem;padding:12px 32px;">
+          🚀 一键注册 Agent World
+        </button>
+        <p style="color:var(--muted);margin-top:12px;font-size:0.85rem;">注册后即可浏览社交动态、参与游戏</p>
+      </div>
+    `;
+    document.getElementById("btn-quick-reg")?.addEventListener("click", async () => {
+      const btn = document.getElementById("btn-quick-reg");
+      if (btn) { btn.disabled = true; btn.textContent = "⏳ 注册中…"; }
+      const regRes = await apiPost("/world/register/agent_quick", { sessionId: sid });
+      if (regRes.ok && regRes.json?.ok) {
+        el.innerHTML = '<div class="alert alert-info">✅ 注册成功！正在加载动态…</div>';
+        setTimeout(() => renderSocial(), 1000);
+      } else {
+        el.innerHTML = friendlyError('注册失败', regRes.json?.message || '请稍后重试');
+      }
+    });
+    return;
   } else {
-    el.innerHTML = friendlyError('动态流加载失败', '社交服务暂时不可用');
+    el.innerHTML = friendlyError('动态流加载失败', `HTTP ${r.status || '?'} - 社交服务暂时不可用`);
     return;
   }
 

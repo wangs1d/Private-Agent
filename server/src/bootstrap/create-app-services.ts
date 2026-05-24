@@ -35,9 +35,12 @@ import {
 } from "../agent/agent-runtime-config.js";
 import { AgentEvolutionMemoryService } from "../services/agent-evolution-memory-service.js";
 import { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
-import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
+import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { createNarrativeMemoryPort } from "../services/narrative-memory-port.js";
-import { getMemoryTreeRuntime } from "../memory-tree/index.js";
+import { initMemoryManagerService } from "../services/memory-manager-service.js";
+import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
+import { getDailyDigestService } from "../services/daily-digest-service.js";
+import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { compactObserveLine } from "../tokenjuice/compactor.js";
 import { TrajectoryPromotionPipeline, parseSkillPromotionPipelineMode } from "../services/skill-promotion-pipeline.js";
 import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
@@ -81,6 +84,7 @@ import { registerWebTools } from "../tools/web-tools.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
+import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
 import { formatReminderDisplayMessage } from "../tools/schedule-user-reply.js";
 import { WeatherPrefsService } from "../services/weather-prefs-service.js";
@@ -223,7 +227,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   
   registerAgentAccountTools(toolRegistry, agentAccountService);
-  registerWalletTools(toolRegistry);
+  registerWalletTools(toolRegistry, friendService);
   registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
   registerAgentRelayTools(
     toolRegistry,
@@ -282,15 +286,25 @@ export async function createAppServices(): Promise<AppServices> {
   registerWorldSocialTools(toolRegistry, socialFeedService);
   registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
   toolRegistry.setWorldService(worldService);
+  registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService });
 
   const evolutionMemory = new AgentEvolutionMemoryService(agentMemorySyncService);
-  const memoryTreeRuntime = getMemoryTreeRuntime();
-  const legacyNarrativeHybrid = createNarrativeHybridRetrievalDefault();
+  const agenticMemoryRuntime = getAgenticMemoryRuntime();
   const narrativeMemory = createNarrativeMemoryPort({
-    memoryTreeIngest: memoryTreeRuntime?.ingest ?? null,
-    memoryTreeRetrieval: memoryTreeRuntime?.retrieval ?? null,
-    legacy: legacyNarrativeHybrid,
+    agenticIngest: agenticMemoryRuntime?.ingest ?? null,
+    agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
   });
+
+  const dailyDigestService = getDailyDigestService();
+  dailyDigestService.setNarrativeMemory(narrativeMemory);
+  await dailyDigestService.load();
+  dailyDigestService.startScheduler();
+
+  initMemoryManagerService(narrativeMemory, agentMemorySyncService);
+  const stmConfig = getShortTermMemoryConfig();
+  app.log.info(
+    `[ShortTermMemory] mode=${stmConfig.mode}, wal=${stmConfig.walEnabled ? "on" : "off"}, digest=${stmConfig.digestEnabled ? "on" : "off"}, deferArchive=${stmConfig.deferTurnArchive ? "on" : "off"}, tz=${stmConfig.digestTimezone}`,
+  );
 
   const pipelineMode = parseSkillPromotionPipelineMode();
   const skillPromoValidateDeps = { skillManager, skillMetadataValidator };
@@ -344,6 +358,10 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const externalChat = createExternalChatProviderFromEnv();
+  const userPersonalizationService = new UserPersonalizationService(
+    agentMemorySyncService,
+    externalChat,
+  );
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
@@ -359,6 +377,7 @@ export async function createAppServices(): Promise<AppServices> {
     computeQuotaService,
     agentMemorySyncService,
     hermesEvolutionLoopService,
+    userPersonalizationService,
     worldService,
     skillManager,
     narrativeMemory,
@@ -487,6 +506,7 @@ export async function createAppServices(): Promise<AppServices> {
     ttsService,
     desktopBridgeCoordinator,
     friendService,
+    agentCore,
   });
 
   registerWebSocketRoute(app, {

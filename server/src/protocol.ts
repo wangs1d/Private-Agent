@@ -17,6 +17,8 @@ export const ClientEventType = {
   DesktopBridgeResult: "desktop.bridge.result",
   /** 用户发起虚拟电话呼叫Agent */
   VirtualPhoneUserCall: "phone.user_call_agent",
+  /** 用户直接呼叫自己的Agent（无需输入ID，服务端从session推断） */
+  VirtualPhoneCallMyAgent: "phone.call_my_agent",
 } as const;
 
 export const ServerEventType = {

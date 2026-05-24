@@ -123,8 +123,9 @@ import {
 
 7️⃣ 【桌面自动化能力】
 可用工具：
-- desktop.visual.run_task: 执行桌面视觉自动化任务
-提示：可操作用户桌面、自动执行任务
+- desktop.visual.screenshot: 截取电脑屏幕（或指定区域）并返回 PNG 图片
+- desktop.visual.run_task: 执行桌面视觉自动化任务（VLM驱动键鼠操作）
+提示：可截取屏幕查看内容、操作用户桌面、自动执行任务
 
 8️⃣ 【Web浏览能力】
 可用工具：
@@ -388,12 +389,12 @@ Agent 可以：
 
 ## 记忆与压缩架构（OpenHuman 对齐）
 
-### Memory Tree（`server/src/memory-tree/`）
+### Mem0 记忆图（`server/src/agentic-memory/`）
 
-- **热路径**：`canonicalize → chunk(≤3k) → SQLite + wiki Markdown → enqueue extract_chunk`
-- **三树**：Source（按 `sourceId`）、Topic（按实体 hotness）、Global（UTC 日摘要）
-- **后台任务**：`extract_chunk` / `append_buffer` / `seal` / `topic_route` / `digest_daily` / `flush_stale`
-- **检索**：BM25 + Qdrant + RRF → 注入 system 的 `narrativeRecall`（文案块：「Memory Tree 检索摘录」）
+- **引擎**：Mem0 OSS（`mem0ai`），实体链接 + 语义/BM25 多信号融合检索
+- **写入**：对话归档、Hermes observe、世界事件等经 `NarrativeMemoryFacade.ingest` → `memory.add(infer=true)`
+- **检索**：`memory.search` 按 actor 过滤 → 注入 system 的 `narrativeRecall`（文案块：「记忆图联想检索」）
+- **向量存储**：优先 Qdrant（`AGENT_QDRANT_URL` + `AGENT_AGENTIC_MEMORY_COLLECTION`）；无 Qdrant 时用本地 `MemoryVectorStore`
 - **KV 慢变量**：`AgentMemorySyncService` 仍负责人格/价值观/能力/`memory_summary`；`AGENT_KV_SUMMARY_APPEND_MODE=minimal` 时世界事件不再重复写 KV 流水
 
 ### TokenJuice（`server/src/tokenjuice/`）
@@ -403,9 +404,9 @@ Agent 可以：
 
 ### 统一端口
 
-- `NarrativeMemoryFacade`（`narrative-memory-port.ts`）对外 `ingest` / `buildNarrativeRecall`；Memory Tree 优先，可选 `AGENT_MEMORY_TREE_DUAL_WRITE_HYBRID` 双写 legacy hybrid
+- `NarrativeMemoryFacade`（`narrative-memory-port.ts`）对外 `ingest` / `buildNarrativeRecall`；底层为 Mem0 记忆图
 
 ---
 
 **最后更新：** 2026-05-21  
-**版本：** v2.1 - Memory Tree + TokenJuice
+**版本：** v2.2 - Mem0 记忆图 + TokenJuice

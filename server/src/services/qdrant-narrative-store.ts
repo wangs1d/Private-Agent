@@ -8,7 +8,7 @@ export type NarrativePointPayload = {
   source: string;
   chunkId: string;
   createdAt: string;
-  /** Memory Tree 作用域（source / topic / global） */
+  /** Mem0 记忆图作用域元数据（source 等） */
   scope?: string;
   sourceId?: string;
   lifecycle?: string;

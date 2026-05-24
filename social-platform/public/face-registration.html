@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>人脸注册 · 生物特征验证</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a1e;
+      --bg-secondary: #2a2a2e;
+      --bg-tertiary: #35353a;
+      --text-primary: #e8e8ec;
+      --text-secondary: #a0a0a8;
+      --text-muted: #6b6b73;
+      --accent: #6b7280;
+      --accent-hover: #7c8490;
+      --border: #4a4a52;
+      --success: #10b981;
+      --error: #ef4444;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: linear-gradient(135deg, var(--bg-primary) 0%, #252529 50%, var(--bg-secondary) 100%);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* 背景装饰 */
+    body::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      right: -20%;
+      width: 80%;
+      height: 80%;
+      background: radial-gradient(circle, rgba(107, 114, 128, 0.08) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: absolute;
+      bottom: -30%;
+      left: -10%;
+      width: 60%;
+      height: 60%;
+      background: radial-gradient(circle, rgba(107, 114, 128, 0.05) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* 顶部导航 */
+    .header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 24px 40px;
+      border-bottom: 1px solid rgba(74, 74, 82, 0.3);
+      backdrop-filter: blur(10px);
+      background: rgba(26, 26, 30, 0.7);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--bg-tertiary) 100%);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+    }
+
+    .logo-icon svg {
+      width: 20px;
+      height: 20px;
+      fill: var(--text-primary);
+    }
+
+    .progress-container {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .step-indicator {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .step-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--bg-tertiary);
+      transition: all 0.3s ease;
+      position: relative;
+    }
+
+    .step-dot.active {
+      background: var(--accent);
+      transform: scale(1.4);
+      box-shadow: 0 0 12px rgba(107, 114, 128, 0.5);
+    }
+
+    .step-dot.completed {
+      background: var(--success);
+    }
+
+    .step-label {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      min-width: 120px;
+    }
+
+    /* 主内容区 */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      z-index: 10;
+      padding: 40px;
+      gap: 32px;
+    }
+
+    /* 标题区域 */
+    .title-section {
+      text-align: center;
+      max-width: 700px;
+    }
+
+    .title-main {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, var(--text-primary) 0%, var(--text-secondary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .title-sub {
+      font-size: 1.125rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* 摄像头区域 - 全屏核心 */
+    .camera-stage {
+      width: 100%;
+      max-width: 800px;
+      height: 500px;
+      background: linear-gradient(135deg, rgba(42, 42, 46, 0.9) 0%, rgba(53, 53, 58, 0.7) 100%);
+      border-radius: 24px;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(20px);
+      box-shadow: 
+        0 20px 60px rgba(0, 0, 0, 0.5),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    /* 视频容器 */
+    .video-wrapper {
+      position: relative;
+      width: 90%;
+      max-width: 640px;
+      aspect-ratio: 4/3;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #000;
+      box-shadow: 
+        0 16px 48px rgba(0, 0, 0, 0.4),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    /* 人脸对齐框 */
+    .face-guide-overlay {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 280px;
+      height: 360px;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    .face-outline {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      border: 2px dashed var(--accent);
+      border-radius: 50% 50% 45% 45%;
+      opacity: 0.5;
+      transition: all 0.4s ease;
+    }
+
+    .face-outline.detecting {
+      border-color: var(--success);
+      border-style: solid;
+      opacity: 1;
+      animation: faceDetectPulse 2s ease-in-out infinite;
+    }
+
+    @keyframes faceDetectPulse {
+      0%, 100% { 
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4), inset 0 0 20px rgba(16, 185, 129, 0.1);
+      }
+      50% { 
+        box-shadow: 0 0 0 20px rgba(16, 185, 129, 0), inset 0 0 30px rgba(16, 185, 129, 0.15);
+      }
+    }
+
+    /* 角标装饰 */
+    .corner-mark {
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-color: var(--accent);
+      border-style: solid;
+      border-width: 0;
+    }
+
+    .corner-tl { top: -2px; left: -2px; border-top-width: 3px; border-left-width: 3px; border-top-left-radius: 6px; }
+    .corner-tr { top: -2px; right: -2px; border-top-width: 3px; border-right-width: 3px; border-top-right-radius: 6px; }
+    .corner-bl { bottom: -2px; left: -2px; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 6px; }
+    .corner-br { bottom: -2px; right: -2px; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 6px; }
+
+    /* 控制按钮区 */
+    .camera-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      margin-top: 28px;
+      position: relative;
+      z-index: 10;
+    }
+
+    /* 拍照按钮 - 超大尺寸 */
+    .capture-button-large {
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+      border: 4px solid var(--border);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+
+    .capture-button-large:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      transform: scale(1.08);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .capture-button-large:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .capture-inner-circle {
+      width: 76px;
+      height: 76px;
+      border-radius: 50%;
+      background: var(--text-primary);
+      transition: all 0.2s ease;
+    }
+
+    .capture-button-large:hover:not(:disabled) .capture-inner-circle {
+      background: var(--accent-hover);
+    }
+
+    .capture-button-large.capturing .capture-inner-circle {
+      background: var(--error);
+      animation: captureFlash 0.3s ease;
+    }
+
+    @keyframes captureFlash {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(0.9); }
+    }
+
+    /* 切换摄像头按钮 */
+    .switch-camera-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: transparent;
+      border: 2px solid var(--border);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.25s ease;
+    }
+
+    .switch-camera-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--accent);
+      transform: rotate(180deg);
+    }
+
+    .switch-camera-btn svg {
+      width: 24px;
+      height: 24px;
+      fill: var(--text-secondary);
+      transition: fill 0.2s ease;
+    }
+
+    .switch-camera-btn:hover svg {
+      fill: var(--text-primary);
+    }
+
+    /* 状态文字 */
+    .status-display {
+      text-align: center;
+      margin-top: 20px;
+      position: relative;
+      z-index: 10;
+    }
+
+    .status-title {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+
+    .status-hint {
+      font-size: 1rem;
+      color: var(--text-muted);
+    }
+
+    /* 预览模式 */
+    .preview-mode {
+      display: none;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.95);
+      z-index: 20;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+      animation: fadeInPreview 0.3s ease;
+    }
+
+    .preview-mode.show {
+      display: flex;
+    }
+
+    @keyframes fadeInPreview {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .preview-image-container {
+      width: 80%;
+      max-width: 480px;
+      aspect-ratio: 4/3;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      margin-bottom: 32px;
+    }
+
+    #previewImage {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .preview-actions-row {
+      display: flex;
+      gap: 16px;
+    }
+
+    .preview-action-btn {
+      padding: 14px 28px;
+      border-radius: 12px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      font-family: inherit;
+      backdrop-filter: blur(10px);
+    }
+
+    .btn-retake {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-primary);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-retake:hover {
+      background: rgba(255, 255, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .btn-use-photo {
+      background: rgba(16, 185, 129, 0.9);
+      color: white;
+    }
+
+    .btn-use-photo:hover {
+      background: rgba(16, 185, 129, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(16, 185, 129, 0.4);
+    }
+
+    /* 底部操作栏 */
+    .footer-actions {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      padding: 24px 40px;
+      border-top: 1px solid rgba(74, 74, 82, 0.3);
+      backdrop-filter: blur(10px);
+      background: rgba(26, 26, 30, 0.7);
+    }
+
+    .action-btn {
+      padding: 14px 32px;
+      border-radius: 12px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      font-family: inherit;
+      min-width: 160px;
+    }
+
+    .btn-skip {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-skip:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border-color: var(--accent);
+    }
+
+    .btn-complete {
+      background: linear-gradient(135deg, var(--accent) 0%, #555c66 100%);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-complete:hover:not(:disabled) {
+      background: linear-gradient(135deg, var(--accent-hover) 0%, #646c78 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .btn-complete:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* 成功状态覆盖层 */
+    .completion-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      animation: fadeIn 0.5s ease;
+    }
+
+    .completion-overlay.show {
+      display: flex;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .completion-icon-large {
+      width: 140px;
+      height: 140px;
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.05) 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 40px;
+      border: 4px solid rgba(16, 185, 129, 0.4);
+      animation: completionPop 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    @keyframes completionPop {
+      0% { transform: scale(0) rotate(-180deg); }
+      100% { transform: scale(1) rotate(0deg); }
+    }
+
+    .completion-icon-large svg {
+      width: 70px;
+      height: 70px;
+      fill: var(--success);
+    }
+
+    .completion-title {
+      font-size: 3rem;
+      font-weight: 700;
+      color: var(--success);
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .completion-subtitle {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      line-height: 1.8;
+      text-align: center;
+      max-width: 500px;
+      margin-bottom: 48px;
+    }
+
+    /* 错误提示 */
+    .error-toast {
+      position: fixed;
+      top: 100px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: rgba(239, 68, 68, 0.95);
+      color: white;
+      padding: 16px 32px;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 500;
+      z-index: 200;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+      box-shadow: 0 8px 32px rgba(239, 68, 68, 0.4);
+      backdrop-filter: blur(10px);
+    }
+
+    .error-toast.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* 响应式设计 */
+    @media (max-width: 900px) {
+      .header {
+        padding: 16px 20px;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .title-main {
+        font-size: 1.75rem;
+      }
+
+      .camera-stage {
+        height: 400px;
+        max-width: 95%;
+      }
+
+      .video-wrapper {
+        max-width: 90%;
+      }
+
+      .face-guide-overlay {
+        width: 220px;
+        height: 280px;
+      }
+
+      .capture-button-large {
+        width: 80px;
+        height: 80px;
+      }
+
+      .capture-inner-circle {
+        width: 64px;
+        height: 64px;
+      }
+
+      .switch-camera-btn {
+        width: 48px;
+        height: 48px;
+      }
+
+      .status-title {
+        font-size: 1.25rem;
+      }
+
+      .footer-actions {
+        padding: 16px 20px;
+      }
+
+      .action-btn {
+        min-width: 130px;
+        padding: 12px 24px;
+        font-size: 0.9rem;
+      }
+
+      .completion-title {
+        font-size: 2rem;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .main-content {
+        padding: 20px;
+        gap: 20px;
+      }
+
+      .camera-stage {
+        height: 350px;
+      }
+
+      .title-sub {
+        font-size: 1rem;
+      }
+
+      .camera-controls {
+        gap: 16px;
+        margin-top: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+        </svg>
+      </div>
+      <span>生物特征认证</span>
+    </div>
+
+    <div class="progress-container">
+      <div class="step-indicator">
+        <div class="step-dot completed" id="step1"></div>
+        <div class="step-dot active" id="step2"></div>
+        <div class="step-dot" id="step3"></div>
+      </div>
+      <span class="step-label">步骤 2/2 · 人脸拍摄</span>
+    </div>
+  </header>
+
+  <!-- 主内容 -->
+  <main class="main-content">
+    <div class="title-section">
+      <h1 class="title-main">拍摄您的面部照片</h1>
+      <p class="title-sub">请将面部对准框线内，确保光线充足且清晰可见</p>
+    </div>
+
+    <div class="camera-stage" id="cameraStage">
+      <!-- 视频预览 -->
+      <div class="video-wrapper" id="videoWrapper">
+        <video id="video" autoplay playsinline></video>
+        
+        <!-- 人脸对齐引导 -->
+        <div class="face-guide-overlay" id="faceGuideOverlay">
+          <div class="face-outline" id="faceOutline"></div>
+          <div class="corner-mark corner-tl"></div>
+          <div class="corner-mark corner-tr"></div>
+          <div class="corner-mark corner-bl"></div>
+          <div class="corner-mark corner-br"></div>
+        </div>
+
+        <!-- 预览模式 -->
+        <div class="preview-mode" id="previewMode">
+          <img id="previewImage" alt="面部照片预览" />
+          <div class="preview-actions-row">
+            <button type="button" class="preview-action-btn btn-retake" id="btnRetake">重新拍摄</button>
+            <button type="button" class="preview-action-btn btn-use-photo" id="btnUsePhoto">使用此照片</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 拍照控制 -->
+      <div class="camera-controls" id="cameraControls">
+        <button type="button" class="switch-camera-btn" id="btnSwitchCamera" title="切换摄像头">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M20 5h-3.17L15 3H9L7.17 5H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-5 11.5V13H9v3.5L5.5 12 9 7.5V11h6V7.5l3.5 4.5-3.5 4.5z"/>
+          </svg>
+        </button>
+
+        <button type="button" class="capture-button-large" id="captureBtn" disabled>
+          <div class="capture-inner-circle"></div>
+        </button>
+
+        <div style="width: 56px;"></div>
+      </div>
+
+      <!-- 状态显示 -->
+      <div class="status-display">
+        <div class="status-title" id="statusTitle">准备就绪</div>
+        <div class="status-hint" id="statusHint">点击拍照按钮拍摄面部照片</div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 底部操作 -->
+  <footer class="footer-actions">
+    <button type="button" class="action-btn btn-skip" id="btnSkip">跳过此步</button>
+    <button type="button" class="action-btn btn-complete" id="btnComplete" disabled>完成注册</button>
+  </footer>
+
+  <!-- 完成覆盖层 -->
+  <div class="completion-overlay" id="completionOverlay">
+    <div class="completion-icon-large">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+      </svg>
+    </div>
+    <h2 class="completion-title">🎉 注册完成！</h2>
+    <p class="completion-subtitle">
+      您的生物特征（声纹 + 人脸）已成功绑定<br/>
+      可用于快速安全登录验证
+    </p>
+    <button type="button" class="action-btn btn-complete" id="btnGoHome" style="min-width: 200px;">进入主页</button>
+  </div>
+
+  <!-- 错误提示 -->
+  <div class="error-toast" id="errorToast"></div>
+
+  <script>
+    const tokenKey = 'social_platform_token';
+    
+    let stream = null;
+    let capturedImageData = null;
+    let facingMode = 'user';
+
+    const $ = (id) => document.getElementById(id);
+
+    function getAuthToken() {
+      return localStorage.getItem(tokenKey);
+    }
+
+    function authHeaders() {
+      const t = getAuthToken();
+      return t ? { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: { ...authHeaders(), ...(opts.headers || {}) }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.reason || data.error || res.statusText);
+      return data;
+    }
+
+    function updateStep(step) {
+      for (let i = 1; i <= 3; i++) {
+        const el = $(`step${i}`);
+        el.classList.remove('active', 'completed');
+        if (i < step) el.classList.add('completed');
+        else if (i === step) el.classList.add('active');
+      }
+
+      const labels = ['步骤 1/2 · 声纹录制', '步骤 2/2 · 人脸拍摄', '完成'];
+      document.querySelector('.step-label').textContent = labels[step - 1] || '';
+    }
+
+    function showError(msg) {
+      const toast = $('errorToast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 4000);
+    }
+
+    async function startCamera() {
+      try {
+        const constraints = {
+          video: {
+            facingMode: facingMode,
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        };
+
+        // 停止现有流
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        $('video').srcObject = stream;
+        $('captureBtn').disabled = false;
+        
+        $('statusTitle').textContent = '摄像头已就绪';
+        $('statusHint').textContent = '请将面部对准框内，然后点击拍照';
+
+      } catch (err) {
+        console.error('Error accessing camera:', err);
+        showError('无法访问摄像头，请检查权限设置');
+      }
+    }
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+    }
+
+    function capturePhoto() {
+      const video = $('video');
+      const canvas = document.createElement('canvas');
+      
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      capturedImageData = canvas.toDataURL('image/jpeg', 0.92);
+
+      // 显示预览
+      $('previewImage').src = capturedImageData;
+      $('previewMode').classList.add('show');
+
+      // 更新UI状态
+      $('captureBtn').classList.add('capturing');
+      setTimeout(() => $('captureBtn').classList.remove('capturing'), 300);
+
+      $('statusTitle').textContent = '照片已捕获';
+      $('statusHint').textContent = '确认使用或重新拍摄';
+    }
+
+    function retakePhoto() {
+      capturedImageData = null;
+      $('previewMode').classList.remove('show');
+      
+      $('statusTitle').textContent = '摄像头已就绪';
+      $('statusHint').textContent = '请将面部对准框内，然后点击拍照';
+      $('btnComplete').disabled = true;
+    }
+
+    async function usePhoto() {
+      try {
+        if (!capturedImageData) {
+          showError('没有可用的照片');
+          return;
+        }
+
+        $('statusTitle').textContent = '上传中...';
+        $('statusHint').textContent = '正在处理人脸数据';
+
+        const base64Data = capturedImageData.split(',')[1];
+
+        await api('/biometric/face', {
+          method: 'POST',
+          body: JSON.stringify({
+            imageData: base64Data,
+            mimeType: 'image/jpeg'
+          })
+        });
+
+        showCompletion();
+
+      } catch (err) {
+        console.error('Upload error:', err);
+        showError(err.message || '上传失败，请重试');
+        retakePhoto();
+      }
+    }
+
+    function showCompletion() {
+      $('completionOverlay').classList.add('show');
+      updateStep(3);
+      stopCamera();
+    }
+
+    async function switchCamera() {
+      facingMode = facingMode === 'user' ? 'environment' : 'user';
+      await startCamera();
+    }
+
+    // 事件绑定
+    $('captureBtn').addEventListener('click', capturePhoto);
+    
+    $('btnRetake').addEventListener('click', retakePhoto);
+    
+    $('btnUsePhoto').addEventListener('click', usePhoto);
+    
+    $('btnSwitchCamera').addEventListener('click', switchCamera);
+    
+    $('btnSkip').addEventListener('click', () => {
+      stopCamera();
+      window.location.href = '/';
+    });
+
+    $('btnComplete').addEventListener('click', () => {
+      if (capturedImageData) {
+        usePhoto();
+      }
+    });
+
+    $('btnGoHome').addEventListener('click', () => {
+      window.location.href = '/';
+    });
+
+    // 初始化
+    window.addEventListener('load', async () => {
+      if (!getAuthToken()) {
+        window.location.href = '/';
+        return;
+      }
+      
+      await startCamera();
+    });
+
+    // 清理资源
+    window.addEventListener('beforeunload', stopCamera);
+  </script>
+</body>
+</html>

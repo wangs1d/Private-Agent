@@ -85,21 +85,7 @@ export class ToolRegistry {
     return Array.from(this.statefulModules.values());
   }
 
-  /**
-   * 注册传统工具（代码方式）
-   *
-   * ⚠️ 如果工具属于已注册的有状态模块（通过 registerStatefulModule），
-   * 请确保实现中包含状态检查逻辑（参考 project_rules.md）。
-   */
   register(name: string, handler: ToolHandler): void {
-    const stateInfo = this.isStatefulTool(name);
-    if (stateInfo.isStateful) {
-      console.warn(
-        `[ToolRegistry] ⚠️ 工具 "${name}" 属于有状态模块，` +
-        `请确保实现中调用 ${stateInfo.snapshotTool} 检查状态！` +
-        `(详见 .trae/rules/project_rules.md)`
-      );
-    }
     this.tools.set(name, handler);
   }
 

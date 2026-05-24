@@ -7,6 +7,8 @@ import type {
   DesktopVisualAgentPort,
   DesktopVisualRunInput,
   DesktopVisualRunResult,
+  DesktopVisualScreenshotInput,
+  DesktopVisualScreenshotResult,
 } from "./desktop-visual-agent-port.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
@@ -32,6 +34,99 @@ function resolvePackageRoot(): string {
   return rel;
 }
 
+type StdioWorkerResult = { ok: boolean; error?: string; [key: string]: unknown };
+
+function parseLastJsonLine(stdout: string): StdioWorkerResult | null {
+  const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "";
+  if (!line.startsWith("{")) return null;
+  try {
+    return JSON.parse(line) as StdioWorkerResult;
+  } catch {
+    return null;
+  }
+}
+
+function spawnStdioWorker(payload: Record<string, unknown>, pythonExe: string, packageRoot: string) {
+  return spawn(pythonExe, ["-u", "-m", "desktop_visual_agent.stdio_worker"], {
+    cwd: packageRoot,
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+}
+
+async function runStdioWorker<T extends StdioWorkerResult>(
+  payload: Record<string, unknown>,
+  opts: { pythonExe: string; packageRoot: string; timeoutMs: number; timeoutLabel: string },
+): Promise<T> {
+  const child = spawnStdioWorker(payload, opts.pythonExe, opts.packageRoot);
+
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout>;
+
+  const exitPromise = new Promise<number>((resolve) => {
+    child.once("close", (code) => resolve(code ?? 0));
+  });
+
+  const resultPromise = new Promise<T>((resolve) => {
+    const finish = (result: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      resolve(result);
+    };
+
+    child.stdout.on("data", (b) => {
+      stdout += b.toString("utf8");
+      const parsed = parseLastJsonLine(stdout);
+      if (parsed) finish(parsed as T);
+    });
+    child.stderr.on("data", (b) => {
+      stderr += b.toString("utf8");
+    });
+
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
+    child.stdin.end();
+
+    timer = setTimeout(() => {
+      finish({ ok: false, error: `${opts.timeoutLabel}（>${opts.timeoutMs}ms）` } as T);
+    }, opts.timeoutMs);
+
+    void exitPromise.then((code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        resolve({ ok: false, error: stderr.trim() || `python 退出码 ${code}` } as T);
+        return;
+      }
+      const parsed = parseLastJsonLine(stdout);
+      if (parsed) {
+        resolve(parsed as T);
+        return;
+      }
+      const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "";
+      resolve({ ok: false, error: `无法解析子进程输出：${line.slice(0, 400)}` } as T);
+    });
+
+    child.once("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) } as T);
+    });
+  });
+
+  return resultPromise;
+}
+
 export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
   private readonly enabled: boolean;
   private readonly pythonExe: string;
@@ -54,72 +149,40 @@ export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
     if (!this.enabled) {
       return { ok: false, error: "desktop visual agent 未启用（DESKTOP_VISUAL_AGENT_ENABLED）" };
     }
-    const payload = {
-      task: input.task,
-      maxSteps: input.maxSteps ?? 40,
-      region: input.region ?? null,
-      stub: Boolean(input.stub),
-    };
-    const child = spawn(this.pythonExe, ["-m", "desktop_visual_agent.stdio_worker"], {
-      cwd: this.packageRoot,
-      env: { ...process.env },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    return runStdioWorker<DesktopVisualRunResult>(
+      {
+        action: "run_task",
+        task: input.task,
+        maxSteps: input.maxSteps ?? 40,
+        region: input.region ?? null,
+        stub: Boolean(input.stub),
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: this.timeoutMs,
+        timeoutLabel: "子进程超时",
+      },
+    );
+  }
 
-    let stdout = "";
-    let stderr = "";
-    const onData = (buf: Buffer, which: "out" | "err") => {
-      const s = buf.toString("utf8");
-      if (which === "out") stdout += s;
-      else stderr += s;
-    };
-    child.stdout.on("data", (b) => onData(b, "out"));
-    child.stderr.on("data", (b) => onData(b, "err"));
+  async screenshot(input?: DesktopVisualScreenshotInput): Promise<DesktopVisualScreenshotResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "desktop visual agent 未启用（DESKTOP_VISUAL_AGENT_ENABLED）" };
+    }
 
-    const exitPromise = new Promise<number>((resolve) => {
-      child.once("close", (code) => resolve(code ?? 0));
-    });
-
-    child.stdin.write(`${JSON.stringify(payload)}\n`);
-    child.stdin.end();
-
-    return await new Promise<DesktopVisualRunResult>((resolve) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          /* ignore */
-        }
-        resolve({ ok: false, error: `子进程超时（>${this.timeoutMs}ms）` });
-      }, this.timeoutMs);
-
-      void exitPromise.then((code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (code !== 0) {
-          resolve({ ok: false, error: stderr.trim() || `python 退出码 ${code}` });
-          return;
-        }
-        const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "";
-        try {
-          resolve(JSON.parse(line) as DesktopVisualRunResult);
-        } catch {
-          resolve({ ok: false, error: `无法解析子进程输出：${line.slice(0, 400)}` });
-        }
-      });
-
-      child.once("error", (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      });
-    });
+    return runStdioWorker<DesktopVisualScreenshotResult>(
+      {
+        action: "screenshot",
+        region: input?.region ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: Math.min(30_000, this.timeoutMs),
+        timeoutLabel: "截图超时",
+      },
+    );
   }
 }
 

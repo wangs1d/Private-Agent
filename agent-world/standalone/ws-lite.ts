@@ -68,9 +68,8 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
     );
   };
 
-  app.get("/ws", { websocket: true }, (connection) => {
+  app.get("/ws", { websocket: true }, (socket) => {
     let boundSessionId: string | undefined;
-    const socket = connection.socket;
 
     socket.on("close", () => {
       const detached = worldPartitionWsRegistry.detachSocket(socket);

@@ -9,6 +9,14 @@ import { chunkText } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
+import { MessageBatchProcessor, type BatchedMessage } from "../message-batch-processor.js";
+import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
+
+const messageBatchProcessor = new MessageBatchProcessor(
+  getAgentRuntimeConfig().messageBatch,
+);
+
+export { messageBatchProcessor };
 
 export type ChatUserMessageHandlerDeps = {
   agentCore: AgentCore;
@@ -109,17 +117,39 @@ export async function handleChatUserMessageEvent(
     })
     .catch(() => {});
 
+  messageBatchProcessor.submit(msgActor, {
+    text: effectiveText,
+    visionFrames,
+    agentAccessMode,
+    clientIp: data.clientIp || ctx.clientIp,
+    clientLocation: data.clientLocation,
+    interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
+    originalMessageId: data.messageId,
+    userId: data.userId,
+  }, (batched) => processBatchedMessage(ctx, batched, deps));
+
+  return true;
+}
+
+async function processBatchedMessage(
+  ctx: ChatUserMessageContext,
+  batched: BatchedMessage,
+  deps: ChatUserMessageHandlerDeps,
+): Promise<void> {
+  const msgActor = ctx.boundActorId;
+  const isBatched = batched.text.includes("[续");
+
   let chunkSeq = 0;
-  const assistantMessageId = `assistant-${data.messageId}`;
+  const assistantMessageId = `assistant-${batched.originalMessageId}`;
   ctx.socket.send(
     JSON.stringify({
       type: ServerEventType.ChatAgentStatus,
       payload: {
         sessionId: msgActor,
         messageId: assistantMessageId,
-        traceId: data.messageId,
+        traceId: batched.originalMessageId,
         phase: "thinking",
-        line: "正在思考…",
+        line: isBatched ? "💭 正在整合你的多条消息…" : "💭 正在理解你的需求…",
       },
     }),
   );
@@ -139,24 +169,20 @@ export async function handleChatUserMessageEvent(
   };
 
   try {
-    // 优先使用客户端传递的 IP，其次使用 WebSocket 连接获取的 IP
-    const effectiveClientIp = data.clientIp || ctx.clientIp;
-    const effectiveClientLocation = data.clientLocation;
-
-    const reply = await deps.agentCore.handleUserMessage(msgActor, effectiveText, {
-      chatUserMessageId: data.messageId,
-      userId: data.userId,
-      agentAccessMode,
-      clientIp: effectiveClientIp,
-      clientLocation: effectiveClientLocation,
-      ...(visionFrames?.length ? { visionFrames } : {}),
-      interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
+    const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
+      chatUserMessageId: batched.originalMessageId,
+      userId: batched.userId,
+      agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
+      clientIp: batched.clientIp,
+      clientLocation: batched.clientLocation,
+      ...(batched.visionFrames?.length ? { visionFrames: batched.visionFrames } : {}),
+      interruptedContext: batched.interruptedContext,
       onAssistantDelta: (delta) => sendAssistantChunk(delta),
       onExternalToolExecuteStart: (info) => {
         wireToolExecuteStart(
           {
             sessionId: msgActor,
-            traceId: data.messageId,
+            traceId: batched.originalMessageId,
             assistantMessageId,
             send: (json) => ctx.socket.send(json),
           },
@@ -167,7 +193,7 @@ export async function handleChatUserMessageEvent(
         wireToolExecuted(
           {
             sessionId: msgActor,
-            traceId: data.messageId,
+            traceId: batched.originalMessageId,
             assistantMessageId,
             send: (json) => ctx.socket.send(json),
           },
@@ -181,7 +207,7 @@ export async function handleChatUserMessageEvent(
             payload: {
               sessionId: msgActor,
               messageId: assistantMessageId,
-              traceId: data.messageId,
+              traceId: batched.originalMessageId,
               phase: "plan_execute",
               line,
             },
@@ -202,7 +228,7 @@ export async function handleChatUserMessageEvent(
           payload: {
             toolName: reply.toolName,
             input: reply.toolInput,
-            traceId: data.messageId,
+            traceId: batched.originalMessageId,
           },
         }),
       );
@@ -210,11 +236,11 @@ export async function handleChatUserMessageEvent(
       toolResult = reply.toolResult
         ? { ok: true, result: reply.toolResult }
         : await deps.agentCore.runToolIfNeeded(msgActor, reply, {
-            chatUserMessageId: data.messageId,
-            userId: data.userId,
-            agentAccessMode,
-            clientIp: effectiveClientIp,
-            clientLocation: effectiveClientLocation,
+            chatUserMessageId: batched.originalMessageId,
+            userId: batched.userId,
+            agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
+            clientIp: batched.clientIp,
+            clientLocation: batched.clientLocation,
           });
       ctx.socket.send(
         JSON.stringify({
@@ -223,7 +249,7 @@ export async function handleChatUserMessageEvent(
             toolName: reply.toolName,
             ok: toolResult.ok,
             result: toolResult.result ?? {},
-            traceId: data.messageId,
+            traceId: batched.originalMessageId,
             durationMs: Date.now() - startedAt,
           },
         }),
@@ -264,7 +290,7 @@ export async function handleChatUserMessageEvent(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[WS] chat.user_message failed:", err);
-    ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, data.messageId);
+    ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, batched.originalMessageId);
     const errText = `处理消息时出错：${msg}`;
     sendAssistantChunk(errText);
     ctx.socket.send(
@@ -279,6 +305,4 @@ export async function handleChatUserMessageEvent(
       }),
     );
   }
-
-  return true;
 }

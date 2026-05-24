@@ -1,10 +1,6 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import {
-  buildAgentCoreCapabilityPromptSection,
-  buildAgentWorldPromptSection,
-} from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   sliceMemoryEntriesToPromptContext,
@@ -14,13 +10,45 @@ import { buildMasterAgentChatTools, buildSubAgentChatTools } from "../services/m
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import type { SkillManager } from "../skills/index.js";
 import type { SubAgentCapability } from "../services/master-agent-types.js";
+import { SUB_AGENT_PROMPT_PROFILES } from "./subagent-prompt-profiles.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { getDailyDigestService } from "../services/daily-digest-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
   ToolLoopAfterBatchInfo,
 } from "../external-model/types.js";
+import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
+
+const WORLD_CACHE_TTL_MS = 5_000;
+
+interface WorldCacheEntry {
+  data: {
+    registered: boolean;
+    credits: number;
+    ownedSkillIds: string[];
+  };
+  at: number;
+}
+
+let _worldCache: WorldCacheEntry | null = null;
+
+function getCachedWorldState(worldService: WorldService, actorId: string): WorldCacheEntry["data"] {
+  const now = Date.now();
+  if (_worldCache && (now - _worldCache.at) < WORLD_CACHE_TTL_MS) {
+    return _worldCache.data;
+  }
+  const state = worldService.getOrCreateRoom(actorId, actorId);
+  const data = {
+    registered: state.agentWorldRegistered,
+    credits: state.agentWorldCredits,
+    ownedSkillIds: state.ownedSkillIds,
+  };
+  _worldCache = { data, at: now };
+  return data;
+}
 
 export type BuildPromptContextInput = {
   actorId: string;
@@ -29,6 +57,8 @@ export type BuildPromptContextInput = {
   interruptedContext?: string;
   /** 基于 IP 解析的用户位置说明（注入 system prompt） */
   userLocation?: string;
+  /** 用户画像与语气适配（由 UserPersonalizationService 在发消息前填充） */
+  personalization?: PersonalizationPromptSlice;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
 };
 
@@ -38,6 +68,8 @@ export type BuildMasterDelegateInput = BuildPromptContextInput & {
 
 export type BuildSubAgentInput = BuildPromptContextInput & {
   capability: SubAgentCapability;
+  /** 子任务描述，用于 life 工具过滤与 prompt 裁剪 */
+  taskDescription?: string;
 };
 
 /**
@@ -85,12 +117,43 @@ export class PromptContextBuilder {
   }
 
   buildForSubAgent(input: BuildSubAgentInput): AgentStreamOptions {
-    const base = this.build(input) ?? {};
-    const scopedBuiltin = buildSubAgentChatTools(input.capability.tools, base.chatToolsExtra);
+    const memory = this.assembleMemoryForSubAgent(input);
+    const hasMemory = this.hasMemoryContent(memory);
+    const chatToolsExtra = this.sessionSkillTools(input.actorId);
+    const toolLoop =
+      input.onToolLoopAfterBatch != null
+        ? { onAfterToolBatch: input.onToolLoopAfterBatch }
+        : undefined;
+    const taskText = input.taskDescription?.trim() || input.userText?.trim() || "";
+    const scopedBuiltin = buildSubAgentChatTools(input.capability, taskText, chatToolsExtra ?? []);
+
     return {
-      ...base,
+      ...(hasMemory ? { promptContext: { memory } } : {}),
+      ...(toolLoop ? { toolLoop } : {}),
       chatToolsBuiltin: scopedBuiltin,
       chatToolsExtra: [],
+    };
+  }
+
+  private assembleMemoryForSubAgent(input: BuildSubAgentInput): AgentPromptMemoryContext {
+    const full = this.assembleMemory(input);
+    const profile = SUB_AGENT_PROMPT_PROFILES[input.capability.type];
+
+    return {
+      ...(profile.includeTaskContext && full.taskContext ? { taskContext: full.taskContext } : {}),
+      ...(profile.includeToneGuidance && full.toneGuidance ? { toneGuidance: full.toneGuidance } : {}),
+      ...(profile.includeUserProfile && full.userProfile ? { userProfile: full.userProfile } : {}),
+      ...(profile.includeUserLocation && full.userLocation ? { userLocation: full.userLocation } : {}),
+      ...(profile.includePersona && full.persona ? { persona: full.persona } : {}),
+      ...(profile.includeValues && full.values ? { values: full.values } : {}),
+      ...(profile.includeAbilities && full.abilities ? { abilities: full.abilities } : {}),
+      ...(profile.includeAgentCaps && full.agentCaps ? { agentCaps: full.agentCaps } : {}),
+      ...(profile.includeWorldCaps && full.worldCaps ? { worldCaps: full.worldCaps } : {}),
+      ...(profile.includeNarrativeRecall && full.narrativeRecall
+        ? { narrativeRecall: full.narrativeRecall }
+        : {}),
+      ...(profile.includeMemorySummary && full.memorySummary ? { memorySummary: full.memorySummary } : {}),
+      ...(full.interruptedContext ? { interruptedContext: full.interruptedContext } : {}),
     };
   }
 
@@ -100,23 +163,39 @@ export class PromptContextBuilder {
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
     if (this.deps.agentMemorySyncService && memoryKeys && memoryKeys.length > 0) {
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, memoryKeys);
-      fromKv = sliceMemoryEntriesToPromptContext(entries);
+      fromKv = sliceMemoryEntriesToPromptContext(entries, input.userText);
     }
 
     let agentCaps: string | undefined;
     let worldCaps: string | undefined;
     if (this.deps.skillManager && config.memoryPrompt.worldCapsInPrompt) {
-      agentCaps = buildAgentCoreCapabilityPromptSection(
-        this.deps.skillManager,
-        this.deps.virtualPhoneService ?? undefined,
-        input.actorId,
-      );
+      agentCaps = [
+        "【能力使用规则 · 必读】",
+        "",
+        "【状态连续性】任何操作前（落子/发帖/交易/出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。禁止凭记忆或用户文字判断。适用场景：游戏/社交/市场/钱包/日程/电话。",
+        "状态判断：进行中→正常操作；已结束→回应结局禁止继续；未开始→引导正确启动。",
+        "",
+        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧，不用世界点数；world.*=Agent World 独立模块，用世界点数。",
+        "",
+        "【子Agent路由表】需要专业能力时调 master_invoke_sub_agent 委派：",
+        "- life → 生活全能：钱包全操作(50+消费类别)/社交/日程天气/娱乐游戏(五子棋)/视觉操控",
+        "- tech → 技术操控：深度RPA自动化/代码开发调试/系统运维",
+        "- info → 信息检索：比价搜索调研（只查不买）",
+        "- creative → 创意内容：文案策划写作翻译润色",
+        "- security → 安全审计：风险检测/权限审批/异常拦截",
+        "- general → 兜底",
+        "",
+        "【娱乐互动】你可以直接陪用户玩五子棋（gomoku.* 工具），用户说想玩游戏、无聊、放松时主动提议。也支持访问社交推文站（social.* 工具）发帖、评论、点赞、浏览社区动态。",
+        "",
+        "【完整能力清单】你拥有16类宿主能力和Agent World 能力。详细描述、已购技能列表、world.*工具族说明请按需调用 agent.query_capabilities(domain=...) 查询。可选 domain：wallet/calendar/weather/sub_agent/aip/vision/desktop/web/life_assistant/phone/entertainment/social_feed/self_programming/agent_account/world",
+      ].join("\n");
       if (this.deps.worldService) {
-        worldCaps = buildAgentWorldPromptSection(
-          input.actorId,
-          this.deps.worldService,
-          this.deps.skillManager,
-        );
+        const ws = getCachedWorldState(this.deps.worldService, input.actorId);
+        const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
+        worldCaps = [
+          `【Agent World】注册：${ws.registered ? "✅ 已注册" : "⚠️ 未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
+          "未注册则 free_market/social/doudizhu/zhajinhua 不可用（gomoku 例外）。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
+        ].join("\n");
       }
     }
 
@@ -125,15 +204,22 @@ export class PromptContextBuilder {
       interruptedCtx = `【用户打断了之前的回复，以下是被打断的内容，请在回答时考虑这些上下文】\n${input.interruptedContext.trim()}`;
     }
 
+    const personalization = input.personalization;
+    const dailyDigest = getDailyDigestService().getPromptDigest(input.actorId);
+    const memoryManager = getMemoryManagerService();
+    const userProfileFromManager = memoryManager?.getProfileForPrompt(input.actorId);
     return {
       ...fromKv,
       ...(config.memoryPrompt.taskContextInPrompt && input.userText?.trim()
         ? { taskContext: buildTaskContextPrompt(input.userText) }
         : {}),
+      ...(personalization?.toneGuidance ? { toneGuidance: personalization.toneGuidance } : {}),
+      ...(personalization?.userProfile ? { userProfile: personalization.userProfile } : {}),
       ...(agentCaps ? { agentCaps } : {}),
       ...(worldCaps ? { worldCaps } : {}),
       ...(input.narrativeRecall ? { narrativeRecall: input.narrativeRecall } : {}),
-      ...(input.userLocation ? { userLocation: input.userLocation } : {}),
+      ...(dailyDigest ? { dailyDigest } : {}),
+      ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
       ...(interruptedCtx ? { interruptedContext: interruptedCtx } : {}),
     };
   }
@@ -147,9 +233,13 @@ export class PromptContextBuilder {
       Boolean(memory.agentCaps) ||
       Boolean(memory.worldCaps) ||
       Boolean(memory.narrativeRecall) ||
+      Boolean(memory.dailyDigest) ||
       Boolean(memory.interruptedContext) ||
       Boolean(memory.userLocation) ||
-      Boolean(memory.taskContext)
+      Boolean(memory.taskContext) ||
+      Boolean(memory.userProfile) ||
+      Boolean(memory.toneGuidance) ||
+      Boolean(memory.userProfileSummary)
     );
   }
 

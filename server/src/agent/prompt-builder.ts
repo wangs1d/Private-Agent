@@ -9,7 +9,7 @@ export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【Agent World 开放式注册�
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
 
 const CLOCK_TOOL_SYSTEM_SUFFIX =
-  "\n\n【时钟与位置】用户询问时间或所在城市时，必须调用 clock.* 工具；位置以【用户位置】中的前端 GPS 为准，禁止使用 IP 或训练数据臆测。";
+  "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
@@ -23,7 +23,8 @@ const CONCISE_REPLY_SYSTEM_SUFFIX = `
 - 先给结论或核心答案，再补必要细节；能一句说清就不写两句。
 - 避免开场白、套话、重复用户原话和过度铺垫（如「好的，我来帮你…」）。
 - 列表/步骤仅在确实有多项时用；简单问答通常 1～3 句即可。
-- 用户明确要求详尽说明时再展开。`;
+- 用户明确要求详尽说明时再展开。
+- 禁止在回复中暴露任何内部技术细节：不输出 taskId、jobId、记录 ID、编号、API 路径、工具调用过程等用户无感知的信息。例如创建日程/提醒/任务后，只说「已为你创建」即可，不要返回 ID 或编号。`;
 
 const MASTER_SUBAGENT_DELEGATE_SUFFIX = `
 
@@ -88,6 +89,8 @@ export const DEFAULT_AGENT_PROMPT_MEMORY_KEYS = [
   "skill_tendencies",
   "memory_summary",
   "important_dates",
+  "user_profile",
+  "emotion_state",
 ] as const;
 
 /**
@@ -119,6 +122,91 @@ function promptMemorySummaryMaxChars(): number {
   return Number.isFinite(n) && n > 200 ? n : 6000;
 }
 
+function promptMemorySummaryMaxLines(): number {
+  const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_LINES?.trim();
+  const n = raw ? Number.parseInt(raw, 10) : 50;
+  return Number.isFinite(n) && n > 10 ? n : 50;
+}
+
+const TIMESTAMP_RE = /\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/;
+
+function extractTimestamp(line: string): Date | null {
+  const match = line.match(TIMESTAMP_RE);
+  if (!match?.[1]) return null;
+  const ts = Date.parse(match[1]);
+  return isNaN(ts) ? null : new Date(ts);
+}
+
+function sortAndTruncateMemoryLines(raw: string, maxChars: number, maxLines: number, userQuery?: string): string {
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return "";
+
+  let scored = lines.map((line) => ({
+    line,
+    timestamp: extractTimestamp(line),
+    relevanceScore: userQuery ? calculateRelevanceScore(line, userQuery) : 0.5,
+  }));
+
+  if (userQuery) {
+    scored.sort((a, b) => {
+      if (Math.abs(b.relevanceScore - a.relevanceScore) > 0.2) {
+        return b.relevanceScore - a.relevanceScore;
+      }
+      const timeA = a.timestamp;
+      const timeB = b.timestamp;
+      if (!timeA && !timeB) return 0;
+      if (!timeA) return 1;
+      if (!timeB) return -1;
+      return timeB.getTime() - timeA.getTime();
+    });
+  } else {
+    scored.sort((a, b) => {
+      const timeA = a.timestamp;
+      const timeB = b.timestamp;
+      if (!timeA && !timeB) return 0;
+      if (!timeA) return 1;
+      if (!timeB) return -1;
+      return timeB.getTime() - timeA.getTime();
+    });
+  }
+
+  const truncated = scored.slice(0, maxLines).map((s) => s.line);
+  let result = truncated.join("\n");
+  if (result.length > maxChars) {
+    result = `…（较早记录已截断）\n${result.slice(-maxChars)}`;
+  }
+  return result;
+}
+
+function calculateRelevanceScore(line: string, query: string): number {
+  const queryLower = query.toLowerCase();
+  const lineLower = line.toLowerCase();
+
+  let score = 0;
+
+  const queryTerms = queryLower.match(/[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}/g) || [];
+  for (const term of queryTerms) {
+    if (lineLower.includes(term)) {
+      score += 0.3;
+    }
+  }
+
+  if (/\[用户要求记住\]/.test(line) || /\[Agent 承诺\/结论\]/.test(line)) {
+    score += 0.2;
+  }
+
+  if (/偏好|喜欢|讨厌|重要|记住|记得/.test(queryLower) &&
+      /偏好|喜欢|讨厌|禁忌|生日|纪念日|重要/.test(lineLower)) {
+    score += 0.3;
+  }
+
+  if (/之前|上次|说过|刚才|刚刚/.test(queryLower)) {
+    score += 0.1;
+  }
+
+  return Math.min(score, 1);
+}
+
 /** 将 KV 条目格式化为可注入 system 的文本（支持 JSON 对象/数组）。 */
 export function formatKvValueForPrompt(value: unknown): string {
   if (value == null) return "";
@@ -139,6 +227,8 @@ const SLICE_RESERVED_KEYS = new Set([
   "abilities",
   "skill_tendencies",
   "memory_summary",
+  "user_profile",
+  "emotion_state",
 ]);
 
 /**
@@ -146,6 +236,7 @@ const SLICE_RESERVED_KEYS = new Set([
  */
 export function sliceMemoryEntriesToPromptContext(
   entries: Record<string, unknown>,
+  userQuery?: string,
 ): AgentPromptMemoryContext {
   const str = (v: unknown): string => formatKvValueForPrompt(v);
 
@@ -160,12 +251,13 @@ export function sliceMemoryEntriesToPromptContext(
     if (s) memoryParts.push(`【${k}】\n${s}`);
   }
   memoryParts.sort();
+  const maxChars = promptMemorySummaryMaxChars();
   let memorySummary = memoryParts.join("\n\n");
   const rawSummary = str(entries["memory_summary"]);
   if (rawSummary) {
-    memorySummary = memorySummary ? `${rawSummary}\n\n${memorySummary}` : rawSummary;
+    const sorted = sortAndTruncateMemoryLines(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery);
+    memorySummary = memorySummary ? `${sorted}\n\n${memorySummary}` : sorted;
   }
-  const maxChars = promptMemorySummaryMaxChars();
   if (memorySummary.length > maxChars) {
     memorySummary = `…（较早记录已截断）\n${memorySummary.slice(-maxChars)}`;
   }
@@ -193,19 +285,25 @@ export function buildLayeredSystemPrompt(
     !memory?.memorySummary &&
     !memory?.interruptedContext &&
     !memory?.userLocation &&
-    !memory?.taskContext
+    !memory?.taskContext &&
+    !memory?.userProfile &&
+    !memory?.toneGuidance &&
+    !memory?.dailyDigest
   ) {
     return baseSystem.trim();
   }
   const parts: string[] = [];
   if (memory.taskContext) parts.push(`[Turn Task Context]\n${memory.taskContext}`);
+  if (memory.toneGuidance) parts.push(`【本轮语气与情绪适配】\n${memory.toneGuidance}`);
+  if (memory.userProfile) parts.push(`【用户画像】\n${memory.userProfile}`);
   if (memory.userLocation) parts.push(`【用户位置】\n${memory.userLocation}`);
   if (memory.persona) parts.push(`【人格与角色】\n${memory.persona}`);
   if (memory.values) parts.push(`【价值观与原则】\n${memory.values}`);
   if (memory.abilities) parts.push(`【能力倾向】\n${memory.abilities}`);
   if (memory.agentCaps) parts.push(`【你的 Agent 专属能力】\n${memory.agentCaps}`);
   if (memory.worldCaps) parts.push(`【Agent World】\n${memory.worldCaps}`);
-  if (memory.narrativeRecall) parts.push(`【Memory Tree 检索摘录】\n${memory.narrativeRecall}`);
+  if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
+  if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
   if (memory.interruptedContext) parts.push(memory.interruptedContext);
   parts.push(baseSystem.trim());

@@ -220,14 +220,15 @@ export function registerCalendarTools(
 
   registry.register("calendar.list_tasks", async (input, context) => {
     const sessionId = resolveActorId(context);
+    const now = Date.now();
     const from =
       input.from != null && String(input.from).trim()
         ? String(input.from).trim()
-        : new Date(Date.now() - 2 * 86400000).toISOString();
+        : new Date(now).toISOString();
     const to =
       input.to != null && String(input.to).trim()
         ? String(input.to).trim()
-        : new Date(Date.now() + 120 * 86400000).toISOString();
+        : new Date(now + 120 * 86400000).toISOString();
     const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
     return {
       ok: true,

@@ -212,6 +212,37 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.VirtualPhoneCallMyAgent) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const callPl = event.payload as Record<string, unknown>;
+          const userMessage = String(callPl.userMessage ?? callPl.message ?? "").trim();
+          const callResult = await virtualPhoneService.handleUserCallAgent({
+            fromUserId: boundActorId,
+            toActorId: boundActorId,
+            userMessage: userMessage || undefined,
+          });
+          if (!callResult.ok) {
+            sendUnifiedError("PHONE_CALL_FAILED", callResult.error ?? "呼叫失败");
+            return;
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.VirtualPhoneCallStatus,
+              payload: {
+                ok: true,
+                callId: callResult.callId,
+                status: "ringing",
+                toActorId: boundActorId,
+                message: "正在呼叫你的 Agent…",
+              },
+            }),
+          );
+          return;
+        }
+
         if (event.type === ClientEventType.SessionInit) {
           const payload = event.payload as Record<string, unknown>;
           const sessionIdRaw = String(payload.sessionId ?? "").trim();

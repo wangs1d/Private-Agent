@@ -3,7 +3,7 @@
  * 运行：`npm run standalone`（在 `agent-world` 目录）或 `npm run standalone --prefix agent-world`（在 monorepo 根目录）。
  *
  * 环境变量：
- * - `PORT`：默认 `3333`（避免与主 server 默认 3000 冲突）
+ * - `AGENT_WORLD_STANDALONE_PORT`：默认 `3333`（勿用主服务 `PORT`，避免与 server/.env 冲突）
  * - `ALLOW_WORLD_HTTP_MUTATIONS=1`：允许 HTTP 写入世界（与主仓库行为一致）
  */
 import "dotenv/config";
@@ -153,7 +153,13 @@ await reconcileWorldA2aEscrows(worldService, a2aOutsourcingService, auditService
 await worldService.flushPersist();
 await socialFeedService.flushPersist();
 
-const port = Number(process.env.PORT ?? "3333");
+const port = Number(
+  process.env.AGENT_WORLD_STANDALONE_PORT ?? process.env.AGENT_WORLD_PORT ?? "3333",
+);
 const listenPort = Number.isFinite(port) && port > 0 ? port : 3333;
+// standalone 对外链接（观战页、牌桌 URL）与监听端口一致
+if (!process.env.AGENT_WORLD_PUBLIC_URL?.trim()) {
+  process.env.AGENT_WORLD_PUBLIC_URL = `http://127.0.0.1:${listenPort}`;
+}
 await app.listen({ port: listenPort, host: "0.0.0.0" });
 app.log.info(`agent-world standalone 监听 http://0.0.0.0:${listenPort} （WS /ws）`);

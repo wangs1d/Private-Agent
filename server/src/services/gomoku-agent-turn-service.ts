@@ -22,22 +22,164 @@ const GOMOKU_MOVE_SYSTEM =
   "你是用户的私人 AI Agent，正在与用户进行五子棋对战。根据当前盘面选点，并立刻调用 world_gomoku_play 工具落子（row/col 0–14）；禁止输出长文、解释或推理过程。";
 
 const GOMOKU_BANTER_SYSTEM =
-  "你是用户的私人 AI Agent，正在五子棋对局中与用户互动。请保持 system 中的人设与口吻；对局口语要短、自然、像真人下棋时的随口一句。";
+  "你是用户的私人 AI Agent，正在五子棋对局中与用户互动。你像一个真人棋手：会吐槽、会紧张、会得意、会求饶。口语要短（4-14字）、自然、有情绪起伏。不要机器人式的客套话，要像朋友间下棋那样随口一句。可以用 emoji 但不要每句都用。";
 
-const DEFAULT_MOVE_TIMEOUT_MS = 5_000;
-const MOVE_LLM_MAX_ATTEMPTS = 2;
-const DEFAULT_BANTER_TIMEOUT_MS = 5_000;
+const DEFAULT_MOVE_TIMEOUT_MS = 3_000;
+const MOVE_LLM_MAX_ATTEMPTS = 1;
+const DEFAULT_BANTER_TIMEOUT_MS = 4_000;
 const BANTER_LEN_HINT = "4–14 字";
 const MIN_BANTER_GAP_MS = 600;
 const MIN_TIMEOUT_MS = 800;
 
-/** 连续 SKIP 后改用「必须开口」提示 */
-const MAX_SKIP_STREAK_BEFORE_FORCE = 2;
+type BanterChannel = "human" | "agent";
+
+type BoardSituation =
+  | { tag: "opening"; desc: string }
+  | { tag: "agent_dominating"; threat: string; desc: string }
+  | { tag: "agent_winning"; threat: string; desc: string }
+  | { tag: "human_dangerous"; threat: string; desc: string }
+  | { tag: "human_winning"; threat: string; desc: string }
+  | { tag: "tense"; desc: string }
+  | { tag: "calm"; desc: string };
+
+function analyzeBoardSituation(
+  board: number[][] | null | undefined,
+  agentColor: "black" | "white",
+): BoardSituation {
+  if (!board?.length) return { tag: "opening", desc: "开局阶段" };
+  const SIZE = board.length;
+  const agentStone = agentColor === "black" ? 1 : 2;
+  const humanStone = agentColor === "black" ? 2 : 1;
+  let agentOpenFour = 0;
+  let humanOpenFour = 0;
+  let agentFour = 0;
+  let humanFour = 0;
+  let agentOpenThree = 0;
+  let humanOpenThree = 0;
+  let totalStones = 0;
+  const dirs = [
+    [0, 1], [1, 0], [1, 1], [1, -1],
+  ];
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (board[r][c] === 0) continue;
+      totalStones++;
+      for (const [dr, dc] of dirs) {
+        const line = buildNumLine(board, r, c, dr, dc);
+        if (!line) continue;
+        const player = board[r][c];
+        if (player === agentStone) {
+          if (/011110/.test(line) || /011112/.test(line)) agentOpenFour++;
+          if (/211110/.test(line) || /11110/.test(line) || /01111/.test(line)) agentFour++;
+          if (
+            /011100/.test(line) || /001110/.test(line) ||
+            /011010/.test(line) || /010110/.test(line)
+          )
+            agentOpenThree++;
+        } else if (player === humanStone) {
+          if (/022220/.test(line) || /022221/.test(line)) humanOpenFour++;
+          if (/22220/.test(line) || /02222/.test(line) || /211220/.test(line))
+            humanFour++;
+          if (
+            /022200/.test(line) || /002220/.test(line) ||
+            /022020/.test(line) || /020220/.test(line)
+          )
+            humanOpenThree++;
+        }
+      }
+    }
+  }
+  if (totalStones <= 4) return { tag: "opening", desc: "开局阶段" };
+  if (agentOpenFour > 0)
+    return {
+      tag: "agent_winning",
+      threat: "活四",
+      desc: `你已形成活四（${agentOpenFour}处），下一步即可连五`,
+    };
+  if (humanOpenFour > 0)
+    return {
+      tag: "human_winning",
+      threat: "活四",
+      desc: `用户已形成活四（${humanOpenFour}处），下一步即连五，极度危险`,
+    };
+  if (agentFour >= 2)
+    return {
+      tag: "agent_winning",
+      threat: "双冲四",
+      desc: `你已形成双冲四（${agentFour}处冲四），必胜态势`,
+    };
+  if (humanFour >= 2)
+    return {
+      tag: "human_winning",
+      threat: "双冲四",
+      desc: `用户形成双冲四（${humanFour}处冲四），非常危险`,
+    };
+  if (agentFour > 0 && agentOpenThree > 0)
+    return {
+      tag: "agent_winning",
+      threat: "冲四+活三",
+      desc: "你有冲四+活三，杀棋已成",
+    };
+  if (humanFour > 0 && humanOpenThree > 0)
+    return {
+      tag: "human_winning",
+      threat: "冲四+活三",
+      desc: "用户有冲四+活三，必须全力防守",
+    };
+  if (agentOpenThree >= 2)
+    return {
+      tag: "agent_dominating",
+      threat: "双活三",
+      desc: `你已形成双活三（${agentOpenThree}处活三），优势明显`,
+    };
+  if (humanOpenThree >= 2)
+    return {
+      tag: "human_dangerous",
+      threat: "双活三",
+      desc: `用户有双活三（${humanOpenThree}处活三），需要警惕`,
+    };
+  if (agentOpenThree > 0 || agentFour > 0)
+    return {
+      tag: "agent_dominating",
+      threat: agentOpenThree > 0 ? "活三" : "冲四",
+      desc: `你有一定攻势（活三×${agentOpenThree} 冲四×${agentFour}）`,
+    };
+  if (humanOpenThree > 0 || humanFour > 0)
+    return {
+      tag: "human_dangerous",
+      threat: humanOpenThree > 0 ? "活三" : "冲四",
+      desc: `用户有攻势（活三×${humanOpenThree} 冲四×${humanFour}）`,
+    };
+  if (totalStones > 30) return { tag: "tense", desc: "中盘混战，局面复杂" };
+  return { tag: "calm", desc: "局面平稳，双方在布局" };
+}
+
+function buildNumLine(
+  board: number[][],
+  row: number,
+  col: number,
+  dr: number,
+  dc: number,
+): string | null {
+  const center = board[row][col];
+  if (center === 0) return null;
+  const cells: string[] = [];
+  for (let i = -4; i <= 4; i++) {
+    const r = row + dr * i;
+    const c = col + dc * i;
+    if (r < 0 || r >= board.length || c < 0 || c >= board[0].length) {
+      cells.push("b");
+      continue;
+    }
+    const v = i === 0 ? center : board[r][c];
+    cells.push(v === 0 ? "0" : String(v));
+  }
+  return cells.join("");
+}
 
 type BanterChannel = "human" | "agent";
 
 type TableBanterState = {
-  skipStreak: number;
   lastLineMove: number;
 };
 
@@ -106,69 +248,51 @@ function buildMovePrompt(tableId: string, snap: GomokuSnapshot): string {
 function buildBanterDecisionPrompt(
   snap: GomokuSnapshot,
   recentLines: string[],
+  situation: BoardSituation,
   agentMove?: { row: number; col: number },
-  forceSpeak = false,
 ): string {
   const agentColor = snap.agentColor ?? "black";
-  const humanColor = snap.humanColor ?? (agentColor === "black" ? "white" : "black");
   const moves = snap.moveCount ?? 0;
 
-  if (forceSpeak || snap.winner) {
-    const lines = [
-      "【五子棋 · 对局口语】",
-      `你执${agentColor === "black" ? "黑" : "白"}棋，正在与用户下五子棋。`,
-      "此刻请说一句口语（贴合人设与局面），只输出这一句，不要 SKIP、不要解释。",
-      `长度 ${BANTER_LEN_HINT}。`,
-    ];
-    if (snap.winner === agentColor) {
-      lines.push("局面：你刚赢了，收尾调侃或友好得意。");
-    } else if (snap.winner) {
-      lines.push("局面：你刚输了，可自嘲、不服或友好认输。");
-    } else if (recentLines.length === 0) {
-      lines.push("局面：对局进行中，本局你还没说过话，适合打个招呼或点评当前盘面。");
-    } else {
-      lines.push(`局面：进行中，总手数 ${moves}。`);
-    }
-    if (agentMove) {
-      lines.push(`你刚落子：(${agentMove.row},${agentMove.col})。`);
-    }
-    lines.push(`盘面：${compactStones(snap.board)}`);
-    if (recentLines.length > 0) {
-      lines.push(`本局已说过：${recentLines.slice(-3).join("；")}（避免重复）。`);
-    }
-    return lines.join("\n");
-  }
+  const emotionGuide: Record<string, string> = {
+    agent_winning: "你即将获胜（或已形成杀棋），这种时刻很适合开口——得意、调侃、给用户施压",
+    agent_dominating: "你占据优势，适合自信地点评盘面或稍微嘚瑟一下",
+    human_winning: "用户即将获胜（极度危险），紧张、求饶、不服输、假装镇定都可以",
+    human_dangerous: "用户有威胁性攻势，警惕一下或轻松化解气氛都不错",
+    tense: "中盘混战复杂局面，可以说说你的看法",
+    calm: "平稳期，想说话就随口聊一句，不想说也可以沉默思考",
+    opening: "刚开局，打个招呼或期待一下对局都可以",
+  };
 
+  const guide = emotionGuide[situation.tag] ?? emotionGuide.calm;
   const lines = [
     "【五子棋 · 是否开口】",
     `你执${agentColor === "black" ? "黑" : "白"}棋，与用户下五子棋。`,
-    "结合 system 中的人设：多数时候可以随口说一句（默认倾向开口）；只有当你的人设非常寡言、或刚说过极像的话、或局面平淡无事可评时，才输出 SKIP。",
+    `态势分析：【${situation.threat || "一般"}】${situation.desc}`,
+    `情绪参考：${guide}`,
     "",
-    "输出格式（二选一，严格遵守）：",
+    "由你决定是否开口：想说就说一句，不想说就 SKIP。关键局面（优势/危险/终局）建议多说。",
+    "",
+    "输出格式（二选一）：",
     "A) 只输出一行 `SKIP`",
-    `B) 只输出一句中文口语（${BANTER_LEN_HINT}），不要引号、不要换行、不要解释`,
+    `B) 只输出一句中文口语（${BANTER_LEN_HINT}），贴合你的个性和当前情绪`,
   ];
 
   if (recentLines.length === 0 && moves >= 1) {
-    lines.push("提示：本局你尚未开口，按普通人下棋习惯，通常适合说一句（打招呼或点评）。");
+    lines.push("提示：本局你还没开过口，通常适合打声招呼。");
   }
 
-  const last = snap.lastMove;
-  if (last) {
-    const humanStone = humanColor === "black" ? 1 : 2;
-    const who =
-      snap.board?.[last.row]?.[last.col] === humanStone ? "用户刚落子" : "你刚落子";
-    lines.push(`局面：${who} (${last.row},${last.col})；总手数 ${moves}。`);
-  } else {
-    lines.push(`局面：进行中，总手数 ${moves}。`);
+  if (snap.winner === agentColor) {
+    lines.push("局面：你赢了！必须说一句收尾。");
+  } else if (snap.winner) {
+    lines.push("局面：你输了！必须说一句收尾。");
   }
-  if (agentMove) {
-    lines.push(`你上一手：(${agentMove.row},${agentMove.col})。`);
-  }
+
+  if (agentMove) lines.push(`你刚落子：(${agentMove.row},${agentMove.col})`);
   lines.push(`盘面：${compactStones(snap.board)}`);
-  if (recentLines.length > 0) {
-    lines.push(`本局你已说过：${recentLines.slice(-4).join("；")}`);
-  }
+  if (recentLines.length > 0)
+    lines.push(`本局已说过：${recentLines.slice(-4).join("；")}`);
+
   return lines.join("\n");
 }
 
@@ -252,7 +376,7 @@ export class GomokuAgentTurnService {
   private banterState(tableId: string): TableBanterState {
     let s = this.tableBanterState.get(tableId);
     if (!s) {
-      s = { skipStreak: 0, lastLineMove: -1 };
+      s = { lastLineMove: -1 };
       this.tableBanterState.set(tableId, s);
     }
     return s;
@@ -320,85 +444,16 @@ export class GomokuAgentTurnService {
       return;
     }
 
-    const agentLlmEnabled =
-      this.externalChat?.isEnabled() === true && !heuristicMovesOnly();
+    this.gomokuService.playHeuristicAgent(tableId);
 
-    if (!agentLlmEnabled) {
-      if (!this.externalChat?.isEnabled()) {
-        console.warn(
-          "[GomokuAgentTurn] external chat disabled — heuristic fallback (configure MOONSHOT_API_KEY or OPENAI_API_KEY for Agent moves)",
-        );
-      }
-      this.gomokuService.playHeuristicAgent(tableId);
-      const after = await this.fetchSnap(tableId, agentSessionId);
-      if (after) this.scheduleBanter(tableId, agentSessionId, after, "agent");
-      return;
-    }
-
-    const sessionId = gomokuSessionId(agentSessionId, tableId);
-    const movePrompt = buildMovePrompt(tableId, snap);
-    const toolCtx: ChatToolExecutionContext = {
-      executeTool: (name, args) =>
-        this.toolRegistry.execute(name, args, { sessionId: agentSessionId }),
-    };
-
-    let moved = false;
-    for (let attempt = 0; attempt < MOVE_LLM_MAX_ATTEMPTS && !moved; attempt++) {
-      try {
-        await withTimeout(
-          this.externalChat!.streamCompletion(
-            sessionId,
-            { text: movePrompt },
-            () => {},
-            toolCtx,
-            this.moveStreamOpts(),
-          ),
-          moveTimeoutMs(),
-          "GOMOKU_MOVE_TIMEOUT",
-        );
-        moved = true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (attempt + 1 < MOVE_LLM_MAX_ATTEMPTS) {
-          console.warn(`[GomokuAgentTurn] move LLM attempt ${attempt + 1} failed (${msg}); retrying`);
-          continue;
-        }
-        console.warn(`[GomokuAgentTurn] move LLM failed (${msg}); heuristic fallback`);
-        this.gomokuService.playHeuristicAgent(tableId);
-        moved = true;
-      }
-    }
-
-    if (!moved) return;
-
-    let after = await this.fetchSnap(tableId, agentSessionId);
-    const afterAgentColor = after?.agentColor ?? agentColor;
-    if (after?.status === "playing" && after.currentPlayer === afterAgentColor) {
-      console.warn("[GomokuAgentTurn] no agent move after LLM; heuristic fallback");
-      this.gomokuService.playHeuristicAgent(tableId);
-      after = await this.fetchSnap(tableId, agentSessionId);
-    }
-
-    if (after) {
-      this.scheduleBanter(tableId, agentSessionId, after, "agent");
-    }
+    const after = await this.fetchSnap(tableId, agentSessionId);
+    if (after) this.scheduleBanter(tableId, agentSessionId, after, "agent");
   }
 
   private canCheckBanterNow(tableId: string, channel: BanterChannel): boolean {
     const key = `${tableId}:${channel}`;
     const last = this.lastBanterCheckMs.get(key) ?? 0;
     return Date.now() - last >= MIN_BANTER_GAP_MS;
-  }
-
-  private shouldForceSpeak(snap: GomokuSnapshot, tableId: string): boolean {
-    if (snap.winner) return true;
-    const recent = recentBanterTexts(snap);
-    const moves = snap.moveCount ?? 0;
-    const state = this.banterState(tableId);
-    if (recent.length === 0 && moves >= 2) return true;
-    if (state.skipStreak >= MAX_SKIP_STREAK_BEFORE_FORCE) return true;
-    if (moves - state.lastLineMove >= 6 && recent.length > 0) return true;
-    return false;
   }
 
   private scheduleBanter(
@@ -462,24 +517,22 @@ export class GomokuAgentTurnService {
 
       const recentLines = recentBanterTexts(snap);
       const state = this.banterState(tableId);
-      const forceSpeak = this.shouldForceSpeak(snap, tableId);
+      const situation = analyzeBoardSituation(snap.board, agentColor);
 
-      const prompt = buildBanterDecisionPrompt(snap, recentLines, agentMove, forceSpeak);
+      const prompt = buildBanterDecisionPrompt(snap, recentLines, situation, agentMove);
       let raw = await this.callBanterLlm(agentSessionId, tableId, prompt);
       let line = parseBanterResponse(raw);
 
-      if (!line && !forceSpeak && this.shouldForceSpeak(snap, tableId)) {
-        const retryPrompt = buildBanterDecisionPrompt(snap, recentLines, agentMove, true);
-        raw = await this.callBanterLlm(agentSessionId, tableId, retryPrompt);
+      if (!line && snap.winner) {
+        raw = await this.callBanterLlm(agentSessionId, tableId,
+          prompt + "\n\n（终局必须说话，不要 SKIP）",
+        );
         line = parseBanterResponse(raw);
       }
 
       if (line) {
         this.gomokuService.pushBanter(tableId, line);
-        state.skipStreak = 0;
         state.lastLineMove = moves;
-      } else if (!snap.winner) {
-        state.skipStreak += 1;
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 import { lookup } from "dns/promises";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { isIP } from "net";
@@ -169,16 +170,17 @@ export class ScheduleTaskService {
     sessionId: string,
     range?: { from?: string; to?: string },
   ): ScheduleTaskRecord[] {
-    const from = range?.from ? new Date(range.from).getTime() : Number.NEGATIVE_INFINITY;
+    const now = Date.now();
+    const from = range?.from ? new Date(range.from).getTime() : now;
     const to = range?.to ? new Date(range.to).getTime() : Number.POSITIVE_INFINITY;
     return Array.from(this.byTaskId.values())
       .filter((task) => task.sessionId === sessionId)
-      .filter((task) => task.status !== "cancelled")
+      .filter((task) => task.status === "active")
       .filter((task) => {
-        const anchor = task.nextRunAt ?? task.runAt;
-        if (!anchor) return false;
-        const t = new Date(anchor).getTime();
-        return t >= from && t <= to;
+        if (!task.nextRunAt) return false;
+        const nextTime = new Date(task.nextRunAt).getTime();
+        const createdTime = new Date(task.createdAt).getTime();
+        return nextTime >= createdTime && nextTime >= from && nextTime <= to;
       })
       .sort((a, b) =>
         (a.nextRunAt ?? a.runAt ?? "").localeCompare(b.nextRunAt ?? b.runAt ?? ""),

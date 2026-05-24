@@ -64,4 +64,34 @@ export function registerPhoneRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       message: "已发起呼叫，请等待 Agent 接听",
     };
   });
+
+  app.post("/phone/call-my-agent", async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    const sessionId = String(body.sessionId ?? "").trim();
+    const userId = String(body.userId ?? "").trim();
+    const userMessage = String(body.userMessage ?? body.message ?? "").trim();
+
+    const actorId = userId || sessionId;
+    if (!actorId) {
+      return reply.code(400).send({ ok: false, error: "需要 sessionId 或 userId" });
+    }
+
+    const result = await virtualPhoneService.handleUserCallAgent({
+      fromUserId: actorId,
+      toActorId: actorId,
+      userMessage: userMessage || undefined,
+    });
+
+    if (!result.ok) {
+      return reply.code(400).send({ ok: false, error: result.error });
+    }
+
+    return {
+      ok: true,
+      callId: result.callId,
+      status: "ringing",
+      toActorId: actorId,
+      message: "正在呼叫你的 Agent…",
+    };
+  });
 }

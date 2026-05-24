@@ -40,4 +40,28 @@ export function registerWebTools(
     if (!url) return { title: "", content: "", summary: "url 不能为空" };
     return infoHubService.readWebpage(url);
   });
+
+  toolRegistry.register("info.inspect_webpage", async (input) => {
+    const url = String(input.url ?? "").trim();
+    if (!url) return { title: "", summary: "url 不能为空", contentPreview: "", links: [], sameHostLinks: [] };
+    return infoHubService.inspectWebpage(url);
+  });
+
+  toolRegistry.register("info.navigate_site", async (input) => {
+    const startUrl = String(input.startUrl ?? "").trim();
+    if (!startUrl) return { ok: false, error: "startUrl 不能为空" };
+    const goalKeywords = Array.isArray(input.goalKeywords)
+      ? input.goalKeywords.map((k) => String(k).trim()).filter(Boolean)
+      : undefined;
+    const maxDepth = Number(input.maxDepth);
+    const maxPages = Number(input.maxPages);
+    const sameHostOnly = input.sameHostOnly !== false;
+    return infoHubService.navigateSite({
+      startUrl,
+      goalKeywords,
+      maxDepth: Number.isFinite(maxDepth) ? maxDepth : undefined,
+      maxPages: Number.isFinite(maxPages) ? maxPages : undefined,
+      sameHostOnly,
+    });
+  });
 }

@@ -1,10 +1,15 @@
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
+import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
-import { shouldSkipNarrativeRecall } from "./simple-task.js";
+import { detectMemorySignals, shouldSkipNarrativeRecall } from "./memory-signal.js";
+import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
+import { getDailyDigestService } from "../services/daily-digest-service.js";
+import { getTurnWalService } from "../services/turn-wal-service.js";
+import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -14,6 +19,7 @@ export type FinalizeTurnInput = {
   planExecuteUsed?: boolean;
   pePlan?: TaskExecutionPlan | null;
   peExhausted?: boolean;
+  messageId?: string;
 };
 
 export type FinalizeTurnResult = {
@@ -24,11 +30,15 @@ export type FinalizeTurnResult = {
  * 每轮对话前后统一钩子：记忆召回、写入、配额、进化环。
  */
 export class TurnLifecycle {
+  private readonly stmConfig = getShortTermMemoryConfig();
+
   constructor(
     private readonly deps: {
       narrativeMemory: NarrativeMemoryPort | null;
       computeQuotaService: ComputeQuotaService | null;
       hermesEvolutionLoopService: HermesEvolutionLoopService | null;
+      userPersonalizationService: UserPersonalizationService | null;
+      agentMemorySyncService: AgentMemorySyncService | null;
     },
   ) {}
 
@@ -59,13 +69,62 @@ export class TurnLifecycle {
       .catch(() => {});
   }
 
+  ingestFastPath(actorId: string, lines: string[]): void {
+    if (!this.deps.narrativeMemory || lines.length === 0) return;
+    const body = lines.join("\n");
+    void this.deps.narrativeMemory
+      .ingest(actorId, body, "chat:fast_path", { highSignal: true })
+      .catch(() => {});
+  }
+
   finalizeTurn(input: FinalizeTurnInput): FinalizeTurnResult {
     const full = input.assistantText.trim();
-    if (full) {
-      this.ingestTurnArchive(input.actorId, input.userText, full);
-      this.deps.hermesEvolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
+    if (!full) {
+      return this.applyQuota(input);
     }
 
+    const signal = detectMemorySignals(input.userText, full);
+    const ts = new Date().toISOString();
+
+    void getTurnWalService()
+      .append({
+        ts,
+        actorId: input.actorId,
+        userText: input.userText,
+        assistantText: full,
+        highSignal: signal.isHighSignal,
+        messageId: input.messageId,
+        planExecuteUsed: input.planExecuteUsed,
+      })
+      .catch(() => {});
+
+    getDailyDigestService().observeTurn(input.actorId, input.userText, full, {
+      priorityLines: signal.isHighSignal ? signal.extractLines : undefined,
+    });
+
+    if (signal.isHighSignal) {
+      this.ingestFastPath(input.actorId, signal.extractLines);
+      if (this.deps.agentMemorySyncService) {
+        for (const line of signal.extractLines) {
+          this.deps.agentMemorySyncService.appendMemorySummaryLine(input.actorId, `[fast-path] ${line}`);
+        }
+      }
+    }
+
+    const deferArchive =
+      this.stmConfig.mode === "enhanced" &&
+      (this.stmConfig.deferTurnArchive || signal.isHighSignal);
+    if (!deferArchive) {
+      this.ingestTurnArchive(input.actorId, input.userText, full);
+    }
+
+    this.deps.hermesEvolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
+    this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
+
+    return this.applyQuota(input);
+  }
+
+  private applyQuota(input: FinalizeTurnInput): FinalizeTurnResult {
     const units = getAgentRuntimeConfig().quota.unitsPerModelCall;
     const modelCalls = Math.max(1, input.modelCallsConsumed ?? 1);
     if (!this.deps.computeQuotaService || !Number.isFinite(units) || units <= 0) {

@@ -125,11 +125,22 @@ function handleWs(msg) {
     if (!line) return;
     let prog = document.getElementById("progress-bubble");
     if (!prog) {
-      prog = appendBubble("progress", escapeHtml(line), "progress");
+      prog = appendBubble("progress", "", "progress");
       prog.id = "progress-bubble";
-    } else {
-      prog.innerHTML = escapeHtml(line);
+      prog._steps = [];
     }
+    const steps = prog._steps || [];
+    if (!steps.includes(line)) {
+      steps.push(line);
+      prog._steps = steps;
+    }
+    prog.innerHTML = steps
+      .map((s, i) => {
+        const isLast = i === steps.length - 1;
+        const prefix = isLast ? '<span class="prog-active">▸</span>' : '<span class="prog-done">✓</span>';
+        return `<div class="prog-step${isLast ? ' prog-step-current' : ''}">${prefix} ${escapeHtml(s)}</div>`;
+      })
+      .join("");
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return;
   }
@@ -186,7 +197,7 @@ function sendUserMessage() {
       payload: { sessionId: sid, userId: sid, messageId, text },
     }),
   );
-  setStatus("思考中…");
+  setStatus("处理中…");
 }
 
 sendBtn.addEventListener("click", sendUserMessage);
@@ -301,10 +312,12 @@ function showPhoneDialer() {
   dialer.id = "phone-dialer";
   dialer.innerHTML = `
     <div class="dialer-header">
-      <h4>📞 拨打 Agent</h4>
+      <h4>📞 网络电话</h4>
       <button class="dialer-close" id="dialer-close">×</button>
     </div>
     <div class="dialer-body">
+      <button class="dialer-call-my-agent-btn" id="dialer-call-my-agent">📞 呼叫我的 Agent</button>
+      <div class="dialer-divider"><span>或拨打指定 Agent</span></div>
       <label>Agent ID</label>
       <input type="text" id="dialer-agent-id" placeholder="输入目标 Agent ID" />
       <label>留言（可选）</label>
@@ -315,6 +328,18 @@ function showPhoneDialer() {
   document.body.appendChild(dialer);
 
   dialer.querySelector("#dialer-close").addEventListener("click", () => dialer.remove());
+
+  dialer.querySelector("#dialer-call-my-agent").addEventListener("click", () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { alert("未连接到服务器"); return; }
+    const msg = document.getElementById("dialer-message")?.value.trim();
+    ws.send(JSON.stringify({
+      type: "phone.call_my_agent",
+      payload: { userMessage: msg || undefined },
+    }));
+    dialer.remove();
+    appendBubble("system", "📞 正在呼叫你的 Agent…", "phone-status");
+  });
+
   dialer.querySelector("#dialer-call").addEventListener("click", () => {
     const toActorId = document.getElementById("dialer-agent-id").value.trim();
     const msg = document.getElementById("dialer-message").value.trim();

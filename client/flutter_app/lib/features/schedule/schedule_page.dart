@@ -100,14 +100,20 @@ class _SchedulePageState extends State<SchedulePage> {
   Future<void> _reloadAll() async {
     final ScheduleApiClient? api = widget.scheduleApi;
     final String? sessionId = widget.sessionId?.trim();
+    final DateTime wEnd = _weekStart.add(const Duration(days: 7));
     if (api != null && sessionId != null && sessionId.isNotEmpty) {
       try {
-        await syncServerRemindersToLocal(widget.store, api, sessionId);
+        await syncServerRemindersToLocal(
+          widget.store,
+          api,
+          sessionId,
+          rangeStart: _weekStart.subtract(const Duration(days: 1)),
+          rangeEnd: wEnd.add(const Duration(days: 1)),
+        );
       } catch (_) {
         // 离线或主服务不可用时仍展示本地已缓存事项。
       }
     }
-    final DateTime wEnd = _weekStart.add(const Duration(days: 7));
     final List<ScheduleEvent> weekList =
         await widget.store.listScheduleEventsInRange(_weekStart, wEnd);
     final List<ScheduleEvent> todayList = await widget.store

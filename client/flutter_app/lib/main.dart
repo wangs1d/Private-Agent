@@ -914,6 +914,65 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
+  void _sendUserMessage(String text) {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      return;
+    }
+    final String trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    if (_isAgentProcessing) {
+      if (_pendingAssistantChunkText.isNotEmpty) {
+        _interruptedResponses.add(_pendingAssistantChunkText.toString());
+        _pendingAssistantChunkText.clear();
+      }
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      setState(() {
+        _isAgentProcessing = false;
+        _agentStatusLine = null;
+        _pendingAssistantChunkMessageId = null;
+      });
+      _assistantChunkFlushTimer?.cancel();
+      _assistantChunkFlushTimer = null;
+    }
+
+    final ChatMessage userMessage = ChatMessage(
+      messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "user",
+      text: trimmed,
+      timestamp: DateTime.now(),
+    );
+    setState(() {
+      _messages.add(userMessage);
+      _isAgentProcessing = true;
+      _agentStatusLine = "Agent 思考中...";
+    });
+    _store.saveMessage(userMessage);
+
+    final Map<String, dynamic> userMsg = <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+      "messageId": userMessage.messageId,
+      "text": trimmed,
+      "timestamp": DateTime.now().toIso8601String(),
+    };
+    if (ApiConfig.userId.trim().isNotEmpty) {
+      userMsg["userId"] = ApiConfig.userId.trim();
+    }
+    userMsg["agentAccessMode"] = _fullComputerAccessEnabled ? "full" : "sandbox";
+
+    if (_interruptedResponses.isNotEmpty) {
+      final String interruptedContext = _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
+      userMsg["interruptedContext"] = interruptedContext;
+      _interruptedResponses.clear();
+    }
+
+    _armAgentReplyWatchdog(userMessage.messageId);
+    _ws.sendEvent("chat.user_message", userMsg);
+  }
+
   static const List<String> _kTabTitles = <String>[
     "",
     "Agent Link",
@@ -1067,6 +1126,28 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (mounted) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(content: Text("📞 正在呼叫 Agent: $agentId")),
+      );
+    }
+  }
+
+  void _callMyAgentViaPhone(String? message) {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("正在连接服务器，请稍后再试")),
+        );
+      }
+      return;
+    }
+    final Map<String, dynamic> callPayload = <String, dynamic>{};
+    if (message != null && message.isNotEmpty) {
+      callPayload["userMessage"] = message;
+    }
+    _ws.sendEvent("phone.call_my_agent", callPayload);
+    if (mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("📞 正在呼叫你的 Agent…")),
       );
     }
   }
@@ -1542,6 +1623,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                   builder: (BuildContext ctx) => PhoneDialerPage(
                                     onCallSent: (String agentId, String? message) {
                                       _callAgentViaPhone(agentId, message);
+                                    },
+                                    onCallMyAgent: (String? message) {
+                                      _callMyAgentViaPhone(message);
                                     },
                                   ),
                                 ),

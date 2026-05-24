@@ -1,6 +1,6 @@
 import type { AgentWorldCreditReason } from "@private-ai-agent/agent-world";
 
-import { getKvSummaryAppendMode } from "../memory-tree/env.js";
+import { getKvSummaryAppendMode } from "../config/memory-env.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 
 export function isEvolutionMemoryAutopatchEnabled(): boolean {
@@ -11,7 +11,7 @@ export function isEvolutionMemoryAutopatchEnabled(): boolean {
 
 /**
  * 世界入账 / 购技能时自动追加 UAP `memory_summary` 一行（养成叙事）。
- * `AGENT_KV_SUMMARY_APPEND_MODE=minimal` 时跳过 KV 流水（细节由 Memory Tree 承担）。
+ * `AGENT_KV_SUMMARY_APPEND_MODE=minimal` 时跳过 KV 流水（细节由 Mem0 记忆图承担）。
  */
 export class AgentEvolutionMemoryService {
   constructor(private readonly memory: AgentMemorySyncService) {}

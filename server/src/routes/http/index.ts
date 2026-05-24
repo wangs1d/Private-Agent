@@ -23,6 +23,7 @@ import {
 } from "@private-ai-agent/agent-world";
 import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
 import { registerChatWeb } from "./chat-web.js";
+import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -52,4 +53,5 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
+  registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
 }

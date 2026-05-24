@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthService } from '../services/auth-service.js';
 import { SocialService } from '../services/social-service.js';
+import { BiometricService } from '../services/biometric-service.js';
 import { z } from 'zod';
 
 // Schema definitions
@@ -37,7 +38,17 @@ const reportSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-export function registerRoutes(app: FastifyInstance, authService: AuthService, socialService: SocialService): void {
+const voicePrintSchema = z.object({
+  audioData: z.string().min(1),
+  mimeType: z.string().default('audio/webm'),
+});
+
+const facePrintSchema = z.object({
+  imageData: z.string().min(1),
+  mimeType: z.string().default('image/jpeg'),
+});
+
+export function registerRoutes(app: FastifyInstance, authService: AuthService, socialService: SocialService, biometricService: BiometricService): void {
   
   // Health check
   app.get('/health', async () => ({ ok: true, service: 'social-platform' }));
@@ -87,7 +98,8 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
       path === '/health' ||
       path === '/ws' ||
       path === '/' ||
-      path.startsWith('/assets/')
+      path.startsWith('/assets/') ||
+      path.startsWith('/biometric/')
     ) {
       return;
     }
@@ -265,5 +277,96 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
     void reply.header('Content-Type', mime);
     void reply.header('Cache-Control', 'public, max-age=86400');
     return reply.send(stream);
+  });
+
+  // Biometric routes
+  app.post('/biometric/voice', async (request: any, reply) => {
+    try {
+      const authHeader = request.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return reply.code(401).send({ ok: false, reason: '需要认证' });
+      }
+
+      const token = authHeader.slice(7);
+      const auth = authService.verifyToken(token);
+      
+      if (!auth) {
+        return reply.code(401).send({ ok: false, reason: '无效的令牌' });
+      }
+
+      const body = voicePrintSchema.parse(request.body);
+      const result = await biometricService.saveVoicePrint(
+        auth.userId,
+        body.audioData,
+        body.mimeType
+      );
+
+      if (!result.ok) {
+        return reply.code(400).send({ ok: false, reason: result.reason });
+      }
+
+      return { 
+        ok: true, 
+        message: '声纹注册成功',
+        createdAt: result.voicePrint.createdAt 
+      };
+    } catch (error: any) {
+      return reply.code(400).send({ ok: false, error: error.errors || error.message });
+    }
+  });
+
+  app.post('/biometric/face', async (request: any, reply) => {
+    try {
+      const authHeader = request.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return reply.code(401).send({ ok: false, reason: '需要认证' });
+      }
+
+      const token = authHeader.slice(7);
+      const auth = authService.verifyToken(token);
+      
+      if (!auth) {
+        return reply.code(401).send({ ok: false, reason: '无效的令牌' });
+      }
+
+      const body = facePrintSchema.parse(request.body);
+      const result = await biometricService.saveFacePrint(
+        auth.userId,
+        body.imageData,
+        body.mimeType
+      );
+
+      if (!result.ok) {
+        return reply.code(400).send({ ok: false, reason: result.reason });
+      }
+
+      return { 
+        ok: true, 
+        message: '人脸注册成功',
+        createdAt: result.facePrint.createdAt 
+      };
+    } catch (error: any) {
+      return reply.code(400).send({ ok: false, error: error.errors || error.message });
+    }
+  });
+
+  app.get('/biometric/status', async (request: any, reply) => {
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ ok: false, reason: '需要认证' });
+    }
+
+    const token = authHeader.slice(7);
+    const auth = authService.verifyToken(token);
+    
+    if (!auth) {
+      return reply.code(401).send({ ok: false, reason: '无效的令牌' });
+    }
+
+    return {
+      ok: true,
+      hasVoicePrint: biometricService.hasVoicePrint(auth.userId),
+      hasFacePrint: biometricService.hasFacePrint(auth.userId)
+    };
   });
 }
