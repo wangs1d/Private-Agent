@@ -463,11 +463,11 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-21T23:00:00.000Z",
-      "nextRunAt": "2026-05-24T23:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "cancelled",
       "reminderMessage": "该起床啦！新的一天开始了~",
       "createdAt": "2026-05-20T17:24:40.603Z",
-      "updatedAt": "2026-05-24T08:23:55.424Z",
+      "updatedAt": "2026-05-24T17:52:01.369Z",
       "lastRunAt": "2026-05-24T08:23:55.424Z"
     },
     {
@@ -552,6 +552,51 @@
       "createdAt": "2026-05-22T17:18:33.457Z",
       "updatedAt": "2026-05-24T08:24:22.571Z",
       "lastRunAt": "2026-05-24T08:24:22.571Z"
+    },
+    {
+      "taskId": "4a5cdfbd-325b-4247-b497-3769f245ef90",
+      "sessionId": "session-mvp-001",
+      "title": "test-delete",
+      "description": "t",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-26T10:00:00.000Z",
+      "nextRunAt": "2026-05-26T10:00:00.000Z",
+      "status": "active",
+      "reminderMessage": "hi",
+      "createdAt": "2026-05-24T17:49:08.344Z",
+      "updatedAt": "2026-05-24T17:49:08.344Z"
+    },
+    {
+      "taskId": "2d9eb395-9ef4-4ca6-8002-8f35d11af1e4",
+      "sessionId": "session-mvp-001",
+      "title": "test-cancel",
+      "description": "t",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-26T11:00:00.000Z",
+      "nextRunAt": null,
+      "status": "cancelled",
+      "reminderMessage": "hi",
+      "createdAt": "2026-05-24T17:49:28.525Z",
+      "updatedAt": "2026-05-24T17:49:28.590Z"
+    },
+    {
+      "taskId": "06d77a75-b3f9-4733-895c-0d01853fc3aa",
+      "sessionId": "session-mvp-001",
+      "title": "del-test",
+      "description": "t",
+      "kind": "reminder",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-26T12:00:00.000Z",
+      "nextRunAt": null,
+      "status": "cancelled",
+      "reminderMessage": "hi",
+      "createdAt": "2026-05-24T17:50:23.088Z",
+      "updatedAt": "2026-05-24T17:50:23.184Z"
     }
   ],
   "runs": [

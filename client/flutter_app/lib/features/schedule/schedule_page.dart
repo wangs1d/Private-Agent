@@ -8,6 +8,7 @@ import "package:flutter/material.dart";
 import "../../core/db/isar_local_history_store.dart";
 import "../../core/models/schedule_models.dart";
 import "../../core/services/schedule_api_client.dart";
+import "../../core/services/schedule_recurrence_expand.dart";
 import "../../core/services/schedule_reminder_sync.dart";
 import "../../core/theme/app_theme.dart";
 
@@ -97,21 +98,30 @@ class _SchedulePageState extends State<SchedulePage> {
     return monday;
   }
 
+  String? _scheduleServiceWarning;
+
   Future<void> _reloadAll() async {
     final ScheduleApiClient? api = widget.scheduleApi;
     final String? sessionId = widget.sessionId?.trim();
     final DateTime wEnd = _weekStart.add(const Duration(days: 7));
+    String? serviceWarning;
     if (api != null && sessionId != null && sessionId.isNotEmpty) {
-      try {
-        await syncServerRemindersToLocal(
-          widget.store,
-          api,
-          sessionId,
-          rangeStart: _weekStart.subtract(const Duration(days: 1)),
-          rangeEnd: wEnd.add(const Duration(days: 1)),
-        );
-      } catch (_) {
-        // 离线或主服务不可用时仍展示本地已缓存事项。
+      final bool reachable = await api.isReachable();
+      if (!reachable) {
+        serviceWarning =
+            "主服务未连接（${api.baseUrl}），日程仅显示本地缓存；删除/同步需先启动后端";
+      } else {
+        try {
+          await syncServerRemindersToLocal(
+            widget.store,
+            api,
+            sessionId,
+            rangeStart: _weekStart.subtract(const Duration(days: 1)),
+            rangeEnd: wEnd.add(const Duration(days: 1)),
+          );
+        } catch (_) {
+          serviceWarning = "日程同步失败，当前为本地缓存";
+        }
       }
     }
     final List<ScheduleEvent> weekList =
@@ -124,6 +134,7 @@ class _SchedulePageState extends State<SchedulePage> {
     setState(() {
       _weekEvents = weekList;
       _todayEvents = todayList;
+      _scheduleServiceWarning = serviceWarning;
     });
   }
 
@@ -334,11 +345,59 @@ class _SchedulePageState extends State<SchedulePage> {
         );
       },
     );
-    if (del == true && mounted) {
+    if (del != true || !mounted) return;
+
+    final String? serverTaskId = scheduleServerTaskIdFromEventId(e.id);
+    final ScheduleApiClient? api = widget.scheduleApi;
+
+    // 1. 立即从本机移除（含隐藏列表，防止同步拉回）
+    if (serverTaskId != null) {
+      await widget.store.hideScheduleTask(serverTaskId);
+      await widget.store.deleteScheduleEventsForTask(serverTaskId);
+    } else {
       await widget.store.deleteScheduleEvent(e.id);
-      _selectedEventId = null;
-      await _reloadAll();
     }
+    _selectedEventId = null;
+    if (mounted) {
+      setState(() {
+        _todayEvents = _filterOutDeletedEvent(_todayEvents, e, serverTaskId);
+        _weekEvents = _filterOutDeletedEvent(_weekEvents, e, serverTaskId);
+      });
+    }
+
+    // 2. 后台同步服务端（失败也不恢复本机已删项）
+    if (serverTaskId != null && api != null) {
+      final ScheduleApiResult<void> result =
+          await api.deleteScheduleTask(serverTaskId);
+      if (!result.ok && mounted) {
+        final String hint = result.networkError
+            ? "已在本地删除。${result.error ?? "请启动主服务（npm run dev）"}"
+            : "已在本地删除；服务端：${result.error ?? "删除失败"}";
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(hint),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+
+    await _reloadAll();
+  }
+
+  List<ScheduleEvent> _filterOutDeletedEvent(
+    List<ScheduleEvent> events,
+    ScheduleEvent target,
+    String? serverTaskId,
+  ) {
+    return events.where((ScheduleEvent ev) {
+      if (ev.id == target.id) return false;
+      if (serverTaskId != null) {
+        final String? tid = scheduleServerTaskIdFromEventId(ev.id);
+        if (tid == serverTaskId) return false;
+      }
+      return true;
+    }).toList();
   }
 
   Widget _buildSubTabBar(ThemeData theme) {
@@ -841,6 +900,23 @@ class _SchedulePageState extends State<SchedulePage> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: <Widget>[
+        if (_scheduleServiceWarning != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Material(
+              color: theme.colorScheme.errorContainer.withValues(alpha: 0.35),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Text(
+                  _scheduleServiceWarning!,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onErrorContainer,
+                  ),
+                ),
+              ),
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Text(

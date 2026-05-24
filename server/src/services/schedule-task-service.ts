@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 import { lookup } from "dns/promises";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { isIP } from "net";
@@ -194,6 +193,16 @@ export class ScheduleTaskService {
 
   getTask(taskId: string): ScheduleTaskRecord | undefined {
     return this.byTaskId.get(taskId);
+  }
+
+  async deleteTask(taskId: string): Promise<void> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) {
+      throw new Error("任务不存在");
+    }
+    this.byTaskId.delete(taskId);
+    this.runsByTaskId.delete(taskId);
+    await this.persist();
   }
 
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {

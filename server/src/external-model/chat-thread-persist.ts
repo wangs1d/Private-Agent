@@ -48,25 +48,42 @@ function tailMessages(
   maxMessages: number,
 ): ChatCompletionMessageParam[] {
   if (messages.length <= maxMessages) return messages;
-  const tail = messages.slice(-maxMessages);
 
-  const validToolCallIds = new Set<string>();
-  for (const msg of tail) {
-    if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
-      for (const tc of msg.tool_calls) {
-        if (tc.id) validToolCallIds.add(tc.id);
+  const groups: ChatCompletionMessageParam[][] = [];
+  let i = messages.length - 1;
+
+  while (i >= 0) {
+    const msg = messages[i];
+    if (msg.role === "tool") {
+      const group: ChatCompletionMessageParam[] = [];
+      while (i >= 0 && messages[i].role === "tool") {
+        group.unshift(messages[i]);
+        i--;
       }
+      if (i >= 0 && messages[i].role === "assistant") {
+        const assistantMsg = messages[i];
+        const hasToolCalls = Array.isArray(assistantMsg.tool_calls);
+        if (hasToolCalls) {
+          group.unshift(assistantMsg);
+          i--;
+        }
+      }
+      groups.unshift(group);
+    } else {
+      groups.unshift([msg]);
+      i--;
     }
   }
 
-  const filtered = tail.filter((msg) => {
-    if (msg.role !== "tool") return true;
-    const tcId = (msg as { tool_call_id?: string }).tool_call_id;
-    if (!tcId) return false;
-    return validToolCallIds.has(tcId);
-  });
+  const result: ChatCompletionMessageParam[] = [];
+  let total = 0;
+  for (let g = groups.length - 1; g >= 0; g--) {
+    if (total + groups[g].length > maxMessages) continue;
+    result.unshift(...groups[g]);
+    total += groups[g].length;
+  }
 
-  return filtered;
+  return result;
 }
 
 /**

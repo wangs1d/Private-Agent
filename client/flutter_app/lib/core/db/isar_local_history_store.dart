@@ -172,6 +172,45 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     await _flush();
   }
 
+  /// 删除同一服务端任务展开出的全部本地事项（id 为 `taskId` 或 `taskId@…`）。
+  Future<void> deleteScheduleEventsForTask(String taskId) async {
+    await init();
+    _scheduleEvents.removeWhere((Map<String, dynamic> m) {
+      final String id = m["id"] as String;
+      return id == taskId || id.startsWith("$taskId@");
+    });
+    await _flush();
+  }
+
+  Future<void> clearAllScheduleEvents() async {
+    await init();
+    _scheduleEvents.clear();
+    await _flush();
+  }
+
+  /// 用户已删除的服务端 taskId（同步时跳过，防止被重新拉回）。
+  Future<Set<String>> getHiddenScheduleTaskIds() async {
+    await init();
+    final Object? raw = _preferences["hiddenScheduleTaskIds"];
+    if (raw is! List) return <String>{};
+    final Set<String> out = <String>{};
+    for (final Object? item in raw) {
+      final String s = item?.toString().trim() ?? "";
+      if (s.isNotEmpty) out.add(s);
+    }
+    return out;
+  }
+
+  Future<void> hideScheduleTask(String taskId) async {
+    final String id = taskId.trim();
+    if (id.isEmpty) return;
+    await init();
+    final Set<String> hidden = await getHiddenScheduleTaskIds();
+    hidden.add(id);
+    _preferences["hiddenScheduleTaskIds"] = hidden.toList();
+    await _flush();
+  }
+
   ScheduleEvent _scheduleEventFromMap(Map<String, dynamic> m) {
     return ScheduleEvent(
       id: m["id"] as String,

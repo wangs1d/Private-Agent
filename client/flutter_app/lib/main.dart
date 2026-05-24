@@ -162,11 +162,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
     if (isPhoneRegistered) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!biometricStatus) {
-          await _showBiometricDialog();
-        }
         if (mounted) {
-          await _promptLocationConsentIfNeeded();
+          if (!biometricStatus) {
+            _showBiometricRegistration();
+          } else {
+            await _promptLocationConsentIfNeeded();
+          }
         }
       });
     }
@@ -1165,6 +1166,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             });
             // 保存注册状态
             _store.saveBiometricRegistrationStatus(true);
+            // 生物特征注册完成后，再请求位置权限
+            _promptLocationConsentIfNeeded();
           },
         ),
       ),
@@ -1192,45 +1195,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (decided) {
       await ClientLocationService.requestGpsAfterConsent();
     }
-  }
-
-  /// 显示生物特征注册对话框
-  Future<void> _showBiometricDialog() async {
-    final BuildContext? ctx = _rootNavigatorKey.currentContext;
-    if (ctx == null || !ctx.mounted) {
-      return;
-    }
-    
-    await showDialog(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text("生物特征注册"),
-          content: const Text("为了增强账户安全，建议您注册生物特征（声纹或面部识别）。您可以现在注册，也可以稍后在设置中完成。"),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext);
-                // 标记为已注册，避免再次弹出
-                setState(() {
-                  _isBiometricRegistered = true;
-                });
-                _store.saveBiometricRegistrationStatus(true);
-              },
-              child: const Text("稍后设置"),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext);
-                _showBiometricRegistration();
-              },
-              child: const Text("立即注册"),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   /// 收起态侧栏图标悬停提示；首 Tab 无顶栏标题，此处用「对话」代替空字符串。
@@ -1557,11 +1521,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               _showRegistration = false;
             });
             WidgetsBinding.instance.addPostFrameCallback((_) async {
-              if (!_isBiometricRegistered) {
-                await _showBiometricDialog();
-              }
               if (mounted) {
-                await _promptLocationConsentIfNeeded();
+                _showBiometricRegistration();
               }
             });
           },

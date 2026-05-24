@@ -54,6 +54,16 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
     }
   });
 
+  app.delete<{ Params: { taskId: string } }>("/schedule/tasks/:taskId", async (request, reply) => {
+    try {
+      await scheduleTaskService.deleteTask(request.params.taskId);
+      return { ok: true };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return reply.code(400).send({ ok: false, message });
+    }
+  });
+
   app.post<{ Params: { taskId: string } }>(
     "/schedule/tasks/:taskId/trigger",
     async (request, reply) => {

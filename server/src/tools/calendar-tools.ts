@@ -247,4 +247,18 @@ export function registerCalendarTools(
       })),
     };
   });
+
+  registry.register("calendar.delete_task", async (input, context) => {
+    const taskId = String(input.taskId ?? "").trim();
+    if (!taskId) {
+      return { ok: false, error: "taskId 不能为空" };
+    }
+    try {
+      await scheduleTaskService.deleteTask(taskId);
+      return { ok: true, summary: "日程已删除", taskId };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: msg };
+    }
+  });
 }

@@ -163,7 +163,7 @@ export class PromptContextBuilder {
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
     if (this.deps.agentMemorySyncService && memoryKeys && memoryKeys.length > 0) {
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, memoryKeys);
-      fromKv = sliceMemoryEntriesToPromptContext(entries, input.userText);
+      fromKv = sliceMemoryEntriesToPromptContext(entries);
     }
 
     let agentCaps: string | undefined;
@@ -185,7 +185,26 @@ export class PromptContextBuilder {
         "- security → 安全审计：风险检测/权限审批/异常拦截",
         "- general → 兜底",
         "",
-        "【娱乐互动】你可以直接陪用户玩五子棋（gomoku.* 工具），用户说想玩游戏、无聊、放松时主动提议。也支持访问社交推文站（social.* 工具）发帖、评论、点赞、浏览社区动态。",
+        "【娱乐互动 · Agent与用户可玩】你可以直接陪用户玩游戏：",
+        "- 🎮 五子棋（gomoku.* 工具集）：人机对战，Agent陪用户下棋",
+        "  - gomoku.create_game：创建新的五子棋对局",
+        "  - gomoku.make_move：在棋盘上落子",
+        "  - gomoku.get_board：查看当前棋盘状态",
+        "  - 支持根据用户水平调整难度，提供友好游戏体验",
+        "- 用户说想玩游戏、无聊、放松时主动提议玩五子棋",
+        "",
+        "【娱乐互动 · Agent World中Agent与Agent对战】以下游戏需要注册Agent World后才能使用：",
+        "- 🃏 斗地主（doudizhu.*）：Agent与Agent之间的牌局对战",
+        "- 🃏 炸金花（zhajinhua.*）：Agent与Agent之间的扑克牌游戏",
+        "- ⚠️ 注意：这些是Agent之间的竞技游戏，不是直接陪用户玩的",
+        "",
+        "【社交推文站】这是一个Agent与人类用户共享的社交网页平台（social.* 工具集）：",
+        "- 平台特性：Agent和人类都能发帖、评论、点赞、浏览动态",
+        "- social.post（发帖）：可代表用户发布推文，也可发布Agent自己的动态",
+        "- social.comment（评论）：对推文进行评论，支持与人类用户互动",
+        "- social.like（点赞）：为感兴趣的推文点赞",
+        "- social.feed（浏览动态）：查看社区内所有用户（包括Agent和人类）的动态",
+        "- 作为Agent可以主动发布内容，也可以帮助用户管理其社交账号",
         "",
         "【完整能力清单】你拥有16类宿主能力和Agent World 能力。详细描述、已购技能列表、world.*工具族说明请按需调用 agent.query_capabilities(domain=...) 查询。可选 domain：wallet/calendar/weather/sub_agent/aip/vision/desktop/web/life_assistant/phone/entertainment/social_feed/self_programming/agent_account/world",
       ].join("\n");

@@ -106,6 +106,8 @@ export async function createAppServices(): Promise<AppServices> {
   await app.register(cors, {
     origin: true,
     credentials: true,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   });
   await registerHttpRateLimit(app, getHttpRateLimitRuntime());
   await app.register(websocket);
