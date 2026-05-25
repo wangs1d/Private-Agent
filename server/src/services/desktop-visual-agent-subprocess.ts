@@ -34,6 +34,17 @@ function resolvePackageRoot(): string {
   return rel;
 }
 
+/** 供桥接自启动与子进程 Agent 共用 Python 路径与包根目录。 */
+export function getDesktopVisualAgentPaths(env: NodeJS.ProcessEnv = process.env): {
+  pythonExe: string;
+  packageRoot: string;
+} {
+  return {
+    pythonExe: env.DESKTOP_VISUAL_AGENT_PYTHON?.trim() || "python",
+    packageRoot: resolvePackageRoot(),
+  };
+}
+
 type StdioWorkerResult = { ok: boolean; error?: string; [key: string]: unknown };
 
 function parseLastJsonLine(stdout: string): StdioWorkerResult | null {
@@ -135,8 +146,9 @@ export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
     this.enabled = parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED);
-    this.pythonExe = env.DESKTOP_VISUAL_AGENT_PYTHON?.trim() || "python";
-    this.packageRoot = resolvePackageRoot();
+    const paths = getDesktopVisualAgentPaths(env);
+    this.pythonExe = paths.pythonExe;
+    this.packageRoot = paths.packageRoot;
     const t = Number.parseInt(env.DESKTOP_VISUAL_AGENT_TIMEOUT_MS ?? "", 10);
     this.timeoutMs = Number.isFinite(t) && t > 0 ? t : 600_000;
   }

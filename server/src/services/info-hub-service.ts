@@ -8,6 +8,7 @@ import {
   searchBingChina,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
+import { applySearchFreshness } from "./search-freshness.js";
 
 export type InfoSearchItem = {
   title: string;
@@ -147,12 +148,18 @@ export class InfoHubService {
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, limit)) : 8;
     const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent };
 
-    let web = await searchBingChina(keyword, boundedLimit, domesticOpts);
-    if (/科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword)) {
-      const tech = await fetchDomesticTechNews(keyword, Math.min(6, boundedLimit), domesticOpts);
-      web = dedupeByUrl([...web, ...tech]);
+    const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
+
+    const [web, tech] = await Promise.all([
+      searchBingChina(keyword, boundedLimit, domesticOpts),
+      isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(6, boundedLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
+    ]);
+
+    if (isTechKeyword && tech.length > 0) {
+      return applySearchFreshness(dedupeByUrl([...web, ...tech]), { query: keyword }).items.slice(0, boundedLimit);
     }
-    return web.sort(sortBySourcePriority).slice(0, boundedLimit);
+
+    return applySearchFreshness(web, { query: keyword }).items.slice(0, boundedLimit);
   }
 
   async fetchNews(topic: string, limit = 8): Promise<InfoSearchItem[]> {
@@ -317,16 +324,6 @@ export class InfoHubService {
     const text = htmlToText(html).slice(0, 12000);
     return { html, text };
   }
-}
-
-function sortBySourcePriority(a: InfoSearchItem, b: InfoSearchItem): number {
-  const rank = (source: string): number => {
-    const normalized = source.trim().toLowerCase();
-    if (normalized.includes("必应") || normalized.includes("bing")) return 0;
-    if (normalized.includes("36") || normalized.includes("it之家") || normalized.includes("ithome")) return 1;
-    return 9;
-  };
-  return rank(a.source) - rank(b.source);
 }
 
 function dedupeByUrl(items: InfoSearchItem[]): InfoSearchItem[] {

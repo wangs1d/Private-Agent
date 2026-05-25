@@ -27,17 +27,20 @@ const DEFAULT_CONFIG: MessageBatchProcessorConfig = {
 
 /**
  * 消息批处理器：将用户连续发送的多条消息合并为一条后再处理。
- * 
+ *
  * 核心机制：
  * - 收到消息后不立即处理，而是放入缓冲区
  * - 启动防抖计时器（debounceMs），期间新消息会重置计时器
  * - 计时器到期后将缓冲区中所有消息合并处理
  * - 超过最大等待时间（maxWaitMs）强制处理，避免用户长时间等待
+ * - 若当前会话正在生成回复，新消息继续缓冲，待本轮结束后再合并处理
  */
 export class MessageBatchProcessor {
   private buffers = new Map<string, BatchedMessage[]>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private maxWaitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private onReadyHandlers = new Map<string, (merged: BatchedMessage) => Promise<void>>();
+  private processing = new Set<string>();
   private config: MessageBatchProcessorConfig;
 
   constructor(config?: Partial<MessageBatchProcessorConfig>) {
@@ -46,15 +49,17 @@ export class MessageBatchProcessor {
 
   /**
    * 提交一条用户消息到批处理器。
-   * @returns 如果立即触发处理则返回合并后的消息，否则返回 null 表示已缓冲
+   * 若仍在防抖窗口内会缓冲；若当前会话正在回复则继续缓冲，待本轮结束后再合并触发。
    */
   submit(
     sessionId: string,
     message: Omit<BatchedMessage, "timestamp">,
     onReady: (merged: BatchedMessage) => Promise<void>,
   ): void {
+    this.onReadyHandlers.set(sessionId, onReady);
+
     if (!this.config.enabled) {
-      onReady({ ...message, timestamp: Date.now() } as BatchedMessage);
+      void this.invokeReady(sessionId, { ...message, timestamp: Date.now() } as BatchedMessage);
       return;
     }
 
@@ -66,47 +71,47 @@ export class MessageBatchProcessor {
     }
     this.buffers.get(sessionId)!.push(buffered);
 
-    this.resetDebounceTimer(sessionId, onReady);
-    this.ensureMaxWaitTimer(sessionId, onReady, now);
+    if (this.processing.has(sessionId)) {
+      return;
+    }
+
+    this.resetDebounceTimer(sessionId);
+    this.ensureMaxWaitTimer(sessionId);
   }
 
-  private resetDebounceTimer(
-    sessionId: string,
-    onReady: (merged: BatchedMessage) => Promise<void>,
-  ): void {
+  private resetDebounceTimer(sessionId: string): void {
     const existing = this.timers.get(sessionId);
     if (existing) {
       clearTimeout(existing);
     }
 
     const timer = setTimeout(() => {
-      this.flush(sessionId, onReady);
+      this.flush(sessionId);
     }, this.config.debounceMs);
 
     this.timers.set(sessionId, timer);
   }
 
-  private ensureMaxWaitTimer(
-    sessionId: string,
-    onReady: (merged: BatchedMessage) => Promise<void>,
-    firstMsgTime: number,
-  ): void {
+  private ensureMaxWaitTimer(sessionId: string): void {
     if (this.maxWaitTimers.has(sessionId)) return;
 
+    const messages = this.buffers.get(sessionId);
+    if (!messages?.length) return;
+
+    const firstMsgTime = messages[0].timestamp;
     const elapsed = Date.now() - firstMsgTime;
     const remaining = Math.max(0, this.config.maxWaitMs - elapsed);
 
     const timer = setTimeout(() => {
-      this.flush(sessionId, onReady);
+      this.flush(sessionId);
     }, remaining);
 
     this.maxWaitTimers.set(sessionId, timer);
   }
 
-  private flush(
-    sessionId: string,
-    onReady: (merged: BatchedMessage) => Promise<void>,
-  ): void {
+  private flush(sessionId: string): void {
+    if (this.processing.has(sessionId)) return;
+
     const messages = this.buffers.get(sessionId);
     if (!messages || messages.length === 0) return;
 
@@ -114,7 +119,21 @@ export class MessageBatchProcessor {
     this.buffers.delete(sessionId);
 
     const merged = this.mergeMessages(messages);
-    onReady(merged);
+    void this.invokeReady(sessionId, merged);
+  }
+
+  private invokeReady(sessionId: string, merged: BatchedMessage): void {
+    const onReady = this.onReadyHandlers.get(sessionId);
+    if (!onReady) return;
+
+    this.processing.add(sessionId);
+    void Promise.resolve(onReady(merged)).finally(() => {
+      this.processing.delete(sessionId);
+      if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
+        this.resetDebounceTimer(sessionId);
+        this.ensureMaxWaitTimer(sessionId);
+      }
+    });
   }
 
   private mergeMessages(messages: BatchedMessage[]): BatchedMessage {
@@ -163,11 +182,12 @@ export class MessageBatchProcessor {
     onReady?: (merged: BatchedMessage) => Promise<void>,
   ): void {
     if (onReady) {
-      this.flush(sessionId, onReady);
-    } else {
-      this.clearTimers(sessionId);
-      this.buffers.delete(sessionId);
+      this.onReadyHandlers.set(sessionId, onReady);
     }
+    if (this.processing.has(sessionId)) {
+      return;
+    }
+    this.flush(sessionId);
   }
 
   /**
@@ -178,6 +198,8 @@ export class MessageBatchProcessor {
       this.clearTimers(sessionId);
     }
     this.buffers.clear();
+    this.onReadyHandlers.clear();
+    this.processing.clear();
   }
 
   /** 获取指定会话当前缓冲的消息数量（调试用） */

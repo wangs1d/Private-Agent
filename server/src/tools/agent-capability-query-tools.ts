@@ -10,6 +10,10 @@ import {
   DOMAIN_LABELS,
   type CapabilityDomain,
 } from "../agent/agent-capabilities.js";
+import {
+  buildAgentAccessModePromptLine,
+  parseAgentAccessMode,
+} from "../agent/agent-access-mode.js";
 import { resolveActorId } from "../agent/actor-id.js";
 
 const VALID_DOMAIN_VALUES = [...CAPABILITY_DOMAINS, "all"] as const;
@@ -75,6 +79,13 @@ export function registerCapabilityQueryTools(
       if (worldCaps) parts.push(worldCaps);
     }
 
+    const accessLine = buildAgentAccessModePromptLine(parseAgentAccessMode(context.agentAccessMode), {
+      desktopBridgeOnline: context.desktopBridgeOnline,
+    });
+    if (accessLine) {
+      parts.push("", accessLine);
+    }
+
     const resultText = parts.join("\n");
 
     return {
@@ -83,7 +94,7 @@ export function registerCapabilityQueryTools(
       capabilities: resultText,
       availableDomains: ALL_DOMAINS,
       message: domain === "all"
-        ? "已返回完整能力清单。"
+        ? "已返回完整能力清单（含本轮访问权限说明）。"
         : `已返回「${DOMAIN_LABELS[domain] || domain}」领域的能力描述。如需其他领域，可指定 domain 参数。`,
     };
   });

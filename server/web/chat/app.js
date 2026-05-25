@@ -8,12 +8,48 @@ import {
   playUrlFromToolResult,
   renderGomokuInviteHtml,
 } from "./gomoku-invite.js";
+import { 
+  parseContentSummaryV2, 
+  renderContentSummaryCardV2, 
+  storeDetailContent,
+  storeSections
+} from "./content-summary-card.js";
 
 const SESSION_KEY = "pai_web_session_id";
+const FULL_ACCESS_KEY = "pai_web_full_access";
 const messagesEl = document.getElementById("messages");
 const inputEl = document.getElementById("input");
 const sendBtn = document.getElementById("send");
+const fullAccessBtn = document.getElementById("full-access");
 const statusEl = document.getElementById("status");
+
+let fullComputerAccessEnabled = localStorage.getItem(FULL_ACCESS_KEY) === "1";
+
+function agentAccessMode() {
+  return fullComputerAccessEnabled ? "full" : "sandbox";
+}
+
+function paintFullAccessButton() {
+  if (!fullAccessBtn) return;
+  fullAccessBtn.textContent = fullComputerAccessEnabled ? "🔓" : "🛡️";
+  fullAccessBtn.title = fullComputerAccessEnabled
+    ? "完全访问：已开启（可控制电脑等高权限操作）"
+    : "沙箱模式：点击开启完全访问";
+  fullAccessBtn.setAttribute("aria-pressed", fullComputerAccessEnabled ? "true" : "false");
+  fullAccessBtn.classList.toggle("full-access-on", fullComputerAccessEnabled);
+}
+
+paintFullAccessButton();
+fullAccessBtn?.addEventListener("click", () => {
+  fullComputerAccessEnabled = !fullComputerAccessEnabled;
+  localStorage.setItem(FULL_ACCESS_KEY, fullComputerAccessEnabled ? "1" : "0");
+  paintFullAccessButton();
+  setStatus(
+    fullComputerAccessEnabled
+      ? "已开启完全访问：下一条消息将携带高权限工具"
+      : "已切换为沙箱模式",
+  );
+});
 
 /** @type {WebSocket | null} */
 let ws = null;
@@ -67,7 +103,31 @@ function paintAssistant(id) {
       window.location.href = url.startsWith("http") ? url : `${window.location.origin}/play/gomoku/${url}`;
     });
   } else {
-    row.el.innerHTML = escapeHtml(row.text);
+    const { summary, briefText, cleanedText } = parseContentSummaryV2(row.text);
+    if (summary) {
+      const cardHtml = renderContentSummaryCardV2(summary, briefText);
+      
+      if (summary.detailContent) {
+        storeDetailContent(summary.id, summary.detailContent);
+      }
+      
+      if (summary.sections) {
+        storeSections(summary.id, summary.sections);
+      }
+      
+      if (cleanedText && cleanedText.trim()) {
+        row.el.innerHTML = cardHtml + `<div class="card-context-text" style="margin-top: 8px;">${escapeHtml(cleanedText)}</div>`;
+      } else {
+        row.el.innerHTML = cardHtml;
+      }
+
+      if (!window.__contentSummaries) {
+        window.__contentSummaries = {};
+      }
+      window.__contentSummaries[summary.id] = summary;
+    } else {
+      row.el.innerHTML = escapeHtml(row.text);
+    }
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -194,7 +254,13 @@ function sendUserMessage() {
   ws.send(
     JSON.stringify({
       type: "chat.user_message",
-      payload: { sessionId: sid, userId: sid, messageId, text },
+      payload: {
+        sessionId: sid,
+        userId: sid,
+        messageId,
+        text,
+        agentAccessMode: agentAccessMode(),
+      },
     }),
   );
   setStatus("处理中…");
@@ -297,7 +363,13 @@ function sendUserMessageDirect(text) {
   ws.send(
     JSON.stringify({
       type: "chat.user_message",
-      payload: { sessionId: sid, userId: sid, messageId, text },
+      payload: {
+        sessionId: sid,
+        userId: sid,
+        messageId,
+        text,
+        agentAccessMode: agentAccessMode(),
+      },
     }),
   );
   setStatus("思考中…");
@@ -359,7 +431,8 @@ phoneBtn.id = "phone-dialer-toggle";
 phoneBtn.textContent = "📞";
 phoneBtn.title = "虚拟电话";
 phoneBtn.className = "phone-toggle-btn";
-document.querySelector(".composer").prepend(phoneBtn);
+const sendBtn = document.getElementById("send");
+document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
 connect();

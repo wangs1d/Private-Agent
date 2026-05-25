@@ -511,11 +511,11 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-21T12:48:07.557Z",
-      "nextRunAt": "2026-05-25T12:48:07.557Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "cancelled",
       "reminderMessage": "喊我",
       "createdAt": "2026-05-21T11:48:07.557Z",
-      "updatedAt": "2026-05-24T13:54:59.791Z",
+      "updatedAt": "2026-05-25T07:39:05.975Z",
       "lastRunAt": "2026-05-24T13:54:59.791Z"
     },
     {
@@ -543,15 +543,15 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-23T00:00:00.000Z",
-      "nextRunAt": "2026-05-25T00:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "cancelled",
       "agentTask": {
         "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
         "accessMode": "sandbox"
       },
       "createdAt": "2026-05-22T17:18:33.457Z",
-      "updatedAt": "2026-05-24T08:24:22.571Z",
-      "lastRunAt": "2026-05-24T08:24:22.571Z"
+      "updatedAt": "2026-05-25T07:39:04.497Z",
+      "lastRunAt": "2026-05-25T07:32:03.173Z"
     },
     {
       "taskId": "4a5cdfbd-325b-4247-b497-3769f245ef90",
@@ -562,11 +562,11 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-26T10:00:00.000Z",
-      "nextRunAt": "2026-05-26T10:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "cancelled",
       "reminderMessage": "hi",
       "createdAt": "2026-05-24T17:49:08.344Z",
-      "updatedAt": "2026-05-24T17:49:08.344Z"
+      "updatedAt": "2026-05-25T10:14:04.727Z"
     },
     {
       "taskId": "2d9eb395-9ef4-4ca6-8002-8f35d11af1e4",
@@ -597,6 +597,42 @@
       "reminderMessage": "hi",
       "createdAt": "2026-05-24T17:50:23.088Z",
       "updatedAt": "2026-05-24T17:50:23.184Z"
+    },
+    {
+      "taskId": "967ffd7b-6837-4ccc-a8bd-eb408efa811c",
+      "sessionId": "session-mvp-001",
+      "title": "每日新闻推送",
+      "description": "推送当天可阅新闻",
+      "kind": "agent_task",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-27T03:00:00.000Z",
+      "nextRunAt": null,
+      "status": "cancelled",
+      "agentTask": {
+        "prompt": "搜索当天（2026年5月27日）的热门新闻，整理成简报推送给用户",
+        "accessMode": "sandbox"
+      },
+      "createdAt": "2026-05-25T17:42:45.013Z",
+      "updatedAt": "2026-05-25T17:43:51.084Z"
+    },
+    {
+      "taskId": "62067c27-17a9-48b1-814a-b34f6cf1eabe",
+      "sessionId": "session-mvp-001",
+      "title": "今日新闻推送",
+      "description": "推送今天（5月26日）可阅新闻",
+      "kind": "agent_task",
+      "recurrence": "none",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-26T03:00:00.000Z",
+      "nextRunAt": "2026-05-26T03:00:00.000Z",
+      "status": "active",
+      "agentTask": {
+        "prompt": "搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户",
+        "accessMode": "sandbox"
+      },
+      "createdAt": "2026-05-25T17:43:39.703Z",
+      "updatedAt": "2026-05-25T17:43:39.703Z"
     }
   ],
   "runs": [
@@ -810,6 +846,21 @@
         "title": "科技新闻早报",
         "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
         "text": "## 📰 今日科技要点（5月24日）\n\n1. **神舟二十三号今晚发射** —— 瞄准23:08发射，飞船大幅升级，预留国际访客接口，将开展中国首个太空人体研究计划\n\n2. **DeepSeek API大升级** —— 完成提速扩容，默认支持500并发；V4-Pro API永久降价至原价1/4\n\n3. **特斯拉FSD登陆中国** —— 监督版FSD官宣入华，售价6.4万元；小鹏称\"可能是唯一欢迎FSD入华的车企\"\n\n4. **小米新品密集发布** —— YU7 GT医疗车亮相赛道，17 Max发布（8000mAh+2亿像素），首款耳夹式耳机卖爆\n\n5. **华为技术突破** —— 自研DoB封装技术，绕过400层NAND造出122TB企业级SSD，未来计划245TB版本"
+      }
+    },
+    {
+      "runId": "5c95b705-e18d-4b87-bcbf-5fe830e580cd",
+      "taskId": "91513c9e-1d39-4e16-b4ea-14edc89b82f7",
+      "plannedAt": "2026-05-25T00:00:00.000Z",
+      "startedAt": "2026-05-25T07:31:40.288Z",
+      "endedAt": "2026-05-25T07:32:03.173Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "科技新闻早报",
+        "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
+        "text": "📰 **今日科技要闻（5月25日）**\n\n**1. 🔥 NVIDIA 开源 GPU 函数计算平台**  \nNVIDIA 以 Apache 2.0 协议开源 NVCF 平台，完整 GPU 函数计算代码全部开放，开发者可直接调用。\n\n**2. 💰 DeepSeek 融资 700 亿，AGI 优先于商业化**  \n国产大模型 DeepSeek 正推进新一轮 700 亿元融资，明确将 AGI 研发置于商业变现之上。\n\n**3. 📊 中国 AI 应用爆发：月访问量破 9 亿**  \n2026年4月国内 AI 应用 Web 端月活突破 9 亿，APP 下载量超 2.4 亿，日活同比增长 223%。\n\n**4. ⚠️ 浏览器安全漏洞：Chromium 关闭后 JS 仍可运行**  \n谷歌被曝泄露 Chromium 未修复漏洞，浏览器关闭后 JavaScript 仍能执行，涉及隐私风险。\n\n**5. 🤖 北京亦庄 AI+产业大会：AI 视觉进军高端制造**  \nAI 视觉技术开始规模化应用于半导体光罩纳米级缺陷检测，解决国产检测装备\"卡脖子\"问题。\n\n---\n*明天早上 8:00 继续自动推送 📩*"
       }
     }
   ]

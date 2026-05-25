@@ -1,6 +1,6 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { filterChatToolsForAccessMode, parseAgentAccessMode } from "../agent/agent-access-mode.js";
+import { mergeChatToolsForAccessMode, parseAgentAccessMode, type ChatToolsAccessContext } from "../agent/agent-access-mode.js";
 import { getBuiltinAgentChatTools } from "./openai-compatible-tool-loop.js";
 import type { AgentStreamOptions } from "./types.js";
 
@@ -19,7 +19,8 @@ function resolvedToolsCacheKey(streamOpts?: AgentStreamOptions): string {
     .sort()
     .join(",");
   const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
-  return `${builtinNames}|${extraNames}|${mode}`;
+  const bridge = streamOpts?.desktopBridgeOnline === true ? "1" : "0";
+  return `${builtinNames}|${extraNames}|${mode}|${bridge}`;
 }
 
 /** 合并内置与技能工具；子 Agent 可通过 `chatToolsBuiltin` 替换内置列表。带 LRU 风格缓存。 */
@@ -31,7 +32,14 @@ export function resolveChatToolsForStream(streamOpts?: AgentStreamOptions): Chat
   const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
   const extra = streamOpts?.chatToolsExtra ?? [];
   const merged = [...builtin, ...extra];
-  const result = filterChatToolsForAccessMode(merged, parseAgentAccessMode(streamOpts?.agentAccessMode));
+  const accessCtx: ChatToolsAccessContext = {
+    desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+  };
+  const result = mergeChatToolsForAccessMode(
+    merged,
+    parseAgentAccessMode(streamOpts?.agentAccessMode),
+    accessCtx,
+  );
 
   if (_resolvedToolsCache.size >= MAX_RESOLVED_TOOLS_CACHE) {
     const firstKey = _resolvedToolsCache.keys().next().value;

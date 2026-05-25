@@ -153,6 +153,17 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     return out;
   }
 
+  /// 全部本地日程（按开始时间升序），供「事项管理」列表使用。
+  Future<List<ScheduleEvent>> listAllScheduleEvents() async {
+    await init();
+    final List<ScheduleEvent> out =
+        _scheduleEvents.map(_scheduleEventFromMap).toList();
+    out.sort(
+      (ScheduleEvent a, ScheduleEvent b) => a.startAt.compareTo(b.startAt),
+    );
+    return out;
+  }
+
   Future<void> saveScheduleEvent(ScheduleEvent event) async {
     await init();
     final Map<String, dynamic> map = _scheduleEventToMap(event);

@@ -12,7 +12,7 @@ const MULTI_STEP_RE =
   /然后|并且|同时|接着|再|以及|顺便|另外|先.+再|一方面|另一方面|第一步|第二步|首先|其次|最后/i;
 
 const FACT_LOOKUP_RE =
-  /搜索|查一下|查询|联网|浏览|天气|新闻|最新|最近|价格|赛程|日程|版本|search|look up|weather|news|latest|recent|price|schedule|version/i;
+  /搜索|查一下|查询|联网|浏览|天气|新闻|最新|最近|价格|赛程|日程|版本|电影|排片|热映|订票|购票|股价|行情|公告|search|look up|weather|news|latest|recent|price|schedule|version|movie|ticket|stock/i;
 
 export function isSimpleDirectTask(message: string): boolean {
   const t = message.trim();

@@ -19,13 +19,18 @@ import {
 import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
 import { resolveUserLocationPrompt } from "./user-location-service.js";
 import type {
+  BackgroundSubAgentJob,
   InterAgentMessage,
   SubAgentCapability,
   SubAgentResult,
   SubAgentType,
   SubTask,
 } from "./master-agent-types.js";
-import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
+import {
+  buildAgentAccessModePromptLine,
+  parseAgentAccessMode,
+  type AgentAccessMode,
+} from "../agent/agent-access-mode.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import { masterChatSessionId } from "../agent/master-chat-session.js";
 import type { ToolContext } from "../tools/tool-registry.js";
@@ -55,6 +60,9 @@ type TurnDelegationState = {
   seenFingerprints: Map<string, SubAgentResult>;
   interAgentMessages: InterAgentMessage[];
   retryAttempts: Map<string, number>;
+  /** 已启动尚未写入 reports 的委派（含后台任务） */
+  inFlightCount: number;
+  backgroundJobs: Map<string, BackgroundSubAgentJob>;
 };
 
 export type OrchestrateTaskOptions = {
@@ -71,6 +79,7 @@ export type OrchestrateTaskOptions = {
   onToolExecuted?: (info: ToolExecutedInfo) => void;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
   agentAccessMode?: import("../agent/agent-access-mode.js").AgentAccessMode;
+  desktopBridgeOnline?: boolean;
 };
 
 export interface MasterAgentConfig {
@@ -78,6 +87,8 @@ export interface MasterAgentConfig {
   maxParallelTasks: number;
   taskTimeoutMs: number;
   techSubtaskTimeoutMs: number;
+  /** info 子 Agent 专用超时（多轮 search_web + fetch_web 通常更长） */
+  infoSubtaskTimeoutMs: number;
   allowFallback: boolean;
   verbose: boolean;
   enableMetrics: boolean;
@@ -86,6 +97,7 @@ export interface MasterAgentConfig {
 export interface PerformanceMetrics {
   totalTasks: number;
   sequentialExecutions: number;
+  parallelExecutions: number;
   fallbackCount: number;
   avgExecutionTime: number;
   successRate: number;
@@ -114,7 +126,10 @@ export class MasterAgentCoordinator {
   }> = [];
 
   private readonly turnDelegationStates = new Map<string, TurnDelegationState>();
+  private readonly turnLocks = new Map<string, Promise<void>>();
   private readonly subAgentMetrics = new Map<SubAgentType, SubAgentPerformanceMetrics>();
+  private activeSubAgentSlots = 0;
+  private readonly subAgentSlotWaiters: Array<() => void> = [];
   private currentTurnUserMessage: string | null = null;
   private currentTurnOrchestrateOpts: OrchestrateTaskOptions | null = null;
 
@@ -129,6 +144,7 @@ export class MasterAgentCoordinator {
       maxParallelTasks: 1,
       taskTimeoutMs: 60_000,
       techSubtaskTimeoutMs: 120_000,
+      infoSubtaskTimeoutMs: 90_000,
       allowFallback: true,
       verbose: isMasterAgentDelegationVerbose(),
       enableMetrics: true,
@@ -141,6 +157,7 @@ export class MasterAgentCoordinator {
     this.metrics = {
       totalTasks: 0,
       sequentialExecutions: 0,
+      parallelExecutions: 0,
       fallbackCount: 0,
       avgExecutionTime: 0,
       successRate: 100,
@@ -161,6 +178,9 @@ export class MasterAgentCoordinator {
     );
     this.toolRegistry.register("master.list_sub_agents", async (_input, context) =>
       this.handleListSubAgentsTool(context),
+    );
+    this.toolRegistry.register("master.poll_sub_agent_tasks", async (_input, context) =>
+      this.handlePollSubAgentTasksTool(context),
     );
   }
 
@@ -483,23 +503,75 @@ export class MasterAgentCoordinator {
     return `${actorId}:${chatUserMessageId ?? "no-message-id"}`;
   }
 
-  private resetTurnReports(actorId: string, chatUserMessageId?: string): void {
-    this.turnDelegationStates.set(this.turnReportKey(actorId, chatUserMessageId), {
+  private emptyTurnDelegationState(): TurnDelegationState {
+    return {
       reports: [],
       seenFingerprints: new Map(),
       interAgentMessages: [],
       retryAttempts: new Map(),
-    });
+      inFlightCount: 0,
+      backgroundJobs: new Map(),
+    };
+  }
+
+  private resetTurnReports(actorId: string, chatUserMessageId?: string): void {
+    this.turnDelegationStates.set(this.turnReportKey(actorId, chatUserMessageId), this.emptyTurnDelegationState());
   }
 
   private getTurnDelegationState(actorId: string, chatUserMessageId?: string): TurnDelegationState {
     const key = this.turnReportKey(actorId, chatUserMessageId);
     let state = this.turnDelegationStates.get(key);
     if (!state) {
-      state = { reports: [], seenFingerprints: new Map(), interAgentMessages: [], retryAttempts: new Map() };
+      state = this.emptyTurnDelegationState();
       this.turnDelegationStates.set(key, state);
     }
     return state;
+  }
+
+  private async withTurnLock<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.turnLocks.get(turnKey) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.turnLocks.set(
+      turnKey,
+      prev.then(() => gate),
+    );
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.turnLocks.get(turnKey) === gate) {
+        this.turnLocks.delete(turnKey);
+      }
+    }
+  }
+
+  private async acquireSubAgentSlot(): Promise<() => void> {
+    const max = Math.max(1, this.config.maxParallelTasks);
+    while (this.activeSubAgentSlots >= max) {
+      await new Promise<void>((resolve) => {
+        this.subAgentSlotWaiters.push(resolve);
+      });
+    }
+    if (this.activeSubAgentSlots >= 1) {
+      this.metrics.parallelExecutions += 1;
+    }
+    this.activeSubAgentSlots += 1;
+    return () => {
+      this.activeSubAgentSlots = Math.max(0, this.activeSubAgentSlots - 1);
+      const next = this.subAgentSlotWaiters.shift();
+      if (next) next();
+    };
+  }
+
+  private parseRunInBackground(raw: unknown): boolean {
+    const v = String(raw ?? "")
+      .trim()
+      .toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
   }
 
   private buildDelegationFingerprint(agentType: SubAgentType, taskDescription: string, priorContext: string): string {
@@ -605,6 +677,7 @@ export class MasterAgentCoordinator {
     const taskDescription = String(input.taskDescription ?? "").trim();
     const priorContext = String(input.priorContext ?? "").trim();
     const targetAgent = String(input.forwardToAgent ?? "").trim();
+    const runInBackground = this.parseRunInBackground(input.runInBackground ?? input.background);
 
     if (!agentType) return { ok: false, error: "Invalid agentType. Use master_list_sub_agents to inspect options." };
     if (!taskDescription) return { ok: false, error: "taskDescription is required." };
@@ -613,17 +686,24 @@ export class MasterAgentCoordinator {
     if (!capability) return { ok: false, error: `Unknown sub-agent type: ${agentType}` };
 
     const rtConfig = getAgentRuntimeConfig();
+    const turnKey = this.turnReportKey(actorId, context.chatUserMessageId);
     const turnState = this.getTurnDelegationState(actorId, context.chatUserMessageId);
     const maxInvocations = Math.max(1, rtConfig.masterDelegation.maxSubAgentInvocationsPerTurn);
-    if (turnState.reports.length >= maxInvocations) {
-      return {
-        ok: false,
-        agentType,
-        agentName: capability.name,
-        error: `Sub-agent delegation limit reached for this turn (${maxInvocations}). Synthesize from prior reports instead of delegating again.`,
-        priorInvocationsInTurn: turnState.reports.length,
-      };
-    }
+
+    const limitError = await this.withTurnLock(turnKey, async () => {
+      if (turnState.reports.length + turnState.inFlightCount >= maxInvocations) {
+        return {
+          ok: false,
+          agentType,
+          agentName: capability.name,
+          error: `Sub-agent delegation limit reached for this turn (${maxInvocations}). Synthesize from prior reports instead of delegating again.`,
+          priorInvocationsInTurn: turnState.reports.length,
+          inFlightInTurn: turnState.inFlightCount,
+        } as Record<string, unknown>;
+      }
+      return null;
+    });
+    if (limitError) return limitError;
 
     const fingerprint = this.buildDelegationFingerprint(agentType, taskDescription, priorContext);
 
@@ -684,100 +764,286 @@ export class MasterAgentCoordinator {
       estimatedComplexity: "medium",
     };
 
-    const maxRetries = rtConfig.masterDelegation.retryEnabled ? Math.min(rtConfig.masterDelegation.maxRetryAttempts, 3) : 0;
-    let lastError = "";
-    let report: string | null = null;
-    let success = false;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const invokeCtx: SubAgentInvokeContext = {
-        userMessage: this.currentTurnUserMessage?.trim() || taskDescription,
-        priorResults: [...turnState.reports],
-      };
-
-      if (attempt > 0) {
-        const hint = this.buildRetryHint(lastError, attempt, agentType);
-        task.description = `${taskDescription}\n\n${hint}${priorContext ? `\n补充背景：${priorContext}` : ""}`;
-        invokeCtx.priorResults = [...turnState.reports];
-        this.log(`Retry attempt ${attempt}/${maxRetries} for ${agentType}`, { taskId: task.id });
-      }
-
-      const started = Date.now();
-      const timeoutMs = this.resolveSubAgentTimeout(agentType);
-      try {
-        const result = await this.withSubTaskTimeout(
-          this.executeTaskWithTools(
-            actorId,
-            task,
-            capability,
-            invokeCtx,
-            parseAgentAccessMode(context.agentAccessMode ?? this.currentTurnOrchestrateOpts?.agentAccessMode),
-          ),
-          timeoutMs,
-          task.id,
-        );
-        const executionTime = Date.now() - started;
-        report = result;
-        success = true;
-
-        const subResult: SubAgentResult = {
+    if (runInBackground) {
+      const reserved = await this.withTurnLock(turnKey, async () => {
+        if (turnState.reports.length + turnState.inFlightCount >= maxInvocations) {
+          return false;
+        }
+        turnState.inFlightCount += 1;
+        turnState.backgroundJobs.set(task.id, {
           taskId: task.id,
-          agentType,
-          success: true,
-          result: report,
-          executionTime,
-        };
-        turnState.reports.push(subResult);
-        turnState.seenFingerprints.set(fingerprint, subResult);
-        this.metrics.sequentialExecutions += 1;
-        this.recordSubAgentMetrics(agentType, true, executionTime, false);
-
-        const uiDoneLine = pickSubAgentDoneLine(report);
-        return {
-          ok: true,
           agentType,
           agentName: capability.name,
-          taskId: task.id,
-          report,
-          ...(attempt > 0 ? { retryAttempt: attempt } : {}),
-          priorInvocationsInTurn: turnState.reports.length,
-          ...(uiDoneLine ? { uiDoneLine } : {}),
-          message: `${capability.name} completed${attempt > 0 ? ` (retry #${attempt})` : ""}; read the report field.`,
-        };
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        const executionTime = Date.now() - started;
-        lastError = msg;
-        const timedOut = msg.includes("timed out");
-        this.recordSubAgentMetrics(agentType, false, executionTime, timedOut);
-
-        if (attempt < maxRetries) {
-          this.log(`Sub-agent ${agentType} failed, will retry (${attempt + 1}/${maxRetries})`, { error: msg });
-          continue;
-        }
-
-        const failResult: SubAgentResult = {
-          taskId: task.id,
-          agentType,
-          success: false,
-          result: msg,
-          executionTime,
-        };
-        turnState.reports.push(failResult);
-        turnState.seenFingerprints.set(fingerprint, failResult);
+          status: "running",
+          startedAt: Date.now(),
+        });
+        return true;
+      });
+      if (!reserved) {
         return {
           ok: false,
           agentType,
           agentName: capability.name,
-          error: msg,
-          retriesExhausted: maxRetries > 0,
-          retryAttempts: attempt,
-          priorInvocationsInTurn: turnState.reports.length,
+          error: `Sub-agent delegation limit reached for this turn (${maxInvocations}).`,
         };
       }
+      void this.runSubAgentDelegation({
+        actorId,
+        turnKey,
+        turnState,
+        task,
+        capability,
+        agentType,
+        fingerprint,
+        taskDescription,
+        priorContext,
+        context,
+        maxRetries: rtConfig.masterDelegation.retryEnabled
+          ? Math.min(rtConfig.masterDelegation.maxRetryAttempts, 3)
+          : 0,
+        background: true,
+      });
+      return {
+        ok: true,
+        agentType,
+        agentName: capability.name,
+        taskId: task.id,
+        background: true,
+        status: "running",
+        maxParallelTasks: this.config.maxParallelTasks,
+        priorInvocationsInTurn: turnState.reports.length,
+        inFlightInTurn: turnState.inFlightCount,
+        message: `${capability.name} 已在后台执行；可继续对话或调用 master_poll_sub_agent_tasks 查看进度。`,
+      };
     }
 
-    return { ok: false, agentType, agentName: capability.name, error: "Unexpected exit from retry loop." };
+    return await this.runSubAgentDelegation({
+      actorId,
+      turnKey,
+      turnState,
+      task,
+      capability,
+      agentType,
+      fingerprint,
+      taskDescription,
+      priorContext,
+      context,
+      maxRetries: rtConfig.masterDelegation.retryEnabled
+        ? Math.min(rtConfig.masterDelegation.maxRetryAttempts, 3)
+        : 0,
+      background: false,
+    });
+  }
+
+  private async runSubAgentDelegation(params: {
+    actorId: string;
+    turnKey: string;
+    turnState: TurnDelegationState;
+    task: SubTask;
+    capability: SubAgentCapability;
+    agentType: SubAgentType;
+    fingerprint: string;
+    taskDescription: string;
+    priorContext: string;
+    context: ToolContext;
+    maxRetries: number;
+    background: boolean;
+  }): Promise<Record<string, unknown>> {
+    const {
+      actorId,
+      turnKey,
+      turnState,
+      task,
+      capability,
+      agentType,
+      fingerprint,
+      taskDescription,
+      priorContext,
+      context,
+      maxRetries,
+      background,
+    } = params;
+
+    if (!background) {
+      await this.withTurnLock(turnKey, async () => {
+        turnState.inFlightCount += 1;
+      });
+    }
+
+    const releaseSlot = await this.acquireSubAgentSlot();
+    let lastError = "";
+    let report: string | null = null;
+
+    try {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const priorResults = await this.withTurnLock(turnKey, async () => [...turnState.reports]);
+        const invokeCtx: SubAgentInvokeContext = {
+          userMessage: this.currentTurnUserMessage?.trim() || taskDescription,
+          priorResults,
+        };
+
+        if (attempt > 0) {
+          const hint = this.buildRetryHint(lastError, attempt, agentType);
+          task.description = `${taskDescription}\n\n${hint}${priorContext ? `\n补充背景：${priorContext}` : ""}`;
+          this.log(`Retry attempt ${attempt}/${maxRetries} for ${agentType}`, { taskId: task.id });
+        }
+
+        const started = Date.now();
+        const timeoutMs = this.resolveSubAgentTimeout(agentType);
+        try {
+          const result = await this.withSubTaskTimeout(
+            this.executeTaskWithTools(
+              actorId,
+              task,
+              capability,
+              invokeCtx,
+              parseAgentAccessMode(context.agentAccessMode ?? this.currentTurnOrchestrateOpts?.agentAccessMode),
+            ),
+            timeoutMs,
+            task.id,
+          );
+          const executionTime = Date.now() - started;
+          report = result;
+
+          const subResult: SubAgentResult = {
+            taskId: task.id,
+            agentType,
+            success: true,
+            result: report,
+            executionTime,
+          };
+          await this.withTurnLock(turnKey, async () => {
+            turnState.reports.push(subResult);
+            turnState.seenFingerprints.set(fingerprint, subResult);
+            const job = turnState.backgroundJobs.get(task.id);
+            if (job) {
+              job.status = "completed";
+              job.completedAt = Date.now();
+              job.report = report ?? undefined;
+            }
+          });
+          this.metrics.sequentialExecutions += 1;
+          this.recordSubAgentMetrics(agentType, true, executionTime, false);
+
+          const uiDoneLine = pickSubAgentDoneLine(report);
+          return {
+            ok: true,
+            agentType,
+            agentName: capability.name,
+            taskId: task.id,
+            report,
+            ...(attempt > 0 ? { retryAttempt: attempt } : {}),
+            priorInvocationsInTurn: turnState.reports.length,
+            ...(uiDoneLine ? { uiDoneLine } : {}),
+            message: `${capability.name} completed${attempt > 0 ? ` (retry #${attempt})` : ""}; read the report field.`,
+          };
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          const executionTime = Date.now() - started;
+          lastError = msg;
+          const timedOut = msg.includes("timed out");
+          this.recordSubAgentMetrics(agentType, false, executionTime, timedOut);
+
+          if (attempt < maxRetries) {
+            this.log(`Sub-agent ${agentType} failed, will retry (${attempt + 1}/${maxRetries})`, { error: msg });
+            continue;
+          }
+
+          const failResult: SubAgentResult = {
+            taskId: task.id,
+            agentType,
+            success: false,
+            result: msg,
+            executionTime,
+          };
+          await this.withTurnLock(turnKey, async () => {
+            turnState.reports.push(failResult);
+            turnState.seenFingerprints.set(fingerprint, failResult);
+            const job = turnState.backgroundJobs.get(task.id);
+            if (job) {
+              job.status = "failed";
+              job.completedAt = Date.now();
+              job.error = msg;
+            }
+          });
+          return {
+            ok: false,
+            agentType,
+            agentName: capability.name,
+            error: msg,
+            retriesExhausted: maxRetries > 0,
+            retryAttempts: attempt,
+            priorInvocationsInTurn: turnState.reports.length,
+          };
+        }
+      }
+      return { ok: false, agentType, agentName: capability.name, error: "Unexpected exit from retry loop." };
+    } finally {
+      releaseSlot();
+      await this.withTurnLock(turnKey, async () => {
+        turnState.inFlightCount = Math.max(0, turnState.inFlightCount - 1);
+      });
+    }
+  }
+
+  /** HTTP / 客户端：查询子 Agent 后台任务与本轮报告（可按 messageId 或聚合会话内全部回合）。 */
+  getSubAgentTasksSnapshot(actorId: string, chatUserMessageId?: string): Record<string, unknown> {
+    if (chatUserMessageId?.trim()) {
+      return this.buildSubAgentTasksPollPayload(actorId, chatUserMessageId.trim());
+    }
+    return this.buildSubAgentTasksPollPayloadAggregated(actorId);
+  }
+
+  private buildSubAgentTasksPollPayload(actorId: string, chatUserMessageId: string): Record<string, unknown> {
+    const turnState = this.getTurnDelegationState(actorId, chatUserMessageId);
+    return this.formatSubAgentTasksPoll(turnState);
+  }
+
+  private buildSubAgentTasksPollPayloadAggregated(actorId: string): Record<string, unknown> {
+    const prefix = `${actorId}:`;
+    const merged: TurnDelegationState = this.emptyTurnDelegationState();
+    for (const [key, state] of this.turnDelegationStates) {
+      if (!key.startsWith(prefix)) continue;
+      merged.reports.push(...state.reports);
+      merged.inFlightCount += state.inFlightCount;
+      for (const [fp, result] of state.seenFingerprints) {
+        merged.seenFingerprints.set(fp, result);
+      }
+      for (const job of state.backgroundJobs.values()) {
+        merged.backgroundJobs.set(job.taskId, job);
+      }
+    }
+    return this.formatSubAgentTasksPoll(merged);
+  }
+
+  private formatSubAgentTasksPoll(turnState: TurnDelegationState): Record<string, unknown> {
+    const running = [...turnState.backgroundJobs.values()].filter((j) => j.status === "running");
+    const completed = [...turnState.backgroundJobs.values()].filter((j) => j.status !== "running");
+    return {
+      ok: true,
+      maxParallelTasks: this.config.maxParallelTasks,
+      activeSubAgentSlots: this.activeSubAgentSlots,
+      inFlightInTurn: turnState.inFlightCount,
+      completedReportsInTurn: turnState.reports.length,
+      running,
+      backgroundCompleted: completed,
+      reports: turnState.reports.map((r) => ({
+        taskId: r.taskId,
+        agentType: r.agentType,
+        success: r.success,
+        executionTime: r.executionTime,
+        reportPreview: r.result.slice(0, 500),
+      })),
+      hint:
+        running.length > 0
+          ? "仍有后台子任务执行中，可稍后再 poll 或继续与用户对话。"
+          : "无运行中后台任务；可基于 reports 合成回复。",
+    };
+  }
+
+  async handlePollSubAgentTasksTool(context: ToolContext): Promise<Record<string, unknown>> {
+    const actorId = resolveActorId(context);
+    return this.getSubAgentTasksSnapshot(actorId, context.chatUserMessageId);
   }
 
   async handleListSubAgentsTool(_context: ToolContext): Promise<Record<string, unknown>> {
@@ -789,7 +1055,13 @@ export class MasterAgentCoordinator {
       capabilities: c.capabilities,
       toolCount: c.tools.length,
     }));
-    return { ok: true, agents, hint: "Use master_invoke_sub_agent for one distinct sub-task at a time." };
+    return {
+      ok: true,
+      agents,
+      maxParallelTasks: this.config.maxParallelTasks,
+      hint:
+        "独立子任务可在同一轮并行委派（受 MAX_PARALLEL_SUB_AGENTS 限制）；耗时任务可设 runInBackground=true，再用 master_poll_sub_agent_tasks 查看进度。",
+    };
   }
 
   async orchestrateTask(
@@ -824,12 +1096,12 @@ export class MasterAgentCoordinator {
           onProgress?.("🔄 切换至单 Agent 模式处理…");
           this.metrics.fallbackCount += 1;
         } else {
-          onProgress?.("💭 正在思考，分析你的需求…");
+          onProgress?.("💭 让我想想…这事儿我直接搞定！");
         }
         return await this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta, enrichedOpts);
       }
 
-      onProgress?.("🧠 主 Agent 分析中，准备委派任务…");
+      onProgress?.("🧠 让我盘一盘，看看要不要摇个专业队友来帮忙…");
       return await this.executeWithMasterDelegateTools(actorId, userMessage, onAssistantDelta, enrichedOpts);
     } catch (error) {
       this.executionHistory.push({
@@ -859,7 +1131,18 @@ export class MasterAgentCoordinator {
     }
   }
 
+  private streamAccessFromOpts(opts?: OrchestrateTaskOptions): {
+    agentAccessMode: ReturnType<typeof parseAgentAccessMode>;
+    desktopBridgeOnline: boolean;
+  } {
+    return {
+      agentAccessMode: parseAgentAccessMode(opts?.agentAccessMode),
+      desktopBridgeOnline: opts?.desktopBridgeOnline === true,
+    };
+  }
+
   private buildToolContext(actorId: string, opts?: OrchestrateTaskOptions): ChatToolExecutionContext {
+    const access = this.streamAccessFromOpts(opts);
     return {
       executeTool: (name, args) =>
         this.toolRegistry.execute(name, args, {
@@ -868,7 +1151,8 @@ export class MasterAgentCoordinator {
           chatUserMessageId: opts?.chatUserMessageId,
           clientIp: opts?.clientIp,
           clientLocation: opts?.clientLocation,
-          agentAccessMode: opts?.agentAccessMode,
+          agentAccessMode: access.agentAccessMode,
+          desktopBridgeOnline: access.desktopBridgeOnline,
         }),
       onToolExecuteStart: opts?.onToolExecuteStart,
       onToolExecuted: opts?.onToolExecuted,
@@ -895,11 +1179,12 @@ export class MasterAgentCoordinator {
   }
 
   private buildMasterDelegateStreamOptions(actorId: string, opts?: OrchestrateTaskOptions): AgentStreamOptions {
+    const access = this.streamAccessFromOpts(opts);
     if (!this.promptContextBuilder) {
       return {
         masterSubAgentDelegate: true,
         chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values()),
-        ...(opts?.agentAccessMode ? { agentAccessMode: opts.agentAccessMode } : {}),
+        ...access,
       };
     }
     return {
@@ -907,11 +1192,12 @@ export class MasterAgentCoordinator {
         ...this.buildPromptInput(actorId, opts),
         subAgentCapabilities: this.subAgentCapabilities.values(),
       }),
-      ...(opts?.agentAccessMode ? { agentAccessMode: opts.agentAccessMode } : {}),
+      ...access,
     };
   }
 
   private buildMasterStreamOptions(actorId: string, opts?: OrchestrateTaskOptions): AgentStreamOptions | undefined {
+    const access = this.streamAccessFromOpts(opts);
     const chatToolsExtra: ChatCompletionTool[] = [];
     if (this.promptContextBuilder) {
       const base = this.promptContextBuilder.build(this.buildPromptInput(actorId, opts));
@@ -920,12 +1206,12 @@ export class MasterAgentCoordinator {
         ...(base ?? {}),
         chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values(), chatToolsExtra),
         chatToolsExtra: [],
-        ...(opts?.agentAccessMode ? { agentAccessMode: opts.agentAccessMode } : {}),
+        ...access,
       };
     }
     return {
       chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values(), chatToolsExtra),
-      ...(opts?.agentAccessMode ? { agentAccessMode: opts.agentAccessMode } : {}),
+      ...access,
     };
   }
 
@@ -980,13 +1266,18 @@ export class MasterAgentCoordinator {
     invokeCtx?: SubAgentInvokeContext,
     agentAccessMode?: AgentAccessMode,
   ): Promise<string> {
+    const accessMode = parseAgentAccessMode(agentAccessMode);
+    const bridgeCtx = {
+      desktopBridgeOnline: this.currentTurnOrchestrateOpts?.desktopBridgeOnline === true,
+    };
     const baseStreamOpts: AgentStreamOptions = {
       ...(this.promptContextBuilder?.buildForSubAgent({
         ...this.buildPromptInput(actorId, this.currentTurnOrchestrateOpts ?? undefined),
         capability,
         taskDescription: task.description,
       }) ?? {}),
-      ...(agentAccessMode ? { agentAccessMode } : {}),
+      agentAccessMode: accessMode,
+      desktopBridgeOnline: bridgeCtx.desktopBridgeOnline,
     };
 
     const allowedList =
@@ -1007,12 +1298,24 @@ export class MasterAgentCoordinator {
       : [];
     const interAgentBlock = this.formatInterAgentMessagesForPrompt(agentMessages);
 
+    const infoSearchGuidance =
+      capability.type === "info"
+        ? [
+            "【检索规范】",
+            "- search_web 的 query 只用 2-6 个核心词，保留完整专名（如「航天电子」不要拆成「航天」）；公司/股票调研可加「股票」或 6 位代码。",
+            "- 若首轮结果标题未包含核心专名，换 query 重搜（加引号专名、股票代码或「最新」），不要重复相同 query。",
+            "- 最多 3 轮 search_web，有可用链接再用 fetch_web 读正文；避免无效多轮导致超时。",
+          ].join("\n")
+        : "";
+
     const prompt = [
       `You are the ${capability.name} sub-agent, invoked by the master Agent. Report to the master Agent only.`,
       userGoal,
       `Current sub-task:\n${task.description}`,
       priorBlock,
       interAgentBlock,
+      infoSearchGuidance,
+      buildAgentAccessModePromptLine(accessMode, bridgeCtx),
       `Available tools:\n${allowedList}`,
       "Use necessary tools. Then return a concise sub-agent report with conclusion, evidence, and success/failure.",
       `The final line must be: ${USER_VISIBLE_PROGRESS_MARKER} followed by one short user-visible completion line.`,
@@ -1037,6 +1340,9 @@ export class MasterAgentCoordinator {
   private resolveSubAgentTimeout(agentType: SubAgentType): number {
     if (agentType === "tech") {
       return Math.max(this.config.techSubtaskTimeoutMs, this.config.taskTimeoutMs);
+    }
+    if (agentType === "info") {
+      return Math.max(this.config.infoSubtaskTimeoutMs, this.config.taskTimeoutMs);
     }
     return this.config.taskTimeoutMs;
   }
@@ -1125,6 +1431,10 @@ export class MasterAgentCoordinator {
 
   public getExecutionHistory(limit = 10): Array<unknown> {
     return this.executionHistory.slice(-limit).reverse();
+  }
+
+  public getMaxParallelTasks(): number {
+    return this.config.maxParallelTasks;
   }
 
   public adjustConcurrency(newMaxParallel: number): void {

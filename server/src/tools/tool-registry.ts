@@ -22,6 +22,8 @@ export type ToolContext = {
   clientLocation?: ClientLocationWire;
   /** 默认沙箱；`full` 时开放高权限工具 */
   agentAccessMode?: AgentAccessMode;
+  /** 电脑桥接在线时允许 desktop.visual.* */
+  desktopBridgeOnline?: boolean;
 };
 
 export type ToolHandler = (input: Record<string, unknown>, context: ToolContext) => Promise<Record<string, unknown>>;
@@ -30,6 +32,7 @@ export type ToolHandler = (input: Record<string, unknown>, context: ToolContext)
 const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
   master_invoke_sub_agent: "master.invoke_sub_agent",
   master_list_sub_agents: "master.list_sub_agents",
+  master_poll_sub_agent_tasks: "master.poll_sub_agent_tasks",
 };
 
 export function resolveRegistryToolName(name: string): string {
@@ -82,7 +85,9 @@ export class ToolRegistry {
   ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
     const registryName = resolveRegistryToolName(name);
     const accessMode = parseAgentAccessMode(context.agentAccessMode);
-    if (!isToolAllowedInAccessMode(registryName, accessMode)) {
+    if (!isToolAllowedInAccessMode(registryName, accessMode, {
+      desktopBridgeOnline: context.desktopBridgeOnline,
+    })) {
       return { ok: false, result: { error: sandboxDeniedToolMessage(registryName) } };
     }
 

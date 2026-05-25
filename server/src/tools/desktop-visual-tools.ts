@@ -13,15 +13,49 @@ function desktopBridgeInvokeTimeoutMs(): number {
   return Number.isFinite(t) && t > 0 ? t : 600_000;
 }
 
-export function registerDesktopVisualTools(registry: ToolRegistry, deps: DesktopVisualToolsDeps): void {
-  const allow = deps.localAgent.isEnabled() || deps.bridge.isBridgeFeatureEnabled();
-  if (!allow) return;
+function parseRegion(input: Record<string, unknown>): [number, number, number, number] | undefined {
+  const r = input.region;
+  if (Array.isArray(r) && r.length === 4 && r.every((x) => typeof x === "number" && Number.isFinite(x))) {
+    return [Math.floor(r[0]), Math.floor(r[1]), Math.floor(r[2]), Math.floor(r[3])];
+  }
+  return undefined;
+}
 
-  registry.register("desktop.visual.screenshot", async (input, _ctx) => {
-    let region: [number, number, number, number] | undefined;
-    const r = input.region;
-    if (Array.isArray(r) && r.length === 4 && r.every((x) => typeof x === "number" && Number.isFinite(x))) {
-      region = [Math.floor(r[0]), Math.floor(r[1]), Math.floor(r[2]), Math.floor(r[3])];
+function desktopUnavailableMessage(bridgeEnabled: boolean): string {
+  if (bridgeEnabled) {
+    return "电脑端未在线：请在本机运行桌面桥接（与手机相同 userId，session.init 带 desktopBridge:true），或设置 DESKTOP_VISUAL_AGENT_ENABLED=1 由服务端本机截图。";
+  }
+  return "桌面能力未配置：请设置 DESKTOP_BRIDGE_ENABLED=1（或 DESKTOP_BRIDGE_TOKEN）并运行桥接客户端，或设置 DESKTOP_VISUAL_AGENT_ENABLED=1 由服务端本机执行。";
+}
+
+/** 始终注册；执行时按桥接在线 / 本机 Agent 择优，避免「完全访问」已开但工具未注册。 */
+export function registerDesktopVisualTools(registry: ToolRegistry, deps: DesktopVisualToolsDeps): void {
+  const bridgeEnabled = deps.bridge.isBridgeFeatureEnabled();
+
+  registry.register("desktop.visual.screenshot", async (input, ctx) => {
+    const region = parseRegion(input);
+    const actorId = resolveActorId(ctx);
+
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        { action: "screenshot", region: region ?? null },
+        Math.min(desktopBridgeInvokeTimeoutMs(), 120_000),
+      );
+      if (remote?.ok && remote.imageBase64) {
+        return {
+          ok: true,
+          imageBase64: remote.imageBase64,
+          mimeType: remote.mimeType ?? "image/png",
+          width: remote.width,
+          height: remote.height,
+          capturedAt: remote.capturedAt,
+          message: `已通过电脑桥接截取屏幕${region ? `区域 [${region.join(", ")}]` : ""}，尺寸 ${remote.width ?? "?"}x${remote.height ?? "?"}`,
+        };
+      }
+      if (remote && !remote.ok) {
+        return { ok: false, error: remote.error ?? "电脑端截图失败" };
+      }
     }
 
     if (deps.localAgent.isEnabled() && deps.localAgent.screenshot) {
@@ -40,10 +74,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       };
     }
 
-    return {
-      ok: false,
-      error: "桌面视觉 Agent 未启用或不支持截图（需要 DESKTOP_VISUAL_AGENT_ENABLED=1）",
-    };
+    return { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
   });
 
   registry.register("desktop.visual.run_task", async (input, ctx) => {
@@ -53,14 +84,10 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     }
     const maxStepsRaw = input.maxSteps;
     const maxSteps =
-      typeof maxStepsRaw === "number" && Number.isFinite(maxStepsRaw) ?
-        Math.min(120, Math.max(1, Math.floor(maxStepsRaw)))
-      : undefined;
-    let region: [number, number, number, number] | undefined;
-    const r = input.region;
-    if (Array.isArray(r) && r.length === 4 && r.every((x) => typeof x === "number" && Number.isFinite(x))) {
-      region = [Math.floor(r[0]), Math.floor(r[1]), Math.floor(r[2]), Math.floor(r[3])];
-    }
+      typeof maxStepsRaw === "number" && Number.isFinite(maxStepsRaw)
+        ? Math.min(120, Math.max(1, Math.floor(maxStepsRaw)))
+        : undefined;
+    const region = parseRegion(input);
     const stub = input.stub === true;
     const actorId = resolveActorId(ctx);
 
@@ -85,10 +112,6 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       return out;
     }
 
-    return {
-      ok: false,
-      error:
-        "电脑端未在线（请用与手机相同的 userId 运行桥接客户端，session.init 带 desktopBridge:true），且服务端未启用 DESKTOP_VISUAL_AGENT_ENABLED 本机执行。",
-    };
+    return { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
   });
 }

@@ -51,7 +51,7 @@ class _SchedulePageState extends State<SchedulePage> {
     "SUN",
   ];
 
-  /// 0：日历日视图；1：日历周视图；2：事项管理（仅今日列表）。
+  /// 0：日历；1：事项管理（全部本地事项）。
   int _subTab = 0;
 
   DateTime _weekStart = _mondayOf(DateTime.now());
@@ -60,7 +60,7 @@ class _SchedulePageState extends State<SchedulePage> {
   /// 视图模式：'day' 为日视图，'week' 为周视图
   String _viewMode = 'day';
 
-  List<ScheduleEvent> _todayEvents = <ScheduleEvent>[];
+  List<ScheduleEvent> _allEvents = <ScheduleEvent>[];
   List<ScheduleEvent> _weekEvents = <ScheduleEvent>[];
   String? _selectedEventId;
 
@@ -126,14 +126,14 @@ class _SchedulePageState extends State<SchedulePage> {
     }
     final List<ScheduleEvent> weekList =
         await widget.store.listScheduleEventsInRange(_weekStart, wEnd);
-    final List<ScheduleEvent> todayList = await widget.store
-        .listScheduleEventsForDay(_stripTime(DateTime.now()));
+    final List<ScheduleEvent> allList =
+        await widget.store.listAllScheduleEvents();
     if (!mounted) {
       return;
     }
     setState(() {
       _weekEvents = weekList;
-      _todayEvents = todayList;
+      _allEvents = allList;
       _scheduleServiceWarning = serviceWarning;
     });
   }
@@ -360,7 +360,7 @@ class _SchedulePageState extends State<SchedulePage> {
     _selectedEventId = null;
     if (mounted) {
       setState(() {
-        _todayEvents = _filterOutDeletedEvent(_todayEvents, e, serverTaskId);
+        _allEvents = _filterOutDeletedEvent(_allEvents, e, serverTaskId);
         _weekEvents = _filterOutDeletedEvent(_weekEvents, e, serverTaskId);
       });
     }
@@ -892,11 +892,19 @@ class _SchedulePageState extends State<SchedulePage> {
     );
   }
 
-  Widget _managementView(ThemeData theme) {
+  static String _formatEventDayLabel(DateTime d) {
+    final DateTime day = _stripTime(d);
     final DateTime today = _stripTime(DateTime.now());
-    final String dateLabel =
-        "${today.year}-${today.month.toString().padLeft(2, "0")}-${today.day.toString().padLeft(2, "0")}";
+    final String ymd =
+        "${day.year}-${day.month.toString().padLeft(2, "0")}-${day.day.toString().padLeft(2, "0")}";
+    if (day == today) return "今天 · $ymd";
+    if (day == today.add(const Duration(days: 1))) {
+      return "明天 · $ymd";
+    }
+    return ymd;
+  }
 
+  Widget _managementView(ThemeData theme) {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: <Widget>[
@@ -920,68 +928,93 @@ class _SchedulePageState extends State<SchedulePage> {
         Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Text(
-            "今日事项 · $dateLabel",
+            "全部事项 · 共 ${_allEvents.length} 条",
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w600,
             ),
           ),
         ),
-        if (_todayEvents.isEmpty)
+        if (_allEvents.isEmpty)
           Text(
-            "今日暂无事项，可点击右上角「创建日程」添加。",
+            "暂无事项，可点击右上角「创建日程」添加。",
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
           )
         else
-          ..._todayEvents.map(
-            (ScheduleEvent e) => Card(
-              margin: const EdgeInsets.only(bottom: 10),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Icon(
-                      Icons.event_note_outlined,
-                      size: 22,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            e.title,
-                            style: theme.textTheme.bodyLarge?.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            "${_formatClock(e.startAt)}"
-                            "${(e.notes != null && e.notes!.isNotEmpty) ? " · ${e.notes}" : ""}",
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () => _confirmDelete(e),
-                      child: const Text("删除"),
-                    ),
-                  ],
-                ),
+          ..._managementEventTiles(theme),
+      ],
+    );
+  }
+
+  List<Widget> _managementEventTiles(ThemeData theme) {
+    final List<Widget> tiles = <Widget>[];
+    DateTime? lastDay;
+    for (final ScheduleEvent e in _allEvents) {
+      final DateTime day = _stripTime(e.startAt);
+      if (lastDay == null || day != lastDay) {
+        lastDay = day;
+        tiles.add(
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
+            child: Text(
+              _formatEventDayLabel(day),
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
               ),
             ),
           ),
-      ],
-    );
+        );
+      }
+      tiles.add(
+        Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Icon(
+                  Icons.event_note_outlined,
+                  size: 22,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        e.title,
+                        style: theme.textTheme.bodyLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "${_formatClock(e.startAt)}"
+                        "${(e.notes != null && e.notes!.isNotEmpty) ? " · ${e.notes}" : ""}",
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => _confirmDelete(e),
+                  child: const Text("删除"),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    return tiles;
   }
 
   @override

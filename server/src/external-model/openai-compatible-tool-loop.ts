@@ -26,21 +26,37 @@ const DEFAULT_MAX_ROUNDS = 12;
 
 /**
  * 清理消息数组中的孤立 tool 消息（tool_call_id 不匹配任何 assistant 消息的 tool_calls）。
+ * 同时清理有 tool_calls 但缺少对应 tool 结果的孤立 assistant 消息。
  * 防止 Kimi/Moonshot 等 API 返回 "tool_call_id is not found" 错误。
  */
 function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
   const validToolCallIds = new Set<string>();
+  const assistantIndicesWithToolCalls = new Set<number>();
 
-  for (const msg of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
       const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
-      for (const tc of toolCalls) {
-        if (tc.id) validToolCallIds.add(tc.id);
+      if (toolCalls.length > 0) {
+        assistantIndicesWithToolCalls.add(i);
+        for (const tc of toolCalls) {
+          if (tc.id) validToolCallIds.add(tc.id);
+        }
       }
     }
   }
 
-  return messages.filter((msg) => {
+  const matchedToolCallIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "tool") {
+      const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+      if (tcId && validToolCallIds.has(tcId)) {
+        matchedToolCallIds.add(tcId);
+      }
+    }
+  }
+
+  return messages.filter((msg, idx) => {
     if (msg.role !== "tool") return true;
     const tcId = (msg as { tool_call_id?: string }).tool_call_id;
     if (!tcId) {
@@ -52,6 +68,20 @@ function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCom
         `[openai-tool-loop] Dropping orphan tool message: tool_call_id=${tcId} ` +
         `(not found in any assistant message's tool_calls). ` +
         `This prevents "tool_call_id is not found" API errors.`,
+      );
+      return false;
+    }
+    return true;
+  }).filter((msg, idx) => {
+    if (msg.role !== "assistant") return true;
+    if (!assistantIndicesWithToolCalls.has(idx)) return true;
+    const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
+    const hasUnmatchedCall = toolCalls.some((tc) => !matchedToolCallIds.has(tc.id));
+    if (hasUnmatchedCall) {
+      console.warn(
+        `[openai-tool-loop] Dropping orphan assistant message with unmatched tool_calls ` +
+        `(index=${idx}, call_ids=${toolCalls.map((tc) => tc.id).join(",")}). ` +
+        `Some tool calls have no corresponding tool results.`,
       );
       return false;
     }
@@ -93,7 +123,8 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "search_web",
-      description: "联网搜索公开网页信息，返回标题、链接和摘要片段。",
+      description:
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。",
       parameters: {
         type: "object",
         properties: {
@@ -533,7 +564,8 @@ const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-const VISION_CHAT_TOOLS: ChatCompletionTool[] = [
+/** 沙箱模式下从模型 tools 列表移除、完全访问时须下发的视觉高权限工具。 */
+export const VISION_SANDBOX_RESTRICTED_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -605,6 +637,8 @@ const VISION_CHAT_TOOLS: ChatCompletionTool[] = [
     },
   },
 ];
+
+const VISION_CHAT_TOOLS: ChatCompletionTool[] = VISION_SANDBOX_RESTRICTED_CHAT_TOOLS;
 
 /** 时钟工具：获取当前时间和日期信息（通过IP地址查询用户时区）。 */
 const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [

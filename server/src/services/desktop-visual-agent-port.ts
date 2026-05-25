@@ -37,6 +37,12 @@ export type DesktopVisualRunResult = {
   steps?: number;
   summary?: string;
   error?: string;
+  /** 桥接/本机截图时附带 */
+  imageBase64?: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  capturedAt?: string;
 };
 
 export interface DesktopVisualAgentPort {

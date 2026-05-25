@@ -171,11 +171,10 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       : buildLayeredSystemPrompt(SYSTEM_PROMPT, streamOpts?.promptContext?.memory);
 
     const sysContent = finalizeChatSystemPrompt(baseContent, {
-
       tools: Boolean(tools && !overrideSys),
-
       masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-
+      agentAccessMode: streamOpts?.agentAccessMode,
+      desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
     });
 
     if (ephemeral || msgs.length === 0) {

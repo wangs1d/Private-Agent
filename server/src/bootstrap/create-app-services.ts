@@ -474,6 +474,7 @@ export async function createAppServices(): Promise<AppServices> {
     localAgent: desktopVisualAgent,
     bridge: desktopBridgeCoordinator,
   });
+  agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
 
   // ========== 注册自我编程和智能生成工具 ==========
   registerSelfProgrammingTools(toolRegistry, skillManager);

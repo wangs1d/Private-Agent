@@ -198,7 +198,13 @@ export class DesktopBridgeCoordinator {
     const steps = typeof payload.steps === "number" ? payload.steps : undefined;
     const summary = typeof payload.summary === "string" ? payload.summary : undefined;
     const error = typeof payload.error === "string" ? payload.error : undefined;
-    p.resolve({ ok, steps, summary, error });
+    const imageBase64 =
+      typeof payload.imageBase64 === "string" ? payload.imageBase64 : undefined;
+    const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : undefined;
+    const width = typeof payload.width === "number" ? payload.width : undefined;
+    const height = typeof payload.height === "number" ? payload.height : undefined;
+    const capturedAt = typeof payload.capturedAt === "string" ? payload.capturedAt : undefined;
+    p.resolve({ ok, steps, summary, error, imageBase64, mimeType, width, height, capturedAt });
     return true;
   }
 }

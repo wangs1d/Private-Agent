@@ -55,6 +55,11 @@ const GLOBAL_RULES_LINES = [
   "禁止凭记忆或用户文字判断状态。只有工具返回的数据才是真实状态。",
   "适用场景：游戏(gomoku/doudizhu/zhajinhua)、社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)。",
   "状态判断：进行中→正常操作；已结束→回应结局禁止继续；未开始→引导正确启动。",
+  "",
+  "【访问权限 · 常规沙箱为默认】",
+  "用户未在输入框开启「完全访问」时，当前为沙箱：不可用 desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.*。",
+  "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
+  "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
 ];
 
 function buildStaticSections(): CapabilitySection[] {
@@ -86,7 +91,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "sub_agent",
       lines: [
-        "5️⃣ 子Agent委派（6个核心）：master_list_sub_agents / master_invoke_sub_agent",
+        "5️⃣ 子Agent委派（6个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
         "   路由表：life(生活全能:钱包50+消费/社交/日程天气/娱乐/视觉) | tech(深度RPA/代码开发/系统运维) | info(比价只查不买) | creative(文案策划写作翻译) | security(风险检测/权限审批) | general(兜底)",
       ],
     },
@@ -99,13 +104,13 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "vision",
       lines: [
-        "7️⃣ 视觉：vision.http_pull / vision.periodic_start / periodic_stop / periodic_list",
+        "7️⃣ 视觉：vision.http_pull / vision.periodic_start / periodic_stop / periodic_list（须「完全访问」）",
       ],
     },
     {
       domain: "desktop",
       lines: [
-        "8️⃣ 桌面自动化：desktop.visual.screenshot（截取屏幕返回PNG图片）/ desktop.visual.run_task（VLM视觉操控电脑）",
+        "8️⃣ 桌面自动化：desktop.visual.screenshot / desktop.visual.run_task（须「完全访问」+ 服务端/桥接已配置）",
       ],
     },
     {
@@ -154,7 +159,7 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "self_programming",
       lines: [
         "1️⃣5️⃣ 系统管理：管理记忆和上下文、调整系统配置",
-        "1️⃣6️⃣ 自我编程：self.create_skill / update_skill / delete_skill / generate_skill / analyze_capabilities / detect_skill_need / analyze_improvements",
+        "1️⃣6️⃣ 自我编程：self.create_skill / update_skill / delete_skill / generate_skill / …（须「完全访问」）",
       ],
     },
     {

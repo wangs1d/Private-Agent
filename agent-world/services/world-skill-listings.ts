@@ -27,17 +27,17 @@ export function skillMarketListingsForSession(
     throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
   }
   const manifests = skillManager.list(true);
-  const items = manifests.map((m) => ({
-    skillId: m.name,
-    displayName: m.displayName,
-    description: m.description,
-    version: m.version,
-    tags: m.tags ?? [],
-    icon: m.icon,
-    kind: m.kind ?? "builtin",
-    author: m.author,
-    price: mockSkillPrice(m),
-    owned: state.ownedSkillIds.includes(m.name),
-  }));
+  const items: Array<{
+    skillId: string;
+    displayName: string;
+    description: string;
+    version: string;
+    tags: string[];
+    icon?: string;
+    kind: string;
+    author?: string;
+    price: number;
+    owned: boolean;
+  }> = [];
   return { state, items };
 }

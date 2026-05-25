@@ -90,6 +90,8 @@ export type AgentStreamOptions = {
   masterSubAgentDelegate?: boolean;
   /** 默认沙箱；`full` 时向 LLM 暴露高权限工具 */
   agentAccessMode?: "sandbox" | "full";
+  /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */
+  desktopBridgeOnline?: boolean;
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */

@@ -21,6 +21,8 @@ export type MasterDelegationConfig = {
   subtaskTimeoutMs: number;
   /** tech 子 Agent 专用超时（深度 RPA / 代码任务通常更长） */
   techSubtaskTimeoutMs: number;
+  /** info 子 Agent 专用超时（多轮联网检索） */
+  infoSubtaskTimeoutMs: number;
   maxSubAgentInvocationsPerTurn: number;
   forceSynthesis: boolean;
   directReplyMaxChars: number;
@@ -88,6 +90,7 @@ function loadMasterDelegationConfig(): MasterDelegationConfig {
     verbose,
     subtaskTimeoutMs,
     techSubtaskTimeoutMs: envPositiveInt(process.env.TECH_SUBTASK_TIMEOUT_MS, 120_000),
+    infoSubtaskTimeoutMs: envPositiveInt(process.env.INFO_SUBTASK_TIMEOUT_MS, 90_000),
     maxSubAgentInvocationsPerTurn: envPositiveInt(process.env.MASTER_AGENT_MAX_SUB_AGENT_INVOCATIONS, 6),
     forceSynthesis: process.env.MASTER_AGENT_FORCE_SYNTHESIS === "1",
     directReplyMaxChars: envPositiveInt(process.env.MASTER_AGENT_DIRECT_REPLY_MAX_CHARS, 2800),
@@ -133,8 +136,9 @@ function loadQuotaConfig(): QuotaConfig {
 }
 
 function loadMessageBatchConfig(): MessageBatchConfig {
+  const rawEnabled = process.env.MESSAGE_BATCH_ENABLED;
   return {
-    enabled: envTruthy(process.env.MESSAGE_BATCH_ENABLED),
+    enabled: rawEnabled === undefined ? true : envTruthy(rawEnabled),
     debounceMs: envPositiveInt(process.env.MESSAGE_BATCH_DEBOUNCE_MS, 1200),
     maxWaitMs: envPositiveInt(process.env.MESSAGE_BATCH_MAX_WAIT_MS, 5000),
   };

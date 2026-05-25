@@ -5,6 +5,7 @@ import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
+import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
@@ -36,7 +37,7 @@ import { resolveUserLocationPrompt } from "../services/user-location-service.js"
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
 import { routeLlmExecution, type LlmExecutionMode } from "../agent/task-router.js";
-import type { AgentAccessMode } from "../agent/agent-access-mode.js";
+import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
@@ -50,7 +51,9 @@ export type MasterAgentDelegationSnapshot = {
   config: {
     taskTimeoutMs: number;
     techSubtaskTimeoutMs: number;
+    infoSubtaskTimeoutMs: number;
     maxSubAgentInvocationsPerTurn: number;
+    maxParallelTasks: number;
   } | null;
 };
 
@@ -76,6 +79,7 @@ export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
   private readonly turnLifecycle: TurnLifecycle;
   private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
+  private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -112,13 +116,33 @@ export class AgentCore {
         this.promptContextBuilder,
         {
           enableSubAgents: true,
-          maxParallelTasks: 1,
+          maxParallelTasks: cfg.maxParallelSubAgents,
           taskTimeoutMs: cfg.subtaskTimeoutMs,
           techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
+          infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
           allowFallback: true,
         },
       );
     }
+  }
+
+  /** 在 bootstrap 注册桌面桥接后注入，用于按轮检测电脑是否在线。 */
+  setDesktopBridgeCoordinator(coordinator: DesktopBridgeCoordinator): void {
+    this.desktopBridgeCoordinator = coordinator;
+  }
+
+  private desktopBridgeOnlineFor(actorId: string): boolean {
+    return this.desktopBridgeCoordinator?.hasExecutor(actorId) ?? false;
+  }
+
+  private streamAccessFields(
+    actorId: string,
+    opts?: HandleUserMessageOptions,
+  ): { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean } {
+    return {
+      agentAccessMode: parseAgentAccessMode(opts?.agentAccessMode),
+      desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
+    };
   }
 
   async handleUserMessage(
@@ -147,6 +171,7 @@ export class AgentCore {
       text,
     );
     const route = routeLlmExecution(text);
+    const access = this.streamAccessFields(actorId, opts);
     const orchestrateOpts = this.buildOrchestrateOpts(
       actorId,
       text,
@@ -154,6 +179,7 @@ export class AgentCore {
       narrativeRecall,
       personalization,
       trajCap,
+      access,
     );
 
     try {
@@ -221,13 +247,23 @@ export class AgentCore {
       config: {
         taskTimeoutMs: cfg.subtaskTimeoutMs,
         techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
+        infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
         maxSubAgentInvocationsPerTurn: cfg.maxSubAgentInvocationsPerTurn,
+        maxParallelTasks: this.masterAgentCoordinator?.getMaxParallelTasks() ?? cfg.maxParallelSubAgents,
       },
     };
   }
 
   adjustMasterAgentConcurrency(_newMaxParallel: number): void {
     this.masterAgentCoordinator?.adjustConcurrency(_newMaxParallel);
+  }
+
+  /** 查询子 Agent 后台任务与委派报告（供客户端「查看后台任务」面板）。 */
+  getSubAgentBackgroundTasks(actorId: string, chatUserMessageId?: string): Record<string, unknown> {
+    if (!this.masterAgentCoordinator) {
+      return { ok: false, error: "主 Agent 委派未启用" };
+    }
+    return this.masterAgentCoordinator.getSubAgentTasksSnapshot(actorId, chatUserMessageId);
   }
 
   async runToolIfNeeded(
@@ -249,6 +285,7 @@ export class AgentCore {
       clientIp: opts?.clientIp,
       clientLocation: opts?.clientLocation,
       agentAccessMode: opts?.agentAccessMode,
+      desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
     });
   }
 
@@ -263,6 +300,7 @@ export class AgentCore {
     narrativeRecall: string | undefined,
     personalization: PersonalizationPromptSlice,
     trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
+    access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean },
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -278,7 +316,8 @@ export class AgentCore {
       userId: opts?.userId,
       clientIp: opts?.clientIp,
       clientLocation: opts?.clientLocation,
-      agentAccessMode: opts?.agentAccessMode,
+      agentAccessMode: access.agentAccessMode,
+      desktopBridgeOnline: access.desktopBridgeOnline,
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
@@ -318,7 +357,8 @@ export class AgentCore {
           chatUserMessageId: opts?.chatUserMessageId,
           clientIp: opts?.clientIp,
           clientLocation: opts?.clientLocation,
-          agentAccessMode: opts?.agentAccessMode,
+          agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
+          desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
         }),
       onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
       onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
@@ -368,11 +408,12 @@ export class AgentCore {
       provider.appendThreadTurn?.(actorId, userTurn, full);
     } else {
       const mergedStreamOpts: AgentStreamOptions | undefined =
-        streamOpts || onBatchWithEvolution || opts?.agentAccessMode
+        streamOpts || onBatchWithEvolution || opts
           ? {
               ...(streamOpts ?? {}),
               ...(onBatchWithEvolution ? { toolLoop: { onAfterToolBatch: onBatchWithEvolution } } : {}),
-              ...(opts?.agentAccessMode ? { agentAccessMode: opts.agentAccessMode } : {}),
+              agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
+              desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
             }
           : undefined;
 

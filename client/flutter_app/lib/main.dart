@@ -22,8 +22,10 @@ import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
 import "features/mailbox/mailbox_page.dart";
+import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/voice_mode_page.dart";
+import "core/services/multi_agent_api_client.dart";
 import "features/gomoku/gomoku_page.dart";
 import "features/auth/phone_registration_page.dart";
 import "features/auth/biometric_registration_page.dart";
@@ -54,6 +56,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
+  final MultiAgentApiClient _multiAgentApi =
+      MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
   final ValueNotifier<int> _scheduleReloadSignal = ValueNotifier<int>(0);
   final TextEditingController _inputController = TextEditingController();
 
@@ -90,6 +94,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _fullComputerAccessEnabled = false;
   /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
+  /// 后台子 Agent 任务角标（对话框右上角按钮）
+  int _backgroundTasksBadgeCount = 0;
   Timer? _assistantChunkFlushTimer;
   Timer? _agentReplyWatchdog;
   String? _pendingAssistantChunkMessageId;
@@ -263,6 +269,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
         }
         final String toolName = payload["toolName"]?.toString() ?? "";
+        if (toolName.contains("invoke_sub_agent") || toolName.contains("master.invoke")) {
+          unawaited(_syncBackgroundTasksBadge());
+        }
         final bool toolOk = payload["ok"] == true;
         if (toolOk && result != null) {
           final bool synced = await upsertLocalScheduleFromToolResult(
@@ -617,6 +626,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _isAgentProcessing = false;
       _agentStatusLine = null;
     });
+    unawaited(_syncBackgroundTasksBadge());
   }
 
   void _armAgentReplyWatchdog(String userMessageId) {
@@ -687,19 +697,127 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   String _toolExecutionStatusLine(String toolName) {
     const Map<String, String> labels = <String, String>{
-      "world.gomoku.create": "正在创建五子棋对局...",
-      "world.gomoku.play": "正在思考落子...",
-      "world.gomoku.status": "正在读取棋局状态...",
-      "schedule.create": "正在创建日程提醒...",
-      "schedule.list": "正在查询日程...",
+      // 🎮 游戏娱乐
+      "world.gomoku.create": "正在摆开五子棋棋盘...",
+      "world.gomoku.create_table": "正在准备五子棋对局...",
+      "world.gomoku.play": "正在思考落子位置...",
+      "world.gomoku.status": "正在查看棋局...",
+      "world.gomoku.join": "正在加入对局...",
+      "world.doudizhu.create": "正在凑一桌斗地主...",
+      "world.doudizhu.play": "正在出牌中...",
+      "world.zhajinhua.create": "正在组一局炸金花...",
+      "world.zhajinhua.play": "正在比拼牌技...",
+      
+      // 🌤️ 天气
+      "weather.get_local": "正在抬头看看天气...",
+      "weather.query": "正在查询天气预报...",
+      
+      // 💰 钱包相关
+      "wallet.get_balance": "正在查看钱包余额...",
+      "wallet.transfer": "正在准备转账...",
+      "wallet.get_transactions": "正在翻看交易记录...",
+      "wallet.recharge": "正在充值中...",
+      "wallet.purchase": "正在帮您买单...",
+      
+      // 📅 日程提醒
+      "calendar.create_from_text": "正在创建日程提醒...",
+      "calendar.create_task": "正在添加新任务...",
+      "calendar.list_tasks": "正在查看日程表...",
+      "calendar.delete_task": "正在删除日程...",
+      "schedule.create": "正在设置闹钟提醒...",
+      "schedule.list": "正在查询日程安排...",
       "schedule.cancel": "正在取消日程...",
-      "agent.send_to_peer": "正在发送中继消息...",
-      "weather.query": "正在查询天气...",
-      "web.search": "正在搜索网络...",
-      "memory.search": "正在检索记忆...",
-      "skill.invoke": "正在调用技能...",
+      
+      // 🔍 搜索与网页
+      "search_web": "正在网上搜索一下...",
+      "fetch_web": "正在抓取网页内容...",
+      "info.search": "正在查找资料...",
+      
+      // 👥 社交与通讯
+      "agent.send_to_peer": "正在转发消息...",
+      "agent.link.list_friends": "正在查看好友列表...",
+      "agent.link.list_friend_requests": "正在查看好友申请...",
+      "agent.link.send_friend_request": "正在发送好友请求...",
+      "agent.link.respond_friend_request": "正在回复好友请求...",
+      
+      // 📱 电话
+      "phone.ensure_my_number": "正在申领电话号码...",
+      "phone.virtual_call": "正在拨打电话...",
+      "phone.call_user": "正在呼叫您...",
+      
+      // 🖥️ 桌面自动化
+      "desktop.visual.screenshot": "正在截取屏幕画面...",
+      "desktop.visual.run_task": "正在操作电脑...",
+      
+      // 👁️ 视觉能力
+      "vision.http_pull": "正在抓取图像...",
+      "vision.periodic_start": "启动定时巡检模式...",
+      "vision.periodic_stop": "停止定时巡检...",
+      "vision.periodic_stop_all": "停止所有巡检任务...",
+      "vision.periodic_list": "正在查看巡检列表...",
+      
+      // 🛒 生活助手
+      "budget.calculate": "正在精打细算算预算...",
+      "shopping.suggest": "正在挑选好物推荐...",
+      "reminder.plan": "正在规划提醒事项...",
+      
+      // 🎯 自我编程
+      "self.create_skill": "正在创造新技能...",
+      "self.update_skill": "正在升级技能包...",
+      "self.delete_skill": "正在删除技能...",
+      "self.analyze_capabilities": "正在分析自身能力...",
+      "self.generate_skill": "正在生成新技能代码...",
+      "self.generate_from_example": "正在学习示例生成技能...",
+      "self.generate_tool_template": "正在设计工具模板...",
+      "self.list_custom_skills": "正在整理技能库...",
+      "self.record_interaction": "正在记录互动经验...",
+      "self.analyze_improvements": "正在自我反思提升...",
+      "self.get_suggestions": "正在思考改进建议...",
+      "self.detect_skill_need": "正在检测技能缺口...",
+      "self.get_learning_stats": "正在查看学习报告...",
+      "self.optimize_skill": "正在优化技能性能...",
+      
+      // 🤖 子Agent委派
+      "master.invoke_sub_agent": "正在派遣得力助手...",
+      "master.list_sub_agents": "正在清点助手团队...",
+      
+      // 🌐 AIP协议
+      "aip.dispatch": "正在分发AIP任务...",
+      "aip.list_my_state": "正在查询AIP状态...",
+      "aip.get_proposal": "正在获取提案详情...",
+      
+      // 📝 记忆与知识
+      "memory.search": "正在检索记忆库...",
+      
+      // 🛠️ 技能调用
+      "skill.invoke": "正在施展技能...",
+      
+      // 🏷️ 关怀提醒
+      "care.set_important_date": "正在标记重要日子...",
+      "care.get_important_dates": "正在查看重要日期...",
+      "care.delete_important_date": "正在删除重要日期...",
+      
+      // 🌍 Agent World
+      "world.open_registry.register": "正在注册世界身份...",
+      "world.room.get_or_create": "正在准备房间...",
+      "world.free_market.purchase": "正在购买技能...",
+      "world.free_market.list": "正在浏览商店...",
+      "world.social.post": "正在发布动态...",
+      "world.social.comment": "正在发表评论...",
+      "world.social.like": "正在点赞支持...",
+      "world.social.feed": "正在刷新动态流...",
+      
+      // 🔐 账号
+      "agent.register_account": "正在注册账号...",
+      
+      // 📡 协议工具
+      "protocol.unified.quota_adjust": "正在调整配额...",
+      "protocol.unified.memory_patch": "正在修补记忆...",
+      "protocol.unified.memory_get": "正在读取记忆...",
+      "protocol.unified.human_directive": "正在接收指令...",
+      "protocol.unified.governance_probe": "正在探测治理状态...",
     };
-    return labels[toolName] ?? "正在执行：$toolName";
+    return labels[toolName] ?? "正在努力处理中...";
   }
 
   bool _isGenericAgentStatusLine(String? line) {
@@ -796,6 +914,59 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       return;
     }
     setState(_pendingGalleryFrames.clear);
+  }
+
+  String? get _activeChatUserMessageId {
+    final String? pending = _pendingAgentUserMessageId;
+    if (pending != null && pending.isNotEmpty) return pending;
+    for (int i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i].role == "user") return _messages[i].messageId;
+    }
+    return null;
+  }
+
+  Future<void> _syncBackgroundTasksBadge() async {
+    try {
+      final Map<String, dynamic> snap = await _multiAgentApi.fetchBackgroundTasks(
+        ApiConfig.effectiveActorId,
+        messageId: _activeChatUserMessageId,
+      );
+      if (!mounted) return;
+      final List<dynamic> running =
+          snap["running"] as List<dynamic>? ?? <dynamic>[];
+      final int inFlight = snap["inFlightInTurn"] as int? ?? 0;
+      final int count = running.isNotEmpty ? running.length : (inFlight > 0 ? inFlight : 0);
+      if (count != _backgroundTasksBadgeCount) {
+        setState(() => _backgroundTasksBadgeCount = count);
+      }
+    } catch (_) {
+      // 忽略：委派未启用或网络不可达时不显示角标
+    }
+  }
+
+  Future<void> _openBackgroundTasksPanel(BuildContext context) async {
+    Map<String, dynamic> snap;
+    try {
+      snap = await _multiAgentApi.fetchBackgroundTasks(
+        ApiConfig.effectiveActorId,
+        messageId: _activeChatUserMessageId,
+      );
+    } catch (e) {
+      snap = <String, dynamic>{"ok": false, "error": e.toString()};
+    }
+    if (!context.mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext ctx) => BackgroundTasksSheet(
+        initialSnapshot: snap,
+        onRefresh: () => _multiAgentApi.fetchBackgroundTasks(
+          ApiConfig.effectiveActorId,
+          messageId: _activeChatUserMessageId,
+        ),
+      ),
+    );
+    await _syncBackgroundTasksBadge();
   }
 
   void _sendSessionInit() {
@@ -902,6 +1073,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
     
     _armAgentReplyWatchdog(userMessage.messageId);
+    unawaited(_syncBackgroundTasksBadge());
     final bool sent = _ws.sendEvent("chat.user_message", userMsg);
     if (!sent) {
       _disarmAgentReplyWatchdog();
@@ -1624,6 +1796,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               messages: _messages,
               controller: _inputController,
               onSend: _sendMessage,
+              onOpenBackgroundTasks: () => _openBackgroundTasksPanel(context),
+              backgroundTasksBadgeCount: _backgroundTasksBadgeCount,
               agentName: _agentName,
               galleryPendingCount: _pendingGalleryFrames.length,
               onPickGalleryImage: _pickGalleryImage,

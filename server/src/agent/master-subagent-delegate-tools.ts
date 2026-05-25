@@ -8,6 +8,7 @@ import type { SubAgentCapability, SubAgentType } from "../services/master-agent-
 
 export const MASTER_INVOKE_SUB_AGENT_REGISTRY = "master.invoke_sub_agent";
 export const MASTER_LIST_SUB_AGENTS_REGISTRY = "master.list_sub_agents";
+export const MASTER_POLL_SUB_AGENT_TASKS_REGISTRY = "master.poll_sub_agent_tasks";
 
 const SUB_AGENT_TYPES: SubAgentType[] = [
   "life",
@@ -74,9 +75,11 @@ export function buildMasterSubAgentDelegateChatTools(
     "",
     "🤖 general 通用助手 → 兜底，拥有全部工具包括视觉操控",
     "",
+    "【访问权限】默认「沙箱」：desktop.visual.run_task、vision.periodic_*、self.* 仅当用户开启「完全访问」后可用；沙箱下委派 life/tech 做电脑操控会失败，须先提醒用户开权限。",
+    "",
     "【视觉操控 = 通用基础设施】",
     "desktop.visual.run_task 不是某个Agent专属能力。",
-    "life / tech / general 都可以通过 tools 白名单使用它。",
+    "life / tech / general 都可以通过 tools 白名单使用它（须完全访问 + 服务端/桥接已配置）。",
     "区别只在使用的深度和场景：",
     "- life: 单次任务（订票/下单/填表单），10-40步",
     "- tech: 复杂流程（批量处理/自动化测试/持续监控），40-120步+",
@@ -100,7 +103,9 @@ export function buildMasterSubAgentDelegateChatTools(
           "Master Agent delegates one professional sub-task to one sub-agent.",
           "Call this only when delegation is useful; simple tasks should use normal tools directly.",
           "After receiving a report, synthesize for the user or delegate another distinct sub-task.",
-          "Features: automatic retry on failure, semantic deduplication to avoid repeated work, inter-agent message forwarding via forwardToAgent parameter.",
+          "Independent sub-tasks may be invoked in parallel in one tool batch (server enforces MAX_PARALLEL_SUB_AGENTS).",
+          "Long-running tasks: set runInBackground=true to return immediately, then call master_poll_sub_agent_tasks.",
+          "Features: automatic retry on failure, semantic deduplication, inter-agent forwarding via forwardToAgent.",
           `Available sub-agents:\n${catalog}`,
           capabilityTable,
         ].join("\n"),
@@ -129,6 +134,11 @@ export function buildMasterSubAgentDelegateChatTools(
               type: "string",
               description: "Optional. Forward this task's result to another sub-agent type (life/tech/info/creative/security/general) for further processing. Enables inter-agent communication.",
             },
+            runInBackground: {
+              type: "boolean",
+              description:
+                "Optional. When true, start the sub-agent in the background and return immediately with taskId; poll via master_poll_sub_agent_tasks.",
+            },
           },
           required: ["agentType", "taskDescription", "userStatusLine"],
           additionalProperties: false,
@@ -142,6 +152,21 @@ export function buildMasterSubAgentDelegateChatTools(
         description: [
           "List available sub-agent types and their built-in capabilities.",
           "Each agent shows its capabilities array describing what it can do natively.",
+        ].join(" "),
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
+        description: [
+          "Poll background sub-agent delegations and completed reports for the current user turn.",
+          "Use after runInBackground=true invocations or when synthesizing parallel sub-agent results.",
         ].join(" "),
         parameters: {
           type: "object",

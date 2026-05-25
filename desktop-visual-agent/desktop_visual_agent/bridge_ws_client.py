@@ -75,15 +75,20 @@ async def one_connection(url: str, token: str | None, init_payload: dict) -> Non
             job_id = pl.get("jobId")
             if not job_id:
                 continue
-            task = pl.get("task")
-            out = await run_stdio_worker_on_pc(
-                {
-                    "task": task,
+            action = pl.get("action") or "run_task"
+            if action == "screenshot":
+                worker_req: dict = {
+                    "action": "screenshot",
+                    "region": pl.get("region"),
+                }
+            else:
+                worker_req = {
+                    "task": pl.get("task"),
                     "maxSteps": pl.get("maxSteps", 40),
                     "region": pl.get("region"),
                     "stub": bool(pl.get("stub")),
                 }
-            )
+            out = await run_stdio_worker_on_pc(worker_req)
             await ws.send(
                 json.dumps(
                     {

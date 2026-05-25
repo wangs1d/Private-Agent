@@ -77,7 +77,13 @@ const DESKTOP_VISUAL_SCREENSHOT_TOOL: ChatCompletionTool = {
   },
 };
 
+/** 完全访问模式下向模型暴露的定义（与 {@link getDesktopVisualChatTools} 环境门控无关）。 */
+export const DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS: ChatCompletionTool[] = [
+  DESKTOP_VISUAL_SCREENSHOT_TOOL,
+  DESKTOP_VISUAL_RUN_TASK_TOOL,
+];
+
 export function getDesktopVisualChatTools(env: NodeJS.ProcessEnv = process.env): ChatCompletionTool[] {
   if (!isDesktopVisualControlChatToolsEnabled(env)) return [];
-  return [DESKTOP_VISUAL_SCREENSHOT_TOOL, DESKTOP_VISUAL_RUN_TASK_TOOL];
+  return DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS;
 }

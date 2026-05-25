@@ -62,7 +62,7 @@ function tailMessages(
       }
       if (i >= 0 && messages[i].role === "assistant") {
         const assistantMsg = messages[i];
-        const hasToolCalls = Array.isArray(assistantMsg.tool_calls);
+        const hasToolCalls = Array.isArray((assistantMsg as { tool_calls?: unknown }).tool_calls);
         if (hasToolCalls) {
           group.unshift(assistantMsg);
           i--;
@@ -121,10 +121,53 @@ export class ChatThreadPersistence {
     const row = this.data.sessions[sessionId];
     if (!row?.messages?.length) return null;
     const max = getChatThreadPersistMaxMessages();
-    return tailMessages(
+    const raw = tailMessages(
       row.messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool"),
       max,
     );
+    const sanitized = this.sanitizeRestoredToolChain(raw);
+    if (sanitized.length !== raw.length) {
+      console.warn(
+        `[chat-thread-persist] Session ${sessionId}: sanitized ${raw.length - sanitized.length} ` +
+        `orphan tool/assistant messages from persisted history (was ${raw.length}, now ${sanitized.length}).`,
+      );
+    }
+    return sanitized;
+  }
+
+  private sanitizeRestoredToolChain(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+    const validToolCallIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
+        const toolCalls = (msg as { tool_calls: Array<{ id?: string }> }).tool_calls;
+        for (const tc of toolCalls) {
+          if (tc.id) validToolCallIds.add(tc.id);
+        }
+      }
+    }
+    const matchedToolCallIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.role === "tool") {
+        const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+        if (tcId && validToolCallIds.has(tcId)) {
+          matchedToolCallIds.add(tcId);
+        }
+      }
+    }
+    let pass1 = messages.filter((msg) => {
+      if (msg.role !== "tool") return true;
+      const tcId = (msg as { tool_call_id?: string }).tool_call_id;
+      if (!tcId) return false;
+      if (!validToolCallIds.has(tcId)) return false;
+      return true;
+    });
+    pass1 = pass1.filter((msg) => {
+      if (msg.role !== "assistant") return true;
+      const toolCalls = (msg as { tool_calls?: unknown }).tool_calls;
+      if (!Array.isArray(toolCalls) || toolCalls.length === 0) return true;
+      return toolCalls.some((tc) => { const tid = (tc as { id?: string }).id; return !!tid && matchedToolCallIds.has(tid); });
+    });
+    return pass1;
   }
 
   scheduleSave(sessionId: string, threadMessages: ChatCompletionMessageParam[]): void {

@@ -92,6 +92,8 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     const sysContent = finalizeChatSystemPrompt(baseContent, {
       tools: Boolean(tools && !overrideSys),
       masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+      agentAccessMode: streamOpts?.agentAccessMode,
+      desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
     });
     if (ephemeral || msgs.length === 0) {
       msgs.push({ role: "system", content: sysContent });
@@ -106,6 +108,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     const model = streamOpts?.modelOverride?.trim() || this.model;
 
     if (tools) {
+      let completed = false;
       try {
         const mergedTools = resolveChatToolsForStream(streamOpts);
         const full = await streamCompletionWithDoudizhuTools(
@@ -121,13 +124,14 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
             extraBody: kimiExtraBody(streamOpts),
           },
         );
+        completed = true;
         if (!ephemeral) {
           this.trimThread(msgs, streamOpts?.maxThreadMessages);
           this.threads.afterTurnCompleted(sessionId, msgs);
         }
         return full;
       } catch (e) {
-        if (!ephemeral) {
+        if (!completed && !ephemeral) {
           msgs.length = startLen;
         }
         throw e;

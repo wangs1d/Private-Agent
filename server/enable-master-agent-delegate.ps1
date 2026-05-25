@@ -1,7 +1,7 @@
-# PowerShell 脚本：一键启用「主 Agent 委派子 Agent」（串行，无并行）
+# PowerShell 脚本：一键启用「主 Agent 委派子 Agent」（支持并行与后台委派）
 # 使用方法：.\enable-master-agent-delegate.ps1
 
-Write-Host "🚀 启用主 Agent 委派子 Agent（串行调用）" -ForegroundColor Cyan
+Write-Host "🚀 启用主 Agent 委派子 Agent（并行 + 后台委派）" -ForegroundColor Cyan
 Write-Host ""
 
 $envFile = ".env"
@@ -23,11 +23,12 @@ Write-Host "📝 添加主 Agent 委派配置..." -ForegroundColor Cyan
 
 $delegateConfig = @"
 
-# ---------- 主 Agent 委派子 Agent（串行，非并列多 Agent） ----------
+# ---------- 主 Agent 委派子 Agent（并行 + 后台委派） ----------
 ENABLE_MASTER_AGENT_DELEGATION=1
 MASTER_AGENT_DELEGATE_VIA_TOOLS=1
 SUBTASK_TIMEOUT_MS=60000
 TECH_SUBTASK_TIMEOUT_MS=120000
+MAX_PARALLEL_SUB_AGENTS=3
 MASTER_AGENT_DELEGATION_VERBOSE=false
 "@
 
@@ -47,4 +48,4 @@ Write-Host "   1. 确保已配置外部模型（MOONSHOT_API_KEY 或 OPENAI_API_
 Write-Host "   2. 运行测试: npm run test:master-agent" -ForegroundColor White
 Write-Host "   3. 启动服务: npm run dev" -ForegroundColor White
 Write-Host ""
-Write-Host "💡 提示：子 Agent 由主 Agent 逐个委派，报告回主 Agent 后统一回复用户" -ForegroundColor Yellow
+Write-Host "💡 提示：独立子任务可并行委派（MAX_PARALLEL_SUB_AGENTS）；耗时任务可 runInBackground + poll" -ForegroundColor Yellow

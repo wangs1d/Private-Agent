@@ -21,6 +21,8 @@ class ChatPage extends StatefulWidget {
     this.onOpenGomoku,
     this.fullComputerAccessEnabled = false,
     this.onToggleFullComputerAccess,
+    this.onOpenBackgroundTasks,
+    this.backgroundTasksBadgeCount = 0,
   });
 
   final List<ChatMessage> messages;
@@ -43,6 +45,10 @@ class ChatPage extends StatefulWidget {
   /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
   final bool fullComputerAccessEnabled;
   final VoidCallback? onToggleFullComputerAccess;
+  /// 打开「后台子 Agent 任务」面板（对话框右上角）
+  final VoidCallback? onOpenBackgroundTasks;
+  /// 运行中后台任务数（用于角标）
+  final int backgroundTasksBadgeCount;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -411,6 +417,31 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     );
                   },
                 ),
+                if (widget.onOpenBackgroundTasks != null)
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: Material(
+                      color: cs.surfaceContainerHigh.withValues(alpha: 0.94),
+                      elevation: 1,
+                      shadowColor: Colors.black26,
+                      borderRadius: BorderRadius.circular(20),
+                      child: IconButton(
+                        tooltip: "查看后台任务",
+                        visualDensity: VisualDensity.compact,
+                        onPressed: widget.onOpenBackgroundTasks,
+                        icon: Badge(
+                          isLabelVisible: widget.backgroundTasksBadgeCount > 0,
+                          label: Text(
+                            widget.backgroundTasksBadgeCount > 9
+                                ? "9+"
+                                : "${widget.backgroundTasksBadgeCount}",
+                          ),
+                          child: const Icon(Icons.pending_actions_outlined, size: 22),
+                        ),
+                      ),
+                    ),
+                  ),
                 // 滚动到底部按钮
                 Positioned(
                   right: 16,

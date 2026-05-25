@@ -2,7 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = 3334;
+const PORT = 3001;
 
 const server = http.createServer((req, res) => {
     // 设置CORS头，允许跨域访问
@@ -65,6 +65,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-    console.log(`Agent Link 社交服务运行在 http://127.0.0.1:${PORT}`);
+    console.log(`社交推文服务运行在 http://127.0.0.1:${PORT}`);
     console.log(`访问 http://127.0.0.1:${PORT} 查看社交页面`);
 });

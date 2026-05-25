@@ -94,13 +94,39 @@ export function registerMultiAgentMonitorRoutes(app: FastifyInstance, deps: { ag
     }
     const maxParallel = Number(request.body?.maxParallel ?? 1);
     agentCore.adjustMasterAgentConcurrency(maxParallel);
+    const cfg = getAgentRuntimeConfig().masterDelegation;
+    const effective = Math.min(Math.max(1, maxParallel), cfg.maxParallelSubAgents);
     return {
       ok: true,
-      maxParallelTasks: 1,
-      message: "子 Agent 委派固定为串行；maxParallelTasks 始终为 1。",
+      maxParallelTasks: effective,
+      maxAllowed: cfg.maxParallelSubAgents,
+      message: `子 Agent 并行上限已调整为 ${effective}（环境变量 MAX_PARALLEL_SUB_AGENTS 上限 ${cfg.maxParallelSubAgents}）。`,
       timestamp: new Date().toISOString(),
     };
   });
+
+  /**
+   * GET /api/multi-agent/background-tasks?sessionId=&messageId=
+   * 查询子 Agent 后台任务与本轮委派报告
+   */
+  app.get<{ Querystring: { sessionId?: string; messageId?: string } }>(
+    "/api/multi-agent/background-tasks",
+    async (request, reply) => {
+      const agentCore = deps.agentCore;
+      if (!agentCore) {
+        return reply.code(503).send({ ok: false, error: "AgentCore 未就绪" });
+      }
+      const sessionId = String(request.query.sessionId ?? "").trim();
+      if (!sessionId) {
+        return reply.code(400).send({ ok: false, error: "sessionId is required" });
+      }
+      const messageId = String(request.query.messageId ?? "").trim() || undefined;
+      return {
+        ...agentCore.getSubAgentBackgroundTasks(sessionId, messageId),
+        timestamp: new Date().toISOString(),
+      };
+    },
+  );
 
   /**
    * GET /api/multi-agent/status
@@ -117,13 +143,14 @@ export function registerMultiAgentMonitorRoutes(app: FastifyInstance, deps: { ag
       enabled,
       coordinatorActive: Boolean(snapshot?.enabled),
       message: enabled
-        ? "主 Agent 委派已启用（主 Agent 通过 master_invoke_sub_agent 串行调用子 Agent）"
+        ? `主 Agent 委派已启用（并行上限 ${snapshot?.config?.maxParallelTasks ?? cfg.maxParallelSubAgents}，支持后台委派）`
         : "主 Agent 委派未启用",
       config: {
         enableSubAgents: enabled,
-        maxParallelTasks: 1,
+        maxParallelTasks: snapshot?.config?.maxParallelTasks ?? cfg.maxParallelSubAgents,
         taskTimeoutMs: cfg.subtaskTimeoutMs,
         techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
+        infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
         maxSubAgentInvocationsPerTurn: cfg.maxSubAgentInvocationsPerTurn,
         verbose: isMasterAgentDelegationVerbose(),
       },

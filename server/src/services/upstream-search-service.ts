@@ -1,6 +1,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { InfoHubService, InfoSearchItem } from "./info-hub-service.js";
+import {
+  applySearchFreshness,
+  formatSearchFreshnessNote,
+  getSearchAnchorNow,
+} from "./search-freshness.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -140,18 +145,34 @@ export class UpstreamSearchService {
   async searchWeb(query: string, limit = 8): Promise<{
     provider: string;
     items: InfoSearchItem[];
+    fetchedAt: string;
+    searchDateLocal: string;
     notes: string[];
   }> {
     const keyword = String(query ?? "").trim();
     if (!keyword) {
-      return { provider: "none", items: [], notes: ["query 不能为空"] };
+      return {
+        provider: "none",
+        items: [],
+        fetchedAt: new Date().toISOString(),
+        searchDateLocal: getSearchAnchorNow().label,
+        notes: ["query 不能为空"],
+      };
     }
     const boundedLimit = clamp(limit, 1, 20);
-    const items = await this.infoHubService.search(keyword, boundedLimit);
+    const anchor = getSearchAnchorNow();
+    const raw = await this.infoHubService.search(keyword, boundedLimit);
+    const fresh = applySearchFreshness(raw, { query: keyword });
+    const maxAgeDays = Number(process.env.SEARCH_MAX_ITEM_AGE_DAYS ?? 120);
     return {
       provider: "domestic-bing-cn",
-      items,
-      notes: ["必应中国 RSS + 国内科技 RSS"],
+      items: fresh.items,
+      fetchedAt: anchor.iso,
+      searchDateLocal: anchor.label,
+      notes: [
+        "必应中国 RSS + 国内科技 RSS",
+        formatSearchFreshnessNote({ anchor, droppedStale: fresh.droppedStale, maxAgeDays }),
+      ],
     };
   }
 

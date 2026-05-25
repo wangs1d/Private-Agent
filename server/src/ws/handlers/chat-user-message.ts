@@ -11,6 +11,7 @@ import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import { MessageBatchProcessor, type BatchedMessage } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
+import { getToolResultProcessor } from "../../services/tool-result-processor.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
   getAgentRuntimeConfig().messageBatch,
@@ -261,10 +262,13 @@ async function processBatchedMessage(
         ? formatScheduleToolResultForUser(reply.toolName, toolResult.result)
         : null;
 
-    const finalText =
+    let finalText =
       scheduleOutcome?.trim() ||
       reply.text.trim() ||
       (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
+
+    const processor = getToolResultProcessor();
+    finalText = processor.processAssistantText(finalText);
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
       sendAssistantChunk(

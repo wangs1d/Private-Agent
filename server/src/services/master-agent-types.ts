@@ -17,6 +17,20 @@ export interface SubAgentResult {
   executionTime?: number;
 }
 
+export type BackgroundSubAgentStatus = "running" | "completed" | "failed";
+
+/** 主 Agent 后台委派的子 Agent 任务（不阻塞当前 tool 批次）。 */
+export interface BackgroundSubAgentJob {
+  taskId: string;
+  agentType: SubAgentType;
+  agentName: string;
+  status: BackgroundSubAgentStatus;
+  startedAt: number;
+  completedAt?: number;
+  report?: string;
+  error?: string;
+}
+
 export type RetryStrategy = "none" | "with_hint" | "simplify" | "reassign";
 
 export interface SubAgentRetryConfig {

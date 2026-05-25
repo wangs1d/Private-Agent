@@ -1,4 +1,9 @@
 import { USER_AGENT_TOOL_SYSTEM_SUFFIX } from "@private-ai-agent/agent-world";
+import {
+  appendAgentAccessModeSystemSuffix,
+  type AgentAccessMode,
+  parseAgentAccessMode,
+} from "./agent-access-mode.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 
 /**
@@ -7,9 +12,13 @@ import type { AgentPromptMemoryContext } from "../external-model/types.js";
  */
 export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【Agent World 开放式注册】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
+export const WEB_SEARCH_SYSTEM_SUFFIX_MARKER = "【联网检索】";
 
 const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
+
+const WEB_SEARCH_SYSTEM_SUFFIX =
+  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再回复。";
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
@@ -30,11 +39,12 @@ const MASTER_SUBAGENT_DELEGATE_SUFFIX = `
 
 【主 Agent 调度】你是主 Agent，负责理解用户诉求并回复用户。
 - 简单、单一事项：优先直接使用 clock、calendar、search_web 等工具，不要委派子 Agent。
-- 需要专业能力或较多步骤时：调用 master_invoke_sub_agent，每次只委派一个子 Agent，等待工具返回的【子Agent执行报告】后再决定下一步。
+- 需要专业能力或较多步骤时：调用 master_invoke_sub_agent；彼此独立的子任务可在同一轮并行委派多个子 Agent（受 MAX_PARALLEL_SUB_AGENTS 限流）。
 - 每次调用 master_invoke_sub_agent 时，必须填写 userStatusLine：用你自己的口吻写一句给用户看的进度话，要有活人感（可幽默、可拟人，如「我让我小弟去帮你查天气了」），禁止固定套话或只写工具名。
-- 可多次串行调用不同子 Agent（例如先 info 查资料，再 life 设提醒），禁止要求并行执行多个子 Agent。
+- 有依赖须串行（如先 security 再 life）；无依赖可并行。耗时任务可 runInBackground=true，用 master_poll_sub_agent_tasks 查进度。
 - 子 Agent 报告仅供你整合；最终由你用自然语言精简回复用户。
-- 规划前可调用 master_list_sub_agents 查看可委派类型。`;
+- 规划前可调用 master_list_sub_agents 查看可委派类型。
+- 用户处于「沙箱」时勿委派需要 desktop.visual.run_task / vision.periodic_* / self.* 的任务；应先提醒用户在输入框开启「完全访问」。`;
 
 /** 追加「尽量精简」的回复风格说明（已包含则跳过）。 */
 export function appendConciseReplySystemSuffix(systemContent: string): string {
@@ -45,9 +55,12 @@ export function appendConciseReplySystemSuffix(systemContent: string): string {
 export type FinalizeChatSystemPromptOpts = {
   tools?: boolean;
   masterSubAgentDelegate?: boolean;
+  /** 来自 `chat.user_message.agentAccessMode`；默认沙箱 */
+  agentAccessMode?: AgentAccessMode;
+  desktopBridgeOnline?: boolean;
 };
 
-/** 统一组装 system：精简风格 → 工具说明 → 主 Agent 委派说明。 */
+/** 统一组装 system：精简风格 → 工具说明 → 主 Agent 委派说明 → 访问权限说明。 */
 export function finalizeChatSystemPrompt(
   baseContent: string,
   opts?: FinalizeChatSystemPromptOpts,
@@ -59,6 +72,9 @@ export function finalizeChatSystemPrompt(
       out = appendMasterSubAgentDelegateSuffix(out);
     }
   }
+  out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
+    desktopBridgeOnline: opts?.desktopBridgeOnline,
+  });
   return out;
 }
 
@@ -69,6 +85,9 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   }
   if (!out.includes(CLOCK_TOOL_SYSTEM_SUFFIX_MARKER)) {
     out += CLOCK_TOOL_SYSTEM_SUFFIX;
+  }
+  if (!out.includes(WEB_SEARCH_SYSTEM_SUFFIX_MARKER)) {
+    out += WEB_SEARCH_SYSTEM_SUFFIX;
   }
   return out;
 }
