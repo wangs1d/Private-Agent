@@ -949,16 +949,46 @@ class _SchedulePageState extends State<SchedulePage> {
 
   List<Widget> _managementEventTiles(ThemeData theme) {
     final List<Widget> tiles = <Widget>[];
-    DateTime? lastDay;
+
+    // 按 taskId 分组事件
+    final Map<String?, List<ScheduleEvent>> groupedEvents = <String?, List<ScheduleEvent>>{};
     for (final ScheduleEvent e in _allEvents) {
-      final DateTime day = _stripTime(e.startAt);
-      if (lastDay == null || day != lastDay) {
-        lastDay = day;
+      final String? taskId = scheduleServerTaskIdFromEventId(e.id);
+      groupedEvents.putIfAbsent(taskId, () => <ScheduleEvent>[]).add(e);
+    }
+
+    // 按每个组的最早时间排序
+    final List<MapEntry<String?, List<ScheduleEvent>>> sortedGroups =
+        groupedEvents.entries.toList()
+          ..sort((MapEntry<String?, List<ScheduleEvent>> a, MapEntry<String?, List<ScheduleEvent>> b) {
+            final DateTime aStart = a.value.map((ScheduleEvent e) => e.startAt).reduce(
+              (DateTime x, DateTime y) => x.isBefore(y) ? x : y,
+            );
+            final DateTime bStart = b.value.map((ScheduleEvent e) => e.startAt).reduce(
+              (DateTime x, DateTime y) => x.isBefore(y) ? x : y,
+            );
+            return aStart.compareTo(bStart);
+          });
+
+    DateTime? lastDay;
+    for (final MapEntry<String?, List<ScheduleEvent>> entry in sortedGroups) {
+      final List<ScheduleEvent> events = entry.value;
+
+      // 找到该组的最早日期（用于分组标题）
+      final DateTime firstDay = _stripTime(
+        events.map((ScheduleEvent e) => e.startAt).reduce(
+          (DateTime x, DateTime y) => x.isBefore(y) ? x : y,
+        ),
+      );
+
+      // 添加日期分组标题（如果与上一个不同）
+      if (lastDay == null || firstDay != lastDay) {
+        lastDay = firstDay;
         tiles.add(
           Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 8),
             child: Text(
-              _formatEventDayLabel(day),
+              _formatEventDayLabel(firstDay),
               style: theme.textTheme.labelLarge?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
                 fontWeight: FontWeight.w600,
@@ -967,6 +997,12 @@ class _SchedulePageState extends State<SchedulePage> {
           ),
         );
       }
+
+      // 获取第一个事件的信息作为代表
+      final ScheduleEvent representative = events.first;
+      final int dayCount = events.length;
+      final bool isMultiDay = dayCount > 1;
+
       tiles.add(
         Card(
           margin: const EdgeInsets.only(bottom: 10),
@@ -986,15 +1022,14 @@ class _SchedulePageState extends State<SchedulePage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Text(
-                        e.title,
+                        representative.title,
                         style: theme.textTheme.bodyLarge?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        "${_formatClock(e.startAt)}"
-                        "${(e.notes != null && e.notes!.isNotEmpty) ? " · ${e.notes}" : ""}",
+                        _buildMultiDayEventInfo(representative, events, isMultiDay, dayCount),
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodySmall?.copyWith(
@@ -1005,7 +1040,7 @@ class _SchedulePageState extends State<SchedulePage> {
                   ),
                 ),
                 TextButton(
-                  onPressed: () => _confirmDelete(e),
+                  onPressed: () => _confirmDelete(representative),
                   child: const Text("删除"),
                 ),
               ],
@@ -1015,6 +1050,46 @@ class _SchedulePageState extends State<SchedulePage> {
       );
     }
     return tiles;
+  }
+
+  /// 构建多天事件的显示信息
+  String _buildMultiDayEventInfo(
+    ScheduleEvent representative,
+    List<ScheduleEvent> events,
+    bool isMultiDay,
+    int dayCount,
+  ) {
+    final StringBuffer info = StringBuffer();
+    info.write(_formatClock(representative.startAt));
+
+    // 多天任务显示天数和日期范围
+    if (isMultiDay) {
+      final DateTime firstDay = _stripTime(
+        events.map((ScheduleEvent e) => e.startAt).reduce(
+          (DateTime x, DateTime y) => x.isBefore(y) ? x : y,
+        ),
+      );
+      final DateTime lastDay = _stripTime(
+        events.map((ScheduleEvent e) => e.startAt).reduce(
+          (DateTime x, DateTime y) => x.isAfter(y) ? x : y,
+        ),
+      );
+
+      info.write(" · 共$dayCount天任务");
+
+      // 如果不是同一天，显示日期范围
+      if (firstDay != lastDay) {
+        info.write(" (${firstDay.month}/${firstDay.day} - ${lastDay.month}/${lastDay.day})");
+      }
+    }
+
+    // 添加备注信息
+    if (representative.notes != null && representative.notes!.isNotEmpty) {
+      if (info.isNotEmpty) info.write(" · ");
+      info.write(representative.notes!);
+    }
+
+    return info.toString();
   }
 
   @override

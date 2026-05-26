@@ -1,6 +1,9 @@
+import "dart:async";
 import "package:flutter/material.dart";
 
 import "../../core/services/world_api_client.dart";
+import "../../core/services/ws_chat_service.dart";
+import "../chat/widgets/game_chat_widget.dart";
 import "world_scene_labels.dart";
 
 /// 世界入口：仅展示概览与进入各场景的入口。
@@ -9,10 +12,12 @@ class WorldHubPage extends StatefulWidget {
     super.key,
     required this.sessionId,
     required this.api,
+    this.ws,
   });
 
   final String sessionId;
   final WorldApiClient api;
+  final WsChatService? ws;
 
   @override
   State<WorldHubPage> createState() => _WorldHubPageState();
@@ -22,11 +27,70 @@ class _WorldHubPageState extends State<WorldHubPage> {
   bool _loading = true;
   String? _error;
   Map<String, dynamic>? _state;
+  final List<GameChatMessage> _chatMessages = <GameChatMessage>[];
+  StreamSubscription<Map<String, dynamic>>? _wsSub;
 
   @override
   void initState() {
     super.initState();
     _refresh();
+    _setupWebSocketListener();
+  }
+
+  void _setupWebSocketListener() {
+    if (widget.ws == null) return;
+    _wsSub = widget.ws!.events.listen(_onWsEvent);
+  }
+
+  void _onWsEvent(Map<String, dynamic> event) {
+    final String type = event["type"]?.toString() ?? "";
+    
+    if (type == "world.chat.message") {
+      final Object? payload = event["payload"];
+      if (payload is! Map) return;
+      final Map<String, dynamic> p = payload.cast<String, dynamic>();
+      final String message = p["message"]?.toString() ?? "";
+      final String sender = p["sender"]?.toString() ?? "";
+      
+      if (mounted && message.isNotEmpty && sender == "agent") {
+        _addAgentMessage(message);
+      }
+    }
+  }
+
+  void _addAgentMessage(String text) {
+    setState(() {
+      _chatMessages.add(GameChatMessage(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        text: text,
+        isUser: false,
+        timestamp: DateTime.now(),
+      ));
+    });
+  }
+
+  void _sendMessage(String message) {
+    if (message.trim().isEmpty) return;
+    
+    setState(() {
+      _chatMessages.add(GameChatMessage(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        text: message,
+        isUser: true,
+        timestamp: DateTime.now(),
+      ));
+    });
+    
+    widget.ws?.sendEvent("world.chat.send", <String, dynamic>{
+      "message": message,
+      "sessionId": widget.sessionId,
+    });
+  }
+
+  @override
+  void dispose() {
+    _wsSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _refresh() async {
@@ -122,9 +186,12 @@ class _WorldHubPageState extends State<WorldHubPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text("")),
-      body: RefreshIndicator(
-        onRefresh: _refresh,
-        child: ListView(
+      body: Row(
+        children: [
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: _refresh,
+              child: ListView(
           padding: const EdgeInsets.all(16),
           children: <Widget>[
             Card(
@@ -198,7 +265,17 @@ class _WorldHubPageState extends State<WorldHubPage> {
               onTap: _openSocial,
             ),
           ],
-        ),
+              ),
+            ),
+          ),
+          if (widget.ws != null)
+            GameChatWidget(
+              messages: _chatMessages,
+              onSendMessage: _sendMessage,
+              placeholder: "和 Agent 聊聊...",
+              title: "Agent World",
+            ),
+        ],
       ),
     );
   }

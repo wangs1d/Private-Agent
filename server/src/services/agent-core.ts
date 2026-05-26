@@ -42,6 +42,136 @@ import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 
+/**
+ * 简单 LRU 缓存实现（用于响应缓存）
+ * 预期效果：重复查询 <100ms，大幅减少 API 调用
+ */
+class ResponseCache {
+  private cache = new Map<string, { response: string; timestamp: number; hits: number }>();
+  private readonly maxSize: number;
+  private readonly ttlMs: number;
+
+  constructor(maxSize = 500, ttlMinutes = 5) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMinutes * 60 * 1000;
+    
+    // 定期清理过期缓存
+    setInterval(() => this.cleanup(), ttlMinutes * 60 * 1000).unref();
+  }
+
+  /**
+   * 生成缓存键（基于输入文本的标准化哈希）
+   */
+  private generateKey(text: string, actorId: string): string {
+    const normalized = text.toLowerCase().trim()
+      .replace(/\s+/g, ' ')
+      .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, '');
+    
+    // 简单哈希函数
+    let hash = 0;
+    for (let i = 0; i < normalized.length; i++) {
+      const char = normalized.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    
+    return `${actorId}:${hash}:${normalized.slice(0, 50)}`;
+  }
+
+  /**
+   * 获取缓存的响应
+   */
+  get(text: string, actorId: string): string | null {
+    const key = this.generateKey(text, actorId);
+    const cached = this.cache.get(key);
+    
+    if (!cached) return null;
+    
+    // 检查是否过期
+    if (Date.now() - cached.timestamp > this.ttlMs) {
+      this.cache.delete(key);
+      return null;
+    }
+    
+    // 更新访问次数和移到最后（LRU）
+    cached.hits++;
+    this.cache.delete(key);
+    this.cache.set(key, cached);
+    
+    return cached.response;
+  }
+
+  /**
+   * 设置缓存响应
+   */
+  set(text: string, actorId: string, response: string): void {
+    const key = this.generateKey(text, actorId);
+    
+    // 如果已存在，不覆盖
+    if (this.cache.has(key)) return;
+    
+    // 如果超过最大容量，删除最旧的条目
+    if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) {
+        this.cache.delete(oldestKey);
+      }
+    }
+    
+    this.cache.set(key, {
+      response,
+      timestamp: Date.now(),
+      hits: 0,
+    });
+  }
+
+  /**
+   * 清理过期条目
+   */
+  private cleanup(): void {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [key, value] of this.cache) {
+      if (now - value.timestamp > this.ttlMs) {
+        this.cache.delete(key);
+        cleaned++;
+      }
+    }
+    
+    if (cleaned > 0) {
+      // 静默清理过期缓存
+    }
+  }
+
+  /** 获取缓存统计信息 */
+  getStats() {
+    let totalHits = 0;
+    for (const [, value] of this.cache) {
+      totalHits += value.hits;
+    }
+    
+    return {
+      size: this.cache.size,
+      maxSize: this.maxSize,
+      totalHits,
+      hitRate: this.cache.size > 0 ? (totalHits / this.cache.size).toFixed(2) : '0.00',
+    };
+  }
+
+  /** 清空所有缓存 */
+  clear(): void {
+    const size = this.cache.size;
+    this.cache.clear();
+  }
+}
+
+// 全局响应缓存实例
+const globalResponseCache = new ResponseCache(
+  parseInt(process.env.RESPONSE_CACHE_MAX_SIZE ?? '500'),
+  parseInt(process.env.RESPONSE_CACHE_TTL_MINUTES ?? '5')
+);
+
 export type MasterAgentDelegationSnapshot = {
   enabled: boolean;
   metrics: PerformanceMetrics | null;
@@ -150,6 +280,23 @@ export class AgentCore {
     text: string,
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
+    const perfStartTime = Date.now();
+    
+    // 响应缓存检查（性能优化：重复查询 <100ms）
+    const cacheEnabled = process.env.RESPONSE_CACHE_ENABLED !== '0';
+    if (cacheEnabled && !opts?.visionFrames?.length) {
+      const cachedResponse = globalResponseCache.get(text, actorId);
+      if (cachedResponse) {
+        this.turnLifecycle.finalizeTurn({ 
+          actorId, 
+          userText: text, 
+          assistantText: cachedResponse 
+        });
+        
+        return { text: cachedResponse, streamedChunks: false };
+      }
+    }
+    
     if (!this.externalChat?.isEnabled()) {
       const available = this.toolRegistry.list().join(", ");
       const fallback = `已收到：${text}。当前可用工具：${available}`;
@@ -157,6 +304,9 @@ export class AgentCore {
       return { text: fallback };
     }
 
+    // 性能监控：前置准备阶段
+    const prepStartTime = Date.now();
+    
     const [narrativeRecall, userLocation, personalization] = await Promise.all([
       this.turnLifecycle.prepareNarrativeRecall(actorId, text),
       resolveUserLocationPrompt({
@@ -165,6 +315,9 @@ export class AgentCore {
       }),
       this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
     ]);
+    
+    const prepDuration = Date.now() - prepStartTime;
+    
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
       actorId,
       opts?.chatUserMessageId,
@@ -183,15 +336,23 @@ export class AgentCore {
     );
 
     try {
+      let result: AgentReply;
+      
       if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
-        const result = await this.masterAgentCoordinator.orchestrateTask(
+        // 性能监控：Master Agent 模式
+        const masterStartTime = Date.now();
+        
+        const masterResult = await this.masterAgentCoordinator.orchestrateTask(
           actorId,
           text,
           opts?.onAgentPhaseStatus,
           opts?.onAssistantDelta,
           orchestrateOpts,
         );
-        return this.finishLlmTurn(actorId, text, result, {
+        
+        const masterDuration = Date.now() - masterStartTime;
+        
+        result = this.finishLlmTurn(actorId, text, masterResult, {
           streamedChunks: true,
           modelCallsConsumed: 1,
           planExecuteUsed: false,
@@ -200,16 +361,65 @@ export class AgentCore {
           trajCap,
           messageId: opts?.chatUserMessageId,
         });
+        
+        // 记录 Master Agent 模式性能
+        this.recordPerformanceMetrics('master_agent', {
+          totalDuration: Date.now() - perfStartTime,
+          preparationDuration: prepDuration,
+          llmDuration: masterDuration,
+          textLength: text.length,
+          mode: route.mode,
+          hasTools: !!result.toolName,
+          success: true,
+        });
+        
+      } else {
+        // 性能监控：标准 LLM 模式
+        const standardStartTime = Date.now();
+        
+        result = await this.runStandardLlmPath(actorId, text, route.mode, opts, {
+          narrativeRecall,
+          userLocation,
+          personalization,
+          trajCap,
+          orchestrateToolCtx: orchestrateOpts,
+        });
+        
+        const standardDuration = Date.now() - standardStartTime;
+        
+        // 记录标准模式性能
+        this.recordPerformanceMetrics('standard_llm', {
+          totalDuration: Date.now() - perfStartTime,
+          preparationDuration: prepDuration,
+          llmDuration: standardDuration,
+          textLength: text.length,
+          mode: route.mode,
+          hasTools: !!result.toolName,
+          modelCallsConsumed: 1, // 简化统计
+          success: true,
+        });
       }
-
-      return await this.runStandardLlmPath(actorId, text, route.mode, opts, {
-        narrativeRecall,
-        userLocation,
-        personalization,
-        trajCap,
-        orchestrateToolCtx: orchestrateOpts,
-      });
+      
+      // 响应缓存存储（仅缓存无工具调用的简单响应）
+      if (cacheEnabled && !result.toolName && result.text) {
+        globalResponseCache.set(text, actorId, result.text);
+      }
+      
+      return result;
+      
     } catch (err) {
+      const errorDuration = Date.now() - perfStartTime;
+      
+      // 记录错误性能指标
+      this.recordPerformanceMetrics('error', {
+        totalDuration: errorDuration,
+        preparationDuration: prepDuration,
+        textLength: text.length,
+        mode: route.mode,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      
       if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
         console.error("[AgentCore] Master Agent orchestration failed, falling back to standard mode:", err);
         return await this.runStandardLlmPath(actorId, text, "direct_llm", opts, {
@@ -222,6 +432,45 @@ export class AgentCore {
       }
       const msg = err instanceof Error ? err.message : String(err);
       return { text: `${this.externalChat.displayLabel} 调用失败：${msg}` };
+    }
+  }
+
+  /**
+   * 性能监控记录器
+   */
+  private recordPerformanceMetrics(
+    mode: string,
+    metrics: Record<string, unknown>
+  ): void {
+    const logData = {
+      timestamp: new Date().toISOString(),
+      mode,
+      ...metrics,
+    };
+    
+    // 可选：发送到外部监控系统（如 Prometheus、Datadog 等）
+    if (process.env.PERFORMANCE_MONITORING_ENABLED === '1') {
+      this.sendToMonitoringSystem(logData).catch((err) => {
+        // 静默处理监控上报失败
+      });
+    }
+  }
+
+  /**
+   * 发送性能数据到外部监控系统（可扩展实现）
+   */
+  private async sendToMonitoringSystem(data: Record<string, unknown>): Promise<void> {
+    // TODO: 集成到你的监控系统
+    // 示例：
+    // await fetch('https://your-monitoring-api.com/metrics', {
+    //   method: 'POST',
+    //   body: JSON.stringify(data),
+    //   headers: { 'Content-Type': 'application/json' }
+    // });
+    
+    // 当前仅记录到控制台，可后续扩展
+    if (process.env.NODE_ENV === 'development') {
+      // 开发环境可在此添加调试逻辑
     }
   }
 

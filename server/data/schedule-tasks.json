@@ -634,6 +634,24 @@
       "createdAt": "2026-05-25T17:43:39.703Z",
       "updatedAt": "2026-05-26T06:47:44.098Z",
       "lastRunAt": "2026-05-26T06:47:44.098Z"
+    },
+    {
+      "taskId": "f803925b-cb0f-4000-b6da-77001a58d8cd",
+      "sessionId": "session-mvp-001",
+      "title": "每日科技新闻推送",
+      "description": "每天中午12点自动搜索并推送当天最新科技新闻",
+      "kind": "agent_task",
+      "recurrence": "daily",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-05-27T04:00:00.000Z",
+      "nextRunAt": "2026-05-27T04:00:00.000Z",
+      "status": "active",
+      "agentTask": {
+        "prompt": "搜索当天（今天是2026年）最新的科技相关新闻，整理成简报推送给用户，包含8-10条左右的科技新闻要点，格式简洁清晰",
+        "accessMode": "sandbox"
+      },
+      "createdAt": "2026-05-26T16:37:44.908Z",
+      "updatedAt": "2026-05-26T16:37:44.908Z"
     }
   ],
   "runs": [

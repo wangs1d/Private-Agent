@@ -92,8 +92,8 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "sub_agent",
       lines: [
         "5️⃣ 子Agent委派（5个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
-        "   路由表：life(复杂生活操作:钱包写/视觉操控/游戏) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价) | creative(专业创作:文案策划写作翻译，含深度调研+内容模板工具链) | security(风险检测/权限审批)",
-        "   ⚠️ 主 agent 拥有基本能力(查天气/查余额/设日程/好友管理/搜信息)，先自己处理，搞不定才委派。",
+        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价) | creative(专业创作:文案策划写作翻译，含深度调研+内容模板工具链) | security(风险检测/权限审批)",
+        "   ⚠️ 主 agent 拥有基本能力(查天气/查余额/设日程/好友管理/搜信息/玩游戏)，先自己处理，搞不定才委派。",
       ],
     },
     {

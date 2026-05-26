@@ -193,7 +193,7 @@ export class MasterAgentCoordinator {
    * 初始化 5 个核心子 Agent（按能力维度划分）
    *
    * 设计理念：
-   * - life  → 复杂生活操作：钱包写操作(转帐/消费50+类/充值) + 视觉操控(电脑) + 游戏
+   * - life  → 复杂生活操作：钱包写操作(转帐/消费50+类/充值) + 视觉操控(电脑)
    * - tech  → 技术操控：深度RPA自动化 + 代码开发 + 系统运维 + 视觉操控(深度)
    * - info  → 信息检索：深度搜索比价调研（只查不买）
    * - creative → 创意内容：专业文案策划写作翻译润色（深度调研+内容模板工具链）
@@ -203,7 +203,6 @@ export class MasterAgentCoordinator {
    * 只有涉及以上子 agent 专属能力时才委派。
    *
    * 视觉操控（desktop.visual.run_task）仅 life / tech 子 Agent 拥有：
-   * 区域仅在于使用的场景：
    * - life: 偶尔用（订酒店时顺手操作网站）
    * - tech: 深度用（复杂自动化流程、批量操作、长时间运行）
    */
@@ -227,8 +226,6 @@ export class MasterAgentCoordinator {
     //   - desktop.visual.run_task / desktop.visual.screenshot
     //   - 需要真实操作网站/App时使用（打开携程订酒店、淘宝下单等）
     //
-    // 🎮 娱乐对局（主 agent 无此权限）：
-    //   - 五子棋、斗地主、炸金花等游戏
     //
     // 委派时机：只有涉及以上能力时才委派 life，简单查询由主 agent 直接处理。
     // ──────────────────────────────────────────────
@@ -259,8 +256,6 @@ export class MasterAgentCoordinator {
         "- 需要真实操作网站/App时使用",
         "- 打开携程订酒店、淘宝下单、操作任何网站/软件",
         "- 像人一样看屏幕、操作鼠标键盘",
-        "",
-        "🎮 娱乐对局：五子棋、斗地主、炸金花等游戏",
       ].join("\n"),
       keywords: [
         "买", "购", "订", "预订", "下单", "支付", "花钱", "消费",
@@ -283,17 +278,14 @@ export class MasterAgentCoordinator {
         "办公", "打印", "复印", "快递", "寄件",
         "帮我买", "帮我订",
         "在电脑上", "打开网站", "操作电脑",
-        "五子棋", "斗地主", "炸金花",
       ],
       tools: [
         ...by("wallet", "fund", "market", "shop", "purchase", "a2a", "trade"),
         ...by("desktop", "visual", "vision"),
-        ...by("gomoku", "music", "video", "doudizhu", "zhajinhua"),
       ],
       capabilities: [
         "wallet",
         "purchase",
-        "entertainment",
       ],
     });
 

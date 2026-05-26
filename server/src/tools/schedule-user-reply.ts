@@ -43,9 +43,25 @@ export function formatScheduleToolResultForUser(
   }
   if (result.matched === true && result.taskId) {
     const when = result.nextRunAt ? formatRunAtLocal(String(result.nextRunAt)) : "";
+    const kind = String(result.kind ?? "").trim();
+    const recurrence = String(result.recurrence ?? "").trim();
+    const title = String(result.title ?? "");
+
+    if (kind === "agent_task") {
+      const msg = title || "自动化任务";
+      if (recurrence === "daily") {
+        return when ? `✅ 已设置**每天永久性自动推送**：${when} 首次执行 — ${msg}` : `✅ 已设置**每天永久性自动推送**：${msg}`;
+      }
+      return when ? `已设置自动化任务：${when} — ${msg}` : `已设置自动化任务：${msg}`;
+    }
+
     const msg = formatReminderDisplayMessage(
       String(result.reminderMessage ?? result.title ?? "提醒"),
     );
+    if (recurrence === "daily" || recurrence === "weekly" || recurrence === "yearly") {
+      const recurrenceText = recurrence === "daily" ? "每天" : recurrence === "weekly" ? "每周" : "每年";
+      return when ? `已设置${recurrenceText}重复提醒：${when} — ${msg}` : `已设置${recurrenceText}重复提醒：${msg}`;
+    }
     return when ? `已设置提醒：${when} — ${msg}` : `已设置提醒：${msg}`;
   }
   if (result.needsRecurrenceConfirm === true) {

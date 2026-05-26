@@ -288,6 +288,7 @@ export function analyzeTaskRecurrencePattern(userText: string, draft: ScheduleDr
     { pattern: /打卡|签到|学习|背单词|阅读|写日记|记账/i, reason: "日常习惯养成类任务通常适合每日重复" },
     { pattern: /喂.*?(宠物|猫|狗|鱼)|铲屎|遛狗/i, reason: "宠物照料通常需要每日重复" },
     { pattern: /备份|同步|清理.*?(缓存|垃圾|邮件)|整理.*?(桌面|文件)/i, reason: "维护类任务通常建议定期重复" },
+    { pattern: /新闻.*?(推送|简报|早报|日报|推送)|推送.*?新闻|简报|早报|日报|每天.*?(搜|查|看|推送).*?新闻/i, reason: "新闻/简报/早报类任务通常是长期的每日信息推送需求" },
   ];
 
   const CONTINUOUS_PATTERNS = [
@@ -310,6 +311,21 @@ export function analyzeTaskRecurrencePattern(userText: string, draft: ScheduleDr
         ],
       };
     }
+  }
+
+  if (isNewsBriefIntent(normalized) || isNewsBriefIntent(subject)) {
+    return {
+      suggestedType: "daily",
+      confidence: "high",
+      reason: "新闻/简报/早报类任务是长期的信息推送需求，建议设置为每天自动推送",
+      question: `「${subject}」看起来像是日常信息推送需求。你想设置为每天永久性自动推送吗？`,
+      examples: [
+        "✅ 好的，每天永久推送（推荐）",
+        "📅 只需要今天一次",
+        "📆 仅工作日推送（周一到周五）",
+        "⏰ 接下来一周每天推送",
+      ],
+    };
   }
 
   for (const { pattern, reason } of CONTINUOUS_PATTERNS) {
@@ -446,6 +462,11 @@ function stripLeadingTimeExpression(text: string): string {
 /** 天气/穿衣类定时简报（与普通「提醒我」区分：须含下列关键词之一） */
 function isWeatherBriefIntent(text: string): boolean {
   return /(天气|气温|穿衣|天气预报|天气提醒|出门穿|带伞)/.test(text);
+}
+
+/** 新闻/简报/早报/日报类定时推送（识别为长期每日任务，避免误判为临时性任务） */
+function isNewsBriefIntent(text: string): boolean {
+  return /(新闻.*?(推送|简报|早报|日报)|推送.*?新闻|科技新闻|每日新闻|每天.*?新闻|新闻早报|新闻日报|资讯.*?(推送|简报)|早报|日报|简报)/.test(text);
 }
 
 function validClock(hours: number, minutes: number): boolean {

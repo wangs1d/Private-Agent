@@ -27,7 +27,6 @@ import "features/chat/chat_page.dart";
 import "features/chat/voice_mode_page.dart";
 import "core/services/multi_agent_api_client.dart";
 import "features/gomoku/gomoku_page.dart";
-import "features/auth/phone_registration_page.dart";
 import "features/auth/biometric_registration_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/silent_camera_capture.dart";
@@ -36,6 +35,7 @@ import "features/schedule/schedule_page.dart";
 import "features/skill_store/skill_store_page.dart";
 import "features/wallet/wallet_page.dart";
 import "features/world/world_page.dart";
+import "features/world/tweet_compose_page.dart";
 
 void main() {
   runApp(const PrivateAiApp());
@@ -86,8 +86,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _isBiometricRegistered = false;
   /// 是否已初始化完成
   bool _isInitialized = false;
-  /// 是否需要显示注册页面
-  bool _showRegistration = false;
   /// Agent是否正在处理中（用于显示响应状态指示器）
   bool _isAgentProcessing = false;
   /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
@@ -141,10 +139,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     
     final bool? visionConsent = await _store.getVisionCameraConsent();
     
-    // 检查是否已注册手机号
-    final phoneNumber = await _store.getPreference('phoneNumber');
-    final isPhoneRegistered = phoneNumber != null && phoneNumber.toString().isNotEmpty;
-    
     // 检查是否已完成生物特征注册
     final biometricStatus = await _store.getBiometricRegistrationStatus();
     
@@ -158,8 +152,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _agentName = "AI助手";
       _isBiometricRegistered = biometricStatus;
       _isInitialized = true;
-      // 如果未注册手机号，显示注册页面
-      _showRegistration = !isPhoneRegistered;
     });
     
     _ws.onConnected = _sendSessionInit;
@@ -169,17 +161,15 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
     _ws.connect();
 
-    if (isPhoneRegistered) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (mounted) {
-          if (!biometricStatus) {
-            _showBiometricRegistration();
-          } else {
-            await _promptLocationConsentIfNeeded();
-          }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (mounted) {
+        if (!_isBiometricRegistered) {
+          _showBiometricRegistration();
+        } else {
+          await _promptLocationConsentIfNeeded();
         }
-      });
-    }
+      }
+    });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
       final Map<String, dynamic> payload =
@@ -1154,11 +1144,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _openAgentWorldWeb();
       return;
     }
-    // 如果点击的是新的社交联系tab (index 6)，则打开网页而不是切换页面
-    if (index == 6) {
-      _openAgentLinkWeb();
-      return;
-    }
     setState(() => _tabIndex = index);
     if (index == 2) {
       _scheduleReloadSignal.value += 1;
@@ -1256,21 +1241,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  /// 显示手机号注册页面
-  void _showPhoneRegistration() {
-    Navigator.of(_rootNavigatorKey.currentContext!).push(
-      MaterialPageRoute(
-        builder: (context) => PhoneRegistrationPage(
-          onRegistrationComplete: () {
-            // 注册成功后，跳转到生物特征页面
-            Navigator.of(context).pop();
-            _showBiometricRegistration();
-          },
-        ),
-      ),
-    );
-  }
-
   void _callAgentViaPhone(String agentId, String? message) {
     if (!_ws.isConnected) {
       _ws.retryConnect();
@@ -1295,6 +1265,27 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
+  /// 显示生物特征注册页面
+  void _showBiometricRegistration() {
+    Navigator.of(_rootNavigatorKey.currentContext!).push(
+      MaterialPageRoute(
+        builder: (context) => BiometricRegistrationPage(
+          userId: ApiConfig.userId.isNotEmpty ? ApiConfig.userId : "user_001",
+          onComplete: () {
+            Navigator.of(context).pop();
+            setState(() {
+              _isBiometricRegistered = true;
+            });
+            // 保存注册状态
+            _store.saveBiometricRegistrationStatus(true);
+            // 生物特征注册完成后，再请求位置权限
+            _promptLocationConsentIfNeeded();
+          },
+        ),
+      ),
+    );
+  }
+
   void _callMyAgentViaPhone(String? message) {
     if (!_ws.isConnected) {
       _ws.retryConnect();
@@ -1315,27 +1306,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         const SnackBar(content: Text("📞 正在呼叫你的 Agent…")),
       );
     }
-  }
-
-  /// 显示生物特征注册页面
-  void _showBiometricRegistration() {
-    Navigator.of(_rootNavigatorKey.currentContext!).push(
-      MaterialPageRoute(
-        builder: (context) => BiometricRegistrationPage(
-          userId: ApiConfig.userId.isNotEmpty ? ApiConfig.userId : "user_001",
-          onComplete: () {
-            Navigator.of(context).pop();
-            setState(() {
-              _isBiometricRegistered = true;
-            });
-            // 保存注册状态
-            _store.saveBiometricRegistrationStatus(true);
-            // 生物特征注册完成后，再请求位置权限
-            _promptLocationConsentIfNeeded();
-          },
-        ),
-      ),
-    );
   }
 
   /// 根据网络 IP 展示推测位置，并询问是否开启 GPS 定位权限（灰色弹窗，仅询问一次）。
@@ -1673,27 +1643,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       );
     }
 
-    // 如果需要显示注册页面
-    if (_showRegistration) {
-      return MaterialApp(
-        navigatorKey: _rootNavigatorKey,
-        title: "Private AI Agent",
-        theme: AppTheme.material,
-        home: PhoneRegistrationPage(
-          onRegistrationComplete: () {
-            setState(() {
-              _showRegistration = false;
-            });
-            WidgetsBinding.instance.addPostFrameCallback((_) async {
-              if (mounted) {
-                _showBiometricRegistration();
-              }
-            });
-          },
-        ),
-      );
-    }
-
     return MaterialApp(
       navigatorKey: _rootNavigatorKey,
       title: "Private AI Agent",
@@ -1857,8 +1806,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               api: _worldApi,
               ws: _ws,
             ),
-            const Center( // 新的社交联系tab占位符，实际会跳转到网页
-              child: Text("正在打开社交联系页面..."),
+            TweetComposePage(
+              sessionId: ApiConfig.effectiveActorId,
+              api: _worldApi,
+              ws: _ws,
             ),
           ],
         );

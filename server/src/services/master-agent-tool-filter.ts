@@ -65,16 +65,29 @@ const MASTER_BASIC_TOOL_NAMES = new Set([
   "self.list_custom_skills",
 ]);
 
+/** 主 Agent 可玩的游戏工具前缀（由主 agent 直接陪用户玩，不走子 agent） */
+const MASTER_GAME_TOOL_PREFIXES = [
+  "gomoku.",
+  "world.gomoku.",
+  "doudizhu.",
+  "world.doudizhu.",
+  "zhajinhua.",
+  "world.zhajinhua.",
+];
+
 /**
- * 主 Agent 基本工具过滤 — 只保留基础能力。
- * 排除：life 专有 (wallet.write/desktop/video游戏)
+ * 主 Agent 基本工具过滤 — 只保留基础能力 + 游戏。
+ * 排除：life 专有 (wallet.write/desktop)
  *       tech 专有 (vision/self.write)
  *       creative 专有 (info.deep/shopping)
+ * 保留：游戏 (gomoku/doudizhu/zhajinhua 系列 — 主 agent 直接陪玩)
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   return tools.filter((t) => {
     if (t.type !== "function" || !t.function?.name) return false;
-    return MASTER_BASIC_TOOL_NAMES.has(t.function.name);
+    const name = t.function.name;
+    if (MASTER_BASIC_TOOL_NAMES.has(name)) return true;
+    return MASTER_GAME_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
   });
 }
 
