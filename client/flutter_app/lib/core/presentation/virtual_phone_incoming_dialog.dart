@@ -24,6 +24,175 @@ Future<void> showVirtualPhoneIncomingDialog({
   );
 }
 
+/// 简化版网络电话悬浮按钮（用于通话中显示）
+class PhoneCallFloatingButton extends StatefulWidget {
+  const PhoneCallFloatingButton({
+    super.key,
+    required this.status,
+    required this.onHangUp,
+    this.toActorId,
+  });
+
+  /// 通话状态: ringing, connected, ended
+  final String status;
+  final VoidCallback onHangUp;
+  final String? toActorId;
+
+  @override
+  State<PhoneCallFloatingButton> createState() => _PhoneCallFloatingButtonState();
+}
+
+class _PhoneCallFloatingButtonState extends State<PhoneCallFloatingButton> {
+  bool _isSpeakerOn = false;
+
+  String get _statusText {
+    switch (widget.status) {
+      case "incoming":
+        return "来电: ${widget.toActorId ?? ""}";
+      case "ringing":
+        return "正在呼叫${widget.toActorId != null && widget.toActorId!.isNotEmpty ? " ${widget.toActorId}" : "中"}";
+      case "connected":
+        return "通话中";
+      case "ended":
+        return "通话结束";
+      default:
+        return "通话中";
+    }
+  }
+
+  IconData get _statusIcon {
+    switch (widget.status) {
+      case "incoming":
+        return Icons.phone_callback;
+      case "ringing":
+        return Icons.phone_in_talk;
+      case "connected":
+        return Icons.phone;
+      case "ended":
+        return Icons.phone_disabled;
+      default:
+        return Icons.phone;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool isRinging = widget.status == "ringing" || widget.status == "incoming";
+
+    return Positioned(
+      right: 16,
+      bottom: 100,
+      child: Material(
+        elevation: 8,
+        borderRadius: BorderRadius.circular(28),
+        color: cs.primaryContainer,
+        child: InkWell(
+          onTap: () {
+            // 点击悬浮按钮可以显示更多信息或操作
+          },
+          borderRadius: BorderRadius.circular(28),
+          child: Container(
+            constraints: const BoxConstraints(
+              minWidth: 56,
+              maxWidth: 200,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                // 状态图标
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: isRinging ? cs.primary : Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _statusIcon,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // 状态文字
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        _statusText,
+                        style: TextStyle(
+                          color: cs.onPrimaryContainer,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (widget.status == "connected")
+                        Text(
+                          "00:00",
+                          style: TextStyle(
+                            color: cs.onPrimaryContainer.withOpacity(0.7),
+                            fontSize: 11,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                // 扬声器按钮
+                IconButton(
+                  icon: Icon(
+                    _isSpeakerOn ? Icons.volume_up : Icons.volume_down,
+                    color: _isSpeakerOn ? cs.primary : cs.onPrimaryContainer,
+                    size: 20,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _isSpeakerOn = !_isSpeakerOn;
+                    });
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      SnackBar(
+                        content: Text(_isSpeakerOn ? "已开启扬声器" : "已关闭扬声器"),
+                        duration: const Duration(seconds: 1),
+                      ),
+                    );
+                  },
+                  tooltip: _isSpeakerOn ? "关闭扬声器" : "开启扬声器",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                ),
+                // 挂断按钮
+                IconButton(
+                  icon: const Icon(
+                    Icons.call_end,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  onPressed: widget.onHangUp,
+                  tooltip: "挂断",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.red,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Uint8List? _decodeMp3FromPayload(Map<String, dynamic> payload) {
   final Object? tts = payload["tts"];
   if (tts is! Map) return null;

@@ -1,15 +1,14 @@
-import { config as loadEnv } from "dotenv";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-// 始终从 server/.env 加载，避免从 monorepo 根目录启动时读不到密钥
-loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "../.env") });
-
+import { loadServerEnv } from "./config/load-server-env.js";
+import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
+import { getRuntimeConfig } from "./config/env.js";
 import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
-import { getRuntimeConfig } from "./config/env.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
+
+// 始终从 server/.env + server/.env.local 加载（密钥放 .env.local，避免被脚本误覆盖）
+loadServerEnv();
+await exitIfDevPortInUse(getRuntimeConfig().port);
 
 const runtime = getRuntimeConfig();
 const externalChatProbe = createExternalChatProviderFromEnv();
@@ -24,10 +23,15 @@ if (externalChatProbe?.isEnabled()) {
 }
 const services = await createAppServices();
 await initializeRuntimeState(services);
-await services.app.listen({
-  port: runtime.port,
-  host: "0.0.0.0",
-});
+try {
+  await services.app.listen({
+    port: runtime.port,
+    host: "0.0.0.0",
+  });
+} catch (err) {
+  if (isDevListenConflict(err)) process.exit(0);
+  throw err;
+}
 
 const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,

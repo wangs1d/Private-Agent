@@ -47,6 +47,13 @@ async function start() {
     console.log(`Social Platform  http://${displayHost}:${port}  （推文 Web + API）`);
     console.log(`WebSocket          ws://${displayHost}:${port}/ws`);
   } catch (err) {
+    const code =
+      typeof err === "object" && err !== null && "code" in err
+        ? (err as NodeJS.ErrnoException).code
+        : undefined;
+    if (process.env.NODE_ENV !== "production" && code === "EADDRINUSE") {
+      process.exit(0);
+    }
     app.log.error(err);
     process.exit(1);
   }

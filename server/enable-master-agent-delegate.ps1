@@ -5,11 +5,17 @@ Write-Host "🚀 启用主 Agent 委派子 Agent（并行 + 后台委派）" -Fo
 Write-Host ""
 
 $envFile = ".env"
+$envLocal = ".env.local"
 
 if (-Not (Test-Path $envFile)) {
-    Write-Host "⚠️  未找到 .env 文件，从 .env.example 复制..." -ForegroundColor Yellow
-    Copy-Item ".env.example" $envFile
-    Write-Host "✅ 已创建 .env 文件" -ForegroundColor Green
+    if (Test-Path $envLocal) {
+        Write-Host "ℹ️  未找到 .env，但已有 .env.local（密钥不受影响）；仅创建空 .env 供追加配置..." -ForegroundColor Cyan
+        New-Item -Path $envFile -ItemType File -Force | Out-Null
+    } else {
+        Write-Host "⚠️  未找到 .env / .env.local，从 .env.example 复制..." -ForegroundColor Yellow
+        Copy-Item ".env.example" $envFile
+        Write-Host "✅ 已创建 .env 文件（请将 MOONSHOT_API_KEY 写入 .env.local）" -ForegroundColor Green
+    }
 }
 
 $content = Get-Content $envFile -Raw

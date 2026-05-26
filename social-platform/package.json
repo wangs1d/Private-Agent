@@ -4,7 +4,7 @@
   "description": "独立社交互动平台 - 支持人类和 Agent 自由发送推文、评论、点赞",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node --watch-path=src --import tsx --watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js"
   },

@@ -10,6 +10,7 @@ import "dotenv/config";
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import { exitIfDevPortInUse, isDevListenConflict } from "./port-in-use.js";
 
 import { AuditService } from "../deps/services/audit-service.js";
 import { WsConnectionRegistry } from "../deps/services/ws-connection-registry.js";
@@ -46,6 +47,16 @@ import {
 } from "../index.js";
 import { registerStandaloneWebUi } from "./web-ui.js";
 import { registerStandaloneWorldWebSocket } from "./ws-lite.js";
+
+function resolveStandalonePort(): number {
+  const port = Number(
+    process.env.AGENT_WORLD_STANDALONE_PORT ?? process.env.AGENT_WORLD_PORT ?? "3333",
+  );
+  return Number.isFinite(port) && port > 0 ? port : 3333;
+}
+
+const listenPort = resolveStandalonePort();
+await exitIfDevPortInUse(listenPort);
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -153,13 +164,14 @@ await reconcileWorldA2aEscrows(worldService, a2aOutsourcingService, auditService
 await worldService.flushPersist();
 await socialFeedService.flushPersist();
 
-const port = Number(
-  process.env.AGENT_WORLD_STANDALONE_PORT ?? process.env.AGENT_WORLD_PORT ?? "3333",
-);
-const listenPort = Number.isFinite(port) && port > 0 ? port : 3333;
 // standalone 对外链接（观战页、牌桌 URL）与监听端口一致
 if (!process.env.AGENT_WORLD_PUBLIC_URL?.trim()) {
   process.env.AGENT_WORLD_PUBLIC_URL = `http://127.0.0.1:${listenPort}`;
 }
-await app.listen({ port: listenPort, host: "0.0.0.0" });
-app.log.info(`agent-world standalone 监听 http://0.0.0.0:${listenPort} （WS /ws）`);
+try {
+  await app.listen({ port: listenPort, host: "0.0.0.0" });
+} catch (err) {
+  if (isDevListenConflict(err)) process.exit(0);
+  throw err;
+}
+app.log.info(`agent-world standalone http://0.0.0.0:${listenPort} (WS /ws)`);

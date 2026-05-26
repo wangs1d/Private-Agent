@@ -42,7 +42,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
   constructor() {
     const apiKey = process.env.MOONSHOT_API_KEY?.trim();
     const baseURL = (process.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1").trim();
-    this.model = (process.env.MOONSHOT_MODEL ?? "moonshot-v1-8k").trim();
+    this.model = (process.env.MOONSHOT_MODEL ?? "kimi-k2.5").trim();
     this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
   }
 

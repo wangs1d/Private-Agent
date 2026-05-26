@@ -1,5 +1,5 @@
 {
-  "description": "本地开发默认 URL（与 start-with-agent-world.ps1 / npm run dev:all 一致）",
+  "description": "本地开发默认 URL（与 npm run dev:all 一致）",
   "server": {
     "http": "http://127.0.0.1:3000",
     "ws": "ws://127.0.0.1:3000/ws",

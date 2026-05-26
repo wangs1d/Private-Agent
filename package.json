@@ -8,21 +8,30 @@
     "social-platform"
   ],
   "scripts": {
-    "dev": "npm run dev -w private-ai-agent-server",
-    "dev:all": "powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1",
+    "dev": "npm run dev:all",
+    "dev:server": "npm run dev:server -w private-ai-agent-server",
+    "dev:all": "node scripts/dev-all.mjs",
+    "dev:ports:free": "powershell -ExecutionPolicy Bypass -File ./scripts/free-dev-ports.ps1",
+    "dev:all:server": "npm run dev:server:watch -w private-ai-agent-server",
+    "dev:all:world": "cross-env AGENT_WORLD_STANDALONE_PORT=3333 AGENT_WORLD_PLACEHOLDER_REGISTER=1 ALLOW_WORLD_HTTP_MUTATIONS=1 npm run standalone -w @private-ai-agent/agent-world",
+    "dev:all:social": "cross-env PORT=3001 HOST=0.0.0.0 npm run dev -w social-platform",
     "build": "npm run build -w @private-ai-agent/agent-world && npm run build -w private-ai-agent-server && npm run build -w private-ai-agent-web",
     "test": "npm run test -w private-ai-agent-server",
     "agent-world": "npm run standalone -w @private-ai-agent/agent-world",
     "agent-world:dev": "npm run standalone -w @private-ai-agent/agent-world",
-    "server:dev": "npm run dev -w private-ai-agent-server",
+    "server:dev": "npm run dev:server -w private-ai-agent-server",
     "server:build": "npm run build -w private-ai-agent-server",
     "web:dev": "npm run dev -w private-ai-agent-web",
     "web:build": "npm run build -w private-ai-agent-web",
     "social:dev": "npm run dev -w social-platform",
     "social:build": "npm run build -w social-platform",
-    "start:full": "powershell -ExecutionPolicy Bypass -File ./start-with-agent-world.ps1"
+    "start:full": "npm run dev:all"
   },
   "dependencies": {
     "ollama": "^0.5.18"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3"
   }
 }

@@ -1,8 +1,10 @@
 import "package:flutter/material.dart";
 
 import "../../core/models/chat_models.dart";
+import "../../core/utils/content_summary_parser.dart";
 import "../../core/vision/vision_user_limits.dart";
 import "../../core/services/speech_service.dart";
+import "content_summary_card.dart";
 import "voice_mode_page.dart";
 
 class ChatPage extends StatefulWidget {
@@ -23,6 +25,7 @@ class ChatPage extends StatefulWidget {
     this.onToggleFullComputerAccess,
     this.onOpenBackgroundTasks,
     this.backgroundTasksBadgeCount = 0,
+    this.onOpenPhoneDialer,
   });
 
   final List<ChatMessage> messages;
@@ -45,10 +48,12 @@ class ChatPage extends StatefulWidget {
   /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
   final bool fullComputerAccessEnabled;
   final VoidCallback? onToggleFullComputerAccess;
-  /// 打开「后台子 Agent 任务」面板（对话框右上角）
+  /// 打开「后台子 Agent 任务」面板
   final VoidCallback? onOpenBackgroundTasks;
   /// 运行中后台任务数（用于角标）
   final int backgroundTasksBadgeCount;
+  /// 打开网络电话拨号面板
+  final VoidCallback? onOpenPhoneDialer;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -59,6 +64,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _isListening = false;
   String _recognizedText = "";
   final ScrollController _scrollController = ScrollController();
+  bool _isUserScrolling = false;
+  bool _hasNewAgentMessage = false;
   AnimationController? _breathingController;
   Animation<double>? _breathingAnimation;
   List<Map<String, dynamic>>? _cachedMessageGroups;
@@ -81,6 +88,30 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       parent: _breathingController!,
       curve: Curves.easeInOut,
     ));
+    // 监听滚动：检测用户是否在手动滚动
+    _scrollController.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final double maxScroll = _scrollController.position.maxScrollExtent;
+    final double currentScroll = _scrollController.position.pixels;
+    final double threshold = maxScroll - 100;
+
+    if (maxScroll - currentScroll > 100) {
+      // 用户向上滑动了（不在底部）
+      if (!_isUserScrolling) {
+        setState(() => _isUserScrolling = true);
+      }
+    } else {
+      // 用户滚动到底部了
+      if (_isUserScrolling) {
+        setState(() {
+          _isUserScrolling = false;
+          _hasNewAgentMessage = false;
+        });
+      }
+    }
   }
 
   @override
@@ -91,8 +122,22 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         widget.agentStatusLine != oldWidget.agentStatusLine) {
       _cachedMessageGroups = null;
     }
-    // 当消息列表长度变化时，自动滚动到底部
+
+    // 检测是否有新的 agent 消息
+    final bool hasNewAgentMessage = widget.messages.length > oldWidget.messages.length &&
+        widget.messages.isNotEmpty &&
+        widget.messages.last.role != "user";
+
+    // 用户在滑动时不自动滚动，标记有新消息
+    if (hasNewAgentMessage && _isUserScrolling) {
+      setState(() => _hasNewAgentMessage = true);
+      return;
+    }
+
+    // 用户没有主动滑动时，自动滚动到底部
     if (widget.messages.length != oldWidget.messages.length) {
+      _isUserScrolling = false;
+      _hasNewAgentMessage = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -103,34 +148,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         }
       });
     }
-    // 当Agent处理状态改变时（开始/结束），也尝试滚动到底部
-    if (widget.isAgentProcessing != oldWidget.isAgentProcessing) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    }
-    // 每次更新都检查是否需要滚动到底部（确保最新消息可见）
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        // 如果当前不在底部附近，则滚动到底部
-        final double maxScroll = _scrollController.position.maxScrollExtent;
-        final double currentScroll = _scrollController.position.pixels;
-        // 如果距离底部超过100像素，则滚动到底部
-        if (maxScroll - currentScroll > 100) {
-          _scrollController.animateTo(
-            maxScroll,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      }
-    });
   }
 
   @override
@@ -264,6 +281,37 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     );
   }
 
+  Widget _buildMessageText(
+    ColorScheme cs,
+    ChatMessage message, {
+    required bool isUser,
+    ContentSummaryParseResult? contentSummary,
+  }) {
+    if (isUser) {
+      return Text(
+        message.text,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: cs.onSurface,
+            ),
+      );
+    }
+
+    if (contentSummary?.summary != null) {
+      return ContentSummaryMessageBody(
+        summary: contentSummary!.summary!,
+        briefText: contentSummary.briefText,
+        extraText: contentSummary.cleanedText,
+      );
+    }
+
+    return Text(
+      message.text,
+      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: cs.onSurface,
+          ),
+    );
+  }
+
   /// 构建灰色链接显示组件
   Widget _buildGrayLinks(String text) {
     final RegExp urlRegex = RegExp(r'https?://\S+');
@@ -329,6 +377,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     final bool isUser = messageGroup['isUser'] as bool;
                     final mainMessage = messageGroup['main'] as ChatMessage;
                     final bool isProgress = messageGroup['isProgress'] as bool;
+                    final ContentSummaryParseResult? contentSummary = isUser
+                        ? null
+                        : ContentSummaryParser.parse(mainMessage.text);
                     
                     // 进度消息：特殊渲染
                     if (isProgress) {
@@ -382,14 +433,15 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         ],
                                       ),
                                     ),
-                                  Text(
-                                    mainMessage.text,
-                                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                          color: cs.onSurface,
-                                        ),
+                                  _buildMessageText(
+                                    cs,
+                                    mainMessage,
+                                    isUser: isUser,
+                                    contentSummary: contentSummary,
                                   ),
-                                  // 将agent消息中的链接显示为灰色
-                                  if (!isUser && mainMessage.text.contains(RegExp(r'https?://\S+')))
+                                  if (!isUser &&
+                                      contentSummary?.summary == null &&
+                                      mainMessage.text.contains(RegExp(r'https?://\S+')))
                                     Padding(
                                       padding: const EdgeInsets.only(top: 6),
                                       child: _buildGrayLinks(mainMessage.text),
@@ -402,12 +454,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         onOpen: widget.onOpenGomoku,
                                       ),
                                     ),
-                                  // 将agent消息中的链接显示为灰色
-                                  if (!isUser && mainMessage.text.contains(RegExp(r'https?://\S+')))
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 6),
-                                      child: _buildGrayLinks(mainMessage.text),
-                                    ),
                                 ],
                               ),
                             ),
@@ -416,60 +462,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       ),
                     );
                   },
-                ),
-                if (widget.onOpenBackgroundTasks != null)
-                  Positioned(
-                    top: 4,
-                    right: 4,
-                    child: Material(
-                      color: cs.surfaceContainerHigh.withValues(alpha: 0.94),
-                      elevation: 1,
-                      shadowColor: Colors.black26,
-                      borderRadius: BorderRadius.circular(20),
-                      child: IconButton(
-                        tooltip: "查看后台任务",
-                        visualDensity: VisualDensity.compact,
-                        onPressed: widget.onOpenBackgroundTasks,
-                        icon: Badge(
-                          isLabelVisible: widget.backgroundTasksBadgeCount > 0,
-                          label: Text(
-                            widget.backgroundTasksBadgeCount > 9
-                                ? "9+"
-                                : "${widget.backgroundTasksBadgeCount}",
-                          ),
-                          child: const Icon(Icons.pending_actions_outlined, size: 22),
-                        ),
-                      ),
-                    ),
-                  ),
-                // 滚动到底部按钮
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: AnimatedOpacity(
-                    opacity: _scrollController.hasClients && 
-                             _scrollController.position.pixels < _scrollController.position.maxScrollExtent - 100 
-                             ? 1.0 : 0.0,
-                    duration: const Duration(milliseconds: 300),
-                    child: IgnorePointer(
-                      ignoring: !(_scrollController.hasClients && 
-                                 _scrollController.position.pixels < _scrollController.position.maxScrollExtent - 100),
-                      child: FloatingActionButton.small(
-                        heroTag: 'scroll_to_bottom',
-                        onPressed: () {
-                          if (_scrollController.hasClients) {
-                            _scrollController.animateTo(
-                              _scrollController.position.maxScrollExtent,
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOut,
-                            );
-                          }
-                        },
-                        backgroundColor: cs.primaryContainer,
-                        child: Icon(Icons.arrow_downward, color: cs.onPrimaryContainer),
-                      ),
-                    ),
-                  ),
                 ),
               ],
             ),
@@ -539,6 +531,46 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 onPressed: widget.onClearGalleryImages,
                                 child: const Text("清除"),
                               ),
+                          ],
+                        ),
+                      ),
+                    // 滚动到底部按钮（用户滑动时显示）
+                    if (_isUserScrolling)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: <Widget>[
+                            if (_hasNewAgentMessage)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 12),
+                                child: Text(
+                                  "Agent 有新消息",
+                                  style: TextStyle(
+                                    color: cs.primary,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            FloatingActionButton.small(
+                              heroTag: 'scroll_to_bottom',
+                              onPressed: () {
+                                if (_scrollController.hasClients) {
+                                  setState(() {
+                                    _isUserScrolling = false;
+                                    _hasNewAgentMessage = false;
+                                  });
+                                  _scrollController.animateTo(
+                                    _scrollController.position.maxScrollExtent,
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeOut,
+                                  );
+                                }
+                              },
+                              backgroundColor: cs.primaryContainer,
+                              child: Icon(Icons.arrow_downward, color: cs.onPrimaryContainer),
+                            ),
                           ],
                         ),
                       ),
@@ -640,7 +672,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 ),
                               ],
                             ),
-                            // 第二行：加号 + 语音按钮
+                            // 第二行：加号 + 语音按钮 + 网络电话按钮
                             Padding(
                               padding: const EdgeInsets.only(top: 6),
                               child: Row(
@@ -685,6 +717,29 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       tooltip: '进入语音模式',
                                     ),
                                   ),
+                                  const SizedBox(width: 8),
+                                  // 网络电话按钮
+                                  if (widget.onOpenPhoneDialer != null)
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        color: cs.surfaceContainerHighest,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: IconButton(
+                                        icon: Icon(
+                                          Icons.phone_in_talk,
+                                          size: 18,
+                                          color: cs.onSurfaceVariant,
+                                        ),
+                                        onPressed: widget.onOpenPhoneDialer,
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 32,
+                                          minHeight: 32,
+                                        ),
+                                        tooltip: '网络电话',
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),

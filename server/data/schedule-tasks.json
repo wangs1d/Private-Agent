@@ -625,14 +625,15 @@
       "recurrence": "none",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-26T03:00:00.000Z",
-      "nextRunAt": "2026-05-26T03:00:00.000Z",
-      "status": "active",
+      "nextRunAt": null,
+      "status": "completed",
       "agentTask": {
         "prompt": "搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户",
         "accessMode": "sandbox"
       },
       "createdAt": "2026-05-25T17:43:39.703Z",
-      "updatedAt": "2026-05-25T17:43:39.703Z"
+      "updatedAt": "2026-05-26T06:47:44.098Z",
+      "lastRunAt": "2026-05-26T06:47:44.098Z"
     }
   ],
   "runs": [
@@ -861,6 +862,21 @@
         "title": "科技新闻早报",
         "prompt": "搜索今天的科技新闻（AI、互联网、数码产品等），整理3-5条重点，用简洁的方式发给用户",
         "text": "📰 **今日科技要闻（5月25日）**\n\n**1. 🔥 NVIDIA 开源 GPU 函数计算平台**  \nNVIDIA 以 Apache 2.0 协议开源 NVCF 平台，完整 GPU 函数计算代码全部开放，开发者可直接调用。\n\n**2. 💰 DeepSeek 融资 700 亿，AGI 优先于商业化**  \n国产大模型 DeepSeek 正推进新一轮 700 亿元融资，明确将 AGI 研发置于商业变现之上。\n\n**3. 📊 中国 AI 应用爆发：月访问量破 9 亿**  \n2026年4月国内 AI 应用 Web 端月活突破 9 亿，APP 下载量超 2.4 亿，日活同比增长 223%。\n\n**4. ⚠️ 浏览器安全漏洞：Chromium 关闭后 JS 仍可运行**  \n谷歌被曝泄露 Chromium 未修复漏洞，浏览器关闭后 JavaScript 仍能执行，涉及隐私风险。\n\n**5. 🤖 北京亦庄 AI+产业大会：AI 视觉进军高端制造**  \nAI 视觉技术开始规模化应用于半导体光罩纳米级缺陷检测，解决国产检测装备\"卡脖子\"问题。\n\n---\n*明天早上 8:00 继续自动推送 📩*"
+      }
+    },
+    {
+      "runId": "05989098-463d-4810-94bc-2beb8d89a20d",
+      "taskId": "62067c27-17a9-48b1-814a-b34f6cf1eabe",
+      "plannedAt": "2026-05-26T03:00:00.000Z",
+      "startedAt": "2026-05-26T06:47:44.093Z",
+      "endedAt": "2026-05-26T06:47:44.098Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "今日新闻推送",
+        "prompt": "搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户",
+        "text": "已收到：搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户。当前可用工具：search_web, fetch_web, info.search, info.read_webpage, info.inspect_webpage, info.navigate_site, clock.get_user_location, clock.get_current_time, clock.get_date, clock.format_timestamp, weather.get_local, care.set_important_date, care.get_important_dates, care.delete_important_date, agent.register_account, wallet.get_balance, wallet.transfer, wallet.get_transactions, wallet.recharge, wallet.purchase, agent.link.list_friends, agent.link.list_friend_requests, agent.link.send_friend_request, agent.link.respond_friend_request, agent.send_to_peer, phone.ensure_my_number, phone.virtual_call, phone.call_user, aip.dispatch, aip.list_my_state, aip.get_proposal, protocol.unified.quota_adjust, protocol.unified.memory_patch, protocol.unified.memory_get, protocol.unified.human_directive, protocol.unified.governance_probe, world.open_registry.get_challenge, world.open_registry.agent_quick, world.open_registry.submit, world.room.create, world.doudizhu.list_tables, world.doudizhu.create_table, world.doudizhu.join, world.doudizhu.leave, world.doudizhu.get_snapshot, world.doudizhu.play, world.doudizhu.subscribe_table, world.doudizhu.unsubscribe_table, world.zhajinhua.list_tables, world.zhajinhua.create_table, world.zhajinhua.join, world.zhajinhua.start_game, world.zhajinhua.act, world.zhajinhua.leave, world.zhajinhua.get_snapshot, world.zhajinhua.subscribe_table, world.zhajinhua.unsubscribe_table, world.gomoku.list_tables, world.gomoku.create_table, world.gomoku.join, world.gomoku.leave, world.gomoku.play, world.gomoku.get_snapshot, world.gomoku.subscribe_table, world.gomoku.unsubscribe_table, world.social.get_feed, world.social.post, world.social.comment, world.social.like_toggle, world.social.upload_media, world.social.delete_post, world.social.report, world.free_market.enter, world.free_market.list_skill_listings, world.free_market.purchase_skill, world.free_market.list_contracts, world.free_market.list_credit_audit, world.free_market.summarize_credit_audit, world.free_market.create_contract, world.free_market.accept_contract, world.free_market.deliver_contract, world.free_market.complete_contract, world.free_market.reject_delivery, world.free_market.cancel_contract, agent.query_capabilities, budget.calculate, shopping.suggest, reminder.plan, calendar.create_from_text, calendar.create_task, calendar.list_tasks, calendar.delete_task, vision.http_pull, vision.periodic_start, vision.periodic_stop, vision.periodic_stop_all, vision.periodic_list, desktop.visual.screenshot, desktop.visual.run_task, self.create_skill, self.update_skill, self.delete_skill, self.analyze_capabilities, self.generate_tool_template, self.list_custom_skills, self.generate_skill, self.generate_from_example, self.optimize_skill, self.record_interaction, self.analyze_improvements, self.get_suggestions, self.detect_skill_need, self.get_learning_stats, virtual-phone.get-status, agentworld.profile-get, agentworld.profile-update, virtual-phone.resolve-actor, agentworld.placeholder-quick, agentworld.get-challenge, virtual-phone.ensure-my-number, agentworld.submit-verification, agentworld.registration-status"
       }
     }
   ]

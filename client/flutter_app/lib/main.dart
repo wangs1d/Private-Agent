@@ -104,6 +104,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 记录被打断的回复内容，用于后续整合
   final List<String> _interruptedResponses = <String>[];
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
+  /// 网络电话悬浮按钮状态: null=无通话, ringing=正在呼叫, connected=已接通, ended=通话结束
+  String? _phoneCallStatus;
+  String? _phoneCallToActorId;
 
   @override
   void initState() {
@@ -478,43 +481,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         }
       }
       if (type == "agent.phone.incoming") {
-        SchedulerBinding.instance.addPostFrameCallback((Duration _) {
-          final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-          if (navCtx != null && navCtx.mounted) {
-            unawaited(
-              showVirtualPhoneIncomingDialog(
-                context: navCtx,
-                payload: payload,
-                onReply: (String replyText) {
-                  _sendUserMessage(replyText);
-                },
-              ),
-            );
-          }
+        // 来电使用悬浮按钮显示，移除了原来的弹窗
+        final String fromPhone = payload["fromPhone"]?.toString() ?? "";
+        final String callerLabel = fromPhone.isNotEmpty ? fromPhone : "未知来电";
+        setState(() {
+          _phoneCallStatus = "incoming";
+          _phoneCallToActorId = callerLabel;
         });
       }
       if (type == "agent.phone.call_status") {
         final String status = payload["status"]?.toString() ?? "unknown";
         final String toActorId = payload["toActorId"]?.toString() ?? "";
-        String statusMsg = "";
-        switch (status) {
-          case "ringing":
-            statusMsg = "📞 正在呼叫 Agent${toActorId.isNotEmpty ? " ($toActorId)" : ""}…";
-            break;
-          case "connected":
-            statusMsg = "📞 已接通";
-            break;
-          case "ended":
-            statusMsg = "📞 通话已结束";
-            break;
-          default:
-            statusMsg = "📞 通话状态: $status";
-        }
-        if (mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            SnackBar(content: Text(statusMsg), duration: const Duration(seconds: 3)),
-          );
-        }
+        setState(() {
+          _phoneCallToActorId = toActorId.isNotEmpty ? toActorId : null;
+          if (status == "ended") {
+            // 通话结束后延迟清除状态，让用户看到结束状态
+            Future.delayed(const Duration(seconds: 2), () {
+              if (mounted) {
+                setState(() {
+                  _phoneCallStatus = null;
+                  _phoneCallToActorId = null;
+                });
+              }
+            });
+          }
+          _phoneCallStatus = status;
+        });
       }
       if (type == "desktop.bridge.sync") {
         final bool? on = payload["bridgeOnline"] as bool?;
@@ -1709,72 +1701,85 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       home: Builder(
         builder: (BuildContext context) {
           return Scaffold(
-            body: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+            body: Stack(
               children: <Widget>[
-                Expanded(
-                  flex: 0,
-                  child: AnimatedCrossFade(
-                    duration: const Duration(milliseconds: 240),
-                    reverseDuration: const Duration(milliseconds: 240),
-                    sizeCurve: Curves.easeInOutCubic,
-                    firstCurve: Curves.easeInOutCubic,
-                    secondCurve: Curves.easeInOutCubic,
-                    alignment: Alignment.topLeft,
-                    crossFadeState: _railExpanded
-                        ? CrossFadeState.showSecond
-                        : CrossFadeState.showFirst,
-                    firstChild: KeyedSubtree(
-                      key: const ValueKey<String>("rail_mini"),
-                      child: _buildCollapsedMiniSidebar(),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    Expanded(
+                      flex: 0,
+                      child: AnimatedCrossFade(
+                        duration: const Duration(milliseconds: 240),
+                        reverseDuration: const Duration(milliseconds: 240),
+                        sizeCurve: Curves.easeInOutCubic,
+                        firstCurve: Curves.easeInOutCubic,
+                        secondCurve: Curves.easeInOutCubic,
+                        alignment: Alignment.topLeft,
+                        crossFadeState: _railExpanded
+                            ? CrossFadeState.showSecond
+                            : CrossFadeState.showFirst,
+                        firstChild: KeyedSubtree(
+                          key: const ValueKey<String>("rail_mini"),
+                          child: _buildCollapsedMiniSidebar(),
+                        ),
+                        secondChild: KeyedSubtree(
+                          key: const ValueKey<String>("rail_expanded"),
+                          child: _buildExpandedSidebar(),
+                        ),
+                      ),
                     ),
-                    secondChild: KeyedSubtree(
-                      key: const ValueKey<String>("rail_expanded"),
-                      child: _buildExpandedSidebar(),
+                    const VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: AppPalette.sidebarSeparator,
                     ),
-                  ),
-                ),
-                const VerticalDivider(
-                  width: 1,
-                  thickness: 1,
-                  color: AppPalette.sidebarSeparator,
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: <Widget>[
-                      AppBar(
-                        automaticallyImplyLeading: false,
-                        title: _buildAppBarTitle(),
-                        actions: <Widget>[
-                          IconButton(
-                            tooltip: "网络电话",
-                            icon: const Icon(Icons.phone_in_talk),
-                            onPressed: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute<PhoneDialerPage>(
-                                  builder: (BuildContext ctx) => PhoneDialerPage(
-                                    onCallSent: (String agentId, String? message) {
-                                      _callAgentViaPhone(agentId, message);
-                                    },
-                                    onCallMyAgent: (String? message) {
-                                      _callMyAgentViaPhone(message);
-                                    },
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          AppBar(
+                            automaticallyImplyLeading: false,
+                            title: _buildAppBarTitle(),
+                            actions: <Widget>[
+                              IconButton(
+                                tooltip: "查看后台任务",
+                                icon: Badge(
+                                  isLabelVisible: _backgroundTasksBadgeCount > 0,
+                                  label: Text(
+                                    _backgroundTasksBadgeCount > 9
+                                        ? "9+"
+                                        : "${_backgroundTasksBadgeCount}",
                                   ),
+                                  child: const Icon(Icons.pending_actions_outlined),
                                 ),
-                              );
-                            },
+                                onPressed: () => _openBackgroundTasksPanel(context),
+                              ),
+                            ],
+                          ),
+                          Expanded(
+                            child: MainPanel(
+                              child: _buildTabStack(),
+                            ),
                           ),
                         ],
                       ),
-                      Expanded(
-                        child: MainPanel(
-                          child: _buildTabStack(),
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
+                // 网络电话悬浮按钮
+                if (_phoneCallStatus != null)
+                  PhoneCallFloatingButton(
+                    status: _phoneCallStatus!,
+                    toActorId: _phoneCallToActorId,
+                    onHangUp: () {
+                      // 发送挂断消息
+                      _ws.sendEvent("phone.hangup", {});
+                      setState(() {
+                        _phoneCallStatus = null;
+                        _phoneCallToActorId = null;
+                      });
+                    },
+                  ),
               ],
             ),
           );
@@ -1796,8 +1801,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               messages: _messages,
               controller: _inputController,
               onSend: _sendMessage,
-              onOpenBackgroundTasks: () => _openBackgroundTasksPanel(context),
-              backgroundTasksBadgeCount: _backgroundTasksBadgeCount,
               agentName: _agentName,
               galleryPendingCount: _pendingGalleryFrames.length,
               onPickGalleryImage: _pickGalleryImage,
@@ -1829,6 +1832,20 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     builder: (context) => VoiceModePage(
                       onExit: () {
                         Navigator.of(context).pop();
+                      },
+                    ),
+                  ),
+                );
+              },
+              onOpenPhoneDialer: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<PhoneDialerPage>(
+                    builder: (BuildContext ctx) => PhoneDialerPage(
+                      onCallSent: (String agentId, String? message) {
+                        _callAgentViaPhone(agentId, message);
+                      },
+                      onCallMyAgent: (String? message) {
+                        _callMyAgentViaPhone(message);
                       },
                     ),
                   ),
