@@ -25,7 +25,24 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
     "desktop.visual.screenshot",
     "desktop.visual.run_task",
   ],
-  creative: ["search_web", "fetch_web"],
+  creative: [
+    "search_web",
+    "fetch_web",
+    "info.search",
+    "info.read_webpage",
+    "info.inspect_webpage",
+    "info.navigate_site",
+    "shopping.suggest",
+    "weather.get_local",
+    "care.get_important_dates",
+    "self.list_custom_skills",
+    "self.create_skill",
+    "self.update_skill",
+    "self.generate_skill",
+    "self.generate_from_example",
+    "self.generate_tool_template",
+    "self.analyze_capabilities",
+  ],
   tech: [
     "desktop.visual.screenshot",
     "desktop.visual.run_task",
@@ -51,7 +68,7 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
 };
 
 export function getSubAgentToolAllowlist(type: SubAgentType): readonly string[] | null {
-  if (type === "life" || type === "general") return null;
+  if (type === "life") return null;
   return SUB_AGENT_TOOL_ALLOWLISTS[type] ?? [];
 }
 
@@ -62,9 +79,6 @@ export function buildSubAgentAllowedRegistryNames(
   lifeFilter?: (tools: readonly string[], taskText: string) => string[],
 ): Set<string> {
   const shared = [...SUBAGENT_SHARED_REGISTRY_TOOLS];
-  if (type === "general") {
-    return new Set([...shared, ...dynamicTools]);
-  }
   if (type === "life") {
     const filtered = lifeFilter ? lifeFilter(dynamicTools, taskText) : [...dynamicTools];
     return new Set([...shared, ...filtered]);

@@ -14,7 +14,7 @@ const SUMMARY_ENABLED_TOOLS = new Set([
   "info.navigate_site",
 ]);
 
-const CONTENT_LENGTH_THRESHOLD = 500;
+const CONTENT_LENGTH_THRESHOLD = 600;
 
 export interface ToolResultProcessorOptions {
   enabled?: boolean;
@@ -70,6 +70,14 @@ export class ToolResultProcessor {
 
   processAssistantText(text: string): string {
     if (!this.options.enabled) {
+      return text;
+    }
+
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.length < 280) {
+      return text;
+    }
+    if (trimmed.includes("[CONTENT_SUMMARY_V2_START]")) {
       return text;
     }
 

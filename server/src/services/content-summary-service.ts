@@ -96,7 +96,7 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
   },
   data: { 
     icon: "📊", 
-    label: "数据",
+    label: "调研报告",
     cardIcon: "☰",
     briefIcons: ["📈", "📉", "🗂️", "📌", "🔢"]
   },
@@ -128,8 +128,79 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
 
 const SUMMARY_THRESHOLD = 350;
 
+/** 调研报告：主区展示结论类板块，数据类板块仅进详情卡 */
+const CONCLUSION_SECTION_RE =
+  /结论|核心|要点|建议|总结|发现|概要|摘要|研判|观点|executive|summary|conclusion/i;
+const DATA_SUPPORT_SECTION_RE =
+  /数据|附录|来源|引用|表格|统计|明细|支撑|证据|样本|方法论|链接|原始|附录|chart|table|source/i;
+
+const CONTENT_SUMMARY_MARKER = "[CONTENT_SUMMARY_V2_START]";
+
 function generateId(): string {
   return `sum-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function looksLikeCapabilityOrToolDump(content: string): boolean {
+  const lineCount = content.split("\n").length;
+  if (lineCount < 6) return false;
+  return (
+    /当前可用.*工具|【宿主能力|【Agent World】|wallet\.|search_web|master_invoke/.test(
+      content,
+    ) && lineCount >= 8
+  );
+}
+
+/**
+ * 仅对「值得折叠」的长内容启用摘要卡，避免普通长回复频繁出现折叠框。
+ */
+export function isEligibleForSummaryCard(
+  category: ContentCategory,
+  content: string,
+  features: {
+    hasSections: boolean;
+    hasList: boolean;
+    hasTable: boolean;
+    lineCount: number;
+    sectionCount: number;
+    listItemCount: number;
+  },
+): boolean {
+  const len = content.length;
+  const { hasSections, hasList, hasTable, lineCount, sectionCount, listItemCount } =
+    features;
+
+  if (len < 280) return false;
+
+  switch (category) {
+    case "news":
+      return len >= 350 || /日报|新闻简报|资讯速递|早报|晚报/.test(content);
+    case "data":
+      return (
+        len >= 400 ||
+        /调研|研究报告|分析报告|行业报告|竞品分析|数据支撑/.test(content)
+      );
+    case "list":
+      return (
+        hasList &&
+        listItemCount >= 5 &&
+        (lineCount >= 8 || /步骤|教程|操作指引|如何|第一步|流程/.test(content))
+      );
+    case "multi_section":
+      return len >= 700 && sectionCount >= 3;
+    case "table":
+      return len >= 650 && hasTable;
+    case "search_result":
+      return len >= 950;
+    case "article":
+      return len >= 1100;
+    case "webpage":
+    case "document":
+      return len >= 850;
+    case "code":
+      return len >= 900 && lineCount >= 20;
+    default:
+      return len >= 1500 && (hasSections || hasList);
+  }
 }
 
 function detectContentType(content: string): {
@@ -140,6 +211,8 @@ function detectContentType(content: string): {
     hasTable: boolean;
     hasLongParagraphs: boolean;
     lineCount: number;
+    sectionCount: number;
+    listItemCount: number;
   };
 } {
   const lines = content.split("\n");
@@ -208,6 +281,11 @@ function detectContentType(content: string): {
     category = "list";
   } else if (hasLongParagraphs && lineCount < 10) {
     category = "article";
+  } else if (
+    /调研|研究报告|分析报告|行业报告|竞品分析/.test(content) ||
+    (/核心结论|数据支撑|研究结论/.test(content) && (hasSections || hasTable))
+  ) {
+    category = "data";
   } else if (content.includes("新闻") || content.includes("最新") || content.includes("日报")) {
     category = "news";
   } else if (content.includes("搜索") || content.includes("结果")) {
@@ -222,6 +300,8 @@ function detectContentType(content: string): {
       hasTable,
       hasLongParagraphs,
       lineCount,
+      sectionCount,
+      listItemCount,
     }
   };
 }
@@ -229,8 +309,14 @@ function detectContentType(content: string): {
 function detectCategory(content: string, source?: string): ContentCategory {
   const lowerSource = (source ?? "").toLowerCase();
 
-  if (lowerSource.includes("news") || lowerSource.includes("search")) {
-    return lowerSource.includes("news") ? "news" : "search_result";
+  if (lowerSource.includes("news")) return "news";
+  if (lowerSource.includes("search")) return "search_result";
+  if (
+    lowerSource.includes("report") ||
+    lowerSource.includes("research") ||
+    lowerSource.includes("survey")
+  ) {
+    return "data";
   }
 
   return detectContentType(content).category;
@@ -313,7 +399,71 @@ function parseSections(content: string): ParsedSection[] {
   return sections.length > 0 ? sections : [{ title: "", items: lines.filter(l => l.trim()), rawText: content }];
 }
 
+function extractResearchBriefPoints(
+  content: string,
+  maxCount: number = 8,
+): BriefPoint[] {
+  const config = CATEGORY_CONFIG.data;
+  const icons = config.briefIcons;
+  const points: BriefPoint[] = [];
+  const sections = parseSections(content);
+  let index = 0;
+
+  const pushText = (text: string, sectionTitle?: string) => {
+    if (index >= maxCount) return;
+    const clean = text.trim();
+    if (clean.length < 6) return;
+    const limit = 320;
+    points.push({
+      icon: icons[index % icons.length],
+      text: clean.length > limit ? `${clean.slice(0, limit - 3)}...` : clean,
+      section: sectionTitle,
+    });
+    index++;
+  };
+
+  for (const section of sections) {
+    const title = section.title.trim();
+    if (title && DATA_SUPPORT_SECTION_RE.test(title)) {
+      continue;
+    }
+
+    const isConclusion =
+      !title || CONCLUSION_SECTION_RE.test(title) || points.length === 0;
+
+    if (!isConclusion) continue;
+
+    if (title) {
+      pushText(`【${title}】`, title);
+    }
+    for (const item of section.items) {
+      if (index >= maxCount) break;
+      pushText(item, title || undefined);
+    }
+  }
+
+  if (points.length > 0) {
+    return points;
+  }
+
+  const sentences = content
+    .split(/[。！？.!?;\n]/)
+    .filter((s) => s.trim().length > 10);
+  for (let i = 0; i < Math.min(sentences.length, maxCount); i++) {
+    const sentence = sentences[i].trim();
+    points.push({
+      icon: icons[i % icons.length],
+      text: sentence.length > 200 ? `${sentence.slice(0, 197)}...` : sentence,
+    });
+  }
+  return points;
+}
+
 function extractBriefPoints(content: string, category: ContentCategory, maxCount: number = 6): BriefPoint[] {
+  if (category === "data") {
+    return extractResearchBriefPoints(content, Math.max(maxCount, 8));
+  }
+
   const config = CATEGORY_CONFIG[category];
   const icons = config.briefIcons;
   const points: BriefPoint[] = [];
@@ -421,20 +571,27 @@ export function createContentSummary(
     return null;
   }
 
-  const contentType = detectContentType(content);
-  const shouldSummarize = forceSummary || 
-    content.length > maxLength ||
-    contentType.features.hasSections ||
-    (contentType.features.lineCount > 15 && contentType.features.hasList);
-
-  if (!shouldSummarize) {
+  if (content.includes(CONTENT_SUMMARY_MARKER) || looksLikeCapabilityOrToolDump(content)) {
     return null;
   }
 
+  const contentType = detectContentType(content);
   const category = detectCategory(content, source);
+
+  const eligible =
+    forceSummary ||
+    isEligibleForSummaryCard(category, content, contentType.features);
+
+  if (!eligible) {
+    return null;
+  }
+
   const config = CATEGORY_CONFIG[category];
 
   const briefPoints = extractBriefPoints(content, category, briefPointCount);
+  if (briefPoints.length === 0) {
+    return null;
+  }
   
   let sections: SectionInfo[] | undefined;
   if (contentType.features.hasSections) {
@@ -495,10 +652,13 @@ ${briefText}
 <details_card ref="${summary.id}" />`;
 }
 
-export function shouldSummarizeContent(content: string, threshold: number = SUMMARY_THRESHOLD): boolean {
-  if (content.length > threshold) return true;
-  
+export function shouldSummarizeContent(content: string, _threshold: number = SUMMARY_THRESHOLD): boolean {
+  if (!content?.trim()) return false;
+  if (content.includes(CONTENT_SUMMARY_MARKER)) return false;
+  if (looksLikeCapabilityOrToolDump(content)) return false;
+  if (content.length < 280) return false;
+
   const contentType = detectContentType(content);
-  return contentType.features.hasSections || 
-         (contentType.features.lineCount > 12 && contentType.features.hasList);
+  const category = detectCategory(content);
+  return isEligibleForSummaryCard(category, content, contentType.features);
 }

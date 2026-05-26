@@ -1,12 +1,11 @@
-/** 子 Agent 类型 — 按能力维度划分（6个核心） */
+/** 子 Agent 类型 — 按能力维度划分（5个核心） */
 
 export type SubAgentType =
   | "life"
   | "tech"
   | "info"
   | "creative"
-  | "security"
-  | "general";
+  | "security";
 
 export interface SubAgentResult {
   taskId: string;

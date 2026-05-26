@@ -190,17 +190,20 @@ export class MasterAgentCoordinator {
   }
 
   /**
-   * 初始化 4 个核心子 Agent（按能力维度划分）
+   * 初始化 5 个核心子 Agent（按能力维度划分）
    *
    * 设计理念：
-   * - life  → 生活全能：钱包全操作 + 社交 + 日常 + 娱乐 + 视觉操控(通用)
-   * - tech  → 技术操控：深度RPA自动化 + 代码开发 + 系统运维 + 视觉操控(通用)
-   * - info  → 信息检索：搜索比价调研（只查不买）
-   * - general → 兜底
+   * - life  → 复杂生活操作：钱包写操作(转帐/消费50+类/充值) + 视觉操控(电脑) + 游戏
+   * - tech  → 技术操控：深度RPA自动化 + 代码开发 + 系统运维 + 视觉操控(深度)
+   * - info  → 信息检索：深度搜索比价调研（只查不买）
+   * - creative → 创意内容：专业文案策划写作翻译润色（深度调研+内容模板工具链）
+   * - security → 安全审计：风险检测/权限审批/异常拦截
    *
-   * 视觉操控（desktop.visual.run_task）是通用基础设施：
-   * 所有拥有 desktop/visual 工具白名单的子Agent都能使用。
-   * 区别仅在于使用的场景：
+   * ⚠️ 主 agent 拥有基本能力（查天气/查余额/设日程/好友管理/搜信息），自己先处理。
+   * 只有涉及以上子 agent 专属能力时才委派。
+   *
+   * 视觉操控（desktop.visual.run_task）仅 life / tech 子 Agent 拥有：
+   * 区域仅在于使用的场景：
    * - life: 偶尔用（订酒店时顺手操作网站）
    * - tech: 深度用（复杂自动化流程、批量操作、长时间运行）
    */
@@ -210,48 +213,54 @@ export class MasterAgentCoordinator {
     const map = new Map<SubAgentType, SubAgentCapability>();
 
     // ──────────────────────────────────────────────
-    // 🏠 life 生活全能助手（合并原 life + finance + entertainment + social + work）
+    // 🏠 life 生活全能助手
     //
-    // 这是用户最常用的子Agent，具备：
-    // 💰 钱包全部操作（转账/消费50+类别/充值/查询）
-    // 🖥️ 视觉操控电脑（可直接操作网站完成真实预订）
-    // 💬 社交互动（好友/消息/红包）
-    // ⏰ 日常生活（天气/日程/提醒）
-    // 🎮 娱乐休闲（游戏对局）
+    // ⚠️ 与主 agent 的区别：
+    // 主 agent 拥有基本生活能力（查天气/查余额/设日程/好友管理/搜信息）
+    // life 子 agent 用于处理主 agent 无法直接完成的**复杂生活操作**：
     //
-    // 用户说任何消费/生活相关的事 → life 直接处理
-    // 不需要判断"这是哪个category"→ Agent 自己决定用什么工具
+    // 💰 钱包写操作（主 agent 只读）：
+    //   - wallet.transfer / wallet.recharge / wallet.purchase
+    //   - 全场景消费（外卖/酒店/打车/电影票/网购/缴费/红包等50+类别）
+    //
+    // 🖥️ 视觉操控电脑（主 agent 无此权限）：
+    //   - desktop.visual.run_task / desktop.visual.screenshot
+    //   - 需要真实操作网站/App时使用（打开携程订酒店、淘宝下单等）
+    //
+    // 🎮 娱乐对局（主 agent 无此权限）：
+    //   - 五子棋、斗地主、炸金花等游戏
+    //
+    // 委派时机：只有涉及以上能力时才委派 life，简单查询由主 agent 直接处理。
     // ──────────────────────────────────────────────
     map.set("life", {
       type: "life",
       name: "生活全能助手",
       description: [
-        "【生活全能 — 一个Agent搞定所有日常事务】",
+        "【生活全能 — 处理复杂生活操作】",
         "",
-        "💰 钱包能力（wallet.* 全部工具）：",
-        "- wallet.get_balance / wallet.get_transactions：查余额、看流水",
+        "主 agent 能做的（不需要委派给我）：",
+        "- 查天气、查日程、查余额、看流水",
+        "- 管理好友、发送消息、设提醒",
+        "- 搜索信息、比价查询",
+        "",
+        "我只处理主 agent 做不到的复杂操作：",
+        "",
+        "💰 钱包写操作：",
         "- wallet.transfer：向好友转账（需好友关系验证）",
         "- wallet.recharge：充值",
-        "- wallet.purchase：**全场景消费**，支持50+类别，包括但不限于：",
-        "  🍱 外卖点餐(美团/饿了么) · 🍽️ 到店餐饮",
-        "  🏨 酒店预订(携程/Booking) · 🚕 打车出行(滴滴)",
-        "  ✈️ 机票火车票(12306/航司) · 🎬 电影票(猫眼/淘票票)",
-        "  🎤 演唱会/体育赛事门票 · 🛒 网购购物(淘宝/京东)",
-        "  📱 话费/电费/水费/燃气/宽带缴费",
-        "  💊 药品/医疗 · 🐾 宠物用品医疗 · 🧹 家政保洁维修",
-        "  🎁 礼品鲜花 · 🧧 红包转账 · ❤️‍🩹 公益捐赠",
-        "  💄 美妆SPA美发 · 🎮 游戏充值 · ⭐ 会员订阅",
-        "  🛡️ 保险理财投资 · 📚 教育课程图书",
+        "- wallet.purchase：**全场景消费**，支持50+类别：",
+        "  🍱 外卖点餐 · 🍽️ 到店餐饮 · 🏨 酒店预订",
+        "  🚕 打车出行 · ✈️ 机票火车票 · 🎬 电影票",
+        "  🛒 网购购物 · 📱 各类缴费 · 💊 药品医疗",
+        "  🎁 礼品鲜花 · 🧹 家政维修 · 🎮 游戏充值",
         "  ...以及所有其他可购买的服务和商品",
         "",
-        "🖥️ 视觉操控（通用基础设施工具）：",
-        "- desktop.visual.run_task 是通用能力，life 可以在需要时使用",
-        "- 典型场景：需要真实操作网站/App时（打开携程订酒店、淘宝下单等）",
-        "- 像人一样看屏幕、操作鼠标键盘完成任务",
+        "🖥️ 视觉操控（主 agent 无此能力）：",
+        "- 需要真实操作网站/App时使用",
+        "- 打开携程订酒店、淘宝下单、操作任何网站/软件",
+        "- 像人一样看屏幕、操作鼠标键盘",
         "",
-        "💬 社交能力：好友消息、动态、红包",
-        "⏰ 日常能力：天气查询、日程管理、提醒闹钟",
-        "🎮 娱乐能力：五子棋、斗地主、炸金花等游戏对局",
+        "🎮 娱乐对局：五子棋、斗地主、炸金花等游戏",
       ].join("\n"),
       keywords: [
         "买", "购", "订", "预订", "下单", "支付", "花钱", "消费",
@@ -262,7 +271,7 @@ export class MasterAgentCoordinator {
         "电影票", "演唱会", "演出", "展览", "门票",
         "网购", "淘宝", "京东", "拼多多", "购物",
         "缴费", "话费", "电费", "水费", "燃气", "宽带",
-        "转账", "汇款", "充值", "红包", "余额",
+        "转账", "汇款", "充值", "红包",
         "礼物", "礼品", "鲜花", "捐赠", "捐款",
         "健康", "医疗", "药品", "健身", "体检",
         "宠物", "猫粮", "狗粮", "宠物医院",
@@ -272,25 +281,18 @@ export class MasterAgentCoordinator {
         "保险", "理财", "基金", "股票", "投资",
         "教育", "课程", "培训", "图书",
         "办公", "打印", "复印", "快递", "寄件",
-        "帮我买", "帮我订", "帮我看下", "多少钱",
+        "帮我买", "帮我订",
         "在电脑上", "打开网站", "操作电脑",
-        "朋友", "社交", "消息", "聊天",
-        "天气", "日程", "提醒", "闹钟",
         "五子棋", "斗地主", "炸金花",
       ],
       tools: [
         ...by("wallet", "fund", "market", "shop", "purchase", "a2a", "trade"),
         ...by("desktop", "visual", "vision"),
-        ...by("social", "relay", "message", "chat", "friend"),
-        ...allTools.filter((t) => t.startsWith("clock.")),
-        ...by("calendar", "schedule", "weather", "reminder", "alarm"),
         ...by("gomoku", "music", "video", "doudizhu", "zhajinhua"),
       ],
       capabilities: [
         "wallet",
         "purchase",
-        "social",
-        "daily_life",
         "entertainment",
       ],
     });
@@ -486,16 +488,11 @@ export class MasterAgentCoordinator {
     });
 
     // ──────────────────────────────────────────────
-    // 🤖 general 通用助手（兜底）
+    // 🤖 取消 general 通用助手（兜底）
+    // 设计原则：主 agent 拥有基本能力，明确需要子 agent 专业能力时才委派。
+    // 不再需要 general 作为兜底——能用主 agent 搞定的就不委派，
+    // 搞不定的就由对应的专业子 agent 处理。
     // ──────────────────────────────────────────────
-    map.set("general", {
-      type: "general",
-      name: "通用助手",
-      description: "处理其他未分类任务和兜底所有无法归类的场景。拥有全部工具权限。",
-      keywords: [],
-      tools: allTools,
-      capabilities: [],
-    });
     return map;
   }
 
@@ -1445,7 +1442,7 @@ export class MasterAgentCoordinator {
   }
 
   public getSubAgentMetricsSnapshot(): Record<SubAgentType, SubAgentPerformanceMetrics> {
-    const types: SubAgentType[] = ["life", "tech", "info", "creative", "security", "general"];
+    const types: SubAgentType[] = ["life", "tech", "info", "creative", "security"];
     const out = {} as Record<SubAgentType, SubAgentPerformanceMetrics>;
     for (const t of types) {
       out[t] = this.subAgentMetrics.get(t) ?? this.emptySubAgentMetrics();

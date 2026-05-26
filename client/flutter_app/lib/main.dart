@@ -1838,18 +1838,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 );
               },
               onOpenPhoneDialer: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute<PhoneDialerPage>(
-                    builder: (BuildContext ctx) => PhoneDialerPage(
-                      onCallSent: (String agentId, String? message) {
-                        _callAgentViaPhone(agentId, message);
-                      },
-                      onCallMyAgent: (String? message) {
-                        _callMyAgentViaPhone(message);
-                      },
-                    ),
-                  ),
-                );
+                _callMyAgentViaPhone(null);
               },
             ),
             MailboxPage(api: _worldApi),

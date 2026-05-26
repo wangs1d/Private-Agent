@@ -85,5 +85,4 @@ export const SUB_AGENT_PROMPT_PROFILES: Record<SubAgentType, SubAgentPromptProfi
     includeNarrativeRecall: false,
     includeMemorySummary: false,
   },
-  general: FULL_PROFILE,
 };

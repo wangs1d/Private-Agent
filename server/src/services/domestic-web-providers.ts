@@ -234,13 +234,7 @@ const SEARCH_STOPWORDS = new Set([
 export function filterItemsByRelevance(items: InfoSearchItem[], query: string): InfoSearchItem[] {
   const anchors = extractRelevanceAnchors(query);
   if (anchors.length === 0) return items;
-  const required = [...anchors].sort((a, b) => b.length - a.length)[0]!;
-  if (required.length >= 3) {
-    return items.filter((item) => {
-      const hay = `${item.title}\n${item.snippet}`;
-      return hay.includes(required);
-    });
-  }
+  // 对所有长度的 anchors 都使用 OR 逻辑：结果只需包含任一 anchor 即可
   return items.filter((item) => {
     const hay = `${item.title}\n${item.snippet}`;
     return anchors.some((a) => hay.includes(a));
