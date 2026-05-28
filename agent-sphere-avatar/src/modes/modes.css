@@ -1,3 +1,14 @@
+/* 嵌入聊天 / Flutter：仅球体实体，无页面底框 */
+html.embed-root,
+html.embed-root body,
+html.embed-root #root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent !important;
+}
+
 .mode-shell {
   width: 100%;
   height: 100%;
@@ -6,7 +17,7 @@
 }
 
 .mode-embed {
-  background: radial-gradient(circle at 50% 35%, rgba(30, 36, 48, 0.95), rgba(12, 14, 20, 0.98));
+  background: transparent !important;
 }
 
 .mode-overlay {

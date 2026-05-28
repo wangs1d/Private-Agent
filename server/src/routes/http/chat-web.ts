@@ -64,6 +64,24 @@ export function registerChatWeb(app: FastifyInstance): void {
     return readFileSync(full);
   });
 
+  /**
+   * Vite 构建的 embed/overlay HTML 引用根路径 `/assets/*`；
+   * 映射到 `server/web/chat/assets/avatar/assets/*` 以便 iframe 能加载脚本。
+   */
+  app.get<{ Params: { "*": string } }>("/assets/*", async (req, reply) => {
+    const raw = req.params["*"] ?? "";
+    if (!raw || raw.includes("..") || !/^[a-zA-Z0-9/._-]+$/.test(raw)) {
+      return reply.code(400).send("Invalid path");
+    }
+    const full = resolve(avatarRoot, "assets", raw);
+    if (!full.startsWith(resolve(avatarRoot, "assets")) || !existsSync(full)) {
+      return reply.code(404).send("Not found");
+    }
+    const ct = contentTypeFor(raw);
+    if (ct) void reply.type(ct);
+    return readFileSync(full);
+  });
+
   /** Agent Sphere 3D 形象构建产物：`/chat/assets/avatar/*` */
   app.get<{ Params: { "*": string } }>("/chat/assets/avatar/*", async (req, reply) => {
     const raw = req.params["*"] ?? "";

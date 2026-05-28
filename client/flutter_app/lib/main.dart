@@ -27,6 +27,7 @@ import "features/mailbox/agent_mailbox_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
+import "features/chat/floating_agent_sphere.dart";
 import "features/chat/voice_mode_page.dart";
 import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
@@ -1559,9 +1560,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    Expanded(
-                      flex: 0,
-                      child: AnimatedCrossFade(
+                    AnimatedCrossFade(
                         duration: const Duration(milliseconds: 240),
                         reverseDuration: const Duration(milliseconds: 240),
                         sizeCurve: Curves.easeInOutCubic,
@@ -1580,7 +1579,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                           child: _buildExpandedSidebar(),
                         ),
                       ),
-                    ),
                     const VerticalDivider(
                       width: 1,
                       thickness: 1,
@@ -1637,6 +1635,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     ),
                   ],
                 ),
+                const FloatingAgentSphere(),
                 // 网络电话悬浮按钮
                 if (_phoneCallStatus != null)
                   PhoneCallFloatingButton(
@@ -1668,7 +1667,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   /// 根级 Tab 栈：新增页请在 `_kTabTitles`、`IndexedStack`、侧栏 `miniTab` 同步索引。
-  /// 3D 球形 Agent 为桌面桌宠（sphere-overlay），启动时自动打开；AppBar 🤖 可手动重开。
+  /// 3D 球形 Agent 为页面内可拖动悬浮层；Windows 另可 AppBar 启动 sphere-overlay 桌宠。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {

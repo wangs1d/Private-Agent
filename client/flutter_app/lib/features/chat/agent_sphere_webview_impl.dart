@@ -7,14 +7,20 @@ class AgentSphereWebView extends StatelessWidget {
   const AgentSphereWebView({
     super.key,
     this.showOverlayButton = true,
+    this.onDragDelta,
+    this.onDragStart,
+    this.onDragEnd,
   });
 
   final bool showOverlayButton;
+  final ValueChanged<Offset>? onDragDelta;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFF0D1018),
+      color: Colors.transparent,
       alignment: Alignment.center,
       child: Text(
         "3D Agent 需 Web 或 Windows 客户端",

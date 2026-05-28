@@ -39,16 +39,20 @@ export function SphereAgentScene({
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
   const transparentBg = isOverlay || isEmbed;
+  const isDemo = mode === "demo";
 
   return (
     <Canvas
-      shadows={!isOverlay}
+      shadows={isDemo}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: transparentBg }}
       style={{ background: transparentBg ? "transparent" : undefined }}
+      onCreated={({ gl }) => {
+        if (transparentBg) gl.setClearColor(0x000000, 0);
+      }}
     >
       {!transparentBg && <color attach="background" args={["#07090f"]} />}
-      {!isOverlay && <fog attach="fog" args={["#07090f", 6, 18]} />}
+      {isDemo && <fog attach="fog" args={["#07090f", 6, 18]} />}
 
       <PerspectiveCamera
         makeDefault
@@ -64,7 +68,8 @@ export function SphereAgentScene({
           minPolarAngle={Math.PI * 0.22}
           maxPolarAngle={Math.PI * 0.62}
           target={[0, 1.45, 0]}
-          enableRotate={!isEmbed}
+          enableRotate
+          enableZoom={isDemo}
         />
       )}
 
@@ -78,12 +83,17 @@ export function SphereAgentScene({
       <pointLight position={[-3, 2, 2]} intensity={0.42} color="#88bbff" />
       <spotLight position={[0, 4, 3]} angle={0.35} penumbra={0.8} intensity={0.55} color="#ffffff" />
 
-      <Suspense fallback={null}>
-        <Environment preset="city" />
-      </Suspense>
+      {isDemo && (
+        <Suspense fallback={null}>
+          <Environment preset="city" />
+        </Suspense>
+      )}
 
-      <Physics gravity={[0, -9.82, 0]} allowSleep={!autonomous}>
-        <Ground visible={!isOverlay} />
+      <Physics
+        gravity={isEmbed || isOverlay ? [0, 0, 0] : [0, -9.82, 0]}
+        allowSleep={!autonomous}
+      >
+        <Ground visible={isDemo} />
         <SphereAgent
           state={state}
           onEyeFocus={onEyeFocus}
@@ -94,7 +104,7 @@ export function SphereAgentScene({
         />
       </Physics>
 
-      {!isOverlay && (
+      {isDemo && (
         <ContactShadows position={[0, 0.01, 0]} opacity={0.45} scale={8} blur={2.5} far={4} />
       )}
     </Canvas>

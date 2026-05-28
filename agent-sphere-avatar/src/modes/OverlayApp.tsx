@@ -55,7 +55,7 @@ export function OverlayApp() {
       <SphereAgentScene
         state={state}
         mode="overlay"
-        physics
+        physics={false}
         autonomous
         onEyeFocus={setFocused}
         onEyeInteractionChange={handleEyeInteraction}

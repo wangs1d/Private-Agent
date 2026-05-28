@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:chat": "npm run build && node scripts/copy-to-chat.mjs",
+    "build:chat": "npm run build -- --base=/chat/assets/avatar/ && node scripts/copy-to-chat.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

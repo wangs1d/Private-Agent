@@ -1,31 +1,39 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent 聊天 · 网页端</title>
-    <link rel="stylesheet" href="/chat/assets/styles.css" />
-    <link rel="stylesheet" href="/chat/assets/gomoku-invite.css" />
-  </head>
-  <body>
-    <div class="layout">
-      <header class="header">Private AI Agent · 网页聊天</header>
-      <p class="status" id="status">初始化…</p>
-      <div class="messages" id="messages"></div>
-      <div class="composer">
-        <button
-          id="full-access"
-          type="button"
-          class="full-access-btn"
-          title="沙箱模式：点击开启完全访问"
-          aria-pressed="false"
-        >
-          🛡️
-        </button>
-        <input id="input" type="text" placeholder="发消息，例如：陪我玩五子棋" autocomplete="off" />
-        <button id="send" type="button" disabled>发送</button>
-      </div>
-    </div>
-    <script type="module" src="/chat/assets/app.js"></script>
-  </body>
-</html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent 聊天 · 网页端</title>
+    <link rel="stylesheet" href="/chat/assets/styles.css" />
+    <link rel="stylesheet" href="/chat/assets/gomoku-invite.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <header class="header">Private AI Agent · 网页聊天</header>
+      <p class="status" id="status">初始化…</p>
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <button
+          id="full-access"
+          type="button"
+          class="full-access-btn"
+          title="沙箱模式：点击开启完全访问"
+          aria-pressed="false"
+        >
+          🛡️
+        </button>
+        <input id="input" type="text" placeholder="发消息，例如：陪我玩五子棋" autocomplete="off" />
+        <button id="send" type="button" disabled>发送</button>
+      </div>
+    </div>
+    <div id="agent-avatar-float" class="avatar-float-host" aria-label="Agent 3D 形象">
+      <iframe
+        id="agent-avatar-frame"
+        class="avatar-float-frame"
+        title="Agent Sphere"
+        allow="autoplay"
+      ></iframe>
+    </div>
+    <script type="module" src="/chat/assets/app.js"></script>
+  </body>
+</html>

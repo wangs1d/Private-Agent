@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect } from "react";
 import { bindAgentBridge } from "../bridge/agent-bridge";
 import { SphereAgentScene } from "../components/SphereAgentScene";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
-import "../index.css";
 import "./modes.css";
 
 function readQuery(key: string): string | undefined {
@@ -47,19 +46,15 @@ export function EmbedApp() {
     return () => window.removeEventListener("message", onMessage);
   }, [apply]);
 
-  const caption = useMemo(() => state.caption, [state.caption]);
-
   return (
     <div className="mode-shell mode-embed">
       <SphereAgentScene
         state={state}
         mode="embed"
-        physics
+        physics={false}
         autonomous
         onEyeFocus={setFocused}
       />
-      {caption && <div className="mode-caption">{caption}</div>}
-      <div className={`mode-badge mode-badge--${state.mood}`}>{state.mood}</div>
     </div>
   );
 }

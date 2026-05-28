@@ -14,10 +14,16 @@ class AgentSphereWebView extends StatefulWidget {
   const AgentSphereWebView({
     super.key,
     this.showOverlayButton = true,
+    this.onDragDelta,
+    this.onDragStart,
+    this.onDragEnd,
   });
 
   /// 是否显示「启动桌面悬浮」按钮（语音模式页可关闭）
   final bool showOverlayButton;
+  final ValueChanged<Offset>? onDragDelta;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
 
   @override
   State<AgentSphereWebView> createState() => _AgentSphereWebViewState();
@@ -106,23 +112,23 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
         clipBehavior: Clip.hardEdge,
         children: <Widget>[
           Webview(_controller),
-        if (!_ready)
-          const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-        if (widget.showOverlayButton)
-          Positioned(
-            left: 8,
-            bottom: 8,
-            child: IconButton.filledTonal(
-              tooltip: "启动桌面悬浮 Agent",
-              onPressed: _launchOverlay,
-              icon: const Icon(Icons.open_in_new, size: 18),
-              style: IconButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                backgroundColor: Colors.black.withOpacity(0.35),
-                foregroundColor: Colors.white70,
+          if (!_ready)
+            const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          if (widget.showOverlayButton)
+            Positioned(
+              left: 8,
+              bottom: 8,
+              child: IconButton.filledTonal(
+                tooltip: "启动桌面悬浮 Agent",
+                onPressed: _launchOverlay,
+                icon: const Icon(Icons.open_in_new, size: 18),
+                style: IconButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: Colors.black.withOpacity(0.35),
+                  foregroundColor: Colors.white70,
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

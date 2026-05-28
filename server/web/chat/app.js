@@ -244,6 +244,69 @@ function getAvatarFrame() {
   return avatarFrame;
 }
 
+/** 进入页面即加载可拖动悬浮 3D Agent（与 Flutter WebView 同源 embed） */
+function initAvatarFrame() {
+  const frame = getAvatarFrame();
+  const host = document.getElementById("agent-avatar-float");
+  if (!frame || !host) return;
+  const sid = sessionId();
+  frame.src = `/chat/assets/avatar/embed.html?wsOff=1&sessionId=${encodeURIComponent(sid)}`;
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let originLeft = 0;
+  let originTop = 0;
+
+  const onPointerDown = (ev) => {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    // 左键拖动旋转；Shift/Alt + 拖动移动悬浮位置
+    if (!ev.shiftKey && !ev.altKey) return;
+    dragging = true;
+    frame.style.pointerEvents = "none";
+    host.classList.add("is-dragging");
+    startX = ev.clientX;
+    startY = ev.clientY;
+    const rect = host.getBoundingClientRect();
+    originLeft = rect.left;
+    originTop = rect.top;
+    host.style.left = `${originLeft}px`;
+    host.style.top = `${originTop}px`;
+    host.style.right = "auto";
+    host.setPointerCapture?.(ev.pointerId);
+    ev.preventDefault();
+  };
+
+  const onPointerMove = (ev) => {
+    if (!dragging) return;
+    ev.preventDefault();
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+    const w = host.offsetWidth;
+    const h = host.offsetHeight;
+    const maxLeft = Math.max(0, window.innerWidth - w);
+    const maxTop = Math.max(0, window.innerHeight - h);
+    const nextLeft = Math.min(maxLeft, Math.max(0, originLeft + dx));
+    const nextTop = Math.min(maxTop, Math.max(0, originTop + dy));
+    host.style.left = `${nextLeft}px`;
+    host.style.top = `${nextTop}px`;
+  };
+
+  const endDrag = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    frame.style.pointerEvents = "auto";
+    host.classList.remove("is-dragging");
+    host.releasePointerCapture?.(ev.pointerId);
+  };
+
+  host.addEventListener("pointerdown", onPointerDown);
+  frame.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", endDrag);
+  window.addEventListener("pointercancel", endDrag);
+}
+
 /** 向嵌入的 3D Agent 形象同步状态（LLM 流式 → thinking / speaking） */
 function patchAvatar(patch) {
   const frame = getAvatarFrame();
@@ -677,5 +740,6 @@ const sendBtn = document.getElementById("send");
 document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
+initAvatarFrame();
 connect();
 dailyChatStorage.startAutoSync();

@@ -3,6 +3,7 @@ import { useRef, type Ref } from "react";
 import * as THREE from "three";
 import { MODEL } from "../constants/model-proportions";
 import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
+import { useVisualFloat } from "../hooks/useVisualFloat";
 import type { AgentState } from "../types/agent";
 import { BreathingShell } from "./BreathingShell";
 import { EyeScreen } from "./EyeScreen";
@@ -44,6 +45,8 @@ export function SphereAgent({
     bounds: 2.4,
     strength: state.mood === "speaking" ? 1.35 : state.mood === "thinking" ? 0.85 : 1,
   });
+
+  useVisualFloat(visualRef, !physics && autonomous);
 
   return (
     <group ref={ref as Ref<THREE.Group>}>
