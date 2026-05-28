@@ -4,12 +4,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
-  DesktopVisualAgentPort,
+  DesktopVisualPort,
   DesktopVisualRunInput,
   DesktopVisualRunResult,
   DesktopVisualScreenshotInput,
   DesktopVisualScreenshotResult,
-} from "./desktop-visual-agent-port.js";
+} from "./desktop-visual-port.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
   if (!raw) return false;
@@ -17,31 +17,49 @@ function parseBooleanEnv(raw: string | undefined): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
-function defaultPackageRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "..", "desktop-visual-agent");
+function envStr(env: NodeJS.ProcessEnv, key: string, legacyKey: string, fallback = ""): string {
+  return env[key]?.trim() || env[legacyKey]?.trim() || fallback;
 }
 
-function resolvePackageRoot(): string {
-  const fromEnv = process.env.DESKTOP_VISUAL_AGENT_ROOT?.trim();
-  if (fromEnv && existsSync(join(fromEnv, "desktop_visual_agent"))) {
+function isVisualEnabled(env: NodeJS.ProcessEnv): boolean {
+  return (
+    parseBooleanEnv(env.DESKTOP_VISUAL_ENABLED) ||
+    parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED)
+  );
+}
+
+function packageDirExists(root: string): boolean {
+  return (
+    existsSync(join(root, "desktop_visual")) ||
+    existsSync(join(root, "desktop_visual_agent"))
+  );
+}
+
+function defaultPackageRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "..", "..", "desktop-visual");
+}
+
+function resolvePackageRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const fromEnv = envStr(env, "DESKTOP_VISUAL_ROOT", "DESKTOP_VISUAL_AGENT_ROOT");
+  if (fromEnv && packageDirExists(fromEnv)) {
     return fromEnv;
   }
   const rel = defaultPackageRoot();
-  if (existsSync(join(rel, "desktop_visual_agent"))) {
+  if (packageDirExists(rel)) {
     return rel;
   }
   return rel;
 }
 
-/** 供桥接自启动与子进程 Agent 共用 Python 路径与包根目录。 */
-export function getDesktopVisualAgentPaths(env: NodeJS.ProcessEnv = process.env): {
+/** 供桥接自启动与子进程共用 Python 路径与包根目录。 */
+export function getDesktopVisualPaths(env: NodeJS.ProcessEnv = process.env): {
   pythonExe: string;
   packageRoot: string;
 } {
   return {
-    pythonExe: env.DESKTOP_VISUAL_AGENT_PYTHON?.trim() || "python",
-    packageRoot: resolvePackageRoot(),
+    pythonExe: envStr(env, "DESKTOP_VISUAL_PYTHON", "DESKTOP_VISUAL_AGENT_PYTHON", "python"),
+    packageRoot: resolvePackageRoot(env),
   };
 }
 
@@ -58,7 +76,7 @@ function parseLastJsonLine(stdout: string): StdioWorkerResult | null {
 }
 
 function spawnStdioWorker(payload: Record<string, unknown>, pythonExe: string, packageRoot: string) {
-  return spawn(pythonExe, ["-u", "-m", "desktop_visual_agent.stdio_worker"], {
+  return spawn(pythonExe, ["-u", "-m", "desktop_visual.stdio_worker"], {
     cwd: packageRoot,
     env: { ...process.env, PYTHONUNBUFFERED: "1" },
     stdio: ["pipe", "pipe", "pipe"],
@@ -138,18 +156,21 @@ async function runStdioWorker<T extends StdioWorkerResult>(
   return resultPromise;
 }
 
-export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
+export class SubprocessDesktopVisual implements DesktopVisualPort {
   private readonly enabled: boolean;
   private readonly pythonExe: string;
   private readonly packageRoot: string;
   private readonly timeoutMs: number;
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
-    this.enabled = parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED);
-    const paths = getDesktopVisualAgentPaths(env);
+    this.enabled = isVisualEnabled(env);
+    const paths = getDesktopVisualPaths(env);
     this.pythonExe = paths.pythonExe;
     this.packageRoot = paths.packageRoot;
-    const t = Number.parseInt(env.DESKTOP_VISUAL_AGENT_TIMEOUT_MS ?? "", 10);
+    const t = Number.parseInt(
+      envStr(env, "DESKTOP_VISUAL_TIMEOUT_MS", "DESKTOP_VISUAL_AGENT_TIMEOUT_MS"),
+      10,
+    );
     this.timeoutMs = Number.isFinite(t) && t > 0 ? t : 600_000;
   }
 
@@ -159,7 +180,7 @@ export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
 
   async runTask(input: DesktopVisualRunInput): Promise<DesktopVisualRunResult> {
     if (!this.enabled) {
-      return { ok: false, error: "desktop visual agent 未启用（DESKTOP_VISUAL_AGENT_ENABLED）" };
+      return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
     }
     return runStdioWorker<DesktopVisualRunResult>(
       {
@@ -180,7 +201,7 @@ export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
 
   async screenshot(input?: DesktopVisualScreenshotInput): Promise<DesktopVisualScreenshotResult> {
     if (!this.enabled) {
-      return { ok: false, error: "desktop visual agent 未启用（DESKTOP_VISUAL_AGENT_ENABLED）" };
+      return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
     }
 
     return runStdioWorker<DesktopVisualScreenshotResult>(
@@ -199,8 +220,8 @@ export class SubprocessDesktopVisualAgent implements DesktopVisualAgentPort {
 }
 
 /** 单例式工厂：按当前进程环境构造子进程桥接实现。 */
-export function createDesktopVisualAgentFromEnv(
+export function createDesktopVisualFromEnv(
   env: NodeJS.ProcessEnv = process.env,
-): DesktopVisualAgentPort {
-  return new SubprocessDesktopVisualAgent(env);
+): DesktopVisualPort {
+  return new SubprocessDesktopVisual(env);
 }

@@ -20,7 +20,7 @@ function buildToolsResponse(
 ) {
   const { toolRegistry, skillManager, worldService } = deps;
   const skillNames = new Set(skillManager.list(true).map((s) => s.name));
-  /** 代码注册的工具（含 `agent.*`、`world.doudizhu.*` 等），排除与 Skill 同名的条目。 */
+  /** 代码注册的工具（含 `agent.*`、`world.gomoku.*` 等），排除与 Skill 同名的条目。 */
   const codeTools = toolRegistry.list().filter((name) => !skillNames.has(name));
   let skills = skillManager.list(true);
   const sid = sessionId?.trim();

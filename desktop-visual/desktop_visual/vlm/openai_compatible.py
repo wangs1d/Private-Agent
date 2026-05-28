@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from desktop_visual_agent.vlm.base import VLMImage, VLMMessage, VLMResult, VisionLanguageModel
+from desktop_visual.vlm.base import VLMImage, VLMMessage, VLMResult, VisionLanguageModel
 
 
 def _image_to_data_url(img: VLMImage) -> str:
@@ -33,7 +33,7 @@ def _messages_to_openai_payload(messages: list[VLMMessage]) -> list[dict[str, An
 
 
 class OpenAICompatibleVLM(VisionLanguageModel):
-    """任意 OpenAI Chat Completions 兼容端点（含 /v1/chat/completions 与 vision）。"""
+    """任意 OpenAI Chat Completions 兼容端点（含 /v1/chat/completions �?vision）�?""
 
     def __init__(
         self,

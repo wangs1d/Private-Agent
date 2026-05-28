@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { ServerEventType } from "../protocol.js";
-import type { DesktopVisualRunResult } from "./desktop-visual-agent-port.js";
+import type { DesktopVisualRunResult } from "./desktop-visual-port.js";
 
 export type WsSendLike = {
   send(data: string): void;

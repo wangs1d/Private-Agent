@@ -15,4 +15,4 @@ if (-not $env:DESKTOP_BRIDGE_SESSION_ID) {
 }
 
 Set-Location $Root
-python -m desktop_visual_agent.bridge_ws_client
+python -m desktop_visual.bridge_ws_client

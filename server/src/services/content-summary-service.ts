@@ -126,7 +126,8 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
   },
 };
 
-const SUMMARY_THRESHOLD = 350;
+/** 低于此字数不启用摘要折叠卡 */
+const SUMMARY_THRESHOLD = 800;
 
 /** 调研报告：主区展示结论类板块，数据类板块仅进详情卡 */
 const CONCLUSION_SECTION_RE =
@@ -151,12 +152,12 @@ function looksLikeCapabilityOrToolDump(content: string): boolean {
 }
 
 /**
- * 仅对「值得折叠」的长内容启用摘要卡，避免普通长回复频繁出现折叠框。
+ * 仅当内容超过 SUMMARY_THRESHOLD（800 字）时启用摘要卡，避免普通回复频繁出现折叠框。
  */
 export function isEligibleForSummaryCard(
-  category: ContentCategory,
+  _category: ContentCategory,
   content: string,
-  features: {
+  _features: {
     hasSections: boolean;
     hasList: boolean;
     hasTable: boolean;
@@ -165,42 +166,7 @@ export function isEligibleForSummaryCard(
     listItemCount: number;
   },
 ): boolean {
-  const len = content.length;
-  const { hasSections, hasList, hasTable, lineCount, sectionCount, listItemCount } =
-    features;
-
-  if (len < 280) return false;
-
-  switch (category) {
-    case "news":
-      return len >= 350 || /日报|新闻简报|资讯速递|早报|晚报/.test(content);
-    case "data":
-      return (
-        len >= 400 ||
-        /调研|研究报告|分析报告|行业报告|竞品分析|数据支撑/.test(content)
-      );
-    case "list":
-      return (
-        hasList &&
-        listItemCount >= 5 &&
-        (lineCount >= 8 || /步骤|教程|操作指引|如何|第一步|流程/.test(content))
-      );
-    case "multi_section":
-      return len >= 700 && sectionCount >= 3;
-    case "table":
-      return len >= 650 && hasTable;
-    case "search_result":
-      return len >= 950;
-    case "article":
-      return len >= 1100;
-    case "webpage":
-    case "document":
-      return len >= 850;
-    case "code":
-      return len >= 900 && lineCount >= 20;
-    default:
-      return len >= 1500 && (hasSections || hasList);
-  }
+  return content.length >= SUMMARY_THRESHOLD;
 }
 
 function detectContentType(content: string): {
@@ -399,161 +365,244 @@ function parseSections(content: string): ParsedSection[] {
   return sections.length > 0 ? sections : [{ title: "", items: lines.filter(l => l.trim()), rawText: content }];
 }
 
-function extractResearchBriefPoints(
+function truncateBrief(text: string, maxLen: number): string {
+  const clean = text.trim();
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen - 3)}...`;
+}
+
+function isGenericSummaryTitle(title: string, category: ContentCategory): boolean {
+  const config = CATEGORY_CONFIG[category];
+  return (
+    !title ||
+    title.length < 3 ||
+    title.startsWith(`${config.label}_`) ||
+    /^\d{4}-\d{2}-\d{2}$/.test(title)
+  );
+}
+
+/** 按内容关键词推断任务主体（如科技新闻、旅游计划） */
+const TASK_SUBJECT_RULES: ReadonlyArray<{ pattern: RegExp; subject: string }> = [
+  { pattern: /旅游|行程|景点|攻略|自驾|民宿|机票|签证|出境|酒店预订|自由行/, subject: "旅游计划" },
+  { pattern: /菜谱|美食|餐厅|探店|小吃|餐饮/, subject: "美食推荐" },
+  { pattern: /科技|人工智能|AI\b|芯片|互联网|数码|发布会|大模型|机器人/, subject: "科技新闻" },
+  { pattern: /财经|股票|基金|股市|经济|央行|利率|理财/, subject: "财经资讯" },
+  { pattern: /健康|医疗|养生|用药|体检/, subject: "健康资讯" },
+  { pattern: /健身|运动|训练计划|减脂|增肌/, subject: "运动计划" },
+  { pattern: /教育|学习|课程|考试|培训|备考/, subject: "学习资料" },
+  { pattern: /育儿|亲子|宝宝|儿童/, subject: "育儿指南" },
+  { pattern: /装修|家居|买房|租房|软装/, subject: "家居生活" },
+  { pattern: /婚礼|婚庆|婚宴/, subject: "婚礼筹备" },
+  { pattern: /购物|商品|比价|电商|优惠|种草/, subject: "购物推荐" },
+  { pattern: /日程|待办|会议|提醒|排期|周报|月报/, subject: "日程安排" },
+  { pattern: /招聘|简历|面试|求职|offer/i, subject: "求职指导" },
+  { pattern: /天气|气温|降水|预报|台风/, subject: "天气预报" },
+  { pattern: /电影|剧集|综艺|娱乐|明星/, subject: "娱乐资讯" },
+  { pattern: /体育|赛事|球赛|奥运|世界杯/, subject: "体育资讯" },
+  { pattern: /汽车|新能源|试驾|车市/, subject: "汽车资讯" },
+  { pattern: /政策|法规|条例|政府|通知/, subject: "政策解读" },
+  { pattern: /代码|函数|API|程序|编程|Bug|调试|部署/i, subject: "技术文档" },
+  { pattern: /步骤|教程|如何|操作指引|说明书|上手/, subject: "操作指南" },
+  { pattern: /调研|研究报告|竞品|行业分析|市场分析|白皮书/, subject: "调研报告" },
+  { pattern: /新闻|头条|简报|早报|晚报|舆情|要闻/, subject: "新闻资讯" },
+];
+
+const CATEGORY_SUBJECT_FALLBACK: Record<ContentCategory, string> = {
+  news: "新闻资讯",
+  article: "文章阅读",
+  search_result: "检索结果",
+  webpage: "网页摘录",
+  document: "文档资料",
+  code: "技术文档",
+  data: "调研报告",
+  list: "任务清单",
+  multi_section: "专题汇总",
+  table: "数据表格",
+  general: "内容详情",
+};
+
+export function inferTaskSubject(
   content: string,
-  maxCount: number = 8,
+  category: ContentCategory,
+  rawTitle: string,
+): string {
+  const titleHint = rawTitle.trim();
+  if (
+    !isGenericSummaryTitle(titleHint, category) &&
+    titleHint.length >= 4 &&
+    titleHint.length <= 18 &&
+    /计划|攻略|指南|简报|总结|报告|清单|方案|安排|推荐|资讯|新闻/.test(titleHint)
+  ) {
+    return titleHint;
+  }
+
+  const sample = `${titleHint}\n${content}`.slice(0, 4000);
+  for (const rule of TASK_SUBJECT_RULES) {
+    if (rule.pattern.test(sample)) {
+      return rule.subject;
+    }
+  }
+
+  return CATEGORY_SUBJECT_FALLBACK[category];
+}
+
+function resolveCardTitle(
+  rawTitle: string,
+  subjectLabel: string,
+  category: ContentCategory,
+): string {
+  if (!isGenericSummaryTitle(rawTitle, category) && rawTitle.length <= 48) {
+    return rawTitle.trim();
+  }
+  return subjectLabel;
+}
+
+/** 精简区：对全文的概括性介绍（非正文摘录） */
+function buildOverviewIntro(
+  content: string,
+  subjectLabel: string,
+  headline: string,
+  features: {
+    sectionCount: number;
+    listItemCount: number;
+    hasTable: boolean;
+  },
+): string {
+  const structureParts: string[] = [];
+
+  if (features.sectionCount >= 2) {
+    structureParts.push(`${features.sectionCount} 个板块`);
+  } else if (features.listItemCount >= 3) {
+    structureParts.push(`${features.listItemCount} 条要点`);
+  } else if (features.hasTable) {
+    structureParts.push("含表格");
+  }
+
+  const structureHint =
+    structureParts.length > 0 ? `，${structureParts.join("、")}` : "";
+
+  const headlineHint =
+    headline !== subjectLabel && headline.length > 0
+      ? `（${truncateBrief(headline, 36)}）`
+      : "";
+
+  return `【${subjectLabel}】全文约 ${content.length} 字${structureHint}${headlineHint}。以下为概要，完整内容见下方详情卡。`;
+}
+
+/** 精简区要点：仅高层主题/结论，不复制详情正文 */
+function extractOverviewHighlights(
+  content: string,
+  category: ContentCategory,
+  features: {
+    hasSections: boolean;
+    hasList: boolean;
+    sectionCount: number;
+    listItemCount: number;
+  },
+  maxCount: number,
 ): BriefPoint[] {
-  const config = CATEGORY_CONFIG.data;
+  const config = CATEGORY_CONFIG[category];
   const icons = config.briefIcons;
   const points: BriefPoint[] = [];
-  const sections = parseSections(content);
   let index = 0;
 
-  const pushText = (text: string, sectionTitle?: string) => {
+  const push = (text: string, section?: string) => {
     if (index >= maxCount) return;
     const clean = text.trim();
-    if (clean.length < 6) return;
-    const limit = 320;
+    if (clean.length < 4) return;
     points.push({
       icon: icons[index % icons.length],
-      text: clean.length > limit ? `${clean.slice(0, limit - 3)}...` : clean,
-      section: sectionTitle,
+      text: truncateBrief(clean, 100),
+      section,
     });
     index++;
   };
 
-  for (const section of sections) {
-    const title = section.title.trim();
-    if (title && DATA_SUPPORT_SECTION_RE.test(title)) {
-      continue;
-    }
-
-    const isConclusion =
-      !title || CONCLUSION_SECTION_RE.test(title) || points.length === 0;
-
-    if (!isConclusion) continue;
-
-    if (title) {
-      pushText(`【${title}】`, title);
-    }
-    for (const item of section.items) {
-      if (index >= maxCount) break;
-      pushText(item, title || undefined);
-    }
-  }
-
-  if (points.length > 0) {
-    return points;
-  }
-
-  const sentences = content
-    .split(/[。！？.!?;\n]/)
-    .filter((s) => s.trim().length > 10);
-  for (let i = 0; i < Math.min(sentences.length, maxCount); i++) {
-    const sentence = sentences[i].trim();
-    points.push({
-      icon: icons[i % icons.length],
-      text: sentence.length > 200 ? `${sentence.slice(0, 197)}...` : sentence,
-    });
-  }
-  return points;
-}
-
-function extractBriefPoints(content: string, category: ContentCategory, maxCount: number = 6): BriefPoint[] {
-  if (category === "data") {
-    return extractResearchBriefPoints(content, Math.max(maxCount, 8));
-  }
-
-  const config = CATEGORY_CONFIG[category];
-  const icons = config.briefIcons;
-  const points: BriefPoint[] = [];
-  
-  const contentType = detectContentType(content);
-  const { hasSections, hasList } = contentType.features;
-
-  if (hasSections) {
+  if (features.hasSections) {
     const sections = parseSections(content);
-    let globalIndex = 0;
-    
-    for (const section of sections) {
-      if (globalIndex >= maxCount) break;
-      
-      if (section.title && !points.find(p => p.text === section.title)) {
-        points.push({
-          icon: icons[globalIndex % icons.length],
-          text: `【${section.title}】`,
-          section: section.title,
-        });
-        globalIndex++;
-      }
+    const titles = sections
+      .map((s) => s.title.trim())
+      .filter((t) => t.length > 0 && t.length < 50);
 
-      for (const item of section.items.slice(0, 2)) {
-        if (globalIndex >= maxCount) break;
-        
-        const cleanItem = item
-          .replace(/^[\s]*[-•*→▸‣⁃◦·#*]+\s*/, "")
-          .replace(/^[""「『【]/, "")
-          .replace(/[""」』】]$/, "")
-          .trim();
-
-        if (cleanItem.length >= 8 && cleanItem.length <= 180) {
-          points.push({
-            icon: icons[globalIndex % icons.length],
-            text: cleanItem.length > 120 ? cleanItem.slice(0, 117) + "..." : cleanItem,
-            section: section.title || undefined,
-          });
-          globalIndex++;
+    if (category === "data") {
+      for (const section of sections) {
+        if (index >= maxCount) break;
+        const title = section.title.trim();
+        if (title && DATA_SUPPORT_SECTION_RE.test(title)) continue;
+        if (title && !CONCLUSION_SECTION_RE.test(title) && points.length > 0) continue;
+        if (title) {
+          push(`板块：${title}`, title);
+        } else if (section.items[0]) {
+          push(truncateBrief(section.items[0], 80), title);
         }
+      }
+    } else if (titles.length > 0) {
+      if (titles.length <= 4) {
+        push(`主要涵盖：${titles.join("、")}`);
+      } else {
+        push(`主要涵盖 ${titles.length} 个部分：${titles.slice(0, 3).join("、")}等`);
       }
     }
-  } else if (hasList) {
-    const lines = content.split("\n").filter(l => l.trim());
-    let index = 0;
-
+  } else if (features.hasList && features.listItemCount >= 3) {
+    push(`清单共 ${features.listItemCount} 项`);
+    const lines = content.split("\n").filter((l) => l.trim());
+    let picked = 0;
     for (const line of lines) {
-      if (index >= maxCount) break;
-
+      if (picked >= 2 || index >= maxCount) break;
       const trimmed = line.trim();
-      const hasEmoji = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(trimmed);
-
-      if (hasEmoji) {
-        const emojiMatch = trimmed.match(/^([\p{Emoji_Presentation}\p{Extended_Pictographic}])\s*(.*)/u);
-        if (emojiMatch && emojiMatch[2]?.trim() && emojiMatch[2].trim().length >= 6) {
-          points.push({
-            icon: emojiMatch[1],
-            text: emojiMatch[2].trim().length > 120 ? emojiMatch[2].trim().slice(0, 117) + "..." : emojiMatch[2].trim(),
-          });
-          index++;
-          continue;
-        }
-      }
-
-      const cleanText = trimmed
+      const clean = trimmed
         .replace(/^[\s]*[-•*→▸‣⁃◦·#*]+\s*/, "")
         .replace(/^[""「『【]/, "")
         .replace(/[""」』】]$/, "")
         .trim();
-
-      if (cleanText.length >= 8) {
-        points.push({
-          icon: icons[index % icons.length],
-          text: cleanText.length > 120 ? cleanText.slice(0, 117) + "..." : cleanText,
-        });
-        index++;
+      if (clean.length >= 6) {
+        push(`示例：${truncateBrief(clean, 55)}`);
+        picked++;
       }
     }
   } else {
-    const sentences = content.split(/[。！？.!?;\n]/).filter(s => s.trim().length > 10);
+    const sentences = content
+      .split(/[。！？.!?]/)
+      .map((s) => s.replace(/\s+/g, " ").trim())
+      .filter((s) => s.length >= 12 && s.length <= 200);
     for (let i = 0; i < Math.min(sentences.length, maxCount); i++) {
-      const sentence = sentences[i].trim();
-      points.push({
-        icon: icons[i % icons.length],
-        text: sentence.length > 120 ? sentence.slice(0, 117) + "..." : sentence,
-      });
+      push(sentences[i]);
     }
   }
 
   return points;
+}
+
+function extractBriefPoints(
+  content: string,
+  category: ContentCategory,
+  maxCount: number = 6,
+  subjectLabel?: string,
+): BriefPoint[] {
+  const contentType = detectContentType(content);
+  const rawTitle = extractTitle(content, category);
+  const subject = subjectLabel ?? inferTaskSubject(content, category, rawTitle);
+  const cardTitle = resolveCardTitle(rawTitle, subject, category);
+  const config = CATEGORY_CONFIG[category];
+  const icons = config.briefIcons;
+
+  const intro: BriefPoint = {
+    icon: icons[0],
+    text: buildOverviewIntro(content, subject, cardTitle, {
+      sectionCount: contentType.features.sectionCount,
+      listItemCount: contentType.features.listItemCount,
+      hasTable: contentType.features.hasTable,
+    }),
+  };
+
+  const highlights = extractOverviewHighlights(
+    content,
+    category,
+    contentType.features,
+    Math.max(1, maxCount - 1),
+  );
+
+  return [intro, ...highlights].slice(0, maxCount);
 }
 
 export function createContentSummary(
@@ -587,8 +636,16 @@ export function createContentSummary(
   }
 
   const config = CATEGORY_CONFIG[category];
+  const rawTitle = extractTitle(content, category);
+  const subjectLabel = inferTaskSubject(content, category, rawTitle);
+  const cardTitle = resolveCardTitle(rawTitle, subjectLabel, category);
 
-  const briefPoints = extractBriefPoints(content, category, briefPointCount);
+  const briefPoints = extractBriefPoints(
+    content,
+    category,
+    briefPointCount,
+    subjectLabel,
+  );
   if (briefPoints.length === 0) {
     return null;
   }
@@ -602,19 +659,20 @@ export function createContentSummary(
     }));
   }
 
-  console.log(`[ContentSummary] Created: ${category}, ${briefPoints.length} points, ${contentType.features.sectionCount} sections`);
+  console.log(`[ContentSummary] Created: ${category}, subject=${subjectLabel}, ${briefPoints.length} points`);
 
   return {
     id: generateId(),
     category,
-    title: extractTitle(content, category),
+    title: cardTitle,
     briefPoints,
     detailContent: content,
     cardIcon: config.cardIcon,
-    cardLabel: config.label,
+    cardLabel: subjectLabel,
     sections,
     metadata: {
       source,
+      subjectLabel,
       wordCount: content.length,
       itemCount: briefPoints.length,
       sectionCount: sections?.length,
@@ -637,6 +695,7 @@ export function formatContentSummaryForChat(summary: ContentSummary): string {
     title: summary.title,
     cardIcon: summary.cardIcon,
     cardLabel: summary.cardLabel,
+    subjectLabel: summary.cardLabel,
     briefCount: summary.briefPoints.length,
     detailContent: summary.detailContent,
     sections: summary.sections,
@@ -656,7 +715,7 @@ export function shouldSummarizeContent(content: string, _threshold: number = SUM
   if (!content?.trim()) return false;
   if (content.includes(CONTENT_SUMMARY_MARKER)) return false;
   if (looksLikeCapabilityOrToolDump(content)) return false;
-  if (content.length < 280) return false;
+  if (content.length < SUMMARY_THRESHOLD) return false;
 
   const contentType = detectContentType(content);
   const category = detectCategory(content);

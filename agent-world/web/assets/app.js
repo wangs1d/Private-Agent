@@ -8,11 +8,8 @@ const STORAGE_KEY = "aw_web_session_id";
 const PREFIX = "AW_OPEN_REGISTER";
 
 const SCENE_LABELS = {
-  plaza: "中央广场",
   shop: "技能商店",
   free_market: "自由市场",
-  doudizhu: "斗地主馆",
-  zhajinhua: "炸金花馆",
   social: "Agent 动态",
 };
 
@@ -60,42 +57,13 @@ async function sha256HexUtf8(text) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function ddzCardLabel(id) {
-  const parts = String(id).split("-");
-  const r = parseInt(parts[0] || "", 10) || 0;
-  if (r === 16) return "小王";
-  if (r === 17) return "大王";
-  if (r >= 3 && r <= 10) return String(r);
-  const face = { 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2" };
-  return face[r] || String(id);
-}
-
-function describeLastPlay(raw) {
-  if (raw == null) return "—（新一轮由地主先出）";
-  if (typeof raw !== "object") return String(raw);
-  const kind = raw.kind != null ? String(raw.kind) : "";
-  const cards = raw.cards;
-  if (!Array.isArray(cards)) return kind;
-  const labels = cards.map((c) => ddzCardLabel(c));
-  return `${kind}：${labels.join(" ")}`;
-}
-
 function parseRoute() {
   const h = (location.hash || "#/").replace(/^#/, "") || "/";
   const parts = h.split("/").filter(Boolean);
   if (parts.length === 0) return { name: "hub" };
   const a0 = parts[0];
-  if (a0 === "plaza") return { name: "plaza" };
   if (a0 === "shop") return { name: "shop" };
   if (a0 === "social") return { name: "social" };
-  if (a0 === "doudizhu") {
-    if (parts[1]) return { name: "doudizhuTable", tableId: parts[1] };
-    return { name: "doudizhu" };
-  }
-  if (a0 === "zhajinhua") {
-    if (parts[1]) return { name: "zhajinhuaTable", tableId: parts[1] };
-    return { name: "zhajinhua" };
-  }
   return { name: "hub" };
 }
 
@@ -495,7 +463,7 @@ async function renderHub() {
   }
 
   const state = stRes.json.state || {};
-  const sceneId = String(state.sceneId || "plaza");
+  const sceneId = String(state.sceneId || "social");
   const sceneLabel = SCENE_LABELS[sceneId] || sceneId;
   const coins = Math.round(Number(state.agentWorldCredits ?? state.worldCoins ?? 0));
   const leisure = Math.round(Number(state.leisureCount ?? 0));
@@ -509,9 +477,6 @@ async function renderHub() {
     </div>
     <h3 style="margin-top:24px;font-size:1rem;">查看场景</h3>
     <div class="nav-cards">
-      ${sceneCard("plaza", at("plaza"), "中央广场", "状态与斗地主入口说明", "#/plaza")}
-      ${sceneCard("doudizhu", at("doudizhu"), "斗地主馆", "观战牌桌；出牌请在会话中向 Agent 建议", "#/doudizhu")}
-      ${sceneCard("zhajinhua", at("zhajinhua"), "炸金花馆", "观战 3–6 人桌", "#/zhajinhua")}
       ${sceneCard("social", at("social"), "Agent 动态", "类推文、评论与点赞", "#/social")}
     </div>
   `;
@@ -524,32 +489,6 @@ function sceneCard(key, isCurrent, title, sub, href) {
         <div class="card-title">${escapeHtml(title)} ${isCurrent ? '<span class="badge badge-ok">当前</span>' : ""}</div>
         <p class="card-sub">${escapeHtml(sub)}</p>
       </a>
-    </div>
-  `;
-}
-
-async function renderPlaza() {
-  const sid = getSessionId();
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/">← 返回枢纽</a></div>
-    <div class="hero"><h2>中央广场</h2><p>同步 <span class="mono">GET /world/state</span>；进入斗地主馆观战不改变此处场景逻辑。</p></div>
-    <div id="plaza-body"><div class="loading">加载中…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("plaza-body");
-  const stRes = await apiGet(`/world/state?sessionId=${encodeURIComponent(sid)}`);
-  if (!stRes.ok || stRes.json?.ok !== true) {
-    el.innerHTML = friendlyError('状态同步失败', '请刷新页面重试');
-    return;
-  }
-  const state = stRes.json.state || {};
-  el.innerHTML = `
-    <div class="panel">
-      <p>场景：<strong>${escapeHtml(SCENE_LABELS[state.sceneId] || state.sceneId)}</strong></p>
-      <p>世界点数：<strong>${Math.round(Number(state.agentWorldCredits ?? 0))}</strong></p>
-      <p class="toolbar"><a class="btn" href="#/doudizhu">进入斗地主馆（观战）</a></p>
     </div>
   `;
 }
@@ -599,290 +538,6 @@ async function renderShop() {
   document.getElementById("shop-refresh")?.addEventListener("click", () => renderShop());
 }
 
-async function renderDoudizhuList() {
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/">← 返回枢纽</a></div>
-    <div class="hero"><h2>斗地主馆</h2><p>列表 <span class="mono">GET /world/doudizhu/tables</span> 不传 sessionId；实时推送需已完成注册并连接 WS。</p></div>
-    <div id="ddz-body"><div class="loading">加载中…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("ddz-body");
-
-  let tables = [];
-  const applyTables = (list) => {
-    tables = list;
-    paint();
-  };
-
-  const paint = () => {
-    if (!tables.length) {
-      el.innerHTML = `
-        <div class="alert alert-info">暂无牌桌。列表可由 HTTP 或 <span class="mono">world.doudizhu.lobby_snapshot</span> 更新。</div>
-        <p class="toolbar"><button type="button" class="btn" id="ddz-refresh">HTTP 刷新</button></p>
-      `;
-      document.getElementById("ddz-refresh")?.addEventListener("click", () => loadHttp());
-      return;
-    }
-    el.innerHTML = `
-      <ul class="table-list">
-        ${tables
-          .map((t) => {
-            const id = String(t.tableId || "");
-            const stake = t.stake != null ? String(t.stake) : "?";
-            const status = escapeHtml(t.status || "");
-            const pc = t.playerCount != null ? String(t.playerCount) : "?";
-            const sc = t.spectatorCount != null ? String(t.spectatorCount) : "?";
-            return `<li><a href="#/doudizhu/${encodeURIComponent(id)}">赌注 ${escapeHtml(stake)} · ${status}<br/><span class="mono">选手 ${pc}/3 · 观战 ${sc}</span><br/><span class="mono">${escapeHtml(id)}</span></a></li>`;
-          })
-          .join("")}
-      </ul>
-      <p class="toolbar"><button type="button" class="btn" id="ddz-refresh">HTTP 刷新</button></p>
-    `;
-    document.getElementById("ddz-refresh")?.addEventListener("click", () => loadHttp());
-  };
-
-  async function loadHttp() {
-    const r = await apiGet("/world/doudizhu/tables");
-    if (r.ok && r.json?.ok) applyTables(Array.isArray(r.json.tables) ? r.json.tables : []);
-    else el.innerHTML = friendlyError('牌桌列表加载失败', '请稍后刷新');
-  }
-
-  await loadHttp();
-
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.doudizhu.lobby_snapshot" && msg.payload?.tables) {
-      applyTables(msg.payload.tables);
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.doudizhu.subscribe_lobby", {});
-
-  const onLeave = () => {
-    off();
-    wsSend("world.doudizhu.unsubscribe_lobby", {});
-  };
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.includes("#/doudizhu") || location.hash.split("/").length > 2) {
-      window.removeEventListener("hashchange", h);
-      onLeave();
-    }
-  });
-}
-
-async function renderDoudizhuTable(tableId) {
-  const sid = getSessionId();
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/doudizhu">← 大厅</a></div>
-    <div class="hero"><h2>牌桌观战</h2><p><span class="mono">${escapeHtml(tableId)}</span> · WS <span class="mono">world.doudizhu.snapshot</span> + HTTP 兜底</p></div>
-    <div id="ddz-t-body"><div class="loading">连接观战…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("ddz-t-body");
-  let snap = null;
-
-  const renderSnap = () => {
-    if (!snap) {
-      el.innerHTML = '<div class="loading">等待快照…</div>';
-      return;
-    }
-    const role = snap.role != null ? String(snap.role) : "guest";
-    const status = snap.status != null ? String(snap.status) : "—";
-    const pot = snap.pot != null ? String(snap.pot) : "0";
-    const turn = snap.turnSeat != null ? Number(snap.turnSeat) : null;
-    const landlord = snap.landlordSeat != null ? Number(snap.landlordSeat) : null;
-    const counts = Array.isArray(snap.handCounts) ? snap.handCounts : null;
-    const finished = snap.finished === true;
-    const winnerSeat = snap.winnerSeat != null ? Number(snap.winnerSeat) : null;
-    el.innerHTML = `
-      <div class="alert alert-info">观战模式：公共快照（身份 ${escapeHtml(role)}）。</div>
-      <div class="panel">
-        <p>状态：<strong>${escapeHtml(status)}</strong> · 底池：<strong>${escapeHtml(pot)}</strong></p>
-        <p>地主座位：${landlord != null ? landlord + 1 : "—"} · 当前回合：${turn != null ? turn + 1 : "—"}</p>
-        ${counts && counts.length === 3 ? `<p>手牌张数：${counts[0]} / ${counts[1]} / ${counts[2]}（座位 1–3）</p>` : ""}
-        <p>上一手：${escapeHtml(describeLastPlay(snap.lastNonPass))}</p>
-        ${
-          finished
-            ? `<p><strong>本局结束</strong> · winnerSide：${escapeHtml(String(snap.winnerSide ?? "—"))} · 赢家座位：${
-                winnerSeat != null ? winnerSeat + 1 : "—"
-              }</p><p class="mono">${escapeHtml(JSON.stringify(snap.payouts ?? {}))}</p>`
-            : ""
-        }
-      </div>
-    `;
-  };
-
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.doudizhu.snapshot" && msg.payload?.tableId === tableId && msg.payload.snapshot) {
-      snap = msg.payload.snapshot;
-      renderSnap();
-    }
-    if (msg.type === "error.event") {
-      /* 可选：toast */
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.doudizhu.subscribe", { tableId });
-
-  const httpOnce = await apiGet(
-    `/world/doudizhu/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
-  );
-  if (httpOnce.ok && httpOnce.json?.ok && !snap) {
-    snap = httpOnce.json.snapshot;
-    renderSnap();
-  } else if (!snap) {
-    el.innerHTML = friendlyError('牌桌数据获取失败', 'HTTP 请求异常');
-  }
-
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.includes(tableId)) {
-      window.removeEventListener("hashchange", h);
-      off();
-      wsSend("world.doudizhu.unsubscribe", { tableId });
-    }
-  });
-}
-
-async function renderZhajinhuaList() {
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/">← 返回枢纽</a></div>
-    <div class="hero"><h2>炸金花馆</h2><p>列表不传 sessionId；WS <span class="mono">world.zhajinhua.lobby_snapshot</span>。</p></div>
-    <div id="zjh-body"><div class="loading">加载中…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("zjh-body");
-  let tables = [];
-  const paint = () => {
-    if (!tables.length) {
-      el.innerHTML =
-        '<div class="alert alert-info">暂无牌桌。</div><p class="toolbar"><button type="button" class="btn" id="zjh-refresh">HTTP 刷新</button></p>';
-      document.getElementById("zjh-refresh")?.addEventListener("click", () => loadHttp());
-      return;
-    }
-    el.innerHTML = `
-      <ul class="table-list">
-        ${tables
-          .map((t) => {
-            const id = String(t.tableId || "");
-            const stake = t.stake != null ? String(t.stake) : "?";
-            const status = escapeHtml(t.status || "");
-            const pc = t.playerCount != null ? String(t.playerCount) : "?";
-            const sc = t.spectatorCount != null ? String(t.spectatorCount) : "?";
-            return `<li><a href="#/zhajinhua/${encodeURIComponent(id)}">底注 ${escapeHtml(stake)} · ${status}<br/><span class="mono">选手 ${pc}/6 · 观战 ${sc}</span><br/><span class="mono">${escapeHtml(id)}</span></a></li>`;
-          })
-          .join("")}
-      </ul>
-      <p class="toolbar"><button type="button" class="btn" id="zjh-refresh">HTTP 刷新</button></p>
-    `;
-    document.getElementById("zjh-refresh")?.addEventListener("click", () => loadHttp());
-  };
-  async function loadHttp() {
-    const r = await apiGet("/world/zhajinhua/tables");
-    if (r.ok && r.json?.ok) {
-      tables = Array.isArray(r.json.tables) ? r.json.tables : [];
-      paint();
-    } else el.innerHTML = friendlyError('炸金花牌桌加载失败');
-  }
-  await loadHttp();
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.zhajinhua.lobby_snapshot" && msg.payload?.tables) {
-      tables = msg.payload.tables;
-      paint();
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.zhajinhua.subscribe_lobby", {});
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.startsWith("#/zhajinhua") || location.hash.split("/").length > 2) {
-      window.removeEventListener("hashchange", h);
-      off();
-      wsSend("world.zhajinhua.unsubscribe_lobby", {});
-    }
-  });
-}
-
-async function renderZhajinhuaTable(tableId) {
-  const sid = getSessionId();
-  appEl.innerHTML =
-    topBar() +
-    `
-    <div class="back-row"><a href="#/zhajinhua">← 大厅</a></div>
-    <div class="hero"><h2>炸金花桌观战</h2><p><span class="mono">${escapeHtml(tableId)}</span></p></div>
-    <div id="zjh-t-body"><div class="loading">…</div></div>
-  `;
-  bindTopBar();
-  const el = document.getElementById("zjh-t-body");
-  let snap = null;
-  const renderSnap = () => {
-    if (!snap) {
-      el.innerHTML = '<div class="loading">等待快照…</div>';
-      return;
-    }
-    const status = String(snap.status || "—");
-    const pot = snap.pot != null ? String(snap.pot) : "0";
-    const turn = snap.turnSeat != null ? Number(snap.turnSeat) : null;
-    const seats = Array.isArray(snap.seats) ? snap.seats : [];
-    const inHand = Array.isArray(snap.inHand) ? snap.inHand : [];
-    const handCounts = Array.isArray(snap.handCardCounts) ? snap.handCardCounts : [];
-    const lines = [];
-    for (let i = 0; i < 6; i++) {
-      const sess = seats[i] != null ? String(seats[i]) : "";
-      const occ = sess.length > 0;
-      let detail = "空位";
-      if (occ) {
-        if (status === "playing") {
-          const still = inHand[i] === true;
-          const n = handCounts[i] != null ? Number(handCounts[i]) : null;
-          detail = still ? `手牌 ${n ?? 3} 张` : "已弃牌";
-        } else if (status === "waiting") detail = "待开局";
-        else detail = sess.length > 8 ? `${sess.slice(0, 6)}…` : sess;
-      }
-      lines.push(`座位 ${i + 1}：${escapeHtml(detail)}`);
-    }
-    el.innerHTML = `
-      <div class="alert alert-info">观战公共快照（${escapeHtml(String(snap.role || "guest"))}）</div>
-      <div class="panel">
-        <p>状态：<strong>${escapeHtml(status)}</strong> · 底池：<strong>${escapeHtml(pot)}</strong></p>
-        <p>当前回合座位：${turn != null && turn >= 0 ? turn + 1 : "—"}</p>
-        <pre style="white-space:pre-wrap;font-size:0.85rem;color:var(--muted);margin:0;">${lines.join("\n")}</pre>
-        ${
-          status === "finished" && snap.payouts
-            ? `<p class="mono" style="margin-top:12px;">${escapeHtml(JSON.stringify(snap.payouts))}</p>`
-            : ""
-        }
-      </div>
-    `;
-  };
-  const off = subscribeWs((msg) => {
-    if (msg.type === "world.zhajinhua.snapshot" && msg.payload?.tableId === tableId && msg.payload.snapshot) {
-      snap = msg.payload.snapshot;
-      renderSnap();
-    }
-  });
-  ensureWebSocket();
-  wsSend("world.zhajinhua.subscribe", { tableId });
-  const httpOnce = await apiGet(
-    `/world/zhajinhua/table/${encodeURIComponent(tableId)}?sessionId=${encodeURIComponent(sid)}`,
-  );
-  if (httpOnce.ok && httpOnce.json?.ok && !snap) {
-    snap = httpOnce.json.snapshot;
-    renderSnap();
-  } else if (!snap) {
-    el.innerHTML = friendlyError('牌桌快照获取失败');
-  }
-  window.addEventListener("hashchange", function h() {
-    if (!location.hash.includes(tableId)) {
-      window.removeEventListener("hashchange", h);
-      off();
-      wsSend("world.zhajinhua.unsubscribe", { tableId });
-    }
-  });
-}
 
 function renderPost(p) {
   const own = p.isOwnAgent ? " own" : "";
@@ -994,12 +649,7 @@ async function route() {
   
   try {
     if (r.name === "hub") await renderHub();
-    else if (r.name === "plaza") await renderPlaza();
     else if (r.name === "shop") await renderShop();
-    else if (r.name === "doudizhu") await renderDoudizhuList();
-    else if (r.name === "doudizhuTable") await renderDoudizhuTable(r.tableId);
-    else if (r.name === "zhajinhua") await renderZhajinhuaList();
-    else if (r.name === "zhajinhuaTable") await renderZhajinhuaTable(r.tableId);
     else if (r.name === "social") await renderSocial();
     else await renderHub();
   } catch (e) {

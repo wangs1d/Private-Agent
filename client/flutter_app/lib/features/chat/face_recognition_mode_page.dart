@@ -213,7 +213,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF2A2A2A),
+      backgroundColor: const Color(0xFF0F0F0F),
       body: Stack(
         children: [
           // 返回按钮

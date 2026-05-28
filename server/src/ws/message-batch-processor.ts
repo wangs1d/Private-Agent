@@ -11,36 +11,39 @@ export type BatchedMessage = {
 };
 
 export type MessageBatchProcessorConfig = {
-  /** 等待新消息的时间窗口（毫秒），默认 1200ms */
-  debounceMs: number;
-  /** 最大等待时间（毫秒），即使还在收到消息也会强制处理，默认 5000ms */
-  maxWaitMs: number;
   /** 是否启用批处理，默认 true */
   enabled: boolean;
 };
 
+export type BatchTurnContext = {
+  /** 本轮代次；客户端隐藏「处理中」UI 后新消息进入下一轮 */
+  generation: number;
+};
+
 const DEFAULT_CONFIG: MessageBatchProcessorConfig = {
-  debounceMs: 1200,
-  maxWaitMs: 5000,
   enabled: true,
 };
 
 /**
- * 消息批处理器：将用户连续发送的多条消息合并为一条后再处理。
+ * 消息批处理器：在客户端仍显示「Agent 处理中」期间，将用户多条消息合并为一条再处理。
  *
- * 核心机制：
- * - 收到消息后不立即处理，而是放入缓冲区
- * - 启动防抖计时器（debounceMs），期间新消息会重置计时器
- * - 计时器到期后将缓冲区中所有消息合并处理
- * - 超过最大等待时间（maxWaitMs）强制处理，避免用户长时间等待
- * - 若当前会话正在生成回复，新消息继续缓冲，待本轮结束后再合并处理
+ * 核心机制（不依赖固定时间间隔）：
+ * - 首条消息到达后尽快开始处理（同事件循环内多条会先合并）
+ * - 客户端上报 `chat.agent_processing_ui` active=true 时允许合并/重启本轮
+ * - active=false（处理中 UI 已隐藏）后锁定本轮，新消息进入下一轮
  */
 export class MessageBatchProcessor {
   private buffers = new Map<string, BatchedMessage[]>();
-  private timers = new Map<string, ReturnType<typeof setTimeout>>();
-  private maxWaitTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private onReadyHandlers = new Map<string, (merged: BatchedMessage) => Promise<void>>();
+  private onReadyHandlers = new Map<
+    string,
+    (merged: BatchedMessage, turn: BatchTurnContext) => Promise<void>
+  >();
   private processing = new Set<string>();
+  /** 客户端已隐藏「处理中」UI，本轮不可再合并 */
+  private turnCommitted = new Set<string>();
+  private inFlightMerged = new Map<string, BatchedMessage>();
+  private processingGeneration = new Map<string, number>();
+  private flushScheduled = new Set<string>();
   private config: MessageBatchProcessorConfig;
 
   constructor(config?: Partial<MessageBatchProcessorConfig>) {
@@ -49,17 +52,22 @@ export class MessageBatchProcessor {
 
   /**
    * 提交一条用户消息到批处理器。
-   * 若仍在防抖窗口内会缓冲；若当前会话正在回复则继续缓冲，待本轮结束后再合并触发。
    */
   submit(
     sessionId: string,
     message: Omit<BatchedMessage, "timestamp">,
-    onReady: (merged: BatchedMessage) => Promise<void>,
+    onReady: (merged: BatchedMessage, turn: BatchTurnContext) => Promise<void>,
   ): void {
     this.onReadyHandlers.set(sessionId, onReady);
 
     if (!this.config.enabled) {
-      void this.invokeReady(sessionId, { ...message, timestamp: Date.now() } as BatchedMessage);
+      const turn = this.bumpGeneration(sessionId);
+      this.processing.add(sessionId);
+      void this.invokeReady(
+        sessionId,
+        { ...message, timestamp: Date.now() } as BatchedMessage,
+        turn,
+      );
       return;
     }
 
@@ -71,69 +79,127 @@ export class MessageBatchProcessor {
     }
     this.buffers.get(sessionId)!.push(buffered);
 
+    this.scheduleFlush(sessionId);
+  }
+
+  /**
+   * 同步客户端「Agent 处理中」UI 状态。
+   * active=false 表示处理中组件已消失，锁定当前轮次。
+   */
+  setClientProcessingUiActive(sessionId: string, active: boolean): void {
+    if (active) {
+      return;
+    }
+    this.commitTurn(sessionId);
+    if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
+      this.scheduleFlush(sessionId);
+    }
+  }
+
+  /** 当前轮次是否已被更新的用户消息取代（应停止向客户端推送） */
+  isStaleTurn(sessionId: string, generation: number): boolean {
+    return (this.processingGeneration.get(sessionId) ?? 0) !== generation;
+  }
+
+  /** @deprecated 仅服务端兜底；正常由客户端 processing_ui active=false 触发 */
+  markReplyStarted(sessionId: string): void {
+    this.commitTurn(sessionId);
+  }
+
+  private commitTurn(sessionId: string): void {
+    this.turnCommitted.add(sessionId);
+  }
+
+  private canMerge(sessionId: string): boolean {
+    return !this.turnCommitted.has(sessionId);
+  }
+
+  private scheduleFlush(sessionId: string): void {
+    if (this.flushScheduled.has(sessionId)) return;
+    this.flushScheduled.add(sessionId);
+    queueMicrotask(() => {
+      this.flushScheduled.delete(sessionId);
+      this.tryStartOrRestart(sessionId);
+    });
+  }
+
+  private tryStartOrRestart(sessionId: string): void {
+    const pending = this.buffers.get(sessionId)?.length ?? 0;
+    if (pending === 0 && !this.inFlightMerged.has(sessionId)) return;
+
     if (this.processing.has(sessionId)) {
+      if (!this.canMerge(sessionId)) {
+        return;
+      }
+      this.restartInFlight(sessionId);
       return;
     }
 
-    this.resetDebounceTimer(sessionId);
-    this.ensureMaxWaitTimer(sessionId);
+    this.flush(sessionId);
   }
 
-  private resetDebounceTimer(sessionId: string): void {
-    const existing = this.timers.get(sessionId);
-    if (existing) {
-      clearTimeout(existing);
-    }
+  private restartInFlight(sessionId: string): void {
+    const pending = this.takeBuffer(sessionId);
+    const prev = this.inFlightMerged.get(sessionId);
+    const merged = this.mergeMessageList(
+      prev ? [prev, ...pending] : pending,
+    );
+    if (!merged) return;
 
-    const timer = setTimeout(() => {
-      this.flush(sessionId);
-    }, this.config.debounceMs);
-
-    this.timers.set(sessionId, timer);
-  }
-
-  private ensureMaxWaitTimer(sessionId: string): void {
-    if (this.maxWaitTimers.has(sessionId)) return;
-
-    const messages = this.buffers.get(sessionId);
-    if (!messages?.length) return;
-
-    const firstMsgTime = messages[0].timestamp;
-    const elapsed = Date.now() - firstMsgTime;
-    const remaining = Math.max(0, this.config.maxWaitMs - elapsed);
-
-    const timer = setTimeout(() => {
-      this.flush(sessionId);
-    }, remaining);
-
-    this.maxWaitTimers.set(sessionId, timer);
+    this.turnCommitted.delete(sessionId);
+    const turn = this.bumpGeneration(sessionId);
+    this.inFlightMerged.set(sessionId, merged);
+    void this.invokeReady(sessionId, merged, turn);
   }
 
   private flush(sessionId: string): void {
     if (this.processing.has(sessionId)) return;
 
-    const messages = this.buffers.get(sessionId);
-    if (!messages || messages.length === 0) return;
+    const pending = this.takeBuffer(sessionId);
+    if (pending.length === 0) return;
 
-    this.clearTimers(sessionId);
-    this.buffers.delete(sessionId);
+    const merged = this.mergeMessageList(pending);
+    if (!merged) return;
 
-    const merged = this.mergeMessages(messages);
-    void this.invokeReady(sessionId, merged);
+    const turn = this.bumpGeneration(sessionId);
+    this.inFlightMerged.set(sessionId, merged);
+    this.processing.add(sessionId);
+    this.turnCommitted.delete(sessionId);
+    void this.invokeReady(sessionId, merged, turn);
   }
 
-  private invokeReady(sessionId: string, merged: BatchedMessage): void {
+  private takeBuffer(sessionId: string): BatchedMessage[] {
+    const messages = this.buffers.get(sessionId) ?? [];
+    this.buffers.delete(sessionId);
+    return messages;
+  }
+
+  private bumpGeneration(sessionId: string): BatchTurnContext {
+    const next = (this.processingGeneration.get(sessionId) ?? 0) + 1;
+    this.processingGeneration.set(sessionId, next);
+    return { generation: next };
+  }
+
+  private invokeReady(sessionId: string, merged: BatchedMessage, turn: BatchTurnContext): void {
     const onReady = this.onReadyHandlers.get(sessionId);
     if (!onReady) return;
 
-    this.processing.add(sessionId);
-    void Promise.resolve(onReady(merged)).finally(() => {
+    void Promise.resolve(onReady(merged, turn)).finally(() => {
+      if (this.processingGeneration.get(sessionId) !== turn.generation) {
+        return;
+      }
       this.processing.delete(sessionId);
+      this.turnCommitted.delete(sessionId);
+      this.inFlightMerged.delete(sessionId);
       if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
-        this.resetDebounceTimer(sessionId);
-        this.ensureMaxWaitTimer(sessionId);
+        this.scheduleFlush(sessionId);
       }
     });
+  }
+
+  private mergeMessageList(messages: BatchedMessage[]): BatchedMessage | null {
+    if (messages.length === 0) return null;
+    return this.mergeMessages(messages);
   }
 
   private mergeMessages(messages: BatchedMessage[]): BatchedMessage {
@@ -160,31 +226,21 @@ export class MessageBatchProcessor {
     };
   }
 
-  private clearTimers(sessionId: string): void {
-    const debounce = this.timers.get(sessionId);
-    if (debounce) {
-      clearTimeout(debounce);
-      this.timers.delete(sessionId);
-    }
-
-    const maxWait = this.maxWaitTimers.get(sessionId);
-    if (maxWait) {
-      clearTimeout(maxWait);
-      this.maxWaitTimers.delete(sessionId);
-    }
-  }
-
   /**
    * 强制刷新指定会话的所有缓冲消息（用于断开连接等场景）
    */
   forceFlush(
     sessionId: string,
-    onReady?: (merged: BatchedMessage) => Promise<void>,
+    onReady?: (merged: BatchedMessage, turn: BatchTurnContext) => Promise<void>,
   ): void {
     if (onReady) {
       this.onReadyHandlers.set(sessionId, onReady);
     }
+    if (this.processing.has(sessionId) && this.turnCommitted.has(sessionId)) {
+      return;
+    }
     if (this.processing.has(sessionId)) {
+      this.restartInFlight(sessionId);
       return;
     }
     this.flush(sessionId);
@@ -194,12 +250,13 @@ export class MessageBatchProcessor {
    * 清理资源（服务关闭时调用）
    */
   dispose(): void {
-    for (const sessionId of this.timers.keys()) {
-      this.clearTimers(sessionId);
-    }
     this.buffers.clear();
     this.onReadyHandlers.clear();
     this.processing.clear();
+    this.turnCommitted.clear();
+    this.inFlightMerged.clear();
+    this.processingGeneration.clear();
+    this.flushScheduled.clear();
   }
 
   /** 获取指定会话当前缓冲的消息数量（调试用） */

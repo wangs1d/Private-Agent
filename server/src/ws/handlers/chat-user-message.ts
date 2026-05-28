@@ -3,13 +3,17 @@ import type { AuditService } from "../../services/audit-service.js";
 import { resolveActorId } from "../../agent/actor-id.js";
 import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
-import { userMessageSchema } from "../../schemas/api.js";
+import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
 import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
 import { chunkText } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
-import { MessageBatchProcessor, type BatchedMessage } from "../message-batch-processor.js";
+import {
+  MessageBatchProcessor,
+  type BatchedMessage,
+  type BatchTurnContext,
+} from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { getToolResultProcessor } from "../../services/tool-result-processor.js";
 
@@ -127,8 +131,43 @@ export async function handleChatUserMessageEvent(
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
     userId: data.userId,
-  }, (batched) => processBatchedMessage(ctx, batched, deps));
+  }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
+  return true;
+}
+
+/**
+ * 处理 `chat.agent_processing_ui`：客户端「处理中」组件显隐。
+ */
+export function handleChatAgentProcessingUiEvent(
+  ctx: ChatUserMessageContext,
+  payload: unknown,
+): boolean {
+  if (!ctx.boundActorId) {
+    return true;
+  }
+  const parsed = agentProcessingUiSchema.safeParse(payload);
+  if (!parsed.success) {
+    ctx.socket.send(
+      JSON.stringify({
+        type: ServerEventType.ErrorEvent,
+        payload: { code: "INVALID_CHAT_EVENT", message: parsed.error.message },
+      }),
+    );
+    return true;
+  }
+  const data = parsed.data;
+  const msgActor = resolveActorId({ userId: data.userId, sessionId: data.sessionId });
+  if (msgActor !== ctx.boundActorId) {
+    ctx.socket.send(
+      JSON.stringify({
+        type: ServerEventType.ErrorEvent,
+        payload: { code: "FORBIDDEN", message: "userId/sessionId 与当前连接不一致" },
+      }),
+    );
+    return true;
+  }
+  messageBatchProcessor.setClientProcessingUiActive(msgActor, data.active);
   return true;
 }
 
@@ -136,26 +175,18 @@ async function processBatchedMessage(
   ctx: ChatUserMessageContext,
   batched: BatchedMessage,
   deps: ChatUserMessageHandlerDeps,
+  turn: BatchTurnContext,
 ): Promise<void> {
   const msgActor = ctx.boundActorId;
-  const isBatched = batched.text.includes("[续");
+  const isStale = (): boolean => messageBatchProcessor.isStaleTurn(msgActor, turn.generation);
+
+  if (isStale()) return;
 
   let chunkSeq = 0;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
-  ctx.socket.send(
-    JSON.stringify({
-      type: ServerEventType.ChatAgentStatus,
-      payload: {
-        sessionId: msgActor,
-        messageId: assistantMessageId,
-        traceId: batched.originalMessageId,
-        phase: "thinking",
-        line: isBatched ? "💭 正在整合你的多条消息…" : "💭 正在理解你的需求…",
-      },
-    }),
-  );
 
   const sendAssistantChunk = (chunk: string): void => {
+    if (isStale()) return;
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -180,6 +211,7 @@ async function processBatchedMessage(
       interruptedContext: batched.interruptedContext,
       onAssistantDelta: (delta) => sendAssistantChunk(delta),
       onExternalToolExecuteStart: (info) => {
+        if (isStale()) return;
         wireToolExecuteStart(
           {
             sessionId: msgActor,
@@ -191,6 +223,7 @@ async function processBatchedMessage(
         );
       },
       onExternalToolExecuted: (info) => {
+        if (isStale()) return;
         wireToolExecuted(
           {
             sessionId: msgActor,
@@ -202,6 +235,9 @@ async function processBatchedMessage(
         );
       },
       onAgentPhaseStatus: (line) => {
+        if (isStale()) return;
+        const trimmed = line.trim();
+        if (!trimmed) return;
         ctx.socket.send(
           JSON.stringify({
             type: ServerEventType.ChatAgentStatus,
@@ -209,20 +245,25 @@ async function processBatchedMessage(
               sessionId: msgActor,
               messageId: assistantMessageId,
               traceId: batched.originalMessageId,
-              phase: "plan_execute",
-              line,
+              phase: "live",
+              line: trimmed,
             },
           }),
         );
       },
     });
 
+    if (isStale()) return;
+
     if (!reply.streamedChunks) {
       chunkText(reply.text, 12).forEach((chunk) => sendAssistantChunk(chunk));
     }
 
+    if (isStale()) return;
+
     let toolResult: { ok: boolean; result?: Record<string, unknown> } | undefined;
     if (reply.toolName && reply.toolInput) {
+      if (isStale()) return;
       ctx.socket.send(
         JSON.stringify({
           type: ServerEventType.ToolCall,
@@ -243,6 +284,7 @@ async function processBatchedMessage(
             clientIp: batched.clientIp,
             clientLocation: batched.clientLocation,
           });
+      if (isStale()) return;
       ctx.socket.send(
         JSON.stringify({
           type: ServerEventType.ToolResult,
@@ -280,6 +322,8 @@ async function processBatchedMessage(
       sendAssistantChunk(finalText);
     }
 
+    if (isStale()) return;
+
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
@@ -291,12 +335,17 @@ async function processBatchedMessage(
         },
       }),
     );
+    if (!isStale()) {
+      messageBatchProcessor.markReplyStarted(msgActor);
+    }
   } catch (err) {
+    if (isStale()) return;
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[WS] chat.user_message failed:", err);
     ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, batched.originalMessageId);
     const errText = `处理消息时出错：${msg}`;
     sendAssistantChunk(errText);
+    if (isStale()) return;
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
@@ -308,5 +357,8 @@ async function processBatchedMessage(
         },
       }),
     );
+    if (!isStale()) {
+      messageBatchProcessor.markReplyStarted(msgActor);
+    }
   }
 }

@@ -1,5 +1,4 @@
 import type { FastifyInstance } from 'fastify';
-import { AuthService } from '../services/auth-service.js';
 import { SocialService } from '../services/social-service.js';
 
 interface WebSocketClient {
@@ -8,7 +7,7 @@ interface WebSocketClient {
   socket: any;
 }
 
-export function registerWebSocket(app: FastifyInstance, authService: AuthService, socialService: SocialService): void {
+export function registerWebSocket(app: FastifyInstance, socialService: SocialService): void {
   const clients = new Map<string, WebSocketClient>();
   const userSessions = new Map<string, Set<string>>();
 
@@ -45,41 +44,25 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       }
 
       if (event.type === 'session.init') {
-        const token = event.payload?.token;
-        if (!token) {
-          socket.send(JSON.stringify({
-            type: 'error',
-            payload: { code: 'INVALID_SESSION', message: '需要提供认证令牌' },
-          }));
-          return;
-        }
-
-        const auth = authService.verifyToken(token);
-        if (!auth) {
-          socket.send(JSON.stringify({
-            type: 'error',
-            payload: { code: 'INVALID_TOKEN', message: '无效的认证令牌' },
-          }));
-          return;
-        }
+        const guestId: string = event.payload?.guestId || `guest_ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         sessionId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        userId = auth.userId;
+        userId = guestId;
 
-        const client: WebSocketClient = { sessionId, userId, socket };
+        const client: WebSocketClient = { sessionId, userId: guestId, socket };
         clients.set(sessionId, client);
 
-        if (!userSessions.has(userId)) {
-          userSessions.set(userId, new Set());
+        if (!userSessions.has(guestId)) {
+          userSessions.set(guestId, new Set());
         }
-        userSessions.get(userId)!.add(sessionId);
+        userSessions.get(guestId)!.add(sessionId);
 
         socket.send(JSON.stringify({
           type: 'session.ready',
-          payload: { sessionId, userId, username: auth.username, userType: auth.userType },
+          payload: { sessionId, userId: guestId, username: 'guest', userType: 'human' },
         }));
 
-        const feed = socialService.getFeedForViewer(userId);
+        const feed = socialService.getFeedForViewer(guestId);
         socket.send(JSON.stringify({
           type: 'social.feed_snapshot',
           payload: feed,
@@ -99,7 +82,7 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       if (event.type === 'social.post') {
         const { text, mediaType, mediaUrl } = event.payload || {};
         const result = socialService.createPost(userId, text || '', mediaType || 'none', mediaUrl || null);
-        
+
         if (!result.ok) {
           socket.send(JSON.stringify({
             type: 'error',
@@ -115,7 +98,7 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       if (event.type === 'social.comment') {
         const { postId, text } = event.payload || {};
         const result = socialService.addComment(userId, postId, text || '');
-        
+
         if (!result.ok) {
           socket.send(JSON.stringify({
             type: 'error',
@@ -131,7 +114,7 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       if (event.type === 'social.like_toggle') {
         const { postId } = event.payload || {};
         const result = socialService.toggleLike(userId, postId);
-        
+
         if (!result.ok) {
           socket.send(JSON.stringify({
             type: 'error',
@@ -147,7 +130,7 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       if (event.type === 'social.post_delete') {
         const { postId } = event.payload || {};
         const result = socialService.deletePost(userId, postId);
-        
+
         if (!result.ok) {
           socket.send(JSON.stringify({
             type: 'error',
@@ -163,7 +146,7 @@ export function registerWebSocket(app: FastifyInstance, authService: AuthService
       if (event.type === 'social.report') {
         const { postId, reason } = event.payload || {};
         const result = socialService.reportPost(userId, postId, reason);
-        
+
         if (!result.ok) {
           socket.send(JSON.stringify({
             type: 'error',

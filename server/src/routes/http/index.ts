@@ -13,17 +13,19 @@ import { registerWeatherRoutes } from "./weather.js";
 import { registerGeoRoutes } from "./geo.js";
 import { registerPhoneRoutes } from "./phone.js";
 import {
+  registerGameCenterRoutes,
   registerWorldDoudizhuRoutes,
   registerWorldGomokuRoutes,
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
-  registerWorldZhajinhuaRoutes,
   registerWorldSocialRoutes,
+  registerWorldZhajinhuaRoutes,
   registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
 import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
 import { registerChatWeb } from "./chat-web.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
+import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -43,9 +45,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWalletRoutes(app, deps);
   registerWorldRoutes(app, deps);
   registerWorldFreeMarketRoutes(app, deps);
+  registerWorldGomokuRoutes(app, deps);
   registerWorldDoudizhuRoutes(app, deps);
   registerWorldZhajinhuaRoutes(app, deps);
-  registerWorldGomokuRoutes(app, deps);
+  registerGameCenterRoutes(app, { gameCenter: deps.gameCenterCoordinator });
   registerWorldSocialRoutes(app, deps);
   registerGomokuPlayWeb(app);
   registerChatWeb(app);
@@ -54,4 +57,5 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
+  registerNightlyMemoryRoutes(app);
 }

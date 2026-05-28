@@ -13,8 +13,6 @@ export type ProactiveRule = {
 const BUILTIN_RULES: ProactiveRule[] = [
   { module: "gomoku", eventType: "game_finished", priority: 10, label: "五子棋对局结束", templateHint: "游戏结束，根据胜负调侃或自嘲" },
   { module: "gomoku", eventType: "game_started", priority: 5, label: "五子棋开局" },
-  { module: "doudizhu", eventType: "game_finished", priority: 10, label: "斗地主结束" },
-  { module: "zhajinhua", eventType: "game_finished", priority: 10, label: "炸金花结束" },
   { module: "wallet", eventType: "transaction_completed", priority: 8, label: "交易完成" },
   { module: "task", eventType: "task_completed", priority: 7, label: "任务完成" },
   { module: "market", eventType: "skill_purchased", priority: 6, label: "技能购买成功" },

@@ -1,0 +1,91 @@
+.mode-shell {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+.mode-embed {
+  background: radial-gradient(circle at 50% 35%, rgba(30, 36, 48, 0.95), rgba(12, 14, 20, 0.98));
+}
+
+.mode-overlay {
+  background: transparent;
+}
+
+.mode-caption {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 36px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #d8e6ff;
+  font-size: 0.72rem;
+  text-align: center;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.mode-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: #a8c8ff;
+  pointer-events: none;
+}
+
+.overlay-body {
+  background: transparent !important;
+}
+
+.overlay-hint {
+  font-size: 0.62rem;
+  color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
+.overlay-drag-handle {
+  display: none;
+}
+
+.overlay-status {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.overlay-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+
+.overlay-dot[data-connected="1"] {
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.8);
+}
+
+.mode-badge--speaking {
+  color: #93c5fd;
+}
+
+.mode-badge--thinking {
+  color: #fcd34d;
+}
+
+.mode-badge--alert {
+  color: #fca5a5;
+}

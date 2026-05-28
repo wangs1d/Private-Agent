@@ -148,12 +148,12 @@ export function parseExecutionPlan(raw: string): TaskExecutionPlan | null {
 }
 
 async function emitPhase(
-  onPhaseStatus: ((label: string) => void) | undefined,
+  _onPhaseStatus: ((label: string) => void) | undefined,
   onDelta: StreamDeltaHandler | undefined,
   label: string,
 ): Promise<void> {
   await Promise.resolve();
-  onPhaseStatus?.(label);
+  // 进度由主 Agent 在执行阶段流式生成，不再推送固定阶段文案。
   if (isPeVerboseStreamEnabled()) {
     onDelta?.(`\n━━ ${label} ━━\n`);
   }

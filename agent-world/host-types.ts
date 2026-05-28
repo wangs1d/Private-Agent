@@ -1,9 +1,9 @@
 import type { A2aOutsourcingService } from "./services/a2a-outsourcing-service.js";
 import type { DoudizhuService } from "./services/doudizhu-service.js";
-import type { ZhaJinHuaService } from "./services/zhajinhua-service.js";
 import type { GomokuService } from "./services/gomoku-service.js";
 import type { SocialFeedService } from "./services/social-feed-service.js";
 import type { WorldService } from "./services/world-service.js";
+import type { ZhaJinHuaService } from "./services/zhajinhua-service.js";
 
 export type SkillPermissionLike = string;
 
@@ -83,9 +83,9 @@ export type WsConnectionRegistryLike = {
 export type HttpRouteDepsLike = {
   worldService: WorldService;
   a2aOutsourcingService: A2aOutsourcingService;
+  gomokuService: GomokuService;
   doudizhuService: DoudizhuService;
   zhaJinHuaService: ZhaJinHuaService;
-  gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
   skillManager: SkillManagerLike;
   skillMetadataValidator: SkillMetadataValidatorLike;

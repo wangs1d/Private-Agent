@@ -14,7 +14,7 @@ import {
 
 import {
 
-  streamCompletionWithDoudizhuTools,
+  streamCompletionWithTools,
 
 } from "../openai-compatible-tool-loop.js";
 
@@ -360,7 +360,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
         const mergedTools = resolveChatToolsForStream(streamOpts);
 
-        const full = await streamCompletionWithDoudizhuTools(
+        const full = await streamCompletionWithTools(
 
           this.client,
 

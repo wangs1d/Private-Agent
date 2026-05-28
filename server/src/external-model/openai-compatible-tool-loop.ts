@@ -10,6 +10,11 @@ import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import {
+  MASTER_INVOKE_SUB_AGENT_REGISTRY,
+  MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
+} from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import type {
   ChatToolExecutionContext,
@@ -23,6 +28,25 @@ const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 type ToolAcc = { id: string; name: string; arguments: string };
 
 const DEFAULT_MAX_ROUNDS = 12;
+
+function resolveToolExecutionTimeoutMs(registryToolName: string): number {
+  const fallback = Number.parseInt(process.env.TOOL_EXECUTION_TIMEOUT_MS ?? "30000", 10);
+  const defaultMs = Number.isFinite(fallback) && fallback > 0 ? fallback : 30_000;
+  if (registryToolName === MASTER_INVOKE_SUB_AGENT_REGISTRY) {
+    const rt = getAgentRuntimeConfig().masterDelegation;
+    return (
+      Math.max(
+        rt.subtaskTimeoutMs,
+        rt.techSubtaskTimeoutMs,
+        rt.infoSubtaskTimeoutMs,
+      ) + 5_000
+    );
+  }
+  if (registryToolName === MASTER_POLL_SUB_AGENT_TASKS_REGISTRY) {
+    return Math.max(defaultMs, 10_000);
+  }
+  return defaultMs;
+}
 
 /**
  * 动态工具轮次配置：基于任务复杂度自动调整最大工具调用轮次
@@ -91,7 +115,28 @@ export function getOptimalMaxRounds(userText: string, messageCount: number): num
  * 同时清理有 tool_calls 但缺少对应 tool 结果的孤立 assistant 消息。
  * 防止 Kimi/Moonshot 等 API 返回 "tool_call_id is not found" 错误。
  */
-function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+/** Moonshot `extra_body.thinking.type === "disabled"` 时须从历史消息中剥离 reasoning_content。 */
+export function isThinkingDisabled(extraBody?: Record<string, unknown>): boolean {
+  const thinking = extraBody?.thinking as { type?: string } | undefined;
+  return thinking?.type === "disabled";
+}
+
+function stripReasoningContentFromMessages(
+  messages: ChatCompletionMessageParam[],
+): ChatCompletionMessageParam[] {
+  return messages.map((msg) => {
+    if (!("reasoning_content" in msg)) return msg;
+    const { reasoning_content: _removed, ...rest } = msg as ChatCompletionMessageParam & {
+      reasoning_content?: string;
+    };
+    return rest;
+  });
+}
+
+function sanitizeMessagesForApi(
+  messages: ChatCompletionMessageParam[],
+  opts?: { stripReasoning?: boolean },
+): ChatCompletionMessageParam[] {
   const validToolCallIds = new Set<string>();
   const assistantIndicesWithToolCalls = new Set<number>();
 
@@ -118,7 +163,7 @@ function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCom
     }
   }
 
-  return messages.filter((msg, idx) => {
+  let filtered = messages.filter((msg, idx) => {
     if (msg.role !== "tool") return true;
     const tcId = (msg as { tool_call_id?: string }).tool_call_id;
     if (!tcId) {
@@ -149,6 +194,10 @@ function sanitizeMessagesForApi(messages: ChatCompletionMessageParam[]): ChatCom
     }
     return true;
   });
+  if (opts?.stripReasoning) {
+    filtered = stripReasoningContentFromMessages(filtered);
+  }
+  return filtered;
 }
 
 /** Moonshot Kimi 等端点仅允许字母数字下划线连字符，将 registry 名 `a.b` 映射为 `a_b`。 */
@@ -1009,7 +1058,7 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 /**
  * OpenAI 兼容 Chat Completions：流式输出 + tool_calls 多轮执行（Kimi / OpenAI 共用）。
  */
-export async function streamCompletionWithDoudizhuTools(
+export async function streamCompletionWithTools(
   client: OpenAI,
   model: string,
   messages: ChatCompletionMessageParam[],
@@ -1042,9 +1091,12 @@ export async function streamCompletionWithDoudizhuTools(
   
   const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
   let lastAssistantText = "";
+  const thinkingDisabled = isThinkingDisabled(options?.extraBody);
 
   for (let round = 0; round < maxRounds; round++) {
-    const sanitizedMessages = sanitizeMessagesForApi(messages);
+    const sanitizedMessages = sanitizeMessagesForApi(messages, {
+      stripReasoning: thinkingDisabled,
+    });
     const stream = await client.chat.completions.create({
       model,
       messages: sanitizedMessages,
@@ -1072,7 +1124,12 @@ export async function streamCompletionWithDoudizhuTools(
         }
         if (d?.content) {
           fullText += d.content;
-          onDelta(d.content);
+          const statusLine = fullText.trim();
+          if (ctx.onAgentStatusLine) {
+            if (statusLine) ctx.onAgentStatusLine(statusLine);
+          } else {
+            onDelta(d.content);
+          }
         }
         if (d?.tool_calls) {
           for (const tc of d.tool_calls) {
@@ -1095,6 +1152,9 @@ export async function streamCompletionWithDoudizhuTools(
     lastAssistantText = fullText;
 
     if (finishReason !== "tool_calls" || toolAcc.size === 0) {
+      if (ctx.onAgentStatusLine && fullText.trim()) {
+        onDelta(fullText);
+      }
       messages.push({
         role: "assistant",
         content: fullText || null,
@@ -1122,13 +1182,17 @@ export async function streamCompletionWithDoudizhuTools(
         };
       });
 
-    messages.push({
+    const assistantWithTools: ChatCompletionMessageParam = {
       role: "assistant",
       content: fullText || null,
       tool_calls: toolCalls,
-      // Kimi k2.5 等开启 thinking 时，带 tool_calls 的 assistant 消息须含 reasoning_content
-      reasoning_content: fullReasoning,
-    } as ChatCompletionMessageParam);
+    };
+    // Kimi k2.5 开启 thinking 时，带 tool_calls 的 assistant 须含 reasoning_content；关闭 thinking 时不得携带该字段
+    if (!thinkingDisabled) {
+      (assistantWithTools as { reasoning_content?: string }).reasoning_content =
+        fullReasoning.trim() || " ";
+    }
+    messages.push(assistantWithTools);
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
 
@@ -1158,8 +1222,7 @@ export async function streamCompletionWithDoudizhuTools(
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
-        // 添加工具执行超时控制（性能优化：异常恢复 +50%）
-        const TOOL_TIMEOUT_MS = parseInt(process.env.TOOL_EXECUTION_TIMEOUT_MS ?? '30000'); // 默认30秒超时
+        const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(item.registryToolName);
         
         let exec: Awaited<ReturnType<ChatToolExecutionContext['executeTool']>>;
         try {

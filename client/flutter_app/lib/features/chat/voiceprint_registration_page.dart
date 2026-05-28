@@ -123,7 +123,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF2A2A2A),
+      backgroundColor: const Color(0xFF0F0F0F),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,

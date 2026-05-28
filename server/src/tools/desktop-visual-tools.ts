@@ -1,10 +1,10 @@
 import { resolveActorId } from "../agent/actor-id.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
-import type { DesktopVisualAgentPort } from "../services/desktop-visual-agent-port.js";
+import type { DesktopVisualPort } from "../services/desktop-visual-port.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export type DesktopVisualToolsDeps = {
-  localAgent: DesktopVisualAgentPort;
+  localVisual: DesktopVisualPort;
   bridge: DesktopBridgeCoordinator;
 };
 
@@ -23,12 +23,12 @@ function parseRegion(input: Record<string, unknown>): [number, number, number, n
 
 function desktopUnavailableMessage(bridgeEnabled: boolean): string {
   if (bridgeEnabled) {
-    return "电脑端未在线：请在本机运行桌面桥接（与手机相同 userId，session.init 带 desktopBridge:true），或设置 DESKTOP_VISUAL_AGENT_ENABLED=1 由服务端本机截图。";
+    return "电脑端未在线：请在本机运行桌面桥接（与手机相同 userId，session.init 带 desktopBridge:true），或设置 DESKTOP_VISUAL_ENABLED=1 由服务端本机截图。";
   }
-  return "桌面能力未配置：请设置 DESKTOP_BRIDGE_ENABLED=1（或 DESKTOP_BRIDGE_TOKEN）并运行桥接客户端，或设置 DESKTOP_VISUAL_AGENT_ENABLED=1 由服务端本机执行。";
+  return "桌面能力未配置：请设置 DESKTOP_BRIDGE_ENABLED=1（或 DESKTOP_BRIDGE_TOKEN）并运行桥接客户端，或设置 DESKTOP_VISUAL_ENABLED=1 由服务端本机执行。";
 }
 
-/** 始终注册；执行时按桥接在线 / 本机 Agent 择优，避免「完全访问」已开但工具未注册。 */
+/** 始终注册；执行时按桥接在线 / 本机 Python 择优，避免「完全访问」已开但工具未注册。 */
 export function registerDesktopVisualTools(registry: ToolRegistry, deps: DesktopVisualToolsDeps): void {
   const bridgeEnabled = deps.bridge.isBridgeFeatureEnabled();
 
@@ -58,8 +58,8 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       }
     }
 
-    if (deps.localAgent.isEnabled() && deps.localAgent.screenshot) {
-      const result = await deps.localAgent.screenshot({ region });
+    if (deps.localVisual.isEnabled() && deps.localVisual.screenshot) {
+      const result = await deps.localVisual.screenshot({ region });
       if (!result.ok) {
         return { ok: false, error: result.error ?? "截图失败" };
       }
@@ -104,8 +104,8 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       return { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
     }
 
-    if (deps.localAgent.isEnabled()) {
-      const out = await deps.localAgent.runTask({ task, maxSteps, region, stub });
+    if (deps.localVisual.isEnabled()) {
+      const out = await deps.localVisual.runTask({ task, maxSteps, region, stub });
       if (deps.bridge.isBridgeFeatureEnabled()) {
         deps.bridge.recordTaskResult(actorId, out);
       }

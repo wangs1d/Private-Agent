@@ -4,11 +4,15 @@ import { buildAgenticMemoryConfig } from "./config.js";
 import { isAgenticMemoryEnabled } from "./env.js";
 import { AgenticMemoryIngestService } from "./ingest.js";
 import { AgenticMemoryRetrievalService } from "./retrieval.js";
+import { AgenticMemoryLifecycleService } from "./memory-lifecycle.js";
+import { AgenticMemoryRecallCompressor } from "./recall-compressor.js";
 
 export type AgenticMemoryRuntime = {
   memory: Memory;
   ingest: AgenticMemoryIngestService;
   retrieval: AgenticMemoryRetrievalService;
+  lifecycle: AgenticMemoryLifecycleService;
+  compressor: AgenticMemoryRecallCompressor;
 };
 
 let singleton: AgenticMemoryRuntime | null | undefined;
@@ -29,12 +33,17 @@ export function getAgenticMemoryRuntime(): AgenticMemoryRuntime | null {
 
   try {
     const memory = new Memory(config);
+    const lifecycle = new AgenticMemoryLifecycleService(memory);
+    lifecycle.start();
+
     singleton = {
       memory,
       ingest: new AgenticMemoryIngestService(memory),
       retrieval: new AgenticMemoryRetrievalService(memory),
+      lifecycle,
+      compressor: new AgenticMemoryRecallCompressor(),
     };
-    console.info("[agentic-memory] Mem0 OSS runtime ready (entity linking + multi-signal retrieval)");
+    console.info("[agentic-memory] Mem0 OSS runtime ready (entity linking + multi-signal retrieval + lifecycle + compressor)");
     return singleton;
   } catch (e) {
     console.warn(
@@ -48,6 +57,8 @@ export function getAgenticMemoryRuntime(): AgenticMemoryRuntime | null {
 
 export { AgenticMemoryIngestService } from "./ingest.js";
 export { AgenticMemoryRetrievalService } from "./retrieval.js";
+export { AgenticMemoryLifecycleService } from "./memory-lifecycle.js";
+export { AgenticMemoryRecallCompressor } from "./recall-compressor.js";
 export {
   getAgenticMemoryCollection,
   getAgenticMemoryDir,

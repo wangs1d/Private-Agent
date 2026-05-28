@@ -3,10 +3,7 @@ import "package:flutter/material.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
-import "doudizhu_page.dart";
-import "plaza_page.dart";
 import "social_feed_page.dart";
-import "zhajinhua_page.dart";
 import "shop_page.dart";
 import "world_hub_page.dart";
 
@@ -36,17 +33,8 @@ class WorldPage extends StatelessWidget {
               child: WorldHubPage(sessionId: sessionId, api: api, ws: ws),
             );
             break;
-          case "/plaza":
-            child = PlazaPage(sessionId: sessionId, api: api);
-            break;
           case "/shop":
             child = ShopPage(sessionId: sessionId, api: api);
-            break;
-          case "/doudizhu":
-            child = DoudizhuPage(sessionId: sessionId, api: api, ws: ws);
-            break;
-          case "/zhajinhua":
-            child = ZhaJinHuaPage(sessionId: sessionId, api: api, ws: ws);
             break;
           case "/social":
             child = SocialFeedPage(sessionId: sessionId, api: api, ws: ws);

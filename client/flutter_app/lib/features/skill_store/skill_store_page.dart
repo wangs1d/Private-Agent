@@ -153,10 +153,13 @@ class _SkillStorePageState extends State<SkillStorePage> {
                 final Widget actions = _subTab == _tabBrowse
                     ? Align(
                         alignment: Alignment.centerRight,
-                        child: FilledButton(
+                        child:                         FilledButton(
                           style: FilledButton.styleFrom(
-                            backgroundColor: cs.surfaceContainerLow,
+                            backgroundColor: Colors.transparent,
                             foregroundColor: cs.onSurface,
+                            side: BorderSide(
+                              color: cs.outline.withValues(alpha: 0.35),
+                            ),
                           ),
                           onPressed: () => _snack(
                             "创建与上架技能请在会话中由 Agent 通过世界工具完成。",
@@ -171,17 +174,20 @@ class _SkillStorePageState extends State<SkillStorePage> {
                         children: <Widget>[
                           OutlinedButton(
                             style: OutlinedButton.styleFrom(
-                              backgroundColor: cs.surfaceContainerLow,
+                              backgroundColor: Colors.transparent,
                               foregroundColor: cs.onSurface,
                             ),
                             onPressed: () => _snack("商户功能尚未接入，敬请期待。"),
                             child: const Text("开通商户"),
                           ),
-                          FilledButton(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: cs.surfaceContainerLow,
-                              foregroundColor: cs.onSurface,
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: cs.onSurface,
+                            side: BorderSide(
+                              color: cs.outline.withValues(alpha: 0.35),
                             ),
+                          ),
                             onPressed: () => _snack(
                               "创建与上架技能请在会话中由 Agent 通过世界工具完成。",
                             ),
@@ -245,11 +251,14 @@ class _SkillStorePageState extends State<SkillStorePage> {
             children: <Widget>[
               Text("无法加载技能商店：$_browseError", textAlign: TextAlign.center),
               const SizedBox(height: 16),
-              FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: cs.surfaceContainerLow,
-                  foregroundColor: cs.onSurface,
-                ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: cs.onSurface,
+                            side: BorderSide(
+                              color: cs.outline.withValues(alpha: 0.35),
+                            ),
+                          ),
                 onPressed: null, 
                 child: const Text("重试"),
               ),
@@ -390,11 +399,7 @@ class _SubNavChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme cs = theme.colorScheme;
-    // 使用更深的灰色作为选中状态，避免紫色调
-    final Color selectedBg = const Color(0xFF5A5A5A); // 深灰色背景
-    final Color selectedBorder = const Color(0xFF7A7A7A); // 稍亮的边框
-    final Color unselectedBorder = cs.outlineVariant.withOpacity(0.4);
-    
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -403,18 +408,12 @@ class _SubNavChip extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          decoration: BoxDecoration(
-            color: selected ? selectedBg : null,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: selected ? selectedBorder : unselectedBorder,
-            ),
-          ),
+          decoration: AppTheme.subNavChip(cs, selected: selected),
           child: Text(
             label,
             style: theme.textTheme.labelLarge?.copyWith(
               fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              color: selected ? Colors.white : cs.onSurfaceVariant,
+              color: selected ? cs.onSurface : cs.onSurfaceVariant,
             ),
           ),
         ),
@@ -442,16 +441,7 @@ class _FeaturedRow extends StatelessWidget {
           ),
           width: double.infinity,
           padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            gradient: LinearGradient(
-              colors: <Color>[
-                cs.surfaceContainerHighest,
-                cs.surfaceContainerHigh,
-              ],
-            ),
-            border: Border.all(color: cs.outlineVariant.withOpacity(0.35)),
-          ),
+          decoration: AppTheme.borderedPanel(cs, radius: 14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.center,
@@ -498,11 +488,7 @@ class _FeaturedRow extends StatelessWidget {
           ),
           width: double.infinity,
           padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            color: cs.surfaceContainerLow,
-            border: Border.all(color: cs.outlineVariant.withOpacity(0.35)),
-          ),
+          decoration: AppTheme.borderedPanel(cs, radius: 14),
           child: stack
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -677,7 +663,7 @@ class _SkillMarketCard extends StatelessWidget {
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(10),
-                  color: cs.surfaceContainerHighest,
+                  border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
                 ),
                 child: Text(
                   (icon != null && icon.isNotEmpty) ? icon : "◇",

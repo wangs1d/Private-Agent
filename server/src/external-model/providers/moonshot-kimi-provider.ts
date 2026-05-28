@@ -6,7 +6,7 @@ import {
   finalizeChatSystemPrompt,
 } from "../../agent/prompt-builder.js";
 import {
-  streamCompletionWithDoudizhuTools,
+  streamCompletionWithTools,
 } from "../openai-compatible-tool-loop.js";
 import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
@@ -111,7 +111,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
       let completed = false;
       try {
         const mergedTools = resolveChatToolsForStream(streamOpts);
-        const full = await streamCompletionWithDoudizhuTools(
+        const full = await streamCompletionWithTools(
           this.client,
           model,
           msgs,

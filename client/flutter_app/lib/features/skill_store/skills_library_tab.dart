@@ -2,6 +2,7 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 
 import "../../core/services/world_api_client.dart";
+import "../../core/theme/app_theme.dart";
 
 /// 当前登录主体可用的 Skill（内置 + 世界中获得的社区技能），卡片式管理启用状态。
 ///
@@ -154,8 +155,9 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
               const SizedBox(height: 16),
               FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: cs.surfaceContainerLow,
+                  backgroundColor: Colors.transparent,
                   foregroundColor: cs.onSurface,
+                  side: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
                 ),
                 onPressed: null, 
                 child: const Text("重试"),
@@ -293,11 +295,7 @@ class _SegmentChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme cs = theme.colorScheme;
-    // 使用更深的灰色作为选中状态，避免紫色调
-    final Color selectedBg = const Color(0xFF5A5A5A); // 深灰色背景
-    final Color selectedBorder = const Color(0xFF7A7A7A); // 稍亮的边框
-    final Color unselectedBorder = cs.outlineVariant.withOpacity(0.4);
-    
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -306,18 +304,12 @@ class _SegmentChip extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          decoration: BoxDecoration(
-            color: selected ? selectedBg : null,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: selected ? selectedBorder : unselectedBorder,
-            ),
-          ),
+          decoration: AppTheme.subNavChip(cs, selected: selected),
           child: Text(
             label,
             style: theme.textTheme.labelLarge?.copyWith(
               fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              color: selected ? Colors.white : cs.onSurfaceVariant,
+              color: selected ? cs.onSurface : cs.onSurfaceVariant,
             ),
           ),
         ),
@@ -373,7 +365,7 @@ class _MySkillCard extends StatelessWidget {
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(10),
-                    color: cs.surfaceContainerHighest,
+                    border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
                   ),
                   child: Text(
                     (icon != null && icon.isNotEmpty) ? icon : "◇",

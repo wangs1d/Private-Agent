@@ -428,7 +428,7 @@ class _SchedulePageState extends State<SchedulePage> {
                 },
                 borderRadius: BorderRadius.circular(8),
                 selectedColor: cs.onSurface,
-                fillColor: cs.surfaceContainerHigh,
+                fillColor: Colors.transparent,
                 color: cs.onSurfaceVariant,
                 borderColor: cs.outline,
                 selectedBorderColor: cs.onSurface,
@@ -527,8 +527,11 @@ class _SchedulePageState extends State<SchedulePage> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: <Widget>[
           Material(
-            color: cs.surfaceContainerLow,
-            borderRadius: BorderRadius.circular(10),
+            color: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+              side: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
+            ),
             child: SizedBox(
               width: 380, // 固定总宽度，包含日期组件和回到按钮
               child: Row(
@@ -605,6 +608,7 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Widget _dayGrid(ThemeData theme) {
+    final ColorScheme cs = theme.colorScheme;
     final Map<DateTime, List<ScheduleEvent>> byDay = _eventsByDay();
     final DateTime today = _stripTime(DateTime.now());
     final DateTime focusedDay = _stripTime(_focusedDay);
@@ -612,9 +616,7 @@ class _SchedulePageState extends State<SchedulePage> {
     // 获取当前聚焦日期的事项
     final List<ScheduleEvent> events = byDay[focusedDay] ?? <ScheduleEvent>[];
     
-    final Color headerBg = focusedDay == today
-        ? theme.colorScheme.surfaceContainerHigh
-        : theme.colorScheme.surfaceContainerLow;
+    final bool isTodayHeader = focusedDay == today;
 
     return Expanded(
       child: Column(
@@ -623,8 +625,16 @@ class _SchedulePageState extends State<SchedulePage> {
           // 日期标题
           Container(
             width: double.infinity,
-            color: headerBg,
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: cs.outline.withValues(
+                    alpha: isTodayHeader ? 0.55 : 0.35,
+                  ),
+                ),
+              ),
+            ),
             child: Column(
               children: <Widget>[
                 Text(
@@ -650,8 +660,7 @@ class _SchedulePageState extends State<SchedulePage> {
           // 事项列表
           Expanded(
             child: ColoredBox(
-              color: theme.colorScheme.surfaceContainerLowest
-                  .withValues(alpha: 0.65),
+              color: cs.surface,
               child: events.isEmpty
                   ? Center(
                       child: Text(
@@ -690,9 +699,6 @@ class _SchedulePageState extends State<SchedulePage> {
       final DateTime day = _weekStart.add(Duration(days: i));
       final bool isToday = _stripTime(day) == today;
       final List<ScheduleEvent> events = byDay[_stripTime(day)] ?? <ScheduleEvent>[];
-      final Color headerBg = isToday
-          ? theme.colorScheme.surfaceContainerHigh
-          : theme.colorScheme.surfaceContainerLow;
 
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -713,9 +719,17 @@ class _SchedulePageState extends State<SchedulePage> {
             children: <Widget>[
               Container(
                 width: double.infinity,
-                color: headerBg,
                 padding:
                     const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: theme.colorScheme.outline.withValues(
+                        alpha: isToday ? 0.55 : 0.35,
+                      ),
+                    ),
+                  ),
+                ),
                 child: Column(
                   children: <Widget>[
                     Text(
@@ -740,8 +754,7 @@ class _SchedulePageState extends State<SchedulePage> {
               ),
               Expanded(
                 child: ColoredBox(
-                  color: theme.colorScheme.surfaceContainerLowest
-                      .withValues(alpha: 0.65),
+                  color: theme.colorScheme.surface,
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(6, 0, 6, 12),
                     children: events
@@ -866,10 +879,12 @@ class _SchedulePageState extends State<SchedulePage> {
     );
 
     return Material(
-      color: cs.surfaceContainer,
-      borderRadius: BorderRadius.circular(radius),
-      elevation: 1,
-      shadowColor: Colors.black.withValues(alpha: 0.4),
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(radius),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => setState(() => _selectedEventId = e.id),
         onLongPress: () => _confirmDelete(e),

@@ -66,7 +66,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     TransactionRecord(
       id: 'tx_004',
       type: 'expense',
-      title: '游戏消费 - 斗地主',
+      title: '游戏消费 - 五子棋',
       amount: -50.00,
       balance: -500.00,
       createdAt: DateTime.now().subtract(const Duration(days: 3)),
@@ -78,89 +78,81 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredTransactions = _filterType == 'all'
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final TextTheme text = Theme.of(context).textTheme;
+    final List<TransactionRecord> filteredTransactions = _filterType == 'all'
         ? _transactions
-        : _transactions.where((t) => t.type == _filterType).toList();
+        : _transactions.where((TransactionRecord t) => t.type == _filterType).toList();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('消费记录'),
-        backgroundColor: Colors.grey[800],
-        actions: [
+        actions: <Widget>[
           PopupMenuButton<String>(
-            icon: Icon(Icons.filter_list, color: Colors.grey[300]),
-            color: Colors.grey[850],
-            onSelected: (value) {
-              setState(() {
-                _filterType = value;
-              });
+            icon: Icon(Icons.filter_list, color: cs.onSurface),
+            color: cs.surface,
+            onSelected: (String value) {
+              setState(() => _filterType = value);
             },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
                 value: 'all',
-                child: Text('全部', style: TextStyle(color: Colors.white)),
+                child: Text('全部', style: text.bodyMedium),
               ),
-              const PopupMenuItem(
+              PopupMenuItem<String>(
                 value: 'income',
-                child: Text('收入', style: TextStyle(color: Colors.white)),
+                child: Text('收入', style: text.bodyMedium),
               ),
-              const PopupMenuItem(
+              PopupMenuItem<String>(
                 value: 'expense',
-                child: Text('支出', style: TextStyle(color: Colors.white)),
+                child: Text('支出', style: text.bodyMedium),
               ),
-              const PopupMenuItem(
+              PopupMenuItem<String>(
                 value: 'transfer',
-                child: Text('转账', style: TextStyle(color: Colors.white)),
+                child: Text('转账', style: text.bodyMedium),
               ),
             ],
           ),
         ],
       ),
-      backgroundColor: Colors.grey[900],
       body: filteredTransactions.isEmpty
-          ? _buildEmptyState()
+          ? _buildEmptyState(cs, text)
           : ListView.builder(
               padding: const EdgeInsets.all(16),
               itemCount: filteredTransactions.length,
-              itemBuilder: (context, index) {
-                return _buildTransactionItem(filteredTransactions[index]);
+              itemBuilder: (BuildContext context, int index) {
+                return _buildTransactionItem(filteredTransactions[index], cs, text);
               },
             ),
     );
   }
 
-  Widget _buildEmptyState() {
+  Widget _buildEmptyState(ColorScheme cs, TextTheme text) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.receipt_long,
-            size: 64,
-            color: Colors.grey[600],
-          ),
+        children: <Widget>[
+          Icon(Icons.receipt_long, size: 64, color: cs.outline),
           const SizedBox(height: 16),
           Text(
             '暂无交易记录',
-            style: TextStyle(
-              color: Colors.grey[400],
-              fontSize: 16,
-            ),
+            style: text.titleSmall?.copyWith(color: cs.onSurfaceVariant),
           ),
           const SizedBox(height: 8),
           Text(
             '开始使用钱包功能后，交易记录将显示在这里',
-            style: TextStyle(
-              color: Colors.grey[500],
-              fontSize: 13,
-            ),
+            style: text.bodySmall?.copyWith(color: cs.onSurfaceVariant),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTransactionItem(TransactionRecord transaction) {
+  Widget _buildTransactionItem(
+    TransactionRecord transaction,
+    ColorScheme cs,
+    TextTheme text,
+  ) {
     final isIncome = transaction.type == 'income';
     final isTransfer = transaction.type == 'transfer';
     final amountColor = isIncome ? Colors.green[400] : Colors.red[400];
@@ -169,47 +161,41 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     final iconColor = _getIconColorForType(transaction.type);
 
     return Card(
-      color: Colors.grey[850],
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+          children: <Widget>[
             Row(
-              children: [
+              children: <Widget>[
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: iconColor.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: iconColor.withValues(alpha: 0.35),
+                    ),
                   ),
-                  child: Icon(
-                    iconData,
-                    color: iconColor,
-                    size: 24,
-                  ),
+                  child: Icon(iconData, color: iconColor, size: 24),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+                    children: <Widget>[
                       Text(
                         transaction.title,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
+                        style: text.titleSmall?.copyWith(
                           fontWeight: FontWeight.w500,
                         ),
                       ),
-                      if (transaction.recipient != null) ...[
+                      if (transaction.recipient != null) ...<Widget>[
                         const SizedBox(height: 4),
                         Text(
                           '收款人：${transaction.recipient}',
-                          style: TextStyle(
-                            color: Colors.grey[500],
-                            fontSize: 12,
+                          style: text.labelSmall?.copyWith(
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                       ],
@@ -218,38 +204,33 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                 ),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
+                  children: <Widget>[
                     Text(
                       '$amountPrefix¥${transaction.amount.abs().toStringAsFixed(2)}',
-                      style: TextStyle(
+                      style: text.titleSmall?.copyWith(
                         color: amountColor,
-                        fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       '余额 ¥${transaction.balance.toStringAsFixed(2)}',
-                      style: TextStyle(
-                        color: Colors.grey[500],
-                        fontSize: 12,
-                      ),
+                      style: text.labelSmall?.copyWith(color: cs.onSurfaceVariant),
                     ),
                   ],
                 ),
               ],
             ),
-            if (transaction.remark != null || transaction.status != 'completed') ...[
-              const Divider(height: 24),
+            if (transaction.remark != null || transaction.status != 'completed') ...<Widget>[
+              Divider(height: 24, color: cs.outline.withValues(alpha: 0.35)),
               Row(
-                children: [
+                children: <Widget>[
                   if (transaction.remark != null)
                     Expanded(
                       child: Text(
                         transaction.remark!,
-                        style: TextStyle(
-                          color: Colors.grey[400],
-                          fontSize: 12,
+                        style: text.labelSmall?.copyWith(
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
                     ),
@@ -260,14 +241,16 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                         vertical: 2,
                       ),
                       decoration: BoxDecoration(
-                        color: _getStatusColor(transaction.status).withOpacity(0.2),
                         borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: _getStatusColor(transaction.status)
+                              .withValues(alpha: 0.45),
+                        ),
                       ),
                       child: Text(
                         _getStatusText(transaction.status),
-                        style: TextStyle(
+                        style: text.labelSmall?.copyWith(
                           color: _getStatusColor(transaction.status),
-                          fontSize: 11,
                         ),
                       ),
                     ),
@@ -277,10 +260,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
             const SizedBox(height: 8),
             Text(
               _formatDateTime(transaction.createdAt),
-              style: TextStyle(
-                color: Colors.grey[600],
-                fontSize: 11,
-              ),
+              style: text.labelSmall?.copyWith(color: cs.outline),
             ),
           ],
         ),

@@ -121,23 +121,8 @@ class _WorldHubPageState extends State<WorldHubPage> {
     }
   }
 
-  Future<void> _openPlaza() async {
-    await Navigator.of(context).pushNamed("/plaza");
-    if (mounted) _refresh();
-  }
-
   Future<void> _openShop() async {
     await Navigator.of(context).pushNamed("/shop");
-    if (mounted) _refresh();
-  }
-
-  Future<void> _openDoudizhu() async {
-    await Navigator.of(context).pushNamed("/doudizhu");
-    if (mounted) _refresh();
-  }
-
-  Future<void> _openZhajinhua() async {
-    await Navigator.of(context).pushNamed("/zhajinhua");
     if (mounted) _refresh();
   }
 
@@ -172,16 +157,13 @@ class _WorldHubPageState extends State<WorldHubPage> {
       );
     }
 
-    final String sceneId = _state?["sceneId"]?.toString() ?? "plaza";
+    final String sceneId = _state?["sceneId"]?.toString() ?? "social";
     final String sceneLabel = kWorldSceneLabels[sceneId] ?? sceneId;
     final int coins = (_state?["agentWorldCredits"] as num?)?.round() ??
         (_state?["worldCoins"] as num?)?.round() ??
         0;
     final int leisure = (_state?["leisureCount"] as num?)?.round() ?? 0;
-    final bool atPlaza = sceneId == "plaza";
     final bool atShop = sceneId == "shop" || sceneId == "free_market";
-    final bool atDdz = sceneId == "doudizhu";
-    final bool atZjh = sceneId == "zhajinhua";
     final bool atSocial = sceneId == "social";
 
     return Scaffold(
@@ -231,31 +213,6 @@ class _WorldHubPageState extends State<WorldHubPage> {
             ),
             const SizedBox(height: 16),
             Text("查看场景", style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            _SceneEntryCard(
-              isCurrent: atPlaza,
-              icon: Icons.park_outlined,
-              title: "中央广场",
-              subtitle: "状态与斗地主入口；操作由 Agent 执行",
-              onTap: _openPlaza,
-            ),
-
-            const SizedBox(height: 8),
-            _SceneEntryCard(
-              isCurrent: atDdz,
-              icon: Icons.style_outlined,
-              title: "斗地主馆",
-              subtitle: "观战牌桌；出牌请在会话中向 Agent 建议",
-              onTap: _openDoudizhu,
-            ),
-            const SizedBox(height: 8),
-            _SceneEntryCard(
-              isCurrent: atZjh,
-              icon: Icons.filter_3_outlined,
-              title: "炸金花馆",
-              subtitle: "观战 3–6 人桌；开桌与操作由 Agent 执行",
-              onTap: _openZhajinhua,
-            ),
             const SizedBox(height: 8),
             _SceneEntryCard(
               isCurrent: atSocial,

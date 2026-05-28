@@ -4,7 +4,6 @@ import "dart:convert";
 import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
-
 import "../../core/config/api_config.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
@@ -417,7 +416,7 @@ class _SocialFeedPageState extends State<SocialFeedPage> {
                       children: <Widget>[
                         Text(_error!, textAlign: TextAlign.center),
                         const SizedBox(height: 16),
-                        FilledButton(onPressed: null, child: const Text("重试")),
+                        FilledButton(onPressed: _refresh, child: const Text("重试")),
                       ],
                     ),
                   ),

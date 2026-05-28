@@ -1,5 +1,6 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
 import "package:url_launcher/url_launcher.dart";
@@ -18,6 +19,8 @@ import "core/services/schedule_api_client.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
+import "core/services/agent_sphere_mood_bridge.dart";
+import "core/services/sphere_overlay_launcher.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
@@ -25,8 +28,11 @@ import "features/mailbox/mailbox_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/voice_mode_page.dart";
+import "features/chat/voiceprint_registration_page.dart";
+import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/multi_agent_api_client.dart";
 import "features/gomoku/gomoku_page.dart";
+import "features/game_center/game_center_page.dart";
 import "features/auth/biometric_registration_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/silent_camera_capture.dart";
@@ -35,7 +41,6 @@ import "features/schedule/schedule_page.dart";
 import "features/skill_store/skill_store_page.dart";
 import "features/wallet/wallet_page.dart";
 import "features/world/world_page.dart";
-import "features/world/tweet_compose_page.dart";
 
 void main() {
   runApp(const PrivateAiApp());
@@ -88,10 +93,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _isInitialized = false;
   /// Agent是否正在处理中（用于显示响应状态指示器）
   bool _isAgentProcessing = false;
+  /// 已上报服务端的「处理中 UI」状态，避免重复 WS 事件
+  bool? _reportedAgentProcessingUiActive;
   /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
   bool _fullComputerAccessEnabled = false;
   /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
+  /// 子 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
+  bool _subAgentDelegationActive = false;
   /// 后台子 Agent 任务角标（对话框右上角按钮）
   int _backgroundTasksBadgeCount = 0;
   Timer? _assistantChunkFlushTimer;
@@ -110,6 +119,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void initState() {
     super.initState();
     _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    unawaited(AgentSphereVoiceController.instance.dispose());
+    _inputController.dispose();
+    _scheduleReloadSignal.dispose();
+    super.dispose();
   }
 
   Future<void> _bootstrap() async {
@@ -161,14 +178,36 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
     _ws.connect();
 
+    final AgentSphereVoiceController voiceCtrl = AgentSphereVoiceController.instance;
+    voiceCtrl.onRecognizedText = (String text) {
+      final String t = text.trim();
+      if (t.isEmpty) return;
+      _inputController.text = t;
+      unawaited(_sendMessage());
+    };
+    voiceCtrl.onRequestVoiceprintRegistration = () {
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (BuildContext ctx) => VoiceprintRegistrationPage(
+            userId: ApiConfig.effectiveActorId,
+            onRegistrationComplete: () {
+              Navigator.of(ctx).pop();
+              voiceCtrl.markVoiceprintRegistered();
+            },
+          ),
+        ),
+      );
+    };
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (mounted) {
-        if (!_isBiometricRegistered) {
-          _showBiometricRegistration();
-        } else {
-          await _promptLocationConsentIfNeeded();
-        }
+      if (!mounted) return;
+      if (!_isBiometricRegistered) {
+        _showBiometricRegistration();
+      } else {
+        await _promptLocationConsentIfNeeded();
       }
+      await _maybeLaunchDesktopPet();
     });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
@@ -242,12 +281,25 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       if (type == "tool.call") {
         if (_isAgentProcessing) {
           final String toolName = payload["toolName"]?.toString() ?? "";
+          if (_subAgentDelegationActive &&
+              !_isMasterInvokeSubAgentTool(toolName)) {
+            return;
+          }
+          final String? userStatusLine =
+              payload["userStatusLine"]?.toString().trim();
           final String? preamble =
               payload["assistantPreamble"]?.toString().trim();
-          final String line = (preamble != null && preamble.isNotEmpty)
-              ? preamble
-              : _toolExecutionStatusLine(toolName);
-          _updateAgentStatusLine(line);
+          final String line = (userStatusLine != null && userStatusLine.isNotEmpty)
+              ? userStatusLine
+              : (preamble != null && preamble.isNotEmpty)
+                  ? preamble
+                  : "";
+          if (_isMasterInvokeSubAgentTool(toolName)) {
+            _subAgentDelegationActive = true;
+          }
+          if (line.isNotEmpty) {
+            _updateAgentStatusLine(line);
+          }
         }
       }
       if (type == "tool.result") {
@@ -262,10 +314,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
         }
         final String toolName = payload["toolName"]?.toString() ?? "";
+        final bool toolOk = payload["ok"] == true;
         if (toolName.contains("invoke_sub_agent") || toolName.contains("master.invoke")) {
           unawaited(_syncBackgroundTasksBadge());
         }
-        final bool toolOk = payload["ok"] == true;
+        if (_isMasterInvokeSubAgentTool(toolName) && result != null) {
+          final bool delegateOk = result["ok"] != false;
+          if (!toolOk || !delegateOk) {
+            _subAgentDelegationActive = false;
+            final String err = result["error"]?.toString().trim() ??
+                "子 Agent 委派失败，请稍后重试";
+            if (err.isNotEmpty) {
+              _updateAgentStatusLine(err);
+            }
+          } else {
+            final String? uiDoneLine = result["uiDoneLine"]?.toString().trim();
+            if (uiDoneLine != null && uiDoneLine.isNotEmpty) {
+              _subAgentDelegationActive = false;
+              _updateAgentStatusLine(uiDoneLine);
+            } else if (result["background"] == true) {
+              _subAgentDelegationActive = false;
+              final String bgLine = result["message"]?.toString().trim() ??
+                  "助手已在后台处理，稍后会汇总结果…";
+              _updateAgentStatusLine(bgLine);
+            }
+          }
+        }
         if (toolOk && result != null) {
           final bool synced = await upsertLocalScheduleFromToolResult(
             _store,
@@ -361,20 +435,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       if (type == "chat.agent_status") {
         final String line = payload["line"]?.toString().trim() ?? "";
         if (line.isEmpty) return;
+        final String phase = payload["phase"]?.toString() ?? "";
+        if (phase == "delegate_start") {
+          _subAgentDelegationActive = true;
+        } else if (phase == "delegate_done") {
+          _subAgentDelegationActive = false;
+        }
         _updateAgentStatusLine(line, ensureProcessing: true);
+        AgentSphereMoodBridge.instance.thinking(caption: line);
       }
       if (type == "chat.assistant_chunk") {
         _resetAgentReplyWatchdog();
         if (!_isAgentProcessing) {
           setState(() => _isAgentProcessing = true);
-        }
-        if (_isGenericAgentStatusLine(_agentStatusLine)) {
-          _updateAgentStatusLine("正在组织回复...");
+          _notifyAgentProcessingUi(true);
         }
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-chunk";
         final String chunk = payload["chunk"]?.toString() ?? "";
         _enqueueAssistantChunk(messageId, chunk);
+        final String liveStatus = _shortLiveStatusLine(_pendingAssistantChunkText.toString());
+        if (liveStatus.isNotEmpty) {
+          _updateAgentStatusLine(liveStatus);
+        }
+        AgentSphereMoodBridge.instance.speaking(
+          caption: chunk.length > 24 ? chunk.substring(chunk.length - 24) : chunk,
+        );
       }
       if (type == "chat.assistant_done") {
         _disarmAgentReplyWatchdog();
@@ -427,6 +513,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           await _store.saveMessage(finalMessage);
         }
         _pendingAgentUserMessageId = null;
+        AgentSphereMoodBridge.instance.happy();
         return;
       }
       if (type == "agent.peer_message") {
@@ -603,12 +690,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   void _clearAgentProcessingState() {
-    if (!_isAgentProcessing && _agentStatusLine == null) return;
+    if (!_isAgentProcessing && _agentStatusLine == null && !_subAgentDelegationActive) {
+      return;
+    }
     setState(() {
       _isAgentProcessing = false;
       _agentStatusLine = null;
+      _subAgentDelegationActive = false;
     });
+    _notifyAgentProcessingUi(false);
     unawaited(_syncBackgroundTasksBadge());
+  }
+
+  /// 与聊天页「处理中」气泡同步；active=false 时服务端锁定本轮不再合并消息。
+  void _notifyAgentProcessingUi(bool active) {
+    if (_reportedAgentProcessingUiActive == active) return;
+    _reportedAgentProcessingUiActive = active;
+    if (!_ws.isConnected) return;
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+      "active": active,
+    };
+    final String uid = ApiConfig.userId.trim();
+    if (uid.isNotEmpty) {
+      payload["userId"] = uid;
+    }
+    _ws.sendEvent("chat.agent_processing_ui", payload);
   }
 
   void _armAgentReplyWatchdog(String userMessageId) {
@@ -677,129 +784,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  String _toolExecutionStatusLine(String toolName) {
-    const Map<String, String> labels = <String, String>{
-      // 🎮 游戏娱乐
-      "world.gomoku.create": "正在摆开五子棋棋盘...",
-      "world.gomoku.create_table": "正在准备五子棋对局...",
-      "world.gomoku.play": "正在思考落子位置...",
-      "world.gomoku.status": "正在查看棋局...",
-      "world.gomoku.join": "正在加入对局...",
-      "world.doudizhu.create": "正在凑一桌斗地主...",
-      "world.doudizhu.play": "正在出牌中...",
-      "world.zhajinhua.create": "正在组一局炸金花...",
-      "world.zhajinhua.play": "正在比拼牌技...",
-      
-      // 🌤️ 天气
-      "weather.get_local": "正在抬头看看天气...",
-      "weather.query": "正在查询天气预报...",
-      
-      // 💰 钱包相关
-      "wallet.get_balance": "正在查看钱包余额...",
-      "wallet.transfer": "正在准备转账...",
-      "wallet.get_transactions": "正在翻看交易记录...",
-      "wallet.recharge": "正在充值中...",
-      "wallet.purchase": "正在帮您买单...",
-      
-      // 📅 日程提醒
-      "calendar.create_from_text": "正在创建日程提醒...",
-      "calendar.create_task": "正在添加新任务...",
-      "calendar.list_tasks": "正在查看日程表...",
-      "calendar.delete_task": "正在删除日程...",
-      "schedule.create": "正在设置闹钟提醒...",
-      "schedule.list": "正在查询日程安排...",
-      "schedule.cancel": "正在取消日程...",
-      
-      // 🔍 搜索与网页
-      "search_web": "正在网上搜索一下...",
-      "fetch_web": "正在抓取网页内容...",
-      "info.search": "正在查找资料...",
-      
-      // 👥 社交与通讯
-      "agent.send_to_peer": "正在转发消息...",
-      "agent.link.list_friends": "正在查看好友列表...",
-      "agent.link.list_friend_requests": "正在查看好友申请...",
-      "agent.link.send_friend_request": "正在发送好友请求...",
-      "agent.link.respond_friend_request": "正在回复好友请求...",
-      
-      // 📱 电话
-      "phone.ensure_my_number": "正在申领电话号码...",
-      "phone.virtual_call": "正在拨打电话...",
-      "phone.call_user": "正在呼叫您...",
-      
-      // 🖥️ 桌面自动化
-      "desktop.visual.screenshot": "正在截取屏幕画面...",
-      "desktop.visual.run_task": "正在操作电脑...",
-      
-      // 👁️ 视觉能力
-      "vision.http_pull": "正在抓取图像...",
-      "vision.periodic_start": "启动定时巡检模式...",
-      "vision.periodic_stop": "停止定时巡检...",
-      "vision.periodic_stop_all": "停止所有巡检任务...",
-      "vision.periodic_list": "正在查看巡检列表...",
-      
-      // 🛒 生活助手
-      "budget.calculate": "正在精打细算算预算...",
-      "shopping.suggest": "正在挑选好物推荐...",
-      "reminder.plan": "正在规划提醒事项...",
-      
-      // 🎯 自我编程
-      "self.create_skill": "正在创造新技能...",
-      "self.update_skill": "正在升级技能包...",
-      "self.delete_skill": "正在删除技能...",
-      "self.analyze_capabilities": "正在分析自身能力...",
-      "self.generate_skill": "正在生成新技能代码...",
-      "self.generate_from_example": "正在学习示例生成技能...",
-      "self.generate_tool_template": "正在设计工具模板...",
-      "self.list_custom_skills": "正在整理技能库...",
-      "self.record_interaction": "正在记录互动经验...",
-      "self.analyze_improvements": "正在自我反思提升...",
-      "self.get_suggestions": "正在思考改进建议...",
-      "self.detect_skill_need": "正在检测技能缺口...",
-      "self.get_learning_stats": "正在查看学习报告...",
-      "self.optimize_skill": "正在优化技能性能...",
-      
-      // 🤖 子Agent委派
-      "master.invoke_sub_agent": "正在派遣得力助手...",
-      "master.list_sub_agents": "正在清点助手团队...",
-      
-      // 🌐 AIP协议
-      "aip.dispatch": "正在分发AIP任务...",
-      "aip.list_my_state": "正在查询AIP状态...",
-      "aip.get_proposal": "正在获取提案详情...",
-      
-      // 📝 记忆与知识
-      "memory.search": "正在检索记忆库...",
-      
-      // 🛠️ 技能调用
-      "skill.invoke": "正在施展技能...",
-      
-      // 🏷️ 关怀提醒
-      "care.set_important_date": "正在标记重要日子...",
-      "care.get_important_dates": "正在查看重要日期...",
-      "care.delete_important_date": "正在删除重要日期...",
-      
-      // 🌍 Agent World
-      "world.open_registry.register": "正在注册世界身份...",
-      "world.room.get_or_create": "正在准备房间...",
-      "world.free_market.purchase": "正在购买技能...",
-      "world.free_market.list": "正在浏览商店...",
-      "world.social.post": "正在发布动态...",
-      "world.social.comment": "正在发表评论...",
-      "world.social.like": "正在点赞支持...",
-      "world.social.feed": "正在刷新动态流...",
-      
-      // 🔐 账号
-      "agent.register_account": "正在注册账号...",
-      
-      // 📡 协议工具
-      "protocol.unified.quota_adjust": "正在调整配额...",
-      "protocol.unified.memory_patch": "正在修补记忆...",
-      "protocol.unified.memory_get": "正在读取记忆...",
-      "protocol.unified.human_directive": "正在接收指令...",
-      "protocol.unified.governance_probe": "正在探测治理状态...",
-    };
-    return labels[toolName] ?? "正在努力处理中...";
+  String _shortLiveStatusLine(String text) {
+    final String trimmed = text.trim();
+    if (trimmed.isEmpty) return "";
+    final List<String> lines =
+        trimmed.split(RegExp(r"\r?\n")).map((String s) => s.trim()).where((String s) => s.isNotEmpty).toList();
+    String line = lines.isNotEmpty ? lines.last : trimmed;
+    if (line.length > 120) {
+      line = "${line.substring(0, 119)}…";
+    }
+    return line;
+  }
+
+  bool _isMasterInvokeSubAgentTool(String toolName) {
+    final String n = toolName.trim();
+    return n == "master.invoke_sub_agent" || n == "master_invoke_sub_agent";
   }
 
   bool _isGenericAgentStatusLine(String? line) {
@@ -807,7 +806,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final String trimmed = line.trim();
     return trimmed == "正在思考…" ||
         trimmed == "正在思考..." ||
-        trimmed == "Agent 思考中...";
+        trimmed == "Agent 思考中..." ||
+        trimmed == "…";
   }
 
   void _updateAgentStatusLine(String line, {bool ensureProcessing = false}) {
@@ -820,6 +820,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       }
       _agentStatusLine = trimmed;
     });
+    if (ensureProcessing) {
+      _notifyAgentProcessingUi(true);
+    }
   }
 
   void _attachPlayUrlToAssistantMessage(String messageId, String playUrl) {
@@ -1021,8 +1024,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _messages.add(userMessage);
       _inputController.clear();
       _isAgentProcessing = true;
-      _agentStatusLine = "Agent 思考中...";
+      _agentStatusLine = null;
     });
+    _notifyAgentProcessingUi(true);
+    AgentSphereMoodBridge.instance.listening();
     await _store.saveMessage(userMessage);
     final Map<String, dynamic> userMsg = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
@@ -1103,8 +1108,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _messages.add(userMessage);
       _isAgentProcessing = true;
-      _agentStatusLine = "Agent 思考中...";
+      _agentStatusLine = null;
     });
+    _notifyAgentProcessingUi(true);
     _store.saveMessage(userMessage);
 
     final Map<String, dynamic> userMsg = <String, dynamic>{
@@ -1134,19 +1140,67 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     "日程",
     "钱包",
     "技能商店",
+    "游戏中心",
     "Agent World",
     "社交推文",
   ];
 
+  /// Windows 桌面启动后自动打开 sphere-overlay 桌宠（Web/其它平台跳过）。
+  Future<void> _maybeLaunchDesktopPet() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    final bool ok = await SphereOverlayLauncher.launch();
+    if (!mounted) return;
+    if (!ok) {
+      final BuildContext? ctx = _rootNavigatorKey.currentContext;
+      if (ctx != null && ctx.mounted) {
+        ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
+          const SnackBar(
+            content: Text("桌宠未启动：请在项目根目录执行 sphere-overlay\\start-overlay.ps1"),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+    }
+  }
+
   void _selectTab(int index) {
-    // 如果点击的是 Agent World (index 5)，则打开网页而不是切换页面
-    if (index == 5) {
-      _openAgentWorldWeb();
+    // 社交推文（index 7）：在系统浏览器打开 social-platform，不切换内嵌页
+    if (index == 7) {
+      unawaited(_openSocialFeedWeb());
       return;
     }
     setState(() => _tabIndex = index);
     if (index == 2) {
       _scheduleReloadSignal.value += 1;
+    }
+  }
+
+  /// 在系统浏览器打开社交推文站（`ApiConfig.socialFeedUrl`，默认 :3001）。
+  Future<void> _openSocialFeedWeb() async {
+    final Uri url = Uri.parse(ApiConfig.socialFeedUrl);
+    try {
+      final bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text("无法打开社交推文站，请先运行 npm run dev:all"),
+            action: SnackBarAction(
+              label: "复制 URL",
+              onPressed: () => debugPrint("socialFeedUrl: $url"),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("打开网页失败: $e")),
+        );
+      }
     }
   }
 
@@ -1171,74 +1225,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ),
       ),
     );
-  }
-
-  /// 打开 Agent World 网页
-  Future<void> _openAgentWorldWeb() async {
-    final Uri url = Uri.parse(ApiConfig.agentWorldUrl);
-    print('尝试打开 Agent World 网页: $url'); // 调试信息
-    
-    try {
-      final bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
-      if (!launched) {
-        print('无法打开 URL: $url'); // 调试信息
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("无法打开 Agent World 网页"),
-              action: SnackBarAction(
-                label: '复制URL',
-                onPressed: () {
-                  // 可以在这里添加复制到剪贴板的逻辑
-                  print('URL: $url');
-                },
-              ),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      print('打开 URL 时出错: $e'); // 调试信息
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("打开网页失败: $e")),
-        );
-      }
-    }
-  }
-
-  /// 打开社交推文站（social-platform）
-  Future<void> _openAgentLinkWeb() async {
-    final Uri url = Uri.parse(ApiConfig.socialFeedUrl);
-    print('尝试打开社交推文站: $url');
-    
-    try {
-      final bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
-      if (!launched) {
-        print('无法打开 URL: $url'); // 调试信息
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("无法打开社交推文站，请先运行 npm run dev:all"),
-              action: SnackBarAction(
-                label: '复制URL',
-                onPressed: () {
-                  // 可以在这里添加复制到剪贴板的逻辑
-                  print('URL: $url');
-                },
-              ),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      print('打开 URL 时出错: $e'); // 调试信息
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("打开网页失败: $e")),
-        );
-      }
-    }
   }
 
   void _callAgentViaPhone(String agentId, String? message) {
@@ -1279,7 +1265,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             // 保存注册状态
             _store.saveBiometricRegistrationStatus(true);
             // 生物特征注册完成后，再请求位置权限
-            _promptLocationConsentIfNeeded();
+            unawaited(_promptLocationConsentIfNeeded().then((_) => _maybeLaunchDesktopPet()));
           },
         ),
       ),
@@ -1339,10 +1325,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return _kTabTitles[index];
   }
 
-  /// 收起态：深色窄条 + 分组线框小按钮（仅图标），风格接近 IDE 迷你侧栏。
+  /// 收起态：深色窄条 + 图标居中，风格与展开态统一（zinc 暗色调）。
   Widget _buildCollapsedMiniSidebar() {
-    const Color iconIdle = Color(0xFFB0B0B8);
-    const Color iconSelected = Color(0xFFFFFFFF);
+    const Color iconIdle = Color(0xFF71717A);
+    const Color iconHover = Color(0xFFD4D4D8);
+    const Color iconSelected = Color(0xFF60A5FA);
 
     Widget miniTab(
       int index,
@@ -1351,86 +1338,52 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     ) {
       final bool selected = _tabIndex == index;
       return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(vertical: 2),
         child: Tooltip(
           message: _tabTooltip(index),
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () => _selectTab(index),
-              borderRadius: BorderRadius.circular(8),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                curve: Curves.easeOutCubic,
-                width: 40,
-                height: 40,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: selected
-                      ? Colors.white.withOpacity(0.12)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: selected
-                        ? Colors.white.withOpacity(0.22)
-                        : Colors.white.withOpacity(0.08),
-                  ),
-                ),
-                child: Icon(
-                  selected ? iconFilled : iconOutlined,
-                  size: 22,
-                  color: selected ? iconSelected : iconIdle,
-                ),
-              ),
-            ),
+          child: _MiniNavItem(
+            selected: selected,
+            iconOutlined: iconOutlined,
+            iconFilled: iconFilled,
+            iconIdle: iconIdle,
+            iconHover: iconHover,
+            iconSelected: iconSelected,
+            onTap: () => _selectTab(index),
           ),
         ),
       );
     }
 
     return Material(
-      color: AppPalette.sidebar,
+      color: const Color(0xFF0F0F0F),
       child: SizedBox(
         width: 56,
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
             child: Column(
               children: <Widget>[
-                SizedBox(
-                  width: 56,
-                  child: Padding(
-                    padding: const EdgeInsetsDirectional.only(top: 2, end: 6),
-                    child: Align(
-                      alignment: AlignmentDirectional.topEnd,
-                      child: IconButton(
-                        tooltip: "展开侧边栏",
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints.tightFor(
-                          width: 40,
-                          height: 40,
-                        ),
-                        icon: const Icon(
-                          Icons.keyboard_double_arrow_right,
-                          color: iconIdle,
-                          size: 22,
-                        ),
-                        onPressed: () => setState(() => _railExpanded = true),
-                      ),
-                    ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                    tooltip: "展开侧边栏",
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+                    icon: const Icon(Icons.keyboard_double_arrow_right, color: iconIdle, size: 20),
+                    onPressed: () => setState(() => _railExpanded = true),
                   ),
                 ),
                 const SizedBox(height: 4),
-                miniTab(0, Icons.chat_outlined, Icons.chat),
+                miniTab(0, Icons.chat_bubble_outline_rounded, Icons.chat_rounded),
                 miniTab(1, Icons.link_outlined, Icons.link),
                 miniTab(2, Icons.calendar_today_outlined, Icons.calendar_today),
-                miniTab(3, Icons.account_balance_wallet_outlined,
-                    Icons.account_balance_wallet),
-                miniTab(4, Icons.storefront_outlined, Icons.storefront),
-                const SizedBox(height: 28),
-                miniTab(5, Icons.public_outlined, Icons.public),
-                miniTab(6, Icons.people_outline, Icons.people),
+                miniTab(3, Icons.account_balance_wallet_outlined, Icons.account_balance_wallet),
+                miniTab(4, Icons.store_outlined, Icons.store),
+                const SizedBox(height: 20),
+                miniTab(5, Icons.sports_esports_outlined, Icons.sports_esports),
+                miniTab(6, Icons.public_outlined, Icons.public),
+                miniTab(7, Icons.people_outline, Icons.people),
               ],
             ),
           ),
@@ -1439,146 +1392,95 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 展开态：文字在左、图标靠右对齐（贴近与主区分隔的一侧），与收起态迷你栏视觉一致。
+  /// 展开态：图标在左、文字在右，匹配 Web 端 Sidebar 风格（zinc 暗色 + 左侧蓝色激活条 + hover + badge）。
   Widget _buildExpandedSidebar() {
-    const double kRailWidth = 208;
-    const Color selectedIconColor = Colors.white;
-    final Color unselectedIconColor = Colors.white.withOpacity(0.58);
-    final TextStyle selectedLabelStyle = const TextStyle(
-      color: Colors.white,
-      fontSize: 12,
-      fontWeight: FontWeight.w600,
-    );
-    final TextStyle unselectedLabelStyle = TextStyle(
-      color: Colors.white.withOpacity(0.52),
-      fontSize: 12,
-    );
+    const double kRailWidth = 220;
 
-    const List<(IconData, IconData, String?)> kSpecs =
-        <(IconData, IconData, String?)>[
-      (Icons.chat_outlined, Icons.chat, "对话"),
-      (Icons.link_outlined, Icons.link, "Agent Link"),
-      (Icons.calendar_today_outlined, Icons.calendar_today, "日程"),
-      (
-        Icons.account_balance_wallet_outlined,
-        Icons.account_balance_wallet,
-        "钱包"
+    const List<_SidebarItemSpec> kItems = <_SidebarItemSpec>[
+      _SidebarItemSpec(
+        iconOutlined: Icons.chat_bubble_outline_rounded,
+        iconFilled: Icons.chat_rounded,
+        label: '对话',
       ),
-      (Icons.storefront_outlined, Icons.storefront, "技能商店"),
-      (Icons.public_outlined, Icons.public, "Agent World"),
-      (Icons.people_outline, Icons.people, "社交推文"),
+      _SidebarItemSpec(
+        iconOutlined: Icons.link_outlined,
+        iconFilled: Icons.link,
+        label: 'Agent Link',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.calendar_today_outlined,
+        iconFilled: Icons.calendar_today,
+        label: '日程',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.account_balance_wallet_outlined,
+        iconFilled: Icons.account_balance_wallet,
+        label: '钱包',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.store_outlined,
+        iconFilled: Icons.store,
+        label: '技能商店',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.sports_esports_outlined,
+        iconFilled: Icons.sports_esports,
+        label: '游戏中心',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.public_outlined,
+        iconFilled: Icons.public,
+        label: 'Agent World',
+      ),
+      _SidebarItemSpec(
+        iconOutlined: Icons.people_outline,
+        iconFilled: Icons.people,
+        label: '社交推文',
+      ),
     ];
 
     return Material(
-      color: AppPalette.sidebar,
+      color: const Color(0xFF0F0F0F),
       child: SizedBox(
         width: kRailWidth,
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsetsDirectional.only(start: 8, end: 6),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 SizedBox(
-                  height: 48,
-                  child: Padding(
-                    padding: const EdgeInsetsDirectional.only(top: 4),
-                    child: Align(
-                      alignment: AlignmentDirectional.topEnd,
-                      child: IconButton(
-                        tooltip: "收起侧边栏",
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints.tightFor(
-                          width: 40,
-                          height: 40,
-                        ),
-                        icon: const Icon(
-                          Icons.keyboard_double_arrow_left,
-                          color: Colors.white70,
-                          size: 22,
-                        ),
-                        onPressed: () =>
-                            setState(() => _railExpanded = false),
-                      ),
+                  height: 40,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: IconButton(
+                      tooltip: "收起侧边栏",
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+                      icon: const Icon(Icons.keyboard_double_arrow_left, color: Color(0xFFA1A1AA), size: 20),
+                      onPressed: () => setState(() => _railExpanded = false),
                     ),
                   ),
                 ),
-                const SizedBox(height: 2),
-                for (int i = 0; i < kSpecs.length; i += 1)
-                  _buildExpandedRailDestination(
-                    index: i,
-                    icon: kSpecs[i].$1,
-                    selectedIcon: kSpecs[i].$2,
-                    label: kSpecs[i].$3,
-                    selected: _tabIndex == i,
-                    selectedIconColor: selectedIconColor,
-                    unselectedIconColor: unselectedIconColor,
-                    selectedLabelStyle: selectedLabelStyle,
-                    unselectedLabelStyle: unselectedLabelStyle,
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildExpandedRailDestination({
-    required int index,
-    required IconData icon,
-    required IconData selectedIcon,
-    required String? label,
-    required bool selected,
-    required Color selectedIconColor,
-    required Color unselectedIconColor,
-    required TextStyle selectedLabelStyle,
-    required TextStyle unselectedLabelStyle,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => _selectTab(index),
-          child: Ink(
-            decoration: BoxDecoration(
-              color: selected ? Colors.white.withOpacity(0.14) : null,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Padding(
-              padding: const EdgeInsetsDirectional.only(
-                start: 8,
-                end: 4,
-                top: 8,
-                bottom: 8,
-              ),
-              child: Row(
-                children: <Widget>[
-                  Flexible(
-                    child: Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: label == null
-                          ? const SizedBox.shrink()
-                          : Text(
-                              label,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: selected
-                                  ? selectedLabelStyle
-                                  : unselectedLabelStyle,
-                            ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        for (int i = 0; i < kItems.length; i += 1)
+                          _SidebarNavItem(
+                            spec: kItems[i],
+                            selected: _tabIndex == i,
+                            onTap: () => _selectTab(i),
+                          ),
+                      ],
                     ),
                   ),
-                  Icon(
-                    selected ? selectedIcon : icon,
-                    size: 24,
-                    color: selected ? selectedIconColor : unselectedIconColor,
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1588,7 +1490,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   Widget? _buildAppBarTitle() {
     if (_tabIndex == 0) {
-    
       if (_desktopBridgeOnline != null) {
         return Tooltip(
           message: _desktopBridgeLastSummary == null || _desktopBridgeLastSummary!.isEmpty
@@ -1607,8 +1508,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       }
       return null;
     }
-   
-    return null;
+    final String title = _kTabTitles[_tabIndex];
+    if (title.isEmpty) {
+      return null;
+    }
+    return Text(title);
   }
 
   @override
@@ -1620,7 +1524,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         title: "Private AI Agent",
         theme: AppTheme.material,
         home: Scaffold(
-          backgroundColor: const Color(0xFF2A2A2A),
+          backgroundColor: const Color(0xFF141414),
           body: Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1690,6 +1594,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             automaticallyImplyLeading: false,
                             title: _buildAppBarTitle(),
                             actions: <Widget>[
+                              if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows)
+                                IconButton(
+                                  tooltip: "启动桌面桌宠 Agent",
+                                  icon: const Icon(Icons.smart_toy_outlined),
+                                  onPressed: () async {
+                                    final bool ok = await SphereOverlayLauncher.launch();
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          ok
+                                              ? "桌面桌宠已启动"
+                                              : "启动失败：请确认 sphere-overlay 已安装",
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
                               IconButton(
                                 tooltip: "查看后台任务",
                                 icon: Badge(
@@ -1737,9 +1659,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 根级 Tab 栈：新增页请在 `_kTabTitles`（首项可为空以隐藏顶栏标题）、`IndexedStack`、`_buildExpandedSidebar` 内目的地元组与 `_buildCollapsedMiniSidebar` 的 `miniTab` 同步索引；
-  /// 索引 1 为占位邮箱注册页 [AgentMailboxPage]；索引 2 为 [SchedulePage]。
-  /// 新页面根布局用 [MainPanel] 包裹以贴合主区底色（见 `core/theme/app_theme.dart`）。
+  Widget _buildGameCenterPage() {
+    return GameCenterPage(
+      actorId: ApiConfig.effectiveActorId,
+      api: _worldApi,
+      ws: _ws,
+    );
+  }
+
+  /// 根级 Tab 栈：新增页请在 `_kTabTitles`、`IndexedStack`、侧栏 `miniTab` 同步索引。
+  /// 3D 球形 Agent 为桌面桌宠（sphere-overlay），启动时自动打开；AppBar 🤖 可手动重开。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -1775,13 +1704,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 );
               },
               onEnterVoiceMode: () {
-                // 在主页面上下文中执行导航
                 Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => VoiceModePage(
-                      onExit: () {
-                        Navigator.of(context).pop();
-                      },
+                  MaterialPageRoute<void>(
+                    builder: (BuildContext ctx) => VoiceModePage(
+                      onExit: () => Navigator.of(ctx).pop(),
                     ),
                   ),
                 );
@@ -1797,23 +1723,222 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               sessionId: ApiConfig.effectiveActorId,
               reloadListenable: _scheduleReloadSignal,
             ),
-            WalletPage(
-              balance: _balance,
-            ),
+            WalletPage(balance: _balance),
             SkillStorePage(api: _worldApi),
+            _buildGameCenterPage(),
             WorldPage(
               sessionId: ApiConfig.effectiveActorId,
               api: _worldApi,
               ws: _ws,
             ),
-            TweetComposePage(
-              sessionId: ApiConfig.effectiveActorId,
-              api: _worldApi,
-              ws: _ws,
-            ),
+            const SizedBox.shrink(),
           ],
         );
       },
+    );
+  }
+}
+
+class _SidebarItemSpec {
+  const _SidebarItemSpec({
+    required this.iconOutlined,
+    required this.iconFilled,
+    required this.label,
+    this.badge,
+  });
+
+  final IconData iconOutlined;
+  final IconData iconFilled;
+  final String label;
+  final String? badge;
+}
+
+class _SidebarNavItem extends StatefulWidget {
+  const _SidebarNavItem({
+    required this.spec,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final _SidebarItemSpec spec;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  State<_SidebarNavItem> createState() => _SidebarNavItemState();
+}
+
+class _SidebarNavItemState extends State<_SidebarNavItem> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool selected = widget.selected;
+    final bool hovering = _hovering;
+    final _SidebarItemSpec spec = widget.spec;
+    final ColorScheme cs = Theme.of(context).colorScheme;
+
+    final Color bgColor = selected
+        ? cs.surfaceContainerHigh.withOpacity(0.6)
+        : (hovering ? cs.surfaceContainer.withOpacity(0.6) : Colors.transparent);
+
+    final Color iconColor = selected
+        ? const Color(0xFF60A5FA)
+        : (hovering ? const Color(0xFFD4D4D8) : const Color(0xFF71717A));
+
+    final Color textColor = selected
+        ? const Color(0xFFF4F4F5)
+        : (hovering ? const Color(0xFFE4E4E7) : const Color(0xFFA1A1AA));
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Stack(
+            children: <Widget>[
+              if (selected)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 4,
+                    margin: const EdgeInsets.symmetric(vertical: 9),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF3B82F6),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: <Widget>[
+                    Icon(
+                      selected ? spec.iconFilled : spec.iconOutlined,
+                      size: 20,
+                      color: iconColor,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        spec.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: textColor,
+                        ),
+                      ),
+                    ),
+                    if (spec.badge != null && spec.badge!.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(left: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: spec.badge == 'NEW'
+                              ? const Color(0xA33B82F6)
+                              : cs.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          spec.badge!,
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            color: spec.badge == 'NEW'
+                                ? const Color(0xFFC084FC)
+                                : const Color(0xFFA1A1AA),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniNavItem extends StatefulWidget {
+  const _MiniNavItem({
+    required this.selected,
+    required this.iconOutlined,
+    required this.iconFilled,
+    required this.iconIdle,
+    required this.iconHover,
+    required this.iconSelected,
+    required this.onTap,
+  });
+
+  final bool selected;
+  final IconData iconOutlined;
+  final IconData iconFilled;
+  final Color iconIdle;
+  final Color iconHover;
+  final Color iconSelected;
+  final VoidCallback onTap;
+
+  @override
+  State<_MiniNavItem> createState() => _MiniNavItemState();
+}
+
+class _MiniNavItemState extends State<_MiniNavItem> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool selected = widget.selected;
+    final bool hovering = _hovering;
+    final ColorScheme cs = Theme.of(context).colorScheme;
+
+    final Color bgColor = selected
+        ? cs.surfaceContainerHigh.withOpacity(0.6)
+        : (hovering ? cs.surfaceContainer.withOpacity(0.6) : Colors.transparent);
+
+    final Color iconColor = selected
+        ? widget.iconSelected
+        : (hovering ? widget.iconHover : widget.iconIdle);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          width: 40,
+          height: 40,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            selected ? widget.iconFilled : widget.iconOutlined,
+            size: 20,
+            color: iconColor,
+          ),
+        ),
+      ),
     );
   }
 }

@@ -1,12 +1,8 @@
 import type { ReminderInstance, TTSAlarmConfig } from "./types.js";
+import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
 
 export interface TTSAlarmHandlerDeps {
-  synthesizeSpeech: (params: {
-    text: string;
-    voiceId?: string;
-    speed?: number;
-  }) => Promise<Buffer>;
-  playAudio: (userId: string, audioBuffer: Buffer, volume: number) => Promise<void>;
+  voiceDialogueService: VoiceDialogueService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
   logger?: {
     info: (msg: string, ...args: unknown[]) => void;
@@ -135,13 +131,23 @@ export class TTSAlarmHandler {
     config: TTSAlarmConfig,
     volume: number,
   ): Promise<void> {
-    const audioBuffer = await this.deps.synthesizeSpeech({
-      text: instance.config.message,
-      voiceId: config.voiceId,
-      speed: config.speed,
-    });
+    try {
+      const audioBuffer = await this.deps.voiceDialogueService.generateAndSpeak(
+        instance.config.message,
+        {
+          voiceId: config.voiceId,
+          speed: config.speed,
+          volume,
+        },
+      );
 
-    await this.deps.playAudio(userId, audioBuffer, volume);
+      this.deps.logger?.info(
+        `Generated TTS audio for alarm ${instance.config.id} at volume ${volume}`,
+      );
+    } catch (error) {
+      this.deps.logger?.error(`Failed to generate TTS audio: ${error}`);
+      throw error;
+    }
   }
 
   stopAlarm(reminderId: string): boolean {

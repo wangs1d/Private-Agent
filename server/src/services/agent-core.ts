@@ -572,6 +572,7 @@ export class AgentCore {
       narrativeRecall,
       personalization,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
+      onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
         trajCap?.observeToolExecuted({
           toolName: info.toolName,
@@ -610,6 +611,7 @@ export class AgentCore {
           desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
         }),
       onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
+      onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
     };
 

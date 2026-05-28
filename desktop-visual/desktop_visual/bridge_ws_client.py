@@ -1,6 +1,6 @@
 """
 电脑端常驻进程：连接服务端 WebSocket（与手机同一 userId），接收 desktop.bridge.invoke，
-在本机调用 desktop_visual_agent.stdio_worker 执行纯视觉任务并回传 desktop.bridge.result。
+在本机调用 desktop_visual.stdio_worker 执行纯视觉任务并回传 desktop.bridge.result。
 
 默认无需配对码：须设置 DESKTOP_BRIDGE_USER_ID 与手机一致；session.init 使用 desktopBridge:true 后由服务端自动绑定。
 若服务端配置了 DESKTOP_BRIDGE_TOKEN，则在本脚本环境变量中设置相同值，连接后会自动发送 register。
@@ -30,7 +30,7 @@ async def run_stdio_worker_on_pc(payload: dict) -> dict:
     proc = await asyncio.create_subprocess_exec(
         exe,
         "-m",
-        "desktop_visual_agent.stdio_worker",
+        "desktop_visual.stdio_worker",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

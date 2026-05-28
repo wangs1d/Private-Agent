@@ -8,6 +8,8 @@ export type WalletAction = "freeze" | "debit" | "refund" | "purchase";
 export const ClientEventType = {
   SessionInit: "session.init",
   ChatUserMessage: "chat.user_message",
+  /** 客户端「Agent 处理中」UI 显隐；false 时服务端锁定本轮，不再合并后续消息 */
+  ChatAgentProcessingUi: "chat.agent_processing_ui",
   WalletSimulateRequest: "wallet.simulate.request",
   /** AIP v0.1：结构化跨 Agent 消息（与工具 aip.dispatch 等价）。 */
   AipDispatch: "aip.dispatch",
