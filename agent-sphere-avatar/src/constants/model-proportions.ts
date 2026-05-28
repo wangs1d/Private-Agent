@@ -1,23 +1,28 @@
-/** 参照 3D 打印实体原型的比例与材质参数 */
+/** 参考深灰金属球形机器人 — 拉丝金属质感 + 4耳 + 大黑玻璃穹顶 */
 export const MODEL = {
-  bodyRadius: 1,
-  /** 前部大开口曲屏 — 约占正面 58% */
-  eyeRadius: 0.62,
-  eyeZ: 0.78,
-  eyePhiLength: 0.48,
-  eyeDisplayPhiLength: 0.44,
-  eyeBezelRadius: 0.82,
-  /** 两侧短圆柱耳 */
-  earX: 0.96,
-  earRadius: 0.07,
-  earLength: 0.12,
-  /** 哑光 PLA 白 */
-  shellColor: "#f2f0eb",
-  shellRoughness: 0.38,
-  shellMetalness: 0.02,
-  shellClearcoat: 0.35,
-  /** 内嵌呼吸灯 */
-  seamEmissive: "#eef6ff",
+  bodyRadius: 0.5,
+  /** 前部大黑玻璃穹顶 */
+  domeRadius: 0.58,
+  domeZ: 0.72,
+  domePhiLength: 0.52,
+  /** 两侧大耳朵 */
+  sideEarX: 0.94,
+  sideEarRadius: 0.12,
+  sideEarLength: 0.20,
+  sideEarY: 0,
+  /** 顶部前后小耳朵 */
+  topEarY: 0.88,
+  topEarFrontX: 0.28,
+  topEarBackX: -0.28,
+  topEarRadius: 0.08,
+  topEarLength: 0.14,
+  /** 深灰拉丝金属壳 */
+  shellColor: "#6a6a6e",
+  shellRoughness: 0.52,
+  shellMetalness: 0.68,
+  shellClearcoat: 0.15,
+  /** 内嵌呼吸灯缝线 */
+  seamEmissive: "#99a4b8",
 } as const;
 
 export type SceneMode = "demo" | "embed" | "overlay";

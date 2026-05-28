@@ -18,7 +18,7 @@ interface SphereAgentProps {
   onEyeInteractionChange?: (active: boolean) => void;
 }
 
-/** 球形主 Agent 形象 — 组合外壳、曲屏眼、侧耳与 Cannon 物理体 */
+/** 深灰金属球形机器人 — 4耳 + 大黑玻璃穹顶 + 内部眼睛光标 */
 export function SphereAgent({
   state,
   onEyeFocus,
@@ -61,17 +61,6 @@ export function SphereAgent({
           onClick={() => onEyeClick?.()}
           onInteractionChange={onEyeInteractionChange}
         />
-
-        <mesh position={[0, 0, MODEL.eyeZ - 0.06]}>
-          <torusGeometry args={[MODEL.bodyRadius * 0.56, 0.022, 12, 72]} />
-          <meshStandardMaterial
-            color="#eceff4"
-            metalness={0.08}
-            roughness={0.32}
-            emissive="#ffffff"
-            emissiveIntensity={0.03}
-          />
-        </mesh>
       </group>
     </group>
   );

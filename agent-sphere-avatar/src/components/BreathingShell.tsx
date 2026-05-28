@@ -8,21 +8,17 @@ interface BreathingShellProps {
   energy?: number;
 }
 
-/** 外壳白色呼吸灯 — 内嵌感 seam 发光（哑光 PLA 质感） */
+/** 深灰拉丝金属壳 — 微弱呼吸发光缝线 */
 export function BreathingShell({ radius = MODEL.bodyRadius, energy = 0.55 }: BreathingShellProps) {
   const shellRef = useRef<THREE.Group>(null);
   const ringsRef = useRef<THREE.Mesh[]>([]);
 
   const shellMaterial = useMemo(
     () =>
-      new THREE.MeshPhysicalMaterial({
+      new THREE.MeshStandardMaterial({
         color: new THREE.Color(MODEL.shellColor),
         metalness: MODEL.shellMetalness,
         roughness: MODEL.shellRoughness,
-        clearcoat: MODEL.shellClearcoat,
-        clearcoatRoughness: 0.28,
-        emissive: new THREE.Color("#ffffff"),
-        emissiveIntensity: 0.018,
       }),
     [],
   );
@@ -30,11 +26,11 @@ export function BreathingShell({ radius = MODEL.bodyRadius, energy = 0.55 }: Bre
   const seamMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: "#fafcff",
+        color: "#8898ac",
         emissive: MODEL.seamEmissive,
-        emissiveIntensity: 0.12,
+        emissiveIntensity: 0.15,
         transparent: true,
-        opacity: 0.42,
+        opacity: 0.35,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),
@@ -45,27 +41,23 @@ export function BreathingShell({ radius = MODEL.bodyRadius, energy = 0.55 }: Bre
     () => [
       { rot: [0, 0, 0] as const, scale: 1.001 },
       { rot: [Math.PI / 2, 0, 0] as const, scale: 0.999 },
-      { rot: [0, Math.PI / 2, 0.08] as const, scale: 1.0005 },
     ],
     [],
   );
 
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;
-    const pulse = 0.1 + ((Math.sin(t * 1.15) + 1) * 0.5) * (0.3 + energy * 0.42);
+    const pulse = 0.08 + ((Math.sin(t * 1.15) + 1) * 0.5) * (0.2 + energy * 0.3);
 
-    shellMaterial.emissiveIntensity = 0.012 + pulse * 0.06;
-
-    ringsRef.current.forEach((ring, i) => {
+    ringsRef.current.forEach((ring) => {
       if (!ring) return;
       const mat = ring.material as THREE.MeshStandardMaterial;
-      mat.emissiveIntensity = pulse * (0.28 + i * 0.1);
-      mat.opacity = 0.18 + pulse * 0.38;
-      ring.rotation.z = Math.sin(t * 0.4 + i) * 0.015;
+      mat.emissiveIntensity = pulse * 0.22;
+      mat.opacity = 0.12 + pulse * 0.28;
     });
 
     if (shellRef.current) {
-      shellRef.current.rotation.y = Math.sin(t * 0.12) * 0.035;
+      shellRef.current.rotation.y = Math.sin(t * 0.1) * 0.02;
     }
   });
 
@@ -85,22 +77,10 @@ export function BreathingShell({ radius = MODEL.bodyRadius, energy = 0.55 }: Bre
           rotation={[cfg.rot[0], cfg.rot[1], cfg.rot[2]]}
           scale={cfg.scale}
         >
-          <torusGeometry args={[radius * 0.945, 0.005, 8, 128]} />
+          <torusGeometry args={[radius * 0.945, 0.004, 8, 128]} />
           <primitive object={seamMaterial.clone()} attach="material" />
         </mesh>
       ))}
-
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[radius * 0.992, 0.0025, 6, 128]} />
-        <meshStandardMaterial
-          color="#ffffff"
-          emissive="#e8f2ff"
-          emissiveIntensity={0.16}
-          transparent
-          opacity={0.28}
-          depthWrite={false}
-        />
-      </mesh>
     </group>
   );
 }
