@@ -3,7 +3,6 @@ import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { MODEL } from "../constants/model-proportions";
 import type { AgentMood } from "../types/agent";
-import { useEyeTexture } from "../hooks/useEyeTexture";
 
 interface EyeScreenProps {
   mood: AgentMood;
@@ -15,56 +14,64 @@ interface EyeScreenProps {
   onInteractionChange?: (active: boolean) => void;
 }
 
-/** 前部大曲屏黑色玻璃态眼睛 — 主交互面 */
+/** 前部大黑玻璃穹顶 — 深凹曲面强反射 + 内部眼睛光标 */
 export function EyeScreen({
   mood,
   focused,
-  radius = MODEL.eyeRadius,
+  radius = MODEL.domeRadius,
   onPointerOver,
   onPointerOut,
   onClick,
   onInteractionChange,
 }: EyeScreenProps) {
   const groupRef = useRef<THREE.Group>(null);
-  const { texture, update } = useEyeTexture(mood, focused);
+  const cursorRef = useRef<THREE.Mesh>(null);
 
   const glassMaterial = useMemo(
     () =>
       new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color("#030306"),
-        metalness: 0.02,
-        roughness: 0.025,
+        color: new THREE.Color("#050608"),
+        metalness: 0.9,
+        roughness: 0.02,
         clearcoat: 1,
-        clearcoatRoughness: 0.015,
+        clearcoatRoughness: 0.01,
         reflectivity: 1,
-        envMapIntensity: 1.6,
+        envMapIntensity: 2.0,
         transparent: true,
-        opacity: 0.96,
+        opacity: 0.94,
         side: THREE.FrontSide,
       }),
     [],
   );
 
-  const displayMaterial = useMemo(
+  const bezelMaterial = useMemo(
     () =>
-      new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: true,
-        toneMapped: false,
+      new THREE.MeshStandardMaterial({
+        color: "#3a3c42",
+        metalness: 0.82,
+        roughness: 0.22,
+        emissive: focused ? "#4a6a9a" : "#2a3040",
+        emissiveIntensity: focused ? 0.5 : 0.12,
       }),
-    [texture],
+    [focused],
   );
 
   useFrame(({ clock }) => {
-    update(clock.elapsedTime);
+    const t = clock.elapsedTime;
     if (groupRef.current) {
-      const breathe = Math.sin(clock.elapsedTime * 1.1) * 0.003;
-      groupRef.current.position.z = MODEL.eyeZ + breathe;
+      const breathe = Math.sin(t * 0.9) * 0.002;
+      groupRef.current.position.z = MODEL.domeZ + breathe;
+    }
+    if (cursorRef.current) {
+      const floatY = Math.sin(t * 1.8) * 0.003;
+      cursorRef.current.position.y = floatY;
+      const scalePulse = 1 + Math.sin(t * 2.4) * 0.04;
+      cursorRef.current.scale.setScalar(scalePulse);
     }
   });
 
   return (
-    <group ref={groupRef} position={[0, 0, MODEL.eyeZ]}>
+    <group ref={groupRef} position={[0, 0, MODEL.domeZ]}>
       <mesh
         onPointerOver={() => {
           onInteractionChange?.(true);
@@ -78,30 +85,48 @@ export function EyeScreen({
         castShadow
       >
         <sphereGeometry
-          args={[radius, 72, 72, 0, Math.PI * 2, 0, Math.PI * MODEL.eyePhiLength]}
+          args={[radius, 72, 72, 0, Math.PI * 2, 0, Math.PI * MODEL.domePhiLength]}
         />
         <primitive object={glassMaterial} attach="material" />
       </mesh>
 
-      <mesh position={[0, 0, -0.018]} scale={0.94}>
-        <sphereGeometry
-          args={[radius * 0.97, 56, 56, 0, Math.PI * 2, 0, Math.PI * MODEL.eyeDisplayPhiLength]}
-        />
-        <primitive object={displayMaterial} attach="material" />
+      {/* 穹顶边框环 */}
+      <mesh position={[0, 0, 0.008]}>
+        <torusGeometry args={[radius * 0.97, 0.016, 16, 72]} />
+        <primitive object={bezelMaterial} attach="material" />
       </mesh>
 
-      <mesh position={[0, 0, 0.012]}>
-        <torusGeometry args={[radius * MODEL.eyeBezelRadius, 0.014, 16, 72]} />
-        <meshStandardMaterial
-          color="#f5f7fb"
-          emissive="#c8dcff"
-          emissiveIntensity={focused ? 0.65 : 0.18}
-          metalness={0.85}
-          roughness={0.12}
-          transparent
-          opacity={0.5}
-        />
-      </mesh>
+      {/* 内部眼睛光标 — 白色圆环 + 微弱发光 */}
+      <group position={[0, -radius * 0.15, -radius * 0.25]} ref={cursorRef}>
+        {/* 外圈 */}
+        <mesh>
+          <torusGeometry args={[0.055, 0.006, 12, 32]} />
+          <meshStandardMaterial
+            color="#c0d8f0"
+            emissive="#80b0e0"
+            emissiveIntensity={focused ? 0.9 : 0.35}
+            toneMapped={false}
+          />
+        </mesh>
+        {/* 内核点 */}
+        <mesh>
+          <sphereGeometry args={[0.018, 16, 16]} />
+          <meshBasicMaterial
+            color="#ffffff"
+            toneMapped={false}
+          />
+        </mesh>
+        {/* 下方小三角指针 */}
+        <mesh position={[0, -0.042, 0.005]} rotation={[0, 0, 0]}>
+          <coneGeometry args={[0.012, 0.028, 3]} />
+          <meshStandardMaterial
+            color="#a0c8f0"
+            emissive="#6090d0"
+            emissiveIntensity={focused ? 0.7 : 0.25}
+            toneMapped={false}
+          />
+        </mesh>
+      </group>
     </group>
   );
 }
