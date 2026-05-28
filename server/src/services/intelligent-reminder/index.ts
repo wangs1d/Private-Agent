@@ -5,6 +5,7 @@ import { IntelligentReminderService } from "./intelligent-reminder-service.js";
 import { PopupReminderHandler } from "./popup-reminder-handler.js";
 import { TTSAlarmHandler } from "./tts-alarm-handler.js";
 import { PhoneCallHandler } from "./phone-call-handler.js";
+import { UserResponsePersistenceService } from "./user-response-persistence.js";
 import type {
   ReminderConfig,
   ReminderLevel,
@@ -12,28 +13,14 @@ import type {
   TTSAlarmConfig,
   PhoneCallConfig,
 } from "./types.js";
+import type { VirtualPhoneService } from "../virtual-phone-service.js";
+import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
 
 export interface IntelligentReminderSystemDeps {
   toolRegistry: ToolRegistry;
+  virtualPhoneService: VirtualPhoneService;
+  voiceDialogueService: VoiceDialogueService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
-  synthesizeSpeech: (params: {
-    text: string;
-    voiceId?: string;
-    speed?: number;
-  }) => Promise<Buffer>;
-  playAudio: (userId: string, audioBuffer: Buffer, volume: number) => Promise<void>;
-  initiatePhoneCall: (params: {
-    userId: string;
-    transcript: string;
-    waitForResponse: boolean;
-  }) => Promise<{
-    ok: boolean;
-    callId?: string;
-    error?: string;
-  }>;
-  playAudioInCall: (callId: string, audio: Buffer) => Promise<void>;
-  recognizeSpeech: (callId: string, durationMs: number) => Promise<string>;
-  hangupCall: (callId: string) => Promise<void>;
   logger?: {
     info: (msg: string, ...args: unknown[]) => void;
     error: (msg: string, ...args: unknown[]) => void;
@@ -41,53 +28,94 @@ export interface IntelligentReminderSystemDeps {
 }
 
 export function createIntelligentReminderSystem(deps: IntelligentReminderSystemDeps) {
+  const userResponsePersistence = new UserResponsePersistenceService();
+
   const popupHandler = new PopupReminderHandler({
     sendToClient: deps.sendToClient,
     logger: deps.logger,
   });
 
   const ttsHandler = new TTSAlarmHandler({
-    synthesizeSpeech: deps.synthesizeSpeech,
-    playAudio: deps.playAudio,
+    voiceDialogueService: deps.voiceDialogueService,
     sendToClient: deps.sendToClient,
     logger: deps.logger,
   });
 
   const phoneHandler = new PhoneCallHandler({
-    initiateCall: deps.initiatePhoneCall,
-    synthesizeSpeech: deps.synthesizeSpeech,
-    playAudioInCall: deps.playAudioInCall,
-    recognizeSpeech: deps.recognizeSpeech,
-    hangupCall: deps.hangupCall,
+    virtualPhoneService: deps.virtualPhoneService,
+    voiceDialogueService: deps.voiceDialogueService,
     sendToClient: deps.sendToClient,
     logger: deps.logger,
   });
 
   const reminderService = new IntelligentReminderService(
     {
-      onPopupReminder: async (instance) => await popupHandler.handle(instance),
-      onTTSAlarmReminder: async (instance) => await ttsHandler.handle(instance),
-      onPhoneCallReminder: async (instance) => await phoneHandler.handle(instance),
+      onPopupReminder: async (instance) => {
+        await popupHandler.handle(instance);
+        await userResponsePersistence.recordResponse({
+          userId: instance.config.metadata?.userId as string ?? "unknown",
+          instance,
+          responded: false,
+          responseTimeMs: 0,
+        });
+      },
+      onTTSAlarmReminder: async (instance) => {
+        await ttsHandler.handle(instance);
+        await userResponsePersistence.recordResponse({
+          userId: instance.config.metadata?.userId as string ?? "unknown",
+          instance,
+          responded: false,
+          responseTimeMs: 0,
+        });
+      },
+      onPhoneCallReminder: async (instance) => {
+        await phoneHandler.handle(instance);
+        await userResponsePersistence.recordResponse({
+          userId: instance.config.metadata?.userId as string ?? "unknown",
+          instance,
+          responded: false,
+          responseTimeMs: 0,
+        });
+      },
+      getUserResponseHistory: async (userId) => {
+        return userResponsePersistence.getUserHistory(userId);
+      },
+      updateUserResponseHistory: async (
+        userId: string,
+        level: ReminderLevel,
+        responseTimeMs: number,
+        responded: boolean,
+      ) => {
+        const record = await userResponsePersistence.recordResponse({
+          userId,
+          instance: {} as any,
+          responded,
+          responseTimeMs,
+        });
+        return;
+      },
     },
   );
 
-  registerIntelligentReminderTools(deps.toolRegistry, reminderService);
+  registerIntelligentReminderTools(deps.toolRegistry, reminderService, userResponsePersistence);
 
   return {
     reminderService,
     popupHandler,
     ttsHandler,
     phoneHandler,
+    userResponsePersistence,
   };
 }
 
 function registerIntelligentReminderTools(
   registry: ToolRegistry,
   service: IntelligentReminderService,
+  persistence: UserResponsePersistenceService,
 ): void {
   registry.register("reminder.create", async (input, context) => {
     const actorId = resolveActorId(context);
-    
+
     const title = String(input.title ?? "").trim();
     const message = String(input.message ?? "").trim();
     const priority = (String(input.priority ?? "medium").trim() as ReminderConfig["priority"]);
@@ -122,6 +150,7 @@ function registerIntelligentReminderTools(
       scheduledAt: new Date(input.scheduledAt ?? Date.now()),
       metadata: {
         userId: actorId,
+        actorId,
         ...(input.metadata ?? {}),
       },
     };
@@ -181,9 +210,25 @@ function registerIntelligentReminderTools(
       return { ok: false, error: "请提供提醒 ID（reminderId）" };
     }
 
+    const instanceBeforeAck = service.getReminder(reminderId);
     const instance = await service.acknowledgeReminder(reminderId, actorId);
     if (!instance) {
       return { ok: false, error: "未找到该提醒或提醒状态不允许确认" };
+    }
+
+    if (instanceBeforeAck) {
+      const responseTimeMs =
+        instanceBeforeAck.startedAt?.getTime()
+          ? Date.now() - instanceBeforeAck.startedAt.getTime()
+          : 0;
+
+      await persistence.recordResponse({
+        userId: actorId,
+        instance: instanceBeforeAck,
+        responded: true,
+        responseTimeMs,
+        feedback: input.feedback as "positive" | "negative" | "neutral" | undefined,
+      });
     }
 
     return {
@@ -270,10 +315,64 @@ function registerIntelligentReminderTools(
     return {
       ok: true,
       reminderId: instance.config.id,
-      previousLevel: instance.escalationHistory[instance.escalationHistory.length - 1]?.fromLevel,
+      previousLevel:
+        instance.escalationHistory[instance.escalationHistory.length - 1]?.fromLevel,
       newLevel: instance.currentLevel,
       escalationCount: instance.escalationCount,
       message: `已从${getLevelLabel(instance.escalationHistory[instance.escalationHistory.length - 1]?.fromLevel ?? instance.currentLevel)}升级到${getLevelLabel(instance.currentLevel)}`,
+    };
+  });
+
+  registry.register("reminder.get_user_stats", async (input, context) => {
+    const actorId = resolveActorId(context);
+    const analytics = await persistence.getUserAnalytics(actorId);
+
+    if (!analytics) {
+      return {
+        ok: true,
+        exists: false,
+        message: "该用户暂无响应数据",
+      };
+    }
+
+    return {
+      ok: true,
+      exists: true,
+      analytics: {
+        totalReminders: analytics.totalReminders,
+        totalResponses: analytics.totalResponses,
+        responseRate: Math.round(analytics.responseRate * 100) / 100,
+        averageResponseTimeMs: Math.round(analytics.averageResponseTimeMs),
+        ignoreRate: Math.round(analytics.ignoreRate * 100) / 100,
+        preferredLevel: analytics.preferredLevel,
+        lastResponseAt: analytics.lastResponseAt,
+        levelDistribution: analytics.levelDistribution,
+      },
+    };
+  });
+
+  registry.register("reminder.get_response_history", async (input, context) => {
+    const actorId = resolveActorId(context);
+    const limit = Number(input.limit ?? 20);
+
+    const recentResponses = persistence.getRecentResponses(actorId, limit);
+
+    return {
+      ok: true,
+      count: recentResponses.length,
+      responses: recentResponses.map((r) => ({
+        id: r.id,
+        reminderTitle: r.reminderTitle,
+        level: r.level,
+        priority: r.priority,
+        triggeredAt: r.triggeredAt,
+        respondedAt: r.respondedAt,
+        responseTimeMs: r.responseTimeMs,
+        responded: r.responded,
+        escalationCount: r.escalationCount,
+        finalLevel: r.finalLevel,
+        userFeedback: r.userFeedback,
+      })),
     };
   });
 }

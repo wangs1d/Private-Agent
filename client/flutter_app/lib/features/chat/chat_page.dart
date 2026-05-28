@@ -601,17 +601,16 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     final bool showDetailPanel = _selectedSummary != null;
 
-    return ColoredBox(
-      color: cs.surface,
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: Column(
-              children: <Widget>[
-                Expanded(
-                  child: Stack(
-                    children: [
-                      ListView.builder(
+    return Stack(
+      children: <Widget>[
+        ColoredBox(
+          color: cs.surface,
+          child: Column(
+            children: <Widget>[
+              Expanded(
+                child: Stack(
+                  children: <Widget>[
+                    ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   itemCount: itemCount,
@@ -713,13 +712,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     );
                   },
                 ),
-              ],
-            ),
-          ),
-          ColoredBox(
-            color: cs.surface,
-            child: SafeArea(
-              child: Padding(
+                  ],
+                ),
+              ),
+              ColoredBox(
+                color: cs.surface,
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -1002,14 +1002,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
               ),
             ),
           ),
-        ],
-      ),
-    ),
-    if (showDetailPanel)
-      _buildDetailPanel(cs, _selectedSummary!),
-  ],
-  ),
-);
+            ],
+          ),
+        ),
+        if (showDetailPanel) _buildDetailPanel(cs, _selectedSummary!),
+      ],
+    );
   }
 }
 

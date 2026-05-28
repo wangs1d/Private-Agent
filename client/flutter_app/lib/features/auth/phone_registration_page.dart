@@ -123,7 +123,7 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF2A2A2A),
+      backgroundColor: const Color(0xFF0F0F0F),
       body: Center(
         child: Container(
           constraints: const BoxConstraints(maxWidth: 450),
@@ -236,7 +236,7 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _countdown > 0 || _isSendingCode
                               ? Colors.grey.withOpacity(0.3)
-                              : const Color(0xFF424242),
+                              : cs.surfaceContainerHighest,
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 16),
                           shape: RoundedRectangleBorder(
@@ -295,7 +295,7 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                   child: ElevatedButton(
                     onPressed: _isVerifying ? null : _verifyAndRegister,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF424242),
+                      backgroundColor: cs.surfaceContainerHighest,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(

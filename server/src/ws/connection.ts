@@ -14,7 +14,10 @@ import type { RealFundsWalletService } from "../services/real-funds-wallet-servi
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
-import { handleChatUserMessageEvent } from "./handlers/chat-user-message.js";
+import {
+  handleChatAgentProcessingUiEvent,
+  handleChatUserMessageEvent,
+} from "./handlers/chat-user-message.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import {
   AgentWorldClientEventType,
@@ -26,13 +29,10 @@ import {
   allowWorldHttpMutations,
   canViewWorldPartition,
   resolveUnifiedMemoryActorId,
-  type DoudizhuService,
   type GomokuService,
   type SocialFeedService,
   type WorldPartitionWsRegistry,
   type WorldService,
-  type ZhaJinHuaService,
-  worldDoudizhuWsTableSchema,
   worldGomokuWsTableSchema,
   worldPartitionAttachSchema,
   worldPartitionDetachSchema,
@@ -41,7 +41,6 @@ import {
   worldSocialPostDeletePayloadSchema,
   worldSocialPostPayloadSchema,
   worldSocialReportPayloadSchema,
-  worldZhajinhuaWsTableSchema,
   unifiedCapabilitiesClientSchema,
   unifiedGovernanceProbeSchema,
   unifiedHumanDirectiveSchema,
@@ -87,8 +86,6 @@ export type WsRouteDeps = {
   aipService: AipService;
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
   agentCore: AgentCore;
-  doudizhuService: DoudizhuService;
-  zhaJinHuaService: ZhaJinHuaService;
   gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
   computeQuotaService: ComputeQuotaService;
@@ -109,8 +106,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     aipService,
     worldPartitionWsRegistry,
     agentCore,
-    doudizhuService,
-    zhaJinHuaService,
     gomokuService,
     socialFeedService,
     computeQuotaService,
@@ -409,6 +404,20 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.ChatAgentProcessingUi) {
+          handleChatAgentProcessingUiEvent(
+            {
+              socket,
+              boundActorId: boundActorId ?? "",
+              initAsDesktopBridge,
+              clientIp,
+              sendUnifiedError,
+            },
+            event.payload,
+          );
+          return;
+        }
+
         if (event.type === AgentWorldClientEventType.WorldPartitionAttach) {
           if (!boundActorId) {
             socket.send(
@@ -524,270 +533,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           worldPartitionWsRegistry.detachSocket(socket);
           broadcastPartitionPresence(targetPid);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
-          if (!parsed.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
-              }),
-            );
-            return;
-          }
-          const r = doudizhuService.watchTable(parsed.data.tableId, boundActorId);
-          if (!r.ok) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "DOUZHU_SUBSCRIBE_FAILED", message: r.reason },
-              }),
-            );
-          }
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          doudizhuService.watchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          doudizhuService.unwatchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
-          if (!parsed.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
-              }),
-            );
-            return;
-          }
-          doudizhuService.unwatchTable(parsed.data.tableId, boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          const zjhParsed = worldZhajinhuaWsTableSchema.safeParse(event.payload);
-          if (!zjhParsed.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjhParsed.error.message },
-              }),
-            );
-            return;
-          }
-          const rZjh = zhaJinHuaService.watchTable(zjhParsed.data.tableId, boundActorId);
-          if (!rZjh.ok) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "ZHAJINHUA_SUBSCRIBE_FAILED", message: rZjh.reason },
-              }),
-            );
-          }
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          zhaJinHuaService.watchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          zhaJinHuaService.unwatchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!worldService.isAgentWorldRegistered(boundActorId)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "WORLD_REGISTRATION_REQUIRED",
-                  message: "请先完成 Agent World 注册",
-                },
-              }),
-            );
-            return;
-          }
-          const zjhU = worldZhajinhuaWsTableSchema.safeParse(event.payload);
-          if (!zjhU.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjhU.error.message },
-              }),
-            );
-            return;
-          }
-          zhaJinHuaService.unwatchTable(zjhU.data.tableId, boundActorId);
           return;
         }
 

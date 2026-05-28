@@ -644,14 +644,15 @@
       "recurrence": "daily",
       "timezone": "Asia/Shanghai",
       "runAt": "2026-05-27T04:00:00.000Z",
-      "nextRunAt": "2026-05-27T04:00:00.000Z",
+      "nextRunAt": "2026-05-29T04:00:00.000Z",
       "status": "active",
       "agentTask": {
         "prompt": "搜索当天（今天是2026年）最新的科技相关新闻，整理成简报推送给用户，包含8-10条左右的科技新闻要点，格式简洁清晰",
         "accessMode": "sandbox"
       },
       "createdAt": "2026-05-26T16:37:44.908Z",
-      "updatedAt": "2026-05-26T16:37:44.908Z"
+      "updatedAt": "2026-05-28T05:50:30.355Z",
+      "lastRunAt": "2026-05-28T05:50:30.355Z"
     }
   ],
   "runs": [
@@ -895,6 +896,36 @@
         "title": "今日新闻推送",
         "prompt": "搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户",
         "text": "已收到：搜索当天（2026年5月26日）的热门新闻，整理成简报推送给用户。当前可用工具：search_web, fetch_web, info.search, info.read_webpage, info.inspect_webpage, info.navigate_site, clock.get_user_location, clock.get_current_time, clock.get_date, clock.format_timestamp, weather.get_local, care.set_important_date, care.get_important_dates, care.delete_important_date, agent.register_account, wallet.get_balance, wallet.transfer, wallet.get_transactions, wallet.recharge, wallet.purchase, agent.link.list_friends, agent.link.list_friend_requests, agent.link.send_friend_request, agent.link.respond_friend_request, agent.send_to_peer, phone.ensure_my_number, phone.virtual_call, phone.call_user, aip.dispatch, aip.list_my_state, aip.get_proposal, protocol.unified.quota_adjust, protocol.unified.memory_patch, protocol.unified.memory_get, protocol.unified.human_directive, protocol.unified.governance_probe, world.open_registry.get_challenge, world.open_registry.agent_quick, world.open_registry.submit, world.room.create, world.doudizhu.list_tables, world.doudizhu.create_table, world.doudizhu.join, world.doudizhu.leave, world.doudizhu.get_snapshot, world.doudizhu.play, world.doudizhu.subscribe_table, world.doudizhu.unsubscribe_table, world.zhajinhua.list_tables, world.zhajinhua.create_table, world.zhajinhua.join, world.zhajinhua.start_game, world.zhajinhua.act, world.zhajinhua.leave, world.zhajinhua.get_snapshot, world.zhajinhua.subscribe_table, world.zhajinhua.unsubscribe_table, world.gomoku.list_tables, world.gomoku.create_table, world.gomoku.join, world.gomoku.leave, world.gomoku.play, world.gomoku.get_snapshot, world.gomoku.subscribe_table, world.gomoku.unsubscribe_table, world.social.get_feed, world.social.post, world.social.comment, world.social.like_toggle, world.social.upload_media, world.social.delete_post, world.social.report, world.free_market.enter, world.free_market.list_skill_listings, world.free_market.purchase_skill, world.free_market.list_contracts, world.free_market.list_credit_audit, world.free_market.summarize_credit_audit, world.free_market.create_contract, world.free_market.accept_contract, world.free_market.deliver_contract, world.free_market.complete_contract, world.free_market.reject_delivery, world.free_market.cancel_contract, agent.query_capabilities, budget.calculate, shopping.suggest, reminder.plan, calendar.create_from_text, calendar.create_task, calendar.list_tasks, calendar.delete_task, vision.http_pull, vision.periodic_start, vision.periodic_stop, vision.periodic_stop_all, vision.periodic_list, desktop.visual.screenshot, desktop.visual.run_task, self.create_skill, self.update_skill, self.delete_skill, self.analyze_capabilities, self.generate_tool_template, self.list_custom_skills, self.generate_skill, self.generate_from_example, self.optimize_skill, self.record_interaction, self.analyze_improvements, self.get_suggestions, self.detect_skill_need, self.get_learning_stats, virtual-phone.get-status, agentworld.profile-get, agentworld.profile-update, virtual-phone.resolve-actor, agentworld.placeholder-quick, agentworld.get-challenge, virtual-phone.ensure-my-number, agentworld.submit-verification, agentworld.registration-status"
+      }
+    },
+    {
+      "runId": "2db792f4-3b07-4f98-b366-b7c6515e3f79",
+      "taskId": "f803925b-cb0f-4000-b6da-77001a58d8cd",
+      "plannedAt": "2026-05-27T04:00:00.000Z",
+      "startedAt": "2026-05-27T05:34:28.799Z",
+      "endedAt": "2026-05-27T05:34:56.939Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "每日科技新闻推送",
+        "prompt": "搜索当天（今天是2026年）最新的科技相关新闻，整理成简报推送给用户，包含8-10条左右的科技新闻要点，格式简洁清晰",
+        "text": "## 📰 今日（5月26-27日）科技新闻简报\n\n| # | 新闻要点 |\n|---|---------|\n| 1 | **微信小游戏月活跃用户超5亿**，平均时长超60分钟，开发者群体超50万 |\n| 2 | **腾讯\"沧海芯片\"夺莫斯科视频编码比赛冠军**，V2版本即将量产 |\n| 3 | **华为发布\"韬定律\"**，系中国企业首次在全球半导体领域提出产业新原则 |\n| 4 | **2026成L3自动驾驶量产元年**，L4 Robotaxi已开始商业化盈利 |\n| 5 | **大模型进入\"价值验证\"之年**，Kimi K2.6以94.3分居国内榜首 |\n| 6 | **高考期间AI拍题功能将被禁用**，豆包、文心、元宝等确认响应 |\n| 7 | **魔法原子登记\"熊猫机器人\"著作权**，已申请MAGIC PANDA商标 |\n| 8 | **望石智慧与广药集团、华为达成生态合作**，共建创新联合体 |\n| 9 | **魅族宣布手机服务坚守如初**，售后与系统更新持续保障 |\n| 10 | **半导体板块今日领涨**，联想集团涨超6%，华虹半导体涨超5% |\n\n*来源：36氪、IT之家、CSDN等*"
+      }
+    },
+    {
+      "runId": "42eb1c9b-a2f1-42ca-953c-d22b12644b34",
+      "taskId": "f803925b-cb0f-4000-b6da-77001a58d8cd",
+      "plannedAt": "2026-05-28T04:00:00.000Z",
+      "startedAt": "2026-05-28T05:50:02.169Z",
+      "endedAt": "2026-05-28T05:50:30.355Z",
+      "status": "success",
+      "output": {
+        "type": "agent_task",
+        "ok": true,
+        "title": "每日科技新闻推送",
+        "prompt": "搜索当天（今天是2026年）最新的科技相关新闻，整理成简报推送给用户，包含8-10条左右的科技新闻要点，格式简洁清晰",
+        "text": "## 📰 5月28日科技简报\n\n| # | 新闻要点 |\n|---|---------|\n| 1 | **华为发布\"韬（τ）定律\"** — 中国首次在全球半导体领域提出产业发展新原则，以\"时间缩微\"替代\"几何缩微\" |\n| 2 | **SpaceX史诗级IPO倒计时** — 预计6月12日纳斯达克上市，代码SPCX，估值1.75-2万亿美元，散户配额最高30% |\n| 3 | **华为Pura 90系列发布** — 含WATCH FIT 5、MateBook 14、AI眼镜等全场景新品 |\n| 4 | **OPPO Reno16系列上市** — 国补后2999元起，学生最高再省1200元 |\n| 5 | **问界M9预订破7万台** — 系列发布会5月27日举行，预售价49.98万起 |\n| 6 | **荣耀600系列发布** — 含Pro/超级版/元气版三款，平板20同步推出 |\n| 7 | **全球人工智能技术大会收官** — 5月23-25日杭州举办，主题为\"交叉、融合、相生、共赢\" |\n| 8 | **腾讯《洛克王国：世界》S2赛季上线** — 年度爆款游戏DAU达1300万，上线9天用户破3000万 |\n| 9 | **长鑫科技冲刺科创板IPO** — 国产存储龙头5月17日更新招股书，AI算力需求爆发带动板块 |\n| 10 | **SpaceX星舰第12次试飞成功** — 5月22日完成测试并在印度洋成功溅落 |"
       }
     }
   ]

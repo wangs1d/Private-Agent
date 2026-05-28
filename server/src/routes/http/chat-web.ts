@@ -5,6 +5,19 @@ import type { FastifyInstance } from "fastify";
 
 const routesDir = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(routesDir, "../../../web/chat");
+const avatarRoot = join(webRoot, "assets", "avatar");
+
+function contentTypeFor(file: string): string | undefined {
+  const lower = file.toLowerCase();
+  if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+  if (lower.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (lower.endsWith(".html")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".map")) return "application/json; charset=utf-8";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".woff2")) return "font/woff2";
+  return undefined;
+}
 
 /** 浏览器 Accept 含 text/html 时返回聊天页 HTML（与 `GET /chat` JSON 元数据共用路径）。 */
 export function prefersChatWebHtml(accept: string | undefined): boolean {
@@ -46,9 +59,23 @@ export function registerChatWeb(app: FastifyInstance): void {
     if (!full.startsWith(webRoot) || !existsSync(full)) {
       return reply.code(404).send("Not found");
     }
-    const lower = raw.toLowerCase();
-    if (lower.endsWith(".css")) void reply.type("text/css; charset=utf-8");
-    else if (lower.endsWith(".js")) void reply.type("application/javascript; charset=utf-8");
+    const ct = contentTypeFor(raw);
+    if (ct) void reply.type(ct);
+    return readFileSync(full);
+  });
+
+  /** Agent Sphere 3D 形象构建产物：`/chat/assets/avatar/*` */
+  app.get<{ Params: { "*": string } }>("/chat/assets/avatar/*", async (req, reply) => {
+    const raw = req.params["*"] ?? "";
+    if (!raw || raw.includes("..") || !/^[a-zA-Z0-9/._-]+$/.test(raw)) {
+      return reply.code(400).send("Invalid path");
+    }
+    const full = resolve(avatarRoot, raw);
+    if (!full.startsWith(avatarRoot) || !existsSync(full)) {
+      return reply.code(404).send("Not found");
+    }
+    const ct = contentTypeFor(raw);
+    if (ct) void reply.type(ct);
     return readFileSync(full);
   });
 }

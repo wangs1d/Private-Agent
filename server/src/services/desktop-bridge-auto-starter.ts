@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { getDesktopVisualAgentPaths } from "./desktop-visual-agent-subprocess.js";
+import { getDesktopVisualPaths } from "./desktop-visual-subprocess.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
   if (!raw) return false;
@@ -40,8 +40,8 @@ export function startDesktopBridgeAutoClient(opts: DesktopBridgeAutoStarterOptio
   }
 
   const log = opts.log ?? ((line: string) => console.log(line));
-  const { pythonExe, packageRoot } = getDesktopVisualAgentPaths(env);
-  const modulePath = join(packageRoot, "desktop_visual_agent");
+  const { pythonExe, packageRoot } = getDesktopVisualPaths(env);
+  const modulePath = join(packageRoot, "desktop_visual");
   if (!existsSync(modulePath)) {
     log(`[desktop-bridge] 跳过自启动：未找到 ${packageRoot}`);
     return () => {};
@@ -69,7 +69,7 @@ export function startDesktopBridgeAutoClient(opts: DesktopBridgeAutoStarterOptio
 
   const spawnOnce = (): void => {
     if (stopped) return;
-    child = spawn(pythonExe, ["-u", "-m", "desktop_visual_agent.bridge_ws_client"], {
+    child = spawn(pythonExe, ["-u", "-m", "desktop_visual.bridge_ws_client"], {
       cwd: packageRoot,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],

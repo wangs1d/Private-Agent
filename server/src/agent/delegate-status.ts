@@ -8,7 +8,7 @@ import type { SubAgentType } from "../services/master-agent-types.js";
 /** 子 Agent 报告末尾的「给用户看的进度/收尾」标记（由子 Agent 模型生成） */
 export const USER_VISIBLE_PROGRESS_MARKER = "【用户可见进度】";
 
-export type DelegateStatusPhase = "delegate_start" | "delegate_done";
+export type DelegateStatusPhase = "delegate_start" | "delegate_done" | "live" | "tool_start";
 
 export type DelegateStatusPayload = {
   phase: DelegateStatusPhase;
@@ -19,10 +19,20 @@ export type DelegateStatusPayload = {
   toolName: string;
 };
 
+/** 从工具参数或模型 tool-call 前导文本提取用户可见进度句 */
+export function pickToolUserStatusLine(
+  input: Record<string, unknown>,
+  assistantPreamble?: string,
+): string | null {
+  const fromInput = String(input.userStatusLine ?? input.statusLine ?? "").trim();
+  if (fromInput.length > 0) return fromInput;
+  const preamble = (assistantPreamble ?? "").trim();
+  return preamble.length > 0 ? preamble : null;
+}
+
 /** 主 Agent 调用 master.invoke_sub_agent 时必须填的 UI 文案字段 */
 export function pickMasterDelegateStartLine(input: Record<string, unknown>): string | null {
-  const line = String(input.userStatusLine ?? input.statusLine ?? "").trim();
-  return line.length > 0 ? line : null;
+  return pickToolUserStatusLine(input);
 }
 
 /** 从子 Agent 报告末尾解析【用户可见进度】行 */
@@ -42,7 +52,8 @@ export function pickSubAgentDoneLine(report: string): string | null {
 }
 
 export function isMasterInvokeSubAgentTool(toolName: string): boolean {
-  return toolName === MASTER_INVOKE_SUB_AGENT_REGISTRY;
+  const n = toolName.trim();
+  return n === MASTER_INVOKE_SUB_AGENT_REGISTRY || n === "master_invoke_sub_agent";
 }
 
 export function buildDelegateStartPayload(
@@ -72,5 +83,17 @@ export function buildDelegateDonePayload(
     agentType,
     subAgentDisplayName: agentName,
     toolName: MASTER_INVOKE_SUB_AGENT_REGISTRY,
+  };
+}
+
+export function buildLiveAgentStatusPayload(
+  line: string,
+  phase: Extract<DelegateStatusPhase, "live" | "tool_start"> = "live",
+  toolName = "agent",
+): DelegateStatusPayload {
+  return {
+    phase,
+    line,
+    toolName,
   };
 }

@@ -51,8 +51,6 @@ export type QuotaConfig = {
 
 export type MessageBatchConfig = {
   enabled: boolean;
-  debounceMs: number;
-  maxWaitMs: number;
 };
 
 export type AgentRuntimeConfig = {
@@ -139,8 +137,6 @@ function loadMessageBatchConfig(): MessageBatchConfig {
   const rawEnabled = process.env.MESSAGE_BATCH_ENABLED;
   return {
     enabled: rawEnabled === undefined ? true : envTruthy(rawEnabled),
-    debounceMs: envPositiveInt(process.env.MESSAGE_BATCH_DEBOUNCE_MS, 1200),
-    maxWaitMs: envPositiveInt(process.env.MESSAGE_BATCH_MAX_WAIT_MS, 5000),
   };
 }
 
@@ -183,9 +179,7 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
       : "uapMemoryKeys=off",
     `taskContext=${config.memoryPrompt.taskContextInPrompt ? "on" : "off"}`,
     config.quota.unitsPerModelCall > 0 ? `quotaUnitsPerCall=${config.quota.unitsPerModelCall}` : null,
-    `messageBatch=${mb.enabled ? "on" : "off"}`,
-    mb.enabled ? `batchDebounceMs=${mb.debounceMs}` : null,
-    mb.enabled ? `batchMaxWaitMs=${mb.maxWaitMs}` : null,
+    `messageBatch=${mb.enabled ? "on(until-processing-ui-off)" : "off"}`,
   ]
     .filter(Boolean)
     .join(", ");

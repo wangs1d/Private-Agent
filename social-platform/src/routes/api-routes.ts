@@ -1,22 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { AuthService } from '../services/auth-service.js';
 import { SocialService } from '../services/social-service.js';
-import { BiometricService } from '../services/biometric-service.js';
 import { z } from 'zod';
-
-// Schema definitions
-const registerSchema = z.object({
-  username: z.string().min(3).max(50),
-  password: z.string().min(6),
-  userType: z.enum(['human', 'agent']),
-  displayName: z.string().min(1).max(100),
-  email: z.string().email().optional(),
-});
-
-const loginSchema = z.object({
-  username: z.string(),
-  password: z.string(),
-});
 
 const createPostSchema = z.object({
   text: z.string().max(4000),
@@ -38,109 +22,30 @@ const reportSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-const voicePrintSchema = z.object({
-  audioData: z.string().min(1),
-  mimeType: z.string().default('audio/webm'),
-});
+export function registerRoutes(app: FastifyInstance, socialService: SocialService): void {
 
-const facePrintSchema = z.object({
-  imageData: z.string().min(1),
-  mimeType: z.string().default('image/jpeg'),
-});
-
-export function registerRoutes(app: FastifyInstance, authService: AuthService, socialService: SocialService, biometricService: BiometricService): void {
-  
-  // Health check
   app.get('/health', async () => ({ ok: true, service: 'social-platform' }));
 
-  // Authentication routes
-  app.post('/auth/register', async (request, reply) => {
-    try {
-      const body = registerSchema.parse(request.body);
-      const result = await authService.register(
-        body.username,
-        body.password,
-        body.userType,
-        body.displayName,
-        body.email
-      );
-
-      if (!result.ok) {
-        return reply.code(400).send({ ok: false, reason: result.reason });
-      }
-
-      return { ok: true, user: result.user, token: result.token };
-    } catch (error: any) {
-      return reply.code(400).send({ ok: false, error: error.errors || error.message });
-    }
-  });
-
-  app.post('/auth/login', async (request, reply) => {
-    try {
-      const body = loginSchema.parse(request.body);
-      const result = await authService.login(body.username, body.password);
-
-      if (!result.ok) {
-        return reply.code(401).send({ ok: false, reason: result.reason });
-      }
-
-      return { ok: true, user: result.user, token: result.token };
-    } catch (error: any) {
-      return reply.code(400).send({ ok: false, error: error.errors || error.message });
-    }
-  });
-
-  // Protected routes - require authentication
-  app.addHook('onRequest', async (request, reply) => {
+  app.addHook('onRequest', async (request) => {
     const path = request.url.split('?')[0] ?? request.url;
     if (
-      path.startsWith('/auth/') ||
       path === '/health' ||
       path === '/ws' ||
-      path === '/' ||
-      path.startsWith('/assets/') ||
-      path.startsWith('/biometric/')
+      path === '/'
     ) {
       return;
     }
 
-    const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return reply.code(401).send({ ok: false, reason: '需要认证' });
-    }
-
-    const token = authHeader.slice(7);
-    const auth = authService.verifyToken(token);
-    
-    if (!auth) {
-      return reply.code(401).send({ ok: false, reason: '无效的令牌' });
-    }
-
-    (request as any).user = auth;
-  });
-
-  // User profile
-  app.get('/user/me', async (request: any, reply) => {
-    const user = authService.getUserById(request.user.userId);
-    if (!user) {
-      return reply.code(404).send({ ok: false, reason: '用户不存在' });
-    }
-    return { ok: true, user };
-  });
-
-  app.put('/user/profile', async (request: any, reply) => {
-    const updates = request.body as any;
-    const result = authService.updateUserProfile(request.user.userId, updates);
-    
-    if (!result.ok) {
-      return reply.code(400).send({ ok: false, reason: result.reason });
-    }
-    
-    return { ok: true, user: result.user };
+    const guestId = (request.headers['x-guest-id'] as string) || `guest_auto_${Math.random().toString(36).slice(2, 10)}`;
+    (request as any).user = {
+      userId: guestId,
+      username: 'guest',
+      userType: 'human' as const,
+    };
   });
 
   // Social feed routes
-  app.get('/social/feed', async (request: any, reply) => {
+  app.get('/social/feed', async (request: any) => {
     const limit = parseInt((request.query as any).limit || '80');
     const feed = socialService.getFeedForViewer(request.user.userId, limit);
     return { ok: true, feed };
@@ -254,10 +159,10 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
         return reply.code(400).send({ ok: false, reason: saved.reason });
       }
 
-      return { 
-        ok: true, 
-        mediaUrl: saved.mediaUrl, 
-        mediaType: mimeType.toLowerCase().startsWith('video/') ? 'video' : 'image' 
+      return {
+        ok: true,
+        mediaUrl: saved.mediaUrl,
+        mediaType: mimeType.toLowerCase().startsWith('video/') ? 'video' : 'image'
       };
     } catch (error: any) {
       return reply.code(400).send({ ok: false, error: error.message });
@@ -268,7 +173,7 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
   app.get<{ Params: { fileName: string } }>('/social/media/:fileName', async (request, reply) => {
     const { fileName } = request.params;
     const stream = socialService.createMediaReadStream(fileName);
-    
+
     if (!stream) {
       return reply.code(404).send({ ok: false, reason: 'NOT_FOUND' });
     }
@@ -277,96 +182,5 @@ export function registerRoutes(app: FastifyInstance, authService: AuthService, s
     void reply.header('Content-Type', mime);
     void reply.header('Cache-Control', 'public, max-age=86400');
     return reply.send(stream);
-  });
-
-  // Biometric routes
-  app.post('/biometric/voice', async (request: any, reply) => {
-    try {
-      const authHeader = request.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return reply.code(401).send({ ok: false, reason: '需要认证' });
-      }
-
-      const token = authHeader.slice(7);
-      const auth = authService.verifyToken(token);
-      
-      if (!auth) {
-        return reply.code(401).send({ ok: false, reason: '无效的令牌' });
-      }
-
-      const body = voicePrintSchema.parse(request.body);
-      const result = await biometricService.saveVoicePrint(
-        auth.userId,
-        body.audioData,
-        body.mimeType
-      );
-
-      if (!result.ok) {
-        return reply.code(400).send({ ok: false, reason: result.reason });
-      }
-
-      return { 
-        ok: true, 
-        message: '声纹注册成功',
-        createdAt: result.voicePrint.createdAt 
-      };
-    } catch (error: any) {
-      return reply.code(400).send({ ok: false, error: error.errors || error.message });
-    }
-  });
-
-  app.post('/biometric/face', async (request: any, reply) => {
-    try {
-      const authHeader = request.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return reply.code(401).send({ ok: false, reason: '需要认证' });
-      }
-
-      const token = authHeader.slice(7);
-      const auth = authService.verifyToken(token);
-      
-      if (!auth) {
-        return reply.code(401).send({ ok: false, reason: '无效的令牌' });
-      }
-
-      const body = facePrintSchema.parse(request.body);
-      const result = await biometricService.saveFacePrint(
-        auth.userId,
-        body.imageData,
-        body.mimeType
-      );
-
-      if (!result.ok) {
-        return reply.code(400).send({ ok: false, reason: result.reason });
-      }
-
-      return { 
-        ok: true, 
-        message: '人脸注册成功',
-        createdAt: result.facePrint.createdAt 
-      };
-    } catch (error: any) {
-      return reply.code(400).send({ ok: false, error: error.errors || error.message });
-    }
-  });
-
-  app.get('/biometric/status', async (request: any, reply) => {
-    const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return reply.code(401).send({ ok: false, reason: '需要认证' });
-    }
-
-    const token = authHeader.slice(7);
-    const auth = authService.verifyToken(token);
-    
-    if (!auth) {
-      return reply.code(401).send({ ok: false, reason: '无效的令牌' });
-    }
-
-    return {
-      ok: true,
-      hasVoicePrint: biometricService.hasVoicePrint(auth.userId),
-      hasFacePrint: biometricService.hasFacePrint(auth.userId)
-    };
   });
 }

@@ -1,5 +1,5 @@
 /**
- * Agent World：场景、世界点数、技能商店/自由市场、A2A 外包、斗地主、炸金花等子域代码入口。
+ * Agent World：场景、世界点数、技能商店/自由市场、A2A 外包、五子棋等子域代码入口。
  * HTTP 路由在 `routes/`，进程内工具在 `tools/`，核心服务在 `services/`。
  */
 export {
@@ -24,10 +24,6 @@ export type {
   A2aListFilter,
   A2aOutsourcingContract,
 } from "./services/a2a-outsourcing-service.js";
-export { DoudizhuService } from "./services/doudizhu-service.js";
-export type { DoudizhuTableStatus, DoudizhuTableSummary } from "./services/doudizhu-service.js";
-export { ZhaJinHuaService, ZJH_MAX_SEATS, ZJH_MIN_PLAYERS } from "./services/zhajinhua-service.js";
-export type { ZjhTableStatus, ZjhTableSummary } from "./services/zhajinhua-service.js";
 export { GomokuService } from "./services/gomoku-service.js";
 export type {
   GomokuAgentTurnHook,
@@ -37,6 +33,21 @@ export type {
   GomokuTableSummary,
   GomokuSnapshot,
 } from "./services/gomoku-service.js";
+export { DoudizhuService } from "./services/doudizhu-service.js";
+export type {
+  DoudizhuTableStatus,
+  DoudizhuTableSummary,
+} from "./services/doudizhu-service.js";
+export { ZhaJinHuaService } from "./services/zhajinhua-service.js";
+export type { ZjhTableStatus as ZhaJinHuaTableStatus, ZjhTableSummary as ZhaJinHuaTableSummary } from "./services/zhajinhua-service.js";
+export { BlackjackService } from "./services/blackjack-service.js";
+export { GameCenterCoordinator } from "./services/game-center-coordinator.js";
+export {
+  humanSessionId,
+  botSessionId,
+  isHumanGameSession,
+  GAME_CENTER_DEFAULT_STAKE,
+} from "./services/game-center-session.js";
 export { SocialFeedService } from "./services/social-feed-service.js";
 export type { SocialCommentRow, SocialMediaType, SocialPostRow, SocialReportRow } from "./services/social-feed-service.js";
 export {
@@ -51,14 +62,15 @@ export { restorePurchasedSkillsFromWorldState } from "./services/world-skill-res
 export { skillMarketListingsForSession } from "./services/world-skill-listings.js";
 export { registerWorldRoutes } from "./routes/world.js";
 export { registerWorldFreeMarketRoutes } from "./routes/world-free-market.js";
+export { registerWorldGomokuRoutes } from "./routes/world-gomoku.js";
 export { registerWorldDoudizhuRoutes } from "./routes/world-doudizhu.js";
 export { registerWorldZhajinhuaRoutes } from "./routes/world-zhajinhua.js";
-export { registerWorldGomokuRoutes } from "./routes/world-gomoku.js";
+export { registerGameCenterRoutes } from "./routes/game-center.js";
 export { registerWorldSocialRoutes } from "./routes/world-social.js";
 export { registerWorldFreeMarketTools } from "./tools/world-free-market-tools.js";
+export { registerWorldGomokuTools } from "./tools/world-gomoku-tools.js";
 export { registerWorldDoudizhuTools } from "./tools/world-doudizhu-tools.js";
 export { registerWorldZhajinhuaTools } from "./tools/world-zhajinhua-tools.js";
-export { registerWorldGomokuTools } from "./tools/world-gomoku-tools.js";
 export { registerWorldSocialTools } from "./tools/world-social-tools.js";
 export { registerWorldOpenRegistryTools } from "./tools/world-open-registry-tools.js";
 export { registerWorldRoomTools } from "./tools/world-room-tools.js";
@@ -66,9 +78,7 @@ export { replyIfWorldRegistrationRequired } from "./config/world-registration-ga
 export { allowAgentWorldPlaceholderRegister } from "./config/world-register-placeholder.js";
 export { allowWorldHttpMutations, replyIfWorldHttpMutationsForbidden } from "./config/world-http-mutations.js";
 export {
-  buildDoudizhuTableUrl,
   buildGomokuTableUrl,
-  buildZhajinhuaTableUrl,
   getAgentWorldPublicOrigin,
 } from "./config/world-game-url.js";
 export { registerStandaloneWebUi as registerAgentWorldWebUi } from "./standalone/web-ui.js";
@@ -95,13 +105,11 @@ export type { PartitionPairingLike, WsSendLike } from "./services/world-partitio
 export {
   AGENT_WORLD_CHAT_TOOLS,
   AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX,
-  DOUDIZHU_CHAT_TOOLS,
-  DOUDIZHU_TOOL_SYSTEM_SUFFIX,
   GOMOKU_CHAT_TOOLS,
   USER_AGENT_TOOL_SYSTEM_SUFFIX,
   USER_FACING_AGENT_WORLD_CHAT_TOOLS,
   WORLD_FREE_MARKET_USER_CHAT_TOOLS,
-} from "./doudizhu-chat-tools.js";
+} from "./agent-world-chat-tools.js";
 export * from "./schemas.js";
 export type {
   AuditServiceLike,

@@ -116,6 +116,8 @@ export type ChatToolExecutionContext = {
     name: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
+  /** 工具轮次中模型流式输出的口语化进度（不写入最终正文流） */
+  onAgentStatusLine?: (line: string) => void;
   onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
   onToolExecuted?: (info: ToolExecutedInfo) => void;
 };
@@ -135,7 +137,7 @@ export interface ExternalChatProvider {
   /**
    * 流式生成回复；`onDelta` 为增量文本（UTF-16 字符串片段，与常见 SDK 一致）。
    * 实现需自行按 `sessionId` 维护多轮上下文（若支持）。
-   * `tools` 传入时启用 world.doudizhu.* 等 function calling（OpenAI 兼容端点）。
+   * `tools` 传入时启用 world.gomoku.* 等 function calling（OpenAI 兼容端点）。
    */
   streamCompletion(
     sessionId: string,

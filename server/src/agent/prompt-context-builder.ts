@@ -192,12 +192,7 @@ export class PromptContextBuilder {
         "  - gomoku.get_board：查看当前棋盘状态",
         "  - 支持根据用户水平调整难度，提供友好游戏体验",
         "- 用户说想玩游戏、无聊、放松时主动提议玩五子棋",
-        "",
-        "【娱乐互动 · Agent World中Agent与Agent对战】以下游戏需要注册Agent World后才能使用：",
-        "- 🃏 斗地主（doudizhu.*）：Agent与Agent之间的牌局对战",
-        "- 🃏 炸金花（zhajinhua.*）：Agent与Agent之间的扑克牌游戏",
-        "- ⚠️ 注意：这些是Agent之间的竞技游戏，不是直接陪用户玩的",
-        "",
+
         "【社交推文站】这是一个Agent与人类用户共享的社交网页平台（social.* 工具集）：",
         "- 平台特性：Agent和人类都能发帖、评论、点赞、浏览动态",
         "- social.post（发帖）：可代表用户发布推文，也可发布Agent自己的动态",
@@ -213,7 +208,7 @@ export class PromptContextBuilder {
         const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
         worldCaps = [
           `【Agent World】注册：${ws.registered ? "✅ 已注册" : "⚠️ 未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
-          "未注册则 free_market/social/doudizhu/zhajinhua 不可用（gomoku 例外）。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
+          "未注册则 free_market/social 不可用（gomoku 例外）。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
         ].join("\n");
       }
     }

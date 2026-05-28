@@ -13,14 +13,15 @@ export function isDesktopBridgeEnvOn(env: NodeJS.ProcessEnv = process.env): bool
 }
 
 /** 本机 Python 执行 或 电脑桥接（手机经服务端调度到已绑定 PC）任一方可用时，向模型暴露工具。 */
-export function isDesktopVisualControlChatToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const local = parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED);
-  return local || isDesktopBridgeEnvOn(env);
+function isLocalVisualEnabled(env: NodeJS.ProcessEnv): boolean {
+  return (
+    parseBooleanEnv(env.DESKTOP_VISUAL_ENABLED) ||
+    parseBooleanEnv(env.DESKTOP_VISUAL_AGENT_ENABLED)
+  );
 }
 
-/** @deprecated 使用 {@link isDesktopVisualControlChatToolsEnabled} */
-export function isDesktopVisualAgentChatToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return isDesktopVisualControlChatToolsEnabled(env);
+export function isDesktopVisualControlChatToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isLocalVisualEnabled(env) || isDesktopBridgeEnvOn(env);
 }
 
 const DESKTOP_VISUAL_RUN_TASK_TOOL: ChatCompletionTool = {
@@ -28,7 +29,7 @@ const DESKTOP_VISUAL_RUN_TASK_TOOL: ChatCompletionTool = {
   function: {
     name: "desktop.visual.run_task",
     description:
-      "【桌面·纯视觉】在已用**同一 userId** 在线桥接的**个人电脑**上截屏并由多模态模型驱动键鼠完成 GUI 任务（默认无需配对码；可选 DESKTOP_BRIDGE_TOKEN 作额外校验）。若电脑未在线且服务端启用了 DESKTOP_VISUAL_AGENT_ENABLED，则在**服务器本机**执行。须用户明确授权；电脑端运行桥接进程并保持连接。",
+      "【桌面·纯视觉】在已用**同一 userId** 在线桥接的**个人电脑**上截屏并由多模态模型驱动键鼠完成 GUI 任务（默认无需配对码；可选 DESKTOP_BRIDGE_TOKEN 作额外校验）。若电脑未在线且服务端启用了 DESKTOP_VISUAL_ENABLED，则在**服务器本机**执行。须用户明确授权；电脑端运行桥接进程并保持连接。",
     parameters: {
       type: "object",
       properties: {
@@ -60,7 +61,7 @@ const DESKTOP_VISUAL_SCREENSHOT_TOOL: ChatCompletionTool = {
   function: {
     name: "desktop.visual.screenshot",
     description:
-      "【桌面·截图】截取电脑屏幕（或指定区域）并返回 PNG 图片。可用于查看当前屏幕内容、获取界面信息、记录屏幕状态等场景。需要 DESKTOP_VISUAL_AGENT_ENABLED=1 或电脑桥接在线。",
+      "【桌面·截图】截取电脑屏幕（或指定区域）并返回 PNG 图片。可用于查看当前屏幕内容、获取界面信息、记录屏幕状态等场景。需要 DESKTOP_VISUAL_ENABLED=1 或电脑桥接在线。",
     parameters: {
       type: "object",
       properties: {

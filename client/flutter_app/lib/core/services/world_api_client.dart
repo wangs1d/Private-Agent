@@ -80,74 +80,6 @@ class WorldApiClient {
     return _decode(r);
   }
 
-  /// 斗地主大厅：牌桌列表（可选带上 sessionId 以标记进入斗地主场景）。
-  Future<Map<String, dynamic>> doudizhuListTables({String? sessionId}) async {
-    final Map<String, String> q = <String, String>{};
-    if (sessionId != null && sessionId.isNotEmpty) {
-      q["sessionId"] = sessionId;
-    }
-    final http.Response r = await http.get(_uri("/world/doudizhu/tables", q.isEmpty ? null : q));
-    return _decode(r);
-  }
-
-  Future<Map<String, dynamic>> doudizhuCreateTable(String sessionId, int stake) async {
-    final http.Response r = await http.post(
-      _uri("/world/doudizhu/tables"),
-      headers: <String, String>{"Content-Type": "application/json"},
-      body: jsonEncode(<String, dynamic>{"sessionId": sessionId, "stake": stake}),
-    );
-    return _decode(r);
-  }
-
-  /// [role]：`player`（选手席）或 `spectator`（观战席）。
-  Future<Map<String, dynamic>> doudizhuJoin(String sessionId, String tableId, String role) async {
-    final http.Response r = await http.post(
-      _uri("/world/doudizhu/join"),
-      headers: <String, String>{"Content-Type": "application/json"},
-      body: jsonEncode(<String, dynamic>{
-        "sessionId": sessionId,
-        "tableId": tableId,
-        "role": role,
-      }),
-    );
-    return _decode(r);
-  }
-
-  Future<Map<String, dynamic>> doudizhuLeave(String sessionId, String tableId) async {
-    final http.Response r = await http.post(
-      _uri("/world/doudizhu/leave"),
-      headers: <String, String>{"Content-Type": "application/json"},
-      body: jsonEncode(<String, dynamic>{"sessionId": sessionId, "tableId": tableId}),
-    );
-    return _decode(r);
-  }
-
-  Future<Map<String, dynamic>> doudizhuSnapshot(String sessionId, String tableId) async {
-    final http.Response r = await http.get(
-      _uri("/world/doudizhu/table/$tableId", <String, String>{"sessionId": sessionId}),
-    );
-    return _decode(r);
-  }
-
-  // --- 炸金花（观战端常用：列表 + 单桌快照；开桌/操作由 Agent 工具完成）---
-
-  /// 炸金花大厅：牌桌列表（可选 sessionId 会标为进入炸金花场景）。
-  Future<Map<String, dynamic>> zhajinhuaListTables({String? sessionId}) async {
-    final Map<String, String> q = <String, String>{};
-    if (sessionId != null && sessionId.isNotEmpty) {
-      q["sessionId"] = sessionId;
-    }
-    final http.Response r = await http.get(_uri("/world/zhajinhua/tables", q.isEmpty ? null : q));
-    return _decode(r);
-  }
-
-  Future<Map<String, dynamic>> zhajinhuaSnapshot(String sessionId, String tableId) async {
-    final http.Response r = await http.get(
-      _uri("/world/zhajinhua/table/$tableId", <String, String>{"sessionId": sessionId}),
-    );
-    return _decode(r);
-  }
-
   // --- 五子棋（用户与 Agent 对战，非 Agent World 观战）---
 
   Future<Map<String, dynamic>> gomokuJoin(String sessionId, String tableId, String role) async {
@@ -196,6 +128,193 @@ class WorldApiClient {
       _uri("/world/gomoku/table/$tableId", <String, String>{"sessionId": sessionId}),
     );
     return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gomokuCreateTable(
+    String sessionId, {
+    String userColor = "random",
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/world/gomoku/tables"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "sessionId": sessionId,
+        "userColor": userColor,
+      }),
+    );
+    return _decode(r);
+  }
+
+  // --- 游戏中心（用户 vs Agent，与 Agent World 观战分离）---
+
+  Future<Map<String, dynamic>> gameCenterStartGomoku(
+    String agentSessionId, {
+    String userColor = "random",
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/gomoku/start"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "agentSessionId": agentSessionId,
+        "userColor": userColor,
+      }),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterStartZhajinhua(
+    String agentSessionId, {
+    int stake = 50,
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/zhajinhua/start"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"agentSessionId": agentSessionId, "stake": stake}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterZhajinhuaAct(
+    String tableId,
+    String sessionId,
+    String action,
+  ) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/zhajinhua/table/$tableId/act"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId, "action": action}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterZhajinhuaSnapshot(
+    String tableId,
+    String sessionId,
+  ) async {
+    final http.Response r = await http.get(
+      _uri("/game-center/zhajinhua/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterStartDoudizhu(
+    String agentSessionId, {
+    int stake = 50,
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/doudizhu/start"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"agentSessionId": agentSessionId, "stake": stake}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterDoudizhuPlay(
+    String tableId,
+    String sessionId, {
+    required String action,
+    List<String>? cards,
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/doudizhu/table/$tableId/play"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "sessionId": sessionId,
+        "action": action,
+        if (cards != null) "cards": cards,
+      }),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterDoudizhuSnapshot(
+    String tableId,
+    String sessionId,
+  ) async {
+    final http.Response r = await http.get(
+      _uri("/game-center/doudizhu/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterStartBlackjack(
+    String agentSessionId, {
+    int stake = 50,
+  }) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/blackjack/start"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"agentSessionId": agentSessionId, "stake": stake}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterBlackjackHit(String tableId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/blackjack/table/$tableId/hit"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterBlackjackStand(String tableId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/game-center/blackjack/table/$tableId/stand"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> gameCenterBlackjackSnapshot(
+    String tableId,
+    String sessionId,
+  ) async {
+    final http.Response r = await http.get(
+      _uri("/game-center/blackjack/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> zhajinhuaListTables() async {
+    final http.Response r = await http.get(_uri("/world/zhajinhua/tables"));
+    return _normalizeGameListResponse(_decode(r));
+  }
+
+  Future<Map<String, dynamic>> zhajinhuaSnapshot(String sessionId, String tableId) async {
+    final http.Response r = await http.get(
+      _uri("/world/zhajinhua/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _normalizeGameSnapshotResponse(_decode(r));
+  }
+
+  Future<Map<String, dynamic>> doudizhuListTables() async {
+    final http.Response r = await http.get(_uri("/world/doudizhu/tables"));
+    return _normalizeGameListResponse(_decode(r));
+  }
+
+  Future<Map<String, dynamic>> doudizhuSnapshot(String sessionId, String tableId) async {
+    final http.Response r = await http.get(
+      _uri("/world/doudizhu/table/$tableId", <String, String>{"sessionId": sessionId}),
+    );
+    return _normalizeGameSnapshotResponse(_decode(r));
+  }
+
+  Map<String, dynamic> _normalizeGameListResponse(Map<String, dynamic> data) {
+    if (data["ok"] == true) return data;
+    return <String, dynamic>{
+      "ok": true,
+      "tables": data["tables"] ?? <dynamic>[],
+    };
+  }
+
+  Map<String, dynamic> _normalizeGameSnapshotResponse(Map<String, dynamic> data) {
+    if (data["ok"] == true) return data;
+    if (data.containsKey("snapshot")) {
+      return <String, dynamic>{"ok": true, "snapshot": data["snapshot"]};
+    }
+    return <String, dynamic>{"ok": true, "snapshot": data};
   }
 
   /// Agent 互动动态时间线（`GET /world/social/feed`）；带 sessionId 时自家 Agent 帖子优先排序。

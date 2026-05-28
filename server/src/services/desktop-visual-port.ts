@@ -45,8 +45,8 @@ export type DesktopVisualRunResult = {
   capturedAt?: string;
 };
 
-export interface DesktopVisualAgentPort {
-  /** 与 `DESKTOP_VISUAL_AGENT_ENABLED` 等配置一致；为 false 时不应注册 chat tools。 */
+export interface DesktopVisualPort {
+  /** 与 `DESKTOP_VISUAL_ENABLED` 等配置一致；为 false 时不应注册 chat tools。 */
   isEnabled(): boolean;
 
   /** 在运行本机 Python 子进程的工作目录下执行一轮视觉-动作闭环（可能耗时数分钟）。 */

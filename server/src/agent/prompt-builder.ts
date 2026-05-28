@@ -24,6 +24,7 @@ const WEB_SEARCH_SYSTEM_SUFFIX =
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  */
 export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
+export const LIVE_USER_STATUS_MARKER = "【用户可见进度】";
 export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复风格】";
 
 const CONCISE_REPLY_SYSTEM_SUFFIX = `
@@ -34,6 +35,10 @@ const CONCISE_REPLY_SYSTEM_SUFFIX = `
 - 列表/步骤仅在确实有多项时用；简单问答通常 1～3 句即可。
 - 用户明确要求详尽说明时再展开。
 - 禁止在回复中暴露任何内部技术细节：不输出 taskId、jobId、记录 ID、编号、API 路径、工具调用过程等用户无感知的信息。例如创建日程/提醒/任务后，只说「已为你创建」即可，不要返回 ID 或编号。`;
+
+const LIVE_USER_STATUS_SUFFIX = `
+
+【用户可见进度】你在调用任何工具之前，必须先输出 1～2 句口语化短话，让用户知道你在做什么（可幽默、可拟人）；该句会作为实时进度展示，不是最终答复。禁止只用固定套话、禁止只写工具名。委派子 Agent 时除口头语外，还须填写 master_invoke_sub_agent 的 userStatusLine（与口头语一致即可）。`;
 
 const MASTER_SUBAGENT_DELEGATE_SUFFIX = `
 
@@ -88,6 +93,9 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   }
   if (!out.includes(WEB_SEARCH_SYSTEM_SUFFIX_MARKER)) {
     out += WEB_SEARCH_SYSTEM_SUFFIX;
+  }
+  if (!out.includes(LIVE_USER_STATUS_MARKER)) {
+    out += LIVE_USER_STATUS_SUFFIX;
   }
   return out;
 }

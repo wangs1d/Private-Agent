@@ -88,7 +88,7 @@ function chatToolRegistryName(tool: ChatCompletionTool): string | undefined {
 
 export function sandboxDeniedToolMessage(toolName: string): string {
   if (isDesktopBridgeToolName(toolName)) {
-    return `无法调用「${toolName}」：电脑桥接未在线。请在本机运行 desktop-visual-agent 桥接（userId 与手机一致），并保持连接。`;
+    return `无法调用「${toolName}」：电脑桥接未在线。请在本机运行 desktop-visual 桥接（userId 与手机一致），并保持连接。`;
   }
   return `当前为沙箱模式，无法调用「${toolName}」。请在对话输入框开启「完全访问」或在电脑上运行桥接后再试。`;
 }

@@ -125,29 +125,6 @@ class _PlazaPageState extends State<PlazaPage> {
           const SizedBox(height: 20),
           Text("牌类游戏（观战）", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.style_outlined),
-              title: const Text("斗地主馆"),
-              subtitle: const Text("列表与快照仅供查看；操作请通过「会话」让 Agent 执行"),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () {
-                Navigator.of(context).pushNamed("/doudizhu");
-              },
-            ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.filter_3_outlined),
-              title: const Text("炸金花馆"),
-              subtitle: const Text("3–6 人底注房；开桌、开局与弃牌/跟注由 Agent 执行"),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () {
-                Navigator.of(context).pushNamed("/zhajinhua");
-              },
-            ),
-          ),
         ],
       ),
     );

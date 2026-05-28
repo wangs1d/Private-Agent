@@ -78,6 +78,8 @@ export type OrchestrateTaskOptions = {
   onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
   onToolExecuted?: (info: ToolExecutedInfo) => void;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
+  /** 主 Agent 流式口语化进度（工具轮次，由模型实时生成） */
+  onAgentStatusLine?: (line: string) => void;
   agentAccessMode?: import("../agent/agent-access-mode.js").AgentAccessMode;
   desktopBridgeOnline?: boolean;
 };
@@ -173,9 +175,13 @@ export class MasterAgentCoordinator {
   }
 
   private registerDelegateTools(): void {
-    this.toolRegistry.register("master.invoke_sub_agent", async (input, context) =>
-      this.handleInvokeSubAgentTool(input, context),
-    );
+    this.toolRegistry.register("master.invoke_sub_agent", async (input, context) => {
+      const out = await this.handleInvokeSubAgentTool(input, context);
+      if (out.ok === false) {
+        throw new Error(String(out.error ?? "子 Agent 委派失败"));
+      }
+      return out;
+    });
     this.toolRegistry.register("master.list_sub_agents", async (_input, context) =>
       this.handleListSubAgentsTool(context),
     );
@@ -914,7 +920,9 @@ export class MasterAgentCoordinator {
           this.metrics.sequentialExecutions += 1;
           this.recordSubAgentMetrics(agentType, true, executionTime, false);
 
-          const uiDoneLine = pickSubAgentDoneLine(report);
+          const uiDoneLine =
+            pickSubAgentDoneLine(report) ??
+            `${capability.name}已交差，正在汇总结果…`;
           return {
             ok: true,
             agentType,
@@ -923,7 +931,7 @@ export class MasterAgentCoordinator {
             report,
             ...(attempt > 0 ? { retryAttempt: attempt } : {}),
             priorInvocationsInTurn: turnState.reports.length,
-            ...(uiDoneLine ? { uiDoneLine } : {}),
+            uiDoneLine,
             message: `${capability.name} completed${attempt > 0 ? ` (retry #${attempt})` : ""}; read the report field.`,
           };
         } catch (error) {
@@ -1056,7 +1064,7 @@ export class MasterAgentCoordinator {
   async orchestrateTask(
     actorId: string,
     userMessage: string,
-    onProgress?: (message: string) => void,
+    onAgentStatusLine?: (line: string) => void,
     onAssistantDelta?: (delta: string) => void,
     opts?: OrchestrateTaskOptions,
   ): Promise<string> {
@@ -1070,29 +1078,51 @@ export class MasterAgentCoordinator {
         clientIp: opts?.clientIp,
         clientLocation: opts?.clientLocation,
       }));
-    const enrichedOpts: OrchestrateTaskOptions = { ...opts, userLocation };
+    const enrichedOpts: OrchestrateTaskOptions = {
+      ...opts,
+      userLocation,
+      onAgentStatusLine: opts?.onAgentStatusLine ?? onAgentStatusLine,
+    };
 
     this.currentTurnUserMessage = userMessage;
     this.currentTurnOrchestrateOpts = enrichedOpts;
     this.resetTurnReports(actorId, enrichedOpts.chatUserMessageId);
 
+    let assistantResult = "";
     try {
       const route = routeLlmExecution(userMessage);
       this.log("Route selected", { taskId, mode: route.mode, reasons: route.reasons });
 
-      if (!this.config.enableSubAgents || route.mode === "master_only") {
+      const useDelegatePrompt =
+        this.config.enableSubAgents && route.mode === "master_delegate";
+
+      if (!useDelegatePrompt) {
         if (!this.config.enableSubAgents) {
-          onProgress?.("🔄 切换至单 Agent 模式处理…");
           this.metrics.fallbackCount += 1;
-        } else {
-          onProgress?.("💭 让我想想…这事儿我直接搞定！");
         }
-        return await this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta, enrichedOpts);
+        assistantResult = await this.executeMasterTurn(
+          actorId,
+          userMessage,
+          onAssistantDelta,
+          enrichedOpts,
+          false,
+        );
+        return assistantResult;
       }
 
-      onProgress?.("🧠 让我盘一盘，看看要不要摇个专业队友来帮忙…");
-      return await this.executeWithMasterDelegateTools(actorId, userMessage, onAssistantDelta, enrichedOpts);
+      assistantResult = await this.executeMasterTurn(
+        actorId,
+        userMessage,
+        onAssistantDelta,
+        enrichedOpts,
+        true,
+      );
+      return assistantResult;
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      this.log("Orchestration failed, evaluating fallback", { taskId, error: errMsg });
+      console.error("[MasterAgentCoordinator] delegate path failed:", error);
+
       this.executionHistory.push({
         timestamp: new Date().toISOString(),
         taskId,
@@ -1105,14 +1135,20 @@ export class MasterAgentCoordinator {
 
       if (this.config.allowFallback) {
         this.metrics.fallbackCount += 1;
-        onProgress?.("⚠️ 委派异常，切换至单 Agent 模式继续处理…");
-        return await this.executeWithMasterOnly(actorId, userMessage, onAssistantDelta, enrichedOpts);
+        assistantResult = await this.executeMasterTurn(
+          actorId,
+          userMessage,
+          onAssistantDelta,
+          enrichedOpts,
+          false,
+        );
+        return assistantResult;
       }
       throw error;
     } finally {
       const memoryManager = getMemoryManagerService();
       if (memoryManager) {
-        memoryManager.onTurnCompleted(actorId, userMessage, "");
+        memoryManager.onTurnCompleted(actorId, userMessage, assistantResult);
       }
       this.currentTurnUserMessage = null;
       this.currentTurnOrchestrateOpts = null;
@@ -1145,6 +1181,7 @@ export class MasterAgentCoordinator {
         }),
       onToolExecuteStart: opts?.onToolExecuteStart,
       onToolExecuted: opts?.onToolExecuted,
+      onAgentStatusLine: opts?.onAgentStatusLine,
     };
   }
 
@@ -1167,48 +1204,57 @@ export class MasterAgentCoordinator {
     };
   }
 
-  private buildMasterDelegateStreamOptions(actorId: string, opts?: OrchestrateTaskOptions): AgentStreamOptions {
-    const access = this.streamAccessFromOpts(opts);
-    if (!this.promptContextBuilder) {
-      return {
-        masterSubAgentDelegate: true,
-        chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values()),
-        ...access,
-      };
-    }
-    return {
-      ...this.promptContextBuilder.buildForMasterDelegate({
-        ...this.buildPromptInput(actorId, opts),
-        subAgentCapabilities: this.subAgentCapabilities.values(),
-      }),
-      ...access,
-    };
+  private listSubAgentCapabilities(): SubAgentCapability[] {
+    return [...this.subAgentCapabilities.values()];
   }
 
-  private buildMasterStreamOptions(actorId: string, opts?: OrchestrateTaskOptions): AgentStreamOptions | undefined {
+  private buildMasterStreamOptions(
+    actorId: string,
+    opts?: OrchestrateTaskOptions,
+    delegatePrompt = false,
+  ): AgentStreamOptions {
     const access = this.streamAccessFromOpts(opts);
-    const chatToolsExtra: ChatCompletionTool[] = [];
+    const perf: AgentStreamOptions = {
+      ...access,
+      disableThinking: true,
+    };
+    const capabilities = this.listSubAgentCapabilities();
+
     if (this.promptContextBuilder) {
+      if (delegatePrompt) {
+        return {
+          ...this.promptContextBuilder.buildForMasterDelegate({
+            ...this.buildPromptInput(actorId, opts),
+            subAgentCapabilities: capabilities,
+          }),
+          ...perf,
+        };
+      }
       const base = this.promptContextBuilder.build(this.buildPromptInput(actorId, opts));
-      if (base?.chatToolsExtra?.length) chatToolsExtra.push(...base.chatToolsExtra);
+      const chatToolsExtra: ChatCompletionTool[] = base?.chatToolsExtra?.length
+        ? [...base.chatToolsExtra]
+        : [];
       return {
         ...(base ?? {}),
-        chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values(), chatToolsExtra),
+        chatToolsBuiltin: buildMasterAgentChatTools(capabilities, chatToolsExtra),
         chatToolsExtra: [],
-        ...access,
+        ...perf,
       };
     }
+
     return {
-      chatToolsBuiltin: buildMasterAgentChatTools(this.subAgentCapabilities.values(), chatToolsExtra),
-      ...access,
+      ...(delegatePrompt ? { masterSubAgentDelegate: true } : {}),
+      chatToolsBuiltin: buildMasterAgentChatTools(capabilities),
+      ...perf,
     };
   }
 
-  private async executeWithMasterDelegateTools(
+  private async executeMasterTurn(
     actorId: string,
     userMessage: string,
     onAssistantDelta?: (delta: string) => void,
     opts?: OrchestrateTaskOptions,
+    delegatePrompt = false,
   ): Promise<string> {
     const sessionId = masterChatSessionId(actorId);
     let fullText = "";
@@ -1220,31 +1266,12 @@ export class MasterAgentCoordinator {
         onAssistantDelta?.(delta);
       },
       this.buildToolContext(actorId, opts),
-      this.buildMasterDelegateStreamOptions(actorId, opts),
+      this.buildMasterStreamOptions(actorId, opts, delegatePrompt),
     );
-    this.recordSuccess("master-delegate-tools", this.getTurnDelegationState(actorId, opts?.chatUserMessageId).reports.length);
-    return fullText;
-  }
-
-  private async executeWithMasterOnly(
-    actorId: string,
-    userMessage: string,
-    onAssistantDelta?: (delta: string) => void,
-    opts?: OrchestrateTaskOptions,
-  ): Promise<string> {
-    const sessionId = masterChatSessionId(actorId);
-    let fullText = "";
-    await this.masterProvider.streamCompletion(
-      sessionId,
-      this.buildUserTurn(userMessage, opts),
-      (delta) => {
-        fullText += delta;
-        onAssistantDelta?.(delta);
-      },
-      this.buildToolContext(actorId, opts),
-      this.buildMasterStreamOptions(actorId, opts),
-    );
-    this.recordSuccess("master-only", 0);
+    const subTaskCount = delegatePrompt
+      ? this.getTurnDelegationState(actorId, opts?.chatUserMessageId).reports.length
+      : 0;
+    this.recordSuccess(delegatePrompt ? "master-delegate-tools" : "master-only", subTaskCount);
     return fullText;
   }
 
@@ -1267,6 +1294,7 @@ export class MasterAgentCoordinator {
       }) ?? {}),
       agentAccessMode: accessMode,
       desktopBridgeOnline: bridgeCtx.desktopBridgeOnline,
+      disableThinking: true,
     };
 
     const allowedList =
@@ -1314,13 +1342,17 @@ export class MasterAgentCoordinator {
 
     const sessionId = `subagent-${actorId}-${task.id}-${Date.now()}`;
     let fullText = "";
+    const subAgentToolCtx = this.buildToolContext(actorId, this.currentTurnOrchestrateOpts ?? undefined);
+    // 子 Agent 内部的 search_web 等工具不应覆盖主会话的委派进度 UI。
+    subAgentToolCtx.onToolExecuteStart = undefined;
+    subAgentToolCtx.onToolExecuted = undefined;
     await this.masterProvider.streamCompletion(
       sessionId,
       { text: prompt },
       (delta) => {
         fullText += delta;
       },
-      this.buildToolContext(actorId, this.currentTurnOrchestrateOpts ?? undefined),
+      subAgentToolCtx,
       baseStreamOpts,
     );
     return fullText.trim();

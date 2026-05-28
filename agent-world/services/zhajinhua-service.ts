@@ -11,6 +11,10 @@ import {
   type ZjhHandEval,
 } from "./zhajinhua/zhajinhua-engine.js";
 import { getStateEventManager } from "../deps/state/index.js";
+import { pickZjhBotAction } from "./game-center-bot.js";
+import { isHumanGameSession } from "./game-center-session.js";
+
+const MAX_BOT_TURN_STEPS = 48;
 
 export const ZJH_MIN_PLAYERS = 3;
 export const ZJH_MAX_SEATS = 6;
@@ -330,6 +334,26 @@ export class ZhaJinHuaService {
     const t = this.tables.get(tableId);
     if (!t) return { ok: false, reason: "桌台不存在" };
     return { ok: true, snapshot: this.buildSnapshot(t, sessionId) };
+  }
+
+  /** 游戏中心：自动推进 Bot / 子 Agent 座位回合。 */
+  advanceBotTurns(tableId: string, viewerSessionId: string): unknown {
+    for (let step = 0; step < MAX_BOT_TURN_STEPS; step += 1) {
+      const t = this.tables.get(tableId);
+      if (!t || t.status !== "playing" || t.turnSeat === null) break;
+      const seat = t.turnSeat;
+      const sid = t.seats[seat];
+      if (!sid || isHumanGameSession(sid)) break;
+      const action = pickZjhBotAction(t, seat);
+      const r = this.act(tableId, sid, action);
+      if (!r.ok) break;
+      if ((r.snapshot as Record<string, unknown>).status === "finished") {
+        return r.snapshot;
+      }
+    }
+    const t = this.tables.get(tableId);
+    if (!t) return null;
+    return this.buildSnapshot(t, viewerSessionId);
   }
 
   private finishLastStanding(t: Table): void {

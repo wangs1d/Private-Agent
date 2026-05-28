@@ -13,6 +13,13 @@ export const visionFrameWireSchema = z.object({
   capturedAt: z.string().max(64).optional(),
 });
 
+/** WebSocket `chat.agent_processing_ui`：与客户端「处理中」气泡/状态同步 */
+export const agentProcessingUiSchema = z.object({
+  sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
+  active: z.boolean(),
+});
+
 export const userMessageSchema = z
   .object({
     /** 兼容旧客户端；与 `userId` 同时存在时以 `userId` 为稳定用户标识 */
@@ -55,12 +62,6 @@ export const walletRequestSchema = z.object({
 
 /** Agent World HTTP/WS 校验：实现位于根目录包 `agent-world/schemas.ts` */
 export {
-  worldDoudizhuCreateBodySchema,
-  worldDoudizhuJoinBodySchema,
-  worldDoudizhuLeaveBodySchema,
-  worldDoudizhuListQuerySchema,
-  worldDoudizhuTableQuerySchema,
-  worldDoudizhuWsTableSchema,
   worldLeisureBodySchema,
   worldMarketContractCreateBodySchema,
   worldMarketContractDeliverBodySchema,

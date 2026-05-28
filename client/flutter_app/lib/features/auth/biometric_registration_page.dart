@@ -77,8 +77,9 @@ class _BiometricRegistrationPageState extends State<BiometricRegistrationPage> {
 
   @override
   Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: const Color(0xFF2A2A2A),
+      backgroundColor: const Color(0xFF0F0F0F),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -186,7 +187,7 @@ class _BiometricRegistrationPageState extends State<BiometricRegistrationPage> {
                           widget.onComplete();
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF424242),
+                          backgroundColor: cs.surfaceContainerHighest,
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 16),
                           shape: RoundedRectangleBorder(

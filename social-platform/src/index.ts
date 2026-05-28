@@ -2,9 +2,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { AuthService } from './services/auth-service.js';
 import { SocialService } from './services/social-service.js';
-import { BiometricService } from './services/biometric-service.js';
 import { registerRoutes } from './routes/api-routes.js';
 import { registerWebSocket } from './routes/websocket-routes.js';
 import { registerSocialWebUi } from './routes/web-ui.js';
@@ -24,17 +22,13 @@ async function start() {
   await app.register(websocket);
 
   // Initialize services
-  const authService = new AuthService();
   const socialService = new SocialService();
-  const biometricService = new BiometricService();
 
-  await authService.load();
   await socialService.load();
-  await biometricService.load();
 
   // Register routes
-  registerRoutes(app, authService, socialService, biometricService);
-  registerWebSocket(app, authService, socialService);
+  registerRoutes(app, socialService);
+  registerWebSocket(app, socialService);
   registerSocialWebUi(app);
 
   // Start server

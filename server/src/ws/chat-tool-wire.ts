@@ -1,7 +1,9 @@
 import {
   buildDelegateDonePayload,
   buildDelegateStartPayload,
+  buildLiveAgentStatusPayload,
   isMasterInvokeSubAgentTool,
+  pickToolUserStatusLine,
   type DelegateStatusPayload,
 } from "../agent/delegate-status.js";
 import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
@@ -35,6 +37,7 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
 }
 
 export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecuteStartInfo): void {
+  const userStatusLine = pickToolUserStatusLine(info.input, info.assistantPreamble);
   ctx.send(
     JSON.stringify({
       type: ServerEventType.ToolCall,
@@ -43,11 +46,17 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
         input: info.input,
         traceId: ctx.traceId,
         assistantPreamble: info.assistantPreamble,
+        ...(userStatusLine ? { userStatusLine } : {}),
       },
     }),
   );
 
-  if (!isMasterInvokeSubAgentTool(info.toolName)) return;
+  if (!isMasterInvokeSubAgentTool(info.toolName)) {
+    if (userStatusLine) {
+      sendAgentStatus(ctx, buildLiveAgentStatusPayload(userStatusLine, "tool_start", info.toolName));
+    }
+    return;
+  }
 
   const agentType = parseSubAgentType(info.input.agentType);
   const SUB_AGENT_LABELS: Record<string, string> = {
@@ -114,10 +123,15 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
   }
 
   if (!isMasterInvokeSubAgentTool(info.toolName) || !info.ok) return;
+  if (info.result.ok === false) return;
 
   const agentType = parseSubAgentType(info.result.agentType ?? info.input.agentType);
   const agentName = String(info.result.agentName ?? info.input.agentType ?? "助手").trim();
-  const line = String(info.result.uiDoneLine ?? "").trim();
+  const line =
+    String(info.result.uiDoneLine ?? "").trim() ||
+    (info.result.background === true
+      ? String(info.result.message ?? "助手已在后台处理，稍后会汇总结果…").trim()
+      : "");
   if (!agentType || !line) return;
 
   sendAgentStatus(ctx, buildDelegateDonePayload(line, agentName, agentType));

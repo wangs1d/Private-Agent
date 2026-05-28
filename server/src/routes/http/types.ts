@@ -14,6 +14,7 @@ import type { RealFundsWalletService } from "../../services/real-funds-wallet-se
 import type {
   A2aOutsourcingService,
   DoudizhuService,
+  GameCenterCoordinator,
   GomokuService,
   SkillMetadataValidatorLike,
   SocialFeedService,
@@ -37,9 +38,10 @@ export type HttpRouteDeps = {
   realFundsWallet: RealFundsWalletService;
   worldService: WorldService;
   a2aOutsourcingService: A2aOutsourcingService;
+  gomokuService: GomokuService;
   doudizhuService: DoudizhuService;
   zhaJinHuaService: ZhaJinHuaService;
-  gomokuService: GomokuService;
+  gameCenterCoordinator: GameCenterCoordinator;
   socialFeedService: SocialFeedService;
   agentRelayService: AgentRelayService;
   scheduleTaskService: ScheduleTaskService;

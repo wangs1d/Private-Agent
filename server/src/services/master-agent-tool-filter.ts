@@ -69,10 +69,6 @@ const MASTER_BASIC_TOOL_NAMES = new Set([
 const MASTER_GAME_TOOL_PREFIXES = [
   "gomoku.",
   "world.gomoku.",
-  "doudizhu.",
-  "world.doudizhu.",
-  "zhajinhua.",
-  "world.zhajinhua.",
 ];
 
 /**
@@ -80,7 +76,7 @@ const MASTER_GAME_TOOL_PREFIXES = [
  * 排除：life 专有 (wallet.write/desktop)
  *       tech 专有 (vision/self.write)
  *       creative 专有 (info.deep/shopping)
- * 保留：游戏 (gomoku/doudizhu/zhajinhua 系列 — 主 agent 直接陪玩)
+ * 保留：游戏 (gomoku 系列 — 主 agent 直接陪玩)
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   return tools.filter((t) => {

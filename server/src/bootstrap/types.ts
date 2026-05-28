@@ -18,11 +18,9 @@ import type { SkillMetadata } from "../skills/types.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type {
   A2aOutsourcingService,
-  DoudizhuService,
   SkillMetadataValidatorLike,
   SocialFeedService,
   WorldService,
-  ZhaJinHuaService,
 } from "@private-ai-agent/agent-world";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
@@ -52,8 +50,6 @@ export type AppServices = {
   agentCore: AgentCore;
   worldService: WorldService;
   a2aOutsourcingService: A2aOutsourcingService;
-  doudizhuService: DoudizhuService;
-  zhaJinHuaService: ZhaJinHuaService;
   socialFeedService: SocialFeedService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;

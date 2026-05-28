@@ -4,22 +4,25 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import {
   A2aOutsourcingService,
+  BlackjackService,
   DoudizhuService,
+  GameCenterCoordinator,
   GomokuService,
   loadPersistedCommunitySkills,
+  registerGameCenterRoutes,
   registerWorldDoudizhuTools,
   registerWorldGomokuTools,
   registerWorldFreeMarketTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
-  registerWorldZhajinhuaTools,
   registerWorldSocialTools,
+  registerWorldZhajinhuaTools,
   SocialFeedService,
+  ZhaJinHuaService,
   AgentWorldServerEventType,
   WorldPartitionWsRegistry,
   WorldService,
   type WorldRevisionEvent,
-  ZhaJinHuaService,
 } from "@private-ai-agent/agent-world";
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
@@ -41,6 +44,14 @@ import { initMemoryManagerService } from "../services/memory-manager-service.js"
 import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
+import {
+  initNightlyMemoryTaskService,
+  getNightlyMemoryTaskService,
+} from "../services/nightly-memory-task-service.js";
+import { 
+  initDailyChatSyncService,
+  getDailyChatSyncService,
+} from "../services/daily-chat-sync-service.js";
 import { compactObserveLine } from "../tokenjuice/compactor.js";
 import { TrajectoryPromotionPipeline, parseSkillPromotionPipelineMode } from "../services/skill-promotion-pipeline.js";
 import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
@@ -77,7 +88,7 @@ import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
-import { createDesktopVisualAgentFromEnv } from "../services/desktop-visual-agent-subprocess.js";
+import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
@@ -278,13 +289,21 @@ export async function createAppServices(): Promise<AppServices> {
   zhaJinHuaService.attachWebSocketRegistry(wsConnectionRegistry);
   const gomokuService = new GomokuService(worldService);
   gomokuService.attachWebSocketRegistry(wsConnectionRegistry);
+  const blackjackService = new BlackjackService(worldService);
+  const gameCenterCoordinator = new GameCenterCoordinator(
+    worldService,
+    gomokuService,
+    zhaJinHuaService,
+    doudizhuService,
+    blackjackService,
+  );
   const socialFeedService = new SocialFeedService(worldService);
   socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
   registerWorldOpenRegistryTools(toolRegistry, worldService);
   registerWorldRoomTools(toolRegistry, worldService);
+  registerWorldGomokuTools(toolRegistry, gomokuService);
   registerWorldDoudizhuTools(toolRegistry, doudizhuService);
   registerWorldZhajinhuaTools(toolRegistry, zhaJinHuaService);
-  registerWorldGomokuTools(toolRegistry, gomokuService);
   registerWorldSocialTools(toolRegistry, socialFeedService);
   registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
   toolRegistry.setWorldService(worldService);
@@ -295,6 +314,7 @@ export async function createAppServices(): Promise<AppServices> {
   const narrativeMemory = createNarrativeMemoryPort({
     agenticIngest: agenticMemoryRuntime?.ingest ?? null,
     agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
+    compressor: agenticMemoryRuntime?.compressor ?? null,
   });
 
   const dailyDigestService = getDailyDigestService();
@@ -304,6 +324,25 @@ export async function createAppServices(): Promise<AppServices> {
 
   initMemoryManagerService(narrativeMemory, agentMemorySyncService);
   const stmConfig = getShortTermMemoryConfig();
+  
+  const nightlyMemoryService = initNightlyMemoryTaskService({
+    timezone: stmConfig.digestTimezone,
+  });
+  if (nightlyMemoryService) {
+    const memoryManager = (await import("../services/memory-manager-service.js")).getMemoryManagerService();
+    nightlyMemoryService.setDependencies(memoryManager, dailyDigestService, agentMemorySyncService);
+    nightlyMemoryService.startScheduler();
+    app.log.info(
+      `[NightlyMemory] Night mode: ${nightlyMemoryService.isInNightMode() ? "🌙 ON" : "☀️ OFF"} (${stmConfig.digestTimezone})`,
+    );
+  }
+  
+  const chatSyncService = initDailyChatSyncService();
+  if (chatSyncService) {
+    chatSyncService.setDependencies(dailyDigestService, agentMemorySyncService);
+    app.log.info(`[DailyChatSync] Service initialized and ready`);
+  }
+  
   app.log.info(
     `[ShortTermMemory] mode=${stmConfig.mode}, wal=${stmConfig.walEnabled ? "on" : "off"}, digest=${stmConfig.digestEnabled ? "on" : "off"}, deferArchive=${stmConfig.deferTurnArchive ? "on" : "off"}, tz=${stmConfig.digestTimezone}`,
   );
@@ -461,7 +500,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   registerVisionTools(toolRegistry, visionPeriodicScheduler);
 
-  const desktopVisualAgent = createDesktopVisualAgentFromEnv();
+  const desktopVisual = createDesktopVisualFromEnv();
   const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
     onSync: (actorId, payload) => {
       wsConnectionRegistry.trySend(
@@ -471,7 +510,7 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
   registerDesktopVisualTools(toolRegistry, {
-    localAgent: desktopVisualAgent,
+    localVisual: desktopVisual,
     bridge: desktopBridgeCoordinator,
   });
   agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
@@ -495,6 +534,7 @@ export async function createAppServices(): Promise<AppServices> {
     doudizhuService,
     zhaJinHuaService,
     gomokuService,
+    gameCenterCoordinator,
     socialFeedService,
     agentRelayService,
     agentPairingService,
@@ -525,6 +565,7 @@ export async function createAppServices(): Promise<AppServices> {
     doudizhuService,
     zhaJinHuaService,
     gomokuService,
+    gameCenterCoordinator,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -552,10 +593,8 @@ export async function createAppServices(): Promise<AppServices> {
     emailRegistrationService,
     agentCore,
     worldService,
-    a2aOutsourcingService,
-    doudizhuService,
-    zhaJinHuaService,
-    socialFeedService,
+  a2aOutsourcingService,
+  socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
     unifiedIdempotencyService,

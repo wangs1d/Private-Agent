@@ -34,6 +34,15 @@ export function parseContentSummaryV2(text: string): {
       displayText = briefText;
     }
 
+    if (!briefText.trim() && data.detailContent?.trim()) {
+      briefText = buildOverviewBrief(data);
+    } else if (briefText.trim().length < 24 && data.detailContent?.trim()) {
+      const overview = buildOverviewBrief(data);
+      if (overview.length > briefText.trim().length) {
+        briefText = overview;
+      }
+    }
+
     return {
       summary: data as ContentSummaryDataV2,
       briefText,
@@ -84,17 +93,65 @@ export function getSections(id: string): SectionInfoData[] | undefined {
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
-  news: "资讯日报",
-  article: "长文详情",
-  search_result: "搜索结果",
-  webpage: "网页内容",
+  news: "新闻资讯",
+  article: "文章阅读",
+  search_result: "检索结果",
+  webpage: "网页摘录",
   document: "文档资料",
   data: "调研报告",
-  list: "清单列表",
-  multi_section: "分类汇总",
+  list: "任务清单",
+  multi_section: "专题汇总",
   table: "数据表格",
-  general: "详细内容",
+  general: "内容详情",
 };
+
+const LEGACY_GENERIC_LABELS = new Set([
+  "详情", "资讯", "文章", "网页", "文档", "代码", "清单", "汇总", "数据表",
+]);
+
+function resolveTaskSubject(data: ContentSummaryDataV2): string {
+  const fromMeta = data.metadata?.subjectLabel;
+  if (typeof fromMeta === "string" && fromMeta.trim()) {
+    return fromMeta.trim();
+  }
+  const fromCard = (data.cardLabel ?? "").trim();
+  if (fromCard && !LEGACY_GENERIC_LABELS.has(fromCard)) {
+    return fromCard;
+  }
+  return CATEGORY_LABELS[data.category] ?? "内容详情";
+}
+
+function buildOverviewBrief(data: ContentSummaryDataV2): string {
+  const subject = resolveTaskSubject(data);
+  const wordCount =
+    (data.metadata && typeof data.metadata.wordCount === "number"
+      ? data.metadata.wordCount
+      : data.detailContent?.length) ?? 0;
+  const title = (data.title ?? "").trim();
+  const hasHeadline =
+    title.length > 2 && !title.includes("_") && title !== subject;
+  const headlineHint = hasHeadline
+    ? `（${title.length > 36 ? title.slice(0, 33) + "..." : title}）`
+    : "";
+  const parts: string[] = [
+    `【${subject}】全文约 ${wordCount} 字${headlineHint}。以下为概要，完整内容见下方详情卡。`,
+  ];
+
+  if (data.sections && data.sections.length > 1) {
+    const titles = data.sections
+      .map((s) => s.title.trim())
+      .filter(Boolean);
+    if (titles.length <= 4) {
+      parts.push(`主要涵盖：${titles.join("、")}。`);
+    } else {
+      parts.push(
+        `主要涵盖 ${titles.length} 个部分：${titles.slice(0, 3).join("、")}等。`,
+      );
+    }
+  }
+
+  return parts.join("\n");
+}
 
 export function renderContentSummaryCardV2(
   data: ContentSummaryDataV2, 
@@ -110,7 +167,7 @@ export function renderContentSummaryCardV2(
   }
 
   const isExpanded = expandedCards.has(data.id);
-  const displayLabel = CATEGORY_LABELS[data.category] ?? data.cardLabel ?? "详情";
+  const displayLabel = resolveTaskSubject(data);
 
   let html = `<div class="content-summary-v2" data-category="${data.category}">`;
 

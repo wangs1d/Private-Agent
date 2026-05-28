@@ -8,15 +8,16 @@ import {
   playUrlFromToolResult,
   renderGomokuInviteHtml,
 } from "./gomoku-invite.js";
-import { 
-  parseContentSummaryV2, 
-  renderContentSummaryCardV2, 
+import {
+  parseContentSummaryV2,
+  renderContentSummaryCardV2,
   storeDetailContent,
   storeSections
 } from "./content-summary-card.js";
 
 const SESSION_KEY = "pai_web_session_id";
 const FULL_ACCESS_KEY = "pai_web_full_access";
+const DAILY_CHAT_PREFIX = "pai_daily_chat_";
 const messagesEl = document.getElementById("messages");
 const inputEl = document.getElementById("input");
 const sendBtn = document.getElementById("send");
@@ -24,6 +25,181 @@ const fullAccessBtn = document.getElementById("full-access");
 const statusEl = document.getElementById("status");
 
 let fullComputerAccessEnabled = localStorage.getItem(FULL_ACCESS_KEY) === "1";
+
+function getTodayKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+class DailyChatStorage {
+  constructor() {
+    this.currentDay = getTodayKey();
+    this.messages = [];
+    this.loadTodayMessages();
+    this.startDayChangeDetector();
+  }
+
+  getStorageKey(day) {
+    return `${DAILY_CHAT_PREFIX}${day || this.currentDay}`;
+  }
+
+  loadTodayMessages() {
+    try {
+      const raw = localStorage.getItem(this.getStorageKey());
+      if (raw) {
+        this.messages = JSON.parse(raw);
+        this.restoreMessagesToUI();
+      }
+    } catch (e) {
+      console.error("[DailyChatStorage] Load failed:", e);
+      this.messages = [];
+    }
+  }
+
+  saveMessage(role, text, messageId, timestamp = new Date().toISOString()) {
+    const msg = {
+      role,
+      text,
+      messageId,
+      timestamp,
+      day: this.currentDay
+    };
+    this.messages.push(msg);
+    this.persist();
+  }
+
+  persist() {
+    try {
+      localStorage.setItem(this.getStorageKey(), JSON.stringify(this.messages));
+    } catch (e) {
+      if (e.name === 'QuotaExceededError') {
+        console.warn("[DailyChatStorage] Storage full, keeping only last 200 messages");
+        this.messages = this.messages.slice(-200);
+        localStorage.setItem(this.getStorageKey(), JSON.stringify(this.messages));
+      } else {
+        console.error("[DailyChatStorage] Save failed:", e);
+      }
+    }
+  }
+
+  restoreMessagesToUI() {
+    if (!messagesEl) return;
+    
+    const todayMsgs = this.messages.filter(m => m.day === this.currentDay);
+    
+    for (const msg of todayMsgs) {
+      if (msg.role === 'user') {
+        appendBubble('user', escapeHtml(msg.text), msg.messageId);
+      } else if (msg.role === 'assistant') {
+        const row = ensureAssistant(msg.messageId);
+        row.text = msg.text;
+        paintAssistant(msg.messageId);
+      } else if (msg.role === 'system') {
+        appendBubble('system', escapeHtml(msg.text), msg.messageId);
+      }
+    }
+    
+    if (todayMsgs.length > 0) {
+      setTimeout(() => {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }, 100);
+    }
+  }
+
+  clearCurrentDay() {
+    this.messages = [];
+    localStorage.removeItem(this.getStorageKey());
+  }
+
+  startDayChangeDetector() {
+    setInterval(() => {
+      const newDay = getTodayKey();
+      if (newDay !== this.currentDay) {
+        console.log(`[DailyChatStorage] Day changed: ${this.currentDay} -> ${newDay}`);
+        this.currentDay = newDay;
+        this.messages = [];
+        this.loadTodayMessages();
+        
+        if (typeof window.onDayChange === 'function') {
+          window.onDayChange(this.currentDay);
+        }
+      }
+    }, 60_000);
+  }
+
+  getTodayStats() {
+    const todayMsgs = this.messages.filter(m => m.day === this.currentDay);
+    const userCount = todayMsgs.filter(m => m.role === 'user').length;
+    const assistantCount = todayMsgs.filter(m => m.role === 'assistant').length;
+    return { total: todayMsgs.length, userCount, assistantCount };
+  }
+
+  async syncToServer() {
+    if (!this.messages || this.messages.length === 0) return;
+
+    const todayMsgs = this.messages.filter(m => m.day === this.currentDay);
+    
+    if (todayMsgs.length === 0) return;
+
+    const syncData = {
+      actorId: sessionId(),
+      day: this.currentDay,
+      messages: todayMsgs.map(m => ({
+        role: m.role,
+        text: m.text,
+        messageId: m.messageId,
+        timestamp: m.timestamp
+      })),
+      clientTimestamp: new Date().toISOString()
+    };
+
+    try {
+      const response = await fetch('/api/chat/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(syncData)
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`[DailyChatSync] ✅ Synced ${result.messageCount} messages to server`);
+        
+        localStorage.setItem(`pai_last_sync_${this.currentDay}`, JSON.stringify({
+          syncedAt: new Date().toISOString(),
+          messageCount: result.messageCount
+        }));
+      } else {
+        console.error('[DailyChatSync] ❌ Sync failed:', response.status);
+      }
+    } catch (err) {
+      console.error('[DailyChatSync] ❌ Sync error:', err);
+    }
+  }
+
+  startAutoSync(intervalMs = 5 * 60 * 1000) {
+    setInterval(() => {
+      this.syncToServer();
+    }, intervalMs);
+
+    window.addEventListener('beforeunload', () => {
+      if (navigator.sendBeacon) {
+        const blob = new Blob([JSON.stringify({
+          actorId: sessionId(),
+          day: this.currentDay,
+          messages: this.messages.filter(m => m.day === this.currentDay),
+          clientTimestamp: new Date().toISOString()
+        })], { type: 'application/json' });
+        navigator.sendBeacon('/api/chat/sync', blob);
+      }
+    });
+
+    setTimeout(() => this.syncToServer(), 10_000);
+  }
+}
+
+const dailyChatStorage = new DailyChatStorage();
 
 function agentAccessMode() {
   return fullComputerAccessEnabled ? "full" : "sandbox";
@@ -53,8 +229,34 @@ fullAccessBtn?.addEventListener("click", () => {
 
 /** @type {WebSocket | null} */
 let ws = null;
+/** 与聊天区「处理中」进度条同步，供服务端合并用户连发消息 */
+let agentProcessingUiActive = false;
 /** @type {Map<string, { el: HTMLElement, text: string, playUrl: string | null }>} */
 const assistants = new Map();
+
+/** @type {HTMLIFrameElement | null} */
+let avatarFrame = null;
+let avatarReady = false;
+let avatarSpeakingEnergy = 0.45;
+
+function getAvatarFrame() {
+  if (!avatarFrame) avatarFrame = document.getElementById("agent-avatar-frame");
+  return avatarFrame;
+}
+
+/** 向嵌入的 3D Agent 形象同步状态（LLM 流式 → thinking / speaking） */
+function patchAvatar(patch) {
+  const frame = getAvatarFrame();
+  if (!frame?.contentWindow || !avatarReady) return;
+  frame.contentWindow.postMessage({ type: "agent-sphere:patch", ...patch }, "*");
+}
+
+window.addEventListener("message", (ev) => {
+  if (ev.data?.type === "agent-sphere:ready") {
+    avatarReady = true;
+    patchAvatar({ mood: "idle", energy: 0.5 });
+  }
+});
 
 function sessionId() {
   let id = localStorage.getItem(SESSION_KEY);
@@ -73,6 +275,19 @@ function wsUrl() {
 
 function setStatus(line) {
   statusEl.textContent = line ?? "";
+}
+
+function syncAgentProcessingUi(active) {
+  if (agentProcessingUiActive === active) return;
+  agentProcessingUiActive = active;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const sid = sessionId();
+  ws.send(
+    JSON.stringify({
+      type: "chat.agent_processing_ui",
+      payload: { sessionId: sid, userId: sid, active },
+    }),
+  );
 }
 
 function escapeHtml(s) {
@@ -151,6 +366,7 @@ function connect() {
     sendBtn.disabled = false;
   });
   ws.addEventListener("close", () => {
+    syncAgentProcessingUi(false);
     setStatus("已断开，3 秒后重连…");
     sendBtn.disabled = true;
     setTimeout(connect, 3000);
@@ -202,6 +418,16 @@ function handleWs(msg) {
       })
       .join("");
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    syncAgentProcessingUi(true);
+    patchAvatar({ mood: "thinking", caption: line, energy: 0.72 });
+    return;
+  }
+
+  if (type === "tool.call") {
+    const line = String(p.userStatusLine ?? p.assistantPreamble ?? p.toolName ?? "").trim();
+    if (line) {
+      patchAvatar({ mood: "thinking", caption: line, energy: 0.68 });
+    }
     return;
   }
 
@@ -212,6 +438,8 @@ function handleWs(msg) {
     const detected = playUrlFromText(row.text);
     if (detected) row.playUrl = detected;
     paintAssistant(id);
+    avatarSpeakingEnergy = Math.min(1, avatarSpeakingEnergy + 0.025);
+    patchAvatar({ mood: "speaking", energy: avatarSpeakingEnergy });
     return;
   }
 
@@ -230,17 +458,26 @@ function handleWs(msg) {
   if (type === "chat.assistant_done") {
     const prog = document.getElementById("progress-bubble");
     prog?.remove();
+    syncAgentProcessingUi(false);
+    setStatus("已连接");
+    avatarSpeakingEnergy = 0.45;
+    patchAvatar({ mood: "happy", energy: 0.55 });
+    setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1800);
     const id = String(p.messageId ?? "assistant-final");
     const row = ensureAssistant(id);
     const finalText = String(p.finalText ?? "").trim();
     if (finalText) row.text = finalText;
     if (!row.playUrl) row.playUrl = playUrlFromText(row.text);
     paintAssistant(id);
+    dailyChatStorage.saveMessage('assistant', row.text, id);
     return;
   }
 
   if (type === "error.event") {
+    document.getElementById("progress-bubble")?.remove();
+    syncAgentProcessingUi(false);
     setStatus(String(p.message ?? "错误"));
+    patchAvatar({ mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85 });
   }
 }
 
@@ -250,6 +487,7 @@ function sendUserMessage() {
   const sid = sessionId();
   const messageId = `msg-${Date.now().toString(36)}`;
   appendBubble("user", escapeHtml(text), messageId);
+  dailyChatStorage.saveMessage('user', text, messageId);
   inputEl.value = "";
   ws.send(
     JSON.stringify({
@@ -264,6 +502,8 @@ function sendUserMessage() {
     }),
   );
   setStatus("处理中…");
+  syncAgentProcessingUi(true);
+  patchAvatar({ mood: "listening", caption: "正在聆听…", energy: 0.65 });
 }
 
 sendBtn.addEventListener("click", sendUserMessage);
@@ -360,6 +600,7 @@ function sendUserMessageDirect(text) {
   const sid = sessionId();
   const messageId = `msg-${Date.now().toString(36)}`;
   appendBubble("user", escapeHtml(text), messageId);
+  dailyChatStorage.saveMessage('user', text, messageId);
   ws.send(
     JSON.stringify({
       type: "chat.user_message",
@@ -373,6 +614,7 @@ function sendUserMessageDirect(text) {
     }),
   );
   setStatus("思考中…");
+  syncAgentProcessingUi(true);
 }
 
 function showPhoneDialer() {
@@ -436,3 +678,4 @@ document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
 connect();
+dailyChatStorage.startAutoSync();

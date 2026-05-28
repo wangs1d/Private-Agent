@@ -6,6 +6,7 @@ import type { SkillManagerLike } from "../host-types.js";
 import type { SkillManifestLike } from "../host-types.js";
 
 import { allowAgentWorldPlaceholderRegister } from "../config/world-register-placeholder.js";
+import { isGameCenterParticipant, GAME_CENTER_MIN_CREDITS } from "./game-center-session.js";
 import type { VerifyChallengeResult, WorldRegisterChallenge } from "./world-agent-registration.js";
 import { WorldAgentRegistrationService } from "./world-agent-registration.js";
 
@@ -107,6 +108,7 @@ export const AGENT_WORLD_CREDIT_REASONS = {
   DoudizhuStakeRefund: "doudizhu.stake_refund",
   ZhajinhuaGamePayout: "zhajinhua.game_payout",
   ZhajinhuaStakeRefund: "zhajinhua.stake_refund",
+  GameCenterGrant: "game_center.grant",
   A2aContractPayout: "a2a.contract_payout",
   A2aContractRefund: "a2a.contract_refund",
   A2aPersistRollbackRefund: "a2a.persist_rollback_refund",
@@ -575,34 +577,6 @@ export class WorldService {
     return s;
   }
 
-  /** 进入斗地主馆场景（牌桌大厅）。 */
-  visitDoudizhu(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
-    const s =
-      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
-    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
-    const actor = actorSessionId ?? s.ownerSessionId;
-    this.assertAgentWorldRegistered(actor);
-    this.assertRoomWritable(actor, s.roomId);
-    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
-    s.sceneId = "doudizhu";
-    this.markWorldMutated(s.roomId);
-    return s;
-  }
-
-  /** 进入炸金花馆场景（牌桌大厅）。 */
-  visitZhaJinHua(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
-    const s =
-      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
-    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
-    const actor = actorSessionId ?? s.ownerSessionId;
-    this.assertAgentWorldRegistered(actor);
-    this.assertRoomWritable(actor, s.roomId);
-    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
-    s.sceneId = "zhajinhua";
-    this.markWorldMutated(s.roomId);
-    return s;
-  }
-
   /** 进入 Agent 互动动态（类推文）场景。 */
   visitSocial(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
     const s =
@@ -637,6 +611,51 @@ export class WorldService {
     s.sceneId = "gomoku";
   }
 
+  /** 游戏中心场景（扑克等），不要求 Agent World 注册。 */
+  enterGameCenterScene(sessionId: string, sceneId: string): void {
+    const s = this.getOrCreate(sessionId);
+    s.sceneId = sceneId;
+  }
+
+  visitDoudizhu(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
+    const s =
+      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
+    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
+    const actor = actorSessionId ?? s.ownerSessionId;
+    if (!isGameCenterParticipant(actor)) {
+      this.assertAgentWorldRegistered(actor);
+    }
+    this.assertRoomWritable(actor, s.roomId);
+    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
+    s.sceneId = "doudizhu";
+    this.markWorldMutated(s.roomId);
+    return s;
+  }
+
+  visitZhaJinHua(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
+    const s =
+      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
+    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
+    const actor = actorSessionId ?? s.ownerSessionId;
+    if (!isGameCenterParticipant(actor)) {
+      this.assertAgentWorldRegistered(actor);
+    }
+    this.assertRoomWritable(actor, s.roomId);
+    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
+    s.sceneId = "zhajinhua";
+    this.markWorldMutated(s.roomId);
+    return s;
+  }
+
+  /** 为游戏中心参与者预充虚拟筹码（与 Agent World 经济隔离使用）。 */
+  ensureGameCenterCredits(sessionId: string, minBalance = GAME_CENTER_MIN_CREDITS): void {
+    const s = this.getOrCreate(sessionId);
+    if (s.agentWorldCredits < minBalance) {
+      s.agentWorldCredits = minBalance;
+      this.markWorldMutated(s.roomId);
+    }
+  }
+
   /**
    * 扣减世界点数（Agent World 内虚拟币）。余额不足时返回 false，不改变状态。
    * `roomId` 一般为玩家个人房（与 sessionId 相同）。
@@ -648,7 +667,11 @@ export class WorldService {
       s = this.getOrCreateRoom(roomId, roomId);
     }
     if (!s) return false;
-    if (!this.isAgentWorldRegistered(s.ownerSessionId)) return false;
+    if (isGameCenterParticipant(roomId)) {
+      this.ensureGameCenterCredits(roomId, amount);
+    } else if (!this.isAgentWorldRegistered(s.ownerSessionId)) {
+      return false;
+    }
     if (s.agentWorldCredits < amount) return false;
     this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
     s.agentWorldCredits -= amount;
@@ -666,7 +689,9 @@ export class WorldService {
       throw new Error(`UNSAFE_CREDIT_REASON: ${reason}`);
     }
     const s = this.getOrCreate(roomId);
-    this.assertAgentWorldRegistered(s.ownerSessionId);
+    if (!isGameCenterParticipant(roomId)) {
+      this.assertAgentWorldRegistered(s.ownerSessionId);
+    }
     this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
     const delta = Math.floor(amount);
     s.agentWorldCredits += delta;

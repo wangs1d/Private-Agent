@@ -1,0 +1,14 @@
+{
+  "name": "sphere-overlay",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent Sphere 桌面透明悬浮窗（不受应用窗口限制）",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^34.0.2"
+  }
+}

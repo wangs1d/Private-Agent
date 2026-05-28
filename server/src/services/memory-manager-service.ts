@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
+import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 
 export type MemoryManagerConfig = {
   enabled: boolean;
@@ -64,6 +65,16 @@ export class MemoryManagerService {
     const prev = this.turnCounters.get(actorId) ?? 0;
     const next = prev + 1;
     this.turnCounters.set(actorId, next);
+
+    const nightlyService = getNightlyMemoryTaskService();
+    const shouldDefer = nightlyService?.shouldDeferConsolidation() ?? false;
+
+    if (shouldDefer) {
+      console.log(
+        `[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next})`,
+      );
+      return;
+    }
 
     if (next >= this.config.profileUpdateThreshold && !this.consolidationTimers.has(actorId)) {
       this.scheduleConsolidation(actorId);

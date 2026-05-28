@@ -14,6 +14,10 @@ import {
   type RunningGame,
 } from "./doudizhu/doudizhu-engine.js";
 import { getStateEventManager } from "../deps/state/index.js";
+import { pickDoudizhuBotMove } from "./game-center-bot.js";
+import { isHumanGameSession } from "./game-center-session.js";
+
+const MAX_BOT_TURN_STEPS = 64;
 
 export type DoudizhuTableStatus = "waiting" | "playing" | "finished";
 
@@ -225,6 +229,35 @@ export class DoudizhuService {
     const t = this.tables.get(tableId);
     if (!t) return { ok: false, reason: "桌台不存在" };
     return { ok: true, snapshot: this.buildSnapshot(t, sessionId) };
+  }
+
+  /** 游戏中心：自动推进 Bot / 子 Agent 座位回合。 */
+  advanceBotTurns(tableId: string, viewerSessionId: string): unknown {
+    for (let step = 0; step < MAX_BOT_TURN_STEPS; step += 1) {
+      const t = this.tables.get(tableId);
+      if (!t || t.status !== "playing" || !t.game) break;
+      const seat = t.game.turnSeat;
+      const sid = t.seats[seat];
+      if (!sid || isHumanGameSession(sid)) break;
+      const move = pickDoudizhuBotMove(t.game, seat);
+      if (move.action === "pass") {
+        const r = this.play(tableId, sid, "pass", undefined);
+        if (!r.ok) break;
+        if ((r.snapshot as Record<string, unknown>).status === "finished") return r.snapshot;
+        continue;
+      }
+      const r = this.play(tableId, sid, "play", move.cards);
+      if (!r.ok) {
+        const pr = this.play(tableId, sid, "pass", undefined);
+        if (!pr.ok) break;
+        if ((pr.snapshot as Record<string, unknown>).status === "finished") return pr.snapshot;
+        continue;
+      }
+      if ((r.snapshot as Record<string, unknown>).status === "finished") return r.snapshot;
+    }
+    const t = this.tables.get(tableId);
+    if (!t) return null;
+    return this.buildSnapshot(t, viewerSessionId);
   }
 
   private summarize(t: Table): DoudizhuTableSummary {

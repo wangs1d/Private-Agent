@@ -1,0 +1,29 @@
+{
+  "name": "agent-sphere-avatar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Private AI Agent 主形象 — 球形 3D Agent（Three.js + R3F + Cannon）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:chat": "npm run build && node scripts/copy-to-chat.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@react-three/cannon": "^6.6.0",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/three": "^0.172.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

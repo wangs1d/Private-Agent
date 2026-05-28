@@ -155,7 +155,7 @@ export class IntelligentReminderService {
     }
 
     if (instance.config.maxLevel && LEVEL_ORDER[rule.toLevel] > LEVEL_ORDER[instance.config.maxLevel]) {
-      return instance;
+      return null;
     }
 
     if (rule.maxEscalations && instance.escalationCount >= rule.maxEscalations) {
