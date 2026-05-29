@@ -5,6 +5,10 @@ import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import {
+  compactValidChatMessages,
+  repairKimiAssistantToolCallReasoning,
+} from "./chat-thread-sanitize.js";
 
 const DEFAULT_MAX_TURN_MESSAGES = 48;
 
@@ -32,12 +36,13 @@ function estimateTokens(text: string | null | undefined): number {
   return Math.ceil(chineseChars * 1.5 + englishWords * 0.25);
 }
 
-function estimateMessageTokens(msg: ChatCompletionMessageParam): number {
+function estimateMessageTokens(msg: ChatCompletionMessageParam | null | undefined): number {
+  if (!msg || typeof msg.role !== "string") return 0;
   let tokens = 0;
-  
+
   // role token
   tokens += 2;
-  
+
   // content tokens
   if (typeof msg.content === 'string') {
     tokens += estimateTokens(msg.content);
@@ -82,7 +87,10 @@ export class ChatThreadStore {
     if (!t && this.persistence) {
       const restored = this.persistence.loadRestoredMessages(sessionId);
       if (restored?.length) {
-        t = [{ role: "system", content: defaultSystemPrompt }, ...restored];
+        t = [
+          { role: "system", content: defaultSystemPrompt },
+          ...repairKimiAssistantToolCallReasoning(compactValidChatMessages(restored)),
+        ];
         this.history.set(sessionId, t);
       }
     }
@@ -98,6 +106,10 @@ export class ChatThreadStore {
    * 支持基于消息数量和 Token 数量的双重限制
    */
   trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
+    const compacted = compactValidChatMessages(msgs);
+    msgs.length = 0;
+    msgs.push(...repairKimiAssistantToolCallReasoning(compacted));
+
     const config = {
       ...DEFAULT_SMART_TRIM_CONFIG,
       maxMessages: maxMessages ?? DEFAULT_SMART_TRIM_CONFIG.maxMessages,
@@ -148,6 +160,7 @@ export class ChatThreadStore {
     const preservedOlder: ChatCompletionMessageParam[] = [];
     for (let i = olderMessages.length - 1; i >= 0 && currentTokens < config.maxTokens; i--) {
       const msg = olderMessages[i];
+      if (!msg || typeof msg.role !== "string") continue;
       const msgTokens = estimateMessageTokens(msg);
       
       // 优先保留包含工具调用的消息（它们通常携带重要上下文）
@@ -213,13 +226,19 @@ function trimPreservingToolPairs(
 
   while (i >= 0) {
     const msg = messages[i];
+    if (!msg || typeof msg.role !== "string") {
+      i--;
+      continue;
+    }
     if (msg.role === "tool") {
       const group: ChatCompletionMessageParam[] = [];
-      while (i >= 0 && messages[i].role === "tool") {
-        group.unshift(messages[i]);
+      while (i >= 0) {
+        const toolMsg = messages[i];
+        if (!toolMsg || toolMsg.role !== "tool") break;
+        group.unshift(toolMsg);
         i--;
       }
-      if (i >= 0 && messages[i].role === "assistant") {
+      if (i >= 0 && messages[i]?.role === "assistant") {
         const assistantMsg = messages[i];
         const hasToolCalls = Array.isArray(
           (assistantMsg as { tool_calls?: unknown }).tool_calls,

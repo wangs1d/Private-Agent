@@ -21,6 +21,7 @@ export const CAPABILITY_DOMAINS = [
   "self_programming",
   "agent_account",
   "world",
+  "embodiment",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -41,6 +42,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   self_programming: "自我编程（创建/更新/删除/生成Skill）",
   agent_account: "Agent账号注册",
   world: "Agent World（世界状态/社交/市场/游戏）",
+  embodiment: "具身身体（球形本体：漫游/移动/表情）",
   all: "全部领域",
 };
 
@@ -59,6 +61,8 @@ const GLOBAL_RULES_LINES = [
   "用户未在输入框开启「完全访问」时，当前为沙箱：不可用 desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.*。",
   "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
   "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
+  "",
+  "【具身身体】屏幕上的球形是你的物理身体（主 Agent 在现实中的延伸，不是另一个机器人）：可用 embodiment.* 工具移动与表达；服务端也会根据 listening/thinking/speaking/idle 自发驱动身体漫游（意识律动），无需用户每次下令。",
 ];
 
 function buildStaticSections(): CapabilitySection[] {
@@ -117,6 +121,17 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "web",
       lines: [
         "9️⃣ Web浏览：search_web / fetch_web",
+      ],
+    },
+    {
+      domain: "embodiment",
+      lines: [
+        "🤖 具身身体（球形即你的物理身体，用来表达状态与移动）：",
+        "   embodiment.roam — 3D 场景内随机漫游",
+        "   embodiment.move — 移动到场景坐标 (x,y,z)",
+        "   embodiment.stop — 停止漫游",
+        "   embodiment.set_state — 设置 mood/energy/玻璃屏 caption",
+        "   embodiment.window_roam — 桌面悬浮窗在屏幕上换位置（仅 overlay）",
       ],
     },
     {

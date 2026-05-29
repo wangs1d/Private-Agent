@@ -144,9 +144,14 @@ export class UserPersonalizationService {
 
   private saveEmotionState(actorId: string, state: EmotionState): void {
     if (!this.memory) return;
+    void this.saveEmotionStateAsync(actorId, state);
+  }
+
+  private async saveEmotionStateAsync(actorId: string, state: EmotionState): Promise<void> {
+    if (!this.memory) return;
     for (let i = 0; i < 8; i++) {
       const { revision } = this.memory.getSnapshot(actorId, [EMOTION_STATE_KEY]);
-      const r = this.memory.applyPatch(actorId, revision, [
+      const r = await this.memory.applyPatch(actorId, revision, [
         { key: EMOTION_STATE_KEY, op: "put", value: state },
       ]);
       if (r.ok) return;
@@ -155,9 +160,14 @@ export class UserPersonalizationService {
 
   private syncProfileKv(actorId: string, md: string): void {
     if (!this.memory) return;
+    void this.syncProfileKvAsync(actorId, md);
+  }
+
+  private async syncProfileKvAsync(actorId: string, md: string): Promise<void> {
+    if (!this.memory) return;
     for (let i = 0; i < 8; i++) {
       const { revision } = this.memory.getSnapshot(actorId, [USER_PROFILE_KV_KEY]);
-      const r = this.memory.applyPatch(actorId, revision, [
+      const r = await this.memory.applyPatch(actorId, revision, [
         { key: USER_PROFILE_KV_KEY, op: "put", value: md },
       ]);
       if (r.ok) return;

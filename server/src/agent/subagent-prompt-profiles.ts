@@ -66,10 +66,16 @@ export const SUB_AGENT_PROMPT_PROFILES: Record<SubAgentType, SubAgentPromptProfi
     includeMemorySummary: false,
   },
   creative: {
-    ...FULL_PROFILE,
+    includeTaskContext: true,
+    includeToneGuidance: true,
+    includeUserProfile: false,
+    includeUserLocation: false,
+    includePersona: true,
+    includeValues: false,
+    includeAbilities: false,
     includeAgentCaps: false,
     includeWorldCaps: false,
-    includeNarrativeRecall: true,
+    includeNarrativeRecall: false,
     includeMemorySummary: true,
   },
   security: {

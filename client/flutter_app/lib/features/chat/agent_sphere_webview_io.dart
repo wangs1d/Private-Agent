@@ -39,6 +39,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   void initState() {
     super.initState();
     AgentSphereMoodBridge.instance.addListener(_onPatch);
+    AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
     if (Platform.isWindows) {
       _initWebView();
     }
@@ -65,6 +66,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   @override
   void dispose() {
     AgentSphereMoodBridge.instance.removeListener(_onPatch);
+    AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
     _controller.dispose();
     super.dispose();
   }
@@ -72,6 +74,12 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   Future<void> _onPatch(AgentSpherePatch patch) async {
     if (!_initialized) return;
     final String json = jsonEncode(patch.toJson());
+    await _controller.executeScript('window.postMessage($json, "*");');
+  }
+
+  Future<void> _onSphereMessage(Map<String, dynamic> message) async {
+    if (!_initialized) return;
+    final String json = jsonEncode(message);
     await _controller.executeScript('window.postMessage($json, "*");');
   }
 

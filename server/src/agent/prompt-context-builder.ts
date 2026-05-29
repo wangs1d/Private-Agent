@@ -4,6 +4,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   sliceMemoryEntriesToPromptContext,
+  sliceSubAgentMemoryEntries,
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
 import { buildMasterAgentChatTools, buildSubAgentChatTools } from "../services/master-agent-tool-filter.js";
@@ -15,6 +16,7 @@ import type { AgentMemorySyncService } from "../services/agent-memory-sync-servi
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
+import { buildFollowUpAnchorPrompt, isAmbiguousFollowUpMessage } from "./memory-signal.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
@@ -33,12 +35,13 @@ interface WorldCacheEntry {
   at: number;
 }
 
-let _worldCache: WorldCacheEntry | null = null;
+const worldCacheByActor = new Map<string, WorldCacheEntry>();
 
 function getCachedWorldState(worldService: WorldService, actorId: string): WorldCacheEntry["data"] {
   const now = Date.now();
-  if (_worldCache && (now - _worldCache.at) < WORLD_CACHE_TTL_MS) {
-    return _worldCache.data;
+  const cached = worldCacheByActor.get(actorId);
+  if (cached && now - cached.at < WORLD_CACHE_TTL_MS) {
+    return cached.data;
   }
   const state = worldService.getOrCreateRoom(actorId, actorId);
   const data = {
@@ -46,7 +49,7 @@ function getCachedWorldState(worldService: WorldService, actorId: string): World
     credits: state.agentWorldCredits,
     ownedSkillIds: state.ownedSkillIds,
   };
-  _worldCache = { data, at: now };
+  worldCacheByActor.set(actorId, { data, at: now });
   return data;
 }
 
@@ -136,34 +139,55 @@ export class PromptContextBuilder {
   }
 
   private assembleMemoryForSubAgent(input: BuildSubAgentInput): AgentPromptMemoryContext {
-    const full = this.assembleMemory(input);
     const profile = SUB_AGENT_PROMPT_PROFILES[input.capability.type];
+    const taskText = input.taskDescription?.trim() || input.userText?.trim() || "";
+
+    let scoped: AgentPromptMemoryContext = {};
+    if (this.deps.agentMemorySyncService && (profile.includePersona || profile.includeMemorySummary)) {
+      const keys: string[] = [];
+      if (profile.includePersona) keys.push("persona", "soul");
+      if (profile.includeMemorySummary) keys.push("memory_summary");
+      const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, keys);
+      scoped = sliceSubAgentMemoryEntries(entries, taskText || undefined);
+      if (!profile.includePersona) {
+        delete scoped.persona;
+      }
+      if (!profile.includeMemorySummary) {
+        delete scoped.memorySummary;
+      }
+    }
+
+    const full = this.assembleMemory(input);
 
     return {
       ...(profile.includeTaskContext && full.taskContext ? { taskContext: full.taskContext } : {}),
       ...(profile.includeToneGuidance && full.toneGuidance ? { toneGuidance: full.toneGuidance } : {}),
       ...(profile.includeUserProfile && full.userProfile ? { userProfile: full.userProfile } : {}),
       ...(profile.includeUserLocation && full.userLocation ? { userLocation: full.userLocation } : {}),
-      ...(profile.includePersona && full.persona ? { persona: full.persona } : {}),
+      ...(profile.includePersona && scoped.persona ? { persona: scoped.persona } : {}),
       ...(profile.includeValues && full.values ? { values: full.values } : {}),
       ...(profile.includeAbilities && full.abilities ? { abilities: full.abilities } : {}),
       ...(profile.includeAgentCaps && full.agentCaps ? { agentCaps: full.agentCaps } : {}),
       ...(profile.includeWorldCaps && full.worldCaps ? { worldCaps: full.worldCaps } : {}),
-      ...(profile.includeNarrativeRecall && full.narrativeRecall
-        ? { narrativeRecall: full.narrativeRecall }
-        : {}),
-      ...(profile.includeMemorySummary && full.memorySummary ? { memorySummary: full.memorySummary } : {}),
+      ...(profile.includeMemorySummary && scoped.memorySummary ? { memorySummary: scoped.memorySummary } : {}),
       ...(full.interruptedContext ? { interruptedContext: full.interruptedContext } : {}),
     };
   }
 
   private assembleMemory(input: BuildPromptContextInput): AgentPromptMemoryContext {
     const config = getAgentRuntimeConfig();
+    const userText = input.userText?.trim() ?? "";
+    const ambiguousFollowUp = isAmbiguousFollowUpMessage(userText);
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
-    if (this.deps.agentMemorySyncService && memoryKeys && memoryKeys.length > 0) {
+    if (
+      this.deps.agentMemorySyncService &&
+      memoryKeys &&
+      memoryKeys.length > 0 &&
+      !ambiguousFollowUp
+    ) {
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, memoryKeys);
-      fromKv = sliceMemoryEntriesToPromptContext(entries);
+      fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
     }
 
     let agentCaps: string | undefined;
@@ -219,22 +243,29 @@ export class PromptContextBuilder {
     }
 
     const personalization = input.personalization;
-    const dailyDigest = getDailyDigestService().getPromptDigest(input.actorId);
+    const dailyDigest =
+      ambiguousFollowUp ? undefined : getDailyDigestService().getPromptDigest(input.actorId);
     const memoryManager = getMemoryManagerService();
     const userProfileFromManager = memoryManager?.getProfileForPrompt(input.actorId);
+    const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     return {
       ...fromKv,
-      ...(config.memoryPrompt.taskContextInPrompt && input.userText?.trim()
-        ? { taskContext: buildTaskContextPrompt(input.userText) }
+      ...(config.memoryPrompt.taskContextInPrompt && userText
+        ? { taskContext: buildTaskContextPrompt(userText) }
         : {}),
       ...(personalization?.toneGuidance ? { toneGuidance: personalization.toneGuidance } : {}),
       ...(personalization?.userProfile ? { userProfile: personalization.userProfile } : {}),
       ...(agentCaps ? { agentCaps } : {}),
       ...(worldCaps ? { worldCaps } : {}),
-      ...(input.narrativeRecall ? { narrativeRecall: input.narrativeRecall } : {}),
+      ...(input.narrativeRecall && !ambiguousFollowUp
+        ? { narrativeRecall: input.narrativeRecall }
+        : {}),
       ...(dailyDigest ? { dailyDigest } : {}),
-      ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
+      ...(userProfileFromManager && !ambiguousFollowUp
+        ? { userProfileSummary: userProfileFromManager }
+        : {}),
       ...(interruptedCtx ? { interruptedContext: interruptedCtx } : {}),
+      ...(followUpAnchor ? { followUpAnchor } : {}),
     };
   }
 
@@ -253,7 +284,8 @@ export class PromptContextBuilder {
       Boolean(memory.taskContext) ||
       Boolean(memory.userProfile) ||
       Boolean(memory.toneGuidance) ||
-      Boolean(memory.userProfileSummary)
+      Boolean(memory.userProfileSummary) ||
+      Boolean(memory.followUpAnchor)
     );
   }
 

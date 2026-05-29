@@ -18,6 +18,7 @@ import {
   handleChatAgentProcessingUiEvent,
   handleChatUserMessageEvent,
 } from "./handlers/chat-user-message.js";
+import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import {
   AgentWorldClientEventType,
@@ -144,6 +145,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         if (boundActorId) {
           socialFeedService.unsubscribe(boundActorId);
           wsConnectionRegistry.unregister(boundActorId, socket);
+          getEmbodimentAutonomy()?.unregisterSession(boundActorId);
           boundActorId = undefined;
         }
       });
@@ -292,6 +294,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           initAsDesktopBridge = isDesktopBridgeChannel;
           if (!isDesktopBridgeChannel) {
             wsConnectionRegistry.register(actorId, socket);
+            getEmbodimentAutonomy()?.registerSession(actorId);
           } else if (!desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
@@ -414,6 +417,21 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               sendUnifiedError,
             },
             event.payload,
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.AgentEmbodimentInteract) {
+          await handleAgentEmbodimentInteractEvent(
+            {
+              socket,
+              boundActorId: boundActorId ?? "",
+              initAsDesktopBridge,
+              clientIp,
+              sendUnifiedError,
+            },
+            event.payload,
+            { agentCore, auditService },
           );
           return;
         }
@@ -1053,7 +1071,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
-          const patchResult = agentMemorySyncService.applyPatch(
+          const patchResult = await agentMemorySyncService.applyPatch(
             memPatchActor,
             parsedMp.data.basisRevision,
             parsedMp.data.patches,

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { AgentMood } from "../types/agent";
 
 declare global {
@@ -9,7 +9,11 @@ declare global {
       getWorkArea: () => Promise<{ x: number; y: number; width: number; height: number }>;
       setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
       onPatch?: (cb: (patch: Record<string, unknown>) => void) => void;
+      onRoam?: (cb: () => void) => void;
+      roamNow?: () => void;
     };
+    SpeechRecognition?: typeof SpeechRecognition;
+    webkitSpeechRecognition?: typeof SpeechRecognition;
   }
 }
 
@@ -23,22 +27,29 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
   const targetRef = useRef<{ x: number; y: number } | null>(null);
   const nextMoveAt = useRef(0);
 
+  const roamNow = useCallback(async () => {
+    if (!window.sphereOverlay) return;
+    const area = await window.sphereOverlay.getWorkArea();
+    const margin = 12;
+    const w = 300;
+    const h = 380;
+    const x = area.x + margin + Math.random() * Math.max(40, area.width - w - margin * 2);
+    const y = area.y + margin + Math.random() * Math.max(40, area.height - h - margin * 2);
+    targetRef.current = { x, y };
+    window.sphereOverlay.moveTo(Math.round(x), Math.round(y), mood === "speaking" ? 900 : 1200);
+    nextMoveAt.current = Date.now() + 5000;
+  }, [mood]);
+
   useEffect(() => {
     if (!enabled || !window.sphereOverlay) return;
+
+    window.sphereOverlay.roamNow = () => void roamNow();
 
     let cancelled = false;
 
     const schedule = async () => {
-      const area = await window.sphereOverlay!.getWorkArea();
       if (cancelled) return;
-
-      const margin = 12;
-      const w = 280;
-      const h = 320;
-      const x = area.x + margin + Math.random() * Math.max(40, area.width - w - margin * 2);
-      const y = area.y + margin + Math.random() * Math.max(40, area.height - h - margin * 2);
-      targetRef.current = { x, y };
-      window.sphereOverlay!.moveTo(Math.round(x), Math.round(y), mood === "speaking" ? 900 : 1600);
+      await roamNow();
     };
 
     const tick = () => {
@@ -60,5 +71,7 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
       cancelled = true;
       window.cancelAnimationFrame(raf);
     };
-  }, [enabled, mood]);
+  }, [enabled, mood, roamNow]);
+
+  return { roamNow };
 }

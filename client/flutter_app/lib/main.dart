@@ -20,7 +20,9 @@ import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
-import "core/services/sphere_overlay_launcher.dart";
+import "core/services/agent_sphere_embodiment_mapper.dart";
+import "core/services/agent_sphere_interact_bridge.dart";
+import "core/services/sphere_entity_controller.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
@@ -66,6 +68,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
   final ValueNotifier<int> _scheduleReloadSignal = ValueNotifier<int>(0);
   final TextEditingController _inputController = TextEditingController();
+  final FocusNode _inputFocusNode = FocusNode();
 
   /// `null` 尚未询问；`true` 随消息静默抓拍；`false` 仅文字。
   bool? _visionCameraConsent;
@@ -125,6 +128,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   @override
   void dispose() {
     unawaited(AgentSphereVoiceController.instance.dispose());
+    _inputFocusNode.dispose();
     _inputController.dispose();
     _scheduleReloadSignal.dispose();
     super.dispose();
@@ -179,6 +183,28 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
     _ws.connect();
 
+    AgentSphereInteractBridge.instance.bind((String action, {String? text}) {
+      if (!_ws.isConnected) return;
+      _ws.sendEvent("agent.embodiment.interact", <String, dynamic>{
+        "sessionId": ApiConfig.effectiveActorId,
+        "userId": ApiConfig.effectiveActorId,
+        "action": action,
+        if (text != null && text.trim().isNotEmpty) "text": text.trim(),
+      });
+      if (action == "wake" || action == "chat") {
+        AgentSphereMoodBridge.instance.listening();
+      }
+    });
+
+    AgentSphereMoodBridge.instance.addFocusListener(() {
+      if (_tabIndex != 0) {
+        setState(() => _tabIndex = 0);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _inputFocusNode.requestFocus();
+      });
+    });
+
     final AgentSphereVoiceController voiceCtrl = AgentSphereVoiceController.instance;
     voiceCtrl.onRecognizedText = (String text) {
       final String t = text.trim();
@@ -208,13 +234,13 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       } else {
         await _promptLocationConsentIfNeeded();
       }
-      await _maybeLaunchDesktopPet();
     });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
       final Map<String, dynamic> payload =
           (event["payload"] as Map?)?.cast<String, dynamic>() ??
               <String, dynamic>{};
+      _syncAgentSphereFromWs(type, payload);
       if (type == "connection_error") {
         final bool hadPendingTurn =
             _isAgentProcessing && _pendingAgentUserMessageId != null;
@@ -443,7 +469,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _subAgentDelegationActive = false;
         }
         _updateAgentStatusLine(line, ensureProcessing: true);
-        AgentSphereMoodBridge.instance.thinking(caption: line);
       }
       if (type == "chat.assistant_chunk") {
         _resetAgentReplyWatchdog();
@@ -459,9 +484,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         if (liveStatus.isNotEmpty) {
           _updateAgentStatusLine(liveStatus);
         }
-        AgentSphereMoodBridge.instance.speaking(
-          caption: chunk.length > 24 ? chunk.substring(chunk.length - 24) : chunk,
-        );
       }
       if (type == "chat.assistant_done") {
         _disarmAgentReplyWatchdog();
@@ -514,8 +536,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           await _store.saveMessage(finalMessage);
         }
         _pendingAgentUserMessageId = null;
-        AgentSphereMoodBridge.instance.happy();
-        return;
       }
       if (type == "agent.peer_message") {
         final String messageId =
@@ -955,6 +975,25 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     await _syncBackgroundTasksBadge();
   }
 
+  void _syncAgentSphereFromWs(String type, Map<String, dynamic> payload) {
+    if (type == "agent.embodiment.command") {
+      AgentSphereMoodBridge.instance.forwardMessage(<String, dynamic>{
+        "type": "agent-sphere:command",
+        "action": payload["action"],
+        if (payload["x"] != null) "x": payload["x"],
+        if (payload["y"] != null) "y": payload["y"],
+        if (payload["z"] != null) "z": payload["z"],
+        if (payload["strength"] != null) "strength": payload["strength"],
+      });
+      return;
+    }
+    final AgentSpherePatch? patch =
+        AgentSphereEmbodimentMapper.mapWsEvent(type, payload);
+    if (patch != null) {
+      AgentSphereMoodBridge.instance.applyEmbodimentPatch(patch);
+    }
+  }
+
   void _sendSessionInit() {
     final Map<String, dynamic> sessionInit = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
@@ -1146,28 +1185,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     "社交推文",
   ];
 
-  /// Windows 桌面启动后自动打开 sphere-overlay 桌宠（Web/其它平台跳过）。
-  Future<void> _maybeLaunchDesktopPet() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
-      return;
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 600));
-    if (!mounted) return;
-    final bool ok = await SphereOverlayLauncher.launch();
-    if (!mounted) return;
-    if (!ok) {
-      final BuildContext? ctx = _rootNavigatorKey.currentContext;
-      if (ctx != null && ctx.mounted) {
-        ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
-          const SnackBar(
-            content: Text("桌宠未启动：请在项目根目录执行 sphere-overlay\\start-overlay.ps1"),
-            duration: Duration(seconds: 4),
-          ),
-        );
-      }
-    }
-  }
-
   void _selectTab(int index) {
     // 社交推文（index 7）：在系统浏览器打开 social-platform，不切换内嵌页
     if (index == 7) {
@@ -1266,7 +1283,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             // 保存注册状态
             _store.saveBiometricRegistrationStatus(true);
             // 生物特征注册完成后，再请求位置权限
-            unawaited(_promptLocationConsentIfNeeded().then((_) => _maybeLaunchDesktopPet()));
+            unawaited(_promptLocationConsentIfNeeded());
           },
         ),
       ),
@@ -1592,19 +1609,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             automaticallyImplyLeading: false,
                             title: _buildAppBarTitle(),
                             actions: <Widget>[
-                              if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows)
+                              if (!kIsWeb &&
+                                  defaultTargetPlatform == TargetPlatform.windows &&
+                                  FloatingAgentSphere.useNativeEntity)
                                 IconButton(
-                                  tooltip: "启动桌面桌宠 Agent",
+                                  tooltip: "召回桌宠到应用槽位",
                                   icon: const Icon(Icons.smart_toy_outlined),
                                   onPressed: () async {
-                                    final bool ok = await SphereOverlayLauncher.launch();
+                                    final bool ok =
+                                        await SphereEntityController.instance.ensureOverlay();
                                     if (!context.mounted) return;
+                                    if (ok) {
+                                      SphereEntityController.instance.onRequestSnapToDock?.call();
+                                      return;
+                                    }
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
+                                      const SnackBar(
                                         content: Text(
-                                          ok
-                                              ? "桌面桌宠已启动"
-                                              : "启动失败：请确认 sphere-overlay 已安装",
+                                          "桌宠未启动：请确认 agent-sphere-avatar 已构建",
                                         ),
                                       ),
                                     );
@@ -1666,8 +1688,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 根级 Tab 栈：新增页请在 `_kTabTitles`、`IndexedStack`、侧栏 `miniTab` 同步索引。
-  /// 3D 球形 Agent 为页面内可拖动悬浮层；Windows 另可 AppBar 启动 sphere-overlay 桌宠。
+  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定 + 桌面漫游）。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -1677,6 +1698,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             ChatPage(
               messages: _messages,
               controller: _inputController,
+              inputFocusNode: _inputFocusNode,
               onSend: _sendMessage,
               agentName: _agentName,
               galleryPendingCount: _pendingGalleryFrames.length,

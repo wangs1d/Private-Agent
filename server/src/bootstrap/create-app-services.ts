@@ -83,6 +83,11 @@ import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
+import { registerEmbodimentTools } from "../tools/embodiment-tools.js";
+import {
+  EmbodimentAutonomyService,
+  initEmbodimentAutonomy,
+} from "../services/embodiment-autonomy-service.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
@@ -97,6 +102,7 @@ import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-too
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
+import { embodimentAlert, embodimentThinking } from "../services/agent-embodiment.js";
 import { formatReminderDisplayMessage } from "../tools/schedule-user-reply.js";
 import { WeatherPrefsService } from "../services/weather-prefs-service.js";
 import { WeatherService } from "../services/weather-service.js";
@@ -158,6 +164,9 @@ export async function createAppServices(): Promise<AppServices> {
 
   const agentRelayService = new AgentRelayService();
   const wsConnectionRegistry = new WsConnectionRegistry();
+  const embodimentAutonomy = new EmbodimentAutonomyService(wsConnectionRegistry);
+  initEmbodimentAutonomy(embodimentAutonomy);
+  registerEmbodimentTools(toolRegistry, wsConnectionRegistry);
 
   scheduleTaskService.setWeatherBriefHandler(async (task) => {
     const prefs = weatherPrefsService.get(task.sessionId);
@@ -206,6 +215,12 @@ export async function createAppServices(): Promise<AppServices> {
           nextRunAt: task.nextRunAt,
         },
       }),
+    );
+    embodimentAlert(
+      task.sessionId,
+      (json) => wsConnectionRegistry.trySend(task.sessionId, json),
+      displayMessage,
+      "schedule.reminder_fired",
     );
     const wakeLike = /起床|叫醒|喊我|叫我/.test(message) || /起床|叫醒|喊我/.test(task.description);
     if (wakeLike) {
@@ -442,6 +457,12 @@ export async function createAppServices(): Promise<AppServices> {
           prompt,
         },
       }),
+    );
+    embodimentThinking(
+      task.sessionId,
+      (json) => wsConnectionRegistry.trySend(task.sessionId, json),
+      task.title || "自动化任务执行中",
+      { phase: "agent_task", source: "schedule.agent_task_fired" },
     );
     const reply = await agentCore.handleUserMessage(task.sessionId, prompt, {
       chatUserMessageId: `schedule:${task.taskId}:${Date.now()}`,

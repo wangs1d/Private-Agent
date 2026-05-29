@@ -1,5 +1,7 @@
 import type { ToolLoopAfterBatchInfo } from "../external-model/types.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
+import { isKvSummaryMinimal } from "../config/memory-env.js";
+import { inferMemoryTopic } from "../agent/memory-topic.js";
 
 type HermesProfile = {
   totalTurns: number;
@@ -119,18 +121,24 @@ export class HermesEvolutionLoopService {
       return profile;
     });
     const shortAssistant = assistantText.replace(/\s+/g, " ").slice(0, 120);
-    this.appendSummary(actorId, `assistantDone user="${userText.slice(0, 64)}" reply="${shortAssistant}"`);
+    this.appendSummary(actorId, `assistantDone user="${userText.slice(0, 64)}" reply="${shortAssistant}"`, userText);
   }
 
-  private appendSummary(actorId: string, line: string): void {
+  private appendSummary(actorId: string, line: string, topicSource?: string): void {
     const compact = line.replace(/\s+/g, " ").trim();
     if (!compact) return;
     const stamped = `HermesLoop: ${compact}`;
-    const ok = this.memory.appendMemorySummaryLine(actorId, stamped);
-    if (ok) this.emitNarrative(actorId, stamped);
+    if (!isKvSummaryMinimal()) {
+      this.memory.appendMemorySummaryLine(actorId, stamped, inferMemoryTopic(topicSource ?? line));
+    }
+    this.emitNarrative(actorId, stamped);
   }
 
   private patchProfile(actorId: string, mutator: (profile: HermesProfile) => HermesProfile): void {
+    void this.patchProfileAsync(actorId, mutator);
+  }
+
+  private async patchProfileAsync(actorId: string, mutator: (profile: HermesProfile) => HermesProfile): Promise<void> {
     for (let i = 0; i < 8; i++) {
       const { revision, entries } = this.memory.getSnapshot(actorId, [
         "hermes_profile",
@@ -147,7 +155,7 @@ export class HermesEvolutionLoopService {
       };
       const next = mutator(profile);
       next.lastUpdatedAt = new Date().toISOString();
-      const r = this.memory.applyPatch(actorId, revision, [
+      const r = await this.memory.applyPatch(actorId, revision, [
         { key: "hermes_profile", op: "put", value: next },
         { key: "persona", op: "put", value: formatPersona(next) },
         { key: "values", op: "put", value: formatValues(next) },

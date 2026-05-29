@@ -5,6 +5,7 @@ import "dart:ui_web" as ui_web;
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/agent_sphere_interact_bridge.dart";
 import "../../core/services/agent_sphere_mood_bridge.dart";
 
 /// Web 平台 — iframe 嵌入 3D Agent
@@ -50,7 +51,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
         ..style.height = "100%"
         ..style.display = "block"
         ..style.backgroundColor = "transparent"
-        ..allow = "autoplay";
+        ..allow = "autoplay; microphone";
       final html.DivElement host = html.DivElement()
         ..style.width = "100%"
         ..style.height = "100%"
@@ -64,10 +65,24 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
     });
 
     AgentSphereMoodBridge.instance.addListener(_onPatch);
+    AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
     html.window.onMessage.listen((html.MessageEvent event) {
-      if (event.data is Map && event.data["type"] == "agent-sphere:ready") {
+      if (event.data is! Map) return;
+      final Map data = event.data as Map;
+      if (data["type"] == "agent-sphere:ready") {
         setState(() => _ready = true);
         AgentSphereMoodBridge.instance.idle();
+        return;
+      }
+      if (data["type"] == "agent-sphere:interact" && data["action"] == "focus") {
+        AgentSphereMoodBridge.instance.requestChatFocus();
+        return;
+      }
+      if (data["type"] == "agent-sphere:send") {
+        AgentSphereInteractBridge.instance.send(
+          data["action"]?.toString() ?? "",
+          text: data["text"]?.toString(),
+        );
       }
     });
   }
@@ -75,11 +90,16 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   @override
   void dispose() {
     AgentSphereMoodBridge.instance.removeListener(_onPatch);
+    AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
     super.dispose();
   }
 
   void _onPatch(AgentSpherePatch patch) {
     _frame?.contentWindow?.postMessage(patch.toJson(), "*");
+  }
+
+  void _onSphereMessage(Map<String, dynamic> message) {
+    _frame?.contentWindow?.postMessage(message, "*");
   }
 
   void _bindDrag(html.DivElement host, html.IFrameElement frame) {

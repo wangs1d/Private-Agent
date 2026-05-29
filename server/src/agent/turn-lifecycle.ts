@@ -10,6 +10,9 @@ import { getShortTermMemoryConfig } from "../services/short-term-memory-config.j
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getTurnWalService } from "../services/turn-wal-service.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { getMemoryManagerService } from "../services/memory-manager-service.js";
+import { isKvSummaryMinimal } from "../config/memory-env.js";
+import { inferMemoryTopic } from "./memory-topic.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -104,9 +107,14 @@ export class TurnLifecycle {
 
     if (signal.isHighSignal) {
       this.ingestFastPath(input.actorId, signal.extractLines);
-      if (this.deps.agentMemorySyncService) {
+      if (this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
+        const topic = inferMemoryTopic(input.userText);
         for (const line of signal.extractLines) {
-          this.deps.agentMemorySyncService.appendMemorySummaryLine(input.actorId, `[fast-path] ${line}`);
+          this.deps.agentMemorySyncService.appendMemorySummaryLine(
+            input.actorId,
+            `[fast-path] ${line}`,
+            topic,
+          );
         }
       }
     }
@@ -120,6 +128,8 @@ export class TurnLifecycle {
 
     this.deps.hermesEvolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
+
+    getMemoryManagerService()?.onTurnCompleted(input.actorId, input.userText, full);
 
     return this.applyQuota(input);
   }

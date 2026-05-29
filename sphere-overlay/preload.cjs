@@ -9,4 +9,7 @@ contextBridge.exposeInMainWorld("sphereOverlay", {
   onPatch: (cb) => {
     ipcRenderer.on("sphere-overlay:patch", (_event, patch) => cb(patch));
   },
+  onRoam: (cb) => {
+    ipcRenderer.on("sphere-overlay:roam", () => cb());
+  },
 });

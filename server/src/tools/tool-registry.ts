@@ -33,6 +33,11 @@ const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
   master_invoke_sub_agent: "master.invoke_sub_agent",
   master_list_sub_agents: "master.list_sub_agents",
   master_poll_sub_agent_tasks: "master.poll_sub_agent_tasks",
+  embodiment_roam: "embodiment.roam",
+  embodiment_move: "embodiment.move",
+  embodiment_stop: "embodiment.stop",
+  embodiment_set_state: "embodiment.set_state",
+  embodiment_window_roam: "embodiment.window_roam",
 };
 
 export function resolveRegistryToolName(name: string): string {

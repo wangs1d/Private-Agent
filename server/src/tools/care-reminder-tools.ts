@@ -91,7 +91,7 @@ export function registerCareReminderTools(
     const updatedDates = [...existingDates, record];
 
     // 保存到记忆
-    const patchResult = agentMemorySyncService.applyPatch(actorId, revision, [
+    const patchResult = await agentMemorySyncService.applyPatch(actorId, revision, [
       { key: "important_dates", op: "put", value: updatedDates },
     ]);
 
@@ -171,7 +171,7 @@ export function registerCareReminderTools(
     const updatedDates = existingDates.filter(d => d.id !== id);
 
     // 更新记忆
-    const patchResult = agentMemorySyncService.applyPatch(actorId, revision, [
+    const patchResult = await agentMemorySyncService.applyPatch(actorId, revision, [
       { key: "important_dates", op: "put", value: updatedDates },
     ]);
 

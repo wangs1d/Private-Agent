@@ -21,6 +21,8 @@ export const ClientEventType = {
   VirtualPhoneUserCall: "phone.user_call_agent",
   /** 用户直接呼叫自己的Agent（无需输入ID，服务端从session推断） */
   VirtualPhoneCallMyAgent: "phone.call_my_agent",
+  /** 球形 Agent 具身交互：唤醒、发消息、聚焦聊天等 */
+  AgentEmbodimentInteract: "agent.embodiment.interact",
 } as const;
 
 export const ServerEventType = {
@@ -50,5 +52,9 @@ export const ServerEventType = {
   DesktopBridgeInvoke: "desktop.bridge.invoke",
   /** 手机端等与 userId 对齐的 WS：电脑桥接在线状态、最近桌面任务结果摘要 */
   DesktopBridgeSync: "desktop.bridge.sync",
+  /** 球形 Agent 权威视觉状态（mood/energy/caption/委派 phase） */
+  AgentEmbodimentPatch: "agent.embodiment.patch",
+  /** 主 Agent 具身控制：3D 漫游、移动、停驻等（球形机器人身体） */
+  AgentEmbodimentCommand: "agent.embodiment.command",
   ErrorEvent: "error.event",
 } as const;

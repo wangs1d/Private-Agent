@@ -11,7 +11,6 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { PersonalizationPromptSlice } from "./user-personalization/user-personalization-service.js";
 import { routeLlmExecution } from "../agent/task-router.js";
-import { getMemoryManagerService } from "./memory-manager-service.js";
 import {
   pickSubAgentDoneLine,
   USER_VISIBLE_PROGRESS_MARKER,
@@ -1146,10 +1145,6 @@ export class MasterAgentCoordinator {
       }
       throw error;
     } finally {
-      const memoryManager = getMemoryManagerService();
-      if (memoryManager) {
-        memoryManager.onTurnCompleted(actorId, userMessage, assistantResult);
-      }
       this.currentTurnUserMessage = null;
       this.currentTurnOrchestrateOpts = null;
       if (this.executionHistory.length > 100) this.executionHistory.shift();

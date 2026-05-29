@@ -1,3 +1,5 @@
+import "dart:io";
+
 import "package:flutter/material.dart";
 
 import "../../core/models/chat_models.dart";
@@ -26,10 +28,12 @@ class ChatPage extends StatefulWidget {
     this.onOpenBackgroundTasks,
     this.backgroundTasksBadgeCount = 0,
     this.onOpenPhoneDialer,
+    this.inputFocusNode,
   });
 
   final List<ChatMessage> messages;
   final TextEditingController controller;
+  final FocusNode? inputFocusNode;
   final VoidCallback onSend;
   /// 用户给agent起的名字
   final String? agentName;
@@ -75,8 +79,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   @override
   void initState() {
     super.initState();
-    // 预初始化语音服务
-    _speechService.initialize();
+    // Windows SAPI 在启动阶段预初始化会触发原生崩溃 (0xC0000409)，改为用户点麦克风时按需初始化
+    if (!Platform.isWindows) {
+      _speechService.initialize();
+    }
     // 初始化呼吸动画
     _breathingController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -847,6 +853,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   flex: 3,
                                   child: TextField(
                                     controller: widget.controller,
+                                    focusNode: widget.inputFocusNode,
                                     style: TextStyle(color: cs.onSurface),
                                     cursorColor: cs.primary,
                                     maxLines: null,

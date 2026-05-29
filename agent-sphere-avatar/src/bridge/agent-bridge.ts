@@ -4,9 +4,9 @@
  * 示例（在主项目 Web 壳中）：
  *   window.dispatchEvent(new CustomEvent('agent-sphere:set-mood', { detail: { mood: 'listening' } }));
  */
-import type { AgentMood } from "../types/agent";
+import type { AgentMood, EmbodimentCommand } from "../types/agent";
 
-export type { AgentMood, AgentState } from "../types/agent";
+export type { AgentMood, AgentState, EmbodimentCommand } from "../types/agent";
 export { DEFAULT_AGENT_STATE } from "../types/agent";
 export { SphereAgentScene } from "../components/SphereAgentScene";
 export { SphereAgent } from "../components/SphereAgent";
@@ -15,6 +15,7 @@ export { useAgentState } from "../hooks/useAgentState";
 const MOOD_EVENT = "agent-sphere:set-mood";
 const ENERGY_EVENT = "agent-sphere:set-energy";
 const CAPTION_EVENT = "agent-sphere:set-caption";
+const COMMAND_EVENT = "agent-sphere:command";
 
 export interface AgentBridgeHandlers {
   onMood?: (mood: AgentMood) => void;
@@ -57,4 +58,17 @@ export function emitAgentEnergy(energy: number) {
 
 export function emitAgentCaption(caption: string) {
   window.dispatchEvent(new CustomEvent(CAPTION_EVENT, { detail: { caption } }));
+}
+
+export function dispatchEmbodimentCommand(command: EmbodimentCommand) {
+  window.dispatchEvent(new CustomEvent(COMMAND_EVENT, { detail: command }));
+}
+
+export function bindEmbodimentCommand(handler: (command: EmbodimentCommand) => void): () => void {
+  const onCommand = (e: Event) => {
+    const cmd = (e as CustomEvent<EmbodimentCommand>).detail;
+    if (cmd?.action) handler(cmd);
+  };
+  window.addEventListener(COMMAND_EVENT, onCommand);
+  return () => window.removeEventListener(COMMAND_EVENT, onCommand);
 }

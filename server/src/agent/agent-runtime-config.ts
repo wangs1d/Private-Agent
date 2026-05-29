@@ -119,7 +119,7 @@ function loadMemoryPromptConfig(): MemoryPromptConfig {
   return {
     narrativeRecallTimeoutMs: Math.min(
       3000,
-      Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 600)),
+      Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 400)),
     ),
     worldCapsInPrompt,
     promptMemoryKeys,

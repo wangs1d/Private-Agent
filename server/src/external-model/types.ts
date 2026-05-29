@@ -55,6 +55,8 @@ export type AgentPromptMemoryContext = {
   dailyDigest?: string;
   /** 后台记忆管理服务自动合成的用户长期画像（偏好/话题/意图/风险标记） */
   userProfileSummary?: string;
+  /** 短句追问时锚定上一轮对话，避免跨话题串台 */
+  followUpAnchor?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

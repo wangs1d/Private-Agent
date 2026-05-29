@@ -31,7 +31,7 @@ export class AgentEvolutionMemoryService {
   ): void {
     if (!this.shouldAppendKvSummary()) return;
     const line = `世界入账 +${ev.amount}（${ev.reason}），余额 ${ev.balanceAfter}`;
-    this.memory.appendMemorySummaryLine(actorId, line);
+    this.memory.appendMemorySummaryLine(actorId, line, "world");
   }
 
   appendSkillPurchaseLine(
@@ -40,6 +40,6 @@ export class AgentEvolutionMemoryService {
   ): void {
     if (!this.shouldAppendKvSummary()) return;
     const line = `购买技能「${ev.displayName}」（${ev.skillId}）花费 ${ev.pricePaid} 点，余额 ${ev.balanceAfter}`;
-    this.memory.appendMemorySummaryLine(actorId, line);
+    this.memory.appendMemorySummaryLine(actorId, line, "world");
   }
 }

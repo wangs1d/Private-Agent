@@ -1,5 +1,5 @@
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 
@@ -20,29 +20,56 @@ export function useAutonomousMotion({
   const target = useRef(new THREE.Vector3(0, 1.6, 0));
   const position = useRef(new THREE.Vector3(0, 1.6, 0));
   const nextRetargetAt = useRef(0);
+  const enabledRef = useRef(enabled);
+  const strengthRef = useRef(strength);
+  enabledRef.current = enabled;
+  strengthRef.current = strength;
 
-  useEffect(() => {
+  const pickRandomTarget = useCallback(() => {
     target.current.set(
       (Math.random() - 0.5) * bounds,
       1.4 + Math.random() * 0.8,
       (Math.random() - 0.5) * bounds,
     );
+    nextRetargetAt.current = 0;
+  }, [bounds]);
+
+  const setTarget = useCallback(
+    (x: number, y: number, z: number) => {
+      target.current.set(
+        Math.max(-bounds, Math.min(bounds, x)),
+        Math.max(0.9, Math.min(2.6, y)),
+        Math.max(-bounds, Math.min(bounds, z)),
+      );
+      nextRetargetAt.current = 0;
+    },
+    [bounds],
+  );
+
+  const stopMotion = useCallback(() => {
+    enabledRef.current = false;
+    api.velocity.set(0, 0, 0);
+    api.angularVelocity.set(0, 0, 0);
+  }, [api]);
+
+  const resumeMotion = useCallback(() => {
+    enabledRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    pickRandomTarget();
     const unsub = api.position.subscribe((p) => {
       position.current.set(p[0], p[1], p[2]);
     });
     return unsub;
-  }, [api, bounds]);
+  }, [api, pickRandomTarget]);
 
   useFrame(({ clock }) => {
-    if (!enabled) return;
+    if (!enabledRef.current) return;
     const t = clock.elapsedTime;
 
     if (t > nextRetargetAt.current) {
-      target.current.set(
-        (Math.random() - 0.5) * bounds,
-        1.2 + Math.random() * 1.1,
-        (Math.random() - 0.5) * bounds,
-      );
+      pickRandomTarget();
       nextRetargetAt.current = t + 2.5 + Math.random() * 3.5;
     }
 
@@ -56,11 +83,15 @@ export function useAutonomousMotion({
       Math.cos(t * 0.75) * 0.35,
     );
 
-    const force = dir.multiplyScalar(0.55 * strength).add(wander.multiplyScalar(0.25 * strength));
+    const force = dir
+      .multiplyScalar(0.55 * strengthRef.current)
+      .add(wander.multiplyScalar(0.25 * strengthRef.current));
     api.applyForce([force.x, force.y + 1.8, force.z], [0, 0, 0]);
 
     if (dist < 0.25) {
       nextRetargetAt.current = t;
     }
   });
+
+  return { pickRandomTarget, setTarget, stopMotion, resumeMotion };
 }

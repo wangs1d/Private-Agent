@@ -3,7 +3,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 const WIDTH = 300;
-const HEIGHT = 340;
+const HEIGHT = 380;
 let mainWindow = null;
 let tray = null;
 
@@ -55,6 +55,14 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (permission === "media") {
+      callback(true);
+      return;
+    }
+    callback(false);
   });
 
   mainWindow.setAlwaysOnTop(true, "screen-saver");
