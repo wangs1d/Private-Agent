@@ -37,8 +37,10 @@ import { resolveUserLocationPrompt } from "../services/user-location-service.js"
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
 import { routeLlmExecution, type LlmExecutionMode } from "../agent/task-router.js";
+import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
+import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 
@@ -284,7 +286,7 @@ export class AgentCore {
     
     // 响应缓存检查（性能优化：重复查询 <100ms）
     const cacheEnabled = process.env.RESPONSE_CACHE_ENABLED !== '0';
-    if (cacheEnabled && !opts?.visionFrames?.length) {
+    if (cacheEnabled && !opts?.visionFrames?.length && !isAmbiguousFollowUpMessage(text)) {
       const cachedResponse = globalResponseCache.get(text, actorId);
       if (cachedResponse) {
         this.turnLifecycle.finalizeTurn({ 
@@ -637,6 +639,11 @@ export class AgentCore {
       ...(opts?.visionFrames?.length ? { visionFrames: opts.visionFrames } : {}),
     };
 
+    const chatSessionId = resolvePrimaryChatSessionId(
+      actorId,
+      getAgentRuntimeConfig().masterDelegation.enabled,
+    );
+
     if (peUsed) {
       const chatKey = opts?.chatUserMessageId ?? randomUUID();
       const peSessionId = planExecuteSessionId(actorId, chatKey);
@@ -656,20 +663,21 @@ export class AgentCore {
       pePlan = result.plan;
       peExhausted = result.exhaustedRetries;
       provider.clearSession?.(peSessionId);
-      provider.appendThreadTurn?.(actorId, userTurn, full);
+      provider.appendThreadTurn?.(chatSessionId, userTurn, full);
     } else {
       const mergedStreamOpts: AgentStreamOptions | undefined =
-        streamOpts || onBatchWithEvolution || opts
+        streamOpts || onBatchWithEvolution || opts || provider.id === "moonshot-kimi"
           ? {
               ...(streamOpts ?? {}),
               ...(onBatchWithEvolution ? { toolLoop: { onAfterToolBatch: onBatchWithEvolution } } : {}),
               agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
               desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
+              ...(provider.id === "moonshot-kimi" ? { disableThinking: true } : {}),
             }
           : undefined;
 
       full = await provider.streamCompletion(
-        actorId,
+        chatSessionId,
         userTurn,
         (delta) => opts?.onAssistantDelta?.(delta),
         toolCtx,

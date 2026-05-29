@@ -168,9 +168,9 @@ class _WorldHubPageState extends State<WorldHubPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text("")),
-      body: Row(
-        children: [
-          Expanded(
+      body: Stack(
+        children: <Widget>[
+          Positioned.fill(
             child: RefreshIndicator(
               onRefresh: _refresh,
               child: ListView(

@@ -67,7 +67,7 @@ export function registerProtocolUnifiedTools(
     if (!parsed.success) throw new Error(`${UnifiedErrorCode.ValidationError}: ${parsed.error.message}`);
     const cached = unifiedIdempotencyService.get(actorId, "protocol.unified.memory_patch", parsed.data.requestId);
     if (cached) return { ...cached, deduped: true };
-    const patchResult = agentMemorySyncService.applyPatch(
+    const patchResult = await agentMemorySyncService.applyPatch(
       actorId,
       parsed.data.basisRevision,
       parsed.data.patches,

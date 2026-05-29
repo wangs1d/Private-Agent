@@ -5,10 +5,11 @@ function envBool(name: string, defaultOn: boolean): boolean {
   return true;
 }
 
-/** UAP `memory_summary` 追加模式：`minimal` 时跳过 KV 流水（细节由 Mem0 记忆图承担）。 */
+/** UAP `memory_summary` 追加模式：`minimal` 时跳过 KV 流水（细节由 Mem0 记忆图承担）。默认 minimal。 */
 export function getKvSummaryAppendMode(): "full" | "minimal" {
   const raw = process.env.AGENT_KV_SUMMARY_APPEND_MODE?.trim().toLowerCase();
-  return raw === "minimal" ? "minimal" : "full";
+  if (!raw) return "minimal";
+  return raw === "full" ? "full" : "minimal";
 }
 
 export function isKvSummaryMinimal(): boolean {

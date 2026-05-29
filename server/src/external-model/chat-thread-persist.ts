@@ -3,6 +3,11 @@ import { dirname, join } from "node:path";
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
+import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import { MASTER_CHAT_SESSION_PREFIX } from "../agent/master-chat-session.js";
+import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
+import { compactValidChatMessages, repairKimiAssistantToolCallReasoning } from "./chat-thread-sanitize.js";
+
 const PE_SESSION_MARKER = "\u007fpe\u007f";
 
 type PersistedSession = {
@@ -40,6 +45,14 @@ export function shouldPersistChatThread(sessionId: string): boolean {
   if (id.startsWith("subagent-")) return false;
   if (id.includes(PE_SESSION_MARKER)) return false;
   if (id.startsWith("master-delegate:")) return false;
+  // 主 Agent 模式下裸 actorId 线程已废弃，避免与 master:{actorId} 分裂
+  if (
+    getAgentRuntimeConfig().masterDelegation.enabled &&
+    !id.startsWith(MASTER_CHAT_SESSION_PREFIX) &&
+    !id.includes(":")
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -54,10 +67,16 @@ function tailMessages(
 
   while (i >= 0) {
     const msg = messages[i];
+    if (!msg || typeof msg.role !== "string") {
+      i--;
+      continue;
+    }
     if (msg.role === "tool") {
       const group: ChatCompletionMessageParam[] = [];
-      while (i >= 0 && messages[i].role === "tool") {
-        group.unshift(messages[i]);
+      while (i >= 0) {
+        const toolMsg = messages[i];
+        if (!toolMsg || toolMsg.role !== "tool") break;
+        group.unshift(toolMsg);
         i--;
       }
       if (i >= 0 && messages[i].role === "assistant") {
@@ -109,10 +128,39 @@ export class ChatThreadPersistence {
       const parsed = JSON.parse(raw) as PersistedShape;
       if (parsed?.sessions && typeof parsed.sessions === "object") {
         this.data = parsed;
+        this.migrateSplitActorThreads();
       }
     } catch (e: unknown) {
       const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
       if (code !== "ENOENT") throw e;
+    }
+  }
+
+  /** 将裸 actorId 线程合并进 `master:{actorId}` 并落盘一次。 */
+  private migrateSplitActorThreads(): void {
+    const masterIds = Object.keys(this.data.sessions).filter((id) =>
+      id.startsWith(MASTER_CHAT_SESSION_PREFIX),
+    );
+    let changed = false;
+    for (const masterId of masterIds) {
+      const actorId = masterId.slice(MASTER_CHAT_SESSION_PREFIX.length);
+      if (!actorId) continue;
+      const rawRow = this.data.sessions[actorId];
+      const masterRow = this.data.sessions[masterId];
+      if (!rawRow?.messages?.length) continue;
+      const merged = mergeActorThreadIntoMasterThread(
+        rawRow.messages,
+        masterRow?.messages ?? [],
+      );
+      this.data.sessions[masterId] = {
+        updatedAt: new Date().toISOString(),
+        messages: merged,
+      };
+      delete this.data.sessions[actorId];
+      changed = true;
+    }
+    if (changed) {
+      void this.flushToDisk();
     }
   }
 
@@ -125,7 +173,9 @@ export class ChatThreadPersistence {
       row.messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool"),
       max,
     );
-    const sanitized = this.sanitizeRestoredToolChain(raw);
+    const sanitized = repairKimiAssistantToolCallReasoning(
+      this.sanitizeRestoredToolChain(raw),
+    );
     if (sanitized.length !== raw.length) {
       console.warn(
         `[chat-thread-persist] Session ${sessionId}: sanitized ${raw.length - sanitized.length} ` +

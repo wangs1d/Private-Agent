@@ -9,6 +9,7 @@ import {
 import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
 import type { ToolExecutedInfo, ToolExecuteStartInfo } from "../external-model/types.js";
 import { ServerEventType } from "../protocol.js";
+import { embodimentThinking } from "../services/agent-embodiment.js";
 import { isScheduleCreateToolName } from "../tools/schedule-tool-names.js";
 
 export type ChatToolWireContext = {
@@ -19,6 +20,12 @@ export type ChatToolWireContext = {
 };
 
 function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload): void {
+  embodimentThinking(ctx.sessionId, ctx.send, status.line, {
+    phase: status.phase,
+    subAgentType: status.agentType,
+    subAgentDisplayName: status.subAgentDisplayName,
+    source: status.toolName ? "tool" : "delegate",
+  });
   ctx.send(
     JSON.stringify({
       type: ServerEventType.ChatAgentStatus,
@@ -38,6 +45,12 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
 
 export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecuteStartInfo): void {
   const userStatusLine = pickToolUserStatusLine(info.input, info.assistantPreamble);
+  if (userStatusLine) {
+    embodimentThinking(ctx.sessionId, ctx.send, userStatusLine, {
+      phase: "tool_start",
+      source: "tool",
+    });
+  }
   ctx.send(
     JSON.stringify({
       type: ServerEventType.ToolCall,

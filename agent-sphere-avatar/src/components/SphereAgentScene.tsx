@@ -16,12 +16,18 @@ interface SphereAgentSceneProps {
   onEyeInteractionChange?: (active: boolean) => void;
 }
 
-function Ground({ visible }: { visible: boolean }) {
-  if (!visible) return null;
+function Ground({ visible, invisibleCollision }: { visible: boolean; invisibleCollision?: boolean }) {
+  if (!visible && !invisibleCollision) return null;
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
-      <planeGeometry args={[20, 20]} />
-      <meshStandardMaterial color="#0a0c12" metalness={0.2} roughness={0.85} />
+      <planeGeometry args={[invisibleCollision ? 8 : 20, invisibleCollision ? 8 : 20]} />
+      <meshStandardMaterial
+        color="#0a0c12"
+        metalness={0.2}
+        roughness={0.85}
+        transparent={!!invisibleCollision}
+        opacity={invisibleCollision ? 0 : 1}
+      />
     </mesh>
   );
 }
@@ -40,6 +46,7 @@ export function SphereAgentScene({
   const isEmbed = mode === "embed";
   const transparentBg = isOverlay || isEmbed;
   const isDemo = mode === "demo";
+  const scenePhysics = physics && (isDemo || isEmbed);
 
   return (
     <Canvas
@@ -90,15 +97,15 @@ export function SphereAgentScene({
       )}
 
       <Physics
-        gravity={isEmbed || isOverlay ? [0, 0, 0] : [0, -9.82, 0]}
+        gravity={isOverlay ? [0, 0, 0] : isEmbed ? [0, -5.5, 0] : [0, -9.82, 0]}
         allowSleep={!autonomous}
       >
-        <Ground visible={isDemo} />
+        <Ground visible={isDemo} invisibleCollision={isEmbed} />
         <SphereAgent
           state={state}
           onEyeFocus={onEyeFocus}
           onEyeClick={onEyeClick}
-          physics={physics}
+          physics={scenePhysics}
           autonomous={autonomous}
           onEyeInteractionChange={onEyeInteractionChange}
         />

@@ -107,7 +107,7 @@ export class MemoryManagerService {
 
       if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
         const newSummary = trimmed.join("\n").slice(-this.config.maxSummaryChars);
-        const patchResult = this.memorySync.applyPatch(actorId, revision, [
+        const patchResult = await this.memorySync.applyPatch(actorId, revision, [
           { key: "memory_summary", op: "put", value: newSummary },
         ]);
         result.summaryUpdated = patchResult.ok;

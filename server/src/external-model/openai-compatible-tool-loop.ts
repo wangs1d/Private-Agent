@@ -8,6 +8,7 @@ import type {
 import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
+import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
@@ -16,6 +17,11 @@ import {
   MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
 } from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
+import {
+  compactValidChatMessages,
+  isAssistantWithToolCalls,
+  repairKimiAssistantToolCallReasoning,
+} from "./chat-thread-sanitize.js";
 import type {
   ChatToolExecutionContext,
   StreamDeltaHandler,
@@ -125,6 +131,12 @@ function stripReasoningContentFromMessages(
   messages: ChatCompletionMessageParam[],
 ): ChatCompletionMessageParam[] {
   return messages.map((msg) => {
+    // Kimi k2.5：关闭 thinking 时，带 tool_calls 的 assistant 仍须保留 reasoning_content 占位
+    if (isAssistantWithToolCalls(msg)) {
+      const rc = (msg as { reasoning_content?: string }).reasoning_content;
+      if (typeof rc === "string" && rc.trim()) return msg;
+      return { ...msg, reasoning_content: " " } as unknown as ChatCompletionMessageParam;
+    }
     if (!("reasoning_content" in msg)) return msg;
     const { reasoning_content: _removed, ...rest } = msg as ChatCompletionMessageParam & {
       reasoning_content?: string;
@@ -137,11 +149,12 @@ function sanitizeMessagesForApi(
   messages: ChatCompletionMessageParam[],
   opts?: { stripReasoning?: boolean },
 ): ChatCompletionMessageParam[] {
+  let filtered = compactValidChatMessages(messages);
   const validToolCallIds = new Set<string>();
   const assistantIndicesWithToolCalls = new Set<number>();
 
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
+  for (let i = 0; i < filtered.length; i++) {
+    const msg = filtered[i];
     if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
       const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
       if (toolCalls.length > 0) {
@@ -154,7 +167,7 @@ function sanitizeMessagesForApi(
   }
 
   const matchedToolCallIds = new Set<string>();
-  for (const msg of messages) {
+  for (const msg of filtered) {
     if (msg.role === "tool") {
       const tcId = (msg as { tool_call_id?: string }).tool_call_id;
       if (tcId && validToolCallIds.has(tcId)) {
@@ -163,7 +176,7 @@ function sanitizeMessagesForApi(
     }
   }
 
-  let filtered = messages.filter((msg, idx) => {
+  filtered = filtered.filter((msg) => {
     if (msg.role !== "tool") return true;
     const tcId = (msg as { tool_call_id?: string }).tool_call_id;
     if (!tcId) {
@@ -179,15 +192,17 @@ function sanitizeMessagesForApi(
       return false;
     }
     return true;
-  }).filter((msg, idx) => {
+  }).filter((msg) => {
     if (msg.role !== "assistant") return true;
-    if (!assistantIndicesWithToolCalls.has(idx)) return true;
-    const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
-    const hasUnmatchedCall = toolCalls.some((tc) => !matchedToolCallIds.has(tc.id));
+    const toolCalls = (msg as { tool_calls?: ChatCompletionMessageToolCall[] }).tool_calls;
+    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return true;
+    const hasUnmatchedCall = toolCalls.some(
+      (tc) => tc.id && !matchedToolCallIds.has(tc.id),
+    );
     if (hasUnmatchedCall) {
       console.warn(
         `[openai-tool-loop] Dropping orphan assistant message with unmatched tool_calls ` +
-        `(index=${idx}, call_ids=${toolCalls.map((tc) => tc.id).join(",")}). ` +
+        `(call_ids=${toolCalls.map((tc) => tc.id).join(",")}). ` +
         `Some tool calls have no corresponding tool results.`,
       );
       return false;
@@ -196,6 +211,8 @@ function sanitizeMessagesForApi(
   });
   if (opts?.stripReasoning) {
     filtered = stripReasoningContentFromMessages(filtered);
+  } else {
+    filtered = repairKimiAssistantToolCallReasoning(filtered);
   }
   return filtered;
 }
@@ -624,7 +641,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.list_tasks",
       description:
-        "【内置 Calendar】查询当前用户已创建的定时日程/提醒（含下次执行时间），便于在对话中确认或避免重复创建。",
+        "【内置 Calendar】查询当前用户已创建的定时日程/提醒（含下次执行时间）。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问（应结合对话线程上一轮回复作答）。",
       parameters: {
         type: "object",
         properties: {
@@ -821,7 +838,7 @@ const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           domain: {
             type: "string",
-            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "self_programming", "agent_account", "world", "all"],
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "self_programming", "agent_account", "world", "embodiment", "all"],
             description:
               "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, self_programming=自我编程, agent_account=账号注册, world=Agent World。",
           },
@@ -849,6 +866,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...VISION_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
+    ...EMBODIMENT_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
     ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
@@ -936,7 +954,13 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   }
 ];
 
-const ALWAYS_INCLUDED_TOOLS = ['clock.get_current_time', 'agent.query_capabilities'];
+const ALWAYS_INCLUDED_TOOLS = [
+  'clock.get_current_time',
+  'agent.query_capabilities',
+  'embodiment.roam',
+  'embodiment.move',
+  'embodiment.set_state',
+];
 
 function extractKeywords(text: string): string[] {
   const cleaned = text.toLowerCase()

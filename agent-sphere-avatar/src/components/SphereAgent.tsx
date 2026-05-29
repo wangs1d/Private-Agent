@@ -1,13 +1,13 @@
 import { useSphere } from "@react-three/cannon";
-import { useRef, type Ref } from "react";
+import { Suspense, useEffect, useRef, type Ref } from "react";
 import * as THREE from "three";
+import { bindEmbodimentCommand } from "../bridge/agent-bridge";
 import { MODEL } from "../constants/model-proportions";
 import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
 import { useVisualFloat } from "../hooks/useVisualFloat";
-import type { AgentState } from "../types/agent";
-import { BreathingShell } from "./BreathingShell";
+import type { AgentState, EmbodimentCommand } from "../types/agent";
+import { DG2RobotModel } from "./DG2RobotModel";
 import { EyeScreen } from "./EyeScreen";
-import { SideEars } from "./SideEars";
 
 interface SphereAgentProps {
   state: AgentState;
@@ -18,7 +18,7 @@ interface SphereAgentProps {
   onEyeInteractionChange?: (active: boolean) => void;
 }
 
-/** 深灰金属球形机器人 — 4耳 + 大黑玻璃穹顶 + 内部眼睛光标 */
+/** DG2 深灰金属球形机器人 — OBJ 一比一还原 */
 export function SphereAgent({
   state,
   onEyeFocus,
@@ -39,23 +39,58 @@ export function SphereAgent({
     material: { friction: 0.35, restitution: 0.22 },
   }));
 
-  useAutonomousMotion({
+  const motionStrength =
+    state.mood === "speaking" ? 1.35 : state.mood === "thinking" ? 0.85 : 1;
+
+  const { pickRandomTarget, setTarget, stopMotion, resumeMotion } = useAutonomousMotion({
     api,
     enabled: physics && autonomous,
     bounds: 2.4,
-    strength: state.mood === "speaking" ? 1.35 : state.mood === "thinking" ? 0.85 : 1,
+    strength: motionStrength,
   });
 
   useVisualFloat(visualRef, !physics && autonomous);
 
+  useEffect(() => {
+    const handleCommand = (cmd: EmbodimentCommand) => {
+      switch (cmd.action) {
+        case "roam":
+          if (physics) {
+            resumeMotion();
+            if (typeof cmd.strength === "number") {
+              /* strength applied on next frame via parent mood; pick new target */
+            }
+            pickRandomTarget();
+          } else if (window.sphereOverlay?.roamNow) {
+            void window.sphereOverlay.roamNow();
+          }
+          break;
+        case "move":
+          if (physics && cmd.x != null && cmd.z != null) {
+            resumeMotion();
+            setTarget(cmd.x, cmd.y ?? 1.6, cmd.z);
+          }
+          break;
+        case "stop":
+          if (physics) stopMotion();
+          break;
+        case "window_roam":
+          window.sphereOverlay?.roamNow?.();
+          break;
+        default:
+          break;
+      }
+    };
+    return bindEmbodimentCommand(handleCommand);
+  }, [physics, pickRandomTarget, setTarget, stopMotion, resumeMotion]);
+
   return (
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
-        <BreathingShell radius={MODEL.bodyRadius} energy={state.energy} />
-        <SideEars radius={MODEL.bodyRadius} />
+        <Suspense fallback={null}>
+          <DG2RobotModel energy={state.energy} focused={state.focused} />
+        </Suspense>
         <EyeScreen
-          mood={state.mood}
-          focused={state.focused}
           onPointerOver={() => onEyeFocus?.(true)}
           onPointerOut={() => onEyeFocus?.(false)}
           onClick={() => onEyeClick?.()}

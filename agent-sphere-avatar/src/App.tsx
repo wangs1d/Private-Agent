@@ -67,7 +67,6 @@ export default function App() {
       <footer className="hud-footer">
         <span className="badge">{state.mood}</span>
         {state.focused && <span className="hint">眼睛区域已聚焦 — 点击切换状态</span>}
-        {state.caption && <span className="caption">{state.caption}</span>}
         <span className="hint muted">空格键 / 点击曲屏眼 切换 Agent 状态</span>
       </footer>
     </div>

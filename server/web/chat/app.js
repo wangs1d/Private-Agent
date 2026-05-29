@@ -307,19 +307,75 @@ function initAvatarFrame() {
   window.addEventListener("pointercancel", endDrag);
 }
 
-/** 向嵌入的 3D Agent 形象同步状态（LLM 流式 → thinking / speaking） */
+/** 向嵌入的 3D Agent 形象同步状态（服务端 embodiment.patch 或聊天事件） */
 function patchAvatar(patch) {
   const frame = getAvatarFrame();
   if (!frame?.contentWindow || !avatarReady) return;
   frame.contentWindow.postMessage({ type: "agent-sphere:patch", ...patch }, "*");
 }
 
+function applyEmbodimentPatch(p) {
+  patchAvatar({
+    mood: p.mood,
+    energy: p.energy,
+    caption: p.caption === null ? undefined : p.caption,
+    phase: p.phase,
+    subAgentType: p.subAgentType,
+    subAgentDisplayName: p.subAgentDisplayName,
+    source: p.source,
+  });
+  if (p.mood === "happy") {
+    setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1800);
+  }
+}
+
 window.addEventListener("message", (ev) => {
   if (ev.data?.type === "agent-sphere:ready") {
     avatarReady = true;
     patchAvatar({ mood: "idle", energy: 0.5 });
+    return;
+  }
+  if (ev.data?.type === "agent-sphere:interact" && ev.data.action === "focus") {
+    inputEl?.focus();
+    inputEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return;
+  }
+  if (ev.data?.type === "agent-sphere:send" && ws?.readyState === WebSocket.OPEN) {
+    const sid = sessionId();
+    const action = ev.data.action;
+    const text = ev.data.text;
+    ws.send(
+      JSON.stringify({
+        type: "agent.embodiment.interact",
+        payload: {
+          sessionId: sid,
+          userId: sid,
+          action,
+          ...(text ? { text } : {}),
+        },
+      }),
+    );
+    if (action === "wake" || action === "chat") {
+      patchAvatar({ mood: "listening", caption: "正在聆听…", energy: 0.65 });
+    }
   }
 });
+
+function forwardEmbodimentCommand(p) {
+  const frame = getAvatarFrame();
+  if (!frame?.contentWindow || !avatarReady) return;
+  frame.contentWindow.postMessage(
+    {
+      type: "agent-sphere:command",
+      action: p.action,
+      x: p.x,
+      y: p.y,
+      z: p.z,
+      strength: p.strength,
+    },
+    "*",
+  );
+}
 
 function sessionId() {
   let id = localStorage.getItem(SESSION_KEY);
@@ -449,8 +505,19 @@ function handleWs(msg) {
   const type = msg.type;
   const p = msg.payload ?? {};
 
+  if (type === "agent.embodiment.patch") {
+    applyEmbodimentPatch(p);
+    return;
+  }
+
+  if (type === "agent.embodiment.command") {
+    forwardEmbodimentCommand(p);
+    return;
+  }
+
   if (type === "agent.phone.incoming") {
     showPhoneIncoming(p);
+    patchAvatar({ mood: "alert", caption: "来电", energy: 0.9 });
     return;
   }
 
@@ -541,6 +608,24 @@ function handleWs(msg) {
     syncAgentProcessingUi(false);
     setStatus(String(p.message ?? "错误"));
     patchAvatar({ mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85 });
+    return;
+  }
+
+  if (type === "schedule.reminder_fired") {
+    const reminderMsg = String(p.message ?? p.title ?? "提醒").trim();
+    patchAvatar({ mood: "alert", caption: reminderMsg, energy: 0.9 });
+    return;
+  }
+
+  if (type === "schedule.agent_task_fired") {
+    const title = String(p.title ?? "自动化任务").trim();
+    patchAvatar({ mood: "thinking", caption: title, energy: 0.75, phase: "agent_task" });
+    return;
+  }
+
+  if (type === "agent.peer_message") {
+    const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
+    patchAvatar({ mood: "alert", caption: preview, energy: 0.82 });
   }
 }
 

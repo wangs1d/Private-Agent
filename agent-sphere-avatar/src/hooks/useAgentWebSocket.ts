@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   mapProcessingIdle,
   mapUserMessageSent,
   mapWsToAgentUpdate,
   resetWsMapperState,
 } from "../bridge/ws-agent-mapper";
-import type { AgentState } from "../types/agent";
+import { relayEmbodimentCommandFromWs } from "./useEmbodimentCommandRelay";
+import type { AgentState, EmbodimentInteractAction } from "../types/agent";
 import { DEFAULT_AGENT_STATE } from "../types/agent";
 
 function resolveWsUrl(explicit?: string): string {
@@ -46,12 +47,14 @@ export function useAgentWebSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const applyRef = useRef(apply);
+  const sessionRef = useRef(resolveSessionId(sessionId));
   applyRef.current = apply;
+  sessionRef.current = resolveSessionId(sessionId);
 
   useEffect(() => {
     if (!enabled) return;
 
-    const sid = resolveSessionId(sessionId);
+    const sid = sessionRef.current;
     const url = resolveWsUrl(wsUrl);
     resetWsMapperState();
     applyRef.current({ ...DEFAULT_AGENT_STATE });
@@ -85,6 +88,11 @@ export function useAgentWebSocket(
           return;
         }
 
+        if (msg.type === "agent.embodiment.command") {
+          relayEmbodimentCommandFromWs(msg.payload ?? {});
+          return;
+        }
+
         const patch = mapWsToAgentUpdate(msg);
         if (patch) {
           applyRef.current(patch);
@@ -104,5 +112,40 @@ export function useAgentWebSocket(
     };
   }, [enabled, wsUrl, sessionId, onConnected, onDisconnected]);
 
-  return { connected, sessionId: resolveSessionId(sessionId) };
+  const sendInteract = useCallback(
+    (action: EmbodimentInteractAction, text?: string) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      const sid = sessionRef.current;
+      ws.send(
+        JSON.stringify({
+          type: "agent.embodiment.interact",
+          payload: {
+            sessionId: sid,
+            userId: sid,
+            action,
+            ...(text ? { text } : {}),
+          },
+        }),
+      );
+      if (action === "wake" || action === "chat") {
+        applyRef.current(mapUserMessageSent());
+      }
+      return true;
+    },
+    [],
+  );
+
+  const sendWake = useCallback(() => sendInteract("wake"), [sendInteract]);
+  const sendChat = useCallback((text: string) => sendInteract("chat", text), [sendInteract]);
+  const sendFocus = useCallback(() => sendInteract("focus"), [sendInteract]);
+
+  return {
+    connected,
+    sessionId: sessionRef.current,
+    sendInteract,
+    sendWake,
+    sendChat,
+    sendFocus,
+  };
 }

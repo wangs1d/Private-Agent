@@ -1,28 +1,45 @@
-/** 参考深灰金属球形机器人 — 拉丝金属质感 + 4耳 + 大黑玻璃穹顶 */
+/**
+ * DG2.obj 参考模型比例 — Autodesk 导出，主体半径 5，直径 10
+ * 场景内统一缩放到 bodyRadius
+ */
+export const DG2_SOURCE = {
+  bodyRadius: 5,
+  bodyCenterY: 1,
+  /** 玻璃面中心（OBJ 坐标，Y 轴负向为前面） */
+  glassCenter: [0, -4, 0] as const,
+  sideEarCenterX: 5.17,
+  topEarCenters: [
+    [3.088, 2.421, 3.056],
+    [-3.056, 2.421, 3.088],
+  ] as const,
+} as const;
+
+/** 缩放后场景常量（bodyRadius = 0.5 → scale = 0.1） */
 export const MODEL = {
   bodyRadius: 0.5,
-  /** 前部大黑玻璃穹顶 */
-  domeRadius: 0.58,
-  domeZ: 0.72,
-  domePhiLength: 0.52,
-  /** 两侧大耳朵 */
-  sideEarX: 0.94,
-  sideEarRadius: 0.12,
-  sideEarLength: 0.20,
-  sideEarY: 0,
-  /** 顶部前后小耳朵 */
-  topEarY: 0.88,
-  topEarFrontX: 0.28,
-  topEarBackX: -0.28,
-  topEarRadius: 0.08,
-  topEarLength: 0.14,
-  /** 深灰拉丝金属壳 */
-  shellColor: "#6a6a6e",
-  shellRoughness: 0.52,
-  shellMetalness: 0.68,
-  shellClearcoat: 0.15,
-  /** 内嵌呼吸灯缝线 */
-  seamEmissive: "#99a4b8",
+  /** OBJ → 场景：绕 X 轴 -90°，使玻璃面朝向 +Z（相机） */
+  objRotation: [-Math.PI / 2, 0, 0] as const,
+  /** 将 OBJ 球心 (0, bodyCenterY, 0) 对齐到视觉原点 */
+  objOffset: [0, -DG2_SOURCE.bodyCenterY, 0] as const,
+  /** 玻璃面中心（缩放+旋转后，相对视觉原点） */
+  glassScreenPosition: [0, 0, 0.5] as const,
+  /** 内嵌屏 angular 参数（供光标尺寸参考） */
+  screenAngularR: Math.PI / 2.8,
+  /** 拉丝钢壳 */
+  shellColor: "#9a9aa2",
+  shellRoughness: 0.38,
+  shellMetalness: 0.82,
+  shellClearcoat: 0.22,
+  /** 深色玻璃 */
+  glassColor: "#080a0e",
+  glassRoughness: 0.04,
+  glassMetalness: 0.85,
+  /** 呼吸灯缝线 */
+  seamEmissive: "#a8b8cc",
 } as const;
 
 export type SceneMode = "demo" | "embed" | "overlay";
+
+export function dg2Scale(bodyRadius = MODEL.bodyRadius): number {
+  return bodyRadius / DG2_SOURCE.bodyRadius;
+}

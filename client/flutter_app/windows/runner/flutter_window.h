@@ -2,11 +2,16 @@
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
+#include <flutter/encodable_value.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter/method_channel.h>
+#include <flutter/method_result_functions.h>
+#include <flutter/standard_method_codec.h>
 
 #include <memory>
 
 #include "win32_window.h"
+#include "sphere_overlay_window.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -19,8 +24,8 @@ class FlutterWindow : public Win32Window {
   // Win32Window:
   bool OnCreate() override;
   void OnDestroy() override;
-  LRESULT MessageHandler(HWND window, UINT const message, WPARAM const wparam,
-                         LPARAM const lparam) noexcept override;
+  LRESULT MessageHandler(HWND window, UINT const message, WPARAM wparam,
+                         LPARAM lparam) noexcept override;
 
  private:
   // The project to run.
@@ -28,6 +33,17 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // Desktop overlay window for 3D Agent sphere.
+  std::unique_ptr<SphereOverlayWindow> overlay_window_;
+
+  // Method channel for overlay control.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      overlay_channel_;
+
+  void HandleOverlayMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

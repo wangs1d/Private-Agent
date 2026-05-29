@@ -5,6 +5,11 @@ import {
   parseAgentAccessMode,
 } from "./agent-access-mode.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
+import {
+  extractMemoryTopicFromLine,
+  inferMemoryTopic,
+  topicRelevanceBoost,
+} from "./memory-topic.js";
 
 /**
  * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
@@ -151,8 +156,20 @@ function promptMemorySummaryMaxChars(): number {
 
 function promptMemorySummaryMaxLines(): number {
   const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_LINES?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 50;
-  return Number.isFinite(n) && n > 10 ? n : 50;
+  const n = raw ? Number.parseInt(raw, 10) : 25;
+  return Number.isFinite(n) && n > 5 ? n : 25;
+}
+
+function promptSubAgentMemorySummaryMaxLines(): number {
+  const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_LINES?.trim();
+  const n = raw ? Number.parseInt(raw, 10) : 12;
+  return Number.isFinite(n) && n > 3 ? n : 12;
+}
+
+function promptSubAgentMemorySummaryMaxChars(): number {
+  const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_CHARS?.trim();
+  const n = raw ? Number.parseInt(raw, 10) : 3000;
+  return Number.isFinite(n) && n > 200 ? n : 3000;
 }
 
 const TIMESTAMP_RE = /\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/;
@@ -217,6 +234,10 @@ function calculateRelevanceScore(line: string, query: string): number {
       score += 0.3;
     }
   }
+
+  const queryTopic = inferMemoryTopic(query);
+  const lineTopic = extractMemoryTopicFromLine(line);
+  score += topicRelevanceBoost(lineTopic, queryTopic);
 
   if (/\[用户要求记住\]/.test(line) || /\[Agent 承诺\/结论\]/.test(line)) {
     score += 0.2;
@@ -297,6 +318,29 @@ export function sliceMemoryEntriesToPromptContext(
   return out;
 }
 
+/** 子 Agent：仅人格 + 与任务相关的 memory_summary 行（更小上限）。 */
+export function sliceSubAgentMemoryEntries(
+  entries: Record<string, unknown>,
+  taskQuery?: string,
+): AgentPromptMemoryContext {
+  const str = (v: unknown): string => formatKvValueForPrompt(v);
+  const out: AgentPromptMemoryContext = {};
+  const persona = str(entries["persona"]) || str(entries["soul"]);
+  if (persona) out.persona = persona;
+
+  const rawSummary = str(entries["memory_summary"]);
+  if (rawSummary) {
+    const sorted = sortAndTruncateMemoryLines(
+      rawSummary,
+      promptSubAgentMemorySummaryMaxChars(),
+      promptSubAgentMemorySummaryMaxLines(),
+      taskQuery,
+    );
+    if (sorted) out.memorySummary = sorted;
+  }
+  return out;
+}
+
 /** 人格 → 价值观 → 能力倾向 → 履历，最后接厂商默认安全提示（长期演化友好顺序）。 */
 export function buildLayeredSystemPrompt(
   baseSystem: string,
@@ -315,11 +359,14 @@ export function buildLayeredSystemPrompt(
     !memory?.taskContext &&
     !memory?.userProfile &&
     !memory?.toneGuidance &&
-    !memory?.dailyDigest
+    !memory?.dailyDigest &&
+    !memory?.userProfileSummary &&
+    !memory?.followUpAnchor
   ) {
     return baseSystem.trim();
   }
   const parts: string[] = [];
+  if (memory.followUpAnchor) parts.push(memory.followUpAnchor);
   if (memory.taskContext) parts.push(`[Turn Task Context]\n${memory.taskContext}`);
   if (memory.toneGuidance) parts.push(`【本轮语气与情绪适配】\n${memory.toneGuidance}`);
   if (memory.userProfile) parts.push(`【用户画像】\n${memory.userProfile}`);
@@ -330,6 +377,7 @@ export function buildLayeredSystemPrompt(
   if (memory.agentCaps) parts.push(`【你的 Agent 专属能力】\n${memory.agentCaps}`);
   if (memory.worldCaps) parts.push(`【Agent World】\n${memory.worldCaps}`);
   if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
+  if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
   if (memory.interruptedContext) parts.push(memory.interruptedContext);

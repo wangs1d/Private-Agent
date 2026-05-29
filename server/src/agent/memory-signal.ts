@@ -6,6 +6,17 @@ export const MEMORY_EXPLICIT_RE =
 export const MEMORY_RECALL_HINT_RE =
   /之前|上次|说过|刚才|刚刚|前面|早些时候|earlier|before|last time|you said/i;
 
+/** 短句追问/确认（无自洽语义，必须锚定上一轮对话） */
+export const AMBIGUOUS_FOLLOWUP_RE =
+  /^(你)?确定[吗？?]?$|^(真的|确实)[吗？?]?$|^(是吗|对吗|对不对)[？?]?$|^(为什么|为何)[？?]?$|^(然后呢|接着呢)[？?]?$|^[？?？!！。…]+$/;
+
+export function isAmbiguousFollowUpMessage(message: string): boolean {
+  const t = message.trim();
+  if (!t) return false;
+  if (t.length > 20) return false;
+  return AMBIGUOUS_FOLLOWUP_RE.test(t);
+}
+
 /** Agent 承诺、结论、决策类信号 */
 export const AGENT_COMMITMENT_RE =
   /我会|我将|已为你|已经帮你|已设置|已创建|已添加|已安排|已提醒|帮你订|帮你查|结论是|建议是|remember to|i will|i've set/i;
@@ -57,7 +68,20 @@ export function detectMemorySignals(userText: string, assistantText: string): Me
 export function shouldSkipNarrativeRecall(message: string): boolean {
   const t = message.trim();
   if (!t) return true;
+  if (isAmbiguousFollowUpMessage(t)) return true;
   if (MEMORY_EXPLICIT_RE.test(t) || MEMORY_RECALL_HINT_RE.test(t)) return false;
   if (t.length <= 16) return true;
   return false;
+}
+
+export function buildFollowUpAnchorPrompt(message: string): string | undefined {
+  if (!isAmbiguousFollowUpMessage(message)) return undefined;
+  return [
+    "【短句追问 · 必须锚定上一轮】",
+    `用户本条消息极短（「${message.trim()}」），是对话线程中**紧邻上一轮**助手回复的追问或确认。`,
+    "- 只根据对话历史中**最后一条 assistant 回复**理解用户在问什么，直接回应该话题。",
+    "- 禁止切换到其他历史话题（如日程/定时推送/旧任务），除非上一轮正是在讨论该话题。",
+    "- 禁止为此类追问调用 calendar.list_tasks / calendar.create_task 等日程工具，除非上一轮明确在确认日程。",
+    "- 若上一轮在讨论事实/排名/新闻等，用户「确定？」=质疑该结论，应补充依据或承认不确定，而非答无关任务状态。",
+  ].join("\n");
 }

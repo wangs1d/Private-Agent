@@ -22,8 +22,12 @@ import type {
 const SYSTEM_PROMPT =
   "You are Kimi, an AI assistant provided by Moonshot AI. You are proficient in Chinese and English conversations. You provide users with safe, helpful, and accurate answers. You will reject any requests involving terrorism, racism, or explicit content. Moonshot AI is a proper noun and should not be translated.";
 
+function kimiThinkingDisabled(streamOpts?: AgentStreamOptions): boolean {
+  return streamOpts?.disableThinking !== false;
+}
+
 function kimiExtraBody(streamOpts?: AgentStreamOptions): Record<string, unknown> | undefined {
-  return streamOpts?.disableThinking ? { thinking: { type: "disabled" } } : undefined;
+  return kimiThinkingDisabled(streamOpts) ? { thinking: { type: "disabled" } } : undefined;
 }
 
 /**
@@ -107,10 +111,15 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
 
     const model = streamOpts?.modelOverride?.trim() || this.model;
 
+    const effectiveStreamOpts: AgentStreamOptions = {
+      ...(streamOpts ?? {}),
+      disableThinking: kimiThinkingDisabled(streamOpts),
+    };
+
     if (tools) {
       let completed = false;
       try {
-        const mergedTools = resolveChatToolsForStream(streamOpts);
+        const mergedTools = resolveChatToolsForStream(effectiveStreamOpts);
         const full = await streamCompletionWithTools(
           this.client,
           model,
@@ -118,10 +127,10 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
           onDelta,
           tools,
           {
-            onAfterToolBatch: streamOpts?.toolLoop?.onAfterToolBatch,
+            onAfterToolBatch: effectiveStreamOpts?.toolLoop?.onAfterToolBatch,
             tools: mergedTools,
-            maxRounds: streamOpts?.toolLoop?.maxRounds,
-            extraBody: kimiExtraBody(streamOpts),
+            maxRounds: effectiveStreamOpts?.toolLoop?.maxRounds,
+            extraBody: kimiExtraBody(effectiveStreamOpts),
           },
         );
         completed = true;
@@ -144,7 +153,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         model,
         messages: msgs,
         stream: true,
-        ...(kimiExtraBody(streamOpts) ? { extra_body: kimiExtraBody(streamOpts) } : {}),
+        ...(kimiExtraBody(effectiveStreamOpts) ? { extra_body: kimiExtraBody(effectiveStreamOpts) } : {}),
       });
     } catch (e) {
       msgs.length = startLen;

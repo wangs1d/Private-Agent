@@ -1,5 +1,6 @@
 import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
+import { isKvSummaryMinimal } from "../config/memory-env.js";
 
 export type ChatSyncRecord = {
   actorId: string;
@@ -116,7 +117,7 @@ class DailyChatSyncService {
   }
 
   private async updateMemorySummary(record: ChatSyncRecord): Promise<void> {
-    if (!this.memorySync) return;
+    if (!this.memorySync || isKvSummaryMinimal()) return;
 
     try {
       const { revision, entries } = this.memorySync.getSnapshot(record.actorId, [
@@ -145,7 +146,7 @@ class DailyChatSyncService {
         summary = summary ? `${summary}\n${newLines.join("\n")}` : newLines.join("\n");
         summary = summary.slice(-32_000);
 
-        this.memorySync.applyPatch(record.actorId, revision, [
+        await this.memorySync.applyPatch(record.actorId, revision, [
           { key: "memory_summary", op: "put", value: summary },
         ]);
       }

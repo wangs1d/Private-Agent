@@ -1,15 +1,16 @@
-import type { AgentMood } from "../types/agent";
+import type { AgentMood, AgentState } from "../types/agent";
 
 export interface WsEnvelope {
   type: string;
   payload?: Record<string, unknown>;
 }
 
-export interface AgentWsUpdate {
-  mood?: AgentMood;
-  caption?: string;
-  energy?: number;
-}
+export type AgentWsUpdate = Partial<
+  Pick<
+    AgentState,
+    "mood" | "caption" | "energy" | "phase" | "subAgentType" | "subAgentDisplayName" | "source"
+  >
+>;
 
 let speakingChunkCount = 0;
 let lastChunkAt = 0;
@@ -19,38 +20,74 @@ export function resetWsMapperState() {
   lastChunkAt = 0;
 }
 
+function patchFromEmbodiment(p: Record<string, unknown>): AgentWsUpdate {
+  const caption = p.caption;
+  return {
+    mood: p.mood as AgentMood | undefined,
+    energy: typeof p.energy === "number" ? p.energy : undefined,
+    caption: caption === null ? undefined : String(caption ?? "") || undefined,
+    phase: p.phase ? String(p.phase) : undefined,
+    subAgentType: p.subAgentType ? String(p.subAgentType) : undefined,
+    subAgentDisplayName: p.subAgentDisplayName ? String(p.subAgentDisplayName) : undefined,
+    source: p.source ? String(p.source) : undefined,
+  };
+}
+
 /** 将服务端 WS 事件映射为 Agent 状态更新 */
 export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
   const type = msg.type;
   const p = msg.payload ?? {};
 
+  if (type === "agent.embodiment.patch") {
+    return patchFromEmbodiment(p);
+  }
+
   switch (type) {
     case "chat.agent_status": {
-      const line = String(p.line ?? "").trim();
-      return { mood: "thinking", caption: line || undefined, energy: 0.72 };
+      const phase = p.phase ? String(p.phase) : undefined;
+      const isDelegate = phase?.startsWith("delegate");
+      return {
+        mood: "thinking",
+        caption: undefined,
+        energy: isDelegate ? 0.78 : 0.72,
+        phase,
+        subAgentType: p.agentType ? String(p.agentType) : undefined,
+        subAgentDisplayName: p.subAgentDisplayName ? String(p.subAgentDisplayName) : undefined,
+        source: "agent_status",
+      };
     }
     case "tool.call": {
-      const line = String(p.userStatusLine ?? p.assistantPreamble ?? p.toolName ?? "").trim();
-      return { mood: "thinking", caption: line || "工具执行中", energy: 0.68 };
+      return { mood: "thinking", caption: undefined, energy: 0.68, source: "tool" };
     }
     case "chat.assistant_chunk": {
-      const chunk = String(p.chunk ?? p.delta ?? "");
+      void (p.chunk ?? p.delta);
       speakingChunkCount += 1;
       lastChunkAt = Date.now();
       const burst = Math.min(1, 0.45 + speakingChunkCount * 0.015);
-      return { mood: "speaking", energy: burst, caption: chunk.slice(-24) || undefined };
+      return { mood: "speaking", energy: burst, caption: undefined, source: "assistant_chunk" };
     }
     case "chat.assistant_done": {
       resetWsMapperState();
-      return { mood: "happy", energy: 0.55, caption: undefined };
+      return { mood: "happy", energy: 0.55, caption: undefined, source: "assistant_done" };
     }
     case "error.event": {
       resetWsMapperState();
-      return { mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85 };
+      return { mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85, source: "error" };
     }
-    case "schedule.reminder_fired":
+    case "schedule.reminder_fired": {
+      const msg = String(p.message ?? p.title ?? "提醒").trim();
+      return { mood: "alert", energy: 0.9, caption: msg, source: "reminder" };
+    }
+    case "schedule.agent_task_fired": {
+      const title = String(p.title ?? "自动化任务").trim();
+      return { mood: "thinking", energy: 0.75, caption: title, phase: "agent_task", source: "agent_task" };
+    }
     case "agent.phone.incoming": {
-      return { mood: "alert", energy: 0.9, caption: "提醒" };
+      return { mood: "alert", energy: 0.9, caption: "来电", source: "phone" };
+    }
+    case "agent.peer_message": {
+      const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
+      return { mood: "alert", energy: 0.82, caption: preview, source: "peer" };
     }
     default:
       return null;
@@ -59,11 +96,11 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
 
 export function mapUserMessageSent(): AgentWsUpdate {
   resetWsMapperState();
-  return { mood: "listening", energy: 0.65, caption: "正在聆听…" };
+  return { mood: "listening", energy: 0.65, caption: "正在聆听…", source: "user_message" };
 }
 
 export function mapProcessingIdle(): AgentWsUpdate {
   if (Date.now() - lastChunkAt < 800) return { mood: "speaking", energy: 0.5 };
   resetWsMapperState();
-  return { mood: "idle", energy: 0.5, caption: undefined };
+  return { mood: "idle", energy: 0.5, caption: undefined, source: "idle" };
 }

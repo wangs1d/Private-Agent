@@ -20,6 +20,15 @@ export const agentProcessingUiSchema = z.object({
   active: z.boolean(),
 });
 
+/** WebSocket `agent.embodiment.interact` — 球形 Agent 用户交互 */
+export const agentEmbodimentInteractSchema = z.object({
+  sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
+  action: z.enum(["focus", "wake", "chat"]),
+  text: z.string().max(4000).optional(),
+  agentAccessMode: z.enum(["sandbox", "full"]).optional(),
+});
+
 export const userMessageSchema = z
   .object({
     /** 兼容旧客户端；与 `userId` 同时存在时以 `userId` 为稳定用户标识 */
