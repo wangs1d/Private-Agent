@@ -7,23 +7,29 @@ interface UseFreeViewportMotionOptions {
   containerH?: number;
 }
 
+type MotionPhase = "idle" | "prepare" | "launch" | "cruise" | "brake" | "settle";
+
 interface FreeViewportMotionState {
   x: number;
   y: number;
   rotation: number;
   scale: number;
-  transitioning: boolean;
+  phase: MotionPhase;
   roaming: boolean;
 }
 
 function calcTilt(fromX: number, fromY: number, toX: number, toY: number): number {
   const dx = toX - fromX;
   const dy = toY - fromY;
-  if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return 0;
+  if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return 0;
   const dist = Math.sqrt(dx * dx + dy * dy);
   const nx = dx / dist;
-  const maxTilt = 11;
+  const maxTilt = 10;
   return Math.round(Math.max(-maxTilt, Math.min(maxTilt, nx * maxTilt)));
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
 }
 
 export function useFreeViewportMotion({
@@ -36,11 +42,20 @@ export function useFreeViewportMotion({
     y: Math.max(0, window.innerHeight - containerH - 24),
     rotation: 0,
     scale: 1,
-    transitioning: false,
+    phase: "idle",
     roaming: false,
   }));
 
-  const roamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = () => {
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
+  };
+
+  const addTimer = (fn: () => void, ms: number) => {
+    const id = setTimeout(fn, ms);
+    timersRef.current.push(id);
+  };
 
   const clampPos = useCallback(
     (x: number, y: number) => {
@@ -56,20 +71,47 @@ export function useFreeViewportMotion({
   );
 
   const moveTo = useCallback(
-    (x: number, y: number, duration = 1200) => {
-      const { x: cx, y: cy } = clampPos(x, y);
-      const tilt = calcTilt(pos.x, pos.y, cx, cy);
-      setPos((prev) => ({
-        ...prev,
-        x: cx,
-        y: cy,
-        rotation: tilt,
-        scale: 1.04,
-        transitioning: true,
-      }));
-      setTimeout(() => {
-        setPos((prev) => ({ ...prev, scale: 1, transitioning: false }));
-      }, duration);
+    (tx: number, ty: number) => {
+      clearTimers();
+      const { x: cx, y: cy } = clampPos(tx, ty);
+      const sx = pos.x;
+      const sy = pos.y;
+      const tilt = calcTilt(sx, sy, cx, cy);
+
+      setPos((prev) => ({ ...prev, phase: "prepare", rotation: tilt, scale: 1.02 }));
+
+      addTimer(() => {
+        const p1x = lerp(sx, cx, 0.22);
+        const p1y = lerp(sy, cy, 0.22);
+        setPos((prev) => ({ ...prev, x: p1x, y: p1y, phase: "launch", scale: 1.05 }));
+      }, 160);
+
+      addTimer(() => {
+        const p2x = lerp(sx, cx, 0.6);
+        const p2y = lerp(sy, cy, 0.6);
+        setPos((prev) => ({ ...prev, x: p2x, y: p2y, phase: "cruise", rotation: Math.round(tilt * 0.6), scale: 1.03 }));
+      }, 480);
+
+      addTimer(() => {
+        const p3x = lerp(sx, cx, 0.85);
+        const p3y = lerp(sy, cy, 0.85);
+        setPos((prev) => ({ ...prev, x: p3x, y: p3y, phase: "brake", rotation: Math.round(tilt * 0.25), scale: 1.01 }));
+      }, 930);
+
+      addTimer(() => {
+        setPos((prev) => ({
+          ...prev,
+          x: cx,
+          y: cy,
+          rotation: 0,
+          scale: 1,
+          phase: "settle",
+        }));
+      }, 1300);
+
+      addTimer(() => {
+        setPos((prev) => ({ ...prev, phase: "idle" }));
+      }, 1520);
     },
     [clampPos, pos.x, pos.y],
   );
@@ -80,15 +122,12 @@ export function useFreeViewportMotion({
     const maxY = Math.max(margin, window.innerHeight - containerH - margin);
     const tx = margin + Math.random() * Math.max(1, maxX - margin);
     const ty = margin + Math.random() * Math.max(1, maxY - margin);
-    moveTo(tx, ty, 1000 + Math.random() * 400);
+    moveTo(tx, ty);
   }, [containerW, containerH, moveTo]);
 
   const stopRoaming = useCallback(() => {
-    if (roamTimerRef.current) {
-      clearTimeout(roamTimerRef.current);
-      roamTimerRef.current = null;
-    }
-    setPos((prev) => ({ ...prev, roaming: false }));
+    clearTimers();
+    setPos((prev) => ({ ...prev, roaming: false, phase: "idle", rotation: 0, scale: 1 }));
   }, []);
 
   const startRoaming = useCallback(() => {
@@ -96,10 +135,12 @@ export function useFreeViewportMotion({
     setPos((prev) => ({ ...prev, roaming: true }));
 
     const scheduleNext = () => {
-      roamTimerRef.current = setTimeout(() => {
+      const id = setTimeout(() => {
         roamOnce();
-        roamTimerRef.current = setTimeout(scheduleNext, 5000 + Math.random() * 5000);
+        const nextId = setTimeout(scheduleNext, 5000 + Math.random() * 5000);
+        timersRef.current.push(nextId);
       }, 1500 + Math.random() * 2000);
+      timersRef.current.push(id);
     };
     scheduleNext();
   }, [roamOnce, stopRoaming]);
@@ -108,9 +149,7 @@ export function useFreeViewportMotion({
     (action: EmbodimentCommandAction, x?: number, y?: number) => {
       switch (action) {
         case "move":
-          if (x != null && y != null) {
-            moveTo(x, y, 1000);
-          }
+          if (x != null && y != null) moveTo(x, y);
           break;
         case "roam":
           roamOnce();
@@ -169,7 +208,8 @@ export function useFreeViewportMotion({
     y: pos.y,
     rotation: pos.rotation,
     scale: pos.scale,
-    transitioning: pos.transitioning,
+    phase: pos.phase,
+    isMoving: pos.phase !== "idle",
     roaming: pos.roaming,
     roamNow: roamOnce,
     moveTo,

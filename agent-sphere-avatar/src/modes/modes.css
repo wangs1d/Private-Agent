@@ -227,20 +227,20 @@ html.embed-root #root {
   bottom: 100%;
   left: 50%;
   transform: translateX(-50%);
-  margin-bottom: 8px;
-  min-width: 100px;
-  max-width: 200px;
-  padding: 6px 10px 8px;
-  border-radius: 12px;
-  background: rgba(8, 12, 20, 0.62);
-  border: 1px solid rgba(136, 187, 255, 0.15);
-  backdrop-filter: blur(12px);
+  margin-bottom: 2px;
+  min-width: 80px;
+  max-width: 180px;
+  padding: 4px 8px 6px;
+  border-radius: 10px;
+  background: rgba(8, 12, 20, 0.30);
+  border: 1px solid rgba(136, 187, 255, 0.08);
+  backdrop-filter: blur(8px);
   pointer-events: none;
-  animation: inner-thought-in 0.3s ease-out;
+  animation: inner-thought-in 0.25s ease-out;
 }
 
 @keyframes inner-thought-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.96); }
+  from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(0.97); }
   to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 
@@ -250,20 +250,20 @@ html.embed-root #root {
   top: 100%;
   left: 50%;
   transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: rgba(8, 12, 20, 0.62);
+  border: 4px solid transparent;
+  border-top-color: rgba(8, 12, 20, 0.30);
 }
 
 .inner-thought__mood {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 0.62rem;
-  letter-spacing: 0.04em;
+  gap: 4px;
+  font-size: 0.58rem;
+  letter-spacing: 0.03em;
 }
 
 .inner-thought__mood-icon {
-  font-size: 0.7rem;
+  font-size: 0.64rem;
 }
 
 .inner-thought--idle .inner-thought__mood { color: rgba(148, 163, 184, 0.7); }
@@ -276,11 +276,11 @@ html.embed-root #root {
 .inner-thought__sub {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid rgba(136, 187, 255, 0.1);
-  font-size: 0.6rem;
+  gap: 4px;
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid rgba(136, 187, 255, 0.08);
+  font-size: 0.55rem;
   color: #c4b5fd;
 }
 
@@ -299,16 +299,16 @@ html.embed-root #root {
 }
 
 .inner-thought__caption {
-  margin-top: 4px;
-  font-size: 0.68rem;
+  margin-top: 3px;
+  font-size: 0.63rem;
   line-height: 1.35;
   color: #e2e8f0;
   word-break: break-word;
 }
 
 .inner-thought__phase {
-  margin-top: 4px;
-  font-size: 0.6rem;
-  color: rgba(148, 163, 184, 0.65);
+  margin-top: 3px;
+  font-size: 0.55rem;
+  color: rgba(148, 163, 184, 0.6);
   font-style: italic;
 }

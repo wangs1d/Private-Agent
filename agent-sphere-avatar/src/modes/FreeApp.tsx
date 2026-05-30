@@ -15,6 +15,15 @@ function readQuery(key: string): string | undefined {
   return new URLSearchParams(window.location.search).get(key) ?? undefined;
 }
 
+const PHASE_TRANSITION: Record<string, string> = {
+  idle: "rotate 500ms ease-out, scale 300ms ease-out",
+  prepare: "rotate 180ms ease-out, scale 180ms ease-out",
+  launch: "left 320ms cubic-bezier(0.33, 1, 0.68, 1), top 320ms cubic-bezier(0.33, 1, 0.68, 1), rotate 320ms ease-out, scale 200ms ease-out",
+  cruise: "left 450ms linear, top 450ms linear, rotate 450ms ease-out, scale 300ms ease-out",
+  brake: "left 380ms cubic-bezier(0.22, 1, 0.36, 1), top 380ms cubic-bezier(0.22, 1, 0.36, 1), rotate 380ms ease-out, scale 250ms ease-out",
+  settle: "left 220ms cubic-bezier(0.22, 1, 0.36, 1), top 220ms cubic-bezier(0.22, 1, 0.36, 1), rotate 220ms ease-out, scale 220ms ease-out",
+};
+
 export function FreeApp() {
   const { state, apply, setFocused } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
@@ -30,7 +39,7 @@ export function FreeApp() {
 
   useEmbodimentCommandRelay(true);
 
-  const { x, y, rotation, scale, transitioning, roamNow } = useFreeViewportMotion({
+  const { x, y, rotation, scale, phase, roamNow } = useFreeViewportMotion({
     enabled: true,
     containerW: 150,
     containerH: 220,
@@ -149,9 +158,7 @@ export function FreeApp() {
           pointerEvents: "auto",
           transformOrigin: "center center",
           transform: `rotate(${rotation}deg) scale(${scale})`,
-          transition: transitioning
-            ? "left 1300ms cubic-bezier(0.22, 1, 0.36, 1), top 1300ms cubic-bezier(0.22, 1, 0.36, 1), rotate 400ms ease-out, scale 300ms ease-out"
-            : "rotate 500ms ease-out, scale 300ms ease-out",
+          transition: PHASE_TRANSITION[phase] ?? PHASE_TRANSITION.idle,
         }}
       >
         <InnerThought state={state} />
