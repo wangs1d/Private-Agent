@@ -18,9 +18,14 @@ import {
 } from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
-  compactValidChatMessages,
+  executeToolSearchBridge,
+  isToolSearchBridgeName,
+  prepareToolsWithToolSearch,
+} from "../tools/tool-search/index.js";
+import {
   isAssistantWithToolCalls,
-  repairKimiAssistantToolCallReasoning,
+  isToolCallIdNotFoundError,
+  sanitizeChatMessagesForApi,
 } from "./chat-thread-sanitize.js";
 import type {
   ChatToolExecutionContext,
@@ -127,94 +132,24 @@ export function isThinkingDisabled(extraBody?: Record<string, unknown>): boolean
   return thinking?.type === "disabled";
 }
 
-function stripReasoningContentFromMessages(
+function repairMessagesAfterToolCallIdError(
   messages: ChatCompletionMessageParam[],
+  stripReasoning: boolean,
 ): ChatCompletionMessageParam[] {
-  return messages.map((msg) => {
-    // Kimi k2.5：关闭 thinking 时，带 tool_calls 的 assistant 仍须保留 reasoning_content 占位
-    if (isAssistantWithToolCalls(msg)) {
-      const rc = (msg as { reasoning_content?: string }).reasoning_content;
-      if (typeof rc === "string" && rc.trim()) return msg;
-      return { ...msg, reasoning_content: " " } as unknown as ChatCompletionMessageParam;
-    }
-    if (!("reasoning_content" in msg)) return msg;
-    const { reasoning_content: _removed, ...rest } = msg as ChatCompletionMessageParam & {
-      reasoning_content?: string;
-    };
-    return rest;
+  const before = messages.length;
+  const repaired = sanitizeChatMessagesForApi(messages, {
+    stripReasoning,
+    logPrefix: "[openai-tool-loop-repair]",
   });
-}
-
-function sanitizeMessagesForApi(
-  messages: ChatCompletionMessageParam[],
-  opts?: { stripReasoning?: boolean },
-): ChatCompletionMessageParam[] {
-  let filtered = compactValidChatMessages(messages);
-  const validToolCallIds = new Set<string>();
-  const assistantIndicesWithToolCalls = new Set<number>();
-
-  for (let i = 0; i < filtered.length; i++) {
-    const msg = filtered[i];
-    if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
-      const toolCalls = (msg as { tool_calls: ChatCompletionMessageToolCall[] }).tool_calls;
-      if (toolCalls.length > 0) {
-        assistantIndicesWithToolCalls.add(i);
-        for (const tc of toolCalls) {
-          if (tc.id) validToolCallIds.add(tc.id);
-        }
-      }
-    }
-  }
-
-  const matchedToolCallIds = new Set<string>();
-  for (const msg of filtered) {
-    if (msg.role === "tool") {
-      const tcId = (msg as { tool_call_id?: string }).tool_call_id;
-      if (tcId && validToolCallIds.has(tcId)) {
-        matchedToolCallIds.add(tcId);
-      }
-    }
-  }
-
-  filtered = filtered.filter((msg) => {
-    if (msg.role !== "tool") return true;
-    const tcId = (msg as { tool_call_id?: string }).tool_call_id;
-    if (!tcId) {
-      console.warn("[openai-tool-loop] Dropping tool message with empty tool_call_id");
-      return false;
-    }
-    if (!validToolCallIds.has(tcId)) {
-      console.warn(
-        `[openai-tool-loop] Dropping orphan tool message: tool_call_id=${tcId} ` +
-        `(not found in any assistant message's tool_calls). ` +
-        `This prevents "tool_call_id is not found" API errors.`,
-      );
-      return false;
-    }
-    return true;
-  }).filter((msg) => {
-    if (msg.role !== "assistant") return true;
-    const toolCalls = (msg as { tool_calls?: ChatCompletionMessageToolCall[] }).tool_calls;
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return true;
-    const hasUnmatchedCall = toolCalls.some(
-      (tc) => tc.id && !matchedToolCallIds.has(tc.id),
+  messages.length = 0;
+  messages.push(...repaired);
+  if (repaired.length !== before) {
+    console.warn(
+      `[openai-tool-loop] Repaired message history after tool_call_id error: ` +
+      `${before} → ${repaired.length} messages`,
     );
-    if (hasUnmatchedCall) {
-      console.warn(
-        `[openai-tool-loop] Dropping orphan assistant message with unmatched tool_calls ` +
-        `(call_ids=${toolCalls.map((tc) => tc.id).join(",")}). ` +
-        `Some tool calls have no corresponding tool results.`,
-      );
-      return false;
-    }
-    return true;
-  });
-  if (opts?.stripReasoning) {
-    filtered = stripReasoningContentFromMessages(filtered);
-  } else {
-    filtered = repairKimiAssistantToolCallReasoning(filtered);
   }
-  return filtered;
+  return repaired;
 }
 
 /** Moonshot Kimi 等端点仅允许字母数字下划线连字符，将 registry 名 `a.b` 映射为 `a_b`。 */
@@ -1104,31 +1039,51 @@ export async function streamCompletionWithTools(
     maxRounds = getOptimalMaxRounds(userText, messages.length);
   }
   
-  let registryTools = options?.tools ?? getBuiltinAgentChatTools();
-  
-  if (!options?.tools) {
-    const userText = extractUserTextFromMessages(messages);
-    if (userText) {
-      registryTools = getSmartToolsForContext(userText);
-    }
+  const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
+  const toolSearchPrepared = prepareToolsWithToolSearch(mergedRegistryTools);
+  const registryTools = toolSearchPrepared.visibleTools;
+  const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
+
+  if (toolSearchPrepared.toolSearchActive) {
+    console.info(
+      `[tool-search] active: ${registryTools.length} visible tools, ` +
+        `${deferredToolCatalog.length} deferred (BM25 on-demand)`,
+    );
   }
-  
+
   const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
   let lastAssistantText = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
 
   for (let round = 0; round < maxRounds; round++) {
-    const sanitizedMessages = sanitizeMessagesForApi(messages, {
-      stripReasoning: thinkingDisabled,
-    });
-    const stream = await client.chat.completions.create({
-      model,
-      messages: sanitizedMessages,
-      tools: apiTools,
-      tool_choice: "auto",
-      stream: true,
-      ...(options?.extraBody ? { extra_body: options.extraBody } : {}),
-    });
+    let retriedToolCallIdError = false;
+    let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
+
+    while (true) {
+      const sanitizedMessages = sanitizeChatMessagesForApi(messages, {
+        stripReasoning: thinkingDisabled,
+        logPrefix: "[openai-tool-loop]",
+      });
+      try {
+        stream = await client.chat.completions.create({
+          model,
+          messages: sanitizedMessages,
+          tools: apiTools,
+          tool_choice: "auto",
+          stream: true,
+          ...(options?.extraBody ? { extra_body: options.extraBody } : {}),
+        });
+        break;
+      } catch (e) {
+        if (!retriedToolCallIdError && isToolCallIdNotFoundError(e)) {
+          retriedToolCallIdError = true;
+          repairMessagesAfterToolCallIdError(messages, thinkingDisabled);
+          console.warn("[openai-tool-loop] Retrying completion after tool_call_id repair");
+          continue;
+        }
+        throw e;
+      }
+    }
 
     let fullText = "";
     let fullReasoning = "";
@@ -1235,9 +1190,16 @@ export async function streamCompletionWithTools(
       } catch {
         args = {};
       }
-      const registryToolName = resolveRegistryToolName(fn.name);
+      let registryToolName = resolveRegistryToolName(fn.name);
+      let notifyToolName = registryToolName;
+      if (isToolSearchBridgeName(registryToolName) && registryToolName === "tool_call") {
+        const bridge = executeToolSearchBridge(registryToolName, args, deferredToolCatalog);
+        if (bridge.kind === "call" && bridge.ok) {
+          notifyToolName = bridge.registryToolName;
+        }
+      }
       ctx.onToolExecuteStart?.({
-        toolName: registryToolName,
+        toolName: notifyToolName,
         input: args,
         assistantPreamble: fullText.trim() || undefined,
       });
@@ -1246,25 +1208,68 @@ export async function streamCompletionWithTools(
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
-        const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(item.registryToolName);
-        
+        let targetToolName = item.registryToolName;
+        let targetArgs = item.parsedArgs;
+
+        if (isToolSearchBridgeName(item.registryToolName)) {
+          const bridge = executeToolSearchBridge(
+            item.registryToolName,
+            item.parsedArgs,
+            deferredToolCatalog,
+          );
+          if (bridge.kind === "search" || bridge.kind === "describe") {
+            const compacted = await compactToolOutputForLlm({
+              toolName: item.registryToolName,
+              ok: bridge.ok,
+              result: bridge.result,
+            });
+            return {
+              exec: { ok: bridge.ok, result: bridge.result },
+              compacted,
+              injectFrames: undefined,
+              resultForWire: bridge.result,
+              wireToolName: item.registryToolName,
+            } as const;
+          }
+          if (bridge.kind === "call") {
+            if (!bridge.ok) {
+              const compacted = await compactToolOutputForLlm({
+                toolName: item.registryToolName,
+                ok: false,
+                result: bridge.result,
+              });
+              return {
+                exec: { ok: false, result: bridge.result },
+                compacted,
+                injectFrames: undefined,
+                resultForWire: bridge.result,
+                wireToolName: item.registryToolName,
+              } as const;
+            }
+            targetToolName = bridge.registryToolName;
+            targetArgs = bridge.parsedArgs;
+          }
+        }
+
+        const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(targetToolName);
+
         let exec: Awaited<ReturnType<ChatToolExecutionContext['executeTool']>>;
         try {
           exec = await Promise.race([
-            ctx.executeTool(item.registryToolName, item.parsedArgs),
-            new Promise<never>((_, reject) => 
-              setTimeout(() => reject(new Error(`工具 "${item.registryToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
+            ctx.executeTool(targetToolName, targetArgs),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
             )
           ]);
         } catch (timeoutError) {
-          console.error(`[工具超时] ${item.registryToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
-          exec = { 
-            ok: false, 
-            result: { 
+          console.error(`[工具超时] ${targetToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
+          exec = {
+            ok: false,
+            result: {
               error: `工具执行超时，请稍后重试。(${TOOL_TIMEOUT_MS}ms)`,
               timeout: true,
-              toolName: item.registryToolName
-            } 
+              toolName: targetToolName
+            }
           };
         }
         
@@ -1282,11 +1287,17 @@ export async function streamCompletionWithTools(
           resultForWire = exec.result;
         }
         const compacted = await compactToolOutputForLlm({
-          toolName: item.registryToolName,
+          toolName: targetToolName,
           ok: exec.ok,
           result: exec.ok ? resultForWire : { error: exec.result.error ?? exec.result },
         });
-        return { exec, compacted, injectFrames, resultForWire } as const;
+        return {
+          exec,
+          compacted,
+          injectFrames,
+          resultForWire,
+          wireToolName: targetToolName,
+        } as const;
       }),
     );
 
@@ -1296,10 +1307,12 @@ export async function streamCompletionWithTools(
       const exec = settled.status === "fulfilled" ? settled.value.exec : { ok: false, result: { error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason) } };
       const compacted = settled.status === "fulfilled" ? settled.value.compacted : { content: JSON.stringify(exec.result), rawBytes: 0, compactBytes: 0, compacted: false };
       const injectFrames = settled.status === "fulfilled" ? settled.value.injectFrames : undefined;
+      const wireToolName =
+        settled.status === "fulfilled" ? settled.value.wireToolName : item.registryToolName;
 
-      toolResults.push({ name: item.registryToolName, ok: exec.ok });
+      toolResults.push({ name: wireToolName, ok: exec.ok });
       ctx.onToolExecuted?.({
-        toolName: item.registryToolName,
+        toolName: wireToolName,
         input: item.parsedArgs,
         ok: exec.ok,
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,

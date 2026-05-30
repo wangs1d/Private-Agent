@@ -8,6 +8,7 @@ import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
   compactValidChatMessages,
   repairKimiAssistantToolCallReasoning,
+  sanitizeToolCallMessageChain,
 } from "./chat-thread-sanitize.js";
 
 const DEFAULT_MAX_TURN_MESSAGES = 48;
@@ -106,7 +107,10 @@ export class ChatThreadStore {
    * 支持基于消息数量和 Token 数量的双重限制
    */
   trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
-    const compacted = compactValidChatMessages(msgs);
+    const compacted = sanitizeToolCallMessageChain(
+      compactValidChatMessages(msgs),
+      "[chat-thread-store]",
+    );
     msgs.length = 0;
     msgs.push(...repairKimiAssistantToolCallReasoning(compacted));
 
@@ -156,29 +160,23 @@ export class ChatThreadStore {
     let currentTokens = estimateMessageTokens(sys) + 
       recentMessages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     
-    // 从旧消息中智能选择保留的内容
+    // 旧消息按完整轮次裁剪，避免 assistant/tool 链被拆散
+    const olderGroups = groupMessagesPreservingToolPairs(olderMessages);
     const preservedOlder: ChatCompletionMessageParam[] = [];
-    for (let i = olderMessages.length - 1; i >= 0 && currentTokens < config.maxTokens; i--) {
-      const msg = olderMessages[i];
-      if (!msg || typeof msg.role !== "string") continue;
-      const msgTokens = estimateMessageTokens(msg);
-      
-      // 优先保留包含工具调用的消息（它们通常携带重要上下文）
-      const hasToolContext = msg.role === 'assistant' && 'tool_calls' in msg &&
-        Array.isArray((msg as { tool_calls?: unknown }).tool_calls) &&
-        (msg as { tool_calls: unknown[] }).tool_calls.length > 0;
-      
-      const isToolResult = msg.role === 'tool';
-      
-      if (hasToolContext || isToolResult || currentTokens + msgTokens <= config.maxTokens) {
-        preservedOlder.unshift(msg);
-        currentTokens += msgTokens;
-      }
+    for (let g = olderGroups.length - 1; g >= 0 && currentTokens < config.maxTokens; g--) {
+      const group = olderGroups[g];
+      const groupTokens = group.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+      if (currentTokens + groupTokens > config.maxTokens) continue;
+      preservedOlder.unshift(...group);
+      currentTokens += groupTokens;
     }
-    
+
     // 组装最终结果
     msgs.length = 0;
-    msgs.push(sys, ...preservedOlder, ...recentMessages);
+    msgs.push(
+      sys,
+      ...sanitizeToolCallMessageChain([...preservedOlder, ...recentMessages], "[chat-thread-store-trim]"),
+    );
   }
 
   appendTurn(
@@ -215,46 +213,60 @@ export function resetChatThreadStoreForTests(): void {
   sharedStore = null;
 }
 
+function groupMessagesPreservingToolPairs(
+  messages: ChatCompletionMessageParam[],
+): ChatCompletionMessageParam[][] {
+  const groups: ChatCompletionMessageParam[][] = [];
+  let i = 0;
+
+  while (i < messages.length) {
+    const msg = messages[i];
+    if (!msg || typeof msg.role !== "string") {
+      i++;
+      continue;
+    }
+
+    if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
+      const group: ChatCompletionMessageParam[] = [msg];
+      i++;
+      while (i < messages.length && messages[i]?.role === "tool") {
+        group.push(messages[i]);
+        i++;
+      }
+      groups.push(group);
+      continue;
+    }
+
+    if (msg.role === "tool") {
+      const orphanTools: ChatCompletionMessageParam[] = [];
+      while (i < messages.length && messages[i]?.role === "tool") {
+        orphanTools.push(messages[i]);
+        i++;
+      }
+      if (orphanTools.length > 0) {
+        console.warn(
+          `[chat-thread-store] Skipping ${orphanTools.length} orphan tool message(s) during trim`,
+        );
+      }
+      continue;
+    }
+
+    groups.push([msg]);
+    i++;
+  }
+
+  return groups;
+}
+
 function trimPreservingToolPairs(
   messages: ChatCompletionMessageParam[],
   maxMessages: number,
 ): ChatCompletionMessageParam[] {
-  if (messages.length <= maxMessages) return messages;
-
-  const groups: ChatCompletionMessageParam[][] = [];
-  let i = messages.length - 1;
-
-  while (i >= 0) {
-    const msg = messages[i];
-    if (!msg || typeof msg.role !== "string") {
-      i--;
-      continue;
-    }
-    if (msg.role === "tool") {
-      const group: ChatCompletionMessageParam[] = [];
-      while (i >= 0) {
-        const toolMsg = messages[i];
-        if (!toolMsg || toolMsg.role !== "tool") break;
-        group.unshift(toolMsg);
-        i--;
-      }
-      if (i >= 0 && messages[i]?.role === "assistant") {
-        const assistantMsg = messages[i];
-        const hasToolCalls = Array.isArray(
-          (assistantMsg as { tool_calls?: unknown }).tool_calls,
-        );
-        if (hasToolCalls) {
-          group.unshift(assistantMsg);
-          i--;
-        }
-      }
-      groups.unshift(group);
-    } else {
-      groups.unshift([msg]);
-      i--;
-    }
+  if (messages.length <= maxMessages) {
+    return sanitizeToolCallMessageChain(messages, "[chat-thread-store-trim]");
   }
 
+  const groups = groupMessagesPreservingToolPairs(messages);
   const result: ChatCompletionMessageParam[] = [];
   let total = 0;
   for (let g = groups.length - 1; g >= 0; g--) {
@@ -263,5 +275,5 @@ function trimPreservingToolPairs(
     total += groups[g].length;
   }
 
-  return result;
+  return sanitizeToolCallMessageChain(result, "[chat-thread-store-trim]");
 }

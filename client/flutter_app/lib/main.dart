@@ -21,8 +21,9 @@ import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
+import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
-import "core/services/sphere_entity_controller.dart";
+import "core/services/sphere_overlay_launcher.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
@@ -176,7 +177,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _isInitialized = true;
     });
     
-    _ws.onConnected = _sendSessionInit;
+    _ws.onConnected = () {
+      SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
+      _sendSessionInit();
+    };
     ClientLocationService.bindPreferences(
       read: _store.getPreference,
       write: _store.savePreference,
@@ -242,6 +246,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               <String, dynamic>{};
       _syncAgentSphereFromWs(type, payload);
       if (type == "connection_error") {
+        SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
         final bool hadPendingTurn =
             _isAgentProcessing && _pendingAgentUserMessageId != null;
         _disarmAgentReplyWatchdog();
@@ -268,6 +273,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         }
       }
       if (type == "ws_disconnected") {
+        SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
         if (_isAgentProcessing && _pendingAgentUserMessageId != null) {
           _disarmAgentReplyWatchdog();
           _handleAgentReplyTimeout(showSnackBar: false);
@@ -1573,6 +1579,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         builder: (BuildContext context) {
           return Scaffold(
             body: Stack(
+              clipBehavior: Clip.none,
               children: <Widget>[
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1610,25 +1617,63 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             title: _buildAppBarTitle(),
                             actions: <Widget>[
                               if (!kIsWeb &&
-                                  defaultTargetPlatform == TargetPlatform.windows &&
-                                  FloatingAgentSphere.useNativeEntity)
-                                IconButton(
-                                  tooltip: "召回桌宠到应用槽位",
-                                  icon: const Icon(Icons.smart_toy_outlined),
-                                  onPressed: () async {
-                                    final bool ok =
-                                        await SphereEntityController.instance.ensureOverlay();
-                                    if (!context.mounted) return;
-                                    if (ok) {
-                                      SphereEntityController.instance.onRequestSnapToDock?.call();
-                                      return;
-                                    }
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          "桌宠未启动：请确认 agent-sphere-avatar 已构建",
-                                        ),
+                                  defaultTargetPlatform == TargetPlatform.windows)
+                                ValueListenableBuilder<bool>(
+                                  valueListenable:
+                                      SphereOverlayLauncher.electronActive,
+                                  builder: (BuildContext context, bool active, _) {
+                                    return IconButton(
+                                      tooltip: SphereOverlayLauncher
+                                              .isElectronAvailable
+                                          ? "启动/重启 Electron 桌面桌宠"
+                                          : "桌宠未就绪（需 npm install + build）",
+                                      icon: Icon(
+                                        Icons.smart_toy_outlined,
+                                        color: active
+                                            ? Theme.of(context)
+                                                .colorScheme
+                                                .primary
+                                            : null,
                                       ),
+                                      onPressed: () async {
+                                        if (!SphereOverlayLauncher
+                                            .isElectronAvailable) {
+                                          if (!context.mounted) return;
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                "请先：cd sphere-overlay && npm install\n"
+                                                "以及：cd agent-sphere-avatar && npm run build",
+                                              ),
+                                            ),
+                                          );
+                                          return;
+                                        }
+                                        if (SphereOverlayLauncher.isCreated) {
+                                          await SphereOverlayLauncher.stop();
+                                        }
+                                        final bool ok =
+                                            await SphereOverlayLauncher.launchElectron();
+                                        if (!context.mounted) return;
+                                        if (ok) {
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                "Electron 桌宠已启动：可在整个桌面拖动与漫游",
+                                              ),
+                                            ),
+                                          );
+                                          return;
+                                        }
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text("桌宠启动失败，请查看终端日志"),
+                                          ),
+                                        );
+                                      },
                                     );
                                   },
                                 ),

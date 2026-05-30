@@ -29,19 +29,26 @@ class SphereEntityController extends ChangeNotifier {
 
   Future<bool> ensureOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
-    if (SphereOverlayLauncher.isCreated) {
-      overlayReady = true;
+    if (overlayReady && SphereOverlayLauncher.isCreated) {
       return true;
     }
     final bool ok = await SphereOverlayLauncher.launch();
-    overlayReady = ok;
-    if (ok) notifyListeners();
-    return ok;
+    if (!ok) return false;
+    if (SphereOverlayLauncher.electronActive.value ||
+        SphereOverlayLauncher.useEmbeddedFallback.value) {
+      overlayReady = true;
+      notifyListeners();
+      return true;
+    }
+    overlayReady = await SphereOverlayLauncher.isWebViewReady();
+    if (overlayReady) notifyListeners();
+    return overlayReady;
   }
 
   /// 将原生悬浮窗对齐到 Flutter 槽位的屏幕物理坐标。
   Future<void> syncDockSlot(Rect globalLogicalRect, double devicePixelRatio) async {
     if (!overlayReady || mode != SphereEntityMode.docked) return;
+    if (!await SphereOverlayLauncher.isWebViewReady()) return;
 
     final int x = (globalLogicalRect.left * devicePixelRatio).round();
     final int y = (globalLogicalRect.top * devicePixelRatio).round();

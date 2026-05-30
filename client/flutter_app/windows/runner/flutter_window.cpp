@@ -98,6 +98,45 @@ void FlutterWindow::HandleOverlayMethodCall(
     return;
   }
 
+  if (method == "isCreated") {
+    const bool created =
+        overlay_window_ && overlay_window_->IsCreated();
+    result->Success(flutter::EncodableValue(created));
+    return;
+  }
+
+  if (method == "getAppBounds") {
+    RECT rc;
+    GetWindowRect(GetHandle(), &rc);
+    flutter::EncodableMap app_bounds;
+    app_bounds[flutter::EncodableValue("x")] =
+        flutter::EncodableValue(static_cast<int64_t>(rc.left));
+    app_bounds[flutter::EncodableValue("y")] =
+        flutter::EncodableValue(static_cast<int64_t>(rc.top));
+    app_bounds[flutter::EncodableValue("width")] = flutter::EncodableValue(
+        static_cast<int64_t>(rc.right - rc.left));
+    app_bounds[flutter::EncodableValue("height")] = flutter::EncodableValue(
+        static_cast<int64_t>(rc.bottom - rc.top));
+    result->Success(flutter::EncodableValue(app_bounds));
+    return;
+  }
+
+  if (method == "destroy") {
+    if (overlay_window_) {
+      overlay_window_.reset();
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "isWebViewReady") {
+    const bool ready =
+        overlay_window_ && overlay_window_->IsCreated() &&
+        overlay_window_->IsWebViewReady();
+    result->Success(flutter::EncodableValue(ready));
+    return;
+  }
+
   if (!overlay_window_ || !overlay_window_->IsCreated()) {
     result->NotImplemented();
     return;
@@ -111,11 +150,6 @@ void FlutterWindow::HandleOverlayMethodCall(
     result->Success(flutter::EncodableValue(true));
   } else if (method == "isVisible") {
     result->Success(flutter::EncodableValue(overlay_window_->IsVisible()));
-  } else if (method == "isCreated") {
-    result->Success(flutter::EncodableValue(overlay_window_->IsCreated()));
-  } else if (method == "destroy") {
-    overlay_window_.reset();
-    result->Success(flutter::EncodableValue(true));
   } else if (method == "moveTo") {
     const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
     int x = 0, y = 0, duration = 1200;
@@ -179,19 +213,6 @@ void FlutterWindow::HandleOverlayMethodCall(
     bounds[flutter::EncodableValue("height")] = flutter::EncodableValue(
         static_cast<int64_t>(rc.bottom - rc.top));
     result->Success(flutter::EncodableValue(bounds));
-  } else if (method == "getAppBounds") {
-    RECT rc;
-    GetWindowRect(GetHandle(), &rc);
-    flutter::EncodableMap app_bounds;
-    app_bounds[flutter::EncodableValue("x")] =
-        flutter::EncodableValue(static_cast<int64_t>(rc.left));
-    app_bounds[flutter::EncodableValue("y")] =
-        flutter::EncodableValue(static_cast<int64_t>(rc.top));
-    app_bounds[flutter::EncodableValue("width")] = flutter::EncodableValue(
-        static_cast<int64_t>(rc.right - rc.left));
-    app_bounds[flutter::EncodableValue("height")] = flutter::EncodableValue(
-        static_cast<int64_t>(rc.bottom - rc.top));
-    result->Success(flutter::EncodableValue(app_bounds));
   } else if (method == "roam") {
     overlay_window_->Roam();
     result->Success(nullptr);
