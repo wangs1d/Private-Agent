@@ -44,7 +44,7 @@ export const EMBODIMENT_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "embodiment.roam",
       description:
-        "驱动你的球形身体在 3D 场景中随机漫游（或加强漫游）。用户要求走动、逛逛、动一动、去别处时使用。桌面悬浮窗可用 embodiment.window_roam 移动窗口。",
+        "驱动你的球形身体漫游：3D 场景内随机移动，并同时驱动 Web/桌面悬浮层在屏幕上换位置。用户要求走动、逛逛、动一动时使用；仅移动屏幕位置可用 embodiment.window_roam。",
       parameters: {
         type: "object",
         properties: {
@@ -114,7 +114,7 @@ export const EMBODIMENT_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "embodiment.window_roam",
       description:
-        "仅桌面透明悬浮窗：将窗口随机移动到屏幕工作区另一位置。Web 嵌入模式无效。",
+        "将球形悬浮体随机移动到屏幕/页面可视区域的另一位置（Web 浮层、桌面透明悬浮窗均有效）。",
       parameters: {
         type: "object",
         properties: {},

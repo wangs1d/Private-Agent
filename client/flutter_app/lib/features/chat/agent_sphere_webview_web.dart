@@ -1,6 +1,6 @@
-// ignore: avoid_web_libraries_in_flutter
+import "dart:async";
 import "dart:html" as html;
-import "dart:ui_web" as ui_web;
+import "dart:js" as js;
 
 import "package:flutter/material.dart";
 
@@ -8,7 +8,8 @@ import "../../core/config/api_config.dart";
 import "../../core/services/agent_sphere_interact_bridge.dart";
 import "../../core/services/agent_sphere_mood_bridge.dart";
 
-/// Web 平台 — iframe 嵌入 3D Agent
+const String _lockKey = "__paiSphereLocked";
+
 class AgentSphereWebView extends StatefulWidget {
   const AgentSphereWebView({
     super.key,
@@ -16,82 +17,114 @@ class AgentSphereWebView extends StatefulWidget {
     this.onDragDelta,
     this.onDragStart,
     this.onDragEnd,
+    this.visible = true,
   });
 
   final bool showOverlayButton;
   final ValueChanged<Offset>? onDragDelta;
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
+  final bool visible;
 
   @override
   State<AgentSphereWebView> createState() => _AgentSphereWebViewState();
 }
 
 class _AgentSphereWebViewState extends State<AgentSphereWebView> {
-  static int _viewSeq = 0;
-  late final String _viewType;
+  html.DivElement? _host;
   html.IFrameElement? _frame;
-  bool _ready = false;
-  bool _dragging = false;
-  double _lastClientX = 0;
-  double _lastClientY = 0;
+  StreamSubscription<html.MessageEvent>? _msgSub;
+  bool _iAmOwner = false;
 
   @override
   void initState() {
     super.initState();
-    _viewType = "agent-sphere-iframe-${_viewSeq++}";
-    final String src =
-        "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
+    if (_acquire()) {
+      _iAmOwner = true;
+      _nukeAll();
+      _inject();
+      AgentSphereMoodBridge.instance.addListener(_onPatch);
+      AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
+      _msgSub = html.window.onMessage.listen(_onWindowMessage);
+    }
+  }
 
-    ui_web.platformViewRegistry.registerViewFactory(_viewType, (int _) {
-      _frame = html.IFrameElement()
-        ..src = src
-        ..style.border = "0"
-        ..style.width = "100%"
-        ..style.height = "100%"
-        ..style.display = "block"
-        ..style.backgroundColor = "transparent"
-        ..allow = "autoplay; microphone";
-      final html.DivElement host = html.DivElement()
-        ..style.width = "100%"
-        ..style.height = "100%"
-        ..style.overflow = "hidden"
-        ..style.position = "relative"
-        ..style.pointerEvents = "auto"
-        ..style.backgroundColor = "transparent";
-      host.append(_frame!);
-      _bindDrag(host, _frame!);
-      return host;
-    });
-
-    AgentSphereMoodBridge.instance.addListener(_onPatch);
-    AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
-    html.window.onMessage.listen((html.MessageEvent event) {
-      if (event.data is! Map) return;
-      final Map data = event.data as Map;
-      if (data["type"] == "agent-sphere:ready") {
-        setState(() => _ready = true);
-        AgentSphereMoodBridge.instance.idle();
-        return;
-      }
-      if (data["type"] == "agent-sphere:interact" && data["action"] == "focus") {
-        AgentSphereMoodBridge.instance.requestChatFocus();
-        return;
-      }
-      if (data["type"] == "agent-sphere:send") {
-        AgentSphereInteractBridge.instance.send(
-          data["action"]?.toString() ?? "",
-          text: data["text"]?.toString(),
-        );
-      }
-    });
+  @override
+  void didUpdateWidget(covariant AgentSphereWebView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_iAmOwner) _applyVisibility();
   }
 
   @override
   void dispose() {
-    AgentSphereMoodBridge.instance.removeListener(_onPatch);
-    AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
+    if (_iAmOwner) {
+      AgentSphereMoodBridge.instance.removeListener(_onPatch);
+      AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
+      _msgSub?.cancel();
+      _remove();
+      _release();
+    }
     super.dispose();
+  }
+
+  static bool _acquire() {
+    final locked = js.context[_lockKey];
+    if (locked == true) return false;
+    js.context[_lockKey] = true;
+    return true;
+  }
+
+  static void _release() {
+    js.context[_lockKey] = false;
+  }
+
+  void _nukeAll() {
+    html.document.querySelectorAll("[data-pai-sphere]").forEach((el) => el.remove());
+  }
+
+  void _inject() {
+    final String src =
+        "${ApiConfig.httpBase}/chat/assets/avatar/free.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
+
+    _host = html.DivElement()
+      ..setAttribute("data-pai-sphere", "host")
+      ..style.position = "fixed"
+      ..style.left = "0"
+      ..style.top = "0"
+      ..style.width = "100vw"
+      ..style.height = "100vh"
+      ..style.pointerEvents = "none"
+      ..style.zIndex = "9999"
+      ..style.overflow = "visible"
+      ..style.backgroundColor = "transparent";
+
+    _frame = html.IFrameElement()
+      ..setAttribute("data-pai-sphere", "frame")
+      ..src = src
+      ..style.border = "none"
+      ..style.width = "100%"
+      ..style.height = "100%"
+      ..style.display = "block"
+      ..style.backgroundColor = "transparent"
+      ..style.pointerEvents = "none"
+      ..style.overflow = "visible"
+      ..allow = "autoplay; microphone";
+
+    _host!.append(_frame!);
+    html.document.body?.append(_host!);
+    _applyVisibility();
+  }
+
+  void _remove() {
+    _frame?.remove();
+    _host?.remove();
+    _frame = null;
+    _host = null;
+  }
+
+  void _applyVisibility() {
+    if (_host == null) return;
+    _host!.style.display = widget.visible ? "" : "none";
   }
 
   void _onPatch(AgentSpherePatch patch) {
@@ -102,62 +135,28 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
     _frame?.contentWindow?.postMessage(message, "*");
   }
 
-  void _bindDrag(html.DivElement host, html.IFrameElement frame) {
-    if (widget.onDragDelta == null) return;
+  void _onWindowMessage(html.MessageEvent event) {
+    if (event.data is! Map) return;
+    final Map data = event.data as Map;
+    final String? type = data["type"]?.toString();
 
-    void onMouseDown(html.MouseEvent ev) {
-      // 左键拖动旋转视角；Shift/Alt + 拖动移动悬浮位置
-      if (ev.button != 0 || widget.onDragDelta == null) return;
-      if (!ev.shiftKey && !ev.altKey) return;
-      _dragging = true;
-      _lastClientX = ev.client.x.toDouble();
-      _lastClientY = ev.client.y.toDouble();
-      frame.style.pointerEvents = "none";
-      host.style.cursor = "grabbing";
-      widget.onDragStart?.call();
-      ev.preventDefault();
+    if (type == "agent-sphere:ready") {
+      AgentSphereMoodBridge.instance.idle();
+      return;
     }
-
-    void onMouseMove(html.MouseEvent ev) {
-      if (!_dragging || widget.onDragDelta == null) return;
-      final double x = ev.client.x.toDouble();
-      final double y = ev.client.y.toDouble();
-      widget.onDragDelta!(Offset(x - _lastClientX, y - _lastClientY));
-      _lastClientX = x;
-      _lastClientY = y;
+    if (type == "agent-sphere:interact" && data["action"] == "focus") {
+      AgentSphereMoodBridge.instance.requestChatFocus();
+      return;
     }
-
-    void onMouseEnd(html.MouseEvent ev) {
-      if (!_dragging) return;
-      _dragging = false;
-      frame.style.pointerEvents = "auto";
-      host.style.cursor = "grab";
-      widget.onDragEnd?.call();
+    if (type == "agent-sphere:send") {
+      AgentSphereInteractBridge.instance.send(
+        data["action"]?.toString() ?? "",
+        text: data["text"]?.toString(),
+      );
+      return;
     }
-
-    host.style.cursor = "grab";
-    host.onMouseDown.listen(onMouseDown);
-    frame.onMouseDown.listen(onMouseDown);
-    html.document.onMouseMove.listen(onMouseMove);
-    html.document.onMouseUp.listen(onMouseEnd);
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Stack(
-      fit: StackFit.expand,
-      clipBehavior: Clip.none,
-      children: <Widget>[
-        HtmlElementView(viewType: _viewType),
-        if (!_ready)
-          const Center(
-            child: SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-          ),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

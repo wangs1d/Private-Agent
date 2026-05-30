@@ -16,6 +16,7 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         embed: resolve(__dirname, "embed.html"),
         overlay: resolve(__dirname, "overlay.html"),
+        free: resolve(__dirname, "free.html"),
       },
     },
   },

@@ -1,29 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(runner LANGUAGES CXX)
 
-set(WEBVIEW_VERSION "1.0.1210.39")
-set(NUGET_URL https://dist.nuget.org/win-x86-commandline/v5.10.0/nuget.exe)
-set(NUGET_SHA256 852b71cc8c8c2d40d09ea49d321ff56fd2397b9d6ea9f96e532530307bbbafd3)
-
-find_program(NUGET nuget)
-if(NOT NUGET)
-  set(NUGET ${CMAKE_BINARY_DIR}/nuget.exe)
-  if(NOT EXISTS ${NUGET})
-    file(DOWNLOAD ${NUGET_URL} ${NUGET})
-  endif()
-  file(SHA256 ${NUGET} NUGET_DL_HASH)
-  if(NOT NUGET_DL_HASH STREQUAL NUGET_SHA256)
-    message(FATAL_ERROR "Integrity check for ${NUGET} failed.")
-  endif()
-endif()
-
-set(WEBVIEW2_PACKAGE_DIR "${CMAKE_BINARY_DIR}/packages/Microsoft.Web.WebView2")
-
-add_custom_target(sphere_overlay_webview2_deps)
-add_custom_command(
-  TARGET sphere_overlay_webview2_deps PRE_BUILD
-  COMMAND ${NUGET} install Microsoft.Web.WebView2 -Version ${WEBVIEW_VERSION} -ExcludeVersion -OutputDirectory ${CMAKE_BINARY_DIR}/packages
-)
+# WebView2 is provided by the webview_windows plugin only. Do NOT link
+# WebView2LoaderStatic into the runner EXE — two loaders in one process
+# cause STATUS_STACK_BUFFER_OVERRUN (0xC0000409) when the desk overlay starts.
 
 # Define the application target. To change its name, change BINARY_NAME in the
 # top-level CMakeLists.txt, not the value here, or `flutter run` will no longer
@@ -59,14 +39,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
-target_include_directories(${BINARY_NAME} PRIVATE
-  "${CMAKE_SOURCE_DIR}"
-  "${WEBVIEW2_PACKAGE_DIR}/build/native/include"
-)
-target_link_libraries(${BINARY_NAME} PRIVATE
-  "${WEBVIEW2_PACKAGE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
-)
-add_dependencies(${BINARY_NAME} sphere_overlay_webview2_deps)
+target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

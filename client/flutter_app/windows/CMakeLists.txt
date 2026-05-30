@@ -9,6 +9,12 @@ set(BINARY_NAME "private_ai_agent")
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
 cmake_policy(VERSION 3.14...3.25)
+# webview_windows (and similar plugins) use DEPENDS with add_custom_command(TARGET).
+if(POLICY CMP0175)
+  cmake_policy(SET CMP0175 OLD)
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ensure_nuget.cmake")
 
 # Define build configuration option.
 get_property(IS_MULTICONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
@@ -55,6 +61,7 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_webview_windows.cmake")
 include(flutter/generated_plugins.cmake)
 
 

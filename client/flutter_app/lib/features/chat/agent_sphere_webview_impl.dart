@@ -10,12 +10,14 @@ class AgentSphereWebView extends StatelessWidget {
     this.onDragDelta,
     this.onDragStart,
     this.onDragEnd,
+    this.visible = true,
   });
 
   final bool showOverlayButton;
   final ValueChanged<Offset>? onDragDelta;
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
+  final bool visible;
 
   @override
   Widget build(BuildContext context) {

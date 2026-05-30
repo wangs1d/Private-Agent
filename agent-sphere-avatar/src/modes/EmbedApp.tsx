@@ -16,6 +16,8 @@ import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
 
+import { useEmbedFloatPan } from "../hooks/useEmbedFloatPan";
+
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 
 import type { EmbodimentCommandAction } from "../types/agent";
@@ -65,6 +67,8 @@ export function EmbedApp() {
 
 
   useEmbodimentCommandRelay(true);
+
+  useEmbedFloatPan(true);
 
 
 
@@ -333,21 +337,13 @@ export function EmbedApp() {
     <div className="mode-shell mode-embed">
 
       <SphereAgentScene
-
         state={state}
-
         mode="embed"
-
         physics
-
-        autonomous={false}
-
+        autonomous
         onEyeFocus={setFocused}
-
         onEyeClick={handleEyeClick}
-
         onEyeInteractionChange={handleEyeInteraction}
-
       />
 
 

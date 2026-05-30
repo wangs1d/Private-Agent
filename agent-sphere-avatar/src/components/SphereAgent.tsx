@@ -15,6 +15,8 @@ interface SphereAgentProps {
   onEyeClick?: () => void;
   physics?: boolean;
   autonomous?: boolean;
+  motionBounds?: number;
+  hardMotionClamp?: boolean;
   onEyeInteractionChange?: (active: boolean) => void;
 }
 
@@ -25,6 +27,8 @@ export function SphereAgent({
   onEyeClick,
   physics = true,
   autonomous = true,
+  motionBounds = 2.4,
+  hardMotionClamp = false,
   onEyeInteractionChange,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
@@ -45,8 +49,9 @@ export function SphereAgent({
   const { pickRandomTarget, setTarget, stopMotion, resumeMotion } = useAutonomousMotion({
     api,
     enabled: physics && autonomous,
-    bounds: 2.4,
+    bounds: motionBounds,
     strength: motionStrength,
+    hardClamp: hardMotionClamp,
   });
 
   useVisualFloat(visualRef, !physics && autonomous);

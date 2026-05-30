@@ -17,6 +17,7 @@ class AgentSphereWebView extends StatefulWidget {
     this.onDragDelta,
     this.onDragStart,
     this.onDragEnd,
+    this.visible = true,
   });
 
   /// 是否显示「启动桌面悬浮」按钮（语音模式页可关闭）
@@ -24,6 +25,7 @@ class AgentSphereWebView extends StatefulWidget {
   final ValueChanged<Offset>? onDragDelta;
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
+  final bool visible;
 
   @override
   State<AgentSphereWebView> createState() => _AgentSphereWebViewState();
@@ -48,14 +50,18 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   Future<void> _initWebView() async {
     try {
       await _controller.initialize();
+      await _controller.setBackgroundColor(Colors.transparent);
       _controller.url.listen((String url) {
-        if (url.contains("embed.html") && mounted) {
+        if ((url.contains("overlay.html") || url.contains("embed.html")) &&
+            mounted) {
           setState(() => _ready = true);
           AgentSphereMoodBridge.instance.idle();
         }
       });
+      final String session = Uri.encodeComponent(ApiConfig.effectiveActorId);
+      final String ws = Uri.encodeComponent(ApiConfig.wsUrl);
       final String url =
-          "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
+          "${ApiConfig.httpBase}/chat/assets/avatar/overlay.html?ws=$ws&sessionId=$session";
       await _controller.loadUrl(url);
       if (mounted) setState(() => _initialized = true);
     } catch (e) {
@@ -87,7 +93,13 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
     final bool ok = await SphereOverlayLauncher.launch();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ok ? "桌面悬浮 Agent 已启动" : "启动失败")),
+      SnackBar(
+        content: Text(
+          ok
+              ? "Electron 桌面桌宠已启动（独立窗口）"
+              : "启动失败：请在 sphere-overlay 目录执行 npm install",
+        ),
+      ),
     );
   }
 
@@ -114,10 +126,11 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
 
-    return ClipRect(
+    return ColoredBox(
+      color: Colors.transparent,
       child: Stack(
         fit: StackFit.expand,
-        clipBehavior: Clip.hardEdge,
+        clipBehavior: Clip.none,
         children: <Widget>[
           Webview(_controller),
           if (!_ready)

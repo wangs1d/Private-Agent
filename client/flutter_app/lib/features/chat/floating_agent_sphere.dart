@@ -1,59 +1,71 @@
 import "dart:async";
-import "dart:io";
 
-import "package:flutter/foundation.dart" show kIsWeb;
+import "package:flutter/foundation.dart"
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
 
+import "../../core/services/agent_sphere_mood_bridge.dart";
 import "../../core/services/sphere_entity_controller.dart";
+import "../../core/services/sphere_overlay_launcher.dart";
 import "agent_sphere_webview.dart";
-import "shift_drag_overlay.dart";
+import "sphere_float_motion.dart";
+import "web_sphere_drag_chrome.dart";
 
 /// 球形 Agent 悬浮层。
 ///
-/// Windows 桌面：单一原生 overlay 实体，Flutter 槽位为透明锚点（可溢出到桌面漫游）。
-/// Web / 其它平台：iframe / WebView 内嵌 embed。
+/// - **Web**：iframe 嵌入
+/// - **Windows 桌面**：Win32 原生透明桌宠窗 + Flutter 透明槽位锚点（无内嵌 WebView）
 class FloatingAgentSphere extends StatefulWidget {
   const FloatingAgentSphere({super.key});
 
   static const Size panelSize = SphereEntityController.entitySize;
 
-  /// Win32 独立透明悬浮窗（桌面漫游）。默认关闭：启动时会触发 WebView2 原生崩溃。
-  /// 启用：`flutter run -d windows --dart-define=NATIVE_SPHERE_OVERLAY=true`
-  static const bool _enableNativeOverlay = bool.fromEnvironment(
-    "NATIVE_SPHERE_OVERLAY",
-    defaultValue: false,
-  );
+  static const double webDragChromeHeight = WebSphereDragChrome.height;
 
-  /// Windows 桌面使用 Flutter 侧透明槽位（可拖动）；与 [_enableNativeOverlay] 独立。
-  static bool get useWindowsDockSlot => !kIsWeb && Platform.isWindows;
-
-  /// 是否挂载 Win32 原生 WebView2 悬浮实体。
-  static bool get useNativeEntity =>
-      useWindowsDockSlot && _enableNativeOverlay;
+  static bool get useWindowsDesktop =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
   @override
   State<FloatingAgentSphere> createState() => _FloatingAgentSphereState();
 }
 
 class _FloatingAgentSphereState extends State<FloatingAgentSphere>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   final SphereEntityController _entity = SphereEntityController.instance;
   final GlobalKey _slotKey = GlobalKey();
 
   Offset? _position;
   bool _bootstrapping = false;
+  String? _bootError;
+  late final SphereFloatMotion _floatMotion = SphereFloatMotion(vsync: this);
+
+  bool get _electronActive =>
+      FloatingAgentSphere.useWindowsDesktop &&
+      SphereOverlayLauncher.electronActive.value;
+
+  bool get _embeddedFallback =>
+      FloatingAgentSphere.useWindowsDesktop &&
+      SphereOverlayLauncher.useEmbeddedFallback.value;
+
+  bool get _nativeReady =>
+      _entity.overlayReady && !_embeddedFallback;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (FloatingAgentSphere.useNativeEntity) {
+    AgentSphereMoodBridge.instance.addMessageListener(_onEmbodimentCommand);
+
+    if (FloatingAgentSphere.useWindowsDesktop) {
       _entity.onRequestSnapToDock = _snapBackToDock;
+      _entity.addListener(_onEntityChanged);
+      SphereOverlayLauncher.electronActive.addListener(_onOverlayState);
+      SphereOverlayLauncher.useEmbeddedFallback.addListener(_onOverlayState);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        Future<void>.delayed(const Duration(seconds: 2), () {
-          if (mounted) unawaited(_bootstrapNativeEntity());
+        Future<void>.delayed(const Duration(milliseconds: 400), () {
+          if (mounted) unawaited(_bootstrapNativeDeskPet());
         });
       });
     }
@@ -61,12 +73,90 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
   @override
   void dispose() {
-    if (FloatingAgentSphere.useNativeEntity &&
-        identical(_entity.onRequestSnapToDock, _snapBackToDock)) {
+    AgentSphereMoodBridge.instance.removeMessageListener(_onEmbodimentCommand);
+    _entity.removeListener(_onEntityChanged);
+    SphereOverlayLauncher.electronActive.removeListener(_onOverlayState);
+    SphereOverlayLauncher.useEmbeddedFallback.removeListener(_onOverlayState);
+    if (identical(_entity.onRequestSnapToDock, _snapBackToDock)) {
       _entity.onRequestSnapToDock = null;
     }
+    _floatMotion.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onEntityChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onOverlayState() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _bootstrapNativeDeskPet() async {
+    if (_bootstrapping ||
+        _nativeReady ||
+        _electronActive ||
+        _embeddedFallback) {
+      return;
+    }
+    _bootstrapping = true;
+    _bootError = null;
+    if (mounted) setState(() {});
+
+    final bool ok = await _entity.ensureOverlay();
+    if (!ok && mounted) {
+      _bootError = "桌宠窗口启动失败\n请确认后端已运行且 avatar 已构建";
+    }
+
+    _bootstrapping = false;
+    if (mounted) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => _syncDockIfNeeded());
+      setState(() {});
+    }
+  }
+
+  void _onEmbodimentCommand(Map<String, dynamic> message) {
+    final String? type = message["type"]?.toString();
+    if (type != "agent-sphere:command") return;
+    if (!mounted || _electronActive) return;
+
+    final Size screen = MediaQuery.sizeOf(context);
+    _ensureInitialPosition(screen);
+    final double dpr = MediaQuery.devicePixelRatioOf(context);
+
+    if (_embeddedFallback) {
+      unawaited(_floatMotion.handleCommand(
+        payload: message,
+        viewport: screen,
+        panelSize: FloatingAgentSphere.panelSize,
+        current: _position!,
+        clampPosition: (Offset p) => _clampToViewport(p, screen),
+        applyPosition: (Offset p) {
+          if (!mounted) return;
+          setState(() => _position = p);
+        },
+        useNativeOverlay: false,
+        devicePixelRatio: dpr,
+      ));
+      return;
+    }
+
+    if (!_nativeReady) return;
+
+    unawaited(_floatMotion.handleCommand(
+      payload: message,
+      viewport: screen,
+      panelSize: FloatingAgentSphere.panelSize,
+      current: _position!,
+      clampPosition: (Offset p) => _clampToViewport(p, screen),
+      applyPosition: (Offset p) {
+        if (!mounted) return;
+        setState(() => _position = p);
+      },
+      useNativeOverlay: true,
+      devicePixelRatio: dpr,
+    ));
   }
 
   void _snapBackToDock() {
@@ -79,19 +169,9 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
   @override
   void didChangeMetrics() {
-    if (FloatingAgentSphere.useNativeEntity) {
+    if (_nativeReady) {
       SchedulerBinding.instance.addPostFrameCallback((_) => _syncDockIfNeeded());
     }
-  }
-
-  Future<void> _bootstrapNativeEntity() async {
-    if (_bootstrapping) return;
-    _bootstrapping = true;
-    await _entity.ensureOverlay();
-    if (mounted) {
-      SchedulerBinding.instance.addPostFrameCallback((_) => _syncDockIfNeeded());
-    }
-    _bootstrapping = false;
   }
 
   void _ensureInitialPosition(Size screen) {
@@ -109,7 +189,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   }
 
   Future<void> _syncDockIfNeeded() async {
-    if (!mounted || !_entity.overlayReady) return;
+    if (!mounted || !_nativeReady) return;
     if (_entity.mode != SphereEntityMode.docked) return;
 
     final Rect? slot = _slotGlobalRect();
@@ -120,31 +200,26 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   }
 
   void _applyDragDelta(Offset delta, Size screen, BuildContext context) {
+    if (!_nativeReady) return;
     final double dpr = MediaQuery.devicePixelRatioOf(context);
+    unawaited(_entity.moveOverlayByPhysical(Offset(
+      delta.dx * dpr,
+      delta.dy * dpr,
+    )));
+  }
 
-    if (FloatingAgentSphere.useNativeEntity && _entity.overlayReady) {
-      unawaited(_entity.moveOverlayByPhysical(Offset(
-        delta.dx * dpr,
-        delta.dy * dpr,
-      )));
-      return;
-    }
-
-    final Offset base = _position ?? Offset.zero;
-    final double maxX =
-        (screen.width - FloatingAgentSphere.panelSize.width).clamp(0, double.infinity);
-    final double maxY =
-        (screen.height - FloatingAgentSphere.panelSize.height).clamp(0, double.infinity);
-    setState(() {
-      _position = Offset(
-        (base.dx + delta.dx).clamp(0, maxX),
-        (base.dy + delta.dy).clamp(0, maxY),
-      );
-    });
+  Offset _clampToViewport(Offset pos, Size screen) {
+    final Size size = FloatingAgentSphere.panelSize;
+    final double maxX = (screen.width - size.width).clamp(0, double.infinity);
+    final double maxY = (screen.height - size.height).clamp(0, double.infinity);
+    return Offset(
+      pos.dx.clamp(0, maxX),
+      pos.dy.clamp(0, maxY),
+    );
   }
 
   Future<void> _onDragEnd(BuildContext context) async {
-    if (!FloatingAgentSphere.useNativeEntity || !_entity.overlayReady) return;
+    if (!_nativeReady) return;
 
     final double dpr = MediaQuery.devicePixelRatioOf(context);
     await _entity.refreshOverflowState(dpr);
@@ -186,24 +261,32 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
                   ),
                 ),
               )
-            : (!FloatingAgentSphere.useNativeEntity
+            : _bootstrapping
                 ? Center(
-                    child: Icon(
-                      Icons.smart_toy_outlined,
-                      size: 56,
-                      color: Colors.white.withValues(alpha: 0.18),
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white.withValues(alpha: 0.25),
+                      ),
                     ),
                   )
-                : null),
-      ),
-    );
-  }
-
-  Widget? _desktopDragLayer(Size screen, BuildContext context) {
-    if (kIsWeb || FloatingAgentSphere.useNativeEntity) return null;
-    return Positioned.fill(
-      child: ShiftDragOverlay(
-        onDragDelta: (Offset d) => _applyDragDelta(d, screen, context),
+                : _bootError != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Text(
+                            _bootError!,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.45),
+                              fontSize: 10,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      )
+                    : null,
       ),
     );
   }
@@ -211,36 +294,42 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   @override
   Widget build(BuildContext context) {
     final Size screen = MediaQuery.sizeOf(context);
-    _ensureInitialPosition(screen);
-    final Offset pos = _position!;
+
+    if (kIsWeb) {
+      final navigator = Navigator.of(context, rootNavigator: true);
+      final bool isMainRoute = !navigator.canPop();
+      return AgentSphereWebView(
+        showOverlayButton: false,
+        visible: isMainRoute,
+      );
+    }
+
+    if (_electronActive) {
+      return const SizedBox.shrink();
+    }
+
+    if (_embeddedFallback) {
+      _ensureInitialPosition(screen);
+      return Positioned(
+        left: _position!.dx,
+        top: _position!.dy,
+        width: FloatingAgentSphere.panelSize.width,
+        height: FloatingAgentSphere.panelSize.height,
+        child: AgentSphereWebView(showOverlayButton: false),
+      );
+    }
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
-      if (FloatingAgentSphere.useNativeEntity) {
-        _syncDockIfNeeded();
-      }
+      if (_nativeReady) _syncDockIfNeeded();
     });
 
+    _ensureInitialPosition(screen);
     return Positioned(
-      left: pos.dx,
-      top: pos.dy,
+      left: _position!.dx,
+      top: _position!.dy,
       width: FloatingAgentSphere.panelSize.width,
       height: FloatingAgentSphere.panelSize.height,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: <Widget>[
-          Positioned.fill(
-            child: FloatingAgentSphere.useWindowsDockSlot
-                ? _nativeDockSlot(context, screen)
-                : AgentSphereWebView(
-                    showOverlayButton: false,
-                    onDragDelta:
-                        kIsWeb ? (Offset d) => _applyDragDelta(d, screen, context) : null,
-                  ),
-          ),
-          if (_desktopDragLayer(screen, context) != null)
-            _desktopDragLayer(screen, context)!,
-        ],
-      ),
+      child: _nativeDockSlot(context, screen),
     );
   }
 }

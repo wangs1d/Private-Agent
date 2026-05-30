@@ -1,5 +1,4 @@
-import "dart:io";
-
+import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
 
 import "../../core/models/chat_models.dart";
@@ -80,7 +79,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   void initState() {
     super.initState();
     // Windows SAPI 在启动阶段预初始化会触发原生崩溃 (0xC0000409)，改为用户点麦克风时按需初始化
-    if (!Platform.isWindows) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
       _speechService.initialize();
     }
     // 初始化呼吸动画

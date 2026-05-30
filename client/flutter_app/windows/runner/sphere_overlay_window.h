@@ -7,10 +7,6 @@
 #include <memory>
 #include <string>
 
-#include <wrl/client.h>
-
-#include "webview2.h"
-
 class SphereOverlayWindow {
  public:
   using PatchMoodCallback = std::function<void(const std::string& json)>;
@@ -25,6 +21,7 @@ class SphereOverlayWindow {
   void Hide();
   bool IsVisible() const;
   bool IsCreated() const;
+  bool IsWebViewReady() const;
 
   void MoveTo(int x, int y, int duration_ms = 1200);
   void MoveBy(int dx, int dy);
@@ -58,12 +55,8 @@ class SphereOverlayWindow {
   void OnWebviewReady();
   void OnWebMessage(const std::wstring& json_msg);
 
-  std::wstring GetDistPath() const;
-
   HWND window_handle_ = nullptr;
   HWND parent_handle_ = nullptr;
-  Microsoft::WRL::ComPtr<ICoreWebView2Controller> webview_controller_;
-  Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
 
   std::string stored_url_;
 
@@ -79,6 +72,7 @@ class SphereOverlayWindow {
 
   bool ignore_mouse_ = false;
   bool mouse_forward_ = true;
+  bool webview_ready_ = false;
 
   int overlay_width_ = 300;
   int overlay_height_ = 380;
@@ -87,6 +81,7 @@ class SphereOverlayWindow {
 
   static constexpr const wchar_t* kClassName =
       L"PAI_SphereOverlay_Window";
+
 };
 
 #endif  // RUNNER_SPHERE_OVERLAY_WINDOW_H_

@@ -1,0 +1,17 @@
+warning: in the working copy of 'agent-sphere-avatar/src/components/SphereAgent.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent-sphere-avatar/src/modes/EmbedApp.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/lib/core/services/sphere_overlay_launcher.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/lib/features/chat/floating_agent_sphere.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/lib/main.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/windows/runner/flutter_window.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/windows/runner/sphere_overlay_window.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'client/flutter_app/windows/runner/sphere_overlay_window.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/agent-memory-sync.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/chat-threads.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/daily-digests.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/hermes-trajectories.jsonl', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/schedule-tasks.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/data/user_profiles/session-mvp-001/USER_PROFILE.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/scripts/cleanup-orphan-tool-messages.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/src/external-model/openai-compatible-tool-loop.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/web/chat/assets/avatar/assets/index-D-c_gXwM.css', LF will be replaced by CRLF the next time Git touches it

@@ -18,6 +18,7 @@ html.embed-root #root {
 
 .mode-embed {
   background: transparent !important;
+  overflow: hidden;
 }
 
 .mode-overlay {
@@ -218,4 +219,96 @@ html.embed-root #root {
   font-size: 0.6rem;
   color: rgba(255, 255, 255, 0.45);
   text-align: center;
+}
+
+/* ── Agent 内心活动浮层 ── */
+.inner-thought {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 8px;
+  min-width: 100px;
+  max-width: 200px;
+  padding: 6px 10px 8px;
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.62);
+  border: 1px solid rgba(136, 187, 255, 0.15);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+  animation: inner-thought-in 0.3s ease-out;
+}
+
+@keyframes inner-thought-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+.inner-thought::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(8, 12, 20, 0.62);
+}
+
+.inner-thought__mood {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+
+.inner-thought__mood-icon {
+  font-size: 0.7rem;
+}
+
+.inner-thought--idle .inner-thought__mood { color: rgba(148, 163, 184, 0.7); }
+.inner-thought--listening .inner-thought__mood { color: #93c5fd; }
+.inner-thought--thinking .inner-thought__mood { color: #fcd34d; }
+.inner-thought--speaking .inner-thought__mood { color: #a5f3fc; }
+.inner-thought--happy .inner-thought__mood { color: #86efac; }
+.inner-thought--alert .inner-thought__mood { color: #fca5a5; }
+
+.inner-thought__sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(136, 187, 255, 0.1);
+  font-size: 0.6rem;
+  color: #c4b5fd;
+}
+
+.inner-thought__sub-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 0 0 6px rgba(167, 139, 250, 0.6);
+  animation: inner-sub-pulse 2s ease-in-out infinite;
+}
+
+@keyframes inner-sub-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.inner-thought__caption {
+  margin-top: 4px;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: #e2e8f0;
+  word-break: break-word;
+}
+
+.inner-thought__phase {
+  margin-top: 4px;
+  font-size: 0.6rem;
+  color: rgba(148, 163, 184, 0.65);
+  font-style: italic;
 }

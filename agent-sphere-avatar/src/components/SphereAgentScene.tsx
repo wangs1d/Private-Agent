@@ -20,7 +20,7 @@ function Ground({ visible, invisibleCollision }: { visible: boolean; invisibleCo
   if (!visible && !invisibleCollision) return null;
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
-      <planeGeometry args={[invisibleCollision ? 8 : 20, invisibleCollision ? 8 : 20]} />
+      <planeGeometry args={[invisibleCollision ? 2.6 : 20, invisibleCollision ? 2.6 : 20]} />
       <meshStandardMaterial
         color="#0a0c12"
         metalness={0.2}
@@ -63,7 +63,7 @@ export function SphereAgentScene({
 
       <PerspectiveCamera
         makeDefault
-        position={isOverlay ? [0, 1.55, 3.6] : [0, 1.75, 4.1]}
+        position={isOverlay ? [0, 1.2, 3.6] : [0, 1.75, 4.1]}
         fov={isOverlay ? 38 : 42}
       />
 
@@ -107,6 +107,8 @@ export function SphereAgentScene({
           onEyeClick={onEyeClick}
           physics={scenePhysics}
           autonomous={autonomous}
+          motionBounds={isEmbed ? 1.15 : 2.4}
+          hardMotionClamp={isEmbed}
           onEyeInteractionChange={onEyeInteractionChange}
         />
       </Physics>

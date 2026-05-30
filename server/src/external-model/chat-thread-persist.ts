@@ -6,7 +6,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { MASTER_CHAT_SESSION_PREFIX } from "../agent/master-chat-session.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
-import { compactValidChatMessages, repairKimiAssistantToolCallReasoning } from "./chat-thread-sanitize.js";
+import { compactValidChatMessages, repairKimiAssistantToolCallReasoning, sanitizeToolCallMessageChain } from "./chat-thread-sanitize.js";
 
 const PE_SESSION_MARKER = "\u007fpe\u007f";
 
@@ -87,7 +87,13 @@ function tailMessages(
           i--;
         }
       }
-      groups.unshift(group);
+      if (group.some((m) => m.role === "assistant")) {
+        groups.unshift(group);
+      } else if (group.length > 0) {
+        console.warn(
+          `[chat-thread-persist] Dropping orphan tool group (${group.length} messages) during tail trim`,
+        );
+      }
     } else {
       groups.unshift([msg]);
       i--;
@@ -128,11 +134,33 @@ export class ChatThreadPersistence {
       const parsed = JSON.parse(raw) as PersistedShape;
       if (parsed?.sessions && typeof parsed.sessions === "object") {
         this.data = parsed;
+        this.sanitizeAllPersistedSessions();
         this.migrateSplitActorThreads();
       }
     } catch (e: unknown) {
       const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
       if (code !== "ENOENT") throw e;
+    }
+  }
+
+  /** 启动时修复已落盘的损坏 tool 链，避免下次对话继续 400。 */
+  private sanitizeAllPersistedSessions(): void {
+    let changed = false;
+    for (const [sessionId, row] of Object.entries(this.data.sessions)) {
+      if (!row?.messages?.length) continue;
+      const sanitized = sanitizeToolCallMessageChain(row.messages, "[chat-thread-persist-load]");
+      if (sanitized.length !== row.messages.length) {
+        console.warn(
+          `[chat-thread-persist] Repaired session ${sessionId} on load: ` +
+          `${row.messages.length} → ${sanitized.length} messages`,
+        );
+        row.messages = sanitized;
+        row.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.flushToDisk();
     }
   }
 
@@ -174,7 +202,7 @@ export class ChatThreadPersistence {
       max,
     );
     const sanitized = repairKimiAssistantToolCallReasoning(
-      this.sanitizeRestoredToolChain(raw),
+      sanitizeToolCallMessageChain(raw, "[chat-thread-persist]"),
     );
     if (sanitized.length !== raw.length) {
       console.warn(
@@ -183,41 +211,6 @@ export class ChatThreadPersistence {
       );
     }
     return sanitized;
-  }
-
-  private sanitizeRestoredToolChain(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
-    const validToolCallIds = new Set<string>();
-    for (const msg of messages) {
-      if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
-        const toolCalls = (msg as { tool_calls: Array<{ id?: string }> }).tool_calls;
-        for (const tc of toolCalls) {
-          if (tc.id) validToolCallIds.add(tc.id);
-        }
-      }
-    }
-    const matchedToolCallIds = new Set<string>();
-    for (const msg of messages) {
-      if (msg.role === "tool") {
-        const tcId = (msg as { tool_call_id?: string }).tool_call_id;
-        if (tcId && validToolCallIds.has(tcId)) {
-          matchedToolCallIds.add(tcId);
-        }
-      }
-    }
-    let pass1 = messages.filter((msg) => {
-      if (msg.role !== "tool") return true;
-      const tcId = (msg as { tool_call_id?: string }).tool_call_id;
-      if (!tcId) return false;
-      if (!validToolCallIds.has(tcId)) return false;
-      return true;
-    });
-    pass1 = pass1.filter((msg) => {
-      if (msg.role !== "assistant") return true;
-      const toolCalls = (msg as { tool_calls?: unknown }).tool_calls;
-      if (!Array.isArray(toolCalls) || toolCalls.length === 0) return true;
-      return toolCalls.some((tc) => { const tid = (tc as { id?: string }).id; return !!tid && matchedToolCallIds.has(tid); });
-    });
-    return pass1;
   }
 
   scheduleSave(sessionId: string, threadMessages: ChatCompletionMessageParam[]): void {
@@ -229,7 +222,8 @@ export class ChatThreadPersistence {
     if (prev) clearTimeout(prev);
     const timer = setTimeout(() => {
       this.debounceTimers.delete(sessionId);
-      const snapshot = tailMessages(nonSystem, getChatThreadPersistMaxMessages());
+      const sanitized = sanitizeToolCallMessageChain(nonSystem, "[chat-thread-persist-save]");
+      const snapshot = tailMessages(sanitized, getChatThreadPersistMaxMessages());
       this.persistChain = this.persistChain.then(() => this.writeSession(sessionId, snapshot));
     }, this.debounceMs);
     this.debounceTimers.set(sessionId, timer);
