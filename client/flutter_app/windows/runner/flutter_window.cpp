@@ -1,7 +1,10 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <string>
+#include <vector>
 
+#include "desktop_screen_capture.h"
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -34,6 +37,16 @@ bool FlutterWindow::OnCreate() {
         HandleOverlayMethodCall(call, std::move(result));
       });
 
+  desktop_bridge_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/desktop_bridge",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  desktop_bridge_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleDesktopBridgeMethodCall(call, std::move(result));
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -43,9 +56,47 @@ bool FlutterWindow::OnCreate() {
   return true;
 }
 
+namespace {
+
+std::string Base64Encode(const std::vector<uint8_t>& data) {
+  static const char kTable[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((data.size() + 2) / 3) * 4);
+  size_t i = 0;
+  while (i + 2 < data.size()) {
+    const uint32_t n = (static_cast<uint32_t>(data[i]) << 16) |
+                       (static_cast<uint32_t>(data[i + 1]) << 8) |
+                       static_cast<uint32_t>(data[i + 2]);
+    out.push_back(kTable[(n >> 18) & 63]);
+    out.push_back(kTable[(n >> 12) & 63]);
+    out.push_back(kTable[(n >> 6) & 63]);
+    out.push_back(kTable[n & 63]);
+    i += 3;
+  }
+  if (i < data.size()) {
+    const uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+    out.push_back(kTable[(n >> 18) & 63]);
+    if (i + 1 < data.size()) {
+      const uint32_t n2 = n | (static_cast<uint32_t>(data[i + 1]) << 8);
+      out.push_back(kTable[(n2 >> 12) & 63]);
+      out.push_back(kTable[(n2 >> 6) & 63]);
+      out.push_back('=');
+    } else {
+      out.push_back(kTable[(n >> 12) & 63]);
+      out.push_back('=');
+      out.push_back('=');
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 void FlutterWindow::OnDestroy() {
   overlay_window_.reset();
   overlay_channel_.reset();
+  desktop_bridge_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -255,4 +306,51 @@ void FlutterWindow::HandleOverlayMethodCall(
   } else {
     result->NotImplemented();
   }
+}
+
+void FlutterWindow::HandleDesktopBridgeMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "captureScreen") {
+    std::optional<int> left, top, width, height;
+    const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+    if (args) {
+      auto read_int = [&](const char* key) -> std::optional<int> {
+        auto it = args->find(flutter::EncodableValue(key));
+        if (it == args->end() || it->second.IsNull()) return std::nullopt;
+        return static_cast<int>(std::get<int64_t>(it->second));
+      };
+      left = read_int("left");
+      top = read_int("top");
+      width = read_int("width");
+      height = read_int("height");
+    }
+
+    auto cap = CaptureDesktopPng(left, top, width, height);
+    if (!cap || !cap->ok) {
+      flutter::EncodableMap err;
+      err[flutter::EncodableValue("ok")] = flutter::EncodableValue(false);
+      err[flutter::EncodableValue("error")] = flutter::EncodableValue(
+          cap ? cap->error : "capture failed");
+      result->Success(flutter::EncodableValue(err));
+      return;
+    }
+
+    flutter::EncodableMap ok;
+    ok[flutter::EncodableValue("ok")] = flutter::EncodableValue(true);
+    ok[flutter::EncodableValue("imageBase64")] =
+        flutter::EncodableValue(Base64Encode(cap->png_bytes));
+    ok[flutter::EncodableValue("mimeType")] =
+        flutter::EncodableValue("image/png");
+    ok[flutter::EncodableValue("width")] =
+        flutter::EncodableValue(static_cast<int64_t>(cap->width));
+    ok[flutter::EncodableValue("height")] =
+        flutter::EncodableValue(static_cast<int64_t>(cap->height));
+    result->Success(flutter::EncodableValue(ok));
+    return;
+  }
+
+  result->NotImplemented();
 }

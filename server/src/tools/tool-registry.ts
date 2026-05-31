@@ -37,7 +37,10 @@ const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
   embodiment_move: "embodiment.move",
   embodiment_stop: "embodiment.stop",
   embodiment_set_state: "embodiment.set_state",
+  embodiment_excite: "embodiment.excite",
   embodiment_window_roam: "embodiment.window_roam",
+  embodiment_window_place: "embodiment.window_place",
+  embodiment_observe: "embodiment.observe",
 };
 
 export function resolveRegistryToolName(name: string): string {

@@ -30,7 +30,7 @@ export type GameCenterRouteDeps = {
 };
 
 /**
- * 游戏中心 HTTP：用户与 Agent 对战（不要求 Agent World 注册）。
+ * 游戏 HTTP：用户与 Agent 对战（不要求 Agent World 注册）。
  * 路径前缀 `/game-center/*`，与 `/world/*` 观战/经济场景分离。
  */
 export function registerGameCenterRoutes(app: FastifyInstance, deps: GameCenterRouteDeps): void {

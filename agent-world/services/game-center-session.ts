@@ -1,4 +1,4 @@
-/** 游戏中心会话：人类与主/子 Agent 陪玩，与 Agent World 观战场景分离。 */
+/** 游戏会话：人类与主/子 Agent 陪玩，与 Agent World 观战场景分离。 */
 
 export const GAME_CENTER_HUMAN_SUFFIX = "--human";
 
@@ -24,7 +24,7 @@ export function isBotGameSession(sessionId: string): boolean {
   return BOT_SUFFIX_RE.test(sessionId);
 }
 
-/** 游戏中心专用参与者（人类或陪玩 Bot），可不完成 Agent World 注册。 */
+/** 游戏专用参与者（人类或陪玩 Bot），可不完成 Agent World 注册。 */
 export function isGameCenterParticipant(sessionId: string): boolean {
   return isHumanGameSession(sessionId) || isBotGameSession(sessionId);
 }

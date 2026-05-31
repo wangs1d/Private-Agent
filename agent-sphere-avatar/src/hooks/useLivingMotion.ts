@@ -81,6 +81,7 @@ export function useLivingMotion({
   const impulseRef = useRef(0);
   const excitedUntilRef = useRef(0);
   const lastBoundaryAtRef = useRef(0);
+  const boundaryStimulateGuardRef = useRef(false);
 
   const refreshBounds = useCallback(() => {
     const margin = 20;
@@ -114,6 +115,12 @@ export function useLivingMotion({
     const rangeX = (b.maxX - b.minX) * profile.roam * 0.5;
     const rangeY = (b.maxY - b.minY) * profile.roam * 0.5;
 
+    const safetyMargin = 60;
+    const safeMinX = b.minX + safetyMargin;
+    const safeMaxX = b.maxX - safetyMargin;
+    const safeMinY = b.minY + safetyMargin;
+    const safeMaxY = b.maxY - safetyMargin;
+
     let bestX = cx;
     let bestY = cy;
     let bestScore = -Infinity;
@@ -121,15 +128,17 @@ export function useLivingMotion({
     for (let i = 0; i < 10; i++) {
       const tx = cx + (Math.random() - 0.5) * 2 * rangeX;
       const ty = cy + (Math.random() - 0.5) * 2 * rangeY;
-      const key = `${Math.round(tx / 80)}_${Math.round(ty / 80)}`;
+      const clampedTx = clamp(tx, safeMinX, safeMaxX);
+      const clampedTy = clamp(ty, safeMinY, safeMaxY);
+      const key = `${Math.round(clampedTx / 80)}_${Math.round(clampedTy / 80)}`;
       const visits = visitRef.current.get(key) ?? 0;
       const edgePenalty =
-        Math.min(tx - b.minX, b.maxX - tx, ty - b.minY, b.maxY - ty) < 40 ? 2 : 0;
+        Math.min(clampedTx - safeMinX, safeMaxX - clampedTx, clampedTy - safeMinY, safeMaxY - clampedTy) < 40 ? 2 : 0;
       const score = -visits - edgePenalty + Math.random() * 0.4;
       if (score > bestScore) {
         bestScore = score;
-        bestX = tx;
-        bestY = ty;
+        bestX = clampedTx;
+        bestY = clampedTy;
       }
     }
 
@@ -363,17 +372,21 @@ export function useLivingMotion({
         if (clamped.x !== newX) {
           newX = clamped.x;
           vel.vx *= -RESTITUTION;
-          if (now - lastBoundaryAtRef.current > 200) {
+          if (now - lastBoundaryAtRef.current > 200 && !boundaryStimulateGuardRef.current) {
             lastBoundaryAtRef.current = now;
+            boundaryStimulateGuardRef.current = true;
             stimulate("boundary_hit", { intensity: 0.85, soulImpact: { impulse: 0.35 } });
+            setTimeout(() => { boundaryStimulateGuardRef.current = false; }, 100);
           }
         }
         if (clamped.y !== newY) {
           newY = clamped.y;
           vel.vy *= -RESTITUTION;
-          if (now - lastBoundaryAtRef.current > 200) {
+          if (now - lastBoundaryAtRef.current > 200 && !boundaryStimulateGuardRef.current) {
             lastBoundaryAtRef.current = now;
+            boundaryStimulateGuardRef.current = true;
             stimulate("boundary_hit", { intensity: 0.85, soulImpact: { impulse: 0.35 } });
+            setTimeout(() => { boundaryStimulateGuardRef.current = false; }, 100);
           }
         }
 

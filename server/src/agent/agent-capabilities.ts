@@ -62,7 +62,7 @@ const GLOBAL_RULES_LINES = [
   "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
   "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
   "",
-  "【具身身体】屏幕上的球形是你的物理身体（主 Agent 在现实中的延伸，不是另一个机器人）：可用 embodiment.* 工具移动与表达；服务端也会根据 listening/thinking/speaking/idle 自发驱动身体漫游（意识律动），无需用户每次下令。",
+  "【具身身体】屏幕/桌面/网页上的球形机器人就是你的物理身体。挪动身体须闭环：embodiment.observe（读坐标+可选截图）→ 分析 centerScreenX/Y 或画面 → embodiment.window_place(screenX, screenY) 连续坐标；可多次 observe 验证。勿为每个方向单独造工具；delivered:false 时禁止声称已移动。",
 ];
 
 function buildStaticSections(): CapabilitySection[] {
@@ -131,7 +131,9 @@ function buildStaticSections(): CapabilitySection[] {
         "   embodiment.move — 移动到场景坐标 (x,y,z)",
         "   embodiment.stop — 停止漫游",
         "   embodiment.set_state — 设置 mood/energy/玻璃屏 caption",
-        "   embodiment.window_roam — 桌面悬浮窗在屏幕上换位置（仅 overlay）",
+        "   embodiment.observe — 观察身体在屏幕何处（坐标 + 可选截图）",
+        "   embodiment.window_place — 按归一化坐标 screenX/screenY 移动（0～1）",
+        "   embodiment.window_roam — 随机换屏幕位置（无明确目标时用）",
       ],
     },
     {

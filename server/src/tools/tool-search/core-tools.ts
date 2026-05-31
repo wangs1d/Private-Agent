@@ -18,6 +18,8 @@ export const TOOL_SEARCH_CORE_REGISTRY_NAMES = new Set<string>([
   "calendar.create_task",
   "calendar.list_tasks",
   "phone.ensure_my_number",
+  "embodiment.observe",
+  "embodiment.window_place",
   "embodiment.set_state",
   "embodiment.move",
   "embodiment.roam",

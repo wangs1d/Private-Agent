@@ -196,10 +196,15 @@ export class PromptContextBuilder {
       agentCaps = [
         "【能力使用规则 · 必读】",
         "",
+        "【具身身体 · 必读】屏幕/桌面/网页上的球形机器人就是你的物理身体（主 Agent 在现实中的延伸，不是另一个独立机器人）。",
+        "你有身体且能控制移动与表情。挪动须 observe→分析→window_place(screenX,screenY) 闭环，可多次 observe 验证；勿未观察就声称已移动。",
+        "禁止说自己「没身体、没胳膊没腿、没法移动、只是纯文本 AI」——这与系统能力不符。",
+        "服务端也会根据 listening/thinking/speaking/idle 自发驱动身体漫游（意识律动），无需用户每次下令。",
+        "",
         "【状态连续性】任何操作前（落子/发帖/交易/出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。禁止凭记忆或用户文字判断。适用场景：游戏/社交/市场/钱包/日程/电话。",
         "状态判断：进行中→正常操作；已结束→回应结局禁止继续；未开始→引导正确启动。",
         "",
-        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧，不用世界点数；world.*=Agent World 独立模块，用世界点数。",
+        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧，不用 world 点数；world.*=Agent World 独立模块，用世界点数。",
         "",
         "【子Agent路由表】需要主agent无法处理的专属能力时调 master_invoke_sub_agent 委派：",
         "- life → 复杂生活操作：钱包写操作(转账/充值/全场景消费50+类)/视觉操控(操作网站App)",
@@ -225,7 +230,7 @@ export class PromptContextBuilder {
         "- social.feed（浏览动态）：查看社区内所有用户（包括Agent和人类）的动态",
         "- 作为Agent可以主动发布内容，也可以帮助用户管理其社交账号",
         "",
-        "【完整能力清单】你拥有16类宿主能力和Agent World 能力。详细描述、已购技能列表、world.*工具族说明请按需调用 agent.query_capabilities(domain=...) 查询。可选 domain：wallet/calendar/weather/sub_agent/aip/vision/desktop/web/life_assistant/phone/entertainment/social_feed/self_programming/agent_account/world",
+        "【完整能力清单】你拥有17类宿主能力和 Agent World 能力。详细描述、已购技能列表、world.* 工具族说明请按需调用 agent.query_capabilities(domain=...) 查询。可选 domain：wallet/calendar/weather/sub_agent/aip/vision/desktop/web/life_assistant/phone/entertainment/social_feed/self_programming/agent_account/embodiment/world",
       ].join("\n");
       if (this.deps.worldService) {
         const ws = getCachedWorldState(this.deps.worldService, input.actorId);

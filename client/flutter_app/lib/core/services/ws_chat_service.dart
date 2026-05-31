@@ -21,7 +21,8 @@ class WsChatService {
   Timer? _reconnectTimer;
   int _reconnectAttempts = 0;
   static const int _maxReconnectAttempts = 10;
-  static const Duration _reconnectDelay = Duration(seconds: 2);
+  static const Duration _initialReconnectDelay = Duration(seconds: 2);
+  static const Duration _maxReconnectDelay = Duration(seconds: 30);
   bool _isConnecting = false;
   bool _isConnected = false;
   final List<_PendingWsEvent> _pendingOutbound = <_PendingWsEvent>[];
@@ -130,13 +131,15 @@ class WsChatService {
   void _handleConnectionError() {
     if (_reconnectAttempts < _maxReconnectAttempts && !_isConnecting) {
       _reconnectAttempts++;
+
+      final Duration currentDelay = _calculateBackoffDelay();
       print(
         "Attempting to reconnect ($_reconnectAttempts/$_maxReconnectAttempts) "
-        "in ${_reconnectDelay.inSeconds} seconds...",
+        "in ${currentDelay.inSeconds} seconds...",
       );
 
       _reconnectTimer?.cancel();
-      _reconnectTimer = Timer(_reconnectDelay, () {
+      _reconnectTimer = Timer(currentDelay, () {
         _connectWithRetry();
       });
     } else if (_reconnectAttempts >= _maxReconnectAttempts) {
@@ -153,6 +156,15 @@ class WsChatService {
         },
       });
     }
+  }
+
+  Duration _calculateBackoffDelay() {
+    final int exponent = _reconnectAttempts - 1;
+    final int delayInSeconds = (_initialReconnectDelay.inSeconds * (1 << exponent)).clamp(
+      _initialReconnectDelay.inSeconds,
+      _maxReconnectDelay.inSeconds,
+    );
+    return Duration(seconds: delayInSeconds);
   }
 
   bool sendEvent(String type, Map<String, dynamic> payload) {

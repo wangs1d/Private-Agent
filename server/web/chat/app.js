@@ -260,7 +260,7 @@ function initAvatarFrame() {
 
   const onPointerDown = (ev) => {
     if (ev.button !== undefined && ev.button !== 0) return;
-    // 左键拖动旋转；Shift/Alt + 拖动移动悬浮位置
+    // Shift/Alt + 拖动：移动悬浮窗位置（左键在 iframe 内旋转球体）
     if (!ev.shiftKey && !ev.altKey) return;
     dragging = true;
     frame.style.pointerEvents = "none";
@@ -301,7 +301,6 @@ function initAvatarFrame() {
   };
 
   host.addEventListener("pointerdown", onPointerDown);
-  frame.addEventListener("pointerdown", onPointerDown);
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", endDrag);
   window.addEventListener("pointercancel", endDrag);

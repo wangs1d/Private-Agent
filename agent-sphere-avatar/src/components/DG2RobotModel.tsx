@@ -3,6 +3,7 @@ import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { MODEL, dg2Scale } from "../constants/model-proportions";
+import { disableMeshRaycast } from "../utils/mesh-raycast";
 
 const MODEL_URL = `${import.meta.env.BASE_URL}models/DG2.obj`;
 
@@ -74,6 +75,7 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
       node.material = steel;
     });
 
+    disableMeshRaycast(root);
     return root;
   }, [obj, shellMaterial, glassMaterial]);
 

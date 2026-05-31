@@ -36,13 +36,22 @@ export interface EmbodimentInteractPayload {
 }
 
 /** 主 Agent 具身指令 — 对应 agent.embodiment.command */
-export type EmbodimentCommandAction = "roam" | "move" | "stop" | "window_roam" | "excite";
+export type EmbodimentCommandAction =
+  | "roam"
+  | "move"
+  | "stop"
+  | "window_roam"
+  | "window_place"
+  | "query_state"
+  | "excite";
 
 export interface EmbodimentCommand {
   action: EmbodimentCommandAction;
   x?: number;
   y?: number;
   z?: number;
+  screenX?: number;
+  screenY?: number;
   strength?: number;
   mood?: AgentMood;
   energy?: number;

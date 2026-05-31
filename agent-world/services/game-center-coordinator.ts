@@ -11,7 +11,7 @@ import type { WorldService } from "./world-service.js";
 import type { ZhaJinHuaService } from "./zhajinhua-service.js";
 
 /**
- * 游戏中心：用户与主 Agent（及自动填充的子 Agent/Bot）对战，不经过 Agent World 观战流程。
+ * 游戏：用户与主 Agent（及自动填充的子 Agent/Bot）对战，不经过 Agent World 观战流程。
  */
 export class GameCenterCoordinator {
   constructor(

@@ -23,6 +23,8 @@ export const ClientEventType = {
   VirtualPhoneCallMyAgent: "phone.call_my_agent",
   /** 球形 Agent 具身交互：唤醒、发消息、聚焦聊天等 */
   AgentEmbodimentInteract: "agent.embodiment.interact",
+  /** 客户端回报球形窗口在屏幕上的位置（配合 embodiment.observe 闭环） */
+  AgentEmbodimentState: "agent.embodiment.state",
 } as const;
 
 export const ServerEventType = {

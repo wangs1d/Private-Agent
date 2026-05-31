@@ -17,12 +17,21 @@ interface SphereAgentSceneProps {
   onEyeInteractionChange?: (active: boolean) => void;
   userDragRotate?: boolean;
   onUserTouch?: (event: SphereTouchEvent) => void;
+  onBodyHover?: (active: boolean) => void;
+  /** embed 网页：DOM 层接管拖拽，Canvas 不接收指针 */
+  domDragBridge?: boolean;
+  canvasCaptureLenient?: boolean;
 }
 
 function Ground({ visible, invisibleCollision }: { visible: boolean; invisibleCollision?: boolean }) {
   if (!visible && !invisibleCollision) return null;
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+    <mesh
+      rotation={[-Math.PI / 2, 0, 0]}
+      position={[0, 0, 0]}
+      receiveShadow
+      raycast={invisibleCollision ? () => null : undefined}
+    >
       <planeGeometry args={[invisibleCollision ? 2.6 : 20, invisibleCollision ? 2.6 : 20]} />
       <meshStandardMaterial
         color="#0a0c12"
@@ -46,6 +55,9 @@ export function SphereAgentScene({
   onEyeInteractionChange,
   userDragRotate = true,
   onUserTouch,
+  onBodyHover,
+  domDragBridge = false,
+  canvasCaptureLenient = false,
 }: SphereAgentSceneProps) {
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
@@ -58,7 +70,14 @@ export function SphereAgentScene({
       shadows={isDemo}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: transparentBg }}
-      style={{ background: transparentBg ? "transparent" : undefined }}
+      style={{
+        width: "100%",
+        height: "100%",
+        touchAction: "none",
+        pointerEvents: domDragBridge ? "none" : "auto",
+        cursor: userDragRotate && !domDragBridge ? "grab" : undefined,
+        background: transparentBg ? "transparent" : undefined,
+      }}
       onCreated={({ gl }) => {
         if (transparentBg) gl.setClearColor(0x000000, 0);
       }}
@@ -72,7 +91,7 @@ export function SphereAgentScene({
         fov={isOverlay ? 38 : isEmbed ? 48 : 42}
       />
 
-      {!isOverlay && (
+      {isDemo && (
         <OrbitControls
           enablePan={false}
           minDistance={2.2}
@@ -81,7 +100,7 @@ export function SphereAgentScene({
           maxPolarAngle={Math.PI * 0.62}
           target={[0, 1.45, 0]}
           enableRotate
-          enableZoom={isDemo}
+          enableZoom
         />
       )}
 
@@ -117,6 +136,10 @@ export function SphereAgentScene({
           onEyeInteractionChange={onEyeInteractionChange}
           userDragRotate={userDragRotate}
           onUserTouch={onUserTouch}
+          onBodyHover={onBodyHover}
+          registerDragBridge={domDragBridge}
+          canvasCapture={!domDragBridge}
+          canvasCaptureLenient={canvasCaptureLenient}
         />
       </Physics>
 

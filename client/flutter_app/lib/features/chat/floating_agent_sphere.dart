@@ -126,6 +126,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     final double dpr = MediaQuery.devicePixelRatioOf(context);
 
     if (_embeddedFallback) {
+      _entity.beginAgentPositionHold();
       unawaited(_floatMotion.handleCommand(
         payload: message,
         viewport: screen,
@@ -143,6 +144,8 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     }
 
     if (!_nativeReady) return;
+
+    _entity.beginAgentPositionHold();
 
     unawaited(_floatMotion.handleCommand(
       payload: message,
@@ -190,7 +193,9 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
   Future<void> _syncDockIfNeeded() async {
     if (!mounted || !_nativeReady) return;
-    if (_entity.mode != SphereEntityMode.docked) return;
+    if (_entity.mode != SphereEntityMode.docked || _entity.shouldSuppressDockSync) {
+      return;
+    }
 
     final Rect? slot = _slotGlobalRect();
     if (slot == null) return;
