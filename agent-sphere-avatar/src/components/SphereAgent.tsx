@@ -1,13 +1,17 @@
 import { useSphere } from "@react-three/cannon";
-import { Suspense, useEffect, useRef, type Ref } from "react";
+import { Suspense, useCallback, useEffect, useRef, type Ref } from "react";
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
 import { MODEL } from "../constants/model-proportions";
+import { postToHost, SPHERE_MSG } from "../embed-protocol";
+import { useAgentBodyMotion } from "../hooks/useAgentBodyMotion";
 import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
-import { useVisualFloat } from "../hooks/useVisualFloat";
+import { useSphereUserDrag, type SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
 import { EyeScreen } from "./EyeScreen";
+import { ScreenFace, type FaceSignals } from "./ScreenFace";
+import { SphereBodyHandle } from "./SphereBodyHandle";
 
 interface SphereAgentProps {
   state: AgentState;
@@ -18,6 +22,14 @@ interface SphereAgentProps {
   motionBounds?: number;
   hardMotionClamp?: boolean;
   onEyeInteractionChange?: (active: boolean) => void;
+  /** 允许用户拖拽旋转球体 */
+  userDragRotate?: boolean;
+  onUserTouch?: (event: SphereTouchEvent) => void;
+}
+
+function relayBoundaryToParent(edge: string) {
+  if (window.parent === window) return;
+  postToHost({ type: SPHERE_MSG.boundary, edge: edge as "left" | "right" | "top" | "bottom" });
 }
 
 /** DG2 深灰金属球形机器人 — OBJ 一比一还原 */
@@ -30,15 +42,26 @@ export function SphereAgent({
   motionBounds = 2.4,
   hardMotionClamp = false,
   onEyeInteractionChange,
+  userDragRotate = true,
+  onUserTouch,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
+  const userRotRef = useRef<THREE.Group>(null);
+  const faceSignalsRef = useRef<FaceSignals>({
+    boundaryBump: 0,
+    excitement: 0,
+    speed: 0,
+    speakPulse: 0,
+    userTouch: 0,
+    userSpin: 0,
+  });
 
   const [ref, api] = useSphere(() => ({
     mass: physics ? 1.2 : 0,
     type: physics ? "Dynamic" : "Static",
     position: [0, 1.6, 0],
     args: [MODEL.bodyRadius * 0.94],
-    linearDamping: 0.82,
+    linearDamping: physics ? 0.82 : 0.95,
     angularDamping: 0.9,
     material: { friction: 0.35, restitution: 0.22 },
   }));
@@ -46,7 +69,21 @@ export function SphereAgent({
   const motionStrength =
     state.mood === "speaking" ? 1.35 : state.mood === "thinking" ? 0.85 : 1;
 
-  const { pickRandomTarget, setTarget, stopMotion, resumeMotion } = useAutonomousMotion({
+  const kinematic = !physics && autonomous;
+
+  const bodyMotion = useAgentBodyMotion({
+    api: kinematic ? api : undefined,
+    visualRef,
+    faceSignalsRef,
+    enabled: kinematic,
+    bounds: motionBounds,
+    mood: state.mood,
+    energy: state.energy,
+    focused: state.focused,
+    onBoundaryHit: (edge) => relayBoundaryToParent(edge),
+  });
+
+  const physicsMotion = useAutonomousMotion({
     api,
     enabled: physics && autonomous,
     bounds: motionBounds,
@@ -54,53 +91,124 @@ export function SphereAgent({
     hardClamp: hardMotionClamp,
   });
 
-  useVisualFloat(visualRef, !physics && autonomous);
+  const motion = kinematic ? bodyMotion : physicsMotion;
+  const exciteMotion = kinematic ? bodyMotion.excite : undefined;
+
+  const relayTouchToParent = useCallback(
+    (event: SphereTouchEvent) => {
+      onUserTouch?.(event);
+      if (window.parent === window) return;
+      postToHost({
+        type: SPHERE_MSG.touch,
+        phase: event.phase,
+        spinStrength: event.spinStrength,
+        totalRotationDeg: event.totalRotationDeg,
+      });
+    },
+    [onUserTouch],
+  );
+
+  const dragHandlers = useSphereUserDrag({
+    userRotRef,
+    faceSignalsRef,
+    enabled: userDragRotate,
+    api: physics ? api : undefined,
+    onTouch: relayTouchToParent,
+    onExcite: (strength) => {
+      if (kinematic) exciteMotion?.(strength);
+      else if (physics && autonomous) {
+        motion.resumeMotion();
+        motion.pickRandomTarget();
+      }
+      if (faceSignalsRef.current) {
+        faceSignalsRef.current.excitement = Math.max(faceSignalsRef.current.excitement, 0.5 + strength * 0.35);
+      }
+    },
+  });
 
   useEffect(() => {
     const handleCommand = (cmd: EmbodimentCommand) => {
       switch (cmd.action) {
         case "roam":
-          if (physics) {
-            resumeMotion();
-            if (typeof cmd.strength === "number") {
-              /* strength applied on next frame via parent mood; pick new target */
-            }
-            pickRandomTarget();
-          } else if (window.sphereOverlay?.roamNow) {
-            void window.sphereOverlay.roamNow();
+          if (kinematic) {
+            motion.resumeMotion();
+            const s = typeof cmd.strength === "number" ? cmd.strength : 1;
+            if (s >= 1.05) exciteMotion?.(s);
+            else motion.pickRandomTarget();
+          } else if (physics) {
+            motion.resumeMotion();
+            motion.pickRandomTarget();
+          } else {
+            void window.sphereOverlay?.roamNow?.();
+          }
+          break;
+        case "excite":
+          if (kinematic) {
+            motion.resumeMotion();
+            exciteMotion?.(cmd.strength ?? 1.4);
+          } else if (physics) {
+            motion.resumeMotion();
+            motion.pickRandomTarget();
+          } else {
+            postToHost({
+              type: SPHERE_MSG.command,
+              action: "excite",
+              strength: cmd.strength ?? 1.4,
+            });
           }
           break;
         case "move":
-          if (physics && cmd.x != null && cmd.z != null) {
-            resumeMotion();
-            setTarget(cmd.x, cmd.y ?? 1.6, cmd.z);
+          if (kinematic || physics) {
+            motion.resumeMotion();
+            if (cmd.x != null && cmd.z != null) {
+              motion.setTarget(cmd.x, cmd.y ?? 1.6, cmd.z);
+            }
           }
           break;
         case "stop":
-          if (physics) stopMotion();
+          motion.stopMotion();
           break;
         case "window_roam":
           window.sphereOverlay?.roamNow?.();
+          if (window.parent !== window) {
+            postToHost({ type: SPHERE_MSG.command, action: "window_roam" });
+          }
           break;
         default:
           break;
       }
     };
     return bindEmbodimentCommand(handleCommand);
-  }, [physics, pickRandomTarget, setTarget, stopMotion, resumeMotion]);
+  }, [kinematic, physics, motion, exciteMotion]);
 
   return (
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
-        <Suspense fallback={null}>
-          <DG2RobotModel energy={state.energy} focused={state.focused} />
-        </Suspense>
-        <EyeScreen
-          onPointerOver={() => onEyeFocus?.(true)}
-          onPointerOut={() => onEyeFocus?.(false)}
-          onClick={() => onEyeClick?.()}
-          onInteractionChange={onEyeInteractionChange}
-        />
+        <group ref={userRotRef}>
+          <Suspense fallback={null}>
+            <DG2RobotModel energy={state.energy} focused={state.focused} />
+          </Suspense>
+          <ScreenFace
+            mood={state.mood}
+            energy={state.energy}
+            focused={state.focused}
+            signalsRef={faceSignalsRef}
+          />
+          <EyeScreen
+            onPointerOver={() => onEyeFocus?.(true)}
+            onPointerOut={() => onEyeFocus?.(false)}
+            onClick={() => onEyeClick?.()}
+            onInteractionChange={onEyeInteractionChange}
+          />
+        </group>
+        {userDragRotate && (
+          <SphereBodyHandle
+            radius={dragHandlers.bodyRadius}
+            onPointerDown={dragHandlers.handlePointerDown}
+            onPointerMove={dragHandlers.handlePointerMove}
+            onPointerUp={dragHandlers.handlePointerUp}
+          />
+        )}
       </group>
     </group>
   );

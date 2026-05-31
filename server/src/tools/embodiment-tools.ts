@@ -112,7 +112,22 @@ export const EMBODIMENT_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "embodiment.window_roam",
+      name: "embodiment.excite",
+      description:
+        "主 Agent 突然兴奋，驱动球形身体乱飞、弹边界、做夸张动作。聊嗨了、说到激动处、想表达强烈情绪时使用；比 embodiment.roam 更狂。",
+      parameters: {
+        type: "object",
+        properties: {
+          strength: {
+            type: "number",
+            description: "兴奋强度 0.5～2，默认 1.4",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
       description:
         "将球形悬浮体随机移动到屏幕/页面可视区域的另一位置（Web 浮层、桌面透明悬浮窗均有效）。",
       parameters: {
@@ -191,6 +206,20 @@ export function registerEmbodimentTools(
       source: "tool:embodiment.set_state",
     });
     return { ok: true, delivered, mood, energy, caption };
+  });
+
+  toolRegistry.register("embodiment.excite", async (input, context) => {
+    const actorId = resolveActorId(context);
+    const strength =
+      typeof input.strength === "number" && Number.isFinite(input.strength)
+        ? clamp(input.strength, 0.5, 2)
+        : 1.4;
+    const delivered = pushEmbodimentCommand(wsRegistry, actorId, {
+      action: "excite",
+      strength,
+      source: "tool:embodiment.excite",
+    });
+    return { ok: true, delivered, strength };
   });
 
   toolRegistry.register("embodiment.window_roam", async (_input, context) => {

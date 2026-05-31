@@ -68,26 +68,27 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
     }
     case "chat.assistant_done": {
       resetWsMapperState();
-      return { mood: "happy", energy: 0.55, caption: undefined, source: "assistant_done" };
+      return { mood: "happy", energy: 0.55, caption: "✓ 完成", source: "assistant_done" };
     }
     case "error.event": {
       resetWsMapperState();
-      return { mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85, source: "error" };
+      const errorMsg = String(p.message ?? "错误");
+      return { mood: "alert", caption: `✗ ${errorMsg}`, energy: 0.85, source: "error" };
     }
     case "schedule.reminder_fired": {
       const msg = String(p.message ?? p.title ?? "提醒").trim();
-      return { mood: "alert", energy: 0.9, caption: msg, source: "reminder" };
+      return { mood: "alert", energy: 0.9, caption: `⏰ ${msg}`, source: "reminder" };
     }
     case "schedule.agent_task_fired": {
       const title = String(p.title ?? "自动化任务").trim();
-      return { mood: "thinking", energy: 0.75, caption: title, phase: "agent_task", source: "agent_task" };
+      return { mood: "thinking", energy: 0.75, caption: `▶ ${title}`, phase: "agent_task", source: "agent_task" };
     }
     case "agent.phone.incoming": {
-      return { mood: "alert", energy: 0.9, caption: "来电", source: "phone" };
+      return { mood: "alert", energy: 0.9, caption: "📞 来电", source: "phone" };
     }
     case "agent.peer_message": {
       const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
-      return { mood: "alert", energy: 0.82, caption: preview, source: "peer" };
+      return { mood: "alert", energy: 0.82, caption: `💬 ${preview}`, source: "peer" };
     }
     default:
       return null;
@@ -96,7 +97,7 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
 
 export function mapUserMessageSent(): AgentWsUpdate {
   resetWsMapperState();
-  return { mood: "listening", energy: 0.65, caption: "正在聆听…", source: "user_message" };
+  return { mood: "listening", energy: 0.65, caption: undefined, source: "user_message" };
 }
 
 export function mapProcessingIdle(): AgentWsUpdate {

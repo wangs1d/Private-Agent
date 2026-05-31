@@ -4,6 +4,7 @@ import { Physics } from "@react-three/cannon";
 import { Suspense } from "react";
 import type { SceneMode } from "../constants/model-proportions";
 import type { AgentState } from "../types/agent";
+import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import { SphereAgent } from "./SphereAgent";
 
 interface SphereAgentSceneProps {
@@ -14,6 +15,8 @@ interface SphereAgentSceneProps {
   autonomous?: boolean;
   mode?: SceneMode;
   onEyeInteractionChange?: (active: boolean) => void;
+  userDragRotate?: boolean;
+  onUserTouch?: (event: SphereTouchEvent) => void;
 }
 
 function Ground({ visible, invisibleCollision }: { visible: boolean; invisibleCollision?: boolean }) {
@@ -41,12 +44,14 @@ export function SphereAgentScene({
   autonomous = true,
   mode = "demo",
   onEyeInteractionChange,
+  userDragRotate = true,
+  onUserTouch,
 }: SphereAgentSceneProps) {
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
   const transparentBg = isOverlay || isEmbed;
   const isDemo = mode === "demo";
-  const scenePhysics = physics && (isDemo || isEmbed);
+  const scenePhysics = physics && isDemo;
 
   return (
     <Canvas
@@ -63,8 +68,8 @@ export function SphereAgentScene({
 
       <PerspectiveCamera
         makeDefault
-        position={isOverlay ? [0, 1.2, 3.6] : [0, 1.75, 4.1]}
-        fov={isOverlay ? 38 : 42}
+        position={isOverlay ? [0, 1.2, 3.6] : isEmbed ? [0, 1.4, 3.2] : [0, 1.75, 4.1]}
+        fov={isOverlay ? 38 : isEmbed ? 48 : 42}
       />
 
       {!isOverlay && (
@@ -110,6 +115,8 @@ export function SphereAgentScene({
           motionBounds={isEmbed ? 1.15 : 2.4}
           hardMotionClamp={isEmbed}
           onEyeInteractionChange={onEyeInteractionChange}
+          userDragRotate={userDragRotate}
+          onUserTouch={onUserTouch}
         />
       </Physics>
 

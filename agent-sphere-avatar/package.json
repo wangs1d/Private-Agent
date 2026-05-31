@@ -3,11 +3,29 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Private AI Agent 主形象 — 球形 3D Agent（Three.js + R3F + Cannon）",
+  "description": "可独立移植的球形 3D Agent 形象（Three.js + R3F + Cannon）",
+  "main": "./src/public-api.ts",
+  "exports": {
+    ".": "./src/public-api.ts",
+    "./protocol": "./src/embed-protocol.ts",
+    "./host-sdk": "./src/host-sdk.ts",
+    "./ws-mapper": "./src/bridge/ws-agent-mapper.ts"
+  },
+  "files": [
+    "dist",
+    "public",
+    "src",
+    "scripts",
+    "*.html",
+    "PORTABLE.md",
+    "README.md"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:chat": "npm run build -- --base=/chat/assets/avatar/ && node scripts/copy-to-chat.mjs",
+    "build:standalone": "node scripts/build-with-env.mjs ./",
+    "build:chat": "node scripts/build-with-env.mjs /chat/assets/avatar/ && node scripts/copy-to-chat.mjs",
+    "build:deploy": "npm run build:chat",
     "preview": "vite preview"
   },
   "dependencies": {

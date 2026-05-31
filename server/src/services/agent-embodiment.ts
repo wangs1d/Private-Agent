@@ -24,7 +24,7 @@ export type EmbodimentPatch = {
 export type EmbodimentSender = (json: string) => void;
 
 /** 主 Agent 对球形身体的运动/姿态指令 */
-export type EmbodimentCommandAction = "roam" | "move" | "stop" | "window_roam";
+export type EmbodimentCommandAction = "roam" | "move" | "stop" | "window_roam" | "excite";
 
 export type EmbodimentCommand = {
   action: EmbodimentCommandAction;

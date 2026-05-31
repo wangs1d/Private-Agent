@@ -1,0 +1,2 @@
+import{r as n,g as i,a as m,f,p,e as E}from"./SphereAgentScene-BoPf-c_3.js";function c({apply:a,onPatch:e,relayCommands:r=!0}){n.useEffect(()=>{const o=s=>{const t=f(s.data);if(t){a(t),e==null||e(t,s.data);return}if(r){const d=p(s.data);d&&E(d)}};return window.addEventListener("message",o),i({type:m.ready}),()=>window.removeEventListener("message",o)},[a,e,r])}export{c as u};
+//# sourceMappingURL=useEmbedParentBridge-CZOI5Vr3.js.map

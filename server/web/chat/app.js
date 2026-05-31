@@ -335,9 +335,59 @@ window.addEventListener("message", (ev) => {
     patchAvatar({ mood: "idle", energy: 0.5 });
     return;
   }
+  if (ev.data?.type === "agent-sphere:touch") {
+    const phase = ev.data.phase;
+    const spin = ev.data.spinStrength ?? 0;
+    if (phase === "start") {
+      patchAvatar({ mood: "listening", energy: 0.62, focused: true, caption: "嗯？" });
+      return;
+    }
+    if (phase === "end") {
+      if (spin > 0.45) {
+        patchAvatar({ mood: "happy", energy: 0.75, caption: "哈哈，别转了！" });
+        forwardEmbodimentCommand({ action: "excite", strength: 0.85 + spin * 0.5 });
+        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1600);
+      } else if ((ev.data.totalRotationDeg ?? 0) > 25) {
+        patchAvatar({ mood: "alert", energy: 0.7, caption: "你在摸我？" });
+        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1200);
+      }
+    }
+    return;
+  }
   if (ev.data?.type === "agent-sphere:interact" && ev.data.action === "focus") {
     inputEl?.focus();
     inputEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return;
+  }
+  if (ev.data?.type === "agent-sphere:boundary") {
+    const host = document.getElementById("agent-avatar-float");
+    if (host) {
+      const edge = ev.data.edge;
+      const rect = host.getBoundingClientRect();
+      const w = host.offsetWidth;
+      const h = host.offsetHeight;
+      const maxLeft = Math.max(0, window.innerWidth - w);
+      const maxTop = Math.max(0, window.innerHeight - h);
+      let left = rect.left;
+      let top = rect.top;
+      const nudge = 52;
+      if (edge === "left") left = Math.min(maxLeft, left + nudge);
+      else if (edge === "right") left = Math.max(0, left - nudge);
+      else if (edge === "top") top = Math.min(maxTop, top + nudge);
+      else if (edge === "bottom") top = Math.max(0, top - nudge);
+      else forwardEmbodimentCommand({ action: "window_roam" });
+      if (edge === "left" || edge === "right" || edge === "top" || edge === "bottom") {
+        host.style.left = `${left}px`;
+        host.style.top = `${top}px`;
+        host.style.right = "auto";
+        patchAvatar({ mood: "alert", energy: 0.82, caption: "哎哟，撞到了！" });
+        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 900);
+      }
+    }
+    return;
+  }
+  if (ev.data?.type === "agent-sphere:command" && ev.data.action === "window_roam") {
+    forwardEmbodimentCommand({ action: "window_roam" });
     return;
   }
   if (ev.data?.type === "agent-sphere:send" && ws?.readyState === WebSocket.OPEN) {

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { postToHost, SPHERE_MSG } from "../embed-protocol";
 
 /** iframe 内 Shift/Alt + 拖动时，将位移 relay 给父页移动浮层 */
 export function useEmbedFloatPan(enabled = true) {
@@ -24,7 +25,7 @@ export function useEmbedFloatPan(enabled = true) {
       lastX = e.clientX;
       lastY = e.clientY;
       if (dx !== 0 || dy !== 0) {
-        window.parent?.postMessage({ type: "agent-sphere:pan", dx, dy }, "*");
+        postToHost({ type: SPHERE_MSG.pan, dx, dy });
       }
     };
 

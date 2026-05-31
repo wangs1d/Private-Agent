@@ -5,6 +5,7 @@
  *   window.dispatchEvent(new CustomEvent('agent-sphere:set-mood', { detail: { mood: 'listening' } }));
  */
 import type { AgentMood, EmbodimentCommand } from "../types/agent";
+import { SPHERE_DOM_EVENT } from "../embed-protocol";
 
 export type { AgentMood, AgentState, EmbodimentCommand } from "../types/agent";
 export { DEFAULT_AGENT_STATE } from "../types/agent";
@@ -12,10 +13,10 @@ export { SphereAgentScene } from "../components/SphereAgentScene";
 export { SphereAgent } from "../components/SphereAgent";
 export { useAgentState } from "../hooks/useAgentState";
 
-const MOOD_EVENT = "agent-sphere:set-mood";
-const ENERGY_EVENT = "agent-sphere:set-energy";
-const CAPTION_EVENT = "agent-sphere:set-caption";
-const COMMAND_EVENT = "agent-sphere:command";
+const MOOD_EVENT = SPHERE_DOM_EVENT.mood;
+const ENERGY_EVENT = SPHERE_DOM_EVENT.energy;
+const CAPTION_EVENT = SPHERE_DOM_EVENT.caption;
+const COMMAND_EVENT = SPHERE_DOM_EVENT.command;
 
 export interface AgentBridgeHandlers {
   onMood?: (mood: AgentMood) => void;

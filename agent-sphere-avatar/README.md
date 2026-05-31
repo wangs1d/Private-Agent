@@ -1,62 +1,52 @@
 # Agent Sphere Avatar
 
-Private AI Agent 的 **3D 主 Agent 形象** — 基于实体球形原型，使用 **Three.js + React Three Fiber (R3F) + Cannon.js** 构建。
+可**独立移植**的球形 3D Agent 形象 — 基于 **Three.js + React Three Fiber (R3F) + Cannon.js**。
+
+> 移植到其他项目请参阅 **[PORTABLE.md](./PORTABLE.md)**
 
 ## 设计要点
 
 | 模块 | 说明 |
 |------|------|
-| **BreathingShell** | 哑光 PLA 白球壳 + 内嵌 seam 呼吸灯 |
-| **EyeScreen** | 前部大曲屏黑色玻璃态眼睛（约占正面 58%） |
-| **SideEars** | 两侧短圆柱耳部（参照 3D 打印原型） |
-| **SphereAgent** | Cannon 物理 + 自主漫游推力 |
-| **useAgentWebSocket** | 对接 `/ws`，LLM 流式 → `thinking` / `speaking` |
-| **sphere-overlay** | Electron 透明置顶窗，桌面任意位置漫游 |
+| **DG2RobotModel** | OBJ 一比一还原深灰金属球形机器人 |
+| **ScreenFace / EyeScreen** | 曲屏表情与交互 |
+| **SphereAgent** | 物理 / 自主漫游 / 用户拖拽 |
+| **useAgentWebSocket** | 可选直连 `/ws` |
+| **embed-protocol** | iframe postMessage 协议（移植核心） |
+| **host-sdk** | 宿主侧集成 SDK |
 
 ## 快速开始
 
 ```bash
 cd agent-sphere-avatar
 npm install
-npm run dev          # 演示页 http://localhost:5180
-npm run build:chat   # 构建并复制到 server/web/chat/assets/avatar/
+npm run dev              # 演示页 http://localhost:5180
+npm run build:standalone # 独立静态包 dist/（相对路径，可任意部署）
+npm run build:chat       # PAI 内部：部署到 server/web/chat/assets/avatar/
 ```
 
-## WebSocket 状态映射
+## 嵌入方式
 
-| 服务端事件 | Agent 状态 |
-|-----------|-----------|
-| 用户发消息 | `listening` |
-| `chat.agent_status` / `tool.call` | `thinking` |
-| `chat.assistant_chunk` | `speaking`（energy 随 chunk 升高） |
-| `chat.assistant_done` | `happy` → `idle` |
-| `error.event` | `alert` |
+### iframe（推荐，任意 Web 项目）
 
-## 嵌入网页聊天
+```html
+<iframe src="./dist/embed.html?wsOff=1&sessionId=xxx"></iframe>
+```
 
-1. `npm run build:chat`
-2. 打开 `GET /chat` — 左侧 iframe 加载 `/chat/assets/avatar/embed.html?wsOff=1`
-3. `app.js` 通过 `postMessage` 转发 WS 事件（避免双连接）
+宿主通过 `postMessage` 推送状态，详见 [PORTABLE.md](./PORTABLE.md)。
 
-## 桌面悬浮（不受应用窗口限制）
+### React 组件（同项目内）
+
+```tsx
+import { SphereAgentScene, useAgentState } from "./src/public-api";
+```
+
+### 桌面悬浮（可选）
 
 ```powershell
 cd sphere-overlay
 .\start-overlay.ps1
 ```
-
-- 透明无边框、始终置顶
-- 连接同一 `WS_URL` / `PAI_SESSION_ID`
-- 屏幕工作区内自主漫游 + 拖拽
-- Flutter Windows 客户端 AppBar 🤖 按钮可一键启动
-
-环境变量：
-
-| 变量 | 说明 |
-|------|------|
-| `PAI_WS_URL` | WebSocket 地址，默认 `ws://127.0.0.1:3000/ws` |
-| `PAI_SESSION_ID` | 与 Flutter `ApiConfig.effectiveActorId` 一致 |
-| `PAI_OVERLAY_DEV_URL` | 开发时指向 Vite overlay 页 |
 
 ## 入口 HTML
 
@@ -65,19 +55,42 @@ cd sphere-overlay
 | `index.html` | 独立演示 |
 | `embed.html` | 网页/chat iframe 嵌入 |
 | `overlay.html` | Electron 桌面悬浮 |
+| `free.html` | 全屏漫游（Flutter Web） |
 
 ## 目录结构
 
 ```
-agent-sphere-avatar/
+agent-sphere-avatar/          ← 独立模块，可直接复制
 ├── src/
+│   ├── embed-protocol.ts     # postMessage 协议（移植时必读）
+│   ├── host-sdk.ts           # 宿主集成 SDK
+│   ├── public-api.ts         # 公共导出
 │   ├── bridge/ws-agent-mapper.ts
-│   ├── hooks/useAgentWebSocket.ts
-│   ├── hooks/useAutonomousMotion.ts
-│   ├── hooks/useOverlayWindowMotion.ts
-│   ├── modes/EmbedApp.tsx
-│   ├── modes/OverlayApp.tsx
+│   ├── hooks/
+│   ├── modes/                # EmbedApp / OverlayApp / FreeApp
 │   └── components/
-sphere-overlay/          # Electron 桌面壳
-server/web/chat/         # 网页聊天 + avatar 静态资源
+├── public/models/
+├── scripts/
+├── PORTABLE.md               # 移植指南
+└── dist/                     # 构建产物
 ```
+
+## WebSocket 状态映射（可选）
+
+对接自有后端时参考 `ws-agent-mapper.ts`，或通过 `host.patch()` 直接推送：
+
+| 服务端事件 | Agent 状态 |
+|-----------|-----------|
+| 用户发消息 | `listening` |
+| `chat.agent_status` / `tool.call` | `thinking` |
+| `chat.assistant_chunk` | `speaking` |
+| `chat.assistant_done` | `happy` → `idle` |
+| `error.event` | `alert` |
+
+## PAI 项目集成点
+
+| 宿主 | 加载路径 |
+|------|----------|
+| 网页聊天 | `/chat/assets/avatar/embed.html?wsOff=1` |
+| Flutter Web | `free.html?wsOff=1` |
+| Electron 桌宠 | `dist/overlay.html` |

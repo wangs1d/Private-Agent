@@ -124,17 +124,19 @@ export class EmbodimentAutonomyService {
     }
 
     if (nextMood === "speaking") {
-      if (st.speakingTicks === 1 || st.speakingTicks % 4 === 0) {
+      if (st.speakingTicks === 1 || st.speakingTicks % 3 === 0) {
         const energy = typeof patch.energy === "number" ? patch.energy : 0.6;
+        const strength = randomRoamStrength(1.05 + energy * 0.55);
+        const wild = energy > 0.62 && (st.speakingTicks > 1 || energy > 0.78);
         this.maybeCommand(
           sessionId,
           {
-            action: "roam",
-            strength: randomRoamStrength(0.95 + energy * 0.45),
-            source: "autonomy:speaking",
+            action: wild ? "excite" : "roam",
+            strength,
+            source: wild ? "autonomy:speaking_excited" : "autonomy:speaking",
           },
           send,
-          st.speakingTicks === 1 ? 0 : 4200,
+          st.speakingTicks === 1 ? 0 : 3200,
         );
       }
       return;
@@ -143,7 +145,7 @@ export class EmbodimentAutonomyService {
     if (nextMood === "happy" && moodChanged) {
       this.maybeCommand(
         sessionId,
-        { action: "roam", strength: randomRoamStrength(1.25), source: "autonomy:happy" },
+        { action: "excite", strength: randomRoamStrength(1.35), source: "autonomy:happy" },
         send,
         0,
       );

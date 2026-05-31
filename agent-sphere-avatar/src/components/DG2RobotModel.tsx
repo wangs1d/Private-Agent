@@ -93,7 +93,9 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
     }
 
     if (groupRef.current) {
-      groupRef.current.rotation.y = Math.sin(t * 0.1) * 0.015;
+      const breathe = Math.sin(t * 1.45) * 0.018 * (0.4 + energy);
+      groupRef.current.rotation.y = Math.sin(t * 0.1) * 0.015 + breathe * 0.3;
+      groupRef.current.position.y = Math.sin(t * 1.35) * 0.012 * (0.35 + energy * 0.5);
     }
   });
 

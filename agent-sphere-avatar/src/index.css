@@ -27,7 +27,8 @@ body,
   min-height: 0;
 }
 
-.stage canvas {
+.stage canvas,
+.mode-shell canvas {
   display: block;
   width: 100% !important;
   height: 100% !important;
