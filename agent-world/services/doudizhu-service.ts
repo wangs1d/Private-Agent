@@ -231,7 +231,7 @@ export class DoudizhuService {
     return { ok: true, snapshot: this.buildSnapshot(t, sessionId) };
   }
 
-  /** 游戏中心：自动推进 Bot / 子 Agent 座位回合。 */
+  /** 游戏：自动推进 Bot / 子 Agent 座位回合。 */
   advanceBotTurns(tableId: string, viewerSessionId: string): unknown {
     for (let step = 0; step < MAX_BOT_TURN_STEPS; step += 1) {
       const t = this.tables.get(tableId);

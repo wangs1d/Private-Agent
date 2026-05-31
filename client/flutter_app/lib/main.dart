@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -23,6 +24,8 @@ import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
+import "core/services/desktop_bridge_service.dart";
+import "core/services/sphere_entity_controller.dart";
 import "core/services/sphere_overlay_launcher.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
@@ -128,6 +131,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   @override
   void dispose() {
+    DesktopBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     _inputFocusNode.dispose();
     _inputController.dispose();
@@ -180,6 +184,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _ws.onConnected = () {
       SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
       _sendSessionInit();
+      if (!kIsWeb && Platform.isWindows) {
+        DesktopBridgeService.instance.start();
+      }
     };
     ClientLocationService.bindPreferences(
       read: _store.getPreference,
@@ -981,8 +988,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     await _syncBackgroundTasksBadge();
   }
 
+  Future<void> _reportEmbodimentState() async {
+    if (!_ws.isConnected || !mounted) return;
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    final double dpr = ctx != null ? MediaQuery.devicePixelRatioOf(ctx) : 1.0;
+    final Map<String, dynamic>? report =
+        await SphereEntityController.instance.collectStateReport(dpr);
+    if (report == null) return;
+    _ws.sendEvent("agent.embodiment.state", report);
+  }
+
   void _syncAgentSphereFromWs(String type, Map<String, dynamic> payload) {
     if (type == "agent.embodiment.command") {
+      final String? action = payload["action"]?.toString();
+      if (action == "query_state") {
+        unawaited(_reportEmbodimentState());
+        return;
+      }
       AgentSphereMoodBridge.instance.forwardMessage(<String, dynamic>{
         "type": "agent-sphere:command",
         "action": payload["action"],
@@ -990,6 +1012,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         if (payload["y"] != null) "y": payload["y"],
         if (payload["z"] != null) "z": payload["z"],
         if (payload["strength"] != null) "strength": payload["strength"],
+        if (payload["screenX"] != null) "screenX": payload["screenX"],
+        if (payload["screenY"] != null) "screenY": payload["screenY"],
       });
       return;
     }

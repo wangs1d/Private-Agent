@@ -296,7 +296,7 @@ export function ScreenFace({ mood, energy, focused, signalsRef }: ScreenFaceProp
   });
 
   return (
-    <mesh position={[gx, gy, gz + 0.008]} renderOrder={2}>
+    <mesh position={[gx, gy, gz + 0.008]} renderOrder={2} raycast={() => null}>
       <circleGeometry args={[0.34, 64]} />
       <meshBasicMaterial
         map={texture}

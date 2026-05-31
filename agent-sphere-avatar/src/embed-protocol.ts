@@ -121,6 +121,8 @@ const COMMAND_ACTIONS: ReadonlySet<EmbodimentCommandAction> = new Set([
   "move",
   "stop",
   "window_roam",
+  "window_place",
+  "query_state",
   "excite",
 ]);
 

@@ -21,6 +21,43 @@ html.embed-root #root {
   overflow: hidden;
   min-width: 200px;
   min-height: 280px;
+  cursor: grab;
+}
+
+.mode-embed:active {
+  cursor: grabbing;
+}
+
+.mode-embed canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none;
+}
+
+.embed-drag-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  touch-action: none;
+  cursor: grab;
+  background: transparent;
+}
+
+.embed-drag-surface:active {
+  cursor: grabbing;
+}
+
+.mode-embed-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  text-align: center;
+  font-size: 0.58rem;
+  color: rgba(200, 220, 255, 0.45);
+  pointer-events: none;
+  letter-spacing: 0.04em;
 }
 
 .mode-overlay {

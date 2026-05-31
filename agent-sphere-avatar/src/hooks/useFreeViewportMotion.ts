@@ -146,10 +146,13 @@ export function useFreeViewportMotion({
   }, [roamOnce, stopRoaming]);
 
   const executeCommand = useCallback(
-    (action: EmbodimentCommandAction, x?: number, y?: number) => {
+    (
+      action: EmbodimentCommandAction,
+      detail?: { x?: number; y?: number; screenX?: number; screenY?: number },
+    ) => {
       switch (action) {
         case "move":
-          if (x != null && y != null) moveTo(x, y);
+          if (detail?.x != null && detail?.y != null) moveTo(detail.x, detail.y);
           break;
         case "roam":
           roamOnce();
@@ -160,25 +163,45 @@ export function useFreeViewportMotion({
         case "window_roam":
           startRoaming();
           break;
+        case "window_place": {
+          const margin = 20;
+          const maxX = Math.max(margin, window.innerWidth - containerW - margin);
+          const maxY = Math.max(margin, window.innerHeight - containerH - margin);
+          const nx = Math.max(0, Math.min(1, detail?.screenX ?? 0.5));
+          const ny = Math.max(0, Math.min(1, detail?.screenY ?? 0.5));
+          moveTo(
+            margin + nx * Math.max(1, maxX - margin),
+            margin + ny * Math.max(1, maxY - margin),
+          );
+          break;
+        }
       }
     },
-    [moveTo, roamOnce, stopRoaming, startRoaming],
+    [moveTo, roamOnce, stopRoaming, startRoaming, containerW, containerH],
   );
 
   useEffect(() => {
     if (!enabled) return;
 
     const onCustomEvent = (e: Event) => {
-      const cmd = (e as CustomEvent<{ action: string; x?: number; y?: number }>).detail;
+      const cmd = (
+        e as CustomEvent<{
+          action: string;
+          x?: number;
+          y?: number;
+          screenX?: number;
+          screenY?: number;
+        }>
+      ).detail;
       if (!cmd?.action) return;
-      executeCommand(cmd.action as EmbodimentCommandAction, cmd.x, cmd.y);
+      executeCommand(cmd.action as EmbodimentCommandAction, cmd);
     };
 
     const onPostMessage = (ev: MessageEvent) => {
       const d = ev.data;
       if (!d || typeof d !== "object") return;
       if (d.type === "agent-sphere:command" && d.action) {
-        executeCommand(d.action as EmbodimentCommandAction, d.x, d.y);
+        executeCommand(d.action as EmbodimentCommandAction, d);
       }
     };
 

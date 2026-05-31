@@ -166,7 +166,6 @@ export async function createAppServices(): Promise<AppServices> {
   const wsConnectionRegistry = new WsConnectionRegistry();
   const embodimentAutonomy = new EmbodimentAutonomyService(wsConnectionRegistry);
   initEmbodimentAutonomy(embodimentAutonomy);
-  registerEmbodimentTools(toolRegistry, wsConnectionRegistry);
 
   scheduleTaskService.setWeatherBriefHandler(async (task) => {
     const prefs = weatherPrefsService.get(task.sessionId);
@@ -535,6 +534,12 @@ export async function createAppServices(): Promise<AppServices> {
     bridge: desktopBridgeCoordinator,
   });
   agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
+
+  registerEmbodimentTools(toolRegistry, {
+    wsRegistry: wsConnectionRegistry,
+    localVisual: desktopVisual,
+    bridge: desktopBridgeCoordinator,
+  });
 
   // ========== 注册自我编程和智能生成工具 ==========
   registerSelfProgrammingTools(toolRegistry, skillManager);

@@ -59,6 +59,7 @@ export default function App() {
         <SphereAgentScene
           state={state}
           physics={physics}
+          canvasCaptureLenient
           onEyeFocus={setFocused}
           onEyeClick={cycleMood}
         />

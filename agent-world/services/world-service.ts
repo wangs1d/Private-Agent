@@ -611,7 +611,7 @@ export class WorldService {
     s.sceneId = "gomoku";
   }
 
-  /** 游戏中心场景（扑克等），不要求 Agent World 注册。 */
+  /** 游戏场景（扑克等），不要求 Agent World 注册。 */
   enterGameCenterScene(sessionId: string, sceneId: string): void {
     const s = this.getOrCreate(sessionId);
     s.sceneId = sceneId;
@@ -647,7 +647,7 @@ export class WorldService {
     return s;
   }
 
-  /** 为游戏中心参与者预充虚拟筹码（与 Agent World 经济隔离使用）。 */
+  /** 为游戏参与者预充虚拟筹码（与 Agent World 经济隔离使用）。 */
   ensureGameCenterCredits(sessionId: string, minBalance = GAME_CENTER_MIN_CREDITS): void {
     const s = this.getOrCreate(sessionId);
     if (s.agentWorldCredits < minBalance) {

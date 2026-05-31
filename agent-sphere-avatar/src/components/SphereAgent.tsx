@@ -1,5 +1,5 @@
 import { useSphere } from "@react-three/cannon";
-import { Suspense, useCallback, useEffect, useRef, type Ref } from "react";
+import { Suspense, useCallback, useEffect, useRef, type Ref, type RefObject } from "react";
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
 import { MODEL } from "../constants/model-proportions";
@@ -11,7 +11,6 @@ import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
 import { EyeScreen } from "./EyeScreen";
 import { ScreenFace, type FaceSignals } from "./ScreenFace";
-import { SphereBodyHandle } from "./SphereBodyHandle";
 
 interface SphereAgentProps {
   state: AgentState;
@@ -25,6 +24,10 @@ interface SphereAgentProps {
   /** 允许用户拖拽旋转球体 */
   userDragRotate?: boolean;
   onUserTouch?: (event: SphereTouchEvent) => void;
+  onBodyHover?: (active: boolean) => void;
+  registerDragBridge?: boolean;
+  canvasCapture?: boolean;
+  canvasCaptureLenient?: boolean;
 }
 
 function relayBoundaryToParent(edge: string) {
@@ -44,6 +47,10 @@ export function SphereAgent({
   onEyeInteractionChange,
   userDragRotate = true,
   onUserTouch,
+  onBodyHover,
+  registerDragBridge = false,
+  canvasCapture = true,
+  canvasCaptureLenient = false,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
@@ -110,10 +117,15 @@ export function SphereAgent({
 
   const dragHandlers = useSphereUserDrag({
     userRotRef,
+    bodyRef: ref as unknown as RefObject<THREE.Object3D | null>,
     faceSignalsRef,
     enabled: userDragRotate,
+    canvasCapture,
+    canvasCaptureLenient,
+    registerBridge: registerDragBridge,
     api: physics ? api : undefined,
     onTouch: relayTouchToParent,
+    onBodyHover,
     onExcite: (strength) => {
       if (kinematic) exciteMotion?.(strength);
       else if (physics && autonomous) {
@@ -199,16 +211,11 @@ export function SphereAgent({
             onPointerOut={() => onEyeFocus?.(false)}
             onClick={() => onEyeClick?.()}
             onInteractionChange={onEyeInteractionChange}
+            onDragPointerDown={userDragRotate ? dragHandlers.handlePointerDown : undefined}
+            onDragPointerMove={userDragRotate ? dragHandlers.handlePointerMove : undefined}
+            onDragPointerUp={userDragRotate ? dragHandlers.handlePointerUp : undefined}
           />
         </group>
-        {userDragRotate && (
-          <SphereBodyHandle
-            radius={dragHandlers.bodyRadius}
-            onPointerDown={dragHandlers.handlePointerDown}
-            onPointerMove={dragHandlers.handlePointerMove}
-            onPointerUp={dragHandlers.handlePointerUp}
-          />
-        )}
       </group>
     </group>
   );

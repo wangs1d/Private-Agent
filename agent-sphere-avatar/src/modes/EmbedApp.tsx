@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { bindAgentBridge, dispatchEmbodimentCommand } from "../bridge/agent-bridge";
 import { mapUserMessageSent } from "../bridge/ws-agent-mapper";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
+import { EmbedDragSurface } from "../components/EmbedDragSurface";
 import { SphereAgentScene } from "../components/SphereAgentScene";
 import type { QuickCommand } from "../constants/quick-commands";
 import { isWsOffMode, postToHost, readSphereQuery, SPHERE_MSG } from "../embed-protocol";
@@ -140,11 +141,19 @@ export function EmbedApp() {
         mode="embed"
         physics={false}
         autonomous
+        domDragBridge
         onEyeFocus={setFocused}
         onEyeClick={handleEyeClick}
         onEyeInteractionChange={handleEyeInteraction}
         onUserTouch={handleUserTouch}
       />
+
+      <EmbedDragSurface
+        disabled={menuOpen || speech.listening}
+        onTap={handleEyeClick}
+      />
+
+      <p className="mode-embed-hint">拖动旋转 · 轻点打开菜单 · Shift+拖动移动窗口</p>
 
       <OverlayQuickMenu
         open={menuOpen || speech.listening}

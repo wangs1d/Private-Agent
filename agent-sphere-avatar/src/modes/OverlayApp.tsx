@@ -6,8 +6,10 @@ import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
+import { useOverlayPointerCapture } from "../hooks/useOverlayPointerCapture";
 import { useOverlayWindowMotion } from "../hooks/useOverlayWindowMotion";
 import type { AgentMood } from "../types/agent";
+import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "../index.css";
 import "./modes.css";
 
@@ -49,18 +51,35 @@ export function OverlayApp() {
     onError: (msg) => apply({ mood: "alert", energy: 0.75, caption: msg }),
   });
 
+  const { setMouseCapture } = useOverlayPointerCapture(menuOpen || speech.listening);
+
   const setMenuOpenSafe = useCallback((open: boolean) => {
     setMenuOpen(open);
     window.sphereOverlay?.setIgnoreMouseEvents(!open, true);
   }, []);
 
+  const handleSphereTouch = useCallback(
+    (event: SphereTouchEvent) => {
+      if (event.phase === "start") {
+        setMouseCapture(true);
+        apply({ mood: "listening", energy: 0.62, focused: true });
+      } else if (event.phase === "end") {
+        const spin = event.spinStrength ?? 0;
+        if (spin > 0.45) {
+          apply({ mood: "happy", energy: 0.72, caption: "哈哈，转晕我了！" });
+        }
+      }
+    },
+    [apply, setMouseCapture],
+  );
+
   const handleEyeInteraction = useCallback(
     (active: boolean) => {
       if (menuOpen) return;
-      window.sphereOverlay?.setIgnoreMouseEvents(!active, true);
+      setMouseCapture(active);
       setFocused(active);
     },
-    [menuOpen, setFocused],
+    [menuOpen, setFocused, setMouseCapture],
   );
 
   const handleEyeClick = useCallback(() => {
@@ -145,6 +164,8 @@ export function OverlayApp() {
         onEyeFocus={setFocused}
         onEyeClick={handleEyeClick}
         onEyeInteractionChange={handleEyeInteraction}
+        onUserTouch={handleSphereTouch}
+        onBodyHover={setMouseCapture}
       />
 
       <OverlayQuickMenu
@@ -163,7 +184,7 @@ export function OverlayApp() {
         <span className={`mode-badge mode-badge--${state.mood}`}>{statusLabel}</span>
         <span className="overlay-dot" data-connected={connected ? "1" : "0"} />
         <span className="overlay-hint">
-          {speech.listening ? "语音识别中…" : connected ? "点击玻璃屏打开菜单" : "连接中…"}
+          {speech.listening ? "语音识别中…" : connected ? "拖动球体旋转 · 点击玻璃屏打开菜单" : "连接中…"}
         </span>
       </div>
     </div>

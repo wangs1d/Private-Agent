@@ -71,18 +71,22 @@ const MASTER_GAME_TOOL_PREFIXES = [
   "world.gomoku.",
 ];
 
+/** 主 Agent 具身身体工具前缀（registry + {@link EMBODIMENT_CHAT_TOOLS}，经 tool-loop 下发并 execute） */
+const MASTER_EMBODIMENT_TOOL_PREFIX = "embodiment.";
+
 /**
- * 主 Agent 基本工具过滤 — 只保留基础能力 + 游戏。
+ * 主 Agent 基本工具过滤 — 只保留基础能力 + 具身 + 游戏。
  * 排除：life 专有 (wallet.write/desktop)
  *       tech 专有 (vision/self.write)
  *       creative 专有 (info.deep/shopping)
- * 保留：游戏 (gomoku 系列 — 主 agent 直接陪玩)
+ * 保留：具身 (embodiment.*)、游戏 (gomoku 系列 — 主 agent 直接陪玩/控身)
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   return tools.filter((t) => {
     if (t.type !== "function" || !t.function?.name) return false;
     const name = t.function.name;
     if (MASTER_BASIC_TOOL_NAMES.has(name)) return true;
+    if (name.startsWith(MASTER_EMBODIMENT_TOOL_PREFIX)) return true;
     return MASTER_GAME_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
   });
 }
@@ -114,8 +118,9 @@ export function buildSubAgentChatTools(
 }
 
 /**
- * 主 Agent 对话工具：仅基本工具 + 子 Agent 委派。
- * 复杂操作（钱包写/桌面操控/深度RPA/专业创作）必须通过子 agent 完成。
+ * 主 Agent 对话工具：基本工具 + 具身身体 + 子 Agent 委派。
+ * 复杂操作（钱包写/桌面操控/深度RPA/专业创作）必须通过子 agent 完成；
+ * 球形机器人移动/表情由主 agent 直接调用 embodiment.*（已注册于 ToolRegistry）。
  */
 export function buildMasterAgentChatTools(
   capabilities: Iterable<SubAgentCapability>,

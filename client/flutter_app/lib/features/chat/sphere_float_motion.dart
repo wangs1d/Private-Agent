@@ -42,6 +42,28 @@ class SphereFloatMotion {
     if (action == null || action.isEmpty) return;
 
     switch (action) {
+      case "window_place":
+      case "window_move":
+        if (useNativeOverlay) {
+          await _nativeWindowPlace(payload, devicePixelRatio);
+          return;
+        }
+        final double? screenX = _readNum(payload["screenX"]);
+        final double? screenY = _readNum(payload["screenY"]);
+        if (screenX == null || screenY == null) return;
+        final Offset target = _normalizedToScreen(
+          nx: screenX.clamp(0.0, 1.0),
+          nz: screenY.clamp(0.0, 1.0),
+          viewport: viewport,
+          panelSize: panelSize,
+        );
+        _animateTo(
+          from: current,
+          to: clampPosition(target),
+          durationMs: 1000,
+          applyPosition: applyPosition,
+        );
+        return;
       case "window_roam":
       case "roam":
         if (useNativeOverlay) {
@@ -87,6 +109,63 @@ class SphereFloatMotion {
       default:
         return;
     }
+  }
+
+  Future<void> _nativeWindowPlace(
+    Map<String, dynamic> payload,
+    double dpr,
+  ) async {
+    final Map<String, int>? area = await SphereOverlayLauncher.getWorkArea();
+    if (area == null) {
+      await SphereOverlayLauncher.roam();
+      return;
+    }
+
+    final double? screenX = _readNum(payload["screenX"]);
+    final double? screenY = _readNum(payload["screenY"]);
+    if (screenX == null || screenY == null) {
+      await SphereOverlayLauncher.roam();
+      return;
+    }
+
+    const int panelW = 300;
+    const int panelH = 380;
+    final int margin = 12;
+    final int aw = area["width"] ?? 1920;
+    final int ah = area["height"] ?? 1080;
+    final int ax = area["x"] ?? 0;
+    final int ay = area["y"] ?? 0;
+
+    final Offset logical = _normalizedToScreen(
+      nx: screenX.clamp(0.0, 1.0),
+      nz: screenY.clamp(0.0, 1.0),
+      viewport: Size(aw / dpr, ah / dpr),
+      panelSize: const Size(300, 380),
+    );
+
+    final int maxX = math.max(margin, aw - panelW - margin);
+    final int maxY = math.max(margin, ah - panelH - margin);
+    final int px = (ax + logical.dx * dpr).round().clamp(ax + margin, ax + maxX);
+    final int py = (ay + logical.dy * dpr).round().clamp(ay + margin, ay + maxY);
+
+    await SphereOverlayLauncher.moveTo(px, py, durationMs: 1100);
+  }
+
+  Offset _normalizedToScreen({
+    required double nx,
+    required double nz,
+    required Size viewport,
+    required Size panelSize,
+  }) {
+    const double margin = 20;
+    final double maxX =
+        (viewport.width - panelSize.width - margin).clamp(margin, double.infinity);
+    final double maxY =
+        (viewport.height - panelSize.height - margin).clamp(margin, double.infinity);
+    return Offset(
+      margin + nx * math.max(1, maxX - margin),
+      margin + nz * math.max(1, maxY - margin),
+    );
   }
 
   Future<void> _nativeMoveTo(Map<String, dynamic> payload, double dpr) async {

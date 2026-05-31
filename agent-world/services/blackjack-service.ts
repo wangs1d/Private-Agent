@@ -167,7 +167,7 @@ export class BlackjackService {
   }
 
   private notify(_t: Table): void {
-    // 游戏中心 21 点以 HTTP 轮询为主；后续可接专用 WS 事件。
+    // 游戏 21 点以 HTTP 轮询为主；后续可接专用 WS 事件。
   }
 }
 

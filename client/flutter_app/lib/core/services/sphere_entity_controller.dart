@@ -20,6 +20,19 @@ class SphereEntityController extends ChangeNotifier {
 
   SphereEntityMode mode = SphereEntityMode.docked;
   bool overlayReady = false;
+  DateTime? _dockSyncHoldUntil;
+
+  /// Agent 通过具身工具移动后，短暂禁止自动对齐侧栏槽位（避免「说动了但仍停在左边」）。
+  bool get shouldSuppressDockSync =>
+      _dockSyncHoldUntil != null && DateTime.now().isBefore(_dockSyncHoldUntil!);
+
+  void beginAgentPositionHold({Duration duration = const Duration(seconds: 45)}) {
+    _dockSyncHoldUntil = DateTime.now().add(duration);
+    if (mode == SphereEntityMode.docked) {
+      mode = SphereEntityMode.overflow;
+      notifyListeners();
+    }
+  }
 
   /// 由 [FloatingAgentSphere] 注册：AppBar「召回」时对齐槽位。
   VoidCallback? onRequestSnapToDock;
@@ -47,7 +60,9 @@ class SphereEntityController extends ChangeNotifier {
 
   /// 将原生悬浮窗对齐到 Flutter 槽位的屏幕物理坐标。
   Future<void> syncDockSlot(Rect globalLogicalRect, double devicePixelRatio) async {
-    if (!overlayReady || mode != SphereEntityMode.docked) return;
+    if (!overlayReady || mode != SphereEntityMode.docked || shouldSuppressDockSync) {
+      return;
+    }
     if (!await SphereOverlayLauncher.isWebViewReady()) return;
 
     final int x = (globalLogicalRect.left * devicePixelRatio).round();
@@ -117,4 +132,35 @@ class SphereEntityController extends ChangeNotifier {
   }
 
   Future<void> roam() => SphereOverlayLauncher.roam();
+
+  /// 回报球形窗口位置，供服务端 `embodiment.observe` 闭环。
+  Future<Map<String, dynamic>?> collectStateReport(double devicePixelRatio) async {
+    final Map<String, int>? work = await SphereOverlayLauncher.getWorkArea();
+    final Map<String, int>? bounds = await SphereOverlayLauncher.getBounds();
+    if (work == null || bounds == null) return null;
+
+    final double dpr = devicePixelRatio;
+    final int aw = work["width"] ?? 1;
+    final int ah = work["height"] ?? 1;
+    final int ax = work["x"] ?? 0;
+    final int ay = work["y"] ?? 0;
+
+    final double cx = bounds["x"]! + bounds["width"]! / 2;
+    final double cy = bounds["y"]! + bounds["height"]! / 2;
+    final double centerScreenX = aw > 0 ? ((cx - ax) / aw).clamp(0.0, 1.0) : 0.5;
+    final double centerScreenY = ah > 0 ? ((cy - ay) / ah).clamp(0.0, 1.0) : 0.5;
+
+    return <String, dynamic>{
+      "x": bounds["x"],
+      "y": bounds["y"],
+      "width": bounds["width"],
+      "height": bounds["height"],
+      "centerScreenX": centerScreenX,
+      "centerScreenY": centerScreenY,
+      "workAreaWidth": aw,
+      "workAreaHeight": ah,
+      "mode": mode.name,
+      "overlayReady": overlayReady,
+    };
+  }
 }

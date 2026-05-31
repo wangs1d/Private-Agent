@@ -18,6 +18,7 @@ import {
   handleChatAgentProcessingUiEvent,
   handleChatUserMessageEvent,
 } from "./handlers/chat-user-message.js";
+import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import {
@@ -433,6 +434,21 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             event.payload,
             { agentCore, auditService },
           );
+          return;
+        }
+
+        if (event.type === ClientEventType.AgentEmbodimentState) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          if (initAsDesktopBridge) return;
+          handleAgentEmbodimentStateEvent(boundActorId, event.payload);
           return;
         }
 

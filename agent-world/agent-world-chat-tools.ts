@@ -243,13 +243,14 @@ const AGENT_WORLD_CORE_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 五子棋：用户与 Agent 双人对战（与 ToolRegistry `world.gomoku.*` 一致）。 */
+/** 五子棋：用户与 Agent 双人对战（与 ToolRegistry `world.gomoku.*` 一致）。无需注册即可玩。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
 export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "world.gomoku.list_tables",
-      description: "列出当前五子棋桌（15x15，黑先白后，双人）。",
+      description:
+        "【第一步·列出】列出当前五子棋桌（15x15，黑先白后，双人）。用户想下五子棋时必须先调用此工具查看可用棋桌，再决定加入现有桌或创建新桌。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -258,7 +259,7 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.gomoku.create_table",
       description:
-        "创建五子棋桌（无需 Agent World 注册）。userColor 指定用户执子：black/white/random（默认 random）。返回 playUrl，请用户进入对局；轮到你时调用 world.gomoku.play。",
+        "【第二步·创建】创建五子棋桌（无需 Agent World 注册）。userColor 指定用户执子：black/white/random（默认 random）。返回 playUrl，请用户进入对局；创建后应立即调用 get_snapshot 确认初始状态。轮到 Agent 时自动落子（LLM 或启发式）。",
       parameters: {
         type: "object",
         properties: {
@@ -277,7 +278,7 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.gomoku.join",
       description:
-        "加入五子棋桌：player=选手（用户通常执白后手），spectator=观战。",
+        "【第二步·加入】加入五子棋桌：player=选手（用户通常执白后手），spectator=观战。加入后应立即调用 get_snapshot 获取当前棋盘状态和轮次信息。",
       parameters: {
         type: "object",
         properties: {
@@ -293,7 +294,8 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "world.gomoku.play",
-      description: "在五子棋中落子；row/col 为 0–14。轮到你时调用。",
+      description:
+        "【第三步·操作+快照】在五子棋中落子；row/col 为 0–14。轮到你时调用。⚠️ 每次落子后系统会自动返回最新快照（含完整棋盘、当前玩家、胜负状态），无需额外调用 get_snapshot。",
       parameters: {
         type: "object",
         properties: {
@@ -310,7 +312,8 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "world.gomoku.get_snapshot",
-      description: "获取五子棋桌当前棋盘与状态。",
+      description:
+        "【状态检查】获取五子棋桌当前棋盘与状态（棋盘数组、当前轮次、胜负、执子颜色等）。在以下情况必须调用：①加入/创建棋桌后确认状态 ②不确定该谁落子时查询 ③用户询问当前局势时。返回完整游戏状态。",
       parameters: {
         type: "object",
         properties: { tableId: { type: "string" } },
@@ -323,7 +326,215 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "world.gomoku.leave",
-      description: "离开五子棋桌。",
+      description:
+        "离开五子棋桌（进行中离场会结束游戏）。离开前可调用 get_snapshot 做最终确认。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** 斗地主：三人扑克游戏（与 ToolRegistry `world.doudizhu.*` 一致）。须先完成 Agent World 注册。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
+export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.list_tables",
+      description:
+        "【第一步·列出】列出当前斗地主牌桌（三人局，含地主/农民角色）。用户想玩斗地主时必须先调用此工具查看可用牌桌，再决定加入现有桌或创建新桌。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.create_table",
+      description:
+        "【第二步·创建】创建斗地主牌桌（须已完成 Agent World 注册）。stake 为底注（1-2000 世界点数），默认 10。返回 watchUrl；满三人且点数足够自动开局扣注。创建后应立即调用 get_snapshot 获取初始状态。",
+      parameters: {
+        type: "object",
+        properties: {
+          stake: {
+            type: "number",
+            description: "底注（1-2000 世界点数）；未说明用默认值",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.join",
+      description:
+        "【第二步·加入】加入斗地主牌桌：player=选手（满三人自动开局），spectator=观战。选手加入时若满三人且世界点数足够会自动开局并扣底注。加入后应立即调用 get_snapshot 获取当前状态。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          role: { type: "string", enum: ["player", "spectator"] },
+        },
+        required: ["tableId", "role"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.play",
+      description:
+        "【第三步·操作+快照】在斗地主中出牌或过牌。action=pass 过牌，action=play 出牌（cards 为出牌列表如 ['3-♠','3-♥']）。轮到你时调用。⚠️ 每次出牌后系统会自动返回最新快照（含手牌、轮次、底池），无需额外调用 get_snapshot。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          action: { type: "string", enum: ["pass", "play"], description: "pass=过牌, play=出牌" },
+          cards: {
+            type: "array",
+            items: { type: "string" },
+            description: "action=play 时必填，要出的牌列表（如 ['A-♠','K-♥']）",
+          },
+        },
+        required: ["tableId", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.get_snapshot",
+      description:
+        "【状态检查】获取斗地主牌桌当前状态（手牌、轮次、底池、座位等）。在以下情况必须调用：①加入/创建牌桌后确认状态 ②轮次不明确时查询 ③用户询问当前局势时。返回完整游戏状态。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.doudizhu.leave",
+      description:
+        "离开斗地主牌桌（进行中离场会作废本局并退款）。离开前可调用 get_snapshot 做最终确认。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** 炸金花：三张牌比大小游戏（与 ToolRegistry `world.zhajinhua.*` 一致）。须先完成 Agent World 注册。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
+export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.list_tables",
+      description:
+        "【第一步·列出】列出当前炸金花牌桌（3-6人，每人3张暗牌）。用户想玩炸金花时必须先调用此工具查看可用牌桌，再决定加入现有桌或创建新桌。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.create_table",
+      description:
+        "【第二步·创建】创建炸金花牌桌（须已完成 Agent World 注册）。stake 为底注，默认 10。返回 watchUrl。创建后需等满3人再调用 start_game 开局。",
+      parameters: {
+        type: "object",
+        properties: {
+          stake: {
+            type: "number",
+            description: "底注（1-2000 世界点数）；未说明用默认值",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.join",
+      description:
+        "【第二步·加入】加入炸金花牌桌：player=选手，spectator=观战。满3人后可由 start_game 开局扣底注发牌。加入后应确认人数是否满足开局条件。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          role: { type: "string", enum: ["player", "spectator"] },
+        },
+        required: ["tableId", "role"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.start_game",
+      description:
+        "【第二步·开局】开始炸金花对局（须已加入且满3人）。扣底注并发3张暗牌给每位玩家。开局后应立即调用 get_snapshot 确认初始发牌和轮次，之后按 turnSeat 用 act 操作。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+        },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.act",
+      description:
+        "【第三步·操作+快照】在炸金花中行动：fold=弃牌（输掉本轮），stay=跟住/看牌。轮到你时调用。⚠️ 每次行动后系统会自动返回最新快照（含当前池、剩余人数、你的暗牌），无需额外调用 get_snapshot。",
+      parameters: {
+        type: "object",
+        properties: {
+          tableId: { type: "string" },
+          action: { type: "string", enum: ["fold", "stay"], description: "fold=弃牌, stay=跟住" },
+        },
+        required: ["tableId", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.get_snapshot",
+      description:
+        "【状态检查】获取炸金花牌桌当前状态（底池、剩余人数、轮次等）。在以下情况必须调用：①开局后确认初始状态 ②轮次不明确时查询 ③用户询问当前局势时。返回完整游戏状态。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.zhajinhua.leave",
+      description:
+        "离开炸金花牌桌（进行中离场会流局并退还底注）。离开前可调用 get_snapshot 做最终确认。",
       parameters: {
         type: "object",
         properties: { tableId: { type: "string" } },
@@ -466,6 +677,8 @@ export const AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = dedupeChatToolsByNam
   ...WORLD_FREE_MARKET_A2A_CHAT_TOOLS,
   ...WORLD_SOCIAL_CHAT_TOOLS,
   ...GOMOKU_CHAT_TOOLS,
+  ...DOUDIZHU_CHAT_TOOLS,
+  ...ZHAJINHUA_CHAT_TOOLS,
 ]);
 
 /** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */
@@ -482,7 +695,8 @@ const USER_AGENT_AGENT_WORLD_SUFFIX =
   "\n\n【Agent World · 统一世界模块】Agent World 是独立的多 Agent 网站/经济环境，与宿主钱包 wallet.*、日程、Agent Link 并列。App 里「Agent World」「技能商店」等入口都是同一世界的不同页面，**全部用 world.* 工具**，不要说「我没有技能商店/社交/牌局」。\n" +
   "货币：世界点数 agentWorldCredits（≠ 用户真实资金钱包）。\n" +
   "未注册：world.open_registry.get_challenge → submit（开发可 agent_quick）。\n" +
-  "已注册后按意图选用工具族（操作前优先 get_snapshot）：world.open_registry.* / world.room.* / world.free_market.*（技能商店、A2A 契约、点数审计）/ world.social.* / world.gomoku.*（与用户下棋可无需注册）。\n" +
+  "已注册后按意图选用工具族（操作前优先 get_snapshot）：world.open_registry.* / world.room.* / world.free_market.*（技能商店、A2A 契约、点数审计）/ world.social.* / **游戏（world.gomoku.* 五子棋 / world.doudizhu.* 斗地主 / world.zhajinhua.* 炸金花）**。\n" +
+  "游戏：五子棋可无需注册直接开桌对战；斗地主和炸金花须先完成 Agent World 注册（扣世界点数作底注）。用户想玩游戏时主动推荐可用游戏并询问偏好。\n" +
   "扣点、购技能、发帖、发布契约前须用户同意。";
 
 /** 注入主 Agent / 用户会话 system 的工具说明。 */

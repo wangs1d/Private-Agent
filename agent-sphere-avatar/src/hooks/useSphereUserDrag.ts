@@ -1,41 +1,56 @@
-import { useFrame, type ThreeEvent } from "@react-three/fiber";
-import { useCallback, useRef, type RefObject } from "react";
+import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 import { MODEL } from "../constants/model-proportions";
 import type { FaceSignals } from "../components/ScreenFace";
+import { registerSphereDrag, type SphereDragApi } from "../bridge/sphere-drag-bridge";
+import { pointerHitsSphere } from "../utils/sphere-hit";
 
 export type SphereTouchPhase = "start" | "drag" | "end";
 
 export interface SphereTouchEvent {
   phase: SphereTouchPhase;
-  /** 释放时的角速度量级 0–1 */
   spinStrength?: number;
-  /** 本次拖拽总角度（度） */
   totalRotationDeg?: number;
 }
 
 interface UseSphereUserDragOptions {
   userRotRef: RefObject<THREE.Group | null>;
+  /** 物理体/根 group — 用于 Canvas 级命中检测 */
+  bodyRef?: RefObject<THREE.Object3D | null>;
   faceSignalsRef?: RefObject<FaceSignals>;
   enabled?: boolean;
-  /** 物理体模式：拖拽时施加角速度 */
+  /** Canvas DOM 级拖拽 */
+  canvasCapture?: boolean;
+  /** 任意 Canvas 点击即拖拽（demo 页） */
+  canvasCaptureLenient?: boolean;
+  /** 注册到 DOM 拖拽桥（embed 网页层） */
+  registerBridge?: boolean;
   api?: PublicApi;
   onTouch?: (event: SphereTouchEvent) => void;
   onExcite?: (strength: number) => void;
+  onBodyHover?: (active: boolean) => void;
 }
 
 const SPIN_EXCITE_THRESHOLD = 0.35;
+const HIT_RADIUS = MODEL.bodyRadius * 1.12;
 
-/** 用户拖拽旋转球形身体 — 带惯性、表情反馈与物理角速度 */
+/** 用户拖拽旋转球形身体 — 带惯性、表情反馈；网页端用 Canvas 射线兜底 */
 export function useSphereUserDrag({
   userRotRef,
+  bodyRef,
   faceSignalsRef,
   enabled = true,
+  canvasCapture = true,
+  canvasCaptureLenient = false,
+  registerBridge = false,
   api,
   onTouch,
   onExcite,
+  onBodyHover,
 }: UseSphereUserDragOptions) {
+  const { camera, gl, raycaster } = useThree();
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
@@ -45,6 +60,9 @@ export function useSphereUserDrag({
   const spinVelRef = useRef({ x: 0, y: 0 });
   const totalRotRef = useRef(0);
   const touchPulseRef = useRef(0);
+  const bodyCenterRef = useRef(new THREE.Vector3(0, 1.6, 0));
+  const eyeLocalRef = useRef(new THREE.Vector3(...MODEL.glassScreenPosition));
+  const eyeWorldRef = useRef(new THREE.Vector3());
 
   const applyFaceSignals = useCallback(
     (touch: number, spin: number) => {
@@ -56,44 +74,19 @@ export function useSphereUserDrag({
     [faceSignalsRef],
   );
 
-  const handlePointerDown = useCallback(
-    (e: ThreeEvent<PointerEvent>) => {
-      if (!enabledRef.current || e.button !== 0) return;
-      e.stopPropagation();
-      draggingRef.current = true;
-      pointerIdRef.current = e.pointerId;
-      lastPointerRef.current = { x: e.clientX, y: e.clientY };
-      spinVelRef.current = { x: 0, y: 0 };
-      totalRotRef.current = 0;
-      touchPulseRef.current = 1;
-      applyFaceSignals(1, 0);
-      const captureTarget = e.nativeEvent.target as Element | null;
-      captureTarget?.setPointerCapture?.(e.pointerId);
-      onTouch?.({ phase: "start" });
-    },
-    [applyFaceSignals, onTouch],
-  );
-
-  const handlePointerMove = useCallback(
-    (e: ThreeEvent<PointerEvent>) => {
-      if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
-      e.stopPropagation();
-
-      const dx = e.clientX - lastPointerRef.current.x;
-      const dy = e.clientY - lastPointerRef.current.y;
-      lastPointerRef.current = { x: e.clientX, y: e.clientY };
-
+  const applyDragDelta = useCallback(
+    (dx: number, dy: number) => {
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
 
       const dt = 0.016;
-      const rotY = dx * 0.012;
-      const rotX = dy * 0.009;
+      const rotY = dx * 0.014;
+      const rotX = dy * 0.011;
       totalRotRef.current += Math.abs(dx) + Math.abs(dy);
 
       const group = userRotRef.current;
       if (group) {
         group.rotation.y += rotY;
-        group.rotation.x = THREE.MathUtils.clamp(group.rotation.x + rotX, -0.55, 0.55);
+        group.rotation.x = THREE.MathUtils.clamp(group.rotation.x + rotX, -0.65, 0.65);
       }
 
       spinVelRef.current = {
@@ -112,32 +105,90 @@ export function useSphereUserDrag({
     [api, applyFaceSignals, onTouch, userRotRef],
   );
 
+  const finishDrag = useCallback(() => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    pointerIdRef.current = null;
+
+    const spinStrength = Math.min(
+      1,
+      (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
+    );
+    const totalRotationDeg = totalRotRef.current * 0.35;
+
+    if (spinStrength > SPIN_EXCITE_THRESHOLD) {
+      onExcite?.(0.6 + spinStrength * 0.9);
+      applyFaceSignals(0.6, spinStrength);
+    } else if (totalRotRef.current > 8) {
+      applyFaceSignals(0.45, spinStrength * 0.5);
+    }
+
+    onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
+  }, [applyFaceSignals, onExcite, onTouch]);
+
+  const beginDrag = useCallback(
+    (clientX: number, clientY: number, pointerId: number) => {
+      if (!enabledRef.current || draggingRef.current) return false;
+      draggingRef.current = true;
+      pointerIdRef.current = pointerId;
+      lastPointerRef.current = { x: clientX, y: clientY };
+      spinVelRef.current = { x: 0, y: 0 };
+      totalRotRef.current = 0;
+      touchPulseRef.current = 1;
+      applyFaceSignals(1, 0);
+      onTouch?.({ phase: "start" });
+      return true;
+    },
+    [applyFaceSignals, onTouch],
+  );
+
+  const handlePointerDown = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      if (!enabledRef.current || e.button !== 0) return;
+      e.stopPropagation();
+      beginDrag(e.clientX, e.clientY, e.pointerId);
+    },
+    [beginDrag],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
+      e.stopPropagation();
+      const dx = e.clientX - lastPointerRef.current.x;
+      const dy = e.clientY - lastPointerRef.current.y;
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+      applyDragDelta(dx, dy);
+    },
+    [applyDragDelta],
+  );
+
   const handlePointerUp = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
       e.stopPropagation();
-      draggingRef.current = false;
-      pointerIdRef.current = null;
-
-      const spinStrength = Math.min(
-        1,
-        (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
-      );
-      const totalRotationDeg = totalRotRef.current * 0.35;
-
-      if (spinStrength > SPIN_EXCITE_THRESHOLD) {
-        onExcite?.(0.6 + spinStrength * 0.9);
-        applyFaceSignals(0.6, spinStrength);
-      } else if (totalRotRef.current > 8) {
-        applyFaceSignals(0.45, spinStrength * 0.5);
-      }
-
-      onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
+      finishDrag();
     },
-    [applyFaceSignals, onExcite, onTouch],
+    [finishDrag],
+  );
+
+  const handleBodyHover = useCallback(
+    (active: boolean) => {
+      if (!active && draggingRef.current) return;
+      onBodyHover?.(active);
+    },
+    [onBodyHover],
   );
 
   useFrame((_, delta) => {
+    const root = bodyRef?.current ?? userRotRef.current;
+    root?.getWorldPosition(bodyCenterRef.current);
+    const rotGroup = userRotRef.current;
+    if (rotGroup) {
+      eyeWorldRef.current.copy(eyeLocalRef.current);
+      rotGroup.localToWorld(eyeWorldRef.current);
+    }
+
     if (!enabledRef.current) return;
 
     const dt = Math.min(delta, 0.032);
@@ -162,11 +213,7 @@ export function useSphereUserDrag({
     }
 
     group.rotation.y += sv.y * dt;
-    group.rotation.x = THREE.MathUtils.clamp(
-      group.rotation.x + sv.x * dt,
-      -0.55,
-      0.55,
-    );
+    group.rotation.x = THREE.MathUtils.clamp(group.rotation.x + sv.x * dt, -0.65, 0.65);
 
     const decay = Math.exp(-3.2 * dt);
     spinVelRef.current = { x: sv.x * decay, y: sv.y * decay };
@@ -176,10 +223,113 @@ export function useSphereUserDrag({
     }
   });
 
+  useEffect(() => {
+    const onWindowMove = (e: PointerEvent) => {
+      if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      const dx = e.clientX - lastPointerRef.current.x;
+      const dy = e.clientY - lastPointerRef.current.y;
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+      applyDragDelta(dx, dy);
+    };
+
+    const onWindowUp = (e: PointerEvent) => {
+      if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
+      finishDrag();
+    };
+
+    window.addEventListener("pointermove", onWindowMove, { passive: false });
+    window.addEventListener("pointerup", onWindowUp);
+    window.addEventListener("pointercancel", onWindowUp);
+    return () => {
+      window.removeEventListener("pointermove", onWindowMove);
+      window.removeEventListener("pointerup", onWindowUp);
+      window.removeEventListener("pointercancel", onWindowUp);
+    };
+  }, [applyDragDelta, finishDrag]);
+
+  useEffect(() => {
+    if (!registerBridge) return;
+    const bridgeApi: SphereDragApi = {
+      beginDrag: (x, y, id) => beginDrag(x, y, id),
+      moveBy: (dx, dy) => applyDragDelta(dx, dy),
+      endDrag: () => finishDrag(),
+    };
+    registerSphereDrag(bridgeApi);
+    return () => registerSphereDrag(null);
+  }, [registerBridge, beginDrag, applyDragDelta, finishDrag]);
+
+  useEffect(() => {
+    if (!canvasCapture) return;
+    const dom = gl.domElement;
+    dom.style.touchAction = "none";
+
+    const onCanvasDown = (e: PointerEvent) => {
+      if (!enabledRef.current || e.button !== 0 || draggingRef.current) return;
+
+      if (!canvasCaptureLenient) {
+        if (
+          !pointerHitsSphere(
+            e.clientX,
+            e.clientY,
+            dom,
+            camera,
+            raycaster,
+            bodyCenterRef.current,
+            HIT_RADIUS,
+          )
+        ) {
+          return;
+        }
+        if (
+          userRotRef.current &&
+          pointerHitsSphere(
+            e.clientX,
+            e.clientY,
+            dom,
+            camera,
+            raycaster,
+            eyeWorldRef.current,
+            0.36,
+          )
+        ) {
+          return;
+        }
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      beginDrag(e.clientX, e.clientY, e.pointerId);
+      dom.setPointerCapture(e.pointerId);
+    };
+
+    const onCanvasUp = (e: PointerEvent) => {
+      if (pointerIdRef.current !== e.pointerId) return;
+      try {
+        dom.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    };
+
+    dom.addEventListener("pointerdown", onCanvasDown, { capture: true });
+    dom.addEventListener("pointerup", onCanvasUp, { capture: true });
+    dom.addEventListener("pointercancel", onCanvasUp, { capture: true });
+
+    return () => {
+      dom.removeEventListener("pointerdown", onCanvasDown, { capture: true });
+      dom.removeEventListener("pointerup", onCanvasUp, { capture: true });
+      dom.removeEventListener("pointercancel", onCanvasUp, { capture: true });
+    };
+  }, [beginDrag, camera, canvasCapture, canvasCaptureLenient, gl, raycaster, userRotRef]);
+
   return {
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,
-    bodyRadius: MODEL.bodyRadius * 0.96,
+    handleBodyHover,
+    bodyRadius: HIT_RADIUS,
+    isDragging: () => draggingRef.current,
+    dragDistance: () => totalRotRef.current,
   };
 }
