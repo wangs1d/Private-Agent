@@ -4,7 +4,8 @@ export const MEMORY_TOPIC_TAG_RE = /\[topic:([a-z][a-z0-9_-]{0,31})\]/i;
 const TOPIC_RULES: ReadonlyArray<{ topic: string; patterns: RegExp[] }> = [
   { topic: "wallet", patterns: [/转账|汇款|钱包|余额|充值|支付|消费|红包|账单/i] },
   { topic: "calendar", patterns: [/日程|提醒|闹钟|安排|待办|会议|预约/i] },
-  { topic: "world", patterns: [/世界|技能商店|自由市场|gomoku|五子棋|斗地主|点数/i] },
+  { topic: "world", patterns: [/世界|技能商店|自由市场|点数/i] },
+  { topic: "entertainment", patterns: [/游戏|gomoku|五子棋|斗地主|炸金花|21点|对局|下棋|打牌/i] },
   { topic: "social", patterns: [/推文|发帖|评论|点赞|社交|动态/i] },
   { topic: "creative", patterns: [/文案|写作|翻译|润色|策划|故事|文章|ppt/i] },
   { topic: "tech", patterns: [/代码|编程|debug|脚本|自动化|rpa|部署|运维|api/i] },

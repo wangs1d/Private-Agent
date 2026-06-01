@@ -9,6 +9,9 @@ import { relayEmbodimentCommandFromWs } from "./useEmbodimentCommandRelay";
 import type { AgentState, EmbodimentInteractAction } from "../types/agent";
 import { DEFAULT_AGENT_STATE } from "../types/agent";
 
+const BASE_RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30000;
+
 function resolveWsUrl(explicit?: string): string {
   if (explicit?.trim()) return explicit.trim();
   if (typeof window !== "undefined") {
@@ -30,6 +33,11 @@ function resolveSessionId(explicit?: string): string {
   return id;
 }
 
+function reconnectDelayMs(attempt: number): number {
+  const exp = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * 2 ** attempt);
+  return exp + Math.random() * exp * 0.2;
+}
+
 interface UseAgentWebSocketOptions {
   wsUrl?: string;
   sessionId?: string;
@@ -44,35 +52,88 @@ export function useAgentWebSocket(
 ) {
   const { wsUrl, sessionId, enabled = true, onConnected, onDisconnected } = options;
   const [connected, setConnected] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const attemptRef = useRef(0);
   const applyRef = useRef(apply);
   const sessionRef = useRef(resolveSessionId(sessionId));
   applyRef.current = apply;
   sessionRef.current = resolveSessionId(sessionId);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setConnected(false);
+      setReconnecting(false);
+      return;
+    }
 
+    let disposed = false;
     const sid = sessionRef.current;
     const url = resolveWsUrl(wsUrl);
     resetWsMapperState();
     applyRef.current({ ...DEFAULT_AGENT_STATE });
+    attemptRef.current = 0;
+
+    const clearReconnectTimer = () => {
+      if (reconnectRef.current != null) {
+        window.clearTimeout(reconnectRef.current);
+        reconnectRef.current = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      clearReconnectTimer();
+      setReconnecting(true);
+      const delay = reconnectDelayMs(attemptRef.current);
+      attemptRef.current += 1;
+      reconnectRef.current = window.setTimeout(() => {
+        reconnectRef.current = null;
+        connect();
+      }, delay);
+    };
 
     const connect = () => {
+      if (disposed) return;
+
+      const existing = wsRef.current;
+      if (
+        existing &&
+        (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+
+      if (existing) {
+        existing.close();
+        wsRef.current = null;
+      }
+
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.addEventListener("open", () => {
+        if (disposed || wsRef.current !== ws) return;
+        attemptRef.current = 0;
+        setReconnecting(false);
         setConnected(true);
         ws.send(JSON.stringify({ type: "session.init", payload: { sessionId: sid, userId: sid } }));
         onConnected?.();
       });
 
       ws.addEventListener("close", () => {
+        if (disposed) return;
+        if (wsRef.current === ws) wsRef.current = null;
         setConnected(false);
         onDisconnected?.();
-        reconnectRef.current = window.setTimeout(connect, 3000);
+        scheduleReconnect();
+      });
+
+      ws.addEventListener("error", () => {
+        if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
       });
 
       ws.addEventListener("message", (ev) => {
@@ -106,9 +167,14 @@ export function useAgentWebSocket(
     connect();
 
     return () => {
-      if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
-      wsRef.current?.close();
+      disposed = true;
+      clearReconnectTimer();
+      setReconnecting(false);
+      const ws = wsRef.current;
       wsRef.current = null;
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+      }
     };
   }, [enabled, wsUrl, sessionId, onConnected, onDisconnected]);
 
@@ -142,10 +208,11 @@ export function useAgentWebSocket(
 
   return {
     connected,
+    reconnecting,
     sessionId: sessionRef.current,
     sendInteract,
     sendWake,
     sendChat,
     sendFocus,
   };
-}
+};

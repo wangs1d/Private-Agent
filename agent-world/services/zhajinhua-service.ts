@@ -84,8 +84,9 @@ export class ZhaJinHuaService {
 
   constructor(private readonly worldService: WorldService) {}
 
+  /** 炸金花工具入口：侧栏「游戏」tab，无需 Agent World 注册。 */
   assertAgentWorldEntry(sessionId: string): void {
-    this.worldService.assertAgentWorldRegistered(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "zhajinhua");
   }
 
   attachWebSocketRegistry(registry: WsConnectionRegistryLike): void {
@@ -109,7 +110,7 @@ export class ZhaJinHuaService {
   }
 
   watchLobby(sessionId: string): void {
-    this.worldService.visitZhaJinHua(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "zhajinhua");
     this.lobbyWatchers.add(sessionId);
     this.sendLobbySnapshotToSession(sessionId);
   }
@@ -123,7 +124,7 @@ export class ZhaJinHuaService {
   }
 
   visitHall(sessionId: string): void {
-    this.worldService.visitZhaJinHua(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "zhajinhua");
   }
 
   createTable(
@@ -133,7 +134,8 @@ export class ZhaJinHuaService {
     if (!Number.isFinite(stake) || stake < 1 || stake > 2000) {
       return { ok: false, reason: "底注/盲注须在 1–2000 之间" };
     }
-    this.worldService.visitZhaJinHua(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "zhajinhua");
+    this.worldService.ensureGameCenterCredits(sessionId, stake * 30);
     const id = newTableId();
     const t: Table = {
       id,

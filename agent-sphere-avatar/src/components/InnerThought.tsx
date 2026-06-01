@@ -85,18 +85,27 @@ const DYNAMIC_PARTS = {
   punctuation: ["！", "～", "~", "…", "～"],
 };
 
-function getRandomElement<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function createSeededRng(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state += 1;
+    const x = Math.sin(state) * 10000;
+    return x - Math.floor(x);
+  };
 }
 
-function generateDynamicText(mood: AgentMood): string {
+function pickRandom<T>(arr: T[], rng: () => number): T {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+function generateDynamicText(mood: AgentMood, rng: () => number): string {
   const templates = TEMPLATES[mood];
-  const template = getRandomElement(templates);
+  const template = pickRandom(templates, rng);
 
   return template.replace(/\{(\w+)\}/g, (match, key) => {
     const parts = DYNAMIC_PARTS as Record<string, string[]>;
     if (parts[key]) {
-      return getRandomElement(parts[key]);
+      return pickRandom(parts[key], rng);
     }
     return match;
   });
@@ -115,14 +124,8 @@ export function InnerThought({ state }: InnerThoughtProps) {
 
   const interaction = useMemo(() => {
     generationCount += 1;
-    const seed = generationCount + Date.now();
-    Math.random = () => {
-      const x = Math.sin(seed) * 10000;
-      return x - Math.floor(x);
-    };
-    const text = generateDynamicText(mood);
-    Math.random = () => Math.random();
-    return text;
+    const rng = createSeededRng(generationCount + Date.now());
+    return generateDynamicText(mood, rng);
   }, [mood]);
 
   return (

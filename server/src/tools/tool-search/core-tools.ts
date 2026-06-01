@@ -1,34 +1,24 @@
-import { MASTER_INVOKE_SUB_AGENT_REGISTRY, MASTER_POLL_SUB_AGENT_TASKS_REGISTRY } from "../../agent/master-subagent-delegate-tools.js";
+export {
+  CORE_TOOL_LIBRARY,
+  TOOL_SEARCH_CORE_REGISTRY_NAMES,
+  TOOL_SEARCH_CORE_REGISTRY_PREFIXES,
+  classifyToolExposureTier,
+  isCoreToolRegistryName,
+  isMasterAgentBuiltinTool,
+  isToolSearchCoreRegistryName,
+  summarizeCoreToolLibrary,
+  type ToolExposureTier,
+} from "./core-tool-library.js";
 
-/**
- * 高频核心工具：始终直接暴露给模型，不参与延迟加载（对齐 Hermes _HERMES_CORE_TOOLS）。
- */
-export const TOOL_SEARCH_CORE_REGISTRY_NAMES = new Set<string>([
-  "clock.get_current_time",
-  "clock.get_user_location",
-  "clock.get_date",
-  "clock.format_timestamp",
-  "agent.query_capabilities",
-  MASTER_INVOKE_SUB_AGENT_REGISTRY,
-  MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
-  "search_web",
-  "fetch_web",
-  "weather.get_local",
-  "calendar.create_from_text",
-  "calendar.create_task",
-  "calendar.list_tasks",
-  "phone.ensure_my_number",
-  "embodiment.observe",
-  "embodiment.window_place",
-  "embodiment.set_state",
-  "embodiment.move",
-  "embodiment.roam",
-]);
+/** 桥接工具注册名（merged=2 枚；legacy=三件套，仍可在执行层解析）。 */
+export const TOOL_SEARCH_BRIDGE_MERGED = ["tool_discover", "tool_call"] as const;
+
+export const TOOL_SEARCH_BRIDGE_LEGACY = ["tool_search", "tool_describe", "tool_call"] as const;
 
 export const TOOL_SEARCH_BRIDGE_REGISTRY_NAMES = new Set<string>([
-  "tool_search",
-  "tool_describe",
-  "tool_call",
+  ...TOOL_SEARCH_BRIDGE_MERGED,
+  ...TOOL_SEARCH_BRIDGE_LEGACY,
+  "tool_resolve",
 ]);
 
 export function isToolSearchBridgeName(name: string): boolean {

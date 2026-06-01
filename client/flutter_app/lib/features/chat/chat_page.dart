@@ -75,6 +75,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   int _cachedMessagesLength = -1;
   ContentSummaryDataV2? _selectedSummary;
 
+  /// 消息折叠相关状态
+  static const int _collapseThreshold = 30; // 超过此数量时开始折叠
+  static const int _visibleCount = 30; // 折叠后显示的消息数量
+  bool _isCollapsed = true; // 是否处于折叠状态
+  int _collapsedCount = 0; // 被折叠的消息数量
+
   @override
   void initState() {
     super.initState();
@@ -96,6 +102,22 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     ));
     // 监听滚动：检测用户是否在手动滚动
     _scrollController.addListener(_onScroll);
+
+    // 初始化后自动滚动到最新消息
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBottom();
+    });
+  }
+
+  /// 滚动到底部的通用方法
+  void _scrollToBottom() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   void _onScroll() {
@@ -138,15 +160,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     if (hasNewUserMessage) {
       _isUserScrolling = false;
       _hasNewAgentMessage = false;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
+
+      // 如果消息数量超过阈值且当前是展开状态，自动折叠
+      if (widget.messages.length > _collapseThreshold && !_isCollapsed) {
+        setState(() => _isCollapsed = true);
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
       return;
     }
 
@@ -165,15 +185,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     if (widget.messages.length != oldWidget.messages.length) {
       _isUserScrolling = false;
       _hasNewAgentMessage = false;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
+
+      // 如果消息数量超过阈值且当前是展开状态，自动折叠
+      if (widget.messages.length > _collapseThreshold && !_isCollapsed) {
+        setState(() => _isCollapsed = true);
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     }
   }
 
@@ -343,6 +361,125 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     return groups;
   }
 
+  /// 获取用于显示的消息列表（考虑折叠状态）
+  List<Map<String, dynamic>> _getDisplayMessages() {
+    final List<Map<String, dynamic>> allGroups = _getGroupedMessages();
+
+    // 如果消息数量不超过阈值，不折叠
+    if (allGroups.length <= _collapseThreshold) {
+      _collapsedCount = 0;
+      return allGroups;
+    }
+
+    // 计算被折叠的消息数量
+    _collapsedCount = allGroups.length - _visibleCount;
+
+    // 如果处于折叠状态，只返回后面的消息
+    if (_isCollapsed) {
+      return allGroups.sublist(allGroups.length - _visibleCount);
+    }
+
+    // 展开状态，返回所有消息
+    return allGroups;
+  }
+
+  /// 切换折叠/展开状态
+  void _toggleCollapse() {
+    setState(() {
+      _isCollapsed = !_isCollapsed;
+      // 如果展开，滚动到之前的位置；如果折叠，滚动到底部
+      if (!_isCollapsed) {
+        // 展开时保持当前位置（稍后会自动调整）
+      } else {
+        // 折叠后滚动到底部
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      }
+    });
+  }
+
+  /// 构建折叠按钮组件
+  Widget _buildCollapseButton(ColorScheme cs) {
+    if (_collapsedCount <= 0) return const SizedBox.shrink();
+
+    // 获取被折叠消息的时间范围
+    String timeRange = "";
+    final List<Map<String, dynamic>> allGroups = _getGroupedMessages();
+    if (allGroups.length > _visibleCount) {
+      final Map<String, dynamic> firstCollapsed = allGroups[allGroups.length - _visibleCount - 1];
+      final Map<String, dynamic> lastCollapsed = allGroups.first;
+      final ChatMessage firstMsg = firstCollapsed['main'] as ChatMessage;
+      final ChatMessage lastMsg = lastCollapsed['main'] as ChatMessage;
+
+      timeRange = " (${_formatTimeRange(firstMsg.timestamp, lastMsg.timestamp)})";
+    }
+
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: _toggleCollapse,
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withOpacity(0.6),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: cs.outline.withOpacity(0.2),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Icon(
+                    _isCollapsed ? Icons.expand_more : Icons.expand_less,
+                    size: 18,
+                    color: cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _isCollapsed
+                        ? "查看 $_collapsedCount 条历史消息$timeRange"
+                        : "收起历史消息",
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 格式化时间范围
+  String _formatTimeRange(DateTime start, DateTime end) {
+    final DateTime now = DateTime.now();
+    final Duration startDiff = now.difference(start);
+    final Duration endDiff = now.difference(end);
+
+    String formatTime(DateTime time) {
+      final Duration diff = now.difference(time);
+      if (diff.inDays > 7) {
+        return "${time.month}/${time.day}";
+      } else if (diff.inDays > 0) {
+        return "${diff.inDays}天前";
+      } else if (diff.inHours > 0) {
+        return "${diff.inHours}h前";
+      } else {
+        return "${diff.inMinutes}m前";
+      }
+    }
+
+    return "${formatTime(end)} - ${formatTime(start)}";
+  }
+
   /// 处理中气泡文案：`agent_status` > 历史流程提示 > 默认
   String _processingStatusText([ChatMessage? progressMessage]) {
     final String? live = widget.agentStatusLine?.trim();
@@ -465,6 +602,37 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: linkWidgets,
+    );
+  }
+
+  /// 构建消息时间戳
+  Widget _buildMessageTimestamp(ChatMessage message, bool isUser) {
+    final DateTime now = DateTime.now();
+    final DateTime msgTime = message.timestamp;
+    final Duration diff = now.difference(msgTime);
+
+    String timeStr;
+    if (diff.inMinutes < 1) {
+      timeStr = "刚刚";
+    } else if (diff.inHours < 1) {
+      timeStr = "${diff.inMinutes}分钟前";
+    } else if (diff.inDays < 1) {
+      timeStr = "${diff.inHours}小时前";
+    } else if (diff.inDays < 7) {
+      timeStr = "${diff.inDays}天前";
+    } else {
+      timeStr = "${msgTime.month}/${msgTime.day} ${msgTime.hour.toString().padLeft(2, '0')}:${msgTime.minute.toString().padLeft(2, '0')}";
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Text(
+        timeStr,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.6),
+          fontSize: 11,
+        ),
+      ),
     );
   }
 
@@ -602,7 +770,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     final List<Map<String, dynamic>> messageGroups = _getGroupedMessages();
     final bool showLiveThinking =
         widget.isAgentProcessing && _breathingAnimation != null;
-    final int itemCount = messageGroups.length + (showLiveThinking ? 1 : 0);
+    final List<Map<String, dynamic>> displayMessages = _getDisplayMessages();
+    final int itemCount = displayMessages.length + (showLiveThinking ? 1 : 0) + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
+    // 如果处于折叠状态，需要在列表开头添加折叠按钮
+    final bool showCollapseButton = _collapsedCount > 0;
 
     final bool showDetailPanel = _selectedSummary != null;
 
@@ -615,19 +786,56 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
               Expanded(
                 child: Stack(
                   children: <Widget>[
-                    ListView.builder(
+                    if (widget.messages.isEmpty)
+                      Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: <Widget>[
+                            Icon(
+                              Icons.chat_bubble_outline,
+                              size: 64,
+                              color: cs.onSurfaceVariant.withOpacity(0.3),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              "开始与 AI 助手对话吧！",
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                color: cs.onSurfaceVariant.withOpacity(0.6),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              "输入消息或使用语音开始交流",
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                color: cs.onSurfaceVariant.withOpacity(0.4),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  itemCount: itemCount,
+                  itemCount: showCollapseButton ? itemCount + 1 : itemCount,
                   itemBuilder: (BuildContext context, int index) {
-                    if (showLiveThinking && index == messageGroups.length) {
+                    // 如果需要显示折叠按钮且是第一项
+                    if (showCollapseButton && index == 0) {
+                      return _buildCollapseButton(cs);
+                    }
+
+                    // 调整索引（如果显示了折叠按钮）
+                    final int adjustedIndex = showCollapseButton ? index - 1 : index;
+
+                    // 检查是否是进度气泡
+                    if (showLiveThinking && adjustedIndex == displayMessages.length) {
                       return _buildProgressBubble(
                         cs,
                         _processingStatusText(),
                       );
                     }
 
-                    final messageGroup = messageGroups[index];
+                    final messageGroup = displayMessages[adjustedIndex];
                     final bool isUser = messageGroup['isUser'] as bool;
                     final mainMessage = messageGroup['main'] as ChatMessage;
                     final bool isProgress = messageGroup['isProgress'] as bool;
@@ -712,6 +920,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                               ),
                             ),
                           ),
+                          _buildMessageTimestamp(mainMessage, isUser),
                         ],
                       ),
                     );
@@ -816,11 +1025,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     _isUserScrolling = false;
                                     _hasNewAgentMessage = false;
                                   });
-                                  _scrollController.animateTo(
-                                    _scrollController.position.maxScrollExtent,
-                                    duration: const Duration(milliseconds: 300),
-                                    curve: Curves.easeOut,
-                                  );
+                                  _scrollToBottom();
                                 }
                               },
                               backgroundColor: cs.primaryContainer,

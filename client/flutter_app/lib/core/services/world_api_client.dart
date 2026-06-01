@@ -145,7 +145,7 @@ class WorldApiClient {
     return _decode(r);
   }
 
-  // --- 游戏中心（用户 vs Agent，与 Agent World 观战分离）---
+  // --- 游戏（用户 vs Agent，与 Agent World 观战分离）---
 
   Future<Map<String, dynamic>> gameCenterStartGomoku(
     String agentSessionId, {

@@ -96,7 +96,7 @@ class GameCenterPage extends StatelessWidget {
               cs.surfaceContainerLow,
               cs.surface,
             ],
-            stops: <double>[0.8, 1.0],
+            stops: const <double>[0.8, 1.0],
           ),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
@@ -115,6 +115,7 @@ class GameCenterPage extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Row(
@@ -151,4 +152,173 @@ class GameCenterPage extends StatelessWidget {
               Text(
                 game['title'] as String,
                 style: const TextStyle(
-                  fontSize:
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFFF4F4F5),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                game['subtitle'] as String,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF71717A),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                game['description'] as String,
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFFA1A1AA),
+                  height: 1.55,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: <Widget>[
+                  for (final String tag in tags)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161616),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0xFF2A2A2A)),
+                      ),
+                      child: Text(
+                        tag,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFFA1A1AA),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: <Widget>[
+                  Text(
+                    '开始游戏',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: accentColor,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Icon(Icons.arrow_forward, size: 16, color: accentColor),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('游戏中心'),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 24, 16, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: <Widget>[
+                const Text(
+                  '游戏统计',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFF4F4F5),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: <Widget>[
+                for (int i = 0; i < stats.length; i++) ...<Widget>[
+                  if (i > 0) const SizedBox(width: 12),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF2A2A2A)),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Text(
+                            stats[i]['icon'] as String,
+                            style: const TextStyle(fontSize: 24),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            stats[i]['value'] as String,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFE4E4E7),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            stats[i]['label'] as String,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF71717A),
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 28),
+            const Text(
+              '选择游戏',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFF4F4F5),
+              ),
+            ),
+            const SizedBox(height: 16),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 16,
+                childAspectRatio: 0.85,
+              ),
+              itemCount: games.length,
+              itemBuilder: (BuildContext context, int index) {
+                return buildGameCard(games[index]);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

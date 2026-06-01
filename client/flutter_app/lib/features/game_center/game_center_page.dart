@@ -421,7 +421,7 @@ class _DoudizhuIcon extends StatelessWidget {
   }
 }
 
-/// 游戏中心：统计条 + 游戏卡片网格（与产品设计稿一致）。
+/// 游戏：统计条 + 游戏卡片网格（与产品设计稿一致）。
 class GameCenterPage extends StatefulWidget {
   const GameCenterPage({
     super.key,

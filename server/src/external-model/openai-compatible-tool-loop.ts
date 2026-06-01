@@ -9,6 +9,7 @@ import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
+import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
@@ -773,9 +774,9 @@ const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           domain: {
             type: "string",
-            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "self_programming", "agent_account", "world", "embodiment", "all"],
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "world", "embodiment", "all"],
             description:
-              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, self_programming=自我编程, agent_account=账号注册, embodiment=具身身体（球形机器人移动/表情）, world=Agent World。",
+              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=侧栏游戏(五子棋/斗地主/炸金花), self_programming=自我编程, agent_account=账号注册, embodiment=具身身体, world=Agent World。",
           },
         },
         additionalProperties: false,
@@ -802,6 +803,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...CLOCK_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
+    ...SMART_HOME_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
     ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
@@ -813,7 +815,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
 
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'embodiment';
+type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'game' | 'aip' | 'embodiment' | 'smart_home';
 
 interface ToolCategoryMapping {
   category: ToolCategory;
@@ -884,14 +886,24 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'world',
-    keywords: ['世界', 'world', '游戏', 'game', '社交', 'social', '市场', 'market', '点数', 'points', '积分', 'score', '对局', 'match', '竞技', 'compete'],
+    keywords: ['世界', 'world', '社交', 'social', '市场', 'market', '点数', 'points', '积分', 'score'],
     toolNames: [] // agent world tools are dynamic
+  },
+  {
+    category: 'game',
+    keywords: ['游戏', 'game', '对局', 'match', '竞技', 'compete', '五子棋', 'gomoku', '斗地主', 'doudizhu', '炸金花', 'zhajinhua', '21点', 'blackjack', '下棋', '打牌'],
+    toolNames: [] // game tools (world.gomoku/doudizhu/zhajinhua) are dynamic
   },
   {
     category: 'aip',
     keywords: ['提案', 'proposal', '联盟', 'alliance', '冲突', 'conflict', '协议', 'protocol', 'aip', '投票', 'vote', '交易', 'trade'],
     toolNames: [] // aip tools are dynamic
-  }
+  },
+  {
+    category: 'smart_home',
+    keywords: ['灯', '灯光', '开关', '空调', '温度', '窗帘', '传感器', '设备', '家电', '家居', '智能', 'home', 'light', 'climate', 'switch', 'cover', 'sensor', '加热', '取暖', '制冷', 'cool', 'heat', 'fan', '风扇', '湿度', 'humidity', 'brightness', '亮度', '场景', 'scene', '回家', '离家', '晚安'],
+    toolNames: ['smart_home.list_devices', 'smart_home.control_device', 'smart_home.scene']
+  },
 ];
 
 const ALWAYS_INCLUDED_TOOLS = [
@@ -1051,8 +1063,9 @@ export async function streamCompletionWithTools(
 
   if (toolSearchPrepared.toolSearchActive) {
     console.info(
-      `[tool-search] active: ${registryTools.length} visible tools, ` +
-        `${deferredToolCatalog.length} deferred (BM25 on-demand)`,
+      `[tool-search] active: core=${toolSearchPrepared.coreToolCount} ` +
+        `deferred=${toolSearchPrepared.deferredToolCount} ` +
+        `visible=${registryTools.length} (BM25 index cached per turn)`,
     );
   }
 
@@ -1222,7 +1235,7 @@ export async function streamCompletionWithTools(
             item.parsedArgs,
             deferredToolCatalog,
           );
-          if (bridge.kind === "search" || bridge.kind === "describe") {
+          if (bridge.kind === "search" || bridge.kind === "describe" || bridge.kind === "discover") {
             const compacted = await compactToolOutputForLlm({
               toolName: item.registryToolName,
               ok: bridge.ok,

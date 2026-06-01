@@ -59,9 +59,9 @@ export class DoudizhuService {
 
   constructor(private readonly worldService: WorldService) {}
 
-  /** 斗地主工具入口：须先完成开放式 Agent World 注册。 */
+  /** 斗地主工具入口：侧栏「游戏」tab，无需 Agent World 注册。 */
   assertAgentWorldEntry(sessionId: string): void {
-    this.worldService.assertAgentWorldRegistered(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "doudizhu");
   }
 
   /** 绑定 WebSocket 注册表后，状态变更会向在线会话推送 `world.doudizhu.snapshot`。 */
@@ -100,16 +100,17 @@ export class DoudizhuService {
     return [...this.tables.values()].map((t) => this.summarize(t));
   }
 
-  /** 将会话场景标为斗地主馆（与 HTTP 列表行为一致）。 */
+  /** 将会话场景标为斗地主馆（游戏中心，无需 Agent World 注册）。 */
   visitHall(sessionId: string): void {
-    this.worldService.visitDoudizhu(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "doudizhu");
   }
 
   createTable(sessionId: string, stake: number): { ok: true; table: DoudizhuTableSummary } | { ok: false; reason: string } {
     if (!Number.isFinite(stake) || stake < 1 || stake > 2000) {
       return { ok: false, reason: "赌注须在 1–2000 之间" };
     }
-    this.worldService.visitDoudizhu(sessionId);
+    this.worldService.enterGameCenterScene(sessionId, "doudizhu");
+    this.worldService.ensureGameCenterCredits(sessionId, stake * 30);
     const id = newTableId();
     const t: Table = {
       id,

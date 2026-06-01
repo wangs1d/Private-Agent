@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Private AI Agent - Layout Preview</title>
+  <style>
+    :root {
+      --bg: #0b0b0c;
+      --panel: #0f0f10;
+      --sidebar: #121214;
+      --card: #17171a;
+      --card-2: #1d1d22;
+      --line: #2a2a32;
+      --text: #ececf1;
+      --muted: #a5a6b3;
+      --blue: #60a5fa;
+      --blue-soft: rgba(96, 165, 250, 0.16);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .app {
+      width: min(1400px, 100%);
+      height: min(860px, calc(100vh - 48px));
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 96px 1fr;
+    }
+
+    .sidebar {
+      background: var(--sidebar);
+      border-right: 1px solid var(--line);
+      padding: 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+    .sphere {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: conic-gradient(from 180deg, #4f46e5, #2563eb, #06b6d4, #4f46e5);
+      box-shadow: 0 0 0 3px #0f0f10;
+      margin: 4px 0 8px;
+    }
+    .nav {
+      width: 100%;
+      display: grid;
+      gap: 8px;
+    }
+    .nav button {
+      width: 100%;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 10px;
+      padding: 9px 8px;
+      font-size: 12px;
+      cursor: default;
+    }
+    .nav button.active {
+      background: var(--blue-soft);
+      border-color: rgba(96, 165, 250, 0.3);
+      color: #dbeafe;
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      min-width: 0;
+    }
+    .status {
+      margin: 10px 10px 8px;
+      background: #121216;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13px;
+      color: #d4d4dd;
+    }
+    .appbar {
+      padding: 0 12px 8px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .content {
+      padding: 10px;
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 10px;
+      min-height: 0;
+    }
+    .chat {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .bubble {
+      max-width: 72%;
+      padding: 9px 11px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .bubble.ai {
+      background: #20202a;
+      border: 1px solid #31313e;
+    }
+    .bubble.user {
+      background: #1a273a;
+      border: 1px solid #2c4465;
+      margin-left: auto;
+    }
+    .side {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 13px;
+      color: #f3f4f6;
+    }
+    .card p {
+      margin: 4px 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .input {
+      border-top: 1px solid var(--line);
+      padding: 10px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .icon, .send {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--card-2);
+      color: #d8d9e4;
+      height: 34px;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+    .field {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #131317;
+      color: #cacbda;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1024px) {
+      .app { grid-template-columns: 84px 1fr; }
+      .content { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sphere" aria-hidden="true"></div>
+      <nav class="nav">
+        <button class="active">伙伴</button>
+        <button>今日</button>
+        <button>连接</button>
+        <button>能力</button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <section class="status">伙伴在线 · 下次提醒 16:30</section>
+      <section class="appbar">今晚安排优化</section>
+
+      <section class="content">
+        <div class="chat">
+          <div class="bubble ai">你今天有 3 个重点事项，我已经帮你按优先级排好。要不要直接给你 2 小时高效版安排？</div>
+          <div class="bubble user">可以，把今晚安排压缩成 2 小时，最好留出 30 分钟缓冲。</div>
+          <div class="bubble ai">好的，我给你做了 A/B 两套：A 更稳，B 更激进。你确认后我可以直接同步到日程并发给 Agent Link 里的协作人。</div>
+        </div>
+
+        <aside class="side">
+          <div class="card">
+            <h3>今日聚焦</h3>
+            <p>14:00 产品评审</p>
+            <p>18:30 健身提醒</p>
+            <p>本周目标进度 62%</p>
+          </div>
+          <div class="card">
+            <h3>待你确认</h3>
+            <p>是否发送给 Alex？</p>
+            <p>预算超支提醒已生成</p>
+            <p>Agent Link 新消息 2 条</p>
+          </div>
+        </aside>
+      </section>
+
+      <section class="input">
+        <button class="icon">+ / 🎤</button>
+        <div class="field">告诉我你现在想推进什么…</div>
+        <button class="send">发送</button>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

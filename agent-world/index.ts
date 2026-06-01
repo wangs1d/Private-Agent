@@ -71,6 +71,7 @@ export { registerWorldFreeMarketTools } from "./tools/world-free-market-tools.js
 export { registerWorldGomokuTools } from "./tools/world-gomoku-tools.js";
 export { registerWorldDoudizhuTools } from "./tools/world-doudizhu-tools.js";
 export { registerWorldZhajinhuaTools } from "./tools/world-zhajinhua-tools.js";
+export { registerWorldBlackjackTools } from "./tools/world-blackjack-tools.js";
 export { registerWorldSocialTools } from "./tools/world-social-tools.js";
 export { registerWorldOpenRegistryTools } from "./tools/world-open-registry-tools.js";
 export { registerWorldRoomTools } from "./tools/world-room-tools.js";
@@ -106,6 +107,7 @@ export {
   AGENT_WORLD_CHAT_TOOLS,
   AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX,
   GOMOKU_CHAT_TOOLS,
+  BLACKJACK_CHAT_TOOLS,
   USER_AGENT_TOOL_SYSTEM_SUFFIX,
   USER_FACING_AGENT_WORLD_CHAT_TOOLS,
   WORLD_FREE_MARKET_USER_CHAT_TOOLS,

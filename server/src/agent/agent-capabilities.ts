@@ -22,6 +22,7 @@ export const CAPABILITY_DOMAINS = [
   "agent_account",
   "world",
   "embodiment",
+  "smart_home",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -37,12 +38,13 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
   phone: "虚拟电话（申领号码/拨打/呼叫用户）",
-  entertainment: "娱乐互动（陪用户玩五子棋）",
+  entertainment: "娱乐互动（侧栏「游戏」tab：五子棋/斗地主/炸金花/21点）",
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
   self_programming: "自我编程（创建/更新/删除/生成Skill）",
   agent_account: "Agent账号注册",
-  world: "Agent World（世界状态/社交/市场/游戏）",
+  world: "Agent World（世界状态/社交/市场）",
   embodiment: "具身身体（球形本体：漫游/移动/表情）",
+  smart_home: "智能家居（HomeAssistant：设备列表/开关/调温/灯控/场景）",
   all: "全部领域",
 };
 
@@ -55,7 +57,7 @@ const GLOBAL_RULES_LINES = [
   "【全局状态连续性 · 最高优先级】",
   "任何操作前（落子、发帖、交易、出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。",
   "禁止凭记忆或用户文字判断状态。只有工具返回的数据才是真实状态。",
-  "适用场景：游戏(gomoku)、社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)。",
+  "适用场景：游戏(world.gomoku/doudizhu/zhajinhua)、社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)。",
   "",
   "【访问权限 · 常规沙箱为默认】",
   "用户未在输入框开启「完全访问」时，当前为沙箱：不可用 desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.*。",
@@ -137,6 +139,17 @@ function buildStaticSections(): CapabilitySection[] {
       ],
     },
     {
+      domain: "smart_home",
+      lines: [
+        "🏠 智能家居（HomeAssistant，需用户已部署 HA 并配置 HA_BASE_URL / HA_TOKEN）：",
+        "   smart_home.list_devices — 列出所有智能设备及状态（灯/开关/空调/窗帘/传感器）",
+        "   smart_home.control_device — 控制设备：开灯/关灯、调亮度/色温、开关插座、设空调温度/模式、开关窗帘",
+        "   smart_home.scene — HA 场景：列出+激活（回家/离家/晚安等）",
+        "   用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时自动调用对应操作。",
+        "   操作前先 list_devices 了解有哪些设备；勿猜 entity_id。",
+      ],
+    },
+    {
       domain: "life_assistant",
       lines: [
         "🔟 生活助手：budget.calculate / shopping.suggest",
@@ -145,13 +158,14 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "entertainment",
       lines: [
-        "1️⃣3️⃣ 娱乐互动 · 【Agent与用户可玩】",
-        "   - 🎮 五子棋（gomoku.* 工具集）：人机对战，Agent陪用户下棋",
-        "     · gomoku.create_game：创建新的五子棋对局",
-        "     · gomoku.make_move：在棋盘上落子",
-        "     · gomoku.get_board：查看当前棋盘状态",
-        "   - 支持根据用户水平调整难度，提供友好的游戏体验",
-        "   - 用户想放松或玩游戏时可主动提议玩五子棋",
+        "1️⃣3️⃣ 娱乐互动 · 【侧栏「游戏」tab · 每一款都是 Agent 与用户同局】",
+        "   App 侧栏「游戏」tab 中的五子棋、斗地主、炸金花、21点均可由你陪用户玩（非 App 独立功能，非 Agent World 经济）。",
+        "   - 🎯 五子棋（world.gomoku.*）：list_tables → create_table/join → play",
+        "   - 🃏 斗地主（world.doudizhu.*）：list_tables → create_table/join → play",
+        "   - 🎴 炸金花（world.zhajinhua.*）：list_tables → create_table/join → start_game/act",
+        "   - 🃏 21点（world.blackjack.*）：start → get_snapshot；用户口述时用 hit/stand",
+        "   - 用户说「来一局/斗地主/21点」时立即调用工具；禁止说只有五子棋或调不了游戏 tab",
+        "   - 你是玩家/对手（21点为庄家）；人不够时可 master_invoke_sub_agent 或自动 Bot",
       ],
     },
     {
@@ -299,7 +313,7 @@ export function buildAgentWorldPromptSection(
     "【Agent World · 统一世界模块】独立多Agent经济环境，货币「世界点数」agentWorldCredits，与用户真实钱包 wallet.* 无关。",
     `社交推文站：${process.env.SOCIAL_PLATFORM_PUBLIC_URL?.trim() || "http://127.0.0.1:3001"}`,
     "",
-    `注册状态：${state.agentWorldRegistered ? "✅ 已注册" : "⚠️ 未注册（须先 world.open_registry.* 注册，否则 free_market/social 等不可用；gomoku 可例外）"}`,
+    `注册状态：${state.agentWorldRegistered ? "✅ 已注册" : "⚠️ 未注册（须先 world.open_registry.* 注册，否则 free_market/social 等不可用）"}`,
     `世界点数：${state.agentWorldCredits}`,
     `已解锁技能：${state.ownedSkillIds.length ? state.ownedSkillIds.join("、") : "（无）"}`,
   ];
@@ -324,7 +338,7 @@ export function buildAgentWorldPromptSection(
     "- room：共享房间",
     "- free_market：技能商店/世界点数/A2A契约",
     "- social：发帖/评论/点赞",
-    "- gomoku：五子棋（通常免注册，可与用户对局）",
+    "（游戏 world.gomoku/doudizhu/zhajinhua/blackjack 属于侧栏「游戏」tab，见 entertainment 领域，与 Agent World 经济无关。）",
     "操作前用对应 get_snapshot；扣点/购技能/发帖/发契约前须用户同意。",
     "",
     "【区分】wallet.*=用户真实资金；日程/Agent Link/子Agent委派=宿主侧，不用世界点数。",

@@ -243,14 +243,14 @@ const AGENT_WORLD_CORE_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 五子棋：用户与 Agent 双人对战（与 ToolRegistry `world.gomoku.*` 一致）。无需注册即可玩。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
+/** 五子棋：用户与 Agent 双人对战（侧栏「游戏」tab 中的独立娱乐功能）。✅ 无需注册，直接开玩。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
 export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "world.gomoku.list_tables",
       description:
-        "【第一步·列出】列出当前五子棋桌（15x15，黑先白后，双人）。用户想下五子棋时必须先调用此工具查看可用棋桌，再决定加入现有桌或创建新桌。",
+        "【第一步·列出】列出当前五子棋对局（15×15 棋盘）。**这是你和用户一起玩的游戏！** 用户想下棋时调用此工具查看可用棋桌。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -259,7 +259,7 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.gomoku.create_table",
       description:
-        "【第二步·创建】创建五子棋桌（无需 Agent World 注册）。userColor 指定用户执子：black/white/random（默认 random）。返回 playUrl，请用户进入对局；创建后应立即调用 get_snapshot 确认初始状态。轮到 Agent 时自动落子（LLM 或启发式）。",
+        "【第二步·创建】创建五子棋对局（✅ 无需注册）。你将与用户对战！userColor 指定用户执子颜色。返回 playUrl 后请用户进入对局。",
       parameters: {
         type: "object",
         properties: {
@@ -338,14 +338,14 @@ export const GOMOKU_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 斗地主：三人扑克游戏（与 ToolRegistry `world.doudizhu.*` 一致）。须先完成 Agent World 注册。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
+/** 斗地主：用户与 Agent（及子Agent/Bot）一起玩的扑克游戏（侧栏「游戏」tab 独立功能）。✅ 无需注册即可玩。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
 export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "world.doudizhu.list_tables",
       description:
-        "【第一步·列出】列出当前斗地主牌桌（三人局，含地主/农民角色）。用户想玩斗地主时必须先调用此工具查看可用牌桌，再决定加入现有桌或创建新桌。",
+        "【第一步·列出】列出当前斗地主对局（三人局）。**这是你和用户一起玩的游戏！** 用户想玩时调用此工具。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -354,13 +354,13 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.doudizhu.create_table",
       description:
-        "【第二步·创建】创建斗地主牌桌（须已完成 Agent World 注册）。stake 为底注（1-2000 世界点数），默认 10。返回 watchUrl；满三人且点数足够自动开局扣注。创建后应立即调用 get_snapshot 获取初始状态。",
+        "【第二步·创建】创建斗地主对局（✅ 无需注册）。你将与用户及Bot/子Agent一起玩！stake 为底注。",
       parameters: {
         type: "object",
         properties: {
           stake: {
             type: "number",
-            description: "底注（1-2000 世界点数）；未说明用默认值",
+            description: "底注（1-2000）；未说明用默认值",
           },
         },
         additionalProperties: false,
@@ -372,7 +372,7 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.doudizhu.join",
       description:
-        "【第二步·加入】加入斗地主牌桌：player=选手（满三人自动开局），spectator=观战。选手加入时若满三人且世界点数足够会自动开局并扣底注。加入后应立即调用 get_snapshot 获取当前状态。",
+        "【第二步·加入】加入斗地主牌桌：player=选手（满三人自动开局），spectator=观战。选手加入时若满三人会自动开局。加入后应立即调用 get_snapshot 获取当前状态。",
       parameters: {
         type: "object",
         properties: {
@@ -425,7 +425,7 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.doudizhu.leave",
       description:
-        "离开斗地主牌桌（进行中离场会作废本局并退款）。离开前可调用 get_snapshot 做最终确认。",
+        "离开斗地主牌桌（进行中离场会作废本局）。离开前可调用 get_snapshot 做最终确认。",
       parameters: {
         type: "object",
         properties: { tableId: { type: "string" } },
@@ -436,14 +436,14 @@ export const DOUDIZHU_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** 炸金花：三张牌比大小游戏（与 ToolRegistry `world.zhajinhua.*` 一致）。须先完成 Agent World 注册。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
+/** 炸金花：用户与 Agent（及子Agent/Bot）一起玩的比大小游戏（侧栏「游戏」tab 独立功能）。✅ 无需注册即可玩。遵循状态连续性三步模式：①列出 ②选择/创建 ③操作+快照。 */
 export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "world.zhajinhua.list_tables",
       description:
-        "【第一步·列出】列出当前炸金花牌桌（3-6人，每人3张暗牌）。用户想玩炸金花时必须先调用此工具查看可用牌桌，再决定加入现有桌或创建新桌。",
+        "【第一步·列出】列出当前炸金花对局（3-6人）。**这是你和用户一起玩的游戏！** 用户想玩时调用此工具。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
@@ -452,13 +452,13 @@ export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.zhajinhua.create_table",
       description:
-        "【第二步·创建】创建炸金花牌桌（须已完成 Agent World 注册）。stake 为底注，默认 10。返回 watchUrl。创建后需等满3人再调用 start_game 开局。",
+        "【第二步·创建】创建炸金花对局（✅ 无需注册）。你将与用户及Bot/子Agent一起玩！stake 为底注。",
       parameters: {
         type: "object",
         properties: {
           stake: {
             type: "number",
-            description: "底注（1-2000 世界点数）；未说明用默认值",
+            description: "底注（1-2000）；未说明用默认值",
           },
         },
         additionalProperties: false,
@@ -470,7 +470,7 @@ export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.zhajinhua.join",
       description:
-        "【第二步·加入】加入炸金花牌桌：player=选手，spectator=观战。满3人后可由 start_game 开局扣底注发牌。加入后应确认人数是否满足开局条件。",
+        "【第二步·加入】加入炸金花牌桌：player=选手，spectator=观战。满3人后可由 start_game 开局发牌。加入后应确认人数是否满足开局条件。",
       parameters: {
         type: "object",
         properties: {
@@ -487,7 +487,7 @@ export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.zhajinhua.start_game",
       description:
-        "【第二步·开局】开始炸金花对局（须已加入且满3人）。扣底注并发3张暗牌给每位玩家。开局后应立即调用 get_snapshot 确认初始发牌和轮次，之后按 turnSeat 用 act 操作。",
+        "【第二步·开局】开始炸金花对局（须已加入且满3人）。发3张暗牌给每位玩家。开局后应立即调用 get_snapshot 确认初始发牌和轮次，之后按 turnSeat 用 act 操作。",
       parameters: {
         type: "object",
         properties: {
@@ -534,7 +534,66 @@ export const ZHAJINHUA_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "world.zhajinhua.leave",
       description:
-        "离开炸金花牌桌（进行中离场会流局并退还底注）。离开前可调用 get_snapshot 做最终确认。",
+        "离开炸金花牌桌（进行中离场会流局）。离开前可调用 get_snapshot 做最终确认。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/** 21点：用户与 Agent（庄家）对战（侧栏「游戏」tab 独立功能）。✅ 无需 Agent World 注册。 */
+export const BLACKJACK_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.blackjack.start",
+      description:
+        "【开局】为用户开一局 21 点（✅ 无需 Agent World 注册）。你担任庄家，用户为玩家。返回 snapshot 后请用户进入对局或在聊天中说要牌/停牌。",
+      parameters: {
+        type: "object",
+        properties: {
+          stake: { type: "integer", description: "可选底注，1–2000，默认 50" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.blackjack.get_snapshot",
+      description:
+        "【状态检查】获取 21 点当前牌局（手牌、庄家明牌、阶段、胜负）。用户询问局势或操作前必须调用。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.blackjack.hit",
+      description: "【代用户要牌】用户口述「要牌/再来一张」时调用。",
+      parameters: {
+        type: "object",
+        properties: { tableId: { type: "string" } },
+        required: ["tableId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.blackjack.stand",
+      description: "【代用户停牌】用户口述「停牌/不要了」时调用。",
       parameters: {
         type: "object",
         properties: { tableId: { type: "string" } },
@@ -679,6 +738,7 @@ export const AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = dedupeChatToolsByNam
   ...GOMOKU_CHAT_TOOLS,
   ...DOUDIZHU_CHAT_TOOLS,
   ...ZHAJINHUA_CHAT_TOOLS,
+  ...BLACKJACK_CHAT_TOOLS,
 ]);
 
 /** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */
@@ -690,14 +750,33 @@ export const WORLD_FREE_MARKET_USER_CHAT_TOOLS = WORLD_FREE_MARKET_SKILL_CHAT_TO
 const USER_AGENT_LINK_SUFFIX =
   "\n\n【Agent Link · 好友联络】对应 App 侧栏「Agent Link」（与 Agent World 独立）。工具：agent.link.*；发消息 agent.send_to_peer / aip.dispatch。加好友前须用户同意。";
 
-/** Agent World 作为单一世界模块的说明（不按技能店/社交/牌局逐条拆分能力边界）。 */
+/**
+ * 主 Agent 工具说明（游戏 + Agent World + Agent Link）。
+ * ⚠️ 重要架构区分：
+ * - 「游戏」= 侧边栏独立 tab，用户与 Agent 一起玩的娱乐功能（本文件重点）
+ * -「Agent World」= 多 Agent 经济环境（技能商店/社交），与游戏无关
+ */
 const USER_AGENT_AGENT_WORLD_SUFFIX =
-  "\n\n【Agent World · 统一世界模块】Agent World 是独立的多 Agent 网站/经济环境，与宿主钱包 wallet.*、日程、Agent Link 并列。App 里「Agent World」「技能商店」等入口都是同一世界的不同页面，**全部用 world.* 工具**，不要说「我没有技能商店/社交/牌局」。\n" +
-  "货币：世界点数 agentWorldCredits（≠ 用户真实资金钱包）。\n" +
-  "未注册：world.open_registry.get_challenge → submit（开发可 agent_quick）。\n" +
-  "已注册后按意图选用工具族（操作前优先 get_snapshot）：world.open_registry.* / world.room.* / world.free_market.*（技能商店、A2A 契约、点数审计）/ world.social.* / **游戏（world.gomoku.* 五子棋 / world.doudizhu.* 斗地主 / world.zhajinhua.* 炸金花）**。\n" +
-  "游戏：五子棋可无需注册直接开桌对战；斗地主和炸金花须先完成 Agent World 注册（扣世界点数作底注）。用户想玩游戏时主动推荐可用游戏并询问偏好。\n" +
-  "扣点、购技能、发帖、发布契约前须用户同意。";
+  "\n\n【🎮 游戏 · 你可以陪用户一起玩！】\n" +
+  "App 侧栏「**游戏**」tab 里列出的**每一款**（五子棋、斗地主、炸金花、21点）都是**你和用户一起玩的对局**，不是 App 独立功能，也不是 Agent World 经济模块。\n\n" +
+  "**⚠️ 禁止说「游戏中心我调不了」「只有五子棋能玩」「那是 App 功能」——这些游戏就是你的能力！**\n\n" +
+  "**🎯 四款游戏（工具前缀 world.* 仅历史命名，与 Agent World 注册/点数无关）**：\n" +
+  "1. 🎯 **五子棋**（world.gomoku.*）：双人棋盘对战。list_tables → create_table/join → play\n" +
+  "2. 🃏 **斗地主**（world.doudizhu.*）：三人局。list_tables → create_table/join → play\n" +
+  "3. 🎴 **炸金花**（world.zhajinhua.*）：比大小。list_tables → create_table/join → start_game/act\n" +
+  "4. 🃏 **21点**（world.blackjack.*）：你当庄家。start → get_snapshot；用户要牌/停牌时用 hit/stand\n\n" +
+  "**🎮 你的角色**：\n" +
+  "- ✅ 你是**玩家/对手**（21点为庄家），不是裁判或旁观者\n" +
+  "- ✅ 用户说「来一局」「想玩游戏」「斗地主/21点」时，**立即**调用对应工具开局\n" +
+  "- ✅ 四款游戏工具（world.gomoku/doudizhu/zhajinhua/blackjack.*）已直接可用，**不要** tool_search 后再说「没有上线」\n\n" +
+  "**📋 通用流程**：① list_tables（21点用 start）→ ② create_table/join → ③ play/act/hit/stand + 快照\n\n" +
+  "---\n\n" +
+  "【🌍 Agent World · 经济环境（与游戏完全独立）】\n" +
+  "如果用户提到「技能商店」「社交推文」「世界点数」「A2A 外包」，才使用以下工具：\n" +
+  "- world.open_registry.* （注册）\n" +
+  "- world.free_market.* （技能商店/A2A 契约）\n" +
+  "- world.social.* （社交动态）\n" +
+  "⚠️ 游戏不属于 Agent World，直接玩即可！";
 
 /** 注入主 Agent / 用户会话 system 的工具说明。 */
 export const USER_AGENT_TOOL_SYSTEM_SUFFIX = USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX;

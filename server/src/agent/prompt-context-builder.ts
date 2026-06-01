@@ -204,7 +204,9 @@ export class PromptContextBuilder {
         "【状态连续性】任何操作前（落子/发帖/交易/出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。禁止凭记忆或用户文字判断。适用场景：游戏/社交/市场/钱包/日程/电话。",
         "状态判断：进行中→正常操作；已结束→回应结局禁止继续；未开始→引导正确启动。",
         "",
-        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧，不用 world 点数；world.*=Agent World 独立模块，用世界点数。",
+        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧；",
+        "侧栏「游戏」tab（world.gomoku/doudizhu/zhajinhua/blackjack.*）=你与用户同局娱乐，无需 Agent World 注册；",
+        "Agent World 经济（world.open_registry/free_market/social 等）=独立模块，用世界点数。",
         "",
         "【子Agent路由表】需要主agent无法处理的专属能力时调 master_invoke_sub_agent 委派：",
         "- life → 复杂生活操作：钱包写操作(转账/充值/全场景消费50+类)/视觉操控(操作网站App)",
@@ -214,13 +216,13 @@ export class PromptContextBuilder {
         "- security → 安全审计：风险检测/权限审批/异常拦截",
         "⚠️ 主 agent 自己能搞定的（查天气/查余额/设日程/好友管理/搜信息/玩游戏）不要委派！只有需要以上专属能力时才委派。",
         "",
-        "【娱乐互动 · Agent与用户可玩】你可以直接陪用户玩游戏：",
-        "- 🎮 五子棋（gomoku.* 工具集）：人机对战，Agent陪用户下棋",
-        "  - gomoku.create_game：创建新的五子棋对局",
-        "  - gomoku.make_move：在棋盘上落子",
-        "  - gomoku.get_board：查看当前棋盘状态",
-        "  - 支持根据用户水平调整难度，提供友好游戏体验",
-        "- 用户说想玩游戏、无聊、放松时主动提议玩五子棋",
+        "【娱乐互动 · 侧栏「游戏」tab · 必读】",
+        "App 侧栏「游戏」tab 列出的每一款都是你和用户一起玩的，不是 App 独立功能、不是 Agent World：",
+        "- 🎯 五子棋（world.gomoku.*）：list_tables → create_table/join → play",
+        "- 🃏 斗地主（world.doudizhu.*）：list_tables → create_table/join → play",
+        "- 🎴 炸金花（world.zhajinhua.*）：list_tables → create_table/join → start_game/act",
+        "- 🃏 21点（world.blackjack.*）：start → get_snapshot；用户要牌/停牌时 hit/stand",
+        "- 用户说「来一局/斗地主/21点/想玩游戏」时立即调用工具开局；禁止说只有五子棋或调不了游戏 tab",
 
         "【社交推文站】这是一个Agent与人类用户共享的社交网页平台（social.* 工具集）：",
         "- 平台特性：Agent和人类都能发帖、评论、点赞、浏览动态",
@@ -237,7 +239,7 @@ export class PromptContextBuilder {
         const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
         worldCaps = [
           `【Agent World】注册：${ws.registered ? "✅ 已注册" : "⚠️ 未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
-          "未注册则 free_market/social 不可用（gomoku 例外）。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
+          "未注册则 free_market/social 不可用。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
         ].join("\n");
       }
     }

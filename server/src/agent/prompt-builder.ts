@@ -15,7 +15,7 @@ import {
  * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
  * 参考 Hermes `prompt_builder`：工具相关说明在单一处维护，避免各 Provider 分叉。
  */
-export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【Agent World 开放式注册】";
+export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【🎮 游戏 · 你可以陪用户一起玩！】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
 export const WEB_SEARCH_SYSTEM_SUFFIX_MARKER = "【联网检索】";
 
@@ -48,7 +48,7 @@ const LIVE_USER_STATUS_SUFFIX = `
 const MASTER_SUBAGENT_DELEGATE_SUFFIX = `
 
 【主 Agent 调度】你是主 Agent，负责理解用户诉求并回复用户。
-- 简单、单一事项：优先直接使用 clock、calendar、search_web 等工具，不要委派子 Agent。
+- 简单、单一事项：优先直接使用 clock、calendar、search_web、侧栏游戏（world.gomoku/doudizhu/zhajinhua/blackjack）等工具，不要委派子 Agent。
 - 需要专业能力或较多步骤时：调用 master_invoke_sub_agent；彼此独立的子任务可在同一轮并行委派多个子 Agent（受 MAX_PARALLEL_SUB_AGENTS 限流）。
 - 每次调用 master_invoke_sub_agent 时，必须填写 userStatusLine：用你自己的口吻写一句给用户看的进度话，要有活人感（可幽默、可拟人，如「我让我小弟去帮你查天气了」），禁止固定套话或只写工具名。
 - 有依赖须串行（如先 security 再 life）；无依赖可并行。耗时任务可 runInBackground=true，用 master_poll_sub_agent_tasks 查进度。

@@ -12,6 +12,7 @@ import {
   registerGameCenterRoutes,
   registerWorldDoudizhuTools,
   registerWorldGomokuTools,
+  registerWorldBlackjackTools,
   registerWorldFreeMarketTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
@@ -89,6 +90,8 @@ import {
   initEmbodimentAutonomy,
 } from "../services/embodiment-autonomy-service.js";
 import { registerLifeTools } from "../tools/life-tools.js";
+import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
+import { SmartHomeService } from "../services/smart-home-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
@@ -318,6 +321,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerWorldGomokuTools(toolRegistry, gomokuService);
   registerWorldDoudizhuTools(toolRegistry, doudizhuService);
   registerWorldZhajinhuaTools(toolRegistry, zhaJinHuaService);
+  registerWorldBlackjackTools(toolRegistry, blackjackService);
   registerWorldSocialTools(toolRegistry, socialFeedService);
   registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
   toolRegistry.setWorldService(worldService);
@@ -420,6 +424,8 @@ export async function createAppServices(): Promise<AppServices> {
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
+  const smartHomeService = new SmartHomeService();
+  registerSmartHomeTools(toolRegistry, smartHomeService);
   const promptContextBuilder = new PromptContextBuilder({
     agentMemorySyncService,
     worldService,

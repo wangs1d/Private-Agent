@@ -15,6 +15,7 @@ import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbedParentBridge } from "../hooks/useEmbedParentBridge";
 import { useLivingMotion } from "../hooks/useLivingMotion";
+import { createGomokuRoom, openGameUrl } from "../utils/game-center";
 import type { AgentMood } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "./modes.css";
@@ -29,7 +30,7 @@ export function FreeApp() {
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
-  const { connected, sendWake, sendChat } = useAgentWebSocket(stableApply, {
+  const { connected, reconnecting, sendWake, sendChat } = useAgentWebSocket(stableApply, {
     wsUrl: wsUrl ?? undefined,
     sessionId: sessionId ?? undefined,
     enabled: !wsOff,
@@ -295,11 +296,25 @@ export function FreeApp() {
           stimulate("listening_start", { intensity: 0.6 });
           apply({ mood: "listening", energy: 0.68, caption: "请说话…" });
           break;
+        case "game": {
+          const sid = sessionId ?? "default-user";
+          setMenuOpen(false);
+          apply({ mood: "happy", energy: 0.7, caption: "正在创建游戏房间…" });
+          createGomokuRoom(sid).then((url) => {
+            if (url) {
+              openGameUrl(url);
+              apply({ mood: "happy", energy: 0.75, caption: "游戏房间已打开！" });
+            } else {
+              apply({ mood: "alert", energy: 0.65, caption: "创建房间失败，请稍后重试" });
+            }
+          });
+          break;
+        }
         default:
           break;
       }
     },
-    [apply, sendToAgent, speech, stimulate, roamNow],
+    [apply, sendToAgent, speech, stimulate, roamNow, sessionId],
   );
 
   useEffect(() => {
@@ -357,6 +372,7 @@ export function FreeApp() {
         <OverlayQuickMenu
           open={menuOpen || speech.listening}
           connected={wsOff || connected}
+          reconnecting={!wsOff && reconnecting}
           voiceListening={speech.listening}
           voiceInterim={speech.interim}
           onSelect={handleCommand}

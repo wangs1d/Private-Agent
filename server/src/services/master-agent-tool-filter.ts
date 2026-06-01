@@ -2,6 +2,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { buildMasterSubAgentDelegateChatTools } from "../agent/master-subagent-delegate-tools.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import { isMasterAgentBuiltinTool } from "../tools/tool-search/core-tool-library.js";
 import type { SubAgentCapability } from "./master-agent-types.js";
 import { filterLifeCapabilityTools } from "./subagent-life-tool-filter.js";
 import {
@@ -9,6 +10,7 @@ import {
   SUBAGENT_SHARED_REGISTRY_TOOLS,
 } from "./subagent-chat-tool-allowlists.js";
 
+export { isMasterAgentBuiltinTool } from "../tools/tool-search/core-tool-library.js";
 export { SUBAGENT_SHARED_REGISTRY_TOOLS };
 
 export function filterChatToolsByRegistryNames(
@@ -22,72 +24,14 @@ export function filterChatToolsByRegistryNames(
 }
 
 /**
- * 主 Agent 基本工具白名单。
- * 原则：主 agent 只拥有基本能力，复杂操作委派给专业子 agent。
- */
-const MASTER_BASIC_TOOL_NAMES = new Set([
-  "clock.get_current_time",
-  "clock.get_date",
-  "clock.get_user_location",
-  "clock.format_timestamp",
-  "weather.get_local",
-  "calendar.create_from_text",
-  "calendar.create_task",
-  "calendar.list_tasks",
-  "calendar.delete_task",
-  "search_web",
-  "fetch_web",
-  "wallet.get_balance",
-  "wallet.get_transactions",
-  "phone.ensure_my_number",
-  "phone.virtual_call",
-  "phone.call_user",
-  "agent.link.list_friends",
-  "agent.link.list_friend_requests",
-  "agent.link.send_friend_request",
-  "agent.link.respond_friend_request",
-  "agent.send_to_peer",
-  "agent.register_account",
-  "agent.query_capabilities",
-  "care.set_important_date",
-  "care.get_important_dates",
-  "care.delete_important_date",
-  "budget.calculate",
-  "reminder.plan",
-  "protocol.unified.quota_adjust",
-  "protocol.unified.memory_patch",
-  "protocol.unified.memory_get",
-  "protocol.unified.human_directive",
-  "protocol.unified.governance_probe",
-  "aip.dispatch",
-  "aip.list_my_state",
-  "aip.get_proposal",
-  "self.list_custom_skills",
-]);
-
-/** 主 Agent 可玩的游戏工具前缀（由主 agent 直接陪用户玩，不走子 agent） */
-const MASTER_GAME_TOOL_PREFIXES = [
-  "gomoku.",
-  "world.gomoku.",
-];
-
-/** 主 Agent 具身身体工具前缀（registry + {@link EMBODIMENT_CHAT_TOOLS}，经 tool-loop 下发并 execute） */
-const MASTER_EMBODIMENT_TOOL_PREFIX = "embodiment.";
-
-/**
- * 主 Agent 基本工具过滤 — 只保留基础能力 + 具身 + 游戏。
- * 排除：life 专有 (wallet.write/desktop)
- *       tech 专有 (vision/self.write)
- *       creative 专有 (info.deep/shopping)
- * 保留：具身 (embodiment.*)、游戏 (gomoku 系列 — 主 agent 直接陪玩/控身)
+ * 主 Agent 基本工具过滤 — 白名单来自 {@link isMasterAgentBuiltinTool}（核心工具库单一数据源）。
+ * 排除：life 专有写操作、tech 视觉/桌面、creative 深度 RPA 等延迟目录工具。
+ * 保留：核心库中的日程/通讯/游戏/具身；`master.*` 委派工具由下方单独追加。
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   return tools.filter((t) => {
     if (t.type !== "function" || !t.function?.name) return false;
-    const name = t.function.name;
-    if (MASTER_BASIC_TOOL_NAMES.has(name)) return true;
-    if (name.startsWith(MASTER_EMBODIMENT_TOOL_PREFIX)) return true;
-    return MASTER_GAME_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
+    return isMasterAgentBuiltinTool(t.function.name);
   });
 }
 
@@ -118,9 +62,8 @@ export function buildSubAgentChatTools(
 }
 
 /**
- * 主 Agent 对话工具：基本工具 + 具身身体 + 子 Agent 委派。
- * 复杂操作（钱包写/桌面操控/深度RPA/专业创作）必须通过子 agent 完成；
- * 球形机器人移动/表情由主 agent 直接调用 embodiment.*（已注册于 ToolRegistry）。
+ * 主 Agent 对话工具：核心库内置 + 子 Agent 委派。
+ * 复杂操作（钱包写/桌面操控/深度 RPA/专业创作）在延迟目录，须委派子 agent。
  */
 export function buildMasterAgentChatTools(
   capabilities: Iterable<SubAgentCapability>,

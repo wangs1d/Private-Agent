@@ -1210,7 +1210,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     "日程",
     "钱包",
     "技能商店",
-    "游戏中心",
+    "游戏",
     "Agent World",
     "社交推文",
   ];
@@ -1473,7 +1473,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _SidebarItemSpec(
         iconOutlined: Icons.sports_esports_outlined,
         iconFilled: Icons.sports_esports,
-        label: '游戏中心',
+        label: '游戏',
       ),
       _SidebarItemSpec(
         iconOutlined: Icons.public_outlined,

@@ -196,23 +196,6 @@ async function main() {
     return "";
   }
 
-  function renderChatMessages() {
-    if (banterLines.length === 0) {
-      return `<div class="chat-empty">Agent 正在观战…<br>落子后它会开口说话</div>`;
-    }
-    let html = "";
-    for (const line of banterLines) {
-      const text = escapeHtml(line.text);
-      const time = formatTime(line.at);
-      html += `
-        <div class="chat-bubble agent">
-          <div>${text}</div>
-          ${time ? `<div class="chat-bubble-time">${time}</div>` : ""}
-        </div>`;
-    }
-    return html;
-  }
-
   const paint = () => {
     if (!snap) {
       root.innerHTML = '<div class="loading">连接对局…</div>';
@@ -238,24 +221,8 @@ async function main() {
           <p class="board-caption">${escapeHtml(caption)}</p>
           <button type="button" class="btn" id="leave-btn">离开对局</button>
         </div>
-        <div class="game-right">
-          <div class="chat-dialog" id="chat-dialog">
-            <div class="chat-dialog-header">
-              <span class="dot"></span>
-              Agent 对局旁白
-            </div>
-            <div class="chat-messages" id="chat-messages">
-              ${renderChatMessages()}
-            </div>
-          </div>
-        </div>
       </div>
     `;
-
-    const msgsEl = document.getElementById("chat-messages");
-    if (msgsEl) {
-      msgsEl.scrollTop = msgsEl.scrollHeight;
-    }
 
     if (status === "playing" && (role === "black" || role === "white")) {
       root.querySelectorAll(".cell.clickable").forEach((cell) => {

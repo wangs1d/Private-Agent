@@ -8,6 +8,7 @@ import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
 import { useOverlayPointerCapture } from "../hooks/useOverlayPointerCapture";
 import { useOverlayWindowMotion } from "../hooks/useOverlayWindowMotion";
+import { createGomokuRoom, openGameUrl } from "../utils/game-center";
 import type { AgentMood } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "../index.css";
@@ -108,11 +109,25 @@ export function OverlayApp() {
           speech.start();
           apply({ mood: "listening", energy: 0.68, caption: "请说话…" });
           break;
+        case "game": {
+          const sid = sessionId ?? "default-user";
+          setMenuOpenSafe(false);
+          apply({ mood: "happy", energy: 0.7, caption: "正在创建游戏房间…" });
+          createGomokuRoom(sid).then((url) => {
+            if (url) {
+              openGameUrl(url);
+              apply({ mood: "happy", energy: 0.75, caption: "游戏房间已打开！" });
+            } else {
+              apply({ mood: "alert", energy: 0.65, caption: "创建房间失败，请稍后重试" });
+            }
+          });
+          break;
+        }
         default:
           break;
       }
     },
-    [apply, connected, sendChat, sendWake, setMenuOpenSafe, speech],
+    [apply, connected, sendChat, sendWake, setMenuOpenSafe, speech, sessionId],
   );
 
   useEffect(() => {

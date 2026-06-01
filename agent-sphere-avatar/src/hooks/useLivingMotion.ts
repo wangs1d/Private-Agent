@@ -82,6 +82,8 @@ export function useLivingMotion({
   const excitedUntilRef = useRef(0);
   const lastBoundaryAtRef = useRef(0);
   const boundaryStimulateGuardRef = useRef(false);
+  const lastSignificantMoveAtRef = useRef(0);
+  const stuckGuardRef = useRef(false);
 
   const refreshBounds = useCallback(() => {
     const margin = 20;
@@ -162,6 +164,7 @@ export function useLivingMotion({
         const initX = Math.max(0, window.innerWidth - containerW - 24);
         const initY = Math.max(0, window.innerHeight - containerH - 24);
         posRef.current = { x: initX, y: initY };
+        lastSignificantMoveAtRef.current = performance.now();
         el.style.position = "fixed";
         el.style.left = "0";
         el.style.top = "0";
@@ -186,8 +189,17 @@ export function useLivingMotion({
       velRef.current.vx *= 0.15;
       velRef.current.vy *= 0.15;
     }
+    lastSignificantMoveAtRef.current = performance.now();
+    stuckGuardRef.current = false;
+    behaviorRef.current = "exploring";
+    pauseUntilRef.current = 0;
+    approachTargetRef.current = null;
+    velRef.current.vx += (Math.random() - 0.5) * 30;
+    velRef.current.vy += (Math.random() - 0.5) * 20;
+    impulseRef.current = Math.max(impulseRef.current, 0.25);
+    pickWaypoint();
     applyTransform();
-  }, [applyTransform]);
+  }, [applyTransform, pickWaypoint]);
 
   const setUserRotation = useCallback(
     (deg: number, velocity?: number) => {
@@ -332,11 +344,12 @@ export function useLivingMotion({
         }
 
         const b = boundsRef.current;
-        const margin = 60;
-        if (posRef.current.x < b.minX + margin) targetX = Math.max(targetX, b.minX + margin + 20);
-        if (posRef.current.x > b.maxX - margin) targetX = Math.min(targetX, b.maxX - margin - 20);
-        if (posRef.current.y < b.minY + margin) targetY = Math.max(targetY, b.minY + margin + 20);
-        if (posRef.current.y > b.maxY - margin) targetY = Math.min(targetY, b.maxY - margin - 20);
+        const isApproaching = behavior === "approaching";
+        const softMargin = isApproaching ? 8 : 60;
+        if (posRef.current.x < b.minX + softMargin) targetX = Math.max(targetX, b.minX + softMargin + (isApproaching ? 0 : 20));
+        if (posRef.current.x > b.maxX - softMargin) targetX = Math.min(targetX, b.maxX - softMargin - (isApproaching ? 0 : 20));
+        if (posRef.current.y < b.minY + softMargin) targetY = Math.max(targetY, b.minY + softMargin + (isApproaching ? 0 : 20));
+        if (posRef.current.y > b.maxY - softMargin) targetY = Math.min(targetY, b.maxY - softMargin - (isApproaching ? 0 : 20));
 
         const dx = targetX - posRef.current.x;
         const dy = targetY - posRef.current.y;
@@ -392,6 +405,22 @@ export function useLivingMotion({
 
         posRef.current.x = newX;
         posRef.current.y = newY;
+
+        const frameDist = Math.sqrt(vel.vx * vel.vx + vel.vy * vel.vy) * dt;
+        if (frameDist > 0.6) {
+          lastSignificantMoveAtRef.current = now;
+        }
+        const stuckMs = now - lastSignificantMoveAtRef.current;
+        if (stuckMs > 3000 && !stuckGuardRef.current && behavior !== "approaching") {
+          stuckGuardRef.current = true;
+          behaviorRef.current = "exploring";
+          pauseUntilRef.current = 0;
+          impulseRef.current = Math.max(impulseRef.current, 0.4);
+          vel.vx += (Math.random() - 0.5) * 60;
+          vel.vy += (Math.random() - 0.5) * 40;
+          pickWaypoint();
+          setTimeout(() => { stuckGuardRef.current = false; }, 2000);
+        }
 
         const speed = Math.sqrt(vel.vx * vel.vx + vel.vy * vel.vy);
         const tiltTarget = speed > 2 ? clamp(vel.vx / Math.max(speed, 1) * 8, -8, 8) : 0;

@@ -3,6 +3,7 @@ import { OVERLAY_QUICK_COMMANDS, type QuickCommand } from "../constants/quick-co
 interface OverlayQuickMenuProps {
   open: boolean;
   connected: boolean;
+  reconnecting?: boolean;
   voiceListening?: boolean;
   voiceInterim?: string;
   onSelect: (cmd: QuickCommand) => void;
@@ -13,6 +14,7 @@ interface OverlayQuickMenuProps {
 export function OverlayQuickMenu({
   open,
   connected,
+  reconnecting = false,
   voiceListening = false,
   voiceInterim,
   onSelect,
@@ -57,7 +59,9 @@ export function OverlayQuickMenu({
           ))}
         </div>
 
-        {!connected ? (
+        {reconnecting ? (
+          <p className="overlay-quick-menu__hint">正在重连主 Agent…</p>
+        ) : !connected ? (
           <p className="overlay-quick-menu__hint">未连接主 Agent，部分指令不可用</p>
         ) : null}
       </div>
