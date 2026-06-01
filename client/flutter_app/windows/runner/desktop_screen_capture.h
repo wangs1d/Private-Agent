@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-// 截取屏幕（可选区域 [left, top, width, height]），输出 PNG 字节。
+// Capture screen (optional region [left, top, width, height]), output PNG bytes.
 struct DesktopScreenshotResult {
   bool ok = false;
   std::string error;
