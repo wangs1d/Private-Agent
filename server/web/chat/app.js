@@ -23,6 +23,14 @@ const inputEl = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const fullAccessBtn = document.getElementById("full-access");
 const statusEl = document.getElementById("status");
+const focusListEl = document.getElementById("focus-list");
+const confirmListEl = document.getElementById("confirm-list");
+const confirmBadgeEl = document.getElementById("confirm-badge");
+
+const uiState = {
+  todayFocus: [],
+  pending: [],
+};
 
 let fullComputerAccessEnabled = localStorage.getItem(FULL_ACCESS_KEY) === "1";
 
@@ -445,6 +453,42 @@ function setStatus(line) {
   statusEl.textContent = line ?? "";
 }
 
+function renderFocusPanel() {
+  if (!focusListEl) return;
+  const items = uiState.todayFocus.slice(0, 4);
+  if (!items.length) {
+    focusListEl.innerHTML = "<p>今天还没有安排，和我说一声就能添加。</p>";
+    return;
+  }
+  focusListEl.innerHTML = items.map((s) => `<p>${escapeHtml(s)}</p>`).join("");
+}
+
+function renderConfirmPanel() {
+  if (!confirmListEl || !confirmBadgeEl) return;
+  const items = uiState.pending.slice(0, 4);
+  confirmBadgeEl.textContent = String(items.length);
+  if (!items.length) {
+    confirmListEl.innerHTML = "<p>当前没有待处理事项。</p>";
+    return;
+  }
+  confirmListEl.innerHTML = items.map((s) => `<p>${escapeHtml(s)}</p>`).join("");
+}
+
+function pushFocus(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return;
+  uiState.todayFocus = [t, ...uiState.todayFocus.filter((x) => x !== t)].slice(0, 8);
+  renderFocusPanel();
+}
+
+function setPending(items) {
+  uiState.pending = items
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  renderConfirmPanel();
+}
+
 function syncAgentProcessingUi(active) {
   if (agentProcessingUiActive === active) return;
   agentProcessingUiActive = active;
@@ -571,6 +615,12 @@ function handleWs(msg) {
   }
 
   if (type === "agent.phone.call_status") {
+    const status = String(p.status ?? "");
+    if (status === "ringing") setPending(["电话处理中：振铃中", ...uiState.pending]);
+    if (status === "connected") setPending(["电话处理中：已接通", ...uiState.pending]);
+    if (status === "ended") {
+      setPending(uiState.pending.filter((x) => !x.startsWith("电话处理中：")));
+    }
     handlePhoneCallStatus(p);
     return;
   }
@@ -578,6 +628,10 @@ function handleWs(msg) {
   if (type === "chat.agent_status") {
     const line = String(p.line ?? "").trim();
     if (!line) return;
+    pushFocus(line);
+    const phase = String(p.phase ?? "");
+    if (phase === "delegate_start") setPending(["后台任务处理中", ...uiState.pending]);
+    if (phase === "delegate_done") setPending(uiState.pending.filter((x) => x !== "后台任务处理中"));
     let prog = document.getElementById("progress-bubble");
     if (!prog) {
       prog = appendBubble("progress", "", "progress");
@@ -662,6 +716,7 @@ function handleWs(msg) {
 
   if (type === "schedule.reminder_fired") {
     const reminderMsg = String(p.message ?? p.title ?? "提醒").trim();
+    pushFocus(`提醒：${reminderMsg}`);
     patchAvatar({ mood: "alert", caption: reminderMsg, energy: 0.9 });
     return;
   }
@@ -705,7 +760,7 @@ function sendUserMessage() {
 
 sendBtn.addEventListener("click", sendUserMessage);
 inputEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !shiftKey) {
+  if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendUserMessage();
   }
@@ -875,5 +930,7 @@ document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
 initAvatarFrame();
+renderFocusPanel();
+renderConfirmPanel();
 connect();
 dailyChatStorage.startAutoSync();

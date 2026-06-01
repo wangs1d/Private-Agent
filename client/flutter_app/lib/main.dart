@@ -105,6 +105,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool? _reportedAgentProcessingUiActive;
   /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
   bool _fullComputerAccessEnabled = false;
+  bool _todayPanelExpanded = true;
+  bool _confirmPanelExpanded = false;
   /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
   /// 子 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
@@ -1701,6 +1703,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                     );
                                   },
                                 ),
+                              TextButton.icon(
+                                onPressed: () => _callMyAgentViaPhone(null),
+                                icon: const Icon(Icons.phonelink_ring_outlined, size: 18),
+                                label: const Text("连接手机"),
+                              ),
                               IconButton(
                                 tooltip: "查看后台任务",
                                 icon: Badge(
@@ -1718,7 +1725,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                           ),
                           Expanded(
                             child: MainPanel(
-                              child: _buildTabStack(),
+                              child: _buildMainContent(),
                             ),
                           ),
                         ],
@@ -1754,6 +1761,189 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       actorId: ApiConfig.effectiveActorId,
       api: _worldApi,
       ws: _ws,
+    );
+  }
+
+  Widget _buildFoldSection({
+    required String title,
+    required bool expanded,
+    required VoidCallback onTap,
+    required List<Widget> children,
+    String? badge,
+  }) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Container(
+      decoration: AppTheme.borderedPanel(cs, radius: 10),
+      child: Column(
+        children: <Widget>[
+          InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Row(
+                      children: <Widget>[
+                        Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (badge != null) ...<Widget>[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: cs.primary.withValues(alpha: 0.18),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: cs.primary.withValues(alpha: 0.38),
+                              ),
+                            ),
+                            child: Text(
+                              badge,
+                              style: TextStyle(fontSize: 11, color: cs.primary),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    expanded ? Icons.expand_more : Icons.chevron_right,
+                    size: 18,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+              child: DefaultTextStyle(
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: children,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCompanionRightPanel() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        children: <Widget>[
+          ValueListenableBuilder<int>(
+            valueListenable: _scheduleReloadSignal,
+            builder: (BuildContext context, int _, __) {
+              final DateTime now = DateTime.now();
+              final DateTime dayStart = DateTime(now.year, now.month, now.day);
+              final DateTime dayEnd = dayStart.add(const Duration(days: 1));
+              return FutureBuilder<List<ScheduleEvent>>(
+                future: _store.listScheduleEventsInRange(dayStart, dayEnd),
+                builder: (BuildContext context, AsyncSnapshot<List<ScheduleEvent>> snapshot) {
+                  final List<Widget> focusWidgets;
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    focusWidgets = const <Widget>[Text("正在加载今日事项...")];
+                  } else {
+                    final List<ScheduleEvent> items = (snapshot.data ?? <ScheduleEvent>[])
+                        .where((ScheduleEvent e) => (e.notes ?? "") != "已完成")
+                        .take(3)
+                        .toList();
+                    if (items.isEmpty) {
+                      focusWidgets = const <Widget>[Text("今天还没有安排，和我说一声就能添加。")];
+                    } else {
+                      focusWidgets = items
+                          .map(
+                            (ScheduleEvent e) => Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')} ${e.title}",
+                              ),
+                            ),
+                          )
+                          .toList();
+                    }
+                  }
+                  return _buildFoldSection(
+                    title: "今日聚焦",
+                    expanded: _todayPanelExpanded,
+                    onTap: () => setState(() => _todayPanelExpanded = !_todayPanelExpanded),
+                    children: focusWidgets,
+                  );
+                },
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          _buildFoldSection(
+            title: "待你确认",
+            badge: "2",
+            expanded: _confirmPanelExpanded,
+            onTap: () =>
+                setState(() => _confirmPanelExpanded = !_confirmPanelExpanded),
+            children: <Widget>[
+              Text(
+                _backgroundTasksBadgeCount > 0
+                    ? "后台任务进行中：$_backgroundTasksBadgeCount 项"
+                    : "当前没有待处理后台任务",
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _desktopBridgeOnline == null
+                    ? "电脑桥接状态暂不可用"
+                    : (_desktopBridgeOnline!
+                        ? "电脑桥接在线，可继续协同处理"
+                        : "电脑桥接离线，建议重连"),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _phoneCallStatus == null
+                    ? "手机连接可用：可发起呼叫"
+                    : "当前电话状态：$_phoneCallStatus",
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMainContent() {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        if (_tabIndex != 0 || constraints.maxWidth < 820) {
+          return _buildTabStack();
+        }
+        final double rightWidth = constraints.maxWidth < 980 ? 240 : 300;
+        return Row(
+          children: <Widget>[
+            Expanded(child: _buildTabStack()),
+            const VerticalDivider(
+              width: 1,
+              thickness: 1,
+              color: AppPalette.sidebarSeparator,
+            ),
+            SizedBox(
+              width: rightWidth,
+              child: _buildCompanionRightPanel(),
+            ),
+          ],
+        );
+      },
     );
   }
 
