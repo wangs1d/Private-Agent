@@ -255,7 +255,23 @@ export class UserResponsePersistenceService {
       lastResponseAt: analytics.lastResponseAt
         ? new Date(analytics.lastResponseAt)
         : undefined,
-      levelStats: analytics.levelDistribution,
+      levelStats: {
+        popup: {
+          shown: analytics.levelDistribution.popup.count,
+          responded: analytics.levelDistribution.popup.responses,
+          avgResponseTimeMs: analytics.levelDistribution.popup.avgResponseTimeMs,
+        },
+        tts_alarm: {
+          shown: analytics.levelDistribution.tts_alarm.count,
+          responded: analytics.levelDistribution.tts_alarm.responses,
+          avgResponseTimeMs: analytics.levelDistribution.tts_alarm.avgResponseTimeMs,
+        },
+        phone_call: {
+          shown: analytics.levelDistribution.phone_call.count,
+          responded: analytics.levelDistribution.phone_call.responses,
+          avgResponseTimeMs: analytics.levelDistribution.phone_call.avgResponseTimeMs,
+        },
+      },
     };
   }
 

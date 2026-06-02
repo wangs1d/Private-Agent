@@ -653,6 +653,24 @@
       "createdAt": "2026-05-26T16:37:44.908Z",
       "updatedAt": "2026-06-01T06:26:39.644Z",
       "lastRunAt": "2026-06-01T04:59:38.242Z"
+    },
+    {
+      "taskId": "eb495950-9f5f-4e0d-b1a0-6aa5364dc729",
+      "sessionId": "session-mvp-001",
+      "title": "航天电子(600879) 每日监控简报",
+      "description": "自动搜索航天电子(600879)最新新闻、公告、研报，整理推送关键信息",
+      "kind": "agent_task",
+      "recurrence": "daily",
+      "timezone": "Asia/Shanghai",
+      "runAt": "2026-06-03T01:00:00.000Z",
+      "nextRunAt": "2026-06-03T01:00:00.000Z",
+      "status": "active",
+      "agentTask": {
+        "prompt": "搜索\"航天电子 600879 最新消息\"，获取今日新闻、公告、研报要点。分析是否涉及：1)重大订单/合同 2)业绩预增/减 3)政策利好 4)技术突破 5)股东变动。用简洁格式推送给用户，标注信息等级（重要/一般/关注）。",
+        "accessMode": "sandbox"
+      },
+      "createdAt": "2026-06-02T08:52:17.894Z",
+      "updatedAt": "2026-06-02T08:52:17.894Z"
     }
   ],
   "runs": [

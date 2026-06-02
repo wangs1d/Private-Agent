@@ -8,6 +8,7 @@ import "package:flutter/material.dart";
 import "../../core/db/isar_local_history_store.dart";
 import "../../core/models/schedule_models.dart";
 import "../../core/services/schedule_api_client.dart";
+import "../../core/services/schedule_offline_delete_queue.dart";
 import "../../core/services/schedule_recurrence_expand.dart";
 import "../../core/services/schedule_reminder_sync.dart";
 import "../../core/theme/app_theme.dart";
@@ -108,10 +109,17 @@ class _SchedulePageState extends State<SchedulePage> {
     if (api != null && sessionId != null && sessionId.isNotEmpty) {
       final bool reachable = await api.isReachable();
       if (!reachable) {
+        final int pendingDeletes =
+            (await widget.store.getPendingScheduleDeleteTaskIds()).length;
         serviceWarning =
             "主服务未连接（${api.baseUrl}），日程仅显示本地缓存；删除/同步需先启动后端";
+        if (pendingDeletes > 0) {
+          serviceWarning =
+              "$serviceWarning（$pendingDeletes 条删除待服务端同步，连接后自动补删）";
+        }
       } else {
         try {
+          await flushScheduleOfflineDeleteQueue(widget.store, api);
           await syncServerRemindersToLocal(
             widget.store,
             api,
@@ -354,6 +362,7 @@ class _SchedulePageState extends State<SchedulePage> {
     if (serverTaskId != null) {
       await widget.store.hideScheduleTask(serverTaskId);
       await widget.store.deleteScheduleEventsForTask(serverTaskId);
+      await enqueueScheduleOfflineDelete(widget.store, serverTaskId);
     } else {
       await widget.store.deleteScheduleEvent(e.id);
     }
@@ -365,17 +374,19 @@ class _SchedulePageState extends State<SchedulePage> {
       });
     }
 
-    // 2. 后台同步服务端（失败也不恢复本机已删项）
+    // 2. 后台同步服务端（失败则保留在离线删除队列，主服务恢复后自动补删）
     if (serverTaskId != null && api != null) {
       final ScheduleApiResult<void> result =
           await api.deleteScheduleTask(serverTaskId);
-      if (!result.ok && mounted) {
+      if (result.ok) {
+        await dequeueScheduleOfflineDelete(widget.store, serverTaskId);
+      } else if (mounted) {
         final String hint = result.networkError
-            ? "已在本地删除。${result.error ?? "请启动主服务（npm run dev）"}"
-            : "已在本地删除；服务端：${result.error ?? "删除失败"}";
+            ? "已在本地删除，待主服务恢复后自动同步删除。${result.error ?? ""}"
+            : "已在本地删除；服务端：${result.error ?? "删除失败"}，将稍后重试";
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(hint),
+            content: Text(hint.trim()),
             duration: const Duration(seconds: 5),
           ),
         );

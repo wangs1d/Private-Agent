@@ -12,6 +12,7 @@ import { registerWalletRoutes } from "./wallet.js";
 import { registerWeatherRoutes } from "./weather.js";
 import { registerGeoRoutes } from "./geo.js";
 import { registerPhoneRoutes } from "./phone.js";
+import { registerCompanionRoutes } from "./companion.js";
 import {
   registerGameCenterRoutes,
   registerWorldDoudizhuRoutes,
@@ -41,6 +42,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWeatherRoutes(app, deps);
   registerGeoRoutes(app);
   registerPhoneRoutes(app, deps);
+  registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
   registerWorldRoutes(app, deps);

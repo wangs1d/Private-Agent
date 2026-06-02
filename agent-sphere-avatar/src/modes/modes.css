@@ -353,9 +353,186 @@ html.embed-root #root {
   word-break: break-word;
 }
 
+/* ── 进场动画 ── */
+.entrance-animation {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.entrance-black-screen {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  animation: entrance-black-fade 2.5s ease-out forwards;
+}
+
+.entrance-light {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translate(-50%, -50%);
+  animation: entrance-light-emerge 1.8s ease-out forwards;
+}
+
+.entrance-halo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.5);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 20px 5px rgba(255, 255, 255, 0.3), 0 0 60px 10px rgba(255, 255, 255, 0.1);
+  animation: entrance-halo-expand 1.5s ease-out forwards;
+}
+
+@keyframes entrance-black-fade {
+  0%, 20% { opacity: 1; }
+  60% { opacity: 0.5; }
+  100% { opacity: 0; }
+}
+
+@keyframes entrance-light-emerge {
+  0%, 10% { opacity: 0; width: 2px; height: 2px; }
+  20% { opacity: 1; width: 4px; height: 4px; box-shadow: 0 0 10px rgba(255, 255, 255, 0.8); }
+  40% { width: 6px; height: 6px; box-shadow: 0 0 20px rgba(255, 255, 255, 0.6); }
+  70% { width: 10px; height: 10px; opacity: 0.7; box-shadow: 0 0 30px rgba(255, 255, 255, 0.4); }
+  100% { width: 16px; height: 16px; opacity: 0; box-shadow: 0 0 40px rgba(255, 255, 255, 0); }
+}
+
+@keyframes entrance-halo-expand {
+  0%, 15% { opacity: 0; width: 4px; height: 4px; box-shadow: 0 0 0 rgba(255, 255, 255, 0); }
+  25% { opacity: 1; width: 8px; height: 8px; box-shadow: 0 0 20px 5px rgba(255, 255, 255, 0.4), 0 0 60px 10px rgba(255, 255, 255, 0.2); }
+  50% { width: 40px; height: 40px; box-shadow: 0 0 40px 10px rgba(255, 255, 255, 0.3), 0 0 100px 20px rgba(255, 255, 255, 0.15); }
+  80% { width: 120px; height: 120px; opacity: 0.6; box-shadow: 0 0 60px 15px rgba(255, 255, 255, 0.2), 0 0 150px 30px rgba(255, 255, 255, 0.1); }
+  100% { width: 200px; height: 200px; opacity: 0; box-shadow: 0 0 80px 20px rgba(255, 255, 255, 0), 0 0 200px 40px rgba(255, 255, 255, 0); }
+}
+
+.entrance-animation.fadeout {
+  animation: entrance-fadeout 0.5s ease-out forwards;
+}
+
+@keyframes entrance-fadeout {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.entrance-animation.fadeout .entrance-black-screen,
+.entrance-animation.fadeout .entrance-light,
+.entrance-animation.fadeout .entrance-halo {
+  animation: none;
+  opacity: 0;
+}
+
 .inner-thought__phase {
   margin-top: 3px;
   font-size: 0.55rem;
   color: rgba(148, 163, 184, 0.6);
   font-style: italic;
+}
+
+/* ── 消息列表 ── */
+.message-list {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 8px;
+  width: min(280px, 80vw);
+  max-height: 300px;
+  overflow-y: auto;
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.88);
+  border: 1px solid rgba(136, 187, 255, 0.15);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  animation: message-list-in 0.2s ease-out;
+}
+
+@keyframes message-list-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+.message-list__inner {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  animation: message-in 0.15s ease-out;
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message--user {
+  background: rgba(96, 165, 250, 0.12);
+  border-left: 2px solid rgba(96, 165, 250, 0.5);
+}
+
+.message--agent {
+  background: rgba(74, 222, 128, 0.08);
+  border-left: 2px solid rgba(74, 222, 128, 0.4);
+}
+
+.message__avatar {
+  font-size: 0.9rem;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.message__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.message__content {
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: #e2e8f0;
+  word-break: break-word;
+}
+
+.message__time {
+  margin-top: 2px;
+  font-size: 0.58rem;
+  color: rgba(148, 163, 184, 0.6);
+}
+
+/* 自定义滚动条 */
+.message-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.message-list::-webkit-scrollbar-thumb {
+  background: rgba(136, 187, 255, 0.3);
+  border-radius: 2px;
+}
+
+.message-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(136, 187, 255, 0.5);
 }

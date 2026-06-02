@@ -15,8 +15,12 @@ import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import {
+  handleAgentEmbodimentInteractEvent,
+} from "./handlers/agent-embodiment-interact.js";
+import {
   handleChatAgentProcessingUiEvent,
   handleChatUserMessageEvent,
+  messageBatchProcessor,
 } from "./handlers/chat-user-message.js";
 import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
@@ -144,6 +148,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         desktopBridgeCoordinator.unbindIfSocket(socket);
         desktopBridgeCoordinator.cancelPendingForSocket(socket);
         if (boundActorId) {
+          messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
           socialFeedService.unsubscribe(boundActorId);
           wsConnectionRegistry.unregister(boundActorId, socket);
           getEmbodimentAutonomy()?.unregisterSession(boundActorId);
@@ -171,6 +176,24 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               payload: { code: "BAD_JSON", message: "无法解析事件 JSON" },
             }),
           );
+          return;
+        }
+
+        if (event.type === "ws.keepalive") {
+          try {
+            socket.send(
+              JSON.stringify({
+                type: "ws.keepalive_ack",
+                payload: {
+                  ok: true,
+                  serverTime: new Date().toISOString(),
+                  sessionId: boundActorId,
+                },
+              }),
+            );
+          } catch {
+            // Connection already dropped; the client will reconnect.
+          }
           return;
         }
 
@@ -287,6 +310,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           sessionService.upsert({ sessionId: actorId, deviceId, userAlias });
           realFundsWallet.bootstrap(actorId);
           worldService.getOrCreate(actorId);
+          if (boundActorId && boundActorId !== actorId) {
+            messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
+          }
           desktopBridgeCoordinator.unbindIfSocket(socket);
           if (boundActorId && boundActorId !== actorId) {
             wsConnectionRegistry.unregister(boundActorId, socket);

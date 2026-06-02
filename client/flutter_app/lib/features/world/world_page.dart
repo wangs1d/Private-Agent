@@ -30,7 +30,7 @@ class WorldPage extends StatelessWidget {
         switch (name) {
           case "/":
             child = MainPanel(
-              child: WorldHubPage(sessionId: sessionId, api: api, ws: ws),
+              child: WorldHubPage(sessionId: sessionId, api: api),
             );
             break;
           case "/shop":

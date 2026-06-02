@@ -349,3 +349,68 @@ export const phoneMeQuerySchema = z.object({
   sessionId: z.string().min(1),
   userId: z.string().min(1).optional(),
 });
+
+export const companionSessionQuerySchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+export const companionProfileUpdateBodySchema = z.object({
+  sessionId: z.string().min(1),
+  preferredTone: z.enum(["warm", "balanced", "formal", "humor"]).optional(),
+  greetingEnabled: z.boolean().optional(),
+  dailyGreetingHourLocal: z.number().int().min(0).max(23).optional(),
+  timezone: z.string().min(1).optional(),
+  likes: z.array(z.string().min(1).max(80)).max(50).optional(),
+  dislikes: z.array(z.string().min(1).max(80)).max(50).optional(),
+});
+
+export const companionOnboardingBodySchema = z.object({
+  sessionId: z.string().min(1),
+  focusModes: z.array(z.enum(["shopping", "planning", "companion"])).min(1).max(3),
+  budgetMin: z.number().nonnegative().optional(),
+  budgetMax: z.number().nonnegative().optional(),
+  shoppingPlatforms: z.array(z.string().min(1).max(60)).max(10).optional(),
+  billReminders: z
+    .array(
+      z.object({
+        billName: z.string().min(1).max(80),
+        dueDate: z.string().min(1),
+        daysBefore: z.number().int().min(0).max(30).default(3),
+      }),
+    )
+    .max(20)
+    .optional(),
+});
+
+export const companionPriceWatchBodySchema = z.object({
+  sessionId: z.string().min(1),
+  item: z.string().min(1).max(120),
+  currentPrice: z.number().positive(),
+  targetPrice: z.number().positive(),
+  currency: z.string().min(1).max(10).default("USD"),
+});
+
+export const companionBillReminderBodySchema = z.object({
+  sessionId: z.string().min(1),
+  billName: z.string().min(1).max(80),
+  dueDate: z.string().min(1),
+  daysBefore: z.number().int().min(0).max(30).default(3),
+  amount: z.number().positive().optional(),
+});
+
+export const companionShoppingPlanBodySchema = z.object({
+  sessionId: z.string().min(1),
+  item: z.string().min(1).max(120),
+  budget: z.number().positive(),
+  runAt: z.string().min(1),
+  timezone: z.string().min(1).optional(),
+  note: z.string().max(500).optional(),
+});
+
+export const companionBehaviorSignalUpdateBodySchema = z.object({
+  sessionId: z.string().min(1),
+  shoppingInterest: z.number().int().min(0).max(1000).optional(),
+  planningInterest: z.number().int().min(0).max(1000).optional(),
+  companionNeed: z.number().int().min(0).max(1000).optional(),
+  privacyConcern: z.number().int().min(0).max(1000).optional(),
+});

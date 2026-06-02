@@ -13,6 +13,8 @@ import type { SkillManager } from "../skills/index.js";
 import type { SubAgentCapability } from "../services/master-agent-types.js";
 import { SUB_AGENT_PROMPT_PROFILES } from "./subagent-prompt-profiles.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
+import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
@@ -85,6 +87,7 @@ export class PromptContextBuilder {
       worldService: WorldService | null;
       skillManager: SkillManager | null;
       virtualPhoneService: VirtualPhoneService | null;
+      scheduleTaskService?: ScheduleTaskService | null;
     },
   ) {}
 
@@ -255,6 +258,10 @@ export class PromptContextBuilder {
     const memoryManager = getMemoryManagerService();
     const userProfileFromManager = memoryManager?.getProfileForPrompt(input.actorId);
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
+    const scheduleSnapshot =
+      this.deps.scheduleTaskService != null
+        ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId)
+        : undefined;
     return {
       ...fromKv,
       ...(config.memoryPrompt.taskContextInPrompt && userText
@@ -273,6 +280,7 @@ export class PromptContextBuilder {
         : {}),
       ...(interruptedCtx ? { interruptedContext: interruptedCtx } : {}),
       ...(followUpAnchor ? { followUpAnchor } : {}),
+      ...(scheduleSnapshot ? { scheduleSnapshot } : {}),
     };
   }
 
@@ -292,7 +300,8 @@ export class PromptContextBuilder {
       Boolean(memory.userProfile) ||
       Boolean(memory.toneGuidance) ||
       Boolean(memory.userProfileSummary) ||
-      Boolean(memory.followUpAnchor)
+      Boolean(memory.followUpAnchor) ||
+      Boolean(memory.scheduleSnapshot)
     );
   }
 

@@ -247,7 +247,14 @@ export function useLivingMotion({
   );
 
   useEffect(() => {
+    let stopped = false;
     const tick = (now: number) => {
+      if (stopped) return;
+      if (document.hidden || document.visibilityState === "hidden") {
+        rafIdRef.current = requestAnimationFrame(tick);
+        lastTimeRef.current = 0;
+        return;
+      }
       if (!lastTimeRef.current) {
         lastTimeRef.current = now;
         rafIdRef.current = requestAnimationFrame(tick);
@@ -451,7 +458,10 @@ export function useLivingMotion({
       lastTimeRef.current = 0;
       rafIdRef.current = requestAnimationFrame(tick);
     }
-    return () => cancelAnimationFrame(rafIdRef.current);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(rafIdRef.current);
+    };
   }, [applyTransform, clampPos, containerH, containerW, enabled, pickWaypoint]);
 
   useEffect(() => {

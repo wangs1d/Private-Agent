@@ -6,6 +6,7 @@ import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
 
 import "../../core/services/agent_sphere_mood_bridge.dart";
+import "../../core/services/desk_pet_session.dart";
 import "../../core/services/sphere_entity_controller.dart";
 import "../../core/services/sphere_overlay_launcher.dart";
 import "agent_sphere_webview.dart";
@@ -56,24 +57,20 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     AgentSphereMoodBridge.instance.addMessageListener(_onEmbodimentCommand);
+    DeskPetSession.instance.addListener(_onDeskPetSessionChanged);
 
     if (FloatingAgentSphere.useWindowsDesktop) {
       _entity.onRequestSnapToDock = _snapBackToDock;
       _entity.addListener(_onEntityChanged);
       SphereOverlayLauncher.electronActive.addListener(_onOverlayState);
       SphereOverlayLauncher.useEmbeddedFallback.addListener(_onOverlayState);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        Future<void>.delayed(const Duration(milliseconds: 400), () {
-          if (mounted) unawaited(_bootstrapNativeDeskPet());
-        });
-      });
     }
   }
 
   @override
   void dispose() {
     AgentSphereMoodBridge.instance.removeMessageListener(_onEmbodimentCommand);
+    DeskPetSession.instance.removeListener(_onDeskPetSessionChanged);
     _entity.removeListener(_onEntityChanged);
     SphereOverlayLauncher.electronActive.removeListener(_onOverlayState);
     SphereOverlayLauncher.useEmbeddedFallback.removeListener(_onOverlayState);
@@ -85,6 +82,10 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     super.dispose();
   }
 
+  void _onDeskPetSessionChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _onEntityChanged() {
     if (mounted) setState(() {});
   }
@@ -94,6 +95,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   }
 
   Future<void> _bootstrapNativeDeskPet() async {
+    if (!DeskPetSession.instance.isSummoned) return;
     if (_bootstrapping ||
         _nativeReady ||
         _electronActive ||
@@ -101,12 +103,15 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
       return;
     }
     _bootstrapping = true;
-    _bootError = null;
+    _bootError = DeskPetSession.instance.error;
     if (mounted) setState(() {});
 
-    final bool ok = await _entity.ensureOverlay();
-    if (!ok && mounted) {
-      _bootError = "桌宠窗口启动失败\n请确认后端已运行且 avatar 已构建";
+    if (_bootError == null) {
+      final bool ok = await _entity.ensureOverlay();
+      if (!ok && mounted) {
+        _bootError = DeskPetSession.instance.error ??
+            "桌宠窗口启动失败\n请确认后端已运行且 avatar 已构建";
+      }
     }
 
     _bootstrapping = false;
@@ -298,14 +303,16 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
   @override
   Widget build(BuildContext context) {
+    if (!DeskPetSession.instance.isSummoned) {
+      return const SizedBox.shrink();
+    }
+
     final Size screen = MediaQuery.sizeOf(context);
 
     if (kIsWeb) {
-      final navigator = Navigator.of(context, rootNavigator: true);
-      final bool isMainRoute = !navigator.canPop();
       return AgentSphereWebView(
         showOverlayButton: false,
-        visible: isMainRoute,
+        visible: true,
       );
     }
 
@@ -325,7 +332,11 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     }
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
-      if (_nativeReady) _syncDockIfNeeded();
+      if (_nativeReady) {
+        _syncDockIfNeeded();
+      } else if (!_bootstrapping && !_electronActive && !_embeddedFallback) {
+        unawaited(_bootstrapNativeDeskPet());
+      }
     });
 
     _ensureInitialPosition(screen);

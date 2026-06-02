@@ -1,5 +1,5 @@
-import type { TTSProvider, AudioBuffer } from "./types.js";
-import type { TtsService } from "../tts-service.js";
+import type { TTSProvider, AudioBuffer } from "../types.js";
+import type { TtsService } from "../../tts-service.js";
 
 export class OpenAITTSAdapter implements TTSProvider {
   name = "openai-tts";
@@ -32,6 +32,6 @@ export class OpenAITTSAdapter implements TTSProvider {
       { id: "onyx", name: "Onyx", language: "en-US", gender: "male" },
       { id: "nova", name: "Nova", language: "en-US", gender: "female" },
       { id: "shimmer", name: "Shimmer", language: "en-US", gender: "female" },
-    ];
+    ] as Array<{ id: string; name: string; language: string; gender: "neutral" | "male" | "female" }>;
   }
 }

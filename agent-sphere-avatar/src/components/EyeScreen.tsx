@@ -1,6 +1,7 @@
 import type { ThreeEvent } from "@react-three/fiber";
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { MODEL } from "../constants/model-proportions";
+import { createScreenCapGeometry } from "../utils/screen-cap-geometry";
 
 interface EyeScreenProps {
   onPointerOver?: () => void;
@@ -12,7 +13,7 @@ interface EyeScreenProps {
   onDragPointerUp?: (e: ThreeEvent<PointerEvent>) => void;
 }
 
-/** DG2 玻璃面透明交互热区 — 短按开菜单，拖动转球 */
+/** DG2 玻璃面透明交互热区 — 与曲屏同形，短按开菜单，拖动转球 */
 export function EyeScreen({
   onPointerOver,
   onPointerOut,
@@ -22,12 +23,20 @@ export function EyeScreen({
   onDragPointerMove,
   onDragPointerUp,
 }: EyeScreenProps) {
-  const [gx, gy, gz] = MODEL.glassScreenPosition;
+  const hitGeometry = useMemo(
+    () =>
+      createScreenCapGeometry({
+        radius: MODEL.bodyRadius,
+        halfAngle: MODEL.screenHitHalfAngle,
+      }),
+    [],
+  );
   const movedRef = useRef(false);
 
   return (
     <mesh
-      position={[gx, gy, gz]}
+      geometry={hitGeometry}
+      renderOrder={3}
       onPointerOver={() => {
         onInteractionChange?.(true);
         onPointerOver?.();
@@ -53,7 +62,6 @@ export function EyeScreen({
         if (!movedRef.current) onClick?.();
       }}
     >
-      <circleGeometry args={[0.38, 48]} />
       <meshBasicMaterial transparent opacity={0} depthWrite={false} />
     </mesh>
   );

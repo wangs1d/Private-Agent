@@ -986,13 +986,16 @@ export function selectRelevantTools(
     }
   }
   
-  const filteredTools = allTools.filter(tool => {
-    if (!tool.function?.name) return false;
+  const filteredTools = allTools.filter((tool) => {
+    if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
     return selectedToolNames.has(tool.function.name);
   });
   
   if (filteredTools.length < minTools) {
-    const remainingTools = allTools.filter(tool => !selectedToolNames.has(tool.function.name));
+    const remainingTools = allTools.filter((tool) => {
+      if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
+      return !selectedToolNames.has(tool.function.name);
+    });
     const needed = minTools - filteredTools.length;
     filteredTools.push(...remainingTools.slice(0, needed));
   }

@@ -28,7 +28,15 @@
       <main class="main">
         <header class="header">
           <span class="header-title"></span>
-          <button id="connect-phone" class="connect-phone-btn icon-only" type="button" title="连接手机">📱</button>
+          <button
+            type="button"
+            id="avatar-summon-btn"
+            class="avatar-summon-btn"
+            title="召唤桌宠"
+            aria-pressed="false"
+          >
+            🤖
+          </button>
         </header>
         <p class="status" id="status">初始化中...</p>
 
@@ -52,15 +60,15 @@
 
           <aside class="right-panel">
             <details class="panel-card" open>
-              <summary>今日聚焦</summary>
+              <summary>📋 今日聚焦</summary>
               <div id="focus-list">
-                <p>今天还没有安排，和我说一声就能添加。</p>
+                <div class="panel-empty">今天还没有安排，和我说一声就能添加。</div>
               </div>
             </details>
             <details class="panel-card">
-              <summary>待你确认 <span class="badge" id="confirm-badge">0</span></summary>
+              <summary>✅ 待你确认 <span class="badge" id="confirm-badge">0</span></summary>
               <div id="confirm-list">
-                <p>当前没有待处理事项。</p>
+                <div class="panel-empty">当前没有待处理事项。</div>
               </div>
             </details>
           </aside>
@@ -68,7 +76,7 @@
       </main>
     </div>
 
-    <div id="agent-avatar-float" class="avatar-float-host" aria-label="Agent 3D 形象">
+    <div id="agent-avatar-float" class="avatar-float-host is-hidden" aria-label="Agent 3D 形象" hidden>
       <iframe id="agent-avatar-frame" class="avatar-float-frame" title="Agent Sphere" allow="autoplay"></iframe>
     </div>
 
@@ -81,9 +89,6 @@
           sideToggle.textContent = shell.classList.contains("sidebar-collapsed") ? "▶" : "◀";
         });
       }
-      document.getElementById("connect-phone")?.addEventListener("click", () => {
-        document.getElementById("phone-dialer-toggle")?.click();
-      });
     </script>
 
     <script type="module" src="/chat/assets/app.js"></script>

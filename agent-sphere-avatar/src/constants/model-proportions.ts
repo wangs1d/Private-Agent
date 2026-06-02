@@ -25,6 +25,14 @@ export const MODEL = {
   glassScreenPosition: [0, 0, 0.5] as const,
   /** 内嵌屏 angular 参数（供光标尺寸参考） */
   screenAngularR: Math.PI / 2.8,
+  /** 曲屏内嵌表情 — 球冠半径（略小于外壳，贴在玻璃内侧） */
+  screenCapRadius: 0.497,
+  /** OLED 表情圆盘半径（与黑色曲屏可视圆一致） */
+  screenFaceRadius: 0.34,
+  /** 表情可见区域半角（球冠 UV 参考） */
+  screenFaceHalfAngle: Math.asin(0.34 / 0.5),
+  /** 交互热区半角（与 EyeScreen 对齐） */
+  screenHitHalfAngle: Math.asin(0.38 / 0.5),
   /** 拉丝钢壳 */
   shellColor: "#9a9aa2",
   shellRoughness: 0.38,

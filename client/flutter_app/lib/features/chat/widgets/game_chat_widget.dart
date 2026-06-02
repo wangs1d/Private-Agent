@@ -55,6 +55,9 @@ class _GameChatWidgetState extends State<GameChatWidget> {
         _position = widget.initialPosition ?? 
             Offset(MediaQuery.of(context).size.width - widget.width - 20, 80);
       });
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
     });
   }
 

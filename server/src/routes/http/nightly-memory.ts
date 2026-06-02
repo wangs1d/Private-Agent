@@ -131,7 +131,7 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
     }
   });
 
-  app.get("/api/chat/sync/status", async (request, reply) => {
+  app.get<{ Querystring: { actorId?: string } }>("/api/chat/sync/status", async (request, reply) => {
     const syncService = getDailyChatSyncService();
     
     if (!syncService) {
@@ -140,7 +140,7 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
       });
     }
 
-    const actorId = request.query.actorId as string | undefined;
+    const actorId = request.query.actorId;
     return syncService.getSyncStatus(actorId);
   });
 }

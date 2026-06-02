@@ -120,7 +120,7 @@ export class PhoneCallHandler {
     this.activeCalls.set(instance.config.id, callState);
 
     try {
-      await this.runInteractiveDialogueLoop(instance, callResult.callId, config, disconnectCommands, dialogueContext);
+      await this.runInteractiveDialogueLoop(instance, userId, callResult.callId, config, disconnectCommands, dialogueContext);
       return true;
     } catch (error) {
       this.deps.logger?.error(`Error during interactive dialogue: ${error}`);
@@ -131,6 +131,7 @@ export class PhoneCallHandler {
 
   private async runInteractiveDialogueLoop(
     instance: ReminderInstance,
+    userId: string,
     callId: string,
     config: PhoneCallConfig,
     disconnectCommands: string[],

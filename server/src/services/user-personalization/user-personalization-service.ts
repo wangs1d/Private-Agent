@@ -16,9 +16,27 @@ import {
   syncPreferredToneInProfile,
 } from "./profile-heuristics.js";
 import { UserProfileStore } from "./user-profile-store.js";
+import {
+  buildFactPromptSummary,
+  decayFactStore,
+  defaultFactStore,
+  extractFactCandidates,
+  mergeFactCandidates,
+  toFactStore,
+} from "./user-profile-facts.js";
 
 const EMOTION_STATE_KEY = "emotion_state";
 const USER_PROFILE_KV_KEY = "user_profile";
+const USER_BEHAVIOR_SIGNAL_KEY = "user_behavior_signal";
+const USER_PROFILE_FACTS_KEY = "user_profile_facts";
+
+type BehaviorSignals = {
+  shoppingInterest: number;
+  planningInterest: number;
+  companionNeed: number;
+  privacyConcern: number;
+  updatedAt: string;
+};
 
 const TONE_ZH: Record<PreferredTone, string> = {
   humor: "幽默轻松",
@@ -65,6 +83,70 @@ function toEmotionState(v: unknown): EmotionState {
   };
 }
 
+function defaultBehaviorSignals(): BehaviorSignals {
+  return {
+    shoppingInterest: 0,
+    planningInterest: 0,
+    companionNeed: 0,
+    privacyConcern: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function toBehaviorSignals(v: unknown): BehaviorSignals {
+  if (!v || typeof v !== "object") return defaultBehaviorSignals();
+  const o = v as Record<string, unknown>;
+  return {
+    shoppingInterest: Number(o.shoppingInterest) || 0,
+    planningInterest: Number(o.planningInterest) || 0,
+    companionNeed: Number(o.companionNeed) || 0,
+    privacyConcern: Number(o.privacyConcern) || 0,
+    updatedAt:
+      typeof o.updatedAt === "string" && o.updatedAt
+        ? o.updatedAt
+        : new Date().toISOString(),
+  };
+}
+
+function detectBehaviorSignals(userText: string): Partial<BehaviorSignals> {
+  const t = userText.toLowerCase();
+  const shopping =
+    /(buy|shopping|price|deal|discount|coupon|amazon|walmart|costco|购买|买|比价|优惠|省钱)/i.test(t)
+      ? 1
+      : 0;
+  const planning =
+    /(plan|schedule|calendar|todo|reminder|deadline|安排|计划|日程|提醒|待办)/i.test(t)
+      ? 1
+      : 0;
+  const companion =
+    /(chat with me|talk to me|陪我|陪伴|孤独|lonely|support me|安慰)/i.test(t)
+      ? 1
+      : 0;
+  const privacy =
+    /(privacy|private|data|delete|export|gdpr|ccpa|隐私|删除数据|导出数据)/i.test(t)
+      ? 1
+      : 0;
+  return {
+    shoppingInterest: shopping,
+    planningInterest: planning,
+    companionNeed: companion,
+    privacyConcern: privacy,
+  };
+}
+
+function behaviorSummaryLine(signal: BehaviorSignals): string | undefined {
+  const pairs: Array<[string, number]> = [
+    ["shopping", signal.shoppingInterest],
+    ["planning", signal.planningInterest],
+    ["companion", signal.companionNeed],
+    ["privacy", signal.privacyConcern],
+  ];
+  pairs.sort((a, b) => b[1] - a[1]);
+  if (pairs[0][1] <= 0) return undefined;
+  const top2 = pairs.slice(0, 2).map((x) => x[0]).join(", ");
+  return `User long-term behavior tendency: ${top2}. Prioritize matching response style and actions.`;
+}
+
 export type PersonalizationPromptSlice = {
   userProfile?: string;
   toneGuidance?: string;
@@ -87,8 +169,12 @@ export class UserPersonalizationService {
     if (!isUserPersonalizationEnabled()) return {};
 
     let state = this.loadEmotionState(actorId);
+    let behavior = this.loadBehaviorSignals(actorId);
+    const facts = this.loadFactStore(actorId);
+    const decayedFacts = decayFactStore(facts);
     if (userText?.trim()) {
       state = this.applyUserSignals(actorId, userText, state);
+      behavior = this.applyBehaviorSignals(actorId, userText, behavior);
     }
 
     const profile = await this.store.read(actorId);
@@ -99,7 +185,13 @@ export class UserPersonalizationService {
 
     return {
       userProfile,
-      toneGuidance: buildToneGuidance(state),
+      toneGuidance: [
+        buildToneGuidance(state),
+        behaviorSummaryLine(behavior),
+        buildFactPromptSummary(decayedFacts, 8),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     };
   }
 
@@ -120,6 +212,7 @@ export class UserPersonalizationService {
     md = syncPreferredToneInProfile(md, TONE_ZH[state.preferredTone]);
     await this.store.write(actorId, md);
     this.syncProfileKv(actorId, md);
+    this.updateFactStore(actorId, userText);
 
     const everyN = profileLlmEveryNTurns();
     if (everyN > 0 && state.turnCount > 0 && state.turnCount % everyN === 0) {
@@ -140,6 +233,71 @@ export class UserPersonalizationService {
     if (!this.memory) return defaultEmotionState();
     const { entries } = this.memory.getSnapshot(actorId, [EMOTION_STATE_KEY]);
     return toEmotionState(entries[EMOTION_STATE_KEY]);
+  }
+
+  private loadFactStore(actorId: string) {
+    if (!this.memory) return defaultFactStore();
+    const { entries } = this.memory.getSnapshot(actorId, [USER_PROFILE_FACTS_KEY]);
+    return toFactStore(entries[USER_PROFILE_FACTS_KEY]);
+  }
+
+  private updateFactStore(actorId: string, userText: string): void {
+    if (!this.memory || !userText.trim()) return;
+    void this.updateFactStoreAsync(actorId, userText);
+  }
+
+  private async updateFactStoreAsync(actorId: string, userText: string): Promise<void> {
+    if (!this.memory) return;
+    const candidates = extractFactCandidates(userText);
+    if (!candidates.length) return;
+    for (let i = 0; i < 8; i++) {
+      const { revision, entries } = this.memory.getSnapshot(actorId, [USER_PROFILE_FACTS_KEY]);
+      const current = toFactStore(entries[USER_PROFILE_FACTS_KEY]);
+      const merged = mergeFactCandidates(decayFactStore(current), candidates);
+      const r = await this.memory.applyPatch(actorId, revision, [
+        { key: USER_PROFILE_FACTS_KEY, op: "put", value: merged },
+      ]);
+      if (r.ok) return;
+    }
+  }
+
+  private loadBehaviorSignals(actorId: string): BehaviorSignals {
+    if (!this.memory) return defaultBehaviorSignals();
+    const { entries } = this.memory.getSnapshot(actorId, [USER_BEHAVIOR_SIGNAL_KEY]);
+    return toBehaviorSignals(entries[USER_BEHAVIOR_SIGNAL_KEY]);
+  }
+
+  private applyBehaviorSignals(
+    actorId: string,
+    userText: string,
+    current: BehaviorSignals,
+  ): BehaviorSignals {
+    const delta = detectBehaviorSignals(userText);
+    const next: BehaviorSignals = {
+      shoppingInterest: current.shoppingInterest + (delta.shoppingInterest ?? 0),
+      planningInterest: current.planningInterest + (delta.planningInterest ?? 0),
+      companionNeed: current.companionNeed + (delta.companionNeed ?? 0),
+      privacyConcern: current.privacyConcern + (delta.privacyConcern ?? 0),
+      updatedAt: new Date().toISOString(),
+    };
+    this.saveBehaviorSignals(actorId, next);
+    return next;
+  }
+
+  private saveBehaviorSignals(actorId: string, signal: BehaviorSignals): void {
+    if (!this.memory) return;
+    void this.saveBehaviorSignalsAsync(actorId, signal);
+  }
+
+  private async saveBehaviorSignalsAsync(actorId: string, signal: BehaviorSignals): Promise<void> {
+    if (!this.memory) return;
+    for (let i = 0; i < 8; i++) {
+      const { revision } = this.memory.getSnapshot(actorId, [USER_BEHAVIOR_SIGNAL_KEY]);
+      const r = await this.memory.applyPatch(actorId, revision, [
+        { key: USER_BEHAVIOR_SIGNAL_KEY, op: "put", value: signal },
+      ]);
+      if (r.ok) return;
+    }
   }
 
   private saveEmotionState(actorId: string, state: EmotionState): void {

@@ -19,6 +19,7 @@ export function SphereBodyHandle({
 }: SphereBodyHandleProps) {
   return (
     <mesh
+      renderOrder={4}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

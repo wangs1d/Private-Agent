@@ -10,7 +10,7 @@ import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
 import type { ToolExecutedInfo, ToolExecuteStartInfo } from "../external-model/types.js";
 import { ServerEventType } from "../protocol.js";
 import { embodimentThinking } from "../services/agent-embodiment.js";
-import { isScheduleCreateToolName } from "../tools/schedule-tool-names.js";
+import { isScheduleMutationToolName } from "../tools/schedule-tool-names.js";
 
 export type ChatToolWireContext = {
   sessionId: string;
@@ -92,14 +92,38 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
 
 function sendScheduleTasksChanged(ctx: ChatToolWireContext, result: Record<string, unknown>): void {
   const taskId = String(result.taskId ?? "").trim();
+  if (!taskId) return;
+
+  const actionRaw = String(result.action ?? "").trim();
+  const action =
+    actionRaw === "deleted" || actionRaw === "updated" || actionRaw === "created"
+      ? actionRaw
+      : "created";
+
+  if (action === "deleted") {
+    ctx.send(
+      JSON.stringify({
+        type: ServerEventType.ScheduleTasksChanged,
+        payload: {
+          sessionId: ctx.sessionId,
+          traceId: ctx.traceId,
+          action: "deleted",
+          taskId,
+        },
+      }),
+    );
+    return;
+  }
+
   const nextRunAt = String(result.nextRunAt ?? "").trim();
-  if (!taskId || !nextRunAt) return;
+  if (!nextRunAt) return;
   ctx.send(
     JSON.stringify({
       type: ServerEventType.ScheduleTasksChanged,
       payload: {
         sessionId: ctx.sessionId,
         traceId: ctx.traceId,
+        action,
         taskId,
         nextRunAt,
         title:
@@ -128,11 +152,15 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
 
   if (
     info.ok &&
-    isScheduleCreateToolName(info.toolName) &&
+    isScheduleMutationToolName(info.toolName) &&
     info.result.ok === true &&
     info.result.taskId
   ) {
-    sendScheduleTasksChanged(ctx, info.result);
+    const isDelete = info.toolName.replace(/_/g, ".") === "calendar.delete_task";
+    sendScheduleTasksChanged(ctx, {
+      ...info.result,
+      action: isDelete ? "deleted" : "created",
+    });
   }
 
   if (!isMasterInvokeSubAgentTool(info.toolName) || !info.ok) return;

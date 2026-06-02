@@ -17,7 +17,12 @@ import {
 
 const SESSION_KEY = "pai_web_session_id";
 const FULL_ACCESS_KEY = "pai_web_full_access";
+const AGENT_NAME_KEY = "pai_agent_name";
 const DAILY_CHAT_PREFIX = "pai_daily_chat_";
+if (typeof history !== "undefined" && history.scrollRestoration) {
+  history.scrollRestoration = "manual";
+}
+
 const messagesEl = document.getElementById("messages");
 const inputEl = document.getElementById("input");
 const sendBtn = document.getElementById("send");
@@ -26,6 +31,12 @@ const statusEl = document.getElementById("status");
 const focusListEl = document.getElementById("focus-list");
 const confirmListEl = document.getElementById("confirm-list");
 const confirmBadgeEl = document.getElementById("confirm-badge");
+const headerTitleEl = document.querySelector(".header-title");
+
+const STORAGE_KEYS = {
+  TODAY_FOCUS: 'pai_today_focus',
+  PENDING: 'pai_pending_items',
+};
 
 const uiState = {
   todayFocus: [],
@@ -92,9 +103,9 @@ class DailyChatStorage {
 
   restoreMessagesToUI() {
     if (!messagesEl) return;
-    
+
     const todayMsgs = this.messages.filter(m => m.day === this.currentDay);
-    
+
     for (const msg of todayMsgs) {
       if (msg.role === 'user') {
         appendBubble('user', escapeHtml(msg.text), msg.messageId);
@@ -105,12 +116,6 @@ class DailyChatStorage {
       } else if (msg.role === 'system') {
         appendBubble('system', escapeHtml(msg.text), msg.messageId);
       }
-    }
-    
-    if (todayMsgs.length > 0) {
-      setTimeout(() => {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }, 100);
     }
   }
 
@@ -127,7 +132,7 @@ class DailyChatStorage {
         this.currentDay = newDay;
         this.messages = [];
         this.loadTodayMessages();
-        
+
         if (typeof window.onDayChange === 'function') {
           window.onDayChange(this.currentDay);
         }
@@ -146,7 +151,7 @@ class DailyChatStorage {
     if (!this.messages || this.messages.length === 0) return;
 
     const todayMsgs = this.messages.filter(m => m.day === this.currentDay);
-    
+
     if (todayMsgs.length === 0) return;
 
     const syncData = {
@@ -173,7 +178,7 @@ class DailyChatStorage {
       if (response.ok) {
         const result = await response.json();
         console.log(`[DailyChatSync] ✅ Synced ${result.messageCount} messages to server`);
-        
+
         localStorage.setItem(`pai_last_sync_${this.currentDay}`, JSON.stringify({
           syncedAt: new Date().toISOString(),
           messageCount: result.messageCount
@@ -237,6 +242,9 @@ fullAccessBtn?.addEventListener("click", () => {
 
 /** @type {WebSocket | null} */
 let ws = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let lastInboundAt = 0;
 /** 与聊天区「处理中」进度条同步，供服务端合并用户连发消息 */
 let agentProcessingUiActive = false;
 /** @type {Map<string, { el: HTMLElement, text: string, playUrl: string | null }>} */
@@ -246,19 +254,58 @@ const assistants = new Map();
 let avatarFrame = null;
 let avatarReady = false;
 let avatarSpeakingEnergy = 0.45;
+let avatarSummoned = false;
 
 function getAvatarFrame() {
   if (!avatarFrame) avatarFrame = document.getElementById("agent-avatar-frame");
   return avatarFrame;
 }
 
-/** 进入页面即加载可拖动悬浮 3D Agent（与 Flutter WebView 同源 embed） */
+function updateAvatarSummonButton() {
+  const btn = document.getElementById("avatar-summon-btn");
+  if (!btn) return;
+  btn.title = avatarSummoned ? "收起桌宠" : "召唤桌宠";
+  btn.setAttribute("aria-pressed", avatarSummoned ? "true" : "false");
+}
+
+function summonAvatar() {
+  const frame = getAvatarFrame();
+  const host = document.getElementById("agent-avatar-float");
+  if (!frame || !host) return;
+  if (!avatarSummoned) {
+    const sid = sessionId();
+    frame.src = `/chat/assets/avatar/embed.html?wsOff=1&sessionId=${encodeURIComponent(sid)}`;
+  }
+  avatarSummoned = true;
+  host.hidden = false;
+  host.classList.remove("is-hidden");
+  updateAvatarSummonButton();
+}
+
+function dismissAvatar() {
+  const frame = getAvatarFrame();
+  const host = document.getElementById("agent-avatar-float");
+  if (!host) return;
+  avatarSummoned = false;
+  avatarReady = false;
+  host.hidden = true;
+  host.classList.add("is-hidden");
+  if (frame) frame.src = "about:blank";
+  updateAvatarSummonButton();
+}
+
+/** 桌宠拖动与可选召唤（默认隐藏，点击按钮后加载） */
 function initAvatarFrame() {
   const frame = getAvatarFrame();
   const host = document.getElementById("agent-avatar-float");
   if (!frame || !host) return;
-  const sid = sessionId();
-  frame.src = `/chat/assets/avatar/embed.html?wsOff=1&sessionId=${encodeURIComponent(sid)}`;
+
+  const summonBtn = document.getElementById("avatar-summon-btn");
+  summonBtn?.addEventListener("click", () => {
+    if (avatarSummoned) dismissAvatar();
+    else summonAvatar();
+  });
+  updateAvatarSummonButton();
 
   let dragging = false;
   let startX = 0;
@@ -443,6 +490,21 @@ function sessionId() {
   return id;
 }
 
+function getAgentName() {
+  return localStorage.getItem(AGENT_NAME_KEY) || "我的AI助手";
+}
+
+function setAgentName(name) {
+  localStorage.setItem(AGENT_NAME_KEY, name);
+  updateAgentNameDisplay();
+}
+
+function updateAgentNameDisplay() {
+  if (headerTitleEl) {
+    headerTitleEl.textContent = getAgentName();
+  }
+}
+
 function wsUrl() {
   const u = new URL("/ws", window.location.href);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
@@ -453,41 +515,168 @@ function setStatus(line) {
   statusEl.textContent = line ?? "";
 }
 
+// === Data Persistence ===
+function loadFromStorage() {
+  try {
+    const focusData = localStorage.getItem(STORAGE_KEYS.TODAY_FOCUS);
+    const pendingData = localStorage.getItem(STORAGE_KEYS.PENDING);
+    
+    if (focusData) {
+      uiState.todayFocus = JSON.parse(focusData);
+    }
+    if (pendingData) {
+      uiState.pending = JSON.parse(pendingData);
+    }
+  } catch (e) {
+    console.error('[Storage] Load failed:', e);
+  }
+}
+
+function saveToStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.TODAY_FOCUS, JSON.stringify(uiState.todayFocus));
+    localStorage.setItem(STORAGE_KEYS.PENDING, JSON.stringify(uiState.pending));
+  } catch (e) {
+    console.error('[Storage] Save failed:', e);
+  }
+}
+
+// === Helper Functions ===
+function generateId() {
+  return `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function formatTime(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const diff = now - date;
+  
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`;
+  if (diff < 86400000) return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function parsePriority(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes('紧急') || lower.includes('high') || lower.includes('urgent')) return 'high';
+  if (lower.includes('重要') || lower.includes('medium')) return 'medium';
+  return 'low';
+}
+
+// === Rendering Functions ===
+function renderItem(item, type) {
+  const priorityClass = item.priority ? `priority-${item.priority}` : '';
+  const completedClass = item.completed ? 'completed' : '';
+  
+  return `
+    <div class="panel-item ${priorityClass} ${completedClass}" data-id="${item.id}" data-type="${type}">
+      <div class="panel-item-content">
+        <div class="panel-item-text">${escapeHtml(item.text)}</div>
+        <div class="panel-item-meta">
+          ${item.tag ? `<span class="panel-item-tag">${escapeHtml(item.tag)}</span>` : ''}
+          <span class="panel-item-time">${formatTime(item.timestamp)}</span>
+        </div>
+      </div>
+      <div class="panel-item-actions">
+        <button class="panel-item-btn complete" title="完成" onclick="toggleComplete('${item.id}', '${type}')">
+          ${item.completed ? '↩️' : '✓'}
+        </button>
+        <button class="panel-item-btn delete" title="删除" onclick="deleteItem('${item.id}', '${type}')">
+          🗑️
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 function renderFocusPanel() {
   if (!focusListEl) return;
-  const items = uiState.todayFocus.slice(0, 4);
+  const items = uiState.todayFocus.slice(0, 8);
   if (!items.length) {
-    focusListEl.innerHTML = "<p>今天还没有安排，和我说一声就能添加。</p>";
+    focusListEl.innerHTML = '<div class="panel-empty">今天还没有安排，和我说一声就能添加。</div>';
     return;
   }
-  focusListEl.innerHTML = items.map((s) => `<p>${escapeHtml(s)}</p>`).join("");
+  focusListEl.innerHTML = `<div class="panel-list">${items.map(item => renderItem(item, 'focus')).join('')}</div>`;
 }
 
 function renderConfirmPanel() {
   if (!confirmListEl || !confirmBadgeEl) return;
-  const items = uiState.pending.slice(0, 4);
+  const items = uiState.pending.slice(0, 8);
   confirmBadgeEl.textContent = String(items.length);
   if (!items.length) {
-    confirmListEl.innerHTML = "<p>当前没有待处理事项。</p>";
+    confirmListEl.innerHTML = '<div class="panel-empty">当前没有待处理事项。</div>';
     return;
   }
-  confirmListEl.innerHTML = items.map((s) => `<p>${escapeHtml(s)}</p>`).join("");
+  confirmListEl.innerHTML = `<div class="panel-list">${items.map(item => renderItem(item, 'pending')).join('')}</div>`;
 }
 
-function pushFocus(text) {
+// === Item Operations ===
+function pushFocus(text, priority = null) {
   const t = String(text ?? "").trim();
   if (!t) return;
-  uiState.todayFocus = [t, ...uiState.todayFocus.filter((x) => x !== t)].slice(0, 8);
+  
+  const newItem = {
+    id: generateId(),
+    text: t,
+    priority: priority || parsePriority(t),
+    tag: null,
+    timestamp: Date.now(),
+    completed: false,
+  };
+  
+  uiState.todayFocus = [newItem, ...uiState.todayFocus.filter(x => x.text !== t)].slice(0, 8);
+  saveToStorage();
   renderFocusPanel();
 }
 
 function setPending(items) {
   uiState.pending = items
-    .map((x) => String(x ?? "").trim())
-    .filter(Boolean)
+    .map(x => {
+      if (typeof x === 'string') {
+        return {
+          id: generateId(),
+          text: String(x ?? "").trim(),
+          priority: parsePriority(x),
+          tag: null,
+          timestamp: Date.now(),
+          completed: false,
+        };
+      }
+      return x;
+    })
+    .filter(x => x && x.text)
     .slice(0, 8);
+  saveToStorage();
   renderConfirmPanel();
 }
+
+function toggleComplete(id, type) {
+  const list = type === 'focus' ? uiState.todayFocus : uiState.pending;
+  const item = list.find(x => x.id === id);
+  if (item) {
+    item.completed = !item.completed;
+    saveToStorage();
+    if (type === 'focus') renderFocusPanel();
+    else renderConfirmPanel();
+  }
+}
+
+function deleteItem(id, type) {
+  if (type === 'focus') {
+    uiState.todayFocus = uiState.todayFocus.filter(x => x.id !== id);
+    saveToStorage();
+    renderFocusPanel();
+  } else {
+    uiState.pending = uiState.pending.filter(x => x.id !== id);
+    saveToStorage();
+    renderConfirmPanel();
+  }
+}
+
+// Make functions available globally for inline onclick
+window.toggleComplete = toggleComplete;
+window.deleteItem = deleteItem;
 
 function syncAgentProcessingUi(active) {
   if (agentProcessingUiActive === active) return;
@@ -515,8 +704,7 @@ function appendBubble(role, html, id) {
   el.className = `bubble ${role}`;
   el.dataset.messageId = id ?? "";
   el.innerHTML = html;
-  messagesEl.appendChild(el);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  messagesEl.insertBefore(el, messagesEl.firstChild);
   return el;
 }
 
@@ -533,15 +721,15 @@ function paintAssistant(id) {
     const { summary, briefText, cleanedText } = parseContentSummaryV2(row.text);
     if (summary) {
       const cardHtml = renderContentSummaryCardV2(summary, briefText);
-      
+
       if (summary.detailContent) {
         storeDetailContent(summary.id, summary.detailContent);
       }
-      
+
       if (summary.sections) {
         storeSections(summary.id, summary.sections);
       }
-      
+
       if (cleanedText && cleanedText.trim()) {
         row.el.innerHTML = cardHtml + `<div class="card-context-text" style="margin-top: 8px;">${escapeHtml(cleanedText)}</div>`;
       } else {
@@ -556,7 +744,6 @@ function paintAssistant(id) {
       row.el.innerHTML = escapeHtml(row.text);
     }
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function ensureAssistant(id) {
@@ -568,22 +755,76 @@ function ensureAssistant(id) {
   return row;
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function scheduleReconnect(delayMs = 3000) {
+  clearReconnectTimer();
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delayMs);
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      stopHeartbeat();
+      return;
+    }
+    if (Date.now() - lastInboundAt > 45000) {
+      try {
+        ws.close();
+      } catch {}
+      return;
+    }
+    ws.send(JSON.stringify({ type: "ws.keepalive", payload: { clientTime: new Date().toISOString() } }));
+  }, 20000);
+}
+
 function connect() {
   const sid = sessionId();
-  ws = new WebSocket(wsUrl());
-  setStatus("连接中…");
-  ws.addEventListener("open", () => {
-    ws.send(JSON.stringify({ type: "session.init", payload: { sessionId: sid, userId: sid } }));
-    setStatus("已连接");
+  clearReconnectTimer();
+  stopHeartbeat();
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    try {
+      ws.close();
+    } catch {}
+  }
+  const currentWs = new WebSocket(wsUrl());
+  ws = currentWs;
+  setStatus("鏉╃偞甯存稉顓涒偓?");
+  currentWs.addEventListener("open", () => {
+    if (ws !== currentWs) return;
+    lastInboundAt = Date.now();
+    currentWs.send(JSON.stringify({ type: "session.init", payload: { sessionId: sid, userId: sid } }));
+    setStatus("瀹歌尪绻涢幒?");
     sendBtn.disabled = false;
+    startHeartbeat();
   });
-  ws.addEventListener("close", () => {
+  currentWs.addEventListener("close", () => {
+    if (ws !== currentWs) return;
     syncAgentProcessingUi(false);
-    setStatus("已断开，3 秒后重连…");
+    setStatus("瀹稿弶鏌囧鈧敍? 缁夋帒鎮楅柌宥堢箾閳?");
     sendBtn.disabled = true;
-    setTimeout(connect, 3000);
+    stopHeartbeat();
+    scheduleReconnect(3000);
   });
-  ws.addEventListener("message", (ev) => {
+  currentWs.addEventListener("message", (ev) => {
+    if (ws !== currentWs) return;
+    lastInboundAt = Date.now();
     let msg;
     try {
       msg = JSON.parse(ev.data);
@@ -616,10 +857,25 @@ function handleWs(msg) {
 
   if (type === "agent.phone.call_status") {
     const status = String(p.status ?? "");
-    if (status === "ringing") setPending(["电话处理中：振铃中", ...uiState.pending]);
-    if (status === "connected") setPending(["电话处理中：已接通", ...uiState.pending]);
+    if (status === "ringing") {
+      const pendingTexts = uiState.pending.map(x => typeof x === 'string' ? x : x.text);
+      if (!pendingTexts.some(t => t.startsWith("电话处理中："))) {
+        setPending(["电话处理中：振铃中", ...uiState.pending]);
+      }
+    }
+    if (status === "connected") {
+      const filtered = uiState.pending.filter(x => {
+        const text = typeof x === 'string' ? x : x.text;
+        return !text.startsWith("电话处理中：");
+      });
+      setPending(["电话处理中：已接通", ...filtered]);
+    }
     if (status === "ended") {
-      setPending(uiState.pending.filter((x) => !x.startsWith("电话处理中：")));
+      const filtered = uiState.pending.filter(x => {
+        const text = typeof x === 'string' ? x : x.text;
+        return !text.startsWith("电话处理中：");
+      });
+      setPending(filtered);
     }
     handlePhoneCallStatus(p);
     return;
@@ -630,8 +886,19 @@ function handleWs(msg) {
     if (!line) return;
     pushFocus(line);
     const phase = String(p.phase ?? "");
-    if (phase === "delegate_start") setPending(["后台任务处理中", ...uiState.pending]);
-    if (phase === "delegate_done") setPending(uiState.pending.filter((x) => x !== "后台任务处理中"));
+    if (phase === "delegate_start") {
+      const pendingTexts = uiState.pending.map(x => typeof x === 'string' ? x : x.text);
+      if (!pendingTexts.includes("后台任务处理中")) {
+        setPending(["后台任务处理中", ...uiState.pending]);
+      }
+    }
+    if (phase === "delegate_done") {
+      const filtered = uiState.pending.filter(x => {
+        const text = typeof x === 'string' ? x : x.text;
+        return text !== "后台任务处理中";
+      });
+      setPending(filtered);
+    }
     let prog = document.getElementById("progress-bubble");
     if (!prog) {
       prog = appendBubble("progress", "", "progress");
@@ -650,7 +917,6 @@ function handleWs(msg) {
         return `<div class="prog-step${isLast ? ' prog-step-current' : ''}">${prefix} ${escapeHtml(s)}</div>`;
       })
       .join("");
-    messagesEl.scrollTop = messagesEl.scrollHeight;
     syncAgentProcessingUi(true);
     patchAvatar({ mood: "thinking", caption: line, energy: 0.72 });
     return;
@@ -835,10 +1101,20 @@ function handlePhoneCallStatus(payload) {
   const status = payload.status ?? "unknown";
   if (status === "ringing") {
     appendBubble("system", `📞 正在呼叫 Agent (${payload.toActorId ?? ""})…`, "phone-status");
+    if (phoneCallWidgetState !== "ringing") {
+      phoneCallWidgetState = "ringing";
+      const widget = document.getElementById("phone-dialer");
+      if (widget) updatePhoneCallWidgetContent(widget);
+    }
   } else if (status === "connected") {
     appendBubble("system", "📞 已接通", "phone-status");
+    phoneCallWidgetState = "connected";
+    phoneCallSeconds = 0;
+    const widget = document.getElementById("phone-dialer");
+    if (widget) updatePhoneCallWidgetContent(widget);
   } else if (status === "ended") {
     appendBubble("system", "📞 通话已结束", "phone-status");
+    setTimeout(() => closePhoneCallWidget(), 2000);
   }
 }
 
@@ -871,65 +1147,130 @@ function sendUserMessageDirect(text) {
 
 function showPhoneDialer() {
   const existing = document.getElementById("phone-dialer");
-  if (existing) { existing.remove(); return; }
+  if (existing) {
+    closePhoneCallWidget();
+    return;
+  }
 
-  const dialer = document.createElement("div");
-  dialer.className = "phone-dialer";
-  dialer.id = "phone-dialer";
-  dialer.innerHTML = `
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    alert("未连接到服务器");
+    return;
+  }
+
+  ws.send(JSON.stringify({
+    type: "phone.call_my_agent",
+    payload: {},
+  }));
+
+  showPhoneCallWidget("ringing");
+  appendBubble("system", "📞 正在呼叫你的 Agent…", "phone-status");
+  patchAvatar({ mood: "alert", caption: "通话中", energy: 0.8 });
+}
+
+let phoneCallWidgetState = null;
+let phoneCallTimer = null;
+let phoneCallSeconds = 0;
+
+function showPhoneCallWidget(status) {
+  phoneCallWidgetState = status;
+  phoneCallSeconds = 0;
+
+  const existing = document.getElementById("phone-dialer");
+  if (existing) existing.remove();
+
+  const widget = document.createElement("div");
+  widget.className = "phone-dialer";
+  widget.id = "phone-dialer";
+
+  updatePhoneCallWidgetContent(widget);
+
+  widget.addEventListener("click", (e) => {
+    if (e.target.closest(".phone-dialer-close") || e.target.closest(".phone-hangup")) {
+      hangUpPhoneCall();
+    }
+  });
+
+  document.body.appendChild(widget);
+
+  if (phoneCallTimer) clearInterval(phoneCallTimer);
+  phoneCallTimer = setInterval(() => {
+    if (phoneCallWidgetState === "connected") {
+      phoneCallSeconds++;
+      const el = document.getElementById("phone-call-timer");
+      if (el) el.textContent = formatPhoneCallTime(phoneCallSeconds);
+    }
+  }, 1000);
+}
+
+function updatePhoneCallWidgetContent(widget) {
+  const statusText = {
+    "ringing": "正在呼叫…",
+    "connected": "通话中",
+    "ended": "通话已结束"
+  }[phoneCallWidgetState] || "通话中";
+
+  const statusIcon = {
+    "ringing": "📞",
+    "connected": "📱",
+    "ended": "✅"
+  }[phoneCallWidgetState] || "📞";
+
+  widget.innerHTML = `
     <div class="dialer-header">
-      <h4>📞 网络电话</h4>
+      <h4>${statusIcon} ${statusText}</h4>
       <button class="dialer-close" id="dialer-close">×</button>
     </div>
     <div class="dialer-body">
-      <button class="dialer-call-my-agent-btn" id="dialer-call-my-agent">📞 呼叫我的 Agent</button>
-      <div class="dialer-divider"><span>或拨打指定 Agent</span></div>
-      <label>Agent ID</label>
-      <input type="text" id="dialer-agent-id" placeholder="输入目标 Agent ID" />
-      <label>留言（可选）</label>
-      <textarea id="dialer-message" placeholder="想对 Agent 说的话…" rows="2"></textarea>
-      <button class="dialer-call-btn" id="dialer-call">拨打电话</button>
+      ${phoneCallWidgetState === "connected" ? `<div id="phone-call-timer" class="phone-call-timer">${formatPhoneCallTime(phoneCallSeconds)}</div>` : ""}
+      <div class="phone-call-actions">
+        <button class="phone-btn phone-hangup" id="phone-hangup">📞 挂断</button>
+      </div>
     </div>
   `;
-  document.body.appendChild(dialer);
+}
 
-  dialer.querySelector("#dialer-close").addEventListener("click", () => dialer.remove());
+function formatPhoneCallTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
 
-  dialer.querySelector("#dialer-call-my-agent").addEventListener("click", () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) { alert("未连接到服务器"); return; }
-    const msg = document.getElementById("dialer-message")?.value.trim();
-    ws.send(JSON.stringify({
-      type: "phone.call_my_agent",
-      payload: { userMessage: msg || undefined },
-    }));
-    dialer.remove();
-    appendBubble("system", "📞 正在呼叫你的 Agent…", "phone-status");
-  });
+function hangUpPhoneCall() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-  dialer.querySelector("#dialer-call").addEventListener("click", () => {
-    const toActorId = document.getElementById("dialer-agent-id").value.trim();
-    const msg = document.getElementById("dialer-message").value.trim();
-    if (!toActorId) { alert("请输入 Agent ID"); return; }
-    if (!ws || ws.readyState !== WebSocket.OPEN) { alert("未连接到服务器"); return; }
-    ws.send(JSON.stringify({
-      type: "phone.user_call_agent",
-      payload: { toActorId, userMessage: msg || undefined },
-    }));
-    dialer.remove();
-    appendBubble("system", `📞 正在呼叫 Agent: ${toActorId}...`, "phone-status");
-  });
+  ws.send(JSON.stringify({
+    type: "phone.hangup",
+    payload: {},
+  }));
+
+  closePhoneCallWidget();
+  appendBubble("system", "📞 通话已结束", "phone-status");
+  patchAvatar({ mood: "idle", caption: undefined, energy: 0.5 });
+}
+
+function closePhoneCallWidget() {
+  const el = document.getElementById("phone-dialer");
+  if (el) el.remove();
+  if (phoneCallTimer) {
+    clearInterval(phoneCallTimer);
+    phoneCallTimer = null;
+  }
+  phoneCallWidgetState = null;
+  phoneCallSeconds = 0;
 }
 
 const phoneBtn = document.createElement("button");
 phoneBtn.id = "phone-dialer-toggle";
 phoneBtn.textContent = "📞";
-phoneBtn.title = "虚拟电话";
+phoneBtn.title = "网络电话";
 phoneBtn.className = "phone-toggle-btn";
-const sendBtn = document.getElementById("send");
+
 document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
 initAvatarFrame();
+updateAgentNameDisplay();
+loadFromStorage();
 renderFocusPanel();
 renderConfirmPanel();
 connect();

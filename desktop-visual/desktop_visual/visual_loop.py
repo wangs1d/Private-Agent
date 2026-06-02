@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from desktop_visual.actions import SYSTEM_PROMPT, parse_action_json
 from desktop_visual.runtime.capture import grab_screen_png
@@ -21,9 +21,7 @@ class LoopConfig:
 
 
 class VisualDesktopLoop:
-    """
-    纯视觉闭环：截屏 �?VLM �?解析 JSON 动作 �?pyautogui/pynput 执行 �?下一步�?
-    """
+    """Screenshot -> VLM -> action -> execute loop."""
 
     def __init__(
         self,
@@ -38,16 +36,16 @@ class VisualDesktopLoop:
 
     async def run(self, cfg: LoopConfig) -> dict[str, Any]:
         if not cfg.task.strip():
-            raise ValueError("cfg.task 不能为空")
+            raise ValueError("cfg.task must not be empty")
 
         history_note = ""
         for step in range(cfg.max_steps):
-            png, (w, h) = grab_screen_png(cfg.region)
+            png, (width, height) = grab_screen_png(cfg.region)
             user_text = (
-                f"任务：{cfg.task}\n"
-                f"当前截图尺寸：{w}x{h} 像素。\n"
-                f"上一步执行反馈：{history_note or '（首轮无�?}\n"
-                "根据截图决定下一步动作，输出一�?JSON�?
+                f"Task: {cfg.task}\n"
+                f"Screenshot size: {width}x{height} pixels.\n"
+                f"Previous step feedback: {history_note or '(first step)'}\n"
+                "Decide the next UI action and return exactly one JSON object."
             )
             messages = [
                 VLMMessage(role="system", text=SYSTEM_PROMPT),
@@ -56,8 +54,10 @@ class VisualDesktopLoop:
             result = await self._vlm.complete(messages)
             try:
                 action = parse_action_json(result.text)
-            except Exception as e:
-                history_note = f"解析动作失败：{e}；模型原文前 200 字：{result.text[:200]!r}"
+            except Exception as exc:
+                history_note = (
+                    f"Action parse failed: {exc}; first 200 chars: {result.text[:200]!r}"
+                )
                 logger.warning(history_note)
                 continue
 
@@ -71,23 +71,23 @@ class VisualDesktopLoop:
             if done:
                 return {"ok": True, "steps": step + 1, "summary": history_note}
 
-        return {"ok": False, "error": "达到 max_steps 仍未 done", "steps": cfg.max_steps}
+        return {"ok": False, "error": "max_steps reached before done", "steps": cfg.max_steps}
 
-    async def _execute(self, kind: str, p: dict[str, Any]) -> tuple[bool, str]:
+    async def _execute(self, kind: str, payload: dict[str, Any]) -> tuple[bool, str]:
         def xy() -> tuple[int, int]:
-            return int(p.get("x", 0)), int(p.get("y", 0))
+            return int(payload.get("x", 0)), int(payload.get("y", 0))
 
         if kind == "move":
             x, y = xy()
-            dur = float(p.get("move_duration_s", 0) or 0)
-            self._pointer.move(x, y, duration_s=dur)
+            duration_s = float(payload.get("move_duration_s", 0) or 0)
+            self._pointer.move(x, y, duration_s=duration_s)
             return False, f"move ({x},{y})"
 
         if kind == "click":
             x, y = xy()
-            btn = str(p.get("button", "left"))
-            clicks = int(p.get("clicks", 1) or 1)
-            self._pointer.click(x, y, button=btn, clicks=clicks)  # type: ignore[arg-type]
+            button = str(payload.get("button", "left"))
+            clicks = int(payload.get("clicks", 1) or 1)
+            self._pointer.click(x, y, button=button, clicks=clicks)  # type: ignore[arg-type]
             return False, f"click ({x},{y}) x{clicks}"
 
         if kind == "double_click":
@@ -101,28 +101,28 @@ class VisualDesktopLoop:
             return False, f"right_click ({x},{y})"
 
         if kind == "scroll":
-            n = int(p.get("scroll_clicks", 0))
-            self._pointer.scroll(n)
-            return False, f"scroll {n}"
+            clicks = int(payload.get("scroll_clicks", 0))
+            self._pointer.scroll(clicks)
+            return False, f"scroll {clicks}"
 
         if kind == "type":
-            text = str(p.get("text", ""))
+            text = str(payload.get("text", ""))
             self._pointer.type_text(text)
             return False, f"type len={len(text)}"
 
         if kind == "key":
-            key = str(p.get("key", "")).strip()
+            key = str(payload.get("key", "")).strip()
             if key:
                 self._pointer.key_tap(key)
             return False, f"key {key!r}"
 
         if kind == "wait":
-            s = float(p.get("wait_s", 0.5) or 0.5)
-            await asyncio.sleep(max(0.0, s))
-            return False, f"wait {s}s"
+            wait_s = float(payload.get("wait_s", 0.5) or 0.5)
+            await asyncio.sleep(max(0.0, wait_s))
+            return False, f"wait {wait_s}s"
 
         if kind == "done":
-            summary = str(p.get("summary", ""))
+            summary = str(payload.get("summary", ""))
             return True, summary
 
-        return False, f"未知 action：{kind!r}，已跳过"
+        return False, f"unknown action {kind!r}; skipped"

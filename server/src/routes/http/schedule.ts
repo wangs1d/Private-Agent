@@ -5,10 +5,15 @@ import {
   scheduleTaskRunsQuerySchema,
   scheduleTaskUpdateBodySchema,
 } from "../../schemas/api.js";
+import {
+  notifyScheduleTasksChanged,
+  scheduleWsPayloadDeleted,
+  scheduleWsPayloadFromTask,
+} from "../../services/schedule-ws-notify.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
-  const { scheduleTaskService } = deps;
+  const { scheduleTaskService, wsConnectionRegistry } = deps;
 
   app.get("/schedule", async () => ({
     domain: "schedule",
@@ -33,6 +38,10 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
     }
     try {
       const task = await scheduleTaskService.createTask(parsed.data);
+      notifyScheduleTasksChanged(
+        wsConnectionRegistry,
+        scheduleWsPayloadFromTask(task, "created"),
+      );
       return { ok: true, task };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -46,7 +55,19 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     try {
+      const existing = scheduleTaskService.getTask(request.params.taskId);
       const task = await scheduleTaskService.updateTask(request.params.taskId, parsed.data);
+      if (parsed.data.status === "cancelled") {
+        notifyScheduleTasksChanged(
+          wsConnectionRegistry,
+          scheduleWsPayloadDeleted(existing?.sessionId ?? task.sessionId, task.taskId),
+        );
+      } else {
+        notifyScheduleTasksChanged(
+          wsConnectionRegistry,
+          scheduleWsPayloadFromTask(task, "updated"),
+        );
+      }
       return { ok: true, task };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -56,7 +77,14 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
 
   app.delete<{ Params: { taskId: string } }>("/schedule/tasks/:taskId", async (request, reply) => {
     try {
+      const existing = scheduleTaskService.getTask(request.params.taskId);
       await scheduleTaskService.deleteTask(request.params.taskId);
+      if (existing) {
+        notifyScheduleTasksChanged(
+          wsConnectionRegistry,
+          scheduleWsPayloadDeleted(existing.sessionId, existing.taskId),
+        );
+      }
       return { ok: true };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

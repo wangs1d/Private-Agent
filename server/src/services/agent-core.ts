@@ -5,6 +5,7 @@ import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
+import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
@@ -225,12 +226,14 @@ export class AgentCore {
     private readonly narrativeMemory: NarrativeMemoryPort | null = null,
     private readonly trajectorySkillPromotion: TrajectorySkillPromotionService | null = null,
     private readonly virtualPhoneService: VirtualPhoneService | null = null,
+    private readonly scheduleTaskService: ScheduleTaskService | null = null,
   ) {
     this.promptContextBuilder = new PromptContextBuilder({
       agentMemorySyncService: this.agentMemorySyncService,
       worldService: this.worldService,
       skillManager: this.skillManager,
       virtualPhoneService: this.virtualPhoneService,
+      scheduleTaskService: this.scheduleTaskService,
     });
     this.turnLifecycle = new TurnLifecycle({
       narrativeMemory: this.narrativeMemory,

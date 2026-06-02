@@ -6,6 +6,7 @@ import "../../core/utils/content_summary_parser.dart";
 import "../../core/vision/vision_user_limits.dart";
 import "../../core/services/speech_service.dart";
 import "content_summary_card.dart";
+import "content_summary_detail_modal.dart";
 import "voice_mode_page.dart";
 
 class ChatPage extends StatefulWidget {
@@ -73,13 +74,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   Animation<double>? _breathingAnimation;
   List<Map<String, dynamic>>? _cachedMessageGroups;
   int _cachedMessagesLength = -1;
-  ContentSummaryDataV2? _selectedSummary;
-
   /// 消息折叠相关状态
   static const int _collapseThreshold = 30; // 超过此数量时开始折叠
   static const int _visibleCount = 30; // 折叠后显示的消息数量
   bool _isCollapsed = true; // 是否处于折叠状态
   int _collapsedCount = 0; // 被折叠的消息数量
+  bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
 
   @override
   void initState() {
@@ -105,18 +105,24 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 初始化后自动滚动到最新消息
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollToBottom();
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
     });
   }
 
   /// 滚动到底部的通用方法
-  void _scrollToBottom() {
+  void _scrollToBottom({bool instant = false}) {
     if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
+      if (instant) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      } else {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
     }
   }
 
@@ -186,12 +192,15 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       _isUserScrolling = false;
       _hasNewAgentMessage = false;
 
+      final bool isFirstLoad = !_hasHadMessages && widget.messages.isNotEmpty;
+      if (isFirstLoad) _hasHadMessages = true;
+
       // 如果消息数量超过阈值且当前是展开状态，自动折叠
       if (widget.messages.length > _collapseThreshold && !_isCollapsed) {
         setState(() => _isCollapsed = true);
       }
 
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom(instant: isFirstLoad));
     }
   }
 
@@ -230,92 +239,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         });
       },
     );
-  }
-
-  List<Widget> _formatDetailLinesForPanel(String content, ColorScheme cs, TextTheme textTheme) {
-    final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
-    final RegExp markdownHeader = RegExp(r"^#{1,3}\s+");
-    final RegExp listItem = RegExp(r"^[\s]*[-•*→▸‣⁃◦·]\s+");
-
-    return content.split("\n").map((String line) {
-      final String trimmed = line.trim();
-      if (trimmed.isEmpty) {
-        return const SizedBox(height: 6);
-      }
-
-      if (sectionHeader.hasMatch(trimmed) || markdownHeader.hasMatch(trimmed)) {
-        final String title = markdownHeader.hasMatch(trimmed)
-            ? trimmed.replaceFirst(markdownHeader, "")
-            : trimmed;
-        return Padding(
-          padding: const EdgeInsets.only(top: 8, bottom: 4),
-          child: Text(
-            title,
-            style: textTheme.titleSmall?.copyWith(
-              color: cs.onSurface,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        );
-      }
-
-      if (listItem.hasMatch(trimmed)) {
-        return Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 4),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text("• ", style: TextStyle(color: cs.onSurfaceVariant)),
-              Expanded(
-                child: Text(
-                  trimmed.replaceFirst(listItem, ""),
-                  style: textTheme.bodyMedium?.copyWith(
-                    color: cs.onSurface,
-                    height: 1.6,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      }
-
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Text(
-          trimmed,
-          style: textTheme.bodyMedium?.copyWith(
-            color: cs.onSurface,
-            height: trimmed.length > 100 ? 1.6 : 1.5,
-          ),
-        ),
-      );
-    }).toList();
-  }
-
-  List<Widget> _metadataTagsForPanel(Map<String, dynamic>? metadata) {
-    if (metadata == null || metadata.isEmpty) {
-      return const <Widget>[];
-    }
-
-    final List<Widget> tags = <Widget>[];
-    final Object? wordCount = metadata["wordCount"];
-    if (wordCount != null) {
-      tags.add(_DetailMetaTag(label: "字数", value: wordCount.toString()));
-    }
-
-    final Object? sectionCount = metadata["sectionCount"];
-    if (sectionCount != null && int.tryParse(sectionCount.toString()) != null &&
-        int.parse(sectionCount.toString()) > 1) {
-      tags.add(_DetailMetaTag(label: "板块", value: "$sectionCount个"));
-    }
-
-    final Object? source = metadata["source"];
-    if (source != null && source.toString().trim().isNotEmpty) {
-      tags.add(_DetailMetaTag(label: "来源", value: source.toString()));
-    }
-
-    return tags;
   }
 
   /// 将消息分组：用户消息单独一组；助手正文按条展示（进度由 `agentStatusLine` 提供，勿把短回复当流程提示吞掉）。
@@ -547,19 +470,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     if (contentSummary?.summary != null) {
-      final bool isSelected = _selectedSummary == contentSummary!.summary;
       return ContentSummaryMessageBody(
-        summary: contentSummary.summary!,
+        summary: contentSummary!.summary!,
         briefText: contentSummary.briefText,
         extraText: contentSummary.cleanedText,
-        onCardTap: () => setState(() {
-          if (_selectedSummary == contentSummary.summary) {
-            _selectedSummary = null;
-          } else {
-            _selectedSummary = contentSummary.summary;
-          }
-        }),
-        isCardSelected: isSelected,
+        onCardTap: () => ContentSummaryDetailModal.show(
+          context,
+          contentSummary.summary!,
+        ),
       );
     }
 
@@ -636,134 +554,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     );
   }
 
-  Widget _buildDetailPanel(ColorScheme cs, ContentSummaryDataV2 summary) {
-    final String displayLabel = ContentSummaryParser.categoryLabel(
-      summary.category,
-      summary.cardLabel,
-    );
-    final String subtitle = summary.sections != null &&
-            summary.sections!.length > 1
-        ? "$displayLabel · ${summary.sections!.length}个板块"
-        : displayLabel;
-    final String content = summary.detailContent?.trim().isNotEmpty == true
-        ? summary.detailContent!.trim()
-        : "暂无详细内容";
-
-    return Container(
-      width: 420,
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height,
-      ),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerLow,
-        border: Border(
-          left: BorderSide(color: cs.outlineVariant.withOpacity(0.3), width: 1),
-        ),
-      ),
-      child: Column(
-        children: <Widget>[
-          // 标题栏
-          Container(
-            padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
-            decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest.withOpacity(0.5),
-              border: Border(
-                bottom: BorderSide(color: cs.outline.withOpacity(0.12)),
-              ),
-            ),
-            child: Row(
-              children: <Widget>[
-                Container(
-                  width: 36,
-                  height: 36,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: cs.primaryContainer.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(summary.cardIcon, style: const TextStyle(fontSize: 18)),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        summary.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
-                              color: cs.onSurface,
-                            ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                              color: cs.onSurfaceVariant,
-                            ),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => setState(() => _selectedSummary = null),
-                  icon: Icon(Icons.close, size: 20, color: cs.onSurfaceVariant),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  tooltip: '关闭',
-                ),
-              ],
-            ),
-          ),
-          // 内容区域
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if (summary.sections != null && summary.sections!.length > 1)
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: summary.sections!
-                          .map(
-                            (ContentSummarySectionInfo section) => Chip(
-                              label: Text(
-                                "${section.title} (${section.pointCount})",
-                                style: Theme.of(context).textTheme.labelMedium,
-                              ),
-                              backgroundColor: cs.primaryContainer.withOpacity(0.4),
-                              side: BorderSide.none,
-                              visualDensity: VisualDensity.compact,
-                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              padding: EdgeInsets.zero,
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  if (summary.sections != null && summary.sections!.length > 1)
-                    const SizedBox(height: 16),
-                  ..._formatDetailLinesForPanel(content, cs, Theme.of(context).textTheme),
-                  if (_metadataTagsForPanel(summary.metadata).isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 16),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 8,
-                      children: _metadataTagsForPanel(summary.metadata),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -775,11 +565,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     // 如果处于折叠状态，需要在列表开头添加折叠按钮
     final bool showCollapseButton = _collapsedCount > 0;
 
-    final bool showDetailPanel = _selectedSummary != null;
-
-    return Stack(
-      children: <Widget>[
-        ColoredBox(
+    return ColoredBox(
           color: cs.surface,
           child: Column(
             children: <Widget>[
@@ -1035,15 +821,28 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         ),
                       ),
                     // 主输入框容器
-                    Container(
-                      decoration: BoxDecoration(
-                        color: cs.surfaceContainerHigh,
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: cs.outline.withOpacity(0.2),
-                          width: 1,
-                        ),
-                      ),
+                    AnimatedBuilder(
+                      animation: _breathingAnimation!,
+                      builder: (context, child) {
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.12 + 0.18 * _breathingAnimation!.value),
+                              width: 1.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.white.withOpacity(0.06 * _breathingAnimation!.value),
+                                blurRadius: 10,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: child,
+                        );
+                      },
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
                         child: Column(
@@ -1179,7 +978,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     ),
                                   ),
                                   const SizedBox(width: 8),
-                                  // 网络电话按钮
                                   if (widget.onOpenPhoneDialer != null)
                                     Container(
                                       decoration: BoxDecoration(
@@ -1215,10 +1013,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
           ),
             ],
           ),
-        ),
-        if (showDetailPanel) _buildDetailPanel(cs, _selectedSummary!),
-      ],
-    );
+        );
   }
 }
 
@@ -1362,43 +1157,5 @@ class _BreathingDotPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _BreathingDotPainter oldDelegate) {
     return oldDelegate.opacity != opacity;
-  }
-}
-
-class _DetailMetaTag extends StatelessWidget {
-  const _DetailMetaTag({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text.rich(
-        TextSpan(
-          children: <InlineSpan>[
-            TextSpan(
-              text: "$label ",
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurfaceVariant,
-                  ),
-            ),
-            TextSpan(
-              text: value,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

@@ -9,14 +9,12 @@ class ContentSummaryMessageBody extends StatelessWidget {
     required this.briefText,
     this.extraText = "",
     this.onCardTap,
-    this.isCardSelected = false,
   });
 
   final ContentSummaryDataV2 summary;
   final String briefText;
   final String extraText;
   final VoidCallback? onCardTap;
-  final bool isCardSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +37,6 @@ class ContentSummaryMessageBody extends StatelessWidget {
         ContentSummaryDetailCard(
           summary: summary,
           onTap: onCardTap,
-          isSelected: isCardSelected,
         ),
         if (extraText.trim().isNotEmpty &&
             extraText.trim() != briefText.trim()) ...<Widget>[
@@ -56,12 +53,10 @@ class ContentSummaryDetailCard extends StatelessWidget {
     super.key,
     required this.summary,
     this.onTap,
-    this.isSelected = false,
   });
 
   final ContentSummaryDataV2 summary;
   final VoidCallback? onTap;
-  final bool isSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -84,9 +79,7 @@ class ContentSummaryDetailCard extends StatelessWidget {
             color: cs.surfaceContainerHighest.withOpacity(0.72),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isSelected
-                  ? cs.primary.withOpacity(0.45)
-                  : cs.outline.withOpacity(0.28),
+              color: cs.outline.withOpacity(0.28),
             ),
           ),
           child: Row(
@@ -137,188 +130,6 @@ class ContentSummaryDetailCard extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-List<Widget> _formatDetailLines(String content, ColorScheme cs, TextTheme textTheme) {
-  final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
-  final RegExp markdownHeader = RegExp(r"^#{1,3}\s+");
-  final RegExp listItem = RegExp(r"^[\s]*[-•*→▸‣⁃◦·]\s+");
-
-  return content.split("\n").map((String line) {
-    final String trimmed = line.trim();
-    if (trimmed.isEmpty) {
-      return const SizedBox(height: 6);
-    }
-
-    if (sectionHeader.hasMatch(trimmed) || markdownHeader.hasMatch(trimmed)) {
-      final String title = markdownHeader.hasMatch(trimmed)
-          ? trimmed.replaceFirst(markdownHeader, "")
-          : trimmed;
-      return Padding(
-        padding: const EdgeInsets.only(top: 8, bottom: 4),
-        child: Text(
-          title,
-          style: textTheme.titleSmall?.copyWith(
-            color: cs.onSurface,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      );
-    }
-
-    if (listItem.hasMatch(trimmed)) {
-      return Padding(
-        padding: const EdgeInsets.only(left: 4, bottom: 4),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text("• ", style: TextStyle(color: cs.onSurfaceVariant)),
-            Expanded(
-              child: Text(
-                trimmed.replaceFirst(listItem, ""),
-                style: textTheme.bodySmall?.copyWith(
-                  color: cs.onSurface,
-                  height: 1.5,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Text(
-        trimmed,
-        style: textTheme.bodySmall?.copyWith(
-          color: cs.onSurface,
-          height: trimmed.length > 100 ? 1.55 : 1.45,
-        ),
-      ),
-    );
-  }).toList();
-}
-
-List<Widget> _metadataTags(Map<String, dynamic>? metadata) {
-  if (metadata == null || metadata.isEmpty) {
-    return const <Widget>[];
-  }
-
-  final List<Widget> tags = <Widget>[];
-  final Object? wordCount = metadata["wordCount"];
-  if (wordCount != null) {
-    tags.add(_MetaTag(label: "字数", value: wordCount.toString()));
-  }
-
-  final Object? sectionCount = metadata["sectionCount"];
-  if (sectionCount != null && int.tryParse(sectionCount.toString()) != null &&
-      int.parse(sectionCount.toString()) > 1) {
-    tags.add(_MetaTag(label: "板块", value: "$sectionCount个"));
-  }
-
-  final Object? source = metadata["source"];
-  if (source != null && source.toString().trim().isNotEmpty) {
-    tags.add(_MetaTag(label: "来源", value: source.toString()));
-  }
-
-  return tags;
-}
-
-class _DetailContentPanel extends StatelessWidget {
-  const _DetailContentPanel({required this.summary});
-
-  final ContentSummaryDataV2 summary;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final String content = summary.detailContent?.trim().isNotEmpty == true
-        ? summary.detailContent!.trim()
-        : "暂无详细内容";
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: cs.surface.withOpacity(0.55),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withOpacity(0.18)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          if (summary.sections != null && summary.sections!.length > 1)
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: summary.sections!
-                  .map(
-                    (ContentSummarySectionInfo section) => Chip(
-                      label: Text(
-                        "${section.title} (${section.pointCount})",
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      padding: EdgeInsets.zero,
-                    ),
-                  )
-                  .toList(),
-            ),
-          if (summary.sections != null && summary.sections!.length > 1)
-            const SizedBox(height: 10),
-          ..._formatDetailLines(content, cs, Theme.of(context).textTheme),
-          if (_metadataTags(summary.metadata).isNotEmpty) ...<Widget>[
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: _metadataTags(summary.metadata),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _MetaTag extends StatelessWidget {
-  const _MetaTag({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text.rich(
-        TextSpan(
-          children: <InlineSpan>[
-            TextSpan(
-              text: "$label ",
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurfaceVariant,
-                  ),
-            ),
-            TextSpan(
-              text: value,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-          ],
         ),
       ),
     );

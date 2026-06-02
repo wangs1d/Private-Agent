@@ -24,6 +24,7 @@ class SphereOverlayLauncher {
   static bool _created = false;
   static bool _visible = false;
   static Process? _electronProcess;
+  static const String _electronCommandArgPrefix = "--pai-command=";
 
   /// Electron 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
   static final ValueNotifier<bool> electronActive = ValueNotifier<bool>(false);
@@ -68,6 +69,56 @@ class SphereOverlayLauncher {
     return null;
   }
 
+  static String _electronMoodFilePath() =>
+      "${Directory.systemTemp.path}${Platform.pathSeparator}pai-sphere-mood.json";
+
+  static Future<bool> _sendElectronCommand(String command) async {
+    final Directory? overlayDir = _findSphereOverlayDir();
+    if (overlayDir == null) return false;
+
+    final Map<String, String> env =
+        Map<String, String>.from(Platform.environment);
+    env["PAI_WS_URL"] = ApiConfig.wsUrl;
+    env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
+    env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
+    env["PAI_MOOD_FILE"] = _electronMoodFilePath();
+
+    final File electronBin = File(
+      "${overlayDir.path}/node_modules/.bin/electron.cmd",
+    );
+    final File electronExe = File(
+      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
+    );
+    final List<String> args = <String>[".", "$_electronCommandArgPrefix$command"];
+
+    try {
+      if (electronExe.existsSync()) {
+        final Process proc = await Process.start(
+          electronExe.path,
+          args,
+          workingDirectory: overlayDir.path,
+          environment: env,
+        );
+        unawaited(proc.exitCode);
+        return true;
+      }
+      if (electronBin.existsSync()) {
+        final Process proc = await Process.start(
+          "cmd",
+          <String>["/c", electronBin.path, ...args],
+          workingDirectory: overlayDir.path,
+          environment: env,
+        );
+        unawaited(proc.exitCode);
+        return true;
+      }
+    } catch (e) {
+      debugPrint("[SphereOverlay] send electron command failed: $e");
+    }
+
+    return false;
+  }
+
   static Future<bool> isWebViewReady() async {
     if (!_created) return false;
     if (electronActive.value || useEmbeddedFallback.value) return true;
@@ -99,7 +150,8 @@ class SphereOverlayLauncher {
     if (kIsWeb || !Platform.isWindows) return false;
 
     await _resyncNativeOverlayState();
-    if (_created && !electron) return true;
+    if (_created && !electron && useEmbeddedFallback.value) return true;
+    if (_created && electron && electronActive.value) return true;
 
     if (electron) {
       return _launchElectronOverlay();
@@ -108,10 +160,6 @@ class SphereOverlayLauncher {
     if (_useInProcessOverlay) {
       final bool native = await _createInProcess(overlayUrl: overlayUrl);
       if (native) return true;
-    }
-
-    if (isElectronAvailable) {
-      return _launchElectronOverlay();
     }
 
     return _enableEmbeddedFallback();
@@ -207,6 +255,8 @@ class SphereOverlayLauncher {
           Map<String, String>.from(Platform.environment);
       env["PAI_WS_URL"] = ApiConfig.wsUrl;
       env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
+      env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
+      env["PAI_MOOD_FILE"] = _electronMoodFilePath();
 
       final File electronBin = File(
         "${overlayDir.path}/node_modules/.bin/electron.cmd",
@@ -324,6 +374,14 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> destroy() async {
+    if (electronActive.value) {
+      await _sendElectronCommand("close");
+      electronActive.value = false;
+      _created = false;
+      _visible = false;
+      useEmbeddedFallback.value = false;
+      return;
+    }
     if (_electronProcess != null) {
       try {
         _electronProcess!.kill();
@@ -437,9 +495,19 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> patchMood(AgentSpherePatch patch) async {
-    if (kIsWeb || !Platform.isWindows || !_created || _electronProcess != null) {
+    if (kIsWeb || !Platform.isWindows || !_created) {
       return;
     }
+    if (electronActive.value) {
+      try {
+        final File moodFile = File(_electronMoodFilePath());
+        await moodFile.writeAsString(jsonEncode(patch.toJson()), flush: true);
+      } catch (e) {
+        debugPrint("[SphereOverlay] electron patchMood failed: $e");
+      }
+      return;
+    }
+    if (_electronProcess != null) return;
     try {
       await _channel.invokeMethod("patchMood",
           <String, dynamic>{"patch": jsonEncode(patch.toJson())});
@@ -461,14 +529,20 @@ class SphereOverlayLauncher {
     }
   }
 
-  static Future<bool> launch({String? repoRoot}) async {
+  static Future<bool> launch({String? repoRoot, bool electron = false}) async {
     if (kIsWeb || !Platform.isWindows) return false;
     await _resyncNativeOverlayState();
-    if (_created && electronActive.value) return true;
-    if (_created && useEmbeddedFallback.value) return true;
-    if (_created) {
-      await show();
-      return await waitForWebViewReady(timeout: const Duration(seconds: 8));
+
+    if (_created && electron && electronActive.value) return true;
+    if (_created && !electron && useEmbeddedFallback.value) return true;
+
+    // 旧版原生窗可能残留但 WebView2 已禁用，清掉后走内嵌降级。
+    if (_created && !electron && !useEmbeddedFallback.value && !electronActive.value) {
+      await destroy();
+    }
+
+    if (electron) {
+      return _launchElectronOverlay();
     }
 
     if (_useInProcessOverlay) {
@@ -482,11 +556,6 @@ class SphereOverlayLauncher {
         }
         await destroy();
       }
-    }
-
-    if (isElectronAvailable) {
-      final bool electron = await _launchElectronOverlay();
-      if (electron) return true;
     }
 
     return _enableEmbeddedFallback();

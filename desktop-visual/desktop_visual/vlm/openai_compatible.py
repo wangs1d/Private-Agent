@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 from typing import Any
@@ -20,20 +20,23 @@ def _image_to_data_url(img: VLMImage) -> str:
 
 def _messages_to_openai_payload(messages: list[VLMMessage]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for m in messages:
+    for message in messages:
         parts: list[dict[str, Any]] = []
-        if m.text:
-            parts.append({"type": "text", "text": m.text})
-        for im in m.images:
-            parts.append({"type": "image_url", "image_url": {"url": _image_to_data_url(im)}})
+        if message.text:
+            parts.append({"type": "text", "text": message.text})
+        for image in message.images:
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": _image_to_data_url(image)},
+            })
         if not parts:
             parts.append({"type": "text", "text": ""})
-        out.append({"role": m.role, "content": parts})
+        out.append({"role": message.role, "content": parts})
     return out
 
 
 class OpenAICompatibleVLM(VisionLanguageModel):
-    """任意 OpenAI Chat Completions 兼容端点（含 /v1/chat/completions �?vision）�?""
+    """OpenAI-compatible chat completions client for vision models."""
 
     def __init__(
         self,
@@ -58,23 +61,24 @@ class OpenAICompatibleVLM(VisionLanguageModel):
             "temperature": kwargs.get("temperature", 0.2),
             **self._extra,
         }
-        for k, v in kwargs.items():
-            if k in ("temperature",):
+        for key, value in kwargs.items():
+            if key == "temperature":
                 continue
-            if k not in payload:
-                payload[k] = v
+            if key not in payload:
+                payload[key] = value
 
         headers = {"Authorization": f"Bearer {self._api_key}"}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            data = r.json()
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
 
         choice0 = data["choices"][0]
-        msg = choice0.get("message") or {}
-        text = msg.get("content") or ""
+        message = choice0.get("message") or {}
+        text = message.get("content") or ""
         if isinstance(text, list):
             text = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part) for part in text
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in text
             )
         return VLMResult(text=str(text), raw=data)

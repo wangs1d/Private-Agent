@@ -38,6 +38,11 @@ class _FriendChatPageState extends State<FriendChatPage> {
   void initState() {
     super.initState();
     // TODO: 加载历史消息（需要后端支持）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
   }
 
   @override

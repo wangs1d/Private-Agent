@@ -5,9 +5,21 @@ export const SCHEDULE_CREATE_TOOL_NAMES = new Set([
   "calendar.create_task",
 ]);
 
+export const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
+  ...SCHEDULE_CREATE_TOOL_NAMES,
+  "calendar.delete_task",
+]);
+
 export function isScheduleCreateToolName(toolName: string): boolean {
   const n = toolName.trim();
   if (SCHEDULE_CREATE_TOOL_NAMES.has(n)) return true;
   const normalized = n.replace(/_/g, ".");
   return SCHEDULE_CREATE_TOOL_NAMES.has(normalized);
+}
+
+export function isScheduleMutationToolName(toolName: string): boolean {
+  const n = toolName.trim();
+  if (SCHEDULE_MUTATION_TOOL_NAMES.has(n)) return true;
+  const normalized = n.replace(/_/g, ".");
+  return SCHEDULE_MUTATION_TOOL_NAMES.has(normalized);
 }

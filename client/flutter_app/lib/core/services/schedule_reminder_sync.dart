@@ -1,6 +1,7 @@
 import "../db/isar_local_history_store.dart";
 import "../models/schedule_models.dart";
 import "schedule_api_client.dart";
+import "schedule_offline_delete_queue.dart";
 import "schedule_recurrence_expand.dart";
 
 const Set<String> _scheduleReminderTools = <String>{
@@ -56,6 +57,19 @@ Future<bool> upsertLocalScheduleFromToolResult(
   );
 }
 
+/// 工具或 WS 通知日程删除时，从本地存储移除对应事项。
+Future<bool> removeLocalScheduleForDeletedTask(
+  IsarLocalHistoryStore store,
+  String taskId,
+) async {
+  final String id = taskId.trim();
+  if (id.isEmpty) return false;
+  await store.hideScheduleTask(id);
+  await store.deleteScheduleEventsForTask(id);
+  await store.dequeuePendingScheduleDelete(id);
+  return true;
+}
+
 /// 从服务端拉取日程任务并合并到本地（按 taskId 展开重复日到可见区间）。
 Future<int> syncServerRemindersToLocal(
   IsarLocalHistoryStore store,
@@ -75,6 +89,8 @@ Future<int> syncServerRemindersToLocal(
     // 网络或服务异常时保留本地缓存，避免清空后无法展示。
     return 0;
   }
+
+  await flushScheduleOfflineDeleteQueue(store, api);
 
   final List<ScheduleEvent> localOnlyEvents = (await store.listAllScheduleEvents())
       .where(

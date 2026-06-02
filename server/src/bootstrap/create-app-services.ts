@@ -120,6 +120,7 @@ import { getHttpRateLimitRuntime } from "../config/env.js";
 import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
 import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
+import { CompanionService } from "../services/companion-service.js";
 
 export async function createAppServices(): Promise<AppServices> {
   const app = Fastify({ logger: true });
@@ -143,6 +144,7 @@ export async function createAppServices(): Promise<AppServices> {
   const realFundsWallet = new RealFundsWalletService();
   const auditService = new AuditService();
   const computeQuotaService = new ComputeQuotaService();
+  const companionService = new CompanionService();
   const agentMemorySyncService = new AgentMemorySyncService();
   const unifiedIdempotencyService = new UnifiedIdempotencyService();
   const toolRegistry = new ToolRegistry();
@@ -247,6 +249,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 加载持久化数据
   await Promise.all([
     scheduleTaskService.load(),
+    companionService.load(),
     agentPairingService.load(),
     agentAccountService.load(),
     emailRegistrationService.load(),
@@ -431,6 +434,7 @@ export async function createAppServices(): Promise<AppServices> {
     worldService,
     skillManager,
     virtualPhoneService,
+    scheduleTaskService,
   });
   const agentCore = createAgentCore({
     toolRegistry,
@@ -444,6 +448,7 @@ export async function createAppServices(): Promise<AppServices> {
     narrativeMemory,
     trajectorySkillPromotion,
     virtualPhoneService,
+    scheduleTaskService,
   });
   scheduleTaskService.setAgentTaskHandler(async (task) => {
     const prompt = task.agentTask?.prompt?.trim();
@@ -581,7 +586,9 @@ export async function createAppServices(): Promise<AppServices> {
     ttsService,
     desktopBridgeCoordinator,
     friendService,
+    companionService,
     agentCore,
+    wsConnectionRegistry,
   });
 
   registerWebSocketRoute(app, {
@@ -594,10 +601,7 @@ export async function createAppServices(): Promise<AppServices> {
     aipService,
     worldPartitionWsRegistry,
     agentCore,
-    doudizhuService,
-    zhaJinHuaService,
     gomokuService,
-    gameCenterCoordinator,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,

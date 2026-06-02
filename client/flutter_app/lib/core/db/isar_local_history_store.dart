@@ -222,6 +222,39 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     await _flush();
   }
 
+  /// 待补删的服务端 taskId（主服务离线时入队，恢复后自动重试）。
+  Future<Set<String>> getPendingScheduleDeleteTaskIds() async {
+    await init();
+    final Object? raw = _preferences["pendingScheduleDeleteTaskIds"];
+    if (raw is! List) return <String>{};
+    final Set<String> out = <String>{};
+    for (final Object? item in raw) {
+      final String s = item?.toString().trim() ?? "";
+      if (s.isNotEmpty) out.add(s);
+    }
+    return out;
+  }
+
+  Future<void> enqueuePendingScheduleDelete(String taskId) async {
+    final String id = taskId.trim();
+    if (id.isEmpty) return;
+    await init();
+    final Set<String> pending = await getPendingScheduleDeleteTaskIds();
+    pending.add(id);
+    _preferences["pendingScheduleDeleteTaskIds"] = pending.toList();
+    await _flush();
+  }
+
+  Future<void> dequeuePendingScheduleDelete(String taskId) async {
+    final String id = taskId.trim();
+    if (id.isEmpty) return;
+    await init();
+    final Set<String> pending = await getPendingScheduleDeleteTaskIds();
+    if (!pending.remove(id)) return;
+    _preferences["pendingScheduleDeleteTaskIds"] = pending.toList();
+    await _flush();
+  }
+
   ScheduleEvent _scheduleEventFromMap(Map<String, dynamic> m) {
     return ScheduleEvent(
       id: m["id"] as String,

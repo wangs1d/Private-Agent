@@ -140,7 +140,7 @@ export async function handleChatUserMessageEvent(
     clientLocation: data.clientLocation,
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
-    userId: data.userId,
+    userId: data.userId ?? msgActor,
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
   return true;

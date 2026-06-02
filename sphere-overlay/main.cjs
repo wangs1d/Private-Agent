@@ -7,6 +7,11 @@ const HEIGHT = 380;
 let mainWindow = null;
 let tray = null;
 
+function readCommandArg(argv = process.argv) {
+  const raw = argv.find((value) => typeof value === "string" && value.startsWith("--pai-command="));
+  return raw ? raw.slice("--pai-command=".length) : "";
+}
+
 function overlayDistDir() {
   return path.resolve(__dirname, "../agent-sphere-avatar/dist");
 }
@@ -15,6 +20,9 @@ function loadOverlayPage(win) {
   const distOverlay = path.join(overlayDistDir(), "overlay.html");
   const ws = process.env.PAI_WS_URL || "ws://127.0.0.1:3000/ws";
   const sessionId = process.env.PAI_SESSION_ID || "";
+  const httpBase = (process.env.PAI_HTTP_BASE || "http://127.0.0.1:3000").replace(/\/$/, "");
+  const query = new URLSearchParams({ ws });
+  if (sessionId) query.set("sessionId", sessionId);
 
   if (process.env.PAI_OVERLAY_DEV_URL) {
     const url = new URL(process.env.PAI_OVERLAY_DEV_URL);
@@ -24,14 +32,22 @@ function loadOverlayPage(win) {
     return;
   }
 
-  if (!fs.existsSync(distOverlay)) {
-    console.error("[sphere-overlay] Missing build. Run: cd agent-sphere-avatar && npm run build");
-    void win.loadURL(`data:text/html,<h2 style='font-family:sans-serif'>请先构建 agent-sphere-avatar</h2>`);
-    return;
-  }
+  const serverUrl = `${httpBase}/chat/assets/avatar/overlay.html?${query.toString()}`;
 
-  void win.loadFile(distOverlay, {
-    query: { ws, ...(sessionId ? { sessionId } : {}) },
+  void win.loadURL(serverUrl).catch((err) => {
+    console.warn("[sphere-overlay] HTTP load failed, fallback to dist:", err?.message || err);
+
+    if (!fs.existsSync(distOverlay)) {
+      console.error("[sphere-overlay] Missing build. Run: cd agent-sphere-avatar && npm run build");
+      void win.loadURL(
+        `data:text/html,<h2 style='font-family:sans-serif;padding:16px'>请先构建 agent-sphere-avatar<br>并确认后端 ${httpBase} 已启动</h2>`,
+      );
+      return;
+    }
+
+    void win.loadFile(distOverlay, {
+      query: { ws, ...(sessionId ? { sessionId } : {}) },
+    });
   });
 }
 
@@ -96,6 +112,46 @@ function animateMove(targetX, targetY, durationMs = 1200) {
   tick();
 }
 
+function handleCommand(command) {
+  if (!command) {
+    if (mainWindow) {
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+    return;
+  }
+
+  if (command === "close") {
+    app.quit();
+    return;
+  }
+
+  if (command === "roam") {
+    mainWindow?.webContents.send("sphere-overlay:roam");
+    return;
+  }
+
+  if (command === "show") {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  }
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock({
+  command: readCommandArg(),
+});
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
+app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
+  const command = additionalData?.command || readCommandArg(argv);
+  handleCommand(command);
+});
+
 app.whenReady().then(() => {
   createWindow();
 
@@ -156,6 +212,8 @@ app.whenReady().then(() => {
       /* ignore malformed mood file */
     }
   }, 250);
+
+  handleCommand(readCommandArg());
 });
 
 app.on("window-all-closed", () => {

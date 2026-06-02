@@ -1,7 +1,7 @@
 import { ContactShadows, Environment, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { Physics } from "@react-three/cannon";
-import { Suspense } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import type { SceneMode } from "../constants/model-proportions";
 import type { AgentState } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
@@ -21,6 +21,8 @@ interface SphereAgentSceneProps {
   /** embed 网页：DOM 层接管拖拽，Canvas 不接收指针 */
   domDragBridge?: boolean;
   canvasCaptureLenient?: boolean;
+  onPanDelta?: (dx: number, dy: number) => void;
+  onPanEnd?: () => void;
 }
 
 function Ground({ visible, invisibleCollision }: { visible: boolean; invisibleCollision?: boolean }) {
@@ -58,24 +60,48 @@ export function SphereAgentScene({
   onBodyHover,
   domDragBridge = false,
   canvasCaptureLenient = false,
+  onPanDelta,
+  onPanEnd,
 }: SphereAgentSceneProps) {
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
   const transparentBg = isOverlay || isEmbed;
   const isDemo = mode === "demo";
   const scenePhysics = physics && isDemo;
+  const isSidebarLike = isOverlay || isEmbed;
+
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [inView, setInView] = useState(true);
+
+  useEffect(() => {
+    if (!isSidebarLike) return;
+    const el = wrapperRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          setInView(entry.isIntersecting);
+        }
+      },
+      { threshold: 0.01 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [isSidebarLike]);
 
   return (
+    <div ref={wrapperRef} style={{ width: "100%", height: "100%" }}>
     <Canvas
       shadows={isDemo}
-      dpr={[1, 2]}
-      gl={{ antialias: true, alpha: transparentBg }}
+      dpr={isSidebarLike ? [1, 1.25] : [1, 2]}
+      frameloop={isSidebarLike ? (inView ? "always" : "never") : "always"}
+      gl={{ antialias: !isSidebarLike, alpha: transparentBg, powerPreference: "low-power" }}
       style={{
         width: "100%",
         height: "100%",
         touchAction: "none",
         pointerEvents: domDragBridge ? "none" : "auto",
-        cursor: userDragRotate && !domDragBridge ? "grab" : undefined,
+        cursor: userDragRotate && !domDragBridge ? "default" : undefined,
         background: transparentBg ? "transparent" : undefined,
       }}
       onCreated={({ gl }) => {
@@ -138,8 +164,9 @@ export function SphereAgentScene({
           onUserTouch={onUserTouch}
           onBodyHover={onBodyHover}
           registerDragBridge={domDragBridge}
-          canvasCapture={!domDragBridge}
           canvasCaptureLenient={canvasCaptureLenient}
+          onPanDelta={onPanDelta}
+          onPanEnd={onPanEnd}
         />
       </Physics>
 
@@ -147,5 +174,6 @@ export function SphereAgentScene({
         <ContactShadows position={[0, 0.01, 0]} opacity={0.45} scale={8} blur={2.5} far={4} />
       )}
     </Canvas>
+    </div>
   );
 }

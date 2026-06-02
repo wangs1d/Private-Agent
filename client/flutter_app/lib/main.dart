@@ -11,12 +11,14 @@ import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/virtual_phone_incoming_dialog.dart";
 import "core/presentation/phone_dialer_page.dart";
+import "core/presentation/entrance_animation.dart";
 import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
 import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
 import "core/services/schedule_api_client.dart";
+import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
@@ -25,8 +27,9 @@ import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
+import "core/services/desk_pet_session.dart";
 import "core/services/sphere_entity_controller.dart";
-import "core/services/sphere_overlay_launcher.dart";
+import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/agent_mailbox_page.dart";
@@ -40,7 +43,6 @@ import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/multi_agent_api_client.dart";
 import "features/gomoku/gomoku_page.dart";
 import "features/game_center/game_center_page.dart";
-import "features/auth/biometric_registration_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/silent_camera_capture.dart";
 import "core/vision/vision_wire_frame.dart";
@@ -50,6 +52,8 @@ import "features/wallet/wallet_page.dart";
 import "features/world/world_page.dart";
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  unawaited(bootstrapWindowsWebView());
   runApp(const PrivateAiApp());
 }
 
@@ -61,7 +65,8 @@ class PrivateAiApp extends StatefulWidget {
 }
 
 class _PrivateAiAppState extends State<PrivateAiApp> {
-  final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
+  final GlobalKey<NavigatorState> _rootNavigatorKey =
+      GlobalKey<NavigatorState>();
   final IsarLocalHistoryStore _store =
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
@@ -88,29 +93,46 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   double _balance = 1000;
   double _frozen = 0;
   int _tabIndex = 0;
+
   /// 左侧导航栏是否展开（显示文字标签）；收起时仅显示图标。
   bool _railExpanded = true;
+
   /// 用户给agent起的名字
   String? _agentName;
+
+  /// 是否显示右上角日历面板
+  bool _showCalendarPanel = false;
+
+  /// 日历面板重新加载信号
+  final ValueNotifier<int> _calendarReloadSignal = ValueNotifier<int>(0);
+
   /// 与 userId 对齐的电脑桥接在线状态（由服务端 `desktop.bridge.sync` 推送）
   bool? _desktopBridgeOnline;
   String? _desktopBridgeLastSummary;
-  /// 是否已完成生物特征注册
-  bool _isBiometricRegistered = false;
+
   /// 是否已初始化完成
   bool _isInitialized = false;
+
+  /// 是否正在播放进场动画
+  bool _showEntranceAnimation = true;
+
   /// Agent是否正在处理中（用于显示响应状态指示器）
   bool _isAgentProcessing = false;
+
   /// 已上报服务端的「处理中 UI」状态，避免重复 WS 事件
   bool? _reportedAgentProcessingUiActive;
+
   /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
   bool _fullComputerAccessEnabled = false;
   bool _todayPanelExpanded = true;
   bool _confirmPanelExpanded = false;
+
   /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
+
   /// 子 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
+
   /// 后台子 Agent 任务角标（对话框右上角按钮）
   int _backgroundTasksBadgeCount = 0;
   Timer? _assistantChunkFlushTimer;
@@ -118,9 +140,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String? _pendingAssistantChunkMessageId;
   String? _pendingAgentUserMessageId;
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
+
   /// 记录被打断的回复内容，用于后续整合
   final List<String> _interruptedResponses = <String>[];
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
+
   /// 网络电话悬浮按钮状态: null=无通话, ringing=正在呼叫, connected=已接通, ended=通话结束
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
@@ -138,6 +162,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _inputFocusNode.dispose();
     _inputController.dispose();
     _scheduleReloadSignal.dispose();
+    _calendarReloadSignal.dispose();
     super.dispose();
   }
 
@@ -147,7 +172,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     } catch (e) {
       rethrow;
     }
-    
+
     try {
       await _store.saveSession(
         ChatSession(
@@ -159,18 +184,15 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     } catch (e) {
       rethrow;
     }
-    
+
     final List<ChatMessage> cachedMessages =
         await _store.listMessages(ApiConfig.effectiveActorId);
-    
+
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
-    
+
     final bool? visionConsent = await _store.getVisionCameraConsent();
-    
-    // 检查是否已完成生物特征注册
-    final biometricStatus = await _store.getBiometricRegistrationStatus();
-    
+
     setState(() {
       _messages.addAll(cachedMessages);
       _relayInbound
@@ -179,13 +201,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _visionCameraConsent = visionConsent;
       // 设置agent名字占位符
       _agentName = "AI助手";
-      _isBiometricRegistered = biometricStatus;
       _isInitialized = true;
+      _showEntranceAnimation = false;
     });
-    
+
+    unawaited(_flushScheduleOfflineDeletes());
+
     _ws.onConnected = () {
       SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
       _sendSessionInit();
+      unawaited(_flushScheduleOfflineDeletes());
       if (!kIsWeb && Platform.isWindows) {
         DesktopBridgeService.instance.start();
       }
@@ -218,7 +243,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       });
     });
 
-    final AgentSphereVoiceController voiceCtrl = AgentSphereVoiceController.instance;
+    final AgentSphereVoiceController voiceCtrl =
+        AgentSphereVoiceController.instance;
     voiceCtrl.onRecognizedText = (String text) {
       final String t = text.trim();
       if (t.isEmpty) return;
@@ -242,11 +268,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
-      if (!_isBiometricRegistered) {
-        _showBiometricRegistration();
-      } else {
-        await _promptLocationConsentIfNeeded();
-      }
+      await _promptLocationConsentIfNeeded();
     });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
@@ -267,8 +289,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             _clearAgentProcessingState();
           }
         }
-        final String message =
-            payload["message"]?.toString() ?? "无法连接到服务器";
+        final String message = payload["message"]?.toString() ?? "无法连接到服务器";
         if (mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             SnackBar(
@@ -287,8 +308,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _disarmAgentReplyWatchdog();
           _handleAgentReplyTimeout(showSnackBar: false);
         }
-        final String message =
-            payload["message"]?.toString() ?? "与服务器的连接已断开";
+        final String message = payload["message"]?.toString() ?? "与服务器的连接已断开";
         if (mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             SnackBar(
@@ -312,8 +332,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _pendingAgentUserMessageId = null;
           _clearAgentProcessingState();
         }
-        final String message =
-            payload["message"]?.toString() ?? "服务器处理失败";
+        final String message = payload["message"]?.toString() ?? "服务器处理失败";
         if (mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             SnackBar(content: Text(message)),
@@ -331,11 +350,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               payload["userStatusLine"]?.toString().trim();
           final String? preamble =
               payload["assistantPreamble"]?.toString().trim();
-          final String line = (userStatusLine != null && userStatusLine.isNotEmpty)
-              ? userStatusLine
-              : (preamble != null && preamble.isNotEmpty)
-                  ? preamble
-                  : "";
+          final String line =
+              (userStatusLine != null && userStatusLine.isNotEmpty)
+                  ? userStatusLine
+                  : (preamble != null && preamble.isNotEmpty)
+                      ? preamble
+                      : "";
           if (_isMasterInvokeSubAgentTool(toolName)) {
             _subAgentDelegationActive = true;
           }
@@ -357,15 +377,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         }
         final String toolName = payload["toolName"]?.toString() ?? "";
         final bool toolOk = payload["ok"] == true;
-        if (toolName.contains("invoke_sub_agent") || toolName.contains("master.invoke")) {
+        if (toolName.contains("invoke_sub_agent") ||
+            toolName.contains("master.invoke")) {
           unawaited(_syncBackgroundTasksBadge());
         }
         if (_isMasterInvokeSubAgentTool(toolName) && result != null) {
           final bool delegateOk = result["ok"] != false;
           if (!toolOk || !delegateOk) {
             _subAgentDelegationActive = false;
-            final String err = result["error"]?.toString().trim() ??
-                "子 Agent 委派失败，请稍后重试";
+            final String err =
+                result["error"]?.toString().trim() ?? "子 Agent 委派失败，请稍后重试";
             if (err.isNotEmpty) {
               _updateAgentStatusLine(err);
             }
@@ -376,44 +397,59 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               _updateAgentStatusLine(uiDoneLine);
             } else if (result["background"] == true) {
               _subAgentDelegationActive = false;
-              final String bgLine = result["message"]?.toString().trim() ??
-                  "助手已在后台处理，稍后会汇总结果…";
+              final String bgLine =
+                  result["message"]?.toString().trim() ?? "助手已在后台处理，稍后会汇总结果…";
               _updateAgentStatusLine(bgLine);
             }
           }
         }
         if (toolOk && result != null) {
-          final bool synced = await upsertLocalScheduleFromToolResult(
-            _store,
-            toolName,
-            result,
-          );
-          if (synced) {
-            _scheduleReloadSignal.value += 1;
+          final String normalizedTool = toolName.replaceAll("_", ".");
+          if (normalizedTool == "calendar.delete_task") {
+            final String? deletedId = result["taskId"]?.toString();
+            if (deletedId != null && deletedId.isNotEmpty) {
+              await removeLocalScheduleForDeletedTask(_store, deletedId);
+              _scheduleReloadSignal.value += 1;
+            }
+          } else {
+            final bool synced = await upsertLocalScheduleFromToolResult(
+              _store,
+              toolName,
+              result,
+            );
+            if (synced) {
+              _scheduleReloadSignal.value += 1;
+            }
           }
         }
       }
       if (type == "schedule.tasks_changed") {
-        final String? nextRunAt = payload["nextRunAt"]?.toString();
+        final String action = payload["action"]?.toString() ?? "created";
         final String? taskId = payload["taskId"]?.toString();
-        if (taskId != null &&
-            taskId.isNotEmpty &&
-            nextRunAt != null &&
-            nextRunAt.isNotEmpty) {
-          final DateTime? startAt = DateTime.tryParse(nextRunAt);
-          if (startAt != null) {
-            final String rawTitle = payload["reminderMessage"]?.toString().trim() ??
-                payload["title"]?.toString().trim() ??
-                "";
-            await _store.saveScheduleEvent(
-              ScheduleEvent(
-                id: taskId,
-                startAt: startAt.toLocal(),
-                title: rawTitle.isNotEmpty && rawTitle != "AI 提醒任务"
-                    ? rawTitle
-                    : "定时提醒",
-              ),
-            );
+        if (action == "deleted" && taskId != null && taskId.isNotEmpty) {
+          await removeLocalScheduleForDeletedTask(_store, taskId);
+        } else {
+          final String? nextRunAt = payload["nextRunAt"]?.toString();
+          if (taskId != null &&
+              taskId.isNotEmpty &&
+              nextRunAt != null &&
+              nextRunAt.isNotEmpty) {
+            final DateTime? startAt = DateTime.tryParse(nextRunAt);
+            if (startAt != null) {
+              final String rawTitle =
+                  payload["reminderMessage"]?.toString().trim() ??
+                      payload["title"]?.toString().trim() ??
+                      "";
+              await _store.saveScheduleEvent(
+                ScheduleEvent(
+                  id: taskId,
+                  startAt: startAt.toLocal(),
+                  title: rawTitle.isNotEmpty && rawTitle != "AI 提醒任务"
+                      ? rawTitle
+                      : "定时提醒",
+                ),
+              );
+            }
           }
         }
         _scheduleReloadSignal.value += 1;
@@ -427,7 +463,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         setState(() {
           _messages.add(
             ChatMessage(
-              messageId: "reminder-${taskId.isNotEmpty ? taskId : DateTime.now().millisecondsSinceEpoch}",
+              messageId:
+                  "reminder-${taskId.isNotEmpty ? taskId : DateTime.now().millisecondsSinceEpoch}",
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
               text: "⏰ $message",
@@ -495,7 +532,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             payload["messageId"]?.toString() ?? "assistant-chunk";
         final String chunk = payload["chunk"]?.toString() ?? "";
         _enqueueAssistantChunk(messageId, chunk);
-        final String liveStatus = _shortLiveStatusLine(_pendingAssistantChunkText.toString());
+        final String liveStatus =
+            _shortLiveStatusLine(_pendingAssistantChunkText.toString());
         if (liveStatus.isNotEmpty) {
           _updateAgentStatusLine(liveStatus);
         }
@@ -511,19 +549,22 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         final String? traceKey = messageId.startsWith("assistant-")
             ? messageId.substring("assistant-".length)
             : null;
-        final String? playUrl =
-            (traceKey != null ? _pendingPlayUrlByTraceId.remove(traceKey) : null) ??
-                _playUrlForAssistantMessageId(messageId) ??
-                PlayUrlUtils.fromAssistantText(
-                  finalText.trim().isNotEmpty ? finalText : fallbackText,
-                );
+        final String? playUrl = (traceKey != null
+                ? _pendingPlayUrlByTraceId.remove(traceKey)
+                : null) ??
+            _playUrlForAssistantMessageId(messageId) ??
+            PlayUrlUtils.fromAssistantText(
+              finalText.trim().isNotEmpty ? finalText : fallbackText,
+            );
         final int? idx = _assistantMessageIndexById[messageId];
         if (idx != null) {
           setState(() {
             final ChatMessage previous = _messages[idx];
             final String nextText = finalText.trim().isNotEmpty
                 ? finalText
-                : (previous.text.trim().isNotEmpty ? previous.text : fallbackText);
+                : (previous.text.trim().isNotEmpty
+                    ? previous.text
+                    : fallbackText);
             _messages[idx] = ChatMessage(
               messageId: previous.messageId,
               sessionId: previous.sessionId,
@@ -555,13 +596,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       if (type == "agent.peer_message") {
         final String messageId =
             payload["messageId"]?.toString() ?? "relay-unknown";
-        final String fromSessionId =
-            payload["fromSessionId"]?.toString() ?? "";
+        final String fromSessionId = payload["fromSessionId"]?.toString() ?? "";
         final String toSessionId = payload["toSessionId"]?.toString() ?? "";
         final String body = payload["text"]?.toString() ?? "";
         final String? subject = payload["subject"]?.toString();
-        final String receivedRaw =
-            payload["receivedAt"]?.toString() ?? DateTime.now().toIso8601String();
+        final String receivedRaw = payload["receivedAt"]?.toString() ??
+            DateTime.now().toIso8601String();
         DateTime receivedAt = DateTime.now();
         try {
           receivedAt = DateTime.parse(receivedRaw);
@@ -571,13 +611,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           fromSessionId: fromSessionId,
           toSessionId: toSessionId,
           text: body,
-          subject:
-              (subject == null || subject.isEmpty) ? null : subject,
+          subject: (subject == null || subject.isEmpty) ? null : subject,
           receivedAt: receivedAt,
         );
         setState(() {
-          final int dup =
-              _relayInbound.indexWhere((AgentRelayMessage x) => x.messageId == messageId);
+          final int dup = _relayInbound
+              .indexWhere((AgentRelayMessage x) => x.messageId == messageId);
           if (dup >= 0) {
             _relayInbound[dup] = inbound;
           } else {
@@ -625,13 +664,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         final bool? on = payload["bridgeOnline"] as bool?;
         final Map<String, dynamic>? lt =
             (payload["lastTask"] as Map?)?.cast<String, dynamic>();
+        final String? nextSummary = lt == null
+            ? null
+            : (lt["summary"]?.toString() ?? lt["error"]?.toString());
+        final String? previousSummary = _desktopBridgeLastSummary;
         setState(() {
           _desktopBridgeOnline = on;
-          _desktopBridgeLastSummary = lt == null
-              ? null
-              : (lt["summary"]?.toString() ?? lt["error"]?.toString());
+          _desktopBridgeLastSummary = nextSummary;
         });
+        if (nextSummary != null &&
+            nextSummary.trim().isNotEmpty &&
+            nextSummary != previousSummary) {
+          _showDesktopBridgeToast(
+            on == false ? "???????$nextSummary" : "???????$nextSummary",
+          );
+        }
       }
+
       if (type == "wallet.simulate.result") {
         final double nextBalance =
             (payload["ledger"]?["balance"] as num?)?.toDouble() ?? _balance;
@@ -653,8 +702,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           );
         });
       }
-
     });
+  }
+
+  /// 主服务恢复后补删离线队列中的服务端日程。
+  Future<void> _flushScheduleOfflineDeletes() async {
+    final ScheduleOfflineDeleteFlushResult result =
+        await flushScheduleOfflineDeleteQueue(_store, _scheduleApi);
+    if (result.flushed > 0) {
+      _scheduleReloadSignal.value += 1;
+    }
   }
 
   String? _playUrlForAssistantMessageId(String messageId) {
@@ -693,9 +750,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _pendingAssistantChunkText.clear();
     if (messageId == null || chunk.isEmpty) return;
 
-    final String? playUrl =
-        _playUrlForAssistantMessageId(messageId) ??
-            PlayUrlUtils.fromAssistantText(chunk);
+    final String? playUrl = _playUrlForAssistantMessageId(messageId) ??
+        PlayUrlUtils.fromAssistantText(chunk);
     setState(() {
       final int? idx = _assistantMessageIndexById[messageId];
       if (idx == null) {
@@ -726,7 +782,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   void _clearAgentProcessingState() {
-    if (!_isAgentProcessing && _agentStatusLine == null && !_subAgentDelegationActive) {
+    if (!_isAgentProcessing &&
+        _agentStatusLine == null &&
+        !_subAgentDelegationActive) {
       return;
     }
     setState(() {
@@ -823,8 +881,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String _shortLiveStatusLine(String text) {
     final String trimmed = text.trim();
     if (trimmed.isEmpty) return "";
-    final List<String> lines =
-        trimmed.split(RegExp(r"\r?\n")).map((String s) => s.trim()).where((String s) => s.isNotEmpty).toList();
+    final List<String> lines = trimmed
+        .split(RegExp(r"\r?\n"))
+        .map((String s) => s.trim())
+        .where((String s) => s.isNotEmpty)
+        .toList();
     String line = lines.isNotEmpty ? lines.last : trimmed;
     if (line.length > 120) {
       line = "${line.substring(0, 119)}…";
@@ -948,7 +1009,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   Future<void> _syncBackgroundTasksBadge() async {
     try {
-      final Map<String, dynamic> snap = await _multiAgentApi.fetchBackgroundTasks(
+      final Map<String, dynamic> snap =
+          await _multiAgentApi.fetchBackgroundTasks(
         ApiConfig.effectiveActorId,
         messageId: _activeChatUserMessageId,
       );
@@ -956,7 +1018,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       final List<dynamic> running =
           snap["running"] as List<dynamic>? ?? <dynamic>[];
       final int inFlight = snap["inFlightInTurn"] as int? ?? 0;
-      final int count = running.isNotEmpty ? running.length : (inFlight > 0 ? inFlight : 0);
+      final int count =
+          running.isNotEmpty ? running.length : (inFlight > 0 ? inFlight : 0);
       if (count != _backgroundTasksBadgeCount) {
         setState(() => _backgroundTasksBadgeCount = count);
       }
@@ -1068,7 +1131,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         _interruptedResponses.add(_pendingAssistantChunkText.toString());
         _pendingAssistantChunkText.clear();
       }
-      
+
       // 清除当前的流式响应状态
       _disarmAgentReplyWatchdog();
       _pendingAgentUserMessageId = null;
@@ -1077,7 +1140,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         _agentStatusLine = null;
         _pendingAssistantChunkMessageId = null;
       });
-      
+
       // 取消定时器
       _assistantChunkFlushTimer?.cancel();
       _assistantChunkFlushTimer = null;
@@ -1114,23 +1177,25 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (ApiConfig.userId.trim().isNotEmpty) {
       userMsg["userId"] = ApiConfig.userId.trim();
     }
-    
+
     // 前端 GPS 定位（优先于 IP 地理库）
     final ClientLocationPayload? clientLocation =
         await ClientLocationService.getCurrentLocation();
     if (clientLocation != null) {
       userMsg["clientLocation"] = clientLocation.toJson();
     }
-    userMsg["agentAccessMode"] = _fullComputerAccessEnabled ? "full" : "sandbox";
-    
+    userMsg["agentAccessMode"] =
+        _fullComputerAccessEnabled ? "full" : "sandbox";
+
     // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示）
     if (_interruptedResponses.isNotEmpty) {
-      final String interruptedContext = _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
+      final String interruptedContext =
+          _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
       userMsg["interruptedContext"] = interruptedContext;
       // 清空已整合的打断历史
       _interruptedResponses.clear();
     }
-    
+
     _armAgentReplyWatchdog(userMessage.messageId);
     unawaited(_syncBackgroundTasksBadge());
     final bool sent = _ws.sendEvent("chat.user_message", userMsg);
@@ -1194,10 +1259,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (ApiConfig.userId.trim().isNotEmpty) {
       userMsg["userId"] = ApiConfig.userId.trim();
     }
-    userMsg["agentAccessMode"] = _fullComputerAccessEnabled ? "full" : "sandbox";
+    userMsg["agentAccessMode"] =
+        _fullComputerAccessEnabled ? "full" : "sandbox";
 
     if (_interruptedResponses.isNotEmpty) {
-      final String interruptedContext = _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
+      final String interruptedContext =
+          _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
       userMsg["interruptedContext"] = interruptedContext;
       _interruptedResponses.clear();
     }
@@ -1209,7 +1276,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   static const List<String> _kTabTitles = <String>[
     "",
     "Agent Link",
-    "日程",
     "钱包",
     "技能商店",
     "游戏",
@@ -1218,22 +1284,20 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   ];
 
   void _selectTab(int index) {
-    // 社交推文（index 7）：在系统浏览器打开 social-platform，不切换内嵌页
-    if (index == 7) {
+    // 社交推文（index 6）：在系统浏览器打开 social-platform，不切换内嵌页
+    if (index == 6) {
       unawaited(_openSocialFeedWeb());
       return;
     }
     setState(() => _tabIndex = index);
-    if (index == 2) {
-      _scheduleReloadSignal.value += 1;
-    }
   }
 
   /// 在系统浏览器打开社交推文站（`ApiConfig.socialFeedUrl`，默认 :3001）。
   Future<void> _openSocialFeedWeb() async {
     final Uri url = Uri.parse(ApiConfig.socialFeedUrl);
     try {
-      final bool launched = await launchUrl(url, mode: LaunchMode.externalApplication);
+      final bool launched =
+          await launchUrl(url, mode: LaunchMode.externalApplication);
       if (!launched && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1299,27 +1363,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         SnackBar(content: Text("📞 正在呼叫 Agent: $agentId")),
       );
     }
-  }
-
-  /// 显示生物特征注册页面
-  void _showBiometricRegistration() {
-    Navigator.of(_rootNavigatorKey.currentContext!).push(
-      MaterialPageRoute(
-        builder: (context) => BiometricRegistrationPage(
-          userId: ApiConfig.userId.isNotEmpty ? ApiConfig.userId : "user_001",
-          onComplete: () {
-            Navigator.of(context).pop();
-            setState(() {
-              _isBiometricRegistered = true;
-            });
-            // 保存注册状态
-            _store.saveBiometricRegistrationStatus(true);
-            // 生物特征注册完成后，再请求位置权限
-            unawaited(_promptLocationConsentIfNeeded());
-          },
-        ),
-      ),
-    );
   }
 
   void _callMyAgentViaPhone(String? message) {
@@ -1419,21 +1462,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     tooltip: "展开侧边栏",
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-                    icon: const Icon(Icons.keyboard_double_arrow_right, color: iconIdle, size: 20),
+                    constraints:
+                        const BoxConstraints.tightFor(width: 36, height: 36),
+                    icon: const Icon(Icons.keyboard_double_arrow_right,
+                        color: iconIdle, size: 20),
                     onPressed: () => setState(() => _railExpanded = true),
                   ),
                 ),
                 const SizedBox(height: 4),
-                miniTab(0, Icons.chat_bubble_outline_rounded, Icons.chat_rounded),
+                miniTab(
+                    0, Icons.chat_bubble_outline_rounded, Icons.chat_rounded),
                 miniTab(1, Icons.link_outlined, Icons.link),
-                miniTab(2, Icons.calendar_today_outlined, Icons.calendar_today),
-                miniTab(3, Icons.account_balance_wallet_outlined, Icons.account_balance_wallet),
-                miniTab(4, Icons.store_outlined, Icons.store),
+                miniTab(2, Icons.account_balance_wallet_outlined,
+                    Icons.account_balance_wallet),
+                miniTab(3, Icons.store_outlined, Icons.store),
                 const SizedBox(height: 20),
-                miniTab(5, Icons.sports_esports_outlined, Icons.sports_esports),
-                miniTab(6, Icons.public_outlined, Icons.public),
-                miniTab(7, Icons.people_outline, Icons.people),
+                miniTab(4, Icons.sports_esports_outlined, Icons.sports_esports),
+                miniTab(5, Icons.public_outlined, Icons.public),
+                miniTab(6, Icons.people_outline, Icons.people),
               ],
             ),
           ),
@@ -1456,11 +1502,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         iconOutlined: Icons.link_outlined,
         iconFilled: Icons.link,
         label: 'Agent Link',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.calendar_today_outlined,
-        iconFilled: Icons.calendar_today,
-        label: '日程',
       ),
       _SidebarItemSpec(
         iconOutlined: Icons.account_balance_wallet_outlined,
@@ -1507,8 +1548,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       tooltip: "收起侧边栏",
                       visualDensity: VisualDensity.compact,
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-                      icon: const Icon(Icons.keyboard_double_arrow_left, color: Color(0xFFA1A1AA), size: 20),
+                      constraints:
+                          const BoxConstraints.tightFor(width: 32, height: 32),
+                      icon: const Icon(Icons.keyboard_double_arrow_left,
+                          color: Color(0xFFA1A1AA), size: 20),
                       onPressed: () => setState(() => _railExpanded = false),
                     ),
                   ),
@@ -1538,22 +1581,60 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
+  void _showDesktopBridgeToast(String message) {
+    if (!mounted) return;
+    final ScaffoldMessengerState? messenger =
+        ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            message,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
   Widget? _buildAppBarTitle() {
     if (_tabIndex == 0) {
       if (_desktopBridgeOnline != null) {
-        return Tooltip(
-          message: _desktopBridgeLastSummary == null || _desktopBridgeLastSummary!.isEmpty
-              ? "电脑桥接状态"
-              : "最近桌面任务：$_desktopBridgeLastSummary",
-          child: Chip(
-            label: Text(
-              _desktopBridgeOnline! ? "电脑在线" : "电脑离线",
-              style: const TextStyle(fontSize: 12),
+        final String? summary = _desktopBridgeLastSummary?.trim();
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Tooltip(
+              message: summary == null || summary.isEmpty
+                  ? "??????"
+                  : "???????$summary",
+              child: Chip(
+                label: Text(
+                  _desktopBridgeOnline! ? "????" : "????",
+                  style: const TextStyle(fontSize: 12),
+                ),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
             ),
-            visualDensity: VisualDensity.compact,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-          ),
+            if (summary != null && summary.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 2, top: 2),
+                child: Text(
+                  summary,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ),
+          ],
         );
       }
       return null;
@@ -1611,24 +1692,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
                     AnimatedCrossFade(
-                        duration: const Duration(milliseconds: 240),
-                        reverseDuration: const Duration(milliseconds: 240),
-                        sizeCurve: Curves.easeInOutCubic,
-                        firstCurve: Curves.easeInOutCubic,
-                        secondCurve: Curves.easeInOutCubic,
-                        alignment: Alignment.topLeft,
-                        crossFadeState: _railExpanded
-                            ? CrossFadeState.showSecond
-                            : CrossFadeState.showFirst,
-                        firstChild: KeyedSubtree(
-                          key: const ValueKey<String>("rail_mini"),
-                          child: _buildCollapsedMiniSidebar(),
-                        ),
-                        secondChild: KeyedSubtree(
-                          key: const ValueKey<String>("rail_expanded"),
-                          child: _buildExpandedSidebar(),
-                        ),
+                      duration: const Duration(milliseconds: 240),
+                      reverseDuration: const Duration(milliseconds: 240),
+                      sizeCurve: Curves.easeInOutCubic,
+                      firstCurve: Curves.easeInOutCubic,
+                      secondCurve: Curves.easeInOutCubic,
+                      alignment: Alignment.topLeft,
+                      crossFadeState: _railExpanded
+                          ? CrossFadeState.showSecond
+                          : CrossFadeState.showFirst,
+                      firstChild: KeyedSubtree(
+                        key: const ValueKey<String>("rail_mini"),
+                        child: _buildCollapsedMiniSidebar(),
                       ),
+                      secondChild: KeyedSubtree(
+                        key: const ValueKey<String>("rail_expanded"),
+                        child: _buildExpandedSidebar(),
+                      ),
+                    ),
                     const VerticalDivider(
                       width: 1,
                       thickness: 1,
@@ -1642,90 +1723,98 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             automaticallyImplyLeading: false,
                             title: _buildAppBarTitle(),
                             actions: <Widget>[
-                              if (!kIsWeb &&
-                                  defaultTargetPlatform == TargetPlatform.windows)
-                                ValueListenableBuilder<bool>(
-                                  valueListenable:
-                                      SphereOverlayLauncher.electronActive,
-                                  builder: (BuildContext context, bool active, _) {
+                              if (_tabIndex == 0)
+                                IconButton(
+                                  tooltip: "查看日程",
+                                  icon: Icon(
+                                    _showCalendarPanel
+                                        ? Icons.calendar_month
+                                        : Icons.calendar_today_outlined,
+                                    color: _showCalendarPanel
+                                        ? Theme.of(context).colorScheme.primary
+                                        : null,
+                                  ),
+                                  onPressed: () => setState(() =>
+                                      _showCalendarPanel = !_showCalendarPanel),
+                                ),
+                              if (DeskPetSession.isSupported)
+                                ListenableBuilder(
+                                  listenable: DeskPetSession.instance,
+                                  builder: (BuildContext context, Widget? _) {
+                                    final bool summoned =
+                                        DeskPetSession.instance.isSummoned;
+                                    final bool bootstrapping =
+                                        DeskPetSession.instance.isBootstrapping;
                                     return IconButton(
-                                      tooltip: SphereOverlayLauncher
-                                              .isElectronAvailable
-                                          ? "启动/重启 Electron 桌面桌宠"
-                                          : "桌宠未就绪（需 npm install + build）",
-                                      icon: Icon(
-                                        Icons.smart_toy_outlined,
-                                        color: active
-                                            ? Theme.of(context)
-                                                .colorScheme
-                                                .primary
-                                            : null,
-                                      ),
-                                      onPressed: () async {
-                                        if (!SphereOverlayLauncher
-                                            .isElectronAvailable) {
-                                          if (!context.mounted) return;
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            const SnackBar(
-                                              content: Text(
-                                                "请先：cd sphere-overlay && npm install\n"
-                                                "以及：cd agent-sphere-avatar && npm run build",
+                                      tooltip: summoned ? "收起桌宠" : "召唤桌宠",
+                                      icon: bootstrapping
+                                          ? SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Theme.of(context)
+                                                    .colorScheme
+                                                    .primary,
                                               ),
+                                            )
+                                          : Icon(
+                                              Icons.smart_toy_outlined,
+                                              color: summoned
+                                                  ? Theme.of(context)
+                                                      .colorScheme
+                                                      .primary
+                                                  : null,
                                             ),
-                                          );
-                                          return;
-                                        }
-                                        if (SphereOverlayLauncher.isCreated) {
-                                          await SphereOverlayLauncher.stop();
-                                        }
-                                        final bool ok =
-                                            await SphereOverlayLauncher.launchElectron();
-                                        if (!context.mounted) return;
-                                        if (ok) {
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            const SnackBar(
-                                              content: Text(
-                                                "Electron 桌宠已启动：可在整个桌面拖动与漫游",
-                                              ),
-                                            ),
-                                          );
-                                          return;
-                                        }
-                                        ScaffoldMessenger.of(context)
-                                            .showSnackBar(
-                                          const SnackBar(
-                                            content: Text("桌宠启动失败，请查看终端日志"),
-                                          ),
-                                        );
-                                      },
+                                      onPressed: bootstrapping
+                                          ? null
+                                          : () async {
+                                              if (summoned) {
+                                                await DeskPetSession.instance
+                                                    .dismiss();
+                                                return;
+                                              }
+                                              final bool ok =
+                                                  await DeskPetSession.instance
+                                                      .summon();
+                                              if (!context.mounted) return;
+                                              if (!ok) {
+                                                ScaffoldMessenger.of(context)
+                                                    .showSnackBar(
+                                                  SnackBar(
+                                                    content: Text(
+                                                      DeskPetSession
+                                                              .instance.error ??
+                                                          "桌宠召唤失败",
+                                                    ),
+                                                  ),
+                                                );
+                                              }
+                                            },
                                     );
                                   },
                                 ),
-                              TextButton.icon(
-                                onPressed: () => _callMyAgentViaPhone(null),
-                                icon: const Icon(Icons.phonelink_ring_outlined, size: 18),
-                                label: const Text("连接手机"),
-                              ),
                               IconButton(
                                 tooltip: "查看后台任务",
                                 icon: Badge(
-                                  isLabelVisible: _backgroundTasksBadgeCount > 0,
+                                  isLabelVisible:
+                                      _backgroundTasksBadgeCount > 0,
                                   label: Text(
                                     _backgroundTasksBadgeCount > 9
                                         ? "9+"
                                         : "${_backgroundTasksBadgeCount}",
                                   ),
-                                  child: const Icon(Icons.pending_actions_outlined),
+                                  child: const Icon(
+                                      Icons.pending_actions_outlined),
                                 ),
-                                onPressed: () => _openBackgroundTasksPanel(context),
+                                onPressed: () =>
+                                    _openBackgroundTasksPanel(context),
                               ),
                             ],
                           ),
                           Expanded(
                             child: MainPanel(
-                              child: _buildMainContent(),
+                              child: _buildMainContentWithCalendar(),
                             ),
                           ),
                         ],
@@ -1747,6 +1836,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                         _phoneCallToActorId = null;
                       });
                     },
+                  ),
+                // 进场动画层（覆盖在主界面上方，播完后自动消失）
+                if (_showEntranceAnimation)
+                  IgnorePointer(
+                    child: EntranceAnimation(
+                      onAnimationComplete: () {
+                        if (mounted) {
+                          setState(() => _showEntranceAnimation = false);
+                        }
+                      },
+                    ),
                   ),
               ],
             ),
@@ -1854,12 +1954,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               final DateTime dayEnd = dayStart.add(const Duration(days: 1));
               return FutureBuilder<List<ScheduleEvent>>(
                 future: _store.listScheduleEventsInRange(dayStart, dayEnd),
-                builder: (BuildContext context, AsyncSnapshot<List<ScheduleEvent>> snapshot) {
+                builder: (BuildContext context,
+                    AsyncSnapshot<List<ScheduleEvent>> snapshot) {
                   final List<Widget> focusWidgets;
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     focusWidgets = const <Widget>[Text("正在加载今日事项...")];
                   } else {
-                    final List<ScheduleEvent> items = (snapshot.data ?? <ScheduleEvent>[])
+                    final List<ScheduleEvent> items = (snapshot.data ??
+                            <ScheduleEvent>[])
                         .where((ScheduleEvent e) => (e.notes ?? "") != "已完成")
                         .take(3)
                         .toList();
@@ -1881,7 +1983,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   return _buildFoldSection(
                     title: "今日聚焦",
                     expanded: _todayPanelExpanded,
-                    onTap: () => setState(() => _todayPanelExpanded = !_todayPanelExpanded),
+                    onTap: () => setState(
+                        () => _todayPanelExpanded = !_todayPanelExpanded),
                     children: focusWidgets,
                   );
                 },
@@ -1918,6 +2021,80 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildMainContentWithCalendar() {
+    return Stack(
+      children: <Widget>[
+        _buildMainContent(),
+        if (_showCalendarPanel && _tabIndex == 0)
+          Positioned(
+            right: 0,
+            top: 48,
+            child: _buildCompactCalendarPanel(),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCompactCalendarPanel() {
+    const double panelHeight = 450;
+    const double panelWidth = 420;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      width: panelWidth,
+      height: panelHeight,
+      child: Material(
+        elevation: 8,
+        color: const Color(0xFF1A1A1A),
+        child: ClipRect(
+          child: Column(
+            children: <Widget>[
+              // 标题栏
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                child: Row(
+                  children: <Widget>[
+                    const Text(
+                      "日程",
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      tooltip: "关闭",
+                      icon: const Icon(Icons.close, size: 20),
+                      onPressed: () =>
+                          setState(() => _showCalendarPanel = false),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints:
+                          const BoxConstraints.tightFor(width: 32, height: 32),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // 日历内容
+              Expanded(
+                child: SizedBox(
+                  width: panelWidth,
+                  child: SchedulePage(
+                    store: _store,
+                    scheduleApi: _scheduleApi,
+                    sessionId: ApiConfig.effectiveActorId,
+                    reloadListenable: _calendarReloadSignal,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1997,12 +2174,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               },
             ),
             MailboxPage(api: _worldApi),
-            SchedulePage(
-              store: _store,
-              scheduleApi: _scheduleApi,
-              sessionId: ApiConfig.effectiveActorId,
-              reloadListenable: _scheduleReloadSignal,
-            ),
             WalletPage(balance: _balance),
             SkillStorePage(api: _worldApi),
             _buildGameCenterPage(),
@@ -2060,7 +2231,9 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
 
     final Color bgColor = selected
         ? cs.surfaceContainerHigh.withOpacity(0.6)
-        : (hovering ? cs.surfaceContainer.withOpacity(0.6) : Colors.transparent);
+        : (hovering
+            ? cs.surfaceContainer.withOpacity(0.6)
+            : Colors.transparent);
 
     final Color iconColor = selected
         ? const Color(0xFF60A5FA)
@@ -2102,7 +2275,8 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
                   ),
                 ),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 child: Row(
                   children: <Widget>[
                     Icon(
@@ -2126,7 +2300,8 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
                     if (spec.badge != null && spec.badge!.isNotEmpty)
                       Container(
                         margin: const EdgeInsets.only(left: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
                           color: spec.badge == 'NEW'
                               ? const Color(0xA33B82F6)
@@ -2189,7 +2364,9 @@ class _MiniNavItemState extends State<_MiniNavItem> {
 
     final Color bgColor = selected
         ? cs.surfaceContainerHigh.withOpacity(0.6)
-        : (hovering ? cs.surfaceContainer.withOpacity(0.6) : Colors.transparent);
+        : (hovering
+            ? cs.surfaceContainer.withOpacity(0.6)
+            : Colors.transparent);
 
     final Color iconColor = selected
         ? widget.iconSelected

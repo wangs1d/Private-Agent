@@ -57,6 +57,8 @@ export type AgentPromptMemoryContext = {
   userProfileSummary?: string;
   /** 短句追问时锚定上一轮对话，避免跨话题串台 */
   followUpAnchor?: string;
+  /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
+  scheduleSnapshot?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

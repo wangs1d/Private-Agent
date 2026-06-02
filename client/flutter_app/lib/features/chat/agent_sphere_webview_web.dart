@@ -39,31 +39,47 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   @override
   void initState() {
     super.initState();
-    if (_acquire()) {
-      _iAmOwner = true;
-      _nukeAll();
-      _inject();
-      AgentSphereMoodBridge.instance.addListener(_onPatch);
-      AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
-      _msgSub = html.window.onMessage.listen(_onWindowMessage);
+    if (widget.visible) {
+      _ensureInjected();
     }
   }
 
   @override
   void didUpdateWidget(covariant AgentSphereWebView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.visible && !oldWidget.visible) {
+      _ensureInjected();
+    } else if (!widget.visible && oldWidget.visible) {
+      _teardown();
+    }
     if (_iAmOwner) _applyVisibility();
+  }
+
+  void _ensureInjected() {
+    if (_host != null) return;
+    if (!_acquire()) return;
+    _iAmOwner = true;
+    _nukeAll();
+    _inject();
+    AgentSphereMoodBridge.instance.addListener(_onPatch);
+    AgentSphereMoodBridge.instance.addMessageListener(_onSphereMessage);
+    _msgSub ??= html.window.onMessage.listen(_onWindowMessage);
+  }
+
+  void _teardown() {
+    if (!_iAmOwner) return;
+    AgentSphereMoodBridge.instance.removeListener(_onPatch);
+    AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
+    _msgSub?.cancel();
+    _msgSub = null;
+    _remove();
+    _release();
+    _iAmOwner = false;
   }
 
   @override
   void dispose() {
-    if (_iAmOwner) {
-      AgentSphereMoodBridge.instance.removeListener(_onPatch);
-      AgentSphereMoodBridge.instance.removeMessageListener(_onSphereMessage);
-      _msgSub?.cancel();
-      _remove();
-      _release();
-    }
+    _teardown();
     super.dispose();
   }
 

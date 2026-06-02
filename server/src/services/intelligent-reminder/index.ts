@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
-import type { ToolRegistry } from "../tools/tool-registry.js";
-import { resolveActorId } from "../agent/actor-id.js";
+import type { ToolRegistry } from "../../tools/tool-registry.js";
+import { resolveActorId } from "../../agent/actor-id.js";
 import { IntelligentReminderService } from "./intelligent-reminder-service.js";
 import { PopupReminderHandler } from "./popup-reminder-handler.js";
 import { TTSAlarmHandler } from "./tts-alarm-handler.js";
@@ -15,6 +15,7 @@ import type {
 } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
+import type { ToolContext } from "../../tools/tool-registry.js";
 
 export interface IntelligentReminderSystemDeps {
   toolRegistry: ToolRegistry;
@@ -113,7 +114,7 @@ function registerIntelligentReminderTools(
   service: IntelligentReminderService,
   persistence: UserResponsePersistenceService,
 ): void {
-  registry.register("reminder.create", async (input, context) => {
+  registry.register("reminder.create", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
 
     const title = String(input.title ?? "").trim();
@@ -145,9 +146,12 @@ function registerIntelligentReminderTools(
       title,
       message,
       priority,
-      initialLevel: initialLevel === "auto" ? recommendedLevel : initialLevel,
+      initialLevel: initialLevel,
       maxLevel,
-      scheduledAt: new Date(input.scheduledAt ?? Date.now()),
+      scheduledAt:
+        typeof input.scheduledAt === "string" || typeof input.scheduledAt === "number"
+          ? new Date(input.scheduledAt)
+          : new Date(),
       metadata: {
         userId: actorId,
         actorId,
@@ -182,7 +186,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.trigger", async (input, _context) => {
+  registry.register("reminder.trigger", async (input: Record<string, unknown>, _context: ToolContext) => {
     const reminderId = String(input.reminderId ?? "").trim();
     if (!reminderId) {
       return { ok: false, error: "请提供提醒 ID（reminderId）" };
@@ -202,7 +206,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.acknowledge", async (input, context) => {
+  registry.register("reminder.acknowledge", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
     const reminderId = String(input.reminderId ?? "").trim();
 
@@ -239,7 +243,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.cancel", async (input, _context) => {
+  registry.register("reminder.cancel", async (input: Record<string, unknown>, _context: ToolContext) => {
     const reminderId = String(input.reminderId ?? "").trim();
     if (!reminderId) {
       return { ok: false, error: "请提供提醒 ID（reminderId）" };
@@ -257,7 +261,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.get_status", async (input, _context) => {
+  registry.register("reminder.get_status", async (input: Record<string, unknown>, _context: ToolContext) => {
     const reminderId = String(input.reminderId ?? "").trim();
     if (!reminderId) {
       return { ok: false, error: "请提供提醒 ID（reminderId）" };
@@ -283,7 +287,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.list_active", async (_input, _context) => {
+  registry.register("reminder.list_active", async (_input: Record<string, unknown>, _context: ToolContext) => {
     const activeReminders = service.getActiveReminders();
 
     return {
@@ -299,7 +303,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.escalate", async (input, _context) => {
+  registry.register("reminder.escalate", async (input: Record<string, unknown>, _context: ToolContext) => {
     const reminderId = String(input.reminderId ?? "").trim();
     const reason = String(input.reason ?? "手动升级").trim();
 
@@ -323,7 +327,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.get_user_stats", async (input, context) => {
+  registry.register("reminder.get_user_stats", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
     const analytics = await persistence.getUserAnalytics(actorId);
 
@@ -351,7 +355,7 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.get_response_history", async (input, context) => {
+  registry.register("reminder.get_response_history", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
     const limit = Number(input.limit ?? 20);
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
+import { EntranceAnimation } from "../components/EntranceAnimation";
 import type { QuickCommand } from "../constants/quick-commands";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
@@ -171,6 +172,7 @@ export function OverlayApp() {
 
   return (
     <div className="mode-shell mode-overlay">
+      <EntranceAnimation />
       <SphereAgentScene
         state={state}
         mode="overlay"
@@ -199,7 +201,7 @@ export function OverlayApp() {
         <span className={`mode-badge mode-badge--${state.mood}`}>{statusLabel}</span>
         <span className="overlay-dot" data-connected={connected ? "1" : "0"} />
         <span className="overlay-hint">
-          {speech.listening ? "语音识别中…" : connected ? "拖动球体旋转 · 点击玻璃屏打开菜单" : "连接中…"}
+          {speech.listening ? "语音识别中…" : connected ? "左键拖动移动 · 右键拖动旋转 · 点击曲屏开菜单" : "连接中…"}
         </span>
       </div>
     </div>

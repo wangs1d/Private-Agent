@@ -40,6 +40,18 @@ class SphereEntityController extends ChangeNotifier {
   /// 与原生 overlay 对齐的尺寸（逻辑像素，调用方乘 DPR 后下发）。
   static const Size entitySize = Size(300, 380);
 
+  void reset() {
+    overlayReady = false;
+    mode = SphereEntityMode.docked;
+    _dockSyncHoldUntil = null;
+    notifyListeners();
+  }
+
+  void markElectronReady() {
+    overlayReady = true;
+    notifyListeners();
+  }
+
   Future<bool> ensureOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
     if (overlayReady && SphereOverlayLauncher.isCreated) {

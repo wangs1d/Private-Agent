@@ -7,6 +7,8 @@ export type AgentMood =
   | "happy"
   | "alert";
 
+import type { Message } from "../components/MessageList";
+
 export interface AgentState {
   mood: AgentMood;
   /** 0–1，影响呼吸灯强度 */
@@ -20,6 +22,8 @@ export interface AgentState {
   subAgentType?: string;
   subAgentDisplayName?: string;
   source?: string;
+  /** 对话消息列表 */
+  messages?: Message[];
 }
 
 export const DEFAULT_AGENT_STATE: AgentState = {

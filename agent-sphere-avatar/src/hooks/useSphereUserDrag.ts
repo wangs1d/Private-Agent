@@ -5,6 +5,7 @@ import type { PublicApi } from "@react-three/cannon";
 import { MODEL } from "../constants/model-proportions";
 import type { FaceSignals } from "../components/ScreenFace";
 import { registerSphereDrag, type SphereDragApi } from "../bridge/sphere-drag-bridge";
+import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { pointerHitsSphere } from "../utils/sphere-hit";
 
 export type SphereTouchPhase = "start" | "drag" | "end";
@@ -31,12 +32,20 @@ interface UseSphereUserDragOptions {
   onTouch?: (event: SphereTouchEvent) => void;
   onExcite?: (strength: number) => void;
   onBodyHover?: (active: boolean) => void;
+  onEyeClick?: () => void;
+  /** 左键拖动平移（无桌面 overlay API 时回调） */
+  onPanDelta?: (dx: number, dy: number) => void;
+  onPanEnd?: () => void;
 }
+
+type DragMode = "pan" | "rotate";
 
 const SPIN_EXCITE_THRESHOLD = 0.35;
 const HIT_RADIUS = MODEL.bodyRadius * 1.12;
+const EYE_HIT_RADIUS = MODEL.bodyRadius * Math.sin(MODEL.screenHitHalfAngle);
+const EYE_CLICK_DRAG_PX = 10;
 
-/** 用户拖拽旋转球形身体 — 带惯性、表情反馈；网页端用 Canvas 射线兜底 */
+/** 左键拖动平移、右键拖动旋转 */
 export function useSphereUserDrag({
   userRotRef,
   bodyRef,
@@ -49,6 +58,9 @@ export function useSphereUserDrag({
   onTouch,
   onExcite,
   onBodyHover,
+  onEyeClick,
+  onPanDelta,
+  onPanEnd,
 }: UseSphereUserDragOptions) {
   const { camera, gl, raycaster } = useThree();
   const enabledRef = useRef(enabled);
@@ -60,6 +72,9 @@ export function useSphereUserDrag({
   const spinVelRef = useRef({ x: 0, y: 0 });
   const totalRotRef = useRef(0);
   const touchPulseRef = useRef(0);
+  const dragModeRef = useRef<DragMode>("pan");
+  const activeButtonRef = useRef(0);
+  const panMovedRef = useRef(0);
   const bodyCenterRef = useRef(new THREE.Vector3(0, 1.6, 0));
   const eyeLocalRef = useRef(new THREE.Vector3(...MODEL.glassScreenPosition));
   const eyeWorldRef = useRef(new THREE.Vector3());
@@ -77,6 +92,18 @@ export function useSphereUserDrag({
   const applyDragDelta = useCallback(
     (dx: number, dy: number) => {
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+
+      if (dragModeRef.current === "pan") {
+        panMovedRef.current += Math.abs(dx) + Math.abs(dy);
+        if (window.sphereOverlay?.moveBy) {
+          window.sphereOverlay.moveBy(Math.round(dx), Math.round(dy));
+        } else if (onPanDelta) {
+          onPanDelta(dx, dy);
+        } else if (window.parent !== window) {
+          postToHost({ type: SPHERE_MSG.pan, dx, dy });
+        }
+        return;
+      }
 
       const dt = 0.016;
       const rotY = dx * 0.014;
@@ -102,51 +129,72 @@ export function useSphereUserDrag({
       applyFaceSignals(1, spin);
       onTouch?.({ phase: "drag", spinStrength: spin });
     },
-    [api, applyFaceSignals, onTouch, userRotRef],
+    [api, applyFaceSignals, onPanDelta, onTouch, userRotRef],
   );
 
   const finishDrag = useCallback(() => {
     if (!draggingRef.current) return;
+    const mode = dragModeRef.current;
     draggingRef.current = false;
     pointerIdRef.current = null;
 
-    const spinStrength = Math.min(
-      1,
-      (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
-    );
-    const totalRotationDeg = totalRotRef.current * 0.35;
+    if (mode === "rotate") {
+      const spinStrength = Math.min(
+        1,
+        (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
+      );
+      const totalRotationDeg = totalRotRef.current * 0.35;
 
-    if (spinStrength > SPIN_EXCITE_THRESHOLD) {
-      onExcite?.(0.6 + spinStrength * 0.9);
-      applyFaceSignals(0.6, spinStrength);
-    } else if (totalRotRef.current > 8) {
-      applyFaceSignals(0.45, spinStrength * 0.5);
+      if (spinStrength > SPIN_EXCITE_THRESHOLD) {
+        onExcite?.(0.6 + spinStrength * 0.9);
+        applyFaceSignals(0.6, spinStrength);
+      } else if (totalRotRef.current > 8) {
+        applyFaceSignals(0.45, spinStrength * 0.5);
+      }
+
+      onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
+    } else {
+      onPanEnd?.();
     }
 
-    onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
-  }, [applyFaceSignals, onExcite, onTouch]);
+    dragModeRef.current = "pan";
+    activeButtonRef.current = 0;
+    panMovedRef.current = 0;
+  }, [applyFaceSignals, onExcite, onPanEnd, onTouch]);
 
   const beginDrag = useCallback(
-    (clientX: number, clientY: number, pointerId: number) => {
+    (clientX: number, clientY: number, pointerId: number, mode: DragMode, button: number) => {
       if (!enabledRef.current || draggingRef.current) return false;
       draggingRef.current = true;
       pointerIdRef.current = pointerId;
+      dragModeRef.current = mode;
+      activeButtonRef.current = button;
       lastPointerRef.current = { x: clientX, y: clientY };
       spinVelRef.current = { x: 0, y: 0 };
       totalRotRef.current = 0;
+      panMovedRef.current = 0;
       touchPulseRef.current = 1;
       applyFaceSignals(1, 0);
-      onTouch?.({ phase: "start" });
+      if (mode === "rotate") {
+        onTouch?.({ phase: "start" });
+      }
       return true;
     },
     [applyFaceSignals, onTouch],
   );
 
+  const resolveDragMode = (button: number): DragMode | null => {
+    if (button === 0) return "pan";
+    if (button === 2) return "rotate";
+    return null;
+  };
+
   const handlePointerDown = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
-      if (!enabledRef.current || e.button !== 0) return;
+      const mode = resolveDragMode(e.button);
+      if (!enabledRef.current || mode == null) return;
       e.stopPropagation();
-      beginDrag(e.clientX, e.clientY, e.pointerId);
+      beginDrag(e.clientX, e.clientY, e.pointerId, mode, e.button);
     },
     [beginDrag],
   );
@@ -167,9 +215,29 @@ export function useSphereUserDrag({
     (e: ThreeEvent<PointerEvent>) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
       e.stopPropagation();
+      const wasPan = dragModeRef.current === "pan";
+      const panPx = panMovedRef.current;
+      const button = activeButtonRef.current;
       finishDrag();
+      if (
+        onEyeClick &&
+        wasPan &&
+        button === 0 &&
+        panPx < EYE_CLICK_DRAG_PX &&
+        pointerHitsSphere(
+          e.clientX,
+          e.clientY,
+          gl.domElement,
+          camera,
+          raycaster,
+          eyeWorldRef.current,
+          EYE_HIT_RADIUS,
+        )
+      ) {
+        onEyeClick();
+      }
     },
-    [finishDrag],
+    [camera, finishDrag, gl.domElement, onEyeClick, raycaster],
   );
 
   const handleBodyHover = useCallback(
@@ -249,9 +317,16 @@ export function useSphereUserDrag({
   }, [applyDragDelta, finishDrag]);
 
   useEffect(() => {
+    const dom = gl.domElement;
+    const onContextMenu = (e: MouseEvent) => e.preventDefault();
+    dom.addEventListener("contextmenu", onContextMenu);
+    return () => dom.removeEventListener("contextmenu", onContextMenu);
+  }, [gl]);
+
+  useEffect(() => {
     if (!registerBridge) return;
     const bridgeApi: SphereDragApi = {
-      beginDrag: (x, y, id) => beginDrag(x, y, id),
+      beginDrag: (x, y, id) => beginDrag(x, y, id, "rotate", 2),
       moveBy: (dx, dy) => applyDragDelta(dx, dy),
       endDrag: () => finishDrag(),
     };
@@ -265,7 +340,8 @@ export function useSphereUserDrag({
     dom.style.touchAction = "none";
 
     const onCanvasDown = (e: PointerEvent) => {
-      if (!enabledRef.current || e.button !== 0 || draggingRef.current) return;
+      const mode = resolveDragMode(e.button);
+      if (!enabledRef.current || mode == null || draggingRef.current) return;
 
       if (!canvasCaptureLenient) {
         if (
@@ -281,27 +357,15 @@ export function useSphereUserDrag({
         ) {
           return;
         }
-        if (
-          userRotRef.current &&
-          pointerHitsSphere(
-            e.clientX,
-            e.clientY,
-            dom,
-            camera,
-            raycaster,
-            eyeWorldRef.current,
-            0.36,
-          )
-        ) {
-          return;
-        }
       }
 
       e.preventDefault();
       e.stopPropagation();
-      beginDrag(e.clientX, e.clientY, e.pointerId);
+      beginDrag(e.clientX, e.clientY, e.pointerId, mode, e.button);
       dom.setPointerCapture(e.pointerId);
     };
+
+    const onContextMenu = (e: MouseEvent) => e.preventDefault();
 
     const onCanvasUp = (e: PointerEvent) => {
       if (pointerIdRef.current !== e.pointerId) return;
@@ -315,11 +379,13 @@ export function useSphereUserDrag({
     dom.addEventListener("pointerdown", onCanvasDown, { capture: true });
     dom.addEventListener("pointerup", onCanvasUp, { capture: true });
     dom.addEventListener("pointercancel", onCanvasUp, { capture: true });
+    dom.addEventListener("contextmenu", onContextMenu);
 
     return () => {
       dom.removeEventListener("pointerdown", onCanvasDown, { capture: true });
       dom.removeEventListener("pointerup", onCanvasUp, { capture: true });
       dom.removeEventListener("pointercancel", onCanvasUp, { capture: true });
+      dom.removeEventListener("contextmenu", onContextMenu);
     };
   }, [beginDrag, camera, canvasCapture, canvasCaptureLenient, gl, raycaster, userRotRef]);
 

@@ -361,12 +361,14 @@ export function buildLayeredSystemPrompt(
     !memory?.toneGuidance &&
     !memory?.dailyDigest &&
     !memory?.userProfileSummary &&
-    !memory?.followUpAnchor
+    !memory?.followUpAnchor &&
+    !memory?.scheduleSnapshot
   ) {
     return baseSystem.trim();
   }
   const parts: string[] = [];
   if (memory.followUpAnchor) parts.push(memory.followUpAnchor);
+  if (memory.scheduleSnapshot) parts.push(memory.scheduleSnapshot);
   if (memory.taskContext) parts.push(`[Turn Task Context]\n${memory.taskContext}`);
   if (memory.toneGuidance) parts.push(`【本轮语气与情绪适配】\n${memory.toneGuidance}`);
   if (memory.userProfile) parts.push(`【用户画像】\n${memory.userProfile}`);

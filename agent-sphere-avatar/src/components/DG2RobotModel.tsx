@@ -1,11 +1,14 @@
 import { useFrame, useLoader } from "@react-three/fiber";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { MODEL, dg2Scale } from "../constants/model-proportions";
+import { useOledFaceTexture } from "../context/oled-face-context";
+import { applyGlassOledUv } from "../utils/glass-oled-uv";
 import { disableMeshRaycast } from "../utils/mesh-raycast";
 
 const MODEL_URL = `${import.meta.env.BASE_URL}models/DG2.obj`;
+const GLASS_RENDER_ORDER = 2;
 
 interface DG2RobotModelProps {
   energy?: number;
@@ -18,9 +21,11 @@ function isGlassMaterial(name: string): boolean {
 
 /** DG2.obj 一比一还原 — 加载 CAD 网格并套用金属/玻璃材质 */
 export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelProps) {
+  const oledMap = useOledFaceTexture();
   const groupRef = useRef<THREE.Group>(null);
   const shellMatsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
   const glassMatRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
+  const glassMeshesRef = useRef<THREE.Mesh[]>([]);
 
   const obj = useLoader(OBJLoader, MODEL_URL);
   const scale = dg2Scale();
@@ -43,7 +48,8 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
       reflectivity: 0.95,
       envMapIntensity: 1.4,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.82,
+      depthWrite: false,
       side: THREE.FrontSide,
     });
     return { shellMaterial: shell, glassMaterial: glass };
@@ -52,6 +58,7 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
   const model = useMemo(() => {
     const root = obj.clone(true);
     shellMatsRef.current = [];
+    glassMeshesRef.current = [];
     glassMatRef.current = glassMaterial;
 
     root.traverse((node) => {
@@ -66,7 +73,12 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
           : node.material?.name) ?? "";
 
       if (isGlassMaterial(sourceName)) {
+        const geo = node.geometry.clone();
+        applyGlassOledUv(geo);
+        node.geometry = geo;
+        glassMeshesRef.current.push(node);
         node.material = glassMaterial;
+        node.renderOrder = GLASS_RENDER_ORDER;
         return;
       }
 
@@ -79,6 +91,12 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
     return root;
   }, [obj, shellMaterial, glassMaterial]);
 
+  useEffect(() => {
+    for (const mesh of glassMeshesRef.current) {
+      mesh.visible = !oledMap;
+    }
+  }, [oledMap]);
+
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;
     const pulse = 0.06 + ((Math.sin(t * 1.15) + 1) * 0.5) * (0.15 + energy * 0.25);
@@ -89,7 +107,7 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
     });
 
     const gMat = glassMatRef.current;
-    if (gMat) {
+    if (gMat && !oledMap) {
       gMat.emissive.set(focused ? "#334466" : "#000000");
       gMat.emissiveIntensity = focused ? 0.08 + pulse * 0.06 : 0;
     }

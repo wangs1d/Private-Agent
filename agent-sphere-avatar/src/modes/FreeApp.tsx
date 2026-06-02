@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { InnerThought } from "../components/InnerThought";
+import { MessageList } from "../components/MessageList";
 import { SphereAgentScene } from "../components/SphereAgentScene";
+import { EntranceAnimation } from "../components/EntranceAnimation";
 import type { QuickCommand } from "../constants/quick-commands";
 import { mapUserMessageSent } from "../bridge/ws-agent-mapper";
 import {
@@ -70,13 +72,31 @@ export function FreeApp() {
       if (wsOff) {
         postToHost({ type: SPHERE_MSG.send, action, text });
         apply(mapUserMessageSent());
+        if (action === "chat" && text) {
+          const newMessage: import("../components/MessageList").Message = {
+            id: `user-${Date.now()}`,
+            role: "user",
+            content: text,
+            timestamp: new Date(),
+          };
+          apply({ messages: [...(state.messages || []), newMessage] });
+        }
         return true;
       }
       if (action === "wake") return sendWake();
-      if (action === "chat" && text) return sendChat(text);
+      if (action === "chat" && text) {
+        const newMessage: import("../components/MessageList").Message = {
+          id: `user-${Date.now()}`,
+          role: "user",
+          content: text,
+          timestamp: new Date(),
+        };
+        apply({ messages: [...(state.messages || []), newMessage] });
+        return sendChat(text);
+      }
       return false;
     },
-    [apply, sendChat, sendWake, wsOff],
+    [apply, sendChat, sendWake, wsOff, state.messages],
   );
 
   const isDraggingRef = useRef(false);
@@ -104,10 +124,8 @@ export function FreeApp() {
   });
 
   const handleEyeClick = useCallback(() => {
-    if (!hasMovedRef.current) {
-      stimulate("touched", { intensity: 0.8 });
-      setMenuOpen(true);
-    }
+    stimulate("touched", { intensity: 0.8 });
+    setMenuOpen(true);
   }, [stimulate]);
 
   const getContainerEl = useCallback((): HTMLDivElement | null => {
@@ -174,6 +192,48 @@ export function FreeApp() {
     window.addEventListener("touchend", onEnd);
     window.addEventListener("touchcancel", onEnd);
   }, [getContainerEl, resumeMotion, stimulate, sphereW, sphereH]);
+
+  const panActiveRef = useRef(false);
+
+  const handlePanDelta = useCallback(
+    (dx: number, dy: number) => {
+      const el = getContainerEl();
+      if (!el) return;
+      if (!panActiveRef.current) {
+        panActiveRef.current = true;
+        pauseMotion();
+        el.style.transition = "none";
+        el.style.cursor = "grabbing";
+        stimulate("touched", { intensity: 0.5 });
+      }
+      hasMovedRef.current = true;
+      const rect = el.getBoundingClientRect();
+      const margin = 20;
+      const newX = Math.max(margin, Math.min(window.innerWidth - sphereW - margin, rect.left + dx));
+      const newY = Math.max(margin, Math.min(window.innerHeight - sphereH - margin, rect.top + dy));
+      el.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+    },
+    [getContainerEl, pauseMotion, sphereW, sphereH, stimulate],
+  );
+
+  const handlePanEnd = useCallback(() => {
+    if (!panActiveRef.current) return;
+    panActiveRef.current = false;
+    const el = getContainerEl();
+    if (el) {
+      el.style.cursor = "grab";
+      el.style.transition = "";
+      const rect = el.getBoundingClientRect();
+      resumeMotion(rect.left, rect.top);
+    }
+    if (hasMovedRef.current) {
+      stimulate("dragged", {
+        intensity: 0.6,
+        soulImpact: { impulse: 0.3 },
+      });
+    }
+    hasMovedRef.current = false;
+  }, [getContainerEl, resumeMotion, stimulate]);
 
   const startDrag = useCallback(
     (clientX: number, clientY: number) => {
@@ -335,6 +395,7 @@ export function FreeApp() {
         overflow: "visible",
       }}
     >
+      <EntranceAnimation />
       <div
         data-sphere-container
         ref={setContainerRef}
@@ -359,6 +420,8 @@ export function FreeApp() {
       >
         <InnerThought state={state} />
 
+        <MessageList messages={state.messages || []} />
+
         <SphereAgentScene
           state={state}
           mode="overlay"
@@ -367,6 +430,8 @@ export function FreeApp() {
           onEyeFocus={setFocused}
           onEyeClick={handleEyeClick}
           onUserTouch={handleSphereTouch}
+          onPanDelta={handlePanDelta}
+          onPanEnd={handlePanEnd}
         />
 
         <OverlayQuickMenu

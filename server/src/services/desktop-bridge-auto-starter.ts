@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -56,7 +57,7 @@ export function startDesktopBridgeAutoClient(opts: DesktopBridgeAutoStarterOptio
     "session-mvp-001";
 
   let stopped = false;
-  let child: ChildProcessWithoutNullStreams | null = null;
+  let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
 
   const childEnv: NodeJS.ProcessEnv = {

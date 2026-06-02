@@ -122,7 +122,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
    */
   private getCachedOrBuildSystemPrompt(
     baseContent: string,
-    finalizeOptions: Parameters<typeof finalizeChatSystemPrompt>[1]
+    finalizeOptions: NonNullable<Parameters<typeof finalizeChatSystemPrompt>[1]>
   ): string {
     const cacheKey = JSON.stringify({
       baseContent: baseContent.slice(0, 500), // 只取前500字符作为key的一部分

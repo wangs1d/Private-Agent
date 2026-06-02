@@ -9,8 +9,8 @@ import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
 import { useSphereUserDrag, type SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
-import { EyeScreen } from "./EyeScreen";
 import { ScreenFace, type FaceSignals } from "./ScreenFace";
+import { SphereBodyHandle } from "./SphereBodyHandle";
 
 interface SphereAgentProps {
   state: AgentState;
@@ -26,8 +26,9 @@ interface SphereAgentProps {
   onUserTouch?: (event: SphereTouchEvent) => void;
   onBodyHover?: (active: boolean) => void;
   registerDragBridge?: boolean;
-  canvasCapture?: boolean;
   canvasCaptureLenient?: boolean;
+  onPanDelta?: (dx: number, dy: number) => void;
+  onPanEnd?: () => void;
 }
 
 function relayBoundaryToParent(edge: string) {
@@ -49,8 +50,9 @@ export function SphereAgent({
   onUserTouch,
   onBodyHover,
   registerDragBridge = false,
-  canvasCapture = true,
   canvasCaptureLenient = false,
+  onPanDelta,
+  onPanEnd,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
@@ -120,12 +122,20 @@ export function SphereAgent({
     bodyRef: ref as unknown as RefObject<THREE.Object3D | null>,
     faceSignalsRef,
     enabled: userDragRotate,
-    canvasCapture,
+    canvasCapture: false,
     canvasCaptureLenient,
     registerBridge: registerDragBridge,
     api: physics ? api : undefined,
     onTouch: relayTouchToParent,
-    onBodyHover,
+    onEyeClick,
+    onPanDelta,
+    onPanEnd,
+    onBodyHover: (active) => {
+      onBodyHover?.(active);
+      onEyeInteractionChange?.(active);
+      if (active) onEyeFocus?.(true);
+      else onEyeFocus?.(false);
+    },
     onExcite: (strength) => {
       if (kinematic) exciteMotion?.(strength);
       else if (physics && autonomous) {
@@ -197,24 +207,25 @@ export function SphereAgent({
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
         <group ref={userRotRef}>
-          <Suspense fallback={null}>
-            <DG2RobotModel energy={state.energy} focused={state.focused} />
-          </Suspense>
           <ScreenFace
             mood={state.mood}
             energy={state.energy}
             focused={state.focused}
             signalsRef={faceSignalsRef}
-          />
-          <EyeScreen
-            onPointerOver={() => onEyeFocus?.(true)}
-            onPointerOut={() => onEyeFocus?.(false)}
-            onClick={() => onEyeClick?.()}
-            onInteractionChange={onEyeInteractionChange}
-            onDragPointerDown={userDragRotate ? dragHandlers.handlePointerDown : undefined}
-            onDragPointerMove={userDragRotate ? dragHandlers.handlePointerMove : undefined}
-            onDragPointerUp={userDragRotate ? dragHandlers.handlePointerUp : undefined}
-          />
+          >
+            <Suspense fallback={null}>
+              <DG2RobotModel energy={state.energy} focused={state.focused} />
+            </Suspense>
+            {userDragRotate ? (
+              <SphereBodyHandle
+                radius={dragHandlers.bodyRadius}
+                onPointerDown={dragHandlers.handlePointerDown}
+                onPointerMove={dragHandlers.handlePointerMove}
+                onPointerUp={dragHandlers.handlePointerUp}
+                onBodyHover={dragHandlers.handleBodyHover}
+              />
+            ) : null}
+          </ScreenFace>
         </group>
       </group>
     </group>
