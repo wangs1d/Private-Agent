@@ -1,0 +1,31 @@
+{
+  "id": "private-agent-wechat-bridge",
+  "name": "Private Agent WeChat Bridge",
+  "description": "Intercepts openclaw-weixin before_dispatch and forwards to Private AI Agent AgentCore",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverBaseUrl": {
+        "type": "string",
+        "description": "Private AI Agent HTTP base URL, e.g. http://127.0.0.1:3000"
+      },
+      "bridgeToken": {
+        "type": "string",
+        "description": "Must match server WECHAT_CLAW_BRIDGE_TOKEN when set"
+      },
+      "defaultActorId": {
+        "type": "string",
+        "description": "userId/sessionId for AgentCore (same as Flutter USER_ID)"
+      },
+      "channels": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Channels to bridge (default: openclaw-weixin)"
+      }
+    }
+  }
+}

@@ -27,6 +27,9 @@ import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
 import { registerChatWeb } from "./chat-web.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
+import { registerWechatClawRoutes } from "./wechat-claw.js";
+import { registerBrowserSessionRoutes } from "./browser-sessions.js";
+import { registerDownloadRoutes } from "./downloads.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -58,6 +61,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
+  registerWechatClawRoutes(app, deps);
+  registerBrowserSessionRoutes(app, deps);
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
   registerNightlyMemoryRoutes(app);
+  registerDownloadRoutes(app);
 }

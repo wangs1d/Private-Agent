@@ -100,7 +100,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
 
   void _inject() {
     final String src =
-        "${ApiConfig.httpBase}/chat/assets/avatar/free.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
+        "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
 
     _host = html.DivElement()
       ..setAttribute("data-pai-sphere", "host")

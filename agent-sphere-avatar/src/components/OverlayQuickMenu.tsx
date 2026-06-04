@@ -6,6 +6,8 @@ interface OverlayQuickMenuProps {
   reconnecting?: boolean;
   voiceListening?: boolean;
   voiceInterim?: string;
+  /** 桌宠：菜单在机器右侧；默认居中弹层（embed） */
+  layout?: "centered" | "side";
   onSelect: (cmd: QuickCommand) => void;
   onClose: () => void;
 }
@@ -17,19 +19,19 @@ export function OverlayQuickMenu({
   reconnecting = false,
   voiceListening = false,
   voiceInterim,
+  layout = "centered",
   onSelect,
   onClose,
 }: OverlayQuickMenuProps) {
   if (!open) return null;
 
-  return (
-    <div className="overlay-menu-backdrop" onClick={onClose}>
-      <div
-        className="overlay-quick-menu"
-        onClick={(e) => e.stopPropagation()}
-        role="menu"
-        aria-label="Agent 快捷指令"
-      >
+  const menu = (
+    <div
+      className={`overlay-quick-menu${layout === "side" ? " overlay-quick-menu--side" : ""}`}
+      onClick={(e) => e.stopPropagation()}
+      role="menu"
+      aria-label="Agent 快捷指令"
+    >
         <div className="overlay-quick-menu__header">
           <span>Agent 指令</span>
           <button type="button" className="overlay-quick-menu__close" onClick={onClose} aria-label="关闭">
@@ -44,19 +46,21 @@ export function OverlayQuickMenu({
           </div>
         ) : null}
 
-        <div className="overlay-quick-menu__grid">
-          {OVERLAY_QUICK_COMMANDS.map((cmd) => (
-            <button
-              key={cmd.id}
-              type="button"
-              className={`overlay-quick-menu__item${!connected && cmd.action !== "roam" && cmd.action !== "voice" ? " is-disabled" : ""}`}
-              disabled={!connected && cmd.action !== "roam" && cmd.action !== "voice"}
-              onClick={() => onSelect(cmd)}
-            >
-              <span className="overlay-quick-menu__icon">{cmd.icon}</span>
-              <span className="overlay-quick-menu__label">{cmd.label}</span>
-            </button>
-          ))}
+        <div className={layout === "side" ? "overlay-quick-menu__scroll" : undefined}>
+          <div className="overlay-quick-menu__grid">
+            {OVERLAY_QUICK_COMMANDS.map((cmd) => (
+              <button
+                key={cmd.id}
+                type="button"
+                className={`overlay-quick-menu__item${!connected && cmd.action !== "roam" && cmd.action !== "voice" ? " is-disabled" : ""}`}
+                disabled={!connected && cmd.action !== "roam" && cmd.action !== "voice"}
+                onClick={() => onSelect(cmd)}
+              >
+                <span className="overlay-quick-menu__icon">{cmd.icon}</span>
+                <span className="overlay-quick-menu__label">{cmd.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
         {reconnecting ? (
@@ -64,7 +68,16 @@ export function OverlayQuickMenu({
         ) : !connected ? (
           <p className="overlay-quick-menu__hint">未连接主 Agent，部分指令不可用</p>
         ) : null}
-      </div>
+    </div>
+  );
+
+  if (layout === "side") {
+    return <div className="overlay-menu-side">{menu}</div>;
+  }
+
+  return (
+    <div className="overlay-menu-backdrop" onClick={onClose}>
+      {menu}
     </div>
   );
 }

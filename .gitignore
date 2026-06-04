@@ -9,8 +9,12 @@ lerna-debug.log*
 
 node_modules
 dist
+server/data/browser-sessions/
 dist-ssr
 *.local
+
+# Uploaded downloads
+**/downloads/
 
 # Editor directories and files
 .vscode/*

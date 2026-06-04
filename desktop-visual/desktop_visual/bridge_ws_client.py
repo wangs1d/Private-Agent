@@ -82,12 +82,15 @@ async def one_connection(url: str, token: str | None, init_payload: dict) -> Non
                     "region": pl.get("region"),
                 }
             else:
-                worker_req = {
+                worker_req: dict = {
+                    "action": "run_task",
                     "task": pl.get("task"),
                     "maxSteps": pl.get("maxSteps", 40),
                     "region": pl.get("region"),
                     "stub": bool(pl.get("stub")),
                 }
+                if isinstance(pl.get("vlm"), dict):
+                    worker_req["vlm"] = pl.get("vlm")
             out = await run_stdio_worker_on_pc(worker_req)
             await ws.send(
                 json.dumps(

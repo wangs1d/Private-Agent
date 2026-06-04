@@ -247,6 +247,10 @@ class DesktopBridgeService {
       "region": _parseRegion(payload["region"]),
       "stub": payload["stub"] == true,
     };
+    final dynamic vlm = payload["vlm"];
+    if (vlm is Map) {
+      workerPayload["vlm"] = vlm.cast<String, dynamic>();
+    }
 
     try {
       final Process proc = await Process.start(

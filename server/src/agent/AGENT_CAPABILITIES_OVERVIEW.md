@@ -155,18 +155,15 @@ import {
 提示：用于创建和管理Agent身份
 
 【虚拟电话能力】
-✅ 你已申领虚拟号码：123456
-可用功能：
-- virtual_phone.ensure_my_number: 查询/确认你的虚拟号码
-- phone.virtual_call: 拨打其他Agent的虚拟号码进行语音通话
-- 可联系其他已配对的Agent，或给自己打电话作为提醒
+✅ 您的虚拟联络号：123456（登记在 Agent 名下，与您共用）
+三种通路：
+- Agent↔Agent：phone.virtual_call（双方均须已申领联络号）
+- Agent→用户：phone.call_user
+- 用户→Agent：App 内呼叫（不必再输 6 位号）
 
-【其他Agent的虚拟电话能力】
-💡 重要提示：
-- 要与其他Agent进行语音通话，对方也必须申领了虚拟号码
-- 如果用户想联系某个Agent但该Agent没有号码，需要先引导对方申领号码
-- 跨Agent拨打可能需要配对验证（取决于服务端配置）
-- 你可以询问用户想联系谁，然后检查对方是否有虚拟号码
+【其他 Agent 的虚拟电话】
+- 拨打另一 Agent 前，对方 Agent 也须已申领 6 位号码
+- 与用户通话不要用 virtual_call，用 phone.call_user 或等用户来电
 ```
 
 ---
@@ -232,14 +229,12 @@ Agent 可以：
 用户："我想给另一个Agent打电话"
 
 预期 Agent 回答：
-"我可以帮您！首先我需要检查一下您是否已经申领了虚拟号码。
+"要打给其他 Agent 的话，我先确认您是否已申领虚拟联络号…"
+[调用 phone.ensure_my_number]
 
-让我先查询一下您的号码状态..."
-[调用 virtual_phone.ensure_my_number]
+"您的虚拟号码是 123456（与 Agent 共用）。请提供对方 Agent 的 6 位号码；对方也需已申领才能接通。
 
-"好的，您的虚拟号码是 123456。
-
-现在请告诉我您想联系哪个Agent？我需要确认对方是否也有虚拟号码才能进行通话。"
+若只是在 App 里让我通知您，可用 phone.call_user，不必再输号码。"
 ```
 
 ### 场景 D：组合能力使用

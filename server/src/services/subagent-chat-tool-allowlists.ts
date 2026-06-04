@@ -22,6 +22,8 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
     "info.navigate_site",
     "shopping.suggest",
     "budget.calculate",
+    "browser.session.list",
+    "browser.fetch_page",
     "desktop.visual.screenshot",
     "desktop.visual.run_task",
   ],

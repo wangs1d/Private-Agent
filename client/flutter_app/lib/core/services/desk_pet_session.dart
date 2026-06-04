@@ -22,7 +22,6 @@ class DeskPetSession extends ChangeNotifier {
   static bool get isSupported => kIsWeb || (!kIsWeb && Platform.isWindows);
 
   Future<bool> summon() async {
-    if (_summoned) return true;
     if (!isSupported) {
       _error = "当前平台不支持桌宠。";
       notifyListeners();
@@ -40,16 +39,23 @@ class DeskPetSession extends ChangeNotifier {
       return true;
     }
 
-    final bool ok = await launchElectronDeskPet();
-    _bootstrapping = false;
-    if (!ok) {
-      _error = "桌宠启动失败\n请确认 `sphere-overlay` 已 `npm install`，并且 `agent-sphere-avatar` 已构建。";
+    final String? setupIssue = SphereOverlayLauncher.electronUnavailableReason;
+    if (setupIssue != null) {
+      _bootstrapping = false;
+      _error = setupIssue;
       notifyListeners();
       return false;
     }
 
-    _summoned = true;
-    notifyListeners();
+    final bool ok = await launchElectronDeskPet();
+    _bootstrapping = false;
+    if (!ok) {
+      _error ??= SphereOverlayLauncher.electronUnavailableReason ??
+          "Electron 桌宠启动失败";
+      notifyListeners();
+      return false;
+    }
+
     return true;
   }
 
@@ -72,18 +78,7 @@ class DeskPetSession extends ChangeNotifier {
   Future<bool> launchElectronDeskPet() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
-    _bootstrapping = true;
-    _error = null;
-    notifyListeners();
-
-    if (SphereOverlayLauncher.isCreated) {
-      await SphereOverlayLauncher.stop();
-      SphereEntityController.instance.reset();
-    }
-
     final bool ok = await SphereOverlayLauncher.launchElectron();
-    _bootstrapping = false;
-
     if (ok) {
       _summoned = true;
       SphereEntityController.instance.markElectronReady();
@@ -91,7 +86,9 @@ class DeskPetSession extends ChangeNotifier {
       return true;
     }
 
-    _error = "桌宠启动失败\n请确认 `sphere-overlay` 已 `npm install`。";
+    _error = SphereOverlayLauncher.electronUnavailableReason ??
+        "Electron 桌宠启动失败\n请确认 sphere-overlay 已 npm install，"
+        "且 agent-sphere-avatar 已执行 npm run build（勿用 build:chat）。";
     notifyListeners();
     return false;
   }

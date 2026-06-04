@@ -322,9 +322,9 @@ body {
 .avatar-float-host {
   position: fixed;
   z-index: 50;
-  width: min(300px, 38vw);
-  height: min(340px, 42vh);
-  left: max(12px, calc(100vw - 320px));
+  width: min(150px, 19vw);
+  height: min(170px, 21vh);
+  left: max(12px, calc(100vw - 162px));
   top: 72px;
   touch-action: none;
   cursor: grab;

@@ -2,6 +2,7 @@ import { useSphere } from "@react-three/cannon";
 import { Suspense, useCallback, useEffect, useRef, type Ref, type RefObject } from "react";
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
+import { triggerOverlayRoam } from "../utils/overlay-roam-bridge";
 import { MODEL } from "../constants/model-proportions";
 import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { useAgentBodyMotion } from "../hooks/useAgentBodyMotion";
@@ -20,6 +21,12 @@ interface SphereAgentProps {
   autonomous?: boolean;
   motionBounds?: number;
   hardMotionClamp?: boolean;
+  /** 覆盖默认刚体/视觉中心（桌宠固定机位） */
+  bodyPosition?: [number, number, number];
+  /** 关闭 DG2 待机呼吸位移（桌宠保持尺寸稳定） */
+  idleBodyMotion?: boolean;
+  /** 桌宠视觉缩放 */
+  modelScale?: number;
   onEyeInteractionChange?: (active: boolean) => void;
   /** 允许用户拖拽旋转球体 */
   userDragRotate?: boolean;
@@ -45,6 +52,9 @@ export function SphereAgent({
   autonomous = true,
   motionBounds = 2.4,
   hardMotionClamp = false,
+  bodyPosition,
+  idleBodyMotion = true,
+  modelScale = 1,
   onEyeInteractionChange,
   userDragRotate = true,
   onUserTouch,
@@ -68,7 +78,7 @@ export function SphereAgent({
   const [ref, api] = useSphere(() => ({
     mass: physics ? 1.2 : 0,
     type: physics ? "Dynamic" : "Static",
-    position: [0, 1.6, 0],
+    position: bodyPosition ?? [0, 1.6, 0],
     args: [MODEL.bodyRadius * 0.94],
     linearDamping: physics ? 0.82 : 0.95,
     angularDamping: 0.9,
@@ -161,7 +171,7 @@ export function SphereAgent({
             motion.resumeMotion();
             motion.pickRandomTarget();
           } else {
-            void window.sphereOverlay?.roamNow?.();
+            triggerOverlayRoam();
           }
           break;
         case "excite":
@@ -191,7 +201,7 @@ export function SphereAgent({
           motion.stopMotion();
           break;
         case "window_roam":
-          window.sphereOverlay?.roamNow?.();
+          triggerOverlayRoam();
           if (window.parent !== window) {
             postToHost({ type: SPHERE_MSG.command, action: "window_roam" });
           }
@@ -206,15 +216,27 @@ export function SphereAgent({
   return (
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
-        <group ref={userRotRef}>
+        <group ref={userRotRef} scale={modelScale}>
           <ScreenFace
             mood={state.mood}
             energy={state.energy}
             focused={state.focused}
             signalsRef={faceSignalsRef}
           >
-            <Suspense fallback={null}>
-              <DG2RobotModel energy={state.energy} focused={state.focused} />
+            <Suspense
+              fallback={
+                <mesh>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.7, 24, 24]} />
+                  <meshStandardMaterial color="#5a6a7a" wireframe />
+                </mesh>
+              }
+            >
+              <DG2RobotModel
+                energy={state.energy}
+                focused={state.focused}
+                idleMotion={idleBodyMotion}
+                standaloneLighting={modelScale !== 1}
+              />
             </Suspense>
             {userDragRotate ? (
               <SphereBodyHandle

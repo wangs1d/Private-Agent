@@ -50,6 +50,22 @@ export function readChatWebIndexHtml(): string {
  * 浏览器聊天静态资源：`/chat/assets/*`（页面本体由 `GET /chat` 按 Accept 分流）。
  */
 export function registerChatWeb(app: FastifyInstance): void {
+  /** Agent Sphere 3D 形象构建产物：`/chat/assets/avatar/*`（必须在 `/chat/assets/:file` 之前注册） */
+  app.get<{ Params: { "*": string } }>("/chat/assets/avatar/*", async (req, reply) => {
+    const raw = req.params["*"] ?? "";
+    if (!raw || raw.includes("..") || !/^[a-zA-Z0-9/._-]+$/.test(raw)) {
+      return reply.code(400).send("Invalid path");
+    }
+    const full = resolve(avatarRoot, raw);
+    if (!full.startsWith(avatarRoot) || !existsSync(full)) {
+      return reply.code(404).send("Not found");
+    }
+    const ct = contentTypeFor(raw);
+    if (ct) void reply.type(ct);
+    return readFileSync(full);
+  });
+
+  /** 静态文件：`/chat/assets/*` */
   app.get<{ Params: { file: string } }>("/chat/assets/:file", async (req, reply) => {
     const raw = req.params.file;
     if (!/^[a-zA-Z0-9._-]+$/.test(raw)) {
@@ -82,18 +98,4 @@ export function registerChatWeb(app: FastifyInstance): void {
     return readFileSync(full);
   });
 
-  /** Agent Sphere 3D 形象构建产物：`/chat/assets/avatar/*` */
-  app.get<{ Params: { "*": string } }>("/chat/assets/avatar/*", async (req, reply) => {
-    const raw = req.params["*"] ?? "";
-    if (!raw || raw.includes("..") || !/^[a-zA-Z0-9/._-]+$/.test(raw)) {
-      return reply.code(400).send("Invalid path");
-    }
-    const full = resolve(avatarRoot, raw);
-    if (!full.startsWith(avatarRoot) || !existsSync(full)) {
-      return reply.code(404).send("Not found");
-    }
-    const ct = contentTypeFor(raw);
-    if (ct) void reply.type(ct);
-    return readFileSync(full);
-  });
 }

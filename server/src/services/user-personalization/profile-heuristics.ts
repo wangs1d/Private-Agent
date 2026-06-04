@@ -5,8 +5,12 @@ export type ProfilePatch = {
   interest?: string;
   identity?: string;
   toneNote?: string;
+  replyPreference?: string;
   freeformNote?: string;
 };
+
+const CONCISE_REPLY_PREF_RE =
+  /不要.*(?:等级|标题|摘要)|(?:等级|标题|摘要).*(?:不要|别出现|什么的)|简洁.*(?:回答|回复)|精简直接|口语化.*短句/;
 
 const NAME_RE = /(?:我叫|叫我|称呼我[是为]?|你可以叫我)([^\s，。！？!?.]{1,16})/;
 const INTEREST_RE = /(?:我喜欢|我爱|我爱好|我最爱|经常)([^\s，。！？!?.]{2,40})/;
@@ -28,6 +32,12 @@ export function extractProfilePatches(userText: string): ProfilePatch[] {
 
   if (/幽默|搞笑|轻松|正式|严肃|温馨|温柔|亲切/.test(t)) {
     patches.push({ toneNote: t.slice(0, 80) });
+  }
+
+  if (CONCISE_REPLY_PREF_RE.test(t)) {
+    patches.push({
+      replyPreference: "精简直接，口语化短句；不要等级、标题、摘要表格或正式简报格式",
+    });
   }
 
   if (/记住|别忘了|以后都|每次都要/.test(t) && t.length <= 200) {
@@ -88,6 +98,11 @@ export function applyProfilePatches(md: string, patches: ProfilePatch[]): string
     if (p.toneNote) {
       out = patchSection(out, "沟通偏好", (body) =>
         upsertBullet(body, `用户曾表达：${p.toneNote}`),
+      );
+    }
+    if (p.replyPreference) {
+      out = patchSection(out, "沟通偏好", (body) =>
+        replaceBulletPrefix(body, "回复偏好：", `回复偏好：${p.replyPreference}`),
       );
     }
     if (p.freeformNote) {

@@ -6,6 +6,11 @@ import { config } from "dotenv";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "./port-in-use.mjs";
+import {
+  readGatewayPort,
+  spawnOpenClawGateway,
+  waitForPort,
+} from "./spawn-openclaw-gateway.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
@@ -19,6 +24,18 @@ const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw < 65536 ? portR
 
 if (await isTcpPortInUse(port)) {
   process.exit(0);
+}
+
+let gatewayChild = null;
+const gatewayPort = readGatewayPort();
+if (!(await isTcpPortInUse(gatewayPort))) {
+  gatewayChild = spawnOpenClawGateway();
+  if (gatewayChild) {
+    const ready = await waitForPort(gatewayPort, 25_000);
+    if (!ready) {
+      console.warn(`[openclaw] Gateway 端口 ${gatewayPort} 未就绪，微信 Claw 绑定可能失败`);
+    }
+  }
 }
 
 const child = spawn(
@@ -38,8 +55,28 @@ const child = spawn(
   },
 );
 
+function stopGateway() {
+  if (gatewayChild && !gatewayChild.killed) {
+    try {
+      gatewayChild.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 child.on("exit", (code, signal) => {
+  stopGateway();
   if (signal) process.kill(process.pid, signal);
   process.exit(code ?? 1);
+});
+
+process.once("SIGINT", () => {
+  stopGateway();
+  process.exit(0);
+});
+process.once("SIGTERM", () => {
+  stopGateway();
+  process.exit(0);
 });
 child.on("error", () => process.exit(1));

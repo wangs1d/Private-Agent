@@ -1,0 +1,11 @@
+{
+  "bindings": {
+    "session-mvp-001": {
+      "actorId": "session-mvp-001",
+      "channel": "openclaw-weixin",
+      "accountId": "8c039a3afd46-im-bot",
+      "boundAt": "2026-06-03T10:25:05.004Z",
+      "lastQrMessage": "渠道已连接"
+    }
+  }
+}

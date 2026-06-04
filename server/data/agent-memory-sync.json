@@ -1,7 +1,7 @@
 {
   "sessions": {
     "session-mvp-001": {
-      "revision": 1074,
+      "revision": 1338,
       "entries": {
         "emotion_state": {
           "recent": [
@@ -13,41 +13,86 @@
             "neutral"
           ],
           "preferredTone": "balanced",
-          "lastUpdatedAt": "2026-06-02T08:51:50.057Z",
-          "turnCount": 190
+          "lastUpdatedAt": "2026-06-03T15:16:10.174Z",
+          "turnCount": 236
         },
         "hermes_profile": {
-          "totalTurns": 165,
-          "successfulToolCalls": 361,
-          "failedToolCalls": 4,
+          "totalTurns": 215,
+          "successfulToolCalls": 458,
+          "failedToolCalls": 6,
           "toolNamespaces": {
             "agentworld": 2,
             "world": 8,
             "wallet": 4,
             "calendar": 9,
             "misc": 263,
-            "agent": 15,
-            "clock": 17,
-            "weather": 8,
-            "virtual-phone": 1,
-            "master": 12,
+            "agent": 24,
+            "clock": 22,
+            "weather": 13,
+            "virtual-phone": 2,
+            "master": 16,
             "info": 9,
-            "desktop": 1,
-            "embodiment": 16
+            "desktop": 12,
+            "embodiment": 20,
+            "search": 53,
+            "fetch": 6,
+            "phone": 1
           },
-          "lastUpdatedAt": "2026-06-02T08:52:28.297Z"
+          "toolNamespaceOutcomes": {
+            "search": {
+              "success": 53,
+              "failure": 0
+            },
+            "fetch": {
+              "success": 4,
+              "failure": 2
+            },
+            "clock": {
+              "success": 5,
+              "failure": 0
+            },
+            "weather": {
+              "success": 5,
+              "failure": 0
+            },
+            "embodiment": {
+              "success": 4,
+              "failure": 0
+            },
+            "agent": {
+              "success": 9,
+              "failure": 0
+            },
+            "desktop": {
+              "success": 11,
+              "failure": 0
+            },
+            "virtual-phone": {
+              "success": 1,
+              "failure": 0
+            },
+            "phone": {
+              "success": 1,
+              "failure": 0
+            },
+            "master": {
+              "success": 4,
+              "failure": 0
+            }
+          },
+          "lastUpdatedAt": "2026-06-03T15:16:25.139Z"
         },
-        "persona": "你是持续进化的长期助手，已累计 165 轮互动；默认跟随用户语言，并根据历史偏好调整表达与行动。",
-        "values": "遵循稳健执行与可审计原则：优先复用已验证路径，工具成功率当前约 99%（361/365）。",
-        "abilities": "长期互动显示该 Agent 在以下能力域更活跃：misc(263)、clock(17)、embodiment(16)、agent(15)。决策时优先考虑这些工具域并保持可解释性。",
-        "memory_summary": "5°C（体感36°C） | | **天气** | 阴天 | | **全天** | 20°C ~ 35°C | | **湿度\"\n[2026-05-25T08:07:57.834Z] [fast-path] [Agent 承诺/结论] 额，**我还没看到新的工具权限进来**😅 你开启了最高权限，但我这边**工具列表还是原来的那些**——搜索、天气、钱包、日历这些，没有看到 `desktop\n[2026-05-25T17:42:47.780Z] [fast-path] [Agent 承诺/结论] 已设置好～明天（5月27日）**上午11点**我会自动搜索当天新闻并推送给你 📰 需要改成每天推送吗\n[2026-05-25T17:43:41.541Z] [fast-path] [Agent 承诺/结论] 已设置～**今天上午11点**我会推送今天（5月26日）的新闻简报给你 📰\n[2026-05-26T16:37:48.876Z] [fast-path] [Agent 承诺/结论] 已设置～**每天中午12点**我会自动推送当天科技新闻给你 📰 首次推送：**明天（5月27日）12:00**\n[2026-05-29T04:41:14.672Z] HermesLoop: assistantDone user=\"今天的新闻呢\" reply=\"## 📰 5月29日科技简报 | # | 新闻要点 | |---|---------| | 1 | **我国首个血管芯片国家标准发布** — 《血管芯片通用技术要求》2027年5月实施，器官芯片标准体系获重要进展 | | 2 | **Op\"",
-        "user_profile": "# 用户画像\n\n> 本文件由 Agent 在与你的对话中持续更新。最后更新：2026-06-02T08:29:42.155Z\n> 用户标识：`session-mvp-001`\n\n## 基本信息\n\n- （待了解：称呼、常用语言、所在地等）\n- 互动特征：以\"小弟\"称呼AI，使用\"好久不见\"等亲切寒暄开场；关注对话记忆持续性，会主动确认长期互动中的相互了解程度\n- 身份/背景：一个怎样的人\n\n\n## 兴趣与习惯\n\n- 关注航天领域，涵盖宏观行业对比（中国航天事业、SpaceX）及具体企业调研（航天电子）\n- 有早间获取科技新闻的习惯，主动关注新闻推送状态与信息时效性\n- 关注消费电子（手机）价格动态，曾查询苹果17（iPhone 17）实时价格信息\n\n## 沟通偏好\n\n- 回复偏好：精简直接（与用户极简提问风格一致）\n- 近期情绪倾向：neutral\n- 语气风格：自然均衡（系统根据对话自动调整）\n\n\n## 备注\n\n- 曾询问关于AI控制电脑及系统最高权限的话题\n- 近期发出方位调整指令：\"往右边移一点\"（可能涉及界面操作或空间定位场景）\n- 主动询问长期对话中的了解程度，体现对记忆连贯性和关系深度的关注",
+        "persona": "你是持续演化的长期助手，已累计 215 轮互动；默认跟随用户语言，并根据历史偏好调整表达与行动。",
+        "values": "遵循稳健执行与可审计原则：优先复用已验证路径，当前工具成功率约 99%（458/464）。",
+        "abilities": "长期使用显示该 Agent 在这些工具域最常用且更可靠：misc(263), search(53, 100%), agent(24, 100%), clock(22, 100%)。决策时优先复用这些已验证路径。",
+        "memory_summary": "5°C（体感36°C） | | **天气** | 阴天 | | **全天** | 20°C ~ 35°C | | **湿度\"\n[2026-05-29T04:41:14.672Z] HermesLoop: assistantDone user=\"今天的新闻呢\" reply=\"## 📰 5月29日科技简报 | # | 新闻要点 | |---|---------| | 1 | **我国首个血管芯片国家标准发布** — 《血管芯片通用技术要求》2027年5月实施，器官芯片标准体系获重要进展 | | 2 | **Op\"",
+        "user_profile": "# 用户画像\n\n> 本文件由 Agent 在与你的对话中持续更新。最后更新：2026-06-03T00:00:00.000Z\n> 用户标识：`session-mvp-001`\n\n## 基本信息\n\n- （待了解：称呼、常用语言、所在地、年龄等）\n- 互动特征：以\"小弟\"称呼AI，使用\"好久不见\"等亲切寒暄开场；持续关注对话记忆持续性，会主动确认消息接收状态及长期互动中的相互了解程度；近期询问北京地区天气信息\n- 身份/背景：一个怎样的人\n\n## 兴趣与习惯\n\n- 关注航天领域，涵盖宏观行业对比（中国航天事业、SpaceX）及具体企业调研，定期跟踪航天电子（600879）股票动态，关注订单、业绩、政策、技术、股东变动等维度\n- 有早间获取科技新闻与财经资讯的习惯，主动关注推送状态与时效性\n- 关注价格动态，涵盖消费电子（如iPhone 17）及国际航班（印度尼西亚航线）等出行成本\n\n## 沟通偏好\n\n- 回复偏好：精简直接，口语化短句；不要等级、标题、摘要表格或正式简报格式\n- 任务反馈：期待查询或任务完成后及时告知结果\n- 近期情绪倾向：neutral\n- 语气风格：自然均衡（系统根据对话自动调整）\n\n\n## 备注\n\n- 曾询问关于AI控制电脑及系统最高权限的话题\n- 近期发出方位调整指令：\"往右边移一点\"（可能涉及界面操作或空间定位场景）\n- 多次主动确认对话记忆连贯性（包括询问长期了解程度、确认消息可见性），体现对关系深度和持续互动的重视\n- 历史输入：曾提及数字\"50\"（具体语境与含义待明确）\n- 今晚提及身体不适，描述为\"一直在血瘀\"（中医概念，指血液运行不畅或局部停滞）",
         "user_behavior_signal": {
-          "shoppingInterest": 0,
-          "planningInterest": 0,
+          "shoppingInterest": 1,
+          "planningInterest": 1,
           "companionNeed": 0,
           "privacyConcern": 0,
-          "updatedAt": "2026-06-02T08:51:50.057Z"
+          "updatedAt": "2026-06-03T15:16:10.175Z"
         }
       }
     },
@@ -82,6 +127,67 @@
       "revision": 1,
       "entries": {
         "memory_summary": "[2026-05-28T06:38:50.557Z] 世界入账 +150（zhajinhua.game_payout），余额 1600"
+      }
+    },
+    "web-mpxrqrdw": {
+      "revision": 5,
+      "entries": {
+        "emotion_state": {
+          "recent": [
+            "neutral"
+          ],
+          "preferredTone": "balanced",
+          "lastUpdatedAt": "2026-06-03T07:53:27.050Z",
+          "turnCount": 1
+        },
+        "user_behavior_signal": {
+          "shoppingInterest": 0,
+          "planningInterest": 0,
+          "companionNeed": 0,
+          "privacyConcern": 0,
+          "updatedAt": "2026-06-03T07:53:27.051Z"
+        },
+        "hermes_profile": {
+          "totalTurns": 1,
+          "successfulToolCalls": 1,
+          "failedToolCalls": 0,
+          "toolNamespaces": {
+            "clock": 1
+          },
+          "toolNamespaceOutcomes": {
+            "clock": {
+              "success": 1,
+              "failure": 0
+            }
+          },
+          "lastUpdatedAt": "2026-06-03T07:55:05.307Z"
+        },
+        "persona": "你是持续演化的长期助手，已累计 1 轮互动；默认跟随用户语言，并根据历史偏好调整表达与行动。",
+        "values": "遵循稳健执行与可审计原则：优先复用已验证路径，当前工具成功率约 100%（1/1）。",
+        "abilities": "长期使用显示该 Agent 在这些工具域最常用且更可靠：clock(1, 100%)。决策时优先复用这些已验证路径。",
+        "user_profile": "# 用户画像\n\n> 本文件由 Agent 在与你的对话中持续更新。最后更新：2026-06-03T07:55:05.321Z\n> 用户标识：`web-mpxrqrdw`\n\n## 基本信息\n\n- （待了解：称呼、常用语言、所在地等）\n\n## 兴趣与习惯\n\n- （待了解）\n\n## 沟通偏好\n\n- 回复偏好：精简直接\n- 语气风格：自然均衡（系统根据对话自动调整）\n\n\n## 备注\n\n- （重要但不宜归类到以上的信息）\n"
+      }
+    },
+    "web-mpxujguv": {
+      "revision": 6,
+      "entries": {
+        "emotion_state": {
+          "recent": [
+            "neutral",
+            "neutral",
+            "neutral"
+          ],
+          "preferredTone": "balanced",
+          "lastUpdatedAt": "2026-06-03T09:11:32.806Z",
+          "turnCount": 3
+        },
+        "user_behavior_signal": {
+          "shoppingInterest": 0,
+          "planningInterest": 0,
+          "companionNeed": 0,
+          "privacyConcern": 0,
+          "updatedAt": "2026-06-03T09:11:32.806Z"
+        }
       }
     }
   }

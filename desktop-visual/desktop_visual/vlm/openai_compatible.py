@@ -70,7 +70,11 @@ class OpenAICompatibleVLM(VisionLanguageModel):
         headers = {"Authorization": f"Bearer {self._api_key}"}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                body_preview = (response.text or "")[:400]
+                raise RuntimeError(
+                    f"VLM HTTP {response.status_code} for {url}: {body_preview}",
+                )
             data = response.json()
 
         choice0 = data["choices"][0]

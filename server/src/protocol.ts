@@ -21,6 +21,8 @@ export const ClientEventType = {
   VirtualPhoneUserCall: "phone.user_call_agent",
   /** 用户直接呼叫自己的Agent（无需输入ID，服务端从session推断） */
   VirtualPhoneCallMyAgent: "phone.call_my_agent",
+  /** 用户对「其他 Agent 虚拟来电」的响应：接听 / 拒接 / 委托 Agent 代接 */
+  VirtualPhoneIncomingResponse: "phone.incoming_response",
   /** 球形 Agent 具身交互：唤醒、发消息、聚焦聊天等 */
   AgentEmbodimentInteract: "agent.embodiment.interact",
   /** 客户端回报球形窗口在屏幕上的位置（配合 embodiment.observe 闭环） */

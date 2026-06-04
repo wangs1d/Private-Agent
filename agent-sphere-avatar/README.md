@@ -9,7 +9,7 @@
 | 模块 | 说明 |
 |------|------|
 | **DG2RobotModel** | OBJ 一比一还原深灰金属球形机器人 |
-| **ScreenFace / EyeScreen** | 曲屏表情与交互 |
+| **ScreenFace** | 曲屏表情与交互 |
 | **SphereAgent** | 物理 / 自主漫游 / 用户拖拽 |
 | **useAgentWebSocket** | 可选直连 `/ws` |
 | **embed-protocol** | iframe postMessage 协议（移植核心） |
@@ -20,7 +20,7 @@
 ```bash
 cd agent-sphere-avatar
 npm install
-npm run dev              # 演示页 http://localhost:5180
+npm run dev              # 桌宠/嵌入开发 http://localhost:5180/overlay.html
 npm run build:standalone # 独立静态包 dist/（相对路径，可任意部署）
 npm run build:chat       # PAI 内部：部署到 server/web/chat/assets/avatar/
 ```
@@ -52,10 +52,8 @@ cd sphere-overlay
 
 | 文件 | 用途 |
 |------|------|
-| `index.html` | 独立演示 |
 | `embed.html` | 网页/chat iframe 嵌入 |
-| `overlay.html` | Electron 桌面悬浮 |
-| `free.html` | 全屏漫游（Flutter Web） |
+| `overlay.html` | Electron 桌面桌宠 |
 
 ## 目录结构
 
@@ -67,7 +65,7 @@ agent-sphere-avatar/          ← 独立模块，可直接复制
 │   ├── public-api.ts         # 公共导出
 │   ├── bridge/ws-agent-mapper.ts
 │   ├── hooks/
-│   ├── modes/                # EmbedApp / OverlayApp / FreeApp
+│   ├── modes/                # EmbedApp / OverlayApp
 │   └── components/
 ├── public/models/
 ├── scripts/
@@ -92,5 +90,5 @@ agent-sphere-avatar/          ← 独立模块，可直接复制
 | 宿主 | 加载路径 |
 |------|----------|
 | 网页聊天 | `/chat/assets/avatar/embed.html?wsOff=1` |
-| Flutter Web | `free.html?wsOff=1` |
+| Flutter Web | `/chat/assets/avatar/embed.html?wsOff=1` |
 | Electron 桌宠 | `dist/overlay.html` |

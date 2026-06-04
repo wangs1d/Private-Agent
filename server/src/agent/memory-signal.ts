@@ -1,14 +1,14 @@
-/** 用户显式要求记住或涉及长期偏好的信号 */
 export const MEMORY_EXPLICIT_RE =
-  /记住|记得|别忘了|帮我记|记下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
+  /记住|记得|别忘了|帮我记|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
 
-/** 用户引用历史上下文的信号 */
 export const MEMORY_RECALL_HINT_RE =
-  /之前|上次|说过|刚才|刚刚|前面|早些时候|earlier|before|last time|you said/i;
+  /之前|上次|说过|刚才|刚刚|前面| earlier|before|last time|you said/i;
 
-/** 短句追问/确认（无自洽语义，必须锚定上一轮对话） */
+export const MEMORY_SUMMARY_PRIORITY_RE =
+  /之前|上次|说过|刚才|刚刚|记住|记得|偏好|喜欢|讨厌|习惯|禁忌|生日|纪念日|承诺|答应|prefer|remember|you said|last time|promise/i;
+
 export const AMBIGUOUS_FOLLOWUP_RE =
-  /^(你)?确定[吗？?]?$|^(真的|确实)[吗？?]?$|^(是吗|对吗|对不对)[？?]?$|^(为什么|为何)[？?]?$|^(然后呢|接着呢)[？?]?$|^[？?？!！。…]+$/;
+  /^(你确定[吗？?]?$|^(真的|确实)[吗？?]?$|^(是吗|对吗|对不对)[？?]?$|^(为什么|为何)[？?]?$|^(然后呢|接着呢)[？?]?$|^[？?！!。.\s]+$)/;
 
 export function isAmbiguousFollowUpMessage(message: string): boolean {
   const t = message.trim();
@@ -17,27 +17,22 @@ export function isAmbiguousFollowUpMessage(message: string): boolean {
   return AMBIGUOUS_FOLLOWUP_RE.test(t);
 }
 
-/** Agent 承诺、结论、决策类信号 */
 export const AGENT_COMMITMENT_RE =
-  /我会|我将|已为你|已经帮你|已设置|已创建|已添加|已安排|已提醒|帮你订|帮你查|结论是|建议是|remember to|i will|i've set/i;
+  /我会|我将|已为你|已经帮你|已设置|已创建|已添加|已安排|已提醒|帮你记|帮你查|结论是|建议是|remember to|i will|i've set/i;
 
 export type MemorySignalResult = {
   isHighSignal: boolean;
   reasons: string[];
-  /** 供 fast-path 写入 digest / KV / 向量库的摘要行 */
   extractLines: string[];
 };
 
 function firstSentence(text: string, maxLen: number): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (!t) return "";
-  const cut = t.split(/[。！？.!?\n]/)[0]?.trim() || t;
+  const cut = t.split(/[。！？?!\n]/)[0]?.trim() || t;
   return cut.length > maxLen ? `${cut.slice(0, maxLen)}…` : cut;
 }
 
-/**
- * 检测本轮是否含高价值记忆信号（供 fast-path 与 recall 跳过对称使用）。
- */
 export function detectMemorySignals(userText: string, assistantText: string): MemorySignalResult {
   const user = userText.trim();
   const assistant = assistantText.trim();
@@ -74,14 +69,22 @@ export function shouldSkipNarrativeRecall(message: string): boolean {
   return false;
 }
 
+export function shouldInjectMemorySummary(message: string): boolean {
+  const t = message.trim();
+  if (!t) return false;
+  if (MEMORY_EXPLICIT_RE.test(t)) return true;
+  if (MEMORY_RECALL_HINT_RE.test(t)) return true;
+  return MEMORY_SUMMARY_PRIORITY_RE.test(t);
+}
+
 export function buildFollowUpAnchorPrompt(message: string): string | undefined {
   if (!isAmbiguousFollowUpMessage(message)) return undefined;
   return [
     "【短句追问 · 必须锚定上一轮】",
-    `用户本条消息极短（「${message.trim()}」），是对话线程中**紧邻上一轮**助手回复的追问或确认。`,
-    "- 只根据对话历史中**最后一条 assistant 回复**理解用户在问什么，直接回应该话题。",
-    "- 禁止切换到其他历史话题（如日程/定时推送/旧任务），除非上一轮正是在讨论该话题。",
+    `用户本条消息极短（「${message.trim()}」），是对话线程中紧邻上一轮助手回复的追问或确认。`,
+    "- 只根据对话历史中最后一条 assistant 回复理解用户在问什么，直接回应该话题。",
+    "- 禁止切换到其他历史话题，除非上一轮正在讨论该话题。",
     "- 禁止为此类追问调用 calendar.list_tasks / calendar.create_task 等日程工具，除非上一轮明确在确认日程。",
-    "- 若上一轮在讨论事实/排名/新闻等，用户「确定？」=质疑该结论，应补充依据或承认不确定，而非答无关任务状态。",
+    "- 若上一轮在讨论事实、排名、新闻等，用户“确定？”是在质疑结论，应补充依据或承认不确定。",
   ].join("\n");
 }

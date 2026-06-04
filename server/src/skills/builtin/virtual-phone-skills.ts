@@ -20,16 +20,16 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
     metadata: {
       name: "virtual-phone.ensure-my-number",
       version: "1.0.0",
-      displayName: "申领虚拟电话号码",
+      displayName: "申领本 Agent 虚拟电话号码",
       description:
-        "为当前用户/Agent分配或查询6位虚拟电话号码。仅在用户明确要求办理时调用，禁止主动调用或帮用户提前占号。重复调用返回已有号码。",
+        "为用户（经本 Agent）分配或查询 6 位虚拟联络号码，号码登记在 Agent 名下、与用户一体。仅在用户明确要求办理时调用；禁止主动占号。",
       kind: "builtin",
       tags: ["phone", "communication", "identity"],
       icon: "📞",
       parameters: [],
       outputSchema: {
-        actorId: "用户/Agent的唯一标识",
-        virtualPhone: "6位数字虚拟号码",
+        actorId: "本 Agent 的唯一标识",
+        virtualPhone: "与用户共用的 6 位虚拟号码",
         summary: "操作结果说明",
       },
       permissions: [],
@@ -43,7 +43,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
           ok: true,
           actorId,
           virtualPhone: number,
-          summary: `你的 6 位虚拟号码为 ${number}。仅在你明确要求办理时才会申领；其他 Agent 可用此号码拨打你（配对规则同中继）。`,
+          summary: `您的虚拟号码为 ${number}（登记在 Agent 名下）。其他 Agent 可拨打此号联系您（配对规则同中继）。`,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -64,7 +64,7 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
       version: "1.0.0",
       displayName: "查询虚拟号码状态",
       description:
-        "查询当前用户/Agent是否已申领虚拟号码，以及号码详情。用于确认是否需要先申领号码再拨打。",
+        "查询本 Agent 是否已申领虚拟号码。Agent 互拨前主叫须已申领；呼叫用户(phone.call_user)或接收用户来电则不需要用户有号码。",
       kind: "builtin",
       tags: ["phone", "query", "status"],
       icon: "🔍",
@@ -86,8 +86,8 @@ export function createVirtualPhoneBuiltinSkills(deps: Deps): SkillDefinition[] {
         hasNumber: virtualPhone !== undefined,
         virtualPhone: virtualPhone || null,
         message: virtualPhone
-          ? `您已申领虚拟号码：${virtualPhone}`
-          : "您尚未申领虚拟号码，请先申领后再使用拨打功能",
+          ? `您的虚拟号码为：${virtualPhone}（与 Agent 共用）`
+          : "尚未申领您的虚拟联络号；办理后其他 Agent 可拨打联系您。App 内呼叫 Agent 无需另输号码。",
       };
     },
   };

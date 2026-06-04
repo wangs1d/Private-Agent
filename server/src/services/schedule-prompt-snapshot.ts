@@ -7,40 +7,58 @@ const RECURRENCE_LABEL: Record<string, string> = {
   yearly: "每年",
 };
 
-/**
- * 每轮对话注入的日程快照（读服务端 ScheduleTaskService，与 App「日程」页服务端数据一致）。
- */
+const SCHEDULE_RECALL_RE =
+  /日程|提醒|安排|待办|计划|行程|会议|约会|闹钟|calendar|schedule|remind|todo|task/i;
+
+const SCHEDULE_FAR_RANGE_RE =
+  /明天|后天|下周|下个月|本月|本周|未来|之后|以后|全部|所有|最近几天|最近一周|长期|tomorrow|next week|next month|future|all/i;
+
+export function shouldInjectScheduleSnapshot(userText: string | undefined): boolean {
+  const text = userText?.trim() ?? "";
+  return Boolean(text) && SCHEDULE_RECALL_RE.test(text);
+}
+
+export function shouldUseExtendedScheduleWindow(userText: string | undefined): boolean {
+  const text = userText?.trim() ?? "";
+  return Boolean(text) && SCHEDULE_FAR_RANGE_RE.test(text);
+}
+
 export function buildSchedulePromptSnapshot(
   scheduleTaskService: ScheduleTaskService,
   sessionId: string,
+  userText?: string,
 ): string {
   const now = Date.now();
+  const extended = shouldUseExtendedScheduleWindow(userText);
+  const horizonDays = extended ? 7 : 1;
+  const maxItems = extended ? 8 : 5;
   const from = new Date(now).toISOString();
-  const to = new Date(now + 14 * 86400000).toISOString();
+  const to = new Date(now + horizonDays * 86400000).toISOString();
   const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
 
   if (tasks.length === 0) {
-    return [
-      "【当前日程 · 服务端实时】暂无活跃提醒/日程（共 0 条）。",
-      "用户可能在 App「日程」页已删除；回答日程相关问题以此为准，勿凭屏幕截图或对话历史中的旧列表作答。",
-    ].join("\n");
+    return extended
+      ? "【当前日程 · 服务端实时】未来 7 天暂无活跃提醒或日程。"
+      : "【今日日程 · 服务端实时】今天暂无活跃提醒或日程。";
   }
 
-  const lines = tasks.slice(0, 15).map((t) => {
-    const when = t.nextRunAt ?? t.runAt;
-    const rec = RECURRENCE_LABEL[t.recurrence] ?? t.recurrence;
-    const title = t.reminderMessage?.trim() || t.title;
-    return `- ${title} · ${when} · ${rec}`;
+  const lines = tasks.slice(0, maxItems).map((task) => {
+    const when = task.nextRunAt ?? task.runAt;
+    const recurrence = RECURRENCE_LABEL[task.recurrence] ?? task.recurrence;
+    const title = task.reminderMessage?.trim() || task.title;
+    return `- ${title} | ${when} | ${recurrence}`;
   });
-  const tail =
-    tasks.length > 15
-      ? `\n（另有 ${tasks.length - 15} 条，请调 calendar.list_tasks 查看完整列表）`
-      : "";
+
+  const hiddenCount = tasks.length - lines.length;
+  const header = extended
+    ? `【当前日程 · 服务端实时】未来 ${horizonDays} 天共 ${tasks.length} 条活跃提醒或日程：`
+    : `【今日日程 · 服务端实时】今天共 ${tasks.length} 条活跃提醒或日程：`;
+
   return [
-    `【当前日程 · 服务端实时】共 ${tasks.length} 条活跃提醒/日程：`,
+    header,
     ...lines,
-    tail,
-    "回答日程/提醒问题时优先参考本快照；用户可在 App「日程」页直接删改，勿凭截图或历史旧数据作答。",
+    hiddenCount > 0 ? `（另有 ${hiddenCount} 条未展开，需要更多时调用 calendar.list_tasks。）` : "",
+    "回答日程相关问题时优先以这份快照为准；需要更远时间范围时再调用日程工具检索。",
   ]
     .filter(Boolean)
     .join("\n");

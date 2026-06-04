@@ -8,6 +8,7 @@ import type {
 import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
+import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
@@ -596,7 +597,7 @@ const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "phone.ensure_my_number",
       description:
-        "仅当用户明确要求办理/申领虚拟电话时调用：分配或查询其 6 位虚拟号码。禁止在用户未要求时主动调用；不要用此工具「帮用户提前占号」。跨 Agent 拨打需配对时与中继规则一致。",
+        "仅当用户明确要求办理虚拟电话时调用：分配或查询用户与 Agent 共用的 6 位虚拟号码（登记在 Agent 名下）。禁止未要求时主动占号。Agent 互拨前须已申领；对用户可说「您的虚拟号码」。App 内用户呼叫 Agent 不必再输 6 位号。跨 Agent 配对规则同中继。",
       parameters: {
         type: "object",
         properties: {},
@@ -609,7 +610,7 @@ const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "phone.virtual_call",
       description:
-        "拨打 6 位虚拟号码：主叫须已申领号码（用户需先明确要求办理过虚拟号）。向目标推送「虚拟来电」并朗读 spokenMessage。ringStyle：reminder=提醒调；peer=联络他人（默认）。打给好友或本人自提醒均可。",
+        "Agent 互拨：拨打另一 Agent 的 6 位虚拟号码（被叫须已申领）。主叫 Agent 须已申领号码（用户明确要求时用 phone.ensure_my_number 办理）。向目标 Agent 推送虚拟来电并朗读 spokenMessage。ringStyle：reminder=自提醒；peer=联络其他 Agent（默认）。与用户通话请用 phone.call_user，勿用本工具。",
       parameters: {
         type: "object",
         properties: {
@@ -622,6 +623,28 @@ const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["toPhone", "spokenMessage"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "phone.call_user",
+      description:
+        "Agent 呼叫当前用户：通过 WebSocket 向用户客户端推送语音来电（含 TTS），用户可接听并文字/语音回复。用户不需要虚拟号码。spokenMessage 为播报正文。ringStyle：reminder=提醒；peer=联络（默认）。",
+      parameters: {
+        type: "object",
+        properties: {
+          toUserId: { type: "string", description: "被叫用户 ID，通常省略则使用当前会话用户" },
+          spokenMessage: { type: "string", description: "用户将听到的播报正文" },
+          ringStyle: {
+            type: "string",
+            enum: ["peer", "reminder"],
+            description: "peer=联络；reminder=提醒",
+          },
+        },
+        required: ["spokenMessage"],
         additionalProperties: false,
       },
     },
@@ -805,6 +828,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
+    BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
   return _builtinToolsCache;
@@ -847,7 +871,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'phone',
     keywords: ['电话', 'phone', '拨打', 'call', '虚拟号', 'virtual', '号码', 'number', '通话', 'ring', '来电', 'call'],
-    toolNames: ['phone.ensure_my_number', 'phone.virtual_call']
+    toolNames: ['phone.ensure_my_number', 'phone.virtual_call', 'phone.call_user']
   },
   {
     category: 'vision',
@@ -876,8 +900,8 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'desktop',
-    keywords: ['桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control', '操作', 'operate', '点击', 'click', '键盘', 'keyboard', '鼠标', 'mouse'],
-    toolNames: [] // desktop tools are dynamic
+    keywords: ['桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control', '操作', 'operate', '点击', 'click', '键盘', 'keyboard', '鼠标', 'mouse', '截屏', '截图', '操控', '打开浏览器', '浏览器'],
+    toolNames: ['desktop.visual.screenshot', 'desktop.visual.run_task'],
   },
   {
     category: 'programming',

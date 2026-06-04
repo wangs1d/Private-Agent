@@ -1,6 +1,7 @@
 import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
 
+import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/vision/vision_user_limits.dart";
@@ -56,7 +57,7 @@ class ChatPage extends StatefulWidget {
   final VoidCallback? onOpenBackgroundTasks;
   /// 运行中后台任务数（用于角标）
   final int backgroundTasksBadgeCount;
-  /// 打开网络电话拨号面板
+  /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
 
   @override
@@ -860,6 +861,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     style: TextStyle(color: cs.onSurface),
                                     cursorColor: cs.primary,
                                     maxLines: null,
+                                    minLines: 1,
                                     textInputAction: TextInputAction.send,
                                     keyboardType: TextInputType.multiline,
                                     onSubmitted: (_) {
@@ -932,7 +934,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 ),
                               ],
                             ),
-                            // 第二行：加号 + 语音按钮 + 网络电话按钮
+                            // 第二行：加号 + 语音按钮 + 呼叫 Agent
                             Padding(
                               padding: const EdgeInsets.only(top: 6),
                               child: Row(
@@ -996,7 +998,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                           minWidth: 32,
                                           minHeight: 32,
                                         ),
-                                        tooltip: '网络电话',
+                                        tooltip: VirtualPhoneUiLabels.chatTooltip,
                                       ),
                                     ),
                                 ],

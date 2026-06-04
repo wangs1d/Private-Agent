@@ -350,6 +350,105 @@ export const phoneMeQuerySchema = z.object({
   userId: z.string().min(1).optional(),
 });
 
+export const wechatClawStatusQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+export const wechatClawActorBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+export const wechatClawLoginStartBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    force: z.boolean().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+export const wechatClawLoginWaitBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    /** 客户端已持有当前二维码时设为 true，避免重复上传巨型 data URL */
+    qrKnown: z.boolean().optional(),
+    currentQrDataUrl: z.string().max(2_000_000).optional(),
+    timeoutMs: z.number().int().min(3000).max(90_000).optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** OpenClaw 消息桥：微信入站 → 主服务 AgentCore */
+export const wechatClawBridgeChatBodySchema = z.object({
+  text: z.string().max(16_000),
+  userId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+  weixinSenderId: z.string().max(256).optional(),
+  channel: z.string().max(64).optional(),
+  accountId: z.string().max(128).optional(),
+  messageId: z.string().max(128).optional(),
+});
+
+const browserSessionSiteIdSchema = z.enum(["ctrip", "taobao", "jd", "qunar", "fliggy"]);
+
+const browserSessionCookieSchema = z.object({
+  name: z.string().min(1).max(512),
+  value: z.string().max(16_384),
+  domain: z.string().max(256).optional(),
+  path: z.string().max(256).optional(),
+  expires: z.number().optional(),
+  httpOnly: z.boolean().optional(),
+  secure: z.boolean().optional(),
+  sameSite: z.string().max(16).optional(),
+});
+
+export const browserSessionStatusQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+export const browserSessionImportBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    siteId: browserSessionSiteIdSchema,
+    cookies: z.array(browserSessionCookieSchema).min(1).max(500),
+    /** 导入时是否立即授权 Agent；默认 false，建议单独调用 consent */
+    agentAllowed: z.boolean().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+export const browserSessionConsentBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    siteId: browserSessionSiteIdSchema,
+    agentAllowed: z.boolean(),
+  })
+  .superRefine(accountActorRefine);
+
+export const browserSessionRevokeBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    siteId: browserSessionSiteIdSchema,
+  })
+  .superRefine(accountActorRefine);
+
+export const browserSessionActorBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
 export const companionSessionQuerySchema = z.object({
   sessionId: z.string().min(1),
 });

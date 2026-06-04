@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("sphereOverlay", {
   moveBy: (dx, dy) => ipcRenderer.send("sphere:moveBy", dx, dy),
   setIgnoreMouseEvents: (ignore, forward) =>
     ipcRenderer.send("sphere:setIgnoreMouseEvents", ignore, forward),
+  setMenuExpanded: (expanded) => ipcRenderer.send("sphere:setMenuExpanded", !!expanded),
   onPatch: (cb) => {
     ipcRenderer.on("sphere-overlay:patch", (_event, patch) => cb(patch));
   },

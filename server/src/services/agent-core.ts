@@ -44,6 +44,7 @@ import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
+import { buildToolRankingHintFromHermesProfile } from "./hermes-tool-ranking.js";
 
 /**
  * 简单 LRU 缓存实现（用于响应缓存）
@@ -206,6 +207,8 @@ export type HandleUserMessageOptions = {
   interruptedContext?: string;
   /** 默认沙箱；`full` 时允许高权限工具 */
   agentAccessMode?: AgentAccessMode;
+  /** 为 true 时禁用 fast_chat 捷径（工具/记忆/人设与 App 对齐） */
+  preferFullPipeline?: boolean;
 };
 
 export class AgentCore {
@@ -286,6 +289,9 @@ export class AgentCore {
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
     const perfStartTime = Date.now();
+    const route = routeLlmExecution(text, getAgentRuntimeConfig(), {
+      preferFullPipeline: opts?.preferFullPipeline === true,
+    });
     
     // 响应缓存检查（性能优化：重复查询 <100ms）
     const cacheEnabled = process.env.RESPONSE_CACHE_ENABLED !== '0';
@@ -312,14 +318,20 @@ export class AgentCore {
     // 性能监控：前置准备阶段
     const prepStartTime = Date.now();
     
-    const [narrativeRecall, userLocation, personalization] = await Promise.all([
-      this.turnLifecycle.prepareNarrativeRecall(actorId, text),
-      resolveUserLocationPrompt({
-        clientIp: opts?.clientIp,
-        clientLocation: opts?.clientLocation,
-      }),
-      this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
-    ]);
+    const [narrativeRecall, userLocation, personalization] = this.isFastChatMode(route.mode)
+      ? await Promise.all([
+          Promise.resolve(undefined),
+          Promise.resolve(undefined),
+          Promise.resolve({} as PersonalizationPromptSlice),
+        ])
+      : await Promise.all([
+          this.turnLifecycle.prepareNarrativeRecall(actorId, text),
+          resolveUserLocationPrompt({
+            clientIp: opts?.clientIp,
+            clientLocation: opts?.clientLocation,
+          }),
+          this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
+        ]);
     
     const prepDuration = Date.now() - prepStartTime;
     
@@ -328,7 +340,6 @@ export class AgentCore {
       opts?.chatUserMessageId,
       text,
     );
-    const route = routeLlmExecution(text);
     const access = this.streamAccessFields(actorId, opts);
     const orchestrateOpts = this.buildOrchestrateOpts(
       actorId,
@@ -547,6 +558,23 @@ export class AgentCore {
     return mode === "master_only" || mode === "master_delegate";
   }
 
+  private isFastChatMode(mode: LlmExecutionMode): boolean {
+    return mode === "fast_chat";
+  }
+
+  private resolveToolExposureProfile(mode: LlmExecutionMode): AgentStreamOptions["toolExposureProfile"] {
+    if (mode === "fast_chat") return "none";
+    if (mode === "master_delegate") return "delegate";
+    if (mode === "plan_execute") return "contextual";
+    return "contextual";
+  }
+
+  private resolveHermesToolRankingHint(actorId: string): AgentStreamOptions["toolRankingHint"] {
+    const profile =
+      this.agentMemorySyncService?.getSnapshot(actorId, ["hermes_profile"]).entries.hermes_profile;
+    return buildToolRankingHintFromHermesProfile(profile);
+  }
+
   private buildOrchestrateOpts(
     actorId: string,
     userText: string,
@@ -572,6 +600,7 @@ export class AgentCore {
       clientLocation: opts?.clientLocation,
       agentAccessMode: access.agentAccessMode,
       desktopBridgeOnline: access.desktopBridgeOnline,
+      toolRankingHint: this.resolveHermesToolRankingHint(actorId),
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
@@ -621,15 +650,28 @@ export class AgentCore {
     };
 
     const onBatchWithEvolution = ctx.orchestrateToolCtx.onToolLoopAfterBatch;
-    const streamOpts = this.promptContextBuilder.build({
-      actorId,
-      userText: text,
-      narrativeRecall: ctx.narrativeRecall,
-      interruptedContext: opts?.interruptedContext,
-      userLocation: ctx.userLocation,
-      personalization: ctx.personalization,
-      onToolLoopAfterBatch: onBatchWithEvolution,
-    });
+    const toolExposureProfile = this.resolveToolExposureProfile(mode);
+    const toolRankingHint = this.resolveHermesToolRankingHint(actorId);
+    const streamOpts = this.isFastChatMode(mode)
+      ? ({
+          chatToolsBuiltin: [],
+          chatToolsExtra: [],
+          toolExposureProfile,
+          toolRankingHint,
+        } satisfies AgentStreamOptions)
+      : {
+          ...(this.promptContextBuilder.build({
+            actorId,
+            userText: text,
+            narrativeRecall: ctx.narrativeRecall,
+            interruptedContext: opts?.interruptedContext,
+            userLocation: ctx.userLocation,
+            personalization: ctx.personalization,
+            onToolLoopAfterBatch: onBatchWithEvolution,
+          }) ?? {}),
+          toolExposureProfile,
+          toolRankingHint,
+        };
 
     let full = "";
     let modelCallsConsumed = 1;

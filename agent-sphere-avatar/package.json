@@ -23,6 +23,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:electron": "npm run build",
     "build:standalone": "node scripts/build-with-env.mjs ./",
     "build:chat": "node scripts/build-with-env.mjs /chat/assets/avatar/ && node scripts/copy-to-chat.mjs",
     "build:deploy": "npm run build:chat",

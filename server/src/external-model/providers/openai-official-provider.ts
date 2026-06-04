@@ -358,7 +358,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
       try {
 
-        const mergedTools = resolveChatToolsForStream(streamOpts);
+        const mergedTools = resolveChatToolsForStream(userTurn.text, streamOpts);
 
         const full = await streamCompletionWithTools(
 

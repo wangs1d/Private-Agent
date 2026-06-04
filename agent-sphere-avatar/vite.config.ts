@@ -19,17 +19,15 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       port: 5180,
-      open: true,
+      open: "/overlay.html",
     },
     build: {
       outDir: "dist",
       sourcemap: true,
       rollupOptions: {
         input: {
-          main: resolve(__dirname, "index.html"),
           embed: resolve(__dirname, "embed.html"),
           overlay: resolve(__dirname, "overlay.html"),
-          free: resolve(__dirname, "free.html"),
         },
       },
     },

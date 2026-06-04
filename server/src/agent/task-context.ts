@@ -38,6 +38,21 @@ export function buildTaskContextPrompt(message: string, now: Date = new Date()):
     `likelyCodeOrProjectWork=${profile.likelyCodeOrProjectWork}`,
   ].join(", ");
 
+  const needsDetailedPolicy =
+    profile.complexity === "multi_step" ||
+    profile.needsNarrativeRecall ||
+    profile.likelyNeedsFreshFacts ||
+    profile.likelyPersistsState ||
+    profile.likelyCodeOrProjectWork;
+
+  if (!needsDetailedPolicy) {
+    return [
+      `Runtime timestamp: ${now.toISOString()}. Interpret relative dates from this timestamp; use clock tools when the user asks for exact current time/date/location.`,
+      `Task profile: ${flags}.`,
+      "Operating policy: answer directly when the request is simple and no tool or persistent action is needed.",
+    ].join("\n");
+  }
+
   return [
     `Runtime timestamp: ${now.toISOString()}. Interpret relative dates from this timestamp; use clock tools when the user asks for exact current time/date/location.`,
     `Task profile: ${flags}.`,

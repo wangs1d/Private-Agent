@@ -30,6 +30,7 @@ export const CORE_TOOL_LIBRARY = {
       MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
       "search_web",
       "fetch_web",
+      "browser.session.list",
       "weather.get_local",
     ],
   },
@@ -75,6 +76,14 @@ export const CORE_TOOL_LIBRARY = {
       "world.game_center.",
     ],
   },
+  desktop: {
+    label: "桌面截图与键鼠",
+    prefixes: ["desktop.visual."],
+  },
+  browser: {
+    label: "电商 Cookie 读价",
+    prefixes: ["browser."],
+  },
 } as const;
 
 const CORE_EXACT_NAMES = new Set<string>([
@@ -86,6 +95,8 @@ const CORE_PREFIXES: readonly string[] = [
   ...CORE_TOOL_LIBRARY.dialogue.prefixes,
   ...CORE_TOOL_LIBRARY.embodiment.prefixes,
   ...CORE_TOOL_LIBRARY.games.prefixes,
+  ...CORE_TOOL_LIBRARY.desktop.prefixes,
+  ...CORE_TOOL_LIBRARY.browser.prefixes,
   "master.",
 ];
 
@@ -134,6 +145,7 @@ export function summarizeCoreToolLibrary(): {
       CORE_TOOL_LIBRARY.dialogue.label,
       CORE_TOOL_LIBRARY.embodiment.label,
       CORE_TOOL_LIBRARY.games.label,
+      CORE_TOOL_LIBRARY.desktop.label,
     ],
   };
 }

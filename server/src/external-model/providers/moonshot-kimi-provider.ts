@@ -119,7 +119,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     if (tools) {
       let completed = false;
       try {
-        const mergedTools = resolveChatToolsForStream(effectiveStreamOpts);
+          const mergedTools = resolveChatToolsForStream(userTurn.text, effectiveStreamOpts);
         const full = await streamCompletionWithTools(
           this.client,
           model,

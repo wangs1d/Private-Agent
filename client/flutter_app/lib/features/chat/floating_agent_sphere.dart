@@ -309,6 +309,11 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
     final Size screen = MediaQuery.sizeOf(context);
 
+    if (FloatingAgentSphere.useWindowsDesktop) {
+      // Windows 桌宠仅由 Electron 独立窗呈现，主应用内不保留占位框。
+      return const SizedBox.shrink();
+    }
+
     if (kIsWeb) {
       return AgentSphereWebView(
         showOverlayButton: false,

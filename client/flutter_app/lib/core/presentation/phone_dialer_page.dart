@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
 
+import "virtual_phone_ui_labels.dart";
+
 class PhoneDialerPage extends StatefulWidget {
   const PhoneDialerPage({super.key, this.onCallSent, this.onCallMyAgent});
 
@@ -60,7 +62,7 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("📞 网络电话")),
+      appBar: AppBar(title: Text("📞 ${VirtualPhoneUiLabels.featureTitle}")),
       body: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -72,16 +74,21 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    const Row(
+                    Row(
                       children: <Widget>[
-                        Icon(Icons.dialpad, size: 22),
-                        SizedBox(width: 8),
-                        Text("网络电话",
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        const Icon(Icons.dialpad, size: 22),
+                        const SizedBox(width: 8),
+                        Text(
+                          VirtualPhoneUiLabels.featureTitle,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 6),
-                    Text("直接给 Agent 打电话，无需对方有号码",
+                    Text(VirtualPhoneUiLabels.featureSubtitle,
                         style: TextStyle(color: Colors.grey[600], fontSize: 13)),
                   ],
                 ),
@@ -100,7 +107,7 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.smart_toy, size: 22),
-                label: Text(_isCalling ? "呼叫中…" : "📞 呼叫我的 Agent"),
+                label: Text(_isCalling ? "呼叫中…" : "📞 ${VirtualPhoneUiLabels.callMyAgentButton}"),
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   textStyle: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
@@ -117,7 +124,7 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
                   Expanded(child: Divider(color: Colors.grey[300])),
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Text("或拨打指定 Agent",
+                    child: Text(VirtualPhoneUiLabels.callOtherAgentDivider,
                         style: TextStyle(color: Colors.grey, fontSize: 12)),
                   ),
                   Expanded(child: Divider(color: Colors.grey[300])),
@@ -157,7 +164,7 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.phone_in_talk),
-              label: Text(_isCalling ? "呼叫中…" : "拨打电话"),
+              label: Text(_isCalling ? "呼叫中…" : "呼叫该 Agent"),
               style: FilledButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 textStyle: const TextStyle(fontSize: 16),

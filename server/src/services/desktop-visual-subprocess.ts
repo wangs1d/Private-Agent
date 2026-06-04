@@ -10,6 +10,7 @@ import type {
   DesktopVisualScreenshotInput,
   DesktopVisualScreenshotResult,
 } from "./desktop-visual-port.js";
+import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
   if (!raw) return false;
@@ -84,11 +85,16 @@ function spawnStdioWorker(payload: Record<string, unknown>, pythonExe: string, p
   });
 }
 
+function withVlmPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const vlm = resolveDesktopVisualVlmConfig();
+  return vlm ? { ...payload, vlm } : payload;
+}
+
 async function runStdioWorker<T extends StdioWorkerResult>(
   payload: Record<string, unknown>,
   opts: { pythonExe: string; packageRoot: string; timeoutMs: number; timeoutLabel: string },
 ): Promise<T> {
-  const child = spawnStdioWorker(payload, opts.pythonExe, opts.packageRoot);
+  const child = spawnStdioWorker(withVlmPayload(payload), opts.pythonExe, opts.packageRoot);
 
   let stdout = "";
   let stderr = "";

@@ -120,6 +120,8 @@ export function buildToneGuidance(state: EmotionState): string {
     lines.push("可适当幽默，但不要牺牲准确性与简洁。");
   } else if (state.preferredTone === "warm") {
     lines.push("语气亲切自然，像可信赖的朋友，避免机械感。");
+  } else {
+    lines.push("像真人朋友在微信聊天：口语短句、自然亲切、有活人感，避免客服腔和机械列举。");
   }
 
   if (state.recent.length >= 2) {

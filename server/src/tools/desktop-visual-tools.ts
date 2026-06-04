@@ -1,6 +1,7 @@
 import { resolveActorId } from "../agent/actor-id.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { DesktopVisualPort } from "../services/desktop-visual-port.js";
+import { resolveDesktopVisualVlmConfig } from "../services/desktop-visual-vlm-config.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export type DesktopVisualToolsDeps = {
@@ -21,6 +22,13 @@ function parseRegion(input: Record<string, unknown>): [number, number, number, n
   return undefined;
 }
 
+function bridgeInvokePayload(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const vlm = resolveDesktopVisualVlmConfig();
+  return vlm ? { ...body, vlm } : body;
+}
+
 function desktopUnavailableMessage(bridgeEnabled: boolean): string {
   if (bridgeEnabled) {
     return "电脑端未在线：请在本机运行桌面桥接（与手机相同 userId，session.init 带 desktopBridge:true），或设置 DESKTOP_VISUAL_ENABLED=1 由服务端本机截图。";
@@ -39,7 +47,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     if (deps.bridge.hasExecutor(actorId)) {
       const remote = await deps.bridge.invoke(
         actorId,
-        { action: "screenshot", region: region ?? null },
+        bridgeInvokePayload({ action: "screenshot", region: region ?? null }),
         Math.min(desktopBridgeInvokeTimeoutMs(), 120_000),
       );
       if (remote?.ok && remote.imageBase64) {
@@ -94,7 +102,13 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     if (deps.bridge.hasExecutor(actorId)) {
       const remote = await deps.bridge.invoke(
         actorId,
-        { task, maxSteps: maxSteps ?? 40, region: region ?? null, stub },
+        bridgeInvokePayload({
+          action: "run_task",
+          task,
+          maxSteps: maxSteps ?? 40,
+          region: region ?? null,
+          stub,
+        }),
         desktopBridgeInvokeTimeoutMs(),
       );
       if (remote) {

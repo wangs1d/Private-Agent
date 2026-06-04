@@ -8,6 +8,9 @@
 #
 # 分布式 HTTP 限流（令牌桶 + 滑动窗口）：在 .env 或此处为 api 设置
 # HTTP_RATE_LIMIT_ENABLED=1；已预置 HTTP_RATE_LIMIT_REDIS_URL 指向下方 redis 服务。
+#
+# 下载上传功能：访问 /downloads 页面，使用 ADMIN_UPLOAD_TOKEN 上传桌面应用安装包。
+# 上传文件存储在 downloads 卷中，由 nginx 直接提供下载。
 
 services:
   qdrant:
@@ -41,8 +44,12 @@ services:
       AGENT_QDRANT_URL: http://qdrant:6333
       # 限流默认关闭；设为 1 时启用并与 redis 服务共享配额
       HTTP_RATE_LIMIT_REDIS_URL: redis://redis:6379
+      # 下载上传管理密码（请修改为强密码，或通过 .env 注入）
+      ADMIN_UPLOAD_TOKEN: ${ADMIN_UPLOAD_TOKEN:-admin-upload-secret}
+      DOWNLOADS_DIR: /app/downloads
     volumes:
       - app-data:/app/data
+      - downloads:/app/downloads
     depends_on:
       qdrant:
         condition: service_started
@@ -71,7 +78,9 @@ services:
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     ports:
-      - "8080:80"
+      - "80:80"
+    volumes:
+      - downloads:/app/downloads
     depends_on:
       api:
         condition: service_healthy
@@ -81,3 +90,4 @@ volumes:
   app-data:
   qdrant-data:
   redis-data:
+  downloads:

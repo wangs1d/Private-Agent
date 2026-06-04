@@ -4,6 +4,7 @@ import {
   type AgentAccessMode,
   parseAgentAccessMode,
 } from "./agent-access-mode.js";
+import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 import {
   extractMemoryTopicFromLine,
@@ -23,7 +24,7 @@ const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再回复。";
+  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再回复。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。";
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
@@ -34,27 +35,37 @@ export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复风格】";
 
 const CONCISE_REPLY_SYSTEM_SUFFIX = `
 
-【回复风格】面向用户的最终回复须尽量精简：
-- 先给结论或核心答案，再补必要细节；能一句说清就不写两句。
-- 避免开场白、套话、重复用户原话和过度铺垫（如「好的，我来帮你…」）。
-- 列表/步骤仅在确实有多项时用；简单问答通常 1～3 句即可。
-- 用户明确要求详尽说明时再展开。
-- 禁止在回复中暴露任何内部技术细节：不输出 taskId、jobId、记录 ID、编号、API 路径、工具调用过程等用户无感知的信息。例如创建日程/提醒/任务后，只说「已为你创建」即可，不要返回 ID 或编号。`;
+【回复风格】像朋友在微信聊天：口语自然、先结论后细节，1～3 句为主；贴近用户称呼与语气，开心可轻快、低落先共情。
+- 禁：客服/AI 腔、套话开场、选项菜单、Markdown 表格/简报体、内部 ID 与工具过程。`;
 
 const LIVE_USER_STATUS_SUFFIX = `
 
 【用户可见进度】你在调用任何工具之前，必须先输出 1～2 句口语化短话，让用户知道你在做什么（可幽默、可拟人）；该句会作为实时进度展示，不是最终答复。禁止只用固定套话、禁止只写工具名。委派子 Agent 时除口头语外，还须填写 master_invoke_sub_agent 的 userStatusLine（与口头语一致即可）。`;
 
-const MASTER_SUBAGENT_DELEGATE_SUFFIX = `
+function buildMasterSubAgentDelegateSuffix(): string {
+  const maxParallel = getAgentRuntimeConfig().masterDelegation.maxParallelSubAgents;
+  return `
 
-【主 Agent 调度】你是主 Agent，负责理解用户诉求并回复用户。
-- 简单、单一事项：优先直接使用 clock、calendar、search_web、侧栏游戏（world.gomoku/doudizhu/zhajinhua/blackjack）等工具，不要委派子 Agent。
-- 需要专业能力或较多步骤时：调用 master_invoke_sub_agent；彼此独立的子任务可在同一轮并行委派多个子 Agent（受 MAX_PARALLEL_SUB_AGENTS 限流）。
-- 每次调用 master_invoke_sub_agent 时，必须填写 userStatusLine：用你自己的口吻写一句给用户看的进度话，要有活人感（可幽默、可拟人，如「我让我小弟去帮你查天气了」），禁止固定套话或只写工具名。
-- 有依赖须串行（如先 security 再 life）；无依赖可并行。耗时任务可 runInBackground=true，用 master_poll_sub_agent_tasks 查进度。
-- 子 Agent 报告仅供你整合；最终由你用自然语言精简回复用户。
-- 规划前可调用 master_list_sub_agents 查看可委派类型。
-- 用户处于「沙箱」时勿委派需要 desktop.visual.run_task / vision.periodic_* / self.* 的任务；应先提醒用户在输入框开启「完全访问」。`;
+【主 Agent 调度】你是主 Agent（带头大哥），手下有 5 类专业「小弟」子 Agent，由你调度、对用户只呈现一份整合后的答复：
+- life（生活）：钱包写操作、订票下单、电脑操控等复杂生活执行
+- tech（技术）：深度 RPA、写代码、部署运维、批量自动化
+- info（信息）：深度搜索、比价调研、多轮检索（只查不买）；电商实价需用户导入 Cookie 并授权 browser.fetch_page
+- creative（创意）：文案、策划、写作、翻译润色
+- security（安全）：大额/敏感操作审批与风控
+
+【何时自己干 vs 派小弟】
+- 简单、单一事项：优先直接用 clock、calendar、search_web、侧栏游戏（world.gomoku/doudizhu/zhajinhua/blackjack）等，不必派小弟。
+- 需要专业能力、多步骤、或你一个人搞不定时：调用 master_invoke_sub_agent 派对应小弟。
+
+【并行委派】用户一次提多件互不依赖的事，或你拆成多个独立子任务时，应在同一轮 tool 批次里并行多次 master_invoke_sub_agent（服务端最多同时跑 ${maxParallel} 个小弟）。例：「查北京天气 + 写一段推广文案」→ 可并行派 info 与 creative。
+- 有先后依赖须串行（如先 security 审批再 life 执行）；无依赖务必并行，不要无谓排队。
+- 耗时任务可 runInBackground=true，再用 master_poll_sub_agent_tasks 收齐小弟报告后统一回复用户。
+
+【对用户说话】每次 master_invoke_sub_agent 必须填 userStatusLine：口语化、有活人感（如「我让小弟去查价，你稍等」），禁止只写工具名或固定套话。
+- 小弟报告仅供你整合；最终由你精简回复用户，不要甩内部 taskId。
+- 不确定派谁时先 master_list_sub_agents 看名册。
+- 用户处于「沙箱」时勿派需要 desktop.visual.run_task / vision.periodic_* / self.* 的任务；须提醒开启「完全访问」。`;
+}
 
 /** 追加「尽量精简」的回复风格说明（已包含则跳过）。 */
 export function appendConciseReplySystemSuffix(systemContent: string): string {
@@ -108,7 +119,7 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
 /** 主 Agent 启用子 Agent 委派工具时追加的 system 说明 */
 export function appendMasterSubAgentDelegateSuffix(systemContent: string): string {
   if (systemContent.includes(MASTER_SUBAGENT_DELEGATE_MARKER)) return systemContent;
-  return systemContent + MASTER_SUBAGENT_DELEGATE_SUFFIX;
+  return systemContent + buildMasterSubAgentDelegateSuffix();
 }
 
 /** 未设置 `AGENT_PROMPT_MEMORY_KEYS` 时默认注入的 UAP 键（可用 env 覆盖或 `off` 关闭）。 */
@@ -150,26 +161,26 @@ export function parsePromptMemoryKeysFromEnv(): string[] | null {
 
 function promptMemorySummaryMaxChars(): number {
   const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_CHARS?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 6000;
-  return Number.isFinite(n) && n > 200 ? n : 6000;
+  const n = raw ? Number.parseInt(raw, 10) : 1800;
+  return Number.isFinite(n) && n > 200 ? n : 1800;
 }
 
 function promptMemorySummaryMaxLines(): number {
   const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_LINES?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 25;
-  return Number.isFinite(n) && n > 5 ? n : 25;
+  const n = raw ? Number.parseInt(raw, 10) : 10;
+  return Number.isFinite(n) && n > 3 ? n : 10;
 }
 
 function promptSubAgentMemorySummaryMaxLines(): number {
   const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_LINES?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 12;
-  return Number.isFinite(n) && n > 3 ? n : 12;
+  const n = raw ? Number.parseInt(raw, 10) : 6;
+  return Number.isFinite(n) && n > 3 ? n : 6;
 }
 
 function promptSubAgentMemorySummaryMaxChars(): number {
   const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_CHARS?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 3000;
-  return Number.isFinite(n) && n > 200 ? n : 3000;
+  const n = raw ? Number.parseInt(raw, 10) : 900;
+  return Number.isFinite(n) && n > 200 ? n : 900;
 }
 
 const TIMESTAMP_RE = /\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/;
@@ -285,6 +296,7 @@ const SLICE_RESERVED_KEYS = new Set([
 export function sliceMemoryEntriesToPromptContext(
   entries: Record<string, unknown>,
   userQuery?: string,
+  opts?: { includeMemorySummary?: boolean },
 ): AgentPromptMemoryContext {
   const str = (v: unknown): string => formatKvValueForPrompt(v);
 
@@ -302,7 +314,7 @@ export function sliceMemoryEntriesToPromptContext(
   const maxChars = promptMemorySummaryMaxChars();
   let memorySummary = memoryParts.join("\n\n");
   const rawSummary = str(entries["memory_summary"]);
-  if (rawSummary) {
+  if (opts?.includeMemorySummary !== false && rawSummary) {
     const sorted = sortAndTruncateMemoryLines(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery);
     memorySummary = memorySummary ? `${sorted}\n\n${memorySummary}` : sorted;
   }

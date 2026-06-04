@@ -26,7 +26,7 @@ export function defaultUserProfileMarkdown(actorId: string): string {
 ## 沟通偏好
 
 - 语气风格：自然均衡（系统将根据对话自动调整）
-- 回复偏好：精简直接
+- 回复偏好：精简直接，口语化，像真人朋友聊天
 
 ## 备注
 

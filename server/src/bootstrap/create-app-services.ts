@@ -70,6 +70,12 @@ import { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import { VirtualPhoneIncomingCoordinator } from "../services/virtual-phone-incoming-coordinator.js";
+import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
+import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
+import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
+import { OpenAIASRAdapter } from "../services/voice-dialogue/adapters/openai-asr-adapter.js";
+import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { SkillManager } from "../skills/index.js";
@@ -96,10 +102,14 @@ import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
+import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
+import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerBrowserTools } from "../tools/browser-tools.js";
+import { BrowserSessionService } from "../services/browser-session-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
@@ -132,7 +142,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   await registerHttpRateLimit(app, getHttpRateLimitRuntime());
   await app.register(websocket);
-  await app.register(multipart, { limits: { fileSize: 12 * 1024 * 1024 } });
+  await app.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 
   const sessionService = new SessionService();
   await getChatThreadPersistence().load();
@@ -140,6 +150,7 @@ export async function createAppServices(): Promise<AppServices> {
   const weatherService = new WeatherService();
   const weatherPrefsService = new WeatherPrefsService();
   const infoHubService = new InfoHubService();
+  const browserSessionService = new BrowserSessionService();
   const upstreamSearchService = new UpstreamSearchService(infoHubService);
   const realFundsWallet = new RealFundsWalletService();
   const auditService = new AuditService();
@@ -160,6 +171,7 @@ export async function createAppServices(): Promise<AppServices> {
   toolRegistry.setSkillManager(skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+  registerBrowserTools(toolRegistry, browserSessionService);
   registerClockTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
   registerCareReminderTools(toolRegistry, {
@@ -202,6 +214,27 @@ export async function createAppServices(): Promise<AppServices> {
   const agentPairingService = new AgentPairingService();
   const ttsService = new TtsService();
   const virtualPhoneService = new VirtualPhoneService(ttsService, wsConnectionRegistry, agentPairingService);
+
+  // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
+  const voiceDialogueService = new VoiceDialogueService();
+  voiceDialogueService.registerProvider("openai", {
+    asr: new OpenAIASRAdapter(),
+    tts: new OpenAITTSAdapter(ttsService),
+    llm: new OpenAILLMAdapter(),
+  });
+  voiceDialogueService.setDefaultProvider("openai");
+
+  // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
+  const intelligentReminder = createIntelligentReminderSystem({
+    toolRegistry,
+    virtualPhoneService,
+    voiceDialogueService,
+    sendToClient: async (userId, payload) => {
+      await wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
+    },
+    logger: app.log,
+  });
+  await intelligentReminder.userResponsePersistence.load();
 
   scheduleTaskService.setReminderHandler(async (task, message) => {
     const displayMessage = formatReminderDisplayMessage(message);
@@ -450,6 +483,11 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     scheduleTaskService,
   });
+  const virtualPhoneIncomingCoordinator = new VirtualPhoneIncomingCoordinator(
+    agentCore,
+    wsConnectionRegistry,
+  );
+  virtualPhoneService.setIncomingCoordinator(virtualPhoneIncomingCoordinator);
   scheduleTaskService.setAgentTaskHandler(async (task) => {
     const prompt = task.agentTask?.prompt?.trim();
     if (!prompt) {
@@ -546,6 +584,12 @@ export async function createAppServices(): Promise<AppServices> {
   });
   agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
 
+  const wechatClawBindingService = new WechatClawBindingService();
+  void wechatClawBindingService.load();
+  const wechatClawBridgeService = new WechatClawBridgeService(agentCore, {
+    weatherPrefsService,
+  });
+
   registerEmbodimentTools(toolRegistry, {
     wsRegistry: wsConnectionRegistry,
     localVisual: desktopVisual,
@@ -585,6 +629,9 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     ttsService,
     desktopBridgeCoordinator,
+    wechatClawBindingService,
+    wechatClawBridgeService,
+    browserSessionService,
     friendService,
     companionService,
     agentCore,
@@ -608,6 +655,7 @@ export async function createAppServices(): Promise<AppServices> {
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     virtualPhoneService,
+    virtualPhoneIncomingCoordinator,
   });
 
   return {
@@ -639,5 +687,8 @@ export async function createAppServices(): Promise<AppServices> {
     ttsService,
     virtualPhoneService,
     friendService,
+    voiceDialogueService,
+    intelligentReminderService: intelligentReminder.reminderService,
+    reminderResponsePersistence: intelligentReminder.userResponsePersistence,
   };
 }

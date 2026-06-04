@@ -81,6 +81,7 @@ export type OrchestrateTaskOptions = {
   onAgentStatusLine?: (line: string) => void;
   agentAccessMode?: import("../agent/agent-access-mode.js").AgentAccessMode;
   desktopBridgeOnline?: boolean;
+  toolRankingHint?: AgentStreamOptions["toolRankingHint"];
 };
 
 export interface MasterAgentConfig {
@@ -365,7 +366,7 @@ export class MasterAgentCoordinator {
         "- 翻译、知识问答、资料收集整理",
         "- 新闻资讯、实时信息查询",
         "- 工具：search_web / fetch_web / info.inspect_webpage / info.navigate_site / shopping.suggest",
-        "- 电商动态价格可尝试 fetch_web 抓页面，或 desktop.visual 截图读价（需完全访问模式）",
+        "- 电商/OTA 实价：用户导入 Cookie 并授权后使用 browser.fetch_page（须完全访问）；或 desktop.visual 操控本机已登录浏览器",
         "- 为其他子Agent提供决策依据，但本身不执行购买或支付操作",
       ].join("\n"),
       keywords: ["搜索", "查询", "比价", "评价", "优惠", "折扣", "促销", "翻译", "新闻", "资料", "攻略", "哪个好", "推荐", "对比"],
@@ -1092,29 +1093,15 @@ export class MasterAgentCoordinator {
       const route = routeLlmExecution(userMessage);
       this.log("Route selected", { taskId, mode: route.mode, reasons: route.reasons });
 
-      const useDelegatePrompt =
-        this.config.enableSubAgents && route.mode === "master_delegate";
-
-      if (!useDelegatePrompt) {
-        if (!this.config.enableSubAgents) {
-          this.metrics.fallbackCount += 1;
-        }
-        assistantResult = await this.executeMasterTurn(
-          actorId,
-          userMessage,
-          onAssistantDelta,
-          enrichedOpts,
-          false,
-        );
-        return assistantResult;
-      }
+      // 只要启用子 Agent，主 Agent 每轮都注入「有小弟、可并行委派」说明 + 委派工具（不限于 master_delegate 路由）
+      const useDelegatePrompt = this.config.enableSubAgents;
 
       assistantResult = await this.executeMasterTurn(
         actorId,
         userMessage,
         onAssistantDelta,
         enrichedOpts,
-        true,
+        useDelegatePrompt,
       );
       return assistantResult;
     } catch (error) {
@@ -1212,6 +1199,7 @@ export class MasterAgentCoordinator {
     const perf: AgentStreamOptions = {
       ...access,
       disableThinking: true,
+      toolRankingHint: opts?.toolRankingHint,
     };
     const capabilities = this.listSubAgentCapabilities();
 
@@ -1223,6 +1211,7 @@ export class MasterAgentCoordinator {
             subAgentCapabilities: capabilities,
           }),
           ...perf,
+          toolExposureProfile: "delegate",
         };
       }
       const base = this.promptContextBuilder.build(this.buildPromptInput(actorId, opts));
@@ -1234,6 +1223,7 @@ export class MasterAgentCoordinator {
         chatToolsBuiltin: buildMasterAgentChatTools(capabilities, chatToolsExtra),
         chatToolsExtra: [],
         ...perf,
+        toolExposureProfile: "contextual",
       };
     }
 
@@ -1241,6 +1231,7 @@ export class MasterAgentCoordinator {
       ...(delegatePrompt ? { masterSubAgentDelegate: true } : {}),
       chatToolsBuiltin: buildMasterAgentChatTools(capabilities),
       ...perf,
+      toolExposureProfile: delegatePrompt ? "delegate" : "contextual",
     };
   }
 
@@ -1290,6 +1281,8 @@ export class MasterAgentCoordinator {
       agentAccessMode: accessMode,
       desktopBridgeOnline: bridgeCtx.desktopBridgeOnline,
       disableThinking: true,
+      toolExposureProfile: "scoped",
+      toolRankingHint: this.currentTurnOrchestrateOpts?.toolRankingHint,
     };
 
     const allowedList =

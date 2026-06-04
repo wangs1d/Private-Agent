@@ -543,76 +543,69 @@ class _SchedulePageState extends State<SchedulePage> {
               borderRadius: BorderRadius.circular(10),
               side: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
             ),
-            child: SizedBox(
-              width: 380, // 固定总宽度，包含日期组件和回到按钮
+            child: IntrinsicWidth(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   IconButton(
+                    constraints: const BoxConstraints.tightFor(width: 32, height: 32),
                     tooltip: _viewMode == 'day' ? "上一天" : "上一周",
                     visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
                     onPressed: () => _viewMode == 'day' ? _shiftDay(-1) : _shiftWeek(-1),
                     icon: Icon(Icons.chevron_left, color: cs.onSurface),
+                    iconSize: 18,
                   ),
-                  SizedBox(
-                    width: 200,
-                    child: Text(
-                      _viewMode == 'day'
-                          ? _formatDayLabel(_focusedDay)
-                          : _formatRangeLabel(_weekStart),
-                      textAlign: TextAlign.center,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        color: cs.onSurface,
-                        fontWeight: FontWeight.w500,
+                  Flexible(
+                    child: SizedBox(
+                      height: 24,
+                      child: Text(
+                        _viewMode == 'day'
+                            ? _formatDayLabel(_focusedDay)
+                            : _formatRangeLabel(_weekStart),
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          color: cs.onSurface,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ),
                   IconButton(
+                    constraints: const BoxConstraints.tightFor(width: 32, height: 32),
                     tooltip: _viewMode == 'day' ? "下一天" : "下一周",
                     visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
                     onPressed: () => _viewMode == 'day' ? _shiftDay(1) : _shiftWeek(1),
                     icon: Icon(Icons.chevron_right, color: cs.onSurface),
+                    iconSize: 18,
                   ),
-                  // 固定占据空间，即使不显示按钮也保持布局稳定
-                  SizedBox(
-                    width: isCurrentView ? 0 : 100,
-                    child: isCurrentView
-                        ? null
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              Container(
-                                height: 24,
-                                width: 1,
-                                color: cs.outline.withValues(alpha: 0.3),
-                                margin: const EdgeInsets.only(right: 4),
-                              ),
-                              SizedBox(
-                                height: 28,
-                                child: OutlinedButton.icon(
-                                  onPressed: _viewMode == 'day' ? _goToToday : _goToCurrentWeek,
-                                  icon: Icon(_viewMode == 'day' ? Icons.today : Icons.calendar_today, size: 14),
-                                  label: Text(_viewMode == 'day' ? "今天" : "本周", style: const TextStyle(fontSize: 11)),
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                    visualDensity: VisualDensity.compact,
-                                    foregroundColor: cs.onSurfaceVariant,
-                                    side: BorderSide(color: cs.outline.withValues(alpha: 0.5)),
-                                    minimumSize: const Size(0, 0),
-                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                ),
-                              ),
-                            ],
+                  // 按需显示"回到今天/本周"按钮
+                  if (!isCurrentView)
+                    Container(
+                      height: 28,
+                      margin: const EdgeInsets.only(left: 4),
+                      child: OutlinedButton.icon(
+                        onPressed: _viewMode == 'day' ? _goToToday : _goToCurrentWeek,
+                        icon: Icon(_viewMode == 'day' ? Icons.today : Icons.calendar_today, size: 14),
+                        label: Text(_viewMode == 'day' ? "今天" : "本周", style: const TextStyle(fontSize: 11)),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(6),
                           ),
-                  ),
-                ],
+                          visualDensity: VisualDensity.compact,
+                          foregroundColor: cs.onSurfaceVariant,
+                          side: BorderSide(color: cs.outline.withValues(alpha: 0.5)),
+                          minimumSize: const Size(0, 0),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

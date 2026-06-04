@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { EntranceAnimation } from "../components/EntranceAnimation";
+import { InnerThought } from "../components/InnerThought";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
-import { EntranceAnimation } from "../components/EntranceAnimation";
+import { TaskFeed } from "../components/TaskFeed";
+import { TaskNotificationCenter } from "../components/TaskNotificationCenter";
 import type { QuickCommand } from "../constants/quick-commands";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
@@ -9,6 +12,8 @@ import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
 import { useOverlayPointerCapture } from "../hooks/useOverlayPointerCapture";
 import { useOverlayWindowMotion } from "../hooks/useOverlayWindowMotion";
+import { useTaskEventAccumulator } from "../hooks/useTaskEventAccumulator";
+import { useTaskEventStream } from "../hooks/useTaskEventStream";
 import { createGomokuRoom, openGameUrl } from "../utils/game-center";
 import type { AgentMood } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
@@ -19,10 +24,11 @@ function readQuery(key: string): string | undefined {
   return new URLSearchParams(window.location.search).get(key) ?? undefined;
 }
 
-/** 桌面透明悬浮窗 — 直连主 Agent，快捷菜单 + 语音输入 */
+/** 桌面透明桌宠 — Electron 无框 3D（DG2 写实机器人），直连主 Agent */
 export function OverlayApp() {
   const { state, apply, setFocused } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuWasOpenOnPointerDown = useRef(false);
   const wsUrl = readQuery("ws");
   const sessionId = readQuery("sessionId");
 
@@ -39,10 +45,15 @@ export function OverlayApp() {
   const { roamNow } = useOverlayWindowMotion({ enabled: true, mood: state.mood });
   roamNowRef.current = roamNow;
 
+  const { onTaskEvent } = useTaskEventAccumulator({ apply });
+  useTaskEventStream({ onTaskEvent });
+  const taskEvents = useMemo(() => state.taskEvents ?? [], [state.taskEvents]);
+
+  const closeMenuRef = useRef<() => void>(() => {});
+
   const handleSpeechResult = useCallback(
     (text: string) => {
-      setMenuOpen(false);
-      window.sphereOverlay?.setIgnoreMouseEvents(true, true);
+      closeMenuRef.current();
       if (connected) sendChat(text);
     },
     [connected, sendChat],
@@ -53,15 +64,32 @@ export function OverlayApp() {
     onError: (msg) => apply({ mood: "alert", energy: 0.75, caption: msg }),
   });
 
-  const { setMouseCapture } = useOverlayPointerCapture(menuOpen || speech.listening);
+  const menuVisible = menuOpen || speech.listening;
 
-  const setMenuOpenSafe = useCallback((open: boolean) => {
-    setMenuOpen(open);
-    window.sphereOverlay?.setIgnoreMouseEvents(!open, true);
+  const closeMenu = useCallback(() => {
+    speech.stop();
+    setMenuOpen(false);
+    window.sphereOverlay?.setMenuExpanded?.(false);
+    window.sphereOverlay?.setIgnoreMouseEvents(true, true);
+  }, [speech]);
+
+  closeMenuRef.current = closeMenu;
+
+  const openMenu = useCallback(() => {
+    setMenuOpen(true);
+    window.sphereOverlay?.setMenuExpanded?.(true);
+    window.sphereOverlay?.setIgnoreMouseEvents(false, true);
   }, []);
+
+  const { setMouseCapture } = useOverlayPointerCapture(menuVisible);
 
   const handleSphereTouch = useCallback(
     (event: SphereTouchEvent) => {
+      if (menuVisible && event.phase === "start") {
+        closeMenu();
+        return;
+      }
+
       if (event.phase === "start") {
         setMouseCapture(true);
         apply({ mood: "listening", energy: 0.62, focused: true });
@@ -72,32 +100,43 @@ export function OverlayApp() {
         }
       }
     },
-    [apply, setMouseCapture],
+    [apply, closeMenu, menuVisible, setMouseCapture],
   );
 
   const handleEyeInteraction = useCallback(
     (active: boolean) => {
-      if (menuOpen) return;
+      if (menuVisible) return;
       setMouseCapture(active);
       setFocused(active);
     },
-    [menuOpen, setFocused, setMouseCapture],
+    [menuVisible, setFocused, setMouseCapture],
   );
 
   const handleEyeClick = useCallback(() => {
-    setMenuOpenSafe(true);
-  }, [setMenuOpenSafe]);
+    if (menuVisible) return;
+    openMenu();
+  }, [menuVisible, openMenu]);
+
+  const handlePetPanePointerDown = useCallback(() => {
+    menuWasOpenOnPointerDown.current = menuVisible;
+  }, [menuVisible]);
+
+  const handlePetPanePointerUp = useCallback(() => {
+    if (menuWasOpenOnPointerDown.current) {
+      closeMenu();
+    }
+  }, [closeMenu]);
 
   const handleCommand = useCallback(
     (cmd: QuickCommand) => {
       switch (cmd.action) {
         case "wake":
           if (connected) sendWake();
-          setMenuOpenSafe(false);
+          closeMenu();
           break;
         case "chat":
           if (connected && cmd.text) sendChat(cmd.text);
-          setMenuOpenSafe(false);
+          closeMenu();
           break;
         case "roam":
           roamNowRef.current?.();
@@ -112,7 +151,7 @@ export function OverlayApp() {
           break;
         case "game": {
           const sid = sessionId ?? "default-user";
-          setMenuOpenSafe(false);
+          closeMenu();
           apply({ mood: "happy", energy: 0.7, caption: "正在创建游戏房间…" });
           createGomokuRoom(sid).then((url) => {
             if (url) {
@@ -128,7 +167,7 @@ export function OverlayApp() {
           break;
       }
     },
-    [apply, connected, sendChat, sendWake, setMenuOpenSafe, speech, sessionId],
+    [apply, closeMenu, connected, sendChat, sendWake, speech, sessionId],
   );
 
   useEffect(() => {
@@ -161,49 +200,46 @@ export function OverlayApp() {
   }, [apply]);
 
   useEffect(() => {
-    if (!menuOpen && !speech.listening) {
+    if (!menuVisible) {
       window.sphereOverlay?.setIgnoreMouseEvents(true, true);
     }
-  }, [menuOpen, speech.listening]);
-
-  const statusLabel = state.subAgentDisplayName
-    ? `${state.mood} · ${state.subAgentDisplayName}`
-    : state.mood;
+  }, [menuVisible]);
 
   return (
-    <div className="mode-shell mode-overlay">
+    <div className={`mode-shell mode-overlay${menuVisible ? " mode-overlay--menu-open" : ""}`}>
       <EntranceAnimation />
-      <SphereAgentScene
-        state={state}
-        mode="overlay"
-        physics={false}
-        autonomous
-        onEyeFocus={setFocused}
-        onEyeClick={handleEyeClick}
-        onEyeInteractionChange={handleEyeInteraction}
-        onUserTouch={handleSphereTouch}
-        onBodyHover={setMouseCapture}
-      />
+      <div
+        className="overlay-pet-pane"
+        onPointerDown={handlePetPanePointerDown}
+        onPointerUp={handlePetPanePointerUp}
+      >
+        <SphereAgentScene
+          state={state}
+          mode="overlay"
+          physics={false}
+          autonomous={false}
+          onEyeFocus={setFocused}
+          onEyeClick={handleEyeClick}
+          onEyeInteractionChange={handleEyeInteraction}
+          onUserTouch={handleSphereTouch}
+          onBodyHover={setMouseCapture}
+        />
+        {state.caption ? <div className="mode-caption overlay-pet-caption">{state.caption}</div> : null}
+        <InnerThought state={state} />
+      </div>
+
+      <TaskFeed events={taskEvents} />
+      <TaskNotificationCenter events={taskEvents} />
 
       <OverlayQuickMenu
-        open={menuOpen || speech.listening}
+        open={menuVisible}
+        layout="side"
         connected={connected}
         voiceListening={speech.listening}
         voiceInterim={speech.interim}
         onSelect={handleCommand}
-        onClose={() => {
-          speech.stop();
-          setMenuOpenSafe(false);
-        }}
+        onClose={closeMenu}
       />
-
-      <div className="overlay-status">
-        <span className={`mode-badge mode-badge--${state.mood}`}>{statusLabel}</span>
-        <span className="overlay-dot" data-connected={connected ? "1" : "0"} />
-        <span className="overlay-hint">
-          {speech.listening ? "语音识别中…" : connected ? "左键拖动移动 · 右键拖动旋转 · 点击曲屏开菜单" : "连接中…"}
-        </span>
-      </div>
     </div>
   );
 }

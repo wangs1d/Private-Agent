@@ -29,6 +29,9 @@ import type { WeatherPrefsService } from "../services/weather-prefs-service.js";
 import type { WeatherService } from "../services/weather-service.js";
 import type { TtsService } from "../services/tts-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
+import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
+import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -59,6 +62,9 @@ export type AppServices = {
   ttsService: TtsService;
   virtualPhoneService: VirtualPhoneService;
   friendService: FriendService;
+  voiceDialogueService: VoiceDialogueService;
+  intelligentReminderService: IntelligentReminderService;
+  reminderResponsePersistence: UserResponsePersistenceService;
 };
 
 export type SkillMetadataValidator = {

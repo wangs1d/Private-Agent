@@ -68,6 +68,18 @@ export type ToolLoopAfterBatchInfo = {
   toolResults: Array<{ name: string; ok: boolean }>;
 };
 
+export type ToolExposureProfile =
+  | "none"
+  | "light"
+  | "contextual"
+  | "full"
+  | "delegate"
+  | "scoped";
+
+export type ToolRankingHint = {
+  preferredNamespaces?: string[];
+};
+
 /** {@link ExternalChatProvider.streamCompletion} 可选行为。 */
 export type AgentStreamOptions = {
   promptContext?: { memory?: AgentPromptMemoryContext };
@@ -96,6 +108,8 @@ export type AgentStreamOptions = {
   agentAccessMode?: "sandbox" | "full";
   /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */
   desktopBridgeOnline?: boolean;
+  toolExposureProfile?: ToolExposureProfile;
+  toolRankingHint?: ToolRankingHint;
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */

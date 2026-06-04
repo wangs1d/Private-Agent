@@ -7,6 +7,8 @@ import "package:audioplayers/audioplayers.dart";
 import "package:flutter/material.dart";
 import "package:path_provider/path_provider.dart";
 
+import "virtual_phone_ui_labels.dart";
+
 typedef PhoneReplyCallback = void Function(String replyText);
 
 Future<void> showVirtualPhoneIncomingDialog({
@@ -20,6 +22,22 @@ Future<void> showVirtualPhoneIncomingDialog({
     builder: (BuildContext ctx) => _VirtualPhoneIncomingBody(
       payload: payload,
       onReply: onReply,
+    ),
+  );
+}
+
+/// 其他 Agent 拨打本 Agent 虚拟号：先让用户选择接听或代接。
+Future<void> showPeerAgentIncomingCallDialog({
+  required BuildContext context,
+  required Map<String, dynamic> payload,
+  required void Function(String action) onRespond,
+}) {
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (BuildContext ctx) => _PeerAgentIncomingBody(
+      payload: payload,
+      onRespond: onRespond,
     ),
   );
 }
@@ -48,13 +66,15 @@ class _PhoneCallFloatingButtonState extends State<PhoneCallFloatingButton> {
   String get _statusText {
     switch (widget.status) {
       case "incoming":
-        return "来电: ${widget.toActorId ?? ""}";
+        return VirtualPhoneUiLabels.floatingIncoming(widget.toActorId);
       case "ringing":
-        return "正在呼叫${widget.toActorId != null && widget.toActorId!.isNotEmpty ? " ${widget.toActorId}" : "中"}";
+        return widget.toActorId != null && widget.toActorId!.isNotEmpty
+            ? "${VirtualPhoneUiLabels.callStatusLabel("ringing")} · ${widget.toActorId}"
+            : VirtualPhoneUiLabels.callStatusLabel("ringing");
       case "connected":
-        return "通话中";
+        return VirtualPhoneUiLabels.callStatusLabel("connected");
       case "ended":
-        return "通话结束";
+        return VirtualPhoneUiLabels.callStatusLabel("ended");
       default:
         return "通话中";
     }
@@ -207,6 +227,149 @@ Uint8List? _decodeMp3FromPayload(Map<String, dynamic> payload) {
   }
 }
 
+class _PeerAgentIncomingBody extends StatefulWidget {
+  const _PeerAgentIncomingBody({
+    required this.payload,
+    required this.onRespond,
+  });
+
+  final Map<String, dynamic> payload;
+  final void Function(String action) onRespond;
+
+  @override
+  State<_PeerAgentIncomingBody> createState() => _PeerAgentIncomingBodyState();
+}
+
+class _PeerAgentIncomingBodyState extends State<_PeerAgentIncomingBody> {
+  AudioPlayer? _player;
+  String? _audioError;
+  bool _isPlaying = false;
+  bool _responded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _startPlayback();
+  }
+
+  Future<void> _startPlayback() async {
+    final Uint8List? bytes = _decodeMp3FromPayload(widget.payload);
+    if (bytes == null || !mounted) return;
+    final AudioPlayer player = AudioPlayer();
+    _player = player;
+    try {
+      await player.play(BytesSource(bytes, mimeType: "audio/mpeg"));
+      if (mounted) setState(() => _isPlaying = true);
+    } catch (e) {
+      await player.dispose();
+      if (mounted) {
+        setState(() {
+          _player = null;
+          _audioError = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_player?.dispose());
+    super.dispose();
+  }
+
+  void _pick(String action) {
+    if (_responded) return;
+    _responded = true;
+    widget.onRespond(action);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Map<String, dynamic> p = widget.payload;
+    final String fromPhone = p["fromPhone"]?.toString() ?? "";
+    final String transcript = p["transcript"]?.toString() ?? "";
+    final int ringSec = (p["ringTimeoutSec"] as num?)?.toInt() ?? 50;
+    final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+      direction: "agent_to_agent",
+      fromPhone: fromPhone,
+    );
+
+    return AlertDialog(
+      icon: const Icon(Icons.phone_in_talk, size: 36),
+      title: Text(VirtualPhoneUiLabels.peerIncomingTitle),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              VirtualPhoneUiLabels.peerIncomingHint,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              callerLabel,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (ringSec > 0) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                "约 ${ringSec}s 未操作将由 Agent 自动代接",
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainerHighest
+                    .withOpacity(0.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                transcript.isEmpty ? "（无语音文字稿）" : transcript,
+                style: Theme.of(context).textTheme.bodyLarge,
+              ),
+            ),
+            if (_audioError != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                "播放失败：$_audioError",
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => _pick("decline"),
+          child: Text(VirtualPhoneUiLabels.peerDecline),
+        ),
+        FilledButton.tonal(
+          onPressed: () => _pick("agent_takeover"),
+          child: Text(VirtualPhoneUiLabels.peerDelegate),
+        ),
+        FilledButton(
+          onPressed: () => _pick("accept"),
+          child: Text(VirtualPhoneUiLabels.peerAccept),
+        ),
+      ],
+    );
+  }
+}
+
 class _VirtualPhoneIncomingBody extends StatefulWidget {
   const _VirtualPhoneIncomingBody({required this.payload, this.onReply});
 
@@ -317,11 +480,13 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
     final String toPhone = p["toPhone"]?.toString() ?? p["toUserId"]?.toString() ?? "—";
     final String transcript = p["transcript"]?.toString() ?? "";
     final String ring = p["ringStyle"]?.toString() ?? "peer";
-    final String ringLabel = ring == "reminder" ? "语音提醒" : "来电";
+    final String ringLabel = ring == "reminder" ? "语音提醒" : "Agent 来电";
+    final String calleeLine = VirtualPhoneUiLabels.calleeAgentLine(toPhone);
 
-    final String callerLabel = isAgentToUser
-        ? (fromPhone.isNotEmpty ? "Agent $fromPhone" : "你的 Agent")
-        : (fromPhone.isNotEmpty ? fromPhone : "未知号码");
+    final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+      direction: direction,
+      fromPhone: fromPhone,
+    );
 
     final Object? tts = p["tts"];
     String? skipReason;
@@ -336,7 +501,7 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
         size: 36,
         color: isAgentToUser ? Colors.blueAccent : null,
       ),
-      title: Text(isAgentToUser ? "📞 Agent 来电" : ringLabel),
+      title: Text(isAgentToUser ? "📞 你的 Agent 来电" : "📞 $ringLabel"),
       content: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -359,11 +524,11 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
                 ),
               ],
             ),
-            if (!isAgentToUser && toPhone != "—") ...<Widget>[
+            if (!isAgentToUser && calleeLine.isNotEmpty) ...<Widget>[
               const SizedBox(height: 2),
-              Text("本机：$toPhone", style: Theme.of(context).textTheme.bodySmall),
+              Text(calleeLine, style: Theme.of(context).textTheme.bodySmall),
             ],
-            if (ringLabel != "来电") ...<Widget>[
+            if (ring == "reminder") ...<Widget>[
               const SizedBox(height: 2),
               Text("类型：$ringLabel", style: Theme.of(context).textTheme.bodySmall),
             ],

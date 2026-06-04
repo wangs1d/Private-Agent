@@ -5,7 +5,7 @@ import type { AgentState } from "../types/agent";
 
 interface UseEmbedParentBridgeOptions {
   apply: (patch: Partial<AgentState>) => void;
-  /** 收到 patch 后的额外回调（如 FreeApp 的 stimulate） */
+  /** 收到 patch 后的额外回调 */
   onPatch?: (patch: Partial<AgentState>, raw: unknown) => void;
   /** 是否监听具身指令 */
   relayCommands?: boolean;
@@ -13,7 +13,7 @@ interface UseEmbedParentBridgeOptions {
 
 /**
  * iframe 嵌入模式：监听宿主 postMessage，转发 ready 信号。
- * embed.html / free.html 共用。
+ * embed.html 使用。
  */
 export function useEmbedParentBridge({
   apply,

@@ -31,7 +31,7 @@ export const MODEL = {
   screenFaceRadius: 0.34,
   /** 表情可见区域半角（球冠 UV 参考） */
   screenFaceHalfAngle: Math.asin(0.34 / 0.5),
-  /** 交互热区半角（与 EyeScreen 对齐） */
+  /** 交互热区半角 */
   screenHitHalfAngle: Math.asin(0.38 / 0.5),
   /** 拉丝钢壳 */
   shellColor: "#9a9aa2",
@@ -46,7 +46,23 @@ export const MODEL = {
   seamEmissive: "#a8b8cc",
 } as const;
 
-export type SceneMode = "demo" | "embed" | "overlay";
+export type SceneMode = "embed" | "overlay";
+
+/** Electron 桌宠 — 固定机位，完整框选 DG2，禁止 3D 空间漫游 */
+export const OVERLAY_SCENE = {
+  cameraPosition: [0, 1.34, 3.35] as const,
+  cameraFov: 26,
+  lookAt: [0, 1.32, 0] as const,
+  bodyPosition: [0, 1.32, 0] as const,
+  modelScale: 1,
+} as const;
+
+/** 网页 embed — 相对桌宠缩小展示，DOM 漫游边界与 modelScale 对齐 */
+export const EMBED_SCENE = {
+  modelScale: 0.25,
+  containerW: 110,
+  containerH: 110,
+} as const;
 
 export function dg2Scale(bodyRadius = MODEL.bodyRadius): number {
   return bodyRadius / DG2_SOURCE.bodyRadius;

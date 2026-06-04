@@ -6,6 +6,10 @@ import type { TtsService } from "./tts-service.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 import { relayRequiresPairEnv } from "./agent-pairing-service.js";
 import type { AgentPairingService } from "./agent-pairing-service.js";
+import type {
+  PeerIncomingCallPayload,
+  VirtualPhoneIncomingCoordinator,
+} from "./virtual-phone-incoming-coordinator.js";
 
 export type VirtualPhoneRingStyle = "reminder" | "peer";
 export type VirtualPhoneInitiator = "user" | "agent";
@@ -39,12 +43,17 @@ export class VirtualPhoneService {
   private readonly byActor = new Map<string, string>();
   private readonly byPhone = new Map<string, string>();
   private persistChain: Promise<void> = Promise.resolve();
+  private incomingCoordinator: VirtualPhoneIncomingCoordinator | null = null;
 
   constructor(
     private readonly tts: TtsService,
     private readonly wsRegistry: WsConnectionRegistry,
     private readonly pairing: AgentPairingService,
   ) {}
+
+  setIncomingCoordinator(coordinator: VirtualPhoneIncomingCoordinator): void {
+    this.incomingCoordinator = coordinator;
+  }
 
   private get persistPath(): string {
     return process.env.VIRTUAL_PHONES_FILE ?? join(process.cwd(), "data", "virtual-phones.json");
@@ -91,8 +100,9 @@ export class VirtualPhoneService {
   }
 
   /**
-   * 申领或返回该 Actor 的 6 位虚拟号码。
-   * 仅应在用户明确要求 Agent 办理时调用（如工具 `phone.ensure_my_number`），不得在其它路径隐式调用。
+   * 申领或返回该 Actor（Agent 实例）的 6 位虚拟号码。
+   * 号码登记在 Agent 名下，即用户联络号；Agent↔Agent 互拨用此号，用户↔Agent 在 App 内通话不必另输 6 位号。
+   * 仅应在用户明确要求办理时调用（如 `phone.ensure_my_number`），不得在其它路径隐式调用。
    */
   ensureNumber(actorId: string): string {
     const id = actorId.trim();
@@ -169,6 +179,10 @@ export class VirtualPhoneService {
     const ttsResult = await this.tts.synthesizeMp3Base64(params.transcript);
     const callId = randomUUID();
 
+    const isSelfReminder =
+      targetActorId === fromActorId && params.ringStyle === "reminder";
+    const isPeerAgentCall = targetActorId !== fromActorId;
+
     const payload: Record<string, unknown> = {
       callId,
       fromActorId,
@@ -177,6 +191,13 @@ export class VirtualPhoneService {
       transcript: params.transcript.trim(),
       ringStyle: params.ringStyle,
       initiatedBy: params.initiatedBy,
+      direction: isSelfReminder ? "agent_self_reminder" : "agent_to_agent",
+      userActionRequired: isPeerAgentCall && params.ringStyle === "peer",
+      ringTimeoutSec: isPeerAgentCall && params.ringStyle === "peer"
+        ? Math.round(
+            Number(process.env.VIRTUAL_PHONE_PEER_RING_TIMEOUT_MS ?? 50_000) / 1000,
+          ) || 50
+        : undefined,
       tts: ttsResult.ok
         ? { format: ttsResult.format, base64: ttsResult.base64 }
         : { format: null, skippedReason: ttsResult.reason },
@@ -189,6 +210,19 @@ export class VirtualPhoneService {
         payload,
       }),
     );
+
+    if (pushed && isPeerAgentCall && params.ringStyle === "peer") {
+      const peerPayload: PeerIncomingCallPayload = {
+        callId,
+        fromActorId,
+        fromPhone,
+        toPhone,
+        transcript: params.transcript.trim(),
+        ringStyle: params.ringStyle,
+        initiatedBy: params.initiatedBy,
+      };
+      this.incomingCoordinator?.registerPeerIncoming(targetActorId, peerPayload);
+    }
 
     return {
       ok: true,

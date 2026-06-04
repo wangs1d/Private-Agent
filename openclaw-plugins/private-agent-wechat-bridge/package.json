@@ -1,0 +1,10 @@
+{
+  "name": "@private-ai-agent/openclaw-wechat-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Forward WeChat (openclaw-weixin) inbound messages to Private AI Agent server",
+  "openclaw": {
+    "extensions": ["./index.mjs"]
+  }
+}

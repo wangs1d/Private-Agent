@@ -9,27 +9,37 @@ export type AgentMood =
 
 import type { Message } from "../components/MessageList";
 
+export type TaskEventType = "progress" | "success" | "warning" | "error" | "info";
+
+export interface TaskEvent {
+  id: string;
+  type: TaskEventType;
+  title: string;
+  detail?: string;
+  timestamp: Date;
+  source?: string;
+  /** 是否已触发桌面通知 */
+  notified?: boolean;
+}
+
 export interface AgentState {
   mood: AgentMood;
-  /** 0–1，影响呼吸灯强度 */
   energy: number;
-  /** 用户是否正在与玻璃屏区域交互 */
   focused: boolean;
-  /** 来自主 Agent 的状态文案 */
   caption?: string;
-  /** 委派/工具阶段 */
   phase?: string;
   subAgentType?: string;
   subAgentDisplayName?: string;
   source?: string;
-  /** 对话消息列表 */
   messages?: Message[];
+  taskEvents?: TaskEvent[];
 }
 
 export const DEFAULT_AGENT_STATE: AgentState = {
   mood: "idle",
   energy: 0.55,
   focused: false,
+  taskEvents: [],
 };
 
 export type EmbodimentInteractAction = "focus" | "wake" | "chat";

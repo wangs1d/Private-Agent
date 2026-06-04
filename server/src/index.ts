@@ -5,6 +5,13 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
+import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
+import {
+  isWechatClawBridgeEnabled,
+  readWechatClawBridgeConfig,
+} from "./services/wechat-claw-bridge-service.js";
+import { isWechatClawFeatureEnabled } from "./services/openclaw-gateway-client.js";
+import { isTcpPortInUse } from "./utils/port-in-use.js";
 
 // 始终从 server/.env + server/.env.local 加载（密钥放 .env.local，避免被脚本误覆盖）
 loadServerEnv();
@@ -37,9 +44,31 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,
   log: (line) => services.app.log.info(line),
 });
+const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
+  ? (() => {
+      const bridge = readWechatClawBridgeConfig(process.env);
+      console.log(
+        `[wechat-claw] 消息桥已启用 → POST http://127.0.0.1:${bridge.serverPort}/integrations/wechat-claw/bridge/chat（OpenClaw 插件 before_dispatch）`,
+      );
+      if (isWechatClawFeatureEnabled(process.env)) {
+        const gwPort = Number(
+          process.env.OPENCLAW_GATEWAY_WS_URL?.match(/:(\d+)/)?.[1] ?? "18789",
+        );
+        void isTcpPortInUse(gwPort, "127.0.0.1").then((inUse) => {
+          if (!inUse) {
+            console.warn(
+              `[wechat-claw] Gateway 未在 127.0.0.1:${gwPort} 监听，微信将无法回复。请重启 dev:all 或单独运行: openclaw gateway`,
+            );
+          }
+        });
+      }
+      return () => {};
+    })()
+  : startOpenClawModelSyncWatcher(process.env);
 
 const shutdown = (): void => {
   stopDesktopBridge();
+  stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));
 };
 process.once("SIGINT", shutdown);

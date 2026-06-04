@@ -1,13 +1,18 @@
 /**
  * 启动本地三服务；端口已占用则跳过（绑定探测，启动前再检一次）。
  */
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { isTcpPortInUse } from "./port-in-use.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const isWin = process.platform === "win32";
+
+// Set console codepage to UTF-8 on Windows to avoid garbled Chinese output.
+if (isWin) {
+  try { execSync("chcp 65001", { stdio: "ignore" }); } catch {}
+}
 
 /** server 最后启动，减少与其它进程抢 3000 的竞态 */
 const SERVICES = [

@@ -6,7 +6,7 @@ import {
   resetWsMapperState,
 } from "../bridge/ws-agent-mapper";
 import { relayEmbodimentCommandFromWs } from "./useEmbodimentCommandRelay";
-import type { AgentState, EmbodimentInteractAction } from "../types/agent";
+import type { AgentState, EmbodimentInteractAction, TaskEvent } from "../types/agent";
 import { DEFAULT_AGENT_STATE } from "../types/agent";
 
 const BASE_RECONNECT_MS = 1000;
@@ -58,6 +58,7 @@ export function useAgentWebSocket(
   const attemptRef = useRef(0);
   const applyRef = useRef(apply);
   const sessionRef = useRef(resolveSessionId(sessionId));
+  const taskEventsRef = useRef<TaskEvent[]>([]);
   applyRef.current = apply;
   sessionRef.current = resolveSessionId(sessionId);
 
@@ -72,6 +73,7 @@ export function useAgentWebSocket(
     const sid = sessionRef.current;
     const url = resolveWsUrl(wsUrl);
     resetWsMapperState();
+    taskEventsRef.current = [];
     applyRef.current({ ...DEFAULT_AGENT_STATE });
     attemptRef.current = 0;
 
@@ -156,7 +158,12 @@ export function useAgentWebSocket(
 
         const patch = mapWsToAgentUpdate(msg);
         if (patch) {
-          applyRef.current(patch);
+          if (patch.taskEvents && patch.taskEvents.length > 0) {
+            taskEventsRef.current = [...taskEventsRef.current, ...patch.taskEvents];
+            applyRef.current({ ...patch, taskEvents: taskEventsRef.current });
+          } else {
+            applyRef.current(patch);
+          }
           if (patch.mood === "happy") {
             window.setTimeout(() => applyRef.current(mapProcessingIdle()), 1800);
           }

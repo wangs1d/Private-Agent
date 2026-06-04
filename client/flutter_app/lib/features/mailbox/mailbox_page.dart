@@ -57,27 +57,50 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   Future<void> _loadFriends() async {
     try {
       final result = await widget.api.getFriendsList();
+      if (!mounted) return;
       if (result["ok"] == true) {
         setState(() {
           _friends = List<Map<String, dynamic>>.from(result["friends"] ?? []);
         });
       }
     } catch (e) {
-      print("加载好友列表失败: $e");
+      if (!mounted) return;
+      final String hint = _networkErrorHint(e);
+      debugPrint("加载好友列表失败: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(hint)),
+      );
     }
   }
 
   Future<void> _loadAllRequests() async {
     try {
       final result = await widget.api.getAllFriendRequests();
+      if (!mounted) return;
       if (result["ok"] == true) {
         setState(() {
           _allRequests = List<Map<String, dynamic>>.from(result["requests"] ?? []);
         });
       }
     } catch (e) {
-      print("加载好友请求失败: $e");
+      if (!mounted) return;
+      final String hint = _networkErrorHint(e);
+      debugPrint("加载好友请求失败: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(hint)),
+      );
     }
+  }
+
+  String _networkErrorHint(Object error) {
+    final String msg = error.toString();
+    if (msg.contains("Failed to fetch") ||
+        msg.contains("ClientException") ||
+        msg.contains("SocketException") ||
+        msg.contains("Connection refused")) {
+      return "无法连接主服务（${ApiConfig.httpBase}），请先启动 server：npm run dev:server";
+    }
+    return "加载失败: $error";
   }
 
   Future<void> _acceptRequest(String requestId) async {

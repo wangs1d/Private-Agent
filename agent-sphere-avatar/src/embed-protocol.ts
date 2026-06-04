@@ -10,6 +10,7 @@ import type {
   EmbodimentCommand,
   EmbodimentCommandAction,
   EmbodimentInteractAction,
+  TaskEvent,
 } from "./types/agent";
 
 /** postMessage / CustomEvent 命名空间前缀 */
@@ -67,6 +68,7 @@ export type SpherePatchMessage = Partial<
     | "subAgentType"
     | "subAgentDisplayName"
     | "source"
+    | "taskEvents"
   >
 > & {
   type: typeof SPHERE_HOST_MSG.patch;
@@ -140,7 +142,6 @@ export function isWsOffMode(): boolean {
   return readSphereQuery("wsOff") === "1";
 }
 
-/** 解析宿主 postMessage 为状态补丁 */
 export function parseHostPatch(data: unknown): Partial<AgentState> | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
@@ -156,6 +157,12 @@ export function parseHostPatch(data: unknown): Partial<AgentState> | null {
       ? String(d.subAgentDisplayName)
       : undefined,
     source: d.source ? String(d.source) : undefined,
+    taskEvents: Array.isArray(d.taskEvents)
+      ? (d.taskEvents as TaskEvent[]).map((te) => ({
+          ...te,
+          timestamp: te.timestamp instanceof Date ? te.timestamp : new Date(te.timestamp ?? Date.now()),
+        }))
+      : undefined,
   };
 }
 

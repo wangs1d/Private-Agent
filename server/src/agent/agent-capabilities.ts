@@ -37,7 +37,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   desktop: "桌面自动化（VLM视觉操控电脑）",
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
-  phone: "虚拟电话（申领号码/拨打/呼叫用户）",
+  phone: "虚拟电话（用户与 Agent 共用联络号 / Agent↔Agent / App 内通话）",
   entertainment: "娱乐互动（侧栏「游戏」tab：五子棋/斗地主/炸金花/21点）",
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
   self_programming: "自我编程（创建/更新/删除/生成Skill）",
@@ -116,7 +116,8 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "desktop",
       lines: [
-        "8️⃣ 桌面自动化：desktop.visual.screenshot / desktop.visual.run_task（须「完全访问」+ 服务端/桥接已配置）",
+        "8️⃣ 电商读价：browser.session.list / browser.fetch_page（用户导入 Cookie 并按站点授权 agentAllowed +「完全访问」）",
+        "8️⃣b 桌面自动化：desktop.visual.screenshot / desktop.visual.run_task（须「完全访问」+ 服务端/桥接已配置）",
       ],
     },
     {
@@ -197,6 +198,22 @@ function buildStaticSections(): CapabilitySection[] {
   ];
 }
 
+/** Agent system prompt：虚拟电话三类通路（勿与用户真实手机号混淆）。 */
+const PHONE_MODEL_LINES = [
+  "【虚拟电话 · 号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码（与用户一体，可说「您的虚拟号码」）。用户无需单独再办一张号。",
+  "【三种通路】① Agent↔Agent：双方均须已申领号码 → phone.virtual_call；其他 Agent 来电时客户端先提醒用户接听，拒接/超时/委托时代你代接并转告；② Agent→用户：phone.call_user；③ 用户→Agent：App 内呼叫（不必再输 6 位号，但联络号仍是用户那条线）。",
+];
+
+function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: string): string[] {
+  const header = hasVirtualPhone && virtualPhone
+    ? `📞 虚拟电话（您的联络号码：${virtualPhone}，登记在 Agent 名下）`
+    : "📞 虚拟电话（尚未申领您的 6 位联络号码）";
+  const tools = hasVirtualPhone
+    ? "工具：phone.ensure_my_number（查询本 Agent 号码）/ phone.virtual_call（拨打其他 Agent）/ phone.call_user（呼叫当前用户）"
+    : "工具：phone.ensure_my_number（仅当用户明确要求为本 Agent 申领号码）/ phone.virtual_call（Agent 互拨前须先申领）/ phone.call_user（可直接呼叫用户，无需先申领）";
+  return [header, ...PHONE_MODEL_LINES, tools];
+}
+
 export function buildCoreCapabilitySections(
   skillManager: SkillManager,
   virtualPhoneService?: VirtualPhoneService,
@@ -209,9 +226,7 @@ export function buildCoreCapabilitySections(
     const hasVirtualPhone = virtualPhone != null && virtualPhone.length > 0;
     sections.push({
       domain: "phone",
-      lines: hasVirtualPhone
-        ? [`1️⃣3️⃣ 虚拟电话（已申领号码：${virtualPhone}）：virtual-phone.ensure-my-number / phone.virtual_call（拨打其他Agent）/ phone.call_user（直接呼叫用户，无需对方有号码，WebSocket推送语音来电）`]
-        : ["1️⃣3️⃣ 虚拟电话（未申领）：virtual-phone.ensure-my-number（用户要求时调用） / phone.call_user（直接呼叫用户，无需申领即可使用）"],
+      lines: buildPhoneCapabilityLines(hasVirtualPhone, virtualPhone ?? undefined),
     });
   }
 

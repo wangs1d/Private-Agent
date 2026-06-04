@@ -29,12 +29,39 @@ function digestKey(actorId: string, day: string): string {
 function firstLine(text: string, maxLen: number): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (!t) return "";
-  return t.length > maxLen ? `${t.slice(0, maxLen)}…` : t;
+  return t.length > maxLen ? `${t.slice(0, maxLen)}...` : t;
 }
 
-/**
- * 当日滚动摘要（L1）：跨 session 同日召回；日终归档进 Mem0 记忆图。
- */
+function extractQueryTerms(text: string): string[] {
+  return Array.from(
+    new Set(
+      (text.toLowerCase().match(/[\u4e00-\u9fff]{2,}|[a-z]{3,}/g) ?? []).filter(Boolean),
+    ),
+  ).slice(0, 12);
+}
+
+function scoreDigestLine(
+  line: string,
+  queryTerms: string[],
+  recencyRank: number,
+  totalLines: number,
+): number {
+  if (queryTerms.length === 0) return 0;
+
+  const lower = line.toLowerCase();
+  let score = 0;
+  for (const term of queryTerms) {
+    if (lower.includes(term)) score += term.length >= 4 ? 2 : 1;
+  }
+
+  if (/\[用户要求记住\]|\[Agent 承诺\/结论\]/.test(line)) score += 2.5;
+
+  const recencyBoost =
+    totalLines <= 1 ? 0 : (recencyRank / Math.max(totalLines - 1, 1)) * 1.5;
+  score += recencyBoost;
+  return score;
+}
+
 export class DailyDigestService {
   private readonly config: ShortTermMemoryConfig;
   private readonly filePath: string;
@@ -63,7 +90,10 @@ export class DailyDigestService {
         this.pruneStaleFromMemory();
       }
     } catch (e: unknown) {
-      const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
+      const code =
+        e && typeof e === "object" && "code" in e
+          ? String((e as NodeJS.ErrnoException).code)
+          : "";
       if (code !== "ENOENT") throw e;
     }
   }
@@ -79,20 +109,58 @@ export class DailyDigestService {
     this.schedulerTimer = null;
   }
 
-  /** 供 prompt 注入：当日（或指定日）摘要 */
   getPromptDigest(actorId: string, day = getCalendarDay()): string | undefined {
     if (!this.config.digestEnabled) return undefined;
     const rec = this.data.digests[digestKey(actorId, day)];
     if (!rec?.text?.trim()) return undefined;
     const max = this.config.digestPromptMaxChars;
     const body = rec.text.trim();
-    return body.length > max ? `…（较早记录已截断）\n${body.slice(-max)}` : body;
+    return body.length > max ? `...(earlier entries truncated)\n${body.slice(-max)}` : body;
   }
 
-  /**
-   * 每轮结束后增量更新 digest。
-   * @param priorityLines 高信号 fast-path 优先写入的行
-   */
+  getRelevantPromptDigest(
+    actorId: string,
+    query: string,
+    day = getCalendarDay(),
+  ): string | undefined {
+    if (!this.config.digestEnabled) return undefined;
+    const rec = this.data.digests[digestKey(actorId, day)];
+    if (!rec?.text?.trim()) return undefined;
+
+    const lines = rec.text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return undefined;
+
+    const queryTerms = extractQueryTerms(query);
+    if (queryTerms.length === 0) {
+      return this.getPromptDigest(actorId, day);
+    }
+
+    const ranked = lines
+      .map((line, index) => ({
+        line,
+        index,
+        score: scoreDigestLine(line, queryTerms, index, lines.length),
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .slice(0, 6)
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => entry.line);
+
+    if (ranked.length === 0) {
+      return this.getPromptDigest(actorId, day);
+    }
+
+    let text = ranked.join("\n");
+    if (text.length > this.config.digestPromptMaxChars) {
+      text = `${text.slice(0, this.config.digestPromptMaxChars)}...`;
+    }
+    return text;
+  }
+
   observeTurn(
     actorId: string,
     userText: string,
@@ -125,7 +193,7 @@ export class DailyDigestService {
 
     let text = prev?.text?.trim() ? `${prev.text.trim()}\n${lines.join("\n")}` : lines.join("\n");
     if (text.length > this.config.digestMaxChars) {
-      text = `…（较早记录已截断）\n${text.slice(-this.config.digestMaxChars)}`;
+      text = `...(earlier entries truncated)\n${text.slice(-this.config.digestMaxChars)}`;
     }
 
     this.data.digests[key] = {

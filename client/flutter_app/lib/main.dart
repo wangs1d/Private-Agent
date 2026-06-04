@@ -1,5 +1,4 @@
 import "dart:async";
-import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -10,6 +9,7 @@ import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/virtual_phone_incoming_dialog.dart";
+import "core/presentation/virtual_phone_ui_labels.dart";
 import "core/presentation/phone_dialer_page.dart";
 import "core/presentation/entrance_animation.dart";
 import "core/db/isar_local_history_store.dart";
@@ -43,6 +43,7 @@ import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/multi_agent_api_client.dart";
 import "features/gomoku/gomoku_page.dart";
 import "features/game_center/game_center_page.dart";
+import "features/integrations/wechat_claw_binding_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/silent_camera_capture.dart";
 import "core/vision/vision_wire_frame.dart";
@@ -55,6 +56,11 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   unawaited(bootstrapWindowsWebView());
   runApp(const PrivateAiApp());
+}
+
+/// 侧栏 hover 延后到下一帧，避免 AnimatedCrossFade 切换时触发 mouse_tracker 断言。
+void _deferSidebarHover(VoidCallback fn) {
+  SchedulerBinding.instance.addPostFrameCallback((_) => fn());
 }
 
 class PrivateAiApp extends StatefulWidget {
@@ -93,9 +99,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   double _balance = 1000;
   double _frozen = 0;
   int _tabIndex = 0;
-
-  /// 左侧导航栏是否展开（显示文字标签）；收起时仅显示图标。
-  bool _railExpanded = true;
 
   /// 用户给agent起的名字
   String? _agentName;
@@ -148,6 +151,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 网络电话悬浮按钮状态: null=无通话, ringing=正在呼叫, connected=已接通, ended=通话结束
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
+  /// 已弹窗处理的「其他 Agent 来电」callId，避免重复弹窗
+  String? _peerIncomingDialogCallId;
 
   @override
   void initState() {
@@ -211,7 +216,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
       _sendSessionInit();
       unawaited(_flushScheduleOfflineDeletes());
-      if (!kIsWeb && Platform.isWindows) {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
       }
     };
@@ -633,32 +638,75 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         }
       }
       if (type == "agent.phone.incoming") {
-        // 来电使用悬浮按钮显示，移除了原来的弹窗
+        final String direction = payload["direction"]?.toString() ?? "";
+        final String ringStyle = payload["ringStyle"]?.toString() ?? "peer";
+        final bool userActionRequired = payload["userActionRequired"] == true;
+        final bool isPeerIncoming = userActionRequired ||
+            (direction == "agent_to_agent" && ringStyle == "peer");
+        if (isPeerIncoming && direction != "agent_to_user") {
+          _presentPeerAgentIncoming(payload);
+          return;
+        }
         final String fromPhone = payload["fromPhone"]?.toString() ?? "";
-        final String callerLabel = fromPhone.isNotEmpty ? fromPhone : "未知来电";
+        final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+          direction: direction,
+          fromPhone: fromPhone,
+        );
         setState(() {
           _phoneCallStatus = "incoming";
           _phoneCallToActorId = callerLabel;
         });
+        final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+        if (navCtx != null && navCtx.mounted && direction == "agent_to_user") {
+          unawaited(
+            showVirtualPhoneIncomingDialog(
+              context: navCtx,
+              payload: payload,
+            ),
+          );
+        }
       }
       if (type == "agent.phone.call_status") {
         final String status = payload["status"]?.toString() ?? "unknown";
         final String toActorId = payload["toActorId"]?.toString() ?? "";
+        final String? fromPhone = payload["fromPhone"]?.toString();
+        final String message = payload["message"]?.toString() ?? "";
+        final String? summary = payload["summary"]?.toString();
         setState(() {
-          _phoneCallToActorId = toActorId.isNotEmpty ? toActorId : null;
-          if (status == "ended") {
-            // 通话结束后延迟清除状态，让用户看到结束状态
+          if (fromPhone != null && fromPhone.isNotEmpty) {
+            _phoneCallToActorId = VirtualPhoneUiLabels.incomingCallerLabel(
+              direction: payload["direction"]?.toString() ?? "agent_to_agent",
+              fromPhone: fromPhone,
+            );
+          } else {
+            _phoneCallToActorId = toActorId.isNotEmpty ? toActorId : _phoneCallToActorId;
+          }
+          if (status == "ended" || status == "answered_by_user" || status == "agent_handled") {
             Future.delayed(const Duration(seconds: 2), () {
               if (mounted) {
                 setState(() {
                   _phoneCallStatus = null;
                   _phoneCallToActorId = null;
+                  _peerIncomingDialogCallId = null;
                 });
               }
             });
           }
           _phoneCallStatus = status;
         });
+        if (status == "agent_handled" && mounted) {
+          final String body = (summary != null && summary.isNotEmpty)
+              ? summary
+              : message;
+          if (body.isNotEmpty) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel(status)}：$body"),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          }
+        }
       }
       if (type == "desktop.bridge.sync") {
         final bool? on = payload["bridgeOnline"] as bool?;
@@ -1318,6 +1366,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
+  Future<void> _openWechatClawBinding() async {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    await openWechatClawBinding(navCtx);
+  }
+
   /// 打开五子棋对局（从 playUrl 或 tableId 解析）。
   void _openGomokuGame(String playUrlOrTableId) {
     final String? tableId = PlayUrlUtils.parseTableId(playUrlOrTableId);
@@ -1360,9 +1414,76 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _ws.sendEvent("phone.user_call_agent", callPayload);
     if (mounted) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text("📞 正在呼叫 Agent: $agentId")),
+        SnackBar(
+          content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel("ringing")}（$agentId）"),
+        ),
       );
     }
+  }
+
+  void _sendPeerIncomingResponse(String callId, String action) {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      return;
+    }
+    _ws.sendEvent("phone.incoming_response", <String, dynamic>{
+      "callId": callId,
+      "action": action,
+    });
+  }
+
+  void _presentPeerAgentIncoming(Map<String, dynamic> payload) {
+    final String callId = payload["callId"]?.toString() ?? "";
+    if (callId.isEmpty) return;
+    if (_peerIncomingDialogCallId == callId) return;
+
+    final String fromPhone = payload["fromPhone"]?.toString() ?? "";
+    final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+      direction: "agent_to_agent",
+      fromPhone: fromPhone,
+    );
+    setState(() {
+      _peerIncomingDialogCallId = callId;
+      _phoneCallStatus = "incoming";
+      _phoneCallToActorId = callerLabel;
+    });
+
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!navCtx.mounted) return;
+      unawaited(
+        showPeerAgentIncomingCallDialog(
+          context: navCtx,
+          payload: payload,
+          onRespond: (String action) {
+            _sendPeerIncomingResponse(callId, action);
+            if (action == "accept") {
+              if (mounted) {
+                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                  const SnackBar(content: Text("已接听，可查看来电语音与文字稿")),
+                );
+              }
+            } else if (mounted) {
+              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                SnackBar(
+                  content: Text(
+                    action == "decline"
+                        ? "已拒接，你的 Agent 正在转告来电内容…"
+                        : "已委托 Agent 代接…",
+                  ),
+                ),
+              );
+            }
+          },
+        ).whenComplete(() {
+          if (mounted && _peerIncomingDialogCallId == callId) {
+            setState(() => _peerIncomingDialogCallId = null);
+          }
+        }),
+      );
+    });
   }
 
   void _callMyAgentViaPhone(String? message) {
@@ -1382,7 +1503,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _ws.sendEvent("phone.call_my_agent", callPayload);
     if (mounted) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text("📞 正在呼叫你的 Agent…")),
+        SnackBar(
+          content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel("ringing")}…"),
+        ),
       );
     }
   }
@@ -1408,177 +1531,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (decided) {
       await ClientLocationService.requestGpsAfterConsent();
     }
-  }
-
-  /// 收起态侧栏图标悬停提示；首 Tab 无顶栏标题，此处用「对话」代替空字符串。
-  String _tabTooltip(int index) {
-    if (index == 0) {
-      return "对话";
-    }
-    return _kTabTitles[index];
-  }
-
-  /// 收起态：深色窄条 + 图标居中，风格与展开态统一（zinc 暗色调）。
-  Widget _buildCollapsedMiniSidebar() {
-    const Color iconIdle = Color(0xFF71717A);
-    const Color iconHover = Color(0xFFD4D4D8);
-    const Color iconSelected = Color(0xFF60A5FA);
-
-    Widget miniTab(
-      int index,
-      IconData iconOutlined,
-      IconData iconFilled,
-    ) {
-      final bool selected = _tabIndex == index;
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Tooltip(
-          message: _tabTooltip(index),
-          child: _MiniNavItem(
-            selected: selected,
-            iconOutlined: iconOutlined,
-            iconFilled: iconFilled,
-            iconIdle: iconIdle,
-            iconHover: iconHover,
-            iconSelected: iconSelected,
-            onTap: () => _selectTab(index),
-          ),
-        ),
-      );
-    }
-
-    return Material(
-      color: const Color(0xFF0F0F0F),
-      child: SizedBox(
-        width: 56,
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-            child: Column(
-              children: <Widget>[
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: IconButton(
-                    tooltip: "展开侧边栏",
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints.tightFor(width: 36, height: 36),
-                    icon: const Icon(Icons.keyboard_double_arrow_right,
-                        color: iconIdle, size: 20),
-                    onPressed: () => setState(() => _railExpanded = true),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                miniTab(
-                    0, Icons.chat_bubble_outline_rounded, Icons.chat_rounded),
-                miniTab(1, Icons.link_outlined, Icons.link),
-                miniTab(2, Icons.account_balance_wallet_outlined,
-                    Icons.account_balance_wallet),
-                miniTab(3, Icons.store_outlined, Icons.store),
-                const SizedBox(height: 20),
-                miniTab(4, Icons.sports_esports_outlined, Icons.sports_esports),
-                miniTab(5, Icons.public_outlined, Icons.public),
-                miniTab(6, Icons.people_outline, Icons.people),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 展开态：图标在左、文字在右，匹配 Web 端 Sidebar 风格（zinc 暗色 + 左侧蓝色激活条 + hover + badge）。
-  Widget _buildExpandedSidebar() {
-    const double kRailWidth = 220;
-
-    const List<_SidebarItemSpec> kItems = <_SidebarItemSpec>[
-      _SidebarItemSpec(
-        iconOutlined: Icons.chat_bubble_outline_rounded,
-        iconFilled: Icons.chat_rounded,
-        label: '对话',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.link_outlined,
-        iconFilled: Icons.link,
-        label: 'Agent Link',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.account_balance_wallet_outlined,
-        iconFilled: Icons.account_balance_wallet,
-        label: '钱包',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.store_outlined,
-        iconFilled: Icons.store,
-        label: '技能商店',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.sports_esports_outlined,
-        iconFilled: Icons.sports_esports,
-        label: '游戏',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.public_outlined,
-        iconFilled: Icons.public,
-        label: 'Agent World',
-      ),
-      _SidebarItemSpec(
-        iconOutlined: Icons.people_outline,
-        iconFilled: Icons.people,
-        label: '社交推文',
-      ),
-    ];
-
-    return Material(
-      color: const Color(0xFF0F0F0F),
-      child: SizedBox(
-        width: kRailWidth,
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                SizedBox(
-                  height: 40,
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: IconButton(
-                      tooltip: "收起侧边栏",
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints:
-                          const BoxConstraints.tightFor(width: 32, height: 32),
-                      icon: const Icon(Icons.keyboard_double_arrow_left,
-                          color: Color(0xFFA1A1AA), size: 20),
-                      onPressed: () => setState(() => _railExpanded = false),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.zero,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        for (int i = 0; i < kItems.length; i += 1)
-                          _SidebarNavItem(
-                            spec: kItems[i],
-                            selected: _tabIndex == i,
-                            onTap: () => _selectTab(i),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   void _showDesktopBridgeToast(String message) {
@@ -1691,24 +1643,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    AnimatedCrossFade(
-                      duration: const Duration(milliseconds: 240),
-                      reverseDuration: const Duration(milliseconds: 240),
-                      sizeCurve: Curves.easeInOutCubic,
-                      firstCurve: Curves.easeInOutCubic,
-                      secondCurve: Curves.easeInOutCubic,
-                      alignment: Alignment.topLeft,
-                      crossFadeState: _railExpanded
-                          ? CrossFadeState.showSecond
-                          : CrossFadeState.showFirst,
-                      firstChild: KeyedSubtree(
-                        key: const ValueKey<String>("rail_mini"),
-                        child: _buildCollapsedMiniSidebar(),
-                      ),
-                      secondChild: KeyedSubtree(
-                        key: const ValueKey<String>("rail_expanded"),
-                        child: _buildExpandedSidebar(),
-                      ),
+                    _AppSidebar(
+                      tabIndex: _tabIndex,
+                      onTabSelected: _selectTab,
+                      onWechatClawTap: _openWechatClawBinding,
                     ),
                     const VerticalDivider(
                       width: 1,
@@ -1716,7 +1654,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       color: AppPalette.sidebarSeparator,
                     ),
                     Expanded(
-                      child: Column(
+                      child: RepaintBoundary(
+                        child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: <Widget>[
                           AppBar(
@@ -1818,6 +1757,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             ),
                           ),
                         ],
+                        ),
                       ),
                     ),
                   ],
@@ -2015,8 +1955,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               const SizedBox(height: 6),
               Text(
                 _phoneCallStatus == null
-                    ? "手机连接可用：可发起呼叫"
-                    : "当前电话状态：$_phoneCallStatus",
+                    ? VirtualPhoneUiLabels.idleStatusHint
+                    : "虚拟电话：${VirtualPhoneUiLabels.callStatusLabel(_phoneCallStatus)}",
               ),
             ],
           ),
@@ -2030,72 +1970,72 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       children: <Widget>[
         _buildMainContent(),
         if (_showCalendarPanel && _tabIndex == 0)
-          Positioned(
-            right: 0,
-            top: 48,
-            child: _buildCompactCalendarPanel(),
+          GestureDetector(
+            onTap: () => setState(() => _showCalendarPanel = false),
+            child: Container(
+              color: Colors.black.withOpacity(0.5),
+              alignment: Alignment.center,
+              child: GestureDetector(
+                onTap: () {},
+                child: Material(
+                  elevation: 24,
+                  borderRadius: BorderRadius.circular(16),
+                  color: const Color(0xFF1E1E1E),
+                  clipBehavior: Clip.antiAlias,
+                  child: SizedBox(
+                    width: 560,
+                    height: MediaQuery.of(context).size.height * 0.8,
+                    child: _buildScheduleSidebar(),
+                  ),
+                ),
+              ),
+            ),
           ),
       ],
     );
   }
 
-  Widget _buildCompactCalendarPanel() {
-    const double panelHeight = 450;
-    const double panelWidth = 420;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      width: panelWidth,
-      height: panelHeight,
-      child: Material(
-        elevation: 8,
-        color: const Color(0xFF1A1A1A),
-        child: ClipRect(
-          child: Column(
+  Widget _buildScheduleSidebar() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 16, 8),
+          child: Row(
             children: <Widget>[
-              // 标题栏
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                child: Row(
-                  children: <Widget>[
-                    const Text(
-                      "日程",
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      tooltip: "关闭",
-                      icon: const Icon(Icons.close, size: 20),
-                      onPressed: () =>
-                          setState(() => _showCalendarPanel = false),
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints:
-                          const BoxConstraints.tightFor(width: 32, height: 32),
-                    ),
-                  ],
+              const Text(
+                "日程",
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
                 ),
               ),
-              const Divider(height: 1),
-              // 日历内容
-              Expanded(
-                child: SizedBox(
-                  width: panelWidth,
-                  child: SchedulePage(
-                    store: _store,
-                    scheduleApi: _scheduleApi,
-                    sessionId: ApiConfig.effectiveActorId,
-                    reloadListenable: _calendarReloadSignal,
-                  ),
-                ),
+              const Spacer(),
+              IconButton(
+                tooltip: "关闭",
+                icon: const Icon(Icons.close, size: 22),
+                onPressed: () =>
+                    setState(() => _showCalendarPanel = false),
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints:
+                    const BoxConstraints.tightFor(width: 32, height: 32),
+                iconSize: 20,
+                color: Colors.white54,
               ),
             ],
           ),
         ),
-      ),
+        Expanded(
+          child: SchedulePage(
+            store: _store,
+            scheduleApi: _scheduleApi,
+            sessionId: ApiConfig.effectiveActorId,
+            reloadListenable: _calendarReloadSignal,
+          ),
+        ),
+      ],
     );
   }
 
@@ -2190,6 +2130,149 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 }
 
+class _AppSidebar extends StatefulWidget {
+  const _AppSidebar({
+    required this.tabIndex,
+    required this.onTabSelected,
+    required this.onWechatClawTap,
+  });
+
+  final int tabIndex;
+  final ValueChanged<int> onTabSelected;
+  final VoidCallback onWechatClawTap;
+
+  @override
+  State<_AppSidebar> createState() => _AppSidebarState();
+}
+
+class _AppSidebarState extends State<_AppSidebar> {
+  static const List<_SidebarItemSpec> _kItems = <_SidebarItemSpec>[
+    _SidebarItemSpec(
+      iconOutlined: Icons.chat_bubble_outline_rounded,
+      iconFilled: Icons.chat_rounded,
+      label: '对话',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.link_outlined,
+      iconFilled: Icons.link,
+      label: 'Agent Link',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.account_balance_wallet_outlined,
+      iconFilled: Icons.account_balance_wallet,
+      label: '钱包',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.store_outlined,
+      iconFilled: Icons.store,
+      label: '技能商店',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.sports_esports_outlined,
+      iconFilled: Icons.sports_esports,
+      label: '游戏',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.public_outlined,
+      iconFilled: Icons.public,
+      label: 'Agent World',
+    ),
+    _SidebarItemSpec(
+      iconOutlined: Icons.people_outline,
+      iconFilled: Icons.people,
+      label: '社交推文',
+    ),
+  ];
+
+  bool _expanded = true;
+
+  void _toggleExpanded() => setState(() => _expanded = !_expanded);
+
+  @override
+  Widget build(BuildContext context) {
+    const Color toggleIdle = Color(0xFFA1A1AA);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeInOutCubic,
+      width: _expanded ? 220.0 : 56.0,
+      color: const Color(0xFF0F0F0F),
+      clipBehavior: Clip.hardEdge,
+      child: Material(
+        color: const Color(0xFF0F0F0F),
+        child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              vertical: _expanded ? 12 : 8,
+              horizontal: _expanded ? 12 : 8,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                SizedBox(
+                  height: 40,
+                  child: Align(
+                    alignment:
+                        _expanded ? Alignment.centerRight : Alignment.center,
+                    child: IconButton(
+                      tooltip: _expanded ? "收起侧边栏" : "展开侧边栏",
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: BoxConstraints.tightFor(
+                        width: _expanded ? 32 : 36,
+                        height: _expanded ? 32 : 36,
+                      ),
+                      icon: Icon(
+                        _expanded
+                            ? Icons.keyboard_double_arrow_left
+                            : Icons.keyboard_double_arrow_right,
+                        color: toggleIdle,
+                        size: 20,
+                      ),
+                      onPressed: _toggleExpanded,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        for (int i = 0; i < _kItems.length; i += 1)
+                          _SidebarNavItem(
+                            key: ValueKey<String>(_kItems[i].label),
+                            spec: _kItems[i],
+                            expanded: _expanded,
+                            selected: widget.tabIndex == i,
+                            onTap: () => widget.onTabSelected(i),
+                          ),
+                        if (!_expanded) const SizedBox(height: 20),
+                      ],
+                    ),
+                  ),
+                ),
+                const Divider(height: 1, color: Color(0xFF27272A)),
+                SizedBox(height: _expanded ? 8 : 4),
+                if (_expanded)
+                  _WechatClawSidebarFooter(onTap: widget.onWechatClawTap)
+                else
+                  Tooltip(
+                    message: "绑定微信 Claw",
+                    child: _WechatClawSidebarMiniButton(
+                      onTap: widget.onWechatClawTap,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SidebarItemSpec {
   const _SidebarItemSpec({
     required this.iconOutlined,
@@ -2206,12 +2289,15 @@ class _SidebarItemSpec {
 
 class _SidebarNavItem extends StatefulWidget {
   const _SidebarNavItem({
+    super.key,
     required this.spec,
+    required this.expanded,
     required this.selected,
     required this.onTap,
   });
 
   final _SidebarItemSpec spec;
+  final bool expanded;
   final bool selected;
   final VoidCallback onTap;
 
@@ -2226,6 +2312,7 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
   Widget build(BuildContext context) {
     final bool selected = widget.selected;
     final bool hovering = _hovering;
+    final bool expanded = widget.expanded;
     final _SidebarItemSpec spec = widget.spec;
     final ColorScheme cs = Theme.of(context).colorScheme;
 
@@ -2243,9 +2330,151 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
         ? const Color(0xFFF4F4F5)
         : (hovering ? const Color(0xFFE4E4E7) : const Color(0xFFA1A1AA));
 
+    final Widget button = MouseRegion(
+      onEnter: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = true);
+      }),
+      onExit: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = false);
+      }),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          width: expanded ? null : 40,
+          height: expanded ? null : 40,
+          alignment: expanded ? null : Alignment.center,
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: expanded
+              ? Stack(
+                  children: <Widget>[
+                    if (selected)
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Container(
+                          width: 4,
+                          margin: const EdgeInsets.symmetric(vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF3B82F6),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      child: Row(
+                        children: <Widget>[
+                          Icon(
+                            selected ? spec.iconFilled : spec.iconOutlined,
+                            size: 20,
+                            color: iconColor,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: AnimatedOpacity(
+                              duration: const Duration(milliseconds: 160),
+                              opacity: expanded ? 1 : 0,
+                              child: Text(
+                                spec.label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: textColor,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (spec.badge != null && spec.badge!.isNotEmpty)
+                            AnimatedOpacity(
+                              duration: const Duration(milliseconds: 160),
+                              opacity: expanded ? 1 : 0,
+                              child: Container(
+                                margin: const EdgeInsets.only(left: 8),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: spec.badge == 'NEW'
+                                      ? const Color(0xA33B82F6)
+                                      : cs.surfaceContainerHigh,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  spec.badge!,
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                    color: spec.badge == 'NEW'
+                                        ? const Color(0xFFC084FC)
+                                        : const Color(0xFFA1A1AA),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                )
+              : Icon(
+                  selected ? spec.iconFilled : spec.iconOutlined,
+                  size: 20,
+                  color: iconColor,
+                ),
+        ),
+      ),
+    );
+
+    if (expanded) {
+      return button;
+    }
+    return Tooltip(
+      message: spec.label,
+      child: button,
+    );
+  }
+}
+
+class _WechatClawSidebarFooter extends StatefulWidget {
+  const _WechatClawSidebarFooter({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_WechatClawSidebarFooter> createState() =>
+      _WechatClawSidebarFooterState();
+}
+
+class _WechatClawSidebarFooterState extends State<_WechatClawSidebarFooter> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Color bgColor = _hovering
+        ? cs.surfaceContainer.withOpacity(0.6)
+        : Colors.transparent;
+    final Color textColor =
+        _hovering ? const Color(0xFFE4E4E7) : const Color(0xFFA1A1AA);
+
     return MouseRegion(
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
+      onEnter: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = true);
+      }),
+      onExit: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = false);
+      }),
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: widget.onTap,
@@ -2258,71 +2487,31 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
             color: bgColor,
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Stack(
-            children: <Widget>[
-              if (selected)
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  child: Container(
-                    width: 4,
-                    margin: const EdgeInsets.symmetric(vertical: 9),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF3B82F6),
-                      borderRadius: BorderRadius.circular(999),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: <Widget>[
+                const _WechatClawGlyph(size: 20),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    "绑定微信 Claw",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: textColor,
                     ),
                   ),
                 ),
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  children: <Widget>[
-                    Icon(
-                      selected ? spec.iconFilled : spec.iconOutlined,
-                      size: 20,
-                      color: iconColor,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        spec.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: textColor,
-                        ),
-                      ),
-                    ),
-                    if (spec.badge != null && spec.badge!.isNotEmpty)
-                      Container(
-                        margin: const EdgeInsets.only(left: 8),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: spec.badge == 'NEW'
-                              ? const Color(0xA33B82F6)
-                              : cs.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          spec.badge!,
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            color: spec.badge == 'NEW'
-                                ? const Color(0xFFC084FC)
-                                : const Color(0xFFA1A1AA),
-                          ),
-                        ),
-                      ),
-                  ],
+                Icon(
+                  Icons.qr_code_scanner_outlined,
+                  size: 16,
+                  color: textColor.withValues(alpha: 0.85),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2330,51 +2519,34 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
   }
 }
 
-class _MiniNavItem extends StatefulWidget {
-  const _MiniNavItem({
-    required this.selected,
-    required this.iconOutlined,
-    required this.iconFilled,
-    required this.iconIdle,
-    required this.iconHover,
-    required this.iconSelected,
-    required this.onTap,
-  });
+class _WechatClawSidebarMiniButton extends StatefulWidget {
+  const _WechatClawSidebarMiniButton({required this.onTap});
 
-  final bool selected;
-  final IconData iconOutlined;
-  final IconData iconFilled;
-  final Color iconIdle;
-  final Color iconHover;
-  final Color iconSelected;
   final VoidCallback onTap;
 
   @override
-  State<_MiniNavItem> createState() => _MiniNavItemState();
+  State<_WechatClawSidebarMiniButton> createState() =>
+      _WechatClawSidebarMiniButtonState();
 }
 
-class _MiniNavItemState extends State<_MiniNavItem> {
+class _WechatClawSidebarMiniButtonState
+    extends State<_WechatClawSidebarMiniButton> {
   bool _hovering = false;
 
   @override
   Widget build(BuildContext context) {
-    final bool selected = widget.selected;
-    final bool hovering = _hovering;
     final ColorScheme cs = Theme.of(context).colorScheme;
-
-    final Color bgColor = selected
-        ? cs.surfaceContainerHigh.withOpacity(0.6)
-        : (hovering
-            ? cs.surfaceContainer.withOpacity(0.6)
-            : Colors.transparent);
-
-    final Color iconColor = selected
-        ? widget.iconSelected
-        : (hovering ? widget.iconHover : widget.iconIdle);
+    final Color bgColor = _hovering
+        ? cs.surfaceContainer.withOpacity(0.6)
+        : Colors.transparent;
 
     return MouseRegion(
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
+      onEnter: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = true);
+      }),
+      onExit: (_) => _deferSidebarHover(() {
+        if (mounted) setState(() => _hovering = false);
+      }),
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: widget.onTap,
@@ -2389,11 +2561,35 @@ class _MiniNavItemState extends State<_MiniNavItem> {
             color: bgColor,
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Icon(
-            selected ? widget.iconFilled : widget.iconOutlined,
-            size: 20,
-            color: iconColor,
-          ),
+          child: const _WechatClawGlyph(size: 20),
+        ),
+      ),
+    );
+  }
+}
+
+class _WechatClawGlyph extends StatelessWidget {
+  const _WechatClawGlyph({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size + 4,
+      height: size + 4,
+      decoration: BoxDecoration(
+        color: const Color(0xFF07C160).withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        "微",
+        style: TextStyle(
+          color: const Color(0xFF07C160),
+          fontSize: size * 0.72,
+          fontWeight: FontWeight.w700,
+          height: 1,
         ),
       ),
     );

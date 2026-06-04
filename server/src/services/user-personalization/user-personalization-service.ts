@@ -143,6 +143,9 @@ function behaviorSummaryLine(signal: BehaviorSignals): string | undefined {
   ];
   pairs.sort((a, b) => b[1] - a[1]);
   if (pairs[0][1] <= 0) return undefined;
+  if (pairs[0][0] === "companion") {
+    return "用户有陪伴/chat 倾向：回复偏真人聊天感，多倾听与共情，少办事式罗列。";
+  }
   const top2 = pairs.slice(0, 2).map((x) => x[0]).join(", ");
   return `User long-term behavior tendency: ${top2}. Prioritize matching response style and actions.`;
 }

@@ -11,7 +11,7 @@ export function registerAgentPhoneTools(registry: ToolRegistry, phone: VirtualPh
       ok: true,
       actorId,
       virtualPhone: number,
-      summary: `你的 6 位虚拟号码为 ${number}。仅在你明确要求办理时才会申领；其他 Agent 可用此号码拨打你（配对规则同中继）。`,
+      summary: `您的虚拟号码为 ${number}（登记在本 Agent 名下，与您共用）。其他 Agent 可拨打此号联系您（配对规则同中继）。`,
     };
   });
 
@@ -86,7 +86,7 @@ export function registerAgentPhoneTools(registry: ToolRegistry, phone: VirtualPh
       toUserId: result.toUserId,
       fromPhone: result.fromPhone,
       summary: result.pushed
-        ? `已向用户推送虚拟来电（含TTS语音），用户可在客户端接听并回复。${!result.fromPhone ? "提示：你尚未申领虚拟号码，显示为未知号码。" : ""}`
+        ? `已向用户推送虚拟来电（含TTS语音），用户可在客户端接听并回复。${!result.fromPhone ? "提示：尚未申领共用虚拟号码，来电显示为未知号码。" : ""}`
         : "已生成通话请求，但用户当前离线，无法实时振铃",
     };
   });

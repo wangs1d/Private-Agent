@@ -75,6 +75,9 @@ export function useSphereUserDrag({
   const dragModeRef = useRef<DragMode>("pan");
   const activeButtonRef = useRef(0);
   const panMovedRef = useRef(0);
+  const panRemainderRef = useRef({ x: 0, y: 0 });
+  /** Electron 窗口拖拽须用 screen 坐标，否则 moveBy 后 client 坐标反馈导致抖动 */
+  const panUseScreenSpaceRef = useRef(false);
   const bodyCenterRef = useRef(new THREE.Vector3(0, 1.6, 0));
   const eyeLocalRef = useRef(new THREE.Vector3(...MODEL.glassScreenPosition));
   const eyeWorldRef = useRef(new THREE.Vector3());
@@ -89,14 +92,30 @@ export function useSphereUserDrag({
     [faceSignalsRef],
   );
 
+  const readPointer = useCallback((clientX: number, clientY: number, screenX: number, screenY: number) => {
+    if (panUseScreenSpaceRef.current) {
+      return { x: screenX, y: screenY };
+    }
+    return { x: clientX, y: clientY };
+  }, []);
+
   const applyDragDelta = useCallback(
     (dx: number, dy: number) => {
-      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+      if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
 
       if (dragModeRef.current === "pan") {
         panMovedRef.current += Math.abs(dx) + Math.abs(dy);
+
         if (window.sphereOverlay?.moveBy) {
-          window.sphereOverlay.moveBy(Math.round(dx), Math.round(dy));
+          panRemainderRef.current.x += dx;
+          panRemainderRef.current.y += dy;
+          const ix = Math.trunc(panRemainderRef.current.x);
+          const iy = Math.trunc(panRemainderRef.current.y);
+          if (ix !== 0 || iy !== 0) {
+            panRemainderRef.current.x -= ix;
+            panRemainderRef.current.y -= iy;
+            window.sphereOverlay.moveBy(ix, iy);
+          }
         } else if (onPanDelta) {
           onPanDelta(dx, dy);
         } else if (window.parent !== window) {
@@ -154,6 +173,15 @@ export function useSphereUserDrag({
 
       onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
     } else {
+      if (window.sphereOverlay?.moveBy) {
+        const rx = Math.round(panRemainderRef.current.x);
+        const ry = Math.round(panRemainderRef.current.y);
+        if (rx !== 0 || ry !== 0) {
+          window.sphereOverlay.moveBy(rx, ry);
+        }
+      }
+      panRemainderRef.current = { x: 0, y: 0 };
+      panUseScreenSpaceRef.current = false;
       onPanEnd?.();
     }
 
@@ -163,16 +191,27 @@ export function useSphereUserDrag({
   }, [applyFaceSignals, onExcite, onPanEnd, onTouch]);
 
   const beginDrag = useCallback(
-    (clientX: number, clientY: number, pointerId: number, mode: DragMode, button: number) => {
+    (
+      clientX: number,
+      clientY: number,
+      screenX: number,
+      screenY: number,
+      pointerId: number,
+      mode: DragMode,
+      button: number,
+    ) => {
       if (!enabledRef.current || draggingRef.current) return false;
       draggingRef.current = true;
       pointerIdRef.current = pointerId;
       dragModeRef.current = mode;
       activeButtonRef.current = button;
-      lastPointerRef.current = { x: clientX, y: clientY };
+      panUseScreenSpaceRef.current = mode === "pan" && !!window.sphereOverlay?.moveBy;
+      const p = readPointer(clientX, clientY, screenX, screenY);
+      lastPointerRef.current = { x: p.x, y: p.y };
       spinVelRef.current = { x: 0, y: 0 };
       totalRotRef.current = 0;
       panMovedRef.current = 0;
+      panRemainderRef.current = { x: 0, y: 0 };
       touchPulseRef.current = 1;
       applyFaceSignals(1, 0);
       if (mode === "rotate") {
@@ -180,7 +219,7 @@ export function useSphereUserDrag({
       }
       return true;
     },
-    [applyFaceSignals, onTouch],
+    [applyFaceSignals, onTouch, readPointer],
   );
 
   const resolveDragMode = (button: number): DragMode | null => {
@@ -189,12 +228,23 @@ export function useSphereUserDrag({
     return null;
   };
 
+  const applyPointerMove = useCallback(
+    (clientX: number, clientY: number, screenX: number, screenY: number) => {
+      const p = readPointer(clientX, clientY, screenX, screenY);
+      const dx = p.x - lastPointerRef.current.x;
+      const dy = p.y - lastPointerRef.current.y;
+      lastPointerRef.current = { x: p.x, y: p.y };
+      applyDragDelta(dx, dy);
+    },
+    [applyDragDelta, readPointer],
+  );
+
   const handlePointerDown = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
       const mode = resolveDragMode(e.button);
       if (!enabledRef.current || mode == null) return;
       e.stopPropagation();
-      beginDrag(e.clientX, e.clientY, e.pointerId, mode, e.button);
+      beginDrag(e.clientX, e.clientY, e.screenX, e.screenY, e.pointerId, mode, e.button);
     },
     [beginDrag],
   );
@@ -203,12 +253,9 @@ export function useSphereUserDrag({
     (e: ThreeEvent<PointerEvent>) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
       e.stopPropagation();
-      const dx = e.clientX - lastPointerRef.current.x;
-      const dy = e.clientY - lastPointerRef.current.y;
-      lastPointerRef.current = { x: e.clientX, y: e.clientY };
-      applyDragDelta(dx, dy);
+      applyPointerMove(e.clientX, e.clientY, e.screenX, e.screenY);
     },
-    [applyDragDelta],
+    [applyPointerMove],
   );
 
   const handlePointerUp = useCallback(
@@ -242,7 +289,7 @@ export function useSphereUserDrag({
 
   const handleBodyHover = useCallback(
     (active: boolean) => {
-      if (!active && draggingRef.current) return;
+      if (draggingRef.current) return;
       onBodyHover?.(active);
     },
     [onBodyHover],
@@ -295,10 +342,7 @@ export function useSphereUserDrag({
     const onWindowMove = (e: PointerEvent) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
       e.preventDefault();
-      const dx = e.clientX - lastPointerRef.current.x;
-      const dy = e.clientY - lastPointerRef.current.y;
-      lastPointerRef.current = { x: e.clientX, y: e.clientY };
-      applyDragDelta(dx, dy);
+      applyPointerMove(e.clientX, e.clientY, e.screenX, e.screenY);
     };
 
     const onWindowUp = (e: PointerEvent) => {
@@ -314,7 +358,7 @@ export function useSphereUserDrag({
       window.removeEventListener("pointerup", onWindowUp);
       window.removeEventListener("pointercancel", onWindowUp);
     };
-  }, [applyDragDelta, finishDrag]);
+  }, [applyPointerMove, finishDrag]);
 
   useEffect(() => {
     const dom = gl.domElement;
@@ -326,7 +370,7 @@ export function useSphereUserDrag({
   useEffect(() => {
     if (!registerBridge) return;
     const bridgeApi: SphereDragApi = {
-      beginDrag: (x, y, id) => beginDrag(x, y, id, "rotate", 2),
+      beginDrag: (x, y, id) => beginDrag(x, y, x, y, id, "rotate", 2),
       moveBy: (dx, dy) => applyDragDelta(dx, dy),
       endDrag: () => finishDrag(),
     };
@@ -361,7 +405,7 @@ export function useSphereUserDrag({
 
       e.preventDefault();
       e.stopPropagation();
-      beginDrag(e.clientX, e.clientY, e.pointerId, mode, e.button);
+      beginDrag(e.clientX, e.clientY, e.screenX, e.screenY, e.pointerId, mode, e.button);
       dom.setPointerCapture(e.pointerId);
     };
 

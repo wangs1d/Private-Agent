@@ -7,8 +7,16 @@ import { instantiateKnownProvider } from "./instantiate-provider.js";
 /** 与 `EXTERNAL_MODEL_PROVIDER` 对齐 */
 export type ExternalModelMode = "auto" | "none" | "moonshot-kimi" | "openai" | "failover";
 
-function parseMode(): ExternalModelMode {
-  const raw = (process.env.EXTERNAL_MODEL_PROVIDER ?? "").trim().toLowerCase();
+/** 主服务当前生效的外部模型（供 OpenClaw 等下游同步） */
+export type PrimaryExternalModelBinding = {
+  providerId: "moonshot-kimi" | "openai";
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+};
+
+function parseMode(env: NodeJS.ProcessEnv = process.env): ExternalModelMode {
+  const raw = (env.EXTERNAL_MODEL_PROVIDER ?? "").trim().toLowerCase();
   if (!raw || raw === "auto") return "auto";
   if (raw === "none" || raw === "off" || raw === "disabled") return "none";
   if (raw === "moonshot-kimi" || raw === "moonshot" || raw === "kimi") return "moonshot-kimi";
@@ -20,8 +28,75 @@ function parseMode(): ExternalModelMode {
   return "auto";
 }
 
-function defaultFailoverChain(): string {
-  return (process.env.EXTERNAL_MODEL_FAILOVER_CHAIN ?? "moonshot-kimi,openai").trim();
+function defaultFailoverChain(env: NodeJS.ProcessEnv = process.env): string {
+  return (env.EXTERNAL_MODEL_FAILOVER_CHAIN ?? "moonshot-kimi,openai").trim();
+}
+
+function moonshotBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | null {
+  const apiKey = env.MOONSHOT_API_KEY?.trim();
+  if (!apiKey) return null;
+  return {
+    providerId: "moonshot-kimi",
+    model: (env.MOONSHOT_MODEL ?? "kimi-k2.5").trim(),
+    apiKey,
+    baseUrl: (env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1").trim(),
+  };
+}
+
+function openaiBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | null {
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return null;
+  return {
+    providerId: "openai",
+    model: (env.OPENAI_MODEL ?? "gpt-4o-mini").trim(),
+    apiKey,
+    baseUrl: (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim(),
+  };
+}
+
+function firstEnabledBinding(
+  env: NodeJS.ProcessEnv,
+  tokens: string[],
+): PrimaryExternalModelBinding | null {
+  for (const token of tokens) {
+    const p = instantiateKnownProvider(token);
+    if (!p?.isEnabled()) continue;
+    if (p.id === "moonshot-kimi") {
+      const b = moonshotBinding(env);
+      if (b) return b;
+    }
+    if (p.id === "openai") {
+      const b = openaiBinding(env);
+      if (b) return b;
+    }
+  }
+  return null;
+}
+
+/**
+ * 解析主服务当前使用的外部模型（与 {@link createExternalChatProviderFromEnv} 对齐）。
+ * failover 取链上第一个已配置密钥的 provider。
+ */
+export function resolvePrimaryExternalModelBinding(
+  env: NodeJS.ProcessEnv = process.env,
+): PrimaryExternalModelBinding | null {
+  const mode = parseMode(env);
+  if (mode === "none") return null;
+  if (mode === "moonshot-kimi") return moonshotBinding(env);
+  if (mode === "openai") return openaiBinding(env);
+  if (mode === "failover") {
+    const tokens = defaultFailoverChain(env)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return firstEnabledBinding(env, tokens);
+  }
+  // auto
+  return moonshotBinding(env) ?? openaiBinding(env);
+}
+
+function defaultFailoverChainLegacy(): string {
+  return defaultFailoverChain(process.env);
 }
 
 /**
@@ -57,7 +132,7 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
   }
 
   if (mode === "failover") {
-    const chainStr = defaultFailoverChain();
+    const chainStr = defaultFailoverChainLegacy();
     const tokens = chainStr.split(",").map((s) => s.trim()).filter(Boolean);
     const chain: ExternalChatProvider[] = [];
     for (const token of tokens) {

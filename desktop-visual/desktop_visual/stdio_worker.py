@@ -60,7 +60,10 @@ async def _run() -> dict:
     line = sys.stdin.readline()
     if not line.strip():
         return {"ok": False, "error": "empty stdin"}
-    req = json.loads(line)
+    try:
+        req = json.loads(line)
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"stdin JSON 无效: {exc}"}
 
     action = req.get("action", "run_task")
 
@@ -87,19 +90,19 @@ async def _run() -> dict:
     if stub:
         vlm = StubVLM()
     else:
-        key = os.environ.get("OPENAI_API_KEY", "").strip()
-        if not key:
+        from desktop_visual.vlm.env_config import resolve_vlm_from_request
+
+        cfg = resolve_vlm_from_request(req)
+        if not cfg:
             return {
                 "ok": False,
-                "error": "OPENAI_API_KEY not set (or use stub:true / DESKTOP_VISUAL_STUB=1)",
+                "error": "未配置视觉模型密钥：请设置 MOONSHOT_API_KEY 或 OPENAI_API_KEY，或由服务端桥接下发 vlm（use stub:true / DESKTOP_VISUAL_STUB=1 调试）",
             }
-        base = _normalize_openai_base(os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"))
-        model = (
-            os.environ.get("OPENAI_VISION_MODEL", "").strip()
-            or os.environ.get("OPENAI_MODEL", "").strip()
-            or "gpt-4o-mini"
+        vlm = OpenAICompatibleVLM(
+            base_url=cfg["baseUrl"],
+            api_key=cfg["apiKey"],
+            model=cfg["model"],
         )
-        vlm = OpenAICompatibleVLM(base_url=base, api_key=key, model=model)
 
     loop = VisualDesktopLoop(vlm)
     out = await loop.run(LoopConfig(max_steps=max_steps, task=task, region=region_t))

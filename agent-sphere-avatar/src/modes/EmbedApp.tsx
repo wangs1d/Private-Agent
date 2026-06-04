@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { bindAgentBridge, dispatchEmbodimentCommand } from "../bridge/agent-bridge";
 import { mapUserMessageSent } from "../bridge/ws-agent-mapper";
+import { EntranceAnimation } from "../components/EntranceAnimation";
+import { InnerThought } from "../components/InnerThought";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { EmbedDragSurface } from "../components/EmbedDragSurface";
 import { SphereAgentScene } from "../components/SphereAgentScene";
+import { ScheduleSidebar } from "../components/ScheduleSidebar";
+import { TaskFeed } from "../components/TaskFeed";
+import { TaskNotificationCenter } from "../components/TaskNotificationCenter";
+import { EMBED_SCENE } from "../constants/model-proportions";
 import type { QuickCommand } from "../constants/quick-commands";
 import { isWsOffMode, postToHost, readSphereQuery, SPHERE_MSG } from "../embed-protocol";
 import { useAgentState } from "../hooks/useAgentState";
@@ -11,7 +17,10 @@ import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 import { useEmbedFloatPan } from "../hooks/useEmbedFloatPan";
 import { useEmbedParentBridge } from "../hooks/useEmbedParentBridge";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
+import { useLivingMotion } from "../hooks/useLivingMotion";
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
+import { useTaskEventAccumulator } from "../hooks/useTaskEventAccumulator";
+import { useTaskEventStream } from "../hooks/useTaskEventStream";
 import "./modes.css";
 
 /** 网页聊天侧边嵌入 — 可对话、3D 漫游、接收主 Agent 具身指令 */
@@ -19,6 +28,7 @@ export function EmbedApp() {
   const wsOff = isWsOffMode();
   const { state, apply, setFocused } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const wsUrl = readSphereQuery("ws");
   const sessionId = readSphereQuery("sessionId");
 
@@ -32,6 +42,20 @@ export function EmbedApp() {
 
   useEmbedParentBridge({ apply });
   useEmbedFloatPan(true);
+
+  // 桌面嵌入模式 — 启用 DOM 级自主漫游（替换 useEmbedFloatPan 的纯拖动平移）
+  const livingMotion = useLivingMotion({
+    enabled: true,
+    containerW: EMBED_SCENE.containerW,
+    containerH: EMBED_SCENE.containerH,
+    mood: state.mood,
+    energy: state.energy,
+  });
+
+  // 任务事件流 — 来自 WS message / postMessage / 自定义 DOM 事件
+  const { onTaskEvent } = useTaskEventAccumulator({ apply });
+  useTaskEventStream({ onTaskEvent });
+  const taskEvents = useMemo(() => state.taskEvents ?? [], [state.taskEvents]);
 
   const sendToAgent = useCallback(
     (action: "wake" | "chat" | "focus", text?: string) => {
@@ -96,6 +120,10 @@ export function EmbedApp() {
           speech.start();
           apply({ mood: "listening", energy: 0.68, caption: "请说话…" });
           break;
+        case "schedule":
+          setMenuOpen(false);
+          setScheduleOpen(true);
+          break;
         default:
           break;
       }
@@ -136,22 +164,34 @@ export function EmbedApp() {
 
   return (
     <div className="mode-shell mode-embed">
-      <SphereAgentScene
-        state={state}
-        mode="embed"
-        physics={false}
-        autonomous
-        domDragBridge
-        onEyeFocus={setFocused}
-        onEyeClick={handleEyeClick}
-        onEyeInteractionChange={handleEyeInteraction}
-        onUserTouch={handleUserTouch}
-      />
+      <EntranceAnimation />
+      <div
+        ref={(el) => {
+          livingMotion.setContainerRef(el);
+        }}
+        className="embed-pet-pane"
+      >
+        <SphereAgentScene
+          state={state}
+          mode="embed"
+          physics={false}
+          autonomous
+          domDragBridge
+          onEyeFocus={setFocused}
+          onEyeClick={handleEyeClick}
+          onEyeInteractionChange={handleEyeInteraction}
+          onUserTouch={handleUserTouch}
+        />
+        <InnerThought state={state} />
+      </div>
 
       <EmbedDragSurface
         disabled={menuOpen || speech.listening}
         onTap={handleEyeClick}
       />
+
+      <TaskFeed events={taskEvents} />
+      <TaskNotificationCenter events={taskEvents} />
 
       <p className="mode-embed-hint">拖动旋转 · 轻点打开菜单 · Shift+拖动移动窗口</p>
 
@@ -165,6 +205,11 @@ export function EmbedApp() {
           speech.stop();
           setMenuOpen(false);
         }}
+      />
+
+      <ScheduleSidebar
+        open={scheduleOpen}
+        onClose={() => setScheduleOpen(false)}
       />
     </div>
   );

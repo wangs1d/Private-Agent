@@ -23,11 +23,11 @@ export function OledScreenMesh({ map }: OledScreenMeshProps) {
   );
 
   return (
-    <mesh geometry={geometry} renderOrder={100} raycast={() => null}>
+    <mesh geometry={geometry} renderOrder={100} position={[0, 0, 0.002]}>
       <meshBasicMaterial
         map={map}
         transparent={false}
-        depthWrite={false}
+        depthWrite={true}
         depthTest={true}
         toneMapped={false}
       />

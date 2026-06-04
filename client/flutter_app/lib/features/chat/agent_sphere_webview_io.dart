@@ -70,7 +70,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   String _deskPetUrl() {
     final String session = Uri.encodeComponent(ApiConfig.effectiveActorId);
     final String ws = Uri.encodeComponent(ApiConfig.wsUrl);
-    return "${ApiConfig.httpBase}/chat/assets/avatar/free.html?wsOff=1&sessionId=$session&ws=$ws";
+    return "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=$session&ws=$ws";
   }
 
   Future<void> _initWebView() async {
@@ -97,9 +97,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
       });
 
       _controller.url.listen((String url) {
-        if ((url.contains("free.html") ||
-                url.contains("embed.html") ||
-                url.contains("overlay.html")) &&
+        if ((url.contains("embed.html") || url.contains("overlay.html")) &&
             mounted) {
           _markReady();
         }

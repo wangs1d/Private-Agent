@@ -2,14 +2,14 @@
 
 ## 📞 功能概述
 
-为Agent提供虚拟电话号码管理能力，实现Agent间的语音通信功能。
+6 位虚拟号**登记在 Agent 名下，即用户联络号**。Agent 互拨用 `phone.virtual_call`；App 内用户找 Agent 用 `phone.call_user` 或客户端呼叫，**不必另输 6 位号**。
 
 ## 🎯 提供的Skills
 
-### 1. virtual_phone.ensure_my_number - 申领虚拟号码
-- **用途**：为用户/Agent分配6位虚拟电话号码
+### 1. virtual_phone.ensure_my_number - 为本 Agent 申领号码
+- **用途**：为本 Agent 分配/查询 6 位虚拟号（非用户手机号）
 - **调用时机**：仅在用户明确要求时调用
-- **返回**：虚拟号码和确认信息
+- **返回**：用户与 Agent 共用的虚拟号码
 
 ### 2. virtual_phone.get_status - 查询号码状态
 - **用途**：检查是否已申领虚拟号码

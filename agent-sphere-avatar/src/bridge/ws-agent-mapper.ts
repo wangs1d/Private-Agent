@@ -1,4 +1,4 @@
-import type { AgentMood, AgentState } from "../types/agent";
+import type { AgentMood, AgentState, TaskEvent } from "../types/agent";
 
 export interface WsEnvelope {
   type: string;
@@ -8,7 +8,7 @@ export interface WsEnvelope {
 export type AgentWsUpdate = Partial<
   Pick<
     AgentState,
-    "mood" | "caption" | "energy" | "phase" | "subAgentType" | "subAgentDisplayName" | "source"
+    | "mood" | "caption" | "energy" | "phase" | "subAgentType" | "subAgentDisplayName" | "source" | "taskEvents"
   >
 >;
 
@@ -84,11 +84,33 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
       return { mood: "thinking", energy: 0.75, caption: `▶ ${title}`, phase: "agent_task", source: "agent_task" };
     }
     case "agent.phone.incoming": {
-      return { mood: "alert", energy: 0.9, caption: "📞 来电", source: "phone" };
+      const dir = String(p.direction ?? "");
+      const caption =
+        dir === "agent_to_user"
+          ? "📞 你的 Agent"
+          : p.userActionRequired === true || dir === "agent_to_agent"
+            ? "📞 其他 Agent"
+            : "📞 来电";
+      return { mood: "alert", energy: 0.9, caption, source: "phone" };
     }
     case "agent.peer_message": {
       const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
       return { mood: "alert", energy: 0.82, caption: `💬 ${preview}`, source: "peer" };
+    }
+    case "task.event":
+    case "agent.task_event": {
+      const eventType = (p.eventType ?? p.type ?? "info") as TaskEvent["type"];
+      const title = String(p.title ?? p.message ?? p.text ?? "任务更新").trim();
+      const detail = p.detail ? String(p.detail).trim() : undefined;
+      const te: TaskEvent = {
+        id: String(p.id ?? `task-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+        type: ["progress", "success", "warning", "error", "info"].includes(eventType) ? eventType : "info",
+        title,
+        detail,
+        timestamp: new Date(),
+        source: String(p.source ?? "task"),
+      };
+      return { taskEvents: [te] };
     }
     default:
       return null;

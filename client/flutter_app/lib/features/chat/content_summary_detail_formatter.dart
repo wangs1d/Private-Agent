@@ -484,7 +484,7 @@ class MarkdownTableWidget extends StatelessWidget {
       ...bodyRows,
     ];
 
-    final int columnCount = allRows.fold<int>(
+    int columnCount = allRows.fold<int>(
       0,
       (int max, List<MarkdownTableCellData> row) {
         int count = 0;
@@ -494,6 +494,8 @@ class MarkdownTableWidget extends StatelessWidget {
         return count > max ? count : max;
       },
     );
+    // Cap columnCount to prevent unbounded layout overflow from malformed markdown tables.
+    columnCount = columnCount.clamp(0, 20);
 
     final List<List<bool>> occupied = List<List<bool>>.generate(
       allRows.length + 4,

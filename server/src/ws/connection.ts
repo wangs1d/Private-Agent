@@ -14,6 +14,10 @@ import type { RealFundsWalletService } from "../services/real-funds-wallet-servi
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import type {
+  IncomingPhoneUserAction,
+  VirtualPhoneIncomingCoordinator,
+} from "../services/virtual-phone-incoming-coordinator.js";
 import {
   handleAgentEmbodimentInteractEvent,
 } from "./handlers/agent-embodiment-interact.js";
@@ -99,6 +103,7 @@ export type WsRouteDeps = {
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   virtualPhoneService: VirtualPhoneService;
+  virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -119,6 +124,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     virtualPhoneService,
+    virtualPhoneIncomingCoordinator,
   } = deps;
 
   const broadcastPartitionPresence = (partitionId: string): void => {
@@ -258,6 +264,54 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 status: "ringing",
                 toActorId: boundActorId,
                 message: "正在呼叫你的 Agent…",
+              },
+            }),
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.VirtualPhoneIncomingResponse) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const callPl = event.payload as Record<string, unknown>;
+          const callId = String(callPl.callId ?? "").trim();
+          const actionRaw = String(callPl.action ?? "").trim().toLowerCase();
+          const allowed: IncomingPhoneUserAction[] = [
+            "accept",
+            "decline",
+            "agent_takeover",
+          ];
+          if (!callId) {
+            sendUnifiedError("BAD_PHONE_CALL", "缺少 callId");
+            return;
+          }
+          if (!allowed.includes(actionRaw as IncomingPhoneUserAction)) {
+            sendUnifiedError(
+              "BAD_PHONE_CALL",
+              "action 须为 accept | decline | agent_takeover",
+            );
+            return;
+          }
+          const action = actionRaw as IncomingPhoneUserAction;
+          const result = await virtualPhoneIncomingCoordinator.handleUserResponse(
+            boundActorId,
+            callId,
+            action,
+          );
+          if (!result.ok) {
+            sendUnifiedError("PHONE_CALL_FAILED", result.error ?? "处理来电失败");
+            return;
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.VirtualPhoneCallStatus,
+              payload: {
+                ok: true,
+                callId,
+                status: action === "accept" ? "answered_by_user" : "delegation_started",
+                action,
               },
             }),
           );

@@ -12,13 +12,27 @@ class DesktopAction:
     payload: dict[str, Any]
 
 
+def _extract_json_object(raw: str) -> str:
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        return raw[start : end + 1]
+    return raw
+
+
 def parse_action_json(text: str) -> DesktopAction:
     """Parse a single action JSON object from model output."""
     raw = text.strip()
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
     if fence:
         raw = fence.group(1).strip()
-    obj = json.loads(raw)
+    raw = _extract_json_object(raw)
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        # 常见：模型在 JSON 外多输出说明文字，或键名未加引号
+        repaired = re.sub(r"(\{|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1 "\2":', raw)
+        obj = json.loads(repaired)
     if not isinstance(obj, dict):
         raise ValueError("action must be a JSON object")
     action = str(obj.get("action", "")).strip().lower()

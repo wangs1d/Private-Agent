@@ -13,6 +13,10 @@ const GLASS_RENDER_ORDER = 2;
 interface DG2RobotModelProps {
   energy?: number;
   focused?: boolean;
+  /** 待机呼吸/微摆（桌宠关闭以保持画面稳定） */
+  idleMotion?: boolean;
+  /** 无 Environment 贴图（桌宠本地灯光） */
+  standaloneLighting?: boolean;
 }
 
 function isGlassMaterial(name: string): boolean {
@@ -20,7 +24,12 @@ function isGlassMaterial(name: string): boolean {
 }
 
 /** DG2.obj 一比一还原 — 加载 CAD 网格并套用金属/玻璃材质 */
-export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelProps) {
+export function DG2RobotModel({
+  energy = 0.55,
+  focused = false,
+  idleMotion = true,
+  standaloneLighting = false,
+}: DG2RobotModelProps) {
   const oledMap = useOledFaceTexture();
   const groupRef = useRef<THREE.Group>(null);
   const shellMatsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
@@ -37,7 +46,7 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
       roughness: MODEL.shellRoughness,
       clearcoat: MODEL.shellClearcoat,
       clearcoatRoughness: 0.32,
-      envMapIntensity: 0.85,
+      envMapIntensity: standaloneLighting ? 0.25 : 0.85,
     });
     const glass = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(MODEL.glassColor),
@@ -46,7 +55,7 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
       clearcoat: 1,
       clearcoatRoughness: 0.02,
       reflectivity: 0.95,
-      envMapIntensity: 1.4,
+      envMapIntensity: standaloneLighting ? 0.35 : 1.4,
       transparent: true,
       opacity: 0.82,
       depthWrite: false,
@@ -92,8 +101,25 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
   }, [obj, shellMaterial, glassMaterial]);
 
   useEffect(() => {
+    const gMat = glassMatRef.current;
     for (const mesh of glassMeshesRef.current) {
-      mesh.visible = !oledMap;
+      mesh.visible = true;
+      if (!gMat) continue;
+      if (oledMap) {
+        // OLED 激活时保留黑色曲屏玻璃框，表情层叠在上方（OledScreenMesh）
+        gMat.color.set("#030508");
+        gMat.opacity = 0.98;
+        gMat.transparent = true;
+        gMat.metalness = 0.35;
+        gMat.roughness = 0.12;
+        gMat.depthWrite = true;
+      } else {
+        gMat.color.set(MODEL.glassColor);
+        gMat.opacity = 0.82;
+        gMat.transparent = true;
+        gMat.metalness = MODEL.glassMetalness;
+        gMat.roughness = MODEL.glassRoughness;
+      }
     }
   }, [oledMap]);
 
@@ -112,10 +138,13 @@ export function DG2RobotModel({ energy = 0.55, focused = false }: DG2RobotModelP
       gMat.emissiveIntensity = focused ? 0.08 + pulse * 0.06 : 0;
     }
 
-    if (groupRef.current) {
+    if (groupRef.current && idleMotion) {
       const breathe = Math.sin(t * 1.45) * 0.018 * (0.4 + energy);
       groupRef.current.rotation.y = Math.sin(t * 0.1) * 0.015 + breathe * 0.3;
       groupRef.current.position.y = Math.sin(t * 1.35) * 0.012 * (0.35 + energy * 0.5);
+    } else if (groupRef.current) {
+      groupRef.current.rotation.y = 0;
+      groupRef.current.position.y = 0;
     }
   });
 

@@ -45,15 +45,70 @@ class SphereOverlayLauncher {
   static bool get isDeskPetActive =>
       electronActive.value || isInProcessOverlayActive;
 
-  /// 是否已安装 Electron 且 agent-sphere-avatar 已构建。
-  static bool get isElectronAvailable {
-    if (kIsWeb || !Platform.isWindows) return false;
+  /// 是否已安装 Electron 且 overlay 为 Electron 可用的相对路径构建。
+  static bool get isElectronAvailable => electronUnavailableReason == null;
+
+  /// 桌宠不可用时的人类可读原因（用于 SnackBar）。
+  static String? get electronUnavailableReason {
+    if (kIsWeb || !Platform.isWindows) {
+      return "当前平台不支持 Electron 桌宠。";
+    }
+
     final Directory? overlayDir = _findSphereOverlayDir();
-    if (overlayDir == null) return false;
+    if (overlayDir == null) {
+      return "未找到 sphere-overlay 目录。\n"
+          "请从仓库根目录启动客户端，或设置环境变量 PAI_REPO_ROOT 指向项目根目录。";
+    }
+
+    if (!File("${overlayDir.path}/package.json").existsSync()) {
+      return "sphere-overlay 不完整：缺少 package.json。";
+    }
+
     if (!Directory("${overlayDir.path}/node_modules").existsSync()) {
+      return "请先安装桌宠依赖：\ncd sphere-overlay && npm install";
+    }
+
+    final String? overlayHtml = _findAvatarOverlayHtml(overlayDir);
+    if (overlayHtml == null) {
+      return "缺少 overlay.html。\n请执行：cd agent-sphere-avatar && npm run build";
+    }
+
+    if (!_isElectronCompatibleOverlay(File(overlayHtml))) {
+      return "overlay 构建路径不正确（当前为服务端 /chat 路径）。\n"
+          "请重新构建桌宠资源：\ncd agent-sphere-avatar && npm run build\n"
+          "（不要用 npm run build:chat）";
+    }
+
+    final File electronExe = File(
+      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
+    );
+    final File electronBin = File(
+      "${overlayDir.path}/node_modules/.bin/electron.cmd",
+    );
+    if (!electronExe.existsSync() && !electronBin.existsSync()) {
+      return "未找到 Electron 可执行文件。\n请执行：cd sphere-overlay && npm install";
+    }
+
+    return null;
+  }
+
+  /// Electron loadFile 需要 Vite base=./ 的构建（src="./assets/..."）。
+  static bool _isElectronCompatibleOverlay(File html) {
+    try {
+      final String content = html.readAsStringSync();
+      if (content.contains('src="./assets/') ||
+          content.contains("src='./assets/")) {
+        return true;
+      }
+      if (content.contains('src="/chat/assets/') ||
+          content.contains("src='/chat/assets/")) {
+        return false;
+      }
+      return content.contains('src="./') || content.contains("src='./");
+    } catch (e) {
+      debugPrint("[SphereOverlay] overlay.html read failed: $e");
       return false;
     }
-    return _findAvatarOverlayHtml(overlayDir) != null;
   }
 
   static String? _findAvatarOverlayHtml(Directory overlayDir) {
@@ -62,6 +117,7 @@ class SphereOverlayLauncher {
     );
     if (fromRepo.existsSync()) return fromRepo.path;
 
+    // 仅作兜底检测；build:chat 产物含 /chat 绝对路径，Electron loadFile 无法加载。
     final File fromServerAssets = File(
       "${overlayDir.parent.path}/server/web/chat/assets/avatar/overlay.html",
     );
@@ -82,6 +138,7 @@ class SphereOverlayLauncher {
     env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
     env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
     env["PAI_MOOD_FILE"] = _electronMoodFilePath();
+    env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
     final File electronBin = File(
       "${overlayDir.path}/node_modules/.bin/electron.cmd",
@@ -196,8 +253,22 @@ class SphereOverlayLauncher {
   /// AppBar 手动启动 Electron 独立桌宠（会先关闭 Win32 原生窗）。
   static Future<bool> launchElectron() async {
     if (kIsWeb || !Platform.isWindows) return false;
+
+    if (electronActive.value || _created) {
+      final bool shown = await _sendElectronCommand("show");
+      if (shown) {
+        _created = true;
+        _visible = true;
+        electronActive.value = true;
+        useEmbeddedFallback.value = false;
+        return true;
+      }
+      debugPrint("[SphereOverlay] show command failed, relaunching Electron…");
+    }
+
     await destroy();
     electronActive.value = false;
+    _created = false;
     return _launchElectronOverlay();
   }
 
@@ -257,6 +328,9 @@ class SphereOverlayLauncher {
       env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
       env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
       env["PAI_MOOD_FILE"] = _electronMoodFilePath();
+      env["PAI_REPO_ROOT"] = overlayDir.parent.path;
+
+      debugPrint("[SphereOverlay] launching Electron from ${overlayDir.path}");
 
       final File electronBin = File(
         "${overlayDir.path}/node_modules/.bin/electron.cmd",
@@ -268,7 +342,7 @@ class SphereOverlayLauncher {
       if (electronExe.existsSync()) {
         await Process.start(
           electronExe.path,
-          <String>["."],
+          <String>[".", "${_electronCommandArgPrefix}show"],
           workingDirectory: overlayDir.path,
           environment: env,
           mode: ProcessStartMode.detached,
@@ -276,7 +350,7 @@ class SphereOverlayLauncher {
       } else if (electronBin.existsSync()) {
         await Process.start(
           "cmd",
-          <String>["/c", electronBin.path, "."],
+          <String>["/c", electronBin.path, ".", "${_electronCommandArgPrefix}show"],
           workingDirectory: overlayDir.path,
           environment: env,
           mode: ProcessStartMode.detached,
@@ -284,7 +358,7 @@ class SphereOverlayLauncher {
       } else {
         await Process.start(
           "cmd",
-          <String>["/c", "npm", "start"],
+          <String>["/c", "npm", "start", "--", "${_electronCommandArgPrefix}show"],
           workingDirectory: overlayDir.path,
           environment: env,
           mode: ProcessStartMode.detached,
@@ -306,6 +380,12 @@ class SphereOverlayLauncher {
   }
 
   static Directory? _findSphereOverlayDir() {
+    final String? repoRoot = Platform.environment["PAI_REPO_ROOT"]?.trim();
+    if (repoRoot != null && repoRoot.isNotEmpty) {
+      final Directory fromEnv = Directory("$repoRoot/sphere-overlay");
+      if (fromEnv.existsSync()) return fromEnv;
+    }
+
     final List<String> seeds = <String>[
       Directory.current.path,
       File(Platform.resolvedExecutable).parent.path,
@@ -313,7 +393,7 @@ class SphereOverlayLauncher {
 
     for (final String seed in seeds) {
       Directory dir = Directory(seed);
-      for (int i = 0; i < 10; i++) {
+      for (int i = 0; i < 15; i++) {
         final Directory candidate = Directory("${dir.path}/sphere-overlay");
         if (candidate.existsSync()) {
           return candidate;

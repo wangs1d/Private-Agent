@@ -9,7 +9,7 @@
 agent-sphere-avatar/          ← 复制此目录
 ├── src/                      全部源码（组件、hooks、协议）
 ├── public/models/            3D 模型资源
-├── *.html                    4 个入口（demo / embed / overlay / free）
+├── *.html                    3 个入口（demo / embed / overlay）
 ├── scripts/                  构建与部署脚本
 ├── PORTABLE.md               本文档
 └── dist/                     npm run build 产物（可单独托管）
@@ -85,10 +85,8 @@ host.command({ action: "roam", strength: 1.1 });
 
 | 文件 | 场景 | WebSocket |
 |------|------|-----------|
-| `index.html` | 独立演示 / 开发 | iframe 内直连（可传 `?ws=`） |
 | `embed.html` | 网页侧边栏、聊天浮层 | 推荐 `?wsOff=1`，由宿主转发 |
 | `overlay.html` | Electron 桌宠、全屏透明窗 | 直连 WS（传 `?ws=&sessionId=`） |
-| `free.html` | Flutter Web 全屏漫游 | 推荐 `?wsOff=1` |
 
 ## postMessage 协议（单一事实来源）
 
@@ -173,7 +171,7 @@ npm run build:chat    # base=/chat/assets/avatar/ + 复制到 server/web/chat/as
 | `src/bridge/ws-agent-mapper.ts` | WS 事件 → AgentState（可替换） |
 | `src/components/` | 3D 场景与模型 |
 | `src/hooks/` | 动画、WS、嵌入桥接 |
-| `src/modes/` | embed / overlay / free 壳组件 |
+| `src/modes/` | embed / overlay 壳组件 |
 
 ## 常见问题
 

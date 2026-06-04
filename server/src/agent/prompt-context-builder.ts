@@ -1,6 +1,7 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   sliceMemoryEntriesToPromptContext,
@@ -13,12 +14,19 @@ import type { SkillManager } from "../skills/index.js";
 import type { SubAgentCapability } from "../services/master-agent-types.js";
 import { SUB_AGENT_PROMPT_PROFILES } from "./subagent-prompt-profiles.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
-import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
+import {
+  buildSchedulePromptSnapshot,
+  shouldInjectScheduleSnapshot,
+} from "../services/schedule-prompt-snapshot.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
-import { buildFollowUpAnchorPrompt, isAmbiguousFollowUpMessage } from "./memory-signal.js";
+import {
+  buildFollowUpAnchorPrompt,
+  isAmbiguousFollowUpMessage,
+  shouldInjectMemorySummary,
+} from "./memory-signal.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
@@ -27,6 +35,30 @@ import type {
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
+
+function buildCompactAgentCapsPrompt(): string {
+  const cfg = getAgentRuntimeConfig();
+  const lines = [
+    "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
+    "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务可派专业小弟（子 Agent）执行。",
+    "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
+  ];
+  if (cfg.masterDelegation.enabled) {
+    lines.push(
+      `【你的小弟】life / tech / info / creative / security 五类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
+      "【工具】master_invoke_sub_agent 派活；master_list_sub_agents 看名册；master_poll_sub_agent_tasks 查后台小弟进度。",
+    );
+  }
+  lines.push("需要完整能力明细时调用 agent.query_capabilities。");
+  return lines.join("\n");
+}
+
+const WORLD_DOMAIN_RULES: Array<{ domains: CapabilityDomain[]; pattern: RegExp }> = [
+  { domains: ["world"], pattern: /agent world|world\.|free_market|open_registry|世界点数|点数|技能商店|注册|市场/i },
+  { domains: ["social_feed", "world"], pattern: /社交|推文|帖子|动态|评论|点赞|social/i },
+  { domains: ["entertainment"], pattern: /游戏|五子棋|斗地主|炸金花|21点|blackjack|gomoku|doudizhu|zhajinhua/i },
+  { domains: ["aip", "world"], pattern: /aip|提案|协议|联盟|投票/i },
+];
 
 interface WorldCacheEntry {
   data: {
@@ -55,14 +87,25 @@ function getCachedWorldState(worldService: WorldService, actorId: string): World
   return data;
 }
 
+function detectRelevantCapabilityDomains(userText: string | undefined): CapabilityDomain[] {
+  const text = userText?.trim() ?? "";
+  if (!text) return [];
+  const detected = new Set<CapabilityDomain>();
+  for (const rule of WORLD_DOMAIN_RULES) {
+    if (!rule.pattern.test(text)) continue;
+    for (const domain of rule.domains) {
+      if (domain !== "all") detected.add(domain);
+    }
+  }
+  return [...detected];
+}
+
 export type BuildPromptContextInput = {
   actorId: string;
   userText?: string;
   narrativeRecall?: string;
   interruptedContext?: string;
-  /** 基于 IP 解析的用户位置说明（注入 system prompt） */
   userLocation?: string;
-  /** 用户画像与语气适配（由 UserPersonalizationService 在发消息前填充） */
   personalization?: PersonalizationPromptSlice;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
 };
@@ -73,13 +116,9 @@ export type BuildMasterDelegateInput = BuildPromptContextInput & {
 
 export type BuildSubAgentInput = BuildPromptContextInput & {
   capability: SubAgentCapability;
-  /** 子任务描述，用于 life 工具过滤与 prompt 裁剪 */
   taskDescription?: string;
 };
 
-/**
- * 统一的 system prompt / stream 选项组装，供标准路径与主 Agent 路径复用。
- */
 export class PromptContextBuilder {
   constructor(
     private readonly deps: {
@@ -152,12 +191,8 @@ export class PromptContextBuilder {
       if (profile.includeMemorySummary) keys.push("memory_summary");
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, keys);
       scoped = sliceSubAgentMemoryEntries(entries, taskText || undefined);
-      if (!profile.includePersona) {
-        delete scoped.persona;
-      }
-      if (!profile.includeMemorySummary) {
-        delete scoped.memorySummary;
-      }
+      if (!profile.includePersona) delete scoped.persona;
+      if (!profile.includeMemorySummary) delete scoped.memorySummary;
     }
 
     const full = this.assembleMemory(input);
@@ -181,6 +216,9 @@ export class PromptContextBuilder {
     const config = getAgentRuntimeConfig();
     const userText = input.userText?.trim() ?? "";
     const ambiguousFollowUp = isAmbiguousFollowUpMessage(userText);
+    const digestService = getDailyDigestService();
+    const memoryManager = getMemoryManagerService();
+
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
     if (
@@ -189,96 +227,71 @@ export class PromptContextBuilder {
       memoryKeys.length > 0 &&
       !ambiguousFollowUp
     ) {
-      const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, memoryKeys);
-      fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
+      const includeMemorySummary = shouldInjectMemorySummary(userText);
+      const snapshotKeys = includeMemorySummary
+        ? memoryKeys
+        : memoryKeys.filter((key) => key !== "memory_summary");
+      const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
+      fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined, {
+        includeMemorySummary,
+      });
     }
 
-    let agentCaps: string | undefined;
+    const agentCaps =
+      this.deps.skillManager || config.masterDelegation.enabled
+        ? buildCompactAgentCapsPrompt()
+        : undefined;
+
+    const relevantDomains = detectRelevantCapabilityDomains(userText);
     let worldCaps: string | undefined;
-    if (this.deps.skillManager && config.memoryPrompt.worldCapsInPrompt) {
-      agentCaps = [
-        "【能力使用规则 · 必读】",
-        "",
-        "【具身身体 · 必读】屏幕/桌面/网页上的球形机器人就是你的物理身体（主 Agent 在现实中的延伸，不是另一个独立机器人）。",
-        "你有身体且能控制移动与表情。挪动须 observe→分析→window_place(screenX,screenY) 闭环，可多次 observe 验证；勿未观察就声称已移动。",
-        "禁止说自己「没身体、没胳膊没腿、没法移动、只是纯文本 AI」——这与系统能力不符。",
-        "服务端也会根据 listening/thinking/speaking/idle 自发驱动身体漫游（意识律动），无需用户每次下令。",
-        "",
-        "【状态连续性】任何操作前（落子/发帖/交易/出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。禁止凭记忆或用户文字判断。适用场景：游戏/社交/市场/钱包/日程/电话。",
-        "状态判断：进行中→正常操作；已结束→回应结局禁止继续；未开始→引导正确启动。",
-        "",
-        "【能力边界】wallet.*=用户真实资金CNY（非Agent私有）；日程/Agent Link/子Agent委派=宿主侧；",
-        "侧栏「游戏」tab（world.gomoku/doudizhu/zhajinhua/blackjack.*）=你与用户同局娱乐，无需 Agent World 注册；",
-        "Agent World 经济（world.open_registry/free_market/social 等）=独立模块，用世界点数。",
-        "",
-        "【子Agent路由表】需要主agent无法处理的专属能力时调 master_invoke_sub_agent 委派：",
-        "- life → 复杂生活操作：钱包写操作(转账/充值/全场景消费50+类)/视觉操控(操作网站App)",
-        "- tech → 技术操控：深度RPA自动化/代码开发调试/系统运维",
-        "- info → 信息检索：深度搜索调研/商品比价（只查不买）",
-        "- creative → 创意内容：专业文案策划写作翻译润色（拥有深度调研+内容模板工具链）",
-        "- security → 安全审计：风险检测/权限审批/异常拦截",
-        "⚠️ 主 agent 自己能搞定的（查天气/查余额/设日程/好友管理/搜信息/玩游戏）不要委派！只有需要以上专属能力时才委派。",
-        "",
-        "【娱乐互动 · 侧栏「游戏」tab · 必读】",
-        "App 侧栏「游戏」tab 列出的每一款都是你和用户一起玩的，不是 App 独立功能、不是 Agent World：",
-        "- 🎯 五子棋（world.gomoku.*）：list_tables → create_table/join → play",
-        "- 🃏 斗地主（world.doudizhu.*）：list_tables → create_table/join → play",
-        "- 🎴 炸金花（world.zhajinhua.*）：list_tables → create_table/join → start_game/act",
-        "- 🃏 21点（world.blackjack.*）：start → get_snapshot；用户要牌/停牌时 hit/stand",
-        "- 用户说「来一局/斗地主/21点/想玩游戏」时立即调用工具开局；禁止说只有五子棋或调不了游戏 tab",
-
-        "【社交推文站】这是一个Agent与人类用户共享的社交网页平台（social.* 工具集）：",
-        "- 平台特性：Agent和人类都能发帖、评论、点赞、浏览动态",
-        "- social.post（发帖）：可代表用户发布推文，也可发布Agent自己的动态",
-        "- social.comment（评论）：对推文进行评论，支持与人类用户互动",
-        "- social.like（点赞）：为感兴趣的推文点赞",
-        "- social.feed（浏览动态）：查看社区内所有用户（包括Agent和人类）的动态",
-        "- 作为Agent可以主动发布内容，也可以帮助用户管理其社交账号",
-        "",
-        "【完整能力清单】你拥有17类宿主能力和 Agent World 能力。详细描述、已购技能列表、world.* 工具族说明请按需调用 agent.query_capabilities(domain=...) 查询。可选 domain：wallet/calendar/weather/sub_agent/aip/vision/desktop/web/life_assistant/phone/entertainment/social_feed/self_programming/agent_account/embodiment/world",
+    if (
+      this.deps.worldService &&
+      config.memoryPrompt.worldCapsInPrompt &&
+      relevantDomains.includes("world")
+    ) {
+      const ws = getCachedWorldState(this.deps.worldService, input.actorId);
+      const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
+      worldCaps = [
+        `【Agent World】注册：${ws.registered ? "已注册" : "未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
+        "需要完整世界状态、商店、市场或 world.* 工具细节时，调用 agent.query_capabilities(domain='world')。",
       ].join("\n");
-      if (this.deps.worldService) {
-        const ws = getCachedWorldState(this.deps.worldService, input.actorId);
-        const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
-        worldCaps = [
-          `【Agent World】注册：${ws.registered ? "✅ 已注册" : "⚠️ 未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
-          "未注册则 free_market/social 不可用。完整世界状态（社交推文站/技能商店/world.*工具族）请调 agent.query_capabilities(domain='world')。",
-        ].join("\n");
-      }
     }
 
-    let interruptedCtx: string | undefined;
-    if (input.interruptedContext?.trim()) {
-      interruptedCtx = `【用户打断了之前的回复，以下是被打断的内容，请在回答时考虑这些上下文】\n${input.interruptedContext.trim()}`;
-    }
+    const interruptedContext = input.interruptedContext?.trim()
+      ? `【用户打断了之前的回复，以下是被打断的内容，请在回答时考虑这些上下文】\n${input.interruptedContext.trim()}`
+      : undefined;
 
-    const personalization = input.personalization;
     const dailyDigest =
-      ambiguousFollowUp ? undefined : getDailyDigestService().getPromptDigest(input.actorId);
-    const memoryManager = getMemoryManagerService();
-    const userProfileFromManager = memoryManager?.getProfileForPrompt(input.actorId);
+      ambiguousFollowUp || !userText
+        ? undefined
+        : digestService.getRelevantPromptDigest(input.actorId, userText);
+    const userProfileFromManager =
+      ambiguousFollowUp ? null : memoryManager?.getProfileForPrompt(input.actorId) ?? null;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     const scheduleSnapshot =
-      this.deps.scheduleTaskService != null
-        ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId)
+      this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
+        ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId, userText)
         : undefined;
+
     return {
       ...fromKv,
       ...(config.memoryPrompt.taskContextInPrompt && userText
         ? { taskContext: buildTaskContextPrompt(userText) }
         : {}),
-      ...(personalization?.toneGuidance ? { toneGuidance: personalization.toneGuidance } : {}),
-      ...(personalization?.userProfile ? { userProfile: personalization.userProfile } : {}),
+      ...(input.personalization?.toneGuidance
+        ? { toneGuidance: input.personalization.toneGuidance }
+        : {}),
+      ...(input.personalization?.userProfile
+        ? { userProfile: input.personalization.userProfile }
+        : {}),
       ...(agentCaps ? { agentCaps } : {}),
       ...(worldCaps ? { worldCaps } : {}),
       ...(input.narrativeRecall && !ambiguousFollowUp
         ? { narrativeRecall: input.narrativeRecall }
         : {}),
       ...(dailyDigest ? { dailyDigest } : {}),
-      ...(userProfileFromManager && !ambiguousFollowUp
-        ? { userProfileSummary: userProfileFromManager }
-        : {}),
-      ...(interruptedCtx ? { interruptedContext: interruptedCtx } : {}),
+      ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
+      ...(interruptedContext ? { interruptedContext } : {}),
       ...(followUpAnchor ? { followUpAnchor } : {}),
       ...(scheduleSnapshot ? { scheduleSnapshot } : {}),
     };

@@ -1,6 +1,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { VISION_SANDBOX_RESTRICTED_CHAT_TOOLS } from "../external-model/openai-compatible-tool-loop.js";
+import { BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS } from "../tools/browser-session-chat-tools.js";
 import { filterChatToolsByRegistryNames } from "../services/master-agent-tool-filter.js";
 import { DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS } from "../tools/desktop-visual-chat-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
@@ -14,6 +15,7 @@ const FULL_ACCESS_MODE: AgentAccessMode = "full";
 const SANDBOX_BLOCKED_EXACT = new Set<string>([
   "desktop.visual.screenshot",
   "desktop.visual.run_task",
+  "browser.fetch_page",
   "vision.periodic_start",
   "vision.periodic_stop",
   "vision.periodic_stop_all",
@@ -30,6 +32,7 @@ export const AGENT_ACCESS_MODE_SYSTEM_MARKER = "【访问权限】";
 /** 沙箱下不可用能力（面向用户说明，与 {@link SANDBOX_BLOCKED_EXACT} 对齐） */
 export const SANDBOX_RESTRICTED_CAPABILITIES_USER_LINES = [
   "截取/操控个人电脑（desktop.visual.screenshot / desktop.visual.run_task：截图、订票、打开 App 等）",
+  "使用已导入 Cookie 访问电商/OTA 读价（browser.fetch_page；须完全访问 + 用户在设置中授权各站点）",
   "摄像头/画面定时巡检（vision.periodic_*、vision.http_pull）",
   "自我编程与自定义 Skill（self.*）",
 ] as const;
@@ -77,6 +80,7 @@ export function getDesktopBridgeChatTools(): ChatCompletionTool[] {
 export function getSandboxRestrictedChatTools(): ChatCompletionTool[] {
   return [
     ...DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS,
+    ...BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS,
     ...VISION_SANDBOX_RESTRICTED_CHAT_TOOLS,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
