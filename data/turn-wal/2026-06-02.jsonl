@@ -1,6 +1,0 @@
-{"ts":"2026-06-02T09:51:55.020Z","actorId":"probe-1","userText":"??","assistantText":"ok","highSignal":false,"planExecuteUsed":false}
-{"ts":"2026-06-02T09:51:55.029Z","actorId":"probe-1","userText":"???????????????????","assistantText":"ok","highSignal":false,"planExecuteUsed":false}
-{"ts":"2026-06-02T09:54:45.562Z","actorId":"actor-1","userText":"hello","assistantText":"OK","highSignal":false,"planExecuteUsed":false}
-{"ts":"2026-06-02T09:54:45.996Z","actorId":"actor-1","userText":"you previously said I like aerospace, can you remember that?","assistantText":"OK","highSignal":true,"planExecuteUsed":false}
-{"ts":"2026-06-02T09:56:46.450Z","actorId":"actor-1","userText":"hello","assistantText":"OK","highSignal":false,"planExecuteUsed":false}
-{"ts":"2026-06-02T09:56:46.885Z","actorId":"actor-1","userText":"you previously said I like aerospace, can you remember that?","assistantText":"OK","highSignal":true,"planExecuteUsed":false}

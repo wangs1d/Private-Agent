@@ -9,9 +9,28 @@ lerna-debug.log*
 
 node_modules
 dist
-server/data/browser-sessions/
 dist-ssr
 *.local
+
+# Build outputs
+windows_dist/
+client/web/dist/
+server/web/
+agent-sphere-avatar/dist/
+agent-world/dist/
+
+# Data directories (sensitive user data)
+server/data/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment files (sensitive secrets)
+.env
+.env.local
+.env.*.local
+!*.env.example
 
 # Uploaded downloads
 **/downloads/
@@ -26,3 +45,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Debug and temporary files
+.dbg/
+*.tmp
+*.temp
+.cache/
