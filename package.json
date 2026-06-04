@@ -27,13 +27,16 @@
     "@supabase/supabase-js": "^2.106.2",
     "better-sqlite3": "^12.10.0",
     "compromise": "^14.15.0",
-    "gcp-metadata": "^8.1.2",
     "groq-sdk": "^1.2.0",
     "natural": "^8.1.1",
     "ollama": "^0.6.3"
   },
   "overrides": {
-    "gcp-metadata": "^8.1.2"
+    "gcp-metadata": "^8.1.2",
+    "uuid": "^11.1.1",
+    "mem0ai": {
+      "uuid": "^11.1.1"
+    }
   },
   "devDependencies": {
     "@types/node": "^22.15.30"
