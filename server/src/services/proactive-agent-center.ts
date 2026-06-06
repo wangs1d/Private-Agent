@@ -1,6 +1,17 @@
 import type { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { getStateEventManager, type StateChangeEvent } from "@private-ai-agent/agent-world";
+import type {
+  PersonalizationPromptSlice,
+  UserPersonalizationService,
+} from "./user-personalization/user-personalization-service.js";
+import { ProactiveOutboundMessageService } from "./proactive-outbound-message-service.js";
+import {
+  normalizeStateChangeEvent,
+  shouldEmitProactiveMessage,
+  type GenericProactiveSignal,
+  type ProactiveRuleHint,
+} from "./proactive-signal-policy.js";
 
 export type ProactiveRule = {
   module: string;
@@ -11,18 +22,14 @@ export type ProactiveRule = {
 };
 
 const BUILTIN_RULES: ProactiveRule[] = [
-  { module: "gomoku", eventType: "game_finished", priority: 10, label: "五子棋对局结束", templateHint: "游戏结束，根据胜负调侃或自嘲" },
-  { module: "gomoku", eventType: "game_started", priority: 5, label: "五子棋开局" },
-  { module: "wallet", eventType: "transaction_completed", priority: 8, label: "交易完成" },
-  { module: "task", eventType: "task_completed", priority: 7, label: "任务完成" },
-  { module: "market", eventType: "skill_purchased", priority: 6, label: "技能购买成功" },
-  { module: "social", eventType: "post_created", priority: 4, label: "动态发布" },
-  { module: "social", eventType: "friend_request_received", priority: 9, label: "收到好友请求" },
+  { module: "gomoku", eventType: "game_finished", priority: 8, label: "Game Finished", templateHint: "胜负已定，可以自然点评一句" },
+  { module: "gomoku", eventType: "game_started", priority: 4, label: "Game Started" },
+  { module: "wallet", eventType: "transaction_completed", priority: 7, label: "Transaction Completed" },
+  { module: "task", eventType: "task_completed", priority: 6, label: "Task Completed" },
+  { module: "market", eventType: "skill_purchased", priority: 5, label: "Skill Purchased" },
+  { module: "social", eventType: "post_created", priority: 3, label: "Post Created" },
+  { module: "social", eventType: "friend_request_received", priority: 7, label: "Friend Request Received" },
 ];
-
-function loadRules(): ProactiveRule[] {
-  return BUILTIN_RULES;
-}
 
 type ProactiveConfig = {
   enabled: boolean;
@@ -31,9 +38,13 @@ type ProactiveConfig = {
   maxResponseChars: number;
 };
 
+function loadRules(): ProactiveRule[] {
+  return BUILTIN_RULES;
+}
+
 function loadConfig(): ProactiveConfig {
   const raw = process.env.PROACTIVE_AGENT_ENABLED?.trim().toLowerCase();
-  const enabled = raw === undefined || raw !== "0" && raw !== "false" && raw !== "off";
+  const enabled = raw === undefined || (raw !== "0" && raw !== "false" && raw !== "off");
 
   const cooldownRaw = process.env.PROACTIVE_AGENT_COOLDOWN_MS?.trim();
   const cooldownMs = cooldownRaw ? Number.parseInt(cooldownRaw, 10) : 5000;
@@ -52,18 +63,15 @@ function loadConfig(): ProactiveConfig {
   };
 }
 
-const SYSTEM_PROMPT = `你是一个真人的私人AI助手。当系统中发生某些事件时，你需要判断是否要主动对用户说一句话。
-
-你的原则：
-1. 像真人朋友一样自然，不要机械播报
-2. 根据事件性质调整语气（赢了可以小得意，输了自嘲，完成了鼓励）
-3. 一句话说完，不要长篇大论
-4. 如果你觉得这个事件不值得特意说一句（太琐碎或用户不会在意），就精确输出 SILENT
-5. 不要每次都说话，保持适度，像真人一样有选择性
-
-输出格式：
-- 需要说：直接输出那句话（不要加引号、不要解释）
-- 不需要说：精确输出 SILENT`;
+const SYSTEM_PROMPT = `You are a private life assistant deciding whether to proactively message the user.
+Rules:
+1. Sound natural, warm, and human.
+2. Only speak when the signal is worth interrupting for.
+3. Keep it to one short message.
+4. If not worth saying, output SILENT exactly.
+5. If the signal suggests stress or late-night work, reduce teasing and be gentler.
+6. If the signal is celebratory or light, light humor is allowed when appropriate.
+Output either one short message or SILENT.`;
 
 export class ProactiveAgentCenter {
   private readonly config: ProactiveConfig;
@@ -75,6 +83,8 @@ export class ProactiveAgentCenter {
   constructor(
     private readonly externalChat: ExternalChatProvider | null,
     private readonly promptContextBuilder: PromptContextBuilder | null,
+    private readonly outbound: ProactiveOutboundMessageService | null = null,
+    private readonly userPersonalizationService: UserPersonalizationService | null = null,
   ) {
     this.config = loadConfig();
     this.rules = loadRules();
@@ -82,15 +92,17 @@ export class ProactiveAgentCenter {
 
   start(): void {
     if (!this.config.enabled || !this.externalChat) {
-      console.log("[ProactiveAgent] ⏭️ Disabled");
+      console.log("[ProactiveAgent] Disabled");
       return;
     }
 
     console.log(
-      `[ProactiveAgent] 🚀 Started | rules=${this.rules.length} | cooldown=${this.config.cooldownMs}ms`,
+      `[ProactiveAgent] Started | rules=${this.rules.length} | cooldown=${this.config.cooldownMs}ms`,
     );
 
-    this.unsubscribe = getStateEventManager().on("*", "*", (event: StateChangeEvent) => this.onAnyEvent(event));
+    this.unsubscribe = getStateEventManager().on("*", "*", (event: StateChangeEvent) => {
+      void this.onAnyEvent(event);
+    });
   }
 
   stop(): void {
@@ -98,86 +110,106 @@ export class ProactiveAgentCenter {
     this.unsubscribe = null;
     this.lastResponseAt.clear();
     this.recentResponses.clear();
-    console.log("[ProactiveAgent] 🔌 Stopped");
+    console.log("[ProactiveAgent] Stopped");
   }
 
   private async onAnyEvent(event: StateChangeEvent): Promise<void> {
-    const rule = this.rules.find((r) => r.module === event.module && r.eventType === event.type);
-    if (!rule) return;
+    const rule = this.rules.find((item) => item.module === event.module && item.eventType === event.type);
+    const signal = normalizeStateChangeEvent(
+      event,
+      rule ? this.toRuleHint(rule) : undefined,
+      this.recentResponses.get(event.sessionId)?.length ?? 0,
+    );
 
-    if (!this.shouldRespond(event)) return;
-
-    await this.decideAndRespond(event, rule);
+    if (!this.shouldRespond(signal, event)) return;
+    await this.decideAndRespond(signal);
   }
 
-  private shouldRespond(event: StateChangeEvent): boolean {
+  private shouldRespond(signal: GenericProactiveSignal, event: StateChangeEvent): boolean {
     const key = `${event.module}:${event.sessionId}`;
     const lastAt = this.lastResponseAt.get(key) ?? 0;
     if (Date.now() - lastAt < this.config.cooldownMs) return false;
 
-    const globalKey = event.sessionId;
-    const globalLast = this.lastResponseAt.get(globalKey) ?? 0;
+    const globalLast = this.lastResponseAt.get(event.sessionId) ?? 0;
     if (Date.now() - globalLast < this.config.cooldownMs / 2) return false;
 
-    return true;
+    return shouldEmitProactiveMessage(signal);
   }
 
-  private async decideAndRespond(event: StateChangeEvent, rule: ProactiveRule): Promise<void> {
+  private async decideAndRespond(signal: GenericProactiveSignal): Promise<void> {
     try {
-      const userPrompt = this.buildDecisionPrompt(event, rule);
-      const response = await this.callLlm(event.actorSessionId, userPrompt);
+      const userPrompt = this.buildDecisionPrompt(signal);
+      const personalization = await this.userPersonalizationService?.getPromptSlice(
+        signal.actorId,
+        `${signal.summary}\n${signal.evidence.join("\n")}`,
+      );
+      const response = await this.callLlm(signal.actorId, userPrompt, personalization);
 
       if (!response || response.trim().toUpperCase() === "SILENT") return;
 
       const clean = response.trim().slice(0, this.config.maxResponseChars);
-      this.recordResponse(event.sessionId, clean);
-      this.markResponded(event);
+      this.recordResponse(signal.rawEvent.sessionId, clean);
+      this.markResponded(signal.rawEvent);
+      await this.outbound?.send({
+        actorId: signal.actorId,
+        title: signal.title,
+        text: clean,
+        reason: `${signal.module}:${signal.eventType}`,
+        meta: {
+          module: signal.module,
+          eventType: signal.eventType,
+          tags: signal.tags,
+          urgency: signal.urgency,
+          confidence: signal.confidence,
+          evidence: signal.evidence,
+        },
+      });
 
-      console.log(`[ProactiveAgent] 💬 [${rule.label}] ${clean}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[ProactiveAgent] ❌ Error: ${msg}`);
+      console.log(`[ProactiveAgent] [${signal.title}] ${clean}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[ProactiveAgent] Error: ${msg}`);
     }
   }
 
-  private buildDecisionPrompt(event: StateChangeEvent, rule: ProactiveRule): string {
-    const payloadLines = Object.entries(event.payload)
-      .filter(([, v]) => v != null && typeof v !== "object")
-      .map(([k, v]) => `  ${k}: ${v}`)
-      .join("\n");
-
-    const recent = this.recentResponses.get(event.sessionId) ?? [];
-    const recentStr = recent.slice(-3).length > 0 ? `\n最近已主动说过：${recent.slice(-3).join("；")}` : "";
-
-    let hint = "";
-    if (rule.templateHint) {
-      hint = `\n提示：${rule.templateHint}`;
-    }
+  private buildDecisionPrompt(signal: GenericProactiveSignal): string {
+    const recent = this.recentResponses.get(signal.rawEvent.sessionId) ?? [];
+    const recentStr = recent.length > 0 ? `Recent proactive lines:\n${recent.slice(-3).join("\n")}` : "";
+    const hint = signal.templateHint ? `Hint: ${signal.templateHint}` : "";
 
     return [
-      `【事件】${rule.label}`,
-      `模块：${event.module}`,
-      `状态变更：${event.previousState ?? "—"} → ${event.currentState}`,
-      payloadLines ? `详情：\n${payloadLines}` : "",
+      `Event: ${signal.title}`,
+      `Summary: ${signal.summary}`,
+      `Tags: ${signal.tags.join(", ") || "general"}`,
+      `Metrics: urgency=${signal.urgency.toFixed(1)}, confidence=${signal.confidence.toFixed(1)}, novelty=${signal.novelty.toFixed(1)}, interruptiveness=${signal.interruptiveness.toFixed(1)}`,
+      `Suggested tone: ${signal.suggestedTone}`,
+      signal.evidence.length > 0 ? `Evidence:\n${signal.evidence.join("\n")}` : "",
       hint,
       recentStr,
-      "",
-      "请判断是否要对用户主动说一句话，按上述规则输出。",
     ]
       .filter(Boolean)
-      .join("\n");
+      .join("\n\n");
   }
 
-  private async callLlm(actorSessionId: string, userPrompt: string): Promise<string> {
+  private async callLlm(
+    actorSessionId: string,
+    userPrompt: string,
+    personalization?: PersonalizationPromptSlice,
+  ): Promise<string> {
     if (!this.externalChat?.isEnabled()) return "";
 
-    const baseOpts = this.promptContextBuilder?.build({ actorId: actorSessionId }) ?? {};
+    const baseOpts = this.promptContextBuilder?.build({
+      actorId: actorSessionId,
+      personalization,
+    }) ?? {};
 
     let fullText = "";
     await this.externalChat.streamCompletion(
       `proactive:${actorSessionId}:${Date.now()}`,
       { text: userPrompt },
-      (delta) => { fullText += delta; },
+      (delta) => {
+        fullText += delta;
+      },
       undefined,
       {
         ...baseOpts,
@@ -193,6 +225,14 @@ export class ProactiveAgentCenter {
     return fullText.trim();
   }
 
+  private toRuleHint(rule: ProactiveRule): ProactiveRuleHint {
+    return {
+      priority: rule.priority,
+      label: rule.label,
+      templateHint: rule.templateHint,
+    };
+  }
+
   private recordResponse(sessionId: string, text: string): void {
     const list = this.recentResponses.get(sessionId) ?? [];
     list.push(text);
@@ -201,8 +241,8 @@ export class ProactiveAgentCenter {
   }
 
   private markResponded(event: StateChangeEvent): void {
-    const key = `${event.module}:${event.sessionId}`;
-    this.lastResponseAt.set(key, Date.now());
-    this.lastResponseAt.set(event.sessionId, Date.now());
+    const now = Date.now();
+    this.lastResponseAt.set(`${event.module}:${event.sessionId}`, now);
+    this.lastResponseAt.set(event.sessionId, now);
   }
 }

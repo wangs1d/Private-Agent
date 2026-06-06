@@ -51,10 +51,14 @@ export type AgentPromptMemoryContext = {
   userProfile?: string;
   /** 本轮语气与情绪适配指引（幽默/正式/温馨、安抚等） */
   toneGuidance?: string;
+  relationshipGuidance?: string;
   /** 当日滚动摘要（跨 session 同日上下文，短期工作记忆 L1） */
   dailyDigest?: string;
   /** 后台记忆管理服务自动合成的用户长期画像（偏好/话题/意图/风险标记） */
   userProfileSummary?: string;
+  memoryContinuity?: string;
+  relationshipMemory?: string;
+  lifeThemeMemory?: string;
   /** 短句追问时锚定上一轮对话，避免跨话题串台 */
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */

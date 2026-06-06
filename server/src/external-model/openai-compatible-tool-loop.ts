@@ -205,11 +205,12 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "fetch_web",
-      description: "读取指定网页正文并返回标题、摘要与纯文本内容。",
+      description: "读取指定网页正文并返回标题、摘要与纯文本内容。自动移除导航栏、页脚、广告等噪音，提取核心正文。",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string" },
+          url: { type: "string", description: "要读取的网页 URL" },
+          include_links: { type: "boolean", description: "是否同时返回页面中的链接列表（默认 false）" },
         },
         required: ["url"],
         additionalProperties: false,

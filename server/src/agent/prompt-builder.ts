@@ -372,6 +372,8 @@ export function buildLayeredSystemPrompt(
     !memory?.toneGuidance &&
     !memory?.dailyDigest &&
     !memory?.userProfileSummary &&
+    !memory?.relationshipMemory &&
+    !memory?.lifeThemeMemory &&
     !memory?.followUpAnchor &&
     !memory?.scheduleSnapshot
   ) {
@@ -393,6 +395,8 @@ export function buildLayeredSystemPrompt(
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
+  if (memory.relationshipMemory) parts.push(memory.relationshipMemory);
+  if (memory.lifeThemeMemory) parts.push(memory.lifeThemeMemory);
   if (memory.interruptedContext) parts.push(memory.interruptedContext);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");

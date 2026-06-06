@@ -59,6 +59,11 @@ import { SkillPromotionQueueService } from "../services/skill-promotion-queue-se
 import { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import { GomokuAgentTurnService } from "../services/gomoku-agent-turn-service.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
+import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
+import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
+import { AnticipationEngineService } from "../services/anticipation-engine-service.js";
+import { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
+import { DesktopPresenceSignalService } from "../services/desktop-presence-signal-service.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
 import { AuditService } from "../services/audit-service.js";
@@ -101,6 +106,8 @@ import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
 import { SmartHomeService } from "../services/smart-home-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
+import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
+import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
@@ -110,7 +117,9 @@ import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
+import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
+import { setMcpChatTools } from "../external-model/openai-compatible-tool-loop.js";
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
@@ -134,6 +143,7 @@ import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
 import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
 import { CompanionService } from "../services/companion-service.js";
+import { MarketSignalService } from "../services/market-signal-service.js";
 
 export async function createAppServices(): Promise<AppServices> {
   const app = Fastify({ logger: true });
@@ -162,6 +172,16 @@ export async function createAppServices(): Promise<AppServices> {
   const agentMemorySyncService = new AgentMemorySyncService();
   const unifiedIdempotencyService = new UnifiedIdempotencyService();
   const toolRegistry = new ToolRegistry();
+  const lifeSignalHubService = new LifeSignalHubService(
+    join(process.cwd(), "data", "life-signals.json"),
+  );
+  await lifeSignalHubService.load();
+  const anticipationEngineService = new AnticipationEngineService(
+    join(process.cwd(), "data", "anticipation-candidates.json"),
+  );
+  await anticipationEngineService.load();
+  const marketSignalService = new MarketSignalService(lifeSignalHubService);
+  const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
 
   const skillManager = new SkillManager();
   skillManager.configureEnabledPersistence(join(process.cwd(), "data", "skill-enabled.json"));
@@ -182,6 +202,7 @@ export async function createAppServices(): Promise<AppServices> {
     const mcpToolCount = mcpClientService.listTools().length;
     if (mcpToolCount > 0) {
       registerMcpTools(toolRegistry, mcpClientService);
+      setMcpChatTools(buildMcpChatTools(mcpClientService));
       app.log.info(`[MCP] 已发现并注册 ${mcpToolCount} 个 MCP 工具（${mcpClientService.listServers().map(s => s.alias).join(", ")}）`);
     } else {
       app.log.info("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
@@ -197,6 +218,8 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     scheduleTaskService,
   });
+  registerLifeSignalTools(toolRegistry, lifeSignalHubService);
+  registerMarketSignalTools(toolRegistry, marketSignalService);
 
   const agentRelayService = new AgentRelayService();
   const wsConnectionRegistry = new WsConnectionRegistry();
@@ -593,7 +616,22 @@ export async function createAppServices(): Promise<AppServices> {
   });
   new GomokuAgentTurnService(gomokuService, toolRegistry, externalChat, promptContextBuilder);
 
-  const proactiveCenter = new ProactiveAgentCenter(externalChat, promptContextBuilder);
+  const proactiveOutbound = new ProactiveOutboundMessageService(async (userId, payload) => {
+    return wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
+  });
+  const proactiveLifeRuntimeService = new ProactiveLifeRuntimeService(
+    lifeSignalHubService,
+    anticipationEngineService,
+    proactiveOutbound,
+    userPersonalizationService,
+  );
+  proactiveLifeRuntimeService.start();
+  const proactiveCenter = new ProactiveAgentCenter(
+    externalChat,
+    promptContextBuilder,
+    proactiveOutbound,
+    userPersonalizationService,
+  );
   proactiveCenter.start();
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
@@ -611,6 +649,10 @@ export async function createAppServices(): Promise<AppServices> {
         actorId,
         JSON.stringify({ type: ServerEventType.DesktopBridgeSync, payload }),
       );
+      desktopPresenceSignalService.handleSync(actorId, payload);
+    },
+    onTaskResult: (actorId, payload) => {
+      desktopPresenceSignalService.handleTaskResult(actorId, payload);
     },
   });
   registerDesktopVisualTools(toolRegistry, {
@@ -671,6 +713,9 @@ export async function createAppServices(): Promise<AppServices> {
     companionService,
     agentCore,
     wsConnectionRegistry,
+    lifeSignalHubService,
+    marketSignalService,
+    proactiveLifeRuntimeService,
   });
 
   registerWebSocketRoute(app, {
@@ -726,5 +771,8 @@ export async function createAppServices(): Promise<AppServices> {
     intelligentReminderService: intelligentReminder.reminderService,
     reminderResponsePersistence: intelligentReminder.userResponsePersistence,
     mcpClientService,
+    lifeSignalHubService,
+    marketSignalService,
+    proactiveLifeRuntimeService,
   };
 }

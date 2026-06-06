@@ -267,6 +267,12 @@ export class PromptContextBuilder {
         : digestService.getRelevantPromptDigest(input.actorId, userText);
     const userProfileFromManager =
       ambiguousFollowUp ? null : memoryManager?.getProfileForPrompt(input.actorId) ?? null;
+    const memoryContinuity =
+      ambiguousFollowUp ? null : memoryManager?.getContinuityForPrompt(input.actorId) ?? null;
+    const relationshipMemory =
+      ambiguousFollowUp ? null : memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? null;
+    const lifeThemeMemory =
+      ambiguousFollowUp ? null : memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? null;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     const scheduleSnapshot =
       this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
@@ -284,6 +290,9 @@ export class PromptContextBuilder {
       ...(input.personalization?.userProfile
         ? { userProfile: input.personalization.userProfile }
         : {}),
+      ...(input.personalization?.relationshipGuidance
+        ? { relationshipGuidance: input.personalization.relationshipGuidance }
+        : {}),
       ...(agentCaps ? { agentCaps } : {}),
       ...(worldCaps ? { worldCaps } : {}),
       ...(input.narrativeRecall && !ambiguousFollowUp
@@ -291,6 +300,9 @@ export class PromptContextBuilder {
         : {}),
       ...(dailyDigest ? { dailyDigest } : {}),
       ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
+      ...(memoryContinuity ? { memoryContinuity } : {}),
+      ...(relationshipMemory ? { relationshipMemory } : {}),
+      ...(lifeThemeMemory ? { lifeThemeMemory } : {}),
       ...(interruptedContext ? { interruptedContext } : {}),
       ...(followUpAnchor ? { followUpAnchor } : {}),
       ...(scheduleSnapshot ? { scheduleSnapshot } : {}),
@@ -311,8 +323,12 @@ export class PromptContextBuilder {
       Boolean(memory.userLocation) ||
       Boolean(memory.taskContext) ||
       Boolean(memory.userProfile) ||
+      Boolean(memory.relationshipGuidance) ||
       Boolean(memory.toneGuidance) ||
       Boolean(memory.userProfileSummary) ||
+      Boolean(memory.memoryContinuity) ||
+      Boolean(memory.relationshipMemory) ||
+      Boolean(memory.lifeThemeMemory) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot)
     );

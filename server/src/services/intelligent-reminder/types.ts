@@ -44,6 +44,8 @@ export interface PhoneCallConfig {
   disconnectCommand?: string[];
   retryOnNoAnswer?: boolean;
   retryCount?: number;
+  /** 前摇振铃持续时间（毫秒），默认 8000 */
+  ringDurationMs?: number;
 }
 
 export interface ReminderEscalationRule {

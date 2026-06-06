@@ -124,6 +124,10 @@ export class AgentMemorySyncService {
     void this.enqueueActorWrite(actorId, () => this.doAppendMemorySummaryLine(actorId, line, topicHint));
   }
 
+  appendRelationshipHistoryLine(actorId: string, line: string, topicHint?: string): void {
+    this.appendMemorySummaryLine(actorId, `【关系线程】${line}`, topicHint ?? "relationship");
+  }
+
   private doAppendMemorySummaryLine(actorId: string, line: string, topicHint?: string): boolean {
     const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
     const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
@@ -141,4 +145,5 @@ export class AgentMemorySyncService {
     }
     return false;
   }
+
 }

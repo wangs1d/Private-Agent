@@ -23,7 +23,14 @@ export function registerWebTools(
   toolRegistry.register("fetch_web", async (input) => {
     const url = String(input.url ?? "").trim();
     if (!url) return { title: "", content: "", summary: "url 不能为空" };
-    return infoHubService.readWebpage(url);
+    const includeLinks = input.include_links === true;
+    const result = await infoHubService.readWebpage(url);
+    // 如果需要链接，额外调用 inspectWebpage 补充
+    if (includeLinks) {
+      const inspect = await infoHubService.inspectWebpage(url);
+      return { ...result, links: inspect.links, sameHostLinks: inspect.sameHostLinks };
+    }
+    return result;
   });
 
   // Backward compatibility: keep historical aliases on built-in path.

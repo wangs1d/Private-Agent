@@ -34,6 +34,9 @@ import type { BrowserSessionService } from "../../services/browser-session-servi
 import type { AgentCore } from "../../services/agent-core.js";
 import type { CompanionService } from "../../services/companion-service.js";
 import type { WsConnectionRegistry } from "../../services/ws-connection-registry.js";
+import type { LifeSignalHubService } from "../../services/life-signal-hub-service.js";
+import type { MarketSignalService } from "../../services/market-signal-service.js";
+import type { ProactiveLifeRuntimeService } from "../../services/proactive-life-runtime-service.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -71,4 +74,7 @@ export type HttpRouteDeps = {
   companionService: CompanionService;
   agentCore?: AgentCore;
   wsConnectionRegistry?: WsConnectionRegistry;
+  lifeSignalHubService?: LifeSignalHubService;
+  marketSignalService?: MarketSignalService;
+  proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
 };

@@ -635,6 +635,88 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           );
         }
       }
+      // ====== 振铃前摇阶段（ringing_start） ======
+      // Agent 呼叫用户时，先推振铃事件，客户端进入"来电中"动画+倒计时
+      if (type == "agent.phone.ringing_start") {
+        final String direction = payload["direction"]?.toString() ?? "agent_to_user";
+        final String ringStyle = payload["ringStyle"]?.toString() ?? "reminder";
+
+        setState(() {
+          _phoneCallStatus = "ringing";
+          _phoneCallToActorId = VirtualPhoneUiLabels.incomingCallerLabel(
+            direction: direction,
+            fromPhone: payload["fromPhone"]?.toString(),
+          );
+        });
+
+        final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+        if (navCtx != null && navCtx.mounted) {
+          unawaited(
+            showRingingPhaseDialog(
+              context: navCtx,
+              ringingPayload: payload,
+              onConnect: () {
+                // 振铃结束/用户提前接听 → 等待 call_connecting 事件推送正式通话内容
+                // 如果服务端已同时发送了 call_connecting，则由下方 handler 处理
+                setState(() => _phoneCallStatus = "connecting");
+              },
+              transcript: null, // 接通后的正文由 call_connecting / incoming 携带
+            ),
+          );
+        }
+      }
+
+      // ====== 电话接通事件（call_connecting）—— 前摇结束后推送 ======
+      // 包含 TTS 音频 + 正文 transcript，替代 legacy incoming 用于有前摇的场景
+      if (type == "agent.phone.call_connecting") {
+        final String direction = payload["direction"]?.toString() ?? "agent_to_user";
+        final String fromPhone = payload["fromPhone"]?.toString() ?? "";
+        final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+          direction: direction,
+          fromPhone: fromPhone,
+        );
+
+        setState(() {
+          _phoneCallStatus = "connected";
+          _phoneCallToActorId = callerLabel;
+        });
+
+        final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+        if (navCtx != null && navCtx.mounted && direction == "agent_to_user") {
+          // 弹出微信风格全屏通话界面（含 TTS + 文字稿）
+          unawaited(
+            Navigator.of(navCtx).push<void>(
+              MaterialPageRoute<void>(
+                builder: (ctx) => WeChatVoiceCallScreen(
+                  callerName: callerLabel,
+                  onHangUp: () {
+                    Navigator.of(ctx).pop();
+                  },
+                  currentTranscript: payload["transcript"]?.toString(),
+                  isIncoming: true,
+                  onMuteToggle: () {},
+                  onSpeakerToggle: () {},
+                ),
+              ),
+            ),
+          );
+        }
+      }
+
+      // ====== 提醒弹窗事件（reminder_popup）—— 服务端 popup 级别提醒 ======
+      if (type == "reminder_popup") {
+        final String title = payload["title"]?.toString() ?? "提醒";
+        final String message = payload["message"]?.toString() ?? "";
+        final String priority = payload["priority"]?.toString() ?? "normal";
+        final bool showConfirm = payload["showConfirmButton"] == true;
+        final String confirmText = payload["confirmText"]?.toString() ?? "我知道了";
+
+        final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+        if (navCtx != null && navCtx.mounted) {
+          _showReminderPopupDialog(navCtx, title, message, priority, showConfirm, confirmText);
+        }
+      }
+
       if (type == "agent.phone.incoming") {
         final String direction = payload["direction"]?.toString() ?? "";
         final String ringStyle = payload["ringStyle"]?.toString() ?? "peer";
@@ -1264,6 +1346,51 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       "callId": callId,
       "action": action,
     });
+  }
+
+  /// 显示服务端推送的提醒弹窗（reminder_popup 事件）
+  /// 用于智能提醒系统的 popup 级别——在用户屏幕中央弹出醒目提醒
+  void _showReminderPopupDialog(
+    BuildContext navCtx,
+    String title,
+    String message,
+    String priority,
+    bool showConfirm,
+    String confirmText,
+  ) {
+    final Color accentColor = switch (priority) {
+      "urgent" => Colors.red,
+      "high" => Colors.orange,
+      _ => Colors.blue,
+    };
+
+    showDialog<void>(
+      context: navCtx,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          icon: Icon(
+            priority == "urgent" ? Icons.warning_amber_rounded : Icons.notifications_active_rounded,
+            color: accentColor,
+            size: 36,
+          ),
+          title: Text(title),
+          content: Text(
+            message,
+            style: Theme.of(ctx).textTheme.bodyLarge?.copyWith(height: 1.5),
+          ),
+          actions: <Widget>[
+            if (showConfirm)
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: Text(confirmText),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _presentPeerAgentIncoming(Map<String, dynamic> payload) {

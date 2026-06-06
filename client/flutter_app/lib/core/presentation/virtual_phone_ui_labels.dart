@@ -43,6 +43,8 @@ class VirtualPhoneUiLabels {
         return "Agent 来电中";
       case "ringing":
         return "正在呼叫 Agent";
+      case "connecting":
+        return "正在接通…";
       case "connected":
         return "与 Agent 通话中";
       case "agent_handling":
@@ -56,6 +58,31 @@ class VirtualPhoneUiLabels {
       default:
         return status ?? "";
     }
+  }
+
+  /// 振铃阶段文案
+  static const String ringingPhaseTitle = "来电中";
+  static const String ringingPhaseAutoAnswerHint = "即将自动接听";
+  static const String ringingPhaseConnecting = "正在接通…";
+  static const String ringingPhaseAnswered = "已接听";
+
+  /// 微信风格通话界面文案
+  static const String wechatCallStatusConnected = "通话中";
+  static const String wechatCallStatusMuted = "已静音";
+  static const String wechatCallSpeakerOn = "扬声器";
+  static const String wechatCallSpeakerOff = "听筒";
+  static const String wechatCallHangUp = "挂断";
+
+  /// 来电振铃阶段——显示「来自 xxx 的来电」
+  static String ringingCallerLabel({
+    required String direction,
+    String? fromPhone,
+  }) {
+    if (direction == "agent_to_user") {
+      final phone = (fromPhone ?? "").trim();
+      return phone.isNotEmpty ? "你的 Agent 来电（$phone）" : "你的 Agent 来电";
+    }
+    return "Agent 来电";
   }
 
   static const String peerIncomingTitle = "其他 Agent 来电";

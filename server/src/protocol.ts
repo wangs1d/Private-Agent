@@ -50,6 +50,19 @@ export const ServerEventType = {
   VirtualPhoneIncoming: "agent.phone.incoming",
   /** 虚拟电话通话状态变更（用户拨打Agent时的振铃/接通/挂断等） */
   VirtualPhoneCallStatus: "agent.phone.call_status",
+  /**
+   * 虚拟电话振铃开始事件 —— 前摇阶段首帧。
+   * 客户端收到后应进入「振铃中」UI：播放振铃音、显示来电者信息、
+   * 渐入动画、倒计时。此时不含 TTS 正文音频。
+   * 随后服务端会推送 agent.phone.call_connecting 进入接通阶段。
+   */
+  VirtualPhoneRingingStart: "agent.phone.ringing_start",
+  /**
+   * 虚拟电话接通事件 —— 前摇结束，正式进入通话。
+   * 包含 TTS 音频和正文 transcript。
+   * 仅在 ringing_start 之后发送；若不需要前摇则直接发 incoming（向后兼容）。
+   */
+  VirtualPhoneCallConnecting: "agent.phone.call_connecting",
   /** 电脑端桥接绑定成功 */
   DesktopBridgeRegisterAck: "desktop.bridge.register_ack",
   /** 发往电脑端：执行一轮纯视觉桌面任务 */

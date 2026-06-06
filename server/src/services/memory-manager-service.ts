@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
@@ -16,6 +14,8 @@ export type MemoryConsolidationResult = {
   entriesRemoved: number;
   summaryUpdated: boolean;
   timestamp: string;
+  rememberedCount: number;
+  fadedCount: number;
 };
 
 export type UserProfileSnapshot = {
@@ -25,6 +25,25 @@ export type UserProfileSnapshot = {
   riskFlags: string[];
   lastUpdated: string;
   version: number;
+};
+
+export type MemoryContinuitySnapshot = {
+  stableLines: string[];
+  fadingLines: string[];
+  forgottenLines: string[];
+  temporalHighlights: string[];
+  lastSleepAt: string;
+  lastUpdatedAt: string;
+};
+
+export type RelationshipMemorySnapshot = {
+  lines: string[];
+  lastUpdatedAt: string;
+};
+
+export type LifeThemeMemorySnapshot = {
+  themes: string[];
+  lastUpdatedAt: string;
 };
 
 const DEFAULT_CONFIG: MemoryManagerConfig = {
@@ -40,9 +59,25 @@ function loadConfig(): MemoryManagerConfig {
   return {
     ...DEFAULT_CONFIG,
     enabled,
-    consolidationIntervalMs: Number.parseInt(process.env.MEMORY_MANAGER_CONSOLIDATION_INTERVAL_MS ?? "", 10) || DEFAULT_CONFIG.consolidationIntervalMs,
-    profileUpdateThreshold: Number.parseInt(process.env.MEMORY_MANAGER_PROFILE_THRESHOLD ?? "", 10) || DEFAULT_CONFIG.profileUpdateThreshold,
+    consolidationIntervalMs:
+      Number.parseInt(process.env.MEMORY_MANAGER_CONSOLIDATION_INTERVAL_MS ?? "", 10) ||
+      DEFAULT_CONFIG.consolidationIntervalMs,
+    profileUpdateThreshold:
+      Number.parseInt(process.env.MEMORY_MANAGER_PROFILE_THRESHOLD ?? "", 10) ||
+      DEFAULT_CONFIG.profileUpdateThreshold,
   };
+}
+
+function formatRelativeAgeLabel(ageHours: number): string {
+  if (ageHours < 1) return "just now";
+  if (ageHours < 24) return `${Math.floor(ageHours)}h ago`;
+  if (ageHours < 24 * 7) return `${Math.floor(ageHours / 24)}d ago`;
+  if (ageHours < 24 * 30) return `${Math.floor(ageHours / (24 * 7))}w ago`;
+  return `${Math.floor(ageHours / (24 * 30))}mo ago`;
+}
+
+function stripTimestampPrefix(line: string): string {
+  return line.replace(/^\[[^\]]+\]\s*/, "").trim();
 }
 
 export class MemoryManagerService {
@@ -50,16 +85,21 @@ export class MemoryManagerService {
   private readonly consolidationTimers = new Map<string, NodeJS.Timeout>();
   private readonly turnCounters = new Map<string, number>();
   private readonly pendingProfiles = new Map<string, UserProfileSnapshot>();
+  private readonly continuitySnapshots = new Map<string, MemoryContinuitySnapshot>();
+  private readonly relationshipSnapshots = new Map<string, RelationshipMemorySnapshot>();
+  private readonly lifeThemeSnapshots = new Map<string, LifeThemeMemorySnapshot>();
 
   constructor(
     private readonly narrativeMemory: NarrativeMemoryPort | null,
     private readonly memorySync: AgentMemorySyncService | null,
     config?: Partial<MemoryManagerConfig>,
   ) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = { ...loadConfig(), ...config };
   }
 
   onTurnCompleted(actorId: string, userText: string, assistantText: string): void {
+    void userText;
+    void assistantText;
     if (!this.config.enabled) return;
 
     const prev = this.turnCounters.get(actorId) ?? 0;
@@ -68,11 +108,8 @@ export class MemoryManagerService {
 
     const nightlyService = getNightlyMemoryTaskService();
     const shouldDefer = nightlyService?.shouldDeferConsolidation() ?? false;
-
     if (shouldDefer) {
-      console.log(
-        `[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next})`,
-      );
+      console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next})`);
       return;
     }
 
@@ -87,26 +124,34 @@ export class MemoryManagerService {
       entriesRemoved: 0,
       summaryUpdated: false,
       timestamp: new Date().toISOString(),
+      rememberedCount: 0,
+      fadedCount: 0,
     };
 
     if (!this.memorySync) return result;
 
+    let lastRetention: ReturnType<MemoryManagerService["evaluateMemoryRetention"]> | null = null;
     try {
       const { revision, entries } = this.memorySync.getSnapshot(actorId, ["memory_summary"]);
       const raw = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
       if (!raw || raw.length < 50) return result;
 
-      const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+      const lines = raw.split("\n").filter((line) => line.trim().length > 0);
       if (lines.length <= 2) return result;
 
       const consolidated = this.deduplicateLines(lines);
       result.entriesMerged = lines.length - consolidated.length;
 
-      const trimmed = this.pruneOldEntries(consolidated);
-      result.entriesRemoved = consolidated.length - trimmed.length;
+      const retention = this.evaluateMemoryRetention(consolidated);
+      lastRetention = retention;
+      result.entriesRemoved = retention.forgotten.length;
+      result.rememberedCount = retention.remembered.length;
+      result.fadedCount = retention.faded.length;
 
       if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
-        const newSummary = trimmed.join("\n").slice(-this.config.maxSummaryChars);
+        const newSummary = [...retention.remembered, ...retention.faded]
+          .join("\n")
+          .slice(-this.config.maxSummaryChars);
         const patchResult = await this.memorySync.applyPatch(actorId, revision, [
           { key: "memory_summary", op: "put", value: newSummary },
         ]);
@@ -117,6 +162,11 @@ export class MemoryManagerService {
     }
 
     await this.synthesizeProfile(actorId);
+    if (lastRetention) {
+      this.updateContinuitySnapshot(actorId, lastRetention);
+      this.updateRelationshipSnapshot(actorId, lastRetention.remembered);
+      this.updateLifeThemeSnapshot(actorId, lastRetention.remembered);
+    }
     this.turnCounters.set(actorId, 0);
     return result;
   }
@@ -142,6 +192,35 @@ export class MemoryManagerService {
       parts.push(`近期意图: ${profile.recentIntentions.join("、")}`);
     }
     return parts.join("\n");
+  }
+
+  getContinuityForPrompt(actorId: string): string | null {
+    const snapshot = this.continuitySnapshots.get(actorId);
+    if (!snapshot) return null;
+
+    const parts = [
+      "【记忆连续性】系统会在夜间整理、压缩并逐渐遗忘低价值内容，高价值内容会保留更久。",
+      snapshot.stableLines.length > 0 ? `长期保留: ${snapshot.stableLines.slice(0, 6).join("；")}` : "",
+      snapshot.fadingLines.length > 0 ? `正在淡化: ${snapshot.fadingLines.slice(0, 4).join("；")}` : "",
+      snapshot.forgottenLines.length > 0 ? `最近淡忘: ${snapshot.forgottenLines.slice(0, 4).join("；")}` : "",
+      snapshot.temporalHighlights.length > 0
+        ? `时间节律: ${snapshot.temporalHighlights.slice(0, 4).join("；")}`
+        : "",
+      `最近整理: ${snapshot.lastSleepAt}`,
+    ].filter(Boolean);
+    return parts.join("\n");
+  }
+
+  getRelationshipMemoryForPrompt(actorId: string): string | null {
+    const snapshot = this.relationshipSnapshots.get(actorId);
+    if (!snapshot || snapshot.lines.length === 0) return null;
+    return `【关系记忆】${snapshot.lines.slice(0, 6).join("；")}`;
+  }
+
+  getLifeThemeMemoryForPrompt(actorId: string): string | null {
+    const snapshot = this.lifeThemeSnapshots.get(actorId);
+    if (!snapshot || snapshot.themes.length === 0) return null;
+    return `【生活主题】${snapshot.themes.slice(0, 6).join("；")}`;
   }
 
   async shutdown(): Promise<void> {
@@ -176,36 +255,6 @@ export class MemoryManagerService {
     return result;
   }
 
-  private pruneOldEntries(lines: string[], maxAgeHours = 168): string[] {
-    const now = Date.now();
-    const shortTermCutoff = now - 24 * 3600_000;
-    const longTermCutoff = now - maxAgeHours * 3600_000;
-
-    const shortTerm: string[] = [];
-    const longTerm: string[] = [];
-
-    for (const line of lines) {
-      const match = line.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
-      if (!match) {
-        shortTerm.push(line);
-        continue;
-      }
-      const ts = Date.parse(match[1]!);
-      if (isNaN(ts)) {
-        shortTerm.push(line);
-        continue;
-      }
-
-      if (ts > shortTermCutoff) {
-        shortTerm.push(line);
-      } else if (ts > longTermCutoff && this.isHighValueEntry(line)) {
-        longTerm.push(line);
-      }
-    }
-
-    return [...shortTerm, ...longTerm.slice(0, 20)];
-  }
-
   private isHighValueEntry(line: string): boolean {
     const highValuePatterns = [
       /\[用户要求记住\]/,
@@ -213,9 +262,108 @@ export class MemoryManagerService {
       /\[fast-path\]/,
       /用户画像/,
       /偏好|喜欢|讨厌|禁忌|生日|纪念日|重要/i,
-      /世界入账|购买技能/,
+      /世界账户|购买技能/,
     ];
-    return highValuePatterns.some((re) => re.test(line));
+    return highValuePatterns.some((pattern) => pattern.test(line));
+  }
+
+  private evaluateMemoryRetention(lines: string[]): {
+    remembered: string[];
+    faded: string[];
+    forgotten: string[];
+  } {
+    const now = Date.now();
+    const scored = lines.map((line) => ({ line, ...this.scoreMemoryLine(line, now) }));
+
+    const remembered = scored
+      .filter((item) => item.score >= 1.25)
+      .sort((a, b) => b.score - a.score || b.ts - a.ts)
+      .slice(0, 32)
+      .map((item) => item.line);
+
+    const faded = scored
+      .filter((item) => item.score >= 0.55 && item.score < 1.25)
+      .sort((a, b) => b.score - a.score || b.ts - a.ts)
+      .slice(0, 24)
+      .map((item) => item.line);
+
+    const forgotten = scored
+      .filter((item) => item.score < 0.55)
+      .map((item) => item.line)
+      .slice(0, 32);
+
+    return { remembered, faded, forgotten };
+  }
+
+  private scoreMemoryLine(line: string, now: number): { score: number; ts: number } {
+    const match = line.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
+    const ts = match?.[1] ? Date.parse(match[1]) : now;
+    const safeTs = Number.isFinite(ts) ? ts : now;
+    const ageHours = Math.max(0, (now - safeTs) / 3_600_000);
+
+    let score = Math.exp(-ageHours / 72);
+    if (line.includes("【关系线程】")) score += 0.45;
+    if (this.isHighValueEntry(line)) score += 1.15;
+    if (/\[fast-path\]|\[Agent 承诺\/结论\]/.test(line)) score += 0.6;
+    if (/记住|偏好|喜欢|讨厌|禁忌|生日|纪念|重要/.test(line)) score += 0.4;
+    if (/股票|买入|卖出|仓位|止损|止盈|工作|加班|夜里|健康|家人|提醒/.test(line)) score += 0.25;
+    if (ageHours <= 6) score += 0.28;
+    else if (ageHours <= 24) score += 0.18;
+    else if (ageHours >= 24 * 14) score -= 0.12;
+    if (ageHours > 168) score -= 0.3;
+
+    return { score, ts: safeTs };
+  }
+
+  private buildTemporalHighlights(lines: string[]): string[] {
+    const now = Date.now();
+    return lines
+      .slice(0, 12)
+      .map((line) => {
+        const match = line.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
+        const ts = match?.[1] ? Date.parse(match[1]) : Number.NaN;
+        if (!Number.isFinite(ts)) return null;
+        const ageHours = Math.max(0, (now - ts) / 3_600_000);
+        return `${formatRelativeAgeLabel(ageHours)}: ${stripTimestampPrefix(line).slice(0, 72)}`;
+      })
+      .filter((line): line is string => Boolean(line));
+  }
+
+  private updateContinuitySnapshot(
+    actorId: string,
+    retention: { remembered: string[]; faded: string[]; forgotten: string[] },
+  ): void {
+    this.continuitySnapshots.set(actorId, {
+      stableLines: retention.remembered,
+      fadingLines: retention.faded,
+      forgottenLines: retention.forgotten,
+      temporalHighlights: this.buildTemporalHighlights([
+        ...retention.remembered,
+        ...retention.faded,
+      ]),
+      lastSleepAt: new Date().toISOString(),
+      lastUpdatedAt: new Date().toISOString(),
+    });
+  }
+
+  private updateRelationshipSnapshot(actorId: string, remembered: string[]): void {
+    const relationshipLines = remembered.filter((line) => {
+      return /陪|关心|鼓励|调侃|默契|信任|支持|晚安|辛苦|安慰/i.test(line);
+    });
+    this.relationshipSnapshots.set(actorId, {
+      lines: relationshipLines.slice(0, 8),
+      lastUpdatedAt: new Date().toISOString(),
+    });
+  }
+
+  private updateLifeThemeSnapshot(actorId: string, remembered: string[]): void {
+    const themes = remembered
+      .map((line) => this.extractTopic(line))
+      .filter((topic) => topic && topic.length >= 2);
+    this.lifeThemeSnapshots.set(actorId, {
+      themes: [...new Set(themes)].slice(0, 10),
+      lastUpdatedAt: new Date().toISOString(),
+    });
   }
 
   private async synthesizeProfile(actorId: string): Promise<void> {
@@ -233,7 +381,9 @@ export class MemoryManagerService {
 
       if (this.narrativeMemory && Object.keys(profile.preferences).length > 0) {
         const profileText = this.formatProfileAsText(profile);
-        await this.narrativeMemory.ingest(actorId, profileText, "memory:user_profile", { highSignal: true }).catch(() => {});
+        await this.narrativeMemory
+          .ingest(actorId, profileText, "memory:user_profile", { highSignal: true })
+          .catch(() => {});
       }
     } catch {
       /* fire-and-forget */
@@ -264,8 +414,8 @@ export class MemoryManagerService {
     }
 
     while ((match = preferencePatterns.exec(raw)) !== null) {
-      const category = match[1]!;
-      const value = match[2]!.trim();
+      const category = match[1];
+      const value = match[2].trim();
       if (!profile.preferences[category]) profile.preferences[category] = [];
       if (!profile.preferences[category].includes(value)) {
         profile.preferences[category].push(value.slice(0, 80));
@@ -275,7 +425,7 @@ export class MemoryManagerService {
     }
 
     while ((match = riskPatterns.exec(raw)) !== null) {
-      const flag = match[1]!.trim();
+      const flag = match[1].trim();
       if (!profile.riskFlags.includes(flag)) {
         profile.riskFlags.push(flag);
       }
@@ -294,7 +444,7 @@ export class MemoryManagerService {
 
   private extractTopic(text: string): string {
     const keywords = text.match(/[\u4e00-\u9fff]{2,}/g);
-    if (keywords && keywords.length > 0) return keywords[0]!;
+    if (keywords && keywords.length > 0) return keywords[0];
     return text.split(/[\s，。！？、]/)[0]?.trim().slice(0, 10) ?? "general";
   }
 
@@ -303,8 +453,10 @@ export class MemoryManagerService {
     if (profile.frequentTopics.length > 0) {
       parts.push(`关注领域: ${profile.frequentTopics.join("、")}`);
     }
-    for (const [cat, vals] of Object.entries(profile.preferences)) {
-      if (vals.length > 0) parts.push(`${cat}: ${vals.slice(0, 3).join("；")}`);
+    for (const [category, values] of Object.entries(profile.preferences)) {
+      if (values.length > 0) {
+        parts.push(`${category}: ${values.slice(0, 3).join("；")}`);
+      }
     }
     return parts.join("\n");
   }

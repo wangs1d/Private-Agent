@@ -11,6 +11,14 @@ import type {
   VirtualPhoneIncomingCoordinator,
 } from "./virtual-phone-incoming-coordinator.js";
 
+/** 前摇阶段配置 */
+export interface RingPhaseConfig {
+  /** 振铃持续时间（毫秒），默认 8000ms（8秒振铃） */
+  ringDurationMs?: number;
+  /** 是否启用前摇阶段；设为 false 则退化为旧逻辑直接推 incoming（向后兼容） */
+  enableRingingPhase?: boolean;
+}
+
 export type VirtualPhoneRingStyle = "reminder" | "peer";
 export type VirtualPhoneInitiator = "user" | "agent";
 
@@ -31,12 +39,16 @@ export type CallUserParams = {
   toUserId: string;
   transcript: string;
   ringStyle: VirtualPhoneRingStyle;
+  /** 前摇阶段配置（可选，不传则启用默认前摇） */
+  ringPhase?: RingPhaseConfig;
 };
 
 export type UserCallAgentParams = {
   fromUserId: string;
   toActorId: string;
   userMessage?: string;
+  /** 前摇阶段配置（可选） */
+  ringPhase?: RingPhaseConfig;
 };
 
 export class VirtualPhoneService {
@@ -291,8 +303,112 @@ export class VirtualPhoneService {
   }
 
   /**
+   * Agent 呼叫用户（带前摇振铃阶段）。
+   *
+   * 分两个阶段推送：
+   *   1. ringing_start —— 客户端进入「振铃中」UI，播放振铃音、渐入动画、倒计时
+   *   2. call_connecting（延迟后）—— 前摇结束，正式接通，含 TTS 音频 + transcript
+   *
+   * 若 ringPhase.enableRingingPhase === false 则退化为旧逻辑直接推 incoming。
+   */
+  async callUserWithRinging(params: CallUserParams): Promise<{
+    ok: boolean;
+    callId?: string;
+    pushed?: boolean;
+    toUserId?: string;
+    fromPhone?: string;
+    error?: string;
+  }> {
+    const fromActorId = params.fromActorId.trim();
+    const toUserId = params.toUserId.trim();
+    if (!fromActorId) {
+      return { ok: false, error: "主叫方 Actor ID 无效" };
+    }
+    if (!toUserId) {
+      return { ok: false, error: "被叫用户 ID 无效" };
+    }
+
+    const ringCfg = params.ringPhase ?? {};
+    const enableRinging = ringCfg.enableRingingPhase !== false;
+    const ringDurationMs = ringCfg.ringDurationMs ?? 8_000;
+
+    const fromPhone = this.byActor.get(fromActorId);
+    const callId = randomUUID();
+
+    // ---- 阶段 1：推送振铃开始事件 ----
+    if (enableRinging) {
+      const ringingPayload: Record<string, unknown> = {
+        callId,
+        fromActorId,
+        fromPhone: fromPhone ?? null,
+        toUserId,
+        direction: "agent_to_user" as const,
+        status: "ringing",
+        ringStyle: params.ringStyle,
+        initiatedBy: "agent" as const,
+        /** 振铃持续毫秒数，客户端用于倒计时 */
+        ringDurationMs,
+        /** 预计自动接通时间戳（ISO） */
+        estimatedConnectAt: new Date(Date.now() + ringDurationMs).toISOString(),
+      };
+
+      this.wsRegistry.trySend(
+        toUserId,
+        JSON.stringify({
+          type: ServerEventType.VirtualPhoneRingingStart,
+          payload: ringingPayload,
+        }),
+      );
+    }
+
+    // ---- 预生成 TTS（与振铃并行，减少接通等待） ----
+    const ttsResult = await this.tts.synthesizeMp3Base64(params.transcript);
+
+    // ---- 等待振铃阶段结束 ----
+    if (enableRinging) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ringDurationMs));
+    }
+
+    // ---- 阶段 2：推送接通事件（含 TTS + 正文） ----
+    const connectPayload: Record<string, unknown> = {
+      callId,
+      fromActorId,
+      fromPhone: fromPhone ?? null,
+      toUserId,
+      transcript: params.transcript.trim(),
+      ringStyle: params.ringStyle,
+      initiatedBy: "agent" as const,
+      direction: "agent_to_user" as const,
+      status: "connected",
+      tts: ttsResult.ok
+        ? { format: ttsResult.format, base64: ttsResult.base64 }
+        : { format: null, skippedReason: ttsResult.reason },
+      replyEnabled: true,
+    };
+
+    const pushed = this.wsRegistry.trySend(
+      toUserId,
+      JSON.stringify({
+        type: enableRinging
+          ? ServerEventType.VirtualPhoneCallConnecting
+          : ServerEventType.VirtualPhoneIncoming,
+        payload: connectPayload,
+      }),
+    );
+
+    return {
+      ok: true,
+      callId,
+      pushed,
+      toUserId,
+      fromPhone: fromPhone ?? undefined,
+    };
+  }
+
+  /**
    * 用户主动拨打 Agent（通过 WebSocket 或 HTTP 触发）。
-   * 向用户端推送「通话中」状态，同时通知 Agent 有用户来电。
+   * 支持前摇阶段：先推振铃状态 → 延迟后推接通状态。
+   * 向用户端推送「通话中」状态序列（ringing -> connecting -> connected）。
    * 返回 callId 供后续消息关联。
    */
   async handleUserCallAgent(params: UserCallAgentParams): Promise<{
@@ -308,23 +424,53 @@ export class VirtualPhoneService {
     if (!toActorId) {
       return { ok: false, error: "目标 Agent ID 无效" };
     }
+
+    const ringCfg = params.ringPhase ?? {};
+    const enableRinging = ringCfg.enableRingingPhase !== false;
+    const ringDurationMs = ringCfg.ringDurationMs ?? 5_000; // 用户主动呼叫默认5秒振铃
+
     const toPhone = this.byActor.get(toActorId);
     const callId = randomUUID();
 
-    const userPayload: Record<string, unknown> = {
+    // ---- 阶段 1：振铃中 ----
+    const ringingPayload: Record<string, unknown> = {
       callId,
       toActorId,
       toPhone: toPhone ?? null,
       userMessage: (params.userMessage ?? "").trim(),
       direction: "user_to_agent" as const,
-      status: "ringing" as const,
+      status: "ringing",
+      /** 振铃持续时间 */
+      ringDurationMs: enableRinging ? ringDurationMs : undefined,
+      message: "正在呼叫 Agent，请稍候…",
     };
 
     this.wsRegistry.trySend(
       fromUserId,
       JSON.stringify({
         type: ServerEventType.VirtualPhoneCallStatus,
-        payload: userPayload,
+        payload: ringingPayload,
+      }),
+    );
+
+    // ---- 阶段 2：等待振铃后进入接通/连接中 ----
+    if (enableRinging) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ringDurationMs));
+    }
+
+    // 推送「连接中」状态
+    this.wsRegistry.trySend(
+      fromUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneCallStatus,
+        payload: {
+          callId,
+          toActorId,
+          toPhone: toPhone ?? null,
+          direction: "user_to_agent" as const,
+          status: "connecting",
+          message: "Agent 正在接听…",
+        },
       }),
     );
 

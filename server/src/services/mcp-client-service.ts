@@ -1,15 +1,12 @@
 /**
- * MCP 客户端服务 —— 通过 mcporter CLI 与 MCP Server 交互
+ * MCP 客户端服务 —— 与 MCP Server 交互
  *
- * 职责：
- * 1. 读取 MCP Server 配置（mcp-servers.json 或环境变量）
- * 2. 发现已配置 server 的可用工具列表
- * 3. 调用 MCP 工具并返回结果
- *
- * 调用方式与 UpstreamSearchService 一致：子进程调用 mcporter CLI
+ * 支持两种连接方式：
+ * 1. mcporter 模式：通过 mcporter CLI 代理调用（与 UpstreamSearchService 一致）
+ * 2. stdio 模式：直接 spawn MCP Server 子进程，通过 JSON-RPC 2.0 / stdio 通信
  */
 
-import { execFile } from "node:child_process";
+import { ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,12 +16,22 @@ const execFileAsync = promisify(execFile);
 // ---------- 类型 ----------
 
 export type McpServerConfig = {
-  /** server 别名（如 weibo、xiaohongshu），对应 mcporter 中的 alias */
+  /** server 别名 */
   alias: string;
   /** 可选描述 */
   description?: string;
   /** 启用/禁用，默认 true */
   enabled?: boolean;
+  /** 连接类型：mcporter（通过 mcporter CLI）| npm（直接 stdio 子进程） */
+  type?: "mcporter" | "npm";
+  /** npm 模式：启动命令（如 npx） */
+  command?: string;
+  /** npm 模式：命令参数 */
+  args?: string[];
+  /** npm 模式：环境变量 */
+  env?: Record<string, string>;
+  /** 备注 */
+  notes?: string;
 };
 
 export type McpToolSchema = {
@@ -47,12 +54,20 @@ type CommandResult = {
   code: number;
 };
 
+/** stdio MCP 子进程实例 */
+type StdioServerInstance = {
+  process: ChildProcess;
+  requestId: number;
+  pendingRequests: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+  buffer: string;
+  initialized: boolean;
+};
+
 // ---------- 配置加载 ----------
 
 const DEFAULT_CONFIG_PATH = join(process.cwd(), "data", "mcp-servers.json");
 
 function loadServerConfigs(): McpServerConfig[] {
-  // 1. 优先从配置文件加载
   const configPath = process.env.MCP_SERVERS_CONFIG?.trim() || DEFAULT_CONFIG_PATH;
   if (existsSync(configPath)) {
     try {
@@ -61,18 +76,14 @@ function loadServerConfigs(): McpServerConfig[] {
       if (Array.isArray(parsed)) return parsed.filter(isValidServerConfig);
       if (parsed.servers && Array.isArray(parsed.servers)) return parsed.servers.filter(isValidServerConfig);
     } catch {
-      // 配置文件解析失败，继续尝试环境变量
+      // 解析失败
     }
   }
 
-  // 2. 从环境变量加载：MCP_SERVERS=weibo,xiaohongshu,wechat
+  // 环境变量回退
   const envServers = process.env.MCP_SERVERS?.trim();
   if (envServers) {
-    return envServers
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((alias) => ({ alias }));
+    return envServers.split(",").map((s) => s.trim()).filter(Boolean).map((alias) => ({ alias }));
   }
 
   return [];
@@ -95,43 +106,41 @@ export class McpClientService {
   private readonly toolCache = new Map<string, McpToolSchema>();
   private cachePopulated = false;
   private cachePopulating: Promise<void> | null = null;
+  /** stdio 模式的活跃子进程池 */
+  private readonly stdioInstances = new Map<string, StdioServerInstance>();
 
   constructor() {
     this.servers = loadServerConfigs().filter((s) => s.enabled !== false);
   }
 
-  /** 获取已配置的 server 列表 */
   listServers(): McpServerConfig[] {
     return [...this.servers];
   }
 
-  /** 获取已发现的工具列表（可能为空，需先调用 discoverTools） */
   listTools(): McpToolSchema[] {
     return Array.from(this.toolCache.values());
   }
 
-  /** 获取单个工具 schema */
   getTool(name: string): McpToolSchema | undefined {
     return this.toolCache.get(name);
   }
 
   /**
    * 发现所有已配置 server 的可用工具
-   * 调用 `mcporter list <alias>` 获取工具列表
+   * - mcporter 类型：调用 `mcporter list <alias>`
+   * - npm/stdio 类型：spawn 子进程 → initialize → tools/list
    */
   async discoverTools(): Promise<void> {
     if (this.cachePopulating) return this.cachePopulating;
 
     this.cachePopulating = (async () => {
-      const bin = resolveMcporterBin();
       for (const server of this.servers) {
         try {
-          const result = await this.runCommand(bin, ["list", server.alias], 15_000);
-          if (!result.ok) continue;
-
-          const tools = this.parseToolList(result.stdout, server.alias);
-          for (const tool of tools) {
-            this.toolCache.set(tool.name, tool);
+          if (server.type === "npm") {
+            await this.discoverStdioTools(server);
+          } else {
+            // 默认 mcporter 模式
+            await this.discoverMcporterTools(server);
           }
         } catch {
           // 单个 server 发现失败不影响其他
@@ -145,13 +154,94 @@ export class McpClientService {
 
   /**
    * 调用 MCP 工具
-   * 调用 `mcporter call <alias>.<tool_name>(arg1: val1, arg2: val2)`
+   * 根据服务器类型自动选择 mcporter 或 stdio 路径
    */
   async callTool(
     serverAlias: string,
     toolName: string,
     args: Record<string, unknown>,
     timeoutMs = 30_000,
+  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    const server = this.servers.find((s) => s.alias === serverAlias);
+
+    if (server?.type === "npm") {
+      return this.callStdioTool(serverAlias, toolName, args, timeoutMs);
+    }
+    // 默认 mcporter 模式
+    return this.callMcporterTool(serverAlias, toolName, args, timeoutMs);
+  }
+
+  async executeByRegistryName(
+    registryName: string,
+    args: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    const parsed = this.parseRegistryName(registryName);
+    if (!parsed) {
+      return { ok: false, result: { error: `无效的 MCP 工具名: ${registryName}` } };
+    }
+    return this.callTool(parsed.serverAlias, parsed.toolName, args, timeoutMs);
+  }
+
+  async healthCheck(): Promise<{
+    ok: boolean;
+    detail: string;
+    servers: Record<string, { ok: boolean; toolCount: number; mode: string }>;
+  }> {
+    const bin = resolveMcporterBin();
+    const versionResult = await this.runCommand(bin, ["--version"], 6_000).catch(() => ({
+      ok: false, stdout: "", stderr: "mcporter 未安装", code: 1,
+    }));
+
+    const servers: Record<string, { ok: boolean; toolCount: number; mode: string }> = {};
+    for (const server of this.servers) {
+      const tools = Array.from(this.toolCache.values()).filter((t) => t.serverAlias === server.alias);
+      servers[server.alias] = {
+        ok: tools.length > 0,
+        toolCount: tools.length,
+        mode: server.type === "npm" ? "stdio" : "mcporter",
+      };
+    }
+
+    return {
+      ok: versionResult.ok || Object.values(servers).some((s) => s.ok),
+      detail: versionResult.ok
+        ? (versionResult.stdout || "ok").split(/\r?\n/)[0] ?? "ok"
+        : "mcporter 不可用，部分 stdio 服务可能正常",
+      servers,
+    };
+  }
+
+  /** 关闭所有 stdio 子进程 */
+  closeAll(): void {
+    for (const [alias, instance] of this.stdioInstances) {
+      try {
+        instance.process.kill();
+      } catch {
+        // ignore
+      }
+      this.stdioInstances.delete(alias);
+    }
+  }
+
+  // ========== mcporter 模式 ==========
+
+  private async discoverMcporterTools(server: McpServerConfig): Promise<void> {
+    const bin = resolveMcporterBin();
+    const result = await this.runCommand(bin, ["list", server.alias], 15_000);
+    if (!result.ok) return;
+
+    const tools = this.parseMcporterToolList(result.stdout, server.alias);
+    for (const tool of tools) {
+      this.toolCache.set(tool.name, tool);
+    }
+  }
+
+  private async callMcporterTool(
+    serverAlias: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
   ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
     const bin = resolveMcporterBin();
     const callExpr = this.buildCallExpression(serverAlias, toolName, args);
@@ -166,63 +256,230 @@ export class McpClientService {
       };
     }
 
-    // 尝试解析 JSON 输出
     try {
       const parsed = JSON.parse(result.stdout);
       return { ok: true, result: typeof parsed === "object" && parsed !== null ? parsed : { data: parsed } };
     } catch {
-      // 非 JSON 输出，直接返回文本
       return { ok: true, result: { text: result.stdout } };
     }
   }
 
-  /**
-   * 通过注册名调用工具（格式 mcp.<alias>.<tool_name>）
-   */
-  async executeByRegistryName(
-    registryName: string,
-    args: Record<string, unknown>,
-    timeoutMs?: number,
-  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
-    const parsed = this.parseRegistryName(registryName);
-    if (!parsed) {
-      return { ok: false, result: { error: `无效的 MCP 工具名: ${registryName}` } };
+  // ========== stdio 模式（JSON-RPC 2.0 over stdin/stdout）==========
+
+  private async discoverStdioTools(server: McpServerConfig): Promise<void> {
+    const instance = await this.getOrCreateStdioInstance(server);
+    if (!instance) return;
+
+    try {
+      const response = await this.sendStdioRequest(instance, "tools/list", {}) as {
+        tools?: Array<{ name?: string; description?: string; inputSchema?: Record<string, unknown> }>;
+      } | null;
+      if (response?.tools) {
+        for (const tool of response.tools) {
+          if (typeof tool !== "object" || !tool.name) continue;
+          this.toolCache.set(`mcp.${server.alias}.${tool.name}`, {
+            name: `mcp.${server.alias}.${tool.name}`,
+            description: tool.description || `${server.alias} MCP 工具: ${tool.name}`,
+            parameters: tool.inputSchema || { type: "object", properties: {} },
+            serverAlias: server.alias,
+            rawToolName: tool.name,
+          });
+        }
+      }
+    } catch (e) {
+      // discover 失败
     }
-    return this.callTool(parsed.serverAlias, parsed.toolName, args, timeoutMs);
   }
 
-  /**
-   * 健康检查：验证 mcporter 是否可用
-   */
-  async healthCheck(): Promise<{ ok: boolean; detail: string; servers: Record<string, { ok: boolean; toolCount: number }> }> {
-    const bin = resolveMcporterBin();
-    const versionResult = await this.runCommand(bin, ["--version"], 6_000);
+  private async callStdioTool(
+    serverAlias: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    _timeoutMs: number,
+  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    const instance = this.stdioInstances.get(serverAlias);
+    if (!instance || !instance.initialized) {
+      return { ok: false, result: { error: `MCP stdio 服务 ${serverAlias} 未就绪` } };
+    }
 
-    if (!versionResult.ok) {
+    try {
+      const response = await this.sendStdioRequest(instance, "tools/call", {
+        name: toolName,
+        arguments: args,
+      }) as { content?: Array<{ type?: string; text?: string }> } | null;
+
+      // MCP tools/call 返回 { content: [{ type: "text", text: "..." }] }
+      if (response?.content) {
+        const texts = response.content
+          .filter((c: { type?: string; text?: string }) => c.type === "text")
+          .map((c: { text?: string }) => c.text)
+          .join("\n");
+
+        // 尝试解析为 JSON
+        try {
+          const parsed = JSON.parse(texts);
+          return { ok: true, result: typeof parsed === "object" ? parsed : { text: texts } };
+        } catch {
+          return { ok: true, result: { text: texts } };
+        }
+      }
+
+      return { ok: true, result: (response as Record<string, unknown>) || {} };
+    } catch (e) {
       return {
         ok: false,
-        detail: `mcporter 不可用: ${versionResult.stderr || "未安装或不在 PATH 中"}`,
-        servers: {},
+        result: { error: `MCP stdio 调用失败(${serverAlias}.${toolName}): ${(e as Error).message}` },
       };
     }
-
-    const servers: Record<string, { ok: boolean; toolCount: number }> = {};
-    for (const server of this.servers) {
-      const tools = Array.from(this.toolCache.values()).filter((t) => t.serverAlias === server.alias);
-      servers[server.alias] = {
-        ok: tools.length > 0,
-        toolCount: tools.length,
-      };
-    }
-
-    return {
-      ok: true,
-      detail: (versionResult.stdout || versionResult.stderr || "ok").split(/\r?\n/)[0] ?? "ok",
-      servers,
-    };
   }
 
-  // ---------- 内部方法 ----------
+  /** 获取或创建 stdio 子进程实例 */
+  private async getOrCreateStdioInstance(server: McpServerConfig): Promise<StdioServerInstance | null> {
+    const existing = this.stdioInstances.get(server.alias);
+    if (existing) return existing;
+
+    const command = server.command || "npx";
+    const args = server.args || [];
+    const envVars = { ...process.env, ...server.env };
+
+    return new Promise((resolve) => {
+      const child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: envVars,
+        windowsHide: true,
+      });
+
+      const instance: StdioServerInstance = {
+        process: child,
+        requestId: 0,
+        pendingRequests: new Map(),
+        buffer: "",
+        initialized: false,
+      };
+
+      child.on("error", (err) => {
+        console.error(`[MCP] stdio 进程启动失败 (${server.alias}):`, err.message);
+        resolve(null);
+      });
+
+      // stderr 日志输出
+      child.stderr?.on("data", (chunk) => {
+        const msg = String(chunk).trim();
+        if (msg) console.debug(`[MCP][${server.alias}] stderr: ${msg}`);
+      });
+
+      // stdout 数据收集 + JSON-RPC 响应解析
+      child.stdout?.on("data", (chunk) => {
+        instance.buffer += String(chunk);
+        this.tryParseStdioResponses(instance);
+      });
+
+      child.on("exit", (code) => {
+        console.warn(`[MCP] stdio 进程退出 (${server.alias}), code=${code}`);
+        this.stdioInstances.delete(server.alias);
+        // 拒绝所有待处理请求
+        for (const [, pending] of instance.pendingRequests) {
+          pending.reject(new Error(`MCP 进程 ${server.alias} 已退出`));
+        }
+      });
+
+      // 等待进程就绪后发送 initialize
+      setTimeout(async () => {
+        try {
+          const initResponse = await this.sendStdioRequest(instance, "initialize", {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "private-ai-agent", version: "1.0.0" },
+          });
+
+          if (initResponse) {
+            // 发送 initialized 通知
+            this.sendStdioNotification(instance, "notifications/initialized");
+            instance.initialized = true;
+            this.stdioInstances.set(server.alias, instance);
+            resolve(instance);
+          } else {
+            resolve(null);
+          }
+        } catch (e) {
+          console.error(`[MCP] stdio 初始化失败 (${server.alias}):`, e);
+          resolve(null);
+        }
+      }, 1000); // 给子进程一点启动时间
+    });
+  }
+
+  /** 发送 JSON-RPC 请求（有响应） */
+  private sendStdioRequest(
+    instance: StdioServerInstance,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const id = ++instance.requestId;
+      const message = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+
+      instance.pendingRequests.set(id, { resolve, reject });
+
+      const timer = setTimeout(() => {
+        instance.pendingRequests.delete(id);
+        reject(new Error(`MCP 请求超时: ${method}`));
+      }, 30_000);
+
+      // 替换 resolve/reject 以便超时时清理
+      const origResolve = resolve;
+      const origReject = reject;
+      instance.pendingRequests.set(id, {
+        resolve: (v) => { clearTimeout(timer); origResolve(v); },
+        reject: (e) => { clearTimeout(timer); origReject(e); },
+      });
+
+      instance.process.stdin!.write(message + "\n");
+    });
+  }
+
+  /** 发送 JSON-RPC 通知（无响应） */
+  private sendStdioNotification(
+    instance: StdioServerInstance,
+    method: string,
+    params?: Record<string, unknown>,
+  ): void {
+    const message = JSON.stringify({ jsonrpc: "2.0", method, params });
+    instance.process.stdin!.write(message + "\n");
+  }
+
+  /** 尝试从缓冲区解析完整的 JSON-RPC 响应 */
+  private tryParseStdioResponses(instance: StdioServerInstance): void {
+    let pos = 0;
+    while (pos < instance.buffer.length) {
+      const newlineIdx = instance.buffer.indexOf("\n", pos);
+      if (newlineIdx === -1) break;
+
+      const line = instance.buffer.slice(pos, newlineIdx).trim();
+      pos = newlineIdx + 1;
+
+      if (!line) continue;
+
+      try {
+        const msg = JSON.parse(line);
+        if (msg.id != null && instance.pendingRequests.has(msg.id)) {
+          const pending = instance.pendingRequests.get(msg.id)!;
+          instance.pendingRequests.delete(msg.id);
+          if (msg.error) {
+            pending.reject(new Error(msg.error.message || "MCP 错误"));
+          } else {
+            pending.resolve(msg.result);
+          }
+        }
+      } catch {
+        // 非完整 JSON 行，跳过
+      }
+    }
+
+    instance.buffer = instance.buffer.slice(pos);
+  }
+
+  // ========== 通用工具方法 ==========
 
   private async runCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {
     try {
@@ -247,56 +504,44 @@ export class McpClientService {
     }
   }
 
-  /**
-   * 解析 mcporter list 输出，提取工具列表
-   * 输出格式示例（每行一个工具）：
-   *   search_weibo_content(keyword: string, limit: number) - 搜索微博内容
-   *   或 JSON 格式
-   */
-  private parseToolList(stdout: string, serverAlias: string): McpToolSchema[] {
+  /** 解析 mcporter list 输出 */
+  private parseMcporterToolList(stdout: string, serverAlias: string): McpToolSchema[] {
     const tools: McpToolSchema[] = [];
 
-    // 尝试 JSON 解析
     try {
       const parsed = JSON.parse(stdout);
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
-          if (typeof item === "object" && item !== null) {
-            const rawName = item.name || item.tool_name || "";
-            if (!rawName) continue;
-            tools.push({
-              name: `mcp.${serverAlias}.${rawName}`,
-              description: item.description || `${serverAlias} MCP 工具: ${rawName}`,
-              parameters: item.parameters || item.inputSchema || { type: "object", properties: {} },
-              serverAlias,
-              rawToolName: rawName,
-            });
-          }
+          if (typeof item !== "object" || item === null) continue;
+          const rawName = item.name || item.tool_name || "";
+          if (!rawName) continue;
+          tools.push({
+            name: `mcp.${serverAlias}.${rawName}`,
+            description: item.description || `${serverAlias} MCP 工具: ${rawName}`,
+            parameters: item.parameters || item.inputSchema || { type: "object", properties: {} },
+            serverAlias,
+            rawToolName: rawName,
+          });
         }
         return tools;
       }
     } catch {
-      // 非 JSON，尝试文本解析
+      // 非 JSON
     }
 
-    // 文本格式解析：每行一个工具
+    // 文本格式回退
     const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     for (const line of lines) {
-      // 匹配格式：tool_name(param1: type1, ...) - description
       const match = line.match(/^(\w+)\s*\(([^)]*)\)\s*(?:-\s*)?(.*)$/);
       if (match) {
-        const rawName = match[1];
-        const paramsStr = match[2];
-        const description = match[3] || `${serverAlias} MCP 工具: ${rawName}`;
         tools.push({
-          name: `mcp.${serverAlias}.${rawName}`,
-          description,
-          parameters: this.parseParamsString(paramsStr),
+          name: `mcp.${serverAlias}.${match[1]}`,
+          description: match[3] || `${serverAlias} MCP 工具: ${match[1]}`,
+          parameters: this.parseParamsString(match[2]),
           serverAlias,
-          rawToolName: rawName,
+          rawToolName: match[1],
         });
       } else if (/^\w+$/.test(line)) {
-        // 纯工具名
         tools.push({
           name: `mcp.${serverAlias}.${line}`,
           description: `${serverAlias} MCP 工具: ${line}`,
@@ -310,63 +555,42 @@ export class McpClientService {
     return tools;
   }
 
-  /** 解析参数字符串为 JSON Schema */
   private parseParamsString(paramsStr: string): Record<string, unknown> {
-    if (!paramsStr.trim()) {
-      return { type: "object", properties: {} };
-    }
+    if (!paramsStr.trim()) return { type: "object", properties: {} };
 
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
 
-    const params = paramsStr.split(",").map((p) => p.trim()).filter(Boolean);
-    for (const param of params) {
+    for (const param of paramsStr.split(",").map((p) => p.trim()).filter(Boolean)) {
       const parts = param.split(":").map((s) => s.trim());
       const name = parts[0];
       if (!name) continue;
 
       const typeStr = parts[1]?.toLowerCase() || "string";
       let type = "string";
-      if (typeStr.includes("int") || typeStr.includes("num") || typeStr.includes("float") || typeStr === "number") {
-        type = "number";
-      } else if (typeStr.includes("bool")) {
-        type = "boolean";
-      } else if (typeStr.includes("arr") || typeStr.includes("list")) {
-        type = "array";
-      }
+      if (/int|num|float/.test(typeStr) || typeStr === "number") type = "number";
+      else if (typeStr.includes("bool")) type = "boolean";
+      else if (/arr|list/.test(typeStr)) type = "array";
 
       properties[name] = { type, description: `${name} 参数` };
       required.push(name);
     }
 
-    return {
-      type: "object",
-      properties,
-      required,
-      additionalProperties: false,
-    };
+    return { type: "object", properties, required, additionalProperties: false };
   }
 
-  /** 构建调用表达式：alias.tool_name(key1: val1, key2: val2) */
   private buildCallExpression(serverAlias: string, toolName: string, args: Record<string, unknown>): string {
     const argsStr = Object.entries(args)
-      .map(([k, v]) => {
-        if (typeof v === "string") return `${k}: ${JSON.stringify(v)}`;
-        return `${k}: ${JSON.stringify(v)}`;
-      })
+      .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
       .join(", ");
     return `${serverAlias}.${toolName}(${argsStr})`;
   }
 
-  /** 解析注册名 mcp.<alias>.<tool_name> */
   private parseRegistryName(registryName: string): { serverAlias: string; toolName: string } | null {
     if (!registryName.startsWith("mcp.")) return null;
-    const rest = registryName.slice(4); // 去掉 "mcp."
+    const rest = registryName.slice(4);
     const dotIndex = rest.indexOf(".");
     if (dotIndex === -1) return null;
-    return {
-      serverAlias: rest.slice(0, dotIndex),
-      toolName: rest.slice(dotIndex + 1),
-    };
+    return { serverAlias: rest.slice(0, dotIndex), toolName: rest.slice(dotIndex + 1) };
   }
 }

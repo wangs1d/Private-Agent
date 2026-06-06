@@ -32,18 +32,10 @@ function parseBooleanEnv(raw: string | undefined): boolean {
 }
 
 export type DesktopBridgeCoordinatorOptions = {
-  /** 向该 actor 的主聊天 WS 推送同步（手机端） */
   onSync?: (actorId: string, payload: DesktopBridgeSyncPayload) => void;
+  onTaskResult?: (actorId: string, payload: DesktopBridgeSyncPayload) => void;
 };
 
-/**
- * 手机经服务端调度 → 已绑定 WebSocket 的电脑端执行纯视觉桌面任务。
- * 与 {@link WsConnectionRegistry} 分离，避免电脑桥接连接抢占手机聊天下行。
- *
- * 启用条件：{@link isBridgeFeatureEnabled}（`DESKTOP_BRIDGE_ENABLED=1` 或配置了 `DESKTOP_BRIDGE_TOKEN`）。
- * 无配对码模式：`session.init` 带 `desktopBridge:true` 且与手机相同的 **userId** 即自动绑定；
- * 若配置了 `DESKTOP_BRIDGE_TOKEN`，则须额外发送 `desktop.bridge.register` 校验 token。
- */
 export class DesktopBridgeCoordinator {
   private readonly executors = new Map<string, WsSendLike>();
   private readonly pending = new Map<string, PendingJob>();
@@ -55,19 +47,16 @@ export class DesktopBridgeCoordinator {
 
   constructor(private readonly opts?: DesktopBridgeCoordinatorOptions) {}
 
-  /** 是否开启「电脑桥接」能力（与是否已连接无关） */
   isBridgeFeatureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
     if (parseBooleanEnv(env.DESKTOP_BRIDGE_ENABLED)) return true;
     const t = env.DESKTOP_BRIDGE_TOKEN?.trim() ?? "";
     return t.length >= 8;
   }
 
-  /** @deprecated 使用 {@link isBridgeFeatureEnabled} */
   isBridgeModeConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
     return this.isBridgeFeatureEnabled(env);
   }
 
-  /** 若服务端配置了 token，则电脑端须通过 register 提交相同 token */
   requiresRegisterToken(env: NodeJS.ProcessEnv = process.env): boolean {
     const t = env.DESKTOP_BRIDGE_TOKEN?.trim() ?? "";
     return t.length >= 8;
@@ -105,6 +94,7 @@ export class DesktopBridgeCoordinator {
       error: result.error,
     });
     this.pushSync(actorId);
+    this.opts?.onTaskResult?.(actorId, this.getSyncPayload(actorId));
   }
 
   private pushSync(actorId: string): void {
@@ -148,7 +138,7 @@ export class DesktopBridgeCoordinator {
       if (p.socket === socket) {
         clearTimeout(p.timer);
         this.pending.delete(jobId);
-        p.resolve({ ok: false, error: "桌面桥接连接已断开" });
+        p.resolve({ ok: false, error: "desktop bridge disconnected" });
       }
     }
   }
@@ -171,7 +161,7 @@ export class DesktopBridgeCoordinator {
       const timer = setTimeout(() => {
         if (!this.pending.has(jobId)) return;
         this.pending.delete(jobId);
-        resolve({ ok: false, error: `电脑端执行超时（>${timeoutMs}ms）` });
+        resolve({ ok: false, error: `desktop execution timeout > ${timeoutMs}ms` });
       }, timeoutMs);
       this.pending.set(jobId, { socket, timer, resolve });
       try {
@@ -184,7 +174,7 @@ export class DesktopBridgeCoordinator {
       } catch {
         clearTimeout(timer);
         this.pending.delete(jobId);
-        resolve({ ok: false, error: "向电脑端发送任务失败（连接异常）" });
+        resolve({ ok: false, error: "failed to send task to desktop bridge" });
       }
     });
   }

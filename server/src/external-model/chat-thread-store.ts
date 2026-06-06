@@ -11,63 +11,112 @@ import {
   sanitizeToolCallMessageChain,
 } from "./chat-thread-sanitize.js";
 
-const DEFAULT_MAX_TURN_MESSAGES = 48;
-
-/**
- * 智能消息历史裁剪配置
- * 预期效果：Token 消耗 -50%，保持关键上下文
- */
-interface SmartTrimConfig {
-  maxMessages: number;
-  maxTokens: number; // 基于估算的 token 上限
-  preserveRecentTurns: number; // 始终保留最近的 N 轮对话
-}
-
-const DEFAULT_SMART_TRIM_CONFIG: SmartTrimConfig = {
-  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? '20'),
-  maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? '8000'),
+const DEFAULT_SMART_TRIM_CONFIG = {
+  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? "20", 10),
+  maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? "8000", 10),
   preserveRecentTurns: 4,
 };
 
+const TIME_FRAME_PREFIX = "[timeframe:";
+
 function estimateTokens(text: string | null | undefined): number {
   if (!text) return 0;
-  // 粗略估算：中文约1.5 token/字符，英文约0.25 token/单词
   const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const englishWords = text.replace(/[\u4e00-\u9fa5]/g, ' ').split(/\s+/).filter(w => w.length > 0).length;
+  const englishWords = text.replace(/[\u4e00-\u9fa5]/g, " ").split(/\s+/).filter((w) => w.length > 0).length;
   return Math.ceil(chineseChars * 1.5 + englishWords * 0.25);
 }
 
 function estimateMessageTokens(msg: ChatCompletionMessageParam | null | undefined): number {
   if (!msg || typeof msg.role !== "string") return 0;
-  let tokens = 0;
-
-  // role token
-  tokens += 2;
-
-  // content tokens
-  if (typeof msg.content === 'string') {
+  let tokens = 2;
+  if (typeof msg.content === "string") {
     tokens += estimateTokens(msg.content);
   } else if (Array.isArray(msg.content)) {
     for (const part of msg.content) {
-      if (part.type === 'text') {
-        tokens += estimateTokens((part as { text?: string })?.text);
-      } else if (part.type === 'image_url') {
-        tokens += 500; // 图像通常消耗较多token
+      if (part.type === "text") {
+        tokens += estimateTokens((part as { text?: string }).text);
+      } else if (part.type === "image_url") {
+        tokens += 500;
       }
     }
   }
-  
-  // tool_calls tokens
-  if ('tool_calls' in msg && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
-    tokens += 50 * (msg as { tool_calls: unknown[] }).tool_calls.length;
+  if ("tool_calls" in msg && Array.isArray((msg as { tool_calls?: unknown[] }).tool_calls)) {
+    tokens += 50 * ((msg as { tool_calls: unknown[] }).tool_calls?.length ?? 0);
   }
-  
-  // tool result tokens
-  if (msg.role === 'tool' && typeof msg.content === 'string') {
-    tokens += Math.min(estimateTokens(msg.content), 1000); // 工具结果限制最大1000 tokens
+  if (msg.role === "tool" && typeof msg.content === "string") {
+    tokens += Math.min(estimateTokens(msg.content), 1000);
   }
-  
   return tokens;
+}
+
+function weekdayName(date: Date): string {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()] ?? "Unknown";
+}
+
+function timeOfDayLabel(date: Date): string {
+  const hour = date.getHours();
+  if (hour < 5) return "deep night";
+  if (hour < 8) return "early morning";
+  if (hour < 12) return "morning";
+  if (hour < 14) return "noon";
+  if (hour < 18) return "afternoon";
+  if (hour < 22) return "evening";
+  return "late night";
+}
+
+function sameLocalDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function dayDiff(from: Date, to: Date): number {
+  const fromDay = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
+  const toDay = new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime();
+  return Math.round((toDay - fromDay) / 86_400_000);
+}
+
+function describeRelativeTime(at: Date, now = new Date()): string {
+  const diffMs = now.getTime() - at.getTime();
+  if (diffMs < 0) return "in the future";
+
+  const diffMinutes = Math.floor(diffMs / 60_000);
+  const diffHours = Math.floor(diffMs / 3_600_000);
+  const diffDays = dayDiff(at, now);
+
+  if (diffMinutes <= 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  if (sameLocalDay(at, now)) return `${diffHours}h ago`;
+  if (diffDays === 1) return `yesterday ${timeOfDayLabel(at)}`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  if (diffDays < 14) return "last week";
+  if (diffDays < 31) return `${Math.floor(diffDays / 7)}w ago`;
+  if (diffDays < 62) return "last month";
+  return `${Math.floor(diffDays / 30)}mo ago`;
+}
+
+function annotateTimeframe(content: string, _at = new Date(), _now = new Date()): string {
+  const trimmed = content.trim();
+  // 兼容历史消息：去除已有的 timeframe 前缀行
+  if (trimmed.startsWith(TIME_FRAME_PREFIX)) {
+    const newlineIdx = trimmed.indexOf("\n");
+    return newlineIdx >= 0 ? trimmed.slice(newlineIdx + 1).trim() : trimmed;
+  }
+  return trimmed;
+}
+
+function annotateMessageIfNeeded(msg: ChatCompletionMessageParam): ChatCompletionMessageParam {
+  if ((msg.role === "user" || msg.role === "assistant") && typeof msg.content === "string") {
+    return { ...msg, content: annotateTimeframe(msg.content) };
+  }
+  return msg;
+}
+
+function annotateUserContentIfString(content: ChatCompletionMessageParam["content"]) {
+  if (typeof content === "string") return annotateTimeframe(content);
+  return content ?? "";
 }
 
 export class ChatThreadStore {
@@ -90,7 +139,9 @@ export class ChatThreadStore {
       if (restored?.length) {
         t = [
           { role: "system", content: defaultSystemPrompt },
-          ...repairKimiAssistantToolCallReasoning(compactValidChatMessages(restored)),
+          ...repairKimiAssistantToolCallReasoning(
+            compactValidChatMessages(restored.map((msg) => annotateMessageIfNeeded(msg))),
+          ),
         ];
         this.history.set(sessionId, t);
       }
@@ -102,15 +153,8 @@ export class ChatThreadStore {
     return t;
   }
 
-  /**
-   * 智能裁剪消息历史（性能优化版）
-   * 支持基于消息数量和 Token 数量的双重限制
-   */
   trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
-    const compacted = sanitizeToolCallMessageChain(
-      compactValidChatMessages(msgs),
-      "[chat-thread-store]",
-    );
+    const compacted = sanitizeToolCallMessageChain(compactValidChatMessages(msgs), "[chat-thread-store]");
     msgs.length = 0;
     msgs.push(...repairKimiAssistantToolCallReasoning(compacted));
 
@@ -118,49 +162,38 @@ export class ChatThreadStore {
       ...DEFAULT_SMART_TRIM_CONFIG,
       maxMessages: maxMessages ?? DEFAULT_SMART_TRIM_CONFIG.maxMessages,
     };
-    
+
     if (msgs.length <= 1 + config.maxMessages) {
-      // 即使消息数量在限制内，也要检查 token 数量
       const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
       if (totalTokens <= config.maxTokens) return;
-      
-      // Token 超限，执行智能裁剪
       this.smartTrimByTokens(msgs, config);
       return;
     }
-    
+
     const sys = msgs[0];
     const rest = msgs.slice(1);
     const trimmed = trimPreservingToolPairs(rest, config.maxMessages);
     msgs.length = 0;
     msgs.push(sys, ...trimmed);
-    
-    // 二次检查 token 数量
+
     const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     if (totalTokens > config.maxTokens) {
       this.smartTrimByTokens(msgs, config);
     }
   }
 
-  /**
-   * 基于 Token 数量的智能裁剪
-   * 保留最近对话 + 关键工具调用上下文
-   */
-  private smartTrimByTokens(msgs: ChatCompletionMessageParam[], config: SmartTrimConfig): void {
-    if (msgs.length <= 2) return; // 至少保留 system + 1条消息
-    
+  private smartTrimByTokens(
+    msgs: ChatCompletionMessageParam[],
+    config: typeof DEFAULT_SMART_TRIM_CONFIG,
+  ): void {
+    if (msgs.length <= 2) return;
     const sys = msgs[0];
     const rest = msgs.slice(1);
-    
-    // 分离出最近的消息（始终保留）
-    const recentMessages = rest.slice(-config.preserveRecentTurns * 2); // 每轮包含 user + assistant
+    const recentMessages = rest.slice(-config.preserveRecentTurns * 2);
     const olderMessages = rest.slice(0, -config.preserveRecentTurns * 2);
-    
-    // 计算当前 token 消耗
-    let currentTokens = estimateMessageTokens(sys) + 
-      recentMessages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
-    
-    // 旧消息按完整轮次裁剪，避免 assistant/tool 链被拆散
+    let currentTokens =
+      estimateMessageTokens(sys) + recentMessages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+
     const olderGroups = groupMessagesPreservingToolPairs(olderMessages);
     const preservedOlder: ChatCompletionMessageParam[] = [];
     for (let g = olderGroups.length - 1; g >= 0 && currentTokens < config.maxTokens; g--) {
@@ -171,7 +204,6 @@ export class ChatThreadStore {
       currentTokens += groupTokens;
     }
 
-    // 组装最终结果
     msgs.length = 0;
     msgs.push(
       sys,
@@ -189,13 +221,20 @@ export class ChatThreadStore {
     const trimmed = assistantText.trim();
     if (!trimmed) return;
     const msgs = this.thread(sessionId, defaultSystemPrompt);
-    msgs.push({ role: "user", content: openAiUserContentFromTurn(userTurn) });
-    msgs.push({ role: "assistant", content: trimmed });
+    const userMessage = {
+      role: "user",
+      content: annotateUserContentIfString(openAiUserContentFromTurn(userTurn)),
+    } as ChatCompletionMessageParam;
+    msgs.push(userMessage);
+    msgs.push({ role: "assistant", content: annotateTimeframe(trimmed) });
     this.trimThread(msgs, maxThreadMessages);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 
   afterTurnCompleted(sessionId: string, msgs: ChatCompletionMessageParam[]): void {
+    const annotated = msgs.map((msg) => annotateMessageIfNeeded(msg));
+    msgs.length = 0;
+    msgs.push(...annotated);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 }
@@ -218,14 +257,12 @@ function groupMessagesPreservingToolPairs(
 ): ChatCompletionMessageParam[][] {
   const groups: ChatCompletionMessageParam[][] = [];
   let i = 0;
-
   while (i < messages.length) {
     const msg = messages[i];
     if (!msg || typeof msg.role !== "string") {
       i++;
       continue;
     }
-
     if (msg.role === "assistant" && Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
       const group: ChatCompletionMessageParam[] = [msg];
       i++;
@@ -236,7 +273,6 @@ function groupMessagesPreservingToolPairs(
       groups.push(group);
       continue;
     }
-
     if (msg.role === "tool") {
       const orphanTools: ChatCompletionMessageParam[] = [];
       while (i < messages.length && messages[i]?.role === "tool") {
@@ -244,17 +280,13 @@ function groupMessagesPreservingToolPairs(
         i++;
       }
       if (orphanTools.length > 0) {
-        console.warn(
-          `[chat-thread-store] Skipping ${orphanTools.length} orphan tool message(s) during trim`,
-        );
+        console.warn(`[chat-thread-store] Skipping ${orphanTools.length} orphan tool message(s) during trim`);
       }
       continue;
     }
-
     groups.push([msg]);
     i++;
   }
-
   return groups;
 }
 
@@ -265,7 +297,6 @@ function trimPreservingToolPairs(
   if (messages.length <= maxMessages) {
     return sanitizeToolCallMessageChain(messages, "[chat-thread-store-trim]");
   }
-
   const groups = groupMessagesPreservingToolPairs(messages);
   const result: ChatCompletionMessageParam[] = [];
   let total = 0;
@@ -274,6 +305,5 @@ function trimPreservingToolPairs(
     result.unshift(...groups[g]);
     total += groups[g].length;
   }
-
   return sanitizeToolCallMessageChain(result, "[chat-thread-store-trim]");
 }

@@ -33,6 +33,9 @@ import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dial
 import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
 import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
 import type { McpClientService } from "../services/mcp-client-service.js";
+import type { LifeSignalHubService } from "../services/life-signal-hub-service.js";
+import type { MarketSignalService } from "../services/market-signal-service.js";
+import type { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -67,6 +70,9 @@ export type AppServices = {
   intelligentReminderService: IntelligentReminderService;
   reminderResponsePersistence: UserResponsePersistenceService;
   mcpClientService: McpClientService;
+  lifeSignalHubService: LifeSignalHubService;
+  marketSignalService: MarketSignalService;
+  proactiveLifeRuntimeService: ProactiveLifeRuntimeService;
 };
 
 export type SkillMetadataValidator = {

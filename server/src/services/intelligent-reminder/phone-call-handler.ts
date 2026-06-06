@@ -80,11 +80,19 @@ export class PhoneCallHandler {
 
     let callResult;
     if (actorId) {
-      callResult = await this.deps.virtualPhoneService.callUser({
+      /** 前摇引导语：振铃阶段让用户知道这是提醒来电 */
+      const preGreeting = this.buildPreGreeting(instance);
+      const fullTranscript = `${preGreeting}\n\n${instance.config.message}`;
+
+      callResult = await this.deps.virtualPhoneService.callUserWithRinging({
         fromActorId: actorId,
         toUserId: userId,
-        transcript: instance.config.message,
+        transcript: fullTranscript,
         ringStyle: "reminder",
+        ringPhase: {
+          enableRingingPhase: true,
+          ringDurationMs: config.ringDurationMs ?? 8_000,
+        },
       });
     } else {
       return false;
@@ -245,6 +253,36 @@ export class PhoneCallHandler {
         resolve(null);
       }, 1000);
     });
+  }
+
+  /**
+   * 构建前摇引导语。
+   * 在振铃阶段结束后、正式提醒内容播放前，给用户一个自然的"接通感"。
+   */
+  private buildPreGreeting(instance: ReminderInstance): string {
+    const title = instance.config.title ?? "提醒";
+    const priority = instance.config.priority ?? "normal";
+    const timeLabel = this.formatTimeLabel();
+
+    const priorityHint =
+      priority === "urgent"
+        ? "紧急"
+        : priority === "high"
+          ? "重要"
+          : "";
+
+    return `叮铃铃——您好，我是您的 Agent。${timeLabel}有一条${priorityHint}${title}提醒，请听好。`;
+  }
+
+  private formatTimeLabel(): string {
+    const hour = new Date().getHours();
+    if (hour < 6) return "深夜";
+    if (hour < 9) return "早上";
+    if (hour < 12) return "上午";
+    if (hour < 14) return "中午";
+    if (hour < 18) return "下午";
+    if (hour < 22) return "晚上";
+    return "夜间";
   }
 
   private async sendIncomingCallNotification(

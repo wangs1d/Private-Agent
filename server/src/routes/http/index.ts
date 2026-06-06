@@ -30,6 +30,8 @@ import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerDownloadRoutes } from "./downloads.js";
+import { registerLifeSignalRoutes } from "./life-signals.js";
+import { registerMarketSignalRoutes } from "./market-signals.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -66,4 +68,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
   registerNightlyMemoryRoutes(app);
   registerDownloadRoutes(app);
+  registerLifeSignalRoutes(app, deps);
+  registerMarketSignalRoutes(app, deps);
 }

@@ -1,6 +1,7 @@
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
+#include <cstdio>
 
 #include "flutter_window.h"
 #include "utils.h"
@@ -12,6 +13,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
     CreateAndAttachConsole();
   }
+
+  // Suppress libpng "iCCP: known incorrect sRGB profile" warnings emitted by
+  // the Flutter engine's built-in PNG resources. These are harmless and only
+  // clutter the console output. Critical engine errors are still reported via
+  // Dart's FlutterError.onError / PlatformDispatcher.onError.
+  FILE* stderr_sink;
+  freopen_s(&stderr_sink, "NUL", "w", stderr);
 
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.

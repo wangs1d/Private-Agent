@@ -347,11 +347,81 @@ function extractTagText(html: string, tagName: string): string {
 }
 
 function htmlToText(html: string): string {
-  const withoutScripts = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ");
-  const plain = withoutScripts.replace(/<[^>]+>/g, " ");
-  return decodeHtmlEntities(plain).replace(/\s+/g, " ").trim();
+  // 1. 移除 HTML 注释
+  let cleaned = html.replace(/<!--[\s\S]*?-->/g, " ");
+
+  // 2. 移除噪音标签（导航、页脚、侧边栏、广告等非正文区域）
+  const NOISE_TAGS = [
+    "nav", "footer", "aside",
+    "noscript", "svg", "canvas", "iframe", "object", "embed",
+    "template", "dialog", "modal", "popup",
+    "script", "style",
+  ];
+  for (const tag of NOISE_TAGS) {
+    cleaned = cleaned.replace(new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, "gi"), " ");
+  }
+
+  // 3. 移除常见广告/推广区域（通过 class/id 属性识别）
+  // 匹配包含广告关键词的 div/section/aside 标签块
+  const adKeywords = "ad[s]?|banner|sponsor|promo|widget|sidebar|cookie[- ]?consent|newsletter|social[- ]?share|related[- ]?post|comment|disqus";
+  cleaned = cleaned.replace(
+    new RegExp(`<(div|section|aside)[^>]*(?:class|id)[^>]*(${adKeywords})[^>]*>[\\s\\S]*?<\\/\\1>`, "gi"),
+    " ",
+  );
+  // 匹配任意标签中含广告关键词的 class/id 属性
+  cleaned = cleaned.replace(
+    new RegExp(`<[^>]+(?:class|id)[^>]*["']\\s*(${adKeywords})\\s*["'][^>]*>[\\s\\S]*?<\\/[^>]+>`, "gi"),
+    " ",
+  );
+
+  // 4. 保留语义化内容标签的文本，其余标签替换为空格
+  const CONTENT_TAGS = new Set([
+    "main", "article", "section",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "li", "td", "th", "dd", "dt",
+    "blockquote", "pre", "code", "figcaption", "caption",
+    "span", "a", "strong", "em", "b", "i", "u", "mark", "time",
+    "label", "option", "summary", "details",
+  ]);
+
+  let result = "";
+  const tagRegex = /<\/?([a-zA-Z][a-zA-Z0-9]*)[^>]*>/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tagRegex.exec(cleaned)) !== null) {
+    // 标签前的纯文本
+    if (match.index > lastIndex) {
+      result += cleaned.slice(lastIndex, match.index);
+    }
+    const tagName = match[1].toLowerCase();
+    const isClosingTag = match[0].startsWith("</");
+
+    // 内容标签：闭合时加换行分隔
+    if (CONTENT_TAGS.has(tagName)) {
+      if (isClosingTag && /^(p|h[1-6]|li|tr|dd|dt|figcaption|caption|blockquote|pre)$/.test(tagName)) {
+        result += "\n";
+      } else if (!isClosingTag && /^(h[1-6])$/.test(tagName)) {
+        result += "\n"; // 标题前换行
+      }
+      // 其他内容标签内的文本自然保留
+    } else {
+      // 非内容标签替换为空格
+      result += " ";
+    }
+    lastIndex = match.index + match[0].length;
+  }
+
+  // 处理末尾剩余文本
+  if (lastIndex < cleaned.length) {
+    result += cleaned.slice(lastIndex);
+  }
+
+  return decodeHtmlEntities(result)
+    .replace(/[ \t]+/g, " ")       // 多空格/制表符合并
+    .replace(/\n[ \t]+\n/g, "\n")   // 空行中的空格清理
+    .replace(/\n{3,}/g, "\n\n")     // 超过2个连续空行压缩为2个
+    .trim();
 }
 
 function summarizePlainText(text: string): string {
