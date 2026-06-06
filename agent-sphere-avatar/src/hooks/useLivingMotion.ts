@@ -84,6 +84,16 @@ export function useLivingMotion({
   const boundaryStimulateGuardRef = useRef(false);
   const lastSignificantMoveAtRef = useRef(0);
   const stuckGuardRef = useRef(false);
+  /** 触发式晃动状态（用于 2D 嵌入式桌宠） */
+  const shakeRef = useRef<{ intensity: number; until: number; lastImpulseAt: number }>({
+    intensity: 0,
+    until: 0,
+    lastImpulseAt: 0,
+  });
+  /** 垂直方向偏置（让 Y 位置小幅上下来回） */
+  const verticalBiasRef = useRef(0);
+  /** 360° 旋转累计（每次旋转时不重置，叠在 rotRef 上） */
+  const yawAccumRef = useRef(0);
 
   const refreshBounds = useCallback(() => {
     const margin = 20;
@@ -203,12 +213,43 @@ export function useLivingMotion({
 
   const setUserRotation = useCallback(
     (deg: number, velocity?: number) => {
+      // 360° 自由旋转：直接累加 deg，不再 wrap 到 [-180, 180]
       userRotRef.current = deg;
       if (velocity != null) userRotVelRef.current = velocity;
       applyTransform();
     },
     [applyTransform],
   );
+
+  /** 触发身体晃动（用于 2D 嵌入式桌宠） */
+  const triggerShake = useCallback((strength = 0.7, durationMs = 800) => {
+    const s = Math.min(1, Math.max(0.1, strength));
+    const now = performance.now();
+    const until = now + Math.max(150, durationMs);
+    if (s > shakeRef.current.intensity || shakeRef.current.until < now) {
+      shakeRef.current = { intensity: s, until, lastImpulseAt: 0 };
+    } else {
+      shakeRef.current.until = Math.max(shakeRef.current.until, until);
+    }
+    impulseRef.current = Math.min(1, impulseRef.current + 0.25 * s);
+    excitedUntilRef.current = Math.max(excitedUntilRef.current, now + durationMs);
+    // 注入初始冲量
+    velRef.current.vx += (Math.random() - 0.5) * 50 * s;
+    velRef.current.vy += (Math.random() - 0.5) * 40 * s;
+    verticalBiasRef.current = (Math.random() - 0.5) * s;
+  }, []);
+
+  /** 注入垂直方向偏置 */
+  const applyVerticalBias = useCallback((bias: number) => {
+    verticalBiasRef.current = Math.max(-1, Math.min(1, bias));
+  }, []);
+
+  /** 累加 360° yaw 旋转（用于跨多周旋转） */
+  const addYaw = useCallback((deg: number) => {
+    yawAccumRef.current += deg;
+    rotRef.current += deg;
+    applyTransform();
+  }, [applyTransform]);
 
   const stimulate = useCallback(
     (
@@ -367,6 +408,26 @@ export function useLivingMotion({
           vel.vy += (Math.random() - 0.5) * 170 * dt;
           if (Math.random() < 0.55) pickWaypoint();
         }
+
+        // 触发式晃动（2D 嵌入式）：周期性注入随机冲量
+        if (now < shakeRef.current.until) {
+          const s = shakeRef.current.intensity;
+          if (now - shakeRef.current.lastImpulseAt > 70) {
+            shakeRef.current.lastImpulseAt = now;
+            vel.vx += (Math.random() - 0.5) * 120 * s * dt * 12;
+            vel.vy += (Math.random() - 0.5) * 100 * s * dt * 12;
+            verticalBiasRef.current = (Math.random() - 0.5) * s;
+          }
+        } else if (shakeRef.current.intensity > 0) {
+          shakeRef.current.intensity = 0;
+          verticalBiasRef.current = 0;
+        }
+
+        // 垂直偏置：让 Y 方向来回小幅度偏移
+        if (Math.abs(verticalBiasRef.current) > 0.001) {
+          vel.vy += verticalBiasRef.current * 35 * dt * 12;
+        }
+
         const springK = moving ? (excited ? 3.6 : 2.9) : 1.3;
         const damping = excited ? 4.2 : 5.5;
 
@@ -431,19 +492,33 @@ export function useLivingMotion({
 
         const speed = Math.sqrt(vel.vx * vel.vx + vel.vy * vel.vy);
         const tiltTarget = speed > 2 ? clamp(vel.vx / Math.max(speed, 1) * 8, -8, 8) : 0;
+        // 360° 旋转时 rot 可以累加超过 180，这里只用于 tilt 小幅倾斜
         rotRef.current = lerp(rotRef.current, tiltTarget, 0.06 + speed * 0.004);
+
+        const shakeActive = now < shakeRef.current.until;
+        const shakeAmp = shakeActive ? shakeRef.current.intensity : 0;
+        const shakeWobble = shakeAmp > 0
+          ? Math.sin(tSec * 22) * 0.06 * shakeAmp + Math.cos(tSec * 17) * 0.04 * shakeAmp
+          : 0;
 
         scaleRef.current =
           1 +
           impulseRef.current * 0.04 +
           (behavior === "pausing" ? breath * 0.006 : 0) +
           (moodRef.current === "speaking" ? Math.sin(tSec * 12) * 0.012 * e : 0) +
-          (excited ? Math.sin(tSec * 14) * 0.018 : 0);
+          (excited ? Math.sin(tSec * 14) * 0.018 : 0) +
+          (shakeAmp > 0 ? Math.sin(tSec * 26) * 0.025 * shakeAmp : 0);
 
+        // 晃动时给旋转叠加额外抖动（保留 360° yaw 累计）
+        userRotRef.current += shakeWobble;
         userRotVelRef.current *= 0.9;
         userRotRef.current += userRotVelRef.current * dt;
         userRotRef.current *= 0.96;
-        if (Math.abs(userRotRef.current) < 0.2 && Math.abs(userRotVelRef.current) < 0.2) {
+        if (
+          Math.abs(userRotRef.current - shakeWobble * 0.5) < 0.2 &&
+          Math.abs(userRotVelRef.current) < 0.2 &&
+          !shakeActive
+        ) {
           userRotRef.current = 0;
           userRotVelRef.current = 0;
         }
@@ -601,6 +676,12 @@ export function useLivingMotion({
     pauseMotion,
     resumeMotion,
     setUserRotation,
+    /** 触发身体晃动（2D 嵌入式） */
+    triggerShake,
+    /** 注入垂直方向偏置（让 Y 位置上下小幅振荡） */
+    applyVerticalBias,
+    /** 累加 360° yaw（旋转可跨多周） */
+    addYaw,
     roamNow: () => {
       pickWaypoint();
       stimulate("boredom_spike");

@@ -1,8 +1,7 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "dart:async";
 
 import "../../core/services/multimodal_recognition_service.dart";
-import "../../core/services/voiceprint_service.dart";
 
 class VoiceprintRegistrationPage extends StatefulWidget {
   const VoiceprintRegistrationPage({
@@ -145,7 +144,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.1),
+                color: Colors.white.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Column(
@@ -161,7 +160,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                   const SizedBox(height: 16),
                   LinearProgressIndicator(
                     value: _progress,
-                    backgroundColor: Colors.white.withOpacity(0.2),
+                    backgroundColor: Colors.white.withValues(alpha: 0.2),
                     valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
                     minHeight: 8,
                   ),
@@ -169,7 +168,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                   Text(
                     _statusText,
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.8),
+                      color: Colors.white.withValues(alpha: 0.8),
                       fontSize: 16,
                     ),
                     textAlign: TextAlign.center,
@@ -189,15 +188,15 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _isRecording
-                      ? Colors.red.withOpacity(0.8)
+                      ? Colors.red.withValues(alpha: 0.8)
                       : _isRegistering
-                          ? Colors.grey.withOpacity(0.5)
-                          : cs.primary.withOpacity(0.8),
+                          ? Colors.grey.withValues(alpha: 0.5)
+                          : cs.primary.withValues(alpha: 0.8),
                   boxShadow: [
                     BoxShadow(
                       color: _isRecording
-                          ? Colors.red.withOpacity(0.4)
-                          : cs.primary.withOpacity(0.3),
+                          ? Colors.red.withValues(alpha: 0.4)
+                          : cs.primary.withValues(alpha: 0.3),
                       blurRadius: _isRecording ? 30 : 20,
                       spreadRadius: _isRecording ? 5 : 2,
                     ),
@@ -216,10 +215,10 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.05),
+                color: Colors.white.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: Colors.white.withOpacity(0.1),
+                  color: Colors.white.withValues(alpha: 0.1),
                 ),
               ),
               child: Column(
@@ -239,7 +238,7 @@ class _VoiceprintRegistrationPageState extends State<VoiceprintRegistrationPage>
                     '3. 需要完成3次录制\n'
                     '4. 建议使用不同的语句进行录制',
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.7),
+                      color: Colors.white.withValues(alpha: 0.7),
                       fontSize: 14,
                       height: 1.6,
                     ),

@@ -128,8 +128,8 @@ class SphereFloatMotion {
       return;
     }
 
-    const int panelW = 300;
-    const int panelH = 380;
+    const int panelW = 450;
+    const int panelH = 570;
     final int margin = 12;
     final int aw = area["width"] ?? 1920;
     final int ah = area["height"] ?? 1080;
@@ -140,7 +140,7 @@ class SphereFloatMotion {
       nx: screenX.clamp(0.0, 1.0),
       nz: screenY.clamp(0.0, 1.0),
       viewport: Size(aw / dpr, ah / dpr),
-      panelSize: const Size(300, 380),
+      panelSize: const Size(450, 570),
     );
 
     final int maxX = math.max(margin, aw - panelW - margin);
@@ -179,8 +179,8 @@ class SphereFloatMotion {
       return;
     }
 
-    const int panelW = 300;
-    const int panelH = 380;
+    const int panelW = 450;
+    const int panelH = 570;
     final int margin = 12;
     final int aw = area["width"] ?? 1920;
     final int ah = area["height"] ?? 1080;

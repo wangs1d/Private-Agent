@@ -3,14 +3,13 @@ import "dart:async";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
-import "package:url_launcher/url_launcher.dart";
+
 
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/virtual_phone_incoming_dialog.dart";
 import "core/presentation/virtual_phone_ui_labels.dart";
-import "core/presentation/phone_dialer_page.dart";
 import "core/presentation/entrance_animation.dart";
 import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
@@ -32,7 +31,6 @@ import "core/services/sphere_entity_controller.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
-import "features/mailbox/agent_mailbox_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
@@ -45,7 +43,6 @@ import "features/gomoku/gomoku_page.dart";
 import "features/game_center/game_center_page.dart";
 import "features/integrations/wechat_claw_binding_page.dart";
 import "core/vision/pick_gallery_vision.dart";
-import "core/vision/silent_camera_capture.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
 import "features/skill_store/skill_store_page.dart";
@@ -58,7 +55,7 @@ void main() {
   runApp(const PrivateAiApp());
 }
 
-/// 侧栏 hover 延后到下一帧，避免 AnimatedCrossFade 切换时触发 mouse_tracker 断言。
+/// 侧栏 hover 延后到下一帧，避免 AnimatedCrossFade 切换时触�?mouse_tracker 断言�?
 void _deferSidebarHover(VoidCallback fn) {
   SchedulerBinding.instance.addPostFrameCallback((_) => fn());
 }
@@ -85,10 +82,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final TextEditingController _inputController = TextEditingController();
   final FocusNode _inputFocusNode = FocusNode();
 
-  /// `null` 尚未询问；`true` 随消息静默抓拍；`false` 仅文字。
+  /// `null` 尚未询问；`true` 随消息静默抓拍；`false` 仅文字模式
+  // ignore: unused_field
   bool? _visionCameraConsent;
 
-  /// 用户从相册/文件选取、待发的图（可多张，优先于摄像头帧）。
+  /// 用户从相�?文件选取、待发的图（可多张，优先于摄像头帧）�?
   final List<VisionWireFrame> _pendingGalleryFrames = <VisionWireFrame>[];
 
   final List<ChatMessage> _messages = <ChatMessage>[];
@@ -103,13 +101,13 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 用户给agent起的名字
   String? _agentName;
 
-  /// 是否显示右上角日历面板
+  /// 是否显示右上角日历面�?
   bool _showCalendarPanel = false;
 
   /// 日历面板重新加载信号
   final ValueNotifier<int> _calendarReloadSignal = ValueNotifier<int>(0);
 
-  /// 与 userId 对齐的电脑桥接在线状态（由服务端 `desktop.bridge.sync` 推送）
+  /// �?userId 对齐的电脑桥接在线状态（由服务端 `desktop.bridge.sync` 推送）
   bool? _desktopBridgeOnline;
   String? _desktopBridgeLastSummary;
 
@@ -119,24 +117,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 是否正在播放进场动画
   bool _showEntranceAnimation = true;
 
-  /// Agent是否正在处理中（用于显示响应状态指示器）
+  /// Agent是否正在处理中（用于显示响应状态指示器�?
   bool _isAgentProcessing = false;
 
   /// 已上报服务端的「处理中 UI」状态，避免重复 WS 事件
   bool? _reportedAgentProcessingUiActive;
 
-  /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
+  /// 对话输入框：默认沙箱；开启后可授权桌�?钱包等高权限工具
   bool _fullComputerAccessEnabled = false;
   bool _todayPanelExpanded = true;
   bool _confirmPanelExpanded = false;
 
-  /// 服务端 `chat.agent_status` 推送的口语化进度（替换固定「思考中」）
+  /// 服务�?`chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
 
-  /// 子 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
+  /// �?Agent 同步委派进行中：屏蔽内部工具对进度条的覆�?
   bool _subAgentDelegationActive = false;
 
-  /// 后台子 Agent 任务角标（对话框右上角按钮）
+  /// 后台�?Agent 任务角标（对话框右上角按钮）
   int _backgroundTasksBadgeCount = 0;
   Timer? _assistantChunkFlushTimer;
   Timer? _agentReplyWatchdog;
@@ -144,14 +142,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String? _pendingAgentUserMessageId;
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
 
-  /// 记录被打断的回复内容，用于后续整合
+  /// 记录被打断的回复内容，用于后续整�?
   final List<String> _interruptedResponses = <String>[];
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
 
-  /// 网络电话悬浮按钮状态: null=无通话, ringing=正在呼叫, connected=已接通, ended=通话结束
+  /// 网络电话悬浮按钮状�? null=无通话, ringing=正在呼叫, connected=已接�? ended=通话结束
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
-  /// 已弹窗处理的「其他 Agent 来电」callId，避免重复弹窗
+  /// 已弹窗处理的「其�?Agent 来电」callId，避免重复弹�?
   String? _peerIncomingDialogCallId;
 
   @override
@@ -204,7 +202,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ..clear()
         ..addAll(cachedRelay);
       _visionCameraConsent = visionConsent;
-      // 设置agent名字占位符
+      // 设置agent名字占位�?
       _agentName = "AI助手";
       _isInitialized = true;
       _showEntranceAnimation = false;
@@ -327,7 +325,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         }
       }
       if (type == "error.event") {
-        // 与当前 chat 轮次无关的错误需立即解除「思考中」；CHAT_HANDLER_ERROR 仍会跟 assistant_done。
+        // 与当�?chat 轮次无关的错误需立即解除「思考中」；CHAT_HANDLER_ERROR 仍会�?assistant_done�?
         final String? traceId = payload["traceId"]?.toString();
         final bool chatTurnError = traceId != null &&
             traceId.isNotEmpty &&
@@ -391,7 +389,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           if (!toolOk || !delegateOk) {
             _subAgentDelegationActive = false;
             final String err =
-                result["error"]?.toString().trim() ?? "子 Agent 委派失败，请稍后重试";
+                result["error"]?.toString().trim() ?? "�?Agent 委派失败，请稍后重试";
             if (err.isNotEmpty) {
               _updateAgentStatusLine(err);
             }
@@ -403,7 +401,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             } else if (result["background"] == true) {
               _subAgentDelegationActive = false;
               final String bgLine =
-                  result["message"]?.toString().trim() ?? "助手已在后台处理，稍后会汇总结果…";
+                  result["message"]?.toString().trim() ?? "助手已在后台处理，稍后会汇总结果";
               _updateAgentStatusLine(bgLine);
             }
           }
@@ -472,14 +470,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   "reminder-${taskId.isNotEmpty ? taskId : DateTime.now().millisecondsSinceEpoch}",
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
-              text: "⏰ $message",
+              text: "�?$message",
               timestamp: DateTime.now(),
             ),
           );
         });
         if (mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            SnackBar(content: Text("⏰ $message")),
+            SnackBar(content: Text("�?$message")),
           );
         }
         if (taskId.isNotEmpty) {
@@ -550,7 +548,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         final String messageId =
             payload["messageId"]?.toString() ?? "assistant-final";
         final String finalText = payload["finalText"]?.toString() ?? "";
-        final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试。";
+        final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
         final String? traceKey = messageId.startsWith("assistant-")
             ? messageId.substring("assistant-".length)
             : null;
@@ -701,7 +699,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           if (body.isNotEmpty) {
             ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
-                content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel(status)}：$body"),
+                content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel(status)}�?body"),
                 duration: const Duration(seconds: 6),
               ),
             );
@@ -753,7 +751,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     });
   }
 
-  /// 主服务恢复后补删离线队列中的服务端日程。
+  /// 主服务恢复后补删离线队列中的服务端日程�?
   Future<void> _flushScheduleOfflineDeletes() async {
     final ScheduleOfflineDeleteFlushResult result =
         await flushScheduleOfflineDeleteQueue(_store, _scheduleApi);
@@ -844,7 +842,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     unawaited(_syncBackgroundTasksBadge());
   }
 
-  /// 与聊天页「处理中」气泡同步；active=false 时服务端锁定本轮不再合并消息。
+  /// 与聊天页「处理中」气泡同步；active=false 时服务端锁定本轮不再合并消息�?
   void _notifyAgentProcessingUi(bool active) {
     if (_reportedAgentProcessingUiActive == active) return;
     _reportedAgentProcessingUiActive = active;
@@ -885,7 +883,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final String assistantMessageId = userMessageId != null
         ? "assistant-$userMessageId"
         : "assistant-timeout-${DateTime.now().microsecondsSinceEpoch}";
-    const String fallbackText = "抱歉，等待回复超时，请稍后重试。";
+    const String fallbackText = "抱歉，等待回复超时，请稍后重试";
     final int? idx = _assistantMessageIndexById[assistantMessageId];
     if (idx != null) {
       setState(() {
@@ -946,15 +944,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return n == "master.invoke_sub_agent" || n == "master_invoke_sub_agent";
   }
 
-  bool _isGenericAgentStatusLine(String? line) {
-    if (line == null || line.trim().isEmpty) return true;
-    final String trimmed = line.trim();
-    return trimmed == "正在思考…" ||
-        trimmed == "正在思考..." ||
-        trimmed == "Agent 思考中..." ||
-        trimmed == "…";
-  }
-
   void _updateAgentStatusLine(String line, {bool ensureProcessing = false}) {
     final String trimmed = line.trim();
     if (trimmed.isEmpty) return;
@@ -988,42 +977,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     });
   }
 
-  /// 首次在「无相册附件」的发送路径上询问一次；结果写入本地，之后不再弹窗。
-  Future<void> _promptVisionConsentIfNeeded() async {
-    if (_visionCameraConsent != null) {
-      return;
-    }
-    final BuildContext? ctx = _rootNavigatorKey.currentContext;
-    if (ctx == null || !ctx.mounted) {
-      return;
-    }
-    final bool? allow = await showDialog<bool>(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (BuildContext dCtx) {
-        return AlertDialog(
-          title: const Text("本机摄像头授权"),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.pop(dCtx, false),
-              child: const Text("不允许"),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(dCtx, true),
-              child: const Text("允许"),
-            ),
-          ],
-        );
-      },
-    );
-    final bool decided = allow ?? false;
-    await _store.setVisionCameraConsent(decided);
-    if (!mounted) {
-      return;
-    }
-    setState(() => _visionCameraConsent = decided);
-  }
-
+  /// 首次在「无相册附件」的发送路径上询问一次；结果写入本地，之后不再弹窗�?
   Future<void> _pickGalleryImage() async {
     final List<VisionWireFrame> frames = await pickGalleryVisionWireFrames();
     if (!mounted || frames.isEmpty) {
@@ -1035,7 +989,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ..addAll(frames);
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("已选择 ${frames.length} 张图片，发送时将一并传给 Agent")),
+      SnackBar(content: Text("已选择 ${frames.length} 张图片，发送时将一并传�?Agent")),
     );
   }
 
@@ -1155,7 +1109,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _ws.retryConnect();
       if (mounted) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("正在连接服务器，请稍后再发送")),
+          const SnackBar(content: Text("正在连接服务器，请稍后再发消息")),
         );
       }
       return;
@@ -1172,7 +1126,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       return;
     }
 
-    // 如果Agent正在处理中，说明用户要打断当前回复
+    // 如果Agent正在处理中，说明用户要打断当前回�?
     if (_isAgentProcessing) {
       // 保存当前未完成的回复内容
       if (_pendingAssistantChunkText.isNotEmpty) {
@@ -1180,7 +1134,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         _pendingAssistantChunkText.clear();
       }
 
-      // 清除当前的流式响应状态
+      // 清除当前的流式响应状�?
       _disarmAgentReplyWatchdog();
       _pendingAgentUserMessageId = null;
       setState(() {
@@ -1189,7 +1143,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         _pendingAssistantChunkMessageId = null;
       });
 
-      // 取消定时器
+      // 取消定时�?
       _assistantChunkFlushTimer?.cancel();
       _assistantChunkFlushTimer = null;
     }
@@ -1235,7 +1189,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     userMsg["agentAccessMode"] =
         _fullComputerAccessEnabled ? "full" : "sandbox";
 
-    // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示）
+    // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示�?
     if (_interruptedResponses.isNotEmpty) {
       final String interruptedContext =
           _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
@@ -1259,111 +1213,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  void _sendUserMessage(String text) {
-    if (!_ws.isConnected) {
-      _ws.retryConnect();
-      return;
-    }
-    final String trimmed = text.trim();
-    if (trimmed.isEmpty) return;
-
-    if (_isAgentProcessing) {
-      if (_pendingAssistantChunkText.isNotEmpty) {
-        _interruptedResponses.add(_pendingAssistantChunkText.toString());
-        _pendingAssistantChunkText.clear();
-      }
-      _disarmAgentReplyWatchdog();
-      _pendingAgentUserMessageId = null;
-      setState(() {
-        _isAgentProcessing = false;
-        _agentStatusLine = null;
-        _pendingAssistantChunkMessageId = null;
-      });
-      _assistantChunkFlushTimer?.cancel();
-      _assistantChunkFlushTimer = null;
-    }
-
-    final ChatMessage userMessage = ChatMessage(
-      messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
-      role: "user",
-      text: trimmed,
-      timestamp: DateTime.now(),
-    );
-    setState(() {
-      _messages.add(userMessage);
-      _isAgentProcessing = true;
-      _agentStatusLine = null;
-    });
-    _notifyAgentProcessingUi(true);
-    _store.saveMessage(userMessage);
-
-    final Map<String, dynamic> userMsg = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-      "messageId": userMessage.messageId,
-      "text": trimmed,
-      "timestamp": DateTime.now().toIso8601String(),
-    };
-    if (ApiConfig.userId.trim().isNotEmpty) {
-      userMsg["userId"] = ApiConfig.userId.trim();
-    }
-    userMsg["agentAccessMode"] =
-        _fullComputerAccessEnabled ? "full" : "sandbox";
-
-    if (_interruptedResponses.isNotEmpty) {
-      final String interruptedContext =
-          _interruptedResponses.join("\n\n--- 用户打断 ---\n\n");
-      userMsg["interruptedContext"] = interruptedContext;
-      _interruptedResponses.clear();
-    }
-
-    _armAgentReplyWatchdog(userMessage.messageId);
-    _ws.sendEvent("chat.user_message", userMsg);
-  }
-
   static const List<String> _kTabTitles = <String>[
     "",
     "Agent Link",
     "钱包",
-    "技能商店",
+    "技能商城",
     "游戏",
     "Agent World",
-    "社交推文",
   ];
 
   void _selectTab(int index) {
-    // 社交推文（index 6）：在系统浏览器打开 social-platform，不切换内嵌页
-    if (index == 6) {
-      unawaited(_openSocialFeedWeb());
-      return;
-    }
     setState(() => _tabIndex = index);
-  }
-
-  /// 在系统浏览器打开社交推文站（`ApiConfig.socialFeedUrl`，默认 :3001）。
-  Future<void> _openSocialFeedWeb() async {
-    final Uri url = Uri.parse(ApiConfig.socialFeedUrl);
-    try {
-      final bool launched =
-          await launchUrl(url, mode: LaunchMode.externalApplication);
-      if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text("无法打开社交推文站，请先运行 npm run dev:all"),
-            action: SnackBarAction(
-              label: "复制 URL",
-              onPressed: () => debugPrint("socialFeedUrl: $url"),
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("打开网页失败: $e")),
-        );
-      }
-    }
   }
 
   Future<void> _openWechatClawBinding() async {
@@ -1372,12 +1232,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     await openWechatClawBinding(navCtx);
   }
 
-  /// 打开五子棋对局（从 playUrl 或 tableId 解析）。
+  /// 打开五子棋对局（从 playUrl �?tableId 解析）�?
   void _openGomokuGame(String playUrlOrTableId) {
     final String? tableId = PlayUrlUtils.parseTableId(playUrlOrTableId);
     if (tableId == null || tableId.isEmpty) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text("无法识别对局：$playUrlOrTableId")),
+        SnackBar(content: Text("无法识别对局�?playUrlOrTableId")),
       );
       return;
     }
@@ -1393,32 +1253,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ),
       ),
     );
-  }
-
-  void _callAgentViaPhone(String agentId, String? message) {
-    if (!_ws.isConnected) {
-      _ws.retryConnect();
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("正在连接服务器，请稍后再试")),
-        );
-      }
-      return;
-    }
-    final Map<String, dynamic> callPayload = <String, dynamic>{
-      "toActorId": agentId,
-    };
-    if (message != null && message.isNotEmpty) {
-      callPayload["userMessage"] = message;
-    }
-    _ws.sendEvent("phone.user_call_agent", callPayload);
-    if (mounted) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(
-          content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel("ringing")}（$agentId）"),
-        ),
-      );
-    }
   }
 
   void _sendPeerIncomingResponse(String callId, String action) {
@@ -1462,7 +1296,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             if (action == "accept") {
               if (mounted) {
                 ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                  const SnackBar(content: Text("已接听，可查看来电语音与文字稿")),
+                  const SnackBar(content: Text("已接听，可查看来电语音与文字内容")),
                 );
               }
             } else if (mounted) {
@@ -1470,8 +1304,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 SnackBar(
                   content: Text(
                     action == "decline"
-                        ? "已拒接，你的 Agent 正在转告来电内容…"
-                        : "已委托 Agent 代接…",
+                        ? "已拒接，你的 Agent 正在转告来电内容"
+                        : "已委托 Agent 代接听",
                   ),
                 ),
               );
@@ -1504,13 +1338,13 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (mounted) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(
-          content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel("ringing")}…"),
+          content: Text("📞 ${VirtualPhoneUiLabels.callStatusLabel("ringing")}"),
         ),
       );
     }
   }
 
-  /// 根据网络 IP 展示推测位置，并询问是否开启 GPS 定位权限（灰色弹窗，仅询问一次）。
+  /// 根据网络 IP 展示推测位置，并询问是否开�?GPS 定位权限（灰色弹窗，仅询问一次）�?
   Future<void> _promptLocationConsentIfNeeded() async {
     final bool? existing = await ClientLocationService.getLocationConsent();
     if (existing != null) {
@@ -1554,41 +1388,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   Widget? _buildAppBarTitle() {
     if (_tabIndex == 0) {
-      if (_desktopBridgeOnline != null) {
-        final String? summary = _desktopBridgeLastSummary?.trim();
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Tooltip(
-              message: summary == null || summary.isEmpty
-                  ? "??????"
-                  : "???????$summary",
-              child: Chip(
-                label: Text(
-                  _desktopBridgeOnline! ? "????" : "????",
-                  style: const TextStyle(fontSize: 12),
-                ),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-              ),
-            ),
-            if (summary != null && summary.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 2, top: 2),
-                child: Text(
-                  summary,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                ),
-              ),
-          ],
-        );
-      }
       return null;
     }
     final String title = _kTabTitles[_tabIndex];
@@ -1617,9 +1416,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  '正在初始化...',
+                  '正在初始�?..',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
+                    color: Colors.white.withValues(alpha: 0.7),
                     fontSize: 14,
                   ),
                 ),
@@ -1741,7 +1540,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                   label: Text(
                                     _backgroundTasksBadgeCount > 9
                                         ? "9+"
-                                        : "${_backgroundTasksBadgeCount}",
+                                        : "$_backgroundTasksBadgeCount",
                                   ),
                                   child: const Icon(
                                       Icons.pending_actions_outlined),
@@ -1769,7 +1568,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     status: _phoneCallStatus!,
                     toActorId: _phoneCallToActorId,
                     onHangUp: () {
-                      // 发送挂断消息
+                      // 发送挂断消�?
                       _ws.sendEvent("phone.hangup", {});
                       setState(() {
                         _phoneCallStatus = null;
@@ -1777,7 +1576,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       });
                     },
                   ),
-                // 进场动画层（覆盖在主界面上方，播完后自动消失）
+                // 进场动画层（覆盖在主界面上方，播完后自动消失�?
                 if (_showEntranceAnimation)
                   IgnorePointer(
                     child: EntranceAnimation(
@@ -1906,7 +1705,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                         .take(3)
                         .toList();
                     if (items.isEmpty) {
-                      focusWidgets = const <Widget>[Text("今天还没有安排，和我说一声就能添加。")];
+                      focusWidgets = const <Widget>[Text("今天还没有安排，和我说一声就能添加日程")];
                     } else {
                       focusWidgets = items
                           .map(
@@ -1950,7 +1749,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     ? "电脑桥接状态暂不可用"
                     : (_desktopBridgeOnline!
                         ? "电脑桥接在线，可继续协同处理"
-                        : "电脑桥接离线，建议重连"),
+                        : "电脑桥接离线，建议重启"),
               ),
               const SizedBox(height: 6),
               Text(
@@ -1973,7 +1772,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           GestureDetector(
             onTap: () => setState(() => _showCalendarPanel = false),
             child: Container(
-              color: Colors.black.withOpacity(0.5),
+              color: Colors.black.withValues(alpha: 0.5),
               alignment: Alignment.center,
               child: GestureDetector(
                 onTap: () {},
@@ -2040,31 +1839,29 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   Widget _buildMainContent() {
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        if (_tabIndex != 0 || constraints.maxWidth < 820) {
-          return _buildTabStack();
-        }
-        final double rightWidth = constraints.maxWidth < 980 ? 240 : 300;
-        return Row(
-          children: <Widget>[
-            Expanded(child: _buildTabStack()),
-            const VerticalDivider(
-              width: 1,
-              thickness: 1,
-              color: AppPalette.sidebarSeparator,
-            ),
-            SizedBox(
-              width: rightWidth,
-              child: _buildCompanionRightPanel(),
-            ),
-          ],
-        );
-      },
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    
+    if (_tabIndex != 0 || screenWidth < 820) {
+      return _buildTabStack();
+    }
+    final double rightWidth = screenWidth < 980 ? 240 : 300;
+    return Row(
+      children: <Widget>[
+        Expanded(child: _buildTabStack()),
+        const VerticalDivider(
+          width: 1,
+          thickness: 1,
+          color: AppPalette.sidebarSeparator,
+        ),
+        SizedBox(
+          width: rightWidth,
+          child: _buildCompanionRightPanel(),
+        ),
+      ],
     );
   }
 
-  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定 + 桌面漫游）。
+  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚�?+ 桌面漫游）�?
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -2084,6 +1881,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               agentStatusLine: _agentStatusLine,
               onOpenGomoku: _openGomokuGame,
               fullComputerAccessEnabled: _fullComputerAccessEnabled,
+              isActive: _tabIndex == 0,
               onToggleFullComputerAccess: () {
                 setState(() {
                   _fullComputerAccessEnabled = !_fullComputerAccessEnabled;
@@ -2113,7 +1911,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 _callMyAgentViaPhone(null);
               },
             ),
-            MailboxPage(api: _worldApi),
+            MailboxPage(api: _worldApi, ws: _ws),
             WalletPage(balance: _balance),
             SkillStorePage(api: _worldApi),
             _buildGameCenterPage(),
@@ -2165,7 +1963,7 @@ class _AppSidebarState extends State<_AppSidebar> {
     _SidebarItemSpec(
       iconOutlined: Icons.store_outlined,
       iconFilled: Icons.store,
-      label: '技能商店',
+      label: '技能商城',
     ),
     _SidebarItemSpec(
       iconOutlined: Icons.sports_esports_outlined,
@@ -2177,12 +1975,15 @@ class _AppSidebarState extends State<_AppSidebar> {
       iconFilled: Icons.public,
       label: 'Agent World',
     ),
-    _SidebarItemSpec(
-      iconOutlined: Icons.people_outline,
-      iconFilled: Icons.people,
-      label: '社交推文',
-    ),
   ];
+
+  // 预定义常量
+  static const Color _toggleIdleColor = Color(0xFFA1A1AA);
+  static const Color _sidebarBgColor = Color(0xFF0F0F0F);
+  static const EdgeInsets _expandedPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 12);
+  static const EdgeInsets _collapsedPadding = EdgeInsets.symmetric(horizontal: 8, vertical: 8);
+  static const double _sidebarExpandedWidth = 220.0;
+  static const double _sidebarCollapsedWidth = 56.0;
 
   bool _expanded = true;
 
@@ -2190,22 +1991,17 @@ class _AppSidebarState extends State<_AppSidebar> {
 
   @override
   Widget build(BuildContext context) {
-    const Color toggleIdle = Color(0xFFA1A1AA);
-
     return AnimatedContainer(
       duration: const Duration(milliseconds: 240),
       curve: Curves.easeInOutCubic,
-      width: _expanded ? 220.0 : 56.0,
-      color: const Color(0xFF0F0F0F),
+      width: _expanded ? _sidebarExpandedWidth : _sidebarCollapsedWidth,
+      color: _sidebarBgColor,
       clipBehavior: Clip.hardEdge,
       child: Material(
-        color: const Color(0xFF0F0F0F),
+        color: _sidebarBgColor,
         child: SafeArea(
           child: Padding(
-            padding: EdgeInsets.symmetric(
-              vertical: _expanded ? 12 : 8,
-              horizontal: _expanded ? 12 : 8,
-            ),
+            padding: _expanded ? _expandedPadding : _collapsedPadding,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
@@ -2226,7 +2022,7 @@ class _AppSidebarState extends State<_AppSidebar> {
                         _expanded
                             ? Icons.keyboard_double_arrow_left
                             : Icons.keyboard_double_arrow_right,
-                        color: toggleIdle,
+                        color: _toggleIdleColor,
                         size: 20,
                       ),
                       onPressed: _toggleExpanded,
@@ -2278,13 +2074,11 @@ class _SidebarItemSpec {
     required this.iconOutlined,
     required this.iconFilled,
     required this.label,
-    this.badge,
   });
 
   final IconData iconOutlined;
   final IconData iconFilled;
   final String label;
-  final String? badge;
 }
 
 class _SidebarNavItem extends StatefulWidget {
@@ -2317,9 +2111,9 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     final Color bgColor = selected
-        ? cs.surfaceContainerHigh.withOpacity(0.6)
+        ? cs.surfaceContainerHigh.withValues(alpha: 0.6)
         : (hovering
-            ? cs.surfaceContainer.withOpacity(0.6)
+            ? cs.surfaceContainer.withValues(alpha: 0.6)
             : Colors.transparent);
 
     final Color iconColor = selected
@@ -2396,32 +2190,6 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
                               ),
                             ),
                           ),
-                          if (spec.badge != null && spec.badge!.isNotEmpty)
-                            AnimatedOpacity(
-                              duration: const Duration(milliseconds: 160),
-                              opacity: expanded ? 1 : 0,
-                              child: Container(
-                                margin: const EdgeInsets.only(left: 8),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: spec.badge == 'NEW'
-                                      ? const Color(0xA33B82F6)
-                                      : cs.surfaceContainerHigh,
-                                  borderRadius: BorderRadius.circular(999),
-                                ),
-                                child: Text(
-                                  spec.badge!,
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w700,
-                                    color: spec.badge == 'NEW'
-                                        ? const Color(0xFFC084FC)
-                                        : const Color(0xFFA1A1AA),
-                                  ),
-                                ),
-                              ),
-                            ),
                         ],
                       ),
                     ),
@@ -2463,7 +2231,7 @@ class _WechatClawSidebarFooterState extends State<_WechatClawSidebarFooter> {
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final Color bgColor = _hovering
-        ? cs.surfaceContainer.withOpacity(0.6)
+        ? cs.surfaceContainer.withValues(alpha: 0.6)
         : Colors.transparent;
     final Color textColor =
         _hovering ? const Color(0xFFE4E4E7) : const Color(0xFFA1A1AA);
@@ -2537,7 +2305,7 @@ class _WechatClawSidebarMiniButtonState
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final Color bgColor = _hovering
-        ? cs.surfaceContainer.withOpacity(0.6)
+        ? cs.surfaceContainer.withValues(alpha: 0.6)
         : Colors.transparent;
 
     return MouseRegion(
@@ -2584,7 +2352,7 @@ class _WechatClawGlyph extends StatelessWidget {
       ),
       alignment: Alignment.center,
       child: Text(
-        "微",
+        "发送",
         style: TextStyle(
           color: const Color(0xFF07C160),
           fontSize: size * 0.72,

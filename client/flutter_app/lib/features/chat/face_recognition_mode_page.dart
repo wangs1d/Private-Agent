@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "dart:async";
 
 import "../../core/services/multimodal_recognition_service.dart";
@@ -221,7 +221,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
             top: 40,
             left: 20,
             child: IconButton(
-              icon: Icon(Icons.arrow_back, color: Colors.white.withOpacity(0.7)),
+              icon: Icon(Icons.arrow_back, color: Colors.white.withValues(alpha: 0.7)),
               onPressed: widget.onExit,
               tooltip: '退出面部识别',
             ),
@@ -242,32 +242,32 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                       gradient: RadialGradient(
                         colors: [
                           _isRecognizing
-                            ? Colors.grey.withOpacity(_opacityAnimation.value)
-                            : Colors.black.withOpacity(_opacityAnimation.value),
+                            ? Colors.grey.withValues(alpha: _opacityAnimation.value)
+                            : Colors.black.withValues(alpha: _opacityAnimation.value),
                           _isRecognizing
-                            ? const Color(0xFF616161).withOpacity(_opacityAnimation.value * 0.8)
-                            : const Color(0xFF1A1A1A).withOpacity(_opacityAnimation.value * 0.8),
+                            ? const Color(0xFF616161).withValues(alpha: _opacityAnimation.value * 0.8)
+                            : const Color(0xFF1A1A1A).withValues(alpha: _opacityAnimation.value * 0.8),
                           _isRecognizing
-                            ? const Color(0xFF757575).withOpacity(_opacityAnimation.value * 0.6)
-                            : const Color(0xFF0D0D0D).withOpacity(_opacityAnimation.value * 0.6),
+                            ? const Color(0xFF757575).withValues(alpha: _opacityAnimation.value * 0.6)
+                            : const Color(0xFF0D0D0D).withValues(alpha: _opacityAnimation.value * 0.6),
                         ],
                         stops: const [0.0, 0.5, 1.0],
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.8),
+                          color: Colors.black.withValues(alpha: 0.8),
                           blurRadius: 20,
                           offset: const Offset(0, 10),
                         ),
                         BoxShadow(
                           color: (_isRecognizing ? Colors.grey : Colors.white)
-                              .withOpacity(_opacityAnimation.value * 0.1),
+                              .withValues(alpha: _opacityAnimation.value * 0.1),
                           blurRadius: 30,
                           spreadRadius: 5,
                         ),
                         BoxShadow(
                           color: (_isRecognizing ? Colors.grey : Colors.white)
-                              .withOpacity(_opacityAnimation.value * 0.05),
+                              .withValues(alpha: _opacityAnimation.value * 0.05),
                           blurRadius: 15,
                           offset: const Offset(0, -5),
                         ),
@@ -278,7 +278,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                         Icons.face,
                         size: 80,
                         color: (_isRecognizing ? Colors.grey : Colors.white)
-                            .withOpacity(_opacityAnimation.value * 0.5),
+                            .withValues(alpha: _opacityAnimation.value * 0.5),
                       ),
                     ),
                   );
@@ -297,7 +297,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                 Text(
                   _statusText,
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.8),
+                    color: Colors.white.withValues(alpha: 0.8),
                     fontSize: 18,
                     fontWeight: FontWeight.w500,
                   ),
@@ -307,7 +307,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                   Text(
                     '检测到: $_lastDetectedAction',
                     style: TextStyle(
-                      color: Colors.grey.withOpacity(0.8),
+                      color: Colors.grey.withValues(alpha: 0.8),
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),
@@ -319,8 +319,8 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                     _verificationStatus,
                     style: TextStyle(
                       color: _verificationStatus.contains('✓') 
-                          ? Colors.green.withOpacity(0.8)
-                          : Colors.red.withOpacity(0.8),
+                          ? Colors.green.withValues(alpha: 0.8)
+                          : Colors.red.withValues(alpha: 0.8),
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),
@@ -331,7 +331,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                   Text(
                     '置信度: ${(_confidence * 100).toStringAsFixed(1)}%',
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.6),
+                      color: Colors.white.withValues(alpha: 0.6),
                       fontSize: 14,
                     ),
                   ),
@@ -340,7 +340,7 @@ class _FaceRecognitionModePageState extends State<FaceRecognitionModePage> with 
                 Text(
                   _isRecognizing ? '点击停止识别' : '点击开始面部识别',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.5),
+                    color: Colors.white.withValues(alpha: 0.5),
                     fontSize: 14,
                   ),
                 ),

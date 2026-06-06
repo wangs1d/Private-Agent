@@ -154,7 +154,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     TextTheme text,
   ) {
     final isIncome = transaction.type == 'income';
-    final isTransfer = transaction.type == 'transfer';
     final amountColor = isIncome ? Colors.green[400] : Colors.red[400];
     final amountPrefix = isIncome ? '+' : '-';
     final iconData = _getIconForType(transaction.type);

@@ -73,6 +73,7 @@ import { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { VirtualPhoneIncomingCoordinator } from "../services/virtual-phone-incoming-coordinator.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
+import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
 import { OpenAIASRAdapter } from "../services/voice-dialogue/adapters/openai-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
@@ -108,6 +109,8 @@ import { createDesktopVisualFromEnv } from "../services/desktop-visual-subproces
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerMcpTools } from "../tools/mcp-tools.js";
+import { McpClientService } from "../services/mcp-client-service.js";
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
@@ -171,6 +174,22 @@ export async function createAppServices(): Promise<AppServices> {
   toolRegistry.setSkillManager(skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+
+  // ========== MCP 客户端服务 ==========
+  const mcpClientService = new McpClientService();
+  if (mcpClientService.listServers().length > 0) {
+    await mcpClientService.discoverTools();
+    const mcpToolCount = mcpClientService.listTools().length;
+    if (mcpToolCount > 0) {
+      registerMcpTools(toolRegistry, mcpClientService);
+      app.log.info(`[MCP] 已发现并注册 ${mcpToolCount} 个 MCP 工具（${mcpClientService.listServers().map(s => s.alias).join(", ")}）`);
+    } else {
+      app.log.info("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
+    }
+  } else {
+    app.log.info("[MCP] 未配置 MCP Server（可通过 data/mcp-servers.json 或 MCP_SERVERS 环境变量配置）");
+  }
+
   registerBrowserTools(toolRegistry, browserSessionService);
   registerClockTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
@@ -217,12 +236,28 @@ export async function createAppServices(): Promise<AppServices> {
 
   // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
   const voiceDialogueService = new VoiceDialogueService();
+
+  // 注册 OpenAI provider（默认）
   voiceDialogueService.registerProvider("openai", {
     asr: new OpenAIASRAdapter(),
     tts: new OpenAITTSAdapter(ttsService),
     llm: new OpenAILLMAdapter(),
   });
-  voiceDialogueService.setDefaultProvider("openai");
+
+  // 注册硅基流动 TTS provider（中文语音质量更佳，优先使用）
+  const siliconflowTTS = new SiliconFlowTTSAdapter();
+  if (siliconflowTTS.isEnabled()) {
+    voiceDialogueService.registerProvider("siliconflow", {
+      asr: new OpenAIASRAdapter(), // ASR 暂时仍用 OpenAI
+      tts: siliconflowTTS,
+      llm: new OpenAILLMAdapter(), // LLM 暂时仍用 OpenAI
+    });
+    voiceDialogueService.setDefaultProvider("siliconflow");
+    app.log.info("[VoiceDialogue] 硅基流动 TTS 已启用，设为默认 TTS 提供商");
+  } else {
+    app.log.info("[VoiceDialogue] 硅基流动 TTS 未配置或凭证不完整，使用 OpenAI 作为默认提供商");
+    voiceDialogueService.setDefaultProvider("openai");
+  }
 
   // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
   const intelligentReminder = createIntelligentReminderSystem({
@@ -690,5 +725,6 @@ export async function createAppServices(): Promise<AppServices> {
     voiceDialogueService,
     intelligentReminderService: intelligentReminder.reminderService,
     reminderResponsePersistence: intelligentReminder.userResponsePersistence,
+    mcpClientService,
   };
 }

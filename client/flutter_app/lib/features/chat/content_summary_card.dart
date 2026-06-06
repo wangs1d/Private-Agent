@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 
 import "../../core/utils/content_summary_parser.dart";
 
@@ -76,10 +76,10 @@ class ContentSummaryDetailCard extends StatelessWidget {
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
           decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest.withOpacity(0.72),
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.72),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: cs.outline.withOpacity(0.28),
+              color: cs.outline.withValues(alpha: 0.28),
             ),
           ),
           child: Row(
@@ -89,7 +89,7 @@ class ContentSummaryDetailCard extends StatelessWidget {
                 height: 34,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: cs.primaryContainer.withOpacity(0.45),
+                  color: cs.primaryContainer.withValues(alpha: 0.45),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -126,7 +126,7 @@ class ContentSummaryDetailCard extends StatelessWidget {
               Icon(
                 Icons.chevron_right,
                 size: 20,
-                color: cs.onSurfaceVariant.withOpacity(0.7),
+                color: cs.onSurfaceVariant.withValues(alpha: 0.7),
               ),
             ],
           ),
@@ -157,11 +157,11 @@ class _BriefContentPreview extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: cs.primaryContainer.withOpacity(0.15),
+          color: cs.primaryContainer.withValues(alpha: 0.15),
           borderRadius: BorderRadius.circular(8),
           border: Border(
             left: BorderSide(
-              color: cs.primary.withOpacity(0.3),
+              color: cs.primary.withValues(alpha: 0.3),
               width: 3,
             ),
           ),
@@ -169,7 +169,7 @@ class _BriefContentPreview extends StatelessWidget {
         child: Text(
           content,
           style: style.copyWith(
-            color: cs.onSurface.withOpacity(0.9),
+            color: cs.onSurface.withValues(alpha: 0.9),
           ),
         ),
       );
@@ -195,7 +195,7 @@ class _BriefContentPreview extends StatelessWidget {
                   width: 6,
                   height: 6,
                   decoration: BoxDecoration(
-                    color: cs.primary.withOpacity(0.7),
+                    color: cs.primary.withValues(alpha: 0.7),
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -204,7 +204,7 @@ class _BriefContentPreview extends StatelessWidget {
                   child: Text(
                     itemText,
                     style: style.copyWith(
-                      color: cs.onSurface.withOpacity(0.9),
+                      color: cs.onSurface.withValues(alpha: 0.9),
                       height: 1.5,
                     ),
                   ),

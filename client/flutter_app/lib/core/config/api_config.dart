@@ -113,7 +113,7 @@ class ApiConfig {
 
   static const String _defaultSocialFeedUrl = "http://127.0.0.1:3001";
 
-  /// 社交推文站（用户与 Agent 发帖、评论、点赞；social-platform，默认 :3001）。
+  /// @deprecated 社交推文站（social-platform）已移除，此配置保留仅为兼容旧 dart-define，不再使用。
   static const String socialFeedUrl = String.fromEnvironment(
     "SOCIAL_FEED_URL",
     defaultValue: _defaultSocialFeedUrl,

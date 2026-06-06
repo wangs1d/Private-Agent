@@ -1,3 +1,6 @@
+import "dart:async";
+
+import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 
@@ -6,18 +9,19 @@ import "../../core/theme/app_theme.dart";
 
 /// 当前登录主体可用的 Skill（内置 + 世界中获得的社区技能），卡片式管理启用状态。
 ///
-/// [outerSearchQuery] 由父级搜索框传入（建议小写），用于按名称与描述过滤。
+/// [outerSearch] 由父级搜索框传入（非空时按名称与描述过滤）；
+/// 传 `null` 表示父级未启用搜索（如在「技能商店」子页时）。
 class SkillsLibraryTab extends StatefulWidget {
   const SkillsLibraryTab({
     super.key,
     required this.api,
-    this.outerSearchQuery = "",
+    this.outerSearch,
   });
 
   final WorldApiClient api;
 
-  /// 父组件「搜索我的技能」当前关键字（小写）。
-  final String outerSearchQuery;
+  /// 父组件「搜索我的技能」当前关键字监听器，传 `null` 则忽略。
+  final ValueListenable<String>? outerSearch;
 
   @override
   State<SkillsLibraryTab> createState() => _SkillsLibraryTabState();
@@ -32,6 +36,11 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
   String? _error;
   List<Map<String, dynamic>> _items = <Map<String, dynamic>>[];
   final Set<String> _toggling = <String>{};
+
+  /// 缓存分段结果，仅在 [setState] 改 segment 或 [items] 变化时失效。
+  List<Map<String, dynamic>>? _cachedBase;
+  int _cachedBaseSegment = -1;
+  int _cachedBaseLength = -1;
 
   @override
   void initState() {
@@ -61,6 +70,7 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
                 ?.map((dynamic e) => (e as Map).cast<String, dynamic>())
                 .toList() ??
             <Map<String, dynamic>>[];
+        _invalidateBaseCache();
       });
     } catch (e) {
       if (!mounted) return;
@@ -69,6 +79,12 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
         _error = e.toString();
       });
     }
+  }
+
+  void _invalidateBaseCache() {
+    _cachedBase = null;
+    _cachedBaseSegment = -1;
+    _cachedBaseLength = -1;
   }
 
   Future<void> _setEnabled(String skillName, bool enabled) async {
@@ -107,7 +123,12 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
   }
 
   List<Map<String, dynamic>> _segmentBase() {
-    return _items.where((Map<String, dynamic> e) {
+    if (_cachedBase != null &&
+        _cachedBaseSegment == _segment &&
+        _cachedBaseLength == _items.length) {
+      return _cachedBase!;
+    }
+    final List<Map<String, dynamic>> base = _items.where((Map<String, dynamic> e) {
       final String src = e["source"]?.toString() ?? "";
       final String kind = e["kind"]?.toString() ?? "";
       if (_segment == _segAdded) {
@@ -115,32 +136,30 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
       }
       // "我创建的" 标签页：排除系统内置技能 (builtin)，只显示用户创建的技能
       return src != "community" && kind != "builtin";
-    }).toList();
+    }).toList(growable: false);
+    _cachedBase = base;
+    _cachedBaseSegment = _segment;
+    _cachedBaseLength = _items.length;
+    return base;
   }
 
-  List<Map<String, dynamic>> _visibleItems() {
+  List<Map<String, dynamic>> _visibleItems(String query) {
     final List<Map<String, dynamic>> base = _segmentBase();
-    final String q = widget.outerSearchQuery.trim();
-    if (q.isEmpty) return base;
+    if (query.isEmpty) return base;
     return base.where((Map<String, dynamic> item) {
       final String name = item["name"]?.toString() ?? "";
       final String disp = item["displayName"]?.toString() ?? "";
       final String desc = item["description"]?.toString() ?? "";
       final String blob = "$name $disp $desc".toLowerCase();
-      return blob.contains(q.toLowerCase());
-    }).toList();
+      return blob.contains(query);
+    }).toList(growable: false);
   }
 
   @override
   Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
     if (_loading) {
-      return Center(
-        child: CircularProgressIndicator(
-          valueColor: AlwaysStoppedAnimation<Color>(
-            Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-        ),
+      return const Center(
+        child: CircularProgressIndicator(),
       );
     }
     if (_error != null) {
@@ -153,14 +172,10 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
             children: <Widget>[
               Text(_error!, textAlign: TextAlign.center),
               const SizedBox(height: 16),
-              FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.transparent,
-                  foregroundColor: cs.onSurface,
-                  side: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
-                ),
-                onPressed: null, 
-                child: const Text("重试"),
+              _GhostButton(
+                label: "重试",
+                onTap: () => unawaited(_load()),
+                cs: cs,
               ),
             ],
           ),
@@ -168,107 +183,57 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
       );
     }
 
-    final List<Map<String, dynamic>> visible = _visibleItems();
+    final ValueListenable<String>? search = widget.outerSearch;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: <Widget>[
-              _SegmentChip(
-                label: "我添加的",
-                selected: _segment == _segAdded,
-                onTap: () => setState(() => _segment = _segAdded),
-              ),
-              const SizedBox(width: 8),
-              _SegmentChip(
-                label: "我创建的",
-                selected: _segment == _segCreated,
-                onTap: () => setState(() => _segment = _segCreated),
-              ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: Text(
-            _segment == _segAdded
-                ? "从技能商店或世界中获得的技能；点「立即使用」即可在对话中启用。"
-                : "你通过 Agent 自行创建并上架的技能；系统内置技能不在此展示。",
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints c) {
-              final int cols = c.maxWidth >= 720 ? 2 : 1;
-              return RefreshIndicator(
-                onRefresh: _load,
-                child: visible.isEmpty
-                    ? ListView(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        padding: const EdgeInsets.all(32),
-                        children: <Widget>[
-                          SizedBox(height: c.maxHeight * 0.12),
-                          Center(
-                            child: Text(
-                              _emptyHint(),
-                              textAlign: TextAlign.center,
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ),
-                        ],
-                      )
-                    : GridView.builder(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: cols,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: cols >= 2 ? 1.75 : 1.55,
-                        ),
-                        itemCount: visible.length,
-                        itemBuilder: (BuildContext context, int i) {
-                          return _MySkillCard(
-                            item: visible[i],
-                            busy: _toggling.contains(
-                              visible[i]["name"]?.toString() ?? "",
-                            ),
-                            onUse: () {
-                              final String n =
-                                  visible[i]["name"]?.toString() ?? "";
-                              if (n.isEmpty) return;
-                              _setEnabled(n, true);
-                            },
-                            onDisable: () {
-                              final String n =
-                                  visible[i]["name"]?.toString() ?? "";
-                              if (n.isEmpty) return;
-                              _setEnabled(n, false);
-                            },
-                            onCopyId: () {
-                              final String n =
-                                  visible[i]["name"]?.toString() ?? "";
-                              Clipboard.setData(ClipboardData(text: n));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text("已复制技能 ID")),
-                              );
-                            },
-                          );
-                        },
-                      ),
-              );
-            },
-          ),
-        ),
-      ],
+    if (search == null) {
+      return const _LibraryBody(
+        segment: _segAdded,
+        visibleItems: <Map<String, dynamic>>[],
+        toggling: <String>{},
+        onSelectSegment: null,
+        onUse: null,
+        onDisable: null,
+        onCopyId: null,
+        onRefresh: null,
+        description: "",
+        emptyHint: "",
+      );
+    }
+
+    return ValueListenableBuilder<String>(
+      valueListenable: search,
+      builder: (BuildContext context, String q, _) {
+        final List<Map<String, dynamic>> visible = _visibleItems(q);
+        return _LibraryBody(
+          segment: _segment,
+          visibleItems: visible,
+          toggling: _toggling,
+          onRefresh: _load,
+          onSelectSegment: (int next) {
+            if (next == _segment) return;
+            setState(() => _segment = next);
+          },
+          onUse: (String name) {
+            if (name.isEmpty) return;
+            unawaited(_setEnabled(name, true));
+          },
+          onDisable: (String name) {
+            if (name.isEmpty) return;
+            unawaited(_setEnabled(name, false));
+          },
+          onCopyId: (String name) {
+            if (name.isEmpty) return;
+            Clipboard.setData(ClipboardData(text: name));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("已复制技能 ID")),
+            );
+          },
+          description: _segment == _segAdded
+              ? "从技能商店或世界中获得的技能；点「立即使用」即可在对话中启用。"
+              : "你通过 Agent 自行创建并上架的技能；系统内置技能不在此展示。",
+          emptyHint: _emptyHint(),
+        );
+      },
     );
   }
 
@@ -276,7 +241,131 @@ class _SkillsLibraryTabState extends State<SkillsLibraryTab> {
     if (_segment == _segAdded) {
       return "暂无从商店获得的技能。\n可在「技能商店」浏览，并由 Agent 在世界中获取。";
     }
+    assert(_segment == _segCreated, "未识别的 segment=$_segment");
     return "暂无你创建的技能；可通过 Agent 在世界中创建并上架新技能。";
+  }
+}
+
+class _LibraryBody extends StatelessWidget {
+  const _LibraryBody({
+    required this.segment,
+    required this.visibleItems,
+    required this.toggling,
+    required this.onSelectSegment,
+    required this.onUse,
+    required this.onDisable,
+    required this.onCopyId,
+    required this.onRefresh,
+    required this.description,
+    required this.emptyHint,
+  });
+
+  final int segment;
+  final List<Map<String, dynamic>> visibleItems;
+  final Set<String> toggling;
+  final ValueChanged<int>? onSelectSegment;
+  final ValueChanged<String>? onUse;
+  final ValueChanged<String>? onDisable;
+  final ValueChanged<String>? onCopyId;
+  final Future<void> Function()? onRefresh;
+  final String description;
+  final String emptyHint;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return RepaintBoundary(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Row(
+              children: <Widget>[
+                _SegmentChip(
+                  label: "我添加的",
+                  selected: segment == 0,
+                  onTap: () => onSelectSegment?.call(0),
+                ),
+                const SizedBox(width: 8),
+                _SegmentChip(
+                  label: "我创建的",
+                  selected: segment == 1,
+                  onTap: () => onSelectSegment?.call(1),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              description,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints c) {
+                final int cols = c.maxWidth >= 720 ? 2 : 1;
+                final int itemCount = visibleItems.length;
+                return RefreshIndicator(
+                  onRefresh: onRefresh ?? () async {},
+                  child: itemCount == 0
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.all(32),
+                          children: <Widget>[
+                            SizedBox(height: c.maxHeight * 0.12),
+                            Center(
+                              child: Text(
+                                emptyHint,
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : GridView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: cols,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                            childAspectRatio: cols >= 2 ? 1.75 : 1.55,
+                          ),
+                          itemCount: itemCount,
+                          itemBuilder: (BuildContext context, int i) {
+                            final Map<String, dynamic> item = visibleItems[i];
+                            return _MySkillCard(
+                              item: item,
+                              busy: toggling.contains(
+                                item["name"]?.toString() ?? "",
+                              ),
+                              onUse: () => onUse?.call(
+                                item["name"]?.toString() ?? "",
+                              ),
+                              onDisable: () => onDisable?.call(
+                                item["name"]?.toString() ?? "",
+                              ),
+                              onCopyId: () => onCopyId?.call(
+                                item["name"]?.toString() ?? "",
+                              ),
+                            );
+                          },
+                        ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -318,6 +407,33 @@ class _SegmentChip extends StatelessWidget {
   }
 }
 
+class _GhostButton extends StatelessWidget {
+  const _GhostButton({
+    required this.label,
+    required this.onTap,
+    required this.cs,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton(
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.transparent,
+        foregroundColor: cs.onSurface,
+        side: BorderSide(
+          color: cs.outline.withValues(alpha: 0.35),
+        ),
+      ),
+      onPressed: onTap,
+      child: Text(label),
+    );
+  }
+}
+
 class _MySkillCard extends StatelessWidget {
   const _MySkillCard({
     required this.item,
@@ -349,7 +465,7 @@ class _MySkillCard extends StatelessWidget {
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.55)),
+        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.55)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),

@@ -32,6 +32,7 @@ import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
 import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
+import type { McpClientService } from "../services/mcp-client-service.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -65,6 +66,7 @@ export type AppServices = {
   voiceDialogueService: VoiceDialogueService;
   intelligentReminderService: IntelligentReminderService;
   reminderResponsePersistence: UserResponsePersistenceService;
+  mcpClientService: McpClientService;
 };
 
 export type SkillMetadataValidator = {

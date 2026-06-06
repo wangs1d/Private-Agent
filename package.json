@@ -5,14 +5,12 @@
   "type": "module",
   "workspaces": [
     "server",
-    "agent-world",
-    "social-platform"
+    "agent-world"
   ],
   "scripts": {
     "dev:all": "node scripts/dev-all.mjs",
     "dev:all:server": "npm run dev:server --workspace=server",
     "dev:all:world": "npm run standalone --workspace=agent-world",
-    "dev:all:social": "npm run dev --workspace=social-platform",
     "dev:ports:free": "powershell -ExecutionPolicy Bypass -File scripts/free-dev-ports.ps1",
     "setup:openclaw": "npm install -g openclaw @tencent-weixin/openclaw-weixin",
     "setup:openclaw-wechat-bridge": "node scripts/install-openclaw-wechat-bridge.mjs"

@@ -11,7 +11,7 @@ const int _kZjhSeats = 6;
 
 String kZhajinhuaCardLabel(String id) {
   final List<String> parts = id.split("-");
-  final int r = int.tryParse(parts.isNotEmpty ? parts[0]! : "") ?? 0;
+  final int r = int.tryParse(parts.isNotEmpty ? parts[0] : "") ?? 0;
   if (r >= 2 && r <= 10) return "$r";
   const Map<int, String> face = <int, String>{11: "J", 12: "Q", 13: "K", 14: "A"};
   return face[r] ?? id;
@@ -174,7 +174,7 @@ class _ZhaJinHuaPageState extends State<ZhaJinHuaPage> {
         padding: const EdgeInsets.all(16),
         itemCount: _tables.length,
         itemBuilder: (BuildContext c, int i) {
-          final Map<String, dynamic> t = _tables[i]!;
+          final Map<String, dynamic> t = _tables[i];
           final String id = t["tableId"]?.toString() ?? "";
           final int stake = (t["stake"] as num?)?.round() ?? 0;
           final String status = t["status"]?.toString() ?? "";

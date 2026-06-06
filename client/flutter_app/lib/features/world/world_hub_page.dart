@@ -23,6 +23,11 @@ class _WorldHubPageState extends State<WorldHubPage> {
   String? _error;
   Map<String, dynamic>? _state;
 
+  // 预定义常量
+  static const EdgeInsets _listPadding = EdgeInsets.all(16);
+  static const EdgeInsets _cardPadding = EdgeInsets.all(12);
+  static const EdgeInsets _cardPadding16 = EdgeInsets.all(16);
+
   @override
   void initState() {
     super.initState();
@@ -55,11 +60,6 @@ class _WorldHubPageState extends State<WorldHubPage> {
         _error = e.toString();
       });
     }
-  }
-
-  Future<void> _openShop() async {
-    await Navigator.of(context).pushNamed("/shop");
-    if (mounted) _refresh();
   }
 
   Future<void> _openSocial() async {
@@ -99,7 +99,6 @@ class _WorldHubPageState extends State<WorldHubPage> {
         (_state?["worldCoins"] as num?)?.round() ??
         0;
     final int leisure = (_state?["leisureCount"] as num?)?.round() ?? 0;
-    final bool atShop = sceneId == "shop" || sceneId == "free_market";
     final bool atSocial = sceneId == "social";
 
     return Scaffold(
@@ -107,12 +106,12 @@ class _WorldHubPageState extends State<WorldHubPage> {
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: ListView(
-          padding: const EdgeInsets.all(16),
+          padding: _listPadding,
           children: <Widget>[
             Card(
-              color: Theme.of(context).colorScheme.secondaryContainer.withOpacity(0.35),
+              color: Theme.of(context).colorScheme.secondaryContainer.withValues(alpha: 0.35),
               child: Padding(
-                padding: const EdgeInsets.all(12),
+                padding: _cardPadding,
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
@@ -131,7 +130,7 @@ class _WorldHubPageState extends State<WorldHubPage> {
             const SizedBox(height: 12),
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: _cardPadding16,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
@@ -187,11 +186,11 @@ class _SceneEntryCard extends StatelessWidget {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: BorderSide(
-          color: isCurrent ? cs.primary : cs.outlineVariant.withOpacity(0.5),
+          color: isCurrent ? cs.primary : cs.outlineVariant.withValues(alpha: 0.5),
           width: isCurrent ? 2 : 1,
         ),
       ),
-      color: isCurrent ? cs.primaryContainer.withOpacity(0.55) : null,
+      color: isCurrent ? cs.primaryContainer.withValues(alpha: 0.55) : null,
       child: ListTile(
         selected: isCurrent,
         selectedColor: cs.onPrimaryContainer,
@@ -214,7 +213,7 @@ class _SceneEntryCard extends StatelessWidget {
                   labelPadding: const EdgeInsets.symmetric(horizontal: 8),
                   label: const Text("当前"),
                   side: BorderSide(color: cs.primary),
-                  backgroundColor: cs.primary.withOpacity(0.12),
+                  backgroundColor: cs.primary.withValues(alpha: 0.12),
                 ),
               ),
             Icon(Icons.chevron_right, color: cs.onSurfaceVariant),

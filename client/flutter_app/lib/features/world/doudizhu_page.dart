@@ -10,7 +10,7 @@ const String _kWsDoudizhuTableSnapshot = "world.doudizhu.snapshot";
 
 String kDoudizhuCardLabel(String id) {
   final List<String> parts = id.split("-");
-  final int r = int.tryParse(parts.isNotEmpty ? parts[0]! : "") ?? 0;
+  final int r = int.tryParse(parts.isNotEmpty ? parts[0] : "") ?? 0;
   if (r == 16) return "小王";
   if (r == 17) return "大王";
   if (r >= 3 && r <= 10) return "$r";
@@ -192,7 +192,7 @@ class _DoudizhuPageState extends State<DoudizhuPage> {
         padding: const EdgeInsets.all(16),
         itemCount: _tables.length,
         itemBuilder: (BuildContext c, int i) {
-          final Map<String, dynamic> t = _tables[i]!;
+          final Map<String, dynamic> t = _tables[i];
           final String id = t["tableId"]?.toString() ?? "";
           final int stake = (t["stake"] as num?)?.round() ?? 0;
           final String status = t["status"]?.toString() ?? "";

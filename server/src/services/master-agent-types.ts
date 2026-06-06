@@ -1,11 +1,10 @@
-/** 子 Agent 类型 — 按能力维度划分（5个核心） */
+/** 子 Agent 类型 — 按能力维度划分（4个核心） */
 
 export type SubAgentType =
   | "life"
   | "tech"
   | "info"
-  | "creative"
-  | "security";
+  | "creative";
 
 export interface SubAgentResult {
   taskId: string;
@@ -81,8 +80,7 @@ export type AgentCapabilityTag =
   | "system_ops"       /** 系统运维：服务器、部署、API调试 */
   | "search_info"      /** 搜索调研：比价、查询、翻译（只查不买） */
   | "deep_rpa"        /** 深度RPA：多步复杂流程自动化 + 批量操作 + 长时间运行 */
-  | "content_creation"  /** 内容创作：文案、策划、创意写作、PPT大纲 */
-  | "security_audit";   /** 安全审计：风险检测、权限审批、异常拦截 */
+  | "content_creation";  /** 内容创作：文案、策划、创意写作、PPT大纲 */
 
 export interface SubAgentCapability {
   type: SubAgentType;

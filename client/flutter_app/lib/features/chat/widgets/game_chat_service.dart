@@ -1,5 +1,4 @@
 import "dart:async";
-import "package:flutter/material.dart";
 import "../../../core/services/ws_chat_service.dart";
 import "game_chat_widget.dart";
 

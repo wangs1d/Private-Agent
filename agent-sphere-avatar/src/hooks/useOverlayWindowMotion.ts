@@ -31,19 +31,49 @@ interface UseOverlayWindowMotionOptions {
 export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOverlayWindowMotionOptions) {
   const targetRef = useRef<{ x: number; y: number } | null>(null);
   const nextMoveAt = useRef(0);
+  /** 垂直方向小幅度振荡（用于身体晃动时窗口上下抖） */
+  const verticalShakeRef = useRef<{
+    active: boolean;
+    until: number;
+    amplitude: number;
+    nextShakeAt: number;
+  }>({ active: false, until: 0, amplitude: 0, nextShakeAt: 0 });
+
+  const pickPetSize = useCallback(() => {
+    return {
+      w: Number(new URLSearchParams(window.location.search).get("petW")) || OVERLAY_PET_WIDTH,
+      h: Number(new URLSearchParams(window.location.search).get("petH")) || OVERLAY_PET_HEIGHT,
+    };
+  }, []);
 
   const roamNow = useCallback(async () => {
     if (!window.sphereOverlay) return;
     const area = await window.sphereOverlay.getWorkArea();
     const margin = 12;
-    const w = Number(new URLSearchParams(window.location.search).get("petW")) || OVERLAY_PET_WIDTH;
-    const h = Number(new URLSearchParams(window.location.search).get("petH")) || OVERLAY_PET_HEIGHT;
+    const { w, h } = pickPetSize();
+    // 上下左右 + 360° 自由漫游：X / Y 同时随机
     const x = area.x + margin + Math.random() * Math.max(40, area.width - w - margin * 2);
     const y = area.y + margin + Math.random() * Math.max(40, area.height - h - margin * 2);
     targetRef.current = { x, y };
     window.sphereOverlay.moveTo(Math.round(x), Math.round(y), mood === "speaking" ? 900 : 1200);
     nextMoveAt.current = Date.now() + 5000;
-  }, [mood]);
+  }, [mood, pickPetSize]);
+
+  /**
+   * 上下方向小幅度振荡 — 让窗口在当前位置附近快速来回移动（视觉上的"上蹿下跳"）。
+   * - strength: 0~1
+   * - durationMs: 持续时间
+   */
+  const triggerVerticalShake = useCallback((strength = 0.7, durationMs = 800) => {
+    if (!window.sphereOverlay?.moveBy) return;
+    const s = Math.min(1, Math.max(0.1, strength));
+    const now = Date.now();
+    const until = now + Math.max(150, durationMs);
+    verticalShakeRef.current.active = true;
+    verticalShakeRef.current.until = until;
+    verticalShakeRef.current.amplitude = Math.round(6 + s * 22);
+    verticalShakeRef.current.nextShakeAt = now;
+  }, []);
 
   useEffect(() => {
     if (!enabled || !window.sphereOverlay) return;
@@ -59,18 +89,40 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
       await roamNow();
     };
 
+    /** 垂直振荡 tick：每 ~50ms 切换一次方向 */
+    const tickVerticalShake = () => {
+      const now = Date.now();
+      const ref = verticalShakeRef.current;
+      if (!ref.active || now >= ref.until) {
+        if (ref.active) {
+          ref.active = false;
+          ref.amplitude = 0;
+        }
+        return;
+      }
+      if (now >= ref.nextShakeAt) {
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        const dy = Math.round(dir * ref.amplitude * (0.4 + Math.random() * 0.6));
+        const dx = Math.round((Math.random() - 0.5) * ref.amplitude * 0.3);
+        window.sphereOverlay?.moveBy?.(dx, dy);
+        ref.nextShakeAt = now + 50 + Math.random() * 30;
+      }
+    };
+
     const tick = () => {
       if (cancelled) return;
       const now = Date.now();
+      // 优先跑垂直振荡（高优先级，视觉感强）
+      tickVerticalShake();
       const interval = mood === "speaking" ? 3500 : mood === "thinking" ? 5000 : 7000;
-      if (now >= nextMoveAt.current) {
+      if (!verticalShakeRef.current.active && now >= nextMoveAt.current) {
         void schedule();
         nextMoveAt.current = now + interval;
       }
       window.requestAnimationFrame(tick);
     };
 
-    // 启动后先停留 45s，避免一出现就漫游到屏幕外被误认为“消失”
+    // 启动后先停留 45s，避免一出现就漫游到屏幕外被误认为"消失"
     nextMoveAt.current = Date.now() + 45_000;
     const raf = window.requestAnimationFrame(tick);
 
@@ -78,8 +130,9 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
       cancelled = true;
       setOverlayRoamHandler(null);
       window.cancelAnimationFrame(raf);
+      verticalShakeRef.current.active = false;
     };
   }, [enabled, mood, roamNow]);
 
-  return { roamNow };
+  return { roamNow, triggerVerticalShake };
 }

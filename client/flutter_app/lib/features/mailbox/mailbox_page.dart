@@ -1,14 +1,18 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/world_api_client.dart";
+import "../../core/services/ws_chat_service.dart";
 import "friend_chat_page.dart";
 
 /// 邮箱Tab主页面：包含好友列表、好友请求、聊天功能
 class MailboxPage extends StatefulWidget {
-  const MailboxPage({super.key, required this.api});
+  const MailboxPage({super.key, required this.api, required this.ws});
 
   final WorldApiClient api;
+  final WsChatService ws;
 
   @override
   State<MailboxPage> createState() => _MailboxPageState();
@@ -16,22 +20,38 @@ class MailboxPage extends StatefulWidget {
 
 class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  
+  StreamSubscription<Map<String, dynamic>>? _wsSub;
+
   bool _loading = false;
+  bool _serverOffline = false;
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _allRequests = [];
+
+  // 预定义常量
+  static const EdgeInsets _cardMargin = EdgeInsets.symmetric(horizontal: 12, vertical: 4);
+  static const EdgeInsets _cardPadding = EdgeInsets.all(12);
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _wsSub = widget.ws.events.listen(_onWsEvent);
     _loadData();
   }
 
   @override
   void dispose() {
+    _wsSub?.cancel();
     _tabController.dispose();
     super.dispose();
+  }
+
+  void _onWsEvent(Map<String, dynamic> event) {
+    final String type = event["type"] as String? ?? "";
+    // WebSocket 重连成功时自动刷新好友数据
+    if (type == "session.init" && _serverOffline) {
+      _loadData();
+    }
   }
 
   Future<void> _loadData() async {
@@ -41,12 +61,8 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         _loadFriends(),
         _loadAllRequests(),
       ]);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("加载失败: $e")),
-        );
-      }
+    } catch (_) {
+      // 各子方法已自行处理
     } finally {
       if (mounted) {
         setState(() => _loading = false);
@@ -61,15 +77,14 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       if (result["ok"] == true) {
         setState(() {
           _friends = List<Map<String, dynamic>>.from(result["friends"] ?? []);
+          _serverOffline = false;
         });
       }
     } catch (e) {
       if (!mounted) return;
-      final String hint = _networkErrorHint(e);
-      debugPrint("加载好友列表失败: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(hint)),
-      );
+      if (_isNetworkError(e)) {
+        setState(() => _serverOffline = true);
+      }
     }
   }
 
@@ -80,27 +95,23 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       if (result["ok"] == true) {
         setState(() {
           _allRequests = List<Map<String, dynamic>>.from(result["requests"] ?? []);
+          _serverOffline = false;
         });
       }
     } catch (e) {
       if (!mounted) return;
-      final String hint = _networkErrorHint(e);
-      debugPrint("加载好友请求失败: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(hint)),
-      );
+      if (_isNetworkError(e)) {
+        setState(() => _serverOffline = true);
+      }
     }
   }
 
-  String _networkErrorHint(Object error) {
+  bool _isNetworkError(Object error) {
     final String msg = error.toString();
-    if (msg.contains("Failed to fetch") ||
+    return msg.contains("Failed to fetch") ||
         msg.contains("ClientException") ||
         msg.contains("SocketException") ||
-        msg.contains("Connection refused")) {
-      return "无法连接主服务（${ApiConfig.httpBase}），请先启动 server：npm run dev:server";
-    }
-    return "加载失败: $error";
+        msg.contains("Connection refused");
   }
 
   Future<void> _acceptRequest(String requestId) async {
@@ -149,87 +160,6 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
     }
   }
 
-  void _showAddFriendDialog() {
-    final TextEditingController controller = TextEditingController();
-    final TextEditingController messageController = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("添加好友"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                labelText: "Agent ID",
-                hintText: "输入对方的 Agent ID",
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: messageController,
-              decoration: const InputDecoration(
-                labelText: "验证消息（可选）",
-                hintText: "介绍一下自己吧",
-              ),
-              maxLines: 2,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("取消"),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final toActorId = controller.text.trim();
-              if (toActorId.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("请输入 Agent ID")),
-                );
-                return;
-              }
-
-              Navigator.pop(context);
-
-              try {
-                final result = await widget.api.sendFriendRequest(
-                  toActorId,
-                  message: messageController.text.trim().isEmpty
-                      ? null
-                      : messageController.text.trim(),
-                );
-
-                if (mounted) {
-                  if (result["ok"] == true) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("好友请求已发送")),
-                    );
-                    await _loadAllRequests();
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(result["message"] ?? "发送失败")),
-                    );
-                  }
-                }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("发送失败: $e")),
-                  );
-                }
-              }
-            },
-            child: const Text("发送"),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -265,6 +195,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       return const Center(child: CircularProgressIndicator());
     }
 
+    if (_serverOffline) {
+      return _buildOfflineHint(theme);
+    }
+
     if (_friends.isEmpty) {
       return Center(
         child: Column(
@@ -298,7 +232,6 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
           final friend = _friends[index];
           final displayName = friend["displayName"] as String? ?? friend["friendActorId"] as String;
           final email = friend["email"] as String?;
-          final addedAt = friend["addedAt"] as String?;
 
           return ListTile(
             leading: CircleAvatar(
@@ -336,6 +269,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   Widget _buildNewFriendsList(ThemeData theme) {
     if (_loading && _allRequests.isEmpty) {
       return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_serverOffline) {
+      return _buildOfflineHint(theme);
     }
 
     if (_allRequests.isEmpty) {
@@ -380,9 +317,9 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
           final String otherActorId = isIncoming ? fromActorId : toActorId;
 
           return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            margin: _cardMargin,
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: _cardPadding,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -487,6 +424,36 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildOfflineHint(ThemeData theme) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.error),
+          const SizedBox(height: 16),
+          Text(
+            "无法连接服务器",
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: theme.colorScheme.error,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            "请先启动 server：npm run dev:server",
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.tonal(
+            onPressed: _loadData,
+            child: const Text("重试"),
+          ),
+        ],
       ),
     );
   }

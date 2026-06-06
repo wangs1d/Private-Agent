@@ -93,6 +93,19 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
             : "📞 来电";
       return { mood: "alert", energy: 0.9, caption, source: "phone" };
     }
+    case "pet.reaction.ack": {
+      // LLM 对 pet.reaction 的实时回复 — 桌宠的即兴台词
+      const text = String(p.text ?? p.caption ?? "").trim();
+      if (!text) return null;
+      const mood = (p.mood as AgentMood | undefined) ?? "speaking";
+      const energy = typeof p.energy === "number" ? p.energy : 0.7;
+      return {
+        mood,
+        energy,
+        caption: text,
+        source: "pet_reaction",
+      };
+    }
     case "agent.peer_message": {
       const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
       return { mood: "alert", energy: 0.82, caption: `💬 ${preview}`, source: "peer" };

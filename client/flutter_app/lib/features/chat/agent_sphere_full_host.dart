@@ -1,4 +1,4 @@
-import "dart:async";
+﻿import "dart:async";
 
 import "package:flutter/material.dart";
 
@@ -64,9 +64,9 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.cyan.withOpacity(0.12),
+                  color: Colors.cyan.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.cyan.withOpacity(0.35)),
+                  border: Border.all(color: Colors.cyan.withValues(alpha: 0.35)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -89,9 +89,9 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
           child: IconButton.filledTonal(
             tooltip: "声纹注册",
             onPressed: _voice.onRequestVoiceprintRegistration,
-            icon: Icon(Icons.fingerprint, color: Colors.white.withOpacity(0.75), size: 22),
+            icon: Icon(Icons.fingerprint, color: Colors.white.withValues(alpha: 0.75), size: 22),
             style: IconButton.styleFrom(
-              backgroundColor: Colors.black.withOpacity(0.35),
+              backgroundColor: Colors.black.withValues(alpha: 0.35),
             ),
           ),
         ),
@@ -108,7 +108,7 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
               size: 20,
             ),
             style: IconButton.styleFrom(
-              backgroundColor: Colors.black.withOpacity(0.35),
+              backgroundColor: Colors.black.withValues(alpha: 0.35),
               foregroundColor: Colors.white70,
             ),
           ),
@@ -159,9 +159,9 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                     vertical: compact ? 8 : 10,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.45),
+                    color: Colors.black.withValues(alpha: 0.45),
                     borderRadius: BorderRadius.circular(compact ? 10 : 14),
-                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
                   ),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -186,9 +186,9 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: vs.verificationStatus.contains("✓")
-                                ? Colors.greenAccent.withOpacity(0.9)
+                                ? Colors.greenAccent.withValues(alpha: 0.9)
                                 : vs.verificationStatus.contains("✗")
-                                    ? Colors.redAccent.withOpacity(0.9)
+                                    ? Colors.redAccent.withValues(alpha: 0.9)
                                     : Colors.white70,
                             fontSize: hintFontSize,
                           ),
@@ -201,7 +201,7 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                         Text(
                           "听到：${vs.wakeHint}",
                           style: TextStyle(
-                            color: Colors.white.withOpacity(0.4),
+                            color: Colors.white.withValues(alpha: 0.4),
                             fontSize: hintFontSize,
                           ),
                         ),
@@ -215,7 +215,7 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                                 : "点击开始说话",
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          color: Colors.white.withOpacity(0.45),
+                          color: Colors.white.withValues(alpha: 0.45),
                           fontSize: hintFontSize,
                         ),
                       ),

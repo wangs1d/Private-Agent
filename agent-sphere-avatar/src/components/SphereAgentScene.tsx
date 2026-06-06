@@ -26,6 +26,14 @@ interface SphereAgentSceneProps {
   canvasCaptureLenient?: boolean;
   onPanDelta?: (dx: number, dy: number) => void;
   onPanEnd?: () => void;
+  /** 实时拖动/旋转反应 */
+  onLiveReact?: (intensity: number, mode: "pan" | "rotate") => void;
+  /** 旋转中累计 yaw/pitch 角度（弧度）回调 */
+  onSpinDelta?: (deltaYaw: number, deltaPitch: number) => void;
+  /** 拖动结束回调 */
+  onDragRelease?: (info: { mode: "pan" | "rotate"; totalRotationDeg: number; panDistance: number; spinStrength: number }) => void;
+  /** 触发身体晃动函数 */
+  onShakeRequest?: (strength: number, durationMs: number) => void;
 }
 
 function Ground({ invisibleCollision }: { invisibleCollision?: boolean }) {
@@ -65,6 +73,10 @@ export function SphereAgentScene({
   canvasCaptureLenient = false,
   onPanDelta,
   onPanEnd,
+  onLiveReact,
+  onSpinDelta,
+  onDragRelease,
+  onShakeRequest,
 }: SphereAgentSceneProps) {
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
@@ -166,6 +178,10 @@ export function SphereAgentScene({
           canvasCaptureLenient={canvasCaptureLenient}
           onPanDelta={onPanDelta}
           onPanEnd={onPanEnd}
+          onLiveReact={onLiveReact}
+          onSpinDelta={onSpinDelta}
+          onDragRelease={onDragRelease}
+          onShakeRequest={onShakeRequest}
         />
       </Physics>
     </Canvas>

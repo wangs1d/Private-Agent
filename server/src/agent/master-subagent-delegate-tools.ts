@@ -15,7 +15,6 @@ const SUB_AGENT_TYPES: SubAgentType[] = [
   "tech",
   "info",
   "creative",
-  "security",
 ];
 
 export function parseSubAgentType(raw: unknown): SubAgentType | null {
@@ -42,7 +41,7 @@ export function buildMasterSubAgentDelegateChatTools(
 
   const capabilityTable = [
     "",
-    "【5个核心子Agent — 按能力维度划分】",
+    "【4个核心子Agent — 按能力维度划分】",
     "",
     "🏠 life 生活全能助手",
     "   能力: wallet · purchase",
@@ -67,12 +66,6 @@ export function buildMasterSubAgentDelegateChatTools(
     "   场景: 写文案/做策划/写邮件/创意写作/PPT大纲/社媒内容/翻译润色",
     "   ⚠️ creative 拥有专属的深度调研+内容创作工具链，简单文案主 agent 也能写，但专业的委派 creative",
     "",
-    "🛡️ security 安全审计助手",
-    "   能力: security_audit",
-    "   工具: wallet.get_balance / wallet.get_transactions（只读审计，不执行转账/消费）",
-    "   场景: 大额转账确认/敏感操作审批/安全策略检查/异常拦截",
-    "   注意: 涉及钱包大额操作时，Master 应先委派 security 审批再委派 life 执行",
-    "",
     "【访问权限】默认「沙箱」：desktop.visual.run_task、vision.periodic_*、self.* 仅当用户开启「完全访问」后可用；沙箱下委派 life/tech 做电脑操控会失败，须先提醒用户开权限。",
     "",
     "【视觉操控】desktop.visual.* 在「完全访问」或电脑桥接在线时主 agent 可直接调用；复杂 RPA 可委派 life / tech。",
@@ -87,7 +80,6 @@ export function buildMasterSubAgentDelegateChatTools(
     "- 写代码/调试/部署/自动化脚本/运维/批量处理 → 委派 tech",
     "- 深度搜索/多轮调研/商品比价 → 委派 info",
     "- 专业创作(文案/策划/PPT/社媒/翻译润色) → 委派 creative",
-    "- 大额交易/敏感操作/安全检查 → 先委派 security 审批",
     "",
   ].join("\n");
 
@@ -97,7 +89,7 @@ export function buildMasterSubAgentDelegateChatTools(
       function: {
         name: MASTER_INVOKE_SUB_AGENT_REGISTRY,
         description: [
-          "主 Agent 派一名小弟（子 Agent）执行一个专业子任务。你是带头大哥，手下有 life/tech/info/creative/security。",
+          "主 Agent 派一名小弟（子 Agent）执行一个专业子任务。你是带头大哥，手下有 life/tech/info/creative。",
           "简单事项用普通工具自己处理；复杂、多步骤或跨领域时再派小弟。",
           "收到小弟报告后整合回复用户，或再派另一个不同小弟接力（forwardToAgent）。",
           "用户一次提多件互不依赖的事：在同一轮并行多次调用本工具（服务端限流 MAX_PARALLEL_SUB_AGENTS）。",
@@ -112,7 +104,7 @@ export function buildMasterSubAgentDelegateChatTools(
             agentType: {
               type: "string",
               enum: [...SUB_AGENT_TYPES],
-              description: "Sub-agent type. Routes: life=复杂生活操作(钱包写+视觉操控), tech=技术操控(RPA+代码+运维), info=信息检索(深度调研), creative=创意内容(文案/策划/写作/PPT), security=安全审计(风险检测/审批/拦截). 注意：游戏由主agent直接处理，不委派life。",
+              description: "Sub-agent type. Routes: life=复杂生活操作(钱包写+视觉操控), tech=技术操控(RPA+代码+运维), info=信息检索(深度调研), creative=创意内容(文案/策划/写作/PPT). 注意：游戏由主agent直接处理，不委派life。",
             },
             taskDescription: {
               type: "string",

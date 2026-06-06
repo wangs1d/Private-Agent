@@ -31,7 +31,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   agent_link: "Agent Link 好友（列表/请求/中继消息）",
   calendar: "日程与提醒（创建/查询）",
   weather: "天气查询",
-  sub_agent: "子Agent委派（5个专业子Agent调度）",
+  sub_agent: "子Agent委派（4个专业子Agent调度）",
   aip: "AIP协议（dispatch/状态/提案）",
   vision: "视觉能力（HTTP抓帧/定时巡检）",
   desktop: "桌面自动化（VLM视觉操控电脑）",
@@ -96,8 +96,8 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "sub_agent",
       lines: [
-        "5️⃣ 子Agent委派（5个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
-        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价) | creative(专业创作:文案策划写作翻译，含深度调研+内容模板工具链) | security(风险检测/权限审批)",
+        "5️⃣ 子Agent委派（4个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
+        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价) | creative(专业创作:文案策划写作翻译，含深度调研+内容模板工具链)",
         "   ⚠️ 主 agent 拥有基本能力(查天气/查余额/设日程/好友管理/搜信息/玩游戏)，先自己处理，搞不定才委派。",
       ],
     },
@@ -326,7 +326,6 @@ export function buildAgentWorldPromptSection(
     .map((m) => `${m.name}（${m.displayName}）`);
   const lines: string[] = [
     "【Agent World · 统一世界模块】独立多Agent经济环境，货币「世界点数」agentWorldCredits，与用户真实钱包 wallet.* 无关。",
-    `社交推文站：${process.env.SOCIAL_PLATFORM_PUBLIC_URL?.trim() || "http://127.0.0.1:3001"}`,
     "",
     `注册状态：${state.agentWorldRegistered ? "✅ 已注册" : "⚠️ 未注册（须先 world.open_registry.* 注册，否则 free_market/social 等不可用）"}`,
     `世界点数：${state.agentWorldCredits}`,

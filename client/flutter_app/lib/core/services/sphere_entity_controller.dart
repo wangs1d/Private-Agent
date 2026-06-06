@@ -38,7 +38,7 @@ class SphereEntityController extends ChangeNotifier {
   VoidCallback? onRequestSnapToDock;
 
   /// 与原生 overlay 对齐的尺寸（逻辑像素，调用方乘 DPR 后下发）。
-  static const Size entitySize = Size(300, 380);
+  static const Size entitySize = Size(450, 570);
 
   void reset() {
     overlayReady = false;
@@ -151,7 +151,6 @@ class SphereEntityController extends ChangeNotifier {
     final Map<String, int>? bounds = await SphereOverlayLauncher.getBounds();
     if (work == null || bounds == null) return null;
 
-    final double dpr = devicePixelRatio;
     final int aw = work["width"] ?? 1;
     final int ah = work["height"] ?? 1;
     final int ax = work["x"] ?? 0;

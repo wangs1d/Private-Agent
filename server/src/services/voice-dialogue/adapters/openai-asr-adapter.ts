@@ -27,7 +27,7 @@ export class OpenAIASRAdapter implements ASRProvider {
     try {
       const transcription = await this.client.audio.transcriptions.create({
         model: "whisper-1",
-        file: new File([audio.data], "audio.mp3", { type: `audio/${audio.format}` }),
+        file: new File([new Uint8Array(audio.data)], "audio.mp3", { type: `audio/${audio.format}` }),
         language: options?.language ?? "zh",
         response_format: "verbose_json",
       });
