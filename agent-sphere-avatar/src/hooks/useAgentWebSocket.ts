@@ -213,6 +213,27 @@ export function useAgentWebSocket(
   const sendChat = useCallback((text: string) => sendInteract("chat", text), [sendInteract]);
   const sendFocus = useCallback(() => sendInteract("focus"), [sendInteract]);
 
+  /**
+   * 桌宠实时反应（不经过 Embodiment）— 用于"用户拖动/旋转桌宠"这种非对话交互
+   * 实时向 LLM 上报上下文，期望拿到一句即兴台词。
+   * 返回 true 表示消息已发送。
+   */
+  const sendPetReaction = useCallback(
+    (payload: Record<string, unknown>) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      const sid = sessionRef.current;
+      ws.send(
+        JSON.stringify({
+          type: "pet.reaction",
+          payload: { sessionId: sid, userId: sid, ts: Date.now(), ...payload },
+        }),
+      );
+      return true;
+    },
+    [],
+  );
+
   return {
     connected,
     reconnecting,
@@ -221,5 +242,6 @@ export function useAgentWebSocket(
     sendWake,
     sendChat,
     sendFocus,
+    sendPetReaction,
   };
 };

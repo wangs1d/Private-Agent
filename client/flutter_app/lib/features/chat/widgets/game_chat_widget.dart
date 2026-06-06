@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "dart:async";
 
 class GameChatMessage {
@@ -113,7 +113,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
       child: Material(
         elevation: 8,
         borderRadius: BorderRadius.circular(_isMinimized ? 28 : 16),
-        shadowColor: Colors.black.withOpacity(0.3),
+        shadowColor: Colors.black.withValues(alpha: 0.3),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeInOut,
@@ -123,7 +123,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
             color: cs.surface,
             borderRadius: BorderRadius.circular(_isMinimized ? 28 : 16),
             border: Border.all(
-              color: cs.outlineVariant.withOpacity(0.5),
+              color: cs.outlineVariant.withValues(alpha: 0.5),
               width: 1,
             ),
             boxShadow: [
@@ -165,7 +165,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: cs.primaryContainer.withOpacity(0.6),
+            color: cs.primaryContainer.withValues(alpha: 0.6),
             borderRadius: BorderRadius.only(
               topLeft: const Radius.circular(16),
               topRight: const Radius.circular(16),
@@ -195,7 +195,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: cs.primary.withOpacity(0.2),
+                  color: cs.primary.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Text(
@@ -213,7 +213,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: cs.surfaceContainerHighest.withOpacity(0.5),
+                  color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
                 ),
                 child: Icon(
                   _isMinimized ? Icons.expand_less : Icons.expand_more,
@@ -324,7 +324,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
         color: cs.surface,
         border: Border(
           top: BorderSide(
-            color: cs.outline.withOpacity(0.12),
+            color: cs.outline.withValues(alpha: 0.12),
             width: 1,
           ),
         ),
@@ -345,7 +345,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
                 decoration: InputDecoration(
                   hintText: widget.placeholder,
                   hintStyle: TextStyle(
-                    color: cs.onSurfaceVariant.withOpacity(0.6),
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.6),
                     fontSize: 13,
                   ),
                   border: OutlineInputBorder(
@@ -353,7 +353,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
                     borderSide: BorderSide.none,
                   ),
                   filled: true,
-                  fillColor: cs.surfaceContainerHigh.withOpacity(0.5),
+                  fillColor: cs.surfaceContainerHigh.withValues(alpha: 0.5),
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 14,
                     vertical: 9,

@@ -1,8 +1,7 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "dart:async";
 
 import "../../core/services/multimodal_recognition_service.dart";
-import "../../core/services/visual_recognition_service.dart";
 
 class FaceRegistrationPage extends StatefulWidget {
   const FaceRegistrationPage({
@@ -146,10 +145,10 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
               width: 200,
               height: 200,
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.3),
+                color: Colors.black.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: cs.primary.withOpacity(0.5),
+                  color: cs.primary.withValues(alpha: 0.5),
                   width: 2,
                 ),
               ),
@@ -157,7 +156,7 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                 child: Icon(
                   Icons.face,
                   size: 80,
-                  color: Colors.white.withOpacity(0.5),
+                  color: Colors.white.withValues(alpha: 0.5),
                 ),
               ),
             ),
@@ -167,7 +166,7 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.1),
+                color: Colors.white.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Column(
@@ -183,7 +182,7 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                   const SizedBox(height: 16),
                   LinearProgressIndicator(
                     value: _progress,
-                    backgroundColor: Colors.white.withOpacity(0.2),
+                    backgroundColor: Colors.white.withValues(alpha: 0.2),
                     valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
                     minHeight: 8,
                   ),
@@ -191,7 +190,7 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                   Text(
                     _statusText,
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.8),
+                      color: Colors.white.withValues(alpha: 0.8),
                       fontSize: 16,
                     ),
                     textAlign: TextAlign.center,
@@ -211,15 +210,15 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _isCapturing
-                      ? Colors.blue.withOpacity(0.8)
+                      ? Colors.blue.withValues(alpha: 0.8)
                       : _isRegistering
-                          ? Colors.grey.withOpacity(0.5)
-                          : cs.primary.withOpacity(0.8),
+                          ? Colors.grey.withValues(alpha: 0.5)
+                          : cs.primary.withValues(alpha: 0.8),
                   boxShadow: [
                     BoxShadow(
                       color: _isCapturing
-                          ? Colors.blue.withOpacity(0.4)
-                          : cs.primary.withOpacity(0.3),
+                          ? Colors.blue.withValues(alpha: 0.4)
+                          : cs.primary.withValues(alpha: 0.3),
                       blurRadius: _isCapturing ? 30 : 20,
                       spreadRadius: _isCapturing ? 5 : 2,
                     ),
@@ -238,10 +237,10 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.05),
+                color: Colors.white.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: Colors.white.withOpacity(0.1),
+                  color: Colors.white.withValues(alpha: 0.1),
                 ),
               ),
               child: Column(
@@ -261,7 +260,7 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                     '3. 需要完成5次采集\n'
                     '4. 建议在不同角度和光线下采集',
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.7),
+                      color: Colors.white.withValues(alpha: 0.7),
                       fontSize: 14,
                       height: 1.6,
                     ),

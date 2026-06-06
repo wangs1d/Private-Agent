@@ -810,6 +810,17 @@ const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
 
 /** world.* / AIP / 内置联网工具等（不含按会话合并的 Skill function 列表）。结果带模块级缓存。 */
 let _builtinToolsCache: ChatCompletionTool[] | null = null;
+
+/** 动态注入的 MCP 工具（由 bootstrap 阶段设置） */
+let _mcpChatTools: ChatCompletionTool[] = [];
+
+/** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
+export function setMcpChatTools(tools: ChatCompletionTool[]): void {
+  _mcpChatTools = tools;
+  // 清除缓存，下次 getBuiltinAgentChatTools 调用会重新构建
+  _builtinToolsCache = null;
+}
+
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
   if (_builtinToolsCache) return _builtinToolsCache;
   _builtinToolsCache = [
@@ -830,6 +841,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...getDesktopVisualChatTools(),
     BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
+    ..._mcpChatTools,
   ];
   return _builtinToolsCache;
 }
@@ -839,7 +851,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
 
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'game' | 'aip' | 'embodiment' | 'smart_home';
+type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'game' | 'aip' | 'embodiment' | 'smart_home' | 'mcp';
 
 interface ToolCategoryMapping {
   category: ToolCategory;
@@ -927,6 +939,11 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'smart_home',
     keywords: ['灯', '灯光', '开关', '空调', '温度', '窗帘', '传感器', '设备', '家电', '家居', '智能', 'home', 'light', 'climate', 'switch', 'cover', 'sensor', '加热', '取暖', '制冷', 'cool', 'heat', 'fan', '风扇', '湿度', 'humidity', 'brightness', '亮度', '场景', 'scene', '回家', '离家', '晚安'],
     toolNames: ['smart_home.list_devices', 'smart_home.control_device', 'smart_home.scene']
+  },
+  {
+    category: 'mcp',
+    keywords: ['微博', 'weibo', '小红书', 'xiaohongshu', 'xhs', '微信', 'wechat', '抖音', 'douyin', 'mcp', '外部工具', 'external tool', '平台', 'platform'],
+    toolNames: [] // MCP tools are dynamic, populated at runtime
   },
 ];
 
@@ -1173,7 +1190,7 @@ export async function streamCompletionWithTools(
       throw e;
     }
 
-    lastAssistantText = fullText;
+    lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
 
     if (finishReason !== "tool_calls" || toolAcc.size === 0) {
       if (ctx.onAgentStatusLine && fullText.trim()) {

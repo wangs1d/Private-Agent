@@ -36,6 +36,12 @@ interface UseSphereUserDragOptions {
   /** 左键拖动平移（无桌面 overlay API 时回调） */
   onPanDelta?: (dx: number, dy: number) => void;
   onPanEnd?: () => void;
+  /** 拖动中累积强度变化（每次跨过 LIVE_REACT_THRESHOLD 触发一次）。强度基于累计位移 + 当前速度 */
+  onLiveReact?: (intensity: number, mode: DragMode) => void;
+  /** 旋转中累计角度（弧度）回调 — 用于实时反应动画与状态 */
+  onSpinDelta?: (deltaYaw: number, deltaPitch: number) => void;
+  /** 拖动结束事件（用于松手瞬间触发动态反应/说话） */
+  onDragRelease?: (info: { mode: DragMode; totalRotationDeg: number; panDistance: number; spinStrength: number }) => void;
 }
 
 type DragMode = "pan" | "rotate";
@@ -44,6 +50,9 @@ const SPIN_EXCITE_THRESHOLD = 0.35;
 const HIT_RADIUS = MODEL.bodyRadius * 1.12;
 const EYE_HIT_RADIUS = MODEL.bodyRadius * Math.sin(MODEL.screenHitHalfAngle);
 const EYE_CLICK_DRAG_PX = 10;
+/** 实时反应：旋转/拖动累积到该强度阈值就触发一次身体晃动 */
+const LIVE_REACT_THRESHOLD = 0.12;
+/** 旋转过冲衰减：在 useFrame 中用 decay 指数衰减 */
 
 /** 左键拖动平移、右键拖动旋转 */
 export function useSphereUserDrag({
@@ -61,6 +70,9 @@ export function useSphereUserDrag({
   onEyeClick,
   onPanDelta,
   onPanEnd,
+  onLiveReact,
+  onSpinDelta,
+  onDragRelease,
 }: UseSphereUserDragOptions) {
   const { camera, gl, raycaster } = useThree();
   const enabledRef = useRef(enabled);
@@ -71,13 +83,20 @@ export function useSphereUserDrag({
   const lastPointerRef = useRef({ x: 0, y: 0 });
   const spinVelRef = useRef({ x: 0, y: 0 });
   const totalRotRef = useRef(0);
+  const totalYawRadRef = useRef(0);
+  const totalPitchRadRef = useRef(0);
   const touchPulseRef = useRef(0);
   const dragModeRef = useRef<DragMode>("pan");
   const activeButtonRef = useRef(0);
   const panMovedRef = useRef(0);
   const panRemainderRef = useRef({ x: 0, y: 0 });
+  /** 实时反应累积强度（每次跨越 LIVE_REACT_THRESHOLD 触发一次 onLiveReact） */
+  const liveReactBucketRef = useRef(0);
   /** Electron 窗口拖拽须用 screen 坐标，否则 moveBy 后 client 坐标反馈导致抖动 */
   const panUseScreenSpaceRef = useRef(false);
+  /** RAF 节流：累积本轮 pointermove 的位移增量，每帧最多提交一次 applyDragDelta */
+  const pendingDeltaRef = useRef({ x: 0, y: 0 });
+  const rafIdRef = useRef<number | null>(null);
   const bodyCenterRef = useRef(new THREE.Vector3(0, 1.6, 0));
   const eyeLocalRef = useRef(new THREE.Vector3(...MODEL.glassScreenPosition));
   const eyeWorldRef = useRef(new THREE.Vector3());
@@ -121,6 +140,16 @@ export function useSphereUserDrag({
         } else if (window.parent !== window) {
           postToHost({ type: SPHERE_MSG.pan, dx, dy });
         }
+
+        // 实时反应：拖动也累计强度，到达阈值触发晃动
+        liveReactBucketRef.current += (Math.abs(dx) + Math.abs(dy)) / 100;
+        while (liveReactBucketRef.current >= LIVE_REACT_THRESHOLD) {
+          liveReactBucketRef.current -= LIVE_REACT_THRESHOLD;
+          onLiveReact?.(
+            Math.min(1, liveReactBucketRef.current / LIVE_REACT_THRESHOLD + 0.3),
+            "pan",
+          );
+        }
         return;
       }
 
@@ -128,12 +157,22 @@ export function useSphereUserDrag({
       const rotY = dx * 0.014;
       const rotX = dy * 0.011;
       totalRotRef.current += Math.abs(dx) + Math.abs(dy);
+      // 360° 旋转：累计 yaw 不再夹紧（X 仅用于短期倾斜动量）
+      totalYawRadRef.current += rotY;
+      totalPitchRadRef.current += rotX;
 
       const group = userRotRef.current;
       if (group) {
+        // Y 轴自由 360° 旋转；X 轴用 wrapPi 维持过冲衰减
         group.rotation.y += rotY;
-        group.rotation.x = THREE.MathUtils.clamp(group.rotation.x + rotX, -0.65, 0.65);
+        group.rotation.x += rotX;
+        // X 轴软回归 0，避免模型上下颠倒
+        group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, 0.04);
+        if (group.rotation.x > Math.PI * 2) group.rotation.x -= Math.PI * 2;
+        else if (group.rotation.x < -Math.PI * 2) group.rotation.x += Math.PI * 2;
       }
+
+      onSpinDelta?.(rotY, rotX);
 
       spinVelRef.current = {
         x: THREE.MathUtils.lerp(spinVelRef.current.x, rotX / dt, 0.35),
@@ -147,22 +186,63 @@ export function useSphereUserDrag({
       const spin = Math.min(1, (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.18);
       applyFaceSignals(1, spin);
       onTouch?.({ phase: "drag", spinStrength: spin });
+
+      // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动
+      const intensityDelta = Math.abs(rotY) + Math.abs(rotX) * 1.4;
+      liveReactBucketRef.current += intensityDelta;
+      while (liveReactBucketRef.current >= LIVE_REACT_THRESHOLD) {
+        liveReactBucketRef.current -= LIVE_REACT_THRESHOLD;
+        onLiveReact?.(
+          Math.min(1, 0.4 + spin * 0.5 + liveReactBucketRef.current / LIVE_REACT_THRESHOLD * 0.4),
+          "rotate",
+        );
+      }
     },
-    [api, applyFaceSignals, onPanDelta, onTouch, userRotRef],
+    [api, applyFaceSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
   );
+
+  /** RAF 节流：将累积的位移增量一次性提交给 applyDragDelta */
+  const flushPendingDelta = useCallback(() => {
+    rafIdRef.current = null;
+    const { x: dx, y: dy } = pendingDeltaRef.current;
+    if (dx === 0 && dy === 0) return;
+    pendingDeltaRef.current = { x: 0, y: 0 };
+    applyDragDelta(dx, dy);
+  }, [applyDragDelta]);
+
+  /** 调度 RAF flush（确保同一帧内只调度一次） */
+  const scheduleFlush = useCallback(() => {
+    if (rafIdRef.current != null) return;
+    rafIdRef.current = requestAnimationFrame(flushPendingDelta);
+  }, [flushPendingDelta]);
 
   const finishDrag = useCallback(() => {
     if (!draggingRef.current) return;
+
+    // 拖拽结束：立即 flush 累积位移，取消待执行的 RAF
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+      const { x: dx, y: dy } = pendingDeltaRef.current;
+      pendingDeltaRef.current = { x: 0, y: 0 };
+      if (dx !== 0 || dy !== 0) {
+        applyDragDelta(dx, dy);
+      }
+    }
+
     const mode = dragModeRef.current;
     draggingRef.current = false;
     pointerIdRef.current = null;
+
+    let releaseInfo: { mode: DragMode; totalRotationDeg: number; panDistance: number; spinStrength: number };
 
     if (mode === "rotate") {
       const spinStrength = Math.min(
         1,
         (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
       );
-      const totalRotationDeg = totalRotRef.current * 0.35;
+      const totalRotationDeg = (totalYawRadRef.current * 180) / Math.PI;
+      const totalPitchDeg = (totalPitchRadRef.current * 180) / Math.PI;
 
       if (spinStrength > SPIN_EXCITE_THRESHOLD) {
         onExcite?.(0.6 + spinStrength * 0.9);
@@ -172,6 +252,12 @@ export function useSphereUserDrag({
       }
 
       onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
+      releaseInfo = {
+        mode: "rotate",
+        totalRotationDeg: Math.abs(totalRotationDeg) + Math.abs(totalPitchDeg),
+        panDistance: 0,
+        spinStrength,
+      };
     } else {
       if (window.sphereOverlay?.moveBy) {
         const rx = Math.round(panRemainderRef.current.x);
@@ -183,12 +269,23 @@ export function useSphereUserDrag({
       panRemainderRef.current = { x: 0, y: 0 };
       panUseScreenSpaceRef.current = false;
       onPanEnd?.();
+      releaseInfo = {
+        mode: "pan",
+        totalRotationDeg: 0,
+        panDistance: panMovedRef.current,
+        spinStrength: 0,
+      };
     }
+
+    onDragRelease?.(releaseInfo);
+    liveReactBucketRef.current = 0;
 
     dragModeRef.current = "pan";
     activeButtonRef.current = 0;
     panMovedRef.current = 0;
-  }, [applyFaceSignals, onExcite, onPanEnd, onTouch]);
+    totalYawRadRef.current = 0;
+    totalPitchRadRef.current = 0;
+  }, [applyFaceSignals, onDragRelease, onExcite, onPanEnd, onTouch]);
 
   const beginDrag = useCallback(
     (
@@ -234,9 +331,12 @@ export function useSphereUserDrag({
       const dx = p.x - lastPointerRef.current.x;
       const dy = p.y - lastPointerRef.current.y;
       lastPointerRef.current = { x: p.x, y: p.y };
-      applyDragDelta(dx, dy);
+      // 累积位移增量，通过 RAF 节流每帧最多提交一次
+      pendingDeltaRef.current.x += dx;
+      pendingDeltaRef.current.y += dy;
+      scheduleFlush();
     },
-    [applyDragDelta, readPointer],
+    [readPointer, scheduleFlush],
   );
 
   const handlePointerDown = useCallback(
@@ -323,12 +423,19 @@ export function useSphereUserDrag({
     const sv = spinVelRef.current;
     if (Math.abs(sv.x) + Math.abs(sv.y) < 0.002) {
       spinVelRef.current = { x: 0, y: 0 };
+      // X 轴软回归 0（保持竖直）
       group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, dt * 2.2);
+      // 衰减后归一化 Y 轴到 (-PI, PI] 防止浮点漂移
+      const TAU = Math.PI * 2;
+      if (group.rotation.y > Math.PI) group.rotation.y -= TAU;
+      else if (group.rotation.y < -Math.PI) group.rotation.y += TAU;
       return;
     }
 
+    // 360° 自由旋转：Y 轴不夹紧；X 轴不夹紧但在更高频的 lerp 回归中
     group.rotation.y += sv.y * dt;
-    group.rotation.x = THREE.MathUtils.clamp(group.rotation.x + sv.x * dt, -0.65, 0.65);
+    group.rotation.x += sv.x * dt;
+    group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, dt * 0.6);
 
     const decay = Math.exp(-3.2 * dt);
     spinVelRef.current = { x: sv.x * decay, y: sv.y * decay };
@@ -441,5 +548,7 @@ export function useSphereUserDrag({
     bodyRadius: HIT_RADIUS,
     isDragging: () => draggingRef.current,
     dragDistance: () => totalRotRef.current,
+    getYawRad: () => userRotRef.current?.rotation.y ?? 0,
+    getPitchRad: () => userRotRef.current?.rotation.x ?? 0,
   };
 }

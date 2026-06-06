@@ -196,14 +196,13 @@ export class MasterAgentCoordinator {
   }
 
   /**
-   * 初始化 5 个核心子 Agent（按能力维度划分）
+   * 初始化 4 个核心子 Agent（按能力维度划分）
    *
    * 设计理念：
    * - life  → 复杂生活操作：钱包写操作(转帐/消费50+类/充值) + 视觉操控(电脑)
    * - tech  → 技术操控：深度RPA自动化 + 代码开发 + 系统运维 + 视觉操控(深度)
    * - info  → 信息检索：深度搜索比价调研（只查不买）
    * - creative → 创意内容：专业文案策划写作翻译润色（深度调研+内容模板工具链）
-   * - security → 安全审计：风险检测/权限审批/异常拦截
    *
    * ⚠️ 主 agent 拥有基本能力（查天气/查余额/设日程/好友管理/搜信息），自己先处理。
    * 只有涉及以上子 agent 专属能力时才委派。
@@ -427,62 +426,6 @@ export class MasterAgentCoordinator {
       ],
       tools: [...(SUB_AGENT_TOOL_ALLOWLISTS.creative ?? [])],
       capabilities: ["content_creation"],
-    });
-
-    // ──────────────────────────────────────────────
-    // 🛡️ security 安全审计助手
-    //
-    // 专注于：
-    // 1. 操作风险检测（大额转账、敏感操作预检）
-    // 2. 权限审批（二次确认机制）
-    // 3. 异常行为检测（偏离用户习惯的操作）
-    // 4. 安全策略执行（规则引擎 + LLM 判断）
-    //
-    // 工作模式：
-    // - Master 先委派 security 审批 → 通过后委派 life/tech 执行
-    // - security 本身不执行购买/转账，只做判断和建议
-    // ──────────────────────────────────────────────
-    map.set("security", {
-      type: "security",
-      name: "安全审计助手",
-      description: [
-        "【安全审计 — 风险检测 · 权限审批 · 异常拦截】",
-        "",
-        "🔒 操作风险检测：",
-        "- 大额转账/消费预警（可配置阈值，默认单笔>1000元触发审核）",
-        "- 敏感操作识别（删除账号、修改密码、授权第三方）",
-        "- 新收款人/新商户首次交易风险提示",
-        "",
-        "✅ 权限审批流程：",
-        "- 对高风险操作进行二次确认评估",
-        "- 输出：APPROVED / REJECTED / NEED_CONFIRM 三级判定",
-        "- 给出具体风险理由和缓解建议",
-        "",
-        "⚠️ 异常行为检测：",
-        "- 偏离用户历史操作模式的行为标记",
-        "- 非常规时间/非常规金额/非常规频率的异常识别",
-        "- 可疑的连续多次小额试探性操作检测",
-        "",
-        "📊 审计报告输出格式：",
-        "```",
-        "【安全审计结果】",
-        "判定: APPROVED / REJECTED / NEED_CONFIRM",
-        "风险等级: LOW / MEDIUM / HIGH / CRITICAL",
-        "原因: <具体分析>",
-        "建议: <操作建议>",
-        "```",
-        "",
-        "注意：security 只做风险评估和审批判断，不直接执行任何钱包或系统操作。",
-      ].join("\n"),
-      keywords: [
-        "大额", "转账", "金额", "审批", "确认", "安全",
-        "风险", "异常", "可疑", "权限", "验证",
-        "敏感操作", "密码", "账号", "授权", "删除",
-        "防盗", "防骗", "诈骗", "钓鱼",
-        "安全检查", "审计", "合规",
-      ],
-      tools: [...(SUB_AGENT_TOOL_ALLOWLISTS.security ?? [])],
-      capabilities: ["security_audit"],
     });
 
     // ──────────────────────────────────────────────
@@ -1454,7 +1397,7 @@ export class MasterAgentCoordinator {
   }
 
   public getSubAgentMetricsSnapshot(): Record<SubAgentType, SubAgentPerformanceMetrics> {
-    const types: SubAgentType[] = ["life", "tech", "info", "creative", "security"];
+    const types: SubAgentType[] = ["life", "tech", "info", "creative"];
     const out = {} as Record<SubAgentType, SubAgentPerformanceMetrics>;
     for (const t of types) {
       out[t] = this.subAgentMetrics.get(t) ?? this.emptySubAgentMetrics();

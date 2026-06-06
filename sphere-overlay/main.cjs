@@ -5,9 +5,9 @@ const fs = require("node:fs");
 const { applyDeskPetShell } = require("./win32-desk-pet.cjs");
 
 /** 3D 桌宠：左侧机器区 + 右侧菜单区（展开时） */
-const PET_WIDTH = 100;
-const PET_HEIGHT = 125;
-const MENU_WIDTH = 136;
+const PET_WIDTH = 150;
+const PET_HEIGHT = 188;
+const MENU_WIDTH = 204;
 const WIDTH = PET_WIDTH;
 const HEIGHT = PET_HEIGHT;
 let menuExpanded = false;

@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/utils/gomoku_player_session.dart";
-import "../chat/widgets/game_chat_widget.dart";
 
 const String _kWsGomokuSnapshot = "world.gomoku.snapshot";
 const String _kWsGomokuBanter = "world.gomoku.banter";
@@ -37,8 +36,8 @@ class _GomokuPageState extends State<GomokuPage> {
   Map<String, dynamic>? _snap;
   String? _error;
   bool _loading = true;
+  bool _gameStarted = false; // 是否已点击开始
   final List<Map<String, dynamic>> _banterLines = <Map<String, dynamic>>[];
-  final List<GameChatMessage> _chatMessages = <GameChatMessage>[];
   StreamSubscription<Map<String, dynamic>>? _tableSub;
   Timer? _pollTimer;
 
@@ -93,40 +92,6 @@ class _GomokuPageState extends State<GomokuPage> {
       return;
     }
     setState(() => _banterLines.add(line));
-    
-    final String text = line["text"]?.toString() ?? "";
-    if (text.isNotEmpty) {
-      _addAgentMessage(text);
-    }
-  }
-
-  void _addAgentMessage(String text) {
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: text,
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    });
-  }
-
-  void _sendMessage(String message) {
-    if (message.trim().isEmpty) return;
-    
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
-    
-    widget.ws.sendEvent("world.gomoku.chat", <String, dynamic>{
-      "tableId": widget.tableId,
-      "message": message,
-    });
   }
 
   void _syncPollTimer(Map<String, dynamic>? snap) {
@@ -158,12 +123,6 @@ class _GomokuPageState extends State<GomokuPage> {
       if (payload is! Map) return;
       final Map<String, dynamic> p = payload.cast<String, dynamic>();
       if (p["tableId"]?.toString() != widget.tableId) return;
-      final String message = p["message"]?.toString() ?? "";
-      final String sender = p["sender"]?.toString() ?? "";
-      
-      if (mounted && message.isNotEmpty && sender == "agent") {
-        _addAgentMessage(message);
-      }
       return;
     }
     
@@ -339,6 +298,91 @@ class _GomokuPageState extends State<GomokuPage> {
     );
   }
 
+  /// 五子棋准备界面：显示「开始对弈」按钮
+  Widget _buildPreparationRoom(ColorScheme cs) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 140,
+              height: 140,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(colors: [
+                  const Color(0xFF60A5FA).withValues(alpha: 0.3),
+                  const Color(0xFF60A5FA).withValues(alpha: 0.1),
+                  Colors.transparent,
+                ]),
+                border: Border.all(
+                    color: const Color(0xFF60A5FA).withValues(alpha: 0.4), width: 2),
+              ),
+              child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.grid_on, size: 40, color: const Color(0xFF60A5FA)),
+                    SizedBox(height: 8),
+                    Text("五子棋",
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey.shade700)),
+                  ]),
+            ),
+            SizedBox(height: 32),
+            Text("五子连珠",
+                style: Theme.of(context)
+                    .textTheme
+                    .headlineSmall
+                    ?.copyWith(fontWeight: FontWeight.bold)),
+            SizedBox(height: 12),
+            Text("经典策略对弈 · 你 vs AI Agent",
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+            SizedBox(height: 24),
+            Container(
+              padding: EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.9),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Column(children: [
+                Icon(Icons.info_outline,
+                    size: 20, color: const Color(0xFF60A5FA)),
+                SizedBox(height: 12),
+                Text("游戏规则",
+                    style:
+                        TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                SizedBox(height: 8),
+                Text("目标：五子连成一线即获胜",
+                    style:
+                        TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+                Text("你执黑先手，AI 执白后手",
+                    style:
+                        TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+                Text("点击格子落子，不可悔棋",
+                    style:
+                        TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+                SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: () => setState(() => _gameStarted = true),
+                  icon: Icon(Icons.play_arrow, size: 18),
+                  label: Text("开始对弈", style: TextStyle(fontSize: 15)),
+                  style: FilledButton.styleFrom(
+                    padding: EdgeInsets.symmetric(horizontal: 36, vertical: 12),
+                    backgroundColor: const Color(0xFF60A5FA),
+                  ),
+                ),
+              ]),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildBody(ColorScheme cs) {
     if (_loading && _snap == null) {
       return const Center(child: CircularProgressIndicator());
@@ -357,6 +401,11 @@ class _GomokuPageState extends State<GomokuPage> {
           ),
         ),
       );
+    }
+
+    // 未点击开始时显示准备界面
+    if (!_gameStarted && _snap != null) {
+      return _buildPreparationRoom(cs);
     }
 
     final Map<String, dynamic>? s = _snap;
@@ -378,9 +427,7 @@ class _GomokuPageState extends State<GomokuPage> {
         final double maxW = constraints.maxWidth;
         final double cellSize = ((maxW - 56) / 14).clamp(24.0, 34.0);
 
-        return Stack(
-      children: [
-        ListView(
+        return ListView(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           children: <Widget>[
             if (_error != null)
@@ -432,15 +479,7 @@ class _GomokuPageState extends State<GomokuPage> {
             ),
             const SizedBox(height: 16),
           ],
-        ),
-        GameChatWidget(
-          messages: _chatMessages,
-          onSendMessage: _sendMessage,
-          placeholder: "聊聊这盘棋...",
-          title: "五子棋对局",
-        ),
-      ],
-    );
+        );
       },
     );
   }

@@ -73,11 +73,13 @@ class SpeechService {
       },
       listenFor: const Duration(seconds: 30),
       pauseFor: const Duration(seconds: 3),
-      partialResults: false,
+      listenOptions: stt.SpeechListenOptions(
+        partialResults: false,
+        cancelOnError: true,
+        listenMode: stt.ListenMode.dictation,
+      ),
       localeId: "zh_CN", // 设置为中文
       onSoundLevelChange: (level) {},
-      cancelOnError: true,
-      listenMode: stt.ListenMode.dictation,
     );
   }
 

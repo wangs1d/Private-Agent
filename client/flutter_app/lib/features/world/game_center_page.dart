@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 class GameCenterPage extends StatelessWidget {
   const GameCenterPage({super.key});
@@ -68,10 +68,10 @@ class GameCenterPage extends StatelessWidget {
     }
 
     Color getBadgeBgColor(String badge) {
-      if (badge == '热门') return const Color(0xFFEF4444).withOpacity(0.2);
-      if (badge == '经典') return const Color(0xFF3B82F6).withOpacity(0.2);
-      if (badge == '新') return const Color(0xFFA855F7).withOpacity(0.2);
-      return const Color(0xFF10B981).withOpacity(0.2);
+      if (badge == '热门') return const Color(0xFFEF4444).withValues(alpha: 0.2);
+      if (badge == '经典') return const Color(0xFF3B82F6).withValues(alpha: 0.2);
+      if (badge == '新') return const Color(0xFFA855F7).withValues(alpha: 0.2);
+      return const Color(0xFF10B981).withValues(alpha: 0.2);
     }
 
     Color getBadgeTextColor(String badge) {
@@ -100,7 +100,7 @@ class GameCenterPage extends StatelessWidget {
           ),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: cs.surfaceContainerHighest.withOpacity(0.5),
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
             width: 1,
           ),
           boxShadow: const <BoxShadow>[

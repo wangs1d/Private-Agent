@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "dart:async";
 
 import "../../core/services/multimodal_recognition_service.dart";
@@ -223,7 +223,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
             top: 40,
             left: 20,
             child: IconButton(
-              icon: Icon(Icons.arrow_back, color: Colors.white.withOpacity(0.7)),
+              icon: Icon(Icons.arrow_back, color: Colors.white.withValues(alpha: 0.7)),
               onPressed: widget.onExit,
               tooltip: '退出语音模式',
             ),
@@ -244,35 +244,35 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                       gradient: RadialGradient(
                         colors: [
                           _isSpeaking 
-                            ? Colors.blue.withOpacity(_opacityAnimation.value)
-                            : Colors.black.withOpacity(_opacityAnimation.value),
+                            ? Colors.blue.withValues(alpha: _opacityAnimation.value)
+                            : Colors.black.withValues(alpha: _opacityAnimation.value),
                           _isSpeaking
-                            ? const Color(0xFF1A237E).withOpacity(_opacityAnimation.value * 0.8)
-                            : const Color(0xFF1A1A1A).withOpacity(_opacityAnimation.value * 0.8),
+                            ? const Color(0xFF1A237E).withValues(alpha: _opacityAnimation.value * 0.8)
+                            : const Color(0xFF1A1A1A).withValues(alpha: _opacityAnimation.value * 0.8),
                           _isSpeaking
-                            ? const Color(0xFF0D1B5E).withOpacity(_opacityAnimation.value * 0.6)
-                            : const Color(0xFF0D0D0D).withOpacity(_opacityAnimation.value * 0.6),
+                            ? const Color(0xFF0D1B5E).withValues(alpha: _opacityAnimation.value * 0.6)
+                            : const Color(0xFF0D0D0D).withValues(alpha: _opacityAnimation.value * 0.6),
                         ],
                         stops: const [0.0, 0.5, 1.0],
                       ),
                       boxShadow: [
                         // 内部阴影 - 创建立体感
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.8),
+                          color: Colors.black.withValues(alpha: 0.8),
                           blurRadius: 20,
                           offset: const Offset(0, 10),
                         ),
                         // 外部光晕 - 呼吸效果
                         BoxShadow(
                           color: (_isSpeaking ? Colors.blue : Colors.white)
-                              .withOpacity(_opacityAnimation.value * 0.1),
+                              .withValues(alpha: _opacityAnimation.value * 0.1),
                           blurRadius: 30,
                           spreadRadius: 5,
                         ),
                         // 底部高光 - 增强立体感
                         BoxShadow(
                           color: (_isSpeaking ? Colors.blue : Colors.white)
-                              .withOpacity(_opacityAnimation.value * 0.05),
+                              .withValues(alpha: _opacityAnimation.value * 0.05),
                           blurRadius: 15,
                           offset: const Offset(0, -5),
                         ),
@@ -287,7 +287,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                           gradient: RadialGradient(
                             colors: [
                               (_isSpeaking ? Colors.blue : Colors.white)
-                                  .withOpacity(_opacityAnimation.value * 0.3),
+                                  .withValues(alpha: _opacityAnimation.value * 0.3),
                               Colors.transparent,
                             ],
                             stops: const [0.0, 1.0],
@@ -311,7 +311,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                 Text(
                   _statusText,
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.8),
+                    color: Colors.white.withValues(alpha: 0.8),
                     fontSize: 18,
                     fontWeight: FontWeight.w500,
                   ),
@@ -322,8 +322,8 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                     _verificationStatus,
                     style: TextStyle(
                       color: _verificationStatus.contains('✓') 
-                          ? Colors.green.withOpacity(0.8)
-                          : Colors.red.withOpacity(0.8),
+                          ? Colors.green.withValues(alpha: 0.8)
+                          : Colors.red.withValues(alpha: 0.8),
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),
@@ -334,7 +334,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                   Text(
                     '置信度: ${(_confidence * 100).toStringAsFixed(1)}%',
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.6),
+                      color: Colors.white.withValues(alpha: 0.6),
                       fontSize: 14,
                     ),
                   ),
@@ -343,7 +343,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                 Text(
                   _isSpeaking ? '点击球体停止录音' : '点击球体开始说话',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.5),
+                    color: Colors.white.withValues(alpha: 0.5),
                     fontSize: 14,
                   ),
                 ),

@@ -62,11 +62,6 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
     "search_web",
     "fetch_web",
   ],
-  security: [
-    "wallet.get_balance",
-    "wallet.get_transactions",
-    "agent.query_capabilities",
-  ],
 };
 
 export function getSubAgentToolAllowlist(type: SubAgentType): readonly string[] | null {

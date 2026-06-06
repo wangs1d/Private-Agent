@@ -8,6 +8,7 @@ import { TaskNotificationCenter } from "../components/TaskNotificationCenter";
 import type { QuickCommand } from "../constants/quick-commands";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
+import { useDynamicSpeech, type DynamicSpeechContext } from "../hooks/useDynamicSpeech";
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
 import { useOverlayPointerCapture } from "../hooks/useOverlayPointerCapture";
@@ -26,7 +27,7 @@ function readQuery(key: string): string | undefined {
 
 /** 桌面透明桌宠 — Electron 无框 3D（DG2 写实机器人），直连主 Agent */
 export function OverlayApp() {
-  const { state, apply, setFocused } = useAgentState({ mood: "idle", energy: 0.55 });
+  const { state, apply, setFocused, setMood, setCaption } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWasOpenOnPointerDown = useRef(false);
   const wsUrl = readQuery("ws");
@@ -34,16 +35,45 @@ export function OverlayApp() {
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
-  const { connected, sendWake, sendChat } = useAgentWebSocket(stableApply, {
+  const { connected, sendWake, sendChat, sendPetReaction } = useAgentWebSocket(stableApply, {
     wsUrl: wsUrl ?? undefined,
     sessionId: sessionId ?? undefined,
   });
 
   useEmbodimentCommandRelay(true);
 
+  const windowMotion = useOverlayWindowMotion({ enabled: true, mood: state.mood });
+  const { roamNow, triggerVerticalShake } = windowMotion;
   const roamNowRef = useRef<(() => void) | null>(null);
-  const { roamNow } = useOverlayWindowMotion({ enabled: true, mood: state.mood });
   roamNowRef.current = roamNow;
+
+  const dynamicSpeech = useDynamicSpeech({
+    send: sendPetReaction,
+    setCaption,
+    setMood: (m) => setMood(m),
+  });
+
+  // 累计拖动/旋转的"今日总量"——作为台词的数值感
+  const interactionTotalsRef = useRef({ pan: 0, spin: 0, shake: 0, lastPos: { x: 0, y: 0 } });
+  const dragStartAtRef = useRef<number | null>(null);
+  const lastDragEndAtRef = useRef(0);
+  const lastLiveReactAtRef = useRef(0);
+
+  /** 把窗口在工作区中的位置换算成 region 上下文（用于空间感台词） */
+  const resolveRegion = useCallback((): DynamicSpeechContext["region"] => {
+    if (typeof window === "undefined") return undefined;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const cx = w / 2;
+    const cy = h / 2;
+    // 默认假设桌宠在右下角；如已设置 sphereOverlay.petScreenPos 则用真实值
+    const pos = (window as unknown as { spherePetPos?: { x: number; y: number } }).spherePetPos;
+    const x = pos?.x ?? cx;
+    const y = pos?.y ?? cy;
+    const v: "top" | "middle" | "bottom" = y < h / 3 ? "top" : y > (2 * h) / 3 ? "bottom" : "middle";
+    const hr: "left" | "center" | "right" = x < w / 3 ? "left" : x > (2 * w) / 3 ? "right" : "center";
+    return { v, h: hr };
+  }, []);
 
   const { onTaskEvent } = useTaskEventAccumulator({ apply });
   useTaskEventStream({ onTaskEvent });
@@ -83,6 +113,58 @@ export function OverlayApp() {
 
   const { setMouseCapture } = useOverlayPointerCapture(menuVisible);
 
+  /**
+   * 处理桌宠上的拖动/旋转/松手事件
+   * - 实时拖动 / 旋转：累计强度 → 跨阈值就触发身体晃动 + 上下抖动 + 短句台词
+   * - 松手：根据累计量给一个总结性的"感想" + 身体晃动
+   */
+  const handleLiveReact = useCallback(
+    (intensity: number, mode: "pan" | "rotate") => {
+      const now = performance.now();
+      if (now - lastLiveReactAtRef.current < 120) return;
+      lastLiveReactAtRef.current = now;
+      const total =
+        mode === "pan"
+          ? interactionTotalsRef.current.pan
+          : interactionTotalsRef.current.spin;
+      if (mode === "pan") interactionTotalsRef.current.pan += intensity * 20;
+      else interactionTotalsRef.current.spin += intensity * 90;
+      // 同步触发身体晃动
+      triggerVerticalShake(0.25 + intensity * 0.5, 320);
+      // 触发动态台词（节流后由 useDynamicSpeech 控制）
+      dynamicSpeech.speak({
+        trigger: mode === "rotate" ? "spin" : "drag_start",
+        intensity: Math.min(1, intensity + 0.15),
+        totalMagnitude: total + intensity * 10,
+        region: resolveRegion(),
+        mood: state.mood,
+      });
+    },
+    [dynamicSpeech, resolveRegion, state.mood, triggerVerticalShake],
+  );
+
+  const handleDragRelease = useCallback(
+    (info: { mode: "pan" | "rotate"; totalRotationDeg: number; panDistance: number; spinStrength: number }) => {
+      const now = performance.now();
+      if (now - lastDragEndAtRef.current < 350) return;
+      lastDragEndAtRef.current = now;
+      dragStartAtRef.current = null;
+      // 强松手再给一次"最终感言" + 身体晃动
+      const intensity = Math.min(1, info.spinStrength * 1.4 + Math.min(1, info.totalRotationDeg / 360) * 0.7 + Math.min(1, info.panDistance / 400) * 0.4);
+      triggerVerticalShake(0.5 + intensity * 0.5, 900);
+      const total = info.mode === "rotate" ? interactionTotalsRef.current.spin : interactionTotalsRef.current.pan;
+      dynamicSpeech.speak({
+        trigger: info.mode === "rotate" ? "rotate_release" : "drag_release",
+        intensity,
+        totalMagnitude: total,
+        region: resolveRegion(),
+        mood: state.mood,
+        force: true,
+      });
+    },
+    [dynamicSpeech, resolveRegion, state.mood, triggerVerticalShake],
+  );
+
   const handleSphereTouch = useCallback(
     (event: SphereTouchEvent) => {
       if (menuVisible && event.phase === "start") {
@@ -92,15 +174,19 @@ export function OverlayApp() {
 
       if (event.phase === "start") {
         setMouseCapture(true);
+        dragStartAtRef.current = performance.now();
         apply({ mood: "listening", energy: 0.62, focused: true });
-      } else if (event.phase === "end") {
-        const spin = event.spinStrength ?? 0;
-        if (spin > 0.45) {
-          apply({ mood: "happy", energy: 0.72, caption: "哈哈，转晕我了！" });
-        }
+        dynamicSpeech.speak({
+          trigger: "tap",
+          intensity: 0.35,
+          totalMagnitude: 1,
+          region: resolveRegion(),
+          mood: state.mood,
+        });
       }
+      // 松手的反应统一由 onDragRelease 处理
     },
-    [apply, closeMenu, menuVisible, setMouseCapture],
+    [apply, closeMenu, dynamicSpeech, menuVisible, resolveRegion, setMouseCapture, state.mood],
   );
 
   const handleEyeInteraction = useCallback(
@@ -183,6 +269,7 @@ export function OverlayApp() {
       subAgentDisplayName?: string;
       source?: string;
     }) => {
+      // LLM pet.reaction.ack 会以 caption 形式覆盖桌宠台词 — 不要再用 caption 自动清除
       apply({
         mood: patch.mood,
         energy: patch.energy,
@@ -205,6 +292,32 @@ export function OverlayApp() {
     }
   }, [menuVisible]);
 
+  // caption 自动消失：显示一段时间后清除
+  // - assistant_chunk / user_message 不自动清（用户对话需要保持可见）
+  // - pet_reaction 也需要自动清（useDynamicSpeech 的定时器不一定能覆盖所有路径）
+  useEffect(() => {
+    if (!state.caption) return;
+    if (state.source === "assistant_chunk" || state.source === "user_message") {
+      return;
+    }
+    // pet_reaction 来源用较长的显示时间，其他来源用 2.5s
+    const duration = state.source === "pet_reaction" ? 5000 : 2500;
+    const timer = setTimeout(() => {
+      apply({ caption: undefined });
+    }, duration);
+    return () => clearTimeout(timer);
+  }, [state.caption, state.source, apply]);
+
+  // alert mood 超时回退：当 mood 为 alert 且没有活跃 caption 时，一段时间后回到 idle
+  useEffect(() => {
+    if (state.mood !== "alert") return;
+    if (state.caption) return; // 有内容显示时保持 alert
+    const timer = setTimeout(() => {
+      apply({ mood: "idle" });
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [state.mood, state.caption, apply]);
+
   return (
     <div className={`mode-shell mode-overlay${menuVisible ? " mode-overlay--menu-open" : ""}`}>
       <EntranceAnimation />
@@ -223,8 +336,10 @@ export function OverlayApp() {
           onEyeInteractionChange={handleEyeInteraction}
           onUserTouch={handleSphereTouch}
           onBodyHover={setMouseCapture}
+          onLiveReact={handleLiveReact}
+          onDragRelease={handleDragRelease}
+          onShakeRequest={(strength, durationMs) => triggerVerticalShake(strength, durationMs)}
         />
-        {state.caption ? <div className="mode-caption overlay-pet-caption">{state.caption}</div> : null}
         <InnerThought state={state} />
       </div>
 

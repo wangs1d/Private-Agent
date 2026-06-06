@@ -5,7 +5,7 @@ import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
 import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
 import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
-import { chunkText } from "../../utils/text.js";
+import { chunkText, formatStatusForDisplay } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
@@ -251,9 +251,9 @@ async function processBatchedMessage(
       },
       onAgentPhaseStatus: (line) => {
         if (isStale()) return;
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        embodimentThinking(msgActor, (json) => ctx.socket.send(json), trimmed, {
+        const displayLine = formatStatusForDisplay(line);
+        if (!displayLine) return;
+        embodimentThinking(msgActor, (json) => ctx.socket.send(json), displayLine, {
           phase: "live",
           source: "agent_status",
         });
@@ -265,7 +265,7 @@ async function processBatchedMessage(
               messageId: assistantMessageId,
               traceId: batched.originalMessageId,
               phase: "live",
-              line: trimmed,
+              line: displayLine,
             },
           }),
         );

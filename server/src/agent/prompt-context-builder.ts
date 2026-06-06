@@ -45,7 +45,7 @@ function buildCompactAgentCapsPrompt(): string {
   ];
   if (cfg.masterDelegation.enabled) {
     lines.push(
-      `【你的小弟】life / tech / info / creative / security 五类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
+      `【你的小弟】life / tech / info / creative 四类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
       "【工具】master_invoke_sub_agent 派活；master_list_sub_agents 看名册；master_poll_sub_agent_tasks 查后台小弟进度。",
     );
   }

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { bindAgentBridge, dispatchEmbodimentCommand } from "../bridge/agent-bridge";
 import { mapUserMessageSent } from "../bridge/ws-agent-mapper";
 import { EntranceAnimation } from "../components/EntranceAnimation";
-import { InnerThought } from "../components/InnerThought";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { EmbedDragSurface } from "../components/EmbedDragSurface";
 import { SphereAgentScene } from "../components/SphereAgentScene";
@@ -98,6 +97,15 @@ export function EmbedApp() {
     [apply],
   );
 
+  // caption 自动消失：显示一段时间后清除
+  useEffect(() => {
+    if (!state.caption) return;
+    const timer = setTimeout(() => {
+      apply({ caption: undefined });
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [state.caption, apply]);
+
   const handleCommand = useCallback(
     (cmd: QuickCommand) => {
       switch (cmd.action) {
@@ -182,7 +190,6 @@ export function EmbedApp() {
           onEyeInteractionChange={handleEyeInteraction}
           onUserTouch={handleUserTouch}
         />
-        <InnerThought state={state} />
       </div>
 
       <EmbedDragSurface

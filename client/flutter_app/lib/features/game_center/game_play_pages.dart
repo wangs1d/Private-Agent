@@ -5,10 +5,353 @@ import "package:flutter/material.dart";
 
 import "../../core/services/world_api_client.dart";
 import "../../core/utils/gomoku_player_session.dart";
-import "../chat/widgets/game_chat_widget.dart";
 import "../world/doudizhu_page.dart" show kDoudizhuCardLabel;
 
 const Duration _dealDuration = Duration(milliseconds: 420);
+
+// 预定义游戏卡片样式常量 - 避免每次 build 重新创建
+class _GameCardStyles {
+  _GameCardStyles._();
+  
+  // 牌背样式
+  static final BoxDecoration cardBackDecoration = BoxDecoration(
+    gradient: const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [
+        Color(0xFF1E40AF),
+        Color(0xFF1E3A8A),
+        Color(0xFF172554),
+      ],
+    ),
+    borderRadius: BorderRadius.circular(8),
+    border: Border.all(color: const Color(0xFF3B82F6).withValues(alpha: 0.4), width: 1.5),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: 0.25),
+        blurRadius: 6,
+        offset: const Offset(0, 3),
+      ),
+    ],
+  );
+  
+  // 迷你牌正面样式（炸金花）
+  static final BoxDecoration miniCardDecoration = BoxDecoration(
+    gradient: const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [Colors.white, Color(0xFFF3F4F6)],
+    ),
+    borderRadius: BorderRadius.circular(8),
+    border: Border.all(color: const Color(0xFFFBBF24).withValues(alpha: 0.5), width: 1),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: 0.1),
+        blurRadius: 4,
+        offset: const Offset(0, 2),
+      ),
+    ],
+  );
+}
+
+/// 游戏阶段枚举：统一管理所有游戏的生命周期
+enum _GamePhase {
+  /// 准备阶段：显示「开始」按钮，等待用户点击
+  preparing,
+
+  /// 发牌中：正在播放发牌动画
+  dealing,
+
+  /// 游戏进行中
+  playing,
+
+  /// 游戏已结束
+  finished,
+}
+
+/// 单张扑克牌背面样式
+Widget _buildCardBack({double width = 60, double height = 84, Color? accentColor}) {
+  return Container(
+    width: width,
+    height: height,
+    decoration: _GameCardStyles.cardBackDecoration,
+    child: Center(
+      child: Container(
+        width: width * 0.7,
+        height: height * 0.75,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.15),
+            width: 1,
+          ),
+        ),
+        child: Center(
+          child: Icon(
+            Icons.casino_outlined,
+            size: min(width, height) * 0.32,
+            color: Colors.white.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// 真实发牌动画组件：从中央牌堆逐张飞入目标位置
+class _RealisticDealAnimation extends StatefulWidget {
+  const _RealisticDealAnimation({
+    required this.totalCards,
+    required this.cardBuildFn,
+    this.dealIntervalMs = 180,
+    this.onDealComplete,
+    this.accentColor,
+    this.title,
+  });
+
+  final int totalCards;
+  final Widget Function(int index) cardBuildFn;
+  final int dealIntervalMs;
+  final VoidCallback? onDealComplete;
+  final Color? accentColor;
+  final String? title;
+
+  @override
+  State<_RealisticDealAnimation> createState() =>
+      _RealisticDealAnimationState();
+}
+
+class _RealisticDealAnimationState extends State<_RealisticDealAnimation>
+    with TickerProviderStateMixin {
+  int _dealtCount = 0;
+  late Timer _dealTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startDealing();
+  }
+
+  void _startDealing() {
+    if (widget.totalCards <= 0) {
+      _finishDealing();
+      return;
+    }
+    _dealTimer = Timer.periodic(
+      Duration(milliseconds: widget.dealIntervalMs), (Timer timer) {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        if (_dealtCount < widget.totalCards) {
+          setState(() => _dealtCount++);
+        } else {
+          timer.cancel();
+          _finishDealing();
+        }
+      });
+  }
+
+  void _finishDealing() {
+    Future<void>.delayed(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      widget.onDealComplete?.call();
+    });
+  }
+
+  @override
+  void dispose() {
+    _dealTimer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Size screenSize = MediaQuery.of(context).size;
+    final Color accent = widget.accentColor ?? const Color(0xFFFBBF24);
+
+    return Stack(
+      children: [
+        // 背景暗化层
+        Positioned.fill(
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.25),
+          ),
+        ),
+        // 中央牌堆区域
+        Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // 牌堆（剩余未发的牌）
+              AnimatedOpacity(
+                opacity: _dealtCount >= widget.totalCards ? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 300),
+                child: Column(
+                  children: [
+                    _buildCardBack(width: 70, height: 98, accentColor: accent),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        widget.title ?? "正在发牌...",
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: accent,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 30),
+              // 发牌进度
+              if (_dealtCount < widget.totalCards)
+                Text(
+                  "$_dealtCount / ${widget.totalCards}",
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white.withValues(alpha: 0.8),
+                  ),
+                )
+              else
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_circle, size: 18, color: accent),
+                    const SizedBox(width: 6),
+                    Text(
+                      "发牌完成",
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: accent,
+                      ),
+                    ),
+                  ],
+                ),
+              const SizedBox(height: 24),
+              // 已发出的牌（逐张显示）
+              SizedBox(
+                width: screenSize.width * 0.8,
+                height: 130,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (int i = 0; i < _dealtCount; i++)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: _FlyingCardIn(
+                            index: i,
+                            child: widget.cardBuildFn(i),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 进度条
+        Positioned(
+          bottom: 40,
+          left: 40,
+          right: 40,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: widget.totalCards > 0
+                  ? _dealtCount / widget.totalCards
+                  : 1.0,
+              minHeight: 6,
+              backgroundColor: Colors.white.withValues(alpha: 0.15),
+              valueColor: AlwaysStoppedAnimation<Color>(accent),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 飞入中的单张牌动画
+class _FlyingCardIn extends StatefulWidget {
+  const _FlyingCardIn({required this.index, required this.child});
+  final int index;
+  final Widget child;
+
+  @override
+  State<_FlyingCardIn> createState() => _FlyingCardInState();
+}
+
+class _FlyingCardInState extends State<_FlyingCardIn>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _flyAnim;
+  late Animation<double> _scaleAnim;
+  late Animation<double> _opacityAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 450),
+    );
+    _flyAnim = Tween<double>(begin: -80.0, end: 0.0).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+    ));
+    _scaleAnim =
+        Tween<double>(begin: 0.5, end: 1.0).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutBack,
+    ));
+    _opacityAnim =
+        Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(
+      parent: _controller,
+      curve: const Interval(0.0, 0.6, curve: Curves.easeOut),
+    ));
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (BuildContext context, Widget? child) {
+        return Transform.translate(
+          offset: Offset(0, _flyAnim.value),
+          child: Transform.scale(
+            scale: _scaleAnim.value,
+            child: Opacity(
+              opacity: _opacityAnim.value,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
 
 class _DealtCard extends StatelessWidget {
   const _DealtCard({
@@ -81,26 +424,14 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
   late Map<String, dynamic> _snap;
   Timer? _poll;
   bool _busy = false;
+  _GamePhase _phase = _GamePhase.preparing;
   String get _humanId => GomokuPlayerSession.humanId(widget.agentId);
-  final List<GameChatMessage> _chatMessages = <GameChatMessage>[];
 
   @override
   void initState() {
     super.initState();
     _snap = widget.initialSnapshot;
     _poll = Timer.periodic(const Duration(seconds: 2), (_) => _refresh());
-    _addWelcomeMessage();
-  }
-
-  void _addWelcomeMessage() {
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: "欢迎来到炸金花！祝你手气爆棚！🎴",
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   @override
@@ -132,7 +463,6 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
       if (r["ok"] == true) {
         setState(
             () => _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap);
-        _addGameActionMessage(action);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(r["reason"]?.toString() ?? "操作失败")),
@@ -141,41 +471,6 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  void _addGameActionMessage(String action) {
-    String message = "";
-    switch (action) {
-      case "stay":
-        message = "你选择了跟注/比牌！";
-        break;
-      case "fold":
-        message = "你选择了弃牌。";
-        break;
-      default:
-        return;
-    }
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
-  }
-
-  void _sendMessage(String message) {
-    if (message.trim().isEmpty) return;
-
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   @override
@@ -191,33 +486,25 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text("炸金花 · 游戏")),
-      body: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  const Color(0xFF1B5E20).withOpacity(0.1),
-                  const Color(0xFF2E7D32).withOpacity(0.05)
-                ],
-              ),
-            ),
-            child: status == "waiting" || status == ""
-                ? _buildPreparationRoom(seats)
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              const Color(0xFF1B5E20).withValues(alpha: 0.1),
+              const Color(0xFF2E7D32).withValues(alpha: 0.05)
+            ],
+          ),
+        ),
+        child: _phase == _GamePhase.preparing
+            ? _buildPreparationRoom(seats)
+            : _phase == _GamePhase.dealing
+                ? _buildZhajinhuaDealAnimation(myHand, seats)
                 : playerCount > 0
                     ? _buildRoundTableLayout(
                         status, pot, seats, inHand, turnSeat, myHand, myTurn)
                     : _buildWaitingRoom(),
-          ),
-          GameChatWidget(
-            messages: _chatMessages,
-            onSendMessage: _sendMessage,
-            placeholder: "聊聊这把牌...",
-            title: "炸金花对局",
-          ),
-        ],
       ),
     );
   }
@@ -239,12 +526,12 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: RadialGradient(colors: [
-                  const Color(0xFFFBBF24).withOpacity(0.3),
-                  const Color(0xFFFBBF24).withOpacity(0.1),
+                  const Color(0xFFFBBF24).withValues(alpha: 0.3),
+                  const Color(0xFFFBBF24).withValues(alpha: 0.1),
                   Colors.transparent,
                 ]),
                 border: Border.all(
-                    color: const Color(0xFFFBBF24).withOpacity(0.4), width: 2),
+                    color: const Color(0xFFFBBF24).withValues(alpha: 0.4), width: 2),
               ),
               child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -272,7 +559,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
             Container(
               padding: EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.9),
+                color: Colors.white.withValues(alpha: 0.9),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: Colors.grey.shade200),
               ),
@@ -300,7 +587,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: 24, vertical: 10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF34D399).withOpacity(0.1),
+                      color: const Color(0xFF34D399).withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: const Color(0xFF34D399)),
                     ),
@@ -344,7 +631,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
       if (r["ok"] == true) {
         setState(
             () => _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap);
-        _addGameActionMessage("ready");
+        setState(() => _phase = _GamePhase.dealing);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(r["reason"]?.toString() ?? "准备失败")));
@@ -409,18 +696,18 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
         shape: BoxShape.circle,
         gradient: RadialGradient(
           colors: [
-            const Color(0xFFFBBF24).withOpacity(0.3),
-            const Color(0xFFFBBF24).withOpacity(0.1),
+            const Color(0xFFFBBF24).withValues(alpha: 0.3),
+            const Color(0xFFFBBF24).withValues(alpha: 0.1),
             Colors.transparent,
           ],
         ),
         border: Border.all(
-          color: const Color(0xFFFBBF24).withOpacity(0.4),
+          color: const Color(0xFFFBBF24).withValues(alpha: 0.4),
           width: 2,
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFFFBBF24).withOpacity(0.2),
+            color: const Color(0xFFFBBF24).withValues(alpha: 0.2),
             blurRadius: 20,
             spreadRadius: 5,
           ),
@@ -448,8 +735,8 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
             padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             decoration: BoxDecoration(
               color: status == "playing"
-                  ? const Color(0xFF34D399).withOpacity(0.2)
-                  : const Color(0xFF60A5FA).withOpacity(0.2),
+                  ? const Color(0xFF34D399).withValues(alpha: 0.2)
+                  : const Color(0xFF60A5FA).withValues(alpha: 0.2),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Text(
@@ -493,11 +780,13 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     return Positioned(
       left: MediaQuery.of(context).size.width / 2 + x - 50,
       top: MediaQuery.of(context).size.height / 2 + y - 60,
-      child: AnimatedContainer(
+      child: RepaintBoundary(
+        child: AnimatedContainer(
         duration: Duration(milliseconds: 300),
         transform: Matrix4.translationValues(0, isMyTurn ? -10 : 0, 0),
         child: _buildPlayerCard(
             seatIndex, isOccupied, stillIn, isMyTurn, isMe, sessionId),
+        ),
       ),
     );
   }
@@ -519,11 +808,11 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
           end: Alignment.bottomRight,
           colors: isMyTurn
               ? [
-                  const Color(0xFFFBBF24).withOpacity(0.3),
-                  const Color(0xFFFBBF24).withOpacity(0.1)
+                  const Color(0xFFFBBF24).withValues(alpha: 0.3),
+                  const Color(0xFFFBBF24).withValues(alpha: 0.1)
                 ]
               : isOccupied
-                  ? [Colors.white.withOpacity(0.95), Colors.grey.shade50]
+                  ? [Colors.white.withValues(alpha: 0.95), Colors.grey.shade50]
                   : [Colors.grey.shade200, Colors.grey.shade300],
         ),
         borderRadius: BorderRadius.circular(16),
@@ -538,8 +827,8 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
         boxShadow: [
           BoxShadow(
             color: isMyTurn
-                ? const Color(0xFFFBBF24).withOpacity(0.4)
-                : Colors.black.withOpacity(0.1),
+                ? const Color(0xFFFBBF24).withValues(alpha: 0.4)
+                : Colors.black.withValues(alpha: 0.1),
             blurRadius: isMyTurn ? 12 : 6,
             offset: Offset(0, isMyTurn ? -4 : 2),
           ),
@@ -596,8 +885,8 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
                     padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: stillIn
-                          ? const Color(0xFF34D399).withOpacity(0.2)
-                          : const Color(0xFFEF4444).withOpacity(0.2),
+                          ? const Color(0xFF34D399).withValues(alpha: 0.2)
+                          : const Color(0xFFEF4444).withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
@@ -625,7 +914,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
-                      color: const Color(0xFFFBBF24).withOpacity(0.6),
+                      color: const Color(0xFFFBBF24).withValues(alpha: 0.6),
                       blurRadius: 8,
                     ),
                   ],
@@ -643,11 +932,11 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
       child: Container(
         padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.9),
+          color: Colors.white.withValues(alpha: 0.9),
           borderRadius: BorderRadius.circular(20),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.15),
+              color: Colors.black.withValues(alpha: 0.15),
               blurRadius: 12,
               offset: Offset(0, -4),
             ),
@@ -687,23 +976,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     return Container(
       width: 48,
       height: 68,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Colors.white, Colors.grey.shade100],
-        ),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-            color: const Color(0xFFFBBF24).withOpacity(0.5), width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 4,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
+      decoration: _GameCardStyles.miniCardDecoration,
       child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -731,13 +1004,13 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
               shape: BoxShape.circle,
               gradient: RadialGradient(
                 colors: [
-                  const Color(0xFFFBBF24).withOpacity(0.3),
-                  const Color(0xFFFBBF24).withOpacity(0.1),
+                  const Color(0xFFFBBF24).withValues(alpha: 0.3),
+                  const Color(0xFFFBBF24).withValues(alpha: 0.1),
                   Colors.transparent,
                 ],
               ),
               border: Border.all(
-                color: const Color(0xFFFBBF24).withOpacity(0.4),
+                color: const Color(0xFFFBBF24).withValues(alpha: 0.4),
                 width: 2,
               ),
             ),
@@ -772,109 +1045,6 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     );
   }
 
-  Widget _buildGameInfo(String status, int pot) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            const Color(0xFFFBBF24).withOpacity(0.1),
-            Colors.transparent
-          ],
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFFBBF24).withOpacity(0.3)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildInfoItem(
-              "底池", "$pot", Icons.monetization_on, const Color(0xFFFBBF24)),
-          _buildInfoItem(
-              "状态",
-              status == "playing" ? "进行中" : status,
-              status == "playing" ? Icons.play_circle : Icons.flag,
-              status == "playing"
-                  ? const Color(0xFF34D399)
-                  : const Color(0xFF60A5FA)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoItem(
-      String label, String value, IconData icon, Color color) {
-    return Column(
-      children: [
-        Icon(icon, size: 28, color: color),
-        const SizedBox(height: 8),
-        Text(value,
-            style: TextStyle(
-                fontSize: 24, fontWeight: FontWeight.bold, color: color)),
-        const SizedBox(height: 4),
-        Text(label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF71717A))),
-      ],
-    );
-  }
-
-  Widget _buildCards(List<dynamic> hand) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text("你的手牌",
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                )),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children: <Widget>[
-            for (final Object? c in hand) _buildCard(c?.toString() ?? ""),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCard(String cardId) {
-    final String suit = _zjhSuit(cardId);
-    final bool red = suit == "♥" || suit == "♦";
-    final Color ink = red ? const Color(0xFFDC2626) : const Color(0xFF111827);
-    return Container(
-      width: 80,
-      height: 112,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Colors.white, Colors.grey.shade100],
-        ),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 8,
-            offset: const Offset(0, 4),
-          ),
-        ],
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(_cardLabel(cardId),
-                style: TextStyle(
-                    fontSize: 28, fontWeight: FontWeight.bold, color: ink)),
-            const SizedBox(height: 4),
-            Text(suit, style: TextStyle(fontSize: 18, color: ink)),
-          ],
-        ),
-      ),
-    );
-  }
 
   String _zjhSuit(String id) {
     final List<String> p = id.split("-");
@@ -893,51 +1063,33 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     }
   }
 
-  Widget _buildActionButtons() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        SizedBox(
-          width: 120,
-          child: FilledButton(
-            onPressed: _busy ? null : () => _act("stay"),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              backgroundColor: const Color(0xFF34D399),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.casino, size: 16),
-                SizedBox(width: 6),
-                Text("跟注", style: TextStyle(fontSize: 13)),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 120,
-          child: OutlinedButton(
-            onPressed: _busy ? null : () => _act("fold"),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              side: const BorderSide(color: Color(0xFFEF4444)),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.close, size: 16, color: Color(0xFFEF4444)),
-                SizedBox(width: 6),
-                Text("弃牌",
-                    style: TextStyle(fontSize: 13, color: Color(0xFFEF4444))),
-              ],
-            ),
-          ),
-        ),
-      ],
+  /// 构建炸金花发牌动画界面
+  Widget _buildZhajinhuaDealAnimation(List<dynamic>? myHand, List<dynamic>? seats) {
+    // 炸金花：3位玩家各3张，共9张牌
+    final int totalCards = (myHand?.length ?? 0) * 3;
+    return _RealisticDealAnimation(
+      totalCards: totalCards,
+      accentColor: const Color(0xFFFBBF24),
+      title: "炸金花 · 发牌中...",
+      dealIntervalMs: 180,
+      cardBuildFn: (int index) => _buildMiniCard(
+        myHand != null && index < myHand.length
+            ? myHand[index]?.toString() ?? ""
+            : "",
+      ),
+      onDealComplete: () {
+        if (mounted) {
+          final String status = _snap["status"]?.toString() ?? "";
+          setState(() {
+            _phase = (status == "finished")
+                ? _GamePhase.finished
+                : _GamePhase.playing;
+          });
+        }
+      },
     );
   }
+
 
   Widget _buildGameOver() {
     return Container(
@@ -965,7 +1117,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
 
   String _cardLabel(String id) {
     final List<String> p = id.split("-");
-    final int r = int.tryParse(p.isNotEmpty ? p[0]! : "") ?? 0;
+    final int r = int.tryParse(p.isNotEmpty ? p[0] : "") ?? 0;
     if (r >= 2 && r <= 10) return "$r";
     const Map<int, String> f = <int, String>{
       11: "J",
@@ -975,6 +1127,45 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
     };
     return f[r] ?? id;
   }
+
+  Widget _buildActionButtons() {
+    return Column(
+      children: [
+        FilledButton(
+          onPressed: _busy ? null : () => _act("stay"),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            backgroundColor: const Color(0xFF34D399),
+          ),
+          child: const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.casino),
+              SizedBox(width: 8),
+              Text("跟注 / 弃牌", style: TextStyle(fontSize: 16)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton(
+          onPressed: _busy ? null : () => _act("fold"),
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            side: const BorderSide(color: Color(0xFFEF4444)),
+          ),
+          child: const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.close, color: Color(0xFFEF4444)),
+              SizedBox(width: 8),
+              Text("弃牌", style: TextStyle(fontSize: 16, color: Color(0xFFEF4444))),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
 }
 
 /// 斗地主 — 用户 vs Agent + 子 Agent。
@@ -1002,28 +1193,16 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
   Timer? _dealTimer;
   bool _busy = false;
   bool _showHandCards = false;
+  _GamePhase _phase = _GamePhase.preparing;
   final Set<String> _selected = <String>{};
   String get _humanId => GomokuPlayerSession.humanId(widget.agentId);
-  final List<GameChatMessage> _chatMessages = <GameChatMessage>[];
 
   @override
   void initState() {
     super.initState();
     _snap = widget.initialSnapshot;
     _poll = Timer.periodic(const Duration(seconds: 2), (_) => _refresh());
-    _addWelcomeMessage();
     _scheduleDealIfNeeded();
-  }
-
-  void _addWelcomeMessage() {
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: "欢迎来到斗地主！祝你成为牌桌之王！👑",
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   @override
@@ -1093,7 +1272,6 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
           }
         });
         _scheduleDealIfNeeded();
-        _addGameActionMessage(action, cards);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(r["reason"]?.toString() ?? "出牌失败")),
@@ -1102,41 +1280,6 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  void _addGameActionMessage(String action, List<String>? cards) {
-    String message = "";
-    switch (action) {
-      case "play":
-        message = "你出了：${cards?.join(", ") ?? ""}";
-        break;
-      case "pass":
-        message = "你选择不出。";
-        break;
-      default:
-        return;
-    }
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
-  }
-
-  void _sendMessage(String message) {
-    if (message.trim().isEmpty) return;
-
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   @override
@@ -1153,33 +1296,25 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text("斗地主 · 游戏")),
-      body: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  const Color(0xFF7F1D1D).withOpacity(0.08),
-                  const Color(0xFF991B1B).withOpacity(0.03)
-                ],
-              ),
-            ),
-            child: (status == "waiting" || status == "")
-                ? _buildPreparationRoom(seats)
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              const Color(0xFF7F1D1D).withValues(alpha: 0.08),
+              const Color(0xFF991B1B).withValues(alpha: 0.03)
+            ],
+          ),
+        ),
+        child: _phase == _GamePhase.preparing
+            ? _buildPreparationRoom(seats)
+            : _phase == _GamePhase.dealing
+                ? _buildDoudizhuDealAnimation(myHand, seats)
                 : (status == "bidding")
                     ? _buildBiddingRoom()
                     : _buildTriangleTableLayout(status, landlordSeat, mySeat,
                         turnSeat, handCounts, lastPlay, myHand, isLandlord),
-          ),
-          GameChatWidget(
-            messages: _chatMessages,
-            onSendMessage: _sendMessage,
-            placeholder: "聊聊这把牌...",
-            title: "斗地主对局",
-          ),
-        ],
       ),
     );
   }
@@ -1201,12 +1336,12 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: RadialGradient(colors: [
-                  const Color(0xFFF87171).withOpacity(0.3),
-                  const Color(0xFFF87171).withOpacity(0.1),
+                  const Color(0xFFF87171).withValues(alpha: 0.3),
+                  const Color(0xFFF87171).withValues(alpha: 0.1),
                   Colors.transparent,
                 ]),
                 border: Border.all(
-                    color: const Color(0xFFF87171).withOpacity(0.4), width: 2),
+                    color: const Color(0xFFF87171).withValues(alpha: 0.4), width: 2),
               ),
               child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -1234,7 +1369,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             Container(
               padding: EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.9),
+                color: Colors.white.withValues(alpha: 0.9),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: Colors.grey.shade200),
               ),
@@ -1262,7 +1397,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: 24, vertical: 10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF34D399).withOpacity(0.1),
+                      color: const Color(0xFF34D399).withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: const Color(0xFF34D399)),
                     ),
@@ -1306,8 +1441,8 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
       if (r["ok"] == true) {
         setState(
             () => _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap);
+        setState(() => _phase = _GamePhase.dealing);
         _scheduleDealIfNeeded();
-        _addGameActionMessage("ready", null);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(r["reason"]?.toString() ?? "准备失败")));
@@ -1412,10 +1547,10 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             Color(0xFF0E211D),
           ],
         ),
-        border: Border.all(color: const Color(0xFF34D399).withOpacity(0.22)),
+        border: Border.all(color: const Color(0xFF34D399).withValues(alpha: 0.22)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.2),
+            color: Colors.black.withValues(alpha: 0.2),
             blurRadius: 24,
             offset: const Offset(0, 12),
           ),
@@ -1427,7 +1562,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             child: DecoratedBox(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(22),
-                border: Border.all(color: Colors.white.withOpacity(0.05)),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
               ),
             ),
           ),
@@ -1471,9 +1606,9 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.2),
+        color: Colors.black.withValues(alpha: 0.2),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withOpacity(0.24)),
+        border: Border.all(color: color.withValues(alpha: 0.24)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1485,7 +1620,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             children: [
               Text(label,
                   style: TextStyle(
-                      fontSize: 10, color: Colors.white.withOpacity(0.62))),
+                      fontSize: 10, color: Colors.white.withValues(alpha: 0.62))),
               Text(value,
                   style: TextStyle(
                       fontSize: 14, fontWeight: FontWeight.w800, color: color)),
@@ -1506,9 +1641,9 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.16),
+        color: color.withValues(alpha: 0.16),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withOpacity(0.32)),
+        border: Border.all(color: color.withValues(alpha: 0.32)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1528,16 +1663,16 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.08),
+        color: Colors.white.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Text(
         status == "playing" ? "等待第一手出牌" : "牌桌准备中",
         style: TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.w700,
-          color: Colors.white.withOpacity(0.82),
+          color: Colors.white.withValues(alpha: 0.82),
         ),
       ),
     );
@@ -1551,11 +1686,11 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
       duration: const Duration(milliseconds: 220),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(isTurn ? 0.18 : 0.1),
+        color: Colors.white.withValues(alpha: isTurn ? 0.18 : 0.1),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
           color: (isTurn ? const Color(0xFF34D399) : Colors.white)
-              .withOpacity(0.22),
+              .withValues(alpha: 0.22),
         ),
       ),
       child: Row(
@@ -1579,91 +1714,6 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     );
   }
 
-  Widget _buildCenterGameInfo(String status) {
-    final int pot = (_snap["pot"] as num?)?.round() ?? 0;
-    return Container(
-      width: 140,
-      height: 140,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: RadialGradient(
-          colors: [
-            const Color(0xFFF87171).withOpacity(0.25),
-            const Color(0xFFF87171).withOpacity(0.08),
-            Colors.transparent,
-          ],
-        ),
-        border: Border.all(
-          color: const Color(0xFFF87171).withOpacity(0.3),
-          width: 2,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFF87171).withOpacity(0.15),
-            blurRadius: 16,
-            spreadRadius: 4,
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.casino, size: 32, color: const Color(0xFFF87171)),
-          const SizedBox(height: 6),
-          Text(
-            "$pot",
-            style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: const Color(0xFFF87171)),
-          ),
-          Text("底池",
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-          SizedBox(height: 4),
-          Container(
-            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: status == "playing"
-                  ? const Color(0xFF34D399).withOpacity(0.2)
-                  : Colors.grey.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              status == "playing" ? "进行中" : status,
-              style: TextStyle(
-                  fontSize: 10,
-                  color: status == "playing"
-                      ? const Color(0xFF34D399)
-                      : Colors.grey.shade600),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTopPlayer(int seatIndex, int? landlordSeat, int? mySeat,
-      int? turnSeat, List<dynamic>? handCounts) {
-    return Center(
-        child: _buildPlayerSeat(
-            seatIndex, landlordSeat, mySeat, turnSeat, handCounts));
-  }
-
-  Widget _buildLeftBottomPlayer(int seatIndex, int? landlordSeat, int? mySeat,
-      int? turnSeat, List<dynamic>? handCounts) {
-    return Align(
-        alignment: Alignment.bottomLeft,
-        child: _buildPlayerSeat(
-            seatIndex, landlordSeat, mySeat, turnSeat, handCounts));
-  }
-
-  Widget _buildRightBottomPlayer(int seatIndex, int? landlordSeat, int? mySeat,
-      int? turnSeat, List<dynamic>? handCounts) {
-    return Align(
-        alignment: Alignment.bottomRight,
-        child: _buildPlayerSeat(
-            seatIndex, landlordSeat, mySeat, turnSeat, handCounts));
-  }
 
   Widget _buildPlayerSeat(
     int seatIndex,
@@ -1692,10 +1742,10 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             end: Alignment.bottomRight,
             colors: isCurrentTurn
                 ? [
-                    const Color(0xFFF87171).withOpacity(0.25),
-                    const Color(0xFFF87171).withOpacity(0.08)
+                    const Color(0xFFF87171).withValues(alpha: 0.25),
+                    const Color(0xFFF87171).withValues(alpha: 0.08)
                   ]
-                : [Colors.white.withOpacity(0.95), Colors.grey.shade50],
+                : [Colors.white.withValues(alpha: 0.95), Colors.grey.shade50],
           ),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
@@ -1709,8 +1759,8 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
           boxShadow: [
             BoxShadow(
               color: isCurrentTurn
-                  ? const Color(0xFFF87171).withOpacity(0.35)
-                  : Colors.black.withOpacity(0.08),
+                  ? const Color(0xFFF87171).withValues(alpha: 0.35)
+                  : Colors.black.withValues(alpha: 0.08),
               blurRadius: isCurrentTurn ? 14 : 6,
               offset: Offset(0, isCurrentTurn ? -4 : 2),
             ),
@@ -1767,7 +1817,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                     Container(
                       padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF7F1D1D).withOpacity(0.1),
+                        color: const Color(0xFF7F1D1D).withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Row(
@@ -1798,7 +1848,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                          color: const Color(0xFFF87171).withOpacity(0.5),
+                          color: const Color(0xFFF87171).withValues(alpha: 0.5),
                           blurRadius: 8)
                     ],
                   ),
@@ -1819,12 +1869,12 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
       child: Container(
         padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.95),
+          color: Colors.white.withValues(alpha: 0.95),
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)
+            BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10)
           ],
-          border: Border.all(color: const Color(0xFFF87171).withOpacity(0.2)),
+          border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.2)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1871,7 +1921,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: Colors.grey.shade300),
         boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 3)
+          BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 3)
         ],
       ),
       child: Center(
@@ -1889,12 +1939,12 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.94),
+          color: Colors.white.withValues(alpha: 0.94),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0xFFF87171).withOpacity(0.22)),
+          border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.22)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.12),
+              color: Colors.black.withValues(alpha: 0.12),
               blurRadius: 12,
               offset: const Offset(0, -4),
             ),
@@ -1939,11 +1989,11 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
         width: maxPanelWidth,
         padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.92),
+          color: Colors.white.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.12),
+                color: Colors.black.withValues(alpha: 0.12),
                 blurRadius: 12,
                 offset: Offset(0, -4))
           ],
@@ -1966,7 +2016,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                        color: const Color(0xFF60A5FA).withOpacity(0.15),
+                        color: const Color(0xFF60A5FA).withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(8)),
                     child: Text("已选 ${_selected.length}",
                         style: TextStyle(
@@ -2027,12 +2077,12 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: RadialGradient(colors: [
-                const Color(0xFFFBBF24).withOpacity(0.3),
-                const Color(0xFFFBBF24).withOpacity(0.1),
+                const Color(0xFFFBBF24).withValues(alpha: 0.3),
+                const Color(0xFFFBBF24).withValues(alpha: 0.1),
                 Colors.transparent
               ]),
               border: Border.all(
-                  color: const Color(0xFFFBBF24).withOpacity(0.4), width: 2),
+                  color: const Color(0xFFFBBF24).withValues(alpha: 0.4), width: 2),
             ),
             child:
                 Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -2065,10 +2115,10 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
       child: Container(
         padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.93),
+            color: Colors.white.withValues(alpha: 0.93),
             borderRadius: BorderRadius.circular(18),
             boxShadow: [
-              BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)
+              BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10)
             ]),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2097,92 +2147,65 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     );
   }
 
-  Widget _buildGameStatus(String status) {
-    final bool isLandlord = _snap["isLandlord"] == true;
-    final String roleText = status == "bidding"
-        ? "叫地主中..."
-        : isLandlord
-            ? "你是地主 👑"
-            : "你是农民 🌾";
-    final Color roleColor =
-        isLandlord ? const Color(0xFFF87171) : const Color(0xFF34D399);
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            const Color(0xFFF87171).withOpacity(0.1),
-            Colors.transparent
-          ],
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFF87171).withOpacity(0.3)),
+  Color _getCardColor(String cardId) {
+    final String suit =
+        cardId.split("-").length > 1 ? cardId.split("-")[1] : "";
+    if (suit == "h" || suit == "d") {
+      return const Color(0xFFF87171); // 红心/方块 - 红色
+    }
+    return const Color(0xFF1F2937); // 黑桃/梅花 - 黑色
+  }
+
+  /// 构建斗地主发牌动画界面
+  Widget _buildDoudizhuDealAnimation(List<dynamic>? myHand, List<dynamic>? seats) {
+    // 斗地主：3位玩家各17张 + 3张底牌 = 54张
+    final int totalCards = (myHand?.length ?? 17) * 3 + 3;
+    return _RealisticDealAnimation(
+      totalCards: totalCards,
+      accentColor: const Color(0xFFF87171),
+      title: "斗地主 · 发牌中...",
+      dealIntervalMs: 100,
+      cardBuildFn: (int index) => _buildMiniDoudizhuCard(
+        myHand != null && index < myHand.length
+            ? myHand[index]?.toString() ?? ""
+            : "",
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
+      onDealComplete: () {
+        if (mounted) {
+          final String status = _snap["status"]?.toString() ?? "";
+          setState(() {
+            _phase = (status == "finished")
+                ? _GamePhase.finished
+                : _GamePhase.playing;
+            _showHandCards = true;
+          });
+        }
+      },
+    );
+  }
+
+  Widget _buildGameOver() {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF2A2A2A)),
+      ),
+      child: Column(
         children: [
-          _buildInfoItem(
-              "状态",
-              status == "playing" ? "进行中" : status,
-              Icons.play_circle,
-              status == "playing"
-                  ? const Color(0xFF34D399)
-                  : const Color(0xFF60A5FA)),
-          _buildInfoItem(
-              "身份",
-              roleText,
-              isLandlord ? Icons.workspace_premium : Icons.agriculture,
-              roleColor),
+          Icon(Icons.emoji_events, size: 64, color: const Color(0xFFFBBF24)),
+          const SizedBox(height: 16),
+          Text("本局结束",
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    color: const Color(0xFFF4F4F5),
+                  )),
+          const SizedBox(height: 12),
+          Text("精彩的对局！再来一局？", style: TextStyle(color: Colors.grey.shade400)),
         ],
       ),
-    );
-  }
-
-  Widget _buildInfoItem(
-      String label, String value, IconData icon, Color color) {
-    return Column(
-      children: [
-        Icon(icon, size: 28, color: color),
-        const SizedBox(height: 8),
-        Text(value,
-            style: TextStyle(
-                fontSize: 18, fontWeight: FontWeight.w600, color: color)),
-        const SizedBox(height: 4),
-        Text(label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF71717A))),
-      ],
-    );
-  }
-
-  Widget _buildCards(List<dynamic> hand) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Icon(Icons.style, size: 20, color: Color(0xFFF87171)),
-            const SizedBox(width: 8),
-            Text("你的手牌 (${hand.length}张)",
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    )),
-            const Spacer(),
-            if (_selected.isNotEmpty)
-              Text("已选 ${_selected.length} 张",
-                  style:
-                      TextStyle(color: const Color(0xFF60A5FA), fontSize: 14)),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: <Widget>[
-            for (final Object? c in hand) _buildCard(c?.toString() ?? ""),
-          ],
-        ),
-      ],
     );
   }
 
@@ -2212,8 +2235,8 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             end: Alignment.bottomRight,
             colors: isSelected
                 ? [
-                    const Color(0xFF60A5FA).withOpacity(0.2),
-                    const Color(0xFF60A5FA).withOpacity(0.1)
+                    const Color(0xFF60A5FA).withValues(alpha: 0.2),
+                    const Color(0xFF60A5FA).withValues(alpha: 0.1)
                   ]
                 : [Colors.white, Colors.grey.shade100],
           ),
@@ -2221,8 +2244,8 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
           boxShadow: [
             BoxShadow(
               color: isSelected
-                  ? const Color(0xFF60A5FA).withOpacity(0.4)
-                  : Colors.black.withOpacity(0.1),
+                  ? const Color(0xFF60A5FA).withValues(alpha: 0.4)
+                  : Colors.black.withValues(alpha: 0.1),
               blurRadius: isSelected ? 8 : 4,
               offset: Offset(0, isSelected ? -4 : 2),
             ),
@@ -2241,86 +2264,6 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                 color: _getCardColor(cardId),
               )),
         ),
-      ),
-    );
-  }
-
-  Color _getCardColor(String cardId) {
-    final String suit =
-        cardId.split("-").length > 1 ? cardId.split("-")[1] : "";
-    if (suit == "h" || suit == "d")
-      return const Color(0xFFF87171); // 红心/方块 - 红色
-    return const Color(0xFF1F2937); // 黑桃/梅花 - 黑色
-  }
-
-  Widget _buildActionButtons() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        SizedBox(
-          width: 110,
-          child: FilledButton(
-            onPressed: _busy || _selected.isEmpty
-                ? null
-                : () => _play(action: "play", cards: _selected.toList()),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              backgroundColor: const Color(0xFFF87171),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.send, size: 16),
-                SizedBox(width: 6),
-                Text("出牌", style: TextStyle(fontSize: 13)),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 110,
-          child: OutlinedButton(
-            onPressed: _busy ? null : () => _play(action: "pass"),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              side: const BorderSide(color: Color(0xFF71717A)),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.block, size: 16, color: Color(0xFF71717A)),
-                SizedBox(width: 6),
-                Text("不出",
-                    style: TextStyle(fontSize: 13, color: Color(0xFF71717A))),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildGameOver() {
-    return Container(
-      padding: const EdgeInsets.all(32),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
-      ),
-      child: Column(
-        children: [
-          Icon(Icons.emoji_events, size: 64, color: const Color(0xFFFBBF24)),
-          const SizedBox(height: 16),
-          Text("本局结束",
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    color: const Color(0xFFF4F4F5),
-                  )),
-          const SizedBox(height: 12),
-          Text("精彩的对局！再来一局？", style: TextStyle(color: Colors.grey.shade400)),
-        ],
       ),
     );
   }
@@ -2348,25 +2291,13 @@ class BlackjackPlayPage extends StatefulWidget {
 class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
   late Map<String, dynamic> _snap;
   bool _busy = false;
+  _GamePhase _phase = _GamePhase.preparing;
   String get _humanId => GomokuPlayerSession.humanId(widget.agentId);
-  final List<GameChatMessage> _chatMessages = <GameChatMessage>[];
 
   @override
   void initState() {
     super.initState();
     _snap = widget.initialSnapshot;
-    _addWelcomeMessage();
-  }
-
-  void _addWelcomeMessage() {
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: "欢迎来到21点！我会给你最优策略建议。🃏",
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   Future<void> _hit() async {
@@ -2378,7 +2309,6 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         setState(() {
           _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap;
         });
-        _addGameActionMessage("hit");
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -2394,46 +2324,10 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         setState(() {
           _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap;
         });
-        _addGameActionMessage("stand");
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  void _addGameActionMessage(String action) {
-    String message = "";
-    switch (action) {
-      case "hit":
-        message = "你要了一张牌！";
-        break;
-      case "stand":
-        message = "你选择停牌。";
-        break;
-      default:
-        return;
-    }
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
-  }
-
-  void _sendMessage(String message) {
-    if (message.trim().isEmpty) return;
-
-    setState(() {
-      _chatMessages.add(GameChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        text: message,
-        isUser: true,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   @override
@@ -2446,35 +2340,26 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         _snap["dealerHand"] as List<dynamic>? ?? <dynamic>[];
     final int dealerScore = (_snap["dealerScore"] as num?)?.round() ?? 0;
     final int playerScore = (_snap["playerScore"] as num?)?.round() ?? 0;
-    final bool hasStarted = playerHand.isNotEmpty || dealerHand.isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(title: const Text("21 点 · 游戏")),
-      body: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  const Color(0xFF065F46).withOpacity(0.08),
-                  const Color(0xFF047857).withOpacity(0.03)
-                ],
-              ),
-            ),
-            child: !hasStarted
-                ? _buildPreparationRoom()
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              const Color(0xFF065F46).withValues(alpha: 0.08),
+              const Color(0xFF047857).withValues(alpha: 0.03)
+            ],
+          ),
+        ),
+        child: _phase == _GamePhase.preparing
+            ? _buildPreparationRoom()
+            : _phase == _GamePhase.dealing
+                ? _buildDealingAnimation(dealerHand, playerHand)
                 : _buildBlackjackTableLayout(phase, playing, dealerHand,
                     playerHand, dealerScore, playerScore),
-          ),
-          GameChatWidget(
-            messages: _chatMessages,
-            onSendMessage: _sendMessage,
-            placeholder: "聊聊这把牌...",
-            title: "21点对局",
-          ),
-        ],
       ),
     );
   }
@@ -2492,12 +2377,12 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: RadialGradient(colors: [
-                  const Color(0xFF34D399).withOpacity(0.3),
-                  const Color(0xFF34D399).withOpacity(0.1),
+                  const Color(0xFF34D399).withValues(alpha: 0.3),
+                  const Color(0xFF34D399).withValues(alpha: 0.1),
                   Colors.transparent,
                 ]),
                 border: Border.all(
-                    color: const Color(0xFF34D399).withOpacity(0.4), width: 2),
+                    color: const Color(0xFF34D399).withValues(alpha: 0.4), width: 2),
               ),
               child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -2525,7 +2410,7 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
             Container(
               padding: EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.9),
+                color: Colors.white.withValues(alpha: 0.9),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: Colors.grey.shade200),
               ),
@@ -2574,7 +2459,7 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
       if (r["ok"] == true) {
         setState(
             () => _snap = (r["snapshot"] as Map<String, dynamic>?) ?? _snap);
-        _addGameActionMessage("start");
+        setState(() => _phase = _GamePhase.dealing);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(r["reason"]?.toString() ?? "开始失败")));
@@ -2621,12 +2506,12 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            const Color(0xFFF87171).withOpacity(0.08),
+            const Color(0xFFF87171).withValues(alpha: 0.08),
             Colors.transparent
           ],
         ),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFFF87171).withOpacity(0.2)),
+        border: Border.all(color: const Color(0xFFF87171).withValues(alpha: 0.2)),
       ),
       child: Column(
         children: [
@@ -2644,10 +2529,10 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
               Container(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF87171).withOpacity(0.15),
+                  color: const Color(0xFFF87171).withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                      color: const Color(0xFFF87171).withOpacity(0.3)),
+                      color: const Color(0xFFF87171).withValues(alpha: 0.3)),
                 ),
                 child: Text("$score 点",
                     style: TextStyle(
@@ -2693,12 +2578,12 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withValues(alpha: 0.1),
               blurRadius: 8,
               offset: Offset(0, 4))
         ],
         border: Border.all(
-            color: const Color(0xFFF87171).withOpacity(0.3), width: 2),
+            color: const Color(0xFFF87171).withValues(alpha: 0.3), width: 2),
       ),
       child: Stack(
         children: <Widget>[
@@ -2740,12 +2625,12 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
       padding: EdgeInsets.symmetric(vertical: 16, horizontal: 24),
       decoration: BoxDecoration(
         gradient: RadialGradient(colors: [
-          const Color(0xFF34D399).withOpacity(0.15),
-          const Color(0xFF34D399).withOpacity(0.05),
+          const Color(0xFF34D399).withValues(alpha: 0.15),
+          const Color(0xFF34D399).withValues(alpha: 0.05),
           Colors.transparent,
         ]),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF34D399).withOpacity(0.25)),
+        border: Border.all(color: const Color(0xFF34D399).withValues(alpha: 0.25)),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -2804,7 +2689,7 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
       Container(
         padding: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-            color: color.withOpacity(0.15),
+            color: color.withValues(alpha: 0.15),
             borderRadius: BorderRadius.circular(10)),
         child: Text(text,
             style: TextStyle(
@@ -2824,11 +2709,11 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
             begin: Alignment.bottomLeft,
             end: Alignment.topRight,
             colors: [
-              const Color(0xFF60A5FA).withOpacity(0.08),
+              const Color(0xFF60A5FA).withValues(alpha: 0.08),
               Colors.transparent
             ]),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF60A5FA).withOpacity(0.2)),
+        border: Border.all(color: const Color(0xFF60A5FA).withValues(alpha: 0.2)),
       ),
       child: Column(
         children: [
@@ -2846,10 +2731,10 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
               Container(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF60A5FA).withOpacity(0.15),
+                  color: const Color(0xFF60A5FA).withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                      color: const Color(0xFF60A5FA).withOpacity(0.3)),
+                      color: const Color(0xFF60A5FA).withValues(alpha: 0.3)),
                 ),
                 child: Text("$score 点",
                     style: TextStyle(
@@ -2895,12 +2780,12 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-              color: const Color(0xFF60A5FA).withOpacity(0.15),
+              color: const Color(0xFF60A5FA).withValues(alpha: 0.15),
               blurRadius: 10,
               offset: Offset(0, -4))
         ],
         border: Border.all(
-            color: const Color(0xFF60A5FA).withOpacity(0.4), width: 2),
+            color: const Color(0xFF60A5FA).withValues(alpha: 0.4), width: 2),
       ),
       child: Stack(
         children: <Widget>[
@@ -2920,216 +2805,7 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
     );
   }
 
-  Widget _buildScoreBoard() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            const Color(0xFF34D399).withOpacity(0.1),
-            Colors.transparent
-          ],
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF34D399).withOpacity(0.3)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildInfoItem("庄家", "${_snap["dealerScore"]} 点", Icons.casino,
-              const Color(0xFFF87171)),
-          _buildInfoItem("你", "${_snap["playerScore"]} 点", Icons.person,
-              const Color(0xFF60A5FA)),
-        ],
-      ),
-    );
-  }
 
-  Widget _buildInfoItem(
-      String label, String value, IconData icon, Color color) {
-    return Column(
-      children: [
-        Icon(icon, size: 28, color: color),
-        const SizedBox(height: 8),
-        Text(value,
-            style: TextStyle(
-                fontSize: 24, fontWeight: FontWeight.bold, color: color)),
-        const SizedBox(height: 4),
-        Text(label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF71717A))),
-      ],
-    );
-  }
-
-  Widget _buildDealerSection(List<dynamic> hand) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Icon(Icons.casino, size: 20, color: Color(0xFFF87171)),
-            const SizedBox(width: 8),
-            Text("庄家的牌",
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    )),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: <Widget>[
-            for (final Object? c in hand)
-              _buildCard(c?.toString() ?? "", const Color(0xFFF87171)),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPlayerSection(List<dynamic> hand) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Icon(Icons.person, size: 20, color: const Color(0xFF60A5FA)),
-            const SizedBox(width: 8),
-            Text("你的手牌",
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    )),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: <Widget>[
-            for (final Object? c in hand)
-              _buildCard(c?.toString() ?? "", const Color(0xFF60A5FA)),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCard(String cardId, Color accentColor) {
-    return Container(
-      width: 70,
-      height: 100,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Colors.white, Colors.grey.shade100],
-        ),
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 6,
-            offset: const Offset(0, 3),
-          ),
-        ],
-        border: Border.all(color: accentColor.withOpacity(0.3), width: 2),
-      ),
-      child: Center(
-        child: Text(_bjLabel(cardId),
-            style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87)),
-      ),
-    );
-  }
-
-  Widget _buildStrategyHint(String hint) {
-    final bool shouldHit = hint == "hit";
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            const Color(0xFF34D399).withOpacity(0.15),
-            Colors.transparent
-          ],
-        ),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF34D399).withOpacity(0.4)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.lightbulb, color: const Color(0xFF34D399), size: 24),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text("AI 策略建议",
-                    style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFF34D399))),
-                const SizedBox(height: 4),
-                Text(shouldHit ? "建议要牌 (Hit)" : "建议停牌 (Stand)",
-                    style: const TextStyle(
-                        fontSize: 16, color: Color(0xFFA1A1AA))),
-              ],
-            ),
-          ),
-          Icon(shouldHit ? Icons.add_circle : Icons.stop_circle,
-              size: 32, color: const Color(0xFF34D399)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionButtons() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        SizedBox(
-          width: 120,
-          child: FilledButton(
-            onPressed: _busy ? null : _hit,
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              backgroundColor: const Color(0xFF60A5FA),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.add_circle, size: 16),
-                SizedBox(width: 6),
-                Text("要牌", style: TextStyle(fontSize: 13)),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 120,
-          child: OutlinedButton(
-            onPressed: _busy ? null : _stand,
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              side: const BorderSide(color: const Color(0xFFF87171)),
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.stop_circle, size: 16, color: Color(0xFFF87171)),
-                SizedBox(width: 6),
-                Text("停牌",
-                    style: TextStyle(fontSize: 13, color: Color(0xFFF87171))),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
 
   Widget _buildOutcome() {
     final String? outcome = _snap["outcome"]?.toString();
@@ -3187,6 +2863,77 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
     }
   }
 
+  /// 发牌动画完成后，根据游戏阶段决定下一步
+  void _onDealComplete() {
+    final String bjPhase = _snap["phase"]?.toString() ?? "";
+    if (mounted) {
+      setState(() {
+        _phase = (bjPhase == "finished")
+            ? _GamePhase.finished
+            : _GamePhase.playing;
+      });
+    }
+  }
+
+  /// 构建发牌动画界面
+  Widget _buildDealingAnimation(List<dynamic> dealerHand, List<dynamic> playerHand) {
+    // 合并庄家和玩家手牌作为总牌数
+    final List<dynamic> allCards = [...dealerHand, ...playerHand];
+    return _RealisticDealAnimation(
+      totalCards: allCards.length,
+      accentColor: const Color(0xFF34D399),
+      title: "21点 · 发牌中...",
+      dealIntervalMs: 200,
+      cardBuildFn: (int index) {
+        if (index < dealerHand.length) {
+          return _buildMiniBjCard(dealerHand[index]?.toString() ?? "");
+        } else {
+          final int pIndex = index - dealerHand.length;
+          return _buildMiniBjCard(playerHand[pIndex]?.toString() ?? "");
+        }
+      },
+      onDealComplete: _onDealComplete,
+    );
+  }
+
+  /// 迷你扑克牌用于21点发牌动画
+  Widget _buildMiniBjCard(String cardId) {
+    final String suit = _bjSuit(cardId);
+    final bool red = suit == "h" || suit == "d" || suit == "♥" || suit == "♦";
+    final Color ink = red ? const Color(0xFFDC2626) : const Color(0xFF111827);
+    return Container(
+      width: 50,
+      height: 70,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Colors.white, Colors.grey.shade100],
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF34D399).withValues(alpha: 0.4), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(_bjLabel(cardId),
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ink)),
+            SizedBox(height: 2),
+            Text(suit, style: TextStyle(fontSize: 13, color: ink)),
+          ],
+        ),
+      ),
+    );
+  }
+
   String _bjLabel(String id) {
     final int r = int.tryParse(id.split("-").first) ?? 0;
     if (r >= 2 && r <= 10) return "$r";
@@ -3210,5 +2957,43 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
       default:
         return "对局结束";
     }
+  }
+
+  Widget _buildActionButtons() {
+    return Column(
+      children: [
+        FilledButton(
+          onPressed: _busy ? null : _hit,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            backgroundColor: const Color(0xFF60A5FA),
+          ),
+          child: const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.add_circle),
+              SizedBox(width: 8),
+              Text("要牌 (Hit)", style: TextStyle(fontSize: 16)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton(
+          onPressed: _busy ? null : _stand,
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            side: BorderSide(color: const Color(0xFFF87171)),
+          ),
+          child: const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.stop_circle, color: Color(0xFFF87171)),
+              SizedBox(width: 8),
+              Text("停牌 (Stand)", style: TextStyle(fontSize: 16, color: Color(0xFFF87171))),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }

@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 
 /// 展示子 Agent 后台任务与委派报告。
 class BackgroundTasksSheet extends StatefulWidget {
@@ -189,7 +189,7 @@ class _BackgroundTasksSheetState extends State<BackgroundTasksSheet> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: ListTile(
-        tileColor: running ? cs.primaryContainer.withOpacity(0.35) : cs.surfaceContainerHigh,
+        tileColor: running ? cs.primaryContainer.withValues(alpha: 0.35) : cs.surfaceContainerHigh,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         leading: Icon(
           running ? Icons.hourglass_top : Icons.check_circle_outline,

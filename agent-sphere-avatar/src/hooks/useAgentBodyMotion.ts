@@ -54,6 +54,14 @@ export function useAgentBodyMotion({
   const excitedUntilRef = useRef(0);
   const lastBoundaryAt = useRef(0);
   const fidgetAt = useRef(0);
+  /** 身体晃动：累计的随机冲量、剩余持续时间、衰减时间戳 */
+  const shakeRef = useRef<{ intensity: number; until: number; lastImpulseAt: number }>({
+    intensity: 0,
+    until: 0,
+    lastImpulseAt: 0,
+  });
+  /** 当前用户传入的额外垂直方向摆动速率（来自旋转/拖动反应） */
+  const verticalBiasRef = useRef(0);
 
   const enabledRef = useRef(enabled);
   const moodRef = useRef(mood);
@@ -189,6 +197,28 @@ export function useAgentBodyMotion({
       }
     }
 
+    // 身体晃动：周期性注入小幅随机冲量，模拟"摇头晃脑"
+    if (nowMs < shakeRef.current.until) {
+      const s = shakeRef.current.intensity;
+      // 抖动频率 ~14Hz，按强度衰减
+      if (nowMs - shakeRef.current.lastImpulseAt > 70) {
+        shakeRef.current.lastImpulseAt = nowMs;
+        vel.current.x += (Math.random() - 0.5) * 1.8 * s;
+        vel.current.z += (Math.random() - 0.5) * 1.6 * s;
+        vel.current.y += (Math.random() - 0.2) * 1.2 * s;
+        // 随机抽一下 verticalBias，让球在垂直方向摆动
+        verticalBiasRef.current = (Math.random() - 0.5) * s;
+      }
+    } else if (shakeRef.current.intensity > 0) {
+      shakeRef.current.intensity = 0;
+      verticalBiasRef.current = 0;
+    }
+
+    // 垂直偏置 → 持续给 Y 一个小幅振荡
+    if (Math.abs(verticalBiasRef.current) > 0.001) {
+      vel.current.y += verticalBiasRef.current * 0.55 * dt * 60;
+    }
+
     const dx = target.current.x - pos.current.x;
     const dz = target.current.z - pos.current.z;
     const horizDist = Math.sqrt(dx * dx + dz * dz);
@@ -247,14 +277,30 @@ export function useAgentBodyMotion({
 
     const leanX = THREE.MathUtils.clamp(-vel.current.x * 0.34, -0.28, 0.28);
     const leanZ = THREE.MathUtils.clamp(vel.current.z * 0.28, -0.22, 0.22);
+    const shakeActive = shakeRef.current.intensity > 0 && nowMs < shakeRef.current.until;
+    const shakeAmp = shakeActive ? shakeRef.current.intensity : 0;
     const wobble = excited
       ? Math.sin(t * 14) * 0.08 * excitementRef.current
       : speaking
         ? Math.sin(t * 10) * 0.025 * energyRef.current
         : Math.sin(t * 1.2) * 0.012;
+    // 晃动时附加额外高频抖动（摇头/左右扭）
+    const shakeJitter = shakeAmp > 0
+      ? Math.sin(t * 22) * 0.18 * shakeAmp + Math.sin(t * 17.3) * 0.12 * shakeAmp
+      : 0;
+    const shakePitch = shakeAmp > 0 ? Math.sin(t * 13.5) * 0.1 * shakeAmp : 0;
+    const shakeRoll = shakeAmp > 0 ? Math.cos(t * 19) * 0.14 * shakeAmp : 0;
 
-    group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, leanX + wobble, dt * 7);
-    group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, leanZ, dt * 7);
+    group.rotation.z = THREE.MathUtils.lerp(
+      group.rotation.z,
+      leanX + wobble + shakeJitter + shakeRoll,
+      dt * 7,
+    );
+    group.rotation.x = THREE.MathUtils.lerp(
+      group.rotation.x,
+      leanZ + shakePitch,
+      dt * 7,
+    );
 
     const spin = excited ? Math.sin(t * 9) * 0.12 * excitementRef.current : 0;
     if (speed < 0.05 && !excited) {
@@ -299,6 +345,35 @@ export function useAgentBodyMotion({
     );
   }, []);
 
+  /**
+   * 触发身体晃动 — 不依赖物理引擎，由 RAF 周期叠加随机冲量。
+   * - strength: 0~1
+   * - durationMs: 持续时间；> durationMs 后自动衰减
+   */
+  const shake = useCallback((strength = 0.7, durationMs = 800) => {
+    const s = Math.min(1, Math.max(0.1, strength));
+    const until = performance.now() + Math.max(150, durationMs);
+    // 取较大值，避免被低强度覆盖
+    if (s > shakeRef.current.intensity || shakeRef.current.until < performance.now()) {
+      shakeRef.current = { intensity: s, until, lastImpulseAt: 0 };
+    } else {
+      shakeRef.current.until = Math.max(shakeRef.current.until, until);
+    }
+    // 顺带注入兴奋度，让视觉更生动
+    excitementRef.current = Math.min(1, Math.max(excitementRef.current, 0.45 + s * 0.4));
+    excitedUntilRef.current = Math.max(excitedUntilRef.current, performance.now() + durationMs);
+    // 注入初始冲量（X/Z 随机）
+    vel.current.x += (Math.random() - 0.5) * 2.6 * s;
+    vel.current.z += (Math.random() - 0.5) * 2.6 * s;
+    vel.current.y += 0.55 * s;
+    pauseUntil.current = 0;
+  }, []);
+
+  /** 注入垂直方向偏置（来自拖动/旋转的实时反应 — 让身体上下抖动） */
+  const applyVerticalBias = useCallback((bias: number) => {
+    verticalBiasRef.current = Math.max(-1, Math.min(1, bias));
+  }, []);
+
   const stopMotion = useCallback(() => {
     enabledRef.current = false;
     excitementRef.current = 0;
@@ -310,5 +385,5 @@ export function useAgentBodyMotion({
     enabledRef.current = true;
   }, []);
 
-  return { pickRandomTarget, setTarget, stopMotion, resumeMotion, excite };
+  return { pickRandomTarget, setTarget, stopMotion, resumeMotion, excite, shake, applyVerticalBias };
 }

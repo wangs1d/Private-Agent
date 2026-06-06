@@ -4,11 +4,9 @@ import "package:flutter/material.dart";
 import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/utils/content_summary_parser.dart";
-import "../../core/vision/vision_user_limits.dart";
 import "../../core/services/speech_service.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
-import "voice_mode_page.dart";
 
 class ChatPage extends StatefulWidget {
   const ChatPage({
@@ -30,6 +28,7 @@ class ChatPage extends StatefulWidget {
     this.backgroundTasksBadgeCount = 0,
     this.onOpenPhoneDialer,
     this.inputFocusNode,
+    this.isActive = true,
   });
 
   final List<ChatMessage> messages;
@@ -59,6 +58,8 @@ class ChatPage extends StatefulWidget {
   final int backgroundTasksBadgeCount;
   /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
+  /// 当前 Tab 是否激活（用于检测从其他 Tab 切回对话页）
+  final bool isActive;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -66,8 +67,8 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin {
   final SpeechService _speechService = SpeechService();
-  bool _isListening = false;
-  String _recognizedText = "";
+  final bool _isListening = false;
+  final String _recognizedText = "";
   final ScrollController _scrollController = ScrollController();
   bool _isUserScrolling = false;
   bool _hasNewAgentMessage = false;
@@ -81,6 +82,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _isCollapsed = true; // 是否处于折叠状态
   int _collapsedCount = 0; // 被折叠的消息数量
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
+
+  // 预定义常量 - 减少重复创建对象
+  static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
+  static const EdgeInsets _cardPadding = EdgeInsets.all(12);
+  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(8, 8, 8, 8);
+  static const EdgeInsets _inputHorizontalPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
 
   @override
   void initState() {
@@ -112,26 +119,40 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     });
   }
 
-  /// 滚动到底部的通用方法
+  /// 滚动到底部的通用方法（带重试机制，确保在 ListView 布局完成后生效）
   void _scrollToBottom({bool instant = false}) {
-    if (_scrollController.hasClients) {
+    if (!_scrollController.hasClients) return;
+    // 延迟到当前帧结束后执行，确保 ListView 已完成新消息的布局
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
       if (instant) {
         _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       } else {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
+        // 桌面端保险：再延迟一帧确认滚动到位（处理内容高度动态变化的情况）
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_scrollController.hasClients) return;
+          final double target = _scrollController.position.maxScrollExtent;
+          if ((_scrollController.position.pixels - target).abs() > 1) {
+            _scrollController.animateTo(
+              target,
+              duration: const Duration(milliseconds: 150),
+              curve: Curves.easeOut,
+            );
+          }
+        });
       }
-    }
+    });
   }
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final double maxScroll = _scrollController.position.maxScrollExtent;
     final double currentScroll = _scrollController.position.pixels;
-    final double threshold = maxScroll - 100;
 
     if (maxScroll - currentScroll > 100) {
       // 用户向上滑动了（不在底部）
@@ -156,6 +177,29 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         widget.isAgentProcessing != oldWidget.isAgentProcessing ||
         widget.agentStatusLine != oldWidget.agentStatusLine) {
       _cachedMessageGroups = null;
+    }
+
+    // 检测 Tab 切换：从非激活状态切回对话页时，滚动到底部
+    if (widget.isActive && !oldWidget.isActive) {
+      _isUserScrolling = false;
+      _hasNewAgentMessage = false;
+      // IndexedStack 切换需要两帧才能完成布局，用双重 postFrameCallback 保证可靠
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToBottom(instant: true);
+        });
+      });
+      return;
+    }
+
+    // 消息数量未变化时，检查是否需要因流式更新而滚动
+    final bool messagesUnchanged = widget.messages.length == oldWidget.messages.length;
+    if (messagesUnchanged) {
+      // Agent 正在流式输出（消息文本在增长），且用户没有主动上滑 → 跟踪到底部
+      if (widget.isAgentProcessing && !_isUserScrolling) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      }
+      return;
     }
 
     // 检测是否有新的用户消息
@@ -211,35 +255,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     _speechService.cancel();
     _scrollController.dispose();
     super.dispose();
-  }
-
-  Future<void> _handleVoiceInput() async {
-    if (_isListening) {
-      // 如果正在录音，则停止并发送
-      await _speechService.stopListening();
-      setState(() => _isListening = false);
-      
-      // 如果有识别到的文本，直接发送
-      if (_recognizedText.isNotEmpty) {
-        widget.controller.text = _recognizedText;
-        widget.onSend();
-        setState(() => _recognizedText = "");
-      }
-      return;
-    }
-
-    setState(() {
-      _isListening = true;
-      _recognizedText = "";
-    });
-
-    await _speechService.startListening(
-      onResult: (String text) {
-        setState(() {
-          _recognizedText = text;
-        });
-      },
-    );
   }
 
   /// 将消息分组：用户消息单独一组；助手正文按条展示（进度由 `agentStatusLine` 提供，勿把短回复当流程提示吞掉）。
@@ -348,10 +363,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest.withOpacity(0.6),
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                  color: cs.outline.withOpacity(0.2),
+                  color: cs.outline.withValues(alpha: 0.2),
                   width: 1,
                 ),
               ),
@@ -385,8 +400,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   /// 格式化时间范围
   String _formatTimeRange(DateTime start, DateTime end) {
     final DateTime now = DateTime.now();
-    final Duration startDiff = now.difference(start);
-    final Duration endDiff = now.difference(end);
 
     String formatTime(DateTime time) {
       final Duration diff = now.difference(time);
@@ -423,10 +436,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: cs.onSurface.withOpacity(0.08 * _breathingAnimation!.value),
+              color: cs.onSurface.withValues(alpha: 0.08 * _breathingAnimation!.value),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
-                color: cs.onSurface.withOpacity(0.2 * _breathingAnimation!.value),
+                color: cs.onSurface.withValues(alpha: 0.2 * _breathingAnimation!.value),
                 width: 1,
               ),
             ),
@@ -443,7 +456,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                 Text(
                   text,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: cs.onSurface.withOpacity(0.6 * _breathingAnimation!.value),
+                        color: cs.onSurface.withValues(alpha: 0.6 * _breathingAnimation!.value),
                         fontWeight: FontWeight.w500,
                       ),
                 ),
@@ -504,9 +517,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: Colors.grey.withOpacity(0.15),
+          color: Colors.grey.withValues(alpha: 0.15),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey.withOpacity(0.3)),
+          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
         ),
         child: Text(
           url,
@@ -548,7 +561,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       child: Text(
         timeStr,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.6),
+          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
           fontSize: 11,
         ),
       ),
@@ -558,7 +571,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final List<Map<String, dynamic>> messageGroups = _getGroupedMessages();
     final bool showLiveThinking =
         widget.isAgentProcessing && _breathingAnimation != null;
     final List<Map<String, dynamic>> displayMessages = _getDisplayMessages();
@@ -581,20 +593,20 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                             Icon(
                               Icons.chat_bubble_outline,
                               size: 64,
-                              color: cs.onSurfaceVariant.withOpacity(0.3),
+                              color: cs.onSurfaceVariant.withValues(alpha: 0.3),
                             ),
                             const SizedBox(height: 16),
                             Text(
                               "开始与 AI 助手对话吧！",
                               style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                color: cs.onSurfaceVariant.withOpacity(0.6),
+                                color: cs.onSurfaceVariant.withValues(alpha: 0.6),
                               ),
                             ),
                             const SizedBox(height: 8),
                             Text(
                               "输入消息或使用语音开始交流",
                               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: cs.onSurfaceVariant.withOpacity(0.4),
+                                color: cs.onSurfaceVariant.withValues(alpha: 0.4),
                               ),
                             ),
                           ],
@@ -603,7 +615,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     else
                       ListView.builder(
                   controller: _scrollController,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: _listPadding,
                   itemCount: showCollapseButton ? itemCount + 1 : itemCount,
                   itemBuilder: (BuildContext context, int index) {
                     // 如果需要显示折叠按钮且是第一项
@@ -635,28 +647,29 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       return _buildProgressBubble(cs, mainMessage.text);
                     }
                     
-                    return Align(
-                      alignment:
-                          isUser ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: 
-                            isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                        children: [
-                          Card(
-                            clipBehavior: Clip.antiAlias,
-                            color: isUser
-                                ? cs.surfaceContainerHigh
-                                : cs.surfaceContainer,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              side: BorderSide(
-                                color: cs.outline.withOpacity(0.28),
+                    return RepaintBoundary(
+                      child: Align(
+                        alignment:
+                            isUser ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: 
+                              isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                          children: [
+                            Card(
+                              clipBehavior: Clip.antiAlias,
+                              color: isUser
+                                  ? cs.surfaceContainerHigh
+                                  : cs.surfaceContainer,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: BorderSide(
+                                  color: cs.outline.withValues(alpha: 0.28),
+                                ),
                               ),
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.all(12),
+                              child: Padding(
+                                padding: _cardPadding,
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
@@ -710,6 +723,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                           _buildMessageTimestamp(mainMessage, isUser),
                         ],
                       ),
+                      ),
                     );
                   },
                 ),
@@ -721,7 +735,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                 child: SafeArea(
                   top: false,
                   child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: _inputHorizontalPadding,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
@@ -731,10 +745,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         margin: const EdgeInsets.only(bottom: 8),
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
-                          color: cs.errorContainer.withOpacity(0.2),
+                          color: cs.errorContainer.withValues(alpha: 0.2),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: cs.error.withOpacity(0.5),
+                            color: cs.error.withValues(alpha: 0.5),
                             width: 1,
                           ),
                         ),
@@ -830,12 +844,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                             color: cs.surfaceContainerHigh,
                             borderRadius: BorderRadius.circular(24),
                             border: Border.all(
-                              color: Colors.white.withOpacity(0.12 + 0.18 * _breathingAnimation!.value),
+                              color: Colors.white.withValues(alpha: 0.12 + 0.18 * _breathingAnimation!.value),
                               width: 1.5,
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.white.withOpacity(0.06 * _breathingAnimation!.value),
+                                color: Colors.white.withValues(alpha: 0.06 * _breathingAnimation!.value),
                                 blurRadius: 10,
                                 spreadRadius: 2,
                               ),
@@ -845,7 +859,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         );
                       },
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                        padding: _inputPadding,
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
@@ -874,7 +888,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       hintText: "发消息或输入\"/\"选择技能",
                                       border: InputBorder.none,
                                       hintStyle: TextStyle(
-                                        color: cs.onSurfaceVariant.withOpacity(0.6),
+                                        color: cs.onSurfaceVariant.withValues(alpha: 0.6),
                                         fontSize: 15,
                                       ),
                                       contentPadding: const EdgeInsets.symmetric(horizontal: 8),
@@ -886,11 +900,11 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   Container(
                                     decoration: BoxDecoration(
                                       color: widget.fullComputerAccessEnabled
-                                          ? cs.primary.withOpacity(0.18)
+                                          ? cs.primary.withValues(alpha: 0.18)
                                           : cs.surfaceContainerHighest,
                                       shape: BoxShape.circle,
                                       border: widget.fullComputerAccessEnabled
-                                          ? Border.all(color: cs.primary.withOpacity(0.45))
+                                          ? Border.all(color: cs.primary.withValues(alpha: 0.45))
                                           : null,
                                     ),
                                     child: IconButton(
@@ -1045,9 +1059,9 @@ class _GomokuPlayUrlCard extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: cs.primaryContainer.withOpacity(0.35),
+        color: cs.primaryContainer.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.primary.withOpacity(0.35)),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.35)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1084,47 +1098,6 @@ class _GomokuPlayUrlCard extends StatelessWidget {
   }
 }
 
-/// 技能按钮组件
-class _SkillButton extends StatelessWidget {
-  const _SkillButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: onPressed,
-      icon: Icon(icon, size: 16, color: color),
-      label: Text(
-        label,
-        style: TextStyle(
-          fontSize: 13,
-          color: color,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-      style: OutlinedButton.styleFrom(
-        foregroundColor: color,
-        side: BorderSide(color: color.withOpacity(0.3)),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-      ),
-    );
-  }
-}
-
 /// 呼吸灯小球绘制器 - 中间浅外边深
 class _BreathingDotPainter extends CustomPainter {
   final double opacity;
@@ -1139,9 +1112,9 @@ class _BreathingDotPainter extends CustomPainter {
     // 创建径向渐变：中间浅，外边深（纯灰色系）
     final gradient = RadialGradient(
       colors: [
-        Colors.grey.withOpacity(opacity * 0.4),  // 中间浅色（灰色）
-        Colors.grey.withOpacity(opacity * 0.6),   // 中间过渡
-        Colors.grey.withOpacity(opacity * 0.9),   // 外边深色
+        Colors.grey.withValues(alpha: opacity * 0.4),  // 中间浅色（灰色）
+        Colors.grey.withValues(alpha: opacity * 0.6),   // 中间过渡
+        Colors.grey.withValues(alpha: opacity * 0.9),   // 外边深色
       ],
       stops: const [0.0, 0.5, 1.0],
       center: Alignment.center,

@@ -154,7 +154,7 @@ class _PhoneCallFloatingButtonState extends State<PhoneCallFloatingButton> {
                         Text(
                           "00:00",
                           style: TextStyle(
-                            color: cs.onPrimaryContainer.withOpacity(0.7),
+                            color: cs.onPrimaryContainer.withValues(alpha: 0.7),
                             fontSize: 11,
                           ),
                         ),
@@ -243,7 +243,6 @@ class _PeerAgentIncomingBody extends StatefulWidget {
 class _PeerAgentIncomingBodyState extends State<_PeerAgentIncomingBody> {
   AudioPlayer? _player;
   String? _audioError;
-  bool _isPlaying = false;
   bool _responded = false;
 
   @override
@@ -259,7 +258,6 @@ class _PeerAgentIncomingBodyState extends State<_PeerAgentIncomingBody> {
     _player = player;
     try {
       await player.play(BytesSource(bytes, mimeType: "audio/mpeg"));
-      if (mounted) setState(() => _isPlaying = true);
     } catch (e) {
       await player.dispose();
       if (mounted) {
@@ -332,7 +330,7 @@ class _PeerAgentIncomingBodyState extends State<_PeerAgentIncomingBody> {
                 color: Theme.of(context)
                     .colorScheme
                     .surfaceContainerHighest
-                    .withOpacity(0.5),
+                    .withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Text(
@@ -386,7 +384,7 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
   File? _tempFile;
   String? _audioError;
   final TextEditingController _replyController = TextEditingController();
-  bool _isPlaying = false;
+  final bool _isPlaying = false;
 
   @override
   void initState() {
@@ -404,7 +402,6 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
       await player.play(
         BytesSource(bytes, mimeType: "audio/mpeg"),
       );
-      if (mounted) setState(() => _isPlaying = true);
     } catch (e) {
       try {
         final Directory dir = await getTemporaryDirectory();
@@ -414,7 +411,6 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
         await f.writeAsBytes(bytes, flush: true);
         _tempFile = f;
         await player.play(DeviceFileSource(f.path));
-        if (mounted) setState(() => _isPlaying = true);
       } catch (e2) {
         await player.dispose();
         final File? tmp = _tempFile;
@@ -537,7 +533,7 @@ class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5),
+                color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Text(

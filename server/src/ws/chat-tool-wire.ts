@@ -11,6 +11,7 @@ import type { ToolExecutedInfo, ToolExecuteStartInfo } from "../external-model/t
 import { ServerEventType } from "../protocol.js";
 import { embodimentThinking } from "../services/agent-embodiment.js";
 import { isScheduleMutationToolName } from "../tools/schedule-tool-names.js";
+import { formatStatusForDisplay } from "../utils/text.js";
 
 export type ChatToolWireContext = {
   sessionId: string;
@@ -20,7 +21,9 @@ export type ChatToolWireContext = {
 };
 
 function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload): void {
-  embodimentThinking(ctx.sessionId, ctx.send, status.line, {
+  const displayLine = formatStatusForDisplay(status.line);
+  if (!displayLine) return;
+  embodimentThinking(ctx.sessionId, ctx.send, displayLine, {
     phase: status.phase,
     subAgentType: status.agentType,
     subAgentDisplayName: status.subAgentDisplayName,
@@ -34,7 +37,7 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
         messageId: ctx.assistantMessageId,
         traceId: ctx.traceId,
         phase: status.phase,
-        line: status.line,
+        line: displayLine,
         agentType: status.agentType,
         subAgentDisplayName: status.subAgentDisplayName,
         toolName: status.toolName,

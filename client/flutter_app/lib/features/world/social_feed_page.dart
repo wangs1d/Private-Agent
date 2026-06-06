@@ -213,7 +213,7 @@ class _SocialFeedPageState extends State<SocialFeedPage> {
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  value: mediaType,
+                  initialValue: mediaType,
                   decoration: const InputDecoration(labelText: "媒体类型"),
                   items: const <DropdownMenuItem<String>>[
                     DropdownMenuItem(value: "none", child: Text("无")),

@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 
 import "../../core/utils/content_summary_parser.dart";
 
@@ -77,9 +77,9 @@ class _ContentSummaryBookmarkRailState extends State<ContentSummaryBookmarkRail>
     return Container(
       width: 168,
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.35),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.35),
         border: Border(
-          right: BorderSide(color: cs.outline.withOpacity(0.12)),
+          right: BorderSide(color: cs.outline.withValues(alpha: 0.12)),
         ),
       ),
       child: Column(
@@ -180,12 +180,12 @@ class _BookmarkItem extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(10),
             color: active
-                ? cs.primaryContainer.withOpacity(0.55)
-                : cs.surface.withOpacity(0.35),
+                ? cs.primaryContainer.withValues(alpha: 0.55)
+                : cs.surface.withValues(alpha: 0.35),
             border: Border.all(
               color: active
-                  ? cs.primary.withOpacity(0.42)
-                  : cs.outline.withOpacity(0.14),
+                  ? cs.primary.withValues(alpha: 0.42)
+                  : cs.outline.withValues(alpha: 0.14),
             ),
           ),
           child: Stack(
@@ -262,15 +262,15 @@ class _VerticalScrollHint extends StatelessWidget {
               begin: up ? Alignment.topCenter : Alignment.bottomCenter,
               end: up ? Alignment.bottomCenter : Alignment.topCenter,
               colors: <Color>[
-                cs.surfaceContainerHighest.withOpacity(0.98),
-                cs.surfaceContainerHighest.withOpacity(0),
+                cs.surfaceContainerHighest.withValues(alpha: 0.98),
+                cs.surfaceContainerHighest.withValues(alpha: 0),
               ],
             ),
           ),
           child: Icon(
             up ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
             size: 18,
-            color: cs.onSurfaceVariant.withOpacity(0.85),
+            color: cs.onSurfaceVariant.withValues(alpha: 0.85),
           ),
         ),
       ),

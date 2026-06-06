@@ -1,4 +1,3 @@
-import "dart:async";
 import "dart:math" as math;
 import "dart:convert";
 
@@ -23,8 +22,8 @@ class SecurityService {
   // 锁定时间（秒）
   static const int lockoutDuration = 300; // 5分钟
   
-  Map<String, int> _failedAttempts = {};
-  Map<String, DateTime> _lockoutTimes = {};
+  final Map<String, int> _failedAttempts = {};
+  final Map<String, DateTime> _lockoutTimes = {};
 
   /// 生成会话令牌
   String generateSessionToken(String userId) {
@@ -68,7 +67,7 @@ class SecurityService {
     // 如果达到最大失败次数，锁定账户
     if (_failedAttempts[userId]! >= maxFailedAttempts) {
       _lockoutTimes[userId] = DateTime.now();
-      print("用户 $userId 已被锁定 ${lockoutDuration} 秒");
+      print("用户 $userId 已被锁定 $lockoutDuration 秒");
     }
   }
 

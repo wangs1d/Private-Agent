@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMood, AgentState } from "../types/agent";
+import { LOCAL_GENERATOR, type DynamicSpeechContext } from "../hooks/useDynamicSpeech";
 
 const MOOD_LABEL: Record<AgentMood, string> = {
   idle: "待机",
@@ -19,114 +20,69 @@ const MOOD_ICON: Record<AgentMood, string> = {
   alert: "⚠",
 };
 
-const TEMPLATES: Record<AgentMood, string[]> = {
-  idle: [
-    "{timeGreeting}，{action}~",
-    "嗯…{feeling}",
-    "{action}，{suggestion}？",
-    "{moodDesc}{punctuation}",
-    "好{timeDesc}啊{punctuation}",
-  ],
-  listening: [
-    "嗯嗯，{response}！",
-    "{encourage}继续说~",
-    "我在{action}呢{punctuation}",
-    "{positive}！然后呢？",
-    "说得{compliment}！",
-  ],
-  thinking: [
-    "让我{action}…",
-    "这个{difficulty}…",
-    "正在{action}！",
-    "嗯…{progress}{punctuation}",
-    "{action}中…",
-  ],
-  speaking: [
-    "听我说{punctuation}",
-    "是这样的{punctuation}",
-    "让我告诉你{punctuation}",
-    "{emphasis}来了{punctuation}",
-    "准备好了吗{punctuation}",
-  ],
-  happy: [
-    "太{positive}了{emoji}！",
-    "{positive}{punctuation}",
-    "今天心情{moodDesc}~",
-    "哈哈{punctuation}",
-    "nice{emoji}！",
-  ],
-  alert: [
-    "咦？{question}{punctuation}",
-    "{notice}异常！",
-    "等等，这是什么{punctuation}",
-    "{notice}情况！",
-    "小心{punctuation}",
-  ],
-};
-
-const DYNAMIC_PARTS = {
-  timeGreeting: ["早上好", "下午好", "晚上好", "嗨"],
-  action: ["想想", "发呆", "等你", "休息", "观察", "听听", "准备", "整理", "琢磨", "分析"],
-  feeling: ["有点无聊呢", "好安静", "有点困", "挺放松的", "在放空"],
-  suggestion: ["聊点什么", "做点有趣的事", "给我个任务", "玩个游戏", "聊聊今天"],
-  moodDesc: ["安静", "悠闲", "平静", "舒适", "惬意"],
-  timeDesc: ["安静", "清闲", "无聊", "慢悠悠"],
-  response: ["我在听", "请讲", "我听着呢", "感兴趣", "明白了"],
-  encourage: ["请", "继续", "加油", "嗯", "好的"],
-  positive: ["不错", "很好", "可以", "OK", "好的"],
-  compliment: ["不错", "很好", "有道理", "精彩", "到位"],
-  difficulty: ["有点复杂", "需要想想", "有意思", "不简单", "有挑战"],
-  progress: ["有思路了", "快想到了", "正在整理", "差不多", "有想法"],
-  emphasis: ["重点", "关键", "核心", "重要", "主要"],
-  question: ["怎么了", "什么情况", "这是啥", "发生什么", "有情况"],
-  notice: ["注意到", "发现", "检测到", "观察到", "感觉到"],
-  positive2: ["棒", "赞", "好", "爽", "开心"],
-  emoji: ["😊", "🎉", "✨", "💪", "👍"],
-  punctuation: ["！", "～", "~", "…", "～"],
-};
-
-function createSeededRng(seed: number): () => number {
-  let state = seed;
-  return () => {
-    state += 1;
-    const x = Math.sin(state) * 10000;
-    return x - Math.floor(x);
-  };
-}
-
-function pickRandom<T>(arr: T[], rng: () => number): T {
-  return arr[Math.floor(rng() * arr.length)];
-}
-
-function generateDynamicText(mood: AgentMood, rng: () => number): string {
-  const templates = TEMPLATES[mood];
-  const template = pickRandom(templates, rng);
-
-  return template.replace(/\{(\w+)\}/g, (match, key) => {
-    const parts = DYNAMIC_PARTS as Record<string, string[]>;
-    if (parts[key]) {
-      return pickRandom(parts[key], rng);
-    }
-    return match;
-  });
-}
-
-let generationCount = 0;
-
 interface InnerThoughtProps {
   state: AgentState;
 }
 
+/**
+ * 桌宠内心独白气泡
+ *
+ * 设计原则：完全不用固定语句。
+ * - 真实对话 / 拖动反馈 / LLM 反应都通过 state.caption 传进来 — 直接显示。
+ * - 没有 caption 时（无对话、无拖动）— 用 useDynamicSpeech 的本地词库 + 长闲上下文
+ *   实时拼一句"短想法"，每次都不同，不存在写死的句子。
+ */
 export function InnerThought({ state }: InnerThoughtProps) {
-  const { mood, phase, subAgentDisplayName } = state;
-  const hasContent = phase || subAgentDisplayName || mood !== "idle";
-  if (!hasContent) return null;
+  const { mood, phase, subAgentDisplayName, caption, source } = state;
+  const [ambientText, setAmbientText] = useState<string | null>(null);
+  const ambientSeedRef = useRef(0);
+  const lastAmbientAtRef = useRef(0);
+  const idleSinceRef = useRef<number>(performance.now());
 
-  const interaction = useMemo(() => {
-    generationCount += 1;
-    const rng = createSeededRng(generationCount + Date.now());
-    return generateDynamicText(mood, rng);
-  }, [mood]);
+  // 当有真实 caption（来自拖动 / 旋转 / LLM 实时反应）时优先显示
+  const showCaption = !!caption;
+
+  // 检测"长时间无交互" — 用作环境独白的触发
+  useEffect(() => {
+    if (showCaption || mood === "speaking" || mood === "listening" || mood === "thinking") {
+      idleSinceRef.current = performance.now();
+      return;
+    }
+    const tick = () => {
+      const idleMs = performance.now() - idleSinceRef.current;
+      // 至少 8s 才开始说"环境独白"；30s 之内不要再换
+      if (idleMs > 8000 && performance.now() - lastAmbientAtRef.current > 30000) {
+        ambientSeedRef.current += 1;
+        const ctx: DynamicSpeechContext = {
+          trigger: "long_idle",
+          intensity: Math.min(0.5, idleMs / 60000),
+          totalMagnitude: ambientSeedRef.current,
+          silenceMs: idleMs,
+          hour: new Date().getHours(),
+          mood,
+        };
+        setAmbientText(LOCAL_GENERATOR.generate(ctx));
+        lastAmbientAtRef.current = performance.now();
+      }
+    };
+    const id = window.setInterval(tick, 1500);
+    return () => window.clearInterval(id);
+  }, [mood, showCaption]);
+
+  // 如果新出现 caption，环境独白先让位
+  useEffect(() => {
+    if (showCaption) setAmbientText(null);
+  }, [showCaption]);
+
+  // 计算最终显示文本
+  const displayText = useMemo(() => {
+    if (caption) return caption;
+    if (ambientText) return ambientText;
+    return null;
+  }, [caption, ambientText]);
+
+  const hasContent = !!displayText || !!phase || !!subAgentDisplayName || mood !== "idle";
+  if (!hasContent) return null;
 
   return (
     <div className={`inner-thought inner-thought--${mood}`}>
@@ -135,7 +91,14 @@ export function InnerThought({ state }: InnerThoughtProps) {
         <span className="inner-thought__mood-label">{MOOD_LABEL[mood]}</span>
       </div>
 
-      <div className="inner-thought__interaction">{interaction}</div>
+      {displayText ? (
+        <div className="inner-thought__interaction">
+          {displayText}
+          {source === "pet_reaction" ? (
+            <span className="inner-thought__source-tag">即兴</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {subAgentDisplayName ? (
         <div className="inner-thought__sub">

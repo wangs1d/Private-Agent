@@ -93,7 +93,7 @@ class MultimodalRecognitionService {
     // 安全检查：账户是否被锁定
     if (_securityService.isAccountLocked(_currentUserId!)) {
       final remainingTime = _securityService.getRemainingLockoutTime(_currentUserId!);
-      throw Exception("账户已锁定，请 ${remainingTime} 秒后重试");
+      throw Exception("账户已锁定，请 $remainingTime 秒后重试");
     }
 
     return _voiceprintService!.startListeningWithVerification(

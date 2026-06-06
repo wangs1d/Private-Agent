@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 import "../../core/db/isar_local_history_store.dart";
 import "../../core/config/api_config.dart";
 
@@ -146,7 +146,7 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                 Text(
                   '请输入手机号完成注册',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.6),
+                    color: Colors.white.withValues(alpha: 0.6),
                     fontSize: 14,
                   ),
                 ),
@@ -169,16 +169,16 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     hintText: '请输入11位手机号',
-                    hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+                    hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
                     filled: true,
-                    fillColor: Colors.white.withOpacity(0.05),
+                    fillColor: Colors.white.withValues(alpha: 0.05),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -209,16 +209,16 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                         style: const TextStyle(color: Colors.white),
                         decoration: InputDecoration(
                           hintText: '请输入6位验证码',
-                          hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+                          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
                           filled: true,
-                          fillColor: Colors.white.withOpacity(0.05),
+                          fillColor: Colors.white.withValues(alpha: 0.05),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
                           ),
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -235,7 +235,7 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                         onPressed: _countdown > 0 || _isSendingCode ? null : _sendVerificationCode,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _countdown > 0 || _isSendingCode
-                              ? Colors.grey.withOpacity(0.3)
+                              ? Colors.grey.withValues(alpha: 0.3)
                               : cs.surfaceContainerHighest,
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 16),
@@ -260,17 +260,17 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       color: _statusText.contains('✓') 
-                          ? Colors.green.withOpacity(0.1)
+                          ? Colors.green.withValues(alpha: 0.1)
                           : _statusText.contains('错误') || _statusText.contains('失败')
-                              ? Colors.red.withOpacity(0.1)
-                              : Colors.white.withOpacity(0.05),
+                              ? Colors.red.withValues(alpha: 0.1)
+                              : Colors.white.withValues(alpha: 0.05),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
                         color: _statusText.contains('✓') 
-                            ? Colors.green.withOpacity(0.3)
+                            ? Colors.green.withValues(alpha: 0.3)
                             : _statusText.contains('错误') || _statusText.contains('失败')
-                                ? Colors.red.withOpacity(0.3)
-                                : Colors.white.withOpacity(0.1),
+                                ? Colors.red.withValues(alpha: 0.3)
+                                : Colors.white.withValues(alpha: 0.1),
                       ),
                     ),
                     child: Text(
@@ -324,8 +324,8 @@ class _PhoneRegistrationPageState extends State<PhoneRegistrationPage> {
                       widget.onRegistrationComplete();
                     },
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white.withOpacity(0.7),
-                      side: BorderSide(color: Colors.white.withOpacity(0.3)),
+                      foregroundColor: Colors.white.withValues(alpha: 0.7),
+                      side: BorderSide(color: Colors.white.withValues(alpha: 0.3)),
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),

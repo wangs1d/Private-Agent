@@ -78,28 +78,28 @@ html.embed-root #root {
 
 .overlay-pet-pane {
   position: relative;
-  flex: 0 0 100px;
-  width: 100px;
+  flex: 0 0 150px;
+  width: 150px;
   height: 100%;
-  min-width: 100px;
+  min-width: 150px;
   /* 底部留出空间放 caption，避免遮挡桌宠身体 */
-  padding-bottom: 48px;
+  padding-bottom: 72px;
   box-sizing: border-box;
 }
 
 .overlay-pet-pane canvas {
-  /* 画布只占内容区高度，下方 48px 留给 caption */
-  height: calc(100% - 48px) !important;
+  /* 画布只占内容区高度，下方 72px 留给 caption */
+  height: calc(100% - 72px) !important;
 }
 
 .overlay-pet-pane .inner-thought {
   /* 跟随 padding，留出底部 caption 空间，避免被 mode-shell 裁剪 */
-  top: calc(100% - 48px);
+  top: calc(100% - 72px);
 }
 
 .overlay-menu-side {
-  flex: 0 0 136px;
-  width: 136px;
+  flex: 0 0 204px;
+  width: 204px;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -265,7 +265,7 @@ html.embed-root #root {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  padding-bottom: 48px;
+  padding-bottom: 72px;
   background: rgba(0, 0, 0, 0.12);
   pointer-events: auto;
 }

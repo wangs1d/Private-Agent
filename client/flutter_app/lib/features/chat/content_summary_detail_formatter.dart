@@ -1,4 +1,4 @@
-import "package:flutter/gestures.dart";
+﻿import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
@@ -328,7 +328,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
           style: baseStyle.copyWith(
             fontFamily: "monospace",
             fontSize: (baseStyle.fontSize ?? 14) - 1,
-            backgroundColor: cs.surfaceContainerHighest.withOpacity(0.65),
+            backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.65),
           ),
         ),
       );
@@ -393,9 +393,9 @@ class _CodeBlockWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.55),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withOpacity(0.18)),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -428,9 +428,9 @@ class _BlockquoteWidget extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(
-          left: BorderSide(color: cs.primary.withOpacity(0.45), width: 3),
+          left: BorderSide(color: cs.primary.withValues(alpha: 0.45), width: 3),
         ),
-        color: cs.primaryContainer.withOpacity(0.12),
+        color: cs.primaryContainer.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
@@ -539,9 +539,9 @@ class MarkdownTableWidget extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
                 color: isHeader
-                    ? cs.primaryContainer.withOpacity(0.28)
+                    ? cs.primaryContainer.withValues(alpha: 0.28)
                     : null,
-                border: Border.all(color: cs.outline.withOpacity(0.14)),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.14)),
               ),
               child: buildInlineMarkdownText(
                 cell.text,
@@ -561,7 +561,7 @@ class MarkdownTableWidget extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withOpacity(0.22)),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),

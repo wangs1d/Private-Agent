@@ -36,6 +36,14 @@ interface SphereAgentProps {
   canvasCaptureLenient?: boolean;
   onPanDelta?: (dx: number, dy: number) => void;
   onPanEnd?: () => void;
+  /** 实时拖动/旋转反应：每次达到反应阈值时回调，可用于触发身体晃动与说话 */
+  onLiveReact?: (intensity: number, mode: "pan" | "rotate") => void;
+  /** 旋转中累计 yaw/pitch 角度（弧度）回调 */
+  onSpinDelta?: (deltaYaw: number, deltaPitch: number) => void;
+  /** 拖动结束回调 */
+  onDragRelease?: (info: { mode: "pan" | "rotate"; totalRotationDeg: number; panDistance: number; spinStrength: number }) => void;
+  /** 触发身体晃动函数（可由外部任何时机调用） */
+  onShakeRequest?: (strength: number, durationMs: number) => void;
 }
 
 function relayBoundaryToParent(edge: string) {
@@ -63,6 +71,10 @@ export function SphereAgent({
   canvasCaptureLenient = false,
   onPanDelta,
   onPanEnd,
+  onLiveReact,
+  onSpinDelta,
+  onDragRelease,
+  onShakeRequest,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
@@ -112,6 +124,24 @@ export function SphereAgent({
 
   const motion = kinematic ? bodyMotion : physicsMotion;
   const exciteMotion = kinematic ? bodyMotion.excite : undefined;
+  const shakeMotion = kinematic ? bodyMotion.shake : undefined;
+  const verticalBiasMotion = kinematic ? bodyMotion.applyVerticalBias : undefined;
+  const shakeBridgeRef = useRef<((strength: number, durationMs: number) => void) | null>(null);
+
+  /** 触发身体晃动（内部或外部均可） */
+  const triggerShake = useCallback((strength: number, durationMs: number) => {
+    shakeMotion?.(strength, durationMs);
+    verticalBiasMotion?.(Math.sin(performance.now() * 0.013) * strength);
+  }, [shakeMotion, verticalBiasMotion]);
+
+  // 外部 onShakeRequest 也可触发身体晃动
+  useEffect(() => {
+    if (!onShakeRequest) return;
+    shakeBridgeRef.current = triggerShake;
+    return () => {
+      shakeBridgeRef.current = null;
+    };
+  }, [onShakeRequest, triggerShake]);
 
   const relayTouchToParent = useCallback(
     (event: SphereTouchEvent) => {
@@ -140,6 +170,19 @@ export function SphereAgent({
     onEyeClick,
     onPanDelta,
     onPanEnd,
+    onLiveReact: (intensity, mode) => {
+      onLiveReact?.(intensity, mode);
+      // 实时身体晃动 + 物理冲量
+      triggerShake(0.35 + intensity * 0.5, 600);
+      if (kinematic) bodyMotion.excite?.(0.25 + intensity * 0.45);
+    },
+    onSpinDelta,
+    onDragRelease: (info) => {
+      onDragRelease?.(info);
+      // 松手时给一个最终的身体晃动 + 物理抖动
+      const endShake = Math.min(1, info.spinStrength * 1.4 + Math.min(1, info.totalRotationDeg / 360) * 0.6);
+      triggerShake(0.5 + endShake * 0.5, 950);
+    },
     onBodyHover: (active) => {
       onBodyHover?.(active);
       onEyeInteractionChange?.(active);
@@ -155,6 +198,7 @@ export function SphereAgent({
       if (faceSignalsRef.current) {
         faceSignalsRef.current.excitement = Math.max(faceSignalsRef.current.excitement, 0.5 + strength * 0.35);
       }
+      triggerShake(0.6 + strength * 0.3, 1100);
     },
   });
 

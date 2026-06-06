@@ -107,12 +107,14 @@ class VoiceWakeService {
           _onWake?.call();
         }
       },
-      partialResults: true,
       listenFor: const Duration(seconds: 45),
       pauseFor: const Duration(seconds: 2),
+      listenOptions: stt.SpeechListenOptions(
+        partialResults: true,
+        cancelOnError: false,
+        listenMode: stt.ListenMode.search,
+      ),
       localeId: "zh_CN",
-      cancelOnError: false,
-      listenMode: stt.ListenMode.search,
     );
   }
 }

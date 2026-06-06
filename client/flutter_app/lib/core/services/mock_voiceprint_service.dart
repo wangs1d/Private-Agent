@@ -101,7 +101,6 @@ class MockVoiceprintService implements VoiceprintService {
   }
 
   void _startSimulation(String userId, Function(String recognizedText) onResult) {
-    int counter = 0;
     final random = math.Random();
     
     _simulationTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
@@ -110,8 +109,6 @@ class MockVoiceprintService implements VoiceprintService {
         return;
       }
 
-      counter++;
-      
       // 模拟语音识别结果
       final mockTexts = [
         "打开天气应用",

@@ -103,7 +103,7 @@ class AgentSphereEmbodimentMapper {
     return AgentSpherePatch(
       mood: p["mood"]?.toString(),
       energy: p["energy"] is num ? (p["energy"] as num).toDouble() : null,
-      caption: caption == null ? null : caption.toString(),
+      caption: caption?.toString(),
       clearCaption: caption == null,
       phase: p["phase"]?.toString(),
       subAgentType: p["subAgentType"]?.toString(),

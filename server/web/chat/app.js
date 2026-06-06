@@ -38,6 +38,12 @@ const STORAGE_KEYS = {
   PENDING: 'pai_pending_items',
 };
 
+/// 滚动到最新消息（column-reverse 布局下 scrollTop=0 即为底部/最新处）
+function scrollToLatest() {
+  if (!messagesEl) return;
+  messagesEl.scrollTop = 0;
+}
+
 const uiState = {
   todayFocus: [],
   pending: [],
@@ -117,6 +123,7 @@ class DailyChatStorage {
         appendBubble('system', escapeHtml(msg.text), msg.messageId);
       }
     }
+    scrollToLatest();
   }
 
   clearCurrentDay() {
@@ -917,6 +924,7 @@ function handleWs(msg) {
         return `<div class="prog-step${isLast ? ' prog-step-current' : ''}">${prefix} ${escapeHtml(s)}</div>`;
       })
       .join("");
+    scrollToLatest();
     syncAgentProcessingUi(true);
     patchAvatar({ mood: "thinking", caption: line, energy: 0.72 });
     return;
@@ -937,6 +945,7 @@ function handleWs(msg) {
     const detected = playUrlFromText(row.text);
     if (detected) row.playUrl = detected;
     paintAssistant(id);
+    scrollToLatest();
     avatarSpeakingEnergy = Math.min(1, avatarSpeakingEnergy + 0.025);
     patchAvatar({ mood: "speaking", energy: avatarSpeakingEnergy });
     return;
@@ -969,6 +978,7 @@ function handleWs(msg) {
     if (!row.playUrl) row.playUrl = playUrlFromText(row.text);
     paintAssistant(id);
     dailyChatStorage.saveMessage('assistant', row.text, id);
+    scrollToLatest();
     return;
   }
 
@@ -1007,6 +1017,7 @@ function sendUserMessage() {
   appendBubble("user", escapeHtml(text), messageId);
   dailyChatStorage.saveMessage('user', text, messageId);
   inputEl.value = "";
+  scrollToLatest();
   ws.send(
     JSON.stringify({
       type: "chat.user_message",
@@ -1101,6 +1112,7 @@ function handlePhoneCallStatus(payload) {
   const status = payload.status ?? "unknown";
   if (status === "ringing") {
     appendBubble("system", `📞 正在呼叫 Agent (${payload.toActorId ?? ""})…`, "phone-status");
+    scrollToLatest();
     if (phoneCallWidgetState !== "ringing") {
       phoneCallWidgetState = "ringing";
       const widget = document.getElementById("phone-dialer");
@@ -1108,12 +1120,14 @@ function handlePhoneCallStatus(payload) {
     }
   } else if (status === "connected") {
     appendBubble("system", "📞 已接通", "phone-status");
+    scrollToLatest();
     phoneCallWidgetState = "connected";
     phoneCallSeconds = 0;
     const widget = document.getElementById("phone-dialer");
     if (widget) updatePhoneCallWidgetContent(widget);
   } else if (status === "ended") {
     appendBubble("system", "📞 通话已结束", "phone-status");
+    scrollToLatest();
     setTimeout(() => closePhoneCallWidget(), 2000);
   }
 }
@@ -1129,6 +1143,7 @@ function sendUserMessageDirect(text) {
   const messageId = `msg-${Date.now().toString(36)}`;
   appendBubble("user", escapeHtml(text), messageId);
   dailyChatStorage.saveMessage('user', text, messageId);
+  scrollToLatest();
   ws.send(
     JSON.stringify({
       type: "chat.user_message",
@@ -1164,6 +1179,7 @@ function showPhoneDialer() {
 
   showPhoneCallWidget("ringing");
   appendBubble("system", "📞 正在呼叫你的 Agent…", "phone-status");
+  scrollToLatest();
   patchAvatar({ mood: "alert", caption: "通话中", energy: 0.8 });
 }
 
@@ -1245,6 +1261,7 @@ function hangUpPhoneCall() {
 
   closePhoneCallWidget();
   appendBubble("system", "📞 通话已结束", "phone-status");
+  scrollToLatest();
   patchAvatar({ mood: "idle", caption: undefined, energy: 0.5 });
 }
 

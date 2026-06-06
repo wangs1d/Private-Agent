@@ -17,7 +17,6 @@ if (isWin) {
 /** server 最后启动，减少与其它进程抢 3000 的竞态 */
 const SERVICES = [
   { name: "world", port: 3333, npmScript: "dev:all:world" },
-  { name: "social", port: 3001, npmScript: "dev:all:social" },
   { name: "server", port: 3000, npmScript: "dev:all:server" },
 ];
 

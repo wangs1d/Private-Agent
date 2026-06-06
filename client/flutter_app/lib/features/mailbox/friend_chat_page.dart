@@ -28,7 +28,7 @@ class _FriendChatPageState extends State<FriendChatPage> {
   final ScrollController _scrollController = ScrollController();
   final ImagePicker _picker = ImagePicker();
   
-  List<Map<String, dynamic>> _messages = [];
+  final List<Map<String, dynamic>> _messages = [];
   bool _loading = false;
   XFile? _selectedImage;
   XFile? _selectedVideo;

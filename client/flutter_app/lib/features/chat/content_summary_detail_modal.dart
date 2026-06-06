@@ -1,4 +1,4 @@
-import "package:flutter/material.dart";
+﻿import "package:flutter/material.dart";
 
 import "../../core/utils/content_summary_parser.dart";
 import "content_summary_detail_formatter.dart";
@@ -16,7 +16,7 @@ class ContentSummaryDetailModal {
       context: context,
       barrierDismissible: true,
       barrierLabel: "关闭详情",
-      barrierColor: Colors.black.withOpacity(0.52),
+      barrierColor: Colors.black.withValues(alpha: 0.52),
       transitionDuration: const Duration(milliseconds: 260),
       pageBuilder: (
         BuildContext context,
@@ -208,7 +208,7 @@ class _ContentSummaryDetailModalBodyState
     final Widget panel = Material(
       color: cs.surfaceContainerLow,
       elevation: wide ? 24 : 16,
-      shadowColor: Colors.black.withOpacity(0.45),
+      shadowColor: Colors.black.withValues(alpha: 0.45),
       borderRadius: BorderRadius.circular(wide ? 16 : 18),
       clipBehavior: Clip.antiAlias,
       child: SizedBox(
@@ -319,9 +319,9 @@ class _ContentSummaryDetailModalBodyState
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 16, 12, 14),
         decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest.withOpacity(0.55),
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
           border: Border(
-            bottom: BorderSide(color: cs.outline.withOpacity(0.12)),
+            bottom: BorderSide(color: cs.outline.withValues(alpha: 0.12)),
           ),
         ),
         child: Row(
@@ -336,7 +336,7 @@ class _ContentSummaryDetailModalBodyState
                 child: Icon(
                   Icons.drag_indicator,
                   size: 22,
-                  color: cs.onSurfaceVariant.withOpacity(0.75),
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.75),
                 ),
               ),
             ),
@@ -345,7 +345,7 @@ class _ContentSummaryDetailModalBodyState
               height: 40,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: cs.primaryContainer.withOpacity(0.5),
+                color: cs.primaryContainer.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Text(summary.cardIcon, style: const TextStyle(fontSize: 20)),
@@ -423,7 +423,7 @@ class _ContentSummaryMetaTag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.65),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text.rich(
