@@ -283,23 +283,23 @@ export class ProactiveLifeRuntimeService {
 
     const reversalText =
       reversalDirection === "upward"
-        ? "最近方向转为上行"
+        ? "方向开始往上走"
         : reversalDirection === "downward"
-          ? "最近方向转为下行"
+          ? "方向开始往下走"
           : reversalDirection === "mixed"
-            ? "最近方向在多条信号之间有分歧"
+            ? "方向有点分歧"
             : trend
-              ? `当前趋势为${trend === "rising" ? "上行" : trend === "falling" ? "下行" : "稳定"}`
-              : "趋势正在变化";
+              ? `方向${trend === "rising" ? "在往上" : trend === "falling" ? "在往下" : "比较稳"}`
+              : "方向在变";
 
     const parts = [
-      "证据窗口：",
-      totalSignals != null ? `最近${totalSignals}条信号` : null,
-      turningPoints != null ? `${turningPoints}个转折点` : null,
-      slopeScore != null ? `斜率 ${slopeScore.toFixed(2)}` : null,
+      "最近这条线",
+      totalSignals != null ? `${totalSignals}条信号` : null,
+      turningPoints != null ? `${turningPoints}个拐点` : null,
       reversalText,
     ].filter(Boolean);
 
-    return `${parts.join("，")}。`;
+    const slopeTail = slopeScore != null ? `，斜率 ${slopeScore.toFixed(2)}` : "";
+    return `${parts.join("，")}${slopeTail}。`;
   }
 }
