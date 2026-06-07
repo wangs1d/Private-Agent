@@ -1349,7 +1349,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   /// 显示服务端推送的提醒弹窗（reminder_popup 事件）
-  /// 用于智能提醒系统的 popup 级别——在用户屏幕中央弹出醒目提醒
+  /// 用于智能提醒系统的 popup 级别——在屏幕右下角弹出通知卡片
   void _showReminderPopupDialog(
     BuildContext navCtx,
     String title,
@@ -1364,32 +1364,124 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _ => Colors.blue,
     };
 
-    showDialog<void>(
+    final IconData iconData = switch (priority) {
+      "urgent" => Icons.warning_amber_rounded,
+      "high" => Icons.notifications_active_rounded,
+      _ => Icons.info_outline_rounded,
+    };
+
+    // 右下角通知卡片 —— 类似微信/QQ 的系统通知
+    showGeneralDialog<void>(
       context: navCtx,
-      barrierDismissible: false,
-      barrierColor: Colors.black54,
-      builder: (ctx) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          icon: Icon(
-            priority == "urgent" ? Icons.warning_amber_rounded : Icons.notifications_active_rounded,
-            color: accentColor,
-            size: 36,
-          ),
-          title: Text(title),
-          content: Text(
-            message,
-            style: Theme.of(ctx).textTheme.bodyLarge?.copyWith(height: 1.5),
-          ),
-          actions: <Widget>[
-            if (showConfirm)
-              FilledButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: Text(confirmText),
+      barrierDismissible: true,
+      barrierLabel: "",
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (ctx, anim1, anim2) => const SizedBox.shrink(),
+      transitionBuilder: (ctx, anim1, anim2, child) {
+        return FadeTransition(
+          opacity: anim1,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0.3, 0.5), // 从右下角滑入
+              end: Offset.zero,
+            ).animate(CurvedAnimation(parent: anim1, curve: Curves.easeOutCubic)),
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(0, 0, 24, 40),
+                child: Material(
+                  elevation: 12,
+                  borderRadius: BorderRadius.circular(16),
+                  color: Theme.of(ctx).colorScheme.surface,
+                  clipBehavior: Clip.antiAlias,
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 380),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: accentColor.withValues(alpha: 0.2),
+                        width: 1,
+                      ),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // 标题行：图标 + 标题 + 关闭按钮
+                        Row(
+                          children: [
+                            Icon(iconData, size: 20, color: accentColor),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: accentColor,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            // 关闭按钮
+                            GestureDetector(
+                              onTap: () => Navigator.of(ctx).pop(),
+                              child: Icon(
+                                Icons.close,
+                                size: 18,
+                                color: Theme.of(ctx)
+                                    .colorScheme
+                                    .onSurfaceVariant
+                                    .withValues(alpha: 0.6),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 10),
+
+                        // 正文内容
+                        Text(
+                          message,
+                          style: TextStyle(
+                            fontSize: 14,
+                            height: 1.5,
+                            color:
+                                Theme.of(ctx).colorScheme.onSurface,
+                          ),
+                          maxLines: 4,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+
+                        const SizedBox(height: 14),
+
+                        // 底部操作栏
+                        if (showConfirm)
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 6,
+                                ),
+                              ),
+                              child: Text(confirmText),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-          ],
-        ),
-      ),
+            ),
+          ),
+        );
+      },
     );
   }
 
