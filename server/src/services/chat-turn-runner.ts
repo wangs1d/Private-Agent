@@ -20,6 +20,10 @@ export type ChatTurnResult = {
   ok: true;
   finalText: string;
   messageId: string;
+  /** 可选：TTS 合成的音频数据（用于微信桥接等需要推送语音的场景） */
+  ttsAudio?: { format: string; base64: string } | null;
+  /** 可选：标记此回复是否为提醒类（用于微信端特殊渲染） */
+  reminderType?: "popup" | "tts_alarm" | "phone_call" | null;
 };
 
 export type ChatTurnError = {

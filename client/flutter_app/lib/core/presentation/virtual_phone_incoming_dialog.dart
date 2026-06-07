@@ -1017,7 +1017,7 @@ class _WeChatVoiceCallScreenState extends State<WeChatVoiceCallScreen> {
     final iconColor =
         isHighlight ? Colors.white : (isActive ? Colors.white : Colors.white38);
 
-    final size = isHighlight ? highlightSize : 56;
+    final double size = isHighlight ? highlightSize : 56;
 
     return GestureDetector(
       onTap: onTap,

@@ -1,7 +1,13 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { Buffer } from "node:buffer";
 
 const DEFAULT_CHANNEL = "openclaw-weixin";
 const BRIDGE_PATH = "/integrations/wechat-claw/bridge/chat";
+
+/** TTS 音频临时文件目录 */
+const VOICE_TMP_DIR = join(process.cwd(), "data", "wechat-tts-voice");
 
 function pluginConfig(api, ctx) {
   const cfg =
@@ -49,6 +55,9 @@ function channelMatches(config, event, ctx) {
   return config.channels.includes(channel);
 }
 
+/**
+ * 调用 Private AI Agent 主服务，获取完整回复（含可选的 TTS 音频和提醒类型）
+ */
 async function callPrivateAgentBridge(config, payload) {
   const headers = { "Content-Type": "application/json" };
   if (config.bridgeToken) {
@@ -75,12 +84,104 @@ async function callPrivateAgentBridge(config, payload) {
   if (!body?.ok || typeof body.replyText !== "string") {
     throw new Error("消息桥返回格式无效");
   }
-  return body.replyText.trim();
+  // 返回完整响应对象（包含 ttsAudio 和 reminderType）
+  return {
+    replyText: body.replyText.trim(),
+    ttsAudio: body.ttsAudio ?? null,
+    reminderType: body.reminderType ?? null,
+  };
+}
+
+/**
+ * 将 base64 编码的 MP3 音频写入临时文件，返回文件路径
+ */
+function saveTtsAudioToTempFile(base64Data, messageId) {
+  try {
+    if (!existsSync(VOICE_TMP_DIR)) {
+      mkdirSync(VOICE_TMP_DIR, { recursive: true });
+    }
+    const fileName = `tts_${messageId}_${Date.now()}.mp3`;
+    const filePath = join(VOICE_TMP_DIR, fileName);
+    const audioBuffer = Buffer.from(base64Data, "base64");
+    writeFileSync(filePath, audioBuffer);
+    return filePath;
+  } catch (err) {
+    console.error(`[private-agent-wechat-bridge] 写入 TTS 临时文件失败:`, err);
+    return null;
+  }
+}
+
+/**
+ * 根据提醒类型生成微信端展示的前缀文字
+ */
+function formatReminderPrefix(reminderType) {
+  switch (reminderType) {
+    case "phone_call":
+      return "\n📞 [语音来电] 您的 Agent 有紧急事项需要与您通话，请点击上方语音条收听。\n";
+    case "tts_alarm":
+      return "\n🔔 [语音提醒] Agent 为您播报以下内容，请点击语音条收听。\n";
+    case "popup":
+      return "\n⚠️ [重要提醒]\n";
+    default:
+      return "";
+  }
+}
+
+/**
+ * 尝试通过 OpenClaw API 发送语音消息。
+ *
+ * OpenClaw 的 sendVoice / sendMedia 能力取决于渠道插件实现。
+ * 如果 API 不支持，则降级为纯文本 + 提示信息。
+ */
+async function trySendVoiceMessage(api, event, ctx, voiceFilePath) {
+  // 方式 1：尝试使用 api.sendVoice（如果 openclaw-weixin 插件支持）
+  if (typeof api.sendVoice === "function") {
+    try {
+      await api.sendVoice({
+        path: voiceFilePath,
+        conversationId: event.conversationId ?? ctx.conversationId,
+        senderId: event.senderId ?? ctx.senderId,
+        channelId: event.channel ?? ctx.channelId,
+      });
+      return true;
+    } catch (e) {
+      console.warn(`[private-agent-wechat-bridge] api.sendVoice 失败:`, e.message);
+    }
+  }
+
+  // 方式 2：尝试使用 api.sendMessage 带 type=voice 参数
+  if (typeof api.sendMessage === "function") {
+    try {
+      await api.sendMessage({
+        type: "voice",
+        path: voiceFilePath,
+        conversationId: event.conversationId ?? ctx.conversationId,
+      });
+      return true;
+    } catch (e) {
+      console.warn(`[private-agent-wechat-bridge] api.sendMessage(voice) 失败:`, e.message);
+    }
+  }
+
+  // 方式 3：尝试 dispatchReplyFromConfig 带 media 参数
+  if (typeof api.dispatchReplyFromConfig === "function") {
+    try {
+      await api.dispatchReplyFromConfig({
+        text: "", // 文字部分由主返回值处理
+        media: [{ type: "voice", path: voiceFilePath }],
+      });
+      return true;
+    } catch (e) {
+      console.warn(`[private-agent-wechat-bridge] dispatchReplyFromConfig(voice) 失败:`, e.message);
+    }
+  }
+
+  return false;
 }
 
 async function bridgeWechatTurn(api, config, { text, channel, senderId, accountId, messageId }) {
   try {
-    const replyText = await callPrivateAgentBridge(config, {
+    const response = await callPrivateAgentBridge(config, {
       text,
       sessionId: config.defaultActorId,
       userId: config.defaultActorId,
@@ -89,20 +190,63 @@ async function bridgeWechatTurn(api, config, { text, channel, senderId, accountI
       accountId,
       messageId,
     });
-    return replyText || "（无回复内容）";
+
+    const { replyText, ttsAudio, reminderType } = response;
+
+    // ---- 如果有 TTS 音频，尝试发送微信语音消息 ----
+    let voiceSent = false;
+    if (ttsAudio && ttsAudio.base64 && ttsAudio.format === "mp3") {
+      const voicePath = saveTtsAudioToTempFile(ttsAudio.base64, messageId || "unknown");
+      if (voicePath) {
+        // 注意：这里需要在 before_dispatch 回调的外部上下文中发送语音
+        // 由于 before_dispatch 的返回值只支持 { handled, text }，
+        // 我们将语音文件路径记录下来，由后续逻辑处理
+        voiceSent = !!voicePath;
+
+        // 尝试异步发送语音（不阻塞文字回复）
+        // 在 before_dispatch 回调中，event/ctx 可能携带足够的上下文来发送额外消息
+        if (api._wechatBridgeLastEvent) {
+          api._wechatBridgeLastEvent = { voicePath, reminderType };
+        }
+      }
+    }
+
+    // 构建最终回复文本
+    let finalText = replyText || "（无回复内容）";
+
+    // 如果是提醒类型且有语音，添加提示前缀
+    if (reminderType && voiceSent) {
+      finalText = formatReminderPrefix(reminderType) + finalText;
+    }
+
+    // 将语音路径挂载到返回对象上，供外部消费
+    // （OpenClaw 框架可能不支持扩展字段，但至少我们尝试了）
+    return {
+      text: finalText,
+      voicePath: voiceSent ? saveTtsAudioToTempFile(ttsAudio.base64, messageId || "unknown") : null,
+      reminderType,
+    };
+
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     api.logger?.warn?.(`[private-agent-wechat-bridge] ${detail}`);
-    return `⚠️ 主服务处理失败：${detail}\n请确认 server 已启动且 WECHAT_CLAW_BRIDGE_ENABLED=1。`;
+    return {
+      text: `⚠️ 主服务处理失败：${detail}\n请确认 server 已启动且 WECHAT_CLAW_BRIDGE_ENABLED=1。`,
+      voicePath: null,
+      reminderType: null,
+    };
   }
 }
 
 export default definePluginEntry({
   id: "private-agent-wechat-bridge",
   name: "Private Agent WeChat Bridge",
-  description: "Route WeChat inbound to Private AI Agent AgentCore",
+  description: "Route WeChat inbound to Private AI Agent AgentCore (with TTS voice support)",
   register(api) {
     const hookOpts = { priority: 200, timeoutMs: 300_000 };
+
+    // 存储最后一次事件上下文（用于异步发送语音）
+    let pendingVoicePayload = null;
 
     // 微信渠道走 dispatchReplyFromConfig → before_dispatch（不会跑全局 inbound_claim）
     api.on(
@@ -125,20 +269,44 @@ export default definePluginEntry({
           return;
         }
 
+        const msgId = event.messageId || event.msgId || `msg-${Date.now()}`;
+
         api.logger?.info?.(
           `[private-agent-wechat-bridge] bridge start channel=${channel} actor=${config.defaultActorId} textLen=${text.length}`,
         );
 
-        const replyText = await bridgeWechatTurn(api, config, {
+        const result = await bridgeWechatTurn(api, config, {
           text,
           channel,
           senderId: event.senderId ?? ctx.senderId ?? ctx.conversationId,
           accountId: ctx.accountId,
-          messageId: undefined,
+          messageId: msgId,
         });
 
+        const { text: replyText, voicePath, reminderType } = result;
+
+        // ---- 异步发送语音消息（不阻塞文字回复） ----
+        if (voicePath) {
+          // 使用 setTimeout 让语音发送在文字回复之后执行
+          setTimeout(async () => {
+            try {
+              const sent = await trySendVoiceMessage(api, event, ctx, voicePath);
+              if (!sent) {
+                api.logger?.warn?.(
+                  `[private-agent-wechat-bridge] 语音发送降级为纯文本（OpenClaw 不支持语音API），已附加文字提示`,
+                );
+              }
+            } catch (asyncErr) {
+              api.logger?.error?.(
+                `[private-agent-wechat-bridge] 异步语音发送异常:`,
+                asyncErr instanceof Error ? asyncErr.message : String(asyncErr),
+              );
+            }
+          }, 500); // 延迟 500ms 确保文字先到达
+        }
+
         api.logger?.info?.(
-          `[private-agent-wechat-bridge] bridge done channel=${channel} replyLen=${replyText.length}`,
+          `[private-agent-wechat-bridge] bridge done channel=${channel} replyLen=${replyText.length} hasVoice=${!!voicePath} type=${reminderType ?? "normal"}`,
         );
 
         return { handled: true, text: replyText };

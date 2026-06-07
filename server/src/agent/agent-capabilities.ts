@@ -37,7 +37,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   desktop: "桌面自动化（VLM视觉操控电脑）",
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
-  phone: "虚拟电话（用户与 Agent 共用联络号 / Agent↔Agent / App 内通话）",
+  phone: "语音触达（语音提醒/闹钟式TTS播报 + 电话通话/TTS-only来电，未来ASR+LLM+TTS全双工）",
   entertainment: "娱乐互动（侧栏「游戏」tab：五子棋/斗地主/炸金花/21点）",
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
   self_programming: "自我编程（创建/更新/删除/生成Skill）",
@@ -198,19 +198,22 @@ function buildStaticSections(): CapabilitySection[] {
   ];
 }
 
-/** Agent system prompt：虚拟电话三类通路（勿与用户真实手机号混淆）。 */
+/** Agent system prompt：语音触达能力（两种模式 + 未来路线图）。 */
 const PHONE_MODEL_LINES = [
-  "【虚拟电话 · 号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码（与用户一体，可说「您的虚拟号码」）。用户无需单独再办一张号。",
-  "【三种通路】① Agent↔Agent：双方均须已申领号码 → phone.virtual_call；其他 Agent 来电时客户端先提醒用户接听，拒接/超时/委托时代你代接并转告；② Agent→用户：phone.call_user；③ 用户→Agent：App 内呼叫（不必再输 6 位号，但联络号仍是用户那条线）。",
+  "【语音触达 · 两套模式】你具备完整的语音通知和电话通话能力，通过 phone.call_user 工具实现。",
+  "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」「用声音通知我」—— 单向 TTS 播报，像闹钟一样播放语音，无来电 UI，不打扰当前操作。spokenMessage 填要说的话，ringStyle=\"reminder\"。",
+  "【模式二 · 电话通话（来电式）】适用「给我打个电话」「打电话给我」「语音通话」—— 完整来电体验：振铃8秒 → 自动接通 → TTS 播放语音。spokenMessage 填要对用户说的话。当前为 TTS-only 单向模式；未来将升级 ASR→LLM→TTS 全双工交互（用户可语音回复）。",
+  "【号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码（与用户一体）。用户无需单独再办一张号。",
+  "【Agent↔Agent 互拨】双方均须已申领号码 → phone.virtual_call。",
 ];
 
 function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: string): string[] {
   const header = hasVirtualPhone && virtualPhone
-    ? `📞 虚拟电话（您的联络号码：${virtualPhone}，登记在 Agent 名下）`
-    : "📞 虚拟电话（尚未申领您的 6 位联络号码）";
+    ? `📞 语音触达（您的联络号码：${virtualPhone}，登记在 Agent 名下）`
+    : "📞 语音触达（尚未申领 6 位联络号码）";
   const tools = hasVirtualPhone
-    ? "工具：phone.ensure_my_number（查询本 Agent 号码）/ phone.virtual_call（拨打其他 Agent）/ phone.call_user（呼叫当前用户）"
-    : "工具：phone.ensure_my_number（仅当用户明确要求为本 Agent 申领号码）/ phone.virtual_call（Agent 互拨前须先申领）/ phone.call_user（可直接呼叫用户，无需先申领）";
+    ? "★ phone.call_user（核心工具：语音提醒/电话通话，spokenMessage 填内容）| phone.ensure_my_number（查询号码）| phone.virtual_call（Agent 互拨）"
+    : "★ phone.call_user（核心工具：直接语音提醒或打电话给用户，无需先申领号码）| phone.ensure_my_number（用户明确要求时申领）| phone.virtual_call（Agent 互拨须先申领）";
   return [header, ...PHONE_MODEL_LINES, tools];
 }
 

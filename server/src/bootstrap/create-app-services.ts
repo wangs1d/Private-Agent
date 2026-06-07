@@ -665,6 +665,7 @@ export async function createAppServices(): Promise<AppServices> {
   void wechatClawBindingService.load();
   const wechatClawBridgeService = new WechatClawBridgeService(agentCore, {
     weatherPrefsService,
+    ttsService,
   });
 
   registerEmbodimentTools(toolRegistry, {

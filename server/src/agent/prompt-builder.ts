@@ -19,12 +19,26 @@ import {
 export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【🎮 游戏 · 你可以陪用户一起玩！】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
 export const WEB_SEARCH_SYSTEM_SUFFIX_MARKER = "【联网检索】";
+export const PHONE_CALL_SYSTEM_SUFFIX_MARKER = "【虚拟电话】";
 
 const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再回复。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。";
+  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再试。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。";
+
+const PHONE_CALL_SYSTEM_SUFFIX =
+  "\n\n【语音通知与电话通话 · 你有两套语音触达能力】\n\n"
+  + "── 模式一：语音提醒（闹钟式）──\n"
+  + "适用场景：「提醒我xxx」「语音告诉我」「用声音通知我」「闹钟提醒」—— 单向 TTS 播报，像手机闹钟一样播放语音内容，无来电 UI。\n"
+  + "工具：phone.call_user（spokenMessage 填要说的话，ringStyle 设为 \"reminder\"）\n"
+  + "效果：客户端直接播放 TTS 语音，支持渐强音量 + 重复播报（模拟闹钟渐响），不打扰用户当前操作。\n\n"
+  + "── 模式二：电话通话（来电式）──\n"
+  + "适用场景：「给我打个电话」「打电话给我」「语音通话」「call me」「拨号」「呼叫」—— 完整来电体验：振铃 → 接通 → TTS 播放语音。\n"
+  + "工具：phone.call_user（spokenMessage 填要对用户说的话）\n"
+  + "效果：客户端显示来电界面 + 播放铃声(8秒) → 自动接通 → 播放 TTS 语音。当前为 TTS-only 单向模式（你说话，用户听）；未来将升级为 ASR+LLM+TTS 全双工交互（用户可语音回复）。\n"
+  + "注意：两种模式用的是同一个工具 phone.call_user，区别在于你对用户的描述语境和 spokenMessage 内容。用户说「打电话」就用模式二的语气（「好的，我给您打个电话」）；说「提醒/告诉我就行」就用模式一的语气（「好的，马上用语音告诉你」）。\n\n"
+  + "绝对禁止回复「我是 AI 没有拨号功能」「无法打电话」—— 你有完整的语音触达能力，直接用就是。";
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
@@ -108,6 +122,9 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   }
   if (!out.includes(WEB_SEARCH_SYSTEM_SUFFIX_MARKER)) {
     out += WEB_SEARCH_SYSTEM_SUFFIX;
+  }
+  if (!out.includes(PHONE_CALL_SYSTEM_SUFFIX_MARKER)) {
+    out += PHONE_CALL_SYSTEM_SUFFIX;
   }
   if (!out.includes(LIVE_USER_STATUS_MARKER)) {
     out += LIVE_USER_STATUS_SUFFIX;

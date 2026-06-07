@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FastifyRequest } from "fastify";
 
@@ -14,6 +14,7 @@ import { runChatTurnForActor, type ChatTurnInput } from "./chat-turn-runner.js";
 import { isWechatClawFeatureEnabled } from "./openclaw-gateway-client.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
 import { sanitizeWechatInboundText } from "./wechat-inbound-text.js";
+import type { TtsService } from "./tts-service.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
   if (!raw) return false;
@@ -88,6 +89,7 @@ export class WechatClawBridgeService {
     private readonly agentCore: AgentCore,
     private readonly deps: {
       weatherPrefsService?: WeatherPrefsService;
+      ttsService?: TtsService;
       env?: NodeJS.ProcessEnv;
     } = {},
   ) {}
@@ -142,7 +144,16 @@ export class WechatClawBridgeService {
   }
 
   async handleChat(body: WechatClawBridgeChatBody): Promise<
-    | { ok: true; replyText: string; actorId: string; messageId: string }
+    | {
+        ok: true;
+        replyText: string;
+        actorId: string;
+        messageId: string;
+        /** TTS 音频数据（微信语音推送用） */
+        ttsAudio?: { format: string; base64: string } | null;
+        /** 提醒类型标记（供 OpenClaw 插件决定渲染方式） */
+        reminderType?: "popup" | "tts_alarm" | "phone_call" | null;
+      }
     | { ok: false; message: string }
   > {
     if (!this.isEnabled()) {
@@ -186,12 +197,62 @@ export class WechatClawBridgeService {
     if (!result.ok) {
       return { ok: false, message: result.message };
     }
+
+    // ---- 检测是否为提醒类回复，并生成 TTS 音频（用于微信语音推送） ----
+    const reminderType = this.detectReminderType(result.finalText);
+    let ttsAudio: { format: string; base64: string } | null | undefined;
+
+    if (reminderType && this.deps.ttsService) {
+      try {
+        const ttsResult = await this.deps.ttsService.synthesizeMp3Base64(result.finalText);
+        if (ttsResult.ok) {
+          ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
+        }
+      } catch (ttsErr) {
+        console.warn("[wechat-claw-bridge] TTS 合成失败，将降级为纯文本:", ttsErr);
+        ttsAudio = null;
+      }
+    }
+
     return {
       ok: true,
       actorId,
       messageId: result.messageId,
       replyText: result.finalText,
+      ttsAudio,
+      reminderType,
     };
+  }
+
+  /**
+   * 检测回复文本是否包含提醒标记，返回对应的提醒类型。
+   *
+   * 支持两种检测方式：
+   * 1. ChatTurnResult 自带 reminderType 字段（Agent 工具调用时主动设置）
+   * 2. 文本内容启发式检测（关键词匹配）
+   */
+  private detectReminderType(text: string): "popup" | "tts_alarm" | "phone_call" | null {
+    // 优先使用 runChatTurn 返回的标记（如果有的话）
+    // 这里做文本启发式检测作为兜底
+
+    const lower = text.toLowerCase();
+
+    // 电话来电标记
+    if (lower.includes("[phone_call]") || lower.includes("📞") || lower.includes("电话提醒")) {
+      return "phone_call";
+    }
+
+    // TTS 语音闹铃标记
+    if (lower.includes("[tts_alarm]") || lower.includes("🔔") || lower.includes("语音提醒") || lower.includes("语音闹钟")) {
+      return "tts_alarm";
+    }
+
+    // 弹窗提醒标记
+    if (lower.includes("[popup_reminder]") || lower.includes("⚠️") || lower.includes("重要提醒")) {
+      return "popup";
+    }
+
+    return null;
   }
 
   private clientLocationForActor(actorId: string): ClientLocationWire | undefined {

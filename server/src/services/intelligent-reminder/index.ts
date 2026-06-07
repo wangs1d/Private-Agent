@@ -22,6 +22,23 @@ export interface IntelligentReminderSystemDeps {
   virtualPhoneService: VirtualPhoneService;
   voiceDialogueService: VoiceDialogueService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
+  /**
+   * 可选：微信主动推送回调。
+   * 当用户无 WebSocket 连接时（仅使用微信），提醒将通过此通道推送。
+   *
+   * @param userId - 目标用户 ID
+   * @param level - 提醒级别
+   * @param title - 提醒标题
+   * @param message - 提醒正文
+   * @param options.ttsAudio - 可选的 TTS 音频数据（用于语音推送）
+   */
+  sendWechatProactive?: (
+    userId: string,
+    level: ReminderLevel,
+    title: string,
+    message: string,
+    options?: { ttsAudio?: { format: string; base64: string } | null },
+  ) => Promise<boolean>;
   logger?: {
     info: (msg: string, ...args: unknown[]) => void;
     error: (msg: string, ...args: unknown[]) => void;
@@ -52,27 +69,86 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
   const reminderService = new IntelligentReminderService(
     {
       onPopupReminder: async (instance) => {
-        await popupHandler.handle(instance);
+        const userId = instance.config.metadata?.userId as string ?? "unknown";
+        try {
+          await popupHandler.handle(instance);
+        } catch (wsErr) {
+          // WS 推送失败时，尝试微信主动推送
+          if (deps.sendWechatProactive) {
+            const sent = await deps.sendWechatProactive(userId, "popup", instance.config.title, instance.config.message);
+            if (sent) {
+              deps.logger?.info?.(`[reminder] popup 已通过微信主动推送: ${instance.config.title}`);
+            } else {
+              deps.logger?.error?.(`[reminder] popup WS 和微信推送均失败: ${instance.config.title}`);
+            }
+          }
+        }
         await userResponsePersistence.recordResponse({
-          userId: instance.config.metadata?.userId as string ?? "unknown",
+          userId,
           instance,
           responded: false,
           responseTimeMs: 0,
         });
       },
       onTTSAlarmReminder: async (instance) => {
-        await ttsHandler.handle(instance);
+        const userId = instance.config.metadata?.userId as string ?? "unknown";
+        try {
+          await ttsHandler.handle(instance);
+        } catch (wsErr) {
+          // WS 推送失败时，尝试微信语音推送
+          if (deps.sendWechatProactive && deps.virtualPhoneService) {
+            // 通过 TtsService 生成音频（复用 VirtualPhoneService 内部的 TTS）
+            let ttsAudio = null;
+            try {
+              const ttsResult = await (deps.virtualPhoneService as any).tts?.synthesizeMp3Base64?.(instance.config.message);
+              if (ttsResult?.ok) {
+                ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
+              }
+            } catch (_) { /* TTS 生成失败则纯文本推送 */ }
+
+            const sent = await deps.sendWechatProactive(userId, "tts_alarm", instance.config.title, instance.config.message, { ttsAudio });
+            if (sent) {
+              deps.logger?.info?.(`[reminder] tts_alarm 已通过微信主动推送(含${ttsAudio ? '语音' : '文本'}): ${instance.config.title}`);
+            } else {
+              deps.logger?.error?.(`[reminder] tts_alarm WS 和微信推送均失败: ${instance.config.title}`);
+            }
+          }
+        }
         await userResponsePersistence.recordResponse({
-          userId: instance.config.metadata?.userId as string ?? "unknown",
+          userId,
           instance,
           responded: false,
           responseTimeMs: 0,
         });
       },
       onPhoneCallReminder: async (instance) => {
-        await phoneHandler.handle(instance);
+        const userId = instance.config.metadata?.userId as string ?? "unknown";
+        try {
+          await phoneHandler.handle(instance);
+        } catch (wsErr) {
+          // WS 推送失败时，尝试微信语音来电模拟
+          if (deps.sendWechatProactive && deps.virtualPhoneService) {
+            // 生成前摇引导语 + 正文 的 TTS 音频
+            let ttsAudio = null;
+            try {
+              const preGreeting = buildPreGreetingForWechat(instance);
+              const fullText = `${preGreeting}\n\n${instance.config.message}`;
+              const ttsResult = await (deps.virtualPhoneService as any).tts?.synthesizeMp3Base64?.(fullText);
+              if (ttsResult?.ok) {
+                ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
+              }
+            } catch (_) { /* TTS 生成失败 */ }
+
+            const sent = await deps.sendWechatProactive(userId, "phone_call", instance.config.title, instance.config.message, { ttsAudio });
+            if (sent) {
+              deps.logger?.info?.(`[reminder] phone_call 已通过微信语音推送模拟来电: ${instance.config.title}`);
+            } else {
+              deps.logger?.error?.(`[reminder] phone_call WS 和微信推送均失败: ${instance.config.title}`);
+            }
+          }
+        }
         await userResponsePersistence.recordResponse({
-          userId: instance.config.metadata?.userId as string ?? "unknown",
+          userId,
           instance,
           responded: false,
           responseTimeMs: 0,
@@ -392,4 +468,25 @@ function getLevelLabel(level: ReminderLevel): string {
     default:
       return level;
   }
+}
+
+/**
+ * 为微信端生成电话来电的前摇引导语（TTS 语音内容）。
+ * 模拟真实电话的"接通感"，让用户知道这是 Agent 的语音提醒。
+ */
+function buildPreGreetingForWechat(instance: { config: { title?: string; priority?: string } }): string {
+  const title = instance.config.title ?? "提醒";
+  const priority = instance.config.priority ?? "normal";
+
+  const hour = new Date().getHours();
+  const timeLabel = hour < 6 ? "深夜" : hour < 9 ? "早上" : hour < 12 ? "上午" : hour < 14 ? "中午" : hour < 18 ? "下午" : hour < 22 ? "晚上" : "夜间";
+
+  const priorityHint =
+    priority === "urgent"
+      ? "紧急"
+      : priority === "high"
+        ? "重要"
+        : "";
+
+  return `叮铃铃——您好，我是您的 Agent。${timeLabel}有一条${priorityHint}${title}提醒，请听好。`;
 }

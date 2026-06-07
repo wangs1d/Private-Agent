@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/utils/content_summary_parser.dart";
+import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
@@ -70,7 +71,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   final bool _isListening = false;
   final String _recognizedText = "";
   final ScrollController _scrollController = ScrollController();
-  bool _isUserScrolling = false;
+
+  /// 滚动状态使用 ValueNotifier，避免 setState 触发整树重建导致掉帧
+  final ValueNotifier<bool> _isUserScrollingNotifier = ValueNotifier<bool>(false);
   bool _hasNewAgentMessage = false;
   AnimationController? _breathingController;
   Animation<double>? _breathingAnimation;
@@ -82,6 +85,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _isCollapsed = true; // 是否处于折叠状态
   int _collapsedCount = 0; // 被折叠的消息数量
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
+
+  /// ====== 滚动位置保持相关 ======
+  double? _savedScrollPosition;       // 离开时保存的滚动像素位置
+  double? _savedMaxScrollExtent;      // 离开时的最大可滚动距离
+  bool _isFirstLoadAfterInit = true;  // 是否为初始化后的首次加载（用于应用重启后滚到底部）
+  bool _hasSavedPosition = false;     // 是否有已保存的有效位置可供恢复
 
   // 预定义常量 - 减少重复创建对象
   static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
@@ -154,18 +163,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     final double maxScroll = _scrollController.position.maxScrollExtent;
     final double currentScroll = _scrollController.position.pixels;
 
-    if (maxScroll - currentScroll > 100) {
-      // 用户向上滑动了（不在底部）
-      if (!_isUserScrolling) {
-        setState(() => _isUserScrolling = true);
-      }
-    } else {
-      // 用户滚动到底部了
-      if (_isUserScrolling) {
-        setState(() {
-          _isUserScrolling = false;
-          _hasNewAgentMessage = false;
-        });
+    // 使用 ValueNotifier 更新，避免触发 setState 导致整树重建和掉帧
+    final bool shouldMarkScrolling = (maxScroll - currentScroll > 100);
+    if (_isUserScrollingNotifier.value != shouldMarkScrolling) {
+      _isUserScrollingNotifier.value = shouldMarkScrolling;
+      if (!shouldMarkScrolling) {
+        // 滚回底部时清除新消息标记（仅更新局部状态）
+        _hasNewAgentMessage = false;
       }
     }
   }
@@ -179,16 +183,15 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       _cachedMessageGroups = null;
     }
 
-    // 检测 Tab 切换：从非激活状态切回对话页时，滚动到底部
+    // ====== 滚动位置保持：离开对话页时保存位置 ======
+    if (!widget.isActive && oldWidget.isActive) {
+      _saveScrollPosition();
+      return;
+    }
+
+    // ====== 滚动位置保持：返回对话页时恢复位置 ======
     if (widget.isActive && !oldWidget.isActive) {
-      _isUserScrolling = false;
-      _hasNewAgentMessage = false;
-      // IndexedStack 切换需要两帧才能完成布局，用双重 postFrameCallback 保证可靠
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scrollToBottom(instant: true);
-        });
-      });
+      _restoreScrollPosition();
       return;
     }
 
@@ -196,7 +199,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     final bool messagesUnchanged = widget.messages.length == oldWidget.messages.length;
     if (messagesUnchanged) {
       // Agent 正在流式输出（消息文本在增长），且用户没有主动上滑 → 跟踪到底部
-      if (widget.isAgentProcessing && !_isUserScrolling) {
+      if (widget.isAgentProcessing && !_isUserScrollingNotifier.value) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
       }
       return;
@@ -209,7 +212,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 用户发送消息时，无论是否在滑动，都自动滚动到底部
     if (hasNewUserMessage) {
-      _isUserScrolling = false;
+      _isUserScrollingNotifier.value = false;
       _hasNewAgentMessage = false;
 
       // 如果消息数量超过阈值且当前是展开状态，自动折叠
@@ -227,14 +230,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         widget.messages.last.role != "user";
 
     // 用户在滑动时不自动滚动，标记有新消息
-    if (hasNewAgentMessage && _isUserScrolling) {
-      setState(() => _hasNewAgentMessage = true);
+    if (hasNewAgentMessage && _isUserScrollingNotifier.value) {
+      _hasNewAgentMessage = true;
       return;
     }
 
     // 用户没有主动滑动时，自动滚动到底部
     if (widget.messages.length != oldWidget.messages.length) {
-      _isUserScrolling = false;
+      _isUserScrollingNotifier.value = false;
       _hasNewAgentMessage = false;
 
       final bool isFirstLoad = !_hasHadMessages && widget.messages.isNotEmpty;
@@ -254,7 +257,112 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     _breathingController?.dispose();
     _speechService.cancel();
     _scrollController.dispose();
+    _isUserScrollingNotifier.dispose();
     super.dispose();
+  }
+
+  /// ====== 滚动位置保持：保存当前滚动位置 ======
+  void _saveScrollPosition() {
+    if (!_scrollController.hasClients) return;
+    final double pixels = _scrollController.position.pixels;
+    final double maxExtent = _scrollController.position.maxScrollExtent;
+    _savedScrollPosition = pixels;
+    _savedMaxScrollExtent = maxExtent;
+    _hasSavedPosition = true;
+
+    // 埋点：记录滚动位置保存事件（包含位置比例便于分析用户浏览深度）
+    final double ratio = maxExtent > 0 ? pixels / maxExtent : 0.0;
+    _logScrollEvent(
+      action: 'save',
+      pixels: pixels,
+      maxExtent: maxExtent,
+      scrollRatio: ratio,
+      messageCount: widget.messages.length,
+    );
+  }
+
+  /// ====== 滚动位置保持：恢复之前保存的滚动位置 ======
+  void _restoreScrollPosition() {
+    // 重置滚动状态
+    _isUserScrollingNotifier.value = false;
+    _hasNewAgentMessage = false;
+
+    // 应用重启后（首次加载），始终滚到底部
+    if (_isFirstLoadAfterInit) {
+      _isFirstLoadAfterInit = false;
+      _hasSavedPosition = false;
+      // IndexedStack 切换需要两帧才能完成布局，用双重 postFrameCallback 保证可靠
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToBottom(instant: true);
+        });
+      });
+      return;
+    }
+
+    // 如果没有已保存的位置（如首次进入无消息时），滚到底部
+    if (!_hasSavedPosition || _savedScrollPosition == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToBottom(instant: true);
+        });
+      });
+      return;
+    }
+
+    // 有保存的位置 → 等待布局完成后恢复
+    final double targetPixels = _savedScrollPosition!;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        final double currentMaxExtent = _scrollController.position.maxScrollExtent;
+        double restorePixels = targetPixels;
+
+        // 如果内容变化导致最大滚动距离变小， clamp 到有效范围
+        if (restorePixels > currentMaxExtent) {
+          restorePixels = currentMaxExtent;
+        }
+        // 如果内容变短导致不需要滚动，直接归零
+        if (restorePixels < 0) {
+          restorePixels = 0;
+        }
+
+        _scrollController.jumpTo(restorePixels);
+
+        // 埋点：记录滚动位置恢复事件（含保存时的最大滚动距离用于对比）
+        _logScrollEvent(
+          action: 'restore',
+          pixels: restorePixels,
+          savedPixels: targetPixels,
+          maxExtent: currentMaxExtent,
+          savedMaxExtent: _savedMaxScrollExtent,
+          messageCount: widget.messages.length,
+        );
+      });
+    });
+  }
+
+  /// ====== 埋点：记录滚动位置的保存与恢复事件 ======
+  void _logScrollEvent({
+    required String action,
+    double? pixels,
+    double? savedPixels,
+    double? maxExtent,
+    double? savedMaxExtent,
+    double? scrollRatio,
+    int? messageCount,
+  }) {
+    // 输出结构化日志供埋点系统采集
+    final StringBuffer buf = StringBuffer('[ChatScroll] action=$action');
+    if (pixels != null) buf.write(' | pixels=${pixels.toStringAsFixed(1)}');
+    if (savedPixels != null) buf.write(' | savedPixels=${savedPixels.toStringAsFixed(1)}');
+    if (maxExtent != null) buf.write(' | maxExtent=${maxExtent.toStringAsFixed(1)}');
+    if (savedMaxExtent != null) buf.write(' | savedMaxExtent=${savedMaxExtent.toStringAsFixed(1)}');
+    if (scrollRatio != null) buf.write(' | scrollRatio=${scrollRatio.toStringAsFixed(3)}');
+    if (messageCount != null) buf.write(' | messageCount=$messageCount');
+    buf.write(' | timestamp=${DateTime.now().toIso8601String()}');
+    debugPrint(buf.toString());
   }
 
   /// 将消息分组：用户消息单独一组；助手正文按条展示（进度由 `agentStatusLine` 提供，勿把短回复当流程提示吞掉）。
@@ -496,7 +604,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     return Text(
-      message.text,
+      stripMarkdown(message.text),
       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
             color: cs.onSurface,
           ),
@@ -616,6 +724,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       ListView.builder(
                   controller: _scrollController,
                   padding: _listPadding,
+                  cacheExtent: 500, // 预渲染上下各 500px 范围内的子项，减少快速滚动时的白屏/卡顿
                   itemCount: showCollapseButton ? itemCount + 1 : itemCount,
                   itemBuilder: (BuildContext context, int index) {
                     // 如果需要显示折叠按钮且是第一项
@@ -799,42 +908,45 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                           ],
                         ),
                       ),
-                    // 滚动到底部按钮（用户滑动时显示）
-                    if (_isUserScrolling)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: <Widget>[
-                            if (_hasNewAgentMessage)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 12),
-                                child: Text(
-                                  "Agent 有新消息",
-                                  style: TextStyle(
-                                    color: cs.primary,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
+                    // 滚动到底部按钮（用户滑动时显示）—— 使用 ValueListenableBuilder 避免整树重建
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _isUserScrollingNotifier,
+                      builder: (BuildContext context, bool isUserScrolling, Widget? child) {
+                        if (!isUserScrolling) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (_hasNewAgentMessage)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 12),
+                                  child: Text(
+                                    "Agent 有新消息",
+                                    style: TextStyle(
+                                      color: cs.primary,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            FloatingActionButton.small(
-                              heroTag: 'scroll_to_bottom',
-                              onPressed: () {
-                                if (_scrollController.hasClients) {
-                                  setState(() {
-                                    _isUserScrolling = false;
+                              FloatingActionButton.small(
+                                heroTag: 'scroll_to_bottom',
+                                onPressed: () {
+                                  if (_scrollController.hasClients) {
+                                    _isUserScrollingNotifier.value = false;
                                     _hasNewAgentMessage = false;
-                                  });
-                                  _scrollToBottom();
-                                }
-                              },
-                              backgroundColor: cs.primaryContainer,
-                              child: Icon(Icons.arrow_downward, color: cs.onPrimaryContainer),
-                            ),
-                          ],
-                        ),
-                      ),
+                                    _scrollToBottom();
+                                  }
+                                },
+                                backgroundColor: cs.primaryContainer,
+                                child: Icon(Icons.arrow_downward, color: cs.onPrimaryContainer),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
                     // 主输入框容器
                     AnimatedBuilder(
                       animation: _breathingAnimation!,
