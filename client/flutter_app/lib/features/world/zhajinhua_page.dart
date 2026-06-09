@@ -57,6 +57,11 @@ class _ZhaJinHuaPageState extends State<ZhaJinHuaPage> {
 
   void _onLobbyWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.zhajinhua.subscribe_lobby", <String, dynamic>{});
+      unawaited(_refresh());
+      return;
+    }
     if (type != _kWsZjhLobbySnapshot) return;
     final Object? payload = event["payload"];
     if (payload is! Map) return;
@@ -236,6 +241,11 @@ class _ZhaJinHuaTablePageState extends State<ZhaJinHuaTablePage> {
 
   void _onTableWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.zhajinhua.subscribe", <String, dynamic>{"tableId": widget.tableId});
+      unawaited(_loadSnapshotOnce());
+      return;
+    }
     if (type != _kWsZjhTableSnapshot) return;
     final Object? payload = event["payload"];
     if (payload is! Map) return;

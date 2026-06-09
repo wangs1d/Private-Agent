@@ -481,12 +481,7 @@ function buildOverviewIntro(
   const structureHint =
     structureParts.length > 0 ? `，${structureParts.join("、")}` : "";
 
-  const headlineHint =
-    headline !== subjectLabel && headline.length > 0
-      ? `（${truncateBrief(headline, 36)}）`
-      : "";
-
-  return `【${subjectLabel}】全文约 ${content.length} 字${structureHint}${headlineHint}。以下为概要，完整内容见下方详情卡。`;
+  return `【${subjectLabel}】全文约 ${content.length} 字${structureHint}。`;
 }
 
 /** 精简区要点：仅高层主题/结论，不复制详情正文 */
@@ -684,10 +679,6 @@ export function createContentSummary(
 }
 
 export function formatContentSummaryForChat(summary: ContentSummary): string {
-  const briefText = summary.briefPoints
-    .map((point) => `${point.icon} ${point.text}`)
-    .join("\n");
-
   const summaryData = JSON.stringify({
     type: "content_summary_v2",
     id: summary.id,
@@ -702,13 +693,25 @@ export function formatContentSummaryForChat(summary: ContentSummary): string {
     metadata: summary.metadata ?? {},
   });
 
+  // 仅保留一行简短标题，详情由 <details_card /> 折叠展示
+  const titleLine = summary.title
+    ? `${summary.cardIcon || "📋"} ${summary.cardLabel || ""}：${summary.title}`
+    : "";
+
   return `[CONTENT_SUMMARY_V2_START]
 ${summaryData}
 [CONTENT_SUMMARY_V2_END]
 
-${briefText}
+${titleLine}
 
 <details_card ref="${summary.id}" />`;
+}
+
+/**
+ * 纯文本格式（微信/Claw 端）：直接输出正文内容，不展示概要元信息。
+ */
+export function formatContentSummaryForPlainText(summary: ContentSummary): string {
+  return summary.detailContent?.trim() ?? "";
 }
 
 export function shouldSummarizeContent(content: string, _threshold: number = SUMMARY_THRESHOLD): boolean {

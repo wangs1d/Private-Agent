@@ -19,45 +19,50 @@ bool isScheduleReminderToolName(String toolName) {
   return _scheduleReminderTools.contains(n.replaceAll("_", "."));
 }
 
-/// 将对话工具创建的提醒写入本地日程存储，供「日程」页展示。
 Future<bool> upsertLocalScheduleFromToolResult(
   IsarLocalHistoryStore store,
   String toolName,
   Map<String, dynamic>? result,
 ) async {
-  if (result == null || result["ok"] != true) return false;
-  if (!isScheduleReminderToolName(toolName)) return false;
-  if (result["matched"] == false) return false;
-  if (result["needsRecurrenceConfirm"] == true) return false;
+  try {
+    if (result == null || result["ok"] != true) return false;
+    if (!isScheduleReminderToolName(toolName)) return false;
+    if (result["matched"] == false) return false;
+    if (result["needsRecurrenceConfirm"] == true) return false;
 
-  final String? taskId = result["taskId"]?.toString();
-  final String? nextRunAt =
-      result["nextRunAt"]?.toString() ?? result["runAt"]?.toString();
-  if (taskId == null || taskId.isEmpty || nextRunAt == null || nextRunAt.isEmpty) {
+    final String? taskId = result["taskId"]?.toString().trim();
+    final String? nextRunAt =
+        result["nextRunAt"]?.toString() ?? result["runAt"]?.toString();
+    if (taskId == null ||
+        taskId.isEmpty ||
+        nextRunAt == null ||
+        nextRunAt.isEmpty) {
+      return false;
+    }
+
+    final DateTime? startAt = DateTime.tryParse(nextRunAt);
+    if (startAt == null) return false;
+
+    final String recurrence = result["recurrence"]?.toString() ?? "none";
+    final DateTime now = DateTime.now();
+    final DateTime rangeStart = DateTime(now.year, now.month, now.day);
+    final DateTime rangeEnd = rangeStart.add(const Duration(days: 14));
+
+    return _persistExpandedTask(
+      store,
+      taskId: taskId,
+      anchorLocal: startAt.toLocal(),
+      recurrence: recurrence,
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      title: _pickTitle(result),
+      notes: _buildNotes(result),
+    );
+  } catch (_) {
     return false;
   }
-
-  final DateTime? startAt = DateTime.tryParse(nextRunAt);
-  if (startAt == null) return false;
-
-  final String recurrence = result["recurrence"]?.toString() ?? "none";
-  final DateTime now = DateTime.now();
-  final DateTime rangeStart = DateTime(now.year, now.month, now.day);
-  final DateTime rangeEnd = rangeStart.add(const Duration(days: 14));
-
-  return _persistExpandedTask(
-    store,
-    taskId: taskId,
-    anchorLocal: startAt.toLocal(),
-    recurrence: recurrence,
-    rangeStart: rangeStart,
-    rangeEnd: rangeEnd,
-    title: _pickTitle(result),
-    notes: _buildNotes(result),
-  );
 }
 
-/// 工具或 WS 通知日程删除时，从本地存储移除对应事项。
 Future<bool> removeLocalScheduleForDeletedTask(
   IsarLocalHistoryStore store,
   String taskId,
@@ -70,7 +75,6 @@ Future<bool> removeLocalScheduleForDeletedTask(
   return true;
 }
 
-/// 从服务端拉取日程任务并合并到本地（按 taskId 展开重复日到可见区间）。
 Future<int> syncServerRemindersToLocal(
   IsarLocalHistoryStore store,
   ScheduleApiClient api,
@@ -78,58 +82,72 @@ Future<int> syncServerRemindersToLocal(
   DateTime? rangeStart,
   DateTime? rangeEnd,
 }) async {
-  final DateTime start = rangeStart ??
-      DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)
-          .subtract(const Duration(days: 1));
-  final DateTime end = rangeEnd ?? start.add(const Duration(days: 14));
+  try {
+    final DateTime start = rangeStart ??
+        DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)
+            .subtract(const Duration(days: 1));
+    final DateTime end = rangeEnd ?? start.add(const Duration(days: 14));
 
-  final ScheduleApiResult<List<Map<String, dynamic>>> listResult =
-      await api.listScheduleTasksResult(sessionId, from: start, to: end);
-  if (!listResult.ok) {
-    // 网络或服务异常时保留本地缓存，避免清空后无法展示。
+    final ScheduleApiResult<List<Map<String, dynamic>>> listResult =
+        await api.listScheduleTasksResult(sessionId, from: start, to: end);
+    if (!listResult.ok) {
+      return 0;
+    }
+
+    await flushScheduleOfflineDeleteQueue(store, api);
+
+    final List<ScheduleEvent> localOnlyEvents = (await store
+            .listAllScheduleEvents())
+        .where(
+            (ScheduleEvent e) => scheduleServerTaskIdFromEventId(e.id) == null)
+        .toList();
+
+    await store.clearAllScheduleEvents();
+
+    final List<Map<String, dynamic>> tasks =
+        listResult.value ?? <Map<String, dynamic>>[];
+    final Set<String> hidden = await store.getHiddenScheduleTaskIds();
+    int n = 0;
+    for (final Map<String, dynamic> t in tasks) {
+      try {
+        final String? taskId = t["taskId"]?.toString().trim();
+        final String? runAtIso =
+            t["nextRunAt"]?.toString() ?? t["runAt"]?.toString();
+        if (taskId == null ||
+            taskId.isEmpty ||
+            runAtIso == null ||
+            runAtIso.isEmpty) {
+          continue;
+        }
+        if (hidden.contains(taskId)) continue;
+        final DateTime? anchor = DateTime.tryParse(runAtIso);
+        if (anchor == null) continue;
+        final String recurrence = t["recurrence"]?.toString() ?? "none";
+        n += await _persistExpandedTask(
+          store,
+          taskId: taskId,
+          anchorLocal: anchor.toLocal(),
+          recurrence: recurrence,
+          rangeStart: start,
+          rangeEnd: end,
+          title: _pickTitle(t),
+          notes: _buildNotes(t),
+        )
+            ? 1
+            : 0;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    for (final ScheduleEvent local in localOnlyEvents) {
+      await store.saveScheduleEvent(local);
+      n += 1;
+    }
+    return n;
+  } catch (_) {
     return 0;
   }
-
-  await flushScheduleOfflineDeleteQueue(store, api);
-
-  final List<ScheduleEvent> localOnlyEvents = (await store.listAllScheduleEvents())
-      .where(
-        (ScheduleEvent e) => scheduleServerTaskIdFromEventId(e.id) == null,
-      )
-      .toList();
-
-  await store.clearAllScheduleEvents();
-
-  final List<Map<String, dynamic>> tasks =
-      listResult.value ?? <Map<String, dynamic>>[];
-  final Set<String> hidden = await store.getHiddenScheduleTaskIds();
-  int n = 0;
-  for (final Map<String, dynamic> t in tasks) {
-    final String? taskId = t["taskId"]?.toString();
-    final String? runAtIso = t["runAt"]?.toString();
-    if (taskId == null || taskId.isEmpty || runAtIso == null) continue;
-    if (hidden.contains(taskId)) continue;
-    final DateTime? anchor = DateTime.tryParse(runAtIso);
-    if (anchor == null) continue;
-    final String recurrence = t["recurrence"]?.toString() ?? "none";
-    n += await _persistExpandedTask(
-      store,
-      taskId: taskId,
-      anchorLocal: anchor.toLocal(),
-      recurrence: recurrence,
-      rangeStart: start,
-      rangeEnd: end,
-      title: _pickTitle(t),
-      notes: _buildNotes(t),
-    )
-        ? 1
-        : 0;
-  }
-  for (final ScheduleEvent local in localOnlyEvents) {
-    await store.saveScheduleEvent(local);
-    n += 1;
-  }
-  return n;
 }
 
 Future<bool> _persistExpandedTask(
@@ -166,34 +184,34 @@ Future<bool> _persistExpandedTask(
 
 String _pickTitle(Map<String, dynamic> result) {
   final String title = result["title"]?.toString().trim() ?? "";
-  if (title.isNotEmpty && title != "AI 提醒任务") {
+  if (title.isNotEmpty && title != "AI 鎻愰啋浠诲姟") {
     return _displayReminderTitle(title);
   }
   final String msg = result["reminderMessage"]?.toString().trim() ?? "";
   if (msg.isNotEmpty) return _displayReminderTitle(msg);
-  return "定时提醒";
+  return "瀹氭椂鎻愰啋";
 }
 
 String _displayReminderTitle(String raw) {
   final String s = raw.trim();
-  if (s.isEmpty) return "定时提醒";
-  if (RegExp(r"喊我起床|叫我起床").hasMatch(s)) return "起床提醒";
-  if (s == "喊我" || s == "叫我") return "起床提醒";
-  if (RegExp(r"吃药").hasMatch(s)) return "吃药提醒";
+  if (s.isEmpty) return "瀹氭椂鎻愰啋";
+  if (RegExp(r"鍠婃垜璧峰簥|鍙垜璧峰簥").hasMatch(s)) return "璧峰簥鎻愰啋";
+  if (s == "鍠婃垜" || s == "鍙垜") return "璧峰簥鎻愰啋";
+  if (RegExp(r"鍚冭嵂").hasMatch(s)) return "鍚冭嵂鎻愰啋";
   return s;
 }
 
 String? _buildNotes(Map<String, dynamic> result) {
   final String recurrence = result["recurrence"]?.toString() ?? "none";
   final String recurrenceLabel = switch (recurrence) {
-    "daily" => "每天重复",
-    "weekly" => "每周重复",
-    "yearly" => "每年重复",
-    _ => "单次提醒",
+    "daily" => "姣忓ぉ閲嶅",
+    "weekly" => "姣忓懆閲嶅",
+    "yearly" => "姣忓勾閲嶅",
+    _ => "鍗曟鎻愰啋",
   };
   final String msg = result["reminderMessage"]?.toString().trim() ?? "";
   if (msg.isNotEmpty && msg != _pickTitle(result)) {
-    return "$recurrenceLabel · $msg";
+    return "$recurrenceLabel 路 $msg";
   }
   return recurrenceLabel;
 }

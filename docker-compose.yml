@@ -13,6 +13,19 @@
 # 上传文件存储在 downloads 卷中，由 nginx 直接提供下载。
 
 services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    ports:
+      - "8123:8123"
+    volumes:
+      - ha-config:/config
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    privileged: true
+    environment:
+      TZ: Asia/Shanghai
+
   qdrant:
     image: qdrant/qdrant:v1.12.4
     expose:
@@ -91,3 +104,4 @@ volumes:
   qdrant-data:
   redis-data:
   downloads:
+  ha-config:

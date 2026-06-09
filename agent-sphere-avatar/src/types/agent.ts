@@ -3,7 +3,6 @@ export type AgentMood =
   | "idle"
   | "listening"
   | "thinking"
-  | "speaking"
   | "happy"
   | "alert";
 

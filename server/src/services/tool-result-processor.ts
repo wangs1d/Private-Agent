@@ -1,6 +1,7 @@
 import {
   createContentSummary,
   formatContentSummaryForChat,
+  formatContentSummaryForPlainText,
   shouldSummarizeContent,
   type ContentSummary,
 } from "../services/content-summary-service.js";
@@ -68,7 +69,7 @@ export class ToolResultProcessor {
     };
   }
 
-  processAssistantText(text: string): string {
+  processAssistantText(text: string, opts?: { plainTextMode?: boolean }): string {
     if (!this.options.enabled) {
       return text;
     }
@@ -81,7 +82,7 @@ export class ToolResultProcessor {
       return text;
     }
 
-    console.log(`[ToolResultProcessor] Processing text, length: ${text.length}, threshold: ${this.options.threshold}`);
+    console.log(`[ToolResultProcessor] Processing text, length: ${text.length}, threshold: ${this.options.threshold}, plainTextMode: ${!!opts?.plainTextMode}`);
 
     if (shouldSummarizeContent(text, this.options.threshold)) {
       const summary = createContentSummary(text, {
@@ -91,7 +92,9 @@ export class ToolResultProcessor {
 
       if (summary) {
         console.log(`[ToolResultProcessor] Created summary: ${summary.title}, points: ${summary.briefPoints.length}`);
-        const formatted = formatContentSummaryForChat(summary);
+        const formatted = opts?.plainTextMode
+          ? formatContentSummaryForPlainText(summary)
+          : formatContentSummaryForChat(summary);
         console.log(`[ToolResultProcessor] Formatted output length: ${formatted.length}`);
         return formatted;
       }

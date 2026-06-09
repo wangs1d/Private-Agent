@@ -16,10 +16,14 @@ function formatRunAtLocal(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   const now = new Date();
   const diffMs = d.getTime() - now.getTime();
-  if (diffMs > 0 && diffMs < 90_000) {
+  // 1 小时内的未来时间用「X 秒/分钟/小时后」口语化表达，避免和模型自己加的
+  // 「(两分钟后)」之类的相对时间重复。
+  if (diffMs > 0 && diffMs < 60 * 60 * 1000) {
     const sec = Math.max(1, Math.round(diffMs / 1000));
     if (sec < 60) return `${sec} 秒后`;
-    return `${Math.round(sec / 60)} 分钟后`;
+    const minutes = Math.round(sec / 60);
+    if (minutes < 60) return `${minutes} 分钟后`;
+    return `${Math.round(minutes / 60)} 小时后`;
   }
   const pad = (n: number) => String(n).padStart(2, "0");
   const today =

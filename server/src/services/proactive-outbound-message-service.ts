@@ -1,4 +1,4 @@
-export type ProactiveOutboundChannel = "websocket" | "console";
+export type ProactiveOutboundChannel = "websocket" | "voice" | "phone_call" | "console";
 
 export type ProactiveOutboundMessage = {
   id: string;
@@ -127,6 +127,14 @@ export class ProactiveOutboundMessageService {
 
   getRecent(actorId: string, limit = 5): ProactiveOutboundMessage[] {
     return [...(this.history.get(actorId) ?? [])].slice(-limit);
+  }
+
+  countSince(actorId: string, windowMs: number): number {
+    const now = Date.now();
+    return (this.history.get(actorId) ?? []).filter((item) => {
+      const createdAt = Date.parse(item.createdAt);
+      return Number.isFinite(createdAt) && now - createdAt <= windowMs;
+    }).length;
   }
 
   assessFatigue(actorId: string, windowMs = 60 * 60_000): ProactiveOutboundEligibility {

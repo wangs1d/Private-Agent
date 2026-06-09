@@ -106,6 +106,11 @@ class _GomokuPageState extends State<GomokuPage> {
 
   void _onTableWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.gomoku.subscribe", <String, dynamic>{"tableId": widget.tableId});
+      unawaited(_refreshSnapshot());
+      return;
+    }
     if (type == _kWsGomokuBanter) {
       final Object? payload = event["payload"];
       if (payload is! Map) return;

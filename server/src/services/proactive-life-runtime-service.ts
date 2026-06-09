@@ -2,6 +2,7 @@ import { AnticipationEngineService } from "./anticipation-engine-service.js";
 import { LifeSignalHubService } from "./life-signal-hub-service.js";
 import type { AnticipationCandidate, LifeSignal } from "./life-signal-types.js";
 import { ProactiveOutboundMessageService } from "./proactive-outbound-message-service.js";
+import { ProactiveContactPolicyService } from "./proactive-contact-policy.js";
 import type {
   PersonalizationBehaviorSignals,
   PersonalizationRelationshipState,
@@ -22,12 +23,14 @@ export class ProactiveLifeRuntimeService {
   private unsubscribe: (() => void) | null = null;
   private readonly lastNotificationAt = new Map<string, number>();
   private readonly recentSilenceAt = new Map<string, number>();
+  private readonly contactPolicy = new ProactiveContactPolicyService();
 
   constructor(
     private readonly signalHub: LifeSignalHubService,
     private readonly anticipation: AnticipationEngineService,
     private readonly outbound: ProactiveOutboundMessageService,
     private readonly personalization: UserPersonalizationService | null = null,
+    private readonly isUserOnline: ((actorId: string) => boolean) | null = null,
   ) {}
 
   start(): void {
@@ -53,6 +56,7 @@ export class ProactiveLifeRuntimeService {
     const behavior = this.personalization?.getBehaviorSignals(signal.actorId) ?? null;
     const timeRhythm = this.personalization?.getTimeRhythmState(signal.actorId) ?? null;
     const styleProfile = this.personalization?.getStyleProfileState(signal.actorId) ?? null;
+    const contactPreference = this.personalization?.getContactPreferenceState(signal.actorId) ?? null;
     const recentSignals = this.signalHub.recentSignals(signal.actorId, 12);
     const repeatedPatternCount = recentSignals.filter((item) => item.kind === signal.kind).length;
     const evidenceWindow = this.signalHub.getEvidenceWindow(signal.actorId);
@@ -77,6 +81,25 @@ export class ProactiveLifeRuntimeService {
         continue;
       }
 
+      const decision = this.contactPolicy.decide({
+        actorId: signal.actorId,
+        category: candidate.category,
+        urgency: candidate.urgency,
+        confidence: candidate.confidence,
+        tags: candidate.tags,
+        wsConnected: this.isUserOnline?.(signal.actorId) ?? true,
+        recentContactCountHour: this.outbound.countSince(signal.actorId, 60 * 60_000),
+        recentContactCountDay: this.outbound.countSince(signal.actorId, 24 * 60 * 60_000),
+        relationship,
+        timeRhythm,
+        styleProfile,
+        preference: contactPreference,
+      });
+      if (!decision.allowed) {
+        this.recentSilenceAt.set(signal.actorId, Date.now());
+        continue;
+      }
+
       const threadContext = this.outbound.getThreadContext(
         signal.actorId,
         `anticipation:${candidate.category}`,
@@ -91,6 +114,7 @@ export class ProactiveLifeRuntimeService {
         title: candidate.title,
         text,
         reason: `anticipation:${candidate.category}`,
+        channel: decision.channel,
         meta: {
           signalId: signal.id,
           category: candidate.category,
@@ -103,6 +127,10 @@ export class ProactiveLifeRuntimeService {
           fatigueReason: fatigue.reason,
           recoveryMode: this.isRecoveryWindow(signal.actorId),
           threadContext,
+          contactDecision: decision.reason,
+          contactRationale: decision.rationale,
+          quietHours: decision.quietHours,
+          disturbanceScore: decision.disturbanceScore,
         },
       });
       this.lastNotificationAt.set(signal.actorId, Date.now());

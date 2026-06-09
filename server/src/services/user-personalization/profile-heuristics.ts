@@ -10,7 +10,10 @@ export type ProfilePatch = {
 };
 
 const CONCISE_REPLY_PREF_RE =
-  /不要.*(?:等级|标题|摘要)|(?:等级|标题|摘要).*(?:不要|别出现|什么的)|简洁.*(?:回答|回复)|精简直接|口语化.*短句/;
+  /不要.*(?:等级|标题|摘要|长篇大论|废话|口水话)|(?:等级|标题|摘要).*(?:不要|别出现|什么的)|简洁.*(?:回答|回复)|精简直接|口语化.*短句|别太啰嗦|别废话|少点废话|短一点|说人话|像聊天一样/;
+
+const ADAPTIVE_REPLY_PREF_RE =
+  /按(?:我|用户).*(?:风格|习惯|方式)|跟着我.*(?:说话|风格)|越来越熟|熟一点|自然一点|像朋友一点|别太官方|别像客服/;
 
 const NAME_RE = /(?:我叫|叫我|称呼我[是为]?|你可以叫我)([^\s，。！？!?.]{1,16})/;
 const INTEREST_RE = /(?:我喜欢|我爱|我爱好|我最爱|经常)([^\s，。！？!?.]{2,40})/;
@@ -36,7 +39,14 @@ export function extractProfilePatches(userText: string): ProfilePatch[] {
 
   if (CONCISE_REPLY_PREF_RE.test(t)) {
     patches.push({
-      replyPreference: "精简直接，口语化短句；不要等级、标题、摘要表格或正式简报格式",
+      replyPreference: "默认精简直接、口语化短句、少废话；不要标题党、摘要腔、表格腔或过度正式",
+    });
+  }
+
+  if (ADAPTIVE_REPLY_PREF_RE.test(t)) {
+    patches.push({
+      freeformNote:
+        "回复要持续跟随用户自己的说话方式微调，不套固定模板；整体保持自然、克制、精简。",
     });
   }
 

@@ -1,14 +1,14 @@
 export const MEMORY_EXPLICIT_RE =
-  /记住|记得|别忘了|帮我记|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
+  /记住|记得|别忘了|帮我记着|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
 
 export const MEMORY_RECALL_HINT_RE =
-  /之前|上次|说过|刚才|刚刚|前面| earlier|before|last time|you said/i;
+  /之前|上次|说过|刚才|刚刚|前面|earlier|before|last time|you said/i;
 
 export const MEMORY_SUMMARY_PRIORITY_RE =
   /之前|上次|说过|刚才|刚刚|记住|记得|偏好|喜欢|讨厌|习惯|禁忌|生日|纪念日|承诺|答应|prefer|remember|you said|last time|promise/i;
 
 export const AMBIGUOUS_FOLLOWUP_RE =
-  /^(你确定[吗？?]?$|^(真的|确实)[吗？?]?$|^(是吗|对吗|对不对)[？?]?$|^(为什么|为何)[？?]?$|^(然后呢|接着呢)[？?]?$|^[？?！!。.\s]+$)/;
+  /^(你确定(?:吗)?[？?]?$|(?:真的|确实)(?:吗)?[？?]?$|(?:是吗|对吗|对不对)[？?]?$|(?:为什么|为何)[？?]?$|(?:然后呢|接着呢)[？?]?$|[？?。,\s]+)$/;
 
 export function isAmbiguousFollowUpMessage(message: string): boolean {
   const t = message.trim();
@@ -18,7 +18,7 @@ export function isAmbiguousFollowUpMessage(message: string): boolean {
 }
 
 export const AGENT_COMMITMENT_RE =
-  /我会|我将|已为你|已经帮你|已设置|已创建|已添加|已安排|已提醒|帮你记|帮你查|结论是|建议是|remember to|i will|i've set/i;
+  /我会|我将|已为你|已经帮你|已设置|已创建|已添加|已安排|已提醒|帮你记住|帮你查|结论是|建议是|remember to|i will|i've set/i;
 
 export type MemorySignalResult = {
   isHighSignal: boolean;
@@ -30,7 +30,7 @@ function firstSentence(text: string, maxLen: number): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (!t) return "";
   const cut = t.split(/[。！？?!\n]/)[0]?.trim() || t;
-  return cut.length > maxLen ? `${cut.slice(0, maxLen)}…` : cut;
+  return cut.length > maxLen ? `${cut.slice(0, maxLen)}...` : cut;
 }
 
 export function detectMemorySignals(userText: string, assistantText: string): MemorySignalResult {
@@ -51,7 +51,8 @@ export function detectMemorySignals(userText: string, assistantText: string): Me
     extractLines.push(`[Agent 承诺/结论] ${firstSentence(assistant, 200)}`);
   }
 
-  const isHighSignal = reasons.includes("explicit_remember") || reasons.includes("agent_commitment");
+  const isHighSignal =
+    reasons.includes("explicit_remember") || reasons.includes("agent_commitment");
 
   if (isHighSignal && extractLines.length === 0) {
     extractLines.push(`用户: ${firstSentence(user, 120)} | Agent: ${firstSentence(assistant, 120)}`);
@@ -79,12 +80,5 @@ export function shouldInjectMemorySummary(message: string): boolean {
 
 export function buildFollowUpAnchorPrompt(message: string): string | undefined {
   if (!isAmbiguousFollowUpMessage(message)) return undefined;
-  return [
-    "【短句追问 · 必须锚定上一轮】",
-    `用户本条消息极短（「${message.trim()}」），是对话线程中紧邻上一轮助手回复的追问或确认。`,
-    "- 只根据对话历史中最后一条 assistant 回复理解用户在问什么，直接回应该话题。",
-    "- 禁止切换到其他历史话题，除非上一轮正在讨论该话题。",
-    "- 禁止为此类追问调用 calendar.list_tasks / calendar.create_task 等日程工具，除非上一轮明确在确认日程。",
-    "- 若上一轮在讨论事实、排名、新闻等，用户“确定？”是在质疑结论，应补充依据或承认不确定。",
-  ].join("\n");
+  return "FU|anchor=prev-assistant|topic=last|calendar=schedule-only";
 }

@@ -40,6 +40,13 @@ try {
   throw err;
 }
 
+// ─── Webhook: Agent 上线事件 ───
+services.webhookService.emit("agent.online", {
+  port: runtime.port,
+  version: "1.0",
+  uptime: new Date().toISOString(),
+});
+
 const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,
   log: (line) => services.app.log.info(line),
@@ -67,6 +74,13 @@ const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   : startOpenClawModelSyncWatcher(process.env);
 
 const shutdown = (): void => {
+  // ─── Webhook: Agent 下线事件 ───
+  services.webhookService.emit("agent.offline", {
+    port: runtime.port,
+    reason: "graceful_shutdown",
+    timestamp: new Date().toISOString(),
+  });
+  services.webhookService.stop();
   stopDesktopBridge();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));

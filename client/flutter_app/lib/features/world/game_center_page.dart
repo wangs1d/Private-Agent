@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 class GameCenterPage extends StatelessWidget {
   const GameCenterPage({super.key});
@@ -309,7 +309,7 @@ class GameCenterPage extends StatelessWidget {
                 crossAxisCount: 2,
                 crossAxisSpacing: 16,
                 mainAxisSpacing: 16,
-                childAspectRatio: 0.85,
+                childAspectRatio: 0.78,
               ),
               itemCount: games.length,
               itemBuilder: (BuildContext context, int index) {

@@ -83,6 +83,11 @@ class _SocialFeedPageState extends State<SocialFeedPage> {
 
   void _onFeedWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.social.subscribe", <String, dynamic>{});
+      unawaited(_refresh());
+      return;
+    }
     if (type != _kWsSocialFeedSnapshot) return;
     final Object? payload = event["payload"];
     if (payload is! Map) return;

@@ -72,6 +72,7 @@ html.embed-root #root {
   display: flex;
   flex-direction: row;
   align-items: stretch;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -100,6 +101,7 @@ html.embed-root #root {
 .overlay-menu-side {
   flex: 0 0 204px;
   width: 204px;
+  min-width: 0;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -117,6 +119,7 @@ html.embed-root #root {
   width: 100%;
   max-width: 132px;
   max-height: 100%;
+  min-height: 0;
   padding: 6px 6px 8px;
   box-sizing: border-box;
   overflow: hidden;
@@ -244,10 +247,6 @@ html.embed-root #root {
 .overlay-dot[data-connected="1"] {
   background: #4ade80;
   box-shadow: 0 0 8px rgba(74, 222, 128, 0.8);
-}
-
-.mode-badge--speaking {
-  color: #93c5fd;
 }
 
 .mode-badge--thinking {
@@ -425,7 +424,6 @@ html.embed-root #root {
 .inner-thought--idle .inner-thought__mood { color: rgba(148, 163, 184, 0.7); }
 .inner-thought--listening .inner-thought__mood { color: #93c5fd; }
 .inner-thought--thinking .inner-thought__mood { color: #fcd34d; }
-.inner-thought--speaking .inner-thought__mood { color: #a5f3fc; }
 .inner-thought--happy .inner-thought__mood { color: #86efac; }
 .inner-thought--alert .inner-thought__mood { color: #fca5a5; }
 

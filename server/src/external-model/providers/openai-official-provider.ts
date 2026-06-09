@@ -17,6 +17,10 @@ import {
   streamCompletionWithTools,
 
 } from "../openai-compatible-tool-loop.js";
+import {
+  applyPromptCacheMessages,
+  preparePromptCachePlan,
+} from "../prefix-cache.js";
 
 import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 
@@ -311,6 +315,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
 
     const overrideSys = streamOpts?.systemPromptOverride?.trim();
+    const promptMemory = streamOpts?.promptContext?.memory;
 
     const baseContent = overrideSys
       ? overrideSys
@@ -353,12 +358,40 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       model = this.model;
     }
 
+    const promptPlan = preparePromptCachePlan({
+      providerId: this.id,
+      model,
+      baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
+      memory: overrideSys ? undefined : promptMemory,
+      finalizeOptions: {
+        tools: Boolean(tools && !overrideSys),
+        masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+        agentAccessMode: streamOpts?.agentAccessMode,
+        desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+      },
+      variant: tools ? "chat-tools" : "chat",
+    });
+
 
     if (tools) {
 
       try {
 
         const mergedTools = resolveChatToolsForStream(userTurn.text, streamOpts);
+        const toolPromptPlan = preparePromptCachePlan({
+          providerId: this.id,
+          model,
+          baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
+          memory: overrideSys ? undefined : promptMemory,
+          finalizeOptions: {
+            tools: Boolean(tools && !overrideSys),
+            masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+            agentAccessMode: streamOpts?.agentAccessMode,
+            desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+          },
+          tools: mergedTools,
+          variant: "chat-tools",
+        });
 
         const full = await streamCompletionWithTools(
 
@@ -385,6 +418,10 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
               ? { thinking: { type: "disabled" } }
 
               : undefined,
+
+            promptCache: toolPromptPlan.promptCache,
+
+            requestSystemMessages: toolPromptPlan.requestSystemMessages,
 
           },
 
@@ -419,16 +456,16 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
     let stream;
 
     try {
-
-      stream = await this.client.chat.completions.create({
-
-        model: this.model,
-
-        messages: msgs,
-
+      const request = {
+        model,
+        messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
         stream: true,
+        ...(promptPlan.promptCache ?? {}),
+      };
 
-      });
+      stream = await this.client.chat.completions.create(
+        request as Parameters<typeof this.client.chat.completions.create>[0],
+      );
 
     } catch (e) {
 

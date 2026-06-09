@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { ServerEventType } from "../protocol.js";
 import type { AgentCore } from "./agent-core.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import { dedupeAdjacentLines } from "../utils/text.js";
 
 export type PeerIncomingCallPayload = {
   callId: string;

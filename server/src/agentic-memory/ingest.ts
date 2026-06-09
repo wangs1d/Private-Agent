@@ -7,12 +7,25 @@ import {
   getLowSignalBufferMaxItems,
   getLowSignalBufferMaxChars,
 } from "./env.js";
+import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 
 interface BufferEntry {
   actorId: string;
   sourceId: string;
   text: string;
   createdAt: number;
+}
+
+function extractKeyLowSignalLines(text: string): string[] {
+  return text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      /\[.*\]|喜欢|不喜欢|讨厌|偏好|记住|提醒|承诺|决定|计划|待办|重要|生日|纪念日/i.test(
+        line,
+      ),
+    )
+    .slice(0, 6);
 }
 
 export class AgenticMemoryIngestService {
@@ -40,16 +53,28 @@ export class AgenticMemoryIngestService {
   }
 
   private async ingestHighSignal(actorId: string, sourceId: string, body: string): Promise<void> {
-    const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}…` : body;
+    const decision = await decideMemoryWrite(body, {
+      actorId,
+      source: sourceId,
+      heuristicHint: "remember",
+    });
+
+    const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}...` : body;
     await this.memory.add([{ role: "user", content: trimmed }], {
       userId: actorId,
-      metadata: { source: sourceId, actorId, highSignal: true },
+      metadata: {
+        source: sourceId,
+        actorId,
+        highSignal: true,
+        memoryDecision: decision.decision,
+        memorySemanticClass: decision.semanticClass,
+      },
       infer: true,
     });
   }
 
   private bufferLowSignal(actorId: string, sourceId: string, body: string): void {
-    const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}…` : body;
+    const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}...` : body;
 
     let entries = this.lowSignalBuffer.get(actorId);
     if (!entries) {
@@ -84,17 +109,28 @@ export class AgenticMemoryIngestService {
 
     const combined = entries
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map((e) => `[${e.sourceId}] ${e.text}`)
+      .map((entry) => `[${entry.sourceId}] ${entry.text}`)
       .join("\n\n---\n\n");
 
     if (combined.length < 20) return;
 
     const summarized = await this.summarizeLowSignal(combined);
-    const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}…` : summarized;
+    const decision = await decideMemoryWrite(summarized, {
+      actorId,
+      source: "chat:low_signal_summary",
+      heuristicHint: "decay",
+    });
 
+    const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
     await this.memory.add([{ role: "user", content: body }], {
       userId: actorId,
-      metadata: { source: "chat:low_signal_summary", actorId, highSignal: false },
+      metadata: {
+        source: "chat:low_signal_summary",
+        actorId,
+        highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+        memoryDecision: decision.decision,
+        memorySemanticClass: decision.semanticClass,
+      },
       infer: true,
     });
   }
@@ -102,14 +138,17 @@ export class AgenticMemoryIngestService {
   private async periodicFlush(): Promise<void> {
     this.flushTimer = null;
     const actorIds = [...this.lowSignalBuffer.keys()];
-    for (const aid of actorIds) {
-      await this.flushBuffer(aid).catch(() => {});
+    for (const actorId of actorIds) {
+      await this.flushBuffer(actorId).catch(() => {});
     }
   }
 
   private async summarizeLowSignal(text: string): Promise<string> {
     const apiKey = resolveOpenAiApiKey();
-    if (!apiKey) return text.slice(0, 3000);
+    const keyLines = extractKeyLowSignalLines(text);
+    if (!apiKey) {
+      return [...keyLines, text.slice(0, 3000)].filter(Boolean).join("\n");
+    }
 
     try {
       const openai = new OpenAI({ apiKey });
@@ -120,24 +159,24 @@ export class AgenticMemoryIngestService {
           {
             role: "system",
             content:
-              "你是信息摘要器。将多轮对话片段压缩为简洁中文摘要，保留关键事实、偏好、决定与待办。删除纯寒暄与无信息量内容。输出纯文本，不超过 500 字。",
+              "你是信息摘要器。把多轮低信号对话压缩成简洁中文摘要，保留关键事实、偏好、决定与待办，删除寒暄和无信息量内容。输出纯文本，500字内。",
           },
           { role: "user", content: text },
         ],
       });
-      return response.choices[0]?.message?.content?.trim() || text.slice(0, 3000);
+      const summary = response.choices[0]?.message?.content?.trim() || text.slice(0, 3000);
+      return [...keyLines, summary].filter(Boolean).join("\n");
     } catch {
-      return text.slice(0, 3000);
+      return [...keyLines, text.slice(0, 3000)].filter(Boolean).join("\n");
     }
   }
 
-  /** 主动刷新指定用户缓冲区（进程退出时调用） */
   async flushAll(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
     const actorIds = [...this.lowSignalBuffer.keys()];
-    await Promise.all(actorIds.map((id) => this.flushBuffer(id).catch(() => {})));
+    await Promise.all(actorIds.map((actorId) => this.flushBuffer(actorId).catch(() => {})));
   }
 }

@@ -38,7 +38,8 @@ export class PhoneCallHandler {
     }
 
     const disconnectCommands = config.disconnectCommand ?? ["退下", "知道了", "收到", "挂断"];
-    const maxRetries = config.retryCount ?? 2;
+    // 不重试：定时提醒只打一次，失败就发通知让用户看消息
+    const maxRetries = 0;
 
     let retryCount = 0;
     let callSuccessful = false;
@@ -256,22 +257,10 @@ export class PhoneCallHandler {
   }
 
   /**
-   * 构建前摇引导语。
-   * 在振铃阶段结束后、正式提醒内容播放前，给用户一个自然的"接通感"。
+   * 构建前摇引导语（精简版）。
    */
   private buildPreGreeting(instance: ReminderInstance): string {
-    const title = instance.config.title ?? "提醒";
-    const priority = instance.config.priority ?? "normal";
-    const timeLabel = this.formatTimeLabel();
-
-    const priorityHint =
-      priority === "urgent"
-        ? "紧急"
-        : priority === "high"
-          ? "重要"
-          : "";
-
-    return `叮铃铃——您好，我是您的 Agent。${timeLabel}有一条${priorityHint}${title}提醒，请听好。`;
+    return "";  // 不加额外引导语，直接播提醒正文
   }
 
   private formatTimeLabel(): string {

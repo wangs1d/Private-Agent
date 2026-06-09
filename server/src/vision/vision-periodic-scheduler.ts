@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentCore } from "../services/agent-core.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { ServerEventType } from "../protocol.js";
-import { chunkText } from "../utils/text.js";
+import { chunkText, dedupeAdjacentLines } from "../utils/text.js";
 import { fetchHttpVisionFrame } from "./fetch-http-vision-frame.js";
 
 export type VisionPeriodicSchedulerDeps = {
@@ -226,7 +226,7 @@ export class VisionPeriodicScheduler {
           payload: {
             sessionId: job.actorId,
             messageId: assistantMsgId,
-            finalText: reply.text,
+            finalText: dedupeAdjacentLines((reply.text ?? "").trim()),
             toolCalls: reply.toolName ? [reply.toolName] : [],
             visionPeriodicJobId: job.jobId,
           },

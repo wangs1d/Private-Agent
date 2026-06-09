@@ -20,6 +20,19 @@ const TYPE_LABEL: Record<TaskEventType, string> = {
 const MAX_FEED_ITEMS = 12;
 const AUTO_COLLAPSE_MS = 8000;
 
+/** 过滤掉乱码/无意义的垃圾事件 */
+function isGarbageEvent(title: string): boolean {
+  if (!title || title.trim().length === 0) return true;
+  const trimmed = title.trim();
+  // 检测乱码特征：连续不可读字符、纯符号、过短无意义文本
+  if (/^[\x00-\x08\x0B\x0C\x0E-\x1F]+$/.test(trimmed)) return true;
+  if (/^[^\u4e00-\u9fa5a-zA-Z0-9\s\u3000-\u303f\uff00-\uffef]{3,}$/.test(trimmed)) return true;
+  // 检测 "X无法件" 类乱码模式
+  if (/^[A-Z]无法/.test(trimmed)) return true;
+  if (/pretaction|无法件|unknow/i.test(trimmed)) return true;
+  return false;
+}
+
 interface TaskFeedProps {
   events: TaskEvent[];
 }
@@ -27,7 +40,9 @@ interface TaskFeedProps {
 export function TaskFeed({ events }: TaskFeedProps) {
   const [expanded, setExpanded] = useState(false);
   const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const visibleEvents = events.slice(-MAX_FEED_ITEMS);
+  // 过滤掉垃圾事件
+  const cleanEvents = events.filter((ev) => !isGarbageEvent(ev.title));
+  const visibleEvents = cleanEvents.slice(-MAX_FEED_ITEMS);
   const hasEvents = visibleEvents.length > 0;
   const lastEvent = visibleEvents[visibleEvents.length - 1];
 

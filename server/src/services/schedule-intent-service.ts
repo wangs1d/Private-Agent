@@ -41,8 +41,12 @@ export class ScheduleIntentService {
   constructor(private readonly externalChat: ExternalChatProvider | null = null) {}
 
   /** 解析并判断是否可立即创建（提醒类在未说明重复时会要求先追问）。 */
-  async parseForCreate(sessionId: string, userText: string): Promise<ScheduleIntentParseResult> {
-    const draft = await this.resolveDraft(sessionId, userText);
+  async parseForCreate(
+    sessionId: string,
+    userText: string,
+    options?: { userTimezone?: string },
+  ): Promise<ScheduleIntentParseResult> {
+    const draft = await this.resolveDraft(sessionId, userText, options?.userTimezone);
     if (!draft) {
       return {
         matched: false,
@@ -63,22 +67,50 @@ export class ScheduleIntentService {
   }
 
   /** 仅解析草案（不拦截重复确认）；供预览接口使用。 */
-  async parse(sessionId: string, userText: string): Promise<ScheduleDraft | null> {
-    return this.resolveDraft(sessionId, userText);
+  async parse(
+    sessionId: string,
+    userText: string,
+    options?: { userTimezone?: string },
+  ): Promise<ScheduleDraft | null> {
+    return this.resolveDraft(sessionId, userText, options?.userTimezone);
   }
 
-  private async resolveDraft(sessionId: string, userText: string): Promise<ScheduleDraft | null> {
+  private async resolveDraft(
+    sessionId: string,
+    userText: string,
+    userTimezone?: string,
+  ): Promise<ScheduleDraft | null> {
     const ruleDraft = this.parseByRule(userText);
     if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
-    const modelDraft = await this.parseByModel(sessionId, userText);
+    const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
     return applyRecurrenceFromUserText(userText, modelDraft);
   }
 
-  private async parseByModel(sessionId: string, userText: string): Promise<ScheduleDraft | null> {
+  private async parseByModel(
+    sessionId: string,
+    userText: string,
+    userTimezone?: string,
+  ): Promise<ScheduleDraft | null> {
     if (!this.externalChat?.isEnabled()) return null;
+    const now = new Date();
+    const tz = (userTimezone?.trim() || "Asia/Shanghai") as string;
+    // 使用 Intl 按用户时区格式化当前时间，避免依赖服务器操作系统时区
+    const localTimeStr = now.toLocaleString("zh-CN", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const nowIso = now.toISOString();
     const prompt = [
       "你是任务解析器。请把用户句子解析为定时任务 JSON。",
+      `当前用户本地时间：${localTimeStr}（时区 ${tz}，ISO: ${nowIso}）。所有相对时间（X 分钟后/小时后、明天、今天 HH:MM）必须基于此时间换算为 ISO-8601 字符串。`,
+      "中文数字映射：一/壹/壹=1，二/贰/两=2，三/叁=3，…，十=10，十一=11，…二十=20。",
       "只返回 JSON，不要输出 markdown 或解释。",
       "若无法解析，返回 {\"ok\":false}。",
       "可解析格式示例：明天 09:00 提醒我开会；今天 18:00 调用 https://api.com/sync 同步；每天 7:00 天气提醒（kind 为 weather_brief）。",

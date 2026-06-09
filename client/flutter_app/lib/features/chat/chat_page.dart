@@ -30,6 +30,10 @@ class ChatPage extends StatefulWidget {
     this.onOpenPhoneDialer,
     this.inputFocusNode,
     this.isActive = true,
+    /// 删除单条消息的回调（传入 messageId）
+    this.onDeleteMessage,
+    /// 删除从某条消息起之后所有消息的回调（传入 messageId）
+    this.onDeleteFromMessage,
   });
 
   final List<ChatMessage> messages;
@@ -61,6 +65,10 @@ class ChatPage extends StatefulWidget {
   final VoidCallback? onOpenPhoneDialer;
   /// 当前 Tab 是否激活（用于检测从其他 Tab 切回对话页）
   final bool isActive;
+  /// 删除单条消息
+  final void Function(String messageId)? onDeleteMessage;
+  /// 删除从某条消息起之后所有消息
+  final void Function(String messageId)? onDeleteFromMessage;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -87,16 +95,19 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
 
   /// ====== 滚动位置保持相关 ======
-  double? _savedScrollPosition;       // 离开时保存的滚动像素位置
-  double? _savedMaxScrollExtent;      // 离开时的最大可滚动距离
-  bool _isFirstLoadAfterInit = true;  // 是否为初始化后的首次加载（用于应用重启后滚到底部）
-  bool _hasSavedPosition = false;     // 是否有已保存的有效位置可供恢复
+  bool _isTabActive = false;            // 当前是否在对话 Tab 上（用于屏蔽非活跃时的自动滚动）
+                                       // 在 initState 中从 widget.isActive 同步初始值
+  double? _savedScrollPosition;         // 离开时保存的滚动像素位置
+  double? _savedMaxScrollExtent;        // 离开时的最大可滚动距离
+  bool _hasSavedPosition = false;       // 是否有已保存的有效位置可供恢复
+                                       // （应用重启后自然重置为 false → 滚到底部）
+  bool _isRestoringPosition = false;    // 恢复锁：正在恢复位置时阻止所有自动滚动
 
   // 预定义常量 - 减少重复创建对象
   static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
   static const EdgeInsets _cardPadding = EdgeInsets.all(12);
-  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(8, 8, 8, 8);
-  static const EdgeInsets _inputHorizontalPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
+  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(6, 6, 6, 5);
+  static const EdgeInsets _inputHorizontalPadding = EdgeInsets.symmetric(horizontal: 10, vertical: 6);
 
   @override
   void initState() {
@@ -119,36 +130,34 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     ));
     // 监听滚动：检测用户是否在手动滚动
     _scrollController.addListener(_onScroll);
-
-    // 初始化后自动滚动到最新消息
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      }
-    });
+    // 同步初始 Tab 激活状态（关键：必须与 widget.isActive 一致，否则首次切走时保存会被跳过）
+    _isTabActive = widget.isActive;
+    // 注意：ListView 使用 reverse=true，天然从底部开始渲染，无需 jumpTo
   }
 
-  /// 滚动到底部的通用方法（带重试机制，确保在 ListView 布局完成后生效）
+  /// 滚动到底部的通用方法（reverse 模式下 bottom = pixels 0）
   void _scrollToBottom({bool instant = false}) {
     if (!_scrollController.hasClients) return;
-    // 延迟到当前帧结束后执行，确保 ListView 已完成新消息的布局
+    // reverse 模式下，pixels=0 就是列表底部（最新消息处）
+    // instant 时直接 jumpTo(0)，非 instant 用短动画过渡
+    if (instant) {
+      _scrollController.jumpTo(0);
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
-      if (instant) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      } else {
+      if (_scrollController.position.pixels > 1) {
         _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
+          0,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
-        // 桌面端保险：再延迟一帧确认滚动到位（处理内容高度动态变化的情况）
+        // 桌面端保险：再延迟一帧确认滚动到位
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_scrollController.hasClients) return;
-          final double target = _scrollController.position.maxScrollExtent;
-          if ((_scrollController.position.pixels - target).abs() > 1) {
+          if (_scrollController.position.pixels > 1) {
             _scrollController.animateTo(
-              target,
+              0,
               duration: const Duration(milliseconds: 150),
               curve: Curves.easeOut,
             );
@@ -160,11 +169,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
-    final double maxScroll = _scrollController.position.maxScrollExtent;
+    // reverse 模式下：pixels=0 是底部，pixels 越大越靠近顶部
     final double currentScroll = _scrollController.position.pixels;
 
     // 使用 ValueNotifier 更新，避免触发 setState 导致整树重建和掉帧
-    final bool shouldMarkScrolling = (maxScroll - currentScroll > 100);
+    // pixels > 100 表示用户从底部向上滑动了超过 100px
+    final bool shouldMarkScrolling = (currentScroll > 100);
     if (_isUserScrollingNotifier.value != shouldMarkScrolling) {
       _isUserScrollingNotifier.value = shouldMarkScrolling;
       if (!shouldMarkScrolling) {
@@ -183,15 +193,32 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       _cachedMessageGroups = null;
     }
 
-    // ====== 滚动位置保持：离开对话页时保存位置 ======
-    if (!widget.isActive && oldWidget.isActive) {
+    // ====== 优先处理 Tab 切换（离开 / 进入） ======
+    final bool wasActive = _isTabActive;
+    final bool nowActive = widget.isActive;
+
+    // 离开对话 Tab → 保存位置
+    if (wasActive && !nowActive) {
+      print('[ChatScroll] 👋 离开对话Tab: wasActive=$wasActive → nowActive=$nowActive');
+      _isTabActive = false;
       _saveScrollPosition();
-      return;
+      return; // 离开后不再处理消息相关滚动
     }
 
-    // ====== 滚动位置保持：返回对话页时恢复位置 ======
-    if (widget.isActive && !oldWidget.isActive) {
-      _restoreScrollPosition();
+    // 进入（或切回）对话 Tab → 恢复位置或滚到底部
+    if (!wasActive && nowActive) {
+      print('[ChatScroll] 🏠 进入对话Tab: wasActive=$wasActive → nowActive=$nowActive, hasSaved=$_hasSavedPosition, savedPixels=$_savedScrollPosition');
+      _isTabActive = true;
+      _restoreOrScrollToBottom();
+      return; // 刚进入时跳过后续消息增量滚动逻辑
+    }
+
+    // ====== 以下逻辑仅在活跃状态下执行（防止非活跃时被新消息覆盖位置） ======
+    if (!_isTabActive) return;
+
+    // 恢复锁：正在恢复位置时，跳过所有自动滚动逻辑，防止被后续 didUpdateWidget 调用覆盖
+    if (_isRestoringPosition) {
+      print('[ChatScroll] ⛔ 恢复锁生效：跳过自动滚动 (messages=${widget.messages.length}, old=${oldWidget.messages.length})');
       return;
     }
 
@@ -263,7 +290,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
   /// ====== 滚动位置保持：保存当前滚动位置 ======
   void _saveScrollPosition() {
-    if (!_scrollController.hasClients) return;
+    if (!_scrollController.hasClients) {
+      print('[ChatScroll] 💾 保存失败: scrollController 无 client');
+      return;
+    }
     final double pixels = _scrollController.position.pixels;
     final double maxExtent = _scrollController.position.maxScrollExtent;
     _savedScrollPosition = pixels;
@@ -272,6 +302,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 埋点：记录滚动位置保存事件（包含位置比例便于分析用户浏览深度）
     final double ratio = maxExtent > 0 ? pixels / maxExtent : 0.0;
+    print('[ChatScroll] 💾 保存位置: pixels=$pixels, maxExtent=$maxExtent, ratio=${ratio.toStringAsFixed(2)}');
     _logScrollEvent(
       action: 'save',
       pixels: pixels,
@@ -281,66 +312,69 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     );
   }
 
-  /// ====== 滚动位置保持：恢复之前保存的滚动位置 ======
-  void _restoreScrollPosition() {
+  /// ====== 滚动位置保持：恢复之前保存的滚动位置（reverse 模式） ======
+  void _restoreOrScrollToBottom() {
     // 重置滚动状态
     _isUserScrollingNotifier.value = false;
     _hasNewAgentMessage = false;
 
-    // 应用重启后（首次加载），始终滚到底部
-    if (_isFirstLoadAfterInit) {
-      _isFirstLoadAfterInit = false;
-      _hasSavedPosition = false;
-      // IndexedStack 切换需要两帧才能完成布局，用双重 postFrameCallback 保证可靠
+    // 有已保存的位置 → 恢复到离开时的位置（reverse 模式下 pixels 即为距底部距离）
+    if (_hasSavedPosition && _savedScrollPosition != null) {
+      final double targetPixels = _savedScrollPosition!;
+      print('[ChatScroll] 🔄 开始恢复位置: targetPixels=$targetPixels, savedMaxExtent=$_savedMaxScrollExtent');
+
+      // 加锁：防止后续 didUpdateWidget 调用中的自动滚动覆盖恢复位置
+      _isRestoringPosition = true;
+
+      // IndexedStack 切换后需要等待布局完成，用双重 postFrameCallback 保证可靠
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) {
+          print('[ChatScroll] ⚠️ 恢复第1帧: scrollController 无 client');
+          return;
+        }
+        print('[ChatScroll] 📐 恢复第1帧: maxExtent=${_scrollController.position.maxScrollExtent}, pixels=${_scrollController.position.pixels}');
+
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scrollToBottom(instant: true);
+          if (!_scrollController.hasClients) {
+            print('[ChatScroll] ⚠️ 恢复第2帧: scrollController 无 client');
+            _isRestoringPosition = false; // 解锁
+            return;
+          }
+          final double currentMaxExtent = _scrollController.position.maxScrollExtent;
+          double restorePixels = targetPixels;
+
+          // clamp 到有效范围
+          if (restorePixels > currentMaxExtent) {
+            restorePixels = currentMaxExtent;
+          }
+          if (restorePixels < 0) {
+            restorePixels = 0;
+          }
+
+          print('[ChatScroll] ✅ 执行 jumpTo: $restorePixels (目标$targetPixels, 当前max=$currentMaxExtent)');
+          _scrollController.jumpTo(restorePixels);
+
+          // 埋点：记录恢复事件
+          _logScrollEvent(
+            action: 'restore',
+            pixels: restorePixels,
+            savedPixels: targetPixels,
+            maxExtent: currentMaxExtent,
+            savedMaxExtent: _savedMaxScrollExtent,
+            messageCount: widget.messages.length,
+          );
+
+          // 解锁：恢复完成，允许后续自动滚动
+          _isRestoringPosition = false;
+          print('[ChatScroll] 🔓 恢复锁已解除');
         });
       });
       return;
     }
 
-    // 如果没有已保存的位置（如首次进入无消息时），滚到底部
-    if (!_hasSavedPosition || _savedScrollPosition == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scrollToBottom(instant: true);
-        });
-      });
-      return;
-    }
-
-    // 有保存的位置 → 等待布局完成后恢复
-    final double targetPixels = _savedScrollPosition!;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scrollController.hasClients) return;
-        final double currentMaxExtent = _scrollController.position.maxScrollExtent;
-        double restorePixels = targetPixels;
-
-        // 如果内容变化导致最大滚动距离变小， clamp 到有效范围
-        if (restorePixels > currentMaxExtent) {
-          restorePixels = currentMaxExtent;
-        }
-        // 如果内容变短导致不需要滚动，直接归零
-        if (restorePixels < 0) {
-          restorePixels = 0;
-        }
-
-        _scrollController.jumpTo(restorePixels);
-
-        // 埋点：记录滚动位置恢复事件（含保存时的最大滚动距离用于对比）
-        _logScrollEvent(
-          action: 'restore',
-          pixels: restorePixels,
-          savedPixels: targetPixels,
-          maxExtent: currentMaxExtent,
-          savedMaxExtent: _savedMaxScrollExtent,
-          messageCount: widget.messages.length,
-        );
-      });
-    });
+    // 无保存位置（首次进入 / 应用重启后）
+    print('[ChatScroll] 🏁 无保存位置，reverse=true 天然在底部');
+    // reverse=true 的 ListView 天然从底部开始渲染，无需任何滚动操作
   }
 
   /// ====== 埋点：记录滚动位置的保存与恢复事件 ======
@@ -428,6 +462,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 展开状态，返回所有消息
     return allGroups;
+  }
+
+  /// 获取反转后的显示消息列表（用于 reverse ListView，使最新消息在 index 0 = 视觉底部）
+  List<Map<String, dynamic>> _getReversedDisplayMessages() {
+    final List<Map<String, dynamic>> displayMessages = _getDisplayMessages();
+    return List<Map<String, dynamic>>.from(displayMessages.reversed);
   }
 
   /// 切换折叠/展开状态
@@ -646,6 +686,26 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   }
 
   /// 构建消息时间戳
+  /// 鼠标悬停消息气泡时自动浮现删除按钮（类似豆包交互）
+  Widget _buildHoverableMessage({
+    required ColorScheme cs,
+    required ChatMessage mainMessage,
+    required bool isUser,
+    ContentSummaryParseResult? contentSummary,
+  }) {
+    return _HoverableMessageWidget(
+      cs: cs,
+      mainMessage: mainMessage,
+      isUser: isUser,
+      contentSummary: contentSummary,
+      onDeleteMessage: widget.onDeleteMessage,
+      onDeleteFromMessage: widget.onDeleteFromMessage,
+      onOpenGomoku: widget.onOpenGomoku,
+      cardPadding: _cardPadding,
+    );
+  }
+
+  /// 构建消息时间戳
   Widget _buildMessageTimestamp(ChatMessage message, bool isUser) {
     final DateTime now = DateTime.now();
     final DateTime msgTime = message.timestamp;
@@ -681,9 +741,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     final ColorScheme cs = Theme.of(context).colorScheme;
     final bool showLiveThinking =
         widget.isAgentProcessing && _breathingAnimation != null;
-    final List<Map<String, dynamic>> displayMessages = _getDisplayMessages();
-    final int itemCount = displayMessages.length + (showLiveThinking ? 1 : 0) + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
-    // 如果处于折叠状态，需要在列表开头添加折叠按钮
+    // reverse 模式下使用反转消息列表（最新消息在 index 0 → 视觉底部）
+    final List<Map<String, dynamic>> reversedMessages = _getReversedDisplayMessages();
+    final int msgCount = reversedMessages.length;
+    // reverse ListView 的 item 顺序（index 0 = 底部）：
+    //   [thinkingBubble(底), newestMsg, ..., oldestMsg, collapseButton(顶)]
+    final int itemCount = msgCount + (showLiveThinking ? 1 : 0) + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
     final bool showCollapseButton = _collapsedCount > 0;
 
     return ColoredBox(
@@ -723,116 +786,52 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     else
                       ListView.builder(
                   controller: _scrollController,
+                  reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
                   padding: _listPadding,
-                  cacheExtent: 500, // 预渲染上下各 500px 范围内的子项，减少快速滚动时的白屏/卡顿
-                  itemCount: showCollapseButton ? itemCount + 1 : itemCount,
+                  cacheExtent: 500,
+                  itemCount: itemCount,
                   itemBuilder: (BuildContext context, int index) {
-                    // 如果需要显示折叠按钮且是第一项
-                    if (showCollapseButton && index == 0) {
+                    // reverse 模式下 index 0 = 视觉底部
+                    // 布局：[thinking?(0), msgs(1..msgCount), collapse?(最后)]
+                    int offset = 0;
+
+                    // index 0 → 思考中气泡（最底部，在最新消息下方）
+                    if (showLiveThinking) {
+                      if (index == 0) {
+                        return _buildProgressBubble(
+                          cs,
+                          _processingStatusText(),
+                        );
+                      }
+                      offset = 1;
+                    }
+
+                    final int msgIndex = index - offset; // 反转后的消息索引（0 = 最新）
+
+                    // 最后一个位置 → 折叠按钮（最顶部，在历史消息上方）
+                    if (showCollapseButton && msgIndex >= msgCount) {
                       return _buildCollapseButton(cs);
                     }
 
-                    // 调整索引（如果显示了折叠按钮）
-                    final int adjustedIndex = showCollapseButton ? index - 1 : index;
-
-                    // 检查是否是进度气泡
-                    if (showLiveThinking && adjustedIndex == displayMessages.length) {
-                      return _buildProgressBubble(
-                        cs,
-                        _processingStatusText(),
-                      );
-                    }
-
-                    final messageGroup = displayMessages[adjustedIndex];
+                    // 正常消息
+                    final messageGroup = reversedMessages[msgIndex];
                     final bool isUser = messageGroup['isUser'] as bool;
-                    final mainMessage = messageGroup['main'] as ChatMessage;
+                    final ChatMessage mainMessage = messageGroup['main'] as ChatMessage;
                     final bool isProgress = messageGroup['isProgress'] as bool;
                     final ContentSummaryParseResult? contentSummary = isUser
                         ? null
                         : ContentSummaryParser.parse(mainMessage.text);
-                    
+
                     // 进度消息：特殊渲染
                     if (isProgress) {
                       return _buildProgressBubble(cs, mainMessage.text);
                     }
-                    
-                    return RepaintBoundary(
-                      child: Align(
-                        alignment:
-                            isUser ? Alignment.centerRight : Alignment.centerLeft,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: 
-                              isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                          children: [
-                            Card(
-                              clipBehavior: Clip.antiAlias,
-                              color: isUser
-                                  ? cs.surfaceContainerHigh
-                                  : cs.surfaceContainer,
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                side: BorderSide(
-                                  color: cs.outline.withValues(alpha: 0.28),
-                                ),
-                              ),
-                              child: Padding(
-                                padding: _cardPadding,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: <Widget>[
-                                  if (mainMessage.attachmentImageCount > 0)
-                                    Padding(
-                                      padding: const EdgeInsets.only(bottom: 6),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: <Widget>[
-                                          Icon(
-                                            Icons.photo_camera_outlined,
-                                            size: 16,
-                                            color: Theme.of(context).colorScheme.primary,
-                                          ),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            "配图 ×${mainMessage.attachmentImageCount}",
-                                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                                  color: Theme.of(context).colorScheme.primary,
-                                                ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  _buildMessageText(
-                                    cs,
-                                    mainMessage,
-                                    isUser: isUser,
-                                    contentSummary: contentSummary,
-                                  ),
-                                  if (!isUser &&
-                                      contentSummary?.summary == null &&
-                                      mainMessage.text.contains(RegExp(r'https?://\S+')))
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 6),
-                                      child: _buildGrayLinks(mainMessage.text),
-                                    ),
-                                  if (!isUser && mainMessage.playUrl != null && mainMessage.playUrl!.isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 10),
-                                      child: _GomokuPlayUrlCard(
-                                        playUrl: mainMessage.playUrl!,
-                                        onOpen: widget.onOpenGomoku,
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          _buildMessageTimestamp(mainMessage, isUser),
-                        ],
-                      ),
-                      ),
+
+                    return _buildHoverableMessage(
+                      cs: cs,
+                      mainMessage: mainMessage,
+                      isUser: isUser,
+                      contentSummary: contentSummary,
                     );
                   },
                 ),
@@ -851,7 +850,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     // 语音识别状态提示
                     if (_isListening)
                       Container(
-                        margin: const EdgeInsets.only(bottom: 8),
+                        margin: const EdgeInsets.only(bottom: 6),
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
                           color: cs.errorContainer.withValues(alpha: 0.2),
@@ -887,7 +886,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       ),
                     if (widget.galleryPendingCount > 0)
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.only(bottom: 6),
                         child: Row(
                           children: <Widget>[
                             Expanded(
@@ -914,7 +913,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       builder: (BuildContext context, bool isUserScrolling, Widget? child) {
                         if (!isUserScrolling) return const SizedBox.shrink();
                         return Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.only(bottom: 6),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
@@ -1007,7 +1006,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     ),
                                   ),
                                 ),
-                                const SizedBox(width: 6),
+                                const SizedBox(width: 4),
                                 if (widget.onToggleFullComputerAccess != null)
                                   Container(
                                     decoration: BoxDecoration(
@@ -1035,13 +1034,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       onPressed: widget.onToggleFullComputerAccess,
                                       padding: EdgeInsets.zero,
                                       constraints: const BoxConstraints(
-                                        minWidth: 36,
-                                        minHeight: 36,
+                                        minWidth: 34,
+                                        minHeight: 34,
                                       ),
                                     ),
                                   ),
                                 if (widget.onToggleFullComputerAccess != null)
-                                  const SizedBox(width: 6),
+                                  const SizedBox(width: 4),
                                 // 发送按钮
                                 Container(
                                   decoration: BoxDecoration(
@@ -1053,8 +1052,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     onPressed: widget.onSend,
                                     padding: EdgeInsets.zero,
                                     constraints: const BoxConstraints(
-                                      minWidth: 36,
-                                      minHeight: 36,
+                                      minWidth: 34,
+                                      minHeight: 34,
                                     ),
                                   ),
                                 ),
@@ -1062,7 +1061,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                             ),
                             // 第二行：加号 + 语音按钮 + 呼叫 Agent
                             Padding(
-                              padding: const EdgeInsets.only(top: 6),
+                              padding: const EdgeInsets.only(top: 4),
                               child: Row(
                                 children: <Widget>[
                                   // 加号按钮
@@ -1077,13 +1076,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         onPressed: widget.onPickGalleryImage,
                                         padding: EdgeInsets.zero,
                                         constraints: const BoxConstraints(
-                                          minWidth: 32,
-                                          minHeight: 32,
+                                          minWidth: 30,
+                                          minHeight: 30,
                                         ),
                                       ),
                                     ),
                                   if (widget.onPickGalleryImage != null)
-                                    const SizedBox(width: 8),
+                                    const SizedBox(width: 6),
                                   // 语音按钮 - 点击进入语音模式
                                   Container(
                                     decoration: BoxDecoration(
@@ -1099,13 +1098,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       onPressed: widget.onEnterVoiceMode,
                                       padding: EdgeInsets.zero,
                                       constraints: const BoxConstraints(
-                                        minWidth: 32,
-                                        minHeight: 32,
+                                        minWidth: 30,
+                                        minHeight: 30,
                                       ),
                                       tooltip: '进入语音模式',
                                     ),
                                   ),
-                                  const SizedBox(width: 8),
+                                  const SizedBox(width: 6),
                                   if (widget.onOpenPhoneDialer != null)
                                     Container(
                                       decoration: BoxDecoration(
@@ -1121,8 +1120,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         onPressed: widget.onOpenPhoneDialer,
                                         padding: EdgeInsets.zero,
                                         constraints: const BoxConstraints(
-                                          minWidth: 32,
-                                          minHeight: 32,
+                                          minWidth: 30,
+                                          minHeight: 30,
                                         ),
                                         tooltip: VirtualPhoneUiLabels.chatTooltip,
                                       ),
@@ -1182,12 +1181,15 @@ class _GomokuPlayUrlCard extends StatelessWidget {
             children: <Widget>[
               Icon(Icons.grid_on, size: 18, color: cs.primary),
               const SizedBox(width: 6),
-              Text(
-                "五子棋对局",
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: cs.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
+              Expanded(
+                child: Text(
+                  "五子棋对局",
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: cs.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ],
           ),
@@ -1206,6 +1208,478 @@ class _GomokuPlayUrlCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 独立的 StatefulWidget：管理每条消息的 hover 悬停状态，避免 StatefulBuilder 内变量被重置
+class _HoverableMessageWidget extends StatefulWidget {
+  const _HoverableMessageWidget({
+    required this.cs,
+    required this.mainMessage,
+    required this.isUser,
+    required this.cardPadding,
+    this.contentSummary,
+    this.onDeleteMessage,
+    this.onDeleteFromMessage,
+    this.onOpenGomoku,
+  });
+
+  final ColorScheme cs;
+  final ChatMessage mainMessage;
+  final bool isUser;
+  final EdgeInsets cardPadding;
+  final ContentSummaryParseResult? contentSummary;
+  final void Function(String messageId)? onDeleteMessage;
+  final void Function(String messageId)? onDeleteFromMessage;
+  final void Function(String playUrlOrTableId)? onOpenGomoku;
+
+  @override
+  State<_HoverableMessageWidget> createState() => _HoverableMessageWidgetState();
+}
+
+class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
+  bool _hovered = false;
+  bool _deleteSelectionMode = false;
+  bool _deleteSelected = true; // 默认全选
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) {
+        if (!_deleteSelectionMode) setState(() => _hovered = false);
+      },
+      cursor: SystemMouseCursors.basic,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: <Widget>[
+          // 原始消息卡片
+          RepaintBoundary(
+            child: Align(
+              alignment:
+                  widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment:
+                    widget.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                children: [
+                  // 删除选择模式：左侧勾选 + 高亮内容
+                  if (_deleteSelectionMode)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12, right: 8),
+                          child: Checkbox(
+                            value: _deleteSelected,
+                            onChanged: (bool? v) {
+                              setState(() => _deleteSelected = v ?? true);
+                            },
+                          ),
+                        ),
+                        Flexible(child: _buildMessageCard(context, highlight: true)),
+                      ],
+                    )
+                  else
+                    _buildMessageCard(context),
+                  _buildTimestampInner(widget.mainMessage, widget.isUser, context),
+                ],
+              ),
+            ),
+          ),
+          // 悬停时浮现操作按钮栏（位于时间戳下方，透明背景）
+          if (_hovered && !_deleteSelectionMode &&
+              widget.onDeleteMessage != null &&
+              widget.onDeleteFromMessage != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              bottom: -32,
+              child: Align(
+                alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: _MessageActionBar(
+                  onCopy: () {
+                    // TODO: 复制消息内容到剪贴板
+                  },
+                  onEdit: () {
+                    // TODO: 编辑/重新生成消息
+                  },
+                  onDeletePressed: () {
+                    setState(() {
+                      _deleteSelectionMode = true;
+                      _deleteSelected = true;
+                      _hovered = false;
+                    });
+                  },
+                ),
+              ),
+            ),
+          // 删除选择模式下的确认/取消按钮栏
+          if (_deleteSelectionMode)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              bottom: -36,
+              child: Align(
+                alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: _DeleteConfirmBar(
+                  isSelected: _deleteSelected,
+                  onToggleSelect: (v) => setState(() => _deleteSelected = v),
+                  onConfirm: () {
+                    if (_deleteSelected) {
+                      widget.onDeleteMessage!(widget.mainMessage.messageId);
+                    }
+                    setState(() {
+                      _deleteSelectionMode = false;
+                      _deleteSelected = true;
+                    });
+                  },
+                  onCancel: () {
+                    setState(() {
+                      _deleteSelectionMode = false;
+                      _deleteSelected = true;
+                    });
+                  },
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建消息卡片（支持高亮态）
+  Widget _buildMessageCard(BuildContext context, {bool highlight = false}) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      color: highlight
+          ? Colors.red.withValues(alpha: 0.06)
+          : (widget.isUser
+              ? widget.cs.surfaceContainerHigh
+              : widget.cs.surfaceContainer),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: highlight
+              ? Colors.red.withValues(alpha: 0.35)
+              : widget.cs.outline.withValues(alpha: 0.28),
+        ),
+      ),
+      child: Padding(
+        padding: widget.cardPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            if (widget.mainMessage.attachmentImageCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(
+                      Icons.photo_camera_outlined,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      "配图 ×${widget.mainMessage.attachmentImageCount}",
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelSmall
+                          ?.copyWith(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .primary,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+            // 消息正文
+            _buildMessageTextInner(
+              context,
+              widget.cs,
+              widget.mainMessage,
+              isUser: widget.isUser,
+              contentSummary: widget.contentSummary,
+            ),
+            if (!widget.isUser &&
+                widget.contentSummary?.summary == null &&
+                widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: _buildGrayLinksInner(widget.mainMessage.text, context),
+              ),
+            if (!widget.isUser && widget.mainMessage.playUrl != null && widget.mainMessage.playUrl!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: _GomokuPlayUrlCard(
+                  playUrl: widget.mainMessage.playUrl!,
+                  onOpen: widget.onOpenGomoku,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 从父级 _ChatPageState 复用的消息文本构建（静态方法避免依赖实例）
+  static Widget _buildMessageTextInner(
+    BuildContext context,
+    ColorScheme cs,
+    ChatMessage message, {
+    required bool isUser,
+    ContentSummaryParseResult? contentSummary,
+  }) {
+    if (isUser) {
+      return Text(
+        message.text,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: cs.onSurface,
+            ),
+      );
+    }
+
+    if (contentSummary?.summary != null) {
+      return ContentSummaryMessageBody(
+        summary: contentSummary!.summary!,
+        briefText: contentSummary.briefText,
+        extraText: contentSummary.cleanedText,
+        onCardTap: () => ContentSummaryDetailModal.show(
+          context,
+          contentSummary.summary!,
+        ),
+      );
+    }
+
+    return Text(
+      stripMarkdown(message.text),
+      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: cs.onSurface,
+          ),
+    );
+  }
+
+  /// 构建灰色链接显示组件（从父级复用）
+  static Widget _buildGrayLinksInner(String text, BuildContext context) {
+    final RegExp urlRegex = RegExp(r'https?://\S+');
+    final Iterable<RegExpMatch> matches = urlRegex.allMatches(text);
+
+    if (matches.isEmpty) return const SizedBox.shrink();
+
+    final List<Widget> linkWidgets = [];
+    for (final match in matches) {
+      final String url = match.group(0)!;
+      linkWidgets.add(Container(
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.grey.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
+        ),
+        child: Text(
+          url,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Colors.grey[600],
+            fontSize: 12,
+          ),
+        ),
+      ));
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: linkWidgets,
+    );
+  }
+
+  /// 构建消息时间戳（从父级复用）
+  static Widget _buildTimestampInner(ChatMessage message, bool isUser, BuildContext context) {
+    final DateTime now = DateTime.now();
+    final DateTime msgTime = message.timestamp;
+    final Duration diff = now.difference(msgTime);
+
+    String timeStr;
+    if (diff.inMinutes < 1) {
+      timeStr = "刚刚";
+    } else if (diff.inHours < 1) {
+      timeStr = "${diff.inMinutes}分钟前";
+    } else if (diff.inDays < 1) {
+      timeStr = "${diff.inHours}小时前";
+    } else if (diff.inDays < 7) {
+      timeStr = "${diff.inDays}天前";
+    } else {
+      timeStr = "${msgTime.month}/${msgTime.day} ${msgTime.hour.toString().padLeft(2, '0')}:${msgTime.minute.toString().padLeft(2, '0')}";
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Text(
+        timeStr,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
+}
+
+/// 消息下方悬浮操作按钮栏（复制 / 编辑 / 删除）—— 透明背景
+class _MessageActionBar extends StatelessWidget {
+  const _MessageActionBar({
+    required this.onCopy,
+    required this.onEdit,
+    required this.onDeletePressed,
+  });
+
+  final VoidCallback onCopy;
+  final VoidCallback onEdit;
+  final VoidCallback onDeletePressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        _ActionButton(
+          icon: Icons.content_copy_outlined,
+          tooltip: "复制",
+          onPressed: onCopy,
+        ),
+        _ActionButton(
+          icon: Icons.edit_outlined,
+          tooltip: "编辑",
+          onPressed: onEdit,
+        ),
+        _ActionButton(
+          icon: Icons.delete_outline,
+          tooltip: "删除",
+          iconColor: Colors.red[400],
+          onPressed: onDeletePressed,
+        ),
+      ],
+    );
+  }
+}
+
+/// 删除选择模式下的确认/取消按钮栏
+class _DeleteConfirmBar extends StatelessWidget {
+  const _DeleteConfirmBar({
+    required this.isSelected,
+    required this.onToggleSelect,
+    required this.onConfirm,
+    required this.onCancel,
+  });
+
+  final bool isSelected;
+  final ValueChanged<bool> onToggleSelect;
+  final VoidCallback onConfirm;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        // 全选/取消勾选
+        GestureDetector(
+          onTap: () => onToggleSelect(!isSelected),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(
+                  isSelected ? Icons.check_box : Icons.check_box_outline_blank,
+                  size: 16,
+                  color: isSelected ? Colors.red[400] : cs.onSurfaceVariant,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  isSelected ? "已选择" : "取消选择",
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        // 取消按钮
+        _ActionButton(
+          icon: Icons.close,
+          tooltip: "取消",
+          onPressed: onCancel,
+        ),
+        const SizedBox(width: 2),
+        // 确认删除按钮
+        GestureDetector(
+          onTap: isSelected ? onConfirm : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: isSelected ? Colors.red : cs.surfaceContainerHighest.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(Icons.delete_outline, size: 15, color: isSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4)),
+                const SizedBox(width: 4),
+                Text(
+                  "删除",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 操作栏中的单个图标按钮（透明背景）
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.iconColor,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final Color? iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color defaultColor = Theme.of(context).colorScheme.onSurfaceVariant;
+    return IconButton(
+      tooltip: tooltip,
+      icon: Icon(icon, size: 17, color: iconColor ?? defaultColor),
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+      style: ButtonStyle(
+        backgroundColor: WidgetStateProperty.all<Color>(Colors.transparent),
+        overlayColor: WidgetStateProperty.all<Color>(Colors.black.withValues(alpha: 0.05)),
+      ),
+      onPressed: onPressed,
     );
   }
 }

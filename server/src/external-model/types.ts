@@ -59,6 +59,7 @@ export type AgentPromptMemoryContext = {
   memoryContinuity?: string;
   relationshipMemory?: string;
   lifeThemeMemory?: string;
+  dreamMemory?: string;
   /** 短句追问时锚定上一轮对话，避免跨话题串台 */
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */

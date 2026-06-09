@@ -6,6 +6,7 @@ import type {
   UserPersonalizationService,
 } from "./user-personalization/user-personalization-service.js";
 import { ProactiveOutboundMessageService } from "./proactive-outbound-message-service.js";
+import { ProactiveContactPolicyService } from "./proactive-contact-policy.js";
 import {
   normalizeStateChangeEvent,
   shouldEmitProactiveMessage,
@@ -78,6 +79,7 @@ export class ProactiveAgentCenter {
   private readonly rules: ProactiveRule[];
   private readonly lastResponseAt = new Map<string, number>();
   private readonly recentResponses = new Map<string, string[]>();
+  private readonly contactPolicy = new ProactiveContactPolicyService();
   private unsubscribe: (() => void) | null = null;
 
   constructor(
@@ -85,6 +87,7 @@ export class ProactiveAgentCenter {
     private readonly promptContextBuilder: PromptContextBuilder | null,
     private readonly outbound: ProactiveOutboundMessageService | null = null,
     private readonly userPersonalizationService: UserPersonalizationService | null = null,
+    private readonly isUserOnline: ((actorId: string) => boolean) | null = null,
   ) {
     this.config = loadConfig();
     this.rules = loadRules();
@@ -147,6 +150,26 @@ export class ProactiveAgentCenter {
 
       if (!response || response.trim().toUpperCase() === "SILENT") return;
 
+      const relationship = this.userPersonalizationService?.getRelationshipState(signal.actorId) ?? null;
+      const timeRhythm = this.userPersonalizationService?.getTimeRhythmState(signal.actorId) ?? null;
+      const styleProfile = this.userPersonalizationService?.getStyleProfileState(signal.actorId) ?? null;
+      const preference = this.userPersonalizationService?.getContactPreferenceState(signal.actorId) ?? null;
+      const decision = this.contactPolicy.decide({
+        actorId: signal.actorId,
+        category: signal.tags.includes("risk") ? "warning" : signal.tags[0],
+        urgency: signal.urgency,
+        confidence: signal.confidence,
+        tags: signal.tags,
+        wsConnected: this.isUserOnline?.(signal.actorId) ?? true,
+        recentContactCountHour: this.outbound?.countSince(signal.actorId, 60 * 60_000) ?? 0,
+        recentContactCountDay: this.outbound?.countSince(signal.actorId, 24 * 60 * 60_000) ?? 0,
+        relationship,
+        timeRhythm,
+        styleProfile,
+        preference,
+      });
+      if (!decision.allowed) return;
+
       const clean = response.trim().slice(0, this.config.maxResponseChars);
       this.recordResponse(signal.rawEvent.sessionId, clean);
       this.markResponded(signal.rawEvent);
@@ -155,6 +178,7 @@ export class ProactiveAgentCenter {
         title: signal.title,
         text: clean,
         reason: `${signal.module}:${signal.eventType}`,
+        channel: decision.channel,
         meta: {
           module: signal.module,
           eventType: signal.eventType,
@@ -162,6 +186,9 @@ export class ProactiveAgentCenter {
           urgency: signal.urgency,
           confidence: signal.confidence,
           evidence: signal.evidence,
+          contactDecision: decision.reason,
+          contactRationale: decision.rationale,
+          disturbanceScore: decision.disturbanceScore,
         },
       });
 

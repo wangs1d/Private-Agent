@@ -12,11 +12,9 @@ export type AgentWsUpdate = Partial<
   >
 >;
 
-let speakingChunkCount = 0;
 let lastChunkAt = 0;
 
 export function resetWsMapperState() {
-  speakingChunkCount = 0;
   lastChunkAt = 0;
 }
 
@@ -46,9 +44,9 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
     case "chat.agent_status": {
       const phase = p.phase ? String(p.phase) : undefined;
       const isDelegate = phase?.startsWith("delegate");
+      // 行动链路状态：仅更新phase和情绪，不覆盖主agent回复文本
       return {
         mood: "thinking",
-        caption: undefined,
         energy: isDelegate ? 0.78 : 0.72,
         phase,
         subAgentType: p.agentType ? String(p.agentType) : undefined,
@@ -57,14 +55,14 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
       };
     }
     case "tool.call": {
-      return { mood: "thinking", caption: undefined, energy: 0.68, source: "tool" };
+      // 行动链路事件：不覆盖主agent回复文本，仅切换情绪状态
+      return { mood: "thinking", energy: 0.68, source: "tool" };
     }
     case "chat.assistant_chunk": {
-      void (p.chunk ?? p.delta);
-      speakingChunkCount += 1;
+      const chunkText = String(p.chunk ?? p.delta ?? "");
       lastChunkAt = Date.now();
-      const burst = Math.min(1, 0.45 + speakingChunkCount * 0.015);
-      return { mood: "speaking", energy: burst, caption: undefined, source: "assistant_chunk" };
+      // 展示主agent的实际回复文本（与行动链路分割）
+      return { mood: "thinking", energy: 0.72, caption: chunkText || undefined, source: "assistant_chunk" };
     }
     case "chat.assistant_done": {
       resetWsMapperState();
@@ -97,7 +95,7 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
       // LLM 对 pet.reaction 的实时回复 — 桌宠的即兴台词
       const text = String(p.text ?? p.caption ?? "").trim();
       if (!text) return null;
-      const mood = (p.mood as AgentMood | undefined) ?? "speaking";
+      const mood = (p.mood as AgentMood | undefined) ?? "happy";
       const energy = typeof p.energy === "number" ? p.energy : 0.7;
       return {
         mood,
@@ -136,7 +134,6 @@ export function mapUserMessageSent(): AgentWsUpdate {
 }
 
 export function mapProcessingIdle(): AgentWsUpdate {
-  if (Date.now() - lastChunkAt < 800) return { mood: "speaking", energy: 0.5 };
   resetWsMapperState();
   return { mood: "idle", energy: 0.5, caption: undefined, source: "idle" };
 }

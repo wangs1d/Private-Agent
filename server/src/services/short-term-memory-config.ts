@@ -38,7 +38,7 @@ export function getShortTermMemoryConfig(): ShortTermMemoryConfig {
     walDir: process.env.AGENT_TURN_WAL_DIR?.trim() || "data/turn-wal",
     digestEnabled: envTruthy(process.env.AGENT_DAILY_DIGEST_ENABLED, mode === "enhanced"),
     digestFile: process.env.AGENT_DAILY_DIGEST_FILE?.trim() || "data/daily-digests.json",
-    digestMaxChars: envPositiveInt(process.env.AGENT_DAILY_DIGEST_MAX_CHARS, 4000),
+    digestMaxChars: envPositiveInt(process.env.AGENT_DAILY_DIGEST_MAX_CHARS, 1000),
     digestPromptMaxChars: envPositiveInt(process.env.AGENT_DAILY_DIGEST_PROMPT_MAX_CHARS, 800),
     digestTimezone: process.env.AGENT_DAILY_DIGEST_TIMEZONE?.trim() || "Asia/Shanghai",
     deferTurnArchive: envTruthy(process.env.AGENT_DEFER_TURN_ARCHIVE, mode === "enhanced"),

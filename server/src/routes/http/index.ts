@@ -15,12 +15,9 @@ import { registerPhoneRoutes } from "./phone.js";
 import { registerCompanionRoutes } from "./companion.js";
 import {
   registerGameCenterRoutes,
-  registerWorldDoudizhuRoutes,
-  registerWorldGomokuRoutes,
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
   registerWorldSocialRoutes,
-  registerWorldZhajinhuaRoutes,
   registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
 import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
@@ -32,6 +29,7 @@ import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
+import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
 export type { HttpRouteDeps } from "./types.js";
@@ -52,9 +50,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWalletRoutes(app, deps);
   registerWorldRoutes(app, deps);
   registerWorldFreeMarketRoutes(app, deps);
-  registerWorldGomokuRoutes(app, deps);
-  registerWorldDoudizhuRoutes(app, deps);
-  registerWorldZhajinhuaRoutes(app, deps);
   registerGameCenterRoutes(app, { gameCenter: deps.gameCenterCoordinator });
   registerWorldSocialRoutes(app, deps);
   registerGomokuPlayWeb(app);
@@ -70,4 +65,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerDownloadRoutes(app);
   registerLifeSignalRoutes(app, deps);
   registerMarketSignalRoutes(app, deps);
+  if (deps.webhookService) {
+    registerWebhookRoutes(app, deps.webhookService);
+  }
 }

@@ -29,8 +29,18 @@ export class WsConnectionRegistry {
     const socket = this.connections.get(sessionId);
     if (!socket) return false;
     const open = socket.readyState === undefined || socket.readyState === 1;
-    if (!open) return false;
-    socket.send(data);
-    return true;
+    if (!open) {
+      this.connections.delete(sessionId);
+      return false;
+    }
+    try {
+      socket.send(data);
+      return true;
+    } catch {
+      if (this.connections.get(sessionId) === socket) {
+        this.connections.delete(sessionId);
+      }
+      return false;
+    }
   }
 }

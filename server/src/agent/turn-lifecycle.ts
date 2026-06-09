@@ -13,6 +13,7 @@ import type { AgentMemorySyncService } from "../services/agent-memory-sync-servi
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
+import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -63,21 +64,34 @@ export class TurnLifecycle {
 
   ingestTurnArchive(actorId: string, userText: string, assistantText: string): void {
     if (!this.deps.narrativeMemory) return;
-    void this.deps.narrativeMemory
-      .ingest(
+    const body = `Turn archive | user: ${userText.slice(0, 600)} | assistant: ${assistantText.slice(0, 1800)}`;
+    void (async () => {
+      const decision = await decideMemoryWrite(body, {
         actorId,
-        `Turn archive | user: ${userText.slice(0, 600)} | assistant: ${assistantText.slice(0, 1800)}`,
-        "chat:turn_archive",
-      )
-      .catch(() => {});
+        source: "chat:turn_archive",
+        userText,
+        assistantText,
+        heuristicHint: "decay",
+      });
+      await this.deps.narrativeMemory?.ingest(actorId, body, "chat:turn_archive", {
+        highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+      });
+    })().catch(() => {});
   }
 
   ingestFastPath(actorId: string, lines: string[]): void {
     if (!this.deps.narrativeMemory || lines.length === 0) return;
     const body = lines.join("\n");
-    void this.deps.narrativeMemory
-      .ingest(actorId, body, "chat:fast_path", { highSignal: true })
-      .catch(() => {});
+    void (async () => {
+      const decision = await decideMemoryWrite(body, {
+        actorId,
+        source: "chat:fast_path",
+        heuristicHint: "remember",
+      });
+      await this.deps.narrativeMemory?.ingest(actorId, body, "chat:fast_path", {
+        highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+      });
+    })().catch(() => {});
   }
 
   finalizeTurn(input: FinalizeTurnInput): FinalizeTurnResult {
@@ -109,13 +123,22 @@ export class TurnLifecycle {
       this.ingestFastPath(input.actorId, signal.extractLines);
       if (this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
         const topic = inferMemoryTopic(input.userText);
-        for (const line of signal.extractLines) {
-          this.deps.agentMemorySyncService.appendMemorySummaryLine(
-            input.actorId,
-            `[fast-path] ${line}`,
-            topic,
-          );
-        }
+        void (async () => {
+          for (const line of signal.extractLines) {
+            const decision = await decideMemoryWrite(line, {
+              actorId: input.actorId,
+              source: "memory_summary:fast_path",
+              userText: input.userText,
+              assistantText: full,
+              heuristicHint: "remember",
+            });
+            this.deps.agentMemorySyncService?.appendMemorySummaryLine(
+              input.actorId,
+              `[fast-path][${decision.decision}][${decision.semanticClass}] ${line}`,
+              topic,
+            );
+          }
+        })().catch(() => {});
       }
     }
 

@@ -33,6 +33,7 @@ import type {
   ToolLoopAfterBatchInfo,
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
+import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
 
@@ -98,6 +99,70 @@ function detectRelevantCapabilityDomains(userText: string | undefined): Capabili
     }
   }
   return [...detected];
+}
+
+function compactPromptBlock(text: string | undefined, maxChars: number): string | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+function compactSchemaField(text: string, maxChars: number): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+function splitPromptLines(block: string | undefined): string[] {
+  return (block ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function dedupePromptBlock(block: string | undefined, existingFingerprints: Set<string>): string | undefined {
+  if (!block) return undefined;
+  const lines = dedupeMemoryLines(splitPromptLines(block), { preferLatest: false });
+  const kept = lines.filter((line) => {
+    const fp = semanticFingerprint(line) || line;
+    if (existingFingerprints.has(fp)) return false;
+    existingFingerprints.add(fp);
+    return true;
+  });
+  return kept.length > 0 ? kept.join("\n") : undefined;
+}
+
+export function formatNarrativeRecallPrompt(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+
+  const rawLines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (rawLines.length === 0) return undefined;
+
+  const items = rawLines
+    .map((line) => {
+      const numbered = line.match(/^\[(\d+)\]\s*(.+)$/);
+      if (numbered?.[2]) return compactSchemaField(numbered[2], 120);
+
+      const bullet = line.match(/^[-*•]\s*(.+)$/);
+      if (bullet?.[1]) return compactSchemaField(bullet[1], 120);
+
+      if (/^(以下|Mem0|记忆图|长时记忆|长期叙事)/i.test(line)) return "";
+      return compactSchemaField(line, 120);
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (items.length === 0) return undefined;
+
+  return [`NR|hits=${items.length}`, ...items.map((item, index) => `- r${index + 1}|${item}`)].join(
+    "\n",
+  );
 }
 
 export type BuildPromptContextInput = {
@@ -237,8 +302,14 @@ export class PromptContextBuilder {
       });
     }
 
+    const capabilityQueryHint =
+      this.deps.skillManager || config.masterDelegation.enabled || this.deps.worldService
+        ? "需要完整能力或 world 细节时，调用 agent.query_capabilities。"
+        : undefined;
+
     const agentCaps =
-      this.deps.skillManager || config.masterDelegation.enabled
+      config.memoryPrompt.agentCapsInPrompt &&
+      (this.deps.skillManager || config.masterDelegation.enabled)
         ? buildCompactAgentCapsPrompt()
         : undefined;
 
@@ -273,39 +344,64 @@ export class PromptContextBuilder {
       ambiguousFollowUp ? null : memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? null;
     const lifeThemeMemory =
       ambiguousFollowUp ? null : memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? null;
+    const dreamMemory =
+      ambiguousFollowUp ? null : memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? null;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     const scheduleSnapshot =
       this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
         ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId, userText)
         : undefined;
+    const taskContext =
+      config.memoryPrompt.taskContextInPrompt && userText
+        ? compactPromptBlock(buildTaskContextPrompt(userText), 320)
+        : undefined;
+    const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
+    const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
+    const narrativeRecall = !ambiguousFollowUp
+      ? compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 520)
+      : undefined;
+    const compactDailyDigest = compactPromptBlock(dailyDigest, 420);
+    const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, 180);
+    const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
+    const userProfile =
+      userProfileFromManager == null ? rawUserProfile : undefined;
+
+    const seenMemory = new Set<string>();
+    const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
+    const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
+    const dedupedDailyDigest = dedupePromptBlock(compactDailyDigest, seenMemory);
+    fromKv = {
+      ...fromKv,
+      ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
+    };
 
     return {
       ...fromKv,
-      ...(config.memoryPrompt.taskContextInPrompt && userText
-        ? { taskContext: buildTaskContextPrompt(userText) }
+      ...(taskContext ? { taskContext } : {}),
+      ...(capabilityQueryHint ? { abilities: fromKv.abilities ? `${fromKv.abilities}\n${capabilityQueryHint}` : capabilityQueryHint } : {}),
+      ...(toneGuidance
+        ? { toneGuidance }
         : {}),
-      ...(input.personalization?.toneGuidance
-        ? { toneGuidance: input.personalization.toneGuidance }
-        : {}),
-      ...(input.personalization?.userProfile
-        ? { userProfile: input.personalization.userProfile }
+      ...(userProfile
+        ? { userProfile }
         : {}),
       ...(input.personalization?.relationshipGuidance
         ? { relationshipGuidance: input.personalization.relationshipGuidance }
         : {}),
       ...(agentCaps ? { agentCaps } : {}),
       ...(worldCaps ? { worldCaps } : {}),
-      ...(input.narrativeRecall && !ambiguousFollowUp
-        ? { narrativeRecall: input.narrativeRecall }
+      ...(dedupedNarrativeRecall
+        ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
-      ...(dailyDigest ? { dailyDigest } : {}),
+      ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
       ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
       ...(memoryContinuity ? { memoryContinuity } : {}),
       ...(relationshipMemory ? { relationshipMemory } : {}),
       ...(lifeThemeMemory ? { lifeThemeMemory } : {}),
+      ...(dreamMemory ? { dreamMemory } : {}),
       ...(interruptedContext ? { interruptedContext } : {}),
-      ...(followUpAnchor ? { followUpAnchor } : {}),
-      ...(scheduleSnapshot ? { scheduleSnapshot } : {}),
+      ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
+      ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
     };
   }
 
@@ -329,6 +425,7 @@ export class PromptContextBuilder {
       Boolean(memory.memoryContinuity) ||
       Boolean(memory.relationshipMemory) ||
       Boolean(memory.lifeThemeMemory) ||
+      Boolean(memory.dreamMemory) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot)
     );

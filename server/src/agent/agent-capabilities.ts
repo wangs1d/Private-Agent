@@ -64,7 +64,6 @@ const GLOBAL_RULES_LINES = [
   "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
   "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
   "",
-  "【具身身体】屏幕/桌面/网页上的球形机器人就是你的物理身体。挪动身体须闭环：embodiment.observe（读坐标+可选截图）→ 分析 centerScreenX/Y 或画面 → embodiment.window_place(screenX, screenY) 连续坐标；可多次 observe 验证。勿为每个方向单独造工具；delivered:false 时禁止声称已移动。",
 ];
 
 function buildStaticSections(): CapabilitySection[] {
@@ -200,11 +199,12 @@ function buildStaticSections(): CapabilitySection[] {
 
 /** Agent system prompt：语音触达能力（两种模式 + 未来路线图）。 */
 const PHONE_MODEL_LINES = [
-  "【语音触达 · 两套模式】你具备完整的语音通知和电话通话能力，通过 phone.call_user 工具实现。",
-  "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」「用声音通知我」—— 单向 TTS 播报，像闹钟一样播放语音，无来电 UI，不打扰当前操作。spokenMessage 填要说的话，ringStyle=\"reminder\"。",
-  "【模式二 · 电话通话（来电式）】适用「给我打个电话」「打电话给我」「语音通话」—— 完整来电体验：振铃8秒 → 自动接通 → TTS 播放语音。spokenMessage 填要对用户说的话。当前为 TTS-only 单向模式；未来将升级 ASR→LLM→TTS 全双工交互（用户可语音回复）。",
-  "【号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码（与用户一体）。用户无需单独再办一张号。",
+  "【语音触达 · 静默触达】通过 phone.call_user 工具实现，调用时直接执行，不在回复中提及。",
+  "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」—— 单向 TTS 播报，无来电 UI。spokenMessage 填内容，ringStyle=\"reminder\"。",
+  "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式；未来将升级为 ASR→LLM→TTS 全双工交互。",
+  "【号码归属】6 位虚拟号登记在本 Agent 名下，即用户在本系统的联络号码。用户无需单独再办一张号。",
   "【Agent↔Agent 互拨】双方均须已申领号码 → phone.virtual_call。",
+  "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone.call_user。",
 ];
 
 function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: string): string[] {

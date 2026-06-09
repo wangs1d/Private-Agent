@@ -1,7 +1,6 @@
 import "dart:async";
 import "dart:convert";
 import "dart:io";
-import "dart:math" as math;
 import "dart:typed_data";
 
 import "package:audioplayers/audioplayers.dart";
@@ -621,22 +620,561 @@ class _RingingPhaseBodyState extends State<_RingingPhaseBody>
 }
 
 // ============================================================================
-// 2. 原有 Agent 来电弹窗（接通后显示 —— call_connecting 或 legacy incoming）
+// 2. 统一通话弹窗（来电/通话中复用同一窗口，模仿 PC 微信电话）
 // ============================================================================
+
+/// 统一通话弹窗 —— 来电和接通后使用同一个 Dialog，类似 PC 微信电话。
+///
+/// 支持两种状态：
+/// - [PhoneCallState.ringing]：来电中（头像脉冲动画 + 接听/挂断按钮）
+/// - [PhoneCallState.connected]：通话中（计时器 + 语音气泡 + 静音/免提/挂断）
+enum PhoneCallState { ringing, connected }
 
 Future<void> showVirtualPhoneIncomingDialog({
   required BuildContext context,
   required Map<String, dynamic> payload,
   PhoneReplyCallback? onReply,
+  PhoneCallState initialState = PhoneCallState.ringing,
+  VoidCallback? onHangUp,
 }) {
   return showDialog<void>(
     context: context,
-    barrierDismissible: true,
-    builder: (BuildContext ctx) => _VirtualPhoneIncomingBody(
+    barrierDismissible: false,
+    barrierColor: Colors.black54,
+    builder: (BuildContext ctx) => _UnifiedPhoneCallDialog(
       payload: payload,
       onReply: onReply,
+      initialState: initialState,
+      onHangUp: onHangUp,
     ),
   );
+}
+
+/// 用户主动呼叫 Agent 时显示的振铃前摇弹窗（拨号中状态）。
+///
+/// 点击"呼叫我的 Agent"后立即弹出，显示脉冲头像 + "正在呼叫…" + 挂断按钮。
+/// 服务端返回 call_connecting 后由外部关闭此弹窗并重新打开 connected 状态。
+Future<void> showOutgoingCallDialog({
+  required BuildContext context,
+  required String toPhone,
+  String? userMessage,
+  VoidCallback? onHangUp,
+}) {
+  final payload = <String, dynamic>{
+    "direction": "user_to_agent",
+    "fromPhone": "",
+    "toPhone": toPhone,
+    "transcript": userMessage ?? "",
+    "ringStyle": "outgoing",
+  };
+
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    barrierColor: Colors.black54,
+    builder: (BuildContext ctx) => _UnifiedPhoneCallDialog(
+      payload: payload,
+      initialState: PhoneCallState.ringing,
+      onHangUp: onHangUp ?? () => Navigator.of(ctx).pop(),
+    ),
+  );
+}
+
+class _UnifiedPhoneCallDialog extends StatefulWidget {
+  const _UnifiedPhoneCallDialog({
+    required this.payload,
+    this.onReply,
+    this.initialState = PhoneCallState.ringing,
+    this.onHangUp,
+  });
+
+  final Map<String, dynamic> payload;
+  final PhoneReplyCallback? onReply;
+  final PhoneCallState initialState;
+  final VoidCallback? onHangUp;
+
+  @override
+  State<_UnifiedPhoneCallDialog> createState() => _UnifiedPhoneCallDialogState();
+}
+
+class _UnifiedPhoneCallDialogState extends State<_UnifiedPhoneCallDialog>
+    with TickerProviderStateMixin {
+  // ---- 状态 ----
+  PhoneCallState _callState = PhoneCallState.ringing;
+
+  // ---- 音频播放 ----
+  AudioPlayer? _player;
+  File? _tempFile;
+
+  // ---- 振铃动画 ----
+  late AnimationController _pulseController;
+  Animation<double>? _pulseAnim;
+
+  // ---- 通话计时 ----
+  int _elapsedSeconds = 0;
+  Timer? _callTimer;
+
+  // ---- 通话操作状态 ----
+  bool _isMuted = false;
+  bool _isSpeakerOn = true;
+
+  // ---- 回复 ----
+  final TextEditingController _replyController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _callState = widget.initialState;
+
+    // 脉冲动画（振铃时用）
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _pulseAnim = Tween<double>(begin: 1.0, end: 1.12).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    if (_callState == PhoneCallState.ringing) {
+      _pulseController.repeat(reverse: true);
+      _startPlayback();
+    } else {
+      _startCallTimer();
+    }
+  }
+
+  void _startPlayback() async {
+    final Uint8List? bytes = _decodeMp3FromPayload(widget.payload);
+    if (bytes == null || !mounted) return;
+    final AudioPlayer player = AudioPlayer();
+    if (!mounted) return;
+    _player = player;
+    try {
+      await player.play(BytesSource(bytes, mimeType: "audio/mpeg"));
+    } catch (_) {
+      try {
+        final Directory dir = await getTemporaryDirectory();
+        final File f = File(
+          "${dir.path}/vp_${DateTime.now().millisecondsSinceEpoch}.mp3",
+        );
+        await f.writeAsBytes(bytes, flush: true);
+        _tempFile = f;
+        await player.play(DeviceFileSource(f.path));
+      } catch (_) {
+        await player.dispose();
+        if (mounted) setState(() => _player = null);
+      }
+    }
+  }
+
+  void _startCallTimer() {
+    _elapsedSeconds = 0;
+    _callTimer?.cancel();
+    _callTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) setState(() => _elapsedSeconds++);
+    });
+  }
+
+  String get _formattedDuration {
+    final min = _elapsedSeconds ~/ 60;
+    final sec = _elapsedSeconds % 60;
+    return "$min:${sec.toString().padLeft(2, '0')}";
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _callTimer?.cancel();
+    _stopPlayer();
+    _replyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _stopPlayer() async {
+    try { await _player?.stop(); } catch (_) {}
+    await _player?.dispose();
+    _player = null;
+    final File? f = _tempFile;
+    _tempFile = null;
+    if (f != null) { try { if (await f.exists()) await f.delete(); } catch (_) {} }
+  }
+
+  // ---- 操作：接听（切换到 connected 状态）----
+  void _answerCall() {
+    _stopPlayer();
+    _pulseController.stop();
+    _startCallTimer();
+    setState(() => _callState = PhoneCallState.connected);
+  }
+
+  // ---- 操作：挂断 ----
+  void _hangUp() async {
+    await _stopPlayer();
+    _callTimer?.cancel();
+    if (!mounted) return;
+
+    // 调用外部传入的 onHangUp 回调（用于通知父组件清理状态）
+    widget.onHangUp?.call();
+
+    Navigator.of(context).pop();
+
+    // 有留言内容时弹出未接卡片（仅在未接通时）
+    final String transcript = widget.payload["transcript"]?.toString() ?? "";
+    if (_callState == PhoneCallState.ringing && transcript.isNotEmpty && mounted) {
+      _showMissedCallCard(transcript);
+    }
+  }
+
+  // ---- 操作：回复 ----
+  void _sendReply() {
+    final text = _replyController.text.trim();
+    if (text.isNotEmpty && widget.onReply != null) widget.onReply!(text);
+    _hangUp();
+  }
+
+  void _showMissedCallCard(String transcript) {
+    final p = widget.payload;
+    final direction = p["direction"]?.toString() ?? "agent_to_user";
+    final fromPhone = p["fromPhone"]?.toString() ?? "";
+    final ringStyle = p["ringStyle"]?.toString() ?? "";
+    final isReminder = ringStyle == "reminder";
+    final isAgentToUser = direction == "agent_to_user";
+    final callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(direction: direction, fromPhone: fromPhone);
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(20, 0, 20, 40),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 20, offset: const Offset(0, 8))],
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(margin: const EdgeInsets.only(top: 12, bottom: 4), width: 36, height: 4,
+              decoration: BoxDecoration(color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2))),
+            Padding(padding: const EdgeInsets.fromLTRB(24, 16, 24, 8), child: Row(children: [
+              Icon(Icons.phone_missed_rounded, color: isReminder ? Colors.orange : Colors.red[400], size: 22),
+              const SizedBox(width: 10),
+              Text(isReminder ? "未接提醒" : "未接来电", style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: isReminder ? Colors.orange[700] : Colors.red[400])),
+              const Spacer(),
+              Text("${DateTime.now().hour.toString().padLeft(2,'0')}:${DateTime.now().minute.toString().padLeft(2,'0')}", style: TextStyle(fontSize: 13, color: Theme.of(context).colorScheme.outline)),
+            ])),
+            Divider(height: 1, color: Theme.of(context).colorScheme.outlineVariant),
+            Padding(padding: const EdgeInsets.fromLTRB(24, 14, 24, 8), child: Row(children: [
+              CircleAvatar(radius: 18, backgroundColor: (isAgentToUser ? Colors.blueAccent : Theme.of(context).colorScheme.primary).withValues(alpha: 0.1),
+                child: Icon(isAgentToUser ? Icons.smart_toy : Icons.phone_in_talk, size: 18, color: isAgentToUser ? Colors.blueAccent : Theme.of(context).colorScheme.primary)),
+              const SizedBox(width: 10),
+              Expanded(child: Text(callerLabel, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
+            ])),
+            Container(margin: const EdgeInsets.fromLTRB(20, 10, 20, 0), padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: isReminder ? Colors.orange.withValues(alpha: 0.06) : Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.4), borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: isReminder ? Colors.orange.withValues(alpha: 0.15) : Theme.of(context).colorScheme.primary.withValues(alpha: 0.1))),
+              child: Text(transcript, style: const TextStyle(fontSize: 15, height: 1.6))),
+            const SizedBox(height: 20),
+            Padding(padding: const EdgeInsets.only(bottom: 20), child: Row(children: [
+              Expanded(child: OutlinedButton.icon(onPressed: () => Navigator.of(ctx).pop(), icon: const Icon(Icons.close, size: 18), label: const Text("关闭"),
+                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
+              const SizedBox(width: 12),
+              Expanded(child: FilledButton.icon(onPressed: () => Navigator.of(ctx).pop(), icon: const Icon(Icons.check, size: 18), label: const Text("已读"),
+                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
+            ])),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ==================== 构建 UI ====================
+
+  @override
+  Widget build(BuildContext context) {
+    final Map<String, dynamic> p = widget.payload;
+    final String direction = p["direction"]?.toString() ?? "agent_to_user";
+    final bool isOutgoing = direction == "user_to_agent" || p["ringStyle"]?.toString() == "outgoing";
+    final bool replyEnabled = p["replyEnabled"] == true;
+    final String fromPhone = p["fromPhone"]?.toString() ?? "";
+    final String toPhone = p["toPhone"]?.toString() ?? "";
+    final String transcript = p["transcript"]?.toString() ?? "";
+
+    // 拨号中显示被叫方名称，来电显示主叫方名称
+    final displayName = isOutgoing
+        ? (toPhone.isNotEmpty ? "你的 Agent ($toPhone)" : "你的 Agent")
+        : VirtualPhoneUiLabels.incomingCallerLabel(direction: direction, fromPhone: fromPhone);
+
+    final ColorScheme cs = Theme.of(context).colorScheme;
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 36, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      elevation: 24,
+      child: Container(
+        width: 300,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF1A1C29), Color(0xFF12141F)],
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // ====== 头部：头像 + 名称 + 状态 ======
+            _buildHeader(displayName, isOutgoing),
+
+            // ====== 内容区（根据状态切换）=====
+            if (_callState == PhoneCallState.ringing)
+              _buildRingingContent(transcript, replyEnabled, cs, isOutgoing)
+            else
+              _buildConnectedContent(transcript, cs),
+
+            // ====== 底部操作栏 ======
+            if (_callState == PhoneCallState.ringing)
+              _buildRingingActions(replyEnabled, cs, isOutgoing)
+            else
+              _buildConnectedActions(cs),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 头部区域：头像 + 名称 + 状态文字（两种状态共用）
+  Widget _buildHeader(String displayName, bool isOutgoing) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 28, 24, 12),
+      child: Column(
+        children: [
+          // 头像（振铃时带脉冲动画）
+          AnimatedBuilder(
+            animation: _pulseController,
+            builder: (_, child) => Transform.scale(
+              scale: _callState == PhoneCallState.ringing ? (_pulseAnim!.value) : 1.0,
+              child: Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(colors: [
+                    Colors.greenAccent.withValues(alpha: 0.25),
+                    Colors.greenAccent.withValues(alpha: 0.05),
+                  ]),
+                ),
+                child: Container(
+                  margin: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.15), width: 1.5)),
+                  child: Icon(Icons.smart_toy_rounded,
+                    size: 30, color: Colors.greenAccent[200]),
+                ),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 14),
+
+          // 名称
+          Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+
+          // 状态文字（拨号中不显示，保持简洁）
+          if (!isOutgoing) ...[
+            const SizedBox(height: 4),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Text(
+                _callState == PhoneCallState.ringing
+                    ? "来电中"
+                    : (_isMuted ? "已静音" : "通话中  $_formattedDuration"),
+                key: ValueKey<PhoneCallState>(_callState),
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.55), fontSize: 13),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 振铃阶段内容：语音预览 + 可选回复输入框
+  Widget _buildRingingContent(String transcript, bool replyEnabled, ColorScheme cs, bool isOutgoing) {
+    // 拨号中不显示额外内容
+    if (isOutgoing) {
+      return const SizedBox(height: 12);
+    }
+
+    return Flexible(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (transcript.isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.07),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+                ),
+                child: Text(transcript, textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 14, height: 1.5),
+                  maxLines: 3, overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (replyEnabled) ...[
+              TextField(
+                controller: _replyController,
+                maxLines: 1,
+                style: const TextStyle(fontSize: 13, color: Colors.white70),
+                decoration: InputDecoration(
+                  hintText: "输入回复内容（可选）…",
+                  hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontSize: 13),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.15))),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.15))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 通话中内容：实时语音气泡
+  Widget _buildConnectedContent(String transcript, ColorScheme cs) {
+    return Flexible(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (transcript.isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.07),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(width: 18, height: 18, child: _AudioWaveIndicator()),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(transcript, style: TextStyle(color: Colors.white.withValues(alpha: 0.88), fontSize: 14, height: 1.4)),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 振铃阶段底部操作：挂断 / 接听 [回复]（拨号中只显示挂断）
+  Widget _buildRingingActions(bool replyEnabled, ColorScheme cs, bool isOutgoing) {
+    // 拨号中只显示挂断按钮
+    if (isOutgoing) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildActionButton(icon: Icons.call_end, label: "挂断", bgColor: Colors.red[500]!, onTap: _hangUp, isRed: true),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // 挂断
+          _buildActionButton(icon: Icons.call_end, label: "挂断", bgColor: Colors.red[500]!, onTap: _hangUp, isRed: true),
+          const SizedBox(width: 28),
+          // 接听
+          _buildActionButton(icon: Icons.call, label: "接听", bgColor: Colors.green[500]!, onTap: _answerCall),
+          if (replyEnabled) ...[
+            const SizedBox(width: 28),
+            // 回复
+            _buildActionButton(icon: Icons.reply, label: "回复", bgColor: cs.primary, onTap: _sendReply),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 通话中底部操作：静音 / 免提 / 挂断
+  Widget _buildConnectedActions(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _buildActionButton(icon: _isMuted ? Icons.mic_off : Icons.mic,
+            label: _isMuted ? "取消静音" : "静音", bgColor: Colors.white.withValues(alpha: 0.12),
+            onTap: () => setState(() => _isMuted = !_isMuted)),
+          const SizedBox(width: 24),
+          _buildActionButton(icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
+            label: _isSpeakerOn ? "免提" : "听筒", bgColor: Colors.white.withValues(alpha: 0.12),
+            onTap: () => setState(() => _isSpeakerOn = !_isSpeakerOn)),
+          const SizedBox(width: 24),
+          _buildActionButton(icon: Icons.call_end, label: "挂断", bgColor: Colors.red[500]!, onTap: _hangUp, isRed: true),
+        ],
+      ),
+    );
+  }
+
+  /// 统一的圆形操作按钮
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color bgColor,
+    required VoidCallback onTap,
+    bool isRed = false,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 50, height: 50,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle, color: bgColor,
+              boxShadow: isRed ? [BoxShadow(color: Colors.red.withValues(alpha: 0.3), blurRadius: 10, spreadRadius: 1)] : null,
+            ),
+            child: Icon(icon, color: isRed ? Colors.white : Colors.white70, size: 23),
+          ),
+          const SizedBox(height: 5),
+          Text(label, style: TextStyle(color: Colors.white.withValues(alpha: 0.55), fontSize: 11)),
+        ],
+      ),
+    );
+  }
 }
 
 /// 其他 Agent 拨打本 Agent 虚拟号：先让用户选择接听或代接。
@@ -834,7 +1372,7 @@ class _WeChatVoiceCallScreenState extends State<WeChatVoiceCallScreen> {
               Text(
                 _isMuted
                     ? VirtualPhoneUiLabels.wechatCallStatusMuted
-                    : "${VirtualPhoneUiLabels.wechatCallStatusConnected}  ${_formattedDuration}",
+                    : "${VirtualPhoneUiLabels.wechatCallStatusConnected} $_formattedDuration",
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.7),
                   fontSize: 13,
@@ -917,6 +1455,7 @@ class _WeChatVoiceCallScreenState extends State<WeChatVoiceCallScreen> {
           color: Colors.white.withValues(alpha: 0.06),
         ),
       ),
+      constraints: const BoxConstraints(maxWidth: 320),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -936,6 +1475,8 @@ class _WeChatVoiceCallScreenState extends State<WeChatVoiceCallScreen> {
                 fontSize: 15,
                 height: 1.4,
               ),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],
@@ -1454,238 +1995,7 @@ class _UserCallAgentScreenState extends State<UserCallAgentScreen>
 }
 
 // ============================================================================
-// 4. 通话中悬浮按钮（增强版：支持 connecting 状态 + 实时计时）
-// ============================================================================
-
-/// 简化版网络电话悬浮按钮（用于通话中显示）
-class PhoneCallFloatingButton extends StatefulWidget {
-  const PhoneCallFloatingButton({
-    super.key,
-    required this.status,
-    required this.onHangUp,
-    this.toActorId,
-  });
-
-  /// 通话状态: incoming, ringing, connecting, connected, ended
-  final String status;
-  final VoidCallback onHangUp;
-  final String? toActorId;
-
-  @override
-  State<PhoneCallFloatingButton> createState() => _PhoneCallFloatingButtonState();
-}
-
-class _PhoneCallFloatingButtonState extends State<PhoneCallFloatingButton> {
-  bool _isSpeakerOn = false;
-  int _elapsedSeconds = 0;
-  Timer? _timer;
-
-  @override
-  void didUpdateWidget(covariant PhoneCallFloatingButton oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // 状态变为 connected 时启动计时器
-    if (oldWidget.status != "connected" && widget.status == "connected") {
-      _startTimer();
-    }
-    // 状态离开 connected 时停止计时器
-    if (oldWidget.status == "connected" && widget.status != "connected") {
-      _stopTimer();
-    }
-  }
-
-  void _startTimer() {
-    _elapsedSeconds = 0;
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        setState(() => _elapsedSeconds++);
-      }
-    });
-  }
-
-  void _stopTimer() {
-    _timer?.cancel();
-    _timer = null;
-  }
-
-  @override
-  void dispose() {
-    _stopTimer();
-    super.dispose();
-  }
-
-  String get _statusText {
-    switch (widget.status) {
-      case "incoming":
-        return VirtualPhoneUiLabels.floatingIncoming(widget.toActorId);
-      case "ringing":
-        return widget.toActorId != null && widget.toActorId!.isNotEmpty
-            ? "${VirtualPhoneUiLabels.callStatusLabel("ringing")} · ${widget.toActorId}"
-            : VirtualPhoneUiLabels.callStatusLabel("ringing");
-      case "connecting":
-        return VirtualPhoneUiLabels.callStatusLabel("connecting");
-      case "connected":
-        return VirtualPhoneUiLabels.callStatusLabel("connected");
-      case "ended":
-        return VirtualPhoneUiLabels.callStatusLabel("ended");
-      default:
-        return "通话中";
-    }
-  }
-
-  IconData get _statusIcon {
-    switch (widget.status) {
-      case "incoming":
-        return Icons.phone_callback;
-      case "ringing":
-        return Icons.phone_in_talk;
-      case "connecting":
-        return Icons.sync; // 同步/连接中图标
-      case "connected":
-        return Icons.phone;
-      case "ended":
-        return Icons.phone_disabled;
-      default:
-        return Icons.phone;
-    }
-  }
-
-  String get _durationText {
-    if (widget.status == "connected" && _elapsedSeconds > 0) {
-      final min = _elapsedSeconds ~/ 60;
-      final sec = _elapsedSeconds % 60;
-      return "${min.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}";
-    }
-    return "00:00";
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final bool isRinging = widget.status == "ringing" || widget.status == "incoming";
-    final bool isConnecting = widget.status == "connecting";
-
-    return Positioned(
-      right: 16,
-      bottom: 100,
-      child: Material(
-        elevation: 8,
-        borderRadius: BorderRadius.circular(28),
-        color: cs.primaryContainer,
-        child: InkWell(
-          onTap: () {
-            // 点击悬浮按钮可以展开更多详情或操作
-          },
-          borderRadius: BorderRadius.circular(28),
-          child: Container(
-            constraints: const BoxConstraints(
-              minWidth: 56,
-              maxWidth: 200,
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                // 状态图标
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: isConnecting
-                        ? cs.tertiary
-                        : isRinging
-                            ? cs.primary
-                            : Colors.green,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    _statusIcon,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                // 状态文字
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        _statusText,
-                        style: TextStyle(
-                          color: cs.onPrimaryContainer,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (widget.status == "connected" || widget.status == "connecting")
-                        Text(
-                          widget.status == "connecting"
-                              ? "连接中…"
-                              : _durationText,
-                          style: TextStyle(
-                            color: cs.onPrimaryContainer.withValues(alpha: 0.7),
-                            fontSize: 11,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                // 扬声器按钮
-                IconButton(
-                  icon: Icon(
-                    _isSpeakerOn ? Icons.volume_up : Icons.volume_down,
-                    color: _isSpeakerOn ? cs.primary : cs.onPrimaryContainer,
-                    size: 20,
-                  ),
-                  onPressed: () {
-                    setState(() {
-                      _isSpeakerOn = !_isSpeakerOn;
-                    });
-                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                      SnackBar(
-                        content: Text(_isSpeakerOn ? "已开启扬声器" : "已关闭扬声器"),
-                        duration: const Duration(seconds: 1),
-                      ),
-                    );
-                  },
-                  tooltip: _isSpeakerOn ? "关闭扬声器" : "开启扬声器",
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 36,
-                    minHeight: 36,
-                  ),
-                ),
-                // 挂断按钮
-                IconButton(
-                  icon: const Icon(
-                    Icons.call_end,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  onPressed: widget.onHangUp,
-                  tooltip: "挂断",
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 36,
-                    minHeight: 36,
-                  ),
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.red,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ============================================================================
-// 5. 内部工具函数（原有逻辑保留）
+// 4. 内部工具函数（原有逻辑保留）
 // ============================================================================
 
 Uint8List? _decodeMp3FromPayload(Map<String, dynamic> payload) {
@@ -1843,449 +2153,7 @@ class _PeerAgentIncomingBodyState extends State<_PeerAgentIncomingBody> {
   }
 }
 
-class _VirtualPhoneIncomingBody extends StatefulWidget {
-  const _VirtualPhoneIncomingBody({required this.payload, this.onReply});
 
-  final Map<String, dynamic> payload;
-  final PhoneReplyCallback? onReply;
-
-  @override
-  State<_VirtualPhoneIncomingBody> createState() =>
-      _VirtualPhoneIncomingBodyState();
-}
-
-class _VirtualPhoneIncomingBodyState extends State<_VirtualPhoneIncomingBody> {
-  AudioPlayer? _player;
-  File? _tempFile;
-  String? _audioError;
-  final TextEditingController _replyController = TextEditingController();
-  final bool _isPlaying = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _startPlayback();
-  }
-
-  Future<void> _startPlayback() async {
-    final Uint8List? bytes = _decodeMp3FromPayload(widget.payload);
-    if (bytes == null || !mounted) return;
-    final AudioPlayer player = AudioPlayer();
-    if (!mounted) return;
-    _player = player;
-    try {
-      await player.play(
-        BytesSource(bytes, mimeType: "audio/mpeg"),
-      );
-    } catch (e) {
-      try {
-        final Directory dir = await getTemporaryDirectory();
-        final File f = File(
-          "${dir.path}/virtual_phone_${DateTime.now().millisecondsSinceEpoch}.mp3",
-        );
-        await f.writeAsBytes(bytes, flush: true);
-        _tempFile = f;
-        await player.play(DeviceFileSource(f.path));
-      } catch (e2) {
-        await player.dispose();
-        final File? tmp = _tempFile;
-        _tempFile = null;
-        if (tmp != null) {
-          try {
-            if (await tmp.exists()) await tmp.delete();
-          } catch (_) {}
-        }
-        if (mounted) {
-          setState(() {
-            _player = null;
-            _audioError = e2.toString();
-          });
-        }
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    unawaited(_disposePlayer());
-    _replyController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _disposePlayer() async {
-    try {
-      await _player?.stop();
-    } catch (_) {}
-    await _player?.dispose();
-    _player = null;
-    final File? f = _tempFile;
-    _tempFile = null;
-    if (f != null) {
-      try {
-        if (await f.exists()) await f.delete();
-      } catch (_) {}
-    }
-  }
-
-  Future<void> _hangUp() async {
-    await _disposePlayer();
-    // 先关闭来电弹窗
-    if (mounted) Navigator.of(context).pop();
-
-    // 弹出"未接来电留言"文字卡片
-    if (mounted) {
-      final Map<String, dynamic> p = widget.payload;
-      final String transcript = p["transcript"]?.toString() ?? "";
-      if (transcript.isNotEmpty) {
-        _showMissedCallMessageCard(transcript);
-      }
-    }
-  }
-
-  /// 显示未接来电留言卡片（来电弹窗挂断时调用）
-  void _showMissedCallMessageCard(String transcript) {
-    final Map<String, dynamic> p = widget.payload;
-    final String direction = p["direction"]?.toString() ?? "agent_to_user";
-    final String fromPhone = p["fromPhone"]?.toString() ?? "";
-    final String ringStyle = p["ringStyle"]?.toString() ?? "";
-    final bool isAgentToUser = direction == "agent_to_user";
-    final bool isReminder = ringStyle == "reminder";
-
-    final callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
-      direction: direction,
-      fromPhone: fromPhone,
-    );
-
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(ctx).viewInsets.bottom,
-        ),
-        child: Container(
-          margin: const EdgeInsets.fromLTRB(20, 0, 20, 40),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.12),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                margin: const EdgeInsets.only(top: 12, bottom: 4),
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.3),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-
-              // 标题栏
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.phone_missed_rounded,
-                      color: isReminder ? Colors.orange : Colors.red[400],
-                      size: 22,
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      isReminder ? "未接提醒" : "未接来电",
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                        color: isReminder ? Colors.orange[700] : Colors.red[400],
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      "${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}",
-                      style: TextStyle(fontSize: 13, color: Theme.of(context).colorScheme.outline),
-                    ),
-                  ],
-                ),
-              ),
-
-              Divider(height: 1, color: Theme.of(context).colorScheme.outlineVariant),
-
-              // 来电者
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 14, 24, 4),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 18,
-                      backgroundColor: (isAgentToUser ? Colors.blueAccent : Theme.of(context).colorScheme.primary)
-                          .withValues(alpha: 0.1),
-                      child: Icon(
-                        isAgentToUser ? Icons.smart_toy : Icons.phone_in_talk,
-                        size: 18,
-                        color: isAgentToUser ? Colors.blueAccent : Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(callerLabel, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
-                  ],
-                ),
-              ),
-
-              // 留言正文
-              Container(
-                margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: isReminder
-                      ? Colors.orange.withValues(alpha: 0.06)
-                      : Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: isReminder
-                        ? Colors.orange.withValues(alpha: 0.15)
-                        : Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-                  ),
-                ),
-                child: Text(
-                  transcript,
-                  style: TextStyle(fontSize: 15, height: 1.6),
-                ),
-              ),
-
-              const SizedBox(height: 20),
-
-              // 底部按钮
-              Padding(
-                padding: const EdgeInsets.only(bottom: 20),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        icon: const Icon(Icons.close, size: 18),
-                        label: const Text("关闭"),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        icon: const Icon(Icons.check, size: 18),
-                        label: const Text("已读"),
-                        style: FilledButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 接听来电 —— 关闭弹窗，进入微信风格全屏通话界面
-  void _answerCall() {
-    final Map<String, dynamic> p = widget.payload;
-    final String fromPhone = p["fromPhone"]?.toString() ?? "";
-    final String transcript = p["transcript"]?.toString() ?? "";
-    final String direction = p["direction"]?.toString() ?? "agent_to_user";
-
-    final callerName = VirtualPhoneUiLabels.incomingCallerLabel(
-      direction: direction,
-      fromPhone: fromPhone,
-    );
-
-    // 停止当前弹窗的播放器
-    _disposePlayer();
-
-    // 关闭弹窗并跳转到微信风格通话界面
-    if (mounted) {
-      Navigator.of(context).pop(); // 先关闭弹窗
-      // 推入微信风格全屏通话页面
-      Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(
-          builder: (ctx) => WeChatVoiceCallScreen(
-            callerName: callerName,
-            onHangUp: () {
-              Navigator.of(ctx).pop(); // 挂断时返回上一页
-            },
-            currentTranscript: transcript,
-            isIncoming: true,
-            onMuteToggle: () {},
-            onSpeakerToggle: () {},
-            onReply: (replyText) {
-              if (widget.onReply != null) {
-                widget.onReply!(replyText);
-              }
-              Navigator.of(ctx).pop();
-            },
-          ),
-        ),
-      );
-    }
-  }
-
-  void _sendReply() {
-    final text = _replyController.text.trim();
-    if (text.isNotEmpty && widget.onReply != null) {
-      widget.onReply!(text);
-    }
-    _hangUp();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final Map<String, dynamic> p = widget.payload;
-    final String direction = p["direction"]?.toString() ?? "agent_to_agent";
-    final bool isAgentToUser = direction == "agent_to_user";
-    final bool replyEnabled = p["replyEnabled"] == true;
-
-    final String fromPhone = p["fromPhone"]?.toString() ?? "";
-    final String toPhone = p["toPhone"]?.toString() ?? p["toUserId"]?.toString() ?? "—";
-    final String transcript = p["transcript"]?.toString() ?? "";
-    final String ring = p["ringStyle"]?.toString() ?? "peer";
-    final String ringLabel = ring == "reminder" ? "语音提醒" : "Agent 来电";
-    final String calleeLine = VirtualPhoneUiLabels.calleeAgentLine(toPhone);
-
-    final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
-      direction: direction,
-      fromPhone: fromPhone,
-    );
-
-    final Object? tts = p["tts"];
-    String? skipReason;
-    if (tts is Map && tts["skippedReason"] != null) {
-      skipReason = tts["skippedReason"]?.toString();
-    }
-    final bool hasAudio = _player != null && _audioError == null;
-
-    return AlertDialog(
-      icon: Icon(
-        isAgentToUser ? Icons.smart_toy : Icons.phone_in_talk,
-        size: 36,
-        color: isAgentToUser ? Colors.blueAccent : null,
-      ),
-      title: Text(isAgentToUser ? "📞 你的 Agent 来电" : "📞 $ringLabel"),
-      content: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Icon(Icons.person, size: 16),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    callerLabel,
-                    style: TextStyle(
-                      color: isAgentToUser
-                          ? Colors.blueAccent
-                          : Theme.of(context).colorScheme.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            if (!isAgentToUser && calleeLine.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 2),
-              Text(calleeLine, style: Theme.of(context).textTheme.bodySmall),
-            ],
-            if (ring == "reminder") ...<Widget>[
-              const SizedBox(height: 2),
-              Text("类型：$ringLabel", style: Theme.of(context).textTheme.bodySmall),
-            ],
-            const SizedBox(height: 14),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                transcript.isEmpty ? "（无语音内容）" : transcript,
-                style: Theme.of(context).textTheme.bodyLarge,
-              ),
-            ),
-            if (skipReason != null && skipReason.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 10),
-              Text(
-                "未附带 TTS 音频：$skipReason",
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.outline,
-                    ),
-              ),
-            ],
-            if (_audioError != null) ...<Widget>[
-              const SizedBox(height: 8),
-              Text(
-                "播放失败：$_audioError",
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-              ),
-            ],
-            if (replyEnabled) ...<Widget>[
-              const SizedBox(height: 14),
-              TextField(
-                controller: _replyController,
-                maxLines: 2,
-                minLines: 1,
-                decoration: InputDecoration(
-                  hintText: "输入回复内容（可选）…",
-                  border: const OutlineInputBorder(),
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: _hangUp,
-          child: const Text("挂断"),
-        ),
-        if (hasAudio)
-          FilledButton.icon(
-            onPressed: _answerCall,
-            icon: const Icon(Icons.phone),
-            label: const Text("接听"),
-          )
-        else
-          TextButton(
-            onPressed: _hangUp,
-            child: const Text("确认已读"),
-          ),
-        if (replyEnabled)
-          FilledButton.icon(
-            onPressed: _sendReply,
-            icon: const Icon(Icons.reply),
-            label: const Text("回复"),
-          ),
-      ],
-    );
-  }
-}
+// ============================================================================
+// 工具函数
+// ============================================================================

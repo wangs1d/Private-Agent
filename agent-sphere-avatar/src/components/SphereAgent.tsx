@@ -98,7 +98,7 @@ export function SphereAgent({
   }));
 
   const motionStrength =
-    state.mood === "speaking" ? 1.35 : state.mood === "thinking" ? 0.85 : 1;
+    state.mood === "thinking" ? 0.85 : 1;
 
   const kinematic = !physics && autonomous;
 

@@ -26,11 +26,14 @@ class WsChatService {
   static const Duration _initialReconnectDelay = Duration(seconds: 2);
   static const Duration _maxReconnectDelay = Duration(seconds: 30);
   static const Duration _heartbeatInterval = Duration(seconds: 20);
-  static const Duration _heartbeatTimeout = Duration(seconds: 45);
+  static const Duration _heartbeatTimeout = Duration(seconds: 75);
+  static const Duration _minHealthyConnectionDuration = Duration(seconds: 12);
   bool _isConnecting = false;
   bool _isConnected = false;
+  bool _manualClose = false;
   final List<_PendingWsEvent> _pendingOutbound = <_PendingWsEvent>[];
   DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _connectedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// 连接就绪（含重连后）时回调；应在此时发送 `session.init`。
   void Function()? onConnected;
@@ -40,6 +43,7 @@ class WsChatService {
   bool get isConnected => _isConnected;
 
   void connect() {
+    _manualClose = false;
     if (!_isConnecting && !_isConnected) {
       _connectWithRetry();
     }
@@ -47,8 +51,10 @@ class WsChatService {
 
   /// 放弃重连计数后再次尝试（例如用户从设置页手动重连）。
   void retryConnect() {
+    _manualClose = false;
     _reconnectAttempts = 0;
     _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _stopHeartbeat();
     unawaited(_subscription?.cancel());
     _subscription = null;
@@ -65,6 +71,8 @@ class WsChatService {
 
   void _connectWithRetry() {
     if (_isConnecting) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     _isConnecting = true;
     try {
@@ -95,8 +103,16 @@ class WsChatService {
           _reconnectAttempts = 0;
           _isConnecting = false;
           _lastInboundAt = DateTime.now();
+          _connectedAt = _lastInboundAt;
           _startHeartbeat(channel);
           _flushPendingOutbound();
+          _eventsController.add(<String, dynamic>{
+            "type": "ws_connected",
+            "payload": <String, dynamic>{
+              "url": url,
+              "connectedAt": _connectedAt.toIso8601String(),
+            },
+          });
           onConnected?.call();
         }).catchError((Object _) {
           if (!identical(_channel, channel)) return;
@@ -125,6 +141,7 @@ class WsChatService {
   void _markDisconnected() {
     _isConnected = false;
     _isConnecting = false;
+    _connectedAt = DateTime.fromMillisecondsSinceEpoch(0);
   }
 
   void _handleDisconnect(WebSocketChannel channel) {
@@ -134,6 +151,7 @@ class WsChatService {
     _subscription = null;
     _channel = null;
     _notifyDisconnected();
+    if (_manualClose) return;
     _handleConnectionError();
   }
 
@@ -147,7 +165,16 @@ class WsChatService {
       if (!_isConnected) return;
       final Duration idle = DateTime.now().difference(_lastInboundAt);
       if (idle > _heartbeatTimeout) {
-        _handleDisconnect(channel);
+        _sendNow(
+          "ws.keepalive",
+          <String, dynamic>{
+            "clientTime": DateTime.now().toIso8601String(),
+            "reason": "idle_probe",
+          },
+        );
+        if (DateTime.now().difference(_lastInboundAt) > _heartbeatTimeout) {
+          _handleDisconnect(channel);
+        }
         return;
       }
       _sendNow(
@@ -176,6 +203,7 @@ class WsChatService {
 
   void _handleConnectionError() {
     if (_reconnectAttempts < _maxReconnectAttempts && !_isConnecting) {
+      if (_reconnectTimer != null) return;
       _reconnectAttempts++;
 
       final Duration currentDelay = _calculateBackoffDelay();
@@ -205,6 +233,12 @@ class WsChatService {
   }
 
   Duration _calculateBackoffDelay() {
+    final bool wasBriefConnection =
+        _connectedAt != DateTime.fromMillisecondsSinceEpoch(0) &&
+        DateTime.now().difference(_connectedAt) < _minHealthyConnectionDuration;
+    if (wasBriefConnection && _reconnectAttempts <= 2) {
+      return const Duration(milliseconds: 800);
+    }
     final int exponent = _reconnectAttempts - 1;
     final int delayInSeconds = (_initialReconnectDelay.inSeconds * (1 << exponent)).clamp(
       _initialReconnectDelay.inSeconds,
@@ -223,6 +257,24 @@ class WsChatService {
       _connectWithRetry();
     }
     return false;
+  }
+
+  bool sendContactFeedback({
+    required String sessionId,
+    required String channel,
+    required bool responded,
+    int? responseTimeMs,
+    String? feedback,
+    bool? quietHours,
+  }) {
+    return sendEvent("companion.contact_feedback", <String, dynamic>{
+      "sessionId": sessionId,
+      "channel": channel,
+      "responded": responded,
+      if (responseTimeMs != null) "responseTimeMs": responseTimeMs,
+      if (feedback != null && feedback.isNotEmpty) "feedback": feedback,
+      if (quietHours != null) "quietHours": quietHours,
+    });
   }
 
   bool _sendNow(String type, Map<String, dynamic> payload) {
@@ -245,7 +297,9 @@ class WsChatService {
   }
 
   Future<void> close() async {
+    _manualClose = true;
     _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _stopHeartbeat();
     await _subscription?.cancel();
     _subscription = null;

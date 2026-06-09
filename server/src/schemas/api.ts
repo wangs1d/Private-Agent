@@ -513,3 +513,12 @@ export const companionBehaviorSignalUpdateBodySchema = z.object({
   companionNeed: z.number().int().min(0).max(1000).optional(),
   privacyConcern: z.number().int().min(0).max(1000).optional(),
 });
+
+export const companionContactFeedbackBodySchema = z.object({
+  sessionId: z.string().min(1),
+  channel: z.enum(["websocket", "voice", "phone_call"]),
+  responded: z.boolean(),
+  responseTimeMs: z.number().int().min(0).max(86_400_000).optional(),
+  feedback: z.enum(["positive", "negative", "neutral"]).optional(),
+  quietHours: z.boolean().optional(),
+});

@@ -2,12 +2,12 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import {
-  buildLayeredSystemPrompt,
-  finalizeChatSystemPrompt,
-} from "../../agent/prompt-builder.js";
-import {
   streamCompletionWithTools,
 } from "../openai-compatible-tool-loop.js";
+import {
+  applyPromptCacheMessages,
+  preparePromptCachePlan,
+} from "../prefix-cache.js";
 import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 import { getChatThreadStore } from "../chat-thread-store.js";
@@ -90,15 +90,22 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     const startLen = msgs.length;
 
     const overrideSys = streamOpts?.systemPromptOverride?.trim();
-    const baseContent = overrideSys
-      ? overrideSys
-      : buildLayeredSystemPrompt(SYSTEM_PROMPT, streamOpts?.promptContext?.memory);
-    const sysContent = finalizeChatSystemPrompt(baseContent, {
-      tools: Boolean(tools && !overrideSys),
-      masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-      agentAccessMode: streamOpts?.agentAccessMode,
-      desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+    const promptMemory = streamOpts?.promptContext?.memory;
+    const model = streamOpts?.modelOverride?.trim() || this.model;
+    const promptPlan = preparePromptCachePlan({
+      providerId: this.id,
+      model,
+      baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
+      memory: overrideSys ? undefined : promptMemory,
+      finalizeOptions: {
+        tools: Boolean(tools && !overrideSys),
+        masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+        agentAccessMode: streamOpts?.agentAccessMode,
+        desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+      },
+      variant: tools ? "chat-tools" : "chat",
     });
+    const sysContent = promptPlan.fullSystemPrompt;
     if (ephemeral || msgs.length === 0) {
       msgs.push({ role: "system", content: sysContent });
     } else {
@@ -108,9 +115,6 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     if (!ephemeral) {
       this.trimThread(msgs, streamOpts?.maxThreadMessages);
     }
-
-    const model = streamOpts?.modelOverride?.trim() || this.model;
-
     const effectiveStreamOpts: AgentStreamOptions = {
       ...(streamOpts ?? {}),
       disableThinking: kimiThinkingDisabled(streamOpts),
@@ -119,7 +123,21 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     if (tools) {
       let completed = false;
       try {
-          const mergedTools = resolveChatToolsForStream(userTurn.text, effectiveStreamOpts);
+        const mergedTools = resolveChatToolsForStream(userTurn.text, effectiveStreamOpts);
+        const toolPromptPlan = preparePromptCachePlan({
+          providerId: this.id,
+          model,
+          baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
+          memory: overrideSys ? undefined : promptMemory,
+          finalizeOptions: {
+            tools: Boolean(tools && !overrideSys),
+            masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
+            agentAccessMode: streamOpts?.agentAccessMode,
+            desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+          },
+          tools: mergedTools,
+          variant: "chat-tools",
+        });
         const full = await streamCompletionWithTools(
           this.client,
           model,
@@ -131,6 +149,8 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
             tools: mergedTools,
             maxRounds: effectiveStreamOpts?.toolLoop?.maxRounds,
             extraBody: kimiExtraBody(effectiveStreamOpts),
+            promptCache: toolPromptPlan.promptCache,
+            requestSystemMessages: toolPromptPlan.requestSystemMessages,
           },
         );
         completed = true;
@@ -149,12 +169,16 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
 
     let stream;
     try {
-      stream = await this.client.chat.completions.create({
+      const request = {
         model,
-        messages: msgs,
+        messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
         stream: true,
+        ...(promptPlan.promptCache ?? {}),
         ...(kimiExtraBody(effectiveStreamOpts) ? { extra_body: kimiExtraBody(effectiveStreamOpts) } : {}),
-      });
+      };
+      stream = await this.client.chat.completions.create(
+        request as Parameters<typeof this.client.chat.completions.create>[0],
+      );
     } catch (e) {
       msgs.length = startLen;
       throw e;

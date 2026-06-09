@@ -74,9 +74,27 @@ export class IntelligentReminderService {
       phoneConfig?: PhoneCallConfig;
     },
   ): Promise<ReminderInstance> {
+    const userId = typeof config.metadata?.userId === "string" ? config.metadata.userId : null;
+    const history =
+      userId && this.deps.getUserResponseHistory
+        ? await this.deps.getUserResponseHistory(userId)
+        : null;
+    const initialLevel =
+      config.autoSelectInitialLevel && userId
+        ? await this.getRecommendedLevel(userId, config.priority)
+        : config.initialLevel;
+    const escalationRules =
+      config.escalationRules && config.escalationRules.length > 0
+        ? config.escalationRules
+        : this.buildAdaptiveEscalationRules(config.priority, history);
+
     const instance: ReminderInstance = {
-      config,
-      currentLevel: config.initialLevel,
+      config: {
+        ...config,
+        initialLevel,
+        escalationRules,
+      },
+      currentLevel: initialLevel,
       status: "pending",
       createdAt: new Date(),
       escalationCount: 0,
@@ -121,7 +139,10 @@ export class IntelligentReminderService {
   }
 
   private scheduleEscalation(instance: ReminderInstance): void {
-    const rule = this.findNextEscalationRule(instance.currentLevel);
+    const rule = this.findNextEscalationRule(
+      instance.currentLevel,
+      instance.config.escalationRules,
+    );
     if (!rule) {
       return;
     }
@@ -137,10 +158,11 @@ export class IntelligentReminderService {
     this.escalationTimers.set(instance.config.id, timer);
   }
 
-  private findNextEscalationRule(currentLevel: ReminderLevel): ReminderEscalationRule | null {
-    return (
-      this.customEscalationRules.find((r) => r.fromLevel === currentLevel) ?? null
-    );
+  private findNextEscalationRule(
+    currentLevel: ReminderLevel,
+    rules?: ReminderEscalationRule[],
+  ): ReminderEscalationRule | null {
+    return (rules ?? this.customEscalationRules).find((r) => r.fromLevel === currentLevel) ?? null;
   }
 
   async escalateReminder(reminderId: string, reason: string): Promise<ReminderInstance | null> {
@@ -149,7 +171,7 @@ export class IntelligentReminderService {
       return null;
     }
 
-    const rule = this.findNextEscalationRule(instance.currentLevel);
+    const rule = this.findNextEscalationRule(instance.currentLevel, instance.config.escalationRules);
     if (!rule) {
       return null;
     }
@@ -266,17 +288,29 @@ export class IntelligentReminderService {
       return this.getDefaultLevelForPriority(priority);
     }
 
-    const ignoreRate = history.totalReminders > 0
-      ? history.ignoredCount / history.totalReminders
-      : 0;
-
+    const ignoreRate = history.totalReminders > 0 ? history.ignoredCount / history.totalReminders : 0;
     const avgResponseTimeMin = history.averageResponseTimeMs / 1000 / 60;
+    const phoneStats = history.levelStats.phone_call;
+    const ttsStats = history.levelStats.tts_alarm;
+    const popupStats = history.levelStats.popup;
+    const phoneResponseRate = phoneStats.shown > 0 ? phoneStats.responded / phoneStats.shown : 0;
+    const ttsResponseRate = ttsStats.shown > 0 ? ttsStats.responded / ttsStats.shown : 0;
+    const popupResponseRate = popupStats.shown > 0 ? popupStats.responded / popupStats.shown : 0;
 
-    if (priority === "urgent" || ignoreRate > 0.5 || avgResponseTimeMin > 10) {
+    if (
+      priority === "urgent" ||
+      (ignoreRate > 0.5 && phoneResponseRate >= 0.35) ||
+      (avgResponseTimeMin > 10 && phoneResponseRate > ttsResponseRate)
+    ) {
       return "phone_call";
     }
 
-    if (priority === "high" || ignoreRate > 0.3 || avgResponseTimeMin > 5) {
+    if (
+      priority === "high" ||
+      ignoreRate > 0.3 ||
+      avgResponseTimeMin > 5 ||
+      (ttsResponseRate >= popupResponseRate + 0.12 && ttsStats.shown >= 3)
+    ) {
       return "tts_alarm";
     }
 
@@ -292,6 +326,59 @@ export class IntelligentReminderService {
       default:
         return "popup";
     }
+  }
+
+  private buildAdaptiveEscalationRules(
+    priority: ReminderConfig["priority"],
+    history: UserResponseHistory | null,
+  ): ReminderEscalationRule[] {
+    const hour = new Date().getHours();
+    const quietHours = hour >= 23 || hour < 8;
+    const popupTimeoutMs =
+      priority === "urgent"
+        ? 20_000
+        : priority === "high"
+          ? 90_000
+          : priority === "medium"
+            ? 4 * 60_000
+            : 8 * 60_000;
+    const ttsTimeoutMs =
+      priority === "urgent"
+        ? 60_000
+        : priority === "high"
+          ? 4 * 60_000
+          : priority === "medium"
+            ? 8 * 60_000
+            : 12 * 60_000;
+
+    const prefersPhone = history?.preferredLevel === "phone_call";
+    const prefersTts = history?.preferredLevel === "tts_alarm";
+    const ignoreRate =
+      history && history.totalReminders > 0 ? history.ignoredCount / history.totalReminders : 0;
+
+    const rules: ReminderEscalationRule[] = [];
+    rules.push({
+      fromLevel: "popup",
+      toLevel: "tts_alarm",
+      triggerCondition: "timeout",
+      timeoutMs: prefersTts ? Math.round(popupTimeoutMs * 0.75) : popupTimeoutMs,
+    });
+
+    const shouldCall =
+      priority === "urgent" ||
+      (!quietHours && priority === "high") ||
+      prefersPhone ||
+      ignoreRate >= 0.45;
+    if (shouldCall) {
+      rules.push({
+        fromLevel: "tts_alarm",
+        toLevel: "phone_call",
+        triggerCondition: "timeout",
+        timeoutMs: prefersPhone ? Math.round(ttsTimeoutMs * 0.75) : ttsTimeoutMs,
+      });
+    }
+
+    return rules;
   }
 
   cleanup(): void {

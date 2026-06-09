@@ -96,10 +96,7 @@ export class NightlyMemoryTaskService {
 
     try {
       if (this.memoryManager) {
-        const allActorIds = this.getAllActorIds();
-        for (const actorId of allActorIds.slice(0, this.config.consolidationBatchSize)) {
-          await this.memoryManager.consolidateNow(actorId);
-        }
+        await this.runDreamPhase();
         result.consolidated = true;
       }
 
@@ -165,7 +162,7 @@ export class NightlyMemoryTaskService {
     console.log(`[NightlyMemory] Running night tasks for ${today}`);
 
     try {
-      await this.runConsolidationForAll();
+      await this.runDreamPhase();
       await this.triggerDailyArchive();
       await this.syncToLongTermStorage();
       await this.cleanupOldStorage();
@@ -192,6 +189,28 @@ export class NightlyMemoryTaskService {
         }
       } catch (err) {
         console.error(`[NightlyMemory] Consolidation failed for ${actorId}:`, err);
+      }
+    }
+  }
+
+  private async runDreamPhase(): Promise<void> {
+    if (!this.memoryManager) return;
+
+    const actorIds = this.getAllActorIds();
+    console.log(
+      `[NightlyMemory] Dream phase: replay -> compress -> reinforce -> decay for ${Math.min(actorIds.length, this.config.consolidationBatchSize)} actors`,
+    );
+
+    for (const actorId of actorIds.slice(0, this.config.consolidationBatchSize)) {
+      try {
+        const result = await this.memoryManager.consolidateNow(actorId);
+        if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
+          console.log(
+            `[NightlyMemory] Dream phase actor ${actorId}: merged=${result.entriesMerged}, removed=${result.entriesRemoved}, remembered=${result.rememberedCount}, faded=${result.fadedCount}`,
+          );
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] Dream phase failed for ${actorId}:`, err);
       }
     }
   }
@@ -226,27 +245,7 @@ export class NightlyMemoryTaskService {
   }
 
   private async cleanupOldStorage(): Promise<void> {
-    const maxAgeDays = 30;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - maxAgeDays);
-    const cutoffKey = this.formatDateKey(cutoff);
-
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key?.startsWith("pai_daily_chat_") && key < `pai_daily_chat_${cutoffKey}`) {
-          keysToRemove.push(key);
-        }
-      }
-
-      keysToRemove.forEach((key) => localStorage.removeItem(key));
-      if (keysToRemove.length > 0) {
-        console.log(`[NightlyMemory] Cleaned up ${keysToRemove.length} old day records`);
-      }
-    } catch (err) {
-      console.error("[NightlyMemory] Cleanup failed:", err);
-    }
+    return Promise.resolve();
   }
 
   private checkMidnightRollover(): void {
@@ -257,19 +256,14 @@ export class NightlyMemoryTaskService {
   }
 
   private getAllActorIds(): string[] {
-    try {
-      const keys: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key?.startsWith("pai_daily_chat_")) {
-          const day = key.replace("pai_daily_chat_", "");
-          keys.push(day);
-        }
-      }
-      return [...new Set(keys)];
-    } catch {
-      return [];
+    const actorIds = new Set<string>();
+    for (const actorId of this.memorySync?.listSessionIds?.() ?? []) {
+      if (actorId && actorId !== "system") actorIds.add(actorId);
     }
+    for (const actorId of this.dailyDigest?.listActorIds?.() ?? []) {
+      if (actorId) actorIds.add(actorId);
+    }
+    return [...actorIds];
   }
 
   private getTodayKey(): string {

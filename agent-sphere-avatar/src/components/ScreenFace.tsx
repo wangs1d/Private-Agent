@@ -44,7 +44,7 @@ function drawMouth(
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
-  if (mood === "speaking" || mouthOpen > 0.1) {
+  if (mood === "happy" || mouthOpen > 0.1) {
     const open = Math.min(1, mouthOpen);
     const w = 12 + open * 15;
     const h = 5 + open * 24;
@@ -124,8 +124,8 @@ function drawFace(
   const cy = CANVAS / 2;
   const safe = FACE_SAFE_SCALE;
   const calm = isCalmMood(mood);
-  const glow = 0.4 + energy * 0.6 + (mood === "speaking" ? speakPulse * 0.15 : 0);
-  const breathe = calm ? 0 : mood === "speaking" ? Math.sin(t * 1.5) * 0.03 : Math.sin(t * 1.5) * 0.012;
+  const glow = 0.4 + energy * 0.6;
+  const breathe = calm ? 0 : Math.sin(t * 1.5) * 0.012;
 
   const bg = ctx.createRadialGradient(cx, cy - 10, 8, cx, cy, CANVAS * 0.48);
   bg.addColorStop(0, `rgba(18, 28, 42, ${0.55 + glow * 0.15})`);
@@ -189,43 +189,7 @@ function drawFace(
   drawEye(cx - eyeSpacing, -1);
   drawEye(cx + eyeSpacing, 1, mood === "happy" ? 0.9 : 1);
 
-  if (mood === "speaking" && mouthOpen > 0.08) {
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 2.5;
-    ctx.lineCap = "round";
-    const browY = eyeY - eyeH - 7;
-    const arch = -3;
-    ctx.beginPath();
-    ctx.moveTo(cx - eyeSpacing - 11, browY);
-    ctx.quadraticCurveTo(cx - eyeSpacing, browY + arch, cx - eyeSpacing + 11, browY + 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(cx + eyeSpacing - 11, browY + 2);
-    ctx.quadraticCurveTo(cx + eyeSpacing, browY + arch, cx + eyeSpacing + 11, browY);
-    ctx.stroke();
-  }
-
-  if (mood === "speaking" && energy > 0.45 && mouthOpen > 0.12) {
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 2.5;
-    const arcY = eyeY - 14 - surprise * 3;
-    ctx.beginPath();
-    ctx.arc(cx - eyeSpacing + curveComp * 0.35, arcY, 7, Math.PI * 0.12, Math.PI * 0.88);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cx + eyeSpacing - curveComp * 0.35, arcY, 7, Math.PI * 0.12, Math.PI * 0.88);
-    ctx.stroke();
-  }
-
   drawMouth(ctx, mood, cx, cy + 30 * safe + surprise * 3, mouthOpen * 0.82, surprise, accent);
-
-  if (mood === "speaking" && speakPulse > 0.5) {
-    ctx.fillStyle = `rgba(136, 187, 255, ${0.06 + speakPulse * 0.08})`;
-    ctx.beginPath();
-    ctx.ellipse(cx - 40, cy + 14, 7, 4, 0, 0, Math.PI * 2);
-    ctx.ellipse(cx + 40, cy + 14, 7, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
 }
 
 /**
@@ -267,7 +231,7 @@ export function ScreenFace({ mood, energy, signalsRef, children }: ScreenFacePro
       bump * (calm ? 0.4 : 1) + excitement * (calm ? 0.08 : 0.2) + userSpin * 0.45 + userTouch * 0.2,
       lookRef.current.x,
       lookRef.current.y,
-      mood === "speaking" ? mouthPhase.current : 0,
+      mood === "happy" ? mouthPhase.current : 0,
     );
     texture.needsUpdate = true;
   };
@@ -317,7 +281,7 @@ export function ScreenFace({ mood, energy, signalsRef, children }: ScreenFacePro
       lookLerp + userTouch * 0.08,
     );
 
-    if (mood === "speaking") {
+    if (mood === "happy") {
       const fast = (Math.sin(t * 19) + 1) * 0.5;
       const mid = (Math.sin(t * 8.5 + 1.2) + 1) * 0.5;
       const slow = (Math.sin(t * 3.6) + 1) * 0.5;

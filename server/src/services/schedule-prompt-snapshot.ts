@@ -31,34 +31,29 @@ export function buildSchedulePromptSnapshot(
   const now = Date.now();
   const extended = shouldUseExtendedScheduleWindow(userText);
   const horizonDays = extended ? 7 : 1;
-  const maxItems = extended ? 8 : 5;
+  const maxItems = extended ? 5 : 3;
   const from = new Date(now).toISOString();
-  const to = new Date(now + horizonDays * 86400000).toISOString();
+  const to = new Date(now + horizonDays * 86_400_000).toISOString();
   const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
+  const rangeLabel = extended ? `${horizonDays}d` : "today";
 
   if (tasks.length === 0) {
-    return extended
-      ? "【当前日程 · 服务端实时】未来 7 天暂无活跃提醒或日程。"
-      : "【今日日程 · 服务端实时】今天暂无活跃提醒或日程。";
+    return `SCH|range=${rangeLabel}|count=0`;
   }
 
   const lines = tasks.slice(0, maxItems).map((task) => {
     const when = task.nextRunAt ?? task.runAt;
     const recurrence = RECURRENCE_LABEL[task.recurrence] ?? task.recurrence;
     const title = task.reminderMessage?.trim() || task.title;
-    return `- ${title} | ${when} | ${recurrence}`;
+    return `- ${when}|${recurrence}|${title}`;
   });
 
   const hiddenCount = tasks.length - lines.length;
-  const header = extended
-    ? `【当前日程 · 服务端实时】未来 ${horizonDays} 天共 ${tasks.length} 条活跃提醒或日程：`
-    : `【今日日程 · 服务端实时】今天共 ${tasks.length} 条活跃提醒或日程：`;
+  const header = `SCH|range=${rangeLabel}|count=${tasks.length}|shown=${lines.length}|more=${Math.max(0, hiddenCount)}`;
 
   return [
     header,
     ...lines,
-    hiddenCount > 0 ? `（另有 ${hiddenCount} 条未展开，需要更多时调用 calendar.list_tasks。）` : "",
-    "回答日程相关问题时优先以这份快照为准；需要更远时间范围时再调用日程工具检索。",
   ]
     .filter(Boolean)
     .join("\n");

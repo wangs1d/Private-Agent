@@ -19,6 +19,8 @@ export interface ReminderConfig {
   scheduledAt: Date;
   expiresAt?: Date;
   metadata?: Record<string, unknown>;
+  escalationRules?: ReminderEscalationRule[];
+  autoSelectInitialLevel?: boolean;
 }
 
 export interface PopupReminderConfig {

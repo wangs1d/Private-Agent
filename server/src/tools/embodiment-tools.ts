@@ -19,7 +19,6 @@ const EMBODIMENT_MOODS: EmbodimentMood[] = [
   "idle",
   "listening",
   "thinking",
-  "speaking",
   "happy",
   "alert",
 ];
@@ -146,7 +145,7 @@ export const EMBODIMENT_CHAT_TOOLS: ChatCompletionTool[] = [
           mood: {
             type: "string",
             enum: EMBODIMENT_MOODS,
-            description: "idle|listening|thinking|speaking|happy|alert",
+            description: "idle|listening|thinking|happy|alert",
           },
           energy: { type: "number", description: "0～1 呼吸灯强度" },
           caption: { type: "string", description: "玻璃屏短文案；传空字符串清除" },

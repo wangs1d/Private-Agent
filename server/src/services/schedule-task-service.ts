@@ -206,7 +206,8 @@ export class ScheduleTaskService {
   }
 
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {
-    const runAt = this.parseRunAt(input.runAt);
+    const tz = input.timezone?.trim() || "Asia/Shanghai";
+    const runAt = this.parseRunAt(input.runAt, tz);
     this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
     const now = new Date().toISOString();
     const task: ScheduleTaskRecord = {
@@ -216,7 +217,7 @@ export class ScheduleTaskService {
       description: input.description.trim(),
       kind: input.kind,
       recurrence: input.recurrence,
-      timezone: input.timezone?.trim() || "Asia/Shanghai",
+      timezone: tz,
       runAt: runAt.toISOString(),
       nextRunAt: runAt.toISOString(),
       status: "active",
@@ -251,7 +252,8 @@ export class ScheduleTaskService {
       updatedAt: new Date().toISOString(),
     };
     if (input.runAt) {
-      const runAt = this.parseRunAt(input.runAt).toISOString();
+      const tz = input.timezone?.trim() || task.timezone;
+      const runAt = this.parseRunAt(input.runAt, tz).toISOString();
       next.runAt = runAt;
       next.nextRunAt = runAt;
     }
@@ -363,15 +365,19 @@ export class ScheduleTaskService {
       updated.nextRunAt = null;
       return updated;
     }
-    const anchor = new Date(updated.nextRunAt ?? updated.runAt);
+    // 将上次执行的 UTC 时间转回目标时区的本地时间，在本地时间维度上推算下一周期
+    const anchorUtc = new Date(updated.nextRunAt ?? updated.runAt);
+    const local = this.toLocalInTimezone(anchorUtc, updated.timezone);
+
     if (updated.recurrence === "daily") {
-      anchor.setUTCDate(anchor.getUTCDate() + 1);
+      local.setDate(local.getDate() + 1);
     } else if (updated.recurrence === "weekly") {
-      anchor.setUTCDate(anchor.getUTCDate() + 7);
+      local.setDate(local.getDate() + 7);
     } else {
-      anchor.setUTCFullYear(anchor.getUTCFullYear() + 1);
+      local.setFullYear(local.getFullYear() + 1);
     }
-    updated.nextRunAt = anchor.toISOString();
+    // 将推算后的本地时间转回 UTC 存储
+    updated.nextRunAt = this.toUtcFromLocalTime(local, updated.timezone).toISOString();
     return updated;
   }
 
@@ -401,15 +407,83 @@ export class ScheduleTaskService {
     }
   }
 
-  private parseRunAt(raw: string): Date {
+  private parseRunAt(raw: string, timezone: string): Date {
     const date = new Date(raw);
     if (Number.isNaN(date.getTime())) {
       throw new Error("runAt 时间格式无效");
     }
-    if (date.getTime() < Date.now() - 5000) {
+    // 将用户输入的时间解释为目标时区的本地时间，转为 UTC 存储
+    const utc = this.toUtcFromLocalTime(date, timezone);
+    if (utc.getTime() < Date.now() - 5000) {
       throw new Error("runAt 必须是未来时间");
     }
-    return date;
+    return utc;
+  }
+
+  /**
+   * 把「视为某时区本地时间的 Date」转换为对应的 UTC Date。
+   * 例如 localTime 的时分是 22:00，timezone 是 Asia/Shanghai，
+   * 则返回值对应上海时间 22:00 的 UTC 时刻（当天 14:00 UTC）。
+   */
+  private toUtcFromLocalTime(localTime: Date, timezone: string): Date {
+    const y = localTime.getFullYear();
+    const mo = localTime.getMonth();
+    const d = localTime.getDate();
+    const h = localTime.getHours();
+    const mi = localTime.getMinutes();
+    const s = localTime.getSeconds();
+
+    // 先按「UTC 分量 = 用户期望的本地分量」构造临时时间
+    let tentative = new Date(Date.UTC(y, mo, d, h, mi, s));
+
+    // 查看这个 UTC 时刻在目标时区里显示为什么本地时间
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(tentative);
+    const tzVals: Record<string, number> = {};
+    for (const p of parts) {
+      if (p.type !== "literal") tzVals[p.type] = Number(p.value);
+    }
+
+    // 偏移量 = 期望本地时间 - 目标时区实际显示的时间
+    let deltaMs =
+      ((h - (tzVals.hour ?? 0)) * 60 + (mi - (tzVals.minute ?? 0))) * 60000 +
+      (s - (tzVals.second ?? 0)) * 1000;
+
+    // 处理跨日
+    if (deltaMs > 43200000) deltaMs -= 86400000;
+    if (deltaMs < -43200000) deltaMs += 86400000;
+
+    return new Date(tentative.getTime() + deltaMs);
+  }
+
+  /**
+   * 将 UTC Date 转换为「目标时区的本地时间分量」表示的新 Date。
+   * 返回的 Date 在系统本地时区中，但其年月日时分秒等于目标时区的本地时间。
+   */
+  private toLocalInTimezone(utcDate: Date, timezone: string): Date {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(utcDate);
+    const v: Record<string, number> = {};
+    for (const p of parts) if (p.type !== "literal") v[p.type] = Number(p.value);
+    return new Date(v.year, v.month - 1, v.day, v.hour ?? 0, v.minute ?? 0, v.second ?? 0);
   }
 
   private validateKindPayload(

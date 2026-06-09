@@ -52,6 +52,8 @@ const EYE_HIT_RADIUS = MODEL.bodyRadius * Math.sin(MODEL.screenHitHalfAngle);
 const EYE_CLICK_DRAG_PX = 10;
 /** 实时反应：旋转/拖动累积到该强度阈值就触发一次身体晃动 */
 const LIVE_REACT_THRESHOLD = 0.12;
+/** onLiveReact 冷却间隔（ms），防止快速拖动时频繁触发 shake 动画导致卡顿 */
+const LIVE_REACT_COOLDOWN_MS = 80;
 /** 旋转过冲衰减：在 useFrame 中用 decay 指数衰减 */
 
 /** 左键拖动平移、右键拖动旋转 */
@@ -92,14 +94,20 @@ export function useSphereUserDrag({
   const panRemainderRef = useRef({ x: 0, y: 0 });
   /** 实时反应累积强度（每次跨越 LIVE_REACT_THRESHOLD 触发一次 onLiveReact） */
   const liveReactBucketRef = useRef(0);
+  /** 上次触发 onLiveReact 的时间戳（用于冷却限流，防止频繁 shake 导致卡顿） */
+  const lastLiveReactTimeRef = useRef(0);
+  /** 物理引擎 angularVelocity 同步节流计数器（每 3 次写入一次即可） */
+  const physicsSyncCounterRef = useRef(0);
   /** Electron 窗口拖拽须用 screen 坐标，否则 moveBy 后 client 坐标反馈导致抖动 */
   const panUseScreenSpaceRef = useRef(false);
-  /** RAF 节流：累积本轮 pointermove 的位移增量，每帧最多提交一次 applyDragDelta */
-  const pendingDeltaRef = useRef({ x: 0, y: 0 });
-  const rafIdRef = useRef<number | null>(null);
+  /** 直接应用位移增量（移除 RAF 节流，避免与 R3F useFrame 渲染帧不同步导致卡顿） */
   const bodyCenterRef = useRef(new THREE.Vector3(0, 1.6, 0));
   const eyeLocalRef = useRef(new THREE.Vector3(...MODEL.glassScreenPosition));
   const eyeWorldRef = useRef(new THREE.Vector3());
+  /** 记录最后一次 pointerup 的坐标（用于 eye-click 检测，解决 window/mesh 双路径竞争） */
+  const lastUpCoordsRef = useRef({ clientX: 0, clientY: 0 });
+  /** 防止同一轮拖拽重复触发 onEyeClick */
+  const eyeClickFiredRef = useRef(false);
 
   const applyFaceSignals = useCallback(
     (touch: number, spin: number) => {
@@ -141,14 +149,18 @@ export function useSphereUserDrag({
           postToHost({ type: SPHERE_MSG.pan, dx, dy });
         }
 
-        // 实时反应：拖动也累计强度，到达阈值触发晃动
+        // 实时反应：拖动也累计强度，到达阈值触发晃动（带冷却限流）
         liveReactBucketRef.current += (Math.abs(dx) + Math.abs(dy)) / 100;
         while (liveReactBucketRef.current >= LIVE_REACT_THRESHOLD) {
           liveReactBucketRef.current -= LIVE_REACT_THRESHOLD;
-          onLiveReact?.(
-            Math.min(1, liveReactBucketRef.current / LIVE_REACT_THRESHOLD + 0.3),
-            "pan",
-          );
+          const now = performance.now();
+          if (now - lastLiveReactTimeRef.current >= LIVE_REACT_COOLDOWN_MS) {
+            lastLiveReactTimeRef.current = now;
+            onLiveReact?.(
+              Math.min(1, liveReactBucketRef.current / LIVE_REACT_THRESHOLD + 0.3),
+              "pan",
+            );
+          }
         }
         return;
       }
@@ -163,11 +175,10 @@ export function useSphereUserDrag({
 
       const group = userRotRef.current;
       if (group) {
-        // Y 轴自由 360° 旋转；X 轴用 wrapPi 维持过冲衰减
+        // Y 轴自由 360° 旋转；X 轴跟随输入（惯性阶段由 useFrame lerp 回归）
         group.rotation.y += rotY;
         group.rotation.x += rotX;
-        // X 轴软回归 0，避免模型上下颠倒
-        group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, 0.04);
+        // 防止浮点溢出
         if (group.rotation.x > Math.PI * 2) group.rotation.x -= Math.PI * 2;
         else if (group.rotation.x < -Math.PI * 2) group.rotation.x += Math.PI * 2;
       }
@@ -180,112 +191,142 @@ export function useSphereUserDrag({
       };
 
       if (api) {
-        api.angularVelocity.set(spinVelRef.current.x * 2.2, spinVelRef.current.y * 3.5, spinVelRef.current.x * 0.4);
+        physicsSyncCounterRef.current++;
+        if (physicsSyncCounterRef.current % 3 === 0) {
+          api.angularVelocity.set(spinVelRef.current.x * 2.2, spinVelRef.current.y * 3.5, spinVelRef.current.x * 0.4);
+        }
       }
 
       const spin = Math.min(1, (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.18);
       applyFaceSignals(1, spin);
       onTouch?.({ phase: "drag", spinStrength: spin });
 
-      // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动
+      // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动（带冷却限流）
       const intensityDelta = Math.abs(rotY) + Math.abs(rotX) * 1.4;
       liveReactBucketRef.current += intensityDelta;
       while (liveReactBucketRef.current >= LIVE_REACT_THRESHOLD) {
         liveReactBucketRef.current -= LIVE_REACT_THRESHOLD;
-        onLiveReact?.(
-          Math.min(1, 0.4 + spin * 0.5 + liveReactBucketRef.current / LIVE_REACT_THRESHOLD * 0.4),
-          "rotate",
-        );
+        const now = performance.now();
+        if (now - lastLiveReactTimeRef.current >= LIVE_REACT_COOLDOWN_MS) {
+          lastLiveReactTimeRef.current = now;
+          onLiveReact?.(
+            Math.min(1, 0.4 + spin * 0.5 + liveReactBucketRef.current / LIVE_REACT_THRESHOLD * 0.4),
+            "rotate",
+          );
+        }
       }
     },
     [api, applyFaceSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
   );
 
-  /** RAF 节流：将累积的位移增量一次性提交给 applyDragDelta */
-  const flushPendingDelta = useCallback(() => {
-    rafIdRef.current = null;
-    const { x: dx, y: dy } = pendingDeltaRef.current;
-    if (dx === 0 && dy === 0) return;
-    pendingDeltaRef.current = { x: 0, y: 0 };
-    applyDragDelta(dx, dy);
-  }, [applyDragDelta]);
+  /** 直接调用 applyDragDelta（移除 RAF 节流，消除与 R3F 渲染帧不同步导致的卡顿） */
+  const applyPointerMove = useCallback(
+    (clientX: number, clientY: number, screenX: number, screenY: number) => {
+      const p = readPointer(clientX, clientY, screenX, screenY);
+      const dx = p.x - lastPointerRef.current.x;
+      const dy = p.y - lastPointerRef.current.y;
+      lastPointerRef.current = { x: p.x, y: p.y };
+      applyDragDelta(dx, dy);
+    },
+    [readPointer, applyDragDelta],
+  );
+  const finishDrag = useCallback(
+    (upClientX?: number, upClientY?: number) => {
+      if (!draggingRef.current) return;
 
-  /** 调度 RAF flush（确保同一帧内只调度一次） */
-  const scheduleFlush = useCallback(() => {
-    if (rafIdRef.current != null) return;
-    rafIdRef.current = requestAnimationFrame(flushPendingDelta);
-  }, [flushPendingDelta]);
-
-  const finishDrag = useCallback(() => {
-    if (!draggingRef.current) return;
-
-    // 拖拽结束：立即 flush 累积位移，取消待执行的 RAF
-    if (rafIdRef.current != null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-      const { x: dx, y: dy } = pendingDeltaRef.current;
-      pendingDeltaRef.current = { x: 0, y: 0 };
-      if (dx !== 0 || dy !== 0) {
-        applyDragDelta(dx, dy);
-      }
-    }
-
-    const mode = dragModeRef.current;
-    draggingRef.current = false;
-    pointerIdRef.current = null;
-
-    let releaseInfo: { mode: DragMode; totalRotationDeg: number; panDistance: number; spinStrength: number };
-
-    if (mode === "rotate") {
-      const spinStrength = Math.min(
-        1,
-        (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
-      );
-      const totalRotationDeg = (totalYawRadRef.current * 180) / Math.PI;
-      const totalPitchDeg = (totalPitchRadRef.current * 180) / Math.PI;
-
-      if (spinStrength > SPIN_EXCITE_THRESHOLD) {
-        onExcite?.(0.6 + spinStrength * 0.9);
-        applyFaceSignals(0.6, spinStrength);
-      } else if (totalRotRef.current > 8) {
-        applyFaceSignals(0.45, spinStrength * 0.5);
+      // 记录 up 坐标（用于 eye-click 检测）
+      if (upClientX != null && upClientY != null) {
+        lastUpCoordsRef.current = { clientX: upClientX, clientY: upClientY };
       }
 
-      onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
-      releaseInfo = {
-        mode: "rotate",
-        totalRotationDeg: Math.abs(totalRotationDeg) + Math.abs(totalPitchDeg),
-        panDistance: 0,
-        spinStrength,
-      };
-    } else {
-      if (window.sphereOverlay?.moveBy) {
-        const rx = Math.round(panRemainderRef.current.x);
-        const ry = Math.round(panRemainderRef.current.y);
-        if (rx !== 0 || ry !== 0) {
-          window.sphereOverlay.moveBy(rx, ry);
+      const mode = dragModeRef.current;
+      const wasPan = mode === "pan";
+      const button = activeButtonRef.current;
+      const panPx = panMovedRef.current;
+
+      draggingRef.current = false;
+      pointerIdRef.current = null;
+
+      let releaseInfo: { mode: DragMode; totalRotationDeg: number; panDistance: number; spinStrength: number };
+
+      if (mode === "rotate") {
+        const spinStrength = Math.min(
+          1,
+          (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
+        );
+        const totalRotationDeg = (totalYawRadRef.current * 180) / Math.PI;
+        const totalPitchDeg = (totalPitchRadRef.current * 180) / Math.PI;
+
+        if (spinStrength > SPIN_EXCITE_THRESHOLD) {
+          onExcite?.(0.6 + spinStrength * 0.9);
+          applyFaceSignals(0.6, spinStrength);
+        } else if (totalRotRef.current > 8) {
+          applyFaceSignals(0.45, spinStrength * 0.5);
+        }
+
+        onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
+        releaseInfo = {
+          mode: "rotate",
+          totalRotationDeg: Math.abs(totalRotationDeg) + Math.abs(totalPitchDeg),
+          panDistance: 0,
+          spinStrength,
+        };
+      } else {
+        if (window.sphereOverlay?.moveBy) {
+          const rx = Math.round(panRemainderRef.current.x);
+          const ry = Math.round(panRemainderRef.current.y);
+          if (rx !== 0 || ry !== 0) {
+            window.sphereOverlay.moveBy(rx, ry);
+          }
+        }
+        panRemainderRef.current = { x: 0, y: 0 };
+        panUseScreenSpaceRef.current = false;
+        onPanEnd?.();
+        releaseInfo = {
+          mode: "pan",
+          totalRotationDeg: 0,
+          panDistance: panPx,
+          spinStrength: 0,
+        };
+      }
+
+      onDragRelease?.(releaseInfo);
+      liveReactBucketRef.current = 0;
+
+      dragModeRef.current = "pan";
+      activeButtonRef.current = 0;
+      panMovedRef.current = 0;
+      totalYawRadRef.current = 0;
+      totalPitchRadRef.current = 0;
+
+      // Eye-click 检测：左键短距离平移 + 命中眼部区域 → 触发 onEyeClick
+      // 使用 guard 防止 window/mesh 双路径重复触发
+      if (
+        !eyeClickFiredRef.current &&
+        onEyeClick &&
+        wasPan &&
+        button === 0 &&
+        panPx < EYE_CLICK_DRAG_PX
+      ) {
+        const coords = upClientX != null ? { clientX: upClientX, clientY: upClientY! } : lastUpCoordsRef.current;
+        if (
+          pointerHitsSphere(
+            coords.clientX,
+            coords.clientY,
+            gl.domElement,
+            camera,
+            raycaster,
+            eyeWorldRef.current,
+            EYE_HIT_RADIUS,
+          )
+        ) {
+          eyeClickFiredRef.current = true;
+          onEyeClick();
         }
       }
-      panRemainderRef.current = { x: 0, y: 0 };
-      panUseScreenSpaceRef.current = false;
-      onPanEnd?.();
-      releaseInfo = {
-        mode: "pan",
-        totalRotationDeg: 0,
-        panDistance: panMovedRef.current,
-        spinStrength: 0,
-      };
-    }
-
-    onDragRelease?.(releaseInfo);
-    liveReactBucketRef.current = 0;
-
-    dragModeRef.current = "pan";
-    activeButtonRef.current = 0;
-    panMovedRef.current = 0;
-    totalYawRadRef.current = 0;
-    totalPitchRadRef.current = 0;
-  }, [applyFaceSignals, onDragRelease, onExcite, onPanEnd, onTouch]);
+    },
+    [applyDragDelta, applyFaceSignals, camera, gl.domElement, onDragRelease, onExcite, onEyeClick, onPanEnd, onTouch, raycaster],
+  );
 
   const beginDrag = useCallback(
     (
@@ -309,8 +350,11 @@ export function useSphereUserDrag({
       totalRotRef.current = 0;
       panMovedRef.current = 0;
       panRemainderRef.current = { x: 0, y: 0 };
+      physicsSyncCounterRef.current = 0;
       touchPulseRef.current = 1;
       applyFaceSignals(1, 0);
+      // 每轮拖拽开始时重置 eye-click 标记
+      eyeClickFiredRef.current = false;
       if (mode === "rotate") {
         onTouch?.({ phase: "start" });
       }
@@ -324,20 +368,6 @@ export function useSphereUserDrag({
     if (button === 2) return "rotate";
     return null;
   };
-
-  const applyPointerMove = useCallback(
-    (clientX: number, clientY: number, screenX: number, screenY: number) => {
-      const p = readPointer(clientX, clientY, screenX, screenY);
-      const dx = p.x - lastPointerRef.current.x;
-      const dy = p.y - lastPointerRef.current.y;
-      lastPointerRef.current = { x: p.x, y: p.y };
-      // 累积位移增量，通过 RAF 节流每帧最多提交一次
-      pendingDeltaRef.current.x += dx;
-      pendingDeltaRef.current.y += dy;
-      scheduleFlush();
-    },
-    [readPointer, scheduleFlush],
-  );
 
   const handlePointerDown = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
@@ -362,29 +392,10 @@ export function useSphereUserDrag({
     (e: ThreeEvent<PointerEvent>) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
       e.stopPropagation();
-      const wasPan = dragModeRef.current === "pan";
-      const panPx = panMovedRef.current;
-      const button = activeButtonRef.current;
-      finishDrag();
-      if (
-        onEyeClick &&
-        wasPan &&
-        button === 0 &&
-        panPx < EYE_CLICK_DRAG_PX &&
-        pointerHitsSphere(
-          e.clientX,
-          e.clientY,
-          gl.domElement,
-          camera,
-          raycaster,
-          eyeWorldRef.current,
-          EYE_HIT_RADIUS,
-        )
-      ) {
-        onEyeClick();
-      }
+      // finishDrag 内部统一处理 eye-click 检测（含防重复 guard）
+      finishDrag(e.clientX, e.clientY);
     },
-    [camera, finishDrag, gl.domElement, onEyeClick, raycaster],
+    [finishDrag],
   );
 
   const handleBodyHover = useCallback(
@@ -454,7 +465,8 @@ export function useSphereUserDrag({
 
     const onWindowUp = (e: PointerEvent) => {
       if (!draggingRef.current || pointerIdRef.current !== e.pointerId) return;
-      finishDrag();
+      // finishDrag 内部统一处理 eye-click 检测（含防重复 guard）
+      finishDrag(e.clientX, e.clientY);
     };
 
     window.addEventListener("pointermove", onWindowMove, { passive: false });

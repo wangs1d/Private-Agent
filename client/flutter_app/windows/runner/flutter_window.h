@@ -12,6 +12,8 @@
 
 #include "win32_window.h"
 #include "sphere_overlay_window.h"
+#include "incoming_call_window.h"
+#include "connected_call_window.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -37,6 +39,12 @@ class FlutterWindow : public Win32Window {
   // Desktop overlay window for 3D Agent sphere.
   std::unique_ptr<SphereOverlayWindow> overlay_window_;
 
+  // 独立来电悬浮窗（脱离主窗口存在）
+  std::unique_ptr<IncomingCallWindow> incoming_call_window_;
+
+  // 独立"通话中"悬浮窗（接通后展示，仿电脑微信电话）
+  std::unique_ptr<ConnectedCallWindow> connected_call_window_;
+
   // Method channel for overlay control.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       overlay_channel_;
@@ -51,6 +59,30 @@ class FlutterWindow : public Win32Window {
   void HandleDesktopBridgeMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // pai/incoming_call MethodChannel —— 控制独立来电悬浮窗
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      incoming_call_channel_;
+
+  void HandleIncomingCallMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // 把 IncomingCallWindow 的回调以 EventChannel / invokeMethod 方式回报给 Dart
+  void ReportIncomingCallEvent(const std::string& event,
+                               const std::string& detail);
+
+  // pai/connected_call MethodChannel —— 控制独立"通话中"窗口
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      connected_call_channel_;
+
+  void HandleConnectedCallMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // 把 ConnectedCallWindow 的回调以 invokeMethod 方式回报给 Dart
+  void ReportConnectedCallEvent(const std::string& event,
+                                const flutter::EncodableMap& extra);
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

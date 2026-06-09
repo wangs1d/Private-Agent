@@ -7,7 +7,6 @@ export type EmbodimentMood =
   | "idle"
   | "listening"
   | "thinking"
-  | "speaking"
   | "happy"
   | "alert";
 
@@ -85,20 +84,6 @@ export function embodimentThinking(
     caption: caption || undefined,
     source: extra?.source ?? "agent_status",
     ...extra,
-  });
-}
-
-export function embodimentSpeaking(
-  sessionId: string,
-  send: EmbodimentSender,
-  energy: number,
-  caption?: string,
-): void {
-  emitEmbodimentPatch(send, sessionId, {
-    mood: "speaking",
-    energy,
-    caption,
-    source: "assistant_chunk",
   });
 }
 

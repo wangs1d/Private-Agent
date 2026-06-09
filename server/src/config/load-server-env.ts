@@ -14,9 +14,9 @@ export function loadServerEnv(): void {
   const localPath = join(serverRoot, ".env.local");
 
   if (existsSync(envPath)) {
-    loadEnv({ path: envPath });
+    loadEnv({ path: envPath, quiet: true });
   }
   if (existsSync(localPath)) {
-    loadEnv({ path: localPath, override: true });
+    loadEnv({ path: localPath, override: true, quiet: true });
   }
 }

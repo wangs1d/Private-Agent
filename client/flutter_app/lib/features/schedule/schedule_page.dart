@@ -853,6 +853,8 @@ class _SchedulePageState extends State<SchedulePage> {
             Expanded(
               child: Text(
                 statusText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: statusColor,
                   fontSize: 12,
@@ -870,11 +872,15 @@ class _SchedulePageState extends State<SchedulePage> {
               color: cs.onSurfaceVariant.withValues(alpha: 0.9),
             ),
             const SizedBox(width: 4),
-            Text(
-              _formatClock(e.startAt),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: cs.onSurfaceVariant,
-                fontSize: 12,
+            Expanded(
+              child: Text(
+                _formatClock(e.startAt),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                  fontSize: 12,
+                ),
               ),
             ),
           ],

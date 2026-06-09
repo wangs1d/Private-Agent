@@ -2,6 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
+import {
+  areLinesConflicting,
+  dedupeMemoryLines,
+  extractOverwriteKey,
+  limitLinesByChars,
+} from "./memory-record-utils.js";
 
 type SessionMemory = {
   revision: number;
@@ -70,6 +76,10 @@ export class AgentMemorySyncService {
     return { revision: s.revision, entries };
   }
 
+  listSessionIds(): string[] {
+    return Object.keys(this.data.sessions);
+  }
+
   /** 按 actor 串行化写入，避免并发 patch  revision 冲突丢写。 */
   private enqueueActorWrite<T>(actorId: string, fn: () => T | Promise<T>): Promise<T> {
     const prev = this.writeQueues.get(actorId) ?? Promise.resolve();
@@ -131,19 +141,56 @@ export class AgentMemorySyncService {
   private doAppendMemorySummaryLine(actorId: string, line: string, topicHint?: string): boolean {
     const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
     const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
+    const archiveMaxChars = Math.max(maxChars, 48_000);
     const stamp = new Date().toISOString();
     const topicTag = formatMemoryTopicTag(topicHint ?? inferMemoryTopic(line));
     const addition = `[${stamp}] ${topicTag} ${line}`;
     for (let i = 0; i < 12; i++) {
-      const { revision, entries } = this.getSnapshot(actorId, ["memory_summary"]);
+      const { revision, entries } = this.getSnapshot(actorId, [
+        "memory_summary",
+        "memory_summary_forgotten",
+      ]);
       const prev = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-      const next = `${prev}${prev ? "\n" : ""}${addition}`.slice(-maxChars);
+      const forgottenPrev =
+        typeof entries.memory_summary_forgotten === "string"
+          ? entries.memory_summary_forgotten
+          : "";
+      const merged = this.mergeMemorySummaryLines(prev, addition);
+      const { kept, evicted } = limitLinesByChars(merged, maxChars, { preserveTail: true });
+      const forgotten = dedupeMemoryLines(
+        [...(forgottenPrev ? forgottenPrev.split("\n").filter(Boolean) : []), ...evicted],
+        { preferLatest: true },
+      );
+      const forgottenTrimmed = limitLinesByChars(forgotten, archiveMaxChars, {
+        preserveTail: true,
+      }).kept;
       const r = this.applyPatchUnsafe(actorId, revision, [
-        { key: "memory_summary", op: "put", value: next },
+        { key: "memory_summary", op: "put", value: kept.join("\n") },
+        {
+          key: "memory_summary_forgotten",
+          op: "put",
+          value: forgottenTrimmed.join("\n"),
+        },
       ]);
       if (r.ok) return true;
     }
     return false;
+  }
+
+  private mergeMemorySummaryLines(prev: string, addition: string): string[] {
+    const base = prev
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const overwriteKey = extractOverwriteKey(addition);
+    const filtered = overwriteKey
+      ? base.filter((line) => {
+          const lineKey = extractOverwriteKey(line);
+          if (!lineKey || lineKey !== overwriteKey) return true;
+          return !areLinesConflicting(line, addition);
+        })
+      : base;
+    return dedupeMemoryLines([...filtered, addition], { preferLatest: true });
   }
 
 }

@@ -62,16 +62,9 @@ export { restorePurchasedSkillsFromWorldState } from "./services/world-skill-res
 export { skillMarketListingsForSession } from "./services/world-skill-listings.js";
 export { registerWorldRoutes } from "./routes/world.js";
 export { registerWorldFreeMarketRoutes } from "./routes/world-free-market.js";
-export { registerWorldGomokuRoutes } from "./routes/world-gomoku.js";
-export { registerWorldDoudizhuRoutes } from "./routes/world-doudizhu.js";
-export { registerWorldZhajinhuaRoutes } from "./routes/world-zhajinhua.js";
 export { registerGameCenterRoutes } from "./routes/game-center.js";
 export { registerWorldSocialRoutes } from "./routes/world-social.js";
 export { registerWorldFreeMarketTools } from "./tools/world-free-market-tools.js";
-export { registerWorldGomokuTools } from "./tools/world-gomoku-tools.js";
-export { registerWorldDoudizhuTools } from "./tools/world-doudizhu-tools.js";
-export { registerWorldZhajinhuaTools } from "./tools/world-zhajinhua-tools.js";
-export { registerWorldBlackjackTools } from "./tools/world-blackjack-tools.js";
 export { registerWorldSocialTools } from "./tools/world-social-tools.js";
 export { registerWorldOpenRegistryTools } from "./tools/world-open-registry-tools.js";
 export { registerWorldRoomTools } from "./tools/world-room-tools.js";

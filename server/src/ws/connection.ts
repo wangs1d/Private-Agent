@@ -14,6 +14,10 @@ import type { RealFundsWalletService } from "../services/real-funds-wallet-servi
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
+import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
+import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
+import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type {
   IncomingPhoneUserAction,
   VirtualPhoneIncomingCoordinator,
@@ -64,6 +68,35 @@ import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { aipDispatchWsSchema, walletRequestSchema } from "../schemas/api.js";
 
+type SocketWithHeartbeat = {
+  send(data: string): void;
+  close(code?: number, data?: string): void;
+  ping?(data?: Buffer, mask?: boolean, cb?: (err?: Error) => void): void;
+  on(event: string, listener: (...args: any[]) => void): void;
+  readyState?: number;
+  isAlive?: boolean;
+};
+
+const WS_READY_STATE_OPEN = 1;
+const WS_HEARTBEAT_INTERVAL_MS = 25_000;
+const WS_HEARTBEAT_GRACE_MS = 10_000;
+
+function safeSocketSend(socket: SocketWithHeartbeat, data: string): boolean {
+  const open = socket.readyState === undefined || socket.readyState === WS_READY_STATE_OPEN;
+  if (!open) return false;
+  try {
+    socket.send(data);
+    return true;
+  } catch {
+    try {
+      socket.close(1011, "send_failed");
+    } catch {
+      // Ignore close failures on broken sockets.
+    }
+    return false;
+  }
+}
+
 /**
  * 从Fastify请求中获取客户端IP地址
  */
@@ -104,6 +137,7 @@ export type WsRouteDeps = {
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   virtualPhoneService: VirtualPhoneService;
   virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
+  userPersonalizationService: UserPersonalizationService;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -125,6 +159,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     desktopBridgeCoordinator,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
+    userPersonalizationService,
   } = deps;
 
   const broadcastPartitionPresence = (partitionId: string): void => {
@@ -142,11 +177,55 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     "/ws",
     { websocket: true },
     (socket, request) => {
+      const ws = socket as SocketWithHeartbeat;
       let boundActorId: string | undefined;
       let initAsDesktopBridge = false;
-      // 获取客户端IP地址
       const clientIp = getClientIp(request);
-      socket.on("close", () => {
+      ws.isAlive = true;
+      let heartbeatMissedAt = 0;
+      const heartbeatTimer = setInterval(() => {
+        const open = ws.readyState === undefined || ws.readyState === WS_READY_STATE_OPEN;
+        if (!open) return;
+        if (ws.isAlive === false) {
+          const overdue = Date.now() - heartbeatMissedAt;
+          if (heartbeatMissedAt > 0 && overdue >= WS_HEARTBEAT_GRACE_MS) {
+            app.log.warn(
+              { actorId: boundActorId, clientIp },
+              "WebSocket heartbeat timeout, closing stale connection",
+            );
+            try {
+              ws.close(1001, "heartbeat_timeout");
+            } catch {
+              // Ignore close failures on stale sockets.
+            }
+          }
+          return;
+        }
+        ws.isAlive = false;
+        heartbeatMissedAt = Date.now();
+        try {
+          ws.ping?.();
+        } catch {
+          try {
+            ws.close(1001, "heartbeat_ping_failed");
+          } catch {
+            // Ignore close failures on broken sockets.
+          }
+        }
+      }, WS_HEARTBEAT_INTERVAL_MS);
+      heartbeatTimer.unref?.();
+
+      ws.on("pong", () => {
+        ws.isAlive = true;
+        heartbeatMissedAt = 0;
+      });
+
+      ws.on("error", (err) => {
+        app.log.warn({ err, actorId: boundActorId, clientIp }, "WebSocket transport error");
+      });
+
+      ws.on("close", () => {
+        clearInterval(heartbeatTimer);
         const detached = worldPartitionWsRegistry.detachSocket(socket);
         if (detached) {
           broadcastPartitionPresence(detached.partitionId);
@@ -162,9 +241,12 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         }
       });
 
-      socket.on("message", async (raw: Buffer) => {
+      ws.on("message", async (raw: Buffer) => {
+        ws.isAlive = true;
+        heartbeatMissedAt = 0;
         const sendUnifiedError = (code: string, message: string, traceId?: string): void => {
-          socket.send(
+          safeSocketSend(
+            ws,
             JSON.stringify({
               type: ServerEventType.ErrorEvent,
               payload: { code, message, traceId },
@@ -176,7 +258,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         try {
           event = JSON.parse(raw.toString()) as EventEnvelope;
         } catch {
-          socket.send(
+          safeSocketSend(
+            ws,
             JSON.stringify({
               type: ServerEventType.ErrorEvent,
               payload: { code: "BAD_JSON", message: "无法解析事件 JSON" },
@@ -186,20 +269,17 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         }
 
         if (event.type === "ws.keepalive") {
-          try {
-            socket.send(
-              JSON.stringify({
-                type: "ws.keepalive_ack",
-                payload: {
-                  ok: true,
-                  serverTime: new Date().toISOString(),
-                  sessionId: boundActorId,
-                },
-              }),
-            );
-          } catch {
-            // Connection already dropped; the client will reconnect.
-          }
+          safeSocketSend(
+            ws,
+            JSON.stringify({
+              type: "ws.keepalive_ack",
+              payload: {
+                ok: true,
+                serverTime: new Date().toISOString(),
+                sessionId: boundActorId,
+              },
+            }),
+          );
           return;
         }
 
@@ -312,6 +392,54 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 callId,
                 status: action === "accept" ? "answered_by_user" : "delegation_started",
                 action,
+              },
+            }),
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.CompanionContactFeedback) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const pl = event.payload as Record<string, unknown>;
+          const sessionId = String(pl.sessionId ?? boundActorId).trim() || boundActorId;
+          if (sessionId !== boundActorId) {
+            sendUnifiedError("FORBIDDEN", "sessionId 与当前连接不一致");
+            return;
+          }
+          const channel = String(pl.channel ?? "").trim();
+          const responded = pl.responded === true;
+          const feedbackRaw = pl.feedback == null ? "" : String(pl.feedback).trim();
+          const quietHours = pl.quietHours === true;
+          const responseTimeMs =
+            typeof pl.responseTimeMs === "number" && Number.isFinite(pl.responseTimeMs)
+              ? Math.max(0, Math.floor(pl.responseTimeMs))
+              : undefined;
+          if (!["websocket", "voice", "phone_call"].includes(channel)) {
+            sendUnifiedError("BAD_CONTACT_FEEDBACK", "channel 必须是 websocket、voice 或 phone_call");
+            return;
+          }
+          if (feedbackRaw && !["positive", "negative", "neutral"].includes(feedbackRaw)) {
+            sendUnifiedError("BAD_CONTACT_FEEDBACK", "feedback 必须是 positive、negative 或 neutral");
+            return;
+          }
+          userPersonalizationService.observeContactOutcome(boundActorId, {
+            channel: channel as "websocket" | "voice" | "phone_call",
+            responded,
+            responseTimeMs,
+            feedback: feedbackRaw
+              ? (feedbackRaw as "positive" | "negative" | "neutral")
+              : undefined,
+            quietHours,
+          });
+          socket.send(
+            JSON.stringify({
+              type: "companion.contact_feedback_ack",
+              payload: {
+                ok: true,
+                understanding: userPersonalizationService.getUnderstandingSnapshot(boundActorId),
               },
             }),
           );
@@ -499,6 +627,20 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             },
             event.payload,
           );
+          return;
+        }
+
+        if (event.type === ClientEventType.ChatClearHistory) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const provider = createExternalChatProviderFromEnv();
+          if (provider?.clearSession) {
+            const masterOn = getAgentRuntimeConfig().masterDelegation.enabled;
+            const chatSessionId = resolvePrimaryChatSessionId(boundActorId, masterOn);
+            provider.clearSession(chatSessionId);
+          }
           return;
         }
 

@@ -84,6 +84,10 @@ export const CORE_TOOL_LIBRARY = {
     label: "电商 Cookie 读价",
     prefixes: ["browser."],
   },
+  mcp: {
+    label: "MCP 外部工具（动态注册）",
+    prefixes: ["mcp."],
+  },
 } as const;
 
 const CORE_EXACT_NAMES = new Set<string>([

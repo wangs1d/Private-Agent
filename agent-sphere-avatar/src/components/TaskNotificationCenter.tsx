@@ -13,6 +13,17 @@ const TYPE_ICON: Record<TaskEventType, string> = {
 const TOAST_LIFETIME_MS = 6000;
 const MAX_TOASTS = 5;
 
+/** 过滤掉乱码/无意义的垃圾事件 */
+function isGarbageEvent(title: string): boolean {
+  if (!title || title.trim().length === 0) return true;
+  const trimmed = title.trim();
+  if (/^[\x00-\x08\x0B\x0C\x0E-\x1F]+$/.test(trimmed)) return true;
+  if (/^[^\u4e00-\u9fa5a-zA-Z0-9\s\u3000-\u303f\uff00-\uffef]{3,}$/.test(trimmed)) return true;
+  if (/^[A-Z]无法/.test(trimmed)) return true;
+  if (/pretaction|无法件|unknow/i.test(trimmed)) return true;
+  return false;
+}
+
 interface ToastItem extends TaskEvent {
   dismissAt: number;
 }
@@ -28,6 +39,8 @@ export function TaskNotificationCenter({ events }: TaskNotificationCenterProps) 
 
   const addToast = useCallback((event: TaskEvent) => {
     if (lastNotifiedIdRef.current.has(event.id)) return;
+    // 过滤垃圾事件
+    if (isGarbageEvent(event.title)) return;
     lastNotifiedIdRef.current.add(event.id);
     const toast: ToastItem = {
       ...event,

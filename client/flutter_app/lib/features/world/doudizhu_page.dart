@@ -71,6 +71,11 @@ class _DoudizhuPageState extends State<DoudizhuPage> {
 
   void _onLobbyWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.doudizhu.subscribe_lobby", <String, dynamic>{});
+      unawaited(_refresh());
+      return;
+    }
     if (type != _kWsDoudizhuLobbySnapshot) return;
     final Object? payload = event["payload"];
     if (payload is! Map) return;
@@ -254,6 +259,11 @@ class _DoudizhuTablePageState extends State<DoudizhuTablePage> {
 
   void _onTableWs(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
+    if (type == "ws_connected") {
+      widget.ws.sendEvent("world.doudizhu.subscribe", <String, dynamic>{"tableId": widget.tableId});
+      unawaited(_loadSnapshotOnce());
+      return;
+    }
     if (type != _kWsDoudizhuTableSnapshot) return;
     final Object? payload = event["payload"];
     if (payload is! Map) return;

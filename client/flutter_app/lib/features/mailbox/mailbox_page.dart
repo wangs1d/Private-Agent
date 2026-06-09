@@ -345,9 +345,12 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
                           children: [
                             Row(
                               children: [
-                                Text(
-                                  otherActorId,
-                                  style: theme.textTheme.titleSmall,
+                                Expanded(
+                                  child: Text(
+                                    otherActorId,
+                                    style: theme.textTheme.titleSmall,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Container(

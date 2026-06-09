@@ -12,7 +12,6 @@ type SessionAutonomyState = {
   processing: boolean;
   lastCommandAt: number;
   lastMoodAt: number;
-  speakingTicks: number;
   registered: boolean;
 };
 
@@ -55,7 +54,6 @@ export class EmbodimentAutonomyService {
       processing: prev?.processing ?? false,
       lastCommandAt: prev?.lastCommandAt ?? 0,
       lastMoodAt: Date.now(),
-      speakingTicks: 0,
       registered: true,
     });
   }
@@ -83,12 +81,6 @@ export class EmbodimentAutonomyService {
     const moodChanged = nextMood !== prevMood;
     st.mood = nextMood;
     st.lastMoodAt = Date.now();
-
-    if (nextMood === "speaking") {
-      st.speakingTicks += 1;
-    } else if (moodChanged) {
-      st.speakingTicks = 0;
-    }
 
     if (nextMood === "listening") {
       if (moodChanged) {
@@ -118,25 +110,6 @@ export class EmbodimentAutonomyService {
           { action: "roam", strength: randomRoamStrength(0.72), source: "autonomy:thinking_pulse" },
           send,
           minGap,
-        );
-      }
-      return;
-    }
-
-    if (nextMood === "speaking") {
-      if (st.speakingTicks === 1 || st.speakingTicks % 3 === 0) {
-        const energy = typeof patch.energy === "number" ? patch.energy : 0.6;
-        const strength = randomRoamStrength(1.05 + energy * 0.55);
-        const wild = energy > 0.62 && (st.speakingTicks > 1 || energy > 0.78);
-        this.maybeCommand(
-          sessionId,
-          {
-            action: wild ? "excite" : "roam",
-            strength,
-            source: wild ? "autonomy:speaking_excited" : "autonomy:speaking",
-          },
-          send,
-          st.speakingTicks === 1 ? 0 : 3200,
         );
       }
       return;
@@ -227,7 +200,6 @@ export class EmbodimentAutonomyService {
         processing: false,
         lastCommandAt: 0,
         lastMoodAt: Date.now(),
-        speakingTicks: 0,
         registered: false,
       };
       this.sessions.set(sessionId, st);

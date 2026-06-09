@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { FastifyInstance } from "fastify";
 import {
+  companionContactFeedbackBodySchema,
   companionBehaviorSignalUpdateBodySchema,
   companionBillReminderBodySchema,
   companionOnboardingBodySchema,
@@ -34,7 +35,12 @@ function toBehaviorSignals(v: unknown): BehaviorSignals {
 }
 
 export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
-  const { companionService, scheduleTaskService, agentMemorySyncService } = deps;
+  const {
+    companionService,
+    scheduleTaskService,
+    agentMemorySyncService,
+    userPersonalizationService,
+  } = deps;
 
   app.get("/companion/profile", async (request, reply) => {
     const parsed = companionSessionQuerySchema.safeParse(request.query);
@@ -91,7 +97,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
         kind: "reminder",
         runAt: due.toISOString(),
         recurrence: "none",
-        timezone: "America/New_York",
+        timezone: "Asia/Shanghai",
         reminderMessage: `Your ${b.billName} bill is due in ${b.daysBefore} day(s).`,
       }).catch(() => null);
       if (task?.taskId) createdBills.push(task.taskId);
@@ -128,7 +134,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       kind: "agent_task",
       runAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       recurrence: "daily",
-      timezone: "America/New_York",
+      timezone: "Asia/Shanghai",
       agentTask: {
         prompt: `Check latest price for "${body.item}". Alert me only when <= ${body.targetPrice} ${body.currency}.`,
         accessMode: "sandbox",
@@ -153,7 +159,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       kind: "reminder",
       runAt: due.toISOString(),
       recurrence: "none",
-      timezone: "America/New_York",
+      timezone: "Asia/Shanghai",
       reminderMessage: `Your ${body.billName} bill is due in ${body.daysBefore} day(s).`,
     });
     return { ok: true, taskId: task.taskId, nextRunAt: task.nextRunAt };
@@ -174,7 +180,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       kind: "agent_task",
       runAt: runAt.toISOString(),
       recurrence: "none",
-      timezone: body.timezone ?? "America/New_York",
+      timezone: body.timezone ?? "Asia/Shanghai",
       agentTask: {
         prompt: `Compare options for "${body.item}" under budget ${body.budget}. Give best value pick + quick summary.`,
         accessMode: "sandbox",
@@ -194,6 +200,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       return Array.isArray(raw?.facts) ? raw?.facts?.slice(0, 20) : [];
     })();
     const profile = companionService.getProfile(sessionId);
+    const understanding = userPersonalizationService?.getUnderstandingSnapshot(sessionId) ?? null;
     const topSignals = [
       { key: "shoppingInterest", value: behavior.shoppingInterest },
       { key: "planningInterest", value: behavior.planningInterest },
@@ -202,7 +209,14 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
     ]
       .sort((a, b) => b.value - a.value)
       .slice(0, 2);
-    return { ok: true, behavior, profile, topSignals, facts };
+    return {
+      ok: true,
+      behavior,
+      profile,
+      topSignals,
+      facts,
+      understanding,
+    };
   });
 
   app.patch("/companion/insights", async (request, reply) => {
@@ -223,5 +237,25 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
     ]);
     if (!result.ok) return reply.code(409).send({ ok: false, reason: result.reason });
     return { ok: true, behavior: next };
+  });
+
+  app.post("/companion/contact-feedback", async (request, reply) => {
+    const parsed = companionContactFeedbackBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    if (!userPersonalizationService) {
+      return reply.code(503).send({ ok: false, error: "user personalization unavailable" });
+    }
+    const body = parsed.data;
+    userPersonalizationService.observeContactOutcome(body.sessionId, {
+      channel: body.channel,
+      responded: body.responded,
+      responseTimeMs: body.responseTimeMs,
+      feedback: body.feedback,
+      quietHours: body.quietHours,
+    });
+    return {
+      ok: true,
+      understanding: userPersonalizationService.getUnderstandingSnapshot(body.sessionId),
+    };
   });
 }

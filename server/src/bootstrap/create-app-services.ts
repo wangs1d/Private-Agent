@@ -10,14 +10,10 @@ import {
   GomokuService,
   loadPersistedCommunitySkills,
   registerGameCenterRoutes,
-  registerWorldDoudizhuTools,
-  registerWorldGomokuTools,
-  registerWorldBlackjackTools,
   registerWorldFreeMarketTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
   registerWorldSocialTools,
-  registerWorldZhajinhuaTools,
   SocialFeedService,
   ZhaJinHuaService,
   AgentWorldServerEventType,
@@ -64,6 +60,7 @@ import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
 import { AnticipationEngineService } from "../services/anticipation-engine-service.js";
 import { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
 import { DesktopPresenceSignalService } from "../services/desktop-presence-signal-service.js";
+import { WebhookService } from "../services/webhook/index.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
 import { AuditService } from "../services/audit-service.js";
@@ -290,6 +287,21 @@ export async function createAppServices(): Promise<AppServices> {
     sendToClient: async (userId, payload) => {
       await wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
     },
+    onContactOutcome: (params) => {
+      const channel =
+        params.channel === "popup"
+          ? "websocket"
+          : params.channel === "tts_alarm"
+            ? "voice"
+            : "phone_call";
+      userPersonalizationService.observeContactOutcome(params.userId, {
+        channel,
+        responded: params.responded,
+        responseTimeMs: params.responseTimeMs,
+        feedback: params.feedback,
+        quietHours: params.quietHours,
+      });
+    },
     logger: app.log,
   });
   await intelligentReminder.userResponsePersistence.load();
@@ -412,10 +424,6 @@ export async function createAppServices(): Promise<AppServices> {
   socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
   registerWorldOpenRegistryTools(toolRegistry, worldService);
   registerWorldRoomTools(toolRegistry, worldService);
-  registerWorldGomokuTools(toolRegistry, gomokuService);
-  registerWorldDoudizhuTools(toolRegistry, doudizhuService);
-  registerWorldZhajinhuaTools(toolRegistry, zhaJinHuaService);
-  registerWorldBlackjackTools(toolRegistry, blackjackService);
   registerWorldSocialTools(toolRegistry, socialFeedService);
   registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
   toolRegistry.setWorldService(worldService);
@@ -617,6 +625,41 @@ export async function createAppServices(): Promise<AppServices> {
   new GomokuAgentTurnService(gomokuService, toolRegistry, externalChat, promptContextBuilder);
 
   const proactiveOutbound = new ProactiveOutboundMessageService(async (userId, payload) => {
+    const proactivePayload =
+      payload && typeof payload.payload === "object" && payload.payload
+        ? (payload.payload as Record<string, unknown>)
+        : null;
+    const title = String(proactivePayload?.title ?? "Agent 主动联系");
+    const text = String(proactivePayload?.text ?? "");
+    const channel = String(proactivePayload?.channel ?? "websocket");
+
+    if (channel === "phone_call") {
+      const result = await virtualPhoneService.callUserWithRinging({
+        fromActorId: userId,
+        toUserId: userId,
+        transcript: `${title}。${text}`,
+        ringStyle: "reminder",
+      });
+      if (result.ok && result.pushed) return true;
+    }
+
+    if (channel === "voice") {
+      const ttsResult = await ttsService.synthesizeMp3Base64(`${title}。${text}`);
+      return wsConnectionRegistry.trySend(
+        userId,
+        JSON.stringify({
+          type: "agent.proactive_voice",
+          payload: {
+            ...proactivePayload,
+            tts:
+              ttsResult.ok
+                ? { format: ttsResult.format, base64: ttsResult.base64, provider: ttsResult.provider }
+                : null,
+          },
+        }),
+      );
+    }
+
     return wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
   });
   const proactiveLifeRuntimeService = new ProactiveLifeRuntimeService(
@@ -624,6 +667,7 @@ export async function createAppServices(): Promise<AppServices> {
     anticipationEngineService,
     proactiveOutbound,
     userPersonalizationService,
+    (actorId) => Boolean(wsConnectionRegistry.get(actorId)),
   );
   proactiveLifeRuntimeService.start();
   const proactiveCenter = new ProactiveAgentCenter(
@@ -631,8 +675,13 @@ export async function createAppServices(): Promise<AppServices> {
     promptContextBuilder,
     proactiveOutbound,
     userPersonalizationService,
+    (actorId) => Boolean(wsConnectionRegistry.get(actorId)),
   );
   proactiveCenter.start();
+
+  // ========== Webhook 事件驱动 ==========
+  const webhookService = new WebhookService();
+  webhookService.start();
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
@@ -717,6 +766,8 @@ export async function createAppServices(): Promise<AppServices> {
     lifeSignalHubService,
     marketSignalService,
     proactiveLifeRuntimeService,
+    userPersonalizationService,
+    webhookService,
   });
 
   registerWebSocketRoute(app, {
@@ -737,6 +788,7 @@ export async function createAppServices(): Promise<AppServices> {
     desktopBridgeCoordinator,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
+    userPersonalizationService,
   });
 
   return {
@@ -775,5 +827,6 @@ export async function createAppServices(): Promise<AppServices> {
     lifeSignalHubService,
     marketSignalService,
     proactiveLifeRuntimeService,
+    webhookService,
   };
 }

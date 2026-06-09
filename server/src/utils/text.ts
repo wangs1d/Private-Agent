@@ -7,6 +7,33 @@ export function chunkText(text: string, size: number): string[] {
 }
 
 /**
+ * 折叠相邻的完全相同行（包括跨多轮工具调用时 LLM 自带的「同句复述」）。
+ * 不区分大小写、不去重非相邻行,避免误伤包含相同短语的并列项。
+ * 用于清理最终回复里与「实时进度句」重复的尾巴,让用户只看到一次。
+ */
+export function dedupeAdjacentLines(text: string): string {
+  if (!text) return text;
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  let lastNormalized = "";
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) {
+      // 保留空行作为段落分隔,不做折叠
+      if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+    const normalized = trimmed.toLowerCase();
+    if (normalized === lastNormalized) continue;
+    out.push(raw);
+    lastNormalized = normalized;
+  }
+  // 去掉尾部多余空行
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.join("\n");
+}
+
+/**
  * 将 LLM 原始状态行转换为用户友好的简短动作描述。
  *
  * 设计原则：

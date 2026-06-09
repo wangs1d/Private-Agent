@@ -28,15 +28,19 @@ export function buildTaskContextProfile(message: string): TaskContextProfile {
   };
 }
 
-export function buildTaskContextPrompt(message: string, now: Date = new Date()): string {
+function compactTaskFlags(profile: TaskContextProfile): string {
+  const flags: string[] = [];
+  if (profile.complexity === "multi_step") flags.push("multi-step");
+  if (profile.needsNarrativeRecall) flags.push("recall");
+  if (profile.likelyNeedsFreshFacts) flags.push("fresh-facts");
+  if (profile.likelyPersistsState) flags.push("state-change");
+  if (profile.likelyCodeOrProjectWork) flags.push("code");
+  return flags.join(", ");
+}
+
+export function buildTaskContextPrompt(message: string, now: Date = new Date()): string | undefined {
   const profile = buildTaskContextProfile(message);
-  const flags = [
-    `complexity=${profile.complexity}`,
-    `needsNarrativeRecall=${profile.needsNarrativeRecall}`,
-    `likelyNeedsFreshFacts=${profile.likelyNeedsFreshFacts}`,
-    `likelyPersistsState=${profile.likelyPersistsState}`,
-    `likelyCodeOrProjectWork=${profile.likelyCodeOrProjectWork}`,
-  ].join(", ");
+  const flags = compactTaskFlags(profile);
 
   const needsDetailedPolicy =
     profile.complexity === "multi_step" ||
@@ -46,20 +50,11 @@ export function buildTaskContextPrompt(message: string, now: Date = new Date()):
     profile.likelyCodeOrProjectWork;
 
   if (!needsDetailedPolicy) {
-    return [
-      `Runtime timestamp: ${now.toISOString()}. Interpret relative dates from this timestamp; use clock tools when the user asks for exact current time/date/location.`,
-      `Task profile: ${flags}.`,
-      "Operating policy: answer directly when the request is simple and no tool or persistent action is needed.",
-    ].join("\n");
+    return undefined;
   }
 
   return [
-    `Runtime timestamp: ${now.toISOString()}. Interpret relative dates from this timestamp; use clock tools when the user asks for exact current time/date/location.`,
-    `Task profile: ${flags}.`,
-    "Operating policy:",
-    "- If facts may be stale, local-state-dependent, or user-specific, use the available tool before giving a confident answer.",
-    "- If the task changes persistent state or performs an external action, verify required fields and report the resulting id/status when available.",
-    "- If this is code/project work, inspect the relevant project context before deciding on an implementation.",
-    "- Before the final answer, check whether the user's actual request is satisfied; name any blocker or uncertainty plainly.",
+    `CTX|now=${now.toISOString()}|flags=${flags || "direct"}`,
+    "POLICY|facts=tool-first|state=verify+report|code=inspect-first|final=state-blockers",
   ].join("\n");
 }

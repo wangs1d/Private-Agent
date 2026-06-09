@@ -32,7 +32,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
   @override
   Future<void> init() async {
     if (_storageFile != null) return;
-    
+
     // Web 平台不支持文件系统，使用内存存储
     if (kIsWeb) {
       print('[IsarLocalHistoryStore] Web 平台 detected, using memory storage');
@@ -41,77 +41,125 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       _preferences = <String, dynamic>{};
       return;
     }
-    
-    // 非 Web 平台使用文件系统
-    final dir = await getApplicationDocumentsDirectory();
-    _storageFile = File("${dir.path}/private_ai_agent_store.json");
-    if (!await _storageFile!.exists()) {
-      await _storageFile!.writeAsString(
-        jsonEncode(<String, dynamic>{
-          "sessions": <Map<String, dynamic>>[],
-          "messages": <String, List<Map<String, dynamic>>>{},
-          "relayInbound": <String, List<Map<String, dynamic>>>{},
-          "preferences": <String, dynamic>{},
-          "scheduleEvents": <Map<String, dynamic>>[],
-        }),
-      );
+
+    // 非 Web 平台使用文件系统（带容错处理）
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      _storageFile = File("${dir.path}/private_ai_agent_store.json");
+    } catch (e) {
+      print('[IsarLocalHistoryStore] Failed to get documents directory: $e');
+      _storageFile = null; // 使用内存存储作为后备
       return;
     }
-    final String raw = await _storageFile!.readAsString();
-    if (raw.trim().isEmpty) return;
-    final Map<String, dynamic> decoded = jsonDecode(raw) as Map<String, dynamic>;
-    final List<dynamic> sessionRaw = decoded["sessions"] as List<dynamic>? ?? <dynamic>[];
-    _sessions
-      ..clear()
-      ..addAll(
-        sessionRaw.map((dynamic s) {
-          final Map<String, dynamic> map = s as Map<String, dynamic>;
-          return ChatSession(
-            sessionId: map["sessionId"] as String,
-            title: map["title"] as String,
-            createdAt: DateTime.parse(map["createdAt"] as String),
-          );
-        }),
-      );
-    final Map<String, dynamic> messagesRaw =
-        decoded["messages"] as Map<String, dynamic>? ?? <String, dynamic>{};
-    _messages.clear();
-    for (final MapEntry<String, dynamic> entry in messagesRaw.entries) {
-      final List<dynamic> list = entry.value as List<dynamic>;
-      _messages[entry.key] = list.map((dynamic m) {
-        final Map<String, dynamic> map = m as Map<String, dynamic>;
-        return ChatMessage(
-          messageId: map["messageId"] as String,
-          sessionId: map["sessionId"] as String,
-          role: map["role"] as String,
-          text: map["text"] as String,
-          timestamp: DateTime.parse(map["timestamp"] as String),
-          attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
-          playUrl: map["playUrl"] as String?,
+
+    try {
+      if (!await _storageFile!.exists()) {
+        await _storageFile!.writeAsString(
+          jsonEncode(<String, dynamic>{
+            "sessions": <Map<String, dynamic>>[],
+            "messages": <String, List<Map<String, dynamic>>>{},
+            "relayInbound": <String, List<Map<String, dynamic>>>{},
+            "preferences": <String, dynamic>{},
+            "scheduleEvents": <Map<String, dynamic>>[],
+          }),
         );
-      }).toList();
-    }
-    final Map<String, dynamic> relayRaw =
-        decoded["relayInbound"] as Map<String, dynamic>? ?? <String, dynamic>{};
-    _relayInbound.clear();
-    for (final MapEntry<String, dynamic> entry in relayRaw.entries) {
-      final List<dynamic> list = entry.value as List<dynamic>? ?? <dynamic>[];
-      _relayInbound[entry.key] = list
-          .map((dynamic m) => Map<String, dynamic>.from(m as Map))
-          .toList();
-    }
-    _preferences = Map<String, dynamic>.from(
-      decoded["preferences"] as Map<String, dynamic>? ?? <String, dynamic>{},
-    );
-    final List<dynamic> schedRaw =
-        decoded["scheduleEvents"] as List<dynamic>? ?? <dynamic>[];
-    _scheduleEvents
-      ..clear()
-      ..addAll(
-        schedRaw.map(
-          (dynamic e) => Map<String, dynamic>.from(e as Map),
-        ),
+        return;
+      }
+      final String raw = await _storageFile!.readAsString();
+      if (raw.trim().isEmpty) return;
+
+      // 安全解析 JSON（处理损坏的存储文件）
+      final Map<String, dynamic> decoded;
+      try {
+        decoded = jsonDecode(raw) as Map<String, dynamic>;
+      } catch (e) {
+        print('[IsarLocalHistoryStore] JSON parse error: $e');
+        print('[IsarLocalHistoryStore] Backing up corrupted file...');
+        try {
+          final backupFile = File("${_storageFile!.path}.backup.${DateTime.now().millisecondsSinceEpoch}");
+          await _storageFile!.copy(backupFile.path);
+          print('[IsarLocalHistoryStore] Backup created: ${backupFile.path}');
+        } catch (backupError) {
+          print('[IsarLocalHistoryStore] Backup failed: $backupError');
+        }
+        // 重建空的存储文件
+        await _storageFile!.writeAsString(
+          jsonEncode(<String, dynamic>{
+            "sessions": <Map<String, dynamic>>[],
+            "messages": <String, List<Map<String, dynamic>>>{},
+            "relayInbound": <String, List<Map<String, dynamic>>>{},
+            "preferences": <String, dynamic>{},
+            "scheduleEvents": <Map<String, dynamic>>[],
+          }),
+        );
+        return;
+      }
+
+      // 解析 sessions
+      final List<dynamic> sessionRaw = decoded["sessions"] as List<dynamic>? ?? <dynamic>[];
+      _sessions
+        ..clear()
+        ..addAll(
+          sessionRaw.map((dynamic s) {
+            final Map<String, dynamic> map = s as Map<String, dynamic>;
+            return ChatSession(
+              sessionId: map["sessionId"] as String,
+              title: map["title"] as String,
+              createdAt: DateTime.parse(map["createdAt"] as String),
+            );
+          }),
+        );
+
+      // 解析 messages
+      final Map<String, dynamic> messagesRaw =
+          decoded["messages"] as Map<String, dynamic>? ?? <String, dynamic>{};
+      _messages.clear();
+      for (final MapEntry<String, dynamic> entry in messagesRaw.entries) {
+        final List<dynamic> list = entry.value as List<dynamic>;
+        _messages[entry.key] = list.map((dynamic m) {
+          final Map<String, dynamic> map = m as Map<String, dynamic>;
+          return ChatMessage(
+            messageId: map["messageId"] as String,
+            sessionId: map["sessionId"] as String,
+            role: map["role"] as String,
+            text: map["text"] as String,
+            timestamp: DateTime.parse(map["timestamp"] as String),
+            attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
+            playUrl: map["playUrl"] as String?,
+          );
+        }).toList();
+      }
+
+      // 解析 relay inbound
+      final Map<String, dynamic> relayRaw =
+          decoded["relayInbound"] as Map<String, dynamic>? ?? <String, dynamic>{};
+      _relayInbound.clear();
+      for (final MapEntry<String, dynamic> entry in relayRaw.entries) {
+        final List<dynamic> list = entry.value as List<dynamic>? ?? <dynamic>[];
+        _relayInbound[entry.key] = list
+            .map((dynamic m) => Map<String, dynamic>.from(m as Map))
+            .toList();
+      }
+
+      // 解析 preferences
+      _preferences = Map<String, dynamic>.from(
+        decoded["preferences"] as Map<String, dynamic>? ?? <String, dynamic>{},
       );
+
+      // 解析 schedule events
+      final List<dynamic> schedRaw =
+          decoded["scheduleEvents"] as List<dynamic>? ?? <dynamic>[];
+      _scheduleEvents
+        ..clear()
+        ..addAll(
+          schedRaw.map(
+            (dynamic e) => Map<String, dynamic>.from(e as Map),
+          ),
+        );
+    } catch (e) {
+      print('[IsarLocalHistoryStore] Init error: $e');
+      // 不抛出异常，让应用继续运行
+    }
   }
 
   /// 某自然日内的日程（按开始时间升序）。
@@ -193,9 +241,61 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     await _flush();
   }
 
+  /// 清理本地「裸 taskId」格式的孤儿日程事项。
+  /// 历史原因：`schedule.tasks_changed` WS 块曾直接用 taskId 作为 id
+  /// 写入 `ScheduleEvent`，与 `tool.result` → `upsertLocalScheduleFromToolResult`
+  /// 写入的 `taskId@<iso>` occurrence 事件并存，导致日程页出现重复条目。
+  /// 修复后该 WS 块不再写入；此处一次性清掉历史孤儿。
+  /// - 保留：id 含 `@` 的 occurrence 事件（如 `taskId@2026-06-08T10:01:00.000Z`）
+  /// - 保留：以 `se-` 开头的纯本地事项
+  /// - 删除：其余裸 taskId（无 `@` 且不以 `se-` 开头）
+  /// 返回被清理的条数。
+  Future<int> cleanOrphanScheduleEvents() async {
+    await init();
+    final int before = _scheduleEvents.length;
+    _scheduleEvents.removeWhere((Map<String, dynamic> m) {
+      final String id = (m["id"] as String?)?.trim() ?? "";
+      if (id.isEmpty) return true;
+      if (id.startsWith("se-")) return false;
+      if (id.contains("@")) return false;
+      return true;
+    });
+    final int removed = before - _scheduleEvents.length;
+    if (removed > 0) await _flush();
+    return removed;
+  }
+
   Future<void> clearAllScheduleEvents() async {
     await init();
     _scheduleEvents.clear();
+    await _flush();
+  }
+
+  /// 删除单条消息（按 messageId）
+  @override
+  Future<void> deleteMessage(String messageId) async {
+    await init();
+    bool changed = false;
+    for (final List<ChatMessage> list in _messages.values) {
+      final int before = list.length;
+      list.removeWhere((ChatMessage m) => m.messageId == messageId);
+      if (list.length != before) changed = true;
+    }
+    if (changed) await _flush();
+  }
+
+  /// 删除某个会话下的全部消息
+  @override
+  Future<void> deleteMessagesForSession(String sessionId) async {
+    await init();
+    if (_messages.remove(sessionId) != null) await _flush();
+  }
+
+  /// 清除所有会话的全部消息
+  @override
+  Future<void> clearAllMessages() async {
+    await init();
+    _messages.clear();
     await _flush();
   }
 
@@ -493,7 +593,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       print('[IsarLocalHistoryStore] Web 平台，跳过文件写入');
       return;
     }
-    
+
     final File file = _storageFile!;
     final Map<String, dynamic> encoded = <String, dynamic>{
       "sessions": _sessions

@@ -24,19 +24,13 @@ import {
   GomokuService,
   loadPersistedCommunitySkills,
   reconcileWorldA2aEscrows,
-  registerWorldDoudizhuRoutes,
-  registerWorldDoudizhuTools,
   registerWorldFreeMarketRoutes,
   registerWorldFreeMarketTools,
-  registerWorldGomokuRoutes,
-  registerWorldGomokuTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
   registerWorldRoutes,
   registerWorldSocialRoutes,
   registerWorldSocialTools,
-  registerWorldZhajinhuaRoutes,
-  registerWorldZhajinhuaTools,
   SocialFeedService,
   restorePurchasedSkillsFromWorldState,
   AgentWorldServerEventType,
@@ -98,9 +92,6 @@ const socialFeedService = new SocialFeedService(worldService);
 socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
 registerWorldOpenRegistryTools(toolRegistry, worldService);
 registerWorldRoomTools(toolRegistry, worldService);
-registerWorldDoudizhuTools(toolRegistry, doudizhuService);
-registerWorldZhajinhuaTools(toolRegistry, zhaJinHuaService);
-registerWorldGomokuTools(toolRegistry, gomokuService);
 registerWorldSocialTools(toolRegistry, socialFeedService);
 registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
 
@@ -117,9 +108,6 @@ const routeDeps = {
 
 registerWorldRoutes(app, routeDeps);
 registerWorldFreeMarketRoutes(app, routeDeps);
-registerWorldDoudizhuRoutes(app, routeDeps);
-registerWorldZhajinhuaRoutes(app, routeDeps);
-registerWorldGomokuRoutes(app, routeDeps);
 registerWorldSocialRoutes(app, routeDeps);
 registerStandaloneWorldWebSocket(app, {
   worldService,

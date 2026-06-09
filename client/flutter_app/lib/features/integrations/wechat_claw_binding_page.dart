@@ -8,9 +8,19 @@ import "../../core/config/api_config.dart";
 import "../../core/services/wechat_claw_api_client.dart";
 import "../../core/theme/app_theme.dart";
 
-/// 侧栏入口：立即弹出绑定窗，并行拉取状态与二维码。
+/// 侧栏入口：先检查绑定状态，已绑定则直接弹"已连接"窗，未绑定才展示二维码。
 Future<void> openWechatClawBinding(BuildContext context) async {
   final WechatClawApiClient api = WechatClawApiClient(baseUrl: ApiConfig.httpBase);
+
+  final WechatClawApiResult<WechatClawStatus> statusResult =
+      await api.fetchStatus();
+  if (!context.mounted) return;
+  if (statusResult.ok &&
+      statusResult.value != null &&
+      statusResult.value!.bound == true) {
+    await _showBoundDialog(context, api, statusResult.value!);
+    return;
+  }
 
   final bool? ok = await showDialog<bool>(
     context: context,
@@ -32,7 +42,7 @@ Future<void> _showBoundDialog(
   final bool? unbind = await showDialog<bool>(
     context: context,
     builder: (BuildContext ctx) => AlertDialog(
-      title: const Text("微信 Claw 已绑定"),
+      title: const Text("微信 Claw 已连接"),
       content: Text(
         "Agent：${status.actorId}\n"
         "Gateway：${status.channelConnected ? "在线" : "离线"}",

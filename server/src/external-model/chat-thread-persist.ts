@@ -32,7 +32,7 @@ export function isChatThreadPersistenceEnabled(): boolean {
 }
 
 export function getChatThreadPersistMaxMessages(): number {
-  return envPositiveInt(process.env.AGENT_CHAT_THREAD_PERSIST_MAX_MESSAGES, 40);
+  return envPositiveInt(process.env.AGENT_CHAT_THREAD_PERSIST_MAX_MESSAGES, 16);
 }
 
 /**

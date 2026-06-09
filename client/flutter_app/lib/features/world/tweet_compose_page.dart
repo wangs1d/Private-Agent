@@ -399,9 +399,12 @@ class _TweetComposePageState extends State<TweetComposePage> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: <Widget>[
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
+              Flexible(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
                   _ActionButton(
                     icon: Icons.image_outlined,
                     color: const Color(0xFF1D9BF0),
@@ -445,6 +448,8 @@ class _TweetComposePageState extends State<TweetComposePage> {
                   ),
                 ],
               ),
+            ),
+            ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(

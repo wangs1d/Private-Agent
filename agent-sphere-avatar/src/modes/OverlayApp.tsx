@@ -21,17 +21,83 @@ import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "../index.css";
 import "./modes.css";
 
+/** TTS 语音播报：使用浏览器 SpeechSynthesis API 让主agent直接说话 */
+function speakText(text: string): void {
+  if (!text.trim() || typeof window === "undefined") return;
+  const utt = new SpeechSynthesisUtterance(text.trim());
+  utt.lang = "zh-CN";
+  utt.rate = 1.1;
+  utt.pitch = 1.0;
+  utt.volume = 1.0;
+  // 取消前一段未完的语音，避免重叠
+  speechSynthesis.cancel();
+  speechSynthesis.speak(utt);
+}
+
+function stopSpeaking(): void {
+  if (typeof window === "undefined") return;
+  speechSynthesis.cancel();
+}
+
 function readQuery(key: string): string | undefined {
   return new URLSearchParams(window.location.search).get(key) ?? undefined;
 }
 
 /** 桌面透明桌宠 — Electron 无框 3D（DG2 写实机器人），直连主 Agent */
 export function OverlayApp() {
-  const { state, apply, setFocused, setMood, setCaption } = useAgentState({ mood: "idle", energy: 0.55 });
+  const { state, apply: rawApply, setFocused, setMood } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWasOpenOnPointerDown = useRef(false);
   const wsUrl = readQuery("ws");
   const sessionId = readQuery("sessionId");
+
+  // ---- 主agent回复文本累积与TTS ----
+  const assistantTextRef = useRef("");
+  const isConversationRef = useRef(false);
+
+  /** 增强 apply：累积assistant_chunk文本，assistant_done时触发TTS */
+  const apply = useCallback((patch: Parameters<typeof rawApply>[0]) => {
+    const source = patch.source;
+
+    // 主agent流式回复：累积文本，展示完整回复（与行动链路分割）
+    if (source === "assistant_chunk" && patch.caption) {
+      isConversationRef.current = true;
+      assistantTextRef.current += patch.caption;
+      // 展示累积的完整文本（截取尾部避免过长）
+      const fullText = assistantTextRef.current;
+      const displayText = fullText.length > 80 ? "…" + fullText.slice(-80) : fullText;
+      rawApply({ ...patch, caption: displayText });
+      return;
+    }
+
+    // 回复完成：触发TTS播报
+    if (source === "assistant_done") {
+      const finalText = assistantTextRef.current.trim();
+      if (finalText) {
+        speakText(finalText);
+      }
+      // 保持最终文本显示一段时间
+      const displayText = finalText.length > 80 ? "…" + finalText.slice(-80) : finalText;
+      rawApply({ ...patch, caption: displayText || patch.caption });
+      // 延迟清除对话状态和文本
+      setTimeout(() => {
+        isConversationRef.current = false;
+        assistantTextRef.current = "";
+        rawApply({ caption: undefined, mood: "idle" });
+      }, 8000);
+      return;
+    }
+
+    // 用户发送消息：重置累积文本
+    if (source === "user_message") {
+      assistantTextRef.current = "";
+      isConversationRef.current = false;
+      stopSpeaking();
+    }
+
+    // 其他事件直接透传
+    rawApply(patch);
+  }, [rawApply]);
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
@@ -49,9 +115,17 @@ export function OverlayApp() {
 
   const dynamicSpeech = useDynamicSpeech({
     send: sendPetReaction,
-    setCaption,
     setMood: (m) => setMood(m),
   });
+
+  /** 对话过程中不发送 pet.reaction 请求（避免与主agent回复冲突） */
+  const safeSpeak = useCallback(
+    (params: Parameters<typeof dynamicSpeech.speak>[0]) => {
+      if (isConversationRef.current) return; // 对话中不发送 LLM 反应请求
+      dynamicSpeech.speak(params);
+    },
+    [dynamicSpeech],
+  );
 
   // 累计拖动/旋转的"今日总量"——作为台词的数值感
   const interactionTotalsRef = useRef({ pan: 0, spin: 0, shake: 0, lastPos: { x: 0, y: 0 } });
@@ -132,7 +206,7 @@ export function OverlayApp() {
       // 同步触发身体晃动
       triggerVerticalShake(0.25 + intensity * 0.5, 320);
       // 触发动态台词（节流后由 useDynamicSpeech 控制）
-      dynamicSpeech.speak({
+      safeSpeak({
         trigger: mode === "rotate" ? "spin" : "drag_start",
         intensity: Math.min(1, intensity + 0.15),
         totalMagnitude: total + intensity * 10,
@@ -153,7 +227,7 @@ export function OverlayApp() {
       const intensity = Math.min(1, info.spinStrength * 1.4 + Math.min(1, info.totalRotationDeg / 360) * 0.7 + Math.min(1, info.panDistance / 400) * 0.4);
       triggerVerticalShake(0.5 + intensity * 0.5, 900);
       const total = info.mode === "rotate" ? interactionTotalsRef.current.spin : interactionTotalsRef.current.pan;
-      dynamicSpeech.speak({
+      safeSpeak({
         trigger: info.mode === "rotate" ? "rotate_release" : "drag_release",
         intensity,
         totalMagnitude: total,
@@ -176,7 +250,7 @@ export function OverlayApp() {
         setMouseCapture(true);
         dragStartAtRef.current = performance.now();
         apply({ mood: "listening", energy: 0.62, focused: true });
-        dynamicSpeech.speak({
+        safeSpeak({
           trigger: "tap",
           intensity: 0.35,
           totalMagnitude: 1,
@@ -293,11 +367,11 @@ export function OverlayApp() {
   }, [menuVisible]);
 
   // caption 自动消失：显示一段时间后清除
-  // - assistant_chunk / user_message 不自动清（用户对话需要保持可见）
+  // - assistant_chunk / user_message / assistant_done 不自动清（主agent回复由TTS逻辑统一管理）
   // - pet_reaction 也需要自动清（useDynamicSpeech 的定时器不一定能覆盖所有路径）
   useEffect(() => {
     if (!state.caption) return;
-    if (state.source === "assistant_chunk" || state.source === "user_message") {
+    if (state.source === "assistant_chunk" || state.source === "user_message" || state.source === "assistant_done") {
       return;
     }
     // pet_reaction 来源用较长的显示时间，其他来源用 2.5s

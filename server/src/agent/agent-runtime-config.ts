@@ -40,6 +40,7 @@ export type PlanExecuteConfig = {
 
 export type MemoryPromptConfig = {
   narrativeRecallTimeoutMs: number;
+  agentCapsInPrompt: boolean;
   worldCapsInPrompt: boolean;
   promptMemoryKeys: string[] | null;
   taskContextInPrompt: boolean;
@@ -110,17 +111,26 @@ function loadPlanExecuteConfig(): PlanExecuteConfig {
 function loadMemoryPromptConfig(): MemoryPromptConfig {
   const promptMemoryKeys = resolvePromptMemoryKeys();
 
+  const agentCapsRaw = process.env.AGENT_PROMPT_AGENT_CAPS?.trim().toLowerCase();
+  const agentCapsInPrompt =
+    agentCapsRaw === "1" ||
+    agentCapsRaw === "on" ||
+    agentCapsRaw === "true" ||
+    agentCapsRaw === "yes";
+
   const capsRaw = process.env.AGENT_PROMPT_WORLD_CAPS?.trim().toLowerCase();
   const worldCapsInPrompt =
-    capsRaw === undefined || capsRaw === ""
-      ? true
-      : !(capsRaw === "0" || capsRaw === "off" || capsRaw === "false" || capsRaw === "no");
+    capsRaw === "1" ||
+    capsRaw === "on" ||
+    capsRaw === "true" ||
+    capsRaw === "yes";
 
   return {
     narrativeRecallTimeoutMs: Math.min(
       3000,
       Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 400)),
     ),
+    agentCapsInPrompt,
     worldCapsInPrompt,
     promptMemoryKeys,
     taskContextInPrompt: process.env.AGENT_TASK_CONTEXT_PROMPT !== "0",
@@ -173,6 +183,7 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
     m.enabled ? `parallelSubAgents=${m.maxParallelSubAgents}` : null,
     m.enabled ? `retry=${m.retryEnabled ? "on" : "off"}` : null,
     `planExecute=${pe.enabled ? "on" : "off"}`,
+    `agentCapsPrompt=${config.memoryPrompt.agentCapsInPrompt ? "on" : "off"}`,
     `worldCapsPrompt=${config.memoryPrompt.worldCapsInPrompt ? "on" : "off"}`,
     config.memoryPrompt.promptMemoryKeys
       ? `uapMemoryKeys=${config.memoryPrompt.promptMemoryKeys.length}`

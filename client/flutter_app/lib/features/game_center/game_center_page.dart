@@ -362,6 +362,7 @@ class _DoudizhuIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Stack(
+      clipBehavior: Clip.none,
       alignment: Alignment.center,
       children: <Widget>[
         Container(
@@ -593,8 +594,6 @@ class _GameCenterPageState extends State<GameCenterPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                const _StatsBar(),
-                const SizedBox(height: 28),
                 _GameCardsSection(
                   launching: _launching,
                   onStart: _startGame,
@@ -609,143 +608,6 @@ class _GameCenterPageState extends State<GameCenterPage> {
 }
 
 enum _GameId { gomoku, zhajinhua, blackjack, doudizhu }
-
-class _StatsBar extends StatelessWidget {
-  const _StatsBar();
-
-  static const List<_StatSpec> _stats = <_StatSpec>[
-    _StatSpec(
-      label: "可用游戏",
-      value: "4",
-      icon: Icons.sports_esports_outlined,
-      iconColor: Color(0xFFA78BFA),
-      iconBg: Color(0xFF2D2640),
-    ),
-    _StatSpec(
-      label: "在线 AGENT",
-      value: "∞",
-      icon: Icons.smart_toy_outlined,
-      iconColor: Color(0xFF60A5FA),
-      iconBg: Color(0xFF1E2A3D),
-    ),
-    _StatSpec(
-      label: "总对战局",
-      value: "0",
-      icon: Icons.sports_martial_arts_outlined,
-      iconColor: Color(0xFFF87171),
-      iconBg: Color(0xFF3D2424),
-    ),
-    _StatSpec(
-      label: "平均胜率",
-      value: "--%",
-      icon: Icons.bar_chart_rounded,
-      iconColor: Color(0xFF34D399),
-      iconBg: Color(0xFF1E3329),
-    ),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final bool narrow = constraints.maxWidth < 720;
-        if (narrow) {
-          return Column(
-            children: <Widget>[
-              for (int i = 0; i < _stats.length; i++) ...<Widget>[
-                if (i > 0) const SizedBox(height: 12),
-                _StatCard(spec: _stats[i]),
-              ],
-            ],
-          );
-        }
-        return Row(
-          children: <Widget>[
-            for (int i = 0; i < _stats.length; i++) ...<Widget>[
-              if (i > 0) const SizedBox(width: 16),
-              Expanded(child: _StatCard(spec: _stats[i])),
-            ],
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _StatSpec {
-  const _StatSpec({
-    required this.label,
-    required this.value,
-    required this.icon,
-    required this.iconColor,
-    required this.iconBg,
-  });
-
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color iconColor;
-  final Color iconBg;
-}
-
-class _StatCard extends StatelessWidget {
-  const _StatCard({required this.spec});
-
-  final _StatSpec spec;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
-      ),
-      child: Row(
-        children: <Widget>[
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: spec.iconBg,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            alignment: Alignment.center,
-            child: Icon(spec.icon, size: 22, color: spec.iconColor),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  spec.value,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFFE4E4E7),
-                    height: 1.1,
-                    fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  spec.label,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF71717A),
-                    letterSpacing: 0.8,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _GameCardsSection extends StatelessWidget {
   const _GameCardsSection({

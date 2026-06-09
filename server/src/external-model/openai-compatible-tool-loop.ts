@@ -29,6 +29,10 @@ import {
   isToolCallIdNotFoundError,
   sanitizeChatMessagesForApi,
 } from "./chat-thread-sanitize.js";
+import {
+  applyPromptCacheMessages,
+  type PrefixCacheRequest,
+} from "./prefix-cache.js";
 import type {
   ChatToolExecutionContext,
   StreamDeltaHandler,
@@ -37,6 +41,36 @@ import type {
 } from "./types.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
+const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
+  "search_web": 1600,
+  "fetch_web": 2600,
+  "info.search": 1400,
+  "info.inspect_webpage": 2200,
+  "info.navigate_site": 2800,
+  "browser.session.list": 1400,
+  "browser.fetch_page": 2400,
+  "calendar.list_tasks": 1400,
+  "aip.list_my_state": 1200,
+  "self.list_custom_skills": 1200,
+  "agent.query_capabilities": 1400,
+  "search": 1400,
+  "describe": 1400,
+  "tool_search": 1400,
+  "tool_discover": 1600,
+  "tool_call": 1800,
+};
+
+const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
+  search_web: ["url"],
+};
+
+function getToolResultBudget(toolName: string): number | undefined {
+  return TOOL_RESULT_PRESET_MAX_CHARS[toolName];
+}
+
+function getToolResultStripKeys(toolName: string): string[] | undefined {
+  return TOOL_RESULT_STRIP_KEYS[toolName];
+}
 
 type ToolAcc = { id: string; name: string; arguments: string };
 
@@ -488,7 +522,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "reminder.plan",
       description:
-        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt、recurrence。",
+        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。",
       parameters: {
         type: "object",
         properties: {
@@ -514,7 +548,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_from_text",
       description:
-        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周/连续，返回 needsRecurrenceConfirm=true，须先向用户确认后再创建。系统会智能分析任务类型并提供建议（含 suggestedQuestion、examples 等），请据此向用户提问。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」「接下来3天提醒我复习」。成功返回 taskId；解析失败则 matched=false。",
+        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周/连续，返回 needsRecurrenceConfirm=true，须向用户确认后再创建。系统会智能分析任务类型并提供建议（含 suggestedQuestion、examples 等），请据此向用户提问。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」「接下来3天提醒我复习」。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）；解析失败则 matched=false。",
       parameters: {
         type: "object",
         properties: {
@@ -531,7 +565,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_task",
       description:
-        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）、Agent 自动化任务（agent_task）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。",
+        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）、Agent 自动化任务（agent_task）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）。",
       parameters: {
         type: "object",
         properties: {
@@ -943,10 +977,28 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'mcp',
-    keywords: ['微博', 'weibo', '小红书', 'xiaohongshu', 'xhs', '微信', 'wechat', '抖音', 'douyin', 'mcp', '外部工具', 'external tool', '平台', 'platform'],
-    toolNames: [] // MCP tools are dynamic, populated at runtime
+    keywords: ['微博', 'weibo', '小红书', 'xiaohongshu', 'xhs', '微信', 'wechat', '抖音', 'douyin', 'mcp', '外部工具', 'external tool', '平台', 'platform', '文件', 'file', '读取', 'read', '写入', 'write', '搜索平台', 'platform search'],
+    toolNames: [] as string[], // 运行时由 buildToolCategoryMappings() 动态填充
   },
 ];
+
+/**
+ * 构建带动态 MCP 工具名的分类映射。
+ * 将已注册的 MCP 工具名注入 mcp 分类的 toolNames，
+ * 使关键词筛选阶段能精确命中 MCP 工具（与内置工具行为一致）。
+ */
+export function buildToolCategoryMappings(
+  extraMcpToolNames?: string[],
+): typeof TOOL_CATEGORY_MAPPINGS {
+  if (!extraMcpToolNames || extraMcpToolNames.length === 0) {
+    return TOOL_CATEGORY_MAPPINGS;
+  }
+  return TOOL_CATEGORY_MAPPINGS.map((mapping) =>
+    mapping.category === "mcp"
+      ? { ...mapping, toolNames: [...extraMcpToolNames] }
+      : mapping,
+  );
+}
 
 const ALWAYS_INCLUDED_TOOLS = [
   'clock.get_current_time',
@@ -982,11 +1034,14 @@ function extractKeywords(text: string): string[] {
   return [...new Set([...words, ...chineseSegments])];
 }
 
-function detectRelevantCategories(userText: string): Set<ToolCategory> {
+function detectRelevantCategoriesFrom(
+  userText: string,
+  mappings: typeof TOOL_CATEGORY_MAPPINGS = TOOL_CATEGORY_MAPPINGS,
+): Set<ToolCategory> {
   const keywords = extractKeywords(userText);
   const relevantCategories = new Set<ToolCategory>();
   
-  for (const mapping of TOOL_CATEGORY_MAPPINGS) {
+  for (const mapping of mappings) {
     const matchCount = mapping.keywords.filter(kw => 
       keywords.some(userKw => 
         userKw.includes(kw) || kw.includes(userKw)
@@ -1002,10 +1057,10 @@ function detectRelevantCategories(userText: string): Set<ToolCategory> {
 }
 
 export function selectRelevantTools(
-  userText: string, 
+  userText: string,
   allTools: ChatCompletionTool[],
-  options?: { 
-    minTools?: number; 
+  options?: {
+    minTools?: number;
     maxTools?: number;
     includeAlwaysIncluded?: boolean;
   }
@@ -1013,16 +1068,25 @@ export function selectRelevantTools(
   const minTools = options?.minTools ?? 5;
   const maxTools = options?.maxTools ?? 20;
   const includeAlwaysIncluded = options?.includeAlwaysIncluded ?? true;
-  
-  const relevantCategories = detectRelevantCategories(userText);
-  
+
+  // 从 allTools 中提取 MCP 工具名，动态注入分类映射
+  const mcpToolNames = allTools
+    .filter((t) => {
+      const fn = (t as { function?: { name?: string } }).function;
+      return Boolean(fn?.name?.startsWith("mcp."));
+    })
+    .map((t) => (t as { function: { name: string } }).function.name);
+  const categoryMappings = buildToolCategoryMappings(mcpToolNames);
+
+  const relevantCategories = detectRelevantCategoriesFrom(userText, categoryMappings);
+
   const selectedToolNames = new Set<string>();
-  
+
   if (includeAlwaysIncluded) {
     ALWAYS_INCLUDED_TOOLS.forEach(name => selectedToolNames.add(name));
   }
-  
-  for (const mapping of TOOL_CATEGORY_MAPPINGS) {
+
+  for (const mapping of categoryMappings) {
     if (relevantCategories.has(mapping.category)) {
       mapping.toolNames.forEach(name => selectedToolNames.add(name));
     }
@@ -1091,6 +1155,8 @@ export async function streamCompletionWithTools(
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
     /** Moonshot Kimi：如 `{ thinking: { type: "disabled" } }` */
     extraBody?: Record<string, unknown>;
+    promptCache?: PrefixCacheRequest;
+    requestSystemMessages?: ChatCompletionMessageParam[];
   },
 ): Promise<string> {
   // 动态调整工具循环轮次（基于任务复杂度）
@@ -1127,15 +1193,20 @@ export async function streamCompletionWithTools(
         stripReasoning: thinkingDisabled,
         logPrefix: "[openai-tool-loop]",
       });
+      const requestMessages = options?.requestSystemMessages
+        ? applyPromptCacheMessages(sanitizedMessages, options.requestSystemMessages)
+        : sanitizedMessages;
       try {
-        stream = await client.chat.completions.create({
+        const request = {
           model,
-          messages: sanitizedMessages,
+          messages: requestMessages,
           tools: apiTools,
           tool_choice: "auto",
           stream: true,
+          ...(options?.promptCache ?? {}),
           ...(options?.extraBody ? { extra_body: options.extraBody } : {}),
-        });
+        };
+        stream = await client.chat.completions.create(request as Parameters<typeof client.chat.completions.create>[0]);
         break;
       } catch (e) {
         if (!retriedToolCallIdError && isToolCallIdNotFoundError(e)) {
@@ -1194,14 +1265,18 @@ export async function streamCompletionWithTools(
     lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
 
     if (finishReason !== "tool_calls" || toolAcc.size === 0) {
-      if (ctx.onAgentStatusLine && fullText.trim()) {
-        onDelta(fullText);
+      // 对话结束：返回完整的累积文本（含所有中间轮次的过程描述 + 最终回复）。
+      // WebSocket 客户端已通过 onDelta 收到过增量（streamedChunks=true），
+      // 微信桥接等无流式推送的场景依赖此返回值获取完整内容。
+      const finalText = lastAssistantText.trim();
+      if (ctx.onAgentStatusLine && finalText) {
+        onDelta(finalText);
       }
       messages.push({
         role: "assistant",
-        content: fullText || null,
+        content: finalText || null,
       });
-      return fullText;
+      return finalText;
     }
 
     const toolCalls: ChatCompletionMessageToolCall[] = [...toolAcc.entries()]
@@ -1285,6 +1360,8 @@ export async function streamCompletionWithTools(
               toolName: item.registryToolName,
               ok: bridge.ok,
               result: bridge.result,
+              preferredMaxChars: getToolResultBudget(item.registryToolName),
+              stripKeys: getToolResultStripKeys(item.registryToolName),
             });
             return {
               exec: { ok: bridge.ok, result: bridge.result },
@@ -1300,6 +1377,8 @@ export async function streamCompletionWithTools(
                 toolName: item.registryToolName,
                 ok: false,
                 result: bridge.result,
+                preferredMaxChars: getToolResultBudget(item.registryToolName),
+                stripKeys: getToolResultStripKeys(item.registryToolName),
               });
               return {
                 exec: { ok: false, result: bridge.result },
@@ -1353,6 +1432,8 @@ export async function streamCompletionWithTools(
           toolName: targetToolName,
           ok: exec.ok,
           result: exec.ok ? resultForWire : { error: exec.result.error ?? exec.result },
+          preferredMaxChars: getToolResultBudget(targetToolName),
+          stripKeys: getToolResultStripKeys(targetToolName),
         });
         return {
           exec,

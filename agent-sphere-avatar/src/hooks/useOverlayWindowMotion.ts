@@ -55,7 +55,7 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
     const x = area.x + margin + Math.random() * Math.max(40, area.width - w - margin * 2);
     const y = area.y + margin + Math.random() * Math.max(40, area.height - h - margin * 2);
     targetRef.current = { x, y };
-    window.sphereOverlay.moveTo(Math.round(x), Math.round(y), mood === "speaking" ? 900 : 1200);
+    window.sphereOverlay.moveTo(Math.round(x), Math.round(y), 1200);
     nextMoveAt.current = Date.now() + 5000;
   }, [mood, pickPetSize]);
 
@@ -114,7 +114,7 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
       const now = Date.now();
       // 优先跑垂直振荡（高优先级，视觉感强）
       tickVerticalShake();
-      const interval = mood === "speaking" ? 3500 : mood === "thinking" ? 5000 : 7000;
+      const interval = mood === "thinking" ? 5000 : 7000;
       if (!verticalShakeRef.current.active && now >= nextMoveAt.current) {
         void schedule();
         nextMoveAt.current = now + interval;

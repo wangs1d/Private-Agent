@@ -43,6 +43,14 @@ export interface IntelligentReminderSystemDeps {
     info: (msg: string, ...args: unknown[]) => void;
     error: (msg: string, ...args: unknown[]) => void;
   };
+  onContactOutcome?: (params: {
+    userId: string;
+    channel: ReminderLevel;
+    responded: boolean;
+    responseTimeMs?: number;
+    feedback?: "positive" | "negative" | "neutral";
+    quietHours?: boolean;
+  }) => void;
 }
 
 export function createIntelligentReminderSystem(deps: IntelligentReminderSystemDeps) {
@@ -89,6 +97,12 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
           responded: false,
           responseTimeMs: 0,
         });
+        deps.onContactOutcome?.({
+          userId,
+          channel: "popup",
+          responded: false,
+          quietHours: isQuietHours(),
+        });
       },
       onTTSAlarmReminder: async (instance) => {
         const userId = instance.config.metadata?.userId as string ?? "unknown";
@@ -119,6 +133,12 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
           instance,
           responded: false,
           responseTimeMs: 0,
+        });
+        deps.onContactOutcome?.({
+          userId,
+          channel: "tts_alarm",
+          responded: false,
+          quietHours: isQuietHours(),
         });
       },
       onPhoneCallReminder: async (instance) => {
@@ -153,6 +173,12 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
           responded: false,
           responseTimeMs: 0,
         });
+        deps.onContactOutcome?.({
+          userId,
+          channel: "phone_call",
+          responded: false,
+          quietHours: isQuietHours(),
+        });
       },
       getUserResponseHistory: async (userId) => {
         return userResponsePersistence.getUserHistory(userId);
@@ -174,7 +200,7 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     },
   );
 
-  registerIntelligentReminderTools(deps.toolRegistry, reminderService, userResponsePersistence);
+  registerIntelligentReminderTools(deps, reminderService, userResponsePersistence);
 
   return {
     reminderService,
@@ -186,17 +212,19 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
 }
 
 function registerIntelligentReminderTools(
-  registry: ToolRegistry,
+  deps: IntelligentReminderSystemDeps,
   service: IntelligentReminderService,
   persistence: UserResponsePersistenceService,
 ): void {
+  const registry = deps.toolRegistry;
   registry.register("reminder.create", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
 
     const title = String(input.title ?? "").trim();
     const message = String(input.message ?? "").trim();
     const priority = (String(input.priority ?? "medium").trim() as ReminderConfig["priority"]);
-    const initialLevel = (String(input.initialLevel ?? "popup").trim() as ReminderLevel);
+    const requestedInitialLevel =
+      input.initialLevel == null ? null : (String(input.initialLevel).trim() as ReminderLevel);
     const maxLevel = input.maxLevel ? (String(input.maxLevel).trim() as ReminderLevel) : undefined;
 
     if (!title || !message) {
@@ -207,7 +235,7 @@ function registerIntelligentReminderTools(
       return { ok: false, error: "优先级必须是 low、medium、high 或 urgent" };
     }
 
-    if (!["popup", "tts_alarm", "phone_call"].includes(initialLevel)) {
+    if (requestedInitialLevel && !["popup", "tts_alarm", "phone_call"].includes(requestedInitialLevel)) {
       return { ok: false, error: "初始级别必须是 popup、tts_alarm 或 phone_call" };
     }
 
@@ -222,8 +250,9 @@ function registerIntelligentReminderTools(
       title,
       message,
       priority,
-      initialLevel: initialLevel,
+      initialLevel: requestedInitialLevel ?? recommendedLevel,
       maxLevel,
+      autoSelectInitialLevel: requestedInitialLevel == null,
       scheduledAt:
         typeof input.scheduledAt === "string" || typeof input.scheduledAt === "number"
           ? new Date(input.scheduledAt)
@@ -308,6 +337,14 @@ function registerIntelligentReminderTools(
         responded: true,
         responseTimeMs,
         feedback: input.feedback as "positive" | "negative" | "neutral" | undefined,
+      });
+      deps.onContactOutcome?.({
+        userId: actorId,
+        channel: instanceBeforeAck.currentLevel,
+        responded: true,
+        responseTimeMs,
+        feedback: input.feedback as "positive" | "negative" | "neutral" | undefined,
+        quietHours: isQuietHours(new Date()),
       });
     }
 
@@ -455,6 +492,11 @@ function registerIntelligentReminderTools(
       })),
     };
   });
+}
+
+function isQuietHours(now = new Date()): boolean {
+  const hour = now.getHours();
+  return hour >= 23 || hour < 8;
 }
 
 function getLevelLabel(level: ReminderLevel): string {

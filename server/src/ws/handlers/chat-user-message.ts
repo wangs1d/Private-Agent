@@ -5,7 +5,7 @@ import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
 import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
 import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
-import { chunkText, formatStatusForDisplay } from "../../utils/text.js";
+import { chunkText, dedupeAdjacentLines, formatStatusForDisplay } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
@@ -13,7 +13,6 @@ import {
   embodimentAlert,
   embodimentHappy,
   embodimentListening,
-  embodimentSpeaking,
   embodimentThinking,
 } from "../../services/agent-embodiment.js";
 import { getEmbodimentAutonomy } from "../../services/embodiment-autonomy-service.js";
@@ -200,8 +199,6 @@ async function processBatchedMessage(
   const sendAssistantChunk = (chunk: string): void => {
     if (isStale()) return;
     chunkSeq += 1;
-    const burst = Math.min(1, 0.45 + chunkSeq * 0.015);
-    embodimentSpeaking(msgActor, (json) => ctx.socket.send(json), burst, chunk.slice(-24) || undefined);
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,

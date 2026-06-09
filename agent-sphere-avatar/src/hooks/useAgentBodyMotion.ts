@@ -12,7 +12,6 @@ const MOOD_PROFILE: Record<
   idle: { speed: 0.48, roam: 0.78, pauseSec: 1.6, breath: 0.045, vitality: 0.22 },
   listening: { speed: 0.32, roam: 0.42, pauseSec: 2.8, breath: 0.032, vitality: 0.28 },
   thinking: { speed: 0.4, roam: 0.88, pauseSec: 1.4, breath: 0.038, vitality: 0.32 },
-  speaking: { speed: 0.68, roam: 0.82, pauseSec: 0.6, breath: 0.052, vitality: 0.55 },
   happy: { speed: 0.85, roam: 1, pauseSec: 0.35, breath: 0.062, vitality: 0.75 },
   alert: { speed: 0.58, roam: 0.62, pauseSec: 0.8, breath: 0.035, vitality: 0.5 },
 };
@@ -80,8 +79,6 @@ export function useAgentBodyMotion({
     if (mood === "happy") {
       excitementRef.current = Math.max(excitementRef.current, 0.95);
       excitedUntilRef.current = performance.now() + 4500;
-    } else if (mood === "speaking") {
-      excitementRef.current = Math.max(excitementRef.current, 0.25 + energy * 0.35);
     }
   }, [mood, energy]);
 
@@ -165,7 +162,6 @@ export function useAgentBodyMotion({
     }
 
     const excited = excitementRef.current > 0.28;
-    const speaking = moodRef.current === "speaking";
     const speedMul =
       profile.speed * (0.7 + energyRef.current * 0.55) * (1 + excitementRef.current * 1.25);
 
@@ -173,19 +169,6 @@ export function useAgentBodyMotion({
     vel.current.x += Math.sin(t * 2.1 + 0.5) * vitality * 0.022;
     vel.current.y += Math.sin(t * 1.55) * profile.breath * 0.35;
     vel.current.z += Math.cos(t * 1.85) * vitality * 0.018;
-
-    if (speaking) {
-      const syllable = Math.sin(t * 12.5);
-      if (syllable > 0.72) {
-        const kick = (syllable - 0.72) * 3.5 * energyRef.current;
-        vel.current.x += (Math.random() - 0.5) * kick * 0.55;
-        vel.current.z += (Math.random() - 0.5) * kick * 0.45;
-        vel.current.y += kick * 0.18;
-        if (faceSignalsRef?.current) {
-          faceSignalsRef.current.speakPulse = Math.min(1, kick * 0.8);
-        }
-      }
-    }
 
     if (excited) {
       const burstRate = 4.5 + excitementRef.current * 4;
@@ -239,17 +222,17 @@ export function useAgentBodyMotion({
       Math.sin(t * 3.4) * profile.breath * 0.22;
     const dy = target.current.y + breathY - pos.current.y;
 
-    const springK = (focusedRef.current ? 2.6 : 4.8) * (excited ? 1.65 : 1) * (speaking ? 1.15 : 1);
+    const springK = (focusedRef.current ? 2.6 : 4.8) * (excited ? 1.65 : 1);
     const forceScale = speedMul / MASS;
 
     vel.current.x += dx * springK * forceScale * dt;
     vel.current.y += dy * springK * forceScale * 0.9 * dt;
     vel.current.z += dz * springK * forceScale * dt;
 
-    const drag = excited ? 2.8 : speaking ? 5.2 : 5.8;
+    const drag = excited ? 2.8 : 5.8;
     vel.current.multiplyScalar(Math.exp(-drag * dt));
 
-    const maxSpeed = excited ? 3.8 : speaking ? 2.4 : 1.85;
+    const maxSpeed = excited ? 3.8 : 1.85;
     if (vel.current.length() > maxSpeed) vel.current.setLength(maxSpeed);
 
     pos.current.addScaledVector(vel.current, dt);
@@ -281,9 +264,7 @@ export function useAgentBodyMotion({
     const shakeAmp = shakeActive ? shakeRef.current.intensity : 0;
     const wobble = excited
       ? Math.sin(t * 14) * 0.08 * excitementRef.current
-      : speaking
-        ? Math.sin(t * 10) * 0.025 * energyRef.current
-        : Math.sin(t * 1.2) * 0.012;
+      : Math.sin(t * 1.2) * 0.012;
     // 晃动时附加额外高频抖动（摇头/左右扭）
     const shakeJitter = shakeAmp > 0
       ? Math.sin(t * 22) * 0.18 * shakeAmp + Math.sin(t * 17.3) * 0.12 * shakeAmp

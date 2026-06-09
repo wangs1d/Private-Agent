@@ -24,6 +24,12 @@ import {
   mergeFactCandidates,
   toFactStore,
 } from "./user-profile-facts.js";
+import {
+  defaultContactPreferenceState,
+  ProactiveContactPolicyService,
+  type ProactiveContactChannel,
+  type ProactiveContactPreferenceState,
+} from "../proactive-contact-policy.js";
 
 const EMOTION_STATE_KEY = "emotion_state";
 const USER_PROFILE_KV_KEY = "user_profile";
@@ -32,6 +38,7 @@ const USER_PROFILE_FACTS_KEY = "user_profile_facts";
 const USER_RELATIONSHIP_KEY = "user_relationship_state";
 const USER_TIME_RHYTHM_KEY = "user_time_rhythm";
 const USER_STYLE_PROFILE_KEY = "user_style_profile";
+const USER_CONTACT_PREFERENCE_KEY = "user_contact_preference";
 
 type BehaviorSignals = {
   shoppingInterest: number;
@@ -68,6 +75,7 @@ type StyleProfileState = {
   initiativeStyle: "reserved" | "balanced" | "proactive";
   lastUpdatedAt: string;
 };
+const contactPolicy = new ProactiveContactPolicyService();
 
 const TONE_ZH: Record<PreferredTone, string> = {
   humor: "幽默轻松",
@@ -162,6 +170,35 @@ function defaultStyleProfileState(): StyleProfileState {
   };
 }
 
+function toContactPreferenceState(v: unknown): ProactiveContactPreferenceState {
+  if (!v || typeof v !== "object") return defaultContactPreferenceState();
+  const o = v as Record<string, unknown>;
+  const channelAffinityRaw =
+    o.channelAffinity && typeof o.channelAffinity === "object"
+      ? (o.channelAffinity as Record<string, unknown>)
+      : {};
+  const channelAffinity = {
+    websocket: Math.min(0.95, Math.max(0.05, Number(channelAffinityRaw.websocket) || 0.62)),
+    voice: Math.min(0.95, Math.max(0.05, Number(channelAffinityRaw.voice) || 0.46)),
+    phone_call: Math.min(0.95, Math.max(0.05, Number(channelAffinityRaw.phone_call) || 0.3)),
+  };
+  return {
+    channelAffinity,
+    quietHoursStart: Math.min(23, Math.max(0, Number(o.quietHoursStart) || 23)),
+    quietHoursEnd: Math.min(23, Math.max(0, Number(o.quietHoursEnd) || 8)),
+    maxDailyProactiveContacts: Math.min(
+      12,
+      Math.max(2, Number(o.maxDailyProactiveContacts) || 6),
+    ),
+    voiceUrgencyThreshold: Math.min(9, Math.max(5.5, Number(o.voiceUrgencyThreshold) || 6.6)),
+    phoneUrgencyThreshold: Math.min(9.7, Math.max(7.8, Number(o.phoneUrgencyThreshold) || 8.7)),
+    lastUpdatedAt:
+      typeof o.lastUpdatedAt === "string" && o.lastUpdatedAt
+        ? o.lastUpdatedAt
+        : new Date().toISOString(),
+  };
+}
+
 function toRelationshipState(v: unknown): RelationshipState {
   if (!v || typeof v !== "object") return defaultRelationshipState();
   const o = v as Record<string, unknown>;
@@ -232,13 +269,49 @@ function toStyleProfileState(v: unknown): StyleProfileState {
 }
 
 function relationshipSummaryLine(state: RelationshipState, style: StyleProfileState): string {
-  const rapport =
-    state.rapport >= 0.75 ? "已有默契" : state.rapport <= 0.4 ? "正在熟悉" : "逐步了解";
-  const warmth =
-    state.warmth >= 0.65 ? "偏温暖" : state.warmth <= 0.35 ? "偏克制" : "温和";
+  const directness =
+    state.directnessPreference >= 0.68
+      ? "用户偏好直接表达，优先先给结论，少铺垫。"
+      : "默认保持简短自然，必要时再补解释。";
   const humor =
-    state.humorTolerance >= 0.65 ? "可适度调侃" : state.humorTolerance <= 0.35 ? "少调侃" : "轻度幽默";
-  return `关系默契: ${warmth} / ${humor} / ${rapport} / 风格=${style.careStyle}-${style.initiativeStyle}`;
+    state.humorTolerance >= 0.7
+      ? "可带一点轻微玩笑或俏皮感，但不要影响信息密度。"
+      : state.humorTolerance <= 0.35
+        ? "少玩梗少调侃，避免轻浮。"
+        : "可以轻微口语化，不必硬凹幽默。";
+  const care =
+    style.careStyle === "playful"
+      ? "整体语气可轻松一点。"
+      : style.careStyle === "direct"
+        ? "整体语气更利落一点。"
+        : "整体语气保持温和自然。";
+  return [
+    directness,
+    humor,
+    care,
+    "无论怎么个性化，默认都要精简、口语化、少废话，避免客服腔和过度正式。",
+    "不要把用户硬归类成某种固定模板，优先根据他这段时间真实的说话方式持续微调。",
+    "优先贴近用户当前说话方式；如果用户明显喜欢某种表达，就往那个方向小幅靠拢，不要突变。",
+  ].join("\n");
+}
+
+function buildReplyLengthGuidance(userText: string): string {
+  const text = userText.trim();
+  const compactText = text.replace(/\s+/g, "");
+  const shortExplicit =
+    /(简单说|简短点|短一点|一句话|一两句|别展开|直接说结论|长话短说|太长不看|简洁点)/i.test(text);
+  const longExplicit =
+    /(详细说|展开说|具体一点|多说点|讲清楚|完整方案|详细分析|一步一步|越详细越好)/i.test(text);
+  if (longExplicit) {
+    return "本轮长度控制：用户明确要详细，信息给全，但仍先给结论，再展开，避免空话。";
+  }
+  if (shortExplicit || compactText.length <= 18) {
+    return "本轮长度控制：尽量压到 1~2 句，先给结论，没被追问就别展开。";
+  }
+  if (compactText.length <= 60) {
+    return "本轮长度控制：以短回复为主，2~4 句内解决；只保留必要信息。";
+  }
+  return "本轮长度控制：默认中短回复，先回答核心问题，再按需要补充，不要写成长文。";
 }
 
 function timeRhythmSummaryLine(rhythm: TimeRhythmState): string | undefined {
@@ -305,6 +378,18 @@ function behaviorSummaryLine(signal: BehaviorSignals): string | undefined {
   return `User long-term behavior tendency: ${top2}. Prioritize matching response style and actions.`;
 }
 
+function contactPreferenceSummaryLine(
+  preference: ProactiveContactPreferenceState,
+  rhythm: TimeRhythmState,
+): string {
+  const rankedChannels = Object.entries(preference.channelAffinity)
+    .sort((a, b) => b[1] - a[1])
+    .map(([channel]) => channel)
+    .slice(0, 2)
+    .join(", ");
+  return `Preferred proactive contact: ${rankedChannels}; quiet hours ${String(preference.quietHoursStart).padStart(2, "0")}:00-${String(preference.quietHoursEnd).padStart(2, "0")}:00; daily contact budget ${preference.maxDailyProactiveContacts}; late-night tolerance ${rhythm.lateNightTolerance.toFixed(2)}.`;
+}
+
 export type PersonalizationPromptSlice = {
   userProfile?: string;
   toneGuidance?: string;
@@ -315,6 +400,15 @@ export type PersonalizationRelationshipState = ReturnType<typeof toRelationshipS
 export type PersonalizationBehaviorSignals = ReturnType<typeof toBehaviorSignals>;
 export type PersonalizationTimeRhythmState = ReturnType<typeof toTimeRhythmState>;
 export type PersonalizationStyleProfileState = ReturnType<typeof toStyleProfileState>;
+export type PersonalizationContactPreferenceState = ReturnType<typeof toContactPreferenceState>;
+export type PersonalizationUnderstandingSnapshot = {
+  relationship: PersonalizationRelationshipState;
+  behavior: PersonalizationBehaviorSignals;
+  timeRhythm: PersonalizationTimeRhythmState;
+  styleProfile: PersonalizationStyleProfileState;
+  contactPreference: PersonalizationContactPreferenceState;
+  contactSummary: string;
+};
 
 export class UserPersonalizationService {
   private readonly store = new UserProfileStore();
@@ -347,9 +441,12 @@ export class UserPersonalizationService {
     return {
       userProfile,
       toneGuidance: [
+        "基础回复纪律：默认用口语化短句，先说重点；除非用户明确要求展开，否则不要长篇铺垫、套话、总结腔。",
+        userText?.trim() ? buildReplyLengthGuidance(userText) : undefined,
         buildToneGuidance(state),
         behaviorSummaryLine(behavior),
         timeRhythmSummaryLine(rhythm),
+        contactPreferenceSummaryLine(this.loadContactPreferenceState(actorId), rhythm),
         buildFactPromptSummary(decayedFacts, 8),
       ].filter(Boolean).join("\n"),
       relationshipGuidance: relationshipSummaryLine(relationship, style),
@@ -370,6 +467,41 @@ export class UserPersonalizationService {
 
   getStyleProfileState(actorId: string): PersonalizationStyleProfileState {
     return this.loadStyleProfileState(actorId);
+  }
+
+  getContactPreferenceState(actorId: string): PersonalizationContactPreferenceState {
+    return this.loadContactPreferenceState(actorId);
+  }
+
+  observeContactOutcome(
+    actorId: string,
+    params: {
+      channel: ProactiveContactChannel;
+      responded: boolean;
+      responseTimeMs?: number;
+      feedback?: "positive" | "negative" | "neutral";
+      quietHours?: boolean;
+    },
+  ): void {
+    const current = this.loadContactPreferenceState(actorId);
+    const next = contactPolicy.learnPreference(current, params);
+    this.saveJsonState(actorId, USER_CONTACT_PREFERENCE_KEY, next);
+  }
+
+  getUnderstandingSnapshot(actorId: string): PersonalizationUnderstandingSnapshot {
+    const relationship = this.loadRelationshipState(actorId);
+    const behavior = this.loadBehaviorSignals(actorId);
+    const timeRhythm = this.loadTimeRhythmState(actorId);
+    const styleProfile = this.loadStyleProfileState(actorId);
+    const contactPreference = this.loadContactPreferenceState(actorId);
+    return {
+      relationship,
+      behavior,
+      timeRhythm,
+      styleProfile,
+      contactPreference,
+      contactSummary: contactPreferenceSummaryLine(contactPreference, timeRhythm),
+    };
   }
 
   observeTurn(actorId: string, userText: string, _assistantText: string): void {
@@ -424,6 +556,13 @@ export class UserPersonalizationService {
   private loadStyleProfileState(actorId: string): StyleProfileState {
     if (!this.memory) return defaultStyleProfileState();
     return toStyleProfileState(this.memory.getSnapshot(actorId, [USER_STYLE_PROFILE_KEY]).entries[USER_STYLE_PROFILE_KEY]);
+  }
+
+  private loadContactPreferenceState(actorId: string): ProactiveContactPreferenceState {
+    if (!this.memory) return defaultContactPreferenceState();
+    return toContactPreferenceState(
+      this.memory.getSnapshot(actorId, [USER_CONTACT_PREFERENCE_KEY]).entries[USER_CONTACT_PREFERENCE_KEY],
+    );
   }
 
   private applyRelationshipSignals(

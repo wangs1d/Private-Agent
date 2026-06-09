@@ -6,6 +6,7 @@ import {
   getTimeDecayHalfLifeHours,
   getHighSignalBoost,
 } from "./env.js";
+import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 
 interface Mem0SearchItem {
   id: string;
@@ -76,7 +77,8 @@ export class AgenticMemoryRetrievalService {
     scored.sort((a, b) => b.rerankScore - a.rerankScore);
 
     const finalTopK = getAgenticMemoryTopK();
-    const topItems = scored.slice(0, finalTopK);
+    const deduped = this.dedupeScoredItems(scored);
+    const topItems = deduped.slice(0, finalTopK);
 
     const parts: string[] = [];
     for (let i = 0; i < topItems.length; i++) {
@@ -136,8 +138,18 @@ export class AgenticMemoryRetrievalService {
 
     scored.sort((a, b) => b.rerankScore - a.rerankScore);
     const finalTopK = getAgenticMemoryTopK();
-    const topItems = scored.slice(0, finalTopK);
+    const deduped = this.dedupeScoredItems(scored);
+    const topItems = deduped.slice(0, finalTopK);
 
-    return { items: scored, topItems };
+    return { items: deduped, topItems };
+  }
+
+  private dedupeScoredItems(items: ScoredItem[]): ScoredItem[] {
+    const keepTexts = dedupeMemoryLines(
+      items.map((item) => item.item.memory),
+      { preferLatest: false },
+    );
+    const keep = new Set(keepTexts.map((line) => semanticFingerprint(line) || line));
+    return items.filter((item) => keep.has(semanticFingerprint(item.item.memory) || item.item.memory));
   }
 }

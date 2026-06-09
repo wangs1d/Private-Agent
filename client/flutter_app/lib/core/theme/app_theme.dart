@@ -33,6 +33,22 @@ abstract final class AppPalette {
 abstract final class AppTheme {
   static ThemeData get material => _buildMaterial();
 
+  /// PingFang SC（苹方）字体族及跨平台回退顺序。
+  ///
+  /// 苹方是 Apple 系（iOS/macOS）默认中文字体；其他平台按以下顺序回退：
+  ///   - Windows:  Microsoft YaHei（微软雅黑）→ SimHei（黑体）
+  ///   - Linux:    Noto Sans CJK SC（思源黑体）
+  ///   - 兜底:     系统默认 sans-serif
+  static const List<String> pingFangFontFamilyFallback = <String>[
+    'PingFang SC',
+    'Microsoft YaHei',
+    '微软雅黑',
+    'Heiti SC',
+    'Noto Sans CJK SC',
+    'Source Han Sans SC',
+    'sans-serif',
+  ];
+
   static ThemeData _buildMaterial() {
     final ColorScheme base = ColorScheme.fromSeed(
       seedColor: const Color(0xFF757575),
@@ -63,6 +79,9 @@ abstract final class AppTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
       colorScheme: cs,
+      // 全局字体族：苹方 PingFang SC，并按平台回退到雅黑/思源黑体/系统无衬线
+      fontFamily: 'PingFang SC',
+      fontFamilyFallback: pingFangFontFamilyFallback,
       dialogTheme: DialogThemeData(
         backgroundColor: AppPalette.locationDialogBg,
         surfaceTintColor: Colors.transparent,

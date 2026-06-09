@@ -10,6 +10,8 @@ export const ClientEventType = {
   ChatUserMessage: "chat.user_message",
   /** 客户端「Agent 处理中」UI 显隐；false 时服务端锁定本轮，不再合并后续消息 */
   ChatAgentProcessingUi: "chat.agent_processing_ui",
+  /** 客户端请求清除聊天历史（服务端同步清除 ChatThreadStore + 持久化） */
+  ChatClearHistory: "chat.clear_history",
   WalletSimulateRequest: "wallet.simulate.request",
   /** AIP v0.1：结构化跨 Agent 消息（与工具 aip.dispatch 等价）。 */
   AipDispatch: "aip.dispatch",
@@ -27,6 +29,8 @@ export const ClientEventType = {
   AgentEmbodimentInteract: "agent.embodiment.interact",
   /** 客户端回报球形窗口在屏幕上的位置（配合 embodiment.observe 闭环） */
   AgentEmbodimentState: "agent.embodiment.state",
+  /** 用户对主动联系的反馈，写回用户理解与联系偏好 */
+  CompanionContactFeedback: "companion.contact_feedback",
 } as const;
 
 export const ServerEventType = {

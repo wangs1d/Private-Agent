@@ -1,13 +1,234 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
+import { createCipheriv, randomBytes, createHash } from "node:crypto";
+import os from "node:os";
 
 const DEFAULT_CHANNEL = "openclaw-weixin";
 const BRIDGE_PATH = "/integrations/wechat-claw/bridge/chat";
 
 /** TTS 音频临时文件目录 */
 const VOICE_TMP_DIR = join(process.cwd(), "data", "wechat-tts-voice");
+
+// ---------------------------------------------------------------------------
+// 微信 API 直接调用常量（绕过 OpenClaw Plugin SDK 发送语音）
+// ---------------------------------------------------------------------------
+const WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
+const WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+const UPLOAD_MEDIA_TYPE_VOICE = 4;       // UploadMediaType.VOICE
+const MESSAGE_ITEM_TYPE_VOICE = 3;       // MessageItemType.VOICE
+const VOICE_ENCODE_TYPE_MP3 = 7;         // VoiceItem.encode_type: MP3
+
+function resolveOpenClawStateDir() {
+  return (
+    process.env.OPENCLAW_STATE_DIR?.trim() ||
+    process.env.CLAWDBOT_STATE_DIR?.trim() ||
+    join(os.homedir(), ".openclaw")
+  );
+}
+
+/** 读取 openclaw-weixin 已登录账号凭据（token, baseUrl） */
+function loadWeixinAccountCredentials(accountId) {
+  const stateDir = resolveOpenClawStateDir();
+  // 尝试标准化后的 ID (如 "xxx-im-bot")
+  const accountPath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.json`);
+  for (const p of [accountPath]) {
+    try {
+      if (existsSync(p)) {
+        return JSON.parse(readFileSync(p, "utf-8"));
+      }
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** 列出所有已登录的 weixin accountId */
+function listWeixinAccountIds() {
+  const stateDir = resolveOpenClawStateDir();
+  const indexPath = join(stateDir, "openclaw-weixin", "accounts.json");
+  try {
+    if (existsSync(indexPath)) {
+      return JSON.parse(readFileSync(indexPath, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+/** 读取 contextToken（从持久化文件中查找与 senderId 匹配的 token） */
+function loadContextToken(accountId, senderId) {
+  const stateDir = resolveOpenClawStateDir();
+  const ctxPath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.context-tokens.json`);
+  try {
+    if (existsSync(ctxPath)) {
+      const tokens = JSON.parse(readFileSync(ctxPath, "utf-8"));
+      // senderId 可能是 userId@im.wechat 格式，直接匹配
+      if (tokens[senderId]) return tokens[senderId];
+      // 也尝试模糊匹配（key 可能是纯 userId）
+      for (const [key, val] of Object.entries(tokens)) {
+        if (senderId.includes(key) || key.includes(senderId)) return val;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * AES-128-ECB 加密（PKCS7 padding）
+ */
+function encryptAesEcb(plaintext, keyBuf) {
+  const cipher = createCipheriv("aes-128-ecb", keyBuf, null);
+  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
+}
+
+/** AES-128-ECB PKCS7 padding 后的密文长度 */
+function aesEcbPaddedSize(plainSize) {
+  return Math.ceil((plainSize + 1) / 16) * 16;
+}
+
+/** 生成随机 X-WECHAT-UIN header 值 */
+function randomWechatUin() {
+  const uint32 = randomBytes(4).readUInt32BE(0);
+  return Buffer.from(String(uint32), "utf-8").toString("base64");
+}
+
+/**
+ * 直接调用微信 API 发送语音消息。
+ *
+ * 完整流程：读 MP3 → AES 加密 → getuploadurl(media_type=VOICE) → CDN 上传 → sendmessage(voice_item)
+ *
+ * 此函数绕过 OpenClaw Plugin SDK，直接使用与 openclaw-weixin 插件相同的微信 HTTP API。
+ */
+async function sendVoiceViaWeixinApi(params) {
+  const { voiceFilePath, senderId } = params;
+
+  // 1. 查找已登录的 weixin 账号
+  const accountIds = listWeixinAccountIds();
+  if (!accountIds.length) {
+    throw new Error("未找到已登录的 weixin 账号，请先运行 `openclaw channels login --channel openclaw-weixin`");
+  }
+
+  // 2. 加载凭据和 contextToken
+  let cred = null;
+  let contextToken = null;
+  let activeAccountId = null;
+
+  for (const aid of accountIds) {
+    const c = loadWeixinAccountCredentials(aid);
+    if (c?.token) {
+      cred = c;
+      activeAccountId = aid;
+      contextToken = loadContextToken(aid, senderId);
+      break;
+    }
+  }
+  if (!cred?.token) {
+    throw new Error("weixin 账号未配置 token");
+  }
+
+  const baseUrl = (cred.baseUrl || WEIXIN_DEFAULT_BASE_URL).replace(/\/$/, "");
+  const token = cred.token.trim();
+
+  // 3. 读取 MP3 文件
+  const plaintext = readFileSync(voiceFilePath);
+  const rawsize = plaintext.length;
+  const rawfilemd5 = createHash("md5").update(plaintext).digest("hex");
+  const filesize = aesEcbPaddedSize(rawsize);
+  const filekey = randomBytes(16).toString("hex");
+  const aeskey = randomBytes(16);
+
+  // 4. 获取上传 URL (media_type=4 VOICE)
+  const uploadUrlResp = await fetch(`${baseUrl}/ilink/bot/getuploadurl`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      AuthorizationType: "ilink_bot_token",
+      "X-WECHAT-UIN": randomWechatUin(),
+    },
+    body: JSON.stringify({
+      filekey,
+      media_type: UPLOAD_MEDIA_TYPE_VOICE,
+      to_user_id: senderId,
+      rawsize,
+      rawfilemd5,
+      filesize,
+      no_need_thumb: true,
+      aeskey: aeskey.toString("hex"),
+    }),
+  });
+  if (!uploadUrlResp.ok) {
+    const errText = await uploadUrlResp.text();
+    throw new Error(`getuploadurl 失败 ${uploadUrlResp.status}: ${errText}`);
+  }
+  const uploadData = await uploadUrlResp.json();
+  const uploadFullUrl = uploadData.upload_full_url?.trim();
+
+  if (!uploadFullUrl) {
+    throw new Error(`getuploadurl 未返回上传 URL: ${JSON.stringify(uploadData)}`);
+  }
+
+  // 5. AES 加密并上传到 CDN
+  const ciphertext = encryptAesEcb(plaintext, aeskey);
+  const cdnResp = await fetch(uploadFullUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: new Uint8Array(ciphertext),
+  });
+  if (cdnResp.status !== 200) {
+    const errMsg = cdnResp.headers.get("x-error-message") || `status ${cdnResp.status}`;
+    throw new Error(`CDN 上传失败: ${errMsg}`);
+  }
+  const downloadEncryptedQueryParam = cdnResp.headers.get("x-encrypted-param");
+  if (!downloadEncryptedQueryParam) {
+    throw new Error("CDN 响应缺少 x-encrypted-param header");
+  }
+
+  // 6. 构造 VoiceItem 并发送消息
+  const clientId = `voice-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const sendMessageReq = {
+    msg: {
+      from_user_id: "",
+      to_user_id: senderId,
+      client_id: clientId,
+      message_type: 2, // MessageType.BOT
+      message_state: 2, // MessageState.FINISH
+      item_list: [{
+        type: MESSAGE_ITEM_TYPE_VOICE,
+        voice_item: {
+          media: {
+            encrypt_query_param: downloadEncryptedQueryParam,
+            aes_key: aeskey.toString("base64"),
+            encrypt_type: 1,
+          },
+          encode_type: VOICE_ENCODE_TYPE_MP3,
+          playtime: Math.round(rawsize / 16000 * 1000), // 粗略估算时长(ms)，MP3 ~16kbps
+        },
+      }],
+      context_token: contextToken || undefined,
+    },
+  };
+
+  const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      AuthorizationType: "ilink_bot_token",
+      "X-WECHAT-UIN": randomWechatUin(),
+    },
+    body: JSON.stringify(sendMessageReq),
+  });
+  if (!sendResp.ok) {
+    const errText = await sendResp.text();
+    throw new Error(`sendmessage 失败 ${sendResp.status}: ${errText}`);
+  }
+
+  console.log(
+    `[private-agent-wechat-bridge] ✅ 语音消息发送成功 to=${senderId} size=${rawsize}B clientId=${clientId}`,
+  );
+  return true;
+}
 
 function pluginConfig(api, ctx) {
   const cfg =
@@ -130,10 +351,25 @@ function formatReminderPrefix(reminderType) {
 /**
  * 尝试通过 OpenClaw API 发送语音消息。
  *
- * OpenClaw 的 sendVoice / sendMedia 能力取决于渠道插件实现。
- * 如果 API 不支持，则降级为纯文本 + 提示信息。
+ * 策略优先级：
+ *   方式 0（新增）: 直接调用微信 HTTP API（绕过 OpenClaw SDK，最可靠）
+ *   方式 1        : api.sendVoice（如果 openclaw-weixin 插件支持）
+ *   方式 2        : api.sendMessage 带 type=voice 参数
+ *   方式 3        : dispatchReplyFromConfig 带 media 参数
+ *
+ * 如果所有方式都不可用，则降级为纯文本 + 提示信息。
  */
 async function trySendVoiceMessage(api, event, ctx, voiceFilePath) {
+  const senderId = event.senderId ?? ctx.senderId ?? ctx.conversationId;
+
+  // 方式 0：直接调用微信 HTTP API 发送语音（绕过 OpenClaw Plugin SDK）
+  try {
+    const sent = await sendVoiceViaWeixinApi({ voiceFilePath, senderId });
+    if (sent) return true;
+  } catch (e) {
+    console.warn(`[private-agent-wechat-bridge] 直接调用微信 API 发送语音失败:`, e.message);
+  }
+
   // 方式 1：尝试使用 api.sendVoice（如果 openclaw-weixin 插件支持）
   if (typeof api.sendVoice === "function") {
     try {

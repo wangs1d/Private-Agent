@@ -17,7 +17,6 @@ const MOOD_MOTION: Record<AgentMood, MoodMotion> = {
   idle: { speed: [22, 48], roam: 0.9, pauseSec: [1.2, 2.8], curiosity: 0.45, vitality: 0.2 },
   listening: { speed: [12, 28], roam: 0.5, pauseSec: [2, 4], curiosity: 0.7, vitality: 0.25 },
   thinking: { speed: [18, 42], roam: 0.98, pauseSec: [1, 2.5], curiosity: 0.55, vitality: 0.3 },
-  speaking: { speed: [36, 72], roam: 0.85, pauseSec: [0.4, 1.2], curiosity: 0.6, vitality: 0.5 },
   happy: { speed: [42, 88], roam: 1, pauseSec: [0.3, 1], curiosity: 0.75, vitality: 0.65 },
   alert: { speed: [30, 62], roam: 0.65, pauseSec: [0.6, 1.5], curiosity: 0.85, vitality: 0.45 },
 };
@@ -55,8 +54,6 @@ export function useLivingMotion({
       impulseRef.current = Math.max(impulseRef.current, 0.95);
       excitedUntilRef.current = performance.now() + 4000;
       behaviorRef.current = "excited";
-    } else if (mood === "speaking") {
-      impulseRef.current = Math.max(impulseRef.current, 0.35 + energy * 0.4);
     }
   }, [mood, energy]);
 
@@ -337,15 +334,6 @@ export function useLivingMotion({
         vel.vx += Math.sin(tSec * 2.2) * profile.vitality * 8 * dt;
         vel.vy += Math.sin(tSec * 1.6) * profile.vitality * 5 * dt;
 
-        if (moodRef.current === "speaking") {
-          const syllable = Math.sin(tSec * 12);
-          if (syllable > 0.7) {
-            const kick = (syllable - 0.7) * 4 * e;
-            vel.vx += (Math.random() - 0.5) * kick * 18 * dt;
-            vel.vy += (Math.random() - 0.4) * kick * 12 * dt;
-          }
-        }
-
         let targetX = posRef.current.x;
         let targetY = posRef.current.y;
 
@@ -505,7 +493,6 @@ export function useLivingMotion({
           1 +
           impulseRef.current * 0.04 +
           (behavior === "pausing" ? breath * 0.006 : 0) +
-          (moodRef.current === "speaking" ? Math.sin(tSec * 12) * 0.012 * e : 0) +
           (excited ? Math.sin(tSec * 14) * 0.018 : 0) +
           (shakeAmp > 0 ? Math.sin(tSec * 26) * 0.025 * shakeAmp : 0);
 

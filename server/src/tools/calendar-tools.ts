@@ -9,6 +9,45 @@ import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/s
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
+/** 将 ISO UTC 时间字符串格式化为用户可读的本地时间描述 */
+export function formatNextRunAtLocal(iso: string | null | undefined, timezone: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const diffMs = d.getTime() - now.getTime();
+  // 90秒内：显示相对时间
+  if (diffMs > 0 && diffMs < 90_000) {
+    const sec = Math.max(1, Math.round(diffMs / 1000));
+    if (sec < 60) return `${sec}秒后`;
+    return `${Math.round(sec / 60)}分钟后`;
+  }
+  // 使用 Intl 显式按用户时区格式化，避免服务器本地时区偏差
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const timeStr = d.toLocaleString("zh-CN", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const today = (() => {
+    const nowLocal = new Date(new Date().toLocaleString("en-US", { timeZone: timezone }));
+    const targetLocal = new Date(d.toLocaleString("en-US", { timeZone: timezone }));
+    return (
+      nowLocal.getFullYear() === targetLocal.getFullYear() &&
+      nowLocal.getMonth() === targetLocal.getMonth() &&
+      nowLocal.getDate() === targetLocal.getDate()
+    );
+  })();
+  if (today) return `今天${timeStr}`;
+  const dateStr = d.toLocaleDateString("zh-CN", {
+    timeZone: timezone,
+    month: "numeric",
+    day: "numeric",
+  });
+  return `${dateStr}${timeStr}`;
+}
+
 export function buildScheduleCreateInput(
   draft: ScheduleDraft,
   sessionId: string,
@@ -63,7 +102,11 @@ export function registerCalendarTools(
     if (!text) return { ok: false, error: "text 不能为空" };
     const sessionId = resolveActorId(context);
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
-    const parsed = await scheduleIntentService.parseForCreate(sessionId, text);
+    const parsed = await scheduleIntentService.parseForCreate(
+      sessionId,
+      text,
+      { userTimezone: context.clientLocation?.timezone?.trim() || tz },
+    );
     const guarded = toolResultFromScheduleParse(parsed);
     if (!guarded.proceed) {
       return guarded.result;
@@ -80,6 +123,7 @@ export function registerCalendarTools(
         title: task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
+        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
@@ -133,6 +177,7 @@ export function registerCalendarTools(
           title: task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
+          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
           reminderMessage: task.reminderMessage,
         };
@@ -155,6 +200,7 @@ export function registerCalendarTools(
           title: task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
+          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
       }
@@ -182,6 +228,7 @@ export function registerCalendarTools(
           title: task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
+          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
       }
@@ -210,6 +257,7 @@ export function registerCalendarTools(
         title: task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
+        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
         recurrence: task.recurrence,
       };
     } catch (e) {

@@ -31,7 +31,7 @@ const DEFAULT_PROFILE: Omit<CompanionProfile, "sessionId" | "updatedAt"> = {
   preferredTone: "warm",
   greetingEnabled: true,
   dailyGreetingHourLocal: 9,
-  timezone: "America/New_York",
+  timezone: "Asia/Shanghai",
   likes: [],
   dislikes: [],
 };

@@ -929,7 +929,9 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
 
   Widget _buildMyCardsArea(List<dynamic> hand) {
     return Center(
-      child: Container(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Container(
         padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.9),
@@ -965,6 +967,7 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1129,40 +1132,46 @@ class _ZhajinhuaPlayPageState extends State<ZhajinhuaPlayPage> {
   }
 
   Widget _buildActionButtons() {
-    return Column(
-      children: [
-        FilledButton(
-          onPressed: _busy ? null : () => _act("stay"),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            backgroundColor: const Color(0xFF34D399),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton(
+            onPressed: _busy ? null : () => _act("stay"),
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              backgroundColor: const Color(0xFF34D399),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.casino),
+                SizedBox(width: 8),
+                Text("跟注 / 弃牌", style: TextStyle(fontSize: 16)),
+              ],
+            ),
           ),
-          child: const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.casino),
-              SizedBox(width: 8),
-              Text("跟注 / 弃牌", style: TextStyle(fontSize: 16)),
-            ],
+          const SizedBox(height: 12),
+          OutlinedButton(
+            onPressed: _busy ? null : () => _act("fold"),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              side: const BorderSide(color: Color(0xFFEF4444)),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.close, color: Color(0xFFEF4444)),
+                SizedBox(width: 8),
+                Text("弃牌", style: TextStyle(fontSize: 16, color: Color(0xFFEF4444))),
+              ],
+            ),
           ),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton(
-          onPressed: _busy ? null : () => _act("fold"),
-          style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            side: const BorderSide(color: Color(0xFFEF4444)),
-          ),
-          child: const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.close, color: Color(0xFFEF4444)),
-              SizedBox(width: 8),
-              Text("弃牌", style: TextStyle(fontSize: 16, color: Color(0xFFEF4444))),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -1290,7 +1299,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
     final int? mySeat = (_snap["mySeat"] as num?)?.round();
     final int? turnSeat = (_snap["turnSeat"] as num?)?.round();
     final List<dynamic>? handCounts = _snap["handCounts"] as List<dynamic>?;
-    final List<dynamic>? lastPlay = _snap["lastNonPass"];
+    final dynamic lastPlay = _snap["lastNonPass"];
     final bool isLandlord = _snap["isLandlord"] == true;
     final List<dynamic>? seats = _snap["seats"] as List<dynamic>?;
 
@@ -1568,24 +1577,27 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
           ),
           Column(
             children: [
-              Row(
-                children: [
-                  _buildTableMetric(
-                      "底池", "$pot", Icons.savings, const Color(0xFFFBBF24)),
-                  const SizedBox(width: 10),
-                  _buildTableMetric(
-                    "你的身份",
-                    isLandlord ? "地主" : "农民",
-                    isLandlord
-                        ? Icons.workspace_premium
-                        : Icons.shield_outlined,
-                    isLandlord
-                        ? const Color(0xFFFBBF24)
-                        : const Color(0xFF60A5FA),
-                  ),
-                  const Spacer(),
-                  _buildTurnChip(status, turnSeat, mySeat),
-                ],
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildTableMetric(
+                        "底池", "$pot", Icons.savings, const Color(0xFFFBBF24)),
+                    const SizedBox(width: 10),
+                    _buildTableMetric(
+                      "你的身份",
+                      isLandlord ? "地主" : "农民",
+                      isLandlord
+                          ? Icons.workspace_premium
+                          : Icons.shield_outlined,
+                      isLandlord
+                          ? const Color(0xFFFBBF24)
+                          : const Color(0xFF60A5FA),
+                    ),
+                    const SizedBox(width: 10),
+                    _buildTurnChip(status, turnSeat, mySeat),
+                  ],
+                ),
               ),
               const Spacer(),
               if (lastPlay != null)
@@ -1708,6 +1720,7 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
             isLandlord ? "你是地主" : "你是农民",
             style: const TextStyle(
                 fontSize: 13, fontWeight: FontWeight.w800, color: Colors.white),
+            overflow: TextOverflow.ellipsis,
           ),
         ],
       ),
@@ -1806,9 +1819,9 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                             ? "Agent ${seatIndex + 1} · 地主"
                             : "Agent ${seatIndex + 1} · 农民"),
                     style: TextStyle(
-                        fontSize: compact ? 11 : 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey.shade800),
+                      fontSize: compact ? 11 : 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade800),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -1886,19 +1899,22 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
                     color: const Color(0xFFF87171))),
             SizedBox(height: 8),
             if (cards.isNotEmpty)
-              Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: <Widget>[
-                  for (int i = 0; i < cards.length; i++)
-                    _DealtCard(
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: <Widget>[
+                    for (int i = 0; i < cards.length; i++)
+                      _DealtCard(
                       index: i,
                       stableKey: cards[i]?.toString() ?? i,
                       from: const Offset(0, -0.35),
                       angle: (i - (cards.length - 1) / 2) * 0.02,
                       child: _buildMiniDoudizhuCard(cards[i]?.toString() ?? ""),
                     ),
-                ],
+                  ],
+                ),
               )
             else
               Text("不出",
@@ -2112,14 +2128,8 @@ class _DoudizhuPlayPageState extends State<DoudizhuPlayPage> {
 
   Widget _buildBiddingButtons() {
     return Center(
-      child: Container(
-        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.93),
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10)
-            ]),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2632,17 +2642,20 @@ class _BlackjackPlayPageState extends State<BlackjackPlayPage> {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: const Color(0xFF34D399).withValues(alpha: 0.25)),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _buildScoreItem(
-              "庄家", "$dealerScore", Icons.casino, const Color(0xFFF87171)),
-          Container(width: 1, height: 40, color: Colors.grey.shade300),
-          _buildScoreItem(
-              "你", "$playerScore", Icons.person, const Color(0xFF60A5FA)),
-          Container(width: 1, height: 40, color: Colors.grey.shade300),
-          _buildPhaseIndicator(phase),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildScoreItem(
+                "庄家", "$dealerScore", Icons.casino, const Color(0xFFF87171)),
+            Container(width: 1, height: 40, color: Colors.grey.shade300),
+            _buildScoreItem(
+                "你", "$playerScore", Icons.person, const Color(0xFF60A5FA)),
+            Container(width: 1, height: 40, color: Colors.grey.shade300),
+            _buildPhaseIndicator(phase),
+          ],
+        ),
       ),
     );
   }

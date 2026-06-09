@@ -7,7 +7,7 @@ import type {
   ScheduleRecurrence,
   ScheduleTaskService,
 } from "../services/schedule-task-service.js";
-import { buildScheduleCreateInput } from "./calendar-tools.js";
+import { buildScheduleCreateInput, formatNextRunAtLocal } from "./calendar-tools.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
@@ -87,6 +87,7 @@ export function registerLifeTools(
           title: task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
+          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
           recurrence: task.recurrence,
           reminderMessage,
         };
@@ -96,7 +97,11 @@ export function registerLifeTools(
       }
     }
 
-    const parsed = await scheduleIntentService.parseForCreate(sessionId, parseSource);
+    const parsed = await scheduleIntentService.parseForCreate(
+      sessionId,
+      parseSource,
+      { userTimezone: context.clientLocation?.timezone?.trim() || tz },
+    );
     const guarded = toolResultFromScheduleParse(parsed);
     if (!guarded.proceed) {
       return guarded.result;
@@ -120,6 +125,7 @@ export function registerLifeTools(
         title: task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
+        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage ?? draft.reminderMessage,
       };
