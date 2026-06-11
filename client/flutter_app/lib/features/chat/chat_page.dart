@@ -1,6 +1,10 @@
 import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
+import "package:http/http.dart" as http;
+import "dart:convert";
 
+import "../../core/config/api_config.dart";
 import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/utils/content_summary_parser.dart";
@@ -79,6 +83,70 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   final bool _isListening = false;
   final String _recognizedText = "";
   final ScrollController _scrollController = ScrollController();
+
+  /// 全局删除选择模式状态
+  bool _deleteSelectionMode = false;
+  /// 触发删除的用户消息 ID（该消息始终被锁定选中，不可取消）
+  String? _deleteTriggerMessageId;
+  /// 删除选择模式下被选中的消息 ID 集合（含触发用户消息+可选的agent回复）
+  final Set<String> _selectedMessageIds = <String>{};
+
+  /// 进入删除选择模式：当前用户消息锁定选中，其agent回复默认全选可取消
+  void _enterDeleteMode(String messageId) {
+    setState(() {
+      _deleteSelectionMode = true;
+      _deleteTriggerMessageId = messageId;
+      _selectedMessageIds.clear();
+      _selectedMessageIds.addAll(_getRelatedMessageIds(messageId));
+    });
+  }
+
+  /// 切换单条消息的选中状态（触发消息不可取消）
+  void _toggleMessageSelection(String messageId, bool selected) {
+    if (messageId == _deleteTriggerMessageId) return; // 用户消息不可取消
+    setState(() {
+      if (selected) {
+        _selectedMessageIds.add(messageId);
+      } else {
+        _selectedMessageIds.remove(messageId);
+      }
+    });
+  }
+
+  /// 确认删除所有选中消息（仅删除被勾选的，倒序逐条删除避免索引偏移）
+  void _confirmDeleteSelection() {
+    if (_selectedMessageIds.isEmpty || widget.onDeleteMessage == null) return;
+
+    // 按索引从大到小排序，倒序删除避免索引偏移
+    final List<MapEntry<int, String>> sorted = <MapEntry<int, String>>[];
+    for (final String mid in _selectedMessageIds) {
+      final int idx = widget.messages.indexWhere((ChatMessage m) => m.messageId == mid);
+      if (idx >= 0) {
+        sorted.add(MapEntry<int, String>(idx, mid));
+      }
+    }
+    sorted.sort((MapEntry<int, String> a, MapEntry<int, String> b) => b.key.compareTo(a.key));
+
+    // 倒序逐条删除
+    for (final MapEntry<int, String> entry in sorted) {
+      widget.onDeleteMessage!(entry.value);
+    }
+
+    setState(() {
+      _deleteSelectionMode = false;
+      _deleteTriggerMessageId = null;
+      _selectedMessageIds.clear();
+    });
+  }
+
+  /// 取消删除选择模式
+  void _cancelDeleteMode() {
+    setState(() {
+      _deleteSelectionMode = false;
+      _deleteTriggerMessageId = null;
+      _selectedMessageIds.clear();
+    });
+  }
 
   /// 滚动状态使用 ValueNotifier，避免 setState 触发整树重建导致掉帧
   final ValueNotifier<bool> _isUserScrollingNotifier = ValueNotifier<bool>(false);
@@ -568,10 +636,43 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   /// 处理中气泡文案：`agent_status` > 历史流程提示 > 默认
   String _processingStatusText([ChatMessage? progressMessage]) {
     final String? live = widget.agentStatusLine?.trim();
-    if (live != null && live.isNotEmpty) return live;
+    if (live != null && live.isNotEmpty) {
+      // 兜底：如果「实时进度」文本和消息列表里最新一条 assistant 回复撞车
+      // （模型违反 prompt 把进度句复读进了最终回复），不要把同一行字再渲一份，
+      // 直接退化成「正在收尾…」——避免用户看到两份一样的内容同框。
+      if (_isLiveStatusDuplicateOfLatestAssistant(live)) {
+        return "Agent 正在收尾…";
+      }
+      return live;
+    }
     final String? progress = progressMessage?.text.trim();
     if (progress != null && progress.isNotEmpty) return progress;
     return "Agent 思考中...";
+  }
+
+  /// 实时进度是否和最新一条 assistant 回复文本撞车。
+  /// 判定：去掉标点/emoji/空白后做子串包含，任一方向包含即视为重复。
+  bool _isLiveStatusDuplicateOfLatestAssistant(String live) {
+    String normalize(String s) {
+      return s
+          .toLowerCase()
+          .replaceAll(RegExp(r"[\s\.,!?;:\-\u3002\uff0c\uff01\uff1f\u2026\ud83c-\udbff\udc00-\udfff]+"), "");
+    }
+
+    final String liveKey = normalize(live);
+    if (liveKey.isEmpty) return false;
+    for (int i = widget.messages.length - 1; i >= 0; i--) {
+      final ChatMessage m = widget.messages[i];
+      if (m.role == "user") return false; // 越过所有 assistant 都没撞上
+      if (m.role != "assistant") continue;
+      final String msgKey = normalize(m.text);
+      if (msgKey.isEmpty) continue;
+      if (msgKey.contains(liveKey) || liveKey.contains(msgKey)) {
+        return true;
+      }
+      return false; // 最新一条 assistant 不撞，剩下的也无需看
+    }
+    return false;
   }
 
   Widget _buildProgressBubble(ColorScheme cs, String text) {
@@ -686,13 +787,20 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   }
 
   /// 构建消息时间戳
-  /// 鼠标悬停消息气泡时自动浮现删除按钮（类似豆包交互）
+  /// 鼠标悬停消息气泡时自动浮现操作按钮栏
   Widget _buildHoverableMessage({
     required ColorScheme cs,
     required ChatMessage mainMessage,
     required bool isUser,
     ContentSummaryParseResult? contentSummary,
   }) {
+    // 所有用户消息都可悬停显示操作按钮
+    final bool canShowActions = isUser;
+    // 选择模式下，只有当前选中范围内的消息参与（触发用户消息 + 其agent回复）
+    final bool inSelectableRange = _deleteSelectionMode && _selectedMessageIds.contains(mainMessage.messageId);
+    // 当前消息是否为触发了删除模式的用户消息（锁定不可取消）
+    final bool isTrigger = mainMessage.messageId == _deleteTriggerMessageId;
+
     return _HoverableMessageWidget(
       cs: cs,
       mainMessage: mainMessage,
@@ -701,8 +809,49 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       onDeleteMessage: widget.onDeleteMessage,
       onDeleteFromMessage: widget.onDeleteFromMessage,
       onOpenGomoku: widget.onOpenGomoku,
+      onGetRelatedMessageIds: _getRelatedMessageIds,
       cardPadding: _cardPadding,
+      // 全局删除选择状态（从 ChatPage 层级传入）
+      deleteSelectionMode: _deleteSelectionMode,
+      isSelected: _selectedMessageIds.contains(mainMessage.messageId),
+      selectedCount: _selectedMessageIds.length,
+      canShowActions: canShowActions,
+      inSelectableRange: inSelectableRange,
+      isTrigger: isTrigger,
+      onEnterDeleteMode: _enterDeleteMode,
+      onToggleSelection: _toggleMessageSelection,
+      onDeleteConfirm: _confirmDeleteSelection,
+      onDeleteCancel: _cancelDeleteMode,
     );
+  }
+
+  /// 获取与当前消息关联的消息 ID 列表（用户消息+agent回复配对）
+  List<String> _getRelatedMessageIds(String messageId) {
+    final int idx = widget.messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (idx < 0) return [messageId];
+
+    final List<String> ids = <String>[messageId];
+    final ChatMessage current = widget.messages[idx];
+
+    // 如果是用户消息，查找紧随其后的 agent 回复
+    if (current.role == "user") {
+      for (int i = idx + 1; i < widget.messages.length; i++) {
+        if (widget.messages[i].role != "user") {
+          ids.add(widget.messages[i].messageId);
+          break;
+        }
+      }
+    } else {
+      // 如果是 agent 消息，查找其前一条用户消息
+      for (int i = idx - 1; i >= 0; i--) {
+        if (widget.messages[i].role == "user") {
+          ids.insert(0, widget.messages[i].messageId);
+          break;
+        }
+      }
+    }
+
+    return ids;
   }
 
   /// 构建消息时间戳
@@ -1212,8 +1361,8 @@ class _GomokuPlayUrlCard extends StatelessWidget {
   }
 }
 
-/// 独立的 StatefulWidget：管理每条消息的 hover 悬停状态，避免 StatefulBuilder 内变量被重置
-class _HoverableMessageWidget extends StatefulWidget {
+/// 独立的 StatefulWidget：管理每条消息的 hover 悬停状态，删除选择状态由父级 ChatPage 统一管理
+class _HoverableMessageWidget extends StatelessWidget {
   const _HoverableMessageWidget({
     required this.cs,
     required this.mainMessage,
@@ -1223,6 +1372,21 @@ class _HoverableMessageWidget extends StatefulWidget {
     this.onDeleteMessage,
     this.onDeleteFromMessage,
     this.onOpenGomoku,
+    this.onGetRelatedMessageIds,
+    // 全局删除选择状态（由 ChatPage 传入）
+    required this.deleteSelectionMode,
+    required this.isSelected,
+    required this.selectedCount,
+    /// 是否可显示悬停操作按钮（所有用户消息为 true）
+    required this.canShowActions,
+    /// 是否在选择模式的可选范围内（触发用户消息 + 其agent回复）
+    required this.inSelectableRange,
+    /// 是否为触发了删除模式的用户消息（锁定不可取消）
+    required this.isTrigger,
+    required this.onEnterDeleteMode,
+    required this.onToggleSelection,
+    required this.onDeleteConfirm,
+    required this.onDeleteCancel,
   });
 
   final ColorScheme cs;
@@ -1233,22 +1397,109 @@ class _HoverableMessageWidget extends StatefulWidget {
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final void Function(String playUrlOrTableId)? onOpenGomoku;
+  final List<String> Function(String messageId)? onGetRelatedMessageIds;
+
+  /// 全局删除选择模式是否激活
+  final bool deleteSelectionMode;
+  /// 当前消息是否被选中
+  final bool isSelected;
+  /// 当前已选中的消息总数（用于确认栏显示）
+  final int selectedCount;
+  /// 是否可显示操作按钮
+  final bool canShowActions;
+  /// 是否在可选择范围内
+  final bool inSelectableRange;
+  /// 是否为触发的用户消息（锁定）
+  final bool isTrigger;
+  /// 回调：进入删除选择模式
+  final void Function(String messageId) onEnterDeleteMode;
+  /// 回调：切换单条消息选中状态
+  final void Function(String messageId, bool selected) onToggleSelection;
+  /// 回调：确认删除
+  final VoidCallback onDeleteConfirm;
+  /// 回调：取消删除模式
+  final VoidCallback onDeleteCancel;
 
   @override
-  State<_HoverableMessageWidget> createState() => _HoverableMessageWidgetState();
+  Widget build(BuildContext context) {
+    return _HoverableMessageContent(
+      cs: cs,
+      mainMessage: mainMessage,
+      isUser: isUser,
+      cardPadding: cardPadding,
+      contentSummary: contentSummary,
+      onDeleteMessage: onDeleteMessage,
+      onDeleteFromMessage: onDeleteFromMessage,
+      onOpenGomoku: onOpenGomoku,
+      deleteSelectionMode: deleteSelectionMode,
+      isSelected: isSelected,
+      selectedCount: selectedCount,
+      canShowActions: canShowActions,
+      inSelectableRange: inSelectableRange,
+      isTrigger: isTrigger,
+      onEnterDeleteMode: onEnterDeleteMode,
+      onToggleSelection: onToggleSelection,
+      onDeleteConfirm: onDeleteConfirm,
+      onDeleteCancel: onDeleteCancel,
+    );
+  }
 }
 
-class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
+/// 实际的 StatefulWidget，仅管理本地 hover 状态
+class _HoverableMessageContent extends StatefulWidget {
+  const _HoverableMessageContent({
+    required this.cs,
+    required this.mainMessage,
+    required this.isUser,
+    required this.cardPadding,
+    this.contentSummary,
+    this.onDeleteMessage,
+    this.onDeleteFromMessage,
+    this.onOpenGomoku,
+    required this.deleteSelectionMode,
+    required this.isSelected,
+    required this.selectedCount,
+    required this.canShowActions,
+    required this.inSelectableRange,
+    required this.isTrigger,
+    required this.onEnterDeleteMode,
+    required this.onToggleSelection,
+    required this.onDeleteConfirm,
+    required this.onDeleteCancel,
+  });
+
+  final ColorScheme cs;
+  final ChatMessage mainMessage;
+  final bool isUser;
+  final EdgeInsets cardPadding;
+  final ContentSummaryParseResult? contentSummary;
+  final void Function(String messageId)? onDeleteMessage;
+  final void Function(String messageId)? onDeleteFromMessage;
+  final void Function(String playUrlOrTableId)? onOpenGomoku;
+  final bool deleteSelectionMode;
+  final bool isSelected;
+  final int selectedCount;
+  final bool canShowActions;
+  final bool inSelectableRange;
+  final bool isTrigger;
+  final void Function(String messageId) onEnterDeleteMode;
+  final void Function(String messageId, bool selected) onToggleSelection;
+  final VoidCallback onDeleteConfirm;
+  final VoidCallback onDeleteCancel;
+
+  @override
+  State<_HoverableMessageContent> createState() => _HoverableMessageContentState();
+}
+
+class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   bool _hovered = false;
-  bool _deleteSelectionMode = false;
-  bool _deleteSelected = true; // 默认全选
 
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) {
-        if (!_deleteSelectionMode) setState(() => _hovered = false);
+        if (!widget.deleteSelectionMode) setState(() => _hovered = false);
       },
       cursor: SystemMouseCursors.basic,
       child: Stack(
@@ -1264,8 +1515,8 @@ class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
                 crossAxisAlignment:
                     widget.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                 children: [
-                  // 删除选择模式：左侧勾选 + 高亮内容
-                  if (_deleteSelectionMode)
+                  // 删除选择模式：左侧勾选 + 高亮内容（仅当前配对范围内的消息参与）
+                  if (widget.inSelectableRange)
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1273,13 +1524,14 @@ class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
                         Padding(
                           padding: const EdgeInsets.only(top: 12, right: 8),
                           child: Checkbox(
-                            value: _deleteSelected,
-                            onChanged: (bool? v) {
-                              setState(() => _deleteSelected = v ?? true);
+                            value: widget.isSelected,
+                            // 触发删除的用户消息不可取消勾选
+                            onChanged: widget.isTrigger ? null : (bool? v) {
+                              widget.onToggleSelection(widget.mainMessage.messageId, v ?? true);
                             },
                           ),
                         ),
-                        Flexible(child: _buildMessageCard(context, highlight: true)),
+                        Flexible(child: _buildMessageCard(context, highlight: widget.isSelected)),
                       ],
                     )
                   else
@@ -1289,67 +1541,181 @@ class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
               ),
             ),
           ),
-          // 悬停时浮现操作按钮栏（位于时间戳下方，透明背景）
-          if (_hovered && !_deleteSelectionMode &&
+          // 悬停时浮现操作按钮栏（所有用户消息，非选择模式下，透明背景）
+          if (_hovered && !widget.deleteSelectionMode && widget.canShowActions &&
               widget.onDeleteMessage != null &&
               widget.onDeleteFromMessage != null)
             Positioned(
               left: 0,
               right: 0,
               top: 0,
-              bottom: -32,
+              bottom: -48,
               child: Align(
                 alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-                child: _MessageActionBar(
-                  onCopy: () {
-                    // TODO: 复制消息内容到剪贴板
+                child: Padding(
+                  padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
+                  child: _MessageActionBar(
+                  messageText: widget.mainMessage.text,
+                  messageId: widget.mainMessage.messageId,
+                  onCopy: () async {
+                    await _copyMessage(context, widget.mainMessage.text, widget.mainMessage.messageId);
                   },
-                  onEdit: () {
-                    // TODO: 编辑/重新生成消息
+                  onEdit: () async {
+                    await _editMessage(context, widget.mainMessage.messageId, widget.mainMessage.text);
                   },
                   onDeletePressed: () {
-                    setState(() {
-                      _deleteSelectionMode = true;
-                      _deleteSelected = true;
-                      _hovered = false;
-                    });
+                    widget.onEnterDeleteMode(widget.mainMessage.messageId);
                   },
+                ),
                 ),
               ),
             ),
-          // 删除选择模式下的确认/取消按钮栏
-          if (_deleteSelectionMode)
+          // 删除选择模式下的确认/取消按钮栏（仅在触发删除的用户消息下方显示）
+          if (widget.deleteSelectionMode && widget.isTrigger)
             Positioned(
               left: 0,
               right: 0,
               top: 0,
-              bottom: -36,
+              bottom: -56,
               child: Align(
                 alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-                child: _DeleteConfirmBar(
-                  isSelected: _deleteSelected,
-                  onToggleSelect: (v) => setState(() => _deleteSelected = v),
-                  onConfirm: () {
-                    if (_deleteSelected) {
-                      widget.onDeleteMessage!(widget.mainMessage.messageId);
-                    }
-                    setState(() {
-                      _deleteSelectionMode = false;
-                      _deleteSelected = true;
-                    });
+                child: Padding(
+                  padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
+                  child: _DeleteConfirmBar(
+                  selectedCount: widget.selectedCount,
+                  isCurrentSelected: widget.isSelected,
+                  onToggleSelect: (v) {
+                    widget.onToggleSelection(widget.mainMessage.messageId, v);
                   },
-                  onCancel: () {
-                    setState(() {
-                      _deleteSelectionMode = false;
-                      _deleteSelected = true;
-                    });
-                  },
+                  onConfirm: widget.onDeleteConfirm,
+                  onCancel: widget.onDeleteCancel,
+                ),
                 ),
               ),
             ),
         ],
       ),
     );
+  }
+
+  /// 复制消息：调用后端审计接口 + 写入剪贴板
+  static Future<void> _copyMessage(BuildContext context, String text, String messageId) async {
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/chat/message/copy");
+      final Map<String, dynamic> requestBody = <String, dynamic>{
+        "sessionId": ApiConfig.sessionId,
+        "userId": ApiConfig.userId.trim().isEmpty ? null : ApiConfig.userId.trim(),
+        "messageId": messageId,
+        "text": text,
+      };
+      final http.Response response = await http.post(
+        uri,
+        headers: <String, String>{"Content-Type": "application/json"},
+        body: jsonEncode(requestBody),
+      );
+      if (response.statusCode == 200) {
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
+          );
+        }
+      } else {
+        // 后端校验失败时仍写入剪贴板（降级体验）
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
+          );
+        }
+      }
+    } catch (_) {
+      // 网络异常时直接复制文本
+      await Clipboard.setData(ClipboardData(text: text));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
+        );
+      }
+    }
+  }
+
+  /// 编辑消息：弹出编辑对话框 → 用户确认后调用后端编辑 API 触发 Agent 重答
+  static Future<void> _editMessage(BuildContext context, String messageId, String originalText) async {
+    final TextEditingController editController = TextEditingController(text: originalText);
+    final String? result = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text("编辑消息"),
+          content: TextField(
+            controller: editController,
+            maxLines: null,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: "修改消息内容…",
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(null),
+              child: const Text("取消"),
+            ),
+            FilledButton(
+              onPressed: () {
+                final String newText = editController.text.trim();
+                if (newText.isEmpty || newText == originalText) {
+                  Navigator.of(dialogContext).pop(null);
+                  return;
+                }
+                Navigator.of(dialogContext).pop(newText);
+              },
+              child: const Text("发送"),
+            ),
+          ],
+        );
+      },
+    );
+
+    editController.dispose();
+
+    // 用户取消或未修改
+    if (result == null || result.isEmpty) return;
+
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/chat/message/edit");
+      final Map<String, dynamic> requestBody = <String, dynamic>{
+        "sessionId": ApiConfig.sessionId,
+        "userId": ApiConfig.userId.trim().isEmpty ? null : ApiConfig.userId.trim(),
+        "messageId": messageId,
+        "newText": result,
+      };
+      final http.Response response = await http.post(
+        uri,
+        headers: <String, String>{"Content-Type": "application/json"},
+        body: jsonEncode(requestBody),
+      );
+      if (response.statusCode == 200) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("消息已编辑，Agent 正在重新回复…"), duration: Duration(seconds: 2)),
+          );
+        }
+      } else {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("编辑失败，请保持聊天页在前台后重试"), duration: Duration(seconds: 2)),
+          );
+        }
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("网络错误，无法连接服务器"), duration: Duration(seconds: 2)),
+        );
+      }
+    }
   }
 
   /// 构建消息卡片（支持高亮态）
@@ -1537,11 +1903,15 @@ class _HoverableMessageWidgetState extends State<_HoverableMessageWidget> {
 /// 消息下方悬浮操作按钮栏（复制 / 编辑 / 删除）—— 透明背景
 class _MessageActionBar extends StatelessWidget {
   const _MessageActionBar({
+    required this.messageText,
+    required this.messageId,
     required this.onCopy,
     required this.onEdit,
     required this.onDeletePressed,
   });
 
+  final String messageText;
+  final String messageId;
   final VoidCallback onCopy;
   final VoidCallback onEdit;
   final VoidCallback onDeletePressed;
@@ -1575,13 +1945,15 @@ class _MessageActionBar extends StatelessWidget {
 /// 删除选择模式下的确认/取消按钮栏
 class _DeleteConfirmBar extends StatelessWidget {
   const _DeleteConfirmBar({
-    required this.isSelected,
+    required this.selectedCount,
+    required this.isCurrentSelected,
     required this.onToggleSelect,
     required this.onConfirm,
     required this.onCancel,
   });
 
-  final bool isSelected;
+  final int selectedCount;
+  final bool isCurrentSelected;
   final ValueChanged<bool> onToggleSelect;
   final VoidCallback onConfirm;
   final VoidCallback onCancel;
@@ -1592,22 +1964,22 @@ class _DeleteConfirmBar extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        // 全选/取消勾选
+        // 勾选当前消息 + 显示已选数量
         GestureDetector(
-          onTap: () => onToggleSelect(!isSelected),
+          onTap: () => onToggleSelect(!isCurrentSelected),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Icon(
-                  isSelected ? Icons.check_box : Icons.check_box_outline_blank,
+                  isCurrentSelected ? Icons.check_box : Icons.check_box_outline_blank,
                   size: 16,
-                  color: isSelected ? Colors.red[400] : cs.onSurfaceVariant,
+                  color: isCurrentSelected ? Colors.red[400] : cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  isSelected ? "已选择" : "取消选择",
+                  isCurrentSelected ? "已选择 ($selectedCount条)" : "取消选择",
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
               ],
@@ -1624,23 +1996,23 @@ class _DeleteConfirmBar extends StatelessWidget {
         const SizedBox(width: 2),
         // 确认删除按钮
         GestureDetector(
-          onTap: isSelected ? onConfirm : null,
+          onTap: isCurrentSelected ? onConfirm : null,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
             decoration: BoxDecoration(
-              color: isSelected ? Colors.red : cs.surfaceContainerHighest.withValues(alpha: 0.5),
+              color: isCurrentSelected ? Colors.red : cs.surfaceContainerHighest.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(Icons.delete_outline, size: 15, color: isSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4)),
+                Icon(Icons.delete_outline, size: 15, color: isCurrentSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4)),
                 const SizedBox(width: 4),
                 Text(
                   "删除",
                   style: TextStyle(
                     fontSize: 12,
-                    color: isSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4),
+                    color: isCurrentSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4),
                   ),
                 ),
               ],

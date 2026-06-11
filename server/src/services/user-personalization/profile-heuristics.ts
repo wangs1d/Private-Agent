@@ -1,5 +1,3 @@
-/** 从用户话术中抽取可写入 USER_PROFILE.md 的线索（规则型，无额外模型调用）。 */
-
 export type ProfilePatch = {
   displayName?: string;
   interest?: string;
@@ -10,18 +8,19 @@ export type ProfilePatch = {
 };
 
 const CONCISE_REPLY_PREF_RE =
-  /不要.*(?:等级|标题|摘要|长篇大论|废话|口水话)|(?:等级|标题|摘要).*(?:不要|别出现|什么的)|简洁.*(?:回答|回复)|精简直接|口语化.*短句|别太啰嗦|别废话|少点废话|短一点|说人话|像聊天一样/;
+  /不要.*(?:等级|标题|摘要|长篇大论|废话|口水话)|(?:等级|标题|摘要).*(?:不要|别出现|什么的)|简洁.*(?:回答|回复)|精简直接|口语化.*短句|别太啰嗦|别废话|少点废话|短一点|说人话|像聊天一样|像真人朋友聊天/;
 
 const ADAPTIVE_REPLY_PREF_RE =
-  /按(?:我|用户).*(?:风格|习惯|方式)|跟着我.*(?:说话|风格)|越来越熟|熟一点|自然一点|像朋友一点|别太官方|别像客服/;
+  /跟着.*(?:风格|习惯|方式)|越来?越熟|熟一点|自然一点|像朋友一点|别太官方|别像客服|别像机器人/;
 
-const NAME_RE = /(?:我叫|叫我|称呼我[是为]?|你可以叫我)([^\s，。！？!?.]{1,16})/;
-const INTEREST_RE = /(?:我喜欢|我爱|我爱好|我最爱|经常)([^\s，。！？!?.]{2,40})/;
-const IDENTITY_RE = /我是([^\s，。！？!?.]{2,20}(?:人|的|籍))/;
+const NAME_RE = /(?:我叫|叫我|称呼我|我是|你可以叫我)([^\s，。！？,\.]{1,16})/;
+const INTEREST_RE = /(?:我喜欢|我爱|我最爱|经常|平时喜欢)([^\s，。！？,\.]{2,40})/;
+const IDENTITY_RE = /我是([^\s，。！？,\.]{2,20}(?:人|的|者|党|派|类)?)/;
 
 export function extractProfilePatches(userText: string): ProfilePatch[] {
   const t = userText.trim();
   if (!t) return [];
+
   const patches: ProfilePatch[] = [];
 
   const name = NAME_RE.exec(t);
@@ -39,18 +38,17 @@ export function extractProfilePatches(userText: string): ProfilePatch[] {
 
   if (CONCISE_REPLY_PREF_RE.test(t)) {
     patches.push({
-      replyPreference: "默认精简直接、口语化短句、少废话；不要标题党、摘要腔、表格腔或过度正式",
+      replyPreference: "默认短句、口语化、少解释，像熟人回话；不要客服腔、标题、表格和长篇总结。",
     });
   }
 
   if (ADAPTIVE_REPLY_PREF_RE.test(t)) {
     patches.push({
-      freeformNote:
-        "回复要持续跟随用户自己的说话方式微调，不套固定模板；整体保持自然、克制、精简。",
+      freeformNote: "回复继续跟着用户自己的说话方式微调，不套固定模板，整体保持自然、克制、精简。",
     });
   }
 
-  if (/记住|别忘了|以后都|每次都要/.test(t) && t.length <= 200) {
+  if (/记住|别忘了|以后都要/.test(t) && t.length <= 200) {
     patches.push({ freeformNote: t.slice(0, 120) });
   }
 
@@ -116,9 +114,7 @@ export function applyProfilePatches(md: string, patches: ProfilePatch[]): string
       );
     }
     if (p.freeformNote) {
-      out = patchSection(out, "备注", (body) =>
-        upsertBullet(body, p.freeformNote!),
-      );
+      out = patchSection(out, "备注", (body) => upsertBullet(body, p.freeformNote!));
     }
   }
 

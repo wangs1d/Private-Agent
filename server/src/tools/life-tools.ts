@@ -57,13 +57,11 @@ export function registerLifeTools(
           error: "请提供 text（自然语言，含时间与事项），或同时提供 subject 与 date/runAt",
         };
       }
-      const runAtDate = new Date(runAt);
-      if (Number.isNaN(runAtDate.getTime())) {
-        return { ok: false, error: "runAt 须为有效 ISO-8601 时间" };
-      }
       const recurrenceRaw = String(input.recurrence ?? "none").trim();
       let recurrence: ScheduleRecurrence =
-        recurrenceRaw === "daily" || recurrenceRaw === "weekly" ? recurrenceRaw : "none";
+        recurrenceRaw === "daily" || recurrenceRaw === "weekly" || recurrenceRaw === "cron"
+          ? recurrenceRaw
+          : "none";
       const textForRecurrence = String(input.text ?? "").trim();
       if (textForRecurrence) {
         recurrence = inferRecurrenceFromUserText(textForRecurrence);
@@ -74,9 +72,11 @@ export function registerLifeTools(
           title: subject,
           description: subject,
           kind: "reminder",
-          runAt: runAtDate.toISOString(),
+          runAt,
           recurrence,
           timezone: tz,
+          cronExpression: String(input.cronExpression ?? "").trim() || undefined,
+          webhookToken: String(input.webhookToken ?? "").trim() || undefined,
           reminderMessage,
         });
         return {
@@ -90,6 +90,8 @@ export function registerLifeTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
           recurrence: task.recurrence,
           reminderMessage,
+          webhookToken: task.webhookToken,
+          cronExpression: task.cronExpression,
         };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -111,7 +113,7 @@ export function registerLifeTools(
       return {
         ok: true,
         matched: false,
-        hint: `解析为 ${draft.kind} 任务；若只需提醒请改用更明确的提醒表述，或使用 calendar.create_from_text。`,
+        hint: `解析出了 ${draft.kind} 任务；若只需提醒请改用更明确的提醒表述，或使用 calendar.create_from_text。`,
       };
     }
     try {

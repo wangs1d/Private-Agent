@@ -15,6 +15,22 @@ import { isTcpPortInUse } from "./utils/port-in-use.js";
 
 // 始终从 server/.env + server/.env.local 加载（密钥放 .env.local，避免被脚本误覆盖）
 loadServerEnv();
+
+// ─── 全局异常处理：防止未捕获异常导致进程意外崩溃 ───
+process.on("uncaughtException", (err: Error) => {
+  console.error("[FATAL] uncaughtException:", err.message || err);
+  console.error(err.stack || "(no stack)");
+  // 记录错误后优雅退出，让外部进程管理器（如 node --watch / pm2）决定是否重启
+  shutdown?.();
+  setTimeout(() => process.exit(1), 2000).unref();
+});
+
+process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) => {
+  const msg = reason instanceof Error ? reason.message : String(reason ?? "unknown");
+  console.error("[WARN] unhandledRejection:", msg);
+  // 不退出进程，仅记录警告；如果是严重错误会触发后续的 uncaughtException
+});
+
 await exitIfDevPortInUse(getRuntimeConfig().port);
 
 const runtime = getRuntimeConfig();

@@ -80,7 +80,7 @@ export class ScheduleIntentService {
     userText: string,
     userTimezone?: string,
   ): Promise<ScheduleDraft | null> {
-    const ruleDraft = this.parseByRule(userText);
+    const ruleDraft = this.parseByRule(userText, options?.userTimezone);
     if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
@@ -145,9 +145,9 @@ export class ScheduleIntentService {
     }
   }
 
-  private parseByRule(userText: string): ScheduleDraft | null {
+  private parseByRule(userText: string, userTimezone?: string): ScheduleDraft | null {
     const normalized = userText.trim();
-    const runAt = parseDateTimeFromPrompt(normalized);
+    const runAt = parseDateTimeFromPrompt(normalized, userTimezone);
     if (!runAt) return null;
     const recurrence = inferRecurrenceFromUserText(normalized);
     const urlMatch = normalized.match(/https?:\/\/[^\s]+/i);
@@ -627,8 +627,8 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
 }
 
 /** 供测试与即时提醒快路径：解析用户句中的可执行时间点（相对或绝对）。 */
-export function parseScheduleTimeFromPrompt(text: string): Date | null {
-  return parseDateTimeFromPrompt(text);
+export function parseScheduleTimeFromPrompt(text: string, timezone?: string): Date | null {
+  return parseDateTimeFromPrompt(text, timezone);
 }
 
 const RELATIVE_TIME_STRIP_RE =
@@ -677,7 +677,7 @@ function parseRelativeDateTimeFromPrompt(text: string): Date | null {
   return null;
 }
 
-function parseDateTimeFromPrompt(text: string): Date | null {
+function parseDateTimeFromPrompt(text: string, timezone?: string): Date | null {
   const relative = parseRelativeDateTimeFromPrompt(text);
   if (relative) return relative;
 
@@ -685,10 +685,74 @@ function parseDateTimeFromPrompt(text: string): Date | null {
   if (!hm) return null;
   const { hours, minutes } = hm;
   const now = new Date();
-  const target = new Date(now);
+  const tz = timezone?.trim();
+  const base = tz ? getLocalDateInTimezone(now, tz) : now;
+  const target = new Date(
+    base.getFullYear(),
+    base.getMonth(),
+    base.getDate(),
+    hours,
+    minutes,
+    0,
+    0,
+  );
   if (/后天/.test(text)) target.setDate(target.getDate() + 2);
   else if (/明天/.test(text)) target.setDate(target.getDate() + 1);
-  target.setHours(hours, minutes, 0, 0);
-  if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
-  return target;
+  const utc = tz ? toUtcFromLocalTime(target, tz) : target;
+  if (utc.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);
+    return tz ? toUtcFromLocalTime(target, tz) : target;
+  }
+  return utc;
+}
+
+function getLocalDateInTimezone(now: Date, timezone: string): Date {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(now);
+  const v: Record<string, number> = {};
+  for (const p of parts) {
+    if (p.type !== "literal") v[p.type] = Number(p.value);
+  }
+  return new Date(v.year, v.month - 1, v.day, v.hour ?? 0, v.minute ?? 0, v.second ?? 0);
+}
+
+function toUtcFromLocalTime(localTime: Date, timezone: string): Date {
+  const y = localTime.getFullYear();
+  const mo = localTime.getMonth();
+  const d = localTime.getDate();
+  const h = localTime.getHours();
+  const mi = localTime.getMinutes();
+  const s = localTime.getSeconds();
+
+  let tentative = new Date(Date.UTC(y, mo, d, h, mi, s));
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(tentative);
+  const tzVals: Record<string, number> = {};
+  for (const p of parts) {
+    if (p.type !== "literal") tzVals[p.type] = Number(p.value);
+  }
+  let deltaMs =
+    ((h - (tzVals.hour ?? 0)) * 60 + (mi - (tzVals.minute ?? 0))) * 60000 +
+    (s - (tzVals.second ?? 0)) * 1000;
+  if (deltaMs > 43200000) deltaMs -= 86400000;
+  if (deltaMs < -43200000) deltaMs += 86400000;
+  return new Date(tentative.getTime() + deltaMs);
 }

@@ -6,9 +6,6 @@
 #include <cmath>
 #include <cwctype>
 
-// <wingdi.h> 在新版 Windows SDK 里被 <windows.h> 集成，独立 include 拿不到
-// CLR_NONE；并且会把 Rectangle / DrawText 等定义成宏与 Win32 / Flutter 类型
-// 冲突。直接兜底定义。COLORREF 来自 <windows.h>，已声明为 DWORD。
 #ifndef CLR_NONE
 #define CLR_NONE static_cast<COLORREF>(0xFFFFFFFFL)
 #endif
@@ -60,7 +57,7 @@ void ConnectedCallWindow::EnsureClassRegistered() {
 
 ConnectedCallWindow::ConnectedCallWindow() = default;
 
-ConnectedCallWindow::~ConnectedCallWindow() { Hide(); }
+ConnectedCallWindow::~ConnectedCallWindow() { DestroyNativeWindow(); }
 
 void ConnectedCallWindow::SetCallbacks(
     HangUpCallback on_hangup, MuteCallback on_mute_toggle,
@@ -86,19 +83,19 @@ bool ConnectedCallWindow::CreateWindowIfNeeded() {
   }
   window_handle_ = hwnd;
 
-  // 三个按钮：静音 / 免提 / 挂断
+
   mute_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u9759\u97F3",  // 静音
+      0, L"BUTTON", L"\u9759\u97F3",
       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdMute)),
       GetModuleHandle(nullptr), nullptr);
   speaker_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u514D\u63D0",  // 免提
+      0, L"BUTTON", L"\u514D\u63D0",
       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSpeaker)),
       GetModuleHandle(nullptr), nullptr);
   hangup_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u6302\u65AD",  // 挂断
+      0, L"BUTTON", L"\u6302\u65AD",
       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdHangup)),
       GetModuleHandle(nullptr), nullptr);
@@ -108,20 +105,19 @@ bool ConnectedCallWindow::CreateWindowIfNeeded() {
   SendMessage(speaker_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
   SendMessage(hangup_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
 
-  // 按钮背景刷
-  mute_brush_ = CreateSolidBrush(RGB(58, 62, 84));    // 灰蓝
-  speaker_brush_ = CreateSolidBrush(RGB(58, 62, 84));
-  hangup_brush_ = CreateSolidBrush(RGB(220, 38, 38));  // 红
-  action_border_brush_ = CreateSolidBrush(RGB(26, 28, 41));
+  mute_brush_ = CreateSolidBrush(RGB(229, 231, 235));
+  speaker_brush_ = CreateSolidBrush(RGB(229, 231, 235));
+  hangup_brush_ = CreateSolidBrush(RGB(239, 68, 68));
+  action_border_brush_ = CreateSolidBrush(RGB(223, 228, 234));
   return true;
 }
 
 void ConnectedCallWindow::RepositionChildren() {
   if (!window_handle_) return;
-  const int btn_w = 72;
-  const int btn_h = 72;
-  const int gap = 18;
-  const int bottom_pad = 32;
+  const int btn_w = 88;
+  const int btn_h = 34;
+  const int gap = 10;
+  const int bottom_pad = 20;
   int total_w = btn_w * 3 + gap * 2;
   int start_x = (kWindowWidth - total_w) / 2;
   int btn_y = kWindowHeight - btn_h - bottom_pad;
@@ -170,9 +166,32 @@ void ConnectedCallWindow::Show(const std::string& caller_name,
 void ConnectedCallWindow::Hide() {
   StopTimer();
   StopPulse();
-  if (mute_btn_) { DestroyWindow(mute_btn_); mute_btn_ = nullptr; }
-  if (speaker_btn_) { DestroyWindow(speaker_btn_); speaker_btn_ = nullptr; }
-  if (hangup_btn_) { DestroyWindow(hangup_btn_); hangup_btn_ = nullptr; }
+  if (window_handle_) {
+    ShowWindow(window_handle_, SW_HIDE);
+  }
+}
+
+void ConnectedCallWindow::DestroyNativeWindow() {
+  StopTimer();
+  StopPulse();
+  if (mute_btn_) {
+    if (IsWindow(mute_btn_)) {
+      DestroyWindow(mute_btn_);
+    }
+    mute_btn_ = nullptr;
+  }
+  if (speaker_btn_) {
+    if (IsWindow(speaker_btn_)) {
+      DestroyWindow(speaker_btn_);
+    }
+    speaker_btn_ = nullptr;
+  }
+  if (hangup_btn_) {
+    if (IsWindow(hangup_btn_)) {
+      DestroyWindow(hangup_btn_);
+    }
+    hangup_btn_ = nullptr;
+  }
   if (mute_brush_) { DeleteObject(mute_brush_); mute_brush_ = nullptr; }
   if (speaker_brush_) { DeleteObject(speaker_brush_); speaker_brush_ = nullptr; }
   if (hangup_brush_) { DeleteObject(hangup_brush_); hangup_brush_ = nullptr; }
@@ -181,7 +200,9 @@ void ConnectedCallWindow::Hide() {
     action_border_brush_ = nullptr;
   }
   if (window_handle_) {
-    DestroyWindow(window_handle_);
+    if (IsWindow(window_handle_)) {
+      DestroyWindow(window_handle_);
+    }
     window_handle_ = nullptr;
   }
 }
@@ -241,10 +262,10 @@ void ConnectedCallWindow::StopPulse() {
 
 void CALLBACK ConnectedCallWindow::TickProc(HWND, UINT, UINT_PTR,
                                             DWORD) noexcept {
-  // WM_TIMER 处理
+  // WM_TIMER handler
 }
 
-// ---------- 绘制 ----------
+// Drawing
 
 void ConnectedCallWindow::DrawRoundedRect(HDC hdc, const RECT& rc, int radius,
                                           COLORREF fill, COLORREF border) {
@@ -262,7 +283,7 @@ void ConnectedCallWindow::DrawRoundedRect(HDC hdc, const RECT& rc, int radius,
     SelectObject(hdc, old_brush2);
     SelectObject(hdc, old_pen2);
     DeleteObject(border_pen);
-    // null_brush 是 stock object，不可 DeleteObject
+    // null_brush is a stock object.
   }
   SelectObject(hdc, old_brush);
   SelectObject(hdc, old_pen);
@@ -321,20 +342,31 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
 
-  // 背景：深色渐变（用两端实色 + 横向叠加近似）
-  RECT top_half = {0, 0, rc.right, rc.bottom / 2};
-  RECT bot_half = {0, rc.bottom / 2, rc.right, rc.bottom};
-  HBRUSH top_brush = CreateSolidBrush(RGB(20, 24, 38));
-  HBRUSH bot_brush = CreateSolidBrush(RGB(32, 38, 58));
+  RECT top_half = {0, 0, rc.right, rc.bottom};
+  HBRUSH top_brush = CreateSolidBrush(RGB(249, 250, 252));
+  HBRUSH bot_brush = CreateSolidBrush(RGB(249, 250, 252));
   FillRect(mem, &top_half, top_brush);
-  FillRect(mem, &bot_half, bot_brush);
   DeleteObject(top_brush);
   DeleteObject(bot_brush);
 
-  // 顶部状态文字（"通话中" / "静音中" / "免提中"）
+  RECT top_bar = {0, 0, rc.right, 4};
+  HBRUSH top_bar_brush = CreateSolidBrush(ParseArgb(accent_color_));
+  FillRect(mem, &top_bar, top_bar_brush);
+  DeleteObject(top_bar_brush);
+
+  HPEN border = CreatePen(PS_SOLID, 1, RGB(223, 228, 234));
+  HBRUSH fill = CreateSolidBrush(RGB(249, 250, 252));
+  HPEN old_pen = static_cast<HPEN>(SelectObject(mem, border));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(mem, fill));
+  RoundRect(mem, rc.left, rc.top, rc.right, rc.bottom, 18, 18);
+  SelectObject(mem, old_brush);
+  SelectObject(mem, old_pen);
+  DeleteObject(border);
+  DeleteObject(fill);
+
   RECT status_rc = {0, 24, rc.right, 56};
-  std::wstring status_text = L"\u901A\u8BDD\u4E2D";  // 通话中
-  if (muted_) status_text = L"\u5DF2\u9759\u97F3";   // 已静音
+  std::wstring status_text = L"\u901A\u8BDD\u4E2D";
+  if (muted_) status_text = L"\u5DF2\u9759\u97F3";
   if (muted_ && speaker_on_) status_text = L"\u5DF2\u9759\u97F3 \u00B7 \u514D\u63D0";
   if (!muted_ && !speaker_on_) status_text = L"\u901A\u8BDD\u4E2D \u00B7 \u624B\u673A\u6253\u63D0";
   HFONT status_font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -343,40 +375,40 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
                                   DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
   HFONT old_font = static_cast<HFONT>(SelectObject(mem, status_font));
   SetBkMode(mem, TRANSPARENT);
-  SetTextColor(mem, RGB(170, 175, 195));
+  SetTextColor(mem, RGB(107, 114, 128));
   DrawTextW(mem, status_text.c_str(), -1, &status_rc,
             DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(status_font);
 
-  // 头像（中央偏上）
-  const int avatar_size = 144;
-  RECT avatar_rc = {(rc.right - avatar_size) / 2, 100,
-                    (rc.right + avatar_size) / 2, 100 + avatar_size};
+  // Avatar
+  const int avatar_size = 96;
+  RECT avatar_rc = {(rc.right - avatar_size) / 2, 88,
+                    (rc.right + avatar_size) / 2, 88 + avatar_size};
   DrawAvatar(mem, avatar_rc, caller_initial_, ParseArgb(accent_color_));
 
-  // 名称
-  RECT name_rc = {0, 260, rc.right, 296};
-  HFONT name_font = CreateFontW(20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+  // Name
+  RECT name_rc = {0, 198, rc.right, 230};
+  HFONT name_font = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
   old_font = static_cast<HFONT>(SelectObject(mem, name_font));
-  SetTextColor(mem, RGB(245, 245, 250));
+  SetTextColor(mem, RGB(31, 35, 41));
   DrawTextW(mem, caller_name_.c_str(), -1, &name_rc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(name_font);
 
-  // 计时
-  RECT timer_rc = {0, 300, rc.right, 336};
-  HFONT timer_font = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+  // Timer
+  RECT timer_rc = {0, 232, rc.right, 260};
+  HFONT timer_font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                  CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                  DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
   old_font = static_cast<HFONT>(SelectObject(mem, timer_font));
   std::wstring duration = FormatDuration(elapsed_seconds_);
-  SetTextColor(mem, RGB(140, 145, 165));
+  SetTextColor(mem, RGB(107, 114, 128));
   DrawTextW(mem, duration.c_str(), -1, &timer_rc,
             DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
   SelectObject(mem, old_font);
@@ -388,7 +420,7 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   DeleteDC(mem);
 }
 
-// ---------- 消息处理 ----------
+// Message handling
 
 LRESULT CALLBACK ConnectedCallWindow::WndProc(HWND hwnd, UINT message,
                                               WPARAM wparam,
@@ -472,7 +504,7 @@ LRESULT ConnectedCallWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_NCHITTEST: {
       POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ScreenToClient(hwnd, &pt);
-      // 标题区（顶部 56px 内、按钮行之上）可拖动
+
       if (pt.y < 56 && pt.x < kWindowWidth && pt.y > 0) return HTCAPTION;
       return HTCLIENT;
     }

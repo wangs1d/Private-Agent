@@ -1006,6 +1006,7 @@ const ALWAYS_INCLUDED_TOOLS = [
   'embodiment.roam',
   'embodiment.move',
   'embodiment.set_state',
+  'phone.call_user',
 ];
 
 function extractKeywords(text: string): string[] {
@@ -1183,6 +1184,8 @@ export async function streamCompletionWithTools(
   const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
   let lastAssistantText = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
+  // 追踪每轮已发送的进度/前导文本，用于最终回复去重（防止思考过程泄露给用户）
+  const emittedStatusLines = new Set<string>();
 
   for (let round = 0; round < maxRounds; round++) {
     let retriedToolCallIdError = false;
@@ -1239,7 +1242,10 @@ export async function streamCompletionWithTools(
           fullText += d.content;
           const statusLine = fullText.trim();
           if (ctx.onAgentStatusLine) {
-            if (statusLine) ctx.onAgentStatusLine(statusLine);
+            if (statusLine) {
+              emittedStatusLines.add(statusLine);
+              ctx.onAgentStatusLine(statusLine);
+            }
           } else {
             onDelta(d.content);
           }
@@ -1262,13 +1268,35 @@ export async function streamCompletionWithTools(
       throw e;
     }
 
-    lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
+    // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为进度前导话
+    //（已通过 onAgentStatusLine 独立推送），不应进入最终回复，否则用户会看到重复的思考过程。
+    if (finishReason !== "tool_calls" || toolAcc.size === 0) {
+      lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
+    }
 
     if (finishReason !== "tool_calls" || toolAcc.size === 0) {
-      // 对话结束：返回完整的累积文本（含所有中间轮次的过程描述 + 最终回复）。
-      // WebSocket 客户端已通过 onDelta 收到过增量（streamedChunks=true），
-      // 微信桥接等无流式推送的场景依赖此返回值获取完整内容。
-      const finalText = lastAssistantText.trim();
+      // 对话结束：返回最终回复文本。
+      // 清理规则：
+      //   1. 去除与已发送进度话重复的内容（LLM 可能在最终回复中复述了进度前导）
+      //   2. 去除 [ts:] 时间戳前缀（仅供 LLM 上下文，不应展示给用户）
+      let finalText = lastAssistantText.trim();
+      if (emittedStatusLines.size > 0 && finalText) {
+        for (const emitted of emittedStatusLines) {
+          if (finalText === emitted || finalText.startsWith(emitted + "\n") || finalText.startsWith(emitted + "。")) {
+            finalText = finalText.slice(emitted.length).replace(/^[\n。、，,\s]+/, "");
+            break;
+          }
+          // 也处理进度话作为独立行出现在多行回复中的情况
+          const linePrefix = "\n" + emitted;
+          const idx = finalText.indexOf(linePrefix);
+          if (idx >= 0) {
+            finalText = finalText.slice(0, idx) + finalText.slice(idx + emitted.length).replace(/^[\n。、，,\s]+/, "");
+          }
+        }
+        finalText = finalText.trim();
+      }
+      // 剥离 [ts:] 时间戳前缀
+      finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
       if (ctx.onAgentStatusLine && finalText) {
         onDelta(finalText);
       }

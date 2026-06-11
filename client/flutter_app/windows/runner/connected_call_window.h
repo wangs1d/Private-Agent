@@ -78,6 +78,7 @@ class ConnectedCallWindow {
   void StopTimer();
   void StartPulse();
   void StopPulse();
+  void DestroyNativeWindow();
 
   void Paint(HWND hwnd, HDC hdc);
   void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,
@@ -123,8 +124,8 @@ class ConnectedCallWindow {
   static constexpr UINT kMsgDeferredHide = WM_USER + 200;
 
   // 窗口尺寸
-  static constexpr int kWindowWidth = 320;
-  static constexpr int kWindowHeight = 540;
+  static constexpr int kWindowWidth = 384;
+  static constexpr int kWindowHeight = 296;
   static constexpr int kMargin = 16;
 
   static constexpr const wchar_t* kClassName =

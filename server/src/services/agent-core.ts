@@ -682,6 +682,9 @@ export class AgentCore {
     const userTurn: ChatUserTurn = {
       text,
       ...(opts?.visionFrames?.length ? { visionFrames: opts.visionFrames } : {}),
+      // 把 WS 客户端的 messageId 透传为 ChatUserTurn.clientMessageId；
+      // provider 会在把 user 消息 push 进 thread 时登记到反向索引，供后续编辑/重发按 id 命中。
+      ...(opts?.chatUserMessageId ? { clientMessageId: opts.chatUserMessageId } : {}),
     };
 
     const chatSessionId = resolvePrimaryChatSessionId(

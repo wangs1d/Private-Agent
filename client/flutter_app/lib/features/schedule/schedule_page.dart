@@ -57,8 +57,8 @@ class _SchedulePageState extends State<SchedulePage> {
 
   DateTime _weekStart = _mondayOf(DateTime.now());
   DateTime _focusedDay = _stripTime(DateTime.now());
-  
-  /// 视图模式：'day' 为日视图，'week' 为周视图
+
+  /// 视图模式：'day' 为日视图，'week' 为周视图。
   String _viewMode = 'day';
 
   List<ScheduleEvent> _allEvents = <ScheduleEvent>[];
@@ -382,8 +382,8 @@ class _SchedulePageState extends State<SchedulePage> {
         await dequeueScheduleOfflineDelete(widget.store, serverTaskId);
       } else if (mounted) {
         final String hint = result.networkError
-            ? "已在本地删除，待主服务恢复后自动同步删除。${result.error ?? ""}"
-            : "已在本地删除；服务端：${result.error ?? "删除失败"}，将稍后重试";
+            ? "已在本地删除，待主服务恢复后自动同步删除。（${result.error ?? ""}）"
+            : "已在本地删除；服务端：（${result.error ?? "删除失败"}），将稍后重试";
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(hint.trim()),
@@ -458,8 +458,8 @@ class _SchedulePageState extends State<SchedulePage> {
             ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: cs.onSurface,
-              foregroundColor: cs.surface,
+              backgroundColor: cs.primary,
+              foregroundColor: cs.onPrimary,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10),
@@ -523,7 +523,7 @@ class _SchedulePageState extends State<SchedulePage> {
   Widget _weekRangeControls(ThemeData theme) {
     final ColorScheme cs = theme.colorScheme;
     final DateTime today = _stripTime(DateTime.now());
-      
+
     // 根据视图模式判断是否显示"回到今天/本周"按钮
     final bool isCurrentView;
     if (_viewMode == 'day') {
@@ -531,7 +531,7 @@ class _SchedulePageState extends State<SchedulePage> {
     } else {
       isCurrentView = !_weekStart.isAfter(today) && !today.isAfter(_weekStart.add(const Duration(days: 6)));
     }
-      
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Row(
@@ -616,10 +616,10 @@ class _SchedulePageState extends State<SchedulePage> {
     final Map<DateTime, List<ScheduleEvent>> byDay = _eventsByDay();
     final DateTime today = _stripTime(DateTime.now());
     final DateTime focusedDay = _stripTime(_focusedDay);
-    
+
     // 获取当前聚焦日期的事项
     final List<ScheduleEvent> events = byDay[focusedDay] ?? <ScheduleEvent>[];
-    
+
     final bool isTodayHeader = focusedDay == today;
 
     return Expanded(
@@ -930,6 +930,11 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Widget _managementView(ThemeData theme) {
+    // 事项管理只展示「待执行」事项：开始时间晚于当前时间的日程。
+    final DateTime now = DateTime.now();
+    final List<ScheduleEvent> pendingEvents = _allEvents
+        .where((ScheduleEvent e) => e.startAt.isAfter(now))
+        .toList();
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: <Widget>[
@@ -953,31 +958,31 @@ class _SchedulePageState extends State<SchedulePage> {
         Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Text(
-            "全部事项 · 共 ${_allEvents.length} 条",
+            "待执行事项 · 共 ${pendingEvents.length} 条",
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w600,
             ),
           ),
         ),
-        if (_allEvents.isEmpty)
+        if (pendingEvents.isEmpty)
           Text(
-            "暂无事项，可点击右上角「创建日程」添加。",
+            "暂无待执行事项，可点击右上角「创建日程」添加。",
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
           )
         else
-          ..._managementEventTiles(theme),
+          ..._managementEventTiles(theme, pendingEvents),
       ],
     );
   }
 
-  List<Widget> _managementEventTiles(ThemeData theme) {
+  List<Widget> _managementEventTiles(ThemeData theme, List<ScheduleEvent> events) {
     final List<Widget> tiles = <Widget>[];
 
     // 按 taskId 分组事件
     final Map<String?, List<ScheduleEvent>> groupedEvents = <String?, List<ScheduleEvent>>{};
-    for (final ScheduleEvent e in _allEvents) {
+    for (final ScheduleEvent e in events) {
       final String? taskId = scheduleServerTaskIdFromEventId(e.id);
       groupedEvents.putIfAbsent(taskId, () => <ScheduleEvent>[]).add(e);
     }
@@ -1077,7 +1082,7 @@ class _SchedulePageState extends State<SchedulePage> {
     return tiles;
   }
 
-  /// 构建多天事件的显示信息
+  /// 构建多天事件的显示信息。
   String _buildMultiDayEventInfo(
     ScheduleEvent representative,
     List<ScheduleEvent> events,
@@ -1121,7 +1126,7 @@ class _SchedulePageState extends State<SchedulePage> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     return ColoredBox(
-      color: AppPalette.mainPanel,
+      color: theme.colorScheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[

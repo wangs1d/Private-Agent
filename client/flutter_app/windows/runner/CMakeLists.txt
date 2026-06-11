@@ -12,10 +12,12 @@ project(runner LANGUAGES CXX)
 # Any new source files that you add to the application should be added here.
 add_executable(${BINARY_NAME} WIN32
   "connected_call_window.cpp"
+  "desktop_notification_window.cpp"
   "desktop_screen_capture.cpp"
   "flutter_window.cpp"
   "incoming_call_window.cpp"
   "main.cpp"
+  "outgoing_call_window.cpp"
   "sphere_overlay_window.cpp"
   "utils.cpp"
   "win32_window.cpp"

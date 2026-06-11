@@ -182,9 +182,11 @@ export const scheduleTaskCreateBodySchema = z
     title: z.string().min(1).max(120),
     description: z.string().min(1).max(2000),
     kind: z.enum(["reminder", "action", "weather_brief", "agent_task"]),
-    runAt: z.string().min(1),
-    recurrence: z.enum(["none", "daily", "weekly", "yearly"]).default("none"),
+    runAt: z.string().min(1).optional(),
+    recurrence: z.enum(["none", "daily", "weekly", "yearly", "cron"]).default("none"),
     timezone: z.string().min(1).optional(),
+    cronExpression: z.string().min(1).max(120).optional(),
+    webhookToken: z.string().min(1).max(160).optional(),
     reminderMessage: z.string().min(1).max(500).optional(),
     action: z
       .object({
@@ -202,6 +204,20 @@ export const scheduleTaskCreateBodySchema = z
       .optional(),
   })
   .superRefine((data, ctx) => {
+    if (!data.runAt && !data.cronExpression) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runAt"],
+        message: "runAt or cronExpression is required",
+      });
+    }
+    if (data.cronExpression && data.recurrence !== "cron") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["recurrence"],
+        message: "recurrence must be cron when cronExpression is provided",
+      });
+    }
     if (data.kind === "reminder" && !data.reminderMessage) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -229,8 +245,10 @@ export const scheduleTaskUpdateBodySchema = z.object({
   title: z.string().min(1).max(120).optional(),
   description: z.string().min(1).max(2000).optional(),
   runAt: z.string().min(1).optional(),
-  recurrence: z.enum(["none", "daily", "weekly", "yearly"]).optional(),
+  recurrence: z.enum(["none", "daily", "weekly", "yearly", "cron"]).optional(),
   timezone: z.string().min(1).optional(),
+  cronExpression: z.string().min(1).max(120).nullable().optional(),
+  webhookToken: z.string().min(1).max(160).nullable().optional(),
   reminderMessage: z.string().min(1).max(500).optional(),
   action: z
     .object({
@@ -291,6 +309,24 @@ export const weatherLinkTaskBodySchema = z.object({
 export const chatScheduleDraftBodySchema = z.object({
   sessionId: z.string().min(1),
   text: z.string().min(1).max(4000),
+});
+
+/** 复制消息：客户端把要复制的纯文本一起带上，服务端做审计/回执（实际剪贴板由前端写入） */
+export const chatMessageCopyBodySchema = z.object({
+  sessionId: z.string().min(1),
+  userId: z.string().optional(),
+  messageId: z.string().min(1).max(160),
+  text: z.string().min(0).max(20000),
+});
+
+/** 编辑消息：替换 user 消息的文本并触发 Agent 重答 */
+export const chatMessageEditBodySchema = z.object({
+  sessionId: z.string().min(1),
+  userId: z.string().optional(),
+  messageId: z.string().min(1).max(160),
+  newText: z.string().min(1).max(20000),
+  /** 透传到 Agent 上下文；可携带 `agentAccessMode`、`clientLocation` 等 */
+  agentAccessMode: z.enum(["sandbox", "full"]).optional(),
 });
 
 /** 技能库：列出当前 Actor 可见的 Skill（含已禁用项） */

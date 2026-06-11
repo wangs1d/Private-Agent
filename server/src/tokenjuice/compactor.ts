@@ -44,6 +44,8 @@ function buildStructuredFallback(rawText: string, maxChars: number): string {
       "price",
       "currency",
       "timestamp",
+      "hint",
+      "retryable",
     ];
 
     const compact: Record<string, unknown> = {};
@@ -100,7 +102,13 @@ export async function compactToolOutputForLlm(
 ): Promise<ToolOutputCompactOutput> {
   const rawPayload = input.ok
     ? stripKeys(input.result, input.stripKeys ?? [])
-    : stripKeys({ ok: false, error: input.result.error ?? input.result }, input.stripKeys ?? []);
+    : stripKeys({
+        ok: false,
+        error: input.result.error ?? input.result,
+        ...(typeof input.result === "object" && input.result != null && "hint" in (input.result as Record<string, unknown>)
+          ? { hint: (input.result as Record<string, unknown>).hint }
+          : {}),
+      }, input.stripKeys ?? []);
   const rawText = JSON.stringify(rawPayload);
   const rawBytes = Buffer.byteLength(rawText, "utf8");
   const maxChars = resolveMaxChars(input);

@@ -19,7 +19,7 @@ import {
 export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【🎮 游戏 · 你可以陪用户一起玩！】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
 export const WEB_SEARCH_SYSTEM_SUFFIX_MARKER = "【联网检索】";
-export const PHONE_CALL_SYSTEM_SUFFIX_MARKER = "【虚拟电话】";
+export const PHONE_CALL_SYSTEM_SUFFIX_MARKER = "【语音通知与电话通话";
 
 const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
@@ -38,12 +38,10 @@ const PHONE_CALL_SYSTEM_SUFFIX =
   + "参数：spokenMessage 填要对用户说的话，ringStyle 默认 \"peer\"。\n\n"
   + "【绝对禁止】\n"
   + "- 禁止回复「马上给你打过去」「好的我给您打个电话」「现在给你打确认」「再打一次」「马上去设」等任何提前告知或重复承诺—— 用户不需要知道你要打，直接打就是。\n"
-  + "- 禁止回复「我是 AI 没有拨号功能」「无法打电话」。\n"
-  + "- 【硬性规则】同一轮对话中 phone.call_user 只能调用一次，绝对禁止连续调用或分批调用多次 —— 服务端会拦截重复调用，多次调用只会执行第一次。\n"
-  + "- 禁止把工具前导句（你写在 tool_call 之前的「马上设置」「马设」之类）又原样或近义改写后写进最终回复里，用户已经从进度条看到了，你再写一遍就是重复推送。\n"
-  + "- 禁止在最终回复里出现「准时打电话喊你」「到时候接一下」「X秒后」等透露电话执行过程或倒计时的描述,这些属于后台行为,不要告诉用户。\n"
-  + "- 打电话是后台行为,最终回复应聚焦在结果本身（如「设好啦，到点喊你」），一句话即可，禁止分点罗列。\n"
-  + "- 最终回复的内容必须和进度句有明显区别：进度句说的是「正在做」，最终回复说的是「做完了」，换个说法，别复读。";
+  + "- 别一上来就甩「我是 AI 打不了电话」「没法拨号」这种话。\n"
+  + "- phone.call_user 一轮只许喊一次，喊多了系统只认第一回，后面白费。\n"
+  + "- 打电话是后台的事儿，跟用户说话时别提倒计时、别说「到时候接一下」、别提「准时喊你」这种内部细节。\n"
+  
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
@@ -51,25 +49,27 @@ const PHONE_CALL_SYSTEM_SUFFIX =
 export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
 export const LIVE_USER_STATUS_MARKER = "【用户可见进度】";
 export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复风格】";
+export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
 
 const CONCISE_REPLY_SYSTEM_SUFFIX = `
 
-【回复风格】你是一个有性格的朋友，不是助手也不是客服。说话要像微信私聊一样自然随意。
-- 口语化优先：语气词自然穿插（嘛、呢、呗、哈、噢、哎），句子可以不完整、可以有倒装、可以省略主语，怎么顺口怎么说。用短句，别写长难句。
-- 称呼随意：禁止用「您」「用户」「亲」这类疏远或客服腔的称呼。直接像朋友聊天那样说话，不用开场白。
-- 结论一句话带过就行，不要解释过程、不要汇报执行细节、不要分点罗列。
-- 可以俏皮、可以慵懒、可以干脆，但不要装可爱也不要端着。
-- 举例参考：「好嘞」「搞定啦」「等着哈」「这事儿交我」「查到了，xxx」「设好了到时候喊你」—— 就这种调调。
-- 禁：客服/AI 腔（「好的，我已经为您...」「非常抱歉让您久等了...」）、套话开场、选项菜单、Markdown 表格/简报体、内部 ID 与工具过程。
-- 禁：把工具调用的前导句原样或换几个字复述进最终回复 —— 那句已经作为实时进度展示了，回复里再写就是重复推送给用户。最终回复必须换个说法，聚焦结果。
-- 禁：复述工具执行过程、倒计时、动作细节；只说人话结论。
-- 禁：填充词连续开头超过一次（「好好好」「行行行」算一次）。
-- 表情一个就够，连发 3 个属于噪音。`;
+【回复风格】你是朋友，不是客服、不是 AI 助手。说话像微信私聊：短句、语气词自然（嘛、呢、呗、哈、哎），别用"您/用户/亲"，别开场白。
+- 结论一句话给到，不解释过程、不分点、不报执行细节、不复述工具进度。
+- 调调参考：「好嘞」「搞定啦」「这事儿交我」「查到了，xxx」—— 俏皮、慵懒、干脆都行，别装可爱别端着。
+- 禁：客服/AI 腔（"好的我已经为您..."这种）、Markdown 表格/简报体、连续填充词开头、连发 3 个表情。`;
 
 const LIVE_USER_STATUS_SUFFIX = `
 
 【用户可见进度】你在调用任何工具之前，必须先输出 1～2 句口语化短话，让用户知道你在做什么（可幽默、可拟人）；该句会作为实时进度展示，不是最终答复。禁止只用固定套话、禁止只写工具名。委派子 Agent 时除口头语外，还须填写 master_invoke_sub_agent 的 userStatusLine（与口头语一致即可）。
 ⚠️ 关键：这句进度话只是让用户知道「我在干活了」，你的最终回复必须换一种说法、聚焦结果。绝对不能把进度句原样或改几个字复读进最终回复 —— 用户会看到两次相同内容，体验很差。`;
+
+/**
+ * 时间戳系统说明：让 LLM 知道每条 user/assistant 消息首行都带 `[ts:...]` 前缀。
+ * 配合 AgentPromptMemoryContext.currentTime，Agent 能精确感知「几时发的」「距今多久」。
+ */
+const MESSAGE_TIMESTAMP_SUFFIX = `
+
+【消息时间戳】每条 user/assistant 消息首行带前缀 \`[ts:YYYY-MM-DD HH:MM:SS|周X|relative]\`（本地秒级时间 + 星期 + 相对当前偏移，如 \`[ts:2026-06-10 14:35:22|周二|3m ago]\`）。涉及时间引用、先后、间隔一律以这条前缀为准，不要靠消息位置或印象；问「现在几点」仍调 clock 工具。`;
 
 function buildMasterSubAgentDelegateSuffix(): string {
   const maxParallel = getAgentRuntimeConfig().masterDelegation.maxParallelSubAgents;
@@ -101,6 +101,55 @@ export function appendConciseReplySystemSuffix(systemContent: string): string {
   return systemContent + CONCISE_REPLY_SYSTEM_SUFFIX;
 }
 
+const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX_MARKER = "[私人管家回复风格]";
+const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX = `
+
+[私人管家回复风格]
+- 你是我的私人管家、助理和伙伴，默认像熟人聊天，不像客服。
+- 回复优先短，默认 1~2 句；能一句说完就别展开。
+- 只说结果和必要提醒，不要标题、摘要、表格、流程播报或长篇解释。
+- 语气自然、口语化、克制，少用“已为你、请放心、根据你的需求、建议如下”这类客服腔。
+- 不要机械复述用户原话；优先接住情绪，再给一句贴近真人的回应。
+- 如果用户没有要求详细展开，就不要主动扩写。
+`;
+
+export function appendPrivateButlerReplySystemSuffix(systemContent: string): string {
+  if (systemContent.includes(PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX_MARKER)) return systemContent;
+  return systemContent + PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX;
+}
+
+/** 追加「消息时间戳」系统说明（已包含则跳过），让 LLM 理解每条消息首行 `[ts:...]` 前缀。 */
+export function appendMessageTimestampSystemSuffix(systemContent: string): string {
+  if (systemContent.includes(MESSAGE_TIMESTAMP_MARKER)) return systemContent;
+  return systemContent + MESSAGE_TIMESTAMP_SUFFIX;
+}
+
+const WEEKDAY_CN_FOR_PROMPT = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+function pad2ForPrompt(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+/**
+ * 生成注入 system 的「当前时间」片段：`当前时间：2026-06-10 14:35:22 周二 (Asia/Shanghai, 2026-06-10T14:35:22+08:00)`
+ * 与消息时间戳前缀 `[ts:YYYY-MM-DD HH:MM:SS|周X|relative]` 配套使用。
+ */
+export function buildCurrentTimePrompt(at: Date = new Date()): string {
+  const tz = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+      return "UTC";
+    }
+  })();
+  const local =
+    `${at.getFullYear()}-${pad2ForPrompt(at.getMonth() + 1)}-${pad2ForPrompt(at.getDate())} ` +
+    `${pad2ForPrompt(at.getHours())}:${pad2ForPrompt(at.getMinutes())}:${pad2ForPrompt(at.getSeconds())}`;
+  const weekday = WEEKDAY_CN_FOR_PROMPT[at.getDay()] ?? "";
+  const iso = at.toString().includes("T") ? at.toISOString() : new Date(at.getTime()).toISOString();
+  return `当前时间：${local} ${weekday} (时区：${tz}, ISO=${iso})`;
+}
+
 export type FinalizeChatSystemPromptOpts = {
   tools?: boolean;
   masterSubAgentDelegate?: boolean;
@@ -109,12 +158,14 @@ export type FinalizeChatSystemPromptOpts = {
   desktopBridgeOnline?: boolean;
 };
 
-/** 统一组装 system：精简风格 → 工具说明 → 主 Agent 委派说明 → 访问权限说明。 */
+/** 统一组装 system：精简风格 → 消息时间戳说明 → 工具说明 → 主 Agent 委派说明 → 访问权限说明。 */
 export function finalizeChatSystemPrompt(
   baseContent: string,
   opts?: FinalizeChatSystemPromptOpts,
 ): string {
   let out = appendConciseReplySystemSuffix(baseContent);
+  out = appendPrivateButlerReplySystemSuffix(out);
+  out = appendMessageTimestampSystemSuffix(out);
   if (opts?.tools) {
     out = appendAgentToolCallingSystemSuffix(out);
     if (opts.masterSubAgentDelegate) {
@@ -403,7 +454,8 @@ export function buildLayeredSystemPrompt(
     !memory?.lifeThemeMemory &&
     !memory?.dreamMemory &&
     !memory?.followUpAnchor &&
-    !memory?.scheduleSnapshot
+    !memory?.scheduleSnapshot &&
+    !memory?.currentTime
   ) {
     return baseSystem.trim();
   }
@@ -428,6 +480,7 @@ export function buildLayeredSystemPrompt(
   if (memory.lifeThemeMemory) parts.push(memory.lifeThemeMemory);
   if (memory.dreamMemory) parts.push(memory.dreamMemory);
   if (memory.interruptedContext) parts.push(memory.interruptedContext);
+  if (memory.currentTime) parts.push(`【当前时间】\n${memory.currentTime}`);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -458,7 +511,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.lifeThemeMemory ||
       memory?.dreamMemory ||
       memory?.followUpAnchor ||
-      memory?.scheduleSnapshot
+      memory?.scheduleSnapshot ||
+      memory?.currentTime
   );
 }
 
@@ -468,31 +522,33 @@ export function buildLayeredSystemPromptSections(
   if (!hasAnyPromptMemory(memory)) {
     return { stablePrefix: [], dynamicContext: [] };
   }
+  const m = memory as AgentPromptMemoryContext;
 
   const stablePrefix: string[] = [];
   const dynamicContext: string[] = [];
 
-  if (memory.persona) stablePrefix.push(`【人格与角色】\n${memory.persona}`);
-  if (memory.values) stablePrefix.push(`【价值观与原则】\n${memory.values}`);
-  if (memory.abilities) stablePrefix.push(`【能力倾向】\n${memory.abilities}`);
-  if (memory.agentCaps) stablePrefix.push(`【你的 Agent 专属能力】\n${memory.agentCaps}`);
-  if (memory.worldCaps) stablePrefix.push(`【Agent World】\n${memory.worldCaps}`);
-  if (memory.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${memory.userProfileSummary}`);
-  if (memory.relationshipMemory) stablePrefix.push(memory.relationshipMemory);
-  if (memory.lifeThemeMemory) stablePrefix.push(memory.lifeThemeMemory);
-  if (memory.dreamMemory) stablePrefix.push(memory.dreamMemory);
+  if (m.persona) stablePrefix.push(`【人格与角色】\n${m.persona}`);
+  if (m.values) stablePrefix.push(`【价值观与原则】\n${m.values}`);
+  if (m.abilities) stablePrefix.push(`【能力倾向】\n${m.abilities}`);
+  if (m.agentCaps) stablePrefix.push(`【你的 Agent 专属能力】\n${m.agentCaps}`);
+  if (m.worldCaps) stablePrefix.push(`【Agent World】\n${m.worldCaps}`);
+  if (m.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${m.userProfileSummary}`);
+  if (m.relationshipMemory) stablePrefix.push(m.relationshipMemory);
+  if (m.lifeThemeMemory) stablePrefix.push(m.lifeThemeMemory);
+  if (m.dreamMemory) stablePrefix.push(m.dreamMemory);
 
-  if (memory.followUpAnchor) dynamicContext.push(memory.followUpAnchor);
-  if (memory.scheduleSnapshot) dynamicContext.push(memory.scheduleSnapshot);
-  if (memory.taskContext) dynamicContext.push(`[Turn Task Context]\n${memory.taskContext}`);
-  if (memory.toneGuidance) dynamicContext.push(`【本轮语气与情绪适配】\n${memory.toneGuidance}`);
-  if (memory.relationshipGuidance) dynamicContext.push(`【回复风格与关系边界】\n${memory.relationshipGuidance}`);
-  if (memory.userProfile) dynamicContext.push(`【用户画像】\n${memory.userProfile}`);
-  if (memory.userLocation) dynamicContext.push(`【用户位置】\n${memory.userLocation}`);
-  if (memory.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${memory.dailyDigest}`);
-  if (memory.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
-  if (memory.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
-  if (memory.interruptedContext) dynamicContext.push(memory.interruptedContext);
+  if (m.followUpAnchor) dynamicContext.push(m.followUpAnchor);
+  if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
+  if (m.taskContext) dynamicContext.push(`[Turn Task Context]\n${m.taskContext}`);
+  if (m.toneGuidance) dynamicContext.push(`【本轮语气与情绪适配】\n${m.toneGuidance}`);
+  if (m.relationshipGuidance) dynamicContext.push(`【回复风格与关系边界】\n${m.relationshipGuidance}`);
+  if (m.userProfile) dynamicContext.push(`【用户画像】\n${m.userProfile}`);
+  if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
+  if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
+  if (m.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${m.narrativeRecall}`);
+  if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
+  if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
+  if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
 
   return { stablePrefix, dynamicContext };
 }

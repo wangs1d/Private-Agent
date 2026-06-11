@@ -39,6 +39,7 @@ const USER_RELATIONSHIP_KEY = "user_relationship_state";
 const USER_TIME_RHYTHM_KEY = "user_time_rhythm";
 const USER_STYLE_PROFILE_KEY = "user_style_profile";
 const USER_CONTACT_PREFERENCE_KEY = "user_contact_preference";
+const USER_REPLY_LENGTH_PROFILE_KEY = "user_reply_length_profile";
 
 type BehaviorSignals = {
   shoppingInterest: number;
@@ -73,6 +74,15 @@ type StyleProfileState = {
   careStyle: "gentle" | "playful" | "direct";
   motivationStyle: "encouraging" | "steady" | "push";
   initiativeStyle: "reserved" | "balanced" | "proactive";
+  lastUpdatedAt: string;
+};
+
+type ReplyLengthProfileState = {
+  avgUserChars: number;
+  shortPreferenceScore: number;
+  longPreferenceScore: number;
+  recentUserChars: number[];
+  sampleCount: number;
   lastUpdatedAt: string;
 };
 const contactPolicy = new ProactiveContactPolicyService();
@@ -166,6 +176,17 @@ function defaultStyleProfileState(): StyleProfileState {
     careStyle: "gentle",
     motivationStyle: "steady",
     initiativeStyle: "balanced",
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+function defaultReplyLengthProfileState(): ReplyLengthProfileState {
+  return {
+    avgUserChars: 36,
+    shortPreferenceScore: 0,
+    longPreferenceScore: 0,
+    recentUserChars: [],
+    sampleCount: 0,
     lastUpdatedAt: new Date().toISOString(),
   };
 }
@@ -295,7 +316,29 @@ function relationshipSummaryLine(state: RelationshipState, style: StyleProfileSt
   ].join("\n");
 }
 
-function buildReplyLengthGuidance(userText: string): string {
+function toReplyLengthProfileState(v: unknown): ReplyLengthProfileState {
+  if (!v || typeof v !== "object") return defaultReplyLengthProfileState();
+  const o = v as Record<string, unknown>;
+  const recentUserChars = Array.isArray(o.recentUserChars)
+    ? o.recentUserChars
+        .map((x) => Number(x))
+        .filter((x) => Number.isFinite(x) && x >= 0)
+        .slice(-8)
+    : [];
+  return {
+    avgUserChars: Math.max(1, Number(o.avgUserChars) || 36),
+    shortPreferenceScore: Math.max(0, Number(o.shortPreferenceScore) || 0),
+    longPreferenceScore: Math.max(0, Number(o.longPreferenceScore) || 0),
+    recentUserChars,
+    sampleCount: Math.max(0, Number(o.sampleCount) || recentUserChars.length || 0),
+    lastUpdatedAt:
+      typeof o.lastUpdatedAt === "string" && o.lastUpdatedAt
+        ? o.lastUpdatedAt
+        : new Date().toISOString(),
+  };
+}
+
+function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileState): string {
   const text = userText.trim();
   const compactText = text.replace(/\s+/g, "");
   const shortExplicit =
@@ -307,6 +350,20 @@ function buildReplyLengthGuidance(userText: string): string {
   }
   if (shortExplicit || compactText.length <= 18) {
     return "本轮长度控制：尽量压到 1~2 句，先给结论，没被追问就别展开。";
+  }
+  if (
+    profile.sampleCount >= 3 &&
+    profile.shortPreferenceScore > profile.longPreferenceScore + 1.2 &&
+    profile.avgUserChars <= 28
+  ) {
+    return "本轮长度控制：这个用户长期更偏短回复，默认压缩表达，2 句左右优先，非必要不展开。";
+  }
+  if (
+    profile.sampleCount >= 3 &&
+    profile.longPreferenceScore > profile.shortPreferenceScore + 1.2 &&
+    profile.avgUserChars >= 65
+  ) {
+    return "本轮长度控制：这个用户长期接受稍展开的说明，可以多给一点上下文，但仍先讲重点。";
   }
   if (compactText.length <= 60) {
     return "本轮长度控制：以短回复为主，2~4 句内解决；只保留必要信息。";
@@ -401,17 +458,20 @@ export type PersonalizationBehaviorSignals = ReturnType<typeof toBehaviorSignals
 export type PersonalizationTimeRhythmState = ReturnType<typeof toTimeRhythmState>;
 export type PersonalizationStyleProfileState = ReturnType<typeof toStyleProfileState>;
 export type PersonalizationContactPreferenceState = ReturnType<typeof toContactPreferenceState>;
+export type PersonalizationReplyLengthProfileState = ReturnType<typeof toReplyLengthProfileState>;
 export type PersonalizationUnderstandingSnapshot = {
   relationship: PersonalizationRelationshipState;
   behavior: PersonalizationBehaviorSignals;
   timeRhythm: PersonalizationTimeRhythmState;
   styleProfile: PersonalizationStyleProfileState;
   contactPreference: PersonalizationContactPreferenceState;
+  replyLengthProfile: PersonalizationReplyLengthProfileState;
   contactSummary: string;
 };
 
 export class UserPersonalizationService {
   private readonly store = new UserProfileStore();
+  private readonly fallbackState = new Map<string, unknown>();
 
   constructor(
     private readonly memory: AgentMemorySyncService | null,
@@ -425,6 +485,7 @@ export class UserPersonalizationService {
     let relationship = this.loadRelationshipState(actorId);
     let rhythm = this.loadTimeRhythmState(actorId);
     let style = this.loadStyleProfileState(actorId);
+    let replyLength = this.loadReplyLengthProfileState(actorId);
     const facts = this.loadFactStore(actorId);
     const decayedFacts = decayFactStore(facts);
     if (userText?.trim()) {
@@ -433,6 +494,7 @@ export class UserPersonalizationService {
       relationship = this.applyRelationshipSignals(actorId, userText, relationship, state, behavior);
       rhythm = this.applyTimeRhythmSignals(actorId, rhythm);
       style = this.applyStyleProfile(actorId, userText, relationship, behavior, style);
+      replyLength = this.applyReplyLengthProfile(actorId, userText, replyLength);
     }
     const profile = await this.store.read(actorId);
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
@@ -442,7 +504,7 @@ export class UserPersonalizationService {
       userProfile,
       toneGuidance: [
         "基础回复纪律：默认用口语化短句，先说重点；除非用户明确要求展开，否则不要长篇铺垫、套话、总结腔。",
-        userText?.trim() ? buildReplyLengthGuidance(userText) : undefined,
+        userText?.trim() ? buildReplyLengthGuidance(userText, replyLength) : undefined,
         buildToneGuidance(state),
         behaviorSummaryLine(behavior),
         timeRhythmSummaryLine(rhythm),
@@ -494,12 +556,14 @@ export class UserPersonalizationService {
     const timeRhythm = this.loadTimeRhythmState(actorId);
     const styleProfile = this.loadStyleProfileState(actorId);
     const contactPreference = this.loadContactPreferenceState(actorId);
+    const replyLengthProfile = this.loadReplyLengthProfileState(actorId);
     return {
       relationship,
       behavior,
       timeRhythm,
       styleProfile,
       contactPreference,
+      replyLengthProfile,
       contactSummary: contactPreferenceSummaryLine(contactPreference, timeRhythm),
     };
   }
@@ -534,35 +598,31 @@ export class UserPersonalizationService {
   }
 
   private loadEmotionState(actorId: string): EmotionState {
-    if (!this.memory) return defaultEmotionState();
-    return toEmotionState(this.memory.getSnapshot(actorId, [EMOTION_STATE_KEY]).entries[EMOTION_STATE_KEY]);
+    return toEmotionState(this.readState(actorId, EMOTION_STATE_KEY));
   }
 
   private loadFactStore(actorId: string) {
-    if (!this.memory) return defaultFactStore();
-    return toFactStore(this.memory.getSnapshot(actorId, [USER_PROFILE_FACTS_KEY]).entries[USER_PROFILE_FACTS_KEY]);
+    return toFactStore(this.readState(actorId, USER_PROFILE_FACTS_KEY));
   }
 
   private loadRelationshipState(actorId: string): RelationshipState {
-    if (!this.memory) return defaultRelationshipState();
-    return toRelationshipState(this.memory.getSnapshot(actorId, [USER_RELATIONSHIP_KEY]).entries[USER_RELATIONSHIP_KEY]);
+    return toRelationshipState(this.readState(actorId, USER_RELATIONSHIP_KEY));
   }
 
   private loadTimeRhythmState(actorId: string): TimeRhythmState {
-    if (!this.memory) return defaultTimeRhythmState();
-    return toTimeRhythmState(this.memory.getSnapshot(actorId, [USER_TIME_RHYTHM_KEY]).entries[USER_TIME_RHYTHM_KEY]);
+    return toTimeRhythmState(this.readState(actorId, USER_TIME_RHYTHM_KEY));
   }
 
   private loadStyleProfileState(actorId: string): StyleProfileState {
-    if (!this.memory) return defaultStyleProfileState();
-    return toStyleProfileState(this.memory.getSnapshot(actorId, [USER_STYLE_PROFILE_KEY]).entries[USER_STYLE_PROFILE_KEY]);
+    return toStyleProfileState(this.readState(actorId, USER_STYLE_PROFILE_KEY));
   }
 
   private loadContactPreferenceState(actorId: string): ProactiveContactPreferenceState {
-    if (!this.memory) return defaultContactPreferenceState();
-    return toContactPreferenceState(
-      this.memory.getSnapshot(actorId, [USER_CONTACT_PREFERENCE_KEY]).entries[USER_CONTACT_PREFERENCE_KEY],
-    );
+    return toContactPreferenceState(this.readState(actorId, USER_CONTACT_PREFERENCE_KEY));
+  }
+
+  private loadReplyLengthProfileState(actorId: string): ReplyLengthProfileState {
+    return toReplyLengthProfileState(this.readState(actorId, USER_REPLY_LENGTH_PROFILE_KEY));
   }
 
   private applyRelationshipSignals(
@@ -643,6 +703,35 @@ export class UserPersonalizationService {
     return next;
   }
 
+  private applyReplyLengthProfile(
+    actorId: string,
+    userText: string,
+    current: ReplyLengthProfileState,
+  ): ReplyLengthProfileState {
+    const text = userText.trim();
+    const chars = text.replace(/\s+/g, "").length;
+    const shortExplicit =
+      /(简单说|简短点|短一点|一句话|一两句|别展开|直接说结论|长话短说|太长不看|简洁点)/i.test(text);
+    const longExplicit =
+      /(详细说|展开说|具体一点|多说点|讲清楚|完整方案|详细分析|一步一步|越详细越好)/i.test(text);
+    const recentUserChars = [...current.recentUserChars, chars].slice(-8);
+    const sampleCount = current.sampleCount + 1;
+    const avgUserChars =
+      current.sampleCount <= 0
+        ? chars
+        : Number(((current.avgUserChars * current.sampleCount + chars) / sampleCount).toFixed(2));
+    const next: ReplyLengthProfileState = {
+      avgUserChars,
+      shortPreferenceScore: Math.max(0, current.shortPreferenceScore * 0.92 + (shortExplicit ? 1.2 : chars <= 20 ? 0.45 : 0)),
+      longPreferenceScore: Math.max(0, current.longPreferenceScore * 0.92 + (longExplicit ? 1.2 : chars >= 90 ? 0.35 : 0)),
+      recentUserChars,
+      sampleCount,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.saveJsonState(actorId, USER_REPLY_LENGTH_PROFILE_KEY, next);
+    return next;
+  }
+
   private updateFactStore(actorId: string, userText: string): void {
     if (!this.memory || !userText.trim()) return;
     void this.updateFactStoreAsync(actorId, userText);
@@ -662,8 +751,7 @@ export class UserPersonalizationService {
   }
 
   private loadBehaviorSignals(actorId: string): BehaviorSignals {
-    if (!this.memory) return defaultBehaviorSignals();
-    return toBehaviorSignals(this.memory.getSnapshot(actorId, [USER_BEHAVIOR_SIGNAL_KEY]).entries[USER_BEHAVIOR_SIGNAL_KEY]);
+    return toBehaviorSignals(this.readState(actorId, USER_BEHAVIOR_SIGNAL_KEY));
   }
 
   private applyBehaviorSignals(actorId: string, userText: string, current: BehaviorSignals): BehaviorSignals {
@@ -684,8 +772,16 @@ export class UserPersonalizationService {
   }
 
   private saveJsonState(actorId: string, key: string, value: unknown): void {
-    if (!this.memory) return;
+    if (!this.memory) {
+      this.fallbackState.set(`${actorId}:${key}`, value);
+      return;
+    }
     void this.saveJsonStateAsync(actorId, key, value);
+  }
+
+  private readState(actorId: string, key: string): unknown {
+    if (!this.memory) return this.fallbackState.get(`${actorId}:${key}`);
+    return this.memory.getSnapshot(actorId, [key]).entries[key];
   }
 
   private async saveJsonStateAsync(actorId: string, key: string, value: unknown): Promise<void> {

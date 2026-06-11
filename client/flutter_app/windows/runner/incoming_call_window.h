@@ -68,6 +68,7 @@ class IncomingCallWindow {
   void StopPulseTimer();
   void StartAcceptButtonGlow();
   void StopAcceptButtonGlow();
+  void DestroyNativeWindow();
 
   void Paint(HWND hwnd, HDC hdc);
   void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,

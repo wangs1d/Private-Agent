@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { isIP } from "net";
 import { dirname, join } from "path";
 
-export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly";
+export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
 export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_task";
 export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled";
 export type ScheduleRunStatus = "success" | "failed";
@@ -31,6 +31,8 @@ export type ScheduleTaskRecord = {
   timezone: string;
   runAt: string;
   nextRunAt: string | null;
+  cronExpression?: string;
+  webhookToken?: string;
   status: ScheduleTaskStatus;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
@@ -61,9 +63,11 @@ export type CreateScheduleTaskInput = {
   title: string;
   description: string;
   kind: ScheduleTaskKind;
-  runAt: string;
+  runAt?: string;
   recurrence: ScheduleRecurrence;
   timezone?: string;
+  cronExpression?: string;
+  webhookToken?: string;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
@@ -75,6 +79,8 @@ type UpdateScheduleTaskInput = {
   recurrence?: ScheduleRecurrence;
   runAt?: string;
   timezone?: string;
+  cronExpression?: string | null;
+  webhookToken?: string | null;
   reminderMessage?: string;
   action?: ScheduleActionConfig;
   agentTask?: ScheduleAgentTaskConfig;
@@ -89,6 +95,11 @@ export type ScheduleReminderHandler = (
 ) => Promise<void>;
 
 export type AgentTaskHandler = (task: ScheduleTaskRecord) => Promise<Record<string, unknown>>;
+export type ScheduleTaskChangeAction = "created" | "updated" | "deleted";
+export type ScheduleTaskChangeHandler = (
+  action: ScheduleTaskChangeAction,
+  task: ScheduleTaskRecord,
+) => void | Promise<void>;
 
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
@@ -98,26 +109,26 @@ export class ScheduleTaskService {
   private weatherBriefHandler?: WeatherBriefHandler;
   private reminderHandler?: ScheduleReminderHandler;
   private agentTaskHandler?: AgentTaskHandler;
+  private taskChangeHandler?: ScheduleTaskChangeHandler;
 
   private get persistPath(): string {
     return process.env.SCHEDULE_TASKS_FILE ?? join(process.cwd(), "data", "schedule-tasks.json");
   }
 
-  /**
-   * 由引导层注入：执行「每日天气简报」任务并推送 WebSocket。
-   */
   setWeatherBriefHandler(handler: WeatherBriefHandler | undefined): void {
     this.weatherBriefHandler = handler;
   }
 
-  /** 由引导层注入：提醒到点时推送 WebSocket / 虚拟电话等。 */
   setReminderHandler(handler: ScheduleReminderHandler | undefined): void {
     this.reminderHandler = handler;
   }
 
-  /** 由引导层注入：到点后让 Agent 执行一段自动化任务。 */
   setAgentTaskHandler(handler: AgentTaskHandler | undefined): void {
     this.agentTaskHandler = handler;
+  }
+
+  setTaskChangeHandler(handler: ScheduleTaskChangeHandler | undefined): void {
+    this.taskChangeHandler = handler;
   }
 
   async load(): Promise<void> {
@@ -174,15 +185,19 @@ export class ScheduleTaskService {
     const to = range?.to ? new Date(range.to).getTime() : Number.POSITIVE_INFINITY;
     return Array.from(this.byTaskId.values())
       .filter((task) => task.sessionId === sessionId)
-      .filter((task) => task.status === "active")
       .filter((task) => {
-        if (!task.nextRunAt) return false;
-        const nextTime = new Date(task.nextRunAt).getTime();
-        const createdTime = new Date(task.createdAt).getTime();
-        return nextTime >= createdTime && nextTime >= from && nextTime <= to;
+        if (task.status === "cancelled") return false;
+        const relevantAt =
+          task.status === "completed"
+            ? task.lastRunAt ?? task.runAt
+            : (task.nextRunAt ?? task.runAt);
+        const relevantTime = new Date(relevantAt).getTime();
+        return Number.isFinite(relevantTime) && relevantTime >= from && relevantTime <= to;
       })
       .sort((a, b) =>
-        (a.nextRunAt ?? a.runAt ?? "").localeCompare(b.nextRunAt ?? b.runAt ?? ""),
+        (a.status === "completed" ? (a.lastRunAt ?? a.runAt) : (a.nextRunAt ?? a.runAt)).localeCompare(
+          b.status === "completed" ? (b.lastRunAt ?? b.runAt) : (b.nextRunAt ?? b.runAt),
+        ),
       );
   }
 
@@ -198,28 +213,31 @@ export class ScheduleTaskService {
   async deleteTask(taskId: string): Promise<void> {
     const task = this.byTaskId.get(taskId);
     if (!task) {
-      throw new Error("任务不存在");
+      throw new Error("task not found");
     }
     this.byTaskId.delete(taskId);
     this.runsByTaskId.delete(taskId);
     await this.persist();
+    await this.emitTaskChange("deleted", task);
   }
 
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {
     const tz = input.timezone?.trim() || "Asia/Shanghai";
-    const runAt = this.parseRunAt(input.runAt, tz);
-    this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
+    const schedule = this.resolveSchedule(input.runAt, input.recurrence, tz, input.cronExpression);
     const now = new Date().toISOString();
+    this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
     const task: ScheduleTaskRecord = {
       taskId: randomUUID(),
       sessionId: input.sessionId,
       title: input.title.trim(),
       description: input.description.trim(),
       kind: input.kind,
-      recurrence: input.recurrence,
+      recurrence: schedule.recurrence,
       timezone: tz,
-      runAt: runAt.toISOString(),
-      nextRunAt: runAt.toISOString(),
+      runAt: schedule.runAt,
+      nextRunAt: schedule.nextRunAt,
+      cronExpression: schedule.cronExpression,
+      webhookToken: this.normalizeWebhookToken(input.webhookToken),
       status: "active",
       reminderMessage: input.reminderMessage?.trim() || undefined,
       action: input.action,
@@ -229,16 +247,17 @@ export class ScheduleTaskService {
     };
     this.byTaskId.set(task.taskId, task);
     await this.persist();
+    await this.emitTaskChange("created", task);
     return task;
   }
 
   async updateTask(taskId: string, input: UpdateScheduleTaskInput): Promise<ScheduleTaskRecord> {
     const task = this.byTaskId.get(taskId);
     if (!task) {
-      throw new Error("任务不存在");
+      throw new Error("task not found");
     }
     if (task.status === "completed" || task.status === "cancelled") {
-      throw new Error("任务已结束，不可再编辑");
+      throw new Error("task already ended");
     }
     const next: ScheduleTaskRecord = {
       ...task,
@@ -246,16 +265,35 @@ export class ScheduleTaskService {
       description: input.description?.trim() || task.description,
       recurrence: input.recurrence ?? task.recurrence,
       timezone: input.timezone?.trim() || task.timezone,
+      cronExpression:
+        input.cronExpression === undefined
+          ? task.cronExpression
+          : (input.cronExpression?.trim() || undefined),
+      webhookToken:
+        input.webhookToken === undefined
+          ? task.webhookToken
+          : this.normalizeWebhookToken(input.webhookToken ?? undefined),
       reminderMessage: input.reminderMessage?.trim() || task.reminderMessage,
       action: input.action ?? task.action,
       agentTask: input.agentTask ?? task.agentTask,
       updatedAt: new Date().toISOString(),
     };
-    if (input.runAt) {
-      const tz = input.timezone?.trim() || task.timezone;
-      const runAt = this.parseRunAt(input.runAt, tz).toISOString();
-      next.runAt = runAt;
-      next.nextRunAt = runAt;
+    if (
+      input.runAt !== undefined ||
+      input.recurrence !== undefined ||
+      input.timezone !== undefined ||
+      input.cronExpression !== undefined
+    ) {
+      const schedule = this.resolveSchedule(
+        input.runAt ?? task.runAt,
+        next.recurrence,
+        next.timezone,
+        next.cronExpression,
+      );
+      next.recurrence = schedule.recurrence;
+      next.runAt = schedule.runAt;
+      next.nextRunAt = schedule.nextRunAt;
+      next.cronExpression = schedule.cronExpression;
     }
     if (input.status) {
       next.status = input.status;
@@ -266,14 +304,25 @@ export class ScheduleTaskService {
     this.validateKindPayload(next.kind, next.reminderMessage, next.action, next.agentTask);
     this.byTaskId.set(taskId, next);
     await this.persist();
+    await this.emitTaskChange("updated", next);
     return next;
   }
 
   async triggerNow(taskId: string): Promise<void> {
     const task = this.byTaskId.get(taskId);
-    if (!task) throw new Error("任务不存在");
-    if (task.status !== "active") throw new Error("当前任务未处于可执行状态");
+    if (!task) throw new Error("task not found");
+    if (task.status !== "active") throw new Error("current task is not active");
     await this.executeTask(task, new Date().toISOString());
+  }
+
+  async triggerByWebhookToken(webhookToken: string): Promise<ScheduleTaskRecord> {
+    const token = webhookToken.trim();
+    if (!token) throw new Error("webhook token is required");
+    const task = Array.from(this.byTaskId.values()).find((entry) => entry.webhookToken === token);
+    if (!task) throw new Error("webhook task not found");
+    if (task.status !== "active") throw new Error("current task is not active");
+    await this.executeTask(task, new Date().toISOString());
+    return this.byTaskId.get(task.taskId) ?? task;
   }
 
   private async tick(): Promise<void> {
@@ -313,12 +362,12 @@ export class ScheduleTaskService {
         };
       } else if (task.kind === "weather_brief") {
         if (!this.weatherBriefHandler) {
-          throw new Error("天气简报执行器未配置");
+          throw new Error("weather brief handler is not configured");
         }
         run.output = await this.weatherBriefHandler(task);
       } else if (task.kind === "agent_task") {
         if (!this.agentTaskHandler) {
-          throw new Error("Agent 自动化执行器未配置");
+          throw new Error("agent task handler is not configured");
         }
         run.output = await this.agentTaskHandler(task);
       } else {
@@ -335,11 +384,8 @@ export class ScheduleTaskService {
       list.push(run);
       this.runsByTaskId.set(task.taskId, list);
       await this.persist();
-      if (
-        task.kind === "reminder" &&
-        run.status === "success" &&
-        this.reminderHandler
-      ) {
+      await this.emitTaskChange("updated", nextTaskState);
+      if (task.kind === "reminder" && run.status === "success" && this.reminderHandler) {
         const message = task.reminderMessage || task.description;
         await this.reminderHandler(nextTaskState, message);
       }
@@ -356,8 +402,16 @@ export class ScheduleTaskService {
       updatedAt: new Date().toISOString(),
     };
     if (!wasSuccessful) {
-      // 失败任务按 1 分钟后重试一次（MVP 策略）。
       updated.nextRunAt = new Date(Date.now() + 60_000).toISOString();
+      return updated;
+    }
+    if (updated.cronExpression) {
+      updated.recurrence = "cron";
+      updated.nextRunAt = this.computeNextCronRun(
+        updated.cronExpression,
+        updated.timezone,
+        updated.lastRunAt ?? updated.runAt,
+      );
       return updated;
     }
     if (updated.recurrence === "none") {
@@ -365,10 +419,9 @@ export class ScheduleTaskService {
       updated.nextRunAt = null;
       return updated;
     }
-    // 将上次执行的 UTC 时间转回目标时区的本地时间，在本地时间维度上推算下一周期
+
     const anchorUtc = new Date(updated.nextRunAt ?? updated.runAt);
     const local = this.toLocalInTimezone(anchorUtc, updated.timezone);
-
     if (updated.recurrence === "daily") {
       local.setDate(local.getDate() + 1);
     } else if (updated.recurrence === "weekly") {
@@ -376,14 +429,13 @@ export class ScheduleTaskService {
     } else {
       local.setFullYear(local.getFullYear() + 1);
     }
-    // 将推算后的本地时间转回 UTC 存储
     updated.nextRunAt = this.toUtcFromLocalTime(local, updated.timezone).toISOString();
     return updated;
   }
 
   private async executeAction(task: ScheduleTaskRecord): Promise<unknown> {
     if (!task.action?.url) {
-      throw new Error("action 任务缺少 url");
+      throw new Error("action task requires url");
     }
     await assertSafeActionUrl(task.action.url);
     const method = task.action.method ?? "POST";
@@ -398,7 +450,7 @@ export class ScheduleTaskService {
     });
     const text = await res.text();
     if (!res.ok) {
-      throw new Error(`调用任务 API 失败: ${res.status} ${res.statusText} ${text}`);
+      throw new Error(`task api call failed: ${res.status} ${res.statusText} ${text}`);
     }
     try {
       return JSON.parse(text);
@@ -407,24 +459,181 @@ export class ScheduleTaskService {
     }
   }
 
-  private parseRunAt(raw: string, timezone: string): Date {
-    const date = new Date(raw);
-    if (Number.isNaN(date.getTime())) {
-      throw new Error("runAt 时间格式无效");
+  private resolveSchedule(
+    runAtRaw: string | undefined,
+    recurrence: ScheduleRecurrence,
+    timezone: string,
+    cronExpression?: string,
+  ): {
+    recurrence: ScheduleRecurrence;
+    runAt: string;
+    nextRunAt: string | null;
+    cronExpression?: string;
+  } {
+    const normalizedCron = cronExpression?.trim() || undefined;
+    if (normalizedCron) {
+      const nextRunAt = this.computeNextCronRun(normalizedCron, timezone);
+      return {
+        recurrence: "cron",
+        runAt: nextRunAt,
+        nextRunAt,
+        cronExpression: normalizedCron,
+      };
     }
-    // 将用户输入的时间解释为目标时区的本地时间，转为 UTC 存储
-    const utc = this.toUtcFromLocalTime(date, timezone);
+    if (!runAtRaw?.trim()) {
+      throw new Error("runAt or cronExpression is required");
+    }
+    const runAt = this.parseRunAt(runAtRaw, timezone).toISOString();
+    return {
+      recurrence,
+      runAt,
+      nextRunAt: runAt,
+    };
+  }
+
+  private parseRunAt(raw: string, timezone: string): Date {
+    const normalizedRaw = raw.trim();
+    const hasExplicitTimezone = /(?:[zZ]|[+\-]\d{2}:\d{2})$/.test(normalizedRaw);
+    const utc =
+      hasExplicitTimezone
+        ? this.parseAbsoluteRunAt(normalizedRaw)
+        : this.parseLocalRunAt(normalizedRaw, timezone);
     if (utc.getTime() < Date.now() - 5000) {
-      throw new Error("runAt 必须是未来时间");
+      throw new Error("runAt must be in the future");
     }
     return utc;
   }
 
-  /**
-   * 把「视为某时区本地时间的 Date」转换为对应的 UTC Date。
-   * 例如 localTime 的时分是 22:00，timezone 是 Asia/Shanghai，
-   * 则返回值对应上海时间 22:00 的 UTC 时刻（当天 14:00 UTC）。
-   */
+  private parseAbsoluteRunAt(raw: string): Date {
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error("invalid runAt");
+    }
+    return date;
+  }
+
+  private parseLocalRunAt(raw: string, timezone: string): Date {
+    const match = raw.match(
+      /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2})(?::(\d{2}))?(?::(\d{2}))?)?$/,
+    );
+    if (match) {
+      const [, year, month, day, hour = "00", minute = "00", second = "00"] = match;
+      const local = new Date(
+        Number(year),
+        Number(month) - 1,
+        Number(day),
+        Number(hour),
+        Number(minute),
+        Number(second),
+        0,
+      );
+      return this.toUtcFromLocalTime(local, timezone);
+    }
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error("invalid runAt");
+    }
+    return this.toUtcFromLocalTime(date, timezone);
+  }
+
+  private normalizeWebhookToken(token: string | undefined): string | undefined {
+    const normalized = token?.trim();
+    return normalized ? normalized : undefined;
+  }
+
+  private computeNextCronRun(
+    cronExpression: string,
+    timezone: string,
+    fromIso?: string,
+  ): string {
+    const fields = cronExpression.trim().split(/\s+/);
+    if (fields.length !== 5) {
+      throw new Error("cronExpression must have 5 fields");
+    }
+    const minutes = this.parseCronField(fields[0]!, 0, 59);
+    const hours = this.parseCronField(fields[1]!, 0, 23);
+    const daysOfMonth = this.parseCronField(fields[2]!, 1, 31);
+    const months = this.parseCronField(fields[3]!, 1, 12);
+    const daysOfWeek = this.parseCronField(fields[4]!, 0, 7, true);
+    const base = fromIso ? new Date(fromIso) : new Date();
+    const candidate = this.toLocalInTimezone(new Date(base.getTime() + 60_000), timezone);
+    candidate.setSeconds(0, 0);
+    for (let i = 0; i < 366 * 24 * 60; i += 1) {
+      const month = candidate.getMonth() + 1;
+      const day = candidate.getDate();
+      const hour = candidate.getHours();
+      const minute = candidate.getMinutes();
+      const dayOfWeek = candidate.getDay();
+      if (
+        months.has(month) &&
+        daysOfMonth.has(day) &&
+        hours.has(hour) &&
+        minutes.has(minute) &&
+        daysOfWeek.has(dayOfWeek)
+      ) {
+        return this.toUtcFromLocalTime(candidate, timezone).toISOString();
+      }
+      candidate.setMinutes(candidate.getMinutes() + 1);
+    }
+    throw new Error("unable to compute next cron run within one year");
+  }
+
+  private parseCronField(
+    expr: string,
+    min: number,
+    max: number,
+    normalizeSunday = false,
+  ): Set<number> {
+    const values = new Set<number>();
+    for (const rawPart of expr.split(",")) {
+      const part = rawPart.trim();
+      if (!part) continue;
+      const [rangeExpr, stepExpr] = part.split("/");
+      const step = stepExpr ? Number(stepExpr) : 1;
+      if (!Number.isInteger(step) || step <= 0) {
+        throw new Error(`invalid cron step: ${part}`);
+      }
+      let rangeStart = min;
+      let rangeEnd = max;
+      if (rangeExpr !== "*") {
+        const rangeParts = rangeExpr.split("-");
+        if (rangeParts.length === 1) {
+          rangeStart = Number(rangeParts[0]);
+          rangeEnd = rangeStart;
+        } else if (rangeParts.length === 2) {
+          rangeStart = Number(rangeParts[0]);
+          rangeEnd = Number(rangeParts[1]);
+        } else {
+          throw new Error(`invalid cron field: ${part}`);
+        }
+      }
+      if (
+        !Number.isInteger(rangeStart) ||
+        !Number.isInteger(rangeEnd) ||
+        rangeStart < min ||
+        rangeEnd > max ||
+        rangeStart > rangeEnd
+      ) {
+        throw new Error(`cron field out of range: ${part}`);
+      }
+      for (let value = rangeStart; value <= rangeEnd; value += step) {
+        values.add(normalizeSunday && value === 7 ? 0 : value);
+      }
+    }
+    if (values.size === 0) {
+      throw new Error(`empty cron field: ${expr}`);
+    }
+    return values;
+  }
+
+  private async emitTaskChange(
+    action: ScheduleTaskChangeAction,
+    task: ScheduleTaskRecord,
+  ): Promise<void> {
+    if (!this.taskChangeHandler) return;
+    await this.taskChangeHandler(action, task);
+  }
+
   private toUtcFromLocalTime(localTime: Date, timezone: string): Date {
     const y = localTime.getFullYear();
     const mo = localTime.getMonth();
@@ -433,10 +642,8 @@ export class ScheduleTaskService {
     const mi = localTime.getMinutes();
     const s = localTime.getSeconds();
 
-    // 先按「UTC 分量 = 用户期望的本地分量」构造临时时间
     let tentative = new Date(Date.UTC(y, mo, d, h, mi, s));
 
-    // 查看这个 UTC 时刻在目标时区里显示为什么本地时间
     const fmt = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezone,
       year: "numeric",
@@ -453,22 +660,16 @@ export class ScheduleTaskService {
       if (p.type !== "literal") tzVals[p.type] = Number(p.value);
     }
 
-    // 偏移量 = 期望本地时间 - 目标时区实际显示的时间
     let deltaMs =
       ((h - (tzVals.hour ?? 0)) * 60 + (mi - (tzVals.minute ?? 0))) * 60000 +
       (s - (tzVals.second ?? 0)) * 1000;
 
-    // 处理跨日
     if (deltaMs > 43200000) deltaMs -= 86400000;
     if (deltaMs < -43200000) deltaMs += 86400000;
 
     return new Date(tentative.getTime() + deltaMs);
   }
 
-  /**
-   * 将 UTC Date 转换为「目标时区的本地时间分量」表示的新 Date。
-   * 返回的 Date 在系统本地时区中，但其年月日时分秒等于目标时区的本地时间。
-   */
   private toLocalInTimezone(utcDate: Date, timezone: string): Date {
     const fmt = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezone,
@@ -482,7 +683,9 @@ export class ScheduleTaskService {
     });
     const parts = fmt.formatToParts(utcDate);
     const v: Record<string, number> = {};
-    for (const p of parts) if (p.type !== "literal") v[p.type] = Number(p.value);
+    for (const p of parts) {
+      if (p.type !== "literal") v[p.type] = Number(p.value);
+    }
     return new Date(v.year, v.month - 1, v.day, v.hour ?? 0, v.minute ?? 0, v.second ?? 0);
   }
 
@@ -493,16 +696,13 @@ export class ScheduleTaskService {
     agentTask?: ScheduleAgentTaskConfig,
   ): void {
     if (kind === "reminder" && !(reminderMessage?.trim() || "").length) {
-      throw new Error("提醒任务必须提供 reminderMessage");
+      throw new Error("reminder task requires reminderMessage");
     }
     if (kind === "action" && !action?.url?.trim()) {
-      throw new Error("动作任务必须提供 action.url");
+      throw new Error("action task requires action.url");
     }
     if (kind === "agent_task" && !(agentTask?.prompt?.trim() || "").length) {
-      throw new Error("Agent 自动化任务必须提供 agentTask.prompt");
-    }
-    if (kind === "weather_brief") {
-      return;
+      throw new Error("agent task requires agentTask.prompt");
     }
   }
 }
@@ -512,24 +712,24 @@ async function assertSafeActionUrl(rawUrl: string): Promise<void> {
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new Error("action.url 格式无效");
+    throw new Error("invalid action.url");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("action.url 仅支持 http/https");
+    throw new Error("action.url only supports http/https");
   }
   if (process.env.SCHEDULE_ACTION_ALLOW_PRIVATE === "1") {
     return;
   }
   const hostname = url.hostname.toLowerCase();
   if (hostname === "localhost" || hostname.endsWith(".localhost")) {
-    throw new Error("action.url 默认禁止访问 localhost");
+    throw new Error("action.url cannot access localhost by default");
   }
   const addresses =
-    isIP(hostname) ?
-      [{ address: hostname }]
-    : await lookup(hostname, { all: true, verbatim: false });
+    isIP(hostname)
+      ? [{ address: hostname }]
+      : await lookup(hostname, { all: true, verbatim: false });
   if (addresses.some((entry) => isPrivateOrLocalAddress(entry.address))) {
-    throw new Error("action.url 默认禁止访问本机或内网地址");
+    throw new Error("action.url cannot access local or private network by default");
   }
 }
 

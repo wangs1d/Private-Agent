@@ -3,6 +3,9 @@ import { ServerEventType } from "../protocol.js";
 import type { AgentCore } from "./agent-core.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 import { dedupeAdjacentLines } from "../utils/text.js";
+import { getToolResultProcessor } from "./tool-result-processor.js";
+import { AssistantRewriterService } from "./assistant-rewriter.js";
+import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 
 export type PeerIncomingCallPayload = {
   callId: string;
@@ -207,7 +210,13 @@ export class VirtualPhoneIncomingCoordinator {
 
       let finalText =
         reply.text.trim() || "已代接来电，但未能生成完整说明，请查看主叫语音稿。";
-      finalText = finalText.trim();
+      finalText = getToolResultProcessor().processAssistantText(finalText.trim(), {
+        plainTextMode: true,
+        userText: call.transcript,
+      });
+      finalText = await new AssistantRewriterService(
+        createExternalChatProviderFromEnv(),
+      ).rewriteIfNeeded(call.transcript, finalText);
 
       send({
         type: ServerEventType.ChatAssistantDone,

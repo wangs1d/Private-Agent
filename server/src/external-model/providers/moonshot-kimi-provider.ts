@@ -10,7 +10,7 @@ import {
 } from "../prefix-cache.js";
 import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
-import { getChatThreadStore } from "../chat-thread-store.js";
+import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -87,7 +87,6 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     }
     const ephemeral = streamOpts?.ephemeralTurn === true;
     const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
-    const startLen = msgs.length;
 
     const overrideSys = streamOpts?.systemPromptOverride?.trim();
     const promptMemory = streamOpts?.promptContext?.memory;
@@ -111,7 +110,18 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     } else {
       msgs[0] = { role: "system", content: sysContent };
     }
-    msgs.push({ role: "user", content: openAiUserContentFromTurn(userTurn) });
+    // 支持「编辑同 clientMessageId 的 user 消息并重发」：先把该消息及其后续内容删掉。
+    // 截断后再重算 turnStartLen，确保异常回滚到本轮开始时的真实状态。
+    if (!ephemeral && userTurn.clientMessageId) {
+      this.threads.removeUserMessageAndAfter(sessionId, userTurn.clientMessageId);
+    }
+    const turnStartLen = msgs.length;
+    const userMsg = {
+      role: "user",
+      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn)),
+    } as ChatCompletionMessageParam;
+    tagUserMessageClientId(userMsg, userTurn.clientMessageId);
+    msgs.push(userMsg);
     if (!ephemeral) {
       this.trimThread(msgs, streamOpts?.maxThreadMessages);
     }
@@ -161,7 +171,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         return full;
       } catch (e) {
         if (!completed && !ephemeral) {
-          msgs.length = startLen;
+          msgs.length = turnStartLen;
         }
         throw e;
       }
@@ -180,7 +190,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         request as Parameters<typeof this.client.chat.completions.create>[0],
       );
     } catch (e) {
-      msgs.length = startLen;
+      msgs.length = turnStartLen;
       throw e;
     }
 
@@ -194,7 +204,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         }
       }
     } catch (e) {
-      msgs.length = startLen;
+      msgs.length = turnStartLen;
       throw e;
     }
 

@@ -62,6 +62,7 @@ class _GomokuIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
     return Stack(
       alignment: Alignment.center,
       children: <Widget>[
@@ -69,11 +70,11 @@ class _GomokuIcon extends StatelessWidget {
           width: 60,
           height: 60,
           decoration: BoxDecoration(
-            color: const Color(0xFF2A2A2A),
+            color: cs.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(8),
           ),
           child: CustomPaint(
-            painter: _GomokuBoardPainter(),
+            painter: _GomokuBoardPainter(lineColor: cs.outline.withValues(alpha: 0.5)),
           ),
         ),
         Positioned(
@@ -159,10 +160,14 @@ class _GomokuIcon extends StatelessWidget {
 }
 
 class _GomokuBoardPainter extends CustomPainter {
+  _GomokuBoardPainter({required this.lineColor});
+
+  final Color lineColor;
+
   @override
   void paint(Canvas canvas, Size size) {
     final Paint paint = Paint()
-      ..color = const Color(0xFF3A3A3A)
+      ..color = lineColor
       ..strokeWidth = 1;
 
     for (int i = 0; i <= 3; i++) {
@@ -782,7 +787,10 @@ class _InteractiveGameCardState extends State<_InteractiveGameCard> {
   Widget build(BuildContext context) {
     final _GameSpec g = widget.spec;
     final bool elevated = _hovered || _pressed;
-    final Color borderColor = elevated ? g.accent.withValues(alpha: 0.45) : const Color(0xFF2A2A2A);
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Color borderColor = elevated
+        ? g.accent.withValues(alpha: 0.45)
+        : cs.outline.withValues(alpha: 0.35);
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -793,7 +801,7 @@ class _InteractiveGameCardState extends State<_InteractiveGameCard> {
         curve: Curves.easeOut,
         transform: Matrix4.translationValues(0, elevated ? -3 : 0, 0),
         decoration: BoxDecoration(
-          color: const Color(0xFF1E1E1E),
+          color: cs.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: borderColor, width: 1),
           boxShadow: elevated
@@ -847,23 +855,23 @@ class _InteractiveGameCardState extends State<_InteractiveGameCard> {
                   const SizedBox(height: 16),
                   Text(
                     g.title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w700,
-                      color: Color(0xFFF4F4F5),
+                      color: cs.onSurface,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     g.subtitle,
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF71717A)),
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                   ),
                   const SizedBox(height: 12),
                   Text(
                     g.description,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 14,
-                      color: Color(0xFFA1A1AA),
+                      color: cs.onSurfaceVariant,
                       height: 1.55,
                     ),
                   ),
@@ -876,13 +884,13 @@ class _InteractiveGameCardState extends State<_InteractiveGameCard> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF161616),
+                            color: cs.surfaceContainerHighest,
                             borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: const Color(0xFF2A2A2A)),
+                            border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
                           ),
                           child: Text(
                             tag,
-                            style: const TextStyle(fontSize: 11, color: Color(0xFFA1A1AA)),
+                            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
                           ),
                         ),
                     ],

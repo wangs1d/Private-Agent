@@ -24,6 +24,12 @@ export type VisionFrame = {
 export type ChatUserTurn = {
   text: string;
   visionFrames?: VisionFrame[];
+  /**
+   * 客户端为该 user 消息生成的稳定 id（与 WebSocket `chat.user_message.messageId` 一致）。
+   * Provider 会把它登记到 ChatThreadStore 的反向索引，供后续「编辑/删除/替换并重发」使用。
+   * 未传或为空时按「无 id」处理，相关操作将无法按 id 命中。
+   */
+  clientMessageId?: string;
 };
 
 /**
@@ -64,6 +70,11 @@ export type AgentPromptMemoryContext = {
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
   scheduleSnapshot?: string;
+  /**
+   * 当前精确时间（年/月/日/时/分/秒 + 星期 + 时区），每轮注入。
+   * 与对话历史中每条消息的 `[ts:...]` 前缀对应，供 LLM 做时间维度计算与对齐。
+   */
+  currentTime?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -170,7 +181,9 @@ export interface ExternalChatProvider {
     streamOpts?: AgentStreamOptions,
   ): Promise<string>;
 
-  /** 可选：丢弃某会话的服务端侧对话记忆 */
+  /**
+   * 可选：丢弃某会话的服务端侧对话记忆
+   */
   clearSession?(sessionId: string): void;
 
   /**

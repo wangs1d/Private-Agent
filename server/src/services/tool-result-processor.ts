@@ -5,6 +5,7 @@ import {
   shouldSummarizeContent,
   type ContentSummary,
 } from "../services/content-summary-service.js";
+import { humanizeAssistantText } from "./assistant-humanizer.js";
 
 const SUMMARY_ENABLED_TOOLS = new Set([
   "search_web",
@@ -69,14 +70,14 @@ export class ToolResultProcessor {
     };
   }
 
-  processAssistantText(text: string, opts?: { plainTextMode?: boolean }): string {
+  processAssistantText(text: string, opts?: { plainTextMode?: boolean; userText?: string }): string {
     if (!this.options.enabled) {
-      return text;
+      return humanizeAssistantText(text, { userText: opts?.userText });
     }
 
     const trimmed = text.trim();
     if (!trimmed || trimmed.length < CONTENT_LENGTH_THRESHOLD) {
-      return text;
+      return humanizeAssistantText(text, { userText: opts?.userText });
     }
     if (trimmed.includes("[CONTENT_SUMMARY_V2_START]")) {
       return text;
@@ -96,11 +97,11 @@ export class ToolResultProcessor {
           ? formatContentSummaryForPlainText(summary)
           : formatContentSummaryForChat(summary);
         console.log(`[ToolResultProcessor] Formatted output length: ${formatted.length}`);
-        return formatted;
+        return humanizeAssistantText(formatted, { userText: opts?.userText });
       }
     }
 
-    return text;
+    return humanizeAssistantText(text, { userText: opts?.userText });
   }
 
   private stringifyResult(result: unknown): string {

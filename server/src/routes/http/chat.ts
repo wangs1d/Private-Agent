@@ -1,12 +1,17 @@
 import type { FastifyInstance } from "fastify";
 
 import {
+  chatMessageCopyBodySchema,
+  chatMessageEditBodySchema,
   chatScheduleDraftBodySchema,
   chatSkillEnabledBodySchema,
   chatSkillsQuerySchema,
 } from "../../schemas/api.js";
 import { prefersChatWebHtml, readChatWebIndexHtml } from "./chat-web.js";
 import type { HttpRouteDeps } from "./types.js";
+import { ServerEventType } from "../../protocol.js";
+import { getChatThreadStore } from "../../external-model/chat-thread-store.js";
+import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 
 function resolveActorKey(q: Record<string, unknown> | undefined): string | undefined {
   const userId = typeof q?.userId === "string" ? q.userId : undefined;
@@ -199,5 +204,120 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       return reply.code(200).send({ ok: true, matched: false, hint: intent.hint });
     }
     return { ok: true, matched: true, draft: intent.draft };
+  });
+
+  app.post("/chat/message/copy", async (request, reply) => {
+    const parsed = chatMessageCopyBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { messageId, text, sessionId, userId } = parsed.data;
+    // 复制行为的核心由前端写入剪贴板完成；这里仅做服务端审计/回执。
+    // 文本由客户端提供，校验后原样回显给前端（无状态写入）。
+    return {
+      ok: true as const,
+      messageId,
+      sessionId,
+      userId: userId ?? null,
+      text,
+      length: text.length,
+    };
+  });
+
+  app.post("/chat/message/edit", async (request, reply) => {
+    const parsed = chatMessageEditBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { messageId, newText, sessionId, userId, agentAccessMode } = parsed.data;
+    const actorKey = userId?.trim() || sessionId.trim();
+
+    const { agentCore, wsConnectionRegistry } = deps;
+    if (!agentCore) {
+      return reply.code(503).send({ ok: false, message: "AgentCore 未就绪" });
+    }
+    if (!wsConnectionRegistry?.get(actorKey)) {
+      return reply.code(409).send({
+        ok: false,
+        message: "当前 Actor 没有在线 WebSocket，无法流式回包；请保持聊天页在前台再试",
+      });
+    }
+
+    // 1) 先在服务端线程里把旧 user 消息及之后内容清掉，等会儿 provider 会用同 clientMessageId 重新 push 一次。
+    const threads = getChatThreadStore();
+    const removed = threads.removeUserMessageAndAfter(sessionId, messageId);
+    if (!removed) {
+      // 兜底：用 editUserMessage 强制覆盖；多用于旧消息（重启后丢失 clientMessageId 反向索引）场景
+      const fallback = threads.editUserMessage(sessionId, "{}", messageId, newText);
+      if (!fallback.ok) {
+        return reply.code(404).send({
+          ok: false,
+          message: `未找到要编辑的消息：${fallback.reason ?? "unknown"}`,
+        });
+      }
+    }
+
+    // 2) 触发 Agent 重答；响应通过 WebSocket 推回（同 user_message 协议）。
+    const assistantMessageId = `edit:${messageId}:${Date.now()}`;
+    const accessMode = parseAgentAccessMode(agentAccessMode);
+    let chunkSeq = 0;
+    void (async () => {
+      try {
+        const reply0 = await agentCore.handleUserMessage(actorKey, newText, {
+          chatUserMessageId: messageId,
+          agentAccessMode: accessMode,
+          onAssistantDelta: (delta) => {
+            chunkSeq += 1;
+            wsConnectionRegistry.trySend(
+              actorKey,
+              JSON.stringify({
+                type: ServerEventType.ChatAssistantChunk,
+                payload: {
+                  sessionId: actorKey,
+                  messageId: assistantMessageId,
+                  chunk: delta,
+                  sequence: chunkSeq,
+                  source: "chat.message_edit",
+                },
+              }),
+            );
+          },
+        });
+        wsConnectionRegistry.trySend(
+          actorKey,
+          JSON.stringify({
+            type: ServerEventType.ChatAssistantDone,
+            payload: {
+              sessionId: actorKey,
+              messageId: assistantMessageId,
+              finalText: reply0.text,
+              toolCalls: reply0.toolName ? [reply0.toolName] : [],
+              source: "chat.message_edit",
+            },
+          }),
+        );
+      } catch (e) {
+        wsConnectionRegistry.trySend(
+          actorKey,
+          JSON.stringify({
+            type: ServerEventType.ErrorEvent,
+            payload: {
+              code: "CHAT_MESSAGE_EDIT_FAILED",
+              message: e instanceof Error ? e.message : String(e),
+              traceId: messageId,
+            },
+          }),
+        );
+      }
+    })();
+
+    return {
+      ok: true as const,
+      messageId,
+      newText,
+      sessionId,
+      userId: userId ?? null,
+      assistantMessageId,
+    };
   });
 }

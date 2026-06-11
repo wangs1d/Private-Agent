@@ -18,6 +18,7 @@ import {
 
 } from "../openai-compatible-tool-loop.js";
 import {
+
   applyPromptCacheMessages,
   preparePromptCachePlan,
 } from "../prefix-cache.js";
@@ -26,7 +27,7 @@ import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
 
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 
-import { getChatThreadStore } from "../chat-thread-store.js";
+import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
 
 import type {
 
@@ -310,8 +311,6 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
 
-    const startLen = msgs.length;
-
 
 
     const overrideSys = streamOpts?.systemPromptOverride?.trim();
@@ -339,7 +338,18 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     }
 
-    msgs.push({ role: "user", content: openAiUserContentFromTurn(userTurn) });
+    // 支持「编辑同 clientMessageId 的 user 消息并重发」：先把该消息及其后续内容删掉。
+    // 截断后再重算 turnStartLen，确保异常回滚到本轮开始时的真实状态。
+    if (!ephemeral && userTurn.clientMessageId) {
+      this.threads.removeUserMessageAndAfter(sessionId, userTurn.clientMessageId);
+    }
+    const turnStartLen = msgs.length;
+    const userMsg = {
+      role: "user",
+      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn)),
+    } as ChatCompletionMessageParam;
+    tagUserMessageClientId(userMsg, userTurn.clientMessageId);
+    msgs.push(userMsg);
 
     if (!ephemeral) {
 
@@ -441,7 +451,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
         if (!ephemeral) {
 
-          msgs.length = startLen;
+          msgs.length = turnStartLen;
 
         }
 
@@ -469,7 +479,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     } catch (e) {
 
-      msgs.length = startLen;
+      msgs.length = turnStartLen;
 
       throw e;
 
@@ -497,7 +507,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     } catch (e) {
 
-      msgs.length = startLen;
+      msgs.length = turnStartLen;
 
       throw e;
 

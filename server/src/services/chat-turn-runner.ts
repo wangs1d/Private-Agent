@@ -5,7 +5,9 @@ import type { ClientLocationWire } from "../types/client-location.js";
 import type { AgentCore } from "./agent-core.js";
 import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
+import { AssistantRewriterService } from "./assistant-rewriter.js";
 import { dedupeAdjacentLines } from "../utils/text.js";
+import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 
 export type ChatTurnInput = {
   text: string;
@@ -87,6 +89,8 @@ export async function runChatTurnForActor(
   const agentAccessMode = parseAgentAccessMode(input.agentAccessMode);
 
   try {
+    const rewriteProvider = createExternalChatProviderFromEnv();
+    const rewriter = new AssistantRewriterService(rewriteProvider);
     const reply = await agentCore.handleUserMessage(actorId, text, {
       chatUserMessageId: messageId,
       userId,
@@ -135,7 +139,11 @@ export async function runChatTurnForActor(
 
     // 折叠相邻的重复行（同 WS 路径）：避免 LLM 把工具前导与最终回复写成同一句。
     finalText = dedupeAdjacentLines(finalText);
-    finalText = getToolResultProcessor().processAssistantText(finalText, { plainTextMode: true });
+    finalText = getToolResultProcessor().processAssistantText(finalText, {
+      plainTextMode: true,
+      userText: text,
+    });
+    finalText = await rewriter.rewriteIfNeeded(text, finalText);
 
     return { ok: true, finalText, messageId };
   } catch (err) {

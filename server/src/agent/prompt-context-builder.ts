@@ -4,6 +4,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
+  buildCurrentTimePrompt,
   sliceMemoryEntriesToPromptContext,
   sliceSubAgentMemoryEntries,
 } from "./prompt-builder.js";
@@ -377,6 +378,7 @@ export class PromptContextBuilder {
 
     return {
       ...fromKv,
+      currentTime: buildCurrentTimePrompt(),
       ...(taskContext ? { taskContext } : {}),
       ...(capabilityQueryHint ? { abilities: fromKv.abilities ? `${fromKv.abilities}\n${capabilityQueryHint}` : capabilityQueryHint } : {}),
       ...(toneGuidance
@@ -427,7 +429,8 @@ export class PromptContextBuilder {
       Boolean(memory.lifeThemeMemory) ||
       Boolean(memory.dreamMemory) ||
       Boolean(memory.followUpAnchor) ||
-      Boolean(memory.scheduleSnapshot)
+      Boolean(memory.scheduleSnapshot) ||
+      Boolean(memory.currentTime)
     );
   }
 

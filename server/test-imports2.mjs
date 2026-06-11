@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+const c = fs.readFileSync('src/ws/handlers/chat-user-message.ts','utf8');
+console.log('--- All matches ---');
+for (const m of c.matchAll(/from\s+['"]([^'"]+)['"]/g)) console.log('from:', m[1]);
+console.log('--- Dynamic ---');
+for (const m of c.matchAll(/import\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) console.log('dyn:', m[1]);
+console.log('--- Re ---');
+for (const m of c.matchAll(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) console.log('req:', m[1]);
+console.log('--- Exported ---');
+for (const m of c.matchAll(/export\s+(?:type\s+)?\{[^}]+\}\s*from\s+['"]([^'"]+)['"]/g)) console.log('exp:', m[1]);

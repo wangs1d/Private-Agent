@@ -184,34 +184,34 @@ Future<bool> _persistExpandedTask(
 
 String _pickTitle(Map<String, dynamic> result) {
   final String title = result["title"]?.toString().trim() ?? "";
-  if (title.isNotEmpty && title != "AI 鎻愰啋浠诲姟") {
+  if (title.isNotEmpty && title != "AI 提醒任务") {
     return _displayReminderTitle(title);
   }
   final String msg = result["reminderMessage"]?.toString().trim() ?? "";
   if (msg.isNotEmpty) return _displayReminderTitle(msg);
-  return "瀹氭椂鎻愰啋";
+  return "定时提醒";
 }
 
 String _displayReminderTitle(String raw) {
   final String s = raw.trim();
-  if (s.isEmpty) return "瀹氭椂鎻愰啋";
-  if (RegExp(r"鍠婃垜璧峰簥|鍙垜璧峰簥").hasMatch(s)) return "璧峰簥鎻愰啋";
-  if (s == "鍠婃垜" || s == "鍙垜") return "璧峰簥鎻愰啋";
-  if (RegExp(r"鍚冭嵂").hasMatch(s)) return "鍚冭嵂鎻愰啋";
+  if (s.isEmpty) return "定时提醒";
+  if (RegExp(r"叫我起床|喊我起床").hasMatch(s)) return "起床提醒";
+  if (s == "叫我" || s == "喊我") return "起床提醒";
+  if (RegExp(r"吃药").hasMatch(s)) return "吃药提醒";
   return s;
 }
 
 String? _buildNotes(Map<String, dynamic> result) {
   final String recurrence = result["recurrence"]?.toString() ?? "none";
   final String recurrenceLabel = switch (recurrence) {
-    "daily" => "姣忓ぉ閲嶅",
-    "weekly" => "姣忓懆閲嶅",
-    "yearly" => "姣忓勾閲嶅",
-    _ => "鍗曟鎻愰啋",
+    "daily" => "每天重复",
+    "weekly" => "每周重复",
+    "yearly" => "每年重复",
+    _ => "单次提醒",
   };
   final String msg = result["reminderMessage"]?.toString().trim() ?? "";
   if (msg.isNotEmpty && msg != _pickTitle(result)) {
-    return "$recurrenceLabel 路 $msg";
+    return "$recurrenceLabel · $msg";
   }
   return recurrenceLabel;
 }

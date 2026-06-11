@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { AgentCore } from "../services/agent-core.js";
+import { getToolResultProcessor } from "../services/tool-result-processor.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { ServerEventType } from "../protocol.js";
 import { chunkText, dedupeAdjacentLines } from "../utils/text.js";
@@ -226,7 +227,10 @@ export class VisionPeriodicScheduler {
           payload: {
             sessionId: job.actorId,
             messageId: assistantMsgId,
-            finalText: dedupeAdjacentLines((reply.text ?? "").trim()),
+            finalText: getToolResultProcessor().processAssistantText(
+              dedupeAdjacentLines((reply.text ?? "").trim()),
+              { userText: job.prompt },
+            ),
             toolCalls: reply.toolName ? [reply.toolName] : [],
             visionPeriodicJobId: job.jobId,
           },

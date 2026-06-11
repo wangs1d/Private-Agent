@@ -141,6 +141,11 @@ import type { AppServices } from "./types.js";
 import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
 import { CompanionService } from "../services/companion-service.js";
 import { MarketSignalService } from "../services/market-signal-service.js";
+import {
+  notifyScheduleTasksChanged,
+  scheduleWsPayloadDeleted,
+  scheduleWsPayloadFromTask,
+} from "../services/schedule-ws-notify.js";
 
 export async function createAppServices(): Promise<AppServices> {
   const app = Fastify({ logger: true });
@@ -305,6 +310,15 @@ export async function createAppServices(): Promise<AppServices> {
     logger: app.log,
   });
   await intelligentReminder.userResponsePersistence.load();
+
+  scheduleTaskService.setTaskChangeHandler(async (action, task) => {
+    notifyScheduleTasksChanged(
+      wsConnectionRegistry,
+      action === "deleted"
+        ? scheduleWsPayloadDeleted(task.sessionId, task.taskId)
+        : scheduleWsPayloadFromTask(task, action),
+    );
+  });
 
   scheduleTaskService.setReminderHandler(async (task, message) => {
     const displayMessage = formatReminderDisplayMessage(message);

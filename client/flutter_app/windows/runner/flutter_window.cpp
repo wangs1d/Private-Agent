@@ -1,5 +1,11 @@
 #include "flutter_window.h"
 
+#include <dwmapi.h>
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,6 +64,16 @@ bool FlutterWindow::OnCreate() {
         HandleIncomingCallMethodCall(call, std::move(result));
       });
 
+  desktop_notification_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/desktop_notification",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  desktop_notification_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleDesktopNotificationMethodCall(call, std::move(result));
+      });
+
   // 独立"通话中"窗口 MethodChannel —— pai/connected_call
   connected_call_channel_ = std::make_unique<
       flutter::MethodChannel<flutter::EncodableValue>>(
@@ -69,11 +85,35 @@ bool FlutterWindow::OnCreate() {
         HandleConnectedCallMethodCall(call, std::move(result));
       });
 
+  outgoing_call_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/outgoing_call",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  outgoing_call_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleOutgoingCallMethodCall(call, std::move(result));
+      });
+
+  // pai/window_titlebar —— 动态切换 Windows 标题栏深色/亮色
+  window_titlebar_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/window_titlebar",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  window_titlebar_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleWindowTitleBarMethodCall(call, std::move(result));
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
 
   flutter_controller_->ForceRedraw();
+
+  // 清空窗口标题栏文字（Flutter 引擎会自动设置标题，需在初始化后覆盖）
+  SetWindowText(GetHandle(), L"");
 
   return true;
 }
@@ -113,13 +153,78 @@ std::string Base64Encode(const std::vector<uint8_t>& data) {
   return out;
 }
 
+std::string GetEncodableString(const flutter::EncodableMap* args,
+                               const char* key,
+                               const std::string& fallback = std::string()) {
+  if (!args) return fallback;
+  auto it = args->find(flutter::EncodableValue(key));
+  if (it == args->end() || it->second.IsNull()) return fallback;
+  if (const auto* value = std::get_if<std::string>(&it->second)) {
+    return *value;
+  }
+  return fallback;
+}
+
+int GetEncodableInt(const flutter::EncodableMap* args,
+                    const char* key,
+                    int fallback) {
+  if (!args) return fallback;
+  auto it = args->find(flutter::EncodableValue(key));
+  if (it == args->end() || it->second.IsNull()) return fallback;
+  if (const auto* value = std::get_if<int32_t>(&it->second)) {
+    return static_cast<int>(*value);
+  }
+  if (const auto* value = std::get_if<int64_t>(&it->second)) {
+    return static_cast<int>(*value);
+  }
+  if (const auto* value = std::get_if<double>(&it->second)) {
+    return static_cast<int>(*value);
+  }
+  return fallback;
+}
+
+uint32_t GetEncodableUint32(const flutter::EncodableMap* args,
+                            const char* key,
+                            uint32_t fallback) {
+  if (!args) return fallback;
+  auto it = args->find(flutter::EncodableValue(key));
+  if (it == args->end() || it->second.IsNull()) return fallback;
+  if (const auto* value = std::get_if<int32_t>(&it->second)) {
+    return static_cast<uint32_t>(*value);
+  }
+  if (const auto* value = std::get_if<int64_t>(&it->second)) {
+    return static_cast<uint32_t>(*value);
+  }
+  if (const auto* value = std::get_if<double>(&it->second)) {
+    return static_cast<uint32_t>(*value);
+  }
+  return fallback;
+}
+
+bool GetEncodableBool(const flutter::EncodableMap* args,
+                      const char* key,
+                      bool fallback) {
+  if (!args) return fallback;
+  auto it = args->find(flutter::EncodableValue(key));
+  if (it == args->end() || it->second.IsNull()) return fallback;
+  if (const auto* value = std::get_if<bool>(&it->second)) {
+    return *value;
+  }
+  return fallback;
+}
+
 }  // namespace
 
 void FlutterWindow::OnDestroy() {
   incoming_call_window_.reset();
   incoming_call_channel_.reset();
+  desktop_notification_window_.reset();
+  desktop_notification_channel_.reset();
   connected_call_window_.reset();
   connected_call_channel_.reset();
+  outgoing_call_window_.reset();
+  outgoing_call_channel_.reset();
+  window_titlebar_channel_.reset();
   overlay_window_.reset();
   overlay_channel_.reset();
   desktop_bridge_channel_.reset();
@@ -143,6 +248,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_SETTEXT:
+      // 拦截标题设置，保持标题栏为空
+      return 0;
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
@@ -395,22 +503,13 @@ void FlutterWindow::HandleIncomingCallMethodCall(
     uint32_t accent = 0xFF22C55E;  // 默认绿
 
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      auto get_str = [&](const char* k) -> std::string {
-        auto it = args->find(flutter::EncodableValue(k));
-        if (it == args->end() || it->second.IsNull()) return std::string();
-        return std::get<std::string>(it->second);
-      };
-      caller_name = get_str("callerName");
-      subtitle = get_str("subtitle").empty() ? subtitle : get_str("subtitle");
-      caller_initial = get_str("callerInitial");
-      auto it_to = args->find(flutter::EncodableValue("ringTimeoutMs"));
-      if (it_to != args->end() && !it_to->second.IsNull()) {
-        ring_timeout_ms = static_cast<int>(std::get<int64_t>(it_to->second));
-      }
-      auto it_acc = args->find(flutter::EncodableValue("accentColor"));
-      if (it_acc != args->end() && !it_acc->second.IsNull()) {
-        accent = static_cast<uint32_t>(std::get<int64_t>(it_acc->second));
-      }
+      caller_name = GetEncodableString(args, "callerName");
+      const std::string subtitle_arg =
+          GetEncodableString(args, "subtitle", subtitle);
+      subtitle = subtitle_arg.empty() ? subtitle : subtitle_arg;
+      caller_initial = GetEncodableString(args, "callerInitial");
+      ring_timeout_ms = GetEncodableInt(args, "ringTimeoutMs", ring_timeout_ms);
+      accent = GetEncodableUint32(args, "accentColor", accent);
     }
 
     // 首次创建 + 绑定一次性回调
@@ -480,6 +579,70 @@ void FlutterWindow::ReportIncomingCallEvent(const std::string& event,
       std::make_unique<flutter::EncodableValue>(payload));
 }
 
+void FlutterWindow::HandleDesktopNotificationMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "show") {
+    std::string title;
+    std::string message;
+    std::string priority = "normal";
+    bool show_confirm_button = false;
+    std::string confirm_text = "我知道了";
+    int auto_close_ms = 0;
+
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      title = GetEncodableString(args, "title");
+      message = GetEncodableString(args, "message");
+      priority = GetEncodableString(args, "priority", priority);
+      show_confirm_button =
+          GetEncodableBool(args, "showConfirmButton", show_confirm_button);
+      confirm_text = GetEncodableString(args, "confirmText", confirm_text);
+      auto_close_ms = GetEncodableInt(args, "autoCloseMs", auto_close_ms);
+    }
+
+    if (!desktop_notification_window_) {
+      desktop_notification_window_ = std::make_unique<DesktopNotificationWindow>();
+      desktop_notification_window_->SetCallbacks(
+          [this]() { ReportDesktopNotificationEvent("confirm"); },
+          [this]() { ReportDesktopNotificationEvent("dismiss"); },
+          [this]() { ReportDesktopNotificationEvent("timeout"); });
+    }
+
+    desktop_notification_window_->Show(title, message, priority,
+                                       show_confirm_button, confirm_text,
+                                       auto_close_ms);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (desktop_notification_window_) desktop_notification_window_->Hide();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "isVisible") {
+    const bool visible = desktop_notification_window_ &&
+                         desktop_notification_window_->IsVisible();
+    result->Success(flutter::EncodableValue(visible));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::ReportDesktopNotificationEvent(const std::string& event) {
+  if (!desktop_notification_channel_) return;
+  flutter::EncodableMap payload;
+  payload[flutter::EncodableValue("event")] = flutter::EncodableValue(event);
+  payload[flutter::EncodableValue("timestampMs")] = flutter::EncodableValue(
+      static_cast<int64_t>(GetTickCount64()));
+  desktop_notification_channel_->InvokeMethod(
+      "onNativeEvent", std::make_unique<flutter::EncodableValue>(payload));
+}
+
 void FlutterWindow::HandleConnectedCallMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -491,17 +654,9 @@ void FlutterWindow::HandleConnectedCallMethodCall(
     uint32_t accent = 0xFF22C55E;
 
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      auto get_str = [&](const char* k) -> std::string {
-        auto it = args->find(flutter::EncodableValue(k));
-        if (it == args->end() || it->second.IsNull()) return std::string();
-        return std::get<std::string>(it->second);
-      };
-      caller_name = get_str("callerName");
-      caller_initial = get_str("callerInitial");
-      auto it_acc = args->find(flutter::EncodableValue("accentColor"));
-      if (it_acc != args->end() && !it_acc->second.IsNull()) {
-        accent = static_cast<uint32_t>(std::get<int64_t>(it_acc->second));
-      }
+      caller_name = GetEncodableString(args, "callerName");
+      caller_initial = GetEncodableString(args, "callerInitial");
+      accent = GetEncodableUint32(args, "accentColor", accent);
     }
 
     if (!connected_call_window_) {
@@ -554,10 +709,7 @@ void FlutterWindow::HandleConnectedCallMethodCall(
   if (method == "setMute") {
     bool muted = false;
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      auto it = args->find(flutter::EncodableValue("muted"));
-      if (it != args->end() && !it->second.IsNull()) {
-        muted = std::get<bool>(it->second);
-      }
+      muted = GetEncodableBool(args, "muted", muted);
     }
     if (connected_call_window_) connected_call_window_->SetMute(muted);
     result->Success(flutter::EncodableValue(true));
@@ -567,10 +719,7 @@ void FlutterWindow::HandleConnectedCallMethodCall(
   if (method == "setSpeaker") {
     bool on = true;
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      auto it = args->find(flutter::EncodableValue("on"));
-      if (it != args->end() && !it->second.IsNull()) {
-        on = std::get<bool>(it->second);
-      }
+      on = GetEncodableBool(args, "on", on);
     }
     if (connected_call_window_) connected_call_window_->SetSpeaker(on);
     result->Success(flutter::EncodableValue(true));
@@ -580,10 +729,7 @@ void FlutterWindow::HandleConnectedCallMethodCall(
   if (method == "setTalking") {
     bool talking = false;
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      auto it = args->find(flutter::EncodableValue("talking"));
-      if (it != args->end() && !it->second.IsNull()) {
-        talking = std::get<bool>(it->second);
-      }
+      talking = GetEncodableBool(args, "talking", talking);
     }
     if (connected_call_window_) connected_call_window_->SetTalking(talking);
     result->Success(flutter::EncodableValue(true));
@@ -609,4 +755,82 @@ void FlutterWindow::ReportConnectedCallEvent(
   connected_call_channel_->InvokeMethod(
       "onNativeEvent",
       std::make_unique<flutter::EncodableValue>(payload));
+}
+
+void FlutterWindow::HandleOutgoingCallMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "show") {
+    std::string caller_name;
+    std::string subtitle = "正在呼叫";
+    std::string caller_initial;
+    uint32_t accent = 0xFF22C55E;
+
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      caller_name = GetEncodableString(args, "callerName");
+      subtitle = GetEncodableString(args, "subtitle", subtitle);
+      caller_initial = GetEncodableString(args, "callerInitial");
+      accent = GetEncodableUint32(args, "accentColor", accent);
+    }
+
+    if (!outgoing_call_window_) {
+      outgoing_call_window_ = std::make_unique<OutgoingCallWindow>();
+      outgoing_call_window_->SetCallbacks(
+          [this]() { ReportOutgoingCallEvent("hangup"); });
+    }
+
+    outgoing_call_window_->Show(caller_name, subtitle, caller_initial, accent);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (outgoing_call_window_) outgoing_call_window_->Hide();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "isVisible") {
+    const bool visible =
+        outgoing_call_window_ && outgoing_call_window_->IsVisible();
+    result->Success(flutter::EncodableValue(visible));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::ReportOutgoingCallEvent(const std::string& event) {
+  if (!outgoing_call_channel_) return;
+  flutter::EncodableMap payload;
+  payload[flutter::EncodableValue("event")] = flutter::EncodableValue(event);
+  payload[flutter::EncodableValue("timestampMs")] = flutter::EncodableValue(
+      static_cast<int64_t>(GetTickCount64()));
+  outgoing_call_channel_->InvokeMethod(
+      "onNativeEvent", std::make_unique<flutter::EncodableValue>(payload));
+}
+
+void FlutterWindow::HandleWindowTitleBarMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "setDarkMode") {
+    bool is_dark = false;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      is_dark = GetEncodableBool(args, "isDark", false);
+    }
+    HWND hwnd = GetHandle();
+    if (hwnd) {
+      BOOL enable_dark_mode = is_dark ? TRUE : FALSE;
+      DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                            &enable_dark_mode, sizeof(enable_dark_mode));
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
 }

@@ -23,6 +23,8 @@ import {
 } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { getToolResultProcessor } from "../../services/tool-result-processor.js";
+import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
+import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
   getAgentRuntimeConfig().messageBatch,
@@ -326,7 +328,10 @@ async function processBatchedMessage(
       (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
 
     const processor = getToolResultProcessor();
-    finalText = processor.processAssistantText(finalText);
+    finalText = processor.processAssistantText(finalText, { userText: batched.text });
+    finalText = await new AssistantRewriterService(
+      createExternalChatProviderFromEnv(),
+    ).rewriteIfNeeded(batched.text, finalText);
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
       sendAssistantChunk(
@@ -342,6 +347,10 @@ async function processBatchedMessage(
 
     embodimentHappy(msgActor, (json) => ctx.socket.send(json));
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
+
+    // 剥离可能残留的 [ts:] 时间戳前缀（该前缀仅供 LLM 上下文使用，不应展示给用户）
+    const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
+    finalText = finalText.replace(TS_PREFIX_RE, "").trim();
 
     ctx.socket.send(
       JSON.stringify({

@@ -94,7 +94,7 @@ async function main() {
   }
 
   // 2. 启动 Node 服务
-  spawnProcess("node", ["dist/index.js"], { cwd: serverDir });
+  spawnProcess("node", ["--max-old-space-size=512", "dist/index.js"], { cwd: serverDir });
 
   process.once("SIGINT", killAll);
   process.once("SIGTERM", killAll);
