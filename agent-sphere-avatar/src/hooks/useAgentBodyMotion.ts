@@ -21,6 +21,7 @@ const MASS = 1.1;
 const RESTITUTION = 0.48;
 const RESTITUTION_EXCITED = 0.62;
 type LifePhase = "roam" | "observe" | "inspect" | "settle";
+type HabitCycle = "neutral" | "relax" | "irritated" | "seek";
 
 interface IntentState {
   yaw: number;
@@ -35,6 +36,8 @@ interface IntentState {
   phaseUntil: number;
   lastTargetAt: number;
   nod: number;
+  habit: HabitCycle;
+  habitUntil: number;
 }
 
 interface AttentionState {
@@ -73,6 +76,13 @@ interface UseAgentBodyMotionOptions {
   phase?: string;
   caption?: string;
   source?: string;
+  attentionTarget?: {
+    screenX: number;
+    screenY: number;
+    strength?: number;
+    source?: string;
+    expiresAt?: number;
+  };
   taskEvents?: TaskEvent[];
   onBoundaryHit?: (edge: "left" | "right" | "top" | "bottom" | "front" | "back") => void;
 }
@@ -90,6 +100,7 @@ export function useAgentBodyMotion({
   phase,
   caption,
   source,
+  attentionTarget,
   taskEvents,
   onBoundaryHit,
 }: UseAgentBodyMotionOptions) {
@@ -115,6 +126,8 @@ export function useAgentBodyMotion({
     phaseUntil: 0,
     lastTargetAt: 0,
     nod: 0,
+    habit: "neutral",
+    habitUntil: 0,
   });
   const attentionRef = useRef<AttentionState>({
     x: 0,
@@ -134,10 +147,14 @@ export function useAgentBodyMotion({
   const phaseRef = useRef(phase);
   const captionRef = useRef(caption);
   const sourceRef = useRef(source);
+  const attentionTargetRef = useRef(attentionTarget);
   const taskEventsRef = useRef(taskEvents);
   const recentTaskCountRef = useRef(taskEvents?.length ?? 0);
   const deliberateUntilRef = useRef(0);
   const behaviorMemoryRef = useRef<BehaviorMemoryEntry[]>([]);
+  const lastInteractionAtRef = useRef(performance.now());
+  const lastTaskActiveRef = useRef(false);
+  const lastSeekAtRef = useRef(0);
   /** 身体晃动：累计的随机冲量、剩余持续时间、衰减时间戳 */
   const shakeRef = useRef<{ intensity: number; until: number; lastImpulseAt: number }>({
     intensity: 0,
@@ -162,6 +179,7 @@ export function useAgentBodyMotion({
   phaseRef.current = phase;
   captionRef.current = caption;
   sourceRef.current = source;
+  attentionTargetRef.current = attentionTarget;
   taskEventsRef.current = taskEvents;
 
   useEffect(() => {
@@ -215,6 +233,28 @@ export function useAgentBodyMotion({
     [],
   );
 
+  const lookAtScreenPoint = useCallback(
+    (screenX: number, screenY: number, strength = 0.62, targetSource = "screen", durationMs = 1800) => {
+      const petPos = window.spherePetPos;
+      const width = Math.max(window.innerWidth, 1);
+      const height = Math.max(window.innerHeight, 1);
+      const originX = petPos?.x ?? width / 2;
+      const originY = petPos?.y ?? height / 2;
+      const dx = THREE.MathUtils.clamp((screenX - originX) / Math.max(width * 0.5, 1), -1, 1);
+      const dy = THREE.MathUtils.clamp((screenY - originY) / Math.max(height * 0.5, 1), -1, 1);
+      const sourceKind: AttentionState["source"] =
+        targetSource === "phone"
+          ? "phone"
+          : targetSource === "peer"
+            ? "peer"
+            : targetSource === "task" || targetSource === "agent_task"
+              ? "task"
+              : "screen";
+      setAttention(dx, dy, strength, sourceKind, durationMs);
+    },
+    [setAttention],
+  );
+
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
       const width = Math.max(window.innerWidth, 1);
@@ -236,7 +276,30 @@ export function useAgentBodyMotion({
   }, [setAttention]);
 
   useEffect(() => {
+    if (!attentionTarget) return;
+    if (attentionTarget.expiresAt && attentionTarget.expiresAt < Date.now()) return;
+    lookAtScreenPoint(
+      attentionTarget.screenX,
+      attentionTarget.screenY,
+      attentionTarget.strength ?? 0.66,
+      attentionTarget.source ?? source ?? "screen",
+      1800,
+    );
+  }, [attentionTarget, lookAtScreenPoint, source]);
+
+  useEffect(() => {
     const nextCount = taskEvents?.length ?? 0;
+    const hasActiveTask = (taskEvents ?? []).some((event) => event.type === "progress");
+    if (lastTaskActiveRef.current && !hasActiveTask) {
+      intentRef.current.habit = "relax";
+      intentRef.current.habitUntil = performance.now() + 9000;
+      emotionRef.current.caution = Math.max(0, emotionRef.current.caution - 0.08);
+      emotionRef.current.curiosity = Math.min(1, emotionRef.current.curiosity + 0.05);
+      setPhase("roam", 1800);
+      rememberBehavior("explore", 0.46, "task_done");
+    }
+    lastTaskActiveRef.current = hasActiveTask;
+
     if (nextCount > recentTaskCountRef.current) {
       const event = taskEvents?.[nextCount - 1];
       const emotion = emotionRef.current;
@@ -244,19 +307,30 @@ export function useAgentBodyMotion({
       emotion.curiosity = Math.min(1, emotion.curiosity + 0.06);
       emotion.lastSource = event?.source ?? source;
       rememberBehavior("task", 0.58, event?.source ?? source);
+      lastInteractionAtRef.current = performance.now();
       deliberateUntilRef.current = performance.now() + 700 + emotion.diligence * 900;
       intentRef.current.nod = Math.max(intentRef.current.nod, 0.38);
       setPhase("observe", 1100);
-      setAttention(
-        event?.source === "phone" ? 0.72 : event?.source === "peer" ? -0.64 : 0,
-        -0.1,
-        0.62,
-        event?.source === "phone" ? "phone" : event?.source === "peer" ? "peer" : "task",
-        1800,
-      );
+      if (attentionTargetRef.current) {
+        lookAtScreenPoint(
+          attentionTargetRef.current.screenX,
+          attentionTargetRef.current.screenY,
+          attentionTargetRef.current.strength ?? 0.68,
+          attentionTargetRef.current.source ?? event?.source ?? "task",
+          1900,
+        );
+      } else {
+        setAttention(
+          event?.source === "phone" ? 0.72 : event?.source === "peer" ? -0.64 : 0,
+          -0.1,
+          0.62,
+          event?.source === "phone" ? "phone" : event?.source === "peer" ? "peer" : "task",
+          1800,
+        );
+      }
     }
     recentTaskCountRef.current = nextCount;
-  }, [taskEvents, source, setAttention, setPhase]);
+  }, [lookAtScreenPoint, rememberBehavior, setAttention, setPhase, source, taskEvents]);
 
   useEffect(() => {
     const emotion = emotionRef.current;
@@ -264,15 +338,18 @@ export function useAgentBodyMotion({
       emotion.caution = Math.min(1, emotion.caution + 0.12);
       emotion.curiosity = Math.min(1, emotion.curiosity + 0.05);
       rememberBehavior("alert", 0.72, source);
+      lastInteractionAtRef.current = performance.now();
       setAttention(0.76, -0.08, 0.74, "phone", 2200);
       deliberateUntilRef.current = performance.now() + 900;
     } else if (source === "peer") {
       emotion.sociability = Math.min(1, emotion.sociability + 0.1);
       rememberBehavior("message", 0.55, source);
+      lastInteractionAtRef.current = performance.now();
       setAttention(-0.68, 0.02, 0.66, "peer", 1800);
     } else if (source === "agent_task" || phase?.includes("agent_task")) {
       emotion.diligence = Math.min(1, emotion.diligence + 0.1);
       rememberBehavior("task", 0.64, source);
+      lastInteractionAtRef.current = performance.now();
       deliberateUntilRef.current = performance.now() + 1000 + emotion.diligence * 900;
       setPhase("observe", 1200);
       setAttention(0, -0.12, 0.58, "task", 1800);
@@ -284,10 +361,12 @@ export function useAgentBodyMotion({
       emotion.sociability = Math.min(1, emotion.sociability + 0.08);
       emotion.familiarity = Math.min(1, emotion.familiarity + 0.05);
       rememberBehavior("interaction", 0.48, source);
+      lastInteractionAtRef.current = performance.now();
       setAttention(0, -0.02, 0.6, "screen", 1600);
     } else if (source === "error") {
       emotion.caution = Math.min(1, emotion.caution + 0.14);
       rememberBehavior("alert", 0.82, source);
+      lastInteractionAtRef.current = performance.now();
       deliberateUntilRef.current = performance.now() + 1100;
       setAttention(0, -0.18, 0.72, "task", 1600);
     }
@@ -430,6 +509,20 @@ export function useAgentBodyMotion({
     const petPos = typeof window !== "undefined" ? window.spherePetPos : undefined;
     const petScreenBiasX = petPos ? THREE.MathUtils.clamp(((petPos.x / Math.max(window.innerWidth, 1)) - 0.5) * 2, -1, 1) : 0;
     const petScreenBiasY = petPos ? THREE.MathUtils.clamp(((petPos.y / Math.max(window.innerHeight, 1)) - 0.5) * 2, -1, 1) : 0;
+    const idleMs = nowMs - lastInteractionAtRef.current;
+    if (recentAlertWeight + recentInteractionWeight > 2.2 && intent.habit !== "irritated") {
+      intent.habit = "irritated";
+      intent.habitUntil = nowMs + 8000;
+      intent.nod = Math.max(intent.nod, 0.35);
+    } else if (idleMs > 75_000 && nowMs - lastSeekAtRef.current > 55_000 && intent.habit !== "seek") {
+      intent.habit = "seek";
+      intent.habitUntil = nowMs + 11_000;
+      lastSeekAtRef.current = nowMs;
+      setAttention(-petScreenBiasX * 0.65, -0.18, 0.5 + emotion.sociability * 0.22, "screen", 4500);
+      rememberBehavior("interaction", 0.28, "attention_seek");
+    } else if (intent.habit !== "neutral" && nowMs > intent.habitUntil) {
+      intent.habit = "neutral";
+    }
 
     if (nowMs > excitedUntilRef.current) {
       excitementRef.current = Math.max(0, excitementRef.current - dt * 0.28);
@@ -453,6 +546,14 @@ export function useAgentBodyMotion({
       (1 + excitementRef.current * 1.25) *
       (0.92 + emotion.curiosity * 0.16 - emotion.caution * 0.06);
     const deliberate = nowMs < deliberateUntilRef.current;
+    const habitSpeed =
+      intent.habit === "relax"
+        ? 1.12
+        : intent.habit === "irritated"
+          ? 0.82
+          : intent.habit === "seek"
+            ? 1.05
+            : 1;
 
     const vitality = profile.vitality * (0.5 + energyRef.current * 0.5);
     vel.current.x += Math.sin(t * 2.1 + 0.5) * vitality * 0.022;
@@ -534,9 +635,9 @@ export function useAgentBodyMotion({
     const forceScale = speedMul / MASS;
 
     if (!deliberate) {
-      vel.current.x += dx * springK * forceScale * dt;
+      vel.current.x += dx * springK * forceScale * habitSpeed * dt;
       vel.current.y += dy * springK * forceScale * 0.9 * dt;
-      vel.current.z += dz * springK * forceScale * dt;
+      vel.current.z += dz * springK * forceScale * habitSpeed * dt;
     } else {
       vel.current.multiplyScalar(Math.exp(-dt * (8.5 + emotion.diligence * 1.5)));
       vel.current.y += dy * springK * forceScale * 0.25 * dt;
@@ -604,6 +705,14 @@ export function useAgentBodyMotion({
         : intent.phase === "inspect"
           ? Math.sin(t * (1.4 + emotion.diligence * 1.2)) * (0.08 + emotion.curiosity * 0.08)
           : 0;
+    const habitLook =
+      intent.habit === "irritated"
+        ? Math.sin(t * 4.5) * 0.09
+        : intent.habit === "seek"
+          ? Math.sin(t * 1.25) * 0.18
+          : intent.habit === "relax"
+            ? Math.sin(t * 0.55) * 0.08
+            : 0;
 
     intent.expression = THREE.MathUtils.lerp(
       intent.expression,
@@ -612,7 +721,7 @@ export function useAgentBodyMotion({
     );
     intent.glanceYaw = THREE.MathUtils.lerp(
       intent.glanceYaw,
-      roamLook + (attentionActive ? attentionYaw : spaceYawBias * 0.6) + recentInteractionWeight * 0.003,
+      roamLook + habitLook + (attentionActive ? attentionYaw : spaceYawBias * 0.6) + recentInteractionWeight * 0.003,
       dt * (intent.phase === "inspect" ? 2.8 : 1.4) * (attentionActive ? 1.8 : 1),
     );
     intent.glancePitch = THREE.MathUtils.lerp(
@@ -620,7 +729,8 @@ export function useAgentBodyMotion({
       moodLookBias +
         (intent.phase === "observe" ? Math.sin(t * 1.4) * 0.04 : 0) +
         (attentionActive ? attentionPitch : spacePitchBias * 0.4) -
-        recentTaskWeight * 0.0018,
+        recentTaskWeight * 0.0018 +
+        (intent.habit === "seek" ? -0.08 : intent.habit === "irritated" ? 0.06 : 0),
       dt * (attentionActive ? 2.8 : 1.8),
     );
     intent.nod = Math.max(0, intent.nod - dt * (0.45 + speed * 0.12));
@@ -640,6 +750,7 @@ export function useAgentBodyMotion({
       shakePitch +
       intent.glancePitch +
       (intent.phase === "inspect" || deliberate ? -0.05 - emotion.diligence * 0.04 : 0) +
+      (intent.habit === "relax" ? 0.05 : 0) +
       Math.sin(t * (1.8 + intent.expression * 0.8)) * 0.018 * profile.vitality -
       intent.nod * 0.08;
     intent.rollTarget =
@@ -647,6 +758,7 @@ export function useAgentBodyMotion({
       wobble +
       shakeJitter +
       shakeRoll +
+      (intent.habit === "irritated" ? Math.sin(t * 7.5) * 0.045 : 0) +
       Math.sin(t * 1.1 + intent.expression) * 0.012 * profile.vitality;
 
     group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, intent.rollTarget, dt * 7);
@@ -741,5 +853,5 @@ export function useAgentBodyMotion({
     enabledRef.current = true;
   }, []);
 
-  return { pickRandomTarget, setTarget, stopMotion, resumeMotion, excite, shake, applyVerticalBias };
+  return { pickRandomTarget, setTarget, stopMotion, resumeMotion, excite, shake, applyVerticalBias, lookAtScreenPoint };
 }

@@ -64,18 +64,18 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.cyan.withValues(alpha: 0.12),
+                  color: Colors.white.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.cyan.withValues(alpha: 0.35)),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    Icon(Icons.graphic_eq, size: 16, color: Colors.cyan.shade200),
+                    Icon(Icons.graphic_eq, size: 16, color: Colors.white.withValues(alpha: 0.78)),
                     const SizedBox(width: 6),
                     Text(
                       "监听唤醒词",
-                      style: TextStyle(color: Colors.cyan.shade100, fontSize: 12),
+                      style: TextStyle(color: Colors.white.withValues(alpha: 0.82), fontSize: 12),
                     ),
                   ],
                 ),
@@ -104,7 +104,7 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
             onPressed: () => unawaited(_voice.toggleWakeEnabled()),
             icon: Icon(
               vs.wakeEnabled ? Icons.hearing : Icons.hearing_disabled,
-              color: vs.wakeEnabled ? Colors.cyan.shade200 : Colors.white38,
+              color: vs.wakeEnabled ? Colors.white.withValues(alpha: 0.78) : Colors.white38,
               size: 20,
             ),
             style: IconButton.styleFrom(
@@ -134,8 +134,8 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: vs.isWaitingWake
-                                ? Colors.cyan.shade300
-                                : Colors.blue.shade300,
+                                ? Colors.grey.shade300
+                                : Colors.grey.shade400,
                           ),
                         ),
                         const SizedBox(width: 6),
@@ -143,8 +143,8 @@ class _AgentSphereFullHostState extends State<AgentSphereFullHost> {
                           vs.isWaitingWake ? "待唤醒" : "聆听中",
                           style: TextStyle(
                             color: vs.isWaitingWake
-                                ? Colors.cyan.shade200
-                                : Colors.blue.shade200,
+                                ? Colors.grey.shade300
+                                : Colors.grey.shade400,
                             fontSize: hintFontSize,
                             fontWeight: FontWeight.w500,
                           ),

@@ -44,6 +44,38 @@ function readQuery(key: string): string | undefined {
 }
 
 /** 桌面透明桌宠 — Electron 无框 3D（DG2 写实机器人），直连主 Agent */
+function readAttentionElementCenter(selector: string): { screenX: number; screenY: number } | undefined {
+  const el = document.querySelector(selector);
+  if (!el) return undefined;
+  const rect = el.getBoundingClientRect();
+  if (!rect.width && !rect.height) return undefined;
+  return {
+    screenX: window.screenX + rect.left + rect.width / 2,
+    screenY: window.screenY + rect.top + rect.height / 2,
+  };
+}
+
+function resolveAttentionTargetFromDom(source?: string) {
+  const selector =
+    source === "phone" || source === "reminder" || source === "error"
+      ? ".task-toast"
+      : source === "agent_task" || source === "tool"
+        ? ".task-feed"
+        : source === "pet_reaction"
+          ? ".inner-thought"
+          : source === "menu"
+            ? ".overlay-quick-menu"
+            : ".inner-thought, .task-toast, .task-feed";
+  const center = readAttentionElementCenter(selector);
+  if (!center) return undefined;
+  return {
+    ...center,
+    strength: source === "phone" || source === "error" ? 0.82 : source === "agent_task" ? 0.68 : 0.58,
+    source,
+    expiresAt: Date.now() + 2400,
+  };
+}
+
 export function OverlayApp() {
   const { state, apply: rawApply, setFocused, setMood } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
@@ -58,6 +90,10 @@ export function OverlayApp() {
   /** 增强 apply：累积assistant_chunk文本，assistant_done时触发TTS */
   const apply = useCallback((patch: Parameters<typeof rawApply>[0]) => {
     const source = patch.source;
+    const attentionTarget =
+      patch.attentionTarget ??
+      (source || patch.caption || patch.phase ? resolveAttentionTargetFromDom(source) : undefined);
+    const patchWithAttention = attentionTarget ? { ...patch, attentionTarget } : patch;
 
     // 主agent流式回复：累积文本，展示完整回复（与行动链路分割）
     if (source === "assistant_chunk" && patch.caption) {
@@ -66,7 +102,7 @@ export function OverlayApp() {
       // 展示累积的完整文本（截取尾部避免过长）
       const fullText = assistantTextRef.current;
       const displayText = fullText.length > 80 ? "…" + fullText.slice(-80) : fullText;
-      rawApply({ ...patch, caption: displayText });
+      rawApply({ ...patchWithAttention, caption: displayText });
       return;
     }
 
@@ -78,7 +114,7 @@ export function OverlayApp() {
       }
       // 保持最终文本显示一段时间
       const displayText = finalText.length > 80 ? "…" + finalText.slice(-80) : finalText;
-      rawApply({ ...patch, caption: displayText || patch.caption });
+      rawApply({ ...patchWithAttention, caption: displayText || patch.caption });
       // 延迟清除对话状态和文本
       setTimeout(() => {
         isConversationRef.current = false;
@@ -96,7 +132,7 @@ export function OverlayApp() {
     }
 
     // 其他事件直接透传
-    rawApply(patch);
+    rawApply(patchWithAttention);
   }, [rawApply]);
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
@@ -345,6 +381,9 @@ export function OverlayApp() {
       subAgentType?: string;
       subAgentDisplayName?: string;
       source?: string;
+      screenX?: number;
+      screenY?: number;
+      attentionTarget?: Parameters<typeof rawApply>[0]["attentionTarget"];
     }) => {
       // LLM pet.reaction.ack 会以 caption 形式覆盖桌宠台词 — 不要再用 caption 自动清除
       apply({
@@ -355,6 +394,17 @@ export function OverlayApp() {
         subAgentType: patch.subAgentType,
         subAgentDisplayName: patch.subAgentDisplayName,
         source: patch.source,
+        attentionTarget:
+          patch.attentionTarget ??
+          (typeof patch.screenX === "number" && typeof patch.screenY === "number"
+            ? {
+                screenX: patch.screenX,
+                screenY: patch.screenY,
+                strength: 0.72,
+                source: patch.source,
+                expiresAt: Date.now() + 2400,
+              }
+            : undefined),
       });
     });
 

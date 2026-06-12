@@ -1817,7 +1817,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       return Text(
         message.text,
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: isUser ? cs.onPrimary : cs.onSurface,
+              color: isUser ? Colors.white : cs.onSurface,
             ),
       );
     }

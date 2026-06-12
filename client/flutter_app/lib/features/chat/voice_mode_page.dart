@@ -244,13 +244,13 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                       gradient: RadialGradient(
                         colors: [
                           _isSpeaking 
-                            ? Colors.blue.withValues(alpha: _opacityAnimation.value)
+                            ? Colors.white.withValues(alpha: _opacityAnimation.value)
                             : Colors.black.withValues(alpha: _opacityAnimation.value),
                           _isSpeaking
-                            ? const Color(0xFF1A237E).withValues(alpha: _opacityAnimation.value * 0.8)
+                            ? const Color(0xFFE8EBF0).withValues(alpha: _opacityAnimation.value * 0.8)
                             : const Color(0xFF1A1A1A).withValues(alpha: _opacityAnimation.value * 0.8),
                           _isSpeaking
-                            ? const Color(0xFF0D1B5E).withValues(alpha: _opacityAnimation.value * 0.6)
+                            ? const Color(0xFFD9DEE7).withValues(alpha: _opacityAnimation.value * 0.6)
                             : const Color(0xFF0D0D0D).withValues(alpha: _opacityAnimation.value * 0.6),
                         ],
                         stops: const [0.0, 0.5, 1.0],
@@ -264,14 +264,14 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                         ),
                         // 外部光晕 - 呼吸效果
                         BoxShadow(
-                          color: (_isSpeaking ? Colors.blue : Colors.white)
+                          color: (_isSpeaking ? Colors.white : Colors.white)
                               .withValues(alpha: _opacityAnimation.value * 0.1),
                           blurRadius: 30,
                           spreadRadius: 5,
                         ),
                         // 底部高光 - 增强立体感
                         BoxShadow(
-                          color: (_isSpeaking ? Colors.blue : Colors.white)
+                          color: (_isSpeaking ? Colors.white : Colors.white)
                               .withValues(alpha: _opacityAnimation.value * 0.05),
                           blurRadius: 15,
                           offset: const Offset(0, -5),
@@ -286,7 +286,7 @@ class _VoiceModePageState extends State<VoiceModePage> with SingleTickerProvider
                           shape: BoxShape.circle,
                           gradient: RadialGradient(
                             colors: [
-                              (_isSpeaking ? Colors.blue : Colors.white)
+                              (_isSpeaking ? Colors.white : Colors.white)
                                   .withValues(alpha: _opacityAnimation.value * 0.3),
                               Colors.transparent,
                             ],

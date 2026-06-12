@@ -127,7 +127,7 @@ export function SphereAgent({
   const motionStrength =
     state.mood === "thinking" ? 0.85 : 1;
 
-  const kinematic = !physics && autonomous;
+  const kinematic = !physics && (autonomous || motionBounds === 0);
 
   const bodyMotion = useAgentBodyMotion({
     api: kinematic ? api : undefined,
@@ -141,6 +141,7 @@ export function SphereAgent({
     phase: state.phase,
     caption: state.caption,
     source: state.source,
+    attentionTarget: state.attentionTarget,
     taskEvents: state.taskEvents,
     onBoundaryHit: (edge) => relayBoundaryToParent(edge),
   });
@@ -235,6 +236,9 @@ export function SphereAgent({
 
   useEffect(() => {
     const handleCommand = (cmd: EmbodimentCommand) => {
+      if (kinematic && typeof cmd.screenX === "number" && typeof cmd.screenY === "number") {
+        bodyMotion.lookAtScreenPoint(cmd.screenX, cmd.screenY, cmd.strength ?? 0.7, cmd.source ?? "screen", 2200);
+      }
       switch (cmd.action) {
         case "roam":
           if (kinematic) {
@@ -286,7 +290,7 @@ export function SphereAgent({
       }
     };
     return bindEmbodimentCommand(handleCommand);
-  }, [kinematic, physics, motion, exciteMotion]);
+  }, [kinematic, physics, motion, exciteMotion, bodyMotion.lookAtScreenPoint]);
 
   useFrame((_, delta) => {
     const target = state.mood === "listening" ? 1 : 0;

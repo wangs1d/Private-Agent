@@ -24,6 +24,7 @@ import {
   isToolSearchBridgeName,
   prepareToolsWithToolSearch,
 } from "../tools/tool-search/index.js";
+import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
 import {
   isAssistantWithToolCalls,
   isToolCallIdNotFoundError,
@@ -215,6 +216,18 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
     apiTools,
     resolveRegistryToolName: (apiName) => apiToRegistry.get(apiName) ?? apiName,
   };
+}
+
+function resolveForcedToolChoice(
+  userText: string,
+  apiTools: ChatCompletionTool[],
+): { type: "function"; function: { name: string } } | "auto" {
+  if (!isExplicitPhoneCallRequest(userText)) return "auto";
+  const hasPhoneCallTool = apiTools.some(
+    (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
+  );
+  if (!hasPhoneCallTool) return "auto";
+  return { type: "function", function: { name: "phone_call_user" } };
 }
 
 const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
@@ -1087,6 +1100,10 @@ export function selectRelevantTools(
     ALWAYS_INCLUDED_TOOLS.forEach(name => selectedToolNames.add(name));
   }
 
+  if (isExplicitPhoneCallRequest(userText)) {
+    selectedToolNames.add("phone.call_user");
+  }
+
   for (const mapping of categoryMappings) {
     if (relevantCategories.has(mapping.category)) {
       mapping.toolNames.forEach(name => selectedToolNames.add(name));
@@ -1162,9 +1179,9 @@ export async function streamCompletionWithTools(
 ): Promise<string> {
   // 动态调整工具循环轮次（基于任务复杂度）
   let maxRounds = options?.maxRounds;
-  
+  const userText = extractUserTextFromMessages(messages) || "";
+
   if (!maxRounds) {
-    const userText = extractUserTextFromMessages(messages) || '';
     maxRounds = getOptimalMaxRounds(userText, messages.length);
   }
   
@@ -1204,7 +1221,7 @@ export async function streamCompletionWithTools(
           model,
           messages: requestMessages,
           tools: apiTools,
-          tool_choice: "auto",
+          tool_choice: resolveForcedToolChoice(userText, apiTools),
           stream: true,
           ...(options?.promptCache ?? {}),
           ...(options?.extraBody ? { extra_body: options.extraBody } : {}),

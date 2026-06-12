@@ -210,14 +210,14 @@ class _FaceRegistrationPageState extends State<FaceRegistrationPage> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _isCapturing
-                      ? Colors.blue.withValues(alpha: 0.8)
+                      ? Colors.grey.withValues(alpha: 0.8)
                       : _isRegistering
                           ? Colors.grey.withValues(alpha: 0.5)
                           : cs.primary.withValues(alpha: 0.8),
                   boxShadow: [
                     BoxShadow(
                       color: _isCapturing
-                          ? Colors.blue.withValues(alpha: 0.4)
+                          ? Colors.grey.withValues(alpha: 0.4)
                           : cs.primary.withValues(alpha: 0.3),
                       blurRadius: _isCapturing ? 30 : 20,
                       spreadRadius: _isCapturing ? 5 : 2,

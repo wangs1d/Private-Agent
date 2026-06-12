@@ -111,7 +111,7 @@ class _PhoneDialerPageState extends State<PhoneDialerPage> {
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   textStyle: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                  backgroundColor: Colors.blue,
+                  backgroundColor: const Color(0xFF2C3440),
                   foregroundColor: Colors.white,
                 ),
               ),

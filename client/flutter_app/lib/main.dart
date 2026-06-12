@@ -1634,6 +1634,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 原生悬浮窗点接听：拉起主窗口 + 走 _phoneCallStatus = "connecting" 状态，
   /// 等待服务端 call_connecting 事件推送正式通话内容
   void _handleNativeCallAccept() {
+    _ws.sendEvent("phone.accept", <String, dynamic>{});
     if (!mounted) return;
     setState(() => _phoneCallStatus = "connecting");
     // 拉起主窗口（如果最小化）
@@ -1793,7 +1794,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final Color accentColor = switch (priority) {
       "urgent" => Colors.red,
       "high" => Colors.orange,
-      _ => Colors.blue,
+      _ => const Color(0xFF4B5563),
     };
 
     final IconData iconData = switch (priority) {
@@ -2610,7 +2611,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: cs.primary,
+                    color: const Color(0xFF5B4B91),
                     fontFeatures: [const FontFeature.tabularFigures()])),
           ),
           // 标题
@@ -2657,7 +2658,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ),
           if (interactive)
             Icon(Icons.arrow_forward_ios,
-                size: 10, color: cs.primary.withValues(alpha: 0.5)),
+                size: 10, color: const Color(0xFF5B4B91).withValues(alpha: 0.5)),
         ],
       ),
     );

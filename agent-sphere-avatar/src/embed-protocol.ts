@@ -68,6 +68,7 @@ export type SpherePatchMessage = Partial<
     | "subAgentType"
     | "subAgentDisplayName"
     | "source"
+    | "attentionTarget"
     | "taskEvents"
   >
 > & {
@@ -80,6 +81,35 @@ export type SpherePatchMessage = Partial<
 export type SphereCommandMessage = EmbodimentCommand & {
   type: typeof SPHERE_HOST_MSG.command | typeof PAI_EMBODIMENT_COMMAND;
 };
+
+function parseAttentionTarget(d: Record<string, unknown>): AgentState["attentionTarget"] | undefined {
+  const raw = d.attentionTarget;
+  if (raw && typeof raw === "object") {
+    const target = raw as Record<string, unknown>;
+    const screenX = typeof target.screenX === "number" ? target.screenX : undefined;
+    const screenY = typeof target.screenY === "number" ? target.screenY : undefined;
+    if (typeof screenX === "number" && typeof screenY === "number") {
+      return {
+        screenX,
+        screenY,
+        strength: typeof target.strength === "number" ? target.strength : undefined,
+        source: target.source ? String(target.source) : undefined,
+        expiresAt: typeof target.expiresAt === "number" ? target.expiresAt : undefined,
+      };
+    }
+  }
+
+  if (typeof d.screenX === "number" && typeof d.screenY === "number") {
+    return {
+      screenX: d.screenX,
+      screenY: d.screenY,
+      strength: typeof d.strength === "number" ? d.strength : undefined,
+      source: d.source ? String(d.source) : undefined,
+    };
+  }
+
+  return undefined;
+}
 
 /** iframe → 宿主 用户交互 */
 export type SphereSendMessage = {
@@ -157,6 +187,7 @@ export function parseHostPatch(data: unknown): Partial<AgentState> | null {
       ? String(d.subAgentDisplayName)
       : undefined,
     source: d.source ? String(d.source) : undefined,
+    attentionTarget: parseAttentionTarget(d),
     taskEvents: Array.isArray(d.taskEvents)
       ? (d.taskEvents as TaskEvent[]).map((te) => ({
           ...te,

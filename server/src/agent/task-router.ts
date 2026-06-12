@@ -1,4 +1,5 @@
 import { getAgentRuntimeConfig, type AgentRuntimeConfig } from "./agent-runtime-config.js";
+import { isExplicitPhoneCallRequest } from "./phone-call-intent.js";
 import { isPlanExecuteLoopEnabled, shouldUsePlanExecuteLoop } from "./plan-execute-loop.js";
 import { isSimpleDirectTask, shouldSkipNarrativeRecall } from "./simple-task.js";
 
@@ -89,6 +90,11 @@ export function routeLlmExecution(
   const reasons: string[] = [];
 
   if (config.masterDelegation.enabled) {
+    if (isExplicitPhoneCallRequest(text)) {
+      reasons.push("explicit_phone_call_request");
+      return { mode: "master_only", reasons };
+    }
+
     if (!options?.preferFullPipeline && shouldUseFastChatLane(text)) {
       reasons.push("fast_chat_lane");
       return { mode: "fast_chat", reasons };

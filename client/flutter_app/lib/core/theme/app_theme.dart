@@ -44,7 +44,7 @@ abstract final class AppPalette {
   static const Color sidebarDivider = Color(0xFF27272A);
   static const Color sidebarIconDefault = Color(0xFF71717A);
   static const Color sidebarIconHover = Color(0xFFD4D4D8);
-  static const Color sidebarIconSelected = Color(0xFF60A5FA);
+  static const Color sidebarIconSelected = Color(0xFFA3A3A3);
 
   /// 五子棋邀请卡片：固定灰色，勿用 theme primary（种子色为灰）
   static const Color gomokuCardBg = Color(0xFF1C1C1C);
@@ -76,7 +76,7 @@ abstract final class AppPalette {
   static const Color warmSidebarDivider = Color(0xFFE8EDF4);
   static const Color warmSidebarIconDefault = Color(0xFF747C88);
   static const Color warmSidebarIconHover = Color(0xFF2C3440);
-  static const Color warmSidebarIconSelected = Color(0xFF2FA8F8);
+  static const Color warmSidebarIconSelected = Color(0xFF4B5563);
 
   // 暖色 surface 渐层（与 ColorScheme.fromSeed 输出的 surfaceContainer* 对齐）
   static const Color warmSurfaceContainerLowest = Color(0xFFFFFFFF);
