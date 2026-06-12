@@ -29,6 +29,7 @@ import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
+import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -63,6 +64,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
   registerNightlyMemoryRoutes(app);
   registerDownloadRoutes(app);
+  registerToolSearchAdminRoutes(app);
   registerLifeSignalRoutes(app, deps);
   registerMarketSignalRoutes(app, deps);
   if (deps.webhookService) {

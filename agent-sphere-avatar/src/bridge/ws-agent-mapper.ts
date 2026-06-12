@@ -12,10 +12,7 @@ export type AgentWsUpdate = Partial<
   >
 >;
 
-let lastChunkAt = 0;
-
 export function resetWsMapperState() {
-  lastChunkAt = 0;
 }
 
 function patchFromEmbodiment(p: Record<string, unknown>): AgentWsUpdate {
@@ -60,7 +57,6 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
     }
     case "chat.assistant_chunk": {
       const chunkText = String(p.chunk ?? p.delta ?? "");
-      lastChunkAt = Date.now();
       // 展示主agent的实际回复文本（与行动链路分割）
       return { mood: "thinking", energy: 0.72, caption: chunkText || undefined, source: "assistant_chunk" };
     }

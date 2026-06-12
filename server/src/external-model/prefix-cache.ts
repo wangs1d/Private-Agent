@@ -51,8 +51,12 @@ function envEnabled(name: string, defaultValue: boolean): boolean {
   return !["0", "false", "off", "no"].includes(raw.toLowerCase());
 }
 
+function includeToolsInPromptCacheKey(): boolean {
+  return envEnabled("OPENAI_PROMPT_CACHE_KEY_INCLUDE_TOOLS", false);
+}
+
 function stableToolSignature(tools?: ChatCompletionTool[]): string {
-  if (!tools?.length) return "";
+  if (!tools?.length || !includeToolsInPromptCacheKey()) return "";
   return JSON.stringify(
     tools.map((tool) => {
       if (tool.type !== "function") return tool;

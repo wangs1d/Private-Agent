@@ -4,7 +4,6 @@ import { buildToolSearchBridgeTools } from "./bridge-tools.js";
 import {
   buildDeferredCatalog,
   shouldActivateToolSearch,
-  splitCoreAndDeferredTools,
   type DeferredToolCatalog,
   type DeferredToolEntry,
   type DeferredToolSearchMatch,
@@ -19,12 +18,41 @@ export type ToolSearchPreparedTurn = {
   deferredToolCount: number;
 };
 
+function isFunctionName(tool: ChatCompletionTool): string | null {
+  return tool.type === "function" && tool.function?.name ? tool.function.name : null;
+}
+
+function uniqueTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
+  const seen = new Set<string>();
+  const out: ChatCompletionTool[] = [];
+  for (const tool of tools) {
+    const name = isFunctionName(tool);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(tool);
+  }
+  return out;
+}
+
 /**
  * 核心工具库 + 延迟目录：核心工具直接暴露；其余工具 BM25 索引，经合并桥接按需加载。
  */
-export function prepareToolsWithToolSearch(allTools: ChatCompletionTool[]): ToolSearchPreparedTurn {
+export function prepareToolsWithToolSearch(
+  visibleCandidateTools: ChatCompletionTool[],
+  searchableSourceTools: ChatCompletionTool[] = visibleCandidateTools,
+): ToolSearchPreparedTurn {
   const cfg = getToolSearchConfig();
-  const { core, deferred } = splitCoreAndDeferredTools(allTools);
+  const visibleTools = uniqueTools(visibleCandidateTools);
+  const visibleNames = new Set(
+    visibleTools
+      .map((tool) => isFunctionName(tool))
+      .filter((name): name is string => Boolean(name)),
+  );
+  const searchableTools = uniqueTools(searchableSourceTools);
+  const deferred = searchableTools.filter((tool) => {
+    const name = isFunctionName(tool);
+    return Boolean(name) && !visibleNames.has(name as string);
+  });
   const deferredCatalog = buildDeferredCatalog(deferred);
   const active = shouldActivateToolSearch(
     deferred,
@@ -35,20 +63,20 @@ export function prepareToolsWithToolSearch(allTools: ChatCompletionTool[]): Tool
 
   if (!active) {
     return {
-      visibleTools: allTools,
+      visibleTools,
       deferredCatalog: buildDeferredCatalog([]),
       toolSearchActive: false,
-      coreToolCount: allTools.length,
+      coreToolCount: visibleTools.length,
       deferredToolCount: 0,
     };
   }
 
   const bridgeTools = buildToolSearchBridgeTools(deferredCatalog.entries.length, cfg.bridgeMode);
   return {
-    visibleTools: [...core, ...bridgeTools],
+    visibleTools: uniqueTools([...visibleTools, ...bridgeTools]),
     deferredCatalog,
     toolSearchActive: true,
-    coreToolCount: core.length,
+    coreToolCount: visibleTools.length,
     deferredToolCount: deferred.length,
   };
 }
@@ -71,6 +99,7 @@ export {
 } from "./core-tools.js";
 export {
   buildDeferredCatalog,
+  estimateToolsSchemaTokens,
   type DeferredToolCatalog,
   type DeferredToolEntry,
   type DeferredToolSearchMatch,

@@ -22,13 +22,13 @@ const DEFAULT_ESCALATION_RULES: ReminderEscalationRule[] = [
     fromLevel: "popup",
     toLevel: "tts_alarm",
     triggerCondition: "timeout",
-    timeoutMs: 30_000,
+    timeoutMs: 10 * 60_000, // 默认 10 分钟后升级到 TTS
   },
   {
     fromLevel: "tts_alarm",
     toLevel: "phone_call",
     triggerCondition: "timeout",
-    timeoutMs: 60_000,
+    timeoutMs: 12 * 60_000, // 默认 12 分钟后升级到电话（仅用户偏好电话时生效）
   },
 ];
 
@@ -280,52 +280,32 @@ export class IntelligentReminderService {
     priority: ReminderConfig["priority"],
   ): Promise<ReminderLevel> {
     if (!this.deps.getUserResponseHistory) {
-      return this.getDefaultLevelForPriority(priority);
+      return "popup";
     }
 
     const history = await this.deps.getUserResponseHistory(userId);
     if (!history) {
-      return this.getDefaultLevelForPriority(priority);
+      return "popup";
     }
 
-    const ignoreRate = history.totalReminders > 0 ? history.ignoredCount / history.totalReminders : 0;
-    const avgResponseTimeMin = history.averageResponseTimeMs / 1000 / 60;
-    const phoneStats = history.levelStats.phone_call;
-    const ttsStats = history.levelStats.tts_alarm;
-    const popupStats = history.levelStats.popup;
-    const phoneResponseRate = phoneStats.shown > 0 ? phoneStats.responded / phoneStats.shown : 0;
-    const ttsResponseRate = ttsStats.shown > 0 ? ttsStats.responded / ttsStats.shown : 0;
-    const popupResponseRate = popupStats.shown > 0 ? popupStats.responded / popupStats.shown : 0;
-
-    if (
-      priority === "urgent" ||
-      (ignoreRate > 0.5 && phoneResponseRate >= 0.35) ||
-      (avgResponseTimeMin > 10 && phoneResponseRate > ttsResponseRate)
-    ) {
+    // 仅当用户明确偏好电话且优先级为 urgent 时，才推荐 phone_call
+    const prefersPhone = history.preferredLevel === "phone_call";
+    if (prefersPhone && priority === "urgent") {
       return "phone_call";
     }
-
-    if (
-      priority === "high" ||
-      ignoreRate > 0.3 ||
-      avgResponseTimeMin > 5 ||
-      (ttsResponseRate >= popupResponseRate + 0.12 && ttsStats.shown >= 3)
-    ) {
+    // 用户明确偏好 TTS 且优先级较高时，才推荐 tts_alarm
+    const prefersTts = history.preferredLevel === "tts_alarm";
+    if (prefersTts && (priority === "urgent" || priority === "high")) {
       return "tts_alarm";
     }
 
-    return history.preferredLevel || "popup";
+    // 默认始终使用弹窗方式
+    return "popup";
   }
 
-  private getDefaultLevelForPriority(priority: ReminderConfig["priority"]): ReminderLevel {
-    switch (priority) {
-      case "urgent":
-        return "phone_call";
-      case "high":
-        return "tts_alarm";
-      default:
-        return "popup";
-    }
+  private getDefaultLevelForPriority(_priority: ReminderConfig["priority"]): ReminderLevel {
+    // 所有优先级默认都使用弹窗，不再根据优先级直接跳到 TTS 或电话
+    return "popup";
   }
 
   private buildAdaptiveEscalationRules(
@@ -334,29 +314,31 @@ export class IntelligentReminderService {
   ): ReminderEscalationRule[] {
     const hour = new Date().getHours();
     const quietHours = hour >= 23 || hour < 8;
+
+    // popup → tts_alarm 的超时：给用户足够时间响应（分钟级而非秒级）
     const popupTimeoutMs =
       priority === "urgent"
-        ? 20_000
+        ? 2 * 60_000       // urgent: 2 分钟
         : priority === "high"
-          ? 90_000
+          ? 5 * 60_000     // high: 5 分钟
           : priority === "medium"
-            ? 4 * 60_000
-            : 8 * 60_000;
+            ? 10 * 60_000   // medium: 10 分钟
+            : 15 * 60_000;  // low: 15 分钟
+
+    // tts_alarm → phone_call 的超时
     const ttsTimeoutMs =
       priority === "urgent"
-        ? 60_000
+        ? 3 * 60_000       // urgent: 3 分钟
         : priority === "high"
-          ? 4 * 60_000
-          : priority === "medium"
-            ? 8 * 60_000
-            : 12 * 60_000;
+          ? 6 * 60_000     // high: 6 分钟
+          : 12 * 60_000;   // medium/low: 12 分钟
 
     const prefersPhone = history?.preferredLevel === "phone_call";
     const prefersTts = history?.preferredLevel === "tts_alarm";
-    const ignoreRate =
-      history && history.totalReminders > 0 ? history.ignoredCount / history.totalReminders : 0;
 
     const rules: ReminderEscalationRule[] = [];
+
+    // popup → tts_alarm：始终允许升级（用户长时间不响应时）
     rules.push({
       fromLevel: "popup",
       toLevel: "tts_alarm",
@@ -364,11 +346,13 @@ export class IntelligentReminderService {
       timeoutMs: prefersTts ? Math.round(popupTimeoutMs * 0.75) : popupTimeoutMs,
     });
 
+    // tts_alarm → phone_call：仅以下情况才升级
+    // 1. 用户明确偏好电话方式
+    // 2. 且优先级为 urgent 或（非安静时段 + high）
+    // 不再根据忽略率等统计自动升级到电话
     const shouldCall =
-      priority === "urgent" ||
-      (!quietHours && priority === "high") ||
-      prefersPhone ||
-      ignoreRate >= 0.45;
+      prefersPhone &&
+      (priority === "urgent" || (!quietHours && priority === "high"));
     if (shouldCall) {
       rules.push({
         fromLevel: "tts_alarm",

@@ -1,8 +1,9 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { Bm25Index, buildToolSearchText } from "./bm25.js";
+import { Bm25Index, buildToolSearchText, tokenize } from "./bm25.js";
 import { isCoreToolRegistryName } from "./core-tool-library.js";
 import { getToolSearchConfig } from "./env.js";
+import { getToolIntentMetadata } from "./intent-metadata.js";
 
 function isFunctionTool(tool: ChatCompletionTool): tool is ChatCompletionTool & {
   type: "function";
@@ -17,6 +18,10 @@ export type DeferredToolEntry = {
   searchText: string;
   parameterNames: string[];
   requiredParameters: string[];
+  searchAliases: string[];
+  negativeAliases: string[];
+  examples: string[];
+  negativeExamples: string[];
 };
 
 /** 单轮对话内复用 BM25 索引与名称查找表，避免每次 tool_search 全量重建。 */
@@ -74,16 +79,22 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
   const entries: DeferredToolEntry[] = deferredTools.filter(isFunctionTool).map((tool) => {
     const fn = tool.function;
     const { parameterNames, requiredParameters } = extractParameterSummary(fn.parameters);
+    const { text, aliases } = buildToolSearchText({
+      name: fn.name,
+      description: fn.description,
+      parameters: fn.parameters,
+    });
+    const metadata = getToolIntentMetadata(fn.name);
     return {
       registryName: fn.name,
       tool,
-      searchText: buildToolSearchText({
-        name: fn.name,
-        description: fn.description,
-        parameters: fn.parameters,
-      }),
+      searchText: text,
       parameterNames,
       requiredParameters,
+      searchAliases: aliases,
+      negativeAliases: metadata.negativeAliases ?? [],
+      examples: metadata.examples ?? [],
+      negativeExamples: metadata.negativeExamples ?? [],
     };
   });
 
@@ -124,7 +135,7 @@ export function searchDeferredTools(
   limit: number,
   options?: { includeSchema?: boolean },
 ): DeferredToolSearchMatch[] {
-  const hits = catalog.index.search(query, limit);
+  const hits = catalog.index.search(query, limit, catalog.entries);
 
   return hits
     .map((hit) => {
@@ -134,7 +145,7 @@ export function searchDeferredTools(
       const match: DeferredToolSearchMatch = {
         name: entry.registryName,
         description: entry.tool.function.description ?? "",
-        score: Math.round(hit.score * 1000) / 1000,
+        score: Math.round(applyIntentPrior(entry, query, hit.score) * 1000) / 1000,
         parameterNames: entry.parameterNames,
         requiredParameters: entry.requiredParameters,
       };
@@ -150,6 +161,31 @@ export function searchDeferredTools(
       return match;
     })
     .filter((v): v is DeferredToolSearchMatch => v != null);
+}
+
+function applyIntentPrior(
+  entry: DeferredToolEntry,
+  query: string,
+  baseScore: number,
+): number {
+  const queryTokens = new Set(tokenize(query));
+  let score = baseScore;
+
+  for (const phrase of [...entry.searchAliases, ...entry.examples]) {
+    const tokens = tokenize(phrase);
+    if (tokens.length === 0) continue;
+    const overlap = tokens.filter((token) => queryTokens.has(token)).length;
+    if (overlap > 0) score += Math.min(1.2, overlap * 0.18);
+  }
+
+  for (const phrase of [...entry.negativeAliases, ...entry.negativeExamples]) {
+    const tokens = tokenize(phrase);
+    if (tokens.length === 0) continue;
+    const overlap = tokens.filter((token) => queryTokens.has(token)).length;
+    if (overlap > 0) score -= Math.min(1.5, overlap * 0.3);
+  }
+
+  return score;
 }
 
 export function describeDeferredTool(

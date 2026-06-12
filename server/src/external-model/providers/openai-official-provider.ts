@@ -23,7 +23,8 @@ import {
   preparePromptCachePlan,
 } from "../prefix-cache.js";
 
-import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
+import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
+import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
 
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 
@@ -368,6 +369,12 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       model = this.model;
     }
 
+    const toolPlan = tools
+      ? resolveChatToolPlanForStream(userTurn.text, streamOpts)
+      : null;
+    const toolSearchPrepared = toolPlan
+      ? prepareToolsWithToolSearch(toolPlan.visibleTools, toolPlan.searchableTools)
+      : null;
     const promptPlan = preparePromptCachePlan({
       providerId: this.id,
       model,
@@ -379,6 +386,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
         agentAccessMode: streamOpts?.agentAccessMode,
         desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
       },
+      tools: toolSearchPrepared?.visibleTools,
       variant: tools ? "chat-tools" : "chat",
     });
 
@@ -386,22 +394,6 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
     if (tools) {
 
       try {
-
-        const mergedTools = resolveChatToolsForStream(userTurn.text, streamOpts);
-        const toolPromptPlan = preparePromptCachePlan({
-          providerId: this.id,
-          model,
-          baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
-          memory: overrideSys ? undefined : promptMemory,
-          finalizeOptions: {
-            tools: Boolean(tools && !overrideSys),
-            masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-            agentAccessMode: streamOpts?.agentAccessMode,
-            desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
-          },
-          tools: mergedTools,
-          variant: "chat-tools",
-        });
 
         const full = await streamCompletionWithTools(
 
@@ -419,7 +411,8 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
             onAfterToolBatch: streamOpts?.toolLoop?.onAfterToolBatch,
 
-            tools: mergedTools,
+            tools: toolPlan?.visibleTools ?? [],
+            toolSearchSourceTools: toolPlan?.searchableTools ?? [],
 
             maxRounds: streamOpts?.toolLoop?.maxRounds,
 
@@ -429,9 +422,9 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
               : undefined,
 
-            promptCache: toolPromptPlan.promptCache,
+            promptCache: promptPlan.promptCache,
 
-            requestSystemMessages: toolPromptPlan.requestSystemMessages,
+            requestSystemMessages: promptPlan.requestSystemMessages,
 
           },
 
@@ -475,7 +468,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
       stream = await this.client.chat.completions.create(
         request as Parameters<typeof this.client.chat.completions.create>[0],
-      );
+      ) as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
 
     } catch (e) {
 
@@ -515,7 +508,9 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
 
 
-    msgs.push({ role: "assistant", content: full });
+    if (full.trim()) {
+      msgs.push({ role: "assistant", content: full });
+    }
 
     if (!ephemeral) {
 

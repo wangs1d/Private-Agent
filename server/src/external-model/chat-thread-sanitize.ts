@@ -143,5 +143,15 @@ export function sanitizeChatMessagesForApi(
   } else {
     filtered = repairKimiAssistantToolCallReasoning(filtered);
   }
+
+  // 过滤 content 为空的 assistant 消息（OpenAI API 要求 assistant 消息 content 不能为空，
+  // 除非同时携带 tool_calls）。流式响应仅返回 tool_calls / 最终回复为空时会产生此类脏数据。
+  filtered = filtered.filter((msg) => {
+    if (msg.role !== "assistant") return true;
+    if (isAssistantWithToolCalls(msg)) return true;
+    const c = msg.content;
+    return typeof c === "string" && c.trim().length > 0;
+  });
+
   return filtered;
 }

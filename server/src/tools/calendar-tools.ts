@@ -7,6 +7,10 @@ import type { ScheduleIntentService } from "../services/schedule-intent-service.
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
 import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
+import {
+  checkScheduleCreateDedup,
+  setScheduleCreateDedup,
+} from "./schedule-create-dedup.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 /** 将 ISO UTC 时间字符串格式化为用户可读的本地时间描述 */
@@ -102,6 +106,13 @@ export function registerCalendarTools(
     if (!text) return { ok: false, error: "text 不能为空" };
     const sessionId = resolveActorId(context);
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+
+    // 去重：同一轮 + 相同文本只创建一次
+    const roundId = context.chatUserMessageId || context.sessionId;
+    const contentKey = text.slice(0, 120);
+    const dedupHit = checkScheduleCreateDedup(roundId, contentKey);
+    if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
+
     const parsed = await scheduleIntentService.parseForCreate(
       sessionId,
       text,
@@ -115,7 +126,7 @@ export function registerCalendarTools(
     try {
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
-      return {
+      const response = {
         ok: true,
         matched: true,
         summary: "日程已写入",
@@ -127,6 +138,8 @@ export function registerCalendarTools(
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
+      setScheduleCreateDedup(roundId, contentKey, response);
+      return response;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
@@ -156,6 +169,13 @@ export function registerCalendarTools(
       return { ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" };
     }
     const recurrence = recurrenceRaw as "none" | "daily" | "weekly" | "yearly";
+
+    // 去重：同一轮 + 相同标题+时间只创建一次
+    const roundId = context.chatUserMessageId || context.sessionId;
+    const contentKey = `${title}:${runAt}`.slice(0, 120);
+    const dedupHit = checkScheduleCreateDedup(roundId, contentKey);
+    if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
+
     try {
       if (kindRaw === "reminder") {
         const reminderMessage = String(input.reminderMessage ?? description).trim();
@@ -169,7 +189,7 @@ export function registerCalendarTools(
           timezone,
           reminderMessage,
         });
-        return {
+        const response = {
           ok: true,
           matched: true,
           summary: "提醒已写入日程",
@@ -181,6 +201,8 @@ export function registerCalendarTools(
           recurrence: task.recurrence,
           reminderMessage: task.reminderMessage,
         };
+        setScheduleCreateDedup(roundId, contentKey, response);
+        return response;
       }
       if (kindRaw === "weather_brief") {
         const task = await scheduleTaskService.createTask({
@@ -192,7 +214,7 @@ export function registerCalendarTools(
           recurrence,
           timezone,
         });
-        return {
+        const response = {
           ok: true,
           matched: true,
           summary: "日程已写入",
@@ -203,6 +225,8 @@ export function registerCalendarTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
+        setScheduleCreateDedup(roundId, contentKey, response);
+        return response;
       }
       if (kindRaw === "agent_task") {
         const agentTaskIn = input.agentTask as Record<string, unknown> | undefined;
@@ -220,7 +244,7 @@ export function registerCalendarTools(
           timezone,
           agentTask: { prompt, accessMode },
         });
-        return {
+        const response = {
           ok: true,
           matched: true,
           summary: "Agent 自动化任务已写入日程",
@@ -231,6 +255,8 @@ export function registerCalendarTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
         };
+        setScheduleCreateDedup(roundId, contentKey, response);
+        return response;
       }
       const actionIn = input.action as Record<string, unknown> | undefined;
       const url = String(actionIn?.url ?? input.actionUrl ?? "").trim();
@@ -249,7 +275,7 @@ export function registerCalendarTools(
         timezone,
         action: { url, method, body: actionIn?.body },
       });
-      return {
+      const response = {
         ok: true,
         matched: true,
         summary: "日程已写入",
@@ -260,6 +286,8 @@ export function registerCalendarTools(
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
         recurrence: task.recurrence,
       };
+      setScheduleCreateDedup(roundId, contentKey, response);
+      return response;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };

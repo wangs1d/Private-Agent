@@ -11,9 +11,49 @@ import {
   selectRelevantTools,
 } from "./openai-compatible-tool-loop.js";
 import type { AgentStreamOptions, ToolExposureProfile } from "./types.js";
+import { estimateToolsSchemaTokens } from "../tools/tool-search/catalog.js";
+
+export type ResolvedChatToolPlan = {
+  visibleTools: ChatCompletionTool[];
+  searchableTools: ChatCompletionTool[];
+};
 
 const _resolvedToolsCache = new Map<string, ChatCompletionTool[]>();
 const MAX_RESOLVED_TOOLS_CACHE = 32;
+
+function resolveExposureTokenBudget(profile: ToolExposureProfile): number | null {
+  const fallback =
+    profile === "light"
+      ? 1400
+      : profile === "contextual"
+        ? 2600
+        : null;
+  if (fallback == null) return null;
+  const envName =
+    profile === "light"
+      ? "AGENT_TOOL_EXPOSURE_LIGHT_TOKENS"
+      : "AGENT_TOOL_EXPOSURE_CONTEXTUAL_TOKENS";
+  const raw = process.env[envName]?.trim();
+  const parsed = raw ? Number.parseInt(raw, 10) : fallback;
+  return Number.isFinite(parsed) && parsed > 200 ? parsed : fallback;
+}
+
+function trimToolsToTokenBudget(
+  tools: ChatCompletionTool[],
+  minTools: number,
+  tokenBudget: number | null,
+): ChatCompletionTool[] {
+  if (!tokenBudget || tokenBudget <= 0) return tools;
+  const out: ChatCompletionTool[] = [];
+  let used = 0;
+  for (const tool of tools) {
+    const delta = estimateToolsSchemaTokens([tool]);
+    if (out.length >= minTools && used + delta > tokenBudget) continue;
+    out.push(tool);
+    used += delta;
+  }
+  return out.length > 0 ? out : tools.slice(0, Math.min(minTools, tools.length));
+}
 
 function resolvedToolsCacheKey(userText?: string, streamOpts?: AgentStreamOptions): string {
   const builtinNames = (streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools())
@@ -117,27 +157,49 @@ function applyToolExposureProfile(
   if (!userText?.trim()) return tools;
 
   if (profile === "light") {
-    return selectRelevantTools(userText, tools, {
+    return trimToolsToTokenBudget(selectRelevantTools(userText, tools, {
       minTools: 3,
-      maxTools: 8,
+      maxTools: tools.length,
       includeAlwaysIncluded: false,
-    });
+      tokenBudget: resolveExposureTokenBudget(profile) ?? undefined,
+    }), 3, resolveExposureTokenBudget(profile));
   }
 
-  return selectRelevantTools(userText, tools, {
+  return trimToolsToTokenBudget(selectRelevantTools(userText, tools, {
     minTools: 4,
-    maxTools: 14,
+    maxTools: tools.length,
     includeAlwaysIncluded: true,
-  });
+    tokenBudget: resolveExposureTokenBudget(profile) ?? undefined,
+  }), 4, resolveExposureTokenBudget(profile));
 }
 
 export function resolveChatToolsForStream(
   userText?: string,
   streamOpts?: AgentStreamOptions,
 ): ChatCompletionTool[] {
+  return resolveChatToolPlanForStream(userText, streamOpts).visibleTools;
+}
+
+export function resolveChatToolPlanForStream(
+  userText?: string,
+  streamOpts?: AgentStreamOptions,
+): ResolvedChatToolPlan {
   const key = resolvedToolsCacheKey(userText, streamOpts);
   const hit = _resolvedToolsCache.get(key);
-  if (hit) return hit;
+  if (hit) {
+    const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
+    const extra = streamOpts?.chatToolsExtra ?? [];
+    const merged = [...builtin, ...extra];
+    const accessCtx: ChatToolsAccessContext = {
+      desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+    };
+    const searchableTools = mergeChatToolsForAccessMode(
+      merged,
+      parseAgentAccessMode(streamOpts?.agentAccessMode),
+      accessCtx,
+    );
+    return { visibleTools: hit, searchableTools };
+  }
 
   const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
   const extra = streamOpts?.chatToolsExtra ?? [];
@@ -163,5 +225,8 @@ export function resolveChatToolsForStream(
   }
   _resolvedToolsCache.set(key, ranked);
 
-  return ranked;
+  return {
+    visibleTools: ranked,
+    searchableTools: accessFiltered,
+  };
 }

@@ -8,7 +8,8 @@ import {
   applyPromptCacheMessages,
   preparePromptCachePlan,
 } from "../prefix-cache.js";
-import { resolveChatToolsForStream } from "../resolve-chat-tools.js";
+import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
+import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
 import type {
@@ -133,7 +134,8 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     if (tools) {
       let completed = false;
       try {
-        const mergedTools = resolveChatToolsForStream(userTurn.text, effectiveStreamOpts);
+        const toolPlan = resolveChatToolPlanForStream(userTurn.text, effectiveStreamOpts);
+        const toolSearchPrepared = prepareToolsWithToolSearch(toolPlan.visibleTools, toolPlan.searchableTools);
         const toolPromptPlan = preparePromptCachePlan({
           providerId: this.id,
           model,
@@ -145,7 +147,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
             agentAccessMode: streamOpts?.agentAccessMode,
             desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
           },
-          tools: mergedTools,
+          tools: toolSearchPrepared.visibleTools,
           variant: "chat-tools",
         });
         const full = await streamCompletionWithTools(
@@ -156,7 +158,8 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
           tools,
           {
             onAfterToolBatch: effectiveStreamOpts?.toolLoop?.onAfterToolBatch,
-            tools: mergedTools,
+            tools: toolPlan.visibleTools,
+            toolSearchSourceTools: toolPlan.searchableTools,
             maxRounds: effectiveStreamOpts?.toolLoop?.maxRounds,
             extraBody: kimiExtraBody(effectiveStreamOpts),
             promptCache: toolPromptPlan.promptCache,
@@ -188,7 +191,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
       };
       stream = await this.client.chat.completions.create(
         request as Parameters<typeof this.client.chat.completions.create>[0],
-      );
+      ) as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
     } catch (e) {
       msgs.length = turnStartLen;
       throw e;
@@ -208,7 +211,9 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
       throw e;
     }
 
-    msgs.push({ role: "assistant", content: full });
+    if (full.trim()) {
+      msgs.push({ role: "assistant", content: full });
+    }
     if (!ephemeral) {
       this.trimThread(msgs, streamOpts?.maxThreadMessages);
       this.threads.afterTurnCompleted(sessionId, msgs);

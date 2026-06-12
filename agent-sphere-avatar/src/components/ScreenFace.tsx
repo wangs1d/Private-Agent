@@ -76,15 +76,11 @@ function drawMouth(
     return;
   }
 
-  ctx.strokeStyle = mood === "happy" ? "#86efac" : accent;
-  ctx.fillStyle = mood === "happy" ? "#86efac" : accent;
+  ctx.strokeStyle = accent;
+  ctx.fillStyle = accent;
   ctx.lineWidth = 3;
 
-  if (mood === "happy") {
-    ctx.beginPath();
-    ctx.arc(cx, mouthY - 8, 16, 0.14 * Math.PI, 0.86 * Math.PI);
-    ctx.stroke();
-  } else if (mood === "alert" || surprise > 0.3) {
+  if (mood === "alert" || surprise > 0.3) {
     ctx.beginPath();
     ctx.ellipse(cx, mouthY, 9 + surprise * 5, 11 + surprise * 7, 0, 0, Math.PI * 2);
     ctx.stroke();
@@ -113,7 +109,6 @@ function drawFace(
   surprise: number,
   lookX: number,
   lookY: number,
-  speakPulse: number,
 ) {
   ctx.clearRect(0, 0, CANVAS, CANVAS);
   // 不透明 OLED 底 — 避免 transparent 材质 + clearRect 导致整屏不可见
@@ -231,7 +226,6 @@ export function ScreenFace({ mood, energy, signalsRef, children }: ScreenFacePro
       bump * (calm ? 0.4 : 1) + excitement * (calm ? 0.08 : 0.2) + userSpin * 0.45 + userTouch * 0.2,
       lookRef.current.x,
       lookRef.current.y,
-      mood === "happy" ? mouthPhase.current : 0,
     );
     texture.needsUpdate = true;
   };

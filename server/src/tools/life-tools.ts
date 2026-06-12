@@ -9,6 +9,10 @@ import type {
 } from "../services/schedule-task-service.js";
 import { buildScheduleCreateInput, formatNextRunAtLocal } from "./calendar-tools.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
+import {
+  checkScheduleCreateDedup,
+  setScheduleCreateDedup,
+} from "./schedule-create-dedup.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export function registerLifeTools(
@@ -48,6 +52,10 @@ export function registerLifeTools(
     const date = String(input.date ?? "").trim();
     const parseSource = text || [date, subject].filter(Boolean).join(" ").trim();
 
+    // 去重：同一轮 + 相似内容只创建一次
+    const roundId = context.chatUserMessageId || context.sessionId;
+    const contentKey = (parseSource || `${subject}:${String(input.runAt ?? "")}`).slice(0, 120);
+
     if (!parseSource) {
       const runAt = String(input.runAt ?? "").trim();
       const reminderMessage = String(input.reminderMessage ?? subject).trim() || "到点提醒";
@@ -57,6 +65,9 @@ export function registerLifeTools(
           error: "请提供 text（自然语言，含时间与事项），或同时提供 subject 与 date/runAt",
         };
       }
+      // 去重检查
+      const hit = checkScheduleCreateDedup(roundId, contentKey);
+      if (hit) return { ...hit, summary: `(同轮重复调用已拦截) ${hit.summary ?? ""}` };
       const recurrenceRaw = String(input.recurrence ?? "none").trim();
       let recurrence: ScheduleRecurrence =
         recurrenceRaw === "daily" || recurrenceRaw === "weekly" || recurrenceRaw === "cron"
@@ -79,7 +90,7 @@ export function registerLifeTools(
           webhookToken: String(input.webhookToken ?? "").trim() || undefined,
           reminderMessage,
         });
-        return {
+        const response = {
           ok: true,
           matched: true,
           summary: "提醒已写入日程",
@@ -93,11 +104,17 @@ export function registerLifeTools(
           webhookToken: task.webhookToken,
           cronExpression: task.cronExpression,
         };
+        setScheduleCreateDedup(roundId, contentKey, response);
+        return response;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return { ok: false, error: msg };
       }
     }
+
+    // 去重检查（自然语言解析路径）
+    const hit = checkScheduleCreateDedup(roundId, contentKey);
+    if (hit) return { ...hit, summary: `(同轮重复调用已拦截) ${hit.summary ?? ""}` };
 
     const parsed = await scheduleIntentService.parseForCreate(
       sessionId,
@@ -119,7 +136,7 @@ export function registerLifeTools(
     try {
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
-      return {
+      const response = {
         ok: true,
         matched: true,
         summary: "提醒已写入日程",
@@ -131,6 +148,8 @@ export function registerLifeTools(
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage ?? draft.reminderMessage,
       };
+      setScheduleCreateDedup(roundId, contentKey, response);
+      return response;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };

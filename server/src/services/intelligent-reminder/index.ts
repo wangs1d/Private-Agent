@@ -278,9 +278,8 @@ function registerIntelligentReminderTools(
 
     const instance = await service.createReminder(config);
 
-    if (new Date(config.scheduledAt) <= new Date()) {
-      await service.triggerReminder(instance.config.id);
-    }
+    // 不再创建后立即触发；提醒应仅由外部调度器在 scheduledAt 到达时触发
+    // 避免用户设置提醒时立刻收到电话
 
     return {
       ok: true,

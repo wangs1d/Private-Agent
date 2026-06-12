@@ -343,19 +343,9 @@ export async function createAppServices(): Promise<AppServices> {
       displayMessage,
       "schedule.reminder_fired",
     );
-    const wakeLike = /起床|叫醒|喊我|叫我/.test(message) || /起床|叫醒|喊我/.test(task.description);
-    if (wakeLike) {
-      const phone = virtualPhoneService.getPhoneForActor(task.sessionId);
-      if (phone) {
-        void virtualPhoneService.placeCall({
-          fromActorId: task.sessionId,
-          toPhone: phone,
-          transcript: displayMessage,
-          ringStyle: "reminder",
-          initiatedBy: "agent",
-        });
-      }
-    }
+    // 不再根据"起床/叫醒"等关键词自动拨打电话
+    // 日程提醒应仅通过 WebSocket 推送 + embodimentAlert 通知用户
+    // 如需电话提醒，用户应显式使用 phone.call_user 工具
   });
 
   const aipService = new AipService(agentRelayService, wsConnectionRegistry, agentPairingService, auditService);

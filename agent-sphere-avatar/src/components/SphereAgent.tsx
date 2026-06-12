@@ -1,4 +1,5 @@
 import { useSphere } from "@react-three/cannon";
+import { useFrame } from "@react-three/fiber";
 import { Suspense, useCallback, useEffect, useRef, type Ref, type RefObject } from "react";
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
@@ -12,6 +13,8 @@ import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
 import { ScreenFace, type FaceSignals } from "./ScreenFace";
 import { SphereBodyHandle } from "./SphereBodyHandle";
+
+const HEADPHONE_MODEL_URL = `${import.meta.env.BASE_URL}models/DG.obj`;
 
 interface SphereAgentProps {
   state: AgentState;
@@ -78,6 +81,12 @@ export function SphereAgent({
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
+  const baseModelRef = useRef<THREE.Group>(null);
+  const headphoneModelRef = useRef<THREE.Group>(null);
+  const transitionFxRef = useRef<THREE.Group>(null);
+  const leftPodRef = useRef<THREE.Group>(null);
+  const rightPodRef = useRef<THREE.Group>(null);
+  const headbandRef = useRef<THREE.Group>(null);
   const faceSignalsRef = useRef<FaceSignals>({
     boundaryBump: 0,
     excitement: 0,
@@ -86,6 +95,7 @@ export function SphereAgent({
     userTouch: 0,
     userSpin: 0,
   });
+  const listenTransitionRef = useRef(0);
 
   const [ref, api] = useSphere(() => ({
     mass: physics ? 1.2 : 0,
@@ -257,6 +267,67 @@ export function SphereAgent({
     return bindEmbodimentCommand(handleCommand);
   }, [kinematic, physics, motion, exciteMotion]);
 
+  useFrame((_, delta) => {
+    const target = state.mood === "listening" ? 1 : 0;
+    const blend = 1 - Math.exp(-delta * 5.5);
+    listenTransitionRef.current += (target - listenTransitionRef.current) * blend;
+    const p = THREE.MathUtils.clamp(listenTransitionRef.current, 0, 1);
+    const pulse = Math.sin(performance.now() * 0.01) * 0.5 + 0.5;
+
+    if (baseModelRef.current) {
+      const scale = 1 - p * 0.08;
+      baseModelRef.current.scale.setScalar(scale);
+      baseModelRef.current.position.y = p * 0.012;
+      baseModelRef.current.rotation.z = -p * 0.08;
+    }
+
+    if (headphoneModelRef.current) {
+      const scale = 0.9 + p * 0.1;
+      headphoneModelRef.current.scale.setScalar(scale);
+      headphoneModelRef.current.position.y = (1 - p) * -0.025;
+      headphoneModelRef.current.rotation.z = (1 - p) * 0.12;
+    }
+
+    if (transitionFxRef.current) {
+      transitionFxRef.current.visible = p > 0.02 && p < 0.98;
+      transitionFxRef.current.scale.setScalar(0.62 + p * 0.28 + pulse * 0.035);
+      transitionFxRef.current.rotation.z += delta * (0.45 + p * 1.2);
+      transitionFxRef.current.position.z = 0.015 + p * 0.02;
+    }
+
+    const podTravel = THREE.MathUtils.smoothstep(p, 0.16, 0.82);
+    const podLift = Math.sin(podTravel * Math.PI) * 0.06;
+    const podVisibility = p > 0.06 && p < 0.96;
+    const podScale = 0.3 + podTravel * 0.9;
+
+    if (leftPodRef.current) {
+      leftPodRef.current.visible = podVisibility;
+      leftPodRef.current.position.set(-0.12 - podTravel * 0.46, 0.03 + podLift, 0.02 + podTravel * 0.12);
+      leftPodRef.current.rotation.set(0.15 - podTravel * 0.2, -0.3 - podTravel * 0.75, 0.2 - podTravel * 0.35);
+      leftPodRef.current.scale.setScalar(podScale);
+    }
+
+    if (rightPodRef.current) {
+      rightPodRef.current.visible = podVisibility;
+      rightPodRef.current.position.set(0.12 + podTravel * 0.46, 0.03 + podLift, 0.02 + podTravel * 0.12);
+      rightPodRef.current.rotation.set(0.15 - podTravel * 0.2, 0.3 + podTravel * 0.75, -0.2 + podTravel * 0.35);
+      rightPodRef.current.scale.setScalar(podScale);
+    }
+
+    if (headbandRef.current) {
+      const bandProgress = THREE.MathUtils.smoothstep(p, 0.52, 0.96);
+      headbandRef.current.visible = bandProgress > 0.02 && p < 0.995;
+      headbandRef.current.position.y = 0.16 + bandProgress * 0.31;
+      headbandRef.current.position.z = 0.04 + bandProgress * 0.08;
+      headbandRef.current.rotation.x = Math.PI / 2;
+      headbandRef.current.scale.set(
+        0.42 + bandProgress * 0.82,
+        0.42 + bandProgress * 0.82,
+        0.42 + bandProgress * 0.82,
+      );
+    }
+  });
+
   return (
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
@@ -275,12 +346,61 @@ export function SphereAgent({
                 </mesh>
               }
             >
-              <DG2RobotModel
-                energy={state.energy}
-                focused={state.focused}
-                idleMotion={idleBodyMotion}
-                standaloneLighting={modelScale !== 1}
-              />
+              <group ref={baseModelRef}>
+                <DG2RobotModel
+                  energy={state.energy}
+                  focused={state.focused}
+                  idleMotion={idleBodyMotion}
+                  standaloneLighting={modelScale !== 1}
+                  opacity={1 - listenTransitionRef.current}
+                />
+              </group>
+              <group ref={transitionFxRef}>
+                <mesh rotation={[Math.PI / 2, 0, 0]}>
+                  <torusGeometry args={[MODEL.bodyRadius * 0.72, MODEL.bodyRadius * 0.024, 20, 80]} />
+                  <meshBasicMaterial color="#7dc4ff" transparent opacity={0.22} depthWrite={false} />
+                </mesh>
+                <mesh>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.08, 20, 20]} />
+                  <meshBasicMaterial color="#b9e7ff" transparent opacity={0.2} depthWrite={false} />
+                </mesh>
+              </group>
+              <group ref={leftPodRef}>
+                <mesh>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.1, 18, 18]} />
+                  <meshStandardMaterial color="#aeb6c2" metalness={0.88} roughness={0.28} emissive="#7dc4ff" emissiveIntensity={0.08} />
+                </mesh>
+                <mesh position={[0, 0, 0.06]}>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.054, 16, 16]} />
+                  <meshStandardMaterial color="#11161d" metalness={0.45} roughness={0.22} />
+                </mesh>
+              </group>
+              <group ref={rightPodRef}>
+                <mesh>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.1, 18, 18]} />
+                  <meshStandardMaterial color="#aeb6c2" metalness={0.88} roughness={0.28} emissive="#7dc4ff" emissiveIntensity={0.08} />
+                </mesh>
+                <mesh position={[0, 0, 0.06]}>
+                  <sphereGeometry args={[MODEL.bodyRadius * 0.054, 16, 16]} />
+                  <meshStandardMaterial color="#11161d" metalness={0.45} roughness={0.22} />
+                </mesh>
+              </group>
+              <group ref={headbandRef}>
+                <mesh>
+                  <torusGeometry args={[MODEL.bodyRadius * 0.55, MODEL.bodyRadius * 0.038, 18, 48, Math.PI]} />
+                  <meshStandardMaterial color="#98a3b3" metalness={0.92} roughness={0.26} emissive="#9fd5ff" emissiveIntensity={0.06} />
+                </mesh>
+              </group>
+              <group ref={headphoneModelRef}>
+                <DG2RobotModel
+                  modelUrl={HEADPHONE_MODEL_URL}
+                  energy={state.energy}
+                  focused={state.focused}
+                  idleMotion={idleBodyMotion}
+                  standaloneLighting={modelScale !== 1}
+                  opacity={listenTransitionRef.current}
+                />
+              </group>
             </Suspense>
             {userDragRotate ? (
               <SphereBodyHandle

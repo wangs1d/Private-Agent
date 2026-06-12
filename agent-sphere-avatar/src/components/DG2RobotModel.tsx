@@ -7,16 +7,18 @@ import { useOledFaceTexture } from "../context/oled-face-context";
 import { applyGlassOledUv } from "../utils/glass-oled-uv";
 import { disableMeshRaycast } from "../utils/mesh-raycast";
 
-const MODEL_URL = `${import.meta.env.BASE_URL}models/DG2.obj`;
+const DEFAULT_MODEL_URL = `${import.meta.env.BASE_URL}models/DG2.obj`;
 const GLASS_RENDER_ORDER = 2;
 
 interface DG2RobotModelProps {
+  modelUrl?: string;
   energy?: number;
   focused?: boolean;
   /** 待机呼吸/微摆（桌宠关闭以保持画面稳定） */
   idleMotion?: boolean;
   /** 无 Environment 贴图（桌宠本地灯光） */
   standaloneLighting?: boolean;
+  opacity?: number;
 }
 
 function isGlassMaterial(name: string): boolean {
@@ -25,10 +27,12 @@ function isGlassMaterial(name: string): boolean {
 
 /** DG2.obj 一比一还原 — 加载 CAD 网格并套用金属/玻璃材质 */
 export function DG2RobotModel({
+  modelUrl = DEFAULT_MODEL_URL,
   energy = 0.55,
   focused = false,
   idleMotion = true,
   standaloneLighting = false,
+  opacity = 1,
 }: DG2RobotModelProps) {
   const oledMap = useOledFaceTexture();
   const groupRef = useRef<THREE.Group>(null);
@@ -36,7 +40,7 @@ export function DG2RobotModel({
   const glassMatRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
   const glassMeshesRef = useRef<THREE.Mesh[]>([]);
 
-  const obj = useLoader(OBJLoader, MODEL_URL);
+  const obj = useLoader(OBJLoader, modelUrl);
   const scale = dg2Scale();
 
   const { shellMaterial, glassMaterial } = useMemo(() => {
@@ -47,6 +51,8 @@ export function DG2RobotModel({
       clearcoat: MODEL.shellClearcoat,
       clearcoatRoughness: 0.32,
       envMapIntensity: standaloneLighting ? 0.25 : 0.85,
+      transparent: true,
+      opacity: 1,
     });
     const glass = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(MODEL.glassColor),
@@ -103,25 +109,26 @@ export function DG2RobotModel({
   useEffect(() => {
     const gMat = glassMatRef.current;
     for (const mesh of glassMeshesRef.current) {
-      mesh.visible = true;
+      mesh.visible = opacity > 0.001;
       if (!gMat) continue;
       if (oledMap) {
         // OLED 激活时保留黑色曲屏玻璃框，表情层叠在上方（OledScreenMesh）
         gMat.color.set("#030508");
-        gMat.opacity = 0.98;
+        gMat.opacity = 0.98 * opacity;
         gMat.transparent = true;
         gMat.metalness = 0.35;
         gMat.roughness = 0.12;
         gMat.depthWrite = true;
       } else {
         gMat.color.set(MODEL.glassColor);
-        gMat.opacity = 0.82;
+        gMat.opacity = 0.82 * opacity;
         gMat.transparent = true;
         gMat.metalness = MODEL.glassMetalness;
         gMat.roughness = MODEL.glassRoughness;
+        gMat.depthWrite = opacity > 0.9;
       }
     }
-  }, [oledMap]);
+  }, [oledMap, opacity]);
 
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;
@@ -130,12 +137,17 @@ export function DG2RobotModel({
     shellMatsRef.current.forEach((mat) => {
       mat.emissive.set(MODEL.seamEmissive);
       mat.emissiveIntensity = pulse * 0.12;
+      mat.opacity = opacity;
     });
 
     const gMat = glassMatRef.current;
     if (gMat && !oledMap) {
       gMat.emissive.set(focused ? "#334466" : "#000000");
       gMat.emissiveIntensity = focused ? 0.08 + pulse * 0.06 : 0;
+    }
+
+    if (groupRef.current) {
+      groupRef.current.visible = opacity > 0.001;
     }
 
     if (groupRef.current && idleMotion) {

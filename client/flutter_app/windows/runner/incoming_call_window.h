@@ -75,6 +75,9 @@ class IncomingCallWindow {
                        COLORREF border);
   void DrawAvatar(HDC hdc, const RECT& rc, const std::wstring& initial,
                   COLORREF bg);
+  // 自绘药丸按钮（仿微信PC来电按钮风格）
+  void DrawPillButton(HDC hdc, const RECT& rc, const wchar_t* text,
+                      bool is_accept, bool hovered);
 
   HWND window_handle_ = nullptr;
   HWND accept_btn_ = nullptr;
@@ -93,6 +96,8 @@ class IncomingCallWindow {
   bool ringing_ = false;
   int pulse_phase_ = 0;       // 0..30 循环（用于头像光晕）
   bool accept_glow_ = true;   // 接听按钮呼吸高亮
+  bool accept_hovered_ = false;  // 接听按钮悬停
+  bool decline_hovered_ = false; // 挂断按钮悬停
 
   // 定时器 id
   static constexpr UINT_PTR kTimeoutTimerId = 1001;

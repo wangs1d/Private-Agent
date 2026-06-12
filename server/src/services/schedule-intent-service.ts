@@ -80,7 +80,7 @@ export class ScheduleIntentService {
     userText: string,
     userTimezone?: string,
   ): Promise<ScheduleDraft | null> {
-    const ruleDraft = this.parseByRule(userText, options?.userTimezone);
+    const ruleDraft = this.parseByRule(userText, userTimezone);
     if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
