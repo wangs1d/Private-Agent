@@ -6,7 +6,8 @@ import "package:flutter/material.dart";
 
 import "../../core/services/agent_sphere_mood_bridge.dart";
 import "../../core/services/desk_pet_session.dart";
-import "../../core/services\sphere_overlay_launcher.dart";
+import "../../core/services/sphere_entity_controller.dart";
+import "../../core/services/sphere_overlay_launcher.dart";
 import "agent_sphere_webview.dart";
 import "sphere_float_motion.dart";
 import "web_sphere_drag_chrome.dart";

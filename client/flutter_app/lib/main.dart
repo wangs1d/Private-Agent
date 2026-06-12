@@ -914,6 +914,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           final String toActorId = payload["toActorId"]?.toString() ?? "";
           final String? fromPhone = payload["fromPhone"]?.toString();
           if (!mounted) return;
+          final bool shouldClearPhoneState =
+              status == "ended" || status == "agent_handled";
           setState(() {
             if (fromPhone != null && fromPhone.isNotEmpty) {
               _phoneCallToActorId = VirtualPhoneUiLabels.incomingCallerLabel(
@@ -924,15 +926,15 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               _phoneCallToActorId =
                   toActorId.isNotEmpty ? toActorId : _phoneCallToActorId;
             }
-            if (status == "ended" ||
-                status == "answered_by_user" ||
-                status == "agent_handled") {
+            if (shouldClearPhoneState) {
               // 通话结束：立刻清状态
               _phoneCallStatus = null;
               _phoneCallToActorId = null;
               _peerIncomingDialogCallId = null;
               _phoneMuted = false;
               _phoneSpeakerOn = true;
+            } else if (status == "answered_by_user") {
+              _phoneCallStatus = "connected";
             } else {
               _phoneCallStatus = status;
             }
@@ -945,9 +947,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               quietHours: _isQuietHoursNow(),
             );
           }
-          if (status == "ended" ||
-              status == "answered_by_user" ||
-              status == "agent_handled") {
+          if (shouldClearPhoneState) {
             // 通话结束/转交：摘掉 TTS 完成回调 + 停 TTS + 关独立"通话中"窗口
             // （不弹任何 UI；清状态由原生 hangup 回调或后续事件统一处理）
             TtsPlayer.instance.removeOnCompleted(_onTtsCompleted);
@@ -1638,6 +1638,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() => _phoneCallStatus = "connecting");
     // 拉起主窗口（如果最小化）
     unawaited(IncomingCallLauncher.bringMainWindowToFront());
+    unawaited(ConnectedCallLauncher.resetDuration());
   }
 
   /// 原生悬浮窗点挂断：发 phone.hangup + 反馈 + 清状态
@@ -2307,7 +2308,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   Widget _buildCompanionRightPanel() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -2315,7 +2316,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           Row(
             children: <Widget>[
               const Icon(Icons.dashboard_outlined, size: 18),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
               Text(
                 "工作台",
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
@@ -2356,7 +2357,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               children: <Widget>[
                 // ── 日程卡片（可点击打开日历）──
                 _buildWorkspaceScheduleCard(cs),
-                const SizedBox(height: 10),
+                const SizedBox(height: 14),
                 // ── Agent 任务卡片（可点击打开任务面板）──
                 _buildWorkspaceTasksCard(cs),
                 const SizedBox(height: 10),
@@ -2400,7 +2401,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
         return _WorkspaceCard(
           icon: Icons.today_outlined,
-          iconColor: cs.tertiary,
+          iconColor: const Color(0xFF7A5C86),
           title: items.isEmpty ? "今日日程" : "今日日程 (${items.length})",
           onTap: items.isNotEmpty
               ? () => setState(() => _showCalendarPanel = true)
@@ -2446,7 +2447,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   Widget _buildWorkspaceTasksCard(ColorScheme cs) {
     return _WorkspaceCard(
       icon: Icons.smart_toy_outlined,
-      iconColor: cs.primary,
+      iconColor: const Color(0xFF5E56A8),
       title: "Agent 任务",
       trailing: _backgroundTasksBadgeCount > 0
           ? Container(
@@ -2549,21 +2550,22 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final Widget cardContent = Container(
       decoration: AppTheme.borderedPanel(
         cs,
-        radius: 10,
+        radius: 16,
         fill: AppPalette.resolveCardBackground(variant),
+        borderAlpha: 0.6,
       ),
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Row(
             children: <Widget>[
-              Icon(icon, size: 16, color: iconColor),
-              const SizedBox(width: 6),
+              Icon(icon, size: 18, color: iconColor),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(title,
                     style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
+                        fontSize: 14, fontWeight: FontWeight.w700)),
               ),
               if (trailing != null) trailing,
               if (interactive)
@@ -2575,7 +2577,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           DefaultTextStyle(
             style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             child: child,

@@ -1102,16 +1102,19 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         return Container(
                           decoration: BoxDecoration(
                             color: cs.surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(24),
+                            borderRadius: BorderRadius.circular(28),
                             border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.12 + 0.18 * _breathingAnimation!.value),
-                              width: 1.5,
+                              color: cs.outline.withValues(
+                                alpha: 0.65 + 0.1 * _breathingAnimation!.value,
+                              ),
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.white.withValues(alpha: 0.06 * _breathingAnimation!.value),
-                                blurRadius: 10,
-                                spreadRadius: 2,
+                                color: Colors.black.withValues(
+                                  alpha: 0.02 + 0.02 * _breathingAnimation!.value,
+                                ),
+                                blurRadius: 20,
+                                offset: const Offset(0, 8),
                               ),
                             ],
                           ),
@@ -1160,8 +1163,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   Container(
                                     decoration: BoxDecoration(
                                       color: widget.fullComputerAccessEnabled
-                                          ? cs.primary.withValues(alpha: 0.18)
-                                          : cs.surfaceContainerHighest,
+                                          ? cs.primary.withValues(alpha: 0.14)
+                                          : cs.surfaceContainerLowest,
                                       shape: BoxShape.circle,
                                       border: widget.fullComputerAccessEnabled
                                           ? Border.all(color: cs.primary.withValues(alpha: 0.45))
@@ -1193,8 +1196,11 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 // 发送按钮
                                 Container(
                                   decoration: BoxDecoration(
-                                    color: cs.surfaceContainerHighest,
+                                    color: cs.surfaceContainerLowest,
                                     shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: cs.outline.withValues(alpha: 0.8),
+                                    ),
                                   ),
                                   child: IconButton(
                                     icon: Icon(Icons.send, size: 20, color: cs.onSurfaceVariant),
@@ -1725,15 +1731,17 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       color: highlight
           ? Colors.red.withValues(alpha: 0.06)
           : (widget.isUser
-              ? widget.cs.surfaceContainerHigh
-              : widget.cs.surfaceContainer),
+              ? const Color(0xFF007AFF)
+              : widget.cs.surfaceContainerLowest),
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: BorderSide(
           color: highlight
               ? Colors.red.withValues(alpha: 0.35)
-              : widget.cs.outline.withValues(alpha: 0.28),
+              : (widget.isUser
+                  ? const Color(0xFF007AFF)
+                  : widget.cs.outline.withValues(alpha: 0.6)),
         ),
       ),
       child: Padding(
@@ -1809,7 +1817,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       return Text(
         message.text,
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: cs.onSurface,
+              color: isUser ? cs.onPrimary : cs.onSurface,
             ),
       );
     }

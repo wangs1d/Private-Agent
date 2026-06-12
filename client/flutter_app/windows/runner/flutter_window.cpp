@@ -523,10 +523,15 @@ void FlutterWindow::HandleIncomingCallMethodCall(
 
     // 唤起主窗口（用户从任务栏点了来电窗后能切回主窗）
     HWND self = GetHandle();
-    if (self && IsIconic(self)) {
-      ShowWindow(self, SW_RESTORE);
+    if (self) {
+      if (IsIconic(self)) {
+        ShowWindow(self, SW_RESTORE);
+      } else {
+        ShowWindow(self, SW_SHOW);
+      }
+      BringWindowToTop(self);
+      SetForegroundWindow(self);
     }
-    SetForegroundWindow(self);
 
     incoming_call_window_->Show(caller_name, subtitle, caller_initial,
                                 ring_timeout_ms, accent);
@@ -552,7 +557,12 @@ void FlutterWindow::HandleIncomingCallMethodCall(
   if (method == "bringToFront") {
     HWND self = GetHandle();
     if (self) {
-      if (IsIconic(self)) ShowWindow(self, SW_RESTORE);
+      if (IsIconic(self)) {
+        ShowWindow(self, SW_RESTORE);
+      } else {
+        ShowWindow(self, SW_SHOW);
+      }
+      BringWindowToTop(self);
       SetForegroundWindow(self);
     }
     result->Success(flutter::EncodableValue(true));
@@ -682,8 +692,13 @@ void FlutterWindow::HandleConnectedCallMethodCall(
 
     // 接通后让主窗口可被看到（如果用户没启动过主窗口就保持后台）
     HWND self = GetHandle();
-    if (self && IsIconic(self)) {
-      ShowWindow(self, SW_RESTORE);
+    if (self) {
+      if (IsIconic(self)) {
+        ShowWindow(self, SW_RESTORE);
+      } else {
+        ShowWindow(self, SW_SHOW);
+      }
+      BringWindowToTop(self);
     }
 
     connected_call_window_->Show(caller_name, caller_initial, accent);

@@ -201,14 +201,17 @@ export function OverlayApp() {
         mode === "pan"
           ? interactionTotalsRef.current.pan
           : interactionTotalsRef.current.spin;
-      if (mode === "pan") interactionTotalsRef.current.pan += intensity * 20;
-      else interactionTotalsRef.current.spin += intensity * 90;
+      if (mode === "pan") {
+        interactionTotalsRef.current.pan += intensity * 20;
+        return;
+      }
+      interactionTotalsRef.current.spin += intensity * 90;
       // 同步触发身体晃动
-      triggerVerticalShake(0.25 + intensity * 0.5, 320);
+      triggerVerticalShake(0.18 + intensity * 0.28, 220);
       // 触发动态台词（节流后由 useDynamicSpeech 控制）
       safeSpeak({
-        trigger: mode === "rotate" ? "spin" : "drag_start",
-        intensity: Math.min(1, intensity + 0.15),
+        trigger: "spin",
+        intensity: Math.min(1, intensity + 0.12),
         totalMagnitude: total + intensity * 10,
         region: resolveRegion(),
         mood: state.mood,

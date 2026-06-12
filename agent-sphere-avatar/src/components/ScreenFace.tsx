@@ -43,6 +43,7 @@ function drawMouth(
 ) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
+  const mouthLineWidth = 3.6;
 
   if (mood === "happy" || mouthOpen > 0.1) {
     const open = Math.min(1, mouthOpen);
@@ -78,7 +79,7 @@ function drawMouth(
 
   ctx.strokeStyle = accent;
   ctx.fillStyle = accent;
-  ctx.lineWidth = 3;
+  ctx.lineWidth = mouthLineWidth;
 
   if (mood === "alert" || surprise > 0.3) {
     ctx.beginPath();
@@ -95,7 +96,7 @@ function drawMouth(
     ctx.stroke();
   } else {
     ctx.beginPath();
-    ctx.arc(cx, mouthY - 4, 10, 0.2 * Math.PI, 0.8 * Math.PI);
+    ctx.arc(cx, mouthY - 5, 12, 0.16 * Math.PI, 0.84 * Math.PI);
     ctx.stroke();
   }
 }
@@ -155,17 +156,18 @@ function drawFace(
   const blinkStart = blinkClose - 0.1;
   const blink = blinkPhase > blinkClose ? 0.06 : blinkPhase > blinkStart ? 0.35 : 1;
 
-  const drawEye = (x: number, edgeSign: -1 | 1, squash = 1) => {
+  const drawEye = (x: number, edgeSign: -1 | 1) => {
     const eyeCx = x - edgeSign * curveComp;
     const outerSqueeze = 1 - Math.abs(edgeSign) * 0.08;
-    ctx.fillStyle = `rgba(136, 187, 255, ${0.12 * glow})`;
+    const eyeGlow = new THREE.Color(eyeColor);
+    ctx.fillStyle = `rgba(${Math.round(eyeGlow.r * 255)}, ${Math.round(eyeGlow.g * 255)}, ${Math.round(eyeGlow.b * 255)}, ${0.14 * glow})`;
     ctx.beginPath();
     ctx.ellipse(eyeCx, eyeY, eyeW + 6, eyeH + 7, 0, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.fillStyle = eyeColor;
     ctx.beginPath();
-    ctx.ellipse(eyeCx, eyeY, eyeW * squash * outerSqueeze, eyeH * blink, 0, 0, Math.PI * 2);
+    ctx.ellipse(eyeCx, eyeY, eyeW * outerSqueeze, eyeH * blink, 0, 0, Math.PI * 2);
     ctx.fill();
 
     const pupilX = eyeCx + lookX * 5 - edgeSign * curveComp * 0.18;
@@ -182,9 +184,9 @@ function drawFace(
   };
 
   drawEye(cx - eyeSpacing, -1);
-  drawEye(cx + eyeSpacing, 1, mood === "happy" ? 0.9 : 1);
+  drawEye(cx + eyeSpacing, 1);
 
-  drawMouth(ctx, mood, cx, cy + 30 * safe + surprise * 3, mouthOpen * 0.82, surprise, accent);
+  drawMouth(ctx, mood, cx, cy + 22 * safe + surprise * 2, mouthOpen * 0.82, surprise, accent);
 }
 
 /**

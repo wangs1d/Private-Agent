@@ -17,6 +17,7 @@ declare global {
       onPatch?: (cb: (patch: Record<string, unknown>) => void) => void;
       onRoam?: (cb: () => void) => void;
     };
+    spherePetPos?: { x: number; y: number };
     SpeechRecognition?: typeof SpeechRecognition;
     webkitSpeechRecognition?: typeof SpeechRecognition;
   }
@@ -30,6 +31,7 @@ interface UseOverlayWindowMotionOptions {
 /** 桌面 overlay 模式 — Electron 窗口在屏幕上自主漫游 */
 export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOverlayWindowMotionOptions) {
   const targetRef = useRef<{ x: number; y: number } | null>(null);
+  const currentPosRef = useRef<{ x: number; y: number } | null>(null);
   const nextMoveAt = useRef(0);
   /** 垂直方向小幅度振荡（用于身体晃动时窗口上下抖） */
   const verticalShakeRef = useRef<{
@@ -46,6 +48,15 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
     };
   }, []);
 
+  const syncPetScreenCenter = useCallback((x: number, y: number) => {
+    const { w, h } = pickPetSize();
+    currentPosRef.current = { x, y };
+    window.spherePetPos = {
+      x: x + w / 2,
+      y: y + h / 2,
+    };
+  }, [pickPetSize]);
+
   const roamNow = useCallback(async () => {
     if (!window.sphereOverlay) return;
     const area = await window.sphereOverlay.getWorkArea();
@@ -55,9 +66,10 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
     const x = area.x + margin + Math.random() * Math.max(40, area.width - w - margin * 2);
     const y = area.y + margin + Math.random() * Math.max(40, area.height - h - margin * 2);
     targetRef.current = { x, y };
+    syncPetScreenCenter(x, y);
     window.sphereOverlay.moveTo(Math.round(x), Math.round(y), 1200);
     nextMoveAt.current = Date.now() + 5000;
-  }, [mood, pickPetSize]);
+  }, [mood, pickPetSize, syncPetScreenCenter]);
 
   /**
    * 上下方向小幅度振荡 — 让窗口在当前位置附近快速来回移动（视觉上的"上蹿下跳"）。
@@ -105,6 +117,9 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
         const dy = Math.round(dir * ref.amplitude * (0.4 + Math.random() * 0.6));
         const dx = Math.round((Math.random() - 0.5) * ref.amplitude * 0.3);
         window.sphereOverlay?.moveBy?.(dx, dy);
+        if (currentPosRef.current) {
+          syncPetScreenCenter(currentPosRef.current.x + dx, currentPosRef.current.y + dy);
+        }
         ref.nextShakeAt = now + 50 + Math.random() * 30;
       }
     };
@@ -124,6 +139,14 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
 
     // 启动后先停留 45s，避免一出现就漫游到屏幕外被误认为"消失"
     nextMoveAt.current = Date.now() + 45_000;
+    void window.sphereOverlay.getWorkArea().then((area) => {
+      if (cancelled) return;
+      const { w, h } = pickPetSize();
+      syncPetScreenCenter(
+        area.x + Math.max(12, area.width - w - 12),
+        area.y + Math.max(12, area.height - h - 12),
+      );
+    });
     const raf = window.requestAnimationFrame(tick);
 
     return () => {
@@ -131,8 +154,9 @@ export function useOverlayWindowMotion({ enabled = false, mood = "idle" }: UseOv
       setOverlayRoamHandler(null);
       window.cancelAnimationFrame(raf);
       verticalShakeRef.current.active = false;
+      delete window.spherePetPos;
     };
-  }, [enabled, mood, roamNow]);
+  }, [enabled, mood, pickPetSize, roamNow, syncPetScreenCenter]);
 
   return { roamNow, triggerVerticalShake };
 }

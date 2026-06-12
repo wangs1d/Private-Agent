@@ -199,22 +199,8 @@ export function useSphereUserDrag({
 
       const spin = Math.min(1, (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.18);
       applyFaceSignals(1, spin);
-      onTouch?.({ phase: "drag", spinStrength: spin });
 
       // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动（带冷却限流）
-      const intensityDelta = Math.abs(rotY) + Math.abs(rotX) * 1.4;
-      liveReactBucketRef.current += intensityDelta;
-      while (liveReactBucketRef.current >= LIVE_REACT_THRESHOLD) {
-        liveReactBucketRef.current -= LIVE_REACT_THRESHOLD;
-        const now = performance.now();
-        if (now - lastLiveReactTimeRef.current >= LIVE_REACT_COOLDOWN_MS) {
-          lastLiveReactTimeRef.current = now;
-          onLiveReact?.(
-            Math.min(1, 0.4 + spin * 0.5 + liveReactBucketRef.current / LIVE_REACT_THRESHOLD * 0.4),
-            "rotate",
-          );
-        }
-      }
     },
     [api, applyFaceSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
   );

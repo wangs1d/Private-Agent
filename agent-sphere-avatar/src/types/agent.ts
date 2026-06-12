@@ -30,6 +30,13 @@ export interface AgentState {
   subAgentType?: string;
   subAgentDisplayName?: string;
   source?: string;
+  attentionTarget?: {
+    screenX: number;
+    screenY: number;
+    strength?: number;
+    source?: string;
+    expiresAt?: number;
+  };
   messages?: Message[];
   taskEvents?: TaskEvent[];
 }

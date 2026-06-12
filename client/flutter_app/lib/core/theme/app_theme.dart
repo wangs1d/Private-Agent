@@ -69,57 +69,57 @@ abstract final class AppPalette {
   // 整体走「燕麦米白」：极浅暖灰底 + 略深的米色侧栏 + 近乎白的工作台卡片
   // 强调色收敛为低饱和的暖橙
   // ═══════════════════════════════════════════════════════════
-  static const Color warmMainPanel = Color(0xFFF7F3EC);
-  static const Color warmSidebar = Color(0xFFF3EDE3);
-  static const Color warmSidebarSeparator = Color(0xFFE7DED2);
-  static const Color warmAppBarForeground = Color(0xFF4E463C);
-  static const Color warmSidebarDivider = Color(0xFFE4D9CB);
-  static const Color warmSidebarIconDefault = Color(0xFFA99D8F);
-  static const Color warmSidebarIconHover = Color(0xFF6F6457);
-  static const Color warmSidebarIconSelected = Color(0xFF7E7365);
+  static const Color warmMainPanel = Color(0xFFF8FAFD);
+  static const Color warmSidebar = Color(0xFFF6F8FB);
+  static const Color warmSidebarSeparator = Color(0xFFE5EAF1);
+  static const Color warmAppBarForeground = Color(0xFF21242B);
+  static const Color warmSidebarDivider = Color(0xFFE8EDF4);
+  static const Color warmSidebarIconDefault = Color(0xFF747C88);
+  static const Color warmSidebarIconHover = Color(0xFF2C3440);
+  static const Color warmSidebarIconSelected = Color(0xFF2FA8F8);
 
   // 暖色 surface 渐层（与 ColorScheme.fromSeed 输出的 surfaceContainer* 对齐）
-  static const Color warmSurfaceContainerLowest = Color(0xFFFFFCF7);
-  static const Color warmSurfaceContainerLow = Color(0xFFFBF7F1);
-  static const Color warmSurfaceContainer = Color(0xFFF6F0E7);
-  static const Color warmSurfaceContainerHigh = Color(0xFFEEE5D9);
-  static const Color warmSurfaceContainerHighest = Color(0xFFE5D8C8);
+  static const Color warmSurfaceContainerLowest = Color(0xFFFFFFFF);
+  static const Color warmSurfaceContainerLow = Color(0xFFFDFEFF);
+  static const Color warmSurfaceContainer = Color(0xFFF6F8FC);
+  static const Color warmSurfaceContainerHigh = Color(0xFFF0F4F9);
+  static const Color warmSurfaceContainerHighest = Color(0xFFE8EDF4);
 
   // 暖色文字 / 描边
-  static const Color warmOnSurface = Color(0xFF3F382F);
-  static const Color warmOnSurfaceVariant = Color(0xFF8B7F72);
-  static const Color warmOutline = Color(0xFFD9CCBD);
+  static const Color warmOnSurface = Color(0xFF232833);
+  static const Color warmOnSurfaceVariant = Color(0xFF98A2B3);
+  static const Color warmOutline = Color(0xFFDCE3EC);
 
   // 暖色强调（primary / secondary / tertiary）—— 收敛饱和度，更接近截图
-  static const Color warmPrimary = Color(0xFF9B8770);
-  static const Color warmOnPrimary = Color(0xFFFFFBF6);
-  static const Color warmPrimaryContainer = Color(0xFFF0E5D6);
-  static const Color warmOnPrimaryContainer = Color(0xFF4B4033);
-  static const Color warmSecondary = Color(0xFFB69E84);
-  static const Color warmOnSecondary = Color(0xFFFFFBF7);
-  static const Color warmSecondaryContainer = Color(0xFFF3E8D9);
-  static const Color warmOnSecondaryContainer = Color(0xFF54483C);
-  static const Color warmTertiary = Color(0xFFC8B49B);
-  static const Color warmOnTertiary = Color(0xFFFFFBF7);
-  static const Color warmTertiaryContainer = Color(0xFFF6EEE3);
-  static const Color warmOnTertiaryContainer = Color(0xFF5C5044);
+  static const Color warmPrimary = Color(0xFF2C3440);
+  static const Color warmOnPrimary = Color(0xFFFFFFFF);
+  static const Color warmPrimaryContainer = Color(0xFFF1F4F8);
+  static const Color warmOnPrimaryContainer = Color(0xFF2C3440);
+  static const Color warmSecondary = Color(0xFF6B5CA5);
+  static const Color warmOnSecondary = Color(0xFFFFFFFF);
+  static const Color warmSecondaryContainer = Color(0xFFF3F0FB);
+  static const Color warmOnSecondaryContainer = Color(0xFF51437D);
+  static const Color warmTertiary = Color(0xFF8E5B7B);
+  static const Color warmOnTertiary = Color(0xFFFFFFFF);
+  static const Color warmTertiaryContainer = Color(0xFFF7EEF4);
+  static const Color warmOnTertiaryContainer = Color(0xFF704661);
 
   // 暖色：五子棋邀请卡片 / 定位弹窗
-  static const Color warmGomokuCardBg = Color(0xFFFCF8F2);
-  static const Color warmGomokuCardBorder = Color(0xFFD9CCBD);
-  static const Color warmGomokuCardTitle = Color(0xFF3F382F);
-  static const Color warmGomokuCardBody = Color(0xFF7D7266);
-  static const Color warmGomokuCardButtonBg = Color(0xFFEEE3D4);
-  static const Color warmGomokuCardButtonFg = Color(0xFF4A4035);
+  static const Color warmGomokuCardBg = Color(0xFFFFFFFF);
+  static const Color warmGomokuCardBorder = Color(0xFFDCE3EC);
+  static const Color warmGomokuCardTitle = Color(0xFF232833);
+  static const Color warmGomokuCardBody = Color(0xFF667085);
+  static const Color warmGomokuCardButtonBg = Color(0xFFF3F6FB);
+  static const Color warmGomokuCardButtonFg = Color(0xFF2A3340);
 
-  static const Color warmLocationDialogBg = Color(0xFFF7F3EC);
-  static const Color warmLocationDialogCard = Color(0xFFFFFCF7);
-  static const Color warmLocationDialogBorder = Color(0xFFD9CCBD);
-  static const Color warmLocationDialogTitle = Color(0xFF3F382F);
-  static const Color warmLocationDialogBody = Color(0xFF7D7266);
-  static const Color warmLocationDialogMuted = Color(0xFFA4988A);
-  static const Color warmLocationDialogButtonBg = Color(0xFFF0E5D6);
-  static const Color warmLocationDialogButtonFg = Color(0xFF4B4033);
+  static const Color warmLocationDialogBg = Color(0xFFF8FAFD);
+  static const Color warmLocationDialogCard = Color(0xFFFFFFFF);
+  static const Color warmLocationDialogBorder = Color(0xFFDCE3EC);
+  static const Color warmLocationDialogTitle = Color(0xFF232833);
+  static const Color warmLocationDialogBody = Color(0xFF667085);
+  static const Color warmLocationDialogMuted = Color(0xFF98A2B3);
+  static const Color warmLocationDialogButtonBg = Color(0xFFEAF3FF);
+  static const Color warmLocationDialogButtonFg = Color(0xFF0055B8);
 
   // ═══════════════════════════════════════════════════════════
   // 运行时调色板入口（按当前 [AppThemeVariant] 返回对应色）
@@ -158,7 +158,7 @@ abstract final class AppPalette {
   static const Color cardBackgroundDark = Color(0xFF0F0F0F);
 
   /// 暖色主题下卡片比主背景略浅，几乎为奶白
-  static const Color cardBackgroundWarm = Color(0xFFFFFCF8);
+  static const Color cardBackgroundWarm = Color(0xFFFFFFFF);
 
   static Color resolveCardBackground(AppThemeVariant v) =>
       v == AppThemeVariant.warm ? cardBackgroundWarm : cardBackgroundDark;

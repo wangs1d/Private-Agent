@@ -522,9 +522,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "reminder.plan",
       description:
-        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。"
-
-**提醒方式规则（重要）**：默认使用弹窗（popup）方式通知用户。仅当用户明确要求时才使用 TTS 语音闹钟或电话呼叫方式，例如用户说「打电话提醒我」「语音喊我」「电话叫醒我」。不要主动升级到 TTS 或电话方式，除非用户有明确偏好或主动提出需求。,
+        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。\n**提醒方式规则（重要）**：默认使用弹窗（popup）方式通知用户。仅当用户明确要求时才使用 TTS 语音闹钟或电话呼叫方式，例如用户说「打电话提醒我」「语音喊我」「电话叫醒我」。不要主动升级到 TTS 或电话方式，除非用户有明确偏好或主动提出需求。",
       parameters: {
         type: "object",
         properties: {

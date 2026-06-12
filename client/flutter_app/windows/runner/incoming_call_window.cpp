@@ -25,6 +25,8 @@
 namespace {
 
 constexpr LPCWSTR kRingAliasIncoming = L"IncomingCall";
+constexpr UINT kFlashCount = 6;
+constexpr DWORD kFlashTimeoutMs = 0;
 
 // ── 窗口尺寸（仿微信PC来电：紧凑横条） ──
 constexpr int kWindowWidth = 300;
@@ -85,6 +87,17 @@ void EnableDwmShadow(HWND hwnd) {
   BOOL prefer_angular_corners = FALSE;
   DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
                         &prefer_angular_corners, sizeof(prefer_angular_corners));
+}
+
+void FlashForAttention(HWND hwnd) {
+  if (!hwnd) return;
+  FLASHWINFO flash = {};
+  flash.cbSize = sizeof(flash);
+  flash.hwnd = hwnd;
+  flash.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+  flash.uCount = kFlashCount;
+  flash.dwTimeout = kFlashTimeoutMs;
+  FlashWindowEx(&flash);
 }
 
 }  // namespace
@@ -194,6 +207,7 @@ void IncomingCallWindow::Show(const std::string& caller_name,
 
   if (!CreateWindowIfNeeded()) return;
   PositionAtBottomRight();
+  FlashForAttention(window_handle_);
 
   StartRingtone();
   StartPulseTimer();
@@ -248,8 +262,10 @@ bool IncomingCallWindow::IsVisible() const {
 }
 
 void IncomingCallWindow::StartRingtone() {
-  PlaySoundW(kRingAliasIncoming, nullptr,
-             SND_ALIAS_ID | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+  if (!PlaySoundW(kRingAliasIncoming, nullptr,
+                  SND_ALIAS_ID | SND_ASYNC | SND_LOOP | SND_NODEFAULT)) {
+    MessageBeep(MB_ICONEXCLAMATION);
+  }
 }
 
 void IncomingCallWindow::StopRingtone() {
