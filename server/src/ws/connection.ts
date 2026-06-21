@@ -33,6 +33,7 @@ import {
 import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
+import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import {
   AgentWorldClientEventType,
   AgentWorldServerEventType,
@@ -119,6 +120,27 @@ function getClientIp(request: any): string | undefined {
   return request.socket?.remoteAddress;
 }
 
+function parsePhoneDeviceInfo(payload: Record<string, unknown>): Record<string, unknown> {
+  const deviceInfo: Record<string, unknown> = {};
+  const keys = [
+    "model",
+    "manufacturer",
+    "brand",
+    "androidVersion",
+    "sdkInt",
+    "isHuawei",
+    "isHarmonyOS",
+    "systemVersion",
+    "batteryLevel",
+  ];
+  for (const key of keys) {
+    if (payload[key] !== undefined) {
+      deviceInfo[key] = payload[key];
+    }
+  }
+  return deviceInfo;
+}
+
 export type WsRouteDeps = {
   sessionService: SessionService;
   realFundsWallet: RealFundsWalletService;
@@ -135,6 +157,7 @@ export type WsRouteDeps = {
   agentMemorySyncService: AgentMemorySyncService;
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
+  phoneBridgeCoordinator: PhoneBridgeCoordinator;
   virtualPhoneService: VirtualPhoneService;
   virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
   userPersonalizationService: UserPersonalizationService;
@@ -157,6 +180,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     agentMemorySyncService,
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
+    phoneBridgeCoordinator,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
@@ -180,6 +204,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
       const ws = socket as SocketWithHeartbeat;
       let boundActorId: string | undefined;
       let initAsDesktopBridge = false;
+      let initAsPhoneBridge = false;
       const clientIp = getClientIp(request);
       ws.isAlive = true;
       let heartbeatMissedAt = 0;
@@ -232,6 +257,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         }
         desktopBridgeCoordinator.unbindIfSocket(socket);
         desktopBridgeCoordinator.cancelPendingForSocket(socket);
+        if (boundActorId) {
+          phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
+        }
+        phoneBridgeCoordinator.cancelPendingForSocket(socket);
         if (boundActorId) {
           messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
           socialFeedService.unsubscribe(boundActorId);
@@ -461,6 +490,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           const isDesktopBridgeChannel = payload.desktopBridge === true;
+          const isPhoneBridgeChannel = payload.phoneBridge === true;
           if (isDesktopBridgeChannel) {
             if (!userIdRaw) {
               socket.send(
@@ -487,6 +517,32 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               return;
             }
           }
+          if (isPhoneBridgeChannel) {
+            if (!userIdRaw) {
+              socket.send(
+                JSON.stringify({
+                  type: ServerEventType.ErrorEvent,
+                  payload: {
+                    code: "PHONE_BRIDGE_USER_ID_REQUIRED",
+                    message: "手机桥接须提供 userId，不可仅用 sessionId",
+                  },
+                }),
+              );
+              return;
+            }
+            if (!phoneBridgeCoordinator.isBridgeFeatureEnabled()) {
+              socket.send(
+                JSON.stringify({
+                  type: ServerEventType.ErrorEvent,
+                  payload: {
+                    code: "PHONE_BRIDGE_DISABLED",
+                    message: "服务端未开启手机桥接（设置 PHONE_BRIDGE_ENABLED=1 或 PHONE_BRIDGE_TOKEN）",
+                  },
+                }),
+              );
+              return;
+            }
+          }
           const deviceId = String(payload.deviceId ?? "");
           const userAlias = payload.userAlias ? String(payload.userAlias) : undefined;
           sessionService.upsert({ sessionId: actorId, deviceId, userAlias });
@@ -497,18 +553,31 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           desktopBridgeCoordinator.unbindIfSocket(socket);
           if (boundActorId && boundActorId !== actorId) {
+            phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
+          }
+          if (boundActorId && boundActorId !== actorId) {
             wsConnectionRegistry.unregister(boundActorId, socket);
           }
           boundActorId = actorId;
           initAsDesktopBridge = isDesktopBridgeChannel;
-          if (!isDesktopBridgeChannel) {
+          initAsPhoneBridge = isPhoneBridgeChannel;
+          if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             wsConnectionRegistry.register(actorId, socket);
             getEmbodimentAutonomy()?.registerSession(actorId);
-          } else if (!desktopBridgeCoordinator.requiresRegisterToken()) {
+          } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
               JSON.stringify({
                 type: ServerEventType.DesktopBridgeRegisterAck,
+                payload: { ok: true, actorId, mode: "userId" },
+              }),
+            );
+          } else if (isPhoneBridgeChannel && !phoneBridgeCoordinator.requiresRegisterToken()) {
+            const deviceInfo = parsePhoneDeviceInfo(payload);
+            phoneBridgeCoordinator.bindExecutor(actorId, socket, deviceInfo);
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.PhoneBridgeRegisterAck,
                 payload: { ok: true, actorId, mode: "userId" },
               }),
             );
@@ -601,6 +670,78 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.PhoneBridgeRegister) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          if (!initAsPhoneBridge) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "PHONE_BRIDGE_INIT_REQUIRED",
+                  message: "session.init 须设置 phoneBridge: true 方可绑定手机执行器",
+                },
+              }),
+            );
+            return;
+          }
+          if (!phoneBridgeCoordinator.requiresRegisterToken()) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.PhoneBridgeRegisterAck,
+                payload: { ok: true, actorId: boundActorId, mode: "userId", note: "当前为无口令模式，已在 session.init 自动绑定" },
+              }),
+            );
+            return;
+          }
+          const token = String((event.payload as Record<string, unknown>).token ?? "").trim();
+          if (!phoneBridgeCoordinator.verifyRegisterToken(token)) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "PHONE_BRIDGE_TOKEN_REJECTED",
+                  message: "桥接 token 与服务器 PHONE_BRIDGE_TOKEN 不一致",
+                },
+              }),
+            );
+            return;
+          }
+          const deviceInfo = parsePhoneDeviceInfo(event.payload as Record<string, unknown>);
+          phoneBridgeCoordinator.bindExecutor(boundActorId, socket, deviceInfo);
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.PhoneBridgeRegisterAck,
+              payload: { ok: true, actorId: boundActorId, mode: "token" },
+            }),
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.PhoneBridgeResult) {
+          if (!boundActorId) return;
+          const pl = event.payload as Record<string, unknown>;
+          const jobId = String(pl.jobId ?? "").trim();
+          if (!jobId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "BAD_PHONE_BRIDGE_RESULT", message: "缺少 jobId" },
+              }),
+            );
+            return;
+          }
+          phoneBridgeCoordinator.completeFromSocket(boundActorId, socket, jobId, pl as PhoneBridgeResult);
+          return;
+        }
+
         if (event.type === ClientEventType.ChatUserMessage) {
           await handleChatUserMessageEvent(
             {
@@ -669,7 +810,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
-          if (initAsDesktopBridge) return;
+          if (initAsDesktopBridge || initAsPhoneBridge) return;
           handleAgentEmbodimentStateEvent(boundActorId, event.payload);
           return;
         }

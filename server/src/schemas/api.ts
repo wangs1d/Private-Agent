@@ -558,3 +558,16 @@ export const companionContactFeedbackBodySchema = z.object({
   feedback: z.enum(["positive", "negative", "neutral"]).optional(),
   quietHours: z.boolean().optional(),
 });
+
+/** 屏幕区域截图 → OCR → 翻译 请求体 */
+export const translateScreenRegionBodySchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  /** 截图的 base64（不含 data:image/...;base64, 前缀） */
+  imageBase64: z.string().min(1).max(20 * 1024 * 1024),
+  /** 截图 MIME，默认 image/png */
+  mimeType: z.string().min(3).max(120).optional(),
+  /** PaddleOCR 源语言，可选 */
+  sourceLang: z.string().min(1).max(16).optional(),
+  /** 翻译目标语言，默认 zh */
+  targetLang: z.string().min(1).max(16).optional(),
+});

@@ -24,6 +24,8 @@ export type ToolContext = {
   agentAccessMode?: AgentAccessMode;
   /** 电脑桥接在线时允许 desktop.visual.* */
   desktopBridgeOnline?: boolean;
+  /** 手机桥接在线时允许 phone.* */
+  phoneBridgeOnline?: boolean;
 };
 
 export type ToolHandler = (input: Record<string, unknown>, context: ToolContext) => Promise<Record<string, unknown>>;
@@ -97,6 +99,7 @@ export class ToolRegistry {
     const accessMode = parseAgentAccessMode(context.agentAccessMode);
     if (!isToolAllowedInAccessMode(registryName, accessMode, {
       desktopBridgeOnline: context.desktopBridgeOnline,
+      phoneBridgeOnline: context.phoneBridgeOnline,
     })) {
       return { ok: false, result: { error: sandboxDeniedToolMessage(registryName) } };
     }

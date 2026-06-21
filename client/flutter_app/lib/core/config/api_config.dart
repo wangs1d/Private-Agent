@@ -88,6 +88,12 @@ class ApiConfig {
 
   static const String _wsUrlFromEnv = String.fromEnvironment("WS_URL");
 
+  /// 手机桥接 Token（与服务端 PHONE_BRIDGE_TOKEN 对应；无口令模式可留空）。
+  static const String phoneBridgeToken = String.fromEnvironment(
+    "PHONE_BRIDGE_TOKEN",
+    defaultValue: "",
+  );
+
   /// WebSocket 地址；未配置时由 [httpBase] 推导。
   static String get wsUrl {
     if (_wsUrlFromEnv.isNotEmpty) {

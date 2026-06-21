@@ -15,11 +15,13 @@ import type {
 } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
+import type { PhoneBridgeCoordinator } from "../phone-bridge-coordinator.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 
 export interface IntelligentReminderSystemDeps {
   toolRegistry: ToolRegistry;
   virtualPhoneService: VirtualPhoneService;
+  phoneBridgeCoordinator?: PhoneBridgeCoordinator;
   voiceDialogueService: VoiceDialogueService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
   /**
@@ -78,6 +80,16 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     {
       onPopupReminder: async (instance) => {
         const userId = instance.config.metadata?.userId as string ?? "unknown";
+        // 若用户真实手机在线，同步触发物理响铃
+        if (deps.phoneBridgeCoordinator?.hasExecutor(userId)) {
+          deps.phoneBridgeCoordinator
+            .invoke(userId, "ring", {
+              reason: `日程提醒：${instance.config.title}`,
+              durationSec: 15,
+              vibrate: true,
+            })
+            .catch((err) => deps.logger?.error?.(`[reminder] phone.ring 失败: ${String(err)}`));
+        }
         try {
           await popupHandler.handle(instance);
         } catch (wsErr) {

@@ -5,8 +5,8 @@ import "package:http/http.dart" as http;
 import "dart:convert";
 
 import "../../core/config/api_config.dart";
-import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/models/chat_models.dart";
+import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
@@ -717,76 +717,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     );
   }
 
-  Widget _buildMessageText(
-    ColorScheme cs,
-    ChatMessage message, {
-    required bool isUser,
-    ContentSummaryParseResult? contentSummary,
-  }) {
-    if (isUser) {
-      return Text(
-        message.text,
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: cs.onSurface,
-            ),
-      );
-    }
-
-    if (contentSummary?.summary != null) {
-      return ContentSummaryMessageBody(
-        summary: contentSummary!.summary!,
-        briefText: contentSummary.briefText,
-        extraText: contentSummary.cleanedText,
-        onCardTap: () => ContentSummaryDetailModal.show(
-          context,
-          contentSummary.summary!,
-        ),
-      );
-    }
-
-    return Text(
-      stripMarkdown(message.text),
-      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: cs.onSurface,
-          ),
-    );
-  }
-
-  /// 构建灰色链接显示组件
-  Widget _buildGrayLinks(String text) {
-    final RegExp urlRegex = RegExp(r'https?://\S+');
-    final Iterable<RegExpMatch> matches = urlRegex.allMatches(text);
-    
-    if (matches.isEmpty) return const SizedBox.shrink();
-    
-    final List<Widget> linkWidgets = [];
-    for (final match in matches) {
-      final String url = match.group(0)!;
-      linkWidgets.add(Container(
-        margin: const EdgeInsets.only(bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: Colors.grey.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
-        ),
-        child: Text(
-          url,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Colors.grey[600],
-            fontSize: 12,
-          ),
-        ),
-      ));
-    }
-    
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: linkWidgets,
-    );
-  }
-
-  /// 构建消息时间戳
   /// 鼠标悬停消息气泡时自动浮现操作按钮栏
   Widget _buildHoverableMessage({
     required ColorScheme cs,
@@ -806,6 +736,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       mainMessage: mainMessage,
       isUser: isUser,
       contentSummary: contentSummary,
+      agentName: widget.agentName,
       onDeleteMessage: widget.onDeleteMessage,
       onDeleteFromMessage: widget.onDeleteFromMessage,
       onOpenGomoku: widget.onOpenGomoku,
@@ -852,37 +783,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     return ids;
-  }
-
-  /// 构建消息时间戳
-  Widget _buildMessageTimestamp(ChatMessage message, bool isUser) {
-    final DateTime now = DateTime.now();
-    final DateTime msgTime = message.timestamp;
-    final Duration diff = now.difference(msgTime);
-
-    String timeStr;
-    if (diff.inMinutes < 1) {
-      timeStr = "刚刚";
-    } else if (diff.inHours < 1) {
-      timeStr = "${diff.inMinutes}分钟前";
-    } else if (diff.inDays < 1) {
-      timeStr = "${diff.inHours}小时前";
-    } else if (diff.inDays < 7) {
-      timeStr = "${diff.inDays}天前";
-    } else {
-      timeStr = "${msgTime.month}/${msgTime.day} ${msgTime.hour.toString().padLeft(2, '0')}:${msgTime.minute.toString().padLeft(2, '0')}";
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Text(
-        timeStr,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
-          fontSize: 11,
-        ),
-      ),
-    );
   }
 
   @override
@@ -1297,6 +1197,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
           ),
         );
   }
+
 }
 
 class _GomokuPlayUrlCard extends StatelessWidget {
@@ -1375,6 +1276,7 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.isUser,
     required this.cardPadding,
     this.contentSummary,
+    this.agentName,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
     this.onOpenGomoku,
@@ -1400,6 +1302,7 @@ class _HoverableMessageWidget extends StatelessWidget {
   final bool isUser;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
+  final String? agentName;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final void Function(String playUrlOrTableId)? onOpenGomoku;
@@ -1434,6 +1337,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       isUser: isUser,
       cardPadding: cardPadding,
       contentSummary: contentSummary,
+      agentName: agentName,
       onDeleteMessage: onDeleteMessage,
       onDeleteFromMessage: onDeleteFromMessage,
       onOpenGomoku: onOpenGomoku,
@@ -1459,6 +1363,7 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.isUser,
     required this.cardPadding,
     this.contentSummary,
+    this.agentName,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
     this.onOpenGomoku,
@@ -1479,6 +1384,7 @@ class _HoverableMessageContent extends StatefulWidget {
   final bool isUser;
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
+  final String? agentName;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final void Function(String playUrlOrTableId)? onOpenGomoku;
@@ -1516,35 +1422,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             child: Align(
               alignment:
                   widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment:
-                    widget.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                children: [
-                  // 删除选择模式：左侧勾选 + 高亮内容（仅当前配对范围内的消息参与）
-                  if (widget.inSelectableRange)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12, right: 8),
-                          child: Checkbox(
-                            value: widget.isSelected,
-                            // 触发删除的用户消息不可取消勾选
-                            onChanged: widget.isTrigger ? null : (bool? v) {
-                              widget.onToggleSelection(widget.mainMessage.messageId, v ?? true);
-                            },
-                          ),
-                        ),
-                        Flexible(child: _buildMessageCard(context, highlight: widget.isSelected)),
-                      ],
-                    )
-                  else
-                    _buildMessageCard(context),
-                  _buildTimestampInner(widget.mainMessage, widget.isUser, context),
-                ],
-              ),
+              child: _buildMessageRow(context),
             ),
           ),
           // 悬停时浮现操作按钮栏（所有用户消息，非选择模式下，透明背景）
@@ -1600,6 +1478,166 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  /// 构建包含头像、时间、气泡的完整消息行
+  Widget _buildMessageRow(BuildContext context) {
+    final Widget bubble = _buildMessageCard(context, highlight: widget.isSelected);
+
+    if (widget.inSelectableRange) {
+      // 删除选择模式：左侧勾选 + 头像/气泡
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 12, right: 8),
+            child: Checkbox(
+              value: widget.isSelected,
+              onChanged: widget.isTrigger ? null : (bool? v) {
+                widget.onToggleSelection(widget.mainMessage.messageId, v ?? true);
+              },
+            ),
+          ),
+          if (!widget.isUser) _buildAvatar(context, isUser: false),
+          Flexible(child: _buildMessageColumn(bubble)),
+          if (widget.isUser) _buildAvatar(context, isUser: true),
+        ],
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (!widget.isUser) _buildAvatar(context, isUser: false),
+        Flexible(child: _buildMessageColumn(bubble)),
+        if (widget.isUser) _buildAvatar(context, isUser: true),
+      ],
+    );
+  }
+
+  Widget _buildMessageColumn(Widget bubble) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment:
+          widget.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: <Widget>[
+        _buildMessageHeader(),
+        bubble,
+      ],
+    );
+  }
+
+  Widget _buildMessageHeader() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final String timeStr = _formatTime(widget.mainMessage.timestamp);
+    final TextStyle timeStyle = TextStyle(
+      fontSize: 10,
+      color: cs.onSurfaceVariant,
+    );
+
+    if (widget.isUser) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 2, right: 4),
+        child: Text(timeStr, style: timeStyle),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2, left: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            widget.agentName ?? "AI 助手",
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(timeStr, style: timeStyle),
+        ],
+      ),
+    );
+  }
+
+  static String _formatTime(DateTime time) {
+    return "${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}";
+  }
+
+  Widget _buildAvatar(BuildContext context, {required bool isUser}) {
+    if (isUser) {
+      return Container(
+        width: 36,
+        height: 36,
+        margin: const EdgeInsets.only(left: 10, top: 4),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: <Color>[
+              Color(0xFF8E8E93),
+              Color(0xFF6E6E73),
+            ],
+          ),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.1),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.5),
+            width: 1,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: const Icon(
+          Icons.person_outline,
+          size: 18,
+          color: Colors.white,
+        ),
+      );
+    }
+
+    return Container(
+      width: 36,
+      height: 36,
+      margin: const EdgeInsets.only(right: 10, top: 4),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: const RadialGradient(
+          center: Alignment(-0.3, -0.3),
+          colors: <Color>[
+            Color(0xFF007AFF),
+            Color(0xB3007AFF),
+            Color(0xE60056D2),
+          ],
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Color(0x4D007AFF),
+            blurRadius: 20,
+            offset: Offset.zero,
+          ),
+        ],
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.4),
+          width: 1,
+        ),
+      ),
+      alignment: Alignment.center,
+      child: const Icon(
+        Icons.smart_toy_outlined,
+        size: 18,
+        color: Colors.white,
       ),
     );
   }
@@ -1726,81 +1764,132 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   /// 构建消息卡片（支持高亮态）
   Widget _buildMessageCard(BuildContext context, {bool highlight = false}) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      color: highlight
-          ? Colors.red.withValues(alpha: 0.06)
-          : (widget.isUser
-              ? const Color(0xFF007AFF)
-              : widget.cs.surfaceContainerLowest),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: highlight
-              ? Colors.red.withValues(alpha: 0.35)
-              : (widget.isUser
-                  ? const Color(0xFF007AFF)
-                  : widget.cs.outline.withValues(alpha: 0.6)),
-        ),
-      ),
-      child: Padding(
-        padding: widget.cardPadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            if (widget.mainMessage.attachmentImageCount > 0)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(
-                      Icons.photo_camera_outlined,
-                      size: 16,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      "配图 ×${widget.mainMessage.attachmentImageCount}",
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .primary,
-                          ),
-                    ),
-                  ],
-                ),
-              ),
-            // 消息正文
-            _buildMessageTextInner(
-              context,
-              widget.cs,
-              widget.mainMessage,
-              isUser: widget.isUser,
-              contentSummary: widget.contentSummary,
-            ),
-            if (!widget.isUser &&
-                widget.contentSummary?.summary == null &&
-                widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: _buildGrayLinksInner(widget.mainMessage.text, context),
-              ),
-            if (!widget.isUser && widget.mainMessage.playUrl != null && widget.mainMessage.playUrl!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: _GomokuPlayUrlCard(
-                  playUrl: widget.mainMessage.playUrl!,
-                  onOpen: widget.onOpenGomoku,
-                ),
-              ),
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final BorderRadius borderRadius = widget.isUser
+        ? const BorderRadius.only(
+            topLeft: Radius.circular(16),
+            topRight: Radius.circular(6),
+            bottomLeft: Radius.circular(16),
+            bottomRight: Radius.circular(16),
+          )
+        : const BorderRadius.only(
+            topLeft: Radius.circular(6),
+            topRight: Radius.circular(16),
+            bottomLeft: Radius.circular(16),
+            bottomRight: Radius.circular(16),
+          );
+
+    final Decoration decoration;
+    if (widget.isUser) {
+      decoration = BoxDecoration(
+        borderRadius: borderRadius,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: <Color>[
+            Color(0xFF007AFF),
+            Color(0xCC007AFF),
           ],
         ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: const Color(0xFF007AFF).withValues(alpha: 0.2),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      );
+    } else {
+      decoration = BoxDecoration(
+        borderRadius: borderRadius,
+        color: cs.surfaceContainerHigh,
+        border: Border.all(
+          color: cs.outline.withValues(alpha: 0.35),
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: cs.outline.withValues(alpha: 0.15),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      );
+    }
+
+    return Container(
+      decoration: highlight
+          ? BoxDecoration(
+              borderRadius: borderRadius,
+              color: Colors.red.withValues(alpha: 0.08),
+              border: Border.all(
+                color: Colors.red.withValues(alpha: 0.4),
+              ),
+            )
+          : decoration,
+      child: ClipRRect(
+        borderRadius: borderRadius,
+        child: Padding(
+          padding: widget.cardPadding,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+                if (widget.mainMessage.attachmentImageCount > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(
+                          Icons.photo_camera_outlined,
+                          size: 16,
+                          color: widget.isUser
+                              ? Colors.white.withValues(alpha: 0.9)
+                              : Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          "配图 ×${widget.mainMessage.attachmentImageCount}",
+                          style: Theme.of(context)
+                              .textTheme
+                              .labelSmall
+                              ?.copyWith(
+                                color: widget.isUser
+                                    ? Colors.white.withValues(alpha: 0.9)
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .primary,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                // 消息正文
+                _buildMessageTextInner(
+                  context,
+                  widget.cs,
+                  widget.mainMessage,
+                  isUser: widget.isUser,
+                  contentSummary: widget.contentSummary,
+                ),
+                if (!widget.isUser &&
+                    widget.contentSummary?.summary == null &&
+                    widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: _buildGrayLinksInner(widget.mainMessage.text, context),
+                  ),
+                if (!widget.isUser && widget.mainMessage.playUrl != null && widget.mainMessage.playUrl!.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: _GomokuPlayUrlCard(
+                      playUrl: widget.mainMessage.playUrl!,
+                      onOpen: widget.onOpenGomoku,
+                    ),
+                  ),
+              ],
+            ),
+          ),
       ),
     );
   }
@@ -1876,36 +1965,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
-  /// 构建消息时间戳（从父级复用）
-  static Widget _buildTimestampInner(ChatMessage message, bool isUser, BuildContext context) {
-    final DateTime now = DateTime.now();
-    final DateTime msgTime = message.timestamp;
-    final Duration diff = now.difference(msgTime);
-
-    String timeStr;
-    if (diff.inMinutes < 1) {
-      timeStr = "刚刚";
-    } else if (diff.inHours < 1) {
-      timeStr = "${diff.inMinutes}分钟前";
-    } else if (diff.inDays < 1) {
-      timeStr = "${diff.inHours}小时前";
-    } else if (diff.inDays < 7) {
-      timeStr = "${diff.inDays}天前";
-    } else {
-      timeStr = "${msgTime.month}/${msgTime.day} ${msgTime.hour.toString().padLeft(2, '0')}:${msgTime.minute.toString().padLeft(2, '0')}";
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Text(
-        timeStr,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
-          fontSize: 11,
-        ),
-      ),
-    );
-  }
 }
 
 /// 消息下方悬浮操作按钮栏（复制 / 编辑 / 删除）—— 透明背景

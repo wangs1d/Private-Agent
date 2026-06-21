@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent 智能个人助手</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'bg-light': '#f5f5f7',
+                        'bg-white': '#ffffff',
+                        'bg-card': '#ffffff',
+                        'bg-hover': '#f0f0f5',
+                        'border-color': '#e5e5ea',
+                        'accent-blue': '#007aff',
+                        'accent-green': '#34c759',
+                        'accent-orange': '#ff9500',
+                        'text-primary': '#1d1d1f',
+                        'text-secondary': '#6e6e73',
+                        'text-muted': '#86868b',
+                    },
+                    fontFamily: {
+                        'sans': ['Inter', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .card-border {
+                border: 1px solid #e5e5ea;
+            }
+            .tool-btn {
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                border: 1px solid transparent;
+            }
+            .tool-btn:hover {
+                transform: scale(1.05);
+                border-color: rgba(0, 122, 255, 0.4);
+                box-shadow: 0 0 15px rgba(0, 122, 255, 0.15);
+                animation: toolBtnBreathe 2s ease-in-out infinite;
+            }
+            .tool-btn:active {
+                transform: scale(0.98);
+            }
+            .tool-btn.active {
+                background: rgba(0, 122, 255, 0.08);
+                border-color: rgba(0, 122, 255, 0.25);
+            }
+            .tool-btn.active svg {
+                color: #007aff;
+            }
+            .tool-btn.active span {
+                color: #007aff;
+            }
+            
+            /* 工具按钮悬停呼吸灯效果 */
+            @keyframes toolBtnBreathe {
+                0%, 100% {
+                    border-color: rgba(0, 122, 255, 0.3);
+                    box-shadow: 0 0 12px rgba(0, 122, 255, 0.1);
+                }
+                50% {
+                    border-color: rgba(0, 122, 255, 0.7);
+                    box-shadow: 0 0 25px rgba(0, 122, 255, 0.25);
+                }
+            }
+            
+            /* 常用工具容器 - 半透明白色毛玻璃背景（静态） */
+            .tools-container {
+                background: rgba(255, 255, 255, 0.8);
+                backdrop-filter: blur(10px);
+                -webkit-backdrop-filter: blur(10px);
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+            }
+            
+            /* ========== 简洁圆形悬浮效果 ========== */
+            .floating-pet {
+                animation: floating 4s ease-in-out infinite;
+            }
+            
+            @keyframes floating {
+                0%, 100% {
+                    transform: translateY(0px);
+                }
+                50% {
+                    transform: translateY(-10px);
+                }
+            }
+            
+            /* 简洁圆形光晕阴影 */
+            .float-shadow {
+                position: relative;
+                width: 80px;
+                height: 20px;
+                margin: 0 auto;
+            }
+            
+            .shadow-glow {
+                position: absolute;
+                bottom: 0;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 60px;
+                height: 12px;
+                border-radius: 50%;
+                background: radial-gradient(ellipse at center, 
+                    rgba(0, 122, 255, 0.25) 0%, 
+                    rgba(0, 122, 255, 0.08) 40%,
+                    transparent 70%);
+                animation: shadowPulse 3s ease-in-out infinite;
+            }
+            
+            @keyframes shadowPulse {
+                0%, 100% {
+                    opacity: 0.4;
+                    transform: translateX(-50%) scale(0.9);
+                }
+                50% {
+                    opacity: 0.8;
+                    transform: translateX(-50%) scale(1.1);
+                }
+            }
+            
+            /* 唤醒状态 - 光晕增强 */
+            .shadow-glow.awake {
+                animation: shadowPulseAwake 2s ease-in-out infinite;
+                background: radial-gradient(ellipse at center, 
+                    rgba(0, 122, 255, 0.4) 0%, 
+                    rgba(0, 122, 255, 0.15) 40%,
+                    transparent 70%);
+            }
+            
+            @keyframes shadowPulseAwake {
+                0%, 100% {
+                    opacity: 0.7;
+                    transform: translateX(-50%) scale(1);
+                }
+                50% {
+                    opacity: 1;
+                    transform: translateX(-50%) scale(1.2);
+                }
+            }
+            
+            /* ========== 消息气泡优化 ========== */
+            .message-bubble-ai {
+                background: rgba(255, 255, 255, 0.9);
+                backdrop-filter: blur(8px);
+                border: 1px solid rgba(0, 0, 0, 0.06);
+                box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+            }
+            
+            .message-bubble-user {
+                background: linear-gradient(135deg, rgba(0, 122, 255, 0.95), rgba(0, 122, 255, 0.8));
+                backdrop-filter: blur(8px);
+                box-shadow: 0 2px 12px rgba(0, 122, 255, 0.2);
+            }
+            
+            /* AI头像 - 3D球形机器人科技感 */
+            .ai-avatar {
+                background: radial-gradient(circle at 30% 30%, 
+                    rgba(0, 122, 255, 1) 0%, 
+                    rgba(0, 122, 255, 0.7) 50%,
+                    rgba(0, 86, 210, 0.9) 100%);
+                box-shadow: 0 0 20px rgba(0, 122, 255, 0.3),
+                            inset 0 0 10px rgba(255, 255, 255, 0.3);
+                border: 1px solid rgba(255, 255, 255, 0.4);
+            }
+            
+            /* 用户头像 - 简约人像 */
+            .user-avatar {
+                background: linear-gradient(135deg, 
+                    rgba(142, 142, 147, 1) 0%, 
+                    rgba(110, 110, 115, 1) 100%);
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.5);
+            }
+            
+            /* ========== 灵动岛 Dynamic Island - 天气专属 ========== */
+            .dynamic-island {
+                background: rgba(255, 255, 255, 0.85);
+                backdrop-filter: blur(25px) saturate(180%);
+                -webkit-backdrop-filter: blur(25px) saturate(180%);
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                box-shadow: 
+                    0 8px 32px rgba(0, 0, 0, 0.12),
+                    0 0 0 1px rgba(255, 255, 255, 0.5) inset,
+                    0 1px 0 rgba(255, 255, 255, 0.8) inset;
+                transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+                animation: islandBorderBreathe 4s ease-in-out infinite;
+                transform-origin: top center;
+                cursor: pointer;
+            }
+            
+            /* 边框呼吸灯效果 - 淡蓝色 */
+            @keyframes islandBorderBreathe {
+                0%, 100% {
+                    border-color: rgba(0, 122, 255, 0.2);
+                    box-shadow: 
+                        0 8px 32px rgba(0, 0, 0, 0.12),
+                        0 0 8px rgba(0, 122, 255, 0.08),
+                        0 0 0 1px rgba(255, 255, 255, 0.5) inset,
+                        0 1px 0 rgba(255, 255, 255, 0.8) inset;
+                }
+                50% {
+                    border-color: rgba(0, 122, 255, 0.6);
+                    box-shadow: 
+                        0 8px 40px rgba(0, 122, 255, 0.18),
+                        0 0 20px rgba(0, 122, 255, 0.15),
+                        0 0 0 1px rgba(255, 255, 255, 0.6) inset,
+                        0 1px 0 rgba(255, 255, 255, 0.9) inset;
+                }
+            }
+            
+            /* 入场动画 - 从顶部掉落弹动 */
+            .island-enter {
+                animation: islandDrop 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) forwards,
+                           islandBorderBreathe 4s ease-in-out 0.8s infinite;
+            }
+            
+            @keyframes islandDrop {
+                0% {
+                    transform: translateY(-100px) scale(0.8);
+                    opacity: 0;
+                }
+                60% {
+                    transform: translateY(10px) scale(1.02);
+                    opacity: 1;
+                }
+                80% {
+                    transform: translateY(-5px) scale(0.98);
+                }
+                100% {
+                    transform: translateY(0) scale(1);
+                    opacity: 1;
+                }
+            }
+            
+            /* 悬停展开效果 - 显示更多天气信息 */
+            .dynamic-island:hover {
+                transform: scale(1.08);
+                border-color: rgba(0, 122, 255, 0.8);
+                box-shadow: 
+                    0 12px 48px rgba(0, 122, 255, 0.25),
+                    0 0 35px rgba(0, 122, 255, 0.2),
+                    0 0 0 1px rgba(255, 255, 255, 0.7) inset,
+                    0 1px 0 rgba(255, 255, 255, 1) inset;
+                animation-play-state: paused;
+            }
+            
+            /* 天气趋势时间线 */
+            .weather-timeline {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            
+            .weather-timeline-item {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 2px;
+            }
+            
+            .weather-timeline-item span:first-child {
+                font-size: 10px;
+                color: #86868b;
+            }
+            
+            .weather-timeline-item span:last-child {
+                font-size: 14px;
+            }
+            
+            .weather-timeline-line {
+                flex: 1;
+                height: 2px;
+                background: linear-gradient(to right, #ff9500, #007aff);
+                border-radius: 1px;
+                opacity: 0.4;
+            }
+            
+            /* 天气提醒 */
+            .weather-alert {
+                background: rgba(255, 149, 0, 0.1);
+                border: 1px solid rgba(255, 149, 0, 0.25);
+                border-radius: 8px;
+                padding: 6px 10px;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            
+            /* 详细天气面板 - 独立层级，确保在最上层 */
+            .weather-detail-panel {
+                position: fixed;
+                opacity: 0;
+                visibility: hidden;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                z-index: 99999;
+                pointer-events: none;
+                transform: translateY(-10px) scale(0.95);
+            }
+            
+            .weather-detail-panel.visible {
+                opacity: 1;
+                visibility: visible;
+                pointer-events: auto;
+                transform: translateY(0) scale(1);
+            }
+            
+            .weather-detail-content {
+                background: rgba(255, 255, 255, 0.95);
+                backdrop-filter: blur(25px) saturate(180%);
+                -webkit-backdrop-filter: blur(25px) saturate(180%);
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                border-radius: 16px;
+                box-shadow: 0 12px 48px rgba(0, 0, 0, 0.15),
+                            0 0 25px rgba(0, 122, 255, 0.1);
+                padding: 16px;
+                min-width: 320px;
+            }
+            
+            /* ========== 桌面悬浮模式 - 每日安排 ========== */
+            .floating-schedule {
+                position: fixed;
+                z-index: 9999;
+                background: rgba(255, 255, 255, 0.9);
+                backdrop-filter: blur(20px) saturate(180%);
+                -webkit-backdrop-filter: blur(20px) saturate(180%);
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                border-radius: 16px;
+                box-shadow: 0 12px 48px rgba(0, 0, 0, 0.15);
+                min-width: 280px;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                user-select: none;
+            }
+            
+            .floating-schedule-header {
+                cursor: move;
+                padding: 12px 16px;
+                border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            
+            .floating-schedule-content {
+                padding: 12px 16px;
+                max-height: 400px;
+                overflow-y: auto;
+            }
+            
+            .floating-schedule.hidden {
+                opacity: 0;
+                visibility: hidden;
+                transform: scale(0.9);
+            }
+            
+            /* 滚动条美化 */
+            .floating-schedule-content::-webkit-scrollbar {
+                width: 4px;
+            }
+            
+            .floating-schedule-content::-webkit-scrollbar-track {
+                background: transparent;
+            }
+            
+            .floating-schedule-content::-webkit-scrollbar-thumb {
+                background: rgba(0, 0, 0, 0.15);
+                border-radius: 2px;
+            }
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-bg-light text-text-primary font-sans overflow-hidden h-screen">
+    <div class="flex h-screen flex-col">
+        <div class="flex flex-1 overflow-hidden">
+            <!-- 左侧边栏 - 极简：只保留Logo + 智能对话 -->
+            <aside class="w-16 bg-bg-white border-r border-border-color flex flex-col items-center py-5">
+                <!-- Logo -->
+                <div class="mb-8">
+                    <div class="w-10 h-10 rounded-xl bg-accent-blue flex items-center justify-center shadow-lg shadow-accent-blue/20">
+                        <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="9" stroke="white" stroke-width="1.5"/>
+                            <circle cx="12" cy="12" r="3" fill="white"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <!-- 核心功能导航：只保留智能对话 -->
+                <nav class="flex-1 flex flex-col gap-1 w-full px-2">
+                    <button class="nav-item active flex items-center justify-center w-full py-3 rounded-lg bg-bg-hover text-accent-blue transition-all hover:bg-bg-hover" data-panel="chat">
+                        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+                        </svg>
+                    </button>
+                </nav>
+
+                <!-- 用户头像 -->
+                <div class="mt-auto">
+                    <div class="w-9 h-9 rounded-full user-avatar flex items-center justify-center cursor-pointer hover:ring-2 hover:ring-accent-blue/40 transition-all">
+                        <svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                            <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- 主内容区 -->
+            <main class="flex-1 flex flex-col overflow-hidden">
+                <!-- ========== 灵动岛 - 天气专属 ========== -->
+                <header class="h-12 bg-bg-white border-b border-border-color flex items-center justify-end pr-6 relative">
+                    <!-- 灵动岛主体 - 天气专属（与右侧更多按钮同一平面） -->
+                    <div id="dynamicIsland" class="dynamic-island island-enter rounded-full px-5 py-2 flex items-center gap-3 relative">
+                        <!-- 当前天气 -->
+                        <div class="flex items-center gap-3">
+                            <span class="text-2xl">☀️</span>
+                            <div class="flex flex-col">
+                                <span class="text-lg font-bold text-text-primary leading-none">26°</span>
+                                <span class="text-[10px] text-text-muted">晴天</span>
+                            </div>
+                        </div>
+                        
+                        <!-- 分隔符 -->
+                        <div class="w-px h-8 bg-black/10"></div>
+                        
+                        <!-- 今日天气趋势 -->
+                        <div class="weather-timeline">
+                            <div class="weather-timeline-item">
+                                <span>上午</span>
+                                <span>☀️</span>
+                            </div>
+                            <div class="weather-timeline-line"></div>
+                            <div class="weather-timeline-item">
+                                <span>下午</span>
+                                <span>⛅</span>
+                            </div>
+                            <div class="weather-timeline-line"></div>
+                            <div class="weather-timeline-item">
+                                <span>晚上</span>
+                                <span>🌧️</span>
+                            </div>
+                        </div>
+                        
+                        <!-- 天气提醒 -->
+                        <div class="weather-alert ml-2">
+                            <span class="text-sm">⚠️</span>
+                            <span class="text-[11px] text-accent-orange font-medium">下午有雷阵雨</span>
+                        </div>
+                    </div>
+                </header>
+
+                <!-- 聊天主区域 -->
+                <div class="flex-1 flex overflow-hidden">
+                    <!-- 聊天窗口 -->
+                    <div class="flex-1 flex flex-col">
+                        <!-- 聊天消息区 -->
+                        <div id="chatMessages" class="flex-1 overflow-y-auto p-6 space-y-6">
+                            <!-- AI 消息 - 带专属头像 -->
+                            <div class="flex gap-4 max-w-3xl">
+                                <div class="flex-shrink-0 pt-1">
+                                    <div class="w-10 h-10 rounded-full ai-avatar flex items-center justify-center">
+                                        <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+                                            <circle cx="12" cy="12" r="7" stroke="white" stroke-width="1.5"/>
+                                            <circle cx="12" cy="12" r="2" fill="white"/>
+                                        </svg>
+                                    </div>
+                                </div>
+                                
+                                <div class="flex-1">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="text-sm font-medium">AI 助手</span>
+                                        <span class="text-[10px] text-text-muted">14:28</span>
+                                    </div>
+                                    <div class="message-bubble-ai rounded-2xl rounded-tl-md p-4 text-text-secondary leading-relaxed space-y-2">
+                                        <p>谷歌 Chrome 开始清退旧版扩展——正从代码库清理 Manifest V2 的遗留支持，uBlock Origin 这类老牌广告拦截插件空间被进一步压缩。</p>
+                                        <p>鸿蒙座舱原生上车——华为今天在 HDC 2026 开发者大会上发布了 HarmonyOS 7 原生座舱系统，还上了 DevEco Studio 模拟器，6 月底就能开开发者 Beta 版。</p>
+                                        <p class="text-text-primary">还有啥想细看的没？</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 用户消息 - 带用户头像 -->
+                            <div class="flex gap-4 justify-end">
+                                <div class="max-w-2xl flex flex-col items-end">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="text-[10px] text-text-muted">14:29</span>
+                                    </div>
+                                    <div class="flex gap-3 items-start">
+                                        <div class="message-bubble-user rounded-2xl rounded-tr-md px-4 py-3 text-white">
+                                            太少了 来10条
+                                        </div>
+                                        <div class="flex-shrink-0 pt-1">
+                                            <div class="w-10 h-10 rounded-full user-avatar flex items-center justify-center">
+                                                <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                                    <circle cx="12" cy="7" r="4"/>
+                                                </svg>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- AI 消息 - 带专属头像 -->
+                            <div class="flex gap-4 max-w-3xl">
+                                <div class="flex-shrink-0 pt-1">
+                                    <div class="w-10 h-10 rounded-full ai-avatar flex items-center justify-center">
+                                        <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+                                            <circle cx="12" cy="12" r="7" stroke="white" stroke-width="1.5"/>
+                                            <circle cx="12" cy="12" r="2" fill="white"/>
+                                        </svg>
+                                    </div>
+                                </div>
+                                
+                                <div class="flex-1">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="text-sm font-medium">AI 助手</span>
+                                        <span class="text-[10px] text-text-muted">14:30</span>
+                                    </div>
+                                    <div class="message-bubble-ai rounded-2xl rounded-tl-md p-4 text-text-secondary leading-relaxed">
+                                        <p>卡壳了，换个问法试试。</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 用户消息 - 带用户头像 -->
+                            <div class="flex gap-4 justify-end">
+                                <div class="max-w-2xl flex flex-col items-end">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="text-[10px] text-text-muted">14:30</span>
+                                    </div>
+                                    <div class="flex gap-3 items-start">
+                                        <div class="message-bubble-user rounded-2xl rounded-tr-md px-4 py-3 text-white">
+                                            10条科技新闻
+                                        </div>
+                                        <div class="flex-shrink-0 pt-1">
+                                            <div class="w-10 h-10 rounded-full user-avatar flex items-center justify-center">
+                                                <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                                    <circle cx="12" cy="7" r="4"/>
+                                                </svg>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- AI 消息 - 带专属头像 -->
+                            <div class="flex gap-4 max-w-3xl">
+                                <div class="flex-shrink-0 pt-1">
+                                    <div class="w-10 h-10 rounded-full ai-avatar flex items-center justify-center">
+                                        <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+                                            <circle cx="12" cy="12" r="7" stroke="white" stroke-width="1.5"/>
+                                            <circle cx="12" cy="12" r="2" fill="white"/>
+                                        </svg>
+                                    </div>
+                                </div>
+                                
+                                <div class="flex-1">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="text-sm font-medium">AI 助手</span>
+                                        <span class="text-[10px] text-text-muted">14:31</span>
+                                    </div>
+                                    <div class="message-bubble-ai rounded-2xl rounded-tl-md p-4 text-text-secondary leading-relaxed">
+                                        <p>卡住了，等会儿再试试，或者换个问法？</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 输入区域 -->
+                        <div class="p-6 border-t border-border-color bg-bg-white">
+                            <div class="max-w-4xl mx-auto">
+                                <div class="bg-bg-card rounded-2xl border border-border-color p-1 shadow-sm">
+                                    <div class="flex items-end gap-2">
+                                        <div class="flex gap-1 p-2">
+                                            <button class="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-hover transition-all" title="附件">
+                                                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                                                </svg>
+                                            </button>
+                                            <button class="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-hover transition-all" title="语音">
+                                                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                                </svg>
+                                            </button>
+                                        </div>
+                                        
+                                        <div class="flex-1">
+                                            <input type="text" placeholder="输入消息..." 
+                                                   class="w-full bg-transparent text-text-primary placeholder-text-muted outline-none py-2.5 px-2 text-sm">
+                                        </div>
+                                        
+                                        <button class="w-9 h-9 m-1.5 rounded-xl bg-accent-blue flex items-center justify-center text-white hover:bg-blue-600 transition-all shadow-md shadow-accent-blue/20">
+                                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <line x1="22" y1="2" x2="11" y2="13"/>
+                                                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧信息面板 - 工作台快捷功能区 -->
+                    <aside class="w-72 bg-bg-white border-l border-border-color flex flex-col overflow-hidden relative">
+                        <div class="p-4 border-b border-border-color">
+                            <h3 class="text-sm font-medium">快捷功能</h3>
+                        </div>
+
+                        <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                            <!-- 今日安排模块 -->
+                            <div id="scheduleCard" class="card-border rounded-xl bg-bg-card p-4 shadow-sm">
+                                <div class="flex items-center gap-2 mb-4">
+                                    <svg class="w-4 h-4 text-accent-blue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                                        <line x1="16" y1="2" x2="16" y2="6"/>
+                                        <line x1="8" y1="2" x2="8" y2="6"/>
+                                        <line x1="3" y1="10" x2="21" y2="10"/>
+                                    </svg>
+                                    <span class="text-sm font-medium">今日安排</span>
+                                    <span class="ml-auto text-xs text-accent-blue">6月18日 周四</span>
+                                    <button id="floatScheduleBtn" class="w-6 h-6 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-black/5 transition-all" title="桌面悬浮模式">
+                                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M15 3h6v6"/>
+                                            <path d="M10 14L21 3"/>
+                                            <path d="M21 14v7H3V3h7"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                
+                                <!-- 详细日程列表 -->
+                                <div class="space-y-3">
+                                    <div class="flex gap-3 p-2 rounded-lg hover:bg-bg-hover transition-all cursor-pointer">
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-xs font-medium text-accent-blue">09:00</span>
+                                            <div class="w-px flex-1 bg-border-color mt-1"></div>
+                                        </div>
+                                        <div class="flex-1">
+                                            <p class="text-sm text-text-primary">产品周会</p>
+                                            <p class="text-xs text-text-muted">会议室 A · 产品部</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex gap-3 p-2 rounded-lg hover:bg-bg-hover transition-all cursor-pointer">
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-xs font-medium text-accent-orange">11:30</span>
+                                            <div class="w-px flex-1 bg-border-color mt-1"></div>
+                                        </div>
+                                        <div class="flex-1">
+                                            <p class="text-sm text-text-primary">技术评审</p>
+                                            <p class="text-xs text-text-muted">线上会议</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex gap-3 p-2 rounded-lg hover:bg-bg-hover transition-all cursor-pointer">
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-xs font-medium text-accent-green">14:00</span>
+                                            <div class="w-px flex-1 bg-border-color mt-1"></div>
+                                        </div>
+                                        <div class="flex-1">
+                                            <p class="text-sm text-text-primary">客户对接</p>
+                                            <p class="text-xs text-text-muted">腾讯会议</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="flex gap-3 p-2 rounded-lg hover:bg-bg-hover transition-all cursor-pointer">
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-xs font-medium text-text-muted">18:00</span>
+                                        </div>
+                                        <div class="flex-1">
+                                            <p class="text-sm text-text-primary">健身运动</p>
+                                            <p class="text-xs text-text-muted">健身房</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 快捷功能 - 视觉升级：半透明白色毛玻璃 + 单个按钮呼吸灯 -->
+                            <div class="tools-container rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <span class="text-sm font-medium">常用工具</span>
+                                    <button id="toggleMoreTools" class="w-7 h-7 rounded-lg flex items-center justify-center text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-all duration-200" title="展开更多工具">
+                                        <svg id="moreIcon" class="w-4 h-4 transition-transform duration-300 ease-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <circle cx="12" cy="12" r="1"/>
+                                            <circle cx="19" cy="12" r="1"/>
+                                            <circle cx="5" cy="12" r="1"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                
+                                <!-- 第一层级 - 4个核心功能：好友、家居、翻译、手机 -->
+                                <div class="grid grid-cols-4 gap-1.5">
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="好友系统">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                                            <circle cx="9" cy="7" r="4"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">好友</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="智能家居控制">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">家居</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="智能翻译">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M5 8l6 6"/>
+                                            <path d="M4 14l6-6 2-2"/>
+                                            <circle cx="15" cy="15" r="6"/>
+                                            <path d="M16.5 13.5L19 16"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">翻译</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="虚拟电话">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+                                            <line x1="7" y1="2" x2="7" y2="22"/>
+                                            <line x1="17" y1="2" x2="17" y2="22"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">手机</span>
+                                    </button>
+                                </div>
+                                
+                                <!-- 第二层级 - 4个：搜索、笔记、钱包、日程 -->
+                                <div id="moreTools" class="grid grid-cols-4 gap-1.5 mt-1.5 overflow-hidden transition-all duration-400 ease-out max-h-0 opacity-0">
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="Web搜索">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <circle cx="11" cy="11" r="8"/>
+                                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">搜索</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="笔记记录">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                            <polyline points="14 2 14 8 20 8"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">笔记</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="数字钱包">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
+                                            <path d="M1 10h22"/>
+                                            <circle cx="18" cy="15" r="1.5"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">钱包</span>
+                                    </button>
+                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="日程管理">
+                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                                            <line x1="16" y1="2" x2="16" y2="6"/>
+                                            <line x1="8" y1="2" x2="8" y2="6"/>
+                                            <line x1="3" y1="10" x2="21" y2="10"/>
+                                        </svg>
+                                        <span class="text-[10px] text-text-muted font-medium">日程</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ========== 简洁圆形悬浮效果 ========== -->
+                        <div class="pb-8 pt-4 flex flex-col items-center">
+                            <!-- 桌宠球体 - 完全悬浮 -->
+                            <div id="petAvatar" class="floating-pet relative z-10 mb-1">
+                                <div class="w-14 h-14 rounded-full bg-gradient-to-br from-accent-blue to-accent-blue/70 flex items-center justify-center shadow-lg shadow-accent-blue/30 transition-all duration-500 opacity-80">
+                                    <svg class="w-6 h-6 text-white/90" viewBox="0 0 24 24" fill="none">
+                                        <circle cx="12" cy="12" r="8" stroke="white" stroke-width="1.5"/>
+                                        <circle cx="12" cy="12" r="2.5" fill="white"/>
+                                    </svg>
+                                </div>
+                            </div>
+                            
+                            <!-- 简洁圆形光晕阴影 - 体现悬浮感 -->
+                            <div class="float-shadow">
+                                <div id="shadowGlow" class="shadow-glow"></div>
+                            </div>
+                            
+                            <!-- 控制按钮 -->
+                            <div class="flex justify-center gap-2 mt-4">
+                                <button id="togglePet" class="px-4 py-1.5 text-xs rounded-full bg-black/5 border border-black/10 text-text-secondary hover:bg-black/10 hover:text-text-primary hover:border-black/20 transition-all">
+                                    唤醒
+                                </button>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- ========== 天气详情面板 - 独立层级，确保在最上层 ========== -->
+    <div id="weatherDetailPanel" class="weather-detail-panel">
+        <div class="weather-detail-content">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="text-4xl">☀️</span>
+                <div>
+                    <div class="text-3xl font-bold">26°</div>
+                    <div class="text-sm text-text-muted">晴天转多云</div>
+                </div>
+            </div>
+            
+            <!-- 温度范围 -->
+            <div class="flex items-center justify-between mb-4 px-2">
+                <div class="text-center">
+                    <div class="text-[10px] text-text-muted">最低</div>
+                    <div class="text-sm font-medium text-accent-blue">22°</div>
+                </div>
+                <div class="flex-1 mx-4 h-2 bg-black/5 rounded-full overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-blue-400 via-yellow-400 to-orange-400 rounded-full" style="width: 70%"></div>
+                </div>
+                <div class="text-center">
+                    <div class="text-[10px] text-text-muted">最高</div>
+                    <div class="text-sm font-medium text-accent-orange">28°</div>
+                </div>
+            </div>
+            
+            <!-- 详细信息 -->
+            <div class="grid grid-cols-3 gap-3 mb-4">
+                <div class="text-center p-2 rounded-lg bg-black/5">
+                    <div class="text-xs text-text-muted mb-1">湿度</div>
+                    <div class="text-sm font-medium">65%</div>
+                </div>
+                <div class="text-center p-2 rounded-lg bg-black/5">
+                    <div class="text-xs text-text-muted mb-1">风速</div>
+                    <div class="text-sm font-medium">3级</div>
+                </div>
+                <div class="text-center p-2 rounded-lg bg-black/5">
+                    <div class="text-xs text-text-muted mb-1">空气质量</div>
+                    <div class="text-sm font-medium text-accent-green">优</div>
+                </div>
+            </div>
+            
+            <!-- 天气提醒 -->
+            <div class="weather-alert">
+                <span class="text-base">⚠️</span>
+                <div>
+                    <div class="text-xs font-medium text-accent-orange">下午有雷阵雨，记得带伞</div>
+                    <div class="text-[10px] text-text-muted">预计15:00-18:00有中到大雨</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 桌面悬浮模式 - 每日安排 ========== -->
+    <div id="floatingSchedule" class="floating-schedule hidden" style="top: 100px; right: 320px;">
+        <div class="floating-schedule-header" id="scheduleDragHandle">
+            <div class="flex items-center gap-2">
+                <svg class="w-4 h-4 text-accent-blue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="16" y1="2" x2="16" y2="6"/>
+                    <line x1="8" y1="2" x2="8" y2="6"/>
+                    <line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+                <span class="text-sm font-medium">今日安排</span>
+                <span class="text-xs text-accent-blue">6月18日 周四</span>
+            </div>
+            <button id="closeFloatSchedule" class="w-6 h-6 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-black/5 transition-all" title="收起">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+        <div class="floating-schedule-content">
+            <div class="space-y-3">
+                <div class="flex gap-3 p-2 rounded-lg hover:bg-black/5 transition-all cursor-pointer">
+                    <div class="flex flex-col items-center">
+                        <span class="text-xs font-medium text-accent-blue">09:00</span>
+                        <div class="w-px flex-1 bg-black/10 mt-1"></div>
+                    </div>
+                    <div class="flex-1">
+                        <p class="text-sm text-text-primary">产品周会</p>
+                        <p class="text-xs text-text-muted">会议室 A · 产品部</p>
+                    </div>
+                </div>
+                
+                <div class="flex gap-3 p-2 rounded-lg hover:bg-black/5 transition-all cursor-pointer">
+                    <div class="flex flex-col items-center">
+                        <span class="text-xs font-medium text-accent-orange">11:30</span>
+                        <div class="w-px flex-1 bg-black/10 mt-1"></div>
+                    </div>
+                    <div class="flex-1">
+                        <p class="text-sm text-text-primary">技术评审</p>
+                        <p class="text-xs text-text-muted">线上会议</p>
+                    </div>
+                </div>
+                
+                <div class="flex gap-3 p-2 rounded-lg hover:bg-black/5 transition-all cursor-pointer">
+                    <div class="flex flex-col items-center">
+                        <span class="text-xs font-medium text-accent-green">14:00</span>
+                        <div class="w-px flex-1 bg-black/10 mt-1"></div>
+                    </div>
+                    <div class="flex-1">
+                        <p class="text-sm text-text-primary">客户对接</p>
+                        <p class="text-xs text-text-muted">腾讯会议</p>
+                    </div>
+                </div>
+                
+                <div class="flex gap-3 p-2 rounded-lg hover:bg-black/5 transition-all cursor-pointer">
+                    <div class="flex flex-col items-center">
+                        <span class="text-xs font-medium text-text-muted">18:00</span>
+                    </div>
+                    <div class="flex-1">
+                        <p class="text-sm text-text-primary">健身运动</p>
+                        <p class="text-xs text-text-muted">健身房</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 快捷功能 - 更多工具展开/收起
+        let toolsExpanded = false;
+        const toggleMoreTools = document.getElementById('toggleMoreTools');
+        const moreTools = document.getElementById('moreTools');
+        const moreIcon = document.getElementById('moreIcon');
+        
+        toggleMoreTools.addEventListener('click', function() {
+            toolsExpanded = !toolsExpanded;
+            if (toolsExpanded) {
+                moreTools.classList.remove('max-h-0', 'opacity-0');
+                moreTools.classList.add('max-h-24', 'opacity-100');
+                moreIcon.style.transform = 'rotate(90deg)';
+            } else {
+                moreTools.classList.add('max-h-0', 'opacity-0');
+                moreTools.classList.remove('max-h-24', 'opacity-100');
+                moreIcon.style.transform = 'rotate(0deg)';
+            }
+        });
+
+        // 工具按钮点击激活状态
+        document.querySelectorAll('.tool-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+
+        // ========== 简洁悬浮光晕控制 ==========
+        let petAwake = false;
+        const togglePet = document.getElementById('togglePet');
+        const petAvatar = document.getElementById('petAvatar');
+        const shadowGlow = document.getElementById('shadowGlow');
+        
+        togglePet.addEventListener('click', function() {
+            petAwake = !petAwake;
+            if (petAwake) {
+                togglePet.textContent = '休眠';
+                // 桌宠状态
+                petAvatar.querySelector('div').classList.remove('opacity-80');
+                petAvatar.querySelector('div').classList.add('opacity-100');
+                // 光晕增强
+                shadowGlow.classList.add('awake');
+            } else {
+                togglePet.textContent = '唤醒';
+                // 桌宠状态
+                petAvatar.querySelector('div').classList.add('opacity-80');
+                petAvatar.querySelector('div').classList.remove('opacity-100');
+                // 光晕恢复
+                shadowGlow.classList.remove('awake');
+            }
+        });
+
+        // ========== 天气详情面板 - 独立层级控制 ==========
+        const dynamicIsland = document.getElementById('dynamicIsland');
+        const weatherDetailPanel = document.getElementById('weatherDetailPanel');
+        let weatherPanelVisible = false;
+        let weatherPanelTimeout = null;
+
+        function showWeatherPanel() {
+            if (weatherPanelTimeout) {
+                clearTimeout(weatherPanelTimeout);
+                weatherPanelTimeout = null;
+            }
+            
+            // 计算灵动岛位置
+            const islandRect = dynamicIsland.getBoundingClientRect();
+            const panelRect = weatherDetailPanel.getBoundingClientRect();
+            
+            // 定位面板在灵动岛正下方居中
+            const left = islandRect.left + (islandRect.width / 2) - (panelRect.width / 2);
+            const top = islandRect.bottom + 12;
+            
+            weatherDetailPanel.style.left = left + 'px';
+            weatherDetailPanel.style.top = top + 'px';
+            
+            weatherDetailPanel.classList.add('visible');
+            weatherPanelVisible = true;
+        }
+
+        function hideWeatherPanel() {
+            weatherPanelTimeout = setTimeout(() => {
+                weatherDetailPanel.classList.remove('visible');
+                weatherPanelVisible = false;
+            }, 200);
+        }
+
+        dynamicIsland.addEventListener('mouseenter', showWeatherPanel);
+        dynamicIsland.addEventListener('mouseleave', hideWeatherPanel);
+        
+        weatherDetailPanel.addEventListener('mouseenter', function() {
+            if (weatherPanelTimeout) {
+                clearTimeout(weatherPanelTimeout);
+                weatherPanelTimeout = null;
+            }
+        });
+        
+        weatherDetailPanel.addEventListener('mouseleave', hideWeatherPanel);
+
+        // ========== 桌面悬浮模式 - 每日安排 ==========
+        const floatScheduleBtn = document.getElementById('floatScheduleBtn');
+        const floatingSchedule = document.getElementById('floatingSchedule');
+        const closeFloatSchedule = document.getElementById('closeFloatSchedule');
+        const scheduleDragHandle = document.getElementById('scheduleDragHandle');
+        const scheduleCard = document.getElementById('scheduleCard');
+
+        let isScheduleFloating = false;
+        let isDragging = false;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+
+        // 切换桌面悬浮模式
+        floatScheduleBtn.addEventListener('click', function() {
+            if (!isScheduleFloating) {
+                // 进入悬浮模式
+                isScheduleFloating = true;
+                scheduleCard.style.opacity = '0.3';
+                floatingSchedule.classList.remove('hidden');
+                
+                // 定位到当前卡片位置附近
+                const cardRect = scheduleCard.getBoundingClientRect();
+                floatingSchedule.style.left = (cardRect.left - 20) + 'px';
+                floatingSchedule.style.top = cardRect.top + 'px';
+            }
+        });
+
+        // 关闭悬浮模式
+        closeFloatSchedule.addEventListener('click', function() {
+            isScheduleFloating = false;
+            scheduleCard.style.opacity = '1';
+            floatingSchedule.classList.add('hidden');
+        });
+
+        // 拖动功能
+        scheduleDragHandle.addEventListener('mousedown', function(e) {
+            isDragging = true;
+            const rect = floatingSchedule.getBoundingClientRect();
+            dragOffsetX = e.clientX - rect.left;
+            dragOffsetY = e.clientY - rect.top;
+            floatingSchedule.style.zIndex = '99999';
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (isDragging) {
+                const newX = e.clientX - dragOffsetX;
+                const newY = e.clientY - dragOffsetY;
+                
+                // 边界限制
+                const maxX = window.innerWidth - floatingSchedule.offsetWidth;
+                const maxY = window.innerHeight - floatingSchedule.offsetHeight;
+                
+                floatingSchedule.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
+                floatingSchedule.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (isDragging) {
+                isDragging = false;
+                floatingSchedule.style.zIndex = '9999';
+            }
+        });
+
+        // 聊天区自动滚动到底部
+        const chatMessages = document.getElementById('chatMessages');
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    </script>
+</body>
+</html>

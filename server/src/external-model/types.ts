@@ -124,6 +124,8 @@ export type AgentStreamOptions = {
   agentAccessMode?: "sandbox" | "full";
   /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */
   desktopBridgeOnline?: boolean;
+  /** 手机桥接在线时向 LLM 暴露 phone.*（远程控制真实手机，可不依赖完全访问） */
+  phoneBridgeOnline?: boolean;
   toolExposureProfile?: ToolExposureProfile;
   toolRankingHint?: ToolRankingHint;
 };
