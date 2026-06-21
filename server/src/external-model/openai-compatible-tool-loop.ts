@@ -8,6 +8,7 @@ import type {
 import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
+import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
@@ -887,6 +888,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
+    ...getPhoneBridgeChatTools(),
     BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
     ..._mcpChatTools,

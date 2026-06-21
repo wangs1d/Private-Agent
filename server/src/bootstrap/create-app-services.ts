@@ -100,6 +100,7 @@ import {
 } from "../services/embodiment-autonomy-service.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
+import { registerTranslateTools } from "../tools/translate-tools.js";
 import { SmartHomeService } from "../services/smart-home-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
@@ -111,6 +112,8 @@ import { WechatClawBindingService } from "../services/wechat-claw-binding-servic
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
+import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
+import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
@@ -284,10 +287,22 @@ export async function createAppServices(): Promise<AppServices> {
     voiceDialogueService.setDefaultProvider("openai");
   }
 
+  // 初始化手机桥接协调器（须在智能提醒系统之前，供其调度 phone.ring）
+  const phoneBridgeCoordinator = new PhoneBridgeCoordinator({
+    onSync: (actorId, payload) => {
+      wsConnectionRegistry.trySend(
+        actorId,
+        JSON.stringify({ type: ServerEventType.PhoneBridgeSync, payload }),
+      );
+    },
+  });
+  registerPhoneBridgeTools(toolRegistry, { bridge: phoneBridgeCoordinator });
+
   // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
   const intelligentReminder = createIntelligentReminderSystem({
     toolRegistry,
     virtualPhoneService,
+    phoneBridgeCoordinator,
     voiceDialogueService,
     sendToClient: async (userId, payload) => {
       await wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
@@ -532,6 +547,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
+  registerTranslateTools(toolRegistry);
   const promptContextBuilder = new PromptContextBuilder({
     agentMemorySyncService,
     worldService,
@@ -553,6 +569,8 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     scheduleTaskService,
   });
+  agentCore.setPhoneBridgeCoordinator(phoneBridgeCoordinator);
+
   const virtualPhoneIncomingCoordinator = new VirtualPhoneIncomingCoordinator(
     agentCore,
     wsConnectionRegistry,
@@ -760,6 +778,7 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     ttsService,
     desktopBridgeCoordinator,
+    phoneBridgeCoordinator,
     wechatClawBindingService,
     wechatClawBridgeService,
     browserSessionService,
@@ -790,6 +809,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
+    phoneBridgeCoordinator,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,

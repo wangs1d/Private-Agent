@@ -156,6 +156,7 @@ export type FinalizeChatSystemPromptOpts = {
   /** 来自 `chat.user_message.agentAccessMode`；默认沙箱 */
   agentAccessMode?: AgentAccessMode;
   desktopBridgeOnline?: boolean;
+  phoneBridgeOnline?: boolean;
 };
 
 /** 统一组装 system：精简风格 → 消息时间戳说明 → 工具说明 → 主 Agent 委派说明 → 访问权限说明。 */
@@ -174,6 +175,7 @@ export function finalizeChatSystemPrompt(
   }
   out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
     desktopBridgeOnline: opts?.desktopBridgeOnline,
+    phoneBridgeOnline: opts?.phoneBridgeOnline,
   });
   return out;
 }

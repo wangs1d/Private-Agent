@@ -136,6 +136,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       masterSubAgentDelegate: finalizeOptions.masterSubAgentDelegate,
       agentAccessMode: finalizeOptions.agentAccessMode,
       desktopBridgeOnline: finalizeOptions.desktopBridgeOnline,
+      phoneBridgeOnline: finalizeOptions.phoneBridgeOnline,
     });
     
     const cached = this.systemPromptCache.get(cacheKey);
@@ -327,6 +328,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
       agentAccessMode: streamOpts?.agentAccessMode,
       desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+      phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
     });
 
     if (ephemeral || msgs.length === 0) {
@@ -385,6 +387,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
         masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
         agentAccessMode: streamOpts?.agentAccessMode,
         desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+        phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
       },
       tools: toolSearchPrepared?.visibleTools,
       variant: tools ? "chat-tools" : "chat",

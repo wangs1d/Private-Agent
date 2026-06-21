@@ -81,6 +81,7 @@ export type OrchestrateTaskOptions = {
   onAgentStatusLine?: (line: string) => void;
   agentAccessMode?: import("../agent/agent-access-mode.js").AgentAccessMode;
   desktopBridgeOnline?: boolean;
+  phoneBridgeOnline?: boolean;
   toolRankingHint?: AgentStreamOptions["toolRankingHint"];
 };
 
@@ -1084,10 +1085,12 @@ export class MasterAgentCoordinator {
   private streamAccessFromOpts(opts?: OrchestrateTaskOptions): {
     agentAccessMode: ReturnType<typeof parseAgentAccessMode>;
     desktopBridgeOnline: boolean;
+    phoneBridgeOnline: boolean;
   } {
     return {
       agentAccessMode: parseAgentAccessMode(opts?.agentAccessMode),
       desktopBridgeOnline: opts?.desktopBridgeOnline === true,
+      phoneBridgeOnline: opts?.phoneBridgeOnline === true,
     };
   }
 
@@ -1103,6 +1106,7 @@ export class MasterAgentCoordinator {
           clientLocation: opts?.clientLocation,
           agentAccessMode: access.agentAccessMode,
           desktopBridgeOnline: access.desktopBridgeOnline,
+          phoneBridgeOnline: access.phoneBridgeOnline,
         }),
       onToolExecuteStart: opts?.onToolExecuteStart,
       onToolExecuted: opts?.onToolExecuted,
@@ -1214,6 +1218,7 @@ export class MasterAgentCoordinator {
     const accessMode = parseAgentAccessMode(agentAccessMode);
     const bridgeCtx = {
       desktopBridgeOnline: this.currentTurnOrchestrateOpts?.desktopBridgeOnline === true,
+      phoneBridgeOnline: this.currentTurnOrchestrateOpts?.phoneBridgeOnline === true,
     };
     const baseStreamOpts: AgentStreamOptions = {
       ...(this.promptContextBuilder?.buildForSubAgent({
@@ -1223,6 +1228,7 @@ export class MasterAgentCoordinator {
       }) ?? {}),
       agentAccessMode: accessMode,
       desktopBridgeOnline: bridgeCtx.desktopBridgeOnline,
+      phoneBridgeOnline: bridgeCtx.phoneBridgeOnline,
       disableThinking: true,
       toolExposureProfile: "scoped",
       toolRankingHint: this.currentTurnOrchestrateOpts?.toolRankingHint,

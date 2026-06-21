@@ -68,10 +68,11 @@ function resolvedToolsCacheKey(userText?: string, streamOpts?: AgentStreamOption
     .join(",");
   const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
   const bridge = streamOpts?.desktopBridgeOnline === true ? "1" : "0";
+  const phoneBridge = streamOpts?.phoneBridgeOnline === true ? "1" : "0";
   const profile = resolveToolExposureProfile(streamOpts);
   const textKey = contextualTextKey(userText, profile);
   const rankingKey = (streamOpts?.toolRankingHint?.preferredNamespaces ?? []).join(",");
-  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${profile}|${textKey}|${rankingKey}`;
+  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${phoneBridge}|${profile}|${textKey}|${rankingKey}`;
 }
 
 function contextualTextKey(userText: string | undefined, profile: ToolExposureProfile): string {
@@ -110,8 +111,9 @@ function pinDesktopVisualTools(
 ): ChatCompletionTool[] {
   const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
   const bridge = streamOpts?.desktopBridgeOnline === true;
+  const phoneBridge = streamOpts?.phoneBridgeOnline === true;
   const fullAccess = mode === "full";
-  if (!bridge && !fullAccess) return tools;
+  if (!bridge && !phoneBridge && !fullAccess) return tools;
 
   const present = new Set(
     tools
@@ -192,6 +194,7 @@ export function resolveChatToolPlanForStream(
     const merged = [...builtin, ...extra];
     const accessCtx: ChatToolsAccessContext = {
       desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+      phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
     };
     const searchableTools = mergeChatToolsForAccessMode(
       merged,
@@ -206,6 +209,7 @@ export function resolveChatToolPlanForStream(
   const merged = [...builtin, ...extra];
   const accessCtx: ChatToolsAccessContext = {
     desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+    phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
   };
   const accessFiltered = mergeChatToolsForAccessMode(
     merged,

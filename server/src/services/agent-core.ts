@@ -7,6 +7,7 @@ import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
+import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
@@ -216,6 +217,7 @@ export class AgentCore {
   private readonly turnLifecycle: TurnLifecycle;
   private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
+  private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -269,17 +271,27 @@ export class AgentCore {
     this.desktopBridgeCoordinator = coordinator;
   }
 
+  /** 在 bootstrap 注册手机桥接后注入，用于按轮检测手机是否在线。 */
+  setPhoneBridgeCoordinator(coordinator: PhoneBridgeCoordinator): void {
+    this.phoneBridgeCoordinator = coordinator;
+  }
+
   private desktopBridgeOnlineFor(actorId: string): boolean {
     return this.desktopBridgeCoordinator?.hasExecutor(actorId) ?? false;
+  }
+
+  private phoneBridgeOnlineFor(actorId: string): boolean {
+    return this.phoneBridgeCoordinator?.hasExecutor(actorId) ?? false;
   }
 
   private streamAccessFields(
     actorId: string,
     opts?: HandleUserMessageOptions,
-  ): { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean } {
+  ): { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean } {
     return {
       agentAccessMode: parseAgentAccessMode(opts?.agentAccessMode),
       desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
+      phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
     };
   }
 
@@ -551,6 +563,7 @@ export class AgentCore {
       clientLocation: opts?.clientLocation,
       agentAccessMode: opts?.agentAccessMode,
       desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
+      phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
     });
   }
 
@@ -582,7 +595,7 @@ export class AgentCore {
     narrativeRecall: string | undefined,
     personalization: PersonalizationPromptSlice,
     trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
-    access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean },
+    access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -600,6 +613,7 @@ export class AgentCore {
       clientLocation: opts?.clientLocation,
       agentAccessMode: access.agentAccessMode,
       desktopBridgeOnline: access.desktopBridgeOnline,
+      phoneBridgeOnline: access.phoneBridgeOnline,
       toolRankingHint: this.resolveHermesToolRankingHint(actorId),
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
@@ -643,6 +657,7 @@ export class AgentCore {
           clientLocation: opts?.clientLocation,
           agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
           desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
+          phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
         }),
       onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
       onAgentStatusLine: opts?.onAgentPhaseStatus,
@@ -720,6 +735,7 @@ export class AgentCore {
               ...(onBatchWithEvolution ? { toolLoop: { onAfterToolBatch: onBatchWithEvolution } } : {}),
               agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
               desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
+              phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
               ...(provider.id === "moonshot-kimi" ? { disableThinking: true } : {}),
             }
           : undefined;

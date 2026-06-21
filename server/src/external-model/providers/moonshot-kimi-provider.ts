@@ -102,6 +102,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
         agentAccessMode: streamOpts?.agentAccessMode,
         desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+        phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
       },
       variant: tools ? "chat-tools" : "chat",
     });
@@ -146,6 +147,7 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
             masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
             agentAccessMode: streamOpts?.agentAccessMode,
             desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
+            phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
           },
           tools: toolSearchPrepared.visibleTools,
           variant: "chat-tools",

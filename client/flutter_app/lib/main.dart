@@ -24,7 +24,7 @@ import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
-import "core/services/desk_pet_session.dart";
+import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
@@ -32,6 +32,7 @@ import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
+import "features/chat/jarvis_chat_layout.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/voice_mode_page.dart";
 import "features/chat/voiceprint_registration_page.dart";
@@ -90,7 +91,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 缓存日程 Future，避免每次 build 重建导致 FutureBuilder 反复重置为 waiting（卡片闪烁/震动）
   Future<List<ScheduleEvent>>? _cachedScheduleFuture;
-  DateTime? _cachedScheduleDayStart;
   final TextEditingController _inputController = TextEditingController();
   final FocusNode _inputFocusNode = FocusNode();
 
@@ -120,6 +120,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final ValueNotifier<int> _calendarReloadSignal = ValueNotifier<int>(0);
 
   /// 与 userId 对齐的电脑桥接在线状态（由服务端 `desktop.bridge.sync` 推送）
+  // ignore: unused_field
   bool? _desktopBridgeOnline;
   String? _desktopBridgeLastSummary;
 
@@ -157,6 +158,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
 
   /// 网络电话悬浮按钮状态 null=无通话, ringing=正在呼叫, connected=已接通 ended=通话结束
+  // ignore: unused_field
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
 
@@ -164,9 +166,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String? _peerIncomingDialogCallId;
 
   /// 通话中是否静音（与 ConnectedCallWindow 同步）
+  // ignore: unused_field
   bool _phoneMuted = false;
 
   /// 通话中是否免提（与 ConnectedCallWindow 同步）
+  // ignore: unused_field
   bool _phoneSpeakerOn = true;
   bool _desktopNotificationNeedsFeedback = false;
   String _desktopNotificationFeedbackChannel = "websocket";
@@ -205,6 +209,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   @override
   void dispose() {
     DesktopBridgeService.instance.stop();
+    PhoneBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     unawaited(TtsPlayer.instance.dispose());
     IncomingCallLauncher.unbind();
@@ -285,6 +290,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       unawaited(_flushScheduleOfflineDeletes());
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
+      }
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        PhoneBridgeService.instance.start();
       }
     };
     ClientLocationService.bindPreferences(
@@ -1473,13 +1481,77 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   static const List<String> _kTabTitles = <String>[
     "",
     "Agent Link",
-    "钱包",
+    "",
     "技能商城",
     "游戏",
   ];
 
   void _selectTab(int index) {
     setState(() => _tabIndex = index);
+  }
+
+  void _openAgentLinkTab() => _selectTab(1);
+
+  void _openGameCenterTab() => _selectTab(4);
+
+  void _openSchedulePanel() {
+    setState(() {
+      _tabIndex = 0;
+      _showCalendarPanel = true;
+    });
+  }
+
+  void _openWalletDialog() {
+    // 用 NavigatorState 顶层推 dialog，避免 State context 触发出栈/Localizations 问题
+    final NavigatorState? navigator = _rootNavigatorKey.currentState;
+    if (navigator == null) {
+      // 兜底走原 showDialog 路径
+      final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+      final BuildContext ctx = navCtx ?? context;
+      if (!ctx.mounted) return;
+      WalletDialog.show(ctx, balance: _balance);
+      return;
+    }
+    showDialog<void>(
+      context: navigator.context,
+      useRootNavigator: true,
+      barrierDismissible: true,
+      builder: (BuildContext _) => WalletDialog(balance: _balance),
+    );
+  }
+
+  /// 常用工具「手机」入口：跳转到"真实手机"功能页
+  /// 与"虚拟电话"区分——这里对接的是用户自己的手机（拨号/通讯录/短信等）。
+  void _openPhoneDevicesDialog() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    // TODO(phone-devices): 等 lib/features/phone_devices/phone_devices_page.dart
+    // 的 PhoneDevicesPage 类完成后，把下面三行解注释：
+    // Navigator.of(navCtx).push<void>(
+    //   MaterialPageRoute<void>(
+    //     builder: (BuildContext context) => const PhoneDevicesPage(),
+    //     fullscreenDialog: true,
+    //   ),
+    // );
+    ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
+      const SnackBar(content: Text("「手机」功能页正在准备中")),
+    );
+  }
+
+  /// 常用工具「翻译」入口：屏幕翻译由独立的桌面托盘应用负责（系统托盘 + 全局热键
+  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗）。Flutter 端仅提示启动方式。
+  void _openTranslatePage() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null) return;
+    ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          "翻译悬浮框由桌面托盘提供：请运行 desktop-visual/start-translate-tray.ps1，\n"
+          "启动后按 Ctrl+Shift+T 框选屏幕区域即可翻译。",
+        ),
+        duration: Duration(seconds: 5),
+      ),
+    );
   }
 
   Future<void> _openWechatClawBinding() async {
@@ -1684,6 +1756,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   /// 用户在聊天页底部"📞 通话中"按钮上点挂断的入口
+  // ignore: unused_element
   void _hangupFromPhoneButton() {
     _ws.sendEvent("phone.hangup", {});
     unawaited(TtsPlayer.instance.stop());
@@ -2118,83 +2191,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                   automaticallyImplyLeading: false,
                                   title: _buildAppBarTitle(),
                                   actions: <Widget>[
-                                    if (DeskPetSession.isSupported)
-                                      ListenableBuilder(
-                                        listenable: DeskPetSession.instance,
-                                        builder:
-                                            (BuildContext context, Widget? _) {
-                                          final bool summoned = DeskPetSession
-                                              .instance.isSummoned;
-                                          final bool bootstrapping =
-                                              DeskPetSession
-                                                  .instance.isBootstrapping;
-                                          return IconButton(
-                                            tooltip: summoned ? "收起桌宠" : "召唤桌宠",
-                                            icon: bootstrapping
-                                                ? SizedBox(
-                                                    width: 20,
-                                                    height: 20,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      color: Theme.of(context)
-                                                          .colorScheme
-                                                          .primary,
-                                                    ),
-                                                  )
-                                                : Icon(
-                                                    Icons.smart_toy_outlined,
-                                                    color: summoned
-                                                        ? Theme.of(context)
-                                                            .colorScheme
-                                                            .primary
-                                                        : null,
-                                                  ),
-                                            onPressed: bootstrapping
-                                                ? null
-                                                : () async {
-                                                    if (summoned) {
-                                                      await DeskPetSession
-                                                          .instance
-                                                          .dismiss();
-                                                      return;
-                                                    }
-                                                    final bool ok =
-                                                        await DeskPetSession
-                                                            .instance
-                                                            .summon();
-                                                    if (!context.mounted)
-                                                      return;
-                                                    if (!ok) {
-                                                      ScaffoldMessenger.of(
-                                                              context)
-                                                          .showSnackBar(
-                                                        SnackBar(
-                                                          content: Text(
-                                                            DeskPetSession
-                                                                    .instance
-                                                                    .error ??
-                                                                "桌宠召唤失败",
-                                                          ),
-                                                        ),
-                                                      );
-                                                    }
-                                                  },
-                                          );
-                                        },
-                                      ),
                                     if (_tabIndex == 0)
                                       PopupMenuButton<String>(
                                         tooltip: "更多",
                                         icon: Icon(Icons.more_vert),
                                         offset: const Offset(0, 48),
                                         onSelected: (String value) {
-                                          if (value == 'calendar') {
-                                            setState(() => _showCalendarPanel =
-                                                !_showCalendarPanel);
-                                          } else if (value == 'wallet') {
-                                            WalletDialog.show(context,
-                                                balance: _balance);
+                                          if (value == 'background_tasks') {
+                                            _openBackgroundTasksPanel(context);
                                           } else if (value == 'clear_history') {
                                             _clearChatHistory();
                                           }
@@ -2202,37 +2206,22 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                         itemBuilder: (BuildContext context) =>
                                             <PopupMenuEntry<String>>[
                                           PopupMenuItem<String>(
-                                            value: 'calendar',
+                                            value: 'background_tasks',
                                             child: Row(
                                               children: <Widget>[
                                                 Icon(
-                                                  _showCalendarPanel
-                                                      ? Icons.calendar_month
-                                                      : Icons
-                                                          .calendar_today_outlined,
+                                                  Icons.smart_toy_outlined,
                                                   size: 20,
-                                                  color: _showCalendarPanel
-                                                      ? Theme.of(context)
-                                                          .colorScheme
-                                                          .primary
-                                                      : null,
+                                                  color:
+                                                      _backgroundTasksBadgeCount >
+                                                              0
+                                                          ? Theme.of(context)
+                                                              .colorScheme
+                                                              .primary
+                                                          : null,
                                                 ),
                                                 const SizedBox(width: 12),
-                                                const Text('日程'),
-                                              ],
-                                            ),
-                                          ),
-                                          PopupMenuItem<String>(
-                                            value: 'wallet',
-                                            child: Row(
-                                              children: <Widget>[
-                                                const Icon(
-                                                  Icons
-                                                      .account_balance_wallet_outlined,
-                                                  size: 20,
-                                                ),
-                                                const SizedBox(width: 12),
-                                                const Text('钱包'),
+                                                const Text('后台任务'),
                                               ],
                                             ),
                                           ),
@@ -2305,414 +2294,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 工作台面板：合并今日聚焦 + 待你确认，统一交互式展示
-  Widget _buildCompanionRightPanel() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          // 工作台标题行
-          Row(
-            children: <Widget>[
-              const Icon(Icons.dashboard_outlined, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                "工作台",
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-              ),
-              const Spacer(),
-              // 动态角标：日程未完成数 + 后台任务数 + 通话状态
-              ValueListenableBuilder<int>(
-                valueListenable: _scheduleReloadSignal,
-                builder: (BuildContext context, int _, __) {
-                  final int totalBadge = _calcWorkspaceBadge();
-                  if (totalBadge <= 0) return const SizedBox.shrink();
-                  return Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: cs.primary.withValues(alpha: 0.18),
-                      borderRadius: BorderRadius.circular(999),
-                      border:
-                          Border.all(color: cs.primary.withValues(alpha: 0.38)),
-                    ),
-                    child: Text(
-                      totalBadge > 9 ? "9+" : "$totalBadge",
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: cs.primary,
-                          fontWeight: FontWeight.w600),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // 可滚动内容区
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: <Widget>[
-                // ── 日程卡片（可点击打开日历）──
-                _buildWorkspaceScheduleCard(cs),
-                const SizedBox(height: 14),
-                // ── Agent 任务卡片（可点击打开任务面板）──
-                _buildWorkspaceTasksCard(cs),
-                const SizedBox(height: 10),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 计算工作台总角标数
-  int _calcWorkspaceBadge() {
-    int badge = 0;
-    if (_backgroundTasksBadgeCount > 0) badge += _backgroundTasksBadgeCount;
-    if (_phoneCallStatus != null && _phoneCallStatus != "ended") badge += 1;
-    if (_desktopBridgeOnline == false) badge += 1;
-    // 日程数需要异步获取，此处通过 scheduleReloadSignal 触发重建时重新计算
-    return badge;
-  }
-
-  /// 工作台 - 日程卡片
-  Widget _buildWorkspaceScheduleCard(ColorScheme cs) {
-    final DateTime now = DateTime.now();
-    final DateTime dayStart = DateTime(now.year, now.month, now.day);
-    final DateTime dayEnd = dayStart.add(const Duration(days: 1));
-    // 缓存 Future：仅在日期变化或首次时创建新实例，避免每次 build 重建导致 FutureBuilder 闪烁
-    if (_cachedScheduleDayStart != dayStart || _cachedScheduleFuture == null) {
-      _cachedScheduleDayStart = dayStart;
-      _cachedScheduleFuture =
-          _store.listScheduleEventsInRange(dayStart, dayEnd);
-    }
-    return FutureBuilder<List<ScheduleEvent>>(
-      future: _cachedScheduleFuture!,
-      builder:
-          (BuildContext context, AsyncSnapshot<List<ScheduleEvent>> snapshot) {
-        final List<ScheduleEvent> items = (snapshot.data ?? <ScheduleEvent>[])
-            .where((ScheduleEvent e) => (e.notes ?? "") != "已完成")
-            .toList()
-          ..sort((a, b) => a.startAt.compareTo(b.startAt));
-
-        return _WorkspaceCard(
-          icon: Icons.today_outlined,
-          iconColor: const Color(0xFF7A5C86),
-          title: items.isEmpty ? "今日日程" : "今日日程 (${items.length})",
-          onTap: items.isNotEmpty
-              ? () => setState(() => _showCalendarPanel = true)
-              : null,
-          child: snapshot.connectionState == ConnectionState.waiting
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Center(
-                      child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))),
-                )
-              : items.isEmpty
-                  ? _WorkspaceHintRow(
-                      icon: Icons.add_circle_outline,
-                      text: "和我说一声就能添加日程",
-                      onTap: null)
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: items.take(3).map((ScheduleEvent e) {
-                        final Duration diff = e.startAt.difference(now);
-                        final String timeStr =
-                            "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}";
-                        String? hint;
-                        if (diff.isNegative) {
-                          hint = "已开始";
-                        } else if (diff.inMinutes < 60) {
-                          hint = "${diff.inMinutes} 分钟后";
-                        } else if (diff.inHours < 24) {
-                          hint = "${diff.inHours} 小时后";
-                        }
-                        return _WorkspaceScheduleRow(
-                            time: timeStr, title: e.title, hint: hint);
-                      }).toList(),
-                    ),
-        );
-      },
-    );
-  }
-
-  /// 工作台 - Agent 任务卡片
-  Widget _buildWorkspaceTasksCard(ColorScheme cs) {
-    return _WorkspaceCard(
-      icon: Icons.smart_toy_outlined,
-      iconColor: const Color(0xFF5E56A8),
-      title: "Agent 任务",
-      trailing: _backgroundTasksBadgeCount > 0
-          ? Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: cs.primary.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text("$_backgroundTasksBadgeCount 项进行中",
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: cs.primary,
-                      fontWeight: FontWeight.w600)),
-            )
-          : null,
-      onTap: _backgroundTasksBadgeCount > 0
-          ? () => _openBackgroundTasksPanel(context)
-          : null,
-      child: _backgroundTasksBadgeCount > 0
-          ? _WorkspaceHintRow(
-              icon: Icons.open_in_new,
-              text: "点击查看任务详情与进度",
-              onTap: () => _openBackgroundTasksPanel(context))
-          : _WorkspaceHintRow(
-              icon: Icons.check_circle_outline,
-              text: "当前没有运行中的后台任务",
-              onTap: null),
-    );
-  }
-
-  /// 工作台 - 系统状态卡片（桥接 + 电话）
-  Widget _buildWorkspaceSystemCard(ColorScheme cs) {
-    return _WorkspaceCard(
-      icon: Icons.settings_suggest_outlined,
-      iconColor: cs.outline,
-      title: "系统状态",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          // 桥接状态
-          _WorkspaceStatusRow(
-            icon: _desktopBridgeOnline == true
-                ? Icons.lan
-                : (_desktopBridgeOnline == false
-                    ? Icons.portable_wifi_off
-                    : Icons.help_outline),
-            label: "电脑桥接",
-            value: _desktopBridgeOnline == null
-                ? "暂不可用"
-                : (_desktopBridgeOnline! ? "在线" : "离线"),
-            statusColor: _desktopBridgeOnline == true
-                ? Colors.green
-                : (_desktopBridgeOnline == false ? Colors.red : cs.outline),
-          ),
-          const SizedBox(height: 8),
-          // 电话状态 —— 通话中时整行可点击触发挂断
-          // 通话中若静音/关免提，value 后追加提示
-          Builder(builder: (context) {
-            final bool inCall =
-                _phoneCallStatus != null && _phoneCallStatus != "ended";
-            String value = inCall
-                ? VirtualPhoneUiLabels.callStatusLabel(_phoneCallStatus)
-                : "空闲";
-            if (inCall) {
-              final List<String> tags = <String>[];
-              if (_phoneMuted) tags.add("静音");
-              if (!_phoneSpeakerOn) tags.add("听筒");
-              if (tags.isNotEmpty) value = "$value · ${tags.join('·')}";
-            }
-            return _WorkspaceStatusRow(
-              icon: inCall ? Icons.phone_in_talk : Icons.phone_outlined,
-              label: "虚拟电话",
-              value: value,
-              statusColor: inCall ? cs.primary : cs.onSurfaceVariant,
-              onTap: inCall ? _hangupFromPhoneButton : null,
-              actionHint: inCall ? "· 点击挂断" : null,
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // 工作台面板 - 私有组件
-  // ═══════════════════════════════════════════════════════════
-
-  /// 工作台卡片容器：统一的圆角边框 + 标题行 + 内容区
-  Widget _WorkspaceCard({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required Widget child,
-    VoidCallback? onTap,
-    Widget? trailing,
-  }) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final AppThemeVariant variant = AppThemeController.instance.value;
-    final bool interactive = onTap != null;
-    final Widget cardContent = Container(
-      decoration: AppTheme.borderedPanel(
-        cs,
-        radius: 16,
-        fill: AppPalette.resolveCardBackground(variant),
-        borderAlpha: 0.6,
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Icon(icon, size: 18, color: iconColor),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(title,
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w700)),
-              ),
-              if (trailing != null) trailing,
-              if (interactive)
-                Padding(
-                  padding: const EdgeInsets.only(left: 4),
-                  child: Icon(Icons.chevron_right,
-                      size: 16,
-                      color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
-                ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          DefaultTextStyle(
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-            child: child,
-          ),
-        ],
-      ),
-    );
-    return interactive
-        ? GestureDetector(
-            onTap: onTap,
-            behavior: HitTestBehavior.opaque,
-            child: cardContent,
-          )
-        : cardContent;
-  }
-
-  /// 日程行：时间 + 标题 + 倒计时提示
-  Widget _WorkspaceScheduleRow(
-      {required String time, required String title, String? hint}) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 7),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          // 时间列
-          SizedBox(
-            width: 42,
-            child: Text(time,
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFF5B4B91),
-                    fontFeatures: [const FontFeature.tabularFigures()])),
-          ),
-          // 标题
-          Expanded(
-              child: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis)),
-          // 倒计时提示
-          if (hint != null)
-            Container(
-              margin: const EdgeInsets.only(left: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: cs.tertiaryContainer.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(hint,
-                  style:
-                      TextStyle(fontSize: 10, color: cs.onTertiaryContainer)),
-            ),
-        ],
-      ),
-    );
-  }
-
-  /// 提示行：图标 + 文字（可点击）
-  Widget _WorkspaceHintRow(
-      {required IconData icon, required String text, VoidCallback? onTap}) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final bool interactive = onTap != null;
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Row(
-        children: <Widget>[
-          Icon(icon,
-              size: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(text,
-                style: TextStyle(
-                    fontSize: 12,
-                    color: interactive
-                        ? cs.primary
-                        : cs.onSurfaceVariant.withValues(alpha: 0.8))),
-          ),
-          if (interactive)
-            Icon(Icons.arrow_forward_ios,
-                size: 10, color: const Color(0xFF5B4B91).withValues(alpha: 0.5)),
-        ],
-      ),
-    );
-  }
-
-  /// 状态行：图标 + 标签 + 值（带状态色指示点）
-  Widget _WorkspaceStatusRow({
-    required IconData icon,
-    required String label,
-    required String value,
-    required Color statusColor,
-    VoidCallback? onTap,
-    String? actionHint,
-  }) {
-    final Widget row = Row(
-      children: <Widget>[
-        Icon(icon, size: 14, color: statusColor),
-        const SizedBox(width: 6),
-        Text(label, style: const TextStyle(fontSize: 12)),
-        const Spacer(),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Container(
-                width: 6,
-                height: 6,
-                decoration:
-                    BoxDecoration(color: statusColor, shape: BoxShape.circle)),
-            const SizedBox(width: 5),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: statusColor)),
-            if (actionHint != null) ...[
-              const SizedBox(width: 6),
-              Text(actionHint,
-                  style: const TextStyle(fontSize: 10, color: Colors.red)),
-            ],
-          ],
-        ),
-      ],
-    );
-    if (onTap == null) return row;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-        child: row,
-      ),
-    );
-  }
-
   Widget _buildMainContentWithCalendar() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Stack(
@@ -2730,6 +2311,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   elevation: 24,
                   borderRadius: BorderRadius.circular(16),
                   color: cs.surfaceContainerLowest,
+                  surfaceTintColor: Colors.transparent,
                   clipBehavior: Clip.antiAlias,
                   child: SizedBox(
                     width: 560,
@@ -2746,7 +2328,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   Widget _buildScheduleSidebar() {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    return Column(
+    return ColoredBox(
+      color: cs.surface,
+      child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Padding(
@@ -2785,6 +2369,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ),
         ),
       ],
+      ),
     );
   }
 
@@ -2794,21 +2379,64 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (_tabIndex != 0 || screenWidth < 820) {
       return _buildTabStack();
     }
-    final double rightWidth = screenWidth < 980 ? 240 : 300;
-    return Row(
-      children: <Widget>[
-        Expanded(child: _buildTabStack()),
-        VerticalDivider(
-          width: 1,
-          thickness: 1,
-          color: AppPalette.resolveSidebarSeparator(
-              AppThemeController.instance.value),
-        ),
-        SizedBox(
-          width: rightWidth,
-          child: _buildCompanionRightPanel(),
-        ),
-      ],
+    return JarvisChatLayout(
+      scheduleFuture: _cachedScheduleFuture,
+      onAgentLink: _openAgentLinkTab,
+      onGames: _openGameCenterTab,
+      onSchedule: _openSchedulePanel,
+      onWallet: _openWalletDialog,
+      onPhone: _openPhoneDevicesDialog,
+      onTranslate: _openTranslatePage,
+      child: _buildChatPage(context),
+    );
+  }
+
+  /// 构建聊天页（宽屏布局与 Tab 栈共用）
+  Widget _buildChatPage(BuildContext context) {
+    return ChatPage(
+      messages: _messages,
+      controller: _inputController,
+      inputFocusNode: _inputFocusNode,
+      onSend: _sendMessage,
+      agentName: _agentName,
+      galleryPendingCount: _pendingGalleryFrames.length,
+      onPickGalleryImage: _pickGalleryImage,
+      onClearGalleryImages: _clearPendingGalleryFrames,
+      isAgentProcessing: _isAgentProcessing,
+      agentStatusLine: _agentStatusLine,
+      onOpenGomoku: _openGomokuGame,
+      fullComputerAccessEnabled: _fullComputerAccessEnabled,
+      isActive: _tabIndex == 0,
+      onToggleFullComputerAccess: () {
+        setState(() {
+          _fullComputerAccessEnabled = !_fullComputerAccessEnabled;
+        });
+        if (!mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text(
+              _fullComputerAccessEnabled
+                  ? "已开启完全访问：Agent 可请求控制电脑等高权限操作"
+                  : "已切换为沙箱模式：高权限工具将被限制",
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      },
+      onEnterVoiceMode: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (BuildContext ctx) => VoiceModePage(
+              onExit: () => Navigator.of(ctx).pop(),
+            ),
+          ),
+        );
+      },
+      onOpenPhoneDialer: () {
+        _callMyAgentViaPhone(null);
+      },
+      onDeleteMessage: _deleteSingleMessage,
+      onDeleteFromMessage: _deleteMessagesFrom,
     );
   }
 
@@ -2819,51 +2447,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         return IndexedStack(
           index: _tabIndex,
           children: <Widget>[
-            ChatPage(
-              messages: _messages,
-              controller: _inputController,
-              inputFocusNode: _inputFocusNode,
-              onSend: _sendMessage,
-              agentName: _agentName,
-              galleryPendingCount: _pendingGalleryFrames.length,
-              onPickGalleryImage: _pickGalleryImage,
-              onClearGalleryImages: _clearPendingGalleryFrames,
-              isAgentProcessing: _isAgentProcessing,
-              agentStatusLine: _agentStatusLine,
-              onOpenGomoku: _openGomokuGame,
-              fullComputerAccessEnabled: _fullComputerAccessEnabled,
-              isActive: _tabIndex == 0,
-              onToggleFullComputerAccess: () {
-                setState(() {
-                  _fullComputerAccessEnabled = !_fullComputerAccessEnabled;
-                });
-                if (!mounted) return;
-                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      _fullComputerAccessEnabled
-                          ? "已开启完全访问：Agent 可请求控制电脑等高权限操作"
-                          : "已切换为沙箱模式：高权限工具将被限制",
-                    ),
-                    duration: const Duration(seconds: 2),
-                  ),
-                );
-              },
-              onEnterVoiceMode: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (BuildContext ctx) => VoiceModePage(
-                      onExit: () => Navigator.of(ctx).pop(),
-                    ),
-                  ),
-                );
-              },
-              onOpenPhoneDialer: () {
-                _callMyAgentViaPhone(null);
-              },
-              onDeleteMessage: _deleteSingleMessage,
-              onDeleteFromMessage: _deleteMessagesFrom,
-            ),
+            _buildChatPage(context),
             MailboxPage(api: _worldApi, ws: _ws),
             // 钱包已改为弹窗形式 (WalletDialog)，此处保留占位
             const SizedBox.shrink(),
@@ -2901,26 +2485,13 @@ class _AppSidebarState extends State<_AppSidebar> {
       iconOutlined: Icons.chat_bubble_outline_rounded,
       iconFilled: Icons.chat_rounded,
       label: '对话',
-    ),
-    _SidebarItemSpec(
-      iconOutlined: Icons.link_outlined,
-      iconFilled: Icons.link,
-      label: 'Agent Link',
-    ),
-    _SidebarItemSpec(
-      iconOutlined: Icons.account_balance_wallet_outlined,
-      iconFilled: Icons.account_balance_wallet,
-      label: '钱包',
+      tabIndex: 0,
     ),
     _SidebarItemSpec(
       iconOutlined: Icons.store_outlined,
       iconFilled: Icons.store,
       label: '技能商城',
-    ),
-    _SidebarItemSpec(
-      iconOutlined: Icons.sports_esports_outlined,
-      iconFilled: Icons.sports_esports,
-      label: '游戏',
+      tabIndex: 3,
     ),
   ];
 
@@ -2957,13 +2528,13 @@ class _AppSidebarState extends State<_AppSidebar> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
                         for (int i = 0; i < _kItems.length; i += 1)
-                          if (i != 2) // 钱包tab已移至AppBar加号菜单中
-                            _SidebarNavItem(
-                              key: ValueKey<String>(_kItems[i].label),
-                              spec: _kItems[i],
-                              selected: widget.tabIndex == i,
-                              onTap: () => widget.onTabSelected(i),
-                            ),
+                          _SidebarNavItem(
+                            key: ValueKey<String>(_kItems[i].label),
+                            spec: _kItems[i],
+                            selected: widget.tabIndex == _kItems[i].tabIndex,
+                            onTap: () =>
+                                widget.onTabSelected(_kItems[i].tabIndex),
+                          ),
                       ],
                     ),
                   ),
@@ -3005,11 +2576,13 @@ class _SidebarItemSpec {
     required this.iconOutlined,
     required this.iconFilled,
     required this.label,
+    required this.tabIndex,
   });
 
   final IconData iconOutlined;
   final IconData iconFilled;
   final String label;
+  final int tabIndex;
 }
 
 class _SidebarNavItem extends StatefulWidget {

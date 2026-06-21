@@ -19,6 +19,10 @@ export const ClientEventType = {
   DesktopBridgeRegister: "desktop.bridge.register",
   /** 电脑端桥接：执行完成后回传结果（与 desktop.bridge.invoke 的 jobId 对应）。 */
   DesktopBridgeResult: "desktop.bridge.result",
+  /** 手机桥接注册：携带 PHONE_BRIDGE_TOKEN 验证 */
+  PhoneBridgeRegister: "phone.bridge.register",
+  /** 手机桥接：执行完成后回传结果（与 phone.bridge.invoke 的 jobId 对应）。 */
+  PhoneBridgeResult: "phone.bridge.result",
   /** 用户发起虚拟电话呼叫Agent */
   VirtualPhoneUserCall: "phone.user_call_agent",
   /** 用户直接呼叫自己的Agent（无需输入ID，服务端从session推断） */
@@ -73,6 +77,12 @@ export const ServerEventType = {
   DesktopBridgeInvoke: "desktop.bridge.invoke",
   /** 手机端等与 userId 对齐的 WS：电脑桥接在线状态、最近桌面任务结果摘要 */
   DesktopBridgeSync: "desktop.bridge.sync",
+  /** 手机桥接：绑定成功 */
+  PhoneBridgeRegisterAck: "phone.bridge.register_ack",
+  /** 发往手机端：执行远程控制命令 */
+  PhoneBridgeInvoke: "phone.bridge.invoke",
+  /** 手机桥接状态同步 */
+  PhoneBridgeSync: "phone.bridge.sync",
   /** 球形 Agent 权威视觉状态（mood/energy/caption/委派 phase） */
   AgentEmbodimentPatch: "agent.embodiment.patch",
   /** 主 Agent 具身控制：3D 漫游、移动、停驻等（球形机器人身体） */

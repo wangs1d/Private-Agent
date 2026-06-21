@@ -26,10 +26,12 @@ import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
+import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
+import { registerTranslateRoutes } from "./translate.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -61,12 +63,14 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerFriendRoutes(app, deps);
   registerWechatClawRoutes(app, deps);
   registerBrowserSessionRoutes(app, deps);
+  registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
   registerNightlyMemoryRoutes(app);
   registerDownloadRoutes(app);
   registerToolSearchAdminRoutes(app);
   registerLifeSignalRoutes(app, deps);
   registerMarketSignalRoutes(app, deps);
+  registerTranslateRoutes(app, deps);
   if (deps.webhookService) {
     registerWebhookRoutes(app, deps.webhookService);
   }

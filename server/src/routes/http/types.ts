@@ -28,6 +28,7 @@ import type { WeatherService } from "../../services/weather-service.js";
 import type { TtsService } from "../../services/tts-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
+import type { PhoneBridgeCoordinator } from "../../services/phone-bridge-coordinator.js";
 import type { WechatClawBindingService } from "../../services/wechat-claw-binding-service.js";
 import type { WechatClawBridgeService } from "../../services/wechat-claw-bridge-service.js";
 import type { BrowserSessionService } from "../../services/browser-session-service.js";
@@ -69,6 +70,7 @@ export type HttpRouteDeps = {
   virtualPhoneService: VirtualPhoneService;
   ttsService: TtsService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
+  phoneBridgeCoordinator: PhoneBridgeCoordinator;
   wechatClawBindingService: WechatClawBindingService;
   wechatClawBridgeService: WechatClawBridgeService;
   browserSessionService: BrowserSessionService;
