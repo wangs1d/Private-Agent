@@ -13,8 +13,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
 const pluginDir = join(root, "openclaw-plugins", "private-agent-wechat-bridge");
 
-dotenvConfig({ path: join(serverDir, ".env") });
-dotenvConfig({ path: join(serverDir, ".env.local"), override: true });
+dotenvConfig({ path: join(serverDir, ".env"), quiet: true });
+dotenvConfig({ path: join(serverDir, ".env.local"), override: true, quiet: true });
 
 const port = Number(process.env.PORT ?? "3000");
 const bridgeToken = process.env.WECHAT_CLAW_BRIDGE_TOKEN?.trim() ?? "";

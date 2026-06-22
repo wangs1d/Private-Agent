@@ -16,8 +16,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
 const isWin = process.platform === "win32";
 
-config({ path: join(serverDir, ".env") });
-config({ path: join(serverDir, ".env.local") });
+config({ path: join(serverDir, ".env"), quiet: true });
+config({ path: join(serverDir, ".env.local"), quiet: true });
 
 const portRaw = Number(process.env.PORT ?? "3000");
 const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw < 65536 ? portRaw : 3000;

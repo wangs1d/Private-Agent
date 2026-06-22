@@ -1,11 +1,27 @@
-# 启动屏幕翻译托盘（独立悬浮窗 + 系统托盘 + 全局热键）
+# 启动屏幕翻译托盘（独立模块，已与 desktop-visual 解耦）
 #   Ctrl+Shift+T   Live 模式：反复框选翻译，结果合并到一个悬浮窗
 #   Ctrl+Shift+R   Continuous 模式：定一个区域，每 2s 自动 OCR + 翻译
 #   Ctrl+Shift+C   清空悬浮窗
 #   Esc            退出当前模式
 #   翻译：默认 auto (LLM → MyMemory 免 key 公网 API)
+#
+# 首次使用：先运行 .\desktop-translate\install-deps.ps1 创建虚拟环境并安装依赖
+# 关闭托盘即可退出
 $ErrorActionPreference = "Stop"
-$Root = $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $RepoRoot) { $RepoRoot = (Get-Location).Path }
+$ModuleRoot = Join-Path $RepoRoot "desktop-translate"
+$VenvPython = Join-Path $ModuleRoot ".venv\Scripts\python.exe"
+$SystemPython = (Get-Command python -ErrorAction SilentlyContinue)?.Source
+if (Test-Path $VenvPython) {
+    $PythonExe = $VenvPython
+} elseif ($SystemPython) {
+    $PythonExe = $SystemPython
+    Write-Host "[提示] 未找到 $VenvPython，将使用系统 Python（$PythonExe）"
+} else {
+    throw "未找到 Python，请先安装 Python 3.11+ 并加入 PATH，或先运行 .\desktop-translate\install-deps.ps1"
+}
+
 $Hotkey = if ($env:TRANSLATE_HOTKEY) { $env:TRANSLATE_HOTKEY.Trim() } else { "Ctrl+Shift+T" }
 $ContHotkey = if ($env:TRANSLATE_CONTINUOUS_HOTKEY) { $env:TRANSLATE_CONTINUOUS_HOTKEY.Trim() } else { "Ctrl+Shift+R" }
 $ClearHotkey = if ($env:TRANSLATE_CLEAR_HOTKEY) { $env:TRANSLATE_CLEAR_HOTKEY.Trim() } else { "Ctrl+Shift+C" }
@@ -15,6 +31,8 @@ $ContInterval = if ($env:TRANSLATE_CONTINUOUS_INTERVAL) { [double]$env:TRANSLATE
 $BaseUrl = if ($env:PRIVATE_AI_AGENT_BASE_URL) { $env:PRIVATE_AI_AGENT_BASE_URL.Trim() } else { "http://127.0.0.1:8787" }
 
 Write-Host "屏幕翻译托盘启动中..."
+Write-Host "  模块根目录:    $ModuleRoot"
+Write-Host "  Python:        $PythonExe"
 Write-Host "  Live 热键:        $Hotkey"
 Write-Host "  Continuous 热键:  $ContHotkey"
 Write-Host "  清空热键:         $ClearHotkey"
@@ -25,8 +43,8 @@ Write-Host "  翻译器:           $(if ($env:TRANSLATE_PROVIDER) { $env:TRANSLA
 Write-Host "  注意：请确保 PaddleOCR 服务已在 127.0.0.1:8765 运行（start-paddle-ocr.ps1）"
 Write-Host "  关闭托盘即可退出"
 
-Set-Location $Root
-python -m desktop_visual.translate_tray `
+Set-Location $ModuleRoot
+& $PythonExe -m translate_tray `
     --hotkey "$Hotkey" `
     --continuous-hotkey "$ContHotkey" `
     --clear-hotkey "$ClearHotkey" `

@@ -1538,16 +1538,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 常用工具「翻译」入口：屏幕翻译由独立的桌面托盘应用负责（系统托盘 + 全局热键
-  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗）。Flutter 端仅提示启动方式。
+  /// 常用工具「翻译」入口：屏幕翻译由独立模块 desktop-translate 提供（系统托盘 + 全局热键
+  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗），后端启动时会自动拉起。
+  /// Flutter 端仅提示启动方式（无需再走 desktop-visual）。
   void _openTranslatePage() {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null) return;
     ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
       const SnackBar(
         content: Text(
-          "翻译悬浮框由桌面托盘提供：请运行 desktop-visual/start-translate-tray.ps1，\n"
-          "启动后按 Ctrl+Shift+T 框选屏幕区域即可翻译。",
+          "屏幕翻译由独立模块提供：后端启动时会自动拉起托盘，\n"
+          "按 Ctrl+Shift+T 框选屏幕区域即可翻译。\n"
+          "如未自动启动，可手动运行根目录 start-translate.ps1。",
         ),
         duration: Duration(seconds: 5),
       ),
@@ -2437,7 +2439,24 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       },
       onDeleteMessage: _deleteSingleMessage,
       onDeleteFromMessage: _deleteMessagesFrom,
+      // 注入一条 assistant 演示消息（用于预览「智能体结果卡片」渲染效果）
+      onInjectAssistantMessage: _injectAssistantDemoMessage,
     );
+  }
+
+  /// 将一段文本以 assistant 身份注入到聊天列表底部。
+  /// 仅用于前端预览 [_AgentResultCard] 渲染效果，不走后端。
+  void _injectAssistantDemoMessage(String text) {
+    if (!mounted) return;
+    setState(() {
+      _messages.add(ChatMessage(
+        messageId: "demo_${DateTime.now().microsecondsSinceEpoch}",
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: text,
+        timestamp: DateTime.now(),
+      ));
+    });
   }
 
   /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）)

@@ -7,6 +7,7 @@ import os
 import sys
 
 from desktop_visual.visual_loop import LoopConfig, VisualDesktopLoop
+from desktop_visual.vlm.env_config import _normalize_openai_base
 from desktop_visual.vlm.openai_compatible import OpenAICompatibleVLM
 from desktop_visual.vlm.stub import StubVLM
 
@@ -14,7 +15,8 @@ from desktop_visual.vlm.stub import StubVLM
 def _build_vlm(args: argparse.Namespace):
     if args.stub:
         return StubVLM()
-    base = args.openai_base or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    raw_base = args.openai_base or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    base = _normalize_openai_base(raw_base)
     key = args.openai_key or os.environ.get("OPENAI_API_KEY", "")
     model = args.model or os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
     if not key and not args.stub:

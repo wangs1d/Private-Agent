@@ -8,8 +8,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverDir = resolve(__dirname, "..");
 
 // 加载 env（与服务端 loadServerEnv 一致）
-dotenvConfig({ path: resolve(serverDir, ".env") });
-dotenvConfig({ path: resolve(serverDir, ".env.local"), override: true });
+dotenvConfig({ path: resolve(serverDir, ".env"), quiet: true });
+dotenvConfig({ path: resolve(serverDir, ".env.local"), override: true, quiet: true });
 
 const isGatewayEnabled = () => {
   const enabled = (process.env.WECHAT_CLAW_ENABLED ?? "").trim();

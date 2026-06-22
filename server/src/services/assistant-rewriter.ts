@@ -11,12 +11,17 @@ function maxChars(): number {
   return Number.isFinite(n) && n >= 120 ? n : 360;
 }
 
+function rewriteTimeoutMs(): number {
+  const n = Number.parseInt(process.env.AGENT_HUMAN_REWRITE_TIMEOUT_MS ?? "1800", 10);
+  return Number.isFinite(n) && n >= 300 ? n : 1800;
+}
+
 function shouldRewrite(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (trimmed.length > maxChars()) return false;
   if (trimmed.includes("[CONTENT_SUMMARY_V2_START]")) return false;
-  if (/\n\s*(?:[-*•|]|\d+[.)、])/.test(trimmed)) return false;
+  if (/\n\s*(?:[-*•]|\d+[.)。])/u.test(trimmed)) return false;
   return true;
 }
 
@@ -31,7 +36,7 @@ function extractFactAnchors(text: string): string[] {
     /\b\d{4}-\d{1,2}-\d{1,2}\b/g,
     /\b\d{1,2}:\d{2}\b/g,
     /\b\d+(?:\.\d+)?%/g,
-    /\b\d+(?:\.\d+)?(?:ms|s|m|h|km|元|块|点|条|个|次)\b/gi,
+    /\b\d+(?:\.\d+)?(?:ms|s|m|h|km|元|块|次)\b/gi,
     /\b[A-Z][A-Z0-9_-]{1,}\b/g,
     /\b\d+(?:\.\d+)?\b/g,
   ];
@@ -76,12 +81,12 @@ export class AssistantRewriterService {
     const tone = detectAssistantToneMode(userText);
     const prompt = [
       "你是中文回复润色器，只改表达，不改事实，不补信息，不删关键结论。",
-      "目标：把回复改得更像真人接话，口语自然，短一点，少客服腔，少说明书味道。",
+      "目标：把回复改得更像真人对话，口语自然，短一点，少客服腔，少说明书味道。",
       `本轮语气温度：${tone}。steady=稳，soft=更柔和，direct=更利落，light=更轻松。`,
       "硬性要求：",
       "1. 不新增事实，不改原意，不改结论。",
       "2. 默认像微信聊天，少用“以下是”“总的来说”“我来帮你分析一下”这类 AI 腔。",
-      "3. 可以接一句，但要克制，不演绎，不鸡汤，不扩写。",
+      "3. 可以接一两句，但要克制，不演绎，不鸡汤，不扩写。",
       "4. 除非原文更短，否则不要把它改长。",
       "5. 数字、时间、百分比、链接、英文术语、专有名词尽量原样保留。",
       "6. 只输出改写后的最终回复，不要解释。",
@@ -92,22 +97,27 @@ export class AssistantRewriterService {
 
     let out = "";
     try {
-      await this.provider.streamCompletion(
-        `assistant-rewrite:${Date.now()}`,
-        { text: prompt },
-        (delta) => {
-          out += delta;
-        },
-        undefined,
-        {
-          ephemeralTurn: true,
-          disableThinking: true,
-          systemPromptOverride:
-            "你是轻量口语润色器。只改表达，不改事实，不加新信息，默认更短、更自然、更像真人接话。",
-          modelOverride: process.env.AGENT_HUMAN_REWRITE_MODEL?.trim() || undefined,
-          maxThreadMessages: 2,
-        },
-      );
+      await Promise.race([
+        this.provider.streamCompletion(
+          `assistant-rewrite:${Date.now()}`,
+          { text: prompt },
+          (delta) => {
+            out += delta;
+          },
+          undefined,
+          {
+            ephemeralTurn: true,
+            disableThinking: true,
+            systemPromptOverride:
+              "你是轻量口语润色器。只改表达，不改事实，不加新信息，默认更短、更自然、更像真人接话。",
+            modelOverride: process.env.AGENT_HUMAN_REWRITE_MODEL?.trim() || undefined,
+            maxThreadMessages: 2,
+          },
+        ),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("assistant rewrite timeout")), rewriteTimeoutMs()),
+        ),
+      ]);
     } catch {
       return base;
     }
