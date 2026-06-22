@@ -1,0 +1,226 @@
+/* ── 独立桌面日程悬浮窗样式 ── */
+
+.schedule-float {
+  width: 280px;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 20, 30, 0.92);
+  border: 1px solid rgba(136, 187, 255, 0.12);
+  border-radius: 14px;
+  backdrop-filter: blur(24px);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+              width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 折叠状态 */
+.schedule-float--collapsed {
+  width: 200px;
+  max-height: none;
+}
+
+/* 标题栏 */
+.schedule-float__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: linear-gradient(
+    135deg,
+    rgba(96, 165, 250, 0.08) 0%,
+    rgba(139, 92, 246, 0.06) 100%
+  );
+  border-bottom: 1px solid rgba(136, 187, 255, 0.1);
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.schedule-float__header:active {
+  cursor: grabbing;
+}
+
+.schedule-float__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.schedule-float__icon {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.schedule-float__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.schedule-float__date {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* 操作按钮区 */
+.schedule-float__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: 10px;
+}
+
+.schedule-float__badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  border-radius: 9px;
+}
+
+.schedule-float__action {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.schedule-float__action:hover {
+  background: rgba(136, 187, 255, 0.12);
+  color: #cbd5e1;
+}
+
+/* 内容区域 */
+.schedule-float__body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 0;
+  min-height: 60px;
+}
+
+/* 自定义滚动条 */
+.schedule-float__body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.schedule-float__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.schedule-float__body::-webkit-scrollbar-thumb {
+  background: rgba(136, 187, 255, 0.2);
+  border-radius: 2px;
+}
+
+.schedule-float__body::-webkit-scrollbar-thumb:hover {
+  background: rgba(136, 187, 255, 0.35);
+}
+
+/* 空状态 */
+.schedule-float__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 16px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.schedule-float__empty-icon {
+  font-size: 28px;
+  opacity: 0.7;
+}
+
+/* 日程列表 */
+.schedule-float__list {
+  list-style: none;
+  padding: 0 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-float__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.schedule-float__item:hover {
+  background: rgba(136, 187, 255, 0.06);
+  border-color: rgba(136, 187, 255, 0.1);
+}
+
+.schedule-float__item.is-completed {
+  opacity: 0.55;
+}
+
+.schedule-float__item.is-completed .schedule-float__item-title {
+  text-decoration: line-through;
+  color: #64748b;
+}
+
+.schedule-float__item-time {
+  font-size: 11px;
+  font-weight: 600;
+  color: #60a5fa;
+  white-space: nowrap;
+  min-width: 42px;
+  padding-top: 1px;
+}
+
+.schedule-float__item-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: #e2e8f0;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 底部统计 */
+.schedule-float__footer {
+  padding: 8px 14px;
+  border-top: 1px solid rgba(136, 187, 255, 0.08);
+  font-size: 10px;
+  color: #64748b;
+  text-align: center;
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}

@@ -7,9 +7,11 @@ import "dart:convert";
 import "../../core/config/api_config.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/presentation/virtual_phone_ui_labels.dart";
+import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
+import "agent_result_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
 
@@ -38,6 +40,8 @@ class ChatPage extends StatefulWidget {
     this.onDeleteMessage,
     /// 删除从某条消息起之后所有消息的回调（传入 messageId）
     this.onDeleteFromMessage,
+    /// 注入一条 assistant 演示消息（用于预览「智能体结果卡片」渲染效果）
+    this.onInjectAssistantMessage,
   });
 
   final List<ChatMessage> messages;
@@ -73,6 +77,8 @@ class ChatPage extends StatefulWidget {
   final void Function(String messageId)? onDeleteMessage;
   /// 删除从某条消息起之后所有消息
   final void Function(String messageId)? onDeleteFromMessage;
+  /// 注入一条 assistant 演示消息（用于预览「智能体结果卡片」渲染效果）
+  final void Function(String text)? onInjectAssistantMessage;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -675,6 +681,179 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     return false;
   }
 
+  /// 「智能体结果卡片」演示入口：弹出底部选择面板，点选后将预设文本以 assistant
+  /// 身份注入到聊天列表里，从而预览 [AgentResultCard] 的渲染效果。
+  void _showAgentResultDemoSheet(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+
+    final List<_AgentResultDemoPreset> presets =
+        <_AgentResultDemoPreset>[
+      _AgentResultDemoPreset(
+        title: '任务完成总结',
+        subtitle: '✓ 列表 + footer 追问',
+        text: '''[AGENT_RESULT_CARD_START]
+{"avatar":"NB","avatarStyle":"default","title":"已完成分析,核心数据如下:",
+ "items":[
+   {"type":"check","text":"核心功能完成度 87%"},
+   {"type":"check","text":"Bug 修复 12 个,新增 3 个"},
+   {"type":"check","text":"本周里程碑:用户测试"}
+ ],
+ "footer":"报告已生成,需要发送至你的邮箱吗?"}
+[AGENT_RESULT_CARD_END]''',
+      ),
+      _AgentResultDemoPreset(
+        title: '工具调用结果',
+        subtitle: '• 序号 + 紧凑布局',
+        text: '''[AGENT_RESULT_CARD_START]
+{"avatar":"AI","avatarStyle":"accent","title":"文件搜索完成",
+ "items":[
+   {"type":"num","text":"匹配文件 5 个,耗时 128ms"},
+   {"type":"num","text":"已展示前 3 条结果"}
+ ]}
+[AGENT_RESULT_CARD_END]''',
+      ),
+      _AgentResultDemoPreset(
+        title: '代码部署汇报',
+        subtitle: '渐变头像 + [tag] 行内标签',
+        text: '''[AGENT_RESULT_CARD_START]
+{"avatar":"NB","avatarStyle":"gradient","title":"代码重构已部署",
+ "items":[
+   {"type":"check","text":"改动文件 8 个,+234 / -176 行"},
+   {"type":"check","text":"单元测试通过率 100%"},
+   {"type":"check","text":"CI 流水线 3m 42s"}
+ ],
+ "footer":"[main] 已合并,可在生产环境验证"}
+[AGENT_RESULT_CARD_END]''',
+      ),
+      _AgentResultDemoPreset(
+        title: '依赖安全提醒',
+        subtitle: '! 警告符号',
+        text: '''[AGENT_RESULT_CARD_START]
+{"avatar":"NB","avatarStyle":"success","title":"检测到 1 项需关注",
+ "items":[
+   {"type":"warn","text":"依赖 lodash@4.17.20 存在已知漏洞"},
+   {"type":"check","text":"建议升级到 4.17.21"}
+ ]}
+[AGENT_RESULT_CARD_END]''',
+      ),
+    ];
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: cs.surfaceContainerHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Icon(Icons.style_outlined,
+                        size: 18, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Text(
+                      '智能体结果卡片 · 预览',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: cs.onSurface,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '点击下方任一模板,以 assistant 身份注入到对话',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.75),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ...presets.map((_AgentResultDemoPreset p) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          widget.onInjectAssistantMessage?.call(p.text);
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainer,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: cs.outline.withValues(alpha: 0.3),
+                            ),
+                          ),
+                          child: Row(
+                            children: <Widget>[
+                              Container(
+                                width: 28,
+                                height: 28,
+                                decoration: BoxDecoration(
+                                  color: cs.primary.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                alignment: Alignment.center,
+                                child: Icon(Icons.bolt_outlined,
+                                    size: 16, color: cs.primary),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: <Widget>[
+                                    Text(
+                                      p.title,
+                                      style: TextStyle(
+                                        fontSize: 13.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: cs.onSurface,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      p.subtitle,
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        color: cs.onSurfaceVariant
+                                            .withValues(alpha: 0.85),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Icon(Icons.chevron_right,
+                                  size: 18, color: cs.onSurfaceVariant),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildProgressBubble(ColorScheme cs, String text) {
     return Align(
       alignment: Alignment.centerLeft,
@@ -1181,6 +1360,31 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         tooltip: VirtualPhoneUiLabels.chatTooltip,
                                       ),
                                     ),
+                                  if (widget.onOpenPhoneDialer != null)
+                                    const SizedBox(width: 6),
+                                  // 智能体结果卡片 演示按钮
+                                  if (widget.onInjectAssistantMessage != null)
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        color: cs.surfaceContainerHighest,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: IconButton(
+                                        icon: Icon(
+                                          Icons.style_outlined,
+                                          size: 18,
+                                          color: cs.onSurfaceVariant,
+                                        ),
+                                        onPressed: () =>
+                                            _showAgentResultDemoSheet(context),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 30,
+                                          minHeight: 30,
+                                        ),
+                                        tooltip: '预览结果卡片',
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
@@ -1198,6 +1402,19 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         );
   }
 
+}
+
+/// 「智能体结果卡片」演示预设：底部选择面板里展示的项。
+class _AgentResultDemoPreset {
+  const _AgentResultDemoPreset({
+    required this.title,
+    required this.subtitle,
+    required this.text,
+  });
+
+  final String title;
+  final String subtitle;
+  final String text;
 }
 
 class _GomokuPlayUrlCard extends StatelessWidget {
@@ -1908,6 +2125,31 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: isUser ? Colors.white : cs.onSurface,
             ),
+      );
+    }
+
+    // 智能体结果卡片（任务总结 / 工具调用结果）优先级最高，
+    // 命中后剥离标记，剩余文本以小字附在卡片下方。
+    final AgentResultParseResult agentResult =
+        AgentResultParser.parse(message.text);
+    if (agentResult.data != null) {
+      final String remaining = agentResult.cleanedText;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          AgentResultCard(data: agentResult.data!),
+          if (remaining.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                stripMarkdown(remaining),
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurface.withValues(alpha: 0.85),
+                    ),
+              ),
+            ),
+        ],
       );
     }
 

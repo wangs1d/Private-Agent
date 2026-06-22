@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 
 const serverDir = join(dirname(fileURLToPath(import.meta.url)), "..", "server");
 
-dotenvConfig({ path: join(serverDir, ".env") });
-dotenvConfig({ path: join(serverDir, ".env.local"), override: true });
+dotenvConfig({ path: join(serverDir, ".env"), quiet: true });
+dotenvConfig({ path: join(serverDir, ".env.local"), override: true, quiet: true });
 
 function isEnabled() {
   const v = (process.env.WECHAT_CLAW_ENABLED ?? "").trim().toLowerCase();

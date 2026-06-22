@@ -44,9 +44,9 @@ function findUserMessageByClientId(
 }
 
 const DEFAULT_SMART_TRIM_CONFIG = {
-  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? "20", 10),
-  maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? "8000", 10),
-  preserveRecentTurns: 4,
+  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? "12", 10),
+  maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? "6000", 10),
+  preserveRecentTurns: 3,
 };
 
 const TIME_FRAME_PREFIX = "[timeframe:";

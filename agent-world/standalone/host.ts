@@ -6,7 +6,8 @@
  * - `AGENT_WORLD_STANDALONE_PORT`：默认 `3333`（勿用主服务 `PORT`，避免与 server/.env 冲突）
  * - `ALLOW_WORLD_HTTP_MUTATIONS=1`：允许 HTTP 写入世界（与主仓库行为一致）
  */
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
+dotenvConfig({ quiet: true });
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";

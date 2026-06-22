@@ -5,6 +5,7 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
+import { startDesktopTranslateTray } from "./services/desktop-translate-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
   isWechatClawBridgeEnabled,
@@ -67,6 +68,9 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,
   log: (line) => services.app.log.info(line),
 });
+const stopDesktopTranslate = startDesktopTranslateTray({
+  log: (line) => services.app.log.info(line),
+});
 const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   ? (() => {
       const bridge = readWechatClawBridgeConfig(process.env);
@@ -98,6 +102,7 @@ const shutdown = (): void => {
   });
   services.webhookService.stop();
   stopDesktopBridge();
+  stopDesktopTranslate();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));
 };

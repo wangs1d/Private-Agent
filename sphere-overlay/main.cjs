@@ -10,8 +10,15 @@ const PET_HEIGHT = 188;
 const MENU_WIDTH = 204;
 const WIDTH = PET_WIDTH;
 const HEIGHT = PET_HEIGHT;
+
+/** 日程悬浮窗尺寸 */
+const SCHEDULE_WIDTH = 280;
+const SCHEDULE_HEIGHT_COLLAPSED = 48; // 折叠状态仅标题栏
+const SCHEDULE_HEIGHT_EXPANDED = 340; // 展开状态
+
 let menuExpanded = false;
 let mainWindow = null;
+let scheduleWindow = null; // 日程悬浮窗
 let tray = null;
 let staticServer = null;
 let staticServerPort = 0;
@@ -223,6 +230,115 @@ function createWindow() {
   });
 }
 
+/** 创建独立的日程悬浮窗 */
+function createScheduleWindow() {
+  if (scheduleWindow && !scheduleWindow.isDestroyed()) {
+    // 窗口已存在，只需显示
+    if (!scheduleWindow.isVisible()) scheduleWindow.show();
+    scheduleWindow.focus();
+    return;
+  }
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+
+  // 默认位置：屏幕左上角区域（避开桌宠）
+  const x = 24;
+  const y = 24;
+
+  scheduleWindow = new BrowserWindow({
+    width: SCHEDULE_WIDTH,
+    height: SCHEDULE_HEIGHT_EXPANDED,
+    x,
+    y,
+    show: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: true,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+
+  scheduleWindow.setAlwaysOnTop(true, "screen-saver");
+  scheduleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  /** 加载日程悬浮窗页面 */
+  async function loadSchedulePage(win) {
+    const distRoot = overlayDistDir();
+    const distSchedule = path.join(distRoot, "schedule-floating.html");
+    const ws = process.env.PAI_WS_URL || "ws://127.0.0.1:3000/ws";
+    const sessionId = process.env.PAI_SESSION_ID || "";
+    const httpBase = (process.env.PAI_HTTP_BASE || "http://127.0.0.1:3000").replace(/\/$/, "");
+    const query = new URLSearchParams({ ws, httpBase });
+    if (sessionId) query.set("sessionId", sessionId);
+
+    const showLoadError = (message) => {
+      if (win.isDestroyed()) return;
+      log("[Schedule] load error:", message);
+      void win.loadURL(
+        `data:text/html,<meta charset=utf-8><body style='font-family:sans-serif;padding:16px;color:#fff;background:#222'>`
+          + `<h3>日程悬浮窗加载失败</h3><pre style='white-space:pre-wrap'>${message}</pre></body>`,
+      );
+    };
+
+    if (fs.existsSync(distSchedule)) {
+      try {
+        const port = await ensureStaticServer(distRoot);
+        const localUrl = `http://127.0.0.1:${port}/schedule-floating.html?${query.toString()}`;
+        log("[Schedule] loading", localUrl);
+        await win.loadURL(localUrl);
+        return;
+      } catch (err) {
+        showLoadError(`本地静态服务启动失败: ${err?.message || err}`);
+        return;
+      }
+    }
+
+    // 回退：尝试从服务端加载
+    const serverUrl = `${httpBase}/chat/assets/avatar/schedule-floating.html?${query.toString()}`;
+    try {
+      await win.loadURL(serverUrl);
+    } catch (err) {
+      showLoadError(`HTTP 加载失败: ${err?.message || err}`);
+    }
+  }
+
+  void loadSchedulePage(scheduleWindow);
+
+  scheduleWindow.once("ready-to-show", () => {
+    if (typeof scheduleWindow.showInactive === "function") {
+      scheduleWindow.showInactive();
+    } else {
+      scheduleWindow.show();
+    }
+    log("[Schedule] window shown");
+  });
+
+  scheduleWindow.on("closed", () => {
+    scheduleWindow = null;
+  });
+}
+
+/** 显示/隐藏日程悬浮窗 */
+function toggleScheduleWindow() {
+  if (!scheduleWindow || scheduleWindow.isDestroyed()) {
+    createScheduleWindow();
+    return;
+  }
+  if (scheduleWindow.isVisible()) {
+    scheduleWindow.hide();
+  } else {
+    scheduleWindow.show();
+  }
+}
+
 function animateMove(targetX, targetY, durationMs = 1200) {
   if (!mainWindow) return;
   const start = mainWindow.getBounds();
@@ -268,6 +384,29 @@ function handleCommand(command) {
       }
       finishDeskPetShow();
     }
+    return;
+  }
+
+  // 日程悬浮窗命令
+  if (command === "schedule" || command === "schedule:toggle") {
+    toggleScheduleWindow();
+    return;
+  }
+
+  if (command === "schedule:show") {
+    if (!scheduleWindow || scheduleWindow.isDestroyed()) {
+      createScheduleWindow();
+    } else if (!scheduleWindow.isVisible()) {
+      scheduleWindow.show();
+    }
+    return;
+  }
+
+  if (command === "schedule:hide") {
+    if (scheduleWindow && !scheduleWindow.isDestroyed()) {
+      scheduleWindow.hide();
+    }
+    return;
   }
 }
 
@@ -299,12 +438,16 @@ app.whenReady().then(() => {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
-        label: "显示/隐藏",
+        label: "显示/隐藏 桌宠",
         click: () => {
           if (!mainWindow) return;
           if (mainWindow.isVisible()) mainWindow.hide();
           else mainWindow.show();
         },
+      },
+      {
+        label: "显示/隐藏 日程悬浮窗",
+        click: () => toggleScheduleWindow(),
       },
       {
         label: "随机漫游",

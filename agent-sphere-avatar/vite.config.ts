@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
         input: {
           embed: resolve(__dirname, "embed.html"),
           overlay: resolve(__dirname, "overlay.html"),
+          "schedule-floating": resolve(__dirname, "schedule-floating.html"),
         },
       },
     },

@@ -1,16 +1,17 @@
-"""
-屏幕翻译托盘应用：
+r"""
+屏幕翻译托盘应用（独立模块，已与 desktop-visual 解耦）：
   - 系统托盘图标 + 菜单
   - 全局热键
       Ctrl+Shift+T   Live 模式：反复框选并翻译（每选一次就出一张新卡片）
       Ctrl+Shift+R   Continuous 模式：定一个区域，每隔 N 秒自动 OCR + 翻译
       Ctrl+Shift+C   清空悬浮窗
       Esc            退出当前模式
-  - 截屏 → PaddleOCR → 翻译（LLM / 公网 API 二选一或自动回退）→ 悬浮结果窗
-  - 所有结果合并到**一个独立的悬浮窗**内（不依赖 Flutter 应用）
+  - 截屏 → 主服务 `/api/translate/screen-region`（OCR + 翻译）→ 悬浮结果窗
+  - 所有结果合并到**一个独立的悬浮窗**内（不依赖 desktop-visual / Flutter 应用）
 
 启动：
-  python -m desktop_visual.translate_tray
+  python -m translate_tray
+  # 或者在仓库根目录：powershell -ExecutionPolicy Bypass -File .\start-translate.ps1
 """
 from __future__ import annotations
 

@@ -364,11 +364,9 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     // 智能模型路由：根据任务复杂度选择最优模型（性能优化：成本 -40%, 速度 +20%）
     let model = streamOpts?.modelOverride?.trim();
-    
+
     if (!model) {
       model = this.selectOptimalModel(userTurn.text, msgs.length);
-    } else {
-      model = this.model;
     }
 
     const toolPlan = tools
@@ -528,5 +526,4 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
   }
 
 }
-
 
