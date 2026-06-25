@@ -1,42 +1,48 @@
-/* ── 独立桌面日程悬浮窗样式 ── */
+/* ── 独立桌面日程悬浮窗样式（纯黑主题） ── */
 
 .schedule-float {
   width: 280px;
   max-height: 380px;
   display: flex;
   flex-direction: column;
-  background: rgba(15, 20, 30, 0.92);
-  border: 1px solid rgba(136, 187, 255, 0.12);
+  background: #000000;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 14px;
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
   box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+    0 12px 40px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
   overflow: hidden;
-  transition: max-height 0.3s cubic-bezier(0.22, 1, 0.36, 1),
-              width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  user-select: none;
+  -webkit-user-select: none;
+  will-change: transform;
+  transform: translateZ(0);
+  /* 拖动期间禁用过渡避免动画拖尾 */
+  transition: none;
 }
 
-/* 折叠状态 */
 .schedule-float--collapsed {
   width: 200px;
   max-height: none;
 }
 
-/* 标题栏 */
+/* 标题栏 — 系统级拖动 + 鼠标 grab 光标 */
 .schedule-float__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 12px 14px;
   background: linear-gradient(
-    135deg,
-    rgba(96, 165, 250, 0.08) 0%,
-    rgba(139, 92, 246, 0.06) 100%
+    180deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(0, 0, 0, 0) 100%
   );
-  border-bottom: 1px solid rgba(136, 187, 255, 0.1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   cursor: grab;
   flex-shrink: 0;
+  /* CSS 层系统级拖动（部分平台/版本下可能不生效，下面有 JS 回退） */
+  -webkit-app-region: drag;
 }
 
 .schedule-float__header:active {
@@ -59,25 +65,25 @@
 .schedule-float__title {
   font-size: 13px;
   font-weight: 600;
-  color: #e2e8f0;
+  color: #f5f5f5;
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
 .schedule-float__date {
   font-size: 11px;
-  color: #94a3b8;
+  color: #888;
   margin-left: auto;
   white-space: nowrap;
 }
 
-/* 操作按钮区 */
 .schedule-float__actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
   margin-left: 10px;
+  -webkit-app-region: no-drag;
 }
 
 .schedule-float__badge {
@@ -89,8 +95,8 @@
   justify-content: center;
   font-size: 11px;
   font-weight: 600;
-  color: #fff;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: #000;
+  background: #f5f5f5;
   border-radius: 9px;
 }
 
@@ -103,45 +109,41 @@
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: #94a3b8;
+  color: #888;
   font-size: 10px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.12s ease, color 0.12s ease;
+  -webkit-app-region: no-drag;
 }
 
 .schedule-float__action:hover {
-  background: rgba(136, 187, 255, 0.12);
-  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f5f5f5;
 }
 
-/* 内容区域 */
 .schedule-float__body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px 0;
   min-height: 60px;
+  background: #000000;
 }
 
-/* 自定义滚动条 */
 .schedule-float__body::-webkit-scrollbar {
   width: 4px;
 }
-
 .schedule-float__body::-webkit-scrollbar-track {
   background: transparent;
 }
-
 .schedule-float__body::-webkit-scrollbar-thumb {
-  background: rgba(136, 187, 255, 0.2);
+  background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;
 }
-
 .schedule-float__body::-webkit-scrollbar-thumb:hover {
-  background: rgba(136, 187, 255, 0.35);
+  background: rgba(255, 255, 255, 0.3);
 }
 
-/* 空状态 */
 .schedule-float__empty {
   display: flex;
   flex-direction: column;
@@ -149,16 +151,16 @@
   justify-content: center;
   gap: 8px;
   padding: 28px 16px;
-  color: #64748b;
+  color: #555;
   font-size: 12px;
 }
 
 .schedule-float__empty-icon {
   font-size: 28px;
-  opacity: 0.7;
+  opacity: 0.6;
+  filter: grayscale(1) brightness(0.7);
 }
 
-/* 日程列表 */
 .schedule-float__list {
   list-style: none;
   padding: 0 12px;
@@ -174,38 +176,39 @@
   gap: 10px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid transparent;
-  transition: all 0.15s ease;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .schedule-float__item:hover {
-  background: rgba(136, 187, 255, 0.06);
-  border-color: rgba(136, 187, 255, 0.1);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .schedule-float__item.is-completed {
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 .schedule-float__item.is-completed .schedule-float__item-title {
   text-decoration: line-through;
-  color: #64748b;
+  color: #666;
 }
 
 .schedule-float__item-time {
   font-size: 11px;
   font-weight: 600;
-  color: #60a5fa;
+  color: #f5f5f5;
   white-space: nowrap;
   min-width: 42px;
   padding-top: 1px;
+  font-variant-numeric: tabular-nums;
 }
 
 .schedule-float__item-title {
   font-size: 12px;
   font-weight: 500;
-  color: #e2e8f0;
+  color: #e5e5e5;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -214,13 +217,13 @@
   min-width: 0;
 }
 
-/* 底部统计 */
 .schedule-float__footer {
   padding: 8px 14px;
-  border-top: 1px solid rgba(136, 187, 255, 0.08);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 10px;
-  color: #64748b;
+  color: #666;
   text-align: center;
   flex-shrink: 0;
   letter-spacing: 0.02em;
+  background: #000000;
 }

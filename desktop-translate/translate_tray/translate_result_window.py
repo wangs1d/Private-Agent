@@ -1,9 +1,12 @@
 """
 独立悬浮翻译结果窗（多卡片合并版）：
   - 单个 always-on-top Tk 悬浮窗，所有选区结果叠加显示在窗口内
-  - 每次新的翻译结果作为一张新卡片插入到顶部（或更新已有卡片，连续模式用）
-  - 卡片可独立关闭、复制原文/译文
+  - 顶部工具栏：翻译为 ▼ / ➕ 新建 / 字号 ▼ / 展开字幕 / ✕
+  - 每次新的翻译结果作为一张新卡片插入到顶部
+  - 卡片可独立关闭、可复制译文
   - 窗口可拖动、可滚动、可隐藏到托盘
+
+不依赖 desktop-visual / Flutter 应用。
 """
 from __future__ import annotations
 
@@ -28,6 +31,35 @@ ERROR = "#f87171"
 WARN = "#fbbf24"
 CONTINUOUS_ACCENT = "#a78bfa"  # 连续模式卡片用紫色区分
 
+# 字号档位（小 / 中 / 大）—— 应用到卡片译文
+FONT_SIZE_OPTIONS: list[tuple[str, int]] = [
+    ("小号字体", 10),
+    ("中号字体", 13),
+    ("大号字体", 16),
+]
+
+# 窗口尺寸
+NORMAL_GEOMETRY: tuple[int, int] = (460, 600)     # 收起态
+EXPANDED_GEOMETRY: tuple[int, int] = (860, 260)   # 展开字幕态（宽而矮，靠底）
+
+# 语言下拉
+LANG_LABELS: dict[str, str] = {
+    "zh": "中文",
+    "zh-CN": "中文",
+    "zh-TW": "繁體",
+    "en": "English",
+    "ja": "日本語",
+    "ko": "한국어",
+    "fr": "Français",
+    "de": "Deutsch",
+    "es": "Español",
+    "ru": "Русский",
+}
+
+
+def _label_for_lang(code: str) -> str:
+    return LANG_LABELS.get(code, code)
+
 
 class ConsolidatedTranslateWindow:
     """单例悬浮窗，所有翻译结果合并在此窗口内。"""
@@ -35,8 +67,20 @@ class ConsolidatedTranslateWindow:
     _instance: Optional["ConsolidatedTranslateWindow"] = None
     _instance_lock = threading.Lock()
 
-    def __init__(self, width: int = 460) -> None:
+    def __init__(
+        self,
+        width: int = NORMAL_GEOMETRY[0],
+        new_callback: Optional[Callable[[], None]] = None,
+        language_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.width = width
+        self._new_callback = new_callback
+        self._language_callback = language_callback
+
+        self._target_lang: str = "zh"
+        self._font_size: int = FONT_SIZE_OPTIONS[1][1]  # 默认中号
+        self._expanded: bool = False
+
         self._root: Optional[tk.Tk] = None
         self._cards_frame: Optional[tk.Frame] = None
         self._canvas: Optional[tk.Canvas] = None
@@ -47,6 +91,11 @@ class ConsolidatedTranslateWindow:
         self._auto_close_ms: int = 0  # 0 = 不自动关闭
         self._close_job: Optional[str] = None
 
+        # 工具栏控件引用
+        self._lang_menubutton: Optional[tk.Menubutton] = None
+        self._font_menubutton: Optional[tk.Menubutton] = None
+        self._expand_button: Optional[tk.Button] = None
+
     # ---------- 单例管理 ----------
 
     @classmethod
@@ -56,6 +105,49 @@ class ConsolidatedTranslateWindow:
                 cls._instance = ConsolidatedTranslateWindow()
                 cls._instance._build()
             return cls._instance
+
+    @classmethod
+    def configure(
+        cls,
+        new_callback: Optional[Callable[[], None]] = None,
+        language_callback: Optional[Callable[[str], None]] = None,
+    ) -> "ConsolidatedTranslateWindow":
+        """注册工具栏回调。首次调用前用于注入；之后用于热更新。"""
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = ConsolidatedTranslateWindow(
+                    new_callback=new_callback,
+                    language_callback=language_callback,
+                )
+                cls._instance._build()
+                return cls._instance
+            if new_callback is not None:
+                cls._instance._new_callback = new_callback
+            if language_callback is not None:
+                cls._instance._language_callback = language_callback
+            return cls._instance
+
+    # ---------- 公开配置接口（供 tray app 同步状态） ----------
+
+    def set_target_lang(self, code: str) -> None:
+        self._target_lang = code or "zh"
+        self._dispatch(self._refresh_lang_label)
+
+    def set_font_size(self, size: int) -> None:
+        for _, v in FONT_SIZE_OPTIONS:
+            if v == size:
+                self._font_size = size
+                self._dispatch(self._apply_font_size)
+                return
+        # 兜底取最近
+        self._font_size = FONT_SIZE_OPTIONS[1][1]
+        self._dispatch(self._apply_font_size)
+
+    def get_target_lang(self) -> str:
+        return self._target_lang
+
+    def get_font_size(self) -> int:
+        return self._font_size
 
     # ---------- 公开 API ----------
 
@@ -160,15 +252,79 @@ class ConsolidatedTranslateWindow:
         self._close_job = self._root.after(ms, self.close)
 
     def _position(self) -> None:
+        if self._root is None:
+            return
         try:
             self._root.update_idletasks()
             sw = self._root.winfo_screenwidth()
             sh = self._root.winfo_screenheight()
-            x = max(20, sw - self.width - 24)
-            y = max(20, (sh - 600) // 2)
-            self._root.geometry(f"{self.width}x600+{x}+{y}")
+            w, h = EXPANDED_GEOMETRY if self._expanded else NORMAL_GEOMETRY
+            x = max(20, sw - w - 24)
+            y = max(20, (sh - h) // 2)
+            self._root.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
             pass
+
+    # ---------- 工具栏回调 ----------
+
+    def _on_new_clicked(self) -> None:
+        LOG.info("工具栏 ➕ 新建：触发框选翻译")
+        cb = self._new_callback
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            LOG.exception("新建回调失败")
+
+    def _on_lang_change(self, code: str) -> None:
+        self._target_lang = code
+        self._refresh_lang_label()
+        if self._language_callback is not None:
+            try:
+                self._language_callback(code)
+            except Exception:
+                LOG.exception("语言切换回调失败")
+
+    def _on_font_change(self, label: str, size: int) -> None:
+        self._font_size = size
+        if self._font_menubutton is not None:
+            try:
+                self._font_menubutton.configure(text=f"Aa {label} ▼")
+            except Exception:
+                pass
+        self._apply_font_size()
+
+    def _on_expand_toggle(self) -> None:
+        self._expanded = not self._expanded
+        if self._expand_button is not None:
+            try:
+                self._expand_button.configure(
+                    text="🗗 收起字幕" if self._expanded else "⛶ 展开字幕"
+                )
+            except Exception:
+                pass
+        self._position()
+
+    def _refresh_lang_label(self) -> None:
+        if self._lang_menubutton is None:
+            return
+        try:
+            self._lang_menubutton.configure(
+                text=f"🌐 翻译为: {_label_for_lang(self._target_lang)} ▼"
+            )
+        except Exception:
+            pass
+
+    def _apply_font_size(self) -> None:
+        # 让所有卡片同步字号
+        for card in self._cards.values():
+            try:
+                card.set_font_size(self._font_size)
+            except Exception:
+                pass
+
+    # ---------- 构建 UI ----------
 
     def _build(self) -> None:
         self._root = tk.Tk()
@@ -183,36 +339,15 @@ class ConsolidatedTranslateWindow:
             pass
         self._root.configure(bg=BG)
         self._root.resizable(True, True)
-        self._root.minsize(self.width, 200)
+        self._root.minsize(360, 180)
         self._root.protocol("WM_DELETE_WINDOW", self.close)
 
-        # 标题栏（极简：图标 + ✕）
-        title_bar = tk.Frame(self._root, bg=BG_PANEL, height=28)
-        title_bar.pack(fill=tk.X, side=tk.TOP)
-        title_bar.pack_propagate(False)
-        tk.Label(
-            title_bar,
-            text="🌐 屏幕翻译",
-            fg=FG,
-            bg=BG_PANEL,
-            font=("Microsoft YaHei UI", 9, "bold"),
-        ).pack(side=tk.LEFT, padx=10)
-        tk.Button(
-            title_bar,
-            text="✕",
-            fg=FG_MUTED,
-            bg=BG_PANEL,
-            activebackground=BORDER,
-            activeforeground=FG,
-            relief="flat",
-            bd=0,
-            padx=8,
-            command=self.close,
-            font=("Microsoft YaHei UI", 10),
-            cursor="hand2",
-        ).pack(side=tk.RIGHT, padx=2)
+        # ─── 顶部工具栏（参照截图：翻译为/新建/字号/展开字幕/关闭）───
+        toolbar = tk.Frame(self._root, bg=BG_PANEL, height=36)
+        toolbar.pack(fill=tk.X, side=tk.TOP)
+        toolbar.pack_propagate(False)
 
-        # 拖动支持
+        # 拖动支持（仅在工具栏空白处生效，避免和按钮冲突）
         def _start_move(e: tk.Event) -> None:
             self._root._drag_x = e.x  # type: ignore[attr-defined]
             self._root._drag_y = e.y  # type: ignore[attr-defined]
@@ -225,10 +360,129 @@ class ConsolidatedTranslateWindow:
             except Exception:
                 pass
 
-        title_bar.bind("<ButtonPress-1>", _start_move)
-        title_bar.bind("<B1-Motion>", _do_move)
+        toolbar.bind("<ButtonPress-1>", _start_move)
+        toolbar.bind("<B1-Motion>", _do_move)
 
-        # 滚动区域
+        # 翻译为 ▼
+        lang_menu = tk.Menu(self._root, tearoff=0)
+        for code, label in LANG_LABELS.items():
+            lang_menu.add_command(
+                label=label,
+                command=lambda c=code: self._on_lang_change(c),
+            )
+        self._lang_menubutton = tk.Menubutton(
+            toolbar,
+            text=f"🌐 翻译为: {_label_for_lang(self._target_lang)} ▼",
+            fg=FG,
+            bg=BG_PANEL,
+            activebackground=BORDER,
+            activeforeground=FG,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            font=("Microsoft YaHei UI", 9),
+            cursor="hand2",
+            menu=lang_menu,
+        )
+        self._lang_menubutton.pack(side=tk.LEFT, padx=(8, 2))
+
+        # ➕ 新建（关键交互：触发 Live 框选）
+        tk.Button(
+            toolbar,
+            text="➕ 新建",
+            fg=FG,
+            bg=BG_PANEL,
+            activebackground=BORDER,
+            activeforeground=FG,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            font=("Microsoft YaHei UI", 9),
+            cursor="hand2",
+            command=self._on_new_clicked,
+        ).pack(side=tk.LEFT, padx=4)
+
+        # Aa 中号字体 ▼
+        font_menu = tk.Menu(self._root, tearoff=0)
+        for label, size in FONT_SIZE_OPTIONS:
+            font_menu.add_command(
+                label=label,
+                command=lambda l=label, s=size: self._on_font_change(l, s),
+            )
+        current_font_label = next(
+            (lab for lab, sz in FONT_SIZE_OPTIONS if sz == self._font_size),
+            FONT_SIZE_OPTIONS[1][0],
+        )
+        self._font_menubutton = tk.Menubutton(
+            toolbar,
+            text=f"Aa {current_font_label} ▼",
+            fg=FG,
+            bg=BG_PANEL,
+            activebackground=BORDER,
+            activeforeground=FG,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            font=("Microsoft YaHei UI", 9),
+            cursor="hand2",
+            menu=font_menu,
+        )
+        self._font_menubutton.pack(side=tk.LEFT, padx=4)
+
+        # 弹性空间
+        tk.Frame(toolbar, bg=BG_PANEL).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # ⛶ 展开字幕
+        self._expand_button = tk.Button(
+            toolbar,
+            text="⛶ 展开字幕",
+            fg=FG,
+            bg=BG_PANEL,
+            activebackground=BORDER,
+            activeforeground=FG,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            font=("Microsoft YaHei UI", 9),
+            cursor="hand2",
+            command=self._on_expand_toggle,
+        )
+        self._expand_button.pack(side=tk.RIGHT, padx=2)
+
+        # ✕ 关闭
+        tk.Button(
+            toolbar,
+            text="✕",
+            fg=FG_MUTED,
+            bg=BG_PANEL,
+            activebackground=BORDER,
+            activeforeground=FG,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=4,
+            font=("Microsoft YaHei UI", 10),
+            cursor="hand2",
+            command=self.close,
+        ).pack(side=tk.RIGHT, padx=(2, 8))
+
+        # ─── 状态行（保留，原有 API 仍可写入） ───
+        self._status_label = tk.Label(
+            self._root,
+            text="",
+            fg=FG_MUTED,
+            bg=BG,
+            font=("Microsoft YaHei UI", 8),
+            anchor="w",
+            padx=12,
+        )
+        self._status_label.pack(fill=tk.X, pady=(2, 0))
+
+        # ─── 滚动区域（卡片列表） ───
         body = tk.Frame(self._root, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
 
@@ -262,7 +516,7 @@ class ConsolidatedTranslateWindow:
         # 空状态提示
         self._empty_label = tk.Label(
             self._cards_frame,
-            text="（还没有翻译结果）\n\nCtrl+Shift+T 框选并翻译\nCtrl+Shift+R 选区域持续翻译",
+            text="（还没有翻译结果）\n\n点 ➕ 新建 或按 Ctrl+Shift+T 框选并翻译\nCtrl+Shift+R 选区域持续翻译",
             fg=FG_MUTED,
             bg=BG,
             font=("Microsoft YaHei UI", 9),
@@ -324,6 +578,7 @@ class ConsolidatedTranslateWindow:
                 self._cards_frame,
                 card_id=card_id,
                 on_close=lambda cid=card_id: self._remove_card_impl(cid),
+                font_size=self._font_size,
             )
             card.pack(fill=tk.X, padx=10, pady=6, anchor="n")
             card.update(source_text, translated_text, target_lang_label, translated_by, error, mode)
@@ -339,9 +594,15 @@ class ConsolidatedTranslateWindow:
 
 
 class _CardWidget(tk.Frame):
-    """单张翻译结果卡片（极简版：原文 + 译文 + 复制/关闭）。"""
+    """单张翻译结果卡片：原文（折叠显示）+ 译文（主）+ ✕。"""
 
-    def __init__(self, parent, card_id: str, on_close: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        parent,
+        card_id: str,
+        on_close: Callable[[], None],
+        font_size: int = 13,
+    ) -> None:
         super().__init__(parent, bg=BG_CARD, bd=1, relief="solid", highlightthickness=0)
         try:
             self.configure(highlightbackground=BORDER, highlightcolor=BORDER)
@@ -349,69 +610,38 @@ class _CardWidget(tk.Frame):
             pass
         self._card_id = card_id
         self._on_close = on_close
-        self._src_text: Optional[tk.Text] = None
+        self._font_size = font_size
         self._tgt_text: Optional[tk.Text] = None
         self._mode_indicator: Optional[tk.Label] = None
         self._tgt_border_color = ACCENT
         self._build()
 
     def _build(self) -> None:
-        # 原文（精简到只一栏，不再带"原文"label）
-        self._src_text = tk.Text(
-            self,
-            height=2,
-            bg=BG,
-            fg=FG_MUTED,
-            insertbackground=FG_MUTED,
-            relief="flat",
-            bd=0,
-            wrap="word",
-            font=("Microsoft YaHei UI", 9),
-            padx=10,
-            pady=(8, 4),
-        )
-        self._src_text.pack(fill=tk.X)
-        self._src_text.configure(state="disabled")
-
-        # 译文（精简：直接显示文字，不再带 label）
+        # 译文（主显示）
         self._tgt_text = tk.Text(
             self,
-            height=3,
+            height=2,
             bg=BG,
             fg=self._tgt_border_color,
             insertbackground=self._tgt_border_color,
             relief="flat",
             bd=0,
             wrap="word",
-            font=("Microsoft YaHei UI", 11, "bold"),
-            padx=10,
-            pady=(2, 4),
+            font=("Microsoft YaHei UI", self._font_size, "bold"),
+            padx=12,
+            pady=(10, 4),
         )
-        self._tgt_text.pack(fill=tk.BOTH, expand=True)
+        self._tgt_text.pack(fill=tk.X)
         self._tgt_text.configure(state="disabled")
 
-        # 按钮栏：左侧模式指示（连续模式时显示彩色小条），右侧 📋 + ✕
+        # 按钮栏：左侧模式指示，右侧 ✕（已去掉"关闭原文"）
         btn_bar = tk.Frame(self, bg=BG_CARD)
-        btn_bar.pack(fill=tk.X, padx=8, pady=(0, 6))
+        btn_bar.pack(fill=tk.X, padx=10, pady=(0, 6))
 
         self._mode_indicator = tk.Frame(btn_bar, bg=BG_CARD, width=4, height=16)
         self._mode_indicator.pack(side=tk.LEFT, padx=(2, 6), pady=2)
         self._mode_indicator.pack_propagate(False)
 
-        tk.Button(
-            btn_bar,
-            text="📋",
-            fg=FG,
-            bg=BG_PANEL,
-            activebackground=BORDER,
-            activeforeground=FG,
-            relief="flat",
-            bd=0,
-            padx=8,
-            pady=2,
-            cursor="hand2",
-            command=lambda: self._copy(self._tgt_text, "译文"),
-        ).pack(side=tk.RIGHT, padx=2)
         tk.Button(
             btn_bar,
             text="✕",
@@ -426,6 +656,14 @@ class _CardWidget(tk.Frame):
             cursor="hand2",
             command=self._on_close,
         ).pack(side=tk.RIGHT, padx=2)
+
+    def set_font_size(self, size: int) -> None:
+        self._font_size = size
+        if self._tgt_text is not None:
+            try:
+                self._tgt_text.configure(font=("Microsoft YaHei UI", size, "bold"))
+            except Exception:
+                pass
 
     def update(
         self,
@@ -459,10 +697,7 @@ class _CardWidget(tk.Frame):
             except Exception:
                 pass
 
-        # 原文
-        self._set_text(self._src_text, source_text or "（未识别到文字）")
-
-        # 译文
+        # 仅显示译文；原文供接口内部保留，但不在卡片上展开
         if error:
             self._set_text(self._tgt_text, f"❌ {error}")
         else:
@@ -476,29 +711,6 @@ class _CardWidget(tk.Frame):
             widget.delete("1.0", tk.END)
             widget.insert("1.0", text)
             widget.configure(state="disabled")
-        except Exception:
-            pass
-
-    def _copy(self, widget: Optional[tk.Text], what: str) -> None:
-        if widget is None:
-            return
-        try:
-            text = widget.get("1.0", tk.END).strip()
-        except Exception:
-            text = ""
-        if not text:
-            return
-        try:
-            widget.master.winfo_toplevel().clipboard_clear()
-            widget.master.winfo_toplevel().clipboard_append(text)
-            widget.master.winfo_toplevel().update()
-        except Exception:
-            pass
-        # 极简反馈：把译文框底色闪一下表示已复制
-        try:
-            if widget is self._tgt_text:
-                self._tgt_text.configure(bg=BG_PANEL)
-                self.after(180, lambda: self._tgt_text.configure(bg=BG) if self._tgt_text else None)
         except Exception:
             pass
 

@@ -1,6 +1,29 @@
 import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
+import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
+export type NightlySleepAgentReport = {
+  runAt: string;
+  actorIds: string[];
+  reports: Array<{
+    actorId: string;
+    removedCount: number;
+    mergedCount: number;
+    reinforcedCount: number;
+    weakenedCount: number;
+    archivedCount: number;
+    plannedActions: number;
+    executedActions: number;
+    stageReports: Array<{
+      stage: string;
+      changed: number;
+      notes: string[];
+    }>;
+  }>;
+};
 
 export type NightModeConfig = {
   enabled: boolean;
@@ -37,6 +60,12 @@ export class NightlyMemoryTaskService {
   private memoryManager: MemoryManagerService | null = null;
   private dailyDigest: DailyDigestService | null = null;
   private memorySync: AgentMemorySyncService | null = null;
+  private narrativeMemory: NarrativeMemoryPort | null = null;
+  private readonly reportFilePath =
+    process.env.AGENT_MEMORY_SLEEP_REPORT_FILE?.trim() ??
+    join(process.cwd(), "data", "nightly-memory-reports.json");
+  private latestReport: NightlySleepAgentReport | null = null;
+  private recentReports: NightlySleepAgentReport[] = [];
 
   constructor(config?: Partial<NightModeConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -46,10 +75,12 @@ export class NightlyMemoryTaskService {
     memoryManager: MemoryManagerService | null,
     dailyDigest: DailyDigestService | null,
     memorySync: AgentMemorySyncService | null,
+    narrativeMemory?: NarrativeMemoryPort | null,
   ): void {
     this.memoryManager = memoryManager;
     this.dailyDigest = dailyDigest;
     this.memorySync = memorySync;
+    this.narrativeMemory = narrativeMemory ?? null;
   }
 
   startScheduler(): void {
@@ -73,6 +104,14 @@ export class NightlyMemoryTaskService {
     return this.isNightMode;
   }
 
+  getLatestReport(): NightlySleepAgentReport | null {
+    return this.latestReport;
+  }
+
+  getRecentReports(): NightlySleepAgentReport[] {
+    return [...this.recentReports];
+  }
+
   shouldDeferConsolidation(): boolean {
     return this.config.enabled && !this.isNightMode;
   }
@@ -83,32 +122,22 @@ export class NightlyMemoryTaskService {
     synced: boolean;
     error?: string;
   }> {
-    const result: {
-      consolidated: boolean;
-      archived: boolean;
-      synced: boolean;
-      error?: string;
-    } = {
+    const result = {
       consolidated: false,
       archived: false,
       synced: false,
+      error: undefined as string | undefined,
     };
 
     try {
-      if (this.memoryManager) {
-        await this.runDreamPhase();
-        result.consolidated = true;
-      }
+      await this.runDreamPhase();
+      result.consolidated = true;
 
-      if (this.dailyDigest) {
-        await this.triggerDailyArchive();
-        result.archived = true;
-      }
+      await this.triggerDailyArchive();
+      result.archived = true;
 
-      if (this.memorySync) {
-        await this.syncToLongTermStorage();
-        result.synced = true;
-      }
+      await this.syncToLongTermStorage();
+      result.synced = true;
     } catch (err) {
       result.error = err instanceof Error ? err.message : String(err);
       console.error("[NightlyMemory] Force run failed:", err);
@@ -122,14 +151,14 @@ export class NightlyMemoryTaskService {
     this.updateNightMode();
 
     if (!wasNight && this.isNightMode) {
-      console.log("[NightlyMemory] 🌙 Night mode activated, starting batch tasks...");
+      console.log("[NightlyMemory] Night mode activated, starting batch tasks...");
       this.runNightTasks().catch((err) => {
         console.error("[NightlyMemory] Night tasks failed:", err);
       });
     }
 
     if (wasNight && !this.isNightMode) {
-      console.log("[NightlyMemory] ☀️ Day mode activated, deferring consolidation");
+      console.log("[NightlyMemory] Day mode activated, deferring consolidation");
     }
 
     this.checkMidnightRollover();
@@ -148,14 +177,12 @@ export class NightlyMemoryTaskService {
     if (this.config.nightStartHour > this.config.nightEndHour) {
       this.isNightMode = hour >= this.config.nightStartHour || hour < this.config.nightEndHour;
     } else {
-      this.isNightMode =
-        hour >= this.config.nightStartHour && hour < this.config.nightEndHour;
+      this.isNightMode = hour >= this.config.nightStartHour && hour < this.config.nightEndHour;
     }
   }
 
   private async runNightTasks(): Promise<void> {
     const today = this.getTodayKey();
-
     if (this.lastProcessedDay === today) return;
     this.lastProcessedDay = today;
 
@@ -166,52 +193,72 @@ export class NightlyMemoryTaskService {
       await this.triggerDailyArchive();
       await this.syncToLongTermStorage();
       await this.cleanupOldStorage();
-
-      console.log("[NightlyMemory] ✅ All night tasks completed successfully");
+      console.log("[NightlyMemory] All night tasks completed successfully");
     } catch (err) {
-      console.error("[NightlyMemory] ❌ Night tasks error:", err);
-    }
-  }
-
-  private async runConsolidationForAll(): Promise<void> {
-    if (!this.memoryManager) return;
-
-    const actorIds = this.getAllActorIds();
-    console.log(`[NightlyMemory] Consolidating ${actorIds.length} actors`);
-
-    for (const actorId of actorIds) {
-      try {
-        const result = await this.memoryManager.consolidateNow(actorId);
-        if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
-          console.log(
-            `[NightlyMemory] Actor ${actorId}: merged=${result.entriesMerged}, removed=${result.entriesRemoved}`,
-          );
-        }
-      } catch (err) {
-        console.error(`[NightlyMemory] Consolidation failed for ${actorId}:`, err);
-      }
+      console.error("[NightlyMemory] Night tasks error:", err);
     }
   }
 
   private async runDreamPhase(): Promise<void> {
-    if (!this.memoryManager) return;
+    const actorIds = this.getAllActorIds().slice(0, this.config.consolidationBatchSize);
+    if (actorIds.length === 0) return;
 
-    const actorIds = this.getAllActorIds();
     console.log(
-      `[NightlyMemory] Dream phase: replay -> compress -> reinforce -> decay for ${Math.min(actorIds.length, this.config.consolidationBatchSize)} actors`,
+      `[NightlyMemory] Sleep agent phase: cleanup -> merge -> reinforce -> weaken for ${actorIds.length} actors`,
     );
 
-    for (const actorId of actorIds.slice(0, this.config.consolidationBatchSize)) {
+    for (const actorId of actorIds) {
       try {
-        const result = await this.memoryManager.consolidateNow(actorId);
-        if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
+        const result = await this.memoryManager?.consolidateNow(actorId);
+        if (result && (result.entriesMerged > 0 || result.entriesRemoved > 0)) {
           console.log(
-            `[NightlyMemory] Dream phase actor ${actorId}: merged=${result.entriesMerged}, removed=${result.entriesRemoved}, remembered=${result.rememberedCount}, faded=${result.fadedCount}`,
+            `[NightlyMemory] Summary consolidation actor=${actorId} merged=${result.entriesMerged} removed=${result.entriesRemoved} remembered=${result.rememberedCount} faded=${result.fadedCount}`,
           );
         }
       } catch (err) {
-        console.error(`[NightlyMemory] Dream phase failed for ${actorId}:`, err);
+        console.error(`[NightlyMemory] Summary consolidation failed for ${actorId}:`, err);
       }
+    }
+
+    if (this.narrativeMemory) {
+      const sleepReports = await this.narrativeMemory.runSleepConsolidation(actorIds).catch((err) => {
+        console.error("[NightlyMemory] Human-like sleep consolidation failed:", err);
+        return null;
+      });
+      if (Array.isArray(sleepReports) && sleepReports.length > 0) {
+        await this.recordSleepAgentReport(actorIds, sleepReports);
+      }
+    }
+  }
+
+  private async recordSleepAgentReport(
+    actorIds: string[],
+    reports: Array<{
+      actorId: string;
+      removedCount: number;
+      mergedCount: number;
+      reinforcedCount: number;
+      weakenedCount: number;
+      archivedCount: number;
+      plannedActions: number;
+      executedActions: number;
+      stageReports: Array<{ stage: string; changed: number; notes: string[] }>;
+    }>,
+  ): Promise<void> {
+    const payload: NightlySleepAgentReport = {
+      runAt: new Date().toISOString(),
+      actorIds,
+      reports,
+    };
+    this.latestReport = payload;
+    this.recentReports.unshift(payload);
+    this.recentReports = this.recentReports.slice(0, 30);
+
+    try {
+      await mkdir(dirname(this.reportFilePath), { recursive: true });
+      await writeFile(this.reportFilePath, `${JSON.stringify(this.recentReports, null, 2)}\n`, "utf8");
+    } catch (err) {
+      console.error("[NightlyMemory] Failed to persist sleep agent report:", err);
     }
   }
 
@@ -220,7 +267,6 @@ export class NightlyMemoryTaskService {
 
     try {
       console.log("[NightlyMemory] Triggering daily digest archive");
-      
       const method = this.dailyDigest as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
       if (typeof method.tickArchive === "function") {
         await method.tickArchive();
@@ -270,19 +316,12 @@ export class NightlyMemoryTaskService {
     return this.formatDateKey(new Date());
   }
 
-  private getYesterdayKey(): string {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    return this.formatDateKey(yesterday);
-  }
-
   private formatDateKey(date: Date): string {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
 
   async shutdown(): Promise<void> {
     this.stopScheduler();
-    
     if (this.isNightMode) {
       console.log("[NightlyMemory] Shutdown in night mode, running final tasks...");
       await this.forceRunNightTasks();

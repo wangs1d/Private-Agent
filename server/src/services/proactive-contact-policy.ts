@@ -124,22 +124,11 @@ export class ProactiveContactPolicyService {
       };
     }
 
-    if (
-      input.recentContactCountDay >= preference.maxDailyProactiveContacts &&
-      !emergency &&
-      input.confidence < 0.9
-    ) {
-      return {
-        allowed: false,
-        channel: "websocket",
-        quietHours,
-        disturbanceScore,
-        reason: "daily_contact_budget_exceeded",
-        rationale,
-      };
-    }
+    // 质量驱动：移除每日配额硬限。
+    // 真实有价值的信号（高 urgency / warning 类）不再被 daily_contact_budget_exceeded 拦截。
+    // 保留该指标供前端展示与个性化学习，但不再阻断推送。
 
-    if (disturbanceScore >= 0.86 && !emergency) {
+    if (disturbanceScore >= 0.92 && !emergency) {
       return {
         allowed: false,
         channel: "websocket",

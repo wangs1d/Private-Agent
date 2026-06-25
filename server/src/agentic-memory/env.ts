@@ -105,3 +105,7 @@ export function getLifecycleIntervalMin(): number {
 export function getDedupSimilarityThreshold(): number {
   return envPositiveFloat("AGENT_MEMORY_DEDUP_SIMILARITY_THRESHOLD", 0.92);
 }
+
+export function getSleepAgentEnabled(): boolean {
+  return envBool("AGENT_MEMORY_SLEEP_AGENT_ENABLED", true);
+}

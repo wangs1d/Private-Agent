@@ -1,18 +1,28 @@
 /**
  * Webhook 服务 — 事件驱动推送的顶层入口
  *
- * 整合 WebhookEventEmitter + WebhookDispatcher，提供：
- * - emit() — 发射事件（业务代码调用入口）
- * - 端点 CRUD 管理
- * - 启动/关闭生命周期
- * - 从环境变量加载默认端点
+ * 新设计：WebhookService 不再维护自己的事件总线。
+ * 它是全局 HookBus 的一个订阅者，业务代码只 emit hook，
+ * WebhookService 在 start() 时自动订阅并把所有匹配的 hook
+ * 推送到已注册的外部端点。
+ *
+ * 这种解耦让"接入 webhook"成为零成本操作：
+ * 1. 新功能不需要知道 WebhookService 存在
+ * 2. 新功能不需要在 bootstrap 阶段手动 wire
+ * 3. 只要往 HookBus emit 事件，webhook 推送就自动生效
+ *
+ * 仍保留的能力：
+ * - 端点 CRUD 管理（/api/webhooks）
+ * - HMAC-SHA256 签名、并发控制、指数退避重试
+ * - 调度结果与统计观测
+ * - 事件历史查询（从 hookBus 读取）
  */
 import { randomUUID } from "node:crypto";
-import { WebhookEventEmitter } from "./webhook-event-emitter.js";
 import { WebhookDispatcher } from "./webhook-dispatcher.js";
+import type { HookBus } from "../hooks/hook-bus.js";
+import type { HookEvent, HookHandler } from "../hooks/hook-types.js";
 import type {
   WebhookEndpoint,
-  WebhookEvent,
   WebhookEventType,
   WebhookServiceConfig,
   WebhookDispatchResult,
@@ -43,34 +53,41 @@ export function resolveWebhookConfig(): WebhookServiceConfig {
 }
 
 export class WebhookService {
-  private readonly emitter: WebhookEventEmitter;
   private readonly dispatcher: WebhookDispatcher;
   private readonly config: WebhookServiceConfig;
+  private readonly hookBus: HookBus;
   private endpoints: Map<string, WebhookEndpoint> = new Map();
   private unsubscribe?: () => void;
   /** 最近一次调度结果（用于调试 / API 查询） */
   private recentDispatchResults: WebhookDispatchResult[] = [];
   private static readonly MAX_DISPATCH_RESULTS = 100;
 
-  constructor(config?: WebhookServiceConfig) {
+  constructor(hookBus: HookBus, config?: WebhookServiceConfig) {
+    this.hookBus = hookBus;
     this.config = config ?? resolveWebhookConfig();
-    this.emitter = new WebhookEventEmitter(this.config.maxHistorySize);
     this.dispatcher = new WebhookDispatcher(this.config);
   }
 
   // ─── 生命周期 ───
 
-  /** 启动服务：注册 emitter→dispatcher 桥接 + 加载默认端点 */
+  /**
+   * 启动服务：
+   * 1. 订阅全局 HookBus（所有 hook 都会过这里）
+   * 2. 加载环境变量中的默认端点
+   *
+   * 新功能只要 emit hook 就会自动被推送到所有已注册端点。
+   */
   start(): void {
     if (!this.config.enabled) {
       console.log("[Webhook] disabled (WEBHOOK_ENABLED != true)");
       return;
     }
 
-    // emitter emit → 自动 dispatch 到所有匹配端点
-    this.unsubscribe = this.emitter.subscribe((event) => {
-      void this.onEvent(event);
-    });
+    // 把所有 hook 转成 webhook 事件，自动 dispatch
+    const handler: HookHandler = (event) => {
+      void this.onHookEvent(event);
+    };
+    this.unsubscribe = this.hookBus.subscribe(handler);
 
     // 从环境变量加载默认端点
     for (const url of this.config.defaultUrls) {
@@ -96,30 +113,6 @@ export class WebhookService {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     console.log("[Webhook] stopped");
-  }
-
-  // ─── 事件发射（对外 API）─────────────────────────────
-
-  /**
-   * 发射一个 webhook 事件。
-   * 这是业务代码调用的唯一入口。
-   *
-   * @example
-   * ```ts
-   * webhookService.emit("agent.online", { port: 3000, version: "1.0" });
-   * webhookService.emit("agent.message_sent", { text: "你好！" }, { actorId: "user-001" });
-   * ```
-   */
-  emit(
-    type: WebhookEventType,
-    data: Record<string, unknown>,
-    opts?: { actorId?: string; source?: string },
-  ): WebhookEvent {
-    if (!this.config.enabled) {
-      // 即使未启用也返回 event 对象（便于测试和日志）
-      return this.emitter.emit(type, data, opts);
-    }
-    return this.emitter.emit(type, data, opts);
   }
 
   // ─── 端点管理 ───
@@ -168,8 +161,9 @@ export class WebhookService {
 
   // ─── 查询 ───
 
-  getRecentEvents(limit = 50, typeFilter?: WebhookEventType): WebhookEvent[] {
-    return this.emitter.recentEvents(limit, typeFilter);
+  /** 最近 hook 事件（从 HookBus 读取，业务代码 emit 的所有事件都可见） */
+  getRecentEvents(limit = 50, typeFilter?: WebhookEventType): HookEvent[] {
+    return this.hookBus.recentEvents(limit, typeFilter);
   }
 
   getRecentDispatchResults(limit = 50): WebhookDispatchResult[] {
@@ -191,9 +185,9 @@ export class WebhookService {
     return this.config.enabled;
   }
 
-  // ─── 内部：事件 → 调度桥接 ───
+  // ─── 内部：hook → 调度桥接 ───
 
-  private async onEvent(event: WebhookEvent): Promise<void> {
+  private async onHookEvent(event: HookEvent): Promise<void> {
     const allEndpoints = [...this.endpoints.values()];
     if (allEndpoints.length === 0) return;
 

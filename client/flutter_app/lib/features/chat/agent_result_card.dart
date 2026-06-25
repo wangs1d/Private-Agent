@@ -3,126 +3,108 @@ import "package:flutter/material.dart";
 import "../../core/utils/agent_result_parser.dart";
 
 /// 智能体结果卡片 —— 用于呈现「任务执行总结」「工具调用结果」
-/// 这类只需少量文字/数字呈现的轻量结构化数据。
+/// 这类**短而固定结构**的轻量数据(3~7 条 ✓/• 项 + 可选追问)。
 ///
-/// 视觉规范与项目其它聊天卡片保持一致：
-///   - 跟随 [ColorScheme] 主题（深色 / 暖色两套自动适配）
-///   - 头像为可配置缩写（智能体标识），支持 default / gradient / accent / success
-///   - 列表项用 ✓ / • / ! 三种符号
-///   - 底部可选 footer（虚线分隔），支持 `[tag]` inline 标签
+/// 与 `ContentSummaryMessageBody` 的边界(后者用于"长内容/可折叠/可查看详情"):
+///   - 数据量小: ≤ 7 条短条目,且不需要完整正文
+///   - 结构固定: 标题 + 列表(+ 可选一行 footer)
+///   - **不可折叠**: 数据已在卡片内完整展示,无需"查看详情"入口
+///   - 不需要头像(图标随标题层级即可)
+///   - 通常用于:任务完成/失败汇报、工具调用结果、行程/清单类小结构
 ///
-/// 直接使用：
+/// 直接使用:
 /// ```dart
 /// AgentResultCard(
 ///   data: AgentResultData(
-///     avatar: 'NB',
-///     avatarStyle: 'gradient',
-///     title: '已完成分析,核心数据如下:',
+///     title: '周末行程已为你规划:',
 ///     items: [
-///       AgentResultItem(type: 'check', text: '核心功能完成度 87%'),
-///       AgentResultItem(type: 'check', text: 'Bug 修复 12 个,新增 3 个'),
+///       AgentResultItem(type: 'check', text: '周六上午:你说过的那家新店探店'),
+///       AgentResultItem(type: 'check', text: '周六下午:健身 + 采购下周食材'),
+///       AgentResultItem(type: 'check', text: '周日:在家看你收藏的那部电影'),
 ///     ],
-///     footer: '报告已生成,需要发送至你的邮箱吗?',
+///     footer: '需要调整吗?',
 ///   ),
 /// )
 /// ```
 class AgentResultCard extends StatelessWidget {
-  const AgentResultCard({super.key, required this.data, this.compact = false});
+  const AgentResultCard({
+    super.key,
+    required this.data,
+    this.compact = true,
+  });
 
   final AgentResultData data;
+
+  /// 紧凑模式:行高/字号/内边距整体更小,适合聊天消息流。默认 `true`。
   final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
-    final EdgeInsets padding = compact
-        ? const EdgeInsets.symmetric(horizontal: 14, vertical: 12)
-        : const EdgeInsets.fromLTRB(16, 14, 16, 14);
-    final double avatarSize = compact ? 30 : 36;
-    final double avatarRadius = compact ? 7 : 9;
-    final double titleGap = compact ? 6 : 10;
-    final double listItemGap = compact ? 1 : 3;
-    final double footerGap = compact ? 8 : 12;
-    final double titleSize = compact ? 13.5 : 14.5;
-    final double itemSize = compact ? 12.5 : 13.5;
-    final double footerSize = compact ? 12 : 13;
+    // 紧凑尺寸(贴近聊天消息流的实际密度)
+    final EdgeInsets padding = const EdgeInsets.fromLTRB(14, 12, 14, 12);
+    final double titleGap = 8;
+    final double listItemGap = 3;
+    final double footerGap = 8;
+    final double titleSize = 14;
+    final double itemSize = 13;
+    final double footerSize = 12.5;
+    final Color titleColor = cs.onSurface;
+    final Color itemColor = cs.onSurface.withValues(alpha: 0.82);
+    final Color footerColor = cs.onSurfaceVariant;
 
     return Container(
+      // 卡片宽度自然跟随内容(由外层 bubble 约束),最大不超过 360,
+      // 避免宽屏下拉成"横幅",实现"刚好包住每行最后那个字"的紧凑效果。
+      constraints: const BoxConstraints(maxWidth: 360),
       padding: padding,
       decoration: BoxDecoration(
-        // 与项目原 agent 气泡一致：surfaceContainerHigh + outline 描边
         color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(compact ? 12 : 14),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.18),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.28)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              _Avatar(
-                text: data.avatar,
-                style: data.avatarStyle,
-                size: avatarSize,
-                radius: avatarRadius,
+          if (data.title.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(bottom: titleGap),
+              child: Text(
+                data.title,
+                style: TextStyle(
+                  fontSize: titleSize,
+                  fontWeight: FontWeight.w600,
+                  color: titleColor,
+                  height: 1.45,
+                ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
+            ),
+          if (data.items.isNotEmpty)
+            ...data.items.map((AgentResultItem it) {
+              return Padding(
+                padding: EdgeInsets.symmetric(vertical: listItemGap),
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    if (data.title.isNotEmpty)
-                      Padding(
-                        padding: EdgeInsets.only(bottom: titleGap),
-                        child: Text(
-                          data.title,
-                          style: TextStyle(
-                            fontSize: titleSize,
-                            fontWeight: FontWeight.w600,
-                            color: cs.onSurface,
-                            height: 1.4,
-                          ),
+                    _ItemMark(type: it.type, colorScheme: cs),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        it.text,
+                        style: TextStyle(
+                          fontSize: itemSize,
+                          color: itemColor,
+                          height: 1.55,
                         ),
                       ),
-                    if (data.items.isNotEmpty)
-                      ...data.items.map((AgentResultItem it) {
-                        return Padding(
-                          padding: EdgeInsets.symmetric(vertical: listItemGap),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              _ItemMark(type: it.type, colorScheme: cs),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  it.text,
-                                  style: TextStyle(
-                                    fontSize: itemSize,
-                                    color: cs.onSurface.withValues(alpha: 0.82),
-                                    height: 1.5,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      }),
+                    ),
                   ],
                 ),
-              ),
-            ],
-          ),
+              );
+            }),
           if (data.footer.isNotEmpty) ...<Widget>[
             SizedBox(height: footerGap),
             Container(
@@ -130,100 +112,19 @@ class AgentResultCard extends StatelessWidget {
               decoration: BoxDecoration(
                 border: Border(
                   top: BorderSide(
-                    color: cs.outline.withValues(alpha: 0.35),
+                    color: cs.outline.withValues(alpha: 0.28),
                     width: 1,
                   ),
                 ),
               ),
               child: _InlineFooterText(
                 text: data.footer,
-                color: cs.onSurfaceVariant,
+                color: footerColor,
                 fontSize: footerSize,
               ),
             ),
           ],
         ],
-      ),
-    );
-  }
-}
-
-/// 头像：可配置配色（智能体标识）。
-class _Avatar extends StatelessWidget {
-  const _Avatar({
-    required this.text,
-    required this.style,
-    required this.size,
-    required this.radius,
-  });
-
-  final String text;
-  final String style;
-  final double size;
-  final double radius;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-
-    final Color bg;
-    final Color fg;
-    final Gradient? gradient;
-    switch (style) {
-      case "gradient":
-        gradient = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[Color(0xFF4F8CFF), Color(0xFF8B5CF6)],
-        );
-        bg = Colors.transparent;
-        fg = Colors.white;
-        break;
-      case "accent":
-        gradient = null;
-        bg = cs.primary;
-        fg = cs.onPrimary;
-        break;
-      case "success":
-        gradient = null;
-        bg = const Color(0xFF34D399);
-        fg = const Color(0xFF052E1C);
-        break;
-      default:
-        // default：白底深字（深色主题）/ 深底浅字（暖色主题）
-        gradient = null;
-        bg = cs.brightness == Brightness.dark
-            ? Colors.white
-            : cs.onSurface;
-        fg = cs.brightness == Brightness.dark
-            ? const Color(0xFF0F1115)
-            : cs.surface;
-    }
-
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        color: gradient == null ? bg : null,
-        gradient: gradient,
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.22),
-            blurRadius: 5,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: size * 0.38,
-          fontWeight: FontWeight.w700,
-          color: fg,
-          letterSpacing: 0.3,
-        ),
       ),
     );
   }

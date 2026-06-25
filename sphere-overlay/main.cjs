@@ -241,9 +241,10 @@ function createScheduleWindow() {
 
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
 
-  // 默认位置：屏幕左上角区域（避开桌宠）
-  const x = 24;
-  const y = 24;
+  // 默认位置：屏幕右上角（避开左下角桌宠）
+  const margin = 24;
+  const x = screenW - SCHEDULE_WIDTH - margin;
+  const y = margin;
 
   scheduleWindow = new BrowserWindow({
     width: SCHEDULE_WIDTH,
@@ -428,7 +429,19 @@ app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
 });
 
 app.whenReady().then(() => {
-  createWindow();
+  // 启动时根据命令决定是否创建桌宠：
+  //  - schedule / schedule:show / schedule:hide / schedule:toggle → 只开日程窗，不开桌宠
+  //  - show / 空 / 其他 → 创建桌宠
+  const initialCommand = readCommandArg();
+  const isScheduleOnly =
+    initialCommand === "schedule" ||
+    initialCommand === "schedule:show" ||
+    initialCommand === "schedule:hide" ||
+    initialCommand === "schedule:toggle";
+
+  if (!isScheduleOnly) {
+    createWindow();
+  }
 
   const trayIcon = nativeImage.createFromDataURL(
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -474,14 +487,17 @@ app.whenReady().then(() => {
     mainWindow.setBounds({ x: b.x, y: b.y, width, height: PET_HEIGHT });
   });
 
-  ipcMain.on("sphere:moveBy", (_ev, dx, dy) => {
-    if (!mainWindow) return;
-    const b = mainWindow.getBounds();
-    mainWindow.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
+  ipcMain.on("sphere:moveBy", (ev, dx, dy) => {
+    // 根据事件来源 webContents 找到对应窗口（桌宠 / 日程窗通用）
+    const win = BrowserWindow.fromWebContents(ev.sender);
+    if (!win || win.isDestroyed()) return;
+    const b = win.getBounds();
+    win.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
   });
 
-  ipcMain.on("sphere:setIgnoreMouseEvents", (_ev, ignore, forward) => {
-    mainWindow?.setIgnoreMouseEvents(!!ignore, { forward: !!forward });
+  ipcMain.on("sphere:setIgnoreMouseEvents", (ev, ignore, forward) => {
+    const win = BrowserWindow.fromWebContents(ev.sender) || mainWindow;
+    win?.setIgnoreMouseEvents(!!ignore, { forward: !!forward });
   });
 
   const moodFile =

@@ -40,6 +40,8 @@ export type ChatUserMessageHandlerDeps = {
 export type ChatUserMessageContext = {
   socket: { send: (data: string) => void };
   boundActorId: string;
+  /** 当前 WS 的完整 sessionId（含 notes:/master: 前缀），用于记忆上下文区分。 */
+  sessionId: string;
   initAsDesktopBridge: boolean;
   clientIp?: string;
   sendUnifiedError: (code: string, message: string, traceId?: string) => void;
@@ -142,6 +144,7 @@ export async function handleChatUserMessageEvent(
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
+    sessionId: ctx.sessionId,
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
   return true;
@@ -223,6 +226,7 @@ async function processBatchedMessage(
       clientLocation: batched.clientLocation,
       ...(batched.visionFrames?.length ? { visionFrames: batched.visionFrames } : {}),
       interruptedContext: batched.interruptedContext,
+      sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,
       onAssistantDelta: (delta) => sendAssistantChunk(delta),
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;

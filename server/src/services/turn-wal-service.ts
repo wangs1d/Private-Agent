@@ -12,6 +12,8 @@ export type TurnWalEntry = {
   highSignal?: boolean;
   messageId?: string;
   planExecuteUsed?: boolean;
+  /** 记忆上下文：主会话 vs 笔记会话 */
+  context?: "main" | "notes";
 };
 
 /**

@@ -126,6 +126,17 @@ class TranslateTrayApp:
         self.api_client = TranslateApiClient(base_url=self.base_url)
         # 提前启动 Tk 事件循环
         translate_result_window._ensure_tk_thread()
+        # 把工具栏交互回灌到本 tray app（新建 → 框选；语言 → 切翻译目标）
+        translate_result_window.ConsolidatedTranslateWindow.configure(
+            new_callback=self._enter_live_mode,
+            language_callback=self._on_lang_change_from_window,
+        )
+        # 同步当前状态到窗口
+        try:
+            win = translate_result_window.ConsolidatedTranslateWindow.get()
+            win.set_target_lang(self.target_lang)
+        except Exception:
+            LOG.exception("同步窗口状态失败")
 
         if once:
             self._trigger_live_once()
@@ -133,6 +144,16 @@ class TranslateTrayApp:
 
         self._start_keyboard_listener()
         self._run_tray()
+
+    def _on_lang_change_from_window(self, code: str) -> None:
+        """悬浮窗上语言下拉变化时，同步到 tray app 自身的目标语言。"""
+        code = (code or "zh").strip() or "zh"
+        if code not in ("zh", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru"):
+            return
+        if code == self.target_lang:
+            return
+        self.target_lang = code
+        LOG.info("悬浮窗切换目标语言为 %s", code)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -386,6 +407,12 @@ class TranslateTrayApp:
                 icon.notify(f"目标语言：{self._lang_label(self.target_lang)}", title="屏幕翻译")
             except Exception:
                 pass
+            # 同步到悬浮窗的语言下拉
+            try:
+                from . import translate_result_window
+                translate_result_window.ConsolidatedTranslateWindow.get().set_target_lang(self.target_lang)
+            except Exception:
+                LOG.exception("同步窗口语言失败")
 
         def _on_exit(icon, item) -> None:
             LOG.info("退出托盘")

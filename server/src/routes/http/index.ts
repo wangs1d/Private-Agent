@@ -32,6 +32,7 @@ import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerTranslateRoutes } from "./translate.js";
+import { registerNotesRoutes } from "./notes.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -71,7 +72,14 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerLifeSignalRoutes(app, deps);
   registerMarketSignalRoutes(app, deps);
   registerTranslateRoutes(app, deps);
-  if (deps.webhookService) {
-    registerWebhookRoutes(app, deps.webhookService);
+  if (deps.notesService) {
+    registerNotesRoutes(app, {
+      notesService: deps.notesService,
+      scheduleTaskService: deps.scheduleTaskService,
+      externalChat: deps.externalChat ?? null,
+    });
+  }
+  if (deps.webhookService && deps.hookBus) {
+    registerWebhookRoutes(app, deps.webhookService, deps.hookBus);
   }
 }

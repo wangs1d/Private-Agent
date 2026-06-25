@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { getNightlyMemoryTaskService } from "../../services/nightly-memory-task-service.js";
 import { getDailyChatSyncService } from "../../services/daily-chat-sync-service.js";
 import type { ChatSyncRecord } from "../../services/daily-chat-sync-service.js";
+import { getHumanLikeMemoryService } from "../../services/human-like-memory-service.js";
 
 export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
   app.get("/api/nightly-memory/status", async (_request, reply) => {
@@ -45,6 +46,45 @@ export function registerNightlyMemoryRoutes(app: FastifyInstance): void {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+
+  app.get("/api/nightly-memory/reports/latest", async (_request, reply) => {
+    const service = getNightlyMemoryTaskService();
+    if (!service) {
+      return reply.status(503).send({
+        error: "Nightly memory service not initialized",
+      });
+    }
+    return {
+      report: service.getLatestReport(),
+      timestamp: new Date().toISOString(),
+    };
+  });
+
+  app.get("/api/nightly-memory/reports", async (_request, reply) => {
+    const service = getNightlyMemoryTaskService();
+    if (!service) {
+      return reply.status(503).send({
+        error: "Nightly memory service not initialized",
+      });
+    }
+    return {
+      reports: service.getRecentReports(),
+      count: service.getRecentReports().length,
+      timestamp: new Date().toISOString(),
+    };
+  });
+
+  app.get("/api/nightly-memory/policy", async (_request, reply) => {
+    const memory = getHumanLikeMemoryService();
+    if (!memory) {
+      return reply.status(503).send({ error: "Human-like memory service not initialized" });
+    }
+    return {
+      policy: memory.getPolicySnapshot(),
+      telemetry: memory.getTelemetrySnapshot(),
+      timestamp: new Date().toISOString(),
+    };
   });
 
   app.get("/api/nightly-memory/stats", async (_request, reply) => {

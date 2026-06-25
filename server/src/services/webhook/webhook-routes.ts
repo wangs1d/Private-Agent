@@ -13,6 +13,7 @@
  *   GET    /api/webhooks/stats        查询统计信息
  */
 import type { FastifyInstance } from "fastify";
+import type { HookBus } from "../hooks/hook-bus.js";
 import type { WebhookService } from "./webhook-service.js";
 import type { WebhookEventType } from "./webhook-event-types.js";
 
@@ -29,12 +30,18 @@ const VALID_EVENT_TYPES: WebhookEventType[] = [
   "agent.tool_called",
   "schedule.reminder_fired",
   "life.signal",
+  // ─── 监控/价格/数据 信号事件 ───
+  "market.position_snapshot",
+  "market.anomaly",
+  "data.threshold_breach",
+  "data.source_heartbeat",
   "custom",
 ];
 
 export function registerWebhookRoutes(
   app: FastifyInstance,
   webhookService: WebhookService,
+  hookBus: HookBus,
 ): void {
   // ─── 端点 CRUD ───
 
@@ -171,7 +178,7 @@ export function registerWebhookRoutes(
     const eventType = (body.type ?? "custom") as WebhookEventType;
     const testData = body.data ?? { message: "test event from webhook api" };
 
-    const event = webhookService.emit(eventType, testData, {
+    const event = hookBus.emit(eventType, testData, {
       source: "api-test",
     });
 
@@ -221,6 +228,80 @@ export function registerWebhookRoutes(
       ...webhookService.getDispatcherStats(),
       enabled: webhookService.isEnabled(),
       config: webhookService.getConfig(),
+    });
+  });
+
+  // ─── 外部系统接入端点：价格/数据 webhook ───
+
+  /**
+   * 价格/数据监控 Webhook 接入端点
+   * 外部数据源（行情 API、监控系统、IoT 设备等）通过此端点主动推送数据，
+   * 服务器会将其转换为 LifeSignal 并通过 WebSocket / 主动消息通知用户。
+   *
+   * 支持的 event 类型：
+   * - market.position_snapshot：持仓快照（价格/盈亏/波动率）
+   * - market.anomaly：价格/成交量异动
+   * - data.threshold_breach：通用数据阈值突破
+   * - data.source_heartbeat：数据源心跳
+   *
+   * 请求体示例：
+   * {
+   *   "actorId": "user-001",
+   *   "eventType": "market.anomaly",
+   *   "payload": {
+   *     "symbol": "AAPL",
+   *     "anomalyType": "price_drop",
+   *     "summary": "AAPL 暴跌 8.5%",
+   *     "priceChangePct": -8.5,
+   *     "volumeRatio": 3.2,
+   *     "confidence": 0.92
+   *   }
+   * }
+   */
+  app.post("/api/webhooks/inbound/market", async (req, reply) => {
+    const body = req.body as {
+      actorId?: string;
+      eventType?: string;
+      payload?: Record<string, unknown>;
+      secret?: string;
+    };
+
+    if (!body.actorId || !body.eventType) {
+      return reply
+        .status(400)
+        .send({ ok: false, error: "actorId and eventType are required" });
+    }
+
+    if (!body.secret || body.secret !== webhookService.getConfig().secret) {
+      return reply
+        .status(401)
+        .send({ ok: false, error: "invalid secret (set WEBHOOK_SECRET env)" });
+    }
+
+    // 通过 Webhook 总线发射事件（自动分发到所有已注册端点）
+    const validInboundTypes: WebhookEventType[] = [
+      "market.position_snapshot",
+      "market.anomaly",
+      "data.threshold_breach",
+      "data.source_heartbeat",
+    ];
+    if (!validInboundTypes.includes(body.eventType as WebhookEventType)) {
+      return reply
+        .status(400)
+        .send({ ok: false, error: `unsupported eventType: ${body.eventType}` });
+    }
+
+    const event = hookBus.emit(
+      body.eventType as WebhookEventType,
+      body.payload ?? {},
+      { actorId: body.actorId, source: "inbound-webhook" },
+    );
+
+    return reply.send({
+      ok: true,
+      eventId: event.id,
+      eventType: event.type,
+      dispatchedTo: webhookService.getAllEndpoints().length,
     });
   });
 }

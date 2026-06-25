@@ -11,6 +11,7 @@ import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
+import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 
 /**
  * Agent「大脑」装配依赖（对齐 Hermes：CLI/网关等多入口共用同一 AIAgent 核心，本仓库为 AgentCore）。
@@ -29,6 +30,7 @@ export type AgentCoreDependencies = {
   trajectorySkillPromotion?: TrajectorySkillPromotionService | null;
   virtualPhoneService?: VirtualPhoneService | null;
   scheduleTaskService?: ScheduleTaskService | null;
+  shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
 };
 
 /**
@@ -48,5 +50,6 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.trajectorySkillPromotion ?? null,
     deps.virtualPhoneService ?? null,
     deps.scheduleTaskService ?? null,
+    deps.shortTermMemoryGateway ?? null,
   );
 }

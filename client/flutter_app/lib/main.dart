@@ -30,6 +30,7 @@ import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
+import "features/notes/notes_chat_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/jarvis_chat_layout.dart";
@@ -1539,8 +1540,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   /// 常用工具「翻译」入口：屏幕翻译由独立模块 desktop-translate 提供（系统托盘 + 全局热键
-  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗），后端启动时会自动拉起。
-  /// Flutter 端仅提示启动方式（无需再走 desktop-visual）。
+  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗），后端启动时会自动拉起（首次会自动创建 venv
+  /// 并安装依赖），无需再走 desktop-visual。
   void _openTranslatePage() {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null) return;
@@ -1549,9 +1550,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         content: Text(
           "屏幕翻译由独立模块提供：后端启动时会自动拉起托盘，\n"
           "按 Ctrl+Shift+T 框选屏幕区域即可翻译。\n"
-          "如未自动启动，可手动运行根目录 start-translate.ps1。",
+          "如未自动启动（首次需装依赖时拉得较慢），可手动运行根目录 start-translate.ps1。",
         ),
         duration: Duration(seconds: 5),
+      ),
+    );
+  }
+
+  /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
+  /// 记忆写入 context=notes）。
+  void _openNotesChat() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    Navigator.of(navCtx).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => NotesChatPage(),
       ),
     );
   }
@@ -1587,18 +1600,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 清空当前会话的所有聊天历史记录
   Future<void> _clearChatHistory() async {
+    // 走 RootNavigator 的 context，避免 State.context 处在 MaterialApp 之上、
+    // 缺少 MaterialLocalizations 而导致 showDialog 抛 assert（与 _openWalletDialog 同解法）。
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    final BuildContext ctx = navCtx ?? context;
+    if (!ctx.mounted) return;
     final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
+      context: ctx,
+      builder: (BuildContext dialogCtx) => AlertDialog(
         title: const Text("清空聊天记录"),
         content: const Text("确定要删除所有聊天历史吗？此操作不可恢复。"),
         actions: <Widget>[
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
             child: const Text("取消"),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text("确认删除"),
           ),
@@ -1616,7 +1634,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _assistantMessageIndexById.clear();
     });
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      final ScaffoldMessengerState? messenger =
+          ScaffoldMessenger.maybeOf(_rootNavigatorKey.currentContext ?? context);
+      messenger?.showSnackBar(
         const SnackBar(content: Text("聊天记录已清空")),
       );
     }
@@ -2389,6 +2409,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onWallet: _openWalletDialog,
       onPhone: _openPhoneDevicesDialog,
       onTranslate: _openTranslatePage,
+      onNotes: _openNotesChat,
       child: _buildChatPage(context),
     );
   }
@@ -2439,24 +2460,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       },
       onDeleteMessage: _deleteSingleMessage,
       onDeleteFromMessage: _deleteMessagesFrom,
-      // 注入一条 assistant 演示消息（用于预览「智能体结果卡片」渲染效果）
-      onInjectAssistantMessage: _injectAssistantDemoMessage,
     );
-  }
-
-  /// 将一段文本以 assistant 身份注入到聊天列表底部。
-  /// 仅用于前端预览 [_AgentResultCard] 渲染效果，不走后端。
-  void _injectAssistantDemoMessage(String text) {
-    if (!mounted) return;
-    setState(() {
-      _messages.add(ChatMessage(
-        messageId: "demo_${DateTime.now().microsecondsSinceEpoch}",
-        sessionId: ApiConfig.effectiveActorId,
-        role: "assistant",
-        text: text,
-        timestamp: DateTime.now(),
-      ));
-    });
   }
 
   /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）)

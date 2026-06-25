@@ -14,11 +14,14 @@ import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
+import { isNotesChatSessionId } from "./master-chat-session.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
   userText: string;
   assistantText: string;
+  /** 当前会话 sessionId；用于区分主会话 vs 笔记会话的记忆上下文。 */
+  sessionId?: string;
   modelCallsConsumed?: number;
   planExecuteUsed?: boolean;
   pePlan?: TaskExecutionPlan | null;
@@ -62,7 +65,7 @@ export class TurnLifecycle {
     }
   }
 
-  ingestTurnArchive(actorId: string, userText: string, assistantText: string): void {
+  ingestTurnArchive(actorId: string, userText: string, assistantText: string, context: "main" | "notes" = "main"): void {
     if (!this.deps.narrativeMemory) return;
     const body = `Turn archive | user: ${userText.slice(0, 600)} | assistant: ${assistantText.slice(0, 1800)}`;
     void (async () => {
@@ -75,11 +78,12 @@ export class TurnLifecycle {
       });
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:turn_archive", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+        context,
       });
     })().catch(() => {});
   }
 
-  ingestFastPath(actorId: string, lines: string[]): void {
+  ingestFastPath(actorId: string, lines: string[], context: "main" | "notes" = "main"): void {
     if (!this.deps.narrativeMemory || lines.length === 0) return;
     const body = lines.join("\n");
     void (async () => {
@@ -90,6 +94,7 @@ export class TurnLifecycle {
       });
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:fast_path", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+        context,
       });
     })().catch(() => {});
   }
@@ -102,6 +107,7 @@ export class TurnLifecycle {
 
     const signal = detectMemorySignals(input.userText, full);
     const ts = new Date().toISOString();
+    const memContext: "main" | "notes" = isNotesChatSessionId(input.sessionId) ? "notes" : "main";
 
     void getTurnWalService()
       .append({
@@ -112,6 +118,7 @@ export class TurnLifecycle {
         highSignal: signal.isHighSignal,
         messageId: input.messageId,
         planExecuteUsed: input.planExecuteUsed,
+        context: memContext,
       })
       .catch(() => {});
 
@@ -120,7 +127,7 @@ export class TurnLifecycle {
     });
 
     if (signal.isHighSignal) {
-      this.ingestFastPath(input.actorId, signal.extractLines);
+      this.ingestFastPath(input.actorId, signal.extractLines, memContext);
       if (this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
         const topic = inferMemoryTopic(input.userText);
         void (async () => {
@@ -146,7 +153,7 @@ export class TurnLifecycle {
       this.stmConfig.mode === "enhanced" &&
       (this.stmConfig.deferTurnArchive || signal.isHighSignal);
     if (!deferArchive) {
-      this.ingestTurnArchive(input.actorId, input.userText, full);
+      this.ingestTurnArchive(input.actorId, input.userText, full, memContext);
     }
 
     this.deps.hermesEvolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
