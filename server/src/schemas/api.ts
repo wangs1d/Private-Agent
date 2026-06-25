@@ -176,6 +176,66 @@ export const accountEmailInboundBodySchema = z.object({
   subject: z.string().optional(),
 });
 
+/* ============================================================
+ *  学习笔记（notes）相关 schema
+ * ============================================================ */
+
+export const NOTE_CATEGORIES = [
+  "study",
+  "meeting",
+  "video",
+  "reading",
+  "idea",
+  "todo",
+  "other",
+] as const;
+
+export const notesCreateBodySchema = z.object({
+  sessionId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  content: z.string().min(1).max(20000),
+  category: z.enum(NOTE_CATEGORIES).default("other"),
+  tags: z.array(z.string().min(1).max(40)).max(20).default([]),
+  source: z.string().max(120).optional(),
+});
+
+export const notesUpdateBodySchema = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    content: z.string().min(1).max(20000).optional(),
+    category: z.enum(NOTE_CATEGORIES).optional(),
+    tags: z.array(z.string().min(1).max(40)).max(20).optional(),
+    source: z.string().max(120).nullable().optional(),
+    summary: z.string().max(2000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "至少传入一个可更新字段" });
+
+export const notesListQuerySchema = z.object({
+  sessionId: z.string().min(1),
+  category: z.enum(NOTE_CATEGORIES).optional(),
+  tag: z.string().min(1).max(40).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const notesSearchBodySchema = z.object({
+  sessionId: z.string().min(1),
+  query: z.string().min(1).max(200),
+  topK: z.coerce.number().int().min(1).max(50).default(10),
+  category: z.enum(NOTE_CATEGORIES).optional(),
+});
+
+export const notesScheduleReviewBodySchema = z.object({
+  sessionId: z.string().min(1),
+  /** ISO 时间字符串（必填；review 必须有明确的执行时刻） */
+  runAt: z.string().min(1),
+  timezone: z.string().min(1).optional(),
+  recurrence: z.enum(["none", "daily", "weekly"]).default("none"),
+  /** 复习提示词；缺省用笔记标题 */
+  reminderMessage: z.string().min(1).max(500).optional(),
+});
+
 export const scheduleTaskCreateBodySchema = z
   .object({
     sessionId: z.string().min(1),

@@ -1,38 +1,16 @@
 /**
- * Webhook 事件驱动系统 — 类型定义
+ * Webhook 事件类型 — 与 HookBus 共用枚举
  *
- * 基于 Agent 生命周期事件（上线、下线、错误等）向外推送 HTTP 回调。
- * 设计对齐 GitHub / Discord 风格的 webhook payload 结构。
+ * 整个项目对"事件类型"只有一份事实来源（WebhookEventType），
+ * 业务代码用 HookBus.emit() 发射事件，WebhookService 在 start() 时
+ * 自动订阅并把匹配的事件外推到已注册端点。
  */
+import type { HookEvent, WebhookEventType } from "../hooks/hook-types.js";
 
-/** Agent 可对外暴露的所有内置事件类型 */
-export type WebhookEventType =
-  | "agent.online"        // Agent 服务启动完成，准备就绪
-  | "agent.offline"       // Agent 服务即将关闭
-  | "agent.error"         // Agent 运行时发生未捕获错误
-  | "agent.message_sent"  // Agent 向用户发送了消息
-  | "agent.message_received" // Agent 收到用户消息
-  | "agent.task_started"  // Agent 开始执行任务
-  | "agent.task_completed" // Agent 任务执行完成
-  | "agent.task_failed"   // Agent 任务执行失败
-  | "agent.tool_called"   // Agent 调用了工具
-  | "schedule.reminder_fired" // 日程提醒触发
-  | "life.signal"         // 生命信号产生
-  | "custom";             // 用户自定义事件
+export type { WebhookEventType } from "../hooks/hook-types.js";
 
-/** 单次 Webhook 推送的事件载荷 */
-export type WebhookEvent = {
-  id: string;              // 全局唯一事件 ID (uuid v7)
-  type: WebhookEventType;  // 事件类型
-  timestamp: string;       // ISO 8601 (服务器时间)
-  actorId?: string;        // 关联的用户/会话 ID
-  data: Record<string, unknown>; // 事件业务数据
-  metadata?: {
-    source?: string;       // 事件来源模块
-    version?: string;      // payload 版本号
-    [key: string]: unknown;
-  };
-};
+/** 向后兼容：旧代码仍可能引用 WebhookEvent，等价于 HookEvent */
+export type WebhookEvent = HookEvent;
 
 /** 已注册的 Webhook 端点配置 */
 export type WebhookEndpoint = {

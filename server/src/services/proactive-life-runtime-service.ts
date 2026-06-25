@@ -137,12 +137,17 @@ export class ProactiveLifeRuntimeService {
     }
   }
 
+  // 质量驱动：warning 类信号不再受冷却时间和 interruptScore 阈值限制。
+  // 真实重要的市场/安全/价格预警必须尽快触达用户。
   private shouldInterrupt(
     actorId: string,
     candidate: AnticipationCandidate,
     relationship: PersonalizationRelationshipState | null,
     timeRhythm: PersonalizationTimeRhythmState | null,
   ): boolean {
+    // warning 类永远不被冷却/分数门槛拦截，确保真实重要信号触达
+    if (candidate.category === "warning") return true;
+
     const lastAt = this.lastNotificationAt.get(actorId) ?? 0;
     const proactiveTolerance = relationship?.proactiveTolerance ?? 0.5;
     const cooldownMs = this.resolveCooldownMs(candidate, proactiveTolerance, timeRhythm);
@@ -170,6 +175,8 @@ export class ProactiveLifeRuntimeService {
     return false;
   }
 
+  // 质量驱动：warning 类冷却时间大幅缩短（30 秒），确保重要信号能快速连续触达。
+  // 真实有价格异动/安全风险时，Agent 不应被冷却时间卡住。
   private resolveCooldownMs(
     candidate: AnticipationCandidate,
     proactiveTolerance: number,
@@ -177,7 +184,7 @@ export class ProactiveLifeRuntimeService {
   ): number {
     const base =
       candidate.category === "warning"
-        ? 4 * 60_000
+        ? 30 * 1000  // 紧急信号 30 秒冷却（原 4 分钟）
         : candidate.category === "care"
           ? 18 * 60_000
           : 10 * 60_000;

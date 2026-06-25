@@ -14,6 +14,8 @@ interface BufferEntry {
   sourceId: string;
   text: string;
   createdAt: number;
+  /** "main" 主会话 / "notes" 笔记学习会话；用于跨上下文过滤 */
+  context: "main" | "notes";
 }
 
 function extractKeyLowSignalLines(text: string): string[] {
@@ -35,24 +37,34 @@ export class AgenticMemoryIngestService {
 
   constructor(private readonly memory: Memory) {}
 
+  /**
+   * 兼容旧调用（默认 context=main）。新调用请显式传 context 区分主会话 vs 笔记会话。
+   */
   async ingestText(
     actorId: string,
     sourceId: string,
     text: string,
-    opts?: { highSignal?: boolean },
+    opts?: { highSignal?: boolean; context?: "main" | "notes" },
   ): Promise<void> {
     const t = text.trim();
     if (!t || t.length < 4) return;
 
+    const context = opts?.context ?? "main";
+
     if (opts?.highSignal) {
-      await this.ingestHighSignal(actorId, sourceId, t);
+      await this.ingestHighSignal(actorId, sourceId, t, context);
       return;
     }
 
-    this.bufferLowSignal(actorId, sourceId, t);
+    this.bufferLowSignal(actorId, sourceId, t, context);
   }
 
-  private async ingestHighSignal(actorId: string, sourceId: string, body: string): Promise<void> {
+  private async ingestHighSignal(
+    actorId: string,
+    sourceId: string,
+    body: string,
+    context: "main" | "notes",
+  ): Promise<void> {
     const decision = await decideMemoryWrite(body, {
       actorId,
       source: sourceId,
@@ -65,6 +77,7 @@ export class AgenticMemoryIngestService {
       metadata: {
         source: sourceId,
         actorId,
+        context,
         highSignal: true,
         memoryDecision: decision.decision,
         memorySemanticClass: decision.semanticClass,
@@ -73,7 +86,12 @@ export class AgenticMemoryIngestService {
     });
   }
 
-  private bufferLowSignal(actorId: string, sourceId: string, body: string): void {
+  private bufferLowSignal(
+    actorId: string,
+    sourceId: string,
+    body: string,
+    context: "main" | "notes",
+  ): void {
     const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}...` : body;
 
     let entries = this.lowSignalBuffer.get(actorId);
@@ -82,7 +100,7 @@ export class AgenticMemoryIngestService {
       this.lowSignalBuffer.set(actorId, entries);
     }
 
-    entries.push({ actorId, sourceId, text: trimmed, createdAt: Date.now() });
+    entries.push({ actorId, sourceId, text: trimmed, createdAt: Date.now(), context });
     const totalChars = (this.lowSignalTotalChars.get(actorId) ?? 0) + trimmed.length;
     this.lowSignalTotalChars.set(actorId, totalChars);
 
@@ -107,32 +125,47 @@ export class AgenticMemoryIngestService {
     this.lowSignalBuffer.delete(actorId);
     this.lowSignalTotalChars.delete(actorId);
 
-    const combined = entries
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .map((entry) => `[${entry.sourceId}] ${entry.text}`)
-      .join("\n\n---\n\n");
+    // 按 context 分桶：每桶独立成一段，方便后续按 context 检索
+    const grouped = new Map<"main" | "notes", BufferEntry[]>();
+    for (const e of entries) {
+      const key = e.context;
+      let arr = grouped.get(key);
+      if (!arr) {
+        arr = [];
+        grouped.set(key, arr);
+      }
+      arr.push(e);
+    }
 
-    if (combined.length < 20) return;
+    for (const [context, ctxEntries] of grouped.entries()) {
+      const sorted = [...ctxEntries].sort((a, b) => a.createdAt - b.createdAt);
+      const combined = sorted
+        .map((entry) => `[${entry.sourceId}] ${entry.text}`)
+        .join("\n\n---\n\n");
 
-    const summarized = await this.summarizeLowSignal(combined);
-    const decision = await decideMemoryWrite(summarized, {
-      actorId,
-      source: "chat:low_signal_summary",
-      heuristicHint: "decay",
-    });
+      if (combined.length < 20) continue;
 
-    const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
-    await this.memory.add([{ role: "user", content: body }], {
-      userId: actorId,
-      metadata: {
-        source: "chat:low_signal_summary",
+      const summarized = await this.summarizeLowSignal(combined);
+      const decision = await decideMemoryWrite(summarized, {
         actorId,
-        highSignal: decision.decision === "remember" || decision.decision === "overwrite",
-        memoryDecision: decision.decision,
-        memorySemanticClass: decision.semanticClass,
-      },
-      infer: true,
-    });
+        source: "chat:low_signal_summary",
+        heuristicHint: "decay",
+      });
+
+      const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
+      await this.memory.add([{ role: "user", content: body }], {
+        userId: actorId,
+        metadata: {
+          source: "chat:low_signal_summary",
+          actorId,
+          context,
+          highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+          memoryDecision: decision.decision,
+          memorySemanticClass: decision.semanticClass,
+        },
+        infer: true,
+      });
+    }
   }
 
   private async periodicFlush(): Promise<void> {

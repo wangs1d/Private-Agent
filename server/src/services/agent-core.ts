@@ -35,6 +35,7 @@ import type {
 } from "../external-model/types.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "./trajectory-skill-promotion-service.js";
+import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
@@ -210,6 +211,14 @@ export type HandleUserMessageOptions = {
   agentAccessMode?: AgentAccessMode;
   /** 为 true 时禁用 fast_chat 捷径（工具/记忆/人设与 App 对齐） */
   preferFullPipeline?: boolean;
+  /** 当前会话 sessionId；用于区分主会话 vs 笔记会话的记忆上下文。 */
+  sessionId?: string;
+};
+
+type ShortTermTurnContext = {
+  recallQuery: string;
+  activeTaskId?: string;
+  resumedTask: boolean;
 };
 
 export class AgentCore {
@@ -232,6 +241,7 @@ export class AgentCore {
     private readonly trajectorySkillPromotion: TrajectorySkillPromotionService | null = null,
     private readonly virtualPhoneService: VirtualPhoneService | null = null,
     private readonly scheduleTaskService: ScheduleTaskService | null = null,
+    private readonly shortTermMemoryGateway: ShortTermMemoryGatewayService | null = null,
   ) {
     this.promptContextBuilder = new PromptContextBuilder({
       agentMemorySyncService: this.agentMemorySyncService,
@@ -239,6 +249,7 @@ export class AgentCore {
       skillManager: this.skillManager,
       virtualPhoneService: this.virtualPhoneService,
       scheduleTaskService: this.scheduleTaskService,
+      shortTermMemoryGateway: this.shortTermMemoryGateway,
     });
     this.turnLifecycle = new TurnLifecycle({
       narrativeMemory: this.narrativeMemory,
@@ -295,11 +306,45 @@ export class AgentCore {
     };
   }
 
+  private buildShortTermTurnContext(sessionId: string, text: string): ShortTermTurnContext {
+    if (!this.shortTermMemoryGateway || text.length < 8) {
+      return {
+        recallQuery: text,
+        resumedTask: false,
+      };
+    }
+
+    const sync = this.shortTermMemoryGateway.syncTaskForTurn(sessionId, text);
+    return {
+      recallQuery: this.shortTermMemoryGateway.buildRecallQuery(sessionId, text),
+      activeTaskId: sync.task.taskId,
+      resumedTask: sync.resumed,
+    };
+  }
+
   async handleUserMessage(
     actorId: string,
     text: string,
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
+    const sessionId = opts?.sessionId ?? actorId;
+    const inputDecision = this.shortTermMemoryGateway?.filterInput(sessionId, text);
+    if (inputDecision && !inputDecision.accepted) {
+      return {
+        text:
+          inputDecision.reason === "small_talk"
+            ? "这条输入已识别为寒暄类内容，不进入短时记忆缓存。"
+            : inputDecision.reason === "duplicate"
+              ? "这条输入与最近上下文重复，已从短时层过滤。"
+              : "这条输入被识别为低价值或无效内容，已忽略。",
+        streamedChunks: false,
+      };
+    }
+    if (inputDecision?.normalizedText) {
+      text = inputDecision.normalizedText;
+    }
+    const shortTermTurn = this.buildShortTermTurnContext(sessionId, text);
+
     const perfStartTime = Date.now();
     const route = routeLlmExecution(text, getAgentRuntimeConfig(), {
       preferFullPipeline: opts?.preferFullPipeline === true,
@@ -310,12 +355,13 @@ export class AgentCore {
     if (cacheEnabled && !opts?.visionFrames?.length && !isAmbiguousFollowUpMessage(text)) {
       const cachedResponse = globalResponseCache.get(text, actorId);
       if (cachedResponse) {
-        this.turnLifecycle.finalizeTurn({ 
-          actorId, 
-          userText: text, 
-          assistantText: cachedResponse 
+        this.turnLifecycle.finalizeTurn({
+          actorId,
+          userText: text,
+          assistantText: cachedResponse,
+          sessionId,
         });
-        
+
         return { text: cachedResponse, streamedChunks: false };
       }
     }
@@ -323,7 +369,12 @@ export class AgentCore {
     if (!this.externalChat?.isEnabled()) {
       const available = this.toolRegistry.list().join(", ");
       const fallback = `已收到：${text}。当前可用工具：${available}`;
-      this.turnLifecycle.finalizeTurn({ actorId, userText: text, assistantText: fallback });
+      this.turnLifecycle.finalizeTurn({
+        actorId,
+        userText: text,
+        assistantText: fallback,
+        sessionId,
+      });
       return { text: fallback };
     }
 
@@ -337,7 +388,7 @@ export class AgentCore {
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
       : await Promise.all([
-          this.turnLifecycle.prepareNarrativeRecall(actorId, text),
+          this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
           resolveUserLocationPrompt({
             clientIp: opts?.clientIp,
             clientLocation: opts?.clientLocation,
@@ -361,6 +412,8 @@ export class AgentCore {
       personalization,
       trajCap,
       access,
+      sessionId,
+      shortTermTurn,
     );
 
     try {
@@ -388,6 +441,7 @@ export class AgentCore {
           peExhausted: false,
           trajCap,
           messageId: opts?.chatUserMessageId,
+          sessionId,
         });
         
         // 记录 Master Agent 模式性能
@@ -411,6 +465,8 @@ export class AgentCore {
           personalization,
           trajCap,
           orchestrateToolCtx: orchestrateOpts,
+          sessionId,
+          shortTermTurn,
         });
         
         const standardDuration = Date.now() - standardStartTime;
@@ -456,6 +512,8 @@ export class AgentCore {
           personalization,
           trajCap,
           orchestrateToolCtx: orchestrateOpts,
+          sessionId,
+          shortTermTurn,
         });
       }
       const msg = err instanceof Error ? err.message : String(err);
@@ -547,6 +605,7 @@ export class AgentCore {
     actorId: string,
     reply: AgentReply,
     opts?: {
+      sessionId?: string;
       chatUserMessageId?: string;
       userId?: string;
       clientIp?: string;
@@ -556,7 +615,7 @@ export class AgentCore {
   ): Promise<{ ok: boolean; result?: Record<string, unknown> }> {
     if (!reply.toolName || !reply.toolInput) return { ok: true };
     return this.toolRegistry.execute(reply.toolName, reply.toolInput, {
-      sessionId: actorId,
+      sessionId: opts?.sessionId ?? actorId,
       userId: opts?.userId,
       chatUserMessageId: opts?.chatUserMessageId,
       clientIp: opts?.clientIp,
@@ -596,6 +655,8 @@ export class AgentCore {
     personalization: PersonalizationPromptSlice,
     trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
     access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
+    sessionId: string,
+    shortTermTurn: ShortTermTurnContext,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -608,6 +669,7 @@ export class AgentCore {
 
     return {
       chatUserMessageId: opts?.chatUserMessageId,
+      sessionId,
       userId: opts?.userId,
       clientIp: opts?.clientIp,
       clientLocation: opts?.clientLocation,
@@ -644,13 +706,15 @@ export class AgentCore {
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization: PersonalizationPromptSlice;
+      sessionId: string;
+      shortTermTurn: ShortTermTurnContext;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
     const toolCtx: ChatToolExecutionContext = {
       executeTool: (name, args) =>
         this.toolRegistry.execute(name, args, {
-          sessionId: actorId,
+          sessionId: ctx.sessionId,
           userId: opts?.userId,
           chatUserMessageId: opts?.chatUserMessageId,
           clientIp: opts?.clientIp,
@@ -677,6 +741,7 @@ export class AgentCore {
       : {
           ...(this.promptContextBuilder.build({
             actorId,
+            sessionId: ctx.sessionId,
             userText: text,
             narrativeRecall: ctx.narrativeRecall,
             interruptedContext: opts?.interruptedContext,
@@ -757,6 +822,7 @@ export class AgentCore {
       peExhausted,
       trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
+      sessionId: opts?.sessionId,
     });
   }
 
@@ -772,6 +838,7 @@ export class AgentCore {
       peExhausted: boolean;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       messageId?: string;
+      sessionId?: string;
     },
   ): AgentReply {
     const trimmed = assistantText.trim();
@@ -793,12 +860,17 @@ export class AgentCore {
       actorId,
       userText,
       assistantText: trimmed,
+      sessionId: meta.sessionId,
       modelCallsConsumed: meta.modelCallsConsumed,
       planExecuteUsed: meta.planExecuteUsed,
       pePlan: meta.pePlan,
       peExhausted: meta.peExhausted,
       messageId: meta.messageId,
     });
+
+    if (this.shortTermMemoryGateway && meta.sessionId) {
+      this.shortTermMemoryGateway.reconcileTaskAfterTurn(meta.sessionId, userText, trimmed);
+    }
 
     return {
       text: quotaSuffix ? `${trimmed}\n\n${quotaSuffix}` : trimmed,

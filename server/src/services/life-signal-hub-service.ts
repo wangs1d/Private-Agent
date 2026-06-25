@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import type { HookBus } from "./hooks/index.js";
 import type { LifeSignal, LifeSignalEvidenceWindow } from "./life-signal-types.js";
 
 type PersistedShape = {
@@ -19,8 +20,15 @@ export class LifeSignalHubService {
     5 * 60_000,
     Number.parseInt(process.env.LIFE_SIGNAL_EVIDENCE_WINDOW_MS ?? "", 10) || 30 * 60_000,
   );
+  /** 可选：HookBus（所有生命信号自动外推到 webhook） */
+  private hookBus: HookBus | null = null;
 
   constructor(private readonly persistPath?: string) {}
+
+  /** 注入 HookBus。新功能接入时无需再手动 wire WebhookService */
+  bindHookBus(bus: HookBus | null): void {
+    this.hookBus = bus;
+  }
 
   publish(signal: LifeSignal): void {
     const list = this.history.get(signal.actorId) ?? [];
@@ -29,6 +37,28 @@ export class LifeSignalHubService {
     this.history.set(signal.actorId, list);
     this.evidenceWindows.set(signal.actorId, this.buildEvidenceWindow(signal.actorId));
     this.schedulePersist();
+
+    // ─── 通过 HookBus 发射（WebhookService 自动订阅并外推）───
+    // 注意：market.* 类型的事件已由 MarketSignalService 直接 emit，此处跳过以避免重复。
+    const isMarketSignal = signal.source === "market";
+    if (this.hookBus && !isMarketSignal) {
+      this.hookBus.emit(
+        "life.signal",
+        {
+          kind: signal.kind,
+          title: signal.title,
+          summary: signal.summary,
+          description: signal.description,
+          tags: signal.tags,
+          importance: signal.importance,
+          evidence: signal.evidence,
+          metrics: signal.metrics,
+          metadata: signal.metadata,
+          occurredAt: signal.occurredAt,
+        },
+        { actorId: signal.actorId, source: "life-signal-hub" },
+      );
+    }
 
     for (const subscriber of this.subscribers) {
       void Promise.resolve(subscriber(signal)).catch((error) => {

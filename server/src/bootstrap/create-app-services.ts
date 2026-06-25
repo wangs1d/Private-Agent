@@ -38,9 +38,11 @@ import { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-se
 import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { createNarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import { initMemoryManagerService } from "../services/memory-manager-service.js";
+import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
+import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import {
   initNightlyMemoryTaskService,
   getNightlyMemoryTaskService,
@@ -60,6 +62,7 @@ import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
 import { AnticipationEngineService } from "../services/anticipation-engine-service.js";
 import { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
 import { DesktopPresenceSignalService } from "../services/desktop-presence-signal-service.js";
+import { HookBus, setHookBus } from "../services/hooks/index.js";
 import { WebhookService } from "../services/webhook/index.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
@@ -125,6 +128,8 @@ import { BrowserSessionService } from "../services/browser-session-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
+import { registerNotesTools } from "../tools/notes-tools.js";
+import { NotesService } from "../services/notes-service.js";
 import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
 import { embodimentAlert, embodimentThinking } from "../services/agent-embodiment.js";
@@ -450,10 +455,13 @@ export async function createAppServices(): Promise<AppServices> {
 
   const evolutionMemory = new AgentEvolutionMemoryService(agentMemorySyncService);
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
+  const humanLikeMemory = await initHumanLikeMemoryService();
+  const shortTermMemoryGateway = await initShortTermMemoryGatewayService();
   const narrativeMemory = createNarrativeMemoryPort({
     agenticIngest: agenticMemoryRuntime?.ingest ?? null,
     agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
     compressor: agenticMemoryRuntime?.compressor ?? null,
+    humanLikeMemory,
   });
 
   const dailyDigestService = getDailyDigestService();
@@ -469,7 +477,12 @@ export async function createAppServices(): Promise<AppServices> {
   });
   if (nightlyMemoryService) {
     const memoryManager = (await import("../services/memory-manager-service.js")).getMemoryManagerService();
-    nightlyMemoryService.setDependencies(memoryManager, dailyDigestService, agentMemorySyncService);
+    nightlyMemoryService.setDependencies(
+      memoryManager,
+      dailyDigestService,
+      agentMemorySyncService,
+      narrativeMemory,
+    );
     nightlyMemoryService.startScheduler();
     app.log.info(
       `[NightlyMemory] Night mode: ${nightlyMemoryService.isInNightMode() ? "🌙 ON" : "☀️ OFF"} (${stmConfig.digestTimezone})`,
@@ -538,6 +551,10 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const externalChat = createExternalChatProviderFromEnv();
+  const notesService = new NotesService(join(process.cwd(), "data"));
+  await notesService.load().catch((err) => {
+    app.log.error({ err }, "NotesService 加载失败");
+  });
   const userPersonalizationService = new UserPersonalizationService(
     agentMemorySyncService,
     externalChat,
@@ -554,6 +571,7 @@ export async function createAppServices(): Promise<AppServices> {
     skillManager,
     virtualPhoneService,
     scheduleTaskService,
+    shortTermMemoryGateway,
   });
   const agentCore = createAgentCore({
     toolRegistry,
@@ -568,6 +586,7 @@ export async function createAppServices(): Promise<AppServices> {
     trajectorySkillPromotion,
     virtualPhoneService,
     scheduleTaskService,
+    shortTermMemoryGateway,
   });
   agentCore.setPhoneBridgeCoordinator(phoneBridgeCoordinator);
 
@@ -702,8 +721,20 @@ export async function createAppServices(): Promise<AppServices> {
   proactiveCenter.start();
 
   // ========== Webhook 事件驱动 ==========
-  const webhookService = new WebhookService();
+  // 1) 先建 hookBus（全局唯一事件总线）
+  // 2) WebhookService 启动时自动订阅 hookBus，业务代码只需 emit hook
+  // 3) 其它服务也通过 hookBus 发事件，无需再 bind WebhookService
+  const hookBus = new HookBus();
+  setHookBus(hookBus); // 替换单例，便于无 DI 上下文的代码也能 emit
+
+  const webhookService = new WebhookService(hookBus);
   webhookService.start();
+
+  // 把 hookBus 注入到业务服务。
+  // 业务服务 emit 的事件会被 hookBus 路由到所有订阅者，
+  // 其中 WebhookService 已经自动订阅，会推送到外部端点。
+  marketSignalService.bindHookBus(hookBus);
+  lifeSignalHubService.bindHookBus(hookBus);
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
@@ -749,6 +780,13 @@ export async function createAppServices(): Promise<AppServices> {
   registerSelfProgrammingTools(toolRegistry, skillManager);
   registerAISkillGenerationTools(toolRegistry, externalChat, skillManager);
   registerSelfLearningTools(toolRegistry, externalChat, skillManager);
+  registerNotesTools(
+    toolRegistry,
+    notesService,
+    scheduleTaskService,
+    externalChat,
+    narrativeMemory,
+  );
 
   registerHttpRoutes(app, {
     toolRegistry,
@@ -791,6 +829,8 @@ export async function createAppServices(): Promise<AppServices> {
     proactiveLifeRuntimeService,
     userPersonalizationService,
     webhookService,
+    notesService,
+    externalChat,
   });
 
   registerWebSocketRoute(app, {
@@ -851,6 +891,9 @@ export async function createAppServices(): Promise<AppServices> {
     lifeSignalHubService,
     marketSignalService,
     proactiveLifeRuntimeService,
+    hookBus,
     webhookService,
+    notesService,
+    externalChat,
   };
 }

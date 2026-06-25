@@ -2,6 +2,8 @@ import "package:flutter/material.dart";
 
 import "../../core/models/schedule_models.dart";
 import "../../core/services/desk_pet_session.dart";
+import "../../core/services/schedule_floating_launcher.dart";
+import "../../core/services/schedule_preference.dart";
 
 /// 强调色（品牌色）：与主题无关，深浅都保留辨识度。
 const Color _kAccentBlue = Color(0xFF007AFF);
@@ -26,6 +28,7 @@ class JarvisChatLayout extends StatefulWidget {
     this.onWallet,
     this.onPhone,
     this.onTranslate,
+    this.onNotes,
   });
 
   /// 中间的聊天页（通常为 ChatPage）。
@@ -52,6 +55,9 @@ class JarvisChatLayout extends StatefulWidget {
   /// 点击常用工具「翻译」：打开翻译工具。
   final VoidCallback? onTranslate;
 
+  /// 点击常用工具「笔记」：打开与笔记 Agent 的独立对话页。
+  final VoidCallback? onNotes;
+
   @override
   State<JarvisChatLayout> createState() => _JarvisChatLayoutState();
 }
@@ -65,6 +71,12 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
   bool _showFloatingSchedule = false;
   bool _petAwake = false;
   Offset _floatingSchedulePosition = const Offset(120, 120);
+
+  /// 是否使用桌面独立悬浮窗模式（vs 应用内嵌）
+  bool _useDesktopFloating = false;
+
+  /// 桌面悬浮窗当前是否已激活
+  bool _scheduleWindowActive = false;
 
   @override
   void initState() {
@@ -80,11 +92,29 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
     )..repeat(reverse: true);
 
     DeskPetSession.instance.addListener(_onDeskPetChanged);
+
+    // 加载用户日程显示偏好，如果是桌面悬浮模式则自动启动
+    _loadSchedulePreference();
+  }
+
+  /// 加载保存的日程显示偏好
+  Future<void> _loadSchedulePreference() async {
+    final ScheduleDisplayMode mode = await SchedulePreference.getDisplayMode();
+    if (mounted) {
+      setState(() {
+        _useDesktopFloating = mode == ScheduleDisplayMode.desktopFloating;
+      });
+      // 如果用户之前选择了桌面悬浮窗模式，自动启动
+      if (_useDesktopFloating) {
+        _launchDesktopScheduleWindow();
+      }
+    }
   }
 
   @override
   void dispose() {
     DeskPetSession.instance.removeListener(_onDeskPetChanged);
+    ScheduleFloatingLauncher.activeNotifier.removeListener(_onScheduleWindowChanged);
     _petFloatController.dispose();
     _shadowPulseController.dispose();
     super.dispose();
@@ -92,6 +122,51 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
 
   void _onDeskPetChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// 启动桌面独立悬浮窗
+  Future<void> _launchDesktopScheduleWindow() async {
+    final bool launched = await ScheduleFloatingLauncher.launch();
+    if (mounted) {
+      setState(() => _scheduleWindowActive = launched);
+    }
+    // 监听窗口状态变化
+    ScheduleFloatingLauncher.activeNotifier.addListener(_onScheduleWindowChanged);
+  }
+
+  /// 监听悬浮窗状态变化
+  void _onScheduleWindowChanged() {
+    if (mounted) {
+      setState(() => _scheduleWindowActive = ScheduleFloatingLauncher.isRunning);
+    }
+  }
+
+  /// 关闭桌面悬浮窗
+  Future<void> _closeDesktopScheduleWindow() async {
+    await ScheduleFloatingLauncher.close();
+    if (mounted) {
+      setState(() => _scheduleWindowActive = false);
+    }
+    ScheduleFloatingLauncher.activeNotifier.removeListener(_onScheduleWindowChanged);
+  }
+
+  /// 切换桌面悬浮窗模式（用户手动切换开关时调用）
+  Future<void> _onDesktopFloatingToggled(bool value) async {
+    setState(() => _useDesktopFloating = value);
+
+    // 保存偏好
+    await SchedulePreference.setDisplayMode(
+      value ? ScheduleDisplayMode.desktopFloating : ScheduleDisplayMode.embedded,
+    );
+
+    if (value) {
+      // 切换到桌面模式：启动独立窗口，隐藏应用内浮动面板
+      _showFloatingSchedule = false;
+      await _launchDesktopScheduleWindow();
+    } else {
+      // 切换回应用内嵌：关闭独立窗口
+      await _closeDesktopScheduleWindow();
+    }
   }
 
   // 浅色主题下表示"描边 / 文字 / 叠加"应使用黑色系，
@@ -133,7 +208,8 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
               ),
             ],
           ),
-          if (_showFloatingSchedule) _buildFloatingSchedule(),
+          if (_showFloatingSchedule && !_useDesktopFloating)
+              _buildFloatingSchedule(),
         ],
       ),
     );
@@ -153,20 +229,32 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
               bottom: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
             ),
           ),
-          child: Text(
-            "快捷功能",
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: cs.onSurface,
-            ),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  "快捷功能",
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                  ),
+                ),
+              ),
+              // 桌面日程模式圆圈按钮 — 桌面模式开启时作为关闭入口
+              _ScheduleModeCircleButton(
+                active: _useDesktopFloating,
+                onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
+              ),
+            ],
           ),
         ),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: <Widget>[
-              _buildScheduleCard(),
+              // 桌面悬浮窗模式开启时，应用内今日安排卡片整体隐藏
+              if (!_useDesktopFloating) _buildScheduleCard(),
               const SizedBox(height: 16),
               _buildToolsCard(),
             ],
@@ -221,29 +309,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
                 style: const TextStyle(fontSize: 11, color: _kAccentBlue),
               ),
               const SizedBox(width: 4),
-              Tooltip(
-                message: "桌面悬浮模式",
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(6),
-                    onTap: () => setState(() {
-                      _showFloatingSchedule = true;
-                      _floatingSchedulePosition = const Offset(120, 120);
-                    }),
-                    child: Container(
-                      width: 26,
-                      height: 26,
-                      alignment: Alignment.center,
-                      child: Icon(
-                        Icons.open_in_new,
-                        size: 14,
-                        color: cs.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+              // 桌面悬浮窗模式开关在右侧"快捷功能"标题栏内（避免应用内卡片隐藏后无法关闭）
             ],
           ),
           const SizedBox(height: 12),
@@ -840,6 +906,55 @@ class _ToolButtonState extends State<_ToolButton>
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 桌面日程模式圆圈切换按钮
+///
+/// - `active = false`：空心圆圈，hover/focus 时显示蓝色描边
+/// - `active = true`：实心蓝色圆圈带勾选标记
+class _ScheduleModeCircleButton extends StatelessWidget {
+  const _ScheduleModeCircleButton({
+    required this.active,
+    required this.onTap,
+  });
+
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: active ? "已开启桌面悬浮窗（点击关闭）" : "开启桌面独立悬浮窗",
+      child: Material(
+        color: Colors.transparent,
+        shape: CircleBorder(
+          side: BorderSide(
+            color: active ? _kAccentBlue : cs.outline.withValues(alpha: 0.55),
+            width: active ? 2 : 1.4,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: 26,
+            height: 26,
+            child: Center(
+              child: active
+                  ? const Icon(Icons.check, size: 16, color: _kAccentBlue)
+                  : Icon(
+                      Icons.desktop_windows_outlined,
+                      size: 14,
+                      color: cs.onSurfaceVariant,
+                    ),
+            ),
           ),
         ),
       ),

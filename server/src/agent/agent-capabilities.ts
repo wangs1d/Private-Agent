@@ -23,6 +23,7 @@ export const CAPABILITY_DOMAINS = [
   "world",
   "embodiment",
   "smart_home",
+  "notes",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -45,6 +46,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   world: "Agent World（世界状态/社交/市场）",
   embodiment: "具身身体（球形本体：漫游/移动/表情）",
   smart_home: "智能家居（HomeAssistant：设备列表/开关/调温/灯控/场景）",
+  notes: "学习笔记（学习/会议/视频/读书/灵感沉淀、摘要、抽问、复习）",
   all: "全部领域",
 };
 
@@ -57,12 +59,17 @@ const GLOBAL_RULES_LINES = [
   "【全局状态连续性 · 最高优先级】",
   "任何操作前（落子、发帖、交易、出牌等）必须先调用对应 get_snapshot/get_status 检查当前真实状态。",
   "禁止凭记忆或用户文字判断状态。只有工具返回的数据才是真实状态。",
-  "适用场景：游戏(world.gomoku/doudizhu/zhajinhua)、社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)。",
+  "适用场景：游戏(world.gomoku/doudizhu/zhajinhua)、社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)、笔记(notes.create/update/delete)。",
   "",
   "【访问权限 · 常规沙箱为默认】",
   "用户未在输入框开启「完全访问」时，当前为沙箱：不可用 desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.*。",
   "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
   "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
+  "",
+  "【笔记 · 状态连续性】",
+  "用户说「记一下/整理笔记/总结这段/抽几道题/复习」时优先走 notes.*；",
+  "写入前先 notes.search 查重；如已存在相似笔记（标题/正文重合度高），update 现有条目而非 create 重复条目；",
+  "update/delete 必须基于 notes.list 或 notes.search 返回的真实 id，禁止凭用户口述构造 id。",
   "",
 ];
 
@@ -192,6 +199,20 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "agent_account",
       lines: [
         "1️⃣7️⃣ Agent账号：agent.register_account",
+      ],
+    },
+    {
+      domain: "notes",
+      lines: [
+        "📝 学习/知识笔记（单用户本地存储，不进 World）",
+        "   - notes.create / notes.list / notes.get / notes.update / notes.delete",
+        "   - notes.search（关键词 BM25 排序，命中后可走 update 复用）",
+        "   - notes.summarize（生成摘要，懒写回）",
+        "   - notes.flashcards（生成记忆卡片 q/a）",
+        "   - notes.quiz（生成自测题）",
+        "   - notes.schedule_review（创建复习提醒，调用 calendar.create_task 落地）",
+        "   适用：学习（看书/视频/课程）、会议纪要、读书摘录、灵感闪念、视频字幕沉淀等。",
+        "   状态连续性：写之前先 notes.search 查重；update/delete 必须基于返回的 id。",
       ],
     },
   ];

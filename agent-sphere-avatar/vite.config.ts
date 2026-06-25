@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: "dist",
       sourcemap: true,
+      chunkSizeWarningLimit: 2000, // 项目级共用 Three.js 场景，禁用 chunk 大小警告
       rollupOptions: {
         input: {
           embed: resolve(__dirname, "embed.html"),

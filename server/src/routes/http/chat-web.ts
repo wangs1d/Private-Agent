@@ -46,6 +46,10 @@ export function readChatWebIndexHtml(): string {
   return readFileSync(join(webRoot, "index.html"), "utf8");
 }
 
+export function readNotesChatHtml(): string {
+  return readFileSync(join(webRoot, "notes.html"), "utf8");
+}
+
 /**
  * 浏览器聊天静态资源：`/chat/assets/*`（页面本体由 `GET /chat` 按 Accept 分流）。
  */
@@ -98,4 +102,12 @@ export function registerChatWeb(app: FastifyInstance): void {
     return readFileSync(full);
   });
 
+  /**
+   * 笔记对话页：与主聊天页共用 WebSocket 协议，但 `session.init` 时客户端会发送
+   * `sessionId = "notes:" + actorId`，后端据此把对话记忆写入 `context=notes` 独立桶。
+   */
+  app.get("/chat/notes", async (_req, reply) => {
+    void reply.type("text/html; charset=utf-8");
+    return readNotesChatHtml();
+  });
 }

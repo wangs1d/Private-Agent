@@ -8,6 +8,8 @@ export type BatchedMessage = {
   originalMessageId: string;
   userId: string;
   timestamp: number;
+  /** 当前 WebSocket 完整 sessionId（含 notes:/master: 等前缀），用于记忆上下文区分。 */
+  sessionId?: string;
 };
 
 export type MessageBatchProcessorConfig = {

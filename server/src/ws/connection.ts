@@ -747,6 +747,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             {
               socket,
               boundActorId: boundActorId ?? "",
+              sessionId: boundActorId ?? "",
               initAsDesktopBridge,
               clientIp,
               sendUnifiedError,
@@ -762,6 +763,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             {
               socket,
               boundActorId: boundActorId ?? "",
+              sessionId: boundActorId ?? "",
               initAsDesktopBridge,
               clientIp,
               sendUnifiedError,
@@ -790,6 +792,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             {
               socket,
               boundActorId: boundActorId ?? "",
+              sessionId: boundActorId ?? "",
               initAsDesktopBridge,
               clientIp,
               sendUnifiedError,

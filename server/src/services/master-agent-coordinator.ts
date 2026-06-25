@@ -65,6 +65,7 @@ type TurnDelegationState = {
 };
 
 export type OrchestrateTaskOptions = {
+  sessionId?: string;
   chatUserMessageId?: string;
   userId?: string;
   clientIp?: string;
@@ -1117,6 +1118,7 @@ export class MasterAgentCoordinator {
   private buildPromptInput(actorId: string, opts?: OrchestrateTaskOptions) {
     return {
       actorId,
+      sessionId: opts?.sessionId,
       userText: this.currentTurnUserMessage ?? undefined,
       narrativeRecall: opts?.narrativeRecall,
       personalization: opts?.personalization,

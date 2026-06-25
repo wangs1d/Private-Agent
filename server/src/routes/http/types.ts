@@ -11,6 +11,8 @@ import type { UpstreamSearchService } from "../../services/upstream-search-servi
 import type { SkillManager } from "../../skills/index.js";
 import type { ToolRegistry } from "../../tools/tool-registry.js";
 import type { RealFundsWalletService } from "../../services/real-funds-wallet-service.js";
+import type { NotesService } from "../../services/notes-service.js";
+import type { ExternalChatProvider } from "../../external-model/types.js";
 import type {
   A2aOutsourcingService,
   DoudizhuService,
@@ -39,6 +41,7 @@ import type { LifeSignalHubService } from "../../services/life-signal-hub-servic
 import type { MarketSignalService } from "../../services/market-signal-service.js";
 import type { ProactiveLifeRuntimeService } from "../../services/proactive-life-runtime-service.js";
 import type { UserPersonalizationService } from "../../services/user-personalization/user-personalization-service.js";
+import type { HookBus } from "../../services/hooks/index.js";
 import type { WebhookService } from "../../services/webhook/index.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
@@ -82,5 +85,8 @@ export type HttpRouteDeps = {
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;
+  hookBus?: HookBus;
   webhookService?: WebhookService;
+  notesService?: NotesService;
+  externalChat?: ExternalChatProvider | null;
 };

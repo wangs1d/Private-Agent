@@ -137,15 +137,17 @@ export class ProactiveOutboundMessageService {
     }).length;
   }
 
+  // 质量驱动：移除硬性配额限制，仅记录推送频率供其他模块参考。
+  // 真实有价值的信号（高 urgency / warning 类）不会被任何硬性限额拦截。
   assessFatigue(actorId: string, windowMs = 60 * 60_000): ProactiveOutboundEligibility {
     const now = Date.now();
     const recent = (this.history.get(actorId) ?? []).filter((item) => {
       return now - Date.parse(item.createdAt) <= windowMs;
     });
-    if (recent.length >= 6) {
-      return { allowed: false, reason: "too_many_recent_proactive_messages" };
-    }
-    return { allowed: true, reason: recent.length >= 3 ? "high_activity" : "clear" };
+    return {
+      allowed: true,
+      reason: recent.length >= 8 ? "high_activity_logged" : recent.length >= 3 ? "moderate_activity" : "clear",
+    };
   }
 
   getThreadContext(actorId: string, reason: string, options?: ThreadContextOptions): string | null {

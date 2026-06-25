@@ -35,6 +35,7 @@ import type {
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
+import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
 
@@ -168,6 +169,7 @@ export function formatNarrativeRecallPrompt(text: string | undefined): string | 
 
 export type BuildPromptContextInput = {
   actorId: string;
+  sessionId?: string;
   userText?: string;
   narrativeRecall?: string;
   interruptedContext?: string;
@@ -193,6 +195,7 @@ export class PromptContextBuilder {
       skillManager: SkillManager | null;
       virtualPhoneService: VirtualPhoneService | null;
       scheduleTaskService?: ScheduleTaskService | null;
+      shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
     },
   ) {}
 
@@ -356,6 +359,10 @@ export class PromptContextBuilder {
       config.memoryPrompt.taskContextInPrompt && userText
         ? compactPromptBlock(buildTaskContextPrompt(userText), 320)
         : undefined;
+    const shortTermTaskContext =
+      input.sessionId && this.deps.shortTermMemoryGateway
+        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), 420)
+        : undefined;
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     const narrativeRecall = !ambiguousFollowUp
@@ -379,7 +386,9 @@ export class PromptContextBuilder {
     return {
       ...fromKv,
       currentTime: buildCurrentTimePrompt(),
-      ...(taskContext ? { taskContext } : {}),
+      ...(taskContext || shortTermTaskContext
+        ? { taskContext: [taskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }
+        : {}),
       ...(capabilityQueryHint ? { abilities: fromKv.abilities ? `${fromKv.abilities}\n${capabilityQueryHint}` : capabilityQueryHint } : {}),
       ...(toneGuidance
         ? { toneGuidance }

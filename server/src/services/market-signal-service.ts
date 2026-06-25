@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { LifeSignalHubService } from "./life-signal-hub-service.js";
 import type { LifeSignal } from "./life-signal-types.js";
+import type { HookBus } from "./hooks/index.js";
 
 export type MarketPositionSnapshotInput = {
   actorId: string;
@@ -31,7 +32,15 @@ export type MarketAnomalySignalInput = {
 };
 
 export class MarketSignalService {
+  /** 可选：HookBus（价格/数据信号自动外推到 webhook） */
+  private hookBus: HookBus | null = null;
+
   constructor(private readonly signalHub: LifeSignalHubService) {}
+
+  /** 注入 HookBus。新功能接入时无需再手动 wire WebhookService */
+  bindHookBus(bus: HookBus | null): void {
+    this.hookBus = bus;
+  }
 
   publishPositionSnapshot(input: MarketPositionSnapshotInput): LifeSignal {
     const occurredAt = input.occurredAt ?? new Date().toISOString();
@@ -66,6 +75,23 @@ export class MarketSignalService {
       },
     };
     this.signalHub.publish(signal);
+    // ─── 通过 HookBus 发射（WebhookService 自动订阅并外推）───
+    this.hookBus?.emit(
+      "market.position_snapshot",
+      {
+        symbol: input.symbol,
+        side: input.side ?? "long",
+        quantity: input.quantity,
+        averageCost: input.averageCost,
+        currentPrice: input.currentPrice,
+        unrealizedPnlPct: input.unrealizedPnlPct,
+        volatilityPct: input.volatilityPct,
+        thesis: input.thesis,
+        importance: signal.importance,
+        occurredAt,
+      },
+      { actorId: input.actorId, source: "market-signal" },
+    );
     return signal;
   }
 
@@ -98,6 +124,22 @@ export class MarketSignalService {
       },
     };
     this.signalHub.publish(signal);
+    // ─── 通过 HookBus 发射（价格异动是真实事件，必须实时外推）───
+    this.hookBus?.emit(
+      "market.anomaly",
+      {
+        symbol: input.symbol,
+        anomalyType: input.anomalyType,
+        summary: input.summary,
+        priceChangePct: input.priceChangePct,
+        volumeRatio: input.volumeRatio,
+        confidence: input.confidence,
+        evidence: input.evidence,
+        importance: signal.importance,
+        occurredAt,
+      },
+      { actorId: input.actorId, source: "market-signal" },
+    );
     return signal;
   }
 

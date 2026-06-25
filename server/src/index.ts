@@ -57,8 +57,8 @@ try {
   throw err;
 }
 
-// ─── Webhook: Agent 上线事件 ───
-services.webhookService.emit("agent.online", {
+// ─── Webhook: Agent 上线事件（通过 HookBus 自动外推） ───
+services.hookBus.emit("agent.online", {
   port: runtime.port,
   version: "1.0",
   uptime: new Date().toISOString(),
@@ -94,8 +94,8 @@ const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   : startOpenClawModelSyncWatcher(process.env);
 
 const shutdown = (): void => {
-  // ─── Webhook: Agent 下线事件 ───
-  services.webhookService.emit("agent.offline", {
+  // ─── Webhook: Agent 下线事件（通过 HookBus 自动外推） ───
+  services.hookBus.emit("agent.offline", {
     port: runtime.port,
     reason: "graceful_shutdown",
     timestamp: new Date().toISOString(),
