@@ -41,6 +41,8 @@ import type { WebhookService } from "../services/webhook/index.js";
 import type { NotesService } from "../services/notes-service.js";
 import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
+import type { MoodInferenceService } from "../services/mood-inference-service.js";
+import type { JarvisHarness } from "../services/jarvis/index.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -84,6 +86,9 @@ export type AppServices = {
   notesService: NotesService;
   morningBriefingScheduler: MorningBriefingScheduler;
   externalChat: ExternalChatProvider | null;
+  moodInferenceService: MoodInferenceService;
+  /** J.A.R.V.I.S. 统一主动消息中枢 */
+  jarvisHarness: JarvisHarness;
 };
 
 export type SkillMetadataValidator = {

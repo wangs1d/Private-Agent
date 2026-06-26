@@ -7,7 +7,8 @@ export type LifeSignalSource =
   | "social"
   | "location"
   | "smart_home"
-  | "system";
+  | "system"
+  | "agent_inference";
 
 export type LifeSignalImportance = "low" | "medium" | "high" | "critical";
 

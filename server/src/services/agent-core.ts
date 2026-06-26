@@ -13,6 +13,10 @@ import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
 import type { HermesEvolutionLoopService } from "./hermes-evolution-loop-service.js";
+import type { MoodInferenceService } from "./mood-inference-service.js";
+import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { LifeSignalHubService } from "./life-signal-hub-service.js";
+import { ServerEventType } from "../protocol.js";
 import type {
   PersonalizationPromptSlice,
   UserPersonalizationService,
@@ -227,6 +231,9 @@ export class AgentCore {
   private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
+  private moodInferenceService: MoodInferenceService | null = null;
+  private wsRegistry: WsConnectionRegistry | null = null;
+  private lifeSignalHubService: LifeSignalHubService | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -242,7 +249,11 @@ export class AgentCore {
     private readonly virtualPhoneService: VirtualPhoneService | null = null,
     private readonly scheduleTaskService: ScheduleTaskService | null = null,
     private readonly shortTermMemoryGateway: ShortTermMemoryGatewayService | null = null,
+    moodInferenceService: MoodInferenceService | null = null,
+    lifeSignalHubService: LifeSignalHubService | null = null,
   ) {
+    this.moodInferenceService = moodInferenceService;
+    this.lifeSignalHubService = lifeSignalHubService;
     this.promptContextBuilder = new PromptContextBuilder({
       agentMemorySyncService: this.agentMemorySyncService,
       worldService: this.worldService,
@@ -287,6 +298,21 @@ export class AgentCore {
     this.phoneBridgeCoordinator = coordinator;
   }
 
+  /** 在 bootstrap 注册情绪感知后注入，用于按轮分析用户消息情绪。 */
+  setMoodInferenceService(service: MoodInferenceService | null): void {
+    this.moodInferenceService = service;
+  }
+
+  /** 在 bootstrap 注册 WS 连接注册表后注入，用于将情绪事件推送给客户端。 */
+  setWsRegistry(registry: WsConnectionRegistry | null): void {
+    this.wsRegistry = registry;
+  }
+
+  /** 在 bootstrap 注册 LifeSignalHub 后注入，用于在情绪推理后发布 mood 信号。 */
+  setLifeSignalHubService(service: LifeSignalHubService | null): void {
+    this.lifeSignalHubService = service;
+  }
+
   private desktopBridgeOnlineFor(actorId: string): boolean {
     return this.desktopBridgeCoordinator?.hasExecutor(actorId) ?? false;
   }
@@ -328,6 +354,62 @@ export class AgentCore {
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
     const sessionId = opts?.sessionId ?? actorId;
+
+    // 情绪感知钩子：每次收到用户消息后异步分析，并通过 WS 推送 mood.inferred 事件给客户端
+    if (this.moodInferenceService && text?.trim()) {
+      const userMessageText = text;
+      const registry = this.wsRegistry;
+      const inferenceService = this.moodInferenceService;
+      const lifeSignalHub = this.lifeSignalHubService;
+      void inferenceService.analyzeMessage(sessionId, userMessageText).then((inference) => {
+        if (!inference) return;
+        const payload = {
+          type: ServerEventType.MoodInferred,
+          payload: {
+            sessionId,
+            sentimentScore: inference.sentimentScore,
+            confidence: inference.confidence,
+            emotionTags: inference.emotionTags,
+            agentNote: inference.agentNote,
+            timestamp: inference.timestamp,
+          },
+        };
+        try {
+          registry?.trySend(sessionId, JSON.stringify(payload));
+        } catch {
+          // 静默失败，不影响主流程
+        }
+        // 同时发布 LifeSignal 到 hub，触发 ProactiveLifeRuntime 关怀
+        try {
+          lifeSignalHub?.publish({
+            id: `mood-${inference.timestamp}-${Date.now()}`,
+            actorId: sessionId,
+            source: "agent_inference",
+            kind: "mood",
+            title: inference.sentimentScore < -0.2 ? "情绪偏低" : "情绪积极",
+            summary: inference.emotionTags.length > 0
+              ? `检测到情绪：${inference.emotionTags.join("、")}`
+              : "情绪状态变化",
+            tags: inference.emotionTags,
+            importance: inference.sentimentScore < -0.5 ? "high" : "medium",
+            evidence: [inference.agentNote ?? "对话情感分析"],
+            metrics: {
+              sentimentScore: inference.sentimentScore,
+              confidence: inference.confidence,
+            },
+            metadata: {
+              inference,
+            },
+            occurredAt: inference.timestamp,
+          });
+        } catch {
+          // 静默失败，不影响主流程
+        }
+      }).catch(() => {
+        // 静默失败，不影响主流程
+      });
+    }
+
     const inputDecision = this.shortTermMemoryGateway?.filterInput(sessionId, text);
     if (inputDecision && !inputDecision.accepted) {
       return {

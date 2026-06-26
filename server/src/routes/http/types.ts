@@ -43,6 +43,8 @@ import type { ProactiveLifeRuntimeService } from "../../services/proactive-life-
 import type { UserPersonalizationService } from "../../services/user-personalization/user-personalization-service.js";
 import type { HookBus } from "../../services/hooks/index.js";
 import type { WebhookService } from "../../services/webhook/index.js";
+import type { MoodInferenceService } from "../../services/mood-inference-service.js";
+import type { JarvisHarness } from "../../services/jarvis/index.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -89,4 +91,7 @@ export type HttpRouteDeps = {
   webhookService?: WebhookService;
   notesService?: NotesService;
   externalChat?: ExternalChatProvider | null;
+  moodInferenceService?: MoodInferenceService;
+  /** J.A.R.V.I.S. 统一主动消息中枢（可选，老路由可能不传） */
+  jarvisHarness?: JarvisHarness;
 };

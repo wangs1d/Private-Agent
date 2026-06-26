@@ -152,6 +152,8 @@ import type { AppServices } from "./types.js";
 import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
 import { CompanionService } from "../services/companion-service.js";
 import { MarketSignalService } from "../services/market-signal-service.js";
+import { MoodInferenceService } from "../services/mood-inference-service.js";
+import { JarvisHarness } from "../services/jarvis/index.js";
 import {
   notifyScheduleTasksChanged,
   scheduleWsPayloadDeleted,
@@ -554,6 +556,17 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const externalChat = createExternalChatProviderFromEnv();
+  const moodInferenceService = new MoodInferenceService({
+    externalChat,
+    persistFilePath: join(process.cwd(), "data", "mood-inferences.jsonl"),
+    logger: {
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+      error: (msg) => app.log.error(msg),
+    },
+  });
+  await moodInferenceService.load();
+  app.log.info("[MoodInference] 服务已初始化并加载历史数据");
   const notesService = new NotesService(join(process.cwd(), "data"));
   await notesService.load().catch((err) => {
     app.log.error({ err }, "NotesService 加载失败");
@@ -618,8 +631,13 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     scheduleTaskService,
     shortTermMemoryGateway,
+    moodInferenceService,
+    lifeSignalHubService,
   });
   agentCore.setPhoneBridgeCoordinator(phoneBridgeCoordinator);
+  agentCore.setMoodInferenceService(moodInferenceService);
+  agentCore.setLifeSignalHubService(lifeSignalHubService);
+  agentCore.setWsRegistry(wsConnectionRegistry);
 
   const virtualPhoneIncomingCoordinator = new VirtualPhoneIncomingCoordinator(
     agentCore,
@@ -740,6 +758,7 @@ export async function createAppServices(): Promise<AppServices> {
     proactiveOutbound,
     userPersonalizationService,
     (actorId) => Boolean(wsConnectionRegistry.get(actorId)),
+    moodInferenceService,
   );
   proactiveLifeRuntimeService.start();
   const proactiveCenter = new ProactiveAgentCenter(
@@ -750,6 +769,30 @@ export async function createAppServices(): Promise<AppServices> {
     (actorId) => Boolean(wsConnectionRegistry.get(actorId)),
   );
   proactiveCenter.start();
+
+  // ========== Jarvis Harness — 统一主动消息中枢 ==========
+  // 借鉴 LangGraph / Letta / ProactiveAgent 的设计思想，把所有主动消息
+  // 触发 / 决策 / 发送 / 反馈 / 反思 收口到一个 Harness。
+  // 默认开启（可用 JARVIS_HARNESS_ENABLED=0 关闭，或 JARVIS_HARNESS_SHADOW=1 仅记录不真发）。
+  const jarvisHarness = new JarvisHarness({
+    externalChat,
+    promptContextBuilder,
+    lifeSignalHub: lifeSignalHubService,
+    outbound: proactiveOutbound,
+    notes: notesService,
+    schedule: scheduleTaskService,
+    moodInference: moodInferenceService,
+    personalization: userPersonalizationService,
+    isUserOnline: (actorId) => Boolean(wsConnectionRegistry.get(actorId)),
+    dataDir: join(process.cwd(), "data"),
+    logger: {
+      info: (m) => app.log.info(m),
+      warn: (m) => app.log.warn(m),
+      error: (m) => app.log.error(m),
+    },
+  });
+  await jarvisHarness.start();
+  void jarvisHarness; // 接入在 route 里 expose
 
   // ========== Webhook 事件驱动 ==========
   // 1) 先建 hookBus（全局唯一事件总线）
@@ -862,6 +905,8 @@ export async function createAppServices(): Promise<AppServices> {
     webhookService,
     notesService,
     externalChat,
+    moodInferenceService,
+    jarvisHarness,
   });
 
   registerWebSocketRoute(app, {
@@ -884,6 +929,15 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
+  });
+
+  app.addHook("onClose", async () => {
+    try {
+      await moodInferenceService.flush();
+      app.log.info("[MoodInference] 持久化已 flush");
+    } catch (e) {
+      app.log.warn(`[MoodInference] shutdown flush failed: ${e}`);
+    }
   });
 
   return {
@@ -926,6 +980,8 @@ export async function createAppServices(): Promise<AppServices> {
     webhookService,
     notesService,
     externalChat,
+    moodInferenceService,
     morningBriefingScheduler,
+    jarvisHarness,
   };
 }

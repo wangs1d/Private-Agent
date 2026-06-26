@@ -1,6 +1,7 @@
 import { AnticipationEngineService } from "./anticipation-engine-service.js";
 import { LifeSignalHubService } from "./life-signal-hub-service.js";
 import type { AnticipationCandidate, LifeSignal } from "./life-signal-types.js";
+import type { MoodInference, MoodInferenceService } from "./mood-inference-service.js";
 import { ProactiveOutboundMessageService } from "./proactive-outbound-message-service.js";
 import { ProactiveContactPolicyService } from "./proactive-contact-policy.js";
 import type {
@@ -24,6 +25,7 @@ export class ProactiveLifeRuntimeService {
   private readonly lastNotificationAt = new Map<string, number>();
   private readonly recentSilenceAt = new Map<string, number>();
   private readonly contactPolicy = new ProactiveContactPolicyService();
+  private readonly knownSessionIds = new Set<string>();
 
   constructor(
     private readonly signalHub: LifeSignalHubService,
@@ -31,6 +33,7 @@ export class ProactiveLifeRuntimeService {
     private readonly outbound: ProactiveOutboundMessageService,
     private readonly personalization: UserPersonalizationService | null = null,
     private readonly isUserOnline: ((actorId: string) => boolean) | null = null,
+    private readonly moodInferenceService: MoodInferenceService | null = null,
   ) {}
 
   start(): void {
@@ -52,6 +55,7 @@ export class ProactiveLifeRuntimeService {
   }
 
   private async onSignal(signal: LifeSignal): Promise<void> {
+    this.trackSession(signal.actorId);
     const relationship = this.personalization?.getRelationshipState(signal.actorId) ?? null;
     const behavior = this.personalization?.getBehaviorSignals(signal.actorId) ?? null;
     const timeRhythm = this.personalization?.getTimeRhythmState(signal.actorId) ?? null;
@@ -135,6 +139,34 @@ export class ProactiveLifeRuntimeService {
       });
       this.lastNotificationAt.set(signal.actorId, Date.now());
     }
+
+    if (signal.kind === "mood") {
+      const inference = this.extractMoodInference(signal);
+      if (inference) {
+        await this.handleMoodInference(inference);
+      }
+    }
+  }
+
+  private extractMoodInference(signal: LifeSignal): MoodInference | null {
+    const metadata = signal.metadata as Record<string, unknown> | undefined;
+    const fromMetadata = metadata?.inference as MoodInference | undefined;
+    if (fromMetadata && typeof fromMetadata === "object" && typeof fromMetadata.sessionId === "string") {
+      return fromMetadata;
+    }
+    const metrics = signal.metrics;
+    if (metrics && typeof metrics.sentimentScore === "number" && typeof metrics.confidence === "number") {
+      return {
+        sessionId: signal.actorId,
+        sentimentScore: metrics.sentimentScore,
+        confidence: metrics.confidence,
+        emotionTags: Array.isArray(signal.tags) ? signal.tags : [],
+        source: "conversation",
+        rawSignals: {},
+        timestamp: signal.occurredAt,
+      };
+    }
+    return null;
   }
 
   // 质量驱动：warning 类信号不再受冷却时间和 interruptScore 阈值限制。
@@ -336,5 +368,66 @@ export class ProactiveLifeRuntimeService {
 
     const slopeTail = slopeScore != null ? `，斜率 ${slopeScore.toFixed(2)}` : "";
     return `${parts.join("，")}${slopeTail}。`;
+  }
+
+  private trackSession(sessionId: string): void {
+    this.knownSessionIds.add(sessionId);
+  }
+
+  private async handleMoodInference(inference: MoodInference): Promise<void> {
+    if (!this.moodInferenceService) return;
+    const sessionId = inference.sessionId;
+
+    const decision = this.moodInferenceService.decideCare(inference);
+    if (!decision?.shouldCare) return;
+
+    const reason: "negative" | "positive" = decision.reason === "positive" ? "positive" : "negative";
+    if (!this.moodInferenceService.shouldSendCare(sessionId, reason)) return;
+
+    if (this.isUserOnline && !this.isUserOnline(sessionId)) return;
+
+    if (reason === "positive") {
+      await this.outbound.send({
+        actorId: sessionId,
+        title: "为你开心",
+        text: this.composePositiveCareText(inference.emotionTags),
+        reason: "mood.positive",
+        channel: "websocket",
+        meta: {
+          moodSummary: {
+            sentimentScore: inference.sentimentScore,
+            emotionTags: inference.emotionTags,
+          },
+        },
+      });
+    } else {
+      await this.outbound.send({
+        actorId: sessionId,
+        title: "我关心你",
+        text: this.composeNegativeCareText(inference.emotionTags),
+        reason: "mood.negative",
+        channel: "websocket",
+        meta: {
+          moodSummary: {
+            sentimentScore: inference.sentimentScore,
+            emotionTags: inference.emotionTags,
+          },
+        },
+      });
+    }
+  }
+
+  private composeNegativeCareText(tags: string[]): string {
+    if (tags.length > 0) {
+      return `感觉你最近有点${tags.join("、")}，如果想聊点什么我一直在`;
+    }
+    return "感觉你状态不太好，记得照顾好自己，想聊随时找我";
+  }
+
+  private composePositiveCareText(tags: string[]): string {
+    if (tags.length > 0) {
+      return `看到你${tags.join("、")}，替你开心 ✨`;
+    }
+    return "看你状态不错，替你开心";
   }
 }
