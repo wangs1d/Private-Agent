@@ -130,6 +130,9 @@ import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-too
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
+import { MorningBriefingService } from "../services/morning-briefing-service.js";
+import { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
+import { getUserPreferences } from "../routes/http/user-preferences.js";
 import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
 import { embodimentAlert, embodimentThinking } from "../services/agent-embodiment.js";
@@ -559,6 +562,34 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     externalChat,
   );
+  const morningBriefingService = new MorningBriefingService({
+    weatherService,
+    weatherPrefsService,
+    scheduleTaskService,
+    notesService,
+  });
+
+  const morningBriefingScheduler = new MorningBriefingScheduler({
+    briefingService: morningBriefingService,
+    getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
+    onBriefingTriggered: async (sessionId, payload) => {
+      wsConnectionRegistry.trySend(
+        sessionId,
+        JSON.stringify({
+          type: ServerEventType.MorningBriefing,
+          payload: {
+            sessionId,
+            mode: payload.mode,
+            narrationText: payload.narrationText,
+            briefing: payload.briefing,
+          },
+        }),
+      );
+    },
+  });
+  morningBriefingScheduler.start();
+  app.log.info("[MorningBriefing] 调度器已启动");
+
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
@@ -895,5 +926,6 @@ export async function createAppServices(): Promise<AppServices> {
     webhookService,
     notesService,
     externalChat,
+    morningBriefingScheduler,
   };
 }

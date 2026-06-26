@@ -50,6 +50,9 @@ export {
 } from "./services/game-center-session.js";
 export { SocialFeedService } from "./services/social-feed-service.js";
 export type { SocialCommentRow, SocialMediaType, SocialPostRow, SocialReportRow } from "./services/social-feed-service.js";
+export { MusicRoomService } from "./services/music-room-service.js";
+export type { MusicTrack, MusicRoomSummary } from "./services/music-room-service.js";
+export { registerWorldMusicRoutes } from "./routes/world-music.js";
 export {
   createSocialMediaReadStream,
   defaultSocialMediaRoot,

@@ -54,12 +54,21 @@ export type MessageBatchConfig = {
   enabled: boolean;
 };
 
+/**
+ * 「分阶段异步对话交互」即时确认应答开关。
+ * 默认开启；设 `CHAT_INTERIM_ACK_ENABLED=0` 可关闭。
+ */
+export type InterimAckConfig = {
+  enabled: boolean;
+};
+
 export type AgentRuntimeConfig = {
   masterDelegation: MasterDelegationConfig;
   planExecute: PlanExecuteConfig;
   memoryPrompt: MemoryPromptConfig;
   quota: QuotaConfig;
   messageBatch: MessageBatchConfig;
+  interimAck: InterimAckConfig;
 };
 
 function loadMasterDelegationConfig(): MasterDelegationConfig {
@@ -150,6 +159,14 @@ function loadMessageBatchConfig(): MessageBatchConfig {
   };
 }
 
+function loadInterimAckConfig(): InterimAckConfig {
+  const raw = process.env.CHAT_INTERIM_ACK_ENABLED;
+  return {
+    // 默认开启；显式置 0/off/false/no 时关闭
+    enabled: raw === undefined ? true : envTruthy(raw),
+  };
+}
+
 export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
   return {
     masterDelegation: loadMasterDelegationConfig(),
@@ -157,6 +174,7 @@ export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
     memoryPrompt: loadMemoryPromptConfig(),
     quota: loadQuotaConfig(),
     messageBatch: loadMessageBatchConfig(),
+    interimAck: loadInterimAckConfig(),
   };
 }
 
@@ -191,6 +209,7 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
     `taskContext=${config.memoryPrompt.taskContextInPrompt ? "on" : "off"}`,
     config.quota.unitsPerModelCall > 0 ? `quotaUnitsPerCall=${config.quota.unitsPerModelCall}` : null,
     `messageBatch=${mb.enabled ? "on(until-processing-ui-off)" : "off"}`,
+    `interimAck=${config.interimAck.enabled ? "on" : "off"}`,
   ]
     .filter(Boolean)
     .join(", ");

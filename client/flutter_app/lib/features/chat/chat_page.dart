@@ -28,6 +28,9 @@ class ChatPage extends StatefulWidget {
     this.onEnterVoiceMode,
     this.isAgentProcessing = false,
     this.agentStatusLine,
+    /// 「分阶段异步对话交互」阶段一文本：在多步/工具型请求开始时显示的
+    /// 即时确认应答（如「好的，让我查一下…」），real chunk 抵达后由父组件清空。
+    this.interimAckText,
     this.onOpenGomoku,
     this.fullComputerAccessEnabled = false,
     this.onToggleFullComputerAccess,
@@ -58,6 +61,8 @@ class ChatPage extends StatefulWidget {
   final bool isAgentProcessing;
   /// `chat.agent_status` 推送的口语化进度，优先于固定「思考中」
   final String? agentStatusLine;
+  /// `chat.assistant_interim` 推送的即时确认应答（生命周期更短：real chunk 一到就清空）
+  final String? interimAckText;
   /// 在 App 内打开五子棋对局（tableId 或 playUrl）
   final void Function(String playUrlOrTableId)? onOpenGomoku;
   /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
@@ -635,7 +640,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     return "${formatTime(end)} - ${formatTime(start)}";
   }
 
-  /// 处理中气泡文案：`agent_status` > 历史流程提示 > 默认
+  /// 处理中气泡文案：`agent_status` > 即时确认应答（interim ack）> 历史流程提示 > 默认
   String _processingStatusText([ChatMessage? progressMessage]) {
     final String? live = widget.agentStatusLine?.trim();
     if (live != null && live.isNotEmpty) {
@@ -646,6 +651,12 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         return "Agent 正在收尾…";
       }
       return live;
+    }
+    // 「分阶段异步对话交互」阶段一：实时 agent_status 还没到时，
+    // 先用服务端推送的即时确认应答顶上（如「好的，让我查一下…」）。
+    final String? interim = widget.interimAckText?.trim();
+    if (interim != null && interim.isNotEmpty) {
+      return interim;
     }
     final String? progress = progressMessage?.text.trim();
     if (progress != null && progress.isNotEmpty) return progress;

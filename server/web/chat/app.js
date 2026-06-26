@@ -930,6 +930,55 @@ function handleWs(msg) {
     return;
   }
 
+  // 「分阶段异步对话交互」阶段一：即时确认应答。
+  // 在多步/工具型请求开始时由服务端推送，作为 progress-bubble 的临时占位。
+  // 后续 chat.agent_status 会继续追加步骤；chat.assistant_chunk/done 抵达时
+  // 现有逻辑会自动让位/清理该 bubble。
+  if (type === "chat.assistant_interim") {
+    const line = String(p.text ?? "").trim();
+    if (!line) return;
+    const traceId = String(p.traceId ?? "");
+    if (!traceId) return;
+    let prog = document.getElementById("progress-bubble");
+    if (!prog) {
+      prog = appendBubble("progress", "", "progress");
+      prog.id = "progress-bubble";
+      prog._steps = [];
+      prog._traceId = traceId;
+    } else if (prog._traceId && prog._traceId !== traceId) {
+      // 跨轮次的迟到的 interim：清空旧 steps，避免误用
+      prog._steps = [];
+      prog._traceId = traceId;
+    } else {
+      prog._traceId = traceId;
+    }
+    const steps = prog._steps || [];
+    // 防止重复推同一条
+    if (steps[steps.length - 1] === line) {
+      // already the latest; nothing to do
+    } else if (steps.includes(line)) {
+      // 把这条线移到最后（最新的进度置顶）
+      const idx = steps.indexOf(line);
+      steps.splice(idx, 1);
+      steps.push(line);
+      prog._steps = steps;
+    } else {
+      steps.push(line);
+      prog._steps = steps;
+    }
+    prog.innerHTML = steps
+      .map((s, i) => {
+        const isLast = i === steps.length - 1;
+        const prefix = isLast ? '<span class="prog-active">▸</span>' : '<span class="prog-done">✓</span>';
+        return `<div class="prog-step${isLast ? ' prog-step-current' : ''}">${prefix} ${escapeHtml(s)}</div>`;
+      })
+      .join("");
+    scrollToLatest();
+    syncAgentProcessingUi(true);
+    patchAvatar({ mood: "thinking", caption: line, energy: 0.6 });
+    return;
+  }
+
   if (type === "tool.call") {
     const line = String(p.userStatusLine ?? p.assistantPreamble ?? p.toolName ?? "").trim();
     if (line) {

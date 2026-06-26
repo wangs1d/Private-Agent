@@ -30,6 +30,8 @@ import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
+import { registerMorningBriefingRoutes } from "./morning-briefing.js";
+import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerTranslateRoutes } from "./translate.js";
 import { registerNotesRoutes } from "./notes.js";
@@ -82,4 +84,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   if (deps.webhookService && deps.hookBus) {
     registerWebhookRoutes(app, deps.webhookService, deps.hookBus);
   }
+  registerMorningBriefingRoutes(app, {
+    weatherService: deps.weatherService,
+    weatherPrefsService: deps.weatherPrefsService,
+    scheduleTaskService: deps.scheduleTaskService,
+    notesService: deps.notesService,
+  });
+  registerUserPreferencesRoutes(app);
 }

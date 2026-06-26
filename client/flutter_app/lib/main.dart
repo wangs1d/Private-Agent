@@ -143,6 +143,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 服务端`chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
 
+  /// 服务端`chat.assistant_interim` 推送的即时确认应答（仅在首条 chunk 之前展示）。
+  /// 与 `_agentStatusLine` 并存但生命周期更短：real chunk 一到立即让位。
+  String? _interimAckText;
+
   /// 与 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
 
@@ -579,6 +583,22 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
           _updateAgentStatusLine(line, ensureProcessing: true);
         }
+        if (type == "chat.assistant_interim") {
+          // 「分阶段异步对话交互」阶段一：服务端在多步/工具型请求开始时
+          // 推送的即时确认应答。把该短句优先展示给用户，让用户"先收到反馈"，
+          // real chunk 一到就自然让位（见 _enqueueAssistantChunk / _flushAssistantChunks）。
+          final String? interimTraceId = payload["traceId"]?.toString();
+          final String? activeTraceId = _pendingAgentUserMessageId;
+          if (interimTraceId == null ||
+              interimTraceId.isEmpty ||
+              activeTraceId == null ||
+              interimTraceId != activeTraceId) {
+            return;
+          }
+          final String text = payload["text"]?.toString().trim() ?? "";
+          if (text.isEmpty) return;
+          _setInterimAck(text);
+        }
         if (type == "chat.assistant_chunk") {
           _resetAgentReplyWatchdog();
           // 丢弃「已结束轮次」的迟到 chunk：避免在 chat.assistant_done 之后
@@ -591,6 +611,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               !chunkAssistantMessageId.endsWith(activeTraceId)) {
             return;
           }
+          // real chunk 抵达：让位即时确认应答（避免同框出现"已收到"和真实正文）
+          _clearInterimAck();
           if (!_isAgentProcessing) {
             setState(() => _isAgentProcessing = true);
             _notifyAgentProcessingUi(true);
@@ -1087,16 +1109,41 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _clearAgentProcessingState() {
     if (!_isAgentProcessing &&
         _agentStatusLine == null &&
+        _interimAckText == null &&
         !_subAgentDelegationActive) {
       return;
     }
     setState(() {
       _isAgentProcessing = false;
       _agentStatusLine = null;
+      _interimAckText = null;
       _subAgentDelegationActive = false;
     });
     _notifyAgentProcessingUi(false);
     unawaited(_syncBackgroundTasksBadge());
+  }
+
+  /// 「分阶段异步对话交互」阶段一：设置/清除即时确认应答。
+  /// 行为与 _updateAgentStatusLine 类似，但走独立字段以便 UI 单独控制样式。
+  void _setInterimAck(String text) {
+    final String trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    _resetAgentReplyWatchdog();
+    if (_interimAckText == trimmed && _isAgentProcessing) return;
+    setState(() {
+      _interimAckText = trimmed;
+      if (!_isAgentProcessing) {
+        _isAgentProcessing = true;
+        _notifyAgentProcessingUi(true);
+      }
+    });
+  }
+
+  void _clearInterimAck() {
+    if (_interimAckText == null) return;
+    setState(() {
+      _interimAckText = null;
+    });
   }
 
   /// 与聊天页「处理中」气泡同步；active=false 时服务端锁定本轮不再合并消息）
@@ -2427,6 +2474,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onClearGalleryImages: _clearPendingGalleryFrames,
       isAgentProcessing: _isAgentProcessing,
       agentStatusLine: _agentStatusLine,
+      interimAckText: _interimAckText,
       onOpenGomoku: _openGomokuGame,
       fullComputerAccessEnabled: _fullComputerAccessEnabled,
       isActive: _tabIndex == 0,

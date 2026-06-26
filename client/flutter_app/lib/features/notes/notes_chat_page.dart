@@ -95,6 +95,13 @@ class _NotesChatPageState extends State<NotesChatPage> {
       case "connection_error":
         setState(() => _status = "连接失败：${payload["message"] ?? ""}");
         return;
+      case "chat.assistant_interim":
+        // 「分阶段异步对话交互」阶段一：即时确认应答。real chunk 一到就让位。
+        final String text = payload["text"]?.toString().trim() ?? "";
+        if (text.isNotEmpty) {
+          setState(() => _status = text);
+        }
+        return;
       case "chat.agent_status":
         setState(() => _status = payload["message"]?.toString() ?? "处理中…");
         return;
@@ -113,6 +120,10 @@ class _NotesChatPageState extends State<NotesChatPage> {
             payload["text"]?.toString() ??
             "";
         _appendOrUpdateAssistant(id, delta);
+        // real chunk 抵达：状态行让位，让用户聚焦到真实回复上
+        if (_status.isNotEmpty) {
+          setState(() => _status = "");
+        }
         return;
       case "chat.assistant_done":
         final String id = payload["messageId"]?.toString() ??

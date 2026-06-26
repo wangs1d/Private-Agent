@@ -24,9 +24,11 @@ import {
   DoudizhuService,
   GomokuService,
   loadPersistedCommunitySkills,
+  MusicRoomService,
   reconcileWorldA2aEscrows,
   registerWorldFreeMarketRoutes,
   registerWorldFreeMarketTools,
+  registerWorldMusicRoutes,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
   registerWorldRoutes,
@@ -78,7 +80,9 @@ worldService.onWorldRevision((ev: WorldRevisionEvent) => {
     ev.partitionId,
     JSON.stringify({
       type: AgentWorldServerEventType.WorldPartitionDelta,
-      payload: { partitionId: ev.partitionId, revision: ev.revision, state: ev.state },
+      payload: ev.changes
+        ? { partitionId: ev.partitionId, revision: ev.revision, changes: ev.changes }
+        : { partitionId: ev.partitionId, revision: ev.revision, state: ev.state },
     }),
   );
 });
@@ -91,6 +95,8 @@ const gomokuService = new GomokuService(worldService);
 gomokuService.attachWebSocketRegistry(wsConnectionRegistry);
 const socialFeedService = new SocialFeedService(worldService);
 socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
+const musicRoomService = new MusicRoomService(worldService);
+musicRoomService.attachWebSocketRegistry(wsConnectionRegistry);
 registerWorldOpenRegistryTools(toolRegistry, worldService);
 registerWorldRoomTools(toolRegistry, worldService);
 registerWorldSocialTools(toolRegistry, socialFeedService);
@@ -110,12 +116,14 @@ const routeDeps = {
 registerWorldRoutes(app, routeDeps);
 registerWorldFreeMarketRoutes(app, routeDeps);
 registerWorldSocialRoutes(app, routeDeps);
+registerWorldMusicRoutes(app, musicRoomService);
 registerStandaloneWorldWebSocket(app, {
   worldService,
   doudizhuService,
   zhaJinHuaService,
   gomokuService,
   socialFeedService,
+  musicRoomService,
   wsConnectionRegistry,
   worldPartitionWsRegistry,
   partitionPairing: standalonePairing,

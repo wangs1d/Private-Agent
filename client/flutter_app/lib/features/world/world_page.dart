@@ -3,6 +3,7 @@ import "package:flutter/material.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
+import "music_room_page.dart";
 import "social_feed_page.dart";
 import "shop_page.dart";
 import "world_hub_page.dart";
@@ -38,6 +39,9 @@ class WorldPage extends StatelessWidget {
             break;
           case "/social":
             child = SocialFeedPage(sessionId: sessionId, api: api, ws: ws);
+            break;
+          case "/music":
+            child = MusicRoomPage(sessionId: sessionId, api: api, ws: ws);
             break;
           default:
             child = MainPanel(

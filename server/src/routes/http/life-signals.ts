@@ -2,6 +2,17 @@ import type { FastifyInstance } from "fastify";
 import type { HttpRouteDeps } from "./types.js";
 import type { LifeSignal } from "../../services/life-signal-types.js";
 
+/** 心情打卡条目（内存存储，按 sessionId 分组）。 */
+type MoodEntry = {
+  sessionId: string;
+  moodLevel: number;
+  note?: string;
+  createdAt: string;
+};
+
+/** 模块级内存存储：sessionId -> 该会话的心情打卡列表（按时间正序）。 */
+const moodStore = new Map<string, MoodEntry[]>();
+
 function normalizeSignal(body: Record<string, unknown>): LifeSignal {
   const actorId = String(body.actorId ?? body.sessionId ?? "").trim();
   if (!actorId) throw new Error("actorId is required");
@@ -64,5 +75,48 @@ export function registerLifeSignalRoutes(app: FastifyInstance, deps: HttpRouteDe
       signals: deps.proactiveLifeRuntimeService?.recentSignals(actorId, limit) ?? [],
       candidates: deps.proactiveLifeRuntimeService?.recentCandidates(actorId, limit) ?? [],
     });
+  });
+
+  app.post("/api/life-signals/mood-checkin", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      sessionId?: unknown;
+      moodLevel?: unknown;
+      note?: unknown;
+    };
+    const sessionId = String(body.sessionId ?? "").trim();
+    if (!sessionId) {
+      return reply.code(400).send({ ok: false, error: "sessionId required" });
+    }
+    const moodLevel = Number(body.moodLevel);
+    if (!Number.isInteger(moodLevel) || moodLevel < 1 || moodLevel > 5) {
+      return reply.code(400).send({ ok: false, error: "moodLevel must be an integer between 1 and 5" });
+    }
+    const noteRaw = body.note;
+    const note =
+      typeof noteRaw === "string" && noteRaw.trim() ? noteRaw.trim() : undefined;
+    const entry: MoodEntry = {
+      sessionId,
+      moodLevel,
+      note,
+      createdAt: new Date().toISOString(),
+    };
+    const list = moodStore.get(sessionId);
+    if (list) list.push(entry);
+    else moodStore.set(sessionId, [entry]);
+    return reply.code(201).send({ ok: true, entry });
+  });
+
+  app.get("/api/life-signals/mood-history", async (request, reply) => {
+    const query = request.query as { sessionId?: string; limit?: string };
+    const sessionId = String(query.sessionId ?? "").trim();
+    if (!sessionId) {
+      return reply.code(400).send({ ok: false, error: "sessionId required" });
+    }
+    const limit = Math.max(1, Math.min(200, Number(query.limit ?? "30") || 30));
+    const list = moodStore.get(sessionId) ?? [];
+    const entries = [...list]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+    return reply.send({ ok: true, entries, count: entries.length });
   });
 }

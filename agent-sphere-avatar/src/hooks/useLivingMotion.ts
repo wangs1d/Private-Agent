@@ -91,6 +91,12 @@ export function useLivingMotion({
   const verticalBiasRef = useRef(0);
   /** 360° 旋转累计（每次旋转时不重置，叠在 rotRef 上） */
   const yawAccumRef = useRef(0);
+  /** 微转头目标角度（idle 时小幅随机偏转） */
+  const microTurnRef = useRef(0);
+  const nextMicroTurnAtRef = useRef(0);
+  /** "眨眼" squash 强度（0..1，快速衰减） */
+  const blinkRef = useRef(0);
+  const nextBlinkAtRef = useRef(0);
 
   const refreshBounds = useCallback(() => {
     const margin = 20;
@@ -479,7 +485,22 @@ export function useLivingMotion({
         }
 
         const speed = Math.sqrt(vel.vx * vel.vx + vel.vy * vel.vy);
-        const tiltTarget = speed > 2 ? clamp(vel.vx / Math.max(speed, 1) * 8, -8, 8) : 0;
+        const idleish = speed <= 2 && !excited;
+
+        // 微转头：idle 时每隔几秒小幅随机偏转（±3°）
+        if (idleish && now >= nextMicroTurnAtRef.current) {
+          microTurnRef.current = (Math.random() - 0.5) * 6;
+          nextMicroTurnAtRef.current = now + 2000 + Math.random() * 3000;
+        }
+        // 变频"眨眼"：idle 时随机间隔触发一次快速 squash
+        if (idleish && now >= nextBlinkAtRef.current) {
+          blinkRef.current = 1;
+          nextBlinkAtRef.current = now + 3000 + Math.random() * 4000;
+        }
+        blinkRef.current = Math.max(0, blinkRef.current - dt * 6);
+
+        const moveTilt = speed > 2 ? clamp(vel.vx / Math.max(speed, 1) * 8, -8, 8) : 0;
+        const tiltTarget = moveTilt + (idleish ? microTurnRef.current : 0);
         // 360° 旋转时 rot 可以累加超过 180，这里只用于 tilt 小幅倾斜
         rotRef.current = lerp(rotRef.current, tiltTarget, 0.06 + speed * 0.004);
 
@@ -489,12 +510,16 @@ export function useLivingMotion({
           ? Math.sin(tSec * 22) * 0.06 * shakeAmp + Math.cos(tSec * 17) * 0.04 * shakeAmp
           : 0;
 
+        // 缓慢"呼吸"节奏（idle 时小幅起伏）+ 眨眼 squash
+        const breathe = Math.sin(now / 1400) * 0.5 + Math.sin(now / 2600) * 0.25;
         scaleRef.current =
           1 +
           impulseRef.current * 0.04 +
           (behavior === "pausing" ? breath * 0.006 : 0) +
           (excited ? Math.sin(tSec * 14) * 0.018 : 0) +
-          (shakeAmp > 0 ? Math.sin(tSec * 26) * 0.025 * shakeAmp : 0);
+          (shakeAmp > 0 ? Math.sin(tSec * 26) * 0.025 * shakeAmp : 0) +
+          (idleish ? breathe * 0.004 : 0) -
+          blinkRef.current * 0.03;
 
         // 晃动时给旋转叠加额外抖动（保留 360° yaw 累计）
         userRotRef.current += shakeWobble;

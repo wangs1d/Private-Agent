@@ -27,6 +27,17 @@ export const AgentWorldClientEventType = {
   WorldSocialLikeToggle: "world.social.like_toggle",
   WorldSocialPostDelete: "world.social.post_delete",
   WorldSocialReport: "world.social.report",
+  /** 一起听音乐：订阅音乐房状态 */
+  WorldMusicSubscribe: "world.music.subscribe",
+  WorldMusicUnsubscribe: "world.music.unsubscribe",
+  /** 播放指定曲目 */
+  WorldMusicPlay: "world.music.play",
+  /** 暂停 */
+  WorldMusicPause: "world.music.pause",
+  /** 下一首 */
+  WorldMusicNext: "world.music.next",
+  /** 进度跳转 */
+  WorldMusicSeek: "world.music.seek",
 } as const;
 
 /** 服务端 → 客户端 */
@@ -45,4 +56,6 @@ export const AgentWorldServerEventType = {
   WorldGomokuBanter: "world.gomoku.banter",
   /** 当前连接可见的动态时间线（含评论、点赞数；当前会话所属 Agent 的帖子排在最前）。 */
   WorldSocialFeedSnapshot: "world.social.feed_snapshot",
+  /** 一起听音乐：音乐房状态快照（currentTrack, isPlaying, positionSec, playlist, participants） */
+  WorldMusicSnapshot: "world.music.snapshot",
 } as const;
