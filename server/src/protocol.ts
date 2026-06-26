@@ -99,6 +99,8 @@ export const ServerEventType = {
   ErrorEvent: "error.event",
   /** 晨间简报：调度器到点触发后推送 */
   MorningBriefing: "morning.briefing",
+  /** Agent 推断的用户心情变化（实时通知） */
+  MoodInferred: "mood.inferred",
   /** 心跳响应 */
   Pong: "pong",
 } as const;

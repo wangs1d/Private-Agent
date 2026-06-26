@@ -29,8 +29,10 @@ import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerDownloadRoutes } from "./downloads.js";
 import { registerLifeSignalRoutes } from "./life-signals.js";
+import { registerMoodInferenceRoutes } from "./mood-inferences.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
+import { registerJarvisRoutes } from "./jarvis.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerTranslateRoutes } from "./translate.js";
@@ -72,6 +74,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerDownloadRoutes(app);
   registerToolSearchAdminRoutes(app);
   registerLifeSignalRoutes(app, deps);
+  if (deps.moodInferenceService) {
+    registerMoodInferenceRoutes(app, { moodInferenceService: deps.moodInferenceService });
+  }
   registerMarketSignalRoutes(app, deps);
   registerTranslateRoutes(app, deps);
   if (deps.notesService) {
@@ -91,4 +96,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     notesService: deps.notesService,
   });
   registerUserPreferencesRoutes(app);
+  if (deps.jarvisHarness) {
+    registerJarvisRoutes(app, { jarvisHarness: deps.jarvisHarness });
+  }
 }
