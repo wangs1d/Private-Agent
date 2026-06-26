@@ -21,6 +21,7 @@ import {
 } from "../services/world-partition-ws-registry.js";
 import type { DoudizhuService } from "../services/doudizhu-service.js";
 import type { GomokuService } from "../services/gomoku-service.js";
+import type { MusicRoomService } from "../services/music-room-service.js";
 import type { SocialFeedService } from "../services/social-feed-service.js";
 import type { WorldService } from "../services/world-service.js";
 import type { ZhaJinHuaService } from "../services/zhajinhua-service.js";
@@ -35,6 +36,7 @@ export type StandaloneWsDeps = {
   zhaJinHuaService: ZhaJinHuaService;
   gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
+  musicRoomService: MusicRoomService;
   wsConnectionRegistry: WsConnectionRegistry;
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
   /** standalone 无配对持久化时可传 `{ arePaired: () => false }`，仅允许订阅本人分区。 */
@@ -52,6 +54,7 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
     zhaJinHuaService,
     gomokuService,
     socialFeedService,
+    musicRoomService,
     wsConnectionRegistry,
     worldPartitionWsRegistry,
     partitionPairing,
@@ -94,6 +97,11 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
             payload: { code: "BAD_JSON", message: "无法解析事件 JSON" },
           }),
         );
+        return;
+      }
+
+      if (event.type === "ping") {
+        socket.send(JSON.stringify({ type: "pong" }));
         return;
       }
 
@@ -517,13 +525,166 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
         return;
       }
 
+      if (event.type === AgentWorldClientEventType.WorldMusicSubscribe) {
+        if (!ensureWorldRegistered()) return;
+        const payload = event.payload as { roomId?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        const r = musicRoomService.watchRoom(roomId, boundSessionId);
+        if (!r.ok) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "MUSIC_SUBSCRIBE_FAILED", message: r.reason },
+            }),
+          );
+        }
+        return;
+      }
+
+      if (event.type === AgentWorldClientEventType.WorldMusicUnsubscribe) {
+        const payload = event.payload as { roomId?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        musicRoomService.unwatchRoom(roomId, boundSessionId);
+        return;
+      }
+
+      if (event.type === AgentWorldClientEventType.WorldMusicPlay) {
+        if (!ensureWorldRegistered()) return;
+        const payload = event.payload as { roomId?: unknown; trackId?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        const trackId = typeof payload?.trackId === "string" ? payload.trackId : undefined;
+        const r = musicRoomService.play(roomId, boundSessionId, trackId);
+        if (!r.ok) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "MUSIC_PLAY_FAILED", message: r.reason },
+            }),
+          );
+        }
+        return;
+      }
+
+      if (event.type === AgentWorldClientEventType.WorldMusicPause) {
+        if (!ensureWorldRegistered()) return;
+        const payload = event.payload as { roomId?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        const r = musicRoomService.pause(roomId, boundSessionId);
+        if (!r.ok) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "MUSIC_PAUSE_FAILED", message: r.reason },
+            }),
+          );
+        }
+        return;
+      }
+
+      if (event.type === AgentWorldClientEventType.WorldMusicNext) {
+        if (!ensureWorldRegistered()) return;
+        const payload = event.payload as { roomId?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        const r = musicRoomService.next(roomId, boundSessionId);
+        if (!r.ok) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "MUSIC_NEXT_FAILED", message: r.reason },
+            }),
+          );
+        }
+        return;
+      }
+
+      if (event.type === AgentWorldClientEventType.WorldMusicSeek) {
+        if (!ensureWorldRegistered()) return;
+        const payload = event.payload as { roomId?: unknown; positionSec?: unknown } | undefined;
+        const roomId = payload?.roomId;
+        if (typeof roomId !== "string" || roomId.length === 0) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.roomId 必填" },
+            }),
+          );
+          return;
+        }
+        const positionSec =
+          typeof payload?.positionSec === "number" ? payload.positionSec : Number(payload?.positionSec);
+        if (!Number.isFinite(positionSec)) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "INVALID_MUSIC_EVENT", message: "payload.positionSec 必须为数字" },
+            }),
+          );
+          return;
+        }
+        const r = musicRoomService.seek(roomId, boundSessionId, positionSec);
+        if (!r.ok) {
+          socket.send(
+            JSON.stringify({
+              type: ServerErrorEvent,
+              payload: { code: "MUSIC_SEEK_FAILED", message: r.reason },
+            }),
+          );
+        }
+        return;
+      }
+
       socket.send(
         JSON.stringify({
           type: ServerErrorEvent,
           payload: {
             code: "UNSUPPORTED_IN_STANDALONE",
             message:
-              "本进程仅支持 session.init、world.partition.*、world.doudizhu.*、world.zhajinhua.*、world.social.*；聊天/钱包等请使用完整宿主。",
+              "本进程仅支持 session.init、world.partition.*、world.doudizhu.*、world.zhajinhua.*、world.social.*、world.music.*；聊天/钱包等请使用完整宿主。",
           },
         }),
       );

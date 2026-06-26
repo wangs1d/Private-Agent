@@ -39,6 +39,7 @@ import type { ProactiveLifeRuntimeService } from "../services/proactive-life-run
 import type { HookBus } from "../services/hooks/index.js";
 import type { WebhookService } from "../services/webhook/index.js";
 import type { NotesService } from "../services/notes-service.js";
+import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 
 export type AppServices = {
@@ -81,6 +82,7 @@ export type AppServices = {
   hookBus: HookBus;
   webhookService: WebhookService;
   notesService: NotesService;
+  morningBriefingScheduler: MorningBriefingScheduler;
   externalChat: ExternalChatProvider | null;
 };
 

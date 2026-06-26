@@ -33,4 +33,9 @@ export class WsConnectionRegistry {
     socket.send(data);
     return true;
   }
+
+  /** 心跳响应：向会话对应的 socket 发送 { type: "pong" }，返回是否成功送达。 */
+  sendPong(sessionId: string): boolean {
+    return this.trySend(sessionId, JSON.stringify({ type: "pong" }));
+  }
 }

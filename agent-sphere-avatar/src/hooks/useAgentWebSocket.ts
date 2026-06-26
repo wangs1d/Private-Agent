@@ -11,6 +11,8 @@ import { DEFAULT_AGENT_STATE } from "../types/agent";
 
 const BASE_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30000;
+const HEARTBEAT_INTERVAL_MS = 25000;
+const HEARTBEAT_TIMEOUT_MS = 10000;
 
 function resolveWsUrl(explicit?: string): string {
   if (explicit?.trim()) return explicit.trim();
@@ -55,6 +57,8 @@ export function useAgentWebSocket(
   const [reconnecting, setReconnecting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const heartbeatIntervalRef = useRef<number | null>(null);
+  const heartbeatTimeoutRef = useRef<number | null>(null);
   const attemptRef = useRef(0);
   const applyRef = useRef(apply);
   const sessionRef = useRef(resolveSessionId(sessionId));
@@ -84,6 +88,17 @@ export function useAgentWebSocket(
       }
     };
 
+    const clearHeartbeatTimers = () => {
+      if (heartbeatIntervalRef.current != null) {
+        window.clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
+      if (heartbeatTimeoutRef.current != null) {
+        window.clearTimeout(heartbeatTimeoutRef.current);
+        heartbeatTimeoutRef.current = null;
+      }
+    };
+
     const scheduleReconnect = () => {
       if (disposed) return;
       clearReconnectTimer();
@@ -94,6 +109,24 @@ export function useAgentWebSocket(
         reconnectRef.current = null;
         connect();
       }, delay);
+    };
+
+    const startHeartbeat = (ws: WebSocket) => {
+      clearHeartbeatTimers();
+      const sendPing = () => {
+        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "ping" }));
+        }
+        if (heartbeatTimeoutRef.current != null) {
+          window.clearTimeout(heartbeatTimeoutRef.current);
+        }
+        heartbeatTimeoutRef.current = window.setTimeout(() => {
+          heartbeatTimeoutRef.current = null;
+          scheduleReconnect();
+        }, HEARTBEAT_TIMEOUT_MS);
+      };
+      sendPing();
+      heartbeatIntervalRef.current = window.setInterval(sendPing, HEARTBEAT_INTERVAL_MS);
     };
 
     const connect = () => {
@@ -122,11 +155,13 @@ export function useAgentWebSocket(
         setConnected(true);
         ws.send(JSON.stringify({ type: "session.init", payload: { sessionId: sid, userId: sid } }));
         onConnected?.();
+        startHeartbeat(ws);
       });
 
       ws.addEventListener("close", () => {
         if (disposed) return;
         if (wsRef.current === ws) wsRef.current = null;
+        clearHeartbeatTimers();
         setConnected(false);
         onDisconnected?.();
         scheduleReconnect();
@@ -143,6 +178,14 @@ export function useAgentWebSocket(
         try {
           msg = JSON.parse(String(ev.data));
         } catch {
+          return;
+        }
+
+        if (msg.type === "pong") {
+          if (heartbeatTimeoutRef.current != null) {
+            window.clearTimeout(heartbeatTimeoutRef.current);
+            heartbeatTimeoutRef.current = null;
+          }
           return;
         }
 
@@ -176,6 +219,7 @@ export function useAgentWebSocket(
     return () => {
       disposed = true;
       clearReconnectTimer();
+      clearHeartbeatTimers();
       setReconnecting(false);
       const ws = wsRef.current;
       wsRef.current = null;

@@ -57,6 +57,8 @@ export type WorldRevisionEvent = {
   sessionId: string;
   revision: number;
   state: WorldState;
+  /** 增量变更字段；存在时订阅者可只广播 delta，缺省时广播全量 state。 */
+  changes?: Partial<WorldState>;
 };
 
 export type CreditAuditEntry = {
@@ -211,6 +213,8 @@ export class WorldService {
   private readonly states = new Map<string, WorldState>();
   private readonly agentRegistration = new WorldAgentRegistrationService();
   private readonly revisionSubscribers = new Set<(e: WorldRevisionEvent) => void>();
+  /** 最近一次已广播的快照（按 roomId），用于计算增量 diff。 */
+  private readonly lastEmittedSnapshot = new Map<string, WorldState>();
   private evolutionHooks: Partial<WorldServiceEvolutionHooks> = {};
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
@@ -268,13 +272,14 @@ export class WorldService {
     return () => this.revisionSubscribers.delete(listener);
   }
 
-  private emitWorldRevision(roomId: string, state: WorldState): void {
+  private emitWorldRevision(roomId: string, state: WorldState, changes?: Partial<WorldState>): void {
     const snapshot: WorldState = { ...state, ownedSkillIds: [...state.ownedSkillIds], creditAuditTrail: [...state.creditAuditTrail] };
     const ev: WorldRevisionEvent = {
       partitionId: roomId,
       sessionId: state.ownerSessionId,
       revision: snapshot.revision,
       state: snapshot,
+      changes,
     };
     for (const cb of this.revisionSubscribers) {
       try {
@@ -283,15 +288,36 @@ export class WorldService {
         console.error("[WorldService] revision subscriber error", e);
       }
     }
+    this.lastEmittedSnapshot.set(roomId, snapshot);
   }
 
   /** 可变字段变更后调用：revision++、落盘、通知订阅者。 */
   markWorldMutated(roomId: string): void {
     const s = this.states.get(roomId);
     if (!s) return;
+    // 标记前保存旧快照（最近一次广播的状态），用于计算增量 diff
+    const prev = this.lastEmittedSnapshot.get(roomId);
     s.revision = (s.revision ?? 0) + 1;
     this.schedulePersist();
-    this.emitWorldRevision(roomId, s);
+    const changes = this.computeChanges(prev, s);
+    this.emitWorldRevision(roomId, s, changes);
+  }
+
+  /** 比较最近一次广播快照与当前状态，返回变更字段（缺省表示无差异或首次广播）。 */
+  private computeChanges(
+    prev: WorldState | undefined,
+    next: WorldState,
+  ): Partial<WorldState> | undefined {
+    if (!prev) return undefined;
+    const changes: Partial<WorldState> = {};
+    let hasChange = false;
+    for (const key of Object.keys(next) as Array<keyof WorldState>) {
+      if (JSON.stringify(prev[key]) !== JSON.stringify(next[key])) {
+        (changes as Record<string, unknown>)[key] = next[key];
+        hasChange = true;
+      }
+    }
+    return hasChange ? changes : undefined;
   }
 
   private checkExpectedRevision(roomId: string, expected: number | undefined): void {
@@ -587,6 +613,20 @@ export class WorldService {
     this.assertRoomWritable(actor, s.roomId);
     this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
     s.sceneId = "social";
+    this.markWorldMutated(s.roomId);
+    return s;
+  }
+
+  /** 进入一起听音乐场景。 */
+  visitMusicRoom(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
+    const s =
+      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
+    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
+    const actor = actorSessionId ?? s.ownerSessionId;
+    this.assertAgentWorldRegistered(actor);
+    this.assertRoomWritable(actor, s.roomId);
+    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
+    s.sceneId = "music_room";
     this.markWorldMutated(s.roomId);
     return s;
   }

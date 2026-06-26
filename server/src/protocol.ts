@@ -35,11 +35,20 @@ export const ClientEventType = {
   AgentEmbodimentState: "agent.embodiment.state",
   /** 用户对主动联系的反馈，写回用户理解与联系偏好 */
   CompanionContactFeedback: "companion.contact_feedback",
+  /** 心跳检测 */
+  Ping: "ping",
 } as const;
 
 export const ServerEventType = {
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
+  /**
+   * 即时确认应答：在多步/工具型请求开始处理时立即推送一段短文本，
+   * 缓解用户等待焦虑。messageId 使用 `interim-${traceId}`，与正式回复的
+   * `assistant-${traceId}` 解耦，客户端可独立渲染为"待办气泡"，在收到
+   * 首条 chat.assistant_chunk 时自动让位。
+   */
+  ChatAssistantInterim: "chat.assistant_interim",
   /** 模型生成的口语化进度/状态行（如委派子 Agent），供客户端替代「思考中」 */
   ChatAgentStatus: "chat.agent_status",
   /** 日程/提醒任务已创建或更新，客户端应刷新日程视图 */
@@ -88,4 +97,8 @@ export const ServerEventType = {
   /** 主 Agent 具身控制：3D 漫游、移动、停驻等（球形机器人身体） */
   AgentEmbodimentCommand: "agent.embodiment.command",
   ErrorEvent: "error.event",
+  /** 晨间简报：调度器到点触发后推送 */
+  MorningBriefing: "morning.briefing",
+  /** 心跳响应 */
+  Pong: "pong",
 } as const;

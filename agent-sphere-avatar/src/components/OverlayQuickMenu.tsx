@@ -47,20 +47,34 @@ export function OverlayQuickMenu({
         ) : null}
 
         <div className={layout === "side" ? "overlay-quick-menu__scroll" : undefined}>
-          <div className="overlay-quick-menu__grid">
-            {OVERLAY_QUICK_COMMANDS.map((cmd) => (
-              <button
-                key={cmd.id}
-                type="button"
-                className={`overlay-quick-menu__item${!connected && cmd.action !== "roam" && cmd.action !== "voice" ? " is-disabled" : ""}`}
-                disabled={!connected && cmd.action !== "roam" && cmd.action !== "voice"}
-                onClick={() => onSelect(cmd)}
-              >
-                <span className="overlay-quick-menu__icon">{cmd.icon}</span>
-                <span className="overlay-quick-menu__label">{cmd.label}</span>
-              </button>
-            ))}
-          </div>
+          {(() => {
+            const groups: Array<{ label: string; items: QuickCommand[] }> = [
+              { label: "user", items: OVERLAY_QUICK_COMMANDS.filter(c => c.category === "user") },
+              { label: "agent", items: OVERLAY_QUICK_COMMANDS.filter(c => c.category === "agent") },
+              { label: "shared", items: OVERLAY_QUICK_COMMANDS.filter(c => c.category === "shared") },
+            ];
+            return groups.map((group, gi) => (
+              group.items.length > 0 ? (
+                <div key={group.label} className="overlay-quick-menu__group">
+                  {gi > 0 && <div className="overlay-quick-menu__divider" />}
+                  <div className="overlay-quick-menu__row">
+                    {group.items.map((cmd) => (
+                      <button
+                        key={cmd.id}
+                        type="button"
+                        className={`overlay-quick-menu__item${!connected && cmd.action !== "roam" && cmd.action !== "voice" ? " is-disabled" : ""}`}
+                        disabled={!connected && cmd.action !== "roam" && cmd.action !== "voice"}
+                        onClick={() => onSelect(cmd)}
+                      >
+                        <span className="overlay-quick-menu__icon">{cmd.icon}</span>
+                        <span className="overlay-quick-menu__label">{cmd.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null
+            ));
+          })()}
         </div>
 
         {reconnecting ? (

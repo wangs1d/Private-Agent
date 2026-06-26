@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>学习笔记 - Flutter Mockup</title>
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<style>
+  /* ===== M3 Color Palette (seed: #6750A4) ===== */
+  :root {
+    --md-primary: #6750A4;
+    --md-on-primary: #FFFFFF;
+    --md-primary-container: #EADDFF;
+    --md-on-primary-container: #21005D;
+    --md-secondary: #625B71;
+    --md-on-secondary: #FFFFFF;
+    --md-secondary-container: #E8DEF8;
+    --md-on-secondary-container: #1D192B;
+    --md-tertiary: #7D5260;
+    --md-tertiary-container: #FFD8E4;
+    --md-surface: #FFFBFE;
+    --md-on-surface: #1C1B1F;
+    --md-on-surface-variant: #49454F;
+    --md-surface-container: #F3EDF7;
+    --md-surface-container-low: #F7F2FA;
+    --md-surface-container-high: #ECE6F0;
+    --md-outline: #79747E;
+    --md-outline-variant: #CAC4D0;
+    --md-inverse-surface: #313033;
+    --md-inverse-on-surface: #F4EFF4;
+    --md-error: #B3261E;
+    --md-on-error: #FFFFFF;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f0f0f0;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+
+  /* ===== Phone Shell ===== */
+  .phone-shell {
+    width: 390px;
+    height: 844px;
+    background: var(--md-surface);
+    border-radius: 40px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
+  /* ===== Top Tab Bar ===== */
+  .top-tabs {
+    display: flex;
+    background: var(--md-surface-container);
+    border-bottom: 1px solid var(--md-outline-variant);
+    flex-shrink: 0;
+  }
+  .top-tab {
+    flex: 1;
+    padding: 12px 0;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    user-select: none;
+  }
+  .top-tab:hover { background: var(--md-surface-container-high); }
+  .top-tab.active {
+    color: var(--md-primary);
+    border-bottom-color: var(--md-primary);
+    font-weight: 600;
+  }
+
+  /* ===== Page Container ===== */
+  .page-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+  .page {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    overflow-y: auto;
+    display: none;
+    flex-direction: column;
+    background: var(--md-surface);
+  }
+  .page.active { display: flex; }
+  .page::-webkit-scrollbar { width: 0; }
+
+  /* ===== AppBar ===== */
+  .appbar {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    background: var(--md-surface);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .appbar-title {
+    flex: 1;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--md-on-surface);
+  }
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    border: none;
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+  .icon-btn:hover { background: var(--md-surface-container-high); }
+  .icon-btn .material-icons { font-size: 22px; }
+
+  /* ===== ChoiceChip Bar ===== */
+  .chip-bar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 16px 12px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    background: var(--md-surface);
+    border-bottom: 1px solid var(--md-outline-variant);
+  }
+  .chip-bar::-webkit-scrollbar { height: 0; }
+  .choice-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    border: 1px solid var(--md-outline-variant);
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .choice-chip:hover { background: var(--md-surface-container-low); }
+  .choice-chip.selected {
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    border-color: transparent;
+  }
+
+  /* ===== Note List ===== */
+  .note-list { flex: 1; overflow-y: auto; }
+  .note-list::-webkit-scrollbar { width: 0; }
+
+  .note-item {
+    display: flex;
+    align-items: flex-start;
+    padding: 14px 16px;
+    gap: 12px;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .note-item:hover { background: var(--md-surface-container-low); }
+
+  .note-cat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .note-cat-icon .material-icons { font-size: 20px; }
+  .note-cat-icon.study { background: #D0E4FF; color: #1565C0; }
+  .note-cat-icon.meeting { background: #E8DEF8; color: #625B71; }
+  .note-cat-icon.reading { background: #EFDFCC; color: #8D6E63; }
+  .note-cat-icon.video { background: #FFDAD6; color: #C62828; }
+  .note-cat-icon.idea { background: #FFF3CD; color: #F9A825; }
+  .note-cat-icon.todo { background: #C8E6C9; color: #2E7D32; }
+
+  .note-content { flex: 1; min-width: 0; }
+  .note-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .note-title {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--md-on-surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .note-time {
+    font-size: 12px;
+    color: var(--md-outline);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .note-preview {
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+    margin-top: 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.4;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--md-outline-variant);
+    margin: 0 16px;
+  }
+
+  /* ===== FAB ===== */
+  .fab {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.15);
+    transition: box-shadow 0.2s, transform 0.1s;
+    z-index: 5;
+  }
+  .fab:hover { box-shadow: 0 6px 16px rgba(0,0,0,0.2); }
+  .fab:active { transform: scale(0.95); }
+  .fab .material-icons { font-size: 28px; }
+
+  /* ===== Detail Page ===== */
+  .detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 16px 24px;
+  }
+  .detail-body::-webkit-scrollbar { width: 0; }
+
+  .tag-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 16px;
+  }
+  .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface-variant);
+  }
+  .tag-chip.category {
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+  }
+
+  .md-card {
+    background: var(--md-surface-container-low);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .md-card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--md-on-surface);
+    margin-bottom: 12px;
+  }
+  .md-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--md-on-surface);
+    margin: 12px 0 6px;
+  }
+  .md-card p, .md-card li {
+    font-size: 14px;
+    color: var(--md-on-surface-variant);
+    line-height: 1.6;
+  }
+  .md-card ul {
+    padding-left: 18px;
+    margin: 4px 0;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--md-on-surface);
+  }
+  .text-btn {
+    background: none;
+    border: none;
+    color: var(--md-primary);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 8px;
+    transition: background 0.15s;
+  }
+  .text-btn:hover { background: var(--md-primary-container); }
+
+  /* Memory Cards */
+  .memory-card {
+    background: var(--md-surface-container-low);
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+  .memory-q {
+    font-size: 13px;
+    color: var(--md-primary);
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .memory-a {
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+    line-height: 1.5;
+  }
+
+  /* ExpansionTile */
+  .expansion-tile {
+    border-radius: 12px;
+    margin-bottom: 8px;
+    overflow: hidden;
+    background: var(--md-surface-container-low);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+  .expansion-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    cursor: pointer;
+    gap: 12px;
+    user-select: none;
+    transition: background 0.12s;
+  }
+  .expansion-header:hover { background: var(--md-surface-container); }
+  .expansion-header .expand-icon {
+    color: var(--md-on-surface-variant);
+    transition: transform 0.25s;
+    font-size: 22px;
+  }
+  .expansion-tile.open .expand-icon {
+    transform: rotate(180deg);
+  }
+  .expansion-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--md-on-surface);
+  }
+  .expansion-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+  .expansion-tile.open .expansion-body {
+    max-height: 200px;
+  }
+  .expansion-answer {
+    padding: 0 16px 12px;
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+    line-height: 1.5;
+    border-top: 1px solid var(--md-outline-variant);
+    padding-top: 10px;
+    margin-top: 0;
+  }
+
+  /* Bottom Buttons */
+  .action-buttons {
+    display: flex;
+    gap: 8px;
+    padding: 16px 16px 8px;
+    flex-shrink: 0;
+  }
+  .filled-btn {
+    flex: 1;
+    padding: 10px 16px;
+    border-radius: 20px;
+    border: none;
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    transition: box-shadow 0.15s;
+  }
+  .filled-btn:hover { box-shadow: 0 2px 8px rgba(103,80,164,0.3); }
+  .filled-btn .material-icons { font-size: 16px; }
+
+  /* ===== Chat Page ===== */
+  .chat-page-layout {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  .chat-status-bar {
+    padding: 4px 16px;
+    font-size: 11px;
+    color: var(--md-on-surface-variant);
+    background: var(--md-surface-container);
+    flex-shrink: 0;
+  }
+  .chat-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  .chat-sidebar {
+    width: 120px;
+    flex-shrink: 0;
+    background: var(--md-surface-container);
+    overflow-y: auto;
+    border-right: 1px solid var(--md-outline-variant);
+  }
+  .chat-sidebar::-webkit-scrollbar { width: 0; }
+  .sidebar-item {
+    padding: 10px 10px;
+    cursor: pointer;
+    transition: background 0.12s;
+    border-left: 3px solid transparent;
+  }
+  .sidebar-item:hover { background: var(--md-surface-container-high); }
+  .sidebar-item.active {
+    background: var(--md-inverse-surface);
+    border-left-color: var(--md-primary);
+  }
+  .sidebar-item.active .sidebar-title { color: var(--md-inverse-on-surface); }
+  .sidebar-item.active .sidebar-cat { color: rgba(255,255,255,0.6); }
+  .sidebar-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--md-on-surface);
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .sidebar-cat {
+    font-size: 10px;
+    color: var(--md-outline);
+    margin-top: 2px;
+  }
+
+  .chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .chat-messages::-webkit-scrollbar { width: 0; }
+
+  .chat-bubble {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  .chat-bubble strong { font-weight: 600; }
+  .chat-bubble.user {
+    align-self: flex-end;
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    border-bottom-right-radius: 4px;
+  }
+  .chat-bubble.agent {
+    align-self: flex-start;
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
+    border-bottom-left-radius: 4px;
+  }
+
+  .chat-input-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--md-outline-variant);
+    flex-shrink: 0;
+    background: var(--md-surface);
+  }
+  .chat-input {
+    flex: 1;
+    padding: 8px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--md-outline-variant);
+    font-size: 13px;
+    background: var(--md-surface-container-low);
+    color: var(--md-on-surface);
+    outline: none;
+    font-family: inherit;
+  }
+  .chat-input:focus { border-color: var(--md-primary); }
+  .chat-send-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    border: none;
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .chat-send-btn .material-icons { font-size: 18px; }
+</style>
+</head>
+<body>
+
+<div class="phone-shell">
+
+  <!-- Top Tabs -->
+  <div class="top-tabs">
+    <div class="top-tab active" onclick="switchPage(0)">列表页</div>
+    <div class="top-tab" onclick="switchPage(1)">详情页</div>
+    <div class="top-tab" onclick="switchPage(2)">对话页</div>
+  </div>
+
+  <div class="page-container">
+
+    <!-- ========== PAGE 0: Notes List ========== -->
+    <div class="page active" id="page-0">
+      <!-- AppBar -->
+      <div class="appbar">
+        <div class="appbar-title">学习笔记</div>
+        <button class="icon-btn"><span class="material-icons">search</span></button>
+        <button class="icon-btn"><span class="material-icons">refresh</span></button>
+      </div>
+
+      <!-- ChoiceChips -->
+      <div class="chip-bar">
+        <div class="choice-chip selected" onclick="selectChip(this)">全部</div>
+        <div class="choice-chip" onclick="selectChip(this)">学习</div>
+        <div class="choice-chip" onclick="selectChip(this)">会议</div>
+        <div class="choice-chip" onclick="selectChip(this)">视频</div>
+        <div class="choice-chip" onclick="selectChip(this)">读书</div>
+        <div class="choice-chip" onclick="selectChip(this)">灵感</div>
+        <div class="choice-chip" onclick="selectChip(this)">待办</div>
+        <div class="choice-chip" onclick="selectChip(this)">其它</div>
+      </div>
+
+      <!-- Note List -->
+      <div class="note-list">
+        <!-- Note 1 -->
+        <div class="note-item" onclick="switchPage(1)">
+          <div class="note-cat-icon study"><span class="material-icons">school</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">Flutter 状态管理总结</div>
+              <div class="note-time">06-25 14:30</div>
+            </div>
+            <div class="note-preview">Provider vs Riverpod 对比分析，推荐在项目中使用 Riverpod 进行状态管理...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 2 -->
+        <div class="note-item">
+          <div class="note-cat-icon meeting"><span class="material-icons">groups</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">周五产品评审会记录</div>
+              <div class="note-time">06-24 10:15</div>
+            </div>
+            <div class="note-preview">参会人员：张三、李四、王五。讨论了 Q3 产品路线图和资源分配方案...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 3 -->
+        <div class="note-item">
+          <div class="note-cat-icon study"><span class="material-icons">school</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">CS 61B Data Structures</div>
+              <div class="note-time">06-23 22:45</div>
+            </div>
+            <div class="note-preview">BST 插入删除操作复杂度分析，红黑树与 AVL 树的对比...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 4 -->
+        <div class="note-item">
+          <div class="note-cat-icon reading"><span class="material-icons">menu_book</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">《深度工作》读书笔记</div>
+              <div class="note-time">06-22 08:30</div>
+            </div>
+            <div class="note-preview">核心观点：注意力残留效应会显著降低切换任务后的认知表现...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 5 -->
+        <div class="note-item">
+          <div class="note-cat-icon video"><span class="material-icons">play_circle_outline</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">分布式系统 CAP 定理</div>
+              <div class="note-time">06-21 19:20</div>
+            </div>
+            <div class="note-preview">CAP 定理证明：不可能同时满足一致性、可用性和分区容错性...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 6 -->
+        <div class="note-item">
+          <div class="note-cat-icon idea"><span class="material-icons">lightbulb</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">API 接口优化思路</div>
+              <div class="note-time">06-20 16:10</div>
+            </div>
+            <div class="note-preview">考虑引入 GraphQL 替代 REST，减少过度获取和不足获取问题...</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+
+        <!-- Note 7 -->
+        <div class="note-item">
+          <div class="note-cat-icon todo"><span class="material-icons">checklist</span></div>
+          <div class="note-content">
+            <div class="note-title-row">
+              <div class="note-title">本周待办清单</div>
+              <div class="note-time">06-19 09:00</div>
+            </div>
+            <div class="note-preview">1. 完成用户模块重构 2. 编写单元测试 3. Code Review...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FAB -->
+      <button class="fab"><span class="material-icons">add</span></button>
+    </div>
+
+    <!-- ========== PAGE 1: Note Detail ========== -->
+    <div class="page" id="page-1">
+      <div class="appbar">
+        <div class="appbar-title">Flutter 状态管理总结</div>
+        <button class="icon-btn"><span class="material-icons">delete_outline</span></button>
+      </div>
+
+      <div class="detail-body">
+        <!-- Tags -->
+        <div class="tag-wrap">
+          <span class="tag-chip category">分类：study</span>
+          <span class="tag-chip">来源：flutter</span>
+          <span class="tag-chip">已复习 3 次</span>
+          <span class="tag-chip">#Flutter</span>
+          <span class="tag-chip">#状态管理</span>
+          <span class="tag-chip">#移动端</span>
+        </div>
+
+        <!-- Main Content Card -->
+        <div class="md-card" id="note-content-card"></div>
+
+        <!-- Summary -->
+        <div class="section-header">
+          <div class="section-title">摘要</div>
+          <button class="text-btn">生成</button>
+        </div>
+        <div class="md-card">
+          本文对比了 Flutter 中 Provider 和 Riverpod 两种状态管理方案，分析了各自的优缺点，最终推荐在复杂项目中使用 Riverpod。
+        </div>
+
+        <!-- Memory Cards -->
+        <div class="section-header">
+          <div class="section-title">记忆卡片 (3)</div>
+        </div>
+        <div class="memory-card">
+          <div class="memory-q">Q. Riverpod 相比 Provider 的核心优势是什么？</div>
+          <div class="memory-a">A. 编译时安全的依赖注入、自动 dispose、支持异步状态组合</div>
+        </div>
+        <div class="memory-card">
+          <div class="memory-q">Q. Provider 底层基于什么机制？</div>
+          <div class="memory-a">A. InheritedWidget</div>
+        </div>
+        <div class="memory-card">
+          <div class="memory-q">Q. 什么时候适合用 Provider？</div>
+          <div class="memory-a">A. 小型项目或原型开发阶段</div>
+        </div>
+
+        <!-- Quiz -->
+        <div class="section-header" style="margin-top:8px;">
+          <div class="section-title">自测题 (2)</div>
+          <button class="text-btn">出题</button>
+        </div>
+        <div class="expansion-tile" onclick="toggleExpansion(this)">
+          <div class="expansion-header">
+            <span class="expand-icon material-icons">expand_more</span>
+            <span class="expansion-title">Q1. Riverpod 的自动 dispose 机制解决了什么问题？</span>
+          </div>
+          <div class="expansion-body">
+            <div class="expansion-answer">避免了 Widget 销毁后状态泄漏</div>
+          </div>
+        </div>
+        <div class="expansion-tile" onclick="toggleExpansion(this)">
+          <div class="expansion-header">
+            <span class="expand-icon material-icons">expand_more</span>
+            <span class="expansion-title">Q2. 在什么场景下不推荐使用 Provider？</span>
+          </div>
+          <div class="expansion-body">
+            <div class="expansion-answer">模块多、状态依赖复杂的大型项目</div>
+          </div>
+        </div>
+
+        <div style="height:12px;"></div>
+      </div>
+
+      <!-- Bottom Action Buttons -->
+      <div class="action-buttons">
+        <button class="filled-btn"><span class="material-icons">summarize</span> 生成摘要</button>
+        <button class="filled-btn"><span class="material-icons">quiz</span> 出题</button>
+        <button class="filled-btn"><span class="material-icons">alarm_add</span> 安排复习</button>
+      </div>
+    </div>
+
+    <!-- ========== PAGE 2: Chat Page ========== -->
+    <div class="page" id="page-2">
+      <div class="chat-page-layout">
+        <div class="appbar" style="padding-bottom:4px;">
+          <div class="appbar-title" style="font-size:18px;">学习笔记 · 对话</div>
+          <button class="icon-btn"><span class="material-icons">refresh</span></button>
+        </div>
+        <div class="chat-status-bar">已连接 · 上下文 = notes</div>
+
+        <div class="chat-body">
+          <!-- Sidebar -->
+          <div class="chat-sidebar">
+            <div class="sidebar-item active">
+              <div class="sidebar-title">Flutter 状态管理总结</div>
+              <div class="sidebar-cat">study</div>
+            </div>
+            <div class="sidebar-item">
+              <div class="sidebar-title">周五产品评审会记录</div>
+              <div class="sidebar-cat">meeting</div>
+            </div>
+            <div class="sidebar-item">
+              <div class="sidebar-title">CS 61B Data Structures</div>
+              <div class="sidebar-cat">study</div>
+            </div>
+            <div class="sidebar-item">
+              <div class="sidebar-title">《深度工作》读书笔记</div>
+              <div class="sidebar-cat">reading</div>
+            </div>
+            <div class="sidebar-item">
+              <div class="sidebar-title">API 接口优化思路</div>
+              <div class="sidebar-cat">idea</div>
+            </div>
+            <div class="sidebar-item">
+              <div class="sidebar-title">本周待办清单</div>
+              <div class="sidebar-cat">todo</div>
+            </div>
+          </div>
+
+          <!-- Chat Panel -->
+          <div class="chat-panel">
+            <div class="chat-messages">
+              <!-- User message -->
+              <div class="chat-bubble user">我们继续讨论这条笔记：Flutter 状态管理总结。先回顾一下要点，再给我下一步建议。</div>
+              <!-- Agent message -->
+              <div class="chat-bubble agent" id="agent-bubble-1"></div>
+            </div>
+
+            <!-- Input bar -->
+            <div class="chat-input-bar">
+              <input type="text" class="chat-input" placeholder="和笔记 Agent 聊一聊…">
+              <button class="chat-send-btn"><span class="material-icons">send</span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ===== Page Switching =====
+function switchPage(index) {
+  document.querySelectorAll('.top-tab').forEach((t, i) => {
+    t.classList.toggle('active', i === index);
+  });
+  document.querySelectorAll('.page').forEach((p, i) => {
+    p.classList.toggle('active', i === index);
+  });
+}
+
+// ===== ChoiceChip Selection =====
+function selectChip(el) {
+  document.querySelectorAll('.choice-chip').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+// ===== ExpansionTile Toggle =====
+function toggleExpansion(el) {
+  el.classList.toggle('open');
+}
+
+// ===== Simple Markdown Renderer =====
+function renderMd(text) {
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>');
+  // Wrap consecutive <li> in <ul>
+  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+  // Wrap remaining plain text lines in <p>
+  html = html.replace(/^(?!<[hulo])(.*\S.*)$/gm, '<p>$1</p>');
+  return html;
+}
+
+// ===== Render note content =====
+const noteContent = "## Provider vs Riverpod 对比\n\n### Provider\n- 简单易学，适合小型项目\n- 使用 InheritedWidget 机制\n- 存在 rebuild 粒度不够细的问题\n\n### Riverpod\n- 编译时安全的依赖注入\n- 自动 dispose 机制\n- 支持异步状态和状态组合\n- 推荐在大型项目中使用\n\n### 结论\n在当前项目中，由于模块较多、状态复杂，推荐使用 Riverpod 作为主要状态管理方案。";
+
+document.getElementById('note-content-card').innerHTML = renderMd(noteContent);
+
+// ===== Render chat message =====
+const agentMsg = "好的，我帮你回顾一下这篇笔记的核心要点：\n\n1. **Provider** 简单易学，适合小项目，但 rebuild 粒度粗\n2. **Riverpod** 编译时安全，自动 dispose，支持异步状态\n3. **结论** — 你的项目适合用 Riverpod\n\n你想深入哪个方向？比如：\n- Riverpod 的具体迁移步骤\n- 状态组合的最佳实践\n- 性能优化技巧";
+
+document.getElementById('agent-bubble-1').innerHTML = renderMd(agentMsg);
+</script>
+
+</body>
+</html>

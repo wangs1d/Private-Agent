@@ -714,6 +714,92 @@ const WORLD_SOCIAL_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+/** 一起听音乐：Agent 与用户同步听歌，共享歌单和播放控制。 */
+const WORLD_MUSIC_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.music.create_room",
+      description:
+        "创建一个音乐房，你与用户可以一起听音乐。创建后返回 roomId，请告知用户并邀请其加入。返回快照包含当前歌单与播放状态。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.music.join_room",
+      description:
+        "加入指定音乐房。加入后可使用 play / pause / next / seek 控制播放，所有参与者同步收到状态。",
+      parameters: {
+        type: "object",
+        properties: {
+          roomId: { type: "string", description: "音乐房 ID（mr_ 开头）" },
+        },
+        required: ["roomId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.music.play",
+      description:
+        "在音乐房中播放曲目。trackId 可选，指定后切换到该曲目；缺省为继续播放当前曲目。操作会同步推送给所有参与者。",
+      parameters: {
+        type: "object",
+        properties: {
+          roomId: { type: "string", description: "音乐房 ID" },
+          trackId: { type: "string", description: "可选，要播放的曲目 ID" },
+        },
+        required: ["roomId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.music.pause",
+      description: "暂停音乐房播放，同步推送给所有参与者。",
+      parameters: {
+        type: "object",
+        properties: { roomId: { type: "string", description: "音乐房 ID" } },
+        required: ["roomId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.music.next",
+      description: "切换到歌单下一首，同步推送给所有参与者。",
+      parameters: {
+        type: "object",
+        properties: { roomId: { type: "string", description: "音乐房 ID" } },
+        required: ["roomId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "world.music.get_state",
+      description:
+        "获取音乐房当前状态（当前曲目、播放/暂停、进度、参与者列表、完整歌单）。用户询问当前在听什么或参与者时调用。",
+      parameters: {
+        type: "object",
+        properties: { roomId: { type: "string", description: "音乐房 ID" } },
+        required: ["roomId"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 function dedupeChatToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   const seen = new Set<string>();
   const out: ChatCompletionTool[] = [];
@@ -739,6 +825,7 @@ export const AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = dedupeChatToolsByNam
   ...DOUDIZHU_CHAT_TOOLS,
   ...ZHAJINHUA_CHAT_TOOLS,
   ...BLACKJACK_CHAT_TOOLS,
+  ...WORLD_MUSIC_CHAT_TOOLS,
 ]);
 
 /** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */

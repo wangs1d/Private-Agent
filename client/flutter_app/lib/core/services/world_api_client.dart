@@ -583,6 +583,91 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  // ==================== 音乐房间 API ====================
+
+  /// 创建音乐房间（`POST /world/music/rooms`）。
+  Future<Map<String, dynamic>> createMusicRoom(String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  /// 加入指定音乐房间（`POST /world/music/rooms/:roomId/join`）。
+  Future<Map<String, dynamic>> joinMusicRoom(String roomId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/join"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  /// 离开音乐房间（`POST /world/music/rooms/:roomId/leave`）。
+  Future<Map<String, dynamic>> leaveMusicRoom(String roomId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/leave"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  /// 播放（可选指定 [trackId]）（`POST /world/music/rooms/:roomId/play`）。
+  Future<Map<String, dynamic>> musicPlay(String roomId, String sessionId, [String? trackId]) async {
+    final Map<String, dynamic> body = <String, dynamic>{"sessionId": sessionId};
+    if (trackId != null && trackId.isNotEmpty) body["trackId"] = trackId;
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/play"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
+  /// 暂停（`POST /world/music/rooms/:roomId/pause`）。
+  Future<Map<String, dynamic>> musicPause(String roomId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/pause"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  /// 下一首（`POST /world/music/rooms/:roomId/next`）。
+  Future<Map<String, dynamic>> musicNext(String roomId, String sessionId) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/next"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
+  /// 跳转进度（`POST /world/music/rooms/:roomId/seek`）。
+  Future<Map<String, dynamic>> musicSeek(String roomId, String sessionId, double positionSec) async {
+    final http.Response r = await http.post(
+      _uri("/world/music/rooms/$roomId/seek"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{
+        "sessionId": sessionId,
+        "positionSec": positionSec,
+      }),
+    );
+    return _decode(r);
+  }
+
+  /// 获取房间当前状态（`GET /world/music/rooms/:roomId`）。
+  Future<Map<String, dynamic>> getMusicState(String roomId, String sessionId) async {
+    final http.Response r = await http.get(
+      _uri("/world/music/rooms/$roomId", <String, String>{"sessionId": sessionId}),
+    );
+    return _decode(r);
+  }
+
   Map<String, dynamic> _decode(http.Response r) {
     final Object? data = jsonDecode(utf8.decode(r.bodyBytes));
     if (data is Map<String, dynamic>) return data;

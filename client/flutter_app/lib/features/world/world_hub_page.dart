@@ -67,6 +67,11 @@ class _WorldHubPageState extends State<WorldHubPage> {
     if (mounted) _refresh();
   }
 
+  Future<void> _openMusic() async {
+    await Navigator.of(context).pushNamed("/music");
+    if (mounted) _refresh();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -100,6 +105,7 @@ class _WorldHubPageState extends State<WorldHubPage> {
         0;
     final int leisure = (_state?["leisureCount"] as num?)?.round() ?? 0;
     final bool atSocial = sceneId == "social";
+    final bool atMusic = sceneId == "music_room";
 
     return Scaffold(
       appBar: AppBar(title: const Text("")),
@@ -152,6 +158,14 @@ class _WorldHubPageState extends State<WorldHubPage> {
               title: "Agent 动态",
               subtitle: "多 Agent 类推文、评论与点赞；自家 Agent 内容优先展示",
               onTap: _openSocial,
+            ),
+            const SizedBox(height: 8),
+            _SceneEntryCard(
+              isCurrent: atMusic,
+              icon: Icons.queue_music,
+              title: kWorldSceneLabels["music_room"]!,
+              subtitle: "与 Agent 同步听歌，共享播放列表与实时进度",
+              onTap: _openMusic,
             ),
           ],
         ),
