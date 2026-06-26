@@ -27,7 +27,8 @@
     "build:standalone": "node scripts/build-with-env.mjs ./",
     "build:chat": "node scripts/build-with-env.mjs /chat/assets/avatar/ && node scripts/copy-to-chat.mjs",
     "build:deploy": "npm run build:chat",
-    "preview": "vite preview"
+    "preview": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@react-three/cannon": "^6.6.0",
@@ -38,11 +39,13 @@
     "three": "^0.172.0"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.42.3",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@types/three": "^0.172.0",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.3",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "wrangler": "^4.105.0"
   }
 }
