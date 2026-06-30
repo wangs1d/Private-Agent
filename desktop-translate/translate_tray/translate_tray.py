@@ -19,10 +19,23 @@ import argparse
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 import uuid
 from typing import Optional
+
+# Windows COM 修复：让 pystray 内部 Tk 线程在 STA 公寓下创建，
+# 否则 pystray._win32 的 self.tk.mainloop() 会抛
+# "RuntimeError: Calling Tcl from different apartment" 然后整个托盘崩。
+if sys.platform == "win32" and not getattr(sys, "frozen", False):
+    try:
+        import pythoncom  # type: ignore
+        # COINIT_APARTMENTTHREADED = 0x2；0x0 表示每个新线程默认 MTA
+        sys.coinit_flags = 0x2
+    except Exception:
+        # 没有 pythoncom 时降级为尽量不影响原行为
+        pass
 
 LOG = logging.getLogger("translate_tray")
 
@@ -383,6 +396,18 @@ class TranslateTrayApp:
             LOG.error("pystray 缺失：%s（请 pip install pystray）", e)
             raise
 
+        # Windows 修复：pystray 内部线程继承主线程的 COM apartment。
+        # 若主线程是 MTA，pystray 内部 Tk 会抛 "Calling Tcl from different apartment"。
+        # 在调 Icon.run() 之前先把主线程 CoInit 到 STA，新线程也会跟着是 STA。
+        if sys.platform == "win32":
+            try:
+                import pythoncom  # type: ignore
+                pythoncom.CoInitialize()
+                self._pythoncom_initialized = True
+            except Exception as e:
+                LOG.warning("pythoncom.CoInitialize 失败：%s（pystray 可能仍会因 Tk 公寓问题崩溃）", e)
+                self._pythoncom_initialized = False
+
         icon_image = _build_tray_icon_image()
 
         def _on_live(icon, item) -> None:
@@ -452,7 +477,15 @@ class TranslateTrayApp:
             "托盘启动 · Live=%s  Continuous=%s  Clear=%s",
             self.hotkey, self.continuous_hotkey, self.clear_hotkey,
         )
-        self._tray_icon.run()
+        try:
+            self._tray_icon.run()
+        finally:
+            if sys.platform == "win32" and getattr(self, "_pythoncom_initialized", False):
+                try:
+                    import pythoncom  # type: ignore
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
     @staticmethod
     def _short_hk(hk: str) -> str:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 import tkinter as tk
@@ -164,6 +165,8 @@ class ConsolidatedTranslateWindow:
     ) -> None:
         """添加或更新一张卡片。card_id 相同则更新；不同则新增到顶部。"""
         win = self.get()
+        # 第一次实际结果(用户触发后)才显示窗口
+        win._ensure_visible()
         win._dispatch(
             lambda: win._add_or_update_card_impl(
                 card_id, source_text, translated_text, target_lang_label, translated_by, error, mode
@@ -174,6 +177,8 @@ class ConsolidatedTranslateWindow:
 
     def show_loading(self, hint: str, card_id: str = "__loading__") -> None:
         win = self.get()
+        # 用户触发后才显示窗口
+        win._ensure_visible()
         win._dispatch(lambda: win._add_or_update_card_impl(
             card_id, "正在识别...", "正在翻译...", "—", "loading", None, "live"
         ))
@@ -182,6 +187,7 @@ class ConsolidatedTranslateWindow:
 
     def show_error(self, error: str) -> None:
         win = self.get()
+        win._ensure_visible()
         win._dispatch(lambda: win._add_or_update_card_impl(
             "__error__", "—", f"❌ {error}", "—", "error", None, "live"
         ))
@@ -233,6 +239,12 @@ class ConsolidatedTranslateWindow:
             LOG.exception("派发到 Tk 失败")
 
     def _ensure_visible(self) -> None:
+        if self._root is None:
+            return
+        # 必须派发到 Tk 线程,跨线程 deiconify/lift 会被 TclError 吞掉,窗口不会真正显示
+        self._dispatch(self._ensure_visible_impl)
+
+    def _ensure_visible_impl(self) -> None:
         if self._root is None:
             return
         try:
@@ -327,20 +339,47 @@ class ConsolidatedTranslateWindow:
     # ---------- 构建 UI ----------
 
     def _build(self) -> None:
-        self._root = tk.Tk()
-        self._root.title("屏幕翻译")
+        """在 Tk worker 线程里构建 UI,避免主线程 Tk 操作触发 apartment 错配。"""
+        # 第一次调用前要等 dummy Tk 线程就绪
+        root = _ensure_tk_thread()
+        # 在 Tk 线程里执行真正的构建,然后阻塞等结果
+        done = threading.Event()
+        err: list[BaseException] = []
+
+        def _build_impl() -> None:
+            try:
+                # 用 Toplevel 而不是新的 tk.Tk(),与 dummy 根共享同一解释器/线程/公寓
+                if self._root is not None and self._alive():
+                    return
+                self._root = tk.Toplevel(root)
+                self._build_ui(self._root)
+            except BaseException as e:
+                err.append(e)
+            finally:
+                done.set()
+
+        root.after(0, _build_impl)
+        if not done.wait(timeout=10):
+            raise RuntimeError("构建 UI 超时")
+        if err:
+            raise err[0]
+
+    def _build_ui(self, root: tk.Tk) -> None:
+        """实际的 widget 构建(必须在 Tk 线程中执行)。"""
+        self._root = root
+        root.title("屏幕翻译")
         try:
-            self._root.attributes("-topmost", True)
+            root.attributes("-topmost", True)
         except Exception:
             pass
         try:
-            self._root.attributes("-toolwindow", True)
+            root.attributes("-toolwindow", True)
         except Exception:
             pass
-        self._root.configure(bg=BG)
-        self._root.resizable(True, True)
-        self._root.minsize(360, 180)
-        self._root.protocol("WM_DELETE_WINDOW", self.close)
+        root.configure(bg=BG)
+        root.resizable(True, True)
+        root.minsize(360, 180)
+        root.protocol("WM_DELETE_WINDOW", self.close)
 
         # ─── 顶部工具栏（参照截图：翻译为/新建/字号/展开字幕/关闭）───
         toolbar = tk.Frame(self._root, bg=BG_PANEL, height=36)
@@ -526,7 +565,12 @@ class ConsolidatedTranslateWindow:
         self._empty_label.pack(fill=tk.X)
 
         self._position()
-        self._root.lift()
+        # 关键：构建完默认隐藏,只有真正收到第一次翻译结果时(用户触发后)才显示,
+        # 避免托盘一启动就弹窗。
+        try:
+            self._root.withdraw()
+        except Exception:
+            pass
 
     def _clear_impl(self) -> None:
         for cid, card in list(self._cards.items()):
@@ -731,19 +775,50 @@ def _ensure_tk_thread() -> tk.Tk:
                     return _TK_THREAD
             except Exception:
                 pass
-        root = tk.Tk()
-        root.withdraw()  # 隐藏主 root
-        _TK_THREAD = root
+        # Tk 实例必须和 mainloop 在同一线程创建,否则跨线程访问会触发
+        # "Calling Tcl from different apartment"。先把 root 占位 None,在线程里建。
+        _TK_THREAD = None
+        _ready = threading.Event()
+        _error: list[BaseException] = []
 
         def _loop() -> None:
+            global _TK_THREAD
+            if sys.platform == "win32":
+                try:
+                    import pythoncom  # type: ignore
+                    pythoncom.CoInitialize()
+                except Exception as e:
+                    LOG.warning("Tk 线程 CoInitialize 失败:%s", e)
             try:
+                # 在 worker 线程里建 Tk,与 mainloop 同线程,避免 apartment 错配
+                root = tk.Tk()
+                try:
+                    root.withdraw()  # 隐藏主 root
+                except Exception:
+                    pass
+                _TK_THREAD = root
+                _ready.set()
                 root.mainloop()
-            except Exception:
+            except BaseException as e:
+                _error.append(e)
+                _ready.set()
                 LOG.exception("Tk 主循环异常")
+            finally:
+                if sys.platform == "win32":
+                    try:
+                        import pythoncom  # type: ignore
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
 
         t = threading.Thread(target=_loop, daemon=True, name="translate-tk-loop")
         t.start()
-        return root
+        # 等 Tk 实例在 worker 线程里建好再返回(最多 10s)
+        if not _ready.wait(timeout=10):
+            raise RuntimeError("Tk 线程初始化超时")
+        if _error:
+            raise _error[0]
+        return _TK_THREAD  # type: ignore[return-value]
 
 
 # 顶层便捷函数（保持向后兼容）
