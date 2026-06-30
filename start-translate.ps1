@@ -28,7 +28,8 @@ $ClearHotkey = if ($env:TRANSLATE_CLEAR_HOTKEY) { $env:TRANSLATE_CLEAR_HOTKEY.Tr
 $TargetLang = if ($env:TRANSLATE_TARGET_LANG) { $env:TRANSLATE_TARGET_LANG.Trim() } else { "zh" }
 $SourceLang = if ($env:TRANSLATE_SOURCE_LANG) { $env:TRANSLATE_SOURCE_LANG.Trim() } else { "en" }
 $ContInterval = if ($env:TRANSLATE_CONTINUOUS_INTERVAL) { [double]$env:TRANSLATE_CONTINUOUS_INTERVAL.Trim() } else { 2.0 }
-$BaseUrl = if ($env:PRIVATE_AI_AGENT_BASE_URL) { $env:PRIVATE_AI_AGENT_BASE_URL.Trim() } else { "http://127.0.0.1:8787" }
+$BaseUrl = if ($env:PRIVATE_AI_AGENT_BASE_URL) { $env:PRIVATE_AI_AGENT_BASE_URL.Trim() } elseif ($env:PORT) { "http://127.0.0.1:$($env:PORT.Trim())" } else { "http://127.0.0.1:3000" }
+$ControlPort = if ($env:TRANSLATE_TRAY_CONTROL_PORT) { [int]$env:TRANSLATE_TRAY_CONTROL_PORT.Trim() } else { 8766 }
 
 Write-Host "屏幕翻译托盘启动中..."
 Write-Host "  模块根目录:    $ModuleRoot"
@@ -39,6 +40,7 @@ Write-Host "  清空热键:         $ClearHotkey"
 Write-Host "  源 → 目标:        $SourceLang → $TargetLang"
 Write-Host "  连续刷新间隔:     ${ContInterval}s"
 Write-Host "  主服务:           $BaseUrl"
+Write-Host "  控制端口(IPC):    $ControlPort"
 Write-Host "  翻译器:           $(if ($env:TRANSLATE_PROVIDER) { $env:TRANSLATE_PROVIDER } else { 'auto (LLM → MyMemory)' })"
 Write-Host "  注意：请确保 PaddleOCR 服务已在 127.0.0.1:8765 运行（start-paddle-ocr.ps1）"
 Write-Host "  关闭托盘即可退出"
@@ -51,4 +53,5 @@ Set-Location $ModuleRoot
     --target-lang "$TargetLang" `
     --source-lang "$SourceLang" `
     --continuous-interval "$ContInterval" `
-    --base-url "$BaseUrl"
+    --base-url "$BaseUrl" `
+    --control-port "$ControlPort"

@@ -4,6 +4,9 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { applyDeskPetShell } = require("./win32-desk-pet.cjs");
 
+// 允许 Chromium 访问 localhost（沙箱会拦截 127.0.0.1 请求）
+app.commandLine.appendSwitch("no-sandbox");
+
 /** 3D 桌宠：左侧机器区 + 右侧菜单区（展开时） */
 const PET_WIDTH = 150;
 const PET_HEIGHT = 188;
@@ -441,6 +444,8 @@ app.whenReady().then(() => {
 
   if (!isScheduleOnly) {
     createWindow();
+    // 同时创建日程悬浮窗
+    createScheduleWindow();
   }
 
   const trayIcon = nativeImage.createFromDataURL(

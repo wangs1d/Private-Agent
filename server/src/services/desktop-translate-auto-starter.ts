@@ -76,7 +76,19 @@ export type DesktopTranslateAutoStarterOptions = {
   autoInstallDeps?: boolean;
   /** 自动装依赖时的最大等待时间（毫秒）。默认 300_000（5 分钟）。 */
   autoInstallTimeoutMs?: number;
+  /** 主服务地址（Flutter / 托盘调 `/api/translate/*` 的目标）。默认根据 PORT 环境变量推断，未设置则 3000。 */
+  baseUrl?: string;
+  /** 托盘本地 IPC HTTP 端口（Flutter 点翻译时唤起窗口用）。默认 8766。 */
+  controlPort?: number;
 };
+
+function envInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
 
 /** 异步跑 install-deps.ps1，成功返回 true。 */
 function runInstallDepsAsync(
@@ -230,8 +242,15 @@ export function startDesktopTranslateTray(
     return () => {};
   }
 
+  // 主服务地址：调用方显式传入 > 显式环境变量 > PORT 推断 > 3000
+  const portFromEnv = envInt(env, "PORT", 3000);
   const baseUrl =
-    envStr(env, "PRIVATE_AI_AGENT_BASE_URL") || "http://127.0.0.1:8787";
+    opts.baseUrl ||
+    envStr(env, "PRIVATE_AI_AGENT_BASE_URL") ||
+    `http://127.0.0.1:${portFromEnv}`;
+
+  // 托盘本地 IPC HTTP 端口（Flutter 点翻译时唤起窗口用）
+  const controlPort = opts.controlPort ?? envInt(env, "TRANSLATE_TRAY_CONTROL_PORT", 8766);
 
   let stopped = false;
   let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
@@ -241,6 +260,7 @@ export function startDesktopTranslateTray(
   const childEnv: NodeJS.ProcessEnv = {
     ...env,
     PRIVATE_AI_AGENT_BASE_URL: baseUrl,
+    TRANSLATE_TRAY_CONTROL_PORT: String(controlPort),
     PYTHONUNBUFFERED: "1",
     // desktop-translate 也走 D 盘缓存/临时(避免它自己读 .paddlex 时落到 C 盘)
     PADDLE_PDX_CACHE_HOME: envStr(env, "PADDLE_PDX_CACHE_HOME", "D:\\paddle\\paddlex"),
@@ -253,13 +273,27 @@ export function startDesktopTranslateTray(
 
   const spawnOnce = (): void => {
     if (stopped || installing) return;
-    log(`[desktop-translate] spawn 托盘: ${pythonExe} -m translate_tray.translate_tray`);
-    child = spawn(pythonExe, ["-u", "-m", "translate_tray.translate_tray"], {
-      cwd: packageRoot,
-      env: childEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    log(
+      `[desktop-translate] spawn 托盘: ${pythonExe} -m translate_tray.translate_tray --base-url ${baseUrl} --control-port ${controlPort}`,
+    );
+    child = spawn(
+      pythonExe,
+      [
+        "-u",
+        "-m",
+        "translate_tray.translate_tray",
+        "--base-url",
+        baseUrl,
+        "--control-port",
+        String(controlPort),
+      ],
+      {
+        cwd: packageRoot,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
 
     let moduleMissing = false;
     child.stdout.on("data", (buf) => {
@@ -317,7 +351,7 @@ export function startDesktopTranslateTray(
   };
 
   log(
-    `[desktop-translate] 随 server 自启动 → base=${baseUrl}  python=${pythonExe}（DESKTOP_TRANSLATE_AUTO_START=0 可关闭）`,
+    `[desktop-translate] 随 server 自启动 → base=${baseUrl}  control=127.0.0.1:${controlPort}  python=${pythonExe}（DESKTOP_TRANSLATE_AUTO_START=0 可关闭）`,
   );
 
   // 异步准备环境，不阻塞 server 启动

@@ -152,21 +152,34 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
 
   /// 切换桌面悬浮窗模式（用户手动切换开关时调用）
   Future<void> _onDesktopFloatingToggled(bool value) async {
-    setState(() => _useDesktopFloating = value);
-
-    // 保存偏好
-    await SchedulePreference.setDisplayMode(
-      value ? ScheduleDisplayMode.desktopFloating : ScheduleDisplayMode.embedded,
-    );
-
     if (value) {
-      // 切换到桌面模式：启动独立窗口，隐藏应用内浮动面板
+      // 切换到桌面模式：先启动独立窗口，成功后再更新 UI 状态
       _showFloatingSchedule = false;
-      await _launchDesktopScheduleWindow();
+      final bool launched = await ScheduleFloatingLauncher.launch();
+      if (!mounted) return;
+      if (launched) {
+        setState(() {
+          _useDesktopFloating = true;
+          _scheduleWindowActive = true;
+        });
+        ScheduleFloatingLauncher.activeNotifier
+            .addListener(_onScheduleWindowChanged);
+      } else {
+        // 启动失败：不切换模式，保持在应用内嵌模式
+        setState(() => _scheduleWindowActive = false);
+      }
     } else {
       // 切换回应用内嵌：关闭独立窗口
       await _closeDesktopScheduleWindow();
+      setState(() => _useDesktopFloating = false);
     }
+
+    // 保存偏好
+    await SchedulePreference.setDisplayMode(
+      _useDesktopFloating
+          ? ScheduleDisplayMode.desktopFloating
+          : ScheduleDisplayMode.embedded,
+    );
   }
 
   // 浅色主题下表示"描边 / 文字 / 叠加"应使用黑色系，
@@ -229,32 +242,20 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
               bottom: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
             ),
           ),
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  "快捷功能",
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: cs.onSurface,
-                  ),
-                ),
-              ),
-              // 桌面日程模式圆圈按钮 — 桌面模式开启时作为关闭入口
-              _ScheduleModeCircleButton(
-                active: _useDesktopFloating,
-                onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
-              ),
-            ],
+          child: Text(
+            "快捷功能",
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
           ),
         ),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: <Widget>[
-              // 桌面悬浮窗模式开启时，应用内今日安排卡片整体隐藏
-              if (!_useDesktopFloating) _buildScheduleCard(),
+              _buildScheduleCard(),
               const SizedBox(height: 16),
               _buildToolsCard(),
             ],
@@ -309,16 +310,41 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
                 style: const TextStyle(fontSize: 11, color: _kAccentBlue),
               ),
               const SizedBox(width: 4),
-              // 桌面悬浮窗模式开关在右侧"快捷功能"标题栏内（避免应用内卡片隐藏后无法关闭）
+              // 开启/关闭桌面悬浮窗按钮
+              _ScheduleModeCircleButton(
+                active: _useDesktopFloating,
+                onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
+              ),
             ],
           ),
           const SizedBox(height: 12),
-          if (widget.scheduleFuture == null)
+          // 桌面悬浮窗已开启时显示提示
+          if (_useDesktopFloating)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.check_circle_outline,
+                      size: 14, color: _kAccentGreen),
+                  const SizedBox(width: 6),
+                  Text(
+                    _scheduleWindowActive ? "桌面悬浮窗已开启" : "正在启动桌面悬浮窗…",
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: _scheduleWindowActive
+                          ? _kAccentGreen
+                          : cs.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (!_useDesktopFloating && widget.scheduleFuture == null)
             Text(
               "暂无日程数据",
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             )
-          else
+          else if (!_useDesktopFloating)
             FutureBuilder<List<ScheduleEvent>>(
               future: widget.scheduleFuture,
               builder: (
