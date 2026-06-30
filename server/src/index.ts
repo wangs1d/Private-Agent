@@ -74,6 +74,7 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
 });
 const stopDesktopTranslate = startDesktopTranslateTray({
   log: (line) => services.app.log.info(line),
+  baseUrl: `http://127.0.0.1:${runtime.port}`,
 });
 const stopPaddleOcr = startPaddleOcrServer({
   log: (line) => services.app.log.info(line),

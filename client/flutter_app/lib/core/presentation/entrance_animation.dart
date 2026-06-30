@@ -1,16 +1,10 @@
+import "dart:math" as math;
+
 import "package:flutter/material.dart";
 
-/// 桌面应用进场动画
-/// 
-/// 动画流程：
-/// 1. 全黑屏幕
-/// 2. 中心出现微弱白光点
-/// 3. 光点扩散成光晕
-/// 4. 光晕继续扩散并淡出
-/// 5. 完全显示应用内容
 class EntranceAnimation extends StatefulWidget {
   final VoidCallback? onAnimationComplete;
-  
+
   const EntranceAnimation({super.key, this.onAnimationComplete});
 
   @override
@@ -19,130 +13,134 @@ class EntranceAnimation extends StatefulWidget {
 
 class _EntranceAnimationState extends State<EntranceAnimation>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _blackFade;
-  late Animation<double> _lightOpacity;
-  late Animation<double> _lightSize;
-  late Animation<double> _haloOpacity;
-  late Animation<double> _haloSize;
+  late final AnimationController _controller;
+  late final Animation<double> _overlayOpacity;
+  late final Animation<double> _ambientPulse;
+  late final Animation<double> _titleReveal;
+  late final Animation<double> _titleOpacity;
+  late final Animation<double> _titleGlow;
+  late final Animation<double> _scanProgress;
+  late final Animation<double> _scanOpacity;
+  late final Animation<double> _scanWidth;
+  late final Animation<double> _particleOpacity;
+  late final Animation<double> _subtitleOpacity;
 
   @override
   void initState() {
     super.initState();
-
     _controller = AnimationController(
-      duration: const Duration(milliseconds: 3000),
+      duration: const Duration(milliseconds: 4200),
       vsync: this,
     );
 
-    // 黑屏淡出：前60%保持，然后逐渐消失
-    _blackFade = Tween<double>(
-      begin: 1.0,
-      end: 0.0,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: const Interval(0.0, 0.7, curve: Curves.easeInOut),
-    ));
+    _overlayOpacity = TweenSequence<double>(<TweenSequenceItem<double>>[
+      TweenSequenceItem<double>(
+        tween: Tween<double>(begin: 1.0, end: 1.0),
+        weight: 72,
+      ),
+      TweenSequenceItem<double>(
+        tween: Tween<double>(begin: 1.0, end: 0.0),
+        weight: 28,
+      ),
+    ]).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic),
+    );
 
-    // 白光点：从暗到亮再到消失
-    _lightOpacity = TweenSequence<double>(<TweenSequenceItem<double>>[
+    _ambientPulse = Tween<double>(begin: 0.2, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.82, curve: Curves.easeOutCubic),
+      ),
+    );
+
+    _titleReveal = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.14, 0.48, curve: Curves.easeOutExpo),
+      ),
+    );
+
+    _titleOpacity = TweenSequence<double>(<TweenSequenceItem<double>>[
       TweenSequenceItem<double>(
         tween: Tween<double>(begin: 0.0, end: 0.0),
-        weight: 10,
+        weight: 18,
       ),
       TweenSequenceItem<double>(
         tween: Tween<double>(begin: 0.0, end: 1.0),
-        weight: 10,
+        weight: 24,
       ),
       TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 1.0, end: 0.7),
-        weight: 30,
+        tween: Tween<double>(begin: 1.0, end: 1.0),
+        weight: 58,
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 0.7, end: 0.0),
-        weight: 50,
-      ),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ]).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    );
 
-    // 光点大小变化
-    _lightSize = TweenSequence<double>(<TweenSequenceItem<double>>[
+    _titleGlow = TweenSequence<double>(<TweenSequenceItem<double>>[
       TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 2.0, end: 2.0),
-        weight: 10,
+        tween: Tween<double>(begin: 0.0, end: 0.42),
+        weight: 28,
       ),
       TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 2.0, end: 4.0),
-        weight: 10,
+        tween: Tween<double>(begin: 0.42, end: 1.0),
+        weight: 24,
       ),
       TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 4.0, end: 6.0),
-        weight: 20,
+        tween: Tween<double>(begin: 1.0, end: 0.45),
+        weight: 48,
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 6.0, end: 10.0),
-        weight: 20,
+    ]).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.16, 0.9, curve: Curves.easeOutCubic),
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 10.0, end: 16.0),
-        weight: 40,
-      ),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    );
 
-    // 光晕透明度
-    _haloOpacity = TweenSequence<double>(<TweenSequenceItem<double>>[
+    _scanProgress = Tween<double>(begin: -0.9, end: 0.9).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.34, 0.74, curve: Curves.easeInOutCubic),
+      ),
+    );
+
+    _scanOpacity = TweenSequence<double>(<TweenSequenceItem<double>>[
       TweenSequenceItem<double>(
         tween: Tween<double>(begin: 0.0, end: 0.0),
-        weight: 15,
+        weight: 28,
       ),
       TweenSequenceItem<double>(
         tween: Tween<double>(begin: 0.0, end: 1.0),
-        weight: 10,
+        weight: 18,
       ),
       TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 1.0, end: 0.6),
-        weight: 35,
+        tween: Tween<double>(begin: 1.0, end: 0.0),
+        weight: 54,
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 0.6, end: 0.0),
-        weight: 40,
-      ),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ]).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    );
 
-    // 光晕大小变化
-    _haloSize = TweenSequence<double>(<TweenSequenceItem<double>>[
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 4.0, end: 4.0),
-        weight: 15,
+    _scanWidth = Tween<double>(begin: 18, end: 72).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.34, 0.74, curve: Curves.easeInOutCubic),
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 4.0, end: 8.0),
-        weight: 10,
+    );
+
+    _particleOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.18, 0.74, curve: Curves.easeOut),
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 8.0, end: 40.0),
-        weight: 25,
+    );
+
+    _subtitleOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.34, 0.7, curve: Curves.easeOutCubic),
       ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 40.0, end: 120.0),
-        weight: 20,
-      ),
-      TweenSequenceItem<double>(
-        tween: Tween<double>(begin: 120.0, end: 200.0),
-        weight: 30,
-      ),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    );
 
     _controller.forward().whenComplete(() {
       widget.onAnimationComplete?.call();
@@ -160,66 +158,315 @@ class _EntranceAnimationState extends State<EntranceAnimation>
     return AnimatedBuilder(
       animation: _controller,
       builder: (BuildContext context, Widget? child) {
-        return Stack(
-          fit: StackFit.expand,
-          children: <Widget>[
-            // 黑屏层
-            FadeTransition(
-              opacity: _blackFade,
-              child: Container(
-                color: Colors.black,
-              ),
+        return Opacity(
+          opacity: _overlayOpacity.value,
+          child: DecoratedBox(
+            decoration: const BoxDecoration(color: Color(0xFF020202)),
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                const _BackgroundVignette(),
+                _buildAmbientGlow(),
+                _buildDustField(),
+                _buildCenterComposition(context),
+              ],
             ),
-            // 中心光点
-            Center(
-              child: Opacity(
-                opacity: _lightOpacity.value,
-                child: Container(
-                  width: _lightSize.value,
-                  height: _lightSize.value,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                    boxShadow: <BoxShadow>[
-                      BoxShadow(
-                        color: Colors.white.withValues(alpha: 0.8),
-                        blurRadius: 10,
-                        spreadRadius: 2,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            // 外围光晕
-            Center(
-              child: Opacity(
-                opacity: _haloOpacity.value,
-                child: Container(
-                  width: _haloSize.value,
-                  height: _haloSize.value,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.5),
-                    shape: BoxShape.circle,
-                    boxShadow: <BoxShadow>[
-                      BoxShadow(
-                        color: Colors.white.withValues(alpha: 0.3),
-                        blurRadius: 20,
-                        spreadRadius: 5,
-                      ),
-                      BoxShadow(
-                        color: Colors.white.withValues(alpha: 0.1),
-                        blurRadius: 60,
-                        spreadRadius: 10,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
+          ),
         );
       },
     );
+  }
+
+  Widget _buildAmbientGlow() {
+    final double pulse = _ambientPulse.value;
+    return IgnorePointer(
+      child: Stack(
+        children: <Widget>[
+          Align(
+            alignment: const Alignment(0, -0.08),
+            child: Container(
+              width: 620 * pulse,
+              height: 620 * pulse,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: <Color>[
+                    const Color(0x55E6F1FF).withValues(alpha: 0.20 * pulse),
+                    const Color(0x2200D1FF).withValues(alpha: 0.12 * pulse),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Align(
+            alignment: const Alignment(0, -0.02),
+            child: Container(
+              width: 420 * pulse,
+              height: 180 * pulse,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(220),
+                gradient: LinearGradient(
+                  colors: <Color>[
+                    Colors.transparent,
+                    const Color(0x66FFFFFF).withValues(alpha: 0.10 * pulse),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDustField() {
+    return IgnorePointer(
+      child: CustomPaint(
+        painter: _ParticlePainter(
+          progress: _controller.value,
+          opacity: _particleOpacity.value,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCenterComposition(BuildContext context) {
+    final Size size = MediaQuery.sizeOf(context);
+    final double titleScale = 0.82 + (_titleReveal.value * 0.18);
+    final double titleYOffset = (1 - _titleReveal.value) * 44;
+
+    return Center(
+      child: Transform.translate(
+        offset: Offset(0, titleYOffset),
+        child: Transform.scale(
+          scale: titleScale,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              SizedBox(
+                width: math.min(size.width * 0.88, 1080),
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: <Widget>[
+                    _buildTitleShadow(),
+                    _buildTitleFillWithScan(),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 22),
+              Opacity(
+                opacity: _subtitleOpacity.value,
+                child: Text(
+                  "SYSTEM ONLINE",
+                  style: TextStyle(
+                    color: const Color(0xFFE8EEF8).withValues(alpha: 0.62),
+                    fontSize: 11,
+                    letterSpacing: 6.4,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTitleShadow() {
+    return Opacity(
+      opacity: _titleOpacity.value,
+      child: Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()..setEntry(0, 1, -0.08),
+        child: Text(
+          "NEXTBOT",
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 92,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 7.5,
+            height: 1,
+            color: const Color(0xFFCBE6FF).withValues(
+              alpha: 0.08 + (_titleGlow.value * 0.18),
+            ),
+            shadows: <Shadow>[
+              Shadow(
+                color: const Color(0xFFD7EEFF).withValues(
+                  alpha: 0.18 * _titleGlow.value,
+                ),
+                blurRadius: 32,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTitleTextBase({required double glow}) {
+    return Text(
+      "NEXTBOT",
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        fontSize: 92,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 7.5,
+        height: 1,
+        color: Colors.white,
+        shadows: <Shadow>[
+          Shadow(
+            color: const Color(0xFFFFFFFF).withValues(alpha: 0.08 * glow),
+            blurRadius: 12,
+          ),
+          Shadow(
+            color: const Color(0xFFB3D9FF).withValues(alpha: 0.16 * glow),
+            blurRadius: 58,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTitleFillWithScan() {
+    final double glow = _titleGlow.value;
+    return Opacity(
+      opacity: _titleOpacity.value,
+      child: Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()..setEntry(0, 1, -0.08),
+        child: Stack(
+          alignment: Alignment.center,
+          children: <Widget>[
+            ShaderMask(
+              blendMode: BlendMode.srcIn,
+              shaderCallback: (Rect bounds) {
+                return const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Color(0xFFFDFEFF),
+                    Color(0xFFD8E1EC),
+                    Color(0xFF6B7380),
+                  ],
+                  stops: <double>[0.0, 0.38, 1.0],
+                ).createShader(bounds);
+              },
+              child: _buildTitleTextBase(glow: glow),
+            ),
+            ShaderMask(
+              blendMode: BlendMode.srcIn,
+              shaderCallback: (Rect bounds) {
+                final double sweepCenter =
+                    ((bounds.width * (_scanProgress.value + 1)) / 2)
+                        .clamp(0.0, bounds.width);
+                final double sweepHalf = _scanWidth.value / 2;
+                final double start =
+                    ((sweepCenter - sweepHalf) / bounds.width).clamp(0.0, 1.0);
+                final double end =
+                    ((sweepCenter + sweepHalf) / bounds.width).clamp(0.0, 1.0);
+                final double innerStart =
+                    (start + ((end - start) * 0.35)).clamp(0.0, 1.0);
+                final double innerEnd =
+                    (start + ((end - start) * 0.65)).clamp(0.0, 1.0);
+                return LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: <Color>[
+                    Colors.transparent,
+                    const Color(0x80FFFFFF).withValues(alpha: 0.28 * _scanOpacity.value),
+                    const Color(0xFFFFFFFF).withValues(alpha: 0.92 * _scanOpacity.value),
+                    const Color(0x99D9EEFF).withValues(alpha: 0.60 * _scanOpacity.value),
+                    Colors.transparent,
+                  ],
+                  stops: <double>[start, innerStart, (start + end) / 2, innerEnd, end],
+                ).createShader(bounds);
+              },
+              child: _buildTitleTextBase(glow: glow + (_scanOpacity.value * 0.35)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BackgroundVignette extends StatelessWidget {
+  const _BackgroundVignette();
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: RadialGradient(
+          center: Alignment(0, -0.22),
+          radius: 1.12,
+          colors: <Color>[
+            Color(0xFF0B0C0F),
+            Color(0xFF040404),
+            Color(0xFF010101),
+          ],
+          stops: <double>[0.0, 0.42, 1.0],
+        ),
+      ),
+      child: CustomPaint(
+        painter: _HorizonPainter(),
+      ),
+    );
+  }
+}
+
+class _HorizonPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint horizon = Paint()
+      ..shader = const LinearGradient(
+        colors: <Color>[
+          Colors.transparent,
+          Color(0x33A8D7FF),
+          Colors.transparent,
+        ],
+      ).createShader(Rect.fromLTWH(0, size.height * 0.58, size.width, 1.5));
+    canvas.drawRect(
+      Rect.fromLTWH(0, size.height * 0.58, size.width, 1.5),
+      horizon,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _ParticlePainter extends CustomPainter {
+  final double progress;
+  final double opacity;
+
+  const _ParticlePainter({
+    required this.progress,
+    required this.opacity,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()..style = PaintingStyle.fill;
+    final double drift = progress * 26;
+
+    for (int i = 0; i < 18; i += 1) {
+      final double seed = i / 18;
+      final double x = size.width * (0.12 + (seed * 0.76));
+      final double baseY = size.height * (0.28 + ((i % 6) * 0.08));
+      final double y = baseY + math.sin((progress * 6) + i) * 10 - drift * 0.2;
+      final double radius = 0.9 + ((i % 4) * 0.55);
+      final double alpha = opacity * (0.08 + ((i % 5) * 0.03));
+      paint.color = const Color(0xFFF3FAFF).withValues(alpha: alpha);
+      canvas.drawCircle(Offset(x, y), radius, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ParticlePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.opacity != opacity;
   }
 }

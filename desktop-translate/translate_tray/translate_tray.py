@@ -23,7 +23,10 @@ import sys
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .translate_tray_control import TrayControlServer
 
 # Windows COM 修复：让 pystray 内部 Tk 线程在 STA 公寓下创建，
 # 否则 pystray._win32 的 self.tk.mainloop() 会抛
@@ -95,6 +98,29 @@ def _parse_hotkey(raw: str) -> str:
     return "+".join(mapped)
 
 
+def _human_hotkey(raw: str) -> str:
+    """把 '<ctrl>+<shift>+t' 转回可读 'Ctrl+Shift+T'。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    out: list[str] = []
+    for token in s.lower().split("+"):
+        token = token.strip()
+        if token == "<ctrl>":
+            out.append("Ctrl")
+        elif token == "<shift>":
+            out.append("Shift")
+        elif token == "<alt>":
+            out.append("Alt")
+        elif token == "<cmd>":
+            out.append("Win")
+        elif token.startswith("<") and token.endswith(">"):
+            out.append(token[1:-1].upper())
+        else:
+            out.append(token.upper() if len(token) == 1 else token)
+    return "+".join(out)
+
+
 class TranslateTrayApp:
     def __init__(
         self,
@@ -105,6 +131,7 @@ class TranslateTrayApp:
         source_lang: str = "en",
         base_url: Optional[str] = None,
         continuous_interval_s: float = 2.0,
+        control_port: int = 0,
     ) -> None:
         self.hotkey = hotkey
         self.continuous_hotkey = continuous_hotkey
@@ -113,10 +140,15 @@ class TranslateTrayApp:
         self.source_lang = source_lang
         self.base_url = base_url
         self.continuous_interval_s = continuous_interval_s
+        # 0 = 不开 IPC；>0 = 监听 127.0.0.1:<port>
+        self.control_port = int(control_port or 0)
 
         self._tray_icon = None
         self._keyboard_listener = None
+        self._selection_watcher = None  # 选中文字翻译监听
+        self._smart_detect = None  # 鼠标悬停智能检测
         self._stop_event = threading.Event()
+        self._control_server: Optional["TrayControlServer"] = None  # type: ignore[name-defined]
 
         # 状态：live 模式 / continuous 模式
         self._live_session = None
@@ -135,28 +167,148 @@ class TranslateTrayApp:
     def start(self, once: bool = False) -> None:
         from .translate_api_client import TranslateApiClient
         from . import translate_result_window
+        from . import pin_panel
 
         self.api_client = TranslateApiClient(base_url=self.base_url)
-        # 提前启动 Tk 事件循环
+        # 提前启动 Tk 事件循环（PinPanel 与 LiveSession 都依赖它）
         translate_result_window._ensure_tk_thread()
-        # 把工具栏交互回灌到本 tray app（新建 → 框选；语言 → 切翻译目标）
-        translate_result_window.ConsolidatedTranslateWindow.configure(
-            new_callback=self._enter_live_mode,
-            language_callback=self._on_lang_change_from_window,
+        # 把主面板的 ✚ 框选 / 语言切换 / 字号 / 原文 / 字幕 回调回灌到本 tray app
+        pin_panel.PinPanel.configure(
+            on_select_request=self._enter_live_mode,
+            on_language_change=self._on_lang_change_from_window,
+            on_show_source_change=lambda _show: None,
+            on_font_size_change=lambda _size: None,
+            on_subtitle_toggle=lambda: None,
+            on_smart_detect_toggle=self._on_smart_detect_toggle,
+            on_close_request=lambda: None,
         )
-        # 同步当前状态到窗口
+        # 同步当前状态到主面板
         try:
-            win = translate_result_window.ConsolidatedTranslateWindow.get()
-            win.set_target_lang(self.target_lang)
+            panel = pin_panel.PinPanel.get()
+            panel.set_language(self.target_lang)
         except Exception:
-            LOG.exception("同步窗口状态失败")
+            LOG.exception("同步主面板状态失败")
+
+        # 启动托盘本地 IPC HTTP（供主服务 / Flutter 唤起窗口）
+        if self.control_port > 0:
+            self._start_control_server()
 
         if once:
             self._trigger_live_once()
             return
 
         self._start_keyboard_listener()
+        self._start_selection_watcher()
         self._run_tray()
+
+    def _start_control_server(self) -> None:
+        try:
+            from .translate_tray_control import TrayControlServer
+            from . import pin_panel
+        except Exception:
+            LOG.exception("导入控制 HTTP 模块失败，跳过 IPC")
+            return
+        try:
+            panel = pin_panel.PinPanel.get()
+            self._control_server = TrayControlServer(
+                host="127.0.0.1",
+                port=self.control_port,
+                on_show_window=self._on_ipc_show_window,
+                on_enter_select=self._on_ipc_enter_select,
+                on_enter_live=self._on_ipc_enter_select,  # 兼容旧名
+                on_add_result=self._on_ipc_add_result,
+                on_clear=panel.clear,
+                on_set_language=self._on_ipc_set_language,
+                on_set_show_source=panel.set_show_source,
+                on_set_font_size=panel.set_font_size,
+                on_toggle_subtitle=panel.toggle_subtitle,
+                on_toggle_smart_detect=panel.toggle_smart_detect,
+                on_collapse=panel.collapse,
+                on_close_panel=panel.close,
+                hotkeys_info={
+                    "live": _human_hotkey(self.hotkey),
+                    "continuous": _human_hotkey(self.continuous_hotkey),
+                    "clear": _human_hotkey(self.clear_hotkey),
+                },
+            )
+            self._control_server.start()
+        except Exception:
+            LOG.exception("启动控制 HTTP 失败")
+            self._control_server = None
+
+    def _stop_control_server(self) -> None:
+        if self._control_server is not None:
+            try:
+                self._control_server.stop()
+            except Exception:
+                LOG.exception("停止控制 HTTP 失败")
+            self._control_server = None
+
+    def _on_ipc_show_window(self, body: dict[str, Any]) -> None:
+        """主服务调来的『唤起主面板』。"""
+        from . import pin_panel
+
+        try:
+            panel = pin_panel.PinPanel.get()
+        except Exception:
+            LOG.exception("IPC show-window: 取不到主面板")
+            return
+        try:
+            panel.show()
+        except Exception:
+            LOG.exception("IPC show-window: show 失败")
+            return
+        hint = (
+            (body or {}).get("hint")
+            or f"点击 ✚ 框选翻译  ·  按 {_human_hotkey(self.clear_hotkey)} 清空"
+        )
+        try:
+            panel.set_status(hint, color=pin_panel.ACCENT)
+        except Exception:
+            LOG.exception("IPC show-window: set_status 失败")
+
+    def _on_ipc_enter_select(self) -> None:
+        """主服务调来的『触发框选翻译』：等价于点击主面板的 ✚ 按钮。"""
+        from . import pin_panel
+        try:
+            pin_panel.PinPanel.get().enter_select()
+        except Exception:
+            LOG.exception("IPC enter-select 失败")
+
+    def _on_ipc_add_result(self, body: dict[str, Any]) -> None:
+        """主服务调来的『直接添加一张翻译结果卡片』。"""
+        from . import pin_panel
+        card_id = str(body.get("card_id") or "") or f"ipc-{uuid.uuid4().hex[:8]}"
+        source = str(body.get("source_text") or body.get("source") or "")
+        target = str(body.get("target_text") or body.get("target") or body.get("text") or "")
+        lang_label = body.get("lang_label") or body.get("lang") or None
+        mode = str(body.get("mode") or "live")
+        try:
+            pin_panel.PinPanel.get().add_result(
+                card_id=card_id,
+                source_text=source,
+                target_text=target,
+                lang_label=lang_label,
+                mode=mode,
+            )
+        except Exception:
+            LOG.exception("IPC add-result 失败")
+
+    def _on_ipc_set_language(self, code: str) -> None:
+        """主服务调来的『切换目标语言』：同步到本 app + 主面板。"""
+        code = (code or "zh").strip() or "zh"
+        if code == self.target_lang:
+            return
+        self.target_lang = code
+        LOG.info("IPC 切换目标语言为 %s", code)
+        from . import pin_panel
+        try:
+            pin_panel.PinPanel.get().set_language(code)
+        except Exception:
+            LOG.exception("IPC set-language 同步面板失败")
+
+    # 兼容旧名：保留 _on_ipc_enter_live 作为 _on_ipc_enter_select 的别名
+    _on_ipc_enter_live = _on_ipc_enter_select
 
     def _on_lang_change_from_window(self, code: str) -> None:
         """悬浮窗上语言下拉变化时，同步到 tray app 自身的目标语言。"""
@@ -170,6 +322,8 @@ class TranslateTrayApp:
 
     def stop(self) -> None:
         self._stop_event.set()
+        # 优先关控制 HTTP，避免主服务还在重试
+        self._stop_control_server()
         try:
             if self._live_session is not None and self._live_session.running:
                 self._live_session.stop()
@@ -185,6 +339,8 @@ class TranslateTrayApp:
                 self._keyboard_listener.stop()
         except Exception:
             pass
+        self._stop_selection_watcher()
+        self._stop_smart_detect()
         try:
             if self._tray_icon is not None:
                 self._tray_icon.stop()
@@ -195,18 +351,14 @@ class TranslateTrayApp:
 
     def _trigger_live_once(self) -> None:
         """单次模式：截一次后退出（调试用）。"""
-        from .translate_result_window import (
-            show_error,
-            show_loading,
-            show_translation,
-        )
+        from . import pin_panel
         from .translate_snipping import capture_region
 
         def _worker() -> None:
             png = capture_region()
             if png is None:
                 return
-            show_loading("正在识别并翻译...")
+            pin_panel.show_loading("正在识别并翻译...")
             self._translate_and_show(png, card_id=f"live-{uuid.uuid4().hex[:8]}")
 
         threading.Thread(target=_worker, daemon=True, name="live-once").start()
@@ -214,7 +366,7 @@ class TranslateTrayApp:
     def _enter_live_mode(self) -> None:
         """进入 Live 模式：持续显示选区蒙版，每次选完回调翻译。"""
         from .translate_snipping import LiveSession
-        from .translate_result_window import set_status
+        from . import pin_panel
 
         if self._live_session is not None and self._live_session.running:
             LOG.info("已在 Live 模式")
@@ -222,18 +374,21 @@ class TranslateTrayApp:
         # 同时只能跑一个模式
         self._exit_continuous_mode()
 
-        set_status("Live 模式：拖选翻译 · Esc 退出", color="#22c55e")
+        pin_panel.set_status("Live 模式：拖选翻译 · Esc 退出", color="#22c55e")
 
         def _on_select(png: bytes) -> None:
-            from .translate_result_window import show_loading
             card_id = f"live-{uuid.uuid4().hex[:8]}"
-            show_loading("正在识别并翻译...", card_id=card_id)
+            pin_panel.show_loading("正在识别并翻译...", card_id=card_id)
             self._translate_and_show(png, card_id=card_id)
 
         def _on_cancel() -> None:
-            from .translate_result_window import set_status
-            set_status("Live 模式已退出", color="#94a3b8")
+            pin_panel.set_status("Live 模式已退出", color="#94a3b8")
             self._live_session = None
+            # 用户取消后重新显示主面板（enter_select 隐藏过它）
+            try:
+                pin_panel.PinPanel.get().show()
+            except Exception:
+                LOG.exception("取消后恢复主面板失败")
 
         self._live_session = LiveSession()
         self._live_session.start(_on_select, _on_cancel)
@@ -242,15 +397,15 @@ class TranslateTrayApp:
         if self._live_session is not None and self._live_session.running:
             self._live_session.stop()
         self._live_session = None
-        from .translate_result_window import set_status
-        set_status("Live 模式已退出", color="#94a3b8")
+        from . import pin_panel
+        pin_panel.set_status("Live 模式已退出", color="#94a3b8")
 
     # ---------- Continuous 模式（连续 OCR） ----------
 
     def _enter_continuous_mode(self) -> None:
         """进入 Continuous 模式：先让用户定一个区域，然后每 N 秒自动 OCR + 翻译。"""
         from .translate_snipping import define_region
-        from .translate_result_window import set_status, show_error
+        from . import pin_panel
 
         if self._continuous_capture is not None and self._continuous_capture.running:
             LOG.info("已在 Continuous 模式")
@@ -264,15 +419,14 @@ class TranslateTrayApp:
             return
         x, y, w, h = region
         if w < 8 or h < 8:
-            show_error("所选区域太小，请重新选择")
+            pin_panel.show_error("所选区域太小，请重新选择")
             return
 
-        set_status(f"Continuous 模式：每 {self.continuous_interval_s:.1f}s 自动翻译 · Esc 退出", color="#a78bfa")
+        pin_panel.set_status(f"Continuous 模式：每 {self.continuous_interval_s:.1f}s 自动翻译 · Esc 退出", color="#a78bfa")
         self._continuous_card_id = f"continuous-{uuid.uuid4().hex[:8]}"
         self._last_continuous_signature = ""
 
-        from .translate_result_window import show_loading
-        show_loading("正在初始化连续模式...", card_id=self._continuous_card_id)
+        pin_panel.show_loading("正在初始化连续模式...", card_id=self._continuous_card_id)
 
         # 启 worker
         from .translate_snipping import start_continuous_capture
@@ -288,8 +442,8 @@ class TranslateTrayApp:
             if self._continuous_capture is not None and self._continuous_capture.running:
                 self._continuous_capture.stop()
             self._continuous_capture = None
-        from .translate_result_window import set_status
-        set_status("Continuous 模式已退出", color="#94a3b8")
+        from . import pin_panel
+        pin_panel.set_status("Continuous 模式已退出", color="#94a3b8")
 
     def _on_continuous_update(self, png: bytes) -> None:
         # 用图像 hash 简单去重（连续两次内容相同就不重复请求翻译）
@@ -298,9 +452,9 @@ class TranslateTrayApp:
             return
         self._last_continuous_signature = sig
 
-        from .translate_result_window import show_loading
+        from . import pin_panel
         if self._continuous_card_id:
-            show_loading("正在识别并翻译...", card_id=self._continuous_card_id)
+            pin_panel.show_loading("正在识别并翻译...", card_id=self._continuous_card_id)
         self._translate_and_show(png, card_id=self._continuous_card_id, mode="continuous")
 
     @staticmethod
@@ -326,10 +480,7 @@ class TranslateTrayApp:
         card_id: Optional[str] = None,
         mode: str = "live",
     ) -> None:
-        from .translate_result_window import (
-            show_error,
-            show_translation,
-        )
+        from . import pin_panel
 
         if not card_id:
             card_id = f"live-{uuid.uuid4().hex[:8]}"
@@ -349,9 +500,9 @@ class TranslateTrayApp:
                     source_lang=self.source_lang,
                 )
                 if not result.ok:
-                    show_error(result.error or "翻译失败")
+                    pin_panel.show_error(result.error or "翻译失败")
                     return
-                show_translation(
+                pin_panel.show_translation(
                     source_text=result.source_text,
                     translated_text=result.translated_text,
                     target_lang_label=self._lang_label(self.target_lang),
@@ -365,7 +516,7 @@ class TranslateTrayApp:
                 )
             except Exception as e:
                 LOG.exception("翻译异常")
-                show_error(f"翻译异常: {e}")
+                pin_panel.show_error(f"翻译异常: {e}")
             finally:
                 with self._inflight_lock:
                     self._inflight.discard(card_id)
@@ -386,6 +537,127 @@ class TranslateTrayApp:
             "ru": "Русский",
         }
         return table.get(code, code)
+
+    # ---------- 选中文字翻译 ----------
+
+    def _start_selection_watcher(self) -> None:
+        """启动 Ctrl+C 监听，复制文字后在鼠标附近弹"译"按钮。"""
+        if self._selection_watcher is not None:
+            return
+        try:
+            from .selection_watcher import SelectionWatcher
+        except ImportError:
+            LOG.warning("selection_watcher 模块缺失，选中文字翻译不可用")
+            return
+        self._selection_watcher = SelectionWatcher(on_translate=self._on_text_selected)
+        self._selection_watcher.start()
+
+    def _stop_selection_watcher(self) -> None:
+        if self._selection_watcher is not None:
+            try:
+                self._selection_watcher.stop()
+            except Exception:
+                LOG.exception("停止 selection_watcher 失败")
+            self._selection_watcher = None
+
+    def _on_text_selected(self, text: str) -> None:
+        """用户点了"译"按钮：唤起主面板并翻译这段文本。"""
+        from . import pin_panel
+        try:
+            pin_panel.PinPanel.get().show()
+        except Exception:
+            LOG.exception("显示主面板失败")
+        card_id = f"text-{uuid.uuid4().hex[:8]}"
+        pin_panel.show_loading("正在翻译选中的文字...", card_id=card_id)
+        self._translate_text_and_show(text, card_id=card_id)
+
+    def _translate_text_and_show(
+        self,
+        text: str,
+        card_id: Optional[str] = None,
+    ) -> None:
+        """纯文本翻译（跳过 OCR），结果显示到主面板。"""
+        from . import pin_panel
+
+        if not card_id:
+            card_id = f"text-{uuid.uuid4().hex[:8]}"
+
+        with self._inflight_lock:
+            if card_id in self._inflight:
+                return
+            self._inflight.add(card_id)
+
+        def _worker() -> None:
+            try:
+                result = self.api_client.translate_text(
+                    text=text,
+                    target_lang=self.target_lang,
+                    source_lang=self.source_lang,
+                )
+                if not result.ok:
+                    pin_panel.show_error(result.error or "翻译失败")
+                    return
+                pin_panel.show_translation(
+                    source_text=result.source_text,
+                    translated_text=result.translated_text,
+                    target_lang_label=self._lang_label(self.target_lang),
+                    translated_by=result.translated_by,
+                    card_id=card_id,
+                    mode="text",
+                )
+                LOG.info(
+                    "文本翻译完成 %d 字 → %d 字 (by %s)",
+                    len(result.source_text), len(result.translated_text), result.translated_by,
+                )
+            except Exception as e:
+                LOG.exception("文本翻译异常")
+                pin_panel.show_error(f"翻译异常: {e}")
+            finally:
+                with self._inflight_lock:
+                    self._inflight.discard(card_id)
+
+        threading.Thread(target=_worker, daemon=True, name=f"translate-text-{card_id}").start()
+
+    # ---------- 智能检测（鼠标悬停即译） ----------
+
+    def _on_smart_detect_toggle(self, enabled: bool) -> None:
+        """主面板「🔍 检测」按钮或 IPC /toggle-smart-detect 触发。"""
+        if enabled:
+            self._start_smart_detect()
+        else:
+            self._stop_smart_detect()
+
+    def _start_smart_detect(self) -> None:
+        if self._smart_detect is not None and self._smart_detect.enabled:
+            return
+        try:
+            from .smart_detect import SmartDetectController
+        except ImportError:
+            LOG.warning("smart_detect 模块缺失，智能检测不可用")
+            return
+        self._smart_detect = SmartDetectController(on_detect=self._on_smart_detect)
+        self._smart_detect.set_enabled(True)
+        from . import pin_panel
+        pin_panel.set_status("智能检测已开启：鼠标停留即翻译 · 再点 🔍 关闭", color="#22c55e")
+
+    def _stop_smart_detect(self) -> None:
+        if self._smart_detect is None:
+            return
+        try:
+            self._smart_detect.stop()
+        except Exception:
+            LOG.exception("停止 smart_detect 失败")
+        self._smart_detect = None
+        LOG.info("智能检测已关闭")
+        from . import pin_panel
+        pin_panel.set_status("智能检测已关闭", color="#94a3b8")
+
+    def _on_smart_detect(self, png: bytes) -> None:
+        """鼠标悬停触发：截图 → OCR + 翻译 → 主面板卡片 + 字幕窗口。"""
+        from . import pin_panel
+        card_id = "smart-detect"
+        pin_panel.show_loading("智能检测：正在识别并翻译...", card_id=card_id)
+        self._translate_and_show(png, card_id=card_id, mode="smart")
 
     # ---------- 托盘 ----------
 
@@ -417,8 +689,8 @@ class TranslateTrayApp:
             self._enter_continuous_mode()
 
         def _on_clear(icon, item) -> None:
-            from .translate_result_window import clear_all
-            clear_all()
+            from . import pin_panel
+            pin_panel.clear_all()
 
         def _on_change_lang(icon, item) -> None:
             cycle = ["zh", "en", "ja", "ko", "fr", "de"]
@@ -432,16 +704,26 @@ class TranslateTrayApp:
                 icon.notify(f"目标语言：{self._lang_label(self.target_lang)}", title="屏幕翻译")
             except Exception:
                 pass
-            # 同步到悬浮窗的语言下拉
+            # 同步到主面板的语言下拉
             try:
-                from . import translate_result_window
-                translate_result_window.ConsolidatedTranslateWindow.get().set_target_lang(self.target_lang)
+                from . import pin_panel
+                pin_panel.PinPanel.get().set_language(self.target_lang)
             except Exception:
-                LOG.exception("同步窗口语言失败")
+                LOG.exception("同步主面板语言失败")
 
         def _on_exit(icon, item) -> None:
             LOG.info("退出托盘")
             self.stop()
+
+        def _on_smart_detect(icon, item) -> None:
+            from . import pin_panel
+            try:
+                pin_panel.PinPanel.get().toggle_smart_detect()
+            except Exception:
+                LOG.exception("切换智能检测失败")
+
+        def _smart_detect_checked(item) -> bool:
+            return self._smart_detect is not None and self._smart_detect.enabled
 
         menu = pystray.Menu(
             pystray.MenuItem(f"开始 Live 模式（{self._short_hk(self.hotkey)}）", _on_live, default=True),
@@ -450,6 +732,9 @@ class TranslateTrayApp:
             ),
             pystray.MenuItem(f"清空结果（{self._short_hk(self.clear_hotkey)}）", _on_clear),
             pystray.MenuItem("切换目标语言", _on_change_lang),
+            pystray.MenuItem(
+                "智能检测（鼠标悬停即译）", _on_smart_detect, checked=_smart_detect_checked
+            ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", _on_exit),
         )
@@ -509,8 +794,8 @@ class TranslateTrayApp:
             self._enter_continuous_mode()
 
         def _on_clear() -> None:
-            from .translate_result_window import clear_all
-            clear_all()
+            from . import pin_panel
+            pin_panel.clear_all()
 
         def _on_esc() -> None:
             # 任何模式下按 Esc 都先退出当前模式
@@ -564,7 +849,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("PRIVATE_AI_AGENT_BASE_URL", "http://127.0.0.1:8787"),
+        default=os.environ.get("PRIVATE_AI_AGENT_BASE_URL") or None,
+        help="主服务地址（不填则读 PRIVATE_AI_AGENT_BASE_URL；都没有则按 PORT 推断 3000）",
+    )
+    parser.add_argument(
+        "--control-port",
+        type=int,
+        default=int(
+            (os.environ.get("TRANSLATE_TRAY_CONTROL_PORT") or "0").strip() or "0"
+        ),
+        help="托盘本地 IPC HTTP 端口（仅 127.0.0.1），0=关闭，默认 8766",
     )
     parser.add_argument("--once", action="store_true", help="截一次后退出（调试用）")
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
@@ -583,6 +877,7 @@ def main() -> None:
         source_lang=args.source_lang,
         base_url=args.base_url,
         continuous_interval_s=args.continuous_interval,
+        control_port=args.control_port,
     )
     try:
         app.start(once=args.once)

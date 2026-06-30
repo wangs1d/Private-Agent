@@ -766,15 +766,18 @@ _TK_THREAD_LOCK = threading.Lock()
 
 
 def _ensure_tk_thread() -> tk.Tk:
-    """确保有一个 Tk 主循环在后台运行；返回 dummy root。"""
+    """确保有一个 Tk 主循环在后台运行；返回 dummy root。
+
+    注意：不要在这里跨线程调用 _TK_THREAD.winfo_exists()。
+    winfo_exists() 会同步求值 Tcl，必须由拥有解释器的 Tk 线程发起；
+    当 Tk 线程正忙（例如字幕窗口 update_idletasks()）时，从其它线程
+    调 winfo_exists() 会永久阻塞，表现为 IPC /add-result 等端点 timeout，
+    而 /health（不碰 Tcl）仍 200。这里只信任引用本身。
+    """
     global _TK_THREAD
     with _TK_THREAD_LOCK:
         if _TK_THREAD is not None:
-            try:
-                if _TK_THREAD.winfo_exists():
-                    return _TK_THREAD
-            except Exception:
-                pass
+            return _TK_THREAD
         # Tk 实例必须和 mainloop 在同一线程创建,否则跨线程访问会触发
         # "Calling Tcl from different apartment"。先把 root 占位 None,在线程里建。
         _TK_THREAD = None

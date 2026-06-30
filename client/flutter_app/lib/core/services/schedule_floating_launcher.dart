@@ -124,9 +124,8 @@ class ScheduleFloatingLauncher {
           args,
           workingDirectory: overlayDir.path,
           environment: env,
+          mode: ProcessStartMode.detached,
         );
-        unawaited(Process.start(electronExe.path, args, // nosem(avoid-dynamic-process-calls)
-            workingDirectory: overlayDir.path, environment: env));
         return true;
       }
       if (electronBin.existsSync()) {
@@ -135,6 +134,7 @@ class ScheduleFloatingLauncher {
           <String>["/c", electronBin.path, ...args],
           workingDirectory: overlayDir.path,
           environment: env,
+          mode: ProcessStartMode.detached,
         );
         return true;
       }

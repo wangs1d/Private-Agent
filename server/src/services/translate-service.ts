@@ -170,6 +170,39 @@ export class TranslateService {
   }
 
   /**
+   * 纯文本翻译：跳过 OCR，直接调 callTranslate。
+   * 供『选中文字翻译』使用（不经过截图/OCR）。
+   */
+  async translateText(req: {
+    text: string;
+    targetLang?: string;
+    sourceLang?: string;
+  }): Promise<TranslateResult> {
+    const targetLang = (req.targetLang ?? "zh").trim() || "zh";
+    const sourceText = (req.text ?? "").trim();
+    if (!sourceText) {
+      return {
+        ok: true,
+        sourceText: "",
+        translatedText: "",
+        targetLang,
+        lines: [],
+        translatedBy: "none",
+      };
+    }
+    const translated = await this.callTranslate(sourceText, targetLang, req.sourceLang);
+    return {
+      ok: translated.ok,
+      sourceText,
+      translatedText: translated.text,
+      targetLang,
+      lines: [],
+      translatedBy: translated.ok ? translated.by : "none",
+      error: translated.ok ? undefined : translated.error,
+    };
+  }
+
+  /**
    * 调用 PaddleOCR HTTP 服务。
    */
   private async callPaddleOcr(req: TranslateRequest): Promise<{

@@ -26,6 +26,7 @@ import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
+import "core/services/translate_tray_client.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
@@ -33,7 +34,7 @@ import "features/mailbox/mailbox_page.dart";
 import "features/notes/notes_chat_page.dart";
 import "features/chat/background_tasks_sheet.dart";
 import "features/chat/chat_page.dart";
-import "features/chat/jarvis_chat_layout.dart";
+import "features/chat/chat_layout.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/voice_mode_page.dart";
 import "features/chat/voiceprint_registration_page.dart";
@@ -284,7 +285,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       // 设置agent名字占位符
       _agentName = "AI助手";
       _isInitialized = true;
-      _showEntranceAnimation = false;
     });
 
     unawaited(_flushScheduleOfflineDeletes());
@@ -1586,22 +1586,66 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 常用工具「翻译」入口：屏幕翻译由独立模块 desktop-translate 提供（系统托盘 + 全局热键
-  /// Ctrl+Shift+T + 截屏选区 + 悬浮结果窗），后端启动时会自动拉起（首次会自动创建 venv
-  /// 并安装依赖），无需再走 desktop-visual。
-  void _openTranslatePage() {
+  /// 常用工具「翻译」入口：唤起桌面翻译托盘悬浮窗。
+  /// - 先探活：托盘没起就提示用户运行 start-translate.ps1
+  /// - 托盘在跑：调 /api/translate/show-window，主服务转发到托盘本地 IPC
+  /// - 端口或连接异常：明确报错，避免用户瞎猜
+  Future<void> _openTranslatePage() async {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null) return;
-    ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
+    final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(navCtx);
+
+    // 先显示「正在连接」提示，避免用户觉得没反应
+    messenger?.showSnackBar(
       const SnackBar(
-        content: Text(
-          "屏幕翻译由独立模块提供：后端启动时会自动拉起托盘，\n"
-          "按 Ctrl+Shift+T 框选屏幕区域即可翻译。\n"
-          "如未自动启动（首次需装依赖时拉得较慢），可手动运行根目录 start-translate.ps1。",
-        ),
-        duration: Duration(seconds: 5),
+        content: Text("正在唤起翻译窗口…"),
+        duration: Duration(seconds: 2),
       ),
     );
+
+    final TranslateTrayClient client = TranslateTrayClient();
+    try {
+      final TranslateTrayStatus status = await client.trayStatus();
+      if (!status.alive) {
+        messenger?.hideCurrentSnackBar();
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(
+              "翻译托盘未运行：${status.error ?? "无法连接"}\n"
+              "请在仓库根目录运行 start-translate.ps1（或检查主服务日志）",
+            ),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+        return;
+      }
+      // 托盘在跑 → 唤起主面板
+      final showResult = await client.showWindow(
+        hint: "点击 ✚ 框选翻译"
+            "  ·  按 ${status.hotkeys['clear'] ?? 'Ctrl+Shift+C'} 清空",
+      );
+      messenger?.hideCurrentSnackBar();
+      if (showResult.ok) {
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(
+              "已唤起翻译面板，点击 ✚ 框选区域"
+              "（或按 ${status.hotkeys['live'] ?? 'Ctrl+Shift+T'}）",
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      } else {
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text("唤起失败：${showResult.error ?? "未知错误"}"),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } finally {
+      client.dispose();
+    }
   }
 
   /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
