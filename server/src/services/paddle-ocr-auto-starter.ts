@@ -1,3 +1,13 @@
+/**
+ * PaddleOCR HTTP 服务自启器。
+ *
+ * 行为：
+ *  - 在本机 spawn `python -m desktop_visual.paddle_ocr_server --host ... --port ...`
+ *  - 端口默认 8765，可由 PADDLE_OCR_PORT 覆盖
+ *  - 若 venv 不存在或缺 paddleocr 依赖，自动跑 install-deps.ps1
+ *  - 进程退出时 5s 后自动重连
+ *  - 设 PADDLE_OCR_AUTO_START=0 可关闭
+ */
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -8,15 +18,23 @@ function envStr(env: NodeJS.ProcessEnv, key: string, fallback = ""): string {
   return env[key]?.trim() || fallback;
 }
 
+function envInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
 function defaultPackageRoot(): string {
   // server/src/services/this-file.ts → ../../.. → repo root
   const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "..", "desktop-translate");
+  return join(here, "..", "..", "..", "desktop-visual");
 }
 
 function resolvePackageRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const fromEnv = envStr(env, "DESKTOP_TRANSLATE_ROOT");
-  if (fromEnv && existsSync(join(fromEnv, "translate_tray"))) {
+  const fromEnv = envStr(env, "PADDLE_OCR_ROOT");
+  if (fromEnv && existsSync(join(fromEnv, "desktop_visual", "paddle_ocr_server.py"))) {
     return fromEnv;
   }
   return defaultPackageRoot();
@@ -46,39 +64,33 @@ function findPowershellExe(): string {
   return "powershell.exe";
 }
 
-export function getDesktopTranslatePaths(env: NodeJS.ProcessEnv = process.env): {
+export function getPaddleOcrPaths(env: NodeJS.ProcessEnv = process.env): {
   pythonExe: string;
   packageRoot: string;
   installScript: string;
 } {
   const packageRoot = resolvePackageRoot(env);
-  const fromEnv = envStr(env, "DESKTOP_TRANSLATE_PYTHON");
+  const fromEnv = envStr(env, "PADDLE_OCR_PYTHON");
   return {
     pythonExe: fromEnv || defaultPythonExe(packageRoot) || "python",
     packageRoot,
-    installScript: envStr(env, "DESKTOP_TRANSLATE_INSTALL_SCRIPT") || defaultInstallScript(packageRoot),
+    installScript: envStr(env, "PADDLE_OCR_INSTALL_SCRIPT") || defaultInstallScript(packageRoot),
   };
 }
 
-/** 默认随 server 启动桌面翻译托盘；设 DESKTOP_TRANSLATE_AUTO_START=0 可关闭。 */
-export function shouldAutoStartDesktopTranslate(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const raw = env.DESKTOP_TRANSLATE_AUTO_START?.trim().toLowerCase();
+export function shouldAutoStartPaddleOcr(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.PADDLE_OCR_AUTO_START?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
   return true;
 }
 
-export type DesktopTranslateAutoStarterOptions = {
+export type PaddleOcrAutoStarterOptions = {
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void;
-  /** 是否允许在没有 venv / 缺依赖的情况下自动跑 install-deps.ps1。默认 true。 */
   autoInstallDeps?: boolean;
-  /** 自动装依赖时的最大等待时间（毫秒）。默认 300_000（5 分钟）。 */
   autoInstallTimeoutMs?: number;
 };
 
-/** 异步跑 install-deps.ps1，成功返回 true。 */
 function runInstallDepsAsync(
   installScript: string,
   log: (line: string) => void,
@@ -86,13 +98,13 @@ function runInstallDepsAsync(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     if (!existsSync(installScript)) {
-      log(`[desktop-translate] 未找到安装脚本 ${installScript}`);
+      log(`[paddle-ocr] 未找到安装脚本 ${installScript}`);
       resolve(false);
       return;
     }
     const ps = findPowershellExe();
     log(
-      `[desktop-translate] 自动创建 venv 并安装依赖（powershell ${installScript}，最长 ${Math.round(timeoutMs / 1000)}s）`,
+      `[paddle-ocr] 自动创建 venv 并安装依赖（powershell ${installScript}，最长 ${Math.round(timeoutMs / 1000)}s）`,
     );
     const child: ChildProcess = spawn(
       ps,
@@ -103,26 +115,21 @@ function runInstallDepsAsync(
     const finish = (ok: boolean, msg?: string): void => {
       if (settled) return;
       settled = true;
-      if (ok) log(`[desktop-translate] 依赖安装完成`);
-      else log(`[desktop-translate] 依赖安装失败${msg ? ": " + msg : ""}`);
       resolve(ok);
+      if (!ok && msg) log(`[paddle-ocr][install] 失败：${msg}`);
     };
-    child.stdout?.on("data", (buf) => {
+    child.stdout.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
-        log(`[desktop-translate][install] ${line}`);
+        log(`[paddle-ocr][install] ${line}`);
       }
     });
-    child.stderr?.on("data", (buf) => {
+    child.stderr.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
-        log(`[desktop-translate][install] ${line}`);
+        log(`[paddle-ocr][install] ${line}`);
       }
     });
-    child.on("error", (err) => {
-      finish(false, err instanceof Error ? err.message : String(err));
-    });
-    child.on("close", (code) => {
-      finish(code === 0, `code=${code ?? "?"}`);
-    });
+    child.on("error", (err) => finish(false, err instanceof Error ? err.message : String(err)));
+    child.on("close", (code) => finish(code === 0, `code=${code ?? "?"}`));
     setTimeout(() => {
       try {
         child.kill();
@@ -134,15 +141,14 @@ function runInstallDepsAsync(
   });
 }
 
-/** 用 venv Python 探一下关键依赖是否就绪。 */
-function probeDepsAsync(pythonExe: string, log: (line: string) => void): Promise<boolean> {
+function probeDepsAsync(pythonExe: string): Promise<boolean> {
   return new Promise((resolve) => {
+    // paddlepaddle 3.x 包名已重命名为 `paddle`；`paddlex` 才是 paddleocr 3.x 的入口
     const probe = spawn(
       pythonExe,
       [
         "-c",
-        // 显式 import importlib.util（仅 `import importlib` 不会自动暴露 util 子模块）
-        "import importlib.util as u,sys;sys.exit(0 if all(u.find_spec(m) for m in ['pystray','pynput','PIL','httpx']) else 1)",
+        "from importlib import util; mods=['fastapi','uvicorn','paddleocr','paddle','paddlex']; import sys; sys.exit(0 if all(util.find_spec(m) for m in mods) else 1)",
       ],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
     );
@@ -165,11 +171,6 @@ function probeDepsAsync(pythonExe: string, log: (line: string) => void): Promise
   });
 }
 
-/**
- * 异步确保 venv 存在且依赖已就绪。
- *  - 若 .venv 不存在：跑 install-deps.ps1
- *  - 若 venv 存在但 pystray 等关键依赖缺失：跑 install-deps.ps1
- */
 async function ensureEnvironment(
   pythonExe: string,
   installScript: string,
@@ -181,57 +182,48 @@ async function ensureEnvironment(
 ): Promise<{ ok: boolean; error?: string }> {
   const { autoInstallDeps, autoInstallTimeoutMs, log } = opts;
   if (existsSync(pythonExe)) {
-    const ok = await probeDepsAsync(pythonExe, log);
+    const ok = await probeDepsAsync(pythonExe);
     if (ok) return { ok: true };
     if (!autoInstallDeps) {
-      return { ok: false, error: "依赖未安装（pystray/pynput/PIL/httpx）" };
+      return { ok: false, error: "依赖未安装（paddleocr/paddlepaddle/fastapi/uvicorn）" };
     }
-    log(`[desktop-translate] 关键依赖缺失，跑 install-deps.ps1`);
+    log(`[paddle-ocr] 关键依赖缺失，跑 install-deps.ps1`);
   } else {
     if (!autoInstallDeps) {
       return { ok: false, error: `未找到 ${pythonExe}，且已禁用自动安装依赖` };
     }
-    log(`[desktop-translate] 未找到 ${pythonExe}，开始自动创建 venv 并装依赖`);
+    log(`[paddle-ocr] 未找到 ${pythonExe}，开始自动创建 venv 并装依赖`);
   }
   const ok = await runInstallDepsAsync(installScript, log, autoInstallTimeoutMs);
   if (!ok) return { ok: false, error: "install-deps.ps1 失败" };
   if (!existsSync(pythonExe)) {
     return { ok: false, error: `安装脚本完成但仍未找到 ${pythonExe}` };
   }
+  const ok2 = await probeDepsAsync(pythonExe);
+  if (!ok2) return { ok: false, error: "安装后仍缺关键依赖" };
   return { ok: true };
 }
 
-/**
- * 在本机 spawn Python `translate_tray` 模块，托盘 + 全局热键。
- * 与 desktop-visual 完全解耦——只依赖 desktop-translate/ 子包。
- *
- * 行为：
- *  - 若 <packageRoot>/.venv 不存在且 autoInstallDeps=true，自动跑 install-deps.ps1
- *  - 若 venv 存在但依赖缺失（pystray/pynput 等），同样会自动重装
- *  - 启动期不阻塞 server：先注册一个延后 spawn，等 venv/依赖就绪后再启动托盘
- *  - 进程异常退出时，5s 后自动重连
- *  - 设 DESKTOP_TRANSLATE_AUTO_START=0 可关闭
- */
-export function startDesktopTranslateTray(
-  opts: DesktopTranslateAutoStarterOptions = {},
+export function startPaddleOcrServer(
+  opts: PaddleOcrAutoStarterOptions = {},
 ): () => void {
   const env = opts.env ?? process.env;
-  if (!shouldAutoStartDesktopTranslate(env)) {
+  if (!shouldAutoStartPaddleOcr(env)) {
     return () => {};
   }
 
   const log = opts.log ?? ((line: string) => console.log(line));
   const autoInstallDeps = opts.autoInstallDeps !== false;
-  const autoInstallTimeoutMs = opts.autoInstallTimeoutMs ?? 300_000;
-  const { pythonExe, packageRoot, installScript } = getDesktopTranslatePaths(env);
+  const autoInstallTimeoutMs = opts.autoInstallTimeoutMs ?? 900_000; // 15min，paddlepaddle 很大
+  const { pythonExe, packageRoot, installScript } = getPaddleOcrPaths(env);
 
-  if (!existsSync(join(packageRoot, "translate_tray"))) {
-    log(`[desktop-translate] 跳过自启动：未找到 ${packageRoot}`);
+  const host = envStr(env, "PADDLE_OCR_HOST", "127.0.0.1");
+  const port = envInt(env, "PADDLE_OCR_PORT", 8765);
+
+  if (!existsSync(join(packageRoot, "desktop_visual", "paddle_ocr_server.py"))) {
+    log(`[paddle-ocr] 跳过自启动：未找到 ${packageRoot}/desktop_visual/paddle_ocr_server.py`);
     return () => {};
   }
-
-  const baseUrl =
-    envStr(env, "PRIVATE_AI_AGENT_BASE_URL") || "http://127.0.0.1:8787";
 
   let stopped = false;
   let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
@@ -240,31 +232,39 @@ export function startDesktopTranslateTray(
 
   const childEnv: NodeJS.ProcessEnv = {
     ...env,
-    PRIVATE_AI_AGENT_BASE_URL: baseUrl,
-    PYTHONUNBUFFERED: "1",
-    // desktop-translate 也走 D 盘缓存/临时(避免它自己读 .paddlex 时落到 C 盘)
+    PADDLE_OCR_HOST: host,
+    PADDLE_OCR_PORT: String(port),
+    // 把所有 Paddle/pip 缓存目录透传给子进程,严禁再写 C 盘
+    PADDLE_OCR_MODEL_DIR: envStr(env, "PADDLE_OCR_MODEL_DIR", "D:\\paddle\\paddleocr"),
+    PPOCR_HOME: envStr(env, "PADDLE_OCR_MODEL_DIR", "D:\\paddle\\paddleocr"),
     PADDLE_PDX_CACHE_HOME: envStr(env, "PADDLE_PDX_CACHE_HOME", "D:\\paddle\\paddlex"),
     PIP_CACHE_DIR: envStr(env, "PIP_CACHE_DIR", "D:\\paddle\\pip"),
     HF_HOME: envStr(env, "HF_HOME", "D:\\paddle\\hf"),
+    HUGGINGFACE_HUB_CACHE: envStr(
+      env,
+      "HUGGINGFACE_HUB_CACHE",
+      "D:\\paddle\\hf\\hub",
+    ),
+    // Paddle inference 临时文件走 D 盘
     TEMP: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
     TMP: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
     TMPDIR: envStr(env, "PADDLE_TMP_DIR", "D:\\paddle\\tmp"),
+    PYTHONUNBUFFERED: "1",
   };
 
   const spawnOnce = (): void => {
     if (stopped || installing) return;
-    log(`[desktop-translate] spawn 托盘: ${pythonExe} -m translate_tray.translate_tray`);
-    child = spawn(pythonExe, ["-u", "-m", "translate_tray.translate_tray"], {
-      cwd: packageRoot,
-      env: childEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    log(`[paddle-ocr] spawn: ${pythonExe} -m desktop_visual.paddle_ocr_server --host ${host} --port ${port}`);
+    child = spawn(
+      pythonExe,
+      ["-u", "-m", "desktop_visual.paddle_ocr_server", "--host", host, "--port", String(port)],
+      { cwd: packageRoot, env: childEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+    );
 
     let moduleMissing = false;
     child.stdout.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
-        log(`[desktop-translate] ${line}`);
+        log(`[paddle-ocr] ${line}`);
       }
     });
     child.stderr.on("data", (buf) => {
@@ -273,12 +273,12 @@ export function startDesktopTranslateTray(
         moduleMissing = true;
       }
       for (const line of text.split(/\r?\n/).filter(Boolean)) {
-        log(`[desktop-translate] ${line}`);
+        log(`[paddle-ocr] ${line}`);
       }
     });
 
     child.on("error", (err) => {
-      log(`[desktop-translate] 进程错误: ${err instanceof Error ? err.message : String(err)}`);
+      log(`[paddle-ocr] 进程错误: ${err instanceof Error ? err.message : String(err)}`);
       scheduleRestart(5_000);
     });
 
@@ -286,7 +286,7 @@ export function startDesktopTranslateTray(
       child = null;
       if (stopped) return;
       if (moduleMissing && autoInstallDeps) {
-        log(`[desktop-translate] 检测到依赖缺失，重新跑 install-deps.ps1 后重启`);
+        log(`[paddle-ocr] 检测到依赖缺失，重新跑 install-deps.ps1 后重启`);
         void (async () => {
           installing = true;
           try {
@@ -303,7 +303,7 @@ export function startDesktopTranslateTray(
         })();
         return;
       }
-      log(`[desktop-translate] 进程退出 code=${code ?? "?"}，5s 后重连…`);
+      log(`[paddle-ocr] 进程退出 code=${code ?? "?"}，5s 后重连…`);
       scheduleRestart(5_000);
     });
   };
@@ -317,10 +317,9 @@ export function startDesktopTranslateTray(
   };
 
   log(
-    `[desktop-translate] 随 server 自启动 → base=${baseUrl}  python=${pythonExe}（DESKTOP_TRANSLATE_AUTO_START=0 可关闭）`,
+    `[paddle-ocr] 随 server 自启动 → ${host}:${port}  python=${pythonExe}（PADDLE_OCR_AUTO_START=0 可关闭）`,
   );
 
-  // 异步准备环境，不阻塞 server 启动
   void (async () => {
     try {
       installing = true;
@@ -333,16 +332,14 @@ export function startDesktopTranslateTray(
       if (stopped) return;
       if (!r.ok) {
         log(
-          `[desktop-translate] 跳过自启动：${r.error ?? "依赖环境未就绪"}（可手动运行根目录 start-translate.ps1）`,
+          `[paddle-ocr] 跳过自启动：${r.error ?? "依赖环境未就绪"}（可手动运行根目录 start-paddle-ocr.ps1）`,
         );
         return;
       }
       spawnOnce();
     } catch (e) {
       installing = false;
-      log(
-        `[desktop-translate] 环境准备异常: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      log(`[paddle-ocr] 环境准备异常: ${e instanceof Error ? e.message : String(e)}`);
     }
   })();
 

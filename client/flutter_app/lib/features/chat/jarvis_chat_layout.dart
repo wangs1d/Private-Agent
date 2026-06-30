@@ -451,7 +451,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
     final List<_ToolSpec> secondRow = <_ToolSpec>[
       _ToolSpec(icon: Icons.sports_esports_outlined, label: "游戏", onTap: widget.onGames),
       _ToolSpec(icon: Icons.home_outlined, label: "家居"),
-      _ToolSpec(icon: Icons.note_alt_outlined, label: "笔记"),
+      _ToolSpec(icon: Icons.note_alt_outlined, label: "笔记", onTap: widget.onNotes),
       _ToolSpec(icon: Icons.calendar_today_outlined, label: "日程", onTap: widget.onSchedule),
     ];
 

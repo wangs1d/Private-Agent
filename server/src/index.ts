@@ -6,6 +6,7 @@ import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
 import { startDesktopTranslateTray } from "./services/desktop-translate-auto-starter.js";
+import { startPaddleOcrServer } from "./services/paddle-ocr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
   isWechatClawBridgeEnabled,
@@ -16,6 +17,9 @@ import { isTcpPortInUse } from "./utils/port-in-use.js";
 
 // 始终从 server/.env + server/.env.local 加载（密钥放 .env.local，避免被脚本误覆盖）
 loadServerEnv();
+
+// ─── 提前声明 shutdown（避免 uncaughtException 触发时遇到 const 暂时性死区） ───
+let shutdown: (() => void) | null = null;
 
 // ─── 全局异常处理：防止未捕获异常导致进程意外崩溃 ───
 process.on("uncaughtException", (err: Error) => {
@@ -71,6 +75,9 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
 const stopDesktopTranslate = startDesktopTranslateTray({
   log: (line) => services.app.log.info(line),
 });
+const stopPaddleOcr = startPaddleOcrServer({
+  log: (line) => services.app.log.info(line),
+});
 const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   ? (() => {
       const bridge = readWechatClawBridgeConfig(process.env);
@@ -93,7 +100,7 @@ const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
     })()
   : startOpenClawModelSyncWatcher(process.env);
 
-const shutdown = (): void => {
+const performShutdown = (): void => {
   // ─── Webhook: Agent 下线事件（通过 HookBus 自动外推） ───
   services.hookBus.emit("agent.offline", {
     port: runtime.port,
@@ -103,11 +110,13 @@ const shutdown = (): void => {
   services.webhookService.stop();
   stopDesktopBridge();
   stopDesktopTranslate();
+  stopPaddleOcr();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));
 };
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
+shutdown = performShutdown;
+process.once("SIGINT", performShutdown);
+process.once("SIGTERM", performShutdown);
 const worldStandalone = process.env.AGENT_WORLD_STANDALONE_URL?.trim() || "http://127.0.0.1:3333";
 console.log(
   `[dev] server http://127.0.0.1:${runtime.port} | Agent World ${worldStandalone}`,
