@@ -5,6 +5,15 @@
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
 
 #include <optional>
 #include <string>
@@ -74,6 +83,17 @@ bool FlutterWindow::OnCreate() {
         HandleDesktopNotificationMethodCall(call, std::move(result));
       });
 
+  // 独立翻译悬浮窗 MethodChannel —— pai/translate_overlay
+  translate_overlay_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/translate_overlay",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  translate_overlay_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleTranslateOverlayMethodCall(call, std::move(result));
+      });
+
   // 独立"通话中"窗口 MethodChannel —— pai/connected_call
   connected_call_channel_ = std::make_unique<
       flutter::MethodChannel<flutter::EncodableValue>>(
@@ -93,6 +113,28 @@ bool FlutterWindow::OnCreate() {
   outgoing_call_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
         HandleOutgoingCallMethodCall(call, std::move(result));
+      });
+
+  // 独立今日安排悬浮窗 MethodChannel —— pai/schedule_floating
+  schedule_floating_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/schedule_floating",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  schedule_floating_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleScheduleFloatingMethodCall(call, std::move(result));
+      });
+
+  // Agent 主页信息弹出窗 MethodChannel —— pai/agent_profile
+  agent_profile_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/agent_profile",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  agent_profile_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleAgentProfileMethodCall(call, std::move(result));
       });
 
   // pai/window_titlebar —— 动态切换 Windows 标题栏深色/亮色
@@ -220,6 +262,8 @@ void FlutterWindow::OnDestroy() {
   incoming_call_channel_.reset();
   desktop_notification_window_.reset();
   desktop_notification_channel_.reset();
+  translate_overlay_window_.reset();
+  translate_overlay_channel_.reset();
   connected_call_window_.reset();
   connected_call_channel_.reset();
   outgoing_call_window_.reset();
@@ -653,6 +697,449 @@ void FlutterWindow::ReportDesktopNotificationEvent(const std::string& event) {
       "onNativeEvent", std::make_unique<flutter::EncodableValue>(payload));
 }
 
+void FlutterWindow::HandleTranslateOverlayMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "create") {
+    if (!translate_overlay_window_) {
+      translate_overlay_window_ = std::make_unique<TranslateOverlayWindow>();
+      translate_overlay_window_->SetEventCallback(
+          [this](TranslateOverlayWindow::EventType type, const std::string& payload) {
+            std::string event_name;
+            switch (type) {
+              case TranslateOverlayWindow::EventType::kCloseClicked: event_name = "close"; break;
+              case TranslateOverlayWindow::EventType::kClearClicked: event_name = "clear"; break;
+              case TranslateOverlayWindow::EventType::kLangChanged: event_name = "langChanged"; break;
+            }
+            if (translate_overlay_channel_) {
+              flutter::EncodableMap pl;
+              pl[flutter::EncodableValue("event")] = flutter::EncodableValue(event_name);
+              pl[flutter::EncodableValue("payload")] = flutter::EncodableValue(payload);
+              translate_overlay_channel_->InvokeMethod(
+                  "onNativeEvent", std::make_unique<flutter::EncodableValue>(pl));
+            }
+          });
+    }
+    const bool ok = translate_overlay_window_->Create();
+    result->Success(flutter::EncodableValue(ok));
+    return;
+  }
+
+  if (method == "destroy") {
+    translate_overlay_window_.reset();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "show") {
+    if (!translate_overlay_window_) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    translate_overlay_window_->Show();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (translate_overlay_window_) translate_overlay_window_->Hide();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setOnTop") {
+    bool on_top = true;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      on_top = GetEncodableBool(args, "onTop", true);
+    }
+    if (translate_overlay_window_) translate_overlay_window_->SetOnTop(on_top);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setBounds") {
+    int x = 200, y = 200, w = 380, h = 460;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      x = GetEncodableInt(args, "x", x);
+      y = GetEncodableInt(args, "y", y);
+      w = GetEncodableInt(args, "width", w);
+      h = GetEncodableInt(args, "height", h);
+    }
+    if (translate_overlay_window_) translate_overlay_window_->SetBounds(x, y, w, h);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "getBounds") {
+    if (!translate_overlay_window_) {
+      result->Success(flutter::EncodableValue(flutter::EncodableMap{}));
+      return;
+    }
+    RECT r = translate_overlay_window_->GetBounds();
+    flutter::EncodableMap m;
+    m[flutter::EncodableValue("x")] = flutter::EncodableValue(static_cast<int>(r.left));
+    m[flutter::EncodableValue("y")] = flutter::EncodableValue(static_cast<int>(r.top));
+    m[flutter::EncodableValue("width")] = flutter::EncodableValue(static_cast<int>(r.right - r.left));
+    m[flutter::EncodableValue("height")] = flutter::EncodableValue(static_cast<int>(r.bottom - r.top));
+    result->Success(flutter::EncodableValue(m));
+    return;
+  }
+
+  if (method == "setLanguage") {
+    std::string code = "zh", label = "中文";
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      code = GetEncodableString(args, "code", code);
+      label = GetEncodableString(args, "label", label);
+    }
+    if (translate_overlay_window_) translate_overlay_window_->SetTargetLanguage(code, label);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setFont") {
+    std::string font = "Microsoft YaHei UI";
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      font = GetEncodableString(args, "font", font);
+    }
+    if (translate_overlay_window_) translate_overlay_window_->SetDisplayFont(font);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setSubtitle") {
+    bool on = true;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      on = GetEncodableBool(args, "on", on);
+    }
+    if (translate_overlay_window_) translate_overlay_window_->SetSubtitleMode(on);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setCards") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      auto cards_it = args->find(flutter::EncodableValue("cards"));
+      auto* list = (cards_it != args->end())
+                       ? std::get_if<flutter::EncodableList>(&cards_it->second)
+                       : nullptr;
+      std::vector<TranslateOverlayWindow::Card> cards;
+      if (list && translate_overlay_window_) {
+        for (const auto& item : *list) {
+          auto* m = std::get_if<flutter::EncodableMap>(&item);
+          if (!m) continue;
+          TranslateOverlayWindow::Card c;
+          c.card_id = GetEncodableString(m, "cardId", "");
+          c.source_text = GetEncodableString(m, "sourceText", "");
+          c.target_text = GetEncodableString(m, "targetText", "");
+          c.lang_label = GetEncodableString(m, "langLabel", "");
+          c.mode = GetEncodableString(m, "mode", "smart");
+          c.timestamp_ms = GetEncodableInt(
+              m, "timestampMs",
+              static_cast<int>(static_cast<int64_t>(GetTickCount64()) & 0x7FFFFFFF));
+          c.show_source = GetEncodableBool(m, "showSource", true);
+          cards.push_back(std::move(c));
+        }
+        translate_overlay_window_->SetCards(std::move(cards));
+      }
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "appendCard") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      auto card_it = args->find(flutter::EncodableValue("card"));
+      auto* m = (card_it != args->end())
+                    ? std::get_if<flutter::EncodableMap>(&card_it->second)
+                    : nullptr;
+      if (m && translate_overlay_window_) {
+        TranslateOverlayWindow::Card c;
+        c.card_id = GetEncodableString(m, "cardId", "");
+        c.source_text = GetEncodableString(m, "sourceText", "");
+        c.target_text = GetEncodableString(m, "targetText", "");
+        c.lang_label = GetEncodableString(m, "langLabel", "");
+        c.mode = GetEncodableString(m, "mode", "smart");
+        c.timestamp_ms = GetEncodableInt(
+            m, "timestampMs",
+            static_cast<int>(static_cast<int64_t>(GetTickCount64()) & 0x7FFFFFFF));
+        c.show_source = GetEncodableBool(m, "showSource", true);
+        translate_overlay_window_->AppendCard(c);
+      }
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "clearCards") {
+    if (translate_overlay_window_) translate_overlay_window_->ClearCards();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setLoading") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      const std::string card_id = GetEncodableString(args, "cardId", "");
+      const std::string msg = GetEncodableString(args, "message", "正在翻译...");
+      if (translate_overlay_window_) translate_overlay_window_->SetLoading(card_id, msg);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "clearLoading") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      const std::string card_id = GetEncodableString(args, "cardId", "");
+      if (translate_overlay_window_) translate_overlay_window_->ClearLoading(card_id);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::HandleScheduleFloatingMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "create") {
+    if (!schedule_floating_window_) {
+      schedule_floating_window_ = std::make_unique<ScheduleFloatingWindow>();
+      schedule_floating_window_->SetEventCallback(
+          [this](ScheduleFloatingWindow::EventType type,
+                 const std::string& payload) {
+            std::string event_name;
+            switch (type) {
+              case ScheduleFloatingWindow::EventType::kCloseClicked:
+                event_name = "close"; break;
+              case ScheduleFloatingWindow::EventType::kCollapseChanged:
+                event_name = "collapseChanged"; break;
+            }
+            if (schedule_floating_channel_) {
+              flutter::EncodableMap pl;
+              pl[flutter::EncodableValue("event")] =
+                  flutter::EncodableValue(event_name);
+              pl[flutter::EncodableValue("payload")] =
+                  flutter::EncodableValue(payload);
+              schedule_floating_channel_->InvokeMethod(
+                  "onNativeEvent",
+                  std::make_unique<flutter::EncodableValue>(pl));
+            }
+          });
+    }
+    const bool ok = schedule_floating_window_->Create();
+    result->Success(flutter::EncodableValue(ok));
+    return;
+  }
+
+  if (method == "destroy") {
+    schedule_floating_window_.reset();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "show") {
+    if (!schedule_floating_window_) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    schedule_floating_window_->Show();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (schedule_floating_window_) schedule_floating_window_->Hide();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setOnTop") {
+    bool on_top = true;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      on_top = GetEncodableBool(args, "onTop", true);
+    }
+    if (schedule_floating_window_) schedule_floating_window_->SetOnTop(on_top);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setBounds") {
+    int x = 200, y = 200, w = 280, h = 420;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      x = GetEncodableInt(args, "x", x);
+      y = GetEncodableInt(args, "y", y);
+      w = GetEncodableInt(args, "width", w);
+      h = GetEncodableInt(args, "height", h);
+    }
+    if (schedule_floating_window_) {
+      schedule_floating_window_->SetBounds(x, y, w, h);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "getBounds") {
+    if (!schedule_floating_window_) {
+      result->Success(flutter::EncodableValue(flutter::EncodableMap{}));
+      return;
+    }
+    RECT r = schedule_floating_window_->GetBounds();
+    flutter::EncodableMap m;
+    m[flutter::EncodableValue("x")] =
+        flutter::EncodableValue(static_cast<int>(r.left));
+    m[flutter::EncodableValue("y")] =
+        flutter::EncodableValue(static_cast<int>(r.top));
+    m[flutter::EncodableValue("width")] =
+        flutter::EncodableValue(static_cast<int>(r.right - r.left));
+    m[flutter::EncodableValue("height")] =
+        flutter::EncodableValue(static_cast<int>(r.bottom - r.top));
+    result->Success(flutter::EncodableValue(m));
+    return;
+  }
+
+  if (method == "setCollapsed") {
+    bool collapsed = false;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      collapsed = GetEncodableBool(args, "collapsed", false);
+    }
+    if (schedule_floating_window_) {
+      schedule_floating_window_->SetCollapsed(collapsed);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setSchedule") {
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      auto items_it = args->find(flutter::EncodableValue("items"));
+      auto* list = (items_it != args->end())
+                       ? std::get_if<flutter::EncodableList>(&items_it->second)
+                       : nullptr;
+      std::vector<ScheduleFloatingWindow::ScheduleItem> items;
+      if (list) {
+        for (const auto& item : *list) {
+          auto* m = std::get_if<flutter::EncodableMap>(&item);
+          if (!m) continue;
+          ScheduleFloatingWindow::ScheduleItem s;
+          s.id = GetEncodableString(m, "id", "");
+          s.time_text = GetEncodableString(m, "timeText", "");
+          s.title = GetEncodableString(m, "title", "");
+          s.completed = GetEncodableBool(m, "completed", false);
+          items.push_back(std::move(s));
+        }
+      }
+      if (schedule_floating_window_) {
+        schedule_floating_window_->SetSchedule(std::move(items));
+      }
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::HandleAgentProfileMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "create") {
+    if (!agent_profile_window_) {
+      agent_profile_window_ = std::make_unique<AgentProfileOverlayWindow>();
+      agent_profile_window_->SetEventCallback(
+          [this](AgentProfileOverlayWindow::EventType type,
+                 const std::string& payload) {
+            std::string event_name;
+            switch (type) {
+              case AgentProfileOverlayWindow::EventType::kCloseClicked:
+                event_name = "close"; break;
+            }
+            if (agent_profile_channel_) {
+              flutter::EncodableMap pl;
+              pl[flutter::EncodableValue("event")] =
+                  flutter::EncodableValue(event_name);
+              agent_profile_channel_->InvokeMethod(
+                  "onNativeEvent",
+                  std::make_unique<flutter::EncodableValue>(pl));
+            }
+          });
+    }
+    const bool ok = agent_profile_window_->Create();
+    result->Success(flutter::EncodableValue(ok));
+    return;
+  }
+
+  if (method == "destroy") {
+    agent_profile_window_.reset();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "show") {
+    if (!agent_profile_window_) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    agent_profile_window_->Show();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hide") {
+    if (agent_profile_window_) agent_profile_window_->Hide();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setBounds") {
+    const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+    if (args && agent_profile_window_) {
+      int x = 0, y = 0, w = 320, h = 160;
+      auto i = args->find(flutter::EncodableValue("x"));
+      if (i != args->end() && std::holds_alternative<int32_t>(i->second))
+        x = std::get<int32_t>(i->second);
+      i = args->find(flutter::EncodableValue("y"));
+      if (i != args->end() && std::holds_alternative<int32_t>(i->second))
+        y = std::get<int32_t>(i->second);
+      i = args->find(flutter::EncodableValue("width"));
+      if (i != args->end() && std::holds_alternative<int32_t>(i->second))
+        w = std::get<int32_t>(i->second);
+      i = args->find(flutter::EncodableValue("height"));
+      if (i != args->end() && std::holds_alternative<int32_t>(i->second))
+        h = std::get<int32_t>(i->second);
+      POINT pt{x, y};
+      ClientToScreen(GetHandle(), &pt);
+      agent_profile_window_->SetBounds(pt.x, pt.y, w, h);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setProfile") {
+    const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+    if (args && agent_profile_window_) {
+      AgentProfileOverlayWindow::ProfileData data;
+      data.display_name = GetEncodableString(args, "displayName", "AI助手");
+      data.handle = GetEncodableString(args, "handle", "ai_agent");
+      data.signature = GetEncodableString(args, "signature", "");
+      data.mood_style = GetEncodableString(args, "moodStyle", "gentle");
+      data.status_text = GetEncodableString(args, "statusText", "");
+      data.avatar_preset = GetEncodableString(args, "avatarPreset", "dawn");
+      data.last_profile_event = GetEncodableString(args, "lastProfileEvent", "");
+      agent_profile_window_->SetProfile(std::move(data));
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
 void FlutterWindow::HandleConnectedCallMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -842,6 +1329,20 @@ void FlutterWindow::HandleWindowTitleBarMethodCall(
       BOOL enable_dark_mode = is_dark ? TRUE : FALSE;
       DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
                             &enable_dark_mode, sizeof(enable_dark_mode));
+
+      const COLORREF black = RGB(0, 0, 0);
+      const COLORREF white = RGB(255, 255, 255);
+      const COLORREF default_color = 0xFFFFFFFF;
+      const COLORREF caption_color = is_dark ? black : default_color;
+      const COLORREF border_color = is_dark ? black : default_color;
+      const COLORREF text_color = is_dark ? white : default_color;
+
+      DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color,
+                            sizeof(caption_color));
+      DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color,
+                            sizeof(border_color));
+      DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_color,
+                            sizeof(text_color));
     }
     result->Success(flutter::EncodableValue(true));
     return;

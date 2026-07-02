@@ -81,6 +81,15 @@ async def one_connection(url: str, token: str | None, init_payload: dict) -> Non
                     "action": "screenshot",
                     "region": pl.get("region"),
                 }
+            elif action == "run_shell":
+                worker_req: dict = {
+                    "action": "run_shell",
+                    "command": pl.get("command"),
+                    "shell": pl.get("shell"),
+                    "cwd": pl.get("cwd"),
+                    "timeoutMs": pl.get("timeoutMs"),
+                    "allowDestructive": bool(pl.get("allowDestructive")),
+                }
             else:
                 worker_req: dict = {
                     "action": "run_task",

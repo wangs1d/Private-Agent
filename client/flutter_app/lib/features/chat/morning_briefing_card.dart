@@ -1,21 +1,5 @@
 import "package:flutter/material.dart";
 
-/// 早安简报卡片：聚合天气、今日日程、待办笔记与 Agent 问候语。
-///
-/// 数据格式（[briefing]）兼容以下两种字段命名：
-/// ```
-/// {
-///   "greeting": "...",  // 或 "agentGreeting"
-///   "weather": { "temperature": 22, "condition": "晴" },
-///   "schedule": [ { "title": "晨会", "time": "09:30" } ],  // 或 "todaySchedule"
-///   "notes": [ "回复张工的消息" ]                            // 或 "pendingNotes"
-/// }
-/// ```
-///
-/// 可选字段：
-///   - [narrationText]：语音播报文本
-///   - [modeLabel]：播报来源（"语音" / "弹窗" / "卡片"），用于显示角标
-///   - [onSpeak]：点击扬声器按钮时的回调
 class MorningBriefingCard extends StatelessWidget {
   const MorningBriefingCard({
     super.key,
@@ -52,25 +36,32 @@ class MorningBriefingCard extends StatelessWidget {
     final ColorScheme cs = theme.colorScheme;
 
     final Object? weather = briefing["weather"];
+    final Object? outfit = briefing["outfitTip"];
     final num? temp = weather is Map ? (weather["temperature"] as num?) : null;
     final String condition =
         weather is Map ? (weather["condition"]?.toString() ?? "") : "";
+    final String description =
+        weather is Map ? (weather["description"]?.toString() ?? "") : "";
+    final String outfitSuggestion =
+        outfit is Map ? (outfit["suggestion"]?.toString() ?? "") : "";
 
     final String greeting = _readString("greeting", "agentGreeting") ?? "";
     final List<Map<String, dynamic>> schedule = <Map<String, dynamic>>[
-      for (final Object? x in _readList("schedule", "todaySchedule") ??
-          <dynamic>[])
+      for (final Object? x
+          in _readList("schedule", "todaySchedule") ?? <dynamic>[])
         if (x is Map) x.cast<String, dynamic>(),
     ];
     final List<String> notes = <String>[
       for (final Object? x
           in _readList("notes", "pendingNotes") ?? <dynamic>[])
-        if (x != null) x.toString(),
-    ];
+        if (x is Map)
+          (x["title"]?.toString() ?? "").trim()
+        else if (x != null)
+          x.toString(),
+    ].where((String item) => item.isNotEmpty).toList();
 
-    final bool canSpeak = onSpeak != null &&
-        narrationText != null &&
-        narrationText!.isNotEmpty;
+    final bool canSpeak =
+        onSpeak != null && narrationText != null && narrationText!.isNotEmpty;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -82,22 +73,14 @@ class MorningBriefingCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                if (greeting.isNotEmpty) ...<Widget>[
-                  Icon(Icons.wb_sunny_outlined, color: cs.primary, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      greeting,
-                      style: theme.textTheme.titleMedium,
-                    ),
+                Icon(Icons.wb_sunny_outlined, color: cs.primary, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    greeting.isNotEmpty ? greeting : "每日简报",
+                    style: theme.textTheme.titleMedium,
                   ),
-                ] else
-                  Expanded(
-                    child: Text(
-                      "早安简报",
-                      style: theme.textTheme.titleMedium,
-                    ),
-                  ),
+                ),
                 if (modeLabel != null && modeLabel!.isNotEmpty) ...<Widget>[
                   const SizedBox(width: 8),
                   _ModeChip(label: modeLabel!),
@@ -110,39 +93,53 @@ class MorningBriefingCard extends StatelessWidget {
                     tooltip: "语音播报",
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 32,
-                      minHeight: 32,
-                    ),
+                    constraints:
+                        const BoxConstraints(minWidth: 32, minHeight: 32),
                   ),
                 ],
               ],
             ),
-            if (greeting.isNotEmpty) const SizedBox(height: 12),
-            if (temp != null || condition.isNotEmpty) ...<Widget>[
+            if (temp != null || condition.isNotEmpty || description.isNotEmpty)
+              ...<Widget>[
+                const SizedBox(height: 16),
+                _SectionHeader(
+                  icon: Icons.cloud_outlined,
+                  text: "天气",
+                  theme: theme,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  [
+                    if (condition.isNotEmpty) condition,
+                    if (temp != null) "${temp.round()}°C",
+                    if (description.isNotEmpty) description,
+                  ].join(" · "),
+                  style: theme.textTheme.bodyLarge,
+                ),
+              ],
+            if (outfitSuggestion.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 16),
               _SectionHeader(
-                icon: Icons.cloud_outlined,
-                text: "天气",
+                icon: Icons.checkroom_outlined,
+                text: "穿衣提醒",
                 theme: theme,
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
               Text(
-                temp != null
-                    ? "${condition.isEmpty ? "" : "$condition · "}${temp.round()}°C"
-                    : (condition.isEmpty ? "暂无天气信息" : condition),
-                style: theme.textTheme.bodyLarge,
+                outfitSuggestion,
+                style: theme.textTheme.bodyMedium,
               ),
-              const SizedBox(height: 12),
             ],
+            const SizedBox(height: 16),
             _SectionHeader(
               icon: Icons.event_note_outlined,
-              text: "今日日程",
+              text: "计划安排",
               theme: theme,
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 6),
             if (schedule.isEmpty)
               Text(
-                "今天暂无日程",
+                "今天还没有安排事项",
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: cs.onSurfaceVariant,
                 ),
@@ -150,40 +147,44 @@ class MorningBriefingCard extends StatelessWidget {
             else
               for (final Map<String, dynamic> s in schedule)
                 Padding(
-                  padding: const EdgeInsets.only(top: 4),
+                  padding: const EdgeInsets.only(top: 6),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       SizedBox(
-                        width: 56,
+                        width: 60,
                         child: Text(
-                          s["time"]?.toString() ?? "",
+                          s["time"]?.toString() ?? "--:--",
                           style: theme.textTheme.labelMedium?.copyWith(
                             color: cs.primary,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
-                      Expanded(child: Text(s["title"]?.toString() ?? "")),
+                      Expanded(
+                        child: Text(s["title"]?.toString() ?? ""),
+                      ),
                     ],
                   ),
                 ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
             _SectionHeader(
               icon: Icons.checklist_outlined,
-              text: "待办笔记",
+              text: "待办提醒",
               theme: theme,
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 6),
             if (notes.isEmpty)
               Text(
-                "暂无待办",
+                "没有待处理的笔记提醒",
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: cs.onSurfaceVariant,
                 ),
               )
             else
-              for (final String n in notes)
+              for (final String note in notes)
                 Padding(
-                  padding: const EdgeInsets.only(top: 4),
+                  padding: const EdgeInsets.only(top: 6),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
@@ -191,7 +192,7 @@ class MorningBriefingCard extends StatelessWidget {
                         padding: const EdgeInsets.only(top: 6, right: 8),
                         child: Icon(Icons.circle, size: 6, color: cs.outline),
                       ),
-                      Expanded(child: Text(n)),
+                      Expanded(child: Text(note)),
                     ],
                   ),
                 ),

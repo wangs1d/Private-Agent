@@ -1,12 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-export type InputFilterDecision = {
-  accepted: boolean;
-  reason: "valid" | "small_talk" | "duplicate" | "empty" | "noise";
-  normalizedText: string;
-};
-
 export type TaskStackEntry = {
   taskId: string;
   title: string;
@@ -19,7 +13,6 @@ export type TaskStackEntry = {
 type SessionTaskState = {
   activeTaskId: string | null;
   tasks: TaskStackEntry[];
-  recentInputs: string[];
 };
 
 type PersistedTaskState = {
@@ -63,14 +56,6 @@ function overlapScore(left: string, right: string): number {
   return hits / Math.max(Math.min(a.size, b.size), 1);
 }
 
-function looksLikeNoise(text: string): boolean {
-  return /^[\s.,!?~\-_=+*/\\|()[\]{}<>:;'"`]+$/.test(text);
-}
-
-function looksLikeSmallTalk(text: string): boolean {
-  return /^(你好|好的|嗯|哦|收到|谢谢|ok|okay|thanks|早安|晚安)[!,.? ]*$/i.test(text);
-}
-
 function shouldPauseFromUserText(text: string): boolean {
   return /(先放一边|先暂停|暂停一下|等等再说|回头再做|晚点再弄|稍后继续|先不做了|先搁置)/i.test(text);
 }
@@ -111,29 +96,6 @@ export class ShortTermMemoryGatewayService {
           : "";
       if (code !== "ENOENT") throw error;
     }
-  }
-
-  filterInput(sessionId: string, input: string): InputFilterDecision {
-    const normalizedText = normalizeInput(input);
-    if (!normalizedText) {
-      return { accepted: false, reason: "empty", normalizedText };
-    }
-    if (looksLikeNoise(normalizedText)) {
-      return { accepted: false, reason: "noise", normalizedText };
-    }
-    if (looksLikeSmallTalk(normalizedText)) {
-      return { accepted: false, reason: "small_talk", normalizedText };
-    }
-
-    const state = this.getSessionState(sessionId);
-    if (state.recentInputs.includes(normalizedText.toLowerCase())) {
-      return { accepted: false, reason: "duplicate", normalizedText };
-    }
-
-    state.recentInputs.push(normalizedText.toLowerCase());
-    state.recentInputs = state.recentInputs.slice(-12);
-    this.schedulePersist();
-    return { accepted: true, reason: "valid", normalizedText };
   }
 
   activateTask(sessionId: string, title: string, contextSummary: string): TaskStackEntry {
@@ -267,7 +229,6 @@ export class ShortTermMemoryGatewayService {
     return {
       activeTaskId: state.activeTaskId,
       tasks: [...state.tasks],
-      recentInputs: [...state.recentInputs],
     };
   }
 
@@ -329,7 +290,6 @@ export class ShortTermMemoryGatewayService {
       this.data.sessions[sessionId] = {
         activeTaskId: null,
         tasks: [],
-        recentInputs: [],
       };
     }
     return this.data.sessions[sessionId]!;

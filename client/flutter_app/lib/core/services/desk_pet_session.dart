@@ -50,8 +50,7 @@ class DeskPetSession extends ChangeNotifier {
     final bool ok = await launchElectronDeskPet();
     _bootstrapping = false;
     if (!ok) {
-      _error ??= SphereOverlayLauncher.electronUnavailableReason ??
-          "Electron 桌宠启动失败";
+      _error ??= SphereOverlayLauncher.electronUnavailableReason ?? "桌宠启动失败";
       notifyListeners();
       return false;
     }
@@ -67,14 +66,14 @@ class DeskPetSession extends ChangeNotifier {
     _error = null;
 
     if (!kIsWeb && Platform.isWindows) {
-      await SphereOverlayLauncher.stop();
+      await SphereEntityController.instance.stop();
       SphereEntityController.instance.reset();
     }
 
     notifyListeners();
   }
 
-  /// Windows 独立桌宠：召唤后直接使用可自由移动的透明桌宠窗口。
+  /// Windows 独立桌宠：默认直接使用 Electron 透明桌宠窗口。
   Future<bool> launchElectronDeskPet() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
@@ -87,8 +86,7 @@ class DeskPetSession extends ChangeNotifier {
     }
 
     _error = SphereOverlayLauncher.electronUnavailableReason ??
-        "Electron 桌宠启动失败\n请确认 sphere-overlay 已 npm install，"
-        "且 agent-sphere-avatar 已执行 npm run build（勿用 build:chat）。";
+        "桌宠启动失败\n请确认 sphere-overlay 已 npm install，且 agent-sphere-avatar 已执行 npm run build。";
     notifyListeners();
     return false;
   }

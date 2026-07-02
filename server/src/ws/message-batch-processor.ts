@@ -222,7 +222,10 @@ export class MessageBatchProcessor {
       clientIp: last.clientIp,
       clientLocation: last.clientLocation,
       interruptedContext: last.interruptedContext,
-      originalMessageId: `batch-${Date.now()}-${messages.length}`,
+      // 沿用最后一条用户消息的 messageId 作为 traceId：客户端 _pendingAgentUserMessageId
+      // 始终是最后发出那条的 id（_armAgentReplyWatchdog 每次覆盖），用合成 batch- id 会让
+      // chat.turn_started / chunk 的 traceId 与客户端对不上，导致 _turnState 永远不被赋值。
+      originalMessageId: last.originalMessageId,
       userId: last.userId,
       timestamp: Date.now(),
     };

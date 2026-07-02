@@ -44,7 +44,7 @@ export function EmbedApp() {
 
   // 桌面嵌入模式 — 启用 DOM 级自主漫游（替换 useEmbedFloatPan 的纯拖动平移）
   const livingMotion = useLivingMotion({
-    enabled: true,
+    enabled: false,
     containerW: EMBED_SCENE.containerW,
     containerH: EMBED_SCENE.containerH,
     mood: state.mood,
@@ -183,7 +183,7 @@ export function EmbedApp() {
           state={state}
           mode="embed"
           physics={false}
-          autonomous
+          autonomous={false}
           domDragBridge
           onEyeFocus={setFocused}
           onEyeClick={handleEyeClick}

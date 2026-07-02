@@ -12,10 +12,13 @@
 
 #include "win32_window.h"
 #include "sphere_overlay_window.h"
+#include "agent_profile_overlay_window.h"
 #include "desktop_notification_window.h"
 #include "incoming_call_window.h"
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
+#include "translate_overlay_window.h"
+#include "schedule_floating_window.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -45,6 +48,15 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<IncomingCallWindow> incoming_call_window_;
   std::unique_ptr<DesktopNotificationWindow> desktop_notification_window_;
 
+  // 翻译组件独立悬浮窗（同主应用进程，可自由拖动、on-top）
+  std::unique_ptr<TranslateOverlayWindow> translate_overlay_window_;
+
+  // 今日安排独立悬浮窗（同进程 HWND + GDI 自绘，不依赖 Electron）
+  std::unique_ptr<ScheduleFloatingWindow> schedule_floating_window_;
+
+  // Agent 主页信息弹出窗
+  std::unique_ptr<AgentProfileOverlayWindow> agent_profile_window_;
+
   // 独立"通话中"悬浮窗（接通后展示，仿电脑微信电话）
   std::unique_ptr<ConnectedCallWindow> connected_call_window_;
   std::unique_ptr<OutgoingCallWindow> outgoing_call_window_;
@@ -70,10 +82,31 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       desktop_notification_channel_;
 
+  // pai/translate_overlay MethodChannel —— 控制独立翻译悬浮窗
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      translate_overlay_channel_;
+
+  // pai/schedule_floating MethodChannel —— 控制今日安排悬浮窗
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      schedule_floating_channel_;
+
+  // pai/agent_profile MethodChannel —— 控制 Agent 主页弹出窗
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      agent_profile_channel_;
+
   void HandleIncomingCallMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleDesktopNotificationMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleTranslateOverlayMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleScheduleFloatingMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleAgentProfileMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 

@@ -24,6 +24,20 @@ class UserPreferencesApi {
 
   static const Duration _timeout = Duration(seconds: 10);
 
+  static const Map<String, bool> defaultBriefingSections = <String, bool>{
+    "weather": true,
+    "outfit": true,
+    "schedule": true,
+    "notes": true,
+  };
+
+  static const String moodFunny = "funny";
+  static const String moodSad = "sad";
+  static const String moodCool = "cool";
+  static const String moodGentle = "gentle";
+  static const String moodEnergetic = "energetic";
+  static const String moodMysterious = "mysterious";
+
   /// 拉取指定会话的偏好。
   Future<Map<String, dynamic>> getPreferences(String sessionId) async {
     final Uri uri = Uri.parse("$baseUrl/api/user-preferences?sessionId=$sessionId");
@@ -48,6 +62,9 @@ class UserPreferencesApi {
     bool? enabled,
     String? time,
     String? mode,
+    bool? showOnDesktopLaunch,
+    Map<String, bool>? sections,
+    Map<String, Object?>? agentProfile,
   }) async {
     final Uri uri = Uri.parse("$baseUrl/api/user-preferences");
     final Map<String, Object?> body = <String, Object?>{
@@ -57,7 +74,11 @@ class UserPreferencesApi {
           if (enabled != null) "enabled": enabled,
           if (time != null) "time": time,
           if (mode != null) "mode": mode,
+          if (showOnDesktopLaunch != null)
+            "showOnDesktopLaunch": showOnDesktopLaunch,
+          if (sections != null) "sections": sections,
         },
+        if (agentProfile != null) "agentProfile": agentProfile,
       },
     };
     final http.Response res = await _client

@@ -70,6 +70,8 @@ import { AuditService } from "../services/audit-service.js";
 import { EmailRegistrationService } from "../services/email-registration-service.js";
 import { InfoHubService } from "../services/info-hub-service.js";
 import { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
+import { PaymentService } from "../services/payment-service.js";
+import { MeituanService } from "../services/meituan-service.js";
 import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { SessionService } from "../services/session-service.js";
@@ -91,6 +93,8 @@ import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
+import { registerPaymentTools } from "../tools/payment-tools.js";
+import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
@@ -113,9 +117,13 @@ import { ToolRegistry } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
+import { MessageHubService } from "../services/message-hub-service.js";
+import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
+import { MessageBridgeService } from "../services/message-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
+import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
@@ -132,6 +140,7 @@ import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
 import { MorningBriefingService } from "../services/morning-briefing-service.js";
 import { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
+import { markMorningBriefingDelivered } from "../routes/http/user-preferences.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
 import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
@@ -181,6 +190,8 @@ export async function createAppServices(): Promise<AppServices> {
   const browserSessionService = new BrowserSessionService();
   const upstreamSearchService = new UpstreamSearchService(infoHubService);
   const realFundsWallet = new RealFundsWalletService();
+  const paymentService = new PaymentService();
+  const meituanService = new MeituanService();
   const auditService = new AuditService();
   const computeQuotaService = new ComputeQuotaService();
   const companionService = new CompanionService();
@@ -197,6 +208,9 @@ export async function createAppServices(): Promise<AppServices> {
   await anticipationEngineService.load();
   const marketSignalService = new MarketSignalService(lifeSignalHubService);
   const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
+  const messageHubService = new MessageHubService(join(process.cwd(), "data", "message-hub.json"));
+  await messageHubService.load();
+  const messagePlatformGateway = new MessagePlatformGateway();
 
   const skillManager = new SkillManager();
   skillManager.configureEnabledPersistence(join(process.cwd(), "data", "skill-enabled.json"));
@@ -235,6 +249,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   registerLifeSignalTools(toolRegistry, lifeSignalHubService);
   registerMarketSignalTools(toolRegistry, marketSignalService);
+  let messageBridgeService: MessageBridgeService;
 
   const agentRelayService = new AgentRelayService();
   const wsConnectionRegistry = new WsConnectionRegistry();
@@ -393,6 +408,8 @@ export async function createAppServices(): Promise<AppServices> {
   
   registerAgentAccountTools(toolRegistry, agentAccountService);
   registerWalletTools(toolRegistry, friendService);
+  registerPaymentTools(toolRegistry, paymentService);
+  registerMeituanTools(toolRegistry, meituanService);
   registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
   registerAgentRelayTools(
     toolRegistry,
@@ -580,13 +597,14 @@ export async function createAppServices(): Promise<AppServices> {
     weatherPrefsService,
     scheduleTaskService,
     notesService,
+    getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
   });
 
   const morningBriefingScheduler = new MorningBriefingScheduler({
     briefingService: morningBriefingService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
     onBriefingTriggered: async (sessionId, payload) => {
-      wsConnectionRegistry.trySend(
+      const sent = wsConnectionRegistry.trySend(
         sessionId,
         JSON.stringify({
           type: ServerEventType.MorningBriefing,
@@ -598,6 +616,9 @@ export async function createAppServices(): Promise<AppServices> {
           },
         }),
       );
+      if (sent) {
+        markMorningBriefingDelivered(sessionId, "scheduled");
+      }
     },
   });
   morningBriefingScheduler.start();
@@ -834,6 +855,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerDesktopVisualTools(toolRegistry, {
     localVisual: desktopVisual,
     bridge: desktopBridgeCoordinator,
+    audit: auditService,
   });
   agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
 
@@ -842,7 +864,11 @@ export async function createAppServices(): Promise<AppServices> {
   const wechatClawBridgeService = new WechatClawBridgeService(agentCore, {
     weatherPrefsService,
     ttsService,
+    messageHubService,
   });
+  messageBridgeService = new MessageBridgeService(agentCore, messageHubService);
+
+  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, agentCore });
 
   registerEmbodimentTools(toolRegistry, {
     wsRegistry: wsConnectionRegistry,
@@ -893,6 +919,9 @@ export async function createAppServices(): Promise<AppServices> {
     phoneBridgeCoordinator,
     wechatClawBindingService,
     wechatClawBridgeService,
+    messageHubService,
+    messagePlatformGateway,
+    messageBridgeService,
     browserSessionService,
     friendService,
     companionService,
@@ -969,6 +998,9 @@ export async function createAppServices(): Promise<AppServices> {
     ttsService,
     virtualPhoneService,
     friendService,
+    messageHubService,
+    messagePlatformGateway,
+    messageBridgeService,
     voiceDialogueService,
     intelligentReminderService: intelligentReminder.reminderService,
     reminderResponsePersistence: intelligentReminder.userResponsePersistence,

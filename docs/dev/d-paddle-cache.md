@@ -16,7 +16,7 @@ D:\paddle\
 
 ## 双重保险
 
-1. **环境变量**:在 [scripts/redirect-paddle-cache-to-d.cmd](../../scripts/redirect-paddle-cache-to-d.cmd) 写用户级环境变量。`paddle_ocr_server.py` / `desktop-translate` / `pip` 都会读这些变量。
+1. **环境变量**:在 [scripts/redirect-paddle-cache-to-d.cmd](../../scripts/redirect-paddle-cache-to-d.cmd) 写用户级环境变量。`paddle_ocr_server.py` / `pip` 等运行时组件都会读这些变量。
 2. **目录联结(Junction)**:`mklink /J` 把 C 盘默认路径(`C:\Users\Administrator\.paddlex`、`C:\Users\Administrator\AppData\Local\pip`)指向 D 盘。**即使程序完全忽略环境变量、只认 C 盘默认路径,实际也会写到 D 盘。**
 
 ## 开机/迁移后一键修复

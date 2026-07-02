@@ -15,6 +15,15 @@ namespace {
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
@@ -273,10 +282,14 @@ void Win32Window::OnDestroy() {
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
-  // 始终使用亮色标题栏，与 App 暖色主题保持一致。
-  // 不再读取 Windows 系统 AppsUseLightTheme 注册表值，
-  // 避免系统深色模式下标题栏变黑导致视觉不统一。
-  BOOL enable_dark_mode = FALSE;
+  // 启动时默认使用纯黑标题栏，避免应用首帧出现白色外壳。
+  BOOL enable_dark_mode = TRUE;
   DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                         &enable_dark_mode, sizeof(enable_dark_mode));
+
+  const COLORREF black = RGB(0, 0, 0);
+  const COLORREF white = RGB(255, 255, 255);
+  DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &black, sizeof(black));
+  DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &black, sizeof(black));
+  DwmSetWindowAttribute(window, DWMWA_TEXT_COLOR, &white, sizeof(white));
 }

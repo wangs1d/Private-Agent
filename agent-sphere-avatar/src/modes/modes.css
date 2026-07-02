@@ -26,6 +26,8 @@ html.embed-root #root {
   min-width: 100px;
   min-height: 140px;
   cursor: grab;
+  border-radius: 24px;
+  isolation: isolate;
 }
 
 .mode-embed:active {
@@ -37,6 +39,7 @@ html.embed-root #root {
   width: 100% !important;
   height: 100% !important;
   touch-action: none;
+  background: transparent !important;
 }
 
 .embed-drag-surface {
@@ -79,23 +82,20 @@ html.embed-root #root {
 
 .overlay-pet-pane {
   position: relative;
-  flex: 0 0 150px;
-  width: 150px;
+  flex: 0 0 186px;
+  width: 186px;
   height: 100%;
-  min-width: 150px;
-  /* 底部留出空间放 caption，避免遮挡桌宠身体 */
-  padding-bottom: 72px;
+  min-width: 186px;
+  padding: 8px 8px 60px;
   box-sizing: border-box;
 }
 
 .overlay-pet-pane canvas {
-  /* 画布只占内容区高度，下方 72px 留给 caption */
-  height: calc(100% - 72px) !important;
+  height: calc(100% - 60px) !important;
 }
 
 .overlay-pet-pane .inner-thought {
-  /* 跟随 padding，留出底部 caption 空间，避免被 mode-shell 裁剪 */
-  top: calc(100% - 72px);
+  top: calc(100% - 60px);
 }
 
 .overlay-menu-side {

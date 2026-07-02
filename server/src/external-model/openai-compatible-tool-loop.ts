@@ -35,6 +35,12 @@ import {
   applyPromptCacheMessages,
   type PrefixCacheRequest,
 } from "./prefix-cache.js";
+import {
+  adaptOpenAiChatCompletionStream,
+  consumeNormalizedStream,
+  materializeOpenAiToolCalls,
+  type NormalToolCall,
+} from "./stream-chat-helpers.js";
 import type {
   ChatToolExecutionContext,
   StreamDeltaHandler,
@@ -73,8 +79,6 @@ function getToolResultBudget(toolName: string): number | undefined {
 function getToolResultStripKeys(toolName: string): string[] | undefined {
   return TOOL_RESULT_STRIP_KEYS[toolName];
 }
-
-type ToolAcc = { id: string; name: string; arguments: string };
 
 const DEFAULT_MAX_ROUNDS = 12;
 
@@ -1226,7 +1230,11 @@ export async function streamCompletionWithTools(
           tool_choice: resolveForcedToolChoice(userText, apiTools),
           stream: true,
           ...(options?.promptCache ?? {}),
-          ...(options?.extraBody ? { extra_body: options.extraBody } : {}),
+          // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body` 顶层字段——它会
+          // 整个 body JSON.stringify 后把 `extra_body` 当作普通 key 发出去，导致
+          // `thinking` 被埋到一层下，Moonshot 看不到 → k2.5 默认 thinking 仍开启
+          // → 撞上 tool_choice='specified' 直接 400。直接 spread 到顶层。
+          ...(options?.extraBody ?? {}),
         };
         stream = await client.chat.completions.create(request as Parameters<typeof client.chat.completions.create>[0]);
         break;
@@ -1243,57 +1251,51 @@ export async function streamCompletionWithTools(
 
     let fullText = "";
     let fullReasoning = "";
-    const toolAcc = new Map<number, ToolAcc>();
-    let finishReason: string | null | undefined;
+    let finishReason: string | null = null;
+    const normalizedToolCalls: NormalToolCall[] = [];
 
     try {
-      for await (const part of stream) {
-        const choice = part.choices[0];
-        if (!choice) continue;
-        finishReason = choice.finish_reason ?? finishReason;
-        const d = choice.delta;
-        const reasoningChunk =
-          (d as { reasoning_content?: string | null } | undefined)?.reasoning_content ?? "";
-        if (reasoningChunk) {
-          fullReasoning += reasoningChunk;
-        }
-        if (d?.content) {
-          fullText += d.content;
-          const statusLine = fullText.trim();
-          if (ctx.onAgentStatusLine) {
-            if (statusLine) {
-              emittedStatusLines.add(statusLine);
-              ctx.onAgentStatusLine(statusLine);
+      // 流式消费走统一的 provider-agnostic helper：自动累积 content + reasoning_content
+      // + tool_calls。任何 provider 的 chunk 只需先经 `adaptOpenAiChatCompletionStream`
+      // 适配成 NormalChatChunk 即可。后续若要接入 Anthropic/Google，只换 adapter 即可。
+      const result = await consumeNormalizedStream(
+        adaptOpenAiChatCompletionStream(
+          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+        ),
+        {
+          onContentDelta: (d) => {
+            fullText += d;
+            if (ctx.onAgentStatusLine) {
+              // 旧行为：把当前累积的整段文本当作一行 status line 反复推送（去重由 emittedStatusLines 在 round 之间处理）
+              const statusLine = fullText.trim();
+              if (statusLine) {
+                emittedStatusLines.add(statusLine);
+                ctx.onAgentStatusLine(statusLine);
+              }
+            } else {
+              onDelta(d);
             }
-          } else {
-            onDelta(d.content);
-          }
-        }
-        if (d?.tool_calls) {
-          for (const tc of d.tool_calls) {
-            const idx = tc.index ?? 0;
-            let acc = toolAcc.get(idx);
-            if (!acc) {
-              acc = { id: "", name: "", arguments: "" };
-              toolAcc.set(idx, acc);
-            }
-            if (tc.id != null) acc.id = tc.id;
-            if (tc.function?.name) acc.name = tc.function.name;
-            if (tc.function?.arguments) acc.arguments += tc.function.arguments;
-          }
-        }
-      }
+          },
+          onToolCallsComplete: (calls) => {
+            for (const c of calls) normalizedToolCalls.push(c);
+          },
+          providerId: "openai-compatible",
+          model,
+        },
+      );
+      fullReasoning = result.reasoning;
+      finishReason = result.finishReason;
     } catch (e) {
       throw e;
     }
 
     // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为进度前导话
     //（已通过 onAgentStatusLine 独立推送），不应进入最终回复，否则用户会看到重复的思考过程。
-    if (finishReason !== "tool_calls" || toolAcc.size === 0) {
+    if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
     }
 
-    if (finishReason !== "tool_calls" || toolAcc.size === 0) {
+    if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       // 对话结束：返回最终回复文本。
       // 清理规则：
       //   1. 去除与已发送进度话重复的内容（LLM 可能在最终回复中复述了进度前导）
@@ -1326,25 +1328,11 @@ export async function streamCompletionWithTools(
       return finalText;
     }
 
-    const toolCalls: ChatCompletionMessageToolCall[] = [...toolAcc.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([idx, v]) => {
-        if (!v.id) {
-          console.warn(
-            `[openai-tool-loop] tool_calls[${idx}].id is empty from stream; ` +
-            `fallback to random id. model=${model} name=${v.name}`,
-          );
-        }
-        const callId = v.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${idx}`;
-        return {
-          id: callId,
-          type: "function" as const,
-          function: {
-            name: v.name,
-            arguments: v.arguments || "{}",
-          },
-        };
-      });
+    // 把 NormalToolCall[] 物化为 OpenAI SDK 形态（保留 id 兜底 + parsedArgs 预解析）
+    const toolCalls: ChatCompletionMessageToolCall[] = materializeOpenAiToolCalls(
+      normalizedToolCalls,
+      model,
+    );
 
     const assistantWithTools: ChatCompletionMessageParam = {
       role: "assistant",

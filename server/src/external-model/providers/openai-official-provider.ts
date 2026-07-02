@@ -20,7 +20,9 @@ import {
 import {
 
   applyPromptCacheMessages,
+
   preparePromptCachePlan,
+
 } from "../prefix-cache.js";
 
 import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
@@ -29,6 +31,12 @@ import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 
 import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
+
+import {
+  adaptOpenAiChatCompletionStream,
+  consumeNormalizedStream,
+  pickVisibleText,
+} from "../stream-chat-helpers.js";
 
 import type {
 
@@ -482,21 +490,26 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
 
     let full = "";
+    let visible = "";
 
     try {
 
-      for await (const part of stream) {
-
-        const delta = part.choices[0]?.delta?.content ?? "";
-
-        if (delta) {
-
-          full += delta;
-
-          onDelta(delta);
-
-        }
-
+      // 流式消费走 provider-agnostic helper：content + reasoning_content + tool_calls 统一累积
+      const result = await consumeNormalizedStream(
+        adaptOpenAiChatCompletionStream(
+          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+        ),
+        {
+          onContentDelta: (d) => onDelta(d),
+          providerId: this.id,
+          model,
+        },
+      );
+      full = result.content;
+      visible = pickVisibleText(result.content, result.reasoning);
+      // content 为空但 reasoning 有内容时，把 reasoning 补发给客户端（一次性）
+      if (!full.trim() && visible) {
+        onDelta(visible);
       }
 
     } catch (e) {
@@ -509,8 +522,8 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
 
 
-    if (full.trim()) {
-      msgs.push({ role: "assistant", content: full });
+    if (visible.trim()) {
+      msgs.push({ role: "assistant", content: visible });
     }
 
     if (!ephemeral) {
@@ -521,7 +534,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     }
 
-    return full;
+    return visible;
 
   }
 

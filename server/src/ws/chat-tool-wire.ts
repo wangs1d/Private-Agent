@@ -7,6 +7,8 @@ import {
   type DelegateStatusPayload,
 } from "../agent/delegate-status.js";
 import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
+import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import { buildExecutionEventPayload } from "../agent/turn-events.js";
 import type { ToolExecutedInfo, ToolExecuteStartInfo } from "../external-model/types.js";
 import { ServerEventType } from "../protocol.js";
 import { embodimentThinking } from "../services/agent-embodiment.js";
@@ -18,7 +20,84 @@ export type ChatToolWireContext = {
   traceId: string;
   assistantMessageId: string;
   send: (json: string) => void;
+  /**
+   * 「分阶段异步对话交互 v2」可选：tool_call 起始时间表（id → epoch ms），
+   * 用于在 tool_result 阶段计算 elapsedMs。
+   * 若调用方未传，elapsedMs 会默认 0。
+   */
+  toolStartedAt?: Map<string, number>;
 };
+
+/** 同 traceId 内单调递增的 eventId 计数器（避免引入全局单例，handler 退出即丢）。 */
+let executionEventSeq = 0;
+function nextExecutionEventId(): string {
+  executionEventSeq += 1;
+  return `evt-${Date.now()}-${executionEventSeq}`;
+}
+
+/** 「分阶段异步对话交互 v2」结构化执行事件发射。
+ *  与 v1 tool.call / tool.result / chat.agent_status 并行存在，
+ *  由 CHAT_TURN_PANEL_V2 开关控制是否下发。
+ *  客户端按 kind 区分：tool_call / tool_result / agent_start / agent_done / log。 */
+function sendExecutionEvent(
+  ctx: ChatToolWireContext,
+  kind:
+    | "tool_call"
+    | "tool_result"
+    | "agent_start"
+    | "agent_done"
+    | "log",
+  body: {
+    thought?: string;
+    toolCall?: Parameters<typeof buildExecutionEventPayload>[0]["toolCall"];
+    toolResult?: Parameters<typeof buildExecutionEventPayload>[0]["toolResult"];
+    agentStart?: Parameters<typeof buildExecutionEventPayload>[0]["agentStart"];
+    agentDone?: Parameters<typeof buildExecutionEventPayload>[0]["agentDone"];
+    log?: string;
+  },
+): void {
+  if (!getAgentRuntimeConfig().turnPanelV2.enabled) return;
+  ctx.send(
+    JSON.stringify({
+      type: ServerEventType.ChatExecutionEvent,
+      payload: buildExecutionEventPayload({
+        sessionId: ctx.sessionId,
+        traceId: ctx.traceId,
+        eventId: nextExecutionEventId(),
+        kind,
+        ...body,
+      }),
+    }),
+  );
+}
+
+/** 摘要化工具入参（避免把大对象塞进 WS 协议）。 */
+function summarizeArgs(input: Record<string, unknown>): string {
+  try {
+    const json = JSON.stringify(input);
+    if (!json || json === "{}") return "";
+    return json.length > 200 ? `${json.slice(0, 200)}…` : json;
+  } catch {
+    return "";
+  }
+}
+
+/** 摘要化工具结果（取关键字段，文本超长截断）。 */
+function summarizeResult(
+  result: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!result) return undefined;
+  const text =
+    typeof result.text === "string"
+      ? result.text
+      : typeof result.message === "string"
+        ? result.message
+        : typeof result.preview === "string"
+          ? result.preview
+          : "";
+  if (!text) return undefined;
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
 
 function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload): void {
   const displayLine = formatStatusForDisplay(status.line);
@@ -44,6 +123,9 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
       },
     }),
   );
+  // v2：把 agent_status 同步下发为 execution_event(kind=log)，
+  // 让 v1 自由文本链路和 v2 结构化链路并存；UI 端按开关决定渲染哪条。
+  sendExecutionEvent(ctx, "log", { log: displayLine });
 }
 
 export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecuteStartInfo): void {
@@ -66,6 +148,14 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
       },
     }),
   );
+  // v2：结构化 tool_call 卡片
+  sendExecutionEvent(ctx, "tool_call", {
+    toolCall: {
+      id: `${ctx.traceId}:${info.toolName}`,
+      name: info.toolName,
+      argsPreview: summarizeArgs(info.input),
+    },
+  });
 
   if (!isMasterInvokeSubAgentTool(info.toolName)) {
     if (userStatusLine) {
@@ -91,6 +181,18 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
 
   const start = buildDelegateStartPayload(info.input, agentName, agentType);
   if (start) sendAgentStatus(ctx, start);
+
+  // v2：结构化 agent_start 卡片
+  const taskText = String(
+    info.input.task ?? info.input.query ?? info.input.userMessage ?? "",
+  ).trim();
+  sendExecutionEvent(ctx, "agent_start", {
+    agentStart: {
+      id: `${ctx.traceId}:${agentType}`,
+      role: agentName,
+      ...(taskText ? { task: taskText.length > 200 ? `${taskText.slice(0, 200)}…` : taskText } : {}),
+    },
+  });
 }
 
 function sendScheduleTasksChanged(ctx: ChatToolWireContext, result: Record<string, unknown>): void {
@@ -152,6 +254,20 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
       },
     }),
   );
+  // v2：结构化 tool_result 卡片
+  const toolCallId = `${ctx.traceId}:${info.toolName}`;
+  const startedAt = ctx.toolStartedAt?.get(toolCallId);
+  const elapsedMs = startedAt ? Date.now() - startedAt : 0;
+  if (startedAt != null) ctx.toolStartedAt?.delete(toolCallId);
+  sendExecutionEvent(ctx, "tool_result", {
+    toolResult: {
+      id: toolCallId,
+      name: info.toolName,
+      preview: summarizeResult(info.result as Record<string, unknown> | undefined),
+      ok: info.ok,
+      elapsedMs,
+    },
+  });
 
   if (
     info.ok &&
@@ -179,4 +295,14 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
   if (!agentType || !line) return;
 
   sendAgentStatus(ctx, buildDelegateDonePayload(line, agentName, agentType));
+
+  // v2：结构化 agent_done 卡片
+  sendExecutionEvent(ctx, "agent_done", {
+    agentDone: {
+      id: `${ctx.traceId}:${agentType}`,
+      role: agentName,
+      ok: true,
+      elapsedMs,
+    },
+  });
 }

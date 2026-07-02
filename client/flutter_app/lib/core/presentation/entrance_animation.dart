@@ -161,12 +161,11 @@ class _EntranceAnimationState extends State<EntranceAnimation>
         return Opacity(
           opacity: _overlayOpacity.value,
           child: DecoratedBox(
-            decoration: const BoxDecoration(color: Color(0xFF020202)),
+            decoration: const BoxDecoration(color: Colors.black),
             child: Stack(
               fit: StackFit.expand,
               children: <Widget>[
                 const _BackgroundVignette(),
-                _buildAmbientGlow(),
                 _buildDustField(),
                 _buildCenterComposition(context),
               ],
@@ -174,50 +173,6 @@ class _EntranceAnimationState extends State<EntranceAnimation>
           ),
         );
       },
-    );
-  }
-
-  Widget _buildAmbientGlow() {
-    final double pulse = _ambientPulse.value;
-    return IgnorePointer(
-      child: Stack(
-        children: <Widget>[
-          Align(
-            alignment: const Alignment(0, -0.08),
-            child: Container(
-              width: 620 * pulse,
-              height: 620 * pulse,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: <Color>[
-                    const Color(0x55E6F1FF).withValues(alpha: 0.20 * pulse),
-                    const Color(0x2200D1FF).withValues(alpha: 0.12 * pulse),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          Align(
-            alignment: const Alignment(0, -0.02),
-            child: Container(
-              width: 420 * pulse,
-              height: 180 * pulse,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(220),
-                gradient: LinearGradient(
-                  colors: <Color>[
-                    Colors.transparent,
-                    const Color(0x66FFFFFF).withValues(alpha: 0.10 * pulse),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -399,18 +354,7 @@ class _BackgroundVignette extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DecoratedBox(
-      decoration: const BoxDecoration(
-        gradient: RadialGradient(
-          center: Alignment(0, -0.22),
-          radius: 1.12,
-          colors: <Color>[
-            Color(0xFF0B0C0F),
-            Color(0xFF040404),
-            Color(0xFF010101),
-          ],
-          stops: <double>[0.0, 0.42, 1.0],
-        ),
-      ),
+      decoration: const BoxDecoration(color: Colors.black),
       child: CustomPaint(
         painter: _HorizonPainter(),
       ),
@@ -420,20 +364,7 @@ class _BackgroundVignette extends StatelessWidget {
 
 class _HorizonPainter extends CustomPainter {
   @override
-  void paint(Canvas canvas, Size size) {
-    final Paint horizon = Paint()
-      ..shader = const LinearGradient(
-        colors: <Color>[
-          Colors.transparent,
-          Color(0x33A8D7FF),
-          Colors.transparent,
-        ],
-      ).createShader(Rect.fromLTWH(0, size.height * 0.58, size.width, 1.5));
-    canvas.drawRect(
-      Rect.fromLTWH(0, size.height * 0.58, size.width, 1.5),
-      horizon,
-    );
-  }
+  void paint(Canvas canvas, Size size) {}
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;

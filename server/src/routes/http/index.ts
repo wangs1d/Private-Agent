@@ -25,6 +25,8 @@ import { registerChatWeb } from "./chat-web.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
+import { registerMessageHubRoutes } from "./messages.js";
+import { registerMessageBridgeRoutes } from "./message-bridge.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerDownloadRoutes } from "./downloads.js";
@@ -32,6 +34,7 @@ import { registerLifeSignalRoutes } from "./life-signals.js";
 import { registerMoodInferenceRoutes } from "./mood-inferences.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
+import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerJarvisRoutes } from "./jarvis.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
@@ -67,6 +70,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
   registerWechatClawRoutes(app, deps);
+  registerMessageBridgeRoutes(app, { messageBridgeService: deps.messageBridgeService });
+  registerMessageHubRoutes(app, {
+    messageHubService: deps.messageHubService,
+    messagePlatformGateway: deps.messagePlatformGateway,
+    agentCore: deps.agentCore!,
+  });
   registerBrowserSessionRoutes(app, deps);
   registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
   registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
@@ -95,6 +104,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     scheduleTaskService: deps.scheduleTaskService,
     notesService: deps.notesService,
   });
+  registerBriefingDeliveryRoutes(app);
   registerUserPreferencesRoutes(app);
   if (deps.jarvisHarness) {
     registerJarvisRoutes(app, { jarvisHarness: deps.jarvisHarness });

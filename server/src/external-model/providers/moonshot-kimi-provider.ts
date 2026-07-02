@@ -12,6 +12,11 @@ import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
 import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
 import { openAiUserContentFromTurn } from "../build-user-message-content.js";
 import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
+import {
+  adaptOpenAiChatCompletionStream,
+  consumeNormalizedStream,
+  pickVisibleText,
+} from "../stream-chat-helpers.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -189,7 +194,9 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
         stream: true,
         ...(promptPlan.promptCache ?? {}),
-        ...(kimiExtraBody(effectiveStreamOpts) ? { extra_body: kimiExtraBody(effectiveStreamOpts) } : {}),
+        // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body`，会把 `thinking`
+        // 埋到一层下导致 Moonshot 收不到。直接 spread 到顶层。
+        ...(kimiExtraBody(effectiveStreamOpts) ?? {}),
       };
       stream = await this.client.chat.completions.create(
         request as Parameters<typeof this.client.chat.completions.create>[0],
@@ -199,27 +206,40 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
       throw e;
     }
 
+    // 流式消费统一走 provider-agnostic helper：自动累积 content + reasoning_content + tool_calls。
+    // 适配层（adaptOpenAiChatCompletionStream）只负责把 OpenAI ChatCompletionChunk 映射到 NormalChatChunk；
+    // 核心 consumer 不关心具体 provider —— 后续接入 Anthropic/Google 时只需换 adapter。
     let full = "";
+    let visible = "";
     try {
-      for await (const part of stream) {
-        const delta = part.choices[0]?.delta?.content ?? "";
-        if (delta) {
-          full += delta;
-          onDelta(delta);
-        }
+      const result = await consumeNormalizedStream(
+        adaptOpenAiChatCompletionStream(
+          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+        ),
+        {
+          onContentDelta: (d) => onDelta(d),
+          providerId: this.id,
+          model,
+        },
+      );
+      full = result.content;
+      visible = pickVisibleText(result.content, result.reasoning);
+      // content 为空但 reasoning 有内容时，把 reasoning 补发给客户端（一次性）
+      if (!full.trim() && visible) {
+        onDelta(visible);
       }
     } catch (e) {
       msgs.length = turnStartLen;
       throw e;
     }
 
-    if (full.trim()) {
-      msgs.push({ role: "assistant", content: full });
+    if (visible.trim()) {
+      msgs.push({ role: "assistant", content: visible });
     }
     if (!ephemeral) {
       this.trimThread(msgs, streamOpts?.maxThreadMessages);
       this.threads.afterTurnCompleted(sessionId, msgs);
     }
-    return full;
+    return visible;
   }
 }

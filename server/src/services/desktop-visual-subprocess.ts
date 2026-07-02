@@ -7,6 +7,8 @@ import type {
   DesktopVisualPort,
   DesktopVisualRunInput,
   DesktopVisualRunResult,
+  DesktopVisualRunShellInput,
+  DesktopVisualRunShellResult,
   DesktopVisualScreenshotInput,
   DesktopVisualScreenshotResult,
 } from "./desktop-visual-port.js";
@@ -220,6 +222,33 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         packageRoot: this.packageRoot,
         timeoutMs: Math.min(30_000, this.timeoutMs),
         timeoutLabel: "截图超时",
+      },
+    );
+  }
+
+  async runShell(input: DesktopVisualRunShellInput): Promise<DesktopVisualRunShellResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    // 给工具调用方一点 buffer，Python 内部 5min 硬上限这里不重复夹
+    const timeoutMs = Math.max(
+      1_000,
+      Math.min(300_000, Math.floor(input.timeoutMs ?? 30_000)),
+    );
+    return runStdioWorker<DesktopVisualRunShellResult>(
+      {
+        action: "run_shell",
+        command: input.command,
+        shell: input.shell ?? null,
+        cwd: input.cwd ?? null,
+        timeoutMs,
+        allowDestructive: Boolean(input.allowDestructive),
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: timeoutMs + 5_000,
+        timeoutLabel: "run_shell 子进程超时",
       },
     );
   }

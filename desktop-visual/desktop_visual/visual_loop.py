@@ -1,14 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Optional
 
-from desktop_visual.actions import SYSTEM_PROMPT, parse_action_json
+from desktop_visual.actions import DELUXE_SYSTEM_PROMPT, SYSTEM_PROMPT, parse_action_json, validate_action_output
+from desktop_visual.agent_history import AgentHistory
 from desktop_visual.runtime.capture import grab_screen_png
 from desktop_visual.runtime.mouse_controller import HybridPointer
-from desktop_visual.vlm.base import VLMImage, VLMMessage, VisionLanguageModel
+from desktop_visual.structured_output import ActionKind, LoopResult
+from desktop_visual.vlm.base import VLMImage, VLMMessage, VLMResult, VisionLanguageModel
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +20,46 @@ class LoopConfig:
     max_steps: int = 40
     task: str = ""
     region: tuple[int, int, int, int] | None = None
+    use_history: bool = True
+    history_steps: int = 3
+    include_screenshots_in_history: bool = True
+    deluxe_prompt: bool = False
+    ocr_context: Optional[str] = None
+    max_vlm_retries: int = 2
+    vlm_retry_delay_s: float = 1.0
+
+
+@dataclass
+class LoopState:
+    _history: AgentHistory = field(default_factory=AgentHistory)
+    _consecutive_parse_failures: int = 0
+
+    @property
+    def history(self) -> AgentHistory:
+        return self._history
+
+    def record_parse_failure(self) -> None:
+        self._consecutive_parse_failures += 1
+
+    def reset_parse_failures(self) -> None:
+        self._consecutive_parse_failures = 0
+
+    @property
+    def should_abort(self) -> bool:
+        return self._consecutive_parse_failures >= 5
 
 
 class VisualDesktopLoop:
-    """Screenshot -> VLM -> action -> execute loop."""
+    """Screenshot -> VLM -> action -> execute loop.
+
+    v2 improvements (inspired by browser-use):
+    - AgentHistory with screenshot context for multi-step reasoning
+    - VLM retry with exponential-ish backoff on transient errors
+    - Stuck detection via action pattern analysis
+    - OCR context injection for better element targeting
+    - Pydantic structured output validation (optional)
+    - Enhanced DELUXE_SYSTEM_PROMPT with reasoning guidance
+    """
 
     def __init__(
         self,
@@ -31,34 +69,81 @@ class VisualDesktopLoop:
         on_step: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> None:
         self._vlm = vlm
-        self._pointer = pointer or HybridPointer()
+        self._pointer = pointer or HybridPointer(fail_safe=True)
         self._on_step = on_step
 
     async def run(self, cfg: LoopConfig) -> dict[str, Any]:
         if not cfg.task.strip():
             raise ValueError("cfg.task must not be empty")
 
-        history_note = ""
+        state = LoopState()
+
+        if cfg.use_history:
+            state.history.max_history_steps = cfg.history_steps
+            state.history.include_screenshots = cfg.include_screenshots_in_history
+
+        system_prompt = DELUXE_SYSTEM_PROMPT if cfg.deluxe_prompt else SYSTEM_PROMPT
+
         for step in range(cfg.max_steps):
             png, (width, height) = grab_screen_png(cfg.region)
-            user_text = (
-                f"Task: {cfg.task}\n"
-                f"Screenshot size: {width}x{height} pixels.\n"
-                f"Previous step feedback: {history_note or '(first step)'}\n"
-                "Decide the next UI action and return exactly one JSON object."
-            )
-            messages = [
-                VLMMessage(role="system", text=SYSTEM_PROMPT),
-                VLMMessage(role="user", text=user_text, images=[VLMImage(data=png)]),
-            ]
-            result = await self._vlm.complete(messages)
+
+            if cfg.use_history and state.history.step_count > 0:
+                messages = state.history.build_context_messages(
+                    system_prompt=system_prompt,
+                    task=cfg.task,
+                    current_screenshot=png,
+                    screenshot_size=(width, height),
+                    ocr_text=cfg.ocr_context,
+                )
+            else:
+                user_text = (
+                    f"Task: {cfg.task}\n"
+                    f"Screenshot size: {width}x{height} pixels.\n"
+                    "Decide the next UI action and return exactly one JSON object."
+                )
+                if cfg.ocr_context:
+                    user_text += f"\n\n--- OCR Text on Screen ---\n{cfg.ocr_context}"
+                messages = [
+                    VLMMessage(role="system", text=system_prompt),
+                    VLMMessage(role="user", text=user_text, images=[VLMImage(data=png)]),
+                ]
+
+            result = await self._vlm_complete_with_retry(messages, cfg)
+
             try:
                 action = parse_action_json(result.text)
+                state.reset_parse_failures()
             except Exception as exc:
-                history_note = (
-                    f"Action parse failed: {exc}; first 200 chars: {result.text[:200]!r}"
-                )
-                logger.warning(history_note)
+                state.record_parse_failure()
+                history_note = f"Parse failed: {exc}; raw: {result.text[:200]!r}"
+                logger.warning("Step %d: %s", step, history_note)
+                if cfg.use_history:
+                    state.history.record(
+                        action_kind=ActionKind.WAIT,
+                        action_payload={},
+                        note=history_note,
+                        screenshot_png=png,
+                        screenshot_size=(width, height),
+                        success=False,
+                    )
+                if state.should_abort:
+                    return {"ok": False, "error": f"Too many consecutive parse failures ({state._consecutive_parse_failures})", "steps": step + 1}
+                continue
+
+            try:
+                action_kind = ActionKind(action.kind)
+            except ValueError:
+                logger.warning("Step %d: unknown action kind '%s'", step, action.kind)
+                history_note = f"Unknown action: {action.kind!r}"
+                if cfg.use_history:
+                    state.history.record(
+                        action_kind=ActionKind.WAIT,
+                        action_payload=action.payload,
+                        note=history_note,
+                        screenshot_png=png,
+                        screenshot_size=(width, height),
+                        success=False,
+                    )
                 continue
 
             payload = {"step": step, "action": action.kind, "raw": action.payload}
@@ -68,10 +153,43 @@ class VisualDesktopLoop:
                     await maybe
 
             done, history_note = await self._execute(action.kind, action.payload)
+
+            if cfg.use_history:
+                state.history.record(
+                    action_kind=action_kind,
+                    action_payload=action.payload,
+                    note=history_note,
+                    screenshot_png=png,
+                    screenshot_size=(width, height),
+                    success=True,
+                    vlm_raw_response=result.text,
+                )
+
+            if state.history.is_stuck():
+                logger.warning("Step %d: stuck detected, VLM will be warned in next prompt", step)
+
             if done:
                 return {"ok": True, "steps": step + 1, "summary": history_note}
 
         return {"ok": False, "error": "max_steps reached before done", "steps": cfg.max_steps}
+
+    async def _vlm_complete_with_retry(
+        self,
+        messages: list[VLMMessage],
+        cfg: LoopConfig,
+    ) -> VLMResult:
+        last_exception: Optional[Exception] = None
+        for attempt in range(cfg.max_vlm_retries + 1):
+            try:
+                return await self._vlm.complete(messages)
+            except Exception as exc:
+                last_exception = exc
+                msg = str(exc)[:200]
+                logger.warning("VLM attempt %d/%d failed: %s", attempt + 1, cfg.max_vlm_retries + 1, msg)
+                if attempt < cfg.max_vlm_retries:
+                    delay = cfg.vlm_retry_delay_s * (2 ** attempt)
+                    await asyncio.sleep(delay)
+        raise RuntimeError(f"VLM failed after {cfg.max_vlm_retries + 1} attempts") from last_exception
 
     async def _execute(self, kind: str, payload: dict[str, Any]) -> tuple[bool, str]:
         def xy() -> tuple[int, int]:

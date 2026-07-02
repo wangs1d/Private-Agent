@@ -8,6 +8,7 @@ import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
 import type { NotesService } from "./notes-service.js";
+import type { UserPreferences } from "../routes/http/user-preferences.js";
 
 export interface MorningBriefingWeather {
   temperature?: number;
@@ -26,9 +27,15 @@ export interface MorningBriefingPendingNote {
   title: string;
 }
 
+export interface MorningBriefingOutfitTip {
+  suggestion: string;
+  reason: string;
+}
+
 export interface MorningBriefing {
   date: string;
   weather: MorningBriefingWeather | null;
+  outfitTip: MorningBriefingOutfitTip | null;
   todaySchedule: MorningBriefingScheduleItem[];
   pendingNotes: MorningBriefingPendingNote[];
   agentGreeting: string;
@@ -46,6 +53,7 @@ export type MorningBriefingDeps = {
   weatherPrefsService?: WeatherPrefsService;
   scheduleTaskService?: ScheduleTaskService;
   notesService?: NotesService;
+  getSessionPrefs?: (sessionId: string) => UserPreferences;
 };
 
 function todayIsoDate(): string {
@@ -114,6 +122,41 @@ function formatWeatherBit(
   return bit;
 }
 
+function buildOutfitTip(weather: MorningBriefingWeather | null): MorningBriefingOutfitTip | null {
+  const temp = weather?.temperature;
+  if (typeof temp !== "number" || !Number.isFinite(temp)) {
+    return null;
+  }
+  if (temp >= 30) {
+    return {
+      suggestion: "建议穿轻薄透气的夏装，外出注意防晒补水。",
+      reason: "今天体感偏热。",
+    };
+  }
+  if (temp >= 22) {
+    return {
+      suggestion: "短袖或薄款上衣就比较合适，早晚可备一件薄外套。",
+      reason: "温度整体比较舒适。",
+    };
+  }
+  if (temp >= 15) {
+    return {
+      suggestion: "建议长袖加薄外套，通勤时会更从容。",
+      reason: "今天稍微有点凉。",
+    };
+  }
+  if (temp >= 8) {
+    return {
+      suggestion: "建议穿上外套或针织层，早晚注意保暖。",
+      reason: "气温偏凉。",
+    };
+  }
+  return {
+    suggestion: "建议厚外套或保暖层一起穿，出门别忘了护颈保暖。",
+    reason: "今天明显偏冷。",
+  };
+}
+
 function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
   const top = items.slice(0, 3);
   const rest = items.length - top.length;
@@ -146,16 +189,27 @@ export class MorningBriefingService {
   async generateBriefing(sessionId: string): Promise<MorningBriefing> {
     const now = new Date();
     const greeting = greetingByHour(now.getHours());
+    const prefs = this.deps.getSessionPrefs?.(sessionId);
+    const sections = prefs?.morningBriefing.sections ?? {
+      weather: true,
+      outfit: true,
+      schedule: true,
+      notes: true,
+    };
 
     const [weather, todaySchedule, pendingNotes] = await Promise.all([
-      this.fetchWeather(sessionId).catch(() => null),
-      this.fetchTodaySchedule(sessionId),
-      this.fetchPendingNotes(sessionId),
+      sections.weather || sections.outfit
+        ? this.fetchWeather(sessionId).catch(() => null)
+        : Promise.resolve(null),
+      sections.schedule ? this.fetchTodaySchedule(sessionId) : Promise.resolve([]),
+      sections.notes ? this.fetchPendingNotes(sessionId) : Promise.resolve([]),
     ]);
+    const outfitTip = sections.outfit ? buildOutfitTip(weather) : null;
 
     return {
       date: todayIsoDate(),
-      weather,
+      weather: sections.weather ? weather : null,
+      outfitTip,
       todaySchedule,
       pendingNotes,
       agentGreeting: greeting,
@@ -228,6 +282,10 @@ export class MorningBriefingService {
       const { condition, temperature, description } = briefing.weather;
       const weatherBit = formatWeatherBit(condition, temperature, description);
       if (weatherBit) parts.push(weatherBit);
+    }
+
+    if (briefing.outfitTip) {
+      parts.push(`穿衣建议：${briefing.outfitTip.suggestion}`);
     }
 
     if (briefing.todaySchedule.length > 0) {

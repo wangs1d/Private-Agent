@@ -178,6 +178,8 @@ type RunPlanExecuteLoopArgs = {
   onDelta?: StreamDeltaHandler;
   /** 计划/执行/自检阶段口语化进度（供 WS chat.agent_status），不写入正文流 */
   onPhaseStatus?: (label: string) => void;
+  /** plan_execute 计划生成后回调，供上层发 chat.execution_event(plan_step) */
+  onPlanReady?: (plan: { goal: string; steps: { id: string; intent: string; successCriteria?: string; suggestedTools?: string[] }[] }) => void;
   /** 启用工具时必须传入（与 AgentCore 一致） */
   toolCtx: ChatToolExecutionContext | undefined;
   /** 不包含 toolLoop（由编排器在每轮执行拼接） */
@@ -196,6 +198,7 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     baseStreamOpts,
     onToolBatchForExecute,
     onPhaseStatus,
+    onPlanReady,
   } = args;
 
   provider.clearSession?.(planSessionId);
@@ -226,6 +229,11 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
   modelCalls += 1;
 
   const plan = parseExecutionPlan(planAssistant);
+
+  // v2：计划生成后立即回调，让上层发 chat.execution_event(plan_step, status=pending)
+  if (plan && !isPlanTriviallySimple(plan) && onPlanReady) {
+    onPlanReady(plan);
+  }
 
   if (!plan || isPlanTriviallySimple(plan)) {
     if (plan) {

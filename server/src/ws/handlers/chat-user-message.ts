@@ -28,9 +28,16 @@ import {
   interimAckMessageId,
   shouldEmitInterimAck,
 } from "../../agent/interim-ack.js";
+import {
+  buildExecutionEventPayload,
+  buildIntentDetectedPayload,
+  createTurnEventEmitter,
+  type TurnEventEmitter,
+} from "../../agent/turn-events.js";
 import { getToolResultProcessor } from "../../services/tool-result-processor.js";
 import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
+import { refreshAgentProfileFromTurn } from "../../services/agent-profile-autonomy-service.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
   getAgentRuntimeConfig().messageBatch,
@@ -207,6 +214,13 @@ async function processBatchedMessage(
   let chunkSeq = 0;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
 
+  // v2：tool_call 起始时间表（id → epoch ms），用于在 tool_result 阶段算 elapsedMs。
+  // 仅当 CHAT_TURN_PANEL_V2 开启时分配，避免无谓内存开销。
+  const toolStartedAt: Map<string, number> | undefined = getAgentRuntimeConfig()
+    .turnPanelV2.enabled
+    ? new Map<string, number>()
+    : undefined;
+
   const sendAssistantChunk = (chunk: string): void => {
     if (isStale()) return;
     chunkSeq += 1;
@@ -216,12 +230,30 @@ async function processBatchedMessage(
         payload: {
           sessionId: msgActor,
           messageId: assistantMessageId,
+          traceId: batched.originalMessageId,
           chunk,
           sequence: chunkSeq,
         },
       }),
     );
   };
+
+  /**
+   * 「分阶段异步对话交互 v2」事件发射器。
+   *
+   * 三个事件：turn_started（阶段 0）/ intent_detected（阶段 1）/ execution_event（阶段 2，多次）。
+   * 当前只在这里 emit 阶段 0 / 1；阶段 2 由 master-agent-coordinator、tool-bridge、
+   * plan-execute-loop 等深链路负责（见各模块 TODO）。
+   *
+   * 与 v1 interim ack 并行存在，由 CHAT_TURN_PANEL_V2 开关控制。
+   */
+  const turnEmitter: TurnEventEmitter = createTurnEventEmitter({
+    send: (json) => {
+      if (isStale()) return;
+      ctx.socket.send(json);
+    },
+    enabled: getAgentRuntimeConfig().turnPanelV2.enabled,
+  });
 
   /**
    * 「分阶段异步对话交互」阶段一：即时确认应答。
@@ -240,25 +272,47 @@ async function processBatchedMessage(
     const decision = routeLlmExecution(batched.text, cfg, {
       preferFullPipeline: batched.agentAccessMode === "full",
     });
+
+    // v2 阶段 0：路由开始打点（先于 interim_ack / intent_detected 发出）
+    if (cfg.turnPanelV2.enabled) {
+      const t0 = Date.now();
+      turnEmitter.emitTurnStarted({
+        sessionId: msgActor,
+        traceId: batched.originalMessageId,
+        t0,
+      });
+      // v2 阶段 1：意图已识别（路由是纯本地规则，立即就有结果）
+      turnEmitter.emitIntentDetected(
+        buildIntentDetectedPayload({
+          sessionId: msgActor,
+          traceId: batched.originalMessageId,
+          decision,
+          // plan / subAgents 由 plan-execute-loop / master-agent-coordinator
+          // 后续补发 execution_event(kind=agent_start / log) 即可
+        }),
+      );
+    }
+
     const interimText = shouldEmitInterimAck(batched.text, decision.mode, {
       enabled: cfg.interimAck.enabled,
     })
       ? buildInterimAckText(batched.text, decision.mode)
       : null;
-    if (!interimText) return;
-    if (isStale()) return;
-    ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ChatAssistantInterim,
-        payload: {
-          sessionId: msgActor,
-          messageId: interimAckMessageId(batched.originalMessageId),
-          traceId: batched.originalMessageId,
-          mode: decision.mode,
-          text: interimText,
-        },
-      }),
-    );
+    if (interimText) {
+      if (isStale()) return;
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ChatAssistantInterim,
+          payload: {
+            sessionId: msgActor,
+            messageId: interimAckMessageId(batched.originalMessageId),
+            traceId: batched.originalMessageId,
+            mode: decision.mode,
+            text: interimText,
+          },
+        }),
+      );
+    }
   };
 
   maybeEmitInterimAck();
@@ -318,6 +372,53 @@ async function processBatchedMessage(
             },
           }),
         );
+        // v2：plan_execute 的阶段进度（"正在分析任务…"等）也按 log 下发
+        turnEmitter.emitExecutionEvent(
+          buildExecutionEventPayload({
+            sessionId: msgActor,
+            traceId: batched.originalMessageId,
+            eventId: `phase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            kind: "log",
+            log: displayLine,
+          }),
+        );
+      },
+      onPlanReady: (plan) => {
+        if (isStale()) return;
+        // v2：plan_execute 计划生成后，对每个 step 发 plan_step(status=pending)
+        for (const step of plan.steps) {
+          turnEmitter.emitExecutionEvent(
+            buildExecutionEventPayload({
+              sessionId: msgActor,
+              traceId: batched.originalMessageId,
+              eventId: `plan-${step.id}-${Date.now()}`,
+              kind: "plan_step",
+              planStep: {
+                id: step.id,
+                title: step.intent,
+                status: "pending",
+              },
+            }),
+          );
+        }
+        // 执行开始后，把所有 step 标记为 running（当前架构是一次性执行，非逐步）
+        // 若未来拆成逐步执行，应在每步开始/完成时单独发 running/ok
+        // 这里先发一条 running 表示整体进入执行
+        if (plan.steps.length > 0) {
+          turnEmitter.emitExecutionEvent(
+            buildExecutionEventPayload({
+              sessionId: msgActor,
+              traceId: batched.originalMessageId,
+              eventId: `plan-running-${Date.now()}`,
+              kind: "plan_step",
+              planStep: {
+                id: plan.steps[0].id,
+                title: plan.steps[0].intent,
+                status: "running",
+              },
+            }),
+          );
+        }
       },
     });
 
@@ -401,6 +502,12 @@ async function processBatchedMessage(
     // 剥离可能残留的 [ts:] 时间戳前缀（该前缀仅供 LLM 上下文使用，不应展示给用户）
     const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
     finalText = finalText.replace(TS_PREFIX_RE, "").trim();
+    refreshAgentProfileFromTurn({
+      sessionId: msgActor,
+      userText: batched.text,
+      assistantText: finalText,
+      toolNames: reply.toolName ? [reply.toolName] : [],
+    });
 
     ctx.socket.send(
       JSON.stringify({
@@ -408,6 +515,7 @@ async function processBatchedMessage(
         payload: {
           sessionId: msgActor,
           messageId: assistantMessageId,
+          traceId: batched.originalMessageId,
           finalText,
           toolCalls: reply.toolName ? [reply.toolName] : [],
         },
@@ -425,6 +533,12 @@ async function processBatchedMessage(
     ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, batched.originalMessageId);
     const errText = `处理消息时出错：${msg}`;
     sendAssistantChunk(errText);
+    refreshAgentProfileFromTurn({
+      sessionId: msgActor,
+      userText: batched.text,
+      assistantText: errText,
+      hadError: true,
+    });
     if (isStale()) return;
     ctx.socket.send(
       JSON.stringify({
@@ -432,6 +546,7 @@ async function processBatchedMessage(
         payload: {
           sessionId: msgActor,
           messageId: assistantMessageId,
+          traceId: batched.originalMessageId,
           finalText: errText,
           toolCalls: [],
         },

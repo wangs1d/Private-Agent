@@ -62,7 +62,6 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         _loadAllRequests(),
       ]);
     } catch (_) {
-      // 各子方法已自行处理
     } finally {
       if (mounted) {
         setState(() => _loading = false);
@@ -166,7 +165,6 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
 
     return Column(
       children: [
-        // TabBar
         TabBar(
           controller: _tabController,
           tabs: const [
@@ -174,14 +172,11 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
             Tab(text: "新朋友"),
           ],
         ),
-        // TabBarView
         Expanded(
           child: TabBarView(
             controller: _tabController,
             children: [
-              // 好友列表
               _buildFriendsList(theme),
-              // 新朋友（所有请求）
               _buildNewFriendsList(theme),
             ],
           ),

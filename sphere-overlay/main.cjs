@@ -8,8 +8,8 @@ const { applyDeskPetShell } = require("./win32-desk-pet.cjs");
 app.commandLine.appendSwitch("no-sandbox");
 
 /** 3D 桌宠：左侧机器区 + 右侧菜单区（展开时） */
-const PET_WIDTH = 150;
-const PET_HEIGHT = 188;
+const PET_WIDTH = 186;
+const PET_HEIGHT = 232;
 const MENU_WIDTH = 204;
 const WIDTH = PET_WIDTH;
 const HEIGHT = PET_HEIGHT;
@@ -174,6 +174,25 @@ function finishDeskPetShow() {
   }
 }
 
+function getMainWorkArea() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return screen.getDisplayMatching(mainWindow.getBounds()).workArea;
+  }
+  return screen.getPrimaryDisplay().workArea;
+}
+
+function clampMainBounds(x, y, width = WIDTH, height = HEIGHT) {
+  const area = getMainWorkArea();
+  const maxX = area.x + Math.max(0, area.width - width);
+  const maxY = area.y + Math.max(0, area.height - height);
+  return {
+    x: Math.min(Math.max(x, area.x), maxX),
+    y: Math.min(Math.max(y, area.y), maxY),
+    width,
+    height,
+  };
+}
+
 function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
@@ -256,6 +275,9 @@ function createScheduleWindow() {
     y,
     show: false,
     frame: false,
+    // transparent:true — 让窗口本身透明，CSS transform 拖动 DOM 时
+    // DOM 元素在任何位置都可见（不会被黑色窗口背景裁掉）。
+    // 鼠标事件由 setIgnoreMouseEvents(false) 保证可交互。
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -346,14 +368,15 @@ function toggleScheduleWindow() {
 function animateMove(targetX, targetY, durationMs = 1200) {
   if (!mainWindow) return;
   const start = mainWindow.getBounds();
+  const target = clampMainBounds(targetX, targetY, start.width, start.height);
   const startAt = Date.now();
 
   const tick = () => {
     if (!mainWindow) return;
     const t = Math.min(1, (Date.now() - startAt) / durationMs);
     const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    const x = Math.round(start.x + (targetX - start.x) * ease);
-    const y = Math.round(start.y + (targetY - start.y) * ease);
+    const x = Math.round(start.x + (target.x - start.x) * ease);
+    const y = Math.round(start.y + (target.y - start.y) * ease);
     mainWindow.setBounds({ x, y, width: start.width, height: start.height });
     if (t < 1) setImmediate(tick);
   };
@@ -444,8 +467,7 @@ app.whenReady().then(() => {
 
   if (!isScheduleOnly) {
     createWindow();
-    // 同时创建日程悬浮窗
-    createScheduleWindow();
+    // 日程悬浮窗已迁移到同进程 HWND（pai/schedule_floating），不再由 Electron 创建
   }
 
   const trayIcon = nativeImage.createFromDataURL(
@@ -489,15 +511,71 @@ app.whenReady().then(() => {
     menuExpanded = !!expanded;
     const b = mainWindow.getBounds();
     const width = menuExpanded ? PET_WIDTH + MENU_WIDTH : PET_WIDTH;
-    mainWindow.setBounds({ x: b.x, y: b.y, width, height: PET_HEIGHT });
+    mainWindow.setBounds(clampMainBounds(b.x, b.y, width, PET_HEIGHT));
+  });
+
+  ipcMain.on("sphere:setScheduleCollapsed", (ev, collapsed) => {
+    // 通过事件来源 webContents 找到日程窗（防止误操作到桌宠）
+    const win = BrowserWindow.fromWebContents(ev.sender);
+    if (!win || win.isDestroyed() || win === mainWindow) {
+      log("[Schedule] setScheduleCollapsed skipped: win=", !!win, "isMain=", win === mainWindow);
+      return;
+    }
+    const b = win.getBounds();
+    const targetHeight = collapsed ? SCHEDULE_HEIGHT_COLLAPSED : SCHEDULE_HEIGHT_EXPANDED;
+    if (b.height === targetHeight) {
+      log("[Schedule] setScheduleCollapsed no-op, already h=", b.height);
+      return;
+    }
+    const targetWidth = collapsed ? 200 : SCHEDULE_WIDTH;
+    // 原地折叠：x/y 保持不变，只改 width/height。这样从 340→48 时底边自然收起，
+    // 从 48→340 时窗口向下展开（顶部锚定）。
+    win.setBounds({
+      x: b.x,
+      y: b.y,
+      width: targetWidth,
+      height: targetHeight,
+    });
+    log("[Schedule] setScheduleCollapsed", collapsed, "→", targetWidth, "x", targetHeight);
+    // 注意：折叠时**不能** setIgnoreMouseEvents(true)，否则整个窗口鼠标穿透，
+    // 用户就点不到"展开"按钮了。窗口始终保持可交互。
+    win.setIgnoreMouseEvents(false, { forward: false });
   });
 
   ipcMain.on("sphere:moveBy", (ev, dx, dy) => {
     // 根据事件来源 webContents 找到对应窗口（桌宠 / 日程窗通用）
     const win = BrowserWindow.fromWebContents(ev.sender);
     if (!win || win.isDestroyed()) return;
-    const b = win.getBounds();
-    win.setBounds({ x: b.x + dx, y: b.y + dy, width: b.width, height: b.height });
+    if (win === mainWindow) {
+      const b = win.getBounds();
+      win.setBounds(clampMainBounds(b.x + dx, b.y + dy, b.width, b.height));
+      return;
+    }
+    // 日程窗：用 setPosition 更快（不重设 width/height），并把 dx/dy 直接累加到 x/y，
+    // 避免 getBounds + setBounds 的两次 IPC 同步开销
+    const pos = win.getPosition();
+    win.setPosition(pos[0] + dx, pos[1] + dy);
+  });
+
+  // 绝对位置：渲染端自己跟踪当前位置，避免主进程每次 getPosition。
+  // 配合 rAF 批处理，60fps 上限，IPC 一次 = setPosition 一次，无中间状态。
+  ipcMain.on("sphere:setPosition", (ev, x, y) => {
+    const win = BrowserWindow.fromWebContents(ev.sender);
+    if (!win || win.isDestroyed()) return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (win === mainWindow) {
+      const b = win.getBounds();
+      win.setBounds(clampMainBounds(x, y, b.width, b.height));
+      return;
+    }
+    win.setPosition(Math.round(x), Math.round(y));
+  });
+
+  ipcMain.handle("sphere:getPosition", (ev) => {
+    const win = BrowserWindow.fromWebContents(ev.sender);
+    if (!win || win.isDestroyed()) return { x: 0, y: 0 };
+    const [x, y] = win.getPosition();
+    return { x, y };
   });
 
   ipcMain.on("sphere:setIgnoreMouseEvents", (ev, ignore, forward) => {

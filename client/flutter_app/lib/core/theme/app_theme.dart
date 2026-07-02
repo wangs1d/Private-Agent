@@ -11,7 +11,7 @@ enum AppThemeVariant { dark, warm }
 /// 侧边栏底部按钮调用 [toggle] 在两种主题之间切换；
 /// `MaterialApp.theme` 通过 `ValueListenableBuilder` 重建实现热切换。
 class AppThemeController extends ValueNotifier<AppThemeVariant> {
-  AppThemeController() : super(AppThemeVariant.warm);
+  AppThemeController() : super(AppThemeVariant.dark);
 
   static final AppThemeController instance = AppThemeController();
 

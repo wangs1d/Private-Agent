@@ -62,6 +62,15 @@ export type InterimAckConfig = {
   enabled: boolean;
 };
 
+/**
+ * 「分阶段异步对话交互 v2」豆包式阶段化事件流开关。
+ * 默认关闭（v1 兼容期）；设 `CHAT_TURN_PANEL_V2=1` 开启
+ * chat.turn_started / chat.intent_detected / chat.execution_event 三件套。
+ */
+export type TurnPanelV2Config = {
+  enabled: boolean;
+};
+
 export type AgentRuntimeConfig = {
   masterDelegation: MasterDelegationConfig;
   planExecute: PlanExecuteConfig;
@@ -69,6 +78,7 @@ export type AgentRuntimeConfig = {
   quota: QuotaConfig;
   messageBatch: MessageBatchConfig;
   interimAck: InterimAckConfig;
+  turnPanelV2: TurnPanelV2Config;
 };
 
 function loadMasterDelegationConfig(): MasterDelegationConfig {
@@ -167,6 +177,14 @@ function loadInterimAckConfig(): InterimAckConfig {
   };
 }
 
+function loadTurnPanelV2Config(): TurnPanelV2Config {
+  const raw = process.env.CHAT_TURN_PANEL_V2;
+  return {
+    // 默认关闭（v1 兼容期），显式 1/true/yes/on 时开启
+    enabled: raw === undefined ? false : envTruthy(raw),
+  };
+}
+
 export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
   return {
     masterDelegation: loadMasterDelegationConfig(),
@@ -175,6 +193,7 @@ export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
     quota: loadQuotaConfig(),
     messageBatch: loadMessageBatchConfig(),
     interimAck: loadInterimAckConfig(),
+    turnPanelV2: loadTurnPanelV2Config(),
   };
 }
 
@@ -210,6 +229,7 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
     config.quota.unitsPerModelCall > 0 ? `quotaUnitsPerCall=${config.quota.unitsPerModelCall}` : null,
     `messageBatch=${mb.enabled ? "on(until-processing-ui-off)" : "off"}`,
     `interimAck=${config.interimAck.enabled ? "on" : "off"}`,
+    `turnPanelV2=${config.turnPanelV2.enabled ? "on" : "off"}`,
   ]
     .filter(Boolean)
     .join(", ");

@@ -2,15 +2,20 @@ import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, Tar
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
+import "dart:async";
 import "dart:convert";
 
 import "../../core/config/api_config.dart";
 import "../../core/models/chat_models.dart";
+import "../../core/models/turn_state.dart";
+import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/virtual_phone_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
+import "../../core/services/agent_profile_overlay_launcher.dart";
+import "agent_profile_page.dart";
 import "agent_result_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
@@ -22,6 +27,11 @@ class ChatPage extends StatefulWidget {
     required this.controller,
     required this.onSend,
     this.agentName,
+    this.agentAvatarUrl,
+    this.agentMoodStyle,
+    this.agentAvatarPreset,
+    this.agentProfile,
+    this.onOpenAgentProfile,
     this.galleryPendingCount = 0,
     this.onPickGalleryImage,
     this.onClearGalleryImages,
@@ -31,6 +41,8 @@ class ChatPage extends StatefulWidget {
     /// 「分阶段异步对话交互」阶段一文本：在多步/工具型请求开始时显示的
     /// 即时确认应答（如「好的，让我查一下…」），real chunk 抵达后由父组件清空。
     this.interimAckText,
+    /// 「分阶段异步对话交互 v2」结构化状态：null 时退回 v1 思考气泡。
+    this.turnState,
     this.onOpenGomoku,
     this.fullComputerAccessEnabled = false,
     this.onToggleFullComputerAccess,
@@ -43,6 +55,8 @@ class ChatPage extends StatefulWidget {
     this.onDeleteMessage,
     /// 删除从某条消息起之后所有消息的回调（传入 messageId）
     this.onDeleteFromMessage,
+    /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
+    this.onStopAgent,
   });
 
   final List<ChatMessage> messages;
@@ -51,6 +65,11 @@ class ChatPage extends StatefulWidget {
   final VoidCallback onSend;
   /// 用户给agent起的名字
   final String? agentName;
+  final String? agentAvatarUrl;
+  final String? agentMoodStyle;
+  final String? agentAvatarPreset;
+  final AgentProfileData? agentProfile;
+  final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   /// 已选相册图张数，待发。
   final int galleryPendingCount;
   final VoidCallback? onPickGalleryImage;
@@ -63,6 +82,8 @@ class ChatPage extends StatefulWidget {
   final String? agentStatusLine;
   /// `chat.assistant_interim` 推送的即时确认应答（生命周期更短：real chunk 一到就清空）
   final String? interimAckText;
+  /// 「分阶段异步对话交互 v2」结构化状态机；null 表示 v1 链路
+  final TurnState? turnState;
   /// 在 App 内打开五子棋对局（tableId 或 playUrl）
   final void Function(String playUrlOrTableId)? onOpenGomoku;
   /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
@@ -80,6 +101,8 @@ class ChatPage extends StatefulWidget {
   final void Function(String messageId)? onDeleteMessage;
   /// 删除从某条消息起之后所有消息
   final void Function(String messageId)? onDeleteFromMessage;
+  /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
+  final VoidCallback? onStopAgent;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -165,7 +188,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   /// 消息折叠相关状态
   static const int _collapseThreshold = 30; // 超过此数量时开始折叠
   static const int _visibleCount = 30; // 折叠后显示的消息数量
-  bool _isCollapsed = true; // 是否处于折叠状态
+  bool _isCollapsed = false; // 是否处于折叠状态
   int _collapsedCount = 0; // 被折叠的消息数量
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
 
@@ -179,8 +202,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _isRestoringPosition = false;    // 恢复锁：正在恢复位置时阻止所有自动滚动
 
   // 预定义常量 - 减少重复创建对象
-  static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
-  static const EdgeInsets _cardPadding = EdgeInsets.all(12);
+  static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 4);
+  static const EdgeInsets _cardPadding = EdgeInsets.all(7);
   static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(6, 6, 6, 5);
   static const EdgeInsets _inputHorizontalPadding = EdgeInsets.symmetric(horizontal: 10, vertical: 6);
 
@@ -191,13 +214,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
       _speechService.initialize();
     }
-    // 初始化呼吸动画
+    // 初始化呼吸动画：agent 工作中输入框的白色光晕靠这个 0~1 的脉动驱动，
+    // 周期压到 1.6s 让呼吸感更明显。
     _breathingController = AnimationController(
-      duration: const Duration(milliseconds: 2000),
+      duration: const Duration(milliseconds: 1600),
       vsync: this,
     )..repeat(reverse: true);
     _breathingAnimation = Tween<double>(
-      begin: 0.3,
+      begin: 0.0,
       end: 1.0,
     ).animate(CurvedAnimation(
       parent: _breathingController!,
@@ -345,8 +369,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       final bool isFirstLoad = !_hasHadMessages && widget.messages.isNotEmpty;
       if (isFirstLoad) _hasHadMessages = true;
 
-      // 如果消息数量超过阈值且当前是展开状态，自动折叠
-      if (widget.messages.length > _collapseThreshold && !_isCollapsed) {
+      // 仅用户消息超阈值时自动折叠；assistant 回复不触发折叠
+      if (hasNewUserMessage &&
+          widget.messages.length > _collapseThreshold &&
+          !_isCollapsed) {
         setState(() => _isCollapsed = true);
       }
 
@@ -694,7 +720,7 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       child: AnimatedBuilder(
         animation: _breathingAnimation!,
         builder: (context, child) {
-          return Container(
+        return Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
@@ -730,6 +756,25 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     );
   }
 
+  void _showAgentProfilePopover(GlobalKey avatarKey) {
+    if (widget.agentProfile == null) return;
+
+    final RenderBox? renderBox =
+        avatarKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+
+    final Offset position = renderBox.localToGlobal(Offset.zero);
+    final Size size = renderBox.size;
+
+    AgentProfileOverlayLauncher.bindHandlers();
+
+    unawaited(AgentProfileOverlayLauncher.show(
+      x: (position.dx + size.width + 10).round(),
+      y: position.dy.round(),
+      profile: widget.agentProfile!,
+    ));
+  }
+
   /// 鼠标悬停消息气泡时自动浮现操作按钮栏
   Widget _buildHoverableMessage({
     required ColorScheme cs,
@@ -737,8 +782,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     required bool isUser,
     ContentSummaryParseResult? contentSummary,
   }) {
-    // 所有用户消息都可悬停显示操作按钮
-    final bool canShowActions = isUser;
     // 选择模式下，只有当前选中范围内的消息参与（触发用户消息 + 其agent回复）
     final bool inSelectableRange = _deleteSelectionMode && _selectedMessageIds.contains(mainMessage.messageId);
     // 当前消息是否为触发了删除模式的用户消息（锁定不可取消）
@@ -750,6 +793,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       isUser: isUser,
       contentSummary: contentSummary,
       agentName: widget.agentName,
+      agentAvatarUrl: widget.agentAvatarUrl,
+      agentMoodStyle: widget.agentMoodStyle,
+      agentAvatarPreset: widget.agentAvatarPreset,
+      onOpenAgentProfile: _showAgentProfilePopover,
       onDeleteMessage: widget.onDeleteMessage,
       onDeleteFromMessage: widget.onDeleteFromMessage,
       onOpenGomoku: widget.onOpenGomoku,
@@ -759,7 +806,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       deleteSelectionMode: _deleteSelectionMode,
       isSelected: _selectedMessageIds.contains(mainMessage.messageId),
       selectedCount: _selectedMessageIds.length,
-      canShowActions: canShowActions,
       inSelectableRange: inSelectableRange,
       isTrigger: isTrigger,
       onEnterDeleteMode: _enterDeleteMode,
@@ -801,14 +847,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final bool showLiveThinking =
-        widget.isAgentProcessing && _breathingAnimation != null;
     // reverse 模式下使用反转消息列表（最新消息在 index 0 → 视觉底部）
     final List<Map<String, dynamic>> reversedMessages = _getReversedDisplayMessages();
     final int msgCount = reversedMessages.length;
     // reverse ListView 的 item 顺序（index 0 = 底部）：
-    //   [thinkingBubble(底), newestMsg, ..., oldestMsg, collapseButton(顶)]
-    final int itemCount = msgCount + (showLiveThinking ? 1 : 0) + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
+    //   [newestMsg, ..., oldestMsg, collapseButton(顶)]
+    // 思考气泡已废弃（由输入框白色呼吸灯替代），不再占位。
+    final int itemCount = msgCount + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
     final bool showCollapseButton = _collapsedCount > 0;
 
     return ColoredBox(
@@ -840,21 +885,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                   itemCount: itemCount,
                   itemBuilder: (BuildContext context, int index) {
                     // reverse 模式下 index 0 = 视觉底部
-                    // 布局：[thinking?(0), msgs(1..msgCount), collapse?(最后)]
-                    int offset = 0;
-
-                    // index 0 → 思考中气泡（最底部，在最新消息下方）
-                    if (showLiveThinking) {
-                      if (index == 0) {
-                        return _buildProgressBubble(
-                          cs,
-                          _processingStatusText(),
-                        );
-                      }
-                      offset = 1;
-                    }
-
-                    final int msgIndex = index - offset; // 反转后的消息索引（0 = 最新）
+                    // 思考气泡已废弃（由输入框白色呼吸灯替代），不在消息列表占位。
+                    final int msgIndex = index;
 
                     // 最后一个位置 → 折叠按钮（最顶部，在历史消息上方）
                     if (showCollapseButton && msgIndex >= msgCount) {
@@ -995,26 +1027,46 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                       },
                     ),
                     // 主输入框容器
+                    // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
+                    // - 空闲时：维持原本的浅灰描边 + 柔和投影
                     AnimatedBuilder(
                       animation: _breathingAnimation!,
                       builder: (context, child) {
+                        final double breath = _breathingAnimation!.value;
+                        final bool busy = widget.isAgentProcessing;
+                        // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
+                        final double pulse = busy
+                            ? (0.6 + 0.4 * breath)
+                            : (0.05 + 0.2 * breath);
                         return Container(
                           decoration: BoxDecoration(
-                            color: cs.surfaceContainerHigh,
+                            color: cs.surface,
                             borderRadius: BorderRadius.circular(28),
                             border: Border.all(
-                              color: cs.outline.withValues(
-                                alpha: 0.65 + 0.1 * _breathingAnimation!.value,
-                              ),
+                              color: busy
+                                  ? Colors.white.withValues(alpha: 0.35 + 0.5 * breath)
+                                  : cs.outline.withValues(alpha: 0.55),
+                              width: busy ? 1.4 : 1.0,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(
-                                  alpha: 0.02 + 0.02 * _breathingAnimation!.value,
+                            boxShadow: <BoxShadow>[
+                              if (busy) ...<BoxShadow>[
+                                // 外圈白色光晕（主呼吸）
+                                BoxShadow(
+                                  color: Colors.white.withValues(alpha: 0.18 * pulse),
+                                  blurRadius: 14 + 10 * breath,
+                                  spreadRadius: 0.5 + 1.5 * breath,
                                 ),
-                                blurRadius: 20,
-                                offset: const Offset(0, 8),
-                              ),
+                                // 内圈近场白雾
+                                BoxShadow(
+                                  color: Colors.white.withValues(alpha: 0.28 * breath),
+                                  blurRadius: 4,
+                                ),
+                              ] else
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.04),
+                                  blurRadius: 20,
+                                  offset: const Offset(0, 8),
+                                ),
                             ],
                           ),
                           child: child,
@@ -1092,18 +1144,33 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   ),
                                 if (widget.onToggleFullComputerAccess != null)
                                   const SizedBox(width: 4),
-                                // 发送按钮
+                                // 发送按钮：处理中时变停止按钮（软取消）
                                 Container(
                                   decoration: BoxDecoration(
-                                    color: cs.surfaceContainerLowest,
+                                    color: widget.isAgentProcessing
+                                        ? cs.errorContainer.withValues(alpha: 0.3)
+                                        : cs.surfaceContainerLowest,
                                     shape: BoxShape.circle,
                                     border: Border.all(
-                                      color: cs.outline.withValues(alpha: 0.8),
+                                      color: widget.isAgentProcessing
+                                          ? cs.error.withValues(alpha: 0.6)
+                                          : cs.outline.withValues(alpha: 0.8),
                                     ),
                                   ),
                                   child: IconButton(
-                                    icon: Icon(Icons.send, size: 20, color: cs.onSurfaceVariant),
-                                    onPressed: widget.onSend,
+                                    icon: Icon(
+                                      widget.isAgentProcessing
+                                          ? Icons.stop_rounded
+                                          : Icons.send,
+                                      size: 20,
+                                      color: widget.isAgentProcessing
+                                          ? cs.error
+                                          : cs.onSurfaceVariant,
+                                    ),
+                                    tooltip: widget.isAgentProcessing ? "停止" : "发送",
+                                    onPressed: widget.isAgentProcessing
+                                        ? widget.onStopAgent
+                                        : widget.onSend,
                                     padding: EdgeInsets.zero,
                                     constraints: const BoxConstraints(
                                       minWidth: 34,
@@ -1276,6 +1343,10 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
+    this.agentAvatarUrl,
+    this.agentMoodStyle,
+    this.agentAvatarPreset,
+    this.onOpenAgentProfile,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
     this.onOpenGomoku,
@@ -1284,8 +1355,6 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.deleteSelectionMode,
     required this.isSelected,
     required this.selectedCount,
-    /// 是否可显示悬停操作按钮（所有用户消息为 true）
-    required this.canShowActions,
     /// 是否在选择模式的可选范围内（触发用户消息 + 其agent回复）
     required this.inSelectableRange,
     /// 是否为触发了删除模式的用户消息（锁定不可取消）
@@ -1302,6 +1371,10 @@ class _HoverableMessageWidget extends StatelessWidget {
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
+  final String? agentAvatarUrl;
+  final String? agentMoodStyle;
+  final String? agentAvatarPreset;
+  final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final void Function(String playUrlOrTableId)? onOpenGomoku;
@@ -1313,8 +1386,6 @@ class _HoverableMessageWidget extends StatelessWidget {
   final bool isSelected;
   /// 当前已选中的消息总数（用于确认栏显示）
   final int selectedCount;
-  /// 是否可显示操作按钮
-  final bool canShowActions;
   /// 是否在可选择范围内
   final bool inSelectableRange;
   /// 是否为触发的用户消息（锁定）
@@ -1337,13 +1408,16 @@ class _HoverableMessageWidget extends StatelessWidget {
       cardPadding: cardPadding,
       contentSummary: contentSummary,
       agentName: agentName,
+      agentAvatarUrl: agentAvatarUrl,
+      agentMoodStyle: agentMoodStyle,
+      agentAvatarPreset: agentAvatarPreset,
+      onOpenAgentProfile: onOpenAgentProfile,
       onDeleteMessage: onDeleteMessage,
       onDeleteFromMessage: onDeleteFromMessage,
       onOpenGomoku: onOpenGomoku,
       deleteSelectionMode: deleteSelectionMode,
       isSelected: isSelected,
       selectedCount: selectedCount,
-      canShowActions: canShowActions,
       inSelectableRange: inSelectableRange,
       isTrigger: isTrigger,
       onEnterDeleteMode: onEnterDeleteMode,
@@ -1363,13 +1437,16 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.cardPadding,
     this.contentSummary,
     this.agentName,
+    this.agentAvatarUrl,
+    this.agentMoodStyle,
+    this.agentAvatarPreset,
+    this.onOpenAgentProfile,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
     this.onOpenGomoku,
     required this.deleteSelectionMode,
     required this.isSelected,
     required this.selectedCount,
-    required this.canShowActions,
     required this.inSelectableRange,
     required this.isTrigger,
     required this.onEnterDeleteMode,
@@ -1384,13 +1461,16 @@ class _HoverableMessageContent extends StatefulWidget {
   final EdgeInsets cardPadding;
   final ContentSummaryParseResult? contentSummary;
   final String? agentName;
+  final String? agentAvatarUrl;
+  final String? agentMoodStyle;
+  final String? agentAvatarPreset;
+  final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
   final void Function(String playUrlOrTableId)? onOpenGomoku;
   final bool deleteSelectionMode;
   final bool isSelected;
   final int selectedCount;
-  final bool canShowActions;
   final bool inSelectableRange;
   final bool isTrigger;
   final void Function(String messageId) onEnterDeleteMode;
@@ -1404,6 +1484,7 @@ class _HoverableMessageContent extends StatefulWidget {
 
 class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   bool _hovered = false;
+  final GlobalKey _avatarKey = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
@@ -1424,35 +1505,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               child: _buildMessageRow(context),
             ),
           ),
-          // 悬停时浮现操作按钮栏（所有用户消息，非选择模式下，透明背景）
-          if (_hovered && !widget.deleteSelectionMode && widget.canShowActions &&
-              widget.onDeleteMessage != null &&
-              widget.onDeleteFromMessage != null)
-            Positioned(
-              left: 0,
-              right: 0,
-              top: 0,
-              bottom: -48,
-              child: Align(
-                alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-                child: Padding(
-                  padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
-                  child: _MessageActionBar(
-                  messageText: widget.mainMessage.text,
-                  messageId: widget.mainMessage.messageId,
-                  onCopy: () async {
-                    await _copyMessage(context, widget.mainMessage.text, widget.mainMessage.messageId);
-                  },
-                  onEdit: () async {
-                    await _editMessage(context, widget.mainMessage.messageId, widget.mainMessage.text);
-                  },
-                  onDeletePressed: () {
-                    widget.onEnterDeleteMode(widget.mainMessage.messageId);
-                  },
-                ),
-                ),
-              ),
-            ),
           // 删除选择模式下的确认/取消按钮栏（仅在触发删除的用户消息下方显示）
           if (widget.deleteSelectionMode && widget.isTrigger)
             Positioned(
@@ -1461,7 +1513,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               top: 0,
               bottom: -56,
               child: Align(
-                alignment: widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
+                alignment: widget.isUser ? Alignment.bottomRight : Alignment.bottomLeft,
                 child: Padding(
                   padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
                   child: _DeleteConfirmBar(
@@ -1606,23 +1658,45 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
-    return Container(
+    final Widget avatar = _buildDefaultAgentAvatar();
+
+    if (widget.onOpenAgentProfile == null) {
+      return avatar;
+    }
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        key: _avatarKey,
+        behavior: HitTestBehavior.opaque,
+        onTap: () => widget.onOpenAgentProfile!.call(_avatarKey),
+        child: SizedBox(
+          width: 46,
+          height: 40,
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: avatar,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDefaultAgentAvatar() {
+    final _AgentAvatarPalette palette =
+        _AgentAvatarPalette.fromPreset(widget.agentAvatarPreset);
+    final Widget fallback = Container(
       width: 36,
       height: 36,
       margin: const EdgeInsets.only(right: 10, top: 4),
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: const RadialGradient(
-          center: Alignment(-0.3, -0.3),
-          colors: <Color>[
-            Color(0xFF007AFF),
-            Color(0xB3007AFF),
-            Color(0xE60056D2),
-          ],
+        gradient: RadialGradient(
+          center: const Alignment(-0.3, -0.3),
+          colors: palette.colors,
         ),
         boxShadow: <BoxShadow>[
           BoxShadow(
-            color: Color(0x4D007AFF),
+            color: palette.colors.first.withValues(alpha: 0.32),
             blurRadius: 20,
             offset: Offset.zero,
           ),
@@ -1633,132 +1707,37 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         ),
       ),
       alignment: Alignment.center,
-      child: const Icon(
-        Icons.smart_toy_outlined,
+      child: Icon(
+        _AgentMoodGlyph.fromMood(widget.agentMoodStyle),
         size: 18,
         color: Colors.white,
       ),
     );
-  }
-
-  /// 复制消息：调用后端审计接口 + 写入剪贴板
-  static Future<void> _copyMessage(BuildContext context, String text, String messageId) async {
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/chat/message/copy");
-      final Map<String, dynamic> requestBody = <String, dynamic>{
-        "sessionId": ApiConfig.sessionId,
-        "userId": ApiConfig.userId.trim().isEmpty ? null : ApiConfig.userId.trim(),
-        "messageId": messageId,
-        "text": text,
-      };
-      final http.Response response = await http.post(
-        uri,
-        headers: <String, String>{"Content-Type": "application/json"},
-        body: jsonEncode(requestBody),
-      );
-      if (response.statusCode == 200) {
-        await Clipboard.setData(ClipboardData(text: text));
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
-          );
-        }
-      } else {
-        // 后端校验失败时仍写入剪贴板（降级体验）
-        await Clipboard.setData(ClipboardData(text: text));
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
-          );
-        }
-      }
-    } catch (_) {
-      // 网络异常时直接复制文本
-      await Clipboard.setData(ClipboardData(text: text));
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("已复制到剪贴板"), duration: Duration(seconds: 1)),
-        );
-      }
-    }
-  }
-
-  /// 编辑消息：弹出编辑对话框 → 用户确认后调用后端编辑 API 触发 Agent 重答
-  static Future<void> _editMessage(BuildContext context, String messageId, String originalText) async {
-    final TextEditingController editController = TextEditingController(text: originalText);
-    final String? result = await showDialog<String>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text("编辑消息"),
-          content: TextField(
-            controller: editController,
-            maxLines: null,
-            autofocus: true,
-            decoration: const InputDecoration(
-              hintText: "修改消息内容…",
-              border: OutlineInputBorder(),
-            ),
+    return Container(
+      width: 36,
+      height: 36,
+      margin: const EdgeInsets.only(right: 10, top: 4),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.4),
+          width: 1,
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: palette.colors.first.withValues(alpha: 0.32),
+            blurRadius: 20,
+            offset: Offset.zero,
           ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(null),
-              child: const Text("取消"),
-            ),
-            FilledButton(
-              onPressed: () {
-                final String newText = editController.text.trim();
-                if (newText.isEmpty || newText == originalText) {
-                  Navigator.of(dialogContext).pop(null);
-                  return;
-                }
-                Navigator.of(dialogContext).pop(newText);
-              },
-              child: const Text("发送"),
-            ),
-          ],
-        );
-      },
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Image.asset(
+        agentAvatarAssetPath(widget.agentAvatarPreset),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => fallback,
+      ),
     );
-
-    editController.dispose();
-
-    // 用户取消或未修改
-    if (result == null || result.isEmpty) return;
-
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/chat/message/edit");
-      final Map<String, dynamic> requestBody = <String, dynamic>{
-        "sessionId": ApiConfig.sessionId,
-        "userId": ApiConfig.userId.trim().isEmpty ? null : ApiConfig.userId.trim(),
-        "messageId": messageId,
-        "newText": result,
-      };
-      final http.Response response = await http.post(
-        uri,
-        headers: <String, String>{"Content-Type": "application/json"},
-        body: jsonEncode(requestBody),
-      );
-      if (response.statusCode == 200) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("消息已编辑，Agent 正在重新回复…"), duration: Duration(seconds: 2)),
-          );
-        }
-      } else {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("编辑失败，请保持聊天页在前台后重试"), duration: Duration(seconds: 2)),
-          );
-        }
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("网络错误，无法连接服务器"), duration: Duration(seconds: 2)),
-        );
-      }
-    }
   }
 
   /// 构建消息卡片（支持高亮态）
@@ -1782,17 +1761,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     if (widget.isUser) {
       decoration = BoxDecoration(
         borderRadius: borderRadius,
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[
-            Color(0xFF007AFF),
-            Color(0xCC007AFF),
-          ],
-        ),
+        color: cs.primaryContainer,
         boxShadow: <BoxShadow>[
           BoxShadow(
-            color: const Color(0xFF007AFF).withValues(alpha: 0.2),
+            color: cs.primary.withValues(alpha: 0.15),
             blurRadius: 12,
             offset: const Offset(0, 2),
           ),
@@ -1835,15 +1807,15 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             children: <Widget>[
                 if (widget.mainMessage.attachmentImageCount > 0)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.only(bottom: 3),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         Icon(
                           Icons.photo_camera_outlined,
-                          size: 16,
+                          size: 14,
                           color: widget.isUser
-                              ? Colors.white.withValues(alpha: 0.9)
+                              ? Theme.of(context).colorScheme.onPrimaryContainer
                               : Theme.of(context).colorScheme.primary,
                         ),
                         const SizedBox(width: 4),
@@ -1854,7 +1826,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                               .labelSmall
                               ?.copyWith(
                                 color: widget.isUser
-                                    ? Colors.white.withValues(alpha: 0.9)
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .onPrimaryContainer
                                     : Theme.of(context)
                                         .colorScheme
                                         .primary,
@@ -1875,12 +1849,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                     widget.contentSummary?.summary == null &&
                     widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
                   Padding(
-                    padding: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.only(top: 4),
                     child: _buildGrayLinksInner(widget.mainMessage.text, context),
                   ),
                 if (!widget.isUser && widget.mainMessage.playUrl != null && widget.mainMessage.playUrl!.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 10),
+                    padding: const EdgeInsets.only(top: 6),
                     child: _GomokuPlayUrlCard(
                       playUrl: widget.mainMessage.playUrl!,
                       onOpen: widget.onOpenGomoku,
@@ -1905,7 +1879,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       return Text(
         message.text,
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: isUser ? Colors.white : cs.onSurface,
+              color: cs.onPrimaryContainer,
             ),
       );
     }
@@ -1923,11 +1897,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           AgentResultCard(data: agentResult.data!),
           if (remaining.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.only(top: 3),
               child: Text(
                 stripMarkdown(remaining),
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.85),
+                      height: 1.35,
                     ),
               ),
             ),
@@ -1949,8 +1924,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
     return Text(
       stripMarkdown(message.text),
-      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: cs.onSurface,
+            height: 1.35,
+            fontSize: 12.5,
           ),
     );
   }
@@ -1966,8 +1943,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     for (final match in matches) {
       final String url = match.group(0)!;
       linkWidgets.add(Container(
-        margin: const EdgeInsets.only(bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        margin: const EdgeInsets.only(bottom: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
         decoration: BoxDecoration(
           color: Colors.grey.withValues(alpha: 0.15),
           borderRadius: BorderRadius.circular(6),
@@ -1977,7 +1954,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           url,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: Colors.grey[600],
-            fontSize: 12,
+            fontSize: 11,
+            height: 1.3,
           ),
         ),
       ));
@@ -1991,45 +1969,71 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
 }
 
-/// 消息下方悬浮操作按钮栏（复制 / 编辑 / 删除）—— 透明背景
-class _MessageActionBar extends StatelessWidget {
-  const _MessageActionBar({
-    required this.messageText,
-    required this.messageId,
-    required this.onCopy,
-    required this.onEdit,
-    required this.onDeletePressed,
-  });
+class _AgentMoodGlyph {
+  static IconData fromMood(String? moodStyle) {
+    switch (moodStyle) {
+      case "funny":
+        return Icons.sentiment_very_satisfied_outlined;
+      case "sad":
+        return Icons.cloud_outlined;
+      case "cool":
+        return Icons.ac_unit_outlined;
+      case "energetic":
+        return Icons.bolt_outlined;
+      case "mysterious":
+        return Icons.nightlight_round_outlined;
+      case "gentle":
+      default:
+        return Icons.smart_toy_outlined;
+    }
+  }
+}
 
-  final String messageText;
-  final String messageId;
-  final VoidCallback onCopy;
-  final VoidCallback onEdit;
-  final VoidCallback onDeletePressed;
+class _AgentAvatarPalette {
+  const _AgentAvatarPalette(this.colors);
 
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        _ActionButton(
-          icon: Icons.content_copy_outlined,
-          tooltip: "复制",
-          onPressed: onCopy,
-        ),
-        _ActionButton(
-          icon: Icons.edit_outlined,
-          tooltip: "编辑",
-          onPressed: onEdit,
-        ),
-        _ActionButton(
-          icon: Icons.delete_outline,
-          tooltip: "删除",
-          iconColor: Colors.red[400],
-          onPressed: onDeletePressed,
-        ),
-      ],
-    );
+  final List<Color> colors;
+
+  static _AgentAvatarPalette fromPreset(String? preset) {
+    switch (preset) {
+      case "ember":
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFFFFA24B),
+          Color(0xFFFF5A36),
+          Color(0xFFC12A2A),
+        ]);
+      case "tide":
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFF62D6FF),
+          Color(0xFF118AB2),
+          Color(0xFF124E78),
+        ]);
+      case "eclipse":
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFF8C7DFF),
+          Color(0xFF473BF0),
+          Color(0xFF171738),
+        ]);
+      case "neon":
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFFB8FF52),
+          Color(0xFF00C853),
+          Color(0xFF00796B),
+        ]);
+      case "mist":
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFFB0BEC5),
+          Color(0xFF78909C),
+          Color(0xFF455A64),
+        ]);
+      case "dawn":
+      default:
+        return const _AgentAvatarPalette(<Color>[
+          Color(0xFF3DA4FF),
+          Color(0xFF0D6EFD),
+          Color(0xFF123A9E),
+        ]);
+    }
   }
 }
 

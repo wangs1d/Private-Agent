@@ -573,6 +573,93 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  Future<Map<String, dynamic>> getMessageConversations({
+    String? platform,
+    int? limit,
+  }) async {
+    final Map<String, String> query = Map<String, String>.from(ApiConfig.accountAuthQuery);
+    if (platform != null && platform.trim().isNotEmpty) {
+      query["platform"] = platform.trim();
+    }
+    if (limit != null) {
+      query["limit"] = limit.toString();
+    }
+    final http.Response r = await http.get(
+      _uri("/messages/conversations", query),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> getConversationDetail(
+    String conversationId, {
+    int? limit,
+  }) async {
+    final Map<String, String> query = Map<String, String>.from(ApiConfig.accountAuthQuery);
+    if (limit != null) {
+      query["limit"] = limit.toString();
+    }
+    final http.Response r = await http.get(
+      _uri("/messages/conversations/$conversationId", query),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> markConversationRead(String conversationId) async {
+    final Map<String, dynamic> body = <String, dynamic>{};
+    for (final MapEntry<String, String> e in ApiConfig.accountAuthQuery.entries) {
+      body[e.key] = e.value;
+    }
+    final http.Response r = await http.post(
+      _uri("/messages/conversations/$conversationId/read"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> sendConversationMessage(
+    String conversationId,
+    String text, {
+    String? replyToMessageId,
+  }) async {
+    final Map<String, dynamic> body = <String, dynamic>{"text": text};
+    if (replyToMessageId != null && replyToMessageId.trim().isNotEmpty) {
+      body["replyToMessageId"] = replyToMessageId.trim();
+    }
+    for (final MapEntry<String, String> e in ApiConfig.accountAuthQuery.entries) {
+      body[e.key] = e.value;
+    }
+    final http.Response r = await http.post(
+      _uri("/messages/conversations/$conversationId/send"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
+  Future<Map<String, dynamic>> suggestConversationReply(
+    String conversationId, {
+    String? style,
+    int? limit,
+  }) async {
+    final Map<String, dynamic> body = <String, dynamic>{};
+    if (style != null && style.trim().isNotEmpty) {
+      body["style"] = style.trim();
+    }
+    if (limit != null) {
+      body["limit"] = limit;
+    }
+    for (final MapEntry<String, String> e in ApiConfig.accountAuthQuery.entries) {
+      body[e.key] = e.value;
+    }
+    final http.Response r = await http.post(
+      _uri("/messages/conversations/$conversationId/suggest-reply"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
   /// 检查好友关系
   Future<Map<String, dynamic>> checkFriendship(String targetActorId) async {
     final Map<String, String> query = Map<String, String>.from(ApiConfig.accountAuthQuery);

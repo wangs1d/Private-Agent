@@ -45,6 +45,34 @@ export type DesktopVisualRunResult = {
   capturedAt?: string;
 };
 
+export type DesktopVisualRunShellInput = {
+  command: string;
+  /** "cmd" | "powershell" | "bash" | null（让 Python 端按 OS 自动） */
+  shell?: string | null;
+  cwd?: string | null;
+  timeoutMs?: number;
+  allowDestructive?: boolean;
+};
+
+export type DesktopVisualRunShellResult = {
+  ok: boolean;
+  command?: string;
+  shell?: string;
+  firstToken?: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  durationMs?: number;
+  killed?: boolean;
+  decision?: {
+    allowed: boolean;
+    shell?: string;
+    firstToken?: string;
+    reason?: string;
+  };
+  error?: string;
+};
+
 export interface DesktopVisualPort {
   /** 与 `DESKTOP_VISUAL_ENABLED` 等配置一致；为 false 时不应注册 chat tools。 */
   isEnabled(): boolean;
@@ -54,4 +82,10 @@ export interface DesktopVisualPort {
 
   /** 截取屏幕（或指定区域）为 PNG 图片，返回 base64 数据。 */
   screenshot?(input?: DesktopVisualScreenshotInput): Promise<DesktopVisualScreenshotResult>;
+
+  /**
+   * 在本机 spawn stdio_worker 执行一条受策略约束的 shell 命令。
+   * 若未实现（即 desktop.run_shell 工具走电脑端 executor 兜底），可以不提供。
+   */
+  runShell?(input: DesktopVisualRunShellInput): Promise<DesktopVisualRunShellResult>;
 }

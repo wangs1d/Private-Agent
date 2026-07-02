@@ -18,8 +18,17 @@
   -webkit-user-select: none;
   will-change: transform;
   transform: translateZ(0);
-  /* 拖动期间禁用过渡避免动画拖尾 */
   transition: none;
+}
+
+/* 拖动期间：关掉所有昂贵效果，让 transform 纯走 GPU 合成 */
+.schedule-float.dragging {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  /* 强制独立合成层，避免与 DWM 重新合成时序冲突产生残影 */
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
 }
 
 .schedule-float--collapsed {
@@ -27,7 +36,7 @@
   max-height: none;
 }
 
-/* 标题栏 — 系统级拖动 + 鼠标 grab 光标 */
+/* 标题栏 — JS 拖动：监听 pointer 事件调用 moveBy IPC */
 .schedule-float__header {
   display: flex;
   align-items: center;
@@ -41,8 +50,7 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   cursor: grab;
   flex-shrink: 0;
-  /* CSS 层系统级拖动（部分平台/版本下可能不生效，下面有 JS 回退） */
-  -webkit-app-region: drag;
+  touch-action: none;
 }
 
 .schedule-float__header:active {
@@ -83,7 +91,6 @@
   gap: 8px;
   flex-shrink: 0;
   margin-left: 10px;
-  -webkit-app-region: no-drag;
 }
 
 .schedule-float__badge {
@@ -113,7 +120,7 @@
   font-size: 10px;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
-  -webkit-app-region: no-drag;
+  touch-action: manipulation;
 }
 
 .schedule-float__action:hover {

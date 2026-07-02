@@ -490,6 +490,20 @@ export const wechatClawBridgeChatBodySchema = z.object({
   messageId: z.string().max(128).optional(),
 });
 
+export const messageBridgeInboundBodySchema = z.object({
+  platform: z.enum(["wechat", "qq", "feishu", "generic"]),
+  text: z.string().max(16_000),
+  userId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+  senderId: z.string().max(256).optional(),
+  senderName: z.string().max(256).optional(),
+  channelId: z.string().max(256).optional(),
+  channelName: z.string().max(256).optional(),
+  accountId: z.string().max(128).optional(),
+  messageId: z.string().max(128).optional(),
+  autoReply: z.boolean().optional(),
+});
+
 const browserSessionSiteIdSchema = z.enum(["ctrip", "taobao", "jd", "qunar", "fliggy"]);
 
 const browserSessionCookieSchema = z.object({

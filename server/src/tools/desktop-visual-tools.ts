@@ -1,4 +1,5 @@
 import { resolveActorId } from "../agent/actor-id.js";
+import type { AuditService } from "../services/audit-service.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { DesktopVisualPort } from "../services/desktop-visual-port.js";
 import { resolveDesktopVisualVlmConfig } from "../services/desktop-visual-vlm-config.js";
@@ -7,6 +8,7 @@ import type { ToolRegistry } from "./tool-registry.js";
 export type DesktopVisualToolsDeps = {
   localVisual: DesktopVisualPort;
   bridge: DesktopBridgeCoordinator;
+  audit?: AuditService;
 };
 
 function desktopBridgeInvokeTimeoutMs(): number {
@@ -128,4 +130,129 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
 
     return { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
   });
+
+  // -------------------------------------------------------------------------
+  // desktop.run_shell：在 PC 本机跑一条受控的 shell 命令（cmd / powershell / bash）
+  // 默认走 allowlist：白名单外的命令直接拒；allowDestructive=true 时仅走 denylist
+  // （要求 DESKTOP_SHELL_ALLOWLIST=0 显式放开，否则拒）。
+  // 安全护栏：审计日志 + 强制 token 鉴权 + 拒绝未启用开关 + env 脱敏（Python 侧）。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.run_shell", async (input, ctx) => {
+    const command = typeof input.command === "string" ? input.command.trim() : "";
+    if (!command) {
+      return { ok: false, error: "缺少 command" };
+    }
+    if (!isShellCommandAllowedByFeatureFlag()) {
+      return {
+        ok: false,
+        error:
+          "desktop.run_shell 未启用：在 server/.env.local 设置 DESKTOP_SHELL_ENABLED=1，" +
+          "并强制设置 DESKTOP_BRIDGE_TOKEN（≥8 字符）做鉴权后再开启。",
+      };
+    }
+    if (!deps.bridge.isBridgeFeatureEnabled()) {
+      return {
+        ok: false,
+        error:
+          "desktop.run_shell 强制要求 DESKTOP_BRIDGE_ENABLED=1 或 DESKTOP_BRIDGE_TOKEN（≥8 字符）以做鉴权。",
+      };
+    }
+
+    const shellRaw = input.shell;
+    const shell =
+      shellRaw === "cmd" || shellRaw === "powershell" || shellRaw === "bash"
+        ? shellRaw
+        : undefined;
+    const allowDestructive = input.allowDestructive === true;
+    if (allowDestructive && !isShellAllowlistDisabled()) {
+      return {
+        ok: false,
+        error:
+          "allowDestructive=true 要求显式设置 DESKTOP_SHELL_ALLOWLIST=0（关闭白名单，仅留黑名单+正则）。",
+      };
+    }
+    const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined;
+    const timeoutMs = clampShellTimeout(input.timeoutMs);
+
+    const actorId = resolveActorId(ctx);
+
+    // 审计：每次 desktop.run_shell 调用都落一条，含 actorId / command / shell /
+    // allowDestructive / outcome（best-effort，失败不影响工具返回）。
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.run_shell",
+        actorId,
+        command: command.slice(0, 400),
+        shell: shell ?? null,
+        allowDestructive,
+        cwd: cwd ?? null,
+        timeoutMs,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "run_shell",
+      command,
+      shell: shell ?? null,
+      cwd: cwd ?? null,
+      timeoutMs,
+      allowDestructive,
+    };
+
+    let out: Record<string, unknown>;
+    // 优先走电脑端 executor；否则退到本机 Python（必须在 server 同机部署时才有意义）
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), timeoutMs + 5_000),
+      );
+      if (remote) {
+        out = { ...remote };
+      } else {
+        out = { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+      }
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.runShell) {
+      out = await deps.localVisual.runShell({
+        command,
+        shell: shell ?? null,
+        cwd: cwd ?? null,
+        timeoutMs,
+        allowDestructive,
+      });
+    } else {
+      out = {
+        ok: false,
+        error:
+          "桌面能力未配置：电脑端 executor 不在线，且未启用 DESKTOP_VISUAL_ENABLED=1" +
+          " 让服务端本机执行 run_shell。",
+      };
+    }
+
+    await auditPromise;
+    return out;
+  });
+}
+
+// ---- helpers ----
+
+function isShellCommandAllowedByFeatureFlag(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.DESKTOP_SHELL_ENABLED?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function isShellAllowlistDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.DESKTOP_SHELL_ALLOWLIST?.trim().toLowerCase();
+  // 默认白名单开（allowlist=1）；只有显式 0/false/no/off 才关
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return true;
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return false;
+  return false;
+}
+
+function clampShellTimeout(raw: unknown): number {
+  // 默认 30s，硬上限 5min，下限 1s
+  const n = typeof raw === "number" && Number.isFinite(raw) ? raw : 30_000;
+  return Math.max(1_000, Math.min(300_000, Math.floor(n)));
 }

@@ -14,14 +14,13 @@ import "web_sphere_drag_chrome.dart";
 
 /// 球形 Agent 悬浮层。
 ///
-/// - **Web**：iframe 嵌入
-/// - **Windows 桌面**：Electron 独立桌宠窗（主应用内不渲染占位）
-/// - **降级**：Flutter 内嵌 WebView（Electron 不可用时）
+/// - Web：iframe 内嵌
+/// - Windows：默认独立桌宠窗口，主应用内不渲染
+/// - 降级：Electron 不可用时，才使用应用内 WebView
 class FloatingAgentSphere extends StatefulWidget {
   const FloatingAgentSphere({super.key});
 
   static const Size panelSize = SphereEntityController.entitySize;
-
   static const double webDragChromeHeight = WebSphereDragChrome.height;
 
   static bool get useWindowsDesktop =>
@@ -92,7 +91,6 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
         },
         useNativeOverlay: false,
       ));
-      return;
     }
   }
 
@@ -121,30 +119,31 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
 
     final Size screen = MediaQuery.sizeOf(context);
 
-    // Windows 桌宠仅由 Electron 独立窗呈现，主应用内不渲染。
     if (FloatingAgentSphere.useWindowsDesktop) {
-      return const SizedBox.shrink();
-    }
+      if (_electronActive || !_embeddedFallback) {
+        return const SizedBox.shrink();
+      }
 
-    if (kIsWeb) {
-      return AgentSphereWebView(
-        showOverlayButton: false,
-        visible: true,
-      );
-    }
-
-    if (_electronActive) {
-      return const SizedBox.shrink();
-    }
-
-    if (_embeddedFallback) {
       _ensureInitialPosition(screen);
       return Positioned(
         left: _position!.dx,
         top: _position!.dy,
         width: FloatingAgentSphere.panelSize.width,
         height: FloatingAgentSphere.panelSize.height,
-        child: AgentSphereWebView(showOverlayButton: false),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: const ColoredBox(
+            color: Colors.transparent,
+            child: AgentSphereWebView(showOverlayButton: false),
+          ),
+        ),
+      );
+    }
+
+    if (kIsWeb) {
+      return const AgentSphereWebView(
+        showOverlayButton: false,
+        visible: true,
       );
     }
 

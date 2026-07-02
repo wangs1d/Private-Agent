@@ -275,6 +275,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
                 payload: {
                   sessionId: actorKey,
                   messageId: assistantMessageId,
+                  traceId: messageId,
                   chunk: delta,
                   sequence: chunkSeq,
                   source: "chat.message_edit",
@@ -290,6 +291,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
             payload: {
               sessionId: actorKey,
               messageId: assistantMessageId,
+              traceId: messageId,
               finalText: reply0.text,
               toolCalls: reply0.toolName ? [reply0.toolName] : [],
               source: "chat.message_edit",

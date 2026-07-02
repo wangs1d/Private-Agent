@@ -1,276 +1,295 @@
 import "dart:async";
-import "dart:io";
 
 import "package:flutter/foundation.dart";
+import "package:flutter/services.dart";
 
-import "../config/api_config.dart";
-
-/// 日程悬浮窗启动器 — 通过 Electron 启动**独立桌面窗口**（非应用内嵌）。
+/// 今日安排独立悬浮窗启动器。
+///
+/// 实现：同进程 HWND + GDI 自绘（不依赖 Electron / 独立后台进程）。
+/// 通过 MethodChannel `pai/schedule_floating` 与
+/// windows/runner/schedule_floating_window.cpp 通信。
 ///
 /// 使用方式：
-/// 1. 用户在 UI 中点击"桌面悬浮模式" → 调用 [launch] 启动独立 Electron 窗口
-/// 2. 用户再次点击或调用 [toggle] 切换显示/隐藏
-/// 3. 偏好通过 [SchedulePreference] 持久化，下次启动自动恢复
+///   1. 用户点击"桌面悬浮模式" → [launch] / [show]
+///   2. 再次点击 → [hide] 或 [toggle]
+///   3. 日程数据更新 → [setSchedule]
+///   4. 关闭 ✕ 只隐藏窗口，不退出进程
 class ScheduleFloatingLauncher {
   ScheduleFloatingLauncher._();
 
-  static const String _electronCommandArgPrefix = "--pai-command=";
+  static const MethodChannel _channel = MethodChannel("pai/schedule_floating");
 
-  static Process? _electronProcess;
-  static bool _visible = false;
+  /// 当前是否可见
+  static final ValueNotifier<bool> isVisible = ValueNotifier<bool>(false);
+
+  /// 当前活跃状态变化通知（兼容旧 API）
+  static final ValueNotifier<bool> activeNotifier = ValueNotifier<bool>(false);
+
+  /// 事件回调
+  static void Function()? onClose;
+  static void Function(bool collapsed)? onCollapseChanged;
+
+  static bool _handlersBound = false;
   static bool _created = false;
 
   /// 日程悬浮窗是否正在运行
-  static bool get isRunning => _created && _visible;
+  static bool get isRunning => _created && isVisible.value;
 
   /// 是否已创建过（可能被隐藏）
   static bool get isCreated => _created;
 
-  /// 当前活跃状态变化通知
-  static final ValueNotifier<bool> activeNotifier = ValueNotifier<bool>(false);
+  /// 绑定事件回调。建议在 App 启动时调一次。
+  static void bindHandlers({
+    void Function()? onCloseClicked,
+    void Function(bool collapsed)? onCollapse,
+  }) {
+    onClose = onCloseClicked;
+    onCollapseChanged = onCollapse;
+    if (!_handlersBound) {
+      _channel.setMethodCallHandler(_onNativeMessage);
+      _handlersBound = true;
+    }
+  }
 
-  /// 更新通知监听器
   static void _notifyActive() {
     activeNotifier.value = isRunning;
   }
 
-  /// 查找 sphere-overlay 目录
-  static Directory? _findSphereOverlayDir() {
-    final String? repoRoot = Platform.environment["PAI_REPO_ROOT"]?.trim();
-    if (repoRoot != null && repoRoot.isNotEmpty) {
-      final Directory fromEnv = Directory("$repoRoot/sphere-overlay");
-      if (fromEnv.existsSync()) return fromEnv;
-    }
-
-    final List<String> seeds = <String>[
-      Directory.current.path,
-      File(Platform.resolvedExecutable).parent.path,
-    ];
-
-    for (final String seed in seeds) {
-      Directory dir = Directory(seed);
-      for (int i = 0; i < 15; i++) {
-        final Directory candidate = Directory("${dir.path}/sphere-overlay");
-        if (candidate.existsSync()) return candidate;
-        final Directory sibling =
-            Directory("${dir.path}${Platform.pathSeparator}sphere-overlay");
-        if (sibling.existsSync()) return sibling;
-        final Directory parent = dir.parent;
-        if (parent.path == dir.path) break;
-        dir = parent;
-      }
-    }
-    return null;
-  }
-
-  /// 检查 Electron 是否可用
-  static String? get electronUnavailableReason {
-    if (kIsWeb || !Platform.isWindows) {
-      return "当前平台不支持独立日程悬浮窗。";
-    }
-
-    final Directory? overlayDir = _findSphereOverlayDir();
-    if (overlayDir == null) {
-      return "未找到 sphere-overlay 目录。";
-    }
-
-    if (!File("${overlayDir.path}/package.json").existsSync()) {
-      return "sphere-overlay 不完整。";
-    }
-
-    if (!Directory("${overlayDir.path}/node_modules").existsSync()) {
-      return "请先安装依赖：cd sphere-overlay && npm install";
-    }
-
-    final File electronExe = File(
-      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-    );
-    final File electronBin = File(
-      "${overlayDir.path}/node_modules/.bin/electron.cmd",
-    );
-    if (!electronExe.existsSync() && !electronBin.existsSync()) {
-      return "未找到 Electron 可执行文件。";
-    }
-
-    return null;
-  }
-
-  /// 向已运行的 Electron 进程发送命令
-  static Future<bool> _sendElectronCommand(String command) async {
-    final Directory? overlayDir = _findSphereOverlayDir();
-    if (overlayDir == null) return false;
-
-    final Map<String, String> env =
-        Map<String, String>.from(Platform.environment);
-    env["PAI_WS_URL"] = ApiConfig.wsUrl;
-    env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
-    env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-    env["PAI_REPO_ROOT"] = overlayDir.parent.path;
-
-    final File electronBin = File(
-      "${overlayDir.path}/node_modules/.bin/electron.cmd",
-    );
-    final File electronExe = File(
-      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-    );
-
-    final List<String> args =
-        <String>[".", "$_electronCommandArgPrefix$command"];
-
+  /// 创建底层窗口（一般不需要手动调，show 时会自动 create）。
+  static Future<bool> create() async {
+    if (kIsWeb) return false;
     try {
-      if (electronExe.existsSync()) {
-        await Process.start(
-          electronExe.path,
-          args,
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-        return true;
-      }
-      if (electronBin.existsSync()) {
-        await Process.start(
-          "cmd",
-          <String>["/c", electronBin.path, ...args],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-        return true;
-      }
-    } catch (e) {
-      debugPrint("[ScheduleFloat] send command failed: $e");
-    }
-
-    return false;
-  }
-
-  /// 启动独立的日程悬浮窗 Electron 进程
-  static Future<bool> _launchElectronScheduleWindow() async {
-    final Directory? overlayDir = _findSphereOverlayDir();
-    if (overlayDir == null) {
-      debugPrint("[ScheduleFloat] sphere-overlay not found.");
+      final bool? ok = await _channel.invokeMethod<bool>("create");
+      if (ok == true) _created = true;
+      return ok ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
       return false;
     }
+  }
 
+  /// 显示窗口（首次会自动 create）。
+  /// 不传 bounds 时由 C++ 端决定位置（加载上次保存的 / 默认右上角）。
+  static Future<bool> show({
+    int? x,
+    int? y,
+    int? width,
+    int? height,
+  }) async {
+    if (kIsWeb) return false;
     try {
-      final Map<String, String> env =
-          Map<String, String>.from(Platform.environment);
-      env["PAI_WS_URL"] = ApiConfig.wsUrl;
-      env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
-      env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-      env["PAI_REPO_ROOT"] = overlayDir.parent.path;
-
-      debugPrint(
-        "[ScheduleFloat] launching schedule window from ${overlayDir.path}",
-      );
-
-      final File electronExe = File(
-        "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-      );
-      final File electronBin = File(
-        "${overlayDir.path}/node_modules/.bin/electron.cmd",
-      );
-
-      if (electronExe.existsSync()) {
-        await Process.start(
-          electronExe.path,
-          <String>[
-            ".",
-            "${_electronCommandArgPrefix}schedule:show",
-          ],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-      } else if (electronBin.existsSync()) {
-        await Process.start(
-          "cmd",
-          <String>[
-            "/c",
-            electronBin.path,
-            ".",
-            "${_electronCommandArgPrefix}schedule:show",
-          ],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-      } else {
-        debugPrint("[ScheduleFloat] No electron binary found");
-        return false;
+      if (!_created) {
+        final bool? created = await _channel.invokeMethod<bool>("create");
+        if (created != true) return false;
+        _created = true;
       }
-
-      // detached 进程独立存活
-      _electronProcess = null;
-      _created = true;
-      _visible = true;
+      // 只有显式传了坐标才覆盖 C++ 端的定位
+      if (x != null && y != null) {
+        await _channel.invokeMethod<bool>(
+          "setBounds",
+          <String, dynamic>{
+            "x": x,
+            "y": y,
+            "width": width ?? 280,
+            "height": height ?? 420,
+          },
+        );
+      }
+      await _channel.invokeMethod<bool>("show");
+      isVisible.value = true;
       _notifyActive();
       return true;
-    } catch (e) {
-      debugPrint("[ScheduleFloat] launch failed: $e");
-      _electronProcess = null;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
       return false;
     }
   }
 
-  /// 启动日程悬浮窗
-  static Future<bool> launch() async {
-    if (kIsWeb || !Platform.isWindows) return false;
-
-    // 如果已经在运行，只需显示
-    if (_created && _visible) return true;
-    if (_created && !_visible) {
-      return show();
-    }
-
-    return _launchElectronScheduleWindow();
-  }
-
-  /// 显示已隐藏的悬浮窗
-  static Future<bool> show() async {
-    if (!_created) return launch();
-    final bool ok = await _sendElectronCommand("schedule:show");
-    if (ok) {
-      _visible = true;
-      _notifyActive();
-    }
-    return ok;
-  }
-
-  /// 隐藏悬浮窗（不销毁）
+  /// 隐藏窗口（不销毁，点 ✕ 也会触发）。
   static Future<bool> hide() async {
     if (!_created) return false;
-    final bool ok = await _sendElectronCommand("schedule:hide");
-    if (ok) {
-      _visible = false;
+    try {
+      await _channel.invokeMethod<bool>("hide");
+      isVisible.value = false;
       _notifyActive();
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
     }
-    return ok;
   }
 
   /// 切换显示/隐藏
   static Future<bool> toggle() async {
-    if (!_created || !_visible) {
-      return launch();
+    if (!_created || !isVisible.value) {
+      return show();
     }
     return hide();
   }
 
-  /// 关闭悬浮窗进程
-  static Future<void> close() async {
-    await _sendElectronCommand("schedule:hide");
-    if (_electronProcess != null) {
-      try {
-        _electronProcess!.kill();
-      } catch (_) {}
-      _electronProcess = null;
+  /// 启动日程悬浮窗（等价于 show）
+  static Future<bool> launch() => show();
+
+  /// 完全销毁底层 HWND
+  static Future<bool> destroy() async {
+    try {
+      await _channel.invokeMethod<bool>("destroy");
+      _created = false;
+      isVisible.value = false;
+      _notifyActive();
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
     }
-    _created = false;
-    _visible = false;
-    _notifyActive();
+  }
+
+  /// 关闭悬浮窗（等价于 hide，保持进程不变）
+  static Future<void> close() async {
+    await hide();
   }
 
   /// 完全停止并重置
-  static Future<void> stop() => close();
+  static Future<void> stop() async {
+    await destroy();
+  }
+
+  /// 设置/取消窗口置顶
+  static Future<bool> setOnTop({required bool onTop}) async {
+    try {
+      await _channel.invokeMethod<bool>(
+        "setOnTop",
+        <String, dynamic>{"onTop": onTop},
+      );
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 移动 + 改变大小
+  static Future<bool> setBounds({
+    required int x,
+    required int y,
+    required int width,
+    required int height,
+  }) async {
+    try {
+      await _channel.invokeMethod<bool>(
+        "setBounds",
+        <String, dynamic>{
+          "x": x,
+          "y": y,
+          "width": width,
+          "height": height,
+        },
+      );
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 读取当前窗口位置 + 大小
+  static Future<Rect> getBounds() async {
+    try {
+      final Map<dynamic, dynamic>? r = await _channel.invokeMethod("getBounds");
+      if (r == null) return Rect.zero;
+      return Rect.fromLTWH(
+        (r["x"] as num?)?.toDouble() ?? 0,
+        (r["y"] as num?)?.toDouble() ?? 0,
+        (r["width"] as num?)?.toDouble() ?? 0,
+        (r["height"] as num?)?.toDouble() ?? 0,
+      );
+    } catch (_) {
+      return Rect.zero;
+    }
+  }
+
+  /// 设置折叠状态（true=只显示顶栏）
+  static Future<bool> setCollapsed(bool collapsed) async {
+    try {
+      await _channel.invokeMethod<bool>(
+        "setCollapsed",
+        <String, dynamic>{"collapsed": collapsed},
+      );
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 替换整个日程列表
+  static Future<bool> setSchedule(List<ScheduleFloatingItem> items) async {
+    try {
+      await _channel.invokeMethod<bool>(
+        "setSchedule",
+        <String, dynamic>{
+          "items": items.map((e) => e.toMap()).toList(),
+        },
+      );
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  // ---- native event handler ----
+
+  static Future<dynamic> _onNativeMessage(MethodCall call) async {
+    if (call.method != "onNativeEvent") return null;
+    try {
+      final Map<dynamic, dynamic> args =
+          (call.arguments as Map).cast<dynamic, dynamic>();
+      final String? event = args["event"] as String?;
+      final String payload = (args["payload"] as String?) ?? "";
+      switch (event) {
+        case "close":
+          isVisible.value = false;
+          _notifyActive();
+          onClose?.call();
+          break;
+        case "collapseChanged":
+          onCollapseChanged?.call(payload == "true");
+          break;
+      }
+    } catch (_) {
+      // ignore malformed events
+    }
+    return null;
+  }
+}
+
+/// 日程事项（与 native C++ 端 ScheduleFloatingWindow::ScheduleItem 对应）
+class ScheduleFloatingItem {
+  ScheduleFloatingItem({
+    required this.id,
+    required this.timeText,
+    required this.title,
+    this.completed = false,
+  });
+
+  final String id;
+  final String timeText; // "HH:MM"
+  final String title;
+  final bool completed;
+
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        "id": id,
+        "timeText": timeText,
+        "title": title,
+        "completed": completed,
+      };
 }

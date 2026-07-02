@@ -27,6 +27,8 @@ class SphereEntityController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> stop() => SphereOverlayLauncher.stop();
+
   Future<bool> ensureOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
     if (overlayReady && SphereOverlayLauncher.isCreated) {

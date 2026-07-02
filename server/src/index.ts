@@ -5,7 +5,6 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
-import { startDesktopTranslateTray } from "./services/desktop-translate-auto-starter.js";
 import { startPaddleOcrServer } from "./services/paddle-ocr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
@@ -15,8 +14,7 @@ import {
 import { isWechatClawFeatureEnabled } from "./services/openclaw-gateway-client.js";
 import { isTcpPortInUse } from "./utils/port-in-use.js";
 
-// 始终从 server/.env + server/.env.local 加载（密钥放 .env.local，避免被脚本误覆盖）
-loadServerEnv();
+// server/.env + server/.env.local 已在 load-server-env.ts 模块加载时自动执行
 
 // ─── 提前声明 shutdown（避免 uncaughtException 触发时遇到 const 暂时性死区） ───
 let shutdown: (() => void) | null = null;
@@ -72,10 +70,6 @@ const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,
   log: (line) => services.app.log.info(line),
 });
-const stopDesktopTranslate = startDesktopTranslateTray({
-  log: (line) => services.app.log.info(line),
-  baseUrl: `http://127.0.0.1:${runtime.port}`,
-});
 const stopPaddleOcr = startPaddleOcrServer({
   log: (line) => services.app.log.info(line),
 });
@@ -110,7 +104,6 @@ const performShutdown = (): void => {
   });
   services.webhookService.stop();
   stopDesktopBridge();
-  stopDesktopTranslate();
   stopPaddleOcr();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));

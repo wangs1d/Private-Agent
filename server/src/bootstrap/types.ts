@@ -43,6 +43,9 @@ import type { MorningBriefingScheduler } from "../services/morning-briefing-sche
 import type { ExternalChatProvider } from "../external-model/types.js";
 import type { MoodInferenceService } from "../services/mood-inference-service.js";
 import type { JarvisHarness } from "../services/jarvis/index.js";
+import type { MessageHubService } from "../services/message-hub-service.js";
+import type { MessagePlatformGateway } from "../services/message-platform-gateway.js";
+import type { MessageBridgeService } from "../services/message-bridge-service.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -73,6 +76,9 @@ export type AppServices = {
   ttsService: TtsService;
   virtualPhoneService: VirtualPhoneService;
   friendService: FriendService;
+  messageHubService: MessageHubService;
+  messagePlatformGateway: MessagePlatformGateway;
+  messageBridgeService: MessageBridgeService;
   voiceDialogueService: VoiceDialogueService;
   intelligentReminderService: IntelligentReminderService;
   reminderResponsePersistence: UserResponsePersistenceService;

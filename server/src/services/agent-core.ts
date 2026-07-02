@@ -210,6 +210,8 @@ export type HandleUserMessageOptions = {
   clientLocation?: ClientLocationWire;
   visionFrames?: VisionFrame[];
   onAgentPhaseStatus?: (line: string) => void;
+  /** plan_execute 计划生成后回调（v2 分阶段对话交互） */
+  onPlanReady?: (plan: { goal: string; steps: { id: string; intent: string; successCriteria?: string; suggestedTools?: string[] }[] }) => void;
   interruptedContext?: string;
   /** 默认沙箱；`full` 时允许高权限工具 */
   agentAccessMode?: AgentAccessMode;
@@ -410,21 +412,6 @@ export class AgentCore {
       });
     }
 
-    const inputDecision = this.shortTermMemoryGateway?.filterInput(sessionId, text);
-    if (inputDecision && !inputDecision.accepted) {
-      return {
-        text:
-          inputDecision.reason === "small_talk"
-            ? "这条输入已识别为寒暄类内容，不进入短时记忆缓存。"
-            : inputDecision.reason === "duplicate"
-              ? "这条输入与最近上下文重复，已从短时层过滤。"
-              : "这条输入被识别为低价值或无效内容，已忽略。",
-        streamedChunks: false,
-      };
-    }
-    if (inputDecision?.normalizedText) {
-      text = inputDecision.normalizedText;
-    }
     const shortTermTurn = this.buildShortTermTurnContext(sessionId, text);
 
     const perfStartTime = Date.now();
@@ -864,6 +851,7 @@ export class AgentCore {
         visionFrames: opts?.visionFrames,
         onDelta: (delta) => opts?.onAssistantDelta?.(delta),
         onPhaseStatus: opts?.onAgentPhaseStatus,
+        onPlanReady: opts?.onPlanReady,
         toolCtx,
         baseStreamOpts: streamOpts,
         onToolBatchForExecute: onBatchWithEvolution,

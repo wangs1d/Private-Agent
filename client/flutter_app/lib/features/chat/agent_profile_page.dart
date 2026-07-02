@@ -1,0 +1,426 @@
+import "package:flutter/material.dart";
+
+import "../../core/presentation/agent_avatar_catalog.dart";
+import "../../core/services/user_preferences_api.dart";
+
+class AgentProfileData {
+  const AgentProfileData({
+    required this.displayName,
+    required this.handle,
+    required this.signature,
+    required this.avatarUrl,
+    required this.moodStyle,
+    required this.statusText,
+    required this.avatarPreset,
+    required this.lastProfileEvent,
+    required this.updatedAt,
+  });
+
+  final String displayName;
+  final String handle;
+  final String signature;
+  final String? avatarUrl;
+  final String moodStyle;
+  final String statusText;
+  final String avatarPreset;
+  final String lastProfileEvent;
+  final DateTime? updatedAt;
+
+  AgentProfileData copyWith({
+    String? displayName,
+    String? handle,
+    String? signature,
+    String? avatarUrl,
+    String? moodStyle,
+    String? statusText,
+    String? avatarPreset,
+    String? lastProfileEvent,
+    DateTime? updatedAt,
+  }) {
+    return AgentProfileData(
+      displayName: displayName ?? this.displayName,
+      handle: handle ?? this.handle,
+      signature: signature ?? this.signature,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
+      moodStyle: moodStyle ?? this.moodStyle,
+      statusText: statusText ?? this.statusText,
+      avatarPreset: avatarPreset ?? this.avatarPreset,
+      lastProfileEvent: lastProfileEvent ?? this.lastProfileEvent,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  Map<String, Object?> toPayload() {
+    return <String, Object?>{
+      "displayName": displayName,
+      "handle": handle,
+      "signature": signature,
+      "avatarUrl": avatarUrl,
+      "moodStyle": moodStyle,
+      "statusText": statusText,
+      "avatarPreset": avatarPreset,
+      "lastProfileEvent": lastProfileEvent,
+      "updatedAt": updatedAt?.toIso8601String(),
+    };
+  }
+
+  static AgentProfileData fromPreferences(Map<String, dynamic> prefs) {
+    final Object? raw = prefs["agentProfile"];
+    final Map<String, dynamic> profile =
+        raw is Map ? raw.cast<String, dynamic>() : <String, dynamic>{};
+    DateTime? updatedAt;
+    final String updatedAtRaw = profile["updatedAt"]?.toString() ?? "";
+    if (updatedAtRaw.isNotEmpty) {
+      updatedAt = DateTime.tryParse(updatedAtRaw);
+    }
+    return AgentProfileData(
+      displayName: profile["displayName"]?.toString().trim().isNotEmpty == true
+          ? profile["displayName"].toString().trim()
+          : "AI助手",
+      handle: profile["handle"]?.toString().trim().isNotEmpty == true
+          ? profile["handle"].toString().trim()
+          : "ai_agent",
+      signature: profile["signature"]?.toString().trim().isNotEmpty == true
+          ? profile["signature"].toString().trim()
+          : "今天也在认真发光。",
+      avatarUrl: profile["avatarUrl"]?.toString().trim().isNotEmpty == true
+          ? profile["avatarUrl"].toString().trim()
+          : null,
+      moodStyle: profile["moodStyle"]?.toString().trim().isNotEmpty == true
+          ? profile["moodStyle"].toString().trim()
+          : UserPreferencesApi.moodGentle,
+      statusText: profile["statusText"]?.toString().trim().isNotEmpty == true
+          ? profile["statusText"].toString().trim()
+          : "在线，温柔模式。",
+      avatarPreset:
+          profile["avatarPreset"]?.toString().trim().isNotEmpty == true
+              ? profile["avatarPreset"].toString().trim()
+              : "dawn",
+      lastProfileEvent:
+          profile["lastProfileEvent"]?.toString().trim().isNotEmpty == true
+              ? profile["lastProfileEvent"].toString().trim()
+              : "",
+      updatedAt: updatedAt,
+    );
+  }
+}
+
+class AgentProfilePage extends StatefulWidget {
+  const AgentProfilePage({
+    super.key,
+    required this.api,
+    required this.sessionId,
+    required this.initialData,
+    required this.onSaved,
+  });
+
+  final UserPreferencesApi api;
+  final String sessionId;
+  final AgentProfileData initialData;
+  final ValueChanged<AgentProfileData> onSaved;
+
+  @override
+  State<AgentProfilePage> createState() => _AgentProfilePageState();
+}
+
+class _AgentProfilePageState extends State<AgentProfilePage> {
+  late final AgentProfileData _profile;
+
+  @override
+  void initState() {
+    super.initState();
+    _profile = widget.initialData;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme cs = theme.colorScheme;
+    final AgentAvatarPalette palette =
+        AgentAvatarPalette.fromPreset(_profile.avatarPreset);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Agent 主页"),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: <Widget>[
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: <Color>[
+                  palette.colors.first.withValues(alpha: 0.22),
+                  palette.colors.last.withValues(alpha: 0.14),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: <Widget>[
+                    _AvatarPreview(
+                      displayName: _profile.displayName,
+                      avatarPreset: _profile.avatarPreset,
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            _profile.displayName,
+                            style: theme.textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            "@${_profile.handle}",
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: palette.colors.first,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          _QqLikeStatusBadge(
+                            moodStyle: _profile.moodStyle,
+                            statusText: _profile.statusText,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  _profile.signature,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    color: cs.onSurfaceVariant,
+                    height: 1.45,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text("头像与身份", style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 16),
+                  _ReadOnlyField(
+                    label: "主页名称",
+                    value: _profile.displayName,
+                  ),
+                  const SizedBox(height: 12),
+                  _ReadOnlyField(
+                    label: "网络名称",
+                    value: "@${_profile.handle}",
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AvatarPreview extends StatelessWidget {
+  const _AvatarPreview({
+    required this.displayName,
+    required this.avatarPreset,
+  });
+
+  final String displayName;
+  final String avatarPreset;
+
+  @override
+  Widget build(BuildContext context) {
+    const double size = 92;
+    final Widget fallback = Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        displayName.isEmpty ? "A" : displayName.characters.first.toUpperCase(),
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 33,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+
+    return ClipOval(
+      child: Image.asset(
+        agentAvatarAssetPath(avatarPreset),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => fallback,
+      ),
+    );
+  }
+}
+
+class _QqLikeStatusBadge extends StatelessWidget {
+  const _QqLikeStatusBadge({
+    required this.moodStyle,
+    required this.statusText,
+  });
+
+  final String moodStyle;
+  final String statusText;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final ({String label, Color color, IconData icon, Color bg}) mood =
+        _moodMeta(cs);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: mood.bg,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(mood.icon, size: 14, color: mood.color),
+              const SizedBox(width: 7),
+              Text(
+                mood.label,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: cs.onSurface,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          if (statusText.trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              statusText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  ({String label, Color color, IconData icon, Color bg}) _moodMeta(
+    ColorScheme cs,
+  ) {
+    switch (moodStyle) {
+      case "funny":
+        return (
+          label: "摸鱼",
+          color: const Color(0xFF2CBF6D),
+          icon: Icons.icecream_outlined,
+          bg: const Color(0x1F2CBF6D),
+        );
+      case "sad":
+        return (
+          label: "隐身感",
+          color: const Color(0xFF8091A7),
+          icon: Icons.visibility_off_outlined,
+          bg: const Color(0x1F8091A7),
+        );
+      case "cool":
+        return (
+          label: "忙碌",
+          color: const Color(0xFF7C73FF),
+          icon: Icons.do_not_disturb_on_outlined,
+          bg: const Color(0x1F7C73FF),
+        );
+      case "energetic":
+        return (
+          label: "在线",
+          color: const Color(0xFFFF8A3D),
+          icon: Icons.flash_on_outlined,
+          bg: const Color(0x1FFF8A3D),
+        );
+      case "mysterious":
+        return (
+          label: "隐身感",
+          color: const Color(0xFF3F8CFF),
+          icon: Icons.nightlight_round_outlined,
+          bg: const Color(0x1F3F8CFF),
+        );
+      case "gentle":
+      default:
+        return (
+          label: "在线",
+          color: const Color(0xFF3AA7A3),
+          icon: Icons.check_circle_outline,
+          bg: const Color(0x1F3AA7A3),
+        );
+    }
+  }
+}
+
+class _ReadOnlyField extends StatelessWidget {
+  const _ReadOnlyField({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(height: 1.45),
+          ),
+        ],
+      ),
+    );
+  }
+}

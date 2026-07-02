@@ -20,3 +20,8 @@ export function loadServerEnv(): void {
     loadEnv({ path: localPath, override: true, quiet: true });
   }
 }
+
+// 模块加载时立即执行：确保在任何其他模块 import 之前环境变量已就绪。
+// 有些模块（如 chat-user-message.ts）在模块顶层调用 getAgentRuntimeConfig()，
+// 如果 loadServerEnv() 被推迟到 index.ts 显式调用，那个缓存就已经写死了。
+loadServerEnv();

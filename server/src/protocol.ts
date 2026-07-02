@@ -49,6 +49,24 @@ export const ServerEventType = {
    * 首条 chat.assistant_chunk 时自动让位。
    */
   ChatAssistantInterim: "chat.assistant_interim",
+  /**
+   * 「分阶段异步对话交互 v2」阶段 0：客户端在用户发消息的同一帧就应展示
+   * 顶栏「正在思考…」占位 + 计时器。服务端在路由/委派开始时立即推一条，
+   * 用于打点 T0（首字延迟测量起点）。
+   */
+  ChatTurnStarted: "chat.turn_started",
+  /**
+   * 「分阶段异步对话交互 v2」阶段 1：路由结束、意图已识别。
+   * 携带 mode + 可选的 plan（plan_execute 拆解出的步骤）和 subAgents
+   * （master_delegate 要派出的子 Agent 列表），让 UI 立刻渲染结构化骨架。
+   */
+  ChatIntentDetected: "chat.intent_detected",
+  /**
+   * 「分阶段异步对话交互 v2」阶段 2：执行事件流（多次）。
+   * 替换此前的 chat.agent_status 自由文本，把工具调用 / 子 Agent 启停 /
+   * 模型内部 thought 都按 kind 结构化下发，UI 按 kind 决定卡片样式。
+   */
+  ChatExecutionEvent: "chat.execution_event",
   /** 模型生成的口语化进度/状态行（如委派子 Agent），供客户端替代「思考中」 */
   ChatAgentStatus: "chat.agent_status",
   /** 日程/提醒任务已创建或更新，客户端应刷新日程视图 */
@@ -104,3 +122,118 @@ export const ServerEventType = {
   /** 心跳响应 */
   Pong: "pong",
 } as const;
+
+// ============================================================
+// 「分阶段异步对话交互 v2」事件载荷类型
+// ============================================================
+
+/**
+ * 阶段 0 载荷：路由开始打点。
+ * - t0: 服务端接收 chat.user_message 的 epoch ms（用于客户端对齐首字延迟）
+ */
+export type ChatTurnStartedPayload = {
+  sessionId: string;
+  traceId: string;
+  t0: number;
+};
+
+/**
+ * 路由模式枚举（与 LlmExecutionMode 同步）：
+ *   fast_chat       单轮流式（闲聊 / 极短消息），不进入 v2 阶段化链路
+ *   master_only     master 自己单轮回答，简单 direct task
+ *   master_delegate 派子 Agent 协作（含 subAgents 字段）
+ *   plan_execute    计划-执行循环（含 plan 字段）
+ *   direct_llm      直接 LLM + 工具调用
+ */
+export type ChatIntentMode =
+  | "fast_chat"
+  | "master_only"
+  | "master_delegate"
+  | "plan_execute"
+  | "direct_llm";
+
+/** plan_execute 拆解出的单个步骤。 */
+export type ChatPlanStep = {
+  id: string;
+  title: string;
+  status: "pending" | "running" | "ok" | "err";
+};
+
+/** master_delegate 要派出的子 Agent 规划。 */
+export type ChatSubAgentPlan = {
+  id: string;
+  role: string;
+  task: string;
+};
+
+/**
+ * 阶段 1 载荷：意图已识别。
+ * - reasons: 路由命中的判定原因（调试用）
+ * - plan: 仅 plan_execute 模式携带
+ * - subAgents: 仅 master_delegate 模式携带
+ */
+export type ChatIntentDetectedPayload = {
+  sessionId: string;
+  traceId: string;
+  mode: ChatIntentMode;
+  reasons: string[];
+  plan?: ChatPlanStep[];
+  subAgents?: ChatSubAgentPlan[];
+};
+
+/** 执行事件类型（结构化区分 UI 渲染）。 */
+export type ChatExecutionKind =
+  | "thought" // 模型内部 monologue
+  | "tool_call" // 工具开始调用
+  | "tool_result" // 工具调用结果
+  | "agent_start" // 子 Agent 开始
+  | "agent_done" // 子 Agent 完成
+  | "plan_step" // plan_execute 拆解出的步骤状态更新
+  | "log"; // 兜底：自由文本日志（v1 过渡期兼容）
+
+/** 阶段 2 载荷：执行事件流。 */
+export type ChatExecutionEventPayload = {
+  sessionId: string;
+  traceId: string;
+  /** 事件唯一 id（同 traceId 内单调递增，便于客户端去重 / 排序） */
+  eventId: string;
+  kind: ChatExecutionKind;
+  /** 该事件发生时间 epoch ms */
+  at: number;
+  // ---- 按 kind 选填 ----
+  thought?: string;
+  toolCall?: {
+    id: string;
+    name: string;
+    /** 摘要化的入参（避免把大对象塞进 WS） */
+    argsPreview?: string;
+  };
+  toolResult?: {
+    id: string;
+    name: string;
+    /** 摘要化的结果预览 */
+    preview?: string;
+    ok: boolean;
+    elapsedMs: number;
+  };
+  agentStart?: {
+    id: string;
+    role: string;
+    task?: string;
+  };
+  agentDone?: {
+    id: string;
+    role: string;
+    ok: boolean;
+    elapsedMs: number;
+  };
+  /** plan_execute 步骤状态更新（kind=plan_step 时携带） */
+  planStep?: {
+    id: string;
+    title: string;
+    status: "pending" | "running" | "ok" | "err";
+  };
+  /** 兜底：v1 过渡期自由文本 */
+  log?: string;
+};
+

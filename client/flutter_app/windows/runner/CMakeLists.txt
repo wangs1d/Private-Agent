@@ -11,6 +11,7 @@ project(runner LANGUAGES CXX)
 #
 # Any new source files that you add to the application should be added here.
 add_executable(${BINARY_NAME} WIN32
+  "agent_profile_overlay_window.cpp"
   "connected_call_window.cpp"
   "desktop_notification_window.cpp"
   "desktop_screen_capture.cpp"
@@ -18,7 +19,9 @@ add_executable(${BINARY_NAME} WIN32
   "incoming_call_window.cpp"
   "main.cpp"
   "outgoing_call_window.cpp"
+  "schedule_floating_window.cpp"
   "sphere_overlay_window.cpp"
+  "translate_overlay_window.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"

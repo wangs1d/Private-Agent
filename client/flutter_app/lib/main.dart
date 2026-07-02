@@ -1,8 +1,11 @@
 import "dart:async";
+import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
+import "package:http/http.dart" as http;
+import "package:permission_handler/permission_handler.dart";
 
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
@@ -14,6 +17,7 @@ import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
 import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
+import "core/models/turn_state.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -26,23 +30,28 @@ import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
-import "core/services/translate_tray_client.dart";
+import "core/services/translate_overlay_launcher.dart";
+import "core/services/user_preferences_api.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
+import "features/mailbox/message_hub_page.dart";
 import "features/notes/notes_chat_page.dart";
-import "features/chat/background_tasks_sheet.dart";
+import "features/chat/agent_profile_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
+import "features/chat/right_side_panel.dart";
 import "features/chat/floating_agent_sphere.dart";
+import "features/chat/morning_briefing_card.dart";
 import "features/chat/voice_mode_page.dart";
 import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
+import "core/services/briefing_delivery_api.dart";
 import "core/services/desktop_notification_launcher.dart";
 import "core/services/incoming_call_launcher.dart";
-import "core/services/multi_agent_api_client.dart";
+import "core/services/mobile_briefing_launcher.dart";
 import "core/services/outgoing_call_launcher.dart";
 import "core/services/tts_player.dart";
 import "core/services/windows_titlebar_theme.dart";
@@ -71,6 +80,9 @@ void _deferSidebarHover(VoidCallback fn) {
   SchedulerBinding.instance.addPostFrameCallback((_) => fn());
 }
 
+/// 右侧抽屉要展示的内容种类。
+enum _RightPanelKind { friends, games, messages }
+
 class PrivateAiApp extends StatefulWidget {
   const PrivateAiApp({super.key});
 
@@ -87,8 +99,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
-  final MultiAgentApiClient _multiAgentApi =
-      MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
+  final UserPreferencesApi _preferencesApi =
+      UserPreferencesApi(baseUrl: ApiConfig.httpBase);
+  final BriefingDeliveryApi _briefingDeliveryApi =
+      BriefingDeliveryApi(baseUrl: ApiConfig.httpBase);
   final ValueNotifier<int> _scheduleReloadSignal = ValueNotifier<int>(0);
 
   /// 缓存日程 Future，避免每次 build 重建导致 FutureBuilder 反复重置为 waiting（卡片闪烁/震动）
@@ -114,9 +128,37 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 用户给agent起的名字
   String? _agentName;
+  AgentProfileData _agentProfile = const AgentProfileData(
+    displayName: "AI助手",
+    handle: "ai_agent",
+    signature: "今天也在认真发光。",
+    avatarUrl: null,
+    moodStyle: UserPreferencesApi.moodGentle,
+    statusText: "刚把今天的对话别在衣领上，准备继续陪你往下走。",
+    avatarPreset: "dawn",
+    lastProfileEvent: "这是 Agent 当前默认的主页状态。",
+    updatedAt: null,
+  );
 
   /// 是否显示右上角日历面板
   bool _showCalendarPanel = false;
+
+  /// 当前右侧面板要展示的内容
+  /// - null: 未打开
+  /// - _RightPanelKind.friends:     好友（MailboxPage）
+  /// - _RightPanelKind.games:      游戏（GameCenterPage）
+  /// - _RightPanelKind.messages:   消息聚合（MessageHubPage）
+  _RightPanelKind? _rightPanel;
+
+  Map<String, int> _unreadByPlatform = <String, int>{};
+  Timer? _messagePollTimer;
+  bool _messageBadgeHovering = false;
+
+  /// 关闭右侧面板
+  void _closeRightPanel() {
+    if (_rightPanel == null) return;
+    setState(() => _rightPanel = null);
+  }
 
   /// 日历面板重新加载信号
   final ValueNotifier<int> _calendarReloadSignal = ValueNotifier<int>(0);
@@ -148,11 +190,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 与 `_agentStatusLine` 并存但生命周期更短：real chunk 一到立即让位。
   String? _interimAckText;
 
+  /// 「分阶段异步对话交互 v2」结构化状态机。
+  /// 取代 v1 的 `_interimAckText` 自由短句 + `_agentStatusLine` 自由文本。
+  /// 当前为骨架：先在内存里把事件跑通，UI 改造下一轮再做（_ChatPage 接 TurnState）。
+  TurnState? _turnState;
+
+  /// 用户消息已发出、服务端 turn_started 抵达前的"本地占位"句柄。
+  /// 用于在用户点发送的同一帧立即显示「正在思考…」（不等服务端）。
+  TurnState? _pendingLocalTurn;
+
   /// 与 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
 
-  /// 后台与 Agent 任务角标（对话框右上角按钮）
-  int _backgroundTasksBadgeCount = 0;
   Timer? _assistantChunkFlushTimer;
   Timer? _agentReplyWatchdog;
   String? _pendingAssistantChunkMessageId;
@@ -180,6 +229,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   bool _phoneSpeakerOn = true;
   bool _desktopNotificationNeedsFeedback = false;
   String _desktopNotificationFeedbackChannel = "websocket";
+  DateTime? _lastDesktopBriefingAt;
+  StreamSubscription<String>? _mobileBriefingTapSub;
+  bool _notificationPermissionChecked = false;
+  Map<String, dynamic>? _pendingDesktopBriefingPayload;
 
   @override
   void initState() {
@@ -208,7 +261,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onDismiss: _handleDesktopNotificationDismiss,
       onTimeout: _handleDesktopNotificationTimeout,
     );
+    MobileBriefingLauncher.bind();
+    _mobileBriefingTapSub =
+        MobileBriefingLauncher.payloads.listen((String payload) {
+      unawaited(_openBriefingFromPayload(payload));
+    });
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
+    // 独立翻译悬浮窗事件绑定（原生 HWND 窗口，C++ 端 → MethodChannel → 这里）
+    //   - close: 用户点 ✕（已自动隐藏窗口，无需重开）
+    //   - clear: 用户点清空（清掉所有卡片）
+    //   - langChanged: 用户点了语言下拉（参数为目标语言 code）
+    TranslateOverlayLauncher.bindHandlers(
+      onCloseClicked: (_) {/* 窗口已自动 hide，不需要做什么 */},
+      onClearClicked: (_) {/* 同上 */},
+      onLangChange: _handleTranslateLangChange,
+    );
     _bootstrap();
   }
 
@@ -218,14 +285,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     PhoneBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     unawaited(TtsPlayer.instance.dispose());
+    unawaited(_mobileBriefingTapSub?.cancel());
     IncomingCallLauncher.unbind();
     ConnectedCallLauncher.unbind();
     DesktopNotificationLauncher.unbind();
+    unawaited(MobileBriefingLauncher.unbind());
     OutgoingCallLauncher.unbind();
     _inputFocusNode.dispose();
     _inputController.dispose();
     _scheduleReloadSignal.dispose();
     _calendarReloadSignal.dispose();
+    _stopMessagePolling();
     super.dispose();
   }
 
@@ -287,6 +357,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _isInitialized = true;
     });
 
+    unawaited(_loadAgentProfile());
     unawaited(_flushScheduleOfflineDeletes());
 
     _ws.onConnected = () {
@@ -295,6 +366,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       unawaited(_flushScheduleOfflineDeletes());
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
+        unawaited(_tryShowDesktopLaunchBriefing());
       }
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         PhoneBridgeService.instance.start();
@@ -305,6 +377,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       write: _store.savePreference,
     );
     _ws.connect();
+    _startMessagePolling();
+    unawaited(_consumePendingMobileBriefingLaunch());
+    unawaited(_ensureAndroidNotificationPermission());
+    unawaited(_tryShowMobileLaunchBriefing());
 
     AgentSphereInteractBridge.instance.bind((String action, {String? text}) {
       if (!_ws.isConnected) return;
@@ -463,10 +539,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
           final String toolName = payload["toolName"]?.toString() ?? "";
           final bool toolOk = payload["ok"] == true;
-          if (toolName.contains("invoke_sub_agent") ||
-              toolName.contains("master.invoke")) {
-            unawaited(_syncBackgroundTasksBadge());
-          }
           if (_isMasterInvokeSubAgentTool(toolName) && result != null) {
             final bool delegateOk = result["ok"] != false;
             if (!toolOk || !delegateOk) {
@@ -584,9 +656,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _updateAgentStatusLine(line, ensureProcessing: true);
         }
         if (type == "chat.assistant_interim") {
-          // 「分阶段异步对话交互」阶段一：服务端在多步/工具型请求开始时
-          // 推送的即时确认应答。把该短句优先展示给用户，让用户"先收到反馈"，
-          // real chunk 一到就自然让位（见 _enqueueAssistantChunk / _flushAssistantChunks）。
+          // 分阶段消息交付阶段一：服务端在多步/工具型请求开始时推送的
+          // 即时确认应答（如「好的，让我查一下…」）。作为独立 assistant 消息
+          // 入列表并保留——工具执行期间呼吸灯亮，chat.assistant_done 抵达后
+          // 再追加结果消息，形成「首条 → 工具 → 结果」的两段式对话。
           final String? interimTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = _pendingAgentUserMessageId;
           if (interimTraceId == null ||
@@ -597,62 +670,122 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
           final String text = payload["text"]?.toString().trim() ?? "";
           if (text.isEmpty) return;
-          _setInterimAck(text);
+          // interim 到达说明服务端已开始处理，重置回复超时计时器
+          _resetAgentReplyWatchdog();
+          final String interimMessageId = "interim-$interimTraceId";
+          // 去重：同一 traceId 的 interim 只入一次
+          if (_assistantMessageIndexById.containsKey(interimMessageId)) {
+            return;
+          }
+          final ChatMessage interimMsg = ChatMessage(
+            messageId: interimMessageId,
+            sessionId: ApiConfig.effectiveActorId,
+            role: "assistant",
+            text: text,
+            timestamp: DateTime.now(),
+          );
+          setState(() {
+            _messages.add(interimMsg);
+            _assistantMessageIndexById[interimMessageId] = _messages.length - 1;
+          });
+          await _store.saveMessage(interimMsg);
         }
+        // ===== 「分阶段异步对话交互 v2」三件套 =====
+        if (type == "chat.turn_started") {
+          // 阶段 0：服务端确认收到，路由开始。客户端用服务端 t0 替换本地占位，
+          // 让首字延迟测量更准。
+          _handleTurnStartedV2(payload);
+        }
+        if (type == "chat.intent_detected") {
+          // 阶段 1：意图已识别。结构化 mode / plan / subAgents 落到 TurnState。
+          _handleIntentDetectedV2(payload);
+        }
+        if (type == "chat.execution_event") {
+          // 阶段 2：执行事件（工具 / 子 Agent / thought / log）。
+          _handleExecutionEventV2(payload);
+        }
+        // ===== /v2 =====
         if (type == "chat.assistant_chunk") {
           _resetAgentReplyWatchdog();
           // 丢弃「已结束轮次」的迟到 chunk：避免在 chat.assistant_done 之后
           // 网络重排 / 子 Agent 回调把 _isAgentProcessing 重新点亮。
           final String? chunkAssistantMessageId =
               payload["messageId"]?.toString();
+          final String? chunkTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = _pendingAgentUserMessageId;
           if (activeTraceId == null ||
-              chunkAssistantMessageId == null ||
-              !chunkAssistantMessageId.endsWith(activeTraceId)) {
+              ((chunkTraceId == null || chunkTraceId.isEmpty) &&
+                  (chunkAssistantMessageId == null ||
+                      !chunkAssistantMessageId.endsWith(activeTraceId))) ||
+              (chunkTraceId != null &&
+                  chunkTraceId.isNotEmpty &&
+                  chunkTraceId != activeTraceId)) {
             return;
           }
-          // real chunk 抵达：让位即时确认应答（避免同框出现"已收到"和真实正文）
+          // interim 已作为独立 assistant 消息入列表并保留，chunk 无需让位；
+          // _clearInterimAck 现为 no-op（_interimAckText 不再被设置）。
           _clearInterimAck();
           if (!_isAgentProcessing) {
             setState(() => _isAgentProcessing = true);
             _notifyAgentProcessingUi(true);
           }
-          final String messageId = chunkAssistantMessageId;
+          final String messageId = chunkAssistantMessageId ??
+              ((activeTraceId != null && activeTraceId.isNotEmpty)
+                  ? "assistant-$activeTraceId"
+                  : "assistant-streaming");
           final String chunk = payload["chunk"]?.toString() ?? "";
           // 关键：流式期间 chunk 只进缓冲（_flushAssistantChunks 现在不入列表），
           // **绝对不要**用「chunked 末行」去覆盖 agentStatusLine——那会把回复正文
           // 顶到思考气泡里。思考气泡只能由 chat.agent_status / tool.call / tool.result
           // 这些"agent 在干的事"来更新。
           _enqueueAssistantChunk(messageId, chunk);
+          // v2：把 chunk 同步累加进 TurnState.streamBuffer（UI 改造后用作流式正文源）
+          _turnState?.appendChunk(chunk);
         }
         if (type == "chat.assistant_done") {
+          final String bufferedText =
+              _pendingAssistantChunkText.toString().trim();
+          final String? doneTraceId = payload["traceId"]?.toString();
+          final String? activeTraceId = _pendingAgentUserMessageId;
+          if (doneTraceId != null &&
+              doneTraceId.isNotEmpty &&
+              activeTraceId != null &&
+              doneTraceId != activeTraceId) {
+            return;
+          }
           // 关键：先在 traceId 上打「本轮已结束」标记，再做后续副作用。
           // 否则清状态与清 traceId 之间存在竞态：迟到的 chunk/agent_status
           // 会看到 _pendingAgentUserMessageId 还有值，重新点亮思考气泡。
           _pendingAgentUserMessageId = null;
           _disarmAgentReplyWatchdog();
           _flushAssistantChunks();
-          _clearAgentProcessingState();
-          final String messageId =
-              payload["messageId"]?.toString() ?? "assistant-final";
+          // v2：done=true 让 _clearAgentProcessingState 内部调 markDone（而非 markCanceled）
+          _clearAgentProcessingState(done: true);
+          final String messageId = payload["messageId"]?.toString() ??
+              ((doneTraceId != null && doneTraceId.isNotEmpty)
+                  ? "assistant-$doneTraceId"
+                  : "assistant-final");
           final String finalText = payload["finalText"]?.toString() ?? "";
           final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
-          final String? traceKey = messageId.startsWith("assistant-")
-              ? messageId.substring("assistant-".length)
-              : null;
-          final String? playUrl = (traceKey != null
+          final String resolvedText = finalText.trim().isNotEmpty
+              ? finalText
+              : (bufferedText.isNotEmpty ? bufferedText : fallbackText);
+          final String traceKey = (doneTraceId?.isNotEmpty == true)
+              ? doneTraceId!
+              : (messageId.startsWith("assistant-")
+                  ? messageId.substring("assistant-".length)
+                  : "");
+          final String? playUrl = (traceKey.isNotEmpty
                   ? _pendingPlayUrlByTraceId.remove(traceKey)
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
-              PlayUrlUtils.fromAssistantText(
-                finalText.trim().isNotEmpty ? finalText : fallbackText,
-              );
+              PlayUrlUtils.fromAssistantText(resolvedText);
           final int? idx = _assistantMessageIndexById[messageId];
           if (idx != null) {
             setState(() {
               final ChatMessage previous = _messages[idx];
-              final String nextText = finalText.trim().isNotEmpty
-                  ? finalText
+              final String nextText = resolvedText.trim().isNotEmpty
+                  ? resolvedText
                   : (previous.text.trim().isNotEmpty
                       ? previous.text
                       : fallbackText);
@@ -672,7 +805,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
-              text: finalText.trim().isNotEmpty ? finalText : fallbackText,
+              text: resolvedText,
               timestamp: DateTime.now(),
               playUrl: playUrl,
             );
@@ -682,6 +815,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             });
             await _store.saveMessage(finalMessage);
           }
+          _takePendingAssistantChunkText();
+          unawaited(_loadAgentProfile());
         }
         if (type == "agent.peer_message") {
           final String messageId =
@@ -940,6 +1075,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             ),
           );
         }
+        if (type == "morning.briefing") {
+          await _handleMorningBriefingEvent(payload);
+        }
         if (type == "agent.phone.call_status") {
           final String status = payload["status"]?.toString() ?? "unknown";
           final String toActorId = payload["toActorId"]?.toString() ?? "";
@@ -1103,14 +1241,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _assistantChunkFlushTimer?.cancel();
     _assistantChunkFlushTimer = null;
     _pendingAssistantChunkMessageId = null;
-    _pendingAssistantChunkText.clear();
   }
 
-  void _clearAgentProcessingState() {
+  String _takePendingAssistantChunkText() {
+    final String buffered = _pendingAssistantChunkText.toString().trim();
+    _pendingAssistantChunkText.clear();
+    return buffered;
+  }
+
+  void _clearAgentProcessingState({bool done = false}) {
     if (!_isAgentProcessing &&
         _agentStatusLine == null &&
         _interimAckText == null &&
-        !_subAgentDelegationActive) {
+        !_subAgentDelegationActive &&
+        _turnState == null &&
+        _pendingLocalTurn == null) {
       return;
     }
     setState(() {
@@ -1118,31 +1263,150 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _agentStatusLine = null;
       _interimAckText = null;
       _subAgentDelegationActive = false;
+      // v2：按调用方语义收尾 TurnState。
+      // - done=true（chat.assistant_done）：markDone，UI 顶栏切「已收尾」后消失
+      // - done=false（timeout/error/中断）：markCanceled，UI 顶栏切「已停止」后消失
+      if (done) {
+        _turnState?.markDone();
+      } else {
+        _turnState?.markCanceled();
+      }
+      _turnState = null;
+      _pendingLocalTurn = null;
     });
     _notifyAgentProcessingUi(false);
-    unawaited(_syncBackgroundTasksBadge());
   }
 
-  /// 「分阶段异步对话交互」阶段一：设置/清除即时确认应答。
-  /// 行为与 _updateAgentStatusLine 类似，但走独立字段以便 UI 单独控制样式。
-  void _setInterimAck(String text) {
-    final String trimmed = text.trim();
-    if (trimmed.isEmpty) return;
-    _resetAgentReplyWatchdog();
-    if (_interimAckText == trimmed && _isAgentProcessing) return;
-    setState(() {
-      _interimAckText = trimmed;
-      if (!_isAgentProcessing) {
-        _isAgentProcessing = true;
-        _notifyAgentProcessingUi(true);
-      }
-    });
+  /// v2：用户点 TurnPanel 顶栏「停止」按钮时的软取消。
+  /// 不发 WS 事件——只本地清状态，让后续 chunk/agent_status 因 traceId 不匹配被过滤。
+  /// 服务端 LLM 调用仍在后台跑（无法硬中断），但客户端不再接收/渲染。
+  void _cancelCurrentTurn() {
+    if (!_isAgentProcessing) return;
+    _disarmAgentReplyWatchdog();
+    _pendingAgentUserMessageId = null;
+    _flushAssistantChunks();
+    _takePendingAssistantChunkText();
+    _clearAgentProcessingState(done: false);
   }
 
+  /// interim 已改为作为独立 assistant 消息入列表（见 chat.assistant_interim
+  /// handler），_interimAckText 字段不再被设置；_clearInterimAck 保留为 no-op
+  /// 兼容旧调用点（chunk handler）。
   void _clearInterimAck() {
     if (_interimAckText == null) return;
     setState(() {
       _interimAckText = null;
+    });
+  }
+
+  // ============================================================
+  // 「分阶段异步对话交互 v2」事件 handlers
+  // 骨架：仅在内存里把事件流跑通并维护 _turnState。
+  // UI 改造（chat_page 接 TurnState 渲染顶栏 / 折叠面板 / 流式正文）下一轮再做。
+  // ============================================================
+
+  /// 阶段 0：服务端确认收到，路由开始。
+  /// 用服务端 t0 替换本地占位（让首字延迟测量更准）；
+  /// 若 traceId 与本轮不匹配或已无活动轮次，丢弃。
+  void _handleTurnStartedV2(Map<String, dynamic> payload) {
+    final String? traceId = payload["traceId"]?.toString();
+    final String? activeTraceId = _pendingAgentUserMessageId;
+    if (traceId == null ||
+        traceId.isEmpty ||
+        activeTraceId == null ||
+        traceId != activeTraceId) {
+      return;
+    }
+    final dynamic t0Raw = payload["t0"];
+    final DateTime t0 = t0Raw is num
+        ? DateTime.fromMillisecondsSinceEpoch(t0Raw.toInt())
+        : DateTime.now();
+    // 替换本地占位为服务端权威 t0
+    _turnState = TurnState(
+      traceId: traceId,
+      sessionId: payload["sessionId"]?.toString() ?? "",
+      t0: t0,
+      phase: TurnPhase.routing,
+    );
+    _pendingLocalTurn = null;
+    if (mounted) setState(() {});
+  }
+
+  /// 阶段 1：意图已识别。mode / plan / subAgents 落到 TurnState。
+  void _handleIntentDetectedV2(Map<String, dynamic> payload) {
+    final String? traceId = payload["traceId"]?.toString();
+    final String? activeTraceId = _pendingAgentUserMessageId;
+    if (traceId == null ||
+        traceId.isEmpty ||
+        activeTraceId == null ||
+        traceId != activeTraceId) {
+      return;
+    }
+    final TurnState? ts = _turnState;
+    if (ts == null || ts.traceId != traceId) return;
+
+    final List<dynamic> reasonsRaw =
+        (payload["reasons"] as List<dynamic>?) ?? const <dynamic>[];
+    final List<dynamic> planRaw =
+        (payload["plan"] as List<dynamic>?) ?? const <dynamic>[];
+    final List<dynamic> subAgentsRaw =
+        (payload["subAgents"] as List<dynamic>?) ?? const <dynamic>[];
+
+    setState(() {
+      ts.applyIntentDetected(
+        mode: TurnIntentMode.fromWire(payload["mode"]?.toString()),
+        reasons: reasonsRaw.map((e) => e.toString()).toList(),
+        plan: planRaw
+            .whereType<Map<String, dynamic>>()
+            .map(TurnPlanStep.fromWire)
+            .toList(),
+        subAgents: subAgentsRaw
+            .whereType<Map<String, dynamic>>()
+            .map(TurnSubAgent.fromWire)
+            .toList(),
+      );
+    });
+  }
+
+  /// 阶段 2：执行事件（工具调用 / 子 Agent / thought / log 兜底）。
+  void _handleExecutionEventV2(Map<String, dynamic> payload) {
+    final String? traceId = payload["traceId"]?.toString();
+    final String? activeTraceId = _pendingAgentUserMessageId;
+    if (traceId == null ||
+        traceId.isEmpty ||
+        activeTraceId == null ||
+        traceId != activeTraceId) {
+      return;
+    }
+    final TurnState? ts = _turnState;
+    if (ts == null || ts.traceId != traceId) return;
+
+    final String kind = payload["kind"]?.toString() ?? "log";
+    final String? eventId = payload["eventId"]?.toString();
+    if (eventId == null) return;
+
+    setState(() {
+      ts.applyExecutionEvent(
+        eventId: eventId,
+        kind: kind,
+        toolCall: payload["toolCall"] is Map<String, dynamic>
+            ? payload["toolCall"] as Map<String, dynamic>
+            : null,
+        toolResult: payload["toolResult"] is Map<String, dynamic>
+            ? payload["toolResult"] as Map<String, dynamic>
+            : null,
+        agentStart: payload["agentStart"] is Map<String, dynamic>
+            ? payload["agentStart"] as Map<String, dynamic>
+            : null,
+        agentDone: payload["agentDone"] is Map<String, dynamic>
+            ? payload["agentDone"] as Map<String, dynamic>
+            : null,
+        planStep: payload["planStep"] is Map<String, dynamic>
+            ? payload["planStep"] as Map<String, dynamic>
+            : null,
+        thought: payload["thought"]?.toString(),
+        log: payload["log"]?.toString(),
+      );
     });
   }
 
@@ -1182,6 +1446,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _handleAgentReplyTimeout({bool showSnackBar = true}) {
     if (!mounted) return;
     final bool wasProcessing = _isAgentProcessing;
+    final String buffered = _pendingAssistantChunkText.toString().trim();
     // 关键：和 chat.assistant_done 一样，traceId 一定要先于 _clearAgentProcessingState
     // 清掉，否则迟到的 chunk 会看到 _isAgentProcessing=false 但 traceId 还在，
     // 重新把思考气泡点亮。
@@ -1212,7 +1477,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       // 新语义：流式期间 chunk 没进列表，超时分支是 agent 文本能进列表的唯一入口。
       // 优先用 _pendingAssistantChunkText 里已经缓冲到的部分流式片段作为兜底文
       // 本；如果缓冲是空的（连一个 chunk 都没收到），才用纯兜底文案。
-      final String buffered = _pendingAssistantChunkText.toString().trim();
       final String timeoutText =
           buffered.isNotEmpty ? "$buffered\n\n⚠️ 后续内容超时未到，已截断。" : fallbackText;
       final ChatMessage timeoutMessage = ChatMessage(
@@ -1228,6 +1492,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       });
       unawaited(_store.saveMessage(timeoutMessage));
     }
+    _takePendingAssistantChunkText();
     _clearAgentProcessingState();
     _disarmAgentReplyWatchdog();
     if (showSnackBar && wasProcessing) {
@@ -1311,61 +1576,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       return;
     }
     setState(_pendingGalleryFrames.clear);
-  }
-
-  String? get _activeChatUserMessageId {
-    final String? pending = _pendingAgentUserMessageId;
-    if (pending != null && pending.isNotEmpty) return pending;
-    for (int i = _messages.length - 1; i >= 0; i--) {
-      if (_messages[i].role == "user") return _messages[i].messageId;
-    }
-    return null;
-  }
-
-  Future<void> _syncBackgroundTasksBadge() async {
-    try {
-      final Map<String, dynamic> snap =
-          await _multiAgentApi.fetchBackgroundTasks(
-        ApiConfig.effectiveActorId,
-        messageId: _activeChatUserMessageId,
-      );
-      if (!mounted) return;
-      final List<dynamic> running =
-          snap["running"] as List<dynamic>? ?? <dynamic>[];
-      final int inFlight = snap["inFlightInTurn"] as int? ?? 0;
-      final int count =
-          running.isNotEmpty ? running.length : (inFlight > 0 ? inFlight : 0);
-      if (count != _backgroundTasksBadgeCount) {
-        setState(() => _backgroundTasksBadgeCount = count);
-      }
-    } catch (_) {
-      // 忽略：委派未启用或网络不可达时不显示角标
-    }
-  }
-
-  Future<void> _openBackgroundTasksPanel(BuildContext context) async {
-    Map<String, dynamic> snap;
-    try {
-      snap = await _multiAgentApi.fetchBackgroundTasks(
-        ApiConfig.effectiveActorId,
-        messageId: _activeChatUserMessageId,
-      );
-    } catch (e) {
-      snap = <String, dynamic>{"ok": false, "error": e.toString()};
-    }
-    if (!context.mounted) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (BuildContext ctx) => BackgroundTasksSheet(
-        initialSnapshot: snap,
-        onRefresh: () => _multiAgentApi.fetchBackgroundTasks(
-          ApiConfig.effectiveActorId,
-          messageId: _activeChatUserMessageId,
-        ),
-      ),
-    );
-    await _syncBackgroundTasksBadge();
   }
 
   Future<void> _reportEmbodimentState() async {
@@ -1512,7 +1722,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
 
     _armAgentReplyWatchdog(userMessage.messageId);
-    unawaited(_syncBackgroundTasksBadge());
+
+    // v2 阶段 0：本地立即建占位 TurnState，让用户感知到「已发送 / 正在思考」，
+    // 不等服务端 chat.turn_started 回来（豆包式即时反馈的关键）。
+    _pendingLocalTurn = TurnState(
+      traceId: userMessage.messageId,
+      sessionId: ApiConfig.effectiveActorId,
+      t0: DateTime.now(),
+    );
+    if (mounted) setState(() {});
+
     final bool sent = _ws.sendEvent("chat.user_message", userMsg);
     if (!sent) {
       _disarmAgentReplyWatchdog();
@@ -1528,7 +1747,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   static const List<String> _kTabTitles = <String>[
     "",
-    "Agent Link",
+    "",
     "",
     "技能商城",
     "游戏",
@@ -1538,9 +1757,63 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() => _tabIndex = index);
   }
 
-  void _openAgentLinkTab() => _selectTab(1);
+  /// 好友入口：不再切整页 tab，而是从右侧滑出好友面板
+  void _openAgentLinkTab() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = _RightPanelKind.friends;
+    });
+  }
 
-  void _openGameCenterTab() => _selectTab(4);
+  /// 游戏入口：不再切整页 tab，而是从右侧滑出游戏面板
+  void _openGameCenterTab() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = _RightPanelKind.games;
+    });
+  }
+
+  /// 消息入口：从右侧滑出消息聚合面板
+  void _openMessagesPanel() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = _RightPanelKind.messages;
+    });
+  }
+
+  Future<void> _pollUnreadMessages() async {
+    try {
+      final result = await _worldApi.getMessageConversations(limit: 200);
+      if (!mounted) return;
+      if (result["ok"] == true) {
+        final List<dynamic> conversations = result["conversations"] ?? [];
+        final Map<String, int> byPlatform = <String, int>{};
+        for (final dynamic c in conversations) {
+          final Map<String, dynamic> conv = c as Map<String, dynamic>;
+          final int unread = (conv["unreadCount"] as num?)?.toInt() ?? 0;
+          if (unread <= 0) continue;
+          final String platform = conv["platform"] as String? ?? "generic";
+          byPlatform[platform] = (byPlatform[platform] ?? 0) + unread;
+        }
+        if (mounted) {
+          setState(() => _unreadByPlatform = byPlatform);
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _startMessagePolling() {
+    _stopMessagePolling();
+    _pollUnreadMessages();
+    _messagePollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _pollUnreadMessages();
+    });
+  }
+
+  void _stopMessagePolling() {
+    _messagePollTimer?.cancel();
+    _messagePollTimer = null;
+  }
 
   void _openSchedulePanel() {
     setState(() {
@@ -1586,65 +1859,74 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 常用工具「翻译」入口：唤起桌面翻译托盘悬浮窗。
-  /// - 先探活：托盘没起就提示用户运行 start-translate.ps1
-  /// - 托盘在跑：调 /api/translate/show-window，主服务转发到托盘本地 IPC
-  /// - 端口或连接异常：明确报错，避免用户瞎猜
+  /// 常用工具「翻译」入口：唤起独立翻译悬浮窗（与主应用同进程，HWND + GDI 自绘）。
+  ///
+  /// 跟之前走 Python 托盘 IPC 不同，这里直接调
+  /// `pai/translate_overlay` MethodChannel，让 windows/runner 端
+  /// `TranslateOverlayWindow` 起一个原生 HWND 窗口。
+  /// 可拖动、可设 on-top、点 ✕ 只隐藏（不退出进程）。
   Future<void> _openTranslatePage() async {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null) return;
     final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(navCtx);
 
-    // 先显示「正在连接」提示，避免用户觉得没反应
-    messenger?.showSnackBar(
-      const SnackBar(
-        content: Text("正在唤起翻译窗口…"),
-        duration: Duration(seconds: 2),
-      ),
-    );
-
-    final TranslateTrayClient client = TranslateTrayClient();
-    try {
-      final TranslateTrayStatus status = await client.trayStatus();
-      if (!status.alive) {
-        messenger?.hideCurrentSnackBar();
-        messenger?.showSnackBar(
-          SnackBar(
-            content: Text(
-              "翻译托盘未运行：${status.error ?? "无法连接"}\n"
-              "请在仓库根目录运行 start-translate.ps1（或检查主服务日志）",
-            ),
-            duration: const Duration(seconds: 6),
+    final ok = await TranslateOverlayLauncher.show();
+    if (ok) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            "已唤起翻译悬浮窗 · 在桌面上自由拖动  ·  鼠标悬停文字自动翻译",
           ),
-        );
-        return;
-      }
-      // 托盘在跑 → 唤起主面板
-      final showResult = await client.showWindow(
-        hint: "点击 ✚ 框选翻译"
-            "  ·  按 ${status.hotkeys['clear'] ?? 'Ctrl+Shift+C'} 清空",
+          duration: Duration(seconds: 4),
+        ),
       );
-      messenger?.hideCurrentSnackBar();
-      if (showResult.ok) {
-        messenger?.showSnackBar(
-          SnackBar(
-            content: Text(
-              "已唤起翻译面板，点击 ✚ 框选区域"
-              "（或按 ${status.hotkeys['live'] ?? 'Ctrl+Shift+T'}）",
-            ),
-            duration: const Duration(seconds: 4),
+    } else {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            "唤起失败：当前平台暂不支持独立翻译窗口（仅 Windows 桌面版）",
           ),
-        );
-      } else {
-        messenger?.showSnackBar(
-          SnackBar(
-            content: Text("唤起失败：${showResult.error ?? "未知错误"}"),
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
-    } finally {
-      client.dispose();
+          duration: Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  void _handleTranslateLangChange(String langCode) {
+    // 1) 把新语言同步到原生窗口（让顶栏按钮文字立刻更新）
+    // 2) 持久化到本地偏好（_preferencesApi，TODO: 加 setString 后再写）
+    debugPrint("[translate] lang changed: $langCode");
+    final label = _translateLangLabel(langCode);
+    unawaited(TranslateOverlayLauncher.setLanguage(
+      code: langCode,
+      label: label,
+    ));
+  }
+
+  String _translateLangLabel(String code) {
+    switch (code) {
+      case 'zh':
+        return '中文';
+      case 'en':
+        return 'English';
+      case 'ja':
+        return '日本語';
+      case 'ko':
+        return '한국어';
+      case 'fr':
+        return 'Français';
+      case 'de':
+        return 'Deutsch';
+      case 'es':
+        return 'Español';
+      case 'ru':
+        return 'Русский';
+      case 'zh-Hant':
+        return '繁體';
+      case 'auto':
+        return '自动检测';
+      default:
+        return '中文';
     }
   }
 
@@ -1687,50 +1969,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ),
       ),
     );
-  }
-
-  /// 清空当前会话的所有聊天历史记录
-  Future<void> _clearChatHistory() async {
-    // 走 RootNavigator 的 context，避免 State.context 处在 MaterialApp 之上、
-    // 缺少 MaterialLocalizations 而导致 showDialog 抛 assert（与 _openWalletDialog 同解法）。
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    final BuildContext ctx = navCtx ?? context;
-    if (!ctx.mounted) return;
-    final bool? confirmed = await showDialog<bool>(
-      context: ctx,
-      builder: (BuildContext dialogCtx) => AlertDialog(
-        title: const Text("清空聊天记录"),
-        content: const Text("确定要删除所有聊天历史吗？此操作不可恢复。"),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(dialogCtx).pop(false),
-            child: const Text("取消"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogCtx).pop(true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text("确认删除"),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    await _store.deleteMessagesForSession(ApiConfig.effectiveActorId);
-    // 通知服务端同步清除 ChatThreadStore（内存 + 磁盘持久化）
-    _ws.sendEvent("chat.clear_history", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-    });
-    setState(() {
-      _messages.clear();
-      _assistantMessageIndexById.clear();
-    });
-    if (mounted) {
-      final ScaffoldMessengerState? messenger =
-          ScaffoldMessenger.maybeOf(_rootNavigatorKey.currentContext ?? context);
-      messenger?.showSnackBar(
-        const SnackBar(content: Text("聊天记录已清空")),
-      );
-    }
   }
 
   /// 删除单条消息（本地 + 通知服务端清除上下文）
@@ -1925,6 +2163,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   void _handleDesktopNotificationConfirm() {
+    final Map<String, dynamic>? pendingBriefing =
+        _pendingDesktopBriefingPayload;
+    _pendingDesktopBriefingPayload = null;
+    if (pendingBriefing != null) {
+      unawaited(
+          _handleMorningBriefingEvent(pendingBriefing, forceDialog: true));
+      return;
+    }
     if (_desktopNotificationNeedsFeedback) {
       _sendContactFeedback(
         channel: _desktopNotificationFeedbackChannel,
@@ -1938,10 +2184,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   void _handleDesktopNotificationDismiss() {
     _desktopNotificationNeedsFeedback = false;
+    _pendingDesktopBriefingPayload = null;
   }
 
   void _handleDesktopNotificationTimeout() {
     _desktopNotificationNeedsFeedback = false;
+    _pendingDesktopBriefingPayload = null;
   }
 
   void _handleOutgoingCallHangup() {
@@ -2223,6 +2471,174 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return Text(title);
   }
 
+  Widget _buildMessageNotificationBadge() {
+    if (_unreadByPlatform.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final int totalUnread =
+        _unreadByPlatform.values.fold(0, (int a, int b) => a + b);
+
+    return MouseRegion(
+      onEnter: (_) {
+        if (mounted) setState(() => _messageBadgeHovering = true);
+      },
+      onExit: (_) {
+        if (mounted) setState(() => _messageBadgeHovering = false);
+      },
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: <Widget>[
+          Tooltip(
+            message: "消息聚合",
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _openMessagesPanel,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  child: Badge(
+                    label: Text(
+                      totalUnread > 99 ? "99+" : totalUnread.toString(),
+                    ),
+                    child: Icon(
+                      Icons.notifications_outlined,
+                      size: 22,
+                      color: Theme.of(context).colorScheme.onSurface,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (_messageBadgeHovering)
+            Positioned(
+              top: 44,
+              left: 4,
+              child: _buildPlatformPopup(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlatformPopup() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final List<MapEntry<String, int>> entries = _unreadByPlatform.entries
+        .map((e) => MapEntry<String, int>(_platformDisplayName(e.key), e.value))
+        .toList();
+
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(12),
+      color: cs.surface,
+      surfaceTintColor: cs.surfaceTint,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 180),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(
+                "未读消息",
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const Divider(height: 8),
+            ...entries.map(
+              (entry) => Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 6,
+                ),
+                child: Row(
+                  children: <Widget>[
+                    _platformIcon(entry.key),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        entry.key,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: cs.onSurface,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: cs.primaryContainer,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        entry.value > 99 ? "99+" : entry.value.toString(),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: cs.onPrimaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _platformIcon(String displayName) {
+    IconData icon;
+    Color color;
+    switch (displayName) {
+      case "微信":
+        icon = Icons.wechat;
+        color = const Color(0xFF07C160);
+        break;
+      case "QQ":
+        icon = Icons.chat;
+        color = const Color(0xFF12B7F5);
+        break;
+      case "飞书":
+        icon = Icons.flutter_dash;
+        color = const Color(0xFF3370FF);
+        break;
+      default:
+        icon = Icons.message;
+        color = Theme.of(context).colorScheme.primary;
+    }
+    return Icon(icon, size: 20, color: color);
+  }
+
+  String _platformDisplayName(String platform) {
+    switch (platform) {
+      case "wechat":
+        return "微信";
+      case "qq":
+        return "QQ";
+      case "feishu":
+        return "飞书";
+      default:
+        return "其他";
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // 如果还未初始化，显示加载界面
@@ -2269,7 +2685,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       builder: (BuildContext _, AppThemeVariant variant, __) {
         // 同步 Windows 标题栏颜色跟随主题
         unawaited(WindowsTitleBarTheme.setDarkMode(
-          variant == AppThemeVariant.dark,
+          _showEntranceAnimation || variant == AppThemeVariant.dark,
         ));
         return MaterialApp(
           navigatorKey: _rootNavigatorKey,
@@ -2302,65 +2718,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                               children: <Widget>[
                                 AppBar(
                                   automaticallyImplyLeading: false,
+                                  leading: _tabIndex == 0
+                                      ? _buildMessageNotificationBadge()
+                                      : null,
                                   title: _buildAppBarTitle(),
-                                  actions: <Widget>[
-                                    if (_tabIndex == 0)
-                                      PopupMenuButton<String>(
-                                        tooltip: "更多",
-                                        icon: Icon(Icons.more_vert),
-                                        offset: const Offset(0, 48),
-                                        onSelected: (String value) {
-                                          if (value == 'background_tasks') {
-                                            _openBackgroundTasksPanel(context);
-                                          } else if (value == 'clear_history') {
-                                            _clearChatHistory();
-                                          }
-                                        },
-                                        itemBuilder: (BuildContext context) =>
-                                            <PopupMenuEntry<String>>[
-                                          PopupMenuItem<String>(
-                                            value: 'background_tasks',
-                                            child: Row(
-                                              children: <Widget>[
-                                                Icon(
-                                                  Icons.smart_toy_outlined,
-                                                  size: 20,
-                                                  color:
-                                                      _backgroundTasksBadgeCount >
-                                                              0
-                                                          ? Theme.of(context)
-                                                              .colorScheme
-                                                              .primary
-                                                          : null,
-                                                ),
-                                                const SizedBox(width: 12),
-                                                const Text('后台任务'),
-                                              ],
-                                            ),
-                                          ),
-                                          const PopupMenuDivider(),
-                                          PopupMenuItem<String>(
-                                            value: 'clear_history',
-                                            child: Row(
-                                              children: <Widget>[
-                                                Icon(
-                                                  Icons.delete_outline,
-                                                  size: 20,
-                                                  color: Colors.red
-                                                      .withValues(alpha: 0.8),
-                                                ),
-                                                const SizedBox(width: 12),
-                                                const Text(
-                                                  '清空聊天记录',
-                                                  style: TextStyle(
-                                                      color: Colors.red),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                  ],
+                                  actions: const <Widget>[],
                                 ),
                                 Expanded(
                                   child: MainPanel(
@@ -2374,6 +2736,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       ],
                     ),
                     const FloatingAgentSphere(),
+                    // 右侧抽屉：top:0 顶到屏幕最顶部，覆盖侧边栏、AppBar、主内容、日历面板
+                    _buildRightPanelOverlay(),
                     // 进场动画层（覆盖在主界面上方，播完后自动消失层
                     if (_showEntranceAnimation)
                       IgnorePointer(
@@ -2397,6 +2761,383 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   void _toggleTheme() {
     AppThemeController.instance.toggle();
+  }
+
+  Future<void> _handleMorningBriefingEvent(
+    Map<String, dynamic> payload, {
+    bool markDesktopShown = false,
+    bool forceDialog = false,
+  }) async {
+    final String mode =
+        payload["mode"]?.toString() ?? UserPreferencesApi.modeCard;
+    final String narrationText = payload["narrationText"]?.toString() ?? "";
+    final Object? rawBriefing = payload["briefing"];
+    final Map<String, dynamic> briefing =
+        rawBriefing is Map ? rawBriefing.cast<String, dynamic>() : payload;
+    final String modeLabel = switch (mode) {
+      UserPreferencesApi.modeVoice => "语音",
+      UserPreferencesApi.modeWindow => "独立窗口",
+      _ => "卡片",
+    };
+
+    if (markDesktopShown) {
+      _lastDesktopBriefingAt = DateTime.now();
+    }
+
+    if (mode == UserPreferencesApi.modeVoice && narrationText.isNotEmpty) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text("已开始播报今日简报")),
+      );
+      if (!forceDialog) {
+        return;
+      }
+    }
+
+    if (mode == UserPreferencesApi.modeWindow &&
+        !forceDialog &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows) {
+      final bool alreadyDelivered =
+          await _isBriefingDeliveredElsewhere(preferredChannel: "desktop");
+      if (alreadyDelivered) return;
+      _pendingDesktopBriefingPayload = <String, dynamic>{
+        "mode": mode,
+        "narrationText": narrationText,
+        "briefing": briefing,
+      };
+      final String message = _buildDesktopBriefingSummary(briefing);
+      _desktopNotificationNeedsFeedback = false;
+      _desktopNotificationFeedbackChannel = "websocket";
+      final bool shown = await DesktopNotificationLauncher.show(
+        title: "每日简报",
+        message: message,
+        priority: "normal",
+        showConfirmButton: true,
+        confirmText: "打开查看",
+        autoCloseMs: 0,
+      );
+      if (shown) {
+        await _markBriefingDelivered("desktop");
+        return;
+      }
+      _pendingDesktopBriefingPayload = null;
+    }
+
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        !forceDialog) {
+      final bool alreadyDelivered =
+          await _isBriefingDeliveredElsewhere(preferredChannel: "mobile");
+      if (alreadyDelivered) return;
+      final String payloadText = jsonEncode(<String, dynamic>{
+        "mode": mode,
+        "narrationText": narrationText,
+        "briefing": briefing,
+      });
+      await MobileBriefingLauncher.showBriefingNotification(
+        title: "每日简报",
+        message: _buildMobileBriefingSummary(briefing),
+        payload: payloadText,
+      );
+      await _markBriefingDelivered("mobile");
+      return;
+    }
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return Dialog(
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    MorningBriefingCard(
+                      briefing: briefing,
+                      narrationText: narrationText,
+                      modeLabel: modeLabel,
+                      onSpeak: (String text) {
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                          SnackBar(content: Text(text)),
+                        );
+                      },
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: <Widget>[
+                          TextButton(
+                            onPressed: () => Navigator.of(dialogContext).pop(),
+                            child: const Text("知道了"),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    if (defaultTargetPlatform == TargetPlatform.windows) {
+      await _markBriefingDelivered("desktop");
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      await _markBriefingDelivered("mobile");
+    }
+  }
+
+  String _buildMobileBriefingSummary(Map<String, dynamic> briefing) {
+    final List<String> parts = <String>[];
+    final Object? weather = briefing["weather"];
+    if (weather is Map) {
+      final String condition = weather["condition"]?.toString() ?? "";
+      final Object? temp = weather["temperature"];
+      if (condition.isNotEmpty || temp != null) {
+        parts.add(
+          [
+            if (condition.isNotEmpty) condition,
+            if (temp != null) "${temp.toString()}°C",
+          ].join(" "),
+        );
+      }
+    }
+    final Object? schedule = briefing["todaySchedule"];
+    if (schedule is List && schedule.isNotEmpty) {
+      final Object? first = schedule.first;
+      if (first is Map) {
+        final String title = first["title"]?.toString() ?? "";
+        final String time = first["time"]?.toString() ?? "";
+        if (title.isNotEmpty) {
+          parts.add(time.isEmpty ? title : "$time $title");
+        }
+      }
+    }
+    final Object? notes = briefing["pendingNotes"];
+    if (notes is List && notes.isNotEmpty) {
+      parts.add("还有 ${notes.length} 条待办提醒");
+    }
+    return parts.isEmpty ? "点击查看今天的简报内容" : parts.join(" · ");
+  }
+
+  String _buildDesktopBriefingSummary(Map<String, dynamic> briefing) {
+    final List<String> lines = <String>[];
+    final String greeting = briefing["agentGreeting"]?.toString() ??
+        briefing["greeting"]?.toString() ??
+        "";
+    if (greeting.isNotEmpty) {
+      lines.add(greeting);
+    }
+    final Object? weather = briefing["weather"];
+    if (weather is Map) {
+      final String condition = weather["condition"]?.toString() ?? "";
+      final String temperature = weather["temperature"]?.toString() ?? "";
+      final String description = weather["description"]?.toString() ?? "";
+      final String weatherLine = [
+        condition,
+        temperature.isEmpty ? "" : "$temperature°C",
+        description
+      ].where((String item) => item.trim().isNotEmpty).join(" · ");
+      if (weatherLine.isNotEmpty) {
+        lines.add("天气：$weatherLine");
+      }
+    }
+    final Object? outfit = briefing["outfitTip"];
+    if (outfit is Map) {
+      final String suggestion = outfit["suggestion"]?.toString() ?? "";
+      if (suggestion.isNotEmpty) {
+        lines.add("穿衣：$suggestion");
+      }
+    }
+    final Object? schedule = briefing["todaySchedule"];
+    if (schedule is List && schedule.isNotEmpty) {
+      final List<String> top = <String>[];
+      for (final Object? item in schedule.take(3)) {
+        if (item is Map) {
+          final String time = item["time"]?.toString() ?? "";
+          final String title = item["title"]?.toString() ?? "";
+          if (title.isNotEmpty) {
+            top.add(time.isEmpty ? title : "$time $title");
+          }
+        }
+      }
+      if (top.isNotEmpty) {
+        lines.add("安排：${top.join("；")}");
+      }
+    }
+    final Object? notes = briefing["pendingNotes"];
+    if (notes is List && notes.isNotEmpty) {
+      final List<String> top = <String>[];
+      for (final Object? item in notes.take(3)) {
+        if (item is Map) {
+          final String title = item["title"]?.toString() ?? "";
+          if (title.isNotEmpty) top.add(title);
+        } else if (item != null && item.toString().trim().isNotEmpty) {
+          top.add(item.toString());
+        }
+      }
+      if (top.isNotEmpty) {
+        lines.add("待办：${top.join("；")}");
+      }
+    }
+    return lines.isEmpty ? "今天的简报已经准备好了。" : lines.join("\n");
+  }
+
+  Future<void> _tryShowDesktopLaunchBriefing() async {
+    try {
+      final Map<String, dynamic> prefs =
+          await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
+      final Object? rawMb = prefs["morningBriefing"];
+      final Map<String, dynamic> mb =
+          rawMb is Map ? rawMb.cast<String, dynamic>() : <String, dynamic>{};
+      if (mb["enabled"] == false || mb["showOnDesktopLaunch"] == false) {
+        return;
+      }
+      final DateTime now = DateTime.now();
+      if (_lastDesktopBriefingAt != null &&
+          now.difference(_lastDesktopBriefingAt!).inMinutes < 10) {
+        return;
+      }
+      if (await _isBriefingDeliveredElsewhere(preferredChannel: "desktop")) {
+        return;
+      }
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
+      );
+      final http.Response res =
+          await http.get(uri).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> data =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final Object? briefingRaw = data["briefing"];
+      if (briefingRaw is! Map) return;
+      await _handleMorningBriefingEvent(
+        <String, dynamic>{
+          "mode": mb["mode"]?.toString() ?? UserPreferencesApi.modeWindow,
+          "narrationText": data["narrationText"]?.toString() ?? "",
+          "briefing": briefingRaw.cast<String, dynamic>(),
+        },
+        markDesktopShown: true,
+      );
+    } catch (_) {
+      // ignore desktop launch briefing failures
+    }
+  }
+
+  Future<void> _tryShowMobileLaunchBriefing() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      final Map<String, dynamic> prefs =
+          await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
+      final Object? rawMb = prefs["morningBriefing"];
+      final Map<String, dynamic> mb =
+          rawMb is Map ? rawMb.cast<String, dynamic>() : <String, dynamic>{};
+      if (mb["enabled"] == false) return;
+      if (await _isBriefingDeliveredElsewhere(preferredChannel: "mobile")) {
+        return;
+      }
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
+      );
+      final http.Response res =
+          await http.get(uri).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> data =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final Object? briefingRaw = data["briefing"];
+      if (briefingRaw is! Map) return;
+      await _handleMorningBriefingEvent(
+        <String, dynamic>{
+          "mode": mb["mode"]?.toString() ?? UserPreferencesApi.modeCard,
+          "narrationText": data["narrationText"]?.toString() ?? "",
+          "briefing": briefingRaw.cast<String, dynamic>(),
+        },
+      );
+    } catch (_) {
+      // ignore mobile launch briefing failures
+    }
+  }
+
+  Future<void> _consumePendingMobileBriefingLaunch() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final String? payload = await MobileBriefingLauncher.consumeLaunchPayload();
+    if (payload == null || payload.isEmpty) return;
+    await _openBriefingFromPayload(payload);
+  }
+
+  Future<void> _openBriefingFromPayload(String payload) async {
+    try {
+      final Map<String, dynamic> data =
+          jsonDecode(payload) as Map<String, dynamic>;
+      await _markBriefingDelivered("mobile");
+      await _handleMorningBriefingEvent(data, forceDialog: true);
+    } catch (_) {
+      // ignore invalid mobile briefing payload
+    }
+  }
+
+  Future<void> _ensureAndroidNotificationPermission() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    if (_notificationPermissionChecked) return;
+    _notificationPermissionChecked = true;
+    try {
+      final PermissionStatus status = await Permission.notification.status;
+      if (status.isDenied) {
+        await Permission.notification.request();
+      }
+    } catch (_) {
+      // ignore notification permission failures
+    }
+  }
+
+  Future<bool> _isBriefingDeliveredElsewhere({
+    required String preferredChannel,
+  }) async {
+    try {
+      final Map<String, dynamic> status =
+          await _briefingDeliveryApi.getStatus(ApiConfig.effectiveActorId);
+      final String? deliveredAt = status["deliveredAt"]?.toString();
+      final String? deliveredChannel = status["deliveredChannel"]?.toString();
+      if (deliveredAt == null || deliveredAt.isEmpty) return false;
+      if (deliveredChannel == null || deliveredChannel.isEmpty) return false;
+      return deliveredChannel != preferredChannel;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _markBriefingDelivered(String channel) async {
+    try {
+      await _briefingDeliveryApi.markDelivered(
+        ApiConfig.effectiveActorId,
+        channel: channel,
+      );
+    } catch (_) {
+      // ignore delivery mark failures
+    }
+  }
+
+  Future<void> _loadAgentProfile() async {
+    try {
+      final Map<String, dynamic> prefs =
+          await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
+      final AgentProfileData profile = AgentProfileData.fromPreferences(prefs);
+      if (!mounted) return;
+      setState(() {
+        _agentProfile = profile;
+        _agentName = profile.displayName;
+      });
+    } catch (_) {
+      // keep defaults when profile loading fails
+    }
   }
 
   Widget _buildGameCenterPage() {
@@ -2435,8 +3176,53 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               ),
             ),
           ),
+        // 右侧抽屉挂在外层 Scaffold Stack 顶层(见 build 中 _buildRightPanelOverlay 调用)
+        // 这里不再渲染,避免顶在 AppBar 下方
       ],
     );
+  }
+
+  /// 渲染右侧滑入面板(挂在外层 Scaffold Stack 顶层，top:0 顶到屏幕最顶)
+  Widget _buildRightPanelOverlay() {
+    if (_rightPanel == null) {
+      return const SizedBox.shrink();
+    }
+    // 根据屏幕宽度计算面板绝对像素宽度:小屏几乎占满,宽屏固定 480
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    final double panelWidth = screenWidth < 820 ? screenWidth * 0.92 : 480.0;
+    return RightSidePanel(
+      visible: true,
+      title: _rightPanelTitle(_rightPanel!),
+      onClose: _closeRightPanel,
+      panelWidth: panelWidth,
+      child: _buildRightPanelContent(),
+    );
+  }
+
+  /// 右侧面板标题
+  String _rightPanelTitle(_RightPanelKind kind) {
+    switch (kind) {
+      case _RightPanelKind.friends:
+        return "好友";
+      case _RightPanelKind.games:
+        return "游戏中心";
+      case _RightPanelKind.messages:
+        return "消息聚合";
+    }
+  }
+
+  /// 右侧面板要渲染的具体内容
+  Widget _buildRightPanelContent() {
+    switch (_rightPanel) {
+      case _RightPanelKind.friends:
+        return MailboxPage(api: _worldApi, ws: _ws);
+      case _RightPanelKind.games:
+        return _buildGameCenterPage();
+      case _RightPanelKind.messages:
+        return MessageHubPage(api: _worldApi);
+      case null:
+        return const SizedBox.shrink();
+    }
   }
 
   Widget _buildScheduleSidebar() {
@@ -2444,44 +3230,44 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return ColoredBox(
       color: cs.surface,
       child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 20, 16, 8),
-          child: Row(
-            children: <Widget>[
-              Text(
-                "日程",
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSurface,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 20, 16, 8),
+            child: Row(
+              children: <Widget>[
+                Text(
+                  "日程",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                  ),
                 ),
-              ),
-              const Spacer(),
-              IconButton(
-                tooltip: "关闭",
-                icon: const Icon(Icons.close, size: 22),
-                onPressed: () => setState(() => _showCalendarPanel = false),
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-                constraints:
-                    const BoxConstraints.tightFor(width: 32, height: 32),
-                iconSize: 20,
-                color: cs.onSurfaceVariant.withValues(alpha: 0.7),
-              ),
-            ],
+                const Spacer(),
+                IconButton(
+                  tooltip: "关闭",
+                  icon: const Icon(Icons.close, size: 22),
+                  onPressed: () => setState(() => _showCalendarPanel = false),
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 32, height: 32),
+                  iconSize: 20,
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                ),
+              ],
+            ),
           ),
-        ),
-        Expanded(
-          child: SchedulePage(
-            store: _store,
-            scheduleApi: _scheduleApi,
-            sessionId: ApiConfig.effectiveActorId,
-            reloadListenable: _calendarReloadSignal,
+          Expanded(
+            child: SchedulePage(
+              store: _store,
+              scheduleApi: _scheduleApi,
+              sessionId: ApiConfig.effectiveActorId,
+              reloadListenable: _calendarReloadSignal,
+            ),
           ),
-        ),
-      ],
+        ],
       ),
     );
   }
@@ -2501,6 +3287,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onPhone: _openPhoneDevicesDialog,
       onTranslate: _openTranslatePage,
       onNotes: _openNotesChat,
+      onMessages: _openMessagesPanel,
+      rightPanelVisible: _rightPanel != null,
       child: _buildChatPage(context),
     );
   }
@@ -2513,12 +3301,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       inputFocusNode: _inputFocusNode,
       onSend: _sendMessage,
       agentName: _agentName,
+      agentAvatarUrl: _agentProfile.avatarUrl,
+      agentMoodStyle: _agentProfile.moodStyle,
+      agentAvatarPreset: _agentProfile.avatarPreset,
+      agentProfile: _agentProfile,
       galleryPendingCount: _pendingGalleryFrames.length,
       onPickGalleryImage: _pickGalleryImage,
       onClearGalleryImages: _clearPendingGalleryFrames,
       isAgentProcessing: _isAgentProcessing,
       agentStatusLine: _agentStatusLine,
       interimAckText: _interimAckText,
+      // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
+      turnState: _turnState ?? _pendingLocalTurn,
       onOpenGomoku: _openGomokuGame,
       fullComputerAccessEnabled: _fullComputerAccessEnabled,
       isActive: _tabIndex == 0,
@@ -2552,10 +3346,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       },
       onDeleteMessage: _deleteSingleMessage,
       onDeleteFromMessage: _deleteMessagesFrom,
+      onStopAgent: _cancelCurrentTurn,
     );
   }
 
-  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）)
+  /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）
+  ///
+  /// 注：好友 / 游戏已不再作为整页 tab 出现，而是从右侧滑出折叠面板。
+  /// 为了不破坏 _tabIndex 的取值约定,这里保留 1(好友占位) 和 4(游戏占位),
+  /// 但渲染为空 SizedBox —— _openAgentLinkTab / _openGameCenterTab
+  /// 会把 _tabIndex 重置为 0 并设置 _rightPanel,实际不会停留在这两个 tab。
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -2563,11 +3363,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           index: _tabIndex,
           children: <Widget>[
             _buildChatPage(context),
-            MailboxPage(api: _worldApi, ws: _ws),
-            // 钱包已改为弹窗形式 (WalletDialog)，此处保留占位
+            const SizedBox.shrink(), // 1: 好友 → 右侧面板
+            // 2: 钱包由 dialog 弹出,栈里不占位
             const SizedBox.shrink(),
             SkillStorePage(api: _worldApi),
-            _buildGameCenterPage(),
+            const SizedBox.shrink(), // 4: 游戏 → 右侧面板
           ],
         );
       },
@@ -2606,7 +3406,7 @@ class _AppSidebarState extends State<_AppSidebar> {
       iconOutlined: Icons.store_outlined,
       iconFilled: Icons.store,
       label: '技能商城',
-      tabIndex: 3,
+      tabIndex: 2,
     ),
   ];
 

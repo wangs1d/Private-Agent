@@ -33,6 +33,9 @@ import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coo
 import type { PhoneBridgeCoordinator } from "../../services/phone-bridge-coordinator.js";
 import type { WechatClawBindingService } from "../../services/wechat-claw-binding-service.js";
 import type { WechatClawBridgeService } from "../../services/wechat-claw-bridge-service.js";
+import type { MessageHubService } from "../../services/message-hub-service.js";
+import type { MessagePlatformGateway } from "../../services/message-platform-gateway.js";
+import type { MessageBridgeService } from "../../services/message-bridge-service.js";
 import type { BrowserSessionService } from "../../services/browser-session-service.js";
 import type { AgentCore } from "../../services/agent-core.js";
 import type { CompanionService } from "../../services/companion-service.js";
@@ -78,6 +81,9 @@ export type HttpRouteDeps = {
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   wechatClawBindingService: WechatClawBindingService;
   wechatClawBridgeService: WechatClawBridgeService;
+  messageHubService: MessageHubService;
+  messagePlatformGateway: MessagePlatformGateway;
+  messageBridgeService: MessageBridgeService;
   browserSessionService: BrowserSessionService;
   friendService: FriendService;
   companionService: CompanionService;

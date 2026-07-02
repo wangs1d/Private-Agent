@@ -1,4 +1,4 @@
-﻿import "package:flutter/material.dart";
+import "package:flutter/material.dart";
 import "dart:async";
 
 class GameChatMessage {
@@ -353,7 +353,7 @@ class _GameChatWidgetState extends State<GameChatWidget> {
                     borderSide: BorderSide.none,
                   ),
                   filled: true,
-                  fillColor: cs.surfaceContainerHigh.withValues(alpha: 0.5),
+                  fillColor: cs.surface,
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 14,
                     vertical: 9,

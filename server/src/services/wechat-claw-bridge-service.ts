@@ -14,6 +14,7 @@ import { runChatTurnForActor, type ChatTurnInput } from "./chat-turn-runner.js";
 import { isWechatClawFeatureEnabled } from "./openclaw-gateway-client.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
 import { sanitizeWechatInboundText } from "./wechat-inbound-text.js";
+import type { MessageHubService } from "./message-hub-service.js";
 import type { TtsService } from "./tts-service.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
@@ -90,6 +91,7 @@ export class WechatClawBridgeService {
     private readonly deps: {
       weatherPrefsService?: WeatherPrefsService;
       ttsService?: TtsService;
+      messageHubService?: MessageHubService;
       env?: NodeJS.ProcessEnv;
     } = {},
   ) {}
@@ -166,6 +168,22 @@ export class WechatClawBridgeService {
     }
 
     const actorId = await this.resolveActorIdForTurn(body);
+    await this.deps.messageHubService?.ingestInbound({
+      actorId,
+      platform: "wechat",
+      channelId: body.weixinSenderId?.trim() || body.accountId?.trim() || "wechat-default",
+      text,
+      participantId: body.weixinSenderId?.trim() || body.accountId?.trim(),
+      participantName: body.channel?.trim() || "微信",
+      title: body.channel?.trim() ? `微信 · ${body.channel!.trim()}` : "微信",
+      senderId: body.weixinSenderId?.trim(),
+      senderName: body.channel?.trim() || "微信联系人",
+      externalMessageId: body.messageId,
+      meta: {
+        channel: body.channel,
+        accountId: body.accountId,
+      },
+    });
 
     if (/^\/new\b/i.test(text) || /^\/reset\b/i.test(text)) {
       await this.resetChatSession(actorId);

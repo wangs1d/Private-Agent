@@ -1,3 +1,6 @@
+import "dart:async" show unawaited;
+
+import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
 
 import "../../core/models/schedule_models.dart";
@@ -29,10 +32,16 @@ class JarvisChatLayout extends StatefulWidget {
     this.onPhone,
     this.onTranslate,
     this.onNotes,
+    this.onMessages,
+    this.rightPanelVisible = false,
   });
 
   /// 中间的聊天页（通常为 ChatPage）。
   final Widget child;
+
+  /// 右侧抽屉是否打开。
+  /// 打开时,聊天区会被挤压到屏幕的左半屏(50% 宽),与右半屏抽屉正好各占一半。
+  final bool rightPanelVisible;
 
   /// 今日日程数据 Future；为 null 时显示空状态。
   final Future<List<ScheduleEvent>>? scheduleFuture;
@@ -58,18 +67,16 @@ class JarvisChatLayout extends StatefulWidget {
   /// 点击常用工具「笔记」：打开与笔记 Agent 的独立对话页。
   final VoidCallback? onNotes;
 
+  /// 点击常用工具「消息」：打开消息聚合面板。
+  final VoidCallback? onMessages;
+
   @override
   State<JarvisChatLayout> createState() => _JarvisChatLayoutState();
 }
 
-class _JarvisChatLayoutState extends State<JarvisChatLayout>
-    with TickerProviderStateMixin {
-  late final AnimationController _petFloatController;
-  late final AnimationController _shadowPulseController;
-
+class _JarvisChatLayoutState extends State<JarvisChatLayout> {
   bool _toolsExpanded = false;
   bool _showFloatingSchedule = false;
-  bool _petAwake = false;
   Offset _floatingSchedulePosition = const Offset(120, 120);
 
   /// 是否使用桌面独立悬浮窗模式（vs 应用内嵌）
@@ -81,20 +88,24 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
   @override
   void initState() {
     super.initState();
-    _petFloatController = AnimationController(
-      duration: const Duration(seconds: 4),
-      vsync: this,
-    )..repeat(reverse: true);
-
-    _shadowPulseController = AnimationController(
-      duration: const Duration(seconds: 3),
-      vsync: this,
-    )..repeat(reverse: true);
-
     DeskPetSession.instance.addListener(_onDeskPetChanged);
 
     // 加载用户日程显示偏好，如果是桌面悬浮模式则自动启动
     _loadSchedulePreference();
+    // 当原生窗口点 ✕ 时，切回应用内嵌模式
+    ScheduleFloatingLauncher.bindHandlers(
+      onCloseClicked: () {
+        if (mounted) {
+          setState(() {
+            _useDesktopFloating = false;
+            _scheduleWindowActive = false;
+          });
+          ScheduleFloatingLauncher.activeNotifier
+              .removeListener(_onScheduleWindowChanged);
+          SchedulePreference.setDisplayMode(ScheduleDisplayMode.embedded);
+        }
+      },
+    );
   }
 
   /// 加载保存的日程显示偏好
@@ -104,10 +115,6 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
       setState(() {
         _useDesktopFloating = mode == ScheduleDisplayMode.desktopFloating;
       });
-      // 如果用户之前选择了桌面悬浮窗模式，自动启动
-      if (_useDesktopFloating) {
-        _launchDesktopScheduleWindow();
-      }
     }
   }
 
@@ -115,8 +122,6 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
   void dispose() {
     DeskPetSession.instance.removeListener(_onDeskPetChanged);
     ScheduleFloatingLauncher.activeNotifier.removeListener(_onScheduleWindowChanged);
-    _petFloatController.dispose();
-    _shadowPulseController.dispose();
     super.dispose();
   }
 
@@ -132,6 +137,33 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
     }
     // 监听窗口状态变化
     ScheduleFloatingLauncher.activeNotifier.addListener(_onScheduleWindowChanged);
+    // 启动成功后推送日程数据到原生窗口
+    if (launched) {
+      _pushScheduleToNativeWindow();
+    }
+  }
+
+  /// 把 scheduleFuture 解析后推送给原生悬浮窗
+  void _pushScheduleToNativeWindow() {
+    final Future<List<ScheduleEvent>>? future = widget.scheduleFuture;
+    if (future == null) {
+      ScheduleFloatingLauncher.setSchedule(<ScheduleFloatingItem>[]);
+      return;
+    }
+    future.then((List<ScheduleEvent> events) {
+      final List<ScheduleEvent> sorted =
+          List<ScheduleEvent>.from(events)
+            ..sort((a, b) => a.startAt.compareTo(b.startAt));
+      final List<ScheduleFloatingItem> items = sorted
+          .map((e) => ScheduleFloatingItem(
+                id: e.id,
+                timeText:
+                    "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
+                title: e.title,
+              ))
+          .toList();
+      ScheduleFloatingLauncher.setSchedule(items);
+    });
   }
 
   /// 监听悬浮窗状态变化
@@ -164,6 +196,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
         });
         ScheduleFloatingLauncher.activeNotifier
             .addListener(_onScheduleWindowChanged);
+        _pushScheduleToNativeWindow();
       } else {
         // 启动失败：不切换模式，保持在应用内嵌模式
         setState(() => _scheduleWindowActive = false);
@@ -189,9 +222,41 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
     return (isDark ? Colors.white : Colors.black).withValues(alpha: alpha);
   }
 
+  /// 埋点：记录桌宠召唤 / 休眠事件。
+  /// 与 `chat_page.dart` 的 `_logScrollEvent` 风格一致，输出 `[DeskPet] action=...` 结构化日志。
+  void _logDeskPetEvent(String action) {
+    debugPrint(
+      '[DeskPet] action=$action | platform=$_currentPlatformTag | timestamp=${DateTime.now().toIso8601String()}',
+    );
+  }
+
+  String get _currentPlatformTag =>
+      kIsWeb ? 'web' : defaultTargetPlatform.toString().split('.').last.toLowerCase();
+
+  Future<void> _onSummonPet() async {
+    _logDeskPetEvent('summon_clicked');
+    final bool ok = await DeskPetSession.instance.summon();
+    if (!mounted) return;
+    _logDeskPetEvent(ok ? 'summon_succeeded' : 'summon_failed');
+  }
+
+  Future<void> _onDismissPet() async {
+    _logDeskPetEvent('dismiss_clicked');
+    await DeskPetSession.instance.dismiss();
+    _logDeskPetEvent('dismiss_succeeded');
+  }
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    // 抽屉打开时,聊天区与右半屏区域各占屏幕一半
+    // (原本是 Row[聊天区(Expanded)|快捷功能(288px)],抽屉开时改成 50% / 50%)
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    final double halfWidth = widget.rightPanelVisible
+        ? screenWidth * 0.5
+        : screenWidth; // 不限制:用 Expanded 自动算
+    final bool useHalf = widget.rightPanelVisible;
+
     return ColoredBox(
       color: cs.surface,
       child: Stack(
@@ -204,18 +269,24 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    Expanded(child: widget.child),
-                    Container(
-                      width: 288,
-                      decoration: BoxDecoration(
-                        color: cs.surfaceContainerLow,
-                        border: Border(
-                          left: BorderSide(
-                              color: cs.outline.withValues(alpha: 0.35)),
+                    if (useHalf)
+                      SizedBox(width: halfWidth, child: widget.child)
+                    else
+                      Expanded(child: widget.child),
+                    if (useHalf)
+                      SizedBox(width: halfWidth)
+                    else
+                      Container(
+                        width: 288,
+                        decoration: BoxDecoration(
+                          color: cs.surfaceContainerLow,
+                          border: Border(
+                            left: BorderSide(
+                                color: cs.outline.withValues(alpha: 0.35)),
+                          ),
                         ),
+                        child: _buildRightPanel(),
                       ),
-                      child: _buildRightPanel(),
-                    ),
                   ],
                 ),
               ),
@@ -231,29 +302,12 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
   // ========== 右侧快捷功能面板 ==========
 
   Widget _buildRightPanel() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
-            ),
-          ),
-          child: Text(
-            "快捷功能",
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: cs.onSurface,
-            ),
-          ),
-        ),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
             children: <Widget>[
               _buildScheduleCard(),
               const SizedBox(height: 16),
@@ -476,7 +530,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
     ];
     final List<_ToolSpec> secondRow = <_ToolSpec>[
       _ToolSpec(icon: Icons.sports_esports_outlined, label: "游戏", onTap: widget.onGames),
-      _ToolSpec(icon: Icons.home_outlined, label: "家居"),
+      _ToolSpec(icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
       _ToolSpec(icon: Icons.note_alt_outlined, label: "笔记", onTap: widget.onNotes),
       _ToolSpec(icon: Icons.calendar_today_outlined, label: "日程", onTap: widget.onSchedule),
     ];
@@ -567,98 +621,30 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
   }
 
   Widget _buildPetArea() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return AnimatedBuilder(
-      animation: Listenable.merge(<Listenable>[
-        _petFloatController,
-        _shadowPulseController,
-      ]),
-      builder: (BuildContext context, Widget? child) {
-        final bool summoned = DeskPetSession.instance.isSummoned;
-        final double floatOffset = summoned ? -10 : -6;
-        final double shadowOpacity = summoned
-            ? 0.5 + 0.5 * _shadowPulseController.value
-            : 0.3 + 0.3 * _shadowPulseController.value;
-        final double shadowScale = summoned
-            ? 1 + 0.2 * _shadowPulseController.value
-            : 0.9 + 0.2 * _shadowPulseController.value;
-
-        return Container(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Transform.translate(
-                offset: Offset(0, floatOffset),
-                child: Container(
-                  width: 56,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const RadialGradient(
-                      center: Alignment(-0.3, -0.3),
-                      colors: <Color>[
-                        _kAccentBlue,
-                        Color(0xCC007AFF),
-                        Color(0xE60056D2),
-                      ],
-                    ),
-                    boxShadow: <BoxShadow>[
-                      BoxShadow(
-                        color: _kAccentBlue.withValues(
-                            alpha: summoned ? 0.35 : 0.25),
-                        blurRadius: 20,
-                        offset: Offset.zero,
-                      ),
-                    ],
-                    border: Border.all(
-                      color: cs.onSurface.withValues(alpha: 0.2),
-                      width: 1,
-                    ),
-                  ),
-                  alignment: Alignment.center,
-                  child: Icon(
-                    Icons.smart_toy_outlined,
-                    size: 26,
-                    color: cs.onInverseSurface,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 4),
-              Transform.scale(
-                scale: shadowScale,
-                child: Container(
-                  width: 50,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(999),
-                    gradient: RadialGradient(
-                      colors: <Color>[
-                        _kAccentBlue.withValues(alpha: shadowOpacity),
-                        _kAccentBlue.withValues(alpha: shadowOpacity * 0.3),
-                        Colors.transparent,
-                      ],
-                      stops: const <double>[0.0, 0.4, 0.7],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              _buildPetToggleButton(),
-            ],
-          ),
-        );
-      },
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      child: Center(child: _buildPetToggleButton()),
     );
   }
 
   Widget _buildPetToggleButton() {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool summoned = DeskPetSession.instance.isSummoned;
+    final bool supported = DeskPetSession.isSupported;
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(999),
-        onTap: () => setState(() => _petAwake = !_petAwake),
+        onTap: supported
+            ? () {
+                if (summoned) {
+                  unawaited(_onDismissPet());
+                } else {
+                  unawaited(_onSummonPet());
+                }
+              }
+            : null,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
           decoration: BoxDecoration(
@@ -667,7 +653,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout>
             border: Border.all(color: _ink(context, 0.1)),
           ),
           child: Text(
-            _petAwake ? "休眠" : "唤醒",
+            summoned ? "休眠" : "唤醒",
             style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
           ),
         ),
