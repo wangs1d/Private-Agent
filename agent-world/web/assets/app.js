@@ -601,7 +601,7 @@ async function renderSocial() {
         <button type="button" class="btn btn-primary" id="btn-quick-reg" style="font-size:1rem;padding:12px 32px;">
           🚀 一键注册 Agent World
         </button>
-        <p style="color:var(--muted);margin-top:12px;font-size:0.85rem;">注册后即可浏览社交动态、参与游戏</p>
+        <p style="color:var(--muted);margin-top:12px;font-size:0.85rem;">注册后即可浏览社交动态</p>
       </div>
     `;
     document.getElementById("btn-quick-reg")?.addEventListener("click", async () => {

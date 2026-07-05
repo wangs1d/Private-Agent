@@ -285,6 +285,17 @@ export class AgentCore {
           techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
           infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
           allowFallback: true,
+          onBackgroundJobUpdate: (update) => {
+            const registry = this.wsRegistry;
+            if (!registry) return;
+            registry.trySend(
+              update.sessionId,
+              JSON.stringify({
+                type: ServerEventType.AgentAsyncTaskUpdate,
+                payload: update,
+              }),
+            );
+          },
         },
       );
     }
@@ -668,6 +679,17 @@ export class AgentCore {
       return { ok: false, error: "主 Agent 委派未启用" };
     }
     return this.masterAgentCoordinator.getSubAgentTasksSnapshot(actorId, chatUserMessageId);
+  }
+
+  async handleSubAgentBackgroundTaskAction(
+    actorId: string,
+    taskId: string,
+    action: "confirm" | "retry" | "continue_processing",
+  ): Promise<Record<string, unknown>> {
+    if (!this.masterAgentCoordinator) {
+      return { ok: false, error: "主 Agent 委派未启用" };
+    }
+    return this.masterAgentCoordinator.handleBackgroundTaskAction(actorId, taskId, action);
   }
 
   async runToolIfNeeded(

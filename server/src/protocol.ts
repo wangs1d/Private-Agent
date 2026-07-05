@@ -35,6 +35,29 @@ export const ClientEventType = {
   AgentEmbodimentState: "agent.embodiment.state",
   /** 用户对主动联系的反馈，写回用户理解与联系偏好 */
   CompanionContactFeedback: "companion.contact_feedback",
+
+  // ============================================================
+  // 终端互连平台 device.* 事件族（Phase 2+）
+  // 与现有 phone.bridge.* / desktop.bridge.* 并存：
+  //   - 旧事件按 userId 单连接语义（每用户一个桥接器）
+  //   - device.* 按 deviceId 多连接语义（每用户可挂 N 台设备）
+  // 适配器迁移完成后旧事件可逐步废弃。
+  // ============================================================
+
+  /** 设备上线注册：携带 deviceId / kind / capabilities / ownerUserId */
+  DeviceRegister: "device.register",
+  /** 设备主动下线 */
+  DeviceUnregister: "device.unregister",
+  /** 设备心跳：刷新 lastSeenAt（复用 ws.keepalive 亦可，本事件携带 deviceId 维度） */
+  DeviceHeartbeat: "device.heartbeat",
+  /** 设备回传 invoke 结果（与 device.invoke 的 jobId 对应） */
+  DeviceInvokeResult: "device.invoke_result",
+  /** 设备回传流数据块（与 device.stream_open 的 streamId 对应） */
+  DeviceStreamData: "device.stream_data",
+  /** 设备主动上报事件：电量变化 / 按键 / 移动侦测等 */
+  DeviceEvent: "device.event",
+  /** 设备能力变更：如摄像头切换分辨率、新增传感器 */
+  DeviceCapabilitiesUpdate: "device.capabilities_update",
   /** 心跳检测 */
   Ping: "ping",
 } as const;
@@ -67,6 +90,8 @@ export const ServerEventType = {
    * 模型内部 thought 都按 kind 结构化下发，UI 按 kind 决定卡片样式。
    */
   ChatExecutionEvent: "chat.execution_event",
+  /** 后台异步任务状态更新：开始/完成/失败，供异步中心与原对话主动回报 */
+  AgentAsyncTaskUpdate: "agent.async_task_update",
   /** 模型生成的口语化进度/状态行（如委派子 Agent），供客户端替代「思考中」 */
   ChatAgentStatus: "chat.agent_status",
   /** 日程/提醒任务已创建或更新，客户端应刷新日程视图 */
@@ -121,6 +146,41 @@ export const ServerEventType = {
   MoodInferred: "mood.inferred",
   /** 心跳响应 */
   Pong: "pong",
+  /**
+   * Agent 语音播报（即时模式）—— `voice.speak` 工具触发的轻量播报。
+   * 与 `agent.phone.*` 不同：无来电 UI、无振铃、无前摇，客户端后台播放即可。
+   * payload.tts.format === null 时表示 TTS 未启用，客户端可用本地 TTS 兜底。
+   */
+  AgentVoiceSpeak: "agent.voice.speak",
+  /**
+   * Agent 语音提醒（闹钟模式）—— 带标题/优先级的语音播报。
+   * 适用于提醒、定时播报、重要通知场景，客户端可显示卡片 + 播放音频。
+   * 比 phone.call_user 轻：无来电界面，但有视觉提示。
+   */
+  AgentVoiceAlarm: "agent.voice.alarm",
+
+  // ============================================================
+  // 终端互连平台 device.* 服务端事件
+  // ============================================================
+
+  /** 设备注册确认（发往注册方设备） */
+  DeviceRegisterAck: "device.register_ack",
+  /** 设备上线广播（发往 owner 的其他客户端，让其刷新设备列表） */
+  DeviceOnline: "device.online",
+  /** 设备下线广播 */
+  DeviceOffline: "device.offline",
+  /** 下发给设备的 RPC 调用请求 */
+  DeviceInvoke: "device.invoke",
+  /** 下发给设备的开流请求 */
+  DeviceStreamOpen: "device.stream_open",
+  /** 下发给设备的关流指令 */
+  DeviceStreamClose: "device.stream_close",
+  /** 设备列表 / 能力 / 状态变更通知（发往 owner 客户端） */
+  DeviceListChanged: "device.list_changed",
+  /** 设备主动上报事件转发（发往订阅了该设备事件的客户端 / Agent） */
+  DeviceEventRelay: "device.event_relay",
+  /** device.list 查询应答（同步拉取当前设备清单） */
+  DeviceListResult: "device.list_result",
 } as const;
 
 // ============================================================
@@ -236,4 +296,3 @@ export type ChatExecutionEventPayload = {
   /** 兜底：v1 过渡期自由文本 */
   log?: string;
 };
-

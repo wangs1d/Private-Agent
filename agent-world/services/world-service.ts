@@ -6,7 +6,7 @@ import type { SkillManagerLike } from "../host-types.js";
 import type { SkillManifestLike } from "../host-types.js";
 
 import { allowAgentWorldPlaceholderRegister } from "../config/world-register-placeholder.js";
-import { isGameCenterParticipant, GAME_CENTER_MIN_CREDITS } from "./game-center-session.js";
+
 import type { VerifyChallengeResult, WorldRegisterChallenge } from "./world-agent-registration.js";
 import { WorldAgentRegistrationService } from "./world-agent-registration.js";
 
@@ -106,11 +106,6 @@ export const INITIAL_WORLD_COINS = INITIAL_AGENT_WORLD_CREDITS;
  * 世界点数入账白名单：后续新增发币场景时，必须先在此显式登记。
  */
 export const AGENT_WORLD_CREDIT_REASONS = {
-  DoudizhuGamePayout: "doudizhu.game_payout",
-  DoudizhuStakeRefund: "doudizhu.stake_refund",
-  ZhajinhuaGamePayout: "zhajinhua.game_payout",
-  ZhajinhuaStakeRefund: "zhajinhua.stake_refund",
-  GameCenterGrant: "game_center.grant",
   A2aContractPayout: "a2a.contract_payout",
   A2aContractRefund: "a2a.contract_refund",
   A2aPersistRollbackRefund: "a2a.persist_rollback_refund",
@@ -376,7 +371,7 @@ export class WorldService {
     return roomId;
   }
 
-  /** 延迟落盘（合并斗地主等高频扣款）。 */
+  /** 延迟落盘。 */
   schedulePersist(): void {
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = setTimeout(() => {
@@ -631,70 +626,7 @@ export class WorldService {
     return s;
   }
 
-  /** 进入五子棋馆场景（游戏大厅）。 */
-  visitGomoku(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
-    const s =
-      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
-    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
-    const actor = actorSessionId ?? s.ownerSessionId;
-    this.assertAgentWorldRegistered(actor);
-    this.assertRoomWritable(actor, s.roomId);
-    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
-    s.sceneId = "gomoku";
-    this.markWorldMutated(s.roomId);
-    return s;
-  }
 
-  /** 五子棋馆场景（用户与 Agent 对战，无需 Agent World 注册）。 */
-  enterGomokuLobby(sessionId: string): void {
-    const s = this.getOrCreate(sessionId);
-    s.sceneId = "gomoku";
-  }
-
-  /** 游戏场景（扑克等），不要求 Agent World 注册。 */
-  enterGameCenterScene(sessionId: string, sceneId: string): void {
-    const s = this.getOrCreate(sessionId);
-    s.sceneId = sceneId;
-  }
-
-  visitDoudizhu(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
-    const s =
-      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
-    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
-    const actor = actorSessionId ?? s.ownerSessionId;
-    if (!isGameCenterParticipant(actor)) {
-      this.assertAgentWorldRegistered(actor);
-    }
-    this.assertRoomWritable(actor, s.roomId);
-    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
-    s.sceneId = "doudizhu";
-    this.markWorldMutated(s.roomId);
-    return s;
-  }
-
-  visitZhaJinHua(roomId: string, actorSessionId?: string, opts?: WorldMutationOptions): WorldState {
-    const s =
-      roomId.startsWith("wr-") ? this.getExisting(roomId) : this.getOrCreateRoom(roomId, actorSessionId ?? roomId);
-    if (!s) throw new Error(`ROOM_NOT_FOUND: ${roomId}`);
-    const actor = actorSessionId ?? s.ownerSessionId;
-    if (!isGameCenterParticipant(actor)) {
-      this.assertAgentWorldRegistered(actor);
-    }
-    this.assertRoomWritable(actor, s.roomId);
-    this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
-    s.sceneId = "zhajinhua";
-    this.markWorldMutated(s.roomId);
-    return s;
-  }
-
-  /** 为游戏参与者预充虚拟筹码（与 Agent World 经济隔离使用）。 */
-  ensureGameCenterCredits(sessionId: string, minBalance = GAME_CENTER_MIN_CREDITS): void {
-    const s = this.getOrCreate(sessionId);
-    if (s.agentWorldCredits < minBalance) {
-      s.agentWorldCredits = minBalance;
-      this.markWorldMutated(s.roomId);
-    }
-  }
 
   /**
    * 扣减世界点数（Agent World 内虚拟币）。余额不足时返回 false，不改变状态。
@@ -707,9 +639,7 @@ export class WorldService {
       s = this.getOrCreateRoom(roomId, roomId);
     }
     if (!s) return false;
-    if (isGameCenterParticipant(roomId)) {
-      this.ensureGameCenterCredits(roomId, amount);
-    } else if (!this.isAgentWorldRegistered(s.ownerSessionId)) {
+    if (!this.isAgentWorldRegistered(s.ownerSessionId)) {
       return false;
     }
     if (s.agentWorldCredits < amount) return false;
@@ -729,9 +659,7 @@ export class WorldService {
       throw new Error(`UNSAFE_CREDIT_REASON: ${reason}`);
     }
     const s = this.getOrCreate(roomId);
-    if (!isGameCenterParticipant(roomId)) {
-      this.assertAgentWorldRegistered(s.ownerSessionId);
-    }
+    this.assertAgentWorldRegistered(s.ownerSessionId);
     this.checkExpectedRevision(s.roomId, opts?.expectedRevision);
     const delta = Math.floor(amount);
     s.agentWorldCredits += delta;

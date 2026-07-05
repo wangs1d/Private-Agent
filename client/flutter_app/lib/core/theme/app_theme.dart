@@ -31,7 +31,7 @@ class AppThemeController extends ValueNotifier<AppThemeVariant> {
 ///
 /// 深色主题保持原 [mainPanel] / [sidebar] / [sidebarSeparator] 等命名不变；
 /// 暖色主题在前面加 [warm] 前缀，避开命名冲突。
-/// 历史使用 [AppPalette] 静态色的代码（如五子棋卡片、定位弹窗）继续工作；
+/// 历史使用 [AppPalette] 静态色的代码（如定位弹窗）继续工作；
 /// 需要跟随主题切换的地方改用 [AppPalette.of] 读取运行时色值。
 abstract final class AppPalette {
   // ═══════════════════════════════════════════════════════════
@@ -45,14 +45,6 @@ abstract final class AppPalette {
   static const Color sidebarIconDefault = Color(0xFF71717A);
   static const Color sidebarIconHover = Color(0xFFD4D4D8);
   static const Color sidebarIconSelected = Color(0xFFA3A3A3);
-
-  /// 五子棋邀请卡片：固定灰色，勿用 theme primary（种子色为灰）
-  static const Color gomokuCardBg = Color(0xFF1C1C1C);
-  static const Color gomokuCardBorder = Color(0xFF333333);
-  static const Color gomokuCardTitle = Color(0xFFE8E8E8);
-  static const Color gomokuCardBody = Color(0xFFBEBEBE);
-  static const Color gomokuCardButtonBg = Color(0xFF2A2A2A);
-  static const Color gomokuCardButtonFg = Color(0xFFE8E8E8);
 
   /// 定位权限弹窗：灰色系，与主面板/侧栏协调
   static const Color locationDialogBg = Color(0xFF171717);
@@ -104,14 +96,7 @@ abstract final class AppPalette {
   static const Color warmTertiaryContainer = Color(0xFFF7EEF4);
   static const Color warmOnTertiaryContainer = Color(0xFF704661);
 
-  // 暖色：五子棋邀请卡片 / 定位弹窗
-  static const Color warmGomokuCardBg = Color(0xFFFFFFFF);
-  static const Color warmGomokuCardBorder = Color(0xFFDCE3EC);
-  static const Color warmGomokuCardTitle = Color(0xFF232833);
-  static const Color warmGomokuCardBody = Color(0xFF667085);
-  static const Color warmGomokuCardButtonBg = Color(0xFFF3F6FB);
-  static const Color warmGomokuCardButtonFg = Color(0xFF2A3340);
-
+  // 暖色：定位弹窗
   static const Color warmLocationDialogBg = Color(0xFFF8FAFD);
   static const Color warmLocationDialogCard = Color(0xFFFFFFFF);
   static const Color warmLocationDialogBorder = Color(0xFFDCE3EC);
@@ -205,8 +190,8 @@ abstract final class AppTheme {
     final ColorScheme cs = base.copyWith(
       primary: const Color(0xFF8A8A8A),
       onPrimary: AppPalette.appBarForeground,
-      primaryContainer: AppPalette.gomokuCardButtonBg,
-      onPrimaryContainer: AppPalette.gomokuCardBody,
+      primaryContainer: const Color(0xFF2A2A2A),
+      onPrimaryContainer: const Color(0xFFBEBEBE),
       secondary: const Color(0xFF757575),
       onSecondary: AppPalette.appBarForeground,
       secondaryContainer: const Color(0xFF1F1F1F),

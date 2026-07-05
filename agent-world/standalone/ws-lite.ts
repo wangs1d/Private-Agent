@@ -3,8 +3,6 @@ import type { FastifyInstance } from "fastify";
 import type { WsConnectionRegistry } from "../deps/services/ws-connection-registry.js";
 import { AgentWorldClientEventType, AgentWorldServerEventType } from "../protocol-world.js";
 import {
-  worldDoudizhuWsTableSchema,
-  worldGomokuWsTableSchema,
   worldPartitionAttachSchema,
   worldPartitionDetachSchema,
   worldSocialCommentPayloadSchema,
@@ -12,19 +10,15 @@ import {
   worldSocialPostDeletePayloadSchema,
   worldSocialPostPayloadSchema,
   worldSocialReportPayloadSchema,
-  worldZhajinhuaWsTableSchema,
 } from "../schemas.js";
 import {
   canViewWorldPartition,
   WorldPartitionWsRegistry,
   type PartitionPairingLike,
 } from "../services/world-partition-ws-registry.js";
-import type { DoudizhuService } from "../services/doudizhu-service.js";
-import type { GomokuService } from "../services/gomoku-service.js";
 import type { MusicRoomService } from "../services/music-room-service.js";
 import type { SocialFeedService } from "../services/social-feed-service.js";
 import type { WorldService } from "../services/world-service.js";
-import type { ZhaJinHuaService } from "../services/zhajinhua-service.js";
 
 /** 与主仓库 `server/src/protocol.ts` 对齐的最小子集，避免 standalone 依赖宿主。 */
 const ClientSessionInit = "session.init";
@@ -32,27 +26,20 @@ const ServerErrorEvent = "error.event";
 
 export type StandaloneWsDeps = {
   worldService: WorldService;
-  doudizhuService: DoudizhuService;
-  zhaJinHuaService: ZhaJinHuaService;
-  gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
   musicRoomService: MusicRoomService;
   wsConnectionRegistry: WsConnectionRegistry;
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
-  /** standalone 无配对持久化时可传 `{ arePaired: () => false }`，仅允许订阅本人分区。 */
   partitionPairing: PartitionPairingLike;
 };
 
 /**
- * 仅处理：`session.init`（绑定会话 + WS 注册表）与斗地主/炸金花/互动动态的观战订阅事件。
+ * 仅处理：`session.init`（绑定会话 + WS 注册表）与互动动态的观战订阅事件。
  * 不含聊天、钱包、Agent 核心。
  */
 export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: StandaloneWsDeps): void {
   const {
     worldService,
-    doudizhuService,
-    zhaJinHuaService,
-    gomokuService,
     socialFeedService,
     musicRoomService,
     wsConnectionRegistry,
@@ -235,158 +222,6 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
         }
         worldPartitionWsRegistry.detachSocket(socket);
         broadcastPartitionPresence(targetPid);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribe) {
-        if (!ensureWorldRegistered()) return;
-        const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
-        if (!parsed.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
-            }),
-          );
-          return;
-        }
-        const r = doudizhuService.watchTable(parsed.data.tableId, boundSessionId);
-        if (!r.ok) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "DOUZHU_SUBSCRIBE_FAILED", message: r.reason },
-            }),
-          );
-        }
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldDoudizhuSubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
-        doudizhuService.watchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
-        doudizhuService.unwatchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldDoudizhuUnsubscribe) {
-        if (!ensureWorldRegistered()) return;
-        const parsed = worldDoudizhuWsTableSchema.safeParse(event.payload);
-        if (!parsed.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_DOUZHU_EVENT", message: parsed.error.message },
-            }),
-          );
-          return;
-        }
-        doudizhuService.unwatchTable(parsed.data.tableId, boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribe) {
-        if (!ensureWorldRegistered()) return;
-        const zjh = worldZhajinhuaWsTableSchema.safeParse(event.payload);
-        if (!zjh.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjh.error.message },
-            }),
-          );
-          return;
-        }
-        const r = zhaJinHuaService.watchTable(zjh.data.tableId, boundSessionId);
-        if (!r.ok) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "ZHAJINHUA_SUBSCRIBE_FAILED", message: r.reason },
-            }),
-          );
-        }
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldZhajinhuaSubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
-        zhaJinHuaService.watchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribeLobby) {
-        if (!ensureWorldRegistered()) return;
-        zhaJinHuaService.unwatchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldZhajinhuaUnsubscribe) {
-        if (!ensureWorldRegistered()) return;
-        const zjhU = worldZhajinhuaWsTableSchema.safeParse(event.payload);
-        if (!zjhU.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_ZHAJINHUA_EVENT", message: zjhU.error.message },
-            }),
-          );
-          return;
-        }
-        zhaJinHuaService.unwatchTable(zjhU.data.tableId, boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldGomokuSubscribe) {
-        const parsed = worldGomokuWsTableSchema.safeParse(event.payload);
-        if (!parsed.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_GOMOKU_EVENT", message: parsed.error.message },
-            }),
-          );
-          return;
-        }
-        const r = gomokuService.watchTable(parsed.data.tableId, boundSessionId);
-        if (!r.ok) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "GOMOKU_SUBSCRIBE_FAILED", message: r.reason },
-            }),
-          );
-        }
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldGomokuSubscribeLobby) {
-        gomokuService.watchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribeLobby) {
-        gomokuService.unwatchLobby(boundSessionId);
-        return;
-      }
-
-      if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribe) {
-        const parsed = worldGomokuWsTableSchema.safeParse(event.payload);
-        if (!parsed.success) {
-          socket.send(
-            JSON.stringify({
-              type: ServerErrorEvent,
-              payload: { code: "INVALID_GOMOKU_EVENT", message: parsed.error.message },
-            }),
-          );
-          return;
-        }
-        gomokuService.unwatchTable(parsed.data.tableId, boundSessionId);
         return;
       }
 
@@ -684,7 +519,7 @@ export function registerStandaloneWorldWebSocket(app: FastifyInstance, deps: Sta
           payload: {
             code: "UNSUPPORTED_IN_STANDALONE",
             message:
-              "本进程仅支持 session.init、world.partition.*、world.doudizhu.*、world.zhajinhua.*、world.social.*、world.music.*；聊天/钱包等请使用完整宿主。",
+              "本进程仅支持 session.init、world.partition.*、world.social.*、world.music.*；聊天/钱包等请使用完整宿主。",
           },
         }),
       );

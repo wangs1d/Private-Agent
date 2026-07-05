@@ -65,17 +65,6 @@ export const CORE_TOOL_LIBRARY = {
     label: "具身身体",
     prefixes: ["embodiment."],
   },
-  games: {
-    label: "游戏大厅",
-    prefixes: [
-      "gomoku.",
-      "world.gomoku.",
-      "world.doudizhu.",
-      "world.zhajinhua.",
-      "world.blackjack.",
-      "world.game_center.",
-    ],
-  },
   desktop: {
     label: "桌面截图与键鼠",
     prefixes: ["desktop.visual."],
@@ -98,7 +87,6 @@ const CORE_EXACT_NAMES = new Set<string>([
 const CORE_PREFIXES: readonly string[] = [
   ...CORE_TOOL_LIBRARY.dialogue.prefixes,
   ...CORE_TOOL_LIBRARY.embodiment.prefixes,
-  ...CORE_TOOL_LIBRARY.games.prefixes,
   ...CORE_TOOL_LIBRARY.desktop.prefixes,
   ...CORE_TOOL_LIBRARY.browser.prefixes,
   "master.",
@@ -147,8 +135,6 @@ export function summarizeCoreToolLibrary(): {
     tierLabels: [
       CORE_TOOL_LIBRARY.essential.label,
       CORE_TOOL_LIBRARY.dialogue.label,
-      CORE_TOOL_LIBRARY.embodiment.label,
-      CORE_TOOL_LIBRARY.games.label,
       CORE_TOOL_LIBRARY.desktop.label,
     ],
   };

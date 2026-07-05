@@ -29,6 +29,7 @@ import type { WeatherPrefsService } from "../services/weather-prefs-service.js";
 import type { WeatherService } from "../services/weather-service.js";
 import type { TtsService } from "../services/tts-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
 import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
@@ -46,6 +47,8 @@ import type { JarvisHarness } from "../services/jarvis/index.js";
 import type { MessageHubService } from "../services/message-hub-service.js";
 import type { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import type { MessageBridgeService } from "../services/message-bridge-service.js";
+import type { DeviceRegistry } from "../device-bus/device-registry.js";
+import type { DevicePairingService } from "../services/device-pairing-service.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -74,6 +77,8 @@ export type AppServices = {
   weatherService: WeatherService;
   weatherPrefsService: WeatherPrefsService;
   ttsService: TtsService;
+  /** Agent 底层语音能力中枢（TTS + ASR + WS 推送，Agent 自调度入口） */
+  voiceCapabilityService: VoiceCapabilityService;
   virtualPhoneService: VirtualPhoneService;
   friendService: FriendService;
   messageHubService: MessageHubService;
@@ -95,6 +100,10 @@ export type AppServices = {
   moodInferenceService: MoodInferenceService;
   /** J.A.R.V.I.S. 统一主动消息中枢 */
   jarvisHarness: JarvisHarness;
+  /** 终端互连平台 —— 设备注册表（多设备并存，按 deviceId 路由） */
+  deviceRegistry: DeviceRegistry;
+  /** 终端互连平台 —— 设备配对服务（生成配对码 + 持久化 owner↔device 绑定） */
+  devicePairingService: DevicePairingService;
 };
 
 export type SkillMetadataValidator = {

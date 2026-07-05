@@ -21,8 +21,6 @@ import type { SkillMetadata } from "../deps/skills/types.js";
 import { ToolRegistry } from "../deps/tools/tool-registry.js";
 import {
   A2aOutsourcingService,
-  DoudizhuService,
-  GomokuService,
   loadPersistedCommunitySkills,
   MusicRoomService,
   reconcileWorldA2aEscrows,
@@ -40,7 +38,6 @@ import {
   WorldPartitionWsRegistry,
   WorldService,
   type WorldRevisionEvent,
-  ZhaJinHuaService,
 } from "../index.js";
 import { registerStandaloneWebUi } from "./web-ui.js";
 import { registerStandaloneWorldWebSocket } from "./ws-lite.js";
@@ -87,12 +84,6 @@ worldService.onWorldRevision((ev: WorldRevisionEvent) => {
   );
 });
 const a2aOutsourcingService = new A2aOutsourcingService(worldService);
-const doudizhuService = new DoudizhuService(worldService);
-doudizhuService.attachWebSocketRegistry(wsConnectionRegistry);
-const zhaJinHuaService = new ZhaJinHuaService(worldService);
-zhaJinHuaService.attachWebSocketRegistry(wsConnectionRegistry);
-const gomokuService = new GomokuService(worldService);
-gomokuService.attachWebSocketRegistry(wsConnectionRegistry);
 const socialFeedService = new SocialFeedService(worldService);
 socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
 const musicRoomService = new MusicRoomService(worldService);
@@ -105,9 +96,6 @@ registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, 
 const routeDeps = {
   worldService,
   a2aOutsourcingService,
-  doudizhuService,
-  zhaJinHuaService,
-  gomokuService,
   socialFeedService,
   skillManager,
   skillMetadataValidator,
@@ -119,9 +107,6 @@ registerWorldSocialRoutes(app, routeDeps);
 registerWorldMusicRoutes(app, musicRoomService);
 registerStandaloneWorldWebSocket(app, {
   worldService,
-  doudizhuService,
-  zhaJinHuaService,
-  gomokuService,
   socialFeedService,
   musicRoomService,
   wsConnectionRegistry,
@@ -161,7 +146,7 @@ await reconcileWorldA2aEscrows(worldService, a2aOutsourcingService, auditService
 await worldService.flushPersist();
 await socialFeedService.flushPersist();
 
-// standalone 对外链接（观战页、牌桌 URL）与监听端口一致
+// standalone 对外链接与监听端口一致
 if (!process.env.AGENT_WORLD_PUBLIC_URL?.trim()) {
   process.env.AGENT_WORLD_PUBLIC_URL = `http://127.0.0.1:${listenPort}`;
 }

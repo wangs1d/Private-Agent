@@ -14,13 +14,11 @@ import { registerGeoRoutes } from "./geo.js";
 import { registerPhoneRoutes } from "./phone.js";
 import { registerCompanionRoutes } from "./companion.js";
 import {
-  registerGameCenterRoutes,
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
   registerWorldSocialRoutes,
   registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
-import { registerGomokuPlayWeb } from "./gomoku-play-web.js";
 import { registerChatWeb } from "./chat-web.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
@@ -40,6 +38,7 @@ import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerTranslateRoutes } from "./translate.js";
 import { registerNotesRoutes } from "./notes.js";
+import { registerDeviceRoutes } from "./device.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -49,6 +48,8 @@ export type { HttpRouteDeps } from "./types.js";
  * 按子域注册 HTTP 路由：系统、聊天（主域）、钱包、世界、Agent 协作、账号。
  */
 export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
+  const worldRouteDeps = deps as unknown as Parameters<typeof registerWorldRoutes>[1];
+
   registerSystemRoutes(app, deps);
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);
@@ -59,11 +60,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
-  registerWorldRoutes(app, deps);
-  registerWorldFreeMarketRoutes(app, deps);
-  registerGameCenterRoutes(app, { gameCenter: deps.gameCenterCoordinator });
-  registerWorldSocialRoutes(app, deps);
-  registerGomokuPlayWeb(app);
+  registerWorldRoutes(app, worldRouteDeps);
+  registerWorldFreeMarketRoutes(app, worldRouteDeps);
+  registerWorldSocialRoutes(app, worldRouteDeps);
   registerChatWeb(app);
   registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
@@ -78,7 +77,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   });
   registerBrowserSessionRoutes(app, deps);
   registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
-  registerMultiAgentMonitorRoutes(app, { agentCore: deps.agentCore });
+  registerMultiAgentMonitorRoutes(app, {
+    agentCore: deps.agentCore,
+    scheduleTaskService: deps.scheduleTaskService,
+  });
   registerNightlyMemoryRoutes(app);
   registerDownloadRoutes(app);
   registerToolSearchAdminRoutes(app);
@@ -108,5 +110,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerUserPreferencesRoutes(app);
   if (deps.jarvisHarness) {
     registerJarvisRoutes(app, { jarvisHarness: deps.jarvisHarness });
+  }
+  if (deps.devicePairingService && deps.deviceRegistry) {
+    registerDeviceRoutes(app, {
+      devicePairingService: deps.devicePairingService,
+      deviceRegistry: deps.deviceRegistry,
+    });
   }
 }

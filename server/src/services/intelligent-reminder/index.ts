@@ -14,6 +14,7 @@ import type {
   PhoneCallConfig,
 } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
+import type { VoiceCapabilityService } from "../voice-capability-service.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
 import type { PhoneBridgeCoordinator } from "../phone-bridge-coordinator.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
@@ -23,6 +24,8 @@ export interface IntelligentReminderSystemDeps {
   virtualPhoneService: VirtualPhoneService;
   phoneBridgeCoordinator?: PhoneBridgeCoordinator;
   voiceDialogueService: VoiceDialogueService;
+  /** Agent 底层语音能力中枢（用于 TTS 闹钟音频合成 + 推送，替代反射访问） */
+  voiceCapabilityService?: VoiceCapabilityService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
   /**
    * 可选：微信主动推送回调。
@@ -65,6 +68,7 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
 
   const ttsHandler = new TTSAlarmHandler({
     voiceDialogueService: deps.voiceDialogueService,
+    voiceCapabilityService: deps.voiceCapabilityService,
     sendToClient: deps.sendToClient,
     logger: deps.logger,
   });
@@ -122,12 +126,12 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
           await ttsHandler.handle(instance);
         } catch (wsErr) {
           // WS 推送失败时，尝试微信语音推送
-          if (deps.sendWechatProactive && deps.virtualPhoneService) {
-            // 通过 TtsService 生成音频（复用 VirtualPhoneService 内部的 TTS）
+          if (deps.sendWechatProactive && deps.voiceCapabilityService) {
+            // 通过 VoiceCapabilityService 合成音频（统一入口，不再反射访问 VirtualPhoneService）
             let ttsAudio = null;
             try {
-              const ttsResult = await (deps.virtualPhoneService as any).tts?.synthesizeMp3Base64?.(instance.config.message);
-              if (ttsResult?.ok) {
+              const ttsResult = await deps.voiceCapabilityService.synthesize(instance.config.message);
+              if (ttsResult.ok) {
                 ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
               }
             } catch (_) { /* TTS 生成失败则纯文本推送 */ }
@@ -159,14 +163,14 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
           await phoneHandler.handle(instance);
         } catch (wsErr) {
           // WS 推送失败时，尝试微信语音来电模拟
-          if (deps.sendWechatProactive && deps.virtualPhoneService) {
+          if (deps.sendWechatProactive && deps.voiceCapabilityService) {
             // 生成前摇引导语 + 正文 的 TTS 音频
             let ttsAudio = null;
             try {
               const preGreeting = buildPreGreetingForWechat(instance);
               const fullText = `${preGreeting}\n\n${instance.config.message}`;
-              const ttsResult = await (deps.virtualPhoneService as any).tts?.synthesizeMp3Base64?.(fullText);
-              if (ttsResult?.ok) {
+              const ttsResult = await deps.voiceCapabilityService.synthesize(fullText);
+              if (ttsResult.ok) {
                 ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
               }
             } catch (_) { /* TTS 生成失败 */ }

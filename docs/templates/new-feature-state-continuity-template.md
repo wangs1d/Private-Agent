@@ -507,10 +507,7 @@ lines.push(`提示：简短的功能描述`);
 ## 📚 相关资源
 
 - **完整规则**: [.trae/rules/project_rules.md](../.trae/rules/project_rules.md)
-- **参考实现**:
-  - [gomoku-service.ts](../agent-world/services/gomoku-service.ts)
-  - [world-gomoku-tools.ts](../agent-world/tools/world-gomoku-tools.ts)
-  - [game-gomoku/SKILL.md](../agent-world/skills/game-gomoku/SKILL.md)
+- **参考实现**: 请参见项目内的有状态功能实现示例
 
 ---
 

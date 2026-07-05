@@ -26,7 +26,7 @@ export function filterChatToolsByRegistryNames(
 /**
  * 主 Agent 基本工具过滤 — 白名单来自 {@link isMasterAgentBuiltinTool}（核心工具库单一数据源）。
  * 排除：life 专有写操作、tech 视觉/桌面、creative 深度 RPA 等延迟目录工具。
- * 保留：核心库中的日程/通讯/游戏/具身；`master.*` 委派工具由下方单独追加。
+ * 保留：核心库中的日程/通讯/具身；`master.*` 委派工具由下方单独追加。
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   return tools.filter((t) => {

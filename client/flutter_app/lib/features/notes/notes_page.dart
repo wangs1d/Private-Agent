@@ -17,6 +17,7 @@ class NotesPage extends StatefulWidget {
 }
 
 class _NotesPageState extends State<NotesPage> {
+  // ignore: unused_field
   static const List<_CategoryOption> _categories = <_CategoryOption>[
     _CategoryOption(null, "全部"),
     _CategoryOption("study", "学习"),
@@ -29,9 +30,13 @@ class _NotesPageState extends State<NotesPage> {
   ];
 
   late final NotesApiClient _api = widget.api ?? NotesApiClient();
+  // ignore: unused_field
   String? _activeCategory;
+  // ignore: unused_field
   List<Map<String, dynamic>> _notes = <Map<String, dynamic>>[];
+  // ignore: unused_field
   bool _loading = false;
+  // ignore: unused_field
   String? _error;
 
   @override
@@ -59,6 +64,7 @@ class _NotesPageState extends State<NotesPage> {
     });
   }
 
+  // ignore: unused_element
   Future<void> _openCreate() async {
     final Map<String, dynamic>? created = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute<Map<String, dynamic>>(
@@ -70,6 +76,7 @@ class _NotesPageState extends State<NotesPage> {
     }
   }
 
+  // ignore: unused_element
   Future<void> _openSearch() async {
     final TextEditingController ctrl = TextEditingController();
     final String? query = await showDialog<String>(
@@ -115,56 +122,12 @@ class _NotesPageState extends State<NotesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("学习笔记"),
-        actions: <Widget>[
-          IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: _openSearch,
-            tooltip: "搜索",
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _reload,
-            tooltip: "刷新",
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(48),
-          child: SizedBox(
-            height: 48,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              children: _categories
-                  .map((_CategoryOption opt) => Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                        child: ChoiceChip(
-                          label: Text(opt.label),
-                          selected: _activeCategory == opt.value,
-                          onSelected: (_) {
-                            setState(() {
-                              _activeCategory = opt.value;
-                            });
-                            _reload();
-                          },
-                        ),
-                      ))
-                  .toList(),
-            ),
-          ),
-        ),
-      ),
-      body: _buildBody(),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _openCreate,
-        tooltip: "新建笔记",
-        child: const Icon(Icons.add),
-      ),
-    );
+    // 临时占位:页面装饰全下线,只留一个空白容器占位(顶部 tab 的「笔记」
+    // 文字由右侧面板外壳渲染,见 main.dart 的 _rightPanelTitle)。
+    return const SizedBox.shrink();
   }
 
+  // ignore: unused_element
   Widget _buildBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {

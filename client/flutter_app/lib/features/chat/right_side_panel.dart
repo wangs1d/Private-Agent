@@ -24,7 +24,7 @@ class RightSidePanel extends StatefulWidget {
   /// 面板顶部标题
   final String title;
 
-  /// 面板内要展示的内容(如 MailboxPage / GameCenterPage)
+  /// 面板内要展示的内容(如 MailboxPage)
   final Widget child;
 
   /// 关闭回调(点遮罩、点 ✕、按 ESC 都会触发)

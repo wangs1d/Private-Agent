@@ -645,3 +645,52 @@ export const translateScreenRegionBodySchema = z.object({
   /** 翻译目标语言，默认 zh */
   targetLang: z.string().min(1).max(16).optional(),
 });
+
+// ========== 终端互连平台 device-bus 配对 schema ==========
+
+/** POST /device/pairing/code：用户生成配对码 */
+export const devicePairingCodeBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    /** 可选：限定只能配对某种 kind */
+    deviceKind: z.string().min(1).max(32).optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** POST /device/pair：设备端提交配对码完成绑定 */
+export const devicePairBodySchema = z.object({
+  code: z.string().min(4).max(64),
+  deviceId: z.string().min(1).max(128),
+  kind: z.string().min(1).max(32),
+  name: z.string().min(1).max(128),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+/** GET /device/list：列出当前用户已绑定设备 */
+export const deviceListQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** DELETE /device/:deviceId：解绑设备 */
+export const deviceUnbindParamsSchema = z.object({
+  deviceId: z.string().min(1).max(128),
+});
+
+export const deviceUnbindQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** GET /device/pairing/code/status：查询当前用户未消费的配对码 */
+export const devicePairingCodeStatusQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);

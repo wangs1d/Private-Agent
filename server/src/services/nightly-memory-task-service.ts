@@ -10,11 +10,13 @@ export type NightlySleepAgentReport = {
   actorIds: string[];
   reports: Array<{
     actorId: string;
-    removedCount: number;
-    mergedCount: number;
-    reinforcedCount: number;
-    weakenedCount: number;
-    archivedCount: number;
+    dailyCleanupCount: number;
+    weeklyMergedCount: number;
+    monthlyAbstractedCount: number;
+    consistencyFlagCount: number;
+    knowledgePromotedCount: number;
+    compressionRate: number;
+    estimatedRecallPrecision: number;
     plannedActions: number;
     executedActions: number;
     stageReports: Array<{
@@ -235,11 +237,13 @@ export class NightlyMemoryTaskService {
     actorIds: string[],
     reports: Array<{
       actorId: string;
-      removedCount: number;
-      mergedCount: number;
-      reinforcedCount: number;
-      weakenedCount: number;
-      archivedCount: number;
+      dailyCleanupCount: number;
+      weeklyMergedCount: number;
+      monthlyAbstractedCount: number;
+      consistencyFlagCount: number;
+      knowledgePromotedCount: number;
+      compressionRate: number;
+      estimatedRecallPrecision: number;
       plannedActions: number;
       executedActions: number;
       stageReports: Array<{ stage: string; changed: number; notes: string[] }>;

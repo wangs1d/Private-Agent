@@ -7,6 +7,7 @@ import "../../core/models/schedule_models.dart";
 import "../../core/services/desk_pet_session.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
+import "vertical_drag_divider.dart";
 
 /// 强调色（品牌色）：与主题无关，深浅都保留辨识度。
 const Color _kAccentBlue = Color(0xFF007AFF);
@@ -26,7 +27,6 @@ class JarvisChatLayout extends StatefulWidget {
     required this.child,
     this.scheduleFuture,
     this.onAgentLink,
-    this.onGames,
     this.onSchedule,
     this.onWallet,
     this.onPhone,
@@ -34,23 +34,41 @@ class JarvisChatLayout extends StatefulWidget {
     this.onNotes,
     this.onMessages,
     this.rightPanelVisible = false,
+    this.rightPanelChild,
+    this.rightPanelTitle,
+    this.splitRatio = 0.5,
+    this.onSplitRatioChanged,
+    this.onCloseRightPanel,
   });
 
   /// 中间的聊天页（通常为 ChatPage）。
   final Widget child;
 
   /// 右侧抽屉是否打开。
-  /// 打开时,聊天区会被挤压到屏幕的左半屏(50% 宽),与右半屏抽屉正好各占一半。
+  /// 打开时,聊天区会被挤压到屏幕的左半屏,与右半屏分栏面板各占一部分。
   final bool rightPanelVisible;
+
+  /// 右侧分栏面板内容（rightPanelVisible=true 时渲染）。
+  /// 为 null 时右侧留空（兼容旧浮层模式）。
+  final Widget? rightPanelChild;
+
+  /// 右侧分栏面板顶栏标题。
+  final String? rightPanelTitle;
+
+  /// 左聊天区占屏幕宽度的比例（0.1~0.9），默认 0.5。
+  final double splitRatio;
+
+  /// 拖动分割条时回调，参数为新的 leftRatio。
+  final ValueChanged<double>? onSplitRatioChanged;
+
+  /// 点击右侧面板的关闭按钮。
+  final VoidCallback? onCloseRightPanel;
 
   /// 今日日程数据 Future；为 null 时显示空状态。
   final Future<List<ScheduleEvent>>? scheduleFuture;
 
   /// 点击常用工具「好友」：打开 Agent Link。
   final VoidCallback? onAgentLink;
-
-  /// 点击常用工具「搜索」：打开游戏中心。
-  final VoidCallback? onGames;
 
   /// 点击常用工具「日程」：打开日程面板。
   final VoidCallback? onSchedule;
@@ -75,6 +93,7 @@ class JarvisChatLayout extends StatefulWidget {
 }
 
 class _JarvisChatLayoutState extends State<JarvisChatLayout> {
+  /// 常用工具区是否展开（默认只显示第一行 4 个高频入口）
   bool _toolsExpanded = false;
   bool _showFloatingSchedule = false;
   Offset _floatingSchedulePosition = const Offset(120, 120);
@@ -249,13 +268,24 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    // 抽屉打开时,聊天区与右半屏区域各占屏幕一半
-    // (原本是 Row[聊天区(Expanded)|快捷功能(288px)],抽屉开时改成 50% / 50%)
     final double screenWidth = MediaQuery.sizeOf(context).width;
-    final double halfWidth = widget.rightPanelVisible
-        ? screenWidth * 0.5
-        : screenWidth; // 不限制:用 Expanded 自动算
-    final bool useHalf = widget.rightPanelVisible;
+    final bool useSplit = widget.rightPanelVisible && widget.rightPanelChild != null;
+
+    // 左聊天区宽度：分栏时按 splitRatio 计算（受最小宽度约束），否则 Expanded
+    final double minLeft = 400.0;
+    final double minRight = 420.0;
+    double? leftWidth;
+    if (useSplit) {
+      final double availForPanels = screenWidth - 8.0; // 减去分割条宽度
+      // 先按 ratio 算，再用最小宽度约束
+      double lw = (availForPanels * widget.splitRatio).clamp(minLeft, availForPanels - minRight);
+      double rw = availForPanels - lw;
+      if (rw < minRight) {
+        rw = minRight;
+        lw = (availForPanels - rw).clamp(minLeft, availForPanels - minRight);
+      }
+      leftWidth = lw;
+    }
 
     return ColoredBox(
       color: cs.surface,
@@ -269,13 +299,22 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    if (useHalf)
-                      SizedBox(width: halfWidth, child: widget.child)
+                    if (useSplit)
+                      SizedBox(width: leftWidth, child: widget.child)
                     else
                       Expanded(child: widget.child),
-                    if (useHalf)
-                      SizedBox(width: halfWidth)
-                    else
+                    if (useSplit)
+                      VerticalDragDivider(
+                        onDrag: (double deltaX) {
+                          if (widget.onSplitRatioChanged == null) return;
+                          final double avail = screenWidth - 8.0;
+                          final double newLeft = (leftWidth! + deltaX)
+                              .clamp(minLeft, avail - minRight);
+                          final double newRatio = (newLeft / avail).clamp(0.1, 0.9);
+                          widget.onSplitRatioChanged!(newRatio);
+                        },
+                      )
+                    else if (!widget.rightPanelVisible)
                       Container(
                         width: 288,
                         decoration: BoxDecoration(
@@ -287,6 +326,29 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
                         ),
                         child: _buildRightPanel(),
                       ),
+                    if (useSplit)
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainerLow,
+                            border: Border(
+                              left: BorderSide(
+                                  color: cs.outline.withValues(alpha: 0.35)),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: <Widget>[
+                              if (widget.onCloseRightPanel != null)
+                                _buildRightPanelHeader(cs),
+                              Expanded(child: widget.rightPanelChild!),
+                            ],
+                          ),
+                        ),
+                      )
+                    else if (widget.rightPanelVisible)
+                      // rightPanelVisible=true 但未提供 rightPanelChild：留空兼容旧浮层
+                      SizedBox(width: screenWidth * 0.5),
                   ],
                 ),
               ),
@@ -294,6 +356,41 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
           ),
           if (_showFloatingSchedule && !_useDesktopFloating)
               _buildFloatingSchedule(),
+        ],
+      ),
+    );
+  }
+
+  /// 右侧分栏面板顶栏（标题 + 关闭按钮）。
+  Widget _buildRightPanelHeader(ColorScheme cs) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainer,
+        border: Border(
+          bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.drag_indicator, size: 16, color: cs.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Text(
+            widget.rightPanelTitle ?? "",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+          ),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            tooltip: "关闭面板",
+            visualDensity: VisualDensity.compact,
+            onPressed: widget.onCloseRightPanel,
+          ),
         ],
       ),
     );
@@ -522,6 +619,7 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
   Widget _buildToolsCard() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     // 钱包是常用入口，默认放在第一行直接可见；其他工具按频次排列。
+    // 折叠态只显示第一行 4 个，点标题右侧的「更多」再展开第二行。
     final List<_ToolSpec> firstRow = <_ToolSpec>[
       _ToolSpec(icon: Icons.people_outline, label: "好友", onTap: widget.onAgentLink),
       _ToolSpec(icon: Icons.account_balance_wallet_outlined, label: "钱包", onTap: widget.onWallet),
@@ -529,7 +627,6 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
       _ToolSpec(icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
     ];
     final List<_ToolSpec> secondRow = <_ToolSpec>[
-      _ToolSpec(icon: Icons.sports_esports_outlined, label: "游戏", onTap: widget.onGames),
       _ToolSpec(icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
       _ToolSpec(icon: Icons.note_alt_outlined, label: "笔记", onTap: widget.onNotes),
       _ToolSpec(icon: Icons.calendar_today_outlined, label: "日程", onTap: widget.onSchedule),
@@ -571,7 +668,8 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
                   color: Colors.transparent,
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8),
-                    onTap: () => setState(() => _toolsExpanded = !_toolsExpanded),
+                    onTap: () =>
+                        setState(() => _toolsExpanded = !_toolsExpanded),
                     child: AnimatedRotation(
                       turns: _toolsExpanded ? 0.25 : 0,
                       duration: const Duration(milliseconds: 300),

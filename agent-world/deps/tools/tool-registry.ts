@@ -15,9 +15,9 @@ export type ToolHandler = (input: Record<string, unknown>, context: ToolContext)
  * - 返回更新后的快照
  */
 export interface StatefulToolConfig {
-  /** 工具名称前缀，如 "world.gomoku" */
+  /** 工具名称前缀 */
   modulePrefix: string;
-  /** 状态检查工具名，如 "world.gomoku.get_snapshot" */
+  /** 状态检查工具名 */
   snapshotToolName: string;
   /** 有效状态列表 */
   validStatuses: string[];

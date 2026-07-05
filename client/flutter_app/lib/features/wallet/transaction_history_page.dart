@@ -63,15 +63,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       balance: 1500.00,
       createdAt: DateTime.now().subtract(const Duration(days: 2)),
     ),
-    TransactionRecord(
-      id: 'tx_004',
-      type: 'expense',
-      title: '游戏消费 - 五子棋',
-      amount: -50.00,
-      balance: -500.00,
-      createdAt: DateTime.now().subtract(const Duration(days: 3)),
-      remark: 'Agent自主决策',
-    ),
   ];
 
   String _filterType = 'all'; // all, income, expense, transfer

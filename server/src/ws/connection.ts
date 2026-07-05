@@ -44,11 +44,9 @@ import {
   allowWorldHttpMutations,
   canViewWorldPartition,
   resolveUnifiedMemoryActorId,
-  type GomokuService,
   type SocialFeedService,
   type WorldPartitionWsRegistry,
   type WorldService,
-  worldGomokuWsTableSchema,
   worldPartitionAttachSchema,
   worldPartitionDetachSchema,
   worldSocialCommentPayloadSchema,
@@ -68,6 +66,14 @@ import type { AgentMemorySyncService } from "../services/agent-memory-sync-servi
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { aipDispatchWsSchema, walletRequestSchema } from "../schemas/api.js";
+import {
+  handleDeviceWsClose,
+  handleDeviceWsEvent,
+  isDeviceEvent,
+  type DeviceWsHandlerDeps,
+} from "../device-bus/ws-device-handler.js";
+import type { DeviceRegistry } from "../device-bus/device-registry.js";
+import type { DevicePairingService } from "../services/device-pairing-service.js";
 
 type SocketWithHeartbeat = {
   send(data: string): void;
@@ -151,7 +157,6 @@ export type WsRouteDeps = {
   aipService: AipService;
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
   agentCore: AgentCore;
-  gomokuService: GomokuService;
   socialFeedService: SocialFeedService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
@@ -161,6 +166,8 @@ export type WsRouteDeps = {
   virtualPhoneService: VirtualPhoneService;
   virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
   userPersonalizationService: UserPersonalizationService;
+  deviceRegistry: DeviceRegistry;
+  devicePairingService: DevicePairingService;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -174,7 +181,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     aipService,
     worldPartitionWsRegistry,
     agentCore,
-    gomokuService,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -184,7 +190,22 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
+    deviceRegistry,
+    devicePairingService,
   } = deps;
+
+  // device-bus 处理器依赖（device.* 事件路由）
+  const deviceHandlerDeps: DeviceWsHandlerDeps = {
+    deviceRegistry,
+    auditService,
+    phoneBridgeCoordinator,
+    desktopBridgeCoordinator,
+    devicePairingService,
+    log: {
+      info: (msg, ctx) => app.log.info(ctx ?? {}, `[DeviceBus] ${msg}`),
+      warn: (msg, ctx) => app.log.warn(ctx ?? {}, `[DeviceBus] ${msg}`),
+    },
+  };
 
   const broadcastPartitionPresence = (partitionId: string): void => {
     const watcherSessionIds = worldPartitionWsRegistry.uniqueWatcherSessionIds(partitionId);
@@ -261,6 +282,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
         }
         phoneBridgeCoordinator.cancelPendingForSocket(socket);
+        // 终端互连平台：清理该 socket 上绑定的设备
+        void handleDeviceWsClose(socket, deviceHandlerDeps);
         if (boundActorId) {
           messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
           socialFeedService.unsubscribe(boundActorId);
@@ -309,6 +332,14 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               },
             }),
           );
+          return;
+        }
+
+        // ========== 终端互连平台 device.* 事件路由 ==========
+        // device.register 不需要 boundActorId（设备身份在 payload 内）；
+        // 其余 device.* 事件依赖 socket 上已绑定的 deviceId（由 register 写入）。
+        if (isDeviceEvent(event.type)) {
+          await handleDeviceWsEvent(socket, event, deviceHandlerDeps);
           return;
         }
 
@@ -933,90 +964,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           worldPartitionWsRegistry.detachSocket(socket);
           broadcastPartitionPresence(targetPid);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldGomokuSubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          const gomokuParsed = worldGomokuWsTableSchema.safeParse(event.payload);
-          if (!gomokuParsed.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_GOMOKU_EVENT", message: gomokuParsed.error.message },
-              }),
-            );
-            return;
-          }
-          const gomokuR = gomokuService.watchTable(gomokuParsed.data.tableId, boundActorId);
-          if (!gomokuR.ok) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "GOMOKU_SUBSCRIBE_FAILED", message: gomokuR.reason },
-              }),
-            );
-          }
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldGomokuSubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          gomokuService.watchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribeLobby) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          gomokuService.unwatchLobby(boundActorId);
-          return;
-        }
-
-        if (event.type === AgentWorldClientEventType.WorldGomokuUnsubscribe) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          const gomokuUnsub = worldGomokuWsTableSchema.safeParse(event.payload);
-          if (!gomokuUnsub.success) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "INVALID_GOMOKU_EVENT", message: gomokuUnsub.error.message },
-              }),
-            );
-            return;
-          }
-          gomokuService.unwatchTable(gomokuUnsub.data.tableId, boundActorId);
           return;
         }
 

@@ -4,18 +4,12 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import {
   A2aOutsourcingService,
-  BlackjackService,
-  DoudizhuService,
-  GameCenterCoordinator,
-  GomokuService,
   loadPersistedCommunitySkills,
-  registerGameCenterRoutes,
   registerWorldFreeMarketTools,
   registerWorldOpenRegistryTools,
   registerWorldRoomTools,
   registerWorldSocialTools,
   SocialFeedService,
-  ZhaJinHuaService,
   AgentWorldServerEventType,
   WorldPartitionWsRegistry,
   WorldService,
@@ -55,7 +49,6 @@ import { compactObserveLine } from "../tokenjuice/compactor.js";
 import { TrajectoryPromotionPipeline, parseSkillPromotionPipelineMode } from "../services/skill-promotion-pipeline.js";
 import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
 import { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
-import { GomokuAgentTurnService } from "../services/gomoku-agent-turn-service.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
 import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
@@ -78,6 +71,7 @@ import { SessionService } from "../services/session-service.js";
 import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { VirtualPhoneIncomingCoordinator } from "../services/virtual-phone-incoming-coordinator.js";
+import { VoiceCapabilityService } from "../services/voice-capability-service.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
@@ -96,6 +90,7 @@ import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
+import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
@@ -108,7 +103,16 @@ import {
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
 import { registerTranslateTools } from "../tools/translate-tools.js";
+import { registerDeviceTools } from "../tools/device-tools.js";
 import { SmartHomeService } from "../services/smart-home-service.js";
+import { DeviceRegistry } from "../device-bus/device-registry.js";
+import { createHomeAdapterFactory } from "../device-bus/adapters/home-adapter.js";
+import { createPhoneAdapterFactory } from "../device-bus/adapters/phone-adapter.js";
+import { createDesktopAdapterFactory } from "../device-bus/adapters/desktop-adapter.js";
+import { createTabletAdapterFactory } from "../device-bus/adapters/tablet-adapter.js";
+import { createGlassesAdapterFactory } from "../device-bus/adapters/glasses-adapter.js";
+import { createCameraAdapterFactory } from "../device-bus/adapters/camera-adapter.js";
+import { DevicePairingService } from "../services/device-pairing-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
@@ -312,6 +316,22 @@ export async function createAppServices(): Promise<AppServices> {
     voiceDialogueService.setDefaultProvider("openai");
   }
 
+  // 初始化 Agent 底层语音能力中枢（TTS + ASR + WS 推送）。
+  // 作为 Agent 的底层能力，被 voice.speak 工具、智能提醒、主动消息等场景统一调度。
+  const voiceCapabilityService = new VoiceCapabilityService({
+    ttsService,
+    voiceDialogueService,
+    wsRegistry: wsConnectionRegistry,
+    logger: app.log,
+  });
+  if (voiceCapabilityService.getCapabilityInfo().ttsEnabled) {
+    app.log.info(
+      `[VoiceCapability] 已启用（TTS 提供商：${voiceCapabilityService.getCapabilityInfo().ttsProvider}）`,
+    );
+  } else {
+    app.log.warn("[VoiceCapability] TTS 未启用，voice.speak 工具将仅推送文本兜底");
+  }
+
   // 初始化手机桥接协调器（须在智能提醒系统之前，供其调度 phone.ring）
   const phoneBridgeCoordinator = new PhoneBridgeCoordinator({
     onSync: (actorId, payload) => {
@@ -329,6 +349,7 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     phoneBridgeCoordinator,
     voiceDialogueService,
+    voiceCapabilityService,
     sendToClient: async (userId, payload) => {
       await wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
     },
@@ -418,6 +439,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentPairingService,
   );
   registerAgentPhoneTools(toolRegistry, virtualPhoneService);
+  registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
   registerAipTools(toolRegistry, aipService);
   registerProtocolUnifiedTools(toolRegistry, {
     computeQuotaService,
@@ -452,20 +474,6 @@ export async function createAppServices(): Promise<AppServices> {
     );
   });
   const a2aOutsourcingService = new A2aOutsourcingService(worldService);
-  const doudizhuService = new DoudizhuService(worldService);
-  doudizhuService.attachWebSocketRegistry(wsConnectionRegistry);
-  const zhaJinHuaService = new ZhaJinHuaService(worldService);
-  zhaJinHuaService.attachWebSocketRegistry(wsConnectionRegistry);
-  const gomokuService = new GomokuService(worldService);
-  gomokuService.attachWebSocketRegistry(wsConnectionRegistry);
-  const blackjackService = new BlackjackService(worldService);
-  const gameCenterCoordinator = new GameCenterCoordinator(
-    worldService,
-    gomokuService,
-    zhaJinHuaService,
-    doudizhuService,
-    blackjackService,
-  );
   const socialFeedService = new SocialFeedService(worldService);
   socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
   registerWorldOpenRegistryTools(toolRegistry, worldService);
@@ -629,7 +637,95 @@ export async function createAppServices(): Promise<AppServices> {
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
+
+  // ========== 终端互连平台 device-bus ==========
+  // 统一抽象手机 / 桌面 / 家居 / 摄像头 / 眼镜等终端，按 deviceId 多设备并存。
+  // 与现有 wsConnectionRegistry（单 session 单连接）共存，互不依赖。
+  const deviceRegistry = new DeviceRegistry();
+  deviceRegistry.registerFactory(createHomeAdapterFactory(smartHomeService));
+  deviceRegistry.registerFactory(createPhoneAdapterFactory());
+  deviceRegistry.registerFactory(createDesktopAdapterFactory());
+  deviceRegistry.registerFactory(createTabletAdapterFactory());
+  deviceRegistry.registerFactory(createGlassesAdapterFactory());
+  deviceRegistry.registerFactory(createCameraAdapterFactory());
+  // 家居是本地服务（无 WS），若 HA 已配置则主动注册一个全局 home 设备
+  if (smartHomeService.isEnabled()) {
+    void deviceRegistry.register({
+      deviceId: "home:default",
+      kind: "home",
+      name: "HomeAssistant",
+      ownerUserId: "system",
+      capabilities: [],
+      status: "online",
+      lastSeenAt: Date.now(),
+      connectionKind: "local_service",
+      metadata: { baseUrl: process.env.HA_BASE_URL },
+    }).catch((err) => {
+      app.log.warn({ err }, "[DeviceBus] home:default 注册失败");
+    });
+  }
+  app.log.info(
+    `[DeviceBus] 已注册适配器工厂: ${deviceRegistry.getRegisteredKinds().join(", ")}`,
+  );
+
+  // 设备配对服务：用户生成配对码 → 设备端提交配对码完成绑定
+  const devicePairingService = new DevicePairingService();
+  await devicePairingService.load();
+  // 设备上下线广播：订阅 DeviceRegistry，推送给 ownerUserId 的 WS session
+  deviceRegistry.subscribe((event) => {
+    let ownerUserId: string | undefined;
+    let payload: { type: string; payload: Record<string, unknown> } | undefined;
+    if (event.kind === "online") {
+      ownerUserId = event.descriptor.ownerUserId;
+      payload = {
+        type: ServerEventType.DeviceOnline,
+        payload: {
+          deviceId: event.descriptor.deviceId,
+          kind: event.descriptor.kind,
+          name: event.descriptor.name,
+          ownerUserId: event.descriptor.ownerUserId,
+          capabilities: event.descriptor.capabilities,
+          status: event.descriptor.status,
+        },
+      };
+    } else if (event.kind === "offline") {
+      ownerUserId = event.ownerUserId;
+      payload = {
+        type: ServerEventType.DeviceOffline,
+        payload: {
+          deviceId: event.deviceId,
+          ownerUserId: event.ownerUserId,
+          reason: event.reason,
+        },
+      };
+    } else if (event.kind === "status_changed") {
+      ownerUserId = event.ownerUserId;
+      payload = {
+        type: ServerEventType.DeviceListChanged,
+        payload: {
+          deviceId: event.deviceId,
+          ownerUserId: event.ownerUserId,
+          status: event.status,
+        },
+      };
+    } else if (event.kind === "capability_changed") {
+      ownerUserId = event.ownerUserId;
+      payload = {
+        type: ServerEventType.DeviceListChanged,
+        payload: {
+          deviceId: event.deviceId,
+          ownerUserId: event.ownerUserId,
+          capabilities: event.capabilities,
+        },
+      };
+    }
+    if (ownerUserId && payload) {
+      wsConnectionRegistry.trySend(ownerUserId, JSON.stringify(payload));
+    }
+  });
+
   registerTranslateTools(toolRegistry);
+  registerDeviceTools(toolRegistry, deviceRegistry, devicePairingService);
   const promptContextBuilder = new PromptContextBuilder({
     agentMemorySyncService,
     worldService,
@@ -733,7 +829,6 @@ export async function createAppServices(): Promise<AppServices> {
     );
     return result;
   });
-  new GomokuAgentTurnService(gomokuService, toolRegistry, externalChat, promptContextBuilder);
 
   const proactiveOutbound = new ProactiveOutboundMessageService(async (userId, payload) => {
     const proactivePayload =
@@ -755,20 +850,8 @@ export async function createAppServices(): Promise<AppServices> {
     }
 
     if (channel === "voice") {
-      const ttsResult = await ttsService.synthesizeMp3Base64(`${title}。${text}`);
-      return wsConnectionRegistry.trySend(
-        userId,
-        JSON.stringify({
-          type: "agent.proactive_voice",
-          payload: {
-            ...proactivePayload,
-            tts:
-              ttsResult.ok
-                ? { format: ttsResult.format, base64: ttsResult.base64, provider: ttsResult.provider }
-                : null,
-          },
-        }),
-      );
+      // 委托给 VoiceCapabilityService 统一推送主动语音（合成 + WS 一站式）
+      return voiceCapabilityService.pushProactiveVoice(userId, title, text);
     }
 
     return wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
@@ -899,10 +982,6 @@ export async function createAppServices(): Promise<AppServices> {
     upstreamSearchService,
     worldService,
     a2aOutsourcingService,
-    doudizhuService,
-    zhaJinHuaService,
-    gomokuService,
-    gameCenterCoordinator,
     socialFeedService,
     agentRelayService,
     agentPairingService,
@@ -936,6 +1015,8 @@ export async function createAppServices(): Promise<AppServices> {
     externalChat,
     moodInferenceService,
     jarvisHarness,
+    devicePairingService,
+    deviceRegistry,
   });
 
   registerWebSocketRoute(app, {
@@ -948,7 +1029,6 @@ export async function createAppServices(): Promise<AppServices> {
     aipService,
     worldPartitionWsRegistry,
     agentCore,
-    gomokuService,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -956,8 +1036,10 @@ export async function createAppServices(): Promise<AppServices> {
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     virtualPhoneService,
+    devicePairingService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
+    deviceRegistry,
   });
 
   app.addHook("onClose", async () => {
@@ -996,6 +1078,7 @@ export async function createAppServices(): Promise<AppServices> {
     weatherService,
     weatherPrefsService,
     ttsService,
+    voiceCapabilityService,
     virtualPhoneService,
     friendService,
     messageHubService,
@@ -1015,5 +1098,7 @@ export async function createAppServices(): Promise<AppServices> {
     moodInferenceService,
     morningBriefingScheduler,
     jarvisHarness,
+    deviceRegistry,
+    devicePairingService,
   };
 }

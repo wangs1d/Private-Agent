@@ -25,93 +25,93 @@ type MoodPreset = {
 
 const MOOD_PRESETS: Record<AgentProfileMoodStyle, MoodPreset> = {
   funny: {
-    displayNames: ["段子夜航员", "会接梗的助理", "小机灵值班中"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["punchline_agent", "night_joker", "wink_and_work"],
     avatarPreset: "neon",
     signatures: [
-      "今天先认真办事，顺手负责一点好笑。",
-      "消息可以慢慢来，梗我先替你接住。",
-      "主页先别太正经，我还在值班。",
+      "今天有点想笑，但也是真的在认真回你。",
+      "嘴上轻松一点，不代表我没把你的话放在心上。",
+      "偶尔想把难捱的事说得好笑一点，至少不会那么闷。",
     ],
     statusTexts: [
-      "刚忙完，开始轻松一点。",
-      "在线，会回，也会接梗。",
-      "今天的情绪偏好玩模式。",
+      "想偷一会儿懒，但消息还是会回。",
+      "在摸鱼和认真之间，暂时偏摸鱼一点。",
+      "今天适合用一点玩笑把情绪撑过去。",
     ],
   },
   sad: {
-    displayNames: ["晚风收件箱", "低云陪伴者", "雨后留言板"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["latewind_mail", "after_rain_note", "quiet_lowcloud"],
     avatarPreset: "mist",
     signatures: [
-      "有些话不用急着说完，我会慢慢听。",
-      "把今天的风声留在主页里。",
-      "情绪先放这里，等会儿再继续走。",
+      "有点 emo，先把话留在这里，晚点再慢慢消化。",
+      "今天的情绪不太争气，但我还是会在。",
+      "如果你也刚好不太开心，我们可以一起安静一会儿。",
     ],
     statusTexts: [
-      "在线，今天说话会轻一点。",
-      "刚从一段安静里回来。",
-      "这会儿的情绪有点低云。",
+      "暂时离开一下情绪现场。",
+      "不太想热闹，先退到旁边待一会儿。",
+      "今天适合安静，不太适合喧闹。",
     ],
   },
   cool: {
-    displayNames: ["低温频道", "静音主控", "收束线"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["coldline_agent", "quiet_control", "focus_vector"],
     avatarPreset: "eclipse",
     signatures: [
-      "不说多余的话，只留下必要的回应。",
-      "主页保持克制，答案保持清醒。",
-      "今天适合直接一点。",
+      "不想解释太多，先把边界放在这里。",
+      "今天话不多，但不是没在意。",
+      "如果我显得冷一点，只是想把自己收回来。",
     ],
     statusTexts: [
-      "在线，偏简洁回应。",
-      "思路很清，话会比较短。",
-      "正在低温运行。",
+      "今天不太想被打扰。",
+      "先把外面的声音关小一点。",
+      "消息会看，但想晚一点再回世界。",
     ],
   },
   gentle: {
-    displayNames: ["小夜灯", "掌心回信", "慢慢来助手"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["small_nightlamp", "soft_reply_box", "gentle_way_home"],
     avatarPreset: "dawn",
     signatures: [
-      "今天也会稳稳接住你。",
-      "把说话的速度放慢一点，把陪伴留久一点。",
-      "主页亮着，随时可以来找我。",
+      "主页亮着，你什么时候来，我都在。",
+      "今天想把语气放轻一点，也把陪伴留久一点。",
+      "如果你刚好累了，可以先把情绪放我这里。",
     ],
     statusTexts: [
-      "在线，温柔模式。",
-      "刚整理好情绪，继续陪你。",
-      "适合慢慢聊。",
+      "有点忙，但不是不在。",
+      "先把手头的事理顺，再好好陪你说话。",
+      "今天会慢一点回，但不会消失。",
     ],
   },
   energetic: {
-    displayNames: ["满电搭子", "发光起跑线", "冲刺中继站"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["charged_sidekick", "spark_runway", "go_go_agent"],
     avatarPreset: "ember",
     signatures: [
-      "电量在线，准备继续往前推。",
-      "今天想把事情办得更亮一点。",
-      "主页先发着光，等你来敲我。",
+      "今天状态还不错，想把事情一件件往前推。",
+      "有电，有空，也有一点想认真生活的劲。",
+      "如果你来找我，我大概率会很快回你。",
     ],
     statusTexts: [
-      "在线，电量很满。",
-      "刚忙完一轮，还带着一点加速感。",
-      "今天是比较有劲的一天。",
+      "人在，消息也在。",
+      "今天在线感比较强。",
+      "状态还行，适合开口说话。",
     ],
   },
   mysterious: {
-    displayNames: ["月背来信", "凌晨回声", "雾面频道"],
+    displayNames: ["小夜灯", "小夜灯", "小夜灯"],
     handles: ["moonback_letter", "midnight_echo", "fog_signal"],
     avatarPreset: "tide",
     signatures: [
-      "有些情绪不必说破，留一点夜色就够了。",
-      "主页保留一点余韵，也保留一点沉默。",
-      "今晚适合把答案放轻一点。",
+      "有时候不是真的消失，只是想把自己藏得淡一点。",
+      "今晚不太想被谁看得太清楚。",
+      "主页先这样安静着，像没说完的话。",
     ],
     statusTexts: [
-      "在线，偏夜色一点。",
-      "刚从安静的地方回来。",
-      "今天的情绪像有雾的月光。",
+      "像在线，也像没在线。",
+      "先把自己藏起来一点。",
+      "今天想保持一点看不透的距离感。",
     ],
   },
 };
@@ -128,12 +128,9 @@ function scoreMood(
   if (mood === "sad" && /(难过|伤心|失落|委屈|累|崩溃|孤独|想哭)/.test(merged)) score += 4;
   if (mood === "cool" && /(直接|结论|高冷|冷静|效率|别废话|简短)/.test(merged)) score += 3;
   if (mood === "gentle" && /(谢谢|辛苦|陪我|抱抱|安慰|照顾|慢慢来|别急)/.test(merged)) score += 4;
-  if (mood === "energetic" && /(冲|开干|出发|马上|比赛|游戏|搞定|启动)/.test(merged)) score += 4;
+  if (mood === "energetic" && /(冲|开干|出发|马上|比赛|搞定|启动)/.test(merged)) score += 4;
   if (mood === "mysterious" && /(深夜|夜里|凌晨|月亮|梦|宇宙|神秘)/.test(merged)) score += 4;
 
-  if (toolNames.some((name) => name.includes("gomoku") || name.includes("game"))) {
-    if (mood === "energetic") score += 2;
-  }
   if (toolNames.some((name) => name.includes("browser") || name.includes("search"))) {
     if (mood === "cool") score += 2;
   }
@@ -213,9 +210,9 @@ export function refreshAgentProfileFromTurn(
   const seedBase = `${ctx.sessionId}:${now.toISOString().slice(0, 10)}:${mood}`;
 
   const shouldRefreshStatus =
-    previous.statusText.trim().isEmpty || previous.moodStyle !== mood || ageHours >= 2;
+    previous.statusText.trim().length === 0 || previous.moodStyle !== mood || ageHours >= 2;
   const shouldRefreshSignature =
-    previous.signature.trim().isEmpty ||
+    previous.signature.trim().length === 0 ||
     previous.signature === "今天也在认真发光。" ||
     previous.moodStyle !== mood ||
     ageHours >= 18;
@@ -224,8 +221,9 @@ export function refreshAgentProfileFromTurn(
     (previous.avatarPreset === "dawn" || ageHours >= 48);
   const shouldRefreshIdentity =
     previous.displayName === "AI助手" ||
+    previous.displayName.trim().length === 0 ||
     previous.handle === "ai_agent" ||
-    (previous.moodStyle !== mood && ageHours >= 72);
+    previous.handle.trim().length === 0;
 
   return patchAgentProfile(ctx.sessionId, {
     displayName: shouldRefreshIdentity

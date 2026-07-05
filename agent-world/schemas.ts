@@ -31,37 +31,6 @@ export const worldLeisureBodySchema = z.object({
   expectedRevision: z.coerce.number().int().min(0).optional(),
 });
 
-export const worldDoudizhuListQuerySchema = z.object({
-  sessionId: z.string().min(1).optional(),
-});
-
-export const worldDoudizhuCreateBodySchema = z.object({
-  sessionId: z.string().min(1),
-  stake: z.coerce.number().int().min(1).max(2000),
-});
-
-export const worldDoudizhuJoinBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-  role: z.enum(["player", "spectator"]),
-  /** 满三人自动开局扣注前，可选校验发起加入方个人世界分区的 revision（与 partition 快照一致）。 */
-  expectedRevision: z.coerce.number().int().min(0).optional(),
-});
-
-export const worldDoudizhuLeaveBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-});
-
-export const worldDoudizhuTableQuerySchema = z.object({
-  sessionId: z.string().min(1),
-});
-
-/** WebSocket：订阅 / 取消订阅斗地主桌 */
-export const worldDoudizhuWsTableSchema = z.object({
-  tableId: z.string().min(1),
-});
-
 /** WebSocket：订阅某分区世界状态（partitionId v0.1 多为拥有者 sessionId） */
 export const worldPartitionAttachSchema = z.object({
   partitionId: z.string().min(1),
@@ -72,53 +41,6 @@ export const worldPartitionAttachSchema = z.object({
 export const worldPartitionDetachSchema = z.object({
   partitionId: z.string().min(1).optional(),
   traceId: z.string().optional(),
-});
-
-export const worldZhajinhuaListQuerySchema = z.object({
-  sessionId: z.string().min(1).optional(),
-});
-
-export const worldZhajinhuaCreateBodySchema = z.object({
-  sessionId: z.string().min(1),
-  stake: z.coerce.number().int().min(1).max(2000),
-});
-
-export const worldZhajinhuaJoinBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-  role: z.enum(["player", "spectator"]),
-});
-
-export const worldZhajinhuaLeaveBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-});
-
-export const worldZhajinhuaTableQuerySchema = z.object({
-  sessionId: z.string().min(1),
-});
-
-export const worldZhajinhuaStartBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-  /** 各选手扣底注前，可选校验发起开局方个人世界分区的 revision。 */
-  expectedRevision: z.coerce.number().int().min(0).optional(),
-});
-
-export const worldZhajinhuaActBodySchema = z.object({
-  sessionId: z.string().min(1),
-  tableId: z.string().min(1),
-  action: z.enum(["fold", "stay"]),
-});
-
-/** WebSocket：订阅 / 取消订阅炸金花桌 */
-export const worldZhajinhuaWsTableSchema = z.object({
-  tableId: z.string().min(1),
-});
-
-/** WebSocket：订阅 / 取消订阅五子棋桌 */
-export const worldGomokuWsTableSchema = z.object({
-  tableId: z.string().min(1),
 });
 
 /** HTTP：拉取互动动态（观战）；可选 limit，需已完成开放式注册。 */

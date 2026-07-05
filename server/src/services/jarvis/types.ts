@@ -26,7 +26,7 @@ import type { StateChangeEvent } from "@private-ai-agent/agent-world";
 // ────────────────────── 触发源 ──────────────────────
 
 export type JarvisTriggerSource =
-  | "event"         // 来自 StateChangeEvent（gomoku/wallet/task/market/social ...）
+  | "event"         // 来自 StateChangeEvent（wallet/task/market/social ...）
   | "life_signal"   // 来自 LifeSignalHubService
   | "cron"          // 定时任务（早间简报 / 自发性扫描）
   | "mood"          // 情绪推断结果
@@ -37,7 +37,7 @@ export type JarvisTriggerCategory =
   | "warning"        // 警告（市场异动 / 钱包 / 风险）
   | "opportunity"    // 机会（学习 / 工具 / 朋友）
   | "planning"       // 计划（提醒 / 日程 / 任务）
-  | "completion"     // 完成（任务 / 游戏 / 交易）
+  | "completion"     // 完成（任务 / 交易）
   | "newness"        // 新增（好友 / 帖子 / 笔记）
   | "follow_up"      // 跟进（昨日未完话题）
   | "presence"       // 陪伴（问候 / 闲聊 / 周末）

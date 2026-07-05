@@ -23,8 +23,6 @@ export type ProactiveRule = {
 };
 
 const BUILTIN_RULES: ProactiveRule[] = [
-  { module: "gomoku", eventType: "game_finished", priority: 8, label: "Game Finished", templateHint: "胜负已定，可以自然点评一句" },
-  { module: "gomoku", eventType: "game_started", priority: 4, label: "Game Started" },
   { module: "wallet", eventType: "transaction_completed", priority: 7, label: "Transaction Completed" },
   { module: "task", eventType: "task_completed", priority: 6, label: "Task Completed" },
   { module: "market", eventType: "skill_purchased", priority: 5, label: "Skill Purchased" },

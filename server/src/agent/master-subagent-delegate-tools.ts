@@ -47,7 +47,7 @@ export function buildMasterSubAgentDelegateChatTools(
     "   能力: wallet · purchase",
     "   工具: wallet.transfer / wallet.recharge / wallet.purchase(全场景消费) + desktop.visual.*(电脑操控)",
     "   场景: 涉及钱包写操作(转账/消费/充值) + 电脑操控时才委派",
-    "   ⚠️ 主 agent 自己能查余额/看流水/查天气/设日程/搜信息/玩游戏，不需要委派 life",
+    "   ⚠️ 主 agent 自己能查余额/看流水/查天气/设日程/搜信息，不需要委派 life",
     "",
     "💻 tech 技术操控助手",
     "   能力: deep_rpa · code_dev · system_ops",
@@ -74,7 +74,7 @@ export function buildMasterSubAgentDelegateChatTools(
     "",
     "【路由规则 — 先自己处理，搞不定才委派】",
     "- 大部分任务：主 agent 直接用基本工具处理，不需要委派",
-    "- 游戏(五子棋等)：主 agent 直接陪玩，不委派",
+
     "- 需要钱包写操作(转账/消费/充值) → 委派 life",
     "- 需要电脑操控(操作网站/App) → 委派 life 或 tech（视复杂度）",
     "- 写代码/调试/部署/自动化脚本/运维/批量处理 → 委派 tech",
@@ -104,7 +104,7 @@ export function buildMasterSubAgentDelegateChatTools(
             agentType: {
               type: "string",
               enum: [...SUB_AGENT_TYPES],
-              description: "Sub-agent type. Routes: life=复杂生活操作(钱包写+视觉操控), tech=技术操控(RPA+代码+运维), info=信息检索(深度调研), creative=创意内容(文案/策划/写作/PPT). 注意：游戏由主agent直接处理，不委派life。",
+              description: "Sub-agent type. Routes: life=复杂生活操作(钱包写+视觉操控), tech=技术操控(RPA+代码+运维), info=信息检索(深度调研), creative=创意内容(文案/策划/写作/PPT).",
             },
             taskDescription: {
               type: "string",
@@ -126,7 +126,7 @@ export function buildMasterSubAgentDelegateChatTools(
             runInBackground: {
               type: "boolean",
               description:
-                "Optional. When true, start the sub-agent in the background and return immediately with taskId; poll via master_poll_sub_agent_tasks.",
+                "Optional. Use only for clearly long-running work like monitoring, polling, batch processing, deployment, or tasks that should finish later. Ordinary search, ordinary Q&A, and simple one-shot delegations should not use this. When allowed, the sub-agent starts in the background and returns immediately with taskId; poll via master_poll_sub_agent_tasks.",
             },
           },
           required: ["agentType", "taskDescription", "userStatusLine"],

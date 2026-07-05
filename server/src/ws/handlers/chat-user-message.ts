@@ -24,9 +24,10 @@ import {
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
 import {
-  buildInterimAckText,
+  buildInterimAckTextWithLlm,
   interimAckMessageId,
   shouldEmitInterimAck,
+  shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
 import {
   buildExecutionEventPayload,
@@ -238,15 +239,6 @@ async function processBatchedMessage(
     );
   };
 
-  /**
-   * 「分阶段异步对话交互 v2」事件发射器。
-   *
-   * 三个事件：turn_started（阶段 0）/ intent_detected（阶段 1）/ execution_event（阶段 2，多次）。
-   * 当前只在这里 emit 阶段 0 / 1；阶段 2 由 master-agent-coordinator、tool-bridge、
-   * plan-execute-loop 等深链路负责（见各模块 TODO）。
-   *
-   * 与 v1 interim ack 并行存在，由 CHAT_TURN_PANEL_V2 开关控制。
-   */
   const turnEmitter: TurnEventEmitter = createTurnEventEmitter({
     send: (json) => {
       if (isStale()) return;
@@ -255,51 +247,42 @@ async function processBatchedMessage(
     enabled: getAgentRuntimeConfig().turnPanelV2.enabled,
   });
 
-  /**
-   * 「分阶段异步对话交互」阶段一：即时确认应答。
-   *
-   * 在多步/工具型请求进入 LLM 之前，先推送一段非常短的"已收到 / 正在处理"短句，
-   * 让客户端有"我先收到了"的即时反馈；后续 chat.assistant_chunk/done 继续
-   * 以原本的 messageId 流式交付最终答案。
-   *
-   * - 路由判断：本地正则匹配（routeLlmExecution 内部纯规则），无副作用。
-   * - 时机：放在 setProcessing(true) 之后、agentCore.handleUserMessage 之前，
-   *   确保 interim 是用户本轮看到的第一条 assistant 事件。
-   * - 走 isStale 闸门：若本轮已被新消息顶掉（debounce 合并/新一轮接管），直接放弃。
-   */
-  const maybeEmitInterimAck = (): void => {
+  // ?????????????????????????????????????
+  let replyFinished = false;
+  const maybeEmitInterimAck = async (): Promise<void> => {
     const cfg = getAgentRuntimeConfig();
     const decision = routeLlmExecution(batched.text, cfg, {
       preferFullPipeline: batched.agentAccessMode === "full",
     });
+    const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
+      enabled: cfg.interimAck.enabled,
+    });
 
-    // v2 阶段 0：路由开始打点（先于 interim_ack / intent_detected 发出）
-    if (cfg.turnPanelV2.enabled) {
+    if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
       const t0 = Date.now();
       turnEmitter.emitTurnStarted({
         sessionId: msgActor,
         traceId: batched.originalMessageId,
         t0,
       });
-      // v2 阶段 1：意图已识别（路由是纯本地规则，立即就有结果）
       turnEmitter.emitIntentDetected(
         buildIntentDetectedPayload({
           sessionId: msgActor,
           traceId: batched.originalMessageId,
           decision,
-          // plan / subAgents 由 plan-execute-loop / master-agent-coordinator
-          // 后续补发 execution_event(kind=agent_start / log) 即可
         }),
       );
     }
 
-    const interimText = shouldEmitInterimAck(batched.text, decision.mode, {
-      enabled: cfg.interimAck.enabled,
-    })
-      ? buildInterimAckText(batched.text, decision.mode)
+    const interimText = phasedAsyncEnabled
+      ? await buildInterimAckTextWithLlm({
+          text: batched.text,
+          mode: decision.mode,
+          provider: createExternalChatProviderFromEnv(),
+        })
       : null;
     if (interimText) {
-      if (isStale()) return;
+      if (isStale() || replyFinished || chunkSeq > 0) return;
       ctx.socket.send(
         JSON.stringify({
           type: ServerEventType.ChatAssistantInterim,
@@ -315,7 +298,7 @@ async function processBatchedMessage(
     }
   };
 
-  maybeEmitInterimAck();
+  void maybeEmitInterimAck();
 
   try {
     const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
@@ -423,12 +406,14 @@ async function processBatchedMessage(
     });
 
     if (isStale()) return;
+    replyFinished = true;
 
     if (!reply.streamedChunks) {
       chunkText(reply.text, 12).forEach((chunk) => sendAssistantChunk(chunk));
     }
 
     if (isStale()) return;
+    replyFinished = true;
 
     let toolResult: { ok: boolean; result?: Record<string, unknown> } | undefined;
     if (reply.toolName && reply.toolInput) {

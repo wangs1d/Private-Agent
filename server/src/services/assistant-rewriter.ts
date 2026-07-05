@@ -1,5 +1,5 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
-import { detectAssistantToneMode } from "./assistant-tone-policy.js";
+import { detectAssistantToneMode, type AssistantToneMode } from "./assistant-tone-policy.js";
 
 function isEnabled(): boolean {
   const raw = (process.env.AGENT_HUMAN_REWRITE_ENABLED ?? "1").trim().toLowerCase();
@@ -21,7 +21,7 @@ function shouldRewrite(text: string): boolean {
   if (!trimmed) return false;
   if (trimmed.length > maxChars()) return false;
   if (trimmed.includes("[CONTENT_SUMMARY_V2_START]")) return false;
-  if (/\n\s*(?:[-*•]|\d+[.)。])/u.test(trimmed)) return false;
+  if (/\n\s*(?:[-*•]|\d+[.)、])/u.test(trimmed)) return false;
   return true;
 }
 
@@ -69,6 +69,62 @@ function compactText(text: string): string {
     .trim();
 }
 
+function keepAtMostOneEmoji(text: string): string {
+  let seen = false;
+  return text.replace(/\p{Extended_Pictographic}/gu, (match) => {
+    if (seen) return "";
+    seen = true;
+    return match;
+  });
+}
+
+function normalizeRewriteTone(
+  base: string,
+  rewritten: string,
+  tone: AssistantToneMode,
+): string {
+  let out = compactText(rewritten);
+  if (!out) return out;
+
+  out = out.replace(/[~～]{2,}/g, "~");
+  out = out.replace(/([!?！？]){2,}/g, "$1");
+  out = out.replace(/([哈呀啦嘛呢哦哎欸诶])\1{1,}/gu, "$1");
+  out = keepAtMostOneEmoji(out);
+
+  if (tone === "direct") {
+    out = out.replace(/\s*[?？]\s*$/u, "").trim();
+  }
+
+  if (!/[\p{Extended_Pictographic}~～]/u.test(base) && tone !== "light") {
+    out = out.replace(/[~～]/g, "");
+  }
+
+  return compactText(out);
+}
+
+function buildRewritePrompt(userText: string, base: string, tone: AssistantToneMode): string {
+  return [
+    "You are a Chinese dialogue polisher.",
+    "Rewrite only the expression. Keep facts, conclusions, and meaning unchanged.",
+    "Target feel: like a real person chatting on WeChat, not a customer-service bot.",
+    "Do not force a fixed persona. Adapt to this user's wording, emotional temperature, and familiarity in the current conversation.",
+    `Tone mode: ${tone}. steady=natural and stable, soft=gentler, direct=more concise, light=more playful.`,
+    "You may add human flavor when it fits: humor, light teasing, a little cuteness, emotional color, or one short follow-up question.",
+    "But do not force it every turn. The reply should still match the topic and feel natural.",
+    "Rules:",
+    "1. Do not add new facts, examples, or claims.",
+    "2. Keep result first when the original is factual or task-oriented.",
+    "3. Make it sound alive and human, but not like a skit or stand-up routine.",
+    "4. Avoid customer-service phrasing, report style, markdown headings, and stiff summary openings.",
+    "5. Unless the original is shorter, do not make it longer overall.",
+    "6. Preserve numbers, dates, links, English terms, proper nouns, and core judgments.",
+    "7. Output only the rewritten final reply.",
+    "",
+    `User said: ${userText.trim().slice(0, 220)}`,
+    `Original reply: ${base}`,
+  ].join("\n");
+}
+
 export class AssistantRewriterService {
   constructor(private readonly provider: ExternalChatProvider | null) {}
 
@@ -79,21 +135,7 @@ export class AssistantRewriterService {
     }
 
     const tone = detectAssistantToneMode(userText);
-    const prompt = [
-      "你是中文回复润色器，只改表达，不改事实，不补信息，不删关键结论。",
-      "目标：把回复改得更像真人对话，口语自然，短一点，少客服腔，少说明书味道。",
-      `本轮语气温度：${tone}。steady=稳，soft=更柔和，direct=更利落，light=更轻松。`,
-      "硬性要求：",
-      "1. 不新增事实，不改原意，不改结论。",
-      "2. 默认像微信聊天，少用“以下是”“总的来说”“我来帮你分析一下”这类 AI 腔。",
-      "3. 可以接一两句，但要克制，不演绎，不鸡汤，不扩写。",
-      "4. 除非原文更短，否则不要把它改长。",
-      "5. 数字、时间、百分比、链接、英文术语、专有名词尽量原样保留。",
-      "6. 只输出改写后的最终回复，不要解释。",
-      "",
-      `用户刚才说：${userText.trim().slice(0, 220)}`,
-      `原回复：${base}`,
-    ].join("\n");
+    const prompt = buildRewritePrompt(userText, base, tone);
 
     let out = "";
     try {
@@ -109,7 +151,7 @@ export class AssistantRewriterService {
             ephemeralTurn: true,
             disableThinking: true,
             systemPromptOverride:
-              "你是轻量口语润色器。只改表达，不改事实，不加新信息，默认更短、更自然、更像真人接话。",
+              "You are a lightweight rewrite model. Keep the meaning and facts exactly the same, but make the reply sound more like a real human chat message.",
             modelOverride: process.env.AGENT_HUMAN_REWRITE_MODEL?.trim() || undefined,
             maxThreadMessages: 2,
           },
@@ -122,9 +164,9 @@ export class AssistantRewriterService {
       return base;
     }
 
-    const rewritten = compactText(out);
+    const rewritten = normalizeRewriteTone(base, out, tone);
     if (!rewritten) return base;
-    if (rewritten.length > Math.max(base.length + 24, Math.floor(base.length * 1.18))) return base;
+    if (rewritten.length > Math.max(base.length + 32, Math.floor(base.length * 1.25))) return base;
     if (!preservesFactAnchors(base, rewritten)) return base;
     return rewritten;
   }

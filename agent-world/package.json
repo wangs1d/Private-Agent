@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Portable Agent World module (world state, free market, A2A, doudizhu).",
+  "description": "Portable Agent World module (world state, free market, A2A).",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

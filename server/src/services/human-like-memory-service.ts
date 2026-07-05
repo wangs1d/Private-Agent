@@ -176,6 +176,42 @@ type HybridRetrievalCandidate = {
   finalScore: number;
 };
 
+function overlapScore(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) return 0;
+  const leftSet = new Set(left.filter(Boolean));
+  const rightSet = new Set(right.filter(Boolean));
+  if (leftSet.size === 0 || rightSet.size === 0) return 0;
+  let overlap = 0;
+  for (const item of leftSet) {
+    if (rightSet.has(item)) overlap += 1;
+  }
+  return overlap / Math.max(leftSet.size, rightSet.size);
+}
+
+function computeSimilarity(
+  left: MemoryNodeRecord,
+  right: MemoryNodeRecord,
+): { score: number } {
+  const semanticScore =
+    left.semanticFingerprint.length > 0 && left.semanticFingerprint === right.semanticFingerprint
+      ? 1
+      : 0;
+  const vectorScore =
+    left.vectorFingerprint.length > 0 && left.vectorFingerprint === right.vectorFingerprint ? 0.92 : 0;
+  const keywordScore = overlapScore(left.keywords, right.keywords);
+  const entityScore = overlapScore(left.entityTags, right.entityTags);
+  const sceneScore = overlapScore(left.sceneTags, right.sceneTags);
+  const emotionScore = overlapScore(left.emotionTags, right.emotionTags);
+  const score =
+    semanticScore * 0.4 +
+    vectorScore * 0.22 +
+    keywordScore * 0.2 +
+    entityScore * 0.1 +
+    sceneScore * 0.05 +
+    emotionScore * 0.03;
+  return { score: clamp(score, 0, 1) };
+}
+
 type SleepAction =
   | { type: "downrank"; nodeId: string; stage: SleepAgentStage; reason: string }
   | { type: "cold"; nodeId: string; stage: SleepAgentStage; reason: string }

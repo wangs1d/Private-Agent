@@ -59,7 +59,7 @@ export function registerWorldOpenRegistryTools(registry: ToolRegistryLike, world
       agentWorldRegistered: true,
       agentWorldCredits: state.agentWorldCredits,
       message:
-        "已注册开放式 Agent World，可开始使用 world.free_market.* / world.doudizhu.* / world.zhajinhua.* / world.social.* 等工具",
+        "已注册开放式 Agent World，可开始使用 world.free_market.* / world.social.* 等工具",
     };
   });
 }

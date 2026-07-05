@@ -99,7 +99,6 @@ export class MusicRoomService {
 
   /** 创建音乐房。 */
   createRoom(sessionId: string): { ok: true; room: MusicRoomSummary } | { ok: false; reason: string } {
-    this.worldService.enterGameCenterScene(sessionId, "music_room");
     const id = newRoomId();
     const room: MusicRoom = {
       id,
@@ -122,7 +121,6 @@ export class MusicRoomService {
   ): { ok: true; snapshot: Record<string, unknown> } | { ok: false; reason: string } {
     const room = this.rooms.get(roomId);
     if (!room) return { ok: false, reason: "音乐房不存在" };
-    this.worldService.enterGameCenterScene(sessionId, "music_room");
     room.participants.add(sessionId);
     room.lastUpdatedAt = Date.now();
     this.notifyRoom(roomId);

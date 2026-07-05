@@ -16,9 +16,12 @@ import {
   USER_VISIBLE_PROGRESS_MARKER,
 } from "../agent/delegate-status.js";
 import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
+import { shouldAllowBackgroundSubAgentTask } from "../agent/background-task-policy.js";
 import { resolveUserLocationPrompt } from "./user-location-service.js";
 import type {
+  BackgroundSubAgentAction,
   BackgroundSubAgentJob,
+  BackgroundSubAgentUpdate,
   InterAgentMessage,
   SubAgentCapability,
   SubAgentResult,
@@ -64,6 +67,12 @@ type TurnDelegationState = {
   backgroundJobs: Map<string, BackgroundSubAgentJob>;
 };
 
+type BackgroundJobLookup = {
+  turnKey: string;
+  turnState: TurnDelegationState;
+  job: BackgroundSubAgentJob;
+};
+
 export type OrchestrateTaskOptions = {
   sessionId?: string;
   chatUserMessageId?: string;
@@ -96,6 +105,7 @@ export interface MasterAgentConfig {
   allowFallback: boolean;
   verbose: boolean;
   enableMetrics: boolean;
+  onBackgroundJobUpdate?: (update: BackgroundSubAgentUpdate) => void;
 }
 
 export interface PerformanceMetrics {
@@ -174,6 +184,17 @@ export class MasterAgentCoordinator {
       maxParallelTasks: this.config.maxParallelTasks,
       verbose: this.config.verbose,
     });
+  }
+
+  private emitBackgroundJobUpdate(update: BackgroundSubAgentUpdate): void {
+    try {
+      this.config.onBackgroundJobUpdate?.(update);
+    } catch (error) {
+      this.log("Background job update callback failed", {
+        taskId: update.taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private registerDelegateTools(): void {
@@ -256,7 +277,7 @@ export class MasterAgentCoordinator {
         "  🍱 外卖点餐 · 🍽️ 到店餐饮 · 🏨 酒店预订",
         "  🚕 打车出行 · ✈️ 机票火车票 · 🎬 电影票",
         "  🛒 网购购物 · 📱 各类缴费 · 💊 药品医疗",
-        "  🎁 礼品鲜花 · 🧹 家政维修 · 🎮 游戏充值",
+        "  🎁 礼品鲜花 · 🧹 家政维修",
         "  ...以及所有其他可购买的服务和商品",
         "",
         "🖥️ 视觉操控（主 agent 无此能力）：",
@@ -279,7 +300,6 @@ export class MasterAgentCoordinator {
         "宠物", "猫粮", "狗粮", "宠物医院",
         "家政", "保洁", "维修", "搬家",
         "美妆", "SPA", "按摩", "美发", "理发",
-        "游戏", "游戏充值", "会员", "VIP", "订阅",
         "保险", "理财", "基金", "股票", "投资",
         "教育", "课程", "培训", "图书",
         "办公", "打印", "复印", "快递", "寄件",
@@ -468,6 +488,28 @@ export class MasterAgentCoordinator {
     return state;
   }
 
+  private listTurnStatesForActor(actorId: string): Array<[string, TurnDelegationState]> {
+    const prefix = `${actorId}:`;
+    return [...this.turnDelegationStates.entries()].filter(([key]) => key.startsWith(prefix));
+  }
+
+  private findBackgroundJob(actorId: string, taskId: string): BackgroundJobLookup | null {
+    for (const [turnKey, turnState] of this.listTurnStatesForActor(actorId)) {
+      const job = turnState.backgroundJobs.get(taskId);
+      if (job) {
+        return { turnKey, turnState, job };
+      }
+    }
+    return null;
+  }
+
+  private computeAvailableActions(job: BackgroundSubAgentJob): BackgroundSubAgentAction[] {
+    if (job.status === "running") return [];
+    if (job.status === "failed") return ["retry", "confirm"];
+    if (job.status === "awaiting_confirmation") return ["continue_processing", "confirm"];
+    return [];
+  }
+
   private async withTurnLock<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.turnLocks.get(turnKey) ?? Promise.resolve();
     let release!: () => void;
@@ -617,13 +659,19 @@ export class MasterAgentCoordinator {
     const taskDescription = String(input.taskDescription ?? "").trim();
     const priorContext = String(input.priorContext ?? "").trim();
     const targetAgent = String(input.forwardToAgent ?? "").trim();
-    const runInBackground = this.parseRunInBackground(input.runInBackground ?? input.background);
+    const requestedBackground = this.parseRunInBackground(input.runInBackground ?? input.background);
 
     if (!agentType) return { ok: false, error: "Invalid agentType. Use master_list_sub_agents to inspect options." };
     if (!taskDescription) return { ok: false, error: "taskDescription is required." };
 
     const capability = this.subAgentCapabilities.get(agentType);
     if (!capability) return { ok: false, error: `Unknown sub-agent type: ${agentType}` };
+    const runInBackground = shouldAllowBackgroundSubAgentTask({
+      userMessage: this.currentTurnUserMessage ?? taskDescription,
+      taskDescription,
+      agentType,
+      explicitlyRequested: requestedBackground,
+    });
 
     const rtConfig = getAgentRuntimeConfig();
     const turnKey = this.turnReportKey(actorId, context.chatUserMessageId);
@@ -705,6 +753,7 @@ export class MasterAgentCoordinator {
     };
 
     if (runInBackground) {
+      const startedAt = Date.now();
       const reserved = await this.withTurnLock(turnKey, async () => {
         if (turnState.reports.length + turnState.inFlightCount >= maxInvocations) {
           return false;
@@ -714,8 +763,18 @@ export class MasterAgentCoordinator {
           taskId: task.id,
           agentType,
           agentName: capability.name,
+          sessionId: actorId,
+          chatUserMessageId: context.chatUserMessageId,
           status: "running",
-          startedAt: Date.now(),
+          startedAt,
+          taskDescription,
+          priorContext,
+          accessMode:
+            parseAgentAccessMode(context.agentAccessMode ?? this.currentTurnOrchestrateOpts?.agentAccessMode) ===
+            "full"
+                ? "full"
+                : "sandbox",
+          availableActions: [],
         });
         return true;
       });
@@ -727,6 +786,16 @@ export class MasterAgentCoordinator {
           error: `Sub-agent delegation limit reached for this turn (${maxInvocations}).`,
         };
       }
+      this.emitBackgroundJobUpdate({
+        taskId: task.id,
+        agentType,
+        agentName: capability.name,
+        status: "running",
+        sessionId: actorId,
+        chatUserMessageId: context.chatUserMessageId,
+        startedAt,
+        userFacingText: `${capability.name}已转到后台处理中，完成后我会主动告诉你。`,
+      });
       void this.runSubAgentDelegation({
         actorId,
         turnKey,
@@ -755,6 +824,13 @@ export class MasterAgentCoordinator {
         inFlightInTurn: turnState.inFlightCount,
         message: `${capability.name} 已在后台执行；可继续对话或调用 master_poll_sub_agent_tasks 查看进度。`,
       };
+    }
+
+    if (requestedBackground && !runInBackground) {
+      this.log("Background execution suppressed for non-long-running task", {
+        agentType,
+        taskDescription: taskDescription.slice(0, 160),
+      });
     }
 
     return await this.runSubAgentDelegation({
@@ -857,9 +933,23 @@ export class MasterAgentCoordinator {
             turnState.seenFingerprints.set(fingerprint, subResult);
             const job = turnState.backgroundJobs.get(task.id);
             if (job) {
-              job.status = "completed";
+              job.status = "awaiting_confirmation";
               job.completedAt = Date.now();
               job.report = report ?? undefined;
+              job.availableActions = this.computeAvailableActions(job);
+              this.emitBackgroundJobUpdate({
+                taskId: job.taskId,
+                agentType: job.agentType,
+                agentName: job.agentName,
+                status: job.status,
+                sessionId: actorId,
+                chatUserMessageId: context.chatUserMessageId,
+                startedAt: job.startedAt,
+                completedAt: job.completedAt,
+                availableActions: job.availableActions,
+                report: job.report,
+                userFacingText: `${job.agentName}后台任务已完成：${(report ?? "").trim().slice(0, 180) || "结果已就绪"}`,
+              });
             }
           });
           this.metrics.sequentialExecutions += 1;
@@ -906,6 +996,20 @@ export class MasterAgentCoordinator {
               job.status = "failed";
               job.completedAt = Date.now();
               job.error = msg;
+              job.availableActions = this.computeAvailableActions(job);
+              this.emitBackgroundJobUpdate({
+                taskId: job.taskId,
+                agentType: job.agentType,
+                agentName: job.agentName,
+                status: job.status,
+                sessionId: actorId,
+                chatUserMessageId: context.chatUserMessageId,
+                startedAt: job.startedAt,
+                completedAt: job.completedAt,
+                availableActions: job.availableActions,
+                error: msg,
+                userFacingText: `${job.agentName}后台任务失败：${msg.slice(0, 180)}`,
+              });
             }
           });
           return {
@@ -960,7 +1064,10 @@ export class MasterAgentCoordinator {
 
   private formatSubAgentTasksPoll(turnState: TurnDelegationState): Record<string, unknown> {
     const running = [...turnState.backgroundJobs.values()].filter((j) => j.status === "running");
-    const completed = [...turnState.backgroundJobs.values()].filter((j) => j.status !== "running");
+    const awaitingConfirmation = [...turnState.backgroundJobs.values()].filter(
+      (j) => j.status === "awaiting_confirmation" || j.status === "failed",
+    );
+    const completed = [...turnState.backgroundJobs.values()].filter((j) => j.status === "completed");
     return {
       ok: true,
       maxParallelTasks: this.config.maxParallelTasks,
@@ -968,6 +1075,7 @@ export class MasterAgentCoordinator {
       inFlightInTurn: turnState.inFlightCount,
       completedReportsInTurn: turnState.reports.length,
       running,
+      awaitingConfirmation,
       backgroundCompleted: completed,
       reports: turnState.reports.map((r) => ({
         taskId: r.taskId,
@@ -979,13 +1087,87 @@ export class MasterAgentCoordinator {
       hint:
         running.length > 0
           ? "仍有后台子任务执行中，可稍后再 poll 或继续与用户对话。"
-          : "无运行中后台任务；可基于 reports 合成回复。",
+          : awaitingConfirmation.length > 0
+              ? "存在待确认的后台结果，可确认归档、继续处理或重试。"
+              : "无运行中后台任务；可基于 reports 合成回复。",
     };
   }
 
   async handlePollSubAgentTasksTool(context: ToolContext): Promise<Record<string, unknown>> {
     const actorId = resolveActorId(context);
     return this.getSubAgentTasksSnapshot(actorId, context.chatUserMessageId);
+  }
+
+  async handleBackgroundTaskAction(
+    actorId: string,
+    taskId: string,
+    action: "confirm" | "retry" | "continue_processing",
+  ): Promise<Record<string, unknown>> {
+    const found = this.findBackgroundJob(actorId, taskId);
+    if (!found) {
+      return { ok: false, error: "Background task not found." };
+    }
+    const { job } = found;
+    if (action === "confirm") {
+      job.status = "completed";
+      job.availableActions = [];
+      this.emitBackgroundJobUpdate({
+        taskId: job.taskId,
+        agentType: job.agentType,
+        agentName: job.agentName,
+        status: job.status,
+        sessionId: job.sessionId,
+        chatUserMessageId: job.chatUserMessageId,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        availableActions: job.availableActions,
+        report: job.report,
+        error: job.error,
+        userFacingText: `${job.agentName}结果已确认归档。`,
+      });
+      return { ok: true, taskId: job.taskId, status: job.status };
+    }
+
+    const capability = this.subAgentCapabilities.get(job.agentType);
+    if (!capability) {
+      return { ok: false, error: `Unknown sub-agent type: ${job.agentType}` };
+    }
+    const baseTaskDescription = job.taskDescription?.trim() || job.report?.trim() || job.error?.trim();
+    if (!baseTaskDescription) {
+      return { ok: false, error: "No source context available to resume this task." };
+    }
+    const nextTaskDescription =
+      action === "retry"
+        ? baseTaskDescription
+        : `${baseTaskDescription}\n\nContinue processing from the previous result and push the work forward.`;
+    const nextPriorContext = [
+      job.priorContext?.trim(),
+      job.report ? `Previous report:\n${job.report}` : "",
+      job.error ? `Previous error:\n${job.error}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const context: ToolContext = {
+      sessionId: actorId,
+      userId: actorId,
+      chatUserMessageId: job.chatUserMessageId,
+      agentAccessMode: job.accessMode === "full" ? "full" : "sandbox",
+    };
+    job.status = "completed";
+    job.availableActions = [];
+    return this.handleInvokeSubAgentTool(
+      {
+        agentType: job.agentType,
+        taskDescription: nextTaskDescription,
+        priorContext: nextPriorContext,
+        runInBackground: true,
+        userStatusLine:
+          action === "retry"
+            ? `正在重试 ${job.agentName}`
+            : `正在继续处理 ${job.agentName} 的后台任务`,
+      },
+      context,
+    );
   }
 
   async handleListSubAgentsTool(_context: ToolContext): Promise<Record<string, unknown>> {

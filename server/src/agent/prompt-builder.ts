@@ -16,7 +16,7 @@ import {
  * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
  * 参考 Hermes `prompt_builder`：工具相关说明在单一处维护，避免各 Provider 分叉。
  */
-export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【🎮 游戏 · 你可以陪用户一起玩！】";
+export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【工具说明】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
 export const WEB_SEARCH_SYSTEM_SUFFIX_MARKER = "【联网检索】";
 export const PHONE_CALL_SYSTEM_SUFFIX_MARKER = "【语音通知与电话通话";
@@ -82,7 +82,7 @@ function buildMasterSubAgentDelegateSuffix(): string {
 - creative（创意）：文案、策划、写作、翻译润色
 
 【何时自己干 vs 派小弟】
-- 简单、单一事项：优先直接用 clock、calendar、search_web、侧栏游戏（world.gomoku/doudizhu/zhajinhua/blackjack）等，不必派小弟。
+- 简单、单一事项：优先直接用 clock、calendar、search_web 等，不必派小弟。
 - 需要专业能力、多步骤、或你一个人搞不定时：调用 master_invoke_sub_agent 派对应小弟。
 
 【并行委派】用户一次提多件互不依赖的事，或你拆成多个独立子任务时，应在同一轮 tool 批次里并行多次 master_invoke_sub_agent（服务端最多同时跑 ${maxParallel} 个小弟）。例：「查北京天气 + 写一段推广文案」→ 可并行派 info 与 creative。

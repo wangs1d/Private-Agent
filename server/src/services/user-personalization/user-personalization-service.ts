@@ -71,6 +71,11 @@ type TimeRhythmState = {
 
 type StyleProfileState = {
   banterLevel: number;
+  playfulTolerance: number;
+  cuteTolerance: number;
+  teasingTolerance: number;
+  followUpTolerance: number;
+  expressiveTolerance: number;
   careStyle: "gentle" | "playful" | "direct";
   motivationStyle: "encouraging" | "steady" | "push";
   initiativeStyle: "reserved" | "balanced" | "proactive";
@@ -173,6 +178,11 @@ function defaultTimeRhythmState(): TimeRhythmState {
 function defaultStyleProfileState(): StyleProfileState {
   return {
     banterLevel: 0.4,
+    playfulTolerance: 0.45,
+    cuteTolerance: 0.35,
+    teasingTolerance: 0.32,
+    followUpTolerance: 0.48,
+    expressiveTolerance: 0.42,
     careStyle: "gentle",
     motivationStyle: "steady",
     initiativeStyle: "balanced",
@@ -270,8 +280,15 @@ function toTimeRhythmState(v: unknown): TimeRhythmState {
 function toStyleProfileState(v: unknown): StyleProfileState {
   if (!v || typeof v !== "object") return defaultStyleProfileState();
   const o = v as Record<string, unknown>;
+  const clamp = (n: unknown, fallback: number) =>
+    Math.min(1, Math.max(0, Number(n) || fallback));
   return {
-    banterLevel: Math.min(1, Math.max(0, Number(o.banterLevel) || 0.4)),
+    banterLevel: clamp(o.banterLevel, 0.4),
+    playfulTolerance: clamp(o.playfulTolerance, 0.45),
+    cuteTolerance: clamp(o.cuteTolerance, 0.35),
+    teasingTolerance: clamp(o.teasingTolerance, 0.32),
+    followUpTolerance: clamp(o.followUpTolerance, 0.48),
+    expressiveTolerance: clamp(o.expressiveTolerance, 0.42),
     careStyle:
       o.careStyle === "playful" || o.careStyle === "direct" ? o.careStyle : "gentle",
     motivationStyle:
@@ -287,6 +304,66 @@ function toStyleProfileState(v: unknown): StyleProfileState {
         ? o.lastUpdatedAt
         : new Date().toISOString(),
   };
+}
+
+function detectDynamicStyleSignals(userText: string): {
+  playful: number;
+  cute: number;
+  teasing: number;
+  followUp: number;
+  expressive: number;
+} {
+  const text = userText.trim();
+  return {
+    playful:
+      /(搞笑|幽默|逗|贫|皮一点|别太端着|松弛一点|活一点|梗|好玩|哈哈|笑死|乐了)/i.test(text)
+        ? 0.14
+        : 0,
+    cute:
+      /(卖萌|可爱一点|软一点|奶一点|撒娇|萌一点|乖一点)/i.test(text)
+        ? 0.14
+        : 0,
+    teasing:
+      /(损我|吐槽|内涵|阴阳|怼|别太正经|调侃我|嘴我两句)/i.test(text)
+        ? 0.12
+        : 0,
+    followUp:
+      /(追问|多问一句|继续问我|顺着聊|陪我聊|别只答完就停)/i.test(text)
+        ? 0.15
+        : 0,
+    expressive:
+      /[!！~～哈哈嘿嘿哇呀啦捏呗嘛嘞诶欸]|😂|😅|🥹|🤔|😎|🥲/u.test(text)
+        ? 0.08
+        : 0,
+  };
+}
+
+function buildAdaptiveStyleGuidance(
+  relationship: RelationshipState,
+  style: StyleProfileState,
+): string {
+  const lines: string[] = [];
+  if (relationship.rapport >= 0.62 && style.playfulTolerance >= 0.58) {
+    lines.push("关系已经熟一点了，可以偶尔顺手逗一句，像熟人聊天那样自然一点。");
+  } else {
+    lines.push("先别硬凹风格，优先自然接话，再一点点贴近用户。");
+  }
+  if (style.cuteTolerance >= 0.6) {
+    lines.push("用户对软一点、萌一点的表达接受度高，偶尔带一点可爱感也行，但别连着来。");
+  }
+  if (style.teasingTolerance >= 0.56 && relationship.rapport >= 0.58) {
+    lines.push("可以轻微调侃、吐槽、阴阳一下下，但尺度要像熟人拌嘴，不要真冒犯。");
+  }
+  if (style.followUpTolerance >= 0.58) {
+    lines.push("回答完可以顺手追问半句，把话题接住，别每次都机械收尾。");
+  }
+  if (style.expressiveTolerance >= 0.55) {
+    lines.push("表达可以更有情绪起伏一点，允许少量语气词和表情感。");
+  } else {
+    lines.push("少堆语气词和表情，免得显得太演。");
+  }
+  lines.push("这些都不是固定人设，只能顺着用户当下的说话方式小幅贴近。");
+  return lines.join("\n");
 }
 
 function relationshipSummaryLine(state: RelationshipState, style: StyleProfileState): string {
@@ -310,6 +387,7 @@ function relationshipSummaryLine(state: RelationshipState, style: StyleProfileSt
     directness,
     humor,
     care,
+    buildAdaptiveStyleGuidance(state, style),
     "无论怎么个性化，默认都要精简、口语化、少废话，避免客服腔和过度正式。",
     "不要把用户硬归类成某种固定模板，优先根据他这段时间真实的说话方式持续微调。",
     "优先贴近用户当前说话方式；如果用户明显喜欢某种表达，就往那个方向小幅靠拢，不要突变。",
@@ -568,12 +646,12 @@ export class UserPersonalizationService {
     };
   }
 
-  observeTurn(actorId: string, userText: string, _assistantText: string): void {
+  observeTurn(actorId: string, userText: string, assistantText: string): void {
     if (!isUserPersonalizationEnabled()) return;
-    void this.observeTurnAsync(actorId, userText).catch(() => {});
+    void this.observeTurnAsync(actorId, userText, assistantText).catch(() => {});
   }
 
-  private async observeTurnAsync(actorId: string, userText: string): Promise<void> {
+  private async observeTurnAsync(actorId: string, userText: string, assistantText: string): Promise<void> {
     const patches = extractProfilePatches(userText);
     let md = await this.store.read(actorId);
     if (patches.length > 0) md = applyProfilePatches(md, patches);
@@ -582,10 +660,30 @@ export class UserPersonalizationService {
     await this.store.write(actorId, md);
     this.syncProfileKv(actorId, md);
     this.updateFactStore(actorId, userText);
+    this.learnFromAssistantStyle(actorId, assistantText);
     const everyN = profileLlmEveryNTurns();
     if (everyN > 0 && state.turnCount > 0 && state.turnCount % everyN === 0) {
       await this.refineProfileWithLlm(actorId, userText, md);
     }
+  }
+
+  private learnFromAssistantStyle(actorId: string, assistantText: string): void {
+    const text = assistantText.trim();
+    if (!text) return;
+    const current = this.loadStyleProfileState(actorId);
+    const next: StyleProfileState = {
+      ...current,
+      followUpTolerance: Math.min(
+        1,
+        Math.max(0, current.followUpTolerance * 0.98 + (/[?？]$/u.test(text) ? 0.02 : 0)),
+      ),
+      expressiveTolerance: Math.min(
+        1,
+        Math.max(0, current.expressiveTolerance * 0.98 + (/[!！~～]|😂|😅|🥹|🤔|😎|🥲/u.test(text) ? 0.02 : 0)),
+      ),
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.saveJsonState(actorId, USER_STYLE_PROFILE_KEY, next);
   }
 
   private applyUserSignals(actorId: string, userText: string, state: EmotionState): EmotionState {
@@ -633,6 +731,7 @@ export class UserPersonalizationService {
     behavior: BehaviorSignals,
   ): RelationshipState {
     const text = userText.toLowerCase();
+    const dynamic = detectDynamicStyleSignals(userText);
     const humorBoost = /(调侃|开玩笑|搞笑|幽默|逗我|别太严肃|轻松一点|humor)/i.test(text) ? 0.12 : 0;
     const warmthBoost = /(安慰|鼓励|陪我|温柔|耐心|温暖|辛苦了|谢谢你)/i.test(text) ? 0.12 : 0;
     const directnessBoost = /(直接点|别绕|简短|一句话|别啰嗦|straight|direct)/i.test(text) ? 0.12 : 0;
@@ -679,24 +778,91 @@ export class UserPersonalizationService {
     current: StyleProfileState,
   ): StyleProfileState {
     const text = userText.toLowerCase();
+    const dynamic = detectDynamicStyleSignals(userText);
+    const humorLift = Math.max(0, relationship.humorTolerance - 0.5);
+    const warmthLift = Math.max(0, relationship.warmth - 0.5);
+    const rapportLift = Math.max(0, relationship.rapport - 0.5);
+    const directLift = Math.max(0, relationship.directnessPreference - 0.5);
     const next: StyleProfileState = {
-      banterLevel: Math.min(1, Math.max(0, current.banterLevel + (relationship.humorTolerance - 0.5) * 0.08)),
+      banterLevel: Math.min(
+        1,
+        Math.max(
+          0,
+          current.banterLevel * 0.92 +
+            humorLift * 0.08 +
+            rapportLift * 0.05 +
+            dynamic.playful * 0.5 -
+            directLift * 0.03,
+        ),
+      ),
+      playfulTolerance: Math.min(
+        1,
+        Math.max(
+          0,
+          current.playfulTolerance * 0.94 + dynamic.playful + humorLift * 0.05 + rapportLift * 0.03,
+        ),
+      ),
+      cuteTolerance: Math.min(
+        1,
+        Math.max(
+          0,
+          current.cuteTolerance * 0.94 +
+            dynamic.cute +
+            (/(?:\u53ef\u7231|\u5356\u840c|\u840c)/i.test(userText) ? 0.04 : 0) +
+            warmthLift * 0.03,
+        ),
+      ),
+      teasingTolerance: Math.min(
+        1,
+        Math.max(
+          0,
+          current.teasingTolerance * 0.95 +
+            dynamic.teasing +
+            (relationship.rapport > 0.55 ? 0.03 : 0) +
+            humorLift * 0.03 -
+            Math.max(0, relationship.encouragementNeed - 0.55) * 0.04,
+        ),
+      ),
+      followUpTolerance: Math.min(
+        1,
+        Math.max(
+          0,
+          current.followUpTolerance * 0.95 +
+            dynamic.followUp +
+            (behavior.companionNeed > 0 ? 0.04 : 0) +
+            (behavior.planningInterest > 0 ? 0.02 : 0),
+        ),
+      ),
+      expressiveTolerance: Math.min(
+        1,
+        Math.max(
+          0,
+          current.expressiveTolerance * 0.94 + dynamic.expressive + warmthLift * 0.05 + rapportLift * 0.02,
+        ),
+      ),
       careStyle:
-        /(安慰|温柔|陪我|慢一点)/i.test(text)
-          ? "gentle"
-          : relationship.humorTolerance > 0.7 && relationship.rapport > 0.6
-            ? "playful"
+        /(?:\u5b89\u6170|\u6e29\u67d4|\u966a\u6211|\u6162\u4e00\u70b9)/i.test(userText)
+          ? 'gentle'
+          : ((relationship.humorTolerance > 0.7 && relationship.rapport > 0.6) ||
+                current.playfulTolerance > 0.6 ||
+                dynamic.playful > 0.1) &&
+              relationship.encouragementNeed < 0.78
+            ? 'playful'
             : relationship.directnessPreference > 0.7
-              ? "direct"
+              ? 'direct'
               : current.careStyle,
       motivationStyle:
-        /(鼓励|打气|夸我)/i.test(text) ? "encouraging" : /(催我|推我|盯着我)/i.test(text) ? "push" : current.motivationStyle,
+        /(?:\u9f13\u52b1|\u6253\u6c14|\u5938\u6211)/i.test(userText)
+          ? 'encouraging'
+          : /(?:\u50ac\u6211|\u63a8\u6211|\u76ef\u7740\u6211)/i.test(userText)
+            ? 'push'
+            : current.motivationStyle,
       initiativeStyle:
         relationship.proactiveTolerance > 0.7 || behavior.planningInterest > 4
-          ? "proactive"
+          ? 'proactive'
           : relationship.proactiveTolerance < 0.4
-            ? "reserved"
-            : "balanced",
+            ? 'reserved'
+            : 'balanced',
       lastUpdatedAt: new Date().toISOString(),
     };
     this.saveJsonState(actorId, USER_STYLE_PROFILE_KEY, next);

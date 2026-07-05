@@ -45,6 +45,7 @@ function buildCompactAgentCapsPrompt(): string {
     "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
     "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务可派专业小弟（子 Agent）执行。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
+    "【真人感·行动宣告】凡是要调工具或派子 Agent 时，必须在调用前先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」「我让技术小弟去看一眼…」），不要直接调用工具。这句话会作为独立消息先送达用户，让对话像真人交互一样有反馈节奏。",
   ];
   if (cfg.masterDelegation.enabled) {
     lines.push(
@@ -59,7 +60,6 @@ function buildCompactAgentCapsPrompt(): string {
 const WORLD_DOMAIN_RULES: Array<{ domains: CapabilityDomain[]; pattern: RegExp }> = [
   { domains: ["world"], pattern: /agent world|world\.|free_market|open_registry|世界点数|点数|技能商店|注册|市场/i },
   { domains: ["social_feed", "world"], pattern: /社交|推文|帖子|动态|评论|点赞|social/i },
-  { domains: ["entertainment"], pattern: /游戏|五子棋|斗地主|炸金花|21点|blackjack|gomoku|doudizhu|zhajinhua/i },
   { domains: ["aip", "world"], pattern: /aip|提案|协议|联盟|投票/i },
 ];
 

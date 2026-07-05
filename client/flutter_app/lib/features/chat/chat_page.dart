@@ -1,11 +1,8 @@
-import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import "package:flutter/foundation.dart"
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
-import "package:flutter/services.dart";
-import "package:http/http.dart" as http;
 import "dart:async";
-import "dart:convert";
 
-import "../../core/config/api_config.dart";
 import "../../core/models/chat_models.dart";
 import "../../core/models/turn_state.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
@@ -38,23 +35,25 @@ class ChatPage extends StatefulWidget {
     this.onEnterVoiceMode,
     this.isAgentProcessing = false,
     this.agentStatusLine,
+
     /// 「分阶段异步对话交互」阶段一文本：在多步/工具型请求开始时显示的
     /// 即时确认应答（如「好的，让我查一下…」），real chunk 抵达后由父组件清空。
     this.interimAckText,
+
     /// 「分阶段异步对话交互 v2」结构化状态：null 时退回 v1 思考气泡。
     this.turnState,
-    this.onOpenGomoku,
     this.fullComputerAccessEnabled = false,
     this.onToggleFullComputerAccess,
-    this.onOpenBackgroundTasks,
-    this.backgroundTasksBadgeCount = 0,
     this.onOpenPhoneDialer,
     this.inputFocusNode,
     this.isActive = true,
+
     /// 删除单条消息的回调（传入 messageId）
     this.onDeleteMessage,
+
     /// 删除从某条消息起之后所有消息的回调（传入 messageId）
     this.onDeleteFromMessage,
+
     /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
     this.onStopAgent,
   });
@@ -63,6 +62,7 @@ class ChatPage extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode? inputFocusNode;
   final VoidCallback onSend;
+
   /// 用户给agent起的名字
   final String? agentName;
   final String? agentAvatarUrl;
@@ -70,37 +70,43 @@ class ChatPage extends StatefulWidget {
   final String? agentAvatarPreset;
   final AgentProfileData? agentProfile;
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
+
   /// 已选相册图张数，待发。
   final int galleryPendingCount;
   final VoidCallback? onPickGalleryImage;
   final VoidCallback? onClearGalleryImages;
+
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
+
   /// Agent是否正在处理中（流式输出）
   final bool isAgentProcessing;
+
   /// `chat.agent_status` 推送的口语化进度，优先于固定「思考中」
   final String? agentStatusLine;
+
   /// `chat.assistant_interim` 推送的即时确认应答（生命周期更短：real chunk 一到就清空）
   final String? interimAckText;
+
   /// 「分阶段异步对话交互 v2」结构化状态机；null 表示 v1 链路
   final TurnState? turnState;
-  /// 在 App 内打开五子棋对局（tableId 或 playUrl）
-  final void Function(String playUrlOrTableId)? onOpenGomoku;
+
   /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
   final bool fullComputerAccessEnabled;
   final VoidCallback? onToggleFullComputerAccess;
-  /// 打开「后台子 Agent 任务」面板
-  final VoidCallback? onOpenBackgroundTasks;
-  /// 运行中后台任务数（用于角标）
-  final int backgroundTasksBadgeCount;
+
   /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
+
   /// 当前 Tab 是否激活（用于检测从其他 Tab 切回对话页）
   final bool isActive;
+
   /// 删除单条消息
   final void Function(String messageId)? onDeleteMessage;
+
   /// 删除从某条消息起之后所有消息
   final void Function(String messageId)? onDeleteFromMessage;
+
   /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
   final VoidCallback? onStopAgent;
 
@@ -108,7 +114,8 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin {
+class _ChatPageState extends State<ChatPage>
+    with SingleTickerProviderStateMixin {
   final SpeechService _speechService = SpeechService();
   final bool _isListening = false;
   final String _recognizedText = "";
@@ -116,8 +123,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
   /// 全局删除选择模式状态
   bool _deleteSelectionMode = false;
+
   /// 触发删除的用户消息 ID（该消息始终被锁定选中，不可取消）
   String? _deleteTriggerMessageId;
+
   /// 删除选择模式下被选中的消息 ID 集合（含触发用户消息+可选的agent回复）
   final Set<String> _selectedMessageIds = <String>{};
 
@@ -150,12 +159,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     // 按索引从大到小排序，倒序删除避免索引偏移
     final List<MapEntry<int, String>> sorted = <MapEntry<int, String>>[];
     for (final String mid in _selectedMessageIds) {
-      final int idx = widget.messages.indexWhere((ChatMessage m) => m.messageId == mid);
+      final int idx =
+          widget.messages.indexWhere((ChatMessage m) => m.messageId == mid);
       if (idx >= 0) {
         sorted.add(MapEntry<int, String>(idx, mid));
       }
     }
-    sorted.sort((MapEntry<int, String> a, MapEntry<int, String> b) => b.key.compareTo(a.key));
+    sorted.sort((MapEntry<int, String> a, MapEntry<int, String> b) =>
+        b.key.compareTo(a.key));
 
     // 倒序逐条删除
     for (final MapEntry<int, String> entry in sorted) {
@@ -179,12 +190,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   }
 
   /// 滚动状态使用 ValueNotifier，避免 setState 触发整树重建导致掉帧
-  final ValueNotifier<bool> _isUserScrollingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _isUserScrollingNotifier =
+      ValueNotifier<bool>(false);
   bool _hasNewAgentMessage = false;
   AnimationController? _breathingController;
   Animation<double>? _breathingAnimation;
   List<Map<String, dynamic>>? _cachedMessageGroups;
   int _cachedMessagesLength = -1;
+
   /// 消息折叠相关状态
   static const int _collapseThreshold = 30; // 超过此数量时开始折叠
   static const int _visibleCount = 30; // 折叠后显示的消息数量
@@ -193,19 +206,21 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
 
   /// ====== 滚动位置保持相关 ======
-  bool _isTabActive = false;            // 当前是否在对话 Tab 上（用于屏蔽非活跃时的自动滚动）
-                                       // 在 initState 中从 widget.isActive 同步初始值
-  double? _savedScrollPosition;         // 离开时保存的滚动像素位置
-  double? _savedMaxScrollExtent;        // 离开时的最大可滚动距离
-  bool _hasSavedPosition = false;       // 是否有已保存的有效位置可供恢复
-                                       // （应用重启后自然重置为 false → 滚到底部）
-  bool _isRestoringPosition = false;    // 恢复锁：正在恢复位置时阻止所有自动滚动
+  bool _isTabActive = false; // 当前是否在对话 Tab 上（用于屏蔽非活跃时的自动滚动）
+  // 在 initState 中从 widget.isActive 同步初始值
+  double? _savedScrollPosition; // 离开时保存的滚动像素位置
+  double? _savedMaxScrollExtent; // 离开时的最大可滚动距离
+  bool _hasSavedPosition = false; // 是否有已保存的有效位置可供恢复
+  // （应用重启后自然重置为 false → 滚到底部）
+  bool _isRestoringPosition = false; // 恢复锁：正在恢复位置时阻止所有自动滚动
 
   // 预定义常量 - 减少重复创建对象
-  static const EdgeInsets _listPadding = EdgeInsets.symmetric(horizontal: 12, vertical: 4);
+  static const EdgeInsets _listPadding =
+      EdgeInsets.symmetric(horizontal: 12, vertical: 4);
   static const EdgeInsets _cardPadding = EdgeInsets.all(7);
-  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(6, 6, 6, 5);
-  static const EdgeInsets _inputHorizontalPadding = EdgeInsets.symmetric(horizontal: 10, vertical: 6);
+  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(6, 12, 6, 10);
+  static const EdgeInsets _inputHorizontalPadding =
+      EdgeInsets.symmetric(horizontal: 10, vertical: 6);
 
   @override
   void initState() {
@@ -298,7 +313,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 离开对话 Tab → 保存位置
     if (wasActive && !nowActive) {
-      print('[ChatScroll] 👋 离开对话Tab: wasActive=$wasActive → nowActive=$nowActive');
+      print(
+          '[ChatScroll] 👋 离开对话Tab: wasActive=$wasActive → nowActive=$nowActive');
       _isTabActive = false;
       _saveScrollPosition();
       return; // 离开后不再处理消息相关滚动
@@ -306,7 +322,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 进入（或切回）对话 Tab → 恢复位置或滚到底部
     if (!wasActive && nowActive) {
-      print('[ChatScroll] 🏠 进入对话Tab: wasActive=$wasActive → nowActive=$nowActive, hasSaved=$_hasSavedPosition, savedPixels=$_savedScrollPosition');
+      print(
+          '[ChatScroll] 🏠 进入对话Tab: wasActive=$wasActive → nowActive=$nowActive, hasSaved=$_hasSavedPosition, savedPixels=$_savedScrollPosition');
       _isTabActive = true;
       _restoreOrScrollToBottom();
       return; // 刚进入时跳过后续消息增量滚动逻辑
@@ -317,12 +334,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 恢复锁：正在恢复位置时，跳过所有自动滚动逻辑，防止被后续 didUpdateWidget 调用覆盖
     if (_isRestoringPosition) {
-      print('[ChatScroll] ⛔ 恢复锁生效：跳过自动滚动 (messages=${widget.messages.length}, old=${oldWidget.messages.length})');
+      print(
+          '[ChatScroll] ⛔ 恢复锁生效：跳过自动滚动 (messages=${widget.messages.length}, old=${oldWidget.messages.length})');
       return;
     }
 
     // 消息数量未变化时，检查是否需要因流式更新而滚动
-    final bool messagesUnchanged = widget.messages.length == oldWidget.messages.length;
+    final bool messagesUnchanged =
+        widget.messages.length == oldWidget.messages.length;
     if (messagesUnchanged) {
       // Agent 正在流式输出（消息文本在增长），且用户没有主动上滑 → 跟踪到底部
       if (widget.isAgentProcessing && !_isUserScrollingNotifier.value) {
@@ -332,9 +351,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     // 检测是否有新的用户消息
-    final bool hasNewUserMessage = widget.messages.length > oldWidget.messages.length &&
-        widget.messages.isNotEmpty &&
-        widget.messages.last.role == "user";
+    final bool hasNewUserMessage =
+        widget.messages.length > oldWidget.messages.length &&
+            widget.messages.isNotEmpty &&
+            widget.messages.last.role == "user";
 
     // 用户发送消息时，无论是否在滑动，都自动滚动到底部
     if (hasNewUserMessage) {
@@ -351,9 +371,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     // 检测是否有新的 agent 消息
-    final bool hasNewAgentMessage = widget.messages.length > oldWidget.messages.length &&
-        widget.messages.isNotEmpty &&
-        widget.messages.last.role != "user";
+    final bool hasNewAgentMessage =
+        widget.messages.length > oldWidget.messages.length &&
+            widget.messages.isNotEmpty &&
+            widget.messages.last.role != "user";
 
     // 用户在滑动时不自动滚动，标记有新消息
     if (hasNewAgentMessage && _isUserScrollingNotifier.value) {
@@ -376,7 +397,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
         setState(() => _isCollapsed = true);
       }
 
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom(instant: isFirstLoad));
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _scrollToBottom(instant: isFirstLoad));
     }
   }
 
@@ -403,7 +425,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
     // 埋点：记录滚动位置保存事件（包含位置比例便于分析用户浏览深度）
     final double ratio = maxExtent > 0 ? pixels / maxExtent : 0.0;
-    print('[ChatScroll] 💾 保存位置: pixels=$pixels, maxExtent=$maxExtent, ratio=${ratio.toStringAsFixed(2)}');
+    print(
+        '[ChatScroll] 💾 保存位置: pixels=$pixels, maxExtent=$maxExtent, ratio=${ratio.toStringAsFixed(2)}');
     _logScrollEvent(
       action: 'save',
       pixels: pixels,
@@ -422,7 +445,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     // 有已保存的位置 → 恢复到离开时的位置（reverse 模式下 pixels 即为距底部距离）
     if (_hasSavedPosition && _savedScrollPosition != null) {
       final double targetPixels = _savedScrollPosition!;
-      print('[ChatScroll] 🔄 开始恢复位置: targetPixels=$targetPixels, savedMaxExtent=$_savedMaxScrollExtent');
+      print(
+          '[ChatScroll] 🔄 开始恢复位置: targetPixels=$targetPixels, savedMaxExtent=$_savedMaxScrollExtent');
 
       // 加锁：防止后续 didUpdateWidget 调用中的自动滚动覆盖恢复位置
       _isRestoringPosition = true;
@@ -433,7 +457,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
           print('[ChatScroll] ⚠️ 恢复第1帧: scrollController 无 client');
           return;
         }
-        print('[ChatScroll] 📐 恢复第1帧: maxExtent=${_scrollController.position.maxScrollExtent}, pixels=${_scrollController.position.pixels}');
+        print(
+            '[ChatScroll] 📐 恢复第1帧: maxExtent=${_scrollController.position.maxScrollExtent}, pixels=${_scrollController.position.pixels}');
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_scrollController.hasClients) {
@@ -441,7 +466,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
             _isRestoringPosition = false; // 解锁
             return;
           }
-          final double currentMaxExtent = _scrollController.position.maxScrollExtent;
+          final double currentMaxExtent =
+              _scrollController.position.maxScrollExtent;
           double restorePixels = targetPixels;
 
           // clamp 到有效范围
@@ -452,7 +478,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
             restorePixels = 0;
           }
 
-          print('[ChatScroll] ✅ 执行 jumpTo: $restorePixels (目标$targetPixels, 当前max=$currentMaxExtent)');
+          print(
+              '[ChatScroll] ✅ 执行 jumpTo: $restorePixels (目标$targetPixels, 当前max=$currentMaxExtent)');
           _scrollController.jumpTo(restorePixels);
 
           // 埋点：记录恢复事件
@@ -491,10 +518,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     // 输出结构化日志供埋点系统采集
     final StringBuffer buf = StringBuffer('[ChatScroll] action=$action');
     if (pixels != null) buf.write(' | pixels=${pixels.toStringAsFixed(1)}');
-    if (savedPixels != null) buf.write(' | savedPixels=${savedPixels.toStringAsFixed(1)}');
-    if (maxExtent != null) buf.write(' | maxExtent=${maxExtent.toStringAsFixed(1)}');
-    if (savedMaxExtent != null) buf.write(' | savedMaxExtent=${savedMaxExtent.toStringAsFixed(1)}');
-    if (scrollRatio != null) buf.write(' | scrollRatio=${scrollRatio.toStringAsFixed(3)}');
+    if (savedPixels != null)
+      buf.write(' | savedPixels=${savedPixels.toStringAsFixed(1)}');
+    if (maxExtent != null)
+      buf.write(' | maxExtent=${maxExtent.toStringAsFixed(1)}');
+    if (savedMaxExtent != null)
+      buf.write(' | savedMaxExtent=${savedMaxExtent.toStringAsFixed(1)}');
+    if (scrollRatio != null)
+      buf.write(' | scrollRatio=${scrollRatio.toStringAsFixed(3)}');
     if (messageCount != null) buf.write(' | messageCount=$messageCount');
     buf.write(' | timestamp=${DateTime.now().toIso8601String()}');
     debugPrint(buf.toString());
@@ -509,10 +540,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     }
 
     final List<Map<String, dynamic>> groups = <Map<String, dynamic>>[];
-  
+
     for (int i = 0; i < widget.messages.length; i++) {
       final ChatMessage currentMessage = widget.messages[i];
-      
+
       // 进度消息特殊处理
       if (currentMessage.role == "assistant_progress") {
         groups.add(<String, dynamic>{
@@ -593,12 +624,14 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     String timeRange = "";
     final List<Map<String, dynamic>> allGroups = _getGroupedMessages();
     if (allGroups.length > _visibleCount) {
-      final Map<String, dynamic> firstCollapsed = allGroups[allGroups.length - _visibleCount - 1];
+      final Map<String, dynamic> firstCollapsed =
+          allGroups[allGroups.length - _visibleCount - 1];
       final Map<String, dynamic> lastCollapsed = allGroups.first;
       final ChatMessage firstMsg = firstCollapsed['main'] as ChatMessage;
       final ChatMessage lastMsg = lastCollapsed['main'] as ChatMessage;
 
-      timeRange = " (${_formatTimeRange(firstMsg.timestamp, lastMsg.timestamp)})";
+      timeRange =
+          " (${_formatTimeRange(firstMsg.timestamp, lastMsg.timestamp)})";
     }
 
     return Center(
@@ -633,9 +666,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         ? "查看 $_collapsedCount 条历史消息$timeRange"
                         : "收起历史消息",
                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: cs.onSurfaceVariant,
-                      fontWeight: FontWeight.w500,
-                    ),
+                          color: cs.onSurfaceVariant,
+                          fontWeight: FontWeight.w500,
+                        ),
                   ),
                 ],
               ),
@@ -693,9 +726,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   /// 判定：去掉标点/emoji/空白后做子串包含，任一方向包含即视为重复。
   bool _isLiveStatusDuplicateOfLatestAssistant(String live) {
     String normalize(String s) {
-      return s
-          .toLowerCase()
-          .replaceAll(RegExp(r"[\s\.,!?;:\-\u3002\uff0c\uff01\uff1f\u2026\ud83c-\udbff\udc00-\udfff]+"), "");
+      return s.toLowerCase().replaceAll(
+          RegExp(
+              r"[\s\.,!?;:\-\u3002\uff0c\uff01\uff1f\u2026\ud83c-\udbff\udc00-\udfff]+"),
+          "");
     }
 
     final String liveKey = normalize(live);
@@ -720,14 +754,16 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       child: AnimatedBuilder(
         animation: _breathingAnimation!,
         builder: (context, child) {
-        return Container(
+          return Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: cs.onSurface.withValues(alpha: 0.08 * _breathingAnimation!.value),
+              color: cs.onSurface
+                  .withValues(alpha: 0.08 * _breathingAnimation!.value),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
-                color: cs.onSurface.withValues(alpha: 0.2 * _breathingAnimation!.value),
+                color: cs.onSurface
+                    .withValues(alpha: 0.2 * _breathingAnimation!.value),
                 width: 1,
               ),
             ),
@@ -744,7 +780,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                 Text(
                   text,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: cs.onSurface.withValues(alpha: 0.6 * _breathingAnimation!.value),
+                        color: cs.onSurface.withValues(
+                            alpha: 0.6 * _breathingAnimation!.value),
                         fontWeight: FontWeight.w500,
                       ),
                 ),
@@ -783,7 +820,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
     ContentSummaryParseResult? contentSummary,
   }) {
     // 选择模式下，只有当前选中范围内的消息参与（触发用户消息 + 其agent回复）
-    final bool inSelectableRange = _deleteSelectionMode && _selectedMessageIds.contains(mainMessage.messageId);
+    final bool inSelectableRange = _deleteSelectionMode &&
+        _selectedMessageIds.contains(mainMessage.messageId);
     // 当前消息是否为触发了删除模式的用户消息（锁定不可取消）
     final bool isTrigger = mainMessage.messageId == _deleteTriggerMessageId;
 
@@ -799,7 +837,6 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
       onOpenAgentProfile: _showAgentProfilePopover,
       onDeleteMessage: widget.onDeleteMessage,
       onDeleteFromMessage: widget.onDeleteFromMessage,
-      onOpenGomoku: widget.onOpenGomoku,
       onGetRelatedMessageIds: _getRelatedMessageIds,
       cardPadding: _cardPadding,
       // 全局删除选择状态（从 ChatPage 层级传入）
@@ -817,7 +854,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
 
   /// 获取与当前消息关联的消息 ID 列表（用户消息+agent回复配对）
   List<String> _getRelatedMessageIds(String messageId) {
-    final int idx = widget.messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    final int idx =
+        widget.messages.indexWhere((ChatMessage m) => m.messageId == messageId);
     if (idx < 0) return [messageId];
 
     final List<String> ids = <String>[messageId];
@@ -848,81 +886,85 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     // reverse 模式下使用反转消息列表（最新消息在 index 0 → 视觉底部）
-    final List<Map<String, dynamic>> reversedMessages = _getReversedDisplayMessages();
+    final List<Map<String, dynamic>> reversedMessages =
+        _getReversedDisplayMessages();
     final int msgCount = reversedMessages.length;
     // reverse ListView 的 item 顺序（index 0 = 底部）：
     //   [newestMsg, ..., oldestMsg, collapseButton(顶)]
     // 思考气泡已废弃（由输入框白色呼吸灯替代），不再占位。
-    final int itemCount = msgCount + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
+    final int itemCount =
+        msgCount + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
     final bool showCollapseButton = _collapsedCount > 0;
 
     return ColoredBox(
-          color: cs.surface,
-          child: Column(
-            children: <Widget>[
-              Expanded(
-                child: Stack(
-                  children: <Widget>[
-                    if (widget.messages.isEmpty)
-                      Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: <Widget>[
-                            Icon(
-                              Icons.chat_bubble_outline,
-                              size: 64,
-                              color: cs.onSurfaceVariant.withValues(alpha: 0.3),
-                            ),
-                          ],
+      color: cs.surface,
+      child: Column(
+        children: <Widget>[
+          Expanded(
+            child: Stack(
+              children: <Widget>[
+                if (widget.messages.isEmpty)
+                  Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: <Widget>[
+                        Icon(
+                          Icons.chat_bubble_outline,
+                          size: 64,
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.3),
                         ),
-                      )
-                    else
-                      ListView.builder(
-                  controller: _scrollController,
-                  reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
-                  padding: _listPadding,
-                  cacheExtent: 500,
-                  itemCount: itemCount,
-                  itemBuilder: (BuildContext context, int index) {
-                    // reverse 模式下 index 0 = 视觉底部
-                    // 思考气泡已废弃（由输入框白色呼吸灯替代），不在消息列表占位。
-                    final int msgIndex = index;
+                      ],
+                    ),
+                  )
+                else
+                  ListView.builder(
+                    controller: _scrollController,
+                    reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
+                    padding: _listPadding,
+                    cacheExtent: 500,
+                    itemCount: itemCount,
+                    itemBuilder: (BuildContext context, int index) {
+                      // reverse 模式下 index 0 = 视觉底部
+                      // 思考气泡已废弃（由输入框白色呼吸灯替代），不在消息列表占位。
+                      final int msgIndex = index;
 
-                    // 最后一个位置 → 折叠按钮（最顶部，在历史消息上方）
-                    if (showCollapseButton && msgIndex >= msgCount) {
-                      return _buildCollapseButton(cs);
-                    }
+                      // 最后一个位置 → 折叠按钮（最顶部，在历史消息上方）
+                      if (showCollapseButton && msgIndex >= msgCount) {
+                        return _buildCollapseButton(cs);
+                      }
 
-                    // 正常消息
-                    final messageGroup = reversedMessages[msgIndex];
-                    final bool isUser = messageGroup['isUser'] as bool;
-                    final ChatMessage mainMessage = messageGroup['main'] as ChatMessage;
-                    final bool isProgress = messageGroup['isProgress'] as bool;
-                    final ContentSummaryParseResult? contentSummary = isUser
-                        ? null
-                        : ContentSummaryParser.parse(mainMessage.text);
+                      // 正常消息
+                      final messageGroup = reversedMessages[msgIndex];
+                      final bool isUser = messageGroup['isUser'] as bool;
+                      final ChatMessage mainMessage =
+                          messageGroup['main'] as ChatMessage;
+                      final bool isProgress =
+                          messageGroup['isProgress'] as bool;
+                      final ContentSummaryParseResult? contentSummary = isUser
+                          ? null
+                          : ContentSummaryParser.parse(mainMessage.text);
 
-                    // 进度消息：特殊渲染
-                    if (isProgress) {
-                      return _buildProgressBubble(cs, mainMessage.text);
-                    }
+                      // 进度消息：特殊渲染
+                      if (isProgress) {
+                        return _buildProgressBubble(cs, mainMessage.text);
+                      }
 
-                    return _buildHoverableMessage(
-                      cs: cs,
-                      mainMessage: mainMessage,
-                      isUser: isUser,
-                      contentSummary: contentSummary,
-                    );
-                  },
-                ),
-                  ],
-                ),
-              ),
-              ColoredBox(
-                color: cs.surface,
-                child: SafeArea(
-                  top: false,
-                  child: Padding(
+                      return _buildHoverableMessage(
+                        cs: cs,
+                        mainMessage: mainMessage,
+                        isUser: isUser,
+                        contentSummary: contentSummary,
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+          ColoredBox(
+            color: cs.surface,
+            child: SafeArea(
+              top: false,
+              child: Padding(
                 padding: _inputHorizontalPadding,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -931,7 +973,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     if (_isListening)
                       Container(
                         margin: const EdgeInsets.only(bottom: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
                           color: cs.errorContainer.withValues(alpha: 0.2),
                           borderRadius: BorderRadius.circular(12),
@@ -947,7 +990,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                               height: 16,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(cs.error),
+                                valueColor:
+                                    AlwaysStoppedAnimation<Color>(cs.error),
                               ),
                             ),
                             const SizedBox(width: 8),
@@ -956,7 +1000,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 _recognizedText.isNotEmpty
                                     ? "正在识别: $_recognizedText"
                                     : "正在聆听...",
-                                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelMedium
+                                    ?.copyWith(
                                       color: cs.error,
                                     ),
                               ),
@@ -974,7 +1021,10 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                 widget.galleryPendingCount > 1
                                     ? "已选 ${widget.galleryPendingCount} 张图，发送时传给 Agent"
                                     : "已选图片，发送时传给 Agent",
-                                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelMedium
+                                    ?.copyWith(
                                       color: cs.primary,
                                     ),
                               ),
@@ -990,7 +1040,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                     // 滚动到底部按钮（用户滑动时显示）—— 使用 ValueListenableBuilder 避免整树重建
                     ValueListenableBuilder<bool>(
                       valueListenable: _isUserScrollingNotifier,
-                      builder: (BuildContext context, bool isUserScrolling, Widget? child) {
+                      builder: (BuildContext context, bool isUserScrolling,
+                          Widget? child) {
                         if (!isUserScrolling) return const SizedBox.shrink();
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 6),
@@ -1019,7 +1070,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   }
                                 },
                                 backgroundColor: cs.primaryContainer,
-                                child: Icon(Icons.arrow_downward, color: cs.onPrimaryContainer),
+                                child: Icon(Icons.arrow_downward,
+                                    color: cs.onPrimaryContainer),
                               ),
                             ],
                           ),
@@ -1035,16 +1087,16 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                         final double breath = _breathingAnimation!.value;
                         final bool busy = widget.isAgentProcessing;
                         // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
-                        final double pulse = busy
-                            ? (0.6 + 0.4 * breath)
-                            : (0.05 + 0.2 * breath);
+                        final double pulse =
+                            busy ? (0.6 + 0.4 * breath) : (0.05 + 0.2 * breath);
                         return Container(
                           decoration: BoxDecoration(
                             color: cs.surface,
                             borderRadius: BorderRadius.circular(28),
                             border: Border.all(
                               color: busy
-                                  ? Colors.white.withValues(alpha: 0.35 + 0.5 * breath)
+                                  ? Colors.white
+                                      .withValues(alpha: 0.35 + 0.5 * breath)
                                   : cs.outline.withValues(alpha: 0.55),
                               width: busy ? 1.4 : 1.0,
                             ),
@@ -1052,21 +1104,38 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                               if (busy) ...<BoxShadow>[
                                 // 外圈白色光晕（主呼吸）
                                 BoxShadow(
-                                  color: Colors.white.withValues(alpha: 0.18 * pulse),
+                                  color: Colors.white
+                                      .withValues(alpha: 0.18 * pulse),
                                   blurRadius: 14 + 10 * breath,
                                   spreadRadius: 0.5 + 1.5 * breath,
                                 ),
                                 // 内圈近场白雾
                                 BoxShadow(
-                                  color: Colors.white.withValues(alpha: 0.28 * breath),
+                                  color: Colors.white
+                                      .withValues(alpha: 0.28 * breath),
                                   blurRadius: 4,
                                 ),
-                              ] else
+                              ] else ...<BoxShadow>[
+                                // 远场扩散投影（环境光遮蔽，最柔最广）
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                  blurRadius: 32,
+                                  spreadRadius: 1,
+                                  offset: const Offset(0, 10),
+                                ),
+                                // 中距主投影（让输入框立体感更强）
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.07),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 3),
+                                ),
+                                // 近场接触阴影（边缘锐利，紧贴输入框）
                                 BoxShadow(
                                   color: Colors.black.withValues(alpha: 0.04),
-                                  blurRadius: 20,
-                                  offset: const Offset(0, 8),
+                                  blurRadius: 4,
+                                  offset: const Offset(0, 1),
                                 ),
+                              ],
                             ],
                           ),
                           child: child,
@@ -1094,7 +1163,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                     keyboardType: TextInputType.multiline,
                                     onSubmitted: (_) {
                                       // 按下 Enter 键时发送消息
-                                      if (widget.controller.text.trim().isNotEmpty) {
+                                      if (widget.controller.text
+                                          .trim()
+                                          .isNotEmpty) {
                                         widget.onSend();
                                       }
                                     },
@@ -1102,10 +1173,13 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       hintText: "发消息或输入\"/\"选择技能",
                                       border: InputBorder.none,
                                       hintStyle: TextStyle(
-                                        color: cs.onSurfaceVariant.withValues(alpha: 0.6),
+                                        color: cs.onSurfaceVariant
+                                            .withValues(alpha: 0.6),
                                         fontSize: 15,
                                       ),
-                                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                              horizontal: 8),
                                     ),
                                   ),
                                 ),
@@ -1118,7 +1192,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                           : cs.surfaceContainerLowest,
                                       shape: BoxShape.circle,
                                       border: widget.fullComputerAccessEnabled
-                                          ? Border.all(color: cs.primary.withValues(alpha: 0.45))
+                                          ? Border.all(
+                                              color: cs.primary
+                                                  .withValues(alpha: 0.45))
                                           : null,
                                     ),
                                     child: IconButton(
@@ -1134,7 +1210,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                       tooltip: widget.fullComputerAccessEnabled
                                           ? "完全访问：已开启（可控制电脑等高权限操作）"
                                           : "沙箱模式：点击开启完全访问",
-                                      onPressed: widget.onToggleFullComputerAccess,
+                                      onPressed:
+                                          widget.onToggleFullComputerAccess,
                                       padding: EdgeInsets.zero,
                                       constraints: const BoxConstraints(
                                         minWidth: 34,
@@ -1144,39 +1221,53 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                   ),
                                 if (widget.onToggleFullComputerAccess != null)
                                   const SizedBox(width: 4),
-                                // 发送按钮：处理中时变停止按钮（软取消）
-                                Container(
-                                  decoration: BoxDecoration(
-                                    color: widget.isAgentProcessing
-                                        ? cs.errorContainer.withValues(alpha: 0.3)
-                                        : cs.surfaceContainerLowest,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: widget.isAgentProcessing
-                                          ? cs.error.withValues(alpha: 0.6)
-                                          : cs.outline.withValues(alpha: 0.8),
-                                    ),
-                                  ),
-                                  child: IconButton(
-                                    icon: Icon(
-                                      widget.isAgentProcessing
-                                          ? Icons.stop_rounded
-                                          : Icons.send,
-                                      size: 20,
-                                      color: widget.isAgentProcessing
-                                          ? cs.error
-                                          : cs.onSurfaceVariant,
-                                    ),
-                                    tooltip: widget.isAgentProcessing ? "停止" : "发送",
-                                    onPressed: widget.isAgentProcessing
-                                        ? widget.onStopAgent
-                                        : widget.onSend,
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(
-                                      minWidth: 34,
-                                      minHeight: 34,
-                                    ),
-                                  ),
+                                // 发送按钮：仅在 agent 处理中浮现（此时充当停止按钮）；空闲时完全隐藏
+                                AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 180),
+                                  switchInCurve: Curves.easeOutCubic,
+                                  switchOutCurve: Curves.easeInCubic,
+                                  transitionBuilder:
+                                      (Widget child, Animation<double> anim) {
+                                    return FadeTransition(
+                                      opacity: anim,
+                                      child: ScaleTransition(
+                                        scale: Tween<double>(begin: 0.6, end: 1)
+                                            .animate(anim),
+                                        child: child,
+                                      ),
+                                    );
+                                  },
+                                  child: widget.isAgentProcessing
+                                      ? Container(
+                                          key: const ValueKey(
+                                              'input-stop-btn'),
+                                          decoration: BoxDecoration(
+                                            color: cs.errorContainer
+                                                .withValues(alpha: 0.3),
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: cs.error
+                                                  .withValues(alpha: 0.6),
+                                            ),
+                                          ),
+                                          child: IconButton(
+                                            icon: Icon(
+                                              Icons.stop_rounded,
+                                              size: 20,
+                                              color: cs.error,
+                                            ),
+                                            tooltip: "停止",
+                                            onPressed: widget.onStopAgent,
+                                            padding: EdgeInsets.zero,
+                                            constraints: const BoxConstraints(
+                                              minWidth: 34,
+                                              minHeight: 34,
+                                            ),
+                                          ),
+                                        )
+                                      : const SizedBox.shrink(
+                                          key: ValueKey('input-send-hidden'),
+                                        ),
                                 ),
                               ],
                             ),
@@ -1193,7 +1284,9 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                         shape: BoxShape.circle,
                                       ),
                                       child: IconButton(
-                                        icon: Icon(Icons.add, size: 18, color: cs.onSurfaceVariant),
+                                        icon: Icon(Icons.add,
+                                            size: 18,
+                                            color: cs.onSurfaceVariant),
                                         onPressed: widget.onPickGalleryImage,
                                         padding: EdgeInsets.zero,
                                         constraints: const BoxConstraints(
@@ -1244,7 +1337,8 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
                                           minWidth: 30,
                                           minHeight: 30,
                                         ),
-                                        tooltip: VirtualPhoneUiLabels.chatTooltip,
+                                        tooltip:
+                                            VirtualPhoneUiLabels.chatTooltip,
                                       ),
                                     ),
                                 ],
@@ -1259,27 +1353,20 @@ class _ChatPageState extends State<ChatPage> with SingleTickerProviderStateMixin
               ),
             ),
           ),
-            ],
-          ),
-        );
+        ],
+      ),
+    );
   }
-
 }
 
 class _GomokuPlayUrlCard extends StatelessWidget {
   const _GomokuPlayUrlCard({
     required this.playUrl,
-    this.onOpen,
   });
 
   final String playUrl;
-  final void Function(String playUrlOrTableId)? onOpen;
 
   void _open(BuildContext context) {
-    if (onOpen != null) {
-      onOpen!(playUrl);
-      return;
-    }
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text("无法打开对局：未配置内嵌入口")),
     );
@@ -1305,7 +1392,7 @@ class _GomokuPlayUrlCard extends StatelessWidget {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  "五子棋对局",
+                  "对局",
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
                         color: cs.primary,
                         fontWeight: FontWeight.w600,
@@ -1349,14 +1436,15 @@ class _HoverableMessageWidget extends StatelessWidget {
     this.onOpenAgentProfile,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
-    this.onOpenGomoku,
     this.onGetRelatedMessageIds,
     // 全局删除选择状态（由 ChatPage 传入）
     required this.deleteSelectionMode,
     required this.isSelected,
     required this.selectedCount,
+
     /// 是否在选择模式的可选范围内（触发用户消息 + 其agent回复）
     required this.inSelectableRange,
+
     /// 是否为触发了删除模式的用户消息（锁定不可取消）
     required this.isTrigger,
     required this.onEnterDeleteMode,
@@ -1377,25 +1465,32 @@ class _HoverableMessageWidget extends StatelessWidget {
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
-  final void Function(String playUrlOrTableId)? onOpenGomoku;
   final List<String> Function(String messageId)? onGetRelatedMessageIds;
 
   /// 全局删除选择模式是否激活
   final bool deleteSelectionMode;
+
   /// 当前消息是否被选中
   final bool isSelected;
+
   /// 当前已选中的消息总数（用于确认栏显示）
   final int selectedCount;
+
   /// 是否在可选择范围内
   final bool inSelectableRange;
+
   /// 是否为触发的用户消息（锁定）
   final bool isTrigger;
+
   /// 回调：进入删除选择模式
   final void Function(String messageId) onEnterDeleteMode;
+
   /// 回调：切换单条消息选中状态
   final void Function(String messageId, bool selected) onToggleSelection;
+
   /// 回调：确认删除
   final VoidCallback onDeleteConfirm;
+
   /// 回调：取消删除模式
   final VoidCallback onDeleteCancel;
 
@@ -1414,7 +1509,6 @@ class _HoverableMessageWidget extends StatelessWidget {
       onOpenAgentProfile: onOpenAgentProfile,
       onDeleteMessage: onDeleteMessage,
       onDeleteFromMessage: onDeleteFromMessage,
-      onOpenGomoku: onOpenGomoku,
       deleteSelectionMode: deleteSelectionMode,
       isSelected: isSelected,
       selectedCount: selectedCount,
@@ -1443,7 +1537,6 @@ class _HoverableMessageContent extends StatefulWidget {
     this.onOpenAgentProfile,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
-    this.onOpenGomoku,
     required this.deleteSelectionMode,
     required this.isSelected,
     required this.selectedCount,
@@ -1467,7 +1560,6 @@ class _HoverableMessageContent extends StatefulWidget {
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
-  final void Function(String playUrlOrTableId)? onOpenGomoku;
   final bool deleteSelectionMode;
   final bool isSelected;
   final int selectedCount;
@@ -1479,7 +1571,8 @@ class _HoverableMessageContent extends StatefulWidget {
   final VoidCallback onDeleteCancel;
 
   @override
-  State<_HoverableMessageContent> createState() => _HoverableMessageContentState();
+  State<_HoverableMessageContent> createState() =>
+      _HoverableMessageContentState();
 }
 
 class _HoverableMessageContentState extends State<_HoverableMessageContent> {
@@ -1513,18 +1606,20 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               top: 0,
               bottom: -56,
               child: Align(
-                alignment: widget.isUser ? Alignment.bottomRight : Alignment.bottomLeft,
+                alignment: widget.isUser
+                    ? Alignment.bottomRight
+                    : Alignment.bottomLeft,
                 child: Padding(
                   padding: EdgeInsets.only(right: widget.isUser ? 60 : 0),
                   child: _DeleteConfirmBar(
-                  selectedCount: widget.selectedCount,
-                  isCurrentSelected: widget.isSelected,
-                  onToggleSelect: (v) {
-                    widget.onToggleSelection(widget.mainMessage.messageId, v);
-                  },
-                  onConfirm: widget.onDeleteConfirm,
-                  onCancel: widget.onDeleteCancel,
-                ),
+                    selectedCount: widget.selectedCount,
+                    isCurrentSelected: widget.isSelected,
+                    onToggleSelect: (v) {
+                      widget.onToggleSelection(widget.mainMessage.messageId, v);
+                    },
+                    onConfirm: widget.onDeleteConfirm,
+                    onCancel: widget.onDeleteCancel,
+                  ),
                 ),
               ),
             ),
@@ -1535,7 +1630,17 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   /// 构建包含头像、时间、气泡的完整消息行
   Widget _buildMessageRow(BuildContext context) {
-    final Widget bubble = _buildMessageCard(context, highlight: widget.isSelected);
+    // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
+    // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
+    final Widget bubble = LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double maxBubbleWidth = constraints.maxWidth * 0.72;
+        return ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+          child: _buildMessageCard(context, highlight: widget.isSelected),
+        );
+      },
+    );
 
     if (widget.inSelectableRange) {
       // 删除选择模式：左侧勾选 + 头像/气泡
@@ -1547,9 +1652,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             padding: const EdgeInsets.only(top: 12, right: 8),
             child: Checkbox(
               value: widget.isSelected,
-              onChanged: widget.isTrigger ? null : (bool? v) {
-                widget.onToggleSelection(widget.mainMessage.messageId, v ?? true);
-              },
+              onChanged: widget.isTrigger
+                  ? null
+                  : (bool? v) {
+                      widget.onToggleSelection(
+                          widget.mainMessage.messageId, v ?? true);
+                    },
             ),
           ),
           if (!widget.isUser) _buildAvatar(context, isUser: false),
@@ -1805,64 +1913,60 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-                if (widget.mainMessage.attachmentImageCount > 0)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Icon(
-                          Icons.photo_camera_outlined,
-                          size: 14,
-                          color: widget.isUser
-                              ? Theme.of(context).colorScheme.onPrimaryContainer
-                              : Theme.of(context).colorScheme.primary,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          "配图 ×${widget.mainMessage.attachmentImageCount}",
-                          style: Theme.of(context)
-                              .textTheme
-                              .labelSmall
-                              ?.copyWith(
-                                color: widget.isUser
-                                    ? Theme.of(context)
-                                        .colorScheme
-                                        .onPrimaryContainer
-                                    : Theme.of(context)
-                                        .colorScheme
-                                        .primary,
-                              ),
-                        ),
-                      ],
-                    ),
+              if (widget.mainMessage.attachmentImageCount > 0)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(
+                        Icons.photo_camera_outlined,
+                        size: 14,
+                        color: widget.isUser
+                            ? Theme.of(context).colorScheme.onPrimaryContainer
+                            : Theme.of(context).colorScheme.primary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        "配图 ×${widget.mainMessage.attachmentImageCount}",
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: widget.isUser
+                                  ? Theme.of(context)
+                                      .colorScheme
+                                      .onPrimaryContainer
+                                  : Theme.of(context).colorScheme.primary,
+                            ),
+                      ),
+                    ],
                   ),
-                // 消息正文
-                _buildMessageTextInner(
-                  context,
-                  widget.cs,
-                  widget.mainMessage,
-                  isUser: widget.isUser,
-                  contentSummary: widget.contentSummary,
                 ),
-                if (!widget.isUser &&
-                    widget.contentSummary?.summary == null &&
-                    widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: _buildGrayLinksInner(widget.mainMessage.text, context),
+              // 消息正文
+              _buildMessageTextInner(
+                context,
+                widget.cs,
+                widget.mainMessage,
+                isUser: widget.isUser,
+                contentSummary: widget.contentSummary,
+              ),
+              if (!widget.isUser &&
+                  widget.contentSummary?.summary == null &&
+                  widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: _buildGrayLinksInner(widget.mainMessage.text, context),
+                ),
+              if (!widget.isUser &&
+                  widget.mainMessage.playUrl != null &&
+                  widget.mainMessage.playUrl!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: _GomokuPlayUrlCard(
+                    playUrl: widget.mainMessage.playUrl!,
                   ),
-                if (!widget.isUser && widget.mainMessage.playUrl != null && widget.mainMessage.playUrl!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: _GomokuPlayUrlCard(
-                      playUrl: widget.mainMessage.playUrl!,
-                      onOpen: widget.onOpenGomoku,
-                    ),
-                  ),
-              ],
-            ),
+                ),
+            ],
           ),
+        ),
       ),
     );
   }
@@ -1900,9 +2004,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               padding: const EdgeInsets.only(top: 3),
               child: Text(
                 stripMarkdown(remaining),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.85),
-                      height: 1.35,
+                      height: 1.4,
                     ),
               ),
             ),
@@ -1924,10 +2028,11 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
     return Text(
       stripMarkdown(message.text),
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+      // 用 bodyMedium（14px）做正文：12.5 时一长串文字会尽量横向铺满不换行，
+      // 提到 14 后行宽更紧凑、换行更自然，单行不再霸屏。
+      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
             color: cs.onSurface,
-            height: 1.35,
-            fontSize: 12.5,
+            height: 1.4,
           ),
     );
   }
@@ -1953,10 +2058,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         child: Text(
           url,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Colors.grey[600],
-            fontSize: 11,
-            height: 1.3,
-          ),
+                color: Colors.grey[600],
+                fontSize: 11,
+                height: 1.3,
+              ),
         ),
       ));
     }
@@ -1966,7 +2071,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       children: linkWidgets,
     );
   }
-
 }
 
 class _AgentMoodGlyph {
@@ -2068,9 +2172,12 @@ class _DeleteConfirmBar extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Icon(
-                  isCurrentSelected ? Icons.check_box : Icons.check_box_outline_blank,
+                  isCurrentSelected
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank,
                   size: 16,
-                  color: isCurrentSelected ? Colors.red[400] : cs.onSurfaceVariant,
+                  color:
+                      isCurrentSelected ? Colors.red[400] : cs.onSurfaceVariant,
                 ),
                 const SizedBox(width: 4),
                 Text(
@@ -2095,19 +2202,27 @@ class _DeleteConfirmBar extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
             decoration: BoxDecoration(
-              color: isCurrentSelected ? Colors.red : cs.surfaceContainerHighest.withValues(alpha: 0.5),
+              color: isCurrentSelected
+                  ? Colors.red
+                  : cs.surfaceContainerHighest.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(Icons.delete_outline, size: 15, color: isCurrentSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4)),
+                Icon(Icons.delete_outline,
+                    size: 15,
+                    color: isCurrentSelected
+                        ? Colors.white
+                        : cs.onSurfaceVariant.withValues(alpha: 0.4)),
                 const SizedBox(width: 4),
                 Text(
                   "删除",
                   style: TextStyle(
                     fontSize: 12,
-                    color: isCurrentSelected ? Colors.white : cs.onSurfaceVariant.withValues(alpha: 0.4),
+                    color: isCurrentSelected
+                        ? Colors.white
+                        : cs.onSurfaceVariant.withValues(alpha: 0.4),
                   ),
                 ),
               ],
@@ -2144,7 +2259,8 @@ class _ActionButton extends StatelessWidget {
       constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
       style: ButtonStyle(
         backgroundColor: WidgetStateProperty.all<Color>(Colors.transparent),
-        overlayColor: WidgetStateProperty.all<Color>(Colors.black.withValues(alpha: 0.05)),
+        overlayColor: WidgetStateProperty.all<Color>(
+            Colors.black.withValues(alpha: 0.05)),
       ),
       onPressed: onPressed,
     );
@@ -2165,9 +2281,9 @@ class _BreathingDotPainter extends CustomPainter {
     // 创建径向渐变：中间浅，外边深（纯灰色系）
     final gradient = RadialGradient(
       colors: [
-        Colors.grey.withValues(alpha: opacity * 0.4),  // 中间浅色（灰色）
-        Colors.grey.withValues(alpha: opacity * 0.6),   // 中间过渡
-        Colors.grey.withValues(alpha: opacity * 0.9),   // 外边深色
+        Colors.grey.withValues(alpha: opacity * 0.4), // 中间浅色（灰色）
+        Colors.grey.withValues(alpha: opacity * 0.6), // 中间过渡
+        Colors.grey.withValues(alpha: opacity * 0.9), // 外边深色
       ],
       stops: const [0.0, 0.5, 1.0],
       center: Alignment.center,

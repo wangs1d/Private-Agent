@@ -15,13 +15,9 @@ import type { NotesService } from "../../services/notes-service.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import type {
   A2aOutsourcingService,
-  DoudizhuService,
-  GameCenterCoordinator,
-  GomokuService,
   SkillMetadataValidatorLike,
   SocialFeedService,
   WorldService,
-  ZhaJinHuaService,
 } from "@private-ai-agent/agent-world";
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../../services/compute-quota-service.js";
@@ -48,6 +44,8 @@ import type { HookBus } from "../../services/hooks/index.js";
 import type { WebhookService } from "../../services/webhook/index.js";
 import type { MoodInferenceService } from "../../services/mood-inference-service.js";
 import type { JarvisHarness } from "../../services/jarvis/index.js";
+import type { DevicePairingService } from "../../services/device-pairing-service.js";
+import type { DeviceRegistry } from "../../device-bus/device-registry.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -57,10 +55,6 @@ export type HttpRouteDeps = {
   realFundsWallet: RealFundsWalletService;
   worldService: WorldService;
   a2aOutsourcingService: A2aOutsourcingService;
-  gomokuService: GomokuService;
-  doudizhuService: DoudizhuService;
-  zhaJinHuaService: ZhaJinHuaService;
-  gameCenterCoordinator: GameCenterCoordinator;
   socialFeedService: SocialFeedService;
   agentRelayService: AgentRelayService;
   scheduleTaskService: ScheduleTaskService;
@@ -100,4 +94,8 @@ export type HttpRouteDeps = {
   moodInferenceService?: MoodInferenceService;
   /** J.A.R.V.I.S. 统一主动消息中枢（可选，老路由可能不传） */
   jarvisHarness?: JarvisHarness;
+  /** 终端互连平台：设备配对服务 */
+  devicePairingService?: DevicePairingService;
+  /** 终端互连平台：设备注册表 */
+  deviceRegistry?: DeviceRegistry;
 };

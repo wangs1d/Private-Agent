@@ -42,7 +42,6 @@ function inferCategoryFromEvent(event: StateChangeEvent): JarvisTrigger["categor
   if (/(schedule|remind|plan|task|deadline)/i.test(text)) return "planning";
   if (/(chat|social|friend|message|post|comment)/i.test(text)) return "social";
   if (/(money|wallet|trade|payment|stock|fund|price|market)/i.test(text)) return "finance";
-  if (event.module === "gomoku") return "completion";
   if (event.module === "wallet") return "finance";
   if (event.module === "task") return "completion";
   if (event.module === "market") return "warning";

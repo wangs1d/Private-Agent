@@ -76,13 +76,13 @@ class AgentProfileData {
     return AgentProfileData(
       displayName: profile["displayName"]?.toString().trim().isNotEmpty == true
           ? profile["displayName"].toString().trim()
-          : "AI助手",
+          : "小夜灯",
       handle: profile["handle"]?.toString().trim().isNotEmpty == true
           ? profile["handle"].toString().trim()
-          : "ai_agent",
+          : "soft_reply_box",
       signature: profile["signature"]?.toString().trim().isNotEmpty == true
           ? profile["signature"].toString().trim()
-          : "今天也在认真发光。",
+          : "主页亮着，你什么时候来找我都可以。",
       avatarUrl: profile["avatarUrl"]?.toString().trim().isNotEmpty == true
           ? profile["avatarUrl"].toString().trim()
           : null,
@@ -181,14 +181,6 @@ class _AgentProfilePageState extends State<AgentProfilePage> {
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            "@${_profile.handle}",
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: palette.colors.first,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
                           const SizedBox(height: 10),
                           _QqLikeStatusBadge(
                             moodStyle: _profile.moodStyle,
@@ -226,7 +218,7 @@ class _AgentProfilePageState extends State<AgentProfilePage> {
                   const SizedBox(height: 12),
                   _ReadOnlyField(
                     label: "网络名称",
-                    value: "@${_profile.handle}",
+                    value: _profile.handle,
                   ),
                 ],
               ),
@@ -347,14 +339,14 @@ class _QqLikeStatusBadge extends StatelessWidget {
         );
       case "sad":
         return (
-          label: "隐身感",
+          label: "离开",
           color: const Color(0xFF8091A7),
-          icon: Icons.visibility_off_outlined,
+          icon: Icons.logout_outlined,
           bg: const Color(0x1F8091A7),
         );
       case "cool":
         return (
-          label: "忙碌",
+          label: "请勿打扰",
           color: const Color(0xFF7C73FF),
           icon: Icons.do_not_disturb_on_outlined,
           bg: const Color(0x1F7C73FF),
@@ -376,9 +368,9 @@ class _QqLikeStatusBadge extends StatelessWidget {
       case "gentle":
       default:
         return (
-          label: "在线",
+          label: "忙碌",
           color: const Color(0xFF3AA7A3),
-          icon: Icons.check_circle_outline,
+          icon: Icons.work_outline,
           bg: const Color(0x1F3AA7A3),
         );
     }

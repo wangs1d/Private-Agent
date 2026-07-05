@@ -12,6 +12,7 @@ import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
+import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
@@ -78,6 +79,18 @@ function getToolResultBudget(toolName: string): number | undefined {
 
 function getToolResultStripKeys(toolName: string): string[] | undefined {
   return TOOL_RESULT_STRIP_KEYS[toolName];
+}
+
+function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
+  const lines = outputs
+    .map((item) => item.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return "";
+  const unique: string[] = [];
+  for (const line of lines) {
+    if (!unique.includes(line)) unique.push(line);
+  }
+  return unique.join("\n\n").trim();
 }
 
 const DEFAULT_MAX_ROUNDS = 12;
@@ -227,12 +240,44 @@ function resolveForcedToolChoice(
   userText: string,
   apiTools: ChatCompletionTool[],
 ): { type: "function"; function: { name: string } } | "auto" {
-  if (!isExplicitPhoneCallRequest(userText)) return "auto";
-  const hasPhoneCallTool = apiTools.some(
-    (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
+  if (isExplicitPhoneCallRequest(userText)) {
+    const hasPhoneCallTool = apiTools.some(
+      (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
+    );
+    if (hasPhoneCallTool) {
+      return { type: "function", function: { name: "phone_call_user" } };
+    }
+  }
+  return "auto";
+}
+
+const DIRECT_CLOCK_OR_LOCATION_RE =
+  /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
+
+const FRESH_WEB_LOOKUP_RE =
+  /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
+
+const FRESH_FACT_TOOL_NAMES = new Set([
+  "search_web",
+  "fetch_web",
+  "info.inspect_webpage",
+  "info.navigate_site",
+]);
+
+export function shouldRequireFreshWebLookup(
+  userText: string,
+  apiTools: ChatCompletionTool[],
+): boolean {
+  const text = userText.trim();
+  if (!text) return false;
+  if (DIRECT_CLOCK_OR_LOCATION_RE.test(text)) return false;
+  if (!FRESH_WEB_LOOKUP_RE.test(text)) return false;
+  return apiTools.some(
+    (tool) =>
+      tool.type === "function" &&
+      typeof tool.function?.name === "string" &&
+      FRESH_FACT_TOOL_NAMES.has(tool.function.name),
   );
-  if (!hasPhoneCallTool) return "auto";
-  return { type: "function", function: { name: "phone_call_user" } };
 }
 
 const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
@@ -852,7 +897,7 @@ const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
             type: "string",
             enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "world", "embodiment", "all"],
             description:
-              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=侧栏游戏(五子棋/斗地主/炸金花), self_programming=自我编程, agent_account=账号注册, embodiment=具身身体, world=Agent World。",
+              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, self_programming=自我编程, agent_account=账号注册, embodiment=具身身体, world=Agent World。",
           },
         },
         additionalProperties: false,
@@ -891,6 +936,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
+    ...DEVICE_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
     ...getPhoneBridgeChatTools(),
     BROWSER_SESSION_LIST_CHAT_TOOL,
@@ -905,7 +951,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
 
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'game' | 'aip' | 'embodiment' | 'smart_home' | 'mcp';
+type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'embodiment' | 'smart_home' | 'mcp';
 
 interface ToolCategoryMapping {
   category: ToolCategory;
@@ -978,11 +1024,6 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'world',
     keywords: ['世界', 'world', '社交', 'social', '市场', 'market', '点数', 'points', '积分', 'score'],
     toolNames: [] // agent world tools are dynamic
-  },
-  {
-    category: 'game',
-    keywords: ['游戏', 'game', '对局', 'match', '竞技', 'compete', '五子棋', 'gomoku', '斗地主', 'doudizhu', '炸金花', 'zhajinhua', '21点', 'blackjack', '下棋', '打牌'],
-    toolNames: [] // game tools (world.gomoku/doudizhu/zhajinhua) are dynamic
   },
   {
     category: 'aip',
@@ -1083,6 +1124,7 @@ export function selectRelevantTools(
     minTools?: number;
     maxTools?: number;
     includeAlwaysIncluded?: boolean;
+    tokenBudget?: number;
   }
 ): ChatCompletionTool[] {
   const minTools = options?.minTools ?? 5;
@@ -1176,6 +1218,7 @@ export async function streamCompletionWithTools(
   options?: {
     maxRounds?: number;
     tools?: ChatCompletionTool[];
+    toolSearchSourceTools?: ChatCompletionTool[];
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
     /** Moonshot Kimi：如 `{ thinking: { type: "disabled" } }` */
     extraBody?: Record<string, unknown>;
@@ -1192,9 +1235,13 @@ export async function streamCompletionWithTools(
   }
   
   const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
-  const toolSearchPrepared = prepareToolsWithToolSearch(mergedRegistryTools);
+  const toolSearchPrepared = prepareToolsWithToolSearch(
+    mergedRegistryTools,
+    options?.toolSearchSourceTools,
+  );
   const registryTools = toolSearchPrepared.visibleTools;
   const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
+  const requiresFreshWebLookup = shouldRequireFreshWebLookup(userText, registryTools);
 
   if (toolSearchPrepared.toolSearchActive) {
     console.info(
@@ -1206,7 +1253,9 @@ export async function streamCompletionWithTools(
 
   const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
   let lastAssistantText = "";
+  let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
+  let satisfiedFreshWebLookup = false;
   // 追踪每轮已发送的进度/前导文本，用于最终回复去重（防止思考过程泄露给用户）
   const emittedStatusLines = new Set<string>();
 
@@ -1318,6 +1367,18 @@ export async function streamCompletionWithTools(
       }
       // 剥离 [ts:] 时间戳前缀
       finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
+      if (requiresFreshWebLookup && !satisfiedFreshWebLookup) {
+        messages.push({
+          role: "assistant",
+          content: finalText || fullText || null,
+        });
+        messages.push({
+          role: "system",
+          content:
+            "This turn requires fresh web evidence. Do not send a final answer yet. Call search_web first, then use fetch_web or info.* if needed, and only answer after you have real search results.",
+        });
+        continue;
+      }
       if (ctx.onAgentStatusLine && finalText) {
         onDelta(finalText);
       }
@@ -1347,6 +1408,7 @@ export async function streamCompletionWithTools(
     messages.push(assistantWithTools);
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
+    const roundToolOutputs: string[] = [];
 
     type ToolCallWorkItem = {
       tc: (typeof toolCalls)[number];
@@ -1490,6 +1552,9 @@ export async function streamCompletionWithTools(
         settled.status === "fulfilled" ? settled.value.wireToolName : item.registryToolName;
 
       toolResults.push({ name: wireToolName, ok: exec.ok });
+      if (exec.ok && FRESH_FACT_TOOL_NAMES.has(wireToolName)) {
+        satisfiedFreshWebLookup = true;
+      }
       ctx.onToolExecuted?.({
         toolName: wireToolName,
         input: item.parsedArgs,
@@ -1497,6 +1562,9 @@ export async function streamCompletionWithTools(
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
       });
       const toolContent = compacted.content;
+      if (toolContent?.trim()) {
+        roundToolOutputs.push(toolContent.trim());
+      }
       messages.push({
         role: "tool",
         tool_call_id: item.tc.id,
@@ -1517,7 +1585,8 @@ export async function streamCompletionWithTools(
       assistantText: fullText,
       toolResults,
     });
+    lastToolOutputFallback = buildFallbackAnswerFromToolOutputs(roundToolOutputs);
   }
 
-  return lastAssistantText;
+  return lastAssistantText.trim() || lastToolOutputFallback.trim();
 }

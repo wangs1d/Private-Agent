@@ -1,12 +1,10 @@
-export type StateModule = "gomoku" | "doudizhu" | "zhajinhua" | "wallet" | "calendar" | "task" | "market" | "social";
+export type StateModule = "wallet" | "calendar" | "task" | "market" | "social";
 
 export type StateEventType =
-  | "game_started"
-  | "game_finished"
-  | "game_move"
   | "turn_changed"
   | "transaction_completed"
   | "task_completed"
+  | "game_finished"
   | "skill_purchased"
   | "post_created"
   | "friend_request_received"
@@ -33,14 +31,6 @@ export interface IStateManager {
   getRecentEvents(module?: StateModule, limit?: number): StateChangeEvent[];
 }
 
-export type GameFinishedPayload = {
-  winner?: string;
-  loser?: string;
-  moveCount?: number;
-  durationMs?: number;
-  snapshot?: Record<string, unknown>;
-};
-
 export type TransactionCompletedPayload = {
   amount: number;
   currency: string;
@@ -53,4 +43,12 @@ export type TaskCompletedPayload = {
   taskType: string;
   summary: string;
   success: boolean;
+};
+
+export type GameFinishedPayload = {
+  gameId?: string;
+  gameType?: string;
+  outcome?: "win" | "lose" | "draw" | "finished";
+  score?: number;
+  summary?: string;
 };

@@ -36,4 +36,47 @@ class MultiAgentApiClient {
     }
     return decoded;
   }
+
+  Future<Map<String, dynamic>> fetchAsyncCenter(
+    String sessionId, {
+    String? messageId,
+  }) async {
+    final Map<String, String> query = <String, String>{"sessionId": sessionId};
+    if (messageId != null && messageId.isNotEmpty) {
+      query["messageId"] = messageId;
+    }
+    final http.Response r = await _client
+        .get(_uri("/api/agent/async-center", query))
+        .timeout(_timeout);
+    final Object? decoded = jsonDecode(r.body);
+    if (decoded is! Map<String, dynamic>) {
+      return <String, dynamic>{"ok": false, "error": "鍝嶅簲鏍煎紡鏃犳晥"};
+    }
+    return decoded;
+  }
+
+  Future<Map<String, dynamic>> runAsyncCenterAction({
+    required String sessionId,
+    required String channel,
+    required String action,
+    required String targetId,
+  }) async {
+    final http.Response r = await _client
+        .post(
+          _uri("/api/agent/async-center/actions"),
+          headers: <String, String>{"Content-Type": "application/json"},
+          body: jsonEncode(<String, dynamic>{
+            "sessionId": sessionId,
+            "channel": channel,
+            "action": action,
+            "targetId": targetId,
+          }),
+        )
+        .timeout(_timeout);
+    final Object? decoded = jsonDecode(r.body);
+    if (decoded is! Map<String, dynamic>) {
+      return <String, dynamic>{"ok": false, "error": "鍝嶅簲鏍煎紡鏃犳晥"};
+    }
+    return decoded;
+  }
 }

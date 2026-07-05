@@ -118,12 +118,12 @@ function runInstallDepsAsync(
       resolve(ok);
       if (!ok && msg) log(`[paddle-ocr][install] 失败：${msg}`);
     };
-    child.stdout.on("data", (buf) => {
+    child.stdout?.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
         log(`[paddle-ocr][install] ${line}`);
       }
     });
-    child.stderr.on("data", (buf) => {
+    child.stderr?.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
         log(`[paddle-ocr][install] ${line}`);
       }
@@ -262,12 +262,12 @@ export function startPaddleOcrServer(
     );
 
     let moduleMissing = false;
-    child.stdout.on("data", (buf) => {
+    child.stdout?.on("data", (buf) => {
       for (const line of buf.toString("utf8").split(/\r?\n/).filter(Boolean)) {
         log(`[paddle-ocr] ${line}`);
       }
     });
-    child.stderr.on("data", (buf) => {
+    child.stderr?.on("data", (buf) => {
       const text = buf.toString("utf8");
       if (/ModuleNotFoundError|ImportError|No module named/.test(text)) {
         moduleMissing = true;

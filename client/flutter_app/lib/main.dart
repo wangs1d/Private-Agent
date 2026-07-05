@@ -3,7 +3,6 @@ import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
-import "package:flutter/scheduler.dart";
 import "package:http/http.dart" as http;
 import "package:permission_handler/permission_handler.dart";
 
@@ -23,6 +22,7 @@ import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
 import "core/services/client_location_service.dart";
+import "core/services/multi_agent_api_client.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
@@ -37,11 +37,12 @@ import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
-import "features/notes/notes_chat_page.dart";
+import "features/notes/notes_page.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
-import "features/chat/right_side_panel.dart";
+import "core/services/split_ratio_preference.dart";
+import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
 import "features/chat/voice_mode_page.dart";
@@ -55,14 +56,14 @@ import "core/services/mobile_briefing_launcher.dart";
 import "core/services/outgoing_call_launcher.dart";
 import "core/services/tts_player.dart";
 import "core/services/windows_titlebar_theme.dart";
-import "features/gomoku/gomoku_page.dart";
-import "features/game_center/game_center_page.dart";
 import "features/integrations/wechat_claw_binding_page.dart";
+import "features/devices/devices_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
-import "features/skill_store/skill_store_page.dart";
 import "features/wallet/wallet_page.dart";
+import "app/app_helpers.dart";
+import "widgets/app_sidebar.dart";
 
 void main() {
   runZonedGuarded(() {
@@ -74,14 +75,6 @@ void main() {
     debugPrint('[UNCAUGHT] $error\n$stack');
   });
 }
-
-/// 侧栏 hover 延后到下一帧，避免 AnimatedCrossFade 切换时触发mouse_tracker 断言失败
-void _deferSidebarHover(VoidCallback fn) {
-  SchedulerBinding.instance.addPostFrameCallback((_) => fn());
-}
-
-/// 右侧抽屉要展示的内容种类。
-enum _RightPanelKind { friends, games, messages }
 
 class PrivateAiApp extends StatefulWidget {
   const PrivateAiApp({super.key});
@@ -99,6 +92,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
   final ScheduleApiClient _scheduleApi =
       ScheduleApiClient(baseUrl: ApiConfig.httpBase);
+  final MultiAgentApiClient _multiAgentApi =
+      MultiAgentApiClient(baseUrl: ApiConfig.httpBase);
   final UserPreferencesApi _preferencesApi =
       UserPreferencesApi(baseUrl: ApiConfig.httpBase);
   final BriefingDeliveryApi _briefingDeliveryApi =
@@ -140,15 +135,28 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     updatedAt: null,
   );
 
+  /// 当前用户在「主题」菜单里选中的模式
+  /// (light → warm, dark → dark, system → 跟随 MediaQuery.platformBrightness)
+  ///
+  /// 初始值从 [AppThemeController] 反推:
+  /// warm → light, dark → dark。系统跟随模式不会被反推出来,
+  /// 因为 AppThemeController 只记实际渲染的两个 variant。
+  ThemeChoice _themeChoice =
+      AppThemeController.instance.value == AppThemeVariant.warm
+          ? ThemeChoice.light
+          : ThemeChoice.dark;
+
   /// 是否显示右上角日历面板
   bool _showCalendarPanel = false;
 
   /// 当前右侧面板要展示的内容
   /// - null: 未打开
-  /// - _RightPanelKind.friends:     好友（MailboxPage）
-  /// - _RightPanelKind.games:      游戏（GameCenterPage）
-  /// - _RightPanelKind.messages:   消息聚合（MessageHubPage）
-  _RightPanelKind? _rightPanel;
+  /// - RightPanelKind.friends:     好友（MailboxPage）
+  /// - RightPanelKind.messages:   消息聚合（MessageHubPage）
+  RightPanelKind? _rightPanel;
+
+  /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
+  double _splitRatio = SplitRatioPreference.defaultRatio;
 
   Map<String, int> _unreadByPlatform = <String, int>{};
   Timer? _messagePollTimer;
@@ -158,6 +166,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _closeRightPanel() {
     if (_rightPanel == null) return;
     setState(() => _rightPanel = null);
+  }
+
+  /// 加载持久化的分栏比例。
+  void _loadSplitRatio() {
+    SplitRatioPreference.load().then((double r) {
+      if (mounted && (r - _splitRatio).abs() > 0.001) {
+        setState(() => _splitRatio = r);
+      }
+    });
+  }
+
+  /// 拖动分割条时更新比例（节流写盘）。
+  void _setSplitRatio(double r) {
+    final double clamped = r.clamp(0.1, 0.9);
+    if ((clamped - _splitRatio).abs() < 0.001) return;
+    setState(() => _splitRatio = clamped);
+    SplitRatioPreference.save(clamped);
   }
 
   /// 日历面板重新加载信号
@@ -201,6 +226,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 与 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
+  final Set<String> _backgroundRunningTaskIds = <String>{};
+  final List<Map<String, dynamic>> _pendingAsyncConfirmations =
+      <Map<String, dynamic>>[];
+  bool _isSubmittingAsyncConfirmation = false;
 
   Timer? _assistantChunkFlushTimer;
   Timer? _agentReplyWatchdog;
@@ -247,6 +276,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onDecline: _handleNativeCallDecline,
       onTimeout: _handleNativeCallTimeout,
     );
+    // 加载持久化的分栏比例
+    _loadSplitRatio();
     // 桌面端独立"通话中"窗口事件绑定
     // hangup       : 用户点了挂断
     // muteToggle   : 用户点了静音，参数 newMuted
@@ -505,20 +536,22 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           if (_isAgentProcessing) {
             final String toolName = payload["toolName"]?.toString() ?? "";
             if (_subAgentDelegationActive &&
-                !_isMasterInvokeSubAgentTool(toolName)) {
+                !isMasterInvokeSubAgentTool(toolName)) {
               return;
             }
             final String? userStatusLine =
                 payload["userStatusLine"]?.toString().trim();
             final String? preamble =
                 payload["assistantPreamble"]?.toString().trim();
+            // 行动宣告由 chat.assistant_interim 确定性下发（服务端路由后立即发），
+            // 这里 preamble 仅作 userStatusLine 的备选来源走输入框状态行。
             final String line =
                 (userStatusLine != null && userStatusLine.isNotEmpty)
                     ? userStatusLine
                     : (preamble != null && preamble.isNotEmpty)
                         ? preamble
                         : "";
-            if (_isMasterInvokeSubAgentTool(toolName)) {
+            if (isMasterInvokeSubAgentTool(toolName)) {
               _subAgentDelegationActive = true;
             }
             if (line.isNotEmpty) {
@@ -539,7 +572,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           }
           final String toolName = payload["toolName"]?.toString() ?? "";
           final bool toolOk = payload["ok"] == true;
-          if (_isMasterInvokeSubAgentTool(toolName) && result != null) {
+          if (isMasterInvokeSubAgentTool(toolName) && result != null) {
             final bool delegateOk = result["ok"] != false;
             if (!toolOk || !delegateOk) {
               _subAgentDelegationActive = false;
@@ -688,7 +721,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             _messages.add(interimMsg);
             _assistantMessageIndexById[interimMessageId] = _messages.length - 1;
           });
-          await _store.saveMessage(interimMsg);
+          // 持久化用 unawaited 包起来：saveMessage 抛错（如 IO 异常）
+          // 会让外层 _ws.events.listen async 回调异常结束 → stream 关闭，
+          // 后续 chunk/done 都收不到，结果消息就出不来。
+          unawaited(_store.saveMessage(interimMsg).catchError((Object e) {
+            debugPrint("[chat] interim saveMessage failed: $e");
+          }));
         }
         // ===== 「分阶段异步对话交互 v2」三件套 =====
         if (type == "chat.turn_started") {
@@ -703,6 +741,28 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         if (type == "chat.execution_event") {
           // 阶段 2：执行事件（工具 / 子 Agent / thought / log）。
           _handleExecutionEventV2(payload);
+        }
+        if (type == "agent.async_task_update") {
+          final String taskId = payload["taskId"]?.toString() ?? "";
+          final String status = payload["status"]?.toString() ?? "";
+          if (status == "running") {
+            if (mounted) {
+              setState(() {
+                if (taskId.isNotEmpty) {
+                  _backgroundRunningTaskIds.add(taskId);
+                }
+              });
+            } else {
+              if (taskId.isNotEmpty) {
+                _backgroundRunningTaskIds.add(taskId);
+              }
+            }
+          }
+          if (status == "awaiting_confirmation") {
+            _enqueueAsyncConfirmation(payload);
+            return;
+          }
+          await _appendAsyncTaskReportMessage(payload);
         }
         // ===== /v2 =====
         if (type == "chat.assistant_chunk") {
@@ -896,6 +956,19 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         if (type == "agent.proactive_voice") {
           final String title = payload["title"]?.toString() ?? "Agent 语音联系";
           final String text = payload["text"]?.toString() ?? "";
+          // 取 TTS 音频并播放（修复：原实现仅显示 SnackBar 未播放音频）
+          final Object? ttsRaw = payload["tts"];
+          String? ttsBase64;
+          if (ttsRaw is Map) {
+            final Object? fmt = ttsRaw["format"];
+            final Object? b64 = ttsRaw["base64"];
+            if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+              ttsBase64 = b64;
+            }
+          }
+          if (ttsBase64 != null) {
+            unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
+          }
           if (mounted) {
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
@@ -924,6 +997,58 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 );
               }
             });
+          }
+        }
+        // ====== Agent 底层语音能力：voice.speak 工具触发的即时播报 ======
+        // 轻量事件：客户端后台播放 TTS 音频，无强制 UI（可选显示简短提示）。
+        if (type == "agent.voice.speak") {
+          final String text = payload["text"]?.toString() ?? "";
+          final Object? ttsRaw = payload["tts"];
+          String? ttsBase64;
+          if (ttsRaw is Map) {
+            final Object? fmt = ttsRaw["format"];
+            final Object? b64 = ttsRaw["base64"];
+            if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+              ttsBase64 = b64;
+            }
+          }
+          if (ttsBase64 != null) {
+            unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
+          } else if (text.isNotEmpty && mounted) {
+            // TTS 未启用兜底：用 SnackBar 显示文本
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text(text),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          }
+        }
+        // ====== Agent 底层语音能力：voice.speak 工具触发的提醒式播报 ======
+        // 带标题/优先级，客户端显示卡片 + 播放音频。
+        if (type == "agent.voice.alarm") {
+          final String title = payload["title"]?.toString() ?? "语音提醒";
+          final String text = payload["text"]?.toString() ?? "";
+          final String priority = payload["priority"]?.toString() ?? "medium";
+          final Object? ttsRaw = payload["tts"];
+          String? ttsBase64;
+          if (ttsRaw is Map) {
+            final Object? fmt = ttsRaw["format"];
+            final Object? b64 = ttsRaw["base64"];
+            if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+              ttsBase64 = b64;
+            }
+          }
+          if (ttsBase64 != null) {
+            unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
+          }
+          if (mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text("[$priority] $title\n$text"),
+                duration: const Duration(seconds: 8),
+              ),
+            );
           }
         }
         if (type == "agent.phone.ringing_start") {
@@ -1502,26 +1627,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  String _shortLiveStatusLine(String text) {
-    final String trimmed = text.trim();
-    if (trimmed.isEmpty) return "";
-    final List<String> lines = trimmed
-        .split(RegExp(r"\r?\n"))
-        .map((String s) => s.trim())
-        .where((String s) => s.isNotEmpty)
-        .toList();
-    String line = lines.isNotEmpty ? lines.last : trimmed;
-    if (line.length > 120) {
-      line = "${line.substring(0, 119)}…";
-    }
-    return line;
-  }
-
-  bool _isMasterInvokeSubAgentTool(String toolName) {
-    final String n = toolName.trim();
-    return n == "master.invoke_sub_agent" || n == "master_invoke_sub_agent";
-  }
-
   void _updateAgentStatusLine(String line, {bool ensureProcessing = false}) {
     final String trimmed = line.trim();
     if (trimmed.isEmpty) return;
@@ -1745,14 +1850,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  static const List<String> _kTabTitles = <String>[
-    "",
-    "",
-    "",
-    "技能商城",
-    "游戏",
-  ];
-
   void _selectTab(int index) {
     setState(() => _tabIndex = index);
   }
@@ -1761,15 +1858,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _openAgentLinkTab() {
     setState(() {
       _tabIndex = 0;
-      _rightPanel = _RightPanelKind.friends;
-    });
-  }
-
-  /// 游戏入口：不再切整页 tab，而是从右侧滑出游戏面板
-  void _openGameCenterTab() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = _RightPanelKind.games;
+      _rightPanel = RightPanelKind.friends;
     });
   }
 
@@ -1777,7 +1866,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _openMessagesPanel() {
     setState(() {
       _tabIndex = 0;
-      _rightPanel = _RightPanelKind.messages;
+      _rightPanel = RightPanelKind.messages;
     });
   }
 
@@ -1896,79 +1985,294 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     // 1) 把新语言同步到原生窗口（让顶栏按钮文字立刻更新）
     // 2) 持久化到本地偏好（_preferencesApi，TODO: 加 setString 后再写）
     debugPrint("[translate] lang changed: $langCode");
-    final label = _translateLangLabel(langCode);
+    final label = translateLangLabel(langCode);
     unawaited(TranslateOverlayLauncher.setLanguage(
       code: langCode,
       label: label,
     ));
   }
 
-  String _translateLangLabel(String code) {
-    switch (code) {
-      case 'zh':
-        return '中文';
-      case 'en':
-        return 'English';
-      case 'ja':
-        return '日本語';
-      case 'ko':
-        return '한국어';
-      case 'fr':
-        return 'Français';
-      case 'de':
-        return 'Deutsch';
-      case 'es':
-        return 'Español';
-      case 'ru':
-        return 'Русский';
-      case 'zh-Hant':
-        return '繁體';
-      case 'auto':
-        return '自动检测';
-      default:
-        return '中文';
+  /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
+  /// 记忆写入 context=notes）。
+  Future<Map<String, dynamic>> _runAsyncCenterAction(
+    String channel,
+    String action,
+    String targetId,
+  ) async {
+    final Map<String, dynamic> result =
+        await _multiAgentApi.runAsyncCenterAction(
+      sessionId: ApiConfig.effectiveActorId,
+      channel: channel,
+      action: action,
+      targetId: targetId,
+    );
+    final Map<String, dynamic> snapshot =
+        (result["snapshot"] as Map?)?.cast<String, dynamic>() ?? result;
+    _syncBackgroundTaskBadgeFromSnapshot(snapshot);
+    return result;
+  }
+
+  void _syncBackgroundTaskBadgeFromSnapshot(Map<String, dynamic> snapshot) {
+    final Map<String, dynamic> background =
+        ((snapshot["channels"] as Map?)?["backgroundTasks"] as Map?)
+                ?.cast<String, dynamic>() ??
+            snapshot;
+    final List<dynamic> running =
+        background["running"] as List<dynamic>? ?? <dynamic>[];
+    final Set<String> nextIds = running
+        .map((dynamic item) => (item as Map)["taskId"]?.toString() ?? "")
+        .where((String id) => id.isNotEmpty)
+        .toSet();
+    if (!mounted) {
+      _backgroundRunningTaskIds
+        ..clear()
+        ..addAll(nextIds);
+      return;
+    }
+    setState(() {
+      _backgroundRunningTaskIds
+        ..clear()
+        ..addAll(nextIds);
+    });
+  }
+
+  void _enqueueAsyncConfirmation(Map<String, dynamic> payload) {
+    final String taskId = payload["taskId"]?.toString() ?? "";
+    if (taskId.isEmpty) return;
+    if (!mounted) {
+      _backgroundRunningTaskIds.remove(taskId);
+      _pendingAsyncConfirmations.removeWhere(
+        (Map<String, dynamic> item) =>
+            item["taskId"]?.toString() == taskId,
+      );
+      _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
+      return;
+    }
+    setState(() {
+      _backgroundRunningTaskIds.remove(taskId);
+      _pendingAsyncConfirmations.removeWhere(
+        (Map<String, dynamic> item) =>
+            item["taskId"]?.toString() == taskId,
+      );
+      _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
+    });
+  }
+
+  Future<void> _handleAsyncConfirmationAction(
+    Map<String, dynamic> payload,
+    String action,
+  ) async {
+    final String taskId = payload["taskId"]?.toString() ?? "";
+    if (taskId.isEmpty || _isSubmittingAsyncConfirmation) return;
+    if (mounted) {
+      setState(() => _isSubmittingAsyncConfirmation = true);
+    } else {
+      _isSubmittingAsyncConfirmation = true;
+    }
+    try {
+      final Map<String, dynamic> result = await _runAsyncCenterAction(
+        "background_task",
+        action,
+        taskId,
+      );
+      final bool ok = result["ok"] == true;
+      if (!ok) {
+        final String error =
+            result["error"]?.toString().trim().isNotEmpty == true
+                ? result["error"]!.toString()
+                : "操作未成功，请稍后再试";
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        }
+        return;
+      }
+      if (!mounted) {
+        _pendingAsyncConfirmations.removeWhere(
+          (Map<String, dynamic> item) =>
+              item["taskId"]?.toString() == taskId,
+        );
+        return;
+      }
+      setState(() {
+        _pendingAsyncConfirmations.removeWhere(
+          (Map<String, dynamic> item) =>
+              item["taskId"]?.toString() == taskId,
+        );
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text("处理失败，请稍后重试")),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmittingAsyncConfirmation = false);
+      } else {
+        _isSubmittingAsyncConfirmation = false;
+      }
     }
   }
 
-  /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
-  /// 记忆写入 context=notes）。
-  void _openNotesChat() {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    Navigator.of(navCtx).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => NotesChatPage(),
+  Widget _buildAsyncConfirmationOverlay() {
+    if (_pendingAsyncConfirmations.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final Map<String, dynamic> payload = _pendingAsyncConfirmations.first;
+    final List<String> actions = confirmationActionsFor(payload);
+    if (actions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final String agentName = payload["agentName"]?.toString() ?? "后台任务";
+    final String summary = payload["userFacingText"]?.toString().trim() ?? "";
+    final String taskDescription =
+        payload["taskDescription"]?.toString().trim() ?? "";
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme cs = theme.colorScheme;
+
+    return Positioned(
+      top: 88,
+      right: 20,
+      child: SafeArea(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Material(
+            elevation: 10,
+            borderRadius: BorderRadius.circular(18),
+            color: cs.surface,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: cs.outlineVariant.withValues(alpha: 0.65),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    "$agentName 需要你的决定",
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    summary.isNotEmpty
+                        ? summary
+                        : "这项异步任务已经走到需要你拍板的阶段。",
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (taskDescription.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 10),
+                    Text(
+                      taskDescription,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: actions.map((String action) {
+                      final String label =
+                          asyncConfirmationActionLabel(action, payload);
+                      final bool primary =
+                          isPrimaryAsyncConfirmationAction(action);
+                      if (primary) {
+                        return FilledButton(
+                          onPressed: _isSubmittingAsyncConfirmation
+                              ? null
+                              : () => unawaited(
+                                    _handleAsyncConfirmationAction(
+                                      payload,
+                                      action,
+                                    ),
+                                  ),
+                          child: Text(label),
+                        );
+                      }
+                      return OutlinedButton(
+                        onPressed: _isSubmittingAsyncConfirmation
+                            ? null
+                            : () => unawaited(
+                                  _handleAsyncConfirmationAction(
+                                    payload,
+                                    action,
+                                  ),
+                                ),
+                        child: Text(label),
+                      );
+                    }).toList(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
+  }
+
+  Future<void> _appendAsyncTaskReportMessage(
+      Map<String, dynamic> payload) async {
+    final String taskId = payload["taskId"]?.toString() ?? "";
+    final String status = payload["status"]?.toString() ?? "";
+    final String text = payload["userFacingText"]?.toString().trim() ?? "";
+    if (taskId.isEmpty || text.isEmpty || status == "running") return;
+    final String messageId = "async-task-$taskId-$status";
+    if (_assistantMessageIndexById.containsKey(messageId)) return;
+    final ChatMessage message = ChatMessage(
+      messageId: messageId,
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: text,
+      timestamp: DateTime.now(),
+    );
+    if (!mounted) {
+      _messages.add(message);
+      _assistantMessageIndexById[messageId] = _messages.length - 1;
+      _backgroundRunningTaskIds.remove(taskId);
+      unawaited(_store.saveMessage(message).catchError((Object e) {
+        debugPrint("[chat] async task saveMessage failed: $e");
+      }));
+      return;
+    }
+    setState(() {
+      _messages.add(message);
+      _assistantMessageIndexById[messageId] = _messages.length - 1;
+      _backgroundRunningTaskIds.remove(taskId);
+    });
+    unawaited(_store.saveMessage(message).catchError((Object e) {
+      debugPrint("[chat] async task saveMessage failed: $e");
+    }));
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(status == "completed" ? "后台任务已完成" : "后台任务执行失败")),
+    );
+  }
+
+  /// 打开笔记页：与对话框构成双面板分栏
+  void _openNotesChat() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.notes;
+    });
   }
 
   Future<void> _openWechatClawBinding() async {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
     await openWechatClawBinding(navCtx);
-  }
-
-  /// 打开五子棋对局（从 playUrl / tableId 解析）)
-  void _openGomokuGame(String playUrlOrTableId) {
-    final String? tableId = PlayUrlUtils.parseTableId(playUrlOrTableId);
-    if (tableId == null || tableId.isEmpty) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text("无法识别对局 playUrlOrTableId")),
-      );
-      return;
-    }
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    Navigator.of(navCtx).push<void>(
-      MaterialPageRoute<void>(
-        builder: (BuildContext context) => GomokuPage(
-          agentActorId: ApiConfig.effectiveActorId,
-          api: _worldApi,
-          ws: _ws,
-          tableId: tableId,
-        ),
-      ),
-    );
   }
 
   /// 删除单条消息（本地 + 通知服务端清除上下文）
@@ -2464,7 +2768,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (_tabIndex == 0) {
       return null;
     }
-    final String title = _kTabTitles[_tabIndex];
+    final String title = kTabTitles[_tabIndex];
     if (title.isEmpty) {
       return null;
     }
@@ -2529,7 +2833,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   Widget _buildPlatformPopup() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final List<MapEntry<String, int>> entries = _unreadByPlatform.entries
-        .map((e) => MapEntry<String, int>(_platformDisplayName(e.key), e.value))
+        .map((e) => MapEntry<String, int>(platformDisplayName(e.key), e.value))
         .toList();
 
     return Material(
@@ -2626,19 +2930,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return Icon(icon, size: 20, color: color);
   }
 
-  String _platformDisplayName(String platform) {
-    switch (platform) {
-      case "wechat":
-        return "微信";
-      case "qq":
-        return "QQ";
-      case "feishu":
-        return "飞书";
-      default:
-        return "其他";
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     // 如果还未初始化，显示加载界面
@@ -2700,11 +2991,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
-                        _AppSidebar(
+                        AppSidebar(
                           tabIndex: _tabIndex,
                           onTabSelected: _selectTab,
-                          onWechatClawTap: _openWechatClawBinding,
-                          onToggleTheme: _toggleTheme,
+                          currentTheme: _themeChoice,
+                          onSetLightTheme: _setLightTheme,
+                          onSetDarkTheme: _setDarkTheme,
+                          onSetSystemTheme: _setSystemTheme,
+                          onOpenMessages: _openMessagesPanel,
+                          onOpenUserMenuSettings: _openUserMenuSettings,
+                          onOpenUserMenuHelp: _openUserMenuHelp,
+                          onOpenWechatClaw: _openWechatClawBinding,
+                          onOpenDevices: _openDevicesPage,
+                          onLogout: _logout,
+                          totalUnread: _unreadByPlatform.values
+                                  .fold(0, (int a, int b) => a + b),
                         ),
                         VerticalDivider(
                           width: 1,
@@ -2736,6 +3037,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                       ],
                     ),
                     const FloatingAgentSphere(),
+                    _buildAsyncConfirmationOverlay(),
                     // 右侧抽屉：top:0 顶到屏幕最顶部，覆盖侧边栏、AppBar、主内容、日历面板
                     _buildRightPanelOverlay(),
                     // 进场动画层（覆盖在主界面上方，播完后自动消失层
@@ -2759,8 +3061,89 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  void _toggleTheme() {
-    AppThemeController.instance.toggle();
+  /// 「主题」→「亮色」
+  void _setLightTheme() {
+    setState(() => _themeChoice = ThemeChoice.light);
+    AppThemeController.instance.setVariant(AppThemeVariant.warm);
+  }
+
+  /// 「主题」→「暗色」
+  void _setDarkTheme() {
+    setState(() => _themeChoice = ThemeChoice.dark);
+    AppThemeController.instance.setVariant(AppThemeVariant.dark);
+  }
+
+  /// 「主题」→「跟随系统」
+  /// 读取当前平台亮度,立即套用;平台亮度后续变化不会自动重算
+  /// (用户需要重新点一次才会重新同步)。
+  void _setSystemTheme() {
+    final Brightness platformBrightness = MediaQuery.platformBrightnessOf(
+      context,
+    );
+    setState(() => _themeChoice = ThemeChoice.system);
+    AppThemeController.instance.setVariant(
+      platformBrightness == Brightness.dark
+          ? AppThemeVariant.dark
+          : AppThemeVariant.warm,
+    );
+  }
+
+  /// 用户菜单「设置」:暂未实现,先弹个 SnackBar 留位
+  void _openUserMenuSettings() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("设置:暂未开放"),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// 用户菜单「帮助与反馈」:暂未实现,先弹个 SnackBar 留位
+  void _openUserMenuHelp() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("帮助与反馈:暂未开放"),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// 用户菜单「我的设备」:与对话框构成双面板分栏
+  void _openDevicesPage() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.devices;
+    });
+  }
+
+  /// 用户菜单「退出登录」:先弹确认,确认后弹 SnackBar 占位
+  Future<void> _logout() async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: const Text("退出登录"),
+          content: const Text("确定要退出当前账号吗?"),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text("取消"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text("退出"),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("退出登录:暂未开放"),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   Future<void> _handleMorningBriefingEvent(
@@ -2805,7 +3188,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         "narrationText": narrationText,
         "briefing": briefing,
       };
-      final String message = _buildDesktopBriefingSummary(briefing);
+      final String message = buildDesktopBriefingSummary(briefing);
       _desktopNotificationNeedsFeedback = false;
       _desktopNotificationFeedbackChannel = "websocket";
       final bool shown = await DesktopNotificationLauncher.show(
@@ -2836,7 +3219,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       });
       await MobileBriefingLauncher.showBriefingNotification(
         title: "每日简报",
-        message: _buildMobileBriefingSummary(briefing),
+        message: buildMobileBriefingSummary(briefing),
         payload: payloadText,
       );
       await _markBriefingDelivered("mobile");
@@ -2893,102 +3276,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     } else if (defaultTargetPlatform == TargetPlatform.android) {
       await _markBriefingDelivered("mobile");
     }
-  }
-
-  String _buildMobileBriefingSummary(Map<String, dynamic> briefing) {
-    final List<String> parts = <String>[];
-    final Object? weather = briefing["weather"];
-    if (weather is Map) {
-      final String condition = weather["condition"]?.toString() ?? "";
-      final Object? temp = weather["temperature"];
-      if (condition.isNotEmpty || temp != null) {
-        parts.add(
-          [
-            if (condition.isNotEmpty) condition,
-            if (temp != null) "${temp.toString()}°C",
-          ].join(" "),
-        );
-      }
-    }
-    final Object? schedule = briefing["todaySchedule"];
-    if (schedule is List && schedule.isNotEmpty) {
-      final Object? first = schedule.first;
-      if (first is Map) {
-        final String title = first["title"]?.toString() ?? "";
-        final String time = first["time"]?.toString() ?? "";
-        if (title.isNotEmpty) {
-          parts.add(time.isEmpty ? title : "$time $title");
-        }
-      }
-    }
-    final Object? notes = briefing["pendingNotes"];
-    if (notes is List && notes.isNotEmpty) {
-      parts.add("还有 ${notes.length} 条待办提醒");
-    }
-    return parts.isEmpty ? "点击查看今天的简报内容" : parts.join(" · ");
-  }
-
-  String _buildDesktopBriefingSummary(Map<String, dynamic> briefing) {
-    final List<String> lines = <String>[];
-    final String greeting = briefing["agentGreeting"]?.toString() ??
-        briefing["greeting"]?.toString() ??
-        "";
-    if (greeting.isNotEmpty) {
-      lines.add(greeting);
-    }
-    final Object? weather = briefing["weather"];
-    if (weather is Map) {
-      final String condition = weather["condition"]?.toString() ?? "";
-      final String temperature = weather["temperature"]?.toString() ?? "";
-      final String description = weather["description"]?.toString() ?? "";
-      final String weatherLine = [
-        condition,
-        temperature.isEmpty ? "" : "$temperature°C",
-        description
-      ].where((String item) => item.trim().isNotEmpty).join(" · ");
-      if (weatherLine.isNotEmpty) {
-        lines.add("天气：$weatherLine");
-      }
-    }
-    final Object? outfit = briefing["outfitTip"];
-    if (outfit is Map) {
-      final String suggestion = outfit["suggestion"]?.toString() ?? "";
-      if (suggestion.isNotEmpty) {
-        lines.add("穿衣：$suggestion");
-      }
-    }
-    final Object? schedule = briefing["todaySchedule"];
-    if (schedule is List && schedule.isNotEmpty) {
-      final List<String> top = <String>[];
-      for (final Object? item in schedule.take(3)) {
-        if (item is Map) {
-          final String time = item["time"]?.toString() ?? "";
-          final String title = item["title"]?.toString() ?? "";
-          if (title.isNotEmpty) {
-            top.add(time.isEmpty ? title : "$time $title");
-          }
-        }
-      }
-      if (top.isNotEmpty) {
-        lines.add("安排：${top.join("；")}");
-      }
-    }
-    final Object? notes = briefing["pendingNotes"];
-    if (notes is List && notes.isNotEmpty) {
-      final List<String> top = <String>[];
-      for (final Object? item in notes.take(3)) {
-        if (item is Map) {
-          final String title = item["title"]?.toString() ?? "";
-          if (title.isNotEmpty) top.add(title);
-        } else if (item != null && item.toString().trim().isNotEmpty) {
-          top.add(item.toString());
-        }
-      }
-      if (top.isNotEmpty) {
-        lines.add("待办：${top.join("；")}");
-      }
-    }
-    return lines.isEmpty ? "今天的简报已经准备好了。" : lines.join("\n");
   }
 
   Future<void> _tryShowDesktopLaunchBriefing() async {
@@ -3140,14 +3427,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  Widget _buildGameCenterPage() {
-    return GameCenterPage(
-      actorId: ApiConfig.effectiveActorId,
-      api: _worldApi,
-      ws: _ws,
-    );
-  }
-
   Widget _buildMainContentWithCalendar() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Stack(
@@ -3182,8 +3461,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 渲染右侧滑入面板(挂在外层 Scaffold Stack 顶层，top:0 顶到屏幕最顶)
+  /// 渲染右侧滑入面板（已废弃：改为 JarvisChatLayout 内嵌分栏）。
+  /// 保留空实现避免 build 处调用断裂。
   Widget _buildRightPanelOverlay() {
+    return const SizedBox.shrink();
+  }
+
+  /* 旧浮层实现（已替换为 JarvisChatLayout 内嵌分栏）
+  Widget _buildRightPanelOverlayLegacy() {
     if (_rightPanel == null) {
       return const SizedBox.shrink();
     }
@@ -3192,34 +3477,25 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final double panelWidth = screenWidth < 820 ? screenWidth * 0.92 : 480.0;
     return RightSidePanel(
       visible: true,
-      title: _rightPanelTitle(_rightPanel!),
+      title: rightPanelTitle(_rightPanel!),
       onClose: _closeRightPanel,
       panelWidth: panelWidth,
       child: _buildRightPanelContent(),
     );
   }
-
-  /// 右侧面板标题
-  String _rightPanelTitle(_RightPanelKind kind) {
-    switch (kind) {
-      case _RightPanelKind.friends:
-        return "好友";
-      case _RightPanelKind.games:
-        return "游戏中心";
-      case _RightPanelKind.messages:
-        return "消息聚合";
-    }
-  }
+  */
 
   /// 右侧面板要渲染的具体内容
   Widget _buildRightPanelContent() {
     switch (_rightPanel) {
-      case _RightPanelKind.friends:
+      case RightPanelKind.friends:
         return MailboxPage(api: _worldApi, ws: _ws);
-      case _RightPanelKind.games:
-        return _buildGameCenterPage();
-      case _RightPanelKind.messages:
+      case RightPanelKind.messages:
         return MessageHubPage(api: _worldApi);
+      case RightPanelKind.notes:
+        return NotesPage();
+      case RightPanelKind.devices:
+        return const DevicesPage();
       case null:
         return const SizedBox.shrink();
     }
@@ -3281,7 +3557,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return JarvisChatLayout(
       scheduleFuture: _cachedScheduleFuture,
       onAgentLink: _openAgentLinkTab,
-      onGames: _openGameCenterTab,
       onSchedule: _openSchedulePanel,
       onWallet: _openWalletDialog,
       onPhone: _openPhoneDevicesDialog,
@@ -3289,6 +3564,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onNotes: _openNotesChat,
       onMessages: _openMessagesPanel,
       rightPanelVisible: _rightPanel != null,
+      rightPanelChild: _rightPanel == null ? null : _buildRightPanelContent(),
+      rightPanelTitle: _rightPanel == null ? null : rightPanelTitle(_rightPanel!),
+      splitRatio: _splitRatio,
+      onSplitRatioChanged: _setSplitRatio,
+      onCloseRightPanel: _closeRightPanel,
       child: _buildChatPage(context),
     );
   }
@@ -3313,7 +3593,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       interimAckText: _interimAckText,
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,
-      onOpenGomoku: _openGomokuGame,
       fullComputerAccessEnabled: _fullComputerAccessEnabled,
       isActive: _tabIndex == 0,
       onToggleFullComputerAccess: () {
@@ -3352,10 +3631,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 根级 Tab 栈：Windows 桌面球形 Agent 为单一原生实体（槽位锚定+ 桌面漫游）
   ///
-  /// 注：好友 / 游戏已不再作为整页 tab 出现，而是从右侧滑出折叠面板。
-  /// 为了不破坏 _tabIndex 的取值约定,这里保留 1(好友占位) 和 4(游戏占位),
-  /// 但渲染为空 SizedBox —— _openAgentLinkTab / _openGameCenterTab
-  /// 会把 _tabIndex 重置为 0 并设置 _rightPanel,实际不会停留在这两个 tab。
+  /// 注：已不再作为整页 tab 出现，而是从右侧滑出折叠面板。
+  /// 为了不破坏 _tabIndex 的取值约定,这里保留 1(好友占位),
+  /// 渲染为空 SizedBox —— _openAgentLinkTab
   Widget _buildTabStack() {
     return Builder(
       builder: (BuildContext context) {
@@ -3366,338 +3644,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             const SizedBox.shrink(), // 1: 好友 → 右侧面板
             // 2: 钱包由 dialog 弹出,栈里不占位
             const SizedBox.shrink(),
-            SkillStorePage(api: _worldApi),
-            const SizedBox.shrink(), // 4: 游戏 → 右侧面板
           ],
         );
       },
-    );
-  }
-}
-
-class _AppSidebar extends StatefulWidget {
-  const _AppSidebar({
-    required this.tabIndex,
-    required this.onTabSelected,
-    required this.onWechatClawTap,
-    required this.onToggleTheme,
-  });
-
-  final int tabIndex;
-  final ValueChanged<int> onTabSelected;
-  final VoidCallback onWechatClawTap;
-
-  /// 切换「深色 / 暖色」主题
-  final VoidCallback onToggleTheme;
-
-  @override
-  State<_AppSidebar> createState() => _AppSidebarState();
-}
-
-class _AppSidebarState extends State<_AppSidebar> {
-  static const List<_SidebarItemSpec> _kItems = <_SidebarItemSpec>[
-    _SidebarItemSpec(
-      iconOutlined: Icons.chat_bubble_outline_rounded,
-      iconFilled: Icons.chat_rounded,
-      label: '对话',
-      tabIndex: 0,
-    ),
-    _SidebarItemSpec(
-      iconOutlined: Icons.store_outlined,
-      iconFilled: Icons.store,
-      label: '技能商城',
-      tabIndex: 2,
-    ),
-  ];
-
-  // 预定义常量
-  static const double _sidebarWidth = 64.0;
-  static const EdgeInsets _sidebarPadding =
-      EdgeInsets.symmetric(horizontal: 10, vertical: 8);
-
-  @override
-  Widget build(BuildContext context) {
-    // 跟随当前主题（侧栏底部的「主题切换」按钮会改变 AppThemeController 的值，
-    // 父级 ValueListenableBuilder 触发整个 MaterialApp 重建，使这里取到新色）。
-    final AppThemeVariant variant = AppThemeController.instance.value;
-    final Color bgColor = AppPalette.resolveSidebar(variant);
-    final Color dividerColor = AppPalette.resolveSidebarDivider(variant);
-
-    return Container(
-      width: _sidebarWidth,
-      decoration: BoxDecoration(color: bgColor),
-      clipBehavior: Clip.hardEdge,
-      child: Material(
-        color: bgColor,
-        child: SafeArea(
-          child: Padding(
-            padding: _sidebarPadding,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                const SizedBox(height: 16),
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.zero,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        for (int i = 0; i < _kItems.length; i += 1)
-                          _SidebarNavItem(
-                            key: ValueKey<String>(_kItems[i].label),
-                            spec: _kItems[i],
-                            selected: widget.tabIndex == _kItems[i].tabIndex,
-                            onTap: () =>
-                                widget.onTabSelected(_kItems[i].tabIndex),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                Divider(height: 1, color: dividerColor),
-                const SizedBox(height: 6),
-                Flexible(
-                  fit: FlexFit.loose,
-                  child: Tooltip(
-                    message: "绑定微信 Claw",
-                    child: _WechatClawSidebarFooter(
-                      onTap: widget.onWechatClawTap,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Flexible(
-                  fit: FlexFit.loose,
-                  child: Tooltip(
-                    message:
-                        variant == AppThemeVariant.warm ? "切换为深色主题" : "切换为浅色主题",
-                    child: _ThemeToggleSidebarFooter(
-                      isWarm: variant == AppThemeVariant.warm,
-                      onTap: widget.onToggleTheme,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SidebarItemSpec {
-  const _SidebarItemSpec({
-    required this.iconOutlined,
-    required this.iconFilled,
-    required this.label,
-    required this.tabIndex,
-  });
-
-  final IconData iconOutlined;
-  final IconData iconFilled;
-  final String label;
-  final int tabIndex;
-}
-
-class _SidebarNavItem extends StatefulWidget {
-  const _SidebarNavItem({
-    super.key,
-    required this.spec,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final _SidebarItemSpec spec;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  State<_SidebarNavItem> createState() => _SidebarNavItemState();
-}
-
-class _SidebarNavItemState extends State<_SidebarNavItem> {
-  bool _hovering = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final bool selected = widget.selected;
-    final bool hovering = _hovering;
-    final _SidebarItemSpec spec = widget.spec;
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final AppThemeVariant variant = AppThemeController.instance.value;
-
-    final Color bgColor = selected
-        ? cs.surfaceContainerHigh.withValues(alpha: 0.6)
-        : (hovering
-            ? cs.surfaceContainer.withValues(alpha: 0.6)
-            : Colors.transparent);
-
-    final Color iconColor = selected
-        ? AppPalette.resolveSidebarIconSelected(variant)
-        : (hovering
-            ? AppPalette.resolveSidebarIconHover(variant)
-            : AppPalette.resolveSidebarIconDefault(variant));
-
-    final Widget button = MouseRegion(
-      onEnter: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = true);
-      }),
-      onExit: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = false);
-      }),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
-          width: 40,
-          height: 40,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(
-            selected ? spec.iconFilled : spec.iconOutlined,
-            size: 20,
-            color: iconColor,
-          ),
-        ),
-      ),
-    );
-
-    return Tooltip(
-      message: spec.label,
-      child: button,
-    );
-  }
-}
-
-class _WechatClawSidebarFooter extends StatefulWidget {
-  const _WechatClawSidebarFooter({
-    required this.onTap,
-  });
-
-  final VoidCallback onTap;
-
-  @override
-  State<_WechatClawSidebarFooter> createState() =>
-      _WechatClawSidebarFooterState();
-}
-
-class _WechatClawSidebarFooterState extends State<_WechatClawSidebarFooter> {
-  bool _hovering = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppThemeVariant variant = AppThemeController.instance.value;
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final Color bgColor = _hovering
-        ? cs.surfaceContainer.withValues(alpha: 0.6)
-        : Colors.transparent;
-    final Color iconColor = _hovering
-        ? AppPalette.resolveSidebarIconHover(variant)
-        : AppPalette.resolveSidebarIconDefault(variant);
-
-    return MouseRegion(
-      onEnter: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = true);
-      }),
-      onExit: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = false);
-      }),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
-          width: 40,
-          height: 40,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(
-            Icons.qr_code_2_outlined,
-            size: 20,
-            color: iconColor,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// 侧边栏底部「主题切换」按钮。
-///
-/// - 当前为 [AppThemeVariant.warm] 时显示「太阳」图标，点击切回深色；
-/// - 当前为 [AppThemeVariant.dark]  时显示「月亮」图标，点击切到暖色。
-class _ThemeToggleSidebarFooter extends StatefulWidget {
-  const _ThemeToggleSidebarFooter({
-    required this.isWarm,
-    required this.onTap,
-  });
-
-  final bool isWarm;
-  final VoidCallback onTap;
-
-  @override
-  State<_ThemeToggleSidebarFooter> createState() =>
-      _ThemeToggleSidebarFooterState();
-}
-
-class _ThemeToggleSidebarFooterState extends State<_ThemeToggleSidebarFooter> {
-  bool _hovering = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final AppThemeVariant variant = AppThemeController.instance.value;
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final Color bgColor = _hovering
-        ? cs.surfaceContainer.withValues(alpha: 0.6)
-        : Colors.transparent;
-    final Color iconColor = _hovering
-        ? AppPalette.resolveSidebarIconHover(variant)
-        : AppPalette.resolveSidebarIconDefault(variant);
-
-    return MouseRegion(
-      onEnter: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = true);
-      }),
-      onExit: (_) => _deferSidebarHover(() {
-        if (mounted) setState(() => _hovering = false);
-      }),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
-          width: 40,
-          height: 40,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(
-            // 当前是暖色 → 显示「太阳」预告下一次点击会切回「深色」；
-            // 当前是深色 → 显示「月亮」预告下一次点击会切到「暖色」。
-            widget.isWarm
-                ? Icons.light_mode_outlined
-                : Icons.dark_mode_outlined,
-            size: 20,
-            color: iconColor,
-          ),
-        ),
-      ),
     );
   }
 }

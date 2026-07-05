@@ -122,9 +122,6 @@ class _PlazaPageState extends State<PlazaPage> {
               ),
             ),
           ),
-          const SizedBox(height: 20),
-          Text("牌类游戏（观战）", style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
         ],
       ),
     );

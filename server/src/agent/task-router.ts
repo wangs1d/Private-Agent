@@ -38,16 +38,21 @@ const MULTI_STEP_RE =
   /然后|并且|同时|接着|以及|顺便|另外|一方面|另一方面|首先|其次|最后/i;
 
 const CHAT_ONLY_RE =
-  /^(你好|hello|hi|hey|早上好|下午好|晚上好|谢谢|thanks|thank you|bye|再见|你是谁)[!！。.？?\s]*$/i;
-
-const NO_TOOL_CHAT_RE =
-  /解释|怎么理解|你怎么看|你觉得|帮我回复|帮我润色|润色一下|改写|改成|翻译|摘要|总结|头脑风暴|idea|brainstorm|rewrite|rephrase|summarize|translate|explain/i;
+  /^(你好|hello|hi|hey|早上好|下午好|晚上好|谢谢|thanks|thank you|bye|再见|你是谁)[!！。.，,？?\s]*$/i;
 
 const TOOL_OR_REALTIME_RE =
   /时间|日期|星期|几点|天气|新闻|最新|最近|价格|汇率|股价|行情|余额|流水|日程|提醒|搜索|查询|查一下|联网|浏览|网页|链接|截图|相册|摄像头|位置|navigation|search|browse|weather|news|latest|recent|price|stock|schedule|calendar|remind|time|date/i;
 
+const INFORMATIONAL_REQUEST_RE =
+  /解释|怎么理解|为什么|为何|原理|区别|对比|比较|分析|总结|摘要|翻译|改写|润色|介绍|教我|帮我|python|javascript|typescript|sql|code|debug|rewrite|rephrase|summarize|translate|explain|compare|analysis|analyze|difference|why|how|what|which|when/i;
+
 const PARALLEL_SUBAGENT_RE =
-  /同时|并行|一起(搞|办|做|处理)|多分|多件事|多线|两头|两头跑|一边.*一边|一方面.*另一方面/i;
+  /同时|并行|一起|协作|分头|多份|多件事|多线|两头|一边.*一边|一方面.*另一方面/i;
+
+const CASUAL_FAST_CHAT_RE =
+  /^(在吗|还在吗|哈哈|haha|lol|ok|okay|嗯|嗯嗯|欸|诶|哎|唉|哦|噢|喔|在|忙吗|睡了吗|吃了吗|收到|行|好嘞|好的呀|谢啦|谢谢啦|bye bye|晚安)[!！。.，,？?\s]*$/i;
+
+const FAST_CHAT_QUESTION_RE = /[?？]|什么|怎么|为什么|why|how|what|which|when/i;
 
 function suggestsParallelSubAgents(message: string): boolean {
   const text = message.trim();
@@ -68,16 +73,17 @@ function shouldUseFastChatLane(message: string): boolean {
   const text = message.trim();
   if (!text) return true;
   if (CHAT_ONLY_RE.test(text)) return true;
+  if (CASUAL_FAST_CHAT_RE.test(text)) return true;
   if (requiresSubAgent(text)) return false;
   if (!shouldSkipNarrativeRecall(text)) return false;
   if (TOOL_OR_REALTIME_RE.test(text)) return false;
+  if (INFORMATIONAL_REQUEST_RE.test(text)) return false;
+  if (FAST_CHAT_QUESTION_RE.test(text) && text.length > 8) return false;
   if (MULTI_STEP_RE.test(text) && text.length > 48) return false;
-  if (NO_TOOL_CHAT_RE.test(text) && text.length <= 240) return true;
-  return text.length <= 24;
+  return text.length <= 12;
 }
 
 export type RouteLlmExecutionOptions = {
-  /** 微信消息桥等场景：与 App WebSocket 一致，不走 fast_chat 空链路 */
   preferFullPipeline?: boolean;
 };
 

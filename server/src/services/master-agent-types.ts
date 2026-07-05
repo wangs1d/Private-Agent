@@ -15,18 +15,48 @@ export interface SubAgentResult {
   executionTime?: number;
 }
 
-export type BackgroundSubAgentStatus = "running" | "completed" | "failed";
+export type BackgroundSubAgentStatus =
+  | "running"
+  | "awaiting_confirmation"
+  | "completed"
+  | "failed";
+
+export type BackgroundSubAgentAction =
+  | "confirm"
+  | "retry"
+  | "continue_processing";
 
 /** 主 Agent 后台委派的子 Agent 任务（不阻塞当前 tool 批次）。 */
 export interface BackgroundSubAgentJob {
   taskId: string;
   agentType: SubAgentType;
   agentName: string;
+  sessionId: string;
+  chatUserMessageId?: string;
   status: BackgroundSubAgentStatus;
   startedAt: number;
   completedAt?: number;
+  taskDescription?: string;
+  priorContext?: string;
+  accessMode?: "sandbox" | "full";
   report?: string;
   error?: string;
+  availableActions?: BackgroundSubAgentAction[];
+}
+
+export interface BackgroundSubAgentUpdate {
+  taskId: string;
+  agentType: SubAgentType;
+  agentName: string;
+  status: BackgroundSubAgentStatus;
+  sessionId: string;
+  chatUserMessageId?: string;
+  startedAt: number;
+  completedAt?: number;
+  availableActions?: BackgroundSubAgentAction[];
+  report?: string;
+  error?: string;
+  userFacingText: string;
 }
 
 export type RetryStrategy = "none" | "with_hint" | "simplify" | "reassign";
@@ -75,7 +105,6 @@ export type AgentCapabilityTag =
   | "purchase"         /** 消费购物：wallet.purchase 全50+类别通用 */
   | "social"           /** 社交交互：好友、消息、红包、动态 */
   | "daily_life"       /** 日常生活：天气、日程、提醒、闹钟 */
-  | "entertainment"     /** 娱乐休闲：游戏、音乐、电影对局 */
   | "code_dev"         /** 代码开发：编写、调试、审查 */
   | "system_ops"       /** 系统运维：服务器、部署、API调试 */
   | "search_info"      /** 搜索调研：比价、查询、翻译（只查不买） */

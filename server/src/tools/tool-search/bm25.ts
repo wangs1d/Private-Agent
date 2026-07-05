@@ -344,12 +344,6 @@ export function buildToolSearchText(tool: {
 function toolSearchAliases(name: string): string[] {
   const aliases: string[] = [];
   const prefixRules: Array<{ prefix: string; words: string[] }> = [
-    { prefix: "world.doudizhu.", words: ["斗地主", "doudizhu", "扑克", "地主", "游戏"] },
-    { prefix: "world.zhajinhua.", words: ["炸金花", "zhajinhua", "金花", "比牌", "游戏"] },
-    { prefix: "world.gomoku.", words: ["五子棋", "gomoku", "下棋", "棋", "游戏"] },
-    { prefix: "gomoku.", words: ["五子棋", "gomoku", "下棋", "棋"] },
-    { prefix: "world.blackjack.", words: ["21点", "blackjack", "二十一点", "要牌", "停牌", "游戏"] },
-    { prefix: "world.game_center.", words: ["游戏中心", "游戏大厅", "game center"] },
     { prefix: "calendar.", words: ["日历", "日程", "待办", "提醒"] },
     { prefix: "phone.", words: ["电话", "短信", "联系", "call", "message"] },
     { prefix: "weather.", words: ["天气", "气温", "预报"] },

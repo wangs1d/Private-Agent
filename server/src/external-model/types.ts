@@ -100,17 +100,17 @@ export type ToolRankingHint = {
 export type AgentStreamOptions = {
   promptContext?: { memory?: AgentPromptMemoryContext };
   toolLoop?: {
-    /** 工具多轮上限；五子棋快路径建议 1 */
+    /** 工具多轮上限；建议 1 */
     maxRounds?: number;
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
   };
   /** 单轮快路径：不写入 provider 会话 thread（避免历史越积越慢） */
   ephemeralTurn?: boolean;
-  /** 替换默认 system（跳过 UAP 记忆拼装，用于五子棋等低延迟场景） */
+  /** 替换默认 system（跳过 UAP 记忆拼装，用于低延迟场景） */
   systemPromptOverride?: string;
-  /** 覆盖默认 chat 模型（如五子棋专用快模型） */
+  /** 覆盖默认 chat 模型（如专用快模型） */
   modelOverride?: string;
-  /** 限制 provider thread 保留的消息条数（不含 system）；五子棋建议 8–12 */
+  /** 限制 provider thread 保留的消息条数（不含 system）；建议 8–12 */
   maxThreadMessages?: number;
   /** Kimi k2.5+：关闭 thinking，降低 tool 落子延迟 */
   disableThinking?: boolean;
@@ -173,7 +173,7 @@ export interface ExternalChatProvider {
   /**
    * 流式生成回复；`onDelta` 为增量文本（UTF-16 字符串片段，与常见 SDK 一致）。
    * 实现需自行按 `sessionId` 维护多轮上下文（若支持）。
-   * `tools` 传入时启用 world.gomoku.* 等 function calling（OpenAI 兼容端点）。
+   * `tools` 传入时启用 function calling（OpenAI 兼容端点）。
    */
   streamCompletion(
     sessionId: string,
