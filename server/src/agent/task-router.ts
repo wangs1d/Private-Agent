@@ -34,6 +34,25 @@ const DELEGATE_KEYWORDS = [
   /第一步.*第二步|先.*再.*然后/,
 ];
 
+/**
+ * 本地可执行代码任务：用户明确想用某种语言「算/计算/运行/验证」一个具体结果，
+ * 而不是「写一个完整程序 / 调试 / 部署」。
+ *
+ * 命中后路由到 direct_llm，由标准 LLM + tool loop 直接调 code.run，
+ * 避免 master agent 派子 agent（实测能把 TTFT 从 20s+ 降到 6-8s）。
+ *
+ * 注意排除「写/实现/开发/debug/部署」这类仍需委派的任务。
+ */
+const LOCAL_CODE_TASK_RE =
+  /(?:^(?:用|使用|用一下)\s*(?:python|javascript|js|typescript|ts|node|go|rust|java|c\+\+|c#|ruby|php|swift|kotlin)\s*(?:算|计算|运行|执行|验证|验算))|(?:^(?:算|计算|验证|验算)\s*一下)|(?:^运行\s*(?:代码|脚本|命令))/i;
+
+/**
+ * 仍然属于「需要写代码 / 调试 / 部署」等开发型任务，应保留 master_delegate。
+ * 用来从 DELEGATE_KEYWORDS 命中里把「写代码」与「本地算一下」区分开。
+ */
+const DEV_WORK_RE =
+  /写.*(?:代码|脚本|程序|爬虫)|实现|开发|部署|debug|调试|重构|优化.*(?:算法|架构|代码)|从零|做一个|搭建/i;
+
 const MULTI_STEP_RE =
   /然后|并且|同时|接着|以及|顺便|另外|一方面|另一方面|首先|其次|最后/i;
 
@@ -109,6 +128,14 @@ export function routeLlmExecution(
     if (isSimpleDirectTask(text)) {
       reasons.push("simple_direct_task");
       return { mode: "master_only", reasons };
+    }
+
+    // 本地可执行代码任务（"用 Python 算一下" / "计算一下" / "运行代码"）
+    // 直接走 direct_llm + code.run，避免 master agent 派子 agent 拖慢 TTFT。
+    // 仅当不是开发型任务（写/实现/调试/部署）时命中。
+    if (LOCAL_CODE_TASK_RE.test(text) && !DEV_WORK_RE.test(text)) {
+      reasons.push("local_code_task_direct");
+      return { mode: "direct_llm", reasons };
     }
 
     if (requiresSubAgent(text)) {

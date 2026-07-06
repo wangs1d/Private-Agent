@@ -2,6 +2,7 @@ import "dart:async";
 
 import "package:flutter/material.dart";
 
+import "../../core/region/region_config.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/theme/app_theme.dart";
 
@@ -42,8 +43,9 @@ class SidebarUserMenu extends StatefulWidget {
     required this.onOpenMessages,
     required this.onOpenSettings,
     required this.onOpenHelp,
-    required this.onOpenWechatClaw,
+    this.onOpenWechatClaw,
     required this.onOpenDevices,
+    required this.onOpenBriefingSettings,
     required this.onLogout,
   });
 
@@ -74,11 +76,17 @@ class SidebarUserMenu extends StatefulWidget {
   /// 点击「帮助与反馈」:后续接帮助页
   final VoidCallback onOpenHelp;
 
-  /// 点击「微信 Claw 绑定」:复用原侧栏底部入口
-  final VoidCallback onOpenWechatClaw;
+  /// 点击「微信 Claw 绑定」:复用原侧栏底部入口。
+  ///
+  /// 可选：当 [RegionCapabilities.wechatClaw] 为 false（国际版）时
+  /// 该行不渲染，回调可为 null。
+  final VoidCallback? onOpenWechatClaw;
 
   /// 点击「我的设备」:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
+
+  /// 点击「每日简报」:打开简报设置页（启用开关/时间/模式/sections）
+  final VoidCallback onOpenBriefingSettings;
 
   /// 点击「退出登录」:后续接账号注销
   final VoidCallback onLogout;
@@ -135,13 +143,19 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenHelp();
           },
-          onOpenWechatClaw: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenWechatClaw();
-          },
+          onOpenWechatClaw: widget.onOpenWechatClaw == null
+              ? null
+              : () {
+                  Navigator.of(context, rootNavigator: true).pop();
+                  widget.onOpenWechatClaw!();
+                },
           onOpenDevices: () {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenDevices();
+          },
+          onOpenBriefingSettings: () {
+            Navigator.of(context, rootNavigator: true).pop();
+            widget.onOpenBriefingSettings();
           },
           onLogout: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -250,8 +264,9 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onOpenMessages,
     required this.onOpenSettings,
     required this.onOpenHelp,
-    required this.onOpenWechatClaw,
+    this.onOpenWechatClaw,
     required this.onOpenDevices,
+    required this.onOpenBriefingSettings,
     required this.onLogout,
   });
 
@@ -265,8 +280,9 @@ class _UserMenuOverlay extends StatefulWidget {
   final VoidCallback onOpenMessages;
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenHelp;
-  final VoidCallback onOpenWechatClaw;
+  final VoidCallback? onOpenWechatClaw;
   final VoidCallback onOpenDevices;
+  final VoidCallback onOpenBriefingSettings;
   final VoidCallback onLogout;
 
   @override
@@ -431,6 +447,13 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onTap: widget.onOpenSettings,
                   ),
                   _Row(
+                    leading:
+                        const Icon(Icons.wb_sunny_outlined, size: 18),
+                    title: "每日简报",
+                    trailing: const _TrailingValue(showChevron: true),
+                    onTap: widget.onOpenBriefingSettings,
+                  ),
+                  _Row(
                     leading: const Icon(Icons.help_outline, size: 18),
                     title: "帮助与反馈",
                     trailing: const _TrailingValue(showChevron: true),
@@ -442,11 +465,13 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onUnhover: _onDeviceUnhover,
                     onTap: widget.onOpenDevices,
                   ),
-                  _Row(
-                    leading: const Icon(Icons.qr_code_2_outlined, size: 18),
-                    title: "绑定微信 Claw",
-                    onTap: widget.onOpenWechatClaw,
-                  ),
+                  if (RegionConfig.capabilities.wechatClaw &&
+                      widget.onOpenWechatClaw != null)
+                    _Row(
+                      leading: const Icon(Icons.qr_code_2_outlined, size: 18),
+                      title: "绑定微信 Claw",
+                      onTap: widget.onOpenWechatClaw!,
+                    ),
                   _Row(
                     leading:
                         const Icon(Icons.notifications_outlined, size: 18),

@@ -192,3 +192,20 @@ export async function buildInterimAckTextWithLlm(opts: {
 export function interimAckMessageId(traceId: string): string {
   return `interim-${traceId}`;
 }
+
+/**
+ * 是否启用 LLM 生成 interim ack 文案。
+ *
+ * 默认关闭：走本地模板（`buildInterimAckText`，0ms）。
+ * 仅当显式设置 `INTERIM_ACK_USE_LLM=1`，或配置了 `FAST_MODEL` / `INTERIM_ACK_MODEL` 时才启用 LLM 路径。
+ *
+ * 性能背景：LLM 路径每次会多消耗一次 kimi-k2.5 调用（~800-1000ms 首 token），
+ * 而 sanitize + looksLikeActualAnswer 多数情况下会丢弃 LLM 输出回退到模板，
+ * 净结果是把所有工具任务的首字延迟从 ~100ms 推到 ~1000ms。
+ */
+export function isInterimAckLlmEnabled(): boolean {
+  if (process.env.INTERIM_ACK_USE_LLM === "1") return true;
+  if (process.env.INTERIM_ACK_MODEL?.trim()) return true;
+  if (process.env.FAST_MODEL?.trim()) return true;
+  return false;
+}

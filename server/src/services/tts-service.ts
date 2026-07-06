@@ -45,6 +45,19 @@ export class TtsService {
     | { ok: true; format: "mp3"; base64: string; provider?: string }
     | { ok: false; reason: string }
   > {
+    const result = await this.synthesizeMp3Buffer(text);
+    if (!result.ok) return result;
+    return { ok: true, format: "mp3", base64: result.buffer.toString("base64"), provider: result.provider };
+  }
+
+  /**
+   * 生成为 mp3 的 Buffer（用于落地为可重播语音消息文件）。
+   * 与 `synthesizeMp3Base64` 同源，但不做 base64 编码，便于直接写盘。
+   */
+  async synthesizeMp3Buffer(text: string): Promise<
+    | { ok: true; format: "mp3"; buffer: Buffer; provider?: string }
+    | { ok: false; reason: string }
+  > {
     const trimmed = text.trim();
     if (!trimmed) return { ok: false, reason: "empty text" };
     const clipped = trimmed.length > 450 ? `${trimmed.slice(0, 447)}…` : trimmed;
@@ -54,12 +67,7 @@ export class TtsService {
       try {
         const result = await this.siliconflow.synthesize(clipped);
         console.log(`[TtsService] 使用硅基流动 TTS 合成成功 (${result.data.length} bytes)`);
-        return {
-          ok: true,
-          format: "mp3",
-          base64: result.data.toString("base64"),
-          provider: "siliconflow",
-        };
+        return { ok: true, format: "mp3", buffer: result.data, provider: "siliconflow" };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.warn(`[TtsService] 硅基流动 TTS 失败，回退到 OpenAI: ${msg}`);
@@ -76,7 +84,7 @@ export class TtsService {
           response_format: "mp3",
         });
         const buf = Buffer.from(await res.arrayBuffer());
-        return { ok: true, format: "mp3", base64: buf.toString("base64"), provider: "openai" };
+        return { ok: true, format: "mp3", buffer: buf, provider: "openai" };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return { ok: false, reason: `OpenAI TTS 错误: ${msg}` };

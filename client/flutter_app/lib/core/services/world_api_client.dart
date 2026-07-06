@@ -121,6 +121,31 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  /// 上传语音消息录音文件（mp3 字节）到服务端 `POST /agent/voice/messages/upload`。
+  ///
+  /// 与 `socialUploadMediaForm` 区别：
+  ///   - socialUploadMediaForm 走 `/world/social/media/form`，存到社交动态目录。
+  ///   - uploadVoiceMessage 走 `/agent/voice/messages/upload`，存到独立语音消息目录。
+  ///
+  /// 返回 `{ ok, mediaUrl, msgId, durationMs }`。
+  Future<Map<String, dynamic>> uploadVoiceMessage({
+    required String sessionId,
+    required List<int> fileBytes,
+    required String fileName,
+    int? durationMs,
+  }) async {
+    final Uri uri = _uri("/agent/voice/messages/upload");
+    final http.MultipartRequest req = http.MultipartRequest("POST", uri);
+    req.fields["sessionId"] = sessionId;
+    if (durationMs != null) {
+      req.fields["durationMs"] = durationMs.toString();
+    }
+    req.files.add(http.MultipartFile.fromBytes("file", fileBytes, filename: fileName));
+    final http.StreamedResponse streamed = await req.send();
+    final http.Response r = await http.Response.fromStream(streamed);
+    return _decode(r);
+  }
+
   Future<Map<String, dynamic>> socialDeletePost(String sessionId, String postId) async {
     final http.Response r = await http.delete(
       _uri("/world/social/post/$postId", <String, String>{"sessionId": sessionId}),

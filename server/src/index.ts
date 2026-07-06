@@ -1,4 +1,4 @@
-import { loadServerEnv } from "./config/load-server-env.js";
+﻿import { loadServerEnv } from "./config/load-server-env.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
 import { getRuntimeConfig } from "./config/env.js";
 import { createExternalChatProviderFromEnv } from "./external-model/index.js";
@@ -13,6 +13,7 @@ import {
 } from "./services/wechat-claw-bridge-service.js";
 import { isWechatClawFeatureEnabled } from "./services/openclaw-gateway-client.js";
 import { isTcpPortInUse } from "./utils/port-in-use.js";
+import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
 
 // server/.env + server/.env.local 已在 load-server-env.ts 模块加载时自动执行
 
@@ -65,6 +66,9 @@ services.hookBus.emit("agent.online", {
   version: "1.0",
   uptime: new Date().toISOString(),
 });
+
+// Phase 2：启动自适应并发控制（AIMD 动态调整全局 turn 并发上限）
+startAdaptiveConcurrency();
 
 const stopDesktopBridge = startDesktopBridgeAutoClient({
   port: runtime.port,

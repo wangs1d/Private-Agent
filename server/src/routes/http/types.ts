@@ -24,6 +24,9 @@ import type { ComputeQuotaService } from "../../services/compute-quota-service.j
 import type { WeatherPrefsService } from "../../services/weather-prefs-service.js";
 import type { WeatherService } from "../../services/weather-service.js";
 import type { TtsService } from "../../services/tts-service.js";
+import type { VoiceMessageService } from "../../services/voice-message-service.js";
+import type { ImageGenerationService } from "../../services/image-generation-service.js";
+import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "../../services/phone-bridge-coordinator.js";
@@ -71,6 +74,12 @@ export type HttpRouteDeps = {
   weatherPrefsService: WeatherPrefsService;
   virtualPhoneService: VirtualPhoneService;
   ttsService: TtsService;
+  /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */
+  voiceMessageService: VoiceMessageService;
+  /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
+  imageGenerationService: ImageGenerationService;
+  /** 文件/文档处理服务（file.read_text 等工具 + 静态拉流共用） */
+  fileProcessingService: FileProcessingService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   wechatClawBindingService: WechatClawBindingService;

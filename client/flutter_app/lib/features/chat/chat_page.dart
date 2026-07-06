@@ -16,6 +16,8 @@ import "agent_profile_page.dart";
 import "agent_result_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
+import "voice_input_bar.dart";
+import "voice_message_bubble.dart";
 
 class ChatPage extends StatefulWidget {
   const ChatPage({
@@ -33,6 +35,7 @@ class ChatPage extends StatefulWidget {
     this.onPickGalleryImage,
     this.onClearGalleryImages,
     this.onEnterVoiceMode,
+    this.onSendVoice,
     this.isAgentProcessing = false,
     this.agentStatusLine,
 
@@ -78,6 +81,10 @@ class ChatPage extends StatefulWidget {
 
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
+
+  /// 「按住说话」发送语音消息的回调（[path] 临时录音文件路径，[durationMs] 时长）。
+  /// 父级负责上传 + 发送 chat.user_message（contentType=audio）。
+  final void Function(String path, int durationMs)? onSendVoice;
 
   /// Agent是否正在处理中（流式输出）
   final bool isAgentProcessing;
@@ -1315,10 +1322,17 @@ class _ChatPageState extends State<ChatPage>
                                         minWidth: 30,
                                         minHeight: 30,
                                       ),
-                                      tooltip: '进入语音模式',
+                                      tooltip: '语音对话模式',
                                     ),
                                   ),
                                   const SizedBox(width: 6),
+                                  // 「按住说话」按钮 - 长按录音，松开发送语音消息
+                                  if (widget.onSendVoice != null)
+                                    VoiceInputBar(
+                                      onSendVoice: widget.onSendVoice!,
+                                    ),
+                                  if (widget.onSendVoice != null)
+                                    const SizedBox(width: 6),
                                   if (widget.onOpenPhoneDialer != null)
                                     Container(
                                       decoration: BoxDecoration(
@@ -1632,15 +1646,47 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   Widget _buildMessageRow(BuildContext context) {
     // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
-    final Widget bubble = LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final double maxBubbleWidth = constraints.maxWidth * 0.72;
-        return ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-          child: _buildMessageCard(context, highlight: widget.isSelected),
-        );
-      },
-    );
+    final bool isVoiceMessage =
+        widget.mainMessage.contentType == "audio" &&
+            widget.mainMessage.attachments
+                .any((MessageAttachment a) => a.type == MessageAttachmentType.audio);
+    final Widget bubble;
+    if (isVoiceMessage) {
+      final MessageAttachment audio = widget.mainMessage.attachments.firstWhere(
+        (MessageAttachment a) => a.type == MessageAttachmentType.audio,
+      );
+      bubble = LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final double maxBubbleWidth = constraints.maxWidth * 0.72;
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+            child: VoiceMessageBubble(
+              mediaUrl: audio.url,
+              isMe: widget.isUser,
+              durationMs:
+                  audio.durationMs ?? widget.mainMessage.durationMs ?? 0,
+              waveform: audio.waveform ?? widget.mainMessage.waveform,
+              transcript:
+                  (audio.transcript?.isNotEmpty == true ? audio.transcript : null) ??
+                      (widget.mainMessage.text.isNotEmpty
+                          ? widget.mainMessage.text
+                          : null),
+              isRead: true,
+            ),
+          );
+        },
+      );
+    } else {
+      bubble = LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final double maxBubbleWidth = constraints.maxWidth * 0.72;
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+            child: _buildMessageCard(context, highlight: widget.isSelected),
+          );
+        },
+      );
+    }
 
     if (widget.inSelectableRange) {
       // 删除选择模式：左侧勾选 + 头像/气泡

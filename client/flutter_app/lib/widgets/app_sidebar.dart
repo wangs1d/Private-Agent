@@ -22,8 +22,9 @@ class AppSidebar extends StatefulWidget {
     required this.onOpenMessages,
     required this.onOpenUserMenuSettings,
     required this.onOpenUserMenuHelp,
-    required this.onOpenWechatClaw,
+    this.onOpenWechatClaw,
     required this.onOpenDevices,
+    required this.onOpenBriefingSettings,
     required this.onLogout,
     required this.totalUnread,
   });
@@ -52,11 +53,17 @@ class AppSidebar extends StatefulWidget {
   /// 用户菜单「帮助与反馈」行
   final VoidCallback onOpenUserMenuHelp;
 
-  /// 用户菜单「绑定微信 Claw」行
-  final VoidCallback onOpenWechatClaw;
+  /// 用户菜单「绑定微信 Claw」行。
+  ///
+  /// 可选：国际版不渲染该行时可不传（由 [RegionCapabilities.wechatClaw]
+  /// 决定是否显示）。
+  final VoidCallback? onOpenWechatClaw;
 
   /// 用户菜单「我的设备」行:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
+
+  /// 用户菜单「每日简报」行:打开简报设置页
+  final VoidCallback onOpenBriefingSettings;
 
   /// 用户菜单「退出登录」行
   final VoidCallback onLogout;
@@ -158,6 +165,7 @@ class _AppSidebarState extends State<AppSidebar> {
                       onOpenHelp: widget.onOpenUserMenuHelp,
                       onOpenWechatClaw: widget.onOpenWechatClaw,
                       onOpenDevices: widget.onOpenDevices,
+                      onOpenBriefingSettings: widget.onOpenBriefingSettings,
                       onLogout: widget.onLogout,
                     ),
                   ),

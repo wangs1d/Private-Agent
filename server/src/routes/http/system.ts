@@ -59,4 +59,10 @@ export function registerSystemRoutes(app: FastifyInstance, deps: Pick<HttpRouteD
     const health = await deps.upstreamSearchService.checkUpstreamHealth();
     return { ok: true, ...health };
   });
+
+  /** 并发控制实时指标：全局 turn + 按工具类别的 active/queued/max。 */
+  app.get("/system/concurrency", async () => {
+    const { getConcurrencyStats } = await import("../../services/concurrency-limiter.js");
+    return { ok: true, ...getConcurrencyStats() };
+  });
 }

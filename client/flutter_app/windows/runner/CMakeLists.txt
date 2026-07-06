@@ -21,7 +21,6 @@ add_executable(${BINARY_NAME} WIN32
   "outgoing_call_window.cpp"
   "schedule_floating_window.cpp"
   "sphere_overlay_window.cpp"
-  "translate_overlay_window.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"

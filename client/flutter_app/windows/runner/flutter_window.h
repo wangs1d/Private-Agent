@@ -17,7 +17,6 @@
 #include "incoming_call_window.h"
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
-#include "translate_overlay_window.h"
 #include "schedule_floating_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -47,9 +46,6 @@ class FlutterWindow : public Win32Window {
   // 独立来电悬浮窗（脱离主窗口存在）
   std::unique_ptr<IncomingCallWindow> incoming_call_window_;
   std::unique_ptr<DesktopNotificationWindow> desktop_notification_window_;
-
-  // 翻译组件独立悬浮窗（同主应用进程，可自由拖动、on-top）
-  std::unique_ptr<TranslateOverlayWindow> translate_overlay_window_;
 
   // 今日安排独立悬浮窗（同进程 HWND + GDI 自绘，不依赖 Electron）
   std::unique_ptr<ScheduleFloatingWindow> schedule_floating_window_;
@@ -82,10 +78,6 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       desktop_notification_channel_;
 
-  // pai/translate_overlay MethodChannel —— 控制独立翻译悬浮窗
-  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
-      translate_overlay_channel_;
-
   // pai/schedule_floating MethodChannel —— 控制今日安排悬浮窗
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       schedule_floating_channel_;
@@ -98,9 +90,6 @@ class FlutterWindow : public Win32Window {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleDesktopNotificationMethodCall(
-      const flutter::MethodCall<flutter::EncodableValue>& call,
-      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-  void HandleTranslateOverlayMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void HandleScheduleFloatingMethodCall(

@@ -30,34 +30,6 @@ bool isMasterInvokeSubAgentTool(String toolName) {
   return n == "master.invoke_sub_agent" || n == "master_invoke_sub_agent";
 }
 
-/// 翻译目标语言的展示标签。
-String translateLangLabel(String code) {
-  switch (code) {
-    case 'zh':
-      return '中文';
-    case 'en':
-      return 'English';
-    case 'ja':
-      return '日本語';
-    case 'ko':
-      return '한국어';
-    case 'fr':
-      return 'Français';
-    case 'de':
-      return 'Deutsch';
-    case 'es':
-      return 'Español';
-    case 'ru':
-      return 'Русский';
-    case 'zh-Hant':
-      return '繁體';
-    case 'auto':
-      return '自动检测';
-    default:
-      return '中文';
-  }
-}
-
 /// 平台标识 → 中文显示名。
 String platformDisplayName(String platform) {
   switch (platform) {

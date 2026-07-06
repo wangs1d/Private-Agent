@@ -1,5 +1,7 @@
 .env
 .env.local
+.env.domestic
+.env.intl
 node_modules/
 dist/
 

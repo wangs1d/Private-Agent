@@ -72,6 +72,15 @@ import { TtsService } from "../services/tts-service.js";
 import { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { VirtualPhoneIncomingCoordinator } from "../services/virtual-phone-incoming-coordinator.js";
 import { VoiceCapabilityService } from "../services/voice-capability-service.js";
+import { VoiceMessageService } from "../services/voice-message-service.js";
+import { ImageGenerationService } from "../services/image-generation-service.js";
+import { FileProcessingService } from "../services/file-processing-service.js";
+import { EmailSmsService } from "../services/email-sms-service.js";
+import { MediaMusicService } from "../services/media-music-service.js";
+import { HealthFitnessService } from "../services/health-fitness-service.js";
+import { FinanceDeepService } from "../services/finance-deep-service.js";
+import { SocialOutreachService } from "../services/social-outreach-service.js";
+import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
@@ -91,6 +100,13 @@ import { registerPaymentTools } from "../tools/payment-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
+import {
+  getAllCapabilityModuleIntentRules,
+  registerAllCapabilityModules,
+  type CapabilityModuleDeps,
+} from "../tools/capability-modules/index.js";
+import { setExtraIntentRules } from "../tools/tool-search/intent-metadata.js";
+import { setCapabilityModuleDeps } from "../external-model/openai-compatible-tool-loop.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
@@ -102,7 +118,6 @@ import {
 } from "../services/embodiment-autonomy-service.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
-import { registerTranslateTools } from "../tools/translate-tools.js";
 import { registerDeviceTools } from "../tools/device-tools.js";
 import { SmartHomeService } from "../services/smart-home-service.js";
 import { DeviceRegistry } from "../device-bus/device-registry.js";
@@ -318,10 +333,31 @@ export async function createAppServices(): Promise<AppServices> {
 
   // 初始化 Agent 底层语音能力中枢（TTS + ASR + WS 推送）。
   // 作为 Agent 的底层能力，被 voice.speak 工具、智能提醒、主动消息等场景统一调度。
+  const voiceMessageService = new VoiceMessageService();
+  voiceMessageService.setTtsService(ttsService);
+  // 初始化图像生成能力服务（硅基流动 text-to-image，下载到本地静态目录）。
+  // 与语音消息同模式：独立目录 data/images/{actorId}/{imageId}.png，HTTP 走 /agent/images。
+  const imageGenerationService = new ImageGenerationService();
+  // 初始化文件/文档处理能力服务（read/write/parse_pdf/parse_office/export_format）。
+  // 独立目录 data/user-files/{actorId}/{fileName}，HTTP 走 /agent/files。
+  const fileProcessingService = new FileProcessingService();
+  // 初始化邮件/短信主动发送服务（SMTP + 阿里云短信，凭证从环境变量读取）。
+  const emailSmsService = new EmailSmsService();
+  // 初始化媒体音乐服务（搜索 + WS 推送播放控制事件）。
+  const mediaMusicService = new MediaMusicService(wsConnectionRegistry);
+  // 初始化健康/运动数据服务（data/health/{actorId}.json，1s 防抖落盘）。
+  const healthFitnessService = new HealthFitnessService(join(process.cwd(), "data", "health"));
+  // 初始化财务深度服务（data/finance/{actorId}/{transactions,budgets}.json + reports/）。
+  const financeDeepService = new FinanceDeepService(join(process.cwd(), "data", "finance"));
+  // 初始化社交主动出击服务（Twitter OAuth 1.0a + 微博 + 小红书/朋友圈占位，凭证从环境变量读取）。
+  const socialOutreachService = new SocialOutreachService();
+  // 初始化代码执行沙盒服务（python/node 子进程，独立工作目录 data/sandbox/{actorId}/{workspaceId}/）。
+  const codeSandboxService = new CodeSandboxService();
   const voiceCapabilityService = new VoiceCapabilityService({
     ttsService,
     voiceDialogueService,
     wsRegistry: wsConnectionRegistry,
+    voiceMessageService,
     logger: app.log,
   });
   if (voiceCapabilityService.getCapabilityInfo().ttsEnabled) {
@@ -439,7 +475,25 @@ export async function createAppServices(): Promise<AppServices> {
     agentPairingService,
   );
   registerAgentPhoneTools(toolRegistry, virtualPhoneService);
-  registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
+  registerAgentVoiceTools(toolRegistry, voiceCapabilityService, voiceMessageService);
+  // 注册能力模块（image-gen / file-doc / email-sms / ...）
+  // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
+  // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
+  // registerAllCapabilityModules 把 handler 注册到 ToolRegistry。
+  const capabilityModuleDeps: CapabilityModuleDeps = {
+    imageGenerationService,
+    fileProcessingService,
+    emailSmsService,
+    mediaMusicService,
+    wsConnectionRegistry,
+    healthFitnessService,
+    financeDeepService,
+    socialOutreachService,
+    codeSandboxService,
+  };
+  setCapabilityModuleDeps(capabilityModuleDeps);
+  setExtraIntentRules(getAllCapabilityModuleIntentRules(capabilityModuleDeps));
+  registerAllCapabilityModules(toolRegistry, capabilityModuleDeps);
   registerAipTools(toolRegistry, aipService);
   registerProtocolUnifiedTools(toolRegistry, {
     computeQuotaService,
@@ -724,7 +778,6 @@ export async function createAppServices(): Promise<AppServices> {
     }
   });
 
-  registerTranslateTools(toolRegistry);
   registerDeviceTools(toolRegistry, deviceRegistry, devicePairingService);
   const promptContextBuilder = new PromptContextBuilder({
     agentMemorySyncService,
@@ -920,7 +973,6 @@ export async function createAppServices(): Promise<AppServices> {
     agentCore,
     wsRegistry: wsConnectionRegistry,
   });
-  registerVisionTools(toolRegistry, visionPeriodicScheduler);
 
   const desktopVisual = createDesktopVisualFromEnv();
   const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
@@ -935,6 +987,9 @@ export async function createAppServices(): Promise<AppServices> {
       desktopPresenceSignalService.handleTaskResult(actorId, payload);
     },
   });
+  // vision 工具族需要 desktopBridgeCoordinator 才能走 desktop:bridge 截图路径，
+  // 必须在 desktopBridgeCoordinator 实例化后注册。
+  registerVisionTools(toolRegistry, visionPeriodicScheduler, deviceRegistry, desktopBridgeCoordinator);
   registerDesktopVisualTools(toolRegistry, {
     localVisual: desktopVisual,
     bridge: desktopBridgeCoordinator,
@@ -994,6 +1049,9 @@ export async function createAppServices(): Promise<AppServices> {
     weatherPrefsService,
     virtualPhoneService,
     ttsService,
+    voiceMessageService,
+    imageGenerationService,
+    fileProcessingService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     wechatClawBindingService,
@@ -1040,6 +1098,9 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
     deviceRegistry,
+    voiceCapabilityService,
+    voiceMessageService,
+    morningBriefingScheduler,
   });
 
   app.addHook("onClose", async () => {
@@ -1079,6 +1140,15 @@ export async function createAppServices(): Promise<AppServices> {
     weatherPrefsService,
     ttsService,
     voiceCapabilityService,
+    voiceMessageService,
+    imageGenerationService,
+    fileProcessingService,
+    emailSmsService,
+    mediaMusicService,
+    healthFitnessService,
+    financeDeepService,
+    socialOutreachService,
+    codeSandboxService,
     virtualPhoneService,
     friendService,
     messageHubService,

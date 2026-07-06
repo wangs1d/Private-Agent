@@ -107,6 +107,42 @@ class TtsPlayer {
     await _disposeCurrent(silent: false);
   }
 
+  /// 从 URL 拉流播放（用于语音消息气泡点击重播）。
+  ///
+  /// [baseUrl] 服务端基础 URL（如 `http://127.0.0.1:3000`）；
+  /// [mediaUrl] 服务端返回的可访问路径（如 `/agent/voice/messages/.../xxx.mp3`）。
+  /// 拼接为完整 URL 后用 audioplayers 的 UrlSource 播放。
+  Future<bool> playFromUrl(String fullUrl) async {
+    if (fullUrl.isEmpty) {
+      _fireCompletion();
+      return false;
+    }
+    // 停掉旧播放
+    await _disposeCurrent(silent: true);
+
+    final AudioPlayer player = AudioPlayer();
+    _player = player;
+    _completionCompleter = Completer<void>();
+
+    player.onPlayerComplete.listen((_) {
+      _fireCompletion();
+    });
+    player.onPlayerStateChanged.listen((state) {
+      if (state == PlayerState.stopped && !(_completionCompleter?.isCompleted ?? true)) {
+        _fireCompletion();
+      }
+    });
+
+    try {
+      await player.play(UrlSource(fullUrl));
+      return true;
+    } catch (e) {
+      debugPrint("[TtsPlayer] playFromUrl failed: $e");
+      await _disposeCurrent(silent: true);
+      return false;
+    }
+  }
+
   /// 释放资源（应用退出时调用）
   Future<void> dispose() async {
     await _disposeCurrent(silent: true);

@@ -15,6 +15,8 @@ import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
+import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
+import type { VoiceMessageService } from "../services/voice-message-service.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
@@ -74,6 +76,8 @@ import {
 } from "../device-bus/ws-device-handler.js";
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
+import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
+import { getUserPreferences } from "../routes/http/user-preferences.js";
 
 type SocketWithHeartbeat = {
   send(data: string): void;
@@ -168,6 +172,12 @@ export type WsRouteDeps = {
   userPersonalizationService: UserPersonalizationService;
   deviceRegistry: DeviceRegistry;
   devicePairingService: DevicePairingService;
+  /** Agent 底层语音能力中枢（用于 chat.user_message 的 ASR 链路） */
+  voiceCapabilityService?: VoiceCapabilityService;
+  /** 语音消息落盘服务（用于解析 audio 消息的本地文件路径） */
+  voiceMessageService?: VoiceMessageService;
+  /** 早间简报调度器：WS 连接建立时 subscribe，断开时 unsubscribe */
+  morningBriefingScheduler?: MorningBriefingScheduler;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -192,6 +202,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     userPersonalizationService,
     deviceRegistry,
     devicePairingService,
+    voiceCapabilityService,
+    voiceMessageService,
+    morningBriefingScheduler,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -285,12 +298,13 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         // 终端互连平台：清理该 socket 上绑定的设备
         void handleDeviceWsClose(socket, deviceHandlerDeps);
         if (boundActorId) {
-          messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
-          socialFeedService.unsubscribe(boundActorId);
-          wsConnectionRegistry.unregister(boundActorId, socket);
-          getEmbodimentAutonomy()?.unregisterSession(boundActorId);
-          boundActorId = undefined;
-        }
+            messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
+            socialFeedService.unsubscribe(boundActorId);
+            wsConnectionRegistry.unregister(boundActorId, socket);
+            getEmbodimentAutonomy()?.unregisterSession(boundActorId);
+            morningBriefingScheduler?.unsubscribe(boundActorId);
+            boundActorId = undefined;
+          }
       });
 
       ws.on("message", async (raw: Buffer) => {
@@ -595,6 +609,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             wsConnectionRegistry.register(actorId, socket);
             getEmbodimentAutonomy()?.registerSession(actorId);
+            // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
+            morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
           } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
@@ -784,7 +800,12 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               sendUnifiedError,
             },
             event.payload,
-            { agentCore, auditService },
+            {
+              agentCore,
+              auditService,
+              voiceCapabilityService,
+              voiceMessageService,
+            },
           );
           return;
         }

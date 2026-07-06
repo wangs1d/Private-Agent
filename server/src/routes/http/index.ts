@@ -33,12 +33,15 @@ import { registerMoodInferenceRoutes } from "./mood-inferences.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
+import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerJarvisRoutes } from "./jarvis.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
-import { registerTranslateRoutes } from "./translate.js";
 import { registerNotesRoutes } from "./notes.js";
 import { registerDeviceRoutes } from "./device.js";
+import { registerVoiceMessageRoutes } from "./voice-messages.js";
+import { registerImageFileRoutes } from "./image-files.js";
+import { registerUserFileRoutes } from "./user-files.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -68,6 +71,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
+  registerVoiceMessageRoutes(app, { voiceMessageService: deps.voiceMessageService });
+  registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
+  registerUserFileRoutes(app, { fileProcessingService: deps.fileProcessingService });
   registerWechatClawRoutes(app, deps);
   registerMessageBridgeRoutes(app, { messageBridgeService: deps.messageBridgeService });
   registerMessageHubRoutes(app, {
@@ -89,7 +95,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     registerMoodInferenceRoutes(app, { moodInferenceService: deps.moodInferenceService });
   }
   registerMarketSignalRoutes(app, deps);
-  registerTranslateRoutes(app, deps);
   if (deps.notesService) {
     registerNotesRoutes(app, {
       notesService: deps.notesService,
@@ -107,6 +112,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     notesService: deps.notesService,
   });
   registerBriefingDeliveryRoutes(app);
+  registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
   registerUserPreferencesRoutes(app);
   if (deps.jarvisHarness) {
     registerJarvisRoutes(app, { jarvisHarness: deps.jarvisHarness });

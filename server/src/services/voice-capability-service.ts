@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { ServerEventType } from "../protocol.js";
 import type { TtsService } from "./tts-service.js";
+import type { VoiceMessageService } from "./voice-message-service.js";
 import type { VoiceDialogueService } from "./voice-dialogue/voice-dialogue-service.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 import type { AudioBuffer } from "./voice-dialogue/types.js";
@@ -102,6 +103,8 @@ export interface VoiceCapabilityDeps {
   ttsService: TtsService;
   voiceDialogueService: VoiceDialogueService;
   wsRegistry: WsConnectionRegistry;
+  /** 语音消息落盘服务（可选；未注入时 voice.send_message 工具不可用）。 */
+  voiceMessageService?: VoiceMessageService;
   logger?: {
     info: (msg: string, ...args: unknown[]) => void;
     warn: (msg: string, ...args: unknown[]) => void;
@@ -204,6 +207,100 @@ export class VoiceCapabilityService {
       pushed,
       provider: ttsResult.ok ? ttsResult.provider : undefined,
       skippedReason: ttsResult.ok ? undefined : ttsResult.reason,
+    };
+  }
+
+  /**
+   * 发送微信式可重播语音消息：合成 + 落盘 + 推 WS `agent.voice.message` 事件。
+   *
+   * 与 `speak()` 的区别：
+   *   - `speak()`：即时播报，无 UI，客户端后台播放一次性。
+   *   - `sendMessage()`：落地为可重播语音消息，客户端渲染为微信式语音气泡，
+   *     可多次点击重播，带 mediaUrl / durationMs / transcript。
+   *
+   * TTS 失败时仍推送事件（tts 字段为 null），客户端可降级为纯文本消息。
+   */
+  async sendMessage(params: VoiceSpeakParams): Promise<
+    | {
+        ok: true;
+        messageId: string;
+        mediaUrl: string;
+        durationMs: number;
+        transcript: string;
+        pushed: boolean;
+        provider?: string;
+      }
+    | { ok: false; error: string }
+  > {
+    const toUserId = params.toUserId?.trim();
+    if (!toUserId) return { ok: false, error: "toUserId 不能为空" };
+    const text = params.text?.trim();
+    if (!text) return { ok: false, error: "text 不能为空" };
+
+    const voiceMessageService = this.deps.voiceMessageService;
+    if (!voiceMessageService) {
+      return { ok: false, error: "VoiceMessageService 未注入，voice.send_message 不可用" };
+    }
+
+    // 合成 + 落盘
+    const stored = await voiceMessageService.composeAndStore(text, toUserId);
+    const messageId = randomUUID();
+    const traceId = params.traceId ?? null;
+
+    if (!stored.ok) {
+      // TTS 失败：仍推一条带 transcript 的事件，让客户端降级为纯文本消息
+      const eventPayload = {
+        messageId,
+        toUserId,
+        text,
+        transcript: text,
+        mediaUrl: null,
+        durationMs: 0,
+        traceId,
+        timestamp: new Date().toISOString(),
+        skippedReason: stored.reason,
+      };
+      this.deps.wsRegistry.trySend(
+        toUserId,
+        JSON.stringify({ type: ServerEventType.AgentVoiceMessage, payload: eventPayload }),
+      );
+      return {
+        ok: false,
+        error: stored.reason,
+      };
+    }
+
+    const eventPayload = {
+      messageId,
+      toUserId,
+      text,
+      transcript: text,
+      mediaUrl: stored.mediaUrl,
+      durationMs: stored.durationMs,
+      traceId,
+      timestamp: new Date().toISOString(),
+      provider: stored.provider,
+    };
+
+    const pushed = this.deps.wsRegistry.trySend(
+      toUserId,
+      JSON.stringify({ type: ServerEventType.AgentVoiceMessage, payload: eventPayload }),
+    );
+
+    if (!pushed) {
+      this.deps.logger?.warn?.(
+        `[VoiceCapability] sendMessage WS 推送失败（用户离线）：toUserId=${toUserId}`,
+      );
+    }
+
+    return {
+      ok: true,
+      messageId,
+      mediaUrl: stored.mediaUrl,
+      durationMs: stored.durationMs,
+      transcript: text,
+      pushed,
+      provider: stored.provider,
     };
   }
 

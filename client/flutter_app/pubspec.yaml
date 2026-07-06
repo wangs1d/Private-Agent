@@ -27,6 +27,13 @@ dependencies:
   image_picker: ^1.0.7
   video_player: ^2.8.5
   qr_flutter: ^4.1.0
+  # 语音消息录音（agent 发送/接收语音消息的底层能力）
+  record: ^5.2.0
+
+dependency_overrides:
+  # 镜像源上 record_linux 0.7.2 与 record_platform_interface 1.6.0 接口签名不兼容
+  # (RecordLinux.hasPermission 缺少 named args / 缺实现), 强制升级到 1.x+
+  record_linux: ^1.0.0
 
 dev_dependencies:
   flutter_test:

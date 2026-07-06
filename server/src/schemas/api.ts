@@ -48,14 +48,24 @@ export const userMessageSchema = z
     clientLocation: clientLocationWireSchema.optional(),
     /** 默认 `sandbox`；`full` 时允许桌面控制、钱包、自编程等高权限工具 */
     agentAccessMode: z.enum(["sandbox", "full"]).optional(),
+    /** 消息内容类型；默认 "text"。当为 "audio" 时，text 可为空，
+     *  服务端会拉取 mediaUrl 对应的 mp3 并调 ASR 转文本，再走正常 LLM 链路。 */
+    contentType: z.enum(["text", "audio"]).optional(),
+    /** audio 类型时的可访问 URL，如 `/agent/voice/messages/{actorId}/{msgId}.mp3` */
+    mediaUrl: z.string().max(500).optional(),
+    /** 音频时长（毫秒），用于 UI 展示与服务端审计 */
+    durationMs: z.number().int().positive().max(120000).optional(),
+    /** 客户端采集的波形数据（16-32 段归一化音量 0.0-1.0），用于气泡渲染 */
+    waveform: z.array(z.number().min(0).max(1)).max(64).optional(),
   })
   .superRefine((data, ctx) => {
     const hasText = data.text.trim().length > 0;
     const hasVision = (data.visionFrames?.length ?? 0) > 0;
-    if (!hasText && !hasVision) {
+    const isAudio = data.contentType === "audio" && (data.mediaUrl?.trim().length ?? 0) > 0;
+    if (!hasText && !hasVision && !isAudio) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "需要非空 text 或至少一帧 visionFrames",
+        message: "需要非空 text、至少一帧 visionFrames，或 audio 类型带 mediaUrl",
         path: ["text"],
       });
     }
@@ -631,19 +641,6 @@ export const companionContactFeedbackBodySchema = z.object({
   responseTimeMs: z.number().int().min(0).max(86_400_000).optional(),
   feedback: z.enum(["positive", "negative", "neutral"]).optional(),
   quietHours: z.boolean().optional(),
-});
-
-/** 屏幕区域截图 → OCR → 翻译 请求体 */
-export const translateScreenRegionBodySchema = z.object({
-  sessionId: z.string().min(1).optional(),
-  /** 截图的 base64（不含 data:image/...;base64, 前缀） */
-  imageBase64: z.string().min(1).max(20 * 1024 * 1024),
-  /** 截图 MIME，默认 image/png */
-  mimeType: z.string().min(3).max(120).optional(),
-  /** PaddleOCR 源语言，可选 */
-  sourceLang: z.string().min(1).max(16).optional(),
-  /** 翻译目标语言，默认 zh */
-  targetLang: z.string().min(1).max(16).optional(),
 });
 
 // ========== 终端互连平台 device-bus 配对 schema ==========

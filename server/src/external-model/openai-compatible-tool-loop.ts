@@ -26,6 +26,11 @@ import {
   isToolSearchBridgeName,
   prepareToolsWithToolSearch,
 } from "../tools/tool-search/index.js";
+import {
+  getCapabilityModuleCategoryMappings,
+  getCapabilityModuleChatTools,
+  type CapabilityModuleDeps,
+} from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
 import {
   isAssistantWithToolCalls,
@@ -48,29 +53,38 @@ import type {
   ToolLoopAfterBatchInfo,
   VisionFrame,
 } from "./types.js";
+import { executeWithToolLimit } from "../services/concurrency-limiter.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
+// 工具结果字符预算：在信息完整性和 token 节省之间取平衡。
+// search_web 1200：保留足够 title+snippet（约 5-6 条结果）让 LLM 判断哪些值得 fetch_web。
+// fetch_web 2000：正文摘要足够 LLM 提取关键信息，不过度截断导致信息丢失。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
-  "search_web": 1600,
-  "fetch_web": 2600,
-  "info.search": 1400,
-  "info.inspect_webpage": 2200,
-  "info.navigate_site": 2800,
-  "browser.session.list": 1400,
-  "browser.fetch_page": 2400,
-  "calendar.list_tasks": 1400,
-  "aip.list_my_state": 1200,
-  "self.list_custom_skills": 1200,
-  "agent.query_capabilities": 1400,
-  "search": 1400,
-  "describe": 1400,
-  "tool_search": 1400,
-  "tool_discover": 1600,
-  "tool_call": 1800,
+  "search_web": 1200,
+  "fetch_web": 2000,
+  "info.search": 1000,
+  "info.inspect_webpage": 1800,
+  "info.navigate_site": 2400,
+  "browser.session.list": 1000,
+  "browser.fetch_page": 1800,
+  "calendar.list_tasks": 1000,
+  "aip.list_my_state": 900,
+  "self.list_custom_skills": 900,
+  "agent.query_capabilities": 1100,
+  "search": 1000,
+  "describe": 1000,
+  "tool_search": 1000,
+  "tool_discover": 1200,
+  "tool_call": 1200,
 };
 
+// strip_keys：只去掉纯元数据字段，保留 LLM 决策需要的字段。
+// 注意：url 必须保留（LLM 需要判断哪些结果值得 fetch_web 深读）。
 const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
-  search_web: ["url"],
+  search_web: ["provider", "fetchedAt", "notes"],
+  fetch_web: ["url"],
+  "info.inspect_webpage": ["sameHostLinks"],
+  "info.navigate_site": ["startUrl"],
 };
 
 function getToolResultBudget(toolName: string): number | undefined {
@@ -110,6 +124,31 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   }
   if (registryToolName === MASTER_POLL_SUB_AGENT_TASKS_REGISTRY) {
     return Math.max(defaultMs, 10_000);
+  }
+  // code.run 内部 spawn 超时上限 120s，外层需 ≥ 内层，避免外层先超时产生孤儿进程
+  if (registryToolName === "code.run") {
+    const sandboxMax = Number.parseInt(process.env.CODE_SANDBOX_TIMEOUT_MS ?? "30000", 10);
+    const sandboxClamped = Math.min(Math.max(sandboxMax, 30_000), 120_000);
+    return Math.max(defaultMs, sandboxClamped + 2_000);
+  }
+  // 按工具类别分级超时：快工具给短超时，防止上游慢响应把整个 turn 卡到 30s
+  const classTimeouts: Record<string, number> = {
+    "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
+    "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
+    "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "fetch_web": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
+    "info.inspect_webpage": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
+    "info.navigate_site": Number.parseInt(process.env.TOOL_TIMEOUT_NAVIGATE_MS ?? "20000", 10),
+    "info.search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "voice.speak": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
+    "voice.send_message": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
+    "voice.transcribe": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
+    "image.generate": Number.parseInt(process.env.TOOL_TIMEOUT_IMAGE_GEN_MS ?? "60000", 10),
+  };
+  const classMs = classTimeouts[registryToolName];
+  if (Number.isFinite(classMs) && classMs > 0) {
+    // 快工具超时不大于全局默认，避免短任务被卡到 30s
+    return Math.min(classMs, defaultMs);
   }
   return defaultMs;
 }
@@ -174,6 +213,98 @@ function analyzeTaskComplexity(userText: string, messageCount: number): TaskComp
 export function getOptimalMaxRounds(userText: string, messageCount: number): number {
   const config = analyzeTaskComplexity(userText, messageCount);
   return config.maxRounds;
+}
+
+/**
+ * tool loop 内消息历史滑动窗口压缩。
+ *
+ * 问题：tool loop 每轮 push assistant(tool_calls) + N 条 tool(result)，N 轮后 messages
+ * 单调增长。第 3 轮以后，前几轮的 tool 结果对 LLM 决策价值递减，但仍消耗大量 token。
+ *
+ * 策略：保留最近 `keepRounds` 轮的完整 tool 对（assistant+tool_messages），更早的 tool
+ * 消息 content 替换为摘要（前 400 字符），保留关键信息（工具名、状态、核心数据）。
+ * system/user 消息不动，保持 prefix cache 稳定。
+ *
+ * 安全性：只压缩 tool message content，不删除消息（保持 tool_call_id 链完整），
+ * 避免 Kimi/OpenAI API 报 tool_call_id 不匹配。400 字符足够保留关键结论。
+ */
+function compactToolLoopHistory(
+  messages: ChatCompletionMessageParam[],
+  keepRounds: number = 2,
+): void {
+  if (messages.length <= 4) return; // 太少不压缩
+
+  // 找到所有 tool message 的 index（role === "tool"）
+  const toolMsgIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "tool") toolMsgIndexes.push(i);
+  }
+
+  // tool 消息总数 ≤ keepRounds 时不压缩（每轮可能有多个 tool result）
+  if (toolMsgIndexes.length <= keepRounds) return;
+
+  // 从第 keepRounds 个 tool 消息（从后往前数）开始，之前的都压缩
+  const cutoffIndex = toolMsgIndexes.length - keepRounds;
+  const firstOldToolIdx = toolMsgIndexes[0];
+  const lastOldToolIdx = toolMsgIndexes[cutoffIndex - 1];
+
+  if (lastOldToolIdx === undefined || firstOldToolIdx === undefined) return;
+
+  // 压缩 cutoff 之前的 tool message content
+  // 保留 400 字符：足够保留工具名、状态、核心数据，避免信息丢失影响后续决策
+  for (let i = firstOldToolIdx; i <= lastOldToolIdx; i++) {
+    const msg = messages[i];
+    if (msg.role !== "tool") continue;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    if (content.length <= 400) continue; // 已经很短不压缩
+    // 保留前 400 字符作为摘要，加压缩标记
+    const summary = content.slice(0, 400).replace(/\n/g, " ").trim();
+    (msg as { content: string }).content = `[已压缩·${content.length}字符→400] ${summary}...`;
+  }
+}
+
+/**
+ * 为工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
+ *
+ * 不同工具的结果有不同的「完整度」信号：
+ * - search_web: 有 N 条结果，告诉 LLM 已有足够信息判断哪些值得深读
+ * - weather: 数据已包含当前温度+未来预报，无需再查
+ * - code.run: 执行结果已包含 stdout/stderr，无需重跑
+ * - fetch_web: 正文已提取，无需再抓
+ *
+ * 提示是轻量的（一行），只追加到成功的工具结果末尾。
+ */
+function buildToolSufficiencyHint(toolName: string, content: string): string {
+  // 如果结果太短，不需要加提示
+  if (!content || content.length < 50) return "";
+
+  // 检测结果中是否已有足够信息（按工具类型判断）
+  switch (toolName) {
+    case "search_web": {
+      // 统计结果条数（items 数组）
+      const itemMatch = content.match(/"title"\s*:/g);
+      const itemCount = itemMatch ? itemMatch.length : 0;
+      if (itemCount >= 3) {
+        return `\n[提示] 已返回 ${itemCount} 条搜索结果，含标题/链接/摘要。如需深入某条结果请用 fetch_web 读取该 URL，否则可直接基于已有摘要回答。不要用相同 query 重复搜索。`;
+      }
+      return "";
+    }
+    case "weather.get_local": {
+      return "\n[提示] 天气数据已包含当前温度、体感温度、湿度、风力、降水概率和穿衣建议。信息已完整，可直接回答用户，无需再搜索。";
+    }
+    case "code.run": {
+      // 如果执行成功且 stdout 非空
+      if (content.includes('"ok":true') || content.includes('"ok": true')) {
+        return "\n[提示] 代码已执行完成，stdout/stderr 已返回。如需读取文件产物请用 code.read_file，不要用相同代码重跑。";
+      }
+      return "";
+    }
+    case "fetch_web": {
+      return "\n[提示] 网页正文已提取完成。如已有足够信息可直接回答，无需重复抓取同一页面。";
+    }
+    default:
+      return "";
+  }
 }
 
 /**
@@ -286,7 +417,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。",
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。",
       parameters: {
         type: "object",
         properties: {
@@ -302,7 +433,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "fetch_web",
-      description: "读取指定网页正文并返回标题、摘要与纯文本内容。自动移除导航栏、页脚、广告等噪音，提取核心正文。",
+      description: "读取指定网页正文并返回标题、摘要与纯文本内容。自动移除导航栏、页脚、广告等噪音，提取核心正文。\n如果已经从 search_web 拿到多个需要深读的独立 URL，请在同一轮内并行发起多个 fetch_web 调用，每个 tool_call 用不同的 url，避免串行等待。",
       parameters: {
         type: "object",
         properties: {
@@ -821,9 +952,147 @@ export const VISION_SANDBOX_RESTRICTED_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "vision.list_cameras",
+      description:
+        "【视觉设备清单】列出当前用户所有「能看」的在线设备：IP 摄像头（camera.*）、手机/电脑摄像头、电脑屏幕（screen_capture.*）、智能眼镜（glasses.display.*）等。" +
+        "返回每个设备的 deviceId / kind / name / 在线状态 / 视觉 capability（含可调 action 清单，如 camera.take_photo）。" +
+        "用户说「我有哪些摄像头」「能看哪里」「监控一下家里」「看看门口」时先调本工具知道有哪些设备可看，再调 vision.see_device 取画面。" +
+        "与 device.list 区别：device.list 返回所有设备（含纯传感器/智能家居等），本工具只返回具备视觉能力的设备。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision.see_device",
+      description:
+        "【从设备取实时画面】从指定设备取一帧当前画面并注入下一轮模型上下文（让 Agent「看到真实世界」）。" +
+        "用户说「看一下门口」「看下家里」「看看我面前」「实时看下摄像头」「看看我电脑屏幕」「看一下我桌面」时调用本工具。" +
+        "参数：device_id（从 vision.list_cameras 结果中选取）+ 可选 action（默认按设备 capability 自动选 camera.take_photo / screen_capture.screenshot / glasses.display.capture）。" +
+        "特殊 device_id='desktop:bridge'：走 desktop-bridge-coordinator 路径截取本机桌面（用户电脑通过 desktop_bridge_register 注册的桌面），" +
+        "支持可选 region=[x,y,w,h] 截取区域。" +
+        "与 vision.http_pull 区别：http_pull 拉远程 URL（公网/局域网快照接口）；see_device 调 device-bus 接入的真实设备（IP 摄像头/手机/眼镜）或 desktop-bridge 桌面，是真正的「看真实世界」。" +
+        "返回简要元数据（mimeType/byteLength/capturedAt），图像已注入模型上下文，请基于图像描述场景并回答。",
+      parameters: {
+        type: "object",
+        properties: {
+          device_id: {
+            type: "string",
+            description: "设备 ID（从 vision.list_cameras 结果中选取，如 camera:front / phone:abc / glasses:xyz / desktop:bridge）",
+          },
+          action: {
+            type: "string",
+            description: "可选：指定调用的 action（如 camera.take_photo / screen_capture.screenshot / glasses.display.capture）。留空则按设备 capability 自动选择。",
+          },
+          params: {
+            type: "object",
+            description: "可选：action 的额外参数（如 PTZ 预设位、摄像头选择等）",
+            additionalProperties: true,
+          },
+          region: {
+            type: "array",
+            items: { type: "number" },
+            description: "可选：仅 desktop:bridge 路径生效，截取区域 [x, y, width, height]",
+          },
+          timeoutMs: {
+            type: "number",
+            description: "可选：仅 desktop:bridge 路径生效，截图超时毫秒（默认 60000，上限 120000）",
+          },
+        },
+        required: ["device_id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const VISION_CHAT_TOOLS: ChatCompletionTool[] = VISION_SANDBOX_RESTRICTED_CHAT_TOOLS;
+
+/**
+ * Agent 底层语音能力 ChatCompletionTool schema（说 + 听）。
+ *
+ * 之前 voice.speak / voice.send_message 已在 ToolRegistry 注册 handler，
+ * 但缺这份 schema，导致 LLM 看不到这两个工具——是个真正的盲点。
+ * 本数组把它们正式暴露给 LLM，并新增 voice.transcribe（主动 ASR）。
+ *
+ * 与 phone.call_user 的区别：phone 走 `isExplicitPhoneCallRequest` 旁路注入，
+ * voice 工具族走常规 tool-search 选择 + 关键词分类。
+ */
+const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "voice.speak",
+      description:
+        "【语音播报·即时模式】合成语音并立即对用户播报（无来电 UI、无振铃，客户端后台一次性播放）。适用于：状态告知、提醒、即时反馈、不需要用户回应的简短播报。与 phone.call_user 区别：phone 是来电体验（振铃+接通+通话 UI），voice.speak 是轻量后台播报。用户问「能不能说话」「用语音告诉我」时调用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "要朗读的文字内容（建议 200 字以内，过长会被截断）" },
+          mode: {
+            type: "string",
+            enum: ["instant", "reminder"],
+            description: "instant=即时播报（默认），reminder=提醒式播报（带标题/优先级，客户端可显示卡片）",
+          },
+          title: { type: "string", description: "reminder 模式下的标题（仅 mode=reminder 生效）" },
+          priority: {
+            type: "string",
+            enum: ["low", "medium", "high", "urgent"],
+            description: "reminder 模式下的优先级（默认 medium）",
+          },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "voice.send_message",
+      description:
+        "【语音消息·微信式】合成语音并落地为可重播的语音消息（客户端渲染为微信式语音气泡，用户可多次点击重播）。适用于：用户明确要求「发语音」「发条语音消息」、长文本回复用语音更自然、朋友式聊天场景。与 voice.speak 区别：speak 是一次性即时播报无 UI，send_message 是落地可重播语音消息。短指令回复（如「好的」「知道了」）请用文本，不要滥用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "语音消息要朗读的内容" },
+          replyToMessageId: {
+            type: "string",
+            description: "可选：要回复的历史消息 ID（用于上下文关联）",
+          },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "voice.transcribe",
+      description:
+        "【ASR 主动识别】把已落地的语音消息文件转写为文本，让 Agent 能「听」用户发来的语音。mediaUrl 形如 /agent/voice/messages/{actorId}/{msgId}.mp3（用户上传或 voice.send_message 落地后产生）。适用于：用户引用了某条历史语音要求重新理解、多轮对话中需要复核语音内容、跨模态推理。注意：通常用户发来 voice 消息时 chat-user-message 已自动调 ASR 把 transcript 喂给模型，本工具主要用于「重听」或「主动检查」历史语音。",
+      parameters: {
+        type: "object",
+        properties: {
+          mediaUrl: {
+            type: "string",
+            description: "语音消息的访问 URL，形如 /agent/voice/messages/{actorId}/{msgId}.mp3",
+          },
+          language: {
+            type: "string",
+            description: "语言提示（如 zh、en），默认 zh",
+          },
+        },
+        required: ["mediaUrl"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
 
 /** 时钟工具：获取当前时间和日期信息（通过IP地址查询用户时区）。 */
 const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
@@ -912,6 +1181,9 @@ let _builtinToolsCache: ChatCompletionTool[] | null = null;
 /** 动态注入的 MCP 工具（由 bootstrap 阶段设置） */
 let _mcpChatTools: ChatCompletionTool[] = [];
 
+/** 能力模块依赖（由 bootstrap 阶段设置；为 null 时能力模块工具不并入） */
+let _capabilityModuleDeps: CapabilityModuleDeps | null = null;
+
 /** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
 export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _mcpChatTools = tools;
@@ -919,8 +1191,25 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _builtinToolsCache = null;
 }
 
+/**
+ * 注入能力模块依赖（启动时调用一次）。
+ *
+ * 注入后：
+ *   - {@link getBuiltinAgentChatTools} 会把所有能力模块的 ChatCompletionTool 合并进总列表
+ *   - {@link selectRelevantTools} 会把能力模块的 category mappings 合并到关键词分类
+ *
+ * 与 {@link setMcpChatTools} 类似，调用后清缓存重建。
+ */
+export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
+  _capabilityModuleDeps = deps;
+  _builtinToolsCache = null;
+}
+
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
   if (_builtinToolsCache) return _builtinToolsCache;
+  const capabilityModuleTools = _capabilityModuleDeps
+    ? getCapabilityModuleChatTools(_capabilityModuleDeps)
+    : [];
   _builtinToolsCache = [
     ...AGENT_WORLD_CHAT_TOOLS,
     ...AIP_CHAT_TOOLS,
@@ -932,6 +1221,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...CALENDAR_CHAT_TOOLS,
     ...PHONE_CHAT_TOOLS,
     ...VISION_CHAT_TOOLS,
+    ...VOICE_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
@@ -941,6 +1231,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...getPhoneBridgeChatTools(),
     BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
+    ...capabilityModuleTools,
     ..._mcpChatTools,
   ];
   return _builtinToolsCache;
@@ -951,7 +1242,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
 
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'embodiment' | 'smart_home' | 'mcp';
+type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'embodiment' | 'smart_home' | 'mcp' | 'image' | string;
 
 interface ToolCategoryMapping {
   category: ToolCategory;
@@ -989,6 +1280,11 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'vision',
     keywords: ['图像', 'image', '图片', 'picture', '视觉', 'vision', '摄像头', 'camera', '截图', 'screenshot', '画面', 'frame', '拍照', 'photo', '识别', 'recognize', '看', 'see', '观察', 'observe'],
     toolNames: ['vision.http_pull', 'vision.periodic_start', 'vision.periodic_stop', 'vision.periodic_stop_all', 'vision.periodic_list']
+  },
+  {
+    category: 'voice',
+    keywords: ['语音', 'voice', '说话', 'speak', '播报', '朗读', '读出来', '说出来', '听', 'listen', '转写', 'transcribe', '识别语音', 'asr', 'tts', '发声', '开口', '说一声', '念', '朗读', '录音', 'audio'],
+    toolNames: ['voice.speak', 'voice.send_message', 'voice.transcribe']
   },
   {
     category: 'clock',
@@ -1138,7 +1434,17 @@ export function selectRelevantTools(
       return Boolean(fn?.name?.startsWith("mcp."));
     })
     .map((t) => (t as { function: { name: string } }).function.name);
-  const categoryMappings = buildToolCategoryMappings(mcpToolNames);
+  const baseCategoryMappings = buildToolCategoryMappings(mcpToolNames);
+
+  // 合并能力模块注入的分类映射（如 image / file_doc / email_sms 等）
+  const capabilityModuleMappings: ToolCategoryMapping[] = _capabilityModuleDeps
+    ? getCapabilityModuleCategoryMappings(_capabilityModuleDeps).map((m) => ({
+        category: m.category as ToolCategory,
+        keywords: m.keywords,
+        toolNames: m.toolNames,
+      }))
+    : [];
+  const categoryMappings = [...baseCategoryMappings, ...capabilityModuleMappings];
 
   const relevantCategories = detectRelevantCategoriesFrom(userText, categoryMappings);
 
@@ -1259,11 +1565,28 @@ export async function streamCompletionWithTools(
   // 追踪每轮已发送的进度/前导文本，用于最终回复去重（防止思考过程泄露给用户）
   const emittedStatusLines = new Set<string>();
 
+  // 工具调用克制引导：减少 LLM 对同一工具的冗余重复调用（实测 S3 联网搜索场景
+  // LLM 会连续调 3-5 次 search_web，S5 代码沙箱会调 2 次 code.run）。
+  // 只在有工具可调时注入，纯对话场景不注入。
+  if (apiTools.length > 0) {
+    messages.push({
+      role: "system",
+      content:
+        "工具调用原则：\n" +
+        "1. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
+        "2. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
+        "3. 能一轮并行解决的不要拆成多轮串行。多个独立 URL 用一轮多个 fetch_web。\n" +
+        "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。",
+    });
+  }
+
   for (let round = 0; round < maxRounds; round++) {
     let retriedToolCallIdError = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
 
     while (true) {
+      // 第 3 轮起压缩早期 tool 结果，减少 token 消耗
+      if (round >= 2) compactToolLoopHistory(messages, 2);
       const sanitizedMessages = sanitizeChatMessagesForApi(messages, {
         stripReasoning: thinkingDisabled,
         logPrefix: "[openai-tool-loop]",
@@ -1277,6 +1600,9 @@ export async function streamCompletionWithTools(
           messages: requestMessages,
           tools: apiTools,
           tool_choice: resolveForcedToolChoice(userText, apiTools),
+          // 明确启用并行工具调用，让 LLM 在单轮内返回多个 tool_calls。
+          // 配合工具描述里的并行引导，减少串行轮次。
+          parallel_tool_calls: true,
           stream: true,
           ...(options?.promptCache ?? {}),
           // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body` 顶层字段——它会
@@ -1494,12 +1820,16 @@ export async function streamCompletionWithTools(
 
         let exec: Awaited<ReturnType<ChatToolExecutionContext['executeTool']>>;
         try {
-          exec = await Promise.race([
-            ctx.executeTool(targetToolName, targetArgs),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
-            )
-          ]);
+          // 重型工具经并发限制器（code.run / image.generate / voice.* 等），
+          // 限流等待不占超时预算：只有 acquire 成功后才开始 Promise.race 计时
+          exec = await executeWithToolLimit(targetToolName, () =>
+            Promise.race([
+              ctx.executeTool(targetToolName, targetArgs),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
+              )
+            ])
+          );
         } catch (timeoutError) {
           console.error(`[工具超时] ${targetToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
           exec = {
@@ -1565,10 +1895,16 @@ export async function streamCompletionWithTools(
       if (toolContent?.trim()) {
         roundToolOutputs.push(toolContent.trim());
       }
+      // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
+      // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
+      // 明确告诉 LLM「结果已完整」，让它直接回答而非重复调用。
+      const sufficiencyHint = exec.ok
+        ? buildToolSufficiencyHint(wireToolName, toolContent)
+        : "";
       messages.push({
         role: "tool",
         tool_call_id: item.tc.id,
-        content: toolContent,
+        content: sufficiencyHint ? `${toolContent}\n${sufficiencyHint}` : toolContent,
       });
       if (injectFrames?.length) {
         messages.push({

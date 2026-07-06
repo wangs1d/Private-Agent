@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -7,6 +8,7 @@ import "package:http/http.dart" as http;
 import "package:permission_handler/permission_handler.dart";
 
 import "core/config/api_config.dart";
+import "core/region/region_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/virtual_phone_ui_labels.dart";
@@ -30,8 +32,8 @@ import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
-import "core/services/translate_overlay_launcher.dart";
 import "core/services/user_preferences_api.dart";
+import "features/chat/briefing_settings_page.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
@@ -68,6 +70,13 @@ import "widgets/app_sidebar.dart";
 void main() {
   runZonedGuarded(() {
     WidgetsFlutterBinding.ensureInitialized();
+    // 区域版本（--dart-define=REGION=domestic|intl）启动期一次性确认，
+    // 便于排查「构建用错 flavor」的问题。
+    debugPrint(
+      '[region] build region = ${RegionConfig.region.name}, '
+      'llm=${RegionConfig.capabilities.defaultLlmProvider}, '
+      'wechatClaw=${RegionConfig.capabilities.wechatClaw}',
+    );
     unawaited(bootstrapWindowsWebView());
     runApp(const PrivateAiApp());
   }, (error, stack) {
@@ -237,6 +246,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String? _pendingAgentUserMessageId;
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
 
+  // Phase 2：429 回压指数退避重试状态
+  String? _pendingRetryText;
+  int _pendingRetryCount = 0;
+
   /// 记录被打断的回复内容，用于后续整)
   final List<String> _interruptedResponses = <String>[];
   static const Duration _agentReplyTimeout = Duration(minutes: 3);
@@ -298,15 +311,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       unawaited(_openBriefingFromPayload(payload));
     });
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
-    // 独立翻译悬浮窗事件绑定（原生 HWND 窗口，C++ 端 → MethodChannel → 这里）
-    //   - close: 用户点 ✕（已自动隐藏窗口，无需重开）
-    //   - clear: 用户点清空（清掉所有卡片）
-    //   - langChanged: 用户点了语言下拉（参数为目标语言 code）
-    TranslateOverlayLauncher.bindHandlers(
-      onCloseClicked: (_) {/* 窗口已自动 hide，不需要做什么 */},
-      onClearClicked: (_) {/* 同上 */},
-      onLangChange: _handleTranslateLangChange,
-    );
     _bootstrap();
   }
 
@@ -821,6 +825,31 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _flushAssistantChunks();
           // v2：done=true 让 _clearAgentProcessingState 内部调 markDone（而非 markCanceled）
           _clearAgentProcessingState(done: true);
+
+          // Phase 2：检测 429 回压（"服务繁忙"），自动指数退避重试
+          final String finalTextRaw = payload["finalText"]?.toString() ?? "";
+          if (finalTextRaw.contains("服务繁忙") &&
+              _pendingRetryText != null &&
+              _pendingRetryCount < 3) {
+            _pendingRetryCount++;
+            final int delaySec = 1 << (_pendingRetryCount - 1); // 1s, 2s, 4s
+            debugPrint(
+                "[429-retry] 检测到回压，${delaySec}s 后重试 (第 $_pendingRetryCount 次)");
+            // 不显示"服务繁忙"消息，保持思考状态
+            _isAgentProcessing = true;
+            _notifyAgentProcessingUi(true);
+            Future.delayed(Duration(seconds: delaySec), () {
+              if (mounted && _pendingRetryText != null) {
+                final String retryText = _pendingRetryText!;
+                _pendingRetryText = null;
+                _sendMessage(text: retryText, isRetry: true);
+              }
+            });
+            return;
+          }
+          // 正常完成或重试次数用尽，清空重试状态
+          _pendingRetryText = null;
+          _pendingRetryCount = 0;
           final String messageId = payload["messageId"]?.toString() ??
               ((doneTraceId != null && doneTraceId.isNotEmpty)
                   ? "assistant-$doneTraceId"
@@ -916,6 +945,58 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 content: Text("收到来自 $fromSessionId 的中继消息"),
               ),
             );
+          }
+        }
+        // ====== Agent 语音消息（voice.send_message 工具触发）======
+        // 服务端推送 `agent.voice.message` 事件，客户端落为一条 assistant
+        // 语音消息（contentType=audio + attachments=[audio]），渲染为微信式
+        // 可重播语音气泡。mediaUrl 为 null（TTS 失败降级）时退化为纯文本。
+        if (type == "agent.voice.message") {
+          final String messageId =
+              payload["messageId"]?.toString() ?? "voice-${DateTime.now().microsecondsSinceEpoch}";
+          final String text = payload["text"]?.toString() ?? "";
+          final String transcript = payload["transcript"]?.toString() ?? text;
+          final String? mediaUrl = payload["mediaUrl"]?.toString();
+          final int durationMs = (payload["durationMs"] as num?)?.toInt() ?? 0;
+          final String? skippedReason = payload["skippedReason"]?.toString();
+          // 去重：同 messageId 已存在则不重复入列表
+          final bool exists = _messages.any((m) => m.messageId == messageId);
+          if (!exists) {
+            final List<MessageAttachment> attachments = <MessageAttachment>[];
+            if (mediaUrl != null && mediaUrl.isNotEmpty) {
+              attachments.add(MessageAttachment(
+                type: MessageAttachmentType.audio,
+                url: mediaUrl,
+                durationMs: durationMs,
+                transcript: transcript.isEmpty ? null : transcript,
+                mimeType: "audio/mpeg",
+              ));
+            }
+            final ChatMessage voiceMsg = ChatMessage(
+              messageId: messageId,
+              sessionId: ApiConfig.effectiveActorId,
+              role: "assistant",
+              // 有 mediaUrl 时正文留空（避免文字气泡重复展示 transcript）；
+              // 无 mediaUrl 时正文回退为 transcript 或失败原因，让用户能看见文字内容
+              text: (mediaUrl == null || mediaUrl.isEmpty)
+                  ? (transcript.isNotEmpty
+                      ? transcript
+                      : (skippedReason?.isNotEmpty == true
+                          ? "语音消息生成失败：$skippedReason"
+                          : "语音消息生成失败"))
+                  : "",
+              timestamp: DateTime.now(),
+              contentType: "audio",
+              durationMs: durationMs > 0 ? durationMs : null,
+              attachments: attachments,
+            );
+            setState(() {
+              _messages.add(voiceMsg);
+              _assistantMessageIndexById[messageId] = _messages.length - 1;
+            });
+            unawaited(_store.saveMessage(voiceMsg).catchError((Object e) {
+              debugPrint("[chat] voice message saveMessage failed: $e");
+            }));
           }
         }
         // ====== 振铃前摇阶段（ringing_start） ======
@@ -1732,7 +1813,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _ws.sendEvent("session.init", sessionInit);
   }
 
-  Future<void> _sendMessage() async {
+  Future<void> _sendMessage({String? text, bool isRetry = false}) async {
     if (!_ws.isConnected) {
       _ws.retryConnect();
       if (mounted) {
@@ -1742,7 +1823,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       }
       return;
     }
-    final String text = _inputController.text.trim();
+    final String effectiveText = text ?? _inputController.text.trim();
 
     List<VisionWireFrame>? attachmentFrames;
     if (_pendingGalleryFrames.isNotEmpty) {
@@ -1750,7 +1831,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       setState(_pendingGalleryFrames.clear);
     }
 
-    if (text.isEmpty && attachmentFrames == null) {
+    if (effectiveText.isEmpty && attachmentFrames == null) {
       return;
     }
 
@@ -1781,23 +1862,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "user",
-      text: text.isEmpty ? "（见图）" : text,
+      text: effectiveText.isEmpty ? "（见图）" : effectiveText,
       timestamp: DateTime.now(),
       attachmentImageCount: attachCount,
     );
-    setState(() {
-      _messages.add(userMessage);
-      _inputController.clear();
-      _isAgentProcessing = true;
-      _agentStatusLine = null;
-    });
+
+    // Phase 2：保存重试文本，供 429 回压时指数退避重发
+    _pendingRetryText = effectiveText;
+    if (isRetry) {
+      // 重试时不重复添加用户消息（首次已添加）
+    } else {
+      setState(() {
+        _messages.add(userMessage);
+        _inputController.clear();
+        _isAgentProcessing = true;
+        _agentStatusLine = null;
+      });
+    }
     _notifyAgentProcessingUi(true);
     AgentSphereMoodBridge.instance.listening();
-    await _store.saveMessage(userMessage);
+    if (!isRetry) {
+      await _store.saveMessage(userMessage);
+    }
     final Map<String, dynamic> userMsg = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "messageId": userMessage.messageId,
-      "text": text.isEmpty && attachmentFrames != null ? "" : text,
+      "text": effectiveText.isEmpty && attachmentFrames != null ? "" : effectiveText,
       "timestamp": DateTime.now().toIso8601String(),
     };
     if (attachmentFrames != null && attachmentFrames.isNotEmpty) {
@@ -1845,6 +1935,139 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       if (mounted) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(content: Text("消息未发出：与服务器的连接尚未就绪")),
+        );
+      }
+    }
+  }
+
+  /// 「按住说话」按钮触发的语音消息发送路径。
+  ///
+  /// 链路：
+  ///   1. 录音文件（m4a）已由 [VoiceInputBar] 落盘到 [path]
+  ///   2. 这里读字节 → 调 [WorldApiClient.uploadVoiceMessage] 走 multipart 上传
+  ///      到服务端 `POST /agent/voice/messages/upload`，拿到 `mediaUrl`
+  ///   3. 本地立即插一条 user 语音消息（contentType=audio + attachments=[audio]），
+  ///      与 agent 回复时收到的 `agent.voice.message` 事件渲染路径对齐
+  ///   4. WS 发送 `chat.user_message` 事件，附 `contentType=audio / mediaUrl / durationMs`，
+  ///      服务端拉流后调 ASR 把音频转成文本喂给 LLM
+  Future<void> _sendVoiceMessage(String path, int durationMs) async {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("正在连接服务器，请稍后再发消息")),
+        );
+      }
+      return;
+    }
+    final File f = File(path);
+    if (!await f.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("录音文件丢失，请重试")),
+        );
+      }
+      return;
+    }
+    final List<int> bytes = await f.readAsBytes();
+    final String fileName =
+        "voice-${DateTime.now().millisecondsSinceEpoch}.m4a";
+
+    String? mediaUrl;
+    try {
+      final Map<String, dynamic> result = await _worldApi.uploadVoiceMessage(
+        sessionId: ApiConfig.sessionId,
+        fileBytes: bytes,
+        fileName: fileName,
+        durationMs: durationMs,
+      );
+      if (result["ok"] == true) {
+        mediaUrl = result["mediaUrl"]?.toString();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text("语音上传失败：$e")),
+        );
+      }
+    }
+    // 上传完即可删除临时录音文件
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {
+      // ignore
+    }
+    if (mediaUrl == null || mediaUrl.isEmpty) {
+      // 上传失败时降级：丢弃消息，不让用户继续等待 ASR
+      return;
+    }
+
+    final String messageId = "msg-${DateTime.now().microsecondsSinceEpoch}";
+    final ChatMessage userMessage = ChatMessage(
+      messageId: messageId,
+      sessionId: ApiConfig.effectiveActorId,
+      role: "user",
+      text: "",
+      timestamp: DateTime.now(),
+      contentType: "audio",
+      durationMs: durationMs,
+      attachments: <MessageAttachment>[
+        MessageAttachment(
+          type: MessageAttachmentType.audio,
+          url: mediaUrl,
+          durationMs: durationMs,
+          mimeType: "audio/mpeg",
+        ),
+      ],
+    );
+    setState(() {
+      _messages.add(userMessage);
+      _isAgentProcessing = true;
+      _agentStatusLine = null;
+    });
+    _notifyAgentProcessingUi(true);
+    AgentSphereMoodBridge.instance.listening();
+    await _store.saveMessage(userMessage);
+
+    final Map<String, dynamic> userMsg = <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+      "messageId": messageId,
+      // 服务端 ASR 链路以 mediaUrl 为准；text 留空
+      "text": "",
+      "timestamp": DateTime.now().toIso8601String(),
+      "contentType": "audio",
+      "mediaUrl": mediaUrl,
+      "durationMs": durationMs,
+    };
+    if (ApiConfig.userId.trim().isNotEmpty) {
+      userMsg["userId"] = ApiConfig.userId.trim();
+    }
+    final ClientLocationPayload? clientLocation =
+        await ClientLocationService.getCurrentLocation();
+    if (clientLocation != null) {
+      userMsg["clientLocation"] = clientLocation.toJson();
+    }
+    userMsg["agentAccessMode"] =
+        _fullComputerAccessEnabled ? "full" : "sandbox";
+
+    // 复用 _sendMessage 的 watchdog / TurnState 占位机制
+    _pendingAgentUserMessageId = messageId;
+    _armAgentReplyWatchdog(messageId);
+    _pendingLocalTurn = TurnState(
+      traceId: messageId,
+      sessionId: ApiConfig.effectiveActorId,
+      t0: DateTime.now(),
+    );
+    if (mounted) setState(() {});
+
+    final bool sent = _ws.sendEvent("chat.user_message", userMsg);
+    if (!sent) {
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      _clearAgentProcessingState();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("语音消息未发出：与服务器的连接尚未就绪")),
         );
       }
     }
@@ -1946,50 +2169,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
       const SnackBar(content: Text("「手机」功能页正在准备中")),
     );
-  }
-
-  /// 常用工具「翻译」入口：唤起独立翻译悬浮窗（与主应用同进程，HWND + GDI 自绘）。
-  ///
-  /// 跟之前走 Python 托盘 IPC 不同，这里直接调
-  /// `pai/translate_overlay` MethodChannel，让 windows/runner 端
-  /// `TranslateOverlayWindow` 起一个原生 HWND 窗口。
-  /// 可拖动、可设 on-top、点 ✕ 只隐藏（不退出进程）。
-  Future<void> _openTranslatePage() async {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null) return;
-    final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(navCtx);
-
-    final ok = await TranslateOverlayLauncher.show();
-    if (ok) {
-      messenger?.showSnackBar(
-        const SnackBar(
-          content: Text(
-            "已唤起翻译悬浮窗 · 在桌面上自由拖动  ·  鼠标悬停文字自动翻译",
-          ),
-          duration: Duration(seconds: 4),
-        ),
-      );
-    } else {
-      messenger?.showSnackBar(
-        const SnackBar(
-          content: Text(
-            "唤起失败：当前平台暂不支持独立翻译窗口（仅 Windows 桌面版）",
-          ),
-          duration: Duration(seconds: 5),
-        ),
-      );
-    }
-  }
-
-  void _handleTranslateLangChange(String langCode) {
-    // 1) 把新语言同步到原生窗口（让顶栏按钮文字立刻更新）
-    // 2) 持久化到本地偏好（_preferencesApi，TODO: 加 setString 后再写）
-    debugPrint("[translate] lang changed: $langCode");
-    final label = translateLangLabel(langCode);
-    unawaited(TranslateOverlayLauncher.setLanguage(
-      code: langCode,
-      label: label,
-    ));
   }
 
   /// 常用工具「笔记」入口：跳转到与笔记 Agent 的独立对话页（独立 WebSocket 命名空间，
@@ -3003,6 +3182,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                           onOpenUserMenuHelp: _openUserMenuHelp,
                           onOpenWechatClaw: _openWechatClawBinding,
                           onOpenDevices: _openDevicesPage,
+                          onOpenBriefingSettings: _openBriefingSettings,
                           onLogout: _logout,
                           totalUnread: _unreadByPlatform.values
                                   .fold(0, (int a, int b) => a + b),
@@ -3114,6 +3294,20 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.devices;
     });
+  }
+
+  /// 用户菜单「每日简报」:打开简报设置页（启用开关 / 时间 / 模式 / sections）
+  void _openBriefingSettings() {
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null) return;
+    Navigator.of(ctx).push<void>(
+      MaterialPageRoute<void>(
+        builder: (BuildContext _) => BriefingSettingsPage(
+          api: _preferencesApi,
+          sessionId: ApiConfig.effectiveActorId,
+        ),
+      ),
+    );
   }
 
   /// 用户菜单「退出登录」:先弹确认,确认后弹 SnackBar 占位
@@ -3560,7 +3754,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onSchedule: _openSchedulePanel,
       onWallet: _openWalletDialog,
       onPhone: _openPhoneDevicesDialog,
-      onTranslate: _openTranslatePage,
       onNotes: _openNotesChat,
       onMessages: _openMessagesPanel,
       rightPanelVisible: _rightPanel != null,
@@ -3620,6 +3813,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ),
         );
       },
+      onSendVoice: _sendVoiceMessage,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },

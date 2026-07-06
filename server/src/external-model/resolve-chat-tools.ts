@@ -22,11 +22,15 @@ const _resolvedToolsCache = new Map<string, ChatCompletionTool[]>();
 const MAX_RESOLVED_TOOLS_CACHE = 32;
 
 function resolveExposureTokenBudget(profile: ToolExposureProfile): number | null {
+  // 工具 schema token 预算：在工具覆盖度和 token 消耗间取平衡。
+  // light 1000：简单对话只需少量工具（clock/weather/search_web）
+  // contextual 2200：工具任务需覆盖主要工具类别，确保 LLM 能选对工具
+  // 可通过环境变量覆盖。
   const fallback =
     profile === "light"
-      ? 1400
+      ? 1000
       : profile === "contextual"
-        ? 2600
+        ? 2200
         : null;
   if (fallback == null) return null;
   const envName =

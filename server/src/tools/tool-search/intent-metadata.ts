@@ -14,6 +14,8 @@ type ToolIntentRule = {
   metadata: ToolIntentMetadata;
 };
 
+export type { ToolIntentRule };
+
 type ToolIntentMetadataFile = {
   rules?: ToolIntentRule[];
 };
@@ -126,6 +128,34 @@ let cachedMtimeMs = -1;
 let lastCheckedAt = 0;
 let lastLoadedAt = 0;
 let lastLoadError: string | null = null;
+
+/**
+ * 由 capability-modules 注入的额外规则。
+ *
+ * 启动时 {@link registerAllCapabilityModules} 调一次 `setExtraIntentRules`，
+ * 把所有能力模块的 intent rules 合并进来。
+ * 与磁盘配置文件不同，这部分是代码层静态规则，不需要热加载。
+ */
+let extraIntentRules: ToolIntentRule[] = [];
+
+/**
+ * 注入能力模块的意图规则。
+ *
+ * @param rules 来自 `capability-modules/index.ts` 的 `getAllCapabilityModuleIntentRules`
+ */
+export function setExtraIntentRules(rules: ToolIntentRule[]): void {
+  extraIntentRules = rules.map(normalizeRule).filter((r): r is ToolIntentRule => r != null);
+}
+
+/** 取出所有规则（磁盘配置 + 能力模块注入），优先级：磁盘 > 能力模块 > DEFAULT。 */
+function getEffectiveRules(): ToolIntentRule[] {
+  const diskRules = loadIntentRulesFromDisk();
+  if (extraIntentRules.length === 0) return diskRules;
+  // disk 与 extra 都可能覆盖同一工具名，按出现顺序后者覆盖前者。
+  // 这里把 extra 追加在 disk 后面，让 catalog.ts 的 getToolIntentMetadata 合并时
+  // 把两边的 aliases / examples 都聚合（它本身就是 mergeUnique 的）。
+  return [...diskRules, ...extraIntentRules];
+}
 
 export type ToolIntentMetadataState = {
   path: string;
@@ -247,7 +277,7 @@ function loadIntentRulesFromDisk(force = false): ToolIntentRule[] {
 }
 
 export function getToolIntentMetadata(toolName: string): ToolIntentMetadata {
-  const rules = loadIntentRulesFromDisk();
+  const rules = getEffectiveRules();
   const exactMatches = rules
     .filter((rule) => rule.exact === toolName)
     .map((rule) => rule.metadata);

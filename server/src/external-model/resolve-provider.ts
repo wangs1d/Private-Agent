@@ -3,6 +3,7 @@ import { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 import { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
 import { FailoverChatProvider } from "./failover-chat-provider.js";
 import { instantiateKnownProvider } from "./instantiate-provider.js";
+import { resolveRegion } from "../config/load-server-env.js";
 
 /** 与 `EXTERNAL_MODEL_PROVIDER` 对齐 */
 export type ExternalModelMode = "auto" | "none" | "moonshot-kimi" | "openai" | "failover";
@@ -91,7 +92,14 @@ export function resolvePrimaryExternalModelBinding(
       .filter(Boolean);
     return firstEnabledBinding(env, tokens);
   }
-  // auto
+  // auto：按 REGION 决定优先级。
+  // - domestic（默认）：优先 Kimi，其次 OpenAI（保持向后兼容）
+  // - intl：优先 OpenAI，其次 Kimi
+  // 显式设置 EXTERNAL_MODEL_PROVIDER 始终优先于本推断。
+  const region = resolveRegion(env);
+  if (region === "intl") {
+    return openaiBinding(env) ?? moonshotBinding(env);
+  }
   return moonshotBinding(env) ?? openaiBinding(env);
 }
 
@@ -157,8 +165,16 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
     return fb;
   }
 
-  // auto
-  if (moonshot.isEnabled()) return moonshot;
-  if (openai.isEnabled()) return openai;
+  // auto：按 REGION 决定优先级。
+  // - domestic（默认）：优先 Kimi，其次 OpenAI（保持向后兼容）
+  // - intl：优先 OpenAI，其次 Kimi
+  const region = resolveRegion();
+  if (region === "intl") {
+    if (openai.isEnabled()) return openai;
+    if (moonshot.isEnabled()) return moonshot;
+  } else {
+    if (moonshot.isEnabled()) return moonshot;
+    if (openai.isEnabled()) return openai;
+  }
   return null;
 }

@@ -30,6 +30,15 @@ import type { WeatherService } from "../services/weather-service.js";
 import type { TtsService } from "../services/tts-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
+import type { VoiceMessageService } from "../services/voice-message-service.js";
+import type { ImageGenerationService } from "../services/image-generation-service.js";
+import type { FileProcessingService } from "../services/file-processing-service.js";
+import type { EmailSmsService } from "../services/email-sms-service.js";
+import type { MediaMusicService } from "../services/media-music-service.js";
+import type { HealthFitnessService } from "../services/health-fitness-service.js";
+import type { FinanceDeepService } from "../services/finance-deep-service.js";
+import type { SocialOutreachService } from "../services/social-outreach-service.js";
+import type { CodeSandboxService } from "../services/code-sandbox-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import type { IntelligentReminderService } from "../services/intelligent-reminder/intelligent-reminder-service.js";
 import type { UserResponsePersistenceService } from "../services/intelligent-reminder/user-response-persistence.js";
@@ -79,6 +88,24 @@ export type AppServices = {
   ttsService: TtsService;
   /** Agent 底层语音能力中枢（TTS + ASR + WS 推送，Agent 自调度入口） */
   voiceCapabilityService: VoiceCapabilityService;
+  /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */
+  voiceMessageService: VoiceMessageService;
+  /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
+  imageGenerationService: ImageGenerationService;
+  /** 文件/文档处理服务（file.read_text / file.write_text / file.parse_pdf / file.parse_office / file.export_format） */
+  fileProcessingService: FileProcessingService;
+  /** 邮件/短信主动发送服务（email.send / sms.send，凭证从环境变量读取） */
+  emailSmsService: EmailSmsService;
+  /** 媒体音乐服务（media.search / media.play / pause / resume / stop / now_playing） */
+  mediaMusicService: MediaMusicService;
+  /** 健康/运动数据服务（health.log_metric / get_metrics / get_summary / set_goal / get_goals / import_data） */
+  healthFitnessService: HealthFitnessService;
+  /** 财务深度服务（finance.import_transactions / analyze_spending / set_budget / get_budget_status / reconcile / categorize / export_report） */
+  financeDeepService: FinanceDeepService;
+  /** 社交主动出击服务（social.post / comment / repost / like / get_feed / search_posts，外部真实平台） */
+  socialOutreachService: SocialOutreachService;
+  /** 代码执行沙盒服务（code.run / list_files / read_file / write_file，python/node 子进程） */
+  codeSandboxService: CodeSandboxService;
   virtualPhoneService: VirtualPhoneService;
   friendService: FriendService;
   messageHubService: MessageHubService;

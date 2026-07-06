@@ -63,6 +63,12 @@ export const ClientEventType = {
 } as const;
 
 export const ServerEventType = {
+  /**
+   * 协议级消息已收到确认：WS 收到用户消息后立即推送（< 1ms），
+   * 让客户端知道服务端已收到并排队处理。与 chat.assistant_interim 不同，
+   * 这是纯协议层 received-confirmation，不带任何内容。
+   */
+  ChatMessageReceived: "chat.message_received",
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
   /**
@@ -158,6 +164,22 @@ export const ServerEventType = {
    * 比 phone.call_user 轻：无来电界面，但有视觉提示。
    */
   AgentVoiceAlarm: "agent.voice.alarm",
+  /**
+   * Agent 语音消息（微信式可重播）—— `voice.send_message` 工具触发。
+   * 与 `agent.voice.speak` 区别：speak 是即时播报（一次性、后台播放、无 UI），
+   * message 是落地的可重播语音消息（带 mediaUrl / durationMs / waveform / transcript），
+   * 客户端渲染为微信式语音气泡，可多次点击重播。
+   */
+  AgentVoiceMessage: "agent.voice.message",
+  /**
+   * 媒体音乐播放控制 —— `media.*` 工具族触发。
+   * 客户端收到后执行实际播放 / 暂停 / 恢复 / 停止；服务端仅下发控制信令，
+   * 不代理音频流（避免版权与带宽问题）。
+   */
+  AgentMediaPlay: "agent.media.play",
+  AgentMediaPause: "agent.media.pause",
+  AgentMediaResume: "agent.media.resume",
+  AgentMediaStop: "agent.media.stop",
 
   // ============================================================
   // 终端互连平台 device.* 服务端事件

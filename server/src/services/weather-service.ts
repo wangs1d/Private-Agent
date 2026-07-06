@@ -177,6 +177,7 @@ export class WeatherService {
         precipitation_probability?: (number | null)[];
       };
       daily?: {
+        weather_code?: (number | null)[];
         temperature_2m_max?: (number | null)[];
         temperature_2m_min?: (number | null)[];
         precipitation_probability_max?: (number | null)[];
@@ -217,7 +218,19 @@ export class WeatherService {
       }),
       summaryLine: "",
     };
-    brief.summaryLine = `${brief.locationLabel} 当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。`;
+
+    // 构建明天预报摘要（用户常问"明天天气"）
+    const tomorrowMax = raw.daily?.temperature_2m_max?.[1];
+    const tomorrowMin = raw.daily?.temperature_2m_min?.[1];
+    const tomorrowRainPct = raw.daily?.precipitation_probability_max?.[1];
+    let tomorrowSummary = "";
+    if (tomorrowMax != null && tomorrowMin != null) {
+      const tomorrowText = wmoText(Number(raw.daily?.weather_code?.[1] ?? 0));
+      const rainInfo = tomorrowRainPct != null ? `，降水概率 ${tomorrowRainPct}%` : "";
+      tomorrowSummary = ` 明日${tomorrowText}，${tomorrowMin.toFixed(0)}–${tomorrowMax.toFixed(0)}°C${rainInfo}。`;
+    }
+
+    brief.summaryLine = `${brief.locationLabel} 当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
     return brief;
   }
 }

@@ -30,7 +30,6 @@ class JarvisChatLayout extends StatefulWidget {
     this.onSchedule,
     this.onWallet,
     this.onPhone,
-    this.onTranslate,
     this.onNotes,
     this.onMessages,
     this.rightPanelVisible = false,
@@ -78,9 +77,6 @@ class JarvisChatLayout extends StatefulWidget {
 
   /// 点击常用工具「手机」：打开虚拟电话拨号页。
   final VoidCallback? onPhone;
-
-  /// 点击常用工具「翻译」：打开翻译工具。
-  final VoidCallback? onTranslate;
 
   /// 点击常用工具「笔记」：打开与笔记 Agent 的独立对话页。
   final VoidCallback? onNotes;
@@ -623,7 +619,6 @@ class _JarvisChatLayoutState extends State<JarvisChatLayout> {
     final List<_ToolSpec> firstRow = <_ToolSpec>[
       _ToolSpec(icon: Icons.people_outline, label: "好友", onTap: widget.onAgentLink),
       _ToolSpec(icon: Icons.account_balance_wallet_outlined, label: "钱包", onTap: widget.onWallet),
-      _ToolSpec(icon: Icons.translate, label: "翻译", onTap: widget.onTranslate),
       _ToolSpec(icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
     ];
     final List<_ToolSpec> secondRow = <_ToolSpec>[

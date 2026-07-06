@@ -1,5 +1,9 @@
+import { readFile } from "node:fs/promises";
+
 import type { AgentCore } from "../../services/agent-core.js";
 import type { AuditService } from "../../services/audit-service.js";
+import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
+import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import { resolveActorId } from "../../agent/actor-id.js";
 import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
@@ -24,8 +28,10 @@ import {
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
 import {
+  buildInterimAckText,
   buildInterimAckTextWithLlm,
   interimAckMessageId,
+  isInterimAckLlmEnabled,
   shouldEmitInterimAck,
   shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
@@ -39,6 +45,7 @@ import { getToolResultProcessor } from "../../services/tool-result-processor.js"
 import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 import { refreshAgentProfileFromTurn } from "../../services/agent-profile-autonomy-service.js";
+import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
   getAgentRuntimeConfig().messageBatch,
@@ -49,6 +56,10 @@ export { messageBatchProcessor };
 export type ChatUserMessageHandlerDeps = {
   agentCore: AgentCore;
   auditService: AuditService;
+  /** 语音能力中枢（可选；注入后支持 contentType=audio 的 ASR 链路） */
+  voiceCapabilityService?: VoiceCapabilityService;
+  /** 语音消息落盘服务（可选；用于解析 audio 消息的本地文件路径） */
+  voiceMessageService?: VoiceMessageService;
 };
 
 export type ChatUserMessageContext = {
@@ -133,9 +144,33 @@ export async function handleChatUserMessageEvent(
 
   const textTrim = data.text.trim();
   const agentAccessMode = parseAgentAccessMode(data.agentAccessMode);
-  const effectiveText =
+  let effectiveText =
     textTrim ||
     (visionFrames?.length ? "（用户发送了摄像头/配图画面，请根据图像描述内容并回答。）" : "");
+
+  // audio 消息：拉取本地 mp3 → ASR 识别 → 用 transcript 作为正文喂给 LLM
+  if (data.contentType === "audio" && data.mediaUrl && deps.voiceCapabilityService && deps.voiceMessageService) {
+    try {
+      const asrText = await transcribeAudioFromMediaUrl(
+        data.mediaUrl,
+        msgActor,
+        deps.voiceCapabilityService,
+        deps.voiceMessageService,
+      );
+      if (asrText) {
+        effectiveText = asrText;
+      } else {
+        effectiveText = "（用户发送了一段语音消息，但识别失败，请提示用户重试或用文字发送）";
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[chat.user_message] ASR 失败: ${msg}`);
+      effectiveText = `（用户发送了一段语音消息，识别失败：${msg}）`;
+    }
+  } else if (data.contentType === "audio" && data.mediaUrl) {
+    // 未注入 ASR 服务：降级提示
+    effectiveText = "（用户发送了一段语音消息，但服务端未配置 ASR 能力，无法识别内容）";
+  }
 
   void deps.auditService
     .record({
@@ -148,6 +183,18 @@ export async function handleChatUserMessageEvent(
     .catch(() => {});
 
   embodimentListening(msgActor, (json) => ctx.socket.send(json));
+
+  // 立即发送协议级 received-ack（< 1ms），让客户端知道消息已被服务端接收
+  ctx.socket.send(
+    JSON.stringify({
+      type: ServerEventType.ChatMessageReceived,
+      payload: {
+        sessionId: msgActor,
+        messageId: data.messageId,
+        receivedAt: Date.now(),
+      },
+    }),
+  );
 
   messageBatchProcessor.submit(msgActor, {
     text: effectiveText,
@@ -275,11 +322,13 @@ async function processBatchedMessage(
     }
 
     const interimText = phasedAsyncEnabled
-      ? await buildInterimAckTextWithLlm({
-          text: batched.text,
-          mode: decision.mode,
-          provider: createExternalChatProviderFromEnv(),
-        })
+      ? (isInterimAckLlmEnabled()
+          ? await buildInterimAckTextWithLlm({
+              text: batched.text,
+              mode: decision.mode,
+              provider: createExternalChatProviderFromEnv(),
+            })
+          : buildInterimAckText(batched.text, decision.mode))
       : null;
     if (interimText) {
       if (isStale() || replyFinished || chunkSeq > 0) return;
@@ -300,6 +349,31 @@ async function processBatchedMessage(
 
   void maybeEmitInterimAck();
 
+  // 获取全局 turn 并发许可（防止高并发时事件循环饱和 + LLM API 限流耗尽）
+  const turnStartedAt = Date.now();
+  let releaseTurn: (() => void) | null = null;
+  try {
+    releaseTurn = await globalTurnLimiter.acquire(TURN_QUEUE_TIMEOUT);
+  } catch {
+    // 排队超时 → 返回 429 风格提示，避免客户端无限等待
+    ctx.socket.send(
+      JSON.stringify({
+        type: ServerEventType.ChatAssistantDone,
+        payload: {
+          sessionId: msgActor,
+          messageId: assistantMessageId,
+          traceId: batched.originalMessageId,
+          finalText: "当前服务繁忙，请稍后重试。",
+          toolCalls: [],
+        },
+      }),
+    );
+    if (!isStale()) messageBatchProcessor.markReplyStarted(msgActor);
+    return;
+  }
+
+  let turnSucceeded = false;
+  let turnError: string | undefined;
   try {
     const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
       chatUserMessageId: batched.originalMessageId,
@@ -464,7 +538,10 @@ async function processBatchedMessage(
       (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
 
     const processor = getToolResultProcessor();
-    finalText = processor.processAssistantText(finalText, { userText: batched.text });
+    finalText = processor.processAssistantText(finalText, {
+      userText: batched.text,
+      toolName: reply.toolName,
+    });
     finalText = await new AssistantRewriterService(
       createExternalChatProviderFromEnv(),
     ).rewriteIfNeeded(batched.text, finalText);
@@ -509,9 +586,11 @@ async function processBatchedMessage(
     if (!isStale()) {
       messageBatchProcessor.markReplyStarted(msgActor);
     }
+    turnSucceeded = true;
   } catch (err) {
     if (isStale()) return;
     const msg = err instanceof Error ? err.message : String(err);
+    turnError = msg;
     console.error("[WS] chat.user_message failed:", err);
     embodimentAlert(msgActor, (json) => ctx.socket.send(json), msg, "error");
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
@@ -540,5 +619,49 @@ async function processBatchedMessage(
     if (!isStale()) {
       messageBatchProcessor.markReplyStarted(msgActor);
     }
+  } finally {
+    releaseTurn();
+    // Phase 2：记录 turn 结果供自适应并发调整（AIMD）
+    const turnDuration = Date.now() - turnStartedAt;
+    recordTurnOutcome(turnSucceeded, turnDuration, turnError);
   }
+}
+
+/**
+ * 从 mediaUrl 解析本地文件路径，读取 mp3 字节并调 ASR 识别。
+ * mediaUrl 形如 `/agent/voice/messages/{actorId}/{msgId}.mp3`。
+ * 失败时返回空字符串，由调用方降级处理。
+ */
+async function transcribeAudioFromMediaUrl(
+  mediaUrl: string,
+  actorId: string,
+  voiceCapability: VoiceCapabilityService,
+  voiceMessageService: VoiceMessageService,
+): Promise<string> {
+  // 从 mediaUrl 提取 actorId 与 fileName
+  const match = mediaUrl.match(/^\/agent\/voice\/messages\/([^/]+)\/([^/]+)$/);
+  if (!match) {
+    console.warn(`[ASR] 无法解析 mediaUrl: ${mediaUrl}`);
+    return "";
+  }
+  const [, urlActorId, fileName] = match;
+  const fullPath = voiceMessageService.resolveFilePath(urlActorId, fileName);
+  if (!fullPath) {
+    console.warn(`[ASR] 文件不存在: ${mediaUrl}`);
+    return "";
+  }
+
+  const buffer = await readFile(fullPath);
+  const result = await voiceCapability.transcribe({
+    audio: { data: Buffer.from(buffer), format: "mp3" },
+    language: "zh",
+  });
+
+  if (!result.ok || !result.text) {
+    console.warn(`[ASR] 识别失败: ${result.error ?? "empty"}`);
+    return "";
+  }
+
+  console.log(`[ASR] 识别成功（actor=${actorId}, ${buffer.length} bytes）: ${result.text.slice(0, 80)}…`);
+  return result.text.trim();
 }
