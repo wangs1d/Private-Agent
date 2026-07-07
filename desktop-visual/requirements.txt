@@ -9,3 +9,4 @@ pydantic>=2.5.0
 numpy>=1.24.0
 paddleocr>=2.7.0
 paddlepaddle>=2.5.0
+pywinauto>=0.6.8  # Windows UIAutomation 集成（runtime/uia_controller.py 懒加载，非 Windows 自动降级）

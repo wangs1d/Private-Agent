@@ -12,6 +12,7 @@ import os
 import shlex
 import subprocess
 import sys
+import webbrowser
 from datetime import datetime, timezone
 
 from desktop_visual.shell_policy import (
@@ -68,6 +69,50 @@ async def _handle_screenshot(req: dict) -> dict:
 DEFAULT_SHELL_TIMEOUT_S = 30
 MAX_SHELL_TIMEOUT_S = 300
 MAX_SHELL_OUTPUT_BYTES = 256 * 1024
+
+
+# ---- open ----
+def _handle_open(req: dict) -> dict:
+    """
+    原生 API 打开文件/网页/软件（不走 shell，不经 shell_policy 判定）。
+    - url  → webbrowser.open（跨平台，用默认浏览器）
+    - file → os.startfile（Windows）/ xdg-open（Linux）/ open（macOS）
+    - app  → subprocess.Popen([path])（无 shell=True，直接启动可执行文件）
+    """
+    target = req.get("target")
+    path = req.get("path")
+    if not isinstance(target, str) or target not in ("file", "url", "app"):
+        return {"ok": False, "error": f"target 必须是 file/url/app，收到 {target!r}"}
+    if not isinstance(path, str) or not path.strip():
+        return {"ok": False, "error": "path 不能为空"}
+
+    try:
+        if target == "url":
+            # webbrowser.open 返回 True/False，不抛异常
+            success = webbrowser.open(path)
+            if not success:
+                return {"ok": False, "error": f"webbrowser.open 返回 False：{path}"}
+        elif target == "file":
+            if os.name == "nt":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        else:  # app
+            # 直接启动可执行文件，不经过 shell
+            subprocess.Popen([path])
+    except FileNotFoundError as e:
+        return {"ok": False, "error": f"找不到目标: {e}"}
+    except OSError as e:
+        return {"ok": False, "error": f"打开失败: {e}"}
+
+    return {
+        "ok": True,
+        "target": target,
+        "path": path,
+        "openedAt": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 async def _handle_run_shell(req: dict) -> dict:
@@ -224,6 +269,10 @@ async def _run() -> dict:
 
     if action == "screenshot":
         return await _handle_screenshot(req)
+    if action == "open":
+        return _handle_open(req)
+    if action == "uia_query":
+        return _handle_uia_query(req)
     if action == "run_shell":
         return await _handle_run_shell(req)
 
@@ -261,9 +310,83 @@ async def _run() -> dict:
             model=cfg["model"],
         )
 
-    loop = VisualDesktopLoop(vlm)
+    loop = VisualDesktopLoop(vlm, uia=_get_uia_for_loop())
     out = await loop.run(LoopConfig(max_steps=max_steps, task=task, region=region_t))
     return out
+
+
+def _get_uia_for_loop():
+    """获取共享 UiaController 实例供 visual_loop 隐式兜底用。非 Windows 或 pywinauto 未装时返回 None。"""
+    try:
+        from desktop_visual.runtime.uia_controller import get_uia_controller
+
+        ctrl = get_uia_controller()
+        return ctrl if ctrl.is_available() else None
+    except Exception:
+        return None
+
+
+def _handle_uia_query(req: dict) -> dict:
+    """UIA 结构化查询。mode: query | read_children | inspect_point。"""
+    from desktop_visual.runtime.uia_controller import get_uia_controller
+
+    ctrl = get_uia_controller()
+    if not ctrl.is_available():
+        return {
+            "ok": False,
+            "error": "UIA 不可用（非 Windows 或 pywinauto 未安装）",
+            "available": False,
+        }
+
+    mode = req.get("mode", "query")
+    try:
+        if mode == "inspect_point":
+            point = req.get("point") or {}
+            x = int(point.get("x", 0))
+            y = int(point.get("y", 0))
+            return ctrl.inspect_point(x, y)
+
+        if mode == "query":
+            selector = req.get("selector") or {}
+            top_only = bool(req.get("topOnly", True))
+            limit = int(req.get("limit", 100))
+            elements = ctrl.query(selector, top_only=top_only, limit=limit)
+            # 剥掉 __ref 字段（不可序列化）
+            return {
+                "ok": True,
+                "mode": "query",
+                "selector": selector,
+                "count": len(elements),
+                "elements": [_strip_ref(e) for e in elements],
+            }
+
+        if mode == "read_children":
+            # 先用 selector 找父元素，再读子树
+            selector = req.get("selector") or {}
+            limit = int(req.get("limit", 200))
+            parents = ctrl.query(selector, top_only=True, limit=1)
+            if not parents:
+                return {"ok": False, "error": "未找到匹配父元素", "selector": selector}
+            parent_ref = parents[0].get("__ref")
+            children = ctrl.read_children(parent_ref, limit=limit)
+            return {
+                "ok": True,
+                "mode": "read_children",
+                "parent": _strip_ref(parents[0]),
+                "count": len(children),
+                "elements": [_strip_ref(c) for c in children],
+            }
+
+        return {"ok": False, "error": f"未知 mode: {mode!r}（应为 query/read_children/inspect_point）"}
+    except Exception as exc:
+        return {"ok": False, "error": f"UIA 查询失败: {exc}", "mode": mode}
+
+
+def _strip_ref(elem: dict) -> dict:
+    """剥掉不可序列化的 __ref 字段。"""
+    if not isinstance(elem, dict):
+        return elem
+    return {k: v for k, v in elem.items() if k != "__ref"}
 
 
 def main() -> None:

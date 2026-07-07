@@ -9,6 +9,10 @@ import type {
   DesktopVisualRunResult,
   DesktopVisualRunShellInput,
   DesktopVisualRunShellResult,
+  DesktopVisualOpenInput,
+  DesktopVisualOpenResult,
+  DesktopVisualUiaQueryInput,
+  DesktopVisualUiaQueryResult,
   DesktopVisualScreenshotInput,
   DesktopVisualScreenshotResult,
 } from "./desktop-visual-port.js";
@@ -249,6 +253,51 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         packageRoot: this.packageRoot,
         timeoutMs: timeoutMs + 5_000,
         timeoutLabel: "run_shell 子进程超时",
+      },
+    );
+  }
+
+  async open(input: DesktopVisualOpenInput): Promise<DesktopVisualOpenResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    // 原生打开不走 shell，10s 足够
+    return runStdioWorker<DesktopVisualOpenResult>(
+      {
+        action: "open",
+        target: input.target,
+        path: input.path,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 15_000,
+        timeoutLabel: "open 子进程超时",
+      },
+    );
+  }
+
+  async uiaQuery(
+    input: DesktopVisualUiaQueryInput,
+  ): Promise<DesktopVisualUiaQueryResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    // UIA 查询走 stdio_worker，给 30s（read_children 可能慢）
+    return runStdioWorker<DesktopVisualUiaQueryResult>(
+      {
+        action: "uia_query",
+        mode: input.mode,
+        selector: input.selector ?? null,
+        point: input.point ?? null,
+        topOnly: input.topOnly ?? null,
+        limit: input.limit ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 30_000,
+        timeoutLabel: "uia_query 子进程超时",
       },
     );
   }

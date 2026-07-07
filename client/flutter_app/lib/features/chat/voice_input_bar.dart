@@ -131,6 +131,18 @@ class _VoiceInputBarState extends State<VoiceInputBar> {
     }
   }
 
+  /// 桌面端单击反馈：长按 500ms 是 mobile 的设计，鼠标用户可能只点一下。
+  /// 这里给个明确提示，避免「点不动」的错觉。
+  void _onTapHint() {
+    if (_isRecording || _isUploading) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text("请按住说话按钮（松开发送，上滑取消）"),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _onLongPressEnd(LongPressEndDetails details) async {
     await _finishRecording();
   }
@@ -282,33 +294,43 @@ class _VoiceInputBarState extends State<VoiceInputBar> {
         : cs.surfaceContainerHighest;
     final Color fg = _isRecording ? cs.onErrorContainer : cs.onSurfaceVariant;
 
-    return GestureDetector(
-      onLongPressStart: _onLongPressStart,
-      onLongPressMoveUpdate: _onLongPressMoveUpdate,
-      onLongPressEnd: _onLongPressEnd,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(20),
-          border: _isRecording
-              ? Border.all(color: cs.error.withValues(alpha: 0.5))
-              : null,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(_isRecording ? Icons.stop_rounded : Icons.mic, size: 16, color: fg),
-            const SizedBox(width: 6),
-            Text(
-              _isRecording
-                  ? "松开发送"
-                  : _isUploading
-                      ? "发送中..."
-                      : widget.label,
-              style: theme.textTheme.labelMedium?.copyWith(color: fg),
-            ),
-          ],
+    // 关键：Windows 桌面端 + 无 Material 祖先的 GestureDetector，
+    // 透明 hit test 经常失败（长按不出 HUD、点不到），外面包一层
+    // Material(type: transparency) 给它一个 opaque hit 区域。
+    return Material(
+      type: MaterialType.transparency,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onLongPressStart: _onLongPressStart,
+        onLongPressMoveUpdate: _onLongPressMoveUpdate,
+        onLongPressEnd: _onLongPressEnd,
+        // 桌面端给个单击反馈 + 提示，避免用户以为「点不动」是 bug；
+        // 实际录音仍走 onLongPressStart。
+        onTap: _onTapHint,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(20),
+            border: _isRecording
+                ? Border.all(color: cs.error.withValues(alpha: 0.5))
+                : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(_isRecording ? Icons.stop_rounded : Icons.mic, size: 16, color: fg),
+              const SizedBox(width: 6),
+              Text(
+                _isRecording
+                    ? "松开发送"
+                    : _isUploading
+                        ? "发送中..."
+                        : widget.label,
+                style: theme.textTheme.labelMedium?.copyWith(color: fg),
+              ),
+            ],
+          ),
         ),
       ),
     );

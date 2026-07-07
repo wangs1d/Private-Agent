@@ -82,10 +82,12 @@ import { FinanceDeepService } from "../services/finance-deep-service.js";
 import { SocialOutreachService } from "../services/social-outreach-service.js";
 import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
+import type { ASRProvider } from "../services/voice-dialogue/types.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
 import { OpenAIASRAdapter } from "../services/voice-dialogue/adapters/openai-asr-adapter.js";
+import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
@@ -309,9 +311,14 @@ export async function createAppServices(): Promise<AppServices> {
   // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
   const voiceDialogueService = new VoiceDialogueService();
 
+  // ASR Adapter 优先级：FunASR（自托管，中文最佳）→ OpenAI Whisper（兜底）
+  const funasrAdapter = new FunAsrAdapter();
+  const openaiAsrAdapter = new OpenAIASRAdapter();
+  const defaultAsr: ASRProvider = funasrAdapter.isEnabled() ? funasrAdapter : openaiAsrAdapter;
+
   // 注册 OpenAI provider（默认）
   voiceDialogueService.registerProvider("openai", {
-    asr: new OpenAIASRAdapter(),
+    asr: openaiAsrAdapter,
     tts: new OpenAITTSAdapter(ttsService),
     llm: new OpenAILLMAdapter(),
   });
@@ -320,15 +327,24 @@ export async function createAppServices(): Promise<AppServices> {
   const siliconflowTTS = new SiliconFlowTTSAdapter();
   if (siliconflowTTS.isEnabled()) {
     voiceDialogueService.registerProvider("siliconflow", {
-      asr: new OpenAIASRAdapter(), // ASR 暂时仍用 OpenAI
+      asr: defaultAsr, // ASR 走 FunASR（如已配置），否则 OpenAI
       tts: siliconflowTTS,
-      llm: new OpenAILLMAdapter(), // LLM 暂时仍用 OpenAI
+      llm: new OpenAILLMAdapter(),
     });
     voiceDialogueService.setDefaultProvider("siliconflow");
-    app.log.info("[VoiceDialogue] 硅基流动 TTS 已启用，设为默认 TTS 提供商");
+    app.log.info(
+      `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${defaultAsr.name}）`,
+    );
   } else {
     app.log.info("[VoiceDialogue] 硅基流动 TTS 未配置或凭证不完整，使用 OpenAI 作为默认提供商");
     voiceDialogueService.setDefaultProvider("openai");
+  }
+
+  // FunASR 自托管 ASR 优先（中文识别效果优于 whisper）
+  if (funasrAdapter.isEnabled()) {
+    app.log.info(
+      `[VoiceDialogue] FunASR 已启用（${process.env.FUNASR_BASE_URL}），中文 ASR 走 FunASR`,
+    );
   }
 
   // 初始化 Agent 底层语音能力中枢（TTS + ASR + WS 推送）。

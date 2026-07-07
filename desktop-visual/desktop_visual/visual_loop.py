@@ -9,6 +9,7 @@ from desktop_visual.actions import DELUXE_SYSTEM_PROMPT, SYSTEM_PROMPT, parse_ac
 from desktop_visual.agent_history import AgentHistory
 from desktop_visual.runtime.capture import grab_screen_png
 from desktop_visual.runtime.mouse_controller import HybridPointer
+from desktop_visual.runtime.uia_controller import UiaController
 from desktop_visual.structured_output import ActionKind, LoopResult
 from desktop_visual.vlm.base import VLMImage, VLMMessage, VLMResult, VisionLanguageModel
 
@@ -66,10 +67,12 @@ class VisualDesktopLoop:
         vlm: VisionLanguageModel,
         *,
         pointer: HybridPointer | None = None,
+        uia: UiaController | None = None,
         on_step: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> None:
         self._vlm = vlm
         self._pointer = pointer or HybridPointer(fail_safe=True)
+        self._uia = uia  # UIA 控制器，None 时跳过隐式兜底
         self._on_step = on_step
 
     async def run(self, cfg: LoopConfig) -> dict[str, Any]:
@@ -205,6 +208,9 @@ class VisualDesktopLoop:
             x, y = xy()
             button = str(payload.get("button", "left"))
             clicks = int(payload.get("clicks", 1) or 1)
+            # 隐式 UIA 兜底：仅 left 单击 + 元素支持 Invoke 时用 UIA 调用替代像素点击
+            if button == "left" and clicks == 1 and self._maybe_uia_invoke(x, y):
+                return False, f"uia_invoke ({x},{y})"
             self._pointer.click(x, y, button=button, clicks=clicks)  # type: ignore[arg-type]
             return False, f"click ({x},{y}) x{clicks}"
 
@@ -244,3 +250,21 @@ class VisualDesktopLoop:
             return True, summary
 
         return False, f"unknown action {kind!r}; skipped"
+
+    def _maybe_uia_invoke(self, x: int, y: int) -> bool:
+        """UIA 隐式兜底：若 (x,y) 处元素支持 InvokePattern，则用 UIA 调用替代像素点击。
+
+        返回 True 表示已用 UIA 完成点击，调用方应跳过像素点击。
+        返回 False 表示未兜底（UIA 不可用 / 无元素 / 不支持 Invoke / 调用失败），调用方继续像素点击。
+        """
+        if not self._uia or not self._uia.is_available():
+            return False
+        try:
+            elem = self._uia.element_at(x, y)
+            if elem and "Invoke" in elem.get("patterns", []):
+                if self._uia.invoke(elem):
+                    logger.info("UIA 兜底命中：(%d,%d) → Invoke 替代像素点击", x, y)
+                    return True
+        except Exception as exc:
+            logger.warning("UIA 兜底失败，回退像素点击: %s", exc)
+        return False

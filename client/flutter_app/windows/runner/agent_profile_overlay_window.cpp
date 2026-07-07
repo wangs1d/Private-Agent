@@ -19,6 +19,50 @@ COLORREF AvatarColor(const std::string& preset) {
   return RGB(0x3D, 0xA4, 0xFF);
 }
 
+/// QQ 风格的状态模式
+struct StatusMode {
+  const wchar_t* label;  // "发呆中" / "emo中" / "在线"
+  COLORREF color;        // 状态点颜色
+};
+
+StatusMode ResolveStatusMode(const std::string& mood_style,
+                             const std::string& status_text) {
+  // mood_style -> 默认状态模式
+  if (mood_style == "funny") {
+    return {L"\u6478\u9c7c\u4e2d", RGB(0xFF, 0xB0, 0x4D)};  // 摸鱼中
+  }
+  if (mood_style == "sad") {
+    return {L"emo\u4e2d", RGB(0x80, 0x91, 0xA7)};
+  }
+  if (mood_style == "cool") {
+    return {L"\u5fd9\u788c\u4e2d", RGB(0x7C, 0x73, 0xFF)};
+  }
+  if (mood_style == "energetic") {
+    return {L"\u5728\u7ebf", RGB(0x3A, 0xE0, 0x6C)};
+  }
+  if (mood_style == "mysterious") {
+    return {L"\u53d1\u5446\u4e2d", RGB(0x3F, 0x8C, 0xFF)};
+  }
+  // gentle / default
+  if (!status_text.empty()) {
+    // 让 status_text 后缀 "中" 形成类似 "发呆中" 的效果
+    return {L"\u5728\u7ebf", RGB(0x3A, 0xE0, 0x6C)};
+  }
+  return {L"\u5728\u7ebf", RGB(0x3A, 0xE0, 0x6C)};
+}
+
+void DrawStatusDot(HDC hdc, const RECT& rc, COLORREF color) {
+  HBRUSH brush = CreateSolidBrush(color);
+  HPEN pen = CreatePen(PS_NULL, 0, 0);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
+  Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+  SelectObject(hdc, old_pen);
+  SelectObject(hdc, old_brush);
+  DeleteObject(brush);
+  DeleteObject(pen);
+}
+
 }  // namespace
 
 AgentProfileOverlayWindow::AgentProfileOverlayWindow() = default;
@@ -265,12 +309,6 @@ void AgentProfileOverlayWindow::Paint(HWND hwnd, HDC hdc) {
   RECT name_rc = {text_x, y, text_x + text_w, y + 24};
   DrawUiText(hdc, name_rc, Utf8ToWide(profile_.display_name), font_name_,
              kTextPrimary, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-
-  y += 26;
-  RECT handle_rc = {text_x, y, text_x + text_w, y + 20};
-  std::wstring handle_str = L"@" + Utf8ToWide(profile_.handle);
-  DrawUiText(hdc, handle_rc, handle_str, font_handle_, c1,
-             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
   // Signature
   y = kPadding + kAvatarSize + 22;

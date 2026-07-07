@@ -81,6 +81,21 @@ async def one_connection(url: str, token: str | None, init_payload: dict) -> Non
                     "action": "screenshot",
                     "region": pl.get("region"),
                 }
+            elif action == "open":
+                worker_req: dict = {
+                    "action": "open",
+                    "target": pl.get("target"),
+                    "path": pl.get("path"),
+                }
+            elif action == "uia_query":
+                worker_req: dict = {
+                    "action": "uia_query",
+                    "mode": pl.get("mode", "query"),
+                    "selector": pl.get("selector"),
+                    "point": pl.get("point"),
+                    "topOnly": pl.get("topOnly"),
+                    "limit": pl.get("limit"),
+                }
             elif action == "run_shell":
                 worker_req: dict = {
                     "action": "run_shell",

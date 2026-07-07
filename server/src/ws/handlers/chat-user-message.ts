@@ -29,10 +29,7 @@ import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
 import {
   buildInterimAckText,
-  buildInterimAckTextWithLlm,
   interimAckMessageId,
-  isInterimAckLlmEnabled,
-  shouldEmitInterimAck,
   shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
 import {
@@ -149,6 +146,7 @@ export async function handleChatUserMessageEvent(
     (visionFrames?.length ? "（用户发送了摄像头/配图画面，请根据图像描述内容并回答。）" : "");
 
   // audio 消息：拉取本地 mp3 → ASR 识别 → 用 transcript 作为正文喂给 LLM
+  // 同时把 transcript 回推给客户端，让 user 消息气泡直接显示识别文本。
   if (data.contentType === "audio" && data.mediaUrl && deps.voiceCapabilityService && deps.voiceMessageService) {
     try {
       const asrText = await transcribeAudioFromMediaUrl(
@@ -162,14 +160,56 @@ export async function handleChatUserMessageEvent(
       } else {
         effectiveText = "（用户发送了一段语音消息，但识别失败，请提示用户重试或用文字发送）";
       }
+      // 回推 ASR 转写结果给客户端（无论成功失败，方便用户/客户端核对）
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ChatAudioTranscript,
+          payload: {
+            sessionId: msgActor,
+            messageId: data.messageId,
+            mediaUrl: data.mediaUrl,
+            transcript: asrText ?? "",
+            language: "zh",
+            ok: Boolean(asrText),
+          },
+        }),
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.warn(`[chat.user_message] ASR 失败: ${msg}`);
       effectiveText = `（用户发送了一段语音消息，识别失败：${msg}）`;
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ChatAudioTranscript,
+          payload: {
+            sessionId: msgActor,
+            messageId: data.messageId,
+            mediaUrl: data.mediaUrl,
+            transcript: "",
+            language: "zh",
+            ok: false,
+            error: msg,
+          },
+        }),
+      );
     }
   } else if (data.contentType === "audio" && data.mediaUrl) {
     // 未注入 ASR 服务：降级提示
     effectiveText = "（用户发送了一段语音消息，但服务端未配置 ASR 能力，无法识别内容）";
+    ctx.socket.send(
+      JSON.stringify({
+        type: ServerEventType.ChatAudioTranscript,
+        payload: {
+          sessionId: msgActor,
+          messageId: data.messageId,
+          mediaUrl: data.mediaUrl,
+          transcript: "",
+          language: "zh",
+          ok: false,
+          error: "ASR 服务未注入",
+        },
+      }),
+    );
   }
 
   void deps.auditService
@@ -322,13 +362,11 @@ async function processBatchedMessage(
     }
 
     const interimText = phasedAsyncEnabled
-      ? (isInterimAckLlmEnabled()
-          ? await buildInterimAckTextWithLlm({
-              text: batched.text,
-              mode: decision.mode,
-              provider: createExternalChatProviderFromEnv(),
-            })
-          : buildInterimAckText(batched.text, decision.mode))
+      ? await buildInterimAckText({
+          text: batched.text,
+          mode: decision.mode,
+          provider: createExternalChatProviderFromEnv(),
+        })
       : null;
     if (interimText) {
       if (isStale() || replyFinished || chunkSeq > 0) return;

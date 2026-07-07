@@ -173,6 +173,27 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
                 style: theme.textTheme.bodySmall?.copyWith(color: fg.withValues(alpha: 0.7)),
               ),
             ],
+            // ASR 完成后由服务端回推 transcript：有转写文本时就在波形下面展示，
+            // 方便用户核对 ASR 准确率（微信式「语音→文字」体验）。
+            if (!_loadFailed &&
+                widget.transcript != null &&
+                widget.transcript!.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: fg.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  widget.transcript!,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: fg.withValues(alpha: 0.85),
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

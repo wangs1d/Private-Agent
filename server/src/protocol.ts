@@ -165,6 +165,14 @@ export const ServerEventType = {
    */
   AgentVoiceAlarm: "agent.voice.alarm",
   /**
+   * 用户语音消息的 ASR 转写结果回执：
+   * 服务端在 `chat.user_message` 收到 `contentType=audio` 后跑 ASR，
+   * 把识别到的 transcript 推回给客户端，让本地 user 消息气泡直接显示转写文本
+   * （便于用户验证 ASR 准确率 + 留有可读副本）。
+   * payload.messageId 与客户端发出的 user 消息 messageId 一一对应。
+   */
+  ChatAudioTranscript: "chat.audio_transcript",
+  /**
    * Agent 语音消息（微信式可重播）—— `voice.send_message` 工具触发。
    * 与 `agent.voice.speak` 区别：speak 是即时播报（一次性、后台播放、无 UI），
    * message 是落地的可重播语音消息（带 mediaUrl / durationMs / waveform / transcript），

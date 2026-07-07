@@ -124,11 +124,42 @@ class ShellDecision:
     first_token: str = ""
 
 
-def _detect_shell(explicit: str | None) -> Literal["cmd", "powershell", "bash"]:
+def classify_shell(command: str) -> Literal["cmd", "powershell"]:
+    """
+    自动判定命令应走 cmd 还是 powershell（仅 Windows，未显式指定 shell 时调用）。
+    - CMD：bat 文件、单行简单文件操作、轻量终端指令（无管道/变量/cmdlet）
+    - PowerShell：cmdlet 名（Get-/Set-/Stop- 等）、管道 |、变量 $、foreach、复杂多语句
+    """
+    cmd = command.strip()
+    if not cmd:
+        return "cmd"
+
+    # PowerShell 特征：cmdlet 前缀 / 管道 / 变量 / 复杂语法
+    if re.search(
+        r"\b(Get|Set|Stop|Start|Restart|New|Remove|Add|Clear|Out|Select|Where|Sort|"
+        r"Format|Measure|Group|Test|Resolve|Convert|Invoke|Export|Import)-",
+        cmd,
+        re.IGNORECASE,
+    ):
+        return "powershell"
+    if "|" in cmd or "$" in cmd or "foreach" in cmd.lower():
+        return "powershell"
+    # 多语句（分号分隔的复合命令）→ PowerShell（cmd 对 ; 支持差）
+    if ";" in cmd and not cmd.lower().startswith(("echo", "set ")):
+        return "powershell"
+
+    # 其余全部走 CMD（bat 文件、dir/type/echo/ping/ipconfig 等单行命令）
+    return "cmd"
+
+
+def _detect_shell(
+    explicit: str | None, command: str = ""
+) -> Literal["cmd", "powershell", "bash"]:
     if explicit in ("cmd", "powershell", "bash"):
         return explicit  # type: ignore[return-value]
     if os.name == "nt":
-        return "powershell"
+        # 未显式指定时按命令内容自动判定（简单→cmd，复杂→powershell）
+        return classify_shell(command) if command.strip() else "cmd"
     return "bash"
 
 
@@ -178,7 +209,7 @@ def evaluate_shell_command(
     denylist = denylist or DEFAULT_DENYLIST
     deny_patterns = deny_patterns or DEFAULT_DENY_PATTERNS
 
-    detected = _detect_shell(shell)
+    detected = _detect_shell(shell, command)
     decision = ShellDecision(
         allowed=False,
         detected_shell=detected,

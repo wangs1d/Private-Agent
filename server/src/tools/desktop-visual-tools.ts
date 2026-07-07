@@ -234,6 +234,209 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     await auditPromise;
     return out;
   });
+
+  // -------------------------------------------------------------------------
+  // desktop.open：原生 API 打开文件/网页/软件（不走 shell，不经白名单判定）
+  // 不受 DESKTOP_SHELL_ENABLED 门控（与 screenshot 同级），只要桌面能力可用即可。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.open", async (input, ctx) => {
+    const target = input.target;
+    const path = typeof input.path === "string" ? input.path.trim() : "";
+    if (target !== "file" && target !== "url" && target !== "app") {
+      return { ok: false, error: "target 必须是 file / url / app" };
+    }
+    if (!path) {
+      return { ok: false, error: "缺少 path" };
+    }
+
+    const actorId = resolveActorId(ctx);
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.open",
+        actorId,
+        command: `${target} ${path}`.slice(0, 400),
+        shell: null,
+        allowDestructive: false,
+        cwd: null,
+        timeoutMs: 15_000,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "open",
+      target,
+      path,
+    };
+
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), 30_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.open) {
+      out = await deps.localVisual.open({ target, path });
+    } else {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    }
+
+    await auditPromise;
+    return out;
+  });
+
+  // -------------------------------------------------------------------------
+  // desktop.uia_query：Windows UIAutomation 结构化查询（不暴露 LLM，主 agent 内部用）
+  // 不受 DESKTOP_SHELL_ENABLED 门控（与 desktop.open 一致）。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.uia_query", async (input, ctx) => {
+    const mode = input.mode;
+    if (mode !== "query" && mode !== "read_children" && mode !== "inspect_point") {
+      return { ok: false, error: "mode 必须是 query / read_children / inspect_point" };
+    }
+
+    const actorId = resolveActorId(ctx);
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.uia_query",
+        actorId,
+        command: `${mode} ${JSON.stringify(input.selector ?? input.point ?? {}).slice(0, 300)}`,
+        shell: null,
+        allowDestructive: false,
+        cwd: null,
+        timeoutMs: 30_000,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "uia_query",
+      mode,
+      selector: input.selector ?? null,
+      point: input.point ?? null,
+      topOnly: input.topOnly ?? null,
+      limit: input.limit ?? null,
+    };
+
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), 35_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.uiaQuery) {
+      const selector =
+        input.selector && typeof input.selector === "object"
+          ? (input.selector as Record<string, unknown>)
+          : null;
+      const point =
+        input.point && typeof input.point === "object"
+          ? (input.point as { x: number; y: number })
+          : null;
+      const topOnly = typeof input.topOnly === "boolean" ? input.topOnly : null;
+      const limit = typeof input.limit === "number" ? input.limit : null;
+      out = await deps.localVisual.uiaQuery({
+        mode,
+        selector,
+        point,
+        topOnly,
+        limit,
+      });
+    } else {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    }
+
+    await auditPromise;
+    return out;
+  });
+
+  // -------------------------------------------------------------------------
+  // desktop.run_preset：调用预打包的常用命令（token 更省）
+  // 受 DESKTOP_SHELL_ENABLED 门控 + bridge 鉴权（与 run_shell 一致）。
+  // 预设命令首 token 均在白名单内，无需 allowDestructive。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.run_preset", async (input, ctx) => {
+    const preset = typeof input.preset === "string" ? input.preset.trim() : "";
+    if (!preset) {
+      return { ok: false, error: "缺少 preset" };
+    }
+    if (!isShellCommandAllowedByFeatureFlag()) {
+      return {
+        ok: false,
+        error: "desktop.run_preset 未启用：在 server/.env.local 设置 DESKTOP_SHELL_ENABLED=1。",
+      };
+    }
+    if (!deps.bridge.isBridgeFeatureEnabled()) {
+      return {
+        ok: false,
+        error: "desktop.run_preset 强制要求 DESKTOP_BRIDGE_ENABLED=1 或 DESKTOP_BRIDGE_TOKEN（≥8 字符）以做鉴权。",
+      };
+    }
+
+    const args = (input.args && typeof input.args === "object" ? input.args : {}) as Record<
+      string,
+      unknown
+    >;
+    const built = buildPresetCommand(preset, args);
+    if ("error" in built) {
+      return { ok: false, error: built.error };
+    }
+    const { command, shell } = built;
+    const timeoutMs = clampShellTimeout(input.timeoutMs);
+    const actorId = resolveActorId(ctx);
+
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.run_preset",
+        actorId,
+        command: `${preset} → ${command}`.slice(0, 400),
+        shell,
+        allowDestructive: false,
+        cwd: null,
+        timeoutMs,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "run_shell",
+      command,
+      shell,
+      cwd: null,
+      timeoutMs,
+      allowDestructive: false,
+    };
+
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), timeoutMs + 5_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.runShell) {
+      out = await deps.localVisual.runShell({
+        command,
+        shell,
+        cwd: null,
+        timeoutMs,
+        allowDestructive: false,
+      });
+    } else {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    }
+
+    await auditPromise;
+    return out;
+  });
 }
 
 // ---- helpers ----
@@ -255,4 +458,126 @@ function clampShellTimeout(raw: unknown): number {
   // 默认 30s，硬上限 5min，下限 1s
   const n = typeof raw === "number" && Number.isFinite(raw) ? raw : 30_000;
   return Math.max(1_000, Math.min(300_000, Math.floor(n)));
+}
+
+// ---- 预设命令表（desktop.run_preset）----
+// 每条预设：固定 shell + build(args) → 命令字符串。所有命令首 token 均在白名单内。
+// 路径参数做基本防注入：CMD 剥危险字符后双引号包裹；PowerShell 单引号包裹并内部 ' 翻倍。
+
+function safeCmdArg(s: unknown): string {
+  // CMD 元字符 & | < > ^ % " 全部剥掉，防止截断/管道逃逸
+  const cleaned = String(s ?? "").replace(/[&|<>^%"]/g, "");
+  return `"${cleaned}"`;
+}
+
+function safePsArg(s: unknown): string {
+  // PowerShell 用单引号包裹，内部 ' 翻倍转义
+  const cleaned = String(s ?? "").replace(/'/g, "''");
+  return `'${cleaned}'`;
+}
+
+type PresetDef = {
+  shell: "cmd" | "powershell";
+  build: (args: Record<string, unknown>) => string;
+};
+
+const SHELL_PRESETS: Record<string, PresetDef> = {
+  // ---- CMD 倾向（简单单行）----
+  list_dir: {
+    shell: "cmd",
+    build: (a) => `dir ${safeCmdArg(a.path)}`,
+  },
+  read_file: {
+    shell: "cmd",
+    build: (a) => `type ${safeCmdArg(a.path)}`,
+  },
+  file_info: {
+    shell: "cmd",
+    build: (a) => `dir ${safeCmdArg(a.path)}`,
+  },
+  find_files: {
+    shell: "cmd",
+    build: (a) => `dir /s /b ${safeCmdArg(String(a.path ?? "") + "\\" + String(a.pattern ?? "*"))}`,
+  },
+  ping: {
+    shell: "cmd",
+    build: (a) => {
+      const count = typeof a.count === "number" && a.count > 0 ? Math.floor(a.count) : 4;
+      return `ping -n ${count} ${safeCmdArg(a.host)}`;
+    },
+  },
+  ipconfig: {
+    shell: "cmd",
+    build: (a) => (a.all ? "ipconfig /all" : "ipconfig"),
+  },
+  netstat: {
+    shell: "cmd",
+    build: () => "netstat -an",
+  },
+  nslookup: {
+    shell: "cmd",
+    build: (a) => `nslookup ${safeCmdArg(a.host)}`,
+  },
+  systeminfo: {
+    shell: "cmd",
+    build: () => "systeminfo",
+  },
+  tasklist: {
+    shell: "cmd",
+    build: (a) => {
+      const f = typeof a.filter === "string" && a.filter.trim() ? a.filter.trim() : "";
+      return f ? `tasklist /fi ${safeCmdArg("imagename eq " + f)}` : "tasklist";
+    },
+  },
+  // ---- PowerShell 倾向（系统查询/批量）----
+  processes: {
+    shell: "powershell",
+    build: (a) => {
+      const name = typeof a.name === "string" && a.name.trim() ? a.name.trim() : "";
+      const head = name ? `Get-Process -Name ${safePsArg(name)}` : "Get-Process";
+      return `${head} | Select-Object Name,Id,CPU,WS | Format-Table -AutoSize`;
+    },
+  },
+  services: {
+    shell: "powershell",
+    build: (a) => {
+      const status = typeof a.status === "string" && a.status.trim() ? a.status.trim() : "";
+      const head = status
+        ? `Get-Service | Where-Object {$_.Status -eq ${safePsArg(status)}}`
+        : "Get-Service";
+      return `${head} | Format-Table -AutoSize`;
+    },
+  },
+  disk_usage: {
+    shell: "powershell",
+    build: () => "Get-PSDrive -PSProvider FileSystem | Format-Table",
+  },
+  env_vars: {
+    shell: "powershell",
+    build: () => "Get-ChildItem Env: | Format-Table",
+  },
+  installed_apps: {
+    shell: "powershell",
+    build: () =>
+      "Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName,DisplayVersion | Format-Table -AutoSize",
+  },
+  network_adapter: {
+    shell: "powershell",
+    build: () => "Get-NetAdapter | Format-Table",
+  },
+};
+
+function buildPresetCommand(
+  preset: string,
+  args: Record<string, unknown>,
+): { command: string; shell: "cmd" | "powershell" } | { error: string } {
+  const def = SHELL_PRESETS[preset];
+  if (!def) {
+    return { error: `未知预设 '${preset}'，可用预设：${Object.keys(SHELL_PRESETS).join(", ")}` };
+  }
+  try {
+    return { command: def.build(args ?? {}), shell: def.shell };
+  } catch (e) {
+    return { error: `预设 ${preset} 参数构造失败: ${e}` };
+  }
 }

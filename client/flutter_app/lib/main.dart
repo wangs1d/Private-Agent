@@ -41,6 +41,7 @@ import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/notes/notes_page.dart";
 import "features/chat/agent_profile_page.dart";
+import "features/chat/agent_status_chip.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "core/services/split_ratio_preference.dart";
@@ -624,6 +625,69 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               debugPrint("[schedule] tool.result sync failed: $e\n$st");
             }
           }
+        }
+        if (type == "chat.audio_transcript") {
+          // 服务端 ASR 完成后回推转写结果（与 chat.user_message.contentType=audio 对应）。
+          // 把 transcript 写回对应 user 消息的 attachment，让语音气泡直接显示识别文本，
+          // 方便用户验证 ASR 准确率 + 留有可读副本。
+          final String? msgId = payload["messageId"]?.toString();
+          if (msgId == null || msgId.isEmpty) return;
+          final String transcript = payload["transcript"]?.toString() ?? "";
+          final bool ok = payload["ok"] == true;
+          if (!ok && transcript.isEmpty) {
+            // ASR 失败：用 snackbar 提示，不静默
+            if (mounted) {
+              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "ASR 识别失败：${payload["error"]?.toString() ?? "未知原因"}",
+                  ),
+                ),
+              );
+            }
+            return;
+          }
+          final int idx = _messages.indexWhere(
+            (ChatMessage m) => m.messageId == msgId,
+          );
+          if (idx < 0) return;
+          final ChatMessage prev = _messages[idx];
+          // 只更新 audio 类型的 attachment；text 字段不动（audio 消息 text 始终为空）
+          final List<MessageAttachment> newAttachments = <MessageAttachment>[];
+          for (final MessageAttachment a in prev.attachments) {
+            if (a.type == MessageAttachmentType.audio) {
+              newAttachments.add(MessageAttachment(
+                type: a.type,
+                url: a.url,
+                durationMs: a.durationMs,
+                waveform: a.waveform,
+                transcript: transcript,
+                mimeType: a.mimeType,
+              ));
+            } else {
+              newAttachments.add(a);
+            }
+          }
+          final ChatMessage updated = ChatMessage(
+            messageId: prev.messageId,
+            sessionId: prev.sessionId,
+            role: prev.role,
+            text: prev.text,
+            timestamp: prev.timestamp,
+            attachmentImageCount: prev.attachmentImageCount,
+            playUrl: prev.playUrl,
+            attachments: newAttachments,
+            contentType: prev.contentType,
+            durationMs: prev.durationMs,
+            waveform: prev.waveform,
+          );
+          setState(() {
+            _messages[idx] = updated;
+          });
+          // 异步持久化（失败也不阻塞 UI；saveMessage 内部按 messageId 覆盖）
+          unawaited(_store.saveMessage(updated).catchError((Object e) {
+            debugPrint("[chat.audio_transcript] saveMessage failed: $e");
+          }));
         }
         if (type == "schedule.tasks_changed") {
           try {
@@ -3200,7 +3264,21 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                 AppBar(
                                   automaticallyImplyLeading: false,
                                   leading: _tabIndex == 0
-                                      ? _buildMessageNotificationBadge()
+                                      ? Center(
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: <Widget>[
+                                              AgentStatusChip(
+                                                moodStyle:
+                                                    _agentProfile.moodStyle,
+                                                statusText:
+                                                    _agentProfile.statusText,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              _buildMessageNotificationBadge(),
+                                            ],
+                                          ),
+                                        )
                                       : null,
                                   title: _buildAppBarTitle(),
                                   actions: const <Widget>[],

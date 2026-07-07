@@ -84,6 +84,8 @@ const DESKTOP_RUN_SHELL_TOOL: ChatCompletionTool = {
     name: "desktop.run_shell",
     description:
       "【桌面·受控 Shell】在已绑定电脑（与 userId 一致）上执行一条 shell 命令（cmd / powershell / bash），返回 stdout / stderr / exitCode。" +
+      "**优先级**：打开软件/文件/网页 → 用 desktop.open；常用操作（列目录/读文件/ping/查进程等）→ 用 desktop.run_preset；仅当预设覆盖不到时才用本工具裸拼命令。" +
+      "Windows 下未指定 shell 时按命令内容自动判定：简单单行命令走 cmd，cmdlet/管道/变量走 powershell。" +
       "默认**白名单**模式：仅允许只读命令（dir / ls / cat / type / Get-ChildItem / Get-Process / systeminfo / ipconfig / Test-NetConnection 等）。" +
       "如需写入/删除/启停服务等操作，**必须**设置 allowDestructive=true（同时要求 server 端 DESKTOP_SHELL_ALLOWLIST=0、DESKTOP_BRIDGE_TOKEN ≥8 字符）。" +
       "高危命令（Remove-Item / del / rmdir / reg / Stop-Service / shutdown / sudo / chmod 0xxx / chown / dd / mkfs / kill -9 / |Out-File / Invoke-Expression）一律拒。",
@@ -121,20 +123,89 @@ const DESKTOP_RUN_SHELL_TOOL: ChatCompletionTool = {
   },
 };
 
-/** 完全访问模式下向模型暴露的定义（与 {@link getDesktopVisualChatTools} 环境门控无关）。 */
+const DESKTOP_OPEN_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "desktop.open",
+    description:
+      "【桌面·原生打开】用操作系统原生 API 打开文件/网页/软件（不走 shell，不经白名单判定，启动最快）。" +
+      "打开软件/文件/网页时**必须优先**用本工具，而非 desktop.run_shell 的 start 命令。" +
+      "- target=url：用默认浏览器打开网页（如 https://example.com）" +
+      "- target=file：用系统默认程序打开文件（如 .pdf/.docx/.txt/.png）" +
+      "- target=app：直接启动可执行文件（如 notepad.exe / calc.exe / 应用快捷方式路径）",
+    parameters: {
+      type: "object",
+      properties: {
+        target: {
+          type: "string",
+          enum: ["file", "url", "app"],
+          description: "打开目标类型：file=文件，url=网页，app=可执行程序",
+        },
+        path: {
+          type: "string",
+          description: "文件绝对路径 / 网页 URL / 可执行文件路径或名称",
+        },
+      },
+      required: ["target", "path"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const DESKTOP_RUN_PRESET_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "desktop.run_preset",
+    description:
+      "【桌面·预设命令】调用预打包的常用 shell 命令（token 更省，无需裸拼命令字符串）。" +
+      "常用只读操作**优先**用本工具，仅在预设覆盖不到时才用 desktop.run_shell。" +
+      "预设目录（preset 名 + args）:\n" +
+      "CMD 类: list_dir{path} | read_file{path} | file_info{path} | find_files{path,pattern} | " +
+      "ping{host,count?} | ipconfig{all?} | netstat{} | nslookup{host} | systeminfo{} | tasklist{filter?}\n" +
+      "PowerShell 类: processes{name?} | services{status?} | disk_usage{} | env_vars{} | " +
+      "installed_apps{} | network_adapter{}",
+    parameters: {
+      type: "object",
+      properties: {
+        preset: {
+          type: "string",
+          enum: [
+            "list_dir", "read_file", "file_info", "find_files",
+            "ping", "ipconfig", "netstat", "nslookup", "systeminfo", "tasklist",
+            "processes", "services", "disk_usage", "env_vars",
+            "installed_apps", "network_adapter",
+          ],
+          description: "预设命令名（见上方目录）",
+        },
+        args: {
+          type: "object",
+          description:
+            "预设参数对象。常见字段：path（文件路径）、host（主机名/IP）、pattern（文件名通配符）、" +
+            "count（ping 次数，默认4）、all（ipconfig /all 布尔）、filter（tasklist 映像名过滤）、" +
+            "name（进程名）、status（服务状态如 Running/Stopped）。无参数的预设省略 args。",
+          additionalProperties: true,
+        },
+      },
+      required: ["preset"],
+      additionalProperties: false,
+    },
+  },
+};
+
+/**
+ * 完全访问模式下向模型暴露的定义（与 {@link getDesktopVisualChatTools} 环境门控无关）。
+ *
+ * 注意：`desktop.open` / `desktop.run_preset` / `desktop.run_shell` 是**内部底层能力**，
+ * handler 已注册到 ToolRegistry 供主 agent 直接调用（不暴露给外部 LLM 探测），
+ * 故**不**列入此数组。
+ */
 export const DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS: ChatCompletionTool[] = [
   DESKTOP_VISUAL_SCREENSHOT_TOOL,
   DESKTOP_VISUAL_RUN_TASK_TOOL,
-  DESKTOP_RUN_SHELL_TOOL,
 ];
 
 export function getDesktopVisualChatTools(env: NodeJS.ProcessEnv = process.env): ChatCompletionTool[] {
   if (!isDesktopVisualControlChatToolsEnabled(env)) return [];
-  if (!parseBooleanEnv(env.DESKTOP_SHELL_ENABLED)) {
-    return DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS.filter((t) => {
-      if (t.type !== "function") return true;
-      return t.function.name !== "desktop.run_shell";
-    });
-  }
+  // desktop.open / desktop.run_preset / desktop.run_shell 是内部能力，不暴露给 LLM
   return DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS;
 }
