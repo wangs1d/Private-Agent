@@ -16,7 +16,6 @@ import "agent_profile_page.dart";
 import "agent_result_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
-import "voice_input_bar.dart";
 import "voice_message_bubble.dart";
 
 class ChatPage extends StatefulWidget {
@@ -35,7 +34,6 @@ class ChatPage extends StatefulWidget {
     this.onPickGalleryImage,
     this.onClearGalleryImages,
     this.onEnterVoiceMode,
-    this.onSendVoice,
     this.isAgentProcessing = false,
     this.agentStatusLine,
 
@@ -81,10 +79,6 @@ class ChatPage extends StatefulWidget {
 
   /// 进入语音模式的回调
   final VoidCallback? onEnterVoiceMode;
-
-  /// 「按住说话」发送语音消息的回调（[path] 临时录音文件路径，[durationMs] 时长）。
-  /// 父级负责上传 + 发送 chat.user_message（contentType=audio）。
-  final void Function(String path, int durationMs)? onSendVoice;
 
   /// Agent是否正在处理中（流式输出）
   final bool isAgentProcessing;
@@ -1326,13 +1320,6 @@ class _ChatPageState extends State<ChatPage>
                                     ),
                                   ),
                                   const SizedBox(width: 6),
-                                  // 「按住说话」按钮 - 长按录音，松开发送语音消息
-                                  if (widget.onSendVoice != null)
-                                    VoiceInputBar(
-                                      onSendVoice: widget.onSendVoice!,
-                                    ),
-                                  if (widget.onSendVoice != null)
-                                    const SizedBox(width: 6),
                                   if (widget.onOpenPhoneDialer != null)
                                     Container(
                                       decoration: BoxDecoration(

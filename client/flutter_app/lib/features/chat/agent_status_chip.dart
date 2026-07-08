@@ -39,43 +39,52 @@ class AgentStatusChip extends StatelessWidget {
 
     return Semantics(
       label: "agent 状态：${mode.label}",
-      container: true,
-      child: Container(
-        height: 28,
-        constraints: const BoxConstraints(minWidth: 72),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-        decoration: BoxDecoration(
-          color: cs.surface.withValues(alpha: 0.78),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: mode.color.withValues(alpha: 0.45),
-            width: 1,
-          ),
-          boxShadow: <BoxShadow>[
-            BoxShadow(
-              color: mode.color.withValues(alpha: 0.18),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: 96,
+          maxHeight: 28,
+          minHeight: 28,
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: <Widget>[
-            _BlinkDot(color: mode.color, size: 8),
-            const SizedBox(width: 6),
-            Text(
-              mode.label,
-              style: TextStyle(
-                color: mode.color,
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                height: 1.0,
-              ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: cs.surface.withValues(alpha: 0.78),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: mode.color.withValues(alpha: 0.45),
+              width: 1,
             ),
-          ],
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: mode.color.withValues(alpha: 0.18),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                _BlinkDot(color: mode.color, size: 8),
+                const SizedBox(width: 6),
+                Text(
+                  mode.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: mode.color,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    height: 1.0,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

@@ -146,6 +146,27 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  /// ASR 专用端点：上传音频后立即拿到转写文本（不走 chat pipeline）。
+  /// 字段：
+  ///   - sessionId / fileBytes / fileName（必填）
+  ///   - language（可选，默认 "zh"）
+  /// 返回 `{ ok, text, language, audioBytes }` 或 `{ ok: false, error }`。
+  Future<Map<String, dynamic>> transcribeVoiceMessage({
+    required String sessionId,
+    required List<int> fileBytes,
+    required String fileName,
+    String language = "zh",
+  }) async {
+    final Uri uri = _uri("/agent/voice/transcribe");
+    final http.MultipartRequest req = http.MultipartRequest("POST", uri);
+    req.fields["sessionId"] = sessionId;
+    req.fields["language"] = language;
+    req.files.add(http.MultipartFile.fromBytes("file", fileBytes, filename: fileName));
+    final http.StreamedResponse streamed = await req.send();
+    final http.Response r = await http.Response.fromStream(streamed);
+    return _decode(r);
+  }
+
   Future<Map<String, dynamic>> socialDeletePost(String sessionId, String postId) async {
     final http.Response r = await http.delete(
       _uri("/world/social/post/$postId", <String, String>{"sessionId": sessionId}),

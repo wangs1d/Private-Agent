@@ -71,7 +71,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFriendRoutes(app, deps);
-  registerVoiceMessageRoutes(app, { voiceMessageService: deps.voiceMessageService });
+  registerVoiceMessageRoutes(app, {
+    voiceMessageService: deps.voiceMessageService,
+    voiceCapabilityService: deps.voiceCapabilityService,
+  });
   registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
   registerUserFileRoutes(app, { fileProcessingService: deps.fileProcessingService });
   registerWechatClawRoutes(app, deps);

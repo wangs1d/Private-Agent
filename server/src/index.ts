@@ -1,4 +1,4 @@
-﻿import { loadServerEnv } from "./config/load-server-env.js";
+import { loadServerEnv } from "./config/load-server-env.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
 import { getRuntimeConfig } from "./config/env.js";
 import { createExternalChatProviderFromEnv } from "./external-model/index.js";
@@ -6,6 +6,7 @@ import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
 import { startPaddleOcrServer } from "./services/paddle-ocr-auto-starter.js";
+import { startFunasrServer } from "./services/funasr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
   isWechatClawBridgeEnabled,
@@ -48,6 +49,12 @@ if (externalChatProbe?.isEnabled()) {
     "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY 或 OPENAI_API_KEY 后重启服务",
   );
 }
+// ─── FunASR 自启动：必须在 createAppServices 之前，让 FunAsrAdapter.isEnabled() 返回 true ───
+// 子进程 spawn 是异步的，但 BASE_URL 同步写入 env；adapter 实例化时就能看到。
+// 首次下模型期间 ASR 请求会 connection refused（adapter 内部 catch 返回空文本）。
+const stopFunasrEarly = startFunasrServer({
+  log: (line) => console.log(line),
+});
 const services = await createAppServices();
 await initializeRuntimeState(services);
 try {
@@ -109,6 +116,7 @@ const performShutdown = (): void => {
   services.webhookService.stop();
   stopDesktopBridge();
   stopPaddleOcr();
+  stopFunasrEarly();
   stopOpenClawModelSync();
   void services.app.close().finally(() => process.exit(0));
 };

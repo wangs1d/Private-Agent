@@ -1,6 +1,5 @@
 import "dart:async";
 import "dart:convert";
-import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -44,6 +43,7 @@ import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_status_chip.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
+import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
@@ -168,6 +168,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
+  /// split 模式下右面板的实际宽度，由 [NextbotChatLayout] 通过
+  /// [NextbotChatLayout.onRightPanelWidthChanged] 同步过来，
+  /// 用于给 AppBar / Sidebar 等加右边距，避免右面板覆盖顶部栏。
+  double _rightPanelWidth = kRightSidePanelWidth;
+
   Map<String, int> _unreadByPlatform = <String, int>{};
   Timer? _messagePollTimer;
   bool _messageBadgeHovering = false;
@@ -193,6 +198,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if ((clamped - _splitRatio).abs() < 0.001) return;
     setState(() => _splitRatio = clamped);
     SplitRatioPreference.save(clamped);
+  }
+
+  /// 同步右面板实际宽度（来自 [NextbotChatLayout] 的 onRightPanelWidthChanged）。
+  void _setRightPanelWidth(double width) {
+    if ((width - _rightPanelWidth).abs() < 0.5) return;
+    setState(() => _rightPanelWidth = width);
   }
 
   /// 日历面板重新加载信号
@@ -2004,139 +2015,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  /// 「按住说话」按钮触发的语音消息发送路径。
-  ///
-  /// 链路：
-  ///   1. 录音文件（m4a）已由 [VoiceInputBar] 落盘到 [path]
-  ///   2. 这里读字节 → 调 [WorldApiClient.uploadVoiceMessage] 走 multipart 上传
-  ///      到服务端 `POST /agent/voice/messages/upload`，拿到 `mediaUrl`
-  ///   3. 本地立即插一条 user 语音消息（contentType=audio + attachments=[audio]），
-  ///      与 agent 回复时收到的 `agent.voice.message` 事件渲染路径对齐
-  ///   4. WS 发送 `chat.user_message` 事件，附 `contentType=audio / mediaUrl / durationMs`，
-  ///      服务端拉流后调 ASR 把音频转成文本喂给 LLM
-  Future<void> _sendVoiceMessage(String path, int durationMs) async {
-    if (!_ws.isConnected) {
-      _ws.retryConnect();
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("正在连接服务器，请稍后再发消息")),
-        );
-      }
-      return;
-    }
-    final File f = File(path);
-    if (!await f.exists()) {
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("录音文件丢失，请重试")),
-        );
-      }
-      return;
-    }
-    final List<int> bytes = await f.readAsBytes();
-    final String fileName =
-        "voice-${DateTime.now().millisecondsSinceEpoch}.m4a";
-
-    String? mediaUrl;
-    try {
-      final Map<String, dynamic> result = await _worldApi.uploadVoiceMessage(
-        sessionId: ApiConfig.sessionId,
-        fileBytes: bytes,
-        fileName: fileName,
-        durationMs: durationMs,
-      );
-      if (result["ok"] == true) {
-        mediaUrl = result["mediaUrl"]?.toString();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text("语音上传失败：$e")),
-        );
-      }
-    }
-    // 上传完即可删除临时录音文件
-    try {
-      if (await f.exists()) await f.delete();
-    } catch (_) {
-      // ignore
-    }
-    if (mediaUrl == null || mediaUrl.isEmpty) {
-      // 上传失败时降级：丢弃消息，不让用户继续等待 ASR
-      return;
-    }
-
-    final String messageId = "msg-${DateTime.now().microsecondsSinceEpoch}";
-    final ChatMessage userMessage = ChatMessage(
-      messageId: messageId,
-      sessionId: ApiConfig.effectiveActorId,
-      role: "user",
-      text: "",
-      timestamp: DateTime.now(),
-      contentType: "audio",
-      durationMs: durationMs,
-      attachments: <MessageAttachment>[
-        MessageAttachment(
-          type: MessageAttachmentType.audio,
-          url: mediaUrl,
-          durationMs: durationMs,
-          mimeType: "audio/mpeg",
-        ),
-      ],
-    );
-    setState(() {
-      _messages.add(userMessage);
-      _isAgentProcessing = true;
-      _agentStatusLine = null;
-    });
-    _notifyAgentProcessingUi(true);
-    AgentSphereMoodBridge.instance.listening();
-    await _store.saveMessage(userMessage);
-
-    final Map<String, dynamic> userMsg = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-      "messageId": messageId,
-      // 服务端 ASR 链路以 mediaUrl 为准；text 留空
-      "text": "",
-      "timestamp": DateTime.now().toIso8601String(),
-      "contentType": "audio",
-      "mediaUrl": mediaUrl,
-      "durationMs": durationMs,
-    };
-    if (ApiConfig.userId.trim().isNotEmpty) {
-      userMsg["userId"] = ApiConfig.userId.trim();
-    }
-    final ClientLocationPayload? clientLocation =
-        await ClientLocationService.getCurrentLocation();
-    if (clientLocation != null) {
-      userMsg["clientLocation"] = clientLocation.toJson();
-    }
-    userMsg["agentAccessMode"] =
-        _fullComputerAccessEnabled ? "full" : "sandbox";
-
-    // 复用 _sendMessage 的 watchdog / TurnState 占位机制
-    _pendingAgentUserMessageId = messageId;
-    _armAgentReplyWatchdog(messageId);
-    _pendingLocalTurn = TurnState(
-      traceId: messageId,
-      sessionId: ApiConfig.effectiveActorId,
-      t0: DateTime.now(),
-    );
-    if (mounted) setState(() {});
-
-    final bool sent = _ws.sendEvent("chat.user_message", userMsg);
-    if (!sent) {
-      _disarmAgentReplyWatchdog();
-      _pendingAgentUserMessageId = null;
-      _clearAgentProcessingState();
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("语音消息未发出：与服务器的连接尚未就绪")),
-        );
-      }
-    }
-  }
-
   void _selectTab(int index) {
     setState(() => _tabIndex = index);
   }
@@ -2146,6 +2024,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.friends;
+      _splitRatio = RightPanelKind.friends.defaultSplitRatio;
     });
   }
 
@@ -2154,6 +2033,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.messages;
+      _splitRatio = RightPanelKind.messages.defaultSplitRatio;
     });
   }
 
@@ -2509,6 +2389,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.notes;
+      _splitRatio = RightPanelKind.notes.defaultSplitRatio;
     });
   }
 
@@ -3261,27 +3142,42 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: <Widget>[
-                                AppBar(
-                                  automaticallyImplyLeading: false,
-                                  leading: _tabIndex == 0
-                                      ? Center(
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: <Widget>[
-                                              AgentStatusChip(
-                                                moodStyle:
-                                                    _agentProfile.moodStyle,
-                                                statusText:
-                                                    _agentProfile.statusText,
+                                // 当右侧面板显示时（side 或 split 模式），
+                                // 给 AppBar 右侧加相应边距，把被右面板覆盖的部分
+                                // 从 AppBar 中裁掉。split 模式使用 [NextbotChatLayout]
+                                // 同步过来的实际动态宽度。
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                    right: _appBarRightInset(),
+                                  ),
+                                  child: AppBar(
+                                    automaticallyImplyLeading: false,
+                                    leadingWidth: 160,
+                                    leading: _tabIndex == 0
+                                        ? Align(
+                                            alignment: Alignment.centerLeft,
+                                            child: Padding(
+                                              padding: const EdgeInsets.only(
+                                                  left: 4),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: <Widget>[
+                                                  AgentStatusChip(
+                                                    moodStyle: _agentProfile
+                                                        .moodStyle,
+                                                    statusText: _agentProfile
+                                                        .statusText,
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  _buildMessageNotificationBadge(),
+                                                ],
                                               ),
-                                              const SizedBox(width: 8),
-                                              _buildMessageNotificationBadge(),
-                                            ],
-                                          ),
-                                        )
-                                      : null,
-                                  title: _buildAppBarTitle(),
-                                  actions: const <Widget>[],
+                                            ),
+                                          )
+                                        : null,
+                                    title: _buildAppBarTitle(),
+                                    actions: const <Widget>[],
+                                  ),
                                 ),
                                 Expanded(
                                   child: MainPanel(
@@ -3296,7 +3192,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                     ),
                     const FloatingAgentSphere(),
                     _buildAsyncConfirmationOverlay(),
-                    // 右侧抽屉：top:0 顶到屏幕最顶部，覆盖侧边栏、AppBar、主内容、日历面板
+                    // 右侧面板：top:0 顶到屏幕最顶部，
+                    // 在面板宽度范围内覆盖 AppBar / 侧边栏 / 主内容。
+                    // side 模式 288px，split 模式动态宽度。
+                    // 仅在 chat tab + 宽屏时显示。
                     _buildRightPanelOverlay(),
                     // 进场动画层（覆盖在主界面上方，播完后自动消失层
                     if (_showEntranceAnimation)
@@ -3371,6 +3270,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.devices;
+      _splitRatio = RightPanelKind.devices.defaultSplitRatio;
     });
   }
 
@@ -3727,19 +3627,136 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               ),
             ),
           ),
-        // 右侧抽屉挂在外层 Scaffold Stack 顶层(见 build 中 _buildRightPanelOverlay 调用)
-        // 这里不再渲染,避免顶在 AppBar 下方
+        // 右侧快捷功能面板由 _buildRightSidePanelOverlay 在外层 Stack 顶层渲染，
+        // 以 Positioned(top: 0, right: 0) 覆盖 AppBar。
       ],
     );
   }
 
-  /// 渲染右侧滑入面板（已废弃：改为 JarvisChatLayout 内嵌分栏）。
-  /// 保留空实现避免 build 处调用断裂。
-  Widget _buildRightPanelOverlay() {
-    return const SizedBox.shrink();
+  /// 是否在主区显示右侧快捷功能面板（同时也是裁剪 AppBar / 占位宽度的依据）。
+  /// 条件：chat tab + 宽屏 (>= 820) + 无右抽屉打开。
+  bool _shouldShowRightSidePanel() {
+    if (_tabIndex != 0) return false;
+    if (_rightPanel != null) return false;
+    return MediaQuery.sizeOf(context).width >= 820;
   }
 
-  /* 旧浮层实现（已替换为 JarvisChatLayout 内嵌分栏）
+  /// AppBar 右侧需要让出的宽度。
+  /// - side 模式：[kRightSidePanelWidth] 固定值
+  /// - split 模式：[NextbotChatLayout] 同步过来的动态宽度 [_rightPanelWidth]
+  /// - 其他：0
+  double _appBarRightInset() {
+    if (_shouldShowRightSidePanel()) return kRightSidePanelWidth;
+    if (_rightPanel != null && _tabIndex == 0) return _rightPanelWidth;
+    return 0;
+  }
+
+  /// 在外层 Stack 顶层用 [Positioned] 渲染右侧面板（side 或 split 模式），
+  /// 使面板从屏幕最顶部 (top:0) 贯通到底部，覆盖宽度范围内的 AppBar。
+  ///
+  /// - side 模式：固定 kRightSidePanelWidth，渲染 [RightSidePanel]
+  ///   （今日安排 / 常用工具 / 桌宠）。
+  /// - split 模式：宽度为 [NextbotChatLayout] 同步过来的动态宽度，
+  ///   渲染 [_buildSplitPanel]（顶栏 + 自定义内容）。
+  Widget _buildRightPanelOverlay() {
+    if (_tabIndex != 0) {
+      return const SizedBox.shrink();
+    }
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    if (screenWidth < 820) {
+      return const SizedBox.shrink();
+    }
+    if (_rightPanel != null) {
+      // split 模式：动态宽度 + 顶栏面板
+      return Positioned(
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: _rightPanelWidth,
+        child: _buildSplitPanel(),
+      );
+    }
+    // side 模式：固定宽度 + RightSidePanel
+    return Positioned(
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: kRightSidePanelWidth,
+      child: RightSidePanel(
+        scheduleFuture: _cachedScheduleFuture,
+        onAgentLink: _openAgentLinkTab,
+        onSchedule: _openSchedulePanel,
+        onWallet: _openWalletDialog,
+        onPhone: _openPhoneDevicesDialog,
+        onNotes: _openNotesChat,
+        onMessages: _openMessagesPanel,
+      ),
+    );
+  }
+
+  /// split 模式的右分栏面板：顶栏（标题 + 关闭按钮）+ 自定义内容。
+  /// 背景使用 cs.surface 跟随主题（黑/白）。
+  Widget _buildSplitPanel() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.surface,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _buildSplitPanelHeader(cs),
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                      color: cs.outline.withValues(alpha: 0.25)),
+                ),
+              ),
+              child: _buildRightPanelContent(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// split 面板顶栏：拖拽指示 + 标题 + 关闭按钮。
+  Widget _buildSplitPanelHeader(ColorScheme cs) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border(
+          left: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
+          bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.drag_indicator, size: 16, color: cs.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Text(
+            _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+          ),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            tooltip: "关闭面板",
+            visualDensity: VisualDensity.compact,
+            onPressed: _closeRightPanel,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /* 旧浮层实现（已替换为 NextbotChatLayout 内嵌分栏）
   Widget _buildRightPanelOverlayLegacy() {
     if (_rightPanel == null) {
       return const SizedBox.shrink();
@@ -3826,20 +3843,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (_tabIndex != 0 || screenWidth < 820) {
       return _buildTabStack();
     }
-    return JarvisChatLayout(
-      scheduleFuture: _cachedScheduleFuture,
-      onAgentLink: _openAgentLinkTab,
-      onSchedule: _openSchedulePanel,
-      onWallet: _openWalletDialog,
-      onPhone: _openPhoneDevicesDialog,
-      onNotes: _openNotesChat,
-      onMessages: _openMessagesPanel,
-      rightPanelVisible: _rightPanel != null,
-      rightPanelChild: _rightPanel == null ? null : _buildRightPanelContent(),
-      rightPanelTitle: _rightPanel == null ? null : rightPanelTitle(_rightPanel!),
+    return NextbotChatLayout(
+      useSplit: _rightPanel != null,
       splitRatio: _splitRatio,
       onSplitRatioChanged: _setSplitRatio,
-      onCloseRightPanel: _closeRightPanel,
+      onRightPanelWidthChanged: _setRightPanelWidth,
       child: _buildChatPage(context),
     );
   }
@@ -3891,7 +3899,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ),
         );
       },
-      onSendVoice: _sendVoiceMessage,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },

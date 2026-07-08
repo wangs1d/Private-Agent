@@ -1,6 +1,26 @@
 /// 右侧抽屉要展示的内容种类。
 enum RightPanelKind { friends, messages, notes, devices }
 
+/// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
+/// - 消息/好友类：信息密度低，右面板小占比（左大右小）
+/// - 笔记/设备类：需要更大展示空间，右面板占比略大
+extension RightPanelKindDefaults on RightPanelKind {
+  /// 打开时左聊天区占可用宽度的比例（0.1~0.9）。
+  /// 越大表示聊天区越宽、右面板越窄。
+  double get defaultSplitRatio {
+    switch (this) {
+      case RightPanelKind.messages:
+        return 0.62; // 消息聚合：右面板较窄
+      case RightPanelKind.friends:
+        return 0.58; // 好友列表：右面板较窄
+      case RightPanelKind.notes:
+        return 0.45; // 笔记编辑：需要更多空间
+      case RightPanelKind.devices:
+        return 0.42; // 设备展示：需要更大空间
+    }
+  }
+}
+
 /// 顶栏标题占位（各 tab 标题均为空字符串，AppBar title 由其他逻辑驱动）。
 const List<String> kTabTitles = <String>[
   "",

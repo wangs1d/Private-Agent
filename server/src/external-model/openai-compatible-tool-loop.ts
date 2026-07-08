@@ -496,6 +496,36 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "http.request",
+      description:
+        "发起任意 HTTP 请求（等价 curl），对接外部 API / Webhook / 自建服务。自动 SSRF 防护（拒绝内网地址），响应 body 默认截断 8KB。method 默认 GET；headers/body 可选；超时默认 15s 上限 60s。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "完整 http(s) URL（内网地址会被拒绝）" },
+          method: {
+            type: "string",
+            enum: ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+            description: "默认 GET",
+          },
+          headers: {
+            type: "object",
+            description: "请求头，如 {\"Authorization\":\"Bearer xxx\",\"Content-Type\":\"application/json\"}",
+            additionalProperties: { type: "string" },
+          },
+          body: { type: "string", description: "请求体（POST/PUT/PATCH 时使用）。JSON 请序列化为字符串" },
+          timeoutMs: { type: "integer", description: "超时毫秒，默认 15000，上限 60000" },
+          maxBytes: { type: "integer", description: "响应 body 截断字节数，默认 8192，上限 65536" },
+          followRedirects: { type: "boolean", description: "是否跟随重定向，默认 true（最多 5 次）" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const LIFE_ASSISTANT_CHAT_TOOLS: ChatCompletionTool[] = [

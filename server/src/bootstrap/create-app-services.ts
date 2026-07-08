@@ -148,6 +148,7 @@ import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerHttpTools } from "../tools/http-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
@@ -244,6 +245,7 @@ export async function createAppServices(): Promise<AppServices> {
   toolRegistry.setSkillManager(skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+  registerHttpTools(toolRegistry);
 
   // ========== MCP 客户端服务 ==========
   const mcpClientService = new McpClientService();
@@ -317,8 +319,11 @@ export async function createAppServices(): Promise<AppServices> {
   const defaultAsr: ASRProvider = funasrAdapter.isEnabled() ? funasrAdapter : openaiAsrAdapter;
 
   // 注册 OpenAI provider（默认）
+  // ASR 走 defaultAsr（FunASR 优先，否则 OpenAI Whisper 兜底）。
+  // 注意：不能硬编码 openaiAsrAdapter，否则当 siliconflow TTS 未配置、
+  // 默认 provider 回退到 "openai" 时，ASR 会绕过 FunASR 直接打 OpenAI 端点（如 DeepSeek，404）。
   voiceDialogueService.registerProvider("openai", {
-    asr: openaiAsrAdapter,
+    asr: defaultAsr,
     tts: new OpenAITTSAdapter(ttsService),
     llm: new OpenAILLMAdapter(),
   });
@@ -1091,6 +1096,8 @@ export async function createAppServices(): Promise<AppServices> {
     jarvisHarness,
     devicePairingService,
     deviceRegistry,
+    // /agent/voice/transcribe 端点依赖（ASR 专用走 voiceCapabilityService）
+    voiceCapabilityService,
   });
 
   registerWebSocketRoute(app, {
