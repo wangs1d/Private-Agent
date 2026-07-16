@@ -19,6 +19,22 @@ server/web/
 agent-sphere-avatar/dist/
 agent-world/dist/
 
+# Rust / Cargo build outputs
+**/target/
+**/Cargo.lock.bak
+
+# Flutter / Dart build outputs
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/.pub-cache/
+**/.pub/
+**/build/
+**/ephemeral/
+**/Pods/
+**/*.iml
+
 # Data directories (sensitive user data)
 server/data/
 data/
