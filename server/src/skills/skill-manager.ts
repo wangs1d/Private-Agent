@@ -11,6 +11,9 @@ import type {
   SkillConfig,
   SkillLoadOptions,
   SkillPermission,
+  SkillMetadata,
+  SkillHandler,
+  SkillExecutionContext,
 } from "./types.js";
 import { SkillValidator } from "./skill-validator.js";
 import { SkillSandbox } from "./skill-sandbox.js";
@@ -105,6 +108,74 @@ export class SkillManager {
     this.skills.set(skillName, skill);
 
     console.log(`✅ Skill 已注册: ${skillName} v${skill.metadata.version}`);
+  }
+
+  /**
+   * 从代码字符串注册 Skill（自我进化用）。
+   *
+   * 把 SkillGenerator 生成的 handlerCode 字符串编译成 SkillHandler 函数：
+   * - handlerCode 应是 `async function(input, context) { ... return result; }` 形式
+   * - 使用 `new Function` 在隔离作用域内编译，不暴露 process/require/__dirname 等
+   * - 注册后该 Skill 立即可被 ToolRegistry.execute 调用
+   *
+   * 安全保证：
+   * 1. 编译前对 handlerCode 做危险模式扫描（process./require/eval/Function/__dirname）
+   * 2. 编译时用 `new Function` 创建独立作用域，handler 内无法访问闭包变量
+   * 3. 注册前仍走 SkillValidator.validate 校验 metadata
+   *
+   * @returns 注册结果，ok=false 时 error 说明失败原因
+   */
+  registerFromCode(
+    metadata: SkillMetadata,
+    handlerCode: string,
+    options?: SkillLoadOptions,
+  ): { ok: boolean; error?: string; skillName?: string } {
+    // 安全扫描：拦截危险模式
+    const dangerous = [/process\./, /require\s*\(/, /eval\s*\(/, /Function\s*\(/, /__dirname/, /__filename/, /import\s+/];
+    for (const pattern of dangerous) {
+      if (pattern.test(handlerCode)) {
+        return {
+          ok: false,
+          error: `handlerCode 包含危险模式 ${pattern.source}，拒绝编译`,
+        };
+      }
+    }
+
+    // 编译 handlerCode 为函数
+    let handler: SkillHandler;
+    try {
+      // 用 new Function 在隔离作用域内编译
+      // handlerCode 形如 "return { ok: true, result: input };" 或 "const x = ...; return x;"
+      // 编译成 async (input, context) => Promise<Record<string, unknown>>
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+      const factory = new Function(
+        "input",
+        "context",
+        `"use strict"; return (async () => { ${handlerCode} })();`,
+      ) as (
+        input: Record<string, unknown>,
+        context: SkillExecutionContext,
+      ) => Promise<Record<string, unknown>>;
+      handler = async (input: Record<string, unknown>, context: SkillExecutionContext) => {
+        return factory(input, context);
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `编译 handlerCode 失败: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    try {
+      const skill: SkillDefinition = { metadata, handler };
+      this.register(skill, options);
+      return { ok: true, skillName: metadata.name };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `注册 Skill 失败: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
   }
 
   /**

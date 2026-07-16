@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { registerAccountRoutes } from "./accounts.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
+import { registerBrainRoutes } from "./brain.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
@@ -34,7 +35,6 @@ import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
-import { registerJarvisRoutes } from "./jarvis.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerNotesRoutes } from "./notes.js";
@@ -117,13 +117,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerBriefingDeliveryRoutes(app);
   registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
   registerUserPreferencesRoutes(app);
-  if (deps.jarvisHarness) {
-    registerJarvisRoutes(app, { jarvisHarness: deps.jarvisHarness });
-  }
   if (deps.devicePairingService && deps.deviceRegistry) {
     registerDeviceRoutes(app, {
       devicePairingService: deps.devicePairingService,
       deviceRegistry: deps.deviceRegistry,
     });
   }
+  // Brain Center 路由（brainCenter 为 null 时端点返回 503 not enabled）
+  registerBrainRoutes(app, deps);
 }

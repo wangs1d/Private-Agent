@@ -1,0 +1,511 @@
+// Agent Brain Center —— 感官皮层（SensoryCortex）
+//
+// 职责：对应人脑的耳朵/眼睛/嘴巴，统一封装「听（ASR）」「看（截屏 + VLM 描述）」
+// 「说（TTS）」三条感知通道，并提供多模态融合帧 buildSensoryFrame 供其他皮层消费。
+//
+// 设计原则：
+//   1. 所有方法直接调用底层服务，不让 LLM 决定要不要感知（不走 prompt 路线）。
+//   2. 子系统缺失时方法优雅降级（返回带 error 的空结果），与 BrainCenter 风格一致。
+//   3. 三个 *Like 接口仅声明 SensoryCortex 实际用到的方法，结构兼容即可。
+import type {
+  AudioBufferRef,
+  EmotionVector,
+  SensoryFrame,
+  SensoryListenResult,
+  SensoryLookResult,
+  SensorySpeakResult,
+  UserActivityState,
+  VisualInput,
+} from "./types.js";
+
+// ---- 子系统最小化外观接口（结构兼容真实服务即可）----------------------
+
+/** 音频格式联合（与 AudioBufferRef.format 一致）。 */
+type AudioFormat = "mp3" | "wav" | "pcm" | "ogg";
+
+/**
+ * 语音对话子系统（VoiceDialogueService）的最小化结构接口。
+ * 提供 ASR（transcribeAudio）+ TTS（synthesizeSpeech），LLM 为可选。
+ */
+interface VoiceDialogueLike {
+  transcribeAudio(
+    audio: {
+      data: Buffer | unknown;
+      format: AudioFormat;
+      sampleRate?: number;
+      channels?: number;
+    },
+    opts?: { language?: string },
+  ): Promise<{
+    text: string;
+    confidence: number;
+    language?: string;
+    isFinal: boolean;
+  }>;
+  synthesizeSpeech(
+    text: string,
+    opts?: { voiceId?: string },
+  ): Promise<{
+    data: Buffer | unknown;
+    format: AudioFormat;
+    sampleRate?: number;
+    channels?: number;
+  }>;
+  chatCompletion?(
+    messages: { role: "system" | "user" | "assistant"; content: string }[],
+    opts?: Record<string, unknown>,
+  ): Promise<string>;
+}
+
+/**
+ * 语音能力子系统（VoiceCapabilityService）的最小化结构接口。
+ * 作为 voiceDialogue 缺失时的 TTS 兜底合成路径（返回 base64 mp3）。
+ */
+interface VoiceCapabilityLike {
+  synthesize?(
+    text: string,
+  ): Promise<
+    | { ok: true; format: "mp3"; base64: string; provider?: string }
+    | { ok: false; reason: string }
+  >;
+}
+
+/**
+ * 桌面视觉子系统（DesktopVisualPort）的最小化结构接口。
+ * 截屏方法 region 用 [left, top, width, height] 元组（与 pyautogui 一致）。
+ * describe 为可选的 VLM 描述方法，存在时用于生成截图的文字描述。
+ */
+interface DesktopVisualLike {
+  screenshot?(input?: {
+    region?: [number, number, number, number];
+  }): Promise<{
+    ok: boolean;
+    imageBase64?: string;
+    mimeType?: string;
+    width?: number;
+    height?: number;
+    error?: string;
+  }>;
+  describe?(image: string | Buffer): Promise<string>;
+}
+
+/**
+ * SynapseBus 的最小化外观接口（结构兼容真实 SynapseBus 即可）。
+ * 仅声明 SensoryCortex 用到的 fire 能力；subscribeType 为可选，
+ * 供需要订阅事件的其他皮层使用。
+ */
+interface SynapseBusLike {
+  fire(
+    type: string,
+    data: Record<string, unknown>,
+    opts?: { actorId?: string; source?: string },
+  ): unknown;
+  subscribeType?(
+    type: string,
+    handler: (event: {
+      data: Record<string, unknown>;
+      actorId?: string;
+      source?: string;
+    }) => void | Promise<void>,
+  ): () => void;
+}
+
+// ---- SensoryCortex ----------------------------------------------------
+
+/**
+ * 感官皮层：统一封装听 / 看 / 说 三条感知通道。
+ *
+ * 任一子系统缺失时方法优雅降级（返回带 error 的空结果），
+ * 不抛异常阻断调用方。所有感知调用均为直连底层服务，不经 LLM 决策。
+ */
+export class SensoryCortex {
+  private voiceDialogue: VoiceDialogueLike | null = null;
+  private voiceCapability: VoiceCapabilityLike | null = null;
+  private desktopVisual: DesktopVisualLike | null = null;
+  private synapseBus: SynapseBusLike | null = null;
+  private started = false;
+
+  // 累计调用计数（含失败调用，反映感官使用频次）
+  private totalListen = 0;
+  private totalLook = 0;
+  private totalSpeak = 0;
+
+  // ---- 子系统注册 -------------------------------------------------------
+
+  registerVoiceDialogue(svc: VoiceDialogueLike): void {
+    this.voiceDialogue = svc;
+    console.log("[SensoryCortex] 已注册 VoiceDialogue");
+  }
+
+  registerVoiceCapability(svc: VoiceCapabilityLike): void {
+    this.voiceCapability = svc;
+    console.log("[SensoryCortex] 已注册 VoiceCapability");
+  }
+
+  registerDesktopVisual(svc: DesktopVisualLike): void {
+    this.desktopVisual = svc;
+    console.log("[SensoryCortex] 已注册 DesktopVisual");
+  }
+
+  /** 注册突触总线，使关键感知操作完成后能 fire 事件给订阅者 */
+  registerSynapseBus(svc: SynapseBusLike): void {
+    this.synapseBus = svc;
+    console.log("[SensoryCortex] 已注册 SynapseBus");
+  }
+
+  // ---- 生命周期 ---------------------------------------------------------
+
+  /** 启动感官皮层：当前无后台任务，仅置位并记日志。 */
+  async start(): Promise<void> {
+    if (this.started) {
+      console.log("[SensoryCortex] 已启动，跳过重复 start");
+      return;
+    }
+    console.log("[SensoryCortex] 正在启动...");
+    this.started = true;
+    console.log("[SensoryCortex] 启动完成");
+  }
+
+  /** 停止感官皮层：仅置位，不主动中断底层服务。 */
+  async stop(): Promise<void> {
+    if (!this.started) {
+      console.log("[SensoryCortex] 未启动，跳过 stop");
+      return;
+    }
+    console.log("[SensoryCortex] 正在停止...");
+    this.started = false;
+    console.log("[SensoryCortex] 已停止");
+  }
+
+  // ---- 核心方法 ---------------------------------------------------------
+
+  /**
+   * 听：委托 VoiceDialogueService.transcribeAudio 做语音识别。
+   * voiceDialogue 未注册时返回空结果并带 error。
+   */
+  async listen(
+    audio: AudioBufferRef,
+    opts?: { language?: string },
+  ): Promise<SensoryListenResult> {
+    const now = new Date().toISOString();
+    this.totalListen += 1;
+
+    if (!this.voiceDialogue) {
+      console.log("[SensoryCortex] listen: VoiceDialogue 未注册");
+      return {
+        text: "",
+        confidence: 0,
+        isFinal: false,
+        processedAt: now,
+        error: "VoiceDialogueService 未注册",
+      };
+    }
+
+    try {
+      const result = await this.voiceDialogue.transcribeAudio(
+        {
+          data: audio.data,
+          format: audio.format,
+          sampleRate: audio.sampleRate,
+          channels: audio.channels,
+        },
+        opts?.language ? { language: opts.language } : undefined,
+      );
+      try {
+        this.synapseBus?.fire(
+          "sensory.listen",
+          {
+            text: result.text,
+            confidence: result.confidence,
+            language: result.language,
+          },
+          { source: "sensory" },
+        );
+      } catch {
+        /* fire 失败不影响主流程 */
+      }
+      return {
+        text: result.text,
+        confidence: result.confidence,
+        language: result.language,
+        isFinal: result.isFinal,
+        processedAt: now,
+      };
+    } catch (err) {
+      console.log(`[SensoryCortex] listen 调用失败: ${err}`);
+      return {
+        text: "",
+        confidence: 0,
+        isFinal: false,
+        processedAt: now,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * 看：委托 DesktopVisual.screenshot 截屏；若暴露 describe 方法则生成 VLM 描述。
+   * VisualInput.region {x,y,width,height} 会转换为 [left,top,width,height] 元组。
+   * desktopVisual 未注册或无 screenshot 方法时返回空结果并带 error。
+   */
+  async look(opts?: VisualInput): Promise<SensoryLookResult> {
+    const now = new Date().toISOString();
+    this.totalLook += 1;
+
+    const dv = this.desktopVisual;
+    if (!dv || typeof dv.screenshot !== "function") {
+      console.log("[SensoryCortex] look: DesktopVisual 未注册");
+      return {
+        processedAt: now,
+        error: "DesktopVisual 未注册",
+      };
+    }
+
+    const screenshotFn = dv.screenshot;
+    try {
+      const shot = await screenshotFn(
+        opts?.region
+          ? {
+              region: [
+                opts.region.x,
+                opts.region.y,
+                opts.region.width,
+                opts.region.height,
+              ],
+            }
+          : undefined,
+      );
+
+      if (!shot || !shot.ok) {
+        return {
+          processedAt: now,
+          error: shot?.error ?? "截图失败",
+        };
+      }
+
+      const screenshot = shot.imageBase64;
+      let description: string | undefined;
+
+      // 若桌面视觉子系统暴露了 VLM 描述方法，对截图生成文字描述
+      if (screenshot && typeof dv.describe === "function") {
+        try {
+          description = await dv.describe(screenshot);
+        } catch (err) {
+          // 描述失败不影响截屏结果，仅记日志
+          console.log(`[SensoryCortex] describe 调用失败: ${err}`);
+        }
+      }
+
+      try {
+        this.synapseBus?.fire(
+          "sensory.look",
+          {
+            description: description ?? "",
+            width: shot.width,
+            height: shot.height,
+          },
+          { source: "sensory" },
+        );
+      } catch {
+        /* fire 失败不影响主流程 */
+      }
+      return {
+        screenshot,
+        description,
+        processedAt: now,
+      };
+    } catch (err) {
+      console.log(`[SensoryCortex] look 调用失败: ${err}`);
+      return {
+        processedAt: now,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * 说：委托 VoiceDialogueService.synthesizeSpeech 合成语音。
+   * voiceDialogue 缺失时退回到 VoiceCapability.synthesize（base64 mp3）兜底；
+   * 两者均缺失时返回 delivered=false 并带 error。
+   * channel 从 opts 传入，默认 "ws"。
+   */
+  async speak(
+    text: string,
+    opts?: { voiceId?: string; channel?: string },
+  ): Promise<SensorySpeakResult> {
+    const now = new Date().toISOString();
+    const channel = opts?.channel ?? "ws";
+    this.totalSpeak += 1;
+
+    // 主路径：voiceDialogue.synthesizeSpeech
+    if (this.voiceDialogue) {
+      try {
+        const tts = await this.voiceDialogue.synthesizeSpeech(
+          text,
+          opts?.voiceId ? { voiceId: opts.voiceId } : undefined,
+        );
+        try {
+          this.synapseBus?.fire(
+            "sensory.speak",
+            { channel, delivered: true, format: tts.format },
+            { source: "sensory" },
+          );
+        } catch {
+          /* fire 失败不影响主流程 */
+        }
+        return {
+          audio: {
+            data: tts.data,
+            format: tts.format,
+            sampleRate: tts.sampleRate,
+            channels: tts.channels,
+          },
+          delivered: true,
+          channel,
+          processedAt: now,
+        };
+      } catch (err) {
+        console.log(`[SensoryCortex] speak 合成失败: ${err}`);
+        return {
+          delivered: false,
+          channel,
+          processedAt: now,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    // 兜底路径：voiceCapability.synthesize（返回 base64 mp3）
+    if (this.voiceCapability?.synthesize) {
+      try {
+        const synth = await this.voiceCapability.synthesize(text);
+        if (synth.ok) {
+          try {
+            this.synapseBus?.fire(
+              "sensory.speak",
+              { channel, delivered: true, format: synth.format },
+              { source: "sensory" },
+            );
+          } catch {
+            /* fire 失败不影响主流程 */
+          }
+          return {
+            audio: {
+              data: Buffer.from(synth.base64, "base64"),
+              format: synth.format,
+            },
+            delivered: true,
+            channel,
+            processedAt: now,
+          };
+        }
+        return {
+          delivered: false,
+          channel,
+          processedAt: now,
+          error: synth.reason,
+        };
+      } catch (err) {
+        console.log(`[SensoryCortex] speak 兜底合成失败: ${err}`);
+        return {
+          delivered: false,
+          channel,
+          processedAt: now,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    console.log(
+      "[SensoryCortex] speak: VoiceDialogue 与 VoiceCapability 均未注册",
+    );
+    return {
+      delivered: false,
+      channel,
+      processedAt: now,
+      error: "VoiceDialogueService 未注册",
+    };
+  }
+
+  /**
+   * 端到端语音：逐块串行处理音频流。
+   *
+   * 简化实现：对每块音频调 listen 识别；若 voiceDialogue 暴露 chatCompletion，
+   * 则把识别文本喂给 LLM 生成回复，再调 speak 合成语音，并 yield 回复文本；
+   * 否则直接 yield 识别中间结果（不真的过 LLM）。
+   *
+   * TODO: 完整端到端全双工语音 LLM（流式 ASR + 流式 LLM + 流式 TTS）在后续迭代实现。
+   *
+   * @param audioStream 输入音频流（异步可迭代或数组）
+   * @param opts.language 语言提示
+   */
+  async *endToEndVoice(
+    audioStream: AsyncIterable<AudioBufferRef> | AudioBufferRef[],
+    opts?: { language?: string },
+  ): AsyncIterable<string> {
+    // for await 同时接受 AsyncIterable 与数组（数组按同步迭代，逐项 await）
+    for await (const chunk of audioStream) {
+      const listened = await this.listen(chunk, opts);
+      if (!listened.text) {
+        continue;
+      }
+
+      // 若有 LLM 能力，生成回复并合成语音
+      if (
+        this.voiceDialogue &&
+        typeof this.voiceDialogue.chatCompletion === "function"
+      ) {
+        try {
+          const reply = await this.voiceDialogue.chatCompletion(
+            [
+              { role: "system", content: "你是用户的私人助理，请简短回复。" },
+              { role: "user", content: listened.text },
+            ],
+            {},
+          );
+          // 合成回复语音（失败不影响 yield 文本）
+          await this.speak(reply);
+          yield reply;
+        } catch (err) {
+          console.log(`[SensoryCortex] endToEndVoice LLM 失败: ${err}`);
+          yield listened.text;
+        }
+      } else {
+        // 简化实现：仅 yield ASR 中间结果，不真的过 LLM
+        yield listened.text;
+      }
+    }
+  }
+
+  /**
+   * 组装多模态感官帧（纯函数式，不调用任何子系统）。
+   * 将 ASR 文本 / 视觉描述 / 情绪 / 活动状态融合为统一感知帧。
+   */
+  buildSensoryFrame(args: {
+    actorId: string;
+    audioText?: string;
+    visualDescription?: string;
+    emotion?: EmotionVector;
+    activity?: UserActivityState;
+  }): SensoryFrame {
+    return {
+      actorId: args.actorId,
+      audioText: args.audioText,
+      visualDescription: args.visualDescription,
+      emotion: args.emotion,
+      activity: args.activity,
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
+  // ---- 统计 -------------------------------------------------------------
+
+  /** 返回累计的 listen / look / speak 调用次数。 */
+  getStats(): { totalListen: number; totalLook: number; totalSpeak: number } {
+    return {
+      totalListen: this.totalListen,
+      totalLook: this.totalLook,
+      totalSpeak: this.totalSpeak,
+    };
+  }
+}

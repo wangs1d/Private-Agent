@@ -124,12 +124,95 @@ class UiaController:
         if ref is None:
             return False
         try:
-            invoke_pat = ref.GetPattern(10000)  # UIA_InvokePatternId = 10000
-            if invoke_pat:
-                invoke_pat.Invoke()
-                return True
+            # comtypes 用 GetCurrentPattern(不是 GetPattern),返回 IUnknown 指针
+            unk = ref.GetCurrentPattern(10000)  # UIA_InvokePatternId = 10000
+            if not unk:
+                return False
+            # QueryInterface 到 IUIAutomationInvokePattern
+            from comtypes.gen.UIAutomationClient import IUIAutomationInvokePattern
+            invoke_pat = unk.QueryInterface(IUIAutomationInvokePattern)
+            invoke_pat.Invoke()
+            return True
         except Exception as exc:
             logger.warning("invoke 失败: %s", exc)
+        return False
+
+    def set_value(self, element_info: ElementInfo, value: str) -> bool:
+        """对元素调用 ValuePattern.SetValue。失败返回 False。
+
+        用于直接设置文本框内容,不模拟键盘输入,不抢焦点,不要求窗口在前台。
+        适用于 Win32 Edit / WPF TextBox / WinForms TextBox 等。
+        Electron 内部控件通常不支持 ValuePattern。
+        """
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            unk = ref.GetCurrentPattern(10002)  # UIA_ValuePatternId = 10002
+            if not unk:
+                return False
+            from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
+            value_pat = unk.QueryInterface(IUIAutomationValuePattern)
+            value_pat.SetValue(value)
+            return True
+        except Exception as exc:
+            logger.warning("set_value 失败: %s", exc)
+        return False
+
+    def get_value(self, element_info: ElementInfo) -> str | None:
+        """读取元素当前值(ValuePattern.CurrentValue)。失败返回 None。"""
+        if not self.is_available():
+            return None
+        ref = element_info.get("__ref")
+        if ref is None:
+            return None
+        try:
+            unk = ref.GetCurrentPattern(10002)
+            if not unk:
+                return None
+            from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
+            value_pat = unk.QueryInterface(IUIAutomationValuePattern)
+            return str(value_pat.CurrentValue) if value_pat.CurrentValue else ""
+        except Exception as exc:
+            logger.warning("get_value 失败: %s", exc)
+            return None
+
+    def toggle(self, element_info: ElementInfo) -> bool:
+        """对元素调用 TogglePattern.Toggle(复选框/单选按钮)。失败返回 False。"""
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            unk = ref.GetCurrentPattern(10015)  # UIA_TogglePatternId = 10015
+            if not unk:
+                return False
+            from comtypes.gen.UIAutomationClient import IUIAutomationTogglePattern
+            toggle_pat = unk.QueryInterface(IUIAutomationTogglePattern)
+            toggle_pat.Toggle()
+            return True
+        except Exception as exc:
+            logger.warning("toggle 失败: %s", exc)
+        return False
+
+    def focus(self, element_info: ElementInfo) -> bool:
+        """对元素调用 SetFocus。失败返回 False。
+
+        用于把焦点设到目标控件(不激活窗口,仅设焦点)。
+        """
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            ref.SetFocus()
+            return True
+        except Exception as exc:
+            logger.warning("focus 失败: %s", exc)
         return False
 
     # ---- 结构化查询 ------------------------------------------------------
@@ -138,41 +221,59 @@ class UiaController:
 
         selector 字段：
         - name: 元素 Name（精确匹配）
-        - name_contains: Name 子串匹配
+        - name_contains: Name 子串匹配（后过滤,UIA 无原生子串条件）
         - automation_id: AutomationId（精确）
         - control_type: 控件类型，如 Button/Edit/List/List/ListItem/Tree/TreeItem
-        - class_name: ClassName
+        - class_name: ClassName（精确）
         - parent: 父元素 __ref（可选，限定查询范围）
         """
         if not self.is_available():
             return []
         try:
-            # 用纯 IUIAutomation API 走 UIA 树（pywinauto 0.6.x 没有 uia_element_infos 子模块）
-            root = self._uia.GetRootElement() if selector.get("parent") is None else selector["parent"]
-            condition = self._build_condition(selector)
+            # name_contains 需要后过滤(UIA 无原生子串条件),先提取出来
+            name_contains = selector.get("name_contains")
+            # 构造 UIA 条件时排除 name_contains(它不是原生条件)
+            cond_selector = {k: v for k, v in selector.items() if k != "name_contains"}
+            root = self._uia.GetRootElement() if cond_selector.get("parent") is None else cond_selector["parent"]
+            condition = self._build_condition(cond_selector)
             if condition is None:
                 return []
             walker = self._uia.CreateTreeWalker(condition)
             results: list[ElementInfo] = []
-            self._walk(root, walker, results, top_only, limit, depth=0)
-            return results
+            # 如果有 name_contains 后过滤,需要多遍历一些再过滤
+            raw_limit = limit * 5 if name_contains else limit
+            self._walk(root, walker, results, top_only, raw_limit, depth=0)
+            # name_contains 后过滤
+            if name_contains:
+                results = [e for e in results if name_contains in e.get("name", "")]
+            return results[:limit]
         except Exception as exc:
             logger.warning("query(%r) 失败: %s", selector, exc)
             return []
 
     def read_children(self, parent_ref: Any, *, limit: int = 200) -> list[ElementInfo]:
-        """读元素直接子节点（用于 ListView/Tree 内容读取）。"""
+        """读元素直接子节点（用于 ListView/Tree 内容读取）。
+
+        comtypes 的 IUIAutomationElement 没有 GetFirstChildElement/GetNextSiblingElement
+        (这些是 IUIAutomationTreeWalker 的方法)。改用 FindAll(TreeScope_Children) 查直接子元素。
+        """
         if not self.is_available() or parent_ref is None:
             return []
         try:
+            # TreeScope_Children = 2,只查直接子节点;用 TrueCondition 匹配所有
+            true_cond = self._uia.CreateTrueCondition()
+            raw_array = parent_ref.FindAll(2, true_cond)  # 2 = TreeScope_Children
+            if not raw_array:
+                return []
+            # IUIAutomationElementArray 不可迭代,用 Length + GetElement
+            length = int(raw_array.Length)
             children: list[ElementInfo] = []
-            child = parent_ref.GetFirstChildElement()
             count = 0
-            while child is not None and count < limit:
+            for i in range(min(length, limit)):
+                child = raw_array.GetElement(i)
                 snap = self._snapshot(child)
                 if snap is not None:
                     children.append(snap)
-                child = child.GetNextSiblingElement()
                 count += 1
             return children
         except Exception as exc:
@@ -188,21 +289,27 @@ class UiaController:
 
     # ---- 内部辅助 --------------------------------------------------------
     def _build_condition(self, selector: dict[str, Any]) -> Any:
-        """构造 UIA 查询条件。"""
+        """构造 UIA 查询条件。
+
+        UIA Property IDs（Microsoft 官方）:
+          30003 = ControlTypeProperty
+          30005 = NameProperty
+          30011 = AutomationIdProperty
+          30012 = ClassNameProperty
+        """
         try:
             uia = self._uia
             conds: list[Any] = []
             if "control_type" in selector:
                 ct_id = self._control_type_id_by_name.get(selector["control_type"])
                 if ct_id is not None:
-                    conds.append(uia.CreatePropertyCondition(30003, ct_id))  # UIA_ControlTypePropertyId
+                    conds.append(uia.CreatePropertyCondition(30003, ct_id))
             if "automation_id" in selector:
-                conds.append(uia.CreatePropertyCondition(30011, selector["automation_id"]))  # AutomationIdProperty
+                conds.append(uia.CreatePropertyCondition(30011, selector["automation_id"]))
             if "name" in selector:
-                conds.append(uia.CreatePropertyCondition(30012, selector["name"]))  # NameProperty
+                conds.append(uia.CreatePropertyCondition(30005, selector["name"]))
             if "class_name" in selector:
-                # UIA 没有独立的 ClassName PropertyId，需要配合 NativeWindowHandle 或其他条件，这里简化跳过
-                logger.debug("class_name 条件暂不支持，忽略")
+                conds.append(uia.CreatePropertyCondition(30012, selector["class_name"]))
             if not conds:
                 return uia.CreateTrueCondition()
             if len(conds) == 1:
@@ -265,23 +372,55 @@ class UiaController:
             return None
 
     def _detect_patterns(self, elem: Any) -> list[str]:
-        """检测元素支持的 pattern（仅列常用：Invoke/SelectionItem/Value/Toggle/ExpandCollapse/ScrollItem）。"""
+        """检测元素支持的 pattern。
+
+        用 GetCurrentPattern + QueryInterface 实际尝试转换到具体 pattern 接口。
+        这样 patterns 字段反映的是「实际能否成功调用该 pattern」,与 invoke/set_value
+        等方法的实际行为一致,不会误报也不会漏报。
+
+        comtypes 的 GetCurrentPattern 即使元素不支持 pattern 也可能返回非空 IUnknown 指针,
+        但 QueryInterface 到具体接口时会失败(返回 None 或抛异常),以此作为判断依据。
+        """
         supported: list[str] = []
+        # (pattern 名, pattern ID, 接口类名)
+        # 延迟 import 避免非 Windows 环境报错
+        try:
+            from comtypes.gen.UIAutomationClient import (
+                IUIAutomationInvokePattern,
+                IUIAutomationValuePattern,
+                IUIAutomationTogglePattern,
+                IUIAutomationSelectionItemPattern,
+                IUIAutomationExpandCollapsePattern,
+                IUIAutomationScrollItemPattern,
+                IUIAutomationTextPattern,
+                IUIAutomationRangeValuePattern,
+                IUIAutomationGridItemPattern,
+                IUIAutomationTableItemPattern,
+            )
+        except ImportError:
+            return supported
+
         candidates = [
-            ("Invoke", 10000),
-            ("SelectionItem", 10010),
-            ("Value", 10002),
-            ("Toggle", 10015),
-            ("ExpandCollapse", 10005),
-            ("ScrollItem", 10017),
-            ("Text", 10020),
-            ("RangeValue", 10003),
-            ("GridItem", 10007),
-            ("TableItem", 10013),
+            ("Invoke", 10000, IUIAutomationInvokePattern),
+            ("Value", 10002, IUIAutomationValuePattern),
+            ("Toggle", 10015, IUIAutomationTogglePattern),
+            ("SelectionItem", 10010, IUIAutomationSelectionItemPattern),
+            ("ExpandCollapse", 10005, IUIAutomationExpandCollapsePattern),
+            ("ScrollItem", 10017, IUIAutomationScrollItemPattern),
+            ("Text", 10020, IUIAutomationTextPattern),
+            ("RangeValue", 10003, IUIAutomationRangeValuePattern),
+            ("GridItem", 10007, IUIAutomationGridItemPattern),
+            ("TableItem", 10013, IUIAutomationTableItemPattern),
         ]
-        for name, pid in candidates:
+        for name, pid, iface in candidates:
             try:
-                if elem.GetPattern(pid) is not None:
+                unk = elem.GetCurrentPattern(pid)
+                if not unk:
+                    continue
+                # QueryInterface 实际尝试转换到具体接口
+                # 成功 = 元素真正支持该 pattern;失败 = 不支持
+                pat = unk.QueryInterface(iface)
+                if pat:
                     supported.append(name)
             except Exception:
                 pass

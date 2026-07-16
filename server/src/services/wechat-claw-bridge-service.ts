@@ -196,7 +196,7 @@ export class WechatClawBridgeService {
     }
 
     const accessMode = parseAgentAccessMode(
-      this.env.WECHAT_CLAW_BRIDGE_AGENT_ACCESS_MODE?.trim() || "sandbox",
+      this.env.WECHAT_CLAW_BRIDGE_AGENT_ACCESS_MODE?.trim() || "full",
     );
     const turnInput: ChatTurnInput = {
       text,

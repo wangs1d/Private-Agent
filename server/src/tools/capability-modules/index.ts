@@ -24,6 +24,8 @@ import type { HealthFitnessService } from "../../services/health-fitness-service
 import type { FinanceDeepService } from "../../services/finance-deep-service.js";
 import type { SocialOutreachService } from "../../services/social-outreach-service.js";
 import type { CodeSandboxService } from "../../services/code-sandbox-service.js";
+import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
+import type { AgentBrowserService } from "../../services/agent-browser-service.js";
 import type { WsConnectionRegistry } from "../../services/ws-connection-registry.js";
 
 import {
@@ -67,6 +69,18 @@ import {
   CODE_SANDBOX_CATEGORY_MAPPING,
   registerCodeSandboxTools,
 } from "./code-sandbox/index.js";
+import {
+  SHOPPING_ORDER_CHAT_TOOLS,
+  SHOPPING_ORDER_INTENT_RULES,
+  SHOPPING_ORDER_CATEGORY_MAPPING,
+  registerShoppingOrderTools,
+} from "./shopping-order/index.js";
+import {
+  AGENT_BROWSER_CHAT_TOOLS,
+  AGENT_BROWSER_INTENT_RULES,
+  AGENT_BROWSER_CATEGORY_MAPPING,
+  registerAgentBrowserTools,
+} from "./agent-browser/index.js";
 
 /**
  * 能力模块描述符：把一个能力域的所有挂载点打包成单一对象，
@@ -110,6 +124,8 @@ export interface CapabilityModuleDeps {
   financeDeepService: FinanceDeepService;
   socialOutreachService: SocialOutreachService;
   codeSandboxService: CodeSandboxService;
+  shoppingOrderService: ShoppingOrderService;
+  agentBrowserService: AgentBrowserService;
 }
 
 /**
@@ -240,6 +256,22 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: CODE_SANDBOX_INTENT_RULES,
       register: (registry) => registerCodeSandboxTools(registry, { codeSandboxService: deps.codeSandboxService }),
       category: CODE_SANDBOX_CATEGORY_MAPPING,
+    },
+    {
+      domain: "shopping_order",
+      label: "购物/下单（后台无头浏览器代用户下单）",
+      chatTools: SHOPPING_ORDER_CHAT_TOOLS,
+      intentRules: SHOPPING_ORDER_INTENT_RULES,
+      register: (registry) => registerShoppingOrderTools(registry, { shoppingOrderService: deps.shoppingOrderService }),
+      category: SHOPPING_ORDER_CATEGORY_MAPPING,
+    },
+    {
+      domain: "agent_browser",
+      label: "Agent 虚拟浏览器（通用网页多步操作）",
+      chatTools: AGENT_BROWSER_CHAT_TOOLS,
+      intentRules: AGENT_BROWSER_INTENT_RULES,
+      register: (registry) => registerAgentBrowserTools(registry, { agentBrowserService: deps.agentBrowserService }),
+      category: AGENT_BROWSER_CATEGORY_MAPPING,
     },
   ];
 }

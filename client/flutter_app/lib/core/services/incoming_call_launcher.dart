@@ -5,7 +5,7 @@ import "package:flutter/services.dart";
 
 /// 独立来电悬浮窗启动器。
 ///
-/// 收到 [agent.phone.ringing_start] 时调用 [show] 唤起一个脱离主窗口的
+/// 收到 [agent.voice.ringing_start] 时调用 [show] 唤起一个脱离主窗口的
 /// Win32 悬浮窗，位于工作区右下角，自带铃声 + 接听/挂断按钮。
 ///
 /// 事件回调：

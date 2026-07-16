@@ -39,7 +39,7 @@ class DeskPetSession extends ChangeNotifier {
       return true;
     }
 
-    final String? setupIssue = SphereOverlayLauncher.electronUnavailableReason;
+    final String? setupIssue = SphereOverlayLauncher.overlayUnavailableReason;
     if (setupIssue != null) {
       _bootstrapping = false;
       _error = setupIssue;
@@ -47,10 +47,10 @@ class DeskPetSession extends ChangeNotifier {
       return false;
     }
 
-    final bool ok = await launchElectronDeskPet();
+    final bool ok = await launchOverlayDeskPet();
     _bootstrapping = false;
     if (!ok) {
-      _error ??= SphereOverlayLauncher.electronUnavailableReason ?? "桌宠启动失败";
+      _error ??= SphereOverlayLauncher.overlayUnavailableReason ?? "桌宠启动失败";
       notifyListeners();
       return false;
     }
@@ -73,11 +73,11 @@ class DeskPetSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Windows 独立桌宠：默认直接使用 Electron 透明桌宠窗口。
-  Future<bool> launchElectronDeskPet() async {
+  /// Windows 独立桌宠：默认直接使用 Tauri 透明桌宠窗口。
+  Future<bool> launchOverlayDeskPet() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
-    final bool ok = await SphereOverlayLauncher.launchElectron();
+    final bool ok = await SphereOverlayLauncher.launchOverlay();
     if (ok) {
       _summoned = true;
       SphereEntityController.instance.markElectronReady();
@@ -85,8 +85,8 @@ class DeskPetSession extends ChangeNotifier {
       return true;
     }
 
-    _error = SphereOverlayLauncher.electronUnavailableReason ??
-        "桌宠启动失败\n请确认 sphere-overlay 已 npm install，且 agent-sphere-avatar 已执行 npm run build。";
+    _error = SphereOverlayLauncher.overlayUnavailableReason ??
+        "桌宠启动失败\n请确认 sphere-overlay-tauri 已构建（npm run tauri build），且 agent-sphere-avatar 已执行 npm run build。";
     notifyListeners();
     return false;
   }

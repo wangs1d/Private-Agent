@@ -812,6 +812,7 @@ void FlutterWindow::HandleScheduleFloatingMethodCall(
           s.id = GetEncodableString(m, "id", "");
           s.time_text = GetEncodableString(m, "timeText", "");
           s.title = GetEncodableString(m, "title", "");
+          s.notes = GetEncodableString(m, "notes", "");
           s.completed = GetEncodableBool(m, "completed", false);
           items.push_back(std::move(s));
         }

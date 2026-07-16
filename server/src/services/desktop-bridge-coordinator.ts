@@ -31,9 +31,23 @@ function parseBooleanEnv(raw: string | undefined): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
+export type DesktopBridgeEvent = {
+  actorId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  timestamp: number | string;
+};
+
+export type DesktopBridgeEventListener = (
+  actorId: string,
+  event: DesktopBridgeEvent,
+) => void;
+
 export type DesktopBridgeCoordinatorOptions = {
   onSync?: (actorId: string, payload: DesktopBridgeSyncPayload) => void;
   onTaskResult?: (actorId: string, payload: DesktopBridgeSyncPayload) => void;
+  /** 电脑端主动推送事件（desktop.event）到达时回调，供上层订阅转 LifeSignal 等。 */
+  onEvent?: (actorId: string, event: DesktopBridgeEvent) => void;
 };
 
 export class DesktopBridgeCoordinator {
@@ -184,17 +198,51 @@ export class DesktopBridgeCoordinator {
     if (!p || p.socket !== socket) return false;
     clearTimeout(p.timer);
     this.pending.delete(jobId);
-    const ok = payload.ok === true;
-    const steps = typeof payload.steps === "number" ? payload.steps : undefined;
-    const summary = typeof payload.summary === "string" ? payload.summary : undefined;
-    const error = typeof payload.error === "string" ? payload.error : undefined;
-    const imageBase64 =
-      typeof payload.imageBase64 === "string" ? payload.imageBase64 : undefined;
-    const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : undefined;
-    const width = typeof payload.width === "number" ? payload.width : undefined;
-    const height = typeof payload.height === "number" ? payload.height : undefined;
-    const capturedAt = typeof payload.capturedAt === "string" ? payload.capturedAt : undefined;
-    p.resolve({ ok, steps, summary, error, imageBase64, mimeType, width, height, capturedAt });
+    // 透传所有字段(除 jobId) — bridge coordinator 是传输层,不应过滤工具结果字段。
+    // uia_query 的 elements/count/mode/selector、run_input 的 action/x/y、
+    // run_shell 的 stdout/stderr/exitCode 等都需要原样传递给工具层和 LLM。
+    const { jobId: _jobId, ...result } = payload;
+    p.resolve(result as DesktopVisualRunResult);
     return true;
+  }
+
+  private readonly eventListeners = new Set<DesktopBridgeEventListener>();
+
+  /**
+   * 订阅 desktop.event 主动推送事件，返回取消订阅函数。
+   * Task 4 用此接入 LifeSignal 转换；本任务仅做消息接收与转发，不转换。
+   */
+  subscribeEvents(listener: DesktopBridgeEventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
+    };
+  }
+
+  /**
+   * 接收来自已绑定 desktop bridge socket 的主动事件推送（desktop.event），
+   * 校验 socket 归属后转发给订阅者。与 invoke 的 jobId 配对队列互不影响：
+   * event 是单向推送，不进入 pending 队列，因此不会阻塞请求-响应通道。
+   */
+  handleEventFromSocket(
+    socket: WsSendLike,
+    actorId: string,
+    event: DesktopBridgeEvent,
+  ): boolean {
+    const bound = this.executors.get(actorId);
+    if (!bound || bound !== socket) return false;
+    this.dispatchEvent(actorId, event);
+    return true;
+  }
+
+  private dispatchEvent(actorId: string, event: DesktopBridgeEvent): void {
+    this.opts?.onEvent?.(actorId, event);
+    for (const listener of this.eventListeners) {
+      try {
+        listener(actorId, event);
+      } catch {
+        // 订阅者异常不应影响其他订阅者或 ws 通道
+      }
+    }
   }
 }

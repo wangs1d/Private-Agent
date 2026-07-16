@@ -85,6 +85,98 @@ export interface CodeFileResult {
   error?: string;
 }
 
+/** Shell 命令执行参数。 */
+export interface ShellRunParams {
+  /** 要执行的命令名（如 `ls` / `curl` / `pip`）。会先过白名单/黑名单/正则三道闸。 */
+  command: string;
+  /** 命令参数数组（每个元素单独传入，不经 shell 解析，避免注入）。 */
+  args?: string[];
+  /** 工作目录标识（一般是 sessionId 或任务 ID），同标识复用同一目录。 */
+  workspaceId?: string;
+  /** 超时毫秒，默认 30000（受 `CODE_SANDBOX_TIMEOUT_MS` 环境变量与 120000 上限约束）。 */
+  timeoutMs?: number;
+  /** stdin 输入（可选）。 */
+  stdin?: string;
+  /** 环境变量覆盖（可选）。 */
+  env?: Record<string, string>;
+}
+
+/** Shell 命令执行结果（与 CodeRunResult 同构，便于复用截断/超时逻辑）。 */
+export type ShellRunResult = CodeRunResult;
+
+/**
+ * Shell 命令白名单（首段命令名必须命中）。
+ *
+ * 设计原则：
+ *   - 只放只读 / 文件操作 / 包管理 / 通用工具类命令，不放任何破坏性命令
+ *   - 破坏性命令（rm/del/format/mkfs/dd/shutdown 等）一律拒绝
+ *   - 与 `desktop.run_shell` 不同，本沙箱在隔离工作目录内执行，
+ *     但仍保留白名单以防误调系统级命令
+ */
+const SHELL_COMMAND_ALLOWLIST: ReadonlySet<string> = new Set([
+  // 文件/目录操作（只读 + 轻量写）
+  "ls", "dir", "cat", "type", "head", "tail", "wc", "file", "stat",
+  "find", "grep", "rg", "ag", "tree", "du", "df",
+  "echo", "printf", "date", "whoami", "hostname", "uname", "pwd",
+  "mkdir", "touch", "cp", "copy", "mv", "move", "ln",
+  "zip", "unzip", "tar", "gzip", "gunzip", "7z",
+  // 文本处理
+  "sort", "uniq", "cut", "paste", "tr", "sed", "awk", "jq", "xq",
+  "diff", "comm", "fold", "fmt", "column", "tsort",
+  // 包管理（pip / npm / yarn，允许 install/list/show，禁止 uninstall）
+  "pip", "pip3", "python", "python3", "node", "npm", "npx", "yarn", "pnpm",
+  // 网络（仅 curl/wget，受禁网策略约束）
+  "curl", "wget",
+  // 编码/格式转换
+  "base64", "xxd", "md5sum", "sha256sum", "iconv", "file",
+  "ffmpeg", "ffprobe", "convert", "magick",
+  // 版本控制（只读子命令由正则约束）
+  "git",
+  // Windows 专用（在 Windows 上 dir/type/copy 等已覆盖）
+  "where", "tasklist",
+]);
+
+/**
+ * Shell 命令黑名单（即使白名单命中也不允许的子命令）。
+ *
+ * 用于拦截 `pip uninstall` / `npm uninstall` / `git push --force` 等危险操作。
+ */
+const SHELL_SUBCOMMAND_BLOCKLIST: ReadonlySet<string> = new Set([
+  "uninstall", "remove", "rm", "del", "rmdir", "rmtree",
+  "format", "mkfs", "dd", "shred",
+  "shutdown", "reboot", "halt", "poweroff",
+  "kill", "killall", "taskkill",
+  "chmod", "chown", "chattr",
+  "sudo", "su", "runas",
+  "push", "force", "reset", "clean", "checkout",
+]);
+
+/**
+ * 危险参数正则：拦截任何形式的 `rm -rf` / `del /s` / `format C:` 等。
+ * 命中即拒绝整个命令。
+ */
+const SHELL_DANGEROUS_ARG_RE = [
+  /(^|[\/\s])rm\s+(-[a-z]*r[a-z]*f?|--recursive)\s/i,        // rm -rf
+  /\brm\s+-[a-z]*f[a-z]*r/i,                                  // rm -fr
+  /(^|[\/\s])del\s+\/[a-z]*s/i,                               // del /s
+  /(^|[\/\s])rmdir\s+\/s/i,                                   // rmdir /s
+  /(^|[\/\s])format\s+[a-z]:/i,                               // format C:
+  /(^|[\/\s])mkfs\./i,                                        // mkfs.*
+  /(^|[\/\s])dd\s+.*of=\/dev\//i,                             // dd of=/dev/
+  /\b(sudo|su|runas)\b/i,                                    // 提权
+  /;\s*(rm|del|format|mkfs|dd|shutdown|reboot|halt)\b/i,     // 链式危险命令
+  /\|\s*(rm|del|format|mkfs|dd|shutdown|reboot|halt)\b/i,    // 管道危险命令
+  /\$\(/i,                                                     // 命令替换 $(...)
+  /\$\{.*\}/i,                                                 // 变量展开 ${...}
+  /\b(rm|del)\s+-[a-z]*r[a-z]*\s+\/(?!tmp|var\/tmp)/i,        // rm -r / 非 tmp
+];
+
+/** shell 命令执行结果。 */
+export interface ShellPolicyDecision {
+  allowed: boolean;
+  reason?: string;
+}
+
 interface SpawnCaptureResult {
   stdout: string;
   stderr: string;
@@ -198,6 +290,132 @@ export class CodeSandboxService {
       workspacePath,
       ...(cap.error ? { error: cap.error } : {}),
     };
+  }
+
+  /**
+   * 执行 shell 命令（在沙箱工作目录内，带白名单+黑名单+正则三道闸）。
+   *
+   * 与 {@link runCode} 的区别：
+   *   - runCode 把代码写入临时脚本文件再执行；runShell 直接 spawn 命令 + 参数数组
+   *   - runShell 走三道闸策略校验（白名单命令名 / 黑名单子命令 / 危险参数正则）
+   *   - 适用于：ls/grep/curl/pip install/ffmpeg/git log 等系统命令
+   *
+   * 安全策略：
+   *   1. 命令名必须在 {@link SHELL_COMMAND_ALLOWLIST} 内
+   *   2. 参数中不能出现 {@link SHELL_SUBCOMMAND_BLOCKLIST} 列出的子命令
+   *   3. 整条命令（command + args 拼接）不能命中 {@link SHELL_DANGEROUS_ARG_RE}
+   *   4. 在隔离工作目录内执行（cwd = workspacePath）
+   *   5. 复用 spawnCapture 的超时/截断/禁网逻辑
+   *
+   * @param params 命令参数，详见 {@link ShellRunParams}
+   * @returns 执行结果，结构与 {@link runCode} 一致
+   */
+  async runShell(actorId: string, params: ShellRunParams): Promise<ShellRunResult> {
+    const startedAt = Date.now();
+    const workspaceId = params.workspaceId?.trim() || randomUUID();
+
+    const wsEnsure = await this.ensureWorkspace(actorId, workspaceId);
+    if ("error" in wsEnsure) {
+      return {
+        ok: false, stdout: "", stderr: "", exitCode: null,
+        durationMs: Date.now() - startedAt, timedOut: false, truncated: false,
+        workspacePath: "", error: wsEnsure.error,
+      };
+    }
+    const workspacePath = wsEnsure.path;
+
+    const command = (params.command ?? "").trim();
+    if (!command) {
+      return {
+        ok: false, stdout: "", stderr: "command 为空", exitCode: null,
+        durationMs: Date.now() - startedAt, timedOut: false, truncated: false,
+        workspacePath, error: "command 为空",
+      };
+    }
+
+    const args = Array.isArray(params.args) ? params.args.map(String) : [];
+
+    // 三道闸策略校验
+    const policy = this.checkShellPolicy(command, args);
+    if (!policy.allowed) {
+      return {
+        ok: false, stdout: "", stderr: "", exitCode: null,
+        durationMs: Date.now() - startedAt, timedOut: false, truncated: false,
+        workspacePath,
+        error: `SHELL_POLICY_DENIED: ${policy.reason ?? "命令被安全策略拒绝"}`,
+      };
+    }
+
+    const timeoutMs = Math.min(
+      Math.max(1, params.timeoutMs ?? this.getDefaultTimeoutMs()),
+      MAX_TIMEOUT_MS,
+    );
+
+    const childEnv = this.buildChildEnv(workspacePath, params.env);
+
+    const cap = await this.spawnCapture(command, args, {
+      cwd: workspacePath,
+      env: childEnv,
+      timeoutMs,
+      stdin: params.stdin,
+    });
+
+    return {
+      ok: cap.exitCode === 0 && !cap.timedOut,
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      exitCode: cap.exitCode,
+      durationMs: Date.now() - startedAt,
+      timedOut: cap.timedOut,
+      truncated: cap.truncated,
+      workspacePath,
+      ...(cap.error ? { error: cap.error } : {}),
+    };
+  }
+
+  /**
+   * 校验 shell 命令是否符合安全策略（三道闸）。
+   *
+   * 1. 命令名白名单：`command` 必须在 {@link SHELL_COMMAND_ALLOWLIST} 内
+   * 2. 子命令黑名单：`args` 中不能出现 {@link SHELL_SUBCOMMAND_BLOCKLIST} 列出的子命令
+   * 3. 危险参数正则：整条命令不能命中 {@link SHELL_DANGEROUS_ARG_RE}
+   *
+   * @param command 命令名（已 trim）
+   * @param args 参数数组
+   * @returns `{ allowed: true }` 或 `{ allowed: false, reason }`
+   */
+  checkShellPolicy(command: string, args: readonly string[]): ShellPolicyDecision {
+    // 1. 命令名白名单
+    if (!SHELL_COMMAND_ALLOWLIST.has(command)) {
+      return {
+        allowed: false,
+        reason: `命令 "${command}" 不在白名单内（允许: ls/grep/curl/pip/npm/ffmpeg/git 等通用工具命令）`,
+      };
+    }
+
+    // 2. 子命令黑名单（检查首个非选项参数，如 `pip uninstall` 的 `uninstall`）
+    for (const a of args) {
+      const lower = a.toLowerCase().replace(/^-+/, "");
+      if (SHELL_SUBCOMMAND_BLOCKLIST.has(lower)) {
+        return {
+          allowed: false,
+          reason: `子命令 "${a}" 在黑名单内（禁止 uninstall/remove/push --force 等危险操作）`,
+        };
+      }
+    }
+
+    // 3. 危险参数正则（整条命令拼接后匹配）
+    const fullCmd = [command, ...args].join(" ");
+    for (const re of SHELL_DANGEROUS_ARG_RE) {
+      if (re.test(fullCmd)) {
+        return {
+          allowed: false,
+          reason: `命令匹配危险模式 ${re.source}（禁止 rm -rf / del /s / format / sudo / 命令替换等）`,
+        };
+      }
+    }
+
+    return { allowed: true };
   }
 
   /** 列出工作目录文件。 */

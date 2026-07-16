@@ -47,9 +47,9 @@ import type { UserPersonalizationService } from "../../services/user-personaliza
 import type { HookBus } from "../../services/hooks/index.js";
 import type { WebhookService } from "../../services/webhook/index.js";
 import type { MoodInferenceService } from "../../services/mood-inference-service.js";
-import type { JarvisHarness } from "../../services/jarvis/index.js";
 import type { DevicePairingService } from "../../services/device-pairing-service.js";
 import type { DeviceRegistry } from "../../device-bus/device-registry.js";
+import type { BrainCenter } from "../../brain/index.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -104,10 +104,10 @@ export type HttpRouteDeps = {
   notesService?: NotesService;
   externalChat?: ExternalChatProvider | null;
   moodInferenceService?: MoodInferenceService;
-  /** J.A.R.V.I.S. 统一主动消息中枢（可选，老路由可能不传） */
-  jarvisHarness?: JarvisHarness;
   /** 终端互连平台：设备配对服务 */
   devicePairingService?: DevicePairingService;
   /** 终端互连平台：设备注册表 */
   deviceRegistry?: DeviceRegistry;
+  /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
+  brainCenter?: BrainCenter | null;
 };

@@ -1,6 +1,6 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { buildMasterSubAgentDelegateChatTools } from "../agent/master-subagent-delegate-tools.js";
+import { buildMasterSubAgentDelegateChatTools, SUBAGENT_ASK_PEER_TOOL } from "../agent/master-subagent-delegate-tools.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
 import { isMasterAgentBuiltinTool } from "../tools/tool-search/core-tool-library.js";
 import type { SubAgentCapability } from "./master-agent-types.js";
@@ -25,7 +25,7 @@ export function filterChatToolsByRegistryNames(
 
 /**
  * 主 Agent 基本工具过滤 — 白名单来自 {@link isMasterAgentBuiltinTool}（核心工具库单一数据源）。
- * 排除：life 专有写操作、tech 视觉/桌面、creative 深度 RPA 等延迟目录工具。
+ * 排除：life 专有写操作、tech 视觉/桌面 等延迟目录工具。
  * 保留：核心库中的日程/通讯/具身；`master.*` 委派工具由下方单独追加。
  */
 function filterMasterBasicTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
@@ -52,13 +52,19 @@ export function buildSubAgentChatTools(
   );
   const builtins = filterChatToolsByRegistryNames(getBuiltinAgentChatTools(), allowed);
   const extra = filterChatToolsByRegistryNames(chatToolsExtra, allowed);
-  const merged = [...builtins, ...extra];
-  if (merged.length > 0) return merged;
+  // subagent.ask_peer 是所有子 Agent 共享的 Agent-to-Agent 协作工具，
+  // 直接追加（不依赖 getBuiltinAgentChatTools 注册）
+  const askPeerTool = SUBAGENT_ASK_PEER_TOOL;
+  const merged = [...builtins, ...extra, askPeerTool];
+  if (merged.length > 1) return merged;
 
-  return filterChatToolsByRegistryNames(
-    getBuiltinAgentChatTools(),
-    new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web", "fetch_web"]),
-  );
+  return [
+    ...filterChatToolsByRegistryNames(
+      getBuiltinAgentChatTools(),
+      new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web", "fetch_web"]),
+    ),
+    askPeerTool,
+  ];
 }
 
 /**

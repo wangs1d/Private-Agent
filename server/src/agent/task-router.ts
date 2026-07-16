@@ -8,7 +8,8 @@ export type LlmExecutionMode =
   | "master_only"
   | "master_delegate"
   | "plan_execute"
-  | "direct_llm";
+  | "direct_llm"
+  | "state_machine";
 
 export type RouteDecision = {
   mode: LlmExecutionMode;
@@ -35,11 +36,8 @@ const DELEGATE_KEYWORDS = [
 ];
 
 /**
- * 本地可执行代码任务：用户明确想用某种语言「算/计算/运行/验证」一个具体结果，
- * 而不是「写一个完整程序 / 调试 / 部署」。
- *
- * 命中后路由到 direct_llm，由标准 LLM + tool loop 直接调 code.run，
- * 避免 master agent 派子 agent（实测能把 TTFT 从 20s+ 降到 6-8s）。
+ * 本地可执行代码任务（"用 Python 算一下" / "计算一下" / "运行代码"）
+ * 直接走 direct_llm + code.run，避免 master agent 派子 agent（实测能把 TTFT 从 20s+ 降到 6-8s）。
  *
  * 注意排除「写/实现/开发/debug/部署」这类仍需委派的任务。
  */
@@ -70,6 +68,30 @@ const PARALLEL_SUBAGENT_RE =
 
 const CASUAL_FAST_CHAT_RE =
   /^(在吗|还在吗|哈哈|haha|lol|ok|okay|嗯|嗯嗯|欸|诶|哎|唉|哦|噢|喔|在|忙吗|睡了吗|吃了吗|收到|行|好嘞|好的呀|谢啦|谢谢啦|bye bye|晚安)[!！。.，,？?\s]*$/i;
+
+/**
+ * 状态机模式触发关键词:需要操控 Windows 桌面完成真实任务的指令。
+ * 命中后路由到 state_machine,由 AgentTaskOrchestrator 状态机编排多轮工具调用。
+ */
+const STATE_MACHINE_KEYWORDS = [
+  /打开.*(微信|qq|钉钉|飞书|浏览器|软件|应用|app|notepad|记事本|word|excel|ppt)/i,
+  /操作.*电脑|控制.*电脑|操控.*电脑/i,
+  /(微信|qq|钉钉|飞书).*(发消息|发.*消息|找.*联系人|搜索.*联系人|输入.*发送)/i,
+  /在电脑上.*(打开|操作|执行|运行|发送|输入)/i,
+  /帮.*(打开|操作|发送|输入|点击).*({微信|qq|软件|应用|电脑|桌面)/i,
+  /桌面.*(自动化|操控|操作|任务)/i,
+  /(点击|输入|按键|截图).*(按钮|框|输入框|搜索框|坐标|位置)/i,
+];
+
+/** 判断是否应走状态机模式(桌面自动化任务) */
+function shouldUseStateMachineMode(message: string): boolean {
+  const text = message.trim();
+  if (!text) return false;
+  for (const pattern of STATE_MACHINE_KEYWORDS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
 
 const FAST_CHAT_QUESTION_RE = /[?？]|什么|怎么|为什么|why|how|what|which|when/i;
 
@@ -125,6 +147,12 @@ export function routeLlmExecution(
       return { mode: "fast_chat", reasons };
     }
 
+    // 桌面自动化任务优先走状态机模式(外部任务队列+状态机编排,不靠 LLM 自主工具循环)
+    if (shouldUseStateMachineMode(text)) {
+      reasons.push("desktop_automation_state_machine");
+      return { mode: "state_machine", reasons };
+    }
+
     if (isSimpleDirectTask(text)) {
       reasons.push("simple_direct_task");
       return { mode: "master_only", reasons };
@@ -138,9 +166,13 @@ export function routeLlmExecution(
       return { mode: "direct_llm", reasons };
     }
 
+    // 长任务(需多步骤/委派能力)走状态机模式:
+    // 外部状态机驱动多轮工具调用 + 持久化进度 + 断点续跑,
+    // 替代 master_delegate 的 LLM 自主工具循环。
+    // orchestrator 不可用时由 agent-core fallback 到 master_delegate。
     if (requiresSubAgent(text)) {
-      reasons.push("requires_subagent_capability");
-      return { mode: "master_delegate", reasons };
+      reasons.push("long_task_state_machine");
+      return { mode: "state_machine", reasons };
     }
 
     reasons.push("master_tries_first");

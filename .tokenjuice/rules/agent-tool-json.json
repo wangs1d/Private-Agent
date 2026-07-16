@@ -5,8 +5,13 @@
   "priority": 50,
   "match": {
     "toolNames": [
-      "web.fetch_page",
-      "web.search",
+      "fetch_web",
+      "search_web",
+      "info.search",
+      "info.read_webpage",
+      "info.inspect_webpage",
+      "info.navigate_site",
+      "browser.fetch_page",
       "schedule.list",
       "schedule.create",
       "world.list_rooms",

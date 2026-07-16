@@ -25,6 +25,31 @@ export const BROWSER_SESSION_SITES = {
     hosts: ["fliggy.com", "www.fliggy.com", "m.fliggy.com"],
     homeUrl: "https://www.fliggy.com",
   },
+  tmall: {
+    label: "天猫",
+    hosts: ["tmall.com", "www.tmall.com", "m.tmall.com"],
+    homeUrl: "https://www.tmall.com",
+  },
+  pdd: {
+    label: "拼多多",
+    hosts: ["pinduoduo.com", "www.pinduoduo.com", "m.pinduoduo.com", "yangkeduo.com"],
+    homeUrl: "https://www.pinduoduo.com",
+  },
+  meituan: {
+    label: "美团",
+    hosts: ["meituan.com", "www.meituan.com", "h5.waimai.meituan.com", "i.waimai.meituan.com"],
+    homeUrl: "https://www.meituan.com",
+  },
+  dianping: {
+    label: "大众点评",
+    hosts: ["dianping.com", "www.dianping.com", "m.dianping.com"],
+    homeUrl: "https://www.dianping.com",
+  },
+  douyin: {
+    label: "抖音商城",
+    hosts: ["douyin.com", "www.douyin.com", "haohuo.jinritemai.com"],
+    homeUrl: "https://www.douyin.com",
+  },
 } as const;
 
 export type BrowserSessionSiteId = keyof typeof BROWSER_SESSION_SITES;

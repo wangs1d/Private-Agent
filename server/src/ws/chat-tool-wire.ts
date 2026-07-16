@@ -173,7 +173,6 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
     finance: "金融助手",
     tech: "技术助手",
     info: "信息助手",
-    creative: "创意助手",
     security: "安全助手",
   };
   const agentName = agentType ? (SUB_AGENT_LABELS[agentType] ?? agentType) : "助手";

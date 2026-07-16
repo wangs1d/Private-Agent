@@ -2,9 +2,6 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:url_launcher/url_launcher.dart";
 
-import "../../core/presentation/huawei_compat_guide_dialog.dart";
-import "../../core/services/phone_bridge_service.dart";
-
 /// 真实手机功能页：
 /// 常用工具「手机」入口的落地页。对接的是**用户自己的手机**（拨号 / 短信 /
 /// 通讯录 / 地图 / 浏览器 / 远程控制等），与 Agent 持有的"虚拟电话"分离。
@@ -91,30 +88,6 @@ class _PhoneDevicesPageState extends State<PhoneDevicesPage> {
     );
   }
 
-  Future<void> _invoke(String action, Map<String, dynamic> params) async {
-    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
-    if (!PhoneBridgeService.instance.isActive) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text("手机桥接未连接，请确认已在 Android 端登录并保持在线")),
-      );
-      return;
-    }
-    messenger.showSnackBar(
-      SnackBar(content: Text("正在执行 $action...")),
-    );
-    try {
-      final result = await PhoneBridgeService.instance.invokeLocal(action, params);
-      final ok = result["ok"] == true;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(ok ? "$action 完成" : "$action 失败：${result["error"] ?? ""}"),
-        ),
-      );
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text("调用失败：$e")));
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -138,8 +111,6 @@ class _PhoneDevicesPageState extends State<PhoneDevicesPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: <Widget>[
-          _buildBridgeCard(cs, text),
-          const SizedBox(height: 16),
           _buildHint(cs, text),
           const SizedBox(height: 16),
           _buildDialCard(cs, text),
@@ -149,122 +120,6 @@ class _PhoneDevicesPageState extends State<PhoneDevicesPage> {
           _buildBrowserCard(cs, text),
           const SizedBox(height: 16),
           _buildQuickActions(cs, text),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBridgeCard(ColorScheme cs, TextTheme text) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: _cardDecoration(cs),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          _sectionTitle(cs, text, Icons.phonelink_ring, "Agent 远程桥接"),
-          const SizedBox(height: 12),
-          ValueListenableBuilder<bool>(
-            valueListenable: PhoneBridgeService.instance.bridgeConnected,
-            builder: (BuildContext context, bool online, Widget? child) {
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: online ? Colors.green.withValues(alpha: 0.1) : cs.errorContainer,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: online ? Colors.green.withValues(alpha: 0.4) : cs.error,
-                  ),
-                ),
-                child: Row(
-                  children: <Widget>[
-                    Icon(
-                      online ? Icons.check_circle : Icons.warning_amber,
-                      color: online ? Colors.green : cs.error,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        online
-                            ? "手机桥接在线：Agent 可远程控制本机"
-                            : "手机桥接离线：Agent 无法远程控制本机",
-                        style: text.bodyMedium?.copyWith(
-                          color: online ? Colors.green.shade800 : cs.onErrorContainer,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 10,
-            runSpacing: 8,
-            children: <Widget>[
-              FilledButton.tonalIcon(
-                onPressed: () => showHuaweiCompatGuideDialog(context: context),
-                icon: const Icon(Icons.settings, size: 18),
-                label: const Text("授权与保活设置"),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => PhoneBridgeService.instance.start(),
-                icon: const Icon(Icons.play_arrow, size: 18),
-                label: const Text("连接桥接"),
-              ),
-            ],
-          ),
-          const Divider(height: 24),
-          Text("远程控制", style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 10,
-            runSpacing: 8,
-            children: <Widget>[
-              _RemoteButton(
-                icon: Icons.battery_full,
-                label: "查电量",
-                onPressed: () => _invoke("battery", <String, dynamic>{}),
-              ),
-              _RemoteButton(
-                icon: Icons.notifications,
-                label: "通知",
-                onPressed: () => _invoke("notifications", <String, dynamic>{"limit": 10}),
-              ),
-              _RemoteButton(
-                icon: Icons.camera_alt,
-                label: "拍照",
-                onPressed: () => _invoke("camera_capture", <String, dynamic>{}),
-              ),
-              _RemoteButton(
-                icon: Icons.videocam,
-                label: "录屏",
-                onPressed: () => _invoke("screen_record", <String, dynamic>{"durationSec": 10}),
-              ),
-              _RemoteButton(
-                icon: Icons.location_on,
-                label: "定位",
-                onPressed: () => _invoke("locate", <String, dynamic>{}),
-              ),
-              _RemoteButton(
-                icon: Icons.ring_volume,
-                label: "响铃",
-                onPressed: () => _invoke("ring", <String, dynamic>{"durationSec": 10}),
-              ),
-              _RemoteButton(
-                icon: Icons.sms,
-                label: "短信",
-                onPressed: () => _invoke("sms_list", <String, dynamic>{"limit": 10}),
-              ),
-              _RemoteButton(
-                icon: Icons.call,
-                label: "通话",
-                onPressed: () => _invoke("call_log", <String, dynamic>{"limit": 10}),
-              ),
-            ],
-          ),
         ],
       ),
     );
@@ -286,7 +141,6 @@ class _PhoneDevicesPageState extends State<PhoneDevicesPage> {
           Expanded(
             child: Text(
               "本页对接的是**你自己手机**的系统能力：拨号盘、短信、浏览器、地图等。"
-              "「Agent 远程桥接」可在电脑端/服务端调用 phone.* 工具控制此手机。"
               "聊天页底部那个「📞」按钮才是联系 Agent 的虚拟电话。",
               style: text.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
             ),
@@ -545,27 +399,6 @@ class _ShortcutTile extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _RemoteButton extends StatelessWidget {
-  const _RemoteButton({required this.icon, required this.label, required this.onPressed});
-  final IconData icon;
-  final String label;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return OutlinedButton.icon(
-      onPressed: onPressed,
-      icon: Icon(icon, size: 18),
-      label: Text(label),
-      style: OutlinedButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        side: BorderSide(color: cs.outline.withValues(alpha: 0.4)),
       ),
     );
   }

@@ -90,21 +90,21 @@ def _get_ocr(lang: str | None = None, use_angle_cls: bool = True) -> Any:
     # 控制语种,模型目录走 PPOCR_HOME 环境变量(我们已在进程启动时设到 D 盘)。
     lang = (target_lang or "ch").lower()
     if lang in ("ch", "zh", "chinese", "zh-cn", "zh-hans"):
-        det_name = "PP-OCRv5_Server_det"
-        rec_name = "PP-OCRv5_Server_rec"
+        det_name = "PP-OCRv5_mobile_det"
+        rec_name = "PP-OCRv5_mobile_rec"
     elif lang in ("en", "english"):
-        det_name = "PP-OCRv5_Server_det"
+        det_name = "PP-OCRv5_mobile_det"
         rec_name = "en_PP-OCRv5_mobile_rec"
     elif lang in ("ja", "japan", "japanese"):
-        det_name = "PP-OCRv5_Server_det"
+        det_name = "PP-OCRv5_mobile_det"
         rec_name = "japan_PP-OCRv5_mobile_rec"
     elif lang in ("ko", "korean"):
-        det_name = "PP-OCRv5_Server_det"
+        det_name = "PP-OCRv5_mobile_det"
         rec_name = "korean_PP-OCRv5_mobile_rec"
     else:
         # 兜底用中文
-        det_name = "PP-OCRv5_Server_det"
-        rec_name = "PP-OCRv5_Server_rec"
+        det_name = "PP-OCRv5_mobile_det"
+        rec_name = "PP-OCRv5_mobile_rec"
 
     LOG.info("加载 PaddleOCR 3.x: lang=%s det=%s rec=%s", lang, det_name, rec_name)
     _OCR_INSTANCE = PaddleOCR(

@@ -16,7 +16,7 @@ import "web_sphere_drag_chrome.dart";
 ///
 /// - Web：iframe 内嵌
 /// - Windows：默认独立桌宠窗口，主应用内不渲染
-/// - 降级：Electron 不可用时，才使用应用内 WebView
+/// - 降级：Tauri 不可用时，才使用应用内 WebView
 class FloatingAgentSphere extends StatefulWidget {
   const FloatingAgentSphere({super.key});
 
@@ -35,9 +35,9 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   Offset? _position;
   late final SphereFloatMotion _floatMotion = SphereFloatMotion(vsync: this);
 
-  bool get _electronActive =>
+  bool get _overlayActive =>
       FloatingAgentSphere.useWindowsDesktop &&
-      SphereOverlayLauncher.electronActive.value;
+      SphereOverlayLauncher.overlayActive.value;
 
   bool get _embeddedFallback =>
       FloatingAgentSphere.useWindowsDesktop &&
@@ -48,7 +48,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     super.initState();
     AgentSphereMoodBridge.instance.addMessageListener(_onEmbodimentCommand);
     DeskPetSession.instance.addListener(_onDeskPetSessionChanged);
-    SphereOverlayLauncher.electronActive.addListener(_onOverlayState);
+    SphereOverlayLauncher.overlayActive.addListener(_onOverlayState);
     SphereOverlayLauncher.useEmbeddedFallback.addListener(_onOverlayState);
   }
 
@@ -56,7 +56,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   void dispose() {
     AgentSphereMoodBridge.instance.removeMessageListener(_onEmbodimentCommand);
     DeskPetSession.instance.removeListener(_onDeskPetSessionChanged);
-    SphereOverlayLauncher.electronActive.removeListener(_onOverlayState);
+    SphereOverlayLauncher.overlayActive.removeListener(_onOverlayState);
     SphereOverlayLauncher.useEmbeddedFallback.removeListener(_onOverlayState);
     _floatMotion.dispose();
     super.dispose();
@@ -73,7 +73,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
   void _onEmbodimentCommand(Map<String, dynamic> message) {
     final String? type = message["type"]?.toString();
     if (type != "agent-sphere:command") return;
-    if (!mounted || _electronActive) return;
+    if (!mounted || _overlayActive) return;
 
     final Size screen = MediaQuery.sizeOf(context);
     _ensureInitialPosition(screen);
@@ -120,7 +120,7 @@ class _FloatingAgentSphereState extends State<FloatingAgentSphere>
     final Size screen = MediaQuery.sizeOf(context);
 
     if (FloatingAgentSphere.useWindowsDesktop) {
-      if (_electronActive || !_embeddedFallback) {
+      if (_overlayActive || !_embeddedFallback) {
         return const SizedBox.shrink();
       }
 

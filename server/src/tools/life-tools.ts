@@ -80,7 +80,6 @@ export function registerLifeTools(
       try {
         const task = await scheduleTaskService.createTask({
           sessionId,
-          title: subject,
           description: subject,
           kind: "reminder",
           runAt,
@@ -95,7 +94,7 @@ export function registerLifeTools(
           matched: true,
           summary: "提醒已写入日程",
           taskId: task.taskId,
-          title: task.title,
+          title: task.reminderMessage || task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
@@ -141,7 +140,7 @@ export function registerLifeTools(
         matched: true,
         summary: "提醒已写入日程",
         taskId: task.taskId,
-        title: task.title,
+        title: task.reminderMessage || task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),

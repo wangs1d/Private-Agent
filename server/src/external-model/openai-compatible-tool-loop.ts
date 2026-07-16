@@ -19,6 +19,7 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import {
   MASTER_INVOKE_SUB_AGENT_REGISTRY,
   MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
+  SUBAGENT_ASK_PEER_REGISTRY,
 } from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
@@ -32,6 +33,7 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
+import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isAssistantWithToolCalls,
   isToolCallIdNotFoundError,
@@ -45,6 +47,7 @@ import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
   materializeOpenAiToolCalls,
+  StreamIdleTimeoutError,
   type NormalToolCall,
 } from "./stream-chat-helpers.js";
 import type {
@@ -56,26 +59,97 @@ import type {
 import { executeWithToolLimit } from "../services/concurrency-limiter.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
+
+/** 检测模型是否支持视觉(多模态图片输入)。
+ *  deepseek-chat / gpt-3.5 等纯文本模型不支持,注入 image_url 会导致 API 报错。 */
+function modelSupportsVision(model: string): boolean {
+  const m = model.toLowerCase();
+  // 已知支持视觉的模型系列
+  const visionPatterns = [
+    "gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-4.1",
+    "claude-3", "claude-sonnet", "claude-opus", "claude-haiku",
+    "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qvq",
+    "glm-4v", "glm-4.6v", "glm-4-plus",
+    "moonshot-v1", "kimi",
+    "gemini", "llava", "internvl",
+    "deepseek-vl", "deepseek-vl2",
+  ];
+  return visionPatterns.some((p) => m.includes(p));
+}
+
+/** 调用 PaddleOCR 服务识别截图中的文本和位置。
+ *  非视觉模型(deepseek-chat 等)看不到图片,用 OCR 文本+坐标作为视觉替代。 */
+async function ocrScreenshot(imageBase64: string, mimeType: string): Promise<string | null> {
+  const port = process.env.PADDLE_OCR_PORT?.trim() || "8765";
+  const url = `http://127.0.0.1:${port}/ocr`;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64, mimeType, mergeLines: true }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      ok: boolean;
+      text?: string;
+      lines?: Array<{ text: string; confidence: number; box: number[][] }>;
+      width?: number;
+      height?: number;
+      error?: string;
+    };
+    if (!data.ok || !data.lines?.length) return null;
+    // 格式化:每个文本元素 + 中心坐标(用于 desktop.run_input 点击)
+    const lines = data.lines.map((ln, i) => {
+      const box = ln.box || [];
+      if (box.length >= 2) {
+        const xs = box.map((p) => p[0]);
+        const ys = box.map((p) => p[1]);
+        const cx = Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
+        const cy = Math.round(ys.reduce((a, b) => a + b, 0) / ys.length);
+        return `${i + 1}. "${ln.text}" → 点击坐标 (${cx}, ${cy}) [置信度: ${ln.confidence}]`;
+      }
+      return `${i + 1}. "${ln.text}" [置信度: ${ln.confidence}]`;
+    });
+    return `屏幕 OCR 识别结果 (${data.width}x${data.height},共 ${data.lines.length} 个文本元素,坐标可用于 desktop.run_input 点击):\n${lines.join("\n")}`;
+  } catch {
+    return null;
+  }
+}
 // 工具结果字符预算：在信息完整性和 token 节省之间取平衡。
 // search_web 1200：保留足够 title+snippet（约 5-6 条结果）让 LLM 判断哪些值得 fetch_web。
 // fetch_web 2000：正文摘要足够 LLM 提取关键信息，不过度截断导致信息丢失。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
-  "search_web": 1200,
-  "fetch_web": 2000,
-  "info.search": 1000,
-  "info.inspect_webpage": 1800,
-  "info.navigate_site": 2400,
-  "browser.session.list": 1000,
-  "browser.fetch_page": 1800,
-  "calendar.list_tasks": 1000,
-  "aip.list_my_state": 900,
-  "self.list_custom_skills": 900,
-  "agent.query_capabilities": 1100,
-  "search": 1000,
-  "describe": 1000,
-  "tool_search": 1000,
-  "tool_discover": 1200,
+  "search_web": 600,
+  "fetch_web": 1000,
+  "info.search": 600,
+  "info.inspect_webpage": 1000,
+  "info.navigate_site": 1200,
+  "browser.session.list": 600,
+  "browser.fetch_page": 1000,
+  "calendar.list_tasks": 800,
+  "aip.list_my_state": 800,
+  "self.list_custom_skills": 800,
+  "agent.query_capabilities": 900,
+  "search": 600,
+  "describe": 800,
+  "tool_search": 800,
+  "tool_discover": 800,
   "tool_call": 1200,
+  "shopping.order.search": 1500,
+  "shopping.order.place": 1000,
+  "shopping.order.track": 1000,
+  "shopping.order.cancel": 800,
+  // agent_browser.* —— extract_text 是主要信息获取工具（文本+可交互元素），给充足 budget；
+  // screenshot 的 base64 已在 service 层截断到 2000 字符，budget 覆盖元数据即可。
+  "agent_browser.open": 600,
+  "agent_browser.click": 300,
+  "agent_browser.type": 300,
+  "agent_browser.scroll": 300,
+  "agent_browser.screenshot": 2500,
+  "agent_browser.extract_text": 5000,
+  "agent_browser.wait_for": 300,
+  "agent_browser.close": 200,
 };
 
 // strip_keys：只去掉纯元数据字段，保留 LLM 决策需要的字段。
@@ -125,12 +199,39 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   if (registryToolName === MASTER_POLL_SUB_AGENT_TASKS_REGISTRY) {
     return Math.max(defaultMs, 10_000);
   }
+  // subagent.ask_peer 内部跑一次完整子 Agent 执行，需与 master.invoke_sub_agent 同级超时
+  if (registryToolName === SUBAGENT_ASK_PEER_REGISTRY) {
+    const rt = getAgentRuntimeConfig().masterDelegation;
+    return (
+      Math.max(
+        rt.subtaskTimeoutMs,
+        rt.techSubtaskTimeoutMs,
+        rt.infoSubtaskTimeoutMs,
+      ) + 5_000
+    );
+  }
   // code.run 内部 spawn 超时上限 120s，外层需 ≥ 内层，避免外层先超时产生孤儿进程
   if (registryToolName === "code.run") {
     const sandboxMax = Number.parseInt(process.env.CODE_SANDBOX_TIMEOUT_MS ?? "30000", 10);
     const sandboxClamped = Math.min(Math.max(sandboxMax, 30_000), 120_000);
     return Math.max(defaultMs, sandboxClamped + 2_000);
   }
+  // code.shell 与 code.run 同样 spawn 子进程，复用相同超时上限
+  if (registryToolName === "code.shell") {
+    const sandboxMax = Number.parseInt(process.env.CODE_SANDBOX_TIMEOUT_MS ?? "30000", 10);
+    const sandboxClamped = Math.min(Math.max(sandboxMax, 30_000), 120_000);
+    return Math.max(defaultMs, sandboxClamped + 2_000);
+  }
+  // shopping.order.* 走 Playwright 多步浏览器操作，耗时长，须独立超时不被 30s 默认截断
+  if (registryToolName === "shopping.order.search") return 90_000;
+  if (registryToolName === "shopping.order.place") return 180_000;
+  if (registryToolName === "shopping.order.track") return 60_000;
+  if (registryToolName === "shopping.order.cancel") return 90_000;
+  // agent_browser.* 走 Playwright 无头浏览器操作，open 须启动浏览器 + 导航给充足超时，
+  // wait_for 用户可设 60s 等待，其余操作默认 15s（service 层）+ 余量
+  if (registryToolName === "agent_browser.open") return 60_000;
+  if (registryToolName === "agent_browser.wait_for") return 65_000;
+  if (registryToolName.startsWith("agent_browser.")) return 30_000;
   // 按工具类别分级超时：快工具给短超时，防止上游慢响应把整个 turn 卡到 30s
   const classTimeouts: Record<string, number> = {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
@@ -299,12 +400,58 @@ function buildToolSufficiencyHint(toolName: string, content: string): string {
       }
       return "";
     }
+    case "code.shell": {
+      if (content.includes('"ok":true') || content.includes('"ok": true')) {
+        return "\n[提示] shell 命令已执行完成，stdout/stderr 已返回。如被策略拒绝请改用白名单内命令，或用 code.run 写脚本实现等效逻辑。";
+      }
+      return "";
+    }
     case "fetch_web": {
       return "\n[提示] 网页正文已提取完成。如已有足够信息可直接回答，无需重复抓取同一页面。";
     }
     default:
       return "";
   }
+}
+
+/**
+ * 失败工具结果的强约束 reminder。
+ *
+ * 为什么需要：LLM 在面对 user 期待型请求（如"打开微信"）时，训练倾向会让它
+ * 即使看到 ok:false 的 tool result 也对用户宣称"已打开"，造成"假成功"。
+ * 这里在 tool result content 后追加一条 system 级强约束，让 LLM 必须如实承认失败。
+ *
+ * P2 升级（2026-07-14）：
+ * - 从硬编码 desktop.open 单例，改为调 tool-metadata.buildRecoveryHint，
+ *   覆盖所有有 alternatives 的工具（desktop/web/shopping 等）。
+ * - desktop.open 保留原有的兜底路径建议（跨盘符扫描/截图确认）。
+ *
+ * 设计原则：
+ * - 仅对"用户易感知成败"或"有确定性替代"的工具生效
+ * - 文案直白：禁止宣称成功 + 引用 error + 给出兜底路径
+ * - 不替代 error 字段，是补充提示
+ */
+function buildToolFailureReminder(toolName: string, content: string): string {
+  // 提取 error 字段供 LLM 引用（避免它编造）
+  const errMatch = content.match(/"error"\s*:\s*"([^"]+)"/);
+  const errSnippet = errMatch ? errMatch[1].slice(0, 120) : "见上方 error 字段";
+
+  // 通用恢复提示（覆盖所有有 alternatives / requireHonestFailure 的工具）
+  const genericHint = buildRecoveryHint(toolName, errSnippet);
+  if (genericHint) {
+    // desktop.open 追加原有的具体兜底路径建议
+    if (toolName === "desktop.open") {
+      return (
+        genericHint +
+        `或改用 desktop.open 重试(自动跨盘符扫描)、` +
+        `desktop.visual.screenshot 截图确认当前屏幕状态后重试。`
+      );
+    }
+    return genericHint;
+  }
+
+  // 无 alternatives 且非 honest 的工具：不加提示（fallthrough 到原行为）
+  return "";
 }
 
 /**
@@ -759,7 +906,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
-          reminderMessage: { type: "string", description: "到点时展示的提醒文案" },
+          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
         },
         required: ["text"],
@@ -793,7 +940,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          title: { type: "string" },
+          title: { type: "string", description: "任务标题（reminder 类型可选，由 reminderMessage 自动生成友好文案）" },
           description: { type: "string" },
           kind: {
             type: "string",
@@ -807,7 +954,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "默认 none；勿在用户未要求时填 daily",
           },
           timezone: { type: "string" },
-          reminderMessage: { type: "string", description: "仅 kind=reminder" },
+          reminderMessage: { type: "string", description: "仅 kind=reminder。到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           action: {
             type: "object",
             description: "仅 kind=action",
@@ -822,12 +969,12 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "仅 kind=agent_task",
             properties: {
               prompt: { type: "string", description: "到点后交给 Agent 执行的自然语言任务" },
-              accessMode: { type: "string", enum: ["sandbox", "full"], description: "默认 sandbox" },
+              accessMode: { type: "string", enum: ["sandbox", "full"], description: "已废弃，Agent 始终以 full 运行；保留字段仅为协议兼容" },
             },
           },
           prompt: { type: "string", description: "agent_task 的快捷 prompt 字段" },
         },
-        required: ["title", "description", "kind", "runAt"],
+        required: ["description", "kind", "runAt"],
         additionalProperties: true,
       },
     },
@@ -1214,6 +1361,9 @@ let _mcpChatTools: ChatCompletionTool[] = [];
 /** 能力模块依赖（由 bootstrap 阶段设置；为 null 时能力模块工具不并入） */
 let _capabilityModuleDeps: CapabilityModuleDeps | null = null;
 
+/** 动态注入的 Brain Center 工具（由 bootstrap 阶段设置；brain 未启用时为空数组） */
+let _brainChatTools: ChatCompletionTool[] = [];
+
 /** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
 export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _mcpChatTools = tools;
@@ -1232,6 +1382,17 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
  */
 export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
   _capabilityModuleDeps = deps;
+  _builtinToolsCache = null;
+}
+
+/**
+ * 注入 Brain Center 工具 schema 列表（启动时调用一次）。
+ *
+ * 仅当 BrainCenter 启用时由 bootstrap 传入 BRAIN_TOOLS；否则保持空数组，
+ * brain.* 工具不会出现在 LLM 可见工具列表中。调用后清缓存重建。
+ */
+export function setBrainChatTools(tools: ChatCompletionTool[]): void {
+  _brainChatTools = tools;
   _builtinToolsCache = null;
 }
 
@@ -1262,6 +1423,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     BROWSER_SESSION_LIST_CHAT_TOOL,
     ...SELF_PROGRAMMING_CHAT_TOOLS,
     ...capabilityModuleTools,
+    ..._brainChatTools,
     ..._mcpChatTools,
   ];
   return _builtinToolsCache;
@@ -1338,8 +1500,24 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'desktop',
-    keywords: ['桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control', '操作', 'operate', '点击', 'click', '键盘', 'keyboard', '鼠标', 'mouse', '截屏', '截图', '操控', '打开浏览器', '浏览器'],
-    toolNames: ['desktop.visual.screenshot', 'desktop.visual.run_task'],
+    keywords: [
+      '桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control',
+      '操作', 'operate', '点击', 'click', '键盘', 'keyboard', '鼠标', 'mouse', '截屏', '截图', '操控',
+      '打开浏览器', '浏览器',
+      // 2026-07-13 新增：让 LLM 在「打开微信 / 启动应用 / 发消息 / 跑命令」等场景下能命中 desktop 工具
+      '打开', 'open', '启动', 'launch', '运行', 'run', '应用', 'app', '程序', 'program',
+      '微信', 'wechat', 'qq', '抖音', 'douyin', '钉钉', 'dingtalk', '飞书', 'feishu', 'lark',
+      '窗口', 'window', '按钮', 'button', 'uia', 'uia_query', '控件', 'control_',
+      'cmd', 'powershell', 'bash', 'shell', '终端', 'terminal', '命令行',
+    ],
+    toolNames: [
+      'desktop.visual.screenshot',
+      'desktop.visual.run_task',
+      'desktop.open',
+      'desktop.run_preset',
+      'desktop.run_shell',
+      'desktop.uia_query',
+    ],
   },
   {
     category: 'programming',
@@ -1691,7 +1869,19 @@ export async function streamCompletionWithTools(
       fullReasoning = result.reasoning;
       finishReason = result.finishReason;
     } catch (e) {
-      throw e;
+      // 流式空闲超时：如果有 partial content 且没有 tool_calls，用 partial content 兜底。
+      // tool_calls 不完整时不能兜底（会导致 LLM 收到半截 JSON 参数）。
+      if (e instanceof StreamIdleTimeoutError && e.partialContent.trim() && normalizedToolCalls.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[stream-idle-timeout] tool-loop model=${model} ` +
+            `→ 使用 ${e.partialContent.length} 字符的 partial content 兜底`,
+        );
+        finishReason = "stop"; // 强制标记为正常结束
+        // fullText 已通过 onContentDelta 累积，不需要额外处理
+      } else {
+        throw e;
+      }
     }
 
     // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为进度前导话
@@ -1885,6 +2075,36 @@ export async function streamCompletionWithTools(
         } else {
           resultForWire = exec.result;
         }
+        // 自动检测工具结果中的图片(imageBase64)。
+        // 视觉模型 → 转成多模态 image_url 注入;非视觉模型 → 调用 PaddleOCR 识别文本+坐标。
+        if (
+          exec.ok &&
+          resultForWire &&
+          typeof (resultForWire as Record<string, unknown>).imageBase64 === "string"
+        ) {
+          const rw = resultForWire as Record<string, unknown>;
+          const b64 = rw.imageBase64 as string;
+          const mime = typeof rw.mimeType === "string" ? rw.mimeType : "image/png";
+          if (modelSupportsVision(model)) {
+            // 视觉模型:注入 image_url 让 LLM 直接看图
+            const frame: VisionFrame = {
+              sourceKind: "agent_attachment",
+              sourceId: targetToolName,
+              mimeType: mime,
+              dataBase64: b64,
+            };
+            injectFrames = injectFrames ? [...injectFrames, frame] : [frame];
+          } else {
+            // 非视觉模型:调用 PaddleOCR 识别文本+坐标,作为视觉替代
+            const ocrText = await ocrScreenshot(b64, mime);
+            if (ocrText) {
+              (rw as Record<string, unknown>).ocrText = ocrText;
+            }
+          }
+          // 移除 base64 数据,避免压缩后以文本形式重复注入
+          resultForWire = { ...rw };
+          delete resultForWire.imageBase64;
+        }
         const compacted = await compactToolOutputForLlm({
           toolName: targetToolName,
           ok: exec.ok,
@@ -1922,6 +2142,13 @@ export async function streamCompletionWithTools(
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
       });
       const toolContent = compacted.content;
+      // 非视觉模型截图后追加 OCR 识别结果(文本+坐标),让 LLM 能"看到"屏幕内容
+      const ocrText = settled.status === "fulfilled"
+        ? (settled.value.resultForWire as Record<string, unknown>)?.ocrText
+        : undefined;
+      const fullToolContent = typeof ocrText === "string" && ocrText.trim()
+        ? `${toolContent}\n\n${ocrText}`
+        : toolContent;
       if (toolContent?.trim()) {
         roundToolOutputs.push(toolContent.trim());
       }
@@ -1929,18 +2156,32 @@ export async function streamCompletionWithTools(
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
       // 明确告诉 LLM「结果已完整」，让它直接回答而非重复调用。
       const sufficiencyHint = exec.ok
-        ? buildToolSufficiencyHint(wireToolName, toolContent)
+        ? buildToolSufficiencyHint(wireToolName, fullToolContent)
         : "";
+      // 对失败的工具结果追加强约束 reminder，防止 LLM 忽略 error 字段后对用户撒谎。
+      // 关键场景：desktop.open 派发进程但窗口未起来 → ok=false → LLM 必须如实承认失败。
+      const failureReminder = !exec.ok
+        ? buildToolFailureReminder(wireToolName, fullToolContent)
+        : "";
+      const appendedHints = [sufficiencyHint, failureReminder]
+        .filter(Boolean)
+        .join("\n");
       messages.push({
         role: "tool",
         tool_call_id: item.tc.id,
-        content: sufficiencyHint ? `${toolContent}\n${sufficiencyHint}` : toolContent,
+        content: appendedHints ? `${fullToolContent}\n${appendedHints}` : fullToolContent,
       });
       if (injectFrames?.length) {
+        const frameHint =
+          wireToolName === "desktop.visual.screenshot" || wireToolName === "vision.http_pull"
+            ? wireToolName === "desktop.visual.screenshot"
+              ? "（以下为 desktop.visual.screenshot 截取的当前屏幕画面；请仔细观察画面内容,判断当前屏幕状态和可操作元素,然后决定下一步动作。）"
+              : "（以下为 vision.http_pull 抓取的远程图像帧；请客观描述画面并继续完成任务。）"
+            : `（以下为 ${wireToolName} 返回的图像；请根据画面内容继续完成任务。）`;
         messages.push({
           role: "user",
           content: openAiUserContentFromTurn({
-            text: "（以下为 vision.http_pull 抓取的远程图像帧；请客观描述画面并继续完成任务。）",
+            text: frameHint,
             visionFrames: injectFrames,
           }),
         });

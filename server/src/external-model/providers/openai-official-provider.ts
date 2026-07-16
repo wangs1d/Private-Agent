@@ -36,6 +36,7 @@ import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
   pickVisibleText,
+  StreamIdleTimeoutError,
 } from "../stream-chat-helpers.js";
 
 import type {
@@ -97,7 +98,9 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     this.model = (process.env.OPENAI_MODEL ?? "gpt-4o-mini").trim();
 
-    this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
+    this.client = apiKey
+      ? new OpenAI({ apiKey, baseURL, timeout: 180_000 })
+      : null;
 
     // 定期清理过期缓存（每10分钟）
     setInterval(() => this.cleanupCache(), 10 * 60 * 1000).unref();
@@ -514,9 +517,19 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
 
     } catch (e) {
 
-      msgs.length = turnStartLen;
-
-      throw e;
+      // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
+      if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {
+        visible = e.partialContent.trim();
+        full = visible;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[stream-idle-timeout] provider=${this.id} model=${model} ` +
+            `→ 使用 ${visible.length} 字符的 partial content 兜底`,
+        );
+      } else {
+        msgs.length = turnStartLen;
+        throw e;
+      }
 
     }
 

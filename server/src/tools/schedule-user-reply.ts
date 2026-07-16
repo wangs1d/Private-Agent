@@ -1,14 +1,14 @@
+import { formatReminderMessage } from "../services/schedule-intent-service.js";
 import { isScheduleCreateToolName } from "./schedule-tool-names.js";
 
 /** 到点提醒展示文案：补全过短的口语片段。 */
 export function formatReminderDisplayMessage(subject: string): string {
   const s = subject.trim();
   if (!s) return "到点提醒";
-  if (/喊我起床|叫我起床/.test(s)) return "该起床啦！";
-  if (s === "喊我" || s === "叫我") return "该起床啦！";
-  if (/吃药/.test(s)) return "该吃药啦";
-  if (s.length >= 3) return s;
-  return s;
+  if (/[啦啊哦哟！!]$/.test(s)) return s;
+  if (/^该.+[啦啊哦哟！!]?$/.test(s)) return s;
+  if (s.length >= 3 && !/提醒|喊|叫/.test(s)) return s;
+  return formatReminderMessage(s);
 }
 
 function formatRunAtLocal(iso: string): string {

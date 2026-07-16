@@ -1,5 +1,6 @@
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
+import { AGENT_COMMITMENT_RE } from "../agent/memory-signal.js";
 import { adoptLegacyMasterDelegateThread } from "./chat-thread-adopt.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
@@ -44,10 +45,19 @@ function findUserMessageByClientId(
 }
 
 const DEFAULT_SMART_TRIM_CONFIG = {
-  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? "12", 10),
+  maxMessages: parseInt(process.env.MAX_THREAD_MESSAGES ?? "24", 10),
   maxTokens: parseInt(process.env.MAX_CONTEXT_TOKENS ?? "6000", 10),
   preserveRecentTurns: 3,
 };
+
+const SESSION_RECAP_PREFIX = "[session-recap]";
+const SESSION_RECAP_TITLE = "Earlier conversation recap:";
+const SESSION_RECAP_MAX_LINES = 8;
+const SESSION_RECAP_MAX_CHARS = 900;
+const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|记住|remember|prefer/i;
+const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我想做|我需要/i;
+const USER_REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
+const ASSISTANT_DECISION_RE = /建议|结论|可以|应该|下一步|已为你|已经帮你|稍后|接下来/i;
 
 const TIME_FRAME_PREFIX = "[timeframe:";
 
@@ -243,6 +253,139 @@ function annotateTimeframe(content: string, at: Date, now: Date = new Date()): s
   return `${prefix}\n${rest}`;
 }
 
+function stripTimestampText(content: string): string {
+  const parsed = readMessageTimestampPrefix(content);
+  return (parsed?.rest ?? content).trim();
+}
+
+function isSessionRecapMessage(msg: ChatCompletionMessageParam | undefined): boolean {
+  if (!msg || msg.role !== "assistant" || typeof msg.content !== "string") return false;
+  return stripTimestampText(msg.content).startsWith(SESSION_RECAP_PREFIX);
+}
+
+function extractSessionRecapLines(content: string | undefined): string[] {
+  if (!content) return [];
+  const text = stripTimestampText(content);
+  if (!text.startsWith(SESSION_RECAP_PREFIX)) return [];
+  return text
+    .split("\n")
+    .slice(1)
+    .map((line) => line.replace(/^-+\s*/, "").trim())
+    .filter((line) => line && line !== SESSION_RECAP_TITLE);
+}
+
+function normalizeRecapLine(line: string): string {
+  return line.replace(/\s+/g, " ").trim();
+}
+
+function firstSentence(text: string, maxLen = 140): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const sentence = normalized.split(/[。！？!?\n]/)[0]?.trim() || normalized;
+  return sentence.length > maxLen ? `${sentence.slice(0, maxLen - 3).trimEnd()}...` : sentence;
+}
+
+function pushRecapLine(target: string[], line: string): void {
+  const normalized = normalizeRecapLine(line);
+  if (!normalized) return;
+  if (target.includes(normalized)) return;
+  target.push(normalized);
+}
+
+function extractRecapLinesFromMessages(messages: ChatCompletionMessageParam[]): string[] {
+  const priority: string[] = [];
+  const general: string[] = [];
+  let leadingUserCount = 0;
+  let leadingAssistantCount = 0;
+
+  for (const msg of messages) {
+    if (msg.role !== "user" && msg.role !== "assistant") continue;
+    if (typeof msg.content !== "string") continue;
+    const text = stripTimestampText(msg.content);
+    if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
+    const gist = firstSentence(text);
+    if (!gist) continue;
+
+    if (msg.role === "user") {
+      if (leadingUserCount < 2) {
+        pushRecapLine(general, `Earlier user: ${gist}`);
+        leadingUserCount += 1;
+        continue;
+      }
+      if (USER_PREFERENCE_RE.test(text)) {
+        pushRecapLine(priority, `User preference: ${gist}`);
+        continue;
+      }
+      if (USER_FACT_RE.test(text)) {
+        pushRecapLine(priority, `User fact: ${gist}`);
+        continue;
+      }
+      if (USER_REQUEST_RE.test(text) || text.includes("?") || text.includes("？")) {
+        pushRecapLine(general, `Earlier user request: ${gist}`);
+      }
+      continue;
+    }
+
+    if (leadingAssistantCount < 2) {
+      pushRecapLine(general, `Earlier assistant: ${gist}`);
+      leadingAssistantCount += 1;
+      continue;
+    }
+    if (AGENT_COMMITMENT_RE.test(text)) {
+      pushRecapLine(priority, `Agent commitment: ${gist}`);
+      continue;
+    }
+    if (ASSISTANT_DECISION_RE.test(text)) {
+      pushRecapLine(general, `Earlier agent conclusion: ${gist}`);
+    }
+  }
+
+  const lines = [...priority, ...general].slice(0, SESSION_RECAP_MAX_LINES);
+  return lines;
+}
+
+function buildSessionRecapMessage(
+  existingLines: string[],
+  droppedMessages: ChatCompletionMessageParam[],
+): ChatCompletionMessageParam | null {
+  const merged: string[] = [];
+  for (const line of existingLines) pushRecapLine(merged, line);
+  for (const line of extractRecapLinesFromMessages(droppedMessages)) pushRecapLine(merged, line);
+
+  if (merged.length === 0) return null;
+
+  const lines: string[] = [];
+  let totalChars = SESSION_RECAP_PREFIX.length + SESSION_RECAP_TITLE.length + 2;
+  for (const line of merged) {
+    if (lines.length >= SESSION_RECAP_MAX_LINES) break;
+    if (totalChars + line.length + 4 > SESSION_RECAP_MAX_CHARS) break;
+    lines.push(`- ${line}`);
+    totalChars += line.length + 4;
+  }
+  if (lines.length === 0) return null;
+
+  return {
+    role: "assistant",
+    content: `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${lines.join("\n")}`,
+  };
+}
+
+function separateRecapMessages(messages: ChatCompletionMessageParam[]): {
+  body: ChatCompletionMessageParam[];
+  recapLines: string[];
+} {
+  const body: ChatCompletionMessageParam[] = [];
+  const recapLines: string[] = [];
+  for (const msg of messages) {
+    if (isSessionRecapMessage(msg)) {
+      recapLines.push(...extractSessionRecapLines(typeof msg.content === "string" ? msg.content : ""));
+      continue;
+    }
+    body.push(msg);
+  }
+  return { body, recapLines };
+}
+
 function annotateMessageIfNeeded(
   msg: ChatCompletionMessageParam,
   at: Date,
@@ -329,10 +472,13 @@ export class ChatThreadStore {
     }
 
     const sys = msgs[0];
-    const rest = msgs.slice(1);
-    const trimmed = trimPreservingToolPairs(rest, config.maxMessages);
+    const separated = separateRecapMessages(msgs.slice(1));
+    const trimResult = trimPreservingToolPairs(separated.body, config.maxMessages);
+    const recap = buildSessionRecapMessage(separated.recapLines, trimResult.dropped);
     msgs.length = 0;
-    msgs.push(sys, ...trimmed);
+    msgs.push(sys);
+    if (recap) msgs.push(recap);
+    msgs.push(...trimResult.kept);
 
     const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     if (totalTokens > config.maxTokens) {
@@ -346,7 +492,8 @@ export class ChatThreadStore {
   ): void {
     if (msgs.length <= 2) return;
     const sys = msgs[0];
-    const rest = msgs.slice(1);
+    const separated = separateRecapMessages(msgs.slice(1));
+    const rest = separated.body;
     const recentMessages = rest.slice(-config.preserveRecentTurns * 2);
     const olderMessages = rest.slice(0, -config.preserveRecentTurns * 2);
     let currentTokens =
@@ -362,9 +509,13 @@ export class ChatThreadStore {
       currentTokens += groupTokens;
     }
 
+    const droppedMessages = olderMessages.filter((msg) => !preservedOlder.includes(msg));
+    const recap = buildSessionRecapMessage(separated.recapLines, droppedMessages);
+
     msgs.length = 0;
+    msgs.push(sys);
+    if (recap) msgs.push(recap);
     msgs.push(
-      sys,
       ...sanitizeToolCallMessageChain([...preservedOlder, ...recentMessages], "[chat-thread-store-trim]"),
     );
   }
@@ -549,17 +700,23 @@ function groupMessagesPreservingToolPairs(
 function trimPreservingToolPairs(
   messages: ChatCompletionMessageParam[],
   maxMessages: number,
-): ChatCompletionMessageParam[] {
+): { kept: ChatCompletionMessageParam[]; dropped: ChatCompletionMessageParam[] } {
   if (messages.length <= maxMessages) {
-    return sanitizeToolCallMessageChain(messages, "[chat-thread-store-trim]");
+    return {
+      kept: sanitizeToolCallMessageChain(messages, "[chat-thread-store-trim]"),
+      dropped: [],
+    };
   }
   const groups = groupMessagesPreservingToolPairs(messages);
-  const result: ChatCompletionMessageParam[] = [];
+  const keptGroups: ChatCompletionMessageParam[][] = [];
   let total = 0;
   for (let g = groups.length - 1; g >= 0; g--) {
     if (total + groups[g].length > maxMessages) continue;
-    result.unshift(...groups[g]);
+    keptGroups.unshift(groups[g]);
     total += groups[g].length;
   }
-  return sanitizeToolCallMessageChain(result, "[chat-thread-store-trim]");
+  const keptSet = new Set(keptGroups.flat());
+  const kept = sanitizeToolCallMessageChain(keptGroups.flat(), "[chat-thread-store-trim]");
+  const dropped = messages.filter((msg) => !keptSet.has(msg));
+  return { kept, dropped };
 }

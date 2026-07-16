@@ -251,7 +251,7 @@ export class MorningBriefingService {
       const tasks = scheduleTaskService.listTasksBySession(sessionId);
       return tasks.slice(0, 10).map((t) => ({
         id: t.taskId,
-        title: t.title,
+        title: t.reminderMessage || t.title || "",
         time: t.nextRunAt ?? t.runAt,
       }));
     } catch {

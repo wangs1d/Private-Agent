@@ -10,6 +10,8 @@ export type BatchedMessage = {
   timestamp: number;
   /** 当前 WebSocket 完整 sessionId（含 notes:/master: 等前缀），用于记忆上下文区分。 */
   sessionId?: string;
+  /** 消息内容类型，用于区分 voice/text_chat 等 channel（如 "audio" → voice） */
+  contentType?: string;
 };
 
 export type MessageBatchProcessorConfig = {

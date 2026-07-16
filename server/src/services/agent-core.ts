@@ -43,14 +43,29 @@ import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
-import { routeLlmExecution, type LlmExecutionMode } from "../agent/task-router.js";
+import { routeLlmExecution, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
+import type { BrainCenter } from "../brain/index.js";
+import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
+import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
+import type { AgentTaskOrchestratorDeps } from "./agent-task-orchestrator.js";
 import { buildToolRankingHintFromHermesProfile } from "./hermes-tool-ranking.js";
+import { LoopOrchestrator } from "../agent/loop/loop-orchestrator.js";
+import {
+  ReactLoopStrategy,
+  PlanExecuteLoopStrategy,
+  StateMachineStrategy,
+  type LoopStrategy,
+} from "../agent/loop/loop-strategy.js";
+import { DefaultTerminationPolicy } from "../agent/loop/default-termination.js";
+import { DefaultRecoveryPolicy } from "../agent/loop/default-recovery.js";
+import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
+import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 
 /**
  * 简单 LRU 缓存实现（用于响应缓存）
@@ -227,15 +242,28 @@ type ShortTermTurnContext = {
   resumedTask: boolean;
 };
 
+/** Loop Orchestrator 启用开关（P1：仅 direct_llm 路径接入，默认关闭）。 */
+function isLoopOrchestratorEnabled(): boolean {
+  const raw = process.env.AGENT_LOOP_ORCHESTRATOR?.trim().toLowerCase();
+  if (!raw || raw === "0" || raw === "off" || raw === "false" || raw === "no") {
+    return false;
+  }
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
   private readonly turnLifecycle: TurnLifecycle;
   private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
+  private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;
+  private readonly loopOrchestrator: LoopOrchestrator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: WsConnectionRegistry | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
+  /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
+  private brainCenter: BrainCenter | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -270,6 +298,7 @@ export class AgentCore {
       hermesEvolutionLoopService: this.hermesEvolutionLoopService,
       userPersonalizationService: this.userPersonalizationService,
       agentMemorySyncService: this.agentMemorySyncService,
+      shortTermMemoryGateway: this.shortTermMemoryGateway,
     });
 
     if (this.externalChat?.isEnabled() && isMasterAgentDelegationEnabled()) {
@@ -299,6 +328,28 @@ export class AgentCore {
         },
       );
     }
+
+    // 初始化状态机编排器(桌面自动化任务,外部状态机驱动 LLM 多轮调用)
+    if (this.externalChat && this.toolRegistry) {
+      const orchestratorDeps: AgentTaskOrchestratorDeps = {
+        provider: this.externalChat,
+        toolRegistry: this.toolRegistry,
+      };
+      this.agentTaskOrchestrator = new AgentTaskOrchestrator(orchestratorDeps);
+
+      // 初始化 Loop Orchestrator（P1：仅 direct_llm 路径接入，feature flag 控制）
+      // strategies map 收敛三种 loop；StateMachine 为 P1 stub，state_machine 路径暂走原分支
+      const loopStrategies = new Map<LlmExecutionMode, LoopStrategy>();
+      loopStrategies.set("direct_llm", new ReactLoopStrategy(this.externalChat));
+      loopStrategies.set("plan_execute", new PlanExecuteLoopStrategy(this.externalChat));
+      loopStrategies.set("state_machine", new StateMachineStrategy());
+      this.loopOrchestrator = new LoopOrchestrator(loopStrategies, {
+        termination: new DefaultTerminationPolicy(),
+        recovery: new DefaultRecoveryPolicy(),
+        progress: new DefaultProgressTracker(this.externalChat),
+        escalation: new DefaultEscalationPolicy(),
+      });
+    }
   }
 
   /** 在 bootstrap 注册桌面桥接后注入，用于按轮检测电脑是否在线。 */
@@ -324,6 +375,72 @@ export class AgentCore {
   /** 在 bootstrap 注册 LifeSignalHub 后注入，用于在情绪推理后发布 mood 信号。 */
   setLifeSignalHubService(service: LifeSignalHubService | null): void {
     this.lifeSignalHubService = service;
+  }
+
+  /**
+   * 注入 BrainCenter。可用时 handleUserMessage 走 cognize() 端到端认知入口，
+   * 替代原切片式 moodInference + routeLlmExecution + buildShortTermTurnContext。
+   * BRAIN_CENTER_ENABLED=0 时 brainCenter 为 null，降级到原切片路径。
+   */
+  setBrainCenter(brain: BrainCenter | null): void {
+    this.brainCenter = brain;
+  }
+
+  /**
+   * 推送 MoodInferred WS 事件 + 发布 mood LifeSignal。
+   * 统一 cognize 路径（用 EmotionVector 映射）和降级路径（用 MoodInference 结果）的副作用。
+   */
+  private emitMoodInferred(
+    sessionId: string,
+    mood: {
+      sentimentScore: number;
+      confidence: number;
+      emotionTags: string[];
+      agentNote: string;
+      timestamp: string;
+    },
+  ): void {
+    const registry = this.wsRegistry;
+    const lifeSignalHub = this.lifeSignalHubService;
+    const payload = {
+      type: ServerEventType.MoodInferred,
+      payload: {
+        sessionId,
+        sentimentScore: mood.sentimentScore,
+        confidence: mood.confidence,
+        emotionTags: mood.emotionTags,
+        agentNote: mood.agentNote,
+        timestamp: mood.timestamp,
+      },
+    };
+    try {
+      registry?.trySend(sessionId, JSON.stringify(payload));
+    } catch {
+      // 静默失败，不影响主流程
+    }
+    try {
+      lifeSignalHub?.publish({
+        id: `mood-${mood.timestamp}-${Date.now()}`,
+        actorId: sessionId,
+        source: "agent_inference",
+        kind: "mood",
+        title: mood.sentimentScore < -0.2 ? "情绪偏低" : "情绪积极",
+        summary: mood.emotionTags.length > 0
+          ? `检测到情绪：${mood.emotionTags.join("、")}`
+          : "情绪状态变化",
+        tags: mood.emotionTags,
+        importance: mood.sentimentScore < -0.5 ? "high" : "medium",
+        evidence: [mood.agentNote ?? "对话情感分析"],
+        metrics: {
+          sentimentScore: mood.sentimentScore,
+          confidence: mood.confidence,
+        },
+        metadata: { mood },
+        occurredAt: mood.timestamp,
+      });
+    } catch {
+      // 静默失败，不影响主流程
+    }
   }
 
   private desktopBridgeOnlineFor(actorId: string): boolean {
@@ -368,67 +485,72 @@ export class AgentCore {
   ): Promise<AgentReply> {
     const sessionId = opts?.sessionId ?? actorId;
 
-    // 情绪感知钩子：每次收到用户消息后异步分析，并通过 WS 推送 mood.inferred 事件给客户端
-    if (this.moodInferenceService && text?.trim()) {
-      const userMessageText = text;
-      const registry = this.wsRegistry;
-      const inferenceService = this.moodInferenceService;
-      const lifeSignalHub = this.lifeSignalHubService;
-      void inferenceService.analyzeMessage(sessionId, userMessageText).then((inference) => {
-        if (!inference) return;
-        const payload = {
-          type: ServerEventType.MoodInferred,
-          payload: {
-            sessionId,
+    // 用户开口即打断小脑：清空该 actor 的 defer 队列 + 设 60s 抑制窗口，
+    // 让"用户开口时 Agent 不抢话"从注释变成可执行逻辑。
+    // 小脑未注册时（BRAIN_NEURO_ENABLED=0）interruptProactive 为空操作。
+    this.brainCenter?.interruptProactive(actorId);
+
+    // === 端到端认知入口（替代原切片式 moodInference + routeLlmExecution + buildShortTermTurnContext）===
+    // BrainCenter 可用时走 cognize()：一次 LLM 完成路由+情绪+记忆召回+初步响应
+    // BrainCenter 不可用时（BRAIN_CENTER_ENABLED=0）降级到原切片路径
+    let route: RouteDecision;
+    let shortTermTurn: ShortTermTurnContext;
+    /** cognize 产出的初步响应：needsToolLoop=false 时可直接作为最终响应 */
+    let cognitiveResponse = "";
+    /** cognize 是否需要工具循环：false 时可跳过 streamCompletion */
+    let cognitiveNeedsToolLoop = true;
+    /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
+    let cognitiveRecallItems: MemoryRecallItem[] | undefined;
+
+    if (this.brainCenter && text?.trim()) {
+      // 端到端认知：感知并行收集 → 一次认知 LLM → 后置安全/记忆
+      const cognitive = await this.brainCenter.cognize({ actorId, text, sessionId });
+      route = {
+        mode: cognitive.route.mode as LlmExecutionMode,
+        reasons: [cognitive.route.rationale],
+      };
+      shortTermTurn = { recallQuery: text, resumedTask: false };
+      cognitiveResponse = cognitive.response;
+      cognitiveNeedsToolLoop = cognitive.needsToolLoop;
+      cognitiveRecallItems = cognitive.recallItems;
+
+      // 推送 MoodInferred 事件（替代原 moodInference 切片，cognize 阶段1 已并行调 limbic.inferEmotion）
+      if (cognitive.emotion) {
+        this.emitMoodInferred(sessionId, {
+          sentimentScore: cognitive.emotion.valence,
+          confidence: cognitive.emotion.confidence ?? 0.5,
+          emotionTags: [cognitive.emotion.label],
+          agentNote: cognitive.emotion.label,
+          timestamp: cognitive.emotion.detectedAt,
+        });
+      }
+    } else {
+      // === 降级：原切片路径（BRAIN_CENTER_ENABLED=0 时）===
+      // 异步情绪推断（不阻塞主流程）+ WS 推送 MoodInferred + lifeSignalHub.publish
+      if (this.moodInferenceService && text?.trim()) {
+        const inferenceService = this.moodInferenceService;
+        void inferenceService.analyzeMessage(sessionId, text).then((inference) => {
+          if (!inference) return;
+          this.emitMoodInferred(sessionId, {
             sentimentScore: inference.sentimentScore,
             confidence: inference.confidence,
             emotionTags: inference.emotionTags,
-            agentNote: inference.agentNote,
+            agentNote: inference.agentNote ?? "对话情感分析",
             timestamp: inference.timestamp,
-          },
-        };
-        try {
-          registry?.trySend(sessionId, JSON.stringify(payload));
-        } catch {
-          // 静默失败，不影响主流程
-        }
-        // 同时发布 LifeSignal 到 hub，触发 ProactiveLifeRuntime 关怀
-        try {
-          lifeSignalHub?.publish({
-            id: `mood-${inference.timestamp}-${Date.now()}`,
-            actorId: sessionId,
-            source: "agent_inference",
-            kind: "mood",
-            title: inference.sentimentScore < -0.2 ? "情绪偏低" : "情绪积极",
-            summary: inference.emotionTags.length > 0
-              ? `检测到情绪：${inference.emotionTags.join("、")}`
-              : "情绪状态变化",
-            tags: inference.emotionTags,
-            importance: inference.sentimentScore < -0.5 ? "high" : "medium",
-            evidence: [inference.agentNote ?? "对话情感分析"],
-            metrics: {
-              sentimentScore: inference.sentimentScore,
-              confidence: inference.confidence,
-            },
-            metadata: {
-              inference,
-            },
-            occurredAt: inference.timestamp,
           });
-        } catch {
+        }).catch(() => {
           // 静默失败，不影响主流程
-        }
-      }).catch(() => {
-        // 静默失败，不影响主流程
+        });
+      }
+      route = routeLlmExecution(text, getAgentRuntimeConfig(), {
+        preferFullPipeline: opts?.preferFullPipeline === true,
       });
+      shortTermTurn = route.mode === "fast_chat"
+        ? { recallQuery: text, resumedTask: false }
+        : this.buildShortTermTurnContext(sessionId, text);
     }
 
-    const shortTermTurn = this.buildShortTermTurnContext(sessionId, text);
-
     const perfStartTime = Date.now();
-    const route = routeLlmExecution(text, getAgentRuntimeConfig(), {
-      preferFullPipeline: opts?.preferFullPipeline === true,
-    });
     
     // 响应缓存检查（性能优化：重复查询 <100ms）
     const cacheEnabled = process.env.RESPONSE_CACHE_ENABLED !== '0';
@@ -458,6 +580,28 @@ export class AgentCore {
       return { text: fallback };
     }
 
+    // cognize 已产出最终响应且无需工具循环 → 直接返回（跳过 streamCompletion/工具循环）
+    // 仅 fast_chat/direct_llm 模式适用；master/plan/state_machine 路径需走执行层
+    if (
+      cognitiveResponse &&
+      !cognitiveNeedsToolLoop &&
+      (route.mode === "fast_chat" || route.mode === "direct_llm")
+    ) {
+      this.turnLifecycle.finalizeTurn({
+        actorId,
+        userText: text,
+        assistantText: cognitiveResponse,
+        sessionId,
+      });
+      // cognize response 写入缓存，下次同类查询 <100ms 命中
+      if (cacheEnabled && !opts?.visionFrames?.length) {
+        globalResponseCache.set(text, actorId, cognitiveResponse);
+      }
+      // 流式分片：cognize response 一次性返回，不分片
+      opts?.onAssistantDelta?.(cognitiveResponse);
+      return { text: cognitiveResponse, streamedChunks: false };
+    }
+
     // 性能监控：前置准备阶段
     const prepStartTime = Date.now();
     
@@ -468,7 +612,11 @@ export class AgentCore {
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
       : await Promise.all([
-          this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
+          // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
+          cognitiveRecallItems && cognitiveRecallItems.length > 0
+            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
           resolveUserLocationPrompt({
             clientIp: opts?.clientIp,
             clientLocation: opts?.clientLocation,
@@ -498,7 +646,76 @@ export class AgentCore {
 
     try {
       let result: AgentReply;
-      
+
+      // 状态机模式:长任务(桌面自动化/多步骤委派)走外置任务队列+状态机编排
+      if (route.mode === "state_machine") {
+        if (!this.agentTaskOrchestrator) {
+          // orchestrator 不可用,降级到 master_only 走后续分支
+          route = { mode: "master_only", reasons: [...route.reasons, "fallback_no_orchestrator"] };
+        } else {
+        const sessionId = opts?.sessionId ?? actorId;
+        const orchestrator = this.agentTaskOrchestrator;
+        const registry = this.wsRegistry;
+        const onDelta = opts?.onAssistantDelta;
+
+        // 创建任务并异步启动主循环
+        const taskId = orchestrator.createAndRun(
+          {
+            actorId,
+            sessionId,
+            chatUserMessageId: opts?.chatUserMessageId,
+            goal: text,
+            maxRounds: 30,
+            tags: ["desktop_automation"],
+          },
+          {
+            onProgress: (event) => {
+              if (!registry) return;
+              try {
+                registry.trySend(
+                  event.sessionId,
+                  JSON.stringify({
+                    type: ServerEventType.ChatExecutionEvent,
+                    payload: {
+                      kind: "task_progress",
+                      ...event,
+                    },
+                  }),
+                );
+              } catch {
+                // 静默失败
+              }
+            },
+            onAssistantDelta: (delta) => {
+              onDelta?.(delta);
+            },
+            onToolExecuteStart: (info) => {
+              opts?.onExternalToolExecuteStart?.({
+                toolName: info.name,
+                input: info.args,
+              });
+            },
+            onToolExecuted: (info) => {
+              opts?.onExternalToolExecuted?.({
+                toolName: info.name,
+                input: {},
+                ok: info.ok,
+                result: (info.result as Record<string, unknown>) ?? {},
+              });
+            },
+          },
+        );
+
+        // 立即返回任务已创建的回复(主循环在后台异步执行)
+        result = {
+          text: `已创建自动化任务 #${taskId.slice(-8)},正在后台执行: ${text}\n\n任务进度会通过事件实时推送。`,
+          streamedChunks: false,
+        };
+
+        return result;
+        } // end else (orchestrator available)
+      }
+
       if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
         // 性能监控：Master Agent 模式
         const masterStartTime = Date.now();
@@ -669,6 +886,11 @@ export class AgentCore {
     };
   }
 
+  /** 暴露 MasterAgentCoordinator 引用供 BrainCenter/PlannerCortex 注册委派能力 */
+  getMasterAgentCoordinator(): MasterAgentCoordinator | null {
+    return this.masterAgentCoordinator;
+  }
+
   adjustMasterAgentConcurrency(_newMaxParallel: number): void {
     this.masterAgentCoordinator?.adjustConcurrency(_newMaxParallel);
   }
@@ -736,6 +958,21 @@ export class AgentCore {
     const profile =
       this.agentMemorySyncService?.getSnapshot(actorId, ["hermes_profile"]).entries.hermes_profile;
     return buildToolRankingHintFromHermesProfile(profile);
+  }
+
+  /**
+   * 把 cognize 阶段已召回的 MemoryRecallItem[] 拼接为 narrative recall 字符串。
+   * 用于在 standard path 中复用 cognize 召回结果，替代 prepareNarrativeRecall。
+   * 单条 content 已由 MemoryCortex.textToRecallItems 截断至 800 字符（Task 3），此处不再截断。
+   * 返回 undefined 表示无可用内容（与 prepareNarrativeRecall 的空结果语义一致）。
+   */
+  private recallItemsToNarrative(items: MemoryRecallItem[]): string | undefined {
+    const lines: string[] = [];
+    for (const it of items) {
+      const content = typeof it?.content === "string" ? it.content.trim() : "";
+      if (content) lines.push(content);
+    }
+    return lines.length > 0 ? lines.join("\n") : undefined;
   }
 
   private buildOrchestrateOpts(
@@ -866,22 +1103,50 @@ export class AgentCore {
     if (peUsed) {
       const chatKey = opts?.chatUserMessageId ?? randomUUID();
       const peSessionId = planExecuteSessionId(actorId, chatKey);
-      const result = await runPlanExecuteLoop({
-        provider,
-        planSessionId: peSessionId,
-        userText: text,
-        visionFrames: opts?.visionFrames,
-        onDelta: (delta) => opts?.onAssistantDelta?.(delta),
-        onPhaseStatus: opts?.onAgentPhaseStatus,
-        onPlanReady: opts?.onPlanReady,
-        toolCtx,
-        baseStreamOpts: streamOpts,
-        onToolBatchForExecute: onBatchWithEvolution,
-      });
-      full = result.finalText;
-      modelCallsConsumed = Math.max(1, result.modelCalls);
-      pePlan = result.plan;
-      peExhausted = result.exhaustedRetries;
+
+      if (isLoopOrchestratorEnabled() && this.loopOrchestrator) {
+        // P4：编排器接管 plan_execute（多工具协同路径），驱动 plan→execute→评估→replan 循环。
+        // direct_llm / fast_chat 不进编排器（普通对话无需多轮控制流）。
+        const orchResult = await this.loopOrchestrator.run(
+          {
+            taskId: `loop-${chatKey}`,
+            actorId,
+            sessionId: peSessionId,
+            goal: text,
+            initialMode: "plan_execute",
+          },
+          {
+            sessionId: peSessionId,
+            userTurn,
+            toolCtx,
+            streamOpts,
+            onDelta: (delta) => opts?.onAssistantDelta?.(delta),
+          },
+        );
+        full = orchResult.finalText;
+        modelCallsConsumed = Math.max(1, orchResult.modelCalls);
+        pePlan = orchResult.ctx.plan;
+        peExhausted =
+          orchResult.terminateReason === "replan_exhausted" ||
+          orchResult.terminateReason === "budget_exhausted";
+      } else {
+        const result = await runPlanExecuteLoop({
+          provider,
+          planSessionId: peSessionId,
+          userText: text,
+          visionFrames: opts?.visionFrames,
+          onDelta: (delta) => opts?.onAssistantDelta?.(delta),
+          onPhaseStatus: opts?.onAgentPhaseStatus,
+          onPlanReady: opts?.onPlanReady,
+          toolCtx,
+          baseStreamOpts: streamOpts,
+          onToolBatchForExecute: onBatchWithEvolution,
+        });
+        full = result.finalText;
+        modelCallsConsumed = Math.max(1, result.modelCalls);
+        pePlan = result.plan;
+        peExhausted = result.exhaustedRetries;
+      }
       provider.clearSession?.(peSessionId);
       provider.appendThreadTurn?.(chatSessionId, userTurn, full);
     } else {

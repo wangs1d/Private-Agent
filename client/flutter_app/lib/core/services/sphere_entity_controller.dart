@@ -36,7 +36,7 @@ class SphereEntityController extends ChangeNotifier {
     }
     final bool ok = await SphereOverlayLauncher.launch();
     if (!ok) return false;
-    if (SphereOverlayLauncher.electronActive.value ||
+    if (SphereOverlayLauncher.overlayActive.value ||
         SphereOverlayLauncher.useEmbeddedFallback.value) {
       overlayReady = true;
       notifyListeners();

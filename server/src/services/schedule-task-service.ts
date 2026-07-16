@@ -24,7 +24,7 @@ export type ScheduleAgentTaskConfig = {
 export type ScheduleTaskRecord = {
   taskId: string;
   sessionId: string;
-  title: string;
+  title?: string;
   description: string;
   kind: ScheduleTaskKind;
   recurrence: ScheduleRecurrence;
@@ -60,7 +60,7 @@ type PersistedScheduleState = {
 
 export type CreateScheduleTaskInput = {
   sessionId: string;
-  title: string;
+  title?: string;
   description: string;
   kind: ScheduleTaskKind;
   runAt?: string;
@@ -229,7 +229,7 @@ export class ScheduleTaskService {
     const task: ScheduleTaskRecord = {
       taskId: randomUUID(),
       sessionId: input.sessionId,
-      title: input.title.trim(),
+      title: input.title?.trim() || undefined,
       description: input.description.trim(),
       kind: input.kind,
       recurrence: schedule.recurrence,

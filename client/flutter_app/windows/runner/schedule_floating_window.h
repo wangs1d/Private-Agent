@@ -27,6 +27,7 @@ class ScheduleFloatingWindow {
     std::string id;         // 唯一 id
     std::string time_text;  // "HH:MM" 展示文本
     std::string title;      // 标题
+    std::string notes;      // 备注（可选，空字符串表示无备注）
     bool completed = false; // 是否已完成
   };
 
@@ -72,17 +73,18 @@ class ScheduleFloatingWindow {
 
  private:
   static constexpr const wchar_t* kClassName = L"PAI_ScheduleFloating_Window";
-  static constexpr int kTitleBarHeight = 36;   // 顶栏高
+  static constexpr int kTitleBarHeight = 40;    // 顶栏高（对齐 in-app 卡片头部）
   static constexpr int kMinWidth = 240;
   static constexpr int kDefaultWidth = 280;
   static constexpr int kDefaultHeight = 420;
-  static constexpr int kItemHeight = 32;        // 单条日程行高
-  static constexpr int kBodyPadding = 12;       // 内容区内边距
-  static constexpr int kMaxVisibleItems = 10;   // 不滚动时最多显示多少条
-  static constexpr int kFooterHeight = 24;      // 底部统计栏
+  static constexpr int kItemHeight = 46;        // 单条日程行高（含时间+竖线+标题+备注）
+  static constexpr int kBodyPadding = 14;       // 内容区内边距（对齐 in-app 14px）
+  static constexpr int kMaxVisibleItems = 8;    // 不滚动时最多显示多少条
+  static constexpr int kTimeColWidth = 42;      // 时间列宽（"HH:MM" + 竖线）
   static constexpr int kCloseBtnSize = 22;
   static constexpr int kCollapseBtnSize = 22;
   static constexpr int kCornerRadius = 12;
+  static constexpr int kCalIconSize = 14;       // 标题栏日历图标尺寸
 
   static constexpr UINT_PTR kButtonCloseId = 2001;
   static constexpr UINT_PTR kButtonCollapseId = 2002;
@@ -112,6 +114,12 @@ class ScheduleFloatingWindow {
   void DrawUiText(HDC hdc, const RECT& rc, const std::wstring& text,
                   HFONT font, COLORREF color,
                   UINT flags = DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  /// 绘制标题栏日历图标（GDI 矢量绘制，避免 emoji 渲染不一致）。
+  void DrawCalendarIcon(HDC hdc, int x, int y, int size, COLORREF color);
+  /// 从 "HH:MM" 时间文本中解析小时。
+  int ParseHour(const std::string& time_text) const;
+  /// 根据小时返回时间文字颜色（对齐 in-app _buildScheduleRow 的配色）。
+  COLORREF GetTimeColor(const std::string& time_text) const;
 
   /// 根据当前日程数量 + 折叠状态计算需要的窗口高度。
   int CalculateWindowHeight() const;
@@ -124,6 +132,7 @@ class ScheduleFloatingWindow {
   HFONT font_ui_ = nullptr;
   HFONT font_title_ = nullptr;
   HFONT font_time_ = nullptr;
+  HFONT font_notes_ = nullptr;  // 备注小字号（10pt）
 
   // 状态
   bool on_top_ = true;

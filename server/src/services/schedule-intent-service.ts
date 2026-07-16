@@ -1,7 +1,7 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
 
 export type ScheduleDraft = {
-  title: string;
+  title?: string;
   description: string;
   kind: "reminder" | "action" | "weather_brief";
   runAt: string;
@@ -121,12 +121,12 @@ export class ScheduleIntentService {
       "{",
       '  "ok": true,',
       '  "task": {',
-      '    "title": "string",',
-      '    "description": "string",',
+      '    "title": "简洁的提醒事项名，如「睡觉」而非「喊我睡觉」（可选；reminder 可不填，由 reminderMessage 自动生成）",',
+      '    "description": "用户原句",',
       '    "kind": "reminder|action|weather_brief",',
       '    "runAt": "ISO-8601 string",',
       '    "recurrence": "none|daily|weekly|yearly",',
-      '    "reminderMessage": "string optional（仅 reminder）",',
+      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该睡觉啦！」而非「喊我睡觉」或「睡觉」（仅 reminder）",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
       "}",
@@ -177,12 +177,11 @@ export class ScheduleIntentService {
     if (isReminderIntent(normalized)) {
       const reminderText = extractReminderSubject(normalized);
       return {
-        title: reminderText,
         description: normalized,
         kind: "reminder",
         runAt: runAt.toISOString(),
         recurrence,
-        reminderMessage: reminderText,
+        reminderMessage: formatReminderMessage(reminderText),
       };
     }
     return null;
@@ -219,16 +218,18 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     recurrence === "daily" ||
     recurrence === "weekly" ||
     recurrence === "yearly";
-  if (!title || !description || !validKind || !validRecurrence) return null;
+  if (!description || !validKind || !validRecurrence) return null;
   const runAtDate = new Date(runAt);
   if (Number.isNaN(runAtDate.getTime())) return null;
   if (kind === "weather_brief") {
+    if (!title) return null;
     return { title, description, kind: "weather_brief", runAt: runAtDate.toISOString(), recurrence };
   }
   if (kind === "reminder") {
     const reminderMessage = String(v.reminderMessage ?? "").trim() || description;
-    return { title, description, kind, runAt: runAtDate.toISOString(), recurrence, reminderMessage };
+    return { description, kind, runAt: runAtDate.toISOString(), recurrence, reminderMessage };
   }
+  if (!title) return null;
   const actionObj = v.action as Record<string, unknown> | undefined;
   const url = String(actionObj?.url ?? "").trim();
   if (!url) return null;
@@ -465,12 +466,13 @@ function isReminderIntent(text: string): boolean {
   );
 }
 
-/** 从用户句中提取提醒事项（保留「喊我起床」等完整语义，不剥离「起床」）。 */
+/** 从用户句中提取提醒事项。 */
 export function extractReminderSubject(userText: string): string {
   const normalized = userText.trim();
   let rest = stripLeadingTimeExpression(normalized);
   rest = rest.replace(/^[，,、；;。\s]+/, "");
   rest = rest.replace(/^(请|帮我|把我)\s*/, "");
+  rest = rest.replace(/^(喊我|叫我)\s*/, "");
   rest = rest.replace(/^提醒我\s*/, "");
   rest = rest.replace(/^提醒一下\s*/, "");
   rest = rest.replace(/^提醒\s*/, "");
@@ -479,13 +481,24 @@ export function extractReminderSubject(userText: string): string {
   return rest || "到点提醒";
 }
 
+/** 将提醒事项转为到点时展示的友好文案。 */
+export function formatReminderMessage(subject: string): string {
+  const s = subject.trim();
+  if (!s) return "到点提醒";
+  if (s === "起床") return "该起床啦！";
+  if (s === "吃药" || s === "用药") return "该吃药啦";
+  if (/[啦啊哦哟！!]$/.test(s)) return s;
+  if (s.length <= 8) return `该${s}啦`;
+  return s;
+}
+
 function stripLeadingTimeExpression(text: string): string {
   const rel = text.match(
     /^(?:半(?:个)?(?:小时|钟头)|\d+\s*秒(?:钟)?|[一二两三四五六七八九十]{1,3}|\d+)\s*(?:个)?(?:分钟|小时|钟头)(?:后|之后|以内)?|半(?:个)?(?:小时|钟头)(?:后|之后)?\s*/,
   );
   if (rel) return text.slice(rel[0].length);
   const abs = text.match(
-    /^(?:(?:明天|今天|后天|大后天)\s*)?(?:(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)\s*)?(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)\s*/,
+    /^(?:(?:每天|每日|明天|今天|后天|大后天)\s*)?(?:(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)\s*)?(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)\s*/,
   );
   if (abs) return text.slice(abs[0].length);
   return text;

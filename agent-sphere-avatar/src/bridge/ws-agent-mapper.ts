@@ -77,7 +77,7 @@ export function mapWsToAgentUpdate(msg: WsEnvelope): AgentWsUpdate | null {
       const title = String(p.title ?? "自动化任务").trim();
       return { mood: "thinking", energy: 0.75, caption: `▶ ${title}`, phase: "agent_task", source: "agent_task" };
     }
-    case "agent.phone.incoming": {
+    case "agent.voice.incoming": {
       const dir = String(p.direction ?? "");
       const caption =
         dir === "agent_to_user"

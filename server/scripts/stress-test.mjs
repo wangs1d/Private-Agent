@@ -2,9 +2,9 @@
  * 高并发压测脚本：验证并发控制 + 回压 + 立即 ack 机制。
  *
  * 用法：
- *   node scripts/stress-test.mjs [并发连接数] [总消息数] [服务器URL]
+ *   node scripts/stress-test.mjs [并发连接数] [总消息数] [服务器URL] [消息文本]
  *
- * 默认：20 并发连接，20 条消息，ws://localhost:3000/ws
+ * 默认：20 并发连接，20 条消息，ws://localhost:3000/ws，消息 "你好"
  *
  * 指标：
  *   - ack 延迟：从发送消息到收到 chat.message_received 的时间（应 < 5ms）
@@ -19,6 +19,7 @@ import WebSocket from "ws";
 const CONCURRENCY = parseInt(process.argv[2] ?? "20", 10);
 const TOTAL_MESSAGES = parseInt(process.argv[3] ?? String(CONCURRENCY), 10);
 const SERVER_URL = process.argv[4] ?? "ws://localhost:3000/ws";
+const MESSAGE_TEXT = process.argv[5] ?? "你好";
 const HTTP_BASE = SERVER_URL.replace("ws://", "http://").replace("wss://", "https://").replace("/ws", "");
 
 console.log("═══════════════════════════════════════════════════");
@@ -27,6 +28,7 @@ console.log("──────────────────────�
 console.log(`  并发连接数:  ${CONCURRENCY}`);
 console.log(`  总消息数:    ${TOTAL_MESSAGES}`);
 console.log(`  服务器:      ${SERVER_URL}`);
+console.log(`  消息文本:    ${MESSAGE_TEXT}`);
 console.log(`  HTTP 监控:   ${HTTP_BASE}/system/concurrency`);
 console.log("═══════════════════════════════════════════════════\n");
 
@@ -102,7 +104,7 @@ function runClient(clientId, userId) {
         ws.send(JSON.stringify({
           type: "chat.user_message",
           payload: {
-            text: "你好",
+            text: MESSAGE_TEXT,
             messageId: msgId,
             sessionId: userId,
             userId,

@@ -29,7 +29,6 @@ class RightSidePanel extends StatefulWidget {
     this.onSchedule,
     this.onWallet,
     this.onPhone,
-    this.onNotes,
     this.onMessages,
   });
 
@@ -38,7 +37,6 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onSchedule;
   final VoidCallback? onWallet;
   final VoidCallback? onPhone;
-  final VoidCallback? onNotes;
   final VoidCallback? onMessages;
 
   @override
@@ -56,7 +54,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
   void initState() {
     super.initState();
     DeskPetSession.instance.addListener(_onDeskPetChanged);
-    _loadSchedulePreference();
     ScheduleFloatingLauncher.bindHandlers(
       onCloseClicked: () {
         if (mounted) {
@@ -70,6 +67,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
         }
       },
     );
+    _loadSchedulePreference();
   }
 
   @override
@@ -90,6 +88,9 @@ class _RightSidePanelState extends State<RightSidePanel> {
       setState(() {
         _useDesktopFloating = mode == ScheduleDisplayMode.desktopFloating;
       });
+    }
+    if (mode == ScheduleDisplayMode.desktopFloating) {
+      await _launchDesktopScheduleWindow();
     }
   }
 
@@ -121,6 +122,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                 timeText:
                     "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
                 title: e.title,
+                notes: (e.notes ?? '').trim(),
               ))
           .toList();
       ScheduleFloatingLauncher.setSchedule(items);
@@ -221,8 +223,10 @@ class _RightSidePanelState extends State<RightSidePanel> {
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                   children: <Widget>[
-                    _buildScheduleCard(),
-                    const SizedBox(height: 16),
+                    if (!_useDesktopFloating) ...<Widget>[
+                      _buildScheduleCard(),
+                      const SizedBox(height: 16),
+                    ],
                     _buildToolsCard(),
                   ],
                 ),
@@ -288,32 +292,12 @@ class _RightSidePanelState extends State<RightSidePanel> {
             ],
           ),
           const SizedBox(height: 12),
-          if (_useDesktopFloating)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                children: <Widget>[
-                  Icon(Icons.check_circle_outline,
-                      size: 14, color: _kAccentGreen),
-                  const SizedBox(width: 6),
-                  Text(
-                    _scheduleWindowActive ? "桌面悬浮窗已开启" : "正在启动桌面悬浮窗…",
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: _scheduleWindowActive
-                          ? _kAccentGreen
-                          : cs.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          if (!_useDesktopFloating && widget.scheduleFuture == null)
+          if (widget.scheduleFuture == null)
             Text(
               "暂无日程数据",
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
             )
-          else if (!_useDesktopFloating)
+          else
             FutureBuilder<List<ScheduleEvent>>(
               future: widget.scheduleFuture,
               builder: (
@@ -449,8 +433,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
           icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
       _ToolSpec(
           icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
-      _ToolSpec(
-          icon: Icons.note_alt_outlined, label: "笔记", onTap: widget.onNotes),
       _ToolSpec(
           icon: Icons.calendar_today_outlined,
           label: "日程",

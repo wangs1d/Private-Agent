@@ -120,12 +120,6 @@ class DailyChatSyncService {
     if (!this.memorySync || isKvSummaryMinimal()) return;
 
     try {
-      const { revision, entries } = this.memorySync.getSnapshot(record.actorId, [
-        "memory_summary",
-      ]);
-      
-      let summary = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-      
       const newLines: string[] = [];
       for (const msg of record.messages.slice(-50)) {
         const timeLabel = new Intl.DateTimeFormat("zh-CN", {
@@ -143,12 +137,9 @@ class DailyChatSyncService {
       }
 
       if (newLines.length > 0) {
-        summary = summary ? `${summary}\n${newLines.join("\n")}` : newLines.join("\n");
-        summary = summary.slice(-32_000);
-
-        await this.memorySync.applyPatch(record.actorId, revision, [
-          { key: "memory_summary", op: "put", value: summary },
-        ]);
+        for (const line of newLines.slice(-12)) {
+          this.memorySync.appendSessionRecapLine(record.actorId, line, "recap");
+        }
       }
     } catch (err) {
       console.error(`[DailyChatSync] Memory update failed for ${record.actorId}:`, err);

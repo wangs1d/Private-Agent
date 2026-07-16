@@ -17,8 +17,8 @@ export type ScheduleWsChangePayload = {
 
 function pickDisplayTitle(task: ScheduleTaskRecord): string {
   const msg = task.reminderMessage?.trim();
-  if (msg && task.title === "AI 提醒任务") return msg;
-  return task.title;
+  if (msg && (!task.title || task.title === "AI 提醒任务")) return msg;
+  return task.title ?? msg ?? "";
 }
 
 export function scheduleWsPayloadFromTask(

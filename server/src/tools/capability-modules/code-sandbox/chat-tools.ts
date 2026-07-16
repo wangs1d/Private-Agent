@@ -5,6 +5,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *
  * 工具族（点号命名空间 `code.*`）：
  *   - code.run         执行 Python / Node 代码，返回 stdout/stderr/exitCode
+ *   - code.shell       执行白名单 shell 命令（ls/grep/curl/pip/ffmpeg/git 等），三道闸安全策略
  *   - code.list_files  列出工作目录文件
  *   - code.read_file   读取工作目录文件
  *   - code.write_file  写入工作目录文件
@@ -58,6 +59,70 @@ export const CODE_SANDBOX_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["language", "code"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code.shell",
+      description:
+        "在沙箱工作目录内执行白名单 shell 命令（不经 shell 解析，参数数组直接传入避免注入）。\n" +
+        "适用场景：\n" +
+        "  - 文件操作：ls / cat / grep / find / tree / du（查看目录结构、搜索内容）\n" +
+        "  - 文本处理：sort / uniq / cut / sed / awk / jq（处理 csv/json/log）\n" +
+        "  - 包管理：pip install pandas / npm install lodash（按需引入依赖）\n" +
+        "  - 格式转换：ffmpeg / iconv / base64 / zip / tar（转码压缩）\n" +
+        "  - 网络抓取：curl / wget（受 SANDBOX_ALLOW_NETWORK 控制，默认禁网时不可用）\n" +
+        "  - 版本控制：git log / git status / git diff（只读子命令）\n" +
+        "安全策略（三道闸）：\n" +
+        "  1. 命令名必须在白名单内（ls/grep/curl/pip/npm/ffmpeg/git 等通用工具）\n" +
+        "  2. 子命令不能在黑名单内（uninstall/remove/push --force 等危险操作）\n" +
+        "  3. 整条命令不能匹配危险正则（rm -rf / del /s / format / sudo / $(...) 等）\n" +
+        "约束：stdout/stderr 各截断到 8KB；默认超时 30s（可经 timeoutMs 调整，上限 120s）；" +
+        "工作目录隔离：每个 actorId + workspaceId 独立，同 workspaceId 复用同一目录。" +
+        "与 code.run 的区别：code.run 适合跑完整脚本，code.shell 适合跑单条命令（尤其装包/文件操作/格式转换）。",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            type: "string",
+            description:
+              "要执行的命令名（不含参数）。必须在白名单内，允许的命令包括：\n" +
+              "ls/dir/cat/type/head/tail/wc/file/stat/find/grep/rg/tree/du/df\n" +
+              "echo/printf/date/whoami/hostname/uname/pwd\n" +
+              "mkdir/touch/cp/copy/mv/move/ln/zip/unzip/tar/gzip/gunzip/7z\n" +
+              "sort/uniq/cut/paste/tr/sed/awk/jq/diff/comm/column\n" +
+              "pip/pip3/python/python3/node/npm/npx/yarn/pnpm\n" +
+              "curl/wget/base64/xxd/md5sum/sha256sum/iconv\n" +
+              "ffmpeg/ffprobe/convert/magick/git/where/tasklist",
+          },
+          args: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "命令参数数组（每个元素单独传入，不经 shell 解析）。\n" +
+              "示例：command=\"pip\", args=[\"install\",\"pandas\"]\n" +
+              "示例：command=\"ls\", args=[\"-la\"]\n" +
+              "示例：command=\"curl\", args=[\"-sL\",\"https://example.com\"]（需 SANDBOX_ALLOW_NETWORK=1）",
+          },
+          workspaceId: {
+            type: "string",
+            description:
+              "工作目录标识（一般是 sessionId 或任务 ID）。同标识复用同一目录，便于多轮操作。" +
+              "未传则服务端生成随机 UUID，返回结果中带 workspacePath 供后续工具引用。",
+          },
+          timeoutMs: {
+            type: "integer",
+            description: "超时毫秒，默认 30000，上限 120000。超时后子进程被 SIGKILL，timedOut=true。",
+          },
+          stdin: {
+            type: "string",
+            description: "标准输入内容（可选）。",
+          },
+        },
+        required: ["command"],
         additionalProperties: false,
       },
     },

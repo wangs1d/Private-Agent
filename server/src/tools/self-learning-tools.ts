@@ -15,8 +15,9 @@ export function registerSelfLearningTools(
   registry: ToolRegistry,
   chatProvider: ExternalChatProvider | null,
   skillManager?: SkillManager | null,
+  existingService?: AgentSelfLearningService | null,
 ): void {
-  const learningService = new AgentSelfLearningService(chatProvider, registry, skillManager || null);
+  const learningService = existingService ?? new AgentSelfLearningService(chatProvider, registry, skillManager || null);
 
   // ========== 记录交互用于学习 ==========
   registry.register("self.record_interaction", async (input, context) => {

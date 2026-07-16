@@ -43,6 +43,17 @@ export type DesktopVisualRunResult = {
   width?: number;
   height?: number;
   capturedAt?: string;
+  /** uia_query 结果字段 */
+  mode?: string;
+  selector?: Record<string, unknown> | null;
+  count?: number;
+  elements?: DesktopVisualUiaElement[];
+  element?: DesktopVisualUiaElement;
+  point?: { x: number; y: number };
+  parent?: DesktopVisualUiaElement;
+  available?: boolean;
+  /** 允许透传其他工具结果字段(run_input / run_shell / open 等),bridge 是传输层不应过滤 */
+  [key: string]: unknown;
 };
 
 export type DesktopVisualRunShellInput = {
@@ -106,6 +117,40 @@ export type DesktopVisualUiaQueryResult = {
   available?: boolean;
 };
 
+export type DesktopVisualRunInputInput = {
+  /** 操作类型 */
+  action: "click" | "double_click" | "right_click" | "move" | "type" | "key" | "shortcut" | "drag" | "scroll";
+  /** click/move/drag 的目标坐标 */
+  x?: number;
+  y?: number;
+  /** drag 的终点坐标 */
+  toX?: number;
+  toY?: number;
+  /** click 的鼠标按键: left / right / middle，默认 left */
+  button?: string;
+  /** type 要输入的文本 */
+  text?: string;
+  /** key 要按的单键: enter, tab, esc, backspace, space, up, down, left, right 等 */
+  key?: string;
+  /** shortcut 组合键: "ctrl+c", "ctrl+v", "alt+tab" 等，用 + 分隔 */
+  keys?: string;
+  /** scroll 滚动量: 正=向上, 负=向下 */
+  scrollClicks?: number;
+  /** 按键间隔秒数，默认 type=0.02, 其他=0.05 */
+  interval?: number;
+  /** 鼠标移动平滑时间秒数，0=瞬间到位 */
+  moveDuration?: number;
+};
+
+export type DesktopVisualRunInputResult = {
+  ok: boolean;
+  action?: string;
+  x?: number;
+  y?: number;
+  text?: string;
+  error?: string;
+};
+
 export type DesktopVisualRunShellResult = {
   ok: boolean;
   command?: string;
@@ -155,4 +200,131 @@ export interface DesktopVisualPort {
   uiaQuery?(
     input: DesktopVisualUiaQueryInput,
   ): Promise<DesktopVisualUiaQueryResult>;
+
+  /**
+   * 原生键盘/鼠标模拟输入（不走 VLM，用 pyautogui + pynput）。
+   * 支持 click / double_click / type / key / shortcut / scroll / drag / move 等原子操作。
+   * 不需要 VLM，不受 VLM 配置影响，任何时候可用。
+   */
+  runInput?(
+    input: DesktopVisualRunInputInput,
+  ): Promise<DesktopVisualRunInputResult>;
+
+  /**
+   * UIA 原生控件原子操作（不模拟鼠标键盘，直接调 pattern）。
+   * 一次调用完成 query → ValuePattern/InvokePattern/TogglePattern 操作。
+   * 不抢焦点，不要求窗口在前台。仅 Win32/WPF/WinForms 支持，Electron 自绘 UI 读不到控件。
+   */
+  runAutomation?(
+    input: DesktopVisualRunAutomationInput,
+  ): Promise<DesktopVisualRunAutomationResult>;
+
+  /**
+   * 原生 HTTP GET 请求(用 requests 库,不走 shell 避免注入)。
+   * 仅支持 GET(只读)。替代 shell curl 调用,带 SSRF 防护、超时、响应体截断。
+   */
+  httpGet?(
+    input: DesktopVisualHttpGetInput,
+  ): Promise<DesktopVisualHttpGetResult>;
+
+  /**
+   * 桌面端联网搜索(Bing CN)。桌面本机直接联网,不依赖服务端。
+   * 返回标题+URL+摘要列表。
+   */
+  webSearch?(
+    input: DesktopVisualWebSearchInput,
+  ): Promise<DesktopVisualWebSearchResult>;
+
+  /**
+   * 桌面端抓取网页正文。提取纯文本(去 HTML 标签/脚本/样式)。
+   * 返回标题+摘要+正文。带 SSRF 防护。
+   */
+  webFetch?(
+    input: DesktopVisualWebFetchInput,
+  ): Promise<DesktopVisualWebFetchResult>;
 }
+
+export type DesktopVisualRunAutomationInput = {
+  /** 原生控件操作类型 */
+  action: "click" | "set_value" | "get_value" | "toggle" | "focus";
+  /** UIA 查询条件 */
+  selector: Record<string, unknown>;
+  /** set_value 时要设置的文本 */
+  value?: string;
+  /** 匹配多个元素时选第 N 个(0-based) */
+  index?: number;
+  /** 是否仅查顶层(默认 true) */
+  topOnly?: boolean;
+};
+
+export type DesktopVisualRunAutomationResult = {
+  ok: boolean;
+  action?: string;
+  matchedCount?: number;
+  matchedElement?: DesktopVisualUiaElement;
+  value?: string | null;
+  error?: string;
+  available?: boolean;
+};
+
+export type DesktopVisualHttpGetInput = {
+  /** 目标 URL,仅 http/https */
+  url: string;
+  /** 自定义 headers(可选) */
+  headers?: Record<string, string>;
+  /** 超时(毫秒),默认 15000,上限 60000 */
+  timeoutMs?: number;
+};
+
+export type DesktopVisualHttpGetResult = {
+  ok: boolean;
+  url?: string;
+  statusCode?: number;
+  contentType?: string;
+  body?: string;
+  /** 响应体编码方式:text(字符串) 或 base64(二进制) */
+  bodyEncoding?: "text" | "base64";
+  /** 响应体是否被截断(超过 256KB) */
+  truncated?: boolean;
+  bytesReceived?: number;
+  headers?: Record<string, string>;
+  error?: string;
+};
+
+export type DesktopVisualWebSearchInput = {
+  /** 搜索关键词 */
+  query: string;
+  /** 返回条数,1-20,默认 8 */
+  limit?: number;
+};
+
+export type DesktopVisualWebSearchResult = {
+  ok: boolean;
+  query?: string;
+  count?: number;
+  items?: Array<{
+    title: string;
+    url: string;
+    snippet: string;
+  }>;
+  engine?: string;
+  error?: string;
+};
+
+export type DesktopVisualWebFetchInput = {
+  /** 目标网页 URL */
+  url: string;
+};
+
+export type DesktopVisualWebFetchResult = {
+  ok: boolean;
+  url?: string;
+  title?: string;
+  summary?: string;
+  content?: string;
+  contentTruncated?: boolean;
+  statusCode?: number;
+  contentType?: string;
+  bytesReceived?: number;
+  error?: string;
+};

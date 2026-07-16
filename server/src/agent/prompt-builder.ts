@@ -6,6 +6,7 @@ import {
 } from "./agent-access-mode.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
+import type { PersonalityCore } from "../brain/types.js";
 import {
   extractMemoryTopicFromLine,
   inferMemoryTopic,
@@ -79,17 +80,16 @@ function buildMasterSubAgentDelegateSuffix(): string {
   const maxParallel = getAgentRuntimeConfig().masterDelegation.maxParallelSubAgents;
   return `
 
-【主 Agent 调度】你是主 Agent（带头大哥），手下有 4 类专业「小弟」子 Agent，由你调度、对用户只呈现一份整合后的答复：
+【主 Agent 调度】你是主 Agent（带头大哥），手下有 3 类专业「小弟」子 Agent，由你调度、对用户只呈现一份整合后的答复：
 - life（生活）：钱包写操作、订票下单、电脑操控等复杂生活执行
 - tech（技术）：深度 RPA、写代码、部署运维、批量自动化
 - info（信息）：深度搜索、比价调研、多轮检索（只查不买）；电商实价需用户导入 Cookie 并授权 browser.fetch_page
-- creative（创意）：文案、策划、写作、翻译润色
 
 【何时自己干 vs 派小弟】
 - 简单、单一事项：优先直接用 clock、calendar、search_web 等，不必派小弟。
 - 需要专业能力、多步骤、或你一个人搞不定时：调用 master_invoke_sub_agent 派对应小弟。
 
-【并行委派】用户一次提多件互不依赖的事，或你拆成多个独立子任务时，应在同一轮 tool 批次里并行多次 master_invoke_sub_agent（服务端最多同时跑 ${maxParallel} 个小弟）。例：「查北京天气 + 写一段推广文案」→ 可并行派 info 与 creative。
+【并行委派】用户一次提多件互不依赖的事，或你拆成多个独立子任务时，应在同一轮 tool 批次里并行多次 master_invoke_sub_agent（服务端最多同时跑 ${maxParallel} 个小弟）。例：「查北京天气 + 调研某商品价格」→ 可并行派 info 做调研，主 Agent 自己查天气。
 - 无依赖务必并行，不要无谓排队。
 - 耗时任务可 runInBackground=true，再用 master_poll_sub_agent_tasks 收齐小弟报告后统一回复用户。
 
@@ -157,7 +157,7 @@ export function buildCurrentTimePrompt(at: Date = new Date()): string {
 export type FinalizeChatSystemPromptOpts = {
   tools?: boolean;
   masterSubAgentDelegate?: boolean;
-  /** 来自 `chat.user_message.agentAccessMode`；默认沙箱 */
+  /** 来自 `chat.user_message.agentAccessMode`；沙箱已废弃，恒为 full */
   agentAccessMode?: AgentAccessMode;
   desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
@@ -216,6 +216,12 @@ export const DEFAULT_AGENT_PROMPT_MEMORY_KEYS = [
   "values",
   "abilities",
   "memory_summary",
+  "memory_current_mission",
+  "memory_preferences",
+  "memory_facts",
+  "memory_commitments",
+  "memory_open_loops",
+  "session_recap",
 ] as const;
 
 /**
@@ -360,6 +366,29 @@ export function formatKvValueForPrompt(value: unknown): string {
   }
 }
 
+/**
+ * 将结构化人格内核格式化为可读文本，注入 system prompt 稳定前缀的【人格内核】块。
+ * 防漂移：每轮从 MemoryCortex.getPersonalityCore 拉取最新值并格式化为稳定文本，
+ * 避免单次对话导致人格漂移。各字段缺省时跳过对应行。
+ */
+export function formatPersonalityCorePrompt(core: PersonalityCore): string {
+  const lines: string[] = [];
+  if (core.values.length > 0) {
+    lines.push(`价值观：${core.values.join("、")}`);
+  }
+  if (core.speech_style) {
+    const ss = core.speech_style;
+    lines.push(`说话风格：语气${ss.tone}｜正式程度${ss.formality}｜幽默${ss.humor}`);
+  }
+  if (core.beliefs.length > 0) {
+    lines.push(`信念：${core.beliefs.join("；")}`);
+  }
+  if (core.quirks.length > 0) {
+    lines.push(`口癖：${core.quirks.join("；")}`);
+  }
+  return lines.join("\n");
+}
+
 const SLICE_RESERVED_KEYS = new Set([
   "persona",
   "soul",
@@ -368,6 +397,12 @@ const SLICE_RESERVED_KEYS = new Set([
   "abilities",
   "skill_tendencies",
   "memory_summary",
+  "memory_current_mission",
+  "memory_preferences",
+  "memory_facts",
+  "memory_commitments",
+  "memory_open_loops",
+  "session_recap",
   "user_profile",
   "emotion_state",
 ]);
@@ -396,6 +431,12 @@ export function sliceMemoryEntriesToPromptContext(
   const maxChars = promptMemorySummaryMaxChars();
   let memorySummary = memoryParts.join("\n\n");
   const rawSummary = str(entries["memory_summary"]);
+  const memoryCurrentMission = sortAndTruncateMemoryLines(str(entries["memory_current_mission"]), 240, 1, userQuery);
+  const memoryPreferences = sortAndTruncateMemoryLines(str(entries["memory_preferences"]), 500, 4, userQuery);
+  const memoryFacts = sortAndTruncateMemoryLines(str(entries["memory_facts"]), 500, 4, userQuery);
+  const memoryCommitments = sortAndTruncateMemoryLines(str(entries["memory_commitments"]), 500, 4, userQuery);
+  const memoryOpenLoops = sortAndTruncateMemoryLines(str(entries["memory_open_loops"]), 500, 4, userQuery);
+  const sessionRecap = sortAndTruncateMemoryLines(str(entries["session_recap"]), 500, 4, userQuery);
   if (opts?.includeMemorySummary !== false && rawSummary) {
     const sorted = sortAndTruncateMemoryLines(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery);
     memorySummary = memorySummary ? `${sorted}\n\n${memorySummary}` : sorted;
@@ -409,6 +450,12 @@ export function sliceMemoryEntriesToPromptContext(
   if (values) out.values = values;
   if (abilities) out.abilities = abilities;
   if (memorySummary) out.memorySummary = memorySummary;
+  if (memoryCurrentMission) out.memoryCurrentMission = memoryCurrentMission;
+  if (memoryPreferences) out.memoryPreferences = memoryPreferences;
+  if (memoryFacts) out.memoryFacts = memoryFacts;
+  if (memoryCommitments) out.memoryCommitments = memoryCommitments;
+  if (memoryOpenLoops) out.memoryOpenLoops = memoryOpenLoops;
+  if (sessionRecap) out.sessionRecap = sessionRecap;
   return out;
 }
 
@@ -442,12 +489,19 @@ export function buildLayeredSystemPrompt(
 ): string {
   if (
     !memory?.persona &&
+    !memory?.personalityCore &&
     !memory?.values &&
     !memory?.abilities &&
     !memory?.agentCaps &&
     !memory?.worldCaps &&
     !memory?.narrativeRecall &&
     !memory?.memorySummary &&
+    !memory?.memoryCurrentMission &&
+    !memory?.memoryPreferences &&
+    !memory?.memoryFacts &&
+    !memory?.memoryCommitments &&
+    !memory?.memoryOpenLoops &&
+    !memory?.sessionRecap &&
     !memory?.interruptedContext &&
     !memory?.userLocation &&
     !memory?.taskContext &&
@@ -473,6 +527,7 @@ export function buildLayeredSystemPrompt(
   if (memory.relationshipGuidance) parts.push(`【回复风格与关系边界】\n${memory.relationshipGuidance}`);
   if (memory.userProfile) parts.push(`【用户画像】\n${memory.userProfile}`);
   if (memory.userLocation) parts.push(`【用户位置】\n${memory.userLocation}`);
+  if (memory.personalityCore) parts.push(`【人格内核】\n${memory.personalityCore}`);
   if (memory.persona) parts.push(`【人格与角色】\n${memory.persona}`);
   if (memory.values) parts.push(`【价值观与原则】\n${memory.values}`);
   if (memory.abilities) parts.push(`【能力倾向】\n${memory.abilities}`);
@@ -482,6 +537,11 @@ export function buildLayeredSystemPrompt(
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
+  if (memory.memoryPreferences) parts.push(`【用户偏好】\n${memory.memoryPreferences}`);
+  if (memory.memoryFacts) parts.push(`【用户事实】\n${memory.memoryFacts}`);
+  if (memory.memoryCommitments) parts.push(`【待兑现承诺】\n${memory.memoryCommitments}`);
+  if (memory.memoryOpenLoops) parts.push(`【未完成事项】\n${memory.memoryOpenLoops}`);
+  if (memory.sessionRecap) parts.push(`【会话回顾】\n${memory.sessionRecap}`);
   if (memory.relationshipMemory) parts.push(memory.relationshipMemory);
   if (memory.lifeThemeMemory) parts.push(memory.lifeThemeMemory);
   if (memory.dreamMemory) parts.push(memory.dreamMemory);
@@ -499,12 +559,18 @@ export type LayeredSystemPromptSections = {
 function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
   return Boolean(
     memory?.persona ||
+      memory?.personalityCore ||
       memory?.values ||
       memory?.abilities ||
       memory?.agentCaps ||
       memory?.worldCaps ||
       memory?.narrativeRecall ||
       memory?.memorySummary ||
+      memory?.memoryPreferences ||
+      memory?.memoryFacts ||
+      memory?.memoryCommitments ||
+      memory?.memoryOpenLoops ||
+      memory?.sessionRecap ||
       memory?.interruptedContext ||
       memory?.userLocation ||
       memory?.taskContext ||
@@ -533,6 +599,7 @@ export function buildLayeredSystemPromptSections(
   const stablePrefix: string[] = [];
   const dynamicContext: string[] = [];
 
+  if (m.personalityCore) stablePrefix.push(`【人格内核】\n${m.personalityCore}`);
   if (m.persona) stablePrefix.push(`【人格与角色】\n${m.persona}`);
   if (m.values) stablePrefix.push(`【价值观与原则】\n${m.values}`);
   if (m.abilities) stablePrefix.push(`【能力倾向】\n${m.abilities}`);
@@ -553,6 +620,11 @@ export function buildLayeredSystemPromptSections(
   if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
   if (m.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${m.narrativeRecall}`);
   if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
+  if (m.memoryPreferences) dynamicContext.push(`【用户偏好】\n${m.memoryPreferences}`);
+  if (m.memoryFacts) dynamicContext.push(`【用户事实】\n${m.memoryFacts}`);
+  if (m.memoryCommitments) dynamicContext.push(`【待兑现承诺】\n${m.memoryCommitments}`);
+  if (m.memoryOpenLoops) dynamicContext.push(`【未完成事项】\n${m.memoryOpenLoops}`);
+  if (m.sessionRecap) dynamicContext.push(`【会话回顾】\n${m.sessionRecap}`);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
 

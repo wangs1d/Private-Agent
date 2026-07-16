@@ -61,7 +61,6 @@ export function buildScheduleCreateInput(
   if (draft.kind === "reminder") {
     return {
       sessionId,
-      title: draft.title,
       description: draft.description,
       kind: "reminder",
       runAt: draft.runAt,
@@ -131,7 +130,7 @@ export function registerCalendarTools(
         matched: true,
         summary: "日程已写入",
         taskId: task.taskId,
-        title: task.title,
+        title: task.reminderMessage || task.title,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
@@ -154,8 +153,8 @@ export function registerCalendarTools(
     const kindRaw = String(input.kind ?? "reminder").trim();
     const recurrenceRaw = String(input.recurrence ?? "none").trim();
     const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
-    if (!title || !description || !runAt) {
-      return { ok: false, error: "title、description、runAt（ISO 时间字符串）必填" };
+    if (!description || !runAt) {
+      return { ok: false, error: "description、runAt（ISO 时间字符串）必填" };
     }
     if (
       kindRaw !== "reminder" &&
@@ -168,11 +167,14 @@ export function registerCalendarTools(
     if (!["none", "daily", "weekly", "yearly"].includes(recurrenceRaw)) {
       return { ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" };
     }
+    if (kindRaw !== "reminder" && !title) {
+      return { ok: false, error: "非提醒类型需要提供 title" };
+    }
     const recurrence = recurrenceRaw as "none" | "daily" | "weekly" | "yearly";
 
-    // 去重：同一轮 + 相同标题+时间只创建一次
+    // 去重：同一轮 + 相同描述+时间只创建一次
     const roundId = context.chatUserMessageId || context.sessionId;
-    const contentKey = `${title}:${runAt}`.slice(0, 120);
+    const contentKey = `${description}:${runAt}`.slice(0, 120);
     const dedupHit = checkScheduleCreateDedup(roundId, contentKey);
     if (dedupHit) return { ...dedupHit, summary: `(同轮重复调用已拦截) ${dedupHit.summary ?? ""}` };
 
@@ -181,7 +183,7 @@ export function registerCalendarTools(
         const reminderMessage = String(input.reminderMessage ?? description).trim();
         const task = await scheduleTaskService.createTask({
           sessionId,
-          title,
+          title: title || undefined,
           description,
           kind: "reminder",
           runAt,
@@ -194,7 +196,7 @@ export function registerCalendarTools(
           matched: true,
           summary: "提醒已写入日程",
           taskId: task.taskId,
-          title: task.title,
+          title: task.reminderMessage || task.title,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
@@ -313,7 +315,7 @@ export function registerCalendarTools(
       count: tasks.length,
       tasks: tasks.map((t) => ({
         taskId: t.taskId,
-        title: t.title,
+        title: t.kind === "reminder" ? (t.reminderMessage || t.title) : t.title,
         kind: t.kind,
         status: t.status,
         recurrence: t.recurrence,

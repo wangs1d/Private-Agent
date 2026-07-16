@@ -5,6 +5,7 @@ import type {
   ExternalChatProvider,
   StreamDeltaHandler,
 } from "./types.js";
+import { CircuitBreaker } from "./circuit-breaker.js";
 
 /**
  * 按顺序尝试多个 {@link ExternalChatProvider}，仅调用 `isEnabled()` 为 true 的成员；
@@ -17,12 +18,19 @@ export class FailoverChatProvider implements ExternalChatProvider {
   readonly id = "failover";
   readonly displayLabel: string;
 
+  /** 每个 provider 对应一个熔断器，按 provider 引用索引。 */
+  private readonly breakers: Map<ExternalChatProvider, CircuitBreaker>;
+
   constructor(
     private readonly chain: ExternalChatProvider[],
     displayLabel?: string,
   ) {
     const ids = chain.map((p) => p.id).join("→");
     this.displayLabel = displayLabel ?? `Failover(${ids})`;
+    this.breakers = new Map();
+    for (const p of chain) {
+      this.breakers.set(p, new CircuitBreaker());
+    }
   }
 
   isEnabled(): boolean {
@@ -56,16 +64,39 @@ export class FailoverChatProvider implements ExternalChatProvider {
       throw new Error("failover chain has no enabled provider");
     }
     let lastErr: unknown;
+    let attemptedAny = false;
     for (const p of enabled) {
+      const breaker = this.breakers.get(p)!;
+      // 熔断中（open）跳过该 provider，直接尝试下一个
+      if (!breaker.canExecute()) {
+        console.warn(
+          `[external-model] Provider "${p.id}" circuit ${breaker.getState()}, skipping`,
+        );
+        continue;
+      }
       try {
-        return await p.streamCompletion(sessionId, userTurn, onDelta, tools, streamOpts);
+        const result = await p.streamCompletion(
+          sessionId,
+          userTurn,
+          onDelta,
+          tools,
+          streamOpts,
+        );
+        breaker.recordSuccess();
+        return result;
       } catch (e) {
+        breaker.recordFailure();
         lastErr = e;
+        attemptedAny = true;
         console.warn(
           `[external-model] Provider "${p.id}" failed, trying next:`,
           e instanceof Error ? e.message : e,
         );
       }
+    }
+    // 所有 provider 均被熔断跳过
+    if (!attemptedAny) {
+      throw new Error("failover chain exhausted: all providers circuit-open");
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }

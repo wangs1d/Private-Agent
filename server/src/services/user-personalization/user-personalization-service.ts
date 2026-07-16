@@ -40,6 +40,10 @@ const USER_TIME_RHYTHM_KEY = "user_time_rhythm";
 const USER_STYLE_PROFILE_KEY = "user_style_profile";
 const USER_CONTACT_PREFERENCE_KEY = "user_contact_preference";
 const USER_REPLY_LENGTH_PROFILE_KEY = "user_reply_length_profile";
+const USER_BEHAVIOR_BASELINE_KEY = "behavior_baseline";
+const BASELINE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const BASELINE_ACTIVE_PROBABILITY_THRESHOLD = 0.3;
+const BASELINE_SWITCH_POINT_DELTA = 0.1;
 
 type BehaviorSignals = {
   shoppingInterest: number;
@@ -67,6 +71,24 @@ type TimeRhythmState = {
   lateNightTolerance: number;
   weekendTolerance: number;
   lastUpdatedAt: string;
+};
+
+type BehaviorBaselineSwitchPoint = {
+  hour: number;
+  direction: "up" | "down";
+};
+
+type BehaviorBaselineActivePeriod = {
+  start: number;
+  end: number;
+};
+
+export type BehaviorBaseline = {
+  hourlyActivityProbability: number[];
+  activePeriods: BehaviorBaselineActivePeriod[];
+  switchPoints: BehaviorBaselineSwitchPoint[];
+  sampleCount: number;
+  lastUpdated: number;
 };
 
 type StyleProfileState = {
@@ -274,6 +296,105 @@ function toTimeRhythmState(v: unknown): TimeRhythmState {
       typeof o.lastUpdatedAt === "string" && o.lastUpdatedAt
         ? o.lastUpdatedAt
         : new Date().toISOString(),
+  };
+}
+
+function defaultBehaviorBaseline(): BehaviorBaseline {
+  return {
+    hourlyActivityProbability: Array.from({ length: 24 }, () => 0),
+    activePeriods: [],
+    switchPoints: [],
+    sampleCount: 0,
+    lastUpdated: 0,
+  };
+}
+
+function toBehaviorBaseline(v: unknown): BehaviorBaseline {
+  if (!v || typeof v !== "object") return defaultBehaviorBaseline();
+  const o = v as Record<string, unknown>;
+  const probRaw = Array.isArray(o.hourlyActivityProbability)
+    ? o.hourlyActivityProbability
+    : [];
+  const hourlyActivityProbability = Array.from({ length: 24 }, (_, h) => {
+    const n = Number(probRaw[h]);
+    return Number.isFinite(n) && n >= 0 ? Math.min(1, n) : 0;
+  });
+  const activePeriods: BehaviorBaselineActivePeriod[] = Array.isArray(o.activePeriods)
+    ? o.activePeriods
+        .map((p): BehaviorBaselineActivePeriod | null => {
+          if (!p || typeof p !== "object") return null;
+          const pe = p as Record<string, unknown>;
+          const startRaw = Number(pe.start);
+          const endRaw = Number(pe.end);
+          if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+          const start = Math.min(23, Math.max(0, Math.floor(startRaw)));
+          const end = Math.min(23, Math.max(0, Math.floor(endRaw)));
+          return { start, end: Math.max(end, start) };
+        })
+        .filter((p): p is BehaviorBaselineActivePeriod => p !== null)
+    : [];
+  const switchPoints: BehaviorBaselineSwitchPoint[] = Array.isArray(o.switchPoints)
+    ? o.switchPoints
+        .map((p): BehaviorBaselineSwitchPoint | null => {
+          if (!p || typeof p !== "object") return null;
+          const pe = p as Record<string, unknown>;
+          const hourRaw = Number(pe.hour);
+          if (!Number.isFinite(hourRaw)) return null;
+          const direction: "up" | "down" =
+            pe.direction === "up" ? "up" : pe.direction === "down" ? "down" : "up";
+          return { hour: Math.min(23, Math.max(0, Math.floor(hourRaw))), direction };
+        })
+        .filter((p): p is BehaviorBaselineSwitchPoint => p !== null)
+    : [];
+  const sampleCountRaw = Number(o.sampleCount);
+  const lastUpdatedRaw = Number(o.lastUpdated);
+  return {
+    hourlyActivityProbability,
+    activePeriods,
+    switchPoints,
+    sampleCount: Number.isFinite(sampleCountRaw) && sampleCountRaw >= 0 ? sampleCountRaw : 0,
+    lastUpdated: Number.isFinite(lastUpdatedRaw) && lastUpdatedRaw >= 0 ? lastUpdatedRaw : 0,
+  };
+}
+
+function buildBaselineFromRhythm(rhythm: TimeRhythmState): BehaviorBaseline {
+  const hourlyCounts = Array.from({ length: 24 }, (_, h) => {
+    const key = String(h).padStart(2, "0");
+    return rhythm.activeHours[key] ?? 0;
+  });
+  const rawTotal = hourlyCounts.reduce((a, b) => a + b, 0);
+  const total = rawTotal > 0 ? rawTotal : 1;
+  const hourlyActivityProbability = hourlyCounts.map((c) => c / total);
+
+  const activePeriods: BehaviorBaselineActivePeriod[] = [];
+  let periodStart: number | null = null;
+  for (let h = 0; h < 24; h++) {
+    const active = hourlyActivityProbability[h] > BASELINE_ACTIVE_PROBABILITY_THRESHOLD;
+    if (active && periodStart === null) {
+      periodStart = h;
+    } else if (!active && periodStart !== null) {
+      activePeriods.push({ start: periodStart, end: h - 1 });
+      periodStart = null;
+    }
+  }
+  if (periodStart !== null) {
+    activePeriods.push({ start: periodStart, end: 23 });
+  }
+
+  const switchPoints: BehaviorBaselineSwitchPoint[] = [];
+  for (let h = 1; h < 24; h++) {
+    const diff = hourlyActivityProbability[h] - hourlyActivityProbability[h - 1];
+    if (Math.abs(diff) > BASELINE_SWITCH_POINT_DELTA) {
+      switchPoints.push({ hour: h, direction: diff > 0 ? "up" : "down" });
+    }
+  }
+
+  return {
+    hourlyActivityProbability,
+    activePeriods,
+    switchPoints,
+    sampleCount: rawTotal,
+    lastUpdated: Date.now(),
   };
 }
 
@@ -605,6 +726,10 @@ export class UserPersonalizationService {
     return this.loadTimeRhythmState(actorId);
   }
 
+  getBehaviorBaseline(actorId: string): BehaviorBaseline {
+    return this.loadBehaviorBaseline(actorId);
+  }
+
   getStyleProfileState(actorId: string): PersonalizationStyleProfileState {
     return this.loadStyleProfileState(actorId);
   }
@@ -767,7 +892,23 @@ export class UserPersonalizationService {
       lastUpdatedAt: new Date().toISOString(),
     };
     this.saveJsonState(actorId, USER_TIME_RHYTHM_KEY, next);
+    this.maybeRefreshBehaviorBaseline(actorId, next);
     return next;
+  }
+
+  private loadBehaviorBaseline(actorId: string): BehaviorBaseline {
+    return toBehaviorBaseline(this.readState(actorId, USER_BEHAVIOR_BASELINE_KEY));
+  }
+
+  private saveBehaviorBaseline(actorId: string, baseline: BehaviorBaseline): void {
+    this.saveJsonState(actorId, USER_BEHAVIOR_BASELINE_KEY, baseline);
+  }
+
+  private maybeRefreshBehaviorBaseline(actorId: string, rhythm: TimeRhythmState): void {
+    const baseline = this.loadBehaviorBaseline(actorId);
+    if (Date.now() - baseline.lastUpdated <= BASELINE_REFRESH_INTERVAL_MS) return;
+    const refreshed = buildBaselineFromRhythm(rhythm);
+    this.saveBehaviorBaseline(actorId, refreshed);
   }
 
   private applyStyleProfile(

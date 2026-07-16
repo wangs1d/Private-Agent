@@ -102,13 +102,13 @@ function loadMasterDelegationConfig(): MasterDelegationConfig {
       ? envTruthy(verbosePrimary)
       : envTruthy(process.env.MULTI_AGENT_VERBOSE);
 
-  const subtaskTimeoutMs = envPositiveInt(process.env.SUBTASK_TIMEOUT_MS, 60_000);
+  const subtaskTimeoutMs = envPositiveInt(process.env.SUBTASK_TIMEOUT_MS, 30_000);
   return {
     enabled,
     verbose,
     subtaskTimeoutMs,
-    techSubtaskTimeoutMs: envPositiveInt(process.env.TECH_SUBTASK_TIMEOUT_MS, 120_000),
-    infoSubtaskTimeoutMs: envPositiveInt(process.env.INFO_SUBTASK_TIMEOUT_MS, 90_000),
+    techSubtaskTimeoutMs: envPositiveInt(process.env.TECH_SUBTASK_TIMEOUT_MS, 90_000),
+    infoSubtaskTimeoutMs: envPositiveInt(process.env.INFO_SUBTASK_TIMEOUT_MS, 25_000),
     maxSubAgentInvocationsPerTurn: envPositiveInt(process.env.MASTER_AGENT_MAX_SUB_AGENT_INVOCATIONS, 6),
     forceSynthesis: process.env.MASTER_AGENT_FORCE_SYNTHESIS === "1",
     directReplyMaxChars: envPositiveInt(process.env.MASTER_AGENT_DIRECT_REPLY_MAX_CHARS, 2800),

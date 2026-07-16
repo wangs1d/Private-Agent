@@ -52,6 +52,10 @@ export interface CardSegment {
   /** 卡片在原文本中的起止行号（含前后空行） */
   startLine: number;
   endLine: number;
+  /** 标题行行号（用于在 leadingLines 中跳过，避免与卡片标题重复） */
+  titleLine: number;
+  /** 结尾行行号（用于在 trailingLines 中跳过，避免与卡片 footer 重复） */
+  footerLine: number;
 }
 
 /**
@@ -113,23 +117,27 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
 
   // 在列表段之前找 title：向前最多 3 行内的非空、非列表短句
   const titleLines: string[] = [];
+  let titleLineIdx = -1;
   for (let k = startLine - 1; k >= Math.max(0, startLine - 3); k--) {
     const ln = lines[k]?.trim() ?? "";
     if (!ln) continue;
     if (LIST_ITEM_RE.test(ln)) break;
     if (ln.length > 40) break;
     titleLines.unshift(ln);
+    if (titleLineIdx === -1) titleLineIdx = k;
   }
   const title = titleLines[0] ?? "";
 
   // 在列表段之后找 footer：向后最多 2 行内的非空、非列表短句
   const footerLines: string[] = [];
+  let footerLineIdx = -1;
   for (let k = endLine + 1; k < Math.min(lines.length, endLine + 3); k++) {
     const ln = lines[k]?.trim() ?? "";
     if (!ln) continue;
     if (LIST_ITEM_RE.test(ln)) break;
     if (ln.length > 40) break;
     footerLines.push(ln);
+    if (footerLineIdx === -1) footerLineIdx = k;
   }
   const footer = footerLines[0] ?? "";
 
@@ -151,6 +159,8 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
     footer,
     startLine,
     endLine,
+    titleLine: titleLineIdx,
+    footerLine: footerLineIdx,
   };
 }
 
@@ -168,15 +178,19 @@ export function formatAgentResultForChat(text: string): string | null {
   const lines = trimmed.split(/\r?\n/);
 
   // 1) 前导：startLine 之前的所有非空行
+  //    跳过已经被卡片消费的 title 行，避免与卡片标题重复显示
   const leadingLines: string[] = [];
   for (let k = 0; k < segment.startLine; k++) {
+    if (k === segment.titleLine) continue;
     const ln = lines[k]?.trim() ?? "";
     if (ln) leadingLines.push(ln);
   }
 
   // 2) 追问：endLine 之后的所有非空行
+  //    跳过已经被卡片消费的 footer 行，避免与卡片 footer 重复显示
   const trailingLines: string[] = [];
   for (let k = segment.endLine + 1; k < lines.length; k++) {
+    if (k === segment.footerLine) continue;
     const ln = lines[k]?.trim() ?? "";
     if (ln) trailingLines.push(ln);
   }

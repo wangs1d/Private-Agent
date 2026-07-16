@@ -16,6 +16,7 @@ import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
   pickVisibleText,
+  StreamIdleTimeoutError,
 } from "../stream-chat-helpers.js";
 import type {
   AgentStreamOptions,
@@ -53,7 +54,9 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
     const apiKey = process.env.MOONSHOT_API_KEY?.trim();
     const baseURL = (process.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1").trim();
     this.model = (process.env.MOONSHOT_MODEL ?? "kimi-k2.5").trim();
-    this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
+    this.client = apiKey
+      ? new OpenAI({ apiKey, baseURL, timeout: 180_000 })
+      : null;
   }
 
   isEnabled(): boolean {
@@ -229,8 +232,20 @@ export class MoonshotKimiProvider implements ExternalChatProvider {
         onDelta(visible);
       }
     } catch (e) {
-      msgs.length = turnStartLen;
-      throw e;
+      // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
+      // partial content 已通过 onContentDelta 发给客户端，这里只是让 provider 正常返回。
+      if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {
+        visible = e.partialContent.trim();
+        full = visible;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[stream-idle-timeout] provider=${this.id} model=${model} ` +
+            `→ 使用 ${visible.length} 字符的 partial content 兜底`,
+        );
+      } else {
+        msgs.length = turnStartLen;
+        throw e;
+      }
     }
 
     if (visible.trim()) {

@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import websockets
@@ -52,79 +54,146 @@ async def run_stdio_worker_on_pc(payload: dict) -> dict:
         return {"ok": False, "error": f"invalid json: {last[:400]!r}"}
 
 
+# ============================================================
+# 主动事件推送通道（desktop.event）
+# Python 端可主动向 server 推送事件（如窗口焦点变化），
+# 与 desktop.bridge.invoke 请求-响应通道并存且互不阻塞：
+#   - invoke：server→Python 请求，Python 回 desktop.bridge.result（jobId 配对）
+#   - event ：Python→server 单向推送，无 jobId，不进入 pending 队列
+# ws 连接由 asyncio 事件循环拥有，send_event 可在任意线程调用，
+# 通过 run_coroutine_threadsafe 把 send 调度到 ws 所在的事件循环；
+# threading.Lock 保护 _bridge_state 的读写。
+# ============================================================
+_bridge_lock = threading.Lock()
+_bridge_state: dict = {"ws": None, "loop": None}
+
+
+def _set_active_bridge(ws, loop: asyncio.AbstractEventLoop) -> None:
+    with _bridge_lock:
+        _bridge_state["ws"] = ws
+        _bridge_state["loop"] = loop
+
+
+def _clear_active_bridge() -> None:
+    with _bridge_lock:
+        _bridge_state["ws"] = None
+        _bridge_state["loop"] = None
+
+
+def send_event(event_type: str, payload: dict | None = None) -> bool:
+    """主动推送 desktop.event 消息到 server（线程安全）。
+
+    与 desktop.bridge.invoke 请求-响应通道并存且互不阻塞：event 是 Python→server
+    的单向推送，不参与 invoke 的 jobId 配对与 pending 队列。
+
+    可在任意线程调用：通过 run_coroutine_threadsafe 把 send 调度到 ws 所在的
+    事件循环；返回 True 表示已调度，False 表示当前无活动桥接连接或循环已关闭。
+    """
+    with _bridge_lock:
+        ws = _bridge_state["ws"]
+        loop = _bridge_state["loop"]
+    if ws is None or loop is None:
+        logging.warning("send_event 失败：桌面桥接未连接（event_type=%s）", event_type)
+        return False
+    msg = {
+        "type": "desktop.event",
+        "event_type": event_type,
+        "payload": payload or {},
+        "timestamp": time.time(),
+    }
+    try:
+        asyncio.run_coroutine_threadsafe(_do_send_event(ws, msg), loop)
+        return True
+    except RuntimeError as e:
+        logging.warning("send_event 调度失败（event_type=%s）：%s", event_type, e)
+        return False
+
+
+async def _do_send_event(ws, msg: dict) -> None:
+    try:
+        await ws.send(json.dumps(msg, ensure_ascii=False))
+    except Exception as e:
+        logging.warning("推送 desktop.event 失败：%s", e)
+
+
 async def one_connection(url: str, token: str | None, init_payload: dict) -> None:
-    async with websockets.connect(url, ping_interval=20, ping_timeout=120) as ws:
-        await ws.send(json.dumps({"type": "session.init", "payload": init_payload}, ensure_ascii=False))
-        if token:
-            await ws.send(
-                json.dumps({"type": "desktop.bridge.register", "payload": {"token": token}}, ensure_ascii=False)
-            )
-        logging.info("已连接桌面桥接，等待任务…")
-        async for raw in ws:
-            msg = json.loads(raw)
-            mtype = msg.get("type")
-            if mtype in ("desktop.bridge.register_ack", "desktop.bridge.sync"):
-                logging.info("信令 %s %s", mtype, msg.get("payload"))
-                continue
-            if mtype == "error.event":
-                pl = msg.get("payload") or {}
-                raise RuntimeError(pl.get("message") or str(pl))
-            if mtype != "desktop.bridge.invoke":
-                continue
-            pl = msg.get("payload") or {}
-            job_id = pl.get("jobId")
-            if not job_id:
-                continue
-            action = pl.get("action") or "run_task"
-            if action == "screenshot":
-                worker_req: dict = {
-                    "action": "screenshot",
-                    "region": pl.get("region"),
-                }
-            elif action == "open":
-                worker_req: dict = {
-                    "action": "open",
-                    "target": pl.get("target"),
-                    "path": pl.get("path"),
-                }
-            elif action == "uia_query":
-                worker_req: dict = {
-                    "action": "uia_query",
-                    "mode": pl.get("mode", "query"),
-                    "selector": pl.get("selector"),
-                    "point": pl.get("point"),
-                    "topOnly": pl.get("topOnly"),
-                    "limit": pl.get("limit"),
-                }
-            elif action == "run_shell":
-                worker_req: dict = {
-                    "action": "run_shell",
-                    "command": pl.get("command"),
-                    "shell": pl.get("shell"),
-                    "cwd": pl.get("cwd"),
-                    "timeoutMs": pl.get("timeoutMs"),
-                    "allowDestructive": bool(pl.get("allowDestructive")),
-                }
-            else:
-                worker_req: dict = {
-                    "action": "run_task",
-                    "task": pl.get("task"),
-                    "maxSteps": pl.get("maxSteps", 40),
-                    "region": pl.get("region"),
-                    "stub": bool(pl.get("stub")),
-                }
-                if isinstance(pl.get("vlm"), dict):
-                    worker_req["vlm"] = pl.get("vlm")
-            out = await run_stdio_worker_on_pc(worker_req)
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "desktop.bridge.result",
-                        "payload": {"jobId": job_id, **out},
-                    },
-                    ensure_ascii=False,
+    loop = asyncio.get_running_loop()
+    try:
+        async with websockets.connect(url, ping_interval=20, ping_timeout=120) as ws:
+            _set_active_bridge(ws, loop)
+            await ws.send(json.dumps({"type": "session.init", "payload": init_payload}, ensure_ascii=False))
+            if token:
+                await ws.send(
+                    json.dumps({"type": "desktop.bridge.register", "payload": {"token": token}}, ensure_ascii=False)
                 )
-            )
+            logging.info("已连接桌面桥接，等待任务…")
+            async for raw in ws:
+                msg = json.loads(raw)
+                mtype = msg.get("type")
+                if mtype in ("desktop.bridge.register_ack", "desktop.bridge.sync"):
+                    logging.info("信令 %s %s", mtype, msg.get("payload"))
+                    continue
+                if mtype == "error.event":
+                    pl = msg.get("payload") or {}
+                    raise RuntimeError(pl.get("message") or str(pl))
+                if mtype != "desktop.bridge.invoke":
+                    continue
+                pl = msg.get("payload") or {}
+                job_id = pl.get("jobId")
+                if not job_id:
+                    continue
+                action = pl.get("action") or "run_task"
+                if action == "screenshot":
+                    worker_req: dict = {
+                        "action": "screenshot",
+                        "region": pl.get("region"),
+                    }
+                elif action == "open":
+                    worker_req: dict = {
+                        "action": "open",
+                        "target": pl.get("target"),
+                        "path": pl.get("path"),
+                    }
+                elif action == "uia_query":
+                    worker_req: dict = {
+                        "action": "uia_query",
+                        "mode": pl.get("mode", "query"),
+                        "selector": pl.get("selector"),
+                        "point": pl.get("point"),
+                        "topOnly": pl.get("topOnly"),
+                        "limit": pl.get("limit"),
+                    }
+                elif action == "run_shell":
+                    worker_req: dict = {
+                        "action": "run_shell",
+                        "command": pl.get("command"),
+                        "shell": pl.get("shell"),
+                        "cwd": pl.get("cwd"),
+                        "timeoutMs": pl.get("timeoutMs"),
+                        "allowDestructive": bool(pl.get("allowDestructive")),
+                    }
+                else:
+                    worker_req: dict = {
+                        "action": "run_task",
+                        "task": pl.get("task"),
+                        "maxSteps": pl.get("maxSteps", 40),
+                        "region": pl.get("region"),
+                        "stub": bool(pl.get("stub")),
+                    }
+                    if isinstance(pl.get("vlm"), dict):
+                        worker_req["vlm"] = pl.get("vlm")
+                out = await run_stdio_worker_on_pc(worker_req)
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "desktop.bridge.result",
+                            "payload": {"jobId": job_id, **out},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+    finally:
+        _clear_active_bridge()
 
 
 async def main() -> None:
@@ -148,17 +217,33 @@ async def main() -> None:
         "userId": user_id,
     }
 
-    while True:
-        try:
-            await one_connection(url, token, init_payload)
-            logging.warning("连接已结束，2s 后重连")
-        except (OSError, websockets.InvalidURI, websockets.InvalidHandshake) as e:
-            logging.warning("连接失败 %s，2s 后重试", e)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logging.exception("桥接异常: %s", e)
-        await asyncio.sleep(2.0)
+    # 启动桌面事件监听（焦点变化 + 窗口开闭，SetWinEventHook + 独立消息循环线程）。
+    # listener 在 ws 重连期间也保持运行：send_event 在无活动桥接时会安全返回 False，
+    # 不会因 ws 未连接而抛错。此处 try/finally 保证 bridge 退出时调用 stop。
+    from desktop_visual.event_subscribers import (
+        start_focus_listener,
+        start_window_listener,
+        stop_focus_listener,
+        stop_window_listener,
+    )
+
+    start_focus_listener()
+    start_window_listener()
+    try:
+        while True:
+            try:
+                await one_connection(url, token, init_payload)
+                logging.warning("连接已结束，2s 后重连")
+            except (OSError, websockets.InvalidURI, websockets.InvalidHandshake) as e:
+                logging.warning("连接失败 %s，2s 后重试", e)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logging.exception("桥接异常: %s", e)
+            await asyncio.sleep(2.0)
+    finally:
+        stop_focus_listener()
+        stop_window_listener()
 
 
 if __name__ == "__main__":

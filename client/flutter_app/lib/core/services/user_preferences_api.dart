@@ -28,7 +28,6 @@ class UserPreferencesApi {
     "weather": true,
     "outfit": true,
     "schedule": true,
-    "notes": true,
   };
 
   static const String moodFunny = "funny";

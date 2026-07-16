@@ -5,6 +5,8 @@ import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   buildCurrentTimePrompt,
+  formatKvValueForPrompt,
+  formatPersonalityCorePrompt,
   sliceMemoryEntriesToPromptContext,
   sliceSubAgentMemoryEntries,
 } from "./prompt-builder.js";
@@ -28,6 +30,7 @@ import {
   isAmbiguousFollowUpMessage,
   shouldInjectMemorySummary,
 } from "./memory-signal.js";
+import type { PersonalityCore } from "../brain/types.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
@@ -36,6 +39,7 @@ import type {
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
+import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
 
@@ -49,7 +53,7 @@ function buildCompactAgentCapsPrompt(): string {
   ];
   if (cfg.masterDelegation.enabled) {
     lines.push(
-      `【你的小弟】life / tech / info / creative 四类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
+      `【你的小弟】life / tech / info 三类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
       "【工具】master_invoke_sub_agent 派活；master_list_sub_agents 看名册；master_poll_sub_agent_tasks 查后台小弟进度。",
     );
   }
@@ -199,6 +203,17 @@ export class PromptContextBuilder {
     },
   ) {}
 
+  private personalityProvider: ((actorId: string) => PersonalityCore | null) | null = null;
+
+  /**
+   * 注入人格内核拉取器（通常来自 BrainCenter.getPersonalityCore → MemoryCortex.getPersonalityCore）。
+   * assembleMemory 会调用它获取结构化人格内核，格式化后填入 memory.personalityCore，
+   * 由 buildLayeredSystemPrompt 注入 system prompt 稳定前缀的【人格内核】块，防止单次对话导致人格漂移。
+   */
+  setPersonalityProvider(fn: (actorId: string) => PersonalityCore | null): void {
+    this.personalityProvider = fn;
+  }
+
   build(input: BuildPromptContextInput): AgentStreamOptions | undefined {
     const memory = this.assembleMemory(input);
     const hasMemory = this.hasMemoryContent(memory);
@@ -300,10 +315,17 @@ export class PromptContextBuilder {
       const snapshotKeys = includeMemorySummary
         ? memoryKeys
         : memoryKeys.filter((key) => key !== "memory_summary");
+      if (!snapshotKeys.includes("memory_current_mission")) {
+        snapshotKeys.push("memory_current_mission");
+      }
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
       fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined, {
         includeMemorySummary,
       });
+      const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
+      if (kvCurrentMission) {
+        fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
+      }
     }
 
     const capabilityQueryHint =
@@ -361,7 +383,7 @@ export class PromptContextBuilder {
         : undefined;
     const shortTermTaskContext =
       input.sessionId && this.deps.shortTermMemoryGateway
-        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), 420)
+        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), 900)
         : undefined;
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
@@ -383,11 +405,22 @@ export class PromptContextBuilder {
       ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
     };
 
-    return {
+    // 互斥：shortTermTaskContext 非空时跳过 taskContext，避免语义重叠字段同时以完整长度注入
+    const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
+
+    // 人格内核（personality 域）：每轮从 MemoryCortex 拉取，格式化后注入 system prompt 稳定前缀防漂移。
+    // 注意：不受 ambiguousFollowUp 影响——人格内核是稳定身份层，非本轮上下文。
+    const rawPersonalityCore = this.personalityProvider?.(input.actorId) ?? null;
+    const personalityCore = rawPersonalityCore
+      ? compactPromptBlock(formatPersonalityCorePrompt(rawPersonalityCore), 400)
+      : undefined;
+
+    const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
       currentTime: buildCurrentTimePrompt(),
-      ...(taskContext || shortTermTaskContext
-        ? { taskContext: [taskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }
+      ...(personalityCore ? { personalityCore } : {}),
+      ...(fromKv.taskContext || effectiveTaskContext || shortTermTaskContext
+        ? { taskContext: [fromKv.taskContext, effectiveTaskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }
         : {}),
       ...(capabilityQueryHint ? { abilities: fromKv.abilities ? `${fromKv.abilities}\n${capabilityQueryHint}` : capabilityQueryHint } : {}),
       ...(toneGuidance
@@ -414,11 +447,44 @@ export class PromptContextBuilder {
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
     };
+
+    // 注入 prompt 前对 memory/facts 等用户内容字段做 PII 脱敏（手机号/邮箱/IP/身份证/银行卡）
+    return this.redactMemoryFields(promptMemory);
+  }
+
+  /**
+   * 对注入 prompt 的 memory/facts 等用户内容字段做 PII 脱敏。
+   * 覆盖承载用户记忆/事实/画像的字段（手机号→***PHONE***、邮箱→***EMAIL***、
+   * IP→***IP***、身份证→***ID***、银行卡→***BANK***）。
+   * 不脱敏能力说明/时间/人格内核等非用户内容字段。
+   */
+  private redactMemoryFields(ctx: AgentPromptMemoryContext): AgentPromptMemoryContext {
+    const redact = (v: string | undefined): string | undefined =>
+      v ? redactSensitiveText(v) : undefined;
+    return {
+      ...ctx,
+      memorySummary: redact(ctx.memorySummary),
+      memoryFacts: redact(ctx.memoryFacts),
+      memoryPreferences: redact(ctx.memoryPreferences),
+      memoryCommitments: redact(ctx.memoryCommitments),
+      memoryOpenLoops: redact(ctx.memoryOpenLoops),
+      memoryContinuity: redact(ctx.memoryContinuity),
+      relationshipMemory: redact(ctx.relationshipMemory),
+      lifeThemeMemory: redact(ctx.lifeThemeMemory),
+      dreamMemory: redact(ctx.dreamMemory),
+      narrativeRecall: redact(ctx.narrativeRecall),
+      dailyDigest: redact(ctx.dailyDigest),
+      userProfileSummary: redact(ctx.userProfileSummary),
+      userProfile: redact(ctx.userProfile),
+      taskContext: redact(ctx.taskContext),
+      sessionRecap: redact(ctx.sessionRecap),
+    };
   }
 
   private hasMemoryContent(memory: AgentPromptMemoryContext): boolean {
     return (
       Boolean(memory.persona) ||
+      Boolean(memory.personalityCore) ||
       Boolean(memory.values) ||
       Boolean(memory.abilities) ||
       Boolean(memory.memorySummary) ||
@@ -426,6 +492,11 @@ export class PromptContextBuilder {
       Boolean(memory.worldCaps) ||
       Boolean(memory.narrativeRecall) ||
       Boolean(memory.dailyDigest) ||
+      Boolean(memory.memoryPreferences) ||
+      Boolean(memory.memoryFacts) ||
+      Boolean(memory.memoryCommitments) ||
+      Boolean(memory.memoryOpenLoops) ||
+      Boolean(memory.sessionRecap) ||
       Boolean(memory.interruptedContext) ||
       Boolean(memory.userLocation) ||
       Boolean(memory.taskContext) ||

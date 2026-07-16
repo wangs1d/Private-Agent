@@ -15,14 +15,16 @@ import {
   pickSubAgentDoneLine,
   USER_VISIBLE_PROGRESS_MARKER,
 } from "../agent/delegate-status.js";
-import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
+import { parseSubAgentType, SUBAGENT_ASK_PEER_REGISTRY } from "../agent/master-subagent-delegate-tools.js";
 import { shouldAllowBackgroundSubAgentTask } from "../agent/background-task-policy.js";
 import { resolveUserLocationPrompt } from "./user-location-service.js";
 import type {
+  AgentRole,
   BackgroundSubAgentAction,
   BackgroundSubAgentJob,
   BackgroundSubAgentUpdate,
   InterAgentMessage,
+  MessageRecipient,
   SubAgentCapability,
   SubAgentResult,
   SubAgentType,
@@ -48,13 +50,28 @@ import type {
 } from "../external-model/types.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import { buildMasterAgentChatTools } from "./master-agent-tool-filter.js";
-import { SUB_AGENT_TOOL_ALLOWLISTS } from "./subagent-chat-tool-allowlists.js";
+import {
+  parseSubAgentReport,
+  buildSubAgentReportForMaster,
+} from "../agent/subagent-system-prompts.js";
+import {
+  SubAgentCapabilityRegistry,
+  createDefaultSubAgentRegistry,
+  type SubAgentDefinition,
+  type ToolNameResolver,
+} from "../agent/subagent-capability-registry.js";
 
 export type { SubAgentCapability, SubAgentResult, SubAgentType, SubTask } from "./master-agent-types.ts";
 
 type SubAgentInvokeContext = {
   userMessage: string;
   priorResults: SubAgentResult[];
+  /** 上次失败的工具调用摘要（重试时传入，帮助子 Agent 不重复相同错误） */
+  priorToolCallSummary?: string;
+  /** 工具调用历史收集器（引用传递，外部可读，用于失败重试时序列化为摘要） */
+  toolCallHistory?: ToolExecutedInfo[];
+  /** 主 Agent 直接指令：该怎么做（执行策略/约束），体现主→子直接通信 */
+  directive?: string;
 };
 
 type TurnDelegationState = {
@@ -128,6 +145,8 @@ export interface SubAgentPerformanceMetrics {
 
 export class MasterAgentCoordinator {
   private readonly config: MasterAgentConfig;
+  /** 子 Agent 能力注册中心（配置驱动 + 运行时可注册） */
+  private readonly capabilityRegistry: SubAgentCapabilityRegistry;
   private readonly subAgentCapabilities: Map<SubAgentType, SubAgentCapability>;
   private readonly metrics: PerformanceMetrics;
   private readonly executionHistory: Array<{
@@ -167,7 +186,13 @@ export class MasterAgentCoordinator {
     const rtConfig = getAgentRuntimeConfig();
     this.config.maxParallelTasks = rtConfig.masterDelegation.maxParallelSubAgents;
 
-    this.subAgentCapabilities = this.initializeSubAgentCapabilities();
+    // 工具名解析器：从 toolRegistry.list() 按关键词匹配（life 的 tools 需动态解析）
+    const toolResolver: ToolNameResolver = (...keywords) => {
+      const all = this.toolRegistry.list();
+      return all.filter((t) => keywords.some((p) => t.includes(p)));
+    };
+    this.capabilityRegistry = createDefaultSubAgentRegistry(toolResolver);
+    this.subAgentCapabilities = this.capabilityRegistry.capabilityMap();
     this.metrics = {
       totalTasks: 0,
       sequentialExecutions: 0,
@@ -211,6 +236,10 @@ export class MasterAgentCoordinator {
     this.toolRegistry.register("master.poll_sub_agent_tasks", async (_input, context) =>
       this.handlePollSubAgentTasksTool(context),
     );
+    // subagent.ask_peer 全局兜底：直接调用时拒绝（只能在子 Agent 执行中通过拦截器调用）
+    this.toolRegistry.register(SUBAGENT_ASK_PEER_REGISTRY, async () => {
+      throw new Error("subagent.ask_peer 只能在子 Agent 执行中调用，不可直接调用");
+    });
   }
 
   /** 供验收测试 / 监控读取子 Agent 能力表。 */
@@ -219,13 +248,12 @@ export class MasterAgentCoordinator {
   }
 
   /**
-   * 初始化 4 个核心子 Agent（按能力维度划分）
+   * 子 Agent 能力定义已迁移至 `SubAgentCapabilityRegistry`（配置驱动）。
    *
-   * 设计理念：
+   * 内置 3 个核心子 Agent（由 createDefaultSubAgentRegistry 注册）：
    * - life  → 复杂生活操作：钱包写操作(转帐/消费50+类/充值) + 视觉操控(电脑)
    * - tech  → 技术操控：深度RPA自动化 + 代码开发 + 系统运维 + 视觉操控(深度)
    * - info  → 信息检索：深度搜索比价调研（只查不买）
-   * - creative → 创意内容：专业文案策划写作翻译润色（深度调研+内容模板工具链）
    *
    * ⚠️ 主 agent 拥有基本能力（查天气/查余额/设日程/好友管理/搜信息），自己先处理。
    * 只有涉及以上子 agent 专属能力时才委派。
@@ -233,230 +261,34 @@ export class MasterAgentCoordinator {
    * 视觉操控（desktop.visual.run_task）仅 life / tech 子 Agent 拥有：
    * - life: 偶尔用（订酒店时顺手操作网站）
    * - tech: 深度用（复杂自动化流程、批量操作、长时间运行）
+   *
+   * 外部项目可通过 {@link registerSubAgentCapability} 注册自定义子 Agent 或覆盖内置配置。
    */
-  private initializeSubAgentCapabilities(): Map<SubAgentType, SubAgentCapability> {
-    const allTools = this.toolRegistry.list();
-    const by = (...parts: string[]) => allTools.filter((t) => parts.some((p) => t.includes(p)));
-    const map = new Map<SubAgentType, SubAgentCapability>();
 
-    // ──────────────────────────────────────────────
-    // 🏠 life 生活全能助手
-    //
-    // ⚠️ 与主 agent 的区别：
-    // 主 agent 拥有基本生活能力（查天气/查余额/设日程/好友管理/搜信息）
-    // life 子 agent 用于处理主 agent 无法直接完成的**复杂生活操作**：
-    //
-    // 💰 钱包写操作（主 agent 只读）：
-    //   - wallet.transfer / wallet.recharge / wallet.purchase
-    //   - 全场景消费（外卖/酒店/打车/电影票/网购/缴费/红包等50+类别）
-    //
-    // 🖥️ 视觉操控电脑（主 agent 无此权限）：
-    //   - desktop.visual.run_task / desktop.visual.screenshot
-    //   - 需要真实操作网站/App时使用（打开携程订酒店、淘宝下单等）
-    //
-    //
-    // 委派时机：只有涉及以上能力时才委派 life，简单查询由主 agent 直接处理。
-    // ──────────────────────────────────────────────
-    map.set("life", {
-      type: "life",
-      name: "生活全能助手",
-      description: [
-        "【生活全能 — 处理复杂生活操作】",
-        "",
-        "主 agent 能做的（不需要委派给我）：",
-        "- 查天气、查日程、查余额、看流水",
-        "- 管理好友、发送消息、设提醒",
-        "- 搜索信息、比价查询",
-        "",
-        "我只处理主 agent 做不到的复杂操作：",
-        "",
-        "💰 钱包写操作：",
-        "- wallet.transfer：向好友转账（需好友关系验证）",
-        "- wallet.recharge：充值",
-        "- wallet.purchase：**全场景消费**，支持50+类别：",
-        "  🍱 外卖点餐 · 🍽️ 到店餐饮 · 🏨 酒店预订",
-        "  🚕 打车出行 · ✈️ 机票火车票 · 🎬 电影票",
-        "  🛒 网购购物 · 📱 各类缴费 · 💊 药品医疗",
-        "  🎁 礼品鲜花 · 🧹 家政维修",
-        "  ...以及所有其他可购买的服务和商品",
-        "",
-        "🖥️ 视觉操控（主 agent 无此能力）：",
-        "- 需要真实操作网站/App时使用",
-        "- 打开携程订酒店、淘宝下单、操作任何网站/软件",
-        "- 像人一样看屏幕、操作鼠标键盘",
-      ].join("\n"),
-      keywords: [
-        "买", "购", "订", "预订", "下单", "支付", "花钱", "消费",
-        "外卖", "吃饭", "点餐", "美团", "饿了么",
-        "酒店", "民宿", "携程", "Booking", "Airbnb",
-        "打车", "滴滴", "网约车", "高德",
-        "机票", "火车票", "高铁", "12306", "飞机",
-        "电影票", "演唱会", "演出", "展览", "门票",
-        "网购", "淘宝", "京东", "拼多多", "购物",
-        "缴费", "话费", "电费", "水费", "燃气", "宽带",
-        "转账", "汇款", "充值", "红包",
-        "礼物", "礼品", "鲜花", "捐赠", "捐款",
-        "健康", "医疗", "药品", "健身", "体检",
-        "宠物", "猫粮", "狗粮", "宠物医院",
-        "家政", "保洁", "维修", "搬家",
-        "美妆", "SPA", "按摩", "美发", "理发",
-        "保险", "理财", "基金", "股票", "投资",
-        "教育", "课程", "培训", "图书",
-        "办公", "打印", "复印", "快递", "寄件",
-        "帮我买", "帮我订",
-        "在电脑上", "打开网站", "操作电脑",
-      ],
-      tools: [
-        ...by("wallet", "fund", "market", "shop", "purchase", "a2a", "trade"),
-        ...by("desktop", "visual", "vision"),
-      ],
-      capabilities: [
-        "wallet",
-        "purchase",
-      ],
+  /**
+   * 注册（或覆盖）一个子 Agent 能力定义。
+   *
+   * 适配层用途：外部项目可注入自定义子 Agent（如专属业务 Agent），
+   * 或覆盖内置 life/tech/info 的 maxRounds / systemPrompt / 模型配置，
+   * 无需改动本项目源码。注册后立即生效于后续委派。
+   */
+  registerSubAgentCapability(def: SubAgentDefinition): void {
+    this.capabilityRegistry.registerCapability(def);
+    // 同步刷新 subAgentCapabilities 快照（供 getSubAgentCapabilities() 读取）
+    this.subAgentCapabilities.clear();
+    for (const [k, v] of this.capabilityRegistry.capabilityMap()) {
+      this.subAgentCapabilities.set(k, v);
+    }
+    this.log("Sub-agent capability registered/overridden", {
+      type: def.capability.type,
+      name: def.capability.name,
+      maxRounds: def.maxRounds,
     });
+  }
 
-    // ──────────────────────────────────────────────
-    // 💻 tech 技术操控助手
-    //
-    // 专注于：
-    // 1. 深度RPA自动化（复杂多步视觉操控流程）
-    // 2. 代码开发与调试
-    // 3. 系统运维与管理
-    //
-    // 与 life 的区别：
-    // - life = "帮我买个东西"（简单消费指令）
-    // - tech = "帮我写个脚本自动监控价格" / "部署这个服务"
-    // ──────────────────────────────────────────────
-    map.set("tech", {
-      type: "tech",
-      name: "技术操控助手",
-      description: [
-        "【技术操控 — 深度RPA自动化 + 开发运维】",
-        "",
-        "🔧 深度RPA（Robotic Process Automation，机器人流程自动化）：",
-        "- 与 life 偶尔用视觉操控不同，tech 专门用它做**复杂多步流程**",
-        "- 区别：",
-        "  普通视觉操控（life也用）: 单次任务，如'订一张电影票'（10-40步）",
-        "  深度RPA（tech专精）: 复杂流程，如：",
-        "    - 批量处理100张发票并录入系统（200+步）",
-        "    - 自动监控10个商品价格，降价就下单（持续运行）",
-        "    - 跨多个网站采集数据并汇总到Excel",
-        "    - 自动化测试整个网站的注册→登录→购买流程",
-        "- 支持指定 region(屏幕区域)、maxSteps(最大步数可达120步)",
-        "",
-        "💻 代码开发：",
-        "- 代码编写、调试、重构、审查、脚本开发",
-        "",
-        "⚙️ 系统运维：",
-        "- 服务器管理、服务部署、API调试、环境搭建、云服务管理",
-        "",
-        "🖥️ 视觉操控（通用基础设施工具）：tech 同样可以使用",
-        "- 只是使用得更深、更复杂、更持久",
-      ].join("\n"),
-      keywords: [
-        "写代码", "编程", "debug", "调试", "开发", "重构",
-        "脚本", "自动化", "RPA", "批量", "爬虫", "数据采集",
-        "服务器", "部署", "运维", "Docker", "容器",
-        "API", "接口", "调试接口", "Postman",
-        "安装软件", "配置环境", "搭建环境",
-        "云服务", "阿里云", "AWS", "服务器",
-        "数据库", "SQL", "MongoDB", "Redis",
-        "Git", "版本控制", "CI/CD",
-        "帮我写个", "帮我做个", "帮我部署",
-        "监控", "定时任务", "cron",
-        "截图", "录屏", "屏幕监控",
-      ],
-      tools: [...(SUB_AGENT_TOOL_ALLOWLISTS.tech ?? [])],
-      capabilities: [
-        "deep_rpa",
-        "code_dev",
-        "system_ops",
-      ],
-    });
-
-    // ──────────────────────────────────────────────
-    // 🔍 info 信息助手（只查不买）
-    // ──────────────────────────────────────────────
-    map.set("info", {
-      type: "info",
-      name: "信息助手",
-      description: [
-        "【信息检索 — 只查不买】",
-        "- 商品比价、搜索评价、查找优惠活动",
-        "- 翻译、知识问答、资料收集整理",
-        "- 新闻资讯、实时信息查询",
-        "- 工具：search_web / fetch_web / info.inspect_webpage / info.navigate_site / shopping.suggest",
-        "- 电商/OTA 实价：用户导入 Cookie 并授权后使用 browser.fetch_page（须完全访问）；或 desktop.visual 操控本机已登录浏览器",
-        "- 为其他子Agent提供决策依据，但本身不执行购买或支付操作",
-      ].join("\n"),
-      keywords: ["搜索", "查询", "比价", "评价", "优惠", "折扣", "促销", "翻译", "新闻", "资料", "攻略", "哪个好", "推荐", "对比"],
-      tools: [...(SUB_AGENT_TOOL_ALLOWLISTS.info ?? [])],
-      capabilities: ["search_info"],
-    });
-
-    // ──────────────────────────────────────────────
-    // ✨ creative 创意内容助手
-    //
-    // 专注于：
-    // 1. 文案撰写（营销文案、产品描述、社媒内容）
-    // 2. 创意写作（故事、邮件、演讲稿、创意方案）
-    // 3. 内容策划（PPT大纲、活动策划、内容策略）
-    // 4. 翻译润色（中英互译、文本优化、风格调整）
-    //
-    // 与其他Agent的区别：
-    // - life = 执行购买操作（不写文案）
-    // - tech = 写代码/技术文档
-    // - creative = 纯内容创作，不涉及代码和金钱操作
-    // ──────────────────────────────────────────────
-    map.set("creative", {
-      type: "creative",
-      name: "创意内容助手",
-      description: [
-        "【创意内容 — 文案·策划·写作·润色】",
-        "",
-        "✍️ 文案撰写：",
-        "- 营销文案、产品描述、广告语、品牌故事",
-        "- 社交媒体内容（朋友圈/小红书/抖音脚本）",
-        "- 邮件撰写（商务邮件、邀请函、感谢信）",
-        "",
-        "📋 创意策划：",
-        "- PPT 大纲与结构设计",
-        "- 活动策划方案、营销策略",
-        "- 内容日历与发布计划",
-        "",
-        "🎨 创意写作：",
-        "- 故事创作、小说开头、剧本对白",
-        "- 演讲稿、致辞、发言稿",
-        "- 创意命名、Slogan 设计",
-        "",
-        "🌐 翻译润色：",
-        "- 中英互译、多语言翻译",
-        "- 文本优化、风格调整、语气改写",
-        "- 校对纠错、语法检查",
-      ].join("\n"),
-      keywords: [
-        "写文案", "写文章", "写邮件", "写策划", "写方案",
-        "做PPT", "PPT大纲", "演示文稿",
-        "创意", "创作", "写故事", "写小说",
-        "翻译", "润色", "校对", "改写",
-        "营销文案", "广告语", "Slogan", "品牌",
-        "社媒", "小红书", "朋友圈", "抖音",
-        "演讲稿", "致辞", "邀请函", "感谢信",
-        "帮我写个", "帮我做个方案", "帮我构思",
-        "取名", "命名", "口号",
-      ],
-      tools: [...(SUB_AGENT_TOOL_ALLOWLISTS.creative ?? [])],
-      capabilities: ["content_creation"],
-    });
-
-    // ──────────────────────────────────────────────
-    // 🤖 取消 general 通用助手（兜底）
-    // 设计原则：主 agent 拥有基本能力，明确需要子 agent 专业能力时才委派。
-    // 不再需要 general 作为兜底——能用主 agent 搞定的就不委派，
-    // 搞不定的就由对应的专业子 agent 处理。
-    // ──────────────────────────────────────────────
-    return map;
+  /** 获取能力注册中心（供高级用法：查询/遍历所有已注册定义） */
+  getCapabilityRegistry(): SubAgentCapabilityRegistry {
+    return this.capabilityRegistry;
   }
 
   private turnReportKey(actorId: string, chatUserMessageId?: string): string {
@@ -606,11 +438,18 @@ export class MasterAgentCoordinator {
     return null;
   }
 
+  /**
+   * 向共享消息总线写入一条消息。
+   * - from/to 支持 "master"（主 Agent）和 SubAgentType
+   * - to 支持 "broadcast"（所有 Agent 可见）
+   * - kind 标注消息类型（handoff/ask_peer/notice/directive）
+   */
   private sendInterAgentMessage(
     turnState: TurnDelegationState,
-    from: SubAgentType,
-    to: SubAgentType,
+    from: AgentRole,
+    to: MessageRecipient,
     content: string,
+    kind: InterAgentMessage["kind"] = "notice",
     relatedTaskId?: string,
   ): InterAgentMessage {
     const msg: InterAgentMessage = {
@@ -620,24 +459,39 @@ export class MasterAgentCoordinator {
       content,
       timestamp: Date.now(),
       relatedTaskId,
+      kind,
     };
     turnState.interAgentMessages.push(msg);
     return msg;
   }
 
-  private getInterAgentMessagesForAgent(turnState: TurnDelegationState, agentType: SubAgentType): InterAgentMessage[] {
-    return turnState.interAgentMessages.filter((m) => m.toAgent === agentType);
+  /**
+   * 读取某角色可见的消息。
+   * - 子 Agent：看到发给它的点对点消息 + broadcast 广播
+   * - master：看到所有消息（监督视角）
+   */
+  private getInterAgentMessagesForAgent(turnState: TurnDelegationState, role: AgentRole): InterAgentMessage[] {
+    return turnState.interAgentMessages.filter((m) => {
+      if (role === "master") return true;
+      return m.toAgent === role || m.toAgent === "broadcast";
+    });
+  }
+
+  /** 主 Agent 监督视角：读取所有协作消息（handoff/ask_peer/notice） */
+  private getInterAgentMessagesForMaster(turnState: TurnDelegationState): InterAgentMessage[] {
+    return turnState.interAgentMessages;
   }
 
   private formatInterAgentMessagesForPrompt(messages: InterAgentMessage[]): string {
     if (messages.length === 0) return "";
     return (
-      "\n\n【来自其他子Agent的消息】\n" +
+      "\n\n【共享消息总线】\n" +
         messages
-          .map(
-            (m) =>
-              `- 来自 ${m.fromAgent} Agent（${new Date(m.timestamp).toLocaleTimeString("zh-CN")}）：\n  ${m.content}`,
-          )
+          .map((m) => {
+            const kindLabel = m.kind ? `[${m.kind}]` : "";
+            const toLabel = m.toAgent === "broadcast" ? "广播" : `→${m.toAgent}`;
+            return `- 来自 ${m.fromAgent} ${toLabel} ${kindLabel}（${new Date(m.timestamp).toLocaleTimeString("zh-CN")}）：\n  ${m.content}`;
+          })
           .join("\n\n")
     );
   }
@@ -655,9 +509,12 @@ export class MasterAgentCoordinator {
 
   async handleInvokeSubAgentTool(input: Record<string, unknown>, context: ToolContext): Promise<Record<string, unknown>> {
     const actorId = resolveActorId(context);
-    const agentType = parseSubAgentType(input.agentType);
+    // 用 registry 动态类型校验，支持外部注册的自定义子 Agent
+    const agentType = parseSubAgentType(input.agentType, this.capabilityRegistry.types());
     const taskDescription = String(input.taskDescription ?? "").trim();
     const priorContext = String(input.priorContext ?? "").trim();
+    // 主 Agent 直接指令：该怎么做（执行策略/约束），体现主→子直接通信
+    const directive = String(input.directive ?? "").trim() || undefined;
     const targetAgent = String(input.forwardToAgent ?? "").trim();
     const requestedBackground = this.parseRunInBackground(input.runInBackground ?? input.background);
 
@@ -724,25 +581,7 @@ export class MasterAgentCoordinator {
       };
     }
 
-    if (targetAgent) {
-      const targetType = parseSubAgentType(targetAgent);
-      if (targetType && targetType !== agentType) {
-        this.sendInterAgentMessage(
-          turnState,
-          agentType,
-          targetType,
-          taskDescription + (priorContext ? `\n背景：${priorContext}` : ""),
-        );
-        return {
-          ok: true,
-          agentType,
-          agentName: capability.name,
-          message: `消息已转发给 ${targetType} Agent。`,
-          forwardedTo: targetType,
-        };
-      }
-    }
-
+    // 创建任务（含主 Agent 直接指令 directive）
     const task: SubTask = {
       id: `delegate-${randomUUID()}`,
       description: priorContext ? `${taskDescription}\n\n补充背景：${priorContext}` : taskDescription,
@@ -750,7 +589,91 @@ export class MasterAgentCoordinator {
       priority: 5,
       dependencies: [],
       estimatedComplexity: "medium",
+      // 主 Agent 直接指令（该怎么做），透传到子 Agent prompt
+      directive,
     };
+
+    // 写入共享消息总线：记录主 Agent 的委派指令（广播，监督 + 其他子 Agent 感知任务上下文）
+    this.sendInterAgentMessage(
+      turnState,
+      "master",
+      "broadcast",
+      `[directive] master→${agentType}：${taskDescription.slice(0, 200)}${directive ? ` | 策略：${directive.slice(0, 150)}` : ""}`,
+      "directive",
+      task.id,
+    );
+
+    if (targetAgent) {
+      const targetType = parseSubAgentType(targetAgent, this.capabilityRegistry.types());
+      if (targetType && targetType !== agentType) {
+        // 真正的 Agent-to-Agent 协作：先执行 A，再把 A 的产出交给 B 接力处理
+        // （旧实现只是把消息塞进消息池就返回，A/B 都不执行 —— 不是真实协作）
+        const aResult = await this.runSubAgentDelegation({
+          actorId,
+          turnKey,
+          turnState,
+          task,
+          capability,
+          agentType,
+          fingerprint,
+          taskDescription,
+          priorContext,
+          context,
+          maxRetries: rtConfig.masterDelegation.retryEnabled
+            ? Math.min(rtConfig.masterDelegation.maxRetryAttempts, 3)
+            : 0,
+          background: false,
+        });
+        // A 执行失败则不接力 B，直接返回 A 的结果
+        if (aResult.ok === false) return aResult;
+        const aReport = String(aResult.report ?? aResult.result ?? "").trim();
+        // 构造 B 的接力任务：A 的报告作为核心输入
+        const bCapability = this.subAgentCapabilities.get(targetType);
+        if (!bCapability) {
+          return { ok: false, error: `Unknown forward target sub-agent type: ${targetType}` };
+        }
+        const bTask: SubTask = {
+          id: `delegate-${randomUUID()}`,
+          description:
+            `接力处理来自 ${capability.name}（${agentType}）的产出。原始任务：${taskDescription}\n\n【${agentType} Agent 的报告】\n${aReport || "(A 未产出有效报告)"}`,
+          assignedAgent: targetType,
+          priority: 5,
+          dependencies: [task.id],
+          estimatedComplexity: "medium",
+          directive: `你是 ${targetType} Agent，${capability.name}（${agentType}）已完成上游工作并产出报告。请基于它的报告继续处理：${directive ? `主 Agent 要求的策略：${directive}；` : ""}若上游报告缺失关键信息，在 [MISSING] 中说明需要 ${agentType} 补充什么。`,
+        };
+        const bFingerprint = this.buildDelegationFingerprint(targetType, bTask.description, `handoff-from-${agentType}`);
+        const bResult = await this.runSubAgentDelegation({
+          actorId,
+          turnKey,
+          turnState,
+          task: bTask,
+          capability: bCapability,
+          agentType: targetType,
+          fingerprint: bFingerprint,
+          taskDescription: bTask.description,
+          priorContext: priorContext ? `上游 ${agentType} 已完成。${priorContext}` : `上游 ${agentType} 已完成。`,
+          context,
+          maxRetries: 0, // 接力任务不重试，避免链路过长
+          background: false,
+        });
+        // 记录 A→B 的协作消息（广播到共享总线，供主 Agent 监督 + 其他子 Agent 感知）
+        this.sendInterAgentMessage(
+          turnState,
+          agentType,
+          "broadcast",
+          `[handoff] ${agentType}→${targetType}：${taskDescription.slice(0, 120)}… A报告摘要：${aReport.slice(0, 200)}`,
+          "handoff",
+          task.id,
+        );
+        return {
+          ...bResult,
+          handoffFrom: agentType,
+          handoffTo: targetType,
+          upstreamReport: aReport,
+        } as Record<string, unknown>;
+      }
+    }
 
     if (runInBackground) {
       const startedAt = Date.now();
@@ -889,13 +812,21 @@ export class MasterAgentCoordinator {
     const releaseSlot = await this.acquireSubAgentSlot();
     let lastError = "";
     let report: string | null = null;
+    // 上次失败的工具调用摘要（重试时传入，避免子 Agent 重复相同错误）
+    let priorToolCallSummary: string | undefined = undefined;
 
     try {
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const priorResults = await this.withTurnLock(turnKey, async () => [...turnState.reports]);
+        // 每次循环新建 toolCallHistory，由 executeTaskWithTools 内部 push 填充
+        const toolCallHistory: ToolExecutedInfo[] = [];
         const invokeCtx: SubAgentInvokeContext = {
           userMessage: this.currentTurnUserMessage?.trim() || taskDescription,
           priorResults,
+          priorToolCallSummary,
+          toolCallHistory,
+          // 透传主 Agent 直接指令到子 Agent
+          directive: task.directive,
         };
 
         if (attempt > 0) {
@@ -921,21 +852,38 @@ export class MasterAgentCoordinator {
           const executionTime = Date.now() - started;
           report = result;
 
+          // 解析子 Agent 报告的结构化标记，判定真实 success
+          // - 若 parseSubAgentReport 返回 null（无 [REPORT] 块），保持向后兼容默认 success=true
+          // - 若 [SUCCESS]=false，记为 success=false（子 Agent 自主声明失败，不算异常抛错）
+          const parsedReport = parseSubAgentReport(report);
+          const actualSuccess = parsedReport ? parsedReport.success : true;
+          // 给主 Agent 的报告：若有结构化标记，用 buildSubAgentReportForMaster 重组（更易读）
+          const reportForMaster = parsedReport ? buildSubAgentReportForMaster(parsedReport, report) : report;
+
           const subResult: SubAgentResult = {
             taskId: task.id,
             agentType,
-            success: true,
-            result: report,
+            success: actualSuccess,
+            result: reportForMaster,
             executionTime,
           };
           await this.withTurnLock(turnKey, async () => {
             turnState.reports.push(subResult);
             turnState.seenFingerprints.set(fingerprint, subResult);
+            // 写入共享消息总线：子 Agent 报告就绪（广播，主 Agent 监督 + 其他子 Agent 感知）
+            this.sendInterAgentMessage(
+              turnState,
+              agentType,
+              "broadcast",
+              `[report] ${agentType}：任务完成（${actualSuccess ? "成功" : "失败"}，${executionTime}ms）。摘要：${(reportForMaster ?? "").trim().slice(0, 200)}`,
+              "notice",
+              task.id,
+            );
             const job = turnState.backgroundJobs.get(task.id);
             if (job) {
               job.status = "awaiting_confirmation";
               job.completedAt = Date.now();
-              job.report = report ?? undefined;
+              job.report = reportForMaster;
               job.availableActions = this.computeAvailableActions(job);
               this.emitBackgroundJobUpdate({
                 taskId: job.taskId,
@@ -948,7 +896,7 @@ export class MasterAgentCoordinator {
                 completedAt: job.completedAt,
                 availableActions: job.availableActions,
                 report: job.report,
-                userFacingText: `${job.agentName}后台任务已完成：${(report ?? "").trim().slice(0, 180) || "结果已就绪"}`,
+                userFacingText: `${job.agentName}后台任务已完成：${(reportForMaster ?? "").trim().slice(0, 180) || "结果已就绪"}`,
               });
             }
           });
@@ -956,6 +904,7 @@ export class MasterAgentCoordinator {
           this.recordSubAgentMetrics(agentType, true, executionTime, false);
 
           const uiDoneLine =
+            parsedReport?.userVisibleLine ??
             pickSubAgentDoneLine(report) ??
             `${capability.name}已交差，正在汇总结果…`;
           return {
@@ -963,7 +912,15 @@ export class MasterAgentCoordinator {
             agentType,
             agentName: capability.name,
             taskId: task.id,
-            report,
+            report: reportForMaster,
+            // 透传结构化解析结果，便于主 Agent 做后续决策
+            ...(parsedReport ? {
+              success: parsedReport.success,
+              conclusion: parsedReport.conclusion,
+              confidence: parsedReport.confidence,
+              evidence: parsedReport.evidence,
+              missing: parsedReport.missing,
+            } : {}),
             ...(attempt > 0 ? { retryAttempt: attempt } : {}),
             priorInvocationsInTurn: turnState.reports.length,
             uiDoneLine,
@@ -975,6 +932,11 @@ export class MasterAgentCoordinator {
           lastError = msg;
           const timedOut = msg.includes("timed out");
           this.recordSubAgentMetrics(agentType, false, executionTime, timedOut);
+
+          // 失败时把 toolCallHistory 序列化为摘要，供下次重试传入 priorToolCallSummary
+          if (toolCallHistory.length > 0) {
+            priorToolCallSummary = this.summarizeToolCallHistory(toolCallHistory);
+          }
 
           if (attempt < maxRetries) {
             this.log(`Sub-agent ${agentType} failed, will retry (${attempt + 1}/${maxRetries})`, { error: msg });
@@ -991,6 +953,15 @@ export class MasterAgentCoordinator {
           await this.withTurnLock(turnKey, async () => {
             turnState.reports.push(failResult);
             turnState.seenFingerprints.set(fingerprint, failResult);
+            // 写入共享消息总线：子 Agent 失败（广播，主 Agent 监督 + 其他子 Agent 感知）
+            this.sendInterAgentMessage(
+              turnState,
+              agentType,
+              "broadcast",
+              `[report] ${agentType}：任务失败（${executionTime}ms）。错误：${msg.slice(0, 200)}`,
+              "notice",
+              task.id,
+            );
             const job = turnState.backgroundJobs.get(task.id);
             if (job) {
               job.status = "failed";
@@ -1032,6 +1003,18 @@ export class MasterAgentCoordinator {
     }
   }
 
+  /** 序列化工具调用历史为人类可读摘要，供失败重试时传入 priorToolCallSummary */
+  private summarizeToolCallHistory(history: ToolExecutedInfo[]): string {
+    if (history.length === 0) return "(无工具调用记录)";
+    return history
+      .map((h, i) => {
+        const argsStr = JSON.stringify(h.input).slice(0, 120);
+        const resultStr = JSON.stringify(h.result).slice(0, 200);
+        return `${i + 1}. ${h.toolName}(${argsStr}) → ${h.ok ? "成功" : "失败"}: ${resultStr}`;
+      })
+      .join("\n");
+  }
+
   /** HTTP / 客户端：查询子 Agent 后台任务与本轮报告（可按 messageId 或聚合会话内全部回合）。 */
   getSubAgentTasksSnapshot(actorId: string, chatUserMessageId?: string): Record<string, unknown> {
     if (chatUserMessageId?.trim()) {
@@ -1052,6 +1035,7 @@ export class MasterAgentCoordinator {
       if (!key.startsWith(prefix)) continue;
       merged.reports.push(...state.reports);
       merged.inFlightCount += state.inFlightCount;
+      merged.interAgentMessages.push(...state.interAgentMessages);
       for (const [fp, result] of state.seenFingerprints) {
         merged.seenFingerprints.set(fp, result);
       }
@@ -1083,6 +1067,17 @@ export class MasterAgentCoordinator {
         success: r.success,
         executionTime: r.executionTime,
         reportPreview: r.result.slice(0, 500),
+      })),
+      // 共享消息总线：主 Agent 监督视角，看到本轮所有 Agent 间协作
+      // （主→子 directive、子→子 ask_peer/handoff、子→主 report notice）
+      sharedMessages: this.getInterAgentMessagesForMaster(turnState).map((m) => ({
+        id: m.id,
+        from: m.fromAgent,
+        to: m.toAgent,
+        kind: m.kind ?? "notice",
+        content: m.content,
+        timestamp: m.timestamp,
+        relatedTaskId: m.relatedTaskId,
       })),
       hint:
         running.length > 0
@@ -1151,7 +1146,7 @@ export class MasterAgentCoordinator {
       sessionId: actorId,
       userId: actorId,
       chatUserMessageId: job.chatUserMessageId,
-      agentAccessMode: job.accessMode === "full" ? "full" : "sandbox",
+      agentAccessMode: "full",
     };
     job.status = "completed";
     job.availableActions = [];
@@ -1392,18 +1387,127 @@ export class MasterAgentCoordinator {
     return fullText;
   }
 
+  /**
+   * 处理子 Agent 运行中的 `subagent.ask_peer` 调用：向另一类型子 Agent 发起同步咨询。
+   *
+   * 轻量路径：不经过 `runSubAgentDelegation`（无重试/后台/fingerprint），直接调
+   * `executeTaskWithTools` 且 `allowAskPeer=false` 防嵌套。
+   * peer 完成后返回 report 作为工具结果，主调子 Agent 基于它继续执行。
+   */
+  private async handleAskPeer(
+    input: Record<string, unknown>,
+    currentAgentType: SubAgentType,
+    actorId: string,
+  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    const peerType = parseSubAgentType(input.peerType, this.capabilityRegistry.types());
+    const question = String(input.question ?? "").trim();
+    if (!question) {
+      return { ok: false, result: { error: "question 不能为空" } };
+    }
+    if (!peerType) {
+      return { ok: false, result: { error: `无效的 peer 类型: ${String(input.peerType)}` } };
+    }
+    if (peerType === currentAgentType) {
+      return { ok: false, result: { error: `不能向自己（${currentAgentType}）咨询，请换一个类型` } };
+    }
+    const peerCapability = this.subAgentCapabilities.get(peerType);
+    if (!peerCapability) {
+      return { ok: false, result: { error: `${peerType} 子 Agent 未注册` } };
+    }
+
+    const peerTask: SubTask = {
+      id: `ask-peer-${randomUUID()}`,
+      description: question,
+      assignedAgent: peerType,
+      priority: 5,
+      dependencies: [],
+      estimatedComplexity: "low",
+      directive: `你是 ${peerType} Agent，正在响应 ${currentAgentType} Agent 的同步咨询。直接回答问题，不可再调 subagent.ask_peer（不可嵌套）。`,
+    };
+
+    this.log(`ask_peer: ${currentAgentType} → ${peerType}`, { question: question.slice(0, 120) });
+    console.log(`[SubAgent] ask_peer ${currentAgentType}→${peerType}: ${question.slice(0, 80)}`);
+
+    // 写入共享消息总线：记录咨询发起（广播，主 Agent 监督 + 其他子 Agent 感知）
+    const turnState = this.currentTurnUserMessage
+      ? this.getTurnDelegationState(actorId, this.currentTurnOrchestrateOpts?.chatUserMessageId)
+      : null;
+    if (turnState) {
+      this.sendInterAgentMessage(
+        turnState,
+        currentAgentType,
+        "broadcast",
+        `[ask_peer] ${currentAgentType}→${peerType}：${question.slice(0, 200)}`,
+        "ask_peer",
+        peerTask.id,
+      );
+    }
+
+    try {
+      const accessMode = parseAgentAccessMode(
+        this.currentTurnOrchestrateOpts?.agentAccessMode,
+      );
+      const report = await this.executeTaskWithTools(
+        actorId,
+        peerTask,
+        peerCapability,
+        { userMessage: question, priorResults: [] },
+        accessMode,
+        false, // allowAskPeer=false：防嵌套
+      );
+      // 写入共享消息总线：记录 peer 回复（广播，让主 Agent 看到完整协作链）
+      if (turnState) {
+        this.sendInterAgentMessage(
+          turnState,
+          peerType,
+          "broadcast",
+          `[ask_peer reply] ${peerType}→${currentAgentType}：${report.trim().slice(0, 300)}`,
+          "ask_peer",
+          peerTask.id,
+        );
+      }
+      return {
+        ok: true,
+        result: {
+          peerType,
+          question,
+          report: report.trim(),
+          message: `${peerCapability.name}（${peerType}）已回复咨询`,
+        },
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.log(`ask_peer 失败: ${currentAgentType}→${peerType}`, { error: msg });
+      return { ok: false, result: { error: `ask_peer 执行失败: ${msg}` } };
+    }
+  }
+
   private async executeTaskWithTools(
     actorId: string,
     task: SubTask,
     capability: SubAgentCapability,
     invokeCtx?: SubAgentInvokeContext,
     agentAccessMode?: AgentAccessMode,
+    /** 是否允许当前子 Agent 调用 subagent.ask_peer（peer 咨询时设为 false 防嵌套） */
+    allowAskPeer = true,
   ): Promise<string> {
     const accessMode = parseAgentAccessMode(agentAccessMode);
     const bridgeCtx = {
       desktopBridgeOnline: this.currentTurnOrchestrateOpts?.desktopBridgeOnline === true,
       phoneBridgeOnline: this.currentTurnOrchestrateOpts?.phoneBridgeOnline === true,
     };
+
+    // 子 Agent 专属 system prompt（身份/推理框架/工具最佳实践/失败处理/报告格式）
+    // 优先用 registry 中注册的 builder；回退到内置 life prompt
+    const systemPromptOverride =
+      this.capabilityRegistry.getSystemPrompt(capability.type) ??
+      this.capabilityRegistry.getSystemPrompt("life") ??
+      undefined;
+    // 子 Agent 专属模型：优先 registry.modelConfig，否则 registry 内部回退到环境变量
+    const modelConfig = this.capabilityRegistry.getModelConfig(capability.type);
+    // 子 Agent 专属工具循环轮次（覆盖 analyzeTaskComplexity 动态推断）
+    const maxRounds = this.capabilityRegistry.getMaxRounds(capability.type);
+
     const baseStreamOpts: AgentStreamOptions = {
       ...(this.promptContextBuilder?.buildForSubAgent({
         ...this.buildPromptInput(actorId, this.currentTurnOrchestrateOpts ?? undefined),
@@ -1416,7 +1520,21 @@ export class MasterAgentCoordinator {
       disableThinking: true,
       toolExposureProfile: "scoped",
       toolRankingHint: this.currentTurnOrchestrateOpts?.toolRankingHint,
+      // 子 Agent 智能化关键注入：
+      systemPromptOverride,
+      toolLoop: { maxRounds },
+      ...(modelConfig.modelOverride ? { modelOverride: modelConfig.modelOverride } : {}),
+      // sessionId 复用：限制 thread 长度避免无限累积
+      // 收敛到 4（最小化 token 消耗），配合 sessionId 复用仍能跨轮保留关键上下文
+      maxThreadMessages: 4,
     };
+
+    // peer 咨询时从工具列表移除 ask_peer，防止 peer 误调（allowAskPeer=false 时）
+    if (!allowAskPeer && baseStreamOpts.chatToolsBuiltin?.length) {
+      baseStreamOpts.chatToolsBuiltin = baseStreamOpts.chatToolsBuiltin.filter(
+        (t) => t.type !== "function" || t.function?.name !== SUBAGENT_ASK_PEER_REGISTRY,
+      );
+    }
 
     const allowedList =
       (baseStreamOpts.chatToolsBuiltin ?? [])
@@ -1426,7 +1544,12 @@ export class MasterAgentCoordinator {
     const priorBlock = invokeCtx?.priorResults.length
       ? `\n\nPrior sub-agent reports for reference; do not repeat work:\n${this.formatSubAgentReportsForMaster(invokeCtx.priorResults)}`
       : "";
-    const userGoal = invokeCtx?.userMessage ? `\n\nOriginal user request:\n${invokeCtx.userMessage}` : "";
+    // 用户原始需求降级为参考上下文（主 Agent 已基于它拆解出指令，子 Agent 无需重新解读）
+    const userGoalRef = invokeCtx?.userMessage ? `\n\n【用户原始需求（参考）】\n${invokeCtx.userMessage}` : "";
+    // 上次失败的工具调用摘要（重试时传入，避免子 Agent 重复相同错误）
+    const priorToolCallBlock = invokeCtx?.priorToolCallSummary
+      ? `\n\n[上次失败的工具调用记录]\n${invokeCtx.priorToolCallSummary}\n请避免重复相同的调用，必须改变策略（换 query/换工具/换参数）。`
+      : "";
 
     const turnState = this.currentTurnUserMessage
       ? this.getTurnDelegationState(actorId, this.currentTurnOrchestrateOpts?.chatUserMessageId)
@@ -1436,56 +1559,129 @@ export class MasterAgentCoordinator {
       : [];
     const interAgentBlock = this.formatInterAgentMessagesForPrompt(agentMessages);
 
-    const infoSearchGuidance =
-      capability.type === "info"
-        ? [
-            "【检索规范】",
-            "- search_web 的 query 只用 2-6 个核心词，保留完整专名（如「航天电子」不要拆成「航天」）；公司/股票调研可加「股票」或 6 位代码。",
-            "- 若首轮结果标题未包含核心专名，换 query 重搜（加引号专名、股票代码或「最新」），不要重复相同 query。",
-            "- 最多 3 轮 search_web，有可用链接再用 fetch_web 读正文；避免无效多轮导致超时。",
-          ].join("\n")
-        : "";
+    // 主 Agent 直接通信：把任务目标和执行策略作为直接指令传给子 Agent（而非塞进通用 prompt 字段）
+    // - description = 做什么（任务目标）
+    // - directive  = 怎么做（执行策略/约束，主 Agent 显式告诉子 Agent 该怎么做）
+    const directiveBlock = task.directive
+      ? `\n\n【主 Agent 指令】\n任务：${task.description}\n执行策略：${task.directive}`
+      : `\n\n【主 Agent 指令】\n${task.description}`;
 
+    // 简化 user message：身份说明和报告格式已移入 system prompt，避免重复
     const prompt = [
-      `You are the ${capability.name} sub-agent, invoked by the master Agent. Report to the master Agent only.`,
-      userGoal,
-      `Current sub-task:\n${task.description}`,
+      directiveBlock,
+      userGoalRef,
       priorBlock,
+      priorToolCallBlock,
       interAgentBlock,
-      infoSearchGuidance,
       buildAgentAccessModePromptLine(accessMode, bridgeCtx),
       `Available tools:\n${allowedList}`,
-      "Use necessary tools. Then return a concise sub-agent report with conclusion, evidence, and success/failure.",
       `The final line must be: ${USER_VISIBLE_PROGRESS_MARKER} followed by one short user-visible completion line.`,
     ]
       .filter(Boolean)
       .join("\n\n");
 
-    const sessionId = `subagent-${actorId}-${task.id}-${Date.now()}`;
+    // sessionId 复用：跨轮保留子 Agent 上下文（subagent-${actorId}-${agentType}）
+    // 同一 actorId + 同一 agentType 的委派共享会话历史，避免冷启动
+    const sessionId = `subagent-${actorId}-${capability.type}`;
     let fullText = "";
     const subAgentToolCtx = this.buildToolContext(actorId, this.currentTurnOrchestrateOpts ?? undefined);
-    // 子 Agent 内部的 search_web 等工具不应覆盖主会话的委派进度 UI。
+    // 子 Agent 内部的 search_web 等工具不应覆盖主会话的委派进度 UI
     subAgentToolCtx.onToolExecuteStart = undefined;
-    subAgentToolCtx.onToolExecuted = undefined;
-    await this.masterProvider.streamCompletion(
-      sessionId,
-      { text: prompt },
-      (delta) => {
-        fullText += delta;
-      },
-      subAgentToolCtx,
-      baseStreamOpts,
+    // 收集工具调用历史，用于失败重试时序列化为摘要传入下次
+    const toolCallHistory = invokeCtx?.toolCallHistory ?? [];
+    subAgentToolCtx.onToolExecuted = (info) => {
+      toolCallHistory.push(info);
+    };
+    // 拦截 subagent.ask_peer：子 Agent 运行中向其他类型子 Agent 发起同步咨询
+    // peer 咨询执行时 allowAskPeer=false，防嵌套（peer 不可再 ask_peer）
+    if (allowAskPeer) {
+      const originalExecuteTool = subAgentToolCtx.executeTool;
+      subAgentToolCtx.executeTool = async (name: string, args: Record<string, unknown>) => {
+        if (name === SUBAGENT_ASK_PEER_REGISTRY) {
+          return this.handleAskPeer(args, capability.type, actorId);
+        }
+        return originalExecuteTool(name, args);
+      };
+    }
+    // 调试日志：子 Agent 执行前
+    console.log(
+      `[SubAgent] ${capability.type} 开始执行: sessionId=${sessionId}, maxRounds=${maxRounds}, ` +
+        `systemPromptLen=${systemPromptOverride?.length ?? 0}, promptLen=${prompt.length}, ` +
+        `modelOverride=${modelConfig.modelOverride ?? "default"}, tools=${allowedList.split(", ").length}`,
     );
-    return fullText.trim();
+    let streamReturnText = "";
+    try {
+      streamReturnText = await this.masterProvider.streamCompletion(
+        sessionId,
+        { text: prompt },
+        (delta) => {
+          fullText += delta;
+        },
+        subAgentToolCtx,
+        baseStreamOpts,
+      );
+    } catch (err) {
+      console.log(
+        `[SubAgent] ${capability.type} streamCompletion 异常: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
+    // streamCompletion 返回值是最终完整文本（含工具循环后的最终回复），
+    // fullText（delta 累加）在工具循环期间可能为空（LLM 只返回 tool_calls 没有文本 delta）
+    let finalReport = (streamReturnText || fullText).trim();
+
+    // 如果工具循环结束后没有输出结构化报告（[REPORT] 块），
+    // 说明 maxRounds 用完时 LLM 还在调工具，streamCompletion 返回的是工具输出兜底。
+    // 此时加一次"总结" LLM 调用，让 LLM 基于工具调用历史生成结构化报告。
+    if (finalReport && !finalReport.includes("[REPORT]") && toolCallHistory.length > 0) {
+      console.log(
+        `[SubAgent] ${capability.type} 工具循环结束但无结构化报告，触发总结调用: toolCalls=${toolCallHistory.length}`,
+      );
+      const toolSummary = toolCallHistory
+        .slice(-8) // 只取最后 8 次工具调用，避免历史过长
+        .map((h, i) => {
+          const argsStr = JSON.stringify(h.input).slice(0, 100);
+          const resultStr = JSON.stringify(h.result).slice(0, 200);
+          return `${i + 1}. ${h.toolName}(${argsStr}) → ${h.ok ? "成功" : "失败"}: ${resultStr}`;
+        })
+        .join("\n");
+      const summaryPrompt =
+        `你刚才作为 ${capability.name} 执行了多个工具调用，但未输出最终报告。` +
+        `请基于以下工具调用历史，按报告格式输出最终结构化报告。\n\n` +
+        `子任务：${task.description}\n\n` +
+        `工具调用历史：\n${toolSummary}\n\n` +
+        `请输出 [REPORT] 块（含 [SUCCESS][CONCLUSION][EVIDENCE][CONFIDENCE][MISSING]）和 [DONE] 行。`;
+      try {
+        let summaryText = "";
+        await this.masterProvider.streamCompletion(
+          `${sessionId}:summary`,
+          { text: summaryPrompt },
+          (delta) => { summaryText += delta; },
+          undefined,
+          { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 0, systemPromptOverride },
+        );
+        if (summaryText.trim()) {
+          finalReport = summaryText.trim();
+        }
+      } catch (summaryErr) {
+        console.log(
+          `[SubAgent] ${capability.type} 总结调用失败: ${summaryErr instanceof Error ? summaryErr.message : String(summaryErr)}`,
+        );
+      }
+    }
+
+    // 调试日志：子 Agent 执行后
+    console.log(
+      `[SubAgent] ${capability.type} 执行完成: fullTextLen=${fullText.length}, streamReturnLen=${streamReturnText.length}, ` +
+        `toolCalls=${toolCallHistory.length}, reportPreview=${finalReport.slice(0, 200)}`,
+    );
+    return finalReport;
   }
 
   private resolveSubAgentTimeout(agentType: SubAgentType): number {
-    if (agentType === "tech") {
-      return Math.max(this.config.techSubtaskTimeoutMs, this.config.taskTimeoutMs);
-    }
-    if (agentType === "info") {
-      return Math.max(this.config.infoSubtaskTimeoutMs, this.config.taskTimeoutMs);
-    }
+    // 专用超时直接覆盖默认超时——info 可能比默认更短（快速收敛），tech 可能更长（深度 RPA）
+    if (agentType === "tech") return this.config.techSubtaskTimeoutMs;
+    if (agentType === "info") return this.config.infoSubtaskTimeoutMs;
     return this.config.taskTimeoutMs;
   }
 
@@ -1587,7 +1783,8 @@ export class MasterAgentCoordinator {
   }
 
   public getSubAgentMetricsSnapshot(): Record<SubAgentType, SubAgentPerformanceMetrics> {
-    const types: SubAgentType[] = ["life", "tech", "info", "creative"];
+    // 从 registry 动态获取已注册类型（支持外部注册的自定义子 Agent）
+    const types = this.capabilityRegistry.types();
     const out = {} as Record<SubAgentType, SubAgentPerformanceMetrics>;
     for (const t of types) {
       out[t] = this.subAgentMetrics.get(t) ?? this.emptySubAgentMetrics();

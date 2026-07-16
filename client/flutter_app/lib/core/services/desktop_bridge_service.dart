@@ -182,6 +182,11 @@ class DesktopBridgeService {
       result = await _runDesktopVisualTask(payload);
     } else if (action == "run_shell") {
       result = await _runShell(payload);
+    } else if (action == "uia_query" ||
+        action == "run_input" ||
+        action == "open" ||
+        action == "show_message") {
+      result = await _runWorkerAction(payload);
     } else {
       result = <String, dynamic>{
         "ok": false,
@@ -413,6 +418,93 @@ class DesktopBridgeService {
         "ok": false,
         "error":
             "desktop_visual run_shell timed out after ${(timeoutMs / 1000).toStringAsFixed(0)}s",
+      };
+    } on ProcessException catch (e) {
+      return <String, dynamic>{"ok": false, "error": e.message};
+    } catch (e) {
+      return <String, dynamic>{"ok": false, "error": e.toString()};
+    }
+  }
+
+  // -- 通用 worker action 转发：uia_query / run_input / open / show_message
+  //    Python stdio_worker 已支持这些 action,Flutter 端只需透传 payload 即可。
+  Future<Map<String, dynamic>> _runWorkerAction(
+      Map<String, dynamic> payload) async {
+    if (!Platform.isWindows) {
+      return <String, dynamic>{
+        "ok": false,
+        "error": "${payload["action"]} is only supported on Windows desktop",
+      };
+    }
+
+    final _DesktopVisualRuntime? runtime = _resolveDesktopVisualRuntime();
+    if (runtime == null) {
+      return <String, dynamic>{
+        "ok": false,
+        "error":
+            "desktop-visual runtime not found; please ensure desktop-visual and its .venv are available",
+      };
+    }
+
+    // 透传 payload(去掉 jobId),Python worker 根据 action 字段自行分发
+    final Map<String, dynamic> workerPayload = Map<String, dynamic>.from(payload);
+    workerPayload.remove("jobId");
+
+    try {
+      final Process proc = await Process.start(
+        runtime.pythonExe,
+        <String>["-u", "-m", "desktop_visual.stdio_worker"],
+        workingDirectory: runtime.packageRoot,
+        environment: runtime.environment,
+        runInShell: false,
+        includeParentEnvironment: true,
+      );
+      proc.stdin.write("${jsonEncode(workerPayload)}\n");
+      await proc.stdin.flush();
+      await proc.stdin.close();
+
+      final Future<String> stdoutFuture =
+          proc.stdout.transform(utf8.decoder).join();
+      final Future<String> stderrFuture =
+          proc.stderr.transform(utf8.decoder).join();
+      final int exitCode = await proc.exitCode.timeout(
+        const Duration(seconds: 40),
+        onTimeout: () {
+          proc.kill(ProcessSignal.sigterm);
+          throw TimeoutException("desktop_visual worker timed out");
+        },
+      );
+      final String stdoutText = (await stdoutFuture).trim();
+      final String stderrText = (await stderrFuture).trim();
+
+      if (exitCode != 0 && stdoutText.isEmpty) {
+        return <String, dynamic>{
+          "ok": false,
+          "error": stderrText.isNotEmpty
+              ? stderrText
+              : "desktop_visual worker exited with code $exitCode",
+        };
+      }
+      if (stdoutText.isEmpty) {
+        return <String, dynamic>{
+          "ok": false,
+          "error": "desktop_visual worker returned empty stdout",
+        };
+      }
+      final String jsonLine =
+          stdoutText.split(RegExp(r"\r?\n")).last.trim();
+      final dynamic decoded = jsonDecode(jsonLine);
+      if (decoded is! Map) {
+        return <String, dynamic>{
+          "ok": false,
+          "error": "desktop_visual worker returned invalid JSON",
+        };
+      }
+      return decoded.cast<String, dynamic>();
+    } on TimeoutException {
+      return <String, dynamic>{
+        "ok": false,
+        "error": "desktop_visual worker timed out after 40s",
       };
     } on ProcessException catch (e) {
       return <String, dynamic>{"ok": false, "error": e.message};

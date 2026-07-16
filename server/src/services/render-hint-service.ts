@@ -8,6 +8,9 @@
  *   1. result_card  小汇报场景（≤300 字 + 含可切列表）→ AgentResultCard 小卡片
  *                     把 LLM 输出整段保留为：[对话前导][卡片][追问/结尾]
  *   2. summary_card 长内容（≥800 字 + 可折叠）→ ContentSummaryCard 摘要卡片
+ *                     ⚠️ 仅在调用了搜索/网页类工具（search_web、fetch_web、info.*）
+ *                     的语境下才会触发；普通对话/桌面控制等场景即使文本很长，
+ *                     也保持 plain 走正文，不要错误折叠成"内容详情"。
  *   3. plain        其余 → 普通正文
  *
  * 设计要点：
@@ -49,6 +52,20 @@ const TASK_DONE_RE =
 /** 工具能力 dump（如「当前可用工具列表」），不应走卡片 */
 const CAPABILITY_DUMP_RE =
   /当前可用.*工具|【宿主能力|【Agent World】|wallet\.|search_web|master_invoke/i;
+
+/** summary_card 仅在搜索/网页类工具的结果里触发，其他场景一律走 plain */
+const SUMMARY_ELIGIBLE_TOOLS = new Set([
+  "search_web",
+  "fetch_web",
+  "info.search",
+  "info.read_webpage",
+  "info.inspect_webpage",
+  "info.navigate_site",
+]);
+
+function isSummaryEligibleToolName(toolName?: string): boolean {
+  return !!toolName && SUMMARY_ELIGIBLE_TOOLS.has(toolName);
+}
 
 /**
  * 判断一段 assistant 文本应使用何种渲染形态。
@@ -106,12 +123,15 @@ export function classifyRenderHint(
     }
   }
 
-  // === 优先级 2：summary_card 长内容 ===
+  // === 优先级 2：summary_card 长内容（仅搜索/网页类工具的结果）===
   if (trimmed.length >= SUMMARY_CARD_MIN_CHARS) {
-    return {
-      type: "summary_card",
-      reason: `long-content(len=${trimmed.length})`,
-    };
+    if (isSummaryEligibleToolName(ctx?.toolName)) {
+      return {
+        type: "summary_card",
+        reason: `long-content+search-tool(len=${trimmed.length},tool=${ctx?.toolName})`,
+      };
+    }
+    // 普通对话/桌面控制等长文本：保持 plain 正文，不折叠成"内容详情"
   }
 
   // === 优先级 3：plain 普通正文 ===

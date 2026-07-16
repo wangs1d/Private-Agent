@@ -83,7 +83,7 @@ class AgentSphereEmbodimentMapper {
           phase: "agent_task",
           source: "agent_task",
         );
-      case "agent.phone.incoming":
+      case "agent.voice.incoming":
         return const AgentSpherePatch(mood: "alert", energy: 0.9, caption: "Agent 来电", source: "phone");
       case "agent.peer_message":
         final String preview = (payload["preview"] ?? payload["text"] ?? "新消息").toString();

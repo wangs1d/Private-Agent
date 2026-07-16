@@ -134,6 +134,18 @@ def classify_shell(command: str) -> Literal["cmd", "powershell"]:
     if not cmd:
         return "cmd"
 
+    # 去掉首段 `cmd /c` / `cmd.exe /c` / `powershell -Command` 这类包装，
+    # 让 classify 看真正的命令体（LLM 经常发 `cmd /c dir ...` 但 classify 会
+    # 把首 token `cmd` 误归 PowerShell）。
+    unwrapped = re.sub(
+        r"^\s*(?:cmd|cmd\.exe)\s+/c\s+",
+        "",
+        cmd,
+        flags=re.IGNORECASE,
+    )
+    if unwrapped != cmd:
+        cmd = unwrapped
+
     # PowerShell 特征：cmdlet 前缀 / 管道 / 变量 / 复杂语法
     if re.search(
         r"\b(Get|Set|Stop|Start|Restart|New|Remove|Add|Clear|Out|Select|Where|Sort|"
@@ -142,7 +154,11 @@ def classify_shell(command: str) -> Literal["cmd", "powershell"]:
         re.IGNORECASE,
     ):
         return "powershell"
-    if "|" in cmd or "$" in cmd or "foreach" in cmd.lower():
+    # 单根 `|` 才是管道（PowerShell）。`||` / `&&` / `&` 是 CMD / bash 控制符
+    # 之前是 `if "|" in cmd` 误判：`cmd /c a || b` 被归为 PowerShell
+    if re.search(r"(?<![|&])(\|(?!\|))(?![|&])", cmd):
+        return "powershell"
+    if re.search(r"\$\w+", cmd) or re.search(r"\bforeach\b", cmd, re.IGNORECASE):
         return "powershell"
     # 多语句（分号分隔的复合命令）→ PowerShell（cmd 对 ; 支持差）
     if ";" in cmd and not cmd.lower().startswith(("echo", "set ")):
@@ -166,8 +182,24 @@ def _detect_shell(
 def _first_token(command: str) -> str:
     if not command or not command.strip():
         return ""
+    # 剥掉 cmd /c / powershell -Command 等包装，让首 token 反映真正命令
+    # （LLM 经常发 `cmd /c dir ...`，但首 token 是 `cmd`，白名单里没有）
+    unwrapped = re.sub(
+        r"^\s*(?:cmd|cmd\.exe)\s+/c\s+",
+        "",
+        command.strip(),
+        flags=re.IGNORECASE,
+    )
+    unwrapped = re.sub(
+        r"^\s*(?:powershell|powershell\.exe)\s+(?:-c|-command)\s+",
+        "",
+        unwrapped,
+        flags=re.IGNORECASE,
+    )
+    if not unwrapped or not unwrapped.strip():
+        unwrapped = command
     # 去前导空白；去路径前缀
-    first = command.lstrip().split(maxsplit=1)[0] if command.strip() else ""
+    first = unwrapped.lstrip().split(maxsplit=1)[0] if unwrapped.strip() else ""
     # 处理 ./foo / /usr/bin/foo / foo.exe / foo.cmd
     base = os.path.basename(first)
     for ext in (".exe", ".cmd", ".bat", ".ps1", ".sh"):

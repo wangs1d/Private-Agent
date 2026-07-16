@@ -277,6 +277,44 @@ class WsChatService {
     });
   }
 
+  /// 发送「选择型卡片」底部按钮点击事件。
+  /// 后端收到后转写为 chat.user_message 走原 chat 流程,
+  /// 并在 payload 中保留 [cardAction] 元数据(actionId/cardId/variant/payload)
+  /// 供审计/埋点/路由分流。
+  ///
+  /// - [messageId] 客户端生成,保证前端 UI 气泡与服务端审计可对齐
+  ///   (与键盘输入发送消息的 messageId 用同一前缀体系)
+  /// - [actionPayload] 是服务端为该 action 预埋的元数据(可空),原样透传
+  /// - [cardTitle]/[cardItems] 卡片摘要,后端用它拼接上下文,
+  ///   让 Agent 知道用户是在回应哪张卡片、卡片内容是什么,从而主动衔接
+  bool sendCardAction({
+    required String sessionId,
+    required String messageId,
+    required String actionId,
+    required String label,
+    String? cardId,
+    String variant = "primary",
+    Map<String, dynamic>? actionPayload,
+    String? cardTitle,
+    List<String>? cardItems,
+    String? userId,
+  }) {
+    return sendEvent("chat.user_action", <String, dynamic>{
+      "sessionId": sessionId,
+      "messageId": messageId,
+      "actionId": actionId,
+      "cardId": cardId ?? "",
+      "label": label,
+      "variant": variant,
+      "timestamp": DateTime.now().toIso8601String(),
+      if (actionPayload != null && actionPayload.isNotEmpty)
+        "payload": actionPayload,
+      if (cardTitle != null && cardTitle.isNotEmpty) "cardTitle": cardTitle,
+      if (cardItems != null && cardItems.isNotEmpty) "cardItems": cardItems,
+      if (userId != null && userId.isNotEmpty) "userId": userId,
+    });
+  }
+
   bool _sendNow(String type, Map<String, dynamic> payload) {
     if (_channel == null || _channel!.closeCode != null) {
       return false;

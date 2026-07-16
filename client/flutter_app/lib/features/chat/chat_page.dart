@@ -6,7 +6,7 @@ import "dart:async";
 import "../../core/models/chat_models.dart";
 import "../../core/models/turn_state.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
-import "../../core/presentation/virtual_phone_ui_labels.dart";
+import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "../../core/utils/markdown_strip.dart";
@@ -14,6 +14,7 @@ import "../../core/services/speech_service.dart";
 import "../../core/services/agent_profile_overlay_launcher.dart";
 import "agent_profile_page.dart";
 import "agent_result_card.dart";
+import "agent_action_choice_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
 import "voice_message_bubble.dart";
@@ -43,8 +44,6 @@ class ChatPage extends StatefulWidget {
 
     /// 「分阶段异步对话交互 v2」结构化状态：null 时退回 v1 思考气泡。
     this.turnState,
-    this.fullComputerAccessEnabled = false,
-    this.onToggleFullComputerAccess,
     this.onOpenPhoneDialer,
     this.inputFocusNode,
     this.isActive = true,
@@ -57,12 +56,23 @@ class ChatPage extends StatefulWidget {
 
     /// 停止当前 agent 处理（由输入框的发送按钮在处理中态触发）
     this.onStopAgent,
+
+    /// 「选择型卡片」按钮点击回调(可选;null 时仅在 UI 上锁定按钮)
+    this.onUserAction,
   });
 
   final List<ChatMessage> messages;
   final TextEditingController controller;
   final FocusNode? inputFocusNode;
   final VoidCallback onSend;
+
+  /// 用户在「选择型卡片」底部按钮上点击某个 action 的回调。
+  /// 父级负责把 action 转成 user message 并发送到后端。
+  /// 传 null 时,卡片按钮点击仅在 UI 上锁定,不会触发任何副作用(调试用)。
+  /// 回调会携带触发该按钮的卡片 [cardData](含 cardId/title/items),
+  /// 供后端做精准审计/埋点,并让 Agent 理解上下文主动衔接。
+  final void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction;
 
   /// 用户给agent起的名字
   final String? agentName;
@@ -91,10 +101,6 @@ class ChatPage extends StatefulWidget {
 
   /// 「分阶段异步对话交互 v2」结构化状态机；null 表示 v1 链路
   final TurnState? turnState;
-
-  /// 是否为本轮消息开启「完全访问电脑」（默认 false = 沙箱）
-  final bool fullComputerAccessEnabled;
-  final VoidCallback? onToggleFullComputerAccess;
 
   /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
@@ -850,6 +856,7 @@ class _ChatPageState extends State<ChatPage>
       onToggleSelection: _toggleMessageSelection,
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
+      onUserAction: widget.onUserAction,
     );
   }
 
@@ -1185,43 +1192,6 @@ class _ChatPageState extends State<ChatPage>
                                   ),
                                 ),
                                 const SizedBox(width: 4),
-                                if (widget.onToggleFullComputerAccess != null)
-                                  Container(
-                                    decoration: BoxDecoration(
-                                      color: widget.fullComputerAccessEnabled
-                                          ? cs.primary.withValues(alpha: 0.14)
-                                          : cs.surfaceContainerLowest,
-                                      shape: BoxShape.circle,
-                                      border: widget.fullComputerAccessEnabled
-                                          ? Border.all(
-                                              color: cs.primary
-                                                  .withValues(alpha: 0.45))
-                                          : null,
-                                    ),
-                                    child: IconButton(
-                                      icon: Icon(
-                                        widget.fullComputerAccessEnabled
-                                            ? Icons.lock_open_rounded
-                                            : Icons.shield_outlined,
-                                        size: 20,
-                                        color: widget.fullComputerAccessEnabled
-                                            ? cs.primary
-                                            : cs.onSurfaceVariant,
-                                      ),
-                                      tooltip: widget.fullComputerAccessEnabled
-                                          ? "完全访问：已开启（可控制电脑等高权限操作）"
-                                          : "沙箱模式：点击开启完全访问",
-                                      onPressed:
-                                          widget.onToggleFullComputerAccess,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(
-                                        minWidth: 34,
-                                        minHeight: 34,
-                                      ),
-                                    ),
-                                  ),
-                                if (widget.onToggleFullComputerAccess != null)
-                                  const SizedBox(width: 4),
                                 // 发送按钮：仅在 agent 处理中浮现（此时充当停止按钮）；空闲时完全隐藏
                                 AnimatedSwitcher(
                                   duration: const Duration(milliseconds: 180),
@@ -1339,7 +1309,7 @@ class _ChatPageState extends State<ChatPage>
                                           minHeight: 30,
                                         ),
                                         tooltip:
-                                            VirtualPhoneUiLabels.chatTooltip,
+                                            VoiceCallUiLabels.chatTooltip,
                                       ),
                                     ),
                                 ],
@@ -1452,6 +1422,9 @@ class _HoverableMessageWidget extends StatelessWidget {
     required this.onToggleSelection,
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
+
+    /// 「选择型卡片」按钮点击回调(可选,透传至内容渲染)
+    this.onUserAction,
   });
 
   final ColorScheme cs;
@@ -1495,6 +1468,10 @@ class _HoverableMessageWidget extends StatelessWidget {
   /// 回调：取消删除模式
   final VoidCallback onDeleteCancel;
 
+  /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
+  final void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction;
+
   @override
   Widget build(BuildContext context) {
     return _HoverableMessageContent(
@@ -1519,6 +1496,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onToggleSelection: onToggleSelection,
       onDeleteConfirm: onDeleteConfirm,
       onDeleteCancel: onDeleteCancel,
+      onUserAction: onUserAction,
     );
   }
 }
@@ -1547,6 +1525,7 @@ class _HoverableMessageContent extends StatefulWidget {
     required this.onToggleSelection,
     required this.onDeleteConfirm,
     required this.onDeleteCancel,
+    this.onUserAction,
   });
 
   final ColorScheme cs;
@@ -1570,6 +1549,10 @@ class _HoverableMessageContent extends StatefulWidget {
   final void Function(String messageId, bool selected) onToggleSelection;
   final VoidCallback onDeleteConfirm;
   final VoidCallback onDeleteCancel;
+
+  /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
+  final void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction;
 
   @override
   State<_HoverableMessageContent> createState() =>
@@ -1980,6 +1963,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 widget.mainMessage,
                 isUser: widget.isUser,
                 contentSummary: widget.contentSummary,
+                onUserAction: widget.onUserAction,
               ),
               if (!widget.isUser &&
                   widget.contentSummary?.summary == null &&
@@ -2011,6 +1995,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     ChatMessage message, {
     required bool isUser,
     ContentSummaryParseResult? contentSummary,
+    void Function(AgentResultAction action, {required AgentResultData cardData})?
+        onUserAction,
   }) {
     if (isUser) {
       return Text(
@@ -2023,15 +2009,28 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
     // 智能体结果卡片（任务总结 / 工具调用结果）优先级最高，
     // 命中后剥离标记，剩余文本以小字附在卡片下方。
+    //
+    // actions 非空时,渲染为带按钮的"选择型卡片"——专门给用户做快速决策
+    // (如「周六去 / 忽略」「订阅 / 稍后再说」),点击会触发 onUserAction。
+    // actions 为空时,保持原有"纯汇报"卡片样式不变。
     final AgentResultParseResult agentResult =
         AgentResultParser.parse(message.text);
     if (agentResult.data != null) {
+      final AgentResultData data = agentResult.data!;
       final String remaining = agentResult.cleanedText;
+      final Widget card = data.actions.isNotEmpty
+          ? AgentActionChoiceCard(
+              data: data,
+              onAction: onUserAction == null
+                  ? null
+                  : (AgentResultAction a) => onUserAction(a, cardData: data),
+            )
+          : AgentResultCard(data: data);
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          AgentResultCard(data: agentResult.data!),
+          card,
           if (remaining.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 3),
@@ -2052,6 +2051,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         summary: contentSummary!.summary!,
         briefText: contentSummary.briefText,
         extraText: contentSummary.cleanedText,
+        structuredItems: contentSummary.structuredItems,
         onCardTap: () => ContentSummaryDetailModal.show(
           context,
           contentSummary.summary!,

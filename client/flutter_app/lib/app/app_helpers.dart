@@ -1,9 +1,9 @@
 /// 右侧抽屉要展示的内容种类。
-enum RightPanelKind { friends, messages, notes, devices }
+enum RightPanelKind { friends, messages, devices }
 
 /// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
 /// - 消息/好友类：信息密度低，右面板小占比（左大右小）
-/// - 笔记/设备类：需要更大展示空间，右面板占比略大
+/// - 设备类：需要更大展示空间，右面板占比略大
 extension RightPanelKindDefaults on RightPanelKind {
   /// 打开时左聊天区占可用宽度的比例（0.1~0.9）。
   /// 越大表示聊天区越宽、右面板越窄。
@@ -13,8 +13,6 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.62; // 消息聚合：右面板较窄
       case RightPanelKind.friends:
         return 0.58; // 好友列表：右面板较窄
-      case RightPanelKind.notes:
-        return 0.45; // 笔记编辑：需要更多空间
       case RightPanelKind.devices:
         return 0.42; // 设备展示：需要更大空间
     }
@@ -71,8 +69,6 @@ String rightPanelTitle(RightPanelKind kind) {
       return "好友";
     case RightPanelKind.messages:
       return "消息聚合";
-    case RightPanelKind.notes:
-      return "笔记";
     case RightPanelKind.devices:
       return "我的设备";
   }
@@ -138,10 +134,6 @@ String buildMobileBriefingSummary(Map<String, dynamic> briefing) {
       }
     }
   }
-  final Object? notes = briefing["pendingNotes"];
-  if (notes is List && notes.isNotEmpty) {
-    parts.add("还有 ${notes.length} 条待办提醒");
-  }
   return parts.isEmpty ? "点击查看今天的简报内容" : parts.join(" · ");
 }
 
@@ -189,21 +181,6 @@ String buildDesktopBriefingSummary(Map<String, dynamic> briefing) {
     }
     if (top.isNotEmpty) {
       lines.add("安排：${top.join("；")}");
-    }
-  }
-  final Object? notes = briefing["pendingNotes"];
-  if (notes is List && notes.isNotEmpty) {
-    final List<String> top = <String>[];
-    for (final Object? item in notes.take(3)) {
-      if (item is Map) {
-        final String title = item["title"]?.toString() ?? "";
-        if (title.isNotEmpty) top.add(title);
-      } else if (item != null && item.toString().trim().isNotEmpty) {
-        top.add(item.toString());
-      }
-    }
-    if (top.isNotEmpty) {
-      lines.add("待办：${top.join("；")}");
     }
   }
   return lines.isEmpty ? "今天的简报已经准备好了。" : lines.join("\n");

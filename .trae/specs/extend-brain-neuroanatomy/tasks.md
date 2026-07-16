@@ -1,0 +1,66 @@
+# Tasks
+
+- [x] Task 1: 扩展 `server/src/brain/types.ts` 新增 5 类神经解剖类型
+  - [x] SubTask 1.1: 新增 `SensoryFrame / SensoryInput / SensoryListenResult / SensoryLookResult / SensorySpeakResult` 类型
+  - [x] SubTask 1.2: 新增 `MemoryItem / MemoryRecallResult / MemoryConsolidationStats / MemoryDomainKind` 类型
+  - [x] SubTask 1.3: 新增 `SynapseMessage / SynapseEnvelope / SynapseRoute` 类型
+  - [x] SubTask 1.4: 新增 `SafetyCheckResult / SafetySeverity / EmotionVector / TonePolicyResult` 类型
+  - [x] SubTask 1.5: 新增 `PlanStep / PlanResult / ReActObservation / SystemRouteDecision` 类型
+  - [x] SubTask 1.6: 扩展 `BrainSnapshot` 加入 `sensory / memory / synapse / limbic / planner` 字段（可选）
+- [x] Task 2: 实现 `SensoryCortex`（感官皮层）
+  - [x] SubTask 2.1: 新建 `server/src/brain/sensory-cortex.ts`，定义 `VoiceDialogueLike / VoiceCapabilityLike / DesktopVisualLike` 子系统接口
+  - [x] SubTask 2.2: 实现 `listen(audio, opts) / look(opts) / speak(text, opts) / endToEndVoice(stream)` 方法
+  - [x] SubTask 2.3: 实现 `buildSensoryFrame(...)` 把 ASR + 视觉 + 情绪融合为 `SensoryFrame`
+- [x] Task 3: 实现 `MemoryCortex`（记忆皮层 / 海马体）
+  - [x] SubTask 3.1: 新建 `server/src/brain/memory-cortex.ts`，定义 `ShortTermMemoryLike / AgenticMemoryLike / HumanLikeMemoryLike / NarrativeMemoryLike` 子系统接口
+  - [x] SubTask 3.2: 实现 `remember(actorId, item) / recall(actorId, query, opts) / recallCrossDomain(actorId, query)` 方法
+  - [x] SubTask 3.3: 实现 `consolidate(actorIds)` 触发睡眠巩固
+- [x] Task 4: 实现 `SynapseBus`（突触总线 / 胼胝体）
+  - [x] SubTask 4.1: 新建 `server/src/brain/synapse-bus.ts`，以 `HookBus` 为底座
+  - [x] SubTask 4.2: 桥接 `MessageHubService / AipService / WsConnectionRegistry`
+  - [x] SubTask 4.3: 实现 `fire(type, data, opts) / subscribe(type, handler) / sendToAgent(agentId, msg) / sendToUser(actorId, msg)` 方法
+- [x] Task 5: 实现 `LimbicCortex`（边缘皮层 / 杏仁核 + 情感）
+  - [x] SubTask 5.1: 新建 `server/src/brain/limbic-cortex.ts`，定义 `TaskSafetyLike / MoodInferenceLike / TonePolicyLike` 子系统接口
+  - [x] SubTask 5.2: 实现 `checkSafety(action, ctx)` 危险熔断（不走 LLM）
+  - [x] SubTask 5.3: 实现 `inferEmotion(actorId, signals) / applyTonePolicy(text, emotion)` 方法
+- [x] Task 6: 实现 `PlannerCortex`（额叶规划皮层）
+  - [x] SubTask 6.1: 新建 `server/src/brain/planner-cortex.ts`，定义 `PlanExecuteLoopLike / MasterCoordinatorLike / TaskRouterLike` 子系统接口
+  - [x] SubTask 6.2: 实现 `plan(goal) / execute(plan) / react(observation) / delegate(subAgentType, task)` 方法
+  - [x] SubTask 6.3: 实现 `routeSystem(userMessage)` 快慢双系统路由
+- [x] Task 7: 扩展 `BrainCenter` 持有 9 分区
+  - [x] SubTask 7.1: 在 `brain-center.ts` 新增 5 个分区引用（可选）+ `registerSensory / registerMemory / registerSynapse / registerLimbic / registerPlanner` 方法
+  - [x] SubTask 7.2: 新增 9 个核心方法代理：`listen / look / speak / remember / recall / fire / checkSafety / plan / routeSystem`（缺失分区时优雅降级）
+  - [x] SubTask 7.3: 扩展 `snapshot(actorId)` 加入 5 个新分区状态字段
+  - [x] SubTask 7.4: 更新 `index.ts` 导出 5 个新分区类
+- [x] Task 8: 在 `create-app-services.ts` 装配 5 个新分区
+  - [x] SubTask 8.1: 实例化 5 个新分区，注册现有感官/记忆/通信/安全/规划服务为子系统（不重写子系统实现）
+  - [x] SubTask 8.2: 把 5 个新分区注册到 `brainCenter.registerXxx`
+  - [x] SubTask 8.3: 支持 `BRAIN_NEURO_ENABLED=0` 降级（5 个新分区不实例化，BrainCenter 回退到 4 皮层）
+- [x] Task 9: 扩展 `HookEventType` 枚举
+  - [x] SubTask 9.1: 在 `server/src/services/hooks/hook-types.ts` 加入 `sensory.listen / sensory.look / sensory.speak / memory.remember / memory.recall / memory.consolidate / synapse.agent_message / synapse.user_message / limbic.safety_block / limbic.emotion_shift / planner.plan_step` 等类型
+- [x] Task 10: 暴露 HTTP 路由扩展
+  - [x] SubTask 10.1: 在 `server/src/routes/http/brain.ts` 新增 `POST /brain/sensory/listen` / `POST /brain/sensory/look` / `POST /brain/sensory/speak`
+  - [x] SubTask 10.2: 新增 `POST /brain/memory/remember` / `POST /brain/memory/recall`
+  - [x] SubTask 10.3: 新增 `POST /brain/synapse/fire` / `POST /brain/synapse/sendToAgent`
+  - [x] SubTask 10.4: 新增 `POST /brain/limbic/checkSafety` / `POST /brain/limbic/inferEmotion`
+  - [x] SubTask 10.5: 新增 `POST /brain/planner/plan` / `POST /brain/planner/routeSystem`
+- [x] Task 11: 注册 agent 工具扩展
+  - [x] SubTask 11.1: 在 `server/src/tools/brain-tools.ts` 新增 `brain.listen / brain.look / brain.speak / brain.remember / brain.recall / brain.check_safety / brain.plan / brain.route_system` 工具 schema + handler
+  - [x] SubTask 11.2: 把新工具加入 `BRAIN_TOOLS` 数组
+- [x] Task 12: 验证与回归
+  - [x] SubTask 12.1: `tsc --noEmit` 通过零错误
+  - [x] SubTask 12.2: 启动 server，确认 `BrainCenter.start()` 后 9 个分区均正常 register
+  - [x] SubTask 12.3: 验证 `BRAIN_NEURO_ENABLED=0` 降级时 5 个新分区不实例化，旧 4 皮层行为不变
+  - [x] SubTask 12.4: 调用 `GET /brain/state` 返回包含 9 分区的快照
+  - [x] SubTask 12.5: 注入"危险 shell 命令"测试 `limbic.checkSafety` 返回 DENIED
+  - [x] SubTask 12.6: 注入"帮用户规划北京三日游"测试 `planner.plan` 返回 PlanStep[]
+
+# Task Dependencies
+
+- Task 2-6 依赖 Task 1（类型扩展）
+- Task 2-6 之间相互独立，可并行
+- Task 7 依赖 Task 2-6（5 个新分区实现完成）
+- Task 8 依赖 Task 7（BrainCenter 已扩展为 9 分区）
+- Task 9 与 Task 4 有耦合（SynapseBus 用扩展后的事件类型），但可并行：Task 9 先做枚举扩展，Task 4 实现时引用
+- Task 10 / 11 依赖 Task 8（BrainCenter 已装配）
+- Task 12 依赖 Task 10 / 11

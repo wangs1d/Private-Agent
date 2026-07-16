@@ -717,6 +717,54 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.DesktopEvent) {
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          if (!initAsDesktopBridge) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "DESKTOP_BRIDGE_INIT_REQUIRED",
+                  message: "session.init 须设置 desktopBridge: true 方可推送 desktop.event",
+                },
+              }),
+            );
+            return;
+          }
+          // desktop.event 消息把 event_type / timestamp 放在顶层（与 type 同级），
+          // payload 为事件数据本体；此处只做接收与转发，不转 LifeSignal（Task 4 的工作）。
+          const rawEvent = event as Record<string, unknown>;
+          const eventType = String(rawEvent.event_type ?? rawEvent.eventType ?? "").trim();
+          if (!eventType) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "BAD_DESKTOP_EVENT", message: "缺少 event_type" },
+              }),
+            );
+            return;
+          }
+          const eventData = (event.payload as Record<string, unknown>) ?? {};
+          const rawTs = rawEvent.timestamp;
+          const eventTs: number | string =
+            typeof rawTs === "number" || typeof rawTs === "string" ? rawTs : Date.now();
+          desktopBridgeCoordinator.handleEventFromSocket(socket, boundActorId, {
+            actorId: boundActorId,
+            eventType,
+            payload: eventData,
+            timestamp: eventTs,
+          });
+          return;
+        }
+
         if (event.type === ClientEventType.PhoneBridgeRegister) {
           if (!boundActorId) {
             socket.send(
@@ -786,6 +834,78 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           phoneBridgeCoordinator.completeFromSocket(boundActorId, socket, jobId, pl as PhoneBridgeResult);
+          return;
+        }
+
+        if (event.type === ClientEventType.ChatUserAction) {
+          // 用户在「选择型卡片」底部按钮上点击的入口。
+          // 语义上等价于 chat.user_message(都是用户输入),但携带 action
+          // 元数据(actionId/cardId/variant/payload)便于审计/埋点/路由分流。
+          // 这里把它转写为 chat.user_message,走完全相同的 chat 流程,
+          // 避免在下游 handler 里出现"user_message vs user_action"双分支。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const actPl = (event.payload ?? {}) as Record<string, unknown>;
+          const label = String(actPl.label ?? "").trim();
+          if (!label) {
+            sendUnifiedError("BAD_USER_ACTION", "缺少 label(按钮显示文案)");
+            return;
+          }
+          const cardId = String(actPl.cardId ?? "").trim();
+          const actionId = String(actPl.actionId ?? actPl.id ?? "").trim();
+          const variant = String(actPl.variant ?? "primary").trim();
+          // 仅保留原始可序列化字段,避免后端把前端 payload 当受信输入。
+          const actionPayload =
+            actPl.payload && typeof actPl.payload === "object"
+              ? (actPl.payload as Record<string, unknown>)
+              : {};
+
+          // 构造等价的 user message payload。
+          // text 使用按钮 label(等价于用户打字输入了这段话);
+          // messageId 由客户端提供,保证前端 UI 与后端审计可对齐。
+          const userMessagePayload: Record<string, unknown> = {
+            sessionId: actPl.sessionId ?? boundActorId,
+            messageId: actPl.messageId ?? `action-${Date.now()}`,
+            text: label,
+            timestamp:
+              typeof actPl.timestamp === "string"
+                ? actPl.timestamp
+                : new Date().toISOString(),
+            // 透传上下文(若有):clientLocation / visionFrames 等。
+            ...(actPl.clientLocation
+              ? { clientLocation: actPl.clientLocation }
+              : {}),
+          };
+          if (typeof actPl.userId === "string" && actPl.userId.trim()) {
+            userMessagePayload.userId = actPl.userId.trim();
+          }
+          // 在 payload 中标记「来源是卡片按钮」,供下游 handler / 记忆 / 审计使用。
+          userMessagePayload.cardAction = {
+            cardId,
+            actionId,
+            variant,
+            payload: actionPayload,
+          };
+
+          await handleChatUserMessageEvent(
+            {
+              socket,
+              boundActorId: boundActorId ?? "",
+              sessionId: boundActorId ?? "",
+              initAsDesktopBridge,
+              clientIp,
+              sendUnifiedError,
+            },
+            userMessagePayload,
+            {
+              agentCore,
+              auditService,
+              voiceCapabilityService,
+              voiceMessageService,
+            },
+          );
           return;
         }
 

@@ -143,7 +143,8 @@ export function OverlayApp() {
 
   useEmbodimentCommandRelay(true);
 
-  const windowMotion = useOverlayWindowMotion({ enabled: true, mood: state.mood });
+  // 自动漫游已禁用：桌宠不再自己随机移动，避免晃出屏幕外看不见
+  const windowMotion = useOverlayWindowMotion({ enabled: false, mood: state.mood });
   const { roamNow, triggerVerticalShake } = windowMotion;
   const roamNowRef = useRef<(() => void) | null>(null);
   roamNowRef.current = roamNow;

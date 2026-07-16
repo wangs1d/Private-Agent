@@ -5,6 +5,7 @@ import { validateCommunitySkillCandidate, type HttpRouteDepsLike } from "@privat
 
 import { skillMetadataFromTrajectoryDraft } from "./skill-promotion-metadata.js";
 import type { SkillPromotionQueueService } from "./skill-promotion-queue-service.js";
+import type { SkillMetadata } from "../skills/types.js";
 
 export type SkillPromotionPipelineMode = "off" | "validate_sync" | "queue";
 
@@ -68,5 +69,42 @@ export class TrajectoryPromotionPipeline {
         traceId: params.traceId,
       });
     }
+  }
+
+  /**
+   * 把 SkillGenerator 生成的代码编译并装载到 SkillManager（自我进化用）。
+   *
+   * 调用 SkillManager.registerFromCode：
+   * 1. 安全扫描 handlerCode（拒绝 process./require/eval/Function/__dirname 等危险模式）
+   * 2. 用 new Function 编译 handlerCode 为 SkillHandler 函数
+   * 3. 注册到 SkillManager，立即可被 ToolRegistry.execute 调用
+   *
+   * @returns ok=true 表示装载成功，Skill 已可用
+   */
+  async promote(skill: {
+    metadata: SkillMetadata;
+    handlerCode: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const skillManager = this.validateDeps.skillManager;
+    if (!skillManager) {
+      return { ok: false, error: "SkillManager 未注入" };
+    }
+
+    if (typeof skillManager.registerFromCode !== "function") {
+      return { ok: false, error: "SkillManager 未实现 registerFromCode 方法" };
+    }
+
+    const result = skillManager.registerFromCode(skill.metadata, skill.handlerCode, {
+      autoEnable: true,
+    });
+
+    if (!result.ok) {
+      return { ok: false, error: result.error ?? "未知错误" };
+    }
+
+    console.log(
+      `✅ [TrajectoryPromotionPipeline] Skill '${result.skillName}' 已通过自我进化路径装载`,
+    );
+    return { ok: true };
   }
 }

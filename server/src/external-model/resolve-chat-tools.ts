@@ -46,11 +46,28 @@ function trimToolsToTokenBudget(
   tools: ChatCompletionTool[],
   minTools: number,
   tokenBudget: number | null,
+  pinnedToolNames?: Set<string>,
 ): ChatCompletionTool[] {
   if (!tokenBudget || tokenBudget <= 0) return tools;
+  const pinned = pinnedToolNames ?? new Set<string>();
   const out: ChatCompletionTool[] = [];
   let used = 0;
+  // Pinned tools go first and keep full schema. They are NOT exempt from the
+  // budget cap (spec SHALL): if a pinned tool would push the total over budget
+  // it is dropped, never trimmed, so any pinned tool that remains stays intact.
   for (const tool of tools) {
+    const name = tool.type === "function" ? tool.function?.name : undefined;
+    if (!name || !pinned.has(name)) continue;
+    const delta = estimateToolsSchemaTokens([tool]);
+    if (used + delta > tokenBudget) continue;
+    out.push(tool);
+    used += delta;
+  }
+  // Non-pinned tools fill the remaining budget; once minTools is reached the
+  // budget is enforced strictly, otherwise the minTools guarantee still applies.
+  for (const tool of tools) {
+    const name = tool.type === "function" ? tool.function?.name : undefined;
+    if (name && pinned.has(name)) continue;
     const delta = estimateToolsSchemaTokens([tool]);
     if (out.length >= minTools && used + delta > tokenBudget) continue;
     out.push(tool);
@@ -76,7 +93,8 @@ function resolvedToolsCacheKey(userText?: string, streamOpts?: AgentStreamOption
   const profile = resolveToolExposureProfile(streamOpts);
   const textKey = contextualTextKey(userText, profile);
   const rankingKey = (streamOpts?.toolRankingHint?.preferredNamespaces ?? []).join(",");
-  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${phoneBridge}|${profile}|${textKey}|${rankingKey}`;
+  const pinnedKey = (streamOpts?.pinnedToolNames ?? []).slice().sort().join(",");
+  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${phoneBridge}|${profile}|${textKey}|${rankingKey}|${pinnedKey}`;
 }
 
 function contextualTextKey(userText: string | undefined, profile: ToolExposureProfile): string {
@@ -106,6 +124,16 @@ function pickNamespace(toolName: string): string {
 const DESKTOP_VISUAL_PINNED_TOOLS = [
   "desktop.visual.screenshot",
   "desktop.visual.run_task",
+  // 2026-07-13：完整暴露底层桌面工具，避免 contextual 漏命中时被裁掉
+  "desktop.open",
+  "desktop.run_preset",
+  "desktop.run_shell",
+  "desktop.uia_query",
+  // 2026-07-14：新增 UIA 原生控件操作 + 桌面端联网工具
+  "desktop.run_automation",
+  "desktop.http_get",
+  "desktop.web_search",
+  "desktop.web_fetch",
 ] as const;
 
 /** 桥接在线或完全访问时，桌面工具不得被 contextual 筛选掉。 */
@@ -136,6 +164,64 @@ function pinDesktopVisualTools(
   return [...tools, ...toAdd];
 }
 
+/**
+ * 强制保留 streamOpts.pinnedToolNames 指定的工具(绕过 contextual 筛选)。
+ * 从 builtin + extra + desktop-visual 定义中查找缺失的工具并补入。
+ */
+function pinSpecifiedTools(
+  tools: ChatCompletionTool[],
+  streamOpts?: AgentStreamOptions,
+): ChatCompletionTool[] {
+  const names = streamOpts?.pinnedToolNames;
+  if (!names || names.length === 0) return tools;
+
+  const present = new Set(
+    tools
+      .map((t) => (t.type === "function" ? t.function?.name : undefined))
+      .filter((n): n is string => Boolean(n)),
+  );
+  const allBuiltin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
+  const extras = [...allBuiltin, ...(streamOpts?.chatToolsExtra ?? []), ...DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS];
+  const toAdd: ChatCompletionTool[] = [];
+  for (const name of names) {
+    if (present.has(name)) continue;
+    const found = extras.find((t) => t.type === "function" && t.function?.name === name);
+    if (found) toAdd.push(found);
+  }
+  if (toAdd.length === 0) return tools;
+  return [...tools, ...toAdd];
+}
+
+/**
+ * 计算当前请求中应被视作 pinned 的工具名集合（desktop 桥接/完全访问时的桌面工具
+ * + streamOpts.pinnedToolNames）。与 {@link pinDesktopVisualTools} /
+ * {@link pinSpecifiedTools} 的注入条件保持一致，用于在统一 token 预算核算中
+ * 标记哪些工具优先保留完整 schema。
+ */
+function resolvePinnedToolNames(streamOpts?: AgentStreamOptions): Set<string> {
+  const pinned = new Set<string>();
+  const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
+  const bridge = streamOpts?.desktopBridgeOnline === true;
+  const phoneBridge = streamOpts?.phoneBridgeOnline === true;
+  const fullAccess = mode === "full";
+  if (bridge || phoneBridge || fullAccess) {
+    for (const name of DESKTOP_VISUAL_PINNED_TOOLS) pinned.add(name);
+  }
+  const names = streamOpts?.pinnedToolNames;
+  if (names && names.length > 0) {
+    for (const name of names) pinned.add(name);
+  }
+  return pinned;
+}
+
+/** 合并 pinned 工具（desktop 桥接 + 用户指定）到 contextual 选中工具列表。 */
+function mergePinnedTools(
+  tools: ChatCompletionTool[],
+  streamOpts?: AgentStreamOptions,
+): ChatCompletionTool[] {
+  return pinSpecifiedTools(pinDesktopVisualTools(tools, streamOpts), streamOpts);
+}
+
 function applyToolRankingHint(
   tools: ChatCompletionTool[],
   streamOpts?: AgentStreamOptions,
@@ -157,26 +243,38 @@ function applyToolExposureProfile(
   tools: ChatCompletionTool[],
   userText: string | undefined,
   profile: ToolExposureProfile,
+  streamOpts?: AgentStreamOptions,
 ): ChatCompletionTool[] {
   if (profile === "none") return [];
   if (profile === "full" || profile === "delegate" || profile === "scoped") return tools;
   if (!userText?.trim()) return tools;
 
+  // Pinned 工具（desktop 桥接 + 用户指定）必须纳入统一 token 预算核算，
+  // 不得绕过 contextual 筛选与预算上限（spec SHALL）。先合并 pinned 工具到
+  // contextual 选中集合，再统一过 trimToolsToTokenBudget：pinned 工具优先
+  // 保留完整 schema，超预算时丢弃非 pinned 工具，pinned 仍超预算则按顺序丢弃。
+  const pinnedNames = resolvePinnedToolNames(streamOpts);
+  const budget = resolveExposureTokenBudget(profile);
+
   if (profile === "light") {
-    return trimToolsToTokenBudget(selectRelevantTools(userText, tools, {
+    const selected = selectRelevantTools(userText, tools, {
       minTools: 3,
       maxTools: tools.length,
       includeAlwaysIncluded: false,
-      tokenBudget: resolveExposureTokenBudget(profile) ?? undefined,
-    }), 3, resolveExposureTokenBudget(profile));
+      tokenBudget: budget ?? undefined,
+    });
+    const merged = mergePinnedTools(selected, streamOpts);
+    return trimToolsToTokenBudget(merged, 3, budget, pinnedNames);
   }
 
-  return trimToolsToTokenBudget(selectRelevantTools(userText, tools, {
+  const selected = selectRelevantTools(userText, tools, {
     minTools: 4,
     maxTools: tools.length,
     includeAlwaysIncluded: true,
-    tokenBudget: resolveExposureTokenBudget(profile) ?? undefined,
-  }), 4, resolveExposureTokenBudget(profile));
+    tokenBudget: budget ?? undefined,
+  });
+  const merged = mergePinnedTools(selected, streamOpts);
+  return trimToolsToTokenBudget(merged, 4, budget, pinnedNames);
 }
 
 export function resolveChatToolsForStream(
@@ -224,8 +322,12 @@ export function resolveChatToolPlanForStream(
     accessFiltered,
     userText,
     resolveToolExposureProfile(streamOpts),
+    streamOpts,
   );
-  const ranked = pinDesktopVisualTools(applyToolRankingHint(result, streamOpts), streamOpts);
+  const ranked = pinSpecifiedTools(
+    pinDesktopVisualTools(applyToolRankingHint(result, streamOpts), streamOpts),
+    streamOpts,
+  );
 
   if (_resolvedToolsCache.size >= MAX_RESOLVED_TOOLS_CACHE) {
     const firstKey = _resolvedToolsCache.keys().next().value;

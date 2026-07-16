@@ -234,7 +234,6 @@ class _BriefingSettingsPageState extends State<BriefingSettingsPage> {
                       Divider(height: 1, color: cs.outline.withValues(alpha: 0.3)),
                       _buildSectionSwitch("schedule", "计划安排", "今天的重要日程和待处理事项"),
                       Divider(height: 1, color: cs.outline.withValues(alpha: 0.3)),
-                      _buildSectionSwitch("notes", "待办笔记", "未复习或待处理的笔记提醒"),
                     ],
                   ),
                 ),

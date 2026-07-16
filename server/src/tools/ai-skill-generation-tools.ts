@@ -15,8 +15,9 @@ export function registerAISkillGenerationTools(
   registry: ToolRegistry,
   chatProvider: ExternalChatProvider | null,
   skillManager?: SkillManager | null,
+  existingGenerator?: SkillGenerator | null,
 ): void {
-  const generator = new SkillGenerator(chatProvider);
+  const generator = existingGenerator ?? new SkillGenerator(chatProvider);
 
   // ========== 智能生成技能 ==========
   registry.register("self.generate_skill", async (input, context) => {

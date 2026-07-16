@@ -51,14 +51,6 @@ class MorningBriefingCard extends StatelessWidget {
           in _readList("schedule", "todaySchedule") ?? <dynamic>[])
         if (x is Map) x.cast<String, dynamic>(),
     ];
-    final List<String> notes = <String>[
-      for (final Object? x
-          in _readList("notes", "pendingNotes") ?? <dynamic>[])
-        if (x is Map)
-          (x["title"]?.toString() ?? "").trim()
-        else if (x != null)
-          x.toString(),
-    ].where((String item) => item.isNotEmpty).toList();
 
     final bool canSpeak =
         onSpeak != null && narrationText != null && narrationText!.isNotEmpty;
@@ -164,35 +156,6 @@ class MorningBriefingCard extends StatelessWidget {
                       Expanded(
                         child: Text(s["title"]?.toString() ?? ""),
                       ),
-                    ],
-                  ),
-                ),
-            const SizedBox(height: 16),
-            _SectionHeader(
-              icon: Icons.checklist_outlined,
-              text: "待办提醒",
-              theme: theme,
-            ),
-            const SizedBox(height: 6),
-            if (notes.isEmpty)
-              Text(
-                "没有待处理的笔记提醒",
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: cs.onSurfaceVariant,
-                ),
-              )
-            else
-              for (final String note in notes)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6, right: 8),
-                        child: Icon(Icons.circle, size: 6, color: cs.outline),
-                      ),
-                      Expanded(child: Text(note)),
                     ],
                   ),
                 ),

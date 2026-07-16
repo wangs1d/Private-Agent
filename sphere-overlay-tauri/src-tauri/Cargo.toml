@@ -1,0 +1,37 @@
+[package]
+name = "sphere-overlay-tauri"
+version = "0.1.0"
+description = "Agent Sphere 桌面透明悬浮窗 - Tauri 版本"
+edition = "2021"
+
+[lib]
+name = "sphere_overlay_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+urlencoding = "2"
+url = "2"
+tokio = { version = "1", features = ["time"] }
+
+# Win32 API（与 Tauri 内部版本保持一致）
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+opt-level = 2
+strip = true

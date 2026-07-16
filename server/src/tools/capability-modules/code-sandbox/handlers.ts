@@ -143,6 +143,75 @@ export function createCodeRunHandler(
   };
 }
 
+/** code.shell —— 执行白名单 shell 命令（在沙箱工作目录内，三道闸安全策略）。 */
+export function createCodeShellHandler(
+  service: CodeSandboxService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const command = typeof input.command === "string" ? input.command.trim() : "";
+    if (!command) {
+      return { ok: false, error: "缺少 command（要执行的命令名）" };
+    }
+    const args = Array.isArray(input.args)
+      ? input.args.map((a) => (typeof a === "string" ? a : String(a)))
+      : [];
+    const workspaceId =
+      typeof input.workspaceId === "string" && input.workspaceId.trim()
+        ? input.workspaceId.trim()
+        : undefined;
+    const timeoutMs =
+      typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)
+        ? Math.floor(input.timeoutMs)
+        : undefined;
+    const stdin = typeof input.stdin === "string" ? input.stdin : undefined;
+
+    const actorId = resolveActorId(context);
+
+    // 主进程执行路径（shell 命令不走 worker 线程，因为命令本身是外部进程）
+    const result = await service.runShell(actorId, {
+      command,
+      args,
+      workspaceId,
+      timeoutMs,
+      stdin,
+    });
+
+    if (!result.ok) {
+      // 策略拒绝时给出更友好的提示
+      const isPolicyDenied = result.error?.startsWith("SHELL_POLICY_DENIED");
+      return {
+        ok: false,
+        error: result.error ?? "shell 命令执行失败",
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        stdout: result.stdout,
+        timedOut: result.timedOut,
+        truncated: result.truncated,
+        durationMs: result.durationMs,
+        workspacePath: result.workspacePath,
+        retryable: !isPolicyDenied && result.timedOut,
+        summary: isPolicyDenied
+          ? `命令被安全策略拒绝：${result.error?.replace("SHELL_POLICY_DENIED: ", "")}`
+          : result.timedOut
+            ? `命令执行超时（${result.durationMs}ms），可简化命令或缩短运行时间后重试`
+            : `命令执行失败（exit=${result.exitCode}，耗时 ${result.durationMs}ms）`,
+      };
+    }
+    return {
+      ok: true,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      durationMs: result.durationMs,
+      truncated: result.truncated,
+      workspacePath: result.workspacePath,
+      summary: result.truncated
+        ? `命令执行完成（exit=${result.exitCode}，耗时 ${result.durationMs}ms）stdout/stderr 已截断到 8KB，如需完整输出请重定向到文件再 code.read_file 分段读`
+        : `命令执行完成（exit=${result.exitCode}，耗时 ${result.durationMs}ms）`,
+    };
+  };
+}
+
 /** code.list_files —— 列出工作目录文件。 */
 export function createCodeListFilesHandler(
   service: CodeSandboxService,
@@ -234,6 +303,7 @@ export function registerCodeSandboxTools(
 ): void {
   const { codeSandboxService } = deps;
   registry.register("code.run", createCodeRunHandler(codeSandboxService));
+  registry.register("code.shell", createCodeShellHandler(codeSandboxService));
   registry.register("code.list_files", createCodeListFilesHandler(codeSandboxService));
   registry.register("code.read_file", createCodeReadFileHandler(codeSandboxService));
   registry.register("code.write_file", createCodeWriteFileHandler(codeSandboxService));

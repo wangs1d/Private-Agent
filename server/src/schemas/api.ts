@@ -46,7 +46,7 @@ export const userMessageSchema = z
     clientIp: z.string().optional(),
     /** 前端 GPS / 浏览器定位（优先于 IP） */
     clientLocation: clientLocationWireSchema.optional(),
-    /** 默认 `sandbox`；`full` 时允许桌面控制、钱包、自编程等高权限工具 */
+    /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
     agentAccessMode: z.enum(["sandbox", "full"]).optional(),
     /** 消息内容类型；默认 "text"。当为 "audio" 时，text 可为空，
      *  服务端会拉取 mediaUrl 对应的 mp3 并调 ASR 转文本，再走正常 LLM 链路。 */

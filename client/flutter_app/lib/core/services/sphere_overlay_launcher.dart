@@ -8,7 +8,7 @@ import "package:flutter/services.dart";
 import "../config/api_config.dart";
 import "agent_sphere_mood_bridge.dart";
 
-/// Windows 桌宠启动器 — 默认 **Electron** 或 **Flutter 内嵌 WebView**。
+/// Windows 桌宠启动器 — 默认 **Tauri** 或 **Flutter 内嵌 WebView**。
 /// Runner 内不再链接第二套 WebView2（会与 webview_windows 冲突导致进程崩溃）。
 class SphereOverlayLauncher {
   SphereOverlayLauncher._();
@@ -23,49 +23,42 @@ class SphereOverlayLauncher {
 
   static bool _created = false;
   static bool _visible = false;
-  static Process? _electronProcess;
-  static const String _electronCommandArgPrefix = "--pai-command=";
+  static Process? _overlayProcess;
+  static const String _commandArgPrefix = "--pai-command=";
 
-  /// Electron 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
-  static final ValueNotifier<bool> electronActive = ValueNotifier<bool>(false);
+  /// Tauri 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
+  static final ValueNotifier<bool> overlayActive = ValueNotifier<bool>(false);
 
-  /// Electron 不可用时的降级标记（显示内嵌透明 WebView）。
+  /// Tauri 不可用时的降级标记（显示内嵌透明 WebView）。
   static final ValueNotifier<bool> useEmbeddedFallback =
       ValueNotifier<bool>(false);
 
   static bool get isRunning => _created && _visible;
   static bool get isCreated => _created;
-  static bool get usesElectron => _electronProcess != null || electronActive.value;
+  static bool get usesOverlayProcess =>
+      _overlayProcess != null || overlayActive.value;
 
-  /// 进程内 Win32 WebView2 桌宠（非 Electron、非内嵌 WebView）。
+  /// 进程内 Win32 WebView2 桌宠（非 Tauri、非内嵌 WebView）。
   static bool get isInProcessOverlayActive =>
-      _created && _electronProcess == null && !useEmbeddedFallback.value;
+      _created && _overlayProcess == null && !useEmbeddedFallback.value;
 
-  /// Electron 或进程内 overlay 任一就绪时，应隐藏 Flutter 内嵌 WebView。
+  /// Tauri 或进程内 overlay 任一就绪时，应隐藏 Flutter 内嵌 WebView。
   static bool get isDeskPetActive =>
-      electronActive.value || isInProcessOverlayActive;
+      overlayActive.value || isInProcessOverlayActive;
 
-  /// 是否已安装 Electron 且 overlay 为 Electron 可用的相对路径构建。
-  static bool get isElectronAvailable => electronUnavailableReason == null;
+  /// 是否已安装 Tauri 且 overlay 为 Tauri 可用的相对路径构建。
+  static bool get isOverlayAvailable => overlayUnavailableReason == null;
 
   /// 桌宠不可用时的人类可读原因（用于 SnackBar）。
-  static String? get electronUnavailableReason {
+  static String? get overlayUnavailableReason {
     if (kIsWeb || !Platform.isWindows) {
-      return "当前平台不支持 Electron 桌宠。";
+      return "当前平台不支持 Tauri 桌宠。";
     }
 
-    final Directory? overlayDir = _findSphereOverlayDir();
+    final Directory? overlayDir = _findTauriOverlayDir();
     if (overlayDir == null) {
-      return "未找到 sphere-overlay 目录。\n"
+      return "未找到 sphere-overlay-tauri 目录。\n"
           "请从仓库根目录启动客户端，或设置环境变量 PAI_REPO_ROOT 指向项目根目录。";
-    }
-
-    if (!File("${overlayDir.path}/package.json").existsSync()) {
-      return "sphere-overlay 不完整：缺少 package.json。";
-    }
-
-    if (!Directory("${overlayDir.path}/node_modules").existsSync()) {
-      return "请先安装桌宠依赖：\ncd sphere-overlay && npm install";
     }
 
     final String? overlayHtml = _findAvatarOverlayHtml(overlayDir);
@@ -73,42 +66,11 @@ class SphereOverlayLauncher {
       return "缺少 overlay.html。\n请执行：cd agent-sphere-avatar && npm run build";
     }
 
-    if (!_isElectronCompatibleOverlay(File(overlayHtml))) {
-      return "overlay 构建路径不正确（当前为服务端 /chat 路径）。\n"
-          "请重新构建桌宠资源：\ncd agent-sphere-avatar && npm run build\n"
-          "（不要用 npm run build:chat）";
-    }
-
-    final File electronExe = File(
-      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-    );
-    final File electronBin = File(
-      "${overlayDir.path}/node_modules/.bin/electron.cmd",
-    );
-    if (!electronExe.existsSync() && !electronBin.existsSync()) {
-      return "未找到 Electron 可执行文件。\n请执行：cd sphere-overlay && npm install";
+    if (_findTauriExe(overlayDir) == null) {
+      return "未找到 Tauri 可执行文件。\n请执行：cd sphere-overlay-tauri && npm run tauri build";
     }
 
     return null;
-  }
-
-  /// Electron loadFile 需要 Vite base=./ 的构建（src="./assets/..."）。
-  static bool _isElectronCompatibleOverlay(File html) {
-    try {
-      final String content = html.readAsStringSync();
-      if (content.contains('src="./assets/') ||
-          content.contains("src='./assets/")) {
-        return true;
-      }
-      if (content.contains('src="/chat/assets/') ||
-          content.contains("src='/chat/assets/")) {
-        return false;
-      }
-      return content.contains('src="./') || content.contains("src='./");
-    } catch (e) {
-      debugPrint("[SphereOverlay] overlay.html read failed: $e");
-      return false;
-    }
   }
 
   static String? _findAvatarOverlayHtml(Directory overlayDir) {
@@ -117,7 +79,7 @@ class SphereOverlayLauncher {
     );
     if (fromRepo.existsSync()) return fromRepo.path;
 
-    // 仅作兜底检测；build:chat 产物含 /chat 绝对路径，Electron loadFile 无法加载。
+    // 仅作兜底检测；build:chat 产物含 /chat 绝对路径。
     final File fromServerAssets = File(
       "${overlayDir.parent.path}/server/web/chat/assets/avatar/overlay.html",
     );
@@ -125,52 +87,48 @@ class SphereOverlayLauncher {
     return null;
   }
 
-  static String _electronMoodFilePath() =>
+  /// Tauri 可执行文件：优先 release，其次 debug。
+  static File? _findTauriExe(Directory overlayDir) {
+    final File release = File(
+      "${overlayDir.path}/src-tauri/target/release/sphere-overlay-tauri.exe",
+    );
+    if (release.existsSync()) return release;
+    final File debug = File(
+      "${overlayDir.path}/src-tauri/target/debug/sphere-overlay-tauri.exe",
+    );
+    if (debug.existsSync()) return debug;
+    return null;
+  }
+
+  static String _moodFilePath() =>
       "${Directory.systemTemp.path}${Platform.pathSeparator}pai-sphere-mood.json";
 
-  static Future<bool> _sendElectronCommand(String command) async {
-    final Directory? overlayDir = _findSphereOverlayDir();
+  static Future<bool> _sendOverlayCommand(String command) async {
+    final Directory? overlayDir = _findTauriOverlayDir();
     if (overlayDir == null) return false;
+
+    final File? tauriExe = _findTauriExe(overlayDir);
+    if (tauriExe == null) return false;
 
     final Map<String, String> env =
         Map<String, String>.from(Platform.environment);
     env["PAI_WS_URL"] = ApiConfig.wsUrl;
     env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
     env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-    env["PAI_MOOD_FILE"] = _electronMoodFilePath();
+    env["PAI_MOOD_FILE"] = _moodFilePath();
     env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
-    final File electronBin = File(
-      "${overlayDir.path}/node_modules/.bin/electron.cmd",
-    );
-    final File electronExe = File(
-      "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-    );
-    final List<String> args = <String>[".", "$_electronCommandArgPrefix$command"];
-
     try {
-      if (electronExe.existsSync()) {
-        final Process proc = await Process.start(
-          electronExe.path,
-          args,
-          workingDirectory: overlayDir.path,
-          environment: env,
-        );
-        unawaited(proc.exitCode);
-        return true;
-      }
-      if (electronBin.existsSync()) {
-        final Process proc = await Process.start(
-          "cmd",
-          <String>["/c", electronBin.path, ...args],
-          workingDirectory: overlayDir.path,
-          environment: env,
-        );
-        unawaited(proc.exitCode);
-        return true;
-      }
+      final Process proc = await Process.start(
+        tauriExe.path,
+        <String>["$_commandArgPrefix$command"],
+        workingDirectory: overlayDir.path,
+        environment: env,
+      );
+      unawaited(proc.exitCode);
+      return true;
     } catch (e) {
-      debugPrint("[SphereOverlay] send electron command failed: $e");
+      debugPrint("[SphereOverlay] send overlay command failed: $e");
     }
 
     return false;
@@ -178,8 +136,8 @@ class SphereOverlayLauncher {
 
   static Future<bool> isWebViewReady() async {
     if (!_created) return false;
-    if (electronActive.value || useEmbeddedFallback.value) return true;
-    if (_electronProcess != null) return true;
+    if (overlayActive.value || useEmbeddedFallback.value) return true;
+    if (_overlayProcess != null) return true;
     try {
       return await _channel.invokeMethod<bool>("isWebViewReady") ?? false;
     } on PlatformException catch (e) {
@@ -194,7 +152,7 @@ class SphereOverlayLauncher {
   static Future<bool> waitForWebViewReady({
     Duration timeout = const Duration(seconds: 15),
   }) async {
-    if (_electronProcess != null) return true;
+    if (_overlayProcess != null) return true;
     final Stopwatch sw = Stopwatch()..start();
     while (sw.elapsed < timeout) {
       if (await isWebViewReady()) return true;
@@ -208,10 +166,10 @@ class SphereOverlayLauncher {
 
     await _resyncNativeOverlayState();
     if (_created && !electron && useEmbeddedFallback.value) return true;
-    if (_created && electron && electronActive.value) return true;
+    if (_created && electron && overlayActive.value) return true;
 
     if (electron) {
-      return _launchElectronOverlay();
+      return _launchTauriOverlay();
     }
 
     if (_useInProcessOverlay) {
@@ -222,21 +180,21 @@ class SphereOverlayLauncher {
     return _enableEmbeddedFallback();
   }
 
-  /// 在应用内嵌 WebView 槽位显示桌宠（无独立 HWND / Electron）。
+  /// 在应用内嵌 WebView 槽位显示桌宠（无独立 HWND / Tauri）。
   static bool _enableEmbeddedFallback() {
     debugPrint(
       "[SphereOverlay] Using embedded Flutter WebView fallback in chat slot.",
     );
     _created = true;
     _visible = true;
-    electronActive.value = false;
+    overlayActive.value = false;
     useEmbeddedFallback.value = true;
     return true;
   }
 
   /// 热重启后 Dart 静态变量会清零，但原生 overlay 可能仍在；先对齐状态。
   static Future<void> _resyncNativeOverlayState() async {
-    if (_electronProcess != null) return;
+    if (_overlayProcess != null) return;
     try {
       final bool nativeUp =
           await _channel.invokeMethod<bool>("isCreated") ?? false;
@@ -250,26 +208,26 @@ class SphereOverlayLauncher {
     }
   }
 
-  /// AppBar 手动启动 Electron 独立桌宠（会先关闭 Win32 原生窗）。
-  static Future<bool> launchElectron() async {
+  /// AppBar 手动启动 Tauri 独立桌宠（会先关闭 Win32 原生窗）。
+  static Future<bool> launchOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
-    if (electronActive.value || _created) {
-      final bool shown = await _sendElectronCommand("show");
+    if (overlayActive.value || _created) {
+      final bool shown = await _sendOverlayCommand("show");
       if (shown) {
         _created = true;
         _visible = true;
-        electronActive.value = true;
+        overlayActive.value = true;
         useEmbeddedFallback.value = false;
         return true;
       }
-      debugPrint("[SphereOverlay] show command failed, relaunching Electron…");
+      debugPrint("[SphereOverlay] show command failed, relaunching Tauri…");
     }
 
     await destroy();
-    electronActive.value = false;
+    overlayActive.value = false;
     _created = false;
-    return _launchElectronOverlay();
+    return _launchTauriOverlay();
   }
 
   static Future<bool> _createInProcess({String? overlayUrl}) async {
@@ -283,7 +241,7 @@ class SphereOverlayLauncher {
       if (ok) {
         _created = true;
         useEmbeddedFallback.value = false;
-        electronActive.value = false;
+        overlayActive.value = false;
       } else {
         debugPrint("[SphereOverlay] native create returned false");
       }
@@ -294,22 +252,19 @@ class SphereOverlayLauncher {
     }
   }
 
-  static Future<bool> _launchElectronOverlay() async {
-    final Directory? overlayDir = _findSphereOverlayDir();
+  static Future<bool> _launchTauriOverlay() async {
+    final Directory? overlayDir = _findTauriOverlayDir();
     if (overlayDir == null) {
-      debugPrint("[SphereOverlay] sphere-overlay not found.");
+      debugPrint("[SphereOverlay] sphere-overlay-tauri not found.");
       return false;
     }
 
-    final File packageJson = File("${overlayDir.path}/package.json");
-    if (!packageJson.existsSync()) {
-      debugPrint("[SphereOverlay] missing ${packageJson.path}");
-      return false;
-    }
-
-    final Directory nodeModules = Directory("${overlayDir.path}/node_modules");
-    if (!nodeModules.existsSync()) {
-      debugPrint("[SphereOverlay] run: cd sphere-overlay && npm install");
+    final File? tauriExe = _findTauriExe(overlayDir);
+    if (tauriExe == null) {
+      debugPrint(
+        "[SphereOverlay] missing Tauri exe — run: "
+        "cd sphere-overlay-tauri && npm run tauri build",
+      );
       return false;
     }
 
@@ -327,62 +282,37 @@ class SphereOverlayLauncher {
       env["PAI_WS_URL"] = ApiConfig.wsUrl;
       env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
       env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-      env["PAI_MOOD_FILE"] = _electronMoodFilePath();
+      env["PAI_MOOD_FILE"] = _moodFilePath();
       env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
-      debugPrint("[SphereOverlay] launching Electron from ${overlayDir.path}");
+      debugPrint("[SphereOverlay] launching Tauri from ${overlayDir.path}");
 
-      final File electronBin = File(
-        "${overlayDir.path}/node_modules/.bin/electron.cmd",
+      await Process.start(
+        tauriExe.path,
+        <String>["${_commandArgPrefix}show"],
+        workingDirectory: overlayDir.path,
+        environment: env,
+        mode: ProcessStartMode.detached,
       );
-      final File electronExe = File(
-        "${overlayDir.path}/node_modules/electron/dist/electron.exe",
-      );
-
-      if (electronExe.existsSync()) {
-        await Process.start(
-          electronExe.path,
-          <String>[".", "${_electronCommandArgPrefix}show"],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-      } else if (electronBin.existsSync()) {
-        await Process.start(
-          "cmd",
-          <String>["/c", electronBin.path, ".", "${_electronCommandArgPrefix}show"],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-      } else {
-        await Process.start(
-          "cmd",
-          <String>["/c", "npm", "start", "--", "${_electronCommandArgPrefix}show"],
-          workingDirectory: overlayDir.path,
-          environment: env,
-          mode: ProcessStartMode.detached,
-        );
-      }
 
       // detached 进程不可监听 exitCode；桌宠独立存活，热重启不拖垮主进程。
-      _electronProcess = null;
+      _overlayProcess = null;
       _created = true;
       _visible = true;
-      electronActive.value = true;
+      overlayActive.value = true;
       useEmbeddedFallback.value = false;
       return true;
     } catch (e) {
-      debugPrint("[SphereOverlay] Electron launch failed: $e");
-      _electronProcess = null;
+      debugPrint("[SphereOverlay] Tauri launch failed: $e");
+      _overlayProcess = null;
       return false;
     }
   }
 
-  static Directory? _findSphereOverlayDir() {
+  static Directory? _findTauriOverlayDir() {
     final String? repoRoot = Platform.environment["PAI_REPO_ROOT"]?.trim();
     if (repoRoot != null && repoRoot.isNotEmpty) {
-      final Directory fromEnv = Directory("$repoRoot/sphere-overlay");
+      final Directory fromEnv = Directory("$repoRoot/sphere-overlay-tauri");
       if (fromEnv.existsSync()) return fromEnv;
     }
 
@@ -394,12 +324,12 @@ class SphereOverlayLauncher {
     for (final String seed in seeds) {
       Directory dir = Directory(seed);
       for (int i = 0; i < 15; i++) {
-        final Directory candidate = Directory("${dir.path}/sphere-overlay");
+        final Directory candidate = Directory("${dir.path}/sphere-overlay-tauri");
         if (candidate.existsSync()) {
           return candidate;
         }
         final Directory sibling =
-            Directory("${dir.path}${Platform.pathSeparator}sphere-overlay");
+            Directory("${dir.path}${Platform.pathSeparator}sphere-overlay-tauri");
         if (sibling.existsSync()) {
           return sibling;
         }
@@ -433,7 +363,7 @@ class SphereOverlayLauncher {
 
   static Future<void> show() async {
     if (!_created) return;
-    if (_electronProcess != null) return;
+    if (_overlayProcess != null) return;
     try {
       await _channel.invokeMethod<bool>("show");
       _visible = true;
@@ -444,7 +374,7 @@ class SphereOverlayLauncher {
 
   static Future<void> hide() async {
     if (!_created) return;
-    if (_electronProcess != null) return;
+    if (_overlayProcess != null) return;
     try {
       await _channel.invokeMethod<bool>("hide");
       _visible = false;
@@ -454,22 +384,22 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> destroy() async {
-    if (electronActive.value) {
-      await _sendElectronCommand("close");
-      electronActive.value = false;
+    if (overlayActive.value) {
+      await _sendOverlayCommand("close");
+      overlayActive.value = false;
       _created = false;
       _visible = false;
       useEmbeddedFallback.value = false;
       return;
     }
-    if (_electronProcess != null) {
+    if (_overlayProcess != null) {
       try {
-        _electronProcess!.kill();
+        _overlayProcess!.kill();
       } catch (_) {}
-      _electronProcess = null;
+      _overlayProcess = null;
     }
-    if (electronActive.value && _electronProcess == null) {
-      electronActive.value = false;
+    if (overlayActive.value && _overlayProcess == null) {
+      overlayActive.value = false;
     }
     if (!_created) return;
     try {
@@ -483,7 +413,7 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> moveTo(int x, int y, {int durationMs = 0}) async {
-    if (!_created || _electronProcess != null) return;
+    if (!_created || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("moveTo", <String, dynamic>{
         "x": x,
@@ -502,7 +432,7 @@ class SphereOverlayLauncher {
     int height, {
     int durationMs = 0,
   }) async {
-    if (!_created || _electronProcess != null) return;
+    if (!_created || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("setBounds", <String, dynamic>{
         "x": x,
@@ -530,7 +460,7 @@ class SphereOverlayLauncher {
   }
 
   static Future<Map<String, int>?> getBounds() async {
-    if (!_created || _electronProcess != null) return null;
+    if (!_created || _overlayProcess != null) return null;
     try {
       final Map<dynamic, dynamic>? result =
           await _channel.invokeMapMethod("getBounds");
@@ -543,7 +473,7 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> moveBy(int dx, int dy) async {
-    if (!_created || _electronProcess != null) return;
+    if (!_created || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("moveBy", <String, dynamic>{
         "dx": dx,
@@ -555,7 +485,7 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> roam() async {
-    if (!_created || _electronProcess != null) return;
+    if (!_created || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("roam");
     } on PlatformException catch (e) {
@@ -565,7 +495,7 @@ class SphereOverlayLauncher {
 
   static Future<void> setIgnoreMouseEvents(bool ignore,
       {bool forward = true}) async {
-    if (!_created || _electronProcess != null) return;
+    if (!_created || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("setIgnoreMouseEvents",
           <String, dynamic>{"ignore": ignore, "forward": forward});
@@ -578,16 +508,16 @@ class SphereOverlayLauncher {
     if (kIsWeb || !Platform.isWindows || !_created) {
       return;
     }
-    if (electronActive.value) {
+    if (overlayActive.value) {
       try {
-        final File moodFile = File(_electronMoodFilePath());
+        final File moodFile = File(_moodFilePath());
         await moodFile.writeAsString(jsonEncode(patch.toJson()), flush: true);
       } catch (e) {
-        debugPrint("[SphereOverlay] electron patchMood failed: $e");
+        debugPrint("[SphereOverlay] overlay patchMood failed: $e");
       }
       return;
     }
-    if (_electronProcess != null) return;
+    if (_overlayProcess != null) return;
     try {
       await _channel.invokeMethod("patchMood",
           <String, dynamic>{"patch": jsonEncode(patch.toJson())});
@@ -597,7 +527,7 @@ class SphereOverlayLauncher {
   }
 
   static Future<Map<String, int>?> getWorkArea() async {
-    if (!_created || _electronProcess != null) return null;
+    if (!_created || _overlayProcess != null) return null;
     try {
       final Map<dynamic, dynamic>? result =
           await _channel.invokeMapMethod("getWorkArea");
@@ -613,16 +543,16 @@ class SphereOverlayLauncher {
     if (kIsWeb || !Platform.isWindows) return false;
     await _resyncNativeOverlayState();
 
-    if (_created && electron && electronActive.value) return true;
+    if (_created && electron && overlayActive.value) return true;
     if (_created && !electron && useEmbeddedFallback.value) return true;
 
     // 旧版原生窗可能残留但 WebView2 已禁用，清掉后走内嵌降级。
-    if (_created && !electron && !useEmbeddedFallback.value && !electronActive.value) {
+    if (_created && !electron && !useEmbeddedFallback.value && !overlayActive.value) {
       await destroy();
     }
 
     if (electron) {
-      return _launchElectronOverlay();
+      return _launchTauriOverlay();
     }
 
     if (_useInProcessOverlay) {

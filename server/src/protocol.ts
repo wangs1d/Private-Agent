@@ -8,6 +8,13 @@ export type WalletAction = "freeze" | "debit" | "refund" | "purchase";
 export const ClientEventType = {
   SessionInit: "session.init",
   ChatUserMessage: "chat.user_message",
+  /**
+   * 用户在「选择型卡片」底部按钮上点击某个 action 的事件。
+   * 与 chat.user_message 语义等价(都是用户输入),但携带 action 元数据
+   * (actionId/cardId/variant/payload),便于后端做埋点/统计/路由分流。
+   * 服务端将其转写为 chat.user_message 走原有 chat 流程。
+   */
+  ChatUserAction: "chat.user_action",
   /** 客户端「Agent 处理中」UI 显隐；false 时服务端锁定本轮，不再合并后续消息 */
   ChatAgentProcessingUi: "chat.agent_processing_ui",
   /** 客户端请求清除聊天历史（服务端同步清除 ChatThreadStore + 持久化） */
@@ -19,6 +26,8 @@ export const ClientEventType = {
   DesktopBridgeRegister: "desktop.bridge.register",
   /** 电脑端桥接：执行完成后回传结果（与 desktop.bridge.invoke 的 jobId 对应）。 */
   DesktopBridgeResult: "desktop.bridge.result",
+  /** 电脑端桥接：Python 主动推送事件（如窗口焦点变化），单向推送，不阻塞 invoke 通道。 */
+  DesktopEvent: "desktop.event",
   /** 手机桥接注册：携带 PHONE_BRIDGE_TOKEN 验证 */
   PhoneBridgeRegister: "phone.bridge.register",
   /** 手机桥接：执行完成后回传结果（与 phone.bridge.invoke 的 jobId 对应）。 */
@@ -211,6 +220,10 @@ export const ServerEventType = {
   DeviceEventRelay: "device.event_relay",
   /** device.list 查询应答（同步拉取当前设备清单） */
   DeviceListResult: "device.list_result",
+  /** 进化审批请求：EvolutionCortex 检测到能力缺口 + 生成 Skill 后，请求用户批准装载 */
+  EvolutionApprovalRequest: "evolution.approval_request",
+  /** 进化审批结果：用户批准或拒绝后的状态通知 */
+  EvolutionApprovalResult: "evolution.approval_result",
 } as const;
 
 // ============================================================
@@ -240,7 +253,8 @@ export type ChatIntentMode =
   | "master_only"
   | "master_delegate"
   | "plan_execute"
-  | "direct_llm";
+  | "direct_llm"
+  | "state_machine";
 
 /** plan_execute 拆解出的单个步骤。 */
 export type ChatPlanStep = {
@@ -279,6 +293,7 @@ export type ChatExecutionKind =
   | "agent_start" // 子 Agent 开始
   | "agent_done" // 子 Agent 完成
   | "plan_step" // plan_execute 拆解出的步骤状态更新
+  | "task_progress" // 状态机编排的桌面自动化任务进度(state_machine 模式)
   | "log"; // 兜底：自由文本日志（v1 过渡期兼容）
 
 /** 阶段 2 载荷：执行事件流。 */
@@ -322,6 +337,30 @@ export type ChatExecutionEventPayload = {
     id: string;
     title: string;
     status: "pending" | "running" | "ok" | "err";
+  };
+  /** 状态机任务进度（kind=task_progress 时携带，由 AgentTaskOrchestrator 推送） */
+  taskProgress?: {
+    taskId: string;
+    actorId: string;
+    type:
+      | "task_created"
+      | "state_transition"
+      | "subtask_started"
+      | "subtask_completed"
+      | "subtask_failed"
+      | "round_started"
+      | "round_completed"
+      | "tool_call"
+      | "tool_result"
+      | "approval_required"
+      | "approval_granted"
+      | "approval_denied"
+      | "task_completed"
+      | "task_failed"
+      | "log";
+    message: string;
+    timestamp: string;
+    data?: Record<string, unknown>;
   };
   /** 兜底：v1 过渡期自由文本 */
   log?: string;

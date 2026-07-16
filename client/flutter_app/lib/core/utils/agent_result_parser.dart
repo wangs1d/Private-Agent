@@ -26,6 +26,43 @@ class AgentResultItem {
   }
 }
 
+/// 单个可选的"抉择按钮"定义。
+///
+/// 用于 [AgentResultData.actions] 列表,渲染在卡片底部供用户一键选择。
+/// 与 [AgentResultItem] 不同:它不是文本条目,而是带点击动作的 UI 控件。
+class AgentResultAction {
+  const AgentResultAction({
+    required this.id,
+    required this.label,
+    this.variant = "primary",
+    this.payload = const <String, dynamic>{},
+  });
+
+  /// 唯一动作 ID(用于后端路由/审计;前端不依赖此字段做去重)。
+  final String id;
+
+  /// 按钮显示文案(同时作为回退的 user message 文本)。
+  final String label;
+
+  /// 视觉变体:`primary` 主按钮(实心) / `secondary` 次按钮(描边)。
+  /// 默认 `primary`,渲染时第一个为 `primary`,其余按 schema 显式指定。
+  final String variant;
+
+  /// 透传给后端的附加负载(后端可按需解析;前端不强约束 schema)。
+  final Map<String, dynamic> payload;
+
+  factory AgentResultAction.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic>? rawPayload =
+        json["payload"] as Map<String, dynamic>?;
+    return AgentResultAction(
+      id: json["id"]?.toString() ?? "",
+      label: json["label"]?.toString() ?? "",
+      variant: json["variant"]?.toString() ?? "primary",
+      payload: rawPayload ?? const <String, dynamic>{},
+    );
+  }
+}
+
 class AgentResultData {
   const AgentResultData({
     this.avatar = "NB",
@@ -33,6 +70,8 @@ class AgentResultData {
     this.title = "",
     this.items = const <AgentResultItem>[],
     this.footer = "",
+    this.actions = const <AgentResultAction>[],
+    this.cardId = "",
   });
 
   /// 智能体头像缩写（默认 "NB"）。
@@ -50,8 +89,17 @@ class AgentResultData {
   /// 底部附加文案（可选，可包含简单 inline 标签）。
   final String footer;
 
+  /// 底部抉择按钮列表(可选;非空时由 [AgentActionChoiceCard] 渲染)。
+  /// 与 [items]/[footer] 解耦:即便后两者为空,仅靠 actions 也能撑起整张卡。
+  final List<AgentResultAction> actions;
+
+  /// 卡片唯一 ID(用于后端关联原始上下文;前端主要用于点击事件回传)。
+  /// 由服务端注入,前端不强校验。
+  final String cardId;
+
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;
+    final List<dynamic>? rawActions = json["actions"] as List<dynamic>?;
     return AgentResultData(
       avatar: json["avatar"]?.toString() ?? "NB",
       avatarStyle: json["avatarStyle"]?.toString() ?? "default",
@@ -62,6 +110,13 @@ class AgentResultData {
               .toList() ??
           const <AgentResultItem>[],
       footer: json["footer"]?.toString() ?? "",
+      actions: rawActions
+              ?.whereType<Map<String, dynamic>>()
+              .map(AgentResultAction.fromJson)
+              .where((AgentResultAction a) => a.label.isNotEmpty)
+              .toList() ??
+          const <AgentResultAction>[],
+      cardId: json["cardId"]?.toString() ?? "",
     );
   }
 }

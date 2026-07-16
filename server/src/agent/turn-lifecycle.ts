@@ -15,6 +15,7 @@ import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { isNotesChatSessionId } from "./master-chat-session.js";
+import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -46,6 +47,7 @@ export class TurnLifecycle {
       hermesEvolutionLoopService: HermesEvolutionLoopService | null;
       userPersonalizationService: UserPersonalizationService | null;
       agentMemorySyncService: AgentMemorySyncService | null;
+      shortTermMemoryGateway: ShortTermMemoryGatewayService | null;
     },
   ) {}
 
@@ -126,6 +128,11 @@ export class TurnLifecycle {
       priorityLines: signal.isHighSignal ? signal.extractLines : undefined,
     });
 
+    if (this.deps.agentMemorySyncService && this.deps.shortTermMemoryGateway && input.sessionId) {
+      const mission = this.deps.shortTermMemoryGateway.getTaskState(input.sessionId).conversationMemory?.currentMission ?? null;
+      this.deps.agentMemorySyncService.setCurrentMission(input.actorId, mission);
+    }
+
     if (signal.isHighSignal) {
       this.ingestFastPath(input.actorId, signal.extractLines, memContext);
       if (this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
@@ -148,6 +155,12 @@ export class TurnLifecycle {
         })().catch(() => {});
       }
     }
+
+    this.deps.agentMemorySyncService?.reconcileStructuredMemoryAfterTurn(
+      input.actorId,
+      input.userText,
+      full,
+    );
 
     const deferArchive =
       this.stmConfig.mode === "enhanced" &&

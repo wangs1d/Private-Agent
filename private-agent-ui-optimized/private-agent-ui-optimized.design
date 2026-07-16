@@ -1,0 +1,73 @@
+{
+  "data": [
+    {
+      "id": "page-entrance-animation",
+      "title": "入场动画",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1720849600000,
+      "canvasData": {
+        "x": 0,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/entrance-animation.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-chat-main",
+      "title": "主聊天界面",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1720849600000,
+      "canvasData": {
+        "x": 480,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/chat-main.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-phone-call-ui",
+      "title": "电话窗口",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1720849600000,
+      "canvasData": {
+        "x": 960,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/phone-call-ui.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-thinking-indicator",
+      "title": "思考动画",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1720849600000,
+      "canvasData": {
+        "x": 1440,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/thinking-indicator.html",
+        "interactions": []
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": true,
+    "deviceType": "tablet",
+    "projectName": "Private Agent UI 优化"
+  }
+}

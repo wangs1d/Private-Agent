@@ -59,22 +59,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 手机桥接前台保活服务 -->
-        <service
-            android:name=".PhoneBridgeForegroundService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false"/>
-
-        <!-- 通知监听服务 -->
-        <service
-            android:name=".PhoneNotificationListenerService"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService"/>
-            </intent-filter>
-        </service>
-
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

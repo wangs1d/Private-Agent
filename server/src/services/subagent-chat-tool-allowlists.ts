@@ -1,11 +1,15 @@
 import type { SubAgentType } from "./master-agent-types.js";
 
-/** 各子 Agent 均可用的 clock 工具（注册名）。 */
+/**
+ * 各子 Agent 均可用的 clock 工具（注册名）。
+ * subagent.ask_peer 让子 Agent 运行中可向其他类型子 Agent 同步咨询（Agent-to-Agent 协作）。
+ */
 export const SUBAGENT_SHARED_REGISTRY_TOOLS = [
   "clock.get_current_time",
   "clock.get_date",
   "clock.get_user_location",
   "clock.format_timestamp",
+  "subagent.ask_peer",
 ] as const;
 
 /**
@@ -26,24 +30,6 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
     "browser.fetch_page",
     "desktop.visual.screenshot",
     "desktop.visual.run_task",
-  ],
-  creative: [
-    "search_web",
-    "fetch_web",
-    "info.search",
-    "info.read_webpage",
-    "info.inspect_webpage",
-    "info.navigate_site",
-    "shopping.suggest",
-    "weather.get_local",
-    "care.get_important_dates",
-    "self.list_custom_skills",
-    "self.create_skill",
-    "self.update_skill",
-    "self.generate_skill",
-    "self.generate_from_example",
-    "self.generate_tool_template",
-    "self.analyze_capabilities",
   ],
   tech: [
     "desktop.visual.screenshot",

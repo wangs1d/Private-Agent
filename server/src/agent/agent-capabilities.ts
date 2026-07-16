@@ -1,6 +1,7 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { SkillManager } from "../skills/index.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
+import type { CapabilityCortex } from "../brain/capability-cortex.js";
 
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 
@@ -33,6 +34,8 @@ export const CAPABILITY_DOMAINS = [
   "finance_deep",
   "social_outreach",
   "code_sandbox",
+  "shopping_order",
+  "agent_browser",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -65,6 +68,8 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   finance_deep: "财务深度能力（交易导入/支出分析/预算/对账/分类/导出报告）",
   social_outreach: "社交主动出击（Twitter/微博/小红书/朋友圈，发帖/评论/转发/点赞）",
   code_sandbox: "代码执行沙盒（python/node 子进程，工作目录隔离）",
+  shopping_order: "购物/下单（后台无头浏览器代用户下单）",
+  agent_browser: "Agent 虚拟浏览器（通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）",
   all: "全部领域",
 };
 
@@ -79,10 +84,10 @@ const GLOBAL_RULES_LINES = [
   "禁止凭记忆或用户文字判断状态。只有工具返回的数据才是真实状态。",
   "适用场景：社交(post/comment/like)、市场(purchase/contract)、钱包(transfer/recharge)、日程(calendar/reminder)、电话(virtual_call)、笔记(notes.create/update/delete)。",
   "",
-  "【访问权限 · 常规沙箱为默认】",
-  "用户未在输入框开启「完全访问」时，当前为沙箱：不可用 desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.*。",
-  "需要操控电脑、定时看屏、自编程时，须告知用户在对话输入框点盾牌图标开启「完全访问」后再发指令。",
-  "每轮实际权限以 system 中的【访问权限】段落为准（随用户当条消息切换）。",
+  "【访问权限 · 始终完全访问】",
+  "Agent 始终以最高权限运行：desktop.visual.run_task、vision.periodic_* / vision.http_pull、self.* 等高权限工具默认可用。",
+  "执行转账、真实消费、桌面自动化、远程拍照等敏感操作前仍须征得用户明确同意。",
+  "每轮实际权限以 system 中的【访问权限】段落为准（含桥接在线状态）。",
   "",
   "【笔记 · 状态连续性】",
   "用户说「记一下/整理笔记/总结这段/抽几道题/复习」时优先走 notes.*；",
@@ -120,8 +125,8 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "sub_agent",
       lines: [
-        "5️⃣ 子Agent委派（4个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
-        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价) | creative(专业创作:文案策划写作翻译，含深度调研+内容模板工具链)",
+        "5️⃣ 子Agent委派（3个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
+        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价)",
         "   ⚠️ 主 agent 拥有基本能力(查天气/查余额/设日程/好友管理/搜信息)，先自己处理，搞不定才委派。",
       ],
     },
@@ -183,7 +188,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "voice",
       lines: [
-        "🔊 语音能力（Agent 底层语音能力，可自调度，沙箱可用）：",
+        "🔊 语音能力（Agent 底层语音能力，可自调度）：",
         "   - voice.speak（即时播报）：合成语音并直接播报给用户，无需走电话流程",
         "     · mode=\"instant\"（默认）：轻量即时播报，客户端后台播放，无 UI 强制",
         "     · mode=\"reminder\"：提醒式播报，带标题/优先级，客户端可显示卡片",
@@ -322,14 +327,51 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "code_sandbox",
       lines: [
-        "💻 代码执行沙盒（python / node）：",
+        "💻 代码执行沙盒（python / node / shell）：",
         "   - code.run（执行代码）：spawn 子进程跑 Python/Node，返回 stdout/stderr/exitCode",
         "     · 工作目录隔离：data/sandbox/{actorId}/{workspaceId}/，每个会话独立",
         "     · 资源限制：超时 30s（可配置 CODE_SANDBOX_TIMEOUT_MS）、stdout/stderr 各截断 8KB",
         "     · 网络默认禁用（SANDBOX_ALLOW_NETWORK=0）",
+        "   - code.shell（执行 shell 命令）：在沙箱工作目录内执行白名单命令（ls/grep/curl/pip/ffmpeg/git 等）",
+        "     · 三道闸安全策略：命令名白名单 + 子命令黑名单 + 危险参数正则",
+        "     · 参数以数组传入，不经 shell 解析，避免注入",
+        "     · 适用：pip install 装包、grep 搜索文件、ffmpeg 转码、git log 查历史、zip 压缩等",
         "   - code.list_files / code.read_file / code.write_file：工作目录文件管理",
-        "   - 适用场景：复杂计算（矩阵/统计）、数据清洗/格式转换、算法验证、批量文件操作、数据可视化",
+        "   - 适用场景：复杂计算（矩阵/统计）、数据清洗/格式转换、算法验证、批量文件操作、数据可视化、装包/文件操作/格式转换",
         "   - 与 self_programming 区别：self.* 是创建/更新 Agent 的 Skill 模块（持久化能力），code.* 是一次性执行临时脚本",
+      ],
+    },
+    {
+      domain: "shopping_order",
+      lines: [
+        "🛒 购物/下单（服务端后台无头浏览器代用户真实下单）：",
+        "   - shopping.order.search（搜索商品）：后台 Playwright 打开平台搜索页，读取商品列表（名称/价格/链接）",
+        "   - shopping.order.place（下单）：两阶段确认。confirm=false 走到结算页返回订单摘要+确认 token+截图；confirm=true+token 完成提交订单",
+        "   - shopping.order.track（查订单）：后台浏览器打开订单页读取状态/物流",
+        "   - shopping.order.cancel（取消订单）：两阶段确认取消",
+        "   - 平台：taobao/tmall/jd/meituan/dianping/pdd/douyin",
+        "   - 前置条件：用户须先导入平台 Cookie 并授权 agentAllowed（POST /integrations/browser-sessions/import + /consent）",
+        "   - 安全护栏不依赖访问模式：Cookie 双重门禁 + 两阶段确认 + 金额上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000）",
+        "   - 与 browser.fetch_page（只读读价）/ shopping.suggest（仅建议）/ wallet.purchase（仅记账）区别：本工具真实提交订单",
+        "   - 下单前必须先返回确认摘要让用户确认，得到用户明确同意后再带 confirm=true+token 执行",
+      ],
+    },
+    {
+      domain: "agent_browser",
+      lines: [
+        "🌐 Agent 虚拟浏览器（服务端 Playwright 无头浏览器，通用网页多步操作）：",
+        "   - agent_browser.open（打开 URL）：启动浏览器打开 https URL，返回 sessionId；对已授权站点自动注入用户 Cookie",
+        "   - agent_browser.click（点击）：传 sessionId + selector 点击元素（支持 CSS / text= / xpath= 选择器）",
+        "   - agent_browser.type（输入）：在输入框输入文本，默认替换模式，append=true 可追加并模拟打字延迟",
+        "   - agent_browser.scroll（滚动）：三种模式 — selector 滚到元素 / deltaY 相对滚动 / x,y 绝对坐标",
+        "   - agent_browser.extract_text（提取文本）：**主要信息获取工具**，返回页面文本 + 可交互元素列表（tag/text/selector）",
+        "   - agent_browser.screenshot（截图）：返回 JPEG base64（⚠️token 消耗大，优先用 extract_text）",
+        "   - agent_browser.wait_for（等待）：等待元素出现并可见，默认超时 15s",
+        "   - agent_browser.close（关闭）：完成操作后主动关闭会话释放资源",
+        "   - 有状态会话：open 返回 sessionId 后，后续操作复用同一 Page，支持多步流程（open → extract_text → click → type → extract_text → close）",
+        "   - 安全：https 任意 URL / http 仅 localhost；沙箱下也可用；会话绑定 actorId 隔离；TTL 10 分钟 + LRU 上限 8 个自动清理；所有操作审计",
+        "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）/ desktop.visual.run_task（操控桌面软件）的区别：本工具是通用多步浏览器操作",
+        "   - 典型流程：open 打开页面 → extract_text 看页面结构和可点元素 → click/type 操作 → extract_text 确认结果 → close 关闭",
       ],
     },
   ];
@@ -506,13 +548,65 @@ export function buildAgentWorldPromptSection(
   return lines.join("\n");
 }
 
-/** @deprecated 请改用 buildAgentCoreCapabilityPromptSection + buildAgentWorldPromptSection */
+// ---- CapabilityCortex 集成 ------------------------------------------------
+// 模块级单例：由 bootstrap 注入（Task 6），未注入时 buildAgentCapabilityPromptSection
+// 回退到原 CAPABILITY_DOMAINS 派生逻辑。
+let capabilityCortexInstance: CapabilityCortex | null = null;
+
+/** 注入 / 清除 CapabilityCortex 单例 */
+export function setCapabilityCortex(c: CapabilityCortex | null): void {
+  capabilityCortexInstance = c;
+}
+
+/** 读取当前注入的 CapabilityCortex 单例（可能为 null） */
+export function getCapabilityCortex(): CapabilityCortex | null {
+  return capabilityCortexInstance;
+}
+
+/**
+ * prompt 中展示的最常用能力域（简短标签）。
+ * 仅当 cortex 已注入时使用，从 snapshot 中按此优先级挑出存在的域。
+ */
+const PROMPT_HIGHLIGHT_DOMAINS: Array<{ domain: string; shortLabel: string }> = [
+  { domain: "wallet", shortLabel: "钱包" },
+  { domain: "calendar", shortLabel: "日程提醒" },
+  { domain: "weather", shortLabel: "天气" },
+  { domain: "notes", shortLabel: "学习笔记" },
+  { domain: "web", shortLabel: "Web搜索" },
+];
+
+/**
+ * 构建 Agent 能力 prompt 段落。
+ *
+ * 若已注入 CapabilityCortex 单例：大幅精简输出，仅给出一行工具调用提示
+ * 与最多 3-5 个最常用域的简短标签（完整能力清单交给 brain.list_capabilities 工具）。
+ * 否则回退到原逻辑（拼装 buildAgentCoreCapabilityPromptSection + buildAgentWorldPromptSection）。
+ *
+ * @deprecated 完整能力清单请改走 brain.list_capabilities 工具；如需旧式分段渲染请用
+ * buildAgentCoreCapabilityPromptSection + buildAgentWorldPromptSection。
+ */
 export function buildAgentCapabilityPromptSection(
   actorId: string,
   world: WorldService,
   skillManager: SkillManager,
   virtualPhoneService?: VirtualPhoneService,
 ): string {
+  const cortex = capabilityCortexInstance;
+  if (cortex) {
+    const snapshot = cortex.snapshot(actorId);
+    const present = new Set(snapshot.map((d) => d.domain));
+    const highlights = PROMPT_HIGHLIGHT_DOMAINS.filter((h) => present.has(h.domain))
+      .slice(0, 5)
+      .map((h) => h.shortLabel);
+    const lines: string[] = [
+      "💡 调用 `brain.list_capabilities` 工具可查看完整能力清单。",
+    ];
+    if (highlights.length > 0) {
+      lines.push(`常用能力：${highlights.join("、")}。`);
+    }
+    return lines.join("\n");
+  }
+  // fallback：未注入 cortex 时走原逻辑（直接读 CAPABILITY_DOMAINS 派生的完整清单）
   return [
     buildAgentCoreCapabilityPromptSection(skillManager, virtualPhoneService, actorId),
     buildAgentWorldPromptSection(actorId, world, skillManager),

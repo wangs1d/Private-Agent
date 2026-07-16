@@ -4,11 +4,23 @@ import { randomUUID } from "crypto";
 
 import {
   fetchDomesticNews,
+  fetchDomesticOfficialNews,
   fetchDomesticTechNews,
   searchBingChina,
+  discoverHtmlSourcesFromResults,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
 import { applySearchFreshness } from "./search-freshness.js";
+import { fetchWebPageEnhanced, extractWithReadability, decodeWithEncoding } from "./web-fetch-enhancer.js";
+import {
+  SearchCache,
+  RssHealthMonitor,
+  classifySearchIntent,
+  SessionSearchCache,
+  sortByQuality,
+  withRetry,
+  type IntentAnalysis,
+} from "./search-enhancements.js";
 
 export type InfoSearchItem = {
   title: string;
@@ -51,8 +63,28 @@ type PersistedInfoHub = {
 
 export class InfoHubService {
   private readonly topics = new Map<string, TrackedTopic>();
+  // 真实浏览器 UA，避免被反爬识别（IT之家/36氪 等会拒绝自定义 UA）
   private readonly userAgent =
-    "Mozilla/5.0 (compatible; PrivateAIAgent/1.0; +https://example.local/agent)";
+    process.env.WEB_FETCH_USER_AGENT ??
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+  // 搜索结果缓存（LRU + TTL）
+  private readonly searchCache = new SearchCache<InfoSearchItem[]>({
+    maxSize: Number(process.env.SEARCH_CACHE_SIZE ?? 200),
+    ttlMs: Number(process.env.SEARCH_CACHE_TTL_MS ?? 5 * 60 * 1000),
+  });
+  // RSS 源健康检查
+  private readonly rssHealth = new RssHealthMonitor();
+  // 同会话跨查询复用
+  private readonly sessionCache = new SessionSearchCache();
+  // 网页内容缓存（LRU + TTL 10 分钟）
+  private readonly pageContentCache = new SearchCache<string>({
+    maxSize: 100,
+    ttlMs: 10 * 60 * 1000,
+  });
+  private readonly pageContentCacheFull = new SearchCache<{ html: string; text: string }>({
+    maxSize: 50,
+    ttlMs: 10 * 60 * 1000,
+  });
 
   private get persistPath(): string {
     return process.env.INFO_TRACKING_FILE ?? join(process.cwd(), "data", "info-tracking.json");
@@ -142,30 +174,80 @@ export class InfoHubService {
     return { topic, items: merged };
   }
 
-  async search(query: string, limit = 8): Promise<InfoSearchItem[]> {
+  async search(query: string, limit = 8, sessionId?: string): Promise<InfoSearchItem[]> {
     const keyword = query.trim();
     if (!keyword) return [];
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, limit)) : 8;
-    const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent };
 
-    const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
+    // 意图识别：影响搜索策略
+    const intent = classifySearchIntent(keyword);
+    const effectiveLimit = intent.suggestedLimit ?? boundedLimit;
 
-    const [web, tech] = await Promise.all([
-      searchBingChina(keyword, boundedLimit, domesticOpts),
-      isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(6, boundedLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
-    ]);
-
-    if (isTechKeyword && tech.length > 0) {
-      return applySearchFreshness(dedupeByUrl([...web, ...tech]), { query: keyword }).items.slice(0, boundedLimit);
+    // 1. 会话内复用（相似查询直接返回之前结果）
+    if (sessionId) {
+      const reusable = this.sessionCache.findReusable(sessionId, keyword);
+      if (reusable && reusable.length > 0) {
+        return reusable.slice(0, effectiveLimit);
+      }
     }
 
-    return applySearchFreshness(web, { query: keyword }).items.slice(0, boundedLimit);
+    // 2. 缓存命中检查（相同 query 直接返回）
+    const cacheKey = `${keyword}:${effectiveLimit}`;
+    const cached = this.searchCache.getWithStats(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    // 3. 实际搜索
+    const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent, rssHealth: this.rssHealth };
+    const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
+    const isNewsKeyword = intent.intent === "latest" || intent.requiresFreshWeb;
+
+    // 必应对长查询效果差，用核心实体构造简洁查询
+    // 例如 "今天A股最新消息" → "A股"（必应能返回结果）
+    let bingQuery = keyword;
+    if (intent.entities.length > 0 && keyword.length > 6) {
+      // 取最长的核心实体作为必应查询
+      bingQuery = intent.entities.sort((a, b) => b.length - a.length)[0];
+    }
+
+    const [web, tech, official] = await Promise.all([
+      searchBingChina(bingQuery, effectiveLimit, domesticOpts),
+      isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(8, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
+      isNewsKeyword ? fetchDomesticOfficialNews(keyword, Math.min(12, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
+    ]);
+
+    let merged = dedupeByUrl([...official, ...web, ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+
+    // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
+    // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
+    if (merged.length < effectiveLimit && web.length > 0) {
+      const discovered = await discoverHtmlSourcesFromResults(web, keyword, domesticOpts);
+      if (discovered.length > 0) {
+        merged = dedupeByUrl([...merged, ...discovered]);
+      }
+    }
+
+    // 质量评分排序：相关性(50%) + 权威度(30%) + 时效性(20%)
+    const scored = sortByQuality(merged, keyword);
+    const result = applySearchFreshness(scored, { query: keyword }).items.slice(0, effectiveLimit);
+
+    // 4. 写入缓存 + 会话记录
+    // 时效性查询缓存时间更短（1 分钟），非时效性查询用默认 TTL
+    const ttlOverride = isNewsKeyword ? 60 * 1000 : undefined;
+    this.searchCache.set(cacheKey, result, ttlOverride);
+    if (sessionId) {
+      this.sessionCache.record(sessionId, keyword, result);
+    }
+
+    return result;
   }
 
   async fetchNews(topic: string, limit = 8): Promise<InfoSearchItem[]> {
     const query = topic.trim();
     if (!query) return [];
-    return fetchDomesticNews(query, limit, { userAgent: this.userAgent });
+    // 增强后的国内新闻：必应 + 科技 RSS + 官方媒体 RSS（已内置并行 + 新鲜度排序 + 健康检查）
+    return fetchDomesticNews(query, limit, { userAgent: this.userAgent, rssHealth: this.rssHealth });
   }
 
   async readWebpage(url: string): Promise<{ title: string; content: string; summary: string }> {
@@ -241,7 +323,14 @@ export class InfoHubService {
         continue;
       }
       const title = extractTagText(html, "title") || "Untitled";
-      const content = htmlToText(html);
+      // 优先用 Readability 提取正文（质量更高），失败时降级到正则
+      let content = "";
+      try {
+        const readabilityResult = extractWithReadability(html, current.url);
+        content = readabilityResult.text.length >= 100 ? readabilityResult.text : htmlToText(html);
+      } catch {
+        content = htmlToText(html);
+      }
       const summary = summarizePlainText(content);
       const links = extractLinks(html, current.url);
       const haystack = `${title}\n${summary}\n${content.slice(0, 2500)}`.toLowerCase();
@@ -303,26 +392,65 @@ export class InfoHubService {
   }
 
   private async fetchHtml(url: string): Promise<string> {
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": this.userAgent,
-      },
-    });
-    if (!response.ok) {
-      throw new Error(`网页读取失败: ${response.status} ${response.statusText}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "user-agent": this.userAgent,
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`网页读取失败: ${response.status} ${response.statusText}`);
+      }
+      const buffer = await response.arrayBuffer();
+      const contentType = response.headers.get("content-type") ?? "";
+      // 复用 web-fetch-enhancer 的编码检测逻辑（支持 GBK/GB2312）
+      return decodeWithEncoding(buffer, contentType);
+    } finally {
+      clearTimeout(timer);
     }
-    return await response.text();
   }
 
   private async readPageAsText(url: string): Promise<string> {
-    const html = await this.fetchHtml(url);
-    return htmlToText(html).slice(0, 12000);
+    // 缓存命中：直接返回（TTL 10 分钟）
+    const cached = this.pageContentCache.get(url);
+    if (cached) return cached;
+
+    // 抓取 + 指数退避重试（网络波动时自动重试 2 次）
+    const result = await withRetry(() =>
+      fetchWebPageEnhanced(
+        url,
+        { userAgent: this.userAgent, timeoutMs: 15_000 },
+        (html) => htmlToText(html),
+      ),
+    );
+    const text = result.text.slice(0, 12000);
+    this.pageContentCache.set(url, text);
+    return text;
   }
 
   private async readPageContent(url: string): Promise<{ html: string; text: string }> {
-    const html = await this.fetchHtml(url);
-    const text = htmlToText(html).slice(0, 12000);
-    return { html, text };
+    // 缓存命中：直接返回（TTL 10 分钟）
+    const cached = this.pageContentCacheFull.get(url);
+    if (cached) return cached;
+
+    const result = await withRetry(() =>
+      fetchWebPageEnhanced(
+        url,
+        { userAgent: this.userAgent, timeoutMs: 15_000 },
+        (html) => htmlToText(html),
+      ),
+    );
+    const data = {
+      html: result.html,
+      text: result.text.slice(0, 12000),
+    };
+    this.pageContentCacheFull.set(url, data);
+    return data;
   }
 }
 

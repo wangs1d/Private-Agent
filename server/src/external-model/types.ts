@@ -38,6 +38,12 @@ export type ChatUserTurn = {
  */
 export type AgentPromptMemoryContext = {
   persona?: string;
+  /**
+   * 结构化人格内核（personality 域）的可读文本，注入 system prompt 稳定前缀。
+   * 由 PromptContextBuilder 从 MemoryCortex.getPersonalityCore 拉取并格式化，
+   * 防止单次对话导致人格漂移。
+   */
+  personalityCore?: string;
   values?: string;
   abilities?: string;
   /** 宿主 Agent 内置能力说明（钱包、日程、虚拟电话、子 Agent 委派等，非 UAP KV） */
@@ -47,6 +53,12 @@ export type AgentPromptMemoryContext = {
   /** BM25+Qdrant+RRF 融合后的履历/叙事摘录，供本轮推理引用 */
   narrativeRecall?: string;
   memorySummary?: string;
+  memoryCurrentMission?: string;
+  memoryPreferences?: string;
+  memoryFacts?: string;
+  memoryCommitments?: string;
+  memoryOpenLoops?: string;
+  sessionRecap?: string;
   /** 用户打断的回复上下文，用于整合到下一次回复中 */
   interruptedContext?: string;
   /** 基于 IP 识别的用户所在地（注入 system，供位置相关问答使用） */
@@ -120,7 +132,7 @@ export type AgentStreamOptions = {
   chatToolsExtra?: ChatCompletionTool[];
   /** 主 Agent 通过 function calling 委派子 Agent（追加调度说明 + master_invoke_sub_agent 工具） */
   masterSubAgentDelegate?: boolean;
-  /** 默认沙箱；`full` 时向 LLM 暴露高权限工具 */
+  /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
   agentAccessMode?: "sandbox" | "full";
   /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */
   desktopBridgeOnline?: boolean;
@@ -128,6 +140,8 @@ export type AgentStreamOptions = {
   phoneBridgeOnline?: boolean;
   toolExposureProfile?: ToolExposureProfile;
   toolRankingHint?: ToolRankingHint;
+  /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
+  pinnedToolNames?: string[];
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */

@@ -37,7 +37,7 @@ class RegionCapabilities {
   const RegionCapabilities({
     required this.region,
     required this.wechatClaw,
-    required this.virtualPhone,
+    required this.voiceCallBridge,
     required this.wallet,
     required this.phoneAuth,
     required this.oauthProviders,
@@ -49,7 +49,7 @@ class RegionCapabilities {
   static const RegionCapabilities domestic = RegionCapabilities(
     region: Region.domestic,
     wechatClaw: true,
-    virtualPhone: true,
+    voiceCallBridge: true,
     wallet: true,
     phoneAuth: true,
     oauthProviders: <OAuthProvider>[],
@@ -71,7 +71,7 @@ class RegionCapabilities {
   static const RegionCapabilities intl = RegionCapabilities(
     region: Region.intl,
     wechatClaw: false,
-    virtualPhone: false,
+    voiceCallBridge: false,
     wallet: false,
     phoneAuth: false,
     oauthProviders: <OAuthProvider>[
@@ -110,7 +110,7 @@ class RegionCapabilities {
   final bool wechatClaw;
 
   /// 虚拟电话 / 手机桥接（仅国内，依赖微信生态）。
-  final bool virtualPhone;
+  final bool voiceCallBridge;
 
   /// 钱包 / 支付（国内走微信支付 + 支付宝，国际版走 Stripe）。
   /// 国际版钱包 UI 暂不开放，待 Stripe 接入后再开。
@@ -134,7 +134,7 @@ class RegionCapabilities {
 
   RegionCapabilities copyWith({
     bool? wechatClaw,
-    bool? virtualPhone,
+    bool? voiceCallBridge,
     bool? wallet,
     bool? phoneAuth,
     List<OAuthProvider>? oauthProviders,
@@ -144,7 +144,7 @@ class RegionCapabilities {
     return RegionCapabilities(
       region: region,
       wechatClaw: wechatClaw ?? this.wechatClaw,
-      virtualPhone: virtualPhone ?? this.virtualPhone,
+      voiceCallBridge: voiceCallBridge ?? this.voiceCallBridge,
       wallet: wallet ?? this.wallet,
       phoneAuth: phoneAuth ?? this.phoneAuth,
       oauthProviders: oauthProviders ?? this.oauthProviders,

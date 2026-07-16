@@ -28,8 +28,8 @@ import {
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
 import {
-  buildInterimAckText,
   interimAckMessageId,
+  LivingInterimController,
   shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
 import {
@@ -246,6 +246,7 @@ export async function handleChatUserMessageEvent(
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
     sessionId: ctx.sessionId,
+    contentType: data.contentType,
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
   return true;
@@ -334,58 +335,112 @@ async function processBatchedMessage(
     enabled: getAgentRuntimeConfig().turnPanelV2.enabled,
   });
 
-  // ?????????????????????????????????????
   let replyFinished = false;
-  const maybeEmitInterimAck = async (): Promise<void> => {
-    const cfg = getAgentRuntimeConfig();
-    const decision = routeLlmExecution(batched.text, cfg, {
-      preferFullPipeline: batched.agentAccessMode === "full",
-    });
-    const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
-      enabled: cfg.interimAck.enabled,
-    });
 
-    if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
-      const t0 = Date.now();
-      turnEmitter.emitTurnStarted({
+  // 路由决策 & 分阶段异步开关
+  const cfg = getAgentRuntimeConfig();
+  const decision = routeLlmExecution(batched.text, cfg, {
+    preferFullPipeline: true,
+  });
+  const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
+    enabled: cfg.interimAck.enabled,
+  });
+
+  // turn 面板 v2 阶段 0/1
+  if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
+    const t0 = Date.now();
+    turnEmitter.emitTurnStarted({
+      sessionId: msgActor,
+      traceId: batched.originalMessageId,
+      t0,
+    });
+    turnEmitter.emitIntentDetected(
+      buildIntentDetectedPayload({
         sessionId: msgActor,
         traceId: batched.originalMessageId,
-        t0,
-      });
-      turnEmitter.emitIntentDetected(
-        buildIntentDetectedPayload({
-          sessionId: msgActor,
-          traceId: batched.originalMessageId,
-          decision,
-        }),
-      );
-    }
+        decision,
+      }),
+    );
+  }
 
-    const interimText = phasedAsyncEnabled
-      ? await buildInterimAckText({
-          text: batched.text,
-          mode: decision.mode,
-          provider: createExternalChatProviderFromEnv(),
-        })
-      : null;
-    if (interimText) {
+  // 活体 interim 控制器：智能门控 + 多条进度更新
+  // 被动路径统一用 text_chat（传达动作）
+  const interimController = new LivingInterimController({
+    sessionId: msgActor,
+    traceId: batched.originalMessageId,
+    mode: decision.mode,
+    enabled: phasedAsyncEnabled,
+    channel: "text_chat",
+    provider: createExternalChatProviderFromEnv(),
+    send: (text, seq) => {
       if (isStale() || replyFinished || chunkSeq > 0) return;
       ctx.socket.send(
         JSON.stringify({
           type: ServerEventType.ChatAssistantInterim,
           payload: {
             sessionId: msgActor,
-            messageId: interimAckMessageId(batched.originalMessageId),
+            messageId: interimAckMessageId(batched.originalMessageId, seq),
             traceId: batched.originalMessageId,
             mode: decision.mode,
-            text: interimText,
+            text,
           },
         }),
       );
-    }
-  };
+    },
+    isStale,
+    isMainReplyStarted: () => chunkSeq > 0,
+  });
 
-  void maybeEmitInterimAck();
+  void interimController.maybeEmitInitial(batched.text);
+
+  // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
+  // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
+  const TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
+  const toolHeartbeatTimers = new Map<string, NodeJS.Timeout>();
+  let heartbeatLineCache: string | null = null;
+
+  function startToolHeartbeat(toolName: string): void {
+    // 已有同工具的心跳则跳过（并行工具调用时可能重名，用 timer 存在性判重）
+    if (toolHeartbeatTimers.has(toolName)) return;
+    const timer = setInterval(() => {
+      if (isStale()) {
+        stopToolHeartbeat(toolName);
+        return;
+      }
+      // 发一条轻量 chat.agent_status 心跳，重置客户端 watchdog
+      const heartbeatLine = heartbeatLineCache ?? `正在执行 ${toolName}…`;
+      ctx.socket.send(
+        JSON.stringify({
+          type: ServerEventType.ChatAgentStatus,
+          payload: {
+            sessionId: msgActor,
+            messageId: assistantMessageId,
+            traceId: batched.originalMessageId,
+            phase: "live",
+            line: heartbeatLine,
+          },
+        }),
+      );
+    }, TOOL_HEARTBEAT_INTERVAL_MS);
+    // 允许事件循环在无其他任务时退出
+    timer.unref();
+    toolHeartbeatTimers.set(toolName, timer);
+  }
+
+  function stopToolHeartbeat(toolName: string): void {
+    const timer = toolHeartbeatTimers.get(toolName);
+    if (timer) {
+      clearInterval(timer);
+      toolHeartbeatTimers.delete(toolName);
+    }
+  }
+
+  function clearAllToolHeartbeats(): void {
+    for (const timer of toolHeartbeatTimers.values()) {
+      clearInterval(timer);
+    }
+    toolHeartbeatTimers.clear();
+  }
 
   // 获取全局 turn 并发许可（防止高并发时事件循环饱和 + LLM API 限流耗尽）
   const turnStartedAt = Date.now();
@@ -434,6 +489,10 @@ async function processBatchedMessage(
           },
           info,
         );
+        void interimController.onToolStart(info.toolName, info.input);
+        // 启动工具执行心跳：每 30s 发一次 chat.agent_status，
+        // 防止单个长工具（如 shopping.order.place 180s）执行期间客户端 watchdog 超时。
+        startToolHeartbeat(info.toolName);
       },
       onExternalToolExecuted: (info) => {
         if (isStale()) return;
@@ -446,11 +505,16 @@ async function processBatchedMessage(
           },
           info,
         );
+        void interimController.onToolEnd(info.toolName, info.input, info.ok);
+        // 清除工具执行心跳
+        stopToolHeartbeat(info.toolName);
       },
       onAgentPhaseStatus: (line) => {
         if (isStale()) return;
         const displayLine = formatStatusForDisplay(line);
         if (!displayLine) return;
+        // 更新心跳文案缓存，让后续心跳更有上下文感
+        heartbeatLineCache = displayLine;
         embodimentThinking(msgActor, (json) => ctx.socket.send(json), displayLine, {
           phase: "live",
           source: "agent_status",
@@ -659,6 +723,8 @@ async function processBatchedMessage(
     }
   } finally {
     releaseTurn();
+    // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）
+    clearAllToolHeartbeats();
     // Phase 2：记录 turn 结果供自适应并发调整（AIMD）
     const turnDuration = Date.now() - turnStartedAt;
     recordTurnOutcome(turnSucceeded, turnDuration, turnError);

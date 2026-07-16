@@ -10,7 +10,7 @@ import "core/config/api_config.dart";
 import "core/region/region_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
-import "core/presentation/virtual_phone_ui_labels.dart";
+import "core/presentation/voice_call_ui_labels.dart";
 import "core/presentation/entrance_animation.dart";
 import "core/db/isar_local_history_store.dart";
 import "core/models/agent_relay_models.dart";
@@ -18,6 +18,7 @@ import "core/models/chat_models.dart";
 import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
 import "core/models/turn_state.dart";
+import "core/utils/agent_result_parser.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -29,7 +30,6 @@ import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
-import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "features/chat/briefing_settings_page.dart";
@@ -38,7 +38,6 @@ import "core/services/ws_chat_service.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
-import "features/notes/notes_page.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_status_chip.dart";
 import "features/chat/chat_page.dart";
@@ -226,9 +225,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 已上报服务端的「处理中 UI」状态，避免重复 WS 事件
   bool? _reportedAgentProcessingUiActive;
 
-  /// 对话输入框：默认沙箱；开启后可授权桌面/钱包等高权限工具
-  bool _fullComputerAccessEnabled = false;
-
   /// 服务端`chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
 
@@ -294,7 +290,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     // 桌面端独立来电悬浮窗事件绑定
     // 所有来电（无论来源）统一走同一套回调
     // accept  : 用户点了接听 → 拉起主窗 + 等待 call_connecting
-    // decline : 用户点了挂断 → 发 phone.hangup
+    // decline : 用户点了挂断 → 停 TTS + 关窗 + 清状态
     // timeout : 振铃超时（默认 30s）
     IncomingCallLauncher.bindHandlers(
       onAccept: _handleNativeCallAccept,
@@ -329,7 +325,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   @override
   void dispose() {
     DesktopBridgeService.instance.stop();
-    PhoneBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     unawaited(TtsPlayer.instance.dispose());
     unawaited(_mobileBriefingTapSub?.cancel());
@@ -414,9 +409,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
         unawaited(_tryShowDesktopLaunchBriefing());
-      }
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-        PhoneBridgeService.instance.start();
       }
     };
     ClientLocationService.bindPreferences(
@@ -1027,8 +1019,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         // 语音消息（contentType=audio + attachments=[audio]），渲染为微信式
         // 可重播语音气泡。mediaUrl 为 null（TTS 失败降级）时退化为纯文本。
         if (type == "agent.voice.message") {
-          final String messageId =
-              payload["messageId"]?.toString() ?? "voice-${DateTime.now().microsecondsSinceEpoch}";
+          final String messageId = payload["messageId"]?.toString() ??
+              "voice-${DateTime.now().microsecondsSinceEpoch}";
           final String text = payload["text"]?.toString() ?? "";
           final String transcript = payload["transcript"]?.toString() ?? text;
           final String? mediaUrl = payload["mediaUrl"]?.toString();
@@ -1213,7 +1205,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               payload["direction"]?.toString() ?? "agent_to_user";
           final String ringStyle =
               payload["ringStyle"]?.toString() ?? "reminder";
-          final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+          final String callerLabel = VoiceCallUiLabels.incomingCallerLabel(
             direction: direction,
             fromPhone: payload["fromPhone"]?.toString(),
           );
@@ -1250,7 +1242,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           final String direction =
               payload["direction"]?.toString() ?? "agent_to_user";
           final String fromPhone = payload["fromPhone"]?.toString() ?? "";
-          final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+          final String callerLabel = VoiceCallUiLabels.incomingCallerLabel(
             direction: direction,
             fromPhone: fromPhone,
           );
@@ -1332,7 +1324,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             return;
           }
           final String fromPhone = payload["fromPhone"]?.toString() ?? "";
-          final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+          final String callerLabel = VoiceCallUiLabels.incomingCallerLabel(
             direction: direction,
             fromPhone: fromPhone,
           );
@@ -1368,7 +1360,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               status == "ended" || status == "agent_handled";
           setState(() {
             if (fromPhone != null && fromPhone.isNotEmpty) {
-              _phoneCallToActorId = VirtualPhoneUiLabels.incomingCallerLabel(
+              _phoneCallToActorId = VoiceCallUiLabels.incomingCallerLabel(
                 direction: payload["direction"]?.toString() ?? "agent_to_agent",
                 fromPhone: fromPhone,
               );
@@ -1912,24 +1904,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
     // 如果Agent正在处理中，说明用户要打断当前回复
     if (_isAgentProcessing) {
-      // 保存当前未完成的回复内容
-      if (_pendingAssistantChunkText.isNotEmpty) {
-        _interruptedResponses.add(_pendingAssistantChunkText.toString());
-        _pendingAssistantChunkText.clear();
+      final String interruptedText = _takePendingAssistantChunkText();
+      if (interruptedText.isNotEmpty) {
+        _interruptedResponses.add(interruptedText);
       }
 
-      // 清除当前的流式响应状态
       _disarmAgentReplyWatchdog();
       _pendingAgentUserMessageId = null;
-      setState(() {
-        _isAgentProcessing = false;
-        _agentStatusLine = null;
-        _pendingAssistantChunkMessageId = null;
-      });
-
-      // 取消定时器
+      _clearAgentProcessingState(done: false);
       _assistantChunkFlushTimer?.cancel();
       _assistantChunkFlushTimer = null;
+      _pendingAssistantChunkMessageId = null;
     }
 
     final int attachCount = attachmentFrames?.length ?? 0;
@@ -1962,7 +1947,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final Map<String, dynamic> userMsg = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "messageId": userMessage.messageId,
-      "text": effectiveText.isEmpty && attachmentFrames != null ? "" : effectiveText,
+      "text": effectiveText.isEmpty && attachmentFrames != null
+          ? ""
+          : effectiveText,
       "timestamp": DateTime.now().toIso8601String(),
     };
     if (attachmentFrames != null && attachmentFrames.isNotEmpty) {
@@ -1979,8 +1966,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (clientLocation != null) {
       userMsg["clientLocation"] = clientLocation.toJson();
     }
-    userMsg["agentAccessMode"] =
-        _fullComputerAccessEnabled ? "full" : "sandbox";
+    userMsg["agentAccessMode"] = "full";
 
     // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示文本
     if (_interruptedResponses.isNotEmpty) {
@@ -2013,6 +1999,145 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         );
       }
     }
+  }
+
+  /// 「选择型卡片」底部按钮点击处理:
+  /// 用户点击选择型卡片上的按钮后的处理流程。
+  ///
+  /// 设计意图:点击是一个**静默决策**,不应该把按钮 label 当作用户发言
+  /// 插到聊天流里(那样会让对话历史显得啰嗦、割裂)。正确的体验是:
+  ///   1. 用户点按钮 → 按钮进入「已选」态(视觉反馈由卡片自身完成)
+  ///   2. **不在聊天流里追加用户消息气泡**
+  ///   3. 直接通过 WS 发送 `chat.user_action` 事件,携带卡片标题/条目摘要
+  ///   4. 后端把摘要注入到 user_message 的 text 中,让 Agent 理解
+  ///      「用户在 X 卡片上选择了 Y」并**主动产生一条衔接回复**
+  ///   5. Agent 的回复作为 assistant 消息正常显示在聊天流
+  ///
+  /// 与 [_sendMessage] 的区别:
+  ///   - 不在 _messages 里追加用户消息
+  ///   - 不走输入框(controller)
+  ///   - 不发 chat.user_message,改发 chat.user_action(携带 actionId/cardId/variant/payload)
+  ///   - 复用「打断当前回复」「置 processing」等通用逻辑,保证按钮与键盘输入在 Agent 端一致
+  ///   - [cardData] 由 chat_page 在渲染时绑定,包含 cardId/title/items,
+  ///     用于后端审计/埋点精准定位到具体卡片,并让 Agent 理解上下文主动衔接
+  Future<void> _handleCardAction(
+    AgentResultAction action, {
+    required AgentResultData cardData,
+  }) async {
+    if (!_ws.isConnected) {
+      _ws.retryConnect();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("正在连接服务器，请稍后再试")),
+        );
+      }
+      return;
+    }
+    final String label = action.label.trim();
+    if (label.isEmpty) return;
+
+    // 如果 Agent 正在处理中,先把当前被截断的回复纳入上下文(与键盘输入同语义)
+    if (_isAgentProcessing) {
+      final String interruptedText = _takePendingAssistantChunkText();
+      if (interruptedText.isNotEmpty) {
+        _interruptedResponses.add(interruptedText);
+      }
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      _clearAgentProcessingState(done: false);
+      _assistantChunkFlushTimer?.cancel();
+      _assistantChunkFlushTimer = null;
+      _pendingAssistantChunkMessageId = null;
+    }
+
+    // 用一个内部 traceId 关联本轮 Agent 回复(不添加用户消息气泡到 _messages)
+    final String actionMessageId =
+        "action-${DateTime.now().microsecondsSinceEpoch}";
+
+    setState(() {
+      _isAgentProcessing = true;
+      _agentStatusLine = null;
+    });
+    _notifyAgentProcessingUi(true);
+    AgentSphereMoodBridge.instance.listening();
+
+    _armAgentReplyWatchdog(actionMessageId);
+
+    // 本地占位 TurnState:让用户立即看到「Agent 正在思考衔接回复」反馈
+    _pendingLocalTurn = TurnState(
+      traceId: actionMessageId,
+      sessionId: ApiConfig.effectiveActorId,
+      t0: DateTime.now(),
+    );
+    if (mounted) setState(() {});
+
+    final bool sent = _ws.sendCardAction(
+      sessionId: ApiConfig.sessionId,
+      messageId: actionMessageId,
+      actionId: action.id,
+      label: label,
+      cardId: cardData.cardId,
+      variant: action.variant,
+      actionPayload: action.payload,
+      cardTitle: cardData.title,
+      cardItems: cardData.items
+          .map((AgentResultItem it) => it.text)
+          .toList(growable: false),
+      userId:
+          ApiConfig.userId.trim().isNotEmpty ? ApiConfig.userId.trim() : null,
+    );
+    if (!sent) {
+      _disarmAgentReplyWatchdog();
+      _pendingAgentUserMessageId = null;
+      _clearAgentProcessingState();
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("按钮点击未发出：与服务器的连接尚未就绪")),
+        );
+      }
+    }
+  }
+
+  /// 调试用:向聊天流注入一张带按钮的"选择型"卡片,
+  /// 用于验证 AgentActionChoiceCard 的渲染效果与点击闭环。
+  ///
+  /// 卡片内容模拟一个"咖啡店推荐"场景:
+  ///   - 标题 + 3 条 ✓ 条目(展示正文区)
+  ///   - 2 个按钮(主按钮"周六去"实心 / 次按钮"忽略"描边)
+  ///   - 点击按钮后会触发 [_handleCardAction]:静默发送 chat.user_action,
+  ///     Agent 收到后主动产生一条衔接回复(不在聊天流追加用户消息气泡)
+  ///
+  /// 上线前删除本方法 + AppBar 里的调试 IconButton 即可。
+  void _injectMockChoiceCard() {
+    const String cardJson = '''
+{
+  "title": "不下单,周六送达。另外发现你收藏的咖啡店开了新店:",
+  "items": [
+    {"type": "check", "text": "附近店推荐"},
+    {"type": "check", "text": "「三顿半」快闪店 · 800m"},
+    {"type": "check", "text": "本周六买一送一"}
+  ],
+  "cardId": "card-recommend-mock-001",
+  "actions": [
+    {"id": "go-saturday", "label": "周六去", "variant": "primary", "payload": {"shop": "三顿半"}},
+    {"id": "ignore", "label": "忽略", "variant": "secondary"}
+  ]
+}
+''';
+    final String cardText =
+        "[AGENT_RESULT_CARD_START]\n$cardJson\n[AGENT_RESULT_CARD_END]";
+
+    final ChatMessage agentMessage = ChatMessage(
+      messageId: "agent-mock-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: cardText,
+      timestamp: DateTime.now(),
+    );
+    setState(() {
+      _messages.add(agentMessage);
+    });
+    unawaited(_store.saveMessage(agentMessage));
   }
 
   void _selectTab(int index) {
@@ -2165,8 +2290,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (!mounted) {
       _backgroundRunningTaskIds.remove(taskId);
       _pendingAsyncConfirmations.removeWhere(
-        (Map<String, dynamic> item) =>
-            item["taskId"]?.toString() == taskId,
+        (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
       );
       _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
       return;
@@ -2174,8 +2298,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _backgroundRunningTaskIds.remove(taskId);
       _pendingAsyncConfirmations.removeWhere(
-        (Map<String, dynamic> item) =>
-            item["taskId"]?.toString() == taskId,
+        (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
       );
       _pendingAsyncConfirmations.add(Map<String, dynamic>.from(payload));
     });
@@ -2213,15 +2336,13 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       }
       if (!mounted) {
         _pendingAsyncConfirmations.removeWhere(
-          (Map<String, dynamic> item) =>
-              item["taskId"]?.toString() == taskId,
+          (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
         );
         return;
       }
       setState(() {
         _pendingAsyncConfirmations.removeWhere(
-          (Map<String, dynamic> item) =>
-              item["taskId"]?.toString() == taskId,
+          (Map<String, dynamic> item) => item["taskId"]?.toString() == taskId,
         );
       });
     } catch (error) {
@@ -2286,9 +2407,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    summary.isNotEmpty
-                        ? summary
-                        : "这项异步任务已经走到需要你拍板的阶段。",
+                    summary.isNotEmpty ? summary : "这项异步任务已经走到需要你拍板的阶段。",
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: cs.onSurfaceVariant,
                       height: 1.35,
@@ -2384,15 +2503,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     );
   }
 
-  /// 打开笔记页：与对话框构成双面板分栏
-  void _openNotesChat() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.notes;
-      _splitRatio = RightPanelKind.notes.defaultSplitRatio;
-    });
-  }
-
   Future<void> _openWechatClawBinding() async {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
@@ -2452,7 +2562,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _ws.retryConnect();
       return;
     }
-    _ws.sendEvent("phone.incoming_response", <String, dynamic>{
+    _ws.sendEvent("voice.incoming_response", <String, dynamic>{
       "callId": callId,
       "action": action,
     });
@@ -2482,26 +2592,38 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   // ====== 桌面端独立来电悬浮窗回调 ======
 
-  /// 原生悬浮窗点接听：拉起主窗口 + 走 _phoneCallStatus = "connecting" 状态，
-  /// 等待服务端 call_connecting 事件推送正式通话内容
+  /// 原生悬浮窗点接听：
+  /// - agent_to_agent：发 voice.incoming_response("accept") 通知服务器
+  /// - agent_to_user：服务器自动推进 ringing→connecting，客户端只需切换 UI
   void _handleNativeCallAccept() {
-    _ws.sendEvent("phone.accept", <String, dynamic>{});
+    final String? peerCallId = _peerIncomingDialogCallId;
+    if (peerCallId != null && peerCallId.isNotEmpty) {
+      _sendPeerIncomingResponse(peerCallId, "accept");
+    }
     if (!mounted) return;
-    setState(() => _phoneCallStatus = "connecting");
-    // 拉起主窗口（如果最小化）
+    setState(() {
+      _phoneCallStatus = "connecting";
+      _peerIncomingDialogCallId = null;
+    });
     unawaited(IncomingCallLauncher.bringMainWindowToFront());
     unawaited(ConnectedCallLauncher.resetDuration());
   }
 
-  /// 原生悬浮窗点挂断：发 phone.hangup + 反馈 + 清状态
+  /// 原生悬浮窗点挂断：
+  /// - agent_to_agent：发 voice.incoming_response("decline")
+  /// - agent_to_user：本地停止 TTS + 关窗 + contact feedback
   void _handleNativeCallDecline() {
-    _ws.sendEvent("phone.hangup", {});
-    _sendContactFeedback(
-      channel: "phone_call",
-      responded: false,
-      feedback: "negative",
-      quietHours: _isQuietHoursNow(),
-    );
+    final String? peerCallId = _peerIncomingDialogCallId;
+    if (peerCallId != null && peerCallId.isNotEmpty) {
+      _sendPeerIncomingResponse(peerCallId, "decline");
+    } else {
+      _sendContactFeedback(
+        channel: "phone_call",
+        responded: false,
+        feedback: "negative",
+        quietHours: _isQuietHoursNow(),
+      );
+    }
     unawaited(TtsPlayer.instance.stop());
     unawaited(IncomingCallLauncher.hide());
     unawaited(OutgoingCallLauncher.hide());
@@ -2510,18 +2632,26 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       setState(() {
         _phoneCallStatus = null;
         _phoneCallToActorId = null;
+        _peerIncomingDialogCallId = null;
       });
     }
   }
 
-  /// 原生悬浮窗振铃超时：按"未接"处理，反馈 negative
+  /// 原生悬浮窗振铃超时：
+  /// - agent_to_agent：发 voice.incoming_response("decline")（服务器也有自己的超时兜底）
+  /// - agent_to_user：contact feedback negative
   void _handleNativeCallTimeout() {
-    _sendContactFeedback(
-      channel: "phone_call",
-      responded: false,
-      feedback: "negative",
-      quietHours: _isQuietHoursNow(),
-    );
+    final String? peerCallId = _peerIncomingDialogCallId;
+    if (peerCallId != null && peerCallId.isNotEmpty) {
+      _sendPeerIncomingResponse(peerCallId, "decline");
+    } else {
+      _sendContactFeedback(
+        channel: "phone_call",
+        responded: false,
+        feedback: "negative",
+        quietHours: _isQuietHoursNow(),
+      );
+    }
     unawaited(TtsPlayer.instance.stop());
     unawaited(IncomingCallLauncher.hide());
     unawaited(OutgoingCallLauncher.hide());
@@ -2530,6 +2660,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       setState(() {
         _phoneCallStatus = null;
         _phoneCallToActorId = null;
+        _peerIncomingDialogCallId = null;
       });
     }
   }
@@ -2537,7 +2668,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 用户在聊天页底部"📞 通话中"按钮上点挂断的入口
   // ignore: unused_element
   void _hangupFromPhoneButton() {
-    _ws.sendEvent("phone.hangup", {});
     unawaited(TtsPlayer.instance.stop());
     unawaited(IncomingCallLauncher.hide());
     unawaited(OutgoingCallLauncher.hide());
@@ -2553,9 +2683,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  /// "通话中"窗口里点了挂断：发 phone.hangup + 关窗 + 停 TTS + 清状态
+  /// "通话中"窗口里点了挂断：关窗 + 停 TTS + 清状态
   void _handleConnectedHangup() {
-    _ws.sendEvent("phone.hangup", {});
     unawaited(TtsPlayer.instance.stop());
     unawaited(IncomingCallLauncher.hide());
     unawaited(OutgoingCallLauncher.hide());
@@ -2794,7 +2923,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     if (_peerIncomingDialogCallId == callId) return;
 
     final String fromPhone = payload["fromPhone"]?.toString() ?? "";
-    final String callerLabel = VirtualPhoneUiLabels.incomingCallerLabel(
+    final String callerLabel = VoiceCallUiLabels.incomingCallerLabel(
       direction: "agent_to_agent",
       fromPhone: fromPhone,
     );
@@ -3130,7 +3259,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                           onOpenBriefingSettings: _openBriefingSettings,
                           onLogout: _logout,
                           totalUnread: _unreadByPlatform.values
-                                  .fold(0, (int a, int b) => a + b),
+                              .fold(0, (int a, int b) => a + b),
                         ),
                         VerticalDivider(
                           width: 1,
@@ -3163,8 +3292,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: <Widget>[
                                                   AgentStatusChip(
-                                                    moodStyle: _agentProfile
-                                                        .moodStyle,
+                                                    moodStyle:
+                                                        _agentProfile.moodStyle,
                                                     statusText: _agentProfile
                                                         .statusText,
                                                   ),
@@ -3176,7 +3305,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                           )
                                         : null,
                                     title: _buildAppBarTitle(),
-                                    actions: const <Widget>[],
+                                    actions: <Widget>[
+                                      // ▼ 调试入口:注入一张带按钮的"选择型"卡片到聊天流,
+                                      // 用于验证 AgentActionChoiceCard 的渲染与点击行为。
+                                      // 上线前删除整个 IconButton 即可。
+                                      if (kDebugMode)
+                                        IconButton(
+                                          icon: const Icon(Icons.bug_report),
+                                          tooltip: "注入选择型卡片(调试)",
+                                          onPressed: _injectMockChoiceCard,
+                                        ),
+                                    ],
                                   ),
                                 ),
                                 Expanded(
@@ -3688,7 +3827,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         onSchedule: _openSchedulePanel,
         onWallet: _openWalletDialog,
         onPhone: _openPhoneDevicesDialog,
-        onNotes: _openNotesChat,
         onMessages: _openMessagesPanel,
       ),
     );
@@ -3708,8 +3846,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             child: Container(
               decoration: BoxDecoration(
                 border: Border(
-                  top: BorderSide(
-                      color: cs.outline.withValues(alpha: 0.25)),
+                  top: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
                 ),
               ),
               child: _buildRightPanelContent(),
@@ -3781,8 +3918,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         return MailboxPage(api: _worldApi, ws: _ws);
       case RightPanelKind.messages:
         return MessageHubPage(api: _worldApi);
-      case RightPanelKind.notes:
-        return NotesPage();
       case RightPanelKind.devices:
         return const DevicesPage();
       case null:
@@ -3872,24 +4007,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       interimAckText: _interimAckText,
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,
-      fullComputerAccessEnabled: _fullComputerAccessEnabled,
       isActive: _tabIndex == 0,
-      onToggleFullComputerAccess: () {
-        setState(() {
-          _fullComputerAccessEnabled = !_fullComputerAccessEnabled;
-        });
-        if (!mounted) return;
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(
-            content: Text(
-              _fullComputerAccessEnabled
-                  ? "已开启完全访问：Agent 可请求控制电脑等高权限操作"
-                  : "已切换为沙箱模式：高权限工具将被限制",
-            ),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      },
       onEnterVoiceMode: () {
         Navigator.of(context).push(
           MaterialPageRoute<void>(
@@ -3905,6 +4023,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onDeleteMessage: _deleteSingleMessage,
       onDeleteFromMessage: _deleteMessagesFrom,
       onStopAgent: _cancelCurrentTurn,
+      onUserAction: _handleCardAction,
     );
   }
 

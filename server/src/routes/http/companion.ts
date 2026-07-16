@@ -137,7 +137,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       timezone: "Asia/Shanghai",
       agentTask: {
         prompt: `Check latest price for "${body.item}". Alert me only when <= ${body.targetPrice} ${body.currency}.`,
-        accessMode: "sandbox",
+        accessMode: "full",
       },
     });
     return { ok: true, watchCreated: true, taskId: task.taskId };
@@ -183,7 +183,7 @@ export function registerCompanionRoutes(app: FastifyInstance, deps: HttpRouteDep
       timezone: body.timezone ?? "Asia/Shanghai",
       agentTask: {
         prompt: `Compare options for "${body.item}" under budget ${body.budget}. Give best value pick + quick summary.`,
-        accessMode: "sandbox",
+        accessMode: "full",
       },
     });
     return { ok: true, taskId: task.taskId, nextRunAt: task.nextRunAt };

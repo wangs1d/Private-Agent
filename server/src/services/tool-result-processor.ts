@@ -9,7 +9,7 @@ import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { classifyRenderHint } from "./render-hint-service.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
 
-const SUMMARY_ENABLED_TOOLS = new Set([
+export const SUMMARY_ENABLED_TOOLS = new Set([
   "search_web",
   "fetch_web",
   "info.search",

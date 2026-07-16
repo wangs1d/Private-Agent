@@ -156,14 +156,14 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   }
 
   Future<void> _launchOverlay() async {
-    final bool ok = await SphereOverlayLauncher.launchElectron();
+    final bool ok = await SphereOverlayLauncher.launchOverlay();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           ok
-              ? "Electron 桌面桌宠已启动（独立窗口）"
-              : "启动失败：请确认后端与 sphere-overlay 已就绪",
+              ? "Tauri 桌面桌宠已启动（独立窗口）"
+              : "启动失败：请确认后端与 sphere-overlay-tauri 已就绪",
         ),
       ),
     );
@@ -216,7 +216,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
               left: 8,
               bottom: 8,
               child: IconButton.filledTonal(
-                tooltip: "启动 Electron 桌面桌宠",
+                tooltip: "启动 Tauri 桌面桌宠",
                 onPressed: _launchOverlay,
                 icon: const Icon(Icons.open_in_new, size: 18),
                 style: IconButton.styleFrom(

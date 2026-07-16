@@ -278,18 +278,21 @@ class ScheduleFloatingItem {
     required this.id,
     required this.timeText,
     required this.title,
+    this.notes = "",
     this.completed = false,
   });
 
   final String id;
   final String timeText; // "HH:MM"
   final String title;
+  final String notes; // 备注（可选，空字符串表示无备注）
   final bool completed;
 
   Map<String, dynamic> toMap() => <String, dynamic>{
         "id": id,
         "timeText": timeText,
         "title": title,
+        "notes": notes,
         "completed": completed,
       };
 }

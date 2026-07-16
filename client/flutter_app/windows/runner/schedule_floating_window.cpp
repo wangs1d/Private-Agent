@@ -8,14 +8,20 @@
 
 namespace {
 
-constexpr COLORREF kBgBlack = RGB(0, 0, 0);
-constexpr COLORREF kSurfaceBg = RGB(10, 10, 12);
-constexpr COLORREF kBorderColor = RGB(32, 32, 38);
-constexpr COLORREF kTextPrimary = RGB(228, 228, 236);
-constexpr COLORREF kTextSecondary = RGB(136, 136, 148);
-constexpr COLORREF kAccentBlue = RGB(74, 164, 255);
-constexpr COLORREF kCompletedColor = RGB(80, 80, 90);
-constexpr COLORREF kFooterBg = RGB(10, 10, 14);
+// 配色对齐 in-app RightSidePanel._buildScheduleCard（深色主题）：
+//   cs.surfaceContainerHigh ≈ #232323，cs.onSurface ≈ #E8E8E8，
+//   cs.onSurfaceVariant ≈ #BBBBBB，cs.outline ≈ #353535
+// 强调色对齐 Flutter 常量：
+//   _kAccentBlue = #007AFF，_kAccentGreen = #34C759，_kAccentOrange = #FF9500
+constexpr COLORREF kSurfaceBg = RGB(35, 35, 35);        // 卡片背景（对齐 surfaceContainerHigh）
+constexpr COLORREF kBorderColor = RGB(53, 53, 53);      // 描边（对齐 outline）
+constexpr COLORREF kTextPrimary = RGB(232, 232, 232);   // 主文字（对齐 onSurface）
+constexpr COLORREF kTextSecondary = RGB(187, 187, 187); // 次文字（对齐 onSurfaceVariant）
+constexpr COLORREF kAccentBlue = RGB(0, 122, 255);      // 蓝强调（<10 点）
+constexpr COLORREF kAccentGreen = RGB(52, 199, 89);     // 绿强调（10-14 点）
+constexpr COLORREF kAccentOrange = RGB(255, 149, 0);    // 橙强调（14-18 点）
+constexpr COLORREF kCompletedColor = RGB(110, 110, 120);
+constexpr COLORREF kTimeLineColor = RGB(90, 90, 100);   // 时间下方竖线色
 constexpr COLORREF kDangerRed = RGB(255, 72, 72);
 
 constexpr int kCloseBtnSize = 24;
@@ -69,14 +75,18 @@ void ScheduleFloatingWindow::EnsureFonts() {
                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_title_ = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+  font_title_ = CreateFontW(15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  font_time_ = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+  font_time_ = CreateFontW(13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+  font_notes_ = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 }
 
 void ScheduleFloatingWindow::EnsureButtons() {
@@ -85,21 +95,19 @@ void ScheduleFloatingWindow::EnsureButtons() {
 
   if (btn_collapse_ == nullptr) {
     btn_collapse_ = CreateWindowExW(
-        0, L"BUTTON", L"\u25B2", WS_CHILD | BS_PUSHBUTTON | BS_FLAT,
+        0, L"BUTTON", L"\u25B2",
+        WS_CHILD | BS_OWNERDRAW,
         0, 0, 0, 0, window_handle_,
         reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonCollapseId)),
         GetModuleHandle(nullptr), nullptr);
-    SendMessage(btn_collapse_, WM_SETFONT,
-                reinterpret_cast<WPARAM>(font_ui_), TRUE);
   }
   if (btn_close_ == nullptr) {
     btn_close_ = CreateWindowExW(
-        0, L"BUTTON", L"\u2715", WS_CHILD | BS_PUSHBUTTON | BS_FLAT,
+        0, L"BUTTON", L"\u2715",
+        WS_CHILD | BS_OWNERDRAW,
         0, 0, 0, 0, window_handle_,
         reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonCloseId)),
         GetModuleHandle(nullptr), nullptr);
-    SendMessage(btn_close_, WM_SETFONT,
-                reinterpret_cast<WPARAM>(font_title_), TRUE);
   }
 }
 
@@ -170,6 +178,7 @@ void ScheduleFloatingWindow::Destroy() {
   if (font_ui_) { DeleteObject(font_ui_); font_ui_ = nullptr; }
   if (font_title_) { DeleteObject(font_title_); font_title_ = nullptr; }
   if (font_time_) { DeleteObject(font_time_); font_time_ = nullptr; }
+  if (font_notes_) { DeleteObject(font_notes_); font_notes_ = nullptr; }
   if (window_handle_ && IsWindow(window_handle_)) {
     DestroyWindow(window_handle_);
   }
@@ -265,9 +274,7 @@ int ScheduleFloatingWindow::CalculateWindowHeight() const {
     int visible = std::min(static_cast<int>(items_.size()), kMaxVisibleItems);
     body_h += visible * kItemHeight;
   }
-  if (!items_.empty()) {
-    body_h += kFooterHeight;
-  }
+  // 对齐 in-app _buildScheduleCard：不再渲染底部统计栏
   return kTitleBarHeight + body_h;
 }
 
@@ -329,37 +336,111 @@ void ScheduleFloatingWindow::DrawUiText(HDC hdc, const RECT& rc,
   SelectObject(hdc, old_font);
 }
 
+void ScheduleFloatingWindow::DrawCalendarIcon(HDC hdc, int x, int y, int size,
+                                               COLORREF color) {
+  // 矢量绘制一个简洁的日历图标：外框 + 顶部两条挂钩线 + 顶部横条
+  // 视觉对齐 Material Icons.calendar_today_outlined。
+  HPEN pen = CreatePen(PS_SOLID, 1, color);
+  HBRUSH brush = CreateSolidBrush(color);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+
+  // 外框
+  RECT outer = {x, y + 3, x + size, y + 3 + size - 3};
+  RoundRect(hdc, outer.left, outer.top, outer.right, outer.bottom, 2, 2);
+
+  // 顶部横条
+  RECT header = {x, y + 3, x + size, y + 3 + 2};
+  FillRect(hdc, &header, brush);
+
+  // 两条挂线
+  int hook_x1 = x + 3;
+  int hook_x2 = x + size - 4;
+  MoveToEx(hdc, hook_x1, y, nullptr);
+  LineTo(hdc, hook_x1, y + 5);
+  MoveToEx(hdc, hook_x2, y, nullptr);
+  LineTo(hdc, hook_x2, y + 5);
+
+  SelectObject(hdc, old_pen);
+  SelectObject(hdc, old_brush);
+  DeleteObject(pen);
+  DeleteObject(brush);
+}
+
+int ScheduleFloatingWindow::ParseHour(const std::string& time_text) const {
+  // 期望格式 "HH:MM"
+  if (time_text.size() < 2) return -1;
+  // 简单解析：前两个字符为小时
+  int h = 0;
+  for (int i = 0; i < 2; ++i) {
+    char c = time_text[i];
+    if (c < '0' || c > '9') return -1;
+    h = h * 10 + (c - '0');
+  }
+  return h;
+}
+
+COLORREF ScheduleFloatingWindow::GetTimeColor(
+    const std::string& time_text) const {
+  // 对齐 in-app _buildScheduleRow 配色规则：
+  //   hour < 10 -> 蓝；< 14 -> 橙；< 18 -> 绿；其它 -> 次文字色
+  int hour = ParseHour(time_text);
+  if (hour < 0) return kTextSecondary;
+  if (hour < 10) return kAccentBlue;
+  if (hour < 14) return kAccentOrange;
+  if (hour < 18) return kAccentGreen;
+  return kTextSecondary;
+}
+
 void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
 
-  HBRUSH bg = CreateSolidBrush(kBgBlack);
+  // 主背景（对齐 in-app 卡片 surfaceContainerHigh）
+  HBRUSH bg = CreateSolidBrush(kSurfaceBg);
   FillRect(hdc, &rc, bg);
   DeleteObject(bg);
 
-  RECT title_rc = {0, 0, rc.right, kTitleBarHeight};
-  HBRUSH tb = CreateSolidBrush(kSurfaceBg);
-  FillRect(hdc, &title_rc, tb);
-  DeleteObject(tb);
-
-  HPEN pen = CreatePen(PS_SOLID, 1, kBorderColor);
-  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
-  MoveToEx(hdc, 0, kTitleBarHeight, nullptr);
-  LineTo(hdc, rc.right, kTitleBarHeight);
+  // 卡片描边（1px，对齐 in-app cs.outline * 0.35）
+  HPEN border_pen = CreatePen(PS_SOLID, 1, kBorderColor);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, border_pen));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+  RECT border_rc = {0, 0, rc.right - 1, rc.bottom - 1};
+  RoundRect(hdc, border_rc.left, border_rc.top, border_rc.right,
+            border_rc.bottom, kCornerRadius, kCornerRadius);
   SelectObject(hdc, old_pen);
-  DeleteObject(pen);
+  SelectObject(hdc, old_brush);
+  DeleteObject(border_pen);
 
   EnsureFonts();
 
-  RECT title_text_rc = {12, 0, 120, kTitleBarHeight};
-  DrawUiText(hdc, title_text_rc, L"\u4eca\u65e5\u5b89\u6392", font_title_, kTextPrimary,
-             DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  // ── 标题栏：📅 今日安排  …  日期 ──
+  // 日历图标（矢量绘制，对齐 Material Icons.calendar_today_outlined）
+  int cal_x = kBodyPadding;
+  int cal_y = (kTitleBarHeight - kCalIconSize) / 2;
+  DrawCalendarIcon(hdc, cal_x, cal_y, kCalIconSize, kAccentBlue);
 
+  // 标题文字
+  RECT title_text_rc = {cal_x + kCalIconSize + 8, 0,
+                        cal_x + kCalIconSize + 8 + 80, kTitleBarHeight};
+  DrawUiText(hdc, title_text_rc, L"\u4eca\u65e5\u5b89\u6392", font_title_,
+             kTextPrimary, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  // 日期文字（右侧，蓝色）
   std::wstring date_label = FormatTodayLabel();
-  RECT date_rc = {120, 0, rc.right - kCloseBtnSize - kCollapseBtnSize - 22,
+  RECT date_rc = {0, 0,
+                  rc.right - kCloseBtnSize - kCollapseBtnSize - 22,
                   kTitleBarHeight};
   DrawUiText(hdc, date_rc, date_label, font_ui_, kAccentBlue,
              DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+
+  // 标题栏底部分隔线（对齐 in-app Border(bottom)）
+  HPEN sep_pen = CreatePen(PS_SOLID, 1, kBorderColor);
+  old_pen = static_cast<HPEN>(SelectObject(hdc, sep_pen));
+  MoveToEx(hdc, 0, kTitleBarHeight, nullptr);
+  LineTo(hdc, rc.right, kTitleBarHeight);
+  SelectObject(hdc, old_pen);
+  DeleteObject(sep_pen);
 
   if (collapsed_) return;
 
@@ -368,7 +449,7 @@ void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
   if (items_.empty()) {
     RECT empty_rc = {0, y, rc.right, y + 44};
     DrawUiText(hdc, empty_rc,
-               L"\u2728 \u6682\u65e0\u65e5\u7a0b\u6570\u636e",
+               L"\u6682\u65e0\u65e5\u7a0b\u6570\u636e",
                font_ui_, kTextSecondary,
                DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     return;
@@ -380,45 +461,50 @@ void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
     const auto& item = items_[i];
     int item_y = y + i * kItemHeight;
 
-    int dot_x = kBodyPadding;
-    int dot_y = item_y + (kItemHeight - 6) / 2;
-    RECT dot_rc = {dot_x, dot_y, dot_x + 6, dot_y + 6};
-    COLORREF dot_color = item.completed ? kCompletedColor : kAccentBlue;
-    DrawRoundedRect(hdc, dot_rc, 3, dot_color, 0);
+    // ── 时间列（左）：时间 + 下方竖线 ──
+    int time_x = kBodyPadding;
+    int time_w = kTimeColWidth;
 
-    RECT time_rc = {kBodyPadding + 14, item_y, kBodyPadding + 60,
-                    item_y + kItemHeight};
+    // 时间文字（颜色按小时变化，对齐 in-app _buildScheduleRow）
+    RECT time_rc = {time_x, item_y + 4, time_x + time_w, item_y + 4 + 16};
+    COLORREF time_color = item.completed
+                              ? kCompletedColor
+                              : GetTimeColor(item.time_text);
     DrawUiText(hdc, time_rc, Utf8ToWide(item.time_text), font_time_,
-               kTextSecondary, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+               time_color, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    RECT title_col_rc = {kBodyPadding + 66, item_y, rc.right - kBodyPadding,
-                         item_y + kItemHeight};
+    // 时间下方竖线（1px * 18px，对齐 in-app Container(width:1, height:18)）
+    int line_x = time_x + 1;
+    int line_y_top = item_y + 22;
+    int line_y_bottom = line_y_top + 18;
+    HPEN line_pen = CreatePen(PS_SOLID, 1, kTimeLineColor);
+    old_pen = static_cast<HPEN>(SelectObject(hdc, line_pen));
+    MoveToEx(hdc, line_x, line_y_top, nullptr);
+    LineTo(hdc, line_x, line_y_bottom);
+    SelectObject(hdc, old_pen);
+    DeleteObject(line_pen);
+
+    // ── 标题列（右）：标题 + 备注 ──
+    int title_x = time_x + time_w + 10;
+    int title_right = rc.right - kBodyPadding;
     COLORREF title_color = item.completed ? kCompletedColor : kTextPrimary;
     std::wstring title_text = Utf8ToWide(item.title);
+
+    // 标题文字（12pt，对齐 in-app fontSize:12）
+    RECT title_col_rc = {title_x, item_y + 4, title_right, item_y + 4 + 16};
     DrawUiText(hdc, title_col_rc, title_text, font_ui_, title_color,
                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-  }
 
-  int footer_y = kTitleBarHeight + kBodyPadding +
-                 visible_count * kItemHeight;
-  if (footer_y + kFooterHeight <= rc.bottom) {
-    RECT footer_rc = {0, footer_y, rc.right, footer_y + kFooterHeight};
-    HBRUSH fb = CreateSolidBrush(kFooterBg);
-    FillRect(hdc, &footer_rc, fb);
-    DeleteObject(fb);
-
-    int pending = 0;
-    for (const auto& it : items_) {
-      if (!it.completed) ++pending;
+    // 备注文字（10pt，仅当存在时绘制）
+    if (!item.notes.empty()) {
+      std::wstring notes_text = Utf8ToWide(item.notes);
+      RECT notes_rc = {title_x, item_y + 24, title_right, item_y + 24 + 14};
+      COLORREF notes_color = item.completed ? kCompletedColor : kTextSecondary;
+      DrawUiText(hdc, notes_rc, notes_text, font_notes_, notes_color,
+                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
-    wchar_t buf[64];
-    wsprintfW(buf, L"共 %d 项 \u00B7 %d 待执行",
-              static_cast<int>(items_.size()), pending);
-    RECT footer_text_rc = {kBodyPadding, footer_y, rc.right - kBodyPadding,
-                           footer_y + kFooterHeight};
-    DrawUiText(hdc, footer_text_rc, buf, font_ui_, kTextSecondary,
-               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
+  // 对齐 in-app _buildScheduleCard：不再渲染底部统计栏
 }
 
 void ScheduleFloatingWindow::FireEvent(EventType type,
@@ -502,6 +588,47 @@ LRESULT ScheduleFloatingWindow::HandleMessage(HWND hwnd, UINT message,
         SetTextColor(btn_dc, RGB(0, 0, 0));
       }
       return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
+    }
+    case WM_DRAWITEM: {
+      // 自绘按钮（BS_OWNERDRAW）：黑色背景 + 白色文字
+      auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+      if (dis == nullptr || dis->hwndItem == nullptr) break;
+      HDC dc = dis->hDC;
+      RECT rc = dis->rcItem;
+
+      // 背景：黑色填充
+      HBRUSH bg_brush = CreateSolidBrush(RGB(0, 0, 0));
+      FillRect(dc, &rc, bg_brush);
+      DeleteObject(bg_brush);
+
+      // 边框：略深灰 1px
+      HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(40, 40, 40));
+      HPEN old_pen = static_cast<HPEN>(SelectObject(dc, border_pen));
+      HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, GetStockObject(NULL_BRUSH)));
+      Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
+      SelectObject(dc, old_pen);
+      SelectObject(dc, old_brush);
+      DeleteObject(border_pen);
+
+      // 文字：白色，居中
+      wchar_t text[8] = {0};
+      GetWindowTextW(dis->hwndItem, text, 7);
+      SetBkMode(dc, TRANSPARENT);
+      SetTextColor(dc, RGB(255, 255, 255));
+      HFONT font = (dis->hwndItem == btn_close_) ? font_title_ : font_ui_;
+      HFONT old_font = static_cast<HFONT>(SelectObject(dc, font));
+      RECT text_rc = rc;
+      ::DrawTextW(dc, text, -1, &text_rc,
+                  DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+      SelectObject(dc, old_font);
+
+      // 按下态：略微变深
+      if (dis->itemState & ODS_SELECTED) {
+        HBRUSH dim = CreateSolidBrush(RGB(0, 0, 0));
+        FrameRect(dc, &rc, dim);
+        DeleteObject(dim);
+      }
+      return TRUE;
     }
     case WM_DESTROY:
       SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);

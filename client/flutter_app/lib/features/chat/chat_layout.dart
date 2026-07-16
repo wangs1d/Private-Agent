@@ -50,58 +50,68 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
-    double? leftWidth;
-    double rightWidth = kRightSidePanelWidth;
-    if (widget.useSplit) {
-      final double availForPanels =
-          MediaQuery.sizeOf(context).width - _dividerWidth;
-      double lw = (availForPanels * widget.splitRatio)
-          .clamp(_minLeft, availForPanels - _minRight);
-      double rw = availForPanels - lw;
-      if (rw < _minRight) {
-        rw = _minRight;
-        lw = (availForPanels - rw).clamp(_minLeft, availForPanels - _minRight);
-      }
-      leftWidth = lw;
-      rightWidth = rw;
-    }
+    // 用 LayoutBuilder 获取实际约束宽度，而非 MediaQuery.sizeOf(context).width。
+    // 因为 NextbotChatLayout 在 AppSidebar 右侧的 Expanded 里，实际宽度 =
+    // 屏宽 - sidebar - 1px(VerticalDivider)，直接用屏宽会导致子元素溢出。
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double actualWidth = constraints.maxWidth;
 
-    _reportRightWidth(rightWidth);
+        double? leftWidth;
+        double rightWidth = kRightSidePanelWidth;
+        if (widget.useSplit) {
+          final double availForPanels = actualWidth - _dividerWidth;
+          double lw = (availForPanels * widget.splitRatio)
+              .clamp(_minLeft, availForPanels - _minRight);
+          double rw = availForPanels - lw;
+          if (rw < _minRight) {
+            rw = _minRight;
+            lw = (availForPanels - rw)
+                .clamp(_minLeft, availForPanels - _minRight);
+          }
+          leftWidth = lw;
+          rightWidth = rw;
+        }
 
-    return ColoredBox(
-      color: cs.surface,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          if (widget.useSplit)
-            SizedBox(width: leftWidth, child: widget.child)
-          else
-            Expanded(child: widget.child),
-          if (widget.useSplit)
-            VerticalDragDivider(
-              onDrag: (double deltaX) {
-                if (widget.onSplitRatioChanged == null) return;
-                final double avail = MediaQuery.sizeOf(context).width - _dividerWidth;
-                final double newLeft = (leftWidth! + deltaX)
-                    .clamp(_minLeft, avail - _minRight);
-                final double newRatio = (newLeft / avail).clamp(0.1, 0.9);
-                final double newRight = avail - newLeft;
-                widget.onSplitRatioChanged!(newRatio);
-                _reportRightWidth(newRight);
-              },
-            )
-          else
-            // 右侧 kRightSidePanelWidth 占位：实际内容由外层 Stack 的
-            // RightSidePanel 以 Positioned(top: 0, right: 0, ...) 渲染，
-            // 从而覆盖顶部 AppBar。
-            const SizedBox(width: kRightSidePanelWidth),
-          if (widget.useSplit)
-            // split 模式右侧占位：实际内容（带关闭按钮的分栏面板）由
-            // 调用方在外层 Stack 用 Positioned 渲染，宽度由 [onRightPanelWidthChanged]
-            // 同步，避免右面板覆盖顶部 AppBar。
-            SizedBox(width: rightWidth),
-        ],
-      ),
+        _reportRightWidth(rightWidth);
+
+        return ColoredBox(
+          color: cs.surface,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              if (widget.useSplit)
+                SizedBox(width: leftWidth, child: widget.child)
+              else
+                Expanded(child: widget.child),
+              if (widget.useSplit)
+                VerticalDragDivider(
+                  onDrag: (double deltaX) {
+                    if (widget.onSplitRatioChanged == null) return;
+                    final double avail = actualWidth - _dividerWidth;
+                    final double newLeft = (leftWidth! + deltaX)
+                        .clamp(_minLeft, avail - _minRight);
+                    final double newRatio =
+                        (newLeft / avail).clamp(0.1, 0.9);
+                    final double newRight = avail - newLeft;
+                    widget.onSplitRatioChanged!(newRatio);
+                    _reportRightWidth(newRight);
+                  },
+                )
+              else
+                // 右侧 kRightSidePanelWidth 占位：实际内容由外层 Stack 的
+                // RightSidePanel 以 Positioned(top: 0, right: 0, ...) 渲染，
+                // 从而覆盖顶部 AppBar。
+                const SizedBox(width: kRightSidePanelWidth),
+              if (widget.useSplit)
+                // split 模式右侧占位：实际内容（带关闭按钮的分栏面板）由
+                // 调用方在外层 Stack 用 Positioned 渲染，宽度由
+                // [onRightPanelWidthChanged] 同步，避免右面板覆盖顶部 AppBar。
+                SizedBox(width: rightWidth),
+            ],
+          ),
+        );
+      },
     );
   }
 

@@ -59,6 +59,30 @@ export const CODE_SANDBOX_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    exact: "code.shell",
+    metadata: {
+      aliases: [
+        "shell", "run command", "execute command", "terminal", "cmd",
+        "bash", "powershell", "pip install", "npm install", "curl",
+        "grep", "find files", "ffmpeg", "git log",
+        "执行命令", "跑命令", "终端", "命令行", "装包", "安装依赖",
+        "pip 安装", "npm 安装", "查找文件", "搜索文件", "压缩文件",
+        "转码", "格式转换",
+      ],
+      examples: [
+        "pip install pandas",
+        "用 grep 搜一下这个目录里的 error",
+        "ffmpeg 把这个 mp4 转成 mp3",
+        "git log 看看最近的提交",
+        "install the pandas package",
+      ],
+      negativeExamples: [
+        "运行这段 python 代码",
+        "读取这个文件",
+      ],
+    },
+  },
+  {
     exact: "code.list_files",
     metadata: {
       aliases: [

@@ -4,6 +4,22 @@ import type { WorldService } from "./services/world-service.js";
 
 export type SkillPermissionLike = string;
 
+/** Skill 元数据最小外观（自我进化 registerFromCode 用） */
+export type SkillMetadataLike = {
+  name: string;
+  version: string;
+  displayName: string;
+  description: string;
+  parameters?: Array<{ name: string; type: string; required: boolean; description?: string }>;
+  permissions?: SkillPermissionLike[];
+  timeoutMs?: number;
+  maxRetries?: number;
+  tags?: string[];
+  kind?: "builtin" | "community";
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 export type SkillManifestLike = {
   name: string;
   displayName: string;
@@ -55,6 +71,12 @@ export type SkillManagerLike = {
   setEnabled(skillName: string, enabled: boolean): void;
   grantPermissions(skillName: string, permissions: SkillPermissionLike[]): void;
   loadFromFile?(skillPath: string, options?: { autoEnable?: boolean }): Promise<void>;
+  /** 从代码字符串注册 Skill（自我进化用） */
+  registerFromCode?(
+    metadata: SkillMetadataLike,
+    handlerCode: string,
+    options?: { autoEnable?: boolean },
+  ): { ok: boolean; error?: string; skillName?: string };
 };
 
 export type ToolContextLike = {

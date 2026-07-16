@@ -77,13 +77,25 @@ export class AgentSelfLearningService {
   }
 
   /**
+   * 返回最近交互记录的失败率（0-1）。
+   *
+   * 供 AwarenessCortex.assessConfidence 注入「历史失败率」因子使用
+   * （Stage 4 Task 3）。无记录时返回 0（不扣分）。
+   */
+  getRecentFailureRate(): number {
+    if (this.recentRecords.length === 0) return 0;
+    const failures = this.recentRecords.filter((r) => !r.success);
+    return failures.length / this.recentRecords.length;
+  }
+
+  /**
    * 分析最近的交互记录，生成改进建议
    */
   async analyzeAndGenerateSuggestions(): Promise<ImprovementSuggestion[]> {
     if (this.recentRecords.length < 5) {
       return [];
     }
-    
+
     // 分析失败案例
     const failures = this.recentRecords.filter((r) => !r.success);
     const failureRate = failures.length / this.recentRecords.length;

@@ -9,7 +9,7 @@
 
 // 独立的来电悬浮窗 —— 脱离主 Flutter 窗口存在。
 //
-// 用途：Agent 推送 agent.phone.ringing_start 时，弹出一个 topmost 的
+// 用途：Agent 推送 agent.voice.ringing_start 时，弹出一个 topmost 的
 // borderless popup 窗口，位于工作区右下角，带铃声循环 + 接听/挂断按钮。
 // 主窗口最小化、被遮挡都不会影响该窗口可见。
 //
@@ -17,7 +17,7 @@
 // - Show(payload)：创建/更新窗口内容 + 启动铃声
 // - Hide()：停止铃声 + 销毁窗口
 // - 用户点接听 → 触发 on_accept 回调，Dart 端会拉起主窗口并打开通话 UI
-// - 用户点挂断 → 触发 on_decline 回调，Dart 端发 phone.hangup
+// - 用户点挂断 → 触发 on_decline 回调，Dart 端发 voice.hangup
 // - 超时（默认 30s）→ 触发 on_timeout 回调
 class IncomingCallWindow {
  public:

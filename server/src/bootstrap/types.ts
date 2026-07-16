@@ -52,12 +52,12 @@ import type { NotesService } from "../services/notes-service.js";
 import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 import type { MoodInferenceService } from "../services/mood-inference-service.js";
-import type { JarvisHarness } from "../services/jarvis/index.js";
 import type { MessageHubService } from "../services/message-hub-service.js";
 import type { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import type { MessageBridgeService } from "../services/message-bridge-service.js";
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
+import type { BrainCenter } from "../brain/index.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -125,12 +125,12 @@ export type AppServices = {
   morningBriefingScheduler: MorningBriefingScheduler;
   externalChat: ExternalChatProvider | null;
   moodInferenceService: MoodInferenceService;
-  /** J.A.R.V.I.S. 统一主动消息中枢 */
-  jarvisHarness: JarvisHarness;
   /** 终端互连平台 —— 设备注册表（多设备并存，按 deviceId 路由） */
   deviceRegistry: DeviceRegistry;
   /** 终端互连平台 —— 设备配对服务（生成配对码 + 持久化 owner↔device 绑定） */
   devicePairingService: DevicePairingService;
+  /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
+  brainCenter: BrainCenter | null;
 };
 
 export type SkillMetadataValidator = {

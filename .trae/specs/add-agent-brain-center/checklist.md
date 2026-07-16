@@ -1,0 +1,19 @@
+- [x] `server/src/brain/` 目录已创建，包含 `brain-center.ts / capability-cortex.ts / awareness-cortex.ts / proaction-cortex.ts / evolution-cortex.ts / types.ts / index.ts`
+- [x] `BrainCenter` 暴露 `introspect() / observe(actorId) / decide(signal) / evolve(proposal) / snapshot(actorId)` 五个核心方法
+- [x] `CapabilityCortex` 提供 `list / has / identifyGap / expand` 程序化 API，**不再通过 system prompt 注入完整能力清单**
+- [x] `agent-capabilities.ts` 的 `CAPABILITY_DOMAINS / DOMAIN_LABELS` 已迁为运行时注册，`buildAgentCapabilityPromptSection` 从 `CapabilityCortex.snapshot()` 取数据
+- [x] system prompt 能力段只保留最简摘要 + 指引调用 `brain.list_capabilities` 工具
+- [x] `AwarenessCortex` 已注册 `LifeSignalHubService / DesktopPresenceSignalService / MoodInferenceService / AnticipationEngineService` 为子系统（未重写其实现）
+- [x] `UserActivityState` 包含至少 `just_off_work / going_out / idle / busy / sleeping` 五种状态，由规则 + 信号驱动，不由 LLM 推断
+- [x] `ProactionCortex` 以 `JarvisDecisionEngine` 为唯一决策入口，整合 contact policy / cooldown / 时间节律闸门
+- [x] `create-app-services.ts` 默认不再独立 `start()` `ProactiveAgentCenter` 与 `ProactiveLifeRuntimeService`
+- [x] `BRAIN_PROACTION_LEGACY=1` 可降级回旧路径，且 ProactionCortex 进入 shadow 模式
+- [x] `EvolutionCortex` 已注册 `AgentSelfLearningService / SkillGenerator / SkillPromotionPipeline / HermesEvolutionLoopService` 为子系统
+- [x] `EvolutionProposal` 状态机覆盖 `pending → reviewing → approved/rejected → generated/loaded`
+- [x] `create-app-services.ts` 已实例化 `BrainCenter` 并注册四皮层子系统
+- [x] `BRAIN_CENTER_ENABLED=0` 可完全降级，现状行为不受影响
+- [x] HTTP 路由 `/brain/capabilities / /brain/state / /brain/proactive/test / /brain/evolve/propose` 已注册并可用
+- [x] agent 工具 `brain.list_capabilities / brain.identify_gap / brain.propose_capability / brain.observe_user` 已注册到 `tool-registry.ts` 与 `getBuiltinAgentChatTools()`
+- [x] `tsc --noEmit` 通过零错误
+- [x] 现有 proactive / life-signal / skill-promotion 流在降级模式下行为不变
+- [x] 全程未引入"用 prompt 让 LLM 自我反思能力 / 推断用户状态"的实现路径

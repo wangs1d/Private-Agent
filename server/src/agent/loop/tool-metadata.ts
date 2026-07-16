@@ -1,0 +1,231 @@
+/**
+ * Loop Orchestrator - 工具元数据层
+ *
+ * 收敛现有分散在 5 处的工具元数据（TOOL_CATEGORY_MAPPINGS / resolveToolExecutionTimeoutMs /
+ * STATE_MACHINE_TOOL_ALLOWLIST / ALWAYS_INCLUDED_TOOLS / TOOL_RESULT_PRESET_MAX_CHARS），
+ * 并新增 `alternatives` 字段声明同类替代关系，供 RecoveryPolicy 做"确定性换工具"决策。
+ *
+ * P2 阶段：alternatives 覆盖高频失败工具（desktop/web/shopping），
+ * 其余工具 fallthrough 到原 prompt 路径（buildToolFailureReminder 返回空）。
+ *
+ * 详见 docs/loop-orchestrator-architecture.md §5 Phase 2
+ */
+
+/** 工具分类（与 TOOL_CATEGORY_MAPPINGS 对齐） */
+export type ToolCategory =
+  | "web"
+  | "calendar"
+  | "wallet"
+  | "social"
+  | "phone"
+  | "vision"
+  | "voice"
+  | "clock"
+  | "life"
+  | "capability"
+  | "embodiment"
+  | "desktop"
+  | "programming"
+  | "world"
+  | "aip"
+  | "smart_home"
+  | "mcp"
+  | "image"
+  | string;
+
+/** 单个工具的恢复元数据 */
+export interface ToolMetadata {
+  name: string;
+  category: ToolCategory;
+  /** 同类替代工具（按优先级排序，失败时依次尝试） */
+  alternatives: string[];
+  /** 是否需要"禁止假成功"强约束（用户易感知成败的工具） */
+  requireHonestFailure?: boolean;
+}
+
+// ────────────────────────────────────────────────────────────
+// 工具 → 分类 反向映射（从 TOOL_CATEGORY_MAPPINGS 提取）
+// ────────────────────────────────────────────────────────────
+
+const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
+  // web
+  search_web: "web",
+  fetch_web: "web",
+  "info.inspect_webpage": "web",
+  "info.navigate_site": "web",
+  "info.search": "web",
+  "weather.get_local": "web",
+  // calendar
+  "reminder.plan": "calendar",
+  "calendar.create_from_text": "calendar",
+  "calendar.create_task": "calendar",
+  "calendar.list_tasks": "calendar",
+  // wallet
+  "wallet.get_balance": "wallet",
+  "wallet.get_transactions": "wallet",
+  "wallet.transfer": "wallet",
+  "wallet.recharge": "wallet",
+  "wallet.purchase": "wallet",
+  // phone
+  "phone.ensure_my_number": "phone",
+  "phone.virtual_call": "phone",
+  "phone.call_user": "phone",
+  // vision
+  "vision.http_pull": "vision",
+  "vision.periodic_start": "vision",
+  "vision.periodic_stop": "vision",
+  "vision.periodic_stop_all": "vision",
+  "vision.periodic_list": "vision",
+  // voice
+  "voice.speak": "voice",
+  "voice.send_message": "voice",
+  "voice.transcribe": "voice",
+  // clock
+  "clock.get_current_time": "clock",
+  "clock.get_user_location": "clock",
+  "clock.get_date": "clock",
+  "clock.format_timestamp": "clock",
+  // life
+  "budget.calculate": "life",
+  "shopping.suggest": "life",
+  // desktop
+  "desktop.visual.screenshot": "desktop",
+  "desktop.visual.run_task": "desktop",
+  "desktop.open": "desktop",
+  "desktop.run_preset": "desktop",
+  "desktop.run_shell": "desktop",
+  "desktop.uia_query": "desktop",
+  "desktop.run_input": "desktop",
+  "desktop.run_automation": "desktop",
+  "desktop.http_get": "desktop",
+  "desktop.web_search": "desktop",
+  "desktop.web_fetch": "desktop",
+  // agent_browser (Playwright 无头浏览器)
+  "agent_browser.open": "web",
+  "agent_browser.click": "web",
+  "agent_browser.type": "web",
+  "agent_browser.scroll": "web",
+  "agent_browser.screenshot": "web",
+  "agent_browser.extract_text": "web",
+  "agent_browser.wait_for": "web",
+  "agent_browser.close": "web",
+  // shopping
+  "shopping.order.search": "life",
+  "shopping.order.place": "life",
+  "shopping.order.track": "life",
+  "shopping.order.cancel": "life",
+  // smart_home
+  "smart_home.list_devices": "smart_home",
+  "smart_home.control_device": "smart_home",
+  "smart_home.scene": "smart_home",
+  // capability
+  "agent.query_capabilities": "capability",
+  // embodiment
+  "embodiment.observe": "embodiment",
+  "embodiment.window_place": "embodiment",
+  "embodiment.roam": "embodiment",
+  "embodiment.move": "embodiment",
+  "embodiment.stop": "embodiment",
+  "embodiment.set_state": "embodiment",
+  "embodiment.excite": "embodiment",
+  "embodiment.window_roam": "embodiment",
+};
+
+// ────────────────────────────────────────────────────────────
+// 工具替代关系（RecoveryPolicy 的核心数据）
+// ────────────────────────────────────────────────────────────
+
+/**
+ * 高频失败工具的确定性替代链。
+ * 来源：buildToolFailureReminder 现有 desktop.open 建议 + TOOL_CATEGORY_MAPPINGS 同类工具。
+ * P2 初期只覆盖 desktop/web/shopping，其余靠同类 category 自动兜底。
+ */
+const TOOL_ALTERNATIVES: Record<string, string[]> = {
+  // desktop.open 失败 → 截图确认状态 / run_preset 查找 / run_shell 直接启动
+  // （对齐 buildToolFailureReminder L427-428 现有建议）
+  "desktop.open": ["desktop.visual.screenshot", "desktop.run_preset", "desktop.run_shell"],
+  // search_web 失败 → fetch_web 直接抓取 / info.search 换引擎
+  search_web: ["fetch_web", "info.search"],
+  // fetch_web 失败 → search_web 先搜再抓 / info.inspect_webpage 换抓取器
+  fetch_web: ["search_web", "info.inspect_webpage"],
+  // info.navigate_site 失败 → info.inspect_webpage 换方式
+  "info.navigate_site": ["info.inspect_webpage", "fetch_web"],
+  // shopping.order.place 失败 → search 先确认商品再重试
+  "shopping.order.place": ["shopping.order.search"],
+  // desktop.uia_query 失败（selector 找不到）→ 截图切视觉策略
+  // （对齐状态机 prompt "uia_query count:0 时切视觉策略"）
+  "desktop.uia_query": ["desktop.visual.screenshot"],
+};
+
+// 需要"禁止假成功"强约束的工具（用户易感知成败）
+const HONEST_FAILURE_TOOLS = new Set<string>([
+  "desktop.open",
+  "desktop.run_preset",
+  "desktop.run_shell",
+  "shopping.order.place",
+  "wallet.transfer",
+  "wallet.purchase",
+]);
+
+// ────────────────────────────────────────────────────────────
+// 对外 API
+// ────────────────────────────────────────────────────────────
+
+/** 获取工具的分类；未知工具返回 "misc"。 */
+export function getToolCategory(toolName: string): ToolCategory {
+  return TOOL_TO_CATEGORY[toolName] ?? "misc";
+}
+
+/** 获取工具的显式替代链；无显式声明时返回空数组（调用方可回退到同类工具）。 */
+export function getToolAlternatives(toolName: string): string[] {
+  return TOOL_ALTERNATIVES[toolName] ?? [];
+}
+
+/** 获取同类其他工具（从 TOOL_TO_CATEGORY 反向查找）。 */
+export function getSameCategoryTools(toolName: string): string[] {
+  const category = getToolCategory(toolName);
+  if (category === "misc") return [];
+  return Object.entries(TOOL_TO_CATEGORY)
+    .filter(([name, cat]) => cat === category && name !== toolName)
+    .map(([name]) => name);
+}
+
+/** 获取工具完整元数据。 */
+export function getToolMetadata(toolName: string): ToolMetadata {
+  return {
+    name: toolName,
+    category: getToolCategory(toolName),
+    alternatives: getToolAlternatives(toolName),
+    requireHonestFailure: HONEST_FAILURE_TOOLS.has(toolName),
+  };
+}
+
+/**
+ * 构建失败恢复提示（替代/增强 buildToolFailureReminder）。
+ *
+ * 对有 alternatives 的工具生成"建议换用 X"提示；
+ * 对 requireHonestFailure 的工具追加"禁止宣称成功"强约束。
+ * 无 alternatives 且非 honest 的工具返回空（fallthrough 到原行为）。
+ */
+export function buildRecoveryHint(toolName: string, errorSnippet: string): string {
+  const meta = getToolMetadata(toolName);
+  const parts: string[] = [];
+
+  // 禁止假成功强约束
+  if (meta.requireHonestFailure) {
+    parts.push(
+      `禁止向用户宣称"已成功/已完成/已就绪"等任何成功暗示。本次失败原因：${errorSnippet}。` +
+        `必须在回复中明确告知用户"操作失败"并附上原因。`,
+    );
+  }
+
+  // 确定性替代建议
+  const alts = meta.alternatives;
+  if (alts.length > 0) {
+    const altList = alts.map((a) => `\`${a}\``).join(" / ");
+    parts.push(`建议换用替代工具：${altList}。不要用相同参数重复调用 \`${toolName}\`。`);
+  }
+
+  if (parts.length === 0) return "";
+  return `\n[失败恢复] ${parts.join(" ")}`;
+}

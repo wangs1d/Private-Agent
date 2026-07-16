@@ -419,45 +419,9 @@
 
             <!-- 主内容区 -->
             <main class="flex-1 flex flex-col overflow-hidden">
-                <!-- ========== 灵动岛 - 天气专属 ========== -->
-                <header class="h-12 bg-bg-white border-b border-border-color flex items-center justify-end pr-6 relative">
-                    <!-- 灵动岛主体 - 天气专属（与右侧更多按钮同一平面） -->
-                    <div id="dynamicIsland" class="dynamic-island island-enter rounded-full px-5 py-2 flex items-center gap-3 relative">
-                        <!-- 当前天气 -->
-                        <div class="flex items-center gap-3">
-                            <span class="text-2xl">☀️</span>
-                            <div class="flex flex-col">
-                                <span class="text-lg font-bold text-text-primary leading-none">26°</span>
-                                <span class="text-[10px] text-text-muted">晴天</span>
-                            </div>
-                        </div>
-                        
-                        <!-- 分隔符 -->
-                        <div class="w-px h-8 bg-black/10"></div>
-                        
-                        <!-- 今日天气趋势 -->
-                        <div class="weather-timeline">
-                            <div class="weather-timeline-item">
-                                <span>上午</span>
-                                <span>☀️</span>
-                            </div>
-                            <div class="weather-timeline-line"></div>
-                            <div class="weather-timeline-item">
-                                <span>下午</span>
-                                <span>⛅</span>
-                            </div>
-                            <div class="weather-timeline-line"></div>
-                            <div class="weather-timeline-item">
-                                <span>晚上</span>
-                                <span>🌧️</span>
-                            </div>
-                        </div>
-                        
-                        <!-- 天气提醒 -->
-                        <div class="weather-alert ml-2">
-                            <span class="text-sm">⚠️</span>
-                            <span class="text-[11px] text-accent-orange font-medium">下午有雷阵雨</span>
-                        </div>
+                <header class="h-12 bg-bg-white border-b border-border-color flex items-center justify-start">
+                    <div class="flex items-center px-6 h-full">
+                        <span class="text-sm font-medium text-text-primary">AI 助手</span>
                     </div>
                 </header>
 
@@ -501,14 +465,6 @@
                                         <div class="message-bubble-user rounded-2xl rounded-tr-md px-4 py-3 text-white">
                                             太少了 来10条
                                         </div>
-                                        <div class="flex-shrink-0 pt-1">
-                                            <div class="w-10 h-10 rounded-full user-avatar flex items-center justify-center">
-                                                <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                                    <circle cx="12" cy="7" r="4"/>
-                                                </svg>
-                                            </div>
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -544,14 +500,6 @@
                                     <div class="flex gap-3 items-start">
                                         <div class="message-bubble-user rounded-2xl rounded-tr-md px-4 py-3 text-white">
                                             10条科技新闻
-                                        </div>
-                                        <div class="flex-shrink-0 pt-1">
-                                            <div class="w-10 h-10 rounded-full user-avatar flex items-center justify-center">
-                                                <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                                    <circle cx="12" cy="7" r="4"/>
-                                                </svg>
-                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -623,6 +571,37 @@
                         </div>
 
                         <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                            <!-- 天气信息条 - 从灵动岛迁移到右栏 -->
+                            <div class="rounded-xl p-3" style="background: rgba(255,255,255,0.8); backdrop-filter: blur(10px); border: 1px solid rgba(0,0,0,0.06); box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+                                <div class="flex items-center justify-between mb-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-2xl">☀️</span>
+                                        <div class="flex flex-col">
+                                            <span class="text-lg font-bold text-text-primary leading-none">26°</span>
+                                            <span class="text-[10px] text-text-muted">晴天</span>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-[10px] text-text-muted">上午</span>
+                                            <span class="text-sm">☀️</span>
+                                        </div>
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-[10px] text-text-muted">下午</span>
+                                            <span class="text-sm">⛅</span>
+                                        </div>
+                                        <div class="flex flex-col items-center">
+                                            <span class="text-[10px] text-text-muted">晚上</span>
+                                            <span class="text-sm">🌧️</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="weather-alert">
+                                    <span class="text-sm">⚠️</span>
+                                    <span class="text-[11px] text-accent-orange font-medium">下午有雷阵雨</span>
+                                </div>
+                            </div>
+
                             <!-- 今日安排模块 -->
                             <div id="scheduleCard" class="card-border rounded-xl bg-bg-card p-4 shadow-sm">
                                 <div class="flex items-center gap-2 mb-4">
@@ -737,7 +716,7 @@
                                     </button>
                                 </div>
                                 
-                                <!-- 第二层级 - 4个：搜索、笔记、钱包、日程 -->
+                                <!-- 第二层级 - 3个：搜索、钱包、日程 -->
                                 <div id="moreTools" class="grid grid-cols-4 gap-1.5 mt-1.5 overflow-hidden transition-all duration-400 ease-out max-h-0 opacity-0">
                                     <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="Web搜索">
                                         <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -745,13 +724,6 @@
                                             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
                                         </svg>
                                         <span class="text-[10px] text-text-muted font-medium">搜索</span>
-                                    </button>
-                                    <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="笔记记录">
-                                        <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                                            <polyline points="14 2 14 8 20 8"/>
-                                        </svg>
-                                        <span class="text-[10px] text-text-muted font-medium">笔记</span>
                                     </button>
                                     <button class="tool-btn flex flex-col items-center gap-1.5 p-2.5 rounded-xl" title="数字钱包">
                                         <svg class="w-4.5 h-4.5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -801,59 +773,6 @@
                     </aside>
                 </div>
             </main>
-        </div>
-    </div>
-
-    <!-- ========== 天气详情面板 - 独立层级，确保在最上层 ========== -->
-    <div id="weatherDetailPanel" class="weather-detail-panel">
-        <div class="weather-detail-content">
-            <div class="flex items-center gap-3 mb-4">
-                <span class="text-4xl">☀️</span>
-                <div>
-                    <div class="text-3xl font-bold">26°</div>
-                    <div class="text-sm text-text-muted">晴天转多云</div>
-                </div>
-            </div>
-            
-            <!-- 温度范围 -->
-            <div class="flex items-center justify-between mb-4 px-2">
-                <div class="text-center">
-                    <div class="text-[10px] text-text-muted">最低</div>
-                    <div class="text-sm font-medium text-accent-blue">22°</div>
-                </div>
-                <div class="flex-1 mx-4 h-2 bg-black/5 rounded-full overflow-hidden">
-                    <div class="h-full bg-gradient-to-r from-blue-400 via-yellow-400 to-orange-400 rounded-full" style="width: 70%"></div>
-                </div>
-                <div class="text-center">
-                    <div class="text-[10px] text-text-muted">最高</div>
-                    <div class="text-sm font-medium text-accent-orange">28°</div>
-                </div>
-            </div>
-            
-            <!-- 详细信息 -->
-            <div class="grid grid-cols-3 gap-3 mb-4">
-                <div class="text-center p-2 rounded-lg bg-black/5">
-                    <div class="text-xs text-text-muted mb-1">湿度</div>
-                    <div class="text-sm font-medium">65%</div>
-                </div>
-                <div class="text-center p-2 rounded-lg bg-black/5">
-                    <div class="text-xs text-text-muted mb-1">风速</div>
-                    <div class="text-sm font-medium">3级</div>
-                </div>
-                <div class="text-center p-2 rounded-lg bg-black/5">
-                    <div class="text-xs text-text-muted mb-1">空气质量</div>
-                    <div class="text-sm font-medium text-accent-green">优</div>
-                </div>
-            </div>
-            
-            <!-- 天气提醒 -->
-            <div class="weather-alert">
-                <span class="text-base">⚠️</span>
-                <div>
-                    <div class="text-xs font-medium text-accent-orange">下午有雷阵雨，记得带伞</div>
-                    <div class="text-[10px] text-text-muted">预计15:00-18:00有中到大雨</div>
-                </div>
-            </div>
         </div>
     </div>
 
@@ -977,51 +896,8 @@
             }
         });
 
-        // ========== 天气详情面板 - 独立层级控制 ==========
-        const dynamicIsland = document.getElementById('dynamicIsland');
-        const weatherDetailPanel = document.getElementById('weatherDetailPanel');
-        let weatherPanelVisible = false;
-        let weatherPanelTimeout = null;
-
-        function showWeatherPanel() {
-            if (weatherPanelTimeout) {
-                clearTimeout(weatherPanelTimeout);
-                weatherPanelTimeout = null;
-            }
-            
-            // 计算灵动岛位置
-            const islandRect = dynamicIsland.getBoundingClientRect();
-            const panelRect = weatherDetailPanel.getBoundingClientRect();
-            
-            // 定位面板在灵动岛正下方居中
-            const left = islandRect.left + (islandRect.width / 2) - (panelRect.width / 2);
-            const top = islandRect.bottom + 12;
-            
-            weatherDetailPanel.style.left = left + 'px';
-            weatherDetailPanel.style.top = top + 'px';
-            
-            weatherDetailPanel.classList.add('visible');
-            weatherPanelVisible = true;
-        }
-
-        function hideWeatherPanel() {
-            weatherPanelTimeout = setTimeout(() => {
-                weatherDetailPanel.classList.remove('visible');
-                weatherPanelVisible = false;
-            }, 200);
-        }
-
-        dynamicIsland.addEventListener('mouseenter', showWeatherPanel);
-        dynamicIsland.addEventListener('mouseleave', hideWeatherPanel);
-        
-        weatherDetailPanel.addEventListener('mouseenter', function() {
-            if (weatherPanelTimeout) {
-                clearTimeout(weatherPanelTimeout);
-                weatherPanelTimeout = null;
-            }
-        });
-        
-        weatherDetailPanel.addEventListener('mouseleave', hideWeatherPanel);
+        // ========== 天气详情面板 - 已随灵动岛移除 ==========
+        // (dynamicIsland 与 weatherDetailPanel 相关逻辑已移除，天气信息已迁移至右栏天气信息条)
 
         // ========== 桌面悬浮模式 - 每日安排 ==========
         const floatScheduleBtn = document.getElementById('floatScheduleBtn');

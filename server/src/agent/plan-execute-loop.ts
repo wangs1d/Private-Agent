@@ -37,7 +37,16 @@ export type PlanExecuteLoopResult = {
   finalText: string;
   modelCalls: number;
   plan: TaskExecutionPlan | null;
+  /**
+   * @deprecated P2 保留：当前恒为 false。P3 ProgressTracker 就绪后激活——
+   * execute 后调 ProgressTracker.assess()，未达 successCriteria 则置 true。
+   * 保留字段避免破坏 turn-lifecycle 的 trajectory 观察语义。
+   */
   exhaustedRetries: boolean;
+  /**
+   * @deprecated P2 保留：当前恒为 ""。P3 ProgressTracker 就绪后激活——
+   * 填入进展评估的反思文本。保留字段避免破坏 turn-lifecycle 的 trajectory 观察。
+   */
   verifyReflection: string;
 };
 

@@ -15,6 +15,16 @@ import type {
   DesktopVisualUiaQueryResult,
   DesktopVisualScreenshotInput,
   DesktopVisualScreenshotResult,
+  DesktopVisualRunInputInput,
+  DesktopVisualRunInputResult,
+  DesktopVisualRunAutomationInput,
+  DesktopVisualRunAutomationResult,
+  DesktopVisualHttpGetInput,
+  DesktopVisualHttpGetResult,
+  DesktopVisualWebSearchInput,
+  DesktopVisualWebSearchResult,
+  DesktopVisualWebFetchInput,
+  DesktopVisualWebFetchResult,
 } from "./desktop-visual-port.js";
 import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
 
@@ -85,7 +95,11 @@ function parseLastJsonLine(stdout: string): StdioWorkerResult | null {
 function spawnStdioWorker(payload: Record<string, unknown>, pythonExe: string, packageRoot: string) {
   return spawn(pythonExe, ["-u", "-m", "desktop_visual.stdio_worker"], {
     cwd: packageRoot,
-    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: "1",
+      PYTHONPATH: packageRoot,
+    },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -133,8 +147,7 @@ async function runStdioWorker<T extends StdioWorkerResult>(
       stderr += b.toString("utf8");
     });
 
-    child.stdin.write(`${JSON.stringify(payload)}\n`);
-    child.stdin.end();
+    child.stdin.end(`${JSON.stringify(payload)}\n`, "utf8");
 
     timer = setTimeout(() => {
       finish({ ok: false, error: `${opts.timeoutLabel}（>${opts.timeoutMs}ms）` } as T);
@@ -298,6 +311,127 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         packageRoot: this.packageRoot,
         timeoutMs: 30_000,
         timeoutLabel: "uia_query 子进程超时",
+      },
+    );
+  }
+
+  async runInput(input: DesktopVisualRunInputInput): Promise<DesktopVisualRunInputResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualRunInputResult>(
+      {
+        action: "run_input",
+        inputAction: input.action,
+        x: input.x ?? null,
+        y: input.y ?? null,
+        toX: input.toX ?? null,
+        toY: input.toY ?? null,
+        button: input.button ?? null,
+        text: input.text ?? null,
+        key: input.key ?? null,
+        keys: input.keys ?? null,
+        scrollClicks: input.scrollClicks ?? null,
+        interval: input.interval ?? null,
+        moveDuration: input.moveDuration ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 10_000,
+        timeoutLabel: "run_input 子进程超时",
+      },
+    );
+  }
+
+  async runAutomation(
+    input: DesktopVisualRunAutomationInput,
+  ): Promise<DesktopVisualRunAutomationResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    // run_automation 内部完成 query + pattern 操作,给 15s(query 遍历可能慢)
+    return runStdioWorker<DesktopVisualRunAutomationResult>(
+      {
+        action: "run_automation",
+        // stdio_worker 内部用 action_name 避免和顶层 action 冲突
+        action_name: input.action,
+        selector: input.selector,
+        value: input.value ?? null,
+        index: input.index ?? 0,
+        topOnly: input.topOnly ?? true,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 15_000,
+        timeoutLabel: "run_automation 子进程超时",
+      },
+    );
+  }
+
+  async httpGet(
+    input: DesktopVisualHttpGetInput,
+  ): Promise<DesktopVisualHttpGetResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    // http_get 默认 15s,客户端可调到 60s
+    const clientTimeout = input.timeoutMs ?? 15_000;
+    const workerTimeout = Math.min(clientTimeout + 5_000, 65_000);
+    return runStdioWorker<DesktopVisualHttpGetResult>(
+      {
+        action: "http_get",
+        url: input.url,
+        headers: input.headers ?? null,
+        timeoutMs: input.timeoutMs ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: workerTimeout,
+        timeoutLabel: "http_get 子进程超时",
+      },
+    );
+  }
+
+  async webSearch(
+    input: DesktopVisualWebSearchInput,
+  ): Promise<DesktopVisualWebSearchResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualWebSearchResult>(
+      {
+        action: "web_search",
+        query: input.query,
+        limit: input.limit ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 25_000,
+        timeoutLabel: "web_search 子进程超时",
+      },
+    );
+  }
+
+  async webFetch(
+    input: DesktopVisualWebFetchInput,
+  ): Promise<DesktopVisualWebFetchResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualWebFetchResult>(
+      {
+        action: "web_fetch",
+        url: input.url,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 25_000,
+        timeoutLabel: "web_fetch 子进程超时",
       },
     );
   }

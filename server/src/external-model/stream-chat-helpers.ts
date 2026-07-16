@@ -61,6 +61,12 @@ export type StreamConsumeOptions = {
   providerId?: string;
   /** 标识 model，方便日志排错 */
   model?: string;
+  /**
+   * 两个 chunk 之间的最大空闲时间（毫秒）。超过则中断流并抛出 `StreamIdleTimeoutError`。
+   * 默认从环境变量 `STREAM_IDLE_TIMEOUT_MS` 读取，未设则 30000ms。
+   * 设为 0 可禁用。
+   */
+  idleTimeoutMs?: number;
 };
 
 export type StreamConsumeResult = {
@@ -76,6 +82,19 @@ export type StreamConsumeResult = {
 
 const REASONING_FALLBACK_LOG_PREFIX = "[stream-chat]";
 
+/** 默认 chunk 间空闲超时：30s 无新 chunk 则判定流卡死。可用 `STREAM_IDLE_TIMEOUT_MS` 覆盖。 */
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+
+function resolveIdleTimeoutMs(explicit?: number): number {
+  if (typeof explicit === "number") return explicit;
+  const env = process.env.STREAM_IDLE_TIMEOUT_MS;
+  if (env) {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_IDLE_TIMEOUT_MS;
+}
+
 function isDebugEnabled(opt?: boolean): boolean {
   if (opt === false) return false;
   const env = process.env.STREAM_CHAT_HELPERS_DEBUG;
@@ -84,10 +103,41 @@ function isDebugEnabled(opt?: boolean): boolean {
 }
 
 /**
+ * 流式响应中两个 chunk 之间空闲超时（网络半开 / 模型卡住 / 代理中断但未关流）。
+ * 抛出后上层可走 failover / 兜底文案，而不是干等到 OpenAI SDK 的 10 分钟默认超时。
+ */
+export class StreamIdleTimeoutError extends Error {
+  readonly providerId?: string;
+  readonly model?: string;
+  readonly idleMs: number;
+  readonly partialContent: string;
+
+  constructor(params: {
+    providerId?: string;
+    model?: string;
+    idleMs: number;
+    partialContent: string;
+  }) {
+    super(
+      `Stream idle timeout: no chunk for ${params.idleMs}ms ` +
+        `(provider=${params.providerId ?? "?"} model=${params.model ?? "?"} ` +
+        `partial_bytes=${params.partialContent.length})`,
+    );
+    this.name = "StreamIdleTimeoutError";
+    this.providerId = params.providerId;
+    this.model = params.model;
+    this.idleMs = params.idleMs;
+    this.partialContent = params.partialContent;
+  }
+}
+
+/**
  * 消费一段 provider-agnostic 的流，自动处理：
  *  - content / reasoning 累积；
  *  - tool_calls 跨 chunk 累积（按 index 合并）；
- *  - finish_reason 取最后一个非空值。
+ *  - finish_reason 取最后一个非空值；
+ *  - **chunk 间空闲超时**：超过 `idleTimeoutMs` 无新 chunk 则抛 `StreamIdleTimeoutError`，
+ *    避免网络半开 / 模型卡住时干等 OpenAI SDK 默认 10 分钟超时。
  *
  * 这个函数**不**关心来源是 OpenAI / Anthropic / 自研 SDK，只看 NormalChatChunk 形态。
  */
@@ -100,29 +150,79 @@ export async function consumeNormalizedStream(
   let finishReason: string | null = null;
   const toolAccByIndex = new Map<number, NormalToolCall>();
 
-  for await (const chunk of source) {
-    if (chunk.content && chunk.content.length > 0) {
-      content += chunk.content;
-      options.onContentDelta?.(chunk.content);
-    }
-    if (chunk.reasoning && chunk.reasoning.length > 0) {
-      reasoning += chunk.reasoning;
-    }
-    if (chunk.finishReason != null) {
-      finishReason = chunk.finishReason;
-    }
-    if (chunk.toolCalls && chunk.toolCalls.length > 0) {
-      for (const tc of chunk.toolCalls) {
-        const idx = typeof tc.index === "number" ? tc.index : 0;
-        let acc = toolAccByIndex.get(idx);
-        if (!acc) {
-          acc = { index: idx };
-          toolAccByIndex.set(idx, acc);
+  const idleMs = resolveIdleTimeoutMs(options.idleTimeoutMs);
+  const useIdleGuard = idleMs > 0;
+
+  // 把 AsyncIterable 包装成「带空闲超时的 iterator」。
+  // 每次取下一个 chunk 时用 Promise.race 让「下一个 chunk」与「超时定时器」竞速。
+  // 超时则抛 StreamIdleTimeoutError，携带已累积的 partial content 供上层兜底。
+  const iterator = source[Symbol.asyncIterator]();
+
+  try {
+    while (true) {
+      const nextPromise = iterator.next();
+      let result: IteratorResult<NormalChatChunk>;
+
+      if (useIdleGuard) {
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          result = await Promise.race<IteratorResult<NormalChatChunk>>([
+            nextPromise,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new StreamIdleTimeoutError({
+                      providerId: options.providerId,
+                      model: options.model,
+                      idleMs,
+                      partialContent: content,
+                    }),
+                  ),
+                idleMs,
+              );
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
-        if (tc.id != null) acc.id = tc.id;
-        if (tc.name) acc.name = tc.name;
-        if (tc.argumentsChunk) acc.argumentsChunk = (acc.argumentsChunk ?? "") + tc.argumentsChunk;
+      } else {
+        result = await nextPromise;
       }
+
+      if (result.done) break;
+      const chunk = result.value;
+
+      if (chunk.content && chunk.content.length > 0) {
+        content += chunk.content;
+        options.onContentDelta?.(chunk.content);
+      }
+      if (chunk.reasoning && chunk.reasoning.length > 0) {
+        reasoning += chunk.reasoning;
+      }
+      if (chunk.finishReason != null) {
+        finishReason = chunk.finishReason;
+      }
+      if (chunk.toolCalls && chunk.toolCalls.length > 0) {
+        for (const tc of chunk.toolCalls) {
+          const idx = typeof tc.index === "number" ? tc.index : 0;
+          let acc = toolAccByIndex.get(idx);
+          if (!acc) {
+            acc = { index: idx };
+            toolAccByIndex.set(idx, acc);
+          }
+          if (tc.id != null) acc.id = tc.id;
+          if (tc.name) acc.name = tc.name;
+          if (tc.argumentsChunk) acc.argumentsChunk = (acc.argumentsChunk ?? "") + tc.argumentsChunk;
+        }
+      }
+    }
+  } finally {
+    // 确保底层 iterator 被释放（尤其是超时中断后，避免底层 HTTP 流泄漏）
+    try {
+      await iterator.return?.();
+    } catch {
+      // ignore
     }
   }
 

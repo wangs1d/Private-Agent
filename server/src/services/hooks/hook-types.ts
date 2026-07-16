@@ -31,6 +31,19 @@ export type WebhookEventType =
   | "market.anomaly"             // 价格/成交量异动
   | "data.threshold_breach"      // 通用数据阈值突破
   | "data.source_heartbeat"      // 外部数据源心跳/在线状态
+  // ─── Brain Center 神经解剖分区事件 ───
+  | "sensory.listen"           // 感官皮层：识别到语音输入
+  | "sensory.look"             // 感官皮层：视觉感知完成
+  | "sensory.speak"            // 感官皮层：TTS 输出
+  | "memory.remember"          // 记忆皮层：写入记忆
+  | "memory.recall"            // 记忆皮层：检索记忆
+  | "memory.consolidate"       // 记忆皮层：睡眠巩固
+  | "synapse.agent_message"    // 突触总线：跨 Agent 通信
+  | "synapse.user_message"     // 突触总线：推送给用户
+  | "limbic.safety_block"      // 边缘皮层：安全熔断
+  | "limbic.emotion_shift"     // 边缘皮层：情绪变化
+  | "planner.plan_step"        // 规划皮层：规划步骤变化
+  | "planner.route_decision"   // 规划皮层：快慢双系统路由决策
   | "custom";                    // 用户自定义事件
 
 /** 复用 WebhookEventType 作为 hook 事件类型枚举，保证两端契约一致 */
