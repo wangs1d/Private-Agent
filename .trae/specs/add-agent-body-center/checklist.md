@@ -1,0 +1,43 @@
+- [x] `server/src/body/types.ts` 定义 BodyAction / BodySignal / BodyState / BodyModuleSnapshot / ReflexVerdict / BodyModuleLike 核心类型
+- [x] `server/src/body/body-bus.ts` 实现 BodyBus（publish/subscribe 主题路由）
+- [x] `server/src/body/body-gateway.ts` 实现 BodyGateway（ReflexArc 拦截 + BodyModule 路由表 + ToolRegistry fallback）
+- [x] `server/src/body/body-center.ts` 实现 BodyCenter 外观类（act/sense/state/registerModule/snapshot/start/stop）
+- [x] ReflexArc 实现 DENY_PATTERNS（rm -rf / format / shutdown / del /s / reg delete / takeown / bcdedit / diskpart / net user / powershell -enc）并支持热加载
+- [x] ReflexArc 拒绝事件写入审计日志（含 actorId / tool / args / reason / timestamp）
+- [x] MotorCortex 注册 desktop-visual、agent-browser、file-doc、code-sandbox 工具并实现 act/sense
+- [x] VocalCortex 聚合 tts/voice-dialogue/voice-message/phone-bridge 出站，按优先级选择 TTS 通道
+- [x] VisualCortex 实现 desktop_frame 拉取并发布 body.visual.frame 信号
+- [x] VisualCortex 订阅 device-bus camera video stream 并发布 body.visual.camera_frame 信号
+- [x] AuditoryCortex 聚合 ASR adapters，音频到达后转写并发布 body.auditory.transcript 信号
+- [x] SomatoCortex 订阅 SmartHomeService 状态变化并发布 body.somato.device_change 信号
+- [x] VestibularCortex 实现 embodiment.* 工具调用并维护多设备渲染状态
+- [x] VestibularCortex 设备切换时迁移 mood/caption 并发布 body.vestibular.device_switch 信号
+- [x] HomeostasisCore 聚合电量/位置/算力配额/负载/疲劳度
+- [x] HomeostasisCore 电量 < 20% 发布 body.homeostasis.battery_low 信号
+- [x] HomeostasisCore 算力配额 < 10% 发布 body.homeostasis.quota_low 信号
+- [x] BrainCenter 新增 registerBodyGateway 方法并接入 BodyGateway
+- [x] action-executor.ts 改造为委托 BodyGateway.execute，未注入时 fallback 到 toolRegistry.execute
+- [x] BrainCenter.cognize() 阶段 1 调用 bodyGateway.sense({ kind: "where_am_i" }) 补全身体状态
+- [x] SensoryCortex 订阅 BodyBus 的 body.visual.frame / body.auditory.transcript / body.vocal.spoken 主题填充 SensoryFrame
+- [x] AwarenessCortex 订阅 body.homeostasis.battery_low / body.somato.device_change / body.vestibular.device_switch 主题
+- [x] BodyBus 与 SynapseBus 桥接：body.* 信号转发到 synapse 总线
+- [x] tools/desktop-visual-*.ts 改为通过 MotorCortex.registerTools 注册
+- [x] tools/embodiment-*.ts 改为通过 VestibularCortex.registerTools 注册
+- [x] tools/smart-home-*.ts 改为通过 SomatoCortex.registerTools 注册
+- [x] tools/phone-bridge-*.ts 按 action 拆分到 VocalCortex 与 AuditoryCortex
+- [x] tools/agent-voice-*.ts 改为通过 VocalCortex.registerTools 注册
+- [x] tools/device-*.ts 按设备 CapabilityId 路由到对应 BodyModule
+- [x] capability-modules/agent-browser、file-doc、code-sandbox 改为通过 MotorCortex.registerTools 注册
+- [x] ToolRegistry 改造为薄路由层：tool name → BodyModule 映射 + fallback
+- [x] GET /body/state 返回全部身体模块状态快照
+- [x] GET /body/where_am_i 返回当前具身位置（设备/3D 坐标/mood）
+- [x] GET /body/modules 返回所有 BodyModule 及其工具清单
+- [x] POST /body/act 注入 BodyAction 走完整反射+执行流水线
+- [x] POST /body/reflex/patterns 热加载新危险模式
+- [x] body.where_am_i / body.state / body.list_modules / body.calibrate 四个 LLM 工具 schema 注册到 getBuiltinAgentChatTools
+- [x] create-app-services.ts 实例化 8 个 BodyModule + BodyCenter 并注入现有服务
+- [x] BODY_CENTER_ENABLED=0 环境变量降级开关生效（关闭时 BrainCenter fallback 到 ToolRegistry 直连）
+- [x] 启动日志输出各 BodyModule 注册状态（工具数 / 子系统在线状态）
+- [x] 单次 BodyGateway 路由开销 < 5ms（不含实际工具执行耗时）
+- [x] ReflexArc 命中 rm -rf / format / shutdown 时直接返回 { ok:false, refused:true }，不调用 LLM
+- [x] BrainCenter.snapshot 包含 body state 字段（电量/位置/当前设备/mood）

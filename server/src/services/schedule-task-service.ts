@@ -4,6 +4,8 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { isIP } from "net";
 import { dirname, join } from "path";
 
+import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
+
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
 export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_task";
 export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled";
@@ -182,17 +184,27 @@ export class ScheduleTaskService {
   ): ScheduleTaskRecord[] {
     const now = Date.now();
     const from = range?.from ? new Date(range.from).getTime() : now;
-    const to = range?.to ? new Date(range.to).getTime() : Number.POSITIVE_INFINITY;
+    const hasExplicitTo = !!range?.to;
+    // 非周期任务沿用原行为：未给 to → +∞（列出所有未来单次任务）
+    const toForSingle = hasExplicitTo ? new Date(range!.to!).getTime() : Number.POSITIVE_INFINITY;
+    // 周期任务展开需要有限上界，避免 expandTaskOccurrenceTimes 无限循环；未指定时默认查 7 天
+    const toForRecurring = hasExplicitTo
+      ? new Date(range!.to!).getTime()
+      : now + 7 * 24 * 60 * 60 * 1000;
     return Array.from(this.byTaskId.values())
       .filter((task) => task.sessionId === sessionId)
       .filter((task) => {
         if (task.status === "cancelled") return false;
+        // 周期任务（daily/weekly/yearly）：用展开器检查区间内是否有任何实例
+        if (task.recurrence !== "none") {
+          return taskHasOccurrenceInRange(task, from, toForRecurring);
+        }
         const relevantAt =
           task.status === "completed"
             ? task.lastRunAt ?? task.runAt
             : (task.nextRunAt ?? task.runAt);
         const relevantTime = new Date(relevantAt).getTime();
-        return Number.isFinite(relevantTime) && relevantTime >= from && relevantTime <= to;
+        return Number.isFinite(relevantTime) && relevantTime >= from && relevantTime <= toForSingle;
       })
       .sort((a, b) =>
         (a.status === "completed" ? (a.lastRunAt ?? a.runAt) : (a.nextRunAt ?? a.runAt)).localeCompare(
@@ -447,6 +459,7 @@ export class ScheduleTaskService {
       },
       body:
         method === "GET" || method === "DELETE" ? undefined : JSON.stringify(task.action.body ?? {}),
+      signal: AbortSignal.timeout(30_000),
     });
     const text = await res.text();
     if (!res.ok) {

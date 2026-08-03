@@ -328,6 +328,23 @@ export class DailyDigestService {
     this.schedulePersist();
   }
 
+  /**
+   * 立即归档"今天"的 digest 到 narrativeMemory，绕过 tickArchive 的时间窗检查。
+   *
+   * 缺口 4 修复：原 triggerDailyArchive 通过反射调 tickArchive，
+   * 但 tickArchive 内部有 `hour === 0 && minute < 5` 限制，
+   * 导致 23:00 触发时归档无效。此方法供 nightly 服务在 runDreamPhase 之前调用，
+   * 确保 dreaming 阶段能看到当天的对话归档。
+   */
+  async archiveDayForTodayImmediately(): Promise<void> {
+    if (!this.config.digestEnabled) return;
+    const today = getCalendarDay();
+    console.log(`[DailyDigest] archiveDayForTodayImmediately: 归档 ${today} 的 digest（绕过时间窗）`);
+    await this.archiveDayForAllActors(today);
+    // 标记今天已归档，避免 00:00 时重复归档（但 00:00 时 yesterday 已是新一天，会归档昨天）
+    this.lastArchiveDay = today;
+  }
+
   private async archiveRecord(rec: DigestRecord): Promise<void> {
     if (!this.narrativeMemory) return;
     const header = `Daily digest ${rec.day} | ${rec.turnCount} turns`;

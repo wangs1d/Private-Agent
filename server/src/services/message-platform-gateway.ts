@@ -96,6 +96,7 @@ export class MessagePlatformGateway {
         conversationId: input.conversationId,
         replyToMessageId: input.replyToMessageId,
       }),
+      signal: AbortSignal.timeout(15_000),
     });
 
     let payload: Record<string, unknown> | null = null;

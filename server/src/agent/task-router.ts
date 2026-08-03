@@ -3,13 +3,7 @@ import { isExplicitPhoneCallRequest } from "./phone-call-intent.js";
 import { isPlanExecuteLoopEnabled, shouldUsePlanExecuteLoop } from "./plan-execute-loop.js";
 import { isSimpleDirectTask, shouldSkipNarrativeRecall } from "./simple-task.js";
 
-export type LlmExecutionMode =
-  | "fast_chat"
-  | "master_only"
-  | "master_delegate"
-  | "plan_execute"
-  | "direct_llm"
-  | "state_machine";
+export type LlmExecutionMode = "fast" | "complex";
 
 export type RouteDecision = {
   mode: LlmExecutionMode;
@@ -25,13 +19,14 @@ const DELEGATE_KEYWORDS = [
   /截图|录屏|操作.*app|操作.*软件/,
   /代码|编程|debug|调试|脚本|自动化|rpa|爬虫|批量.*处理/,
   /部署|服务器|运维|docker|容器|云服务/,
-  /数据库|sql|mongodb|redis|api.*调试/,
-  /搜索.*多个|对比.*商品|比价|调研|深度.*搜/,
+  /数据库.*(调试|迁移|部署|连接|优化|配置|备份)|调试.*数据库|sql.*调试|mongodb.*部署|redis.*配置|api.*调试/,
+  /搜索.*\d+|搜索.*多个|搜索.*几个|对比.*商品|对比.*价格|对比.*结果|比价|调研|深度.*搜/,
   /监控.*价格|批量.*查询/,
   /写.*文案|写.*策划|写.*方案|写.*故事|写.*文章/,
   /做ppt|制作.*演示|演示文稿/,
   /营销.*文案|广告.*语|社媒.*内容|品牌.*故事/,
   /翻译.*文章|润色.*文章/,
+  /生成.*报告|输出.*报告|汇总.*报告/,
   /第一步.*第二步|先.*再.*然后/,
 ];
 
@@ -83,11 +78,44 @@ const STATE_MACHINE_KEYWORDS = [
   /(点击|输入|按键|截图).*(按钮|框|输入框|搜索框|坐标|位置)/i,
 ];
 
+/**
+ * 自我进化相关关键词：用户说"自我进化"/"扫描新版本"/"升级依赖"/"沙箱测试"等时
+ * 必须路由到 complex（因为需要 LLM 评估 + 沙箱真实执行，是多步异步任务）。
+ *
+ * 注：这些是 Agent 触发自我驱动进化管线的入口，命中后 Agent 会调
+ * self_evolution.trigger_tech_scan / check_dependencies 工具。
+ */
+const SELF_EVOLUTION_KEYWORDS = [
+  /自我进化|自主进化|自我升级|自进化/i,
+  /扫描.*新版本|检查.*更新|检查.*升级|扫描.*依赖|扫描.*技术/i,
+  /升级.*依赖|升级.*包|升级.*sdk|升级.*sdk/i,
+  /沙箱.*测试|沙箱.*升级|sandbox.*test|沙箱.*运行/i,
+  /应用.*自我.?升级|触发.*自我.?升级|执行.*自我.?升级/i,
+  /self.?evolution|self.?upgrade|self.?driven/i,
+  /进化.*提案|进化.*管线|进化.*状态|查看.*提案/i,
+];
+
 /** 判断是否应走状态机模式(桌面自动化任务) */
 function shouldUseStateMachineMode(message: string): boolean {
   const text = message.trim();
   if (!text) return false;
   for (const pattern of STATE_MACHINE_KEYWORDS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
+/**
+ * 判断是否触发自我进化管线（必须 complex）
+ * 命中后路由到 complex，由 PlanExecuteLoopStrategy 编排多步工具调用：
+ *   1. self_evolution.trigger_tech_scan 触发技术扫描 + LLM 评估
+ *   2. self_evolution.list_proposals 查看提案
+ *   3. self_evolution.execute_proposal 执行沙箱测试
+ */
+function shouldUseSelfEvolutionPipeline(message: string): boolean {
+  const text = message.trim();
+  if (!text) return false;
+  for (const pattern of SELF_EVOLUTION_KEYWORDS) {
     if (pattern.test(text)) return true;
   }
   return false;
@@ -128,10 +156,42 @@ export type RouteLlmExecutionOptions = {
   preferFullPipeline?: boolean;
 };
 
+/**
+ * 时效性实体检测：用户消息含"最新/最近/版本号/新发布"等时效信号时,
+ * 直接判 complex,避免 fast 凭印象答后检测 hedging 再升级(省一次重复 LLM 调用)。
+ * 排除明显闲聊("今天天气真好"/"现在几点"由简单工具处理)。
+ */
+const TIME_SENSITIVITY_RE =
+  /最新|最近|新出的|新出|刚出|刚发布|今年|去年|上周|本周|这周|这个月|上个月/i;
+const VERSION_SIGNAL_RE =
+  /kimi\s*3|gpt[-\s]*5|claude[-\s]*4|iphone\s*17|macbook\s*m\d|新版|最新款|旗舰款|20\d{2}/i;
+const SIMPLE_CHAT_OVERRIDE_RE = /几点|天气怎么样|天气如何|今日天气|今天.*天气|天气.*今天/;
+
+function hasTimeSensitiveIntent(text: string): boolean {
+  if (SIMPLE_CHAT_OVERRIDE_RE.test(text)) return false;
+  return TIME_SENSITIVITY_RE.test(text) || VERSION_SIGNAL_RE.test(text);
+}
+
+/**
+ * 判断是否为桌面自动化任务(用于 complex 分支区分后台 vs 同步)。
+ * 导出供 agent-core 复用,避免重复调 shouldUseStateMachineMode。
+ */
+export function isDesktopAutomationTask(text: string): boolean {
+  return shouldUseStateMachineMode(text);
+}
+
+/**
+ * 双模式路由：Fast（前台秒回 + 垫词 + 轻工具）vs Complex（后台并行 + 子 Agent 委派）。
+ *
+ * 映射规则：
+ *  - 旧 fast_chat / direct_llm / master_only / cognize 直返 → fast
+ *  - 旧 master_delegate / plan_execute / state_machine → complex
+ *  - complex 时 Fast 仍并行运行（垫词 + 即时反馈），Complex 在后台执行
+ */
 export function routeLlmExecution(
   message: string,
   config: AgentRuntimeConfig = getAgentRuntimeConfig(),
-  options?: RouteLlmExecutionOptions,
+  _options?: RouteLlmExecutionOptions,
 ): RouteDecision {
   const text = message.trim();
   const reasons: string[] = [];
@@ -139,55 +199,38 @@ export function routeLlmExecution(
   if (config.masterDelegation.enabled) {
     if (isExplicitPhoneCallRequest(text)) {
       reasons.push("explicit_phone_call_request");
-      return { mode: "master_only", reasons };
+      return { mode: "fast", reasons };
     }
 
-    if (!options?.preferFullPipeline && shouldUseFastChatLane(text)) {
-      reasons.push("fast_chat_lane");
-      return { mode: "fast_chat", reasons };
-    }
-
-    // 桌面自动化任务优先走状态机模式(外部任务队列+状态机编排,不靠 LLM 自主工具循环)
+    // 桌面自动化任务 → complex
     if (shouldUseStateMachineMode(text)) {
-      reasons.push("desktop_automation_state_machine");
-      return { mode: "state_machine", reasons };
+      reasons.push("desktop_automation");
+      return { mode: "complex", reasons };
     }
 
-    if (isSimpleDirectTask(text)) {
-      reasons.push("simple_direct_task");
-      return { mode: "master_only", reasons };
-    }
-
-    // 本地可执行代码任务（"用 Python 算一下" / "计算一下" / "运行代码"）
-    // 直接走 direct_llm + code.run，避免 master agent 派子 agent 拖慢 TTFT。
-    // 仅当不是开发型任务（写/实现/调试/部署）时命中。
-    if (LOCAL_CODE_TASK_RE.test(text) && !DEV_WORK_RE.test(text)) {
-      reasons.push("local_code_task_direct");
-      return { mode: "direct_llm", reasons };
-    }
-
-    // 长任务(需多步骤/委派能力)走状态机模式:
-    // 外部状态机驱动多轮工具调用 + 持久化进度 + 断点续跑,
-    // 替代 master_delegate 的 LLM 自主工具循环。
-    // orchestrator 不可用时由 agent-core fallback 到 master_delegate。
+    // 需要委派子 Agent 的任务 → complex
     if (requiresSubAgent(text)) {
-      reasons.push("long_task_state_machine");
-      return { mode: "state_machine", reasons };
+      reasons.push("requires_sub_agent");
+      return { mode: "complex", reasons };
     }
 
-    reasons.push("master_tries_first");
-    return { mode: "master_only", reasons };
+    // 时效性实体前置：含"最新/最近/版本号"等 → 直接 complex(避免 fast 凭印象答后升级)
+    if (hasTimeSensitiveIntent(text)) {
+      reasons.push("time_sensitive_intent");
+      return { mode: "complex", reasons };
+    }
+
+    // 其余全部走 fast（含简单工具、寒暄、追问、本地代码任务）
+    reasons.push("fast_lane");
+    return { mode: "fast", reasons };
   }
 
+  // masterDelegation 未启用时，多步任务走 complex
   if (shouldUsePlanExecuteLoop(text)) {
     reasons.push("plan_execute_heuristic");
-    return { mode: "plan_execute", reasons };
+    return { mode: "complex", reasons };
   }
 
-  if (isPlanExecuteLoopEnabled() && !isSimpleDirectTask(text)) {
-    reasons.push("plan_execute_available_but_skipped");
-  }
-
-  reasons.push("default_direct_llm");
-  return { mode: "direct_llm", reasons };
+  reasons.push("default_fast");
+  return { mode: "fast", reasons };
 }

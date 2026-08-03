@@ -19,6 +19,19 @@ export function parseSkillPromotionPipelineMode(): SkillPromotionPipelineMode {
 }
 
 /**
+ * Skill 装载成功后的通知回调。
+ *
+ * 由 bootstrap 阶段注入实现，负责把自我进化生成的新能力同步到：
+ *  - CapabilityCortex（让 agent.query_capabilities 可见）
+ *  - 动态 fastLane 名单（若 Skill 标记为 fast_lane，让 Fast 模式可收编）
+ *  - builtin / fastLane 工具缓存清除（确保下次请求看到新能力）
+ */
+export type OnSkillPromotedCallback = (params: {
+  metadata: SkillMetadata;
+  skillName: string;
+}) => void;
+
+/**
  * `TrajectorySkillPromotionService` 在写出 `*.skill-draft.json` 后调用本类：
  * — `validate_sync`：同步写 `*.skill-draft.validation.json`；
  * — `queue`：投递 `SkillPromotionQueueService`。
@@ -28,6 +41,12 @@ export class TrajectoryPromotionPipeline {
     private readonly mode: SkillPromotionPipelineMode,
     private readonly validateDeps: Pick<HttpRouteDepsLike, "skillManager" | "skillMetadataValidator">,
     private readonly queue: SkillPromotionQueueService | null,
+    /**
+     * Skill 装载成功后的通知回调（自我进化能力与工具收编结合的关键钩子）。
+     * 装载成功后触发，把新 Skill 的 metadata + skillName 传给调用方，
+     * 由调用方决定如何同步到 CapabilityCortex / 动态 fastLane / 缓存。
+     */
+    private readonly onSkillPromoted?: OnSkillPromotedCallback,
   ) {}
 
   getMode(): SkillPromotionPipelineMode {
@@ -100,6 +119,22 @@ export class TrajectoryPromotionPipeline {
 
     if (!result.ok) {
       return { ok: false, error: result.error ?? "未知错误" };
+    }
+
+    // 装载成功后触发通知回调：同步 CapabilityCortex + 动态 fastLane + 缓存清除
+    // 回调失败不影响装载结果（fire-and-forget，错误静默吞掉）
+    if (this.onSkillPromoted) {
+      try {
+        this.onSkillPromoted({
+          metadata: skill.metadata,
+          skillName: result.skillName!,
+        });
+      } catch (e) {
+        console.warn(
+          `[TrajectoryPromotionPipeline] onSkillPromoted 回调失败（不影响装载）:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
     }
 
     console.log(

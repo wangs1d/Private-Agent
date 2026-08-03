@@ -1,6 +1,12 @@
 import { loadServerEnv } from "./config/load-server-env.js";
+import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
 import { getRuntimeConfig } from "./config/env.js";
+
+// ─── 全局 HTTP Agent 配置：必须在第一次 fetch 之前执行 ───
+// 配置 undici 连接池 / keepAlive / strictContentLength=false，
+// 从根源上减少 undici Parser 在 socket 异常关闭时抛出 AssertionError 的频率。
+setupGlobalHttpAgent();
 import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
@@ -21,10 +27,53 @@ import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
 // ─── 提前声明 shutdown（避免 uncaughtException 触发时遇到 const 暂时性死区） ───
 let shutdown: (() => void) | null = null;
 
+// ─── BrainCenter 引用（services 装配完成后赋值，让 process 监听器能转发 bug 信号） ───
+// 装配完成前的异常不会转发（services 还没建好，没有 CodeRepairCortex 可用）
+let brainCenterRef: import("./brain/brain-center.js").BrainCenter | null = null;
+
 // ─── 全局异常处理：防止未捕获异常导致进程意外崩溃 ───
+// 若 CodeRepairCortex 已启用（BRAIN_CODE_REPAIR_ENABLED=1），会把异常作为 BugSignal 转发，
+// 触发自动修复闭环。转发失败不影响原有的 shutdown 流程。
+
+// 判定是否为 undici HTTP parser 在 socket 异常关闭时抛出的良性断言错误。
+// 这类错误源自 node:internal/deps/undici 的 Parser.finish / onHttpSocketEnd，
+// 属于网络层偶发问题（对端在响应未完成时 RST 或 FIN），与业务逻辑无关，
+// 且从 socket 事件回调同步抛出、无法被业务 try/catch 捕获。
+// 若让这类错误触发 shutdown，会因一次外部网络抖动拖垮整个后端。
+function isBenignUndiciParserError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const stack = err.stack ?? "";
+  if (!stack.includes("node:internal/deps/undici")) return false;
+  // 典型特征：AssertionError [ERR_ASSERTION]: false == true
+  // 或 stack 中出现 Parser.finish / onHttpSocketEnd
+  return (
+    err.name === "AssertionError" ||
+    stack.includes("Parser.finish") ||
+    stack.includes("onHttpSocketEnd")
+  );
+}
+
 process.on("uncaughtException", (err: Error) => {
+  // undici parser 的良性断言错误：仅记录警告，不退出进程，不触发 shutdown
+  if (isBenignUndiciParserError(err)) {
+    console.warn(
+      "[WARN] swallowed benign undici parser error (socket closed mid-response):",
+      err.message,
+    );
+    return;
+  }
   console.error("[FATAL] uncaughtException:", err.message || err);
   console.error(err.stack || "(no stack)");
+  // 转发给 CodeRepairCortex（fire-and-forget，不阻塞 shutdown）
+  if (brainCenterRef) {
+    void brainCenterRef.reportBug({
+      source: "uncaught_exception",
+      title: err.message?.slice(0, 100) || "uncaughtException",
+      errorMessage: `${err.message ?? ""}\n${err.stack ?? ""}`,
+    }).catch(() => {
+      // 转发失败静默吞掉，不阻塞 shutdown
+    });
+  }
   // 记录错误后优雅退出，让外部进程管理器（如 node --watch / pm2）决定是否重启
   shutdown?.();
   setTimeout(() => process.exit(1), 2000).unref();
@@ -32,7 +81,18 @@ process.on("uncaughtException", (err: Error) => {
 
 process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) => {
   const msg = reason instanceof Error ? reason.message : String(reason ?? "unknown");
+  const stack = reason instanceof Error ? reason.stack ?? "" : "";
   console.error("[WARN] unhandledRejection:", msg);
+  // 转发给 CodeRepairCortex：unhandledRejection 不退出进程，可作为修复信号
+  if (brainCenterRef) {
+    void brainCenterRef.reportBug({
+      source: "unhandled_rejection",
+      title: msg.slice(0, 100),
+      errorMessage: `${msg}\n${stack}`,
+    }).catch(() => {
+      // 转发失败静默吞掉
+    });
+  }
   // 不退出进程，仅记录警告；如果是严重错误会触发后续的 uncaughtException
 });
 
@@ -57,6 +117,8 @@ const stopFunasrEarly = startFunasrServer({
 });
 const services = await createAppServices();
 await initializeRuntimeState(services);
+// 把 BrainCenter 引用挂到 process 监听器，让后续异常能转发给 CodeRepairCortex
+brainCenterRef = services.brainCenter;
 try {
   await services.app.listen({
     port: runtime.port,

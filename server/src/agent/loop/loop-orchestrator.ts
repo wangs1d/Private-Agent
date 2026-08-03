@@ -37,6 +37,16 @@ export interface OrchestratorResult {
   modelCalls: number;
   /** 发生过的 loop 升级事件 */
   loopSwitches: SharedTaskContext["loopSwitches"];
+  /**
+   * 反思环节是否耗尽 replan 次数（激活原 PlanExecuteLoopResult.exhaustedRetries 语义）。
+   * true 表示 replan 达上限仍未 onTrack，或预算耗尽。
+   */
+  exhaustedRetries: boolean;
+  /**
+   * 最近一次 ProgressTracker 评估的反思文本（激活原 PlanExecuteLoopResult.verifyReflection 语义）。
+   * 取 ctx.reflections 中最近一条非 "replan:" 标记的 body；无评估时为空串。
+   */
+  verifyReflection: string;
 }
 
 export interface LoopOrchestratorOptions {
@@ -200,7 +210,7 @@ export class LoopOrchestrator {
       });
 
       // 10. replan 决策（P4：两者结合，最多 maxReplans 次）
-      if (assessment.recommendation === "replan" && mode === "plan_execute") {
+      if (assessment.recommendation === "replan" && mode === "complex") {
         if (ctx.replanCount < this.maxReplans) {
           ctx.replanCount += 1;
           // 写 "replan:" 标记，strategy 下一轮检测到后构造 replan prompt
@@ -243,6 +253,19 @@ export class LoopOrchestrator {
       terminateReason = "no_iteration";
     }
 
+    // 激活反思字段：exhaustedRetries 来自 replan_exhausted / budget_exhausted；
+    // verifyReflection 取最近一条非 "replan:" 标记的评估反馈（无则为空串）。
+    const exhaustedRetries =
+      terminateReason === "replan_exhausted" || terminateReason === "budget_exhausted";
+    let verifyReflection = "";
+    for (let i = ctx.reflections.length - 1; i >= 0; i--) {
+      const r = ctx.reflections[i];
+      if (!r.body.startsWith("replan:")) {
+        verifyReflection = r.body;
+        break;
+      }
+    }
+
     return {
       finalText,
       finished: terminateReason === "goal_met",
@@ -250,12 +273,14 @@ export class LoopOrchestrator {
       ctx,
       modelCalls: ctx.budget.modelCallsUsed,
       loopSwitches: ctx.loopSwitches,
+      exhaustedRetries,
+      verifyReflection,
     };
   }
 
   /** 单向升级校验：只允许向更强 loop 升级，禁止回退以防抖动。 */
   private canEscalate(from: LlmExecutionMode, to: LlmExecutionMode): boolean {
-    const order: LlmExecutionMode[] = ["fast_chat", "direct_llm", "plan_execute", "state_machine"];
+    const order: LlmExecutionMode[] = ["fast", "complex"];
     const fromIdx = order.indexOf(from);
     const toIdx = order.indexOf(to);
     return toIdx > fromIdx;

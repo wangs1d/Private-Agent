@@ -1,6 +1,6 @@
 // Agent Brain Center — 能力皮层（CapabilityCortex）
 // 维护 Agent 能力域注册表，提供自省 / 缺口识别 / 占位扩展能力。
-// 规则驱动，不调用任何 LLM。
+// identifyGap 支持 LLM 语义分析（注入 GapAnalyzer 时），规则兜底（SCENARIO_KEYWORD_MAP）。
 
 import type {
   CapabilityDescriptor,
@@ -24,6 +24,57 @@ export type CapabilityExpansionProposal = {
   source?: "builtin" | "skill" | "dynamic";
   rationale?: string;
 };
+
+/**
+ * LLM 能力缺口分析结果（结构化）。
+ * 替代原 SCENARIO_KEYWORD_MAP 硬编码的关键词匹配，做语义级分析。
+ */
+export interface GapAnalysisResult {
+  /** 识别到的能力缺口列表 */
+  gaps: Array<{
+    /** 场景描述 */
+    scenario: string;
+    /** 缺失的能力域标识，如 "travel_planning" / "code_sandbox" */
+    missingCapability: string;
+    /** 建议的补救动作，如 "走 self-programming 生成" / "接入第三方工具" */
+    suggestedAction: string;
+  }>;
+  /** 整体分析理由（可选） */
+  rationale?: string;
+}
+
+/**
+ * 能力缺口分析器（LLM 驱动）。
+ *
+ * 替代原 SCENARIO_KEYWORD_MAP 硬编码场景匹配，做语义级分析：
+ * LLM 分析最近的工具失败记录和用户请求，识别能力缺口。
+ * 未注册时 identifyGap 回退到 SCENARIO_KEYWORD_MAP 关键词匹配。
+ */
+export interface GapAnalyzer {
+  analyze(params: {
+    /** 场景描述 / 用户请求文本 */
+    scenario: string;
+    /** 最近的工具失败记录（可选，由调用方提供或实现方自行拉取） */
+    recentFailures?: Array<{
+      tool: string;
+      errorMessage?: string;
+      userRequest?: string;
+    }>;
+    /** 当前已注册的能力域列表，供 LLM 判断哪些已就绪、哪些缺失 */
+    existingDomains: string[];
+  }): Promise<GapAnalysisResult>;
+}
+
+/**
+ * 检查是否启用 identifyGap 的 LLM 化（语义分析）。
+ * - "0" / "false" / "off"（不区分大小写）→ 返回 false（关闭 LLM 化，回退到 SCENARIO_KEYWORD_MAP 规则匹配）
+ * - 其他（含未设置）→ 返回 true（启用 LLM 化，优先用 GapAnalyzer 语义分析）
+ */
+function isIdentifyGapLlmEnabled(): boolean {
+  const raw = process.env.BRAIN_LLM_IDENTIFYGAP_ENABLED?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off") return false;
+  return true;
+}
 
 /**
  * 场景关键词 → 期望能力域映射。
@@ -89,6 +140,74 @@ const EXPANDABLE_DOMAINS = new Set<string>([
 ]);
 
 /**
+ * 能力域 → 工具名匹配规则。
+ *
+ * - 字符串以 `.` 结尾：前缀匹配（如 `phone.` 命中 phone.call_user / phone_bridge.ring）
+ * - 字符串不含 `.`：精确匹配（如 `agent.register_account`）
+ * - 字符串含 `.` 但不以 `.` 结尾：精确匹配（如 `agent.send_to_peer`）
+ *
+ * 用途：bootstrap 阶段调用 {@link CapabilityCortex.attachToolNames}，
+ * 把 ToolRegistry 中已注册的真实工具名按 domain 归类填到 descriptor.tools，
+ * 让 brain.list_capabilities 返回的工具名对 LLM 可见。
+ *
+ * 注意 social_feed / social_outreach 工具名前缀相同（`social.`），靠精确名区分：
+ *   - social_feed 走 `world.social.*`（前缀 `world.social.`）
+ *   - social_outreach 走无 `world.` 前缀的 `social.post / social.comment / ...`
+ */
+const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
+  wallet: ["wallet."],
+  agent_link: ["agent.link.", "agent.send_to_peer"],
+  calendar: ["calendar.", "reminder."],
+  weather: ["weather."],
+  sub_agent: ["master."],
+  aip: ["aip."],
+  vision: ["vision."],
+  desktop: ["desktop.", "browser.session.", "browser.fetch_page"],
+  web: ["search_web", "fetch_web", "info."],
+  life_assistant: ["budget.", "shopping.suggest"],
+  voice: ["voice."],
+  phone: ["phone.", "phone_bridge."],
+  // entertainment 暂无对应工具
+  social_feed: ["world.social."],
+  self_programming: ["self."],
+  agent_account: ["agent.register_account"],
+  world: ["world."],
+  embodiment: ["embodiment."],
+  smart_home: ["smart_home."],
+  notes: ["notes."],
+  image_gen: ["image."],
+  file_doc: ["file."],
+  email_sms: ["email.", "sms."],
+  media_music: ["media."],
+  health_fitness: ["health."],
+  finance_deep: ["finance."],
+  // 外部社交平台：精确匹配 6 个工具名（不带 world. 前缀，避免与 social_feed 冲突）
+  social_outreach: [
+    "social.post",
+    "social.comment",
+    "social.repost",
+    "social.like",
+    "social.get_feed",
+    "social.search_posts",
+  ],
+  code_sandbox: ["code."],
+  shopping_order: ["shopping.order."],
+  agent_browser: ["agent_browser."],
+};
+
+/** 判断工具名是否被某个 pattern 命中 */
+function matchToolName(toolName: string, patterns: string[]): boolean {
+  for (const p of patterns) {
+    if (p.endsWith(".")) {
+      if (toolName.startsWith(p)) return true;
+    } else if (toolName === p) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * 能力皮层 —— 维护 Agent 能力域注册表。
  *
  * - 启动时把 agent-capabilities.ts 的 CAPABILITY_DOMAINS / DOMAIN_LABELS
@@ -100,6 +219,8 @@ const EXPANDABLE_DOMAINS = new Set<string>([
 export class CapabilityCortex {
   /** 能力域 → 描述符 */
   private registry = new Map<string, CapabilityDescriptor>();
+  /** 能力缺口分析器（LLM 驱动）：替代 SCENARIO_KEYWORD_MAP 硬编码做语义级分析 */
+  private gapAnalyzer: GapAnalyzer | null = null;
 
   private started = false;
 
@@ -126,6 +247,78 @@ export class CapabilityCortex {
     this.started = false;
     console.log("[CapabilityCortex] 已停止");
   }
+
+  /**
+   * 注册能力缺口分析器（LLM 驱动）。
+   *
+   * 注入后 identifyGap 优先用 LLM 语义分析场景文本 + 工具失败记录，
+   * 替代原 SCENARIO_KEYWORD_MAP 硬编码关键词匹配。
+   * 未注入或 LLM 失败时回退到 identifyGapByRule 规则匹配。
+   */
+  registerGapAnalyzer(analyzer: GapAnalyzer): void {
+    this.gapAnalyzer = analyzer;
+    console.log("[CapabilityCortex] 已注册 GapAnalyzer（LLM 能力缺口分析）");
+  }
+
+  /**
+   * 把 ToolRegistry 中已注册的真实工具名按 {@link DOMAIN_TOOL_PATTERNS}
+   * 归类填充到对应 domain 的 descriptor.tools。
+   *
+   * 在 bootstrap 完成所有 registerXxxTools 之后调用一次，确保
+   * `brain.list_capabilities` / `introspect` 返回的工具名是真实可调用的。
+   *
+   * 副作用：覆盖 registry 中已注册的 descriptor.tools 字段；
+   * 未匹配到任何工具的 domain 仍保持空数组（不会创建新 domain）。
+   *
+   * @param allToolNames ToolRegistry.list() 返回的全部工具名
+   */
+  attachToolNames(allToolNames: string[]): void {
+    let touched = 0;
+    // 先处理静态 DOMAIN_TOOL_PATTERNS（核心域）
+    for (const [domain, patterns] of Object.entries(DOMAIN_TOOL_PATTERNS)) {
+      const existing = this.registry.get(domain);
+      if (!existing) continue;
+      const matched = allToolNames.filter((name) => matchToolName(name, patterns));
+      this.registry.set(domain, {
+        ...existing,
+        tools: matched,
+      });
+      if (matched.length > 0) touched++;
+    }
+    // 再处理动态注册的 domain → toolNames（capability-modules 等通过 registerDomainToolNames 注入）
+    for (const [domain, toolNames] of this._dynamicDomainTools) {
+      const existing = this.registry.get(domain);
+      if (!existing) continue;
+      // 与 allToolNames 取交集，确保只填入实际已注册的工具
+      const allSet = new Set(allToolNames);
+      const matched = toolNames.filter((n) => allSet.has(n));
+      this.registry.set(domain, {
+        ...existing,
+        tools: matched,
+      });
+      if (matched.length > 0) touched++;
+    }
+    console.log(
+      `[CapabilityCortex] attachToolNames 完成：${touched} 个 domain 已填充工具名，共 ${allToolNames.length} 个工具名参与匹配`,
+    );
+  }
+
+  /**
+   * 动态注册 domain → 工具名映射。
+   *
+   * 用于 capability-modules 等动态能力源：bootstrap 遍历 buildCapabilityModules 结果，
+   * 把每个 module 的 chatTools 工具名按 domain 注入。
+   *
+   * 与 {@link attachToolNames} 配合：attachToolNames 会把这些工具名与
+   * ToolRegistry 实际已注册的工具取交集后填入 descriptor.tools。
+   *
+   * 新增 capability-module 时只需在 buildCapabilityModules 加 entry，
+   * 不需要改 DOMAIN_TOOL_PATTERNS。
+   */
+  registerDomainToolNames(domain: string, toolNames: string[]): void {
+    this._dynamicDomainTools.set(domain, toolNames);
+  }
+  private _dynamicDomainTools = new Map<string, string[]>();
 
   // ---- CapabilityCortexLike 契约 ----------------------------------------
 
@@ -171,13 +364,80 @@ export class CapabilityCortex {
   }
 
   /**
-   * 识别能力缺口（规则驱动，无 LLM）。
+   * 识别能力缺口（LLM 语义分析 + 规则兜底）。
+   *
+   * LLM 化策略：
+   *  - 启用且 GapAnalyzer 已注册 → 调 LLM 分析场景文本 + 工具失败记录，
+   *    识别能力缺口，返回结构化 {gaps: [{scenario, missingCapability, suggestedAction}]}
+   *  - LLM 不可用/超时/降级开关关闭/未注入 GapAnalyzer → 回退到 identifyGapByRule 规则匹配
+   *
+   * 注意：identifyGap 不是热路径（由 EvolutionCortex 周期触发），可承受 LLM 调用成本。
+   */
+  async identifyGap(scenario: string): Promise<CapabilityGapReport> {
+    // 降级开关关闭 / GapAnalyzer 未注册 → 走规则兜底
+    if (!isIdentifyGapLlmEnabled() || !this.gapAnalyzer) {
+      return this.identifyGapByRule(scenario);
+    }
+
+    try {
+      const result = await this.gapAnalyzer.analyze({
+        scenario,
+        existingDomains: Array.from(this.registry.keys()),
+      });
+
+      // 把 LLM 结构化结果映射到 CapabilityGapReport（向后兼容）
+      const allDomains = result.gaps.map((g) => g.missingCapability);
+      const missingDomains = allDomains.filter((d) => !this.registry.has(d));
+      const relatedExisting = allDomains.filter((d) => this.registry.has(d));
+      const expandable = missingDomains.some((d) => EXPANDABLE_DOMAINS.has(d));
+
+      const rationaleParts: string[] = [];
+      if (result.rationale) {
+        rationaleParts.push(result.rationale);
+      }
+      if (result.gaps.length === 0) {
+        rationaleParts.push("LLM 分析未识别到能力缺口。");
+      } else {
+        for (const g of result.gaps) {
+          rationaleParts.push(`${g.scenario}: 缺 ${g.missingCapability}（${g.suggestedAction}）；`);
+        }
+        if (missingDomains.length > 0) {
+          rationaleParts.push(`缺失：${missingDomains.join("、")}。`);
+        }
+        if (relatedExisting.length > 0) {
+          rationaleParts.push(`已就绪可复用：${relatedExisting.join("、")}。`);
+        }
+        if (expandable) {
+          rationaleParts.push("缺失域属可扩展场景，可走 self-programming 流程生成。");
+        }
+      }
+
+      return {
+        scenario,
+        missingDomains,
+        relatedExisting,
+        expandable,
+        rationale: rationaleParts.join(""),
+        detectedAt: new Date().toISOString(),
+      };
+    } catch (err) {
+      console.log(
+        `[CapabilityCortex] identifyGap LLM 失败，回退规则: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.identifyGapByRule(scenario);
+    }
+  }
+
+  /**
+   * 规则驱动的能力缺口识别（规则兜底）。
    *
    * 策略：把 scenario 与 SCENARIO_KEYWORD_MAP 逐条匹配，
    * 命中则收集期望能力域，再与现有 registry 对比，
    * 缺失的进 missingDomains，已存在的进 relatedExisting。
+   *
+   * LLM 不可用/超时/降级开关关闭时由 identifyGap 回退调用。
    */
-  identifyGap(scenario: string): CapabilityGapReport {
+  private identifyGapByRule(scenario: string): CapabilityGapReport {
     const text = scenario.toLowerCase();
     const expected = new Set<string>();
 

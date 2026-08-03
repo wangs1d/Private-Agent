@@ -6,6 +6,11 @@ import "package:audioplayers/audioplayers.dart";
 import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
+/// Windows 上 audioplayers_windows_plugin 的 BytesSource 会触发 native
+/// 层 0xc0000005 access violation，Dart try-catch 无法捕获。
+/// 统一走临时文件 + DeviceFileSource 绕过。
+const bool _kWindowsSkipBytesSource = true;
+
 /// 后台 TTS 音频播放器。
 ///
 /// 用法：
@@ -80,8 +85,27 @@ class TtsPlayer {
       }
     });
 
+    // Windows 上 BytesSource 会触发 native 层 0xc0000005 access violation
+    // 直接走临时文件 + DeviceFileSource 绕过
+    if (_kWindowsSkipBytesSource) {
+      try {
+        final Directory dir = await getTemporaryDirectory();
+        final File f = File(
+          "${dir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3",
+        );
+        await f.writeAsBytes(bytes, flush: true);
+        _tempFile = f;
+        await player.play(DeviceFileSource(f.path));
+        return true;
+      } catch (e) {
+        debugPrint("[TtsPlayer] play failed: $e");
+        await _disposeCurrent(silent: true);
+        return false;
+      }
+    }
+
     try {
-      // 优先 BytesSource；某些 Windows 后端不支持则降级到临时文件
+      // 非 Windows 平台优先 BytesSource
       await player.play(BytesSource(bytes, mimeType: "audio/mpeg"));
       return true;
     } catch (e) {

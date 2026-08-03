@@ -89,6 +89,21 @@ export class AgentSelfLearningService {
   }
 
   /**
+   * 返回最近的交互学习记录（含 attemptedTools / errorMessage / success 等字段）。
+   *
+   * 供 EvolutionCortex.fromSelfLearningGap 识别能力缺口使用：
+   *  - 工具反复失败（>=3 次）→ optimize_existing 提案
+   *  - 无工具匹配+关键词反复（>=3 次）→ new_capability 提案
+   *
+   * AgentCore 工具调用回调通过 brainCenter.recordToolInteraction →
+   * EvolutionCortex.recordToolInteraction → 本方法填充数据源。
+   * 这是自我进化闭环的真正入口（打破摆设）。
+   */
+  getRecentRecords(): LearningRecord[] {
+    return this.recentRecords;
+  }
+
+  /**
    * 分析最近的交互记录，生成改进建议
    */
   async analyzeAndGenerateSuggestions(): Promise<ImprovementSuggestion[]> {

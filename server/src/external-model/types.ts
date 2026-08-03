@@ -78,6 +78,12 @@ export type AgentPromptMemoryContext = {
   relationshipMemory?: string;
   lifeThemeMemory?: string;
   dreamMemory?: string;
+  /**
+   * 主动跨天 recall：用「昨天的 userText」作为 query 跑一次 narrative recall，
+   * 让 LLM 即使当前话题与昨天无关也能看到昨天的关键事件。
+   * 解决「前天说后天要去玩，今天提及时 agent 能关联记忆」的连续性问题。
+   */
+  yesterdayHighlight?: string;
   /** 短句追问时锚定上一轮对话，避免跨话题串台 */
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
@@ -87,6 +93,24 @@ export type AgentPromptMemoryContext = {
    * 与对话历史中每条消息的 `[ts:...]` 前缀对应，供 LLM 做时间维度计算与对齐。
    */
   currentTime?: string;
+  /**
+   * 元认知评估结果：MetaCognitionCortex.assess() 的输出。
+   * 包含 uncertaintyMarkers / confidence / shouldReflect 等字段的可读摘要，
+   * 让 LLM 知道自己当前对哪些点不确定、是否应该先反思再答。
+   * 由 agent-core 从 brainCenter.metaCognition.assess() 拉取并格式化注入。
+   */
+  metaCognition?: string;
+  /**
+   * 当前情绪状态摘要：LimbicCortex/EmotionModulator 的 VAD 值可读化输出。
+   * 让 LLM 知道自己当前的情绪（如低落、兴奋、关注），影响回复语气。
+   * 由 agent-core 从 brainCenter.limbicCortex.getEmotion() 拉取并格式化注入。
+   */
+  emotionState?: string;
+  /**
+   * 工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围。
+   * complex 路由时注入，建议 LLM 按规划顺序调用工具，避免乱试或遗漏关键工具。
+   */
+  toolPlan?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -106,6 +130,7 @@ export type ToolExposureProfile =
 
 export type ToolRankingHint = {
   preferredNamespaces?: string[];
+  cautiousNamespaces?: string[];
 };
 
 /** {@link ExternalChatProvider.streamCompletion} 可选行为。 */
@@ -142,6 +167,24 @@ export type AgentStreamOptions = {
   toolRankingHint?: ToolRankingHint;
   /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
   pinnedToolNames?: string[];
+  /**
+   * RuntimeKernel minimal 模式控制位：true 时 provider 跳过身份/风格/时间戳说明类后缀追加，
+   * 但仍保留功能性后缀（工具说明/主 Agent 调度/用户可见进度/访问权限）。
+   * 配合 RuntimeKernel.buildSessionSystem() 实现"层 A 不进 prompt"。
+   */
+  suppressRuntimeSuffixes?: boolean;
+  /**
+   * 功能性后缀开关（仅 suppressRuntimeSuffixes=true 时生效）：
+   * - true/undefined（默认）：保留工具说明/主 Agent 调度/用户可见进度等功能性后缀
+   * - false：极致节省模式，所有功能性后缀也剥离（不推荐生产）
+   */
+  functionalSuffixes?: boolean;
+  /**
+   * 中断信号：用户发新消息或取消时,调用方 abort 此 signal,
+   * provider 底层 fetch/SDK 收到后真正中断 HTTP 流式请求(节省 tokens/算力)。
+   * 未传时无法中断(向后兼容)。
+   */
+  signal?: AbortSignal;
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */
@@ -166,11 +209,48 @@ export type ChatToolExecutionContext = {
     name: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
+  /** 查询工具缓存（命中则跳过 executeTool 的安全检查/BodyGateway 等中间层） */
+  getCachedToolResult?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => { ok: boolean; result: Record<string, unknown> } | null;
   /** 工具轮次中模型流式输出的口语化进度（不写入最终正文流） */
   onAgentStatusLine?: (line: string) => void;
   onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
   onToolExecuted?: (info: ToolExecutedInfo) => void;
 };
+
+/**
+ * 工具调用协议族。
+ *
+ * 让上层调用方能根据协议族选择正确的适配器，而非假设全部走 OpenAI 格式。
+ * - `openai`：OpenAI Chat Completions 的 tool_calls / tool_call_id 格式
+ * - `anthropic`：Anthropic Messages API 的 tool_use / tool_result block 格式
+ * - `gemini`：Gemini functionCall / functionResponse 格式
+ * - `custom`：自研协议（如世界模型原生 function-calling）
+ */
+export type ToolCallingProtocol = "openai" | "anthropic" | "gemini" | "custom";
+
+/**
+ * Provider 能力声明。
+ *
+ * 让上层调用方在不试探的前提下知道 provider 支持哪些特性，
+ * 用于"换大脑"时按能力路由（而非按模型名字符串）。
+ */
+export interface ProviderCapabilities {
+  /** 工具调用协议族，缺省 "openai"（向后兼容） */
+  toolCallingProtocol?: ToolCallingProtocol;
+  /** 是否支持并行工具调用（parallel_tool_calls） */
+  supportsParallelToolCalls?: boolean;
+  /** 是否支持视觉输入（vision frames） */
+  supportsVision?: boolean;
+  /** 最大上下文窗口（token 数），缺省 0 表示未知 */
+  maxContextTokens?: number;
+  /** 是否支持 reasoning / thinking 字段（如 Kimi k2.5+ disableThinking） */
+  supportsThinking?: boolean;
+  /** 是否支持流式输出 */
+  supportsStreaming?: boolean;
+}
 
 /**
  * 可插拔的外部聊天提供方（通常对应「云端 Chat Completions」类 API）。
@@ -181,6 +261,12 @@ export interface ExternalChatProvider {
   readonly id: string;
   /** 人类可读名称，用于错误提示等 */
   readonly displayLabel: string;
+
+  /**
+   * 能力声明：让上层按能力路由而非按模型名。
+   * 缺省（未实现 getter）时按 "openai" 协议处理（向后兼容）。
+   */
+  readonly capabilities?: ProviderCapabilities;
 
   isEnabled(): boolean;
 

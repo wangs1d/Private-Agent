@@ -98,6 +98,71 @@ html.embed-root #root {
   top: calc(100% - 60px);
 }
 
+/* ── 对话消息列表（追加渲染，替代单字段 caption） ── */
+.overlay-pet-pane .message-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 56px;
+  max-height: 55%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 4px 2px;
+  z-index: 5;
+  pointer-events: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(136, 187, 255, 0.3) transparent;
+}
+.overlay-pet-pane .message-list::-webkit-scrollbar {
+  width: 4px;
+}
+.overlay-pet-pane .message-list::-webkit-scrollbar-thumb {
+  background: rgba(136, 187, 255, 0.3);
+  border-radius: 2px;
+}
+.overlay-pet-pane .message-list__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.overlay-pet-pane .message {
+  font-size: 0.68rem;
+  line-height: 1.35;
+  padding: 4px 8px;
+  border-radius: 10px;
+  max-width: 92%;
+  word-break: break-word;
+  animation: msg-in 0.2s ease-out;
+}
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.overlay-pet-pane .message--agent {
+  background: rgba(8, 12, 20, 0.55);
+  border: 1px solid rgba(136, 187, 255, 0.12);
+  backdrop-filter: blur(8px);
+  color: #e8edf5;
+  align-self: flex-start;
+  border-bottom-left-radius: 3px;
+}
+.overlay-pet-pane .message--user {
+  background: rgba(59, 130, 246, 0.28);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: #f0f6ff;
+  align-self: flex-end;
+  border-bottom-right-radius: 3px;
+}
+.overlay-pet-pane .message__avatar {
+  display: none;
+}
+.overlay-pet-pane .message__time {
+  display: none;
+}
+.overlay-pet-pane .message__content {
+  white-space: pre-wrap;
+}
+
 .overlay-menu-side {
   flex: 0 0 204px;
   width: 204px;

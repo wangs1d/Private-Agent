@@ -93,6 +93,7 @@ class _PhoneDevicesPageState extends State<PhoneDevicesPage> {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final TextTheme text = Theme.of(context).textTheme;
     return Scaffold(
+      backgroundColor: cs.surface,
       appBar: AppBar(
         title: const Text("📱 我的手机"),
         actions: <Widget>[

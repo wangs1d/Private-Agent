@@ -107,11 +107,39 @@ function detectRelevantCapabilityDomains(userText: string | undefined): Capabili
   return [...detected];
 }
 
-function compactPromptBlock(text: string | undefined, maxChars: number): string | undefined {
+function compactPromptBlock(
+  text: string | undefined,
+  maxChars: number,
+  importance?: "high" | "normal" | "low",
+  preserve?: "head" | "tail" | "both",
+): string | undefined {
   const trimmed = text?.trim();
   if (!trimmed) return undefined;
-  if (trimmed.length <= maxChars) return trimmed;
-  return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+  // Phase 6.2：低重要性内容压缩更激进（取 70% 上限），高价值保持原值。
+  // 用于 lifeThemeMemory 等"背景性"上下文，不损失主对话能力。
+  const effectiveLimit =
+    importance === "low"
+      ? Math.floor(maxChars * 0.7)
+      : importance === "high"
+        ? maxChars
+        : maxChars;
+  if (trimmed.length <= effectiveLimit) return trimmed;
+  // Phase 6.2 修正：支持首尾保留模式，避免单纯截断丢失末尾关键内容。
+  // dreamMemory 等跨会话整理结果用 "both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），
+  // 中间被省略号替换，保持记忆连续性。
+  if (preserve === "both") {
+    const headLen = Math.floor(effectiveLimit * 0.6);
+    const tailLen = Math.max(0, effectiveLimit - headLen - 6);
+    const head = trimmed.slice(0, headLen).trimEnd();
+    const tail = trimmed.slice(trimmed.length - tailLen).trimStart();
+    return `${head}\n...[省略中间]...\n${tail}`;
+  }
+  if (preserve === "tail") {
+    const tailLen = effectiveLimit - 3;
+    return `...${trimmed.slice(trimmed.length - tailLen).trimStart()}`;
+  }
+  // default "head"
+  return `${trimmed.slice(0, Math.max(0, effectiveLimit - 3)).trimEnd()}...`;
 }
 
 function compactSchemaField(text: string, maxChars: number): string {
@@ -180,6 +208,25 @@ export type BuildPromptContextInput = {
   userLocation?: string;
   personalization?: PersonalizationPromptSlice;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
+  /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
+  userPattern?: {
+    topics: string[];
+    preferredToolDomain?: string;
+    negativeFeedbackCount: number;
+    learningActive?: boolean;
+  };
+  /**
+   * 深度优化：工具规划链（来自 ToolPlanningCortex），注入 prompt 约束 LLM 工具选择顺序和范围。
+   * complex 路由时由 ToolPlanningCortex.planTools 产出，让 LLM 按规划顺序调用工具，
+   * 避免乱试或遗漏关键工具。
+   */
+  toolPlan?: {
+    task: string;
+    toolChain: Array<{ name: string; purpose: string; critical?: boolean }>;
+    reasoning: string;
+    estimatedTokens: number;
+    estimatedCalls: number;
+  };
 };
 
 export type BuildMasterDelegateInput = BuildPromptContextInput & {
@@ -305,11 +352,12 @@ export class PromptContextBuilder {
 
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
+    // 追问场景也拉取 KV snapshot（原策略追问时跳过，导致 memorySummary 等丢失 → 记忆跳）
+    // 追问时压缩到 200 字（非追问保持原长度）
     if (
       this.deps.agentMemorySyncService &&
       memoryKeys &&
-      memoryKeys.length > 0 &&
-      !ambiguousFollowUp
+      memoryKeys.length > 0
     ) {
       const includeMemorySummary = shouldInjectMemorySummary(userText);
       const snapshotKeys = includeMemorySummary
@@ -325,6 +373,15 @@ export class PromptContextBuilder {
       const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
       if (kvCurrentMission) {
         fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
+      }
+      // 追问场景压缩 KV 摘要记忆字段到 200 字（仍注入，保留长期记忆上下文）
+      if (ambiguousFollowUp) {
+        if (fromKv.memorySummary) {
+          fromKv.memorySummary = compactPromptBlock(fromKv.memorySummary, 200);
+        }
+        if (fromKv.memoryFacts) {
+          fromKv.memoryFacts = compactPromptBlock(fromKv.memoryFacts, 150);
+        }
       }
     }
 
@@ -355,23 +412,32 @@ export class PromptContextBuilder {
     }
 
     const interruptedContext = input.interruptedContext?.trim()
-      ? `【用户打断了之前的回复，以下是被打断的内容，请在回答时考虑这些上下文】\n${input.interruptedContext.trim()}`
+      ? `【上一轮回复被打断的残留内容——仅供背景参考，不要在回复中承接、提及或道歉它】\n${input.interruptedContext.trim()}\n【用户已发送新消息，请直接、干净地回答新消息，不要以"哈哈被你看穿""我刚查XX"之类的话开头】`
       : undefined;
 
+    // 追问场景下的降权策略：
+    //   原策略（已废弃）：ambiguousFollowUp=true 时清空所有记忆字段 → 导致追问时「记忆跳」
+    //   新策略：追问场景压缩长度而非清空，保留上下文连续性
+    //     - 非追问：narrativeRecall=520 / memoryContinuity 等保留原长度
+    //     - 追问：  narrativeRecall=240 / memoryContinuity 等压缩到 150 字（仍注入）
+    //   dailyDigest 仍只在非追问场景注入（digest 与追问语义无关，省 token）
     const dailyDigest =
       ambiguousFollowUp || !userText
         ? undefined
         : digestService.getRelevantPromptDigest(input.actorId, userText);
     const userProfileFromManager =
-      ambiguousFollowUp ? null : memoryManager?.getProfileForPrompt(input.actorId) ?? null;
+      memoryManager?.getProfileForPrompt(input.actorId) ?? undefined;
     const memoryContinuity =
-      ambiguousFollowUp ? null : memoryManager?.getContinuityForPrompt(input.actorId) ?? null;
+      memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined;
     const relationshipMemory =
-      ambiguousFollowUp ? null : memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? null;
+      memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? undefined;
     const lifeThemeMemory =
-      ambiguousFollowUp ? null : memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? null;
+      memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? undefined;
     const dreamMemory =
-      ambiguousFollowUp ? null : memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? null;
+      memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? undefined;
+    // 优化 2：主动跨天 recall，注入昨天/前天的关键事件
+    const yesterdayHighlight =
+      memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     const scheduleSnapshot =
       this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
@@ -381,20 +447,82 @@ export class PromptContextBuilder {
       config.memoryPrompt.taskContextInPrompt && userText
         ? compactPromptBlock(buildTaskContextPrompt(userText), 320)
         : undefined;
+    // 追问场景扩容：900 → 1500 字，保留更多任务脉络
+    const shortTermTaskContextLimit = ambiguousFollowUp ? 1500 : 900;
     const shortTermTaskContext =
       input.sessionId && this.deps.shortTermMemoryGateway
-        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), 900)
+        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), shortTermTaskContextLimit)
         : undefined;
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
-    const narrativeRecall = !ambiguousFollowUp
-      ? compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 520)
-      : undefined;
+    // 追问场景压缩 narrativeRecall：800 → 400 字（仍注入，保留上下文）
+    // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
+    const narrativeRecallLimit = ambiguousFollowUp ? 400 : 800;
+    const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), narrativeRecallLimit);
     const compactDailyDigest = compactPromptBlock(dailyDigest, 420);
-    const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, 180);
+    // followUpAnchor 追问场景扩容：180 → 400 字，增加指代消解线索
+    const followUpAnchorLimit = ambiguousFollowUp ? 400 : 180;
+    const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
     const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
+    // 追问场景压缩 userProfile/memoryContinuity 等到 150 字（仍注入，保留关系/情绪上下文）
+    const memoryFollowUpLimit = 150;
+    const userProfileFromManagerCompact = ambiguousFollowUp
+      ? compactPromptBlock(userProfileFromManager, memoryFollowUpLimit)
+      : userProfileFromManager;
+    const memoryContinuityCompact = ambiguousFollowUp
+      ? compactPromptBlock(memoryContinuity, memoryFollowUpLimit)
+      : memoryContinuity;
+    const relationshipMemoryCompact = ambiguousFollowUp
+      ? compactPromptBlock(relationshipMemory, memoryFollowUpLimit)
+      : compactPromptBlock(relationshipMemory, 480, "normal");
+    // Phase 6.2 修正：非追问场景压缩策略调整，避免丢失连续记忆。
+    // - lifeThemeMemory：背景性上下文，用 low importance 压到 280*0.7≈196 字（保留前 N 个主题）
+    // - dreamMemory：跨会话整理结果，含「核心主题」高价值抽象，不能用 low 压缩会丢末尾主题。
+    //   改用 normal importance + preserve="both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），
+    //   中间被省略号替换，既省 token 又保住记忆连续性。
+    const lifeThemeMemoryCompact = ambiguousFollowUp
+      ? compactPromptBlock(lifeThemeMemory, memoryFollowUpLimit)
+      : compactPromptBlock(lifeThemeMemory, 280, "low");
+    const dreamMemoryCompact = ambiguousFollowUp
+      ? compactPromptBlock(dreamMemory, memoryFollowUpLimit)
+      : compactPromptBlock(dreamMemory, 500, "normal", "both");
     const userProfile =
-      userProfileFromManager == null ? rawUserProfile : undefined;
+      userProfileFromManagerCompact == null ? rawUserProfile : undefined;
+
+    // 深度优化：用户画像注入（来自 OnlineLearningCortex）
+    let userPatternBlock: string | undefined;
+    if (input.userPattern) {
+      const up = input.userPattern;
+      const lines: string[] = [];
+      if (up.topics.length > 0) lines.push(`用户近期关注话题：${up.topics.join("、")}`);
+      if (up.preferredToolDomain) lines.push(`用户偏好工具领域：${up.preferredToolDomain}`);
+      if (up.negativeFeedbackCount > 0) lines.push(`用户近期否定反馈次数：${up.negativeFeedbackCount}`);
+      if (up.learningActive === true) lines.push(`用户处于学习活跃期`);
+      if (lines.length > 0) {
+        userPatternBlock = `【用户画像】\n${lines.join("\n")}`;
+      }
+    }
+
+    // 深度优化：工具规划链注入（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围
+    let toolPlanBlock: string | undefined;
+    if (input.toolPlan && input.toolPlan.toolChain.length > 0) {
+      try {
+        const tp = input.toolPlan;
+        const lines: string[] = [
+          `【建议工具链】`,
+          `任务：${tp.task}`,
+          `依据：${tp.reasoning}`,
+          `建议按以下顺序调用工具：`,
+          ...tp.toolChain.map((t, i) =>
+            `  ${i + 1}. ${t.name} — ${t.purpose}${t.critical ? '（关键路径）' : ''}`,
+          ),
+          `预估调用次数：${tp.estimatedCalls}，预估 token：${tp.estimatedTokens}`,
+        ];
+        toolPlanBlock = lines.join("\n");
+      } catch (err) {
+        console.log(`[PromptContextBuilder] toolPlan 注入失败（忽略）: ${err}`);
+      }
+    }
 
     const seenMemory = new Set<string>();
     const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
@@ -438,14 +566,20 @@ export class PromptContextBuilder {
         ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
-      ...(userProfileFromManager ? { userProfileSummary: userProfileFromManager } : {}),
-      ...(memoryContinuity ? { memoryContinuity } : {}),
-      ...(relationshipMemory ? { relationshipMemory } : {}),
-      ...(lifeThemeMemory ? { lifeThemeMemory } : {}),
-      ...(dreamMemory ? { dreamMemory } : {}),
-      ...(interruptedContext ? { interruptedContext } : {}),
+      ...(userProfileFromManagerCompact ? { userProfileSummary: userProfileFromManagerCompact } : {}),
+      ...(memoryContinuityCompact ? { memoryContinuity: memoryContinuityCompact } : {}),
+      ...(relationshipMemoryCompact ? { relationshipMemory: relationshipMemoryCompact } : {}),
+      ...(lifeThemeMemoryCompact ? { lifeThemeMemory: lifeThemeMemoryCompact } : {}),
+      ...(dreamMemoryCompact ? { dreamMemory: dreamMemoryCompact } : {}),
+      // 优化 2：跨天事件回顾，压缩到 200 字（非追问场景）
+      ...(yesterdayHighlight && !ambiguousFollowUp
+        ? { yesterdayHighlight: compactPromptBlock(yesterdayHighlight, 200) }
+        : {}),
+      ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
+      ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
+      ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
     };
 
     // 注入 prompt 前对 memory/facts 等用户内容字段做 PII 脱敏（手机号/邮箱/IP/身份证/银行卡）
@@ -472,6 +606,7 @@ export class PromptContextBuilder {
       relationshipMemory: redact(ctx.relationshipMemory),
       lifeThemeMemory: redact(ctx.lifeThemeMemory),
       dreamMemory: redact(ctx.dreamMemory),
+      yesterdayHighlight: redact(ctx.yesterdayHighlight),
       narrativeRecall: redact(ctx.narrativeRecall),
       dailyDigest: redact(ctx.dailyDigest),
       userProfileSummary: redact(ctx.userProfileSummary),
@@ -508,8 +643,10 @@ export class PromptContextBuilder {
       Boolean(memory.relationshipMemory) ||
       Boolean(memory.lifeThemeMemory) ||
       Boolean(memory.dreamMemory) ||
+      Boolean(memory.yesterdayHighlight) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
+      Boolean(memory.toolPlan) ||
       Boolean(memory.currentTime)
     );
   }

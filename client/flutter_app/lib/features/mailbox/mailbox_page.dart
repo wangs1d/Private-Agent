@@ -163,25 +163,28 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Column(
-      children: [
-        TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: "好友"),
-            Tab(text: "新朋友"),
-          ],
-        ),
-        Expanded(
-          child: TabBarView(
+    return Container(
+      color: theme.colorScheme.surface,
+      child: Column(
+        children: [
+          TabBar(
             controller: _tabController,
-            children: [
-              _buildFriendsList(theme),
-              _buildNewFriendsList(theme),
+            tabs: const [
+              Tab(text: "好友"),
+              Tab(text: "新朋友"),
             ],
           ),
-        ),
-      ],
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                _buildFriendsList(theme),
+                _buildNewFriendsList(theme),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

@@ -20,6 +20,7 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ model: opts.model, input: opts.input.slice(0, 32_000) }),
+    signal: AbortSignal.timeout(60_000),
   });
   if (!r.ok) {
     const txt = await r.text().catch(() => "");

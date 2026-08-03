@@ -29,12 +29,13 @@ const DEFAULT_CONFIG: MessageBatchProcessorConfig = {
 };
 
 /**
- * 消息批处理器：在客户端仍显示「Agent 处理中」期间，将用户多条消息合并为一条再处理。
+ * 消息队列处理器：用户持续输入时排队，依次回复。
  *
- * 核心机制（不依赖固定时间间隔）：
- * - 首条消息到达后尽快开始处理（同事件循环内多条会先合并）
- * - 客户端上报 `chat.agent_processing_ui` active=true 时允许合并/重启本轮
- * - active=false（处理中 UI 已隐藏）后锁定本轮，新消息进入下一轮
+ * 核心机制：
+ * - 首条消息到达后尽快开始处理（同事件循环内多条会先合并为一条）
+ * - 处理中到达的新消息进入队列，等当前回复完成后依次处理
+ * - 每条用户消息都会得到独立的回复，不会被合并或丢弃
+ * - 客户端上报 `chat.agent_processing_ui` active=false 后锁定本轮
  */
 export class MessageBatchProcessor {
   private buffers = new Map<string, BatchedMessage[]>();
@@ -49,6 +50,8 @@ export class MessageBatchProcessor {
   private processingGeneration = new Map<string, number>();
   private flushScheduled = new Set<string>();
   private config: MessageBatchProcessorConfig;
+  /** 消息队列：处理中到达的新消息排队，依次回复 */
+  private messageQueue = new Map<string, BatchedMessage[]>();
 
   constructor(config?: Partial<MessageBatchProcessorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -132,10 +135,14 @@ export class MessageBatchProcessor {
     if (pending === 0 && !this.inFlightMerged.has(sessionId)) return;
 
     if (this.processing.has(sessionId)) {
-      if (!this.canMerge(sessionId)) {
-        return;
+      // 处理中：新消息进入队列，等当前回复完成后依次处理
+      // 不再合并/重启当前轮次（避免多条消息只回复一次）
+      const pending = this.takeBuffer(sessionId);
+      if (pending.length > 0) {
+        const queue = this.messageQueue.get(sessionId) ?? [];
+        queue.push(...pending);
+        this.messageQueue.set(sessionId, queue);
       }
-      this.restartInFlight(sessionId);
       return;
     }
 
@@ -195,6 +202,23 @@ export class MessageBatchProcessor {
       this.processing.delete(sessionId);
       this.turnCommitted.delete(sessionId);
       this.inFlightMerged.delete(sessionId);
+
+      // 处理队列中的下一条消息
+      const queue = this.messageQueue.get(sessionId);
+      if (queue && queue.length > 0) {
+        const next = queue.shift();
+        if (!next) return;
+        if (queue.length === 0) {
+          this.messageQueue.delete(sessionId);
+        }
+        const nextTurn = this.bumpGeneration(sessionId);
+        this.inFlightMerged.set(sessionId, next);
+        this.processing.add(sessionId);
+        this.turnCommitted.delete(sessionId);
+        void this.invokeReady(sessionId, next, nextTurn);
+        return;
+      }
+
       if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
         this.scheduleFlush(sessionId);
       }
@@ -264,10 +288,16 @@ export class MessageBatchProcessor {
     this.inFlightMerged.clear();
     this.processingGeneration.clear();
     this.flushScheduled.clear();
+    this.messageQueue.clear();
   }
 
   /** 获取指定会话当前缓冲的消息数量（调试用） */
   getBufferSize(sessionId: string): number {
     return this.buffers.get(sessionId)?.length ?? 0;
+  }
+
+  /** 获取指定会话当前队列中等待处理的消息数量（调试用） */
+  getQueueSize(sessionId: string): number {
+    return this.messageQueue.get(sessionId)?.length ?? 0;
   }
 }

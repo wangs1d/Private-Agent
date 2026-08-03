@@ -98,6 +98,22 @@
 }
 
     </style>
+    <style id="semantic-token-fallback">
+/* Tailwind semantic token fallback — prevents blank page if @theme inline fails */
+:root {
+  --color-background: var(--pa-bg-page);
+  --color-foreground: var(--pa-text-primary);
+  --color-card: var(--pa-bg-surface);
+  --color-card-foreground: var(--pa-text-primary);
+  --color-border: var(--pa-border);
+  --color-input: var(--pa-border);
+  --color-ring: var(--pa-primary);
+  --color-muted: var(--pa-text-muted);
+  --color-muted-foreground: var(--pa-text-secondary);
+  --color-accent: var(--pa-primary-light);
+  --color-accent-foreground: var(--pa-primary);
+}
+    </style>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
     <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <style type="text/tailwindcss">
@@ -226,34 +242,117 @@
 
       <!-- ============ Right panel (w-72) ============ -->
       <aside class="w-72 shrink-0 flex-col gap-4 p-4 overflow-y-auto no-scrollbar hidden lg:flex" style="background: var(--pa-bg-surface); border-left: 1px solid var(--pa-border);">
-        <!-- Weather strip -->
-        <div class="px-3 py-3" style="background: var(--pa-glass-bg); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid var(--pa-border-soft); border-radius: var(--pa-radius-md);">
-          <div class="flex items-start justify-between">
-            <div class="flex flex-col gap-0.5">
-              <span class="font-bold" style="font-size:24px; color: var(--pa-text-primary); line-height:1;">26°</span>
-              <div class="flex items-center gap-1">
-                <span style="font-size:14px;">☀️</span>
-                <span class="text-xs" style="color: var(--pa-text-secondary);">晴天</span>
-              </div>
+        <!-- Weather widget — soft & animated -->
+        <div class="weather-card relative overflow-hidden" style="border-radius: var(--pa-radius-lg); padding: 18px 20px; background: var(--pa-bg-surface); border: 1px solid var(--pa-border);">
+          <!-- Subtle animated sky gradient -->
+          <div class="weather-sky absolute inset-0 pointer-events-none" style="background: linear-gradient(180deg, rgba(0,122,255,0.04) 0%, rgba(0,122,255,0.01) 60%, transparent 100%);"></div>
+
+          <!-- Floating cloud animation -->
+          <div class="weather-clouds absolute inset-0 pointer-events-none overflow-hidden">
+            <div class="cloud cloud-1 absolute" style="top: 12px; left: -20px; opacity: 0.5;">
+              <svg width="52" height="28" viewBox="0 0 52 28" fill="none">
+                <ellipse cx="18" cy="18" rx="14" ry="8" fill="white"/>
+                <ellipse cx="30" cy="14" rx="16" ry="10" fill="white"/>
+                <ellipse cx="42" cy="18" rx="10" ry="7" fill="white"/>
+              </svg>
             </div>
-            <div class="flex gap-2.5 pt-1">
-              <div class="flex flex-col items-center gap-0.5">
-                <span style="font-size:11px; color: var(--pa-text-muted);">上午</span>
-                <span style="font-size:13px;">☀️</span>
-              </div>
-              <div class="flex flex-col items-center gap-0.5">
-                <span style="font-size:11px; color: var(--pa-text-muted);">下午</span>
-                <span style="font-size:13px;">⛅</span>
-              </div>
-              <div class="flex flex-col items-center gap-0.5">
-                <span style="font-size:11px; color: var(--pa-text-muted);">晚上</span>
-                <span style="font-size:13px;">🌧️</span>
-              </div>
+            <div class="cloud cloud-2 absolute" style="top: 28px; right: -10px; opacity: 0.35;">
+              <svg width="40" height="22" viewBox="0 0 40 22" fill="none">
+                <ellipse cx="14" cy="14" rx="12" ry="7" fill="white"/>
+                <ellipse cx="24" cy="11" rx="13" ry="8" fill="white"/>
+                <ellipse cx="32" cy="14" rx="8" ry="6" fill="white"/>
+              </svg>
+            </div>
+            <div class="cloud cloud-3 absolute" style="bottom: 50px; left: 40%; opacity: 0.25;">
+              <svg width="32" height="18" viewBox="0 0 32 18" fill="none">
+                <ellipse cx="12" cy="11" rx="10" ry="6" fill="white"/>
+                <ellipse cx="20" cy="9" rx="10" ry="7" fill="white"/>
+              </svg>
             </div>
           </div>
-          <div class="mt-2 flex items-center gap-1" style="font-size:11px; color: var(--state-warning);">
-            <span>⚠️</span>
-            <span>下午有雷阵雨</span>
+
+          <!-- Sun glow -->
+          <div class="sun-glow absolute pointer-events-none" style="top: -10px; right: 10px; width: 70px; height: 70px; background: radial-gradient(circle, rgba(255,180,50,0.25) 0%, rgba(255,180,50,0.08) 40%, transparent 70%); border-radius: 50%;"></div>
+
+          <!-- Top row: city + icon -->
+          <div class="relative flex items-start justify-between">
+            <div>
+              <div class="flex items-center gap-1.5">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--pa-text-muted);"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                <span style="font-size: 13px; font-weight: 500; color: var(--pa-text-secondary);">北京</span>
+              </div>
+              <div style="font-size: 11px; color: var(--pa-text-muted); margin-top: 2px;">6月18日 周四</div>
+            </div>
+            <!-- Weather icon -->
+            <div class="weather-icon relative" style="width: 36px; height: 36px;">
+              <svg viewBox="0 0 48 48" fill="none">
+                <!-- Sun -->
+                <circle cx="18" cy="18" r="8" fill="#FFB340" opacity="0.9"/>
+                <circle cx="18" cy="18" r="5" fill="#FFD275"/>
+                <!-- Cloud -->
+                <ellipse cx="26" cy="28" rx="14" ry="8" fill="white"/>
+                <ellipse cx="32" cy="25" rx="12" ry="8" fill="white"/>
+                <ellipse cx="20" cy="27" rx="10" ry="6" fill="white"/>
+              </svg>
+            </div>
+          </div>
+
+          <!-- Center: temperature -->
+          <div class="relative mt-2">
+            <div class="flex items-baseline gap-0.5">
+              <span style="font-size: 48px; font-weight: 200; line-height: 1; letter-spacing: -2px; color: var(--pa-text-primary);">26</span>
+              <span style="font-size: 18px; font-weight: 300; line-height: 1; color: var(--pa-text-secondary);">°C</span>
+            </div>
+            <div style="font-size: 12px; color: var(--pa-text-secondary); margin-top: 2px;">多云转晴 · 体感 28°</div>
+          </div>
+
+          <!-- H/L + warning -->
+          <div class="relative mt-2.5 flex items-center justify-between">
+            <div style="font-size: 11px; color: var(--pa-text-muted);">
+              <span style="color: var(--pa-text-secondary); font-weight: 500;">H 30°</span>
+              <span style="margin: 0 4px;">·</span>
+              <span>L 21°</span>
+            </div>
+            <div class="flex items-center gap-1" style="font-size: 11px; color: var(--state-warning);">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+              <span>下午有雷阵雨</span>
+            </div>
+          </div>
+
+          <!-- Hourly forecast -->
+          <div class="relative mt-3 pt-3" style="border-top: 1px solid var(--pa-border-soft);">
+            <div class="flex items-end justify-between gap-1 h-20">
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">23°</span>
+                <div style="width: 3px; height: 26px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.15), rgba(0,122,255,0.35));"></div>
+                <span style="font-size: 10px; color: var(--pa-text-muted);">9时</span>
+              </div>
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">27°</span>
+                <div style="width: 3px; height: 38px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.2), rgba(0,122,255,0.5));"></div>
+                <span style="font-size: 10px; color: var(--pa-text-muted);">12时</span>
+              </div>
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 600; color: var(--pa-primary);">30°</span>
+                <div style="width: 4px; height: 52px; border-radius: 2px; background: linear-gradient(to top, rgba(255,150,0,0.35), rgba(0,122,255,0.7));"></div>
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">15时</span>
+              </div>
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">28°</span>
+                <div style="width: 3px; height: 42px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.2), rgba(0,122,255,0.55));"></div>
+                <span style="font-size: 10px; color: var(--pa-text-muted);">18时</span>
+              </div>
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">24°</span>
+                <div style="width: 3px; height: 30px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.15), rgba(0,122,255,0.4));"></div>
+                <span style="font-size: 10px; color: var(--pa-text-muted);">21时</span>
+              </div>
+              <div class="flex flex-col items-center gap-1 flex-1">
+                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-muted);">22°</span>
+                <div style="width: 3px; height: 22px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.1), rgba(0,122,255,0.25));"></div>
+                <span style="font-size: 10px; color: var(--pa-text-muted);">0时</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -403,6 +502,61 @@
       }
       @media (hover: none) {
         .tool-btn:hover, .send-btn:hover { transform: none; }
+      }
+
+      /* ===== Weather card animations ===== */
+      .weather-card .cloud {
+        animation: cloud-drift linear infinite;
+      }
+      .weather-card .cloud-1 {
+        animation-duration: 22s;
+        animation-name: cloud-drift-1;
+      }
+      .weather-card .cloud-2 {
+        animation-duration: 28s;
+        animation-name: cloud-drift-2;
+        animation-delay: -8s;
+      }
+      .weather-card .cloud-3 {
+        animation-duration: 18s;
+        animation-name: cloud-drift-3;
+        animation-delay: -4s;
+      }
+      @keyframes cloud-drift-1 {
+        0%   { transform: translateX(0); opacity: 0; }
+        10%  { opacity: 0.5; }
+        90%  { opacity: 0.5; }
+        100% { transform: translateX(120px); opacity: 0; }
+      }
+      @keyframes cloud-drift-2 {
+        0%   { transform: translateX(0); opacity: 0; }
+        15%  { opacity: 0.35; }
+        85%  { opacity: 0.35; }
+        100% { transform: translateX(-100px); opacity: 0; }
+      }
+      @keyframes cloud-drift-3 {
+        0%   { transform: translateX(0); opacity: 0; }
+        20%  { opacity: 0.25; }
+        80%  { opacity: 0.25; }
+        100% { transform: translateX(80px); opacity: 0; }
+      }
+
+      /* Sun glow breathing */
+      .weather-card .sun-glow {
+        animation: sun-pulse 5s ease-in-out infinite;
+      }
+      @keyframes sun-pulse {
+        0%, 100% { transform: scale(1); opacity: 0.9; }
+        50%      { transform: scale(1.15); opacity: 1; }
+      }
+
+      /* Sky gradient subtle shift */
+      .weather-card .weather-sky {
+        animation: sky-shift 10s ease-in-out infinite alternate;
+      }
+      @keyframes sky-shift {
+        0%   { opacity: 0.7; }
+        100% { opacity: 1; }
       }
     </style>
     <script>lucide.createIcons();</script>

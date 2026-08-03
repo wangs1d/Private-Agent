@@ -52,10 +52,43 @@ export function resolveRegistryToolName(name: string): string {
   return REGISTRY_TOOL_NAME_ALIASES[name] ?? name;
 }
 
+/**
+ * 工具结果缓存：相同工具名+参数在 TTL 内复用结果。
+ * 适用场景：天气/时间/搜索等查询类工具，短时间内重复调用概率高。
+ * 不适用：写操作、桌面操作、购物下单等副作用工具。
+ */
+interface ToolCacheEntry {
+  result: { ok: boolean; result: Record<string, unknown> };
+  timestamp: number;
+}
+
+const TOOL_CACHE_TTL_MS = 60_000; // 60 秒缓存
+const TOOL_CACHE_MAX_SIZE = 100;
+
+/** 需要缓存的工具名（查询类、无副作用） */
+const CACHEABLE_TOOLS = new Set([
+  "weather.get_local",
+  "search_web",
+  "fetch_web",
+  "info.inspect_webpage",
+  "info.navigate_site",
+  "info.search",
+]);
+
+/** 生成工具缓存键 */
+function buildToolCacheKey(name: string, input: Record<string, unknown>): string {
+  const sortedInput = Object.keys(input).sort().reduce((acc, key) => {
+    acc[key] = input[key];
+    return acc;
+  }, {} as Record<string, unknown>);
+  return `${name}:${JSON.stringify(sortedInput)}`;
+}
+
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolHandler>();
   private skillManager?: SkillManager;
   private worldService?: WorldService | null;
+  private readonly toolCache = new Map<string, ToolCacheEntry>();
 
   /**
    * 用于校验社区 Skill 是否已被当前会话购买（个人房 `roomId === sessionId`）。
@@ -69,6 +102,14 @@ export class ToolRegistry {
    */
   setSkillManager(manager: SkillManager): void {
     this.skillManager = manager;
+  }
+
+  /**
+   * 获取已注入的 SkillManager（可能未注入，返回 undefined）。
+   * 用于需要查询 skill schema 的场景（如 brain.list_capabilities include_schema）。
+   */
+  getSkillManager(): SkillManager | undefined {
+    return this.skillManager;
   }
 
   /**
@@ -132,12 +173,69 @@ export class ToolRegistry {
     // 回退到传统工具执行
     const tool = this.tools.get(registryName);
     if (!tool) return { ok: false, result: { error: `未知工具: ${registryName}` } };
+
+    // 工具结果缓存：查询类工具在 TTL 内复用结果
+    if (CACHEABLE_TOOLS.has(registryName)) {
+      const cacheKey = buildToolCacheKey(registryName, input);
+      const cached = this.toolCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < TOOL_CACHE_TTL_MS) {
+        return cached.result;
+      }
+      // 缓存未命中或过期，执行并缓存
+      try {
+        const result = await tool(input, context);
+        const ok = true;
+        const entry = { result: { ok, result }, timestamp: Date.now() };
+        // LRU 淘汰：超过最大容量时删除最旧的
+        if (this.toolCache.size >= TOOL_CACHE_MAX_SIZE) {
+          const oldestKey = this.toolCache.keys().next().value;
+          if (oldestKey !== undefined) {
+            this.toolCache.delete(oldestKey);
+          }
+        }
+        this.toolCache.set(cacheKey, entry);
+        return { ok, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "工具执行失败";
+        return { ok: false, result: { error: message } };
+      }
+    }
+
     try {
       const result = await tool(input, context);
       return { ok: true, result };
     } catch (error) {
       const message = error instanceof Error ? error.message : "工具执行失败";
       return { ok: false, result: { error: message } };
+    }
+  }
+
+  /**
+   * 查询工具缓存（供 tool search 桥接层调用）。
+   * 命中时直接返回缓存结果，跳过 executeTool 调用。
+   * @returns 缓存结果，未命中返回 null
+   */
+  getCachedResult(
+    name: string,
+    input: Record<string, unknown>,
+  ): { ok: boolean; result: Record<string, unknown> } | null {
+    const registryName = resolveRegistryToolName(name);
+    if (!CACHEABLE_TOOLS.has(registryName)) return null;
+    const cacheKey = buildToolCacheKey(registryName, input);
+    const cached = this.toolCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < TOOL_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    return null;
+  }
+
+  /** 清理过期缓存（定期调用） */
+  cleanupCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.toolCache.entries()) {
+      if (now - entry.timestamp >= TOOL_CACHE_TTL_MS) {
+        this.toolCache.delete(key);
+      }
     }
   }
 }

@@ -39,7 +39,6 @@ import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
-import "features/chat/agent_status_chip.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/right_side_panel.dart";
@@ -70,13 +69,6 @@ import "widgets/app_sidebar.dart";
 void main() {
   runZonedGuarded(() {
     WidgetsFlutterBinding.ensureInitialized();
-    // 区域版本（--dart-define=REGION=domestic|intl）启动期一次性确认，
-    // 便于排查「构建用错 flavor」的问题。
-    debugPrint(
-      '[region] build region = ${RegionConfig.region.name}, '
-      'llm=${RegionConfig.capabilities.defaultLlmProvider}, '
-      'wechatClaw=${RegionConfig.capabilities.wechatClaw}',
-    );
     unawaited(bootstrapWindowsWebView());
     runApp(const PrivateAiApp());
   }, (error, stack) {
@@ -84,6 +76,10 @@ void main() {
     debugPrint('[UNCAUGHT] $error\n$stack');
   });
 }
+
+/// side 模式下 NextbotChatLayout 内嵌的 [VerticalDragDivider] 宽度。
+/// 与 [NextbotChatLayout] 内部 `_dividerWidth` 保持一致。
+const double _kSidePanelDividerWidth = 8.0;
 
 class PrivateAiApp extends StatefulWidget {
   const PrivateAiApp({super.key});
@@ -167,10 +163,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
+  /// 保存打开面板前的 splitRatio，用于关闭时恢复
+  double _previousSplitRatio = SplitRatioPreference.defaultRatio;
+
   /// split 模式下右面板的实际宽度，由 [NextbotChatLayout] 通过
   /// [NextbotChatLayout.onRightPanelWidthChanged] 同步过来，
   /// 用于给 AppBar / Sidebar 等加右边距，避免右面板覆盖顶部栏。
-  double _rightPanelWidth = kRightSidePanelWidth;
+  ///
+  /// 语义为"总右占位"：side 模式下包含 8px 拖拽条 + [kRightSidePanelWidth] 的
+  /// 面板内容(220+8=228)，split 模式即 chat_layout 报告的 rightWidth。
+  double _rightPanelWidth = kRightSidePanelWidth + _kSidePanelDividerWidth;
 
   Map<String, int> _unreadByPlatform = <String, int>{};
   Timer? _messagePollTimer;
@@ -179,7 +181,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 关闭右侧面板
   void _closeRightPanel() {
     if (_rightPanel == null) return;
-    setState(() => _rightPanel = null);
+    setState(() {
+      _rightPanel = null;
+      // 恢复打开面板前的 splitRatio
+      _splitRatio = _previousSplitRatio;
+    });
   }
 
   /// 加载持久化的分栏比例。
@@ -760,44 +766,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _updateAgentStatusLine(line, ensureProcessing: true);
         }
         if (type == "chat.assistant_interim") {
-          // 分阶段消息交付阶段一：服务端在多步/工具型请求开始时推送的
-          // 即时确认应答（如「好的，让我查一下…」）。作为独立 assistant 消息
-          // 入列表并保留——工具执行期间呼吸灯亮，chat.assistant_done 抵达后
-          // 再追加结果消息，形成「首条 → 工具 → 结果」的两段式对话。
-          final String? interimTraceId = payload["traceId"]?.toString();
-          final String? activeTraceId = _pendingAgentUserMessageId;
-          if (interimTraceId == null ||
-              interimTraceId.isEmpty ||
-              activeTraceId == null ||
-              interimTraceId != activeTraceId) {
-            return;
-          }
-          final String text = payload["text"]?.toString().trim() ?? "";
-          if (text.isEmpty) return;
-          // interim 到达说明服务端已开始处理，重置回复超时计时器
-          _resetAgentReplyWatchdog();
-          final String interimMessageId = "interim-$interimTraceId";
-          // 去重：同一 traceId 的 interim 只入一次
-          if (_assistantMessageIndexById.containsKey(interimMessageId)) {
-            return;
-          }
-          final ChatMessage interimMsg = ChatMessage(
-            messageId: interimMessageId,
-            sessionId: ApiConfig.effectiveActorId,
-            role: "assistant",
-            text: text,
-            timestamp: DateTime.now(),
-          );
-          setState(() {
-            _messages.add(interimMsg);
-            _assistantMessageIndexById[interimMessageId] = _messages.length - 1;
-          });
-          // 持久化用 unawaited 包起来：saveMessage 抛错（如 IO 异常）
-          // 会让外层 _ws.events.listen async 回调异常结束 → stream 关闭，
-          // 后续 chunk/done 都收不到，结果消息就出不来。
-          unawaited(_store.saveMessage(interimMsg).catchError((Object e) {
-            debugPrint("[chat] interim saveMessage failed: $e");
-          }));
+          // 已废弃：被动聊天路径已改为通过 chat.assistant_chunk + phase="interim"
+          // 推送首段文本，与主回复共用同一 messageId，不再作为独立消息入列表。
+          // 此分支仅保留兼容旧服务端（主动通知路径仍可能发此事件），直接忽略。
         }
         // ===== 「分阶段异步对话交互 v2」三件套 =====
         if (type == "chat.turn_started") {
@@ -853,8 +824,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   chunkTraceId != activeTraceId)) {
             return;
           }
-          // interim 已作为独立 assistant 消息入列表并保留，chunk 无需让位；
-          // _clearInterimAck 现为 no-op（_interimAckText 不再被设置）。
+          // interim 已废弃，chunk（含 phase="interim" 首段）直接入列表显示，
+          // 实现真人"边说边看"效果。
           _clearInterimAck();
           if (!_isAgentProcessing) {
             setState(() => _isAgentProcessing = true);
@@ -865,11 +836,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   ? "assistant-$activeTraceId"
                   : "assistant-streaming");
           final String chunk = payload["chunk"]?.toString() ?? "";
-          // 关键：流式期间 chunk 只进缓冲（_flushAssistantChunks 现在不入列表），
-          // **绝对不要**用「chunked 末行」去覆盖 agentStatusLine——那会把回复正文
-          // 顶到思考气泡里。思考气泡只能由 chat.agent_status / tool.call / tool.result
-          // 这些"agent 在干的事"来更新。
+          // 关键：chunk 文字直接入列表（新建或续写），让用户实时看到回复内容。
+          // 同时进缓冲，供 done 时做兜底比对。
           _enqueueAssistantChunk(messageId, chunk);
+          _appendChunkToMessageList(messageId, chunk);
           // v2：把 chunk 同步累加进 TurnState.streamBuffer（UI 改造后用作流式正文源）
           _turnState?.appendChunk(chunk);
         }
@@ -1505,6 +1475,44 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     });
   }
 
+  /// 把 chunk 文字直接追加到消息列表（新建或续写），实现"边说边看"效果。
+  /// 与 _enqueueAssistantChunk 配合：前者管缓冲（供 done 兜底），后者管显示。
+  void _appendChunkToMessageList(String messageId, String chunk) {
+    if (chunk.isEmpty) return;
+    final int? existingIdx = _assistantMessageIndexById[messageId];
+    if (existingIdx != null && existingIdx < _messages.length) {
+      // 续写已存在的消息
+      setState(() {
+        final ChatMessage previous = _messages[existingIdx];
+        _messages[existingIdx] = ChatMessage(
+          messageId: previous.messageId,
+          sessionId: previous.sessionId,
+          role: previous.role,
+          text: previous.text + chunk,
+          timestamp: previous.timestamp,
+          attachmentImageCount: previous.attachmentImageCount,
+          playUrl: previous.playUrl,
+        );
+      });
+    } else {
+      // 新建一条 assistant 消息入列表
+      final ChatMessage newMsg = ChatMessage(
+        messageId: messageId,
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: chunk,
+        timestamp: DateTime.now(),
+      );
+      setState(() {
+        _messages.add(newMsg);
+        _assistantMessageIndexById[messageId] = _messages.length - 1;
+      });
+      unawaited(_store.saveMessage(newMsg).catchError((Object e) {
+        debugPrint("[chat] chunk saveMessage failed: $e");
+      }));
+    }
+  }
+
   void _flushAssistantChunks() {
     // 关键设计变更：流式阶段（agent 还在干活、思考气泡还在）期间，
     // **不要把 chunk 拼到消息列表**——避免用户看到「思考中」和「回复正文」同框。
@@ -2098,48 +2106,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  /// 调试用:向聊天流注入一张带按钮的"选择型"卡片,
-  /// 用于验证 AgentActionChoiceCard 的渲染效果与点击闭环。
-  ///
-  /// 卡片内容模拟一个"咖啡店推荐"场景:
-  ///   - 标题 + 3 条 ✓ 条目(展示正文区)
-  ///   - 2 个按钮(主按钮"周六去"实心 / 次按钮"忽略"描边)
-  ///   - 点击按钮后会触发 [_handleCardAction]:静默发送 chat.user_action,
-  ///     Agent 收到后主动产生一条衔接回复(不在聊天流追加用户消息气泡)
-  ///
-  /// 上线前删除本方法 + AppBar 里的调试 IconButton 即可。
-  void _injectMockChoiceCard() {
-    const String cardJson = '''
-{
-  "title": "不下单,周六送达。另外发现你收藏的咖啡店开了新店:",
-  "items": [
-    {"type": "check", "text": "附近店推荐"},
-    {"type": "check", "text": "「三顿半」快闪店 · 800m"},
-    {"type": "check", "text": "本周六买一送一"}
-  ],
-  "cardId": "card-recommend-mock-001",
-  "actions": [
-    {"id": "go-saturday", "label": "周六去", "variant": "primary", "payload": {"shop": "三顿半"}},
-    {"id": "ignore", "label": "忽略", "variant": "secondary"}
-  ]
-}
-''';
-    final String cardText =
-        "[AGENT_RESULT_CARD_START]\n$cardJson\n[AGENT_RESULT_CARD_END]";
-
-    final ChatMessage agentMessage = ChatMessage(
-      messageId: "agent-mock-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
-      role: "assistant",
-      text: cardText,
-      timestamp: DateTime.now(),
-    );
-    setState(() {
-      _messages.add(agentMessage);
-    });
-    unawaited(_store.saveMessage(agentMessage));
-  }
-
   void _selectTab(int index) {
     setState(() => _tabIndex = index);
   }
@@ -2149,6 +2115,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.friends;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
       _splitRatio = RightPanelKind.friends.defaultSplitRatio;
     });
   }
@@ -2158,6 +2126,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.messages;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
       _splitRatio = RightPanelKind.messages.defaultSplitRatio;
     });
   }
@@ -3288,34 +3258,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                             child: Padding(
                                               padding: const EdgeInsets.only(
                                                   left: 4),
-                                              child: Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: <Widget>[
-                                                  AgentStatusChip(
-                                                    moodStyle:
-                                                        _agentProfile.moodStyle,
-                                                    statusText: _agentProfile
-                                                        .statusText,
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  _buildMessageNotificationBadge(),
-                                                ],
-                                              ),
+                                              child: _buildMessageNotificationBadge(),
                                             ),
                                           )
                                         : null,
                                     title: _buildAppBarTitle(),
-                                    actions: <Widget>[
-                                      // ▼ 调试入口:注入一张带按钮的"选择型"卡片到聊天流,
-                                      // 用于验证 AgentActionChoiceCard 的渲染与点击行为。
-                                      // 上线前删除整个 IconButton 即可。
-                                      if (kDebugMode)
-                                        IconButton(
-                                          icon: const Icon(Icons.bug_report),
-                                          tooltip: "注入选择型卡片(调试)",
-                                          onPressed: _injectMockChoiceCard,
-                                        ),
-                                    ],
+                                    actions: <Widget>[],
                                   ),
                                 ),
                                 Expanded(
@@ -3409,6 +3357,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.devices;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
       _splitRatio = RightPanelKind.devices.defaultSplitRatio;
     });
   }
@@ -3781,11 +3731,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   /// AppBar 右侧需要让出的宽度。
-  /// - side 模式：[kRightSidePanelWidth] 固定值
+  /// - side 模式：右面板宽度(由 NextbotChatLayout 同步) — 此宽度是总占位
+  ///   (含 8px 拖拽条)，与 Positioned 的 width 一致。
   /// - split 模式：[NextbotChatLayout] 同步过来的动态宽度 [_rightPanelWidth]
   /// - 其他：0
   double _appBarRightInset() {
-    if (_shouldShowRightSidePanel()) return kRightSidePanelWidth;
+    if (_shouldShowRightSidePanel()) return _rightPanelWidth;
     if (_rightPanel != null && _tabIndex == 0) return _rightPanelWidth;
     return 0;
   }
@@ -3793,9 +3744,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 在外层 Stack 顶层用 [Positioned] 渲染右侧面板（side 或 split 模式），
   /// 使面板从屏幕最顶部 (top:0) 贯通到底部，覆盖宽度范围内的 AppBar。
   ///
-  /// - side 模式：固定 kRightSidePanelWidth，渲染 [RightSidePanel]
-  ///   （今日安排 / 常用工具 / 桌宠）。
-  /// - split 模式：宽度为 [NextbotChatLayout] 同步过来的动态宽度，
+  /// - side 模式：宽度 = [_rightPanelWidth]（由 NextbotChatLayout 拖动条控制），
+  ///   渲染 [RightSidePanel]（今日安排 / 常用工具 / 桌宠）。
+  /// - split 模式：宽度 = [NextbotChatLayout] 同步过来的动态宽度，
   ///   渲染 [_buildSplitPanel]（顶栏 + 自定义内容）。
   Widget _buildRightPanelOverlay() {
     if (_tabIndex != 0) {
@@ -3815,12 +3766,17 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         child: _buildSplitPanel(),
       );
     }
-    // side 模式：固定宽度 + RightSidePanel
+    // side 模式：动态宽度(可拖拽) + RightSidePanel
+    //
+    // [NextbotChatLayout] 内部的 Row = Expanded(chat) | VerticalDragDivider(8)
+    // | SizedBox(占位), 报告的总右占位 = [kDividerWidth] + 占位 = 220 等。
+    // 这里 Positioned 只覆盖占位(不含 divider 8px), 拖拽条才能在 chat 与
+    // 面板之间露出来, 用户才能拖动。
     return Positioned(
       top: 0,
       right: 0,
       bottom: 0,
-      width: kRightSidePanelWidth,
+      width: _rightPanelWidth - _kSidePanelDividerWidth,
       child: RightSidePanel(
         scheduleFuture: _cachedScheduleFuture,
         onAgentLink: _openAgentLinkTab,
@@ -3844,6 +3800,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _buildSplitPanelHeader(cs),
           Expanded(
             child: Container(
+              color: cs.surface,
               decoration: BoxDecoration(
                 border: Border(
                   top: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
@@ -3983,6 +3940,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       splitRatio: _splitRatio,
       onSplitRatioChanged: _setSplitRatio,
       onRightPanelWidthChanged: _setRightPanelWidth,
+      // side 模式下也启用拖拽：把当前宽度(含 8px 拖拽条)传下去,
+      // NextbotChatLayout 内部会保留此值作为初始/外部同步值。
+      sidePanelWidth: _rightPanel != null ? null : _rightPanelWidth,
       child: _buildChatPage(context),
     );
   }

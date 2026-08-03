@@ -2,7 +2,7 @@
  * 实测：搜索今天 A 股的消息
  */
 import { InfoHubService } from "../src/services/info-hub-service.js";
-import { parsePublishedAtMs } from "../src/services/search-freshness.js";
+import { parsePublishedAtMs } from "../src/services/search-enhancements.js";
 
 async function main() {
   const service = new InfoHubService();

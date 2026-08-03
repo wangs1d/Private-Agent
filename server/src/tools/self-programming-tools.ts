@@ -81,6 +81,7 @@ import type { ToolRegistry } from "./tool-registry.js";
 import type { SkillManager } from "../skills/index.js";
 import type { SkillDefinition, SkillMetadata, SkillParameter } from "../skills/types.js";
 import { SkillValidator } from "../skills/skill-validator.js";
+import { invalidateFullCatalogCache } from "./tool-search/index.js";
 
 /**
  * 注册自我编程工具
@@ -168,6 +169,9 @@ export function registerSelfProgrammingTools(
       if (skillManager && skillManager.loadFromFile) {
         try {
           await skillManager.loadFromFile(jsonPath, { autoEnable: true });
+          // 新 skill 注册后立即失效 tool-search BM25 全量索引缓存，
+          // 让 LLM 下一轮调用 tool_discover 时能搜到新 skill
+          invalidateFullCatalogCache();
         } catch (loadError) {
           console.error(`[self.create_skill] 加载技能失败:`, loadError);
           return {
@@ -177,7 +181,7 @@ export function registerSelfProgrammingTools(
           };
         }
       }
-      
+
       return {
         ok: true,
         skillId: skillName,
@@ -237,6 +241,8 @@ export function registerSelfProgrammingTools(
         // 重新加载技能
         if (skillManager.loadFromFile) {
           await skillManager.loadFromFile(jsonPath, { autoEnable: true });
+          // skill 更新后失效 tool-search BM25 索引缓存
+          invalidateFullCatalogCache();
         }
       }
       
@@ -288,7 +294,9 @@ export function registerSelfProgrammingTools(
       
       // 卸载技能
       skillManager.uninstall(skillName);
-      
+      // skill 删除后失效 tool-search BM25 索引缓存
+      invalidateFullCatalogCache();
+
       // 删除文件
       await rm(skillDir, { recursive: true, force: true });
       

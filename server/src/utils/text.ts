@@ -43,7 +43,11 @@ export function dedupeAdjacentLines(text: string): string {
  * - 短文本（≤40字）保留原样，通常是简短的思考说明
  */
 export function formatStatusForDisplay(rawLine: string): string {
-  const t = rawLine.trim();
+  let t = rawLine.trim();
+  if (!t) return "";
+  // 先剥离 [ts:...] 时间戳前缀：LLM 在 tool loop 思考阶段常把对话历史的时间戳
+  // 前缀"复述"进 fullText，若不清理会推到前端成乱码（如 [ts:2026-07-21 14:52:48|周二|13s…）
+  t = t.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
   if (!t) return "";
   // 短文本直接保留（通常是简短思考/动作说明，不会是结果内容）
   if (t.length <= 40) return t;

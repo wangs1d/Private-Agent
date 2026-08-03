@@ -38,14 +38,20 @@ export type PlanExecuteLoopResult = {
   modelCalls: number;
   plan: TaskExecutionPlan | null;
   /**
-   * @deprecated P2 保留：当前恒为 false。P3 ProgressTracker 就绪后激活——
-   * execute 后调 ProgressTracker.assess()，未达 successCriteria 则置 true。
-   * 保留字段避免破坏 turn-lifecycle 的 trajectory 观察语义。
+   * 反思环节是否耗尽 replan 次数。
+   *
+   * 激活方式：调用方（通常是 PlanExecuteLoopStrategy）传入 `reflectionContext` 时，
+   * 由 `replanCount >= maxReplans` 计算；未传入时为 false（兼容旧路径/直调场景）。
+   *
+   * 在 LoopOrchestrator 模型下，反思由编排器在 strategy.run 之间驱动（assess→replan），
+   * 单次 runPlanExecuteLoop 调用时通常未耗尽；任务级"是否耗尽"以 OrchestratorResult.exhaustedRetries 为准。
    */
   exhaustedRetries: boolean;
   /**
-   * @deprecated P2 保留：当前恒为 ""。P3 ProgressTracker 就绪后激活——
-   * 填入进展评估的反思文本。保留字段避免破坏 turn-lifecycle 的 trajectory 观察。
+   * 最近一次进展评估的反思文本。
+   *
+   * 激活方式：调用方传入 `reflectionContext.lastDeviation` 时回填；未传入时为空串。
+   * 任务级反思聚合见 SharedTaskContext.reflections / OrchestratorResult.verifyReflection。
    */
   verifyReflection: string;
 };
@@ -194,6 +200,16 @@ type RunPlanExecuteLoopArgs = {
   /** 不包含 toolLoop（由编排器在每轮执行拼接） */
   baseStreamOpts: AgentStreamOptions | undefined;
   onToolBatchForExecute?: ((info: ToolLoopAfterBatchInfo) => void) | undefined;
+  /**
+   * 反思上下文（可选）。由编排器/PlanExecuteLoopStrategy 传入，用于激活
+   * exhaustedRetries / verifyReflection 字段（不再恒 false/""）。
+   * 不传则保持默认（兼容旧路径直调与 PlannerCortex 适配器）。
+   */
+  reflectionContext?: {
+    replanCount: number;
+    maxReplans: number;
+    lastDeviation?: string;
+  };
 };
 
 export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<PlanExecuteLoopResult> {
@@ -208,7 +224,14 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     onToolBatchForExecute,
     onPhaseStatus,
     onPlanReady,
+    reflectionContext,
   } = args;
+
+  // 反思字段激活：由调用方传入的 reflectionContext 驱动；未传入时为默认值（兼容旧路径）。
+  const exhaustedRetries = reflectionContext
+    ? reflectionContext.replanCount >= reflectionContext.maxReplans
+    : false;
+  const verifyReflection = reflectionContext?.lastDeviation ?? "";
 
   provider.clearSession?.(planSessionId);
 
@@ -269,8 +292,8 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
       finalText: full,
       modelCalls,
       plan: null,
-      exhaustedRetries: false,
-      verifyReflection: "",
+      exhaustedRetries,
+      verifyReflection,
     };
   }
 
@@ -313,7 +336,7 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     finalText: full,
     modelCalls,
     plan,
-    exhaustedRetries: false,
-    verifyReflection: "",
+    exhaustedRetries,
+    verifyReflection,
   };
 }

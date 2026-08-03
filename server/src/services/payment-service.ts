@@ -195,6 +195,7 @@ export class PaymentService {
         "Authorization": `WECHATPAY2-SHA256-RSA2048 mchid="${wechatMchId}",nonce_str="${nonceStr}",signature="${signature}",timestamp="${timestamp}",serial_no="${this.config.wechatCertSerialNo || ""}"`,
       },
       body: bodyStr,
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
@@ -314,6 +315,7 @@ export class PaymentService {
         "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
       },
       body: formBody,
+      signal: AbortSignal.timeout(30_000),
     });
 
     const responseText = await response.text();
@@ -435,6 +437,7 @@ export class PaymentService {
           "Accept": "application/json",
           "Authorization": `WECHATPAY2-SHA256-RSA2048 mchid="${wechatMchId}",nonce_str="${nonceStr}",signature="${signature}",timestamp="${timestamp}",serial_no="${this.config.wechatCertSerialNo || ""}"`,
         },
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!response.ok) {
@@ -515,6 +518,7 @@ export class PaymentService {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" },
         body: formBody,
+        signal: AbortSignal.timeout(30_000),
       });
 
       const responseText = await response.text();

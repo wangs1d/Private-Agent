@@ -1,14 +1,29 @@
 /**
- * 搜索增强模块：缓存 + RSS 健康检查 + 搜索意图识别 + 跨查询复用
+ * 搜索增强模块：缓存 + RSS 健康检查 + 搜索意图识别 + 跨查询复用 + 时效性 + 质量评分
  *
- * 四个独立能力，可单独或组合使用：
+ * 六个独立能力，可单独或组合使用：
  *   1. SearchCache：内存 LRU + TTL，重复查询零成本
  *   2. RssHealthMonitor：RSS 源健康检查，连续失败自动降级
  *   3. SearchIntentClassifier：识别查询意图（对比/调研/价格/最新），影响搜索策略
  *   4. SessionSearchCache：同会话内跨查询复用结果片段
+ *   5. Freshness：时效性过滤、排序、日期推断（原 search-freshness.ts）
+ *   6. QualityScoring + Retry：质量评分排序 + 指数退避重试
  */
 
 import type { InfoSearchItem } from "./info-hub-service.js";
+
+// ============================================================
+// 0. 时效性常量（原 search-freshness.ts）
+// ============================================================
+
+const DEFAULT_TIMEZONE = "Asia/Shanghai";
+const DEFAULT_MAX_AGE_DAYS = Number(process.env.SEARCH_MAX_ITEM_AGE_DAYS ?? 120);
+
+const STALE_QUERY_ALLOW_RE =
+  /历史|去年|往年|回顾|成立于|发展历程|发展史|是什么|百科|维基|wiki|历年|过去\d+年/i;
+
+const RECENCY_QUERY_BOOST_RE =
+  /最新|最近|今天|今日|昨晚|刚刚|实时|新闻|股价|行情|公告|热映|排片|电影|天气|价格|赛程|版本|发布|动态|头条|资讯|调研|公司|股票|\d{6}\b|20\d{2}年?\d{0,2}月?/i;
 
 // ============================================================
 // 1. SearchCache：内存 LRU + TTL
@@ -208,34 +223,78 @@ export function classifySearchIntent(query: string): IntentAnalysis {
     }
   }
 
-  // 提取核心实体
+  // 提取核心实体（按优先级：先抓「最具体」的实体，如 GPT-5、A股、蜘蛛侠4）
   const entities: string[] = [];
+  const pushEntity = (s: string) => {
+    const t = s.trim();
+    if (!t) return;
+    if (!entities.includes(t)) entities.push(t);
+  };
 
   // 1. 移除时效性词汇，剩余部分作为核心实体
   const cleaned = q.replace(/最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|怎么样|如何|是什么|什么是|什么意思|breaking|news|event|latest|recent|current|today/gi, " ");
 
-  // 2. 中文连续段（2 字以上，降低阈值提高召回）
-  const cnRuns = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,10}/gu)].map((m) => m[0]);
-  for (const run of cnRuns.sort((a, b) => b.length - a.length).slice(0, 3)) {
-    if (!/^(最新|最近|今日|今天|什么|怎么|为什么|怎么样|了解|调研|分析|介绍|发生|事件)$/u.test(run)) {
-      entities.push(run);
-    }
+  // 2. 英文-数字型号（如 GPT-5、Claude-4、iPhone 17、MacBook M5、Switch 2、PS5）— 最具体的实体，优先
+  //    模式：英文(可含数字) + 可选分隔符 + 数字/字母数字
+  const enDigitRuns = [
+    ...cleaned.matchAll(/[A-Za-z][A-Za-z0-9]{0,15}[\s\-_]?\d{1,3}[A-Za-z]?\b/g),
+  ].map((m) => m[0].trim());
+  for (const run of enDigitRuns) {
+    if (/^\d+$/.test(run)) continue;
+    pushEntity(run);
+  }
+
+  // 2.5 中文-数字型号（如 蜘蛛侠4、华为Mate60、iPhone15Pro）— 中文主体+数字版本
+  //     模式：1-N 个中文字符 + 可选 1-N 个英文/数字 + 1-3 个数字
+  const cnDigitRuns = [
+    ...cleaned.matchAll(/[\u4e00-\u9fff]{1,8}[A-Za-z0-9]{0,8}[\s\-_]?\d{1,3}[A-Za-z]?\b/g),
+  ].map((m) => m[0].trim()).filter((s) => /[\u4e00-\u9fff]/.test(s) && /\d/.test(s));
+  for (const run of cnDigitRuns) {
+    if (/^\d+$/.test(run)) continue;
+    pushEntity(run);
   }
 
   // 3. 中英混合词（如 A股、B股、H股、AI芯片）— 关键实体
   const mixedRuns = [...cleaned.matchAll(/[a-zA-Z]{1,3}[\u4e00-\u9fff]{1,4}/gu)].map((m) => m[0]);
   for (const run of mixedRuns) {
-    entities.push(run);
+    pushEntity(run);
   }
 
-  // 4. 英文实体（大写开头的词组，如 OpenAI、iPhone）
-  const enRuns = [...cleaned.matchAll(/\b[A-Z][a-zA-Z]{2,}\b/g)].map((m) => m[0]);
-  entities.push(...enRuns.slice(0, 2));
+  // 4. 中文连续段（2 字以上）
+  const cnRuns = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,10}/gu)].map((m) => m[0]);
+  for (const run of cnRuns.sort((a, b) => b.length - a.length).slice(0, 3)) {
+    if (!/^(最新|最近|今日|今天|什么|怎么|为什么|怎么样|了解|调研|分析|介绍|发生|事件|动态|新闻|消息|资讯|情况|怎么样|如何|意思|含义)$/u.test(run)) {
+      pushEntity(run);
+    }
+  }
 
-  // 5. 英文小写词（如 ai、gpt）
+  // 5. 英文实体（大写开头的词组，如 OpenAI、Apple）
+  const enRuns = [...cleaned.matchAll(/\b[A-Z][a-zA-Z]{2,}\b/g)].map((m) => m[0]);
+  for (const e of enRuns.slice(0, 2)) {
+    pushEntity(e);
+  }
+
+  // 6. 英文小写词（如 ai、gpt、tesla）
   const enLower = [...cleaned.matchAll(/\b[a-z]{2,}\b/gi)].map((m) => m[0].toLowerCase())
-    .filter((w) => !/^(the|and|for|with|how|what|when|where|why)$/i.test(w));
-  entities.push(...enLower.slice(0, 2));
+    .filter((w) => !/^(the|and|for|with|how|what|when|where|why|how|is|are)$/i.test(w));
+  for (const w of enLower.slice(0, 2)) {
+    pushEntity(w);
+  }
+
+  // === 实体排序：把「最具体」的实体放前面 ===
+  // 优先级：英文-数字型号 > 中文-数字型号 > 中英混合 > 长中文段 > 短中文段 > 纯英文
+  const entityPriority = (e: string): number => {
+    if (/[A-Za-z]/.test(e) && /\d/.test(e)) return 0; // 字母+数字
+    if (/[\u4e00-\u9fff]/.test(e) && /\d/.test(e)) return 1; // 中文+数字
+    if (/[a-zA-Z][\u4e00-\u9fff]|[\u4e00-\u9fff][a-zA-Z]/.test(e)) return 2; // 中英混合
+    if (/^[\u4e00-\u9fff]+$/.test(e)) {
+      // 中文实体：长度优先（4+ 字 > 3 字 > 2 字）
+      return 6 - Math.min(e.length, 4);
+    }
+    if (/^[A-Z]/.test(e)) return 10; // 大写英文
+    return 20; // 小写英文
+  };
+  entities.sort((a, b) => entityPriority(a) - entityPriority(b));
 
   // 建议参数
   const suggestedLimit =
@@ -274,7 +333,7 @@ export class SessionSearchCache {
   constructor(opts: { maxEntriesPerSession?: number; maxAgeMs?: number; similarityThreshold?: number } = {}) {
     this.maxEntriesPerSession = opts.maxEntriesPerSession ?? 10;
     this.maxAgeMs = opts.maxAgeMs ?? 30 * 60 * 1000; // 30 分钟
-    this.similarityThreshold = opts.similarityThreshold ?? 0.3; // 较低阈值，只要有一个核心实体相同就复用
+    this.similarityThreshold = opts.similarityThreshold ?? 0.5; // 提高阈值，避免不相关查询返回旧结果
   }
 
   /** 记录一次搜索结果 */
@@ -342,7 +401,170 @@ function jaccardSimilarity(a: string[], b: string[]): number {
 }
 
 // ============================================================
-// 5. 搜索结果质量评分（相关性 + 权威度 + 时效性）
+// 5. 时效性：日期解析 + 新鲜度过滤/排序（原 search-freshness.ts）
+// ============================================================
+
+export type SearchAnchorNow = {
+  iso: string;
+  year: number;
+  month: number;
+  day: number;
+  label: string;
+};
+
+export function getSearchAnchorNow(timezone = DEFAULT_TIMEZONE): SearchAnchorNow {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(now);
+  const year = Number(parts.find((p) => p.type === "year")?.value ?? now.getUTCFullYear());
+  const month = Number(parts.find((p) => p.type === "month")?.value ?? 1);
+  const day = Number(parts.find((p) => p.type === "day")?.value ?? 1);
+  const label = `${year}年${month}月${day}日`;
+  return { iso: now.toISOString(), year, month, day, label };
+}
+
+export function queryAllowsStaleResults(query: string): boolean {
+  return STALE_QUERY_ALLOW_RE.test(query);
+}
+
+export function shouldBoostQueryRecency(query: string): boolean {
+  if (queryAllowsStaleResults(query)) return false;
+  return RECENCY_QUERY_BOOST_RE.test(query) || query.trim().length > 0;
+}
+
+/** 为必应检索前置「年月 / 最新」变体，提高实时结果占比。 */
+export function prependRecencyQueryVariants(variants: string[], query: string): string[] {
+  if (!shouldBoostQueryRecency(query)) return variants;
+  const anchor = getSearchAnchorNow();
+  const ym = `${anchor.year}年${anchor.month}月`;
+  const core = variants.find((v) => v.length > 0) ?? query.trim();
+  const boosted = [
+    ...variants,
+    `${core} ${ym}`,
+    `${core} 最新`,
+  ];
+  return [...new Set(boosted.map((v) => v.trim()).filter(Boolean))];
+}
+
+export function parsePublishedAtMs(raw?: string): number | undefined {
+  if (!raw?.trim()) return undefined;
+  const text = raw.trim();
+  const direct = Date.parse(text);
+  if (Number.isFinite(direct)) return direct;
+
+  const cn = text.match(/(\d{1,2})\s*(\d{1,2})月\s*(\d{4})/);
+  if (cn) {
+    const d = new Date(Number(cn[3]), Number(cn[2]) - 1, Number(cn[1]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+
+  const cn2 = text.match(/(\d{4})年(\d{1,2})月(\d{1,2})日?/);
+  if (cn2) {
+    const d = new Date(Number(cn2[1]), Number(cn2[2]) - 1, Number(cn2[3]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+
+  return undefined;
+}
+
+export function inferPublishedAtMsFromUrl(url: string): number | undefined {
+  const slash = url.match(/\/(20\d{2})(\d{2})(\d{2})\//);
+  if (slash) {
+    const d = new Date(Number(slash[1]), Number(slash[2]) - 1, Number(slash[3]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+  const dashed = url.match(/\/(20\d{2})-(\d{2})-(\d{2})\//);
+  if (dashed) {
+    const d = new Date(Number(dashed[1]), Number(dashed[2]) - 1, Number(dashed[3]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+  return undefined;
+}
+
+export function inferPublishedAtMsFromText(text: string): number | undefined {
+  const iso = text.match(/(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
+  if (iso) {
+    const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+  return undefined;
+}
+
+export function resolveItemPublishedAtMs(item: InfoSearchItem): number | undefined {
+  return (
+    parsePublishedAtMs(item.publishedAt) ??
+    inferPublishedAtMsFromUrl(item.url) ??
+    inferPublishedAtMsFromText(`${item.title}\n${item.snippet}`)
+  );
+}
+
+export type ApplySearchFreshnessResult = {
+  items: InfoSearchItem[];
+  droppedStale: number;
+  sortedBy: "publishedAtDesc";
+};
+
+export function applySearchFreshness(
+  items: InfoSearchItem[],
+  input: { query: string; maxAgeDays?: number; nowMs?: number },
+): ApplySearchFreshnessResult {
+  const maxAgeDays = input.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS;
+  const nowMs = input.nowMs ?? Date.now();
+  const allowStale = queryAllowsStaleResults(input.query);
+  const maxAgeMs = maxAgeDays * 86_400_000;
+
+  const enriched = items.map((item) => ({
+    item,
+    publishedMs: resolveItemPublishedAtMs(item),
+  }));
+
+  let droppedStale = 0;
+  const kept = allowStale
+    ? enriched
+    : enriched.filter(({ publishedMs }) => {
+        if (publishedMs == null) return true;
+        if (nowMs - publishedMs <= maxAgeMs) return true;
+        droppedStale += 1;
+        return false;
+      });
+
+  kept.sort((a, b) => {
+    const aMs = a.publishedMs;
+    const bMs = b.publishedMs;
+    if (aMs != null && bMs != null) return bMs - aMs;
+    if (aMs != null) return -1;
+    if (bMs != null) return 1;
+    return 0;
+  });
+
+  return {
+    items: kept.map((x) => x.item),
+    droppedStale,
+    sortedBy: "publishedAtDesc",
+  };
+}
+
+export function formatSearchFreshnessNote(input: {
+  anchor: SearchAnchorNow;
+  droppedStale: number;
+  maxAgeDays: number;
+}): string {
+  const parts = [
+    `检索基准时间：${input.anchor.label}（${DEFAULT_TIMEZONE}）`,
+    "结果已按发布时间从新到旧排序",
+  ];
+  if (input.droppedStale > 0) {
+    parts.push(`已剔除 ${input.droppedStale} 条超过 ${input.maxAgeDays} 天的旧结果`);
+  }
+  return parts.join("；");
+}
+
+// ============================================================
+// 6. 搜索结果质量评分（相关性 + 权威度 + 时效性）
 // ============================================================
 
 // 来源权威度评分（0-1）
@@ -401,7 +623,7 @@ export function scoreSearchItem(item: InfoSearchItem, query: string): number {
   // 3. 时效性（越新越高分，1小时内=1.0，1天内=0.8，7天内=0.5，更早=0.3，未知=0.4）
   let freshness = 0.4;
   if (item.publishedAt) {
-    const ts = parseDateMs(item.publishedAt);
+    const ts = parsePublishedAtMs(item.publishedAt);
     if (ts) {
       const ageMin = (Date.now() - ts) / 60000;
       if (ageMin <= 60) freshness = 1.0;
@@ -422,27 +644,8 @@ export function sortByQuality(items: InfoSearchItem[], query: string): InfoSearc
     .map((x) => x.item);
 }
 
-// 解析日期为时间戳（复用 search-freshness 的逻辑，避免循环依赖）
-function parseDateMs(raw?: string): number | undefined {
-  if (!raw?.trim()) return undefined;
-  const text = raw.trim();
-  const direct = Date.parse(text);
-  if (Number.isFinite(direct)) return direct;
-  const cn = text.match(/(\d{1,2})\s*(\d{1,2})月\s*(\d{4})/);
-  if (cn) {
-    const d = new Date(Number(cn[3]), Number(cn[2]) - 1, Number(cn[1]));
-    if (Number.isFinite(d.getTime())) return d.getTime();
-  }
-  const cn2 = text.match(/(\d{4})年(\d{1,2})月(\d{1,2})日?/);
-  if (cn2) {
-    const d = new Date(Number(cn2[1]), Number(cn2[2]) - 1, Number(cn2[3]));
-    if (Number.isFinite(d.getTime())) return d.getTime();
-  }
-  return undefined;
-}
-
 // ============================================================
-// 6. 带重试的异步执行（指数退避）
+// 7. 带重试的异步执行（指数退避）
 // ============================================================
 
 /**
@@ -457,9 +660,9 @@ export async function withRetry<T>(
   fn: () => Promise<T>,
   opts: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number } = {},
 ): Promise<T> {
-  const maxRetries = opts.maxRetries ?? 2;
-  const baseDelayMs = opts.baseDelayMs ?? 200;
-  const maxDelayMs = opts.maxDelayMs ?? 2000;
+  const maxRetries = opts.maxRetries ?? 1;
+  const baseDelayMs = opts.baseDelayMs ?? 150;
+  const maxDelayMs = opts.maxDelayMs ?? 1000;
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {

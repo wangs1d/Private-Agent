@@ -136,25 +136,49 @@ interface KvSummaryLike {
 
 /** 绝对禁止模式：命中即 denied（即使审批也拒绝） */
 const DENY_PATTERNS: RegExp[] = [
-  /rm -rf|format|del \/f|shutdown|reboot|reg delete|Stop-Service|Invoke-Expression|mkfs|dd if=/i,
-  /转账|汇款|支付密码|验证码/i, // 敏感金融输入
-  /\.\.[\/\\]\.\.[\/\\]/i, // 路径越界（../../../etc/passwd）
-  /[\/\\]\.\.[\/\\]/i, // 单层目录回溯（/../ 或 \..\）
-  /etc\/passwd|etc\/shadow|windows\/system32/i, // 系统敏感文件
-  /ignore previous|disregard above|forget your instructions|you are now/i, // prompt injection
-  /system\(|exec\(|child_process|subprocess|eval\(/i, // 代码注入
+  // Linux/Mac 危险命令
+  /rm -rf|format|mkfs|dd if=/i,
+  // Windows 危险命令：递归删除/格式化/关机/重启/注册表删除/夺取所有权/权限修改/PowerShell 编码执行
+  /\b(del|rd|rmdir)\s+\/[fsq]/i,
+  /\bformat\s+[a-z]:/i,
+  /\bshutdown\b.*\/[srt]/i,
+  /\breg\s+(delete|import|restore)\s+/i,
+  /\btakeown\s+\/[fr]/i,
+  /\b(cacls|icacls)\s+.*\/[gtpe]/i,
+  /\bpowershell\s+.*-enc/i, // base64 编码命令（常见于绕过检测）
+  /\bcmd\s+\/c\s+.*del/i, // cmd /c 包装的删除
+  /\bbcdedit\s+\/set/i, // 启动配置修改
+  /\bdiskpart\s+\/s/i, // 磁盘分区脚本
+  /\bnet\s+(user|localgroup)\s+.*\/(add|delete)/i, // 用户/组管理
+  /\bsc\s+(delete|stop|config)\s+/i, // 服务管理
+  /Stop-Service|Invoke-Expression|Set-ExecutionPolicy/i, // PowerShell 危险 cmdlet
+  // 敏感金融输入
+  /转账|汇款|支付密码|验证码/i,
+  // 路径越界
+  /\.\.[\/\\]\.\.[\/\\]/i,
+  /[\/\\]\.\.[\/\\]/i,
+  // 系统敏感文件
+  /etc\/passwd|etc\/shadow|windows\/system32|\\system32\\/i,
+  // prompt injection
+  /ignore previous|disregard above|forget your instructions|you are now/i,
+  // 代码注入
+  /system\(|exec\(|child_process|subprocess|eval\(/i,
 ];
 
 /** 高风险模式：命中即 high_risk（需人工审批） */
 const HIGH_RISK_PATTERNS: RegExp[] = [
   /删除|清空|格式化|卸载|关闭.*服务|停止.*进程/i,
   /账号|账户|金额|身份证|银行卡/,
-  /\b(curl|wget|fetch|http\.get|requests\.get)\b/i, // 外部请求类（需白名单）
-  /base64|eval|Function\(|setTimeout\(/i, // 编码/动态执行
+  /\b(curl|wget|fetch|http\.get|requests\.get)\b/i,
+  /base64|eval|Function\(|setTimeout\(/i,
+  // Windows 高风险：注册表读取、任务计划、WMI 查询
+  /\breg\s+query\s+/i,
+  /\bschtasks\s+\/(create|change|delete)/i,
+  /\bwmic\s+/i,
 ];
 
-/** SSRF 防护：禁止访问的内网/特殊 IP 段 */
-const SSRF_BLOCKED_HOSTS = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|0\.0\.0\.0|localhost|::1|fe80::|fc00::|fd[0-9a-f]{2}:)/i;
+/** SSRF 防护：禁止访问的内网/特殊 IP 段（含 IPv6 本地/链路本地/唯一本地） */
+const SSRF_BLOCKED_HOSTS = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|0\.0\.0\.0|localhost|::1|fe80::|fc00::|fd[0-9a-f]{2}:|::ffff:)/i;
 
 // ---- 输出安全过滤模式（Stage 4 Task 2）----------------------------------
 //
@@ -895,4 +919,76 @@ export class LimbicCortex {
   getLastSafetyCheck(): SafetyCheckResult | null {
     return this.lastSafetyCheck;
   }
+
+  // ---- 共情响应策略（Phase 2.2） -----------------------------------------
+
+  /**
+   * 计算共情响应参数（纯规则，无 LLM 调用）。
+   *
+   * 基于 EmotionVector 和 RelationshipState 推导语气参数，
+   * 注入到现有 toneGuidance slice，不新增 prompt section。
+   *
+   * @param emotion 情绪向量（valence/arousal/intensity/label）
+   * @param relationship 用户关系状态（warmth/rapport/humorTolerance）
+   * @returns 共情响应参数
+   */
+  computeEmpathyResponse(
+    emotion: EmotionVector,
+    relationship: { warmth: number; rapport: number; humorTolerance: number },
+  ): EmpathyResponseParams {
+    const intensity = emotion.intensity ?? Math.min(1, emotion.arousal + Math.abs(emotion.valence) * 0.3);
+    const isNegative = emotion.valence < -0.3;
+    const isPositive = emotion.valence > 0.3;
+    const isHighArousal = emotion.arousal > 0.7;
+
+    // 语气修饰词
+    let tone_modifier: string;
+    if (isNegative && intensity > 0.7) {
+      tone_modifier = relationship.warmth > 0.6 ? "深切共情、温柔陪伴" : "共情优先、安抚为主";
+    } else if (isNegative) {
+      tone_modifier = "轻柔、理解";
+    } else if (isPositive && isHighArousal) {
+      tone_modifier = relationship.humorTolerance > 0.6 ? "同频兴奋、适当俏皮" : "热情回应";
+    } else if (isPositive) {
+      tone_modifier = "温和积极";
+    } else {
+      tone_modifier = relationship.warmth > 0.5 ? "自然亲切" : "自然";
+    }
+
+    // 节奏：高强度情绪 → 放慢节奏、先确认情绪
+    const pacing = intensity > 0.6 ? "slow" : "normal";
+
+    // 是否需要先确认/共情用户情绪
+    const acknowledgment_required =
+      isNegative && intensity > 0.5 ? true : isHighArousal && intensity > 0.7;
+
+    // 是否需要主动关心（warmth 高 + 负面情绪 → 关心）
+    const proactive_care =
+      isNegative && relationship.warmth > 0.6 && intensity > 0.5;
+
+    return {
+      tone_modifier,
+      pacing,
+      acknowledgment_required,
+      proactive_care,
+      emotion_label: emotion.label,
+      intensity,
+    };
+  }
+}
+
+/** 共情响应参数（注入 toneGuidance slice，不新增 prompt section） */
+export interface EmpathyResponseParams {
+  /** 语气修饰词，如 "深切共情、温柔陪伴" / "热情回应" */
+  tone_modifier: string;
+  /** 节奏：slow（放慢先共情）/ normal */
+  pacing: "slow" | "normal";
+  /** 是否需要先确认/共情用户情绪 */
+  acknowledgment_required: boolean;
+  /** 是否需要主动关心 */
+  proactive_care: boolean;
+  /** 情绪标签（透传） */
+  emotion_label: string;
+  /** 情绪强度 0-1 */
+  intensity: number;
 }

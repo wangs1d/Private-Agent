@@ -1,105 +1,60 @@
 import OpenAI from "openai";
 
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-
-
-
 import {
-
   buildLayeredSystemPrompt,
-
   finalizeChatSystemPrompt,
-
 } from "../../agent/prompt-builder.js";
-
+import { preparePromptCachePlan } from "../prefix-cache.js";
 import {
-
-  streamCompletionWithTools,
-
-} from "../openai-compatible-tool-loop.js";
-import {
-
-  applyPromptCacheMessages,
-
-  preparePromptCachePlan,
-
-} from "../prefix-cache.js";
-
-import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
-import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
-
-import { openAiUserContentFromTurn } from "../build-user-message-content.js";
-
-import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
-
-import {
-  adaptOpenAiChatCompletionStream,
-  consumeNormalizedStream,
-  pickVisibleText,
-  StreamIdleTimeoutError,
-} from "../stream-chat-helpers.js";
-
-import type {
-
-  AgentStreamOptions,
-
-  ChatToolExecutionContext,
-
-  ChatUserTurn,
-
-  ExternalChatProvider,
-
-  StreamDeltaHandler,
-
-} from "../types.js";
-
-
+  AbstractChatProvider,
+  type SystemAndPlanContext,
+  type SystemAndPlanResult,
+} from "../abstract-chat-provider.js";
+import type { AgentStreamOptions } from "../types.js";
 
 const SYSTEM_PROMPT =
-
   "You are a helpful, safe assistant. Respond in the same language the user uses when appropriate (Chinese or English). Refuse requests involving illegal or harmful content.";
 
-
-
 /**
-
  * OpenAI 官方 Chat Completions（流式）。
-
  * 环境变量：`OPENAI_API_KEY`（必填以启用）、`OPENAI_MODEL`、`OPENAI_BASE_URL`（可选，默认官方端点）。
-
+ *
+ * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、
+ * thread 维护等公共逻辑由基类模板方法固化，本类只实现 OpenAI 特有的 system prompt 缓存、
+ * 智能模型路由与 extraBody 构造。
  */
-
-export class OpenAiOfficialProvider implements ExternalChatProvider {
-
+export class OpenAiOfficialProvider extends AbstractChatProvider {
   readonly id = "openai";
-
   readonly displayLabel = "OpenAI";
+  readonly capabilities = {
+    toolCallingProtocol: "openai" as const,
+    supportsParallelToolCalls: true,
+    supportsVision: true,
+    supportsThinking: false,
+    supportsStreaming: true,
+  };
 
-  private readonly client: OpenAI | null;
-
-  private readonly model: string;
-
-  private readonly threads = getChatThreadStore();
+  protected readonly systemPrompt = SYSTEM_PROMPT;
+  protected readonly notEnabledErrorMessage = "OPENAI_API_KEY is not set";
+  protected readonly client: OpenAI | null;
+  protected readonly model: string;
 
   /**
    * System Prompt 缓存：避免重复构建相同的 System Prompt
    * 预期效果：System prompt 构建时间减少 90%
    */
   private systemPromptCache = new Map<string, { content: string; timestamp: number }>();
-  
+
   private static readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5分钟缓存
   private static readonly MAX_CACHE_SIZE = 100; // 最大缓存条目数
 
   constructor() {
-
+    super();
     const apiKey = process.env.OPENAI_API_KEY?.trim();
-
     const baseURL = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim();
-
     this.model = (process.env.OPENAI_MODEL ?? "gpt-4o-mini").trim();
-
     this.client = apiKey
-      ? new OpenAI({ apiKey, baseURL, timeout: 180_000 })
+      ? new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 2 })
       : null;
 
     // 定期清理过期缓存（每10分钟）
@@ -111,24 +66,15 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
    */
   private cleanupCache(): void {
     const now = Date.now();
-    let cleaned = 0;
-    
     for (const [key, value] of this.systemPromptCache) {
       if (now - value.timestamp > OpenAiOfficialProvider.CACHE_TTL_MS) {
         this.systemPromptCache.delete(key);
-        cleaned++;
       }
     }
-    
-    if (cleaned > 0) {
-      // 静默清理过期缓存
-    }
-    
     // 如果缓存仍然过大，删除最旧的条目
     if (this.systemPromptCache.size > OpenAiOfficialProvider.MAX_CACHE_SIZE) {
       const entries = [...this.systemPromptCache.entries()]
         .sort((a, b) => a[1].timestamp - b[1].timestamp);
-      
       const toDelete = entries.slice(0, this.systemPromptCache.size - OpenAiOfficialProvider.MAX_CACHE_SIZE);
       toDelete.forEach(([key]) => this.systemPromptCache.delete(key));
     }
@@ -139,7 +85,7 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
    */
   private getCachedOrBuildSystemPrompt(
     baseContent: string,
-    finalizeOptions: NonNullable<Parameters<typeof finalizeChatSystemPrompt>[1]>
+    finalizeOptions: NonNullable<Parameters<typeof finalizeChatSystemPrompt>[1]>,
   ): string {
     const cacheKey = JSON.stringify({
       baseContent: baseContent.slice(0, 500), // 只取前500字符作为key的一部分
@@ -148,28 +94,29 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
       agentAccessMode: finalizeOptions.agentAccessMode,
       desktopBridgeOnline: finalizeOptions.desktopBridgeOnline,
       phoneBridgeOnline: finalizeOptions.phoneBridgeOnline,
+      suppressRuntimeSuffixes: finalizeOptions.suppressRuntimeSuffixes,
+      functionalSuffixes: finalizeOptions.functionalSuffixes,
     });
-    
+
     const cached = this.systemPromptCache.get(cacheKey);
     const now = Date.now();
-    
+
     if (cached && (now - cached.timestamp) < OpenAiOfficialProvider.CACHE_TTL_MS) {
       return cached.content;
     }
-    
+
     const sysContent = finalizeChatSystemPrompt(baseContent, finalizeOptions);
-    
+
     this.systemPromptCache.set(cacheKey, {
       content: sysContent,
       timestamp: now,
     });
-    
+
     return sysContent;
   }
 
   /** 手动清除所有缓存（用于配置变更等场景） */
   clearSystemPromptCache(): void {
-    const size = this.systemPromptCache.size;
     this.systemPromptCache.clear();
   }
 
@@ -181,24 +128,24 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
     // 如果配置了强制使用特定模型，直接返回
     const forceModel = process.env.FORCE_MODEL?.trim();
     if (forceModel) return forceModel;
-    
+
     // 分析任务复杂度
     const complexity = this.analyzeTaskComplexityForModel(userText, messageCount);
-    
+
     // 可用模型池（按成本从低到高排序）
     const modelPool = [
       { name: process.env.FAST_MODEL || 'gpt-4o-mini', maxComplexity: 0.3 },
       { name: process.env.STANDARD_MODEL || 'gpt-4o', maxComplexity: 0.7 },
       { name: process.env.POWER_MODEL || 'gpt-4-turbo', maxComplexity: 1.0 },
     ];
-    
+
     // 选择最适合的模型
     for (const modelConfig of modelPool) {
       if (complexity <= modelConfig.maxComplexity) {
         return modelConfig.name;
       }
     }
-    
+
     // 默认返回标准模型
     return this.model;
   }
@@ -209,347 +156,104 @@ export class OpenAiOfficialProvider implements ExternalChatProvider {
    */
   private analyzeTaskComplexityForModel(userText: string, messageCount: number): number {
     let score = 0;
-    
+
     // 1. 文本长度评分 (0 - 0.25)
     if (userText.length > 1000) score += 0.25;
     else if (userText.length > 500) score += 0.18;
     else if (userText.length > 200) score += 0.12;
     else if (userText.length > 50) score += 0.06;
-    
+
     // 2. 问题数量评分 (0 - 0.15)
     const questionCount = (userText.match(/[？?。]/g) || []).length;
     score += Math.min(questionCount * 0.05, 0.15);
-    
+
     // 3. 关键词复杂度评分 (0 - 0.25)
     const complexKeywords = [
       '分析', 'analyze', '比较', 'compare', '总结', 'summarize',
       '优化', 'optimize', '设计', 'design', '实现', 'implement',
       '架构', 'architecture', '算法', 'algorithm', '推理', 'reasoning'
     ];
-    const matchedKeywords = complexKeywords.filter(kw => 
+    const matchedKeywords = complexKeywords.filter(kw =>
       userText.toLowerCase().includes(kw)
     ).length;
     score += Math.min(matchedKeywords * 0.05, 0.25);
-    
+
     // 4. 上下文长度评分 (0 - 0.20)
     if (messageCount > 10) score += 0.20;
     else if (messageCount > 6) score += 0.15;
     else if (messageCount > 3) score += 0.08;
-    
+
     // 5. 特殊模式检测 (0 - 0.15)
     const hasCodeBlock = userText.includes('```') || userText.includes('code');
     const hasMathExpression = /[\+\-\*\/\=\<\>\{\}]/.test(userText);
     const hasStructuredData = userText.includes('{') && userText.includes('}');
-    
+
     if (hasCodeBlock) score += 0.08;
     if (hasMathExpression) score += 0.04;
     if (hasStructuredData) score += 0.03;
-    
+
     return Math.min(score, 1.0);
   }
 
+  // ── 基类钩子实现 ──────────────────────────────────────────────
 
-
-  isEnabled(): boolean {
-
-    return this.client !== null;
-
+  /** 智能模型路由：override 优先，否则按任务复杂度选择。 */
+  protected resolveModel(
+    streamOpts: AgentStreamOptions | undefined,
+    userText: string,
+    msgCount: number,
+  ): string {
+    const override = streamOpts?.modelOverride?.trim();
+    if (override) return override;
+    return this.selectOptimalModel(userText, msgCount);
   }
 
-
-
-  clearSession(sessionId: string): void {
-
-    this.threads.clearSession(sessionId);
-
+  /**
+   * 构造 extraBody：thinking 开关 + fastProfile（Fast 模式跳过强制 tool_choice）。
+   * 仅用于工具分支（applyExtraBodyToPlainRequest 默认 false，非工具分支不 spread）。
+   */
+  protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
+    const out: Record<string, unknown> = {};
+    if (effectiveStreamOpts.disableThinking) {
+      out.thinking = { type: "disabled" };
+    }
+    if (effectiveStreamOpts.toolExposureProfile === "contextual" || effectiveStreamOpts.toolExposureProfile === "light") {
+      out.fastProfile = true;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
+  /**
+   * 构建 system 内容（走 5 分钟 LRU 缓存 + 分层 prompt）与 prompt cache plan。
+   */
+  protected buildSystemAndPlan(ctx: SystemAndPlanContext): SystemAndPlanResult {
+    const finalizeOptions = {
+      tools: Boolean(ctx.tools && !ctx.overrideSys),
+      masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
+      agentAccessMode: ctx.streamOpts?.agentAccessMode,
+      desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
+      phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,
+      ...(ctx.suppressSuffixes ? {
+        suppressRuntimeSuffixes: true,
+        functionalSuffixes: ctx.streamOpts?.functionalSuffixes !== false,
+      } : {}),
+    };
 
+    const baseContent = ctx.overrideSys
+      ? ctx.overrideSys
+      : buildLayeredSystemPrompt(SYSTEM_PROMPT, ctx.promptMemory);
+    const sysContent = this.getCachedOrBuildSystemPrompt(baseContent, finalizeOptions);
 
-  appendThreadTurn(
-
-    sessionId: string,
-
-    userTurn: ChatUserTurn,
-
-    assistantText: string,
-
-    maxThreadMessages?: number,
-
-  ): void {
-
-    this.threads.appendTurn(sessionId, SYSTEM_PROMPT, userTurn, assistantText, maxThreadMessages);
-
-  }
-
-
-
-  private thread(sessionId: string): ChatCompletionMessageParam[] {
-
-    return this.threads.thread(sessionId, SYSTEM_PROMPT);
-
-  }
-
-
-
-  private trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
-
-    this.threads.trimThread(msgs, maxMessages);
-
-  }
-
-
-
-  async streamCompletion(
-
-    sessionId: string,
-
-    userTurn: ChatUserTurn,
-
-    onDelta: StreamDeltaHandler,
-
-    tools?: ChatToolExecutionContext,
-
-    streamOpts?: AgentStreamOptions,
-
-  ): Promise<string> {
-
-    if (!this.client) {
-
-      throw new Error("OPENAI_API_KEY is not set");
-
-    }
-
-    const ephemeral = streamOpts?.ephemeralTurn === true;
-
-    const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
-
-
-
-    const overrideSys = streamOpts?.systemPromptOverride?.trim();
-    const promptMemory = streamOpts?.promptContext?.memory;
-
-    const baseContent = overrideSys
-      ? overrideSys
-      : buildLayeredSystemPrompt(SYSTEM_PROMPT, streamOpts?.promptContext?.memory);
-
-    // 使用缓存的 System Prompt（性能优化：减少 90% 构建时间）
-    const sysContent = this.getCachedOrBuildSystemPrompt(baseContent, {
-      tools: Boolean(tools && !overrideSys),
-      masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-      agentAccessMode: streamOpts?.agentAccessMode,
-      desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
-      phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
-    });
-
-    if (ephemeral || msgs.length === 0) {
-
-      msgs.push({ role: "system", content: sysContent });
-
-    } else {
-
-      msgs[0] = { role: "system", content: sysContent };
-
-    }
-
-    // 支持「编辑同 clientMessageId 的 user 消息并重发」：先把该消息及其后续内容删掉。
-    // 截断后再重算 turnStartLen，确保异常回滚到本轮开始时的真实状态。
-    if (!ephemeral && userTurn.clientMessageId) {
-      this.threads.removeUserMessageAndAfter(sessionId, userTurn.clientMessageId);
-    }
-    const turnStartLen = msgs.length;
-    const userMsg = {
-      role: "user",
-      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn)),
-    } as ChatCompletionMessageParam;
-    tagUserMessageClientId(userMsg, userTurn.clientMessageId);
-    msgs.push(userMsg);
-
-    if (!ephemeral) {
-
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
-
-    }
-
-
-
-    // 智能模型路由：根据任务复杂度选择最优模型（性能优化：成本 -40%, 速度 +20%）
-    let model = streamOpts?.modelOverride?.trim();
-
-    if (!model) {
-      model = this.selectOptimalModel(userTurn.text, msgs.length);
-    }
-
-    const toolPlan = tools
-      ? resolveChatToolPlanForStream(userTurn.text, streamOpts)
-      : null;
-    const toolSearchPrepared = toolPlan
-      ? prepareToolsWithToolSearch(toolPlan.visibleTools, toolPlan.searchableTools)
-      : null;
     const promptPlan = preparePromptCachePlan({
       providerId: this.id,
-      model,
-      baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
-      memory: overrideSys ? undefined : promptMemory,
-      finalizeOptions: {
-        tools: Boolean(tools && !overrideSys),
-        masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-        agentAccessMode: streamOpts?.agentAccessMode,
-        desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
-        phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
-      },
-      tools: toolSearchPrepared?.visibleTools,
-      variant: tools ? "chat-tools" : "chat",
+      model: ctx.model,
+      baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
+      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
+      finalizeOptions,
+      tools: ctx.toolSearchPrepared?.visibleTools,
+      variant: ctx.tools ? "chat-tools" : "chat",
     });
 
-
-    if (tools) {
-
-      try {
-
-        const full = await streamCompletionWithTools(
-
-          this.client,
-
-          model,
-
-          msgs,
-
-          onDelta,
-
-          tools,
-
-          {
-
-            onAfterToolBatch: streamOpts?.toolLoop?.onAfterToolBatch,
-
-            tools: toolPlan?.visibleTools ?? [],
-            toolSearchSourceTools: toolPlan?.searchableTools ?? [],
-
-            maxRounds: streamOpts?.toolLoop?.maxRounds,
-
-            extraBody: streamOpts?.disableThinking
-
-              ? { thinking: { type: "disabled" } }
-
-              : undefined,
-
-            promptCache: promptPlan.promptCache,
-
-            requestSystemMessages: promptPlan.requestSystemMessages,
-
-          },
-
-        );
-
-        if (!ephemeral) {
-
-          this.trimThread(msgs, streamOpts?.maxThreadMessages);
-
-          this.threads.afterTurnCompleted(sessionId, msgs);
-
-        }
-
-        return full;
-
-      } catch (e) {
-
-        if (!ephemeral) {
-
-          msgs.length = turnStartLen;
-
-        }
-
-        throw e;
-
-      }
-
-    }
-
-
-
-    let stream;
-
-    try {
-      const request = {
-        model,
-        messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
-        stream: true,
-        ...(promptPlan.promptCache ?? {}),
-      };
-
-      stream = await this.client.chat.completions.create(
-        request as Parameters<typeof this.client.chat.completions.create>[0],
-      ) as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
-
-    } catch (e) {
-
-      msgs.length = turnStartLen;
-
-      throw e;
-
-    }
-
-
-
-    let full = "";
-    let visible = "";
-
-    try {
-
-      // 流式消费走 provider-agnostic helper：content + reasoning_content + tool_calls 统一累积
-      const result = await consumeNormalizedStream(
-        adaptOpenAiChatCompletionStream(
-          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
-        ),
-        {
-          onContentDelta: (d) => onDelta(d),
-          providerId: this.id,
-          model,
-        },
-      );
-      full = result.content;
-      visible = pickVisibleText(result.content, result.reasoning);
-      // content 为空但 reasoning 有内容时，把 reasoning 补发给客户端（一次性）
-      if (!full.trim() && visible) {
-        onDelta(visible);
-      }
-
-    } catch (e) {
-
-      // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
-      if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {
-        visible = e.partialContent.trim();
-        full = visible;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[stream-idle-timeout] provider=${this.id} model=${model} ` +
-            `→ 使用 ${visible.length} 字符的 partial content 兜底`,
-        );
-      } else {
-        msgs.length = turnStartLen;
-        throw e;
-      }
-
-    }
-
-
-
-    if (visible.trim()) {
-      msgs.push({ role: "assistant", content: visible });
-    }
-
-    if (!ephemeral) {
-
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
-
-      this.threads.afterTurnCompleted(sessionId, msgs);
-
-    }
-
-    return visible;
-
+    return { sysContent, promptPlan };
   }
-
 }
-

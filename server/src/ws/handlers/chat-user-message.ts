@@ -9,7 +9,7 @@ import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
 import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
 import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
-import { chunkText, dedupeAdjacentLines, formatStatusForDisplay } from "../../utils/text.js";
+import { formatStatusForDisplay } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
@@ -28,7 +28,6 @@ import {
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
 import {
-  interimAckMessageId,
   LivingInterimController,
   shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
@@ -41,14 +40,71 @@ import {
 import { getToolResultProcessor } from "../../services/tool-result-processor.js";
 import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
+import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { refreshAgentProfileFromTurn } from "../../services/agent-profile-autonomy-service.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
+import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
   getAgentRuntimeConfig().messageBatch,
 );
 
 export { messageBatchProcessor };
+
+/**
+ * Actor 级 AbortController 跟踪:用户发新消息时 abort 旧 controller,
+ * 真正中断进行中的 LLM HTTP 流式请求(节省 tokens/算力)。
+ * 与 messageBatchProcessor 的 isStaleTurn 门控配合:isStale 抑制输出,abort 中断请求。
+ */
+const activeTurnAborters = new Map<string, AbortController>();
+
+/** 中断指定 actor 当前进行中的 LLM 请求(如有)。 */
+function abortActiveTurn(actorId: string): void {
+  const prev = activeTurnAborters.get(actorId);
+  if (prev) {
+    try { prev.abort(); } catch { /* ignore */ }
+    activeTurnAborters.delete(actorId);
+  }
+}
+
+/**
+ * 工具调用成功 + LLM 末轮没出正文时，把工具结果格式化成用户可读的回复文本。
+ * 不再用"已查到见上面"等合成提示语——直接展示工具返回的真实数据。
+ * 返回空串表示无法格式化（上层会走其他回退路径）。
+ */
+function formatToolResultAsReply(toolName: string, result: Record<string, unknown>): string {
+  const t = toolName.toLowerCase();
+  // 搜索类：把标题/摘要/URL 列出来
+  if (t.includes("search_web") || t.includes("web_search") || t.includes("info_hub")) {
+    const items = (result.results ?? result.items ?? []) as Array<Record<string, unknown>>;
+    if (Array.isArray(items) && items.length > 0) {
+      const lines = items.slice(0, 5).map((it, i) => {
+        const title = (it.title ?? "") as string;
+        const url = (it.url ?? it.link ?? "") as string;
+        const snippet = (it.snippet ?? it.summary ?? "") as string;
+        return `${i + 1}. ${title}${url ? `\n   ${url}` : ""}${snippet ? `\n   ${snippet.slice(0, 120)}` : ""}`;
+      });
+      return `查到了 ${items.length} 条结果：\n\n${lines.join("\n\n")}`;
+    }
+    return "";
+  }
+  // 抓取类：返回正文摘要
+  if (t.includes("fetch_web") || t.includes("web_fetch") || t.includes("http_get")) {
+    const title = (result.title ?? "") as string;
+    const content = (result.content ?? result.text ?? result.body ?? "") as string;
+    if (title || content) {
+      return `${title}\n\n${content.slice(0, 800)}`.trim();
+    }
+    return "";
+  }
+  // 天气/时钟/日历：直接 JSON 转可读文本
+  const summary = (result.summary ?? result.description ?? result.text ?? "") as string;
+  if (summary) return String(summary);
+  // 兜底：把 result 的关键字段拼出来，避免完全无内容
+  const keys = Object.keys(result).filter((k) => !["ok", "error"].includes(k));
+  if (keys.length === 0) return "";
+  return keys.map((k) => `${k}: ${JSON.stringify(result[k]).slice(0, 200)}`).join("\n");
+}
 
 export type ChatUserMessageHandlerDeps = {
   agentCore: AgentCore;
@@ -298,9 +354,17 @@ async function processBatchedMessage(
 
   if (isStale()) return;
 
+  // 中断该 actor 上一轮进行中的 LLM 请求(用户发新消息 → abort 旧的 HTTP 流式)
+  abortActiveTurn(msgActor);
+  const turnAbortController = new AbortController();
+  activeTurnAborters.set(msgActor, turnAbortController);
+
   getEmbodimentAutonomy()?.setProcessing(msgActor, true, (json) => ctx.socket.send(json));
 
   let chunkSeq = 0;
+  // 区分 interim 与 stream：interim 是回复首段（垫词），stream 是主回复正文
+  // mainStreamStarted 一旦为 true，interim 不再插入，保证顺序
+  let mainStreamStarted = false;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
 
   // v2：tool_call 起始时间表（id → epoch ms），用于在 tool_result 阶段算 elapsedMs。
@@ -310,8 +374,9 @@ async function processBatchedMessage(
     ? new Map<string, number>()
     : undefined;
 
-  const sendAssistantChunk = (chunk: string): void => {
+  const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
     if (isStale()) return;
+    if (phase === "stream") mainStreamStarted = true;
     chunkSeq += 1;
     ctx.socket.send(
       JSON.stringify({
@@ -322,6 +387,7 @@ async function processBatchedMessage(
           traceId: batched.originalMessageId,
           chunk,
           sequence: chunkSeq,
+          phase,
         },
       }),
     );
@@ -365,6 +431,7 @@ async function processBatchedMessage(
 
   // 活体 interim 控制器：智能门控 + 多条进度更新
   // 被动路径统一用 text_chat（传达动作）
+  // interim 不再用独立 messageId，而是作为同一 assistant 消息的 phase="interim" 首段
   const interimController = new LivingInterimController({
     sessionId: msgActor,
     traceId: batched.originalMessageId,
@@ -372,23 +439,12 @@ async function processBatchedMessage(
     enabled: phasedAsyncEnabled,
     channel: "text_chat",
     provider: createExternalChatProviderFromEnv(),
-    send: (text, seq) => {
-      if (isStale() || replyFinished || chunkSeq > 0) return;
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.ChatAssistantInterim,
-          payload: {
-            sessionId: msgActor,
-            messageId: interimAckMessageId(batched.originalMessageId, seq),
-            traceId: batched.originalMessageId,
-            mode: decision.mode,
-            text,
-          },
-        }),
-      );
+    send: (text, _seq) => {
+      // 通过 sendAssistantChunk 推送，phase="interim" 让客户端识别为首段
+      sendAssistantChunk(text, "interim");
     },
     isStale,
-    isMainReplyStarted: () => chunkSeq > 0,
+    isMainReplyStarted: () => mainStreamStarted,
   });
 
   void interimController.maybeEmitInitial(batched.text);
@@ -398,6 +454,12 @@ async function processBatchedMessage(
   const TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
   const toolHeartbeatTimers = new Map<string, NodeJS.Timeout>();
   let heartbeatLineCache: string | null = null;
+  // 防 status line 抖动：tool loop 阶段 LLM 的每个流式 delta 都会把整段 fullText
+  // 推过来，formatStatusForDisplay 经常把它剪成同一句"正在查阅历史记忆…" / "正在从网络检索相关信息…"
+  // → 不去重的话单轮能连发几百次完全相同的事件，挤占通道并延长 LLM 等待窗口。
+  // 这里按"格式化后的展示文案"去重：文案变了才发，文案不变直接吞掉。
+  let lastStatusDisplayLine: string | null = null;
+  let statusLineRepeats = 0;
 
   function startToolHeartbeat(toolName: string): void {
     // 已有同工具的心跳则跳过（并行工具调用时可能重名，用 timer 存在性判重）
@@ -456,7 +518,7 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
-          finalText: "当前服务繁忙，请稍后重试。",
+          finalText: FALLBACK_TEXT_BUSY(),
           toolCalls: [],
         },
       }),
@@ -477,7 +539,13 @@ async function processBatchedMessage(
       ...(batched.visionFrames?.length ? { visionFrames: batched.visionFrames } : {}),
       interruptedContext: batched.interruptedContext,
       sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,
-      onAssistantDelta: (delta) => sendAssistantChunk(delta),
+      signal: turnAbortController.signal,
+      routeDecision: decision,
+      onAssistantDelta: (delta) => {
+        // 流式推送最终内容到前端（tool loop 结束后的最终回复 token-by-token）
+        if (isStale()) return;
+        sendAssistantChunk(delta, "stream");
+      },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
         wireToolExecuteStart(
@@ -513,6 +581,20 @@ async function processBatchedMessage(
         if (isStale()) return;
         const displayLine = formatStatusForDisplay(line);
         if (!displayLine) return;
+        // 去重：同一句展示文案不重复推送（tool loop 每个 delta 都会调一次）
+        if (displayLine === lastStatusDisplayLine) {
+          statusLineRepeats += 1;
+          // 重复超过 20 次（约略估算同一 LLM 轮次上限）就彻底吞掉，避免：
+          //   1) WS 通道被同一文案挤爆
+          //   2) 客户端 watchdog 始终不超时（chat.agent_status 本身在重置 watchdog），
+          //      而真正的 chat.assistant_done 因为 LLM 卡在同一句 status 而发不出
+          //   3) 用户在前端看到 LLM 永远在"正在查阅历史记忆…"，超 90s 后被前端兜底成"没听清"
+          if (statusLineRepeats > 20) return;
+          // 20 次以内仍保留心跳语义（重置 watchdog），但不再 emit event
+        } else {
+          lastStatusDisplayLine = displayLine;
+          statusLineRepeats = 0;
+        }
         // 更新心跳文案缓存，让后续心跳更有上下文感
         heartbeatLineCache = displayLine;
         embodimentThinking(msgActor, (json) => ctx.socket.send(json), displayLine, {
@@ -584,8 +666,9 @@ async function processBatchedMessage(
     if (isStale()) return;
     replyFinished = true;
 
-    if (!reply.streamedChunks) {
-      chunkText(reply.text, 12).forEach((chunk) => sendAssistantChunk(chunk));
+    // 流式推送已在 onAssistantDelta 中完成；若未启动（兜底路径未走流式），单次推送完整文本
+    if (!mainStreamStarted && reply.text) {
+      sendAssistantChunk(reply.text, "stream");
     }
 
     if (isStale()) return;
@@ -637,25 +720,40 @@ async function processBatchedMessage(
     let finalText =
       scheduleOutcome?.trim() ||
       reply.text.trim() ||
-      (chunkSeq > 0 ? "" : "抱歉，我暂时无法生成回复，请稍后重试。");
+      (chunkSeq > 0 ? "" : "");
+
+    // 工具成功但 LLM 末轮没出正文时，用工具结果文本作为回复（不再用合成的"已查到见上面"）。
+    // 真实数据比提示语更有价值——用户能看到工具到底返回了什么。
+    if (
+      !finalText &&
+      reply.toolName &&
+      toolResult?.ok &&
+      toolResult.result &&
+      !chunkSeq
+    ) {
+      const toolResultText = formatToolResultAsReply(reply.toolName, toolResult.result);
+      if (toolResultText) finalText = toolResultText;
+    }
 
     const processor = getToolResultProcessor();
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
       toolName: reply.toolName,
     });
-    finalText = await new AssistantRewriterService(
-      createExternalChatProviderFromEnv(),
-    ).rewriteIfNeeded(batched.text, finalText);
+    // 关闭 AssistantRewriterService：它会在流式完成后用另一个 LLM 改写 finalText，
+    // 导致前端先看到"流式原版"再被"改写版"覆盖，出现"两段内容"。
+    // 用户需求：流式输出的内容就是最终结果，不要二次改写。
+    // finalText = await new AssistantRewriterService(
+    //   createExternalChatProviderFromEnv(),
+    // ).rewriteIfNeeded(batched.text, finalText);
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
-      sendAssistantChunk(
-        scheduleOutcome.startsWith(reply.text.trim())
-          ? scheduleOutcome.slice(reply.text.trim().length)
-          : `\n\n${scheduleOutcome}`,
-      );
+      const supplement = scheduleOutcome.startsWith(reply.text.trim())
+        ? scheduleOutcome.slice(reply.text.trim().length)
+        : `\n\n${scheduleOutcome}`;
+      if (!isStale()) sendAssistantChunk(supplement, "stream");
     } else if (!reply.text.trim() && chunkSeq === 0) {
-      sendAssistantChunk(finalText);
+      if (!isStale() && finalText) sendAssistantChunk(finalText, "stream");
     }
 
     if (isStale()) return;
@@ -666,6 +764,9 @@ async function processBatchedMessage(
     // 剥离可能残留的 [ts:] 时间戳前缀（该前缀仅供 LLM 上下文使用，不应展示给用户）
     const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
     finalText = finalText.replace(TS_PREFIX_RE, "").trim();
+    // 兜底再剥一次 DSML 工具调用标记：极少数情况下 DSML 跨多个 chunk 拼接后正则未在 adapter 层
+    // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
+    finalText = stripDsmlToolCallMarkup(finalText);
     refreshAgentProfileFromTurn({
       sessionId: msgActor,
       userText: batched.text,
@@ -693,12 +794,14 @@ async function processBatchedMessage(
     if (isStale()) return;
     const msg = err instanceof Error ? err.message : String(err);
     turnError = msg;
+    // 内部错误日志保留完整信息（含 stack），便于排查
     console.error("[WS] chat.user_message failed:", err);
     embodimentAlert(msgActor, (json) => ctx.socket.send(json), msg, "error");
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
     ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, batched.originalMessageId);
-    const errText = `处理消息时出错：${msg}`;
-    sendAssistantChunk(errText);
+    // 不再用 apology 兜底文案掩盖错误：agent-core 已尝试 emergencyRegenerate，
+    // 此处发空串让 UI 不显示虚假回复。sendUnifiedError 已通知前端出错。
+    const errText = "";
     refreshAgentProfileFromTurn({
       sessionId: msgActor,
       userText: batched.text,
@@ -725,6 +828,10 @@ async function processBatchedMessage(
     releaseTurn();
     // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）
     clearAllToolHeartbeats();
+    // 清理本轮 AbortController(如未被新消息 abort 则正常清理)
+    if (activeTurnAborters.get(msgActor) === turnAbortController) {
+      activeTurnAborters.delete(msgActor);
+    }
     // Phase 2：记录 turn 结果供自适应并发调整（AIMD）
     const turnDuration = Date.now() - turnStartedAt;
     recordTurnOutcome(turnSucceeded, turnDuration, turnError);

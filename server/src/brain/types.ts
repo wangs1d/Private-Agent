@@ -1,5 +1,8 @@
 // Agent Brain Center — 核心类型定义
 
+import type { RuntimeKernelState } from "../agent/runtime-kernel.js";
+import type { BodyState } from "../body/types.js";
+
 // 能力描述符
 export type CapabilityStatus = "active" | "disabled" | "planned" | "deprecated";
 export interface CapabilityDescriptor {
@@ -44,6 +47,58 @@ export interface UserActivityState {
   occurredAt: string;        // ISO timestamp
 }
 
+/**
+ * 用户心智状态（SemanticAwarenessInferrer 产出）。
+ *
+ * 比 UserActivityState 更深层：描述用户「为什么」处于当前状态、
+ * 在聊什么话题趋势、和 Agent 的关系亲密度。由轻量 LLM 推断，
+ * 未注册 inferrer 时降级为 unknown（不影响 AwarenessCortex 原规则路径）。
+ */
+export interface UserMentalState {
+  actorId: string;
+  /** 意图分类：用户当下想做什么 */
+  intentCategory:
+    | "planning"     // 规划期（如换工作、筹备旅行）
+    | "executing"    // 执行期（赶工、做具体事）
+    | "reflecting"   // 反思期（复盘、总结）
+    | "chatting"     // 闲聊
+    | "seeking_help" // 求助
+    | "venting"      // 宣泄情绪
+    | "unknown";
+  /** 情绪成因猜测：帮助 Agent 选择合适的话术 */
+  emotionCause:
+    | "work_pressure"    // 工作压力
+    | "interpersonal"    // 人际冲突
+    | "physical_unwell"  // 身体不适
+    | "anticipation"     // 期待
+    | "disappointment"   // 失落
+    | "neutral"
+    | "unknown";
+  /** 当前连续话题趋势（如 "换工作 已聊 3 天"），无趋势时为 null */
+  topicTrend: { topic: string; daysActive: number; turnCountInTopic: number } | null;
+  /** 与 Agent 的关系亲密度 0-1（基于累计对话轮数 + 共享记忆数 + 承诺兑现率） */
+  relationshipCloseness: number;
+  /** 推断依据（简短证据片段，供 debug） */
+  evidence: string[];
+  inferredAt: string;      // ISO timestamp
+}
+
+/**
+ * 语义觉察推断器接口（可注入 AwarenessCortex）。
+ *
+ * 实现方通常跑一次轻量 LLM，基于最近 N 轮对话历史 + 情绪时间线 + 关系状态，
+ * 产出 UserMentalState。未注册时 AwarenessCortex.observe 返回 mental=unknown。
+ */
+export interface SemanticAwarenessInferrer {
+  infer(
+    actorId: string,
+    opts: {
+      recentConversationHistory?: string;
+      recentActivity?: UserActivityState;
+    },
+  ): Promise<UserMentalState>;
+}
+
 // 大脑决策
 export type BrainDecisionOutcome = "speak" | "silent" | "shadow";
 
@@ -78,7 +133,16 @@ export interface BrainDecision {
 }
 
 // 进化提案
-export type EvolutionProposalType = "new_capability" | "optimize_existing" | "add_tool" | "update_prompt";
+// - new_capability / optimize_existing / add_tool / update_prompt：技能层（缺工具或工具需优化）
+// - knowledge_gap：知识层（工具齐全且调用成功，但用户反复问同类问题 → 缺背景知识）
+// - self_upgrade：自我改写层（Phase 5，ExternalTechScanner 发现高收益升级或 benchmark 检测到回归）
+export type EvolutionProposalType =
+  | "new_capability"
+  | "optimize_existing"
+  | "add_tool"
+  | "update_prompt"
+  | "knowledge_gap"
+  | "self_upgrade";
 export type EvolutionProposalStatus =
   | "pending"
   | "reviewing"
@@ -95,6 +159,83 @@ export interface EvolutionProposal {
   rationale: string;
   status: EvolutionProposalStatus;
   relatedGap?: CapabilityGapReport;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ============================================================
+// CodeRepairCortex 自我修复类型
+// ============================================================
+
+/** Bug 信号来源 */
+export type BugSignalSource =
+  | "unhandled_rejection" // process.on('unhandledRejection')
+  | "uncaught_exception" // process.on('uncaughtException')
+  | "tool_loop_max_rounds" // 工具循环达到最大轮次仍未完成
+  | "apology_fallback_burst" // 道歉式兜底短时间高频出现
+  | "compile_error" // tsc --noEmit 失败
+  | "user_report" // 用户主动报告
+  | "runtime_error"; // 运行时抛错被捕获
+
+/** Bug 信号（CodeRepairCortex 触发入口） */
+export interface BugSignal {
+  /** 唯一 id（不传则 cortex 自动生成） */
+  id?: string;
+  source: BugSignalSource;
+  /** 简短标题：如 "chat-user-message.ts 状态行重复推送" */
+  title: string;
+  /** 错误消息 / 堆栈 / 关键日志（多行字符串） */
+  errorMessage?: string;
+  /** 嫌疑文件路径（绝对或相对 server/，cortex 内部归一） */
+  suspectFiles?: string[];
+  /** 触发该信号的会话 id（可选，用于日志关联） */
+  sessionId?: string;
+  /** 用户原始消息（user_report 时必填） */
+  userReport?: string;
+  /** 触发时间戳（不传则 cortex 自动生成） */
+  observedAt?: string;
+}
+
+/** 修复提案状态 */
+export type RepairStatus =
+  | "pending" // 刚接收到 BugSignal
+  | "isolating" // 正在隔离问题（收集文件 + 日志）
+  | "analyzing" // 正在分析根因
+  | "patching" // 正在生成 patch
+  | "testing" // 正在跑 tsc + test
+  | "applying" // 正在应用 patch 到源码
+  | "fixed" // 修复成功（终态）
+  | "failed" // 修复失败（可重试）
+  | "rejected"; // 超过重试上限（终态）
+
+/** 修复提案 */
+export interface RepairProposal {
+  id: string;
+  /** 关联 BugSignal id */
+  bugSignalId: string;
+  source: BugSignalSource;
+  title: string;
+  errorMessage?: string;
+  suspectFiles: string[];
+  status: RepairStatus;
+  /** 重试次数（失败后递增，达到 maxRetries 转 rejected） */
+  retryCount: number;
+  /** 已隔离的相关文件内容快照（路径 → 内容片段） */
+  isolatedContext?: Record<string, string>;
+  /** LLM 分析出的根因 */
+  rootCause?: string;
+  /** 生成的 unified diff patch */
+  patch?: string;
+  /** LLM 对修复的简要说明 */
+  explanation?: string;
+  /** 测试输出（tsc/test 的 stderr+stdout） */
+  testOutput?: string;
+  /** 是否测试通过 */
+  testPassed?: boolean;
+  /** 最近一次失败原因 */
+  lastError?: string;
+  /** 备份目录路径（修复成功后保留 7 天） */
+  backupDir?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +280,13 @@ export interface BrainSnapshot {
     interruptedCount?: number;
     lastInterruptAt?: string;
   };
+  runtimeKernel?: RuntimeKernelState;
+  /**
+   * 身体状态聚合（来自 BodyGateway.snapshot().state）。
+   * 含电量/位置/算力配额/负载/疲劳度/当前设备/情绪基调/是否在渲染具身。
+   * bodyGateway 未注入时为 undefined（纯脑模式，向后兼容）。
+   */
+  bodyState?: BodyState;
 }
 
 // 信号输入（用于 decide）
@@ -219,7 +367,16 @@ export interface SensoryFrame {
   emotion?: EmotionVector;
   activity?: UserActivityState;  // 引用现有类型
   capturedAt: string;
+  /** 多模态冲突标记（Phase 4 扩展，如 ["audio_visual_conflict"]） */
+  conflictFlags?: string[];
+  /** 融合置信度 0-1（Phase 4 扩展） */
+  fusionConfidence?: number;
+  /** 主导模态（Phase 4 扩展，如 "audio" / "visual" / "activity"） */
+  primaryModality?: "audio" | "visual" | "activity" | "emotion";
 }
+
+/** FusedFrame 是 SensoryFrame 的别名（Phase 4 向后兼容） */
+export type FusedFrame = SensoryFrame;
 
 // ---------- 2. 记忆类型（MemoryCortex 用） ----------
 
@@ -231,7 +388,9 @@ export type MemoryDomainKind =
   | "procedural"       // 程序记忆（技能）
   | "emotional"        // 情感记忆
   | "narrative"        // 叙事记忆
-  | "personality";     // 人格内核（结构化特质，防漂移）
+  | "personality"      // 人格内核（结构化特质，防漂移）
+  | "relationship"     // 关系记忆（里程碑/轨迹/共同经历，Phase 1.2）
+  | "world";           // 世界状态轨迹（WorldModel 状态时间序列，P1-10）
 
 // ---- 人格内核（personality 域）----
 
@@ -293,6 +452,27 @@ export interface MemoryItem {
   source?: "chat" | "tool" | "digest" | "world" | "system";
   metadata?: Record<string, unknown>;
   timestamp: string;
+  /**
+   * 多模态记忆扩展（可选）。
+   * 携带此字段时，content 视为该媒体的文字描述（caption），
+   * 二进制数据由 MemoryCortex 存到本地文件系统，路径写入 mediaRef.storageId。
+   * 缺省时为纯文本记忆（向后兼容）。
+   */
+  media?: MemoryMedia;
+}
+
+/** 多模态媒体数据（写入时携带二进制，存储后只保留引用） */
+export interface MemoryMedia {
+  kind: "image" | "audio" | "video";
+  /** 媒体二进制数据（仅写入时携带，存储后丢弃） */
+  blob?: Buffer;
+  /** 存储后生成的引用 ID（如 sha256.<ext>），召回时用此拉取文件 */
+  storageId?: string;
+  mime: string;
+  /** 媒体的文字描述 / caption（与 MemoryItem.content 重复但独立保留，便于召回时直接用） */
+  caption?: string;
+  /** 原始来源标记：screenshot / voice_message / camera_capture / user_upload */
+  origin?: string;
 }
 
 // 记忆召回结果
@@ -315,6 +495,34 @@ export interface MemoryRecallItem {
   sensitivity?: MemorySensitivity;
   score?: number;                // 相关度评分 0-1
   timestamp?: string;
+  /**
+   * 多模态记忆扩展（可选）。
+   * 携带此字段时，content 是文字描述，mediaRef 指向已存储的媒体文件。
+   * 召回后由 prompt 注入层补 `[图片：${caption}]` 占位符（阶段1不直接把图喂给 LLM）。
+   * 缺省时为纯文本召回（向后兼容）。
+   */
+  modality?: "text" | "image" | "audio" | "video";
+  mediaRef?: {
+    storageId: string;
+    kind: "image" | "audio" | "video";
+    mime: string;
+    caption?: string;
+  };
+  /**
+   * 元记忆扩展（Phase 0）：来源链路。
+   * 仅在 recallWithProvenance 路径下填充，普通 recall 不填。
+   */
+  provenance?: MemoryProvenance;
+  /**
+   * 元记忆扩展（Phase 0）：置信分层。
+   * 规则计算：verified → known；pending → uncertain；accessCount<3 → unknown。
+   */
+  confidenceTier?: ConfidenceTier;
+  /**
+   * 显著性扩展（Phase 0）：显著性分数 0-1。
+   * 仅在 salience filter 路径下填充。
+   */
+  salienceScore?: number;
 }
 
 // 记忆固化统计
@@ -385,6 +593,12 @@ export interface EmotionVector {
   label: string;         // 文字标签，如 "焦虑" / "放松" / "愤怒"
   confidence?: number;
   detectedAt: string;
+  /** 情绪原因（Phase 2.1 扩展，可选） */
+  cause?: string;
+  /** 情绪强度 0-1（Phase 2.1 扩展，由 arousal + |valence| 计算） */
+  intensity?: number;
+  /** 次要情绪标签（Phase 2.1 扩展，可选） */
+  secondaryLabel?: string;
 }
 
 // 语气策略应用结果
@@ -428,14 +642,10 @@ export interface ReActObservation {
   observedAt: string;
 }
 
-// 快慢双系统路由模式
+// 双模式路由：Fast 前台秒回 + Complex 后台并行
 export type SystemRouteMode =
-  | "fast_chat"          // System 1 快：寒暄/简单模式匹配
-  | "direct_llm"         // System 1 快：直接 LLM
-  | "master_only"        // System 2 中：主 Agent 自处理
-  | "master_delegate"    // System 2 中：子 Agent 委派
-  | "plan_execute"       // System 2 慢：先规划后执行
-  | "state_machine";     // System 2 慢：桌面自动化多步骤状态机
+  | "fast"     // 快速模式：垫词 + 简单任务 + 轻工具，极快返回
+  | "complex"; // 复杂模式：后台委派子 Agent / 复杂工具链 / 多步计划，完成后分步推送
 
 // 快慢双系统路由决策
 export interface SystemRouteDecision {
@@ -470,6 +680,32 @@ export interface CognitiveContext {
   audioText?: string;                       // 语音转写结果（SensoryCortex）
   visualDescription?: string;               // 视觉描述（SensoryCortex）
   sensoryFrame?: SensoryFrame;              // 多模态融合帧（SensoryCortex.buildSensoryFrame 产出）
+  /**
+   * 最近对话历史（最近 3 轮，6 条消息）。
+   * 从 thread store 拉取，注入到 cognize prompt 让 LLM 能理解追问上下文。
+   * 例：用户追问"kimi的新模型啊"时，cognize 需要知道上一轮刚聊过 Kimi K3。
+   * 格式：`用户：xxx\nAgent：xxx\n用户：yyy\nAgent：yyy`
+   */
+  recentConversationHistory?: string;
+  // ---- Step 7 扩展：新皮层模块上下文（由 DecisionHub.gatherContext 拉取）----
+  /** 工作记忆快照（前额叶） */
+  workingMemory?: import("./working-memory-cortex.js").WorkingMemorySnapshot;
+  /** 当前任务上下文（任务切换皮层） */
+  currentTask?: import("./task-switching-cortex.js").TaskContext | null;
+  /** 多源情境融合结果（情境皮层） */
+  situation?: import("./context-cortex.js").SituatedContext;
+  /** 意图预判结果（AnticipationEngine） */
+  anticipatedIntent?: { intent: string; confidence: number; preparationHints?: string[] } | null;
+  /** 用户画像（在线学习皮层） */
+  userPattern?: import("./online-learning-cortex.js").UserProfile;
+  /**
+   * 身体状态聚合（来自 BodyGateway）。
+   *
+   * cognize 阶段 1 并行调 bodyGateway.sense({ kind: "where_am_i" }) 拉取，
+   * 让认知 LLM 能感知"我在哪个设备上/电量多少/是否在渲染具身"等物理上下文。
+   * bodyGateway 未注入时为 undefined（纯脑模式，向后兼容）。
+   */
+  bodyState?: BodyState;
 }
 
 // 端到端认知结果：一次 LLM 产出的完整认知输出
@@ -490,6 +726,35 @@ export interface CognitiveResult {
    * 缺失或为空时（如 memory 未注册 / 召回失败），后续 standard path 仍走原 prepareNarrativeRecall 逻辑。
    */
   recallItems?: MemoryRecallItem[];
+  /**
+   * 工作记忆摘要（深度链接优化）：含活跃目标 + 槽位 + 待办。
+   * 由 BrainCenter.cognize 阶段 3 生成，注入到 streamCompletion 的 system prompt，
+   * 让主 Agent LLM 真正感知"当前对话上下文"。
+   * 空字符串表示工作记忆为空或未注册。
+   */
+  workingMemorySummary?: string;
+  /**
+   * 最近对话历史（最近 6 轮，12 条消息）。
+   * 从 thread store 拉取，注入到 streamCompletion 的 system prompt【最近对话】块，
+   * 让主 Agent LLM 能理解追问上下文与指代消解。
+   * 空字符串表示无历史或拉取失败。
+   */
+  recentConversationHistory?: string;
+  /**
+   * 元认知评估结果（cognize 阶段 3.5 已评估，原样透出给 agent-core）。
+   * 由 agent-core 格式化为方向化短字符串注入 promptContext.memory.metaCognition，
+   * 让 LLM 知道"自己当前对哪些点不确定、是否需要先反思"——但不堆 prompt，
+   * 只给方向，让模型基于上下文自己调整。
+   * 缺失时 agent-core 不注入该字段。
+   */
+  metacog?: import("./meta-cognition-cortex.js").MetacogAssessment;
+  /**
+   * 工具规划链（cognize 阶段 2 由 DecisionHub 或 ToolPlanningCortex 生成）。
+   * complex 路由时由 ToolPlanningCortex.planTools 产出，注入到 streamCompletion 的
+   * system prompt【建议工具链】块，约束 LLM 工具选择顺序和范围。
+   * 缺失时（fast 路由 / 工具规划皮层未注册）跳过注入。
+   */
+  toolPlan?: import("./tool-planning-cortex.js").ToolPlan;
 }
 
 /**
@@ -544,4 +809,187 @@ export interface PendingDecision {
   enqueuedAt: number;
   /** 超时时间戳(ms),超时未触发则降级 silent */
   expiresAt: number;
+}
+
+// ============================================================
+// 记忆认知架构升级扩展类型（Phase 0）
+// ============================================================
+
+/** 记忆来源链路（元记忆用） */
+export interface MemoryProvenance {
+  /** 原始来源标识：chat / tool / digest / world / system */
+  source: string;
+  /** 来源类型 */
+  sourceType: "chat" | "tool" | "digest" | "world" | "system";
+  /** 捕获时间 ISO */
+  capturedAt: string;
+  /** 来源链路（版本追溯） */
+  sourceChain?: {
+    versionId: string;
+    sourceNodeIds: string[];
+    sourceSummary: string;
+  }[];
+}
+
+/** 置信分层（元记忆用，程序化计算，不让 LLM 表演） */
+export type ConfidenceTier = "known" | "uncertain" | "unknown";
+
+/** 重构校验结果 */
+export interface ReconstructionValidation {
+  /** 字段保留率 0-1 */
+  accuracy: number;
+  /** 缺失的关键信息列表 */
+  lostInfo: string[];
+  /** 语义偏移 0-1（embedding cosine 距离） */
+  distortion: number;
+  /** 是否通过校验（accuracy >= 0.7 且 distortion < 0.3） */
+  isValid: boolean;
+  /** 校验时间 */
+  validatedAt: string;
+}
+
+/** 扩散激活结果 */
+export interface SpreadingActivationResult {
+  /** 种子节点 id 列表 */
+  seedNodeIds: string[];
+  /** 被激活的节点列表（含激活值） */
+  activatedNodes: Array<{
+    nodeId: string;
+    activationValue: number;
+    hopCount: number;
+  }>;
+  /** 扩散深度 */
+  maxHopsReached: number;
+  /** 扩散时间 */
+  spreadAt: string;
+}
+
+/** 联想预判结果 */
+export interface PredictedAssociation {
+  /** 种子节点 */
+  seedNodes: string[];
+  /** 被激活的节点 */
+  activatedNodes: string[];
+  /** 预判结果（由激活节点 summary 聚合，非 LLM 生成） */
+  predictedOutcome: string;
+  /** 预判置信度 0-1 */
+  confidence: number;
+  /** 预判时间 */
+  predictedAt: string;
+}
+
+/** 图式节点（语义抽象形成） */
+export interface SchemaNode {
+  /** 图式 id */
+  id: string;
+  /** 图式名称，如 "餐厅图式" */
+  name: string;
+  /** 步骤序列，如 ["进门", "点餐", "吃", "结账"] */
+  steps: string[];
+  /** 前置条件 */
+  preconditions: string[];
+  /** 预期结果 */
+  expectedOutcomes: string[];
+  /** 实例节点 id 列表（来源 episodic 节点） */
+  instances: string[];
+  /** 刻板印象警告次数（>3 时附加警告） */
+  stereotypeWarningCount: number;
+  /** 所属 sceneTag */
+  sceneTag: string;
+  /** 创建时间 */
+  createdAt: string;
+  /** 最后更新时间 */
+  updatedAt: string;
+}
+
+/** 图式匹配结果 */
+export interface SchemaMatchResult {
+  /** 匹配的图式 */
+  schema: SchemaNode;
+  /** 匹配分数 0-1 */
+  matchScore: number;
+  /** 是否附加刻板印象警告 */
+  hasStereotypeWarning: boolean;
+  /** 匹配时间 */
+  matchedAt: string;
+}
+
+/** 显著性过滤决策 */
+export interface SalienceDecision {
+  /** 是否接受写入 */
+  accept: boolean;
+  /** 显著性分数 0-1 */
+  score: number;
+  /** 决策原因 */
+  reason: string;
+  /** 是否降级为 decay（短期保留） */
+  degraded: boolean;
+}
+
+/** 程序性技能匹配结果 */
+export interface ProceduralMatch {
+  /** 匹配的技能 id */
+  skillId: string;
+  /** 匹配分数 0-1 */
+  matchScore: number;
+  /** 是否可绕过 LLM */
+  canBypassLlm: boolean;
+  /** 触发模式（关键词或 embedding 匹配描述） */
+  triggerPattern: string;
+  /** 热更新版本号 */
+  hotUpdateVersion: number;
+  /** 匹配时间 */
+  matchedAt: string;
+}
+
+// ============================================================
+// MemoryInferenceEngine 推理引擎类型
+// ============================================================
+
+/** 线索来源类型 */
+export type InferenceClueSource = "user_input" | "perception" | "memory_recalled";
+
+/** 线索（推理引擎输入） */
+export interface InferenceClue {
+  /** 线索文本 */
+  text: string;
+  /** 来源：用户输入 / 感知 / 召回的记忆 */
+  source: InferenceClueSource;
+  /** 权重（缺省：显性 1.0，隐性 0.6） */
+  weight?: number;
+  /** 检测时间 */
+  detectedAt?: string;
+}
+
+/** 推理结论（输出，新节点） */
+export interface InferenceNode {
+  /** 节点 id：inf_<fnv1a hash> */
+  id: string;
+  /** 推理出的结论文本 */
+  conclusion: string;
+  /** 置信度 0-1 */
+  confidence: number;
+  /** 证据 */
+  evidence: {
+    /** 触发线索文本 */
+    clues: string[];
+    /** 应用的规则 id */
+    rules: string[];
+    /** 推理链（人类可读） */
+    reasoningChain: string[];
+  };
+  /** 是否已被验证 */
+  isVerified: boolean;
+  /** 创建时间 */
+  createdAt: string;
+}
+
+/** 推理结果 */
+export interface InferenceResult {
+  /** 推理出的结论列表 */
+  inferences: InferenceNode[];
+  /** 综合置信度 */
+  combinedConfidence: number;
+  /** 推理时间 */
+  inferredAt: string;
 }

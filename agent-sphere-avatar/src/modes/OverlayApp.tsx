@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EntranceAnimation } from "../components/EntranceAnimation";
 import { InnerThought } from "../components/InnerThought";
+import { MessageList } from "../components/MessageList";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
 import { TaskFeed } from "../components/TaskFeed";
@@ -76,7 +77,14 @@ function resolveAttentionTargetFromDom(source?: string) {
 }
 
 export function OverlayApp() {
-  const { state, apply: rawApply, setFocused, setMood } = useAgentState({ mood: "idle", energy: 0.55 });
+  const {
+    state,
+    apply: rawApply,
+    setFocused,
+    setMood,
+    pushMessage,
+    appendToLastMessage,
+  } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWasOpenOnPointerDown = useRef(false);
   const wsUrl = readQuery("ws");
@@ -85,8 +93,10 @@ export function OverlayApp() {
   // ---- 主agent回复文本累积与TTS ----
   const assistantTextRef = useRef("");
   const isConversationRef = useRef(false);
+  /** 当前是否有进行中的 agent 消息（用于区分多步骤多次回复） */
+  const pendingAgentMsgRef = useRef(false);
 
-  /** 增强 apply：累积assistant_chunk文本，assistant_done时触发TTS */
+  /** 增强 apply：把 assistant_chunk/user_message/assistant_done 转为消息列表追加 */
   const apply = useCallback((patch: Parameters<typeof rawApply>[0]) => {
     const source = patch.source;
     const attentionTarget =
@@ -94,45 +104,52 @@ export function OverlayApp() {
       (source || patch.caption || patch.phase ? resolveAttentionTargetFromDom(source) : undefined);
     const patchWithAttention = attentionTarget ? { ...patch, attentionTarget } : patch;
 
-    // 主agent流式回复：累积文本，展示完整回复（与行动链路分割）
-    if (source === "assistant_chunk" && patch.caption) {
-      isConversationRef.current = true;
-      assistantTextRef.current += patch.caption;
-      // 展示累积的完整文本（截取尾部避免过长）
-      const fullText = assistantTextRef.current;
-      const displayText = fullText.length > 80 ? "…" + fullText.slice(-80) : fullText;
-      rawApply({ ...patchWithAttention, caption: displayText });
+    // 用户发送消息：追加 user 消息，重置累积文本，结束上一条 agent 消息
+    if (source === "user_message") {
+      assistantTextRef.current = "";
+      isConversationRef.current = false;
+      pendingAgentMsgRef.current = false;
+      stopSpeaking();
+      // caption 不用于对话文本展示，清空避免与消息列表重复
+      rawApply({ ...patchWithAttention, caption: undefined });
       return;
     }
 
-    // 回复完成：触发TTS播报
+    // 主agent流式回复：追加到最后一条 agent 消息（支持多步骤多次回复）
+    if (source === "assistant_chunk") {
+      isConversationRef.current = true;
+      const chunkText = patch.caption ?? "";
+      if (chunkText) {
+        assistantTextRef.current += chunkText;
+        // pendingAgentMsgRef 区分：进行中→追加到当前消息；已完成→新建消息（多步骤的新一次回复）
+        if (pendingAgentMsgRef.current) {
+          appendToLastMessage("agent", chunkText);
+        } else {
+          pushMessage("agent", chunkText);
+        }
+        pendingAgentMsgRef.current = true;
+      }
+      rawApply({ ...patchWithAttention, caption: undefined });
+      return;
+    }
+
+    // 回复完成：触发TTS播报完整文本，标记当前 agent 消息完成
     if (source === "assistant_done") {
       const finalText = assistantTextRef.current.trim();
       if (finalText) {
         speakText(finalText);
       }
-      // 保持最终文本显示一段时间
-      const displayText = finalText.length > 80 ? "…" + finalText.slice(-80) : finalText;
-      rawApply({ ...patchWithAttention, caption: displayText || patch.caption });
-      // 延迟清除对话状态和文本
-      setTimeout(() => {
-        isConversationRef.current = false;
-        assistantTextRef.current = "";
-        rawApply({ caption: undefined, mood: "idle" });
-      }, 8000);
-      return;
-    }
-
-    // 用户发送消息：重置累积文本
-    if (source === "user_message") {
+      // 标记当前 agent 消息已完成（下一次 chunk 到来时新建消息）
+      pendingAgentMsgRef.current = false;
       assistantTextRef.current = "";
       isConversationRef.current = false;
-      stopSpeaking();
+      rawApply({ ...patchWithAttention, caption: undefined });
+      return;
     }
 
     // 其他事件直接透传
     rawApply(patchWithAttention);
-  }, [rawApply]);
+  }, [rawApply, appendToLastMessage, pushMessage]);
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
@@ -194,9 +211,12 @@ export function OverlayApp() {
   const handleSpeechResult = useCallback(
     (text: string) => {
       closeMenuRef.current();
-      if (connected) sendChat(text);
+      if (connected) {
+        pushMessage("user", text);
+        sendChat(text);
+      }
     },
-    [connected, sendChat],
+    [connected, sendChat, pushMessage],
   );
 
   const speech = useOverlaySpeech({
@@ -334,7 +354,10 @@ export function OverlayApp() {
           closeMenu();
           break;
         case "chat":
-          if (connected && cmd.text) sendChat(cmd.text);
+          if (connected && cmd.text) {
+            pushMessage("user", cmd.text);
+            sendChat(cmd.text);
+          }
           closeMenu();
           break;
         case "roam":
@@ -353,7 +376,7 @@ export function OverlayApp() {
           break;
       }
     },
-    [apply, closeMenu, connected, sendChat, sendWake, speech, sessionId],
+    [apply, closeMenu, connected, sendChat, sendWake, speech, sessionId, pushMessage],
   );
 
   useEffect(() => {
@@ -454,6 +477,7 @@ export function OverlayApp() {
           onDragRelease={handleDragRelease}
           onShakeRequest={(strength, durationMs) => triggerVerticalShake(strength, durationMs)}
         />
+        <MessageList messages={state.messages ?? []} />
         <InnerThought state={state} />
       </div>
 

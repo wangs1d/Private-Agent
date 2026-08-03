@@ -58,6 +58,8 @@ import type { MessageBridgeService } from "../services/message-bridge-service.js
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
 import type { BrainCenter } from "../brain/index.js";
+import type { BodyCenter } from "../body/index.js";
+import type { ReflexArc } from "../body/reflex-arc.js";
 
 export type AppServices = {
   app: FastifyInstance;
@@ -131,6 +133,10 @@ export type AppServices = {
   devicePairingService: DevicePairingService;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter: BrainCenter | null;
+  /** Agent Body Center —— 身体中心外观（BODY_CENTER_ENABLED=0 时为 null） */
+  bodyCenter: BodyCenter | null;
+  /** Agent ReflexArc —— 反射弧硬安全门（BODY_CENTER_ENABLED=0 时为 null） */
+  reflexArc: ReflexArc | null;
 };
 
 export type SkillMetadataValidator = {

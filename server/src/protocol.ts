@@ -81,10 +81,10 @@ export const ServerEventType = {
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
   /**
-   * 即时确认应答：在多步/工具型请求开始处理时立即推送一段短文本，
-   * 缓解用户等待焦虑。messageId 使用 `interim-${traceId}`，与正式回复的
-   * `assistant-${traceId}` 解耦，客户端可独立渲染为"待办气泡"，在收到
-   * 首条 chat.assistant_chunk 时自动让位。
+   * 即时确认应答（已废弃，保留兼容）：被动聊天路径已改为通过
+   * chat.assistant_chunk 携带 phase="interim" 字段推送首段文本，
+   * 与主回复共用同一 messageId，避免渲染成两条独立消息。
+   * 主动通知路径（proactive_text）仍使用此事件类型。
    */
   ChatAssistantInterim: "chat.assistant_interim",
   /**
@@ -242,19 +242,12 @@ export type ChatTurnStartedPayload = {
 
 /**
  * 路由模式枚举（与 LlmExecutionMode 同步）：
- *   fast_chat       单轮流式（闲聊 / 极短消息），不进入 v2 阶段化链路
- *   master_only     master 自己单轮回答，简单 direct task
- *   master_delegate 派子 Agent 协作（含 subAgents 字段）
- *   plan_execute    计划-执行循环（含 plan 字段）
- *   direct_llm      直接 LLM + 工具调用
+ *   fast     快速模式：垫词 + 简单任务 + 轻工具，前台秒回
+ *   complex  复杂模式：后台委派子 Agent / 复杂工具链 / 多步计划，完成后分步推送
  */
 export type ChatIntentMode =
-  | "fast_chat"
-  | "master_only"
-  | "master_delegate"
-  | "plan_execute"
-  | "direct_llm"
-  | "state_machine";
+  | "fast"
+  | "complex";
 
 /** plan_execute 拆解出的单个步骤。 */
 export type ChatPlanStep = {

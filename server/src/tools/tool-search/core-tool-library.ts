@@ -77,6 +77,33 @@ export const CORE_TOOL_LIBRARY = {
     label: "MCP 外部工具（动态注册）",
     prefixes: ["mcp."],
   },
+  /**
+   * Fast 模式工具分组：只读查询 + 轻量交互（TTS 推送/号码查询）。
+   * 新增工具时声明到此分组即可自动被 Fast 模式收编，无需改其他代码。
+   * 未声明的工具默认走 Complex 模式（全量工具集 + tool search 桥接）。
+   */
+  fastLane: {
+    label: "Fast 模式轻量工具",
+    names: [
+      "clock.get_current_time",
+      "clock.get_user_location",
+      "clock.get_date",
+      "clock.format_timestamp",
+      "weather.get_local",
+      "calendar.list_tasks",
+      "search_web",
+      "fetch_web",
+      "browser.session.list",
+      "agent.query_capabilities",
+      "phone.ensure_my_number",
+      "phone.virtual_call",
+      "phone.call_user",
+      "budget.calculate",
+      "shopping.suggest",
+      "self.list_custom_skills",
+    ],
+    prefixes: ["clock."],
+  },
 } as const;
 
 const CORE_EXACT_NAMES = new Set<string>([
@@ -91,6 +118,63 @@ const CORE_PREFIXES: readonly string[] = [
   ...CORE_TOOL_LIBRARY.browser.prefixes,
   "master.",
 ];
+
+// ---- Fast 模式工具判定（单一数据源：CORE_TOOL_LIBRARY.fastLane + 动态名单） ----
+
+const FAST_LANE_EXACT_NAMES = new Set<string>(CORE_TOOL_LIBRARY.fastLane.names);
+const FAST_LANE_PREFIXES: readonly string[] = CORE_TOOL_LIBRARY.fastLane.prefixes;
+
+/**
+ * 动态 fastLane 工具名名单。
+ *
+ * 用于自我进化（EvolutionCortex + SkillGenerator）生成的动态 Skill：
+ * 装载后若 SkillMetadata.tags 包含 "fast_lane"（或 "fast"），则把 skill 名
+ * 注册到此集合，isFastLaneTool 即对其返回 true，自动被 Fast 模式收编。
+ *
+ * 与静态 CORE_TOOL_LIBRARY.fastLane 并列，互不影响：
+ *  - 静态名单：编译期确定的内置工具
+ *  - 动态名单：运行时自我进化生成的轻量查询类 Skill
+ */
+const _dynamicFastLaneNames = new Set<string>();
+
+/** 注册一个动态 fastLane 工具名（自我进化装载 Skill 后调用） */
+export function registerDynamicFastLaneName(name: string): void {
+  if (name) _dynamicFastLaneNames.add(name);
+}
+
+/** 批量注册动态 fastLane 工具名 */
+export function registerDynamicFastLaneNames(names: string[]): void {
+  for (const n of names) {
+    if (n) _dynamicFastLaneNames.add(n);
+  }
+}
+
+/** 清空动态 fastLane 名单（卸载 Skill / 测试重置时调用） */
+export function clearDynamicFastLaneNames(): void {
+  _dynamicFastLaneNames.clear();
+}
+
+/** 返回当前动态 fastLane 名单快照（调试/自省用） */
+export function listDynamicFastLaneNames(): string[] {
+  return Array.from(_dynamicFastLaneNames);
+}
+
+/**
+ * 判断工具是否属于 Fast 模式工具集。
+ *
+ * 判定优先级：
+ *  1. 静态名单 {@link CORE_TOOL_LIBRARY}.fastLane（编译期内置工具）
+ *  2. 动态名单 {@link _dynamicFastLaneNames}（自我进化生成的轻量 Skill）
+ *
+ * 新增内置工具时在 CORE_TOOL_LIBRARY.fastLane 里声明即可自动收编；
+ * 自我进化生成的 Skill 通过 registerDynamicFastLaneName() 注册后自动收编。
+ */
+export function isFastLaneTool(registryName: string): boolean {
+  if (FAST_LANE_EXACT_NAMES.has(registryName)) return true;
+  if (FAST_LANE_PREFIXES.some((p) => registryName.startsWith(p))) return true;
+  if (_dynamicFastLaneNames.has(registryName)) return true;
+  return false;
+}
 
 /** 主 Agent 过滤用：与核心库一致，但不包含 master.*（委派工具另附）。 */
 const MASTER_AGENT_EXCLUDED_PREFIXES: readonly string[] = ["master."];

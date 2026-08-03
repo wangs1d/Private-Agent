@@ -47,7 +47,7 @@ export class DefaultRecoveryPolicy implements RecoveryPolicy {
 
   constructor(opts: DefaultRecoveryOptions = {}) {
     this.maxRetriesBeforeSwitch = opts.maxRetriesBeforeSwitch ?? 2;
-    this.escalateTo = opts.escalateTo ?? "plan_execute";
+    this.escalateTo = opts.escalateTo ?? "complex";
   }
 
   onFailure(ctx: SharedTaskContext, failure: FailureRecord): RecoveryAction {

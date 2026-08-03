@@ -331,6 +331,7 @@ class _ConversationDetailPageState extends State<_ConversationDetailPage> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     return Scaffold(
+      backgroundColor: theme.colorScheme.surface,
       appBar: AppBar(title: Text(widget.title)),
       body: Column(
         children: [

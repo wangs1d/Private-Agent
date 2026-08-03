@@ -176,7 +176,7 @@ export function preparePromptCachePlan(
 
   const requestSystemMessages: ChatCompletionMessageParam[] = [
     { role: "system", content: stableSystemPrompt },
-    ...(profile.mode !== "none" && dynamicSystemPrompt
+    ...(dynamicSystemPrompt
       ? [{ role: "system", content: dynamicSystemPrompt } satisfies ChatCompletionMessageParam]
       : []),
   ];

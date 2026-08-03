@@ -65,8 +65,8 @@ const SHELL_READONLY_TOKENS: Set<string> = new Set([
 interface DenyRule {
   /** 工具名,"*" 表示匹配任意工具 */
   tool: string;
-  /** 参数匹配函数,返回 true 表示命中 */
-  match: (args: Record<string, unknown>) => boolean;
+  /** 参数匹配函数,返回 true 表示命中；toolName 仅在 tool==="*" 时传入,供工具名级规则使用 */
+  match: (args: Record<string, unknown>, toolName: string) => boolean;
   /** 命中原因 */
   reason: string;
 }
@@ -74,7 +74,7 @@ interface DenyRule {
 /** 高危规则:命中需人工审批 */
 interface HighRiskRule {
   tool: string;
-  match: (args: Record<string, unknown>) => boolean;
+  match: (args: Record<string, unknown>, toolName: string) => boolean;
   reason: string;
 }
 
@@ -121,6 +121,13 @@ const DENIED_ACTIONS: DenyRule[] = [
  */
 const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
   {
+    // 高风险金融/购物类工具:下单/支付/转账/钱包一律需人工审批
+    // 迁移自原 RuntimeKernel.checkToolAction（工具名硬匹配规则）
+    tool: "*",
+    match: (args, toolName) => isHighRiskFinancialTool(toolName),
+    reason: "High-risk financial or purchase action requires explicit confirmation before execution.",
+  },
+  {
     tool: "desktop.run_shell",
     match: (args) => args.allowDestructive === true,
     reason: "shell 命令开启 allowDestructive,可能造成不可逆破坏",
@@ -157,6 +164,19 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
     reason: "操作描述包含高危关键词(删除/清空/格式化/卸载/关闭服务/停止进程)",
   },
 ];
+
+/**
+ * 判断工具名是否属于高风险金融/购物类（下单/支付/转账/钱包）。
+ * 迁移自原 RuntimeKernel.checkToolAction，集中到 AgentTaskSafety 统一管理。
+ */
+function isHighRiskFinancialTool(toolName: string): boolean {
+  return (
+    toolName === "shopping.order.place" ||
+    toolName.includes("payment") ||
+    toolName.includes("transfer") ||
+    toolName.includes("wallet")
+  );
+}
 
 // --------------------------------------------------------------------------- //
 // 辅助函数
@@ -223,7 +243,7 @@ export class AgentTaskSafety {
     for (const rule of DENIED_ACTIONS) {
       if (rule.tool !== "*" && rule.tool !== toolName) continue;
       try {
-        if (rule.match(args)) {
+        if (rule.match(args, toolName)) {
           return {
             isHighRisk: true,
             action: "deny",
@@ -240,7 +260,7 @@ export class AgentTaskSafety {
     for (const rule of HIGH_RISK_TOOL_PATTERNS) {
       if (rule.tool !== "*" && rule.tool !== toolName) continue;
       try {
-        if (rule.match(args)) {
+        if (rule.match(args, toolName)) {
           return {
             isHighRisk: true,
             action: "require_approval",

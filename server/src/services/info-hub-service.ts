@@ -7,10 +7,10 @@ import {
   fetchDomesticOfficialNews,
   fetchDomesticTechNews,
   searchBingChina,
+  searchBingChinaRelaxed,
   discoverHtmlSourcesFromResults,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
-import { applySearchFreshness } from "./search-freshness.js";
 import { fetchWebPageEnhanced, extractWithReadability, decodeWithEncoding } from "./web-fetch-enhancer.js";
 import {
   SearchCache,
@@ -18,6 +18,7 @@ import {
   classifySearchIntent,
   SessionSearchCache,
   sortByQuality,
+  applySearchFreshness,
   withRetry,
   type IntentAnalysis,
 } from "./search-enhancements.js";
@@ -204,25 +205,48 @@ export class InfoHubService {
     const isNewsKeyword = intent.intent === "latest" || intent.requiresFreshWeb;
 
     // 必应对长查询效果差，用核心实体构造简洁查询
-    // 例如 "今天A股最新消息" → "A股"（必应能返回结果）
+    // 关键修复：classifySearchIntent 已经按「具体性优先级」排好序（字母+数字 > 中文+数字 > 中英混合 > 短中文 > 纯英文），
+    // 不能简单地按长度重排（会破坏顺序，例如「今天A股最新消息」按长度会拿到「最新消息」而不是「A股」）。
+    // 策略：取第一个「够长且有信息量」的实体；过短（≤1 字符）或过于泛化（仅含时效词）的实体跳过。
     let bingQuery = keyword;
-    if (intent.entities.length > 0 && keyword.length > 6) {
-      // 取最长的核心实体作为必应查询
-      bingQuery = intent.entities.sort((a, b) => b.length - a.length)[0];
+    const stopwordEntity = /^(最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|动态|头条|怎么|如何|什么|情况)$/i;
+    const bestEntity = intent.entities.find(
+      (e) => e.length >= 2 && !stopwordEntity.test(e),
+    );
+    if (bestEntity && keyword.length > 6) {
+      // 实体存在且短于原 query（避免退化），优先用实体
+      bingQuery = bestEntity;
     }
 
-    const [web, tech, official] = await Promise.all([
+    // 4. 第一轮：实体化查询（精准）+ 科技/官方 RSS（按关键词）
+    //    同时并行发起完整原始 query 搜索（第二轮回退），避免串行等待
+    const bingPromises: Promise<InfoSearchItem[]>[] = [
       searchBingChina(bingQuery, effectiveLimit, domesticOpts),
+    ];
+    if (bingQuery !== keyword) {
+      bingPromises.push(searchBingChina(keyword, effectiveLimit, domesticOpts));
+    }
+    const [bingResults, tech, official] = await Promise.all([
+      Promise.all(bingPromises),
       isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(8, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
       isNewsKeyword ? fetchDomesticOfficialNews(keyword, Math.min(12, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
     ]);
 
-    let merged = dedupeByUrl([...official, ...web, ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+    let merged = dedupeByUrl([...official, ...bingResults.flat(), ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+
+    // 5. 第二轮回退：仅当所有必应搜索都返回 0 结果时，用宽松模式
+    if (merged.length === 0) {
+      const webRelaxed = await searchBingChinaRelaxed(bingQuery, effectiveLimit, domesticOpts);
+      if (webRelaxed.length > 0) {
+        merged = dedupeByUrl([...merged, ...webRelaxed]);
+      }
+    }
 
     // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
     // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
-    if (merged.length < effectiveLimit && web.length > 0) {
-      const discovered = await discoverHtmlSourcesFromResults(web, keyword, domesticOpts);
+    const firstBingResults = bingResults[0] ?? [];
+    if (merged.length < effectiveLimit && firstBingResults.length > 0) {
+      const discovered = await discoverHtmlSourcesFromResults(firstBingResults, keyword, domesticOpts);
       if (discovered.length > 0) {
         merged = dedupeByUrl([...merged, ...discovered]);
       }
@@ -393,7 +417,7 @@ export class InfoHubService {
 
   private async fetchHtml(url: string): Promise<string> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15_000);
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
       const response = await fetch(url, {
         signal: controller.signal,
@@ -424,11 +448,11 @@ export class InfoHubService {
     const result = await withRetry(() =>
       fetchWebPageEnhanced(
         url,
-        { userAgent: this.userAgent, timeoutMs: 15_000 },
+        { userAgent: this.userAgent, timeoutMs: 10_000 },
         (html) => htmlToText(html),
       ),
     );
-    const text = result.text.slice(0, 12000);
+    const text = result.text.slice(0, 10000);
     this.pageContentCache.set(url, text);
     return text;
   }
@@ -441,13 +465,13 @@ export class InfoHubService {
     const result = await withRetry(() =>
       fetchWebPageEnhanced(
         url,
-        { userAgent: this.userAgent, timeoutMs: 15_000 },
+        { userAgent: this.userAgent, timeoutMs: 10_000 },
         (html) => htmlToText(html),
       ),
     );
     const data = {
       html: result.html,
-      text: result.text.slice(0, 12000),
+      text: result.text.slice(0, 10000),
     };
     this.pageContentCacheFull.set(url, data);
     return data;

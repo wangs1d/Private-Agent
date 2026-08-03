@@ -131,10 +131,12 @@ export async function runChatTurnForActor(
         finalText = `${processText}\n\n${rawToolResultText}`;
       }
     } else {
+      // 不再用 apology 兜底文案：空回复时返回空串，让 UI 不显示虚假内容。
+      // agent-core 已在 finishLlmTurn 中尝试过 emergencyRegenerate。
       finalText =
         scheduleOutcome?.trim() ||
         reply.text.trim() ||
-        "抱歉，我暂时无法生成回复，请稍后重试。";
+        "";
     }
 
     // 折叠相邻的重复行（同 WS 路径）：避免 LLM 把工具前导与最终回复写成同一句。

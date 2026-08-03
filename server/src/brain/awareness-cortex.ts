@@ -4,7 +4,13 @@
 // 子系统提供的信号，按纯规则（无 LLM）推断用户当前的活动状态（UserActivityState），
 // 并对外提供 observe / recentActivity / onActivityChange 等查询与订阅入口。
 import type { AnticipationCandidate, LifeSignal } from "../services/life-signal-types.js";
-import type { BrainDecision, UserActivityKind, UserActivityState } from "./types.js";
+import type {
+  BrainDecision,
+  SemanticAwarenessInferrer,
+  UserActivityKind,
+  UserActivityState,
+  UserMentalState,
+} from "./types.js";
 
 // ---- 子系统最小化接口（仅声明 AwarenessCortex 实际用到的方法）------------
 
@@ -134,6 +140,15 @@ const TRAVEL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const SLEEP_INACTIVE_MS = 30 * 60 * 1000;
 const INFERENCE_SIGNAL_SCAN = 50;
 /**
+ * 动态睡眠窗口学习相关常量。
+ *
+ * 用户要求 dreaming 时间窗口根据用户习惯决定，而非硬编码 23:00-6:00。
+ * 策略：跟踪用户进入/离开 sleeping 状态的时段，积累最近 N 天的样本，
+ *       用中位数计算个性化窗口起点/终点。
+ */
+const SLEEP_WINDOW_SAMPLE_LIMIT = 14; // 保留最近 14 天的睡眠窗口样本
+const SLEEP_WINDOW_MIN_SAMPLES = 3;   // 至少 3 个样本才开始使用学习到的窗口
+/**
  * 深度专注（in_focus）触发阈值：持续 busy 超过 25 分钟且近 25 分钟无 speak 决策打断。
  */
 const IN_FOCUS_THRESHOLD_MS = 25 * 60_000;
@@ -161,6 +176,15 @@ export class AwarenessCortex {
   private proaction: ProactionLike | null = null;
   /** AgentSelfLearningService（可选，供 assessConfidence 注入历史失败率因子） */
   private selfLearning: SelfLearningLike | null = null;
+  /** SemanticAwarenessInferrer（可选，注入后 observeWithMental 产出 UserMentalState） */
+  private semanticInferrer: SemanticAwarenessInferrer | null = null;
+
+  /** 最近设备状态变化事件（来自 body.skin.device_change） */
+  private recentDeviceChangeEvents: Array<{ at: string; payload: unknown }> = [];
+  /** 最近设备切换事件（来自 body.vestibular.device_switch） */
+  private recentDeviceSwitchEvents: Array<{ at: string; payload: unknown }> = [];
+  /** BodyBus 订阅取消函数（attachBodyBus 注入后设置，stop 时清理） */
+  private bodyBusUnsubscribe: (() => void) | null = null;
 
   private unsubscribe: (() => void) | null = null;
   private started = false;
@@ -171,6 +195,23 @@ export class AwarenessCortex {
   private readonly history = new Map<string, UserActivityState[]>();
   /** 活动变化订阅者 */
   private readonly listeners = new Set<ActivityChangeListener>();
+  /**
+   * 动态睡眠窗口学习：per-actorId 睡眠时段样本。
+   *
+   * key: actorId
+   * value: 最近 SLEEP_WINDOW_SAMPLE_LIMIT 个样本（按时间顺序）
+   *        date: 样本所属日期（YYYY-MM-DD）
+   *        startHour: 进入 sleeping 的小时（小数表示，如 23.5 = 23:30）
+   *        endHour: 离开 sleeping 的小数小时（跨天时 endHour < startHour，如 6.25 = 6:15）
+   *
+   * 用中位数计算个性化窗口，避免单个异常值影响。
+   */
+  private readonly sleepWindowSamples = new Map<
+    string,
+    Array<{ date: string; startHour: number; endHour: number }>
+  >();
+  /** 正在跟踪的 sleeping 会话：actorId → 进入 sleeping 的时间戳 */
+  private readonly ongoingSleepSession = new Map<string, number>();
 
   // ---- 子系统注册 -------------------------------------------------------
 
@@ -215,6 +256,103 @@ export class AwarenessCortex {
     console.log("[AwarenessCortex] 已注册 AgentSelfLearningService");
   }
 
+  /**
+   * 注册语义觉察推断器（SemanticAwarenessInferrer）。
+   *
+   * 注册后 observeWithMental 会调用 inferrer.infer 产出 UserMentalState，
+   * 让 cognize LLM 能理解"嘴上说休息但还在赶工"这种深层语义。
+   * 未注册时 observeWithMental 返回 mental=unknown（保持原规则路径，向后兼容）。
+   */
+  registerSemanticInferrer(inferrer: SemanticAwarenessInferrer): void {
+    this.semanticInferrer = inferrer;
+    console.log("[AwarenessCortex] 已注册 SemanticAwarenessInferrer");
+  }
+
+  /**
+   * 订阅 BodyBus 上行身体状态信号，让觉察皮层能感知身体侧的事件。
+   *
+   * 订阅主题：
+   *  - body.homeostasis.battery_low → 触发用户活动推断（用户可能去充电了，状态变化）
+   *  - body.skin.device_change → 记录最近设备状态变化事件（供 inferActivity 参考）
+   *  - body.vestibular.device_switch → 记录设备切换事件
+   *
+   * 返回取消订阅函数（调用后移除所有 BodyBus 订阅）。
+   * 此方法由 create-app-services.ts 在装配阶段调用，注入 BodyBus 引用。
+   */
+  attachBodyBus(bodyBus: {
+    subscribe(kind: string, handler: (signal: unknown) => void | Promise<void>): () => void;
+  }): () => void {
+    const unsubs: Array<() => void> = [];
+
+    // body.homeostasis.battery_low → 触发用户活动推断
+    unsubs.push(
+      bodyBus.subscribe("body.homeostasis.battery_low", (signal) => {
+        try {
+          const s = signal as { actorId?: string; payload?: Record<string, unknown> };
+          if (s?.actorId) {
+            // 电量低可能意味着用户去充电了，活动状态可能变化，重新推断一次
+            const state = this.inferActivity(s.actorId);
+            if (state) {
+              this.commitState(state, true);
+            }
+          }
+        } catch (err) {
+          console.log(`[AwarenessCortex] battery_low 信号处理失败（忽略）: ${err}`);
+        }
+      }),
+    );
+
+    // body.skin.device_change → 记录最近设备状态变化事件
+    unsubs.push(
+      bodyBus.subscribe("body.skin.device_change", (signal) => {
+        try {
+          const s = signal as { payload?: Record<string, unknown>; timestamp?: string };
+          this.recentDeviceChangeEvents.push({
+            at: s?.timestamp ?? new Date().toISOString(),
+            payload: s?.payload,
+          });
+          // 仅保留最近 20 条，避免无限增长
+          if (this.recentDeviceChangeEvents.length > 20) {
+            this.recentDeviceChangeEvents.shift();
+          }
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+
+    // body.vestibular.device_switch → 记录设备切换事件
+    unsubs.push(
+      bodyBus.subscribe("body.vestibular.device_switch", (signal) => {
+        try {
+          const s = signal as { payload?: Record<string, unknown>; timestamp?: string };
+          this.recentDeviceSwitchEvents.push({
+            at: s?.timestamp ?? new Date().toISOString(),
+            payload: s?.payload,
+          });
+          if (this.recentDeviceSwitchEvents.length > 20) {
+            this.recentDeviceSwitchEvents.shift();
+          }
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+
+    const unsubAll = () => {
+      for (const unsub of unsubs) {
+        try {
+          unsub();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    this.bodyBusUnsubscribe = unsubAll;
+    console.log("[AwarenessCortex] 已订阅 BodyBus（battery_low / device_change / device_switch）");
+    return unsubAll;
+  }
+
   // ---- 生命周期 ---------------------------------------------------------
 
   async start(): Promise<void> {
@@ -247,6 +385,10 @@ export class AwarenessCortex {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+    if (this.bodyBusUnsubscribe) {
+      this.bodyBusUnsubscribe();
+      this.bodyBusUnsubscribe = null;
+    }
     this.latest.clear();
     this.history.clear();
     this.started = false;
@@ -264,6 +406,33 @@ export class AwarenessCortex {
       this.commitState(state, false);
     }
     return state;
+  }
+
+  /**
+   * 返回活动状态 + 心智状态复合对象。
+   *
+   * activity 一定有值（规则推断，立即返回）；
+   * mental 可能为 null（inferrer 未注册时）或 unknown 降级（inferrer 调用失败时）。
+   * 调用方应 graceful 处理 mental=null 跳过注入。
+   */
+  async observeWithMental(
+    actorId: string,
+    opts?: { recentConversationHistory?: string },
+  ): Promise<{ activity: UserActivityState | null; mental: UserMentalState | null }> {
+    const activity = this.observe(actorId);
+    if (!this.semanticInferrer || !activity) {
+      return { activity, mental: null };
+    }
+    try {
+      const mental = await this.semanticInferrer.infer(actorId, {
+        recentConversationHistory: opts?.recentConversationHistory,
+        recentActivity: activity,
+      });
+      return { activity, mental };
+    } catch (err) {
+      console.log(`[AwarenessCortex] semanticInferrer.infer 失败（降级 null）: ${err}`);
+      return { activity, mental: null };
+    }
   }
 
   /** 返回最近 N 条活动历史（默认 20） */
@@ -386,8 +555,81 @@ export class AwarenessCortex {
     this.latest.set(state.actorId, state);
     if (!prev || prev.activity !== state.activity) {
       this.appendHistory(state);
+      // 动态睡眠窗口跟踪：记录进入/离开 sleeping 的时段
+      this.trackSleepWindow(state.actorId, prev?.activity, state.activity);
       if (notify) this.notifyChange(state);
     }
+  }
+
+  /**
+   * 跟踪用户的 sleeping 时段，用于动态学习个性化睡眠窗口。
+   *
+   * - 从其他状态进入 sleeping → 记录会话起点
+   * - 从 sleeping 切换到其他状态 → 关闭会话，写入样本
+   * - 跨天会话按实际进入/离开时间记录（endHour 可小于 startHour，如 23.5→6.25）
+   * - 不足 30 分钟的"短暂打盹"不记入样本（避免噪声）
+   */
+  private trackSleepWindow(
+    actorId: string,
+    prevActivity: UserActivityKind | undefined,
+    nextActivity: UserActivityKind,
+  ): void {
+    const now = Date.now();
+    if (nextActivity === "sleeping" && prevActivity !== "sleeping") {
+      // 进入 sleeping：记录会话起点
+      this.ongoingSleepSession.set(actorId, now);
+      return;
+    }
+    if (nextActivity !== "sleeping" && prevActivity === "sleeping") {
+      // 离开 sleeping：关闭会话，写入样本
+      const startTs = this.ongoingSleepSession.get(actorId);
+      this.ongoingSleepSession.delete(actorId);
+      if (!startTs) return;
+      const durationMs = now - startTs;
+      // 不足 30 分钟不算睡眠样本（短暂打盹/误判）
+      if (durationMs < SLEEP_INACTIVE_MS) return;
+      const startDate = new Date(startTs);
+      const endDate = new Date(now);
+      const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, "0")}-${String(
+        startDate.getDate(),
+      ).padStart(2, "0")}`;
+      const startHour = startDate.getHours() + startDate.getMinutes() / 60;
+      const endHour = endDate.getHours() + endDate.getMinutes() / 60;
+      const samples = this.sleepWindowSamples.get(actorId) ?? [];
+      samples.push({ date: dateStr, startHour, endHour });
+      // 只保留最近 SLEEP_WINDOW_SAMPLE_LIMIT 个样本
+      if (samples.length > SLEEP_WINDOW_SAMPLE_LIMIT) {
+        samples.splice(0, samples.length - SLEEP_WINDOW_SAMPLE_LIMIT);
+      }
+      this.sleepWindowSamples.set(actorId, samples);
+    }
+  }
+
+  /**
+   * 获取学习到的个性化睡眠窗口（中位数）。
+   *
+   * - 样本不足（< SLEEP_WINDOW_MIN_SAMPLES）返回 null，调用方回退到默认 23-6
+   * - 样本足够：取 startHour 和 endHour 的中位数
+   * - 返回值：{ startHour: 23.5, endHour: 6.25, sampleCount: 5 }
+   *
+   * NightlyMemoryTaskService 通过此接口获取动态窗口，替换硬编码的 nightStartHour/nightEndHour
+   */
+  getLearnedSleepWindow(
+    actorId: string,
+  ): { startHour: number; endHour: number; sampleCount: number } | null {
+    const samples = this.sleepWindowSamples.get(actorId);
+    if (!samples || samples.length < SLEEP_WINDOW_MIN_SAMPLES) return null;
+    const startHours = samples.map((s) => s.startHour).sort((a, b) => a - b);
+    const endHours = samples.map((s) => s.endHour).sort((a, b) => a - b);
+    const median = (arr: number[]): number => {
+      const mid = Math.floor(arr.length / 2);
+      return arr.length % 2 === 0 ? (arr[mid - 1]! + arr[mid]!) / 2 : arr[mid]!;
+    };
+    return {
+      startHour: median(startHours),
+      endHour: median(endHours),
+      sampleCount: samples.length,
+    };
   }
 
   private appendHistory(state: UserActivityState): void {

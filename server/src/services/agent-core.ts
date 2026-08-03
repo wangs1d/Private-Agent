@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { humanizeAssistantText } from "./assistant-humanizer.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
@@ -8,6 +9,7 @@ import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
+import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
@@ -37,19 +39,22 @@ import type {
   ToolLoopAfterBatchInfo,
   VisionFrame,
 } from "../external-model/types.js";
+import { isApologyStyleFallback, FALLBACK_TEXT_BACKGROUND_FAILED } from "../external-model/fallback-texts.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "./trajectory-skill-promotion-service.js";
 import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
-import { routeLlmExecution, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { routeLlmExecution, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
+import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
@@ -66,6 +71,8 @@ import { DefaultTerminationPolicy } from "../agent/loop/default-termination.js";
 import { DefaultRecoveryPolicy } from "../agent/loop/default-recovery.js";
 import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
+import { getRuntimeKernel } from "../agent/runtime-kernel.js";
+import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
 
 /**
  * 简单 LRU 缓存实现（用于响应缓存）
@@ -234,6 +241,16 @@ export type HandleUserMessageOptions = {
   preferFullPipeline?: boolean;
   /** 当前会话 sessionId；用于区分主会话 vs 笔记会话的记忆上下文。 */
   sessionId?: string;
+  /**
+   * 中断信号:用户发新消息时,调用方 abort 此 signal,
+   * agent-core 透传到 provider.streamCompletion,真正中断进行中的 LLM HTTP 流式请求。
+   */
+  signal?: AbortSignal;
+  /**
+   * 外层(WS 层)已计算的路由决策。传入时 agent-core 复用,避免重复调 routeLlmExecution。
+   * 未传时 agent-core 内部自行调用(向后兼容)。
+   */
+  routeDecision?: RouteDecision;
 };
 
 type ShortTermTurnContext = {
@@ -242,14 +259,7 @@ type ShortTermTurnContext = {
   resumedTask: boolean;
 };
 
-/** Loop Orchestrator 启用开关（P1：仅 direct_llm 路径接入，默认关闭）。 */
-function isLoopOrchestratorEnabled(): boolean {
-  const raw = process.env.AGENT_LOOP_ORCHESTRATOR?.trim().toLowerCase();
-  if (!raw || raw === "0" || raw === "off" || raw === "false" || raw === "no") {
-    return false;
-  }
-  return raw === "1" || raw === "true" || raw === "yes";
-}
+// Loop Orchestrator 启用开关已移至 config/env.ts 的 isLoopOrchestratorEnabled（默认开启）。
 
 export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
@@ -337,17 +347,19 @@ export class AgentCore {
       };
       this.agentTaskOrchestrator = new AgentTaskOrchestrator(orchestratorDeps);
 
-      // 初始化 Loop Orchestrator（P1：仅 direct_llm 路径接入，feature flag 控制）
-      // strategies map 收敛三种 loop；StateMachine 为 P1 stub，state_machine 路径暂走原分支
+      // 初始化 Loop Orchestrator（默认开启，feature flag 控制）。
+      // 双模式下：fast 走 ReactLoopStrategy，complex 走 PlanExecuteLoopStrategy + StateMachine。
+      // complex 内部自适应选择 plan_execute / state_machine，路由层不感知。
       const loopStrategies = new Map<LlmExecutionMode, LoopStrategy>();
-      loopStrategies.set("direct_llm", new ReactLoopStrategy(this.externalChat));
-      loopStrategies.set("plan_execute", new PlanExecuteLoopStrategy(this.externalChat));
-      loopStrategies.set("state_machine", new StateMachineStrategy());
+      loopStrategies.set("fast", new ReactLoopStrategy(this.externalChat));
+      const maxReplans = getLoopMaxReplans();
+      loopStrategies.set("complex", new PlanExecuteLoopStrategy(this.externalChat, maxReplans));
       this.loopOrchestrator = new LoopOrchestrator(loopStrategies, {
         termination: new DefaultTerminationPolicy(),
         recovery: new DefaultRecoveryPolicy(),
         progress: new DefaultProgressTracker(this.externalChat),
         escalation: new DefaultEscalationPolicy(),
+        maxReplans,
       });
     }
   }
@@ -384,6 +396,9 @@ export class AgentCore {
    */
   setBrainCenter(brain: BrainCenter | null): void {
     this.brainCenter = brain;
+    if (brain) {
+      brain.registerRuntimeKernel(getRuntimeKernel());
+    }
   }
 
   /**
@@ -501,28 +516,104 @@ export class AgentCore {
     let cognitiveNeedsToolLoop = true;
     /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
+    /** 工作记忆摘要（注入 streamCompletion 的 prompt） */
+    let cognitiveWorkingMemorySummary = "";
+    /** cognize 阶段 3.5 元认知评估结果（透出给 runStandardLlmPath → promptContext.memory.metaCognition） */
+    let cognitiveMetacog: import("../brain/meta-cognition-cortex.js").MetacogAssessment | undefined;
+    /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
+    let cognitiveEmotion: import("../brain/types.js").EmotionVector | null = null;
+    /** cognize 阶段 1.5.1 拉取的最近 6 轮对话历史（注入 prompt【最近对话】块） */
+    let cognitiveRecentConversationHistory = "";
+    /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
+    let cognitiveUserPattern: {
+      topics: string[];
+      preferredToolDomain?: string;
+      negativeFeedbackCount: number;
+      learningActive?: boolean;
+    } | undefined;
+    /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
+    let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
 
     if (this.brainCenter && text?.trim()) {
-      // 端到端认知：感知并行收集 → 一次认知 LLM → 后置安全/记忆
-      const cognitive = await this.brainCenter.cognize({ actorId, text, sessionId });
-      route = {
-        mode: cognitive.route.mode as LlmExecutionMode,
-        reasons: [cognitive.route.rationale],
-      };
-      shortTermTurn = { recallQuery: text, resumedTask: false };
-      cognitiveResponse = cognitive.response;
-      cognitiveNeedsToolLoop = cognitive.needsToolLoop;
-      cognitiveRecallItems = cognitive.recallItems;
+      // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeLlmExecution
+      const fastRoute = opts?.routeDecision ?? routeLlmExecution(text, getAgentRuntimeConfig(), {
+        preferFullPipeline: opts?.preferFullPipeline === true,
+      });
 
-      // 推送 MoodInferred 事件（替代原 moodInference 切片，cognize 阶段1 已并行调 limbic.inferEmotion）
-      if (cognitive.emotion) {
-        this.emitMoodInferred(sessionId, {
-          sentimentScore: cognitive.emotion.valence,
-          confidence: cognitive.emotion.confidence ?? 0.5,
-          emotionTags: [cognitive.emotion.label],
-          agentNote: cognitive.emotion.label,
-          timestamp: cognitive.emotion.detectedAt,
-        });
+      if (fastRoute.mode === "fast") {
+        // Fast 模式：跳过 cognize，直接用规则路由结果
+        route = fastRoute;
+        shortTermTurn = { recallQuery: text, resumedTask: false };
+        cognitiveResponse = "";
+        cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
+        cognitiveRecallItems = undefined;
+        cognitiveWorkingMemorySummary = "";
+        cognitiveRecentConversationHistory = "";
+        cognitiveMetacog = undefined;
+        cognitiveEmotion = null;
+        cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
+        cognitiveToolPlan = undefined; // fast 模式不生成工具规划
+
+        // 异步情绪推断（不阻塞主流程）
+        if (this.moodInferenceService) {
+          const inferenceService = this.moodInferenceService;
+          void inferenceService.analyzeMessage(sessionId, text).then((inference) => {
+            if (!inference) return;
+            this.emitMoodInferred(sessionId, {
+              sentimentScore: inference.sentimentScore,
+              confidence: inference.confidence,
+              emotionTags: inference.emotionTags,
+              agentNote: inference.agentNote ?? "对话情感分析",
+              timestamp: inference.timestamp,
+            });
+          }).catch(() => {
+            // 静默失败，不影响主流程
+          });
+        }
+      } else {
+        // Complex 模式：走完整 cognize 流程（需要 LLM 做规划和路由升级）
+        const cognitive = await this.brainCenter.cognize({ actorId, text, sessionId });
+        // 防降级保护：cognize 内部 rule-router 缺少时效性实体/桌面自动化检测,
+        // 可能把 task-router 已判 complex 的请求降级为 fast(凭印象答 → hedging → 再升级,浪费 LLM)。
+        // 当外层 fastRoute 已判 complex 且属以下"硬规则 complex"场景时,保留外层 complex 判定:
+        //  - 桌面自动化(isDesktopAutomationTask):需走后台状态机,cognize 规则无法识别
+        //  - 时效性实体(hasTimeSensitiveIntent):需调工具查实时信息,cognize 规则无法识别
+        //  - 子agent委派(requires_sub_agent):多步任务需 orchestrator
+        // 仅当 cognize 也升级到 complex(如低置信度)时才用 cognize 的 route。
+        const cognizeMode = cognitive.route.mode as LlmExecutionMode;
+        const outerIsHardComplex =
+          isDesktopAutomationTask(text) ||
+          fastRoute.reasons.includes("time_sensitive_intent") ||
+          fastRoute.reasons.includes("requires_sub_agent");
+        if (cognizeMode === "fast" && outerIsHardComplex) {
+          route = fastRoute; // 保留外层 complex,防 cognize 规则降级
+        } else {
+          route = {
+            mode: cognizeMode,
+            reasons: [cognitive.route.rationale],
+          };
+        }
+        shortTermTurn = { recallQuery: text, resumedTask: false };
+        cognitiveResponse = cognitive.response;
+        cognitiveNeedsToolLoop = cognitive.needsToolLoop;
+        cognitiveRecallItems = cognitive.recallItems;
+        cognitiveWorkingMemorySummary = cognitive.workingMemorySummary ?? "";
+        cognitiveRecentConversationHistory = cognitive.recentConversationHistory ?? "";
+        cognitiveMetacog = cognitive.metacog;
+        cognitiveEmotion = cognitive.emotion;
+        cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
+        cognitiveToolPlan = cognitive.toolPlan ?? undefined;
+
+        // 推送 MoodInferred 事件
+        if (cognitive.emotion) {
+          this.emitMoodInferred(sessionId, {
+            sentimentScore: cognitive.emotion.valence,
+            confidence: cognitive.emotion.confidence ?? 0.5,
+            emotionTags: [cognitive.emotion.label],
+            agentNote: cognitive.emotion.label,
+            timestamp: cognitive.emotion.detectedAt,
+          });
+        }
       }
     } else {
       // === 降级：原切片路径（BRAIN_CENTER_ENABLED=0 时）===
@@ -545,7 +636,7 @@ export class AgentCore {
       route = routeLlmExecution(text, getAgentRuntimeConfig(), {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
-      shortTermTurn = route.mode === "fast_chat"
+      shortTermTurn = route.mode === "fast"
         ? { recallQuery: text, resumedTask: false }
         : this.buildShortTermTurnContext(sessionId, text);
     }
@@ -582,48 +673,124 @@ export class AgentCore {
 
     // cognize 已产出最终响应且无需工具循环 → 直接返回（跳过 streamCompletion/工具循环）
     // 仅 fast_chat/direct_llm 模式适用；master/plan/state_machine 路径需走执行层
+    //
+    // ⚠️ Apology/空内容检测：cognize LLM 偶尔会自己生成 "抱歉，我无法..." 这种 apology
+    // 风格回复（尤其信息不足时），或返回空串。直接返回会让用户看到 fallback 风格回复，
+    // 而非真正的对话内容。命中时强制走 streamCompletion 重建回复，让主 LLM 用完整上下文
+    // （含 narrativeRecall/personalization）重新组织语言。
     if (
       cognitiveResponse &&
+      cognitiveResponse.trim() &&
       !cognitiveNeedsToolLoop &&
-      (route.mode === "fast_chat" || route.mode === "direct_llm")
+      !isApologyStyleFallback(cognitiveResponse) &&
+      (route.mode === "fast")
     ) {
+      // 人化处理：去除客服腔、清理 LEADING_CLEANUPS、调整语气——与 streamCompletion 路径保持一致。
+      // 不补这一步会让大量快回复（不带工具调用）跳过人化，导致"活人感"约束大面积失效。
+      const humanized = humanizeAssistantText(cognitiveResponse, { userText: text });
       this.turnLifecycle.finalizeTurn({
         actorId,
         userText: text,
-        assistantText: cognitiveResponse,
+        assistantText: humanized,
         sessionId,
       });
-      // cognize response 写入缓存，下次同类查询 <100ms 命中
+      // cognize response 写入缓存，下次同类查询 <100ms 命中（缓存人化后的版本）
       if (cacheEnabled && !opts?.visionFrames?.length) {
-        globalResponseCache.set(text, actorId, cognitiveResponse);
+        globalResponseCache.set(text, actorId, humanized);
       }
       // 流式分片：cognize response 一次性返回，不分片
-      opts?.onAssistantDelta?.(cognitiveResponse);
-      return { text: cognitiveResponse, streamedChunks: false };
+      opts?.onAssistantDelta?.(humanized);
+      return { text: humanized, streamedChunks: false };
+    }
+    // cognize 返回 apology 或空内容 → 记日志，让流程继续走 streamCompletion 重建回复
+    if (cognitiveResponse && isApologyStyleFallback(cognitiveResponse)) {
+      console.log(
+        `[AgentCore] cognize 返回 apology 风格回复，降级走 streamCompletion 重建：` +
+          `"${cognitiveResponse.slice(0, 80)}" route=${route.mode}`,
+      );
     }
 
     // 性能监控：前置准备阶段
     const prepStartTime = Date.now();
-    
-    const [narrativeRecall, userLocation, personalization] = this.isFastChatMode(route.mode)
+
+    // 2026-07-29 修复：用户陈述具体数据时（含温度/降水/行程/日期动作），跳过 userLocation 注入。
+    // 原 BUG：用户说"今天20到26度"时，userLocation prompt 会让 LLM 反问"你是不是在 XX"，
+    // 把"陈述"误判为"查询"，导致对话岔开。判定条件：route.reasons 包含"用户陈述具体数据"标识。
+    const userIsStatingData = route.reasons.some(
+      (r) => r.includes("用户陈述具体数据") || r.includes("user_stating_data"),
+    );
+
+    // 2026-07-29 修复 C1：计算当前 thread store 中实际消息数（不含 system），
+    // 用于判断 narrativeRecall 末尾的 [最近对话] 块是否与 msgs 重复。
+    // 12 条 ≈ 6 轮 user/assistant 配对；超过此值说明 LLM 已能从 msgs 看到最近对话。
+    // 失败时返回 -1（关闭 dedup 判定，保持原行为）。
+    const threadMessageCount = this.peekThreadMessageCount(actorId, sessionId);
+
+    // 2026-07-29 修复 D：fast_chat 也注入 narrativeRecall（复用 cognize 召回结果），
+    // 解决追问被误判 fast_chat 时 LLM 只有 thread messages、缺乏长期记忆/工作记忆导致答非所问。
+    // 仍跳过 userLocation（保持速度，避免反问"你是不是在 XX"）和 personalization（fast_chat 不需要个性化语气）。
+    const [narrativeRecall, userLocation, personalization] = this.isFastMode(route.mode)
       ? await Promise.all([
-          Promise.resolve(undefined),
+          // Fast 模式记忆注入：
+          // - 有 cognize 召回结果时直接复用（Complex 路径）
+          // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
+          cognitiveRecallItems && cognitiveRecallItems.length > 0
+            ? Promise.resolve(
+                this.appendRecentConversationHistory(
+                  this.appendWorkingMemorySummary(
+                    this.recallItemsToNarrative(cognitiveRecallItems),
+                    cognitiveWorkingMemorySummary,
+                  ),
+                  cognitiveRecentConversationHistory,
+                  threadMessageCount,
+                ),
+              )
+            : this.turnLifecycle
+                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
+                .then((n) => this.appendRecentConversationHistory(n, "", threadMessageCount)),
           Promise.resolve(undefined),
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
           // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
+          // 深度优化：把工作记忆摘要 + 最近对话历史拼接到 narrativeRecall，让 streamCompletion 真正感知上下文
           cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
-          resolveUserLocationPrompt({
-            clientIp: opts?.clientIp,
-            clientLocation: opts?.clientLocation,
-          }),
+            ? Promise.resolve(
+                this.appendRecentConversationHistory(
+                  this.appendWorkingMemorySummary(
+                    this.recallItemsToNarrative(cognitiveRecallItems),
+                    cognitiveWorkingMemorySummary,
+                  ),
+                  cognitiveRecentConversationHistory,
+                  threadMessageCount,
+                ),
+              )
+            : this.turnLifecycle
+                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
+                .then((n) => this.appendWorkingMemorySummary(n, cognitiveWorkingMemorySummary))
+                .then((n) =>
+                  this.appendRecentConversationHistory(
+                    n,
+                    cognitiveRecentConversationHistory,
+                    threadMessageCount,
+                  ),
+                ),
+          // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开
+          userIsStatingData
+            ? Promise.resolve(undefined)
+            : resolveUserLocationPrompt({
+                clientIp: opts?.clientIp,
+                clientLocation: opts?.clientLocation,
+              }),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
     
+    const enrichedNarrativeRecall = this.appendLearningDecisionGuidance(
+      narrativeRecall,
+      cognitiveRecallItems,
+    );
+
     const prepDuration = Date.now() - prepStartTime;
     
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
@@ -636,7 +803,7 @@ export class AgentCore {
       actorId,
       text,
       opts,
-      narrativeRecall,
+      enrichedNarrativeRecall,
       personalization,
       trajCap,
       access,
@@ -647,11 +814,14 @@ export class AgentCore {
     try {
       let result: AgentReply;
 
-      // 状态机模式:长任务(桌面自动化/多步骤委派)走外置任务队列+状态机编排
-      if (route.mode === "state_machine") {
+      // Complex 模式分发:
+      //  - 桌面自动化(desktop_automation)→ 后台 createAndRun(多轮 UI 操作,立即返回 task id)
+      //  - 其他 complex(信息查询/子agent委派/时效性查询)→ fallthrough 到 master 同步流式或 runStandardLlmPath
+      //    (这些场景用户期望直接看到流式回复,而非"已创建任务"占位)
+      if (route.mode === "complex" && isDesktopAutomationTask(text)) {
         if (!this.agentTaskOrchestrator) {
-          // orchestrator 不可用,降级到 master_only 走后续分支
-          route = { mode: "master_only", reasons: [...route.reasons, "fallback_no_orchestrator"] };
+          // orchestrator 不可用，降级到 master/runStandardLlmPath
+          route = { mode: "complex", reasons: [...route.reasons, "fallback_no_orchestrator"] };
         } else {
         const sessionId = opts?.sessionId ?? actorId;
         const orchestrator = this.agentTaskOrchestrator;
@@ -685,6 +855,14 @@ export class AgentCore {
               } catch {
                 // 静默失败
               }
+              // 后台任务失败时推送 fallback 文案,让用户知道任务没成功
+              if (event.type === "task_failed") {
+                try {
+                  onDelta?.(FALLBACK_TEXT_BACKGROUND_FAILED());
+                } catch {
+                  /* ignore */
+                }
+              }
             },
             onAssistantDelta: (delta) => {
               onDelta?.(delta);
@@ -702,6 +880,19 @@ export class AgentCore {
                 ok: info.ok,
                 result: (info.result as Record<string, unknown>) ?? {},
               });
+              // 失败时自我学习闭环（orchestrator 路径）：写入 selfLearning
+              this.brainCenter?.recordToolInteraction({
+                actorId,
+                sessionId,
+                userRequest: text,
+                attemptedTools: [info.name],
+                success: info.ok,
+                errorMessage: info.ok
+                  ? undefined
+                  : typeof (info.result as Record<string, unknown>)?.error === "string"
+                    ? String((info.result as Record<string, unknown>).error).slice(0, 200)
+                    : undefined,
+              });
             },
           },
         );
@@ -716,10 +907,10 @@ export class AgentCore {
         } // end else (orchestrator available)
       }
 
-      if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
+      if (this.isComplexMode(route.mode) && this.masterAgentCoordinator) {
         // 性能监控：Master Agent 模式
         const masterStartTime = Date.now();
-        
+
         const masterResult = await this.masterAgentCoordinator.orchestrateTask(
           actorId,
           text,
@@ -727,10 +918,12 @@ export class AgentCore {
           opts?.onAssistantDelta,
           orchestrateOpts,
         );
-        
+
         const masterDuration = Date.now() - masterStartTime;
-        
-        result = this.finishLlmTurn(actorId, text, masterResult, {
+
+        // 不做 humanize 后处理：流式推送的内容必须和最终返回一致，避免"两个版本"。
+        // humanize 会删前导话/改客套词，导致流式内容和 finalText 不一致 → 前端先显示一版再被覆盖。
+        result = await this.finishLlmTurn(actorId, text, masterResult, {
           streamedChunks: true,
           modelCallsConsumed: 1,
           planExecuteUsed: false,
@@ -739,8 +932,8 @@ export class AgentCore {
           trajCap,
           messageId: opts?.chatUserMessageId,
           sessionId,
-        });
-        
+        }, opts?.onAssistantDelta);
+
         // 记录 Master Agent 模式性能
         this.recordPerformanceMetrics('master_agent', {
           totalDuration: Date.now() - perfStartTime,
@@ -755,19 +948,23 @@ export class AgentCore {
       } else {
         // 性能监控：标准 LLM 模式
         const standardStartTime = Date.now();
-        
+
         result = await this.runStandardLlmPath(actorId, text, route.mode, opts, {
-          narrativeRecall,
+          narrativeRecall: enrichedNarrativeRecall,
           userLocation,
           personalization,
           trajCap,
           orchestrateToolCtx: orchestrateOpts,
           sessionId,
           shortTermTurn,
+          cognitiveMetacog,
+          cognitiveEmotion,
+          cognitiveUserPattern,
+          cognitiveToolPlan,
         });
-        
+
         const standardDuration = Date.now() - standardStartTime;
-        
+
         // 记录标准模式性能
         this.recordPerformanceMetrics('standard_llm', {
           totalDuration: Date.now() - perfStartTime,
@@ -779,6 +976,48 @@ export class AgentCore {
           modelCallsConsumed: 1, // 简化统计
           success: true,
         });
+
+        // ── 兜底机制：fast 路径回复检测"需要外部信息"信号 → 自动升级到 complex ──
+        // 场景：cognize 误判把"最新 AI 新闻"分到 fast，主 Agent 没调 search_web 就凭印象答，
+        // 回复里出现"我不确定/最新/建议查询/可能已经更新"等 hedging 信号时，升级到子 Agent 重新处理。
+        // 注意：只在 fast 路径触发，且 masterAgentCoordinator 可用时才升级；防重入。
+        if (
+          route.mode === "fast" &&
+          this.masterAgentCoordinator &&
+          getAgentRuntimeConfig().masterDelegation.enabled &&
+          result.text &&
+          this.needsExternalInfoUpgrade(result.text, text)
+        ) {
+          console.log(
+            `[AgentCore] fast 回复命中"需外部信息"兜底信号，升级到 complex：` +
+              `userText="${text.slice(0, 40)}" replyHint="${result.text.slice(0, 60)}"`,
+          );
+          try {
+            const upgradeResult = await this.masterAgentCoordinator.orchestrateTask(
+              actorId,
+              text,
+              opts?.onAgentPhaseStatus,
+              opts?.onAssistantDelta,
+              orchestrateOpts,
+            );
+            result = await this.finishLlmTurn(actorId, text, upgradeResult, {
+              streamedChunks: true,
+              modelCallsConsumed: 2,
+              planExecuteUsed: false,
+              pePlan: null,
+              peExhausted: false,
+              trajCap,
+              messageId: opts?.chatUserMessageId,
+              sessionId,
+            }, opts?.onAssistantDelta);
+          } catch (upgradeErr) {
+            // 升级失败：保留原 direct_llm 结果，记日志（不向用户暴露错误）
+            console.error(
+              "[AgentCore] 兜底升级 master_delegate 失败，保留原 direct_llm 结果:",
+              upgradeErr,
+            );
+          }
+        }
       }
       
       // 响应缓存存储（仅缓存无工具调用的简单响应）
@@ -789,8 +1028,15 @@ export class AgentCore {
       return result;
       
     } catch (err) {
+      // 用户发新消息或取消导致的中断:不触发降级/emergencyRegenerate,直接返回空串。
+      // 调用方(chat-user-message)通过 isStale() 门控,不会推送此空结果给用户。
+      if (err instanceof Error && (err.name === "AbortError" || opts?.signal?.aborted)) {
+        console.log("[AgentCore] LLM 请求被中断(用户发新消息或取消),跳过重生成");
+        return { text: "", streamedChunks: false };
+      }
+
       const errorDuration = Date.now() - perfStartTime;
-      
+
       // 记录错误性能指标
       this.recordPerformanceMetrics('error', {
         totalDuration: errorDuration,
@@ -800,21 +1046,32 @@ export class AgentCore {
         success: false,
         error: err instanceof Error ? err.message : String(err),
       });
-      
-      if (this.isMasterMode(route.mode) && this.masterAgentCoordinator) {
+
+      if (this.isComplexMode(route.mode) && this.masterAgentCoordinator) {
         console.error("[AgentCore] Master Agent orchestration failed, falling back to standard mode:", err);
-        return await this.runStandardLlmPath(actorId, text, "direct_llm", opts, {
-          narrativeRecall,
-          userLocation,
-          personalization,
-          trajCap,
-          orchestrateToolCtx: orchestrateOpts,
-          sessionId,
-          shortTermTurn,
-        });
+        try {
+          return await this.runStandardLlmPath(actorId, text, "fast", opts, {
+            narrativeRecall: enrichedNarrativeRecall,
+            userLocation,
+            personalization,
+            trajCap,
+            orchestrateToolCtx: orchestrateOpts,
+            sessionId,
+            shortTermTurn,
+            cognitiveUserPattern,
+            cognitiveToolPlan,
+          });
+        } catch (retryErr) {
+          // 降级也失败：不再用 apology 兜底文案，尝试一次最小化 LLM 调用生成回复
+          console.error("[AgentCore] direct_llm 降级也失败，尝试最小化重生成:", retryErr);
+          const emergencyText = await this.emergencyRegenerate(actorId, text, opts?.onAssistantDelta);
+          return { text: emergencyText, streamedChunks: false };
+        }
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      return { text: `${this.externalChat.displayLabel} 调用失败：${msg}` };
+      // 非 master 模式失败：不再用 apology 兜底文案，尝试一次最小化 LLM 调用生成回复
+      console.error("[AgentCore] runStandardLlmPath 失败，尝试最小化重生成:", err);
+      const emergencyText = await this.emergencyRegenerate(actorId, text, opts?.onAssistantDelta);
+      return { text: emergencyText, streamedChunks: false };
     }
   }
 
@@ -927,6 +1184,33 @@ export class AgentCore {
     },
   ): Promise<{ ok: boolean; result?: Record<string, unknown> }> {
     if (!reply.toolName || !reply.toolInput) return { ok: true };
+    // 工具调用前置安全检查统一由 BrainCenter + AgentTaskSafety 负责（含原 RuntimeKernel.checkToolAction 的工具名规则）
+    const brainSafety = this.brainCenter?.checkSafety(
+      { tool: reply.toolName, args: reply.toolInput },
+      { actorId, sessionId: opts?.sessionId ?? actorId },
+    );
+    if (brainSafety && !brainSafety.allowed) {
+      return {
+        ok: false,
+        result: {
+          error: brainSafety.reason,
+          severity: brainSafety.severity,
+          blockedBy: "brain_center",
+        },
+      };
+    }
+    // Task 12 工具下沉：先尝试 BodyGateway 路由（前缀匹配 → BodyModule.act + 反射弧硬安全门），
+    // 未下沉工具（hasRoute=false）走原 toolRegistry 直连路径。
+    // BodyGateway 内部对未覆盖的具体工具会自动降级到 fallbackToolRegistry（仍走 toolRegistry.execute）。
+    const bodyGw = this.brainCenter?.getBodyGateway();
+    if (bodyGw && bodyGw.hasRoute(reply.toolName)) {
+      return bodyGw.execute({
+        tool: reply.toolName,
+        args: reply.toolInput,
+        actorId,
+        source: "runToolIfNeeded",
+      });
+    }
     return this.toolRegistry.execute(reply.toolName, reply.toolInput, {
       sessionId: opts?.sessionId ?? actorId,
       userId: opts?.userId,
@@ -939,25 +1223,113 @@ export class AgentCore {
     });
   }
 
-  private isMasterMode(mode: LlmExecutionMode): boolean {
-    return mode === "master_only" || mode === "master_delegate";
+  private isComplexMode(mode: LlmExecutionMode): boolean {
+    return mode === "complex";
   }
 
-  private isFastChatMode(mode: LlmExecutionMode): boolean {
-    return mode === "fast_chat";
+  private isFastMode(mode: LlmExecutionMode): boolean {
+    return mode === "fast";
+  }
+
+  /**
+   * 兜底检测：主 Agent direct_llm 路径生成的回复是否暴露"需要外部信息"信号。
+   * 命中条件（满足任一即升级到 master_delegate）：
+   *   1. 回复含 hedging 词汇（我不确定/可能已经/建议查询/无法确认/信息可能过时）
+   *   2. 用户消息含时效性实体（最新/最近/新出的/版本号/新产品），但回复未调用任何工具
+   *   3. 回复明确说"我无法获取实时/最新/联网信息"
+   * 排除：回复很短（<10 字符，可能是寒暄）；用户消息也含 hedging（用户自己说的）
+   */
+  private needsExternalInfoUpgrade(replyText: string, userText: string): boolean {
+    const reply = replyText.trim();
+    const user = userText.trim();
+    // 太短的回复（寒暄/确认）不升级
+    if (reply.length < 10) return false;
+
+    // hedging 信号：LLM 自己暴露"不确定/过时/建议查"
+    const hedgingSignals = [
+      "我不确定", "无法确认", "信息可能过时", "可能已经更新", "可能已经变化",
+      "建议查询", "建议查看", "建议搜索", "建议你查", "可以搜索", "可以查询",
+      "我无法获取", "我无法联网", "我无法访问", "没有联网", "无法获取最新",
+      "截至我所知", "截至我的知识", "我的知识截止", "知识库可能没有",
+      "可能不准确", "可能不完整", "可能已过时", "建议核实",
+    ];
+    if (hedgingSignals.some((s) => reply.includes(s))) return true;
+
+    // 用户消息含时效性实体 + 回复未调工具（result.toolName 为空才走到这）→ 升级
+    const timeSensitivitySignals = [
+      "最新", "最近", "新出的", "新出", "刚出", "刚发布", "今年", "去年",
+      "上周", "本周", "这周", "这个月", "上个月", "今天", "昨天", "明天",
+      "现在", "目前", "当前",
+    ];
+    const versionSignals = [
+      "kimi3", "gpt-5", "gpt5", "claude-4", "claude4", "iphone 17", "iphone17",
+      "macbook m5", "m5", "新版", "最新款", "旗舰款", "2024", "2025", "2026",
+    ];
+    const userHasTimeSignal = timeSensitivitySignals.some((s) => user.includes(s));
+    const userHasVersionSignal = versionSignals.some((s) =>
+      user.toLowerCase().includes(s.toLowerCase()),
+    );
+    if (userHasTimeSignal || userHasVersionSignal) {
+      // 排除明显闲聊（"今天天气真好" / "现在几点" 由简单工具处理，不升级）
+      const simpleChatPatterns = ["几点", "天气怎么样", "天气如何", "今日天气"];
+      if (simpleChatPatterns.some((p) => user.includes(p))) return false;
+      return true;
+    }
+
+    return false;
   }
 
   private resolveToolExposureProfile(mode: LlmExecutionMode): AgentStreamOptions["toolExposureProfile"] {
-    if (mode === "fast_chat") return "none";
-    if (mode === "master_delegate") return "delegate";
-    if (mode === "plan_execute") return "contextual";
+    // Fast 模式：暴露轻量工具（天气/日历/搜索/计算），不暴露委派工具
+    // Complex 模式：暴露全部工具（含委派/计划），由 master coordinator / orchestrator 自适应
+    if (mode === "fast") return "contextual";
+    if (mode === "complex") return "delegate";
     return "contextual";
   }
 
   private resolveHermesToolRankingHint(actorId: string): AgentStreamOptions["toolRankingHint"] {
     const profile =
       this.agentMemorySyncService?.getSnapshot(actorId, ["hermes_profile"]).entries.hermes_profile;
-    return buildToolRankingHintFromHermesProfile(profile);
+    const hermesHint = buildToolRankingHintFromHermesProfile(profile);
+    const cautiousNamespaces = this.resolveCautiousToolNamespacesFromLearning(actorId);
+    if (cautiousNamespaces.length === 0) return hermesHint;
+    return {
+      ...(hermesHint ?? {}),
+      cautiousNamespaces: [
+        ...new Set([
+          ...(hermesHint?.cautiousNamespaces ?? []),
+          ...cautiousNamespaces,
+        ]),
+      ],
+    };
+  }
+
+  private resolveCautiousToolNamespacesFromLearning(actorId: string): string[] {
+    const snapshot = this.brainCenter?.getLearningSnapshot(actorId);
+    if (!snapshot) return [];
+    const namespaces = new Set<string>();
+    for (const belief of snapshot.beliefs) {
+      if (belief.status === "deprecated") continue;
+      if (belief.failureCount <= belief.successCount) continue;
+      if (!/tool|using|risky|failed|failure/i.test(belief.claim)) continue;
+      const match = belief.claim.match(/\busing\s+(.+?)\s+is\s+risky\b/i);
+      const rawTools = match?.[1] ?? "";
+      for (const toolName of rawTools.split(",")) {
+        const namespace = this.pickToolNamespace(toolName.trim());
+        if (namespace) namespaces.add(namespace);
+      }
+      if (namespaces.size >= 4) break;
+    }
+    return [...namespaces];
+  }
+
+  private pickToolNamespace(toolName: string): string | null {
+    if (!toolName) return null;
+    const dotIndex = toolName.indexOf(".");
+    if (dotIndex > 0) return toolName.slice(0, dotIndex);
+    const underscoreIndex = toolName.indexOf("_");
+    if (underscoreIndex > 0) return toolName.slice(0, underscoreIndex);
+    return toolName === "unknown" ? null : "misc";
   }
 
   /**
@@ -973,6 +1345,99 @@ export class AgentCore {
       if (content) lines.push(content);
     }
     return lines.length > 0 ? lines.join("\n") : undefined;
+  }
+
+  /**
+   * 深度优化：把工作记忆摘要拼接到 narrativeRecall 末尾。
+   * 让 streamCompletion 真正感知 cognize 阶段 3 生成的工作记忆摘要（活跃目标+槽位+待办），
+   * 实现工作记忆跨模块连贯性。
+   */
+  private appendWorkingMemorySummary(
+    narrativeRecall: string | undefined,
+    workingMemorySummary: string,
+  ): string | undefined {
+    if (!workingMemorySummary) return narrativeRecall;
+    const wmBlock = `\n\n[当前对话上下文]\n${workingMemorySummary}`;
+    return narrativeRecall ? narrativeRecall + wmBlock : wmBlock.trim();
+  }
+
+  /**
+   * 把 cognize 阶段 1.5.1 拉取的最近 6 轮对话历史拼接到 narrativeRecall。
+   * 让 streamCompletion 的 system prompt 能看到【最近对话】块，解决追问断片问题。
+   * 格式与 appendWorkingMemorySummary 对称：追加到 narrativeRecall 末尾。
+   *
+   * 2026-07-29 修复 C1+C2（用户反馈"agent 记忆没有连续性、会岔开"）：
+   *  - C1: 若 thread messages 已包含 recentConversationHistory 同等最近轮次内容，
+   *    跳过追加（避免 LLM 同时看到 msgs + [最近对话] 块造成 ~400 token 重复/注意力分散）
+   *  - C2: 即使保留 [最近对话] 块，也加 "recap, 非指令" 前缀提示，
+   *    防止 LLM 把"用户：xxx"误读成"用户要 Agent 复述"
+   *  - recentConversationHistory 缺省/为空时直接透传 narrativeRecall，不增加任何 block
+   */
+  private appendRecentConversationHistory(
+    narrativeRecall: string | undefined,
+    recentConversationHistory: string,
+    threadMessageCount: number = -1,
+  ): string | undefined {
+    if (!recentConversationHistory) return narrativeRecall;
+
+    // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，说明 LLM 已经能从 msgs
+    // 里看到全部最近对话，narrativeRecall 末尾再追加 [最近对话] 块属于完全重复。
+    // 这是 [最近对话] 块最初设计为 12 条的初衷 —— 与 thread 末尾对齐。
+    // 仅当 thread 较短（如首次对话、新会话、长 context 被 trim 掉）时才保留 recap 块。
+    if (threadMessageCount >= 12) {
+      return narrativeRecall;
+    }
+
+    // C2: 加 "recap, 非指令" 前缀，明确告诉 LLM 这只是上下文复述，避免被读成"用户让你复述"。
+    const hint =
+      "（以下为最近对话的上下文回顾，用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）";
+    const histBlock = `\n\n[最近对话]\n${hint}\n${recentConversationHistory}`;
+    return narrativeRecall ? narrativeRecall + histBlock : histBlock.trim();
+  }
+
+  /**
+   * 2026-07-29 修复 C1 配套：窥探当前 thread store 中的非 system 消息条数。
+   * - 成功：返回 user/assistant 消息总数（不含 system）
+   * - 失败：返回 -1（关闭 dedup 判定，保持原追加行为）
+   *
+   * 调用栈：narrativeRecall 准备阶段，用于判断 [最近对话] 块是否与 msgs 重复。
+   * 不修改 thread store，纯查询。
+   */
+  private peekThreadMessageCount(actorId: string, sessionId?: string): number {
+    try {
+      const chatSessionId = resolvePrimaryChatSessionId(
+        actorId,
+        getAgentRuntimeConfig().masterDelegation.enabled,
+      );
+      const threadStore = getChatThreadStore();
+      const messages = threadStore.thread(chatSessionId, "");
+      let count = 0;
+      for (const m of messages) {
+        if (m && (m.role === "user" || m.role === "assistant")) count++;
+      }
+      return count;
+    } catch (err) {
+      console.log(`[AgentCore] peekThreadMessageCount 失败（忽略，关闭 dedup）: ${err}`);
+      return -1;
+    }
+  }
+
+  private appendLearningDecisionGuidance(
+    narrativeRecall: string | undefined,
+    recallItems: MemoryRecallItem[] | undefined,
+  ): string | undefined {
+    const learningLines = (recallItems ?? [])
+      .filter((item) => item.source === "experience_learning_loop" || item.content.startsWith("belief:"))
+      .map((item) => item.content.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (learningLines.length === 0) return narrativeRecall;
+    const guidance = [
+      "[learned-decision-guidance]",
+      "Use these learned beliefs when selecting tools, deciding whether to ask for confirmation, or choosing a safer fallback.",
+      ...learningLines.map((line) => `- ${line}`),
+    ].join("\n");
+    return narrativeRecall ? `${narrativeRecall}\n\n${guidance}` : guidance;
   }
 
   private buildOrchestrateOpts(
@@ -1018,6 +1483,20 @@ export class AgentCore {
           result: info.result,
         });
         opts?.onExternalToolExecuted?.(info);
+        // 失败时自我学习闭环：把工具调用结果（含失败）写入 selfLearning
+        // → DMN 周期扫描时即可读到失败轨迹 → 触发 proposeEvolution 生成进化提案
+        this.brainCenter?.recordToolInteraction({
+          actorId,
+          sessionId,
+          userRequest: userText,
+          attemptedTools: [info.toolName],
+          success: info.ok,
+          errorMessage: info.ok
+            ? undefined
+            : typeof info.result?.error === "string"
+              ? String(info.result.error).slice(0, 200)
+              : undefined,
+        });
       },
       onToolLoopAfterBatch: onBatchWithEvolution,
     };
@@ -1036,12 +1515,58 @@ export class AgentCore {
       personalization: PersonalizationPromptSlice;
       sessionId: string;
       shortTermTurn: ShortTermTurnContext;
+      /**
+       * r5: cognize 阶段已评估的元认知 + 情绪，由本函数格式化为方向化短字符串
+       * 注入 promptContext.memory.metaCognition / emotionState。
+       * 缺失（无 BrainCenter / cognize 未跑）时跳过注入。
+       */
+      cognitiveMetacog?: import("../brain/meta-cognition-cortex.js").MetacogAssessment;
+      cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
+      /** 深度优化：用户画像，注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
+      cognitiveUserPattern?: {
+        topics: string[];
+        preferredToolDomain?: string;
+        negativeFeedbackCount: number;
+        learningActive?: boolean;
+      };
+      /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
+      cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
     const toolCtx: ChatToolExecutionContext = {
-      executeTool: (name, args) =>
-        this.toolRegistry.execute(name, args, {
+      getCachedToolResult: (name, args) => {
+        return this.toolRegistry.getCachedResult(name, args);
+      },
+      executeTool: (name, args) => {
+        // 工具调用前置安全检查统一由 BrainCenter + AgentTaskSafety 负责（含原 RuntimeKernel.checkToolAction 的工具名规则）
+        const brainSafety = this.brainCenter?.checkSafety(
+          { tool: name, args },
+          { actorId, sessionId: ctx.sessionId, userText: text },
+        );
+        if (brainSafety && !brainSafety.allowed) {
+          return Promise.resolve({
+            ok: false,
+            result: {
+              error: brainSafety.reason,
+              severity: brainSafety.severity,
+              blockedBy: "brain_center",
+            },
+          });
+        }
+        // Task 12 工具下沉：先尝试 BodyGateway 路由（前缀匹配 → BodyModule.act + 反射弧硬安全门），
+        // 未下沉工具（hasRoute=false）走原 toolRegistry 直连路径。
+        // BodyGateway 内部对未覆盖的具体工具会自动降级到 fallbackToolRegistry（仍走 toolRegistry.execute）。
+        const bodyGw = this.brainCenter?.getBodyGateway();
+        if (bodyGw && bodyGw.hasRoute(name)) {
+          return bodyGw.execute({
+            tool: name,
+            args,
+            actorId,
+            source: "runStandardLlmPath",
+          });
+        }
+        return this.toolRegistry.execute(name, args, {
           sessionId: ctx.sessionId,
           userId: opts?.userId,
           chatUserMessageId: opts?.chatUserMessageId,
@@ -1050,7 +1575,8 @@ export class AgentCore {
           agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
           desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
           phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
-        }),
+        });
+      },
       onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
@@ -1059,9 +1585,25 @@ export class AgentCore {
     const onBatchWithEvolution = ctx.orchestrateToolCtx.onToolLoopAfterBatch;
     const toolExposureProfile = this.resolveToolExposureProfile(mode);
     const toolRankingHint = this.resolveHermesToolRankingHint(actorId);
-    const streamOpts = this.isFastChatMode(mode)
+    // 2026-07-29 修复 D2：fast_chat 也走 promptContextBuilder.build，把 narrativeRecall 注入 promptContext.memory，
+    // 让 LLM 能看到长期记忆 + 工作记忆 + [最近对话] recap。
+    // 2026-07-30 重构：Fast 模式作为表达层 + 轻量工具通道（clock/weather/calendar.list 只读工具）。
+    // Complex 模式负责重活（多步/写操作/子 Agent 委派），结果回传后由 Fast 统一输出。
+    const baseStreamOpts = this.isFastMode(mode)
       ? ({
-          chatToolsBuiltin: [],
+          ...(this.promptContextBuilder.build({
+            actorId,
+            sessionId: ctx.sessionId,
+            userText: text,
+            narrativeRecall: ctx.narrativeRecall,
+            interruptedContext: opts?.interruptedContext,
+            userLocation: undefined, // fast_chat 跳过位置注入
+            personalization: ctx.personalization,
+            onToolLoopAfterBatch: undefined, // fast_chat 无工具循环
+            userPattern: ctx.cognitiveUserPattern,
+            toolPlan: ctx.cognitiveToolPlan,
+          }) ?? {}),
+          chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
           toolExposureProfile,
           toolRankingHint,
@@ -1076,14 +1618,107 @@ export class AgentCore {
             userLocation: ctx.userLocation,
             personalization: ctx.personalization,
             onToolLoopAfterBatch: onBatchWithEvolution,
+            userPattern: ctx.cognitiveUserPattern,
+            toolPlan: ctx.cognitiveToolPlan,
           }) ?? {}),
           toolExposureProfile,
           toolRankingHint,
         };
+    const runtimeKernel = getRuntimeKernel(actorId);
+    // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
+    // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
+    // - emotionState: 仅当情绪显著时输出（强负/强正/高唤醒），让模型基于情绪调语气
+    // 高置信 + 中性情绪 → 跳过（避免噪声污染 prompt）
+    const memoryBeforeSanitize = baseStreamOpts.promptContext?.memory;
+    const cogMeta = ctx.cognitiveMetacog;
+    const cogEmo = ctx.cognitiveEmotion;
+    if (memoryBeforeSanitize && (cogMeta || cogEmo)) {
+      if (cogMeta && (cogMeta.shouldReflect || cogMeta.confidence < 0.7)) {
+        const markers = cogMeta.uncertaintyMarkers.slice(0, 2).join("、");
+        const direction = cogMeta.shouldReflect
+          ? "建议先反思再答"
+          : "对不确定的点先说明";
+        memoryBeforeSanitize.metaCognition =
+          `置信度 ${cogMeta.confidence.toFixed(2)} — ${direction}${markers ? `（${markers}）` : ""}`;
+      }
+      if (cogEmo) {
+        const v = cogEmo.valence;
+        const a = cogEmo.arousal;
+        if (v < -0.3 || v > 0.5 || a > 0.7) {
+          const tone = v < -0.5
+            ? "回复应简短温和"
+            : v < -0.3
+              ? "回复宜温和"
+              : v > 0.5
+                ? "回复可活泼些"
+                : a > 0.7
+                  ? "回复别端着"
+                  : "";
+          memoryBeforeSanitize.emotionState =
+            `情绪：${cogEmo.label}${tone ? ` — ${tone}` : ""}`;
+        }
+      }
+    }
+    const runtimePlan = runtimeKernel.planTurn(text, baseStreamOpts.promptContext?.memory);
+    const sanitizedMemory = runtimeKernel.sanitizePromptMemory(
+      baseStreamOpts.promptContext?.memory,
+      runtimePlan,
+    );
+    const isMinimalMode = runtimeKernel.isMinimalMode();
+    // 2026-08-02 模型路由：Fast mode → deepseek-chat（Flash），Complex mode → deepseek-reasoner（Pro）
+    const tierForMode: Record<LlmExecutionMode, TaskTier> = {
+      fast: TaskTier.FAST,
+      complex: TaskTier.COMPLEX,
+    };
+    const streamOpts: AgentStreamOptions = {
+      ...baseStreamOpts,
+      ...(sanitizedMemory ? { promptContext: { memory: sanitizedMemory } } : { promptContext: undefined }),
+      ...(runtimePlan.promptMode === "conversation_only"
+        ? {
+            systemPromptOverride:
+              "You are a helpful, safe assistant. Reply in the user's language. Follow the current user request and conversation context.",
+          }
+        : {}),
+      // minimal 模式下：通过 RuntimeKernel.buildSessionSystem() 生成薄身份 system，
+      // suppressRuntimeSuffixes=true 跳过身份/风格/时间戳说明后缀，
+      // functionalSuffixes=true 保留功能性后缀（工具说明/主 Agent 调度/用户可见进度/访问权限）
+      ...(isMinimalMode
+        ? {
+            systemPromptOverride: runtimeKernel.buildSessionSystem() ?? undefined,
+            suppressRuntimeSuffixes: true,
+            functionalSuffixes: runtimePlan.functionalSuffixes !== false,
+          }
+        : {}),
+      toolExposureProfile: runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile,
+      pinnedToolNames: runtimePlan.enabled
+        ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
+        : baseStreamOpts.pinnedToolNames,
+      // 2026-08-01 性能优化：Fast 模式 maxRounds 限制为 1。
+      // Fast 模式以对话为主，单次工具调用足够（LLM 可基于 system prompt 的 currentTime/userLocation
+      // 直接答时间/位置/天气类问题）。Complex 模式交给 plan_execute / master_subagent 处理重活。
+      ...(this.isFastMode(mode)
+        ? {
+            toolLoop: {
+              ...(baseStreamOpts.toolLoop ?? {}),
+              maxRounds: 1,
+            },
+          }
+        : baseStreamOpts.toolLoop
+          ? { toolLoop: baseStreamOpts.toolLoop }
+          : {}),
+      maxThreadMessages: runtimePlan.promptMode === "conversation_only"
+        ? Number.parseInt(process.env.AGENT_RUNTIME_KERNEL_MAX_THREAD_MESSAGES ?? "12", 10)
+        : baseStreamOpts.maxThreadMessages,
+      // 透传中断信号:用户发新消息时 abort,provider 底层 fetch 真正中断 HTTP 流式
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      // 2026-08-02 模型路由：根据 Fast/Complex 模式选择对应模型
+      // Fast → deepseek-chat（Flash），Complex → deepseek-reasoner（Pro）
+      ...buildModelOverrideOpts(tierForMode[mode]),
+    };
 
     let full = "";
     let modelCallsConsumed = 1;
-    const peUsed = mode === "plan_execute";
+    const peUsed = mode === "complex";
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 
@@ -1113,7 +1748,7 @@ export class AgentCore {
             actorId,
             sessionId: peSessionId,
             goal: text,
-            initialMode: "plan_execute",
+            initialMode: "complex",
           },
           {
             sessionId: peSessionId,
@@ -1126,9 +1761,8 @@ export class AgentCore {
         full = orchResult.finalText;
         modelCallsConsumed = Math.max(1, orchResult.modelCalls);
         pePlan = orchResult.ctx.plan;
-        peExhausted =
-          orchResult.terminateReason === "replan_exhausted" ||
-          orchResult.terminateReason === "budget_exhausted";
+        // 反思字段由编排器激活：exhaustedRetries 覆盖 replan 耗尽 / 预算耗尽两种终止。
+        peExhausted = orchResult.exhaustedRetries;
       } else {
         const result = await runPlanExecuteLoop({
           provider,
@@ -1171,7 +1805,7 @@ export class AgentCore {
       );
     }
 
-    return this.finishLlmTurn(actorId, text, full, {
+    return await this.finishLlmTurn(actorId, text, full, {
       streamedChunks: true,
       modelCallsConsumed,
       planExecuteUsed: peUsed,
@@ -1180,10 +1814,41 @@ export class AgentCore {
       trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
-    });
+    }, opts?.onAssistantDelta);
   }
 
-  private finishLlmTurn(
+  /**
+   * 紧急重生成：当主流程 + 降级都失败时，用最小化 prompt 直接调 LLM 生成回复。
+   * 不再用 apology 兜底文案——让 agent 真正回复内容，哪怕是简短的。
+   * 返回空串（而非 apology）让上层用工具结果拼接，调用方需处理空串。
+   */
+  private async emergencyRegenerate(
+    actorId: string,
+    userText: string,
+    onAssistantDelta?: (delta: string) => void,
+  ): Promise<string> {
+    try {
+      const provider = this.externalChat;
+      if (!provider?.isEnabled()) return "";
+      const text = await provider.streamCompletion(
+        `emergency-${actorId}-${Date.now()}`,
+        { text: userText },
+        (delta) => onAssistantDelta?.(delta),
+        undefined,
+        {
+          ephemeralTurn: true,
+          disableThinking: true,
+          maxThreadMessages: 3,
+        },
+      );
+      return text.trim();
+    } catch (err) {
+      console.error("[AgentCore] emergencyRegenerate 也失败:", err);
+      return "";
+    }
+  }
+
+  private async finishLlmTurn(
     actorId: string,
     userText: string,
     assistantText: string,
@@ -1197,11 +1862,64 @@ export class AgentCore {
       messageId?: string;
       sessionId?: string;
     },
-  ): AgentReply {
-    const trimmed = assistantText.trim();
+    onAssistantDelta?: (delta: string) => void,
+  ): Promise<AgentReply> {
+    const outputSafety = this.brainCenter?.checkOutputSafety(assistantText, {
+      actorId,
+      sessionId: meta.sessionId,
+      userText,
+    });
+    let sanitizedOutput = outputSafety?.sanitized ?? assistantText;
+
+    // 钩子 3：RuntimeKernel 后置校验（零 token，程序层拦截违规输出）
+    // 全程不向 LLM 发任何约束 prompt，纯规则匹配。违规时记录日志但不阻断输出（避免循环重生成）
+    const runtimeKernel = getRuntimeKernel(actorId);
+    if (runtimeKernel.isMinimalMode()) {
+      const postResult = runtimeKernel.postValidate(sanitizedOutput);
+      if (!postResult.ok) {
+        console.warn(
+          `[RuntimeKernel.postValidate] 输出违规，命中 ${postResult.hitPatterns.length} 条规则：`,
+          postResult.violations,
+        );
+        // 当前策略：仅记录日志，不重生成（避免循环 + 失败时仍要给用户回复）
+        // 后续如需重生成，可在此处加 retry 逻辑
+      }
+    }
+
+    const trimmed = sanitizedOutput.trim();
     if (!trimmed) {
+      // 空响应修复：不再用兜底文案，而是重新调用一次 LLM 强制出文本。
+      // 根因：某些轮次 LLM 只返回 tool_calls 没有文本 delta，streamCompletion 返回空字符串。
+      // 重新调用（不带工具上下文）让 LLM 基于对话历史生成自然回复。
+      console.warn("[AgentCore] finishLlmTurn 收到空响应，重新调用 LLM 强制出文本");
+      try {
+        const provider = this.externalChat;
+        if (provider?.isEnabled()) {
+          const regenerateText = await provider.streamCompletion(
+            `regen-${actorId}-${Date.now()}`,
+            { text: `${userText}\n\n[系统提示：上一轮没有生成回复文本，请直接用自然语言回答用户]` },
+            (delta) => onAssistantDelta?.(delta),
+            undefined,
+            {
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 4,
+            },
+          );
+          const regenTrimmed = regenerateText.trim();
+          if (regenTrimmed) {
+            return {
+              text: regenTrimmed,
+              streamedChunks: meta.streamedChunks,
+            };
+          }
+        }
+      } catch (regenErr) {
+        console.error("[AgentCore] 重新调用 LLM 也失败:", regenErr);
+      }
+      // 重新调用也失败：返回空串让上层用工具结果拼接，不用 apology 文案
       return {
-        text: "抱歉，我暂时无法生成回复，请稍后重试或换一种问法。",
+        text: "",
         streamedChunks: false,
       };
     }

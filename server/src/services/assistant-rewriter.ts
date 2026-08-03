@@ -22,6 +22,11 @@ function shouldRewrite(text: string): boolean {
   if (trimmed.length > maxChars()) return false;
   if (trimmed.includes("[CONTENT_SUMMARY_V2_START]")) return false;
   if (/\n\s*(?:[-*•]|\d+[.)、])/u.test(trimmed)) return false;
+  // 工具结果（JSON 风格或包含大量 URL）跳过改写 — 改写会破坏数据完整性。
+  // 典型形态："title": "..."、"snippet": "..."、含 https?:// 多个链接。
+  if (/"(?:title|snippet|url|source|publishedAt)"\s*:/.test(trimmed)) return false;
+  const urlCount = (trimmed.match(/https?:\/\//g) ?? []).length;
+  if (urlCount >= 2) return false;
   return true;
 }
 

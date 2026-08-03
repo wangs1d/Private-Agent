@@ -31,6 +31,10 @@ const TEST_MESSAGES = [
   { tag: "thanks", text: "谢谢" },
   { tag: "chitchat", text: "今天心情不太好" },
   { tag: "long", text: "请用三句话介绍一下太阳系，每句话不超过20个字" },
+  // 新增：用户截图中的真实场景（信息查询类问题，LLM 训练截止后可能没有的数据）
+  { tag: "info_query", text: "kimi最新的模型kimi3怎么样" },
+  { tag: "info_query2", text: "最近一周AI领域有什么重要新闻？" },
+  { tag: "info_query3", text: "今天北京天气怎么样" },
 ];
 
 const FALLBACK_SIGNATURES = [
@@ -68,6 +72,10 @@ function runClient(clientId, userId, msgTag, msgText) {
       firstChunkLatencyMs: null,
       doneLatencyMs: null,
       chunkCount: 0,
+      executionEventCount: 0,         // 工具执行事件数
+      subAgentInvocationCount: 0,     // 子 Agent 委派事件数
+      toolCallNames: [],              // 实际调用的工具名
+      routeMode: null,                // 从后端日志/cognize 返回中读到的路由模式
       finalText: "",
       error: null,
       isFallback: false,
@@ -121,6 +129,25 @@ function runClient(clientId, userId, msgTag, msgText) {
         metrics.chunkCount++;
         if (metrics.firstChunkLatencyMs === null) {
           metrics.firstChunkLatencyMs = Date.now() - sendTime.msgSent;
+        }
+        return;
+      }
+      // 路由模式（从后端元数据读）
+      if (t === "chat.route_decided" || t === "chat.route_info" || t === "chat.routing") {
+        if (p.mode && !metrics.routeMode) metrics.routeMode = p.mode;
+        return;
+      }
+      // 子 Agent 委派事件
+      if (t.includes("delegate") || t.includes("sub_agent") || t.includes("subagent") || t.includes("master.invoke_sub_agent")) {
+        metrics.subAgentInvocationCount++;
+        return;
+      }
+      // 工具执行事件
+      if (t.includes("tool_call") || t.includes("tool_execution") || t.includes("tool.result") || t === "tool.call" || t === "tool.result" || t === "chat.tool_call" || t === "chat.tool_result") {
+        metrics.executionEventCount++;
+        const toolName = p.name || p.tool || p.toolName;
+        if (toolName && !metrics.toolCallNames.includes(toolName)) {
+          metrics.toolCallNames.push(toolName);
         }
         return;
       }
@@ -205,10 +232,12 @@ async function main() {
       const res = await runClient(clientId, userId, tc.tag, tc.text);
       results.push(res);
       const flag = res.isFallback ? "FALLBACK" : "OK";
-      const txt = (res.finalText || res.error || "").slice(0, 40);
+      const tools = res.toolCallNames.length > 0 ? `tools=[${res.toolCallNames.join(",")}]` : "";
+      const sub = res.subAgentInvocationCount > 0 ? `sub=${res.subAgentInvocationCount}` : "";
+      const txt = (res.finalText || res.error || "").slice(0, 30);
       console.log(
-        `  [#${String(clientId).padStart(3)}] ${flag.padEnd(8)} ${tc.tag.padEnd(10)} ` +
-        `done=${res.doneLatencyMs ?? "-"}ms chunks=${res.chunkCount} :: ${txt}`,
+        `  [#${String(clientId).padStart(3)}] ${flag.padEnd(8)} ${tc.tag.padEnd(13)} ` +
+        `done=${res.doneLatencyMs ?? "-"}ms exec=${res.executionEventCount} ${sub} ${tools} :: ${txt}`,
       );
     }
   }

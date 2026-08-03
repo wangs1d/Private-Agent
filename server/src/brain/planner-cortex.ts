@@ -19,6 +19,12 @@ import type {
   SystemRouteMode,
 } from "./types.js";
 import type { SubAgentType } from "../services/master-agent-types.js";
+import type {
+  WorldModel,
+  WorldState,
+  WorldAction,
+  SimulationTrajectory,
+} from "./world-model-types.js";
 
 // ---- 子系统外观接口 ------------------------------------------------------
 
@@ -144,8 +150,8 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system1",
-      mode: "fast_chat",
-      rationale: "寒暄匹配 fast_chat",
+      mode: "fast",
+      rationale: "寒暄匹配 fast",
       decidedAt: nowIso(),
     };
   }
@@ -153,8 +159,8 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system1",
-      mode: "direct_llm",
-      rationale: "简单任务匹配 direct_llm",
+      mode: "fast",
+      rationale: "简单任务匹配 fast",
       decidedAt: nowIso(),
     };
   }
@@ -162,8 +168,8 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system2",
-      mode: "master_delegate",
-      rationale: "研究类任务匹配 master_delegate",
+      mode: "complex",
+      rationale: "研究类任务匹配 complex",
       decidedAt: nowIso(),
     };
   }
@@ -171,16 +177,16 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
     return {
       userMessage,
       system: "system2",
-      mode: "plan_execute",
-      rationale: "多步任务匹配 plan_execute",
+      mode: "complex",
+      rationale: "多步任务匹配 complex",
       decidedAt: nowIso(),
     };
   }
   return {
     userMessage,
     system: "system1",
-    mode: "direct_llm",
-    rationale: "默认路由到 direct_llm",
+    mode: "fast",
+    rationale: "默认路由到 fast",
     decidedAt: nowIso(),
   };
 }
@@ -191,11 +197,49 @@ function builtinRoute(userMessage: string): SystemRouteDecision {
  * shouldDelegate 判断结果。
  * - delegate=true 时携带 agentType（life/tech/info）与 reason
  * - delegate=false 时其余字段省略
+ * - confidence：LLM 语义判断的置信度 0-1（仅 shouldDelegateWithLLM 路径返回）
  */
 interface ShouldDelegateResult {
   delegate: boolean;
   agentType?: SubAgentType;
   reason?: string;
+  confidence?: number;
+}
+
+/**
+ * 委派判断器（LLM 驱动）。
+ *
+ * 评估任务复杂度、是否需要外部工具/信息，判断是否应该委派给子 Agent。
+ * 替代原 DELEGATE_KEYWORDS 纯关键词匹配，做语义级判断。
+ * 未注册时 shouldDelegateWithLLM 回退到 shouldDelegate 规则匹配。
+ */
+export interface DelegateJudge {
+  judge(params: {
+    userMessage: string;
+    actorId?: string;
+    /** 规则预筛结果（白名单/步骤数/关键词命中），供 LLM 参考以降低幻觉 */
+    ruleHint?: {
+      stepCount: number;
+      matchedKeywords: string[];
+      whitelistHit: boolean;
+    };
+  }): Promise<{
+    delegate: boolean;
+    agentType?: SubAgentType;
+    reason: string;
+    confidence: number;
+  }>;
+}
+
+/**
+ * 检查是否启用 shouldDelegate 的 LLM 化（语义判断）。
+ * - "0" / "false" / "off"（不区分大小写）→ 返回 false（关闭 LLM 化，回退到纯规则关键词匹配）
+ * - 其他（含未设置）→ 返回 true（启用 LLM 化，边界情况调 LLM 语义判断）
+ */
+function isShouldDelegateLlmEnabled(): boolean {
+  const raw = process.env.BRAIN_LLM_SHOULDDELEGATE_ENABLED?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off") return false;
+  return true;
 }
 
 /**
@@ -545,32 +589,24 @@ function mergeStepStatuses(
  * 把 task-router 的 LlmExecutionMode 映射为 SystemRouteDecision 的 system / mode 二元组。
  *
  * Spec 显式定义 4 个映射：
- *  - fast_chat → system1 / fast_chat
- *  - direct_llm → system1 / direct_llm
- *  - master_only → system2 / master_only（主 Agent 自处理）
- *  - master_delegate → system2 / master_delegate
- *  - plan_execute → system2 / plan_execute
- *  - state_machine → system2 / state_machine（桌面自动化多步骤状态机）
+ *  - fast → system1 / fast
+ *  - fast → system1 / fast
+ *  - fast → system2 / fast（主 Agent 自处理）
+ *  - complex → system2 / complex
+ *  - complex → system2 / complex
+ *  - complex → system2 / complex（桌面自动化多步骤状态机）
  */
 function mapRouteMode(rawMode: unknown): { system: "system1" | "system2"; mode: SystemRouteMode } {
   if (typeof rawMode !== "string") {
-    return { system: "system1", mode: "direct_llm" };
+    return { system: "system1", mode: "fast" };
   }
   switch (rawMode) {
-    case "fast_chat":
-      return { system: "system1", mode: "fast_chat" };
-    case "direct_llm":
-      return { system: "system1", mode: "direct_llm" };
-    case "master_only":
-      return { system: "system2", mode: "master_only" };
-    case "master_delegate":
-      return { system: "system2", mode: "master_delegate" };
-    case "plan_execute":
-      return { system: "system2", mode: "plan_execute" };
-    case "state_machine":
-      return { system: "system2", mode: "state_machine" };
+    case "fast":
+      return { system: "system1", mode: "fast" };
+    case "complex":
+      return { system: "system2", mode: "complex" };
     default:
-      return { system: "system1", mode: "direct_llm" };
+      return { system: "system1", mode: "fast" };
   }
 }
 
@@ -620,9 +656,20 @@ export class PlannerCortex {
   private masterCoordinator: MasterCoordinatorLike | null = null;
   private taskRouter: TaskRouterLike | null = null;
   private toolExecutor: ToolExecutorLike | null = null;
+  /** 委派判断器（LLM 驱动）：替代 DELEGATE_KEYWORDS 纯关键词匹配做语义级判断 */
+  private delegateJudge: DelegateJudge | null = null;
+  /** 世界模型（可选）：注入后 plan() 优先走 model-based rollout 路径 */
+  private worldModel: WorldModel | null = null;
   private started = false;
   private lastPlan: PlanResult | null = null;
   private lastRoute: SystemRouteDecision | null = null;
+
+  // ---- 风险点3：shouldDelegateWithLLM 的 LRU 缓存 ----
+  // 缓存键：userMessage 的归一化 hash；值：ShouldDelegateResult
+  // TTL 60s，容量 32 条，命中后直接返回避免重复 LLM 调用。
+  private delegateLruCache: Map<string, { result: ShouldDelegateResult; expiresAt: number }> = new Map();
+  private readonly DELEGATE_CACHE_TTL_MS = 60_000;
+  private readonly DELEGATE_CACHE_MAX = 32;
 
   // ---- 注册方法 ----------------------------------------------------------
 
@@ -648,6 +695,35 @@ export class PlannerCortex {
   registerToolExecutor(svc: ToolExecutorLike): void {
     this.toolExecutor = svc;
     console.log("[PlannerCortex] 已注册 ToolExecutor");
+  }
+
+  /**
+   * 注册委派判断器（LLM 驱动）。
+   *
+   * 注入后 shouldDelegateWithLLM 在边界情况（步骤数多但未命中明确委派关键词）下
+   * 调用 LLM 做语义级判断，替代原 DELEGATE_KEYWORDS 纯关键词匹配。
+   * 未注入或 LLM 失败时回退到 shouldDelegate 规则匹配。
+   */
+  registerDelegateJudge(judge: DelegateJudge): void {
+    this.delegateJudge = judge;
+    console.log("[PlannerCortex] 已注册 DelegateJudge（LLM 语义委派判断）");
+  }
+
+  /**
+   * 注册世界模型（World Model）：让 PlannerCortex 具备 model-based planning 能力。
+   *
+   * 注入后 plan() 会优先走 model-based rollout 路径：
+   *   1. 生成候选动作序列
+   *   2. 对每个序列调 worldModel.rollout() 预测轨迹
+   *   3. 用 selectOptimal() 评估函数给每条轨迹打分
+   *   4. 选最优轨迹的第一个动作执行
+   *
+   * 未注入时回退到原 LLM 一次性 plan 路径（向后兼容）。
+   * env BRAIN_WORLD_MODEL_ENABLED=0 时 bootstrap 不注入世界模型。
+   */
+  registerWorldModel(model: WorldModel): void {
+    this.worldModel = model;
+    console.log("[PlannerCortex] 已注册 WorldModel（model-based planning）");
   }
 
   // ---- 生命周期 ----------------------------------------------------------
@@ -707,6 +783,139 @@ export class PlannerCortex {
     const fallback = builtinPlan(goal);
     this.lastPlan = fallback;
     return fallback;
+  }
+
+  // ---- Model-based planning（世界模型驱动）-------------------------------
+
+  /**
+   * 基于 WorldModel 的 model-based planning 路径。
+   *
+   * 流程：
+   *   1. 从 goal 推断候选动作序列（每个 step 的 expectedTools 转为 WorldAction）
+   *   2. 对每个候选序列调 worldModel.rollout() 预测轨迹
+   *   3. 用 selectOptimal() 评估函数给每条轨迹打分
+   *   4. 选最优轨迹，取其动作序列构造 PlanResult
+   *
+   * 与 plan() 的关系：plan() 优先调此方法，worldModel 未注入或失败时回退原路径。
+   *
+   * @param goal 规划目标
+   * @param currentState 当前世界状态（由 BrainCenter.cognize 阶段 1 聚合后传入）
+   * @param opts 规划选项
+   * @returns model-based PlanResult，worldModel 未注入时返回 null（调用方回退）
+   */
+  async planWithWorldModel(
+    goal: string,
+    currentState: WorldState,
+    opts?: { actorId?: string; maxSteps?: number },
+  ): Promise<PlanResult | null> {
+    if (!this.worldModel) return null;
+
+    try {
+      // 1. 生成候选动作序列（从 builtinPlan 转换 + goal 关键词推断）
+      const basePlan = builtinPlan(goal);
+      const candidateActions = this.generateCandidateActions(basePlan, goal);
+
+      if (candidateActions.length === 0) {
+        return null; // 无法生成候选，回退
+      }
+
+      // 2. 对每个候选序列做 rollout
+      const trajectories: SimulationTrajectory[] = [];
+      for (const actions of candidateActions) {
+        const trajectory = await this.worldModel.rollout(currentState, actions);
+        trajectories.push(trajectory);
+      }
+
+      // 3. 评估并选最优
+      const optimal = this.selectOptimal(trajectories, goal);
+      if (!optimal) return null;
+
+      // 4. 构造 PlanResult
+      const steps: PlanStep[] = optimal.actions.map((action, i) => ({
+        id: `wm-s${i + 1}`,
+        title: action.tool,
+        description: action.expectedEffect ?? `执行 ${action.tool}`,
+        expectedTools: [action.tool],
+        status: "pending" as const,
+        dependencies: i > 0 ? [`wm-s${i}`] : [],
+      }));
+
+      const result: PlanResult = {
+        goal,
+        steps,
+        createdAt: new Date().toISOString(),
+        rationale: `model-based planning: ${optimal.overallConfidence.toFixed(2)} confidence, score=${optimal.score?.toFixed(2) ?? "N/A"}`,
+      };
+      this.lastPlan = result;
+      console.log(`[PlannerCortex] model-based plan: ${steps.length} steps, confidence=${optimal.overallConfidence.toFixed(2)}`);
+      return result;
+    } catch (err) {
+      console.log(`[PlannerCortex] planWithWorldModel 失败，回退原路径: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * 从 builtinPlan + goal 生成候选动作序列。
+   *
+   * 简单策略：把 builtinPlan 的每个 step 的 expectedTools 转为 WorldAction 序列。
+   * 未来可扩展为 LLM 生成多个候选序列。
+   */
+  private generateCandidateActions(plan: PlanResult, goal: string): WorldAction[][] {
+    const actions: WorldAction[] = plan.steps
+      .filter((s) => s.expectedTools && s.expectedTools.length > 0)
+      .flatMap((s) => (s.expectedTools ?? []).map((tool) => ({
+        tool,
+        args: {} as Record<string, unknown>,
+        source: "planner-world-model" as const,
+        expectedEffect: s.description,
+      })));
+
+    if (actions.length === 0) return [];
+    // 当前只生成一个候选序列（原 plan 顺序）
+    // 未来可生成多个变体（如打乱顺序、增减步骤）供 selectOptimal 比较
+    return [actions];
+  }
+
+  /**
+   * 从多条模拟轨迹中选最优。
+   *
+   * 评估函数：overallConfidence（轨迹置信度） + changes 相关性（与 goal 关键词匹配度）
+   * 未来可注入自定义评估函数（如 reward model）。
+   */
+  selectOptimal(trajectories: SimulationTrajectory[], goal: string): SimulationTrajectory | null {
+    if (trajectories.length === 0) return null;
+
+    let best: SimulationTrajectory | null = null;
+    let bestScore = -Infinity;
+
+    for (const traj of trajectories) {
+      // 评估分数 = 置信度 × changes 与 goal 的关键词匹配度
+      const allChanges = traj.predictedStates.flatMap((p) => p.changes ?? []);
+      const goalKeywords = goal.split(/[\s,，。、]+/).filter((w) => w.length > 1);
+      let relevanceScore = 0;
+      if (goalKeywords.length > 0) {
+        const matched = goalKeywords.filter((kw) =>
+          allChanges.some((ch) => ch.toLowerCase().includes(kw.toLowerCase())),
+        );
+        relevanceScore = matched.length / goalKeywords.length;
+      }
+
+      const score = traj.overallConfidence * 0.6 + relevanceScore * 0.4;
+      traj.score = score;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = traj;
+      }
+    }
+
+    return best;
+  }
+
+  /** 获取已注入的 WorldModel 引用（供 BrainCenter/ActionExecutor 调 update 学习） */
+  getWorldModel(): WorldModel | null {
+    return this.worldModel;
   }
 
   /**
@@ -887,7 +1096,7 @@ export class PlannerCortex {
    *
    * 返回值：
    *  - { delegate: true, agentType, reason }：主动委派
-   *  - { delegate: false }：走原 standard path 或 fast_chat
+   *  - { delegate: false }：走原 standard path 或 fast
    */
   shouldDelegate(
     userMessage: string,
@@ -941,12 +1150,163 @@ export class PlannerCortex {
   }
 
   /**
+   * LLM 语义委派判断（shouldDelegate 的 LLM 化版本）。
+   *
+   * 替代原 DELEGATE_KEYWORDS 纯关键词匹配，做语义级判断：
+   * 评估任务复杂度、是否需要外部工具/信息，返回 {delegate, agentType, reason, confidence}。
+   *
+   * 热路径成本控制（shouldDelegate 可能在 cognize 热路径上调用）：
+   *  1. 白名单预筛（NO_DELEGATE_WHITELIST）→ 命中直接 delegate:false（硬闸门，无 LLM）
+   *  2. 规则快速路径：命中明确委派关键词 + 步骤数 > 3 → 直接委派（无 LLM）
+   *  3. 步骤数 ≤ 阈值且未命中关键词 → 直接不委派（无 LLM）
+   *  4. 边界情况（步骤数 > 阈值但未命中明确委派关键词）→ LLM 语义判断
+   *  5. LLM 不可用/超时/降级开关关闭 → 回退到 shouldDelegate 规则匹配
+   *
+   * 注意：routeSystem 同步路径仍用 shouldDelegate（规则），不调用此异步方法。
+   * 异步调用方（如 BrainCenter.cognize）可调用此方法做 LLM 增强委派判断。
+   */
+  async shouldDelegateWithLLM(
+    userMessage: string,
+    context?: { actorId?: string },
+  ): Promise<ShouldDelegateResult> {
+    // 空消息 → 不委派
+    if (!userMessage || !userMessage.trim()) {
+      return { delegate: false };
+    }
+    const msg = userMessage.toLowerCase();
+
+    // 1. 白名单预筛（硬闸门，无 LLM）—— 与 shouldDelegate 共用，保留规则预筛
+    let whitelistHit = false;
+    for (const kw of NO_DELEGATE_WHITELIST) {
+      if (msg.includes(kw.toLowerCase())) {
+        whitelistHit = true;
+        return { delegate: false };
+      }
+    }
+
+    // 2. 规则快速路径：先跑 shouldDelegate 规则，有明确结论直接返回（无 LLM）
+    const ruleResult = this.shouldDelegate(userMessage, context);
+    if (ruleResult.delegate) {
+      // 规则已判定委派（命中关键词 + 步骤数 > 阈值）→ 直接返回，无需 LLM
+      return { ...ruleResult, confidence: 0.85 };
+    }
+
+    // 3. 降级开关关闭 / DelegateJudge 未注册 → 回退到规则结果
+    if (!isShouldDelegateLlmEnabled() || !this.delegateJudge) {
+      return ruleResult;
+    }
+
+    // 4. 计算规则提示（步骤数/关键词命中），供 LLM 参考降低幻觉
+    let stepCount = 1;
+    for (const conj of STEP_CONJUNCTIONS) {
+      if (msg.includes(conj)) stepCount++;
+    }
+    for (const verb of ACTION_VERBS) {
+      if (msg.includes(verb)) stepCount++;
+    }
+    // 步骤数 ≤ 阈值且规则未命中 → 简单任务，无需 LLM，直接返回不委派
+    if (stepCount <= DELEGATE_STEP_THRESHOLD) {
+      return ruleResult;
+    }
+
+    // 收集命中的委派关键词（即使未达阈值，也作为 LLM 参考）
+    const matchedKeywords: string[] = [];
+    for (const agentType of ["tech", "info", "life"] as SubAgentType[]) {
+      for (const kw of DELEGATE_KEYWORDS[agentType]) {
+        if (msg.includes(kw.toLowerCase())) {
+          matchedKeywords.push(kw);
+        }
+      }
+    }
+
+    // 5. 边界情况：步骤数 > 阈值但规则未明确委派 → LLM 语义判断
+    // 风险点3：先查 LRU 缓存，命中则直接返回避免重复 LLM 调用
+    const cacheKey = this.hashDelegateMessage(userMessage);
+    const cached = this.lookupDelegateCache(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const llmResult = await this.delegateJudge.judge({
+        userMessage,
+        actorId: context?.actorId,
+        ruleHint: { stepCount, matchedKeywords, whitelistHit },
+      });
+      let result: ShouldDelegateResult;
+      if (llmResult.delegate) {
+        result = {
+          delegate: true,
+          agentType: llmResult.agentType,
+          reason: llmResult.reason,
+          confidence: llmResult.confidence,
+        };
+      } else {
+        result = { delegate: false, confidence: llmResult.confidence };
+      }
+      // 写入缓存（仅缓存 LLM 结果，不缓存规则回退结果）
+      this.storeDelegateCache(cacheKey, result);
+      return result;
+    } catch (err) {
+      // LLM 调用失败/超时 → 回退到规则匹配
+      console.log(
+        `[PlannerCortex] shouldDelegateWithLLM LLM 失败，回退规则: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return ruleResult;
+    }
+  }
+
+  // ---- 风险点3：shouldDelegateWithLLM LRU 缓存实现 ----
+
+  /**
+   * 归一化 hash：trim + lowercase 后用 FNV-1a 32 位哈希。
+   * 忽略首尾空白和大小写差异，让"帮我查天气"和" 帮我查天气 "命中同一缓存项。
+   */
+  private hashDelegateMessage(userMessage: string): string {
+    const normalized = userMessage.trim().toLowerCase();
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < normalized.length; i++) {
+      hash ^= normalized.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  /** 查询缓存：过期或不存在返回 undefined，命中时淘汰过期项并返回结果 */
+  private lookupDelegateCache(key: string): ShouldDelegateResult | undefined {
+    const entry = this.delegateLruCache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.delegateLruCache.delete(key);
+      return undefined;
+    }
+    // LRU：删除后重新插入，让最近命中的项排在 Map 末尾（Map 保持插入顺序）
+    this.delegateLruCache.delete(key);
+    this.delegateLruCache.set(key, entry);
+    return entry.result;
+  }
+
+  /** 写入缓存：超容量时淘汰 Map 头部最旧项（LRU 淘汰） */
+  private storeDelegateCache(key: string, result: ShouldDelegateResult): void {
+    if (this.delegateLruCache.size >= this.DELEGATE_CACHE_MAX) {
+      const oldestKey = this.delegateLruCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.delegateLruCache.delete(oldestKey);
+      }
+    }
+    this.delegateLruCache.set(key, {
+      result,
+      expiresAt: Date.now() + this.DELEGATE_CACHE_TTL_MS,
+    });
+  }
+
+  /**
    * 系统路由：委托 TaskRouter.routeLlmExecution(userMessage, opts)，
    * 把返回的 LlmExecutionMode 映射为 SystemRouteDecision 并缓存。
    * 若 TaskRouter 未注册或方法缺失，走内置关键词兜底路由。
    *
    * Task 6 注入点：在路由顶部先调 shouldDelegate，若命中则主动 fire delegate
-   * 并返回 master_delegate 路径，不等待主 Agent LLM 自行决定是否调 delegate 工具。
+   * 并返回 complex 路径，不等待主 Agent LLM 自行决定是否调 delegate 工具。
    */
   routeSystem(userMessage: string, opts?: { actorId?: string }): SystemRouteDecision {
     // Task 6：规则层主动委派检查（优先于 TaskRouter/builtinRoute）
@@ -966,7 +1326,7 @@ export class PlannerCortex {
       const route: SystemRouteDecision = {
         userMessage,
         system: "system2",
-        mode: "master_delegate",
+        mode: "complex",
         rationale: `shouldDelegate 主动委派→${delegation.agentType}：${delegation.reason}`,
         decidedAt: nowIso(),
       };

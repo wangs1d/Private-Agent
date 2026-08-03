@@ -268,6 +268,91 @@ export function stripThinkTags(reasoning: string): string {
 }
 
 /**
+ * 剥离 Moonshot/Kimi 在 `content` 字段里泄漏的 DSML 工具调用标记。
+ *
+ * 背景：Moonshot/Kimi 的部分模型/模式会同时把工具调用写到结构化 `tool_calls` 字段
+ * 以及写到 `content` 文本里（DSML XML 格式：`<| | DSML| | tool_calls> ... </| | DSML| | tool_calls>`）。
+ * 这种「双重写出」会让内部格式透出到用户可见的 assistant 消息里（截图里能看到完整的
+ * `<| | DSML| | invoke name="fetch_web"><| | DSML| | parameter ...>...` 块），既影响体验
+ * 也可能让前端模板解析炸掉。
+ *
+ * 实际观测到的格式变体（已覆盖）：
+ *   - `<| | DSML| | tool_calls>...</| | DSML| | tool_calls>`（带前后两个 `| |`）
+ *   - `<| | DSML| |tool_calls>...</| | DSML| |tool_calls>`（开标签无尾 `| |`，但闭合标签有）
+ *   - `<||DSML||tool_calls>...</||DSML||tool_calls>`（紧凑无空格）
+ *   - `<| | DSML| |invoke name="...">...</| | DSML| |invoke>`（invoke 块独立成行）
+ *
+ * 策略：只剥 `tool_calls` 块（连同其内容），其他 `DSML` 标签（如 `</DSML>` 之类的
+ * 残留闭合）一并清掉；参数值（url 等）已经在结构化 tool_calls 里被使用，正文不需要再保留。
+ */
+export function stripDsmlToolCallMarkup(content: string): string {
+  if (!content) return content;
+  if (!content.includes("DSML") && !content.includes("dsml")) return content;
+  let cleaned = content;
+
+  // 竖线字符类：兼容半角 `|` (U+007C) 和全角 `｜` (U+FF5C)
+  // Moonshot/Kimi 在不同 token 化下会输出两种形式，必须都覆盖。
+  const pipe = "[|｜]"; // 半角或全角竖线
+
+  // 关键修复：DSML 实际格式里开标签在 `DSML` 之后**不一定有 `| |`**（`tool_calls` 直接接在 `|` 后面）。
+  // 兼容形式：DSML 之后允许 `| |tool_calls` / `| | tool_calls` / `| |  tool_calls` 任意空白/无空白。
+  // 主块：成对的 tool_calls ... /tool_calls（dotall 允许跨行）
+  const toolCallsBlockPaired = new RegExp(
+    `<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*tool_calls\\s*>[\\s\\S]*?<\\s*\\/\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*tool_calls\\s*>`,
+    "gi",
+  );
+  cleaned = cleaned.replace(toolCallsBlockPaired, "");
+  // 兜底：未闭合的开标签（模型偶尔切到一半就 finish），剥到行尾
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*tool_calls\\s*>[\\s\\S]*$`, "gi"),
+    "",
+  );
+
+  // 额外修复：开标签无尾 `| |` 的格式（实测命中，如 `<| | DSML| |tool_calls>`）
+  // 这种格式通常会与 invoke 块在同一段里整体出现。直接用更宽松的 `tool_calls` 块匹配。
+  const looseToolCallsPaired = new RegExp(
+    `<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?tool_calls\\s*>[\\s\\S]*?<\\s*\\/\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?tool_calls\\s*>`,
+    "gi",
+  );
+  cleaned = cleaned.replace(looseToolCallsPaired, "");
+  // 半截的 tool_calls 块（开标签匹配但无闭合）
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?tool_calls\\s*>[\\s\\S]*$`, "gi"),
+    "",
+  );
+
+  // 单独存在的 invoke / parameter 块（紧跟 tool_calls 剥离后，避免孤立残留）
+  // 形如 `<| | DSML| | invoke name="fetch_web">...<| | DSML| | parameter ...>...<| | DSML| | invoke>`
+  const invokeBlockPaired = new RegExp(
+    `<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?invoke\\b[^<>]*>[\\s\\S]*?<\\s*\\/\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?invoke\\s*>`,
+    "gi",
+  );
+  cleaned = cleaned.replace(invokeBlockPaired, "");
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?invoke\\b[^<>]*\\/?><[\\s\\S]*?<\\s*\\/\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}[^<>]*?parameter\\s*>`, "gi"),
+    "",
+  );
+
+  // 残留的关闭标签 / 空 invoke 块
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*\\/\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*(?:tool_calls|invoke|parameter)\\s*>`, "gi"),
+    "",
+  );
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*(?:invoke|parameter)\\b[^<>]*\\/?>`, "gi"),
+    "",
+  );
+  // 兼容 `||` 紧贴的紧凑形式（含全角）
+  cleaned = cleaned.replace(
+    new RegExp(`<\\s*${pipe}\\s*${pipe}\\s*DSML\\s*${pipe}\\s*${pipe}\\s*[^<>]*?\\/?>`, "gi"),
+    "",
+  );
+  // 合并多余空行/收尾空白
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+\n/g, "\n").trim();
+  return cleaned;
+}
+
+/**
  * 决定「对外展示什么文本」。
  * 规则（按顺序）：
  *  1. 若 `content.trim()` 非空：返回 content（已经是最终态）。
@@ -555,7 +640,10 @@ export function adaptOpenAiChatCompletionChunk(
   if (!delta) return out;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
-    out.content = delta.content;
+    // 剥离 Moonshot/Kimi 在 content 字段里泄漏的 DSML 工具调用标记，
+    // 否则用户会看到 <| | DSML| | tool_calls>... 内部格式。
+    const cleaned = stripDsmlToolCallMarkup(delta.content);
+    if (cleaned) out.content = cleaned;
   }
 
   // 嗅探 reasoning 字段（OpenAI 标准没有，但 Moonshot/DeepSeek 扩展为 reasoning_content）

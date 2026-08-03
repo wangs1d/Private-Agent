@@ -59,6 +59,19 @@
   --pa-glass-blur: blur(20px) saturate(180%);
   --pa-glass-border: rgba(0, 0, 0, 0.08);
 
+  /* ── Semantic Aliases (Tailwind compatibility) ── */
+  --pa-background: var(--pa-bg-page);
+  --pa-foreground: var(--pa-text-primary);
+  --pa-card: var(--pa-bg-surface);
+  --pa-card-foreground: var(--pa-text-primary);
+  --pa-muted: var(--pa-text-muted);
+  --pa-muted-foreground: var(--pa-text-secondary);
+  --pa-accent: var(--pa-primary-light);
+  --pa-accent-foreground: var(--pa-primary);
+  --pa-border: var(--pa-border);
+  --pa-input: var(--pa-border);
+  --pa-ring: var(--pa-primary);
+
   /* ── Typography ── */
   --pa-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --pa-font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
@@ -92,6 +105,17 @@
   --pa-glass-bg: rgba(28, 31, 38, 0.85);
   --pa-glass-border: rgba(255, 255, 255, 0.08);
 
+  --pa-background: var(--pa-bg-page);
+  --pa-foreground: var(--pa-text-primary);
+  --pa-card: var(--pa-bg-surface);
+  --pa-card-foreground: var(--pa-text-primary);
+  --pa-muted: var(--pa-text-muted);
+  --pa-muted-foreground: var(--pa-text-secondary);
+  --pa-accent: var(--pa-primary-light);
+  --pa-accent-foreground: var(--pa-primary);
+  --pa-input: var(--pa-border);
+  --pa-ring: var(--pa-primary);
+
   --pa-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
   --pa-shadow-md: 0 2px 12px rgba(0, 0, 0, 0.4);
   --pa-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -102,14 +126,77 @@
     <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
     <style type="text/tailwindcss">
   @theme inline {
+    --color-background: var(--pa-background);
+    --color-foreground: var(--pa-foreground);
+    --color-card: var(--pa-card);
+    --color-card-foreground: var(--pa-card-foreground);
     --color-primary: var(--pa-primary);
+    --color-muted: var(--pa-muted);
+    --color-muted-foreground: var(--pa-muted-foreground);
+    --color-accent: var(--pa-accent);
+    --color-accent-foreground: var(--pa-accent-foreground);
     --color-border: var(--pa-border);
+    --color-input: var(--pa-input);
+    --color-ring: var(--pa-ring);
+    --radius-sm: var(--pa-radius-sm);
+    --radius-md: var(--pa-radius-md);
+    --radius-lg: var(--pa-radius-lg);
   }
   @layer base {
-    body { background: var(--pa-background); color: var(--pa-text-primary); }
+    body { background: var(--pa-background); color: var(--pa-foreground); }
     td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
     th { @apply whitespace-nowrap; }
   }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--pa-background); }
+      .text-background { color: var(--pa-background); }
+      .border-background { border-color: var(--pa-background); }
+      .ring-background { --tw-ring-color: var(--pa-background); }
+      .bg-foreground { background-color: var(--pa-foreground); }
+      .text-foreground { color: var(--pa-foreground); }
+      .border-foreground { border-color: var(--pa-foreground); }
+      .ring-foreground { --tw-ring-color: var(--pa-foreground); }
+      .bg-card { background-color: var(--pa-card); }
+      .text-card { color: var(--pa-card); }
+      .border-card { border-color: var(--pa-card); }
+      .ring-card { --tw-ring-color: var(--pa-card); }
+      .bg-card-foreground { background-color: var(--pa-card-foreground); }
+      .text-card-foreground { color: var(--pa-card-foreground); }
+      .border-card-foreground { border-color: var(--pa-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--pa-card-foreground); }
+      .bg-primary { background-color: var(--pa-primary); }
+      .text-primary { color: var(--pa-primary); }
+      .border-primary { border-color: var(--pa-primary); }
+      .ring-primary { --tw-ring-color: var(--pa-primary); }
+      .bg-muted { background-color: var(--pa-muted); }
+      .text-muted { color: var(--pa-muted); }
+      .border-muted { border-color: var(--pa-muted); }
+      .ring-muted { --tw-ring-color: var(--pa-muted); }
+      .bg-muted-foreground { background-color: var(--pa-muted-foreground); }
+      .text-muted-foreground { color: var(--pa-muted-foreground); }
+      .border-muted-foreground { border-color: var(--pa-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--pa-muted-foreground); }
+      .bg-accent { background-color: var(--pa-accent); }
+      .text-accent { color: var(--pa-accent); }
+      .border-accent { border-color: var(--pa-accent); }
+      .ring-accent { --tw-ring-color: var(--pa-accent); }
+      .bg-accent-foreground { background-color: var(--pa-accent-foreground); }
+      .text-accent-foreground { color: var(--pa-accent-foreground); }
+      .border-accent-foreground { border-color: var(--pa-accent-foreground); }
+      .ring-accent-foreground { --tw-ring-color: var(--pa-accent-foreground); }
+      .bg-border { background-color: var(--pa-border); }
+      .text-border { color: var(--pa-border); }
+      .border-border { border-color: var(--pa-border); }
+      .ring-border { --tw-ring-color: var(--pa-border); }
+      .bg-input { background-color: var(--pa-input); }
+      .text-input { color: var(--pa-input); }
+      .border-input { border-color: var(--pa-input); }
+      .ring-input { --tw-ring-color: var(--pa-input); }
+      .bg-ring { background-color: var(--pa-ring); }
+      .text-ring { color: var(--pa-ring); }
+      .border-ring { border-color: var(--pa-ring); }
+      .ring-ring { --tw-ring-color: var(--pa-ring); }
     </style>
     <style>
       .no-scrollbar::-webkit-scrollbar { display: none; }

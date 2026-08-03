@@ -52,15 +52,30 @@ export class SkillGenerator {
     try {
       // 构建提示词
       const prompt = this.buildGenerationPrompt(request);
-      
-      // 调用 LLM 生成代码（使用 streamCompletion，但收集完整响应）
+
+      // 调用 LLM 生成代码：
+      //  - systemPromptOverride：明确告知 LLM 任务是严格输出 JSON（非聊天）
+      //  - ephemeralTurn：避免污染会话历史
+      //  - 每次唯一 sessionId：避免跨次调用上下文串扰
+      const systemPrompt =
+        "你是 Skill 代码生成器。你的唯一任务是严格按照用户描述的 JSON 格式输出技能代码。\n" +
+        "禁止任何对话式回复（如\"好的\"、\"稍等\"、\"我来帮你\"等）。\n" +
+        "直接输出 JSON，第一个字符必须是 `{`，最后一个字符必须是 `}`。\n" +
+        "不要在 JSON 外添加任何文字、解释、代码块包裹（```json 也不要）。\n" +
+        "handlerCode 字段必须是字符串形式（字符串内可以包含换行符 \\n）。";
       let fullContent = "";
       await this.chatProvider.streamCompletion(
-        "skill-generator-session",
+        `skill-generator-${Date.now()}`,
         { text: prompt },
         (delta) => {
           fullContent += delta;
-        }
+        },
+        undefined,
+        {
+          systemPromptOverride: systemPrompt,
+          ephemeralTurn: true,
+          maxThreadMessages: 2,
+        },
       );
 
       // 解析生成的代码
@@ -165,45 +180,73 @@ export class SkillGenerator {
 
   /**
    * 解析生成的代码
+   *
+   * 多重 fallback 策略：
+   *  1. 优先匹配 ```json ... ``` 代码块（标准格式）
+   *  2. 若无，匹配任意 ``` ... ``` 代码块
+   *  3. 若无，直接匹配最外层 { ... } JSON 对象（LLM 未用代码块包裹时）
+   *
+   * 容错两种结构：
+   *  - 标准：{ metadata: { name, description, ... }, handlerCode, explanation }
+   *  - 简化：{ name, description, handlerCode, ... } → 自动包装为 metadata
    */
   private parseGeneratedCode(content: string): SkillGenerationResult["skill"] | null {
-    try {
-      // 尝试提取 JSON 代码块
-      const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        const jsonStr = jsonMatch[1];
+    const tryParse = (jsonStr: string): SkillGenerationResult["skill"] | null => {
+      try {
         const parsed = JSON.parse(jsonStr);
-        
-        // 验证基本结构
-        if (!parsed.metadata || !parsed.handlerCode) {
-          return null;
-        }
-        
-        // 补充默认值
+        if (!parsed || typeof parsed !== "object") return null;
+
+        // 兼容两种结构：标准（含 metadata）+ 简化（直接含 name/description/handlerCode）
+        const hasStandard = parsed.metadata && parsed.handlerCode;
+        const hasSimplified = !hasStandard && parsed.name && parsed.handlerCode;
+        if (!hasStandard && !hasSimplified) return null;
+
+        const meta = hasStandard ? parsed.metadata : parsed;
         const metadata: SkillMetadata = {
-          name: parsed.metadata.name,
-          version: parsed.metadata.version || "1.0.0",
-          displayName: parsed.metadata.displayName,
-          description: parsed.metadata.description,
+          name: meta.name,
+          version: meta.version || "1.0.0",
+          displayName: meta.displayName ?? meta.name,
+          description: meta.description ?? "",
           kind: "community",
-          parameters: parsed.metadata.parameters || [],
-          permissions: parsed.metadata.permissions || [],
-          tags: parsed.metadata.tags || ["auto-generated"],
+          parameters: meta.parameters || [],
+          permissions: meta.permissions || [],
+          tags: meta.tags || ["auto-generated"],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
-        
+
         return {
           metadata,
           handlerCode: parsed.handlerCode,
           explanation: parsed.explanation || "自动生成的技能代码",
         };
+      } catch {
+        return null;
       }
-      
-      return null;
-    } catch (error) {
-      console.error("[SkillGenerator] 解析失败:", error);
-      return null;
+    };
+
+    // 策略 1：```json ... ``` 代码块
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch) {
+      const parsed = tryParse(jsonBlockMatch[1]);
+      if (parsed) return parsed;
     }
+
+    // 策略 2：任意 ``` ... ``` 代码块
+    const anyBlockMatch = content.match(/```\s*([\s\S]*?)\s*```/);
+    if (anyBlockMatch) {
+      const parsed = tryParse(anyBlockMatch[1]);
+      if (parsed) return parsed;
+    }
+
+    // 策略 3：直接匹配最外层 { ... } JSON 对象（贪婪到最外层闭合括号）
+    const objMatch = content.match(/\{[\s\S]*\}/);
+    if (objMatch) {
+      const parsed = tryParse(objMatch[0]);
+      if (parsed) return parsed;
+    }
+
+    console.error("[SkillGenerator] 解析失败：未找到有效的 JSON 结构");
+    return null;
   }
 }

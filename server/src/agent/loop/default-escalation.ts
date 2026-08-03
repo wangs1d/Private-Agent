@@ -28,10 +28,8 @@ export interface DefaultEscalationOptions {
 }
 
 const ESCALATION_ORDER: LlmExecutionMode[] = [
-  "fast_chat",
-  "direct_llm",
-  "plan_execute",
-  "state_machine",
+  "fast",
+  "complex",
 ];
 
 export class DefaultEscalationPolicy implements EscalationPolicy {
@@ -52,28 +50,23 @@ export class DefaultEscalationPolicy implements EscalationPolicy {
 
     // 2. react 卡住 → 升级 plan_execute
     if (
-      ctx.currentLoop === "direct_llm" &&
+      ctx.currentLoop === "fast" &&
       ctx.progress.consecutiveNoProgress >= reactThreshold
     ) {
       return {
         escalate: true,
-        to: "plan_execute",
+        to: "complex",
         reason: `react_no_progress_${ctx.progress.consecutiveNoProgress}`,
       };
     }
 
-    // 3. plan_execute 评估分过低 → 升级 state_machine
-    if (ctx.currentLoop === "plan_execute") {
-      // 读取最近一条 reflection 的 confidence 作为 progressScore 近似
-      //（ProgressTracker 的 assess 结果由编排器写入 reflection）
+    // 3. complex 已是顶层模式，低分 reflection 不再升级（双模式下无更高级可升）
+    if (ctx.currentLoop === "complex") {
       const lastReflection = ctx.reflections[ctx.reflections.length - 1];
       const score = lastReflection?.confidence ?? 1;
       if (score < peScoreThreshold) {
-        return {
-          escalate: true,
-          to: "state_machine",
-          reason: `plan_execute_low_score_${score.toFixed(2)}`,
-        };
+        // 已在顶层，无法继续升级；返回不升级，让编排器自行 replan 或终止
+        return { escalate: false, reason: "already_at_top" };
       }
     }
 

@@ -52,8 +52,8 @@ const DEFAULT_SMART_TRIM_CONFIG = {
 
 const SESSION_RECAP_PREFIX = "[session-recap]";
 const SESSION_RECAP_TITLE = "Earlier conversation recap:";
-const SESSION_RECAP_MAX_LINES = 8;
-const SESSION_RECAP_MAX_CHARS = 900;
+const SESSION_RECAP_MAX_LINES = 14;
+const SESSION_RECAP_MAX_CHARS = 1600;
 const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|记住|remember|prefer/i;
 const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我想做|我需要/i;
 const USER_REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
@@ -297,6 +297,21 @@ function extractRecapLinesFromMessages(messages: ChatCompletionMessageParam[]): 
   const general: string[] = [];
   let leadingUserCount = 0;
   let leadingAssistantCount = 0;
+  const LEADING_USER_MAX = 4; // 提升前 N 条 user 消息保留量（原 2 → 4）
+  const LEADING_ASSISTANT_MAX = 4; // 同上
+
+  // 按消息时间戳生成日期偏移标签（[d-1]=昨天，[d-2]=前天…），让 LLM 能区分历史时间线
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayLabelOf = (msg: ChatCompletionMessageParam): string => {
+    const ts = extractMessageTimestamp(msg);
+    if (!ts) return ""; // 无时间戳不标日期，避免误导
+    const dayStart = new Date(ts.getFullYear(), ts.getMonth(), ts.getDate());
+    const diff = Math.round((todayStart.getTime() - dayStart.getTime()) / 86_400_000);
+    if (diff <= 0) return "[今天]";
+    if (diff === 1) return "[昨天]";
+    return `[${diff}天前]`;
+  };
 
   for (const msg of messages) {
     if (msg.role !== "user" && msg.role !== "assistant") continue;
@@ -305,38 +320,39 @@ function extractRecapLinesFromMessages(messages: ChatCompletionMessageParam[]): 
     if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
     const gist = firstSentence(text);
     if (!gist) continue;
+    const dayLabel = dayLabelOf(msg);
 
     if (msg.role === "user") {
-      if (leadingUserCount < 2) {
-        pushRecapLine(general, `Earlier user: ${gist}`);
+      if (leadingUserCount < LEADING_USER_MAX) {
+        pushRecapLine(general, `${dayLabel}Earlier user: ${gist}`.trim());
         leadingUserCount += 1;
         continue;
       }
       if (USER_PREFERENCE_RE.test(text)) {
-        pushRecapLine(priority, `User preference: ${gist}`);
+        pushRecapLine(priority, `${dayLabel}User preference: ${gist}`.trim());
         continue;
       }
       if (USER_FACT_RE.test(text)) {
-        pushRecapLine(priority, `User fact: ${gist}`);
+        pushRecapLine(priority, `${dayLabel}User fact: ${gist}`.trim());
         continue;
       }
       if (USER_REQUEST_RE.test(text) || text.includes("?") || text.includes("？")) {
-        pushRecapLine(general, `Earlier user request: ${gist}`);
+        pushRecapLine(general, `${dayLabel}Earlier user request: ${gist}`.trim());
       }
       continue;
     }
 
-    if (leadingAssistantCount < 2) {
-      pushRecapLine(general, `Earlier assistant: ${gist}`);
+    if (leadingAssistantCount < LEADING_ASSISTANT_MAX) {
+      pushRecapLine(general, `${dayLabel}Earlier assistant: ${gist}`.trim());
       leadingAssistantCount += 1;
       continue;
     }
     if (AGENT_COMMITMENT_RE.test(text)) {
-      pushRecapLine(priority, `Agent commitment: ${gist}`);
+      pushRecapLine(priority, `${dayLabel}Agent commitment: ${gist}`.trim());
       continue;
     }
     if (ASSISTANT_DECISION_RE.test(text)) {
-      pushRecapLine(general, `Earlier agent conclusion: ${gist}`);
+      pushRecapLine(general, `${dayLabel}Earlier agent conclusion: ${gist}`.trim());
     }
   }
 
@@ -397,6 +413,110 @@ function annotateMessageIfNeeded(
   return msg;
 }
 
+/**
+ * 从根源折叠「已完成的 tool_call 链」，防止串台。
+ *
+ * 根源问题：OpenAI 协议里 tool 消息没有「轮次边界」。一轮工具调用完成后，thread 里留下
+ *   assistant(tool_calls) → tool → tool → assistant(content)
+ * 下一轮 LLM 看到这些 raw tool 结果，会把它们当成「刚发生的事」去承接，导致回复开头出现
+ * 「哈哈被你看穿了，我刚查 XX 没查到」之类的串台。
+ *
+ * 旧方案（已废弃）：closeIncompleteToolTurns 在下一轮 user 消息 push 后才插入 system 分隔提示，
+ * 靠 prompt「恳求」LLM 别串台——治标不治本，raw tool 结果仍在 thread 里。
+ *
+ * 新方案（根源）：在轮次完成的瞬间（afterTurnCompleted），把已完成的 tool_call 链折叠成
+ * 单条干净的 assistant 消息，彻底移除 tool 角色消息。LLM 下一轮根本看不到 raw tool 结果，
+ * 无法串台。折叠时保留最终 assistant 回复的正文与时间戳，不丢失语义。
+ *
+ * 折叠规则：
+ *   assistant(tool_calls, 无content) → tool* → assistant(content)
+ *   压缩为：
+ *   assistant(content)
+ *
+ * 未完成的 tool_call 链（无后续 assistant(content)，如被新消息打断）：折叠为单条 assistant
+ * 占位消息，明确标注「上一轮工具调用未完成」，避免 LLM 把孤立的 tool_calls 当成当前轮语境。
+ *
+ * 幂等：已是普通 assistant（无 tool_calls）的消息不会被重复处理。
+ */
+export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boolean {
+  if (msgs.length < 2) return false;
+  const result: ChatCompletionMessageParam[] = [];
+  let i = 0;
+  let changed = false;
+
+  while (i < msgs.length) {
+    const msg = msgs[i];
+
+    // 检测 assistant(tool_calls) 起始
+    if (msg && msg.role === "assistant") {
+      const toolCalls = (msg as { tool_calls?: unknown[] }).tool_calls;
+      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+        // 收集后续连续的 tool 结果
+        let j = i + 1;
+        while (j < msgs.length && msgs[j].role === "tool") {
+          j++;
+        }
+
+        // 检查 tool 结果后面是否紧跟 assistant(content)（已完成的轮次）
+        if (j < msgs.length && msgs[j].role === "assistant") {
+          const following = msgs[j];
+          const followingToolCalls = (following as { tool_calls?: unknown[] }).tool_calls;
+          const hasFollowingContent =
+            typeof following.content === "string" && following.content.trim().length > 0;
+
+          if (!Array.isArray(followingToolCalls) || followingToolCalls.length === 0) {
+            // 已完成的 tool_call 链：assistant(tool_calls) → tool* → assistant(content)
+            // 折叠为单条 assistant(content)，移除 tool_calls 与 tool 结果
+            if (hasFollowingContent) {
+              result.push(following);
+            } else {
+              // assistant(content) 为空（异常情况），保留占位
+              result.push({
+                role: "assistant",
+                content: annotateTimeframe(
+                  "[上一轮工具调用已完成但未生成可见回复]",
+                  new Date(),
+                  new Date(),
+                ),
+              });
+            }
+            changed = true;
+            i = j + 1;
+            continue;
+          }
+          // following 也带 tool_calls → 多轮工具调用中的中间步，继续向后找最终 assistant(content)
+          // 先 push 当前 assistant(tool_calls) + tool 结果，让下一轮循环处理
+          // （实际上多轮工具调用在 streamCompletion 中会被 trimThread/sanitize 处理，
+          //  这里只折叠「已完成」的尾部链）
+        } else if (j >= msgs.length || msgs[j].role !== "assistant") {
+          // 未完成的 tool_call 链：assistant(tool_calls) → tool*（无后续 assistant content）
+          // 折叠为单条 assistant 占位消息
+          result.push({
+            role: "assistant",
+            content: annotateTimeframe(
+              "[上一轮工具调用尚未完成即被新消息打断，未生成完整回复]",
+              new Date(),
+              new Date(),
+            ),
+          });
+          changed = true;
+          i = j;
+          continue;
+        }
+      }
+    }
+
+    result.push(msg);
+    i++;
+  }
+
+  if (changed) {
+    msgs.length = 0;
+    msgs.push(...result);
+  }
+  return changed;
+}
+
 function annotateUserContentIfString(
   content: ChatCompletionMessageParam["content"],
   at: Date,
@@ -420,7 +540,31 @@ function annotateUserContentIfString(
 export class ChatThreadStore {
   private readonly history = new Map<string, ChatCompletionMessageParam[]>();
 
+  /**
+   * 可选的「会话首条 system」提供者。
+   *
+   * 设计目的：让 RuntimeKernel minimal 模式下，sessionSys（薄身份 system）由 thread-store
+   * 在会话首次创建时一次性写入 msgs[0]，provider 后续轮次不再覆盖——
+   * 真正实现"首轮注入一次"，而不是"每轮重发但靠 prefix cache"。
+   *
+   * 协议：回调返回非空字符串时，thread-store 在新建会话时用它作为 msgs[0]；
+   * 返回 null/undefined 时回退 defaultSystemPrompt（旧行为）。
+   *
+   * 模型无关性：该机制只影响 msgs[0] 内容，与具体 provider 模型解耦——
+   * OpenAI / Kimi / DeepSeek / Claude 等所有 OpenAI-compatible provider 都遵循
+   * "msgs[0] = system message" 的统一协议。
+   */
+  private sessionSystemProvider: (() => string | null | undefined) | null = null;
+
   constructor(private readonly persistence: ChatThreadPersistence | null) {}
+
+  /**
+   * 注入会话首条 system 提供者（通常由 bootstrap 调用，传入 RuntimeKernel.buildSessionSystem）。
+   * 传 null 解除注入，回退 defaultSystemPrompt 行为。
+   */
+  setSessionSystemProvider(provider: (() => string | null | undefined) | null): void {
+    this.sessionSystemProvider = provider;
+  }
 
   clearSession(sessionId: string): void {
     this.history.delete(sessionId);
@@ -428,6 +572,7 @@ export class ChatThreadStore {
   }
 
   thread(sessionId: string, defaultSystemPrompt: string): ChatCompletionMessageParam[] {
+    const sessionSys = this.sessionSystemProvider?.() ?? null;
     let t = this.history.get(sessionId);
     if (!t) {
       t = adoptLegacyMasterDelegateThread(this.history, sessionId);
@@ -437,7 +582,7 @@ export class ChatThreadStore {
       if (restored?.length) {
         const now = new Date();
         t = [
-          { role: "system", content: defaultSystemPrompt },
+          { role: "system", content: sessionSys ?? defaultSystemPrompt },
           ...repairKimiAssistantToolCallReasoning(
             compactValidChatMessages(
               restored.map((msg) => annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now)),
@@ -448,9 +593,11 @@ export class ChatThreadStore {
       }
     }
     if (!t) {
-      t = [{ role: "system", content: defaultSystemPrompt }];
+      t = [{ role: "system", content: sessionSys ?? defaultSystemPrompt }];
       this.history.set(sessionId, t);
     }
+    // 防串台已根源解决：afterTurnCompleted 在轮次完成时调用 foldCompletedToolChains
+    // 移除 raw tool 结果。这里无需再做事后隔断。
     return t;
   }
 
@@ -464,6 +611,13 @@ export class ChatThreadStore {
       maxMessages: maxMessages ?? DEFAULT_SMART_TRIM_CONFIG.maxMessages,
     };
 
+    // 优先按天切分：保留「当天全部消息」+「历史按天整体 recap」。
+    // 这与前端「当天渲染、历史折叠」语义对齐：今天对话不丢，历史压成摘要。
+    if (this.trimByDayBoundary(msgs, config)) {
+      return;
+    }
+
+    // 按天切分后仍超 token 上限（当天消息太多），降级到 token 维度裁剪
     if (msgs.length <= 1 + config.maxMessages) {
       const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
       if (totalTokens <= config.maxTokens) return;
@@ -471,6 +625,7 @@ export class ChatThreadStore {
       return;
     }
 
+    // 消息条数也超限（极少触发，今天消息爆量）：保留最近 N 条 + recap
     const sys = msgs[0];
     const separated = separateRecapMessages(msgs.slice(1));
     const trimResult = trimPreservingToolPairs(separated.body, config.maxMessages);
@@ -484,6 +639,73 @@ export class ChatThreadStore {
     if (totalTokens > config.maxTokens) {
       this.smartTrimByTokens(msgs, config);
     }
+  }
+
+  /**
+   * 按本地日期边界切分会话线程：
+   * - 「今天」的全部消息原样保留（含工具链成对保护）
+   * - 「今天之前」的所有消息整体压成一条 [session-recap] 摘要
+   * - 没有时间戳的消息按今天处理，避免误归入历史
+   *
+   * @returns true 表示已成功按天切分（无需上层再裁剪）；
+   *          false 表示当天消息已使 token 超限，上层需降级到 smartTrimByTokens
+   */
+  private trimByDayBoundary(
+    msgs: ChatCompletionMessageParam[],
+    config: typeof DEFAULT_SMART_TRIM_CONFIG,
+  ): boolean {
+    if (msgs.length <= 1) return true; // 仅 system，无需压缩
+
+    const sys = msgs[0];
+    const separated = separateRecapMessages(msgs.slice(1));
+    const body = separated.body;
+    if (body.length === 0) return true;
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayStart = new Date(todayStart.getTime() - 86_400_000);
+
+    // 仿人记忆连续性：保留"今天 + 昨天"原文，只把前天及更早压成 recap。
+    // 人类对昨天的对话仍有清晰记忆，不应被压成 8 行摘要。
+    const recentMessages: ChatCompletionMessageParam[] = []; // 今天 + 昨天
+    const olderMessages: ChatCompletionMessageParam[] = []; // 前天及更早
+
+    for (const msg of body) {
+      const ts = extractMessageTimestamp(msg);
+      // 无时间戳（极旧数据或非 user/assistant）按今天处理，避免被错误归入历史 recap
+      if (!ts || ts.getTime() >= yesterdayStart.getTime()) {
+        recentMessages.push(msg);
+      } else {
+        olderMessages.push(msg);
+      }
+    }
+
+    // 无历史消息：不需要按天 recap，但仍可能 token 超限 → 让上层处理
+    if (olderMessages.length === 0) {
+      const totalTokens =
+        estimateMessageTokens(sys) +
+        recentMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
+      return totalTokens <= config.maxTokens;
+    }
+
+    // 仅"前天及更早"的历史整体压成一条 recap
+    const recap = buildSessionRecapMessage(separated.recapLines, olderMessages);
+
+    // 重组后 token 检查：若当天+昨天消息本身就超限，让上层走 smartTrimByTokens
+    const sysTokens = estimateMessageTokens(sys);
+    const recapTokens = recap ? estimateMessageTokens(recap) : 0;
+    const recentTokens = recentMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
+    if (sysTokens + recapTokens + recentTokens > config.maxTokens) {
+      return false;
+    }
+
+    msgs.length = 0;
+    msgs.push(sys);
+    if (recap) msgs.push(recap);
+    msgs.push(
+      ...sanitizeToolCallMessageChain(recentMessages, "[chat-thread-store-day]"),
+    );
+    return true;
   }
 
   private smartTrimByTokens(
@@ -566,6 +788,9 @@ export class ChatThreadStore {
     );
     msgs.length = 0;
     msgs.push(...annotated);
+    // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。
+    // 下一轮 LLM 只看到干净的 assistant(content)，不会把上轮 tool 结果当成当前轮语境。
+    foldCompletedToolChains(msgs);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 

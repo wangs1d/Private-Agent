@@ -190,3 +190,93 @@ export function createNarrativeMemoryPort(opts: {
     opts.humanLikeMemory,
   );
 }
+
+/**
+ * 混合检索适配器：把 NarrativeHybridRetrievalService（BM25+Qdrant+RRF）
+ * 与现有 NarrativeMemoryPort 组合，实现「人脑记忆 + 向量检索」双通道。
+ *
+ * - ingest：双写（facade 做人脑记忆沉淀，hybrid 做 BM25+Qdrant 索引）
+ * - buildNarrativeRecall：双通道召回后拼接结果（facade 优先，hybrid 补充）
+ * - 其余方法：仅委托 facade（hybrid 未实现这些方法）
+ */
+class NarrativeHybridAdapter implements NarrativeMemoryPort {
+  constructor(
+    private readonly facade: NarrativeMemoryPort,
+    private readonly hybrid: import("./narrative-hybrid-retrieval-service.js").NarrativeHybridRetrievalService,
+  ) {}
+
+  async ingest(
+    actorId: string,
+    text: string,
+    source: string,
+    opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
+  ): Promise<void> {
+    await Promise.all([
+      this.facade.ingest(actorId, text, source, opts),
+      this.hybrid.ingest(actorId, text, source),
+    ]);
+  }
+
+  async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
+    const [facadeResult, hybridResult] = await Promise.all([
+      this.facade.buildNarrativeRecall(actorId, query),
+      this.hybrid.buildNarrativeRecall(actorId, query),
+    ]);
+    return [facadeResult, hybridResult].filter(Boolean).join("\n\n");
+  }
+
+  async buildCrossContextRecall(actorId: string, query: string): Promise<string> {
+    return this.facade.buildCrossContextRecall(actorId, query);
+  }
+
+  async buildDetailedRecall(actorId: string, query: string): Promise<string> {
+    return this.facade.buildDetailedRecall(actorId, query);
+  }
+
+  async buildSourceRecall(actorId: string, query: string): Promise<string> {
+    return this.facade.buildSourceRecall(actorId, query);
+  }
+
+  async runSleepConsolidation(actorIds: string[]): Promise<
+    Array<{
+      actorId: string;
+      dailyCleanupCount: number;
+      weeklyMergedCount: number;
+      monthlyAbstractedCount: number;
+      consistencyFlagCount: number;
+      knowledgePromotedCount: number;
+      compressionRate: number;
+      estimatedRecallPrecision: number;
+      plannedActions: number;
+      executedActions: number;
+      stageReports: Array<{ stage: string; changed: number; notes: string[] }>;
+    }>
+  > {
+    return this.facade.runSleepConsolidation(actorIds);
+  }
+
+  async selfCheck(actorId: string, query: string): Promise<{ exists: boolean; domainId: string | null; confidence: number }> {
+    return this.facade.selfCheck(actorId, query);
+  }
+
+  getTelemetrySnapshot(): Record<string, unknown> {
+    return {
+      ...this.facade.getTelemetrySnapshot(),
+      hybridRetrieval: "enabled",
+    };
+  }
+}
+
+/**
+ * 条件包装：如果 hybrid 检索服务可用，把 port 包装为双通道适配器。
+ * @param port 现有 NarrativeMemoryPort（可能为 null）
+ * @param hybrid NarrativeHybridRetrievalService 实例（可能为 null）
+ * @returns 包装后的 NarrativeMemoryPort（或原 port / null）
+ */
+export function wrapNarrativeWithHybrid(
+  port: NarrativeMemoryPort | null,
+  hybrid: import("./narrative-hybrid-retrieval-service.js").NarrativeHybridRetrievalService | null,
+): NarrativeMemoryPort | null {
+  if (!port || !hybrid) return port;
+  return new NarrativeHybridAdapter(port, hybrid);
+}

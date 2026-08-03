@@ -5,6 +5,77 @@ import { dirname, join } from "node:path";
 import OpenAI from "openai";
 
 import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
+import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
+import { isPlaceholderApiKey } from "../config/api-key-validator.js";
+import type { InferenceNode } from "../brain/types.js";
+
+/**
+ * 真向量 cosine 相似度（方案 C）。
+ * 用于 HumanLikeMemory 图谱节点的语义关联，替代原 string 精确匹配。
+ */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** 向量缓存（进程内），key = 文本指纹，TTL 30min，避免重复算 embedding */
+const embeddingCache = new Map<string, { vector: number[]; ts: number }>();
+const EMBEDDING_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * 异步计算文本的真 embedding（方案 C 核心）。
+ * 无 API key 或 key 是占位符时返回 null（调用方降级到原逻辑）。
+ * 带 30min 缓存，避免 ingest 同一文本重复算。
+ */
+async function computeEmbedding(text: string): Promise<number[] | null> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (isPlaceholderApiKey(apiKey)) return null;
+  const cacheKey = semanticFingerprint(text) || text.slice(0, 64);
+  const now = Date.now();
+  const cached = embeddingCache.get(cacheKey);
+  if (cached && now - cached.ts < EMBEDDING_CACHE_TTL_MS) {
+    return cached.vector;
+  }
+  try {
+    const model = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
+    const r = await fetchOpenAiCompatibleEmbedding({ apiKey: apiKey!, model, input: text });
+    embeddingCache.set(cacheKey, { vector: r.vector, ts: now });
+    return r.vector;
+  } catch (err) {
+    console.log(`[HumanLikeMemory] computeEmbedding 失败: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * 从 vectorFingerprint 字段解析真向量。
+ * 旧节点存的是 normalizeMemoryLine(summary)（非 JSON 数组），解析失败返回 null。
+ * 新节点存的是 JSON 序列化的向量数组。
+ */
+function parseVectorFingerprint(fp: string): number[] | null {
+  if (!fp || !fp.startsWith("[")) return null;
+  try {
+    const parsed = JSON.parse(fp);
+    if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "number") {
+      return parsed as number[];
+    }
+  } catch {
+    // 旧格式（非 JSON），降级到 null
+  }
+  return null;
+}
+
+/** 把真向量序列化为 vectorFingerprint 字段可存的字符串 */
+function serializeVector(vec: number[]): string {
+  return JSON.stringify(vec);
+}
 
 export type MemoryContextKind = "main" | "notes";
 export type MemoryDomainLifecycle = "knowledge" | "transactional" | "temporary" | "relationship" | "procedural";
@@ -17,7 +88,9 @@ export type SleepAgentStage =
   | "weekly_merge"
   | "monthly_abstract"
   | "consistency_audit"
-  | "promote_knowledge";
+  | "promote_knowledge"
+  | "connection_pruning"
+  | "schema_formation";
 
 export type MemoryVersionRecord = {
   versionId: string;
@@ -196,8 +269,18 @@ function computeSimilarity(
     left.semanticFingerprint.length > 0 && left.semanticFingerprint === right.semanticFingerprint
       ? 1
       : 0;
-  const vectorScore =
-    left.vectorFingerprint.length > 0 && left.vectorFingerprint === right.vectorFingerprint ? 0.92 : 0;
+  // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到原字符串精确匹配
+  const leftVec = parseVectorFingerprint(left.vectorFingerprint);
+  const rightVec = parseVectorFingerprint(right.vectorFingerprint);
+  let vectorScore: number;
+  if (leftVec && rightVec) {
+    // 新路径：真向量 cosine 相似度（0-1），替代原 0/0.92 二值
+    vectorScore = Math.max(0, cosineSimilarity(leftVec, rightVec));
+  } else {
+    // 降级路径：旧节点无真向量，保持原字符串精确匹配逻辑
+    vectorScore =
+      left.vectorFingerprint.length > 0 && left.vectorFingerprint === right.vectorFingerprint ? 0.92 : 0;
+  }
   const keywordScore = overlapScore(left.keywords, right.keywords);
   const entityScore = overlapScore(left.entityTags, right.entityTags);
   const sceneScore = overlapScore(left.sceneTags, right.sceneTags);
@@ -220,7 +303,8 @@ type SleepAction =
   | { type: "merge"; nodeIds: string[]; stage: SleepAgentStage; reason: string; summary?: string }
   | { type: "promote_knowledge"; nodeIds: string[]; stage: SleepAgentStage; reason: string; summary: string }
   | { type: "mark_error"; nodeId: string; stage: SleepAgentStage; reason: string }
-  | { type: "mark_conflict"; nodeIds: string[]; stage: SleepAgentStage; reason: string };
+  | { type: "mark_conflict"; nodeIds: string[]; stage: SleepAgentStage; reason: string }
+  | { type: "decay_weight"; nodeId: string; stage: SleepAgentStage; reason: string; delta: number };
 
 const DEFAULT_POLICY: HumanLikeMemoryPolicyFile = {
   version: 2,
@@ -355,6 +439,30 @@ const DEFAULT_STORE: HumanLikeMemoryStoreShape = {
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
+
+/**
+ * 自动确认阈值：节点被召回次数 >= 此值时，自动从 "unknown" 升级为 "confirmed"。
+ *
+ * 设计意图：用户要求"agent 对有用的记忆是牢固的，不需要像人类一样有时候想不起"。
+ * "有用"通过召回频次衡量 —— 3 次召回说明这条记忆确实在被反复使用，应锁定不衰减。
+ * 阈值过低（1-2 次）会误锁偶发召回；过高（5+ 次）需要太多轮才生效，失去实用性。
+ */
+const AUTO_CONFIRM_THRESHOLD = 3;
+
+/**
+ * deletionStage 回退映射（供 reawakenNode 使用）。
+ * 与 ForgettingController 中的 STAGE_ORDER 对应但反向：
+ *   cold → downranked → active
+ *   soft_deleted → cold
+ *   active / hard_deleted 为终态，不再回退。
+ */
+const STAGE_REGRESS: Record<MemoryDeletionStage, MemoryDeletionStage> = {
+  active: "active",
+  downranked: "active",
+  cold: "downranked",
+  soft_deleted: "cold",
+  hard_deleted: "hard_deleted",
+};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -609,6 +717,14 @@ export class HumanLikeMemoryService {
       existing.frequencyScore = clamp(existing.frequencyScore + 0.12, 0, 5);
       existing.importance = Math.max(existing.importance, importance);
       existing.confidence = Math.max(existing.confidence, confidence);
+      // 自动确认：反复 re-ingest（同一记忆被多次提及）说明是用户持续关注的有用信息
+      // 与 buildRecall 的自动确认机制一致，阈值 AUTO_CONFIRM_THRESHOLD
+      if (
+        existing.correctness === "unknown" &&
+        existing.accessCount >= AUTO_CONFIRM_THRESHOLD
+      ) {
+        existing.correctness = "confirmed";
+      }
       existing.keywords = uniqueStrings([...existing.keywords, ...extractKeywords(summary)], 14);
       existing.entityTags = uniqueStrings([...existing.entityTags, ...extractEntityTags(summary)], 12);
       existing.sceneTags = uniqueStrings([...existing.sceneTags, ...inferSceneTags(source, context, domainId)], 8);
@@ -616,11 +732,15 @@ export class HumanLikeMemoryService {
       this.rebuildLinksForNode(existing);
       this.schedulePersist();
       this.recordWriteLatency(start);
+      // 方案 C：re-ingest 时也异步更新 embedding（summary 可能已变）
+      void this.enhanceNodeWithEmbedding(existing.id, summary);
       return;
     }
 
     const nodeId = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const versionId = this.createVersion(summary, null, confidence, importance);
+    // 方案 C：ingest 时先存 normalizeMemoryLine 作为占位，再异步计算真 embedding 覆盖
+    // 无 API key 时保持 normalizeMemoryLine（向后兼容旧节点）
     this.store.nodes[nodeId] = {
       id: nodeId,
       actorId,
@@ -657,6 +777,26 @@ export class HumanLikeMemoryService {
     this.rebuildCommunities(actorId, domainId);
     this.schedulePersist();
     this.recordWriteLatency(start);
+
+    // 方案 C：异步计算真 embedding 覆盖 vectorFingerprint，并重建该节点边
+    // 不阻塞主流程，计算完成后增强图谱语义关联质量
+    void this.enhanceNodeWithEmbedding(nodeId, summary);
+  }
+
+  /**
+   * 方案 C：异步计算节点 summary 的真 embedding，覆盖 vectorFingerprint 并重建边。
+   * 无 API key 时跳过（保持 normalizeMemoryLine 占位）。
+   * 设计意图：ingest 主流程不阻塞，embedding 计算完成后增强图谱语义关联质量。
+   */
+  private async enhanceNodeWithEmbedding(nodeId: string, summary: string): Promise<void> {
+    const vec = await computeEmbedding(summary);
+    if (!vec) return; // 无 API key 或计算失败，保持占位
+    const node = this.store.nodes[nodeId];
+    if (!node || node.summary !== summary) return; // 节点已变更，避免覆盖错误
+    node.vectorFingerprint = serializeVector(vec);
+    // 重建该节点的边（现在用真向量 cosine 算 similarity，边权重更准）
+    this.rebuildLinksForNode(node);
+    this.schedulePersist();
   }
 
   async buildRecall(
@@ -673,7 +813,11 @@ export class HumanLikeMemoryService {
     if (mode === "single_domain") this.telemetry.routeSingleDomain += 1;
     else this.telemetry.routeCrossDomain += 1;
 
-    const candidates = this.hybridRetrieve(actorId, cleanedQuery, domainId, mode, opts?.context, limit);
+    // 方案 C：buildRecall 时算 query 的真 embedding，传给 hybridRetrieve 做真向量检索
+    // 无 API key 时返回 null，hybridRetrieve 降级到 cosineLikeScore
+    const queryVec = await computeEmbedding(cleanedQuery);
+
+    const candidates = this.hybridRetrieve(actorId, cleanedQuery, domainId, mode, opts?.context, limit, queryVec);
     const selected = this.applyDiversityControl(candidates, limit, mode === "cross_domain");
     if (selected.length === 0) {
       this.telemetry.recallMisses += 1;
@@ -686,6 +830,15 @@ export class HumanLikeMemoryService {
       item.node.accessCount += 1;
       item.node.frequencyScore = clamp(item.node.frequencyScore + 0.06, 0, 5);
       item.node.recencyScore = 1;
+      // 自动确认机制：反复命中（accessCount >= AUTO_CONFIRM_THRESHOLD）的"unknown"节点
+      // 自动升级为 "confirmed" —— agent 对有用的记忆是牢固的，不会像人类一样想不起
+      // 阈值设为 3：3 次召回说明这条记忆确实在被反复使用，应锁定不衰减
+      if (
+        item.node.correctness === "unknown" &&
+        item.node.accessCount >= AUTO_CONFIRM_THRESHOLD
+      ) {
+        item.node.correctness = "confirmed";
+      }
     }
     this.schedulePersist();
 
@@ -742,6 +895,221 @@ export class HumanLikeMemoryService {
       }
     }
     this.schedulePersist();
+  }
+
+  /**
+   * 获取指定 actor 的所有节点（供 ForgettingController.continuousScore 调用）。
+   * 返回节点数组的浅拷贝，避免外部修改内部状态。
+   * 排除 hard_deleted 节点（已彻底删除）。
+   */
+  getAllNodes(actorId: string): MemoryNodeRecord[] {
+    return Object.values(this.store.nodes)
+      .filter((node) => node.actorId === actorId && node.deletionStage !== "hard_deleted")
+      .map((node) => ({ ...node }));
+  }
+
+  /**
+   * 更新节点 deletionStage（供 ForgettingController.continuousScore 调用）。
+   * 写入后立即持久化到 store。
+   */
+  updateDeletionStage(actorId: string, nodeId: string, stage: MemoryDeletionStage): void {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) {
+      console.log(
+        `[HumanLikeMemory] updateDeletionStage 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
+      );
+      return;
+    }
+    node.deletionStage = stage;
+    this.schedulePersist();
+  }
+
+  /**
+   * 节点再唤醒（供 ForgettingController.reawakenAndStrengthen 调用）。
+   * - frequencyScore += 0.3（远超普通 recall 的 +0.06，体现"再唤醒反弹"）
+   * - deletionStage 回退一级：cold → downranked → active
+   * - lastAccessedAt 更新为当前时间
+   * - 写入后立即持久化
+   */
+  reawakenNode(actorId: string, nodeId: string): void {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) {
+      console.log(
+        `[HumanLikeMemory] reawakenNode 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
+      );
+      return;
+    }
+    node.frequencyScore = clamp(node.frequencyScore + 0.3, 0, 5);
+    node.deletionStage = STAGE_REGRESS[node.deletionStage];
+    node.lastAccessedAt = nowIso();
+    this.schedulePersist();
+  }
+
+  /**
+   * 清除节点所有 edge（供 ForgettingController.pruneConnections 调用）。
+   * 保留节点本体供历史追溯，仅清除连接。
+   * 写入后立即持久化。
+   */
+  pruneNodeEdges(actorId: string, nodeId: string): void {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) {
+      console.log(
+        `[HumanLikeMemory] pruneNodeEdges 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
+      );
+      return;
+    }
+    const edgeIds = Object.keys(this.store.edges).filter((edgeId) => {
+      const edge = this.store.edges[edgeId]!;
+      return edge.from === nodeId || edge.to === nodeId;
+    });
+    for (const edgeId of edgeIds) {
+      delete this.store.edges[edgeId];
+    }
+    console.log(`[HumanLikeMemory] pruneNodeEdges 完成：删除 ${edgeIds.length} 条边 (nodeId=${nodeId})`);
+    this.schedulePersist();
+  }
+
+  /**
+   * 获取指定 actor 的所有边（供 MemoryAssociativeGraph.spread 扩散激活调用）。
+   * 返回边数组的浅拷贝，避免外部修改内部状态。
+   */
+  getAllEdges(actorId: string): MemoryEdgeRecord[] {
+    return Object.values(this.store.edges)
+      .filter((edge) => edge.actorId === actorId)
+      .map((edge) => ({ ...edge }));
+  }
+
+  /**
+   * 获取指定 actor 指定 sceneTag 的所有节点（供 MemorySchemaFormation.extractSchema 调用）。
+   * 排除 hard_deleted 节点。返回节点数组的浅拷贝。
+   */
+  getNodesBySceneTag(actorId: string, sceneTag: string): MemoryNodeRecord[] {
+    return Object.values(this.store.nodes)
+      .filter(
+        (node) =>
+          node.actorId === actorId &&
+          node.deletionStage !== "hard_deleted" &&
+          node.sceneTags.includes(sceneTag),
+      )
+      .map((node) => ({ ...node }));
+  }
+
+  /**
+   * 获取单个节点（供 MemoryReconstructionValidator 校验与来源追溯调用）。
+   * 节点不存在或 actorId 不匹配时返回 null。返回浅拷贝。
+   */
+  getNode(actorId: string, nodeId: string): MemoryNodeRecord | null {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) return null;
+    return { ...node };
+  }
+
+  /**
+   * 获取版本记录（供 MemoryReconstructionValidator.getProvenanceChain 来源链路追溯调用）。
+   * 版本不存在时返回 null。返回浅拷贝。
+   */
+  getVersion(actorId: string, versionId: string): MemoryVersionRecord | null {
+    const version = this.store.versions[versionId];
+    if (!version) return null;
+    // 版本记录不直接关联 actorId，通过节点链间接关联；
+    // 此处不强制 actorId 校验（调用方已通过 getNode 确认归属）。
+    void actorId; // 显式标记 actorId 保留供未来扩展
+    return { ...version };
+  }
+
+  /**
+   * 标记节点 correctness（供 MemoryReconstructionValidator 标记 suspected_error 调用）。
+   * 写入后立即持久化。节点不存在或 actorId 不匹配时静默跳过。
+   */
+  markNodeCorrectness(actorId: string, nodeId: string, correctness: string): void {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) {
+      console.log(
+        `[HumanLikeMemory] markNodeCorrectness 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
+      );
+      return;
+    }
+    node.correctness = correctness as MemoryNodeRecord["correctness"];
+    this.schedulePersist();
+  }
+
+  /**
+   * 回写推理结论为新节点（供 MemoryInferenceEngine 高置信回写调用）。
+   *
+   * 设计要点：
+   *   - kind="knowledge"（inferred 不是有效 MemoryNodeKind，用 knowledge 兜底 + metadata.inferred=true 标记）
+   *   - confidence 直接用推理结论的 confidence（> 0.6 才会回写）
+   *   - keywords 包含 "推理" + 从 conclusion 自动抽取，让召回时能按 "推理" 关键词找到
+   *   - 创建从触发节点到推理节点的边（若可识别）
+   *   - 调度持久化（异步）
+   */
+  ingestInferredNode(actorId: string, node: InferenceNode): void {
+    const summary = node.conclusion.trim().replace(/\s+/g, " ");
+    if (!summary) return;
+    const domainId = "general";
+    const domainPolicy = this.policy.domains[domainId];
+    if (domainPolicy?.enabled === false || domainPolicy?.retired === true) return;
+
+    const fingerprint = semanticFingerprint(summary) || normalizeMemoryLine(summary);
+    // 已存在相同 fingerprint 的节点 → 跳过（避免重复回写）
+    const existing = Object.values(this.store.nodes).find(
+      (n) => n.actorId === actorId && n.semanticFingerprint === fingerprint,
+    );
+    if (existing) {
+      // 已存在 → 只更新 confidence（取较大值）+ accessCount + 1
+      existing.confidence = Math.max(existing.confidence, node.confidence);
+      existing.accessCount += 1;
+      existing.lastAccessedAt = nowIso();
+      this.schedulePersist();
+      return;
+    }
+
+    const nodeId = `inf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const versionId = this.createVersion(summary, null, node.confidence, 0.6);
+    const keywords = uniqueStrings(["推理", ...extractKeywords(summary)], 14);
+    this.store.nodes[nodeId] = {
+      id: nodeId,
+      actorId,
+      domainId,
+      parentDomainId: domainPolicy?.parentDomainId ?? null,
+      kind: "knowledge",
+      source: `inference:${node.evidence.rules.join(",")}`,
+      sourceType: "system",
+      context: "main",
+      summary,
+      keywords,
+      sceneTags: inferSceneTags(`inference:${node.id}`, "main", domainId),
+      emotionTags: [],
+      entityTags: extractEntityTags(summary),
+      semanticFingerprint: fingerprint,
+      vectorFingerprint: normalizeMemoryLine(summary),
+      timestamp: nowIso(),
+      lastAccessedAt: nowIso(),
+      accessCount: 0,
+      importance: 0.6,
+      confidence: node.confidence,
+      frequencyScore: 0,
+      recencyScore: 1,
+      domainScore: domainPolicy?.recallWeight ?? 1,
+      userFeedbackScore: 1,
+      correctness: "unknown",
+      deletionStage: "active",
+      isArchived: false,
+      currentVersionId: versionId,
+      versionIds: [versionId],
+      metadata: {
+        inferred: true,
+        inferenceId: node.id,
+        reasoningChain: node.evidence.reasoningChain,
+        clueCount: node.evidence.clues.length,
+      },
+    };
+    this.rebuildLinksForNode(this.store.nodes[nodeId]!);
+    this.rebuildCommunities(actorId, domainId);
+    this.schedulePersist();
+
+    // 异步计算真 embedding 覆盖 vectorFingerprint
+    void this.enhanceNodeWithEmbedding(nodeId, summary);
   }
 
   private async loadStore(): Promise<void> {
@@ -802,6 +1170,29 @@ export class HumanLikeMemoryService {
     } catch {
       this.policyWatcher = null;
     }
+  }
+
+  /**
+   * 关闭服务：释放文件监听 + 定时器，并等待挂起的持久化完成。
+   *
+   * 测试 helper（withMemoryService）在 finally 块中调用此方法做清理；
+   * 未调用时 policyWatcher 会泄漏 FSWatcher，导致测试进程不退出。
+   */
+  async shutdown(): Promise<void> {
+    if (this.reloadTimer) {
+      clearTimeout(this.reloadTimer);
+      this.reloadTimer = null;
+    }
+    if (this.policyWatcher) {
+      try {
+        this.policyWatcher.close();
+      } catch {
+        // ignore
+      }
+      this.policyWatcher = null;
+    }
+    // 等待挂起的持久化链完成，避免测试目录被 rm 时丢数据
+    await this.persistChain;
   }
 
   private async persistPolicy(): Promise<void> {
@@ -945,6 +1336,7 @@ export class HumanLikeMemoryService {
     mode: RecallMode,
     context: MemoryContextKind | undefined,
     limit: number,
+    queryVec: number[] | null = null,
   ): HybridRetrievalCandidate[] {
     const queryKeywords = extractKeywords(query);
     const queryEntities = extractEntityTags(query);
@@ -969,11 +1361,42 @@ export class HumanLikeMemoryService {
         const keywordScore =
           queryKeywords.filter((keyword) => node.keywords.includes(keyword)).length * 0.15 +
           queryEntities.filter((entity) => node.entityTags.includes(entity)).length * 0.12;
-        const vectorScore = cosineLikeScore(queryKeywords, node.keywords) * 0.26;
+        // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到 cosineLikeScore
+        let vectorScore: number;
+        const nodeVec = parseVectorFingerprint(node.vectorFingerprint);
+        if (queryVec && nodeVec) {
+          // 新路径：真向量 cosine 相似度（0-1）
+          vectorScore = Math.max(0, cosineSimilarity(queryVec, nodeVec)) * 0.26;
+        } else {
+          // 降级路径：旧节点无真向量或无 query 向量，用关键词集合 cosine
+          vectorScore = cosineLikeScore(queryKeywords, node.keywords) * 0.26;
+        }
+        // W2 新增：inactivityPenalty — 长期未命中的节点在召回排序时降权
+        // 与人类记忆"经常提起就记忆犹新，不提起就逐渐淡忘"机制一致
+        // 使用 lastAccessedAt 计算距今天数，配合 forgettingFactor 域差异化
+        // confirmed 节点不衰减（agent 对有用记忆是牢固的，不像人类会想不起）
+        const policy = this.policy.domains[node.domainId];
+        const forgettingFactor = policy?.forgettingFactor ?? 1.0;
+        const lastAccessedTs = node.lastAccessedAt ? Date.parse(node.lastAccessedAt) : Date.parse(node.timestamp);
+        const daysSinceAccess = Math.max(0, (Date.now() - lastAccessedTs) / 86_400_000);
+        // 衰减曲线：7 天内无惩罚，7-30 天线性增长到 0.3，30 天以上封顶 0.3
+        const inactivityPenalty =
+          node.correctness === "confirmed"
+            ? 0 // confirmed 节点不衰减（agent 对有用记忆是牢固的）
+            : daysSinceAccess <= 7
+              ? 0
+              : Math.min(0.3, (daysSinceAccess - 7) * 0.015 * forgettingFactor);
+        // confirmed 节点召回 boost：确保流程回复能稳定记住重要记忆
+        // 设计意图：用户澄清"agent 对有用记忆是牢固的"指的是
+        //   agent 在对话/流程回复中能够稳定召回这些记忆，而不是"想不起"
+        //   通过 finalScore 加分让 confirmed 节点在排序中优先被选中
+        const confirmedBoost = node.correctness === "confirmed" ? 0.25 : 0;
         const finalScore =
           structureScore +
           keywordScore +
-          vectorScore -
+          vectorScore +
+          confirmedBoost - // confirmed 节点召回优先（流程回复能稳定记住）
+          inactivityPenalty - // W2 新增：未命中惩罚
           (node.correctness === "rejected" ? 0.6 : 0) -
           (node.correctness === "suspected_error" ? 0.25 : 0) -
           (node.deletionStage === "cold" ? 0.18 : 0) -
@@ -1102,15 +1525,46 @@ export class HumanLikeMemoryService {
     for (const node of nodes) {
       const policy = this.policy.domains[node.domainId];
       if (!policy) continue;
-      const ageDays = Math.max(0, (now - Date.parse(node.timestamp)) / 86_400_000);
+      // W1 修复：原 ageDays 基于 node.timestamp（创建时间），5 年前创建但昨天刚被召回的节点
+      // 仍会按 5 年年龄判定 cold_storage —— 这是 bug。
+      // 新策略：区分 ageSinceCreated 和 ageSinceAccessed，cold/soft_delete 判定用 ageSinceAccessed
+      const ageSinceCreatedDays = Math.max(0, (now - Date.parse(node.timestamp)) / 86_400_000);
+      const lastAccessedTs = node.lastAccessedAt ? Date.parse(node.lastAccessedAt) : Date.parse(node.timestamp);
+      const ageSinceAccessedDays = Math.max(0, (now - lastAccessedTs) / 86_400_000);
 
-      if (ageDays > policy.coldStorageAfterDays && node.deletionStage === "active" && node.accessCount <= 1) {
+      // W1 新增：长期未命中 → 连续衰减权重（decay_weight）
+      // 原策略：frequencyScore / domainScore 只增不减（召回+0.06，ingest+0.12），
+      //         只有 accessCount===0 时一次性 downrank，没有连续衰减
+      // 新策略：距上次访问超过阈值（默认 7 天）的节点，每次 sleep cycle 衰减 frequencyScore
+      //         使用 policy.forgettingFactor 调节衰减强度（0.6-1.6，域差异化）
+      //         但已确认（confirmed）的高价值节点不衰减（agent 对有用记忆是牢固的）
+      const INACTIVITY_DECAY_THRESHOLD_DAYS = 7;
+      const INACTIVITY_DECAY_DELTA = 0.02; // 每次衰减 0.02（约 50 次 sleep cycle 后降到 0）
+      if (
+        ageSinceAccessedDays > INACTIVITY_DECAY_THRESHOLD_DAYS &&
+        node.deletionStage === "active" &&
+        node.correctness !== "confirmed" &&
+        node.frequencyScore > 0.1 // 下限保护，避免衰减到 0
+      ) {
+        const decayDelta = INACTIVITY_DECAY_DELTA * (policy.forgettingFactor ?? 1.0);
+        actions.push({
+          type: "decay_weight",
+          nodeId: node.id,
+          stage: "daily_cleanup",
+          reason: `inactivity_${ageSinceAccessedDays.toFixed(0)}d`,
+          delta: decayDelta,
+        });
+      }
+
+      // W1 修复：cold/soft_delete/hard_delete 判定改用 ageSinceAccessedDays
+      if (ageSinceAccessedDays > policy.coldStorageAfterDays && node.deletionStage === "active" && node.accessCount <= 1) {
         actions.push({ type: "cold", nodeId: node.id, stage: "daily_cleanup", reason: "cold_storage_threshold" });
       }
-      if (ageDays > policy.softDeleteAfterDays && node.deletionStage === "cold" && node.correctness !== "confirmed") {
+      if (ageSinceAccessedDays > policy.softDeleteAfterDays && node.deletionStage === "cold" && node.correctness !== "confirmed") {
         actions.push({ type: "soft_delete", nodeId: node.id, stage: "daily_cleanup", reason: "soft_delete_threshold" });
       }
-      if (ageDays > policy.hardDeleteAfterDays && node.deletionStage === "soft_deleted") {
+      // hard_delete 仍用 ageSinceCreatedDays（节点存在时间够久才能彻底删除）
+      if (ageSinceCreatedDays > policy.hardDeleteAfterDays && node.deletionStage === "soft_deleted") {
         actions.push({ type: "hard_delete", nodeId: node.id, stage: "daily_cleanup", reason: "hard_delete_threshold" });
       }
       if (node.correctness === "suspected_error") {
@@ -1193,6 +1647,18 @@ export class HumanLikeMemoryService {
       if (action.type === "downrank") {
         node.domainScore = clamp(node.domainScore - 0.12, 0.1, 3);
         node.deletionStage = "downranked";
+        report.dailyCleanupCount += 1;
+      } else if (action.type === "decay_weight") {
+        // W1 新增：连续衰减权重（长期未命中）
+        // 不改变 deletionStage，只调整 frequencyScore / recencyScore / domainScore
+        // 下限保护：frequencyScore 不低于 0.1（保留召回可能性，不彻底丢失）
+        const delta = action.delta;
+        node.frequencyScore = clamp(node.frequencyScore - delta, 0.1, 5);
+        // recencyScore 从 1 衰减为连续值：未访问越久衰减越多
+        const daysSinceAccess = Math.max(0, (Date.now() - Date.parse(node.lastAccessedAt || node.timestamp)) / 86_400_000);
+        node.recencyScore = clamp(Math.exp(-daysSinceAccess / 7), 0, 1);
+        // domainScore 轻微衰减（不影响 deletionStage）
+        node.domainScore = clamp(node.domainScore - delta * 0.3, 0.1, 3);
         report.dailyCleanupCount += 1;
       } else if (action.type === "cold") {
         node.deletionStage = "cold";

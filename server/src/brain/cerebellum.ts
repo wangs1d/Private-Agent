@@ -7,14 +7,19 @@
 //  1. schedule(decision, signal, fire)：皮层 ProactionCortex 决策 speak 后调用。
 //     - 用户 busy/sleeping → defer 进队列,等 reaper 复查
 //     - 抑制窗口内（用户刚开口）→ defer
-//     - 否则 → 犹豫 0.8-2.5s 后执行（模拟真人"要不要说"的犹豫期）
+//     - 否则 → 犹豫后执行（Step 5 扩展：基于信号重要性动态计算犹豫期）
 //     - 执行前再查一次抑制窗口,若期间被打断则取消（"被打断就不说了"）
 //  2. reaper 定时器（2 分钟）：复查 defer 队列
 //     - 超时（30 分钟）未触发 → 降级 silent,记日志
 //     - 用户状态变好（idle/just_off_work/...）→ 重新触发执行
 //  3. interrupt(actorId)：用户开口打断
 //     - 清空该 actor 的 defer 队列
-//     - 设 60s 抑制窗口,期间 schedule 直接 defer 不执行
+//     - 设抑制窗口（Step 5 扩展：基于最近 speak 信号重要性动态调整时长）
+//
+// Step 5 扩展（拟人化）：
+//  - 犹豫期动态计算：critical=0.3-0.8s（紧急立即说）/ high=0.8-2.0s / medium=1.5-3.5s / low=3-6s
+//  - 打断抑制窗口动态调整：critical=5s（紧急快速恢复主动）/ high=30s / medium=60s / low=120s
+//  替代原固定 HESITATE_MIN_MS/MAX_MS=0.8-2.5s 和 SUPPRESS_WINDOW_MS=60s。
 //
 // 设计要点：
 //  - 小脑不产出话术/不做 value 评分,只搬运 ProactionCortex 已决策的 speak 到合适时机。
@@ -41,14 +46,54 @@ export interface CerebellumAwarenessLike {
 const REAPER_INTERVAL_MS = 2 * 60_000;
 /** defer 超时阈值（30 分钟）,超时未触发则降级 silent */
 const DEFER_TTL_MS = 30 * 60_000;
-/** 打断后抑制窗口（60 秒）,期间主动决策直接 defer 不执行 */
-const SUPPRESS_WINDOW_MS = 60_000;
-/** 立即执行前的犹豫延迟下限/上限（模拟真人"要不要说"的犹豫期） */
-const HESITATE_MIN_MS = 800;
-const HESITATE_MAX_MS = 2500;
 
 /** 不适合立即开口的活动状态 → defer */
 const DEFER_ACTIVITIES = new Set<string>(["busy", "sleeping"]);
+
+// ---- Step 5 扩展：犹豫期 + 打断抑制窗口动态计算 --------------------------
+
+/**
+ * 信号重要性等级。
+ * 与 BrainSignalInput.importance 类型一致，复用以驱动动态计算。
+ */
+type SignalImportance = "critical" | "high" | "medium" | "low";
+
+/**
+ * 犹豫期范围（ms）—— 基于信号重要性动态计算。
+ * 替代原固定 HESITATE_MIN_MS=800 / HESITATE_MAX_MS=2500。
+ *
+ * 设计意图（拟人化）：
+ *  - critical: 0.3-0.8s（紧急情况立即说，几乎不犹豫）
+ *  - high:     0.8-2.0s（重要事情稍作犹豫）
+ *  - medium:   1.5-3.5s（普通信号适度犹豫）
+ *  - low:      3-6s（不重要信号多想想再决定要不要说）
+ */
+const HESITATE_RANGE: Record<SignalImportance, { min: number; max: number }> = {
+  critical: { min: 300, max: 800 },
+  high: { min: 800, max: 2000 },
+  medium: { min: 1500, max: 3500 },
+  low: { min: 3000, max: 6000 },
+};
+
+/**
+ * 打断抑制窗口时长（ms）—— 基于最近 speak 信号重要性动态调整。
+ * 替代原固定 SUPPRESS_WINDOW_MS=60_000。
+ *
+ * 设计意图（拟人化）：
+ *  - critical: 5s（紧急情况快速恢复主动，不长时间沉默）
+ *  - high:    30s（重要事情适度沉默）
+ *  - medium:  60s（普通信号标准沉默）
+ *  - low:    120s（不重要信号长时间沉默，给用户充足空间）
+ */
+const SUPPRESS_WINDOW_BY_IMPORTANCE: Record<SignalImportance, number> = {
+  critical: 5_000,
+  high: 30_000,
+  medium: 60_000,
+  low: 120_000,
+};
+
+/** 默认重要性（信号未指定时） */
+const DEFAULT_IMPORTANCE: SignalImportance = "medium";
 
 // ---- Cerebellum --------------------------------------------------------
 
@@ -71,6 +116,15 @@ export class Cerebellum {
   private interruptedCount = 0;
   /** 最近一次打断时间 */
   private lastInterruptAt: string | null = null;
+
+  // ---- Step 5 扩展：动态计算所需状态 ----
+
+  /** actorId → 最近一次 speak 信号的 importance（用于 interrupt 时动态计算抑制窗口） */
+  private readonly lastSpeakImportance = new Map<string, SignalImportance>();
+  /** 统计：动态犹豫期计算次数（用于 snapshot） */
+  private dynamicHesitateCount = 0;
+  /** 统计：动态抑制窗口计算次数（用于 snapshot） */
+  private dynamicSuppressCount = 0;
 
   // ---- 注册 ------------------------------------------------------------
 
@@ -106,6 +160,8 @@ export class Cerebellum {
       this.reaperTimer = null;
     }
     this.pending.clear();
+    // Step 5 扩展：清理动态计算相关状态
+    this.lastSpeakImportance.clear();
     this.started = false;
     console.log("[Cerebellum] 已停止");
   }
@@ -118,7 +174,8 @@ export class Cerebellum {
    * 皮层（ProactionCortex）已决策 speak,小脑只管"什么时候执行"：
    *  - 抑制窗口内（用户刚开口）→ defer,别抢话
    *  - 用户 busy/sleeping → defer,等 reaper 复查状态变好
-   *  - 否则 → 犹豫 0.8-2.5s 后执行,执行前再查一次抑制窗口（可被打断取消）
+   *  - 否则 → 犹豫后执行（Step 5 扩展：基于信号重要性动态计算犹豫期）
+   *    执行前再查一次抑制窗口（可被打断取消）
    */
   async schedule(
     decision: BrainDecision,
@@ -127,6 +184,10 @@ export class Cerebellum {
   ): Promise<void> {
     const actorId = signal.actorId;
     const now = Date.now();
+
+    // 记录最近 speak 信号的重要性（用于 interrupt 时动态计算抑制窗口）
+    const importance = (signal.importance ?? DEFAULT_IMPORTANCE) as SignalImportance;
+    this.lastSpeakImportance.set(actorId, importance);
 
     // 抑制窗口内 → defer
     const suppressUntilMs = this.suppressUntil.get(actorId);
@@ -146,9 +207,12 @@ export class Cerebellum {
       return;
     }
 
-    // 立即执行（带犹豫延迟,模拟真人察觉后的"要不要说"犹豫期）
-    const hesitateMs = HESITATE_MIN_MS + Math.floor(Math.random() * (HESITATE_MAX_MS - HESITATE_MIN_MS));
-    console.log(`[Cerebellum] ${actorId} 立即执行,犹豫 ${hesitateMs}ms: ${signal.kind}`);
+    // 立即执行（Step 5 扩展：基于信号重要性动态计算犹豫期）
+    const hesitateMs = this.computeHesitation(importance);
+    this.dynamicHesitateCount += 1;
+    console.log(
+      `[Cerebellum] ${actorId} 立即执行,犹豫 ${hesitateMs}ms (importance=${importance}): ${signal.kind}`,
+    );
     setTimeout(() => {
       // 执行前再查一次：若犹豫期间用户开口了（抑制窗口触发）,则取消
       const su = this.suppressUntil.get(actorId);
@@ -164,6 +228,8 @@ export class Cerebellum {
 
   /**
    * 用户开口打断：清空 defer 队列 + 设抑制窗口。
+   *
+   * Step 5 扩展：抑制窗口时长基于最近 speak 信号重要性动态调整。
    * 让"用户开口时 Agent 不抢话"从注释变成可执行逻辑。
    */
   interrupt(actorId: string): void {
@@ -171,14 +237,55 @@ export class Cerebellum {
     if (count > 0) {
       this.pending.delete(actorId);
     }
-    this.suppressUntil.set(actorId, Date.now() + SUPPRESS_WINDOW_MS);
+
+    // Step 5 扩展：基于最近 speak 信号重要性动态计算抑制窗口
+    const recentImportance = this.lastSpeakImportance.get(actorId) ?? DEFAULT_IMPORTANCE;
+    const suppressMs = this.computeSuppressWindow(recentImportance);
+    this.dynamicSuppressCount += 1;
+
+    this.suppressUntil.set(actorId, Date.now() + suppressMs);
     this.interruptedCount += 1;
     this.lastInterruptAt = new Date().toISOString();
     if (count > 0) {
       console.log(
-        `[Cerebellum] ${actorId} 用户开口打断,清空 ${count} 个 defer + 抑制 ${SUPPRESS_WINDOW_MS / 1000}s`,
+        `[Cerebellum] ${actorId} 用户开口打断,清空 ${count} 个 defer + 抑制 ${suppressMs / 1000}s (importance=${recentImportance})`,
+      );
+    } else {
+      console.log(
+        `[Cerebellum] ${actorId} 用户开口打断,抑制 ${suppressMs / 1000}s (importance=${recentImportance})`,
       );
     }
+  }
+
+  // ---- Step 5 扩展：动态计算辅助方法 ----------------------------------
+
+  /**
+   * 基于信号重要性动态计算犹豫期（ms）。
+   * 替代原固定 HESITATE_MIN_MS + random(HESITATE_MAX_MS - HESITATE_MIN_MS)。
+   *
+   * 拟人化设计：
+   *  - critical: 0.3-0.8s（紧急情况立即说，几乎不犹豫）
+   *  - high:     0.8-2.0s（重要事情稍作犹豫）
+   *  - medium:   1.5-3.5s（普通信号适度犹豫）
+   *  - low:      3-6s（不重要信号多想想再决定要不要说）
+   */
+  private computeHesitation(importance: SignalImportance): number {
+    const range = HESITATE_RANGE[importance] ?? HESITATE_RANGE[DEFAULT_IMPORTANCE];
+    return range.min + Math.floor(Math.random() * (range.max - range.min));
+  }
+
+  /**
+   * 基于信号重要性动态计算打断抑制窗口时长（ms）。
+   * 替代原固定 SUPPRESS_WINDOW_MS=60_000。
+   *
+   * 拟人化设计：
+   *  - critical: 5s（紧急情况快速恢复主动，不长时间沉默）
+   *  - high:    30s（重要事情适度沉默）
+   *  - medium:  60s（普通信号标准沉默）
+   *  - low:    120s（不重要信号长时间沉默，给用户充足空间）
+   */
+  private computeSuppressWindow(importance: SignalImportance): number {
+    return SUPPRESS_WINDOW_BY_IMPORTANCE[importance] ?? SUPPRESS_WINDOW_BY_IMPORTANCE[DEFAULT_IMPORTANCE];
   }
 
   /** 清空某 actor 的 defer 队列 */
@@ -275,6 +382,8 @@ export class Cerebellum {
     pendingCount: number;
     interruptedCount: number;
     lastInterruptAt: string | null;
+    dynamicHesitateCount: number;
+    dynamicSuppressCount: number;
   } {
     let total = 0;
     for (const list of this.pending.values()) total += list.length;
@@ -282,6 +391,8 @@ export class Cerebellum {
       pendingCount: total,
       interruptedCount: this.interruptedCount,
       lastInterruptAt: this.lastInterruptAt,
+      dynamicHesitateCount: this.dynamicHesitateCount,
+      dynamicSuppressCount: this.dynamicSuppressCount,
     };
   }
 }

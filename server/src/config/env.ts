@@ -69,3 +69,35 @@ export function getHttpRateLimitRuntime(env: NodeJS.ProcessEnv = process.env): H
     redisFailOpen: parseBoolean(env.HTTP_RATE_LIMIT_REDIS_FAIL_OPEN, true),
   };
 }
+
+/**
+ * Loop Orchestrator 启用开关。
+ *
+ * 默认**开启**：plan_execute 路径走 LoopOrchestrator，启用
+ * ProgressTracker / Recovery / Escalation / Termination 策略与 assess→replan 反思环节。
+ *
+ * 设 `AGENT_LOOP_ORCHESTRATOR=0|off|false|no` 可回退到原 runPlanExecuteLoop 路径
+ * （保留降级开关，便于回滚与对照测试）。
+ */
+export function isLoopOrchestratorEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.AGENT_LOOP_ORCHESTRATOR?.trim().toLowerCase();
+  // 未设置 → 默认开启
+  if (!raw) return true;
+  if (raw === "0" || raw === "off" || raw === "false" || raw === "no") return false;
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * plan_execute 路径的 replan 上限（统一配置源）。
+ *
+ * LoopOrchestrator 与 PlanExecuteLoopStrategy 共享此值，避免双处默认值不同步。
+ * 设 `AGENT_LOOP_MAX_REPLANS=N` 覆盖默认值 2。
+ * 取值范围 [0, 5]，超出范围 clamp 到边界；0 表示禁止 replan。
+ */
+export function getLoopMaxReplans(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AGENT_LOOP_MAX_REPLANS?.trim();
+  if (!raw) return 2;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(0, Math.min(5, n));
+}

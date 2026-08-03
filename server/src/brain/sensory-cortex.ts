@@ -1,7 +1,13 @@
 // Agent Brain Center —— 感官皮层（SensoryCortex）
 //
-// 职责：对应人脑的耳朵/眼睛/嘴巴，统一封装「听（ASR）」「看（截屏 + VLM 描述）」
-// 「说（TTS）」三条感知通道，并提供多模态融合帧 buildSensoryFrame 供其他皮层消费。
+// 职责：脑内感官皮层聚合（视觉/听觉/语言理解），统一封装「听（ASR）」「看（截屏 + VLM 描述）」
+// 「说（语言组织）」三条感知通道，并提供多模态融合帧 buildSensoryFrame 供其他皮层消费。
+//
+// 与 BodyCenter 器官的分工：
+//   - BrainCenter.SensoryCortex（本类）= 脑内感官皮层，做语义理解（图像→描述、音频→文本、文本→话术）
+//   - BodyCenter.Eye/Ear/Mouth = 身体感觉器官与发声执行器，做硬件采集与执行（拉截屏、收音频、TTS 合成）
+//   - 协作通路：BodyCenter 器官发布 body.eye.frame / body.ear.transcript / body.mouth.spoken 信号到 BodyBus，
+//     SensoryCortex 通过 attachBodyBus 订阅这些信号填充 SensoryFrame；决策后通过 BodyGateway 下行控制器官
 //
 // 设计原则：
 //   1. 所有方法直接调用底层服务，不让 LLM 决定要不要感知（不走 prompt 路线）。
@@ -130,6 +136,13 @@ export class SensoryCortex {
   private totalLook = 0;
   private totalSpeak = 0;
 
+  // BodyBus 上行信号缓存（attachBodyBus 注入后由 body.* 信号更新）
+  // buildSensoryFrame 在 args 未提供时优先使用这些缓存值
+  private lastVisualFrame: unknown = null;
+  private lastAudioText: string | undefined;
+  /** BodyBus 订阅取消函数（attachBodyBus 注入后设置，stop 时清理） */
+  private bodyBusUnsubscribe: (() => void) | null = null;
+
   // ---- 子系统注册 -------------------------------------------------------
 
   registerVoiceDialogue(svc: VoiceDialogueLike): void {
@@ -153,6 +166,79 @@ export class SensoryCortex {
     console.log("[SensoryCortex] 已注册 SynapseBus");
   }
 
+  /**
+   * 订阅 BodyBus 上行信号，把 body.eye.frame / body.ear.transcript /
+   * body.mouth.spoken 信号接入感官皮层。
+   *
+   * - body.eye.frame → 更新内部缓存 lastVisualFrame（供 buildSensoryFrame 优先使用）
+   * - body.ear.transcript → 更新内部缓存 lastAudioText
+   * - body.mouth.spoken → 仅记日志（发声完成事件，感官皮层无需缓存）
+   *
+   * 返回取消订阅函数（调用后移除所有 BodyBus 订阅）。
+   * 此方法由 create-app-services.ts 在装配阶段调用，注入 BodyBus 引用。
+   */
+  attachBodyBus(bodyBus: {
+    subscribe(kind: string, handler: (signal: unknown) => void | Promise<void>): () => void;
+    getRecentSignals?(limit?: number): unknown[];
+  }): () => void {
+    const unsubs: Array<() => void> = [];
+
+    // body.eye.frame → 缓存最新视觉帧
+    unsubs.push(
+      bodyBus.subscribe("body.eye.frame", (signal) => {
+        try {
+          const s = signal as { payload?: Record<string, unknown> };
+          if (s?.payload) {
+            this.lastVisualFrame = s.payload;
+          }
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+
+    // body.ear.transcript → 缓存最新音频文本
+    unsubs.push(
+      bodyBus.subscribe("body.ear.transcript", (signal) => {
+        try {
+          const s = signal as { payload?: { text?: string } };
+          if (s?.payload && typeof s.payload.text === "string") {
+            this.lastAudioText = s.payload.text;
+          }
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+
+    // body.mouth.spoken → 仅记日志（发声完成事件）
+    unsubs.push(
+      bodyBus.subscribe("body.mouth.spoken", (signal) => {
+        try {
+          const s = signal as { payload?: Record<string, unknown> };
+          console.log(
+            `[SensoryCortex] body.mouth.spoken: ${JSON.stringify(s?.payload ?? {}).slice(0, 100)}`,
+          );
+        } catch {
+          /* ignore */
+        }
+      }),
+    );
+
+    const unsubAll = () => {
+      for (const unsub of unsubs) {
+        try {
+          unsub();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    this.bodyBusUnsubscribe = unsubAll;
+    console.log("[SensoryCortex] 已订阅 BodyBus（eye.frame / ear.transcript / mouth.spoken）");
+    return unsubAll;
+  }
+
   // ---- 生命周期 ---------------------------------------------------------
 
   /** 启动感官皮层：当前无后台任务，仅置位并记日志。 */
@@ -173,6 +259,10 @@ export class SensoryCortex {
       return;
     }
     console.log("[SensoryCortex] 正在停止...");
+    if (this.bodyBusUnsubscribe) {
+      this.bodyBusUnsubscribe();
+      this.bodyBusUnsubscribe = null;
+    }
     this.started = false;
     console.log("[SensoryCortex] 已停止");
   }
@@ -480,6 +570,10 @@ export class SensoryCortex {
   /**
    * 组装多模态感官帧（纯函数式，不调用任何子系统）。
    * 将 ASR 文本 / 视觉描述 / 情绪 / 活动状态融合为统一感知帧。
+   *
+   * 当 args 未提供 audioText / visualDescription 时，优先使用 BodyBus 缓存的
+   * 最近一次 body.ear.transcript / body.eye.frame 信号值，
+   * 让 cognize 在没有显式调 listen/look 时也能拿到身体侧的感知数据。
    */
   buildSensoryFrame(args: {
     actorId: string;
@@ -488,14 +582,35 @@ export class SensoryCortex {
     emotion?: EmotionVector;
     activity?: UserActivityState;
   }): SensoryFrame {
+    // 优先用 args 显式传入的值；缺失时回退到 BodyBus 缓存
+    const audioText = args.audioText ?? this.lastAudioText;
+    const visualDescription =
+      args.visualDescription ?? this.extractVisualDescriptionFromCache();
     return {
       actorId: args.actorId,
-      audioText: args.audioText,
-      visualDescription: args.visualDescription,
+      audioText,
+      visualDescription,
       emotion: args.emotion,
       activity: args.activity,
       capturedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * 从 BodyBus 缓存的 lastVisualFrame 提取视觉描述字符串。
+   * - payload 含 description 字段 → 直接用
+   * - 否则 → JSON 序列化截断到 200 字符
+   * - 无缓存 → 返回 undefined
+   */
+  private extractVisualDescriptionFromCache(): string | undefined {
+    if (!this.lastVisualFrame) return undefined;
+    try {
+      const frame = this.lastVisualFrame as { description?: string };
+      if (typeof frame.description === "string") return frame.description;
+      return JSON.stringify(this.lastVisualFrame).slice(0, 200);
+    } catch {
+      return undefined;
+    }
   }
 
   // ---- 统计 -------------------------------------------------------------

@@ -78,7 +78,7 @@ export class FileProcessingService {
     } else if (input.url && input.url.trim()) {
       const url = input.url.trim();
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
         if (!res.ok) {
           return {
             ok: false,
@@ -649,7 +649,7 @@ async function loadBuffer(input: {
   }
   if (input.url && input.url.trim()) {
     try {
-      const res = await fetch(input.url.trim());
+      const res = await fetch(input.url.trim(), { signal: AbortSignal.timeout(60_000) });
       if (!res.ok) {
         return {
           ok: false,

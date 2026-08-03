@@ -11,6 +11,7 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { PersonalizationPromptSlice } from "./user-personalization/user-personalization-service.js";
 import { routeLlmExecution } from "../agent/task-router.js";
+import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import {
   pickSubAgentDoneLine,
   USER_VISIBLE_PROGRESS_MARKER,
@@ -917,6 +918,8 @@ export class MasterAgentCoordinator {
             ...(parsedReport ? {
               success: parsedReport.success,
               conclusion: parsedReport.conclusion,
+              framework: parsedReport.framework,
+              analysis: parsedReport.analysis,
               confidence: parsedReport.confidence,
               evidence: parsedReport.evidence,
               missing: parsedReport.missing,
@@ -1326,6 +1329,8 @@ export class MasterAgentCoordinator {
       ...access,
       disableThinking: true,
       toolRankingHint: opts?.toolRankingHint,
+      // 2026-08-02 模型路由：Master Agent 始终使用 Complex 模式 → deepseek-reasoner（Pro）
+      ...buildModelOverrideOpts(TaskTier.COMPLEX),
     };
     const capabilities = this.listSubAgentCapabilities();
 
@@ -1667,6 +1672,18 @@ export class MasterAgentCoordinator {
         console.log(
           `[SubAgent] ${capability.type} 总结调用失败: ${summaryErr instanceof Error ? summaryErr.message : String(summaryErr)}`,
         );
+        // ⚠️ summary 失败兜底：用工具调用历史拼一个最低限度结构化报告，
+        // 避免主 Agent 收到空报告或工具输出 dump 而无法继续。
+        // 至少让主 Agent 知道子 Agent 调了哪些工具、成功/失败情况。
+        const lastTool = toolCallHistory[toolCallHistory.length - 1];
+        const lastResultPreview = lastTool
+          ? `${lastTool.toolName}(${JSON.stringify(lastTool.input).slice(0, 80)}) → ${lastTool.ok ? "成功" : "失败"}: ${JSON.stringify(lastTool.result).slice(0, 150)}`
+          : "(无工具调用记录)";
+        finalReport =
+          `[REPORT]\n[SUCCESS]${toolCallHistory.some((h) => h.ok) ? "true" : "false"}\n` +
+          `[CONCLUSION]子 Agent 完成了 ${toolCallHistory.length} 次工具调用，但总结生成失败。最后工具结果：${lastResultPreview}\n` +
+          `[EVIDENCE]${toolSummary.slice(0, 500)}\n` +
+          `[CONFIDENCE]0.4\n[MISSING]总结生成失败，结果可能不完整\n[/REPORT]\n[DONE]`;
       }
     }
 

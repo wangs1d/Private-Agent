@@ -1,5 +1,9 @@
 import type { AgentMemorySyncService } from "../agent-memory-sync-service.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
+import { EmotionRecognitionService } from "../emotion-recognition-service.js";
+import { PersonalityAdjuster } from "../../brain/personality-adjuster.js";
+import type { PersonalityAdjustmentInput } from "../../brain/personality-adjuster.js";
+import type { PersonalityCore } from "../../brain/types.js";
 import {
   buildToneGuidance,
   defaultEmotionState,
@@ -7,6 +11,7 @@ import {
   detectPreferredToneFromText,
   dominantRecentEmotion,
   pushEmotion,
+  type EmotionLabel,
   type EmotionState,
   type PreferredTone,
 } from "./emotion-tone.js";
@@ -668,14 +673,74 @@ export type PersonalizationUnderstandingSnapshot = {
   contactSummary: string;
 };
 
+/**
+ * MemoryCortex 最小化外观接口（仅暴露人格内核读写，避免循环依赖）。
+ *
+ * UserPersonalizationService 通过此接口在 observeTurnAsync 中驱动 PersonalityAdjuster，
+ * 后者调用 getPersonalityCore / setPersonalityCore 完成人格微调。
+ */
+interface MemoryCortexLike {
+  getPersonalityCore(actorId: string): PersonalityCore;
+  setPersonalityCore(actorId: string, core: PersonalityCore): void;
+}
+
+/** 把 EmotionRecognitionService 的细粒度中文标签映射回粗粒度 EmotionLabel */
+function fineEmotionToCoarse(fineLabel: string): EmotionLabel {
+  switch (fineLabel) {
+    case "开心":
+    case "兴奋":
+    case "感激":
+      return "positive";
+    case "悲伤":
+    case "愤怒":
+      return "negative";
+    case "焦虑":
+      return "stressed";
+    default:
+      return "neutral";
+  }
+}
+
+/** 根据细粒度情绪标签推断偏好语气（仅高置信度时覆盖） */
+function inferPreferredToneFromFineEmotion(fineLabel: string): PreferredTone | null {
+  switch (fineLabel) {
+    case "悲伤":
+    case "焦虑":
+    case "疲惫":
+      return "warm";
+    case "开心":
+    case "兴奋":
+    case "感激":
+      return "humor";
+    case "愤怒":
+      return "balanced";
+    default:
+      return null;
+  }
+}
+
 export class UserPersonalizationService {
   private readonly store = new UserProfileStore();
   private readonly fallbackState = new Map<string, unknown>();
+  /** 情绪识别服务（L1 规则 + L2 LLM mini） */
+  private readonly emotionRecognition: EmotionRecognitionService;
+  /** 人格自适应微调器（纯规则，clamp ±30%） */
+  private readonly personalityAdjuster: PersonalityAdjuster;
+  /** MemoryCortex 引用，用于人格内核读写（registerMemoryCortex 注入） */
+  private memoryCortex: MemoryCortexLike | null = null;
 
   constructor(
     private readonly memory: AgentMemorySyncService | null,
     private readonly externalChat: ExternalChatProvider | null = null,
-  ) {}
+  ) {
+    this.emotionRecognition = new EmotionRecognitionService(this.externalChat);
+    this.personalityAdjuster = new PersonalityAdjuster();
+  }
+
+  /** 注入 MemoryCortex 引用，激活人格自适应微调闭环 */
+  registerMemoryCortex(mc: MemoryCortexLike): void {
+    this.memoryCortex = mc;
+  }
 
   async getPromptSlice(actorId: string, userText?: string): Promise<PersonalizationPromptSlice> {
     if (!isUserPersonalizationEnabled()) return {};
@@ -780,12 +845,66 @@ export class UserPersonalizationService {
     const patches = extractProfilePatches(userText);
     let md = await this.store.read(actorId);
     if (patches.length > 0) md = applyProfilePatches(md, patches);
-    const state = this.loadEmotionState(actorId);
+    let state = this.loadEmotionState(actorId);
     md = syncPreferredToneInProfile(md, TONE_ZH[state.preferredTone]);
     await this.store.write(actorId, md);
     this.syncProfileKv(actorId, md);
     this.updateFactStore(actorId, userText);
     this.learnFromAssistantStyle(actorId, assistantText);
+
+    // ---- 情绪识别簇集成 ----
+    // 用 EmotionRecognitionService（L1 规则 + L2 LLM mini）做更精细的情绪识别，
+    // 高置信度时回写粗粒度 EmotionLabel 并推断 preferredTone。
+    if (userText.trim()) {
+      try {
+        const result = await this.emotionRecognition.recognize(actorId, userText, {
+          recentEmotions: state.recent,
+        });
+        if ((result.emotion.confidence ?? 0) >= 0.6) {
+          const coarseLabel = fineEmotionToCoarse(result.emotion.label);
+          // 替换最近一条情绪（不额外 increment turnCount，因 applyUserSignals 已 +1）
+          if (state.recent.length > 0 && state.recent[state.recent.length - 1] !== coarseLabel) {
+            state = {
+              ...state,
+              recent: [...state.recent.slice(0, -1), coarseLabel],
+              lastUpdatedAt: new Date().toISOString(),
+            };
+            this.saveEmotionState(actorId, state);
+          }
+          // 高置信度情绪推断 preferredTone
+          const inferredTone = inferPreferredToneFromFineEmotion(result.emotion.label);
+          if (inferredTone && inferredTone !== state.preferredTone) {
+            state = { ...state, preferredTone: inferredTone };
+            this.saveEmotionState(actorId, state);
+          }
+        }
+      } catch {
+        // 情绪识别失败不阻塞主流程
+      }
+    }
+
+    // ---- 人格簇集成 ----
+    // 每 N turn 触发 PersonalityAdjuster 微调 MemoryCortex.personalityCache
+    if (this.memoryCortex && state.turnCount > 0) {
+      const relationship = this.loadRelationshipState(actorId);
+      const style = this.loadStyleProfileState(actorId);
+      const input: PersonalityAdjustmentInput = {
+        relationship,
+        style,
+        preferredTone: state.preferredTone,
+        turnCount: state.turnCount,
+      };
+      const adjusted = this.personalityAdjuster.tryAdjust(
+        actorId,
+        input,
+        () => this.memoryCortex!.getPersonalityCore(actorId),
+        (core) => this.memoryCortex!.setPersonalityCore(actorId, core),
+      );
+      if (adjusted) {
+        console.log(`[UserPersonalization] 人格微调已应用: actor=${actorId}, turn=${state.turnCount}`);
+      }
+    }
+
     const everyN = profileLlmEveryNTurns();
     if (everyN > 0 && state.turnCount > 0 && state.turnCount % everyN === 0) {
       await this.refineProfileWithLlm(actorId, userText, md);

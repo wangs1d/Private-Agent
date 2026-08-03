@@ -117,7 +117,7 @@ export async function geocodeCity(name: string): Promise<GeocodeHit | null> {
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
     name.trim(),
   )}&count=1&language=zh&format=json`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
   if (!res.ok) return null;
   const data = (await res.json()) as { results?: GeocodeHit[] };
   const hit = data.results?.[0];
@@ -160,7 +160,7 @@ export class WeatherService {
       forecast_days: "2",
     });
     const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       throw new Error(`天气接口错误: ${res.status}`);
     }

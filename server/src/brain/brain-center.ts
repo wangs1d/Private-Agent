@@ -1,5 +1,9 @@
 // Agent Brain Center — 外观类
 import { randomUUID } from "node:crypto";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { getChatThreadStore } from "../external-model/chat-thread-store.js";
+import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
+import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type {
   AudioBufferRef,
   BrainDecision,
@@ -18,7 +22,11 @@ import type {
   MemoryItem,
   MemoryRecallItem,
   MemoryRecallResult,
+  PredictedAssociation,
+  ProceduralMatch,
   PlanResult,
+  SalienceDecision,
+  SchemaMatchResult,
   ReActObservation,
   SafetyCheckResult,
   SensoryFrame,
@@ -32,14 +40,52 @@ import type {
   UserActivityState,
   VisualInput,
   PersonalityCore,
+  InferenceClue,
+  InferenceResult,
 } from "./types.js";
+import type { EmotionState } from "./memory-cognitive/memory-inference-emotion-modulator.js";
+import type {
+  LearningFeedback,
+  LearningSnapshot,
+} from "./memory-cognitive/memory-experience-learning-loop.js";
+import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
+import { getRuntimeKernel } from "../agent/runtime-kernel.js";
+import type { BodyGatewayLike, BodyState } from "../body/types.js";
+import { isMultimodalFusionEnabled } from "./multimodal-fusion-cortex.js";
+
+function stableLearningKey(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function summarizeLearningText(text: string, max = 180): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length <= max ? compact : `${compact.slice(0, max - 1)}…`;
+}
+
+function looksLikeUserCorrection(text: string): boolean {
+  return /(?:不对|不是|错了|纠正|更正|应该是|应当是|其实是|不是这样|你理解错|you are wrong|actually|correction)/i.test(
+    text,
+  );
+}
 
 // 能力皮层外观接口（后续 CapabilityCortex 实现可直接传入）
 interface CapabilityCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
   introspect(actorId: string): CapabilityDescriptor[];
-  identifyGap?(scenario: string): CapabilityGapReport;
+  identifyGap?(scenario: string): Promise<CapabilityGapReport>;
+  /**
+   * 用 ToolRegistry 当前全量工具名重新填充各 domain 的 descriptor.tools。
+   * 用于动态注册（MCP / self-programming）后让 list_capabilities 返回真实工具。
+   * 带 TTL 节流避免短时间内重复刷新。
+   */
+  attachToolNames?(toolNames: string[]): void;
 }
 
 // 觉察皮层外观接口
@@ -49,7 +95,7 @@ interface AwarenessCortexLike {
   observe(actorId: string): UserActivityState | null;
   /**
    * 元认知置信度评估（Stage 4 Task 3）。
-   * 在 cognize 路由前调用；score < 0.4 时由 BrainCenter 强制升级到 master_delegate。
+   * 在 cognize 路由前调用；score < 0.4 时由 BrainCenter 强制升级到 complex。
    * 未注册（无 awareness）时 cognize 跳过该步。
    */
   assessConfidence?(
@@ -75,6 +121,17 @@ interface EvolutionCortexLike {
     proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
   ): EvolutionProposal;
   listPending?(actorId?: string): EvolutionProposal[];
+  /** DMN 调用入口：基于规则产出能力进化提案统计 */
+  proposeEvolution?(actorId: string): { proposals: number; reason: string };
+  /** 真正的失败时自我学习入口：AgentCore 工具调用结束（含失败）时通过 BrainCenter 转发到此 */
+  recordToolInteraction?(params: {
+    sessionId: string;
+    userRequest: string;
+    attemptedTools: string[];
+    success: boolean;
+    errorMessage?: string;
+    responseTime?: number;
+  }): Promise<void>;
   approveByUser?(
     proposalId: string,
     sessionId?: string,
@@ -84,6 +141,20 @@ interface EvolutionCortexLike {
     reason: string | undefined,
     sessionId?: string,
   ): { ok: boolean; proposal: EvolutionProposal | null };
+}
+
+// 自我修复皮层外观接口
+interface CodeRepairCortexLike {
+  start?(): Promise<void>;
+  stop?(): Promise<void>;
+  /** 报告 bug 信号，触发自动修复 */
+  reportBug?(signal: import("./types.js").BugSignal): Promise<import("./types.js").RepairProposal>;
+  /** 列出修复提案（可按状态过滤） */
+  listRepairs?(status?: import("./types.js").RepairStatus): import("./types.js").RepairProposal[];
+  /** 查询单个修复提案 */
+  getRepair?(id: string): import("./types.js").RepairProposal | null;
+  /** 用户强制重试 */
+  retry?(id: string): Promise<import("./types.js").RepairProposal | null>;
 }
 
 // 感官皮层外观接口
@@ -114,6 +185,14 @@ interface MemoryCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
   remember(actorId: string, item: MemoryItem): Promise<void>;
+  /**
+   * 批量写入记忆（性能优化方案 D）。
+   * 一次 IO 写入多条记忆，避免 cognize 阶段 3 多次独立 remember 调用。
+   * 未实现时 BrainCenter 回退到逐条 remember。
+   */
+  rememberBatch?(actorId: string, items: MemoryItem[]): Promise<void>;
+  recordLearningFeedback?(feedback: LearningFeedback): Promise<LearningSnapshot | null>;
+  getLearningSnapshot?(actorId: string): LearningSnapshot | null;
   recall(
     actorId: string,
     query: string,
@@ -123,6 +202,42 @@ interface MemoryCortexLike {
   consolidate(actorIds: string[]): Promise<MemoryConsolidationStats>;
   /** 拉取结构化人格内核（personality 域），未设置时返回默认人格 */
   getPersonalityCore?(actorId: string): PersonalityCore;
+  /**
+   * 元记忆召回：附带来源（provenance）与置信分层（confidenceTier）。
+   * 记忆认知架构升级（Phase 4）：cognize 阶段优先使用此方法，
+   * 未注册 MetacognitionBridge 时降级到普通 recall。
+   */
+  recallWithProvenance?(
+    actorId: string,
+    query: string,
+    opts?: { domain?: MemoryDomainKind; limit?: number },
+  ): Promise<MemoryRecallResult>;
+  /** 联想预判（委托 AssociativeGraph，未注册返回空结果） */
+  predictAssociation?(actorId: string, query: string): Promise<PredictedAssociation>;
+  /** 图式同化（委托 SchemaFormation，未注册返回 null） */
+  matchSchema?(situation: {
+    sceneTag?: string;
+    keywords?: string[];
+    summary?: string;
+  }): SchemaMatchResult | null;
+  /** 显著性评估（委托 SalienceFilter，未注册返回默认接受） */
+  evaluateSalience?(item: MemoryItem): SalienceDecision;
+  /** 再唤醒反弹（委托 ForgettingController，未注册空操作） */
+  reawakenAndStrengthen?(actorId: string, nodeId: string): Promise<void>;
+  /** 程序性技能匹配（委托 ProceduralAutomation，未注册返回 null） */
+  matchProceduralSkill?(query: string): ProceduralMatch | null;
+  /** 多线索交叉推理（委托 InferenceEngine，未注册返回空结果） */
+  inferFromClues?(
+    actorId: string,
+    clues: InferenceClue[],
+    emotion?: EmotionState | null,
+  ): Promise<InferenceResult>;
+  /** 触发规则自学习（委托 RuleLearner，未注册返回空） */
+  autoLearn?(actorId?: string): Promise<unknown[]>;
+  /** 获取已学习规则（未注册返回空） */
+  getLearnedRules?(): unknown[];
+  /** 获取已迁移规则（未注册返回空） */
+  getMigratedRules?(): unknown[];
 }
 
 // 突触总线外观接口
@@ -193,6 +308,20 @@ interface PlannerCortexLike {
     opts?: { actorId?: string },
   ): Promise<unknown>;
   routeSystem(userMessage: string, opts?: { actorId?: string }): SystemRouteDecision;
+  /**
+   * LLM 语义委派判断（shouldDelegate 的 LLM 化版本，async）。
+   * 替代原 DELEGATE_KEYWORDS 纯关键词匹配，做语义级判断。
+   * 未注入 DelegateJudge 或降级开关关闭时回退到 shouldDelegate 规则匹配。
+   */
+  shouldDelegateWithLLM?(
+    userMessage: string,
+    context?: { actorId?: string },
+  ): Promise<{
+    delegate: boolean;
+    agentType?: string;
+    reason?: string;
+    confidence?: number;
+  }>;
   getLastPlan(): PlanResult | null;
   getLastRoute(): SystemRouteDecision | null;
 }
@@ -227,6 +356,17 @@ interface CerebellumLike {
   };
 }
 
+// 多模态融合皮层外观接口（Phase 4）
+interface MultimodalFusionCortexLike {
+  fuse(inputs: {
+    actorId: string;
+    audioText?: string;
+    visualDescription?: string;
+    emotion?: EmotionVector;
+    activity?: UserActivityState;
+  }): SensoryFrame;
+}
+
 /**
  * Brain Center —— 大脑中心外观类。
  *
@@ -241,17 +381,64 @@ export class BrainCenter {
   private awareness: AwarenessCortexLike | null = null;
   private proaction: ProactionCortexLike | null = null;
   private evolution: EvolutionCortexLike | null = null;
+  /** 自我修复皮层（CodeRepairCortex）：可选注入，env BRAIN_CODE_REPAIR_ENABLED=1 时启用 */
+  private codeRepair: CodeRepairCortexLike | null = null;
   private sensory: SensoryCortexLike | null = null;
   private memory: MemoryCortexLike | null = null;
   private synapse: SynapseBusLike | null = null;
   private limbic: LimbicCortexLike | null = null;
   private planner: PlannerCortexLike | null = null;
+  /** 多模态融合皮层（Phase 4）：可选注入，env BRAIN_MULTIMODAL_FUSION_ENABLED=0 时禁用 */
+  private multimodalFusion: MultimodalFusionCortexLike | null = null;
   /** 脑干（subcortical:自主节律调度） */
   private brainStem: BrainStemLike | null = null;
   /** 小脑（subcortical:时序协调） */
   private cerebellum: CerebellumLike | null = null;
   /** 端到端认知引擎：一次 LLM 完成理解+决策+响应（整体端到端调度的核心） */
   private cognitiveEngine: CognitiveEngine | null = null;
+  /** Step 6 扩展：DecisionHub 协调层（规则驱动端到端认知，优先于 cognitiveEngine） */
+  private decisionHub: import("./decision-hub.js").DecisionHub | null = null;
+  /** Runtime Kernel: prompt-free stable state and deterministic turn hooks. */
+  private runtimeKernel: RuntimeKernel | null = null;
+  /**
+   * BodyGateway 引用（大脑→身体下行网关，可选）。
+   *
+   * 注入后：
+   *  - ActionExecutor.execute 优先委托 bodyGateway.execute（在 action-executor.ts 中实现）
+   *  - cognize 阶段 1 并行调 bodyGateway.sense({ kind: "where_am_i" }) 补全身体状态
+   *  - snapshot() 聚合 bodyGateway.snapshot().state 到 BrainSnapshot.bodyState
+   *
+   * env BODY_CENTER_ENABLED=0/false/off 时 registerBodyGateway 忽略注入（纯脑模式）。
+   */
+  private bodyGateway: BodyGatewayLike | null = null;
+
+  // ---- Step 7 扩展：7 个新皮层模块 + AnticipationEngine ----
+  /** 前额叶工作记忆 */
+  private workingMemoryCortex: import("./working-memory-cortex.js").WorkingMemoryCortex | null = null;
+  /** 任务切换皮层 */
+  private taskSwitchingCortex: import("./task-switching-cortex.js").TaskSwitchingCortex | null = null;
+  /** 元认知皮层 */
+  private metaCognitionCortex: import("./meta-cognition-cortex.js").MetaCognitionCortex | null = null;
+  /** 情境皮层（多源融合） */
+  private contextCortex: import("./context-cortex.js").ContextCortex | null = null;
+  /** 工具规划皮层 */
+  private toolPlanningCortex: import("./tool-planning-cortex.js").ToolPlanningCortex | null = null;
+  /** 在线学习皮层 */
+  private onlineLearningCortex: import("./online-learning-cortex.js").OnlineLearningCortex | null = null;
+  /** 意图预判引擎（外部已有服务，可选注入） */
+  private anticipationEngine: import("./decision-hub.js").AnticipationEngineLike | null = null;
+  /** 情绪调节器（深度优化：情绪影响路由） */
+  private emotionModulator: import("./emotion-modulator.js").EmotionModulator | null = null;
+  /** 默认模式网络（深度优化：空闲时整合记忆） */
+  private defaultModeNetwork: import("./default-mode-network.js").DefaultModeNetwork | null = null;
+  /**
+   * 主题词提取器（深度优化：让工作记忆真正"记住在聊什么"）。
+   *
+   * 由 create-app-services.ts 注入：内部走一次轻量 LLM 调用，从用户文本中
+   * 提取 1-3 个业务领域关键词。替代了 working-memory-cortex.ts 原硬编码主题词列表。
+   * 未注入时降级为不提取（保持纯规则驱动）。
+   */
+  private topicExtractor: ((text: string) => Promise<string[]>) | null = null;
 
   private started = false;
 
@@ -277,6 +464,48 @@ export class BrainCenter {
     console.log("[BrainCenter] 已注册 EvolutionCortex");
   }
 
+  /** 注册自我修复皮层（可选；env BRAIN_CODE_REPAIR_ENABLED=1 时由装配阶段注入） */
+  registerCodeRepair(c: CodeRepairCortexLike): void {
+    this.codeRepair = c;
+    console.log("[BrainCenter] 已注册 CodeRepairCortex（自我修复）");
+  }
+
+  /** 转发 bug 信号给 CodeRepairCortex。未注册时静默返回 null。 */
+  async reportBug(signal: import("./types.js").BugSignal): Promise<import("./types.js").RepairProposal | null> {
+    if (!this.codeRepair?.reportBug) return null;
+    return await this.codeRepair.reportBug(signal);
+  }
+
+  /** 转发修复查询。未注册时返回空数组。 */
+  listRepairs(status?: import("./types.js").RepairStatus): import("./types.js").RepairProposal[] {
+    if (!this.codeRepair?.listRepairs) return [];
+    return this.codeRepair.listRepairs(status);
+  }
+
+  /** 转发修复详情查询。 */
+  getRepair(id: string): import("./types.js").RepairProposal | null {
+    if (!this.codeRepair?.getRepair) return null;
+    return this.codeRepair.getRepair(id);
+  }
+
+  /** 转发强制重试。 */
+  async retryRepair(id: string): Promise<import("./types.js").RepairProposal | null> {
+    if (!this.codeRepair?.retry) return null;
+    return await this.codeRepair.retry(id);
+  }
+
+  /**
+   * 注入主题词提取器（LLM 驱动）。
+   *
+   * 替代 working-memory-cortex.ts 中原硬编码主题词列表。提取器由调用方实现，
+   * 通常是一次轻量 LLM 调用。BrainCenter.cognize 在 extractAndSetSlots 之后异步触发，
+   * 不阻塞主流程。
+   */
+  setTopicExtractor(extractor: ((text: string) => Promise<string[]>) | null): void {
+    this.topicExtractor = extractor;
+    console.log("[BrainCenter] 已注入 TopicExtractor（LLM 驱动）");
+  }
+
   registerSensory(c: SensoryCortexLike): void {
     this.sensory = c;
     console.log("[BrainCenter] 已注册 SensoryCortex");
@@ -285,6 +514,55 @@ export class BrainCenter {
   registerMemory(c: MemoryCortexLike): void {
     this.memory = c;
     console.log("[BrainCenter] 已注册 MemoryCortex");
+  }
+
+  /**
+   * 批量注册记忆认知架构升级的 7 个子组件到 MemoryCortex（Phase 4）。
+   *
+   * 装配阶段调用：在 registerMemory 后，把 7 个子模块统一注入。
+   * 任意子模块为 null/undefined 时跳过对应注册（独立降级）。
+   * memory 未注册时整体空操作。
+   *
+   * 注意：MemoryCortexLike 外观接口不暴露 register* 方法，
+   * 此处通过结构化断言调用具体 MemoryCortex 的注册方法。
+   */
+  registerMemoryCognitiveSubmodules(submodules: {
+    associativeGraph?: unknown;
+    reconstructionValidator?: unknown;
+    metacognitionBridge?: unknown;
+    forgettingController?: unknown;
+    proceduralAutomation?: unknown;
+    schemaFormation?: unknown;
+    salienceFilter?: unknown;
+    experienceLearningLoop?: unknown;
+    inferenceEngine?: unknown;
+  }): void {
+    if (!this.memory) {
+      console.log("[BrainCenter] registerMemoryCognitiveSubmodules: MemoryCortex 未注册，跳过");
+      return;
+    }
+    const mc = this.memory as unknown as Record<string, ((svc: unknown) => void) | undefined>;
+    const reg = (methodName: string, svc: unknown): void => {
+      if (!svc) return;
+      const fn = mc[methodName];
+      if (typeof fn === "function") {
+        try {
+          fn.call(this.memory, svc);
+        } catch (err) {
+          console.log(`[BrainCenter] ${methodName} 注册失败: ${err}`);
+        }
+      }
+    };
+    reg("registerAssociativeGraph", submodules.associativeGraph);
+    reg("registerReconstructionValidator", submodules.reconstructionValidator);
+    reg("registerMetacognitionBridge", submodules.metacognitionBridge);
+    reg("registerForgettingController", submodules.forgettingController);
+    reg("registerProceduralAutomation", submodules.proceduralAutomation);
+    reg("registerSchemaFormation", submodules.schemaFormation);
+    reg("registerSalienceFilter", submodules.salienceFilter);
+    reg("registerExperienceLearningLoop", submodules.experienceLearningLoop);
+    reg("registerInferenceEngine", submodules.inferenceEngine);
+    console.log("[BrainCenter] 已注册记忆认知子组件（Phase 4 + 推理引擎）");
   }
 
   /**
@@ -317,10 +595,31 @@ export class BrainCenter {
     console.log("[BrainCenter] 已注册 BrainStem（脑干/自主节律）");
   }
 
+  /**
+   * 获取脑干引用（供装配阶段补充注册子系统，如 WorkingMemoryCortex）。
+   * 注意：返回 BrainStemLike（最小化外观接口），仅能调用 sweepOnce/snapshot 等基础方法。
+   * 装配阶段需要扩展接口时，应直接在 BrainStem 类中扩展并暴露 register 方法。
+   */
+  getBrainStem(): BrainStemLike | null {
+    return this.brainStem;
+  }
+
   /** 注册小脑（subcortical:时序协调） */
   registerCerebellum(c: CerebellumLike): void {
     this.cerebellum = c;
     console.log("[BrainCenter] 已注册 Cerebellum（小脑/时序协调）");
+  }
+
+  /**
+   * 注册多模态融合皮层（Phase 4）。
+   *
+   * 注册后 cognize 阶段 1.5 改用 fusionCortex.fuse() 组装感知帧，
+   * 在 SensoryFrame 基础上增加结构化冲突检测与优先级仲裁。
+   * 纯规则无 LLM 调用；env BRAIN_MULTIMODAL_FUSION_ENABLED=0 时 cognize 自动降级回 buildSensoryFrame。
+   */
+  registerMultimodalFusion(c: MultimodalFusionCortexLike): void {
+    this.multimodalFusion = c;
+    console.log("[BrainCenter] 已注册 MultimodalFusionCortex（多模态融合）");
   }
 
   /**
@@ -358,6 +657,162 @@ export class BrainCenter {
     console.log("[BrainCenter] 已注册 CognitiveEngine（端到端认知）");
   }
 
+  registerRuntimeKernel(kernel: RuntimeKernel): void {
+    this.runtimeKernel = kernel;
+    console.log("[BrainCenter] 已注册 RuntimeKernel（常驻内核态，默认共享实例）");
+  }
+
+  /**
+   * 取当前 actor 的 RuntimeKernel。
+   * - 传 actorId：返回 per-actor 实例（无则 lazy-clone 默认 kernel）
+   * - 不传 actorId：返回默认共享实例（兼容旧调用）
+   */
+  getRuntimeKernel(actorId?: string): RuntimeKernel | null {
+    if (!this.runtimeKernel) return null;
+    if (!actorId) return this.runtimeKernel;
+    return getRuntimeKernel(actorId);
+  }
+
+  getRuntimeKernelSnapshot(actorId?: string): RuntimeKernelState | null {
+    return this.getRuntimeKernel(actorId)?.snapshot() ?? null;
+  }
+
+  updateRuntimeKernel(
+    patch: Partial<RuntimeKernelState>,
+    actorId?: string,
+  ): RuntimeKernelState | null {
+    return this.getRuntimeKernel(actorId)?.update(patch) ?? null;
+  }
+
+  // ---- BodyGateway 注入（大脑→身体下行网关）----------------------------
+
+  /**
+   * 注入 BodyGateway（大脑→身体下行网关）。
+   *
+   * 注入后：
+   *  - cognize 阶段 1 并行调 bodyGateway.sense({ kind: "where_am_i" }) 补全身体状态
+   *  - snapshot() 聚合 bodyGateway.snapshot().state
+   *  - 装配阶段应额外调 actionExecutor.registerBodyGateway(gw) 让 ActionExecutor.execute 优先委托
+   *
+   * env BODY_CENTER_ENABLED=0/false/off 时忽略注入（降级为纯脑模式，向后兼容）。
+   */
+  registerBodyGateway(gw: BodyGatewayLike): void {
+    if (!this.isBodyCenterEnabled()) {
+      console.log("[BrainCenter] BODY_CENTER_ENABLED=0, bodyGateway ignored");
+      return;
+    }
+    this.bodyGateway = gw;
+    console.log("[BrainCenter] 已注册 BodyGateway（大脑→身体下行网关）");
+  }
+
+  /** 获取 BodyGateway 引用（供装配阶段注入 ActionExecutor 等） */
+  getBodyGateway(): BodyGatewayLike | null {
+    return this.bodyGateway;
+  }
+
+  /**
+   * 检查 BODY_CENTER_ENABLED 环境变量是否启用身体中心。
+   * - "0" / "false" / "off"（不区分大小写）→ 返回 false（禁用身体中心，纯脑模式）
+   * - 其他（含未设置）→ 返回 true（启用身体中心）
+   */
+  private isBodyCenterEnabled(): boolean {
+    const raw = process.env.BODY_CENTER_ENABLED?.trim().toLowerCase();
+    if (raw === "0" || raw === "false" || raw === "off") return false;
+    return true;
+  }
+
+  /**
+   * Step 6 扩展：注册 DecisionHub 协调层。
+   *
+   * 注册后 cognize 阶段 2 优先使用 DecisionHub.decidePassive（规则驱动），
+   * 替代原 CognitiveEngine 的 LLM 路由判断，避免幻觉。
+   * 未注册时回退到 cognitiveEngine（向后兼容）。
+   */
+  setDecisionHub(hub: import("./decision-hub.js").DecisionHub): void {
+    this.decisionHub = hub;
+    console.log("[BrainCenter] 已注册 DecisionHub（规则驱动端到端认知）");
+  }
+
+  /** Step 6 扩展：获取 DecisionHub 引用（供外部装配层调用） */
+  getDecisionHub(): import("./decision-hub.js").DecisionHub | null {
+    return this.decisionHub;
+  }
+
+  // ---- Step 7 扩展：新模块注册 + getter --------------------------------
+
+  registerWorkingMemoryCortex(wm: import("./working-memory-cortex.js").WorkingMemoryCortex): void {
+    this.workingMemoryCortex = wm;
+    console.log("[BrainCenter] 已注册 WorkingMemoryCortex（前额叶工作记忆）");
+  }
+  getWorkingMemoryCortex(): import("./working-memory-cortex.js").WorkingMemoryCortex | null {
+    return this.workingMemoryCortex;
+  }
+
+  registerTaskSwitchingCortex(ts: import("./task-switching-cortex.js").TaskSwitchingCortex): void {
+    this.taskSwitchingCortex = ts;
+    console.log("[BrainCenter] 已注册 TaskSwitchingCortex（任务切换皮层）");
+  }
+  getTaskSwitchingCortex(): import("./task-switching-cortex.js").TaskSwitchingCortex | null {
+    return this.taskSwitchingCortex;
+  }
+
+  registerMetaCognitionCortex(mc: import("./meta-cognition-cortex.js").MetaCognitionCortex): void {
+    this.metaCognitionCortex = mc;
+    console.log("[BrainCenter] 已注册 MetaCognitionCortex（元认知皮层）");
+  }
+  getMetaCognitionCortex(): import("./meta-cognition-cortex.js").MetaCognitionCortex | null {
+    return this.metaCognitionCortex;
+  }
+
+  registerContextCortex(cc: import("./context-cortex.js").ContextCortex): void {
+    this.contextCortex = cc;
+    console.log("[BrainCenter] 已注册 ContextCortex（情境皮层）");
+  }
+  getContextCortex(): import("./context-cortex.js").ContextCortex | null {
+    return this.contextCortex;
+  }
+
+  registerToolPlanningCortex(tp: import("./tool-planning-cortex.js").ToolPlanningCortex): void {
+    this.toolPlanningCortex = tp;
+    console.log("[BrainCenter] 已注册 ToolPlanningCortex（工具规划皮层）");
+  }
+  getToolPlanningCortex(): import("./tool-planning-cortex.js").ToolPlanningCortex | null {
+    return this.toolPlanningCortex;
+  }
+
+  registerOnlineLearningCortex(ol: import("./online-learning-cortex.js").OnlineLearningCortex): void {
+    this.onlineLearningCortex = ol;
+    console.log("[BrainCenter] 已注册 OnlineLearningCortex（在线学习皮层）");
+  }
+  getOnlineLearningCortex(): import("./online-learning-cortex.js").OnlineLearningCortex | null {
+    return this.onlineLearningCortex;
+  }
+
+  registerAnticipationEngine(engine: import("./decision-hub.js").AnticipationEngineLike): void {
+    this.anticipationEngine = engine;
+    console.log("[BrainCenter] 已注册 AnticipationEngine（意图预判引擎）");
+  }
+
+  registerEmotionModulator(em: import("./emotion-modulator.js").EmotionModulator): void {
+    this.emotionModulator = em;
+    console.log("[BrainCenter] 已注册 EmotionModulator（情绪调节器）");
+  }
+  getEmotionModulator(): import("./emotion-modulator.js").EmotionModulator | null {
+    return this.emotionModulator;
+  }
+
+  registerDefaultModeNetwork(dmn: import("./default-mode-network.js").DefaultModeNetwork): void {
+    this.defaultModeNetwork = dmn;
+    console.log("[BrainCenter] 已注册 DefaultModeNetwork（默认模式网络）");
+  }
+  getDefaultModeNetwork(): import("./default-mode-network.js").DefaultModeNetwork | null {
+    return this.defaultModeNetwork;
+  }
+
+  getAnticipationEngine(): import("./decision-hub.js").AnticipationEngineLike | null {
+    return this.anticipationEngine;
+  }
+
   // ---- 核心方法 ----------------------------------------------------------
 
   /** 能力自省：返回当前 actor 已注册的能力描述符列表 */
@@ -369,13 +824,35 @@ export class BrainCenter {
     return this.cap.introspect(actorId);
   }
 
-  /** 能力缺口识别：委托给 CapabilityCortex；未注册或方法缺失时返回 null */
-  identifyGap(scenario: string): CapabilityGapReport | null {
+  /**
+   * 用 ToolRegistry 当前全量工具名刷新各 domain 的 descriptor.tools。
+   *
+   * 场景：MCP 动态注册、self-programming 生成新 skill、社区 skill 启用后，
+   * capabilityCortex 的 loadSeed 快照已过期，需要重新填充才能让
+   * brain.list_capabilities 返回真实工具名。
+   *
+   * 内部有 60s 节流，避免每次调用都全量重算。
+   */
+  refreshCapabilityTools(toolNames: string[]): void {
+    if (!this.cap || typeof this.cap.attachToolNames !== "function") return;
+    const now = Date.now();
+    if (now - this._lastCapabilityRefreshTs < 60_000) return;
+    this._lastCapabilityRefreshTs = now;
+    try {
+      this.cap.attachToolNames(toolNames);
+    } catch (err) {
+      console.log(`[BrainCenter] refreshCapabilityTools 失败: ${err}`);
+    }
+  }
+  private _lastCapabilityRefreshTs = 0;
+
+  /** 能力缺口识别：委托给 CapabilityCortex（async，支持 LLM 语义分析）；未注册或方法缺失时返回 null */
+  async identifyGap(scenario: string): Promise<CapabilityGapReport | null> {
     if (!this.cap || typeof this.cap.identifyGap !== "function") {
       return null;
     }
     try {
-      return this.cap.identifyGap(scenario);
+      return await this.cap.identifyGap(scenario);
     } catch (err) {
       console.log(`[BrainCenter] identifyGap 调用失败: ${err}`);
       return null;
@@ -389,6 +866,144 @@ export class BrainCenter {
       return null;
     }
     return this.awareness.observe(actorId);
+  }
+
+  /**
+   * 记录一次工具交互到自我学习闭环。
+   *
+   * AgentCore 在工具调用结束（无论成功失败）时调用此方法。BrainCenter 转发到
+   * EvolutionCortex.recordToolInteraction → selfLearning.recordInteraction 持久化。
+   *
+   * DMN 周期扫描时从 selfLearning.getRecentRecords() 即可读到失败轨迹，
+   * 触发 proposeEvolution 生成进化提案。这是"失败时自我学习"的真正入口。
+   *
+   * 设计要点：
+   *  - fire-and-forget，错误不抛回调用方
+   *  - 不阻塞 cognize 主流程
+   *  - 仅在 BRAIN_CENTER_ENABLED=1 时生效
+   */
+  recordToolInteraction(params: {
+    actorId: string;
+    sessionId: string;
+    userRequest: string;
+    attemptedTools: string[];
+    success: boolean;
+    errorMessage?: string;
+    responseTime?: number;
+  }): void {
+    const tools = params.attemptedTools.length > 0 ? params.attemptedTools : ["unknown"];
+    const toolList = tools.join(", ");
+    const beliefKey = stableLearningKey(
+      `tool:${toolList}:request:${summarizeLearningText(params.userRequest, 80)}`,
+    );
+    const beliefId = `belief-${beliefKey}`;
+    const outcome = params.success ? "success" : "failure";
+    const experienceText = params.success
+      ? `Tool interaction succeeded. userRequest="${summarizeLearningText(params.userRequest)}" tools="${toolList}"`
+      : `Tool interaction failed. userRequest="${summarizeLearningText(params.userRequest)}" tools="${toolList}" error="${summarizeLearningText(params.errorMessage ?? "unknown error")}"`;
+
+    void this.memory
+      ?.remember(params.actorId, {
+        actorId: params.actorId,
+        kind: "experience",
+        domain: "episodic",
+        content: experienceText,
+        importance: params.success ? "medium" : "high",
+        source: "tool",
+        sessionId: params.sessionId,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          outcome,
+          learningBeliefKey: beliefKey,
+          lesson: `For similar requests, using ${toolList} is ${params.success ? "supported by a recent success" : "risky until the failure pattern is understood"}.`,
+          interpretation: params.success
+            ? "A concrete tool execution succeeded and should modestly reinforce the related strategy."
+            : "A concrete tool execution failed and should make the related strategy more cautious.",
+          attemptedTools: tools,
+          userRequest: params.userRequest,
+          errorMessage: params.errorMessage,
+          responseTime: params.responseTime,
+        },
+      })
+      .catch((e) => {
+        console.warn("[BrainCenter] recordToolInteraction memory write failed:", e);
+      });
+
+    void this.memory
+      ?.recordLearningFeedback?.({
+        actorId: params.actorId,
+        beliefId,
+        outcome,
+        note: params.success
+          ? `Tool execution succeeded: ${toolList}`
+          : `Tool execution failed: ${toolList}; ${params.errorMessage ?? "unknown error"}`,
+        evidence: [experienceText],
+      })
+      .catch((e) => {
+        console.warn("[BrainCenter] recordToolInteraction learning feedback failed:", e);
+      });
+
+    if (!this.evolution?.recordToolInteraction) {
+      // EvolutionCortex 未注册或未实现 recordToolInteraction，静默降级
+      return;
+    }
+    void this.evolution.recordToolInteraction({
+      sessionId: params.sessionId,
+      userRequest: params.userRequest,
+      attemptedTools: params.attemptedTools,
+      success: params.success,
+      errorMessage: params.errorMessage,
+      responseTime: params.responseTime,
+    }).catch((e) => {
+      console.warn("[BrainCenter] recordToolInteraction 转发失败:", e);
+    });
+  }
+
+  /** 记录用户纠正信号：例如“不是这样/应该是X/你前面错了”。 */
+  recordUserCorrection(actorId: string, userText: string, assistantText?: string): void {
+    if (!this.memory) return;
+    const correctedText = summarizeLearningText(userText);
+    const assistantSummary = assistantText ? summarizeLearningText(assistantText) : "";
+    const beliefKey = stableLearningKey(`correction:${correctedText}`);
+    const content = assistantSummary
+      ? `User correction received. user="${correctedText}" assistant="${assistantSummary}"`
+      : `User correction received. user="${correctedText}"`;
+    void this.memory
+      .remember(actorId, {
+        actorId,
+        kind: "experience",
+        domain: "episodic",
+        content,
+        importance: "high",
+        source: "chat",
+        timestamp: new Date().toISOString(),
+        metadata: {
+          outcome: "correction",
+          learningBeliefKey: beliefKey,
+          lesson: `Treat the corrected user statement as the newer belief for this topic.`,
+          interpretation: "The user explicitly corrected the assistant and the prior assumption should be downgraded.",
+          userText,
+          assistantText,
+        },
+      })
+      .catch((e) => {
+        console.warn("[BrainCenter] recordUserCorrection memory write failed:", e);
+      });
+    void this.memory
+      .recordLearningFeedback?.({
+        actorId,
+        beliefId: `belief-${beliefKey}`,
+        outcome: "correction",
+        note: content,
+        evidence: [userText, assistantSummary].filter(Boolean),
+      })
+      .catch((e) => {
+        console.warn("[BrainCenter] recordUserCorrection learning feedback failed:", e);
+      });
+  }
+
+  getLearningSnapshot(actorId: string): LearningSnapshot | null {
+    return this.memory?.getLearningSnapshot?.(actorId) ?? null;
   }
 
   /**
@@ -412,38 +1027,134 @@ export class BrainCenter {
     const actorId = input.actorId;
     const query = input.text ?? input.signal?.title ?? "";
 
-    // === 阶段 1：感知收集（并行，不串行切片）===
-    const [audioResult, visualResult, recallResult, emotion, userActivity, capabilities, recentDecisions] =
-      await Promise.all([
-        input.audio && this.sensory
-          ? this.sensory.listen(input.audio).catch(() => null)
-          : Promise.resolve(null),
-        input.visual && this.sensory
-          ? this.sensory.look(input.visual).catch(() => null)
-          : Promise.resolve(null),
-        this.memory
-          ? this.memory.recall(actorId, query, { limit: 5 }).catch(() => null)
-          : Promise.resolve(null),
-        this.limbic?.inferEmotion
-          ? this.limbic.inferEmotion(actorId, { text: input.text }).catch(() => null)
-          : Promise.resolve(null),
-        Promise.resolve(this.awareness?.observe(actorId) ?? null),
-        Promise.resolve(this.cap?.introspect(actorId) ?? []),
-        Promise.resolve(this.proaction?.recentDecisions?.(actorId) ?? []),
-      ]);
+    if (query && looksLikeUserCorrection(query)) {
+      try {
+        this.recordUserCorrection(actorId, query);
+      } catch {
+        /* correction learning is non-blocking */
+      }
+      // 主动学习循环：纠正时立即更新用户画像（降权错误偏好 + 提取正确信号）
+      try {
+        this.onlineLearningCortex?.recordCorrection(actorId, query);
+      } catch {
+        /* onlineLearning correction is non-blocking */
+      }
+    }
+
+    // === 深度优化：记录用户输入到 DefaultModeNetwork（让 DMN 知道用户活跃）===
+    // DMN 依靠 recordUserInput 维持"最后活跃时间"，BrainStem 周期性扫描时检查
+    // isIdle -> 5 分钟无输入则触发 onIdle（记忆固化 + 反思 + 进化）。
+    if (this.defaultModeNetwork) {
+      try {
+        this.defaultModeNetwork.recordUserInput(actorId);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // === 阶段 1：感知收集（并行，含 Step 7 新模块一次性大并行）===
+    // 性能优化（方案 B）：把阶段 1（7 原始模块）与阶段 1.6 中不依赖阶段 1 结果的
+    // 4 个新模块（WorkingMemory/CurrentTask/AnticipatedIntent/UserProfile）合并为一次 Promise.all。
+    // Situation 依赖 userActivity，单独后置调用。
+    // 性能优化(C1)：6 个同步通道直接取值,不包 Promise.resolve,减少微任务开销;
+    // 仅 6 个真 async 通道(audio/visual/recall/emotion/anticipatedIntent/bodySense)进 Promise.all。
+    const userActivity = this.awareness?.observe(actorId) ?? null;
+    const capabilities = this.cap?.introspect(actorId) ?? [];
+    const recentDecisions = this.proaction?.recentDecisions?.(actorId) ?? [];
+    const workingMemorySnap = this.workingMemoryCortex?.load(actorId) ?? undefined;
+    const currentTask = this.taskSwitchingCortex?.getCurrentTask(actorId) ?? null;
+    const userPattern = this.onlineLearningCortex?.getProfile(actorId) ?? undefined;
+
+    const [
+      audioResult,
+      visualResult,
+      recallResult,
+      emotion,
+      anticipatedIntent,
+      bodySense,
+    ] = await Promise.all([
+      input.audio && this.sensory
+        ? this.sensory.listen(input.audio).catch(() => null)
+        : Promise.resolve(null),
+      input.visual && this.sensory
+        ? this.sensory.look(input.visual).catch(() => null)
+        : Promise.resolve(null),
+      this.memory
+        ? (typeof this.memory.recallWithProvenance === "function"
+            ? this.memory.recallWithProvenance(actorId, query, { limit: 5 })
+            : this.memory.recall(actorId, query, { limit: 5 })
+          ).catch(() => null)
+        : Promise.resolve(null),
+      this.limbic?.inferEmotion
+        ? this.limbic.inferEmotion(actorId, { text: input.text }).then((ev) => {
+            // Limbic 返回中性且 emotionModulator 有文本推理 → 用文本推理补充
+            if (ev && Math.abs(ev.valence) < 0.2 && ev.arousal >= 0.25 && ev.arousal <= 0.35 && this.emotionModulator && input.text) {
+              const textEmotion = this.emotionModulator.inferFromText(input.text, actorId);
+              if (textEmotion) return textEmotion;
+            }
+            return ev;
+          }).catch(() => null)
+        : (this.emotionModulator && input.text
+            ? Promise.resolve(this.emotionModulator.inferFromText(input.text, actorId))
+            : Promise.resolve(null)),
+      this.anticipationEngine?.predictNextIntent
+        ? this.anticipationEngine.predictNextIntent(actorId, { text: query }).catch(() => null)
+        : Promise.resolve(null),
+      // BodyGateway 感官查询：where_am_i（含 device/screenX/screenY/mood/rendering）
+      this.bodyGateway
+        ? this.bodyGateway.sense({ kind: "where_am_i", actorId }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
 
     // === 阶段 1.5：组装多模态融合帧（SensoryFrame）===
     // 将 audioResult/visualResult/emotion/userActivity 融合为统一感知帧，
     // 让认知 LLM 一次拿到完整的多模态上下文。
+    // Phase 4：若 MultimodalFusionCortex 已注册且启用，则用 fuse() 做结构化冲突检测；
+    // BRAIN_MULTIMODAL_FUSION_ENABLED=0 时降级回 buildSensoryFrame（保持纯规则、无额外 token）。
+    const fusionInputs = {
+      actorId,
+      audioText: audioResult?.text,
+      visualDescription: visualResult?.description,
+      emotion: emotion ?? undefined,
+      activity: userActivity ?? undefined,
+    };
     const sensoryFrame = this.sensory
-      ? this.sensory.buildSensoryFrame({
-          actorId,
-          audioText: audioResult?.text,
-          visualDescription: visualResult?.description,
-          emotion: emotion ?? undefined,
-          activity: userActivity ?? undefined,
-        })
+      ? (this.multimodalFusion && isMultimodalFusionEnabled()
+          ? this.multimodalFusion.fuse(fusionInputs)
+          : this.sensory.buildSensoryFrame(fusionInputs))
       : undefined;
+
+    // === 阶段 1.5.1：拉取最近对话历史（解决追问断片问题）===
+    // 从 thread store 拉取最近 3 轮对话（6 条消息：3 user + 3 assistant），
+    // 注入到 cognize prompt，让 LLM 能理解追问的上下文。
+    // 例：用户追问"kimi的新模型啊"时，cognize 需要知道上一轮刚聊过 Kimi K3。
+    let recentConversationHistory = "";
+    try {
+      const chatSessionId = resolvePrimaryChatSessionId(
+        actorId,
+        getAgentRuntimeConfig().masterDelegation.enabled,
+      );
+      const threadStore = getChatThreadStore();
+      const messages = threadStore.thread(chatSessionId, "");
+      // 取最近 12 条消息（6 轮对话：user + assistant）—— 扩展自原 6 条，解决追问断片
+      const recentMessages = messages.slice(-12);
+      if (recentMessages.length > 0) {
+        const historyLines = recentMessages
+          .map((msg: ChatCompletionMessageParam) => {
+            const role = msg.role === "user" ? "用户" : msg.role === "assistant" ? "Agent" : null;
+            if (!role) return null;
+            const content = typeof msg.content === "string" ? msg.content : "[多模态消息]";
+            // 去掉时间戳前缀（[ts:...]）
+            const cleaned = content.replace(/^\[ts:[^\]]+\]\n?/, "").trim();
+            return cleaned ? `${role}：${cleaned}` : null;
+          })
+          .filter(Boolean);
+        recentConversationHistory = historyLines.join("\n");
+      }
+    } catch (err) {
+      // thread store 拉取失败不影响 cognize，静默跳过
+      console.log(`[BrainCenter] 拉取对话历史失败（忽略）: ${err}`);
+    }
 
     const context: CognitiveContext = {
       memories: recallResult?.items ?? [],
@@ -454,15 +1165,39 @@ export class BrainCenter {
       audioText: audioResult?.text,
       visualDescription: visualResult?.description,
       sensoryFrame,
+      recentConversationHistory: recentConversationHistory || undefined,
+      // Step 7 扩展：阶段 1 大并行已收集的字段（方案 B 合并）
+      workingMemory: workingMemorySnap,
+      currentTask,
+      anticipatedIntent,
+      userPattern,
+      // BodyGateway 感官查询结果（where_am_i）：device/screenX/screenY/mood/rendering 等
+      // bodyGateway 未注入时为 undefined（纯脑模式，向后兼容）
+      bodyState: bodySense?.ok ? (bodySense.data as unknown as BodyState) : undefined,
     };
 
-    // === 阶段 1.6：（已废弃正则预评判）===
+    // === 阶段 1.6：Step 7 扩展上下文（仅 Situation）===
+    // 性能优化（方案 B）：4 个新模块已在阶段 1 大并行中收集，只剩 Situation
+    // 依赖 userActivity，单独后置调用（已用方案 A 传入 activity 避免 observe 重复）。
+    if (this.contextCortex) {
+      try {
+        context.situation = await this.contextCortex.gatherContext(actorId, {
+          activity: userActivity ?? null,
+        });
+      } catch (err) {
+        console.log(`[BrainCenter] contextCortex.gatherContext 失败（忽略）: ${err}`);
+      }
+    }
+
+    // === 阶段 1.7：（已废弃正则预评判）===
     // 原先在此用 AwarenessCortex.assessConfidence 正则规则预评分，但正则无法理解
     // 对话语义（如「嗯」是模糊追问还是确认、「那个」指代什么），会误判。
     // 现置信度由 cognize LLM 基于对话内容语义评判（见阶段 2），规则仅作 cognize
     // 失败降级时的兜底（见阶段 2 catch 分支）。
 
-    // === 阶段 2：端到端认知 LLM ===
+    // === 阶段 2：端到端认知 ===
+    // Step 6 扩展：优先使用 DecisionHub.decidePassive（规则驱动，不调 LLM，避免幻觉）。
+    // 未注册 DecisionHub 时回退到 cognitiveEngine（保留原 LLM 路由，向后兼容）。
     let cognitive: {
       route: SystemRouteDecision;
       response: string;
@@ -472,20 +1207,55 @@ export class BrainCenter {
       rationale: string;
       confidence?: number;
       confidenceReason?: string;
+      toolPlan?: import("./tool-planning-cortex.js").ToolPlan;
     };
     // 兜底置信度：仅当 cognize 失败/未返回 confidence 时用规则评估
     let ruleFallbackConfidence: { score: number; reason: string } | null = null;
-    if (this.cognitiveEngine) {
+
+    // Step 6：优先使用 DecisionHub（规则驱动端到端认知）
+    if (this.decisionHub) {
       try {
-        cognitive = await this.cognitiveEngine.cognize(input, context);
+        const decision = await this.decisionHub.decidePassive(input, context);
+        const route = this.decisionHub.getRuleRouter().toSystemRouteDecision(query, decision.route);
+        cognitive = {
+          route,
+          response: decision.response, // 始终为空字符串（让 streamCompletion 生成）
+          memoryWrites: decision.memoryWrites,
+          action: decision.action,
+          needsToolLoop: decision.needsToolLoop,
+          rationale: decision.rationale,
+          confidence: decision.confidence,
+          confidenceReason: decision.confidenceReason,
+          toolPlan: decision.toolPlan ?? undefined,
+        };
       } catch (e) {
-        // 端到端认知失败 → 降级到 routeSystem 规则路由 + 规则置信度兜底
+        // DecisionHub 失败 → 降级到 cognitiveEngine（如有）或 routeSystem
+        console.log(`[BrainCenter] DecisionHub.decidePassive 失败，降级: ${e}`);
         const fallbackRoute = this.routeSystem(query, { actorId });
         cognitive = {
           route: fallbackRoute,
           response: "",
           memoryWrites: [],
-          needsToolLoop: fallbackRoute.mode !== "fast_chat",
+          needsToolLoop: true,
+          rationale: `decision_hub_failed:${String(e).slice(0, 80)}`,
+        };
+      }
+    } else if (this.cognitiveEngine) {
+      // 回退路径：原 CognitiveEngine（保留 LLM 路由，向后兼容）
+      try {
+        cognitive = await this.cognitiveEngine.cognize(input, context);
+      } catch (e) {
+        // 端到端认知失败 → 降级到 routeSystem 规则路由 + 规则置信度兜底
+        // needsToolLoop 由 route.mode 决定：
+        //  - fast/fast：不走工具循环，response="" 由外层 streamCompletion
+        //    用对应模式调 LLM 流式补全（避免空 response 直返的安全职责在外层）
+        //  - fast/complex：需要工具循环（子 Agent 委派）
+        const fallbackRoute = this.routeSystem(query, { actorId });
+        cognitive = {
+          route: fallbackRoute,
+          response: "",
+          memoryWrites: [],
+          needsToolLoop: fallbackRoute.mode !== "fast",
           rationale: `cognize_failed:${String(e).slice(0, 80)}`,
         };
         if (typeof this.awareness?.assessConfidence === "function") {
@@ -496,12 +1266,15 @@ export class BrainCenter {
       }
     } else {
       // 未注入认知引擎 → 降级到 routeSystem + 规则置信度兜底
+      // needsToolLoop 由 route.mode 决定（同 cognize_failed 分支语义）：
+      //  - fast/fast：不走工具循环，response="" 由外层 streamCompletion 流式补全
+      //  - fast/complex：需要工具循环
       const fallbackRoute = this.routeSystem(query, { actorId });
       cognitive = {
         route: fallbackRoute,
         response: "",
         memoryWrites: [],
-        needsToolLoop: fallbackRoute.mode !== "fast_chat",
+        needsToolLoop: fallbackRoute.mode !== "fast",
         rationale: "no_cognitive_engine",
       };
       if (typeof this.awareness?.assessConfidence === "function") {
@@ -513,11 +1286,11 @@ export class BrainCenter {
 
     // === 阶段 2.5：低置信度路由升级 ===
     // 置信度来源优先级：cognize LLM 基于对话内容的语义评判 > 规则兜底（仅 cognize 失败时）。
-    // score < 0.4 且 route.mode === "master_only" 时升级到 master_delegate，让子 Agent 兜底。
+    // score < 0.4 且 route.mode === "fast" 时升级到 complex，让子 Agent 兜底。
     //
-    // ⚠️ 仅对 `master_only` 路由生效：该路由是「主 Agent 带工具先试」，若 LLM 基于内容
+    // ⚠️ 仅对 `fast` 路由生效：该路由是「主 Agent 带工具先试」，若 LLM 基于内容
     // 判定置信度低（信息不足/能力缺失），委派给子 Agent 兜底是合理的。
-    // 对 `fast_chat` / `direct_llm` 绝不升级——这两类是认知 LLM 明确判定「可直接回答」的路由。
+    // 对 `fast` / `fast` 绝不升级——这两类是认知 LLM 明确判定「可直接回答」的路由。
     let finalRoute = cognitive.route;
     let finalRationale = cognitive.rationale;
     let finalNeedsToolLoop = cognitive.needsToolLoop;
@@ -526,15 +1299,15 @@ export class BrainCenter {
     const effReason = typeof cognitive.confidence === "number"
       ? (cognitive.confidenceReason ?? `cognize_confidence=${cognitive.confidence.toFixed(2)}`)
       : (ruleFallbackConfidence?.reason ?? "");
-    if (typeof effScore === "number" && effScore < 0.4 && finalRoute.mode === "master_only") {
+    if (typeof effScore === "number" && effScore < 0.4 && finalRoute.mode === "fast") {
       console.log(
         `[BrainCenter] 低置信度路由升级 actorId=${actorId} score=${effScore.toFixed(2)} ` +
-          `origMode=${finalRoute.mode} → master_delegate reason=${effReason}`,
+          `origMode=${finalRoute.mode} → complex reason=${effReason}`,
       );
       finalRoute = {
         userMessage: finalRoute.userMessage,
         system: "system2",
-        mode: "master_delegate",
+        mode: "complex",
         rationale: `low_confidence_override:${effReason}`,
         decidedAt: now,
       };
@@ -566,13 +1339,120 @@ export class BrainCenter {
       );
     }
 
+    // 性能优化：记忆写入 fire-and-forget，不阻塞 cognize 返回。
+    // streamCompletion 不依赖记忆写入结果，后台执行即可减少 complex 首字节延迟。
     if (cognitive.memoryWrites.length > 0 && this.memory) {
-      for (const item of cognitive.memoryWrites) {
+      const mem = this.memory;
+      const wmCortex = this.workingMemoryCortex;
+      const writes = cognitive.memoryWrites;
+      void (async () => {
         try {
-          await this.memory!.remember(actorId, item);
+          let allWrites = writes;
+          if (wmCortex) {
+            try {
+              const wmItems = wmCortex.toMemoryItems(actorId);
+              if (wmItems.length > 0) {
+                allWrites = [...writes, ...wmItems];
+              }
+            } catch {
+              /* ignore working memory export failure */
+            }
+          }
+          if (typeof mem.rememberBatch === "function") {
+            await mem.rememberBatch(actorId, allWrites);
+          } else {
+            for (const item of allWrites) {
+              try {
+                await mem.remember(actorId, item);
+              } catch {
+                /* ignore */
+              }
+            }
+          }
         } catch {
           /* ignore memory write failure */
         }
+      })();
+    }
+
+    // === 深度优化（工作记忆连贯性）：阶段 3.4 自动提取对话要点写入槽位 ===
+    // 让 setSlot 真正被使用，工作记忆每轮自动更新（不是只 pushGoal）
+    if (this.workingMemoryCortex) {
+      try {
+        this.workingMemoryCortex.extractAndSetSlots(actorId, query);
+      } catch {
+        /* ignore slot extraction failure */
+      }
+    }
+
+    // === 深度优化（工作记忆主题词）：阶段 3.4.1 LLM 提取主题词 ===
+    // 同步阻塞，确保当前轮 workingMemorySummary 包含新主题词
+    // 用 2s 超时保护，超时或失败不阻塞主流程
+    if (this.workingMemoryCortex && this.topicExtractor && query) {
+      try {
+        const topics = await Promise.race([
+          this.topicExtractor(query),
+          new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("topic_extract_timeout")), 2000)),
+        ]) as string[];
+        if (topics && topics.length > 0) {
+          this.workingMemoryCortex.setTopicSlots(actorId, topics);
+        }
+      } catch (err) {
+        if (String(err).includes("timeout")) {
+          console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
+        }
+      }
+    }
+
+    // === Step 7 扩展：阶段 3.6 — 在线学习观察 ===
+    // 每轮 cognize 完成后流式更新用户画像。每轮都调用，不受 observeCount 守卫限制
+    // 去掉原 observeCount === 0 守卫（bug：仅首轮更新，后续轮次画像不会更新）
+    if (this.onlineLearningCortex) {
+      try {
+        // finalRoute 是 SystemRouteDecision，OnlineLearning.observe 需要 RuleRouteDecision
+        const routeForLearning = {
+          ...finalRoute,
+          confidence: typeof cognitive.confidence === "number" ? cognitive.confidence : 0.5,
+          reason: cognitive.rationale ?? finalRoute.rationale ?? "",
+          matchedRules: [] as string[],
+        } as import("./rule-router.js").RuleRouteDecision;
+        this.onlineLearningCortex.observe(actorId, { text: query }, routeForLearning);
+      } catch (err) {
+        console.log(`[BrainCenter] 在线学习观察失败（忽略）: ${err}`);
+      }
+    }
+
+    // === Step 7 扩展：阶段 3.7 — 情感调制推理触发（4 项仿人推理能力扩展）===
+    // 在 cognize 后置阶段异步触发多线索交叉推理：
+    //   1. 从 LimbicCortex 获取当前情绪（getCurrentEmotion）
+    //   2. 构造线索：userInput（显性）+ 最近召回的记忆（隐性）
+    //   3. 调用 memory.inferFromClues(actorId, clues, emotion) 做情感调制推理
+    // 异步触发，不阻塞响应；失败静默降级。
+    if (this.memory && typeof this.memory.inferFromClues === "function" && query) {
+      const emotion = this.getCurrentEmotion(actorId);
+      const clues: InferenceClue[] = [
+        { text: query, source: "user_input" },
+        ...(recallResult?.items ?? [])
+          .slice(0, 2)
+          .map((it) => ({ text: it.content, source: "memory_recalled" as const })),
+      ];
+      if (clues.length >= 2) {
+        void this.memory
+          .inferFromClues(actorId, clues, emotion)
+          .catch(() => {
+            /* 静默降级 */
+          });
+      }
+    }
+
+    // 深度优化：阶段 3.7 提取工作记忆摘要（注入 streamCompletion 的 prompt）
+    // 让主 Agent LLM 真正感知"当前对话上下文"
+    let workingMemorySummary = "";
+    if (this.workingMemoryCortex) {
+      try {
+        workingMemorySummary = this.workingMemoryCortex.toSummary(actorId);
+      } catch {
+        /* ignore summary failure */
       }
     }
 
@@ -589,7 +1469,14 @@ export class BrainCenter {
       cognizedAt: now,
       // 携带阶段 1 已召回的记忆条目，供后续 standard path 复用，避免重复 MemoryCortex.recall
       recallItems: recallResult?.items ?? [],
-    };
+      // 深度优化：工作记忆摘要（活跃目标+槽位+待办），供 streamCompletion 注入 prompt
+      workingMemorySummary,
+      // 最近 6 轮对话历史，供 streamCompletion 注入 prompt【最近对话】块（解决追问断片）
+      recentConversationHistory: recentConversationHistory || undefined,
+      // 深度优化：工具规划链（complex 路由时由 DecisionHub 或 ToolPlanningCortex 生成）
+      // 注入到 streamCompletion 的 system prompt，约束 LLM 工具选择顺序和范围
+      toolPlan: cognitive.toolPlan,
+      };
   }
 
   /** 主动决策：根据输入信号产出大脑决策 */
@@ -866,6 +1753,34 @@ export class BrainCenter {
     }
   }
 
+  /**
+   * 获取当前情绪状态（4 项仿人推理能力扩展）。
+   *
+   * 从 LimbicCortex.getLastEmotion 拉取最近一次情绪识别结果，
+   * 转换为 EmotionState（VAD 三维度）供推理引擎做情感调制。
+   *
+   * LimbicCortex 未注册 / 无最近情绪时返回 null（推理引擎将不调制）。
+   *
+   * @param actorId 当前 actor
+   * @returns EmotionState 或 null
+   */
+  getCurrentEmotion(actorId: string): EmotionState | null {
+    if (!this.limbic) return null;
+    try {
+      const ev = this.limbic.getLastEmotion(actorId);
+      if (!ev) return null;
+      // EmotionVector → EmotionState 字段直接映射
+      // （EmotionVector.arousal 是 0~1，EmotionState 标注 -1~1 但阈值逻辑对 0~1 也成立）
+      return {
+        arousal: ev.arousal,
+        valence: ev.valence,
+        dominance: ev.dominance,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** 规划：委托 PlannerCortex.plan；缺失时返回空计划 */
   async plan(
     goal: string,
@@ -893,7 +1808,7 @@ export class BrainCenter {
     }
   }
 
-  /** 系统路由：委托 PlannerCortex.routeSystem；缺失时返回 fast_chat 兜底 */
+  /** 系统路由：委托 PlannerCortex.routeSystem；缺失时返回 fast 兜底 */
   routeSystem(
     userMessage: string,
     opts?: { actorId?: string },
@@ -903,7 +1818,7 @@ export class BrainCenter {
       return {
         userMessage,
         system: "system1",
-        mode: "fast_chat",
+        mode: "fast",
         rationale: "PlannerCortex 未注册",
         decidedAt: new Date().toISOString(),
       };
@@ -915,7 +1830,7 @@ export class BrainCenter {
       return {
         userMessage,
         system: "system1",
-        mode: "fast_chat",
+        mode: "fast",
         rationale: "PlannerCortex 未注册",
         decidedAt: new Date().toISOString(),
       };
@@ -940,6 +1855,36 @@ export class BrainCenter {
         ok: false,
         error: `delegate 调用失败: ${err instanceof Error ? err.message : String(err)}`,
       };
+    }
+  }
+
+  /**
+   * LLM 语义委派判断（shouldDelegate 的 LLM 化版本）。
+   *
+   * 委托 PlannerCortex.shouldDelegateWithLLM：替代原 DELEGATE_KEYWORDS 纯关键词匹配，
+   * 做语义级判断（评估任务复杂度、是否需要外部工具/信息）。
+   * 未注入 DelegateJudge / 降级开关关闭 / LLM 失败时回退到 shouldDelegate 规则匹配。
+   *
+   * 注意：routeSystem 同步路径仍用 shouldDelegate（规则），不调用此异步方法。
+   * 此方法供异步调用方（如 cognize 增强路径 / 外部 API）使用。
+   */
+  async shouldDelegateWithLLM(
+    userMessage: string,
+    opts?: { actorId?: string },
+  ): Promise<{
+    delegate: boolean;
+    agentType?: string;
+    reason?: string;
+    confidence?: number;
+  }> {
+    if (!this.planner || typeof this.planner.shouldDelegateWithLLM !== "function") {
+      return { delegate: false };
+    }
+    try {
+      return await this.planner.shouldDelegateWithLLM(userMessage, opts);
+    } catch (err) {
+      console.log(`[BrainCenter] shouldDelegateWithLLM 调用失败: ${err}`);
+      return { delegate: false };
     }
   }
 
@@ -990,7 +1935,62 @@ export class BrainCenter {
             };
           })()
         : undefined,
+      runtimeKernel: this.runtimeKernel?.snapshot(),
+      bodyState: this.safeGetBodyState(),
       capturedAt: now,
+    };
+  }
+
+  /**
+   * 安全获取身体状态聚合（BodyGateway.snapshot().state）。
+   * - bodyGateway 未注入 → 返回 undefined（纯脑模式，向后兼容）
+   * - snapshot 调用异常 → 记日志并返回 undefined（不阻塞 BrainSnapshot）
+   */
+  private safeGetBodyState(): BodyState | undefined {
+    if (!this.bodyGateway) return undefined;
+    try {
+      return this.bodyGateway.snapshot().state;
+    } catch (err) {
+      console.log(`[BrainCenter] snapshot bodyGateway 异常（忽略）: ${err}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * 获取各皮层模块健康状态（是否已注册 + 是否已启动）。
+   * 供外部健康检查 / 监控使用。
+   */
+  getHealth(): {
+    started: boolean;
+    modules: Array<{ name: string; registered: boolean }>;
+  } {
+    return {
+      started: this.started,
+      modules: [
+        { name: "CapabilityCortex", registered: this.cap !== null },
+        { name: "AwarenessCortex", registered: this.awareness !== null },
+        { name: "ProactionCortex", registered: this.proaction !== null },
+        { name: "EvolutionCortex", registered: this.evolution !== null },
+        { name: "CodeRepairCortex", registered: this.codeRepair !== null },
+        { name: "SensoryCortex", registered: this.sensory !== null },
+        { name: "MemoryCortex", registered: this.memory !== null },
+        { name: "SynapseBus", registered: this.synapse !== null },
+        { name: "LimbicCortex", registered: this.limbic !== null },
+        { name: "PlannerCortex", registered: this.planner !== null },
+        { name: "BrainStem", registered: this.brainStem !== null },
+        { name: "Cerebellum", registered: this.cerebellum !== null },
+        { name: "CognitiveEngine", registered: this.cognitiveEngine !== null },
+        { name: "DecisionHub", registered: this.decisionHub !== null },
+        { name: "WorkingMemoryCortex", registered: this.workingMemoryCortex !== null },
+        { name: "TaskSwitchingCortex", registered: this.taskSwitchingCortex !== null },
+        { name: "MetaCognitionCortex", registered: this.metaCognitionCortex !== null },
+        { name: "ContextCortex", registered: this.contextCortex !== null },
+        { name: "ToolPlanningCortex", registered: this.toolPlanningCortex !== null },
+        { name: "OnlineLearningCortex", registered: this.onlineLearningCortex !== null },
+        { name: "EmotionModulator", registered: this.emotionModulator !== null },
+        { name: "DefaultModeNetwork", registered: this.defaultModeNetwork !== null },
+        { name: "BodyGateway", registered: this.bodyGateway !== null },
+      ],
     };
   }
 
@@ -1007,6 +2007,7 @@ export class BrainCenter {
     await this.startCortex("AwarenessCortex", this.awareness);
     await this.startCortex("ProactionCortex", this.proaction);
     await this.startCortex("EvolutionCortex", this.evolution);
+    await this.startCortex("CodeRepairCortex", this.codeRepair);
     await this.startCortex("SensoryCortex", this.sensory);
     await this.startCortex("MemoryCortex", this.memory);
     await this.startCortex("SynapseBus", this.synapse);
@@ -1029,6 +2030,7 @@ export class BrainCenter {
     await this.stopCortex("AwarenessCortex", this.awareness);
     await this.stopCortex("ProactionCortex", this.proaction);
     await this.stopCortex("EvolutionCortex", this.evolution);
+    await this.stopCortex("CodeRepairCortex", this.codeRepair);
     await this.stopCortex("SensoryCortex", this.sensory);
     await this.stopCortex("MemoryCortex", this.memory);
     await this.stopCortex("SynapseBus", this.synapse);

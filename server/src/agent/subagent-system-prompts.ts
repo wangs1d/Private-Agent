@@ -26,14 +26,18 @@ const REPORT_FORMAT = `## 报告格式
 完成后输出：
 [REPORT]
 [SUCCESS] true/false
-[CONCLUSION] 一句话核心结论
+[CONCLUSION] 一句话核心结论（定性判断，不要只描述事实）
+[FRAMEWORK] 归因框架：列出2-4个主要原因/维度，用「原因→影响」格式简述因果传导
+[ANALYSIS] 每个维度的展开分析：先讲机制（为什么会影响），再给数据支撑
 [EVIDENCE]
 - 证据1（含来源）
 - 证据2
 [CONFIDENCE] 0.0-1.0
 [MISSING] 缺什么，无则填 none
 [/REPORT]
-[DONE] 给用户的简短完成提示（≤30字）`;
+[DONE] 给用户的简短完成提示（≤30字）
+
+⚠️ [FRAMEWORK]和[ANALYSIS]是核心字段，不能省略。不要只罗列事实，必须给出因果归因和结构化分析。`;
 
 /** 通用失败处理 + 安全约束（合并精简） */
 const FAILURE_AND_SAFETY = `## 失败与安全
@@ -107,6 +111,14 @@ ${capability.description}
 - **禁止第 3 轮**：信息不足就降 confidence（0.2-0.4）+ [MISSING] 说明，不得继续搜索
 - query 精简 2-6 词；来源链接放 [EVIDENCE]
 
+## 归因分析要求（核心！）
+你不仅是"信息搬运工"，更是"信息分析师"。搜集到事实后必须做归因：
+- [CONCLUSION] 必须是定性判断（如"三重因素叠加导致X"），不能只描述"发生了X"
+- [FRAMEWORK] 必须拆出2-4个原因维度，每个维度用「原因→影响」格式说明因果传导
+- [ANALYSIS] 每个维度先讲机制（为什么这个原因会导致这个结果），再给数据支撑
+- 禁止只罗列事实不做归因；禁止在结尾退缩道歉说"信息不完整"
+- 信息有缺口时，明确说"已知X未知Y"，不要退缩
+
 ## 工具优先级
 search_web（首选）→ fetch_web（仅当 snippet 不足时）→ shopping.suggest（比价）
 
@@ -162,6 +174,8 @@ export function getSubAgentModelConfig(type: SubAgentType): SubAgentModelConfig 
 export interface SubAgentReportParse {
   success: boolean;
   conclusion: string;
+  framework: string;
+  analysis: string;
   evidence: string[];
   confidence: number;
   missing: string;
@@ -193,6 +207,8 @@ export function parseSubAgentReport(rawReport: string): SubAgentReportParse | nu
   const successStr = get("SUCCESS").toLowerCase();
   const success = successStr === "true" || successStr === "1" || successStr === "yes";
   const conclusion = get("CONCLUSION");
+  const framework = get("FRAMEWORK");
+  const analysis = get("ANALYSIS");
   const evidenceRaw = get("EVIDENCE");
   const evidence = evidenceRaw
     .split("\n")
@@ -213,6 +229,8 @@ export function parseSubAgentReport(rawReport: string): SubAgentReportParse | nu
   return {
     success,
     conclusion,
+    framework,
+    analysis,
     evidence,
     confidence: Number.isNaN(confidence) ? 0.5 : Math.max(0, Math.min(1, confidence)),
     missing: missing || "none",
@@ -226,9 +244,15 @@ export function buildSubAgentReportForMaster(parsed: SubAgentReportParse, rawRep
   const lines = [
     `### 子 Agent 报告`,
     `**结论**：${parsed.conclusion || "(未提供)"}`,
-    `**置信度**：${parsed.confidence.toFixed(2)}`,
-    `**成功**：${parsed.success ? "是" : "否"}`,
   ];
+  if (parsed.framework) {
+    lines.push(`**归因框架**：${parsed.framework}`);
+  }
+  if (parsed.analysis) {
+    lines.push(`**展开分析**：${parsed.analysis}`);
+  }
+  lines.push(`**置信度**：${parsed.confidence.toFixed(2)}`);
+  lines.push(`**成功**：${parsed.success ? "是" : "否"}`);
   if (parsed.evidence.length > 0) {
     lines.push(`**证据**：`);
     parsed.evidence.forEach((e, i) => lines.push(`${i + 1}. ${e}`));

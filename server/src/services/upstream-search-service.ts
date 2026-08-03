@@ -5,7 +5,8 @@ import {
   applySearchFreshness,
   formatSearchFreshnessNote,
   getSearchAnchorNow,
-} from "./search-freshness.js";
+  SearchCache,
+} from "./search-enhancements.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,6 +26,12 @@ export type UnifiedSearchItem = {
 };
 
 export class UpstreamSearchService {
+  // 社交平台搜索结果缓存（3 分钟 TTL，避免重复调用 mcporter）
+  private readonly socialCache = new SearchCache<{ provider: string; raw: string; notes: string[] }>({
+    maxSize: 50,
+    ttlMs: 3 * 60 * 1000,
+  });
+
   constructor(private readonly infoHubService: InfoHubService) {}
 
   async searchUnified(input: {
@@ -117,17 +124,23 @@ export class UpstreamSearchService {
       }
     };
 
+    // 并行化：web 搜索 + 社交平台搜索同时发起，避免串行等待
+    const isChinese = hasChinese(query) || /微博|小红书|公众号|抖音|b站|国内/.test(query.toLowerCase());
+    const socialPromise = isChinese
+      ? Promise.all([
+          this.searchWeibo(query, Math.min(8, limit)),
+          this.searchXiaohongshu(query, Math.min(8, limit)),
+          this.searchWechat(query, Math.min(8, limit)),
+        ])
+      : null;
+
     const web = await this.searchWeb(query, limit);
     notes.push(...web.notes);
     pushItems(web.items.map((x) => ({ ...x, platform: "web" })));
 
-    // 中文语境下优先补充国内平台结果。
-    if (hasChinese(query) || /微博|小红书|公众号|抖音|b站|国内/.test(query.toLowerCase())) {
-      const [weibo, xhs, wechat] = await Promise.all([
-        this.searchWeibo(query, Math.min(8, limit)),
-        this.searchXiaohongshu(query, Math.min(8, limit)),
-        this.searchWechat(query, Math.min(8, limit)),
-      ]);
+    // 等待社交平台结果（已与 web 并行执行）
+    if (socialPromise) {
+      const [weibo, xhs, wechat] = await socialPromise;
       notes.push(...weibo.notes, ...xhs.notes, ...wechat.notes);
       pushItems(rawToItems(weibo.raw, "weibo", "weibo"));
       pushItems(rawToItems(xhs.raw, "xiaohongshu", "xiaohongshu"));
@@ -303,16 +316,20 @@ export class UpstreamSearchService {
     const keyword = String(query ?? "").trim();
     if (!keyword) return { provider: "weibo", raw: "", notes: ["query 不能为空"] };
     const boundedLimit = clamp(limit, 1, 20);
+    const cacheKey = `weibo:${keyword}:${boundedLimit}`;
+    const cached = this.socialCache.get(cacheKey);
+    if (cached) return cached;
     const attempts = [
       `weibo.search_weibo_content(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
       `weibo.search_content(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
-      `weibo.get_trendings(limit: ${boundedLimit})`,
     ];
-    const run = await this.callMcporterAttempts(attempts, 20000);
+    const run = await this.callMcporterAttempts(attempts, 12_000);
     if (!run.ok) {
       return { provider: "weibo", raw: "", notes: [run.note] };
     }
-    return { provider: "weibo", raw: run.stdout.slice(0, 12000), notes: [] };
+    const result = { provider: "weibo", raw: run.stdout.slice(0, 12000), notes: [] };
+    this.socialCache.set(cacheKey, result);
+    return result;
   }
 
   async readBilibili(url: string): Promise<{
@@ -371,15 +388,20 @@ export class UpstreamSearchService {
     const keyword = String(query ?? "").trim();
     if (!keyword) return { provider: "xiaohongshu", raw: "", notes: ["query 不能为空"] };
     const boundedLimit = clamp(limit, 1, 20);
+    const cacheKey = `xhs:${keyword}:${boundedLimit}`;
+    const cached = this.socialCache.get(cacheKey);
+    if (cached) return cached;
     const attempts = [
       `xiaohongshu.search_feeds(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
       `xhs.search_feeds(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
     ];
-    const run = await this.callMcporterAttempts(attempts, 25000);
+    const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
       return { provider: "xiaohongshu", raw: "", notes: [run.note] };
     }
-    return { provider: "xiaohongshu", raw: run.stdout.slice(0, 12000), notes: [] };
+    const result = { provider: "xiaohongshu", raw: run.stdout.slice(0, 12000), notes: [] };
+    this.socialCache.set(cacheKey, result);
+    return result;
   }
 
   async searchWechat(query: string, limit = 10): Promise<{
@@ -390,16 +412,20 @@ export class UpstreamSearchService {
     const keyword = String(query ?? "").trim();
     if (!keyword) return { provider: "wechat", raw: "", notes: ["query 不能为空"] };
     const boundedLimit = clamp(limit, 1, 20);
+    const cacheKey = `wechat:${keyword}:${boundedLimit}`;
+    const cached = this.socialCache.get(cacheKey);
+    if (cached) return cached;
     const attempts = [
       `wechat.search_articles(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
       `wechat.search_wechat_articles(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
-      `wechat.search(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
     ];
-    const run = await this.callMcporterAttempts(attempts, 25000);
+    const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
       return { provider: "wechat", raw: "", notes: [run.note] };
     }
-    return { provider: "wechat", raw: run.stdout.slice(0, 12000), notes: [] };
+    const result = { provider: "wechat", raw: run.stdout.slice(0, 12000), notes: [] };
+    this.socialCache.set(cacheKey, result);
+    return result;
   }
 
   async searchDouyin(query: string, limit = 10): Promise<{
@@ -410,15 +436,20 @@ export class UpstreamSearchService {
     const keyword = String(query ?? "").trim();
     if (!keyword) return { provider: "douyin", raw: "", notes: ["query 不能为空"] };
     const boundedLimit = clamp(limit, 1, 20);
+    const cacheKey = `douyin:${keyword}:${boundedLimit}`;
+    const cached = this.socialCache.get(cacheKey);
+    if (cached) return cached;
     const attempts = [
       `douyin.search(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
       `douyin.search_videos(keyword: ${JSON.stringify(keyword)}, limit: ${boundedLimit})`,
     ];
-    const run = await this.callMcporterAttempts(attempts, 25000);
+    const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
       return { provider: "douyin", raw: "", notes: [run.note] };
     }
-    return { provider: "douyin", raw: run.stdout.slice(0, 12000), notes: [] };
+    const result = { provider: "douyin", raw: run.stdout.slice(0, 12000), notes: [] };
+    this.socialCache.set(cacheKey, result);
+    return result;
   }
 
   async checkUpstreamHealth(): Promise<{

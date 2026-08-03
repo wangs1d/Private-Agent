@@ -9,6 +9,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { resolveActorId } from "../agent/actor-id.js";
+import type { RuntimeKernelPromptMode, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { ToolContext } from "./tool-registry.js";
 import type { BrainCenter } from "../brain/brain-center.js";
@@ -22,6 +23,9 @@ import type {
   MemoryItemKind,
   UserActivityKind,
   UserActivityState,
+  BugSignal,
+  BugSignalSource,
+  RepairStatus,
 } from "../brain/types.js";
 
 // ---- 工具 schema ------------------------------------------------------
@@ -32,13 +36,19 @@ export const BRAIN_LIST_CAPABILITIES_TOOL: ChatCompletionTool = {
   function: {
     name: "brain.list_capabilities",
     description:
-      "查询自己当前已注册的能力域清单。当你需要知道自己有哪些能力、可调用哪些工具时调用，例如用户问「你能做什么」、或需要判断某任务是否在自己能力范围内时。",
+      "查询自己当前已注册的能力域清单。当你需要知道自己有哪些能力、可调用哪些工具时调用，例如用户问「你能做什么」、或需要判断某任务是否在自己能力范围内时。设置 include_schema=true 可一并返回每个工具的 parameters schema（仅在需要直接构造工具调用参数时使用，避免 token 浪费）。",
     parameters: {
       type: "object",
       properties: {
         actorId: {
           type: "string",
           description: "用户/会话标识，用于按 actor 过滤能力；不传则使用当前上下文 actor。",
+        },
+        include_schema: {
+          type: "boolean",
+          description:
+            "是否返回每个工具的完整 parameters schema。默认 false 只返回工具名；设为 true 时会显著增加返回体积，仅在你需要立即构造工具调用参数且不想再单独 tool_discover 时使用。",
+          default: false,
         },
       },
       additionalProperties: false,
@@ -340,7 +350,193 @@ export const BRAIN_DELEGATE_TOOL: ChatCompletionTool = {
   },
 };
 
-/** 12 个 brain 工具的 schema 数组（供 setBrainChatTools 注入到 getBuiltinAgentChatTools） */
+/** brain.runtime_kernel_get —— 读取当前 Agent 常驻运行时内核状态 */
+export const BRAIN_RUNTIME_KERNEL_GET_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.runtime_kernel_get",
+    description:
+      "读取当前 Agent 的独立运行时内核状态。用于查看当前是否启用运行时内核、prompt 裁剪模式、身份风格、安全规则与全局配置，而不是从对话 prompt 里猜测。",
+    parameters: {
+      type: "object",
+      properties: {
+        actorId: {
+          type: "string",
+          description: "可选：指定目标 actor（多用户场景下隔离）。不传则使用当前调用 actor。",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/** brain.runtime_kernel_update —— 热更新当前 Agent 常驻运行时内核状态 */
+export const BRAIN_RUNTIME_KERNEL_UPDATE_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.runtime_kernel_update",
+    description:
+      "热更新当前 Agent 的独立运行时内核状态。适合中途切换 prompt 模式、调整身份风格、修改回复详略和安全规则；修改后立即生效，无需重建会话。多用户场景下每 actor 独立 state，互不污染。",
+    parameters: {
+      type: "object",
+      properties: {
+        actorId: {
+          type: "string",
+          description: "可选：指定目标 actor（多用户场景下隔离）。不传则使用当前调用 actor。",
+        },
+        enabled: {
+          type: "boolean",
+          description: "是否启用运行时内核。",
+        },
+        promptMode: {
+          type: "string",
+          enum: ["legacy", "dynamic", "conversation_only", "minimal"],
+          description:
+            "prompt 模式：legacy=保持旧式完整 prompt；dynamic=保留动态上下文并剥离稳定设定；conversation_only=仅保留对话级最小注入；minimal=层 A 不进 prompt，身份/工具说明下沉到会话首条 system + 程序层强制。",
+        },
+        identity: {
+          type: "object",
+          properties: {
+            persona: {
+              type: "array",
+              items: { type: "string" },
+              description: "身份标签列表，如 companion / butler / planner。",
+            },
+            values: {
+              type: "array",
+              items: { type: "string" },
+              description: "价值观标签列表，如 safe / privacy-first / honest。",
+            },
+            style: {
+              type: "array",
+              items: { type: "string" },
+              description: "风格标签列表，如 brief / natural / same-language。",
+            },
+          },
+          additionalProperties: false,
+        },
+        postValidation: {
+          type: "object",
+          description: "后置校验规则。当前策略仅记录日志，不阻断输出。",
+          properties: {
+            bannedPatterns: {
+              type: "array",
+              items: { type: "string" },
+              description: "正则字符串列表，命中即标记违规。非法正则退化为字符串包含匹配。",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/** brain 工具的 schema 数组（供 setBrainChatTools 注入到 getBuiltinAgentChatTools） */
+// 注：放在所有 *_TOOL schema 之后，避免 const 引用顺序问题。
+
+// ---- 自我修复工具 schema -----------------------------------------------
+
+/** brain.report_bug —— 报告一个 bug，触发自动修复闭环 */
+export const BRAIN_REPORT_BUG_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.report_bug",
+    description:
+      "向 CodeRepairCortex 报告一个 bug（运行时异常/兜底频发/编译失败/用户报告等）。会自动触发隔离→分析→patch→测试→应用闭环。修复成功后源码会被实际修改，失败会自动回滚。",
+    parameters: {
+      type: "object",
+      properties: {
+        source: {
+          type: "string",
+          description: "bug 来源",
+          enum: [
+            "unhandled_rejection",
+            "uncaught_exception",
+            "tool_loop_max_rounds",
+            "apology_fallback_burst",
+            "compile_error",
+            "user_report",
+            "runtime_error",
+          ] as BugSignalSource[],
+        },
+        title: {
+          type: "string",
+          description: "简短标题，例如 'chat-user-message.ts 状态行重复推送'",
+        },
+        errorMessage: {
+          type: "string",
+          description: "错误消息/堆栈/关键日志（多行字符串，可选）",
+        },
+        suspectFiles: {
+          type: "array",
+          items: { type: "string" },
+          description: "嫌疑文件路径列表（相对 server/ 根，如 src/ws/handlers/foo.ts）",
+        },
+        userReport: {
+          type: "string",
+          description: "用户原始报告内容（source=user_report 时必填）",
+        },
+      },
+      required: ["source", "title"],
+      additionalProperties: false,
+    },
+  },
+};
+
+/** brain.list_repairs —— 列出修复提案 */
+export const BRAIN_LIST_REPAIRS_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.list_repairs",
+    description:
+      "列出 CodeRepairCortex 中的修复提案（可按状态过滤）。返回最近修复历史与状态。",
+    parameters: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          description: "按状态过滤（不传则返回全部）",
+          enum: [
+            "pending",
+            "isolating",
+            "analyzing",
+            "patching",
+            "testing",
+            "applying",
+            "fixed",
+            "failed",
+            "rejected",
+          ] as RepairStatus[],
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/** brain.retry_repair —— 强制重试一个 failed 的修复提案 */
+export const BRAIN_RETRY_REPAIR_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.retry_repair",
+    description:
+      "强制重试一个 failed 状态的修复提案。重置状态为 pending 并触发新一轮修复闭环。",
+    parameters: {
+      type: "object",
+      properties: {
+        repairId: {
+          type: "string",
+          description: "修复提案 id（reportBug 返回的 id）",
+        },
+      },
+      required: ["repairId"],
+      additionalProperties: false,
+    },
+  },
+};
+
 export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_LIST_CAPABILITIES_TOOL,
   BRAIN_IDENTIFY_GAP_TOOL,
@@ -355,6 +551,12 @@ export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_PLAN_TOOL,
   BRAIN_ROUTE_SYSTEM_TOOL,
   BRAIN_DELEGATE_TOOL,
+  BRAIN_RUNTIME_KERNEL_GET_TOOL,
+  BRAIN_RUNTIME_KERNEL_UPDATE_TOOL,
+  // 自我修复（CodeRepairCortex）：3 个工具
+  BRAIN_REPORT_BUG_TOOL,
+  BRAIN_LIST_REPAIRS_TOOL,
+  BRAIN_RETRY_REPAIR_TOOL,
 ];
 
 // ---- 内部常量与辅助 ----------------------------------------------------
@@ -367,6 +569,66 @@ const VALID_PROPOSAL_TYPES: ReadonlySet<EvolutionProposalType> = new Set([
   "add_tool",
   "update_prompt",
 ]);
+
+const VALID_RUNTIME_KERNEL_PROMPT_MODES: ReadonlySet<RuntimeKernelPromptMode> = new Set([
+  "legacy",
+  "dynamic",
+  "conversation_only",
+  "minimal",
+]);
+
+function asStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+  return items.length > 0 ? items : [];
+}
+
+function buildRuntimeKernelPatch(input: Record<string, unknown>): Partial<RuntimeKernelState> {
+  const patch: Partial<RuntimeKernelState> = {};
+
+  if (typeof input.enabled === "boolean") {
+    patch.enabled = input.enabled;
+  }
+
+  if (typeof input.promptMode === "string") {
+    const mode = input.promptMode.trim() as RuntimeKernelPromptMode;
+    if (!VALID_RUNTIME_KERNEL_PROMPT_MODES.has(mode)) {
+      throw new Error("promptMode 仅允许 legacy / dynamic / conversation_only / minimal");
+    }
+    patch.promptMode = mode;
+  }
+
+  if (typeof input.identity === "object" && input.identity !== null && !Array.isArray(input.identity)) {
+    const identityInput = input.identity as Record<string, unknown>;
+    const identityPatch: Partial<RuntimeKernelState["identity"]> = {};
+    if ("persona" in identityInput) identityPatch.persona = asStringList(identityInput.persona) ?? [];
+    if ("values" in identityInput) identityPatch.values = asStringList(identityInput.values) ?? [];
+    if ("style" in identityInput) identityPatch.style = asStringList(identityInput.style) ?? [];
+    if (Object.keys(identityPatch).length > 0) {
+      patch.identity = identityPatch as RuntimeKernelState["identity"];
+    }
+  }
+
+  if (
+    typeof input.postValidation === "object" &&
+    input.postValidation !== null &&
+    !Array.isArray(input.postValidation)
+  ) {
+    const postValidationInput = input.postValidation as Record<string, unknown>;
+    const postValidationPatch: Partial<RuntimeKernelState["postValidation"]> = {};
+    if (Array.isArray(postValidationInput.bannedPatterns)) {
+      const patterns = asStringList(postValidationInput.bannedPatterns);
+      postValidationPatch.bannedPatterns = patterns ?? [];
+    }
+    if (Object.keys(postValidationPatch).length > 0) {
+      patch.postValidation = postValidationPatch as RuntimeKernelState["postValidation"];
+    }
+  }
+
+  return patch;
+}
 
 const ACTIVITY_LABELS: Record<UserActivityKind, string> = {
   just_off_work: "刚下班",
@@ -390,11 +652,16 @@ function pickActorId(
   return resolved || fallback;
 }
 
-/** 把能力清单格式化为紧凑文本：每行 `{domain} - {label} - {n} tools` */
+/** 把能力清单格式化为紧凑文本：每行 `{domain} - {label} - tools: [...]` */
 function formatCapabilityList(capabilities: CapabilityDescriptor[]): string {
   if (capabilities.length === 0) return "(无已注册能力域)";
   return capabilities
-    .map((c) => `${c.domain} - ${c.label} - ${c.tools.length} tools [${c.status}]`)
+    .map((c) => {
+      const toolList = c.tools.length > 0
+        ? c.tools.join(", ")
+        : "(无工具)";
+      return `${c.domain} - ${c.label} [${c.status}] (${c.tools.length} tools)\n  ↳ ${toolList}`;
+    })
     .join("\n");
 }
 
@@ -434,6 +701,7 @@ function formatProposalResult(proposal: EvolutionProposal) {
 export function registerBrainTools(
   registry: ToolRegistry,
   brainCenter: BrainCenter | null,
+  getToolSchema?: (name: string) => ChatCompletionTool | null,
 ): void {
   if (!brainCenter) {
     // brain 未启用：不注册 handler，避免运行时 KeyError
@@ -444,20 +712,42 @@ export function registerBrainTools(
   registry.register("brain.list_capabilities", async (input, context) => {
     try {
       const actorId = pickActorId(input.actorId, context);
+      // 动态刷新：MCP / self-programming 新增工具后让 capabilityCortex 可见
+      // 内部有 60s 节流，避免每次调用都全量重算
+      brainCenter.refreshCapabilityTools(registry.list());
       const capabilities = brainCenter.introspect(actorId);
+      const includeSchema = input.include_schema === true && typeof getToolSchema === "function";
       const summary = formatCapabilityList(capabilities);
-      return {
-        ok: true,
-        actorId,
-        count: capabilities.length,
-        summary,
-        capabilities: capabilities.map((c) => ({
+      const capabilitiesOut = capabilities.map((c) => {
+        const base = {
           domain: c.domain,
           label: c.label,
           status: c.status,
           source: c.source,
           toolCount: c.tools.length,
-        })),
+          tools: c.tools,
+        };
+        if (!includeSchema) return base;
+        // include_schema=true：附带每个工具的 parameters schema
+        const toolSchemas: Array<{ name: string; description: string; parameters: unknown }> = [];
+        for (const name of c.tools) {
+          const tool = getToolSchema(name);
+          if (!tool || tool.type !== "function" || !tool.function) continue;
+          toolSchemas.push({
+            name,
+            description: tool.function.description ?? "",
+            parameters: tool.function.parameters ?? { type: "object", properties: {} },
+          });
+        }
+        return { ...base, toolSchemas };
+      });
+      return {
+        ok: true,
+        actorId,
+        count: capabilities.length,
+        includeSchema,
+        summary,
+        capabilities: capabilitiesOut,
       };
     } catch (err) {
       return {
@@ -475,7 +765,7 @@ export function registerBrainTools(
         return { ok: false, error: "缺少必填字段：scenario（场景描述）" };
       }
 
-      const report = brainCenter.identifyGap(scenario);
+      const report = await brainCenter.identifyGap(scenario);
       if (!report) {
         return {
           ok: false,
@@ -852,6 +1142,177 @@ export function registerBrainTools(
       return {
         ok: false,
         error: `brain.delegate 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  // ---- brain.runtime_kernel_get ----
+  registry.register("brain.runtime_kernel_get", async (input, context) => {
+    try {
+      const actorId = pickActorId(
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>).actorId
+          : undefined,
+        context,
+      );
+      const kernel = brainCenter.getRuntimeKernelSnapshot(actorId);
+      if (!kernel) {
+        return {
+          ok: false,
+          error: "RuntimeKernel 未注册到 BrainCenter",
+        };
+      }
+      return {
+        ok: true,
+        runtimeKernel: kernel,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.runtime_kernel_get 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  // ---- brain.runtime_kernel_update ----
+  registry.register("brain.runtime_kernel_update", async (input, context) => {
+    try {
+      const rawInput =
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>)
+          : {};
+      const actorId = pickActorId(rawInput.actorId, context);
+      const patch = buildRuntimeKernelPatch(rawInput);
+      if (Object.keys(patch).length === 0) {
+        return {
+          ok: false,
+          error: "未检测到可更新字段",
+        };
+      }
+
+      const kernel = brainCenter.updateRuntimeKernel(patch, actorId);
+      if (!kernel) {
+        return {
+          ok: false,
+          error: "RuntimeKernel 未注册到 BrainCenter",
+        };
+      }
+
+      return {
+        ok: true,
+        runtimeKernel: kernel,
+        updatedFields: Object.keys(patch),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.runtime_kernel_update 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  // ---- 自我修复（CodeRepairCortex）工具 handler ----
+
+  registry.register("brain.report_bug", async (input) => {
+    try {
+      const rawInput =
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>)
+          : {};
+      const source = rawInput.source as BugSignalSource | undefined;
+      const title = typeof rawInput.title === "string" ? rawInput.title : "";
+      if (!source || !title) {
+        return { ok: false, error: "source 和 title 为必填" };
+      }
+      const signal: BugSignal = {
+        source,
+        title,
+        errorMessage: typeof rawInput.errorMessage === "string" ? rawInput.errorMessage : undefined,
+        suspectFiles: Array.isArray(rawInput.suspectFiles)
+          ? (rawInput.suspectFiles as unknown[]).filter((s): s is string => typeof s === "string")
+          : undefined,
+        userReport:
+          typeof rawInput.userReport === "string" ? rawInput.userReport : undefined,
+      };
+      const proposal = await brainCenter.reportBug(signal);
+      if (!proposal) {
+        return {
+          ok: false,
+          error: "CodeRepairCortex 未注册或 reportBug 不可用",
+        };
+      }
+      return {
+        ok: true,
+        repairId: proposal.id,
+        status: proposal.status,
+        message: `已收到 bug 信号，正在自动修复。可调用 brain.list_repairs 查看进度，brain.retry_repair 强制重试。`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.report_bug 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  registry.register("brain.list_repairs", async (input) => {
+    try {
+      const rawInput =
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>)
+          : {};
+      const status = typeof rawInput.status === "string" ? (rawInput.status as RepairStatus) : undefined;
+      const repairs = brainCenter.listRepairs(status);
+      return {
+        ok: true,
+        total: repairs.length,
+        repairs: repairs.map((r) => ({
+          id: r.id,
+          title: r.title,
+          source: r.source,
+          status: r.status,
+          retryCount: r.retryCount,
+          lastError: r.lastError,
+          rootCause: r.rootCause,
+          explanation: r.explanation,
+          testPassed: r.testPassed,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        })),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.list_repairs 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  registry.register("brain.retry_repair", async (input) => {
+    try {
+      const rawInput =
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>)
+          : {};
+      const repairId = typeof rawInput.repairId === "string" ? rawInput.repairId : "";
+      if (!repairId) {
+        return { ok: false, error: "repairId 为必填" };
+      }
+      const proposal = await brainCenter.retryRepair(repairId);
+      if (!proposal) {
+        return { ok: false, error: "CodeRepairCortex 未注册或修复提案不存在" };
+      }
+      return {
+        ok: true,
+        repairId: proposal.id,
+        status: proposal.status,
+        retryCount: proposal.retryCount,
+        message: `已重置为 pending，正在重新触发修复闭环。`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.retry_repair 失败：${err instanceof Error ? err.message : String(err)}`,
       };
     }
   });

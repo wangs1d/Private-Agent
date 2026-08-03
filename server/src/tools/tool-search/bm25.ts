@@ -48,6 +48,8 @@ export type Bm25Document = {
 type SearchAliasEntry = {
   registryName: string;
   searchAliases?: string[];
+  /** 可选：catalog 构建时预计算的字符 trigram 集合，用于 trigram 排名加速 */
+  trigramSet?: Set<string>;
 };
 
 export type Bm25Hit = {
@@ -179,16 +181,28 @@ function rankByTokenOverlap(docs: Bm25Document[], queries: string[]): Array<{ id
   return sortRanking(scoreById);
 }
 
-function rankByTrigramSimilarity(docs: Bm25Document[], queries: string[]): Array<{ id: string }> {
+function rankByTrigramSimilarity(
+  docs: Bm25Document[],
+  queries: string[],
+  aliasEntries?: SearchAliasEntry[],
+): Array<{ id: string }> {
   const scoreById = new Map<string, number>();
+  // 优先从 aliasEntries 拿预计算的 trigramSet（catalog 构建时已缓存），
+  // 避免每次 search 都重算 O(D × L)。仅当 aliasEntries 缺失时才回退到原始重算。
+  const docGramsCache =
+    aliasEntries?.length && aliasEntries[0]?.trigramSet
+      ? new Map(aliasEntries.map((e) => [e.registryName, e.trigramSet!]))
+      : null;
 
   for (const query of queries) {
     const queryGrams = buildCharacterTrigrams(query);
     if (queryGrams.size === 0) continue;
 
     for (const doc of docs) {
-      const docGrams = buildCharacterTrigrams(doc.text);
-      if (docGrams.size === 0) continue;
+      const docGrams =
+        docGramsCache?.get(doc.id) ??
+        (docGramsCache == null ? buildCharacterTrigrams(doc.text) : null);
+      if (!docGrams || docGrams.size === 0) continue;
       let shared = 0;
       for (const gram of queryGrams) {
         if (docGrams.has(gram)) shared += 1;
@@ -275,6 +289,9 @@ function buildCharacterTrigrams(text: string): Set<string> {
   return grams;
 }
 
+// 暴露给 catalog.ts 用于预计算 trigram 集合（避免每次 search 都重算）。
+export { buildCharacterTrigrams, expandSearchQueries };
+
 function registryNameSearchTokens(name: string): string[] {
   const segments = name.split(/[._-]+/).filter((s) => s.length >= 2);
   const underscored = name.replace(/\./g, "_");
@@ -352,7 +369,7 @@ function toolSearchAliases(name: string): string[] {
     { prefix: "embodiment.", words: ["桌面", "窗口", "移动", "身体", "化身"] },
     { prefix: "memory.", words: ["记忆", "回忆", "笔记"] },
     { prefix: "schedule.", words: ["定时", "计划任务", "cron"] },
-    { prefix: "desktop.visual.", words: ["桌面自动化", "截图", "屏幕", "键鼠", "computer"] },
+    { prefix: "desktop.visual.", words: ["截图", "屏幕", "键鼠", "computer"] },
     { prefix: "browser.", words: ["浏览器", "网页", "cookie", "页面"] },
     { prefix: "mcp.", words: ["外部工具", "平台", "文件", "mcp"] },
   ];
@@ -429,13 +446,35 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
   }
 
   const queryTokens = tokenize(normalized);
+  const queryTokenSet = new Set(queryTokens);
+  const addedVariants: string[] = [];
+  const MAX_VARIANTS = 5; // 限制变体数，避免 BM25/Trigram 多路 RRF 跑 N 次
   if (aliasEntries?.length && queryTokens.length > 0) {
+    // 优化：把每个 entry 的所有 alias 预先拼接并 lowercase 一次，
+    // 然后用 queryToken 逐个做 includes，避免每对 (alias, token) 都重复 substring。
+    // 在 100+ 工具 × 10+ alias × 10+ token 的情况下，旧的 O(N×M×K) substring 拼接约 100ms，
+    // 优化后降到 O(N×K)。
+    // 同时按 entry 的"语义匹配度"（alias 与 query 重叠 token 数）排序，
+    // 只取前 MAX_VARIANTS 个最相关的变体，避免变体爆炸。
+    type ScoredEntry = { registryName: string; score: number };
+    const scored: ScoredEntry[] = [];
     for (const entry of aliasEntries) {
       if (!entry.searchAliases?.length) continue;
-      const aliasMatched = entry.searchAliases.some((alias) =>
-        queryTokens.some((token) => alias.toLowerCase().includes(token) || token.includes(alias.toLowerCase())),
-      );
-      if (aliasMatched) variants.add(`${trimmed} ${entry.registryName}`);
+      const aliasBag = entry.searchAliases.map((a) => a.toLowerCase()).join("|");
+      if (!aliasBag) continue;
+      let overlap = 0;
+      for (const token of queryTokenSet) {
+        if (token.length < 2) continue;
+        if (aliasBag.includes(token)) overlap += 1;
+      }
+      if (overlap > 0) scored.push({ registryName: entry.registryName, score: overlap });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    for (const s of scored) {
+      if (addedVariants.length >= MAX_VARIANTS) break;
+      const v = `${trimmed} ${s.registryName}`;
+      variants.add(v);
+      addedVariants.push(v);
     }
   }
 

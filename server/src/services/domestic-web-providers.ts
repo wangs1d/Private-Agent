@@ -2,12 +2,13 @@ import type { InfoSearchItem } from "./info-hub-service.js";
 import {
   applySearchFreshness,
   prependRecencyQueryVariants,
-} from "./search-freshness.js";
-import type { RssHealthMonitor } from "./search-enhancements.js";
+  classifySearchIntent,
+  type RssHealthMonitor,
+} from "./search-enhancements.js";
 
 const BING_CN_SEARCH = "https://cn.bing.com/search";
-const DEFAULT_TIMEOUT_MS = 8_000;
-const MAX_QUERY_VARIANTS = 4;
+const DEFAULT_TIMEOUT_MS = 6_000;
+const MAX_QUERY_VARIANTS = 3; // 精简到 3：实体变体(1) + 原文(1) + recency变体(1)，减少并行请求
 
 const DOMESTIC_TECH_RSS_FEEDS: Array<{ source: string; url: string }> = [
   { source: "36氪", url: "https://36kr.com/feed" },
@@ -40,26 +41,19 @@ const DOMESTIC_NEWS_RSS_FEEDS: Array<{ source: string; url: string }> = [
 //   光明网/中青网: /2026-07/13/content_xxx.htm(l)
 //   海外网: /n/2026/0701/cxxx-xxx.html
 const DOMESTIC_NEWS_HTML_FEEDS: Array<{ source: string; url: string; baseUrl: string }> = [
-  // 央视网（官方媒体，3 个频道）
+  // 精简到 6 个核心源（原 13 个），减少并行 fan-out 同时保持覆盖面
+  // 央视网（官方媒体，首页覆盖最全）
   { source: "央视网", url: "https://news.cctv.com/", baseUrl: "https://news.cctv.com" },
-  { source: "央视网", url: "https://news.cctv.com/world/", baseUrl: "https://news.cctv.com" },
-  { source: "央视网", url: "https://news.cctv.com/china/", baseUrl: "https://news.cctv.com" },
-  // 联合早报（境外华文媒体，2 个频道）
+  // 联合早报（境外华文媒体）
   { source: "联合早报", url: "https://www.zaobao.com.sg/news/china", baseUrl: "https://www.zaobao.com.sg" },
-  { source: "联合早报", url: "https://www.zaobao.com.sg/news/world", baseUrl: "https://www.zaobao.com.sg" },
-  // 新浪（门户，3 个频道，覆盖面广）
+  // 新浪（门户，综合覆盖面广）
   { source: "新浪", url: "https://news.sina.com.cn/", baseUrl: "https://news.sina.com.cn" },
-  { source: "新浪", url: "https://news.sina.com.cn/world/", baseUrl: "https://news.sina.com.cn" },
-  { source: "新浪", url: "https://finance.sina.com.cn/", baseUrl: "https://finance.sina.com.cn" },
-  // 网易（门户，2 个频道）
+  // 网易（门户）
   { source: "网易", url: "https://news.163.com/", baseUrl: "https://news.163.com" },
-  { source: "网易", url: "https://money.163.com/", baseUrl: "https://money.163.com" },
   // 中国日报（官方媒体）
   { source: "中国日报", url: "https://cn.chinadaily.com.cn/", baseUrl: "https://cn.chinadaily.com.cn" },
   // 光明网（官方媒体）
   { source: "光明网", url: "https://news.gmw.cn/", baseUrl: "https://news.gmw.cn" },
-  // 中青网（官方媒体）
-  { source: "中青网", url: "http://news.cyol.com/", baseUrl: "http://news.cyol.com" },
 ];
 
 /**
@@ -156,13 +150,13 @@ export async function searchBingChina(
   query: string,
   limit: number,
   opts: DomesticFetchOptions,
+  flags: { skipRelevanceFilter?: boolean } = {},
 ): Promise<InfoSearchItem[]> {
   const keyword = query.trim();
   if (!keyword) return [];
 
   const allVariants = prependRecencyQueryVariants(buildSearchQueryVariants(keyword), keyword);
   const variants = allVariants.slice(0, MAX_QUERY_VARIANTS);
-  const minHits = Math.min(3, limit);
 
   if (variants.length === 0) return [];
 
@@ -174,25 +168,36 @@ export async function searchBingChina(
     ),
   );
 
-  let bestFallback: InfoSearchItem[] = [];
+  let collected: InfoSearchItem[] = [];
 
   for (const result of results) {
     if (result.status !== "fulfilled" || result.value.length === 0) continue;
-    const relevant = filterItemsByRelevance(result.value, keyword);
+    // 宽松模式：跳过相关性过滤，保留所有原始结果（用于回退搜索）
+    const relevant = flags.skipRelevanceFilter
+      ? result.value
+      : filterItemsByRelevance(result.value, keyword);
     if (relevant.length === 0) continue;
-    const fresh = applySearchFreshness(relevant, { query: keyword }).items;
-    if (fresh.length >= minHits) return fresh.slice(0, limit);
-    if (fresh.length > bestFallback.length) bestFallback = fresh;
+    collected = [...collected, ...relevant];
   }
 
-  return applySearchFreshness(bestFallback, { query: keyword }).items.slice(0, limit);
+  // 合并去重后只调用一次 applySearchFreshness（避免冗余排序）
+  return applySearchFreshness(dedupeByUrl(collected), { query: keyword }).items.slice(0, limit);
+}
+
+/** 宽松模式必应搜索：跳过相关性过滤 + 不要求最低命中数，返回所有能找到的结果。 */
+export async function searchBingChinaRelaxed(
+  query: string,
+  limit: number,
+  opts: DomesticFetchOptions,
+): Promise<InfoSearchItem[]> {
+  return searchBingChina(query, limit, opts, { skipRelevanceFilter: true });
 }
 
 function calculateTimeoutPerVariant(totalBudgetMs: number, variantCount: number): number {
   const safeCount = Math.max(1, variantCount);
   const perVariant = Math.floor(totalBudgetMs / safeCount);
-  const minPerVariant = 3_000;
-  const maxPerVariant = 10_000;
+  const minPerVariant = 2_000;
+  const maxPerVariant = 8_000;
   return Math.max(minPerVariant, Math.min(maxPerVariant, perVariant));
 }
 
@@ -269,7 +274,18 @@ export function buildSearchQueryVariants(query: string): string[] {
   const stockCode = raw.match(/\b[036]\d{5}\b/)?.[0];
   if (stockCode) priorityVariants.push(stockCode);
 
-  const entity = extractPrimaryChineseEntity(raw);
+  // 关键修复：使用 classifySearchIntent 的实体提取（支持中英混合、英文+数字等），
+  // 不要只用 extractPrimaryChineseEntity（它只支持纯中文，会丢失「A」在「A股」中的角色）。
+  // 这样「今天A股最新消息」会得到 [A股, 今天A股最新消息, ...] 而不是 [今天A股, ...]
+  const intentAnalysis = classifySearchIntent(raw);
+  const intentEntity = intentAnalysis.entities.find(
+    (e) =>
+      e.length >= 2 &&
+      !/^(最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|动态|头条|怎么|如何|什么|情况)$/i.test(e),
+  );
+
+  // 兼容旧逻辑：纯中文实体（如果 intent 没找到好实体，再用 extractPrimaryChineseEntity）
+  const entity = intentEntity ?? extractPrimaryChineseEntity(raw);
 
   if (entity) {
     priorityVariants.push(`"${entity}"`);
@@ -391,6 +407,29 @@ function extractRelevanceAnchors(query: string): string[] {
     push(m[1] ?? "");
   }
 
+  // === 关键修复：拆解无分隔符的混合 query ===
+  // 原 bug：对 "今天A股最新消息" 这种无空格的 query，整个字符串被当一个 token，
+  // 导致 anchors = ["今天A股最新消息"]，任何 item.title/snippet 都不含这个完整短语，全部被过滤掉。
+  // 修复：从 query 中拆出"更具体"的子串（中英混合、英文-数字、中文-数字、英文+数字型号）。
+  // 1. 中英混合词（如 A股、B股、H股、AI芯片）
+  for (const m of query.matchAll(/[a-zA-Z]{1,3}[\u4e00-\u9fff]{1,4}/g)) {
+    push(m[0]);
+  }
+  // 2. 英文-数字型号（GPT-5、iPhone 17、Claude 4）
+  for (const m of query.matchAll(/[A-Za-z][A-Za-z0-9]{0,15}[\s\-_]?\d{1,3}[A-Za-z]?\b/g)) {
+    push(m[0].trim());
+  }
+  // 3. 中文-数字型号（蜘蛛侠4、华为Mate60）— 中文主体+数字版本
+  for (const m of query.matchAll(/[\u4e00-\u9fff]{1,8}[A-Za-z0-9]{0,8}[\s\-_]?\d{1,3}[A-Za-z]?\b/g)) {
+    const s = m[0].trim();
+    if (/[\u4e00-\u9fff]/.test(s) && /\d/.test(s)) push(s);
+  }
+  // 4. 中文连续段（2-6 字）— 比 8-10 字阈值更小，避免过短噪音
+  for (const m of query.matchAll(/[\u4e00-\u9fff]{2,6}/gu)) {
+    const s = m[0];
+    if (!SEARCH_STOPWORDS.has(s)) push(s);
+  }
+
   for (const token of query.split(/[\s,，、。；;:：/|]+/)) {
     const t = token.trim();
     if (t.length < 2 || SEARCH_STOPWORDS.has(t)) continue;
@@ -458,7 +497,8 @@ export async function fetchDomesticTechNews(
       return keywords.some((k) => hay.includes(k));
     });
   }
-  return applySearchFreshness(merged, { query: topic }).items.slice(0, limit);
+  // 不再在此处调用 applySearchFreshness，由调用方统一处理
+  return merged.slice(0, limit);
 }
 
 /** 国内官方媒体 RSS 聚合 + HTML 列表爬取（中国新闻网/人民网 RSS + 央视网/新浪/网易/中国日报等 HTML）。 */
@@ -514,7 +554,8 @@ export async function fetchDomesticOfficialNews(
       return keywords.some((k) => hay.includes(k));
     });
   }
-  return applySearchFreshness(merged, { query: topic }).items.slice(0, limit);
+  // 不再在此处调用 applySearchFreshness，由调用方统一处理
+  return merged.slice(0, limit);
 }
 
 /**

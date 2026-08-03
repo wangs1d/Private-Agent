@@ -16,13 +16,26 @@ class NextbotChatLayout extends StatefulWidget {
     this.splitRatio = 0.5,
     this.onSplitRatioChanged,
     this.onRightPanelWidthChanged,
+
+    /// side 模式下右面板的初始总占位（含 8px 拖拽条），
+    /// 不传则用 [kRightSidePanelWidth] + 8 = 228。split 模式下忽略。
+    ///
+    /// 此值会在拖动时被改写，并同步给 [onRightPanelWidthChanged]。
+    /// 含义上等同于 split 模式的"右占位"语义（[kRightSidePanelWidth] 早先
+    /// 不含 divider，现加上 8px 的拖拽条后语义对齐为"总右占位"）。
+    this.sidePanelWidth,
+
+    /// side 模式下右面板可调整的最小总占位（含 8px 拖拽条）。
+    /// 低于此值时禁止继续收窄。
+    this.minSidePanelWidth = 208.0,
   });
 
   /// 中间的聊天页（通常为 ChatPage）。
   final Widget child;
 
   /// 是否为 split 模式（聊天 + 分割条 + 动态右面板宽度）。
-  /// 为 false 时聊天区占满主区，右侧留出 [kRightSidePanelWidth] 占位。
+  /// 为 false 时聊天区占满主区，右侧留出 [sidePanelWidth] 占位；
+  /// 此时仍会渲染一个常驻 [VerticalDragDivider]，允许用户拖拽调整面板宽度。
   final bool useSplit;
 
   /// 左聊天区占可用宽度的比例（0.1~0.9），仅在 [useSplit] 为 true 时使用。
@@ -31,9 +44,15 @@ class NextbotChatLayout extends StatefulWidget {
   /// 拖动分割条时回调，参数为新的 leftRatio。
   final ValueChanged<double>? onSplitRatioChanged;
 
-  /// 当前应预留的右面板宽度（含 split 动态宽度与 side 固定宽度）。
+  /// 当前应预留的右面板宽度（含 split 动态宽度与 side 动态宽度）。
   /// 调用方可用此值同步 AppBar 右边距，避免右面板覆盖顶部栏。
   final ValueChanged<double>? onRightPanelWidthChanged;
+
+  /// side 模式下右面板宽度（含 divider），用于初始化。
+  final double? sidePanelWidth;
+
+  /// side 模式下右面板最小宽度（含 divider）。低于此值时禁止继续收窄。
+  final double minSidePanelWidth;
 
   @override
   State<NextbotChatLayout> createState() => _NextbotChatLayoutState();
@@ -44,7 +63,31 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
   static const double _minRight = 420.0;
   static const double _dividerWidth = 8.0;
 
+  /// side 模式下右面板的当前宽度（含 divider），内部状态以便持续响应拖动。
+  /// split 模式下不使用。
+  late double _sidePanelWidth;
+
   double? _lastReportedRightWidth;
+
+  @override
+  void initState() {
+    super.initState();
+    // side 模式下总右占位 = 面板内容宽 [kRightSidePanelWidth] + 8px 拖拽条。
+    // 拖拽条位于 chat 与右面板之间, 不挤压面板内容, 只让 chat 区略窄 8px。
+    // 调用方传入的 [widget.sidePanelWidth] 已是"总右占位"（含 divider），
+    // 此处只在没传时按 kRightSidePanelWidth + 8 给默认值。
+    _sidePanelWidth = widget.sidePanelWidth ??
+        (kRightSidePanelWidth + _dividerWidth);
+  }
+
+  @override
+  void didUpdateWidget(covariant NextbotChatLayout oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.sidePanelWidth != null &&
+        widget.sidePanelWidth != oldWidget.sidePanelWidth) {
+      _sidePanelWidth = widget.sidePanelWidth!;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -58,7 +101,7 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
         final double actualWidth = constraints.maxWidth;
 
         double? leftWidth;
-        double rightWidth = kRightSidePanelWidth;
+        double rightWidth;
         if (widget.useSplit) {
           final double availForPanels = actualWidth - _dividerWidth;
           double lw = (availForPanels * widget.splitRatio)
@@ -71,6 +114,9 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
           }
           leftWidth = lw;
           rightWidth = rw;
+        } else {
+          // side 模式:聊天区占满,右面板宽度由拖动条控制
+          rightWidth = _sidePanelWidth;
         }
 
         _reportRightWidth(rightWidth);
@@ -84,30 +130,36 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
                 SizedBox(width: leftWidth, child: widget.child)
               else
                 Expanded(child: widget.child),
+              // 分割条：split 模式已写过，但渲染在 Expanded 之后；
+              // side 模式现在也始终渲染常驻分割条,允许用户调整宽度
+              VerticalDragDivider(
+                onDrag: widget.useSplit
+                    ? (double deltaX) {
+                        if (widget.onSplitRatioChanged == null) return;
+                        final double avail = actualWidth - _dividerWidth;
+                        final double newLeft = (leftWidth! + deltaX)
+                            .clamp(_minLeft, avail - _minRight);
+                        final double newRatio =
+                            (newLeft / avail).clamp(0.1, 0.9);
+                        final double newRight = avail - newLeft;
+                        widget.onSplitRatioChanged!(newRatio);
+                        _reportRightWidth(newRight);
+                      }
+                    : (double deltaX) {
+                        // side 模式: 分割条在右面板左边缘
+                        // 向右拖 (deltaX>0) → 面板变窄；向左拖 (deltaX<0) → 面板变宽
+                        final double maxRight = actualWidth - _minLeft;
+                        final double newRight = (_sidePanelWidth - deltaX)
+                            .clamp(widget.minSidePanelWidth, maxRight);
+                        if ((newRight - _sidePanelWidth).abs() < 0.5) return;
+                        setState(() => _sidePanelWidth = newRight);
+                        _reportRightWidth(newRight);
+                      },
+              ),
               if (widget.useSplit)
-                VerticalDragDivider(
-                  onDrag: (double deltaX) {
-                    if (widget.onSplitRatioChanged == null) return;
-                    final double avail = actualWidth - _dividerWidth;
-                    final double newLeft = (leftWidth! + deltaX)
-                        .clamp(_minLeft, avail - _minRight);
-                    final double newRatio =
-                        (newLeft / avail).clamp(0.1, 0.9);
-                    final double newRight = avail - newLeft;
-                    widget.onSplitRatioChanged!(newRatio);
-                    _reportRightWidth(newRight);
-                  },
-                )
+                SizedBox(width: rightWidth)
               else
-                // 右侧 kRightSidePanelWidth 占位：实际内容由外层 Stack 的
-                // RightSidePanel 以 Positioned(top: 0, right: 0, ...) 渲染，
-                // 从而覆盖顶部 AppBar。
-                const SizedBox(width: kRightSidePanelWidth),
-              if (widget.useSplit)
-                // split 模式右侧占位：实际内容（带关闭按钮的分栏面板）由
-                // 调用方在外层 Stack 用 Positioned 渲染，宽度由
-                // [onRightPanelWidthChanged] 同步，避免右面板覆盖顶部 AppBar。
-                SizedBox(width: rightWidth),
+                SizedBox(width: rightWidth - _dividerWidth),
             ],
           ),
         );

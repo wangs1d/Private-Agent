@@ -294,7 +294,7 @@ export class EmailSmsService {
     const url = `https://dysmsapi.aliyuncs.com/?${finalQuery}`;
 
     try {
-      const res = await fetch(url, { method: "GET" });
+      const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(15_000) });
       const json = (await res.json()) as { Code?: string; Message?: string; BizId?: string; RequestId?: string };
       if (!res.ok || json.Code !== "OK") {
         const err = `阿里云短信发送失败：${json.Code ?? `HTTP ${res.status}`} ${json.Message ?? res.statusText}`;

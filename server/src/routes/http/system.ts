@@ -7,11 +7,15 @@ import {
 } from "@private-ai-agent/agent-world";
 import { PROTOCOL_UNIFIED_TOOL_NAMES } from "../../tools/protocol-unified-tools.js";
 import type { HttpRouteDeps } from "./types.js";
+import type { BrainCenter } from "../../brain/brain-center.js";
 
 /**
  * 系统级：健康检查（根路径，便于探针与旧文档链接）。
  */
-export function registerSystemRoutes(app: FastifyInstance, deps: Pick<HttpRouteDeps, "upstreamSearchService">): void {
+export function registerSystemRoutes(
+  app: FastifyInstance,
+  deps: Pick<HttpRouteDeps, "upstreamSearchService" | "brainCenter">,
+): void {
   app.get("/health", async () => ({ ok: true }));
 
   /** AWP v0.1：无鉴权元数据，供外部 Agent 发现入口与事件名。 */
@@ -64,5 +68,12 @@ export function registerSystemRoutes(app: FastifyInstance, deps: Pick<HttpRouteD
   app.get("/system/concurrency", async () => {
     const { getConcurrencyStats } = await import("../../services/concurrency-limiter.js");
     return { ok: true, ...getConcurrencyStats() };
+  });
+
+  /** Brain 模块健康状态（仅 brain 启用时有效）。 */
+  app.get("/brain/health", async () => {
+    const bc = deps.brainCenter;
+    if (!bc) return { ok: false, reason: "BrainCenter 未启用" };
+    return { ok: true, ...bc.getHealth() };
   });
 }

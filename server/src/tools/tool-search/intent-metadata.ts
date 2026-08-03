@@ -85,10 +85,60 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   {
     prefix: "desktop.visual.",
     metadata: {
-      aliases: ["desktop", "screenshot", "screen", "automation", "computer control", "桌面", "截图", "自动化"],
+      aliases: ["desktop", "screenshot", "screen", "computer control", "桌面", "截图"],
+      // 注意：这里不放 "automation"/"自动化"——desktop.run_automation 才是该语义的目标工具，
+      // 避免 desktop.visual.*（如 screenshot/run_task）因通用 alias 抢走 top1。
       negativeAliases: ["weather", "shopping recommendation", "wallet balance"],
       examples: ["take a screenshot", "open the browser and click the search box"],
       negativeExamples: ["what's today's weather"],
+    },
+  },
+  {
+    exact: "desktop.visual.screenshot",
+    metadata: {
+      negativeAliases: [
+        "automation task script",
+        "run automation",
+        "自动化任务脚本",
+        "UIA pattern",
+        "原生控件操作",
+      ],
+      negativeExamples: [
+        "运行桌面自动化任务脚本",
+        "用 UIA 操作 Windows 原生控件",
+        "执行 run_automation 任务",
+      ],
+    },
+  },
+  {
+    exact: "desktop.run_automation",
+    metadata: {
+      aliases: [
+        "run automation script",
+        "execute desktop automation task",
+        "UIA native control operation",
+        "运行桌面自动化任务脚本",
+        "桌面控件原子操作",
+        "UIA pattern 直接调用",
+        "免抢焦点的桌面操作",
+      ],
+      negativeAliases: [
+        "take a screenshot",
+        "open the browser",
+        "screenshot capture",
+        "截屏",
+        "打开浏览器",
+        "全屏截图",
+      ],
+      examples: [
+        "运行桌面自动化任务脚本",
+        "用 UIA 操作 Windows 原生控件",
+        "执行 run_automation 任务",
+      ],
+      negativeExamples: [
+        "截一张桌面截图",
+        "打开浏览器到百度",
+      ],
     },
   },
   {
@@ -98,6 +148,67 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeAliases: ["price compare", "weather", "wallet bill"],
       examples: ["move a bit to the left"],
       negativeExamples: ["compare product prices"],
+    },
+  },
+  {
+    exact: "embodiment.window_place",
+    metadata: {
+      aliases: [
+        "put window at position",
+        "place avatar window at coordinates",
+        "set window to specified position",
+        "桌面角色窗口放到指定位置",
+        "球形窗口精准定位",
+        "把化身放到屏幕某个位置",
+        "窗口精调",
+      ],
+      negativeAliases: [
+        "random wander",
+        "roam freely",
+        "无目标随机漫游",
+        "随便走走",
+      ],
+      examples: [
+        "把桌面角色窗口放到右下角",
+        "把球形化身窗口定位到屏幕中央",
+        "把悬浮窗放到指定坐标",
+        "move my avatar window to (0.5, 0.5)",
+      ],
+      negativeExamples: [
+        "让桌面角色随便走走",
+        "让窗口随机换个位置",
+        "roam around the screen",
+      ],
+    },
+  },
+  {
+    exact: "embodiment.roam",
+    metadata: {
+      aliases: ["3D 场景随机漫游", "无目标漫游", "随机走动", "自由漫游", "random roam", "free move", "漫游移动", "到处走走"],
+      negativeAliases: ["放到指定位置", "定位", "坐标", "place at", "position"],
+      examples: ["在 3D 场景里随机漫游", "让角色到处走走", "无目标移动"],
+      negativeExamples: ["把窗口放到指定位置", "移动到坐标 (1,2,3)"],
+    },
+  },
+  {
+    exact: "embodiment.move",
+    metadata: {
+      aliases: ["移动到坐标", "场景内移动", "移动到指定位置", "move to coordinates", "scene move"],
+      negativeAliases: ["随机漫游", "random roam", "无目标"],
+      examples: ["移动到场景坐标 (1,2,3)", "移动到指定位置"],
+      negativeExamples: ["随机漫游", "到处走走"],
+    },
+  },
+  {
+    exact: "embodiment.window_roam",
+    metadata: {
+      aliases: ["random window roam", "no-target window move", "随便换个位置", "随机挪一下窗口"],
+      examples: ["让窗口随机换到别处", "no specific target, just move"],
+      negativeExamples: [
+        "把窗口放到指定位置",
+        "定位到屏幕中央",
+        "place the avatar at a specific position",
+      ],
     },
   },
   {

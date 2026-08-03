@@ -1,6 +1,7 @@
 import { join } from "node:path";
 
 import { envBool } from "../config/memory-env.js";
+import { isPlaceholderApiKey } from "../config/api-key-validator.js";
 
 function envPositiveInt(name: string, fallback: number): number {
   const v = Number.parseInt(process.env[name] ?? "", 10);
@@ -48,11 +49,13 @@ export function getAgenticMemoryLlmModel(): string {
 }
 
 export function resolveOpenAiApiKey(): string | null {
-  return (
+  const key =
     process.env.OPENAI_API_KEY?.trim() ||
     process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
-    null
-  );
+    null;
+  // 防御：占位符 key（sk-placeholder-... 等）不应被当作真 key 传给 mem0ai
+  if (isPlaceholderApiKey(key)) return null;
+  return key;
 }
 
 export function getAgenticMemoryCustomInstructions(): string {

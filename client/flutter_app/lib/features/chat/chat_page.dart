@@ -1,6 +1,7 @@
 import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 import "dart:async";
 
 import "../../core/models/chat_models.dart";
@@ -202,14 +203,7 @@ class _ChatPageState extends State<ChatPage>
   bool _hasNewAgentMessage = false;
   AnimationController? _breathingController;
   Animation<double>? _breathingAnimation;
-  List<Map<String, dynamic>>? _cachedMessageGroups;
-  int _cachedMessagesLength = -1;
 
-  /// 消息折叠相关状态
-  static const int _collapseThreshold = 30; // 超过此数量时开始折叠
-  static const int _visibleCount = 30; // 折叠后显示的消息数量
-  bool _isCollapsed = false; // 是否处于折叠状态
-  int _collapsedCount = 0; // 被折叠的消息数量
   bool _hasHadMessages = false; // 是否已经加载过消息（用于区分初始加载和后续新消息）
 
   /// ====== 滚动位置保持相关 ======
@@ -225,9 +219,8 @@ class _ChatPageState extends State<ChatPage>
   static const EdgeInsets _listPadding =
       EdgeInsets.symmetric(horizontal: 12, vertical: 4);
   static const EdgeInsets _cardPadding = EdgeInsets.all(7);
-  static const EdgeInsets _inputPadding = EdgeInsets.fromLTRB(6, 12, 6, 10);
   static const EdgeInsets _inputHorizontalPadding =
-      EdgeInsets.symmetric(horizontal: 10, vertical: 6);
+      EdgeInsets.symmetric(horizontal: 4, vertical: 6);
 
   @override
   void initState() {
@@ -290,7 +283,7 @@ class _ChatPageState extends State<ChatPage>
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
-    // reverse 模式下：pixels=0 是底部，pixels 越大越靠近顶部
+    // reverse 模式下：pixels=0 是底部（最新消息），pixels 越大越靠近顶部（最旧消息）
     final double currentScroll = _scrollController.position.pixels;
 
     // 使用 ValueNotifier 更新，避免触发 setState 导致整树重建和掉帧
@@ -308,11 +301,6 @@ class _ChatPageState extends State<ChatPage>
   @override
   void didUpdateWidget(covariant ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.messages.length != _cachedMessagesLength ||
-        widget.isAgentProcessing != oldWidget.isAgentProcessing ||
-        widget.agentStatusLine != oldWidget.agentStatusLine) {
-      _cachedMessageGroups = null;
-    }
 
     // ====== 优先处理 Tab 切换（离开 / 进入） ======
     final bool wasActive = _isTabActive;
@@ -367,12 +355,6 @@ class _ChatPageState extends State<ChatPage>
     if (hasNewUserMessage) {
       _isUserScrollingNotifier.value = false;
       _hasNewAgentMessage = false;
-
-      // 如果消息数量超过阈值且当前是展开状态，自动折叠
-      if (widget.messages.length > _collapseThreshold && !_isCollapsed) {
-        setState(() => _isCollapsed = true);
-      }
-
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
       return;
     }
@@ -396,13 +378,6 @@ class _ChatPageState extends State<ChatPage>
 
       final bool isFirstLoad = !_hasHadMessages && widget.messages.isNotEmpty;
       if (isFirstLoad) _hasHadMessages = true;
-
-      // 仅用户消息超阈值时自动折叠；assistant 回复不触发折叠
-      if (hasNewUserMessage &&
-          widget.messages.length > _collapseThreshold &&
-          !_isCollapsed) {
-        setState(() => _isCollapsed = true);
-      }
 
       WidgetsBinding.instance
           .addPostFrameCallback((_) => _scrollToBottom(instant: isFirstLoad));
@@ -538,172 +513,12 @@ class _ChatPageState extends State<ChatPage>
     debugPrint(buf.toString());
   }
 
-  /// 将消息分组：用户消息单独一组；助手正文按条展示（进度由 `agentStatusLine` 提供，勿把短回复当流程提示吞掉）。
-  List<Map<String, dynamic>> _getGroupedMessages() {
-    if (_cachedMessageGroups != null &&
-        widget.messages.length == _cachedMessagesLength &&
-        !widget.isAgentProcessing) {
-      return _cachedMessageGroups!;
-    }
-
-    final List<Map<String, dynamic>> groups = <Map<String, dynamic>>[];
-
-    for (int i = 0; i < widget.messages.length; i++) {
-      final ChatMessage currentMessage = widget.messages[i];
-
-      // 进度消息特殊处理
-      if (currentMessage.role == "assistant_progress") {
-        groups.add(<String, dynamic>{
-          "isUser": false,
-          "main": currentMessage,
-          "progress": null,
-          "isProgress": true,
-        });
-      } else if (currentMessage.role == "user") {
-        groups.add(<String, dynamic>{
-          "isUser": true,
-          "main": currentMessage,
-          "progress": null,
-          "isProgress": false,
-        });
-      } else {
-        groups.add(<String, dynamic>{
-          "isUser": false,
-          "main": currentMessage,
-          "progress": null,
-          "isProgress": false,
-        });
-      }
-    }
-
-    _cachedMessageGroups = groups;
-    _cachedMessagesLength = widget.messages.length;
-    return groups;
-  }
-
-  /// 获取用于显示的消息列表（考虑折叠状态）
-  List<Map<String, dynamic>> _getDisplayMessages() {
-    final List<Map<String, dynamic>> allGroups = _getGroupedMessages();
-
-    // 如果消息数量不超过阈值，不折叠
-    if (allGroups.length <= _collapseThreshold) {
-      _collapsedCount = 0;
-      return allGroups;
-    }
-
-    // 计算被折叠的消息数量
-    _collapsedCount = allGroups.length - _visibleCount;
-
-    // 如果处于折叠状态，只返回后面的消息
-    if (_isCollapsed) {
-      return allGroups.sublist(allGroups.length - _visibleCount);
-    }
-
-    // 展开状态，返回所有消息
-    return allGroups;
-  }
-
-  /// 获取反转后的显示消息列表（用于 reverse ListView，使最新消息在 index 0 = 视觉底部）
-  List<Map<String, dynamic>> _getReversedDisplayMessages() {
-    final List<Map<String, dynamic>> displayMessages = _getDisplayMessages();
-    return List<Map<String, dynamic>>.from(displayMessages.reversed);
-  }
-
-  /// 切换折叠/展开状态
-  void _toggleCollapse() {
-    setState(() {
-      _isCollapsed = !_isCollapsed;
-      // 如果展开，滚动到之前的位置；如果折叠，滚动到底部
-      if (!_isCollapsed) {
-        // 展开时保持当前位置（稍后会自动调整）
-      } else {
-        // 折叠后滚动到底部
-        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-      }
-    });
-  }
-
-  /// 构建折叠按钮组件
-  Widget _buildCollapseButton(ColorScheme cs) {
-    if (_collapsedCount <= 0) return const SizedBox.shrink();
-
-    // 获取被折叠消息的时间范围
-    String timeRange = "";
-    final List<Map<String, dynamic>> allGroups = _getGroupedMessages();
-    if (allGroups.length > _visibleCount) {
-      final Map<String, dynamic> firstCollapsed =
-          allGroups[allGroups.length - _visibleCount - 1];
-      final Map<String, dynamic> lastCollapsed = allGroups.first;
-      final ChatMessage firstMsg = firstCollapsed['main'] as ChatMessage;
-      final ChatMessage lastMsg = lastCollapsed['main'] as ChatMessage;
-
-      timeRange =
-          " (${_formatTimeRange(firstMsg.timestamp, lastMsg.timestamp)})";
-    }
-
-    return Center(
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 8),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: _toggleCollapse,
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: cs.outline.withValues(alpha: 0.2),
-                  width: 1,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Icon(
-                    _isCollapsed ? Icons.expand_more : Icons.expand_less,
-                    size: 18,
-                    color: cs.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    _isCollapsed
-                        ? "查看 $_collapsedCount 条历史消息$timeRange"
-                        : "收起历史消息",
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          color: cs.onSurfaceVariant,
-                          fontWeight: FontWeight.w500,
-                        ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 格式化时间范围
-  String _formatTimeRange(DateTime start, DateTime end) {
-    final DateTime now = DateTime.now();
-
-    String formatTime(DateTime time) {
-      final Duration diff = now.difference(time);
-      if (diff.inDays > 7) {
-        return "${time.month}/${time.day}";
-      } else if (diff.inDays > 0) {
-        return "${diff.inDays}天前";
-      } else if (diff.inHours > 0) {
-        return "${diff.inHours}h前";
-      } else {
-        return "${diff.inMinutes}m前";
-      }
-    }
-
-    return "${formatTime(end)} - ${formatTime(start)}";
+  /// 按时间倒序生成所有消息的渲染项列表（最新在 reverse ListView 的 index 0）。
+  List<Map<String, dynamic>> _getRenderItems() {
+    final List<ChatMessage> sorted = List<ChatMessage>.from(widget.messages)
+      ..sort((ChatMessage a, ChatMessage b) =>
+          b.timestamp.compareTo(a.timestamp));
+    return sorted.map(_messageToGroup).toList();
   }
 
   /// 处理中气泡文案：`agent_status` > 即时确认应答（interim ack）> 历史流程提示 > 默认
@@ -753,6 +568,110 @@ class _ChatPageState extends State<ChatPage>
       return false; // 最新一条 assistant 不撞，剩下的也无需看
     }
     return false;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 发送按钮（常显，有内容时高亮可点击）
+  // ═══════════════════════════════════════════════════════════
+  Widget _buildSendButton(ColorScheme cs) {
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: widget.controller,
+      builder: (_, TextEditingValue value, __) {
+        final bool canSend = value.text.trim().isNotEmpty;
+        return Container(
+          key: const ValueKey('input-send-btn'),
+          decoration: BoxDecoration(
+            color: canSend
+                ? cs.primary
+                : cs.surfaceContainerHighest.withValues(alpha: 0.8),
+            shape: BoxShape.circle,
+          ),
+          child: IconButton(
+            icon: Icon(
+              Icons.send_rounded,
+              size: 18,
+              color: canSend ? cs.onPrimary : cs.onSurfaceVariant,
+            ),
+            tooltip: "发送",
+            onPressed: canSend
+                ? () {
+                    if (widget.controller.text.trim().isNotEmpty) {
+                      widget.onSend();
+                    }
+                  }
+                : null,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(
+              width: 34,
+              height: 34,
+            ),
+            splashRadius: 16,
+          ),
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 停止按钮（agent 处理中显示）
+  // ═══════════════════════════════════════════════════════════
+  Widget _buildStopButton(ColorScheme cs) {
+    return Container(
+      key: const ValueKey('input-stop-btn'),
+      decoration: BoxDecoration(
+        color: cs.errorContainer.withValues(alpha: 0.4),
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: cs.error.withValues(alpha: 0.5),
+        ),
+      ),
+      child: IconButton(
+        icon: Icon(
+          Icons.stop_rounded,
+          size: 16,
+          color: cs.error,
+        ),
+        tooltip: "停止",
+        onPressed: widget.onStopAgent,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(
+          width: 34,
+          height: 34,
+        ),
+        splashRadius: 16,
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 输入框内统一的图标按钮样式
+  // ═══════════════════════════════════════════════════════════
+  Widget _buildInputIconButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback? onTap,
+    required ColorScheme cs,
+    double size = 20,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: onTap,
+          child: SizedBox(
+            width: 32,
+            height: 32,
+            child: Icon(
+              icon,
+              size: size,
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildProgressBubble(ColorScheme cs, String text) {
@@ -893,16 +812,10 @@ class _ChatPageState extends State<ChatPage>
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    // reverse 模式下使用反转消息列表（最新消息在 index 0 → 视觉底部）
-    final List<Map<String, dynamic>> reversedMessages =
-        _getReversedDisplayMessages();
-    final int msgCount = reversedMessages.length;
-    // reverse ListView 的 item 顺序（index 0 = 底部）：
-    //   [newestMsg, ..., oldestMsg, collapseButton(顶)]
-    // 思考气泡已废弃（由输入框白色呼吸灯替代），不再占位。
-    final int itemCount =
-        msgCount + (_collapsedCount > 0 && !_isCollapsed ? 1 : 0);
-    final bool showCollapseButton = _collapsedCount > 0;
+    // 渲染项列表：按 reverse ListView 顺序（index 0 = 视觉底部 = 最新消息），
+    // 直接渲染所有消息，不做任何折叠/分桶。
+    final List<Map<String, dynamic>> renderItems = _getRenderItems();
+    final int itemCount = renderItems.length;
 
     return ColoredBox(
       color: cs.surface,
@@ -932,17 +845,8 @@ class _ChatPageState extends State<ChatPage>
                     cacheExtent: 500,
                     itemCount: itemCount,
                     itemBuilder: (BuildContext context, int index) {
-                      // reverse 模式下 index 0 = 视觉底部
-                      // 思考气泡已废弃（由输入框白色呼吸灯替代），不在消息列表占位。
-                      final int msgIndex = index;
-
-                      // 最后一个位置 → 折叠按钮（最顶部，在历史消息上方）
-                      if (showCollapseButton && msgIndex >= msgCount) {
-                        return _buildCollapseButton(cs);
-                      }
-
-                      // 正常消息
-                      final messageGroup = reversedMessages[msgIndex];
+                      // reverse 模式下 index 0 = 视觉底部（最新消息）
+                      final Map<String, dynamic> messageGroup = renderItems[index];
                       final bool isUser = messageGroup['isUser'] as bool;
                       final ChatMessage mainMessage =
                           messageGroup['main'] as ChatMessage;
@@ -1086,6 +990,7 @@ class _ChatPageState extends State<ChatPage>
                         );
                       },
                     ),
+                    const SizedBox(height: 8),
                     // 主输入框容器
                     // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
                     // - 空闲时：维持原本的浅灰描边 + 柔和投影
@@ -1100,13 +1005,12 @@ class _ChatPageState extends State<ChatPage>
                         return Container(
                           decoration: BoxDecoration(
                             color: cs.surface,
-                            borderRadius: BorderRadius.circular(28),
+                            borderRadius: BorderRadius.circular(20),
+                            // 外层描边：busy 强白光，idle 弱白光，随呼吸脉动
                             border: Border.all(
-                              color: busy
-                                  ? Colors.white
-                                      .withValues(alpha: 0.35 + 0.5 * breath)
-                                  : cs.outline.withValues(alpha: 0.55),
-                              width: busy ? 1.4 : 1.0,
+                              color: Colors.white
+                                  .withValues(alpha: 0.15 + 0.45 * pulse),
+                              width: 0.8 + 0.6 * pulse,
                             ),
                             boxShadow: <BoxShadow>[
                               if (busy) ...<BoxShadow>[
@@ -1124,24 +1028,12 @@ class _ChatPageState extends State<ChatPage>
                                   blurRadius: 4,
                                 ),
                               ] else ...<BoxShadow>[
-                                // 远场扩散投影（环境光遮蔽，最柔最广）
+                                // 柔和投影，更轻盈
                                 BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.12),
-                                  blurRadius: 32,
-                                  spreadRadius: 1,
-                                  offset: const Offset(0, 10),
-                                ),
-                                // 中距主投影（让输入框立体感更强）
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.07),
-                                  blurRadius: 12,
-                                  offset: const Offset(0, 3),
-                                ),
-                                // 近场接触阴影（边缘锐利，紧贴输入框）
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.04),
-                                  blurRadius: 4,
-                                  offset: const Offset(0, 1),
+                                  color: Colors.black.withValues(alpha: 0.08),
+                                  blurRadius: 20,
+                                  spreadRadius: 0,
+                                  offset: const Offset(0, 4),
                                 ),
                               ],
                             ],
@@ -1150,49 +1042,84 @@ class _ChatPageState extends State<ChatPage>
                         );
                       },
                       child: Padding(
-                        padding: _inputPadding,
+                        padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
-                            // 第一行：输入框 + 发送/打断按钮
+                            // 第一行：输入框 + 发送/停止按钮
                             Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.end,
                               children: <Widget>[
-                                Flexible(
-                                  flex: 3,
-                                  child: TextField(
-                                    controller: widget.controller,
-                                    focusNode: widget.inputFocusNode,
-                                    style: TextStyle(color: cs.onSurface),
-                                    cursorColor: cs.primary,
-                                    maxLines: null,
-                                    minLines: 1,
-                                    textInputAction: TextInputAction.send,
-                                    keyboardType: TextInputType.multiline,
-                                    onSubmitted: (_) {
-                                      // 按下 Enter 键时发送消息
-                                      if (widget.controller.text
-                                          .trim()
-                                          .isNotEmpty) {
-                                        widget.onSend();
-                                      }
-                                    },
-                                    decoration: InputDecoration(
-                                      hintText: "发消息或输入\"/\"选择技能",
-                                      border: InputBorder.none,
-                                      hintStyle: TextStyle(
-                                        color: cs.onSurfaceVariant
-                                            .withValues(alpha: 0.6),
-                                        fontSize: 15,
+                                // 中间：输入框
+                                Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 4, vertical: 2),
+                                    child: Focus(
+                                      // Enter 键发送消息；Shift+Enter 换行
+                                      onKeyEvent:
+                                          (FocusNode node, KeyEvent event) {
+                                        if (event is! KeyDownEvent) {
+                                          return KeyEventResult.ignored;
+                                        }
+                                        final bool isEnter =
+                                            event.logicalKey ==
+                                                    LogicalKeyboardKey.enter ||
+                                                event.logicalKey ==
+                                                    LogicalKeyboardKey
+                                                        .numpadEnter;
+                                        if (!isEnter) {
+                                          return KeyEventResult.ignored;
+                                        }
+                                        if (HardwareKeyboard
+                                            .instance.isShiftPressed) {
+                                          return KeyEventResult.ignored;
+                                        }
+                                        if (widget.controller.text
+                                                .trim()
+                                                .isNotEmpty &&
+                                            !widget.isAgentProcessing) {
+                                          widget.onSend();
+                                          return KeyEventResult.handled;
+                                        }
+                                        return KeyEventResult.ignored;
+                                      },
+                                      child: TextField(
+                                        controller: widget.controller,
+                                        focusNode: widget.inputFocusNode,
+                                        style: TextStyle(
+                                            color: cs.onSurface,
+                                            fontSize: 15),
+                                        cursorColor: cs.primary,
+                                        maxLines: 6,
+                                        minLines: 1,
+                                        textInputAction:
+                                            TextInputAction.newline,
+                                        keyboardType: TextInputType.multiline,
+                                        decoration: InputDecoration(
+                                          hintText: "",
+                                          // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
+                                          border: InputBorder.none,
+                                          enabledBorder: InputBorder.none,
+                                          focusedBorder: InputBorder.none,
+                                          disabledBorder: InputBorder.none,
+                                          errorBorder: InputBorder.none,
+                                          focusedErrorBorder:
+                                              InputBorder.none,
+                                          hintStyle: TextStyle(
+                                            color: cs.onSurfaceVariant
+                                                .withValues(alpha: 0.5),
+                                            fontSize: 15,
+                                          ),
+                                          contentPadding: EdgeInsets.zero,
+                                          isDense: true,
+                                        ),
                                       ),
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                              horizontal: 8),
                                     ),
                                   ),
                                 ),
                                 const SizedBox(width: 4),
-                                // 发送按钮：仅在 agent 处理中浮现（此时充当停止按钮）；空闲时完全隐藏
+                                // 右侧：发送/停止按钮（常显，根据状态切换）
                                 AnimatedSwitcher(
                                   duration: const Duration(milliseconds: 180),
                                   switchInCurve: Curves.easeOutCubic,
@@ -1202,115 +1129,50 @@ class _ChatPageState extends State<ChatPage>
                                     return FadeTransition(
                                       opacity: anim,
                                       child: ScaleTransition(
-                                        scale: Tween<double>(begin: 0.6, end: 1)
+                                        scale: Tween<double>(begin: 0.85, end: 1)
                                             .animate(anim),
                                         child: child,
                                       ),
                                     );
                                   },
                                   child: widget.isAgentProcessing
-                                      ? Container(
-                                          key: const ValueKey(
-                                              'input-stop-btn'),
-                                          decoration: BoxDecoration(
-                                            color: cs.errorContainer
-                                                .withValues(alpha: 0.3),
-                                            shape: BoxShape.circle,
-                                            border: Border.all(
-                                              color: cs.error
-                                                  .withValues(alpha: 0.6),
-                                            ),
-                                          ),
-                                          child: IconButton(
-                                            icon: Icon(
-                                              Icons.stop_rounded,
-                                              size: 20,
-                                              color: cs.error,
-                                            ),
-                                            tooltip: "停止",
-                                            onPressed: widget.onStopAgent,
-                                            padding: EdgeInsets.zero,
-                                            constraints: const BoxConstraints(
-                                              minWidth: 34,
-                                              minHeight: 34,
-                                            ),
-                                          ),
-                                        )
-                                      : const SizedBox.shrink(
-                                          key: ValueKey('input-send-hidden'),
-                                        ),
+                                      ? _buildStopButton(cs)
+                                      : _buildSendButton(cs),
                                 ),
                               ],
                             ),
-                            // 第二行：加号 + 语音按钮 + 呼叫 Agent
+                            // 第二行：辅助功能按钮（左下：上传图片；右下：语音/通话）
                             Padding(
-                              padding: const EdgeInsets.only(top: 4),
+                              padding: const EdgeInsets.only(top: 2),
                               child: Row(
                                 children: <Widget>[
-                                  // 加号按钮
+                                  // 左下：上传图片
                                   if (widget.onPickGalleryImage != null)
-                                    Container(
-                                      decoration: BoxDecoration(
-                                        color: cs.surfaceContainerHighest,
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: IconButton(
-                                        icon: Icon(Icons.add,
-                                            size: 18,
-                                            color: cs.onSurfaceVariant),
-                                        onPressed: widget.onPickGalleryImage,
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(
-                                          minWidth: 30,
-                                          minHeight: 30,
-                                        ),
-                                      ),
+                                    _buildInputIconButton(
+                                      icon: Icons.add_rounded,
+                                      tooltip: "上传图片",
+                                      onTap: widget.onPickGalleryImage,
+                                      cs: cs,
+                                      size: 18,
                                     ),
-                                  if (widget.onPickGalleryImage != null)
-                                    const SizedBox(width: 6),
-                                  // 语音按钮 - 点击进入语音模式
-                                  Container(
-                                    decoration: BoxDecoration(
-                                      color: cs.surfaceContainerHighest,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: IconButton(
-                                      icon: Icon(
-                                        Icons.mic_none,
-                                        size: 18,
-                                        color: cs.onSurfaceVariant,
-                                      ),
-                                      onPressed: widget.onEnterVoiceMode,
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(
-                                        minWidth: 30,
-                                        minHeight: 30,
-                                      ),
-                                      tooltip: '语音对话模式',
-                                    ),
+                                  const Spacer(),
+                                  // 右下：语音按钮
+                                  _buildInputIconButton(
+                                    icon: Icons.mic_none,
+                                    tooltip: "语音对话模式",
+                                    onTap: widget.onEnterVoiceMode,
+                                    cs: cs,
+                                    size: 18,
                                   ),
-                                  const SizedBox(width: 6),
+                                  const SizedBox(width: 4),
+                                  // 右下：电话按钮
                                   if (widget.onOpenPhoneDialer != null)
-                                    Container(
-                                      decoration: BoxDecoration(
-                                        color: cs.surfaceContainerHighest,
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: IconButton(
-                                        icon: Icon(
-                                          Icons.phone_in_talk,
-                                          size: 18,
-                                          color: cs.onSurfaceVariant,
-                                        ),
-                                        onPressed: widget.onOpenPhoneDialer,
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(
-                                          minWidth: 30,
-                                          minHeight: 30,
-                                        ),
-                                        tooltip:
-                                            VoiceCallUiLabels.chatTooltip,
-                                      ),
+                                    _buildInputIconButton(
+                                      icon: Icons.phone_in_talk,
+                                      tooltip: VoiceCallUiLabels.chatTooltip,
+                                      onTap: widget.onOpenPhoneDialer,
+                                      cs: cs,
+                                      size: 18,
                                     ),
                                 ],
                               ),
@@ -2336,3 +2198,30 @@ class _BreathingDotPainter extends CustomPainter {
     return oldDelegate.opacity != opacity;
   }
 }
+
+/// 工具函数：将一条消息转换为渲染用的 group 结构
+Map<String, dynamic> _messageToGroup(ChatMessage msg) {
+  if (msg.role == "assistant_progress") {
+    return <String, dynamic>{
+      "isUser": false,
+      "main": msg,
+      "progress": null,
+      "isProgress": true,
+    };
+  }
+  if (msg.role == "user") {
+    return <String, dynamic>{
+      "isUser": true,
+      "main": msg,
+      "progress": null,
+      "isProgress": false,
+    };
+  }
+  return <String, dynamic>{
+    "isUser": false,
+    "main": msg,
+    "progress": null,
+    "isProgress": false,
+  };
+}
+

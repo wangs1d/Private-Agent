@@ -50,6 +50,8 @@ import type { MoodInferenceService } from "../../services/mood-inference-service
 import type { DevicePairingService } from "../../services/device-pairing-service.js";
 import type { DeviceRegistry } from "../../device-bus/device-registry.js";
 import type { BrainCenter } from "../../brain/index.js";
+import type { BodyCenter } from "../../body/index.js";
+import type { ReflexArc } from "../../body/reflex-arc.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -110,4 +112,8 @@ export type HttpRouteDeps = {
   deviceRegistry?: DeviceRegistry;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter?: BrainCenter | null;
+  /** Agent Body Center —— 身体中心外观（未启用时为 null） */
+  bodyCenter?: BodyCenter | null;
+  /** 反射弧（身体侧硬安全门），用于 /body/reflex/patterns 热加载与列出；未装配时为 null */
+  reflexArc?: ReflexArc | null;
 };

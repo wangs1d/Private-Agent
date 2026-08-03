@@ -26,7 +26,7 @@ const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），禁止仅凭训练数据作答；整合结果时优先引用发布时间最新的条目，并注明日期。本地消费（电影票、外卖等）同样须先搜索再试。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。";
+  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、价格、公告等强时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），优先用搜索结果作答，并注明日期。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。\n\n【搜索失败兜底】search_web 返回 0 条或网络异常时，仍可基于训练知识作答，但必须前置一句「我这边搜不到最新数据，按我之前知道的答你」之类说明，让用户知道这不是实时结果。不要机械回复「搜索不到」就走人。天气查询直接调 weather.* 工具（如果已注册），不要走 search_web。";
 
 const PHONE_CALL_SYSTEM_SUFFIX =
   "\n\n【语音通知与电话通话 · 静默触达规则】\n\n"
@@ -52,21 +52,23 @@ const PHONE_CALL_SYSTEM_SUFFIX =
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  */
 export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
-export const LIVE_USER_STATUS_MARKER = "【用户可见进度】";
-export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复风格】";
+export const LIVE_USER_STATUS_MARKER = "【回复方向】";
+export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复方向】";
 export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
 
+/**
+ * 「活人感」核心方向（只给方向，不堆 prompt）：
+ * 让模型基于"a close friend in WeChat"这个方向自己发挥，
+ * 程序层靠 postValidate 兜底（如检测到客服腔触发重生成）。
+ *
+ * 不再列举"嘛/呢/呗/哈/哎"等具体语气词——这些应该让模型自己根据上下文选；
+ * 不再列举禁用清单——具体行为由 assistant-humanizer 在程序层过滤。
+ */
 const CONCISE_REPLY_SYSTEM_SUFFIX = `
 
-【回复风格】你是朋友，不是客服、不是 AI 助手。说话像微信私聊：短句、语气词自然（嘛、呢、呗、哈、哎），别用"您/用户/亲"，别开场白。
-- 结论一句话给到，不解释过程、不分点、不报执行细节、不复述工具进度。
-- 调调参考：「好嘞」「搞定啦」「这事儿交我」「查到了，xxx」—— 俏皮、慵懒、干脆都行，别装可爱别端着。
-- 禁：客服/AI 腔（"好的我已经为您..."这种）、Markdown 表格/简报体、连续填充词开头、连发 3 个表情。`;
+【回复方向】像微信里的熟人，不像客服。短、自然、有温度。说重点，别端着，别"您"。`;
 
-const LIVE_USER_STATUS_SUFFIX = `
-
-【用户可见进度】你在调用任何工具之前，必须先输出 1～2 句口语化短话，让用户知道你在做什么（可幽默、可拟人）；该句会作为实时进度展示，不是最终答复。禁止只用固定套话、禁止只写工具名。委派子 Agent 时除口头语外，还须填写 master_invoke_sub_agent 的 userStatusLine（与口头语一致即可）。
-⚠️ 关键：这句进度话只是让用户知道「我在干活了」，你的最终回复必须换一种说法、聚焦结果。绝对不能把进度句原样或改几个字复读进最终回复 —— 用户会看到两次相同内容，体验很差。`;
+const LIVE_USER_STATUS_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX
 
 /**
  * 时间戳系统说明：让 LLM 知道每条 user/assistant 消息首行都带 `[ts:...]` 前缀。
@@ -74,7 +76,24 @@ const LIVE_USER_STATUS_SUFFIX = `
  */
 const MESSAGE_TIMESTAMP_SUFFIX = `
 
-【消息时间戳】每条 user/assistant 消息首行带前缀 \`[ts:YYYY-MM-DD HH:MM:SS|周X|relative]\`（本地秒级时间 + 星期 + 相对当前偏移，如 \`[ts:2026-06-10 14:35:22|周二|3m ago]\`）。涉及时间引用、先后、间隔一律以这条前缀为准，不要靠消息位置或印象；问「现在几点」仍调 clock 工具。`;
+【消息时间戳】每条 user/assistant 消息首行带前缀 \`[ts:YYYY-MM-DD HH:MM:SS|周X|relative]\`（本地秒级时间 + 星期 + 相对当前偏移，如 \`[ts:2026-06-10 14:35:22|周二|3m ago]\`）。涉及时间引用、先后、间隔一律以这条前缀为准，不要靠消息位置或印象；问「现在几点」仍调 clock 工具。
+
+【跨天识别】每条消息的 \`[ts:YYYY-MM-DD...]\` 都带完整日期，**日期不同就是不同一天**，不能用「看着像今天」草率判断：
+- 当前系统已注入「当前时间：YYYY-MM-DD HH:MM:SS 周X」，与历史消息前缀日期对比即可知道是哪天。
+- \`relative\` 段只是参考：\`3m ago\` / \`5h ago\` 是同一天内的偏移；跨天会用 \`yesterday <时段>\` / \`Nd ago\` / \`Nw ago\`。读到 \`yesterday\` / \`Nd ago\` 必须把它识别成「非今天」。
+- 回答"几天没聊 / 上次什么时候 / 昨天发生了什么"这类时间跨度问题，必须以 \`[ts:...]\` 里的日期为准，不能只看时间。
+- 不要把「同一天内的不同时间」当成「隔了几天」，也不要反过来把「不同日期的同一时间」当成「同一时刻」。
+
+【重要约束】\`[ts:...]\` 是系统注入的元数据标记，不是消息内容，也不是用户说的话。你绝不能：
+1. 在回复中复述或引用 \`[ts:...]\` 标记本身；
+2. 把 \`[ts:...]\` 后的内容当作上一轮对话来「接话」或「续写」；
+3. 基于时间戳编造对话上下文（如「刚上轮你说的…」），除非用户消息内容里确实有对应内容。
+每条消息的真正内容是 \`[ts:...]\n\` 之后的部分。
+
+【话题切换】如果上一条 user 消息和当前 user 消息主题不同（如「问电影 → 问几天没聊」），说明用户已转话题。当前回复必须**直接、干净地回应本条 user 消息**——不要接着上一轮的话题续写、不要把上一轮的工具结果/未完成工作当作本轮语境：
+- 回复开头不要出现「接着上轮的 XX / 我刚查 XX / 哈哈被你发现」之类承接旧话题的话；
+- 不要在回复里把上一轮的工具名/搜索关键词再复述一遍，除非当前问题真的需要；
+- 如果用户问「几天没聊 / 上次聊什么」，按 \`[ts:...]\` 日期如实回答日期差，不要凭印象模糊作答。`;
 
 function buildMasterSubAgentDelegateSuffix(): string {
   const maxParallel = getAgentRuntimeConfig().masterDelegation.maxParallelSubAgents;
@@ -105,21 +124,12 @@ export function appendConciseReplySystemSuffix(systemContent: string): string {
   return systemContent + CONCISE_REPLY_SYSTEM_SUFFIX;
 }
 
-const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX_MARKER = "[私人管家回复风格]";
-const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX = `
-
-[私人管家回复风格]
-- 你是我的私人管家、助理和伙伴，默认像熟人聊天，不像客服。
-- 回复优先短，默认 1~2 句；能一句说完就别展开。
-- 只说结果和必要提醒，不要标题、摘要、表格、流程播报或长篇解释。
-- 语气自然、口语化、克制，少用“已为你、请放心、根据你的需求、建议如下”这类客服腔。
-- 不要机械复述用户原话；优先接住情绪，再给一句贴近真人的回应。
-- 如果用户没有要求详细展开，就不要主动扩写。
-`;
+const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX_MARKER = "【活人感与进度话】"; // 合并到 CONCISE_REPLY，使用同一个 marker 避免重复
+const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX
 
 export function appendPrivateButlerReplySystemSuffix(systemContent: string): string {
-  if (systemContent.includes(PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX_MARKER)) return systemContent;
-  return systemContent + PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX;
+  // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX（marker 一致，appendConciseReplySystemSuffix 会处理）
+  return systemContent;
 }
 
 /** 追加「消息时间戳」系统说明（已包含则跳过），让 LLM 理解每条消息首行 `[ts:...]` 前缀。 */
@@ -161,6 +171,25 @@ export type FinalizeChatSystemPromptOpts = {
   agentAccessMode?: AgentAccessMode;
   desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
+  /**
+   * RuntimeKernel minimal 模式控制位：true 时跳过身份/时间戳说明/工具规则类后缀，
+   * 这些"层 A 身份内容"由 RuntimeKernel state 管理，由 buildSessionSystem 在会话首条 system 一次性注入；
+   * 工具调用规则（clock/search_web/voice/phone/master_invoke_sub_agent）已下沉到对应 tool schema description，
+   * 工具被 ToolSearch contextual profile 暴露时 LLM 自然看到规则，不污染 prompt。
+   *
+   * minimal 模式仍保留：
+   * - 「活人感与进度话」约束（合并了原回复风格+管家风格+用户可见进度，是 LLM 输出风格核心约束）
+   * - 访问权限说明（agentAccessMode/desktopBridgeOnline/phoneBridgeOnline）
+   *
+   * functionalSuffixes=false 可进一步剥离「活人感」约束（仅用于极致节省场景，不推荐生产）。
+   */
+  suppressRuntimeSuffixes?: boolean;
+  /**
+   * 功能性后缀开关：false 时跳过「活人感」约束（极致节省场景，不推荐生产）。
+   * 默认 undefined（视为 true）：保留「活人感」+ 访问权限。
+   * 仅在 suppressRuntimeSuffixes=true（minimal 模式）时生效；其他模式此参数无效。
+   */
+  functionalSuffixes?: boolean;
 };
 
 /** 统一组装 system：精简风格 → 消息时间戳说明 → 工具说明 → 主 Agent 委派说明 → 访问权限说明。 */
@@ -168,6 +197,26 @@ export function finalizeChatSystemPrompt(
   baseContent: string,
   opts?: FinalizeChatSystemPromptOpts,
 ): string {
+  // minimal 模式：只保留「活人感」约束 + 访问权限说明
+  // 工具调用规则（clock/search_web/voice/phone/master_invoke_sub_agent）已下沉到 tool schema description，
+  // 通过 ToolSearch contextual profile 按需暴露给 LLM
+  if (opts?.suppressRuntimeSuffixes) {
+    const keepFunctional = opts.functionalSuffixes !== false; // 默认 true
+    let out = baseContent.trim();
+    if (!keepFunctional) {
+      // 极致节省模式：连「活人感」约束都跳过（不推荐生产）
+      return out;
+    }
+    // 保留「活人感与进度话」约束（合并了回复风格+管家风格+进度话）
+    out = appendConciseReplySystemSuffix(out);
+    // 保留访问权限说明
+    out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
+      desktopBridgeOnline: opts?.desktopBridgeOnline,
+      phoneBridgeOnline: opts?.phoneBridgeOnline,
+    });
+    return out;
+  }
+  // 非 minimal 模式：完整追加所有后缀（legacy/dynamic/conversation_only 行为不变）
   let out = appendConciseReplySystemSuffix(baseContent);
   out = appendPrivateButlerReplySystemSuffix(out);
   out = appendMessageTimestampSystemSuffix(out);
@@ -545,8 +594,13 @@ export function buildLayeredSystemPrompt(
   if (memory.relationshipMemory) parts.push(memory.relationshipMemory);
   if (memory.lifeThemeMemory) parts.push(memory.lifeThemeMemory);
   if (memory.dreamMemory) parts.push(memory.dreamMemory);
+  if (memory.yesterdayHighlight) parts.push(memory.yesterdayHighlight);
+  if (memory.memoryContinuity) parts.push(memory.memoryContinuity);
   if (memory.interruptedContext) parts.push(memory.interruptedContext);
   if (memory.currentTime) parts.push(`【当前时间】\n${memory.currentTime}`);
+  // 元认知与情绪：让 LLM 知道"自己现在怎么想/感觉如何"
+  if (memory.metaCognition) parts.push(`【自我认知】\n${memory.metaCognition}`);
+  if (memory.emotionState) parts.push(`【当前情绪】\n${memory.emotionState}`);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -582,6 +636,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.relationshipMemory ||
       memory?.lifeThemeMemory ||
       memory?.dreamMemory ||
+      memory?.yesterdayHighlight ||
+      memory?.memoryContinuity ||
       memory?.followUpAnchor ||
       memory?.scheduleSnapshot ||
       memory?.currentTime
@@ -610,6 +666,8 @@ export function buildLayeredSystemPromptSections(
   if (m.lifeThemeMemory) stablePrefix.push(m.lifeThemeMemory);
   if (m.dreamMemory) stablePrefix.push(m.dreamMemory);
 
+  if (m.yesterdayHighlight) dynamicContext.push(m.yesterdayHighlight);
+  if (m.memoryContinuity) dynamicContext.push(m.memoryContinuity);
   if (m.followUpAnchor) dynamicContext.push(m.followUpAnchor);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
   if (m.taskContext) dynamicContext.push(`[Turn Task Context]\n${m.taskContext}`);

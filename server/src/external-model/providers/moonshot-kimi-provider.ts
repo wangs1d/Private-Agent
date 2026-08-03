@@ -1,30 +1,12 @@
 import OpenAI from "openai";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
+import { preparePromptCachePlan } from "../prefix-cache.js";
 import {
-  streamCompletionWithTools,
-} from "../openai-compatible-tool-loop.js";
-import {
-  applyPromptCacheMessages,
-  preparePromptCachePlan,
-} from "../prefix-cache.js";
-import { resolveChatToolPlanForStream } from "../resolve-chat-tools.js";
-import { prepareToolsWithToolSearch } from "../../tools/tool-search/index.js";
-import { openAiUserContentFromTurn } from "../build-user-message-content.js";
-import { annotateUserContentForLlm, getChatThreadStore, tagUserMessageClientId } from "../chat-thread-store.js";
-import {
-  adaptOpenAiChatCompletionStream,
-  consumeNormalizedStream,
-  pickVisibleText,
-  StreamIdleTimeoutError,
-} from "../stream-chat-helpers.js";
-import type {
-  AgentStreamOptions,
-  ChatToolExecutionContext,
-  ChatUserTurn,
-  ExternalChatProvider,
-  StreamDeltaHandler,
-} from "../types.js";
+  AbstractChatProvider,
+  type SystemAndPlanContext,
+  type SystemAndPlanResult,
+} from "../abstract-chat-provider.js";
+import type { AgentStreamOptions } from "../types.js";
 
 const SYSTEM_PROMPT =
   "You are Kimi, an AI assistant provided by Moonshot AI. You are proficient in Chinese and English conversations. You provide users with safe, helpful, and accurate answers. You will reject any requests involving terrorism, racism, or explicit content. Moonshot AI is a proper noun and should not be translated.";
@@ -34,227 +16,87 @@ function kimiThinkingDisabled(streamOpts?: AgentStreamOptions): boolean {
 }
 
 function kimiExtraBody(streamOpts?: AgentStreamOptions): Record<string, unknown> | undefined {
-  return kimiThinkingDisabled(streamOpts) ? { thinking: { type: "disabled" } } : undefined;
+  const out: Record<string, unknown> = {};
+  if (kimiThinkingDisabled(streamOpts)) {
+    out.thinking = { type: "disabled" };
+  }
+  // 2026-08-01 性能优化：Fast 模式（contextual/light）跳过强制 tool_choice，
+  // 让 LLM 基于 system prompt 中已注入的 currentTime/userLocation 直接答。
+  if (streamOpts?.toolExposureProfile === "contextual" || streamOpts?.toolExposureProfile === "light") {
+    out.fastProfile = true;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
  * Moonshot OpenAI 兼容 API（Kimi 模型）。
  * 环境变量：`MOONSHOT_API_KEY`（必填以启用）、`MOONSHOT_MODEL`、`MOONSHOT_BASE_URL`。
  * @see https://platform.moonshot.ai/docs/guide/start-using-kimi-api
+ *
+ * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、
+ * thread 维护等公共逻辑由基类模板方法固化，本类只实现 Kimi 特有的 system prompt 构建、
+ * thinking 开关与 fastProfile。
  */
-export class MoonshotKimiProvider implements ExternalChatProvider {
+export class MoonshotKimiProvider extends AbstractChatProvider {
   readonly id = "moonshot-kimi";
   readonly displayLabel = "Kimi (Moonshot)";
+  readonly capabilities = {
+    toolCallingProtocol: "openai" as const,
+    supportsParallelToolCalls: true,
+    supportsVision: true,
+    supportsThinking: true,
+    supportsStreaming: true,
+  };
 
-  private readonly client: OpenAI | null;
-  private readonly model: string;
-  private readonly threads = getChatThreadStore();
+  protected readonly systemPrompt = SYSTEM_PROMPT;
+  protected readonly notEnabledErrorMessage = "MOONSHOT_API_KEY is not set";
+  protected readonly client: OpenAI | null;
+  protected readonly model: string;
 
   constructor() {
+    super();
     const apiKey = process.env.MOONSHOT_API_KEY?.trim();
     const baseURL = (process.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1").trim();
     this.model = (process.env.MOONSHOT_MODEL ?? "kimi-k2.5").trim();
     this.client = apiKey
-      ? new OpenAI({ apiKey, baseURL, timeout: 180_000 })
+      ? new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 2 })
       : null;
   }
 
-  isEnabled(): boolean {
-    return this.client !== null;
-  }
-
-  clearSession(sessionId: string): void {
-    this.threads.clearSession(sessionId);
-  }
-
-  appendThreadTurn(
-    sessionId: string,
-    userTurn: ChatUserTurn,
-    assistantText: string,
-    maxThreadMessages?: number,
-  ): void {
-    this.threads.appendTurn(sessionId, SYSTEM_PROMPT, userTurn, assistantText, maxThreadMessages);
-  }
-
-  private thread(sessionId: string): ChatCompletionMessageParam[] {
-    return this.threads.thread(sessionId, SYSTEM_PROMPT);
-  }
-
-  private trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
-    this.threads.trimThread(msgs, maxMessages);
-  }
-
-  async streamCompletion(
-    sessionId: string,
-    userTurn: ChatUserTurn,
-    onDelta: StreamDeltaHandler,
-    tools?: ChatToolExecutionContext,
-    streamOpts?: AgentStreamOptions,
-  ): Promise<string> {
-    if (!this.client) {
-      throw new Error("MOONSHOT_API_KEY is not set");
-    }
-    const ephemeral = streamOpts?.ephemeralTurn === true;
-    const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
-
-    const overrideSys = streamOpts?.systemPromptOverride?.trim();
-    const promptMemory = streamOpts?.promptContext?.memory;
-    const model = streamOpts?.modelOverride?.trim() || this.model;
+  protected buildSystemAndPlan(ctx: SystemAndPlanContext): SystemAndPlanResult {
     const promptPlan = preparePromptCachePlan({
       providerId: this.id,
-      model,
-      baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
-      memory: overrideSys ? undefined : promptMemory,
+      model: ctx.model,
+      baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
+      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
       finalizeOptions: {
-        tools: Boolean(tools && !overrideSys),
-        masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-        agentAccessMode: streamOpts?.agentAccessMode,
-        desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
-        phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
+        tools: Boolean(ctx.tools && !ctx.overrideSys),
+        masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
+        agentAccessMode: ctx.streamOpts?.agentAccessMode,
+        desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
+        phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,
+        ...(ctx.suppressSuffixes ? {
+          suppressRuntimeSuffixes: true,
+          functionalSuffixes: ctx.streamOpts?.functionalSuffixes !== false,
+        } : {}),
       },
-      variant: tools ? "chat-tools" : "chat",
+      tools: ctx.toolSearchPrepared?.visibleTools,
+      variant: ctx.tools ? "chat-tools" : "chat",
     });
-    const sysContent = promptPlan.fullSystemPrompt;
-    if (ephemeral || msgs.length === 0) {
-      msgs.push({ role: "system", content: sysContent });
-    } else {
-      msgs[0] = { role: "system", content: sysContent };
-    }
-    // 支持「编辑同 clientMessageId 的 user 消息并重发」：先把该消息及其后续内容删掉。
-    // 截断后再重算 turnStartLen，确保异常回滚到本轮开始时的真实状态。
-    if (!ephemeral && userTurn.clientMessageId) {
-      this.threads.removeUserMessageAndAfter(sessionId, userTurn.clientMessageId);
-    }
-    const turnStartLen = msgs.length;
-    const userMsg = {
-      role: "user",
-      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn)),
-    } as ChatCompletionMessageParam;
-    tagUserMessageClientId(userMsg, userTurn.clientMessageId);
-    msgs.push(userMsg);
-    if (!ephemeral) {
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
-    }
-    const effectiveStreamOpts: AgentStreamOptions = {
-      ...(streamOpts ?? {}),
-      disableThinking: kimiThinkingDisabled(streamOpts),
-    };
+    return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
+  }
 
-    if (tools) {
-      let completed = false;
-      try {
-        const toolPlan = resolveChatToolPlanForStream(userTurn.text, effectiveStreamOpts);
-        const toolSearchPrepared = prepareToolsWithToolSearch(toolPlan.visibleTools, toolPlan.searchableTools);
-        const toolPromptPlan = preparePromptCachePlan({
-          providerId: this.id,
-          model,
-          baseSystemPrompt: overrideSys || SYSTEM_PROMPT,
-          memory: overrideSys ? undefined : promptMemory,
-          finalizeOptions: {
-            tools: Boolean(tools && !overrideSys),
-            masterSubAgentDelegate: streamOpts?.masterSubAgentDelegate,
-            agentAccessMode: streamOpts?.agentAccessMode,
-            desktopBridgeOnline: streamOpts?.desktopBridgeOnline,
-            phoneBridgeOnline: streamOpts?.phoneBridgeOnline,
-          },
-          tools: toolSearchPrepared.visibleTools,
-          variant: "chat-tools",
-        });
-        const full = await streamCompletionWithTools(
-          this.client,
-          model,
-          msgs,
-          onDelta,
-          tools,
-          {
-            onAfterToolBatch: effectiveStreamOpts?.toolLoop?.onAfterToolBatch,
-            tools: toolPlan.visibleTools,
-            toolSearchSourceTools: toolPlan.searchableTools,
-            maxRounds: effectiveStreamOpts?.toolLoop?.maxRounds,
-            extraBody: kimiExtraBody(effectiveStreamOpts),
-            promptCache: toolPromptPlan.promptCache,
-            requestSystemMessages: toolPromptPlan.requestSystemMessages,
-          },
-        );
-        completed = true;
-        if (!ephemeral) {
-          this.trimThread(msgs, streamOpts?.maxThreadMessages);
-          this.threads.afterTurnCompleted(sessionId, msgs);
-        }
-        return full;
-      } catch (e) {
-        if (!completed && !ephemeral) {
-          msgs.length = turnStartLen;
-        }
-        throw e;
-      }
-    }
+  protected resolveEffectiveStreamOpts(streamOpts: AgentStreamOptions | undefined): AgentStreamOptions {
+    return { ...(streamOpts ?? {}), disableThinking: kimiThinkingDisabled(streamOpts) };
+  }
 
-    let stream;
-    try {
-      const request = {
-        model,
-        messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
-        stream: true,
-        ...(promptPlan.promptCache ?? {}),
-        // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body`，会把 `thinking`
-        // 埋到一层下导致 Moonshot 收不到。直接 spread 到顶层。
-        ...(kimiExtraBody(effectiveStreamOpts) ?? {}),
-      };
-      stream = await this.client.chat.completions.create(
-        request as Parameters<typeof this.client.chat.completions.create>[0],
-      ) as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
-    } catch (e) {
-      msgs.length = turnStartLen;
-      throw e;
-    }
+  protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> | undefined {
+    return kimiExtraBody(effectiveStreamOpts);
+  }
 
-    // 流式消费统一走 provider-agnostic helper：自动累积 content + reasoning_content + tool_calls。
-    // 适配层（adaptOpenAiChatCompletionStream）只负责把 OpenAI ChatCompletionChunk 映射到 NormalChatChunk；
-    // 核心 consumer 不关心具体 provider —— 后续接入 Anthropic/Google 时只需换 adapter。
-    let full = "";
-    let visible = "";
-    try {
-      const result = await consumeNormalizedStream(
-        adaptOpenAiChatCompletionStream(
-          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
-        ),
-        {
-          onContentDelta: (d) => onDelta(d),
-          providerId: this.id,
-          model,
-        },
-      );
-      full = result.content;
-      visible = pickVisibleText(result.content, result.reasoning);
-      // content 为空但 reasoning 有内容时，把 reasoning 补发给客户端（一次性）
-      if (!full.trim() && visible) {
-        onDelta(visible);
-      }
-    } catch (e) {
-      // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
-      // partial content 已通过 onContentDelta 发给客户端，这里只是让 provider 正常返回。
-      if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {
-        visible = e.partialContent.trim();
-        full = visible;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[stream-idle-timeout] provider=${this.id} model=${model} ` +
-            `→ 使用 ${visible.length} 字符的 partial content 兜底`,
-        );
-      } else {
-        msgs.length = turnStartLen;
-        throw e;
-      }
-    }
-
-    if (visible.trim()) {
-      msgs.push({ role: "assistant", content: visible });
-    }
-    if (!ephemeral) {
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
-      this.threads.afterTurnCompleted(sessionId, msgs);
-    }
-    return visible;
+  protected applyExtraBodyToPlainRequest(): boolean {
+    // Kimi 需要把 thinking/fastProfile spread 到非工具分支 request 顶层
+    // （OpenAI Node SDK v6 不识别 Python 风格的 extra_body，直接 spread 到顶层 Moonshot 才能收到）
+    return true;
   }
 }

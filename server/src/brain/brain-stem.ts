@@ -27,6 +27,8 @@ import type {
   UserActivityState,
   VisualInput,
 } from "./types.js";
+import type { SequencePatternMiner, Pattern } from "../services/sequence-pattern-miner.js";
+import { PredictiveActionSynthesizer } from "./predictive-action-synthesizer.js";
 
 // ---- 子系统最小化接口 --------------------------------------------------
 
@@ -58,6 +60,31 @@ export interface BrainStemUserPersonalizationLike {
   getBehaviorBaseline(actorId: string): BehaviorBaseline;
 }
 
+/**
+ * WorkingMemoryCortex 的最小化结构接口。
+ * BrainStem 只需 decay(actorId) 来触发遗忘曲线。
+ */
+export interface BrainStemWorkingMemoryLike {
+  decay(actorId: string): { decayed: number; forgotten: number };
+}
+
+/**
+ * DefaultModeNetwork 的最小化结构接口。
+ * BrainStem 周期性扫描时调用 isIdle/onIdle，触发"空闲时整合"。
+ */
+export interface BrainStemDefaultModeNetworkLike {
+  isIdle(actorId: string, now?: number): boolean;
+  onIdle(actorId: string): Promise<unknown>;
+}
+
+/**
+ * 记忆整理器最小化接口：白天 idle 时触发轻量记忆整理。
+ * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
+ */
+export interface BrainStemMemoryConsolidatorLike {
+  tryIdleConsolidation(actorId: string): Promise<boolean>;
+}
+
 /** 行为预测结果：基于行为基线推断用户即将执行的动作 */
 export type PredictedAction = {
   action: string;
@@ -67,8 +94,15 @@ export type PredictedAction = {
 
 // ---- 常量 --------------------------------------------------------------
 
-/** 心跳扫描间隔（45 秒）—— idle 默认采样率 */
-const SWEEP_INTERVAL_MS = 45_000;
+/** 心跳扫描间隔（45 秒）—— idle 默认采样率。
+ * 可通过 BRAIN_STEM_SWEEP_INTERVAL_MS 环境变量覆盖（毫秒，测试用）。
+ * 运行时读取，便于真实场景观察测试加速。 */
+function getSweepIntervalMs(): number {
+  const env = process.env.BRAIN_STEM_SWEEP_INTERVAL_MS;
+  const parsed = env != null ? parseInt(env, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : 45_000;
+}
+const SWEEP_INTERVAL_MS = getSweepIntervalMs();
 /** busy 状态下降采样间隔（90 秒）—— 用户忙碌时降低打扰 */
 const BUSY_SAMPLE_MS = 90_000;
 /** meeting / in_focus 状态采样间隔（120 秒）—— 会议/深度专注时适度降采样 */
@@ -98,6 +132,48 @@ const SWEEP_SIGNAL_LIMIT = 50;
  */
 const VISUAL_CHECK_INTERVAL_MS = 5 * 60_000;
 
+// ---- 注意力焦点（Step 4 扩展：事件驱动 + 注意力调度）---------------------
+
+/**
+ * 注意力焦点类型：根据当前任务调整感知采样率。
+ * 替代纯定时器轮询，让 Agent 能像人一样根据当前任务调整感知焦点
+ * （如等快递时频繁看手机，会议中减少打扰）。
+ */
+export type AttentionFocus =
+  | "default"             // 默认：45s 采样
+  | "waiting_delivery"     // 等快递：30s 采样（提高感知频率）
+  | "waiting_message"      // 等消息：60s 采样
+  | "in_meeting"           // 会议中：300s 采样（不打扰）
+  | "in_focus_work"        // 深度工作：180s 采样
+  | "waiting_payment"      // 等待付款确认：15s 采样（高频感知）
+  | "idle_check";          // 空闲检查：90s 采样（降低感知频率）
+
+/** 注意力焦点 → 采样间隔（ms） */
+const ATTENTION_FOCUS_INTERVAL: Record<AttentionFocus, number> = {
+  default: SWEEP_INTERVAL_MS,
+  waiting_delivery: 30_000,
+  waiting_message: 60_000,
+  in_meeting: 300_000,
+  in_focus_work: 180_000,
+  waiting_payment: 15_000,
+  idle_check: 90_000,
+};
+
+/**
+ * 事件触发类型：异常事件触发即时扫描，不等下次心跳。
+ * 替代纯 45s 心跳轮询，让 Agent 能像人一样被异常事件触发感知。
+ */
+export type BrainStemEventName =
+  | "transaction_completed"        // 交易完成
+  | "mood_shift"                   // 情绪突变
+  | "desktop_app_focus_changed"    // 应用切换
+  | "schedule_task_due"            // 日程到期
+  | "user_idle_too_long"           // 用户长时间空闲
+  | "user_back_from_away"          // 用户从离开状态回来
+  | "external_trigger";            // 外部触发（如测试/手动）
+
+type EventTriggerHandler = (actorId?: string) => void;
+
 // ---- BrainStem ---------------------------------------------------------
 
 /**
@@ -112,6 +188,28 @@ export class BrainStem {
   private awareness: BrainStemAwarenessLike | null = null;
   private sensory: BrainStemSensoryLike | null = null;
   private userPersonalizationService: BrainStemUserPersonalizationLike | null = null;
+  /** 工作记忆引用，用于定期 decay */
+  private workingMemory: BrainStemWorkingMemoryLike | null = null;
+  /** decay 调度计数器：每 5 次 sweepOnce（约 5×45s=3.75min）触发一次 decay */
+  private decaySweepCounter = 0;
+  /** decay 触发间隔（sweep 次数） */
+  private static readonly DECAY_EVERY_N_SWEEPS = 5;
+  /** decay 累计统计 */
+  private decayStats = { triggered: 0, totalDecayed: 0, totalForgotten: 0 };
+  /** 默认模式网络引用，用于空闲时整合 */
+  private dmn: BrainStemDefaultModeNetworkLike | null = null;
+  /** DMN 调度计数器：每 7 次 sweepOnce（约 7×45s=5.25min）触发一次 DMN 检查 */
+  private dmnSweepCounter = 0;
+  /** DMN 触发间隔（sweep 次数） */
+  private static readonly DMN_CHECK_EVERY_N_SWEEPS = 7;
+  /** DMN 累计统计 */
+  private dmnStats = { triggered: 0, idleActors: 0, failed: 0 };
+  /** 记忆整理器引用，白天 idle 时触发轻量整理 */
+  private memoryConsolidator: BrainStemMemoryConsolidatorLike | null = null;
+  /** 记忆整理调度计数器：与 DMN 同周期检查 */
+  private idleMemSweepCounter = 0;
+  /** 记忆整理累计统计 */
+  private idleMemStats = { triggered: 0, skipped: 0, failed: 0 };
   private unsubscribe: (() => void) | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
   private started = false;
@@ -132,6 +230,32 @@ export class BrainStem {
   private syntheticEmitted = 0;
   /** 最近一次扫描时间 */
   private lastSweepAt: string | null = null;
+
+  // Phase 3：序列模式挖掘 + 预测合成
+  private sequencePatternMiner: SequencePatternMiner | null = null;
+  private readonly predictiveSynthesizer = new PredictiveActionSynthesizer();
+  /** actor → 上次序列预测时间戳（ms），用于重复抑制（30 分钟） */
+  private readonly lastSequencePredictionTime = new Map<string, number>();
+  /** actor → 上次模式挖掘时间戳（ms），10 分钟挖掘一次 */
+  private readonly lastMiningTime = new Map<string, number>();
+  /** actor → 缓存的挖掘结果 */
+  private cachedPatterns = new Map<string, Pattern[]>();
+
+  // ---- Step 4 扩展：事件驱动 + 注意力调度 ----
+
+  /** actor → 当前注意力焦点（覆盖心跳间隔） */
+  private readonly attentionFocus = new Map<string, AttentionFocus>();
+  /** 事件名 → 处理器列表（事件驱动即时扫描） */
+  private readonly eventHandlers = new Map<BrainStemEventName, EventTriggerHandler[]>();
+  /** actor → 上次事件触发扫描时间戳（ms），用于事件去重（5s 内不重复触发） */
+  private readonly lastEventTriggerAt = new Map<string, number>();
+  /** 统计：事件触发扫描次数 */
+  private eventTriggeredCount = 0;
+  /** 统计：注意力焦点变更次数 */
+  private attentionChangeCount = 0;
+
+  /** 心跳回调列表：每次 sweepOnce 结束后调用，供外部子系统（如 ForgettingController）桥接 */
+  private readonly heartbeatCallbacks: Array<() => void | Promise<void>> = [];
 
   // ---- 注册 ------------------------------------------------------------
 
@@ -154,6 +278,216 @@ export class BrainStem {
   registerUserPersonalization(s: BrainStemUserPersonalizationLike): void {
     this.userPersonalizationService = s;
     console.log("[BrainStem] 已注册 UserPersonalizationService");
+  }
+
+  /**
+   * 深度优化：注册 WorkingMemoryCortex，让脑干定期调度 decay()（遗忘曲线）。
+   *
+   * 工作记忆的遗忘机制（30min 降级 / 1h 遗忘）原本无人触发，
+   * 由脑干每 5 分钟（5 × sweepOnce）调用 decay()，让工作记忆真正"会遗忘"。
+   */
+  registerWorkingMemory(wm: BrainStemWorkingMemoryLike): void {
+    this.workingMemory = wm;
+    console.log("[BrainStem] 已注册 WorkingMemoryCortex（每 5 次扫描触发 decay）");
+  }
+
+  /**
+   * 深度优化：注册 DefaultModeNetwork，让脑干定期调度 onIdle()（空闲时整合）。
+   *
+   * DMN 模拟人脑"默认模式网络"——用户空闲时触发记忆固化 + 反思 + 进化提案。
+   * 由脑干每 7 次扫描（约 5 分钟）检查一次各 actor 是否空闲，命中则异步触发 onIdle。
+   */
+  registerDefaultModeNetwork(dmn: BrainStemDefaultModeNetworkLike): void {
+    this.dmn = dmn;
+    console.log("[BrainStem] 已注册 DefaultModeNetwork（每 7 次扫描触发 onIdle 检查）");
+  }
+
+  /**
+   * 注册记忆整理器：白天 idle 时触发轻量记忆整理。
+   * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
+   * 与 DMN 同周期检查（每 7 次 sweepOnce ≈ 5 分钟），仅在用户 idle 时触发。
+   */
+  registerMemoryConsolidator(consolidator: BrainStemMemoryConsolidatorLike): void {
+    this.memoryConsolidator = consolidator;
+    console.log("[BrainStem] 已注册 MemoryConsolidator（白天 idle 轻量整理）");
+  }
+
+  /**
+   * 注册序列模式挖掘器（Phase 3.1）。
+   *
+   * 注册后 BrainStem 心跳扫描会：
+   * 1. 每 10 分钟从 LifeSignalHub 历史挖掘序列模式（缓存）
+   * 2. 当前事件流匹配模式前缀时，合成 predicted_action 信号
+   * 3. 与现有 predictNextAction 预测源合并，去重后发布
+   */
+  registerSequencePatternMiner(miner: SequencePatternMiner): void {
+    this.sequencePatternMiner = miner;
+    console.log("[BrainStem] 已注册 SequencePatternMiner（序列模式预测）");
+  }
+
+  /**
+   * 注册心跳回调：每次 sweepOnce 结束后调用。
+   *
+   * 供外部子系统桥接到脑干 45s 心跳节律，如：
+   *   - ForgettingController.continuousScore → 连续打分 + 连接剪枝
+   *
+   * 回调异常不传播，不阻塞下次心跳。回调返回 Promise 时异步执行（不 await）。
+   *
+   * @param callback 心跳回调（无参，由回调自身决定要扫描哪些 actor）
+   * @returns 取消注册函数
+   */
+  onHeartbeat(callback: () => void | Promise<void>): () => void {
+    this.heartbeatCallbacks.push(callback);
+    console.log(`[BrainStem] 已注册心跳回调（共 ${this.heartbeatCallbacks.length} 个）`);
+    return () => {
+      const idx = this.heartbeatCallbacks.indexOf(callback);
+      if (idx >= 0) {
+        this.heartbeatCallbacks.splice(idx, 1);
+        console.log(`[BrainStem] 已取消心跳回调（剩余 ${this.heartbeatCallbacks.length} 个）`);
+      }
+    };
+  }
+
+  /**
+   * 返回当前已知 actor 列表的快照（供心跳回调遍历使用）。
+   *
+   * 记忆认知架构升级（Phase 4）：ForgettingController.continuousScore 需要遍历所有 actor
+   * 执行连续打分，但 knownActors 是私有集合。此方法返回数组副本，避免外部修改内部状态。
+   */
+  getKnownActors(): string[] {
+    return Array.from(this.knownActors);
+  }
+
+  // ---- Step 4 扩展：事件驱动 + 注意力调度注册方法 ----------------------
+
+  /**
+   * 注册事件触发处理器（事件驱动感知）。
+   * 异常事件触发时立即扫描对应 actor，不等 45s 心跳。
+   *
+   * 使用场景：
+   *  - 交易完成 → 即时扫描（让 Agent 能及时察觉并主动反馈）
+   *  - 情绪突变 → 即时扫描（让 Agent 能及时察觉用户情绪变化）
+   *  - 应用切换 → 即时扫描（让 Agent 能及时察觉用户行为变化）
+   *  - 日程到期 → 即时扫描（让 Agent 能及时提醒）
+   *
+   * @param eventName 事件名
+   * @param handler 处理器（接收可选 actorId，触发即时扫描）
+   */
+  registerEventTrigger(eventName: BrainStemEventName, handler: EventTriggerHandler): void {
+    const handlers = this.eventHandlers.get(eventName) ?? [];
+    handlers.push(handler);
+    this.eventHandlers.set(eventName, handlers);
+    console.log(`[BrainStem] 已注册事件触发器: ${eventName}（共 ${handlers.length} 个处理器）`);
+  }
+
+  /**
+   * 设置注意力焦点（覆盖心跳间隔）。
+   * 替代纯 45s 心跳轮询，让 Agent 能像人一样根据当前任务调整感知频率。
+   *
+   * 使用场景：
+   *  - 等快递 → waiting_delivery（30s 采样，频繁看手机）
+   *  - 等消息 → waiting_message（60s 采样）
+   *  - 会议中 → in_meeting（300s 采样，不打扰）
+   *  - 深度工作 → in_focus_work（180s 采样）
+   *  - 等付款确认 → waiting_payment（15s 采样，高频感知）
+   *
+   * 注意力焦点由 ProactionCortex 决策时设置（如检测到用户说"等快递"→设为 waiting_delivery）。
+   *
+   * @param actorId 用户 id
+   * @param focus 注意力焦点（default 表示恢复默认）
+   */
+  setAttentionFocus(actorId: string, focus: AttentionFocus): void {
+    const prev = this.attentionFocus.get(actorId) ?? "default";
+    this.attentionFocus.set(actorId, focus);
+    this.attentionChangeCount++;
+    console.log(`[BrainStem] 注意力焦点变更 actorId=${actorId}: ${prev} → ${focus}`);
+
+    // 立即重排心跳定时器（应用新注意力焦点对应的间隔）
+    if (this.started) {
+      this.adjustSampleRateByAttention(actorId, focus);
+    }
+  }
+
+  /** 获取当前注意力焦点 */
+  getAttentionFocus(actorId: string): AttentionFocus {
+    return this.attentionFocus.get(actorId) ?? "default";
+  }
+
+  /**
+   * 触发事件（外部调用）。
+   * 事件触发时立即扫描对应 actor，不等下次心跳。
+   * 5s 内同 actor 不重复触发（去重）。
+   *
+   * @param eventName 事件名
+   * @param actorId 用户 id（可选，未指定时扫描所有已知 actor）
+   */
+  triggerEvent(eventName: BrainStemEventName, actorId?: string): void {
+    const handlers = this.eventHandlers.get(eventName);
+    if (!handlers || handlers.length === 0) return;
+
+    // 事件去重：5s 内同 actor 不重复触发
+    const now = Date.now();
+    const dedupKey = actorId ?? "__global__";
+    const lastAt = this.lastEventTriggerAt.get(dedupKey) ?? 0;
+    if (now - lastAt < 5_000) {
+      console.log(`[BrainStem] 事件 ${eventName} 5s 内已触发过，跳过 actorId=${actorId ?? "all"}`);
+      return;
+    }
+    this.lastEventTriggerAt.set(dedupKey, now);
+
+    // 调用所有注册的处理器
+    for (const handler of handlers) {
+      try {
+        handler(actorId);
+      } catch (err) {
+        console.error(`[BrainStem] 事件处理器异常 ${eventName}:`, err);
+      }
+    }
+
+    // 立即扫描对应 actor（不等下次心跳）
+    if (actorId && this.knownActors.has(actorId)) {
+      try {
+        this.sweepActor(actorId);
+        this.eventTriggeredCount++;
+        console.log(`[BrainStem] 事件 ${eventName} 触发即时扫描 actorId=${actorId}`);
+      } catch (err) {
+        console.error(`[BrainStem] 事件触发扫描异常 ${eventName} actorId=${actorId}:`, err);
+      }
+    } else if (!actorId) {
+      // 全局事件：扫描所有已知 actor
+      for (const id of this.knownActors) {
+        try {
+          this.sweepActor(id);
+        } catch (err) {
+          console.error(`[BrainStem] 事件触发扫描异常 ${eventName} actorId=${id}:`, err);
+        }
+      }
+      this.eventTriggeredCount++;
+      console.log(`[BrainStem] 事件 ${eventName} 触发全局即时扫描`);
+    }
+  }
+
+  /**
+   * 根据注意力焦点调整心跳采样率。
+   * 优先级：注意力焦点 > 用户活动状态 > 默认 45s。
+   */
+  private adjustSampleRateByAttention(actorId: string, focus: AttentionFocus): void {
+    const newInterval = ATTENTION_FOCUS_INTERVAL[focus];
+    if (newInterval === this.currentSampleInterval) return;
+    const prev = this.currentSampleInterval;
+    this.currentSampleInterval = newInterval;
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = setInterval(() => {
+        void this.sweepOnce().catch((e) => {
+          console.error("[BrainStem] sweep 异常:", e);
+        });
+      }, newInterval);
+      this.sweepTimer.unref?.();
+    }
+    console.log(
+      `[BrainStem] 注意力调整采样率 actorId=${actorId}: ${prev / 1000}s → ${newInterval / 1000}s (focus=${focus})`,
+    );
   }
 
   // ---- 生命周期 --------------------------------------------------------
@@ -195,8 +529,30 @@ export class BrainStem {
     }
     this.busySince.clear();
     this.lastVisualCheck.clear();
+    // Step 4 扩展：清理事件驱动 + 注意力调度相关状态
+    this.attentionFocus.clear();
+    this.lastEventTriggerAt.clear();
     this.started = false;
     console.log("[BrainStem] 已停止");
+  }
+
+  /** Step 4 扩展：获取 BrainStem 统计（用于 snapshot） */
+  getStats(): {
+    syntheticEmitted: number;
+    lastSweepAt: string | null;
+    activeActors: number;
+    eventTriggeredCount: number;
+    attentionChangeCount: number;
+    registeredEventTypes: BrainStemEventName[];
+  } {
+    return {
+      syntheticEmitted: this.syntheticEmitted,
+      lastSweepAt: this.lastSweepAt,
+      activeActors: this.knownActors.size,
+      eventTriggeredCount: this.eventTriggeredCount,
+      attentionChangeCount: this.attentionChangeCount,
+      registeredEventTypes: Array.from(this.eventHandlers.keys()),
+    };
   }
 
   // ---- 心跳扫描 --------------------------------------------------------
@@ -205,23 +561,178 @@ export class BrainStem {
   async sweepOnce(): Promise<void> {
     this.lastSweepAt = new Date().toISOString();
     if (this.knownActors.size === 0) return;
-    for (const actorId of this.knownActors) {
-      try {
-        this.sweepActor(actorId);
-      } catch (e) {
-        console.error(`[BrainStem] sweepActor ${actorId} 失败:`, e);
-      }
-    }
+    // 异步分片扫描：每个 actor 用 setImmediate 让出 event loop，
+    // 避免 45s 心跳期间同步阻塞造成用户请求延迟尖峰（原同步 for 循环可能耗时 100-500ms）
+    const actors = Array.from(this.knownActors);
+    await new Promise<void>((resolve) => {
+      const scheduleNext = (idx: number): void => {
+        if (idx >= actors.length) {
+          resolve();
+          return;
+        }
+        const actorId = actors[idx];
+        if (!actorId) {
+          scheduleNext(idx + 1);
+          return;
+        }
+        setImmediate(() => {
+          try {
+            this.sweepActor(actorId);
+          } catch (e) {
+            console.error(`[BrainStem] sweepActor ${actorId} 失败:`, e);
+          }
+          scheduleNext(idx + 1);
+        });
+      };
+      scheduleNext(0);
+    });
     // 感知预算：扫描结束后根据用户活动状态动态调整心跳采样率。
     this.observeAndAdjustSampleRate();
+
+    // 深度优化：定期调度 WorkingMemoryCortex.decay()（遗忘曲线）
+    // 每 N 次 sweep 触发一次，对所有 known actor 跑遗忘机制
+    this.decaySweepCounter++;
+    if (this.workingMemory && this.decaySweepCounter >= BrainStem.DECAY_EVERY_N_SWEEPS) {
+      this.decaySweepCounter = 0;
+      await new Promise<void>((resolve) => {
+        const decayNext = (idx: number): void => {
+          if (idx >= actors.length) {
+            resolve();
+            return;
+          }
+          const actorId = actors[idx];
+          if (!actorId) {
+            decayNext(idx + 1);
+            return;
+          }
+          setImmediate(() => {
+            try {
+              const stats = this.workingMemory!.decay(actorId);
+              this.decayStats.triggered++;
+              this.decayStats.totalDecayed += stats.decayed;
+              this.decayStats.totalForgotten += stats.forgotten;
+              if (stats.decayed > 0 || stats.forgotten > 0) {
+                console.log(
+                  `[BrainStem] WorkingMemory decay actor=${actorId} decayed=${stats.decayed} forgotten=${stats.forgotten}`,
+                );
+              }
+            } catch (e) {
+              console.error(`[BrainStem] WorkingMemory decay ${actorId} 失败:`, e);
+            }
+            decayNext(idx + 1);
+          });
+        };
+        decayNext(0);
+      });
+    }
+
+    // 深度优化：定期调度 DefaultModeNetwork.onIdle()（空闲时整合）
+    // 每 7 次 sweep（约 5 分钟）检查一次各 actor 是否空闲，命中则异步触发 onIdle
+    // 异步触发不阻塞主循环；onIdle 内部有 10 分钟最小间隔抑制，不会频繁跑
+    this.dmnSweepCounter++;
+    if (this.dmn && this.dmnSweepCounter >= BrainStem.DMN_CHECK_EVERY_N_SWEEPS) {
+      this.dmnSweepCounter = 0;
+      for (const actorId of this.knownActors) {
+        try {
+          if (!this.dmn.isIdle(actorId)) continue;
+          this.dmnStats.idleActors++;
+          // 异步触发，不阻塞 sweepOnce
+          void this.dmn.onIdle(actorId).then((result) => {
+            const r = result as { triggered?: boolean } | null | undefined;
+            if (r?.triggered) {
+              this.dmnStats.triggered++;
+              console.log(`[BrainStem] DMN onIdle 触发 actor=${actorId}`);
+            }
+          }).catch((e) => {
+            this.dmnStats.failed++;
+            console.error(`[BrainStem] DMN onIdle ${actorId} 失败:`, e);
+          });
+        } catch (e) {
+          console.error(`[BrainStem] DMN isIdle 检查 ${actorId} 失败:`, e);
+        }
+      }
+    }
+
+    // 仿人记忆连续性：白天 idle 时触发轻量记忆整理
+    // 与 DMN 同周期（每 7 次 sweep ≈ 5 分钟），仅在用户 idle 且有待整理队列时触发
+    // tryIdleConsolidation 内部检查队列是否为空，空则直接返回 false，不会空跑
+    this.idleMemSweepCounter++;
+    if (this.memoryConsolidator && this.idleMemSweepCounter >= BrainStem.DMN_CHECK_EVERY_N_SWEEPS) {
+      this.idleMemSweepCounter = 0;
+      for (const actorId of this.knownActors) {
+        try {
+          // 复用 awareness 判断用户是否 idle/sleeping
+          const state = this.awareness?.observe(actorId);
+          const isActive = state?.activity === "sleeping" || state?.activity === "idle";
+          if (!isActive) continue;
+          void this.memoryConsolidator.tryIdleConsolidation(actorId).then((triggered) => {
+            if (triggered) {
+              this.idleMemStats.triggered++;
+              console.log(`[BrainStem] 白天 idle 记忆整理触发 actor=${actorId}`);
+            } else {
+              this.idleMemStats.skipped++;
+            }
+          }).catch((e) => {
+            this.idleMemStats.failed++;
+            console.error(`[BrainStem] idle 记忆整理 ${actorId} 失败:`, e);
+          });
+        } catch (e) {
+          console.error(`[BrainStem] idle 记忆整理检查 ${actorId} 失败:`, e);
+        }
+      }
+    }
+
+    // 记忆认知架构升级（Phase 4）：心跳回调——供 ForgettingController.continuousScore 桥接
+    // 每次 sweepOnce 结束后调用，回调异常不传播、不阻塞下次心跳。
+    // 回调返回 Promise 时异步执行（fire-and-forget）。
+    for (const cb of this.heartbeatCallbacks) {
+      try {
+        const ret = cb();
+        if (ret && typeof (ret as Promise<void>).catch === "function") {
+          void (ret as Promise<void>).catch((e) => {
+            console.error("[BrainStem] 心跳回调异步失败:", e);
+          });
+        }
+      } catch (e) {
+        console.error("[BrainStem] 心跳回调异常:", e);
+      }
+    }
+  }
+
+  /** 获取 DMN 调度统计 */
+  getDmnStats(): { triggered: number; idleActors: number; failed: number } {
+    return { ...this.dmnStats };
+  }
+
+  /** 获取 decay 统计 */
+  getDecayStats(): { triggered: number; totalDecayed: number; totalForgotten: number } {
+    return { ...this.decayStats };
   }
 
   /**
    * 扫描结束后观察用户活动状态并调整心跳采样率。
+   * 优先级（Step 4 扩展）：注意力焦点 > 用户活动状态 > 默认 45s。
    * awareness 未注册或 observe 返回 null 时保持当前 interval 不变（降级安全）。
    * 与 sweepActor 内部的 awareness.observe 用法保持一致：遍历所有已知 actor。
    */
   private observeAndAdjustSampleRate(): void {
+    // 优先级 1：注意力焦点（如等快递 → 30s 采样）
+    let attentionActor: string | null = null;
+    let attentionFocus: AttentionFocus | null = null;
+    for (const actorId of this.knownActors) {
+      const focus = this.attentionFocus.get(actorId);
+      if (focus && focus !== "default") {
+        attentionActor = actorId;
+        attentionFocus = focus;
+        break;
+      }
+    }
+    if (attentionActor && attentionFocus) {
+      this.adjustSampleRateByAttention(attentionActor, attentionFocus);
+      return;
+    }
+
+    // 优先级 2：用户活动状态（原有逻辑）
     if (!this.awareness) return;
     // 多 actor 场景取最近一次非空状态作为采样率依据（典型场景下单 actor）。
     let latestState: UserActivityState | null = null;
@@ -374,6 +885,31 @@ export class BrainStem {
         // emitSynthetic 因 kind 级抑制未发布时,回退本次 predictNextAction 标记,允许下次重试。
         this.lastPredictionTime.delete(`${actorId}:${prediction.action}`);
       }
+    }
+
+    // Phase 3.2：基于序列模式的预测（补充 predictNextAction 未覆盖的场景）
+    // 仅在 predictNextAction 未发布 predicted_action 信号时尝试序列预测，避免重复
+    const sequencePrediction = this.predictBySequencePattern(actorId);
+    if (sequencePrediction) {
+      this.emitSynthetic(actorId, {
+        kind: "predicted_action",
+        title: "基于历史模式预测",
+        summary: `模式预测：${sequencePrediction.action}（置信度 ${(sequencePrediction.confidence * 100).toFixed(0)}%），预计 ${sequencePrediction.predictedTime}`,
+        importance: "low",
+        tags: ["predicted_action", "agent_inference", "sequence_pattern"],
+        evidence: [
+          `action=${sequencePrediction.action}`,
+          `confidence=${sequencePrediction.confidence.toFixed(2)}`,
+          `predictedTime=${sequencePrediction.predictedTime}`,
+          `source=sequence_pattern`,
+        ],
+        metadata: {
+          action: sequencePrediction.action,
+          confidence: sequencePrediction.confidence,
+          predictedTime: sequencePrediction.predictedTime,
+          source: "sequence_pattern",
+        },
+      });
     }
 
     // 5. 周期性视觉感知：busy 时调 SensoryCortex.look() + describe() 获取屏幕描述，
@@ -549,6 +1085,53 @@ export class BrainStem {
     this.lastPredictionTime.set(key, Date.now());
 
     return { action, confidence, predictedTime };
+  }
+
+  /**
+   * Phase 3.2：基于序列模式的预测。
+   *
+   * 从 LifeSignalHub 历史挖掘序列模式（10 分钟缓存），
+   * 若当前事件流匹配某模式前缀，合成预测。
+   *
+   * 重复抑制：同 actor 30 分钟内不重复预测（与 predictNextAction 独立）。
+   */
+  private predictBySequencePattern(actorId: string): PredictedAction | null {
+    if (!this.sequencePatternMiner || !this.hub) return null;
+
+    // 重复抑制：30 分钟内不重复
+    const lastSeqPred = this.lastSequencePredictionTime.get(actorId);
+    const suppressMs = 30 * 60 * 1000;
+    if (lastSeqPred !== undefined && Date.now() - lastSeqPred < suppressMs) {
+      return null;
+    }
+
+    // 10 分钟挖掘一次（缓存）
+    const miningInterval = 10 * 60 * 1000;
+    const lastMining = this.lastMiningTime.get(actorId);
+    const now = Date.now();
+    if (lastMining === undefined || now - lastMining > miningInterval) {
+      try {
+        const patterns = this.sequencePatternMiner.mine(actorId);
+        this.cachedPatterns.set(actorId, patterns);
+        this.lastMiningTime.set(actorId, now);
+      } catch (err) {
+        console.log(`[BrainStem] 序列模式挖掘失败 ${actorId}: ${err}`);
+        return null;
+      }
+    }
+
+    const patterns = this.cachedPatterns.get(actorId);
+    if (!patterns || patterns.length === 0) return null;
+
+    // 取最近 5 个信号作为当前事件流
+    const recentSignals = this.hub.recentSignals(actorId, 5);
+    if (recentSignals.length === 0) return null;
+
+    const prediction = this.predictiveSynthesizer.predict(patterns, recentSignals);
+    if (!prediction) return null;
+
+    this.lastSequencePredictionTime.set(actorId, now);
+    return prediction;
   }
 
   // ---- 快照 ------------------------------------------------------------

@@ -27,6 +27,7 @@ import {
   isToolSearchBridgeName,
   prepareToolsWithToolSearch,
 } from "../tools/tool-search/index.js";
+import { isFastLaneTool } from "../tools/tool-search/core-tool-library.js";
 import {
   getCapabilityModuleCategoryMappings,
   getCapabilityModuleChatTools,
@@ -57,6 +58,7 @@ import type {
   VisionFrame,
 } from "./types.js";
 import { executeWithToolLimit } from "../services/concurrency-limiter.js";
+import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 
@@ -179,6 +181,40 @@ function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
     if (!unique.includes(line)) unique.push(line);
   }
   return unique.join("\n\n").trim();
+}
+
+/**
+ * 检测 LLM 最终回复是否是「道歉式兜底」（无法整合工具结果/道歉重试）。
+ * 当工具结果已有真实数据时，这种 apology 不应替代搜索结果 — 应回退到工具结果拼接。
+ *
+ * 触发条件（任一即视为兜底）：
+ *  - 含"抱歉/请稍后重试/无法生成回复/不太清楚/我不太确定"等认错短语
+ *  - 长度很短（< 60 字符）且不含任何事实/数字/链接（说明 LLM 没尝试整合）
+ */
+function isApologyStyleFallback(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  const apologyPatterns = [
+    /抱歉.*(?:无法|不能|暂时)/,
+    /请稍后重试/,
+    /换个(?:问法|方式)/,
+    /我(?:不太|没有)?(?:清楚|了解|知道|听说过)/,
+    /没(?:太|有)?(?:听过|见过|找到|搜到|查到|听清|听到|收到)/,
+    /再说一遍/,
+    /网络(?:那边)?(?:卡住|异常|繁忙|问题)/,
+    /刚走神/, // 用户明确要求删除"哈?刚走神了"风格的兜底
+    /没反应过来/, // 用户明确要求删除"没反应过来"风格的兜底
+    /我这会儿/, // 用户明确要求删除"我这会儿没反应过来"风格的兜底
+  ];
+  if (apologyPatterns.some((re) => re.test(t))) {
+    // 仅当 LLM 没有在回复里整合任何事实（数字/链接/标题/日期）时，才判定为兜底
+    const hasFactAnchors =
+      /\d/.test(t) ||
+      /https?:\/\//.test(t) ||
+      /Kimi|Moonshot|月之暗面|大模型|发布|开源|参数|刷新/.test(t);
+    return !hasFactAnchors;
+  }
+  return false;
 }
 
 const DEFAULT_MAX_ROUNDS = 12;
@@ -517,7 +553,15 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
 function resolveForcedToolChoice(
   userText: string,
   apiTools: ChatCompletionTool[],
+  fastProfile?: boolean,
 ): { type: "function"; function: { name: string } } | "auto" {
+  // 2026-08-01 性能优化：Fast 模式（contextual/light 暴露策略）跳过强制 tool_choice。
+  // 原因：Fast 模式的 system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
+  // LLM 可直接答「现在几点」「今天星期几」等问题，强制调 clock 工具反而多 1 次 round trip
+  // （LLM→tool→LLM，3 次网络往返）。Fast 模式把工具调用决策权完全交给 LLM。
+  if (fastProfile) return "auto";
+
+  // 1. 显式电话请求 → 强制 phone_call_user
   if (isExplicitPhoneCallRequest(userText)) {
     const hasPhoneCallTool = apiTools.some(
       (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
@@ -526,6 +570,40 @@ function resolveForcedToolChoice(
       return { type: "function", function: { name: "phone_call_user" } };
     }
   }
+
+  // 2. 直接时间/日期/位置问题 → 强制 clock_get_current_time
+  //    避免 LLM 在"现在几点"这类事实型问题上瞎编
+  if (DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
+    const hasClockTool = apiTools.some(
+      (tool) => tool.type === "function" && tool.function?.name === "clock_get_current_time",
+    );
+    if (hasClockTool) {
+      return { type: "function", function: { name: "clock_get_current_time" } };
+    }
+  }
+
+  // 3. 天气类问题 → 强制 weather_get_local
+  //    避免 LLM 用旧知识编造天气
+  if (/天气|气温|下雨|下雪|forecast|weather|温度多少/i.test(userText)) {
+    const hasWeatherTool = apiTools.some(
+      (tool) => tool.type === "function" && tool.function?.name === "weather_get_local",
+    );
+    if (hasWeatherTool) {
+      return { type: "function", function: { name: "weather_get_local" } };
+    }
+  }
+
+  // 4. 时效性事实查询 → 强制 search_web
+  //    避免 LLM 用训练截止知识回答"最新""近期"类问题
+  if (shouldRequireFreshWebLookup(userText, apiTools)) {
+    const hasSearchTool = apiTools.some(
+      (tool) => tool.type === "function" && tool.function?.name === "search_web",
+    );
+    if (hasSearchTool) {
+      return { type: "function", function: { name: "search_web" } };
+    }
+  }
+
   return "auto";
 }
 
@@ -534,6 +612,11 @@ const DIRECT_CLOCK_OR_LOCATION_RE =
 
 const FRESH_WEB_LOOKUP_RE =
   /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
+
+// 扩展触发 fresh lookup 的场景：用户提到具体模型/产品名 + "新/最新/出/版/v\d|k\d" 等时效信号。
+// 修复 LLM 在"Kimi3 新出的"这种含具体产品名但没显式"搜索"关键词的场景下不主动联网的漏判。
+const FRESH_FACT_ENTITY_HINT_RE =
+  /(?:kimi|gpt|claude|gemini|llama|qwen|deepseek|文心|通义|盘古|智谱|豆包|星火|混元|llm|大模型|foundation model|foundation_model)[\s\-_]*[a-z0-9]*\d|新出|新发|刚出|刚发|新版|新版本|新模型|新上|v\d|k\d|beta|rc\d|preview|alpha/i;
 
 const FRESH_FACT_TOOL_NAMES = new Set([
   "search_web",
@@ -549,7 +632,8 @@ export function shouldRequireFreshWebLookup(
   const text = userText.trim();
   if (!text) return false;
   if (DIRECT_CLOCK_OR_LOCATION_RE.test(text)) return false;
-  if (!FRESH_WEB_LOOKUP_RE.test(text)) return false;
+  const hasFreshWebTrigger = FRESH_WEB_LOOKUP_RE.test(text) || FRESH_FACT_ENTITY_HINT_RE.test(text);
+  if (!hasFreshWebTrigger) return false;
   return apiTools.some(
     (tool) =>
       tool.type === "function" &&
@@ -564,7 +648,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。",
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期；用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、简报格式。",
       parameters: {
         type: "object",
         properties: {
@@ -1038,7 +1122,7 @@ const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "phone.call_user",
       description:
-        "Agent 呼叫当前用户：通过 WebSocket 向用户客户端推送语音来电（含 TTS），用户可接听并文字/语音回复。用户不需要虚拟号码。spokenMessage 为播报正文。ringStyle：reminder=提醒；peer=联络（默认）。",
+        "Agent 呼叫当前用户：通过 WebSocket 向用户客户端推送语音来电（含 TTS），用户可接听并文字/语音回复。用户不需要虚拟号码。spokenMessage 为播报正文。ringStyle：reminder=提醒；peer=联络（默认）。\n【绝对禁止】\n- 一轮只许调用一次，多次调用系统只认第一次。\n- 禁止回复「马上给你打过去」「好的我给您打个电话」「现在给你打确认」「再打一次」「马上去设」等任何提前告知或重复承诺——用户不需要知道你要打，直接打就是。\n- 别一上来就甩「我是 AI 打不了电话」「没法拨号」这种话。\n- 打电话是后台事儿，跟用户说话时别提倒计时、别说「到时候接一下」、别提「准时喊你」这种内部细节。",
       parameters: {
         type: "object",
         properties: {
@@ -1204,7 +1288,7 @@ const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "voice.speak",
       description:
-        "【语音播报·即时模式】合成语音并立即对用户播报（无来电 UI、无振铃，客户端后台一次性播放）。适用于：状态告知、提醒、即时反馈、不需要用户回应的简短播报。与 phone.call_user 区别：phone 是来电体验（振铃+接通+通话 UI），voice.speak 是轻量后台播报。用户问「能不能说话」「用语音告诉我」时调用本工具。",
+        "【语音播报·即时模式】合成语音并立即对用户播报（无来电 UI、无振铃，客户端后台一次性播放）。适用于：状态告知、提醒、即时反馈、不需要用户回应的简短播报。与 phone.call_user 区别：phone 是来电体验（振铃+接通+通话 UI），voice.speak 是轻量后台播报。用户问「能不能说话」「用语音告诉我」时调用本工具。\n【绝对禁止】调用后不要在文本回复里复述语音内容，工具会替你落地。禁止回复「马上给你播报」「好的我给您念」等提前告知。",
       parameters: {
         type: "object",
         properties: {
@@ -1231,7 +1315,7 @@ const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "voice.send_message",
       description:
-        "【语音消息·微信式】合成语音并落地为可重播的语音消息（客户端渲染为微信式语音气泡，用户可多次点击重播）。适用于：用户明确要求「发语音」「发条语音消息」、长文本回复用语音更自然、朋友式聊天场景。与 voice.speak 区别：speak 是一次性即时播报无 UI，send_message 是落地可重播语音消息。短指令回复（如「好的」「知道了」）请用文本，不要滥用本工具。",
+        "【语音消息·微信式】合成语音并落地为可重播的语音消息（客户端渲染为微信式语音气泡，用户可多次点击重播）。适用于：用户明确要求「发语音」「发条语音消息」、长文本回复用语音更自然、朋友式聊天场景。与 voice.speak 区别：speak 是一次性即时播报无 UI，send_message 是落地可重播语音消息。短指令回复（如「好的」「知道了」）请用文本，不要滥用本工具。\n【绝对禁止】调用后不要在文本回复里复述语音内容，工具会替你落地。",
       parameters: {
         type: "object",
         properties: {
@@ -1272,13 +1356,13 @@ const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
 ];
 
 /** 时钟工具：获取当前时间和日期信息（通过IP地址查询用户时区）。 */
-const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
+export const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "clock.get_current_time",
       description:
-        "获取当前时间（注册名 clock.get_current_time）。通过 IP 查询时区与城市，返回本地时间（精确到秒）、星期。用户问现在几点、当前时间时必须调用。",
+        "获取当前时间（注册名 clock.get_current_time）。通过 IP 查询时区与城市，返回本地时间（精确到秒）、星期。\n【强制调用规则】用户询问时间或所在城市/当前位置时必须调用本工具或 clock.get_user_location；禁止使用 IP 或训练数据臆测位置。",
       parameters: {
         type: "object",
         properties: {},
@@ -1328,6 +1412,53 @@ const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+/**
+ * Fast 车道轻量工具集：从 builtin 全量工具集中动态筛选 fastLane 工具
+ * + 合并自我进化生成的动态 fastLane Skill 工具。
+ *
+ * 筛选规则：{@link isFastLaneTool}（静态 CORE_TOOL_LIBRARY.fastLane + 动态名单）。
+ * 新增内置工具时在 CORE_TOOL_LIBRARY.fastLane 里声明即可自动收编；
+ * 自我进化生成的 Skill 通过 setDynamicFastLaneSkillTools() 注入后自动收编。
+ */
+let _fastLaneToolsCache: ChatCompletionTool[] | null = null;
+
+/**
+ * 动态 fastLane Skill 工具（自我进化生成的轻量查询类 Skill）。
+ *
+ * 由 setDynamicFastLaneSkillTools() 注入，getFastLaneTools() 会把它们合并到
+ * Fast 模式工具集中。注入后自动清缓存重建。
+ */
+let _dynamicFastLaneSkillTools: ChatCompletionTool[] = [];
+
+/**
+ * 注入动态 fastLane Skill 工具列表（自我进化装载 Skill 后调用）。
+ *
+ * 调用后清除 fastLane 缓存，下次 getFastLaneTools() 会重新合并 builtin + 动态。
+ */
+export function setDynamicFastLaneSkillTools(tools: ChatCompletionTool[]): void {
+  _dynamicFastLaneSkillTools = tools;
+  _fastLaneToolsCache = null;
+}
+
+export function getFastLaneTools(): ChatCompletionTool[] {
+  if (_fastLaneToolsCache) return _fastLaneToolsCache;
+  const builtinFastLane = getBuiltinAgentChatTools().filter((t) => {
+    if (!("function" in t) || !t.function?.name) return false;
+    return isFastLaneTool(t.function.name);
+  });
+  // 合并动态 fastLane Skill（去重：builtin 已有的不重复加入）
+  const seen = new Set<string>();
+  for (const t of builtinFastLane) {
+    if ("function" in t && t.function?.name) seen.add(t.function.name);
+  }
+  const dynamicUnique = _dynamicFastLaneSkillTools.filter((t) => {
+    if (!("function" in t) || !t.function?.name) return false;
+    return !seen.has(t.function.name);
+  });
+  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique];
+  return _fastLaneToolsCache;
+}
+
 /** Agent 能力详细查询工具（Layer 3）：system prompt 已包含行为规则和路由表（Layer 2），本工具用于获取某领域的完整能力描述和运行时状态。 */
 const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -1364,11 +1495,15 @@ let _capabilityModuleDeps: CapabilityModuleDeps | null = null;
 /** 动态注入的 Brain Center 工具（由 bootstrap 阶段设置；brain 未启用时为空数组） */
 let _brainChatTools: ChatCompletionTool[] = [];
 
+/** 动态注入的 Body Center 工具（由 bootstrap 阶段设置；body 未启用时为空数组） */
+let _bodyChatTools: ChatCompletionTool[] = [];
+
 /** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
 export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _mcpChatTools = tools;
   // 清除缓存，下次 getBuiltinAgentChatTools 调用会重新构建
   _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1383,6 +1518,7 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
 export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
   _capabilityModuleDeps = deps;
   _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1394,6 +1530,19 @@ export function setCapabilityModuleDeps(deps: CapabilityModuleDeps): void {
 export function setBrainChatTools(tools: ChatCompletionTool[]): void {
   _brainChatTools = tools;
   _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
+}
+
+/**
+ * 注入 Body Center 工具 schema 列表（启动时调用一次）。
+ *
+ * 仅当 BodyCenter 启用时由 bootstrap 传入 BODY_CHAT_TOOLS；否则保持空数组，
+ * body.* 工具不会出现在 LLM 可见工具列表中。调用后清缓存重建。
+ */
+export function setBodyChatTools(tools: ChatCompletionTool[]): void {
+  _bodyChatTools = tools;
+  _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
 }
 
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
@@ -1424,9 +1573,21 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...SELF_PROGRAMMING_CHAT_TOOLS,
     ...capabilityModuleTools,
     ..._brainChatTools,
+    ..._bodyChatTools,
     ..._mcpChatTools,
   ];
   return _builtinToolsCache;
+}
+
+/**
+ * 统一清除 builtin + fastLane 工具缓存。
+ *
+ * 自我进化装载 / 卸载 Skill 后调用，确保下次 getBuiltinAgentChatTools() /
+ * getFastLaneTools() 重新构建，新能力立即可见。
+ */
+export function invalidateBuiltinToolsCache(): void {
+  _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
 }
 
 /**
@@ -1499,6 +1660,18 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     toolNames: ['embodiment.observe', 'embodiment.window_place', 'embodiment.roam', 'embodiment.move', 'embodiment.stop', 'embodiment.set_state', 'embodiment.excite', 'embodiment.window_roam']
   },
   {
+    // Body Center 器官层：让用户问"身体器官 / 大脑结构 / 我有哪些身体能力"时能命中 body.* 工具
+    category: 'body',
+    keywords: [
+      '身体器官', '器官', '大脑结构', '大脑', 'brain', '身体结构', '身体能力', '身体模块',
+      '我有哪些身体', '我有什么身体', '我的身体', '我在哪台设备', '我在哪里渲染',
+      '手', '眼', '耳', '嘴', '皮肤', '前庭', '稳态', '反射', 'hand', 'eye', 'ear', 'mouth', 'skin',
+      '电量', 'battery', '算力配额', '负载', '疲劳度', 'fatigue',
+      'body.list_modules', 'body.where_am_i', 'body.state', 'body.calibrate',
+    ],
+    toolNames: ['body.list_modules', 'body.where_am_i', 'body.state', 'body.calibrate']
+  },
+  {
     category: 'desktop',
     keywords: [
       '桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control',
@@ -1567,10 +1740,10 @@ export function buildToolCategoryMappings(
 const ALWAYS_INCLUDED_TOOLS = [
   'clock.get_current_time',
   'agent.query_capabilities',
-  'embodiment.roam',
-  'embodiment.move',
-  'embodiment.set_state',
+  'brain.list_capabilities',
   'phone.call_user',
+  // embodiment.* 已在 CORE_TOOL_LIBRARY 的 embodiment tier 整族暴露，每轮必带，
+  // 不需要再在 ALWAYS_INCLUDED_TOOLS 重复声明，减少 contextual 筛选时的冗余。
 ];
 
 function extractKeywords(text: string): string[] {
@@ -1678,12 +1851,33 @@ export function selectRelevantTools(
   });
   
   if (filteredTools.length < minTools) {
+    // 兜底补充工具：按"通用工具优先级"排序，而非按 allTools 原始拼接顺序
+    // 避免命中很少时（如"在吗"）塞进与意图无关的工具
+    const FALLBACK_PRIORITY = [
+      "clock.get_current_time",
+      "agent.query_capabilities",
+      "brain.list_capabilities",
+      "search_web",
+      "weather.get_local",
+      "calendar.list_tasks",
+      "wallet.get_balance",
+      "phone.call_user",
+    ];
     const remainingTools = allTools.filter((tool) => {
       if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
       return !selectedToolNames.has(tool.function.name);
     });
+    // 优先级排序：FALLBACK_PRIORITY 中的按顺序排前，其余保持原序
+    const priorityRank = new Map(FALLBACK_PRIORITY.map((name, idx) => [name, idx]));
+    const sortedRemaining = remainingTools.sort((a, b) => {
+      const aName = (a as { function?: { name?: string } }).function?.name ?? "";
+      const bName = (b as { function?: { name?: string } }).function?.name ?? "";
+      const aRank = priorityRank.has(aName) ? priorityRank.get(aName)! : FALLBACK_PRIORITY.length;
+      const bRank = priorityRank.has(bName) ? priorityRank.get(bName)! : FALLBACK_PRIORITY.length;
+      return aRank - bRank;
+    });
     const needed = minTools - filteredTools.length;
-    filteredTools.push(...remainingTools.slice(0, needed));
+    filteredTools.push(...sortedRemaining.slice(0, needed));
   }
   
   if (filteredTools.length > maxTools) {
@@ -1770,8 +1964,12 @@ export async function streamCompletionWithTools(
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
-  // 追踪每轮已发送的进度/前导文本，用于最终回复去重（防止思考过程泄露给用户）
-  const emittedStatusLines = new Set<string>();
+  // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
+  // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
+  // 强制工具调用会多 1 次 round trip，徒增延迟。
+  const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
+  // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
+  const allToolExecResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }> = [];
 
   // 工具调用克制引导：减少 LLM 对同一工具的冗余重复调用（实测 S3 联网搜索场景
   // LLM 会连续调 3-5 次 search_web，S5 代码沙箱会调 2 次 code.run）。
@@ -1807,7 +2005,7 @@ export async function streamCompletionWithTools(
           model,
           messages: requestMessages,
           tools: apiTools,
-          tool_choice: resolveForcedToolChoice(userText, apiTools),
+          tool_choice: resolveForcedToolChoice(userText, apiTools, fastProfile),
           // 明确启用并行工具调用，让 LLM 在单轮内返回多个 tool_calls。
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
@@ -1848,16 +2046,8 @@ export async function streamCompletionWithTools(
         {
           onContentDelta: (d) => {
             fullText += d;
-            if (ctx.onAgentStatusLine) {
-              // 旧行为：把当前累积的整段文本当作一行 status line 反复推送（去重由 emittedStatusLines 在 round 之间处理）
-              const statusLine = fullText.trim();
-              if (statusLine) {
-                emittedStatusLines.add(statusLine);
-                ctx.onAgentStatusLine(statusLine);
-              }
-            } else {
-              onDelta(d);
-            }
+            // 不在 tool loop 期间推送 delta：避免"思考前导话"流式输出给前端。
+            // 最终内容在 round 结束后（finishReason !== "tool_calls"）统一推送到 onDelta。
           },
           onToolCallsComplete: (calls) => {
             for (const c of calls) normalizedToolCalls.push(c);
@@ -1884,39 +2074,21 @@ export async function streamCompletionWithTools(
       }
     }
 
-    // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为进度前导话
-    //（已通过 onAgentStatusLine 独立推送），不应进入最终回复，否则用户会看到重复的思考过程。
+    // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为思考前导话，
+    // 不进入最终回复，也不推送给前端。
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
     }
 
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       // 对话结束：返回最终回复文本。
-      // 清理规则：
-      //   1. 去除与已发送进度话重复的内容（LLM 可能在最终回复中复述了进度前导）
-      //   2. 去除 [ts:] 时间戳前缀（仅供 LLM 上下文，不应展示给用户）
+      // 剥离 [ts:] 时间戳前缀（仅供 LLM 上下文，不应展示给用户）
       let finalText = lastAssistantText.trim();
-      if (emittedStatusLines.size > 0 && finalText) {
-        for (const emitted of emittedStatusLines) {
-          if (finalText === emitted || finalText.startsWith(emitted + "\n") || finalText.startsWith(emitted + "。")) {
-            finalText = finalText.slice(emitted.length).replace(/^[\n。、，,\s]+/, "");
-            break;
-          }
-          // 也处理进度话作为独立行出现在多行回复中的情况
-          const linePrefix = "\n" + emitted;
-          const idx = finalText.indexOf(linePrefix);
-          if (idx >= 0) {
-            finalText = finalText.slice(0, idx) + finalText.slice(idx + emitted.length).replace(/^[\n。、，,\s]+/, "");
-          }
-        }
-        finalText = finalText.trim();
-      }
-      // 剥离 [ts:] 时间戳前缀
       finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
       if (requiresFreshWebLookup && !satisfiedFreshWebLookup) {
         messages.push({
           role: "assistant",
-          content: finalText || fullText || null,
+          content: finalText || fullText || "(需要调用搜索工具获取最新信息)",
         });
         messages.push({
           role: "system",
@@ -1925,14 +2097,20 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
-      if (ctx.onAgentStatusLine && finalText) {
-        onDelta(finalText);
+      // 防 LLM "道歉式兜底"：当已有工具结果但 LLM 输出是 apology/无法整合时，
+      // 直接把工具结果拼接作为回复，避免把真实搜索数据扔掉。
+      const effectiveFinalText = isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()
+        ? lastToolOutputFallback.trim()
+        : finalText;
+      // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
+      if (effectiveFinalText) {
+        onDelta(effectiveFinalText);
       }
       messages.push({
         role: "assistant",
-        content: finalText || null,
+        content: effectiveFinalText || null,
       });
-      return finalText;
+      return effectiveFinalText;
     }
 
     // 把 NormalToolCall[] 物化为 OpenAI SDK 形态（保留 id 兜底 + parsedArgs 预解析）
@@ -1974,7 +2152,7 @@ export async function streamCompletionWithTools(
       let registryToolName = resolveRegistryToolName(fn.name);
       let notifyToolName = registryToolName;
       if (isToolSearchBridgeName(registryToolName) && registryToolName === "tool_call") {
-        const bridge = executeToolSearchBridge(registryToolName, args, deferredToolCatalog);
+        const bridge = await executeToolSearchBridge(registryToolName, args, deferredToolCatalog);
         if (bridge.kind === "call" && bridge.ok) {
           notifyToolName = bridge.registryToolName;
         }
@@ -1993,7 +2171,7 @@ export async function streamCompletionWithTools(
         let targetArgs = item.parsedArgs;
 
         if (isToolSearchBridgeName(item.registryToolName)) {
-          const bridge = executeToolSearchBridge(
+          const bridge = await executeToolSearchBridge(
             item.registryToolName,
             item.parsedArgs,
             deferredToolCatalog,
@@ -2039,27 +2217,34 @@ export async function streamCompletionWithTools(
         const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(targetToolName);
 
         let exec: Awaited<ReturnType<ChatToolExecutionContext['executeTool']>>;
-        try {
-          // 重型工具经并发限制器（code.run / image.generate / voice.* 等），
-          // 限流等待不占超时预算：只有 acquire 成功后才开始 Promise.race 计时
-          exec = await executeWithToolLimit(targetToolName, () =>
-            Promise.race([
-              ctx.executeTool(targetToolName, targetArgs),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
-              )
-            ])
-          );
-        } catch (timeoutError) {
-          console.error(`[工具超时] ${targetToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
-          exec = {
-            ok: false,
-            result: {
-              error: `工具执行超时，请稍后重试。(${TOOL_TIMEOUT_MS}ms)`,
-              timeout: true,
-              toolName: targetToolName
-            }
-          };
+
+        // 工具结果缓存：查询类工具在 TTL 内相同参数直接返回缓存，跳过安全检查/BodyGateway 等中间层
+        const cachedResult = ctx.getCachedToolResult?.(targetToolName, targetArgs);
+        if (cachedResult) {
+          exec = cachedResult;
+        } else {
+          try {
+            // 重型工具经并发限制器（code.run / image.generate / voice.* 等），
+            // 限流等待不占超时预算：只有 acquire 成功后才开始 Promise.race 计时
+            exec = await executeWithToolLimit(targetToolName, () =>
+              Promise.race([
+                ctx.executeTool(targetToolName, targetArgs),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
+                )
+              ])
+            );
+          } catch (timeoutError) {
+            console.error(`[工具超时] ${targetToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
+            exec = {
+              ok: false,
+              result: {
+                error: `工具执行超时，请稍后重试。(${TOOL_TIMEOUT_MS}ms)`,
+                timeout: true,
+                toolName: targetToolName
+              }
+            };
+          }
         }
         
         let injectFrames: VisionFrame[] | undefined;
@@ -2141,6 +2326,12 @@ export async function streamCompletionWithTools(
         ok: exec.ok,
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
       });
+      // 累积工具结果供 summary 调用做策略评估
+      allToolExecResults.push({
+        toolName: wireToolName,
+        ok: exec.ok,
+        result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
+      });
       const toolContent = compacted.content;
       // 非视觉模型截图后追加 OCR 识别结果(文本+坐标),让 LLM 能"看到"屏幕内容
       const ocrText = settled.status === "fulfilled"
@@ -2195,5 +2386,87 @@ export async function streamCompletionWithTools(
     lastToolOutputFallback = buildFallbackAnswerFromToolOutputs(roundToolOutputs);
   }
 
-  return lastAssistantText.trim() || lastToolOutputFallback.trim();
+  // ⚠️ 工具循环结束兜底：maxRounds 用完或 LLM 一直没出 finalText 时，
+  // 如果已有工具结果（lastToolOutputFallback 非空），发一次轻量 LLM 调用让 LLM
+  // 用自然语言组织工具结果，避免直接把工具 JSON 摘要 dump 给用户。
+  // 同时处理：lastAssistantText 是 apology 风格时，也用 summary 调用重建。
+  const needSummaryCall =
+    (!lastAssistantText.trim() || isApologyStyleFallback(lastAssistantText)) &&
+    lastToolOutputFallback.trim().length > 0;
+
+  if (needSummaryCall) {
+    try {
+      // 过滤无效 assistant message：OpenAI API 要求 assistant 消息必须有 content 或 tool_calls
+      const sanitizedMessages = messages.filter((m) => {
+        if (m.role !== "assistant") return true;
+        const hasContent = typeof m.content === "string" && m.content.trim().length > 0;
+        const hasToolCalls = Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0;
+        return hasContent || hasToolCalls;
+      });
+
+      // 数据驱动策略评估：根据工具收集到的真实数据质量选择回复策略
+      const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText);
+      const strategyBlock = strategyDirective.instruction
+        ? `\n\n【回复策略】${strategyDirective.instruction}`
+        : "";
+      console.log(
+        `[synthesis] 策略=${strategyDirective.strategy} 等级=${strategyDirective.quality.level} ` +
+          `来源=${strategyDirective.quality.sourceCount} 成功=${strategyDirective.quality.successCount} ` +
+          `内容=${strategyDirective.quality.totalContentLength}字符 理由=${strategyDirective.quality.reason}`,
+      );
+
+      const summaryMessages: ChatCompletionMessageParam[] = [
+        ...sanitizedMessages,
+        {
+          role: "user",
+          content:
+            `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
+            `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
+            strategyBlock +
+            `\n\n工具结果：\n${lastToolOutputFallback.slice(0, 4000)}`,
+        },
+      ];
+      const summaryResp = await client.chat.completions.create({
+        model,
+        messages: summaryMessages,
+        temperature: 0.5,
+        max_tokens: 800,
+        stream: true,
+      });
+      // 流式消费 summary 调用：每个 delta 通过 onDelta 实时推送给前端
+      let summaryText = "";
+      await consumeNormalizedStream(
+        adaptOpenAiChatCompletionStream(
+          summaryResp as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+        ),
+        {
+          onContentDelta: (d) => {
+            summaryText += d;
+            onDelta(d);
+          },
+          providerId: "openai-compatible",
+          model,
+        },
+      );
+      summaryText = summaryText.trim();
+      if (summaryText && !isApologyStyleFallback(summaryText)) {
+        return summaryText;
+      }
+      // summary 调用也失败了 → 用工具结果拼接兜底（比空串好）
+      return lastToolOutputFallback.trim();
+    } catch (summaryErr) {
+      console.log(
+        `[tool-loop] summary 调用失败，回退到工具结果拼接: ${
+          summaryErr instanceof Error ? summaryErr.message : String(summaryErr)
+        }`,
+      );
+      return lastToolOutputFallback.trim();
+    }
+  }
+
+  return (
+    isApologyStyleFallback(lastAssistantText) && lastToolOutputFallback.trim()
+      ? lastToolOutputFallback.trim()
+      : lastAssistantText.trim() || lastToolOutputFallback.trim()
+  );
 }

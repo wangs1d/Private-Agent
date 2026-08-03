@@ -21,8 +21,6 @@ import { JSDOM } from "jsdom";
 import iconv from "iconv-lite";
 
 // PDF 解析：动态 import 避免非 PDF 场景的额外开销
-type PdfParseResult = { numpages?: number; num_pages?: number; info?: unknown; text: string };
-let pdfParseLoader: ((input: ArrayBuffer | Uint8Array) => Promise<PdfParseResult>) | null = null;
 async function getPdfParser(): Promise<typeof import("pdf-parse") | null> {
   try {
     return await import("pdf-parse");
@@ -33,7 +31,7 @@ async function getPdfParser(): Promise<typeof import("pdf-parse") | null> {
 
 export type EnhancedFetchOptions = {
   userAgent: string;
-  /** 单次请求超时，默认 12000ms */
+  /** 单次请求超时，默认 8000ms */
   timeoutMs?: number;
   /** 是否启用 Jina Reader，默认 false（国内不可达），env JINA_READER_ENABLED=1 可启用 */
   enableJina?: boolean;
@@ -52,7 +50,7 @@ export type EnhancedFetchResult = {
 };
 
 const JINA_READER_BASE = "https://r.jina.ai";
-const DEFAULT_TIMEOUT_MS = 12_000;
+const DEFAULT_TIMEOUT_MS = 8_000;
 
 /**
  * 抓取并提取网页正文。
@@ -287,12 +285,6 @@ export function decodeWithEncoding(buffer: ArrayBuffer, contentType: string): st
   } catch {
     return new TextDecoder("utf-8", { fatal: false }).decode(buffer);
   }
-}
-
-/** 抓取原始 HTML（兼容旧调用） */
-async function fetchRawHtml(url: string, userAgent: string, timeoutMs: number): Promise<string> {
-  const { text } = await fetchRawResponse(url, userAgent, timeoutMs);
-  return text;
 }
 
 /** 使用 pdf-parse 解析 PDF */

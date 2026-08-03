@@ -23,12 +23,28 @@
       "version": 1,
       "createdAt": 1720849600000,
       "canvasData": {
-        "x": 480,
+        "x": 504,
         "y": 0,
         "group": 0
       },
       "devMetadata": {
         "htmlSrc": "pages/chat-main.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-chat-main-threejs-weather",
+      "title": "主聊天界面 - Three.js 天气动画",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1720849700000,
+      "canvasData": {
+        "x": 504,
+        "y": 1000,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/chat-main-threejs-weather.html",
         "interactions": []
       }
     },
@@ -39,7 +55,7 @@
       "version": 1,
       "createdAt": 1720849600000,
       "canvasData": {
-        "x": 960,
+        "x": 998,
         "y": 0,
         "group": 0
       },
@@ -55,7 +71,7 @@
       "version": 1,
       "createdAt": 1720849600000,
       "canvasData": {
-        "x": 1440,
+        "x": 1497,
         "y": 0,
         "group": 0
       },
@@ -66,8 +82,8 @@
     }
   ],
   "config": {
-    "autoLayout": true,
-    "deviceType": "tablet",
+    "autoLayout": false,
+    "deviceType": "desktop",
     "projectName": "Private Agent UI 优化"
   }
 }

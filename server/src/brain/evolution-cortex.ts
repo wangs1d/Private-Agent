@@ -35,11 +35,88 @@ interface SelfLearningLike {
   getRecentRecords?(): LearningRecord[];
   /** 读取已生成的改进建议（fallback，不含原始轨迹字段） */
   getRecentSuggestions?(): Promise<ImprovementSuggestion[]>;
+  /** 记录一次交互学习（含失败轨迹）。生产路径由 AgentCore 工具回调调用 */
+  recordInteraction?(record: Omit<LearningRecord, "timestamp">): Promise<void>;
 }
 
 /** 技能生成器外观 */
 interface SkillGeneratorLike {
   generateSkill(request: SkillGenerationRequest): Promise<SkillGenerationResult>;
+}
+
+/**
+ * 知识缺口执行器外观（学知识层）。
+ *
+ * 与技能生成器走完全不同的路径：
+ *  1. 先调 rag.recall(query) 看本地知识库（向量库+BM25+RRF）能否命中
+ *  2. 若召回不足（返回空或太短）→ 调 rag.fetchFromWeb(query) 联网兜底
+ *  3. 把查询结果（摘要后）调 rag.ingestKnowledge(actorId, text, source) 沉淀到
+ *     - 向量库（NarrativeMemoryPort.ingest → HumanLikeMemory + Mem0）
+ *     - 结构化 KV facts（AgentMemorySyncService.appendMemorySummaryLine）
+ *
+ * 设计原则：知识层不走 SkillGenerator，不生成 handler 代码，不需要用户审批。
+ * 知识不是危险操作，但写入需可审计（通过日志 + source 字段标识来源）。
+ */
+export interface KnowledgeGapExecutorLike {
+  /** 先 RAG 召回，召回不足则联网兜底，返回最终沉淀到记忆层的知识文本 */
+  executeKnowledgeGap(params: {
+    actorId: string;
+    query: string;
+    rationale: string;
+  }): Promise<{ ok: boolean; knowledge?: string; source?: string; ragHit?: boolean; error?: string }>;
+}
+
+/**
+ * 升级执行器外观（Phase 5：self_upgrade 执行路径）。
+ *
+ * EvolutionCortex 对 self_upgrade 提案路由到这里执行。
+ * 实现方应使用 UpgradeSandboxRunner 做沙箱测试：备份 → 安装新版本 → tsc + test → 通过才应用。
+ */
+export interface CodeRepairExecutorLike {
+  /**
+   * 执行升级（沙箱测试先行）。
+   *
+   * 实现需自行做：
+   * 1. 备份 package.json + package-lock.json
+   * 2. 安装新版本
+   * 3. 运行 tsc --noEmit + 相关测试
+   * 4. 全部通过才保留；任一失败回滚
+   *
+   * 返回 sandboxReport 包含详细的测试结果。
+   */
+  executeUpgrade?(params: {
+    target: string;          // 升级目标（如 "升级 @modelcontextprotocol/sdk 到 1.0.0"）
+    rationale: string;       // 升级理由
+    suggestedAction: string; // 建议操作（LLM 评估产出）
+    llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment;
+  }): Promise<{
+    ok: boolean;
+    patchApplied?: boolean;
+    error?: string;
+    sandboxReport?: import("../services/upgrade-sandbox-runner.js").SandboxTestReport;
+  }>;
+}
+
+/**
+ * 知识验证服务外观（反馈回路入口）。
+ *
+ * EvolutionCortex 在每次 recordToolInteraction 时通知它，
+ * 触发已沉淀知识的验证状态机演进。
+ */
+export interface KnowledgeVerificationLike {
+  /**
+   * 观察一次用户交互，匹配已沉淀知识的主题，触发验证状态演进。
+   *
+   * 反馈识别规则（由 verification service 内部实现）：
+   *  - 用户明确确认（"对的"/"谢谢"）→ 强正反馈 → verified_strong
+   *  - 用户继续追问同类 + 工具成功 → 负反馈 → disputed → rejected
+   *  - 用户切换话题 → 隐式正反馈 → pending_verification 升级为 verified
+   */
+  observeInteraction(params: {
+    userRequest: string;
+    toolSuccess: boolean;
+    matchedTopics?: string[];
+  }): void;
 }
 
 /**
@@ -110,6 +187,10 @@ interface ProposalMeta {
     handlerCode: string;
     explanation?: string;
   };
+  /** LLM 深度评估结果（self_upgrade 提案专用，来自 SelfDrivenEvolutionProposer） */
+  llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment;
+  /** 沙箱测试报告（self_upgrade 提案执行后写入，供 self_evolution 工具查询） */
+  sandboxReport?: import("../services/upgrade-sandbox-runner.js").SandboxTestReport;
 }
 
 /** 持久化文件结构 */
@@ -128,6 +209,14 @@ const TERMINAL_STATUS: ReadonlySet<EvolutionProposalStatus> = new Set([
 /** 阈值默认值 */
 const DEFAULT_GAP_TOOL_FAILURE_THRESHOLD = 3;
 const DEFAULT_GAP_RECENT_RECORDS = 50;
+
+/**
+ * 长期学习信号阈值：n-gram 关键词反复检测不作为即时救火工具，
+ * 而是作为长期模式信号——需要跨会话、跨时间跨度的持续观察才触发进化提案。
+ */
+const LONG_TERM_PATTERN_THRESHOLD = 5;       // 关键词至少出现 5 次（非 3 次）
+const LONG_TERM_PATTERN_MIN_SESSIONS = 2;    // 至少跨 2 个不同会话
+const LONG_TERM_PATTERN_MIN_HOURS = 24;      // 首末出现至少间隔 24 小时
 
 // ---- EvolutionCortex --------------------------------------------------
 
@@ -160,6 +249,22 @@ export class EvolutionCortex {
 
   private selfLearning: SelfLearningLike | null = null;
   private skillGenerator: SkillGeneratorLike | null = null;
+  /** 知识缺口执行器（学知识层）：RAG 召回 + 联网兜底 + 沉淀到记忆 */
+  private knowledgeExecutor: KnowledgeGapExecutorLike | null = null;
+  /**
+   * 自我修复皮层引用（Phase 5：self_upgrade 执行路径）。
+   * self_upgrade 提案路由到 CodeRepairCortex 执行依赖升级 patch。
+   * 未注册时 executeSelfUpgrade 降级为 generated（保持非终态，等注册后再执行）。
+   */
+  private codeRepairRef: CodeRepairExecutorLike | null = null;
+  /**
+   * 知识验证服务（学知识层反馈回路）。
+   * 每次工具交互都通知它，触发验证状态机演进：
+   *  - 用户不再追问同类 → pending_verification 升级为 verified
+   *  - 用户明确确认 → verified_strong
+   *  - 用户继续追问同类 → disputed → rejected
+   */
+  private knowledgeVerification: KnowledgeVerificationLike | null = null;
   private promotionPipeline: PromotionPipelineLike | null = null;
   private hermesLoop: HermesLoopLike | null = null;
   /** WS 推送器：向用户推送审批请求 / 审批结果 */
@@ -192,6 +297,29 @@ export class EvolutionCortex {
     console.log("[EvolutionCortex] 已注册 SkillGenerator");
   }
 
+  /** 注册知识缺口执行器（学知识层入口） */
+  registerKnowledgeExecutor(svc: KnowledgeGapExecutorLike): void {
+    this.knowledgeExecutor = svc;
+    console.log("[EvolutionCortex] 已注册 KnowledgeGapExecutor（RAG+联网+记忆沉淀）");
+  }
+
+  /**
+   * 注册自我修复执行器（Phase 5：self_upgrade 执行路径）。
+   *
+   * 注册后 EvolutionCortex 对 self_upgrade 提案路由到 CodeRepairCortex 执行依赖升级。
+   * 未注册时 executeSelfUpgrade 降级为 generated（保持非终态，等注册后再执行）。
+   */
+  registerCodeRepairExecutor(svc: CodeRepairExecutorLike): void {
+    this.codeRepairRef = svc;
+    console.log("[EvolutionCortex] 已注册 CodeRepairExecutor（self_upgrade 执行路径）");
+  }
+
+  /** 注册知识验证服务（反馈回路入口） */
+  registerKnowledgeVerification(svc: KnowledgeVerificationLike): void {
+    this.knowledgeVerification = svc;
+    console.log("[EvolutionCortex] 已注册 KnowledgeVerificationService（反馈回路）");
+  }
+
   registerPromotionPipeline(svc: PromotionPipelineLike): void {
     this.promotionPipeline = svc;
     console.log("[EvolutionCortex] 已注册 SkillPromotionPipeline");
@@ -207,6 +335,54 @@ export class EvolutionCortex {
   registerApprovalEmitter(emitter: ApprovalEmitterLike): void {
     this.approvalEmitter = emitter;
     console.log("[EvolutionCortex] 已注册 ApprovalEmitter");
+  }
+
+  /**
+   * 注入外部提案（来自 SelfDrivenEvolutionProposer）。
+   *
+   * 将外部提案合并到内部 proposals Map，状态保持 pending，
+   * 由 runAutoEvolutionCycle 自动推进到 reviewing → approved → execute。
+   * 同 id 提案不重复注入。
+   *
+   * @param assessments LLM 评估结果（proposalId → assessment），可选
+   */
+  ingestProposals(
+    proposals: EvolutionProposal[],
+    assessments?: Map<string, import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment>,
+  ): void {
+    if (proposals.length === 0) return;
+    let ingested = 0;
+    let updated = 0;
+    for (const proposal of proposals) {
+      const assessment = assessments?.get(proposal.id);
+      // 提案已存在：仅补充 LLM 评估（如果有），不覆盖提案本体
+      // 对应真实场景：EvolutionCortex 自主 evolve 的提案，后续由
+      // SelfDrivenEvolutionProposer 异步产出 assessment 后回填。
+      if (this.proposals.has(proposal.id)) {
+        if (assessment) {
+          const existing = this.meta.get(proposal.id);
+          if (existing) {
+            existing.llmAssessment = assessment;
+          } else {
+            this.meta.set(proposal.id, { warnings: [], llmAssessment: assessment });
+          }
+          updated++;
+        }
+        continue;
+      }
+      this.proposals.set(proposal.id, proposal);
+      this.meta.set(proposal.id, {
+        warnings: [],
+        llmAssessment: assessment,
+      });
+      ingested++;
+    }
+    if (ingested > 0 || updated > 0) {
+      console.log(
+        `[EvolutionCortex] 注入 ${ingested} 个外部提案（self_upgrade）${updated > 0 ? `，补充 ${updated} 个提案的 LLM 评估` : ""}`,
+      );
+      void this.flush();
+    }
   }
 
   // ---- 生命周期 --------------------------------------------------------
@@ -242,11 +418,15 @@ export class EvolutionCortex {
    * 启动自动进化循环。每 5 分钟扫描一次：
    * 1. 从 AgentSelfLearningService 失败轨迹识别能力缺口 → 创建 pending 提案
    * 2. pending → reviewing → approved（规则自动批准，非 LLM）
-   * 3. approved → execute 生成 Skill → awaiting_user_approval
-   * 4. awaiting_user_approval 状态由用户通过 HTTP 回调决定（approveByUser/rejectByUser）
+   * 3. approved → execute：
+   *    - new_capability/optimize_existing → LLM 生成 Skill 代码 → 直接 promote 装载 → loaded
+   *    - knowledge_gap → RAG 召回 + 联网兜底 + 沉淀 → loaded
    *
-   * 设计原则：完全自主进化 + 用户同意闸门。
-   * LLM 生成 Skill 代码后必须等待用户同意才装载。
+   * 设计原则（用户明确要求）：自我学习是 Agent 自己的事，不需要用户确认。
+   * 三层学习闭环全部自主完成：
+   *  - 学经验：AgentSelfLearningService 自动沉淀失败轨迹
+   *  - 学技能：LLM 生成 handler 代码后直接装载（LimbicCortex 安全闸门做硬拦截）
+   *  - 学知识：联网沉淀 + 验证状态机（pending → verified / disputed → rejected）
    */
   private startAutoEvolutionLoop(): void {
     if (this.autoLoopTimer) clearInterval(this.autoLoopTimer);
@@ -287,32 +467,32 @@ export class EvolutionCortex {
       }
     }
 
-    // 阶段 3：执行 approved → 生成 Skill → awaiting_user_approval
+    // 阶段 3：执行 approved → 直接装载（不再等用户审批）
+    // execute() 内部已直接调用 PromotionPipeline.promote 完成 skill 装载：
+    //  - new_capability/optimize_existing：LLM 生成 → promote → loaded
+    //  - knowledge_gap：RAG 召回 + 联网兜底 + 沉淀 → loaded
+    // 失败时保持 approved + lastError，下一轮 autoLoop 会重试
     for (const proposal of this.proposals.values()) {
       if (proposal.status === "approved") {
         const executed = await this.execute(proposal.id);
-        // execute() 完成后，若 generatedSkill 已生成，转入 awaiting_user_approval
         if (executed) {
-          const meta = this.meta.get(proposal.id);
-          if (meta?.generatedSkill) {
-            this.transition(proposal.id, ["generated"], "awaiting_user_approval");
-            this.emitUserApprovalRequest(executed);
-            console.log(`[EvolutionCortex] autoLoop 提案 ${proposal.id} 已生成 Skill，等待用户审批`);
-          }
+          console.log(
+            `[EvolutionCortex] autoLoop 提案 ${proposal.id} 执行完成，状态=${executed.status}`,
+          );
         }
       }
     }
 
-    // 阶段 4：处理遗留的 generated 提案 → awaiting_user_approval
-    // （execute() 在上一轮已生成 Skill 但尚未转为 awaiting_user_approval 的情况）
+    // 阶段 4：处理遗留的 generated 提案（PromotionPipeline 未注册时的兜底路径）
+    // 当 PromotionPipeline 未注册时，execute() 会降级为标记 generated。
+    // 此处重试 execute()，期待 PromotionPipeline 已就绪后能完成装载。
     for (const proposal of this.proposals.values()) {
       if (proposal.status === "generated") {
-        const meta = this.meta.get(proposal.id);
-        if (meta?.generatedSkill) {
-          this.transition(proposal.id, ["generated"], "awaiting_user_approval");
-          this.emitUserApprovalRequest(proposal);
-          console.log(`[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 转入等待用户审批`);
-        }
+        // 重置为 approved 让下一轮能再次执行
+        this.transition(proposal.id, ["generated"], "approved");
+        console.log(
+          `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退为 approved（等下轮重试装载）`,
+        );
       }
     }
   }
@@ -353,6 +533,21 @@ export class EvolutionCortex {
   evolve(
     proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
   ): EvolutionProposal {
+    // 去重检查：若已有同 type + 同 title 的 pending/reviewing 提案，复用之，不重复生成
+    // 避免 DMN 多次触发时累积大量相同提案
+    const existing = [...this.proposals.values()].find(
+      (p) =>
+        p.type === proposal.type &&
+        p.title === proposal.title &&
+        (p.status === "pending" || p.status === "reviewing"),
+    );
+    if (existing) {
+      console.log(
+        `[EvolutionCortex] 复用已存在提案 ${existing.id} type=${proposal.type} title="${proposal.title}"（不重复生成）`,
+      );
+      return existing;
+    }
+
     const now = new Date().toISOString();
     const id = randomUUID();
     const record: EvolutionProposal = {
@@ -585,6 +780,25 @@ export class EvolutionCortex {
 
     const meta = this.ensureMeta(proposalId);
 
+    // === 知识层分支：knowledge_gap 走 RAG + 联网兜底 + 记忆沉淀 ===
+    // 设计差异（与技能层对比）：
+    //  - 不调 SkillGenerator（不生成 handler 代码）
+    //  - 不进 awaiting_user_approval（知识不是危险操作，不需要用户审批）
+    //  - 执行成功直接 → loaded（终态）
+    //  - 执行失败保持 approved + lastError，等下一轮 autoLoop 重试
+    if (current.type === "knowledge_gap") {
+      return this.executeKnowledgeGap(current);
+    }
+
+    // === Phase 5：自我改写分支：self_upgrade 走沙箱测试先行升级 ===
+    // 触发条件：ExternalTechScanner 发现高收益+低风险升级，或 Benchmark 检测到回归。
+    // 执行路径：路由到 UpgradeSandboxRunner（备份 → 安装新版本 → tsc + test → 通过才应用），
+    //           失败自动回滚，保持 approved + lastError 等下轮重试。
+    // 安全约束：npm 包白名单 + 失败必回滚。
+    if (current.type === "self_upgrade") {
+      return this.executeSelfUpgrade(current, meta.llmAssessment);
+    }
+
     // --- 阶段 1：生成 ---
     let generatedSkill: { metadata: SkillMetadata; handlerCode: string; explanation?: string } | null = null;
 
@@ -631,17 +845,254 @@ export class EvolutionCortex {
       explanation: generatedSkill.explanation,
     };
 
-    // --- 阶段 2：不立即装载，仅标记 generated ---
-    // 设计原则：完全自主进化 + 用户同意闸门。
-    // execute() 只负责生成 Skill 代码，不装载。
-    // 装载由 approveByUser() 在用户同意后调用 promote 完成。
+    // --- 阶段 2：直接装载（不再等用户审批） ---
+    // 设计原则（用户明确要求）：自我学习是 Agent 自己的事，不需要用户确认。
+    //  - 学经验：已无需用户介入（AgentSelfLearningService 自动沉淀失败轨迹）
+    //  - 学技能：LLM 生成 handler 代码后直接 promote 装载
+    //  - 学知识：联网沉淀 + 验证状态机，无需用户介入
+    //
+    // 安全保障：
+    //  - LimbicCortex 在工具调用层做 DENY_PATTERNS 拦截（rm -rf / 系统文件 / 注入等）
+    //  - PromotionPipeline.promote 内部做代码安全校验
+    //  - 全程日志可审计
+    if (this.promotionPipeline?.promote) {
+      try {
+        const promoteResult = await this.promotionPipeline.promote({
+          metadata: generatedSkill.metadata,
+          handlerCode: generatedSkill.handlerCode,
+        });
+        if (promoteResult.ok) {
+          const next = this.setStatus(current, "loaded");
+          this.proposals.set(proposalId, next);
+          this.schedulePersist();
+          console.log(
+            `[EvolutionCortex] 提案 ${proposalId} 已生成并装载 Skill=${generatedSkill.metadata.name}（自主完成，无需用户审批）`,
+          );
+          return next;
+        } else {
+          // 装载失败：保持 approved + lastError，等下一轮 autoLoop 重试
+          meta.lastError = promoteResult.error ?? "PromotionPipeline.promote 返回失败";
+          const next = this.touch(current);
+          this.proposals.set(proposalId, next);
+          this.schedulePersist();
+          console.log(
+            `[EvolutionCortex] 提案 ${proposalId} 装载失败：${meta.lastError}（保持 approved，等下轮重试）`,
+          );
+          return next;
+        }
+      } catch (err) {
+        meta.lastError = err instanceof Error ? err.message : String(err);
+        const next = this.touch(current);
+        this.proposals.set(proposalId, next);
+        this.schedulePersist();
+        console.log(
+          `[EvolutionCortex] 提案 ${proposalId} promote 异常：${meta.lastError}`,
+        );
+        return next;
+      }
+    }
+
+    // PromotionPipeline 未注册：仅标记 generated（保留向后兼容）
     const next = this.setStatus(current, "generated");
     this.proposals.set(proposalId, next);
     this.schedulePersist();
     console.log(
-      `[EvolutionCortex] 提案 ${proposalId} 已生成 Skill=${generatedSkill.metadata.name}，等待用户审批后装载`,
+      `[EvolutionCortex] 提案 ${proposalId} 已生成 Skill=${generatedSkill.metadata.name}（PromotionPipeline 未注册，仅标记 generated）`,
     );
     return next;
+  }
+
+  /**
+   * 知识层执行器：knowledge_gap 提案的专属执行路径。
+   *
+   * 与技能层 execute() 完全分离：
+   *  - 不调 SkillGenerator（不生成 handler 代码）
+   *  - 不进 awaiting_user_approval（知识不是危险操作）
+   *  - 成功 → loaded（终态）；失败保持 approved + lastError
+   *
+   * 委托 KnowledgeGapExecutor 完成三件事：
+   *  1. RAG 召回本地知识库（NarrativeMemoryPort.buildNarrativeRecall）
+   *  2. 召回不足 → 联网兜底（desktop.http_get）
+   *  3. 把查询结果沉淀到记忆层（NarrativeMemoryPort.ingest + memory_facts KV）
+   *
+   * 从 proposal.title 中提取主题词作为 query：
+   *  - 标题格式："补充「${keyword}」相关知识"
+   *  - 提取「」之间的内容作为查询关键词
+   */
+  private async executeKnowledgeGap(
+    current: EvolutionProposal,
+  ): Promise<EvolutionProposal | null> {
+    const proposalId = current.id;
+    const meta = this.ensureMeta(proposalId);
+
+    if (!this.knowledgeExecutor) {
+      meta.warnings.push("KnowledgeGapExecutor 未注册，无法执行知识层闭环");
+      console.log(
+        `[EvolutionCortex] executeKnowledgeGap ${proposalId}: KnowledgeGapExecutor 未注册`,
+      );
+      // 状态降级为 generated（保持非终态，等注册后再执行）
+      const next = this.setStatus(current, "generated");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      return next;
+    }
+
+    // 从 title 提取主题词：标题格式 "补充「${keyword}」相关知识"
+    const keywordMatch = current.title.match(/[「」]/);
+    const keyword = keywordMatch
+      ? current.title.replace(/.*[「]/, "").replace(/[」].*/, "").trim()
+      : current.title;
+    const query = keyword || current.title;
+
+    try {
+      console.log(
+        `[EvolutionCortex] executeKnowledgeGap ${proposalId}: 启动 RAG+联网兜底，query="${query}"`,
+      );
+      const result = await this.knowledgeExecutor.executeKnowledgeGap({
+        actorId: "__knowledge_gap__", // 知识缺口跨 actor 共享，使用固定 actorId
+        query,
+        rationale: current.rationale,
+      });
+
+      if (!result.ok) {
+        meta.lastError = result.error ?? "KnowledgeGapExecutor 返回失败但未提供错误信息";
+        const next = this.touch(current);
+        this.proposals.set(proposalId, next);
+        this.schedulePersist();
+        console.log(
+          `[EvolutionCortex] executeKnowledgeGap ${proposalId} 失败：${meta.lastError}`,
+        );
+        return next;
+      }
+
+      // 知识沉淀成功 → 标记 loaded（终态）
+      meta.generatedSkill = result.knowledge
+        ? {
+            name: `knowledge:${query}`,
+            handlerCode: result.knowledge,
+            explanation: result.source
+              ? `来源: ${result.source}${result.ragHit ? "（RAG 命中）" : "（联网兜底）"}`
+              : undefined,
+          }
+        : undefined;
+      const next = this.setStatus(current, "loaded");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] 知识提案 ${proposalId} 已沉淀主题="${query}"，` +
+          `来源=${result.ragHit ? "RAG" : "联网"}，状态=loaded`,
+      );
+      return next;
+    } catch (err) {
+      meta.lastError = err instanceof Error ? err.message : String(err);
+      const next = this.touch(current);
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] executeKnowledgeGap ${proposalId} 异常：${meta.lastError}`,
+      );
+      return next;
+    }
+  }
+
+  /**
+   * Phase 5：自我改写执行（self_upgrade 提案）。
+   *
+   * 路由到升级执行器，执行沙箱测试先行的升级流程：
+   * 1. 备份 package.json + package-lock.json
+   * 2. 安装新版本
+   * 3. 运行 tsc --noEmit + 相关测试
+   * 4. 全部通过才保留（loaded）；任一失败回滚 + 记录错误
+   *
+   * 安全约束：
+   *  - npm 包白名单（UpgradeSandboxRunner 内部拦截）
+   *  - 失败必回滚（rollback 是 finally 级别保证）
+   *  - 执行失败保持 approved + lastError，等下一轮 autoLoop 重试
+   *
+   * @param llmAssessment LLM 深度评估结果（可选，来自 SelfDrivenEvolutionProposer）
+   */
+  private async executeSelfUpgrade(
+    current: EvolutionProposal,
+    llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment,
+  ): Promise<EvolutionProposal | null> {
+    const proposalId = current.id;
+    const meta = this.ensureMeta(proposalId);
+
+    if (!this.codeRepairRef?.executeUpgrade) {
+      meta.warnings.push("CodeRepairExecutor 未注册，无法执行自我升级");
+      console.log(
+        `[EvolutionCortex] executeSelfUpgrade ${proposalId}: CodeRepairExecutor 未注册`,
+      );
+      const next = this.setStatus(current, "generated");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      return next;
+    }
+
+    try {
+      console.log(
+        `[EvolutionCortex] executeSelfUpgrade ${proposalId}: 启动沙箱测试先行升级，target="${current.title}"`,
+      );
+      const result = await this.codeRepairRef.executeUpgrade({
+        target: current.title,
+        rationale: current.rationale,
+        suggestedAction: current.description,
+        llmAssessment,
+      });
+
+      if (!result.ok) {
+        meta.lastError = result.error ?? "升级沙箱测试失败";
+        if (result.sandboxReport) {
+          // 保存完整沙箱报告，供 self_evolution 工具查询
+          meta.sandboxReport = result.sandboxReport;
+          meta.warnings.push(
+            `tscPassed=${result.sandboxReport.tscPassed}, ` +
+            `testsPassed=${result.sandboxReport.testsPassed}, ` +
+            `rolledBack=${result.sandboxReport.rolledBack}`,
+          );
+        }
+        const next = this.touch(current);
+        this.proposals.set(proposalId, next);
+        this.schedulePersist();
+        console.log(
+          `[EvolutionCortex] executeSelfUpgrade ${proposalId} 沙箱测试失败：${meta.lastError}`,
+        );
+        return next;
+      }
+
+      // 升级沙箱测试通过 → 标记 loaded（终态）
+      const report = result.sandboxReport;
+      if (report) {
+        // 保存完整沙箱报告，供 self_evolution 工具查询
+        meta.sandboxReport = report;
+      }
+      meta.generatedSkill = {
+        name: `self_upgrade:${current.title}`,
+        handlerCode: "",
+        explanation: report
+          ? `沙箱测试通过：tsc=${report.tscPassed}, tests=${report.testsPassed}, ` +
+            `testFiles=[${report.testFilesRun.join(", ")}], ` +
+            `总耗时=${(report.totalMs / 1000).toFixed(1)}s`
+          : `依赖升级已应用：${current.title}`,
+      };
+      const next = this.setStatus(current, "loaded");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] 自我升级提案 ${proposalId} 沙箱测试通过并已应用，` +
+        `target="${current.title}"，状态=loaded`,
+      );
+      return next;
+    } catch (err) {
+      meta.lastError = err instanceof Error ? err.message : String(err);
+      const next = this.touch(current);
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] executeSelfUpgrade ${proposalId} 异常：${meta.lastError}`,
+      );
+      return next;
+    }
   }
 
   // ---- 能力缺口 --------------------------------------------------------
@@ -662,12 +1113,20 @@ export class EvolutionCortex {
    * **纯规则，不调用 LLM。** 优先调用 getRecentRecords()；若不可用，
    * 尝试读取 recentRecords 字段（私有但运行时可访问）；若均不可用则返回 null。
    *
-   * 规则：
-   * 1. 统计最近 N 条失败记录中 attemptedTools 的失败频次；
-   *    若某工具失败次数 >= 阈值（默认 3），生成 optimize_existing 提案。
-   * 2. 若多失败记录 attemptedTools 为空且 userRequest 关键词反复出现，
-   *    生成 new_capability 提案。
-   * 3. 否则返回 null。
+   * 三类仿人自我学习缺口（按优先级短路识别，命中即返回）：
+   *
+   * 1. **技能层-优化工具**（学技能）：某工具反复失败（>=3 次）→ optimize_existing
+   *    语义：工具有 bug 或参数设计不合理，需要修代码
+   *
+   * 2. **技能层-补能力**（学技能）：多次失败且 attemptedTools 为空 + 关键词反复 → new_capability
+   *    语义：根本没有对应工具，需要造新工具
+   *
+   * 3. **知识层-补知识**（学知识）：工具调用成功（success=true）+ 用户请求关键词反复（>=3 次同类主题）→ knowledge_gap
+   *    语义：工具齐全且工作正常，但用户还在反复问同一类问题
+   *         → 说明上次回答没解决需求，根因是缺背景知识（不是缺工具）
+   *    识别特征：attemptedTools 非空 + success=true + 用户请求反复出现同一主题词
+   *
+   * 4. 否则返回 null。
    */
   fromSelfLearningGap(): EvolutionProposal | null {
     if (!this.selfLearning) return null;
@@ -678,7 +1137,7 @@ export class EvolutionCortex {
     const recent = records.slice(-DEFAULT_GAP_RECENT_RECORDS);
     const failures = recent.filter((r) => !r.success);
 
-    // 规则 1：工具失败频次
+    // 规则 1：工具失败频次（学技能-优化）
     const toolFailCounts = new Map<string, number>();
     for (const f of failures) {
       if (!f.attemptedTools || f.attemptedTools.length === 0) continue;
@@ -697,23 +1156,150 @@ export class EvolutionCortex {
       });
     }
 
-    // 规则 2：反复出现的用户请求但无工具可用
+    // 规则 2：长期模式——用户跨会话、跨时间反复请求某领域但无工具可用（学技能-补能力）
+    // 设计：n-gram 是长期学习信号，不是即时救火工具。
+    //   - 不因 3 次近期失败就触发（那是即时救火）
+    //   - 需要跨 2+ 会话、跨 24+ 小时、出现 5+ 次的持续模式才触发
+    //   - 真实场景：agent 应先通过 tool search 找到 web.search 等通用工具
+    //     只有长期反复出现同一领域需求且通用工具无法满足时，才考虑建设专门能力
     const emptyToolFailures = failures.filter(
       (f) => !f.attemptedTools || f.attemptedTools.length === 0,
     );
-    if (emptyToolFailures.length >= DEFAULT_GAP_TOOL_FAILURE_THRESHOLD) {
+    if (emptyToolFailures.length >= LONG_TERM_PATTERN_THRESHOLD) {
       const keyword = this.pickRepeatedKeyword(emptyToolFailures.map((f) => f.userRequest));
       if (keyword) {
-        return this.evolve({
-          type: "new_capability",
-          title: `补充「${keyword}」相关能力`,
-          description: `检测到最近 ${emptyToolFailures.length} 次失败请求均未触发任何工具，且反复出现「${keyword}」关键词，可能需要新增专门技能。`,
-          rationale: `最近 ${recent.length} 条学习记录中有 ${emptyToolFailures.length} 条失败未触发工具调用，且关键词「${keyword}」反复出现，达到进化阈值 ${DEFAULT_GAP_TOOL_FAILURE_THRESHOLD}。`,
-        });
+        // 长期模式校验：跨会话 + 跨时间跨度
+        const patternCheck = this.checkLongTermPattern(emptyToolFailures, keyword);
+        if (patternCheck.isLongTerm) {
+          return this.evolve({
+            type: "new_capability",
+            title: `补充「${keyword}」相关能力`,
+            description: `检测到跨 ${patternCheck.sessionCount} 个会话、跨度 ${patternCheck.hourSpan} 小时的长期模式：用户反复请求「${keyword}」相关内容（${patternCheck.occurrenceCount} 次），且通用工具未能满足。建议新增专门能力。`,
+            rationale: `长期学习信号：关键词「${keyword}」在 ${patternCheck.sessionCount} 个会话中出现 ${patternCheck.occurrenceCount} 次，时间跨度 ${patternCheck.hourSpan} 小时（≥${LONG_TERM_PATTERN_MIN_HOURS}h），达到长期模式阈值（≥${LONG_TERM_PATTERN_THRESHOLD} 次 / ≥${LONG_TERM_PATTERN_MIN_SESSIONS} 会话 / ≥${LONG_TERM_PATTERN_MIN_HOURS}h）。`,
+          });
+        }
+      }
+    }
+
+    // 规则 3：长期模式——工具调用成功但用户跨会话反复问同类问题（学知识-补知识）
+    // 语义：工具齐全 + 调用成功，但用户长期反复问，说明回答没满足需求 → 缺背景知识
+    // 设计：同样需要跨会话 + 跨时间跨度的长期模式校验，避免短期集中提问误触发
+    const successesWithTools = recent.filter(
+      (r) =>
+        r.success &&
+        r.attemptedTools &&
+        r.attemptedTools.length > 0,
+    );
+    if (successesWithTools.length >= LONG_TERM_PATTERN_THRESHOLD) {
+      const keyword = this.pickRepeatedKeyword(successesWithTools.map((r) => r.userRequest));
+      if (keyword) {
+        // 长期模式校验
+        const patternCheck = this.checkLongTermPattern(successesWithTools, keyword);
+        if (patternCheck.isLongTerm) {
+          // 去重：如果已存在同主题的非终态提案，不再重复创建
+          const existingSameTopic = [...this.proposals.values()].find(
+            (p) =>
+              p.type === "knowledge_gap" &&
+              p.title.includes(keyword) &&
+              (p.status === "pending" ||
+                p.status === "reviewing" ||
+                p.status === "approved" ||
+                p.status === "generated" ||
+                p.status === "awaiting_user_approval"),
+          );
+          if (existingSameTopic) {
+            console.log(
+              `[EvolutionCortex] 已存在同主题 knowledge_gap 提案 ${existingSameTopic.id}，跳过重复创建`,
+            );
+            return null;
+          }
+          return this.evolve({
+            type: "knowledge_gap",
+            title: `补充「${keyword}」相关知识`,
+            description: `检测到跨 ${patternCheck.sessionCount} 个会话、跨度 ${patternCheck.hourSpan} 小时的长期模式：工具调用成功但用户仍在反复询问「${keyword}」（${patternCheck.occurrenceCount} 次）。将通过 RAG 召回本地知识库，召回不足时联网查询，并把结果沉淀到长期记忆。`,
+            rationale: `长期学习信号：关键词「${keyword}」在 ${patternCheck.sessionCount} 个会话中出现 ${patternCheck.occurrenceCount} 次，时间跨度 ${patternCheck.hourSpan} 小时。特征：工具齐全+调用成功+用户长期重复问，判定为知识缺口而非技能缺口。`,
+          });
+        }
       }
     }
 
     return null;
+  }
+
+  /**
+   * DMN 调用入口：基于规则产出能力进化提案统计。
+   *
+   * 包装 fromSelfLearningGap + pending 列表统计，返回 DMN 期望的简单结构。
+   * 不调用 LLM，纯规则。失败时返回 proposals=0。
+   */
+  proposeEvolution(actorId: string): { proposals: number; reason: string } {
+    try {
+      const gap = this.fromSelfLearningGap();
+      const pendingCount = Array.from(this.proposals.values())
+        .filter((p) => p.status === "pending" || p.status === "reviewing").length;
+      const total = (gap ? 1 : 0) + pendingCount;
+      const reason = gap
+        ? `已生成新提案：${gap.title.slice(0, 60)}`
+        : pendingCount > 0
+          ? `当前已有 ${pendingCount} 条待审提案`
+          : "无失败轨迹或重复关键词，未达进化阈值";
+      void actorId; // 当前规则不依赖 actorId（数据源是 selfLearning 全局失败记录）
+      return { proposals: total, reason };
+    } catch (e) {
+      return { proposals: 0, reason: `proposeEvolution 失败: ${String(e).slice(0, 80)}` };
+    }
+  }
+
+  /**
+   * 记录一次工具交互（成功或失败）到 AgentSelfLearningService。
+   *
+   * 这是自我进化闭环的真正入口：AgentCore 在工具调用结束（无论成功失败）时
+   * 通过 BrainCenter 转发到此。EvolutionCortex 再委托 selfLearning.recordInteraction
+   * 持久化。DMN 后续扫描时即可读到失败轨迹，触发 proposeEvolution。
+   *
+   * 设计要点：
+   *  - 不阻塞调用方（fire-and-forget，错误静默吞掉）
+   *  - 不依赖 LLM，纯数据搬运
+   *  - recordInteraction 失败不影响主流程
+   */
+  async recordToolInteraction(params: {
+    sessionId: string;
+    userRequest: string;
+    attemptedTools: string[];
+    success: boolean;
+    errorMessage?: string;
+    responseTime?: number;
+  }): Promise<void> {
+    if (!this.selfLearning?.recordInteraction) {
+      // selfLearning 未注册或未实现 recordInteraction，静默降级
+      return;
+    }
+    try {
+      await this.selfLearning.recordInteraction({
+        sessionId: params.sessionId,
+        userRequest: params.userRequest,
+        attemptedTools: params.attemptedTools,
+        success: params.success,
+        errorMessage: params.errorMessage,
+        responseTime: params.responseTime,
+      });
+    } catch (e) {
+      // 学习记录失败不应影响主流程
+      console.warn("[EvolutionCortex] recordToolInteraction 失败:", e);
+    }
+
+    // === 知识层反馈回路 ===
+    // 每次工具交互都通知验证服务，触发已沉淀知识的验证状态机演进
+    if (this.knowledgeVerification) {
+      try {
+        this.knowledgeVerification.observeInteraction({
+          userRequest: params.userRequest,
+          toolSuccess: params.success,
+        });
+      } catch (e) {
+        console.warn("[EvolutionCortex] knowledgeVerification.observeInteraction 失败:", e);
+      }
+    }
   }
 
   // ---- 内部：状态流转辅助 ----------------------------------------------
@@ -794,13 +1380,75 @@ export class EvolutionCortex {
     return [];
   }
 
-  /** 从一组用户请求中挑出反复出现的关键词，返回第一个达标的词 */
+  /**
+   * 长期模式校验：检查含关键词的记录是否跨会话、跨时间跨度。
+   *
+   * n-gram 是长期学习信号而非即时救火工具：
+   *  - 同一会话连续问 4 次"区块链"→ 不是长期模式（可能是临时任务）
+   *  - 跨 3 个会话、跨 2 天共 5 次问"区块链"→ 是长期模式（持续需求）
+   */
+  private checkLongTermPattern(
+    records: LearningRecord[],
+    keyword: string,
+  ): {
+    isLongTerm: boolean;
+    sessionCount: number;
+    hourSpan: number;
+    occurrenceCount: number;
+  } {
+    // 筛出含关键词的记录
+    const matched = records.filter((r) =>
+      (r.userRequest ?? "").toLowerCase().includes(keyword.toLowerCase()),
+    );
+    if (matched.length === 0) {
+      return { isLongTerm: false, sessionCount: 0, hourSpan: 0, occurrenceCount: 0 };
+    }
+
+    // 统计不同会话数
+    const sessions = new Set(matched.map((r) => r.sessionId));
+    const sessionCount = sessions.size;
+
+    // 计算时间跨度
+    const timestamps = matched
+      .map((r) => Date.parse(r.timestamp))
+      .filter((t) => !Number.isNaN(t))
+      .sort((a, b) => a - b);
+    const hourSpan =
+      timestamps.length >= 2
+        ? Math.round((timestamps[timestamps.length - 1] - timestamps[0]) / 3_600_000)
+        : 0;
+
+    const isLongTerm =
+      matched.length >= LONG_TERM_PATTERN_THRESHOLD &&
+      sessionCount >= LONG_TERM_PATTERN_MIN_SESSIONS &&
+      hourSpan >= LONG_TERM_PATTERN_MIN_HOURS;
+
+    return {
+      isLongTerm,
+      sessionCount,
+      hourSpan,
+      occurrenceCount: matched.length,
+    };
+  }
+
+  /**
+   * 从一组用户请求中挑出反复出现的关键词，返回第一个达标的词。
+   *
+   * 混合策略（纯规则，不调 LLM）：
+   *  1. 优先匹配预置关键词列表（图片/翻译/计算等已知能力域）
+   *  2. 若无匹配，用通用 2-3 字汉字 n-gram 提取反复出现的片段
+   *     这样能识别"区块链分析/股票行情/法律咨询"等任意领域关键词
+   */
   private pickRepeatedKeyword(requests: string[]): string | null {
-    const keywords = ["图片", "图像", "photo", "image", "视频", "video", "翻译", "translate", "计算", "calculate", "数学", "math", "日历", "calendar", "提醒", "remind"];
+    // 步骤 1：预置关键词列表匹配
+    const presetKeywords = [
+      "图片", "图像", "photo", "image", "视频", "video", "翻译", "translate",
+      "计算", "calculate", "数学", "math", "日历", "calendar", "提醒", "remind",
+    ];
     const counts = new Map<string, number>();
     for (const req of requests) {
       const lower = (req ?? "").toLowerCase();
-      for (const kw of keywords) {
+      for (const kw of presetKeywords) {
         if (lower.includes(kw.toLowerCase())) {
           counts.set(kw, (counts.get(kw) ?? 0) + 1);
         }
@@ -808,6 +1456,43 @@ export class EvolutionCortex {
     }
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
     if (top && top[1] >= DEFAULT_GAP_TOOL_FAILURE_THRESHOLD) return top[0];
+
+    // 步骤 2：通用 n-gram 提取（识别任意 2-3 字汉字片段的反复出现）
+    const ngramCounts = new Map<string, number>();
+    const stopChars = new Set(["的", "了", "是", "在", "我", "你", "他", "她", "们", "帮", "下", "有", "什么", "怎么", "能否", "可以", "一下"]);
+    for (const req of requests) {
+      // 去除空格、标点
+      const text = (req ?? "").replace(/[\s\u3000\p{P}]/gu, "");
+      // 提取 2-3 字汉字片段
+      for (let n = 2; n <= 3; n++) {
+        for (let i = 0; i <= text.length - n; i++) {
+          const gram = text.slice(i, i + n);
+          // 跳过含停用字或英文/数字的片段
+          if (/[a-z0-9]/i.test(gram)) continue;
+          let hasStop = false;
+          for (const sc of stopChars) {
+            if (gram.includes(sc)) { hasStop = true; break; }
+          }
+          if (hasStop) continue;
+          ngramCounts.set(gram, (ngramCounts.get(gram) ?? 0) + 1);
+        }
+      }
+    }
+    // 选词策略：先按出现频次降序，再按 n-gram 长度降序（最长匹配优先）
+    // 例：4 句"比特币现在什么行情"等请求中
+    //     "比特"(2字) 出现 4 次，"比特币"(3字) 也出现 4 次
+    //     长度降序保证选"比特币"而非"比特"（更准确的主题词）
+    const topNgram = [...ngramCounts.entries()]
+      .filter(([_gram, c]) => c >= DEFAULT_GAP_TOOL_FAILURE_THRESHOLD)
+      .sort((a, b) => {
+        // 主排序：频次降序
+        if (b[1] !== a[1]) return b[1] - a[1];
+        // 次排序：长度降序（最长匹配优先）
+        return b[0].length - a[0].length;
+      })[0];
+    if (topNgram) {
+      return topNgram[0];
+    }
     return null;
   }
 
@@ -846,6 +1531,14 @@ export class EvolutionCortex {
       generatedSkill:
         raw.generatedSkill && typeof raw.generatedSkill === "object"
           ? (raw.generatedSkill as ProposalMeta["generatedSkill"])
+          : undefined,
+      llmAssessment:
+        raw.llmAssessment && typeof raw.llmAssessment === "object"
+          ? (raw.llmAssessment as ProposalMeta["llmAssessment"])
+          : undefined,
+      sandboxReport:
+        raw.sandboxReport && typeof raw.sandboxReport === "object"
+          ? (raw.sandboxReport as ProposalMeta["sandboxReport"])
           : undefined,
     };
   }

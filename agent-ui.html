@@ -38,6 +38,21 @@
             .card-border {
                 border: 1px solid #e5e5ea;
             }
+            .section-divider {
+                border-top: 1px solid rgba(255, 255, 255, 0.15);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+                animation: sectionBreathe 2s ease-in-out infinite;
+            }
+            @keyframes sectionBreathe {
+                0%, 100% {
+                    border-top-color: rgba(255, 255, 255, 0.08);
+                    border-bottom-color: rgba(255, 255, 255, 0.08);
+                }
+                50% {
+                    border-top-color: rgba(255, 255, 255, 0.35);
+                    border-bottom-color: rgba(255, 255, 255, 0.35);
+                }
+            }
             .tool-btn {
                 transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
                 border: 1px solid transparent;
@@ -80,6 +95,8 @@
                 backdrop-filter: blur(10px);
                 -webkit-backdrop-filter: blur(10px);
                 border: 1px solid rgba(0, 0, 0, 0.08);
+                border-top: 1px solid #e5e5ea;
+                border-bottom: 1px solid #e5e5ea;
                 box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
             }
             
@@ -603,7 +620,7 @@
                             </div>
 
                             <!-- 今日安排模块 -->
-                            <div id="scheduleCard" class="card-border rounded-xl bg-bg-card p-4 shadow-sm">
+                            <div id="scheduleCard" class="card-border section-divider rounded-xl bg-bg-card p-4 shadow-sm">
                                 <div class="flex items-center gap-2 mb-4">
                                     <svg class="w-4 h-4 text-accent-blue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>

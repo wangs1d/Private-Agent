@@ -573,6 +573,7 @@ const PROMPT_HIGHLIGHT_DOMAINS: Array<{ domain: string; shortLabel: string }> = 
   { domain: "weather", shortLabel: "天气" },
   { domain: "notes", shortLabel: "学习笔记" },
   { domain: "web", shortLabel: "Web搜索" },
+  { domain: "phone", shortLabel: "电话/语音触达" },
 ];
 
 /**
@@ -596,7 +597,7 @@ export function buildAgentCapabilityPromptSection(
     const snapshot = cortex.snapshot(actorId);
     const present = new Set(snapshot.map((d) => d.domain));
     const highlights = PROMPT_HIGHLIGHT_DOMAINS.filter((h) => present.has(h.domain))
-      .slice(0, 5)
+      .slice(0, 6)
       .map((h) => h.shortLabel);
     const lines: string[] = [
       "💡 调用 `brain.list_capabilities` 工具可查看完整能力清单。",

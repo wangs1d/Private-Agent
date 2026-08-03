@@ -67,6 +67,17 @@ function isLegacyEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "on";
 }
 
+/**
+ * 检查是否启用 inferActions 的 LLM 化（端到端决策返回 actions）。
+ * - "0" / "false" / "off"（不区分大小写）→ 返回 false（关闭 LLM 化，回退到纯规则 inferActions）
+ * - 其他（含未设置）→ 返回 true（启用 LLM 化，优先使用端到端决策返回的 actions）
+ */
+function isInferActionsLlmEnabled(): boolean {
+  const raw = process.env.BRAIN_LLM_INFERACTIONS_ENABLED?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off") return false;
+  return true;
+}
+
 /** 读取决策阈值（可通过 PROACTION_THRESHOLD env 调整，默认 2.0） */
 function readThreshold(): number {
   const raw = process.env.PROACTION_THRESHOLD?.trim();
@@ -168,11 +179,27 @@ export interface MemoryCortexLike {
   ): Promise<{
     items: MemoryRecallItem[];
   }>;
+  /** 端到端决策的工作记忆摘要输入（短字符串，可空）。可选——未实现时跳过 */
+  toSummary?: (actorId: string) => string;
+}
+
+/**
+ * 最近对话提供者：从 ChatThreadStore 拉取用户最近几轮实时对话。
+ * 端到端决策时注入，让 LLM 能感知"用户刚说了什么、话题转到哪了"，
+ * 避免在用户已转换话题后还回去讲旧话题（根源修复"重复且不正面回复"问题）。
+ */
+export interface RecentConversationProvider {
+  /** 返回最近对话的文本摘要（如 "用户：xxx\nAgent：yyy"），无对话时返回空字符串 */
+  fetchRecentConversation(actorId: string, limit?: number): string;
 }
 
 /**
  * 端到端决策上下文：把规则层算出的参考量 + 召回记忆 + 用户状态打包，
  * 一次性交给 LLM 完成"要不要说 + 说什么"。
+ *
+ * r6 优化：补充 workingMemoryBrief（活跃目标/槽位/待办的短摘要），
+ * 让主动话术能感知"当前在聊什么"——避免突兀开口。
+ * 不堆 prompt：仅一两句方向化描述，让模型基于上下文自己发挥。
  */
 export interface EndToEndDecisionContext {
   recentMemories: Array<{ content: string; timestamp?: string }>;
@@ -180,6 +207,10 @@ export interface EndToEndDecisionContext {
   valueScore: number;
   disturbScore: number;
   recentDecisions: BrainDecision[];
+  /** 活跃工作记忆摘要（活跃目标/槽位/待办），空字符串表示无活跃任务 */
+  workingMemoryBrief?: string;
+  /** 用户最近实时对话（2-3 轮文本摘要），让 LLM 感知当前话题走向 */
+  recentConversation?: string;
 }
 
 /**
@@ -190,12 +221,21 @@ export interface EndToEndDecisionContext {
  *  - 通过粗筛的信号走一次端到端 LLM 调用，把"判断 + 话术 + 理由"作为一个
  *    整体认知过程产出，不再切片式（先判相关性 → 再决策 → 再生成话术）。
  *  - value/disturb 数值作为 LLM 的参考输入，而非硬性数值闸门。
+ *  - inferActions LLM 化：在同一次 LLM 调用中通过 function calling 风格的
+ *    JSON 输出决定调用哪些环境控制工具（calendar/smart_home），不单独调一次 LLM。
+ *    返回的 actions 供 ProactionCortex 直接执行；LLM 不可用/未返回时回退到 inferActions 硬编码规则。
  */
 export interface EndToEndDecisionMaker {
   decide(
     signal: BrainSignalInput,
     context: EndToEndDecisionContext,
-  ): Promise<{ speak: boolean; message: string; reason: string }>;
+  ): Promise<{
+    speak: boolean;
+    message: string;
+    reason: string;
+    /** LLM 决定的环境控制动作（function calling 风格）；缺失或空时 ProactionCortex 回退到 inferActions 规则 */
+    actions?: BrainDecisionAction[];
+  }>;
 }
 
 /**
@@ -225,6 +265,8 @@ export class ProactionCortex {
   private awarenessCortex: AwarenessCortexLike | null = null;
   /** 端到端决策的记忆皮层引用，用于召回最近对话作为 LLM 记忆输入 */
   private memoryCortex: MemoryCortexLike | null = null;
+  /** 最近对话提供者：拉取用户实时对话，让主动决策感知当前话题走向 */
+  private recentConversationProvider: RecentConversationProvider | null = null;
   /** 端到端决策器：一次 LLM 调用完成"要不要说 + 说什么" */
   private endToEndMaker: EndToEndDecisionMaker | null = null;
   private contactPolicy: ProactiveContactPolicyService | null = null;
@@ -259,6 +301,12 @@ export class ProactionCortex {
   registerMemory(memory: MemoryCortexLike): void {
     this.memoryCortex = memory;
     console.log("[ProactionCortex] 已注册 MemoryCortex（端到端记忆输入）");
+  }
+
+  /** 注册最近对话提供者：让主动决策能感知用户当前话题走向 */
+  registerRecentConversationProvider(provider: RecentConversationProvider): void {
+    this.recentConversationProvider = provider;
+    console.log("[ProactionCortex] 已注册 RecentConversationProvider（实时对话上下文）");
   }
 
   /** 注册端到端决策器：一次 LLM 调用完成"要不要说 + 说什么" */
@@ -384,6 +432,9 @@ export class ProactionCortex {
     // Task 5: 端到端路径召回的记忆条目，携带到 BrainDecision 供 executeProactiveDecision 复用，
     // 避免对同一 LifeSignal 在 buildProactivePrompt 中重复召回。
     let recallItems: MemoryRecallItem[] | undefined;
+    // inferActions LLM 化：端到端决策返回的环境控制动作（function calling 风格）。
+    // 缺失或无效时回退到 inferActions 硬编码规则。
+    let e2eActions: BrainDecisionAction[] | undefined;
 
     if (!policy.allowed) {
       // 硬闸门拦截（静音 / cooldown）→ silent，不进 LLM
@@ -403,6 +454,15 @@ export class ProactionCortex {
       recallItems = recentMemories; // Task 5: 透传 recall 上下文，供 buildProactivePrompt 复用
       const userActivity = this.observeUserActivity(actorId);
       const recentDecisions = this.recentDecisions(actorId, 5);
+      // r6: 拉取工作记忆摘要（活跃目标/槽位/待办），让主动话术能感知"当前在聊什么"
+      let workingMemoryBrief = "";
+      try {
+        workingMemoryBrief = this.memoryCortex?.toSummary?.(actorId) ?? "";
+      } catch {
+        /* ignore summary failure */
+      }
+      // 拉取用户最近实时对话，让 LLM 感知当前话题走向
+      const recentConversation = this.fetchRecentConversation(actorId);
       try {
         const e2e = await this.endToEndMaker.decide(signal, {
           recentMemories,
@@ -410,6 +470,8 @@ export class ProactionCortex {
           valueScore: adjustedValueScore,
           disturbScore: disturb.score,
           recentDecisions,
+          workingMemoryBrief,
+          recentConversation,
         });
         if (e2e.speak) {
           outcome = "speak";
@@ -418,6 +480,10 @@ export class ProactionCortex {
         } else {
           outcome = "silent";
           rationaleParts.push(`e2e:silent(${e2e.reason || ""})`);
+        }
+        // inferActions LLM 化：保存端到端决策返回的 actions，供后续优先使用
+        if (isInferActionsLlmEnabled() && Array.isArray(e2e.actions) && e2e.actions.length > 0) {
+          e2eActions = e2e.actions;
         }
       } catch (e) {
         // 端到端 LLM 调用失败 → 回退规则决策（gap 已通过粗筛，倾向 speak）
@@ -432,14 +498,34 @@ export class ProactionCortex {
       rationaleParts.push("shadow_override");
     }
 
-    // 环境控制：outcome=speak 时，基于信号 kind 产出建议动作并直接执行
+    // 环境控制：outcome=speak 时，产出建议动作并直接执行。
+    // inferActions LLM 化：优先使用端到端决策返回的 e2eActions（LLM function calling 风格），
+    // 缺失或无效时回退到 inferActions 硬编码规则（travel→calendar / late_night→smart_home 等）。
+    // 注意：此处不影响 speak/silent 决策（speak/silent 已由端到端 LLM 完成）。
+    // 风险点4：LLM 返回的 actions 需经过白名单+信号场景双重过滤，防止幻觉导致非预期工具调用。
     let actions: BrainDecisionAction[] | undefined;
     if (outcome === "speak" || outcome === "shadow") {
-      actions = this.inferActions(signal);
-      if (actions.length > 0) {
+      const llmActions = e2eActions ?? [];
+      if (llmActions.length > 0) {
+        // 过滤 LLM 幻觉：仅保留白名单工具 + 信号场景匹配的动作
+        const filtered = this.filterLlmActions(llmActions, signal);
+        if (filtered.length === 0) {
+          // LLM actions 全部被过滤 → 回退到规则 inferActions
+          actions = this.inferActions(signal);
+          rationaleParts.push(`actions:${actions.length}(rule_fallback_filtered)`);
+        } else {
+          actions = filtered;
+          rationaleParts.push(`actions:${actions.length}(llm_filtered:${llmActions.length - filtered.length} dropped)`);
+        }
+      } else {
+        actions = this.inferActions(signal);
+        if (actions.length > 0) {
+          rationaleParts.push(`actions:${actions.length}(rule)`);
+        }
+      }
+      if (actions && actions.length > 0) {
         // 直接执行动作（环境控制类，如关窗/调空调/创建日程）
         await this.executeActions(actions, actorId);
-        rationaleParts.push(`actions:${actions.length}`);
       }
     }
 
@@ -513,6 +599,69 @@ export class ProactionCortex {
     return actions;
   }
 
+  // ---- 风险点4：LLM actions 幻觉过滤 ----
+
+  /** 允许 LLM 调用的环境控制工具白名单 */
+  private static readonly ACTION_TOOL_WHITELIST = new Set([
+    "calendar.create_task",
+    "smart_home.scene",
+    "smart_home.control_device",
+  ]);
+
+  /**
+   * 信号 kind/title 关键词 → 允许的工具集合映射。
+   * LLM 只能对匹配信号场景的动作执行对应工具，避免在市场异动等无关信号上创建日程。
+   * 未在映射中的信号场景 → 允许全部白名单工具（保守放行，避免过度过滤）。
+   */
+  private static readonly SIGNAL_TOOL_MAP: Array<{ keywords: RegExp; tools: Set<string> }> = [
+    { keywords: /travel|出行|出差|旅游|出发|trip|flight|deadline|截止|到期|due|schedule|日程|待办|todo/, tools: new Set(["calendar.create_task"]) },
+    { keywords: /late_night|深夜|熬夜|night|晚安|sleep|休息/, tools: new Set(["smart_home.scene", "smart_home.control_device"]) },
+    { keywords: /weather|天气|温度|temperature|hot|cold|热|冷/, tools: new Set(["smart_home.control_device"]) },
+  ];
+
+  /**
+   * 过滤 LLM 返回的 actions：白名单 + 信号场景双重校验。
+   *
+   * 过滤规则：
+   *  1. 工具必须在 ACTION_TOOL_WHITELIST 内（拒绝 calendar.delete / smart_home.delete 等危险操作）
+   *  2. 信号场景匹配时，工具必须在对应 SIGNAL_TOOL_MAP 的允许集合内
+   *  3. 信号场景未匹配任何映射 → 保守放行白名单工具（避免过度过滤合法动作）
+   *
+   * 被过滤的动作记日志便于排查 LLM 幻觉模式。
+   */
+  private filterLlmActions(actions: BrainDecisionAction[], signal: BrainSignalInput): BrainDecisionAction[] {
+    const kind = signal.kind.toLowerCase();
+    const title = signal.title.toLowerCase();
+    const combined = `${kind} ${title}`;
+
+    // 找到信号场景匹配的工具集（取首个命中）
+    let allowedByScene: Set<string> | null = null;
+    for (const mapping of ProactionCortex.SIGNAL_TOOL_MAP) {
+      if (mapping.keywords.test(combined)) {
+        allowedByScene = mapping.tools;
+        break;
+      }
+    }
+
+    const result: BrainDecisionAction[] = [];
+    for (const action of actions) {
+      // 校验1：白名单
+      if (!ProactionCortex.ACTION_TOOL_WHITELIST.has(action.tool)) {
+        console.log(`[ProactionCortex] LLM action 被过滤（非白名单工具）: ${action.tool}`);
+        continue;
+      }
+      // 校验2：信号场景匹配时，工具必须在场景允许集合内
+      if (allowedByScene && !allowedByScene.has(action.tool)) {
+        console.log(
+          `[ProactionCortex] LLM action 被过滤（信号场景不匹配）: ${action.tool} on signal[${signal.kind}]`,
+        );
+        continue;
+      }
+      result.push(action);
+    }
+    return result;
+  }
+
   /** 执行建议动作：actionExecutor 未注册时只记日志不阻塞决策 */
   private async executeActions(actions: BrainDecisionAction[], actorId: string): Promise<void> {
     if (!this.actionExecutor) {
@@ -543,6 +692,16 @@ export class ProactionCortex {
       return result?.items ?? [];
     } catch {
       return [];
+    }
+  }
+
+  /** 拉取用户最近实时对话：无 provider 时返回空字符串，不阻塞决策 */
+  private fetchRecentConversation(actorId: string): string {
+    if (!this.recentConversationProvider) return "";
+    try {
+      return this.recentConversationProvider.fetchRecentConversation(actorId, 6);
+    } catch {
+      return "";
     }
   }
 
