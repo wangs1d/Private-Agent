@@ -68,6 +68,19 @@ const CONCISE_REPLY_SYSTEM_SUFFIX = `
 
 【回复方向】像微信里的熟人，不像客服。短、自然、有温度。说重点，别端着，别"您"。`;
 
+/**
+ * 记忆召回的使用方式：让 LLM 知道"背景里有这些信息"，但要求像真人一样
+ * 只在话题相关或临期时再主动提起，不要每轮都把承诺/未完成事项/历史提醒
+ * 复读一遍。系统注入只是给 agent 后台认知，发言权仍由话题相关性决定。
+ */
+const MEMORY_RECALL_BEHAVIOR_SUFFIX = `
+
+【记忆使用方式】system 里出现的【待兑现承诺】【未完成事项】【会话回顾】【持久记忆与偏好】等都属于"后台你知道的背景资料"，不是你必须主动提醒用户的小本本。规则：
+- 当前话题和某条承诺/未完成事项明显相关，或那条事项马上到期（≤24h），才在回复里自然带一句；
+- 否则保持沉默——真朋友不会把几周前的提醒每条都复读一遍，更不会用"顺便提醒你…"当过渡；
+- 引用时要模糊自然（"之前你说过的那个…"），别照搬原文堆在句首；
+- 即使本轮什么都没相关，宁可一字不提，也别硬塞一段「温馨提示」打断当下对话。`;
+
 const LIVE_USER_STATUS_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX
 
 /**
@@ -130,6 +143,14 @@ const PRIVATE_BUTLER_REPLY_SYSTEM_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYS
 export function appendPrivateButlerReplySystemSuffix(systemContent: string): string {
   // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX（marker 一致，appendConciseReplySystemSuffix 会处理）
   return systemContent;
+}
+
+export const MEMORY_RECALL_BEHAVIOR_MARKER = "【记忆使用方式】";
+
+/** 追加「记忆召回使用方式」说明：让 LLM 知道 background memory 的使用边界，不主动复读无关提醒。 */
+export function appendMemoryRecallBehaviorSuffix(systemContent: string): string {
+  if (systemContent.includes(MEMORY_RECALL_BEHAVIOR_MARKER)) return systemContent;
+  return systemContent + MEMORY_RECALL_BEHAVIOR_SUFFIX;
 }
 
 /** 追加「消息时间戳」系统说明（已包含则跳过），让 LLM 理解每条消息首行 `[ts:...]` 前缀。 */
@@ -220,6 +241,8 @@ export function finalizeChatSystemPrompt(
   let out = appendConciseReplySystemSuffix(baseContent);
   out = appendPrivateButlerReplySystemSuffix(out);
   out = appendMessageTimestampSystemSuffix(out);
+  // 记忆召回使用方式：让 LLM 知道 background memory 怎么用，不主动复读无关提醒
+  out = appendMemoryRecallBehaviorSuffix(out);
   if (opts?.tools) {
     out = appendAgentToolCallingSystemSuffix(out);
     if (opts.masterSubAgentDelegate) {
@@ -329,7 +352,15 @@ function extractTimestamp(line: string): Date | null {
   return isNaN(ts) ? null : new Date(ts);
 }
 
-function sortAndTruncateMemoryLines(raw: string, maxChars: number, maxLines: number, userQuery?: string): string {
+function sortAndTruncateMemoryLines(
+  raw: string,
+  maxChars: number,
+  maxLines: number,
+  userQuery?: string,
+  opts?: { minRelevance?: number; fallbackOnEmpty?: boolean },
+): string {
+  const minRelevance = opts?.minRelevance ?? 0;
+  const fallbackOnEmpty = opts?.fallbackOnEmpty ?? false;
   const lines = raw.split("\n").filter((l) => l.trim().length > 0);
   if (lines.length === 0) return "";
 
@@ -339,30 +370,27 @@ function sortAndTruncateMemoryLines(raw: string, maxChars: number, maxLines: num
     relevanceScore: userQuery ? calculateRelevanceScore(line, userQuery) : 0.5,
   }));
 
-  if (userQuery) {
-    scored.sort((a, b) => {
-      if (Math.abs(b.relevanceScore - a.relevanceScore) > 0.2) {
-        return b.relevanceScore - a.relevanceScore;
-      }
-      const timeA = a.timestamp;
-      const timeB = b.timestamp;
-      if (!timeA && !timeB) return 0;
-      if (!timeA) return 1;
-      if (!timeB) return -1;
-      return timeB.getTime() - timeA.getTime();
-    });
-  } else {
-    scored.sort((a, b) => {
-      const timeA = a.timestamp;
-      const timeB = b.timestamp;
-      if (!timeA && !timeB) return 0;
-      if (!timeA) return 1;
-      if (!timeB) return -1;
-      return timeB.getTime() - timeA.getTime();
-    });
-  }
+  // 先按相关度过滤（仅 userQuery 存在时启用门槛），过滤后按相关度+时间排序
+  const filtered = minRelevance > 0 && userQuery
+    ? scored.filter((s) => s.relevanceScore >= minRelevance)
+    : scored;
+  const workingSet = filtered.length > 0 ? filtered : (fallbackOnEmpty ? scored : []);
 
-  const truncated = scored.slice(0, maxLines).map((s) => s.line);
+  if (workingSet.length === 0) return "";
+
+  const sorted = [...workingSet].sort((a, b) => {
+    if (Math.abs(b.relevanceScore - a.relevanceScore) > 0.2) {
+      return b.relevanceScore - a.relevanceScore;
+    }
+    const timeA = a.timestamp;
+    const timeB = b.timestamp;
+    if (!timeA && !timeB) return 0;
+    if (!timeA) return 1;
+    if (!timeB) return -1;
+    return timeB.getTime() - timeA.getTime();
+  });
+
+  const truncated = sorted.slice(0, maxLines).map((s) => s.line);
   let result = truncated.join("\n");
   if (result.length > maxChars) {
     result = `…（较早记录已截断）\n${result.slice(-maxChars)}`;
@@ -483,8 +511,26 @@ export function sliceMemoryEntriesToPromptContext(
   const memoryCurrentMission = sortAndTruncateMemoryLines(str(entries["memory_current_mission"]), 240, 1, userQuery);
   const memoryPreferences = sortAndTruncateMemoryLines(str(entries["memory_preferences"]), 500, 4, userQuery);
   const memoryFacts = sortAndTruncateMemoryLines(str(entries["memory_facts"]), 500, 4, userQuery);
-  const memoryCommitments = sortAndTruncateMemoryLines(str(entries["memory_commitments"]), 500, 4, userQuery);
-  const memoryOpenLoops = sortAndTruncateMemoryLines(str(entries["memory_open_loops"]), 500, 4, userQuery);
+  // 「待兑现承诺 / 未完成事项」默认仅在 topic 相关时才注入 prompt；
+  // 计算得分低于 0.45 的行直接丢弃（与用户当前话题弱相关就别让 LLM 主动提）。
+  // 门槛 0.45 的依据：commitment 标签自带 +0.2 加成，加上 topic boost 0.15（general）
+  // 或 0.45（同 topic），弱相关行落到 0.4（general+commitment）→ 被过滤；
+  // 同 topic + commitment 行落到 0.65 → 保留。
+  // 兜底：若全部不相关则不注入，避免把无关提醒强行塞进 prompt。
+  const memoryCommitments = sortAndTruncateMemoryLines(
+    str(entries["memory_commitments"]),
+    500,
+    2,
+    userQuery,
+    { minRelevance: 0.45, fallbackOnEmpty: false },
+  );
+  const memoryOpenLoops = sortAndTruncateMemoryLines(
+    str(entries["memory_open_loops"]),
+    500,
+    2,
+    userQuery,
+    { minRelevance: 0.45, fallbackOnEmpty: false },
+  );
   const sessionRecap = sortAndTruncateMemoryLines(str(entries["session_recap"]), 500, 4, userQuery);
   if (opts?.includeMemorySummary !== false && rawSummary) {
     const sorted = sortAndTruncateMemoryLines(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery);

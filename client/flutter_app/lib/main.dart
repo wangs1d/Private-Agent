@@ -1,10 +1,12 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 import "package:permission_handler/permission_handler.dart";
+import "package:window_manager/window_manager.dart";
 
 import "core/config/api_config.dart";
 import "core/region/region_config.dart";
@@ -46,7 +48,7 @@ import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
-import "features/chat/voice_mode_page.dart";
+// 语音对话模式已迁移到独立的 PySide6 桌面悬浮球（client/voice-orb-py）。
 import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
@@ -66,10 +68,26 @@ import "features/wallet/wallet_page.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
 
-void main() {
-  runZonedGuarded(() {
+void main() async {
+  runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     unawaited(bootstrapWindowsWebView());
+    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      await windowManager.ensureInitialized();
+      final WindowOptions options = WindowOptions(
+        size: const Size(1280, 800),
+        center: true,
+        backgroundColor: Colors.transparent,
+        skipTaskbar: false,
+        // 保留原生标题栏（关闭/最小化/最大化按钮），
+        // 与 windows/runner 里的 pai/window_titlebar 深色标题栏主题一致。
+        titleBarStyle: TitleBarStyle.normal,
+      );
+      await windowManager.waitUntilReadyToShow(options, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      });
+    }
     runApp(const PrivateAiApp());
   }, (error, stack) {
     // 兜底所有未捕获的异步异常，防止 Flutter engine 断连崩溃
@@ -166,6 +184,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 保存打开面板前的 splitRatio，用于关闭时恢复
   double _previousSplitRatio = SplitRatioPreference.defaultRatio;
 
+  /// 保存打开面板前的 side 模式右面板总占位（含 8px 拖拽条），
+  /// 关闭时恢复——避免工具面板打开期间被 split 模式改写后回不去。
+  double _previousRightPanelWidth = kRightSidePanelWidth + _kSidePanelDividerWidth;
+
   /// split 模式下右面板的实际宽度，由 [NextbotChatLayout] 通过
   /// [NextbotChatLayout.onRightPanelWidthChanged] 同步过来，
   /// 用于给 AppBar / Sidebar 等加右边距，避免右面板覆盖顶部栏。
@@ -185,6 +207,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _rightPanel = null;
       // 恢复打开面板前的 splitRatio
       _splitRatio = _previousSplitRatio;
+      // 恢复打开面板前的 side 模式右面板总占位（含 8px 拖拽条），
+      // 避免工具面板打开期间被 split 模式把宽度改写后回不去。
+      _rightPanelWidth = _previousRightPanelWidth;
     });
   }
 
@@ -344,6 +369,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _scheduleReloadSignal.dispose();
     _calendarReloadSignal.dispose();
     _stopMessagePolling();
+    _voiceOrbProcess?.kill();
     super.dispose();
   }
 
@@ -824,8 +850,15 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   chunkTraceId != activeTraceId)) {
             return;
           }
-          // interim 已废弃，chunk（含 phase="interim" 首段）直接入列表显示，
-          // 实现真人"边说边看"效果。
+          // 纯流式渲染：phase="interim" 是「行动宣告/进度感」类首段（"好的，我帮你看看…"），
+          // 属于「agent 思路过程」而非最终回复——直接丢弃，不入消息列表。
+          // 只保留 phase="stream"（或无 phase）的最终回复 chunks。
+          final String chunkPhase = payload["phase"]?.toString() ?? "";
+          if (chunkPhase == "interim") {
+            // 仍可借助 _clearInterimAck 清掉旧的 interim ack 气泡（若有）
+            _clearInterimAck();
+            return;
+          }
           _clearInterimAck();
           if (!_isAgentProcessing) {
             setState(() => _isAgentProcessing = true);
@@ -908,25 +941,27 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               PlayUrlUtils.fromAssistantText(resolvedText);
           final int? idx = _assistantMessageIndexById[messageId];
           if (idx != null) {
+            // 纯流式：消息已经在 chunk 入列表时建好（带逐字流式内容），
+            // 这里不要整体覆盖 text，避免「先渲染流式过程 → 再被 finalText 替换」的二次渲染。
+            // 只补 playUrl 等不影响正文的字段；流式文本本身就是最终回复。
             setState(() {
               final ChatMessage previous = _messages[idx];
-              final String nextText = resolvedText.trim().isNotEmpty
-                  ? resolvedText
-                  : (previous.text.trim().isNotEmpty
-                      ? previous.text
-                      : fallbackText);
+              final String currentText = previous.text;
+              final String? existingPlayUrl = previous.playUrl;
               _messages[idx] = ChatMessage(
                 messageId: previous.messageId,
                 sessionId: previous.sessionId,
                 role: previous.role,
-                text: nextText,
+                // 关键：text 保留流式已拼好的版本，不被 resolvedText 整体覆盖
+                text: currentText,
                 timestamp: previous.timestamp,
                 attachmentImageCount: previous.attachmentImageCount,
-                playUrl: playUrl ?? previous.playUrl,
+                playUrl: playUrl ?? existingPlayUrl,
               );
             });
             await _store.saveMessage(_messages[idx]);
           } else {
+            // 极端边界：完全没收到任何 chunk（只收到 done），用 finalText 兜底
             final ChatMessage finalMessage = ChatMessage(
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
@@ -2117,6 +2152,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _rightPanel = RightPanelKind.friends;
       // 保存当前 splitRatio，关闭时恢复
       _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.friends.defaultSplitRatio;
     });
   }
@@ -2128,6 +2165,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _rightPanel = RightPanelKind.messages;
       // 保存当前 splitRatio，关闭时恢复
       _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.messages.defaultSplitRatio;
     });
   }
@@ -2998,6 +3037,142 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return Text(title);
   }
 
+  /// 启动独立的 PySide6 语音悬浮球进程，并隐藏当前 Flutter 窗口，
+  /// 进入纯语音模式（屏幕上只保留悬浮球）。
+  /// 由 ChatPage 输入框中的语音按钮通过 onEnterVoiceMode 回调触发。
+  ///
+  /// 环境变量 PAI_WS_URL / PAI_HTTP_BASE / PAI_SESSION_ID / PAI_ACTOR_ID
+  /// 会传递给 voice-orb-py，使其复用当前 session 与后端通信。
+  Future<void> _invokeVoiceOrb() async {
+    if (!Platform.isWindows) {
+      // 非桌面平台：保留原入口但不执行（后续可扩展 macOS/Linux）
+      debugPrint("[VoiceOrb] external PySide6 orb is only supported on Windows");
+      return;
+    }
+    if (_voiceOrbProcess != null && _voiceOrbReady) {
+      // 已有进程在跑且悬浮球已就绪：直接隐藏主窗口并把焦点交过去
+      await windowManager.hide();
+      return;
+    }
+    if (_voiceOrbProcess != null && !_voiceOrbReady) {
+      // 进程启动中，忽略重复点击
+      return;
+    }
+
+    final Directory? orbDir = _findVoiceOrbDir();
+    if (orbDir == null) {
+      debugPrint(
+          "[VoiceOrb] voice-orb-py not found (cwd: ${Directory.current.path})");
+      return;
+    }
+    final String script =
+        "${orbDir.path}${Platform.pathSeparator}main.py";
+
+    final Map<String, String> env = Map<String, String>.from(Platform.environment);
+    env["PAI_WS_URL"] = ApiConfig.wsUrl;
+    env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
+    env["PAI_SESSION_ID"] = ApiConfig.sessionId;
+    env["PAI_ACTOR_ID"] = ApiConfig.effectiveActorId;
+    env["PAI_USER_ID"] = ApiConfig.localPin;
+    // 告知悬浮球父进程（本 Flutter 应用）的 PID：
+    // 应用退出/重启后，悬浮球检测到父进程消失会自动结束，避免残留悬浮窗。
+    env["PAI_ORB_PARENT_PID"] = "$pid";
+
+    try {
+      _voiceOrbProcess = await Process.start(
+        "python",
+        <String>[script],
+        workingDirectory: orbDir.path,
+        environment: env,
+      );
+      _voiceOrbProcess!.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(_onVoiceOrbStdout);
+      _voiceOrbProcess!.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((String line) => debugPrint("[VoiceOrb][err] $line"));
+      _voiceOrbProcess!.exitCode.then((int code) {
+        debugPrint("[VoiceOrb] process exited with code $code");
+        _voiceOrbProcess = null;
+        _voiceOrbReadyTimer?.cancel();
+        _voiceOrbReadyTimer = null;
+        if (_voiceOrbReady) {
+          // 悬浮球进程退出（崩溃/被关闭）且主窗口已被隐藏时，立即恢复页面，
+          // 避免应用"卡退"式地消失后无法找回。
+          _voiceOrbReady = false;
+          _restorePageMode();
+        } else {
+          _voiceOrbReady = false;
+        }
+      });
+      // 就绪看门狗：10s 内未收到 ORB_READY（python 启动失败/挂起），
+      // 终止子进程并恢复主窗口，防止主窗口被无限期隐藏。
+      _voiceOrbReadyTimer?.cancel();
+      _voiceOrbReadyTimer = Timer(const Duration(seconds: 10), () {
+        if (_voiceOrbProcess != null && !_voiceOrbReady) {
+          debugPrint("[VoiceOrb] ready timeout, restoring page mode");
+          _voiceOrbProcess?.kill();
+          _voiceOrbProcess = null;
+          _restorePageMode();
+        }
+      });
+    } on Exception catch (e) {
+      debugPrint("[VoiceOrb] failed to start: $e");
+    }
+  }
+
+  /// 恢复 Flutter 主窗口（从悬浮球模式回到页面模式）。
+  Future<void> _restorePageMode() async {
+    await windowManager.show();
+    await windowManager.focus();
+  }
+
+  Process? _voiceOrbProcess;
+  bool _voiceOrbReady = false;
+  Timer? _voiceOrbReadyTimer;
+
+  /// 从进程工作目录 / 可执行文件目录向上逐级查找 client/voice-orb-py。
+  /// 兼容 flutter run（cwd = client/flutter_app）与从仓库根目录启动两种形态。
+  static Directory? _findVoiceOrbDir() {
+    final List<String> seeds = <String>[
+      Directory.current.path,
+      File(Platform.resolvedExecutable).parent.path,
+    ];
+
+    for (final String seed in seeds) {
+      Directory dir = Directory(seed);
+      for (int i = 0; i < 15; i++) {
+        final Directory candidate = Directory(
+          "${dir.path}${Platform.pathSeparator}client"
+          "${Platform.pathSeparator}voice-orb-py",
+        );
+        if (candidate.existsSync()) {
+          return candidate;
+        }
+        final Directory parent = dir.parent;
+        if (parent.path == dir.path) break;
+        dir = parent;
+      }
+    }
+    return null;
+  }
+
+  void _onVoiceOrbStdout(String line) {
+    debugPrint("[VoiceOrb][out] $line");
+    if (line.contains("__VOICE_ORB_EVENT__:ORB_READY")) {
+      _voiceOrbReadyTimer?.cancel();
+      _voiceOrbReadyTimer = null;
+      _voiceOrbReady = true;
+      // 悬浮球窗口已就绪，隐藏 Flutter 主窗口进入纯语音模式
+      windowManager.hide();
+    } else if (line.contains("__VOICE_ORB_EVENT__:PAGE_MODE_REQUESTED")) {
+      // 用户点击悬浮球的"回到页面模式"，恢复 Flutter 主窗口
+      _restorePageMode();
+    }
+  }
+
   Widget _buildMessageNotificationBadge() {
     if (_unreadByPlatform.isEmpty) {
       return const SizedBox.shrink();
@@ -3263,7 +3438,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                           )
                                         : null,
                                     title: _buildAppBarTitle(),
-                                    actions: <Widget>[],
+                                    actions: const <Widget>[],
                                   ),
                                 ),
                                 Expanded(
@@ -3359,6 +3534,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _rightPanel = RightPanelKind.devices;
       // 保存当前 splitRatio，关闭时恢复
       _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.devices.defaultSplitRatio;
     });
   }
@@ -3800,8 +3977,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           _buildSplitPanelHeader(cs),
           Expanded(
             child: Container(
-              color: cs.surface,
               decoration: BoxDecoration(
+                color: cs.surface,
                 border: Border(
                   top: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
                 ),
@@ -3942,7 +4119,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onRightPanelWidthChanged: _setRightPanelWidth,
       // side 模式下也启用拖拽：把当前宽度(含 8px 拖拽条)传下去,
       // NextbotChatLayout 内部会保留此值作为初始/外部同步值。
-      sidePanelWidth: _rightPanel != null ? null : _rightPanelWidth,
+      // split 模式下该参数会被忽略,这里统一传当前宽度即可,
+      // 避免打开工具面板时传 null 把内部的 _sidePanelWidth 重置成默认值。
+      sidePanelWidth: _rightPanelWidth,
       child: _buildChatPage(context),
     );
   }
@@ -3968,15 +4147,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,
       isActive: _tabIndex == 0,
-      onEnterVoiceMode: () {
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (BuildContext ctx) => VoiceModePage(
-              onExit: () => Navigator.of(ctx).pop(),
-            ),
-          ),
-        );
-      },
+      // 语音对话模式入口（输入框右下 mic 按钮）—— 召唤屏幕右下角 VoiceOrb 悬浮球
+      onEnterVoiceMode: _invokeVoiceOrb,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);
       },

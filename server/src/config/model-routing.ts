@@ -29,7 +29,7 @@ export enum TaskTier {
 /** 默认模型映射 */
 const DEFAULT_MODELS: Record<TaskTier, string> = {
   [TaskTier.FAST]: "deepseek-chat",       // DeepSeek Flash（V3 快模型）
-  [TaskTier.COMPLEX]: "deepseek-reasoner", // DeepSeek Pro（R1 推理模型）
+  [TaskTier.COMPLEX]: "deepseek-chat",    // 临时回滚：仍用 V3 验证基础功能；R1 集成后切回 deepseek-reasoner
   [TaskTier.NANO]: "gpt-4.1-nano",
   [TaskTier.MINI]: "gpt-4.1-mini",
   [TaskTier.FULL]: "", // 空字符串表示使用主模型（OPENAI_MODEL / MOONSHOT_MODEL）

@@ -98,11 +98,9 @@ import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
-import type { ASRProvider } from "../services/voice-dialogue/types.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
-import { OpenAIASRAdapter } from "../services/voice-dialogue/adapters/openai-asr-adapter.js";
 import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
@@ -428,17 +426,12 @@ export async function createAppServices(): Promise<AppServices> {
   // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
   const voiceDialogueService = new VoiceDialogueService();
 
-  // ASR Adapter 优先级：FunASR（自托管，中文最佳）→ OpenAI Whisper（兜底）
+  // ASR Adapter：FunASR 自托管（中文最佳）
   const funasrAdapter = new FunAsrAdapter();
-  const openaiAsrAdapter = new OpenAIASRAdapter();
-  const defaultAsr: ASRProvider = funasrAdapter.isEnabled() ? funasrAdapter : openaiAsrAdapter;
 
   // 注册 OpenAI provider（默认）
-  // ASR 走 defaultAsr（FunASR 优先，否则 OpenAI Whisper 兜底）。
-  // 注意：不能硬编码 openaiAsrAdapter，否则当 siliconflow TTS 未配置、
-  // 默认 provider 回退到 "openai" 时，ASR 会绕过 FunASR 直接打 OpenAI 端点（如 DeepSeek，404）。
   voiceDialogueService.registerProvider("openai", {
-    asr: defaultAsr,
+    asr: funasrAdapter,
     tts: new OpenAITTSAdapter(ttsService),
     llm: new OpenAILLMAdapter(),
   });
@@ -447,13 +440,13 @@ export async function createAppServices(): Promise<AppServices> {
   const siliconflowTTS = new SiliconFlowTTSAdapter();
   if (siliconflowTTS.isEnabled()) {
     voiceDialogueService.registerProvider("siliconflow", {
-      asr: defaultAsr, // ASR 走 FunASR（如已配置），否则 OpenAI
+      asr: funasrAdapter, // ASR 走 FunASR
       tts: siliconflowTTS,
       llm: new OpenAILLMAdapter(),
     });
     voiceDialogueService.setDefaultProvider("siliconflow");
     app.log.info(
-      `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${defaultAsr.name}）`,
+      `[VoiceDialogue] 硅基流动 TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
     );
   } else {
     app.log.info("[VoiceDialogue] 硅基流动 TTS 未配置或凭证不完整，使用 OpenAI 作为默认提供商");
@@ -2285,7 +2278,6 @@ export async function createAppServices(): Promise<AppServices> {
       bodyBus,
       voiceDialogue: voiceDialogueService,
       funasrAdapter,
-      openaiAsrAdapter,
     });
 
     const skin = new Skin({

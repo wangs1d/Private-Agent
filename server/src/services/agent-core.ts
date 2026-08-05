@@ -48,7 +48,6 @@ import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
 import { routeLlmExecution, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
-import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
@@ -73,136 +72,6 @@ import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
-
-/**
- * 简单 LRU 缓存实现（用于响应缓存）
- * 预期效果：重复查询 <100ms，大幅减少 API 调用
- */
-class ResponseCache {
-  private cache = new Map<string, { response: string; timestamp: number; hits: number }>();
-  private readonly maxSize: number;
-  private readonly ttlMs: number;
-
-  constructor(maxSize = 500, ttlMinutes = 5) {
-    this.maxSize = maxSize;
-    this.ttlMs = ttlMinutes * 60 * 1000;
-    
-    // 定期清理过期缓存
-    setInterval(() => this.cleanup(), ttlMinutes * 60 * 1000).unref();
-  }
-
-  /**
-   * 生成缓存键（基于输入文本的标准化哈希）
-   */
-  private generateKey(text: string, actorId: string): string {
-    const normalized = text.toLowerCase().trim()
-      .replace(/\s+/g, ' ')
-      .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, '');
-    
-    // 简单哈希函数
-    let hash = 0;
-    for (let i = 0; i < normalized.length; i++) {
-      const char = normalized.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    
-    return `${actorId}:${hash}:${normalized.slice(0, 50)}`;
-  }
-
-  /**
-   * 获取缓存的响应
-   */
-  get(text: string, actorId: string): string | null {
-    const key = this.generateKey(text, actorId);
-    const cached = this.cache.get(key);
-    
-    if (!cached) return null;
-    
-    // 检查是否过期
-    if (Date.now() - cached.timestamp > this.ttlMs) {
-      this.cache.delete(key);
-      return null;
-    }
-    
-    // 更新访问次数和移到最后（LRU）
-    cached.hits++;
-    this.cache.delete(key);
-    this.cache.set(key, cached);
-    
-    return cached.response;
-  }
-
-  /**
-   * 设置缓存响应
-   */
-  set(text: string, actorId: string, response: string): void {
-    const key = this.generateKey(text, actorId);
-    
-    // 如果已存在，不覆盖
-    if (this.cache.has(key)) return;
-    
-    // 如果超过最大容量，删除最旧的条目
-    if (this.cache.size >= this.maxSize) {
-      const oldestKey = this.cache.keys().next().value;
-      if (oldestKey) {
-        this.cache.delete(oldestKey);
-      }
-    }
-    
-    this.cache.set(key, {
-      response,
-      timestamp: Date.now(),
-      hits: 0,
-    });
-  }
-
-  /**
-   * 清理过期条目
-   */
-  private cleanup(): void {
-    const now = Date.now();
-    let cleaned = 0;
-    
-    for (const [key, value] of this.cache) {
-      if (now - value.timestamp > this.ttlMs) {
-        this.cache.delete(key);
-        cleaned++;
-      }
-    }
-    
-    if (cleaned > 0) {
-      // 静默清理过期缓存
-    }
-  }
-
-  /** 获取缓存统计信息 */
-  getStats() {
-    let totalHits = 0;
-    for (const [, value] of this.cache) {
-      totalHits += value.hits;
-    }
-    
-    return {
-      size: this.cache.size,
-      maxSize: this.maxSize,
-      totalHits,
-      hitRate: this.cache.size > 0 ? (totalHits / this.cache.size).toFixed(2) : '0.00',
-    };
-  }
-
-  /** 清空所有缓存 */
-  clear(): void {
-    const size = this.cache.size;
-    this.cache.clear();
-  }
-}
-
-// 全局响应缓存实例
-const globalResponseCache = new ResponseCache(
-  parseInt(process.env.RESPONSE_CACHE_MAX_SIZE ?? '500'),
-  parseInt(process.env.RESPONSE_CACHE_TTL_MINUTES ?? '5')
-);
 
 export type MasterAgentDelegationSnapshot = {
   enabled: boolean;
@@ -642,23 +511,7 @@ export class AgentCore {
     }
 
     const perfStartTime = Date.now();
-    
-    // 响应缓存检查（性能优化：重复查询 <100ms）
-    const cacheEnabled = process.env.RESPONSE_CACHE_ENABLED !== '0';
-    if (cacheEnabled && !opts?.visionFrames?.length && !isAmbiguousFollowUpMessage(text)) {
-      const cachedResponse = globalResponseCache.get(text, actorId);
-      if (cachedResponse) {
-        this.turnLifecycle.finalizeTurn({
-          actorId,
-          userText: text,
-          assistantText: cachedResponse,
-          sessionId,
-        });
 
-        return { text: cachedResponse, streamedChunks: false };
-      }
-    }
-    
     if (!this.externalChat?.isEnabled()) {
       const available = this.toolRegistry.list().join(", ");
       const fallback = `已收到：${text}。当前可用工具：${available}`;
@@ -694,10 +547,6 @@ export class AgentCore {
         assistantText: humanized,
         sessionId,
       });
-      // cognize response 写入缓存，下次同类查询 <100ms 命中（缓存人化后的版本）
-      if (cacheEnabled && !opts?.visionFrames?.length) {
-        globalResponseCache.set(text, actorId, humanized);
-      }
       // 流式分片：cognize response 一次性返回，不分片
       opts?.onAssistantDelta?.(humanized);
       return { text: humanized, streamedChunks: false };
@@ -1018,11 +867,6 @@ export class AgentCore {
             );
           }
         }
-      }
-      
-      // 响应缓存存储（仅缓存无工具调用的简单响应）
-      if (cacheEnabled && !result.toolName && result.text) {
-        globalResponseCache.set(text, actorId, result.text);
       }
       
       return result;

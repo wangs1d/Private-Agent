@@ -9,7 +9,14 @@
       "canvasData": {
         "x": 0,
         "y": 0,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 932,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-deb16d64",
+          "measuredAt": 1785816414067
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/entrance-animation.html",
@@ -25,7 +32,14 @@
       "canvasData": {
         "x": 504,
         "y": 0,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-464de4be",
+          "measuredAt": 1785815367147
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/chat-main.html",
@@ -41,7 +55,14 @@
       "canvasData": {
         "x": 504,
         "y": 1000,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-8b3a235f",
+          "measuredAt": 1785815367147
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/chat-main-threejs-weather.html",
@@ -57,7 +78,14 @@
       "canvasData": {
         "x": 998,
         "y": 0,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 974,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-537e448f",
+          "measuredAt": 1785852675543
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/phone-call-ui.html",
@@ -73,10 +101,40 @@
       "canvasData": {
         "x": 1497,
         "y": 0,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 562,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-cee6dbc5",
+          "measuredAt": 1785815367147
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/thinking-indicator.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-voice-mode",
+      "title": "语音模式",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1754275200000,
+      "canvasData": {
+        "x": 1996,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 793,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-a4e9d2f0",
+          "measuredAt": 1785852675543
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/voice-mode.html",
         "interactions": []
       }
     }

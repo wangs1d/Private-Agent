@@ -19,7 +19,7 @@ import type { ASRProvider, AudioBuffer, ASRResult } from "../types.js";
  * 设计说明：
  *   - 非流式 transcribe：一次性上传音频文件 (POST /api/asr)
  *   - 流式 startStreamingTranscribe：通过 WebSocket /ws/asr 分块发送音频
- *   - 失败时返回空文本的退化结果（与 OpenAIASRAdapter 行为一致），不抛异常。
+ *   - 失败时返回空文本的退化结果，不抛异常。
  */
 export class FunAsrAdapter implements ASRProvider {
   name = "funasr";

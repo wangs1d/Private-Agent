@@ -1079,6 +1079,22 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "calendar.delete_task",
+      description:
+        "【内置 Calendar】删除用户已创建的定时日程/提醒。仅当用户明确要求删除/取消某个日程或提醒时调用；可先用 calendar.list_tasks 找到 taskId。",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "要删除的日程/提醒 taskId（list_tasks 返回）" },
+        },
+        required: ["taskId"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [

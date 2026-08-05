@@ -20,6 +20,11 @@ import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
 import "voice_message_bubble.dart";
 
+/// 输入框内图标按钮的视觉强度
+/// - muted：默认（onSurfaceVariant 色），用于次要功能
+/// - primary：主色 + 弱容器背景，用于需要被一眼找到的入口
+enum InputIconTone { muted, primary }
+
 class ChatPage extends StatefulWidget {
   const ChatPage({
     super.key,
@@ -652,11 +657,19 @@ class _ChatPageState extends State<ChatPage>
     required VoidCallback? onTap,
     required ColorScheme cs,
     double size = 20,
+    InputIconTone tone = InputIconTone.muted,
   }) {
+    final Color iconColor = switch (tone) {
+      InputIconTone.muted => cs.onSurfaceVariant,
+      InputIconTone.primary => cs.primary,
+    };
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: Colors.transparent,
+        color: tone == InputIconTone.primary
+            ? cs.primaryContainer.withValues(alpha: 0.55)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
         child: InkWell(
           borderRadius: BorderRadius.circular(10),
           onTap: onTap,
@@ -666,7 +679,7 @@ class _ChatPageState extends State<ChatPage>
             child: Icon(
               icon,
               size: size,
-              color: cs.onSurfaceVariant,
+              color: iconColor,
             ),
           ),
         ),
@@ -1156,14 +1169,16 @@ class _ChatPageState extends State<ChatPage>
                                       size: 18,
                                     ),
                                   const Spacer(),
-                                  // 右下：语音按钮
-                                  _buildInputIconButton(
-                                    icon: Icons.mic_none,
-                                    tooltip: "语音对话模式",
-                                    onTap: widget.onEnterVoiceMode,
-                                    cs: cs,
-                                    size: 18,
-                                  ),
+                                  // 右下：语音对话模式 —— 召唤屏幕右下角悬浮球
+                                  if (widget.onEnterVoiceMode != null)
+                                    _buildInputIconButton(
+                                      icon: Icons.mic_rounded,
+                                      tooltip: "语音对话模式",
+                                      onTap: widget.onEnterVoiceMode,
+                                      cs: cs,
+                                      size: 20,
+                                      tone: InputIconTone.primary,
+                                    ),
                                   const SizedBox(width: 4),
                                   // 右下：电话按钮
                                   if (widget.onOpenPhoneDialer != null)

@@ -81,6 +81,11 @@ export const CORE_TOOL_LIBRARY = {
    * Fast 模式工具分组：只读查询 + 轻量交互（TTS 推送/号码查询）。
    * 新增工具时声明到此分组即可自动被 Fast 模式收编，无需改其他代码。
    * 未声明的工具默认走 Complex 模式（全量工具集 + tool search 桥接）。
+   *
+   * 2026-08-03 修复：fastLane 原本只有只读的 calendar.list_tasks，用户设置提醒
+   * 被路由到 fast 模式时 LLM 看不到任何创建工具 → 只能口头答应"已设置"却未真正写入日程。
+   * 把 reminder.plan / calendar.create_from_text / calendar.create_task / calendar.delete_task
+   * 加入 fastLane：设置/删除提醒是轻量交互，fast 模式可直接落地（工具执行后走 summary 兜底生成回复）。
    */
   fastLane: {
     label: "Fast 模式轻量工具",
@@ -91,6 +96,10 @@ export const CORE_TOOL_LIBRARY = {
       "clock.format_timestamp",
       "weather.get_local",
       "calendar.list_tasks",
+      "calendar.create_from_text",
+      "calendar.create_task",
+      "calendar.delete_task",
+      "reminder.plan",
       "search_web",
       "fetch_web",
       "browser.session.list",

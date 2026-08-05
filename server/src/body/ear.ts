@@ -1,7 +1,7 @@
 // Agent Body Center —— Ear 耳/听觉传感器
 //
 // 职责：对应人体的听觉器官，统一封装「听」通道：
-//   1. ASR 转写：优先级 voiceDialogue > funasrAdapter > openaiAsrAdapter
+//   1. ASR 转写：优先级 voiceDialogue > funasrAdapter
 //   2. phone-bridge 入站音频流：标记入站音频到达事件
 //   3. voice-message 入站音频：委托 voiceMessageService 接收音频
 //
@@ -50,7 +50,7 @@ interface VoiceDialogueLike {
 }
 
 /**
- * ASR Adapter（FunAsrAdapter / OpenAIASRAdapter）的最小化结构接口。
+ * ASR Adapter（FunAsrAdapter）的最小化结构接口。
  * 仅声明 transcribe 方法，与 services/voice-dialogue/types.ts 的 ASRProvider 结构兼容。
  */
 interface AsrAdapterLike {
@@ -88,7 +88,6 @@ interface VoiceMessageInboundLike {
  * - bodyBus：必填，身体内部消息总线，用于发布 body.ear.transcript 信号
  * - voiceDialogue：优先级 1 的 ASR 通道（含 transcribeAudio）
  * - funasrAdapter：优先级 2 的 ASR 通道
- * - openaiAsrAdapter：优先级 3 的 ASR 通道
  * - phoneBridge：入站音频流（可选）
  * - voiceMessageService：入站语音消息（可选）
  */
@@ -96,7 +95,6 @@ export interface EarDeps {
   bodyBus: BodyBus;
   voiceDialogue?: VoiceDialogueLike;
   funasrAdapter?: AsrAdapterLike;
-  openaiAsrAdapter?: AsrAdapterLike;
   phoneBridge?: PhoneBridgeInboundLike;
   voiceMessageService?: VoiceMessageInboundLike;
 }
@@ -108,7 +106,7 @@ interface TranscriptRecord {
   text: string;
   confidence: number;
   language?: string;
-  /** 来源标识：voiceDialogue / funasr / openai / phone_bridge / voice_message */
+  /** 来源标识：voiceDialogue / funasr / phone_bridge / voice_message */
   source: string;
   /** ISO timestamp */
   timestamp: string;
@@ -153,7 +151,7 @@ export class Ear implements BodyModuleLike {
   private readonly bodyBus: BodyBus;
   private readonly voiceDialogue: VoiceDialogueLike | null;
   private readonly funasrAdapter: AsrAdapterLike | null;
-  private readonly openaiAsrAdapter: AsrAdapterLike | null;
+  
   private readonly phoneBridge: PhoneBridgeInboundLike | null;
   private readonly voiceMessageService: VoiceMessageInboundLike | null;
 
@@ -168,7 +166,7 @@ export class Ear implements BodyModuleLike {
     this.bodyBus = deps.bodyBus;
     this.voiceDialogue = deps.voiceDialogue ?? null;
     this.funasrAdapter = deps.funasrAdapter ?? null;
-    this.openaiAsrAdapter = deps.openaiAsrAdapter ?? null;
+    
     this.phoneBridge = deps.phoneBridge ?? null;
     this.voiceMessageService = deps.voiceMessageService ?? null;
   }
@@ -567,9 +565,8 @@ export class Ear implements BodyModuleLike {
   /**
    * 转写音频（公开方法，供其他 BodyModule 直接调用，绕过 act/sense 路由）。
    *
-   * 优先级：voiceDialogue > funasrAdapter > openaiAsrAdapter。
-   * 全部不可用时返回 ok=false 形态的退化结果（text="", confidence=0），
-   * 与 FunAsrAdapter/OpenAIASRAdapter 失败时的退化行为一致。
+   * 优先级：voiceDialogue > funasrAdapter。
+   * 全部不可用时返回 ok=false 形态的退化结果（text="", confidence=0）。
    *
    * @param audio 音频数据，data 为 Buffer 或 base64 字符串
    * @param opts.format 音频格式（mp3/wav/ogg/pcm），可选
@@ -636,7 +633,7 @@ export class Ear implements BodyModuleLike {
   /**
    * 选择最优 ASR adapter。
    *
-   * 优先级：voiceDialogue > funasrAdapter > openaiAsrAdapter。
+   * 优先级：voiceDialogue > funasrAdapter。
    * 全部不可用时返回 null。
    */
   private selectBestAsrAdapter(): SelectedAsrAdapter | null {
@@ -645,9 +642,6 @@ export class Ear implements BodyModuleLike {
     }
     if (this.funasrAdapter) {
       return { adapter: this.funasrAdapter, name: "funasr" };
-    }
-    if (this.openaiAsrAdapter) {
-      return { adapter: this.openaiAsrAdapter, name: "openai" };
     }
     return null;
   }
@@ -689,7 +683,7 @@ export class Ear implements BodyModuleLike {
       };
     }
 
-    // AsrAdapterLike 路径（FunAsr / OpenAI 等）
+    // AsrAdapterLike 路径（FunAsr 等）
     const adapter = selected.adapter as AsrAdapterLike;
     return adapter.transcribe(
       { data: audio.data, format },
@@ -702,7 +696,6 @@ export class Ear implements BodyModuleLike {
     const list: string[] = [];
     if (this.voiceDialogue) list.push("voiceDialogue");
     if (this.funasrAdapter) list.push("funasr");
-    if (this.openaiAsrAdapter) list.push("openai");
     return list;
   }
 

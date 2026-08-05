@@ -9,9 +9,11 @@ list(APPEND FLUTTER_PLUGIN_LIST
   isar_flutter_libs
   permission_handler_windows
   record_windows
+  screen_retriever_windows
   speech_to_text_windows
   url_launcher_windows
   webview_windows
+  window_manager
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

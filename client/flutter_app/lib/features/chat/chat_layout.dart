@@ -83,7 +83,11 @@ class _NextbotChatLayoutState extends State<NextbotChatLayout> {
   @override
   void didUpdateWidget(covariant NextbotChatLayout oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.sidePanelWidth != null &&
+    // 仅 side 模式才用 sidePanelWidth 同步 _sidePanelWidth。
+    // split 模式下 onRightPanelWidthChanged 推上来的宽度是 split 实际宽度，
+    // 不能用它覆盖侧边宽度的内部状态——否则关闭面板后会"继承"工具面板的宽度。
+    if (!widget.useSplit &&
+        widget.sidePanelWidth != null &&
         widget.sidePanelWidth != oldWidget.sidePanelWidth) {
       _sidePanelWidth = widget.sidePanelWidth!;
     }

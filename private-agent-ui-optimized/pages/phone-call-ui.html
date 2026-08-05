@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>电话窗口</title>
+    <title>电话窗口 UI · Private Agent</title>
     <style id="theme-vars">
 /* ================================================
    Private Agent UI - Unified Theme Color Palette
@@ -215,546 +215,751 @@
       }
     </style>
 </head>
-<body class="min-h-screen font-sans antialiased">
-    <main>
-      <div class="pc-page">
-        <div class="pc-page-header">
-          <div class="pc-header-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
-              <circle cx="12" cy="12" r="3.2" fill="currentColor"/>
-            </svg>
-          </div>
-          <div>
-            <h1 class="pc-page-title">电话窗口 UI</h1>
-            <p class="pc-page-subtitle">两种通话状态 · Agent 统一头像 · 去电自动转通话中</p>
-          </div>
-        </div>
+<body class="min-h-screen">
 
-        <div class="pc-grid">
-          <!-- Window 1: Incoming Call -->
-          <section class="pc-section">
-            <div class="pc-section-head">
-              <span class="pc-section-label">来电提示窗</span>
-              <span class="pc-section-desc">300×88 · 紧凑横条</span>
+  <!-- 顶部标题区 -->
+  <header class="pt-16 pb-10 text-center animate-in">
+    <h1 class="text-4xl font-bold tracking-tight" style="color: var(--pa-text-primary);">
+      电话窗口 UI
+    </h1>
+    <p class="mt-3 text-base" style="color: var(--pa-text-secondary);">
+      两种通话状态 · Agent 统一头像 · 去电自动转通话中
+    </p>
+  </header>
+
+  <!-- 主体展示区 -->
+  <main class="max-w-5xl mx-auto px-6 pb-16">
+    <div class="flex flex-col lg:flex-row items-center lg:items-start justify-center gap-16">
+
+      <!-- 1. 来电提示窗 -->
+      <div class="flex flex-col items-center animate-in delay-1">
+        <div class="state-label">来电提示窗 · Incoming Call</div>
+        <!-- 深色背景预览区 -->
+        <div class="dark-preview rounded-2xl p-10 flex items-center justify-center"
+             style="width: 360px; height: 180px;">
+          <div class="incoming-call">
+            <!-- 头像 -->
+            <div class="incoming-avatar agent-avatar">
+              <div class="avatar-halo avatar-halo-sm"></div>
+              <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="8" />
+                <circle cx="12" cy="12" r="4" />
+              </svg>
             </div>
-            <div class="pc-backdrop">
-              <div class="pc-window pc-window--incoming">
-                <div class="pc-avatar-wrap pc-avatar-wrap--sm">
-                  <span class="pc-glow pc-glow--incoming"></span>
-                  <span class="pc-avatar pc-avatar--sm">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <circle cx="12" cy="12" r="9" stroke="#ffffff" stroke-width="2"/>
-                      <circle cx="12" cy="12" r="3.2" fill="#ffffff"/>
-                    </svg>
-                  </span>
-                </div>
-                <div class="pc-info">
-                  <span class="pc-name pc-name--sm">Agent</span>
-                  <span class="pc-status pc-status--sm">来电中</span>
-                </div>
-                <div class="pc-actions">
-                  <button class="pc-pill pc-pill--accept" type="button" aria-label="接听来电">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-                  </button>
-                  <button class="pc-pill pc-pill--reject" type="button" aria-label="拒接来电">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
-                  </button>
-                </div>
+            <!-- 信息 -->
+            <div class="incoming-info">
+              <div class="incoming-name">Agent</div>
+              <div class="incoming-status">
+                <span class="incoming-status-dot"></span>
+                <span>来电中</span>
               </div>
             </div>
-          </section>
-
-          <!-- Window 2: Unified Call (Outgoing + Connected) -->
-          <section class="pc-section">
-            <div class="pc-section-head">
-              <span class="pc-section-label">通话窗口</span>
-              <span class="pc-section-desc">384×320 · 去电 / 通话中</span>
+            <!-- 按钮 -->
+            <div class="incoming-buttons">
+              <button class="call-btn btn-answer answer-pulse" title="接听">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                </svg>
+              </button>
+              <button class="call-btn btn-decline" title="拒接">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(135deg);">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                </svg>
+              </button>
             </div>
-            <div class="pc-backdrop">
-              <div class="pc-window pc-window--call" id="callWindow">
-                <div class="pc-accent-bar"></div>
-                <div class="pc-window-body pc-window-body--call">
-                  <div class="pc-call-top">
-                    <div class="pc-avatar-wrap pc-avatar-wrap--lg">
-                      <span class="pc-glow pc-glow--call" id="callGlow"></span>
-                      <span class="pc-avatar pc-avatar--lg">
-                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                          <circle cx="12" cy="12" r="9" stroke="#ffffff" stroke-width="2"/>
-                          <circle cx="12" cy="12" r="3.2" fill="#ffffff"/>
-                        </svg>
-                      </span>
-                    </div>
-                    <span class="pc-name pc-name--call">Agent</span>
-                    <!-- Calling state -->
-                    <div class="pc-state-calling" id="stateCalling">
-                      <span class="pc-dots"><span></span><span></span><span></span></span>
-                      <span class="pc-status">正在呼叫</span>
-                    </div>
-                    <!-- Connected state -->
-                    <div class="pc-state-connected" id="stateConnected">
-                      <div class="pc-timer-row">
-                        <span class="pc-live-dot"></span>
-                        <span class="pc-timer" id="callTimer">00:00</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="pc-bottom-actions">
-                    <button class="pc-btn pc-btn--neutral" id="muteBtn" type="button" aria-label="切换静音">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-                      <span>静音</span>
-                    </button>
-                    <button class="pc-btn pc-btn--neutral" id="speakerBtn" type="button" aria-label="切换免提">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-                      <span>免提</span>
-                    </button>
-                    <button class="pc-btn pc-btn--hangup" id="hangupBtn" type="button" aria-label="挂断通话">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-                      <span>挂断</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
+          </div>
         </div>
-
-        <footer class="pc-footer">
-          <span>Private Agent UI</span>
-          <span class="pc-footer-sep">·</span>
-          <span>电话窗口组件</span>
-          <span class="pc-footer-sep">·</span>
-          <span>去电 + 通话中合并窗口</span>
-        </footer>
+        <p class="mt-3 text-xs text-center" style="color: var(--pa-text-muted); max-width: 300px;">
+          300 × 88px · 头像呼吸光晕 · 接听脉冲提示
+        </p>
       </div>
-    </main>
+
+      <!-- 2. 通话窗口 -->
+      <div class="flex flex-col items-center animate-in delay-2">
+        <div class="state-label">通话窗口 · Unified Call</div>
+        <div class="pa-card rounded-2xl p-8 flex items-center justify-center"
+             style="width: 440px; height: 380px;">
+          <div class="unified-call" id="unifiedCall">
+            <!-- 顶部装饰条 -->
+            <div class="call-top-bar"></div>
+
+            <!-- 主体 -->
+            <div class="call-body">
+              <!-- 大头像 -->
+              <div class="call-avatar-wrap">
+                <div class="call-avatar agent-avatar" id="callAvatar">
+                  <div class="avatar-halo"></div>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="8" />
+                    <circle cx="12" cy="12" r="4" />
+                  </svg>
+                </div>
+              </div>
+              <!-- 名字 -->
+              <div class="call-name">Agent</div>
+              <!-- 状态 -->
+              <div class="call-status">
+                <!-- 正在呼叫状态 -->
+                <span id="callingState" class="status-fade">
+                  正在呼叫
+                  <span class="call-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </span>
+                </span>
+                <!-- 通话中状态 -->
+                <span id="connectedState" class="call-connected status-fade">
+                  <span class="connected-dot"></span>
+                  <span>通话中</span>
+                  <span class="call-timer" id="callTimer">00:00</span>
+                </span>
+              </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="call-actions">
+              <button class="action-btn" id="muteBtn" title="静音">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
+                  <line x1="3" y1="3" x2="21" y2="21" style="display:none" id="muteSlash"/>
+                </svg>
+              </button>
+              <button class="action-btn hangup" id="hangupBtn" title="挂断">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(135deg);">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                </svg>
+              </button>
+              <button class="action-btn" id="speakerBtn" title="免提">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <p class="mt-3 text-xs text-center" style="color: var(--pa-text-muted); max-width: 380px;">
+          384 × 320px · 正在呼叫 → 通话中自动切换 · 静音 / 免提 / 挂断
+        </p>
+      </div>
+
+    </div>
+
+    <!-- 功能说明 -->
+    <div class="mt-20 grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto animate-in delay-3">
+      <div class="pa-card rounded-xl p-5">
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center mb-3"
+             style="background: rgba(0, 122, 255, 0.1); color: var(--pa-primary);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold mb-1" style="color: var(--pa-text-primary);">自动演示</h3>
+        <p class="text-xs leading-relaxed" style="color: var(--pa-text-secondary);">
+          通话窗口默认显示"正在呼叫"，3 秒后自动切换到"通话中"状态并开始计时。
+        </p>
+      </div>
+      <div class="pa-card rounded-xl p-5">
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center mb-3"
+             style="background: rgba(52, 199, 89, 0.1); color: var(--state-success);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold mb-1" style="color: var(--pa-text-primary);">状态切换</h3>
+        <p class="text-xs leading-relaxed" style="color: var(--pa-text-secondary);">
+          点击挂断按钮重置为呼叫状态，静音和免提按钮支持点击切换激活态。
+        </p>
+      </div>
+      <div class="pa-card rounded-xl p-5">
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center mb-3"
+             style="background: rgba(255, 59, 48, 0.1); color: var(--state-error);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold mb-1" style="color: var(--pa-text-primary);">精致动效</h3>
+        <p class="text-xs leading-relaxed" style="color: var(--pa-text-secondary);">
+          头像呼吸光晕、接听脉冲、三点跳动、绿点闪烁，营造流畅交互体验。
+        </p>
+      </div>
+    </div>
+  </main>
+
+  <!-- 页脚 -->
+  <footer class="pb-10 text-center text-xs" style="color: var(--pa-text-muted);">
+    Private Agent · Phone Call UI · Apple Style Design
+  </footer>
+
+<script>
+  // ============================================
+  // 通话窗口交互逻辑
+  // ============================================
+
+  const callingState = document.getElementById('callingState');
+  const connectedState = document.getElementById('connectedState');
+  const callTimer = document.getElementById('callTimer');
+  const hangupBtn = document.getElementById('hangupBtn');
+  const muteBtn = document.getElementById('muteBtn');
+  const speakerBtn = document.getElementById('speakerBtn');
+  const muteSlash = document.getElementById('muteSlash');
+
+  let timerInterval = null;
+  let seconds = 0;
+  let isConnected = false;
+  let autoConnectTimer = null;
+
+  // 格式化时间
+  function formatTime(totalSeconds) {
+    const mins = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+    const secs = (totalSeconds % 60).toString().padStart(2, '0');
+    return `${mins}:${secs}`;
+  }
+
+  // 开始计时
+  function startTimer() {
+    seconds = 0;
+    callTimer.textContent = formatTime(seconds);
+    timerInterval = setInterval(() => {
+      seconds++;
+      callTimer.textContent = formatTime(seconds);
+    }, 1000);
+  }
+
+  // 停止计时
+  function stopTimer() {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+  }
+
+  // 切换到通话中状态
+  function connectCall() {
+    isConnected = true;
+    callingState.style.opacity = '0';
+    setTimeout(() => {
+      callingState.style.display = 'none';
+      connectedState.classList.add('active');
+      connectedState.style.opacity = '0';
+      // 强制回流
+      void connectedState.offsetWidth;
+      connectedState.style.opacity = '1';
+      startTimer();
+    }, 250);
+  }
+
+  // 重置为呼叫状态
+  function resetCall() {
+    stopTimer();
+    seconds = 0;
+    isConnected = false;
+
+    connectedState.style.opacity = '0';
+    setTimeout(() => {
+      connectedState.classList.remove('active');
+      callingState.style.display = 'inline';
+      callingState.style.opacity = '0';
+      void callingState.offsetWidth;
+      callingState.style.opacity = '1';
+    }, 250);
+
+    // 清除自动连接定时器（如果存在）
+    if (autoConnectTimer) {
+      clearTimeout(autoConnectTimer);
+      autoConnectTimer = null;
+    }
+
+    // 3 秒后自动连接（演示用）
+    autoConnectTimer = setTimeout(() => {
+      connectCall();
+    }, 3000);
+  }
+
+  // 挂断按钮
+  hangupBtn.addEventListener('click', () => {
+    if (isConnected) {
+      resetCall();
+    }
+  });
+
+  // 静音按钮切换
+  muteBtn.addEventListener('click', () => {
+    muteBtn.classList.toggle('active');
+    const isMuted = muteBtn.classList.contains('active');
+    muteSlash.style.display = isMuted ? 'block' : 'none';
+  });
+
+  // 免提按钮切换
+  speakerBtn.addEventListener('click', () => {
+    speakerBtn.classList.toggle('active');
+  });
+
+  // 页面加载后 3 秒自动连接
+  window.addEventListener('DOMContentLoaded', () => {
+    autoConnectTimer = setTimeout(() => {
+      connectCall();
+    }, 3000);
+  });
+</script>
+
+
     <style>
-      /* === Body background === */
-      body { background: var(--pa-bg-page); font-family: var(--pa-font-sans); }
+  :root {
+    --pa-primary: #007aff;
+    --pa-primary-hover: #0066d6;
+    --state-success: #34c759;
+    --state-error: #ff3b30;
+    --pa-bg-page: #f5f5f7;
+    --pa-bg-surface: #ffffff;
+    --pa-bg-hover: #f0f0f5;
+    --pa-text-primary: #1d1d1f;
+    --pa-text-secondary: #6e6e73;
+    --pa-text-muted: #86868b;
+    --pa-border: #e5e5ea;
+    --pa-border-soft: rgba(0, 0, 0, 0.06);
+    --pa-shadow-md: 0 2px 12px rgba(0, 0, 0, 0.06);
+    --pa-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
+    --pa-shadow-primary: 0 2px 12px rgba(0, 122, 255, 0.2);
+  }
 
-      /* === Page Layout === */
-      .pc-page {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 48px 40px;
-      }
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 
-      /* === Page Header === */
-      .pc-page-header {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        margin-bottom: 48px;
-      }
-      .pc-header-icon {
-        width: 48px; height: 48px;
-        border-radius: var(--pa-radius-md);
-        background: var(--pa-primary);
-        color: white;
-        display: flex; align-items: center; justify-content: center;
-        flex-shrink: 0;
-      }
-      .pc-page-title {
-        font-size: 28px; font-weight: 700;
-        color: var(--pa-text-primary);
-        line-height: 1.2; margin: 0;
-      }
-      .pc-page-subtitle {
-        font-size: 14px;
-        color: var(--pa-text-secondary);
-        margin: 4px 0 0 0; line-height: 1.5;
-      }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--pa-bg-page);
+    color: var(--pa-text-primary);
+  }
 
-      /* === Preview Grid === */
-      .pc-grid {
-        display: flex; gap: 40px;
-        flex-wrap: wrap; justify-content: center;
-      }
-      .pc-section { flex: 0 0 auto; }
-      .pc-section-head { margin-bottom: 16px; }
-      .pc-section-label {
-        display: block; font-size: 16px; font-weight: 600;
-        color: var(--pa-text-primary); line-height: 1.4;
-      }
-      .pc-section-desc {
-        display: block; font-size: 12px;
-        color: var(--pa-text-muted); margin-top: 4px; line-height: 1.4;
-      }
+  /* ============================================
+     通用组件
+     ============================================ */
 
-      /* === Dark Backdrop Card === */
-      .pc-backdrop {
-        background: linear-gradient(145deg, #1a1a2e, #16213e);
-        border-radius: 20px;
-        padding: 36px 32px;
-        display: flex; align-items: center; justify-content: center;
-        min-height: 300px;
-      }
+  .pa-card {
+    background: var(--pa-bg-surface);
+    border: 1px solid var(--pa-border);
+    box-shadow: var(--pa-shadow-md);
+  }
 
-      /* === Window Common === */
-      .pc-window {
-        position: relative;
-        font-family: var(--pa-font-sans);
-      }
+  .dark-preview {
+    background: linear-gradient(145deg, #1a1a2e, #16213e);
+  }
 
-      /* === Agent Avatar System (Blue gradient) === */
-      .pc-avatar-wrap {
-        position: relative;
-        display: flex; align-items: center; justify-content: center;
-        flex-shrink: 0;
-      }
-      .pc-glow {
-        position: absolute; top: 0; left: 0;
-        pointer-events: none;
-      }
-      .pc-avatar {
-        position: relative; z-index: 1;
-        display: flex; align-items: center; justify-content: center;
-        background: radial-gradient(circle at 30% 30%, #4a9eff, #007aff);
-        box-shadow: inset 0 1px 3px rgba(255,255,255,0.3), 0 2px 8px rgba(0,122,255,0.3);
-      }
+  /* ============================================
+     Agent 头像（蓝色径向渐变 + 双同心圆图标）
+     ============================================ */
 
-      /* Avatar — Small (Incoming, 44px circle) */
-      .pc-avatar-wrap--sm { width: 44px; height: 44px; }
-      .pc-avatar--sm {
-        width: 44px; height: 44px;
-        border-radius: 50%;
-        border: 2px solid rgba(255,255,255,0.9);
-      }
-      .pc-glow--incoming {
-        width: 44px; height: 44px;
-        border-radius: 50%;
-        background: rgba(0, 122, 255, 0.3);
-        animation: pc-breathe-incoming 1.8s ease-in-out infinite;
-      }
-      @keyframes pc-breathe-incoming {
-        0%, 100% { transform: scale(1); opacity: 0.5; }
-        50% { transform: scale(1.12); opacity: 0.15; }
-      }
+  .agent-avatar {
+    background: radial-gradient(circle at 30% 30%, #4a9eff 0%, #007aff 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
 
-      /* Avatar — Medium (Outgoing, 80px circle) */
-      .pc-avatar-wrap--md { width: 80px; height: 80px; }
-      .pc-avatar--md {
-        width: 80px; height: 80px;
-        border-radius: 50%;
-        border: 3px solid rgba(255,255,255,0.9);
-      }
-      .pc-glow--outgoing {
-        width: 80px; height: 80px;
-        border-radius: 50%;
-        background: rgba(0, 122, 255, 0.25);
-        animation: pc-breathe-outgoing 3.6s ease-in-out infinite;
-      }
-      @keyframes pc-breathe-outgoing {
-        0%, 100% { transform: scale(1); opacity: 0.6; }
-        50% { transform: scale(1.12); opacity: 0.2; }
-      }
+  .agent-avatar svg {
+    width: 60%;
+    height: 60%;
+  }
 
-      /* Avatar — Large (Connected, 96px rounded square) */
-      .pc-avatar-wrap--lg { width: 96px; height: 96px; }
-      .pc-avatar--lg {
-        width: 96px; height: 96px;
-        border-radius: 20px;
-        border: 3px solid rgba(255,255,255,0.9);
-      }
-      .pc-glow--call {
-        width: 96px; height: 96px;
-        border-radius: 20px;
-        background: rgba(0, 122, 255, 0.25);
-        animation: pc-breathe-call 1.8s ease-in-out infinite;
-      }
-      @keyframes pc-breathe-call {
-        0%, 100% { transform: scale(1); opacity: 0.5; }
-        50% { transform: scale(1.12); opacity: 0.1; }
-      }
+  /* ============================================
+     呼吸光晕动画（头像外）
+     ============================================ */
 
-      /* === Text Tokens === */
-      .pc-name { font-size: 18px; font-weight: 600; color: var(--pa-text-primary); }
-      .pc-name--sm { font-size: 13px; font-weight: 600; color: var(--pa-text-primary); }
-      .pc-status { font-size: 14px; color: var(--pa-text-secondary); display: flex; align-items: center; gap: 6px; }
-      .pc-status--sm { font-size: 11px; color: var(--pa-text-muted); }
+  @keyframes breathe {
+    0%, 100% {
+      transform: scale(1);
+      opacity: 0.4;
+    }
+    50% {
+      transform: scale(1.15);
+      opacity: 0.15;
+    }
+  }
 
-      /* Calling dots animation */
-      .pc-dots { display: inline-flex; gap: 3px; }
-      .pc-dots span {
-        width: 4px; height: 4px;
-        border-radius: 50%;
-        background: var(--pa-primary);
-        animation: pc-dot-bounce 1.4s ease-in-out infinite;
-      }
-      .pc-dots span:nth-child(2) { animation-delay: 0.2s; }
-      .pc-dots span:nth-child(3) { animation-delay: 0.4s; }
-      @keyframes pc-dot-bounce {
-        0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-        40% { transform: scale(1); opacity: 1; }
-      }
+  .avatar-halo {
+    position: absolute;
+    inset: -6px;
+    border-radius: inherit;
+    background: radial-gradient(circle, rgba(0, 122, 255, 0.4) 0%, transparent 70%);
+    animation: breathe 2.5s ease-in-out infinite;
+    pointer-events: none;
+  }
 
-      /* === Incoming Call Window — softer shadow === */
-      .pc-window--incoming {
-        width: 300px; height: 88px;
-        border-radius: 16px;
-        background: var(--pa-bg-surface);
-        box-shadow: 0 2px 16px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.03);
-        display: flex; flex-direction: row; align-items: center;
-        padding: 0 14px; gap: 12px;
-        border: 1px solid var(--pa-border-soft);
-      }
-      .pc-info {
-        flex: 1; min-width: 0;
-        display: flex; flex-direction: column; gap: 2px;
-      }
-      .pc-actions {
-        display: flex; gap: 8px; flex-shrink: 0;
-      }
+  .avatar-halo-sm {
+    inset: -4px;
+    animation-duration: 2.8s;
+  }
 
-      /* Pill Buttons (Incoming) — icon-only round */
-      .pc-pill {
-        width: 36px; height: 36px;
-        border-radius: 50%;
-        border: none; cursor: pointer;
-        color: #FFFFFF;
-        display: flex; align-items: center; justify-content: center;
-        transition: filter 140ms cubic-bezier(.2,.8,.2,1), transform 120ms cubic-bezier(.2,.8,.2,1);
-      }
-      .pc-pill--accept {
-        background: var(--state-success);
-        animation: pc-pulse-accept 2s ease-in-out infinite;
-      }
-      .pc-pill--reject {
-        background: var(--state-error);
-      }
-      .pc-pill--accept:hover, .pc-pill--reject:hover { filter: brightness(0.92); }
-      .pc-pill:active { transform: scale(0.92); }
-      .pc-pill:focus-visible { outline: 2px solid var(--pa-primary); outline-offset: 2px; }
-      @keyframes pc-pulse-accept {
-        0%, 100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.2); }
-        50% { box-shadow: 0 0 0 6px rgba(52, 199, 89, 0.12); }
-      }
+  /* ============================================
+     接听按钮脉冲动画
+     ============================================ */
 
-      /* === Accent Bar — Blue === */
-      .pc-accent-bar {
-        height: 4px;
-        background: linear-gradient(90deg, var(--pa-primary), #4a9eff);
-        border-radius: 20px 20px 0 0;
-        flex-shrink: 0;
-      }
+  @keyframes pulse-ring {
+    0% {
+      box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.5);
+    }
+    70% {
+      box-shadow: 0 0 0 10px rgba(52, 199, 89, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(52, 199, 89, 0);
+    }
+  }
 
-      /* === Window Body === */
-      .pc-window-body {
-        flex: 1;
-        display: flex; flex-direction: column; align-items: center;
-      }
+  .answer-pulse {
+    animation: pulse-ring 1.8s ease-out infinite;
+  }
 
-      /* === Unified Call Window (Outgoing + Connected) === */
-      .pc-window--call {
-        width: 384px; height: 320px;
-        border-radius: 20px;
-        background: var(--pa-bg-surface);
-        border: 1px solid var(--pa-border-soft);
-        display: flex; flex-direction: column;
-        overflow: hidden;
-        box-shadow: 0 2px 16px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.03);
-      }
-      .pc-window-body--call { padding: 24px; }
+  /* ============================================
+     来电提示窗（Incoming Call）
+     ============================================ */
 
-      .pc-call-top {
-        flex: 1;
-        display: flex; flex-direction: column; align-items: center;
-        padding-top: 12px;
-      }
+  .incoming-call {
+    width: 300px;
+    height: 88px;
+    border-radius: 16px;
+    background: var(--pa-bg-surface);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+    border: 1px solid var(--pa-border-soft);
+    position: relative;
+    overflow: hidden;
+  }
 
-      /* Call name */
-      .pc-name--call { margin-top: 14px; }
+  .incoming-call::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #34c759, #007aff);
+    opacity: 0.6;
+  }
 
-      /* State toggle: calling vs connected */
-      .pc-state-calling, .pc-state-connected {
-        display: flex; align-items: center; gap: 6px;
-        margin-top: 6px;
-        transition: opacity 0.3s ease;
-      }
-      .pc-state-calling.hidden, .pc-state-connected.hidden {
-        display: none;
-      }
+  .incoming-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    position: relative;
+  }
 
-      /* Timer row */
-      .pc-timer-row {
-        display: flex; align-items: center; gap: 6px;
-      }
-      .pc-live-dot {
-        width: 6px; height: 6px;
-        border-radius: 50%;
-        background: var(--state-success);
-        animation: pc-live-pulse 2s ease-in-out infinite;
-      }
-      @keyframes pc-live-pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.3; }
-      }
-      .pc-timer {
-        font-size: 14px; color: var(--pa-text-secondary);
-        font-variant-numeric: tabular-nums;
-      }
+  .incoming-info {
+    flex: 1;
+    min-width: 0;
+  }
 
-      .pc-bottom-actions {
-        display: flex; gap: 10px;
-        margin-top: 16px;
-        justify-content: center;
-      }
+  .incoming-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--pa-text-primary);
+    line-height: 1.2;
+  }
 
-      /* === Buttons (Outgoing / Connected) === */
-      .pc-btn {
-        height: 40px;
-        border-radius: 12px;
-        border: none; cursor: pointer;
-        font-size: 13px; font-weight: 600;
-        display: flex; align-items: center; justify-content: center;
-        gap: 6px;
-        font-family: var(--pa-font-sans);
-        transition: filter 140ms cubic-bezier(.2,.8,.2,1),
-                    background-color 160ms cubic-bezier(.2,.8,.2,1),
-                    color 160ms cubic-bezier(.2,.8,.2,1),
-                    transform 120ms cubic-bezier(.2,.8,.2,1);
-        padding: 0 16px;
-      }
-      .pc-btn--w112 { width: 112px; }
-      .pc-btn--hangup {
-        background: var(--state-error);
-        color: #FFFFFF;
-      }
-      .pc-btn--hangup:hover { filter: brightness(0.92); }
-      .pc-btn--neutral {
-        background: var(--pa-bg-hover);
-        color: var(--pa-text-secondary);
-        font-weight: 500;
-      }
-      .pc-btn--neutral:hover { background: var(--pa-border); color: var(--pa-text-primary); }
-      .pc-btn--neutral.pc-active {
-        background: var(--pa-primary);
-        color: #FFFFFF;
-        font-weight: 600;
-      }
-      .pc-btn:active { transform: scale(0.96); }
-      .pc-btn:focus-visible { outline: 2px solid var(--pa-primary); outline-offset: 2px; }
+  .incoming-status {
+    font-size: 12px;
+    color: var(--state-success);
+    margin-top: 2px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
 
-      /* === Footer === */
-      .pc-footer {
-        margin-top: 60px;
-        padding-top: 24px;
-        border-top: 1px solid var(--pa-border);
-        text-align: center;
-        font-size: 12px;
-        color: var(--pa-text-muted);
-        display: flex; align-items: center; justify-content: center; gap: 8px;
-      }
-      .pc-footer-sep { color: var(--pa-border); }
+  .incoming-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--state-success);
+    animation: blink 1.2s ease-in-out infinite;
+  }
 
-      /* === Responsive === */
-      @media (max-width: 768px) {
-        .pc-page { padding: 32px 20px; }
-        .pc-grid { gap: 24px; }
-        .pc-backdrop { padding: 24px 16px; }
-      }
+  .incoming-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
 
-      /* === Reduced Motion === */
-      @media (prefers-reduced-motion: reduce) {
-        .pc-glow--incoming, .pc-glow--call,
-        .pc-pill--accept, .pc-dots span, .pc-live-dot {
-          animation: none;
-        }
-        .pc-pill, .pc-btn { transition: none; }
-      }
-    </style>
-    <script>
-      (function () {
-        var callSeconds = 0;
-        var timerInterval = null;
-        var timerEl = document.getElementById('callTimer');
-        var stateCalling = document.getElementById('stateCalling');
-        var stateConnected = document.getElementById('stateConnected');
-        var callGlow = document.getElementById('callGlow');
-        var connectedTimer = null;
+  .call-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    transition: transform 0.15s ease, filter 0.15s ease;
+  }
 
-        function formatTime(sec) {
-          var m = String(Math.floor(sec / 60)).padStart(2, '0');
-          var s = String(sec % 60).padStart(2, '0');
-          return m + ':' + s;
-        }
+  .call-btn:hover {
+    transform: scale(1.08);
+    filter: brightness(1.05);
+  }
 
-        function updateDisplay() {
-          if (timerEl) timerEl.textContent = formatTime(callSeconds);
-        }
+  .call-btn:active {
+    transform: scale(0.95);
+  }
 
-        function showCallingState() {
-          if (stateCalling) stateCalling.classList.remove('hidden');
-          if (stateConnected) stateConnected.classList.add('hidden');
-          if (callGlow) callGlow.style.animationDuration = '3.6s';
-        }
+  .call-btn svg {
+    width: 18px;
+    height: 18px;
+  }
 
-        function showConnectedState() {
-          if (stateCalling) stateCalling.classList.add('hidden');
-          if (stateConnected) stateConnected.classList.remove('hidden');
-          if (callGlow) callGlow.style.animationDuration = '1.8s';
-          startTimer();
-        }
+  .btn-answer {
+    background: var(--state-success);
+    color: white;
+  }
 
-        function startTimer() {
-          if (timerInterval) return;
-          callSeconds = 0;
-          updateDisplay();
-          timerInterval = setInterval(function () {
-            callSeconds++;
-            updateDisplay();
-          }, 1000);
-        }
+  .btn-decline {
+    background: var(--state-error);
+    color: white;
+  }
 
-        function stopTimer() {
-          if (timerInterval) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-          }
-          callSeconds = 0;
-          updateDisplay();
-        }
+  /* ============================================
+     通话窗口（Unified Call）
+     ============================================ */
 
-        function resetToCalling() {
-          stopTimer();
-          if (connectedTimer) {
-            clearTimeout(connectedTimer);
-            connectedTimer = null;
-          }
-          showCallingState();
-          // Auto-switch to connected after 3s
-          connectedTimer = setTimeout(function () {
-            showConnectedState();
-          }, 3000);
-        }
+  .unified-call {
+    width: 384px;
+    height: 320px;
+    border-radius: 20px;
+    background: var(--pa-bg-surface);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+    border: 1px solid var(--pa-border-soft);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
 
-        var muteBtn = document.getElementById('muteBtn');
-        if (muteBtn) {
-          muteBtn.addEventListener('click', function () {
-            muteBtn.classList.toggle('pc-active');
-          });
-        }
+  .call-top-bar {
+    height: 4px;
+    background: linear-gradient(90deg, #4a9eff, #007aff, #5ac8fa);
+    flex-shrink: 0;
+  }
 
-        var speakerBtn = document.getElementById('speakerBtn');
-        if (speakerBtn) {
-          speakerBtn.addEventListener('click', function () {
-            speakerBtn.classList.toggle('pc-active');
-          });
-        }
+  .call-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 24px 16px;
+  }
 
-        var hangupBtn = document.getElementById('hangupBtn');
-        if (hangupBtn) {
-          hangupBtn.addEventListener('click', function () {
-            if (muteBtn) muteBtn.classList.remove('pc-active');
-            if (speakerBtn) speakerBtn.classList.remove('pc-active');
-            resetToCalling();
-          });
-        }
+  .call-avatar-wrap {
+    position: relative;
+    margin-bottom: 16px;
+  }
 
-        // Start in calling state, auto-transition to connected
-        resetToCalling();
-      })();
-    </script>
-    <script>lucide.createIcons();</script>
+  .call-avatar {
+    width: 96px;
+    height: 96px;
+    border-radius: 20px;
+    position: relative;
+  }
+
+  .call-avatar svg {
+    width: 50%;
+    height: 50%;
+  }
+
+  .call-name {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--pa-text-primary);
+    letter-spacing: -0.3px;
+    margin-bottom: 6px;
+  }
+
+  .call-status {
+    font-size: 13px;
+    color: var(--pa-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 20px;
+  }
+
+  /* 正在呼叫 - 三点跳动 */
+  .call-dots {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+  }
+
+  .call-dots span {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--pa-text-muted);
+    animation: dot-bounce 1.2s ease-in-out infinite;
+  }
+
+  .call-dots span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .call-dots span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+
+  @keyframes dot-bounce {
+    0%, 80%, 100% {
+      transform: translateY(0);
+      opacity: 0.4;
+    }
+    40% {
+      transform: translateY(-4px);
+      opacity: 1;
+    }
+  }
+
+  /* 通话中 - 绿点 + 计时器 */
+  .call-connected {
+    display: none;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .call-connected.active {
+    display: flex;
+  }
+
+  .connected-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--state-success);
+    animation: blink 1.5s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .call-timer {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--state-success);
+    letter-spacing: 0.5px;
+  }
+
+  /* 底部按钮区 */
+  .call-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 0 24px 28px;
+  }
+
+  .action-btn {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: var(--pa-bg-hover);
+    color: var(--pa-text-primary);
+  }
+
+  .action-btn:hover {
+    filter: brightness(0.95);
+  }
+
+  .action-btn:active {
+    transform: scale(0.92);
+  }
+
+  .action-btn svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .action-btn.active {
+    background: var(--pa-primary);
+    color: white;
+  }
+
+  .action-btn.hangup {
+    background: var(--state-error);
+    color: white;
+    width: 60px;
+    height: 60px;
+  }
+
+  .action-btn.hangup:hover {
+    background: #e6362b;
+  }
+
+  .action-btn.hangup svg {
+    width: 26px;
+    height: 26px;
+  }
+
+  /* ============================================
+     标签
+     ============================================ */
+
+  .state-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--pa-text-muted);
+    margin-bottom: 12px;
+  }
+
+  /* ============================================
+     页面动画进入
+     ============================================ */
+
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-in {
+    animation: fadeInUp 0.6s ease-out both;
+  }
+
+  .delay-1 { animation-delay: 0.1s; }
+  .delay-2 { animation-delay: 0.2s; }
+  .delay-3 { animation-delay: 0.3s; }
+
+  /* 状态切换过渡 */
+  .status-fade {
+    transition: opacity 0.3s ease;
+  }
+</style>
 </body>
 </html>
