@@ -595,7 +595,17 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       attachmentImageCount: message.attachmentImageCount,
       playUrl: message.playUrl,
     );
-    _messages.putIfAbsent(masked.sessionId, () => <ChatMessage>[]).add(masked);
+    final List<ChatMessage> list =
+        _messages.putIfAbsent(masked.sessionId, () => <ChatMessage>[]);
+    // 按 messageId 覆盖而不是直接追加：旧实现 append 会导致同一消息被
+    // 存成多条（流式入列表 + done 兜底等路径叠加），缓存恢复后同一条渲染两次。
+    final int existingIndex =
+        list.indexWhere((ChatMessage m) => m.messageId == message.messageId);
+    if (existingIndex >= 0) {
+      list[existingIndex] = masked;
+    } else {
+      list.add(masked);
+    }
     await _flush();
   }
 

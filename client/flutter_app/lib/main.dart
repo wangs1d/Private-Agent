@@ -430,13 +430,37 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         .map(_sanitizeLoadedChatMessage)
         .toList();
 
+    // 修复历史遗留的重复消息：旧版本 saveMessage 按 messageId 直接 append，
+    // 同一 messageId 可能在本地 store 里被存成多条（流式入列表 + done 兜底 +
+    // 缓存恢复后事件重放等路径叠加），导致「同一条回复渲染两次」。
+    // 这里按 messageId 去重保序：同 id 保留内容更完整的一条（文本更长优先，
+    // 相同长度则保留时间更晚的一条），并收集被剔除的重复 id 供 store 清理。
+    final List<ChatMessage> dedupedMessages = <ChatMessage>[];
+    final Map<String, int> messageIndexById = <String, int>{};
+    final Set<String> duplicateMessageIds = <String>{};
+    for (final ChatMessage m in cachedMessages) {
+      final int? existingIdx = messageIndexById[m.messageId];
+      if (existingIdx == null) {
+        messageIndexById[m.messageId] = dedupedMessages.length;
+        dedupedMessages.add(m);
+        continue;
+      }
+      final ChatMessage existing = dedupedMessages[existingIdx];
+      if (m.text.length > existing.text.length ||
+          (m.text.length == existing.text.length &&
+              m.timestamp.isAfter(existing.timestamp))) {
+        dedupedMessages[existingIdx] = m;
+      }
+      duplicateMessageIds.add(m.messageId);
+    }
+
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
 
     final bool? visionConsent = await _store.getVisionCameraConsent();
 
     setState(() {
-      _messages.addAll(cachedMessages);
+      _messages.addAll(dedupedMessages);
       // 关键：从缓存恢复后必须重建 assistant 消息索引，
       // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
       // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
@@ -449,6 +473,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       _agentName = "AI助手";
       _isInitialized = true;
     });
+
+    // 异步清理本地 store 里已剔除的重复消息（不阻塞首帧渲染）
+    if (duplicateMessageIds.isNotEmpty) {
+      unawaited(_cleanupDuplicateMessages(
+          dedupedMessages, messageIndexById, duplicateMessageIds));
+    }
 
     unawaited(_loadAgentProfile());
     unawaited(_flushScheduleOfflineDeletes());
@@ -959,24 +989,31 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
               PlayUrlUtils.fromAssistantText(resolvedText);
-          final int? idx = _assistantMessageIndexById[messageId];
+          final int? idx = _messageIndexById(messageId);
           if (idx != null) {
-            // 纯流式：消息已经在 chunk 入列表时建好（带逐字流式内容），
-            // 这里不要整体覆盖 text，避免「先渲染流式过程 → 再被 finalText 替换」的二次渲染。
-            // 只补 playUrl 等不影响正文的字段；流式文本本身就是最终回复。
+            // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
+            // 但如果 finalText 明显更“最终态”（例如带结构化卡片标记，或当前文本是原始 JSON），
+            // 则应覆盖中间态文本，否则会把工具原始返回错误地留在聊天气泡里。
             setState(() {
               final ChatMessage previous = _messages[idx];
               final String currentText = previous.text;
+              final String nextText =
+                  _shouldReplaceAssistantTextOnDone(currentText, resolvedText)
+                      ? resolvedText
+                      : currentText;
               final String? existingPlayUrl = previous.playUrl;
               _messages[idx] = ChatMessage(
                 messageId: previous.messageId,
                 sessionId: previous.sessionId,
                 role: previous.role,
-                // 关键：text 保留流式已拼好的版本，不被 resolvedText 整体覆盖
-                text: currentText,
+                text: nextText,
                 timestamp: previous.timestamp,
                 attachmentImageCount: previous.attachmentImageCount,
                 playUrl: playUrl ?? existingPlayUrl,
+                attachments: previous.attachments,
+                contentType: previous.contentType,
+                durationMs: previous.durationMs,
+                waveform: previous.waveform,
               );
             });
             await _store.saveMessage(_messages[idx]);
@@ -1510,7 +1547,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       final String? pending = _pendingPlayUrlByTraceId[traceKey];
       if (pending != null) return pending;
     }
-    final int? idx = _assistantMessageIndexById[messageId];
+    final int? idx = _messageIndexById(messageId);
     if (idx == null) return null;
     return _messages[idx].playUrl;
   }
@@ -1538,7 +1575,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 与 _enqueueAssistantChunk 配合：前者管缓冲（供 done 兜底），后者管显示。
   void _appendChunkToMessageList(String messageId, String chunk) {
     if (chunk.isEmpty) return;
-    final int? existingIdx = _assistantMessageIndexById[messageId];
+    // 用带兜底的索引查询：即使索引失真也能命中已存在的消息，避免重复插入
+    final int? existingIdx = _messageIndexById(messageId);
     if (existingIdx != null && existingIdx < _messages.length) {
       // 续写已存在的消息
       setState(() {
@@ -1595,6 +1633,36 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   String _sanitizeAssistantVisibleText(String text) {
     return stripAssistantTimestampFrames(text);
+  }
+
+  bool _shouldReplaceAssistantTextOnDone(
+    String streamedText,
+    String finalText,
+  ) {
+    final String current = streamedText.trim();
+    final String resolved = finalText.trim();
+    if (resolved.isEmpty) return false;
+    if (current.isEmpty) return true;
+    if (current == resolved) return false;
+    if (_containsStructuredAssistantMarkers(resolved)) return true;
+    if (_looksLikeRawToolJson(current) && !_looksLikeRawToolJson(resolved)) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _containsStructuredAssistantMarkers(String text) {
+    return text.contains("[CONTENT_SUMMARY_V2_START]") ||
+        text.contains("[AGENT_RESULT_CARD_START]");
+  }
+
+  bool _looksLikeRawToolJson(String text) {
+    final String trimmed = text.trimLeft();
+    if (!trimmed.startsWith("{")) return false;
+    return trimmed.contains('"items"') &&
+        (trimmed.contains('"snippet"') ||
+            trimmed.contains('"publishedAt"') ||
+            trimmed.contains('"searchDateLocal"'));
   }
 
   ChatMessage _sanitizeLoadedChatMessage(ChatMessage message) {
@@ -1824,7 +1892,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         ? "assistant-$userMessageId"
         : "assistant-timeout-${DateTime.now().microsecondsSinceEpoch}";
     const String fallbackText = "抱歉，等待回复超时，请稍后重试";
-    final int? idx = _assistantMessageIndexById[assistantMessageId];
+    final int? idx = _messageIndexById(assistantMessageId);
     if (idx != null) {
       setState(() {
         final ChatMessage previous = _messages[idx];
@@ -1885,7 +1953,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   void _attachPlayUrlToAssistantMessage(String messageId, String playUrl) {
-    final int? idx = _assistantMessageIndexById[messageId];
+    final int? idx = _messageIndexById(messageId);
     if (idx == null) return;
     final ChatMessage previous = _messages[idx];
     if (previous.playUrl == playUrl) return;
@@ -2533,7 +2601,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final String text = payload["userFacingText"]?.toString().trim() ?? "";
     if (taskId.isEmpty || text.isEmpty || status == "running") return;
     final String messageId = "async-task-$taskId-$status";
-    if (_assistantMessageIndexById.containsKey(messageId)) return;
+    // 带兜底的索引查询：索引失真时也能识别已存在的消息，防止重复追加
+    if (_messageIndexById(messageId) != null) return;
     final ChatMessage message = ChatMessage(
       messageId: messageId,
       sessionId: ApiConfig.effectiveActorId,
@@ -2613,6 +2682,54 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     for (int i = 0; i < _messages.length; i++) {
       if (_messages[i].role != "user") {
         _assistantMessageIndexById[_messages[i].messageId] = i;
+      }
+    }
+  }
+
+  /// 按 messageId 定位消息在 [_messages] 中的下标（根源防线）。
+  ///
+  /// 优先查 [_assistantMessageIndexById] 索引；索引未命中或指向错误时
+  /// 回退全列表扫描并回写索引。所有「add 前先判断是否已存在」的入口
+  /// 都必须走这里，保证索引与列表永远一致——任何索引失真（历史脏数据、
+  /// 删除/重建遗漏、缓存恢复后未重建等）都不会再导致同一条消息被重复插入。
+  int? _messageIndexById(String messageId) {
+    final int? fromIndex = _assistantMessageIndexById[messageId];
+    if (fromIndex != null &&
+        fromIndex >= 0 &&
+        fromIndex < _messages.length &&
+        _messages[fromIndex].messageId == messageId) {
+      return fromIndex;
+    }
+    // 索引缺失或指向了别的消息 → 回退全列表扫描，并顺手修复索引
+    _assistantMessageIndexById.remove(messageId);
+    for (int i = 0; i < _messages.length; i++) {
+      if (_messages[i].messageId == messageId) {
+        if (_messages[i].role != "user") {
+          _assistantMessageIndexById[messageId] = i;
+        }
+        return i;
+      }
+    }
+    return null;
+  }
+
+  /// 清理本地 store 中同 messageId 的重复记录：
+  /// deleteMessage 按 messageId 全删（无法只删一条），所以先删光，
+  /// 再把去重后保留的那条重新落盘。
+  Future<void> _cleanupDuplicateMessages(
+    List<ChatMessage> dedupedMessages,
+    Map<String, int> messageIndexById,
+    Set<String> duplicateMessageIds,
+  ) async {
+    for (final String messageId in duplicateMessageIds) {
+      try {
+        final int? keptIdx = messageIndexById[messageId];
+        if (keptIdx == null || keptIdx >= dedupedMessages.length) continue;
+        await _store.deleteMessage(messageId);
+        await _store.saveMessage(dedupedMessages[keptIdx]);
+        debugPrint("[chat] dedupe: cleaned duplicate messageId=$messageId");
+      } catch (e) {
+        debugPrint("[chat] dedupe cleanup failed for $messageId: $e");
       }
     }
   }
