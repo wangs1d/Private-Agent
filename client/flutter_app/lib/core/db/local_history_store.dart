@@ -6,6 +6,7 @@ abstract class LocalHistoryStore {
   Future<void> saveMessage(ChatMessage message);
   Future<List<ChatSession>> listSessions();
   Future<List<ChatMessage>> listMessages(String sessionId);
+  Future<int> migrateAssistantTimestampFrames();
 
   // 历史消息删除
   Future<void> deleteMessage(String messageId);

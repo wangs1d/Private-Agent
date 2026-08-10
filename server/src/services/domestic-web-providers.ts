@@ -3,12 +3,14 @@ import {
   applySearchFreshness,
   prependRecencyQueryVariants,
   classifySearchIntent,
+  buildIntentAwareQueryVariants,
   type RssHealthMonitor,
 } from "./search-enhancements.js";
 
 const BING_CN_SEARCH = "https://cn.bing.com/search";
 const DEFAULT_TIMEOUT_MS = 6_000;
-const MAX_QUERY_VARIANTS = 3; // 精简到 3：实体变体(1) + 原文(1) + recency变体(1)，减少并行请求
+const MAX_QUERY_VARIANTS = 6;
+const PRIMARY_QUERY_VARIANTS = 4;
 
 const DOMESTIC_TECH_RSS_FEEDS: Array<{ source: string; url: string }> = [
   { source: "36氪", url: "https://36kr.com/feed" },
@@ -160,24 +162,27 @@ export async function searchBingChina(
 
   if (variants.length === 0) return [];
 
-  const timeoutPerVariant = calculateTimeoutPerVariant(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, variants.length);
-
-  const results = await Promise.allSettled(
-    variants.map((variant) =>
-      fetchBingChinaOnceWithTimeout(variant, limit, { ...opts, timeoutMs: timeoutPerVariant }),
-    ),
-  );
+  const primaryVariants = variants.slice(0, PRIMARY_QUERY_VARIANTS);
+  const secondaryVariants = variants.slice(PRIMARY_QUERY_VARIANTS);
+  const primaryResults = await fetchBingVariantBatch(primaryVariants, limit, opts);
 
   let collected: InfoSearchItem[] = [];
+  for (const batch of primaryResults) {
+    const relevant = flags.skipRelevanceFilter ? batch : filterItemsByRelevance(batch, keyword);
+    if (relevant.length > 0) {
+      collected = [...collected, ...relevant];
+    }
+  }
 
-  for (const result of results) {
-    if (result.status !== "fulfilled" || result.value.length === 0) continue;
-    // 宽松模式：跳过相关性过滤，保留所有原始结果（用于回退搜索）
-    const relevant = flags.skipRelevanceFilter
-      ? result.value
-      : filterItemsByRelevance(result.value, keyword);
-    if (relevant.length === 0) continue;
-    collected = [...collected, ...relevant];
+  const recallThreshold = Math.min(limit, Math.max(3, Math.ceil(limit * 0.6)));
+  if (secondaryVariants.length > 0 && collected.length < recallThreshold) {
+    const secondaryResults = await fetchBingVariantBatch(secondaryVariants, limit, opts);
+    for (const batch of secondaryResults) {
+      const relevant = flags.skipRelevanceFilter ? batch : filterItemsByRelevance(batch, keyword);
+      if (relevant.length > 0) {
+        collected = [...collected, ...relevant];
+      }
+    }
   }
 
   // 合并去重后只调用一次 applySearchFreshness（避免冗余排序）
@@ -199,6 +204,24 @@ function calculateTimeoutPerVariant(totalBudgetMs: number, variantCount: number)
   const minPerVariant = 2_000;
   const maxPerVariant = 8_000;
   return Math.max(minPerVariant, Math.min(maxPerVariant, perVariant));
+}
+
+async function fetchBingVariantBatch(
+  variants: string[],
+  limit: number,
+  opts: DomesticFetchOptions,
+): Promise<InfoSearchItem[][]> {
+  if (variants.length === 0) return [];
+  const timeoutPerVariant = calculateTimeoutPerVariant(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, variants.length);
+  const results = await Promise.allSettled(
+    variants.map((variant) =>
+      fetchBingChinaOnceWithTimeout(variant, limit, { ...opts, timeoutMs: timeoutPerVariant }),
+    ),
+  );
+  return results
+    .filter((result): result is PromiseFulfilledResult<InfoSearchItem[]> => result.status === "fulfilled")
+    .map((result) => result.value)
+    .filter((items) => items.length > 0);
 }
 
 async function fetchBingChinaOnceWithTimeout(
@@ -265,7 +288,8 @@ export function buildSearchQueryVariants(query: string): string[] {
     if (t && !variants.includes(t) && variants.length < MAX_QUERY_VARIANTS) variants.push(t);
   };
 
-  const priorityVariants: string[] = [];
+  const intentAnalysis = classifySearchIntent(raw);
+  const priorityVariants = buildIntentAwareQueryVariants(raw, intentAnalysis, MAX_QUERY_VARIANTS + 4);
 
   for (const m of raw.matchAll(/["'「『]([^"'」』]+)["'」』]/g)) {
     priorityVariants.push(m[1] ?? "");
@@ -277,7 +301,6 @@ export function buildSearchQueryVariants(query: string): string[] {
   // 关键修复：使用 classifySearchIntent 的实体提取（支持中英混合、英文+数字等），
   // 不要只用 extractPrimaryChineseEntity（它只支持纯中文，会丢失「A」在「A股」中的角色）。
   // 这样「今天A股最新消息」会得到 [A股, 今天A股最新消息, ...] 而不是 [今天A股, ...]
-  const intentAnalysis = classifySearchIntent(raw);
   const intentEntity = intentAnalysis.entities.find(
     (e) =>
       e.length >= 2 &&
@@ -399,6 +422,9 @@ function extractRelevanceAnchors(query: string): string[] {
 
   const entity = extractPrimaryChineseEntity(query);
   if (entity) push(entity);
+  for (const entityCandidate of classifySearchIntent(query).entities.slice(0, 3)) {
+    push(entityCandidate);
+  }
 
   const code = query.match(/\b[036]\d{5}\b/)?.[0];
   if (code) push(code);

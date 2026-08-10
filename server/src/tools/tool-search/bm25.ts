@@ -64,19 +64,39 @@ export class Bm25Index {
   private readonly df = new Map<string, number>();
   private readonly k1 = 1.2;
   private readonly b = 0.75;
+  // ===== 倒排/预计算（优化：避免每次 search 重复 tokenize / 重建 tf） =====
+  /** doc → token 集合（token overlap 通道直接复用，不再每次重算） */
+  private readonly docTokenSets: Set<string>[];
+  /** doc → term frequency Map（BM25 通道直接复用，不再每次重建） */
+  private readonly tfCache: Map<string, number>[];
+  /** token → docIds（倒排索引：BM25 只扫含 query token 的 doc） */
+  private readonly postings: Map<string, number[]>;
 
   constructor(docs: Bm25Document[]) {
     this.docs = docs;
     this.docTokens = docs.map((d) => tokenize(d.text));
+    this.docTokenSets = new Array(docs.length);
+    this.tfCache = new Array(docs.length);
+    this.postings = new Map<string, number[]>();
     let totalLen = 0;
-    for (const tokens of this.docTokens) {
+    for (let i = 0; i < this.docTokens.length; i++) {
+      const tokens = this.docTokens[i]!;
       totalLen += tokens.length;
       const seen = new Set<string>();
+      const tf = new Map<string, number>();
+      const tokenSet = new Set<string>();
       for (const t of tokens) {
+        tokenSet.add(t);
+        tf.set(t, (tf.get(t) ?? 0) + 1);
         if (seen.has(t)) continue;
         seen.add(t);
         this.df.set(t, (this.df.get(t) ?? 0) + 1);
+        const list = this.postings.get(t) ?? [];
+        list.push(i);
+        this.postings.set(t, list);
       }
+      this.docTokenSets[i] = tokenSet;
+      this.tfCache[i] = tf;
     }
     this.avgDl = docs.length > 0 ? totalLen / docs.length : 0;
   }
@@ -85,17 +105,9 @@ export class Bm25Index {
     const queries = expandSearchQueries(query, aliasEntries);
     if (queries.length === 0 || this.docs.length === 0) return [];
 
-    const bm25Ranking = rankByBm25(
-      this.docs,
-      this.docTokens,
-      this.df,
-      this.avgDl,
-      queries,
-      this.k1,
-      this.b,
-    );
-    const overlapRanking = rankByTokenOverlap(this.docs, queries);
-    const fuzzyRanking = rankByTrigramSimilarity(this.docs, queries);
+    const bm25Ranking = this.rankByBm25(queries);
+    const overlapRanking = this.rankByTokenOverlap(queries);
+    const fuzzyRanking = rankByTrigramSimilarity(this.docs, queries, aliasEntries);
     const registryRanking = rankByRegistryName(this.docs, queries);
 
     const fused = reciprocalRankFusion(
@@ -113,72 +125,77 @@ export class Bm25Index {
 
     return rankBySubstringFallback(this.docs, queries, query).slice(0, limit);
   }
-}
 
-function rankByBm25(
-  docs: Bm25Document[],
-  docTokens: string[][],
-  df: Map<string, number>,
-  avgDl: number,
-  queries: string[],
-  k1: number,
-  b: number,
-): Array<{ id: string }> {
-  const N = docs.length;
-  const scoreById = new Map<string, number>();
+  /**
+   * BM25 打分：利用倒排索引只扫「含 query token」的 doc，并用预计算的 tf。
+   * 复杂度从 O(Q × D × L) 降到 O(sum(docFreq(qt)))。
+   */
+  private rankByBm25(queries: string[]): Array<{ id: string }> {
+    const N = this.docs.length;
+    const scoreById = new Map<string, number>();
+    const avgDl = this.avgDl || 1;
 
-  for (const query of queries) {
-    const qTokens = tokenize(query);
-    if (qTokens.length === 0) continue;
+    for (const query of queries) {
+      const qTokens = tokenize(query);
+      if (qTokens.length === 0) continue;
+      // 合并同一 query 内重复 token，减少重复 doc 访问
+      const qTokenSet = Array.from(new Set(qTokens));
 
-    for (let i = 0; i < docs.length; i++) {
-      const tokens = docTokens[i];
-      const dl = tokens.length;
-      if (dl === 0) continue;
-
-      const tf = new Map<string, number>();
-      for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1);
-
-      let score = 0;
-      for (const qToken of qTokens) {
-        const freq = tf.get(qToken) ?? 0;
-        if (freq === 0) continue;
-        const docFreq = df.get(qToken) ?? 0;
-        const idf = Math.log(1 + (N - docFreq + 0.5) / (docFreq + 0.5));
-        const denom = freq + k1 * (1 - b + b * (dl / (avgDl || 1)));
-        score += idf * ((freq * (k1 + 1)) / denom);
+      // 预聚合：收集所有候选 docIds（用倒排索引缩小扫描范围）
+      const candidateDocs = new Set<number>();
+      for (const qToken of qTokenSet) {
+        const postings = this.postings.get(qToken);
+        if (!postings) continue;
+        for (const docIdx of postings) candidateDocs.add(docIdx);
       }
+      if (candidateDocs.size === 0) continue;
 
-      if (score > 0) {
-        scoreById.set(docs[i].id, Math.max(scoreById.get(docs[i].id) ?? 0, score));
+      for (const docIdx of candidateDocs) {
+        const tokens = this.docTokens[docIdx]!;
+        const dl = tokens.length;
+        if (dl === 0) continue;
+        const tf = this.tfCache[docIdx]!;
+        let score = 0;
+        for (const qToken of qTokenSet) {
+          const freq = tf.get(qToken) ?? 0;
+          if (freq === 0) continue;
+          const docFreq = this.df.get(qToken) ?? 0;
+          const idf = Math.log(1 + (N - docFreq + 0.5) / (docFreq + 0.5));
+          const denom = freq + this.k1 * (1 - this.b + this.b * (dl / avgDl));
+          score += idf * ((freq * (this.k1 + 1)) / denom);
+        }
+        if (score > 0) {
+          scoreById.set(this.docs[docIdx]!.id, Math.max(scoreById.get(this.docs[docIdx]!.id) ?? 0, score));
+        }
       }
     }
+
+    return sortRanking(scoreById);
   }
 
-  return sortRanking(scoreById);
-}
+  /** Token overlap：复用预计算 doc token Set，避免每次 search 重新 tokenize 全部 doc。 */
+  private rankByTokenOverlap(queries: string[]): Array<{ id: string }> {
+    const scoreById = new Map<string, number>();
 
-function rankByTokenOverlap(docs: Bm25Document[], queries: string[]): Array<{ id: string }> {
-  const scoreById = new Map<string, number>();
+    for (const query of queries) {
+      const queryTokens = Array.from(new Set(tokenize(query)));
+      if (queryTokens.length === 0) continue;
 
-  for (const query of queries) {
-    const queryTokens = new Set(tokenize(query));
-    if (queryTokens.size === 0) continue;
-
-    for (const doc of docs) {
-      const docTokens = new Set(tokenize(doc.text));
-      if (docTokens.size === 0) continue;
-      let shared = 0;
-      for (const token of queryTokens) {
-        if (docTokens.has(token)) shared += 1;
+      for (let i = 0; i < this.docs.length; i++) {
+        const docTokens = this.docTokenSets[i]!;
+        if (docTokens.size === 0) continue;
+        let shared = 0;
+        for (const token of queryTokens) {
+          if (docTokens.has(token)) shared += 1;
+        }
+        if (shared === 0) continue;
+        const score = shared / Math.sqrt(queryTokens.length * docTokens.size);
+        scoreById.set(this.docs[i]!.id, Math.max(scoreById.get(this.docs[i]!.id) ?? 0, score));
       }
-      if (shared === 0) continue;
-      const score = shared / Math.sqrt(queryTokens.size * docTokens.size);
-      scoreById.set(doc.id, Math.max(scoreById.get(doc.id) ?? 0, score));
     }
-  }
 
-  return sortRanking(scoreById);
+    return sortRanking(scoreById);
+  }
 }
 
 function rankByTrigramSimilarity(
@@ -430,14 +447,31 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     [/\bweixin\b/gi, "wechat 微信"],
     [/\bxhs\b/gi, "xiaohongshu 小红书"],
     [/\bdouyin\b/gi, "抖音 tiktok"],
-    [/\bremind(er)?\b/gi, "提醒 reminder schedule calendar"],
-    [/\bcall\b/gi, "电话 phone call"],
-    [/\bmessage\b/gi, "短信 message send"],
-    [/\bbuy\b/gi, "购买 下单 buy order"],
+    [/\bwx\b/gi, "wechat 微信"],
+    [/\bwb\b/gi, "微博 weibo"],
+    [/\bjd\b/gi, "京东 jd shopping 购物"],
+    [/\btb\b/gi, "淘宝 taobao shopping 购物"],
+    [/\bdy\b/gi, "抖音 douyin"],
+    [/\bremind(er)?\b/gi, "提醒 reminder schedule calendar 闹钟"],
+    [/\bcall\b/gi, "电话 phone call 拨打 呼叫"],
+    [/\bmessage\b/gi, "短信 message send 发送"],
+    [/\bbuy\b/gi, "购买 下单 buy order 购物"],
     [/\bbook\b/gi, "预订 预约 book reserve"],
-    [/\bshop(ping)?\b/gi, "shopping buy compare recommend"],
-    [/\bcompare\b/gi, "compare suggest shopping prices"],
-    [/\bprice\b/gi, "price compare budget shopping"],
+    [/\bshop(ping)?\b/gi, "shopping buy compare recommend 购物 买"],
+    [/\bcompare\b/gi, "compare suggest shopping prices 比价"],
+    [/\bprice\b/gi, "price compare budget shopping 价格 省钱"],
+    [/\bsearch\b/gi, "search 搜索 查询 搜"],
+    [/\bweather\b/gi, "weather 天气 气温 预报"],
+    [/\bcalendar\b/gi, "calendar 日历 日程 会议 待办"],
+    [/\bclock\b/gi, "clock 时间 时钟 日期 现在几点"],
+    [/\bdesktop\b/gi, "desktop 桌面 电脑 计算机 自动化 shell 命令"],
+    [/\bbrowser\b/gi, "browser 浏览器 网页 页面 标签"],
+    [/\bwallet\b/gi, "wallet 钱包 余额 账单 支付 消费"],
+    [/\bbudget\b/gi, "budget 预算 花销 算钱 计算"],
+    [/\breminder\b/gi, "reminder 提醒 闹钟 定时"],
+    [/\bnote(s)?\b/gi, "notes 笔记 记录 记忆"],
+    [/\bfriend(s)?\b/gi, "friend 好友 朋友 agent 社交"],
+    [/\bagent\b/gi, "agent 智能体 好友 消息 发送"],
   ];
   for (const [pattern, replacement] of replacements) {
     if (pattern.test(trimmed)) {
@@ -448,7 +482,7 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
   const queryTokens = tokenize(normalized);
   const queryTokenSet = new Set(queryTokens);
   const addedVariants: string[] = [];
-  const MAX_VARIANTS = 5; // 限制变体数，避免 BM25/Trigram 多路 RRF 跑 N 次
+  const MAX_VARIANTS = 8; // 限制变体数，避免 BM25/Trigram 多路 RRF 跑 N 次
   if (aliasEntries?.length && queryTokens.length > 0) {
     // 优化：把每个 entry 的所有 alias 预先拼接并 lowercase 一次，
     // 然后用 queryToken 逐个做 includes，避免每对 (alias, token) 都重复 substring。
@@ -456,7 +490,7 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     // 优化后降到 O(N×K)。
     // 同时按 entry 的"语义匹配度"（alias 与 query 重叠 token 数）排序，
     // 只取前 MAX_VARIANTS 个最相关的变体，避免变体爆炸。
-    type ScoredEntry = { registryName: string; score: number };
+    type ScoredEntry = { entry: SearchAliasEntry; score: number };
     const scored: ScoredEntry[] = [];
     for (const entry of aliasEntries) {
       if (!entry.searchAliases?.length) continue;
@@ -467,14 +501,19 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
         if (token.length < 2) continue;
         if (aliasBag.includes(token)) overlap += 1;
       }
-      if (overlap > 0) scored.push({ registryName: entry.registryName, score: overlap });
+      if (overlap > 0) scored.push({ entry, score: overlap });
     }
     scored.sort((a, b) => b.score - a.score);
     for (const s of scored) {
       if (addedVariants.length >= MAX_VARIANTS) break;
-      const v = `${trimmed} ${s.registryName}`;
+      const v = `${trimmed} ${s.entry.registryName}`;
       variants.add(v);
       addedVariants.push(v);
+    }
+    // 把最相关 entry 的 alias 原文也拼进 query（帮助 token overlap / trigram 通道命中同义表达）
+    if (scored.length > 0 && scored[0]!.entry.searchAliases) {
+      const topAliases = scored[0]!.entry.searchAliases!.slice(0, 6).join(" ");
+      variants.add(`${trimmed} ${topAliases}`);
     }
   }
 

@@ -16,6 +16,7 @@ import "../../core/services/agent_profile_overlay_launcher.dart";
 import "agent_profile_page.dart";
 import "agent_result_card.dart";
 import "agent_action_choice_card.dart";
+import "assistant_brief_message.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
 import "voice_message_bubble.dart";
@@ -597,7 +598,7 @@ class _ChatPageState extends State<ChatPage>
               size: 18,
               color: canSend ? cs.onPrimary : cs.onSurfaceVariant,
             ),
-            tooltip: "发送",
+            tooltip: widget.isAgentProcessing ? "发送（打断当前回复）" : "发送",
             onPressed: canSend
                 ? () {
                     if (widget.controller.text.trim().isNotEmpty) {
@@ -1088,10 +1089,10 @@ class _ChatPageState extends State<ChatPage>
                                             .instance.isShiftPressed) {
                                           return KeyEventResult.ignored;
                                         }
+                                        // agent 回复中也允许发送：会打断当前回复并开新轮次
                                         if (widget.controller.text
-                                                .trim()
-                                                .isNotEmpty &&
-                                            !widget.isAgentProcessing) {
+                                            .trim()
+                                            .isNotEmpty) {
                                           widget.onSend();
                                           return KeyEventResult.handled;
                                         }
@@ -1133,24 +1134,35 @@ class _ChatPageState extends State<ChatPage>
                                 ),
                                 const SizedBox(width: 4),
                                 // 右侧：发送/停止按钮（常显，根据状态切换）
-                                AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 180),
-                                  switchInCurve: Curves.easeOutCubic,
-                                  switchOutCurve: Curves.easeInCubic,
-                                  transitionBuilder:
-                                      (Widget child, Animation<double> anim) {
-                                    return FadeTransition(
-                                      opacity: anim,
-                                      child: ScaleTransition(
-                                        scale: Tween<double>(begin: 0.85, end: 1)
-                                            .animate(anim),
-                                        child: child,
-                                      ),
+                                // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
+                                // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
+                                ValueListenableBuilder<TextEditingValue>(
+                                  valueListenable: widget.controller,
+                                  builder: (_, TextEditingValue value, __) {
+                                    final bool hasText =
+                                        value.text.trim().isNotEmpty;
+                                    return AnimatedSwitcher(
+                                      duration:
+                                          const Duration(milliseconds: 180),
+                                      switchInCurve: Curves.easeOutCubic,
+                                      switchOutCurve: Curves.easeInCubic,
+                                      transitionBuilder: (Widget child,
+                                          Animation<double> anim) {
+                                        return FadeTransition(
+                                          opacity: anim,
+                                          child: ScaleTransition(
+                                            scale: Tween<double>(
+                                                    begin: 0.85, end: 1)
+                                                .animate(anim),
+                                            child: child,
+                                          ),
+                                        );
+                                      },
+                                      child: widget.isAgentProcessing && !hasText
+                                          ? _buildStopButton(cs)
+                                          : _buildSendButton(cs),
                                     );
                                   },
-                                  child: widget.isAgentProcessing
-                                      ? _buildStopButton(cs)
-                                      : _buildSendButton(cs),
                                 ),
                               ],
                             ),
@@ -1933,6 +1945,13 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           context,
           contentSummary.summary!,
         ),
+      );
+    }
+
+    if (AssistantBriefMessage.shouldEnhance(message.text)) {
+      return AssistantBriefMessage(
+        text: message.text,
+        colorScheme: cs,
       );
     }
 

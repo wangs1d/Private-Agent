@@ -21,6 +21,7 @@ import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
 import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
+import "core/utils/assistant_text_sanitizer.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
@@ -284,6 +285,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   String? _pendingAssistantChunkMessageId;
   String? _pendingAgentUserMessageId;
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
+  final AssistantTextSanitizer _assistantTextSanitizer =
+      AssistantTextSanitizer();
 
   // Phase 2：429 回压指数退避重试状态
   String? _pendingRetryText;
@@ -400,6 +403,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
 
     try {
+      final int migrated = await _store.migrateAssistantTimestampFrames();
+      if (migrated > 0) {
+        debugPrint(
+            "[chat] sanitized $migrated assistant message(s) with legacy timestamp frames");
+      }
+    } catch (e) {
+      debugPrint("[chat] migrateAssistantTimestampFrames failed: $e");
+    }
+
+    try {
       await _store.saveSession(
         ChatSession(
           sessionId: ApiConfig.effectiveActorId,
@@ -412,8 +425,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       // 继续运行
     }
 
-    final List<ChatMessage> cachedMessages =
-        await _store.listMessages(ApiConfig.effectiveActorId);
+    final List<ChatMessage> cachedMessages = (await _store
+            .listMessages(ApiConfig.effectiveActorId))
+        .map(_sanitizeLoadedChatMessage)
+        .toList();
 
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
@@ -422,6 +437,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
     setState(() {
       _messages.addAll(cachedMessages);
+      // 关键：从缓存恢复后必须重建 assistant 消息索引，
+      // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
+      // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
+      _rebuildAssistantIndex();
       _relayInbound
         ..clear()
         ..addAll(cachedRelay);
@@ -865,20 +884,19 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             _notifyAgentProcessingUi(true);
           }
           final String messageId = chunkAssistantMessageId ??
-              ((activeTraceId != null && activeTraceId.isNotEmpty)
+              (activeTraceId.isNotEmpty
                   ? "assistant-$activeTraceId"
                   : "assistant-streaming");
           final String chunk = payload["chunk"]?.toString() ?? "";
           // 关键：chunk 文字直接入列表（新建或续写），让用户实时看到回复内容。
           // 同时进缓冲，供 done 时做兜底比对。
-          _enqueueAssistantChunk(messageId, chunk);
-          _appendChunkToMessageList(messageId, chunk);
+          final String visibleChunk = _enqueueAssistantChunk(messageId, chunk);
+          if (visibleChunk.isEmpty) return;
+          _appendChunkToMessageList(messageId, visibleChunk);
           // v2：把 chunk 同步累加进 TurnState.streamBuffer（UI 改造后用作流式正文源）
-          _turnState?.appendChunk(chunk);
+          _turnState?.appendChunk(visibleChunk);
         }
         if (type == "chat.assistant_done") {
-          final String bufferedText =
-              _pendingAssistantChunkText.toString().trim();
           final String? doneTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = _pendingAgentUserMessageId;
           if (doneTraceId != null &&
@@ -887,6 +905,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               doneTraceId != activeTraceId) {
             return;
           }
+          final String bufferedText = _takePendingAssistantChunkText();
           // 关键：先在 traceId 上打「本轮已结束」标记，再做后续副作用。
           // 否则清状态与清 traceId 之间存在竞态：迟到的 chunk/agent_status
           // 会看到 _pendingAgentUserMessageId 还有值，重新点亮思考气泡。
@@ -924,7 +943,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               ((doneTraceId != null && doneTraceId.isNotEmpty)
                   ? "assistant-$doneTraceId"
                   : "assistant-final");
-          final String finalText = payload["finalText"]?.toString() ?? "";
+          final String finalText =
+              _sanitizeAssistantVisibleText(payload["finalText"]?.toString() ?? "");
           final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
           final String resolvedText = finalText.trim().isNotEmpty
               ? finalText
@@ -976,7 +996,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
             });
             await _store.saveMessage(finalMessage);
           }
-          _takePendingAssistantChunkText();
           unawaited(_loadAgentProfile());
         }
         if (type == "agent.peer_message") {
@@ -1496,18 +1515,23 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return _messages[idx].playUrl;
   }
 
-  void _enqueueAssistantChunk(String messageId, String chunk) {
-    if (chunk.isEmpty) return;
+  String _enqueueAssistantChunk(String messageId, String chunk) {
+    if (chunk.isEmpty) return "";
     if (_pendingAssistantChunkMessageId != null &&
         _pendingAssistantChunkMessageId != messageId) {
       _flushAssistantChunks();
+      _pendingAssistantChunkText.clear();
+      _assistantTextSanitizer.reset();
     }
     _pendingAssistantChunkMessageId = messageId;
-    _pendingAssistantChunkText.write(chunk);
+    final String visibleChunk = _assistantTextSanitizer.ingest(chunk);
+    if (visibleChunk.isEmpty) return "";
+    _pendingAssistantChunkText.write(visibleChunk);
     _assistantChunkFlushTimer ??= Timer(const Duration(milliseconds: 32), () {
       _assistantChunkFlushTimer = null;
       _flushAssistantChunks();
     });
+    return visibleChunk;
   }
 
   /// 把 chunk 文字直接追加到消息列表（新建或续写），实现"边说边看"效果。
@@ -1561,8 +1585,35 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   String _takePendingAssistantChunkText() {
     final String buffered = _pendingAssistantChunkText.toString().trim();
+    final String pending = _assistantTextSanitizer.drainPending().trim();
     _pendingAssistantChunkText.clear();
-    return buffered;
+    _assistantTextSanitizer.reset();
+    if (buffered.isEmpty) return pending;
+    if (pending.isEmpty) return buffered;
+    return buffered + pending;
+  }
+
+  String _sanitizeAssistantVisibleText(String text) {
+    return stripAssistantTimestampFrames(text);
+  }
+
+  ChatMessage _sanitizeLoadedChatMessage(ChatMessage message) {
+    if (message.role != "assistant") return message;
+    final String sanitizedText = _sanitizeAssistantVisibleText(message.text);
+    if (sanitizedText == message.text) return message;
+    return ChatMessage(
+      messageId: message.messageId,
+      sessionId: message.sessionId,
+      role: message.role,
+      text: sanitizedText,
+      timestamp: message.timestamp,
+      attachmentImageCount: message.attachmentImageCount,
+      playUrl: message.playUrl,
+      attachments: message.attachments,
+      contentType: message.contentType,
+      durationMs: message.durationMs,
+      waveform: message.waveform,
+    );
   }
 
   void _clearAgentProcessingState({bool done = false}) {

@@ -1,4 +1,5 @@
 import type { AgentMemorySyncService } from "../agent-memory-sync-service.js";
+import { isDirectFactQuery, shouldSuppressFollowUp } from "../../agent/direct-fact-query.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import { EmotionRecognitionService } from "../emotion-recognition-service.js";
 import { PersonalityAdjuster } from "../../brain/personality-adjuster.js";
@@ -467,8 +468,10 @@ function detectDynamicStyleSignals(userText: string): {
 function buildAdaptiveStyleGuidance(
   relationship: RelationshipState,
   style: StyleProfileState,
+  userText?: string,
 ): string {
   const lines: string[] = [];
+  const suppressFollowUp = userText ? shouldSuppressFollowUp(userText) : false;
   if (relationship.rapport >= 0.62 && style.playfulTolerance >= 0.58) {
     lines.push("关系已经熟一点了，可以偶尔顺手逗一句，像熟人聊天那样自然一点。");
   } else {
@@ -480,7 +483,9 @@ function buildAdaptiveStyleGuidance(
   if (style.teasingTolerance >= 0.56 && relationship.rapport >= 0.58) {
     lines.push("可以轻微调侃、吐槽、阴阳一下下，但尺度要像熟人拌嘴，不要真冒犯。");
   }
-  if (style.followUpTolerance >= 0.58) {
+  if (suppressFollowUp) {
+    lines.push("这轮更像单一事实查询：回答到结论和依据就停，不要顺手追加追问、兜圈总结或第二遍复述。");
+  } else if (style.followUpTolerance >= 0.58) {
     lines.push("回答完可以顺手追问半句，把话题接住，别每次都机械收尾。");
   }
   if (style.expressiveTolerance >= 0.55) {
@@ -492,7 +497,11 @@ function buildAdaptiveStyleGuidance(
   return lines.join("\n");
 }
 
-function relationshipSummaryLine(state: RelationshipState, style: StyleProfileState): string {
+function relationshipSummaryLine(
+  state: RelationshipState,
+  style: StyleProfileState,
+  userText?: string,
+): string {
   const directness =
     state.directnessPreference >= 0.68
       ? "用户偏好直接表达，优先先给结论，少铺垫。"
@@ -513,7 +522,7 @@ function relationshipSummaryLine(state: RelationshipState, style: StyleProfileSt
     directness,
     humor,
     care,
-    buildAdaptiveStyleGuidance(state, style),
+    buildAdaptiveStyleGuidance(state, style, userText),
     "无论怎么个性化，默认都要精简、口语化、少废话，避免客服腔和过度正式。",
     "不要把用户硬归类成某种固定模板，优先根据他这段时间真实的说话方式持续微调。",
     "优先贴近用户当前说话方式；如果用户明显喜欢某种表达，就往那个方向小幅靠拢，不要突变。",
@@ -552,6 +561,9 @@ function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileS
   if (longExplicit) {
     return "本轮长度控制：用户明确要详细，信息给全，但仍先给结论，再展开，避免空话。";
   }
+  if (isDirectFactQuery(text)) {
+    return "本轮长度控制：这是单一事实查询，默认压到「结论 + 1句依据」；不要重复总结，也不要顺手追问。";
+  }
   if (shortExplicit || compactText.length <= 18) {
     return "本轮长度控制：尽量压到 1~2 句，先给结论，没被追问就别展开。";
   }
@@ -570,9 +582,9 @@ function buildReplyLengthGuidance(userText: string, profile: ReplyLengthProfileS
     return "本轮长度控制：这个用户长期接受稍展开的说明，可以多给一点上下文，但仍先讲重点。";
   }
   if (compactText.length <= 60) {
-    return "本轮长度控制：以短回复为主，2~4 句内解决；只保留必要信息。";
+    return "本轮长度控制：以短回复为主，2~4 句内解决；只保留必要信息，同一事实不要重复解释两遍。";
   }
-  return "本轮长度控制：默认中短回复，先回答核心问题，再按需要补充，不要写成长文。";
+  return "本轮长度控制：默认中短回复，先回答核心问题，再按需要补充；避免重复总结、重复铺垫和连续追问。";
 }
 
 function timeRhythmSummaryLine(rhythm: TimeRhythmState): string | undefined {
@@ -775,7 +787,7 @@ export class UserPersonalizationService {
         contactPreferenceSummaryLine(this.loadContactPreferenceState(actorId), rhythm),
         buildFactPromptSummary(decayedFacts, 8),
       ].filter(Boolean).join("\n"),
-      relationshipGuidance: relationshipSummaryLine(relationship, style),
+      relationshipGuidance: relationshipSummaryLine(relationship, style, userText),
     };
   }
 

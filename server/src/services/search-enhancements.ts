@@ -202,6 +202,75 @@ export type IntentAnalysis = {
   requiresFreshWeb: boolean;
 };
 
+export function buildIntentAwareQueryVariants(
+  query: string,
+  intentAnalysis: IntentAnalysis,
+  maxVariants = 8,
+): string[] {
+  const raw = query.trim();
+  if (!raw) return [];
+
+  const variants: string[] = [];
+  const push = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized || variants.includes(normalized) || variants.length >= maxVariants) return;
+    variants.push(normalized);
+  };
+
+  const primaryEntities = intentAnalysis.entities
+    .filter((entity) => entity.length >= 2)
+    .slice(0, 3);
+  const primary = primaryEntities[0];
+  const secondary = primaryEntities[1];
+
+  if (primary) {
+    push(`"${primary}"`);
+    push(primary);
+  }
+  if (secondary) {
+    push(`"${secondary}"`);
+    push(secondary);
+  }
+
+  switch (intentAnalysis.intent) {
+    case "latest":
+      if (primary) {
+        push(`${primary} 最新`);
+        push(`${primary} 最新动态`);
+      }
+      break;
+    case "price":
+      if (primary) {
+        push(`${primary} 价格`);
+        push(`${primary} 报价`);
+      }
+      break;
+    case "research":
+      if (primary) {
+        push(`${primary} 介绍`);
+        push(`${primary} 分析`);
+      }
+      break;
+    case "definition":
+      if (primary) {
+        push(`${primary} 是什么`);
+      }
+      break;
+    case "compare":
+      if (primary && secondary) {
+        push(`${primary} ${secondary} 对比`);
+        push(`${primary} ${secondary} 区别`);
+        push(`${primary} vs ${secondary}`);
+      }
+      break;
+    default:
+      break;
+  }
+
+  push(raw);
+  return variants;
+}
+
 const INTENT_PATTERNS: Array<{ intent: SearchIntent; re: RegExp }> = [
   { intent: "latest", re: /最新|最近|今日|今天|现在|目前|刚刚|新闻|事件|发生|breaking|news|event|latest|recent|current|today/i },
   { intent: "compare", re: /对比|比较|VS|vs|哪个好|区别|差异|优缺点/i },
@@ -298,10 +367,10 @@ export function classifySearchIntent(query: string): IntentAnalysis {
 
   // 建议参数
   const suggestedLimit =
-    intent === "latest" ? 8 :
-    intent === "compare" ? 10 :
-    intent === "research" ? 6 :
-    intent === "price" ? 5 :
+    intent === "latest" ? 12 :
+    intent === "compare" ? 12 :
+    intent === "research" ? 10 :
+    intent === "price" ? 8 :
     undefined;
 
   const requiresFreshWeb =
@@ -433,7 +502,10 @@ export function queryAllowsStaleResults(query: string): boolean {
 
 export function shouldBoostQueryRecency(query: string): boolean {
   if (queryAllowsStaleResults(query)) return false;
-  return RECENCY_QUERY_BOOST_RE.test(query) || query.trim().length > 0;
+  const trimmed = query.trim();
+  if (!trimmed) return false;
+  const intent = classifySearchIntent(trimmed);
+  return intent.requiresFreshWeb || RECENCY_QUERY_BOOST_RE.test(trimmed);
 }
 
 /** 为必应检索前置「年月 / 最新」变体，提高实时结果占比。 */
@@ -443,9 +515,9 @@ export function prependRecencyQueryVariants(variants: string[], query: string): 
   const ym = `${anchor.year}年${anchor.month}月`;
   const core = variants.find((v) => v.length > 0) ?? query.trim();
   const boosted = [
-    ...variants,
     `${core} ${ym}`,
     `${core} 最新`,
+    ...variants,
   ];
   return [...new Set(boosted.map((v) => v.trim()).filter(Boolean))];
 }

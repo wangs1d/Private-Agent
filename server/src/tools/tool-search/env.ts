@@ -3,6 +3,7 @@ export type ToolSearchEnabledMode = "auto" | "on" | "off";
 export type ToolSearchBridgeMode = "merged" | "legacy";
 
 export type ToolSearchEmbeddingMode = "auto" | "on" | "off";
+export type ToolSearchBackend = "tool_router" | "adaptive";
 
 function parseEnabledMode(raw: string | undefined): ToolSearchEnabledMode {
   const v = raw?.trim().toLowerCase();
@@ -26,8 +27,15 @@ function parseEmbeddingMode(raw: string | undefined): ToolSearchEmbeddingMode {
   return "auto";
 }
 
+function parseBackend(raw: string | undefined): ToolSearchBackend {
+  const v = raw?.trim().toLowerCase();
+  if (v === "adaptive" || v === "legacy" || v === "ts") return "adaptive";
+  return "tool_router";
+}
+
 export function getToolSearchConfig() {
   return {
+    backend: parseBackend(process.env.AGENT_TOOL_SEARCH_BACKEND),
     enabled: parseEnabledMode(process.env.AGENT_TOOL_SEARCH_ENABLED),
     bridgeMode: parseBridgeMode(process.env.AGENT_TOOL_SEARCH_BRIDGE_MODE),
     thresholdPct: clampInt(process.env.AGENT_TOOL_SEARCH_THRESHOLD_PCT, 10, 0, 100),

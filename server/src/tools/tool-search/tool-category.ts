@@ -344,7 +344,7 @@ export function routeToCategory(
 }
 
 /**
- * Embedding 路由：余弦相似度 → top-1（差距 < 0.1 时 top-2）。
+ * Embedding 路由：余弦相似度 → top-1（差距 < 0.18 时 top-2，避免类别误判一票否决）。
  */
 function routeByEmbedding(
   queryVector: Float32Array | number[],
@@ -356,8 +356,12 @@ function routeByEmbedding(
   const top1 = all[0]!;
   const top2 = all[1];
 
-  // 如果 top-1 与 top-2 差距 < 0.1，并行搜两个
-  if (top2 && top1.score - top2.score < 0.1) {
+  // 如果 top-1 与 top-2 差距 < 0.18，并行搜两个（原 0.1 过严，类别误判时全盘皆输）
+  if (top2 && top1.score - top2.score < 0.18) {
+    return [top1.id, top2.id];
+  }
+  // top-1 本身置信度偏低（< 0.35）→ 也带上 top-2 兜底
+  if (top2 && top1.score < 0.35) {
     return [top1.id, top2.id];
   }
   return [top1.id];
@@ -365,6 +369,7 @@ function routeByEmbedding(
 
 /**
  * BM25 降级路由：类别级 BM25 搜索（alias 丰富，命中率远高于单工具级）。
+ * top-1 与 top-2 分数接近（ratio ≥ 0.8）时也返回两个类别兜底。
  */
 function routeByBm25(
   query: string,
@@ -376,9 +381,18 @@ function routeByBm25(
 
   const top1 = hits[0]!.id;
   const top2 = hits[1];
-  // BM25 用类别别名搜索，top-1 进入下一层
-  // 如果 categories 中有 top1 则返回
-  if (categories.has(top1)) return [top1];
+  // 优先返回 top-1
+  if (categories.has(top1)) {
+    // top-2 分数接近 top-1（≥ 80%）→ 双类别并行搜
+    if (
+      top2 &&
+      categories.has(top2.id) &&
+      top2.score >= hits[0]!.score * 0.8
+    ) {
+      return [top1, top2.id];
+    }
+    return [top1];
+  }
 
   // 如果 top1 不在 categories 中（比如 misc 被删），但 top2 在
   if (top2 && categories.has(top2.id)) return [top2.id];

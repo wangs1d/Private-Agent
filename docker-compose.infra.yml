@@ -1,0 +1,40 @@
+# Optional infrastructure for the adaptive tool intelligence layer.
+#
+# Start only these services:
+#   docker compose -f docker-compose.infra.yml up -d
+#
+# The TypeScript service degrades gracefully when these are not running.
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: private-agent-tool-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/private-agent-tool}
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1g
+    volumes:
+      - tool-neo4j-data:/data
+      - tool-neo4j-logs:/logs
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: private-agent-tool-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-private_agent}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-private-agent-tool}
+    volumes:
+      - tool-rabbitmq-data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+volumes:
+  tool-neo4j-data:
+  tool-neo4j-logs:
+  tool-rabbitmq-data:

@@ -67,6 +67,11 @@ export type DeferredToolCatalog = {
   categories: Map<string, ToolCategoryInfo>;
   /** 类别 BM25 索引（降级路由用） */
   categoryBm25: Bm25Index;
+  /**
+   * 每类别的 Bm25 子索引（Level 2 类内搜索直接用，省全量扫描 + 消除跨类挤占）。
+   * 无 embedding 时类别路由降级为类别级 BM25，这里依然可用。
+   */
+  categorySearches: Map<string, Bm25Index>;
 };
 
 export type DeferredToolSearchMatch = {
@@ -198,7 +203,34 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
     },
   );
 
-  return { entries, index, byName, byApiName, embeddingIndex, embeddingReady, categoryIndex, categories: catInfo, categoryBm25 };
+  // === 每类别 Bm25 子索引（Level 2 只搜子集） ===
+  // 类别内工具越多，收益越大：搜索复杂度从 O(全量) 降到 O(类别内)
+  const categorySearches = new Map<string, Bm25Index>();
+  for (const [catName, info] of catInfo) {
+    const catEntries = info.toolNames
+      .map((n) => byName.get(n))
+      .filter((e): e is DeferredToolEntry => e != null);
+    if (catEntries.length === 0) continue;
+    categorySearches.set(
+      catName,
+      new Bm25Index(
+        catEntries.map((e) => ({ id: e.registryName, text: e.searchText })),
+      ),
+    );
+  }
+
+  return {
+    entries,
+    index,
+    byName,
+    byApiName,
+    embeddingIndex,
+    embeddingReady,
+    categoryIndex,
+    categories: catInfo,
+    categoryBm25,
+    categorySearches,
+  };
 }
 
 export function estimateToolsSchemaTokens(tools: ChatCompletionTool[]): number {
@@ -274,12 +306,16 @@ export function searchDeferredTools(
     return searchWithinTools(catalog, query, limit, catalog.entries, options);
   }
 
-  return searchWithinTools(catalog, query, limit, categoryEntries, options);
+  // Level 2：用该类别的 Bm25 子索引搜索（只扫子集，同时消除跨类工具挤占排名）
+  const subIndex = catalog.categorySearches.get(catName);
+  return searchWithinTools(catalog, query, limit, categoryEntries, options, subIndex);
 }
 
 /**
  * 在指定工具子集内搜索（BM25 + embedding 动态阈值 → RRF 融合）。
  * 与原有逻辑相同，但限制搜索空间。
+ *
+ * @param subIndex 类别子索引（传入时只在子集内做 BM25，不再全量扫描后过滤）
  */
 function searchWithinTools(
   catalog: DeferredToolCatalog,
@@ -287,11 +323,17 @@ function searchWithinTools(
   limit: number,
   entries: DeferredToolEntry[],
   options?: SearchDeferredOptions,
+  subIndex?: Bm25Index,
 ): DeferredToolSearchMatch[] {
-  // 子集搜索时增大 BM25 limit，避免其他类工具挤占本类工具排名
+  // 有子索引时搜索空间天然是子集，无需放大 BM25 limit；
+  // 全量索引时放大避免其他类工具挤占本类工具排名
   const isSubset = entries.length < catalog.entries.length;
-  const bm25Limit = isSubset ? Math.max(limit * 4, 20) : limit;
-  const bm25Hits = catalog.index.search(query, bm25Limit, catalog.entries);
+  const bm25Limit = subIndex
+    ? Math.max(limit * 2, 8)
+    : isSubset
+      ? Math.max(limit * 4, 20)
+      : limit;
+  const bm25Hits = (subIndex ?? catalog.index).search(query, bm25Limit, entries);
   const useEmbedding =
     options?.queryVector &&
     catalog.embeddingIndex.size > 0 &&
@@ -311,7 +353,15 @@ function searchWithinTools(
       relativeRatio: cfg.embeddingDynamicRatio,
       maxKeep: cfg.embeddingDynamicMaxKeep,
     });
-    hits = fuseHybridRankings(bm25Hits, embHits, cfg.embeddingRankWeight, Math.max(limit * 4, 12));
+    // 权重自适应：BM25 与 embedding 的 top-1 不一致时，降低 embedding 权重，
+    // 避免 embedding 通道把 BM25 的正确结果拉下去（query 表述偏差场景）
+    let effWeight = cfg.embeddingRankWeight;
+    const bm25Top1 = bm25Hits[0]?.id;
+    const embTop1 = embHits[0]?.id;
+    if (bm25Top1 && embTop1 && bm25Top1 !== embTop1) {
+      effWeight = Math.min(effWeight, 0.35);
+    }
+    hits = fuseHybridRankings(bm25Hits, embHits, effWeight, Math.max(limit * 4, 12));
   }
 
   return hits
@@ -364,7 +414,8 @@ function searchMultiCategory(
 
     if (catEntries.length === 0) continue;
 
-    const catResults = searchWithinTools(catalog, query, limit, catEntries, options);
+    const subIndex = catalog.categorySearches.get(catName);
+    const catResults = searchWithinTools(catalog, query, limit, catEntries, options, subIndex);
     for (const r of catResults) {
       allResults.push({
         name: r.name,
@@ -396,14 +447,15 @@ function searchMultiCategory(
   return [...scoreById.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
-    .map(([name]) => {
+    .map(([name, rrfScore]) => {
       const entry = catalog.byName.get(name);
       if (!entry) return null;
       const desc = isFunctionTool(entry.tool) ? (entry.tool.function.description ?? "") : "";
       return {
         name: entry.registryName,
         description: desc,
-        score: 0,
+        // 回填真实 RRF 融合分（原实现置 0，导致 LLM/下游拿不到相对相关性）
+        score: Math.round(rrfScore * 1000) / 1000,
         parameterNames: entry.parameterNames,
         requiredParameters: entry.requiredParameters,
       } as DeferredToolSearchMatch;

@@ -1,0 +1,70 @@
+services:
+  redis:
+    image: redis:7
+    container_name: tool-router-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    container_name: tool-router-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - tool-router-qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: tool-router-postgres
+    environment:
+      POSTGRES_DB: tool_router
+      POSTGRES_USER: tool_router
+      POSTGRES_PASSWORD: tool_router
+    ports:
+      - "5432:5432"
+    volumes:
+      - tool-router-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: tool-router-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/tool-router
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - tool-router-neo4j-data:/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: tool-router-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: tool_router
+      RABBITMQ_DEFAULT_PASS: tool_router
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: tool-router-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+volumes:
+  tool-router-redis:
+  tool-router-qdrant:
+  tool-router-postgres:
+  tool-router-neo4j-data:

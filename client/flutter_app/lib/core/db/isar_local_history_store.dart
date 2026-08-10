@@ -8,10 +8,14 @@ import "package:path_provider/path_provider.dart";
 import "../models/agent_relay_models.dart";
 import "../models/chat_models.dart";
 import "../models/schedule_models.dart";
+import "../utils/assistant_text_sanitizer.dart";
 import "local_history_store.dart";
 
 class IsarLocalHistoryStore implements LocalHistoryStore {
   IsarLocalHistoryStore({required String userPin}) : _userPin = userPin;
+
+  static const String _assistantTimestampMigrationPreferenceKey =
+      "assistantTimestampFramesSanitizedV1";
 
   String _userPin;
 
@@ -531,6 +535,43 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           ),
         )
         .toList();
+  }
+
+  @override
+  Future<int> migrateAssistantTimestampFrames() async {
+    await init();
+    if (_preferences[_assistantTimestampMigrationPreferenceKey] == true) {
+      return 0;
+    }
+
+    int changed = 0;
+    for (final String sessionId in _messages.keys.toList()) {
+      final List<ChatMessage> encryptedMessages =
+          _messages[sessionId] ?? <ChatMessage>[];
+      for (int index = 0; index < encryptedMessages.length; index++) {
+        final ChatMessage message = encryptedMessages[index];
+        if (message.role != "assistant") continue;
+
+        final String plainText = _decryptFor(message.text, _userPin);
+        final String sanitizedText = stripAssistantTimestampFrames(plainText);
+        if (sanitizedText == plainText) continue;
+
+        encryptedMessages[index] = ChatMessage(
+          messageId: message.messageId,
+          sessionId: message.sessionId,
+          role: message.role,
+          text: _encryptFor(sanitizedText, _userPin),
+          timestamp: message.timestamp,
+          attachmentImageCount: message.attachmentImageCount,
+          playUrl: message.playUrl,
+        );
+        changed++;
+      }
+    }
+
+    _preferences[_assistantTimestampMigrationPreferenceKey] = true;
+    await _flush();
+    return changed;
   }
 
   @override

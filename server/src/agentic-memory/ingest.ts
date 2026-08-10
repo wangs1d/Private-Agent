@@ -108,7 +108,9 @@ export class AgenticMemoryIngestService {
     const maxChars = getLowSignalBufferMaxChars();
 
     if (entries.length >= maxItems || totalChars >= maxChars) {
-      void this.flushBuffer(actorId);
+      void this.flushBuffer(actorId).catch((err) => {
+        console.error("[agentic-memory] flushBuffer failed (check embedding config):", err);
+      });
       return;
     }
 

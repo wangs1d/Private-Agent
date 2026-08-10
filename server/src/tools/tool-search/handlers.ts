@@ -1,7 +1,27 @@
 import type { DeferredToolCatalog } from "./catalog.js";
 import { describeDeferredTool, resolveCatalogToolName, searchDeferredTools } from "./catalog.js";
+import {
+  adaptiveSearchDeferredTools,
+  type AdaptiveDeferredToolSearchMatch,
+} from "./adaptive-catalog.js";
 import { getToolSearchConfig } from "./env.js";
-import { getQueryEmbedding } from "./tool-embedding.js";
+import { searchDeferredToolsViaToolRouter } from "./tool-router-adapter.js";
+import { getQueryEmbedding, peekQueryEmbedding } from "./tool-embedding.js";
+import { HistoryScoreStore } from "./retrieval/history-score.js";
+import { ResourceType } from "./registry/models.js";
+import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
+
+const historyStore = new HistoryScoreStore();
+const EMBED_GRACE_MS = 150;
+
+const ADAPTIVE_AGENT_SEARCH_PATH = [
+  "intent_router",
+  "hierarchical_router",
+  "hybrid_retrieval",
+  "adaptive_top_p",
+  "knowledge_graph_expansion",
+  "tool_reranking",
+] as const;
 
 export type ToolSearchBridgeResult =
   | {
@@ -22,9 +42,13 @@ export type ToolSearchBridgeResult =
     };
 
 /**
- * 异步执行桥接工具。tool_search / tool_discover 在执行时会同步尝试拉取 query 的
- * embedding（命中 LRU 内存缓存就零成本），若有则走 BM25 + embedding hybrid RRF 召回；
- * 无 key / API 失败 / 工具集过小 → 静默降级纯 BM25，不影响返回。
+ * Agent 延迟工具桥接入口。
+ *
+ * tool_search / tool_discover 的主搜索路径统一迁移到 adaptive pipeline：
+ * Intent Router → Hierarchical Router → Hybrid Retrieval → Adaptive Top-P →
+ * Knowledge Graph Expansion → Tool Reranking。
+ *
+ * Legacy BM25 只在 adaptive pipeline 异常时兜底。
  */
 export async function executeToolSearchBridge(
   bridgeName: string,
@@ -45,12 +69,21 @@ export async function executeToolSearchBridge(
     }
     const limit = resolveSearchLimit(args.limit, cfg);
     const includeSchema = args.include_schema === true;
-    const queryVector = await safeQueryEmbedding(query, catalog);
-    const matches = searchDeferredTools(catalog, query, limit, {
+    const matches = await searchAdaptiveAgentPath(catalog, query, limit, {
       includeSchema,
-      queryVector: queryVector ?? undefined,
+      tenantId: resolveTenantArg(args),
+      agentContextHash: resolveContextHashArg(args),
     });
-    return { kind: "search", ok: true, result: { matches, query, count: matches.length } };
+    return {
+      kind: "search",
+      ok: true,
+      result: {
+        matches,
+        query,
+        count: matches.length,
+        search_path: ADAPTIVE_AGENT_SEARCH_PATH,
+      },
+    };
   }
 
   if (normalized === "tool_describe") {
@@ -78,6 +111,7 @@ export async function executeToolSearchBridge(
       args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
         ? (args.arguments as Record<string, unknown>)
         : {};
+    recordToolCallFeedback(catalog, entry.registryName);
     return {
       kind: "call",
       ok: true,
@@ -102,6 +136,14 @@ function resolveSearchLimit(
   return Number.isFinite(requested) && requested > 0
     ? Math.min(Math.floor(requested), cfg.maxSearchLimit)
     : cfg.searchDefaultLimit;
+}
+
+function resolveTenantArg(args: Record<string, unknown>): string {
+  return String(args.tenant_id ?? args.tenantId ?? "default");
+}
+
+function resolveContextHashArg(args: Record<string, unknown>): string {
+  return String(args.agent_context_hash ?? args.context_hash ?? "tool-search-bridge");
 }
 
 function executeToolDiscover(
@@ -139,8 +181,10 @@ async function executeToolDiscoverByName(
   const result: Record<string, unknown> = { mode: "describe", tool: schema };
   if (query) {
     const limit = resolveSearchLimit(args.limit, cfg);
-    const queryVector = await safeQueryEmbedding(query, catalog);
-    result.search = searchDeferredTools(catalog, query, limit, { queryVector: queryVector ?? undefined });
+    result.search = await searchAdaptiveAgentPath(catalog, query, limit, {
+      tenantId: resolveTenantArg(args),
+      agentContextHash: resolveContextHashArg(args),
+    });
   }
   return { kind: "discover", ok: true, result };
 }
@@ -153,10 +197,10 @@ async function executeToolDiscoverByQuery(
 ): Promise<ToolSearchBridgeResult> {
   const limit = resolveSearchLimit(args.limit, cfg);
   const includeAllSchema = args.include_schema === true;
-  const queryVector = await safeQueryEmbedding(query, catalog);
-  let matches = searchDeferredTools(catalog, query, limit, {
+  let matches = await searchAdaptiveAgentPath(catalog, query, limit, {
     includeSchema: includeAllSchema,
-    queryVector: queryVector ?? undefined,
+    tenantId: resolveTenantArg(args),
+    agentContextHash: resolveContextHashArg(args),
   });
 
   if (
@@ -189,9 +233,243 @@ async function executeToolDiscoverByQuery(
       query,
       count: matches.length,
       matches,
+      search_path: ADAPTIVE_AGENT_SEARCH_PATH,
       hint: "首选 matches[0]；已含 schema 时可直接 tool_call。",
     },
   };
+}
+
+async function searchAdaptiveAgentPath(
+  catalog: DeferredToolCatalog,
+  query: string,
+  limit: number,
+  options: {
+    includeSchema?: boolean;
+    tenantId?: string;
+    agentContextHash?: string;
+  },
+): Promise<AdaptiveDeferredToolSearchMatch[]> {
+  const queryVector =
+    peekQueryEmbedding(query) ??
+    (await raceWithTimeout(safeQueryEmbedding(query, catalog), EMBED_GRACE_MS));
+  const matches = await searchWithAdaptiveFallback(catalog, query, limit, {
+    includeSchema: options.includeSchema,
+    queryVector: queryVector ?? undefined,
+    tenantId: options.tenantId,
+    agentContextHash: options.agentContextHash,
+  });
+  recordSearchContext(catalog, query, matches);
+  return matches;
+}
+
+function recordSearchContext(
+  catalog: DeferredToolCatalog,
+  query: string,
+  matches: Array<{ name: string }>,
+): void {
+  const ctx = catalog as DeferredToolCatalog & {
+    lastSearchQuery?: string;
+    lastSearchMatches?: string[];
+  };
+  ctx.lastSearchQuery = query;
+  ctx.lastSearchMatches = matches.slice(0, 5).map((m) => m.name);
+}
+
+function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): void {
+  const ctx = catalog as DeferredToolCatalog & {
+    lastSearchQuery?: string;
+    lastSearchMatches?: string[];
+  };
+  if (!ctx.lastSearchQuery || !ctx.lastSearchMatches || ctx.lastSearchMatches.length === 0) {
+    return;
+  }
+  const now = new Date().toISOString();
+  void historyStore.record({
+    resource_id: chosen,
+    success: true,
+    latency_ms: 0,
+    result_quality_score: 0.8,
+    call_timestamp: now,
+  });
+  const top1 = ctx.lastSearchMatches[0];
+  if (top1 && top1 !== chosen && ctx.lastSearchMatches.includes(chosen)) {
+    void historyStore.record({
+      resource_id: top1,
+      success: false,
+      latency_ms: 0,
+      result_quality_score: 0,
+      call_timestamp: now,
+    });
+  }
+}
+
+function raceWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    promise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+async function searchWithAdaptiveFallback(
+  catalog: DeferredToolCatalog,
+  query: string,
+  limit: number,
+  options: {
+    includeSchema?: boolean;
+    queryVector?: number[] | Float32Array;
+    tenantId?: string;
+    agentContextHash?: string;
+  },
+): Promise<AdaptiveDeferredToolSearchMatch[]> {
+  const cfg = getToolSearchConfig();
+  if (cfg.backend === "tool_router") {
+    const [toolRouterResult, adaptiveResult] = await Promise.allSettled([
+      searchDeferredToolsViaToolRouter(catalog, query, limit, {
+        includeSchema: options.includeSchema,
+        tenantId: options.tenantId,
+        agentContextHash: options.agentContextHash,
+      }),
+      adaptiveSearchDeferredTools(catalog, query, limit, options),
+    ]);
+
+    if (toolRouterResult.status === "fulfilled" && adaptiveResult.status === "fulfilled") {
+      return mergeBackendMatches(adaptiveResult.value, toolRouterResult.value, limit);
+    }
+    if (adaptiveResult.status === "fulfilled") {
+      if (toolRouterResult.status === "rejected") {
+        console.warn("[tool-search:bridge] tool-router backend failed, fallback to adaptive TS path", toolRouterResult.reason);
+      }
+      return adaptiveResult.value;
+    }
+    if (toolRouterResult.status === "fulfilled") {
+      console.warn("[tool-search:bridge] adaptive TS path failed, fallback to tool-router backend");
+      return toolRouterResult.value;
+    }
+    console.warn("[tool-search:bridge] both tool-router and adaptive search failed", {
+      toolRouterError: toolRouterResult.reason,
+      adaptiveError: adaptiveResult.reason,
+    });
+    const fallback = searchDeferredTools(catalog, query, limit, {
+      includeSchema: options.includeSchema,
+      queryVector: options.queryVector,
+    });
+    return fallback.map((match) => {
+      const resourceType = inferFallbackResourceType(match.name);
+      const domain = inferFallbackDomain(match.name, resourceType);
+      const domainGroups = inferFallbackDomainGroups(domain, resourceType);
+      return {
+        ...match,
+        resource_type: resourceType,
+        domain,
+        capability: domain.map((item) => `${item}.general`),
+        routing: {
+          intent: query,
+          confidence: 0.5,
+          top_p: 0.95,
+          domain_groups: domainGroups,
+          domain_candidates: domain,
+          primary_capability: `${domain[0] ?? "misc"}.general`,
+        },
+      } satisfies AdaptiveDeferredToolSearchMatch;
+    });
+  }
+  try {
+    return await adaptiveSearchDeferredTools(catalog, query, limit, options);
+  } catch (e) {
+    console.warn("[tool-search:bridge] adaptive search failed, fallback to legacy BM25", e);
+    const fallback = searchDeferredTools(catalog, query, limit, {
+      includeSchema: options.includeSchema,
+      queryVector: options.queryVector,
+    });
+    return fallback.map((match) => {
+      const resourceType = inferFallbackResourceType(match.name);
+      const domain = inferFallbackDomain(match.name, resourceType);
+      const domainGroups = inferFallbackDomainGroups(domain, resourceType);
+      return {
+        ...match,
+        resource_type: resourceType,
+        domain,
+        capability: domain.map((item) => `${item}.general`),
+        routing: {
+          intent: query,
+          confidence: 0.5,
+          top_p: 0.95,
+          domain_groups: domainGroups,
+          domain_candidates: domain,
+          primary_capability: `${domain[0] ?? "misc"}.general`,
+        },
+      } satisfies AdaptiveDeferredToolSearchMatch;
+    });
+  }
+}
+
+function mergeBackendMatches(
+  adaptive: AdaptiveDeferredToolSearchMatch[],
+  toolRouter: AdaptiveDeferredToolSearchMatch[],
+  limit: number,
+): AdaptiveDeferredToolSearchMatch[] {
+  const merged = new Map<string, AdaptiveDeferredToolSearchMatch>();
+  for (const match of adaptive) merged.set(match.name, match);
+  for (const match of toolRouter) {
+    if (!merged.has(match.name)) {
+      merged.set(match.name, match);
+      continue;
+    }
+    const current = merged.get(match.name);
+    if (current && match.score > current.score) {
+      merged.set(match.name, { ...current, score: match.score });
+    }
+  }
+  return [...merged.values()].slice(0, Math.max(1, limit));
+}
+
+function inferFallbackResourceType(name: string): ResourceType {
+  if (name.startsWith("mcp.")) return ResourceType.McpServer;
+  if (isRegisteredSkillChatToolName(name)) return ResourceType.Skill;
+  return ResourceType.Tool;
+}
+
+function inferFallbackDomain(name: string, resourceType: ResourceType): string[] {
+  if (resourceType === ResourceType.McpServer) return ["mcp"];
+  if (resourceType === ResourceType.Skill) return ["self"];
+  if (name === "search_web" || name === "fetch_web") return ["search"];
+  return [name.split(/[._-]/)[0]?.toLowerCase() || "misc"];
+}
+
+function inferFallbackDomainGroups(domains: string[], resourceType: ResourceType): string[] {
+  if (resourceType === ResourceType.McpServer) return ["integration"];
+  if (resourceType === ResourceType.Skill) return ["productivity"];
+  const first = domains[0] ?? "general";
+  switch (first) {
+    case "search":
+    case "browser":
+      return ["information"];
+    case "calendar":
+    case "reminder":
+    case "self":
+      return ["productivity"];
+    case "phone":
+    case "agent":
+      return ["communication"];
+    case "world":
+    case "aip":
+      return ["coordination"];
+    case "wallet":
+    case "budget":
+    case "shopping":
+      return ["commerce"];
+    case "desktop":
+    case "embodiment":
+    case "device":
+    case "smart_home":
+    case "vision":
+      return ["execution"];
+    case "weather":
+    case "clock":
+      return ["signals"];
+    default:
+      return ["general"];
+  }
 }
 
 /**
