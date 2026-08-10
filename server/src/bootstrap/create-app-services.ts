@@ -19,6 +19,7 @@ import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import type { ChatToolExecutionContext } from "../external-model/types.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
+import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { LivingInterimController, interimAckMessageId } from "../agent/interim-ack.js";
 import {
   formatAgentStylePrompt,
@@ -318,6 +319,9 @@ export async function createAppServices(): Promise<AppServices> {
 
   const sessionService = new SessionService();
   await getChatThreadPersistence().load();
+  // 滚动摘要增强器：trim 丢弃历史消息时，LLM 增量生成高质量 recap（模拟人类记忆，保留原意）。
+  // 无 API key 时返回 null（自动保持旧正则 recap），不影响对话主链路。
+  getChatThreadStore().setRecapSummarizer(createLlmRollingRecapSummarizer());
   const scheduleTaskService = new ScheduleTaskService();
   const weatherService = new WeatherService();
   const weatherPrefsService = new WeatherPrefsService();

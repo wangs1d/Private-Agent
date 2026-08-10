@@ -114,8 +114,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     return this.threads.thread(sessionId, this.systemPrompt);
   }
 
-  protected trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
-    this.threads.trimThread(msgs, maxMessages);
+  protected trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number, sessionId?: string): void {
+    this.threads.trimThread(msgs, maxMessages, sessionId);
   }
 
   // ── 子类可覆写的钩子（均有默认实现） ──────────────────────────────
@@ -235,7 +235,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // ★ 防串台已根源解决：afterTurnCompleted 在上一轮完成时已调用 foldCompletedToolChains
     //    移除 raw tool 结果。这里只需 trimThread 控制上下文长度。
     if (!ephemeral) {
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
+      this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
     }
 
     const effectiveStreamOpts = this.resolveEffectiveStreamOpts(streamOpts);
@@ -263,7 +263,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         );
         completed = true;
         if (!ephemeral) {
-          this.trimThread(msgs, streamOpts?.maxThreadMessages);
+          this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
           this.threads.afterTurnCompleted(sessionId, msgs);
         }
         return full;
@@ -326,7 +326,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       msgs.push({ role: "assistant", content: visible });
     }
     if (!ephemeral) {
-      this.trimThread(msgs, streamOpts?.maxThreadMessages);
+      this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
       this.threads.afterTurnCompleted(sessionId, msgs);
     }
     return visible;

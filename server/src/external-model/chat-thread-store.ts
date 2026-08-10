@@ -5,6 +5,7 @@ import { adoptLegacyMasterDelegateThread } from "./chat-thread-adopt.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
+import type { RecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
   compactValidChatMessages,
@@ -360,6 +361,11 @@ function extractRecapLinesFromMessages(messages: ChatCompletionMessageParam[]): 
   return lines;
 }
 
+/** 把 recap 行数组渲染为 recap 消息的 content（与 extractSessionRecapLines 双向兼容）。 */
+function buildSessionRecapContent(lines: string[]): string {
+  return `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${lines.map((l) => `- ${l}`).join("\n")}`;
+}
+
 function buildSessionRecapMessage(
   existingLines: string[],
   droppedMessages: ChatCompletionMessageParam[],
@@ -382,7 +388,7 @@ function buildSessionRecapMessage(
 
   return {
     role: "assistant",
-    content: `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${lines.join("\n")}`,
+    content: buildSessionRecapContent(lines),
   };
 }
 
@@ -541,6 +547,59 @@ export class ChatThreadStore {
   private readonly history = new Map<string, ChatCompletionMessageParam[]>();
 
   /**
+   * 可选的滚动摘要增强器（LLM 增量摘要）。
+   * 为 null 时保持旧的正则提取 recap，不影响对话主链路。
+   * 通过 setRecapSummarizer 注入（bootstrap 装配）。
+   */
+  private recapSummarizer: RecapSummarizer | null = null;
+
+  /**
+   * 每个 session 的增强序号：trim 触发增强时递增。
+   * 增强完成回写前检查序号是否仍为触发值，防止旧结果覆盖期间新生成的 recap。
+   */
+  private readonly recapEnhanceSeq = new Map<string, number>();
+
+  /** 注入滚动摘要增强器（null 关闭）。 */
+  setRecapSummarizer(summarizer: RecapSummarizer | null): void {
+    this.recapSummarizer = summarizer;
+  }
+
+  /**
+   * 把「被 trim 丢弃的历史消息」异步交给 LLM 增强 recap。
+   * - 不阻塞 trimThread 主链路（fire-and-forget）
+   * - 失败静默：保留同步生成的正则 recap
+   * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果
+   */
+  private async enhanceRecap(
+    sessionId: string,
+    existingLines: string[],
+    droppedMessages: ChatCompletionMessageParam[],
+  ): Promise<void> {
+    const summarizer = this.recapSummarizer;
+    if (!summarizer || !sessionId || droppedMessages.length === 0) return;
+    const seq = (this.recapEnhanceSeq.get(sessionId) ?? 0) + 1;
+    this.recapEnhanceSeq.set(sessionId, seq);
+    try {
+      const lines = await summarizer({ existingLines, droppedMessages });
+      if (!lines || lines.length === 0) return;
+      // 期间又发生了 trim → recap 已有更新版本，丢弃本次结果，避免覆盖
+      if (this.recapEnhanceSeq.get(sessionId) !== seq) return;
+      this.applyEnhancedRecap(sessionId, lines);
+    } catch {
+      // 静默失败：保留同步正则 recap
+    }
+  }
+
+  private applyEnhancedRecap(sessionId: string, lines: string[]): void {
+    const msgs = this.history.get(sessionId);
+    if (!msgs) return;
+    const index = msgs.findIndex(isSessionRecapMessage);
+    if (index < 0) return; // recap 已被移除（fold/removeUserMessageAndAfter），跳过
+    msgs[index] = { ...msgs[index], content: buildSessionRecapContent(lines) };
+    this.persistence?.scheduleSave(sessionId, msgs);
+  }
+
+  /**
    * 可选的「会话首条 system」提供者。
    *
    * 设计目的：让 RuntimeKernel minimal 模式下，sessionSys（薄身份 system）由 thread-store
@@ -601,7 +660,7 @@ export class ChatThreadStore {
     return t;
   }
 
-  trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number): void {
+  trimThread(msgs: ChatCompletionMessageParam[], maxMessages?: number, sessionId?: string): void {
     const compacted = sanitizeToolCallMessageChain(compactValidChatMessages(msgs), "[chat-thread-store]");
     msgs.length = 0;
     msgs.push(...repairKimiAssistantToolCallReasoning(compacted));
@@ -613,7 +672,7 @@ export class ChatThreadStore {
 
     // 优先按天切分：保留「当天全部消息」+「历史按天整体 recap」。
     // 这与前端「当天渲染、历史折叠」语义对齐：今天对话不丢，历史压成摘要。
-    if (this.trimByDayBoundary(msgs, config)) {
+    if (this.trimByDayBoundary(msgs, config, sessionId)) {
       return;
     }
 
@@ -621,7 +680,7 @@ export class ChatThreadStore {
     if (msgs.length <= 1 + config.maxMessages) {
       const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
       if (totalTokens <= config.maxTokens) return;
-      this.smartTrimByTokens(msgs, config);
+      this.smartTrimByTokens(msgs, config, sessionId);
       return;
     }
 
@@ -635,9 +694,12 @@ export class ChatThreadStore {
     if (recap) msgs.push(recap);
     msgs.push(...trimResult.kept);
 
+    // 丢弃消息较多时异步交给 LLM 滚动摘要增强（不阻塞主链路）
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, trimResult.dropped).catch(() => {});
+
     const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     if (totalTokens > config.maxTokens) {
-      this.smartTrimByTokens(msgs, config);
+      this.smartTrimByTokens(msgs, config, sessionId);
     }
   }
 
@@ -653,6 +715,7 @@ export class ChatThreadStore {
   private trimByDayBoundary(
     msgs: ChatCompletionMessageParam[],
     config: typeof DEFAULT_SMART_TRIM_CONFIG,
+    sessionId?: string,
   ): boolean {
     if (msgs.length <= 1) return true; // 仅 system，无需压缩
 
@@ -691,6 +754,11 @@ export class ChatThreadStore {
     // 仅"前天及更早"的历史整体压成一条 recap
     const recap = buildSessionRecapMessage(separated.recapLines, olderMessages);
 
+    // 历史消息丢弃后异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留正则 recap）
+    if (recap && olderMessages.length > 0) {
+      this.enhanceRecap(sessionId ?? "", separated.recapLines, olderMessages).catch(() => {});
+    }
+
     // 重组后 token 检查：若当天+昨天消息本身就超限，让上层走 smartTrimByTokens
     const sysTokens = estimateMessageTokens(sys);
     const recapTokens = recap ? estimateMessageTokens(recap) : 0;
@@ -711,6 +779,7 @@ export class ChatThreadStore {
   private smartTrimByTokens(
     msgs: ChatCompletionMessageParam[],
     config: typeof DEFAULT_SMART_TRIM_CONFIG,
+    sessionId?: string,
   ): void {
     if (msgs.length <= 2) return;
     const sys = msgs[0];
@@ -733,6 +802,11 @@ export class ChatThreadStore {
 
     const droppedMessages = olderMessages.filter((msg) => !preservedOlder.includes(msg));
     const recap = buildSessionRecapMessage(separated.recapLines, droppedMessages);
+
+    // 丢弃消息异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留正则 recap）
+    if (droppedMessages.length > 0) {
+      this.enhanceRecap(sessionId ?? "", separated.recapLines, droppedMessages).catch(() => {});
+    }
 
     msgs.length = 0;
     msgs.push(sys);
@@ -777,7 +851,7 @@ export class ChatThreadStore {
       msgs.push(userMsg);
     }
     msgs.push({ role: "assistant", content: annotateTimeframe(trimmed, assistantAt, now) });
-    this.trimThread(msgs, maxThreadMessages);
+    this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 

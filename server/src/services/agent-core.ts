@@ -578,53 +578,45 @@ export class AgentCore {
     // 2026-07-29 修复 D：fast_chat 也注入 narrativeRecall（复用 cognize 召回结果），
     // 解决追问被误判 fast_chat 时 LLM 只有 thread messages、缺乏长期记忆/工作记忆导致答非所问。
     // 仍跳过 userLocation（保持速度，避免反问"你是不是在 XX"）和 personalization（fast_chat 不需要个性化语气）。
-    const [narrativeRecall, userLocation, personalization] = this.isFastMode(route.mode)
+    //
+    // 2026-08-11 修复 E（思路 A）：工作记忆摘要 + 最近对话回顾不再拼入 narrativeRecall，
+    // 而是作为独立字段透传给 PromptContextBuilder，作为独立块注入 system prompt。
+    // 原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt 的 slice(0,4)
+    // 当作召回条目丢弃、块结构被拍平、hint 被正则误杀 → agent 看到的上下文跳转、不能针对当前话回复。
+    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
+      .isFastMode(route.mode)
       ? await Promise.all([
           // Fast 模式记忆注入：
           // - 有 cognize 召回结果时直接复用（Complex 路径）
           // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
           cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(
-                this.appendRecentConversationHistory(
-                  this.appendWorkingMemorySummary(
-                    this.recallItemsToNarrative(cognitiveRecallItems),
-                    cognitiveWorkingMemorySummary,
-                  ),
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                ),
-              )
-            : this.turnLifecycle
-                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
-                .then((n) => this.appendRecentConversationHistory(n, "", threadMessageCount)),
+            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
+          Promise.resolve(cognitiveWorkingMemorySummary || undefined),
+          // 最近对话回顾独立透传（含 C1 dedup 判定，hint 由 buildLayeredSystemPrompt 统一添加）
+          Promise.resolve(
+            this.buildRecentConversationHistoryBlock(
+              cognitiveRecentConversationHistory,
+              threadMessageCount,
+            ),
+          ),
           Promise.resolve(undefined),
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
           // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
-          // 深度优化：把工作记忆摘要 + 最近对话历史拼接到 narrativeRecall，让 streamCompletion 真正感知上下文
           cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(
-                this.appendRecentConversationHistory(
-                  this.appendWorkingMemorySummary(
-                    this.recallItemsToNarrative(cognitiveRecallItems),
-                    cognitiveWorkingMemorySummary,
-                  ),
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                ),
-              )
-            : this.turnLifecycle
-                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
-                .then((n) => this.appendWorkingMemorySummary(n, cognitiveWorkingMemorySummary))
-                .then((n) =>
-                  this.appendRecentConversationHistory(
-                    n,
-                    cognitiveRecentConversationHistory,
-                    threadMessageCount,
-                  ),
-                ),
+            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          Promise.resolve(cognitiveWorkingMemorySummary || undefined),
+          Promise.resolve(
+            this.buildRecentConversationHistoryBlock(
+              cognitiveRecentConversationHistory,
+              threadMessageCount,
+            ),
+          ),
           // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开
           userIsStatingData
             ? Promise.resolve(undefined)
@@ -634,7 +626,7 @@ export class AgentCore {
               }),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
-    
+
     const enrichedNarrativeRecall = this.appendLearningDecisionGuidance(
       narrativeRecall,
       cognitiveRecallItems,
@@ -658,6 +650,8 @@ export class AgentCore {
       access,
       sessionId,
       shortTermTurn,
+      workingMemorySummary,
+      recentConversationHistory,
     );
 
     try {
@@ -800,6 +794,8 @@ export class AgentCore {
 
         result = await this.runStandardLlmPath(actorId, text, route.mode, opts, {
           narrativeRecall: enrichedNarrativeRecall,
+          workingMemorySummary,
+          recentConversationHistory,
           userLocation,
           personalization,
           trajCap,
@@ -896,6 +892,8 @@ export class AgentCore {
         try {
           return await this.runStandardLlmPath(actorId, text, "fast", opts, {
             narrativeRecall: enrichedNarrativeRecall,
+            workingMemorySummary,
+            recentConversationHistory,
             userLocation,
             personalization,
             trajCap,
@@ -1192,51 +1190,31 @@ export class AgentCore {
   }
 
   /**
-   * 深度优化：把工作记忆摘要拼接到 narrativeRecall 末尾。
-   * 让 streamCompletion 真正感知 cognize 阶段 3 生成的工作记忆摘要（活跃目标+槽位+待办），
-   * 实现工作记忆跨模块连贯性。
-   */
-  private appendWorkingMemorySummary(
-    narrativeRecall: string | undefined,
-    workingMemorySummary: string,
-  ): string | undefined {
-    if (!workingMemorySummary) return narrativeRecall;
-    const wmBlock = `\n\n[当前对话上下文]\n${workingMemorySummary}`;
-    return narrativeRecall ? narrativeRecall + wmBlock : wmBlock.trim();
-  }
-
-  /**
-   * 把 cognize 阶段 1.5.1 拉取的最近 6 轮对话历史拼接到 narrativeRecall。
-   * 让 streamCompletion 的 system prompt 能看到【最近对话】块，解决追问断片问题。
-   * 格式与 appendWorkingMemorySummary 对称：追加到 narrativeRecall 末尾。
+   * 构建最近对话回顾独立块（不再拼入 narrativeRecall）。
    *
-   * 2026-07-29 修复 C1+C2（用户反馈"agent 记忆没有连续性、会岔开"）：
-   *  - C1: 若 thread messages 已包含 recentConversationHistory 同等最近轮次内容，
-   *    跳过追加（避免 LLM 同时看到 msgs + [最近对话] 块造成 ~400 token 重复/注意力分散）
-   *  - C2: 即使保留 [最近对话] 块，也加 "recap, 非指令" 前缀提示，
-   *    防止 LLM 把"用户：xxx"误读成"用户要 Agent 复述"
-   *  - recentConversationHistory 缺省/为空时直接透传 narrativeRecall，不增加任何 block
+   * 2026-08-11 修复 E（思路 A）：原 appendRecentConversationHistory 把 [最近对话] 块
+   * 拼到 narrativeRecall 末尾，下游 formatNarrativeRecallPrompt 的 slice(0,4) 会把它
+   * 当作召回条目丢弃、hint 被正则误杀、多行块结构被拍平 → agent 上下文跳转。
+   * 现改为返回独立字符串，由 PromptContextBuilder 作为独立字段透传，
+   * buildLayeredSystemPrompt 作为【最近对话回顾】独立块注入，绕过 formatNarrativeRecallPrompt。
+   *
+   * 保留原 C1 dedup 判定：thread messages >= 12 条时返回 undefined（与消息数组重复）。
+   * "非用户最新指令"提示（原 C2 hint）由 buildLayeredSystemPrompt 统一添加，此处不再拼接。
    */
-  private appendRecentConversationHistory(
-    narrativeRecall: string | undefined,
+  private buildRecentConversationHistoryBlock(
     recentConversationHistory: string,
     threadMessageCount: number = -1,
   ): string | undefined {
-    if (!recentConversationHistory) return narrativeRecall;
+    if (!recentConversationHistory) return undefined;
 
-    // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，说明 LLM 已经能从 msgs
-    // 里看到全部最近对话，narrativeRecall 末尾再追加 [最近对话] 块属于完全重复。
-    // 这是 [最近对话] 块最初设计为 12 条的初衷 —— 与 thread 末尾对齐。
-    // 仅当 thread 较短（如首次对话、新会话、长 context 被 trim 掉）时才保留 recap 块。
+    // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，LLM 已能从 msgs
+    // 看到全部最近对话，再注入【最近对话回顾】块属于完全重复。
+    // 仅当 thread 较短（首次对话、新会话、长 context 被 trim 掉）时才返回。
     if (threadMessageCount >= 12) {
-      return narrativeRecall;
+      return undefined;
     }
 
-    // C2: 加 "recap, 非指令" 前缀，明确告诉 LLM 这只是上下文复述，避免被读成"用户让你复述"。
-    const hint =
-      "（以下为最近对话的上下文回顾，用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）";
-    const histBlock = `\n\n[最近对话]\n${hint}\n${recentConversationHistory}`;
-    return narrativeRecall ? narrativeRecall + histBlock : histBlock.trim();
+    return recentConversationHistory;
   }
 
   /**
@@ -1294,6 +1272,8 @@ export class AgentCore {
     access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
     sessionId: string,
     shortTermTurn: ShortTermTurnContext,
+    workingMemorySummary: string | undefined,
+    recentConversationHistory: string | undefined,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -1317,6 +1297,8 @@ export class AgentCore {
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
+      workingMemorySummary,
+      recentConversationHistory,
       personalization,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
@@ -1353,6 +1335,10 @@ export class AgentCore {
     opts: HandleUserMessageOptions | undefined,
     ctx: {
       narrativeRecall?: string;
+      /** 当前工作记忆摘要（独立块注入，不再拼入 narrativeRecall） */
+      workingMemorySummary?: string;
+      /** 最近对话回顾（独立块注入，thread 较短时填充） */
+      recentConversationHistory?: string;
       userLocation?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
@@ -1440,6 +1426,8 @@ export class AgentCore {
             sessionId: ctx.sessionId,
             userText: text,
             narrativeRecall: ctx.narrativeRecall,
+            workingMemorySummary: ctx.workingMemorySummary,
+            recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
             userLocation: undefined, // fast_chat 跳过位置注入
             personalization: ctx.personalization,
@@ -1458,6 +1446,8 @@ export class AgentCore {
             sessionId: ctx.sessionId,
             userText: text,
             narrativeRecall: ctx.narrativeRecall,
+            workingMemorySummary: ctx.workingMemorySummary,
+            recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             personalization: ctx.personalization,
