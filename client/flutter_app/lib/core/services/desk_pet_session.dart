@@ -73,7 +73,7 @@ class DeskPetSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Windows 独立桌宠：默认直接使用 Tauri 透明桌宠窗口。
+  /// Windows 独立桌宠：默认直接使用 PySide6 (sphere-overlay-py) 透明桌宠窗口。
   Future<bool> launchOverlayDeskPet() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
@@ -86,7 +86,7 @@ class DeskPetSession extends ChangeNotifier {
     }
 
     _error = SphereOverlayLauncher.overlayUnavailableReason ??
-        "桌宠启动失败\n请确认 sphere-overlay-tauri 已构建（npm run tauri build），且 agent-sphere-avatar 已执行 npm run build。";
+        "桌宠启动失败\n请确认 sphere-overlay-py 依赖已安装（python -m pip install -r requirements.txt），且 agent-sphere-avatar 已执行 npm run build。";
     notifyListeners();
     return false;
   }

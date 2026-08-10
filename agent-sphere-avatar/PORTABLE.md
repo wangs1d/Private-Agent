@@ -19,7 +19,7 @@ agent-sphere-avatar/          ← 复制此目录
 
 | 目录 | 用途 |
 |------|------|
-| `sphere-overlay-tauri/` | Tauri 透明桌宠 |
+| `sphere-overlay-py/` | PySide6 透明桌宠 |
 | `server/web/chat/` | PAI 网页聊天 iframe 宿主 |
 | `client/flutter_app/` | Flutter WebView 宿主 |
 
@@ -86,7 +86,7 @@ host.command({ action: "roam", strength: 1.1 });
 | 文件 | 场景 | WebSocket |
 |------|------|-----------|
 | `embed.html` | 网页侧边栏、聊天浮层 | 推荐 `?wsOff=1`，由宿主转发 |
-| `overlay.html` | Tauri 桌宠、全屏透明窗 | 直连 WS（传 `?ws=&sessionId=`） |
+| `overlay.html` | PySide6 桌宠、全屏透明窗 | 直连 WS（传 `?ws=&sessionId=`） |
 
 ## postMessage 协议（单一事实来源）
 
@@ -181,5 +181,5 @@ npm run build:chat    # base=/chat/assets/avatar/ + 复制到 server/web/chat/as
 **Q: 模型资源可以换吗？**  
 替换 `public/models/DG2.obj` 并调整 `src/constants/model-proportions.ts`。
 
-**Q: 不需要 Tauri 桌宠？**  
-只复制 `agent-sphere-avatar/`，忽略 `sphere-overlay-tauri/` 即可。
+**Q: 不需要独立桌宠？**  
+只复制 `agent-sphere-avatar/`，忽略 `sphere-overlay-py/` 即可。

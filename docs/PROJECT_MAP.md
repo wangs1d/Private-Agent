@@ -24,7 +24,7 @@
 | 目录 | 角色 | 说明 |
 | --- | --- | --- |
 | `openclaw-plugins/` | 外部插件 | 比如微信桥接插件 |
-| `sphere-overlay-tauri/` | 桌面悬浮层 | Tauri / overlay 相关 |
+| `sphere-overlay-py/` | 桌面悬浮层 | PySide6 / overlay 相关 |
 | `scripts/` | 根级脚本 | 启动、端口释放、桥接安装等 |
 | `docs/` | 说明文档 | 设计、模板、开发说明 |
 
