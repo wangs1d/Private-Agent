@@ -207,6 +207,18 @@ export type BuildPromptContextInput = {
   interruptedContext?: string;
   userLocation?: string;
   personalization?: PersonalizationPromptSlice;
+  /**
+   * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
+   * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
+   * 避免被 formatNarrativeRecallPrompt 的 slice(0,4) 截断或块结构被拍平。
+   */
+  workingMemorySummary?: string;
+  /**
+   * 最近对话回顾（thread 较短时注入，用于指代消解）。
+   * 仅在 thread 消息 < 12 条时填充（由 agent-core 做 dedup 判定）。
+   * 作为独立块注入，"非用户最新指令"提示由 buildLayeredSystemPrompt 统一添加。
+   */
+  recentConversationHistory?: string;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
   /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
   userPattern?: {
@@ -459,6 +471,17 @@ export class PromptContextBuilder {
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
     const narrativeRecallLimit = ambiguousFollowUp ? 400 : 800;
     const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), narrativeRecallLimit);
+    // 工作记忆摘要 / 最近对话回顾：作为独立块注入，不走 formatNarrativeRecallPrompt。
+    // 修复"上下文跳转"：原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt
+    // 的 slice(0,4) 当作召回条目丢弃，或块结构被拍平、hint 被正则误杀。
+    // 追问场景适度压缩（仍注入，保留指代消解线索），非追问保持原长度。
+    const workingMemorySummaryLimit = ambiguousFollowUp ? 300 : 600;
+    const workingMemorySummary = compactPromptBlock(input.workingMemorySummary, workingMemorySummaryLimit);
+    const recentConversationHistoryLimit = ambiguousFollowUp ? 500 : 900;
+    const recentConversationHistory = compactPromptBlock(
+      input.recentConversationHistory,
+      recentConversationHistoryLimit,
+    );
     const compactDailyDigest = compactPromptBlock(dailyDigest, 420);
     // followUpAnchor 追问场景扩容：180 → 400 字，增加指代消解线索
     const followUpAnchorLimit = ambiguousFollowUp ? 400 : 180;
@@ -565,6 +588,9 @@ export class PromptContextBuilder {
       ...(dedupedNarrativeRecall
         ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
+      // 工作记忆 / 最近对话回顾：独立块，不参与跨字段语义去重（结构化上下文，非召回条目）
+      ...(workingMemorySummary ? { workingMemorySummary } : {}),
+      ...(recentConversationHistory ? { recentConversationHistory } : {}),
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
       ...(userProfileFromManagerCompact ? { userProfileSummary: userProfileFromManagerCompact } : {}),
       ...(memoryContinuityCompact ? { memoryContinuity: memoryContinuityCompact } : {}),
@@ -613,6 +639,8 @@ export class PromptContextBuilder {
       userProfile: redact(ctx.userProfile),
       taskContext: redact(ctx.taskContext),
       sessionRecap: redact(ctx.sessionRecap),
+      workingMemorySummary: redact(ctx.workingMemorySummary),
+      recentConversationHistory: redact(ctx.recentConversationHistory),
     };
   }
 
@@ -647,7 +675,9 @@ export class PromptContextBuilder {
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
       Boolean(memory.toolPlan) ||
-      Boolean(memory.currentTime)
+      Boolean(memory.currentTime) ||
+      Boolean(memory.workingMemorySummary) ||
+      Boolean(memory.recentConversationHistory)
     );
   }
 

@@ -101,6 +101,10 @@ export type OrchestrateTaskOptions = {
   visionFrames?: VisionFrame[];
   interruptedContext?: string;
   narrativeRecall?: string;
+  /** 当前工作记忆摘要（独立块注入，不再拼入 narrativeRecall） */
+  workingMemorySummary?: string;
+  /** 最近对话回顾（独立块注入，thread 较短时填充） */
+  recentConversationHistory?: string;
   personalization?: PersonalizationPromptSlice;
   onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
   onToolExecuted?: (info: ToolExecutedInfo) => void;
@@ -1301,6 +1305,8 @@ export class MasterAgentCoordinator {
       sessionId: opts?.sessionId,
       userText: this.currentTurnUserMessage ?? undefined,
       narrativeRecall: opts?.narrativeRecall,
+      workingMemorySummary: opts?.workingMemorySummary,
+      recentConversationHistory: opts?.recentConversationHistory,
       personalization: opts?.personalization,
       interruptedContext: opts?.interruptedContext,
       userLocation: opts?.userLocation,

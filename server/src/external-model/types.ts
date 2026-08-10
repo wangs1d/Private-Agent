@@ -111,6 +111,18 @@ export type AgentPromptMemoryContext = {
    * complex 路由时注入，建议 LLM 按规划顺序调用工具，避免乱试或遗漏关键工具。
    */
   toolPlan?: string;
+  /**
+   * 当前工作记忆摘要（活跃目标 / 已知槽位 / 待办），来自 WorkingMemoryCortex.toSummary。
+   * 作为独立块注入 system prompt（不再拼入 narrativeRecall），避免被 formatNarrativeRecallPrompt
+   * 的 slice(0,4) 截断或块结构被拍平。解决"上下文跳转、不能针对当前话回复"的连续性问题。
+   */
+  workingMemorySummary?: string;
+  /**
+   * 最近对话回顾（thread 较短时注入，用于指代消解与话题衔接）。
+   * 仅在 thread 消息 < 12 条时填充（与消息数组重复时跳过），块内含"非用户最新指令"提示。
+   * 作为独立块注入，避免被 formatNarrativeRecallPrompt 当作召回条目丢弃。
+   */
+  recentConversationHistory?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

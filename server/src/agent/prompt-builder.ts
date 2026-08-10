@@ -615,7 +615,9 @@ export function buildLayeredSystemPrompt(
     !memory?.dreamMemory &&
     !memory?.followUpAnchor &&
     !memory?.scheduleSnapshot &&
-    !memory?.currentTime
+    !memory?.currentTime &&
+    !memory?.workingMemorySummary &&
+    !memory?.recentConversationHistory
   ) {
     return baseSystem.trim();
   }
@@ -636,6 +638,11 @@ export function buildLayeredSystemPrompt(
   if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
+  if (memory.workingMemorySummary) parts.push(`【当前工作记忆】\n${memory.workingMemorySummary}`);
+  if (memory.recentConversationHistory)
+    parts.push(
+      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${memory.recentConversationHistory}`,
+    );
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
   if (memory.memoryPreferences) parts.push(`【用户偏好】\n${memory.memoryPreferences}`);
   if (memory.memoryFacts) parts.push(`【用户事实】\n${memory.memoryFacts}`);
@@ -691,7 +698,9 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.memoryContinuity ||
       memory?.followUpAnchor ||
       memory?.scheduleSnapshot ||
-      memory?.currentTime
+      memory?.currentTime ||
+      memory?.workingMemorySummary ||
+      memory?.recentConversationHistory
   );
 }
 
@@ -728,6 +737,11 @@ export function buildLayeredSystemPromptSections(
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
   if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
   if (m.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${m.narrativeRecall}`);
+  if (m.workingMemorySummary) dynamicContext.push(`【当前工作记忆】\n${m.workingMemorySummary}`);
+  if (m.recentConversationHistory)
+    dynamicContext.push(
+      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${m.recentConversationHistory}`,
+    );
   if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
   if (m.memoryPreferences) dynamicContext.push(`【用户偏好】\n${m.memoryPreferences}`);
   if (m.memoryFacts) dynamicContext.push(`【用户事实】\n${m.memoryFacts}`);
