@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync, renameSync } from "node:fs";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -7,17 +8,17 @@ import type { TrajectoryPromotionPipeline } from "./skill-promotion-pipeline.js"
 
 export type TrajectoryToolRecord = { name: string; ok: boolean; snippet?: string };
 
-export type HermesObservePhase = {
+export type EvolutionObservePhase = {
   ts: string;
-  kind: "user_turn" | "tool_batch" | "plan_executed" | "self_check" | "hermes_reflect";
+  kind: "user_turn" | "tool_batch" | "plan_executed" | "self_check" | "evolution_reflect";
   detail?: Record<string, unknown>;
 };
 
 /**
- * Hermes 风格：observe（轨迹写入）→ reflect（启发式）→ consolidate（升格 Skill 草稿，需人工审核上架）。
+ * 进化循环风格：observe（轨迹写入）→ reflect（启发式）→ consolidate（升格 Skill 草稿，需人工审核上架）。
  *
  * ENV:
- * - `AGENT_TRAJECTORY_JSONL`: 轨迹文件（默认 data/hermes-trajectories.jsonl）
+ * - `AGENT_TRAJECTORY_JSONL`: 轨迹文件（默认 data/evolution-trajectories.jsonl）
  * - `AGENT_SKILL_PROMOTION_DRAFTS_DIR`: 草稿目录（默认 data/skill-promotion-drafts）
  * - `AGENT_SKILL_PROMOTION_MIN_TOOLS` / `MIN_UNIQUE_TOOLS`（默认 2）
  * - `AGENT_SKILL_PROMOTION_REQUIRE_PE_PASS=1`: 若在 PE 环下则要求未 exhaustedRetries 才升格
@@ -47,7 +48,22 @@ export class TrajectorySkillPromotionService {
   constructor(private readonly promotionPipeline?: TrajectoryPromotionPipeline | null) {
     this.trajectoryPath =
       process.env.AGENT_TRAJECTORY_JSONL?.trim() ||
-      join(process.cwd(), "data", "hermes-trajectories.jsonl");
+      join(process.cwd(), "data", "evolution-trajectories.jsonl");
+    // 兼容迁移：旧文件名 hermes-trajectories.jsonl 存在且新文件不存在时，重命名接管历史轨迹
+    const legacyPath = join(process.cwd(), "data", "hermes-trajectories.jsonl");
+    try {
+      if (
+        !process.env.AGENT_TRAJECTORY_JSONL?.trim() &&
+        this.trajectoryPath.endsWith("evolution-trajectories.jsonl") &&
+        existsSync(legacyPath) &&
+        !existsSync(this.trajectoryPath)
+      ) {
+        renameSync(legacyPath, this.trajectoryPath);
+        console.log(`[TrajectorySkillPromotion] 旧轨迹文件已迁移: ${legacyPath} → ${this.trajectoryPath}`);
+      }
+    } catch (err) {
+      console.warn("[TrajectorySkillPromotion] 轨迹文件迁移失败（忽略，继续用新文件）:", err);
+    }
     this.draftsDir =
       process.env.AGENT_SKILL_PROMOTION_DRAFTS_DIR?.trim() ||
       join(process.cwd(), "data", "skill-promotion-drafts");
@@ -78,7 +94,7 @@ export type TrajectoryCaptureMeta = {
 
 export class TrajectoryCapture {
   private readonly tools: TrajectoryToolRecord[] = [];
-  private readonly phases: HermesObservePhase[] = [];
+  private readonly phases: EvolutionObservePhase[] = [];
 
   constructor(
     private readonly ctx: {
@@ -122,8 +138,8 @@ export class TrajectoryCapture {
     });
   }
 
-  /** Hermes consolidate：在满足闸门时写入 Skill 草稿 JSON（非自动上架）。 */
-  async finalizeHermes(
+  /** 进化循环 consolidate：在满足闸门时写入 Skill 草稿 JSON（非自动上架）。 */
+  async finalizeEvolution(
     assistantFinal: string,
     meta: TrajectoryCaptureMeta,
   ): Promise<{ trajectoryLine: boolean; draftPath?: string }> {
@@ -173,7 +189,7 @@ export class TrajectoryCapture {
       description: `由轨迹自动提炼：${reflectSummary}. 用户任务摘要：${this.ctx.userText.slice(0, 140)}`,
       derivedFromTrajectory: traceDigest,
       toolSequenceHint: Array.from(uniq.values()),
-      hermes_reflect: `成功工具计数=${okTools.length}；distinct=${uniq.size}`,
+      evolution_reflect: `成功工具计数=${okTools.length}；distinct=${uniq.size}`,
       proceduralHint:
         meta.pePlan ?
           `按计划 goal:「${meta.pePlan.goal}」，关键步骤：` +

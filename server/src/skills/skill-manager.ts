@@ -2,7 +2,7 @@
  * Skill 管理器 - 管理 Skill 的生命周期、权限和配置
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, renameSync } from "fs";
 import { dirname, join, extname } from "path";
 import type { ToolContext } from "../tools/tool-registry.js";
 import type {
@@ -14,6 +14,8 @@ import type {
   SkillMetadata,
   SkillHandler,
   SkillExecutionContext,
+  ProceduralSkillEntry,
+  SkillUsageStats,
 } from "./types.js";
 import { SkillValidator } from "./skill-validator.js";
 import { SkillSandbox } from "./skill-sandbox.js";
@@ -26,6 +28,34 @@ export class SkillManager {
   /** 若设置，则 `setEnabled` 后写入 JSON；启动时在全部 Skill 注册完成后调用 `loadEnabledFromDisk`。 */
   private enabledPersistPath: string | null = null;
 
+  /**
+   * procedural 技能（过程式文档）索引。
+   *
+   * 与 code 技能（this.skills）分离管理：
+   *  - code 技能有 handler，由 execute() 调用
+   *  - procedural 技能只有 SKILL.md 文档，由 skill_view 工具读取作为 LLM 上下文
+   *
+   * 两者在 list() 中统一返回 manifest，用于注入 prompt 的轻量索引。
+   */
+  private readonly proceduralSkills = new Map<string, ProceduralSkillEntry>();
+  /** procedural 技能存储根目录（默认 data/skills）；传 null 关闭磁盘持久化。 */
+  private proceduralSkillsDir: string | null = null;
+
+  /**
+   * 自我进化 code 技能存储根目录（默认 data/skills-evolved）。
+   * registerFromCode 注册成功后把 metadata + handlerCode 写到磁盘，
+   * loadEvolvedSkillsFromDisk 启动时扫描恢复——保证"越用越强"的技能跨重启存活。
+   */
+  private evolvedSkillsDir: string | null = null;
+
+  /**
+   * 技能使用统计（Curator 质量治理用）。
+   * useCount / viewCount / patchCount / lastActivityAt 四维指标。
+   * code 技能在 execute() 成功时记录 use；procedural 技能在 view/patch 时记录。
+   * 内存态，不持久化（仅用于运行期质量判断与日志）。
+   */
+  private readonly usageStats = new Map<string, SkillUsageStats>();
+
   constructor(sandbox?: SkillSandbox) {
     this.sandbox = sandbox || new SkillSandbox();
   }
@@ -33,6 +63,31 @@ export class SkillManager {
   /** 持久化文件路径（`data/skill-enabled.json`）；传 `null` 关闭落盘。 */
   configureEnabledPersistence(filePath: string | null): void {
     this.enabledPersistPath = filePath;
+  }
+
+  /**
+   * 配置自我进化 code 技能存储根目录（如 `data/skills-evolved`）。
+   *
+   * 设置后 registerFromCode 会把 { metadata, handlerCode } 写到
+   * `<dir>/<category>/<name>/skill.json`；loadEvolvedSkillsFromDisk 扫描恢复。
+   * 传 null 关闭持久化（仅内存）。
+   */
+  configureEvolvedSkillsDir(dir: string | null): void {
+    this.evolvedSkillsDir = dir;
+  }
+
+  /**
+   * 配置 procedural 技能存储根目录（如 `data/skills`）。
+   *
+   * 设置后：
+   *  - registerProceduralSkill 会把 SKILL.md + skill.meta.json 写到 `<dir>/<category>/<name>/`
+   *  - loadProceduralSkillsFromDisk 会扫描该目录加载已有 procedural 技能
+   *  - patchProceduralSkill 会原地更新 SKILL.md
+   *
+   * 传 null 关闭 procedural 技能的磁盘持久化（仅内存）。
+   */
+  configureProceduralSkillsDir(dir: string | null): void {
+    this.proceduralSkillsDir = dir;
   }
 
   /**
@@ -169,6 +224,8 @@ export class SkillManager {
     try {
       const skill: SkillDefinition = { metadata, handler };
       this.register(skill, options);
+      // 注册成功后持久化到磁盘（若配置了 evolvedSkillsDir），保证跨重启存活
+      this.persistEvolvedSkill(metadata, handlerCode);
       return { ok: true, skillName: metadata.name };
     } catch (err) {
       return {
@@ -176,6 +233,445 @@ export class SkillManager {
         error: `注册 Skill 失败: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  }
+
+  /**
+   * 把自我进化 code 技能（metadata + handlerCode）写到磁盘。
+   *
+   * 文件：`<evolvedSkillsDir>/<category>/<name>/skill.json`
+   * category 取 tags[0]（净化后），缺失时用 "evolved"。
+   * 磁盘写入失败仅告警，不影响注册结果（内存已可用）。
+   */
+  private persistEvolvedSkill(metadata: SkillMetadata, handlerCode: string): void {
+    if (!this.evolvedSkillsDir) return;
+    try {
+      const category =
+        (metadata.tags?.[0] ?? "evolved").replace(/[^a-zA-Z0-9_-]/g, "_") || "evolved";
+      const skillDir = join(this.evolvedSkillsDir, category, metadata.name);
+      mkdirSync(skillDir, { recursive: true });
+      const payload = { metadata, handlerCode };
+      writeFileSync(
+        join(skillDir, "skill.json"),
+        JSON.stringify(payload, null, 2),
+        "utf8",
+      );
+      console.log(`💾 自我进化技能已持久化: ${metadata.name} → ${skillDir}`);
+    } catch (err) {
+      console.warn(
+        `[SkillManager] 持久化自我进化技能 ${metadata.name} 失败:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  /**
+   * 从磁盘扫描加载所有自我进化 code 技能。
+   *
+   * 扫描 evolvedSkillsDir 下的 `<category>/<name>/skill.json`，读取 metadata +
+   * handlerCode 重新 registerFromCode 恢复。在 bootstrap 启动期调用一次。
+   *
+   * 安全：恢复仍走 registerFromCode 的安全扫描 + new Function 隔离编译路径。
+   * 恢复失败（如 handlerCode 已失效）仅跳过并计数，不影响其余技能。
+   */
+  loadEvolvedSkillsFromDisk(): { loaded: number; skipped: number } {
+    if (!this.evolvedSkillsDir || !existsSync(this.evolvedSkillsDir)) {
+      return { loaded: 0, skipped: 0 };
+    }
+    let loaded = 0;
+    let skipped = 0;
+    try {
+      const categories = readdirSync(this.evolvedSkillsDir);
+      for (const category of categories) {
+        if (category.startsWith(".")) continue;
+        const categoryDir = join(this.evolvedSkillsDir!, category);
+        if (!statSync(categoryDir).isDirectory()) continue;
+        const skillNames = readdirSync(categoryDir);
+        for (const skillName of skillNames) {
+          const skillDir = join(categoryDir, skillName);
+          if (!statSync(skillDir).isDirectory()) continue;
+          const skillPath = join(skillDir, "skill.json");
+          if (!existsSync(skillPath)) {
+            skipped++;
+            continue;
+          }
+          try {
+            const raw = JSON.parse(readFileSync(skillPath, "utf8")) as {
+              metadata: SkillMetadata;
+              handlerCode: string;
+            };
+            if (!raw?.metadata?.name || typeof raw.handlerCode !== "string") {
+              skipped++;
+              continue;
+            }
+            const result = this.registerFromCode(raw.metadata, raw.handlerCode, {
+              autoEnable: true,
+            });
+            if (result.ok) {
+              loaded++;
+            } else {
+              console.warn(
+                `[SkillManager] 恢复自我进化技能 ${skillName} 失败: ${result.error ?? "未知错误"}`,
+              );
+              skipped++;
+            }
+          } catch (err) {
+            console.warn(`[SkillManager] 加载自我进化技能失败 ${skillName}:`, err);
+            skipped++;
+          }
+        }
+      }
+      console.log(
+        `[SkillManager] 从磁盘加载 ${loaded} 个自我进化 code 技能（跳过 ${skipped}）`,
+      );
+    } catch (err) {
+      console.warn("[SkillManager] 扫描自我进化技能目录失败:", err);
+    }
+    return { loaded, skipped };
+  }
+
+  // ========================================================================
+  // procedural 技能（过程式文档）管理
+  // ========================================================================
+
+  /**
+   * 注册一个 procedural 技能（过程式文档）。
+   *
+   * 与 code 技能不同，procedural 技能不编译 handler，而是把 SKILL.md 正文 +
+   * skill.meta.json 元数据写到磁盘（若配置了 proceduralSkillsDir），并登记到内存索引。
+   *
+   * @param metadata 技能元数据（skillType 会被强制设为 "procedural"）
+   * @param doc SKILL.md 正文（When to Use / Procedure / Pitfalls / Verification）
+   */
+  registerProceduralSkill(
+    metadata: SkillMetadata,
+    doc: string,
+  ): { ok: boolean; skillName?: string; error?: string; docPath?: string } {
+    const meta: SkillMetadata = { ...metadata, skillType: "procedural" };
+
+    const errors = SkillValidator.validateMetadata(meta);
+    const fatalErrors = errors.filter((e) => e.field !== "parameters");
+    if (fatalErrors.length > 0) {
+      return {
+        ok: false,
+        error: `procedural 技能元数据校验失败: ${fatalErrors.map((e) => `${e.field}: ${e.message}`).join(", ")}`,
+      };
+    }
+
+    const skillName = meta.name;
+    const category =
+      (meta.tags?.[0] ?? "general").replace(/[^a-zA-Z0-9_-]/g, "_") || "general";
+
+    const docPath = this.proceduralSkillsDir
+      ? join(this.proceduralSkillsDir, category, skillName, "SKILL.md")
+      : null;
+
+    if (docPath) {
+      try {
+        mkdirSync(dirname(docPath), { recursive: true });
+        writeFileSync(docPath, doc, "utf8");
+        writeFileSync(join(dirname(docPath), "skill.meta.json"), JSON.stringify(meta, null, 2), "utf8");
+      } catch (err) {
+        return {
+          ok: false,
+          error: `写入 procedural 技能磁盘失败: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    this.proceduralSkills.set(skillName, {
+      metadata: meta,
+      docPath: docPath ?? "",
+      doc,
+    });
+    if (!this.configs.has(skillName)) {
+      this.configs.set(skillName, { enabled: true });
+    }
+
+    console.log(`✅ procedural 技能已注册: ${skillName} v${meta.version}${docPath ? ` (磁盘: ${docPath})` : ""}`);
+    return { ok: true, skillName, docPath: docPath ?? undefined };
+  }
+
+  /** 列出所有 procedural 技能的 manifest（用于注入 prompt 轻量索引）。 */
+  listProceduralSkills(): SkillManifest[] {
+    const manifests: SkillManifest[] = [];
+    this.proceduralSkills.forEach((entry, name) => {
+      const config = this.configs.get(name);
+      if (config?.enabled === false) return;
+      manifests.push({
+        ...entry.metadata,
+        enabled: config?.enabled ?? true,
+        trusted: true,
+      });
+    });
+    return manifests;
+  }
+
+  /**
+   * 读取 procedural 技能的文档全文（带缓存）。
+   * 用于 skill_view 工具让 LLM 按需加载全文（渐进式召回 Level 1）。
+   */
+  getProceduralSkillDoc(
+    skillName: string,
+  ): { ok: boolean; doc?: string; metadata?: SkillMetadata; error?: string } {
+    const entry = this.proceduralSkills.get(skillName);
+    if (!entry) {
+      return { ok: false, error: `procedural 技能不存在: ${skillName}` };
+    }
+    let doc: string | undefined;
+    if (entry.doc) {
+      doc = entry.doc;
+    } else if (!entry.docPath || !existsSync(entry.docPath)) {
+      return { ok: false, error: `procedural 技能文档文件不存在: ${entry.docPath || "(无磁盘路径)"}` };
+    } else {
+      try {
+        doc = readFileSync(entry.docPath, "utf8");
+        entry.doc = doc;
+      } catch (err) {
+        return {
+          ok: false,
+          error: `读取 procedural 技能文档失败: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+    // Curator 统计：被 view 加载一次（渐进式召回 Level 1 的使用痕迹）
+    this.recordUsage(skillName, "view");
+    return { ok: true, doc, metadata: entry.metadata };
+  }
+
+  /**
+   * 局部 patch procedural 技能文档（模糊匹配 + 原子写 + 安全扫描）。
+   *
+   * 参考 skill_manage(action='patch')：用 fuzzy_find_and_replace 容忍
+   * LLM 给的 oldString 与原文有格式差异，匹配后替换，原子写回滚。
+   */
+  patchProceduralSkill(
+    skillName: string,
+    oldString: string,
+    newString: string,
+    replaceAll: boolean = false,
+  ): { ok: boolean; matched?: number; error?: string } {
+    const entry = this.proceduralSkills.get(skillName);
+    if (!entry) {
+      return { ok: false, error: `procedural 技能不存在: ${skillName}` };
+    }
+
+    const current =
+      entry.doc ??
+      (entry.docPath && existsSync(entry.docPath) ? readFileSync(entry.docPath, "utf8") : "");
+    if (!current) {
+      return { ok: false, error: "procedural 技能文档为空，无法 patch" };
+    }
+
+    const replaceResult = fuzzyFindAndReplace(current, oldString, newString, replaceAll);
+    if (!replaceResult.ok) {
+      return { ok: false, error: replaceResult.error };
+    }
+
+    const scanError = scanProceduralDoc(replaceResult.content!);
+    if (scanError) {
+      return { ok: false, error: `安全扫描未通过: ${scanError}` };
+    }
+
+    if (entry.docPath) {
+      try {
+        mkdirSync(dirname(entry.docPath), { recursive: true });
+        const tmpPath = entry.docPath + ".tmp";
+        writeFileSync(tmpPath, replaceResult.content!, "utf8");
+        renameSync(tmpPath, entry.docPath);
+      } catch (err) {
+        return {
+          ok: false,
+          error: `写入 procedural 技能文档失败: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    entry.doc = replaceResult.content;
+    entry.metadata.updatedAt = new Date().toISOString();
+    // Curator 统计：被 patch 局部修补一次（技能持续进化的痕迹）
+    this.recordUsage(skillName, "patch");
+    console.log(`✏️ procedural 技能已 patch: ${skillName}（替换 ${replaceResult.matchCount} 处）`);
+    return { ok: true, matched: replaceResult.matchCount };
+  }
+
+  /**
+   * 从磁盘扫描加载所有 procedural 技能。
+   * 扫描 proceduralSkillsDir 下的 `<category>/<name>/SKILL.md` + `skill.meta.json`。
+   * 在 bootstrap 启动期调用一次，恢复跨重启的 procedural 技能。
+   */
+  loadProceduralSkillsFromDisk(): { loaded: number; skipped: number } {
+    if (!this.proceduralSkillsDir || !existsSync(this.proceduralSkillsDir)) {
+      return { loaded: 0, skipped: 0 };
+    }
+    let loaded = 0;
+    let skipped = 0;
+    try {
+      const categories = readdirSync(this.proceduralSkillsDir);
+      for (const category of categories) {
+        if (category.startsWith(".")) continue;
+        const categoryDir = join(this.proceduralSkillsDir!, category);
+        if (!statSync(categoryDir).isDirectory()) continue;
+        const skillNames = readdirSync(categoryDir);
+        for (const skillName of skillNames) {
+          const skillDir = join(categoryDir, skillName);
+          if (!statSync(skillDir).isDirectory()) continue;
+          const docPath = join(skillDir, "SKILL.md");
+          const metaPath = join(skillDir, "skill.meta.json");
+          if (!existsSync(docPath) || !existsSync(metaPath)) {
+            skipped++;
+            continue;
+          }
+          try {
+            const meta = JSON.parse(readFileSync(metaPath, "utf8")) as SkillMetadata;
+            if (meta.skillType !== "procedural") {
+              skipped++;
+              continue;
+            }
+            const doc = readFileSync(docPath, "utf8");
+            this.proceduralSkills.set(meta.name, { metadata: meta, docPath, doc });
+            if (!this.configs.has(meta.name)) {
+              this.configs.set(meta.name, { enabled: true });
+            }
+            loaded++;
+          } catch (err) {
+            console.warn(`[SkillManager] 加载 procedural 技能失败 ${skillName}:`, err);
+            skipped++;
+          }
+        }
+      }
+      console.log(`[SkillManager] 从磁盘加载 ${loaded} 个 procedural 技能（跳过 ${skipped}）`);
+    } catch (err) {
+      console.warn("[SkillManager] 扫描 procedural 技能目录失败:", err);
+    }
+    return { loaded, skipped };
+  }
+
+  /** 判断指定名称是否为 procedural 技能 */
+  isProceduralSkill(skillName: string): boolean {
+    return this.proceduralSkills.has(skillName);
+  }
+
+  /**
+   * 删除 procedural 技能（从内存索引移除；磁盘文件保留，由 Curator 归档管理）。
+   * 采用「归档而非物理删除」的治理策略。
+   */
+  deleteProceduralSkill(skillName: string): { ok: boolean; error?: string } {
+    if (!this.proceduralSkills.has(skillName)) {
+      return { ok: false, error: `procedural 技能不存在: ${skillName}` };
+    }
+    this.proceduralSkills.delete(skillName);
+    this.configs.delete(skillName);
+    console.log(`🗑️ 已移除 procedural 技能: ${skillName}（磁盘文件保留，由 Curator 归档管理）`);
+    return { ok: true };
+  }
+
+  // ========================================================================
+  // Curator 质量治理（useCount / viewCount / patchCount + 归档）
+  // ========================================================================
+
+  /** 记录一次技能使用行为（内部辅助，供 execute / view / patch 调用）。 */
+  private recordUsage(skillName: string, kind: "use" | "view" | "patch"): void {
+    const now = new Date().toISOString();
+    const cur = this.usageStats.get(skillName) ?? {
+      useCount: 0,
+      viewCount: 0,
+      patchCount: 0,
+      lastActivityAt: now,
+    };
+    if (kind === "use") cur.useCount += 1;
+    else if (kind === "view") cur.viewCount += 1;
+    else cur.patchCount += 1;
+    cur.lastActivityAt = now;
+    this.usageStats.set(skillName, cur);
+  }
+
+  /**
+   * 读取单个技能的使用统计（无记录时返回零值）。
+   * 供 skill 详情工具 / 调试日志展示。
+   */
+  getUsageStats(skillName: string): SkillUsageStats {
+    return (
+      this.usageStats.get(skillName) ?? {
+        useCount: 0,
+        viewCount: 0,
+        patchCount: 0,
+        lastActivityAt: "",
+      }
+    );
+  }
+
+  /**
+   * 读取全部技能的使用统计（name → stats）。
+   * 供 Curator 巡检 / 管理界面展示。
+   */
+  getAllUsageStats(): Record<string, SkillUsageStats> {
+    return Object.fromEntries(this.usageStats);
+  }
+
+  /**
+   * Curator 质量巡检：归档"长期无人用"的 procedural 技能。
+   *
+   * Curator 治理原则——**归档而非物理删除**：
+   *  - procedural 技能从内存索引移除（不再注入 prompt 索引、不可被 skill.view 命中），
+   *    磁盘上的 SKILL.md + skill.meta.json 原样保留，未来仍可重新加载。
+   *  - code 技能不禁用（避免打断自主进化产物），只做统计留痕。
+   *
+   * 归档判定（同时满足）：
+   *  1. 从未被使用/查看/修补（useCount + viewCount + patchCount === 0）
+   *  2. 最近活动距今 ≥ idleDays（默认 30 天；按 updatedAt 计算，无 updatedAt 用 createdAt）
+   *  3. 仅针对 procedural 技能（code 技能跳过）
+   *
+   * @returns 归档结果汇总
+   */
+  runCuratorGrooming(opts?: { idleDays?: number }): {
+    archived: string[];
+    reviewed: number;
+    skippedCodeSkills: number;
+  } {
+    const idleDays = opts?.idleDays ?? 30;
+    const idleMs = idleDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const archived: string[] = [];
+    let reviewed = 0;
+    let skippedCodeSkills = 0;
+
+    for (const [name, entry] of this.proceduralSkills) {
+      reviewed++;
+      const stats = this.usageStats.get(name);
+      const totalActivity =
+        (stats?.useCount ?? 0) + (stats?.viewCount ?? 0) + (stats?.patchCount ?? 0);
+      if (totalActivity > 0) continue; // 有使用痕迹，保留
+      const lastTouch =
+        Date.parse(entry.metadata.updatedAt ?? "") ||
+        Date.parse(entry.metadata.createdAt ?? "") ||
+        0;
+      if (lastTouch > 0 && now - lastTouch < idleMs) continue; // 仍在新鲜期
+      // 归档：从内存索引移除（磁盘保留）
+      this.proceduralSkills.delete(name);
+      this.configs.delete(name);
+      this.usageStats.delete(name);
+      archived.push(name);
+      console.log(
+        `🗄️ [SkillCurator] 归档未使用 procedural 技能: ${name}（${
+          lastTouch > 0
+            ? `${Math.round((now - lastTouch) / (24 * 60 * 60 * 1000))} 天无活动`
+            : "无创建/更新时间戳"
+        }，磁盘文件保留）`,
+      );
+    }
+
+    // code 技能仅统计，不归档（防止打断自主进化产物）
+    for (const name of this.skills.keys()) {
+      if (this.proceduralSkills.has(name)) continue;
+      skippedCodeSkills++;
+    }
+
+    if (archived.length > 0) {
+      console.log(
+        `[SkillCurator] 巡检完成：审查 ${reviewed} 个 procedural 技能，归档 ${archived.length} 个（磁盘保留）`,
+      );
+    }
+    return { archived, reviewed, skippedCodeSkills };
   }
 
   /**
@@ -271,8 +767,19 @@ export class SkillManager {
     input: Record<string, unknown>,
     context: ToolContext,
   ): Promise<{ ok: boolean; result?: Record<string, unknown>; error?: any }> {
+    // procedural 技能不可执行：它只有文档，应由 skill_view 工具读取作为上下文
+    if (this.isProceduralSkill(skillName)) {
+      return {
+        ok: false,
+        error: {
+          code: "PROCEDURAL_SKILL_NOT_EXECUTABLE",
+          message: `procedural 技能「${skillName}」不可执行，请用 skill_view 工具读取其文档作为上下文`,
+        },
+      };
+    }
+
     const skill = this.skills.get(skillName);
-    
+
     if (!skill) {
       return {
         ok: false,
@@ -329,11 +836,15 @@ export class SkillManager {
       grantedPermissions: grantedPerms,
     });
 
+    // Curator 统计：执行成功记录一次使用（"越用越强"的量化依据）
+    if (result.ok) {
+      this.recordUsage(skillName, "use");
+    }
     return result;
   }
 
   /**
-   * 列出所有可用的 Skill
+   * 列出所有可用的 Skill（code + procedural 统一返回，用于注入 prompt 轻量索引）。
    */
   list(enabledOnly: boolean = false): SkillManifest[] {
     const manifests: SkillManifest[] = [];
@@ -352,6 +863,9 @@ export class SkillManager {
         trusted: isTrusted,
       });
     });
+
+    // procedural 技能一并纳入（用于 prompt 轻量索引）
+    manifests.push(...this.listProceduralSkills());
 
     return manifests.sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
@@ -457,6 +971,7 @@ export class SkillManager {
     enabled: number;
     disabled: number;
     trusted: number;
+    procedural: number;
   } {
     let enabled = 0;
     let disabled = 0;
@@ -476,10 +991,119 @@ export class SkillManager {
     });
 
     return {
-      total: this.skills.size,
+      total: this.skills.size + this.proceduralSkills.size,
       enabled,
       disabled,
       trusted,
+      procedural: this.proceduralSkills.size,
     };
   }
+}
+
+// ==========================================================================
+// 模块级辅助函数（procedural 技能 patch 用）
+// ==========================================================================
+
+/**
+ * 模糊查找并替换。
+ *
+ * 参考 fuzzy_find_and_replace 设计：容忍 LLM 给的 oldString 与原文有
+ * 格式差异（多余空白、换行不同）。策略：
+ *  1. 先精确匹配
+ *  2. 精确失败 → 规范化空白后再匹配（按段落 split，逐段 trim 比较）
+ *  3. 仍失败 → 返回 error，不修改原文
+ *
+ * @param content 原文
+ * @param oldString 要替换的片段
+ * @param newString 替换为的内容
+ * @param replaceAll true 替换所有匹配；false 只替换第一处
+ */
+function fuzzyFindAndReplace(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+): { ok: boolean; content?: string; matchCount: number; error?: string } {
+  if (!oldString.trim()) {
+    return { ok: false, matchCount: 0, error: "oldString 为空" };
+  }
+
+  // 策略 1：精确匹配
+  if (content.includes(oldString)) {
+    if (replaceAll) {
+      const parts = content.split(oldString);
+      return { ok: true, content: parts.join(newString), matchCount: parts.length - 1 };
+    }
+    const idx = content.indexOf(oldString);
+    return {
+      ok: true,
+      content: content.slice(0, idx) + newString + content.slice(idx + oldString.length),
+      matchCount: 1,
+    };
+  }
+
+  // 策略 2：规范化空白后匹配（把连续空白/换行统一为单个空格再比较）
+  const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+  const normOld = normalize(oldString);
+  if (!normOld) {
+    return { ok: false, matchCount: 0, error: "oldString 规范化后为空" };
+  }
+  const normContent = normalize(content);
+  if (normContent.includes(normOld)) {
+    // 在规范化空间定位，但回写原文：用规范化匹配找到的段落边界做替换。
+    // 简化实现：按段落（双换行或单换行）拆分原文，对每段 trim 后比较，
+    // 命中的段落整体替换为 newString。
+    const paragraphs = content.split(/(\n)/);
+    let matched = 0;
+    const out: string[] = [];
+    for (const para of paragraphs) {
+      if (normalize(para) === normOld || normalize(para).includes(normOld)) {
+        matched++;
+        out.push(newString);
+        if (!replaceAll) {
+          // 只替换第一处，后续原样保留
+        }
+      } else {
+        out.push(para);
+      }
+    }
+    if (matched > 0) {
+      return { ok: true, content: out.join(""), matchCount: matched };
+    }
+  }
+
+  return {
+    ok: false,
+    matchCount: 0,
+    error: `未在文档中找到匹配片段（精确与模糊匹配均失败），oldString 前 60 字: "${oldString.slice(0, 60)}..."`,
+  };
+}
+
+/**
+ * procedural 技能文档安全扫描。
+ *
+ * 参考 _security_scan_skill 设计：拦截 prompt injection、凭据外泄、危险命令、
+ * 不可见 Unicode。返回 error 字符串（未通过）或 null（通过）。
+ */
+function scanProceduralDoc(content: string): string | null {
+  // 不可见 Unicode（零宽字符、BOM 等）
+  if (/[\u200B-\u200D\uFEFF\u2060]/.test(content)) {
+    return "文档包含不可见 Unicode 字符（零宽/BOM），可能为注入攻击";
+  }
+  // 凭据外泄
+  if (/(api[_-]?key|secret|password|token|passwd)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i.test(content)) {
+    return "文档疑似包含明文凭据（api_key/secret/password/token）";
+  }
+  // 危险命令（rm -rf / 系统文件覆写 / 提权）
+  if (/rm\s+-rf\s+\/(\s|$)/.test(content)) {
+    return "文档包含危险命令 rm -rf /";
+  }
+  if (/\b(dd\s+of=\/dev\/|mkfs|:\(\)\s*\{\s*:\|:&\s*\}\s*;:)/.test(content)) {
+    return "文档包含危险命令（dd/mkfs/fork bomb）";
+  }
+  // SSH 后门
+  if (/authorized_keys|ssh-rsa\s+AAAA/i.test(content)) {
+    return "文档疑似包含 SSH 后门（authorized_keys / ssh-rsa）";
+  }
+  return null;
 }

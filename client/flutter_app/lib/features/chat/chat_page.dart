@@ -18,6 +18,7 @@ import "agent_result_card.dart";
 import "agent_action_choice_card.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
+import "structured_assistant_message_body.dart";
 import "voice_message_bubble.dart";
 
 /// 输入框内图标按钮的视觉强度
@@ -77,8 +78,8 @@ class ChatPage extends StatefulWidget {
   /// 传 null 时,卡片按钮点击仅在 UI 上锁定,不会触发任何副作用(调试用)。
   /// 回调会携带触发该按钮的卡片 [cardData](含 cardId/title/items),
   /// 供后端做精准审计/埋点,并让 Agent 理解上下文主动衔接。
-  final void Function(AgentResultAction action, {required AgentResultData cardData})?
-      onUserAction;
+  final void Function(AgentResultAction action,
+      {required AgentResultData cardData})? onUserAction;
 
   /// 用户给agent起的名字
   final String? agentName;
@@ -521,8 +522,8 @@ class _ChatPageState extends State<ChatPage>
   /// 按时间倒序生成所有消息的渲染项列表（最新在 reverse ListView 的 index 0）。
   List<Map<String, dynamic>> _getRenderItems() {
     final List<ChatMessage> sorted = List<ChatMessage>.from(widget.messages)
-      ..sort((ChatMessage a, ChatMessage b) =>
-          b.timestamp.compareTo(a.timestamp));
+      ..sort(
+          (ChatMessage a, ChatMessage b) => b.timestamp.compareTo(a.timestamp));
     return sorted.map(_messageToGroup).toList();
   }
 
@@ -859,7 +860,8 @@ class _ChatPageState extends State<ChatPage>
                     itemCount: itemCount,
                     itemBuilder: (BuildContext context, int index) {
                       // reverse 模式下 index 0 = 视觉底部（最新消息）
-                      final Map<String, dynamic> messageGroup = renderItems[index];
+                      final Map<String, dynamic> messageGroup =
+                          renderItems[index];
                       final bool isUser = messageGroup['isUser'] as bool;
                       final ChatMessage mainMessage =
                           messageGroup['main'] as ChatMessage;
@@ -1075,12 +1077,10 @@ class _ChatPageState extends State<ChatPage>
                                         if (event is! KeyDownEvent) {
                                           return KeyEventResult.ignored;
                                         }
-                                        final bool isEnter =
+                                        final bool isEnter = event.logicalKey ==
+                                                LogicalKeyboardKey.enter ||
                                             event.logicalKey ==
-                                                    LogicalKeyboardKey.enter ||
-                                                event.logicalKey ==
-                                                    LogicalKeyboardKey
-                                                        .numpadEnter;
+                                                LogicalKeyboardKey.numpadEnter;
                                         if (!isEnter) {
                                           return KeyEventResult.ignored;
                                         }
@@ -1101,8 +1101,7 @@ class _ChatPageState extends State<ChatPage>
                                         controller: widget.controller,
                                         focusNode: widget.inputFocusNode,
                                         style: TextStyle(
-                                            color: cs.onSurface,
-                                            fontSize: 15),
+                                            color: cs.onSurface, fontSize: 15),
                                         cursorColor: cs.primary,
                                         maxLines: 6,
                                         minLines: 1,
@@ -1117,8 +1116,7 @@ class _ChatPageState extends State<ChatPage>
                                           focusedBorder: InputBorder.none,
                                           disabledBorder: InputBorder.none,
                                           errorBorder: InputBorder.none,
-                                          focusedErrorBorder:
-                                              InputBorder.none,
+                                          focusedErrorBorder: InputBorder.none,
                                           hintStyle: TextStyle(
                                             color: cs.onSurfaceVariant
                                                 .withValues(alpha: 0.5),
@@ -1142,8 +1140,9 @@ class _ChatPageState extends State<ChatPage>
                                     return FadeTransition(
                                       opacity: anim,
                                       child: ScaleTransition(
-                                        scale: Tween<double>(begin: 0.85, end: 1)
-                                            .animate(anim),
+                                        scale:
+                                            Tween<double>(begin: 0.85, end: 1)
+                                                .animate(anim),
                                         child: child,
                                       ),
                                     );
@@ -1346,8 +1345,8 @@ class _HoverableMessageWidget extends StatelessWidget {
   final VoidCallback onDeleteCancel;
 
   /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
-  final void Function(AgentResultAction action, {required AgentResultData cardData})?
-      onUserAction;
+  final void Function(AgentResultAction action,
+      {required AgentResultData cardData})? onUserAction;
 
   @override
   Widget build(BuildContext context) {
@@ -1428,8 +1427,8 @@ class _HoverableMessageContent extends StatefulWidget {
   final VoidCallback onDeleteCancel;
 
   /// 「选择型卡片」按钮点击回调(透传至消息正文渲染)
-  final void Function(AgentResultAction action, {required AgentResultData cardData})?
-      onUserAction;
+  final void Function(AgentResultAction action,
+      {required AgentResultData cardData})? onUserAction;
 
   @override
   State<_HoverableMessageContent> createState() =>
@@ -1439,6 +1438,107 @@ class _HoverableMessageContent extends StatefulWidget {
 class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   bool _hovered = false;
   final GlobalKey _avatarKey = GlobalKey();
+
+  // ===== 打字机式流式显示 =====
+  // 后端 chunk 可能整段/大块到达，这里在气泡渲染层把「已 reveal」的原文前缀
+  // 逐字放大，模拟真人打字；历史消息与用户消息直接显示全文。
+  static const int _charsPerTick = 2;
+  static const Duration _tick = Duration(milliseconds: 24);
+  static const Duration _cursorBlink = Duration(milliseconds: 480);
+
+  /// 原始文本（未 strip）的已显示前缀；仅 assistant 流式消息逐字增长。
+  String _revealedRaw = "";
+  Timer? _typeTimer;
+  Timer? _cursorTimer;
+  bool _typeCursorOn = false;
+
+  String get _rawTarget => widget.mainMessage.text;
+
+  /// 是否处于打字机展示中（打字中或光标闪烁中）
+  bool get _typewriterActive => _typeTimer != null || _cursorTimer != null;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.mainMessage.streaming && widget.mainMessage.text.isNotEmpty) {
+      // 流式接收中的新消息：从零开始逐字 reveal（覆盖整段一次性到达的场景）
+      _revealedRaw = "";
+      _typeTimer = Timer.periodic(_tick, (_) => _typeTick());
+    } else {
+      // 历史消息 / 用户消息直接显示全文
+      _revealedRaw = _rawTarget;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _HoverableMessageContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.mainMessage.text != oldWidget.mainMessage.text) {
+      _syncTypewriter();
+    }
+  }
+
+  @override
+  void dispose() {
+    _typeTimer?.cancel();
+    _cursorTimer?.cancel();
+    super.dispose();
+  }
+
+  void _syncTypewriter() {
+    if (widget.isUser) {
+      _revealedRaw = _rawTarget;
+      _stopTypeTimers();
+      return;
+    }
+    final String target = _rawTarget;
+    if (target.startsWith(_revealedRaw)) {
+      // 前缀延伸 = 流式追加：继续逐字 reveal
+      if (_revealedRaw.length < target.length && _typeTimer == null) {
+        _typeTimer = Timer.periodic(_tick, (_) => _typeTick());
+      }
+    } else {
+      // 内容被替换（如删除重发）：直接显示全文
+      _revealedRaw = target;
+      _stopTypeTimers();
+      _scheduleRebuild();
+    }
+  }
+
+  void _typeTick() {
+    if (!mounted) {
+      _stopTypeTimers();
+      return;
+    }
+    final String target = _rawTarget;
+    if (_revealedRaw.length < target.length) {
+      int end = _revealedRaw.length + _charsPerTick;
+      if (end > target.length) end = target.length;
+      _revealedRaw = target.substring(0, end);
+      _cursorTimer ??= Timer.periodic(_cursorBlink, (_) {
+        if (!mounted) return;
+        setState(() => _typeCursorOn = !_typeCursorOn);
+      });
+      setState(() {});
+      if (_revealedRaw.length >= target.length) _stopTypeTimers();
+    } else {
+      _stopTypeTimers();
+    }
+  }
+
+  void _stopTypeTimers() {
+    _typeTimer?.cancel();
+    _typeTimer = null;
+    _cursorTimer?.cancel();
+    _cursorTimer = null;
+    _typeCursorOn = false;
+  }
+
+  void _scheduleRebuild() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1493,10 +1593,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   Widget _buildMessageRow(BuildContext context) {
     // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
-    final bool isVoiceMessage =
-        widget.mainMessage.contentType == "audio" &&
-            widget.mainMessage.attachments
-                .any((MessageAttachment a) => a.type == MessageAttachmentType.audio);
+    final bool isVoiceMessage = widget.mainMessage.contentType == "audio" &&
+        widget.mainMessage.attachments.any(
+            (MessageAttachment a) => a.type == MessageAttachmentType.audio);
     final Widget bubble;
     if (isVoiceMessage) {
       final MessageAttachment audio = widget.mainMessage.attachments.firstWhere(
@@ -1513,11 +1612,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               durationMs:
                   audio.durationMs ?? widget.mainMessage.durationMs ?? 0,
               waveform: audio.waveform ?? widget.mainMessage.waveform,
-              transcript:
-                  (audio.transcript?.isNotEmpty == true ? audio.transcript : null) ??
-                      (widget.mainMessage.text.isNotEmpty
-                          ? widget.mainMessage.text
-                          : null),
+              transcript: (audio.transcript?.isNotEmpty == true
+                      ? audio.transcript
+                      : null) ??
+                  (widget.mainMessage.text.isNotEmpty
+                      ? widget.mainMessage.text
+                      : null),
               isRead: true,
             ),
           );
@@ -1841,8 +1941,16 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 isUser: widget.isUser,
                 contentSummary: widget.contentSummary,
                 onUserAction: widget.onUserAction,
+                // 打字机：assistant 流式消息用「已 reveal」前缀渲染，
+                // 光标随打字闪烁；非打字场景传 null 走原文。
+                typewriterRawText:
+                    (!widget.isUser && _revealedRaw != _rawTarget)
+                        ? _revealedRaw
+                        : null,
+                typewriterCursor: _typeTimer != null && _typeCursorOn,
               ),
               if (!widget.isUser &&
+                  !_typewriterActive &&
                   widget.contentSummary?.summary == null &&
                   widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
                 Padding(
@@ -1872,8 +1980,16 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     ChatMessage message, {
     required bool isUser,
     ContentSummaryParseResult? contentSummary,
-    void Function(AgentResultAction action, {required AgentResultData cardData})?
+    void Function(AgentResultAction action,
+            {required AgentResultData cardData})?
         onUserAction,
+
+    /// 打字机「已 reveal」的原文前缀；null 时显示完整原文。
+    /// 仅作用于下方纯文本分支（卡片/摘要仍用完整原文解析）。
+    String? typewriterRawText,
+
+    /// 是否在文本末尾显示闪烁光标（打字机进行中）
+    bool typewriterCursor = false,
   }) {
     if (isUser) {
       return Text(
@@ -1936,8 +2052,16 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
+    return StructuredAssistantMessageBody(
+      text: typewriterRawText ?? message.text,
+      cs: cs,
+      textTheme: Theme.of(context).textTheme,
+      showCursor: typewriterCursor,
+    );
+/*
+        stripMarkdown(typewriterRawText ?? message.text);
     return Text(
-      stripMarkdown(message.text),
+      typewriterCursor ? "$displayText▍" : displayText,
       // 用 bodyMedium（14px）做正文：12.5 时一长串文字会尽量横向铺满不换行，
       // 提到 14 后行宽更紧凑、换行更自然，单行不再霸屏。
       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -1945,6 +2069,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             height: 1.4,
           ),
     );
+*/
   }
 
   /// 构建灰色链接显示组件（从父级复用）
@@ -2239,4 +2364,3 @@ Map<String, dynamic> _messageToGroup(ChatMessage msg) {
     "isProgress": false,
   };
 }
-

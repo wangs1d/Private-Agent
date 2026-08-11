@@ -149,6 +149,17 @@ export class AgentTaskOrchestrator {
     return task.id;
   }
 
+  async runToCompletion(input: CreateAgentTaskInput, options: RunTaskOptions): Promise<AgentTask> {
+    const store = getAgentTaskStore();
+    const task = store.create(input);
+    await this.runLoop(task.id, options);
+    const finished = store.get(task.id);
+    if (!finished) {
+      throw new Error(`Task ${task.id} disappeared while running`);
+    }
+    return finished;
+  }
+
   /**
    * 状态机主循环。
    *
@@ -690,15 +701,32 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
     return true;
   }
 
-  /** 恢复暂停的任务 */
+  /**
+   * 恢复任务：重新启动主循环继续执行。
+   * 可用于人工恢复暂停任务，也用于服务重启后自动恢复未完成的自主任务。
+   *
+   * 可恢复状态：pending / planning / executing / verifying / paused（未到终态）。
+   *  - paused（用户主动暂停）：恢复时置为 executing 重新进入主循环
+   *  - pending / planning / executing / verifying：保持原状态，runLoop 从断点继续
+   * 不可恢复状态：done / failed / awaiting_approval（终态或等待人工审批，不得自动放行）
+   */
   resumeTask(taskId: string, options: RunTaskOptions): boolean {
     const store = getAgentTaskStore();
     const task = store.get(taskId);
-    if (!task || task.status !== "paused") return false;
+    if (!task) return false;
+    if (
+      task.status === "done" ||
+      task.status === "failed" ||
+      task.status === "awaiting_approval"
+    ) {
+      return false;
+    }
 
-    store.update(taskId, (t) => {
-      t.status = "executing";
-    });
+    if (task.status === "paused") {
+      store.update(taskId, (t) => {
+        t.status = "executing";
+      });
+    }
 
     // 重新启动主循环
     void this.runLoop(taskId, options).catch((err) => {
@@ -729,5 +757,4 @@ export function initAgentTaskOrchestrator(deps: AgentTaskOrchestratorDeps): Agen
 export function getAgentTaskOrchestrator(): AgentTaskOrchestrator | null {
   return orchestratorInstance;
 }
-
 

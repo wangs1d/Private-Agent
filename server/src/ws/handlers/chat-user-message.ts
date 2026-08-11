@@ -9,7 +9,7 @@ import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
 import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
 import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
-import { formatStatusForDisplay } from "../../utils/text.js";
+import { formatStatusForDisplay, stripSentencesAlreadySaid } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
@@ -41,7 +41,6 @@ import { getToolResultProcessor } from "../../services/tool-result-processor.js"
 import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
-import { refreshAgentProfileFromTurn } from "../../services/agent-profile-autonomy-service.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
 
@@ -73,6 +72,19 @@ function abortActiveTurn(actorId: string): void {
  * 返回空串表示无法格式化（上层会走其他回退路径）。
  */
 function formatToolResultAsReply(toolName: string, result: Record<string, unknown>): string {
+  // 元工具/能力查询类输出是结构化 JSON（工具 schema、能力清单），不是用户可读内容。
+  // 若 LLM 末轮没出正文,不能用它们拼成回复透出到前端,直接返回空串走其他兜底路径。
+  const META_TOOL_NAMES = new Set([
+    "tool_discover",
+    "tool_search",
+    "tool_describe",
+    "tool_call",
+    "agent.query_capabilities",
+    "brain.list_capabilities",
+    "self.list_custom_skills",
+  ]);
+  if (META_TOOL_NAMES.has(toolName)) return "";
+
   const t = toolName.toLowerCase();
   // 搜索类：把标题/摘要/URL 列出来
   if (t.includes("search_web") || t.includes("web_search") || t.includes("info_hub")) {
@@ -374,10 +386,18 @@ async function processBatchedMessage(
     ? new Map<string, number>()
     : undefined;
 
+  // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
+  // 在所有 chunk 出口处统一剥离，避免 LLM 误把格式回显到回复里。
+  const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
+  const stripTsPrefix = (text: string): string =>
+    text.replace(TS_PREFIX_RE, "");
+
   const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
     if (isStale()) return;
     if (phase === "stream") mainStreamStarted = true;
     chunkSeq += 1;
+    // 仅在首块剥离前缀；后续块被剥会丢失合法内容。
+    const cleanedChunk = chunkSeq === 1 ? stripTsPrefix(chunk) : chunk;
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -385,7 +405,7 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
-          chunk,
+          chunk: cleanedChunk,
           sequence: chunkSeq,
           phase,
         },
@@ -577,6 +597,40 @@ async function processBatchedMessage(
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
       },
+      onBackgroundAssistantDelta: (info) => {
+        if (isStale()) return;
+        chunkSeq += 1;
+        ctx.socket.send(
+          JSON.stringify({
+            type: ServerEventType.ChatAssistantChunk,
+            payload: {
+              sessionId: msgActor,
+              messageId: info.messageId,
+              traceId: batched.originalMessageId,
+              chunk: info.delta,
+              sequence: chunkSeq,
+              phase: "stream",
+              source: info.source,
+            },
+          }),
+        );
+      },
+      onBackgroundAssistantDone: (info) => {
+        if (isStale()) return;
+        ctx.socket.send(
+          JSON.stringify({
+            type: ServerEventType.ChatAssistantDone,
+            payload: {
+              sessionId: msgActor,
+              messageId: info.messageId,
+              traceId: batched.originalMessageId,
+              finalText: info.finalText,
+              toolCalls: [],
+              source: info.source,
+            },
+          }),
+        );
+      },
       onAgentPhaseStatus: (line) => {
         if (isStale()) return;
         const displayLine = formatStatusForDisplay(line);
@@ -751,7 +805,10 @@ async function processBatchedMessage(
       const supplement = scheduleOutcome.startsWith(reply.text.trim())
         ? scheduleOutcome.slice(reply.text.trim().length)
         : `\n\n${scheduleOutcome}`;
-      if (!isStale()) sendAssistantChunk(supplement, "stream");
+      // 去重兜底：剔除 supplement 与已流式正文句级重复的内容，
+      // 避免"整段一模一样出现两次"（工具结果拼接与 LLM 已说内容重叠）。
+      const deduped = stripSentencesAlreadySaid(reply.text, supplement);
+      if (!isStale() && deduped.trim()) sendAssistantChunk(deduped, "stream");
     } else if (!reply.text.trim() && chunkSeq === 0) {
       if (!isStale() && finalText) sendAssistantChunk(finalText, "stream");
     }
@@ -761,18 +818,11 @@ async function processBatchedMessage(
     embodimentHappy(msgActor, (json) => ctx.socket.send(json));
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
 
-    // 剥离可能残留的 [ts:] 时间戳前缀（该前缀仅供 LLM 上下文使用，不应展示给用户）
-    const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
+    // 兜底剥离 [ts:] 时间戳前缀（首块已剥，这里再兜底一次以防路径绕过 sendAssistantChunk）
     finalText = finalText.replace(TS_PREFIX_RE, "").trim();
     // 兜底再剥一次 DSML 工具调用标记：极少数情况下 DSML 跨多个 chunk 拼接后正则未在 adapter 层
     // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
     finalText = stripDsmlToolCallMarkup(finalText);
-    refreshAgentProfileFromTurn({
-      sessionId: msgActor,
-      userText: batched.text,
-      assistantText: finalText,
-      toolNames: reply.toolName ? [reply.toolName] : [],
-    });
 
     ctx.socket.send(
       JSON.stringify({
@@ -802,12 +852,6 @@ async function processBatchedMessage(
     // 不再用 apology 兜底文案掩盖错误：agent-core 已尝试 emergencyRegenerate，
     // 此处发空串让 UI 不显示虚假回复。sendUnifiedError 已通知前端出错。
     const errText = "";
-    refreshAgentProfileFromTurn({
-      sessionId: msgActor,
-      userText: batched.text,
-      assistantText: errText,
-      hadError: true,
-    });
     if (isStale()) return;
     ctx.socket.send(
       JSON.stringify({

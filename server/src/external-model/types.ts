@@ -33,7 +33,7 @@ export type ChatUserTurn = {
 };
 
 /**
- * 注入外部模型 system 的 UAP 记忆片段（对齐 Hermes：SOUL / USER / MEMORY 分层）。
+ * 注入外部模型 system 的 UAP 记忆片段（SOUL / USER / MEMORY 分层）。
  * `values` / `abilities` 对应长期演化中的慢变量：价值观与能力倾向（见 ARCHITECTURE 长期演化节）。
  */
 export type AgentPromptMemoryContext = {
@@ -111,6 +111,14 @@ export type AgentPromptMemoryContext = {
    * complex 路由时注入，建议 LLM 按规划顺序调用工具，避免乱试或遗漏关键工具。
    */
   toolPlan?: string;
+  /**
+   * 可复用技能轻量索引（Level 0 渐进式召回）。
+   *
+   * 只含 name + description + skillType + tags 的紧凑列表（不含 doc 全文），
+   * 让 LLM 感知"我有这些沉淀的技能"，需要时再用 skill.view 工具加载全文（Level 1）。
+   * 由 PromptContextBuilder 从 SkillManager.list() 提取并压缩注入。
+   */
+  skillIndex?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

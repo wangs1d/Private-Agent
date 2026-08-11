@@ -27,6 +27,8 @@ export type ScheduleTaskRecord = {
   taskId: string;
   sessionId: string;
   title?: string;
+  /** 简洁展示标题（用于「今日安排」等紧凑列表，创建时由 LLM 在同一个调用里生成，区别于完整 title / reminderMessage） */
+  shortTitle?: string;
   description: string;
   kind: ScheduleTaskKind;
   recurrence: ScheduleRecurrence;
@@ -63,6 +65,7 @@ type PersistedScheduleState = {
 export type CreateScheduleTaskInput = {
   sessionId: string;
   title?: string;
+  shortTitle?: string;
   description: string;
   kind: ScheduleTaskKind;
   runAt?: string;
@@ -77,6 +80,7 @@ export type CreateScheduleTaskInput = {
 
 type UpdateScheduleTaskInput = {
   title?: string;
+  shortTitle?: string;
   description?: string;
   recurrence?: ScheduleRecurrence;
   runAt?: string;
@@ -242,6 +246,7 @@ export class ScheduleTaskService {
       taskId: randomUUID(),
       sessionId: input.sessionId,
       title: input.title?.trim() || undefined,
+      shortTitle: input.shortTitle?.trim() || undefined,
       description: input.description.trim(),
       kind: input.kind,
       recurrence: schedule.recurrence,
@@ -274,6 +279,7 @@ export class ScheduleTaskService {
     const next: ScheduleTaskRecord = {
       ...task,
       title: input.title?.trim() || task.title,
+      shortTitle: input.shortTitle?.trim() || task.shortTitle,
       description: input.description?.trim() || task.description,
       recurrence: input.recurrence ?? task.recurrence,
       timezone: input.timezone?.trim() || task.timezone,

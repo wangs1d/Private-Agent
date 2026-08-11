@@ -37,7 +37,7 @@ import {
   getAgentRuntimeConfig,
 } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
-import { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
+import { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { createNarrativeMemoryPort, wrapNarrativeWithHybrid } from "../services/narrative-memory-port.js";
 import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
@@ -165,6 +165,7 @@ import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerInternetIntelligenceTools } from "../tools/internet-intelligence-tools.js";
 import { registerHttpTools } from "../tools/http-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
@@ -173,9 +174,11 @@ import { setMcpChatTools, setBrainChatTools, setBodyChatTools } from "../externa
 import { registerBrainTools, BRAIN_TOOLS } from "../tools/brain-tools.js";
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
+import { InternetIntelligenceService } from "../services/internet-intelligence-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
+import { registerSkillManageTools } from "../tools/skill-manage-tools.js";
 import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
 import { MorningBriefingService } from "../services/morning-briefing-service.js";
@@ -324,6 +327,11 @@ export async function createAppServices(): Promise<AppServices> {
   const infoHubService = new InfoHubService();
   const browserSessionService = new BrowserSessionService();
   const upstreamSearchService = new UpstreamSearchService(infoHubService);
+  const internetIntelligenceService = new InternetIntelligenceService({
+    search: upstreamSearchService,
+    pages: infoHubService,
+    weather: weatherService,
+  });
   const realFundsWallet = new RealFundsWalletService();
   const paymentService = new PaymentService();
   const meituanService = new MeituanService();
@@ -349,6 +357,18 @@ export async function createAppServices(): Promise<AppServices> {
 
   const skillManager = new SkillManager();
   skillManager.configureEnabledPersistence(join(process.cwd(), "data", "skill-enabled.json"));
+  // 自我进化技能（code + procedural）磁盘持久化目录：跨重启恢复"越用越强"的技能
+  skillManager.configureEvolvedSkillsDir(join(process.cwd(), "data", "skills-evolved"));
+  skillManager.configureProceduralSkillsDir(join(process.cwd(), "data", "skills"));
+  // SkillCurator 质量巡检：每小时归档长期未使用的 procedural 技能（磁盘保留，不物理删除）
+  const curatorTimer = setInterval(() => {
+    try {
+      skillManager.runCuratorGrooming();
+    } catch (e) {
+      console.warn("[SkillCurator] 巡检异常:", e);
+    }
+  }, 60 * 60 * 1000);
+  if (typeof curatorTimer.unref === "function") curatorTimer.unref();
   const skillMetadataValidator = {
     validateMetadata(metadata: unknown) {
       return SkillValidator.validateMetadata(metadata as SkillMetadata);
@@ -356,8 +376,11 @@ export async function createAppServices(): Promise<AppServices> {
   };
   await loadPersistedCommunitySkills(skillManager);
   toolRegistry.setSkillManager(skillManager);
+  // 技能管理工具（skill.list / skill.view / skill.manage）：让 LLM 自主查询/沉淀/修补 procedural 技能
+  registerSkillManageTools(toolRegistry, skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+  registerInternetIntelligenceTools(toolRegistry, internetIntelligenceService);
   registerHttpTools(toolRegistry);
 
   // ========== MCP 客户端服务 ==========
@@ -775,11 +798,11 @@ export async function createAppServices(): Promise<AppServices> {
 
   const trajectorySkillPromotion = new TrajectorySkillPromotionService(trajectoryPromotionPipeline);
 
-  const hermesEvolutionLoopService = new HermesEvolutionLoopService(agentMemorySyncService, {
+  const evolutionLoopService = new EvolutionLoopService(agentMemorySyncService, {
     onObserveForNarrative: (actorId, line) => {
       void (async () => {
-        const compacted = await compactObserveLine("hermes.observe", line);
-        await narrativeMemory?.ingest(actorId, compacted, "hermes:observe");
+        const compacted = await compactObserveLine("evolution.observe", line);
+        await narrativeMemory?.ingest(actorId, compacted, "evolution:observe");
       })().catch(() => {});
     },
   });
@@ -978,7 +1001,7 @@ export async function createAppServices(): Promise<AppServices> {
     externalChat,
     computeQuotaService,
     agentMemorySyncService,
-    hermesEvolutionLoopService,
+    evolutionLoopService,
     userPersonalizationService,
     worldService,
     skillManager,
@@ -1279,13 +1302,15 @@ export async function createAppServices(): Promise<AppServices> {
       proactionCortex.setShadowMode(true);
     }
 
-    // EvolutionCortex：注册四个子系统（自学习 / 技能生成 / 晋升管道 / Hermes 循环）
+    // EvolutionCortex：注册四个子系统（自学习 / 技能生成 / 晋升管道 / 进化循环）
     evolutionCortex.registerSelfLearning(agentSelfLearningService);
     evolutionCortex.registerSkillGenerator(skillGenerator);
     if (trajectoryPromotionPipeline) {
       evolutionCortex.registerPromotionPipeline(trajectoryPromotionPipeline);
     }
-    evolutionCortex.registerHermesLoop(hermesEvolutionLoopService);
+    // 经验沉淀落地：skill_distill 提案执行成功后把 SKILL.md 写入磁盘 + 注册
+    evolutionCortex.registerProceduralSink(skillManager);
+    evolutionCortex.registerEvolutionLoop(evolutionLoopService);
 
     // 知识缺口执行器（学知识层）：RAG 召回 + 联网兜底 + LLM 摘要 + 记忆沉淀 + 验证状态机
     // - 复用 toolRegistry 调 desktop.http_get（享受 URL 白名单+超时+审计）

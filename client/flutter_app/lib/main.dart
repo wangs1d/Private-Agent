@@ -169,9 +169,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           ? ThemeChoice.light
           : ThemeChoice.dark;
 
-  /// 是否显示右上角日历面板
-  bool _showCalendarPanel = false;
-
   /// 当前右侧面板要展示的内容
   /// - null: 未打开
   /// - RightPanelKind.friends:     好友（MailboxPage）
@@ -350,6 +347,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       unawaited(_openBriefingFromPayload(payload));
     });
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
+    // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
+    _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();
   }
 
@@ -366,6 +365,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     OutgoingCallLauncher.unbind();
     _inputFocusNode.dispose();
     _inputController.dispose();
+    _scheduleReloadSignal.removeListener(_onScheduleReloadSignal);
     _scheduleReloadSignal.dispose();
     _calendarReloadSignal.dispose();
     _stopMessagePolling();
@@ -432,6 +432,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     });
 
     unawaited(_loadAgentProfile());
+    _onScheduleReloadSignal();
     unawaited(_flushScheduleOfflineDeletes());
 
     _ws.onConnected = () {
@@ -643,7 +644,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 if (deletedId != null && deletedId.isNotEmpty) {
                   await removeLocalScheduleForDeletedTask(_store, deletedId);
                   _notifyScheduleViewsChanged();
-                  _cachedScheduleFuture = null; // 清除缓存，触发 FutureBuilder 重建
                 }
               } else {
                 final bool synced = await upsertLocalScheduleFromToolResult(
@@ -653,7 +653,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 );
                 if (synced) {
                   _notifyScheduleViewsChanged();
-                  _cachedScheduleFuture = null; // 清除缓存，触发 FutureBuilder 重建
                 }
               }
             } catch (e, st) {
@@ -736,7 +735,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               await removeLocalScheduleForDeletedTask(_store, taskId);
             }
             await _syncScheduleFromServer();
-            _cachedScheduleFuture = null; // 清除缓存
           } catch (e, st) {
             debugPrint("[schedule] schedule.tasks_changed failed: $e\n$st");
           }
@@ -1458,14 +1456,27 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         await flushScheduleOfflineDeleteQueue(_store, _scheduleApi);
     if (result.flushed > 0) {
       _notifyScheduleViewsChanged();
-      _cachedScheduleFuture = null; // 失效缓存
     }
   }
 
   void _notifyScheduleViewsChanged() {
     _scheduleReloadSignal.value += 1;
     _calendarReloadSignal.value += 1;
-    _cachedScheduleFuture = null;
+  }
+
+  /// 今日安排面板数据刷新：把「已设置的安排」（本地日程中的今日事项）
+  /// 接进右侧面板的 FutureBuilder，数据变化时重新构建 future 并 setState。
+  void _onScheduleReloadSignal() {
+    if (!mounted) return;
+    setState(() {
+      _cachedScheduleFuture = _loadTodayScheduleFuture();
+    });
+  }
+
+  Future<List<ScheduleEvent>> _loadTodayScheduleFuture() {
+    final DateTime now = DateTime.now();
+    return _store
+        .listScheduleEventsForDay(DateTime(now.year, now.month, now.day));
   }
 
   Future<void> _syncScheduleFromServer() async {
@@ -1527,16 +1538,20 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           timestamp: previous.timestamp,
           attachmentImageCount: previous.attachmentImageCount,
           playUrl: previous.playUrl,
+          // 流式追加中，保持 streaming 标志，渲染层打字机持续逐字展示
+          streaming: previous.streaming,
         );
       });
     } else {
-      // 新建一条 assistant 消息入列表
+      // 新建一条 assistant 消息入列表（streaming=true：渲染层从头做打字机效果，
+      // 等 chat.assistant_done 重建消息时该标志自动回落为 false）
       final ChatMessage newMsg = ChatMessage(
         messageId: messageId,
         sessionId: ApiConfig.effectiveActorId,
         role: "assistant",
         text: chunk,
         timestamp: DateTime.now(),
+        streaming: true,
       );
       setState(() {
         _messages.add(newMsg);
@@ -2205,10 +2220,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     _messagePollTimer = null;
   }
 
+  /// 日程入口：不再弹出居中弹窗，而是与好友/消息/设备一致，从右侧滑出 split 双栏面板
   void _openSchedulePanel() {
     setState(() {
       _tabIndex = 0;
-      _showCalendarPanel = true;
+      _rightPanel = RightPanelKind.schedule;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.schedule.defaultSplitRatio;
     });
   }
 
@@ -3426,6 +3447,14 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                   ),
                                   child: AppBar(
                                     automaticallyImplyLeading: false,
+                                    backgroundColor:
+                                        AppPalette.resolveMainPanel(variant),
+                                    foregroundColor:
+                                        AppPalette.resolveAppBarForeground(
+                                            variant),
+                                    surfaceTintColor: Colors.transparent,
+                                    elevation: 0,
+                                    scrolledUnderElevation: 0,
                                     leadingWidth: 160,
                                     leading: _tabIndex == 0
                                         ? Align(
@@ -3433,7 +3462,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                             child: Padding(
                                               padding: const EdgeInsets.only(
                                                   left: 4),
-                                              child: _buildMessageNotificationBadge(),
+                                              child:
+                                                  _buildMessageNotificationBadge(),
                                             ),
                                           )
                                         : null,
@@ -3443,7 +3473,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                                 ),
                                 Expanded(
                                   child: MainPanel(
-                                    child: _buildMainContentWithCalendar(),
+                                    child: _buildMainContent(),
                                   ),
                                 ),
                               ],
@@ -3865,40 +3895,6 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  Widget _buildMainContentWithCalendar() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Stack(
-      children: <Widget>[
-        _buildMainContent(),
-        if (_showCalendarPanel && _tabIndex == 0)
-          GestureDetector(
-            onTap: () => setState(() => _showCalendarPanel = false),
-            child: Container(
-              color: cs.onSurface.withValues(alpha: 0.12),
-              alignment: Alignment.center,
-              child: GestureDetector(
-                onTap: () {},
-                child: Material(
-                  elevation: 24,
-                  borderRadius: BorderRadius.circular(16),
-                  color: cs.surfaceContainerLowest,
-                  surfaceTintColor: Colors.transparent,
-                  clipBehavior: Clip.antiAlias,
-                  child: SizedBox(
-                    width: 560,
-                    height: MediaQuery.of(context).size.height * 0.8,
-                    child: _buildScheduleSidebar(),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        // 右侧快捷功能面板由 _buildRightSidePanelOverlay 在外层 Stack 顶层渲染，
-        // 以 Positioned(top: 0, right: 0) 覆盖 AppBar。
-      ],
-    );
-  }
-
   /// 是否在主区显示右侧快捷功能面板（同时也是裁剪 AppBar / 占位宽度的依据）。
   /// 条件：chat tab + 宽屏 (>= 820) + 无右抽屉打开。
   bool _shouldShowRightSidePanel() {
@@ -3971,6 +3967,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Material(
       color: cs.surface,
+      surfaceTintColor: Colors.transparent,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
@@ -3993,11 +3990,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// split 面板顶栏：拖拽指示 + 标题 + 关闭按钮。
   Widget _buildSplitPanelHeader(ColorScheme cs) {
+    // 标题栏背景跟随主题主色（黑色主题下为纯黑），
+    // 因此文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
+    final bool isDark =
+        Theme.of(context).brightness == Brightness.dark;
+    final Color fg = isDark ? Colors.white : cs.onSurface;
+    final Color fgMuted = isDark ? Colors.white : cs.onSurfaceVariant;
     return Container(
       height: 40,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: cs.surface,
+        // 标题栏与主面板同色，显式绑定主题主色，杜绝任何残留的浅色渲染
+        color: AppPalette.resolveMainPanel(AppThemeController.instance.value),
         border: Border(
           left: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
           bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),
@@ -4005,19 +4009,19 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       ),
       child: Row(
         children: <Widget>[
-          Icon(Icons.drag_indicator, size: 16, color: cs.onSurfaceVariant),
+          Icon(Icons.drag_indicator, size: 16, color: fgMuted),
           const SizedBox(width: 8),
           Text(
             _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
             style: TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.w600,
-              color: cs.onSurface,
+              color: fg,
             ),
           ),
           const Spacer(),
           IconButton(
-            icon: const Icon(Icons.close, size: 18),
+            icon: Icon(Icons.close, size: 18, color: fgMuted),
             tooltip: "关闭面板",
             visualDensity: VisualDensity.compact,
             onPressed: _closeRightPanel,
@@ -4054,56 +4058,16 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         return MessageHubPage(api: _worldApi);
       case RightPanelKind.devices:
         return const DevicesPage();
+      case RightPanelKind.schedule:
+        return SchedulePage(
+          store: _store,
+          scheduleApi: _scheduleApi,
+          sessionId: ApiConfig.effectiveActorId,
+          reloadListenable: _calendarReloadSignal,
+        );
       case null:
         return const SizedBox.shrink();
     }
-  }
-
-  Widget _buildScheduleSidebar() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return ColoredBox(
-      color: cs.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 20, 16, 8),
-            child: Row(
-              children: <Widget>[
-                Text(
-                  "日程",
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: cs.onSurface,
-                  ),
-                ),
-                const Spacer(),
-                IconButton(
-                  tooltip: "关闭",
-                  icon: const Icon(Icons.close, size: 22),
-                  onPressed: () => setState(() => _showCalendarPanel = false),
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints.tightFor(width: 32, height: 32),
-                  iconSize: 20,
-                  color: cs.onSurfaceVariant.withValues(alpha: 0.7),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: SchedulePage(
-              store: _store,
-              scheduleApi: _scheduleApi,
-              sessionId: ApiConfig.effectiveActorId,
-              reloadListenable: _calendarReloadSignal,
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _buildMainContent() {

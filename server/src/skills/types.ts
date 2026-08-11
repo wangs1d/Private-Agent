@@ -47,6 +47,15 @@ export type SkillMetadata = {
   icon?: string;             // 图标（emoji 或 URL）
   /** 内置或用户上传到技能商店的社区技能 */
   kind?: "builtin" | "community";
+  /**
+   * 技能类型：
+   * - code：可执行 handler，由 SkillManager.execute 调用（默认，向后兼容）
+   * - procedural：过程式文档（SKILL.md），无 handler，由 skill_view 工具读取作为 LLM 上下文
+   *
+   * procedural 技能用于沉淀操作流程、踩坑经验、最佳实践等"过程式知识"，
+   * 是"越用越强"的核心载体——复杂任务完成后把经验提炼成可复用文档。
+   */
+  skillType?: "code" | "procedural";
 
   // 输入输出定义
   parameters: SkillParameter[];  // 输入参数列表
@@ -149,4 +158,36 @@ export type SkillLoadOptions = {
   trustByDefault?: boolean;     // 是否默认信任新 Skill
   autoEnable?: boolean;         // 是否自动启用
   validateOnly?: boolean;       // 仅验证不加载
+};
+
+/**
+ * 过程式技能条目（procedural skill）。
+ *
+ * 与 code 技能不同，procedural 技能不包含可执行 handler，
+ * 而是存储一份 Markdown 文档（SKILL.md），由 LLM 通过 skill_view 工具读取作为上下文。
+ * 适合沉淀操作流程、踩坑经验、最佳实践等"过程式知识"。
+ */
+export type ProceduralSkillEntry = {
+  metadata: SkillMetadata;
+  /** SKILL.md 文件在磁盘的绝对路径 */
+  docPath: string;
+  /** 缓存的文档内容（首次读取后缓存，patch 后失效重读） */
+  doc?: string;
+};
+
+/**
+ * 技能使用统计（由 SkillCurator 维护，用于质量治理与归档）。
+ *
+ * 参考 Curator 设计的 use_count / view_count / patch_count / last_activity_at。
+ * code 与 procedural 技能共用同一套统计结构。
+ */
+export type SkillUsageStats = {
+  /** 技能被调用（code.execute）或被读取（procedural.view）的次数 */
+  useCount: number;
+  /** 被 skill_view 加载全文的次数（procedural 专属，code 技能始终为 0） */
+  viewCount: number;
+  /** 被 skill_manage patch 局部修补的次数 */
+  patchCount: number;
+  /** 最近一次活动时间（ISO 字符串） */
+  lastActivityAt: string;
 };

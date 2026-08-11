@@ -250,6 +250,7 @@ export const scheduleTaskCreateBodySchema = z
   .object({
     sessionId: z.string().min(1),
     title: z.string().min(1).max(120),
+    shortTitle: z.string().min(1).max(120).optional(),
     description: z.string().min(1).max(2000),
     kind: z.enum(["reminder", "action", "weather_brief", "agent_task"]),
     runAt: z.string().min(1).optional(),
@@ -313,6 +314,7 @@ export const scheduleTaskCreateBodySchema = z
 
 export const scheduleTaskUpdateBodySchema = z.object({
   title: z.string().min(1).max(120).optional(),
+  shortTitle: z.string().min(1).max(120).optional(),
   description: z.string().min(1).max(2000).optional(),
   runAt: z.string().min(1).optional(),
   recurrence: z.enum(["none", "daily", "weekly", "yearly", "cron"]).optional(),

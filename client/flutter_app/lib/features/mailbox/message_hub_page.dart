@@ -67,7 +67,14 @@ class _MessageHubPageState extends State<MessageHubPage> {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    // 面板自身显式铺上主题背景色，避免依赖父容器（黑色主题下为纯黑）
+    return ColoredBox(
+      color: theme.colorScheme.surface,
+      child: _buildBody(theme),
+    );
+  }
 
+  Widget _buildBody(ThemeData theme) {
     if (_loading && _conversations.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }

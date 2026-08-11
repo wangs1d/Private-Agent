@@ -21,6 +21,12 @@ export type WeatherBrief = {
   peakRainPct: number;
   clothingAdvice: string;
   summaryLine: string;
+  /** 从当前小时起的未来分时预报（用于前端分时温度柱），最多 6 个点 */
+  hourlyForecast: {
+    time: string;
+    temperatureC: number;
+    weatherCode: number;
+  }[];
 };
 
 const WMO_TEXT: Record<number, string> = {
@@ -174,6 +180,9 @@ export class WeatherService {
         precipitation?: number;
       };
       hourly?: {
+        time?: (string | null)[];
+        temperature_2m?: (number | null)[];
+        weather_code?: (number | null)[];
         precipitation_probability?: (number | null)[];
       };
       daily?: {
@@ -192,6 +201,29 @@ export class WeatherService {
     const peakRainPct = probs.length > 0 ? Math.max(...probs) : Number(raw.daily?.precipitation_probability_max?.[0] ?? 0);
 
     const currentTempC = Number(cur.temperature_2m ?? 0);
+
+    // 从当前小时起取未来 6 个小时的温度（open-meteo hourly 从当天 0 点起、步长 1h）
+    const hourlyTimes = raw.hourly?.time ?? [];
+    const hourlyTemps = raw.hourly?.temperature_2m ?? [];
+    const hourlyCodes = raw.hourly?.weather_code ?? [];
+    const nowMs = Date.now();
+    const hourlyForecast: WeatherBrief["hourlyForecast"] = [];
+    if (hourlyTimes.length > 0) {
+      for (let i = 0; i < hourlyTimes.length && hourlyForecast.length < 6; i++) {
+        const time = hourlyTimes[i];
+        if (time == null) continue;
+        const startMs = new Date(time).getTime();
+        if (Number.isNaN(startMs) || startMs < nowMs - 45 * 60 * 1000) continue;
+        const temp = hourlyTemps[i];
+        if (temp == null) continue;
+        hourlyForecast.push({
+          time,
+          temperatureC: Math.round(temp),
+          weatherCode: Number(hourlyCodes[i] ?? 0),
+        });
+      }
+    }
+
     const brief: WeatherBrief = {
       source: "open-meteo",
       latitude,
@@ -217,6 +249,7 @@ export class WeatherService {
         windKmh: Number(cur.wind_speed_10m ?? 0),
       }),
       summaryLine: "",
+      hourlyForecast,
     };
 
     // 构建明天预报摘要（用户常问"明天天气"）

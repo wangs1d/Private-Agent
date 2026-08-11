@@ -111,6 +111,8 @@ export type OrchestrateTaskOptions = {
   desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
   toolRankingHint?: AgentStreamOptions["toolRankingHint"];
+  /** Internal: run a master turn in an isolated provider thread and merge only the synthesized result. */
+  ephemeralSessionId?: string;
 };
 
 export interface MasterAgentConfig {
@@ -1373,9 +1375,9 @@ export class MasterAgentCoordinator {
     opts?: OrchestrateTaskOptions,
     delegatePrompt = false,
   ): Promise<string> {
-    const sessionId = masterChatSessionId(actorId);
+    const sessionId = opts?.ephemeralSessionId ?? masterChatSessionId(actorId);
     let fullText = "";
-    await this.masterProvider.streamCompletion(
+    const streamReturnText = await this.masterProvider.streamCompletion(
       sessionId,
       this.buildUserTurn(userMessage, opts),
       (delta) => {
@@ -1385,6 +1387,9 @@ export class MasterAgentCoordinator {
       this.buildToolContext(actorId, opts),
       this.buildMasterStreamOptions(actorId, opts, delegatePrompt),
     );
+    if (!fullText.trim() && streamReturnText.trim()) {
+      fullText = streamReturnText;
+    }
     const subTaskCount = delegatePrompt
       ? this.getTurnDelegationState(actorId, opts?.chatUserMessageId).reports.length
       : 0;

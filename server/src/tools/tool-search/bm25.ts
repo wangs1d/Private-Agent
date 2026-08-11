@@ -438,6 +438,16 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     [/\bshop(ping)?\b/gi, "shopping buy compare recommend"],
     [/\bcompare\b/gi, "compare suggest shopping prices"],
     [/\bprice\b/gi, "price compare budget shopping"],
+    // 中文同义词扩展：BM25 单工具级文本匹配对中文近义词很弱，
+    // 把常见口语/别名扩展成标准工具词，显著提升召回（如「配音」→ voice/tts）。
+    // 注意：长精确词放前（语音合成/语音消息），避免被短词（语音）先替换吃掉。
+    [/语音合成|合成语音|配音|音频(?:生成)?/gi, "语音合成 配音 音频 语音 voice speak tts speech"],
+    [/语音消息|语音(?:播报|回复|对话|通话|提醒)/gi, "语音消息 语音播报 语音 voice speak send_message 播报"],
+    [/念(?:给我听|出来)?|朗读|播报|读出来|说出来|发语音|用语音/gi, "朗读 播报 念 读出来 语音 speak voice tts"],
+    [/提醒|闹钟|定时(?:提醒)?/gi, "提醒 reminder schedule calendar 闹钟"],
+    [/日程|会议|待办|预约/gi, "日程 会议 待办 calendar schedule meeting"],
+    [/截图|屏幕(?:截图|画面)?|截屏|截(?:个)?(?:图|屏)/gi, "截图 屏幕 截屏 screenshot desktop.visual"],
+    [/搜(?:索|一下|一搜)|查一下|查询/gi, "搜索 查询 search search_web web"],
   ];
   for (const [pattern, replacement] of replacements) {
     if (pattern.test(trimmed)) {

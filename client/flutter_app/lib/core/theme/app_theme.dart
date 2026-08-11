@@ -232,6 +232,20 @@ abstract final class AppTheme {
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
       ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: Colors.white,
+        unselectedLabelColor: Colors.white70,
+        indicatorColor: cs.onSurface,
+        dividerColor: cs.outline.withValues(alpha: 0.25),
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+        labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        unselectedLabelStyle:
+            const TextStyle(fontWeight: FontWeight.w400, fontSize: 14),
+        indicator: UnderlineTabIndicator(
+          borderSide: BorderSide(width: 2, color: cs.onSurface),
+          insets: const EdgeInsets.symmetric(horizontal: 12),
+        ),
+      ),
       cardTheme: CardThemeData(
         color: Colors.transparent,
         surfaceTintColor: Colors.transparent,
@@ -325,6 +339,21 @@ abstract final class AppTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
+      ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: AppPalette.warmOnSurface,
+        unselectedLabelColor: AppPalette.warmOnSurfaceVariant,
+        indicatorColor: AppPalette.warmOnSurface,
+        dividerColor: AppPalette.warmOutline.withValues(alpha: 0.55),
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+        labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        unselectedLabelStyle:
+            const TextStyle(fontWeight: FontWeight.w400, fontSize: 14),
+        indicator: UnderlineTabIndicator(
+          borderSide:
+              BorderSide(width: 2, color: AppPalette.warmOnSurface),
+          insets: const EdgeInsets.symmetric(horizontal: 12),
+        ),
       ),
       cardTheme: CardThemeData(
         color: Colors.transparent,

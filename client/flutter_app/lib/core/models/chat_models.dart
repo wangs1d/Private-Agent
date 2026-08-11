@@ -105,6 +105,7 @@ class ChatMessage {
     this.contentType = "text",
     this.durationMs,
     this.waveform,
+    this.streaming = false,
   });
 
   final String messageId;
@@ -116,6 +117,11 @@ class ChatMessage {
   final int attachmentImageCount;
   /// 对局入口（来自 tool.result 或回复文本解析）。
   final String? playUrl;
+
+  /// 是否为「正在流式接收中」的 assistant 消息。
+  /// 仅内存态标志：渲染层据此对整条消息做打字机逐字展示；
+  /// 持久化/历史加载均为 false（存储层重建消息时不带此字段）。
+  final bool streaming;
 
   /// 消息附件列表（语音 / 图片 / 视频）。
   /// agent 发的语音消息、用户上传的语音消息都会落到这里。

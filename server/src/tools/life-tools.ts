@@ -51,6 +51,7 @@ export function registerLifeTools(
     const subject = String(input.subject ?? "").trim();
     const date = String(input.date ?? "").trim();
     const parseSource = text || [date, subject].filter(Boolean).join(" ").trim();
+    const shortTitle = String(input.shortTitle ?? "").trim() || undefined;
 
     // 去重：同一轮 + 相似内容只创建一次
     const roundId = context.chatUserMessageId || context.sessionId;
@@ -80,6 +81,7 @@ export function registerLifeTools(
       try {
         const task = await scheduleTaskService.createTask({
           sessionId,
+          shortTitle,
           description: subject,
           kind: "reminder",
           runAt,
@@ -95,6 +97,7 @@ export function registerLifeTools(
           summary: "提醒已写入日程",
           taskId: task.taskId,
           title: task.reminderMessage || task.title,
+          shortTitle: task.shortTitle,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
@@ -141,6 +144,7 @@ export function registerLifeTools(
         summary: "提醒已写入日程",
         taskId: task.taskId,
         title: task.reminderMessage || task.title,
+        shortTitle: task.shortTitle,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),

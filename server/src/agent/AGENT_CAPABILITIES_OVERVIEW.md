@@ -387,7 +387,7 @@ Agent 可以：
 ### Mem0 记忆图（`server/src/agentic-memory/`）
 
 - **引擎**：Mem0 OSS（`mem0ai`），实体链接 + 语义/BM25 多信号融合检索
-- **写入**：对话归档、Hermes observe、世界事件等经 `NarrativeMemoryFacade.ingest` → `memory.add(infer=true)`
+- **写入**：对话归档、进化循环 observe、世界事件等经 `NarrativeMemoryFacade.ingest` → `memory.add(infer=true)`
 - **检索**：`memory.search` 按 actor 过滤 → 注入 system 的 `narrativeRecall`（文案块：「记忆图联想检索」）
 - **向量存储**：优先 Qdrant（`AGENT_QDRANT_URL` + `AGENT_AGENTIC_MEMORY_COLLECTION`）；无 Qdrant 时用本地 `MemoryVectorStore`
 - **KV 慢变量**：`AgentMemorySyncService` 仍负责人格/价值观/能力/`memory_summary`；`AGENT_KV_SUMMARY_APPEND_MODE=minimal` 时世界事件不再重复写 KV 流水

@@ -116,7 +116,7 @@ function legacyBridgeTools(deferredCount: number): ChatCompletionTool[] {
   ];
 }
 
-/** 核心库之外的工具通过桥接按需披露（merged 默认 2 枚，legacy 为 Hermes 三件套）。 */
+/** 核心库之外的工具通过桥接按需披露（merged 默认 2 枚，legacy 为技能管理三件套）。 */
 export function buildToolSearchBridgeTools(
   deferredCount: number,
   mode: ToolSearchBridgeMode = "merged",

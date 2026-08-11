@@ -4,6 +4,8 @@ interface ScheduleItem {
   id: string;
   title: string;
   time: string;
+  /** 简洁展示标题（创建时由 LLM 生成，优先展示；缺省回退 title 的剥离简化） */
+  shortTitle?: string;
   description?: string;
   completed?: boolean;
 }
@@ -23,6 +25,46 @@ function formatTodayLabel(): string {
   const now = new Date();
   const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
   return `${now.getMonth() + 1}月${now.getDate()}日 ${weekdays[now.getDay()]}`;
+}
+
+/**
+ * 今日安排标题简洁化（与 Flutter 端 _simplifyScheduleTitle 逻辑对齐）：
+ * 剥离「该X啦」提醒式包装、指令前缀、元描述前缀、以及和左侧时间列重复的
+ * 时间词，再清理冗余代词词头，只保留说明事情的核心文案。
+ * “该去游泳啦，带上泳衣和浴巾！” -> “去游泳”；“记得提醒我3点吃药” -> “吃药”
+ */
+function simplifyScheduleTitle(raw: string): string {
+  let s = raw.trim();
+  if (!s) return s;
+
+  // 提醒式包装：“该去游泳啦，带上泳衣和浴巾！” -> “去游泳”
+  const wrapperMatch = s.match(/^该([^啦了，。！!?？\s]{1,10})(啦|了)/);
+  if (wrapperMatch && wrapperMatch[1]) s = wrapperMatch[1];
+
+  const instruction =
+    /^\s*(请)?(记得|别忘了|不要忘记|不要忘了|提醒用户|提醒我|提醒一下|提醒|帮我|记着|叫我|喊我|给我|让我)\s*(提醒|一下)?/;
+  const metaPrefix = /^\s*(定时|设置|安排|添加|创建|新增)(一个|一下|个|条)?(提醒|日程|事项)?/;
+  const timeExpr =
+    /(今天|明天|后天|今晚|明晚|凌晨|早上|上午|中午|下午|傍晚|晚上|夜里|半夜)?(\d{1,2}(点|[:：])[:：]?\d{0,2}(分|分钟)?(半|整|左右)?|[一二三四五六七八九十两]+点(半|整|左右)?|\d{1,2}[:：]\d{2})/g;
+  const pronoun = /^(我(?!们)|帮我|给我)(的)?/;
+
+  // 交替剥离指令前缀 / 元描述前缀 / 时间词 / 冗余代词，直到不再变化
+  let prev = "";
+  while (s !== prev) {
+    prev = s;
+    s = s
+      .replace(instruction, "")
+      .replace(metaPrefix, "")
+      .replace(timeExpr, "")
+      .replace(pronoun, "");
+  }
+
+  // 清理“的提醒：X”残留结构，以及开头的日期词（今日安排均为当天事项）
+  s = s.replace(/^[^：:]*的?(提醒|闹钟|日程)[：:]/, "");
+  s = s.replace(/^(今天|明天|后天|明早|明晚|大后天)/, "");
+
+  s = s.replace(/^[\s，,、.。!！?？\-~—－–]+/, "").trim();
+  return s || "待办事项";
 }
 
 /**
@@ -76,7 +118,8 @@ export function ScheduleFloatingWidget() {
           if (Array.isArray(data) && data.length > 0) {
             const items: ScheduleItem[] = data.map((item: Record<string, unknown>) => ({
               id: String(item.id ?? Date.now()),
-              title: String(item.title ?? "未命名"),
+              title: simplifyScheduleTitle(String(item.title ?? "未命名")),
+              shortTitle: item.shortTitle ? String(item.shortTitle).trim() : undefined,
               time: item.startAt
                 ? new Date(item.startAt as string).toLocaleTimeString("zh-CN", {
                     hour: "2-digit",
@@ -107,7 +150,13 @@ export function ScheduleFloatingWidget() {
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "schedule-update" && Array.isArray(event.data.schedules)) {
-        setSchedules(event.data.schedules);
+        setSchedules(
+          event.data.schedules.map((item: { title?: string; shortTitle?: string }) => ({
+            ...item,
+            shortTitle: item.shortTitle ? String(item.shortTitle).trim() : undefined,
+            title: simplifyScheduleTitle(String(item.title ?? "未命名")),
+          })),
+        );
       }
     };
     window.addEventListener("message", handleMessage);
@@ -246,7 +295,9 @@ export function ScheduleFloatingWidget() {
                     className={`schedule-float__item${item.completed ? " is-completed" : ""}`}
                   >
                     <span className="schedule-float__item-time">{item.time}</span>
-                    <span className="schedule-float__item-title">{item.title}</span>
+                    <span className="schedule-float__item-title">
+                      {item.shortTitle || item.title}
+                    </span>
                   </li>
                 ))}
               </ul>

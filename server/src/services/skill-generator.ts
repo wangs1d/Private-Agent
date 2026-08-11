@@ -29,6 +29,40 @@ export interface SkillGenerationResult {
 }
 
 /**
+ * procedural 技能（过程式文档）生成请求。
+ *
+ * 由「任务完成即时反思」触发：复杂任务成功后，把任务轨迹交给 LLM，
+ * 提炼成可复用的 SKILL.md 文档（经验沉淀）。
+ */
+export interface ProceduralSkillGenerationRequest {
+  /** 用户原始请求 */
+  userRequest: string;
+  /** 工具调用次数（≥5 才值得沉淀） */
+  toolCallCount: number;
+  /** 工具调用序列摘要（如 "search_web(ok), desktop.uia_query(ok), ..."） */
+  toolCallsSummary: string;
+  /** Agent 最终回复 */
+  assistantReply: string;
+  /** 建议的技能名（可选，LLM 可自行命名） */
+  suggestedName?: string;
+}
+
+export interface ProceduralSkillGenerationResult {
+  ok: boolean;
+  skill?: {
+    /** 技能名（namespace.action 格式） */
+    name: string;
+    /** 一句话描述（≤60 字符，召回命门） */
+    description: string;
+    /** SKILL.md 全文（Markdown） */
+    doc: string;
+    /** 分类标签（第一个作为存储 category） */
+    tags: string[];
+  };
+  error?: string;
+}
+
+/**
  * 智能技能生成服务
  */
 export class SkillGenerator {
@@ -247,6 +281,152 @@ export class SkillGenerator {
     }
 
     console.error("[SkillGenerator] 解析失败：未找到有效的 JSON 结构");
+    return null;
+  }
+
+  // ====================================================================
+  // procedural 技能生成（经验沉淀）
+  // ====================================================================
+
+  /**
+   * 从一次完成的复杂任务轨迹中提炼 procedural 技能文档（SKILL.md）。
+   *
+   * 参考 Skill Review 思路：任务完成后把踩坑经验/非平凡流程提炼成
+   * 可复用文档。LLM 自行判断是否值得沉淀（shouldSave=false 时跳过）。
+   *
+   * 触发条件（由调用方把关）：工具调用 ≥5 次、踩过坑、用户纠正过、非平凡流程。
+   * 简单一次性任务不应调用本方法。
+   */
+  async generateProceduralSkill(
+    request: ProceduralSkillGenerationRequest,
+  ): Promise<ProceduralSkillGenerationResult> {
+    if (!this.chatProvider || !this.chatProvider.isEnabled()) {
+      return {
+        ok: false,
+        error: "需要配置外部聊天提供商才能生成 procedural 技能",
+      };
+    }
+
+    try {
+      const prompt = this.buildProceduralGenerationPrompt(request);
+      const systemPrompt =
+        "你是技能沉淀助手。任务：分析一次已完成的复杂任务轨迹，判断是否值得沉淀为可复用技能文档（SKILL.md），" +
+        "若值得则生成，不值得则返回 shouldSave=false。\n" +
+        "严格输出 JSON，第一个字符必须是 `{`，最后一个字符必须是 `}`，不要任何对话式回复或代码块包裹。\n" +
+        "doc 字段是 Markdown 字符串，包含四个章节：## When to Use / ## Procedure / ## Pitfalls / ## Verification。";
+
+      let fullContent = "";
+      await this.chatProvider.streamCompletion(
+        `skill-distill-${Date.now()}`,
+        { text: prompt },
+        (delta) => {
+          fullContent += delta;
+        },
+        undefined,
+        {
+          systemPromptOverride: systemPrompt,
+          ephemeralTurn: true,
+          maxThreadMessages: 2,
+        },
+      );
+
+      const parsed = this.parseProceduralResult(fullContent);
+      if (!parsed) {
+        return { ok: false, error: "无法解析 LLM 输出的 procedural 技能" };
+      }
+      if (parsed.shouldSave === false) {
+        return { ok: false, error: "LLM 判定本次任务不值得沉淀（shouldSave=false）" };
+      }
+      return { ok: true, skill: parsed.skill };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: `procedural 技能生成失败：${msg}` };
+    }
+  }
+
+  /** 构建 procedural 技能生成的提示词 */
+  private buildProceduralGenerationPrompt(request: ProceduralSkillGenerationRequest): string {
+    const replyPreview = request.assistantReply.replace(/\s+/g, " ").slice(0, 600);
+    return `请分析以下已完成的复杂任务轨迹，判断是否值得沉淀为可复用技能文档。
+
+**用户请求：**
+${request.userRequest}
+
+**工具调用次数：** ${request.toolCallCount}
+
+**工具调用序列：**
+${request.toolCallsSummary}
+
+**Agent 最终回复（节选）：**
+${replyPreview}
+
+**沉淀判断标准：**
+- 工具调用 ≥5 次、踩过坑、用户纠正过、发现非平凡流程 → 值得沉淀
+- 简单问答、一次性任务 → 不值得（返回 shouldSave=false）
+
+**若值得沉淀，输出 JSON：**
+{
+  "shouldSave": true,
+  "skill": {
+    "name": "namespace.action（如 devops.deploy_k8s，全小写+下划线）",
+    "description": "一句话功能描述，≤60 字符（这是召回命门，必须精准）",
+    "tags": ["category", "other-tag"],
+    "doc": "SKILL.md 全文（Markdown 字符串），必须包含四个章节：\\n## When to Use\\n触发条件\\n\\n## Procedure\\n1. 步骤一\\n2. 步骤二\\n\\n## Pitfalls\\n- 已知坑与修复\\n\\n## Verification\\n如何确认成功"
+  }
+}
+
+**若不值得沉淀，输出：**
+{ "shouldSave": false }
+
+注意：doc 字段内的换行用 \\n 表示，章节标题用 ## 二级标题。`;
+  }
+
+  /** 解析 procedural 技能生成结果 */
+  private parseProceduralResult(
+    content: string,
+  ): { shouldSave: boolean; skill?: ProceduralSkillGenerationResult["skill"] } | null {
+    const tryParse = (jsonStr: string) => {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (!parsed || typeof parsed !== "object") return null;
+        if (parsed.shouldSave === false) {
+          return { shouldSave: false };
+        }
+        const skill = parsed.skill;
+        if (!skill || !skill.name || !skill.description || !skill.doc) return null;
+        if (typeof skill.description !== "string" || skill.description.length > 60) return null;
+        return {
+          shouldSave: true,
+          skill: {
+            name: String(skill.name),
+            description: String(skill.description),
+            doc: String(skill.doc),
+            tags: Array.isArray(skill.tags) ? skill.tags.map(String) : ["distilled"],
+          },
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    // 策略 1：```json ... ``` 代码块
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch) {
+      const r = tryParse(jsonBlockMatch[1]);
+      if (r) return r;
+    }
+    // 策略 2：任意 ``` ... ``` 代码块
+    const anyBlockMatch = content.match(/```\s*([\s\S]*?)\s*```/);
+    if (anyBlockMatch) {
+      const r = tryParse(anyBlockMatch[1]);
+      if (r) return r;
+    }
+    // 策略 3：直接匹配最外层 { ... }
+    const objMatch = content.match(/\{[\s\S]*\}/);
+    if (objMatch) {
+      const r = tryParse(objMatch[0]);
+      if (r) return r;
+    }
     return null;
   }
 }

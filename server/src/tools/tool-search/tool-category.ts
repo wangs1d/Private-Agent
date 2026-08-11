@@ -37,6 +37,16 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
     secondaryTools: [],
   },
   {
+    name: "voice",
+    prefixes: ["voice."],
+    aliases: [
+      "语音", "说话", "播报", "朗读", "念", "读出来", "说出来", "发声",
+      "语音合成", "合成语音", "配音", "语音消息", "录音", "音频",
+      "转写", "听", "asr", "tts", "voice", "speak", "speech", "audio",
+    ],
+    secondaryTools: [],
+  },
+  {
     name: "desktop",
     prefixes: ["desktop."],
     aliases: ["桌面操作", "自动化", "脚本", "shell", "命令", "执行", "电脑", "快捷键", "桌面控制", "计算机", "desktop", "automation", "automate", "run"],
@@ -365,6 +375,10 @@ function routeByEmbedding(
 
 /**
  * BM25 降级路由：类别级 BM25 搜索（alias 丰富，命中率远高于单工具级）。
+ *
+ * 容错策略（与 embedding 路由对齐）：
+ *   - top-1 与 top-2 分数接近（< 0.15）→ 返回两个类别并行搜，降低错判风险
+ *   - 无任何类别命中 → 返回空数组，调用方降级为全量搜索，避免把工具排除在外
  */
 function routeByBm25(
   query: string,
@@ -372,18 +386,16 @@ function routeByBm25(
   categories: Map<string, ToolCategoryInfo>,
 ): string[] {
   const hits = categoryBm25.search(query, 3);
-  if (hits.length === 0) return ["misc"];
+  const valid = hits.filter((h) => categories.has(h.id));
+  if (valid.length === 0) return [];
 
-  const top1 = hits[0]!.id;
-  const top2 = hits[1];
-  // BM25 用类别别名搜索，top-1 进入下一层
-  // 如果 categories 中有 top1 则返回
-  if (categories.has(top1)) return [top1];
-
-  // 如果 top1 不在 categories 中（比如 misc 被删），但 top2 在
-  if (top2 && categories.has(top2.id)) return [top2.id];
-
-  return ["misc"];
+  const top1 = valid[0]!;
+  const top2 = valid[1];
+  // top-1 与 top-2 差距 < 0.15 → 并行搜两个类别（BM25 分数尺度与 cosine 不同，阈值放宽）
+  if (top2 && top1.score - top2.score < 0.15) {
+    return [top1.id, top2.id];
+  }
+  return [top1.id];
 }
 
 /**
