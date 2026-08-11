@@ -446,7 +446,7 @@ function buildToolSufficiencyHint(toolName: string, content: string): string {
       const itemMatch = content.match(/"title"\s*:/g);
       const itemCount = itemMatch ? itemMatch.length : 0;
       if (itemCount >= 3) {
-        return `\n[提示] 已返回 ${itemCount} 条搜索结果，含标题/链接/摘要。如需深入某条结果请用 fetch_web 读取该 URL，否则可直接基于已有摘要回答。不要用相同 query 重复搜索。`;
+        return `\n[提示] 已返回 ${itemCount} 条搜索结果，含标题/链接/摘要。如需深入某条结果请用 fetch_web 读取该 URL，否则可直接基于已有摘要回答。不要用相同 query 重复搜索。若用户问的是单一事实判断，请直接给结论和一条依据，不要做第二遍总结。`;
       }
       return "";
     }
@@ -672,7 +672,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期；用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、简报格式。",
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期；用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、简报格式。若用户只问单一事实判断，默认输出“结论 + 1句依据”，不要再把同一判断换句式复述一遍。",
       parameters: {
         type: "object",
         properties: {
@@ -2467,6 +2467,7 @@ export async function streamCompletionWithTools(
           content:
             `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
             `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
+            `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。` +
             strategyBlock +
             `\n\n工具结果：\n${lastToolOutputFallback.slice(0, 4000)}`,
         },

@@ -26,7 +26,7 @@ const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、价格、公告等强时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），优先用搜索结果作答，并注明日期。整理搜索结果时用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。\n\n【搜索失败兜底】search_web 返回 0 条或网络异常时，仍可基于训练知识作答，但必须前置一句「我这边搜不到最新数据，按我之前知道的答你」之类说明，让用户知道这不是实时结果。不要机械回复「搜索不到」就走人。天气查询直接调 weather.* 工具（如果已注册），不要走 search_web。";
+  "\n\n【联网检索】涉及时事、新闻、股价、排片、票价、价格、公告等强时效信息时，必须先调用 search_web（query 2-6 个核心词，可含当前年月或「最新」），优先用搜索结果作答，并注明日期。整理搜索结果时优先用「一句总括 + 2-4 个分点重点」：每点先写关键词，再补一句说明；可以用短小标题、编号或 emoji 起头，但不要上来先说一遍、后面又重复展开一遍。禁止重复同一句开场、结论或相同信息块；禁止使用 Markdown 表格、管道符、以及「等级|标题|摘要」类简报格式。若用户问的是单一事实判断（如“现在在哪 / 有没有 / 是不是 / 最新情况”），默认只回答“结论 + 1 句依据”，不要再补第二轮总结性复述。\n\n【搜索失败兜底】search_web 返回 0 条或网络异常时，仍可基于训练知识作答，但必须前置一句「我这边搜不到最新数据，按我之前知道的答你」之类说明，让用户知道这不是实时结果。不要机械回复「搜索不到」就走人。天气查询直接调 weather.* 工具（如果已注册），不要走 search_web。";
 
 const PHONE_CALL_SYSTEM_SUFFIX =
   "\n\n【语音通知与电话通话 · 静默触达规则】\n\n"
@@ -611,7 +611,9 @@ export function buildLayeredSystemPrompt(
     !memory?.followUpAnchor &&
     !memory?.scheduleSnapshot &&
     !memory?.currentTime &&
-    !memory?.skillIndex
+    !memory?.skillIndex &&
+    !memory?.workingMemorySummary &&
+    !memory?.recentConversationHistory
   ) {
     return baseSystem.trim();
   }
@@ -632,6 +634,11 @@ export function buildLayeredSystemPrompt(
   if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
+  if (memory.workingMemorySummary) parts.push(`【当前工作记忆】\n${memory.workingMemorySummary}`);
+  if (memory.recentConversationHistory)
+    parts.push(
+      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${memory.recentConversationHistory}`,
+    );
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
   if (memory.memoryPreferences) parts.push(`【用户偏好】\n${memory.memoryPreferences}`);
   if (memory.memoryFacts) parts.push(`【用户事实】\n${memory.memoryFacts}`);
@@ -689,7 +696,9 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.followUpAnchor ||
       memory?.scheduleSnapshot ||
       memory?.currentTime ||
-      memory?.skillIndex
+      memory?.skillIndex ||
+      memory?.workingMemorySummary ||
+      memory?.recentConversationHistory
   );
 }
 
@@ -726,6 +735,11 @@ export function buildLayeredSystemPromptSections(
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
   if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
   if (m.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${m.narrativeRecall}`);
+  if (m.workingMemorySummary) dynamicContext.push(`【当前工作记忆】\n${m.workingMemorySummary}`);
+  if (m.recentConversationHistory)
+    dynamicContext.push(
+      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${m.recentConversationHistory}`,
+    );
   if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
   if (m.memoryPreferences) dynamicContext.push(`【用户偏好】\n${m.memoryPreferences}`);
   if (m.memoryFacts) dynamicContext.push(`【用户事实】\n${m.memoryFacts}`);

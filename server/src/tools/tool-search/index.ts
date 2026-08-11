@@ -9,6 +9,7 @@ import {
   type DeferredToolSearchMatch,
 } from "./catalog.js";
 import { getToolSearchConfig } from "./env.js";
+import { prewarmToolRouterCatalog } from "./tool-router-adapter.js";
 
 export type ToolSearchPreparedTurn = {
   visibleTools: ChatCompletionTool[];
@@ -64,6 +65,15 @@ function computeToolsSignature(tools: ChatCompletionTool[]): string {
   return names.join(",");
 }
 
+function isExpectedToolRouterPrewarmError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("tool-router worker shutdown") ||
+    message.includes("tool-router worker is not writable") ||
+    message.includes("tool-router worker exited")
+  );
+}
+
 /**
  * 取（或构建）全量 catalog。命中缓存时直接返回，否则重建并写入缓存。
  */
@@ -110,6 +120,7 @@ function deriveDeferredCatalog(
     categoryIndex: full.categoryIndex,
     categories: full.categories,
     categoryBm25: full.categoryBm25,
+    categorySearches: full.categorySearches,
   };
 }
 
@@ -153,6 +164,12 @@ export function prepareToolsWithToolSearch(
   }
 
   const bridgeTools = buildToolSearchBridgeTools(deferredCatalog.entries.length, cfg.bridgeMode);
+  if (cfg.backend === "tool_router" && deferredCatalog.entries.length > 0) {
+    void prewarmToolRouterCatalog(deferredCatalog, { tenantId: "default" }).catch((error) => {
+      if (isExpectedToolRouterPrewarmError(error)) return;
+      console.warn("[tool-search:tool-router] prewarm failed", error);
+    });
+  }
   return {
     visibleTools: uniqueTools([...visibleTools, ...bridgeTools]),
     deferredCatalog,
@@ -195,4 +212,28 @@ export {
   type DeferredToolEntry,
   type DeferredToolSearchMatch,
 } from "./catalog.js";
+export {
+  adaptiveSearchDeferredTools,
+  loadAdaptiveCatalogSchema,
+  summarizeAdaptiveCatalog,
+  type AdaptiveCatalogSummary,
+  type AdaptiveDeferredToolSearchMatch,
+  type AdaptiveSearchOptions,
+} from "./adaptive-catalog.js";
 export { executeToolSearchBridge, type ToolSearchBridgeResult } from "./handlers.js";
+export * from "./registry/index.js";
+export * from "./intent-router/intent-router.js";
+export * from "./hierarchical-router/hierarchical-router.js";
+export * from "./retrieval/history-score.js";
+export * from "./retrieval/hybrid-retrieval.js";
+export * from "./top-p-selector/top-p-selector.js";
+export * from "./feedback/feedback-models.js";
+export * from "./feedback/online-learner.js";
+export * from "./feedback/circuit-breaker.js";
+export * from "./feedback/async-feedback-queue.js";
+export * from "./knowledge-graph/graph-relations.js";
+export * from "./knowledge-graph/neo4j-client.js";
+export * from "./lazy-loader/lazy-loader.js";
+export * from "./lazy-loader/mcp-connection-pool.js";
+export * from "./reranking/reranking-pipeline.js";
+export * from "./observability/metrics.js";

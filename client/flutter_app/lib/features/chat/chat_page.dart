@@ -16,6 +16,7 @@ import "../../core/services/agent_profile_overlay_launcher.dart";
 import "agent_profile_page.dart";
 import "agent_result_card.dart";
 import "agent_action_choice_card.dart";
+import "assistant_brief_message.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
 import "structured_assistant_message_body.dart";
@@ -598,7 +599,7 @@ class _ChatPageState extends State<ChatPage>
               size: 18,
               color: canSend ? cs.onPrimary : cs.onSurfaceVariant,
             ),
-            tooltip: "发送",
+            tooltip: widget.isAgentProcessing ? "发送（打断当前回复）" : "发送",
             onPressed: canSend
                 ? () {
                     if (widget.controller.text.trim().isNotEmpty) {
@@ -1088,10 +1089,10 @@ class _ChatPageState extends State<ChatPage>
                                             .instance.isShiftPressed) {
                                           return KeyEventResult.ignored;
                                         }
+                                        // agent 回复中也允许发送：会打断当前回复并开新轮次
                                         if (widget.controller.text
-                                                .trim()
-                                                .isNotEmpty &&
-                                            !widget.isAgentProcessing) {
+                                            .trim()
+                                            .isNotEmpty) {
                                           widget.onSend();
                                           return KeyEventResult.handled;
                                         }
@@ -1131,25 +1132,35 @@ class _ChatPageState extends State<ChatPage>
                                 ),
                                 const SizedBox(width: 4),
                                 // 右侧：发送/停止按钮（常显，根据状态切换）
-                                AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 180),
-                                  switchInCurve: Curves.easeOutCubic,
-                                  switchOutCurve: Curves.easeInCubic,
-                                  transitionBuilder:
-                                      (Widget child, Animation<double> anim) {
-                                    return FadeTransition(
-                                      opacity: anim,
-                                      child: ScaleTransition(
-                                        scale:
-                                            Tween<double>(begin: 0.85, end: 1)
+                                // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
+                                // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
+                                ValueListenableBuilder<TextEditingValue>(
+                                  valueListenable: widget.controller,
+                                  builder: (_, TextEditingValue value, __) {
+                                    final bool hasText =
+                                        value.text.trim().isNotEmpty;
+                                    return AnimatedSwitcher(
+                                      duration:
+                                          const Duration(milliseconds: 180),
+                                      switchInCurve: Curves.easeOutCubic,
+                                      switchOutCurve: Curves.easeInCubic,
+                                      transitionBuilder: (Widget child,
+                                          Animation<double> anim) {
+                                        return FadeTransition(
+                                          opacity: anim,
+                                          child: ScaleTransition(
+                                            scale: Tween<double>(
+                                                    begin: 0.85, end: 1)
                                                 .animate(anim),
-                                        child: child,
-                                      ),
+                                            child: child,
+                                          ),
+                                        );
+                                      },
+                                      child: widget.isAgentProcessing && !hasText
+                                          ? _buildStopButton(cs)
+                                          : _buildSendButton(cs),
                                     );
                                   },
-                                  child: widget.isAgentProcessing
-                                      ? _buildStopButton(cs)
-                                      : _buildSendButton(cs),
                                 ),
                               ],
                             ),
@@ -2052,24 +2063,19 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
+    if (AssistantBriefMessage.shouldEnhance(message.text)) {
+      return AssistantBriefMessage(
+        text: message.text,
+        colorScheme: cs,
+      );
+    }
+
     return StructuredAssistantMessageBody(
       text: typewriterRawText ?? message.text,
       cs: cs,
       textTheme: Theme.of(context).textTheme,
       showCursor: typewriterCursor,
     );
-/*
-        stripMarkdown(typewriterRawText ?? message.text);
-    return Text(
-      typewriterCursor ? "$displayText▍" : displayText,
-      // 用 bodyMedium（14px）做正文：12.5 时一长串文字会尽量横向铺满不换行，
-      // 提到 14 后行宽更紧凑、换行更自然，单行不再霸屏。
-      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: cs.onSurface,
-            height: 1.4,
-          ),
-    );
-*/
   }
 
   /// 构建灰色链接显示组件（从父级复用）

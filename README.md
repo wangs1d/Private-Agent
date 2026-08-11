@@ -21,7 +21,7 @@
 
 这个仓库不要按“页面多不多”来理解，按下面 4 层最清楚：
 
-1. `client` / `agent-sphere-avatar` / `sphere-overlay-tauri`
+1. `client` / `agent-sphere-avatar` / `sphere-overlay-py`
 负责用户界面、悬浮球、桌面展示。
 
 2. `server/src/agent` + `server/src/routes` + `server/src/ws`

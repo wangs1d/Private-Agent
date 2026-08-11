@@ -70,6 +70,8 @@ import { DefaultRecoveryPolicy } from "../agent/loop/default-recovery.js";
 import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
+import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
+import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
@@ -624,53 +626,45 @@ export class AgentCore {
     // 2026-07-29 修复 D：fast_chat 也注入 narrativeRecall（复用 cognize 召回结果），
     // 解决追问被误判 fast_chat 时 LLM 只有 thread messages、缺乏长期记忆/工作记忆导致答非所问。
     // 仍跳过 userLocation（保持速度，避免反问"你是不是在 XX"）和 personalization（fast_chat 不需要个性化语气）。
-    const [narrativeRecall, userLocation, personalization] = this.isFastMode(route.mode)
+    //
+    // 2026-08-11 修复 E（思路 A）：工作记忆摘要 + 最近对话回顾不再拼入 narrativeRecall，
+    // 而是作为独立字段透传给 PromptContextBuilder，作为独立块注入 system prompt。
+    // 原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt 的 slice(0,4)
+    // 当作召回条目丢弃、块结构被拍平、hint 被正则误杀 → agent 看到的上下文跳转、不能针对当前话回复。
+    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
+      .isFastMode(route.mode)
       ? await Promise.all([
           // Fast 模式记忆注入：
           // - 有 cognize 召回结果时直接复用（Complex 路径）
           // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
           cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(
-                appendRecentConversationHistory(
-                  appendWorkingMemorySummary(
-                    recallItemsToNarrative(cognitiveRecallItems),
-                    cognitiveWorkingMemorySummary,
-                  ),
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                ),
-              )
-            : this.turnLifecycle
-                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
-                .then((n) => appendRecentConversationHistory(n, "", threadMessageCount)),
+            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
+          Promise.resolve(cognitiveWorkingMemorySummary || undefined),
+          // 最近对话回顾独立透传（含 C1 dedup 判定，hint 由 buildLayeredSystemPrompt 统一添加）
+          Promise.resolve(
+            this.buildRecentConversationHistoryBlock(
+              cognitiveRecentConversationHistory,
+              threadMessageCount,
+            ),
+          ),
           Promise.resolve(undefined),
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
           // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
-          // 深度优化：把工作记忆摘要 + 最近对话历史拼接到 narrativeRecall，让 streamCompletion 真正感知上下文
           cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(
-                appendRecentConversationHistory(
-                  appendWorkingMemorySummary(
-                    recallItemsToNarrative(cognitiveRecallItems),
-                    cognitiveWorkingMemorySummary,
-                  ),
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                ),
-              )
-            : this.turnLifecycle
-                .prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)
-                .then((n) => appendWorkingMemorySummary(n, cognitiveWorkingMemorySummary))
-                .then((n) =>
-                  appendRecentConversationHistory(
-                    n,
-                    cognitiveRecentConversationHistory,
-                    threadMessageCount,
-                  ),
-                ),
+            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          Promise.resolve(cognitiveWorkingMemorySummary || undefined),
+          Promise.resolve(
+            this.buildRecentConversationHistoryBlock(
+              cognitiveRecentConversationHistory,
+              threadMessageCount,
+            ),
+          ),
           // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开
           userIsStatingData
             ? Promise.resolve(undefined)
@@ -704,6 +698,8 @@ export class AgentCore {
       access,
       sessionId,
       shortTermTurn,
+      workingMemorySummary,
+      recentConversationHistory,
     );
     const parallelLiveRaw =
       parallelLiveComplex && parallelLiveOriginalRoute
@@ -850,6 +846,8 @@ export class AgentCore {
 
         result = await this.runStandardLlmPath(actorId, text, route.mode, opts, {
           narrativeRecall: enrichedNarrativeRecall,
+          workingMemorySummary,
+          recentConversationHistory,
           userLocation,
           personalization,
           trajCap,
@@ -980,6 +978,8 @@ export class AgentCore {
         try {
           return await this.runStandardLlmPath(actorId, text, "fast", opts, {
             narrativeRecall: enrichedNarrativeRecall,
+            workingMemorySummary,
+            recentConversationHistory,
             userLocation,
             personalization,
             trajCap,
@@ -1466,6 +1466,66 @@ export class AgentCore {
     }
   }
 
+  private pickToolNamespace(toolName: string): string | null {
+    if (!toolName) return null;
+    const dotIndex = toolName.indexOf(".");
+    if (dotIndex > 0) return toolName.slice(0, dotIndex);
+    const underscoreIndex = toolName.indexOf("_");
+    if (underscoreIndex > 0) return toolName.slice(0, underscoreIndex);
+    return toolName === "unknown" ? null : "misc";
+  }
+
+  /**
+   * 把 cognize 阶段已召回的 MemoryRecallItem[] 拼接为 narrative recall 字符串。
+   * 用于在 standard path 中复用 cognize 召回结果，替代 prepareNarrativeRecall。
+   * 单条 content 已由 MemoryCortex.textToRecallItems 截断至 800 字符（Task 3），此处不再截断。
+   * 返回 undefined 表示无可用内容（与 prepareNarrativeRecall 的空结果语义一致）。
+   */
+  private recallItemsToNarrative(items: MemoryRecallItem[]): string | undefined {
+    const lines: string[] = [];
+    for (const it of items) {
+      const content = typeof it?.content === "string" ? it.content.trim() : "";
+      if (content) lines.push(content);
+    }
+    return lines.length > 0 ? lines.join("\n") : undefined;
+  }
+
+  /**
+   * 构建最近对话回顾独立块（不再拼入 narrativeRecall）。
+   *
+   * 2026-08-11 修复 E（思路 A）：原 appendRecentConversationHistory 把 [最近对话] 块
+   * 拼到 narrativeRecall 末尾，下游 formatNarrativeRecallPrompt 的 slice(0,4) 会把它
+   * 当作召回条目丢弃、hint 被正则误杀、多行块结构被拍平 → agent 上下文跳转。
+   * 现改为返回独立字符串，由 PromptContextBuilder 作为独立字段透传，
+   * buildLayeredSystemPrompt 作为【最近对话回顾】独立块注入，绕过 formatNarrativeRecallPrompt。
+   *
+   * 保留原 C1 dedup 判定：thread messages >= 12 条时返回 undefined（与消息数组重复）。
+   * "非用户最新指令"提示（原 C2 hint）由 buildLayeredSystemPrompt 统一添加，此处不再拼接。
+   */
+  private buildRecentConversationHistoryBlock(
+    recentConversationHistory: string,
+    threadMessageCount: number = -1,
+  ): string | undefined {
+    if (!recentConversationHistory) return undefined;
+
+    // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，LLM 已能从 msgs
+    // 看到全部最近对话，再注入【最近对话回顾】块属于完全重复。
+    // 仅当 thread 较短（首次对话、新会话、长 context 被 trim 掉）时才返回。
+    if (threadMessageCount >= 12) {
+      return undefined;
+    }
+
+    return recentConversationHistory;
+  }
+
+  /**
+   * 2026-07-29 修复 C1 配套：窥探当前 thread store 中的非 system 消息条数。
+   * - 成功：返回 user/assistant 消息总数（不含 system）
+   * - 失败：返回 -1（关闭 dedup 判定，保持原追加行为）
+   *
+   * 调用栈：narrativeRecall 准备阶段，用于判断 [最近对话] 块是否与 msgs 重复。
+   * 不修改 thread store，纯查询。
+   */
   private peekThreadMessageCount(actorId: string, sessionId?: string): number {
     try {
       const chatSessionId = resolvePrimaryChatSessionId(
@@ -1495,6 +1555,8 @@ export class AgentCore {
     access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
     sessionId: string,
     shortTermTurn: ShortTermTurnContext,
+    workingMemorySummary: string | undefined,
+    recentConversationHistory: string | undefined,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -1518,6 +1580,8 @@ export class AgentCore {
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
+      workingMemorySummary,
+      recentConversationHistory,
       personalization,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
@@ -1554,6 +1618,10 @@ export class AgentCore {
     opts: HandleUserMessageOptions | undefined,
     ctx: {
       narrativeRecall?: string;
+      /** 当前工作记忆摘要（独立块注入，不再拼入 narrativeRecall） */
+      workingMemorySummary?: string;
+      /** 最近对话回顾（独立块注入，thread 较短时填充） */
+      recentConversationHistory?: string;
       userLocation?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
@@ -1603,25 +1671,142 @@ export class AgentCore {
     );
 
     const onBatchWithEvolution = ctx.orchestrateToolCtx.onToolLoopAfterBatch;
-    const streamOpts = this.streamOptionsBuilder.build({
-      actorId,
-      sessionId: ctx.sessionId,
-      text,
-      mode,
-      promptContextBuilder: this.promptContextBuilder,
-      narrativeRecall: ctx.narrativeRecall,
-      interruptedContext: opts?.interruptedContext,
-      userLocation: ctx.userLocation,
-      personalization: ctx.personalization,
-      onToolLoopAfterBatch: onBatchWithEvolution,
-      userPattern: ctx.cognitiveUserPattern,
-      toolPlan: ctx.cognitiveToolPlan,
-      toolExposureProfile: this.toolPolicyResolver.resolveExposureProfile(mode),
-      toolRankingHint: this.toolPolicyResolver.resolveRankingHint(actorId),
-      cognitiveMetacog: ctx.cognitiveMetacog,
-      cognitiveEmotion: ctx.cognitiveEmotion,
-      signal: opts?.signal,
-    });
+    const toolExposureProfile = this.toolPolicyResolver.resolveExposureProfile(mode);
+    const toolRankingHint = this.toolPolicyResolver.resolveRankingHint(actorId);
+    // 2026-07-29 修复 D2：fast_chat 也走 promptContextBuilder.build，把 narrativeRecall 注入 promptContext.memory，
+    // 让 LLM 能看到长期记忆 + 工作记忆 + [最近对话] recap。
+    // 2026-07-30 重构：Fast 模式作为表达层 + 轻量工具通道（clock/weather/calendar.list 只读工具）。
+    // Complex 模式负责重活（多步/写操作/子 Agent 委派），结果回传后由 Fast 统一输出。
+    const baseStreamOpts = this.isFastMode(mode)
+      ? ({
+          ...(this.promptContextBuilder.build({
+            actorId,
+            sessionId: ctx.sessionId,
+            userText: text,
+            narrativeRecall: ctx.narrativeRecall,
+            workingMemorySummary: ctx.workingMemorySummary,
+            recentConversationHistory: ctx.recentConversationHistory,
+            interruptedContext: opts?.interruptedContext,
+            userLocation: undefined, // fast_chat 跳过位置注入
+            personalization: ctx.personalization,
+            onToolLoopAfterBatch: undefined, // fast_chat 无工具循环
+            userPattern: ctx.cognitiveUserPattern,
+            toolPlan: ctx.cognitiveToolPlan,
+          }) ?? {}),
+          chatToolsBuiltin: getFastLaneTools(),
+          chatToolsExtra: [],
+          toolExposureProfile,
+          toolRankingHint,
+        } satisfies AgentStreamOptions)
+      : {
+          ...(this.promptContextBuilder.build({
+            actorId,
+            sessionId: ctx.sessionId,
+            userText: text,
+            narrativeRecall: ctx.narrativeRecall,
+            workingMemorySummary: ctx.workingMemorySummary,
+            recentConversationHistory: ctx.recentConversationHistory,
+            interruptedContext: opts?.interruptedContext,
+            userLocation: ctx.userLocation,
+            personalization: ctx.personalization,
+            onToolLoopAfterBatch: onBatchWithEvolution,
+            userPattern: ctx.cognitiveUserPattern,
+            toolPlan: ctx.cognitiveToolPlan,
+          }) ?? {}),
+          toolExposureProfile,
+          toolRankingHint,
+        };
+    const runtimeKernel = getRuntimeKernel(actorId);
+    // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
+    // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
+    // - emotionState: 仅当情绪显著时输出（强负/强正/高唤醒），让模型基于情绪调语气
+    // 高置信 + 中性情绪 → 跳过（避免噪声污染 prompt）
+    const memoryBeforeSanitize = baseStreamOpts.promptContext?.memory;
+    const cogMeta = ctx.cognitiveMetacog;
+    const cogEmo = ctx.cognitiveEmotion;
+    if (memoryBeforeSanitize && (cogMeta || cogEmo)) {
+      if (cogMeta && (cogMeta.shouldReflect || cogMeta.confidence < 0.7)) {
+        const markers = cogMeta.uncertaintyMarkers.slice(0, 2).join("、");
+        const direction = cogMeta.shouldReflect
+          ? "建议先反思再答"
+          : "对不确定的点先说明";
+        memoryBeforeSanitize.metaCognition =
+          `置信度 ${cogMeta.confidence.toFixed(2)} — ${direction}${markers ? `（${markers}）` : ""}`;
+      }
+      if (cogEmo) {
+        const v = cogEmo.valence;
+        const a = cogEmo.arousal;
+        if (v < -0.3 || v > 0.5 || a > 0.7) {
+          const tone = v < -0.5
+            ? "回复应简短温和"
+            : v < -0.3
+              ? "回复宜温和"
+              : v > 0.5
+                ? "回复可活泼些"
+                : a > 0.7
+                  ? "回复别端着"
+                  : "";
+          memoryBeforeSanitize.emotionState =
+            `情绪：${cogEmo.label}${tone ? ` — ${tone}` : ""}`;
+        }
+      }
+    }
+    const runtimePlan = runtimeKernel.planTurn(text, baseStreamOpts.promptContext?.memory);
+    const sanitizedMemory = runtimeKernel.sanitizePromptMemory(
+      baseStreamOpts.promptContext?.memory,
+      runtimePlan,
+    );
+    const isMinimalMode = runtimeKernel.isMinimalMode();
+    // 2026-08-02 模型路由：Fast mode → deepseek-chat（Flash），Complex mode → deepseek-reasoner（Pro）
+    const tierForMode: Record<LlmExecutionMode, TaskTier> = {
+      fast: TaskTier.FAST,
+      complex: TaskTier.COMPLEX,
+    };
+    const streamOpts: AgentStreamOptions = {
+      ...baseStreamOpts,
+      ...(sanitizedMemory ? { promptContext: { memory: sanitizedMemory } } : { promptContext: undefined }),
+      ...(runtimePlan.promptMode === "conversation_only"
+        ? {
+            systemPromptOverride:
+              "You are a helpful, safe assistant. Reply in the user's language. Follow the current user request and conversation context.",
+          }
+        : {}),
+      // minimal 模式下：通过 RuntimeKernel.buildSessionSystem() 生成薄身份 system，
+      // suppressRuntimeSuffixes=true 跳过身份/风格/时间戳说明后缀，
+      // functionalSuffixes=true 保留功能性后缀（工具说明/主 Agent 调度/用户可见进度/访问权限）
+      ...(isMinimalMode
+        ? {
+            systemPromptOverride: runtimeKernel.buildSessionSystem() ?? undefined,
+            suppressRuntimeSuffixes: true,
+            functionalSuffixes: runtimePlan.functionalSuffixes !== false,
+          }
+        : {}),
+      toolExposureProfile: runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile,
+      pinnedToolNames: runtimePlan.enabled
+        ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
+        : baseStreamOpts.pinnedToolNames,
+      // 2026-08-01 性能优化：Fast 模式 maxRounds 限制为 1。
+      // Fast 模式以对话为主，单次工具调用足够（LLM 可基于 system prompt 的 currentTime/userLocation
+      // 直接答时间/位置/天气类问题）。Complex 模式交给 plan_execute / master_subagent 处理重活。
+      ...(this.isFastMode(mode)
+        ? {
+            toolLoop: {
+              ...(baseStreamOpts.toolLoop ?? {}),
+              maxRounds: 1,
+            },
+          }
+        : baseStreamOpts.toolLoop
+          ? { toolLoop: baseStreamOpts.toolLoop }
+          : {}),
+      maxThreadMessages: runtimePlan.promptMode === "conversation_only"
+        ? Number.parseInt(process.env.AGENT_RUNTIME_KERNEL_MAX_THREAD_MESSAGES ?? "12", 10)
+        : baseStreamOpts.maxThreadMessages,
+      // 透传中断信号:用户发新消息时 abort,provider 底层 fetch 真正中断 HTTP 流式
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      // 2026-08-02 模型路由：根据 Fast/Complex 模式选择对应模型
+      // Fast → deepseek-chat（Flash），Complex → deepseek-reasoner（Pro）
+      ...buildModelOverrideOpts(tierForMode[mode]),
+    };
 
     let full = "";
     let modelCallsConsumed = 1;

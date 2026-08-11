@@ -1,3 +1,5 @@
+import { isDirectFactQuery } from "./direct-fact-query.js";
+
 /**
  * 数据驱动回复策略评估器
  *
@@ -175,6 +177,7 @@ export function assessDataQuality(toolData: CollectedToolData[]): DataQualityAss
 /** 根据数据质量选择回复策略 */
 export function selectStrategy(quality: DataQualityAssessment, userMessage: string): StrategyDirective {
   const isAnalysisQuestion = /为什么|分析|怎么回事|原因|导致|影响|怎么回事|怎么回事|背后|逻辑/i.test(userMessage);
+  const directFactQuery = isDirectFactQuery(userMessage);
 
   let strategy: SynthesisStrategy;
   let instruction: string;
@@ -197,7 +200,8 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
           `2. 归因展开：拆出2-4个原因维度，每个维度用「原因→机制→数据」结构展开\n` +
           `3. 综合改写：用自己的话整合多源信息，不要直接转发任何单一来源的原文\n` +
           `4. 信息密度：合并冗余，只保留最有价值的证据\n` +
-          `5. 如果信息有缺口，明确说"已知X未知Y"，不要退缩道歉`;
+          `5. 如果信息有缺口，明确说"已知X未知Y"，不要退缩道歉\n` +
+          `6. 禁止把同一结论再换个说法复述一遍`;
       } else {
         // 高质量数据 + 非分析类 → 分层递进
         strategy = "layered_progressive";
@@ -207,7 +211,8 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
           `1. 直接给出核心信息，不要铺垫\n` +
           `2. 如有必要，补充关键细节（数据/时间/来源）\n` +
           `3. 合并多源冗余信息，只保留最有价值的部分\n` +
-          `4. 用自然的口语表述，不要罗列工具调用过程`;
+          `4. 用自然的口语表述，不要罗列工具调用过程\n` +
+          `5. ${directFactQuery ? "这是单一事实查询，默认压到 2~3 句：结论 + 依据，不要再做总结性复述" : "同一事实不要换句话重复第二遍"}`;
       }
       break;
 
@@ -220,7 +225,8 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
         `1. 先给出已确认的事实（有数据支撑的部分）\n` +
         `2. 再给出合理推断（基于已有信息的推测，标注是推断）\n` +
         `3. 最后说明待验证点（信息缺口在哪）\n` +
-        `4. 不要道歉说"信息不完整"，用"已知X未知Y"替代`;
+        `4. 不要道歉说"信息不完整"，用"已知X未知Y"替代\n` +
+        `5. ${directFactQuery ? "如果用户只问一个事实点，最多 3 句：事实、推断、缺口；不要再来一遍“所以现在...”总结" : "禁止把事实层和推断层重复表述两次"}`;
       break;
 
     case "contradictory":
@@ -244,7 +250,8 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
         `1. 明确说明目前能确定的信息\n` +
         `2. 明确说明未知的信息（用"目前未知X"而非"抱歉搜不到"）\n` +
         `3. 如果能从已有知识给出方向性判断，简述并标注"基于已有知识推断"\n` +
-        `4. 不要道歉，不要退缩，不要说"换个角度"`; 
+        `4. 不要道歉，不要退缩，不要说"换个角度"\n` +
+        `5. 不要为了显得完整而重复同一判断；缺口说明一次就够`; 
       break;
   }
 

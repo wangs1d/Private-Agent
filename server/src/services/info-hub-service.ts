@@ -182,7 +182,7 @@ export class InfoHubService {
 
     // 意图识别：影响搜索策略
     const intent = classifySearchIntent(keyword);
-    const effectiveLimit = intent.suggestedLimit ?? boundedLimit;
+    const effectiveLimit = Math.max(boundedLimit, intent.suggestedLimit ?? 0);
 
     // 1. 会话内复用（相似查询直接返回之前结果）
     if (sessionId) {
@@ -234,19 +234,32 @@ export class InfoHubService {
 
     let merged = dedupeByUrl([...official, ...bingResults.flat(), ...tech]); // 官方媒体 RSS 排前面（实时性更高）
 
-    // 5. 第二轮回退：仅当所有必应搜索都返回 0 结果时，用宽松模式
-    if (merged.length === 0) {
-      const webRelaxed = await searchBingChinaRelaxed(bingQuery, effectiveLimit, domesticOpts);
-      if (webRelaxed.length > 0) {
-        merged = dedupeByUrl([...merged, ...webRelaxed]);
+    // 5. 第二轮扩搜：结果偏少时就主动放宽，不等到完全 0 条
+    const sparseThreshold = Math.min(effectiveLimit, Math.max(4, Math.ceil(effectiveLimit * 0.6)));
+    if (merged.length < sparseThreshold) {
+      const fallbackQueries = [
+        keyword,
+        bingQuery,
+        ...intent.entities.slice(1, 3),
+      ]
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const relaxedBatches = await Promise.all(
+        [...new Set(fallbackQueries)].slice(0, 3).map((value) =>
+          searchBingChinaRelaxed(value, effectiveLimit, domesticOpts),
+        ),
+      );
+      const relaxedMerged = dedupeByUrl(relaxedBatches.flat());
+      if (relaxedMerged.length > 0) {
+        merged = dedupeByUrl([...merged, ...relaxedMerged]);
       }
     }
 
     // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
     // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
-    const firstBingResults = bingResults[0] ?? [];
-    if (merged.length < effectiveLimit && firstBingResults.length > 0) {
-      const discovered = await discoverHtmlSourcesFromResults(firstBingResults, keyword, domesticOpts);
+    const allBingResults = dedupeByUrl(bingResults.flat());
+    if (merged.length < effectiveLimit && allBingResults.length > 0) {
+      const discovered = await discoverHtmlSourcesFromResults(allBingResults, keyword, domesticOpts);
       if (discovered.length > 0) {
         merged = dedupeByUrl([...merged, ...discovered]);
       }

@@ -8,7 +8,7 @@ import "package:flutter/services.dart";
 import "../config/api_config.dart";
 import "agent_sphere_mood_bridge.dart";
 
-/// Windows 桌宠启动器 — 默认 **Tauri** 或 **Flutter 内嵌 WebView**。
+/// Windows 桌宠启动器 — 默认 **PySide6 (sphere-overlay-py)** 或 **Flutter 内嵌 WebView**。
 /// Runner 内不再链接第二套 WebView2（会与 webview_windows 冲突导致进程崩溃）。
 class SphereOverlayLauncher {
   SphereOverlayLauncher._();
@@ -24,12 +24,11 @@ class SphereOverlayLauncher {
   static bool _created = false;
   static bool _visible = false;
   static Process? _overlayProcess;
-  static const String _commandArgPrefix = "--pai-command=";
 
-  /// Tauri 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
+  /// PySide6 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
   static final ValueNotifier<bool> overlayActive = ValueNotifier<bool>(false);
 
-  /// Tauri 不可用时的降级标记（显示内嵌透明 WebView）。
+  /// 独立桌宠不可用时的降级标记（显示内嵌透明 WebView）。
   static final ValueNotifier<bool> useEmbeddedFallback =
       ValueNotifier<bool>(false);
 
@@ -38,100 +37,53 @@ class SphereOverlayLauncher {
   static bool get usesOverlayProcess =>
       _overlayProcess != null || overlayActive.value;
 
-  /// 进程内 Win32 WebView2 桌宠（非 Tauri、非内嵌 WebView）。
+  /// 进程内 Win32 WebView2 桌宠（非 PySide6、非内嵌 WebView）。
   static bool get isInProcessOverlayActive =>
       _created && _overlayProcess == null && !useEmbeddedFallback.value;
 
-  /// Tauri 或进程内 overlay 任一就绪时，应隐藏 Flutter 内嵌 WebView。
+  /// PySide6 或进程内 overlay 任一就绪时，应隐藏 Flutter 内嵌 WebView。
   static bool get isDeskPetActive =>
       overlayActive.value || isInProcessOverlayActive;
 
-  /// 是否已安装 Tauri 且 overlay 为 Tauri 可用的相对路径构建。
+  /// 是否已安装 sphere-overlay-py 且 overlay 资源完整。
   static bool get isOverlayAvailable => overlayUnavailableReason == null;
 
   /// 桌宠不可用时的人类可读原因（用于 SnackBar）。
   static String? get overlayUnavailableReason {
     if (kIsWeb || !Platform.isWindows) {
-      return "当前平台不支持 Tauri 桌宠。";
+      return "当前平台不支持桌宠。";
     }
 
-    final Directory? overlayDir = _findTauriOverlayDir();
+    final Directory? overlayDir = _findPyOverlayDir();
     if (overlayDir == null) {
-      return "未找到 sphere-overlay-tauri 目录。\n"
+      return "未找到 sphere-overlay-py 目录。\n"
           "请从仓库根目录启动客户端，或设置环境变量 PAI_REPO_ROOT 指向项目根目录。";
     }
 
-    final String? overlayHtml = _findAvatarOverlayHtml(overlayDir);
-    if (overlayHtml == null) {
-      return "缺少 overlay.html。\n请执行：cd agent-sphere-avatar && npm run build";
+    if (!File("${overlayDir.path}${Platform.pathSeparator}main.py").existsSync()) {
+      return "缺少 main.py，请确认 sphere-overlay-py 目录完整。";
     }
 
-    if (_findTauriExe(overlayDir) == null) {
-      return "未找到 Tauri 可执行文件。\n请执行：cd sphere-overlay-tauri && npm run tauri build";
+    final String? overlayHtml = _findAvatarOverlayHtml(overlayDir.parent.path);
+    if (overlayHtml == null) {
+      return "缺少 overlay.html。\n请执行：cd agent-sphere-avatar && npm run build";
     }
 
     return null;
   }
 
-  static String? _findAvatarOverlayHtml(Directory overlayDir) {
+  static String? _findAvatarOverlayHtml(String repoRoot) {
     final File fromRepo = File(
-      "${overlayDir.parent.path}/agent-sphere-avatar/dist/overlay.html",
+      "$repoRoot${Platform.pathSeparator}agent-sphere-avatar${Platform.pathSeparator}dist${Platform.pathSeparator}overlay.html",
     );
     if (fromRepo.existsSync()) return fromRepo.path;
 
     // 仅作兜底检测；build:chat 产物含 /chat 绝对路径。
     final File fromServerAssets = File(
-      "${overlayDir.parent.path}/server/web/chat/assets/avatar/overlay.html",
+      "$repoRoot${Platform.pathSeparator}server${Platform.pathSeparator}web${Platform.pathSeparator}chat${Platform.pathSeparator}assets${Platform.pathSeparator}avatar${Platform.pathSeparator}overlay.html",
     );
     if (fromServerAssets.existsSync()) return fromServerAssets.path;
     return null;
-  }
-
-  /// Tauri 可执行文件：优先 release，其次 debug。
-  static File? _findTauriExe(Directory overlayDir) {
-    final File release = File(
-      "${overlayDir.path}/src-tauri/target/release/sphere-overlay-tauri.exe",
-    );
-    if (release.existsSync()) return release;
-    final File debug = File(
-      "${overlayDir.path}/src-tauri/target/debug/sphere-overlay-tauri.exe",
-    );
-    if (debug.existsSync()) return debug;
-    return null;
-  }
-
-  static String _moodFilePath() =>
-      "${Directory.systemTemp.path}${Platform.pathSeparator}pai-sphere-mood.json";
-
-  static Future<bool> _sendOverlayCommand(String command) async {
-    final Directory? overlayDir = _findTauriOverlayDir();
-    if (overlayDir == null) return false;
-
-    final File? tauriExe = _findTauriExe(overlayDir);
-    if (tauriExe == null) return false;
-
-    final Map<String, String> env =
-        Map<String, String>.from(Platform.environment);
-    env["PAI_WS_URL"] = ApiConfig.wsUrl;
-    env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
-    env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-    env["PAI_MOOD_FILE"] = _moodFilePath();
-    env["PAI_REPO_ROOT"] = overlayDir.parent.path;
-
-    try {
-      final Process proc = await Process.start(
-        tauriExe.path,
-        <String>["$_commandArgPrefix$command"],
-        workingDirectory: overlayDir.path,
-        environment: env,
-      );
-      unawaited(proc.exitCode);
-      return true;
-    } catch (e) {
-      debugPrint("[SphereOverlay] send overlay command failed: $e");
-    }
-
-    return false;
   }
 
   static Future<bool> isWebViewReady() async {
@@ -169,7 +121,7 @@ class SphereOverlayLauncher {
     if (_created && electron && overlayActive.value) return true;
 
     if (electron) {
-      return _launchTauriOverlay();
+      return _launchPyOverlay();
     }
 
     if (_useInProcessOverlay) {
@@ -180,7 +132,7 @@ class SphereOverlayLauncher {
     return _enableEmbeddedFallback();
   }
 
-  /// 在应用内嵌 WebView 槽位显示桌宠（无独立 HWND / Tauri）。
+  /// 在应用内嵌 WebView 槽位显示桌宠（无独立 HWND）。
   static bool _enableEmbeddedFallback() {
     debugPrint(
       "[SphereOverlay] Using embedded Flutter WebView fallback in chat slot.",
@@ -208,26 +160,25 @@ class SphereOverlayLauncher {
     }
   }
 
-  /// AppBar 手动启动 Tauri 独立桌宠（会先关闭 Win32 原生窗）。
+  /// AppBar 手动启动独立桌宠（PySide6，会先关闭 Win32 原生窗）。
   static Future<bool> launchOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
-    if (overlayActive.value || _created) {
-      final bool shown = await _sendOverlayCommand("show");
-      if (shown) {
-        _created = true;
-        _visible = true;
-        overlayActive.value = true;
-        useEmbeddedFallback.value = false;
-        return true;
-      }
-      debugPrint("[SphereOverlay] show command failed, relaunching Tauri…");
+    // 进程在即视为已就绪：PySide6 桌宠常驻可见，隐藏仅通过系统托盘手动操作。
+    if (_overlayProcess != null) {
+      _created = true;
+      _visible = true;
+      overlayActive.value = true;
+      useEmbeddedFallback.value = false;
+      return true;
     }
 
-    await destroy();
-    overlayActive.value = false;
-    _created = false;
-    return _launchTauriOverlay();
+    if (overlayActive.value || _created) {
+      await destroy();
+      overlayActive.value = false;
+      _created = false;
+    }
+    return _launchPyOverlay();
   }
 
   static Future<bool> _createInProcess({String? overlayUrl}) async {
@@ -252,23 +203,22 @@ class SphereOverlayLauncher {
     }
   }
 
-  static Future<bool> _launchTauriOverlay() async {
-    final Directory? overlayDir = _findTauriOverlayDir();
+  static Future<bool> _launchPyOverlay() async {
+    final Directory? overlayDir = _findPyOverlayDir();
     if (overlayDir == null) {
-      debugPrint("[SphereOverlay] sphere-overlay-tauri not found.");
+      debugPrint("[SphereOverlay] sphere-overlay-py not found.");
       return false;
     }
 
-    final File? tauriExe = _findTauriExe(overlayDir);
-    if (tauriExe == null) {
+    if (!File("${overlayDir.path}${Platform.pathSeparator}main.py").existsSync()) {
       debugPrint(
-        "[SphereOverlay] missing Tauri exe — run: "
-        "cd sphere-overlay-tauri && npm run tauri build",
+        "[SphereOverlay] missing main.py — run: "
+        "cd sphere-overlay-py && python -m pip install -r requirements.txt",
       );
       return false;
     }
 
-    if (_findAvatarOverlayHtml(overlayDir) == null) {
+    if (_findAvatarOverlayHtml(overlayDir.parent.path) == null) {
       debugPrint(
         "[SphereOverlay] missing overlay.html — run: "
         "cd agent-sphere-avatar && npm run build",
@@ -282,37 +232,48 @@ class SphereOverlayLauncher {
       env["PAI_WS_URL"] = ApiConfig.wsUrl;
       env["PAI_SESSION_ID"] = ApiConfig.effectiveActorId;
       env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
-      env["PAI_MOOD_FILE"] = _moodFilePath();
+      env["PAI_ACTOR_ID"] = ApiConfig.effectiveActorId;
+      env["PAI_USER_ID"] = ApiConfig.localPin;
+      env["PAI_AVATAR_DIST"] =
+          "${overlayDir.parent.path}${Platform.pathSeparator}agent-sphere-avatar${Platform.pathSeparator}dist";
       env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
-      debugPrint("[SphereOverlay] launching Tauri from ${overlayDir.path}");
+      debugPrint("[SphereOverlay] launching PySide6 overlay from ${overlayDir.path}");
 
-      await Process.start(
-        tauriExe.path,
-        <String>["${_commandArgPrefix}show"],
+      final Process proc = await Process.start(
+        "python",
+        <String>["main.py"],
         workingDirectory: overlayDir.path,
         environment: env,
-        mode: ProcessStartMode.detached,
       );
-
-      // detached 进程不可监听 exitCode；桌宠独立存活，热重启不拖垮主进程。
-      _overlayProcess = null;
+      _overlayProcess = proc;
       _created = true;
       _visible = true;
       overlayActive.value = true;
       useEmbeddedFallback.value = false;
+
+      // 保留进程句柄以便 destroy() 关闭；退出时清理状态。
+      unawaited(proc.exitCode.then((int code) {
+        debugPrint("[SphereOverlay] PySide6 overlay exited: $code");
+        if (identical(_overlayProcess, proc)) {
+          _overlayProcess = null;
+          _created = false;
+          _visible = false;
+          overlayActive.value = false;
+        }
+      }));
       return true;
     } catch (e) {
-      debugPrint("[SphereOverlay] Tauri launch failed: $e");
+      debugPrint("[SphereOverlay] PySide6 overlay launch failed: $e");
       _overlayProcess = null;
       return false;
     }
   }
 
-  static Directory? _findTauriOverlayDir() {
+  static Directory? _findPyOverlayDir() {
     final String? repoRoot = Platform.environment["PAI_REPO_ROOT"]?.trim();
     if (repoRoot != null && repoRoot.isNotEmpty) {
-      final Directory fromEnv = Directory("$repoRoot/sphere-overlay-tauri");
+      final Directory fromEnv = Directory("$repoRoot/sphere-overlay-py");
       if (fromEnv.existsSync()) return fromEnv;
     }
 
@@ -324,12 +285,12 @@ class SphereOverlayLauncher {
     for (final String seed in seeds) {
       Directory dir = Directory(seed);
       for (int i = 0; i < 15; i++) {
-        final Directory candidate = Directory("${dir.path}/sphere-overlay-tauri");
+        final Directory candidate = Directory("${dir.path}/sphere-overlay-py");
         if (candidate.existsSync()) {
           return candidate;
         }
         final Directory sibling =
-            Directory("${dir.path}${Platform.pathSeparator}sphere-overlay-tauri");
+            Directory("${dir.path}${Platform.pathSeparator}sphere-overlay-py");
         if (sibling.existsSync()) {
           return sibling;
         }
@@ -384,21 +345,19 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> destroy() async {
-    if (overlayActive.value) {
-      await _sendOverlayCommand("close");
-      overlayActive.value = false;
-      _created = false;
-      _visible = false;
-      useEmbeddedFallback.value = false;
-      return;
-    }
     if (_overlayProcess != null) {
       try {
         _overlayProcess!.kill();
       } catch (_) {}
       _overlayProcess = null;
+      _created = false;
+      _visible = false;
+      overlayActive.value = false;
+      useEmbeddedFallback.value = false;
+      return;
     }
-    if (overlayActive.value && _overlayProcess == null) {
+    if (overlayActive.value) {
+      // 兜底清理：overlayActive 通常伴随 python 进程，此处仅用于状态对齐。
       overlayActive.value = false;
     }
     if (!_created) return;
@@ -508,16 +467,9 @@ class SphereOverlayLauncher {
     if (kIsWeb || !Platform.isWindows || !_created) {
       return;
     }
-    if (overlayActive.value) {
-      try {
-        final File moodFile = File(_moodFilePath());
-        await moodFile.writeAsString(jsonEncode(patch.toJson()), flush: true);
-      } catch (e) {
-        debugPrint("[SphereOverlay] overlay patchMood failed: $e");
-      }
-      return;
-    }
-    if (_overlayProcess != null) return;
+    // PySide6 桌宠无 mood 文件轮询机制，patch 统一经 server WS 下发；
+    // 独立进程 overlay 的本地情绪由前端直接连接 WS 获取。
+    if (overlayActive.value || _overlayProcess != null) return;
     try {
       await _channel.invokeMethod("patchMood",
           <String, dynamic>{"patch": jsonEncode(patch.toJson())});
@@ -552,7 +504,7 @@ class SphereOverlayLauncher {
     }
 
     if (electron) {
-      return _launchTauriOverlay();
+      return _launchPyOverlay();
     }
 
     if (_useInProcessOverlay) {

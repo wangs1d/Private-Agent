@@ -8,6 +8,7 @@ import { getToolResultProcessor } from "./tool-result-processor.js";
 import { AssistantRewriterService } from "./assistant-rewriter.js";
 import { dedupeAdjacentLines } from "../utils/text.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
+import { isApologyStyleFallback } from "../external-model/fallback-texts.js";
 
 export type ChatTurnInput = {
   text: string;
@@ -124,11 +125,18 @@ export async function runChatTurnForActor(
 
     let finalText: string;
     if (rawToolResultText) {
-      // 有独立工具结果时，以结果为主，LLM 过程文本为辅
+      // 源头修复：LLM 在主循环里已经看过工具结果并把结论整合进 reply.text，
+      // 这里再把工具原文拼到回复后面，就会出现"网上没查到 + 搜索结果没查到"这种
+      // 主题一致但字面不完全重合的重复段落。前 40 字 includes 判定太弱，会漏掉。
+      // 改为：LLM 已给出非 apology 真实回复 → 只用 reply.text；只有 LLM 回复为空
+      // 或为 apology 时才用工具结果兜底，避免从源头产出重复内容。
       const processText = reply.text.trim();
-      finalText = rawToolResultText;
-      if (processText && !rawToolResultText.includes(processText.slice(0, 40))) {
-        finalText = `${processText}\n\n${rawToolResultText}`;
+      const llmAnswered =
+        processText.length > 0 && !isApologyStyleFallback(processText);
+      if (llmAnswered) {
+        finalText = processText;
+      } else {
+        finalText = rawToolResultText;
       }
     } else {
       // 不再用 apology 兜底文案：空回复时返回空串，让 UI 不显示虚假内容。
@@ -146,6 +154,11 @@ export async function runChatTurnForActor(
       userText: text,
     });
     finalText = await rewriter.rewriteIfNeeded(text, finalText);
+    finalText = dedupeAdjacentLines(finalText);
+    finalText = getToolResultProcessor().processAssistantText(finalText, {
+      plainTextMode: true,
+      userText: text,
+    });
 
     return { ok: true, finalText, messageId };
   } catch (err) {

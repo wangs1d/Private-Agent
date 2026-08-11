@@ -64,6 +64,7 @@ data/
 
 # Debug and temporary files
 .dbg/
+.tmp/
 *.tmp
 *.temp
 .cache/

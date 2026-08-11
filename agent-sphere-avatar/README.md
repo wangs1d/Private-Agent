@@ -44,8 +44,8 @@ import { SphereAgentScene, useAgentState } from "./src/public-api";
 ### 桌面悬浮（可选）
 
 ```powershell
-cd sphere-overlay-tauri
-.\start-overlay.ps1
+cd sphere-overlay-py
+.\start-sphere-overlay.ps1
 ```
 
 ## 入口 HTML
@@ -53,7 +53,7 @@ cd sphere-overlay-tauri
 | 文件 | 用途 |
 |------|------|
 | `embed.html` | 网页/chat iframe 嵌入 |
-| `overlay.html` | Tauri 桌面桌宠 |
+| `overlay.html` | PySide6 桌面桌宠 |
 
 ## 目录结构
 

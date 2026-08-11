@@ -3,6 +3,12 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { SkillManager } from "./skill-manager.js";
 import type { SkillManifest, SkillParameter } from "./types.js";
 
+const registeredSkillChatToolNames = new Set<string>();
+
+export function isRegisteredSkillChatToolName(name: string): boolean {
+  return registeredSkillChatToolNames.has(name);
+}
+
 function paramToJsonSchema(p: SkillParameter): Record<string, unknown> {
   const base: Record<string, unknown> = {};
   if (p.description) base.description = p.description;
@@ -26,6 +32,7 @@ function paramToJsonSchema(p: SkillParameter): Record<string, unknown> {
  * 将 Skill 元数据转为 OpenAI Chat Completions `tools` 条目（与 ToolRegistry 执行名一致）。
  */
 export function skillManifestToChatTool(manifest: SkillManifest): ChatCompletionTool {
+  registeredSkillChatToolNames.add(manifest.name);
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (const p of manifest.parameters ?? []) {

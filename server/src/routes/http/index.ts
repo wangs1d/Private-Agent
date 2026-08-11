@@ -39,6 +39,7 @@ import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
+import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
 import { registerNotesRoutes } from "./notes.js";
 import { registerDeviceRoutes } from "./device.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
@@ -95,6 +96,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerNightlyMemoryRoutes(app);
   registerDownloadRoutes(app);
   registerToolSearchAdminRoutes(app);
+  registerToolRegistryRoutes(app);
   registerLifeSignalRoutes(app, deps);
   if (deps.moodInferenceService) {
     registerMoodInferenceRoutes(app, { moodInferenceService: deps.moodInferenceService });

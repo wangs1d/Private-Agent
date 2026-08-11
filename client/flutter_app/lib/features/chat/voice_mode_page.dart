@@ -28,6 +28,7 @@ import "package:record/record.dart";
 import "../../core/config/api_config.dart";
 import "../../core/services/tts_player.dart";
 import "../../core/services/ws_chat_service.dart";
+import "../../core/utils/assistant_text_sanitizer.dart";
 
 /// 语音对话状态机
 enum VoiceOrbPhase {
@@ -101,6 +102,8 @@ class VoiceOrbState extends State<VoiceOrb>
   StreamSubscription<Map<String, dynamic>>? _wsSub;
   String? _activeTraceId;
   final StringBuffer _assistantBuffer = StringBuffer();
+  final AssistantTextSanitizer _assistantTextSanitizer =
+      AssistantTextSanitizer();
 
   // ---- 设置 ----
   bool _voiceprintRequired = false;
@@ -223,7 +226,9 @@ class VoiceOrbState extends State<VoiceOrb>
     if (!traceMatch && !msgMatch) return;
     if (payload["phase"]?.toString() == "interim") return;
 
-    final String chunk = payload["chunk"]?.toString() ?? "";
+    final String rawChunk = payload["chunk"]?.toString() ?? "";
+    if (rawChunk.isEmpty) return;
+    final String chunk = _assistantTextSanitizer.ingest(rawChunk);
     if (chunk.isEmpty) return;
     _assistantBuffer.write(chunk);
     if (!mounted) return;
@@ -243,9 +248,15 @@ class VoiceOrbState extends State<VoiceOrb>
         doneTraceId != _activeTraceId) {
       return;
     }
-    String text = payload["finalText"]?.toString() ?? "";
-    if (text.isEmpty) text = _assistantBuffer.toString().trim();
+    String text =
+        stripAssistantTimestampFrames(payload["finalText"]?.toString() ?? "");
+    if (text.isEmpty) {
+      final String buffered = _assistantBuffer.toString().trim();
+      final String pending = _assistantTextSanitizer.drainPending().trim();
+      text = pending.isEmpty ? buffered : "$buffered$pending";
+    }
     _assistantBuffer.clear();
+    _assistantTextSanitizer.reset();
     _activeTraceId = null;
     if (text.isEmpty) {
       if (!mounted) return;
@@ -460,6 +471,7 @@ class VoiceOrbState extends State<VoiceOrb>
     final String messageId = "voice-${DateTime.now().microsecondsSinceEpoch}";
     _activeTraceId = messageId;
     _assistantBuffer.clear();
+    _assistantTextSanitizer.reset();
     final Map<String, dynamic> userMsg = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "messageId": messageId,

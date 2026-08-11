@@ -162,8 +162,8 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
       SnackBar(
         content: Text(
           ok
-              ? "Tauri 桌面桌宠已启动（独立窗口）"
-              : "启动失败：请确认后端与 sphere-overlay-tauri 已就绪",
+              ? "桌面桌宠已启动（独立窗口）"
+              : "启动失败：请确认后端与 sphere-overlay-py 已就绪",
         ),
       ),
     );

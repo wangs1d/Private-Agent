@@ -1,4 +1,5 @@
 import "agent_sphere_mood_bridge.dart";
+import "../utils/assistant_text_sanitizer.dart";
 
 /// 将服务端 WS 事件映射为 Agent 球形形象 patch（与 agent-sphere-avatar/ws-agent-mapper 对齐）
 class AgentSphereEmbodimentMapper {
@@ -6,10 +7,13 @@ class AgentSphereEmbodimentMapper {
 
   static double _speakingEnergy = 0.45;
   static int _speakingChunkCount = 0;
+  static final AssistantTextSanitizer _chunkSanitizer =
+      AssistantTextSanitizer();
 
   static void resetSpeakingState() {
     _speakingEnergy = 0.45;
     _speakingChunkCount = 0;
+    _chunkSanitizer.reset();
   }
 
   static AgentSpherePatch? mapWsEvent(String type, Map<String, dynamic> payload) {
@@ -49,7 +53,9 @@ class AgentSphereEmbodimentMapper {
           source: "tool",
         );
       case "chat.assistant_chunk":
-        final String chunk = payload["chunk"]?.toString() ?? "";
+        final String chunk =
+            _chunkSanitizer.ingest(payload["chunk"]?.toString() ?? "");
+        if (chunk.isEmpty) return null;
         _speakingChunkCount += 1;
         _speakingEnergy = (0.45 + _speakingChunkCount * 0.015).clamp(0.45, 1.0);
         return AgentSpherePatch(

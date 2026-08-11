@@ -1,4 +1,5 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
+import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 import { detectAssistantToneMode, type AssistantToneMode } from "./assistant-tone-policy.js";
 
 function isEnabled(): boolean {
@@ -108,22 +109,26 @@ function normalizeRewriteTone(
 }
 
 function buildRewritePrompt(userText: string, base: string, tone: AssistantToneMode): string {
+  const directFactQuery = isDirectFactQuery(userText);
   return [
     "You are a Chinese dialogue polisher.",
     "Rewrite only the expression. Keep facts, conclusions, and meaning unchanged.",
     "Target feel: like a real person chatting on WeChat, not a customer-service bot.",
     "Do not force a fixed persona. Adapt to this user's wording, emotional temperature, and familiarity in the current conversation.",
     `Tone mode: ${tone}. steady=natural and stable, soft=gentler, direct=more concise, light=more playful.`,
-    "You may add human flavor when it fits: humor, light teasing, a little cuteness, emotional color, or one short follow-up question.",
+    directFactQuery
+      ? "This turn is a direct fact query. Keep it compact and literal: conclusion first, one supporting sentence at most, and no follow-up question."
+      : "You may add human flavor when it fits: humor, light teasing, a little cuteness, emotional color, or one short follow-up question.",
     "But do not force it every turn. The reply should still match the topic and feel natural.",
     "Rules:",
     "1. Do not add new facts, examples, or claims.",
     "2. Keep result first when the original is factual or task-oriented.",
     "3. Make it sound alive and human, but not like a skit or stand-up routine.",
-    "4. Avoid customer-service phrasing, report style, markdown headings, and stiff summary openings.",
-    "5. Unless the original is shorter, do not make it longer overall.",
-    "6. Preserve numbers, dates, links, English terms, proper nouns, and core judgments.",
-    "7. Output only the rewritten final reply.",
+    "4. Avoid customer-service phrasing and stiff report tone, but preserve useful structure if the original already has bullets or short headings.",
+    "5. Keep it tighter than the original when possible. Do not restate the same fact in another sentence.",
+    "6. If the original is factual, task-oriented, or a direct fact query, do not add a follow-up question. Otherwise, if the original did not ask one, do not add more than one short follow-up question.",
+    "7. Preserve numbers, dates, links, English terms, proper nouns, and core judgments.",
+    "8. Output only the rewritten final reply.",
     "",
     `User said: ${userText.trim().slice(0, 220)}`,
     `Original reply: ${base}`,
@@ -136,6 +141,9 @@ export class AssistantRewriterService {
   async rewriteIfNeeded(userText: string, assistantText: string): Promise<string> {
     const base = compactText(assistantText.trim());
     if (!isEnabled() || !this.provider?.isEnabled() || !shouldRewrite(base)) {
+      return base;
+    }
+    if (isDirectFactQuery(userText)) {
       return base;
     }
 
