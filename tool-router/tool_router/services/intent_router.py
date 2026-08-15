@@ -81,6 +81,26 @@ class IntentRouter:
             (re.compile(r"\btravel\b|\btrip\b|\bitinerary\b"), ["travel"]),
             (re.compile(r"\btime\b|\bclock\b|\bdate\b"), ["clock"]),
             (re.compile(r"\baip\b|\bprotocol\b"), ["aip"]),
+            # ---- 中文领域规则（具体 → 通用，避免"查询"被通用 search 截胡）----
+            (re.compile(r"天气|气温|温度|降雨|下雨|降水|预报|湿度|台风|风力|晴天|多云"), ["weather"]),
+            (re.compile(r"日历|日程|会议|开会|有没有会|有会|预约|待办|排期|行程安排"), ["calendar", "reminder"]),
+            (re.compile(r"提醒|闹钟|定时|稍后|到点|催我"), ["reminder"]),
+            (re.compile(r"打电话|电话|拨号|短信|发短信|呼叫|通讯录|通话"), ["phone"]),
+            (re.compile(r"钱包|余额|支付|付款|转账|充值|账单|扣款|收款"), ["wallet"]),
+            (re.compile(r"买|购买|购物|下单|商品|商城|推荐|种草|笔记本|电脑|手机|耳机|相机|平板|家电"), ["shopping"]),
+            (re.compile(r"预算|记账|开支|花费|理财|报销"), ["budget", "wallet"]),
+            (re.compile(r"桌面|自动化|窗口|脚本|鼠标|键盘|点击|截图"), ["desktop"]),
+            (re.compile(r"悬浮|桌宠|头像|漫游|移动窗口|放置窗口|漂移"), ["embodiment"]),
+            (re.compile(r"技能|自定义能力|我的能力|能力列表"), ["self", "agent"]),
+            (re.compile(r"好友|添加好友|好友请求|另一个智能体|发送给.{0,6}智能体"), ["agent"]),
+            (re.compile(r"世界|注册中心|广场|市场"), ["world", "agent"]),
+            (re.compile(r"旅行|旅游|机票|酒店|行程|航班|出行|订票"), ["travel"]),
+            (re.compile(r"时间|几点|日期|今天几号|钟表|现在.*(点|时)"), ["clock"]),
+            (re.compile(r"网页|浏览器|网址|页面|网站|打开.{0,6}(网页|网站|链接)|访问"), ["browser", "search"]),
+            (re.compile(r"搜索|查找|查一下|查查|资讯|新闻|谷歌|百度|资料|内容"), ["search"]),
+            (re.compile(r"读取|抓取|下载|内容|正文"), ["browser", "search"]),
+            (re.compile(r"mcp|外部服务|集成|接入"), ["mcp"]),
+            (re.compile(r"aip|协议"), ["aip"]),
         ]
         out: list[str] = []
         for pattern, domains in rules:
@@ -113,15 +133,44 @@ class IntentRouter:
             return "navigate"
         if re.search(r"\blist\b|\bshow\b", q):
             return "list"
+        # ---- 中文动作推断 ----
+        if re.search(r"邀请|好友请求|加.{0,4}好友", q):
+            return "request"
+        if re.search(r"注册|登记|入驻", q):
+            return "register"
+        if re.search(r"提取|解析|识别", q):
+            return "extract"
+        if re.search(r"搜索|查找|查一下|查查|搜|谷歌|百度|查询", q):
+            return "search"
+        if re.search(r"读取|抓取|下载|看内容|正文", q):
+            return "read"
+        if re.search(r"提醒|计划|安排|预约|规划", q):
+            return "plan"
+        if re.search(r"发送|发消息|转发|发给|发.{0,3}短信|打个电话|拨号|呼叫", q):
+            return "send"
+        if re.search(r"创建|新建|添加|设置|设定|建个|定个", q):
+            return "create"
+        if re.search(r"执行|运行|调用|跑|启动|漫游", q):
+            return "execute"
+        if re.search(r"打开|访问|进入|打开网页", q):
+            return "navigate"
+        if re.search(r"列表|列出|展示|看看有|查有哪些|显示", q):
+            return "list"
+        if re.search(r"推荐|预订|订|买|购买|下单|创建订单", q):
+            return "create"
         return "query"
 
     @staticmethod
     def _infer_constraints(query: str) -> QueryConstraints:
         q = query.lower()
         return QueryConstraints(
-            max_latency_ms=100 if "fast" in q or "quick" in q else 200,
+            max_latency_ms=100 if "fast" in q or "quick" in q or "快点" in q or "尽快" in q else 200,
             read_only=not bool(
-                re.search(r"\bcreate\b|\bupdate\b|\bdelete\b|\bsend\b|\bexecute\b|\bextract\b|\bparse\b|\bplan\b|\bschedule\b|\bset\b", q)
+                re.search(
+                    r"\bcreate\b|\bupdate\b|\bdelete\b|\bsend\b|\bexecute\b|\bextract\b|\bparse\b|\bplan\b|\bschedule\b|\bset\b"
+                    r"|创建|新建|添加|设置|删除|取消|发送|发.{0,3}短信|打个电话|拨号|呼叫|执行|提取|解析|提醒|安排|预约|计划|注册|转账|支付|下单|购买|买",
+                    q,
+                )
             ),
             file_type="pdf" if "pdf" in q else None,
         )

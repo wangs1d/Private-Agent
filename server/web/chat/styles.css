@@ -591,6 +591,47 @@ body {
   min-width: 200px;
 }
 
+/* agent 回复的 Markdown 排版：覆盖 .bubble 的 pre-wrap，让块级元素正常渲染 */
+.bubble .reply-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--spacer-12) var(--spacer-16);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.bubble .md-body {
+  white-space: normal;
+}
+.bubble .md-body > *:first-child { margin-top: 0; }
+.bubble .md-body > *:last-child { margin-bottom: 0; }
+.bubble .md-body p { margin: 0.5em 0; }
+.bubble .md-body h1, .bubble .md-body h2, .bubble .md-body h3 {
+  margin: 0.7em 0 0.4em; line-height: 1.3; font-weight: 600;
+}
+.bubble .md-body h1 { font-size: 1.15rem; }
+.bubble .md-body h2 { font-size: 1.05rem; }
+.bubble .md-body h3 { font-size: 0.98rem; }
+.bubble .md-body ul, .bubble .md-body ol { margin: 0.5em 0; padding-left: 1.4em; }
+.bubble .md-body li { margin: 0.2em 0; }
+.bubble .md-body code {
+  background: var(--surface-high, #f2f2f3); padding: 1px 5px; border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 0.88em;
+}
+.bubble .md-body pre {
+  background: var(--surface-high, #f2f2f3); padding: 10px 12px; border-radius: 8px;
+  overflow-x: auto; margin: 0.6em 0; white-space: pre;
+}
+.bubble .md-body pre code { background: transparent; padding: 0; }
+.bubble .md-body blockquote {
+  margin: 0.6em 0; padding: 2px 12px; border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+.bubble .md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+.bubble .md-body th, .bubble .md-body td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.bubble .md-body th { background: var(--surface-high, #f2f2f3); font-weight: 600; }
+.bubble .md-body a { color: var(--link, #2f6feb); word-break: break-all; }
+.bubble .md-body hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+
 .prog-step {
   padding: 3px 0;
   line-height: 1.5;

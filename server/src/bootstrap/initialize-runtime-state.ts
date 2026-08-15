@@ -2,16 +2,24 @@ import { reconcileWorldA2aEscrows, restorePurchasedSkillsFromWorldState } from "
 import type { AppServices } from "./types.js";
 
 export async function initializeRuntimeState(services: AppServices): Promise<void> {
-  await services.agentMemorySyncService.load();
-  await services.agentPairingService.load();
-  await services.aipService.load();
-  await services.agentAccountService.load();
-  await services.emailRegistrationService.load();
-  await services.infoHubService.load();
-  await services.scheduleTaskService.load();
-  await services.weatherPrefsService.load();
-  await services.virtualPhoneService.load();
+  // 无相互依赖的持久化加载并行执行（文件读 + JSON.parse 均为异步 IO，
+  // 串行等待会把各文件加载时间累加；并行后总耗时 ≈ 最慢的一个）。
+  // 注：部分服务在 createAppServices 中已 load 过一次，此处保留重复调用作为
+  // 二次校验（文件损坏时抛错阻止启动，避免后续 persist 覆盖损坏文件造成数据丢失）。
+  await Promise.all([
+    services.agentMemorySyncService.load(),
+    services.agentPairingService.load(),
+    services.aipService.load(),
+    services.agentAccountService.load(),
+    services.emailRegistrationService.load(),
+    services.infoHubService.load(),
+    services.scheduleTaskService.load(),
+    services.weatherPrefsService.load(),
+    services.virtualPhoneService.load(),
+  ]);
   services.scheduleTaskService.startScheduler();
+
+  // World 链路存在顺序依赖（load → 恢复技能 → 对账 → 落盘），保持串行。
   await services.worldService.load();
   await services.socialFeedService.load();
   await restorePurchasedSkillsFromWorldState(

@@ -103,6 +103,34 @@ export function resolvePrimaryExternalModelBinding(
   return moonshotBinding(env) ?? openaiBinding(env);
 }
 
+/** 供旁路 LLM（滚动摘要 / 记忆联想 / 记忆决策 / 记忆评分等）使用的客户端配置，跟随当前 provider。 */
+export type PrimaryLlmClientConfig = {
+  apiKey: string;
+  baseURL: string;
+  /** 当前主模型名；旁路调用方仍可先用自己的环境变量覆盖。 */
+  model: string;
+};
+
+/**
+ * 解析当前生效 provider 的 LLM 客户端配置（与主对话链路同一 provider/模型）。
+ * 无任何已配置密钥时返回 null；兼容仅设 `OPENAI_*` 的旧配置。
+ */
+export function resolvePrimaryLlmClientConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): PrimaryLlmClientConfig | null {
+  const binding = resolvePrimaryExternalModelBinding(env);
+  const apiKey = binding?.apiKey?.trim() || env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return null;
+  return {
+    apiKey,
+    baseURL:
+      binding?.baseUrl?.trim() ||
+      env.OPENAI_BASE_URL?.trim() ||
+      "https://api.openai.com/v1",
+    model: binding?.model?.trim() || env.OPENAI_MODEL?.trim() || "",
+  };
+}
+
 function defaultFailoverChainLegacy(): string {
   return defaultFailoverChain(process.env);
 }

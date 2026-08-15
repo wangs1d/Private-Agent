@@ -216,7 +216,7 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
               left: 8,
               bottom: 8,
               child: IconButton.filledTonal(
-                tooltip: "启动 Tauri 桌面桌宠",
+                tooltip: "启动桌面桌宠",
                 onPressed: _launchOverlay,
                 icon: const Icon(Icons.open_in_new, size: 18),
                 style: IconButton.styleFrom(

@@ -68,9 +68,9 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
   },
   {
     name: "wallet",
-    prefixes: ["wallet."],
-    aliases: ["钱包", "余额", "转账", "支付", "消费", "wallet", "balance", "transaction", "交易", "账单", "金额"],
-    secondaryTools: ["budget.calculate"],
+    prefixes: ["wallet.", "payment.", "alipay."],
+    aliases: ["钱包", "余额", "转账", "支付", "付款", "消费", "支付宝", "AI付", "alipay", "payment", "wallet", "balance", "transaction", "交易", "账单", "金额"],
+    secondaryTools: ["budget.calculate", "payment.create_order", "payment.query_order", "alipay.check-wallet", "alipay.apply-wallet", "alipay.submit-payment", "alipay.query-payment", "alipay.pay-402", "alipay.proxy-trade"],
   },
   {
     name: "embodiment",

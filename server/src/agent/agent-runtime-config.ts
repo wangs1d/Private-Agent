@@ -145,9 +145,13 @@ function loadMemoryPromptConfig(): MemoryPromptConfig {
     capsRaw === "yes";
 
   return {
+    // narrativeRecallTimeoutMs：默认 3000ms、上限 6000ms。
+    // 修复：humanLike 召回需先算 query embedding（外部 API），原 400ms 默认值必然超时，
+    // 导致对话中长期记忆永不注入（agent 失忆）。embedding 已单独降级为短超时（~1.2s），
+    // 3000ms 足够 embedding 正常命中或降级后的本地关键词检索路径完成。
     narrativeRecallTimeoutMs: Math.min(
-      3000,
-      Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 400)),
+      6000,
+      Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 3000)),
     ),
     agentCapsInPrompt,
     worldCapsInPrompt,

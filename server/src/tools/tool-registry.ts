@@ -20,6 +20,11 @@ export type ToolContext = {
   clientIp?: string;
   /** 前端 GPS / 浏览器定位（优先于 IP 地理库） */
   clientLocation?: ClientLocationWire;
+  /**
+   * 按需向客户端请求实时位置（Agent 需要位置时才调用，返回 null 表示不可用/超时）。
+   * 由位置类工具（weather.get_local 等）在缺少经纬度时使用。
+   */
+  requestLocation?: (reason?: string) => Promise<ClientLocationWire | null>;
   /** 默认沙箱；`full` 时开放高权限工具 */
   agentAccessMode?: AgentAccessMode;
   /** 电脑桥接在线时允许 desktop.visual.* */
@@ -137,7 +142,8 @@ export class ToolRegistry {
     input: Record<string, unknown>,
     context: ToolContext,
   ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
-    const registryName = resolveRegistryToolName(name);
+    // 先别名归一，再 trim + 大小写兜底（LLM 偶尔回传带空格/改写大小写的工具名）
+    const registryName = this.normalizeToolName(resolveRegistryToolName(name));
     const accessMode = parseAgentAccessMode(context.agentAccessMode);
     if (!isToolAllowedInAccessMode(registryName, accessMode, {
       desktopBridgeOnline: context.desktopBridgeOnline,
@@ -162,7 +168,7 @@ export class ToolRegistry {
       }
       const skillResult = await this.skillManager.execute(registryName, input, context);
       if (skillResult.ok) {
-        return { ok: true, result: skillResult.result || {} };
+        return { ok: true, result: jsonSafeResult(skillResult.result || {}) };
       }
       // 如果 Skill 不存在，继续尝试传统工具
       if (skillResult.error?.code !== "SKILL_NOT_FOUND") {
@@ -184,8 +190,8 @@ export class ToolRegistry {
       // 缓存未命中或过期，执行并缓存
       try {
         const result = await tool(input, context);
-        const ok = true;
-        const entry = { result: { ok, result }, timestamp: Date.now() };
+        const safeResult = jsonSafeResult(result);
+        const entry = { result: { ok: true, result: safeResult }, timestamp: Date.now() };
         // LRU 淘汰：超过最大容量时删除最旧的
         if (this.toolCache.size >= TOOL_CACHE_MAX_SIZE) {
           const oldestKey = this.toolCache.keys().next().value;
@@ -194,7 +200,7 @@ export class ToolRegistry {
           }
         }
         this.toolCache.set(cacheKey, entry);
-        return { ok, result };
+        return entry.result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "工具执行失败";
         return { ok: false, result: { error: message } };
@@ -203,11 +209,34 @@ export class ToolRegistry {
 
     try {
       const result = await tool(input, context);
-      return { ok: true, result };
+      return { ok: true, result: jsonSafeResult(result) };
     } catch (error) {
       const message = error instanceof Error ? error.message : "工具执行失败";
       return { ok: false, result: { error: message } };
     }
+  }
+
+  /**
+   * 工具名归一化：trim 空格 + 大小写不敏感兜底。
+   * 精确匹配优先；未命中时再做一次 O(n) 的小写匹配（仅传统工具与 skill 列表），
+   * 避免 LLM 回传带空格/改写大小写的工具名时误报"未知工具"。
+   */
+  private normalizeToolName(name: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) return trimmed;
+    if (this.tools.has(trimmed)) return trimmed;
+    if (this.skillManager?.get(trimmed)) return trimmed;
+
+    const lower = trimmed.toLowerCase();
+    for (const key of this.tools.keys()) {
+      if (key.toLowerCase() === lower) return key;
+    }
+    if (this.skillManager) {
+      for (const manifest of this.skillManager.list()) {
+        if (manifest.name.toLowerCase() === lower) return manifest.name;
+      }
+    }
+    return trimmed;
   }
 
   /**
@@ -237,5 +266,53 @@ export class ToolRegistry {
         this.toolCache.delete(key);
       }
     }
+  }
+}
+
+/**
+ * 将工具 handler 返回结果递归转换为 JSON 安全值，防止 wire 层序列化崩溃：
+ *  - BigInt → 字符串（保精度）
+ *  - NaN / ±Infinity → null
+ *  - function / symbol / undefined → 对象内跳过、数组内转 null（由 JSON.stringify 处理）
+ *  - Date → ISO 字符串
+ *  - 循环引用 → "[Circular]"（防御，正常 handler 不应产生）
+ */
+function jsonSafeResult(
+  result: Record<string, unknown>,
+): Record<string, unknown> {
+  const seen = new Set<object>();
+  return deepJsonSafe(result, seen) as Record<string, unknown>;
+}
+
+function deepJsonSafe(value: unknown, seen: Set<object>): unknown {
+  if (value === null || value === undefined) return value;
+  switch (typeof value) {
+    case "bigint":
+      return value.toString();
+    case "number":
+      return Number.isFinite(value) ? value : null;
+    case "function":
+    case "symbol":
+      return undefined;
+    case "object": {
+      if (seen.has(value)) return "[Circular]";
+      if (value instanceof Date) return value.toISOString();
+      if (Array.isArray(value)) {
+        seen.add(value);
+        const out = value.map((item) => deepJsonSafe(item, seen));
+        seen.delete(value);
+        return out;
+      }
+      seen.add(value);
+      const out: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        const safe = deepJsonSafe(item, seen);
+        if (safe !== undefined) out[key] = safe;
+      }
+      seen.delete(value);
+      return out;
+    }
+    default:
+      return value;
   }
 }

@@ -7,6 +7,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from tool_router.container import Container
 from tool_router.models import (
     ApiEnvelope,
+    CatalogInitRequest,
     ExecuteRequest,
     FeedbackBatchRequest,
     FeedbackEntry,
@@ -46,6 +47,20 @@ def create_router(container: Container) -> APIRouter:
             elapsed_ms=round((perf_counter() - started_at) * 1000, 3),
             data=data,
         )
+
+    @router.post("/api/catalog/init")
+    async def init_catalog(payload: CatalogInitRequest) -> ApiEnvelope:
+        """批量初始化目录（幂等）：注册全部资源 + 图边。等价于 stdio worker 的 init_catalog。"""
+        started = perf_counter()
+        registered = container.registry.register_many(payload.resources)
+        for edge in payload.edges:
+            container.registry.add_edge(edge)
+        container.metrics.inc("catalog.init", len(registered))
+        summary = {
+            "total": len(registered),
+            "resource_types": container.registry.resource_type_summary(),
+        }
+        return wrap(container.settings.default_tenant, summary, started)
 
     @router.post("/api/resource/register")
     async def register_resource(payload: ResourceRegisterRequest) -> ApiEnvelope:

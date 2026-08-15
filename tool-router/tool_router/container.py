@@ -38,7 +38,7 @@ def build_container() -> Container:
     cfg = settings
     metrics = MetricsRegistry()
     registry = RegistryStore(cfg)
-    top_p = AdaptiveTopPSelector()
+    top_p = AdaptiveTopPSelector(cfg)
     graph = KnowledgeGraphService(registry)
     lazy_loader = LazyLoader(registry, cfg)
     return Container(
@@ -47,7 +47,7 @@ def build_container() -> Container:
         registry=registry,
         intent_router=IntentRouter(),
         hierarchical_router=HierarchicalRouter(registry, cfg),
-        retrieval=HybridRetrievalEngine(),
+        retrieval=HybridRetrievalEngine(registry, cfg),
         top_p=top_p,
         graph=graph,
         reranking=RerankingPipeline(),

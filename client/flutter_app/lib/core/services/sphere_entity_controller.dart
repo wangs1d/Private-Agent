@@ -1,7 +1,5 @@
 import "dart:async";
-import "dart:io";
 
-import "package:flutter/foundation.dart";
 import "package:flutter/widgets.dart";
 
 import "sphere_overlay_launcher.dart";
@@ -28,24 +26,6 @@ class SphereEntityController extends ChangeNotifier {
   }
 
   Future<void> stop() => SphereOverlayLauncher.stop();
-
-  Future<bool> ensureOverlay() async {
-    if (kIsWeb || !Platform.isWindows) return false;
-    if (overlayReady && SphereOverlayLauncher.isCreated) {
-      return true;
-    }
-    final bool ok = await SphereOverlayLauncher.launch();
-    if (!ok) return false;
-    if (SphereOverlayLauncher.overlayActive.value ||
-        SphereOverlayLauncher.useEmbeddedFallback.value) {
-      overlayReady = true;
-      notifyListeners();
-      return true;
-    }
-    overlayReady = await SphereOverlayLauncher.isWebViewReady();
-    if (overlayReady) notifyListeners();
-    return overlayReady;
-  }
 
   /// 拖动：按屏幕物理像素移动原生窗。
   Future<void> moveOverlayByPhysical(Offset deltaPhysical) async {

@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 import {
   buildLayeredSystemPrompt,
@@ -88,7 +90,11 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
     finalizeOptions: NonNullable<Parameters<typeof finalizeChatSystemPrompt>[1]>,
   ): string {
     const cacheKey = JSON.stringify({
-      baseContent: baseContent.slice(0, 500), // 只取前500字符作为key的一部分
+      // 修复：不能只取 baseContent 前 500 字符——narrativeRecall 等动态记忆块排在
+      // buildLayeredSystemPrompt 渲染顺序的靠后位置，若被前 500 字符覆盖到，记忆变化
+      // 不会使缓存失效，导致每轮都命中旧的"无记忆" system prompt（对话中长期记忆永不生效）。
+      // 改用完整 baseContent 的 sha1 指纹，动态记忆一变缓存即失效。
+      baseContent: createHash("sha1").update(baseContent).digest("hex"),
       tools: finalizeOptions.tools,
       masterSubAgentDelegate: finalizeOptions.masterSubAgentDelegate,
       agentAccessMode: finalizeOptions.agentAccessMode,
@@ -240,15 +246,43 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
     };
 
     const baseContent = ctx.overrideSys
-      ? ctx.overrideSys
+      ? // 修复：overrideSys（minimal/fast 模式的身份 prompt）不能直接跳过记忆分层——
+        // 否则 promptMemory（narrativeRecall 等）永远不注入，对话中长期记忆失忆。
+        // 把 overrideSys 作为 baseSystem 传入 buildLayeredSystemPrompt，memory 为空时
+        // 原样返回 overrideSys（行为兼容），memory 非空时正常附加记忆块。
+        buildLayeredSystemPrompt(ctx.overrideSys, ctx.promptMemory)
       : buildLayeredSystemPrompt(SYSTEM_PROMPT, ctx.promptMemory);
     const sysContent = this.getCachedOrBuildSystemPrompt(baseContent, finalizeOptions);
+
+    // TEMP DEBUG（记忆注入诊断 4：最终 system prompt 是否含记忆）
+    try {
+      appendFileSync(
+        ".memory-inject-debug.log",
+        JSON.stringify({
+          t: new Date().toISOString(),
+          phase: "sysContent",
+          memoryInSystem: sysContent.includes("记忆图联想检索"),
+          memoryBlock: sysContent.slice(sysContent.indexOf("记忆图联想检索"), sysContent.indexOf("记忆图联想检索") + 300),
+          hasOverride: Boolean(ctx.overrideSys),
+          promptMemoryNarrative: Boolean(ctx.promptMemory?.narrativeRecall),
+          baseContentHasNarrative: baseContent.includes("记忆图联想检索"),
+          baseContentHead: baseContent.slice(0, 200),
+        }) + "\n",
+      );
+    } catch {
+      /* ignore */
+    }
 
     const promptPlan = preparePromptCachePlan({
       providerId: this.id,
       model: ctx.model,
       baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
-      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
+      // 修复：之前 overrideSys 时 memory 传 undefined，导致 promptPlan.requestSystemMessages
+      // 只含稳定 system（无记忆）。而发送阶段 applyPromptCacheMessages 会用
+      // requestSystemMessages 覆盖 msgs[0]（带记忆的 sysContent），
+      // 于是 overrideSys（fast/minimal）实际发给 LLM 的请求里记忆被丢弃，
+      // 表现为"记忆已注入但 LLM 失忆"。改为始终传入 memory。
+      memory: ctx.promptMemory,
       finalizeOptions,
       tools: ctx.toolSearchPrepared?.visibleTools,
       variant: ctx.tools ? "chat-tools" : "chat",

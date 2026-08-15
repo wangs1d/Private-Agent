@@ -65,6 +65,24 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    prefix: "alipay.",
+    metadata: {
+      aliases: ["alipay", "支付宝", "AI付", "支付授权", "付款", "真实支付", "收银台", "402 payment"],
+      negativeAliases: ["weather", "screenshot", "calendar reminder"],
+      examples: ["开通支付宝AI付", "帮我用支付宝付款", "query alipay payment status"],
+      negativeExamples: ["estimate my budget"],
+    },
+  },
+  {
+    prefix: "payment.",
+    metadata: {
+      aliases: ["payment", "pay order", "收银台", "支付订单", "扫码支付", "支付宝", "微信支付"],
+      negativeAliases: ["weather", "desktop screenshot", "phone call"],
+      examples: ["create an alipay order", "query payment order status"],
+      negativeExamples: ["compare product prices"],
+    },
+  },
+  {
     prefix: "phone.",
     metadata: {
       aliases: ["phone", "call", "message", "ring", "电话", "短信"],

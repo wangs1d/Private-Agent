@@ -85,6 +85,74 @@ const REASONING_FALLBACK_LOG_PREFIX = "[stream-chat]";
 /** 默认 chunk 间空闲超时：30s 无新 chunk 则判定流卡死。可用 `STREAM_IDLE_TIMEOUT_MS` 覆盖。 */
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
+const DSML_PIPE = "\\|";
+const DSML_TAG_PREFIX = `<\\s*\\/?\\s*${DSML_PIPE}\\s*${DSML_PIPE}\\s*DSML\\s*${DSML_PIPE}\\s*${DSML_PIPE}\\s*`;
+
+function parseDsmlAttributes(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const attrRe = /([A-Za-z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+  for (const match of raw.matchAll(attrRe)) {
+    attrs[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return attrs;
+}
+
+function decodeDsmlText(raw: string): string {
+  return raw
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+export function extractDsmlToolCalls(content: string): NormalToolCall[] {
+  if (!content || !/DSML/i.test(content)) return [];
+  const calls: NormalToolCall[] = [];
+  const invokeRe = new RegExp(
+    `${DSML_TAG_PREFIX}invoke\\b([^>]*)>([\\s\\S]*?)${DSML_TAG_PREFIX}invoke\\s*>`,
+    "gi",
+  );
+  let index = 0;
+  for (const invokeMatch of content.matchAll(invokeRe)) {
+    const invokeAttrs = parseDsmlAttributes(invokeMatch[1] ?? "");
+    const name = invokeAttrs.name?.trim();
+    if (!name) continue;
+
+    const args: Record<string, unknown> = {};
+    const body = invokeMatch[2] ?? "";
+    const parameterRe = new RegExp(
+      `${DSML_TAG_PREFIX}parameter\\b([^>]*)>([\\s\\S]*?)${DSML_TAG_PREFIX}parameter\\s*>`,
+      "gi",
+    );
+    for (const paramMatch of body.matchAll(parameterRe)) {
+      const paramAttrs = parseDsmlAttributes(paramMatch[1] ?? "");
+      const paramName = paramAttrs.name?.trim();
+      if (!paramName) continue;
+      const value = decodeDsmlText(paramMatch[2] ?? "");
+      if (paramAttrs.number === "true") {
+        const n = Number(value);
+        args[paramName] = Number.isFinite(n) ? n : value;
+      } else if (paramAttrs.boolean === "true") {
+        args[paramName] = /^(true|1|yes)$/i.test(value);
+      } else {
+        args[paramName] = value;
+      }
+    }
+
+    calls.push({
+      index,
+      id: `dsml_call_${Date.now().toString(36)}_${index}`,
+      name,
+      argumentsChunk: JSON.stringify(args),
+    });
+    index += 1;
+  }
+  return calls;
+}
+
 function resolveIdleTimeoutMs(explicit?: number): number {
   if (typeof explicit === "number") return explicit;
   const env = process.env.STREAM_IDLE_TIMEOUT_MS;
@@ -226,9 +294,20 @@ export async function consumeNormalizedStream(
     }
   }
 
-  const toolCalls: NormalToolCall[] = [...toolAccByIndex.entries()]
+  let toolCalls: NormalToolCall[] = [...toolAccByIndex.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, v]) => v);
+  const dsmlToolCalls = extractDsmlToolCalls(content);
+  if (dsmlToolCalls.length > 0) {
+    const offset = toolCalls.length;
+    toolCalls = toolCalls.concat(
+      dsmlToolCalls.map((call, i) => ({ ...call, index: offset + i })),
+    );
+    content = stripDsmlToolCallMarkup(content);
+    finishReason = "tool_calls";
+  } else {
+    content = stripDsmlToolCallMarkup(content);
+  }
   if (toolCalls.length > 0) {
     options.onToolCallsComplete?.(toolCalls);
   }
@@ -287,12 +366,30 @@ export function stripThinkTags(reasoning: string): string {
  */
 export function stripDsmlToolCallMarkup(content: string): string {
   if (!content) return content;
-  if (!content.includes("DSML") && !content.includes("dsml")) return content;
+  if (!/dsml/i.test(content)) return content;
   let cleaned = content;
+
+  const dsmlToolCallsBlock = new RegExp(
+    `${DSML_TAG_PREFIX}tool_calls\\s*>[\\s\\S]*?${DSML_TAG_PREFIX}tool_calls\\s*>`,
+    "gi",
+  );
+  cleaned = cleaned.replace(dsmlToolCallsBlock, "");
+  cleaned = cleaned.replace(
+    new RegExp(`${DSML_TAG_PREFIX}tool_calls\\s*>[\\s\\S]*$`, "gi"),
+    "",
+  );
+  cleaned = cleaned.replace(
+    new RegExp(`${DSML_TAG_PREFIX}(?:invoke|parameter)\\b[^>]*>[\\s\\S]*?${DSML_TAG_PREFIX}(?:invoke|parameter)\\s*>`, "gi"),
+    "",
+  );
+  cleaned = cleaned.replace(
+    new RegExp(`${DSML_TAG_PREFIX}[^>]*>`, "gi"),
+    "",
+  );
 
   // 竖线字符类：兼容半角 `|` (U+007C) 和全角 `｜` (U+FF5C)
   // Moonshot/Kimi 在不同 token 化下会输出两种形式，必须都覆盖。
-  const pipe = "[|｜]"; // 半角或全角竖线
+  const pipe = "\\|";
 
   // 关键修复：DSML 实际格式里开标签在 `DSML` 之后**不一定有 `| |`**（`tool_calls` 直接接在 `|` 后面）。
   // 兼容形式：DSML 之后允许 `| |tool_calls` / `| | tool_calls` / `| |  tool_calls` 任意空白/无空白。
@@ -640,10 +737,7 @@ export function adaptOpenAiChatCompletionChunk(
   if (!delta) return out;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
-    // 剥离 Moonshot/Kimi 在 content 字段里泄漏的 DSML 工具调用标记，
-    // 否则用户会看到 <| | DSML| | tool_calls>... 内部格式。
-    const cleaned = stripDsmlToolCallMarkup(delta.content);
-    if (cleaned) out.content = cleaned;
+    out.content = delta.content;
   }
 
   // 嗅探 reasoning 字段（OpenAI 标准没有，但 Moonshot/DeepSeek 扩展为 reasoning_content）

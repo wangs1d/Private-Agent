@@ -134,18 +134,22 @@ export class McpClientService {
     if (this.cachePopulating) return this.cachePopulating;
 
     this.cachePopulating = (async () => {
-      for (const server of this.servers) {
-        try {
-          if (server.type === "npm") {
-            await this.discoverStdioTools(server);
-          } else {
-            // 默认 mcporter 模式
-            await this.discoverMcporterTools(server);
+      // 各 server 发现互相独立（写 toolCache 为并发安全的 Map.set），并行执行，
+      // 避免多 server 串行等待（每 server 最长 15s 超时）拖慢启动。
+      await Promise.all(
+        this.servers.map(async (server) => {
+          try {
+            if (server.type === "npm") {
+              await this.discoverStdioTools(server);
+            } else {
+              // 默认 mcporter 模式
+              await this.discoverMcporterTools(server);
+            }
+          } catch {
+            // 单个 server 发现失败不影响其他
           }
-        } catch {
-          // 单个 server 发现失败不影响其他
-        }
-      }
+        }),
+      );
       this.cachePopulated = true;
     })();
 

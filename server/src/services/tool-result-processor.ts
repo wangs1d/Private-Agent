@@ -3,20 +3,10 @@ import {
   formatContentSummaryForChat,
   formatContentSummaryForPlainText,
   shouldSummarizeContent,
-  type ContentSummary,
 } from "../services/content-summary-service.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { classifyRenderHint } from "./render-hint-service.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
-
-export const SUMMARY_ENABLED_TOOLS = new Set([
-  "search_web",
-  "fetch_web",
-  "info.search",
-  "info.read_webpage",
-  "info.inspect_webpage",
-  "info.navigate_site",
-]);
 
 const CONTENT_LENGTH_THRESHOLD = 800;
 
@@ -32,43 +22,6 @@ export class ToolResultProcessor {
     this.options = {
       enabled: options.enabled ?? true,
       threshold: options.threshold ?? CONTENT_LENGTH_THRESHOLD,
-    };
-  }
-
-  processToolResult(
-    toolName: string,
-    result: unknown
-  ): { processed: boolean; output: string; summary?: ContentSummary } {
-    if (!this.options.enabled) {
-      return { processed: false, output: this.stringifyResult(result) };
-    }
-
-    if (!SUMMARY_ENABLED_TOOLS.has(toolName)) {
-      return { processed: false, output: this.stringifyResult(result) };
-    }
-
-    const textContent = this.extractTextContent(result);
-    
-    if (!textContent || !shouldSummarizeContent(textContent, this.options.threshold)) {
-      return { processed: false, output: this.stringifyResult(result) };
-    }
-
-    const source = this.extractSourceFromResult(result);
-    const summary = createContentSummary(textContent, {
-      source,
-      maxLength: this.options.threshold,
-    });
-
-    if (!summary) {
-      return { processed: false, output: this.stringifyResult(result) };
-    }
-
-    const formattedOutput = formatContentSummaryForChat(summary);
-
-    return { 
-      processed: true, 
-      output: formattedOutput, 
-      summary 
     };
   }
 
@@ -100,7 +53,7 @@ export class ToolResultProcessor {
 
     // 优先级 1：result_card 简短汇报（仅在富文本模式生效，纯文本端不展示卡片）
     if (hint.type === "result_card" && !opts?.plainTextMode) {
-      const marked = formatAgentResultForChat(text);
+      const marked = formatAgentResultForChat(text, opts?.toolName);
       if (marked) {
         console.log(
           `[ToolResultProcessor] result_card: ${hint.reason}`,
@@ -140,86 +93,6 @@ export class ToolResultProcessor {
     // 优先级 3：plain 普通正文
     return humanizeAssistantText(text, { userText: opts?.userText });
   }
-
-  private stringifyResult(result: unknown): string {
-    if (typeof result === "string") {
-      return result;
-    }
-
-    try {
-      return JSON.stringify(result, null, 2);
-    } catch {
-      return String(result);
-    }
-  }
-
-  private extractTextContent(result: unknown): string | null {
-    if (typeof result === "string") {
-      return result;
-    }
-
-    if (result && typeof result === "object") {
-      const obj = result as Record<string, unknown>;
-
-      if (Array.isArray(obj.items)) {
-        return obj.items
-          .map((item) => {
-            if (item && typeof item === "object") {
-              const itemObj = item as Record<string, unknown>;
-              return [
-                itemObj.title,
-                itemObj.snippet,
-                itemObj.content,
-                itemObj.summary,
-                itemObj.description,
-              ]
-                .filter((v): v is string => typeof v === "string")
-                .join("\n");
-            }
-            return String(item ?? "");
-          })
-          .filter(Boolean)
-          .join("\n\n");
-      }
-
-      if (obj.content && typeof obj.content === "string") {
-        return obj.content;
-      }
-
-      if (obj.summary && typeof obj.summary === "string") {
-        return obj.summary;
-      }
-
-      const textFields = ["text", "body", "description", "snippet"];
-      for (const field of textFields) {
-        if (obj[field] && typeof obj[field] === "string") {
-          return obj[field] as string;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  private extractSourceFromResult(result: unknown): string | undefined {
-    if (result && typeof result === "object") {
-      const obj = result as Record<string, unknown>;
-      
-      if (obj.url && typeof obj.url === "string") {
-        return obj.url;
-      }
-
-      if (obj.source && typeof obj.source === "string") {
-        return obj.source;
-      }
-
-      if (obj.provider && typeof obj.provider === "string") {
-        return obj.provider;
-      }
-    }
-
-    return undefined;
-  }
 }
 
 let _instance: ToolResultProcessor | null = null;
@@ -229,8 +102,4 @@ export function getToolResultProcessor(): ToolResultProcessor {
     _instance = new ToolResultProcessor();
   }
   return _instance;
-}
-
-export function resetToolResultProcessor(): void {
-  _instance = null;
 }

@@ -161,7 +161,13 @@ export class MemoryMetacognitionBridge {
     this.memoryCortex = opts.memoryCortex ?? null;
     this.metaCognition = opts.metaCognition ?? null;
     this.knowledgeVerification = opts.knowledgeVerification ?? null;
-    this.knowledgeGapExecutor = opts.knowledgeGapExecutor ?? null;
+    // 依赖形状校验：只保留真正实现了 executeGapQuery 的执行器，
+    // 误传类构造函数 / mock / 空壳对象时统一降级为 null（符合"依赖可缺失、缺失时优雅降级"约定）。
+    const suppliedGapExecutor = opts.knowledgeGapExecutor ?? null;
+    this.knowledgeGapExecutor =
+      suppliedGapExecutor && typeof suppliedGapExecutor.executeGapQuery === "function"
+        ? suppliedGapExecutor
+        : null;
   }
 
   // ------------------------------------------------------------

@@ -6,12 +6,12 @@ export type LifeTaskCategory = "purchase" | "visual";
 
 const CATEGORY_MATCHERS: Record<LifeTaskCategory, RegExp> = {
   purchase:
-    /买|购|订|预订|下单|支付|花钱|消费|外卖|酒店|打车|机票|火车|转账|汇款|充值|红包|余额|wallet|purchase|shop|trade|a2a/i,
+    /买|购|订|预订|下单|支付|付款|付钱|花钱|消费|外卖|酒店|打车|机票|火车|转账|汇款|充值|红包|余额|支付宝|alipay|payment|wallet|purchase|shop|trade|a2a/i,
   visual: /电脑|网站|desktop|visual|屏幕|操作|打开网站|app|携程|美团|淘宝|京东|饿了么|12306|rpa/i,
 };
 
 const CATEGORY_TOOL_PARTS: Record<LifeTaskCategory, readonly string[]> = {
-  purchase: ["wallet", "fund", "market", "shop", "purchase", "a2a", "trade"],
+  purchase: ["wallet", "alipay", "payment", "pay", "fund", "market", "shop", "purchase", "a2a", "trade"],
   visual: ["desktop", "visual", "vision"],
 };
 

@@ -3,6 +3,7 @@ import "package:flutter/services.dart";
 
 import "../../core/utils/agent_result_parser.dart";
 import "agent_result_card.dart";
+import "content_summary_detail_formatter.dart";
 
 /// "选择型"卡片 —— 在 [AgentResultCard] 的基础上,在底部追加一排抉择按钮,
 /// 让用户无需打字即可完成"周末去不去"、"确认/取消"、"订阅/忽略"这类高频选择。
@@ -38,6 +39,15 @@ class _AgentActionChoiceCardState extends State<AgentActionChoiceCard>
   /// 点击后立即锁定,避免网络往返期间用户重复点击同一按钮。
   String _selectedId = "";
 
+  /// 多选模式(actions 带 multiSelect)：已勾选的 action id 集合。
+  /// 勾选多个后,「确认选择」一次性提交全部。
+  final Set<String> _selectedIds = <String>{};
+
+  /// 是否处于多选模式(由任一 action 的 payload.multiSelect 决定)。
+  bool get _isMultiSelect =>
+      widget.data.actions.any((AgentResultAction a) =>
+          (a.payload["multiSelect"] as bool?) == true);
+
   /// 按下时的缩放动画控制器(0.0 = 正常, 1.0 = 按下缩小态)
   late final AnimationController _pressController;
   late final Animation<double> _pressAnim;
@@ -62,11 +72,73 @@ class _AgentActionChoiceCardState extends State<AgentActionChoiceCard>
   }
 
   void _handleTap(AgentResultAction action) {
+    if (_isMultiSelect) {
+      // 多选模式：勾选/取消勾选项；「确认选择」一次性提交全部已选项
+      if (action.id == "select_confirm") {
+        if (_selectedIds.isEmpty) return;
+        HapticFeedback.mediumImpact();
+        setState(() => _selectedId = action.id);
+        widget.onAction?.call(_mergedSelectionAction(action));
+        return;
+      }
+      if (action.id == "select_cancel") {
+        HapticFeedback.selectionClick();
+        setState(() {
+          _selectedId = action.id;
+          _selectedIds.clear();
+        });
+        widget.onAction?.call(action);
+        return;
+      }
+      // 普通勾选项：切换选中态（确认前可反复改）
+      HapticFeedback.selectionClick();
+      setState(() {
+        if (_selectedIds.contains(action.id)) {
+          _selectedIds.remove(action.id);
+        } else {
+          _selectedIds.add(action.id);
+        }
+      });
+      return;
+    }
     if (_selectedId.isNotEmpty) return; // 已锁定
     // 触觉反馈：中等力度的冲击感，比 selectionClick 更"实在"
     HapticFeedback.mediumImpact();
     setState(() => _selectedId = action.id);
     widget.onAction?.call(action);
+  }
+
+  /// 多选模式下勾选/取消勾选某个列表项（index 为 items 下标）。
+  void _toggleItemSelection(int index) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      final String id = "$index";
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  /// 多选确认时，把已勾选项的 label 合并进单个 action 的 payload，
+  /// 供后端一次性拿到用户勾选的多个选项。
+  AgentResultAction _mergedSelectionAction(AgentResultAction confirmAction) {
+    final List<String> chosen = <String>[
+      for (final int i in _selectedIds.map(int.parse))
+        if (i >= 0 && i < widget.data.items.length)
+          widget.data.items[i].text,
+    ];
+    return AgentResultAction(
+      id: confirmAction.id,
+      label: '已选择：${chosen.join("、")}',
+      variant: confirmAction.variant,
+      payload: <String, dynamic>{
+        ...confirmAction.payload,
+        "selected": chosen,
+        "selectedIds": _selectedIds.toList(growable: false),
+      },
+    );
   }
 
   @override
@@ -96,88 +168,118 @@ class _AgentActionChoiceCardState extends State<AgentActionChoiceCard>
         widget.data.items.isNotEmpty ||
         widget.data.footer.isNotEmpty;
 
-    return Container(
-      // 与 AgentResultCard 一致:最大 360,避免宽屏拉成横幅
-      constraints: const BoxConstraints(maxWidth: 360),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          if (hasHeader)
-            Padding(
-              padding: padding,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  if (widget.data.title.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: titleGap),
-                      child: Text(
-                        widget.data.title,
-                        style: TextStyle(
-                          fontSize: titleSize,
-                          fontWeight: FontWeight.w600,
-                          color: titleColor,
-                          height: 1.45,
+    return SizedBox(
+      width: double.infinity,
+      child: Container(
+        // 与 AgentResultCard 一致:最大 360,避免宽屏拉成横幅
+        constraints: const BoxConstraints(maxWidth: 390),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: dividerColor),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            if (hasHeader)
+              Padding(
+                padding: padding,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (widget.data.title.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: titleGap),
+                        child: Text(
+                          widget.data.title,
+                          style: TextStyle(
+                            fontSize: titleSize,
+                            fontWeight: FontWeight.w600,
+                            color: titleColor,
+                            height: 1.45,
+                          ),
+                          softWrap: true,
                         ),
                       ),
-                    ),
-                  ...widget.data.items.map((AgentResultItem it) {
-                    return Padding(
-                      padding:
-                          const EdgeInsets.symmetric(vertical: listItemGap),
-                      child: Row(
+                    ...widget.data.items.asMap().entries.map(
+                        (MapEntry<int, AgentResultItem> e) {
+                      final int index = e.key;
+                      final AgentResultItem it = e.value;
+                      final bool multi = _isMultiSelect;
+                      final bool checked = multi && _selectedIds.contains("$index");
+                      final Widget row = Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
                         children: <Widget>[
-                          _ItemMark(type: it.type, colorScheme: cs),
+                          if (multi)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 1),
+                              child: Icon(
+                                checked
+                                    ? Icons.check_circle
+                                    : Icons.radio_button_unchecked,
+                                size: 18,
+                                color: checked
+                                    ? cs.primary
+                                    : cs.outline,
+                              ),
+                            )
+                          else
+                            _ItemMark(type: it.type, colorScheme: cs),
                           const SizedBox(width: 8),
-                          Flexible(
-                            child: Text(
+                          Expanded(
+                            child: _InlineMarkdownBody(
                               it.text,
                               style: TextStyle(
                                 fontSize: itemSize,
                                 color: itemColor,
                                 height: 1.55,
                               ),
+                              colorScheme: cs,
                             ),
                           ),
                         ],
-                      ),
-                    );
-                  }),
-                  if (widget.data.footer.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: titleGap),
-                      child: Text(
-                        widget.data.footer,
-                        style: TextStyle(
-                          fontSize: footerSize,
-                          color: footerColor,
-                          height: 1.5,
+                      );
+                      return Padding(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: listItemGap),
+                        child: multi
+                            ? InkWell(
+                                onTap: () => _toggleItemSelection(index),
+                                borderRadius: BorderRadius.circular(6),
+                                child: row,
+                              )
+                            : row,
+                      );
+                    }),
+                    if (widget.data.footer.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: titleGap),
+                        child: Text(
+                          widget.data.footer,
+                          style: TextStyle(
+                            fontSize: footerSize,
+                            color: footerColor,
+                            height: 1.5,
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
+            // 按钮区:与正文用顶部边框分割,形成"操作区"视觉
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              decoration: BoxDecoration(
+                border: hasHeader
+                    ? Border(top: BorderSide(color: dividerColor, width: 1))
+                    : null,
+              ),
+              child: _buildActionRow(context, actions, buttonGap),
             ),
-          // 按钮区:与正文用顶部边框分割,形成"操作区"视觉
-          Container(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-            decoration: BoxDecoration(
-              border: hasHeader
-                  ? Border(top: BorderSide(color: dividerColor, width: 1))
-                  : null,
-            ),
-            child: _buildActionRow(context, actions, buttonGap),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -373,5 +475,22 @@ class _ItemMark extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _InlineMarkdownBody extends StatelessWidget {
+  const _InlineMarkdownBody(
+    this.text, {
+    required this.style,
+    required this.colorScheme,
+  });
+
+  final String text;
+  final TextStyle style;
+  final ColorScheme colorScheme;
+
+  @override
+  Widget build(BuildContext context) {
+    return buildInlineMarkdownText(text, style, cs: colorScheme);
   }
 }

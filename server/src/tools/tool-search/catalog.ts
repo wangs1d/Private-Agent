@@ -556,9 +556,18 @@ export function resolveCatalogToolName(
   if (direct) return direct;
 
   const apiNormalized = trimmed.replace(/\./g, "_");
-  return (
-    catalog.byApiName.get(apiNormalized) ??
-    catalog.byName.get(apiNormalized) ??
-    null
-  );
+  const viaApi =
+    catalog.byApiName.get(apiNormalized) ?? catalog.byName.get(apiNormalized);
+  if (viaApi) return viaApi;
+
+  // 大小写不敏感兜底：LLM 偶尔改写工具名大小写，精确未命中时做一次 O(n) 小写匹配
+  const lower = trimmed.toLowerCase();
+  const apiLower = apiNormalized.toLowerCase();
+  for (const entry of catalog.entries) {
+    const regLower = entry.registryName.toLowerCase();
+    if (regLower === lower || regLower === apiLower) return entry;
+    const apiEntry = entry.registryName.replace(/\./g, "_").toLowerCase();
+    if (apiEntry === lower || apiEntry === apiLower) return entry;
+  }
+  return null;
 }

@@ -1,11 +1,11 @@
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
-import { AGENT_COMMITMENT_RE } from "../agent/memory-signal.js";
 import { adoptLegacyMasterDelegateThread } from "./chat-thread-adopt.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
 import type { RecapSummarizer } from "../services/conversation-rolling-summarizer.js";
+import { layerRecapLinesByBudget } from "../services/conversation-rolling-summarizer.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
   compactValidChatMessages,
@@ -55,10 +55,6 @@ const SESSION_RECAP_PREFIX = "[session-recap]";
 const SESSION_RECAP_TITLE = "Earlier conversation recap:";
 const SESSION_RECAP_MAX_LINES = 14;
 const SESSION_RECAP_MAX_CHARS = 1600;
-const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|记住|remember|prefer/i;
-const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我想做|我需要/i;
-const USER_REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
-const ASSISTANT_DECISION_RE = /建议|结论|可以|应该|下一步|已为你|已经帮你|稍后|接下来/i;
 
 const TIME_FRAME_PREFIX = "[timeframe:";
 
@@ -279,13 +275,6 @@ function normalizeRecapLine(line: string): string {
   return line.replace(/\s+/g, " ").trim();
 }
 
-function firstSentence(text: string, maxLen = 140): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return "";
-  const sentence = normalized.split(/[。！？!?\n]/)[0]?.trim() || normalized;
-  return sentence.length > maxLen ? `${sentence.slice(0, maxLen - 3).trimEnd()}...` : sentence;
-}
-
 function pushRecapLine(target: string[], line: string): void {
   const normalized = normalizeRecapLine(line);
   if (!normalized) return;
@@ -293,93 +282,33 @@ function pushRecapLine(target: string[], line: string): void {
   target.push(normalized);
 }
 
-function extractRecapLinesFromMessages(messages: ChatCompletionMessageParam[]): string[] {
-  const priority: string[] = [];
-  const general: string[] = [];
-  let leadingUserCount = 0;
-  let leadingAssistantCount = 0;
-  const LEADING_USER_MAX = 4; // 提升前 N 条 user 消息保留量（原 2 → 4）
-  const LEADING_ASSISTANT_MAX = 4; // 同上
-
-  // 按消息时间戳生成日期偏移标签（[d-1]=昨天，[d-2]=前天…），让 LLM 能区分历史时间线
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dayLabelOf = (msg: ChatCompletionMessageParam): string => {
-    const ts = extractMessageTimestamp(msg);
-    if (!ts) return ""; // 无时间戳不标日期，避免误导
-    const dayStart = new Date(ts.getFullYear(), ts.getMonth(), ts.getDate());
-    const diff = Math.round((todayStart.getTime() - dayStart.getTime()) / 86_400_000);
-    if (diff <= 0) return "[今天]";
-    if (diff === 1) return "[昨天]";
-    return `[${diff}天前]`;
-  };
-
-  for (const msg of messages) {
-    if (msg.role !== "user" && msg.role !== "assistant") continue;
-    if (typeof msg.content !== "string") continue;
-    const text = stripTimestampText(msg.content);
-    if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
-    const gist = firstSentence(text);
-    if (!gist) continue;
-    const dayLabel = dayLabelOf(msg);
-
-    if (msg.role === "user") {
-      if (leadingUserCount < LEADING_USER_MAX) {
-        pushRecapLine(general, `${dayLabel}Earlier user: ${gist}`.trim());
-        leadingUserCount += 1;
-        continue;
-      }
-      if (USER_PREFERENCE_RE.test(text)) {
-        pushRecapLine(priority, `${dayLabel}User preference: ${gist}`.trim());
-        continue;
-      }
-      if (USER_FACT_RE.test(text)) {
-        pushRecapLine(priority, `${dayLabel}User fact: ${gist}`.trim());
-        continue;
-      }
-      if (USER_REQUEST_RE.test(text) || text.includes("?") || text.includes("？")) {
-        pushRecapLine(general, `${dayLabel}Earlier user request: ${gist}`.trim());
-      }
-      continue;
-    }
-
-    if (leadingAssistantCount < LEADING_ASSISTANT_MAX) {
-      pushRecapLine(general, `${dayLabel}Earlier assistant: ${gist}`.trim());
-      leadingAssistantCount += 1;
-      continue;
-    }
-    if (AGENT_COMMITMENT_RE.test(text)) {
-      pushRecapLine(priority, `${dayLabel}Agent commitment: ${gist}`.trim());
-      continue;
-    }
-    if (ASSISTANT_DECISION_RE.test(text)) {
-      pushRecapLine(general, `${dayLabel}Earlier agent conclusion: ${gist}`.trim());
-    }
-  }
-
-  const lines = [...priority, ...general].slice(0, SESSION_RECAP_MAX_LINES);
-  return lines;
-}
-
 /** 把 recap 行数组渲染为 recap 消息的 content（与 extractSessionRecapLines 双向兼容）。 */
 function buildSessionRecapContent(lines: string[]): string {
-  return `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${lines.map((l) => `- ${l}`).join("\n")}`;
+  // 事件化分层 + 预算裁剪（记忆连续性 Phase 2）：按行首时间标签（[今天]/[昨天]/[N天前]）
+  // 重新排序（今天 → 昨天 → 本周 → 更早），并按预算裁剪——近层全量、远层压缩，
+  // 避免简单 slice 丢失近因、时间线乱跳、跳转不可追溯。
+  const plain = lines.map((l) => l.replace(/^-+\s*/, "").trim()).filter(Boolean);
+  const ordered = layerRecapLinesByBudget(plain, SESSION_RECAP_MAX_LINES);
+  return `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${ordered.map((l) => `- ${l}`).join("\n")}`;
 }
 
 function buildSessionRecapMessage(
   existingLines: string[],
   droppedMessages: ChatCompletionMessageParam[],
 ): ChatCompletionMessageParam | null {
+  // 同步路径只合并已有的 recap 行（去重、排序、预算裁剪），不再做旧的正则提取；
+  // 被丢弃消息的具体摘要交由 LLM 滚动摘要异步生成（enhanceRecap）。
+  // droppedMessages 非空但无已有行时返回 null，由 enhanceRecap 在完成后插入 recap 消息。
   const merged: string[] = [];
   for (const line of existingLines) pushRecapLine(merged, line);
-  for (const line of extractRecapLinesFromMessages(droppedMessages)) pushRecapLine(merged, line);
 
-  if (merged.length === 0) return null;
+  if (merged.length === 0 && droppedMessages.length === 0) return null;
 
+  // 字符预算截断（1600 chars）先行；行数预算交给 buildSessionRecapContent 的
+  // layerRecapLinesByBudget 按时间桶裁剪（近层全量、远层压缩），避免简单 slice 丢近因。
   const lines: string[] = [];
   let totalChars = SESSION_RECAP_PREFIX.length + SESSION_RECAP_TITLE.length + 2;
   for (const line of merged) {
-    if (lines.length >= SESSION_RECAP_MAX_LINES) break;
     if (totalChars + line.length + 4 > SESSION_RECAP_MAX_CHARS) break;
     lines.push(`- ${line}`);
     totalChars += line.length + 4;
@@ -444,6 +373,26 @@ function annotateMessageIfNeeded(
  *
  * 幂等：已是普通 assistant（无 tool_calls）的消息不会被重复处理。
  */
+function hasToolCalls(msg: ChatCompletionMessageParam): boolean {
+  const toolCalls = (msg as { tool_calls?: unknown }).tool_calls;
+  return Array.isArray(toolCalls) && toolCalls.length > 0;
+}
+
+/**
+ * 移除会话中间（index > 0）的 transient system 消息，只保留 msgs[0] 的主 system prompt。
+ * tool loop 会把「工具调用原则」等临时指令 push 进 messages（即 thread 数组），
+ * 若不清理会逐轮累积，污染后续轮次的对话历史，导致 LLM 丢失对前文的感知。
+ */
+function removeTransientSystemMessages(msgs: ChatCompletionMessageParam[]): void {
+  if (msgs.length <= 1) return;
+  let write = 1;
+  for (let read = 1; read < msgs.length; read++) {
+    if (msgs[read].role === "system") continue;
+    msgs[write++] = msgs[read];
+  }
+  msgs.length = write;
+}
+
 export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boolean {
   if (msgs.length < 2) return false;
   const result: ChatCompletionMessageParam[] = [];
@@ -453,63 +402,61 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
   while (i < msgs.length) {
     const msg = msgs[i];
 
-    // 检测 assistant(tool_calls) 起始
-    if (msg && msg.role === "assistant") {
-      const toolCalls = (msg as { tool_calls?: unknown[] }).tool_calls;
-      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
-        // 收集后续连续的 tool 结果
-        let j = i + 1;
-        while (j < msgs.length && msgs[j].role === "tool") {
-          j++;
-        }
+    // 检测 assistant(tool_calls) 起始，折叠整条工具链（含多轮）为单条最终 assistant(content)
+    if (msg && msg.role === "assistant" && hasToolCalls(msg)) {
+      let j = i;
+      let finalAssistant: ChatCompletionMessageParam | null = null;
 
-        // 检查 tool 结果后面是否紧跟 assistant(content)（已完成的轮次）
-        if (j < msgs.length && msgs[j].role === "assistant") {
-          const following = msgs[j];
-          const followingToolCalls = (following as { tool_calls?: unknown[] }).tool_calls;
-          const hasFollowingContent =
-            typeof following.content === "string" && following.content.trim().length > 0;
-
-          if (!Array.isArray(followingToolCalls) || followingToolCalls.length === 0) {
-            // 已完成的 tool_call 链：assistant(tool_calls) → tool* → assistant(content)
-            // 折叠为单条 assistant(content)，移除 tool_calls 与 tool 结果
-            if (hasFollowingContent) {
-              result.push(following);
-            } else {
-              // assistant(content) 为空（异常情况），保留占位
-              result.push({
-                role: "assistant",
-                content: annotateTimeframe(
-                  "[上一轮工具调用已完成但未生成可见回复]",
-                  new Date(),
-                  new Date(),
-                ),
-              });
+      // 向前扫描：跳过连续的 assistant(tool_calls) → tool* 段，直到最终 assistant(content) 或链被打断
+      while (j < msgs.length) {
+        const m = msgs[j];
+        if (m.role === "assistant") {
+          if (hasToolCalls(m)) {
+            j++;
+            while (j < msgs.length && msgs[j].role === "tool") {
+              j++;
             }
-            changed = true;
-            i = j + 1;
             continue;
           }
-          // following 也带 tool_calls → 多轮工具调用中的中间步，继续向后找最终 assistant(content)
-          // 先 push 当前 assistant(tool_calls) + tool 结果，让下一轮循环处理
-          // （实际上多轮工具调用在 streamCompletion 中会被 trimThread/sanitize 处理，
-          //  这里只折叠「已完成」的尾部链）
-        } else if (j >= msgs.length || msgs[j].role !== "assistant") {
-          // 未完成的 tool_call 链：assistant(tool_calls) → tool*（无后续 assistant content）
-          // 折叠为单条 assistant 占位消息
+          finalAssistant = m;
+          j++;
+          break;
+        }
+        break; // 遇到非 assistant 消息（如新的 user）→ 链被打断
+      }
+
+      if (finalAssistant) {
+        const content =
+          typeof finalAssistant.content === "string" ? finalAssistant.content.trim() : "";
+        if (content) {
+          result.push(finalAssistant);
+        } else {
           result.push({
             role: "assistant",
             content: annotateTimeframe(
-              "[上一轮工具调用尚未完成即被新消息打断，未生成完整回复]",
+              "[上一轮工具调用已完成但未生成可见回复]",
               new Date(),
               new Date(),
             ),
           });
-          changed = true;
-          i = j;
-          continue;
         }
+        changed = true;
+        i = j;
+        continue;
       }
+
+      // 未完成的 tool_call 链：assistant(tool_calls) → tool*（无后续 assistant content）
+      result.push({
+        role: "assistant",
+        content: annotateTimeframe(
+          "[上一轮工具调用尚未完成即被新消息打断，未生成完整回复]",
+          new Date(),
+          new Date(),
+        ),
+      });
+      changed = true;
+      i = j;
+      continue;
     }
 
     result.push(msg);
@@ -547,8 +494,8 @@ export class ChatThreadStore {
   private readonly history = new Map<string, ChatCompletionMessageParam[]>();
 
   /**
-   * 可选的滚动摘要增强器（LLM 增量摘要）。
-   * 为 null 时保持旧的正则提取 recap，不影响对话主链路。
+   * 滚动摘要增强器（LLM 增量摘要）——recap 的唯一生成者。
+   * 为 null 时仅保留已有 recap 行（不生成新摘要），不影响对话主链路。
    * 通过 setRecapSummarizer 注入（bootstrap 装配）。
    */
   private recapSummarizer: RecapSummarizer | null = null;
@@ -567,7 +514,7 @@ export class ChatThreadStore {
   /**
    * 把「被 trim 丢弃的历史消息」异步交给 LLM 增强 recap。
    * - 不阻塞 trimThread 主链路（fire-and-forget）
-   * - 失败静默：保留同步生成的正则 recap
+   * - 失败静默：保留同步生成的已有 recap 行
    * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果
    */
   private async enhanceRecap(
@@ -586,16 +533,25 @@ export class ChatThreadStore {
       if (this.recapEnhanceSeq.get(sessionId) !== seq) return;
       this.applyEnhancedRecap(sessionId, lines);
     } catch {
-      // 静默失败：保留同步正则 recap
+      // 静默失败：保留同步生成的已有 recap 行
     }
   }
 
   private applyEnhancedRecap(sessionId: string, lines: string[]): void {
     const msgs = this.history.get(sessionId);
     if (!msgs) return;
+    const recapMsg: ChatCompletionMessageParam = {
+      role: "assistant",
+      content: buildSessionRecapContent(lines),
+    };
     const index = msgs.findIndex(isSessionRecapMessage);
-    if (index < 0) return; // recap 已被移除（fold/removeUserMessageAndAfter），跳过
-    msgs[index] = { ...msgs[index], content: buildSessionRecapContent(lines) };
+    if (index >= 0) {
+      msgs[index] = recapMsg;
+    } else {
+      // 无同步 recap 消息（首次压缩、此前无历史 recap）：在 system 之后插入，
+      // 保证 LLM 摘要对后续轮次可见。
+      msgs.splice(1, 0, recapMsg);
+    }
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 
@@ -754,8 +710,9 @@ export class ChatThreadStore {
     // 仅"前天及更早"的历史整体压成一条 recap
     const recap = buildSessionRecapMessage(separated.recapLines, olderMessages);
 
-    // 历史消息丢弃后异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留正则 recap）
-    if (recap && olderMessages.length > 0) {
+    // 历史消息丢弃后异步交给 LLM 滚动摘要增强（不阻塞主链路）。
+    // 不依赖同步 recap 是否存在：无已有 recap 行时由 enhanceRecap 完成后插入。
+    if (olderMessages.length > 0) {
       this.enhanceRecap(sessionId ?? "", separated.recapLines, olderMessages).catch(() => {});
     }
 
@@ -803,7 +760,7 @@ export class ChatThreadStore {
     const droppedMessages = olderMessages.filter((msg) => !preservedOlder.includes(msg));
     const recap = buildSessionRecapMessage(separated.recapLines, droppedMessages);
 
-    // 丢弃消息异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留正则 recap）
+    // 丢弃消息异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留已有 recap 行）
     if (droppedMessages.length > 0) {
       this.enhanceRecap(sessionId ?? "", separated.recapLines, droppedMessages).catch(() => {});
     }
@@ -865,6 +822,9 @@ export class ChatThreadStore {
     // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。
     // 下一轮 LLM 只看到干净的 assistant(content)，不会把上轮 tool 结果当成当前轮语境。
     foldCompletedToolChains(msgs);
+    // 清理 tool loop 残留在会话中间的 transient system 消息（如「工具调用原则」），
+    // 只保留 msgs[0] 的主 system prompt，避免污染后续轮次的对话历史。
+    removeTransientSystemMessages(msgs);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 

@@ -1,13 +1,19 @@
 import { createInterface } from "node:readline";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { existsSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
 import type { DeferredToolCatalog } from "./catalog.js";
 import type { AdaptiveDeferredToolSearchMatch } from "./adaptive-catalog.js";
 import { describeDeferredTool } from "./catalog.js";
 import { exportCatalogToToolRouter, type ToolRouterExportBundle } from "./tool-router-export.js";
+import {
+  resolveToolRouterHttpUrl,
+  prewarmToolRouterCatalogHttp,
+  searchDeferredToolsViaToolRouterHttp,
+} from "./tool-router-http-client.js";
 
 type WorkerState = {
   proc: ChildProcessWithoutNullStreams;
@@ -40,6 +46,20 @@ export async function searchDeferredToolsViaToolRouter(
     agentContextHash?: string;
   },
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
+  // 优先 HTTP REST：独立部署的 FastAPI 服务（配置 TOOL_ROUTER_HTTP_URL 时启用）。
+  // 服务不可用（未启动 / 网络失败）时自动回退 stdio bridge_worker 子进程。
+  if (resolveToolRouterHttpUrl()) {
+    try {
+      return await searchDeferredToolsViaToolRouterHttp(catalog, query, limit, options);
+    } catch (error) {
+      console.warn(
+        `[tool-search:tool-router] HTTP 服务调用失败，回退 stdio worker: ${
+          error instanceof Error ? error.message : error
+        }`,
+      );
+    }
+  }
+
   const exported = getExportedCatalog(catalog, {
     tenantId: options?.tenantId ?? "default",
     environment: resolveToolRouterEnvironment(),
@@ -116,6 +136,10 @@ export function prewarmToolRouterCatalog(
     tenantId: options?.tenantId ?? "default",
     environment: options?.environment ?? resolveToolRouterEnvironment(),
   });
+  // HTTP 模式预加载（服务未配置/未启动时静默跳过，搜索时再回退 stdio）
+  if (resolveToolRouterHttpUrl()) {
+    prewarmToolRouterCatalogHttp(catalog, options);
+  }
   const existing = prewarmPromises.get(exported.signature);
   if (existing) return existing;
   const promise = (async () => {
@@ -254,7 +278,37 @@ function sendWorkerCommand(
 }
 
 function resolveWorkerScript(): string {
-  return join(process.cwd(), "tool-router", "scripts", "bridge_worker.py");
+  // 1) 显式 TOOL_ROUTER_ROOT 优先
+  const explicitRoot = process.env.TOOL_ROUTER_ROOT?.trim();
+  if (explicitRoot) {
+    const candidate = join(explicitRoot, "scripts", "bridge_worker.py");
+    if (existsSync(candidate)) return candidate;
+  }
+  // 2) 从 cwd 向上逐级查找 <repo>/tool-router/scripts/bridge_worker.py
+  //    （server 从 server/ 启动时 cwd 是 server/，仓库根在其上级）
+  let dir = resolve(process.cwd());
+  for (let i = 0; i < 8; i++) {
+    const candidate = join(dir, "tool-router", "scripts", "bridge_worker.py");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // 3) 相对本模块位置（src/ 与 dist/ 下均为 tools/tool-search，上溯 4 级到仓库根）
+  const viaModule = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "..",
+    "..",
+    "tool-router",
+    "scripts",
+    "bridge_worker.py",
+  );
+  if (existsSync(viaModule)) return viaModule;
+  throw new Error(
+    `bridge_worker.py not found. Tried TOOL_ROUTER_ROOT, cwd walk-up from "${process.cwd()}", and "${viaModule}".`,
+  );
 }
 
 function resolvePythonBin(): string {
@@ -278,7 +332,7 @@ function resolvePythonBin(): string {
   for (const candidate of candidates) {
     try {
       if (candidate.includes("\\") || candidate.includes("/")) {
-        accessSync(candidate, fsConstants.X_OK);
+        if (!existsSync(candidate)) continue;
         return candidate;
       }
       return candidate;

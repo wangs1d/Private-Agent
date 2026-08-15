@@ -42,6 +42,22 @@ interface AgentResultPayload {
   title: string;
   items: Array<{ type: string; text: string }>;
   footer: string;
+  /**
+   * 工具专用卡片类型：
+   * weather / schedule / wallet / order / file / carousel / compare / timeline / media；
+   * 空串=通用列表卡。
+   * compare=左右对比卡、timeline=时间轴卡、media=图片结果卡。
+   */
+  cardType?: string;
+  /** 底部抉择按钮（客户端渲染为 AgentActionChoiceCard，点击经 chat.user_action 回传） */
+  actions?: Array<{ id: string; label: string; variant: string; payload: Record<string, unknown> }>;
+  /** 卡片唯一 ID（点击按钮回传，便于后端定位上下文） */
+  cardId?: string;
+  /**
+   * 语音播报优先级：high=语音端优先朗读结论，low=可跳过次要内容；空串=默认。
+   * 供语音输出端（agent.voice.*）决定取舍。
+   */
+  speak?: string;
 }
 
 export interface CardSegment {
@@ -165,10 +181,107 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
 }
 
 /**
+ * 根据工具名推断工具专用卡片类型。
+ * 命中则客户端按类型渲染专用 UI（天气/日程/钱包/订单/文件/搜索轮播，
+ * 以及对比/时间轴/媒体），未命中返回空串 → 客户端渲染通用列表卡。
+ */
+export function inferCardType(toolName?: string): string {
+  if (!toolName) return "";
+  if (toolName.startsWith("weather.")) return "weather";
+  if (toolName.includes("calendar") || toolName.includes("schedule")) return "schedule";
+  if (toolName.startsWith("wallet.")) return "wallet";
+  if (
+    toolName.includes("order") ||
+    toolName.includes("payment") ||
+    toolName.includes("pay") ||
+    toolName.includes("alipay")
+  ) {
+    return "order";
+  }
+  if (toolName.includes("file")) return "file";
+  if (toolName === "search_web" || toolName.startsWith("info.")) return "carousel";
+  // 新增：对比类（商品/方案 pk）、时间轴类（行程/计划）、媒体类（识图/图片结果）
+  if (
+    toolName.toLowerCase().includes("compare") ||
+    toolName.toLowerCase().includes("pk") ||
+    toolName.toLowerCase().includes("对比")
+  ) {
+    return "compare";
+  }
+  if (
+    toolName.toLowerCase().includes("timeline") ||
+    toolName.toLowerCase().includes("plan") ||
+    toolName.toLowerCase().includes("行程")
+  ) {
+    return "timeline";
+  }
+  if (
+    toolName.toLowerCase().includes("image") ||
+    toolName.toLowerCase().includes("photo") ||
+    toolName.toLowerCase().includes("vision") ||
+    toolName.toLowerCase().includes("识图") ||
+    toolName.toLowerCase().includes("图片")
+  ) {
+    return "media";
+  }
+  return "";
+}
+
+/** 结尾是否属于「征求用户确认」的问句（用于注入抉择按钮） */
+const CONFIRM_QUESTION_RE =
+  /[？?]\s*$|吗\s*$|呢\s*$|要不要|是否|需要.*(调整|修改|继续|确认|下单)|想不想要/i;
+
+/** 结尾是否属于「多选/勾选」类（用于注入可选型按钮，variant=select） */
+const SELECT_QUESTION_RE = /选哪|勾选|多选|任选|挑几个|要哪些|哪些合适|想要哪些|选几个/i;
+
+/**
+ * 当卡片结尾是确认问句时，注入通用抉择按钮（好的 / 不用了）。
+ * 用户点击后 label 作为 user message 经 chat.user_action 回传，
+ * Agent 据此衔接上下文继续执行。
+ */
+function inferConfirmActions(footer: string): Array<{
+  id: string;
+  label: string;
+  variant: string;
+  payload: Record<string, unknown>;
+}> {
+  if (!footer || !CONFIRM_QUESTION_RE.test(footer)) {
+    return [];
+  }
+  return [
+    { id: "confirm", label: "好的", variant: "primary", payload: {} },
+    { id: "decline", label: "不用了", variant: "secondary", payload: {} },
+  ];
+}
+
+/**
+ * 当卡片结尾是「多选/勾选」类问句时，注入可选型按钮（variant=select）。
+ * 客户端渲染为可勾选的多选框，用户可多项选择后提交（经 chat.user_action 回传）。
+ */
+function inferSelectActions(footer: string): Array<{
+  id: string;
+  label: string;
+  variant: string;
+  payload: Record<string, unknown>;
+}> {
+  if (!footer || !SELECT_QUESTION_RE.test(footer)) {
+    return [];
+  }
+  return [
+    { id: "select_confirm", label: "确认选择", variant: "primary", payload: { multiSelect: true } },
+    { id: "select_cancel", label: "再想想", variant: "secondary", payload: { multiSelect: true } },
+  ];
+}
+
+/**
  * 把小汇报场景文本切成「前导 + 卡片标记 + 追问」三段。
+ * @param toolName 最近调用的工具名，用于推断专用卡片类型（cardType）
  * @returns 拼接后的字符串；若无法切出卡片返回 null
  */
-export function formatAgentResultForChat(text: string): string | null {
+export function formatAgentResultForChat(
+  text: string,
+  toolName?: string,
+): string | null {
   const trimmed = text?.trim() ?? "";
   if (!trimmed) return null;
 
@@ -206,12 +319,29 @@ export function formatAgentResultForChat(text: string): string | null {
     return { type, text: itemText };
   });
 
+  const cardType = inferCardType(toolName);
+  const confirmActions = inferConfirmActions(segment.footer);
+  // 多选/勾选类：优先用可选型按钮替代确认按钮（两者互斥，Select 优先）
+  const selectActions = inferSelectActions(segment.footer);
+  const actions = selectActions.length ? selectActions : confirmActions;
+
+  // 语音播报优先级：追问/结论句（问句或含"建议/注意/总之"）标记 high，语音端优先朗读
+  const speak = /[？?]\s*$|吗\s*$|建议|推荐|注意|警告|总之|结论|提醒/i.test(
+    `${segment.title} ${segment.footer}`,
+  )
+    ? "high"
+    : "";
+
   const payload: AgentResultPayload = {
     avatar: "NB",
     avatarStyle: "default",
     title: segment.title,
     items,
     footer: segment.footer,
+    cardType,
+    actions,
+    speak,
+    cardId: actions.length > 0 || cardType ? `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}` : undefined,
   };
 
   const json = JSON.stringify(payload);

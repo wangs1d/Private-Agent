@@ -31,6 +31,7 @@ dependencies:
   record: ^5.2.0
   # 桌面端窗口控制（隐藏/显示/置顶）
   window_manager: ^0.4.3
+  flutter_timezone: ^5.1.0
 
 dependency_overrides:
   # 镜像源上 record_linux 0.7.2 与 record_platform_interface 1.6.0 接口签名不兼容

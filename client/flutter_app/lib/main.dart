@@ -260,6 +260,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   /// 服务端`chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
 
+  /// `chat.agent_status` 携带的可选进度百分比（0-90，长工具心跳推进）。
+  /// null = 无进度条（仅文本状态）；非 null = 渲染进度条。
+  int? _agentStatusPercent;
+
   /// 服务端`chat.assistant_interim` 推送的即时确认应答（仅在首条 chunk 之前展示）。
   /// 与 `_agentStatusLine` 并存但生命周期更短：real chunk 一到立即让位。
   String? _interimAckText;
@@ -287,6 +291,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   final StringBuffer _pendingAssistantChunkText = StringBuffer();
   final AssistantTextSanitizer _assistantTextSanitizer =
       AssistantTextSanitizer();
+
+  /// 垫词（phase="interim"）独立气泡的本地序号兜底。
+  /// 服务端 chunk 自带 sequence，通常无需走到这里。
+  int _interimChunkSeq = 0;
 
   // Phase 2：429 回压指数退避重试状态
   String? _pendingRetryText;
@@ -454,13 +462,43 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       duplicateMessageIds.add(m.messageId);
     }
 
+    // 内容级去重：修复「同一段正文被渲染成两条消息」的历史遗留。
+    // 旧版本服务端把主回复正文既按段推成 interim 消息（interim-$trace-$seq），
+    // 又推成 stream 主回复（assistant-$trace），前端会得到内容完全相同的相邻
+    // 两条 assistant 消息。仅对相邻 assistant 消息做比较：trim 后文本一致即视为
+    // 同一回复的重复渲染，保留先出现的一条（stream 主回复通常更完整），删除
+    // 靠后的那条。非相邻消息不做比较，避免误删正常对话中恰好相同的回复。
+    final List<ChatMessage> contentDedupedMessages = <ChatMessage>[];
+    final Set<String> contentDuplicateMessageIds = <String>{};
+    for (final ChatMessage m in dedupedMessages) {
+      final bool isContentDup = contentDedupedMessages.isNotEmpty &&
+          contentDedupedMessages.last.role == "assistant" &&
+          m.role == "assistant" &&
+          contentDedupedMessages.last.text.trim() == m.text.trim();
+      if (isContentDup) {
+        contentDuplicateMessageIds.add(m.messageId);
+        continue;
+      }
+      contentDedupedMessages.add(m);
+    }
+    // 同步清理 store 中内容重复的消息（避免刷新后再次加载出来）
+    for (final String messageId in contentDuplicateMessageIds) {
+      try {
+        await _store.deleteMessage(messageId);
+        debugPrint(
+            "[chat] dedupe: cleaned content-duplicate messageId=$messageId");
+      } catch (e) {
+        debugPrint("[chat] content dedupe cleanup failed for $messageId: $e");
+      }
+    }
+
     final List<AgentRelayMessage> cachedRelay =
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
 
     final bool? visionConsent = await _store.getVisionCameraConsent();
 
     setState(() {
-      _messages.addAll(dedupedMessages);
+      _messages.addAll(contentDedupedMessages);
       // 关键：从缓存恢复后必须重建 assistant 消息索引，
       // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
       // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
@@ -558,6 +596,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               <String, dynamic>{};
       try {
         _syncAgentSphereFromWs(type, payload);
+        // 服务端按需请求实时位置：Agent 需要位置时（如天气工具）才拉一次 GPS。
+        if (type == "agent.location_request") {
+          final String jobId = payload["jobId"]?.toString() ?? "";
+          final ClientLocationPayload? loc =
+              await ClientLocationService.getCurrentLocationForChat();
+          if (loc != null) {
+            _ws.sendEvent("client.location_report", <String, dynamic>{
+              if (jobId.isNotEmpty) "jobId": jobId,
+              ...loc.toJson(),
+            });
+          }
+        }
         if (type == "connection_error") {
           SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
           final bool hadPendingTurn =
@@ -838,7 +888,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
           } else if (phase == "delegate_done") {
             _subAgentDelegationActive = false;
           }
-          _updateAgentStatusLine(line, ensureProcessing: true);
+          // 进度百分比（可选）：长工具心跳推进进度条
+          final dynamic rawPercent = payload["percent"];
+          final int? percent = rawPercent is num ? rawPercent.toInt() : null;
+          _updateAgentStatusLine(line, ensureProcessing: true, percent: percent);
         }
         if (type == "chat.assistant_interim") {
           // 已废弃：被动聊天路径已改为通过 chat.assistant_chunk + phase="interim"
@@ -899,13 +952,30 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                   chunkTraceId != activeTraceId)) {
             return;
           }
-          // 纯流式渲染：phase="interim" 是「行动宣告/进度感」类首段（"好的，我帮你看看…"），
-          // 属于「agent 思路过程」而非最终回复——直接丢弃，不入消息列表。
-          // 只保留 phase="stream"（或无 phase）的最终回复 chunks。
+          // 纯流式渲染：phase="interim" 是「垫词 / 主动在场互动」类首段
+          //（"好的，我帮你看看…" / presence 闲聊）。多步回复架构下它属于
+          // agent 的独立一步（承接 / 边聊边干），应作为独立 assistant 消息入列表，
+          // 让用户实时看到 agent 正在回应，而不是被丢弃。
+          // 主回复（phase="stream"）则走正常流式渲染路径。
           final String chunkPhase = payload["phase"]?.toString() ?? "";
           if (chunkPhase == "interim") {
             // 仍可借助 _clearInterimAck 清掉旧的 interim ack 气泡（若有）
             _clearInterimAck();
+            if (!_isAgentProcessing) {
+              setState(() => _isAgentProcessing = true);
+              _notifyAgentProcessingUi(true);
+            }
+            // 与服务端共用同一 trace，但用独立 messageId 渲染为独立气泡，
+            // 与主回复分开，形成「垫词 → 互动 → 结果」的多步回复效果。
+            // interim 是 LLM 自主生成的完整句子（非 token 流），无需 sanitizer
+            // 缓冲，也不应污染 _pendingAssistantChunkText 兜底文本。
+            final String interimSeq = payload["sequence"]?.toString() ??
+                "${_interimChunkSeq++}";
+            final String interimMessageId =
+                "interim-$activeTraceId-$interimSeq";
+            final String interimChunk = payload["chunk"]?.toString() ?? "";
+            if (interimChunk.isEmpty) return;
+            _appendChunkToMessageList(interimMessageId, interimChunk);
             return;
           }
           _clearInterimAck();
@@ -1632,7 +1702,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   String _sanitizeAssistantVisibleText(String text) {
-    return stripAssistantTimestampFrames(text);
+    return stripAssistantProtocolFrames(text);
   }
 
   bool _shouldReplaceAssistantTextOnDone(
@@ -1687,6 +1757,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   void _clearAgentProcessingState({bool done = false}) {
     if (!_isAgentProcessing &&
         _agentStatusLine == null &&
+        _agentStatusPercent == null &&
         _interimAckText == null &&
         !_subAgentDelegationActive &&
         _turnState == null &&
@@ -1696,6 +1767,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     setState(() {
       _isAgentProcessing = false;
       _agentStatusLine = null;
+      _agentStatusPercent = null;
       _interimAckText = null;
       _subAgentDelegationActive = false;
       // v2：按调用方语义收尾 TurnState。
@@ -1937,7 +2009,11 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
   }
 
-  void _updateAgentStatusLine(String line, {bool ensureProcessing = false}) {
+  void _updateAgentStatusLine(
+    String line, {
+    bool ensureProcessing = false,
+    int? percent,
+  }) {
     final String trimmed = line.trim();
     if (trimmed.isEmpty) return;
     _resetAgentReplyWatchdog();
@@ -1946,6 +2022,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         _isAgentProcessing = true;
       }
       _agentStatusLine = trimmed;
+      // 进度百分比：null 表示该事件不带进度（保持上次值或清为 null）
+      _agentStatusPercent = percent;
     });
     if (ensureProcessing) {
       _notifyAgentProcessingUi(true);
@@ -2122,12 +2200,9 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       userMsg["userId"] = ApiConfig.userId.trim();
     }
 
-    // 前端 GPS 定位（优先于 IP 地理库）
-    final ClientLocationPayload? clientLocation =
-        await ClientLocationService.getCurrentLocation();
-    if (clientLocation != null) {
-      userMsg["clientLocation"] = clientLocation.toJson();
-    }
+    // 位置不再随每条消息实时拉取（避免每次发消息都走 GPS + 逆地理）。
+    // 改为按需：Agent 需要位置（如 weather.get_local 工具）时服务端下发
+    // agent.location_request，客户端响应后实时回传；天气面板也会主动上报缓存。
     userMsg["agentAccessMode"] = "full";
 
     // 如果有被打断的回复，将其添加到消息上下文中（作为系统提示文本
@@ -3152,7 +3227,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     return;
   }
 
-  /// 根据网络 IP 展示推测位置，并询问是否开启 GPS 定位权限（灰色弹窗，仅询问一次）)
+  /// 弹窗询问 GPS 定位权限：仅询问一次，未显式拒绝则默认同意并立即拉一次 GPS。
   Future<void> _promptLocationConsentIfNeeded() async {
     final bool? existing = await ClientLocationService.getLocationConsent();
     if (existing != null) {
@@ -3168,7 +3243,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     }
 
     final bool? allow = await showLocationPermissionDialog(context: ctx);
-    final bool decided = allow ?? false;
+    // 默认同意：用户没显式点「暂不允许」就视为允许，让 Agent 默认能拿到实时位置。
+    final bool decided = allow ?? true;
     await ClientLocationService.setLocationConsent(decided);
     if (decided) {
       await ClientLocationService.requestGpsAfterConsent();
@@ -4129,6 +4205,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         onWallet: _openWalletDialog,
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
+        // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
+        onReportLocation: (location) {
+          _ws.sendEvent("client.location_report", location);
+        },
       ),
     );
   }
@@ -4311,6 +4391,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
       onClearGalleryImages: _clearPendingGalleryFrames,
       isAgentProcessing: _isAgentProcessing,
       agentStatusLine: _agentStatusLine,
+      agentStatusPercent: _agentStatusPercent,
       interimAckText: _interimAckText,
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,

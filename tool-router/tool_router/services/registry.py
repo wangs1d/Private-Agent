@@ -12,6 +12,7 @@ from tool_router.models import (
     ResourceStatus,
     ResourceType,
 )
+from tool_router.services.bm25 import Bm25Index
 
 
 DOMAIN_GROUPS: dict[str, set[str]] = {
@@ -49,6 +50,10 @@ class RegistryStore:
         self.by_domain: dict[tuple[str, str, str], set[str]] = defaultdict(set)
         self.by_capability: dict[tuple[str, str, str], set[str]] = defaultdict(set)
         self.by_domain_capability: dict[tuple[str, str, str, str], set[str]] = defaultdict(set)
+        # BM25 关键词索引（混合检索关键词得分 + 类别路由降级）
+        self._bm25 = Bm25Index()
+        # 环境隔离的 domain -> resource_id 索引（四级路由按 domain 分片取候选）
+        self.by_domain_env: dict[tuple[str, str, str], set[str]] = defaultdict(set)
 
     def register(self, record: ResourceRecord) -> ResourceRecord:
         if not record.level1.capability:
@@ -59,6 +64,7 @@ class RegistryStore:
         self.records[record.level1.resource_id] = record
         self._index_record(record)
         self._index_dependency_edges(record)
+        self._index_bm25(record)
         return record
 
     def register_many(self, records: Iterable[ResourceRecord]) -> list[ResourceRecord]:
@@ -73,12 +79,39 @@ class RegistryStore:
     def add_edge(self, edge: GraphEdge) -> None:
         self.edges.append(edge)
 
+    def update_edge_weight(self, source_id: str, target_id: str, relation: GraphRelationType, weight: float) -> None:
+        """根据调用频次动态更新关系边权重。"""
+        for edge in self.edges:
+            if edge.source_id == source_id and edge.target_id == target_id and edge.relation == relation:
+                edge.weight = max(0.0, min(1.0, weight))
+                return
+        self.edges.append(GraphEdge(source_id=source_id, target_id=target_id, relation=relation, weight=weight))
+
     def list_graph_edges(self, resource_id: str, relations: set[str] | None = None) -> list[GraphEdge]:
         return [
             edge
             for edge in self.edges
             if edge.source_id == resource_id and (not relations or edge.relation.value in relations)
         ]
+
+    def neighbors(self, resource_id: str, relation: GraphRelationType | None = None) -> list[tuple[str, float]]:
+        """返回资源在指定关系（或全部关系）下的邻居资源 id 与边权重。"""
+        return [
+            (edge.target_id, edge.weight)
+            for edge in self.edges
+            if edge.source_id == resource_id and (relation is None or edge.relation == relation)
+        ]
+
+    def all_neighbors(self, resource_id: str) -> dict[str, list[tuple[str, float]]]:
+        """按关系类型分组返回全部邻居（/api/graph/query 接口用）。"""
+        grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        for edge in self.edges:
+            if edge.source_id == resource_id:
+                grouped[edge.relation.value].append((edge.target_id, edge.weight))
+        return dict(grouped)
+
+    def edge_count(self) -> int:
+        return len(self.edges)
 
     def route_search(
         self,
@@ -93,6 +126,17 @@ class RegistryStore:
         file_type: str | None,
     ) -> list[ResourceRecord]:
         ids: set[str] = set()
+        # 第一层：capability 全名匹配（跨域）。注册 domain 与 query 推断 domain 可能不同
+        #（如 reminder.plan 注册 domain=calendar，query 推断 domain=reminder），
+        # 因此先按 capability 全名 + 域组做宽松匹配，避免多域 query 因精确域匹配
+        # 命中部分候选后跳过 group 级兜底、漏掉跨域候选。
+        for group in domain_groups:
+            grouped = self.by_domain_group.get((tenant_id, environment, group), set())
+            if not grouped:
+                continue
+            for capability in capabilities:
+                ids.update(grouped & self.by_capability.get((tenant_id, environment, capability), set()))
+        # 第二层：域组 × 域 × capability 精确匹配
         for group in domain_groups:
             for domain in domains:
                 grouped = self.by_domain_group_domain.get((tenant_id, environment, group, domain), set())
@@ -125,6 +169,13 @@ class RegistryStore:
             for record in self.records.values()
         ]
 
+    def resource_type_summary(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for record in self.records.values():
+            key = record.level1.resource_type.value
+            out[key] = out.get(key, 0) + 1
+        return out
+
     def _index_record(self, record: ResourceRecord) -> None:
         tenant_id = record.level1.tenant_id
         environment = record.level1.environment.value
@@ -136,10 +187,55 @@ class RegistryStore:
             self.by_domain_group_domain[(tenant_id, environment, group, domain)].add(record.level1.resource_id)
 
         self.by_domain[(tenant_id, environment, domain)].add(record.level1.resource_id)
+        self.by_domain_env[(tenant_id, environment, domain)].add(record.level1.resource_id)
         for capability in record.level1.capability:
             cleaned_capability = capability.strip().lower()
             self.by_capability[(tenant_id, environment, cleaned_capability)].add(record.level1.resource_id)
             self.by_domain_capability[(tenant_id, environment, domain, cleaned_capability)].add(record.level1.resource_id)
+
+    def _index_bm25(self, record: ResourceRecord) -> None:
+        """将资源文本写入全局 BM25 索引，供关键词得分与类别路由降级使用。"""
+        text = " ".join(
+            [
+                record.level1.name,
+                record.level1.description,
+                record.level1.domain,
+                " ".join(record.level1.capability),
+                " ".join(record.level1.tags),
+                " ".join(record.level2.use_cases),
+            ]
+        )
+        self._bm25.add(record.level1.resource_id, text)
+
+    def bm25_search(self, query: str, top_k: int = 25) -> list[str]:
+        """在注册资源全集上做 BM25 关键词检索，返回 resource_id 列表。"""
+        return [rid for rid, _ in self._bm25.search(query, top_k)]
+
+    def bm25_scores(self, query: str, resource_ids: list[str]) -> dict[str, float]:
+        """在候选子集内计算 BM25 得分（归一化到 0~1）。"""
+        if not resource_ids:
+            return {}
+        hits = self._bm25.search(query, top_k=len(resource_ids))
+        max_score = max((s for _, s in hits), default=1.0)
+        candidate_set = set(resource_ids)
+        result: dict[str, float] = {}
+        for rid, score in hits:
+            if rid in candidate_set:
+                result[rid] = score / max_score if max_score > 0 else 0.0
+        return result
+
+    def list_by_domain(self, domain: str, environment: str) -> list[ResourceRecord]:
+        """按 domain + 环境分片取资源（禁止全量遍历）。"""
+        ids = self.by_domain_env.get(("default", environment, clean_domain(domain)), set())
+        return [record for rid in ids if (record := self.records.get(rid)) is not None]
+
+    def list_all(self) -> list[ResourceRecord]:
+        return self.list_records()
+
+    def set_status(self, resource_id: str, status: ResourceStatus) -> None:
+        record = self.records.get(resource_id)
+        if record is not None:
+            record.level1.status = status
 
     def _allows(
         self,

@@ -15,8 +15,8 @@ import "web_sphere_drag_chrome.dart";
 /// 球形 Agent 悬浮层。
 ///
 /// - Web：iframe 内嵌
-/// - Windows：默认独立桌宠窗口，主应用内不渲染
-/// - 降级：Tauri 不可用时，才使用应用内 WebView
+/// - Windows：默认独立桌宠（PySide6）窗口，主应用内不渲染
+/// - 降级：独立桌宠不可用时，才使用应用内 WebView
 class FloatingAgentSphere extends StatefulWidget {
   const FloatingAgentSphere({super.key});
 

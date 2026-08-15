@@ -38,11 +38,20 @@ function formatTodayLabel(): string {
  * 不使用 `-webkit-app-region: drag`：在 transparent + frame:false 窗口下
  * 不同 Electron 版本表现不一致，JS 拖动更可控。
  */
+function getTodayRange(): { from: string; to: string } {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  end.setMilliseconds(end.getMilliseconds() - 1);
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
 export function ScheduleFloatingWidget() {
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
   const [collapsed, setCollapsed] = useState(false);
 
-  const { httpBase } = getConfig();
+  const { wsUrl, httpBase, sessionId } = getConfig();
 
   /**
    * 拖动策略（最终版）：
@@ -66,9 +75,11 @@ export function ScheduleFloatingWidget() {
   /** 加载日程 */
   const loadSchedules = useCallback(async () => {
     try {
-      if (httpBase) {
+      if (httpBase && sessionId) {
+        const { from, to } = getTodayRange();
+        const params = new URLSearchParams({ sessionId, from, to });
         const response = await fetch(
-          `${httpBase.replace(/\/$/, "")}/api/schedule/today`,
+          `${httpBase.replace(/\/$/, "")}/api/schedule/today?${params.toString()}`,
           { headers: { "Content-Type": "application/json" } },
         );
         if (response.ok) {
@@ -95,13 +106,38 @@ export function ScheduleFloatingWidget() {
     } catch {
       setSchedules([]);
     }
-  }, [httpBase]);
+  }, [httpBase, sessionId]);
 
   useEffect(() => {
     loadSchedules();
     const interval = setInterval(loadSchedules, 30000);
     return () => clearInterval(interval);
   }, [loadSchedules]);
+
+  useEffect(() => {
+    if (!wsUrl || !sessionId) return;
+    const ws = new WebSocket(wsUrl);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ type: "session.init", payload: { sessionId, userId: sessionId } }));
+    });
+    ws.addEventListener("message", (event) => {
+      let message: { type?: string };
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (
+        message.type === "schedule.tasks_changed" ||
+        message.type === "schedule.reminder_fired"
+      ) {
+        void loadSchedules();
+      }
+    });
+    return () => {
+      ws.close();
+    };
+  }, [loadSchedules, sessionId, wsUrl]);
 
   /** 监听来自宿主窗口的日程更新 */
   useEffect(() => {

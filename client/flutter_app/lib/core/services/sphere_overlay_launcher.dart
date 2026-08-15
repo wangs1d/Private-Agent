@@ -238,10 +238,14 @@ class SphereOverlayLauncher {
           "${overlayDir.parent.path}${Platform.pathSeparator}agent-sphere-avatar${Platform.pathSeparator}dist";
       env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
-      debugPrint("[SphereOverlay] launching PySide6 overlay from ${overlayDir.path}");
+      // 优先使用 sphere-overlay-py/.venv 的解释器（自带 PySide6 依赖），
+      // 找不到 venv 时才回退到 PATH 中的 python，避免 PATH 里无 PySide6 导致召唤失败。
+      final String pythonExe = _resolvePyOverlayPython(overlayDir);
+
+      debugPrint("[SphereOverlay] launching PySide6 overlay from ${overlayDir.path} (python=$pythonExe)");
 
       final Process proc = await Process.start(
-        "python",
+        pythonExe,
         <String>["main.py"],
         workingDirectory: overlayDir.path,
         environment: env,
@@ -276,7 +280,6 @@ class SphereOverlayLauncher {
       final Directory fromEnv = Directory("$repoRoot/sphere-overlay-py");
       if (fromEnv.existsSync()) return fromEnv;
     }
-
     final List<String> seeds = <String>[
       Directory.current.path,
       File(Platform.resolvedExecutable).parent.path,
@@ -300,6 +303,16 @@ class SphereOverlayLauncher {
       }
     }
     return null;
+  }
+
+  /// 解析启动桌宠的解释器：优先 `.venv/Scripts/python.exe`（Windows），
+  /// 无 venv 时回退 PATH 的 `python`。
+  static String _resolvePyOverlayPython(Directory overlayDir) {
+    final String sep = Platform.pathSeparator;
+    final String venvPy =
+        "${overlayDir.path}$sep.venv${sep}Scripts${sep}python.exe";
+    if (Platform.isWindows && File(venvPy).existsSync()) return venvPy;
+    return "python";
   }
 
   static String _buildOverlayUrl() {

@@ -1633,7 +1633,21 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'wallet',
     keywords: ['钱包', 'wallet', '余额', 'balance', '支付', 'pay', '转账', 'transfer', '充值', 'recharge', '消费', 'purchase', '交易', 'transaction', '账单', 'bill', '钱', 'money', '金额', 'amount'],
-    toolNames: ['wallet.get_balance', 'wallet.get_transactions', 'wallet.transfer', 'wallet.recharge', 'wallet.purchase']
+    toolNames: [
+      'wallet.get_balance',
+      'wallet.get_transactions',
+      'wallet.transfer',
+      'wallet.recharge',
+      'wallet.purchase',
+      'payment.create_order',
+      'payment.query_order',
+      'alipay.check-wallet',
+      'alipay.apply-wallet',
+      'alipay.submit-payment',
+      'alipay.query-payment',
+      'alipay.pay-402',
+      'alipay.proxy-trade',
+    ]
   },
   {
     category: 'social',
@@ -2016,6 +2030,28 @@ export async function streamCompletionWithTools(
       const requestMessages = options?.requestSystemMessages
         ? applyPromptCacheMessages(sanitizedMessages, options.requestSystemMessages)
         : sanitizedMessages;
+      // TEMP DEBUG（记忆注入诊断 6：工具分支实际发送的 system 是否含记忆）
+      try {
+        const sysJoined = requestMessages
+          .filter((m) => m.role === "system" && typeof m.content === "string")
+          .map((m) => String(m.content))
+          .join("\n");
+        const { appendFileSync } = await import("node:fs");
+        appendFileSync(
+          ".memory-inject-debug.log",
+          JSON.stringify({
+            t: new Date().toISOString(),
+            phase: "finalRequestTools",
+            round,
+            sysMsgCount: requestMessages.filter((m) => m.role === "system").length,
+            finalSysHasNarrative: sysJoined.includes("记忆图联想检索"),
+            planSysHasNarrative: String(options?.requestSystemMessages?.[0]?.content ?? "").includes("记忆图联想检索"),
+            sysHead: sysJoined.slice(0, 100),
+          }) + "\n",
+        );
+      } catch {
+        /* ignore */
+      }
       try {
         const request = {
           model,
@@ -2072,6 +2108,7 @@ export async function streamCompletionWithTools(
           model,
         },
       );
+      fullText = result.content;
       fullReasoning = result.reasoning;
       finishReason = result.finishReason;
     } catch (e) {

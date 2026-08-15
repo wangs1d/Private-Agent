@@ -8,6 +8,8 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   baseUrl?: string;
   model: string;
   input: string;
+  /** 请求超时毫秒；默认 60s（兼容既有调用方，如 Qdrant 批量写入） */
+  timeoutMs?: number;
 }): Promise<{ vector: number[]; dimension: number }> {
   const base =
     opts.baseUrl?.replace(/\/$/, "") ??
@@ -20,7 +22,7 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ model: opts.model, input: opts.input.slice(0, 32_000) }),
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
   });
   if (!r.ok) {
     const txt = await r.text().catch(() => "");

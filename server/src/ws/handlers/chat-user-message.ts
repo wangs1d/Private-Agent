@@ -38,7 +38,6 @@ import {
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor } from "../../services/tool-result-processor.js";
-import { AssistantRewriterService } from "../../services/assistant-rewriter.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { refreshAgentProfileFromTurn } from "../../services/agent-profile-autonomy-service.js";
@@ -449,11 +448,23 @@ async function processBatchedMessage(
 
   void interimController.maybeEmitInitial(batched.text);
 
+  // 主动在场：complex 后台执行期间周期性给 LLM 开口机会，
+  // 生成自然互动（追问/反馈/闲聊），像真人边做边聊，直到主回复开始/结束。
+  if (decision.mode === "complex" && phasedAsyncEnabled) {
+    interimController.startPresence(batched.text);
+  }
+
+  // 内容驱动的多步回复：主回复流式输出时，由 interim 控制器按自然段落切分，
+  // 每完成一个段落就作为一条独立消息推送（步数 = 段落数，无定时器/随机/模板）。
+  // 复杂任务（complex）后台执行期间，fast 的承接 + 分段推送共同形成"多步回复"效果。
+
   // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
   // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
   const TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
   const toolHeartbeatTimers = new Map<string, NodeJS.Timeout>();
   let heartbeatLineCache: string | null = null;
+  // 进度条：每个心跳累计 15%，封顶 90%（留 10% 给最终收尾），支持客户端渲染进度条
+  const heartbeatPercent = new Map<string, number>();
   // 防 status line 抖动：tool loop 阶段 LLM 的每个流式 delta 都会把整段 fullText
   // 推过来，formatStatusForDisplay 经常把它剪成同一句"正在查阅历史记忆…" / "正在从网络检索相关信息…"
   // → 不去重的话单轮能连发几百次完全相同的事件，挤占通道并延长 LLM 等待窗口。
@@ -469,7 +480,11 @@ async function processBatchedMessage(
         stopToolHeartbeat(toolName);
         return;
       }
-      // 发一条轻量 chat.agent_status 心跳，重置客户端 watchdog
+      // 进度条：每次心跳 +15%，封顶 90%（最终收尾时 agent-core 会再推 100%）
+      const prev = heartbeatPercent.get(toolName) ?? 0;
+      const next = Math.min(90, prev + 15);
+      heartbeatPercent.set(toolName, next);
+      // 发一条轻量 chat.agent_status 心跳，重置客户端 watchdog + 推进度
       const heartbeatLine = heartbeatLineCache ?? `正在执行 ${toolName}…`;
       ctx.socket.send(
         JSON.stringify({
@@ -480,6 +495,7 @@ async function processBatchedMessage(
             traceId: batched.originalMessageId,
             phase: "live",
             line: heartbeatLine,
+            percent: next,
           },
         }),
       );
@@ -495,6 +511,7 @@ async function processBatchedMessage(
       clearInterval(timer);
       toolHeartbeatTimers.delete(toolName);
     }
+    heartbeatPercent.delete(toolName);
   }
 
   function clearAllToolHeartbeats(): void {
@@ -544,6 +561,11 @@ async function processBatchedMessage(
       onAssistantDelta: (delta) => {
         // 流式推送最终内容到前端（tool loop 结束后的最终回复 token-by-token）
         if (isStale()) return;
+        // 主回复正文只走 stream 单条通道。不再喂给 interim 分段器：
+        // 否则同一段正文会被 feedStreamDelta 累积成完整段落后以 phase="interim"
+        // 推一份（前端渲染为独立消息），又被这里以 phase="stream" 推一份（前端
+        // 渲染为主回复）——同一回复内容双推送，前端出现两条气泡。
+        // interim 通道只承载垫词 / presence 互动（独立 LLM 生成，内容与正文不同）。
         sendAssistantChunk(delta, "stream");
       },
       onExternalToolExecuteStart: (info) => {
@@ -557,7 +579,6 @@ async function processBatchedMessage(
           },
           info,
         );
-        void interimController.onToolStart(info.toolName, info.input);
         // 启动工具执行心跳：每 30s 发一次 chat.agent_status，
         // 防止单个长工具（如 shopping.order.place 180s）执行期间客户端 watchdog 超时。
         startToolHeartbeat(info.toolName);
@@ -573,7 +594,6 @@ async function processBatchedMessage(
           },
           info,
         );
-        void interimController.onToolEnd(info.toolName, info.input, info.ok);
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
       },
@@ -671,6 +691,9 @@ async function processBatchedMessage(
       sendAssistantChunk(reply.text, "stream");
     }
 
+    // 多步收尾：把分段器缓冲中剩余的半截文本作为最后一条消息推送
+    interimController.flushRemaining();
+
     if (isStale()) return;
     replyFinished = true;
 
@@ -740,12 +763,6 @@ async function processBatchedMessage(
       userText: batched.text,
       toolName: reply.toolName,
     });
-    // 关闭 AssistantRewriterService：它会在流式完成后用另一个 LLM 改写 finalText，
-    // 导致前端先看到"流式原版"再被"改写版"覆盖，出现"两段内容"。
-    // 用户需求：流式输出的内容就是最终结果，不要二次改写。
-    // finalText = await new AssistantRewriterService(
-    //   createExternalChatProviderFromEnv(),
-    // ).rewriteIfNeeded(batched.text, finalText);
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
       const supplement = scheduleOutcome.startsWith(reply.text.trim())
@@ -826,6 +843,8 @@ async function processBatchedMessage(
     }
   } finally {
     releaseTurn();
+    // 停止主动在场 ticker（turn 结束无论成败都停，防定时器泄漏）
+    interimController.stopPresence();
     // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）
     clearAllToolHeartbeats();
     // 清理本轮 AbortController(如未被新消息 abort 则正常清理)

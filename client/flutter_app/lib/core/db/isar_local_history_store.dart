@@ -33,6 +33,43 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
   final List<Map<String, dynamic>> _scheduleEvents =
       <Map<String, dynamic>>[];
 
+  /// 解析一个可写的存储文件位置。
+  ///
+  /// 优先 Documents；若该目录被 OneDrive 重定向 / 权限保护而不可写，
+  /// 则回退到应用支持目录（AppData，保证可写），再不行回退系统临时目录。
+  /// 全部失败返回 null（调用方降级为内存存储）。
+  static Future<File?> _resolveWritableStorageFile() async {
+    final List<Future<Directory> Function()> providers =
+        <Future<Directory> Function()>[
+      getApplicationDocumentsDirectory,
+      getApplicationSupportDirectory,
+    ];
+    for (final Future<Directory> Function() provider in providers) {
+      try {
+        final Directory dir = await provider();
+        final File? writable = await _probeWritableFile(dir);
+        if (writable != null) return writable;
+        print('[IsarLocalHistoryStore] 目录不可写，尝试备用存储目录: ${dir.path}');
+      } catch (_) {
+        // 该 provider 失败，尝试下一个
+      }
+    }
+    // 最后兜底系统临时目录
+    try {
+      return await _probeWritableFile(Directory.systemTemp);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 在 [dir] 下验证可写性（写入并删除探针文件），可写则返回真实存储文件。
+  static Future<File?> _probeWritableFile(Directory dir) async {
+    final File probe = File("${dir.path}${Platform.pathSeparator}.pai_write_probe");
+    await probe.writeAsString("probe");
+    await probe.delete();
+    return File("${dir.path}${Platform.pathSeparator}private_ai_agent_store.json");
+  }
+
   @override
   Future<void> init() async {
     if (_storageFile != null) return;
@@ -47,12 +84,9 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
 
     // 非 Web 平台使用文件系统（带容错处理）
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      _storageFile = File("${dir.path}/private_ai_agent_store.json");
-    } catch (e) {
-      print('[IsarLocalHistoryStore] Failed to get documents directory: $e');
-      _storageFile = null; // 使用内存存储作为后备
+    _storageFile = await _resolveWritableStorageFile();
+    if (_storageFile == null) {
+      print('[IsarLocalHistoryStore] 未找到可写存储目录，使用内存存储');
       return;
     }
 
@@ -678,7 +712,12 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       "preferences": _preferences,
       "scheduleEvents": _scheduleEvents,
     };
-    await file.writeAsString(jsonEncode(encoded));
+    try {
+      await file.writeAsString(jsonEncode(encoded));
+    } catch (e) {
+      // 写入失败不抛异常，避免影响调用链（如定位缓存上报）；仅记日志。
+      print('[IsarLocalHistoryStore] 存储写入失败（已忽略）: $e');
+    }
   }
 
   @override

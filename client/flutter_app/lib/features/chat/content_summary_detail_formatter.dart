@@ -1,4 +1,4 @@
-﻿import "package:flutter/gestures.dart";
+import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
@@ -346,7 +346,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
               decoration: TextDecoration.underline,
             ),
             recognizer: TapGestureRecognizer()
-              ..onTap = () => _launchUrl(url),
+              ..onTap = () => launchUrlFromText(url),
           ),
         );
       } else {
@@ -372,7 +372,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
   return spans;
 }
 
-Future<void> _launchUrl(String url) async {
+Future<void> launchUrlFromText(String url) async {
   final Uri? uri = Uri.tryParse(url);
   if (uri == null) return;
   await launchUrl(uri, mode: LaunchMode.externalApplication);

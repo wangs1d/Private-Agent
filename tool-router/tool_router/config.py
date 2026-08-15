@@ -11,6 +11,7 @@ class Settings(BaseModel):
     port: int = 8787
     default_tenant: str = "default"
 
+    # 可选外部后端（未配置时服务以纯内存模式运行，接口照常可用）
     redis_url: str | None = None
     qdrant_url: str | None = None
     postgres_dsn: str | None = None
@@ -19,20 +20,38 @@ class Settings(BaseModel):
     neo4j_password: str | None = None
     rabbitmq_url: str | None = None
 
-    prometheus_enabled: bool = True
-    otel_enabled: bool = False
-
     route_cache_ttl_seconds: int = 30
     schema_cache_size: int = 256
     rate_limited_failure_threshold: int = 3
     default_base_score: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    # ===== 混合检索动态权重 =====
+    # 短关键词指令
+    weight_short_bm25: float = 0.40
+    weight_short_embed: float = 0.25
+    # 长文本模糊需求
+    weight_long_embed: float = 0.60
+    weight_long_bm25: float = 0.20
+    # 可调公共项
+    weight_history: float = 0.20
+    weight_latency: float = 0.10
+    weight_failure: float = 0.30
+    # 短 / 长 query 分界（字符数）
+    short_query_threshold: int = 12
 
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    # ===== Adaptive Top-P =====
+    top_p_high_conf: float = 0.70    # confidence > 0.85
+    top_p_mid_conf: float = 0.90     # 0.6 < confidence <= 0.85
+    top_p_low_conf: float = 0.95     # confidence <= 0.6
+    min_candidate: int = 3
+    max_candidate: int = 25
+
+    # ===== 熔断 =====
+    circuit_breaker_threshold: int = 5       # 连续失败次数
+    circuit_breaker_cooldown_ms: int = 60_000
+
+    # ===== 滑动窗口 =====
+    history_window_size: int = 50
 
 
 def load_settings() -> Settings:
@@ -48,8 +67,6 @@ def load_settings() -> Settings:
         neo4j_username=os.getenv("TOOL_ROUTER_NEO4J_USERNAME"),
         neo4j_password=os.getenv("TOOL_ROUTER_NEO4J_PASSWORD"),
         rabbitmq_url=os.getenv("TOOL_ROUTER_RABBITMQ_URL"),
-        prometheus_enabled=_bool_env("TOOL_ROUTER_PROMETHEUS_ENABLED", True),
-        otel_enabled=_bool_env("TOOL_ROUTER_OTEL_ENABLED", False),
         route_cache_ttl_seconds=int(os.getenv("TOOL_ROUTER_ROUTE_CACHE_TTL_SECONDS", "30")),
         schema_cache_size=int(os.getenv("TOOL_ROUTER_SCHEMA_CACHE_SIZE", "256")),
         rate_limited_failure_threshold=int(os.getenv("TOOL_ROUTER_RATE_LIMITED_FAILURE_THRESHOLD", "3")),

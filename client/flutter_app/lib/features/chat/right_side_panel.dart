@@ -1,9 +1,12 @@
-import "dart:async" show unawaited;
+import "dart:async" show Timer, unawaited;
+import "dart:convert";
 
 import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
+import "package:http/http.dart" as http;
 
 import "../../core/models/schedule_models.dart";
+import "../../core/config/api_config.dart";
 import "../../core/services/client_location_service.dart";
 import "../../core/services/desk_pet_session.dart";
 import "../../core/services/schedule_floating_launcher.dart";
@@ -32,6 +35,7 @@ class RightSidePanel extends StatefulWidget {
     this.onWallet,
     this.onPhone,
     this.onMessages,
+    this.onReportLocation,
   });
 
   final Future<List<ScheduleEvent>>? scheduleFuture;
@@ -40,6 +44,9 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onWallet;
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
+
+  /// 天气面板拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
+  final void Function(Map<String, dynamic> location)? onReportLocation;
 
   @override
   State<RightSidePanel> createState() => _RightSidePanelState();
@@ -127,9 +134,8 @@ class _RightSidePanelState extends State<RightSidePanel>
       return;
     }
     future.then((List<ScheduleEvent> events) {
-      final List<ScheduleEvent> sorted =
-          List<ScheduleEvent>.from(events)
-            ..sort((a, b) => a.startAt.compareTo(b.startAt));
+      final List<ScheduleEvent> sorted = List<ScheduleEvent>.from(events)
+        ..sort((a, b) => a.startAt.compareTo(b.startAt));
       final List<ScheduleFloatingItem> items = sorted
           .map((e) => ScheduleFloatingItem(
                 id: e.id,
@@ -145,7 +151,8 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   void _onScheduleWindowChanged() {
     if (mounted) {
-      setState(() => _scheduleWindowActive = ScheduleFloatingLauncher.isRunning);
+      setState(
+          () => _scheduleWindowActive = ScheduleFloatingLauncher.isRunning);
     }
   }
 
@@ -226,7 +233,7 @@ class _RightSidePanelState extends State<RightSidePanel>
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             // 顶部天气 Header：与面板融为一体，顶部贴合
-            const _WeatherHeader(),
+            _WeatherHeader(onReportLocation: widget.onReportLocation),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -235,6 +242,32 @@ class _RightSidePanelState extends State<RightSidePanel>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
                     if (!_useDesktopFloating) ...<Widget>[
+                      AnimatedBuilder(
+                        animation: _breatheOpacity,
+                        builder: (context, child) {
+                          return Container(
+                            decoration: BoxDecoration(
+                              border: Border(
+                                top: BorderSide(
+                                  color: Colors.white.withValues(
+                                    alpha: _breatheOpacity.value,
+                                  ),
+                                ),
+                                bottom: BorderSide(
+                                  color: Colors.white.withValues(
+                                    alpha: _breatheOpacity.value,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            child: child,
+                          );
+                        },
+                        child: _buildScheduleSection(cs),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     AnimatedBuilder(
                       animation: _breatheOpacity,
                       builder: (context, child) {
@@ -257,34 +290,8 @@ class _RightSidePanelState extends State<RightSidePanel>
                           child: child,
                         );
                       },
-                      child: _buildScheduleSection(cs),
+                      child: _buildToolsSection(cs),
                     ),
-                    const SizedBox(height: 16),
-                  ],
-                  AnimatedBuilder(
-                    animation: _breatheOpacity,
-                    builder: (context, child) {
-                      return Container(
-                        decoration: BoxDecoration(
-                          border: Border(
-                            top: BorderSide(
-                              color: Colors.white.withValues(
-                                alpha: _breatheOpacity.value,
-                              ),
-                            ),
-                            bottom: BorderSide(
-                              color: Colors.white.withValues(
-                                alpha: _breatheOpacity.value,
-                              ),
-                            ),
-                          ),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        child: child,
-                      );
-                    },
-                    child: _buildToolsSection(cs),
-                  ),
                   ],
                 ),
               ),
@@ -363,15 +370,14 @@ class _RightSidePanelState extends State<RightSidePanel>
                   ),
                 );
               }
-              final List<ScheduleEvent> items =
-                  (snapshot.data ?? <ScheduleEvent>[])
-                    ..sort((a, b) => a.startAt.compareTo(b.startAt));
+              final List<ScheduleEvent> items = (snapshot.data ??
+                  <ScheduleEvent>[])
+                ..sort((a, b) => a.startAt.compareTo(b.startAt));
               if (items.isEmpty) {
                 return _buildEmptySchedule(cs);
               }
               // 只展示最近 3 条，保持面板精简
-              final List<ScheduleEvent> visible =
-                  items.take(3).toList();
+              final List<ScheduleEvent> visible = items.take(3).toList();
               final int hiddenCount = items.length - visible.length;
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -524,8 +530,7 @@ class _RightSidePanelState extends State<RightSidePanel>
           icon: Icons.account_balance_wallet_outlined,
           label: "钱包",
           onTap: widget.onWallet),
-      _ToolSpec(
-          icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
+      _ToolSpec(icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
       _ToolSpec(
           icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
       _ToolSpec(
@@ -599,16 +604,13 @@ class _RightSidePanelState extends State<RightSidePanel>
               decoration: BoxDecoration(
                 color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                    color: cs.outline.withValues(alpha: 0.3)),
+                border: Border.all(color: cs.outline.withValues(alpha: 0.3)),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   Icon(
-                    summoned
-                        ? Icons.nightlight_round
-                        : Icons.wb_sunny_outlined,
+                    summoned ? Icons.nightlight_round : Icons.wb_sunny_outlined,
                     size: 13,
                     color: cs.onSurfaceVariant,
                   ),
@@ -711,8 +713,78 @@ class _ToolButtonState extends State<_ToolButton> {
 // ═══════════════════════════════════════════════════════════
 // 天气 Header：作为右侧面板顶部区域，与面板融为一体，顶部贴合
 // ═══════════════════════════════════════════════════════════
+class _WeatherBriefData {
+  const _WeatherBriefData({
+    required this.currentTempC,
+    required this.apparentTempC,
+    required this.weatherText,
+    required this.todayMinC,
+    required this.todayMaxC,
+    required this.peakRainPct,
+    required this.hourlyForecast,
+    required this.updatedAt,
+  });
+
+  final double currentTempC;
+  final double apparentTempC;
+  final String weatherText;
+  final double todayMinC;
+  final double todayMaxC;
+  final int peakRainPct;
+  final List<_WeatherHourData> hourlyForecast;
+  final DateTime updatedAt;
+
+  factory _WeatherBriefData.fromJson(Map<String, dynamic> json) {
+    final List<dynamic> hourly =
+        (json["hourlyForecast"] as List?) ?? const <dynamic>[];
+    final double currentTemp = _asDouble(json["currentTempC"], 26);
+    final String weatherText = (json["weatherText"] as String?)?.trim() ?? "";
+    return _WeatherBriefData(
+      currentTempC: currentTemp,
+      apparentTempC: _asDouble(json["apparentTempC"], currentTemp),
+      weatherText: weatherText.isNotEmpty ? weatherText : "多云",
+      todayMinC: _asDouble(json["todayMinC"], 21),
+      todayMaxC: _asDouble(json["todayMaxC"], 30),
+      peakRainPct: _asDouble(json["peakRainPct"], 0).round(),
+      hourlyForecast: hourly
+          .whereType<Map>()
+          .map((Map item) =>
+              _WeatherHourData.fromJson(item.cast<String, dynamic>()))
+          .toList(growable: false),
+      updatedAt: DateTime.now(),
+    );
+  }
+}
+
+class _WeatherHourData {
+  const _WeatherHourData({
+    required this.hour,
+    required this.temperatureC,
+  });
+
+  final String hour;
+  final double temperatureC;
+
+  factory _WeatherHourData.fromJson(Map<String, dynamic> json) {
+    final String hour = (json["hour"] as String?)?.trim() ?? "";
+    return _WeatherHourData(
+      hour: hour.isNotEmpty ? hour : "--",
+      temperatureC: _asDouble(json["temperatureC"], 0),
+    );
+  }
+}
+
+double _asDouble(Object? value, double fallback) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? fallback;
+  return fallback;
+}
+
 class _WeatherHeader extends StatefulWidget {
-  const _WeatherHeader();
+  const _WeatherHeader({this.onReportLocation});
+
+  /// 拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
+  final void Function(Map<String, dynamic> location)? onReportLocation;
 
   @override
   State<_WeatherHeader> createState() => _WeatherHeaderState();
@@ -721,8 +793,10 @@ class _WeatherHeader extends StatefulWidget {
 class _WeatherHeaderState extends State<_WeatherHeader>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
-  NetworkLocationHint? _locationHint;
-  bool _loadingLocation = true;
+  Timer? _refreshTimer;
+  _WeatherBriefData? _weather;
+  bool _refreshingWeather = false;
+  String? _weatherError;
 
   @override
   void initState() {
@@ -731,51 +805,104 @@ class _WeatherHeaderState extends State<_WeatherHeader>
       vsync: this,
       duration: const Duration(seconds: 10),
     )..repeat();
-    _loadLocation();
+    unawaited(_refreshWeather());
+    _refreshTimer = Timer.periodic(
+      const Duration(minutes: 10),
+      (_) => unawaited(_refreshWeather()),
+    );
   }
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     _ctrl.dispose();
     super.dispose();
   }
 
-  Future<void> _loadLocation() async {
+  /// 面板打开/重建时拉一次实时 GPS（实时位置数据），并上报服务端填充位置缓存，
+  /// 供 Agent 需要位置时（如天气工具）按需复用。面板本身不再展示位置文本。
+  Future<void> _refreshWeather() async {
+    if (_refreshingWeather) return;
+    _refreshingWeather = true;
     try {
-      final NetworkLocationHint? hint =
-          await ClientLocationService.fetchNetworkLocationHint();
-      if (mounted) {
+      final ClientLocationPayload? loc =
+          await ClientLocationService.getCurrentLocationForChat();
+      if (loc != null) {
+        widget.onReportLocation?.call(loc.toJson());
+        final _WeatherBriefData brief = await _fetchWeather(loc);
+        if (!mounted) return;
         setState(() {
-          _locationHint = hint;
-          _loadingLocation = false;
+          _weather = brief;
+          _weatherError = null;
+        });
+      } else if (mounted) {
+        setState(() {
+          _weatherError = "定位不可用";
         });
       }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _loadingLocation = false);
-      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _weatherError = e.toString();
+      });
+    } finally {
+      _refreshingWeather = false;
     }
   }
 
-  String get _cityLabel {
-    if (_loadingLocation) return "定位中…";
-    final String? city = _locationHint?.city;
-    final String? region = _locationHint?.region;
-    if (city != null && city.isNotEmpty) {
-      if (region != null && region.isNotEmpty && region != city) {
-        return "$city·$region";
-      }
-      return city;
+  Future<_WeatherBriefData> _fetchWeather(ClientLocationPayload loc) async {
+    final Uri uri = Uri.parse("${ApiConfig.httpBase}/weather/current").replace(
+      queryParameters: <String, String>{
+        "latitude": loc.latitude.toString(),
+        "longitude": loc.longitude.toString(),
+        if (loc.timezone?.isNotEmpty == true) "timezone": loc.timezone!,
+        if (loc.label?.isNotEmpty == true) "label": loc.label!,
+      },
+    );
+    final http.Response res = await http.get(uri,
+        headers: const <String, String>{
+          "Accept": "application/json"
+        }).timeout(const Duration(seconds: 15));
+    if (res.statusCode != 200) {
+      throw Exception("天气接口返回 ${res.statusCode}");
     }
-    final String? label = _locationHint?.label;
-    if (label != null && label.isNotEmpty) return label;
-    return "当前位置";
+    final Map<String, dynamic> body =
+        jsonDecode(res.body) as Map<String, dynamic>;
+    if (body["ok"] != true) {
+      throw Exception(body["message"]?.toString() ?? "天气接口异常");
+    }
+    final Map<String, dynamic>? brief =
+        (body["brief"] as Map?)?.cast<String, dynamic>();
+    if (brief == null) {
+      throw Exception("天气接口缺少数据");
+    }
+    return _WeatherBriefData.fromJson(brief);
   }
 
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final bool isDark = cs.brightness == Brightness.dark;
+    final _WeatherBriefData? weather = _weather;
+    final String currentTempText =
+        weather?.currentTempC.round().toString() ?? "26";
+    final String weatherText =
+        weather?.weatherText ?? (_weatherError == null ? "更新中" : "更新失败");
+    final String feelsLikeText =
+        "体感 ${weather?.apparentTempC.round().toString() ?? "28"}°";
+    final String highText =
+        "H ${weather?.todayMaxC.round().toString() ?? "30"}°";
+    final String lowText =
+        "L ${weather?.todayMinC.round().toString() ?? "21"}°";
+    final int rainPct = weather?.peakRainPct ?? 0;
+    final bool hasRainAlert = rainPct >= 40;
+    final String alertText = hasRainAlert
+        ? "降雨 $rainPct%"
+        : weather == null
+            ? "实时同步"
+            : "刚更新";
+    final Color alertColor =
+        hasRainAlert ? const Color(0xFFFF9500) : _kAccentGreen;
 
     return Container(
       decoration: BoxDecoration(
@@ -808,8 +935,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
               animation: _ctrl,
               builder: (_, __) {
                 final double t = _ctrl.value;
-                final double scale =
-                    1 + 0.12 * (t < 0.5 ? t * 2 : 2 - t * 2);
+                final double scale = 1 + 0.12 * (t < 0.5 ? t * 2 : 2 - t * 2);
                 return Transform.scale(
                   scale: scale,
                   child: Container(
@@ -842,26 +968,10 @@ class _WeatherHeaderState extends State<_WeatherHeader>
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                // 城市 + 天气图标
+                // 天气图标（右对齐；「显示当前位置」组件已按需求移除）
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: <Widget>[
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Icon(Icons.location_on_outlined,
-                            size: 11, color: cs.onSurfaceVariant),
-                        const SizedBox(width: 3),
-                        Text(
-                          _cityLabel,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w500,
-                            color: cs.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
                     const Spacer(),
                     SizedBox(
                       width: 26,
@@ -887,7 +997,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       textBaseline: TextBaseline.alphabetic,
                       children: <Widget>[
                         Text(
-                          "26",
+                          currentTempText,
                           style: TextStyle(
                             fontSize: 32,
                             fontWeight: FontWeight.w300,
@@ -915,7 +1025,9 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: <Widget>[
                         Text(
-                          "多云转晴",
+                          weatherText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 11.5,
                             fontWeight: FontWeight.w500,
@@ -924,7 +1036,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                         ),
                         const SizedBox(height: 1),
                         Text(
-                          "体感 28°",
+                          feelsLikeText,
                           style: TextStyle(
                             fontSize: 10,
                             color: cs.onSurfaceVariant,
@@ -944,7 +1056,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       TextSpan(
                         children: <InlineSpan>[
                           TextSpan(
-                            text: "H 30°",
+                            text: highText,
                             style: TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w500,
@@ -955,16 +1067,14 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                             text: " · ",
                             style: TextStyle(
                               fontSize: 10,
-                              color: cs.onSurfaceVariant
-                                  .withValues(alpha: 0.5),
+                              color: cs.onSurfaceVariant.withValues(alpha: 0.5),
                             ),
                           ),
                           TextSpan(
-                            text: "L 21°",
+                            text: lowText,
                             style: TextStyle(
                               fontSize: 10,
-                              color: cs.onSurfaceVariant
-                                  .withValues(alpha: 0.7),
+                              color: cs.onSurfaceVariant.withValues(alpha: 0.7),
                             ),
                           ),
                         ],
@@ -973,15 +1083,15 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                     const Spacer(),
                     Row(
                       mainAxisSize: MainAxisSize.min,
-                      children: const <Widget>[
+                      children: <Widget>[
                         Icon(Icons.warning_amber_rounded,
-                            size: 10, color: Color(0xFFFF9500)),
-                        SizedBox(width: 2),
+                            size: 10, color: alertColor),
+                        const SizedBox(width: 2),
                         Text(
-                          "雷阵雨",
+                          alertText,
                           style: TextStyle(
                             fontSize: 10,
-                            color: Color(0xFFFF9500),
+                            color: alertColor,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
@@ -1004,20 +1114,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                   mainAxisSize: MainAxisSize.max,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const <Widget>[
-                    _HourTempBar(
-                        hour: "9", temp: "23", height: 12, peak: false),
-                    _HourTempBar(
-                        hour: "12", temp: "27", height: 22, peak: false),
-                    _HourTempBar(
-                        hour: "15", temp: "30", height: 32, peak: true),
-                    _HourTempBar(
-                        hour: "18", temp: "28", height: 25, peak: false),
-                    _HourTempBar(
-                        hour: "21", temp: "24", height: 15, peak: false),
-                    _HourTempBar(
-                        hour: "0", temp: "22", height: 10, peak: false),
-                  ],
+                  children: _buildHourlyBars(weather),
                 ),
               ],
             ),
@@ -1025,6 +1122,47 @@ class _WeatherHeaderState extends State<_WeatherHeader>
         ],
       ),
     );
+  }
+
+  List<Widget> _buildHourlyBars(_WeatherBriefData? weather) {
+    final List<_WeatherHourData> hours =
+        weather?.hourlyForecast.take(6).toList(growable: false) ??
+            const <_WeatherHourData>[
+              _WeatherHourData(hour: "9", temperatureC: 23),
+              _WeatherHourData(hour: "12", temperatureC: 27),
+              _WeatherHourData(hour: "15", temperatureC: 30),
+              _WeatherHourData(hour: "18", temperatureC: 28),
+              _WeatherHourData(hour: "21", temperatureC: 24),
+              _WeatherHourData(hour: "0", temperatureC: 22),
+            ];
+    if (hours.isEmpty) {
+      return const <Widget>[
+        _HourTempBar(hour: "9", temp: "23", height: 12, peak: false),
+        _HourTempBar(hour: "12", temp: "27", height: 22, peak: false),
+        _HourTempBar(hour: "15", temp: "30", height: 32, peak: true),
+        _HourTempBar(hour: "18", temp: "28", height: 25, peak: false),
+        _HourTempBar(hour: "21", temp: "24", height: 15, peak: false),
+        _HourTempBar(hour: "0", temp: "22", height: 10, peak: false),
+      ];
+    }
+
+    final double minTemp =
+        hours.map((h) => h.temperatureC).reduce((a, b) => a < b ? a : b);
+    final double maxTemp =
+        hours.map((h) => h.temperatureC).reduce((a, b) => a > b ? a : b);
+    final double range = (maxTemp - minTemp).abs();
+
+    return hours.map((h) {
+      final bool peak = h.temperatureC == maxTemp;
+      final double normalized =
+          range <= 0 ? 0.5 : (h.temperatureC - minTemp) / range;
+      return _HourTempBar(
+        hour: h.hour,
+        temp: h.temperatureC.round().toString(),
+        height: 10 + normalized * 22,
+        peak: peak,
+      );
+    }).toList(growable: false);
   }
 
   Widget _buildCloudLayer() {
@@ -1165,8 +1303,7 @@ class _WeatherIconPainter extends CustomPainter {
 
     // 云主体
     canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.15, cy, size.width * 0.5, size.height * 0.3),
+      Rect.fromLTWH(size.width * 0.15, cy, size.width * 0.5, size.height * 0.3),
       cloudPaint,
     );
     canvas.drawOval(

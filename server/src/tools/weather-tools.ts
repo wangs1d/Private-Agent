@@ -15,13 +15,30 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
         clientIp: context.clientIp,
         clientLocation: context.clientLocation,
       });
-      if (geo?.latitude != null && geo?.longitude != null) {
-        lat = geo.latitude;
-        lon = geo.longitude;
-        label = label || [geo.district, geo.city, geo.region, geo.country].filter(Boolean).join(" · ");
-      } else if (geo?.city) {
-        city = geo.city;
-        if (!label) label = [geo.city, geo.region, geo.country].filter(Boolean).join(" · ");
+      let liveLat = geo?.latitude;
+      let liveLon = geo?.longitude;
+      let liveCity = geo?.city ?? "";
+      if (liveLat == null || liveLon == null) {
+        // 未携带位置：按需向客户端请求实时 GPS（仅 Agent 调用天气工具时产生一次 GPS 开销）。
+        const live = await context.requestLocation?.("weather.get_local");
+        if (live) {
+          liveLat = live.latitude;
+          liveLon = live.longitude;
+          liveCity = live.city ?? "";
+          if (!label) {
+            label = [live.district, live.city, live.region, live.country]
+              .filter(Boolean)
+              .join(" · ");
+          }
+        }
+      }
+      if (liveLat != null && liveLon != null) {
+        lat = liveLat;
+        lon = liveLon;
+        label = label || [geo?.district, geo?.city, geo?.region, geo?.country].filter(Boolean).join(" · ");
+      } else if (liveCity) {
+        city = liveCity;
+        if (!label) label = [geo?.city, geo?.region, geo?.country].filter(Boolean).join(" · ");
       }
     }
 

@@ -124,6 +124,14 @@ class ResourceRegisterRequest(BaseModel):
     resource: ResourceRecord
 
 
+class CatalogInitRequest(BaseModel):
+    """批量初始化目录：与 stdio worker 的 init_catalog 载荷对齐，一次注册全部资源与图边。"""
+
+    signature: str | None = None
+    resources: list[ResourceRecord] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
 class IntentDecomposeRequest(BaseModel):
     raw_user_query: str
     agent_context_hash: str

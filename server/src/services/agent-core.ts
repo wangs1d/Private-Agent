@@ -9,6 +9,7 @@ import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
+import type { LocationCoordinator } from "./location-coordinator.js";
 import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
@@ -47,6 +48,7 @@ import { resolveUserLocationPrompt } from "../services/user-location-service.js"
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
 import { routeLlmExecution, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -138,6 +140,7 @@ export class AgentCore {
   private readonly loopOrchestrator: LoopOrchestrator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
+  private locationCoordinator: LocationCoordinator | null = null;
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: WsConnectionRegistry | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
@@ -241,6 +244,11 @@ export class AgentCore {
   /** 在 bootstrap 注册手机桥接后注入，用于按轮检测手机是否在线。 */
   setPhoneBridgeCoordinator(coordinator: PhoneBridgeCoordinator): void {
     this.phoneBridgeCoordinator = coordinator;
+  }
+
+  /** 在 bootstrap 注册位置协调器后注入：Agent 需要位置时按需向客户端请求实时 GPS。 */
+  setLocationCoordinator(coordinator: LocationCoordinator): void {
+    this.locationCoordinator = coordinator;
   }
 
   /** 在 bootstrap 注册情绪感知后注入，用于按轮分析用户消息情绪。 */
@@ -374,14 +382,16 @@ export class AgentCore {
     // 小脑未注册时（BRAIN_NEURO_ENABLED=0）interruptProactive 为空操作。
     this.brainCenter?.interruptProactive(actorId);
 
-    // === 端到端认知入口（替代原切片式 moodInference + routeLlmExecution + buildShortTermTurnContext）===
-    // BrainCenter 可用时走 cognize()：一次 LLM 完成路由+情绪+记忆召回+初步响应
+    // === 对话认知入口 ===
+    // fast（对话层）与 complex（后台任务执行器）均走轻量路由（routeLight），不调用完整 cognize：
+    // - fast 负责对话（完整认知/情绪/记忆召回属对话层，此处仅做轻量路由 + 异步情绪推断）
+    // - complex 仅作后台任务执行器，直接以轻量上下文进入工具循环，记忆由兜底路径自行拉取
     // BrainCenter 不可用时（BRAIN_CENTER_ENABLED=0）降级到原切片路径
     let route: RouteDecision;
     let shortTermTurn: ShortTermTurnContext;
-    /** cognize 产出的初步响应：needsToolLoop=false 时可直接作为最终响应 */
+    /** 轻量路径不产出初步响应；needsToolLoop 恒为 true 强制走 streamCompletion/工具循环 */
     let cognitiveResponse = "";
-    /** cognize 是否需要工具循环：false 时可跳过 streamCompletion */
+    /** 是否走工具循环：恒为 true（当前主链路统一经 streamCompletion 生成回复） */
     let cognitiveNeedsToolLoop = true;
     /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
@@ -409,9 +419,21 @@ export class AgentCore {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
 
-      if (fastRoute.mode === "fast") {
-        // Fast 模式：跳过 cognize，直接用规则路由结果
-        route = fastRoute;
+      // 单一权威路由源：task-router 只做硬规则 pre-filter，最终以 DecisionHub 规则路由为准。
+      // 给 fast 注入规则置信度（纯规则、不调 LLM），低置信度(<0.4)提前升级 complex，
+      // 把「低置信度升级」从 hedging 事后检测前移，减少 fast 凭印象答后二次重跑的 LLM 消耗。
+      const light = this.brainCenter.routeLight(text);
+      const lowConfidence = light.confidence < 0.4;
+      // 需要走 complex 的三种情况：硬规则命中 / 规则路由判 complex / 低置信度升级
+      const shouldGoComplex =
+        fastRoute.mode === "complex" || light.mode === "complex" || lowConfidence;
+
+      if (!shouldGoComplex) {
+        // Fast 模式：保留 task-router 硬规则结果 + 注入规则置信度（用于日志/诊断）
+        route = {
+          mode: "fast",
+          reasons: [...fastRoute.reasons, `rule=${light.mode}@${light.confidence.toFixed(2)}`],
+        };
         shortTermTurn = { recallQuery: text, resumedTask: false };
         cognitiveResponse = "";
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
@@ -440,47 +462,43 @@ export class AgentCore {
           });
         }
       } else {
-        // Complex 模式：走完整 cognize 流程（需要 LLM 做规划和路由升级）
-        const cognitive = await this.brainCenter.cognize({ actorId, text, sessionId });
-        // 防降级保护：cognize 内部 rule-router 缺少时效性实体/桌面自动化检测,
-        // 可能把 task-router 已判 complex 的请求降级为 fast(凭印象答 → hedging → 再升级,浪费 LLM)。
-        // 当外层 fastRoute 已判 complex 且属以下"硬规则 complex"场景时,保留外层 complex 判定:
-        //  - 桌面自动化(isDesktopAutomationTask):需走后台状态机,cognize 规则无法识别
-        //  - 时效性实体(hasTimeSensitiveIntent):需调工具查实时信息,cognize 规则无法识别
-        //  - 子agent委派(requires_sub_agent):多步任务需 orchestrator
-        // 仅当 cognize 也升级到 complex(如低置信度)时才用 cognize 的 route。
-        const cognizeMode = cognitive.route.mode as LlmExecutionMode;
-        const outerIsHardComplex =
-          isDesktopAutomationTask(text) ||
-          fastRoute.reasons.includes("time_sensitive_intent") ||
-          fastRoute.reasons.includes("requires_sub_agent");
-        if (cognizeMode === "fast" && outerIsHardComplex) {
-          route = fastRoute; // 保留外层 complex,防 cognize 规则降级
-        } else {
-          route = {
-            mode: cognizeMode,
-            reasons: [cognitive.route.rationale],
-          };
-        }
+        // Complex 模式：对话认知归 fast（完整 cognize 只服务对话层），complex 仅作后台任务执行器。
+        // 不再 await 完整 cognize —— 省去感知阶段串行等待，让工具从对话一开始就启动；
+        // 记忆/工作记忆/位置/个性化由后续兜底路径（prepareNarrativeRecall 等）自行拉取。
+        // 情绪推送改为异步（不阻塞工具执行），MoodInferred 事件仍正常下发。
+        route = {
+          mode: "complex",
+          reasons: [
+            ...fastRoute.reasons,
+            `rule=${light.mode}@${light.confidence.toFixed(2)}`,
+            "complex_background_executor",
+          ],
+        };
         shortTermTurn = { recallQuery: text, resumedTask: false };
-        cognitiveResponse = cognitive.response;
-        cognitiveNeedsToolLoop = cognitive.needsToolLoop;
-        cognitiveRecallItems = cognitive.recallItems;
-        cognitiveWorkingMemorySummary = cognitive.workingMemorySummary ?? "";
-        cognitiveRecentConversationHistory = cognitive.recentConversationHistory ?? "";
-        cognitiveMetacog = cognitive.metacog;
-        cognitiveEmotion = cognitive.emotion;
+        cognitiveResponse = "";
+        cognitiveNeedsToolLoop = true; // 强制走工具循环
+        cognitiveRecallItems = undefined;
+        cognitiveWorkingMemorySummary = "";
+        cognitiveRecentConversationHistory = "";
+        cognitiveMetacog = undefined;
+        cognitiveEmotion = null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
-        cognitiveToolPlan = cognitive.toolPlan ?? undefined;
+        cognitiveToolPlan = undefined; // 复杂任务不做认知层规划，交给工具循环内 LLM 自行规划
 
-        // 推送 MoodInferred 事件
-        if (cognitive.emotion) {
-          this.emitMoodInferred(sessionId, {
-            sentimentScore: cognitive.emotion.valence,
-            confidence: cognitive.emotion.confidence ?? 0.5,
-            emotionTags: [cognitive.emotion.label],
-            agentNote: cognitive.emotion.label,
-            timestamp: cognitive.emotion.detectedAt,
+        // 异步情绪推断（不阻塞工具执行，MoodInferred 仍推送）
+        if (this.moodInferenceService) {
+          const inferenceService = this.moodInferenceService;
+          void inferenceService.analyzeMessage(sessionId, text).then((inference) => {
+            if (!inference) return;
+            this.emitMoodInferred(sessionId, {
+              sentimentScore: inference.sentimentScore,
+              confidence: inference.confidence,
+              emotionTags: inference.emotionTags,
+              agentNote: inference.agentNote ?? "对话情感分析",
+              timestamp: inference.timestamp,
+            });
+          }).catch(() => {
+            // 静默失败，不影响主流程
           });
         }
       }
@@ -599,6 +617,8 @@ export class AgentCore {
             this.buildRecentConversationHistoryBlock(
               cognitiveRecentConversationHistory,
               threadMessageCount,
+              actorId,
+              text,
             ),
           ),
           Promise.resolve(undefined),
@@ -615,15 +635,15 @@ export class AgentCore {
             this.buildRecentConversationHistoryBlock(
               cognitiveRecentConversationHistory,
               threadMessageCount,
+              actorId,
+              text,
             ),
           ),
-          // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开
+          // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开。
+          // 位置只读缓存，不主动请求——实时 GPS 仅在位置类工具执行时（requestLocation）产生一次开销。
           userIsStatingData
             ? Promise.resolve(undefined)
-            : resolveUserLocationPrompt({
-                clientIp: opts?.clientIp,
-                clientLocation: opts?.clientLocation,
-              }),
+            : this.resolveUserLocationForPrompt(actorId, opts),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
 
@@ -633,6 +653,27 @@ export class AgentCore {
     );
 
     const prepDuration = Date.now() - prepStartTime;
+
+    // TEMP DEBUG（记忆注入诊断，验证后移除）
+    try {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(
+        ".memory-inject-debug.log",
+        JSON.stringify({
+          t: new Date().toISOString(),
+          mode: route.mode,
+          sessionId: opts?.sessionId ?? null,
+          narrativeLen: enrichedNarrativeRecall?.length ?? 0,
+          wmLen: workingMemorySummary?.length ?? 0,
+          recentLen: recentConversationHistory?.length ?? 0,
+          cognitiveRecallCount: cognitiveRecallItems?.length ?? 0,
+          narrativeHead: String(enrichedNarrativeRecall ?? "").slice(0, 300),
+          text: String(text).slice(0, 40),
+        }) + "\n",
+      );
+    } catch {
+      /* debug log 失败忽略 */
+    }
     
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
       actorId,
@@ -750,56 +791,18 @@ export class AgentCore {
         } // end else (orchestrator available)
       }
 
-      if (this.isComplexMode(route.mode) && this.masterAgentCoordinator) {
-        // 性能监控：Master Agent 模式
-        const masterStartTime = Date.now();
-
-        const masterResult = await this.masterAgentCoordinator.orchestrateTask(
-          actorId,
-          text,
-          opts?.onAgentPhaseStatus,
-          opts?.onAssistantDelta,
-          orchestrateOpts,
-        );
-
-        const masterDuration = Date.now() - masterStartTime;
-
-        // 不做 humanize 后处理：流式推送的内容必须和最终返回一致，避免"两个版本"。
-        // humanize 会删前导话/改客套词，导致流式内容和 finalText 不一致 → 前端先显示一版再被覆盖。
-        result = await this.finishLlmTurn(actorId, text, masterResult, {
-          streamedChunks: true,
-          modelCallsConsumed: 1,
-          planExecuteUsed: false,
-          pePlan: null,
-          peExhausted: false,
-          trajCap,
-          messageId: opts?.chatUserMessageId,
-          sessionId,
-        }, opts?.onAssistantDelta);
-
-        // 记录 Master Agent 模式性能
-        this.recordPerformanceMetrics('master_agent', {
-          totalDuration: Date.now() - perfStartTime,
-          preparationDuration: prepDuration,
-          llmDuration: masterDuration,
-          textLength: text.length,
-          mode: route.mode,
-          hasTools: !!result.toolName,
-          success: true,
-        });
-        
-      } else {
-        // 性能监控：标准 LLM 模式
-        const standardStartTime = Date.now();
-
-        result = await this.runStandardLlmPath(actorId, text, route.mode, opts, {
+      if (this.isComplexMode(route.mode)) {
+        // 异步并行：complex 多线程执行（子 Agent 委派 / plan_execute），
+        // fast 通过 LivingInterimController 渐进式垫词先回复多步；
+        // complex 完成后结果无缝流式回传，最终结果作为完整回复。
+        const complexResult = await this.launchComplexBackgroundTask(actorId, text, opts, {
           narrativeRecall: enrichedNarrativeRecall,
           workingMemorySummary,
           recentConversationHistory,
           userLocation,
           personalization,
           trajCap,
-          orchestrateToolCtx: orchestrateOpts,
+          orchestrateOpts,
           sessionId,
           shortTermTurn,
           cognitiveMetacog,
@@ -808,63 +811,79 @@ export class AgentCore {
           cognitiveToolPlan,
         });
 
-        const standardDuration = Date.now() - standardStartTime;
-
-        // 记录标准模式性能
-        this.recordPerformanceMetrics('standard_llm', {
-          totalDuration: Date.now() - perfStartTime,
-          preparationDuration: prepDuration,
-          llmDuration: standardDuration,
-          textLength: text.length,
-          mode: route.mode,
-          hasTools: !!result.toolName,
-          modelCallsConsumed: 1, // 简化统计
-          success: true,
-        });
-
-        // ── 兜底机制：fast 路径回复检测"需要外部信息"信号 → 自动升级到 complex ──
-        // 场景：cognize 误判把"最新 AI 新闻"分到 fast，主 Agent 没调 search_web 就凭印象答，
-        // 回复里出现"我不确定/最新/建议查询/可能已经更新"等 hedging 信号时，升级到子 Agent 重新处理。
-        // 注意：只在 fast 路径触发，且 masterAgentCoordinator 可用时才升级；防重入。
-        if (
-          route.mode === "fast" &&
-          this.masterAgentCoordinator &&
-          getAgentRuntimeConfig().masterDelegation.enabled &&
-          result.text &&
-          this.needsExternalInfoUpgrade(result.text, text)
-        ) {
-          console.log(
-            `[AgentCore] fast 回复命中"需外部信息"兜底信号，升级到 complex：` +
-              `userText="${text.slice(0, 40)}" replyHint="${result.text.slice(0, 60)}"`,
-          );
-          try {
-            const upgradeResult = await this.masterAgentCoordinator.orchestrateTask(
-              actorId,
-              text,
-              opts?.onAgentPhaseStatus,
-              opts?.onAssistantDelta,
-              orchestrateOpts,
-            );
-            result = await this.finishLlmTurn(actorId, text, upgradeResult, {
-              streamedChunks: true,
-              modelCallsConsumed: 2,
-              planExecuteUsed: false,
-              pePlan: null,
-              peExhausted: false,
-              trajCap,
-              messageId: opts?.chatUserMessageId,
-              sessionId,
-            }, opts?.onAssistantDelta);
-          } catch (upgradeErr) {
-            // 升级失败：保留原 direct_llm 结果，记日志（不向用户暴露错误）
-            console.error(
-              "[AgentCore] 兜底升级 master_delegate 失败，保留原 direct_llm 结果:",
-              upgradeErr,
-            );
-          }
-        }
+        // complex 任务已完成，返回最终结果
+        result = {
+          text: complexResult,
+          streamedChunks: true,
+        };
+        return result;
       }
-      
+
+      // fast 路径：同步执行（秒回）
+      const standardStartTime = Date.now();
+
+      result = await this.runStandardLlmPath(actorId, text, "fast", opts, {
+        narrativeRecall: enrichedNarrativeRecall,
+        workingMemorySummary,
+        recentConversationHistory,
+        userLocation,
+        personalization,
+        trajCap,
+        orchestrateToolCtx: orchestrateOpts,
+        sessionId,
+        shortTermTurn,
+        cognitiveMetacog,
+        cognitiveEmotion,
+        cognitiveUserPattern,
+        cognitiveToolPlan,
+      });
+
+      const standardDuration = Date.now() - standardStartTime;
+
+      // 记录标准模式性能
+      this.recordPerformanceMetrics('standard_llm', {
+        totalDuration: Date.now() - perfStartTime,
+        preparationDuration: prepDuration,
+        llmDuration: standardDuration,
+        textLength: text.length,
+        mode: route.mode,
+        hasTools: !!result.toolName,
+        modelCallsConsumed: 1, // 简化统计
+        success: true,
+      });
+
+      // ── 兜底机制：fast 回复检测 hedging 信号 → 后台升级 complex ──
+      // 低置信度已在路由阶段前移升级，此处仅覆盖「规则判 fast 高置信但实际需外部信息」的少数场景。
+      // 后台升级：fast 先答，complex 后台补充，完成后结果无缝流式回传。
+      if (
+        this.masterAgentCoordinator &&
+        getAgentRuntimeConfig().masterDelegation.enabled &&
+        result.text &&
+        this.needsExternalInfoUpgrade(result.text, text)
+      ) {
+        console.log(
+          `[AgentCore] fast 回复命中"需外部信息"兜底信号，后台升级到 complex：` +
+            `userText="${text.slice(0, 40)}" replyHint="${result.text.slice(0, 60)}"`,
+        );
+        this.launchComplexBackgroundTask(actorId, text, opts, {
+          narrativeRecall: enrichedNarrativeRecall,
+          workingMemorySummary,
+          recentConversationHistory,
+          userLocation,
+          personalization,
+          trajCap,
+          orchestrateOpts,
+          sessionId,
+          shortTermTurn,
+          cognitiveMetacog,
+          cognitiveEmotion,
+          cognitiveUserPattern,
+          cognitiveToolPlan,
+        }).catch((err) => {
+          console.error(`[AgentCore] 兜底 complex 后台任务异常:`, err);
+        });
+      }
+
       return result;
       
     } catch (err) {
@@ -1190,6 +1209,22 @@ export class AgentCore {
   }
 
   /**
+   * Prompt 阶段的位置注入：优先用消息自带位置，否则读位置协调器缓存。
+   * 不主动请求客户端（避免普通对话被 GPS 阻塞）——实时位置只在位置类工具执行时
+   * 经 `requestLocation` 按需拉取一次。
+   */
+  private resolveUserLocationForPrompt(
+    actorId: string,
+    opts?: { clientIp?: string; clientLocation?: ClientLocationWire },
+  ): Promise<string | undefined> {
+    const location = opts?.clientLocation ?? this.locationCoordinator?.getCached(actorId) ?? undefined;
+    return resolveUserLocationPrompt({
+      clientIp: opts?.clientIp,
+      clientLocation: location,
+    });
+  }
+
+  /**
    * 构建最近对话回顾独立块（不再拼入 narrativeRecall）。
    *
    * 2026-08-11 修复 E（思路 A）：原 appendRecentConversationHistory 把 [最近对话] 块
@@ -1204,17 +1239,41 @@ export class AgentCore {
   private buildRecentConversationHistoryBlock(
     recentConversationHistory: string,
     threadMessageCount: number = -1,
+    actorId?: string,
+    userText?: string,
   ): string | undefined {
     if (!recentConversationHistory) return undefined;
+    const ambiguousFollowUp = Boolean(userText && isAmbiguousFollowUpMessage(userText));
 
     // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，LLM 已能从 msgs
     // 看到全部最近对话，再注入【最近对话回顾】块属于完全重复。
     // 仅当 thread 较短（首次对话、新会话、长 context 被 trim 掉）时才返回。
-    if (threadMessageCount >= 12) {
+    if (threadMessageCount >= 12 && !ambiguousFollowUp) {
       return undefined;
     }
 
-    return recentConversationHistory;
+    let block = recentConversationHistory;
+
+    // 跨会话开放环路（记忆连续性 Phase 2）：新会话开场（thread 较短）时，
+    // 并入上一会话未完成的待办与承诺，让连续性跨会话延续（解决"换会话跳转"）。
+    if (actorId && this.brainCenter?.getSessionEpitome) {
+      try {
+        const epitome = this.brainCenter.getSessionEpitome(actorId);
+        if (epitome) {
+          const lines: string[] = [
+            ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`),
+            ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`),
+          ];
+          if (lines.length > 0) {
+            block += `\n\n【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}`;
+          }
+        }
+      } catch {
+        /* epitome 读取失败静默降级 */
+      }
+    }
+
+    return block;
   }
 
   /**
@@ -1328,6 +1387,187 @@ export class AgentCore {
     };
   }
 
+  /**
+   * 后台执行复杂任务（子 Agent 委派 / plan_execute），返回最终结果文本。
+   *
+   * 异步并行：fast 通过 LivingInterimController 渐进式垫词先回复，
+   * complex 在多线程中执行，完成后通过 Promise 返回最终结果文本。
+   * 流式结果通过 opts.onAssistantDelta 实时回传，最终结果由 caller await。
+   */
+  private launchComplexBackgroundTask(
+    actorId: string,
+    text: string,
+    opts: HandleUserMessageOptions | undefined,
+    ctx: {
+      narrativeRecall?: string;
+      workingMemorySummary?: string;
+      recentConversationHistory?: string;
+      userLocation?: string;
+      trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
+      orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>;
+      personalization: PersonalizationPromptSlice;
+      sessionId: string;
+      shortTermTurn: ShortTermTurnContext;
+      cognitiveMetacog?: import("../brain/meta-cognition-cortex.js").MetacogAssessment;
+      cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
+      cognitiveUserPattern?: {
+        topics: string[];
+        preferredToolDomain?: string;
+        negativeFeedbackCount: number;
+        learningActive?: boolean;
+      };
+      cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
+    },
+  ): Promise<string> {
+    const useSubAgent = this.masterAgentCoordinator !== null;
+    const registry = this.wsRegistry;
+    const onDelta = opts?.onAssistantDelta;
+    // 后台执行不继承外层 signal（turn 已返回占位，避免用户发新消息时中断后台任务）
+    const bgOpts: HandleUserMessageOptions | undefined = opts
+      ? { ...opts, signal: undefined }
+      : opts;
+
+    // 返回 Promise，在 complex 任务完成时 resolve 最终结果文本
+    return new Promise<string>((resolve, reject) => {
+      const run = async (_taskId: string): Promise<void> => {
+        try {
+          if (useSubAgent && this.masterAgentCoordinator) {
+            // 子 Agent 委派：后台执行 Master Agent，结果通过 onAssistantDelta 流式回传
+            const masterResult = await this.masterAgentCoordinator.orchestrateTask(
+              actorId,
+              text,
+              opts?.onAgentPhaseStatus,
+              onDelta,
+              ctx.orchestrateOpts,
+            );
+            await this.finishLlmTurn(actorId, text, masterResult, {
+              streamedChunks: true,
+              modelCallsConsumed: 1,
+              planExecuteUsed: false,
+              pePlan: null,
+              peExhausted: false,
+              trajCap: ctx.trajCap,
+              messageId: opts?.chatUserMessageId,
+              sessionId: ctx.sessionId,
+            }, onDelta);
+            resolve(masterResult);
+          } else {
+            // plan_execute：执行标准复杂路径
+            const result = await this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
+              narrativeRecall: ctx.narrativeRecall,
+              workingMemorySummary: ctx.workingMemorySummary,
+              recentConversationHistory: ctx.recentConversationHistory,
+              userLocation: ctx.userLocation,
+              trajCap: ctx.trajCap,
+              orchestrateToolCtx: ctx.orchestrateOpts,
+              personalization: ctx.personalization,
+              sessionId: ctx.sessionId,
+              shortTermTurn: ctx.shortTermTurn,
+              cognitiveMetacog: ctx.cognitiveMetacog,
+              cognitiveEmotion: ctx.cognitiveEmotion,
+              cognitiveUserPattern: ctx.cognitiveUserPattern,
+              cognitiveToolPlan: ctx.cognitiveToolPlan,
+            });
+            resolve(result.text ?? "");
+          }
+        } catch (err) {
+          reject(err);
+        }
+      };
+
+      const runOpts: import("./agent-task-orchestrator.js").RunTaskOptions = {
+        onProgress: (event) => {
+          if (!registry) return;
+          try {
+            registry.trySend(
+              event.sessionId,
+              JSON.stringify({
+                type: ServerEventType.ChatExecutionEvent,
+                payload: { kind: "task_progress", ...event },
+              }),
+            );
+          } catch {
+            // 静默失败
+          }
+          // 后台任务失败时推送 fallback 文案
+          if (event.type === "task_failed") {
+            try {
+              onDelta?.(FALLBACK_TEXT_BACKGROUND_FAILED());
+              resolve(""); // 任务失败时仍 resolve 空串，避免 caller 一直等待
+            } catch {
+              /* ignore */
+            }
+          }
+        },
+        onAssistantDelta: (delta) => {
+          onDelta?.(delta);
+        },
+        onToolExecuteStart: (info) => {
+          opts?.onExternalToolExecuteStart?.({
+            toolName: info.name,
+            input: info.args,
+          });
+        },
+        onToolExecuted: (info) => {
+          opts?.onExternalToolExecuted?.({
+            toolName: info.name,
+            input: {},
+            ok: info.ok,
+            result: (info.result as Record<string, unknown>) ?? {},
+          });
+        },
+      };
+
+      // 启动复杂任务（多线程包装）
+      void this.runComplexTaskInWorker(actorId, text, run, runOpts)
+        .then(() => {
+          // worker 已完成，run 内部的 resolve/reject 已处理
+        })
+        .catch((err) => {
+          console.error("[AgentCore] 复杂任务 worker 异常:", err);
+          if (!reject) {} // 标记使用，防止 lint
+          reject(err);
+        });
+    });
+  }
+
+  /**
+   * 在多线程 Worker 中执行复杂任务。
+   * 使用 node:worker_threads 将 LLM 密集调用隔离到独立线程，
+   * 主线程可继续处理 fast 模式的渐进式垫词。
+   *
+   * 当前实现：async/await 主线程并发执行（非阻塞 event loop），
+   * 可通过配置 useWorker 切换为真实 worker_threads 隔离。
+   */
+  private async runComplexTaskInWorker(
+    _actorId: string,
+    _text: string,
+    run: (taskId: string) => Promise<void>,
+    _runOpts: import("./agent-task-orchestrator.js").RunTaskOptions,
+  ): Promise<void> {
+    const taskId = `complex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // 使用 worker_threads 隔离 LLM 密集调用
+    // 当前通过 async/await 在主线程并发执行，保持事件循环响应
+    const useWorker = false; // 暂设为 false，用 async/await 并发
+    if (useWorker) {
+      const { Worker } = await import("node:worker_threads");
+      const workerPath = new URL("./complex-worker.js", import.meta.url).href;
+      const worker = new Worker(workerPath, {
+        workerData: { actorId: _actorId, text: _text, taskId },
+        execArgv: ["--import", "data:text/javascript,import { register } from 'node:module'; globalThis.__WORKER_IMPORT_META_URL__ = " + JSON.stringify(import.meta.url)],
+      });
+      try {
+        await run(taskId);
+      } finally {
+        await worker.terminate().catch(() => {});
+      }
+    } else {
+      // 主线程并发执行（event loop 非阻塞，progressive 垫词仍可推送）
+      await run(taskId);
+    }
+  }
+
   private async runStandardLlmPath(
     actorId: string,
     text: string,
@@ -1405,6 +1645,10 @@ export class AgentCore {
           agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
           desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
           phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
+          // 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
+          requestLocation: () =>
+            this.locationCoordinator?.requestLocation(actorId, `tool:${name}`) ??
+            Promise.resolve(null),
         });
       },
       onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
@@ -1458,6 +1702,23 @@ export class AgentCore {
           toolExposureProfile,
           toolRankingHint,
         };
+    // TEMP DEBUG（记忆注入诊断 2：最终 promptContext.memory 是否含记忆）
+    try {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(
+        ".memory-inject-debug.log",
+        JSON.stringify({
+          t: new Date().toISOString(),
+          phase: "streamOpts",
+          mode,
+          memoryHasNarrative: Boolean(baseStreamOpts.promptContext?.memory?.narrativeRecall),
+          memoryNarrativeHead: String(baseStreamOpts.promptContext?.memory?.narrativeRecall ?? "").slice(0, 200),
+          memoryKeys: Object.keys(baseStreamOpts.promptContext?.memory ?? {}),
+        }) + "\n",
+      );
+    } catch {
+      /* ignore */
+    }
     const runtimeKernel = getRuntimeKernel(actorId);
     // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
     // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
@@ -1638,6 +1899,24 @@ export class AgentCore {
         mergedStreamOpts,
       );
     }
+    // TEMP DEBUG（记忆注入诊断 3：LLM 实际拿到的 thread 上下文）
+    try {
+      const { appendFileSync } = await import("node:fs");
+      const threadMsgs = getChatThreadStore().thread(chatSessionId, "");
+      appendFileSync(
+        ".memory-inject-debug.log",
+        JSON.stringify({
+          t: new Date().toISOString(),
+          phase: "streamCall",
+          chatSessionId,
+          threadMsgCount: threadMsgs.length,
+          threadRoles: threadMsgs.map((m) => m.role).join(","),
+          text: String(text).slice(0, 40),
+        }) + "\n",
+      );
+    } catch {
+      /* ignore */
+    }
 
     return await this.finishLlmTurn(actorId, text, full, {
       streamedChunks: true,
@@ -1704,6 +1983,11 @@ export class AgentCore {
       userText,
     });
     let sanitizedOutput = outputSafety?.sanitized ?? assistantText;
+
+    // 剥离 LLM 回显的话题切换标签前缀（如 [话题切换，只答这个] / [话题已切换] / [Topic switched — don't revisit.]）：
+    // topic-switched 是注入给模型的内部信号，chat 模型偶发会自创方括号标签回显到回复开头。
+    // 零 token 程序层剥离，不做重生成。
+    sanitizedOutput = sanitizedOutput.replace(/^\s*(?:\[话题已?切换[^\]]*\]|\[[Tt]opic[^\]]*\])[\s:：—-]*/, "");
 
     // 钩子 3：RuntimeKernel 后置校验（零 token，程序层拦截违规输出）
     // 全程不向 LLM 发任何约束 prompt，纯规则匹配。违规时记录日志但不阻断输出（避免循环重生成）

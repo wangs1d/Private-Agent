@@ -41,12 +41,23 @@ export type TaskTurnDisposition =
   | { action: "pause"; reason: string }
   | { action: "complete"; reason: string };
 
+type TurnFocusKind = "task_followup" | "meta_debug" | "emotion_pause" | "topic_switch" | "new_task";
+
+type TurnFocusResolution = {
+  kind: TurnFocusKind;
+  includeTaskScopedMemory: boolean;
+  preserveRecentContext: boolean;
+  reason: string;
+};
+
 const MEMORY_LIST_LIMIT = 6;
 const ASSISTANT_COMMITMENT_RE =
   /我会|我将|已经帮你|已为你|我先|稍后|接下来|我去|我帮你|i will|i'll|i can/i;
 const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|remember|prefer/i;
 const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我住在|我需要/i;
 const REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
+const CONTINUITY_TURN_RE =
+  /^(?:这个|那个|这块|那块|它|他|她|他们|这些|那些|这里|那里|刚才那个|上面那个|继续|接着|往下|然后呢|再说说|展开|细说|具体点|详细点|怎么做|怎么办|咋办|改一下|修一下|优化一下|继续做|继续看|继续修|继续优化|this|that|it|they|continue|go on|next|then|fix it|improve it)(?:[。！？?!,.，\s]*|呢|啊|吧|哈|嘛|呀)*$/i;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -81,6 +92,48 @@ function isTaskSeekingTurn(text: string): boolean {
   if (REQUEST_RE.test(normalized)) return true;
   if (normalized.length >= 18) return true;
   return false;
+}
+
+function isContinuityTurn(text: string): boolean {
+  const normalized = normalizeInput(text);
+  if (!normalized) return false;
+  if (CONTINUITY_TURN_RE.test(normalized)) return true;
+  if (normalized.length <= 12 && /^(?:这|那|它|他|她|继续|接着|然后|再|改|修|看|做|this|that|it|next|then)/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function hasMetaAgentDebugSignal(text: string): boolean {
+  const normalized = normalizeInput(text);
+  if (!normalized) return false;
+  return /agent|assistant|bot|模型|大模型|助手|智能体|回复|对话|话题|串台|跑题|切换话题|回复对象|上下文|记忆|短期记忆|焦点|归因|提示词|prompt|system|调试|路由|旧任务|上一轮|上次对话|旧话题/i.test(
+    normalized,
+  );
+}
+
+function hasEmotionPauseSignal(text: string): boolean {
+  const normalized = normalizeInput(text);
+  if (!normalized) return false;
+  return /好累|累呀|累了|心累|疲惫|烦死|烦了|崩溃|不想弄|先不想|歇一下|缓一下|太折腾|太难受|受不了了|tired|exhausted|overwhelmed/i.test(
+    normalized,
+  );
+}
+
+function isShortAffectiveTurn(text: string): boolean {
+  const normalized = normalizeInput(text);
+  if (!normalized) return false;
+  return normalized.length <= 24 && hasEmotionPauseSignal(normalized);
+}
+
+function mergeContextSummary(previous: string, next: string, maxLen = 240): string {
+  const prev = normalizeInput(previous);
+  const incoming = normalizeInput(next);
+  if (!prev) return incoming.slice(0, maxLen);
+  if (!incoming || prev === incoming || prev.includes(incoming)) return prev.slice(0, maxLen);
+  if (incoming.includes(prev)) return incoming.slice(0, maxLen);
+  const merged = `${prev} / latest: ${incoming}`;
+  return merged.length <= maxLen ? merged : `${prev.slice(0, 150)} / latest: ${incoming.slice(0, 70)}`;
 }
 
 function shouldPauseFromUserText(text: string): boolean {
@@ -180,39 +233,52 @@ export class ShortTermMemoryGatewayService {
     const normalizedInput = normalizeInput(input);
     const state = this.getSessionState(sessionId);
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
+    const focus = this.resolveTurnFocus(normalizedInput, active, state.conversationMemory);
 
-    if (active) {
+    if (active && focus.includeTaskScopedMemory) {
       const activeScore = Math.max(
         overlapScore(`${active.title} ${active.contextSummary}`, normalizedInput),
         normalizedInput.toLowerCase().includes(active.title.toLowerCase()) ? 0.9 : 0,
       );
       if (activeScore >= 0.35) {
-        active.contextSummary = normalizedInput.slice(0, 180);
+        active.contextSummary = mergeContextSummary(active.contextSummary, normalizedInput);
+        active.updatedAt = nowIso();
+        this.schedulePersist();
+        return { task: active, resumed: false };
+      }
+      if (isContinuityTurn(normalizedInput)) {
+        active.contextSummary = mergeContextSummary(active.contextSummary, normalizedInput);
         active.updatedAt = nowIso();
         this.schedulePersist();
         return { task: active, resumed: false };
       }
     }
 
-    const pausedMatch = state.tasks
-      .filter((task) => task.status === "paused")
-      .map((task) => ({
-        task,
-        score: Math.max(
-          overlapScore(`${task.title} ${task.contextSummary}`, normalizedInput),
-          normalizedInput.toLowerCase().includes(task.title.toLowerCase()) ? 0.9 : 0,
-        ),
-      }))
-      .sort((a, b) => b.score - a.score)[0];
+    if (focus.includeTaskScopedMemory) {
+      const pausedMatch = state.tasks
+        .filter((task) => task.status === "paused")
+        .map((task) => ({
+          task,
+          score: Math.max(
+            overlapScore(`${task.title} ${task.contextSummary}`, normalizedInput),
+            normalizedInput.toLowerCase().includes(task.title.toLowerCase()) ? 0.9 : 0,
+          ),
+        }))
+        .sort((a, b) => b.score - a.score)[0];
 
-    if (pausedMatch && pausedMatch.score >= 0.45) {
-      const resumed = this.resumeTask(sessionId, pausedMatch.task.taskId);
-      if (resumed) {
-        resumed.contextSummary = normalizedInput.slice(0, 180);
-        resumed.updatedAt = nowIso();
-        this.schedulePersist();
-        return { task: resumed, resumed: true };
+      if (pausedMatch && pausedMatch.score >= 0.45) {
+        const resumed = this.resumeTask(sessionId, pausedMatch.task.taskId);
+        if (resumed) {
+          resumed.contextSummary = mergeContextSummary(resumed.contextSummary, normalizedInput);
+          resumed.updatedAt = nowIso();
+          this.schedulePersist();
+          return { task: resumed, resumed: true };
+        }
       }
+    }
+
+    if (!focus.includeTaskScopedMemory && active) {
+      return { task: active, resumed: false };
     }
 
     return {
@@ -312,7 +378,8 @@ export class ShortTermMemoryGatewayService {
     const completed = state.tasks.filter((task) => task.status === "completed").slice(0, 2);
     const lines: string[] = [];
     const memory = state.conversationMemory;
-    const includeTaskScopedMemory = this.shouldInjectTaskScopedMemory(currentInput, active, memory);
+    const focus = this.resolveTurnFocus(currentInput, active, memory);
+    const includeTaskScopedMemory = focus.includeTaskScopedMemory;
 
     if (active && includeTaskScopedMemory) {
       lines.push(`current-focus: ${active.title}`);
@@ -324,8 +391,23 @@ export class ShortTermMemoryGatewayService {
     if (completed.length > 0 && includeTaskScopedMemory) {
       lines.push(`recently-completed: ${completed.map((task) => task.title).join(" | ")}`);
     }
-    if (memory?.activeTopic) {
-      lines.push(`conversation-topic: ${memory.activeTopic}`);
+    // 话题信号：检测当前输入与上一话题是「延续」还是「切换」，
+    // 显式告诉 LLM 该基于上下文作答还是只回应本条新话题。
+    // 实测（chat 模型）仍必须保留：#30 家具轮在无信号时被上一轮天气工具状态带跑、
+    // #20 电影轮串入搬家/出差记忆。
+    // 用 active.title + contextSummary 作为话题参照（contextSummary 含完整事实，如"华强科技/出差"）。
+    const topicRef = active ? `${active.title} ${active.contextSummary}` : (memory?.activeTopic || null);
+    const topicSignal = includeTaskScopedMemory ? this.buildTopicSignal(currentInput, topicRef) : undefined;
+    if (topicSignal) {
+      lines.push(`important ${topicSignal}`);
+    }
+    // 延续话题时强制注入最近对话原文（recent-context）：
+    // #5 场景「我这次出差要去见哪家公司」被 shouldInjectTaskScopedMemory 判定为不相关，
+    // 导致 carryForward 被拦掉、LLM 看不到上一轮用户原文 → 答「没存过」。
+    const isTopicFollowUp = topicSignal?.startsWith("topic-followup") === true;
+    const recentContext = this.selectRecentContextForFocus(memory?.carryForward ?? [], currentInput, focus);
+    if (recentContext.length && (includeTaskScopedMemory || isTopicFollowUp || focus.preserveRecentContext)) {
+      lines.push(`recent-context: ${recentContext.join(" || ")}`);
     }
     if (memory?.currentMission && includeTaskScopedMemory) {
       lines.push(`current-mission: ${memory.currentMission}`);
@@ -342,9 +424,6 @@ export class ShortTermMemoryGatewayService {
     if (memory?.agentCommitments.length && includeTaskScopedMemory) {
       lines.push(`agent-commitments: ${memory.agentCommitments.join(" || ")}`);
     }
-    if (memory?.carryForward.length && includeTaskScopedMemory) {
-      lines.push(`recent-context: ${memory.carryForward.join(" || ")}`);
-    }
     if (currentInput?.trim()) {
       lines.push(`incoming-turn: ${normalizeInput(currentInput).slice(0, 180)}`);
     }
@@ -360,7 +439,8 @@ export class ShortTermMemoryGatewayService {
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
     const paused = state.tasks.filter((task) => task.status === "paused").slice(0, 2);
     const parts = [normalizeInput(currentInput)];
-    const includeTaskScopedMemory = this.shouldInjectTaskScopedMemory(currentInput, active, state.conversationMemory);
+    const focus = this.resolveTurnFocus(currentInput, active, state.conversationMemory);
+    const includeTaskScopedMemory = focus.includeTaskScopedMemory;
 
     if (active && includeTaskScopedMemory) {
       parts.push(`current task ${active.title}`);
@@ -369,7 +449,7 @@ export class ShortTermMemoryGatewayService {
     if (paused.length > 0 && includeTaskScopedMemory) {
       parts.push(`suspended tasks ${paused.map((task) => task.title).join(" ")}`);
     }
-    if (state.conversationMemory?.activeTopic) {
+    if (state.conversationMemory?.activeTopic && (includeTaskScopedMemory || focus.preserveRecentContext)) {
       parts.push(`current topic ${state.conversationMemory.activeTopic}`);
     }
     if (state.conversationMemory?.currentMission && includeTaskScopedMemory) {
@@ -421,10 +501,12 @@ export class ShortTermMemoryGatewayService {
     const userSentence = firstSentence(userText);
     const assistantSentence = firstSentence(assistantText);
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
+    const focus = this.resolveTurnFocus(userText, active, memory);
+    const effectiveActive = focus.includeTaskScopedMemory ? active : null;
 
     memory.activeTopic =
-      active?.title || this.inferTopicFromUserText(userText) || memory.activeTopic || null;
-    memory.currentMission = this.inferMissionFromTurn(userText, assistantText, active, memory.currentMission);
+      effectiveActive?.title || this.inferTopicFromUserText(userText) || memory.activeTopic || null;
+    memory.currentMission = this.inferMissionFromTurn(userText, assistantText, effectiveActive, memory.currentMission);
 
     if (USER_PREFERENCE_RE.test(userText)) {
       pushUnique(memory.preferences, userSentence);
@@ -446,19 +528,19 @@ export class ShortTermMemoryGatewayService {
       }
     }
 
-    if (active && disposition.action !== "complete") {
-      pushUnique(memory.openLoops, `${active.title} | ${active.contextSummary}`);
-    } else if (!active && REQUEST_RE.test(userText) && disposition.action === "none") {
+    if (effectiveActive && disposition.action !== "complete") {
+      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`);
+    } else if (!effectiveActive && REQUEST_RE.test(userText) && disposition.action === "none") {
       pushUnique(memory.openLoops, userSentence);
     }
 
     if (disposition.action === "complete") {
-      this.removeMatching(memory.openLoops, userText, assistantText, active?.title);
-      this.removeMatching(memory.agentCommitments, userText, assistantText, active?.title);
+      this.removeMatching(memory.openLoops, userText, assistantText, effectiveActive?.title);
+      this.removeMatching(memory.agentCommitments, userText, assistantText, effectiveActive?.title);
     }
 
-    if (disposition.action === "pause" && active) {
-      pushUnique(memory.openLoops, `${active.title} | ${active.contextSummary}`);
+    if (disposition.action === "pause" && effectiveActive) {
+      pushUnique(memory.openLoops, `${effectiveActive.title} | ${effectiveActive.contextSummary}`);
     }
 
     memory.lastUpdated = nowIso();
@@ -472,14 +554,112 @@ export class ShortTermMemoryGatewayService {
     return firstSentence(normalized, 48);
   }
 
-  private shouldInjectTaskScopedMemory(
+  /** 中文 2-gram 词元集：解决中文无空格分词导致的 overlapScore 失效问题。 */
+  private zhGrams(text: string): Set<string> {
+    const chars = normalizeInput(text);
+    const grams = new Set<string>();
+    for (let i = 0; i < chars.length - 1; i++) {
+      const g = chars.slice(i, i + 2);
+      if (/[\u4e00-\u9fff]/.test(g)) grams.add(g);
+    }
+    return grams;
+  }
+
+  /** 中文 2-gram 相似度：衡量当前输入与上一话题的词汇重叠（0~1）。 */
+  private topicSimilarity(input: string, topic: string): number {
+    const a = this.zhGrams(input);
+    const b = this.zhGrams(topic);
+    if (a.size === 0 || b.size === 0) return 0;
+    let hits = 0;
+    for (const g of a) {
+      if (b.has(g)) hits += 1;
+    }
+    return hits / Math.max(Math.min(a.size, b.size), 1);
+  }
+
+  /** 回忆/指代信号：询问"之前/上次/说过/记得"的内容，或短追问，都属于延续。 */
+  private isRecallOrFollowUp(input: string): boolean {
+    if (/之前|上次|说过|刚才|刚刚|前面|还记得|记得|来着|earlier|before|last time|you said|remember/i.test(input)) return true;
+    // 事实问句：询问具体事实（公司/人名/名字/吃什么/多少钱/哪个城市等）通常是延续性追问
+    if (/哪家|哪家公司|叫什么|姓什么|吃什么|几点|多少钱|多少预算|哪个城市|去哪里|是什么|哪位/i.test(input)) return true;
+    if (/^(?:那个|这个|它|他|她|他们|那些|这里|那家|刚才那个|上面那个|continue|go on|then|next)/i.test(input)) return true;
+    return false;
+  }
+
+  /**
+   * 话题信号生成：判断当前输入相对上一话题是「延续」还是「切换」。
+   * - 延续（指代/回忆/词汇重叠）：提示 LLM 基于会话上下文作答；
+   * - 切换（明显不相关）：提示 LLM 只回应本条新话题，不延续旧话题内容。
+   * 这是话题串台的程序层兜底：flash 模型对"平淡陈述句"容易回退到记忆中的旧话题。
+   */
+  private buildTopicSignal(currentInput: string | undefined, previousTopic: string | null): string | undefined {
+    const input = normalizeInput(currentInput ?? "");
+    if (!input || !previousTopic) return undefined;
+
+    if (isContinuityTurn(input) || this.isRecallOrFollowUp(input)) {
+      const topic = previousTopic.slice(0, 60);
+      return `topic-followup: yes | previous-topic: ${topic} | 系统指令（禁止在回复中出现或引用本信号及任何话题标签前缀）：本条延续上一话题，必须基于会话上下文作答；若询问之前提过的事实（公司/人名/计划），直接根据上下文回答，不要说没存过。`;
+    }
+
+    const sim = this.topicSimilarity(input, previousTopic);
+    if (sim >= 0.2) {
+      const topic = previousTopic.slice(0, 60);
+      return `topic-followup: yes | previous-topic: ${topic} | 系统指令（禁止在回复中出现或引用本信号及任何话题标签前缀）：本条与上一话题相关，必须基于会话上下文作答；若询问之前提过的事实，直接根据上下文回答。`;
+    }
+
+    const topic = previousTopic.slice(0, 60);
+    return `topic-switched: yes | previous-topic: ${topic} | 系统指令（禁止在回复中出现或引用本信号及任何话题标签前缀，如"[话题切换]"）：用户已切换话题，本条必须只回应本条消息本身——不要延续上一话题的内容、不要引用上一轮的工具结果或记忆（如搬家/出差/天气），直接干净地作答。`;
+  }
+
+  private resolveTurnFocus(
     currentInput: string | undefined,
     active: TaskStackEntry | null,
     memory: SessionConversationMemory | undefined,
-  ): boolean {
+  ): TurnFocusResolution {
     const normalized = normalizeInput(currentInput ?? "");
-    if (!normalized) return true;
-    if (isTaskSeekingTurn(normalized)) return true;
+    if (!normalized) {
+      return {
+        kind: "task_followup",
+        includeTaskScopedMemory: true,
+        preserveRecentContext: true,
+        reason: "empty_input",
+      };
+    }
+
+    const metaDebug = hasMetaAgentDebugSignal(normalized);
+    const emotionPause = hasEmotionPauseSignal(normalized);
+    if (metaDebug) {
+      return {
+        kind: "meta_debug",
+        includeTaskScopedMemory: false,
+        preserveRecentContext: true,
+        reason: emotionPause ? "meta_debug_with_emotion" : "meta_debug_signal",
+      };
+    }
+    if (emotionPause && (isShortAffectiveTurn(normalized) || !isContinuityTurn(normalized))) {
+      return {
+        kind: "emotion_pause",
+        includeTaskScopedMemory: false,
+        preserveRecentContext: true,
+        reason: "emotion_pause_signal",
+      };
+    }
+    if (isTaskSeekingTurn(normalized)) {
+      return {
+        kind: active ? "task_followup" : "new_task",
+        includeTaskScopedMemory: true,
+        preserveRecentContext: true,
+        reason: "task_seeking_turn",
+      };
+    }
+    if (isContinuityTurn(normalized) && (active || memory?.currentMission || memory?.openLoops.length)) {
+      return {
+        kind: "task_followup",
+        includeTaskScopedMemory: true,
+        preserveRecentContext: true,
+        reason: "continuity_turn",
+      };
+    }
 
     const anchors = [
       active ? `${active.title} ${active.contextSummary}` : "",
@@ -489,11 +669,53 @@ export class ShortTermMemoryGatewayService {
 
     for (const anchor of anchors) {
       if (overlapScore(anchor, normalized) >= 0.25) {
-        return true;
+        return {
+          kind: "task_followup",
+          includeTaskScopedMemory: true,
+          preserveRecentContext: true,
+          reason: "anchor_overlap",
+        };
       }
     }
 
-    return false;
+    return {
+      kind: "topic_switch",
+      includeTaskScopedMemory: false,
+      preserveRecentContext: false,
+      reason: "no_task_anchor",
+    };
+  }
+
+  private selectRecentContextForFocus(
+    carryForward: string[],
+    currentInput: string | undefined,
+    focus: TurnFocusResolution,
+  ): string[] {
+    if (carryForward.length === 0) return [];
+    if (focus.includeTaskScopedMemory) return carryForward;
+
+    const input = normalizeInput(currentInput ?? "");
+    if (focus.kind === "meta_debug") {
+      const selected = carryForward.filter(
+        (line) => hasMetaAgentDebugSignal(line) || (input && overlapScore(line, input) >= 0.18),
+      );
+      return (selected.length > 0 ? selected : carryForward.slice(0, 2)).slice(0, 4);
+    }
+
+    if (focus.kind === "emotion_pause") {
+      const metaContext = carryForward.filter((line) => hasMetaAgentDebugSignal(line));
+      return (metaContext.length > 0 ? metaContext : carryForward.slice(0, 2)).slice(0, 4);
+    }
+
+    return [];
+  }
+
+  private shouldInjectTaskScopedMemory(
+    currentInput: string | undefined,
+    active: TaskStackEntry | null,
+    memory: SessionConversationMemory | undefined,
+  ): boolean {
+    return this.resolveTurnFocus(currentInput, active, memory).includeTaskScopedMemory;
   }
 
   private inferMissionFromTurn(

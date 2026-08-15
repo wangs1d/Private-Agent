@@ -72,6 +72,8 @@ class AgentResultData {
     this.footer = "",
     this.actions = const <AgentResultAction>[],
     this.cardId = "",
+    this.cardType = "",
+    this.speak = "",
   });
 
   /// 智能体头像缩写（默认 "NB"）。
@@ -97,6 +99,15 @@ class AgentResultData {
   /// 由服务端注入,前端不强校验。
   final String cardId;
 
+  /// 工具专用卡片类型(服务端按 toolName 推断注入):
+  /// weather / schedule / wallet / order / file / carousel / compare / timeline / media;
+  /// 空串=通用列表卡。
+  final String cardType;
+
+  /// 语音播报优先级:`high`(优先朗读结论) / `low`(可跳过) / 空串(默认)。
+  /// 供语音输出端决定取舍。
+  final String speak;
+
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;
     final List<dynamic>? rawActions = json["actions"] as List<dynamic>?;
@@ -117,6 +128,8 @@ class AgentResultData {
               .toList() ??
           const <AgentResultAction>[],
       cardId: json["cardId"]?.toString() ?? "",
+      cardType: json["cardType"]?.toString() ?? "",
+      speak: json["speak"]?.toString() ?? "",
     );
   }
 }

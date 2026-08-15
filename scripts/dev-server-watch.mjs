@@ -6,6 +6,7 @@ import { config } from "dotenv";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "./port-in-use.mjs";
+import { spawnToolRouter } from "./spawn-tool-router.mjs";
 import {
   readGatewayPort,
   spawnOpenClawGateway,
@@ -38,6 +39,9 @@ if (!(await isTcpPortInUse(gatewayPort))) {
   }
 }
 
+// tool-router FastAPI：与 TS 服务异步并行拉起（端口占用时自动跳过）
+const toolRouterChild = await spawnToolRouter();
+
 const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", "src/index.ts"], {
   cwd: serverDir,
   stdio: "inherit",
@@ -62,29 +66,44 @@ function stopGateway() {
   }
 }
 
+function stopToolRouter() {
+  if (toolRouterChild && !toolRouterChild.killed) {
+    try {
+      toolRouterChild.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function stopAll() {
+  stopGateway();
+  stopToolRouter();
+}
+
 child.on("error", (err) => {
   console.error("[dev-server] 子进程启动失败:", err instanceof Error ? err.message : String(err));
-  stopGateway();
+  stopAll();
   process.exit(1);
 });
 
 child.on("exit", (code, signal) => {
   if (signal === "SIGTERM" || signal === "SIGINT") {
     // 父进程主动关闭，正常退出
-    stopGateway();
+    stopAll();
     process.exit(0);
     return;
   }
   console.error(`[dev-server] 子进程异常退出: code=${code ?? "?"}, signal=${signal ?? "none"}`);
-  stopGateway();
+  stopAll();
   // 延迟退出，给日志时间输出
   setTimeout(() => process.exit(code ?? 1), 500).unref();
 });
 process.once("SIGINT", () => {
-  stopGateway();
+  stopAll();
   process.exit(0);
 });
 process.once("SIGTERM", () => {
-  stopGateway();
+  stopAll();
   process.exit(0);
 });

@@ -4,6 +4,7 @@ import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import OpenAI from "openai";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
+import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 
 /**
  * 真向量 cosine 相似度（替代 human-like-memory 里的假 cosineLikeScore）。
@@ -463,7 +464,7 @@ export class MemoryManagerService {
           return embeddingHits;
         }
         // embedding 无命中，降级到 LLM 判断
-        const llmHits = await this.recallForgottenByLlm(query, forgottenLines, apiKey);
+        const llmHits = await this.recallForgottenByLlm(query, forgottenLines);
         if (llmHits.length > 0) {
           console.log(`[MemoryManager] forgotten LLM 召回 ${llmHits.length} 行 (${actorId})`);
           return llmHits;
@@ -520,12 +521,13 @@ export class MemoryManagerService {
   private async recallForgottenByLlm(
     query: string,
     lines: string[],
-    apiKey: string,
   ): Promise<string[]> {
+    const llm = resolvePrimaryLlmClientConfig();
+    if (!llm) return [];
     try {
-      const openai = new OpenAI({ apiKey });
+      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
       const response = await openai.chat.completions.create({
-        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || "gpt-4.1-mini",
+        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
         temperature: 0,
         response_format: { type: "json_object" },
         messages: [
@@ -1022,15 +1024,15 @@ export class MemoryManagerService {
   }
 
   private async scoreLinesWithLlm(lines: string[]): Promise<number[]> {
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!apiKey || lines.length === 0) {
+    const llm = resolvePrimaryLlmClientConfig();
+    if (!llm || lines.length === 0) {
       return lines.map((line) => this.heuristicSemanticScore(line));
     }
 
     try {
-      const openai = new OpenAI({ apiKey });
+      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
       const response = await openai.chat.completions.create({
-        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || "gpt-4.1-mini",
+        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
         temperature: 0,
         response_format: { type: "json_object" },
         messages: [

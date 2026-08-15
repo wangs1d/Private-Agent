@@ -2,8 +2,11 @@
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
-import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import {
+  isNotesChatSessionId,
+  resolvePrimaryChatSessionId,
+} from "../agent/master-chat-session.js";
 import type {
   AudioBufferRef,
   BrainDecision,
@@ -48,6 +51,9 @@ import type {
   LearningFeedback,
   LearningSnapshot,
 } from "./memory-cognitive/memory-experience-learning-loop.js";
+import type { MemoryFeedbackInput } from "./memory-feedback-store.js";
+import type { SessionEpitomeEntries, SessionEpitomeSnapshot } from "../services/session-epitome.js";
+import { extractEpitomeEntries } from "../services/session-epitome.js";
 import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import type { BodyGatewayLike, BodyState } from "../body/types.js";
@@ -66,6 +72,14 @@ function stableLearningKey(text: string): string {
 function summarizeLearningText(text: string, max = 180): string {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length <= max ? compact : `${compact.slice(0, max - 1)}…`;
+}
+
+function formatRecentConversationLine(msg: ChatCompletionMessageParam): string | null {
+  const role = msg.role === "user" ? "用户" : msg.role === "assistant" ? "Agent" : null;
+  if (!role) return null;
+  const content = typeof msg.content === "string" ? msg.content : "[多模态消息]";
+  const cleaned = content.replace(/^\[ts:[^\]]+\]\n?/, "").trim();
+  return cleaned ? `${role}：${cleaned}` : null;
 }
 
 function looksLikeUserCorrection(text: string): boolean {
@@ -193,6 +207,19 @@ interface MemoryCortexLike {
   rememberBatch?(actorId: string, items: MemoryItem[]): Promise<void>;
   recordLearningFeedback?(feedback: LearningFeedback): Promise<LearningSnapshot | null>;
   getLearningSnapshot?(actorId: string): LearningSnapshot | null;
+  /**
+   * 记忆相关性在线反馈回灌：记录用户对召回记忆的反馈（显式/隐式），
+   * 按语义指纹持久化，后续 recall 对命中条目做加成/惩罚调整排序。
+   */
+  recordMemoryFeedback?(input: MemoryFeedbackInput): void;
+  /** 读取某 actor 的记忆反馈快照（调试/统计用）。 */
+  getMemoryFeedbackSnapshot?(actorId: string): unknown;
+  /** 跨会话开放环路：记录 open loops / 承诺 / 偏好（KV 持久化）。 */
+  updateSessionEpitome?(actorId: string, entries: SessionEpitomeEntries): void;
+  /** 读取某 actor 的跨会话开放环路快照（新会话开场注入用）。 */
+  getSessionEpitome?(actorId: string): SessionEpitomeSnapshot | null;
+  /** 读取某 actor 的最近召回锚点（连续性诊断用）。 */
+  getRecallAnchors?(actorId: string): unknown[];
   recall(
     actorId: string,
     query: string,
@@ -738,6 +765,32 @@ export class BrainCenter {
     return this.decisionHub;
   }
 
+  /**
+   * 轻量规则路由（单一权威路由源的前置）：纯规则、不调 LLM、不收集感知。
+   *
+   * 供 fast 路径注入「规则置信度」，把低置信度升级从「hedging 事后检测」前移，
+   * 避免 fast 先凭印象答、再二次升级 complex 的重复 LLM 消耗。
+   * 未注册 DecisionHub 时返回默认 fast 低置信度（保守，不强制升级）。
+   */
+  routeLight(userMessage: string): {
+    mode: "fast" | "complex";
+    confidence: number;
+    reason: string;
+    agentType?: "tech" | "info" | "life";
+  } {
+    const hub = this.decisionHub;
+    if (hub) {
+      const d = hub.getRuleRouter().route(userMessage);
+      return {
+        mode: d.mode,
+        confidence: d.confidence,
+        reason: d.reason,
+        agentType: d.agentType,
+      };
+    }
+    return { mode: "fast", confidence: 0.5, reason: "no_decision_hub" };
+  }
+
   // ---- Step 7 扩展：新模块注册 + getter --------------------------------
 
   registerWorkingMemoryCortex(wm: import("./working-memory-cortex.js").WorkingMemoryCortex): void {
@@ -964,6 +1017,25 @@ export class BrainCenter {
     if (!this.memory) return;
     const correctedText = summarizeLearningText(userText);
     const assistantSummary = assistantText ? summarizeLearningText(assistantText) : "";
+    // 记忆相关性在线反馈：用户纠正 → 对助手回复中涉及的旧记忆内容做负反馈。
+    // 助手回复通常复述了被召回的旧记忆，后续再次召回同指纹记忆时会被惩罚降权。
+    if (assistantSummary) {
+      const lines = assistantSummary
+        .split(/\n+/)
+        .map((l) => l.trim())
+        .filter((l) => l.length >= 6);
+      for (const line of lines.length > 0 ? lines : [assistantSummary]) {
+        try {
+          this.memory.recordMemoryFeedback?.({
+            actorId,
+            content: line,
+            outcome: "correction",
+          });
+        } catch {
+          /* 反馈记录非阻塞 */
+        }
+      }
+    }
     const beliefKey = stableLearningKey(`correction:${correctedText}`);
     const content = assistantSummary
       ? `User correction received. user="${correctedText}" assistant="${assistantSummary}"`
@@ -1004,6 +1076,58 @@ export class BrainCenter {
 
   getLearningSnapshot(actorId: string): LearningSnapshot | null {
     return this.memory?.getLearningSnapshot?.(actorId) ?? null;
+  }
+
+  /**
+   * 记忆相关性在线反馈回灌：转发到 MemoryCortex.recordMemoryFeedback。
+   * 未注册时静默降级（不阻塞调用方）。
+   */
+  recordMemoryFeedback(input: MemoryFeedbackInput): void {
+    if (!this.memory?.recordMemoryFeedback) return;
+    try {
+      this.memory.recordMemoryFeedback(input);
+    } catch (err) {
+      console.warn("[BrainCenter] recordMemoryFeedback failed:", err);
+    }
+  }
+
+  /** 读取某 actor 的记忆反馈快照（调试/统计用）。 */
+  getMemoryFeedbackSnapshot(actorId: string): unknown {
+    return this.memory?.getMemoryFeedbackSnapshot?.(actorId) ?? null;
+  }
+
+  /** 跨会话开放环路：转发到 MemoryCortex（KV 持久化）。未注册时静默降级。 */
+  updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries): void {
+    if (!this.memory?.updateSessionEpitome) return;
+    try {
+      this.memory.updateSessionEpitome(actorId, entries);
+    } catch (err) {
+      console.warn("[BrainCenter] updateSessionEpitome failed:", err);
+    }
+  }
+
+  /** 读取某 actor 的跨会话开放环路快照（新会话开场注入用）。 */
+  getSessionEpitome(actorId: string): SessionEpitomeSnapshot | null {
+    return this.memory?.getSessionEpitome?.(actorId) ?? null;
+  }
+
+  /** 读取某 actor 的最近召回锚点（连续性诊断用）。 */
+  getRecallAnchors(actorId: string): unknown[] {
+    return this.memory?.getRecallAnchors?.(actorId) ?? [];
+  }
+
+  /**
+   * 连续性诊断：聚合最近召回锚点 + 反馈惩罚 + 跨会话开放环路。
+   * 用于定位"上下文跳转"根因（最近注入了什么、哪些被反馈降权、上一会话遗留了什么）。
+   */
+  diagnoseContinuity(actorId: string): Record<string, unknown> {
+    return {
+      actorId,
+      recalledAt: new Date().toISOString(),
+      recentRecalls: this.getRecallAnchors(actorId),
+      feedback: this.getMemoryFeedbackSnapshot(actorId),
+      epitome: this.getSessionEpitome(actorId),
+    };
   }
 
   /**
@@ -1072,6 +1196,7 @@ export class BrainCenter {
       emotion,
       anticipatedIntent,
       bodySense,
+      situation,
     ] = await Promise.all([
       input.audio && this.sensory
         ? this.sensory.listen(input.audio).catch(() => null)
@@ -1104,6 +1229,12 @@ export class BrainCenter {
       this.bodyGateway
         ? this.bodyGateway.sense({ kind: "where_am_i", actorId }).catch(() => null)
         : Promise.resolve(null),
+      // Situation 依赖 userActivity（已在 Promise.all 前同步拿到），并入大并行消除阶段 1.6 的串行等待
+      this.contextCortex
+        ? this.contextCortex
+            .gatherContext(actorId, { activity: userActivity ?? null })
+            .catch(() => null)
+        : Promise.resolve(null),
     ]);
 
     // === 阶段 1.5：组装多模态融合帧（SensoryFrame）===
@@ -1130,25 +1261,30 @@ export class BrainCenter {
     // 例：用户追问"kimi的新模型啊"时，cognize 需要知道上一轮刚聊过 Kimi K3。
     let recentConversationHistory = "";
     try {
-      const chatSessionId = resolvePrimaryChatSessionId(
-        actorId,
-        getAgentRuntimeConfig().masterDelegation.enabled,
-      );
+      // 修复：主会话 thread 统一存于 `master:{actorId}`（masterDelegation 开启时）。
+      // 原实现用 input.sessionId（裸 actorId）拉取 → 恒为空 → 追问时 cognize 无上下文（失忆）。
+      // notes 会话保留独立前缀，其余统一走 resolvePrimaryChatSessionId（与 agent-core 一致）。
+      const chatSessionId =
+        input.sessionId && isNotesChatSessionId(input.sessionId)
+          ? input.sessionId
+          : resolvePrimaryChatSessionId(
+              actorId,
+              getAgentRuntimeConfig().masterDelegation.enabled,
+            );
       const threadStore = getChatThreadStore();
       const messages = threadStore.thread(chatSessionId, "");
-      // 取最近 12 条消息（6 轮对话：user + assistant）—— 扩展自原 6 条，解决追问断片
       const recentMessages = messages.slice(-12);
-      if (recentMessages.length > 0) {
-        const historyLines = recentMessages
-          .map((msg: ChatCompletionMessageParam) => {
-            const role = msg.role === "user" ? "用户" : msg.role === "assistant" ? "Agent" : null;
-            if (!role) return null;
-            const content = typeof msg.content === "string" ? msg.content : "[多模态消息]";
-            // 去掉时间戳前缀（[ts:...]）
-            const cleaned = content.replace(/^\[ts:[^\]]+\]\n?/, "").trim();
-            return cleaned ? `${role}：${cleaned}` : null;
-          })
-          .filter(Boolean);
+      const currentUserMessage =
+        input.text?.trim()
+          ? ({ role: "user", content: input.text.trim() } satisfies ChatCompletionMessageParam)
+          : null;
+      const recentWindow = currentUserMessage
+        ? [...recentMessages, currentUserMessage].slice(-12)
+        : recentMessages;
+      if (recentWindow.length > 0) {
+        const historyLines = recentWindow
+          .map((msg: ChatCompletionMessageParam) => formatRecentConversationLine(msg))
+          .filter((line): line is string => Boolean(line));
         recentConversationHistory = historyLines.join("\n");
       }
     } catch (err) {
@@ -1174,20 +1310,9 @@ export class BrainCenter {
       // BodyGateway 感官查询结果（where_am_i）：device/screenX/screenY/mood/rendering 等
       // bodyGateway 未注入时为 undefined（纯脑模式，向后兼容）
       bodyState: bodySense?.ok ? (bodySense.data as unknown as BodyState) : undefined,
+      // 情境（阶段 1 大并行已收集，替代原先阶段 1.6 的串行 await）
+      situation: situation ?? undefined,
     };
-
-    // === 阶段 1.6：Step 7 扩展上下文（仅 Situation）===
-    // 性能优化（方案 B）：4 个新模块已在阶段 1 大并行中收集，只剩 Situation
-    // 依赖 userActivity，单独后置调用（已用方案 A 传入 activity 避免 observe 重复）。
-    if (this.contextCortex) {
-      try {
-        context.situation = await this.contextCortex.gatherContext(actorId, {
-          activity: userActivity ?? null,
-        });
-      } catch (err) {
-        console.log(`[BrainCenter] contextCortex.gatherContext 失败（忽略）: ${err}`);
-      }
-    }
 
     // === 阶段 1.7：（已废弃正则预评判）===
     // 原先在此用 AwarenessCortex.assessConfidence 正则规则预评分，但正则无法理解
@@ -1368,6 +1493,21 @@ export class BrainCenter {
                 /* ignore */
               }
             }
+          }
+          // 跨会话开放环路（记忆连续性 Phase 2）：每轮提取 open loops / 承诺 / 偏好，
+          // 持久化到 KV，新会话开场注入【上一会话待办】。fire-and-forget，失败静默。
+          // 传入 finalResponse（脱敏后的 Agent 回复），让 Agent 回复中的承诺也能被捕获。
+          try {
+            const epitome = extractEpitomeEntries(query, allWrites, finalResponse);
+            if (
+              epitome.openLoops.length > 0 ||
+              epitome.commitments.length > 0 ||
+              epitome.preferences.length > 0
+            ) {
+              this.updateSessionEpitome(actorId, epitome);
+            }
+          } catch {
+            /* epitome 提取失败不影响记忆写入 */
           }
         } catch {
           /* ignore memory write failure */

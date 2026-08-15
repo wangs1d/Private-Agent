@@ -27,4 +27,8 @@ export { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 export { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
 export { FailoverChatProvider } from "./failover-chat-provider.js";
 export { instantiateKnownProvider } from "./instantiate-provider.js";
-export { createExternalChatProviderFromEnv, resolvePrimaryExternalModelBinding } from "./resolve-provider.js";
+export {
+  createExternalChatProviderFromEnv,
+  resolvePrimaryExternalModelBinding,
+  resolvePrimaryLlmClientConfig,
+} from "./resolve-provider.js";

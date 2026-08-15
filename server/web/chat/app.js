@@ -1,13 +1,6 @@
 /**
- * 浏览器聊天页（与 Flutter 共用同一 WS 协议与灰色五子棋邀请卡片）。
+ * 浏览器聊天页（与 Flutter 共用同一 WS 协议）。
  */
-import {
-  bindGomokuInviteButtons,
-  displayTextForGomoku,
-  playUrlFromText,
-  playUrlFromToolResult,
-  renderGomokuInviteHtml,
-} from "./gomoku-invite.js";
 import {
   parseContentSummaryV2,
   renderContentSummaryCardV2,
@@ -254,7 +247,7 @@ let heartbeatTimer = null;
 let lastInboundAt = 0;
 /** 与聊天区「处理中」进度条同步，供服务端合并用户连发消息 */
 let agentProcessingUiActive = false;
-/** @type {Map<string, { el: HTMLElement, text: string, playUrl: string | null }>} */
+/** @type {Map<string, { el: HTMLElement, text: string }>} */
 const assistants = new Map();
 
 /** @type {HTMLIFrameElement | null} */
@@ -706,6 +699,30 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * 把 agent 回复文本渲染为 HTML。
+ * 优先用 marked + DOMPurify 渲染 Markdown（独立排版 2：Markdown 排版）；
+ * 库未加载或渲染失败时回退为纯文本转义。
+ *
+ * 整体包在 `.reply-card` 容器中：边框/圆角/阴影，与聊天区其它元素区分。
+ */
+function renderMessageHtml(text) {
+  const md = window.marked;
+  const dp = window.DOMPurify;
+  let inner = "";
+  if (md && dp) {
+    try {
+      const raw = md.parse(String(text ?? ""));
+      inner = dp.sanitize(raw, { USE_PROFILES: { html: true } });
+    } catch {
+      inner = escapeHtml(text);
+    }
+  } else {
+    inner = escapeHtml(text);
+  }
+  return `<div class="reply-card"><div class="md-body">${inner}</div></div>`;
+}
+
 function appendBubble(role, html, id) {
   const el = document.createElement("div");
   el.className = `bubble ${role}`;
@@ -718,38 +735,28 @@ function appendBubble(role, html, id) {
 function paintAssistant(id) {
   const row = assistants.get(id);
   if (!row) return;
-  const playUrl = row.playUrl ?? playUrlFromText(row.text);
-  if (playUrl) {
-    row.el.innerHTML = renderGomokuInviteHtml({ text: row.text, playUrl });
-    bindGomokuInviteButtons(row.el, (url) => {
-      window.location.href = url.startsWith("http") ? url : `${window.location.origin}/play/gomoku/${url}`;
-    });
-  } else {
-    const { summary, briefText, cleanedText } = parseContentSummaryV2(row.text);
-    if (summary) {
-      const cardHtml = renderContentSummaryCardV2(summary, briefText);
-
-      if (summary.detailContent) {
-        storeDetailContent(summary.id, summary.detailContent);
-      }
-
-      if (summary.sections) {
-        storeSections(summary.id, summary.sections);
-      }
-
-      if (cleanedText && cleanedText.trim()) {
-        row.el.innerHTML = cardHtml + `<div class="card-context-text" style="margin-top: 8px;">${escapeHtml(cleanedText)}</div>`;
-      } else {
-        row.el.innerHTML = cardHtml;
-      }
-
-      if (!window.__contentSummaries) {
-        window.__contentSummaries = {};
-      }
-      window.__contentSummaries[summary.id] = summary;
-    } else {
-      row.el.innerHTML = escapeHtml(row.text);
+  const { summary, briefText, cleanedText } = parseContentSummaryV2(row.text);
+  if (summary) {
+    // 独立排版 1：内容摘要卡片（原本就有的图片形式卡片，<details_card> 标记触发）
+    const cardHtml = renderContentSummaryCardV2(summary, briefText);
+    if (summary.detailContent) {
+      storeDetailContent(summary.id, summary.detailContent);
     }
+    if (summary.sections) {
+      storeSections(summary.id, summary.sections);
+    }
+    if (cleanedText && cleanedText.trim()) {
+      row.el.innerHTML = cardHtml + `<div class="card-context-text" style="margin-top: 8px;">${escapeHtml(cleanedText)}</div>`;
+    } else {
+      row.el.innerHTML = cardHtml;
+    }
+    if (!window.__contentSummaries) {
+      window.__contentSummaries = {};
+    }
+    window.__contentSummaries[summary.id] = summary;
+  } else {
+    // 独立排版 2：Markdown 排版，包一层「回复卡」容器（边框/圆角/阴影，与其它元素区分）
+    row.el.innerHTML = renderMessageHtml(row.text);
   }
 }
 
@@ -757,7 +764,7 @@ function ensureAssistant(id) {
   let row = assistants.get(id);
   if (row) return row;
   const el = appendBubble("assistant", "", id);
-  row = { el, text: "", playUrl: null };
+  row = { el, text: "" };
   assistants.set(id, row);
   return row;
 }
@@ -991,8 +998,6 @@ function handleWs(msg) {
     const id = String(p.messageId ?? "assistant-chunk");
     const row = ensureAssistant(id);
     row.text += String(p.chunk ?? "");
-    const detected = playUrlFromText(row.text);
-    if (detected) row.playUrl = detected;
     paintAssistant(id);
     scrollToLatest();
     avatarSpeakingEnergy = Math.min(1, avatarSpeakingEnergy + 0.025);
@@ -1001,14 +1006,7 @@ function handleWs(msg) {
   }
 
   if (type === "tool.result") {
-    const playUrl = playUrlFromToolResult(p.result);
-    const traceId = String(p.traceId ?? "");
-    if (playUrl && traceId) {
-      const id = `assistant-${traceId}`;
-      const row = ensureAssistant(id);
-      row.playUrl = playUrl;
-      paintAssistant(id);
-    }
+    // 五子棋 playUrl 逻辑已移除，不再做卡片重绘。
     return;
   }
 
@@ -1024,7 +1022,6 @@ function handleWs(msg) {
     const row = ensureAssistant(id);
     const finalText = String(p.finalText ?? "").trim();
     if (finalText) row.text = finalText;
-    if (!row.playUrl) row.playUrl = playUrlFromText(row.text);
     paintAssistant(id);
     dailyChatStorage.saveMessage('assistant', row.text, id);
     scrollToLatest();

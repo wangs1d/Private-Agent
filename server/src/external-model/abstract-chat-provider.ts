@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { appendFileSync } from "node:fs";
 
 import {
   annotateUserContentForLlm,
@@ -278,9 +279,31 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // ── 非工具分支 ──
     let stream;
     try {
+      const finalMessages = applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages);
+      // TEMP DEBUG（记忆注入诊断 5：实际发给 LLM 的最终 messages 是否含记忆）
+      try {
+        const sysJoined = finalMessages
+          .filter((m) => m.role === "system" && typeof m.content === "string")
+          .map((m) => String(m.content))
+          .join("\n");
+        appendFileSync(
+          ".memory-inject-debug.log",
+          JSON.stringify({
+            t: new Date().toISOString(),
+            phase: "finalRequest",
+            overrideSys: Boolean(overrideSys),
+            sysMsgCount: finalMessages.filter((m) => m.role === "system").length,
+            finalSysHasNarrative: sysJoined.includes("记忆图联想检索"),
+            promptPlanSysHasNarrative: String(promptPlan.requestSystemMessages[0]?.content ?? "").includes("记忆图联想检索"),
+            finalSysHead: sysJoined.slice(0, 120),
+          }) + "\n",
+        );
+      } catch {
+        /* ignore */
+      }
       const request = {
         model,
-        messages: applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages),
+        messages: finalMessages,
         stream: true,
         ...(promptPlan.promptCache ?? {}),
         ...(this.applyExtraBodyToPlainRequest() ? (extraBody ?? {}) : {}),

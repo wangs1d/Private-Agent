@@ -1,8 +1,10 @@
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 
 import "../theme/app_theme.dart";
 
-/// 简洁的定位权限弹窗：询问用户是否允许 Agent 获取位置信息。
+/// 简洁的定位权限弹窗：默认聚焦「允许」按钮（按 Enter/回车直接确认）。
+/// 任何 dismiss（点空白、系统返回、Esc）行为均视为同意；只有显式点击「暂不允许」才回退。
 Future<bool?> showLocationPermissionDialog({
   required BuildContext context,
 }) {
@@ -33,57 +35,81 @@ class _LocationPermissionDialogBodyState
         borderRadius: BorderRadius.circular(14),
         side: const BorderSide(color: AppPalette.locationDialogBorder),
       ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 400),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              const Text(
-                "定位权限",
-                style: TextStyle(
-                  color: AppPalette.locationDialogTitle,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                "是否允许 Agent 获取您的位置信息？",
-                style: TextStyle(
-                  color: AppPalette.locationDialogBody.withValues(alpha: 0.92),
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+      child: Shortcuts(
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.enter): _ConfirmIntent(),
+          SingleActivator(LogicalKeyboardKey.numpadEnter): _ConfirmIntent(),
+        },
+        child: Actions(
+          actions: <Type, Action<Intent>>{
+            _ConfirmIntent: CallbackAction<_ConfirmIntent>(
+              onInvoke: (_) {
+                if (Navigator.canPop(context)) {
+                  Navigator.pop(context, true);
+                }
+                return null;
+              },
+            ),
+          },
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppPalette.locationDialogMuted,
+                  const Text(
+                    "定位权限",
+                    style: TextStyle(
+                      color: AppPalette.locationDialogTitle,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
                     ),
-                    child: const Text("暂不允许"),
                   ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppPalette.locationDialogButtonBg,
-                      foregroundColor: AppPalette.locationDialogButtonFg,
+                  const SizedBox(height: 16),
+                  Text(
+                    "是否允许 Agent 获取您实时的位置信息？\n（按 Enter 默认同意，用于天气、附近推荐等场景。）",
+                    style: TextStyle(
+                      color: AppPalette.locationDialogBody.withValues(alpha: 0.92),
+                      fontSize: 15,
+                      height: 1.5,
                     ),
-                    child: const Text("允许"),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: <Widget>[
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        style: TextButton.styleFrom(
+                          foregroundColor: AppPalette.locationDialogMuted,
+                        ),
+                        child: const Text("暂不允许"),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        autofocus: true,
+                        onPressed: () => Navigator.pop(context, true),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppPalette.locationDialogButtonBg,
+                          foregroundColor: AppPalette.locationDialogButtonFg,
+                        ),
+                        child: const Text("允许"),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
 }
+
+class _ConfirmIntent extends Intent {
+  const _ConfirmIntent();
+}
+

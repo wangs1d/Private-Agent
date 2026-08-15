@@ -1,21 +1,30 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="overlay-root">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent 桌宠 · 3D</title>
     <style>
-      html, body, #root {
+      html.overlay-root,
+      html.overlay-root body,
+      html.overlay-root #root {
         margin: 0;
         width: 100%;
         height: 100%;
         overflow: hidden;
         background: transparent !important;
       }
+      /* 确保 Canvas 不超出容器 */
+      .mode-shell canvas,
+      .overlay-pet-pane canvas {
+        display: block;
+        clip-path: inset(0);
+      }
     </style>
-    <script type="module" crossorigin src="/chat/assets/avatar/assets/overlay-rKSF2-q7.js"></script>
-    <link rel="modulepreload" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-ChJr7RGZ.js">
-    <link rel="stylesheet" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-B4vlw4d2.css">
+    <script type="module" crossorigin src="/chat/assets/avatar/assets/overlay-Bu0wjW0z.js"></script>
+    <link rel="modulepreload" crossorigin href="/chat/assets/avatar/assets/client-BQA3iFgX.js">
+    <link rel="modulepreload" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-BbdJrZxJ.js">
+    <link rel="stylesheet" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-DdBSiJab.css">
     <link rel="stylesheet" crossorigin href="/chat/assets/avatar/assets/overlay-DOArU_u_.css">
   </head>
   <body>

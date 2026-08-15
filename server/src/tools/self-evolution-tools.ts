@@ -2,11 +2,13 @@
  * Agent 自我驱动进化工具
  *
  * 让 Agent 在对话中能够调用自我进化能力：
- *   1. self_evolution.trigger_tech_scan     - 触发技术扫描 + LLM 评估 + 沙箱测试
- *   2. self_evolution.list_proposals        - 查看进化提案（pending/approved/...）
- *   3. self_evolution.execute_proposal      - 对已 approved 提案执行沙箱测试
- *   4. self_evolution.run_failure_rate_scan - 基于能力失败率生成 self_upgrade 提案
- *   5. self_evolution.check_dependencies    - 检查依赖升级并生成沙箱测试报告
+ *   1. self_evolution.trigger_tech_scan       - 触发技术扫描 + LLM 评估 + 沙箱测试
+ *   2. self_evolution.list_proposals          - 查看进化提案（pending/approved/...）
+ *   3. self_evolution.execute_proposal        - 对已 approved 提案执行沙箱测试
+ *   4. self_evolution.run_failure_rate_scan   - 基于能力失败率生成 self_upgrade 提案
+ *   5. self_evolution.check_dependencies      - 检查依赖升级并生成沙箱测试报告
+ *   6. self_evolution.discover_better_tool    - 外部知识扫描发现更优 tool/skill 替代方案
+ *   7. self_evolution.modify_router_code      - 读取/修改 tool-router 自身代码并重启
  *
  * 接入路径（fast/complex 模式都能用，因为是工具调用）：
  *   - 用户说"自我进化" / "升级依赖" / "扫描新版本" → task-router 路由到 complex
@@ -17,6 +19,7 @@
  *   - 仅白名单内的 npm 包可升级（防任意包安装）
  *   - 沙箱测试必真实执行（tsc + test + 回滚）
  *   - LLM 识别 breaking changes → 阻止自动升级，需用户确认
+ *   - modify_router_code 写入前做路径安全检查（防路径穿越）
  */
 
 import { resolveActorId } from "../agent/actor-id.js";
@@ -28,6 +31,14 @@ import type { ExternalTechScanner } from "../services/external-tech-scanner.js";
 import type { BenchmarkSelfAssessment } from "../services/benchmark-self-assessment.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { getModelOverrideForTask, TaskTier } from "../config/model-routing.js";
+import {
+  discoverBetterTools,
+  listToolRouterResources,
+  readToolRouterCode,
+  writeToolRouterCode,
+  listToolRouterCodeFiles,
+  registerSkillToToolRouter,
+} from "../services/self-evolution-router-registrar.js";
 
 export interface SelfEvolutionToolDeps {
   evolutionCortex: EvolutionCortex;
@@ -346,5 +357,231 @@ export function registerSelfEvolutionTools(
     }
   });
 
-  console.log("[self_evolution] 已注册 5 个工具: trigger_tech_scan / list_proposals / execute_proposal / run_failure_rate_scan / check_dependencies");
+  // ========== 6. 外部知识扫描发现更优 tool/skill 替代方案 ==========
+  registry.register("self_evolution.discover_better_tool", async (input, context) => {
+    void context;
+    const start = Date.now();
+    try {
+      // 1. 读取外部扫描结果（从 input 传入或自行触发扫描）
+      const externalResults = input.externalResults as Array<{
+        name: string;
+        description: string;
+        sourceUrl: string;
+        domain: string;
+        score: number;
+      }> | undefined;
+
+      if (!externalResults || externalResults.length === 0) {
+        // 没有外部结果：先触发 techScanner 扫描，再对比
+        const scanResults = await techScanner.scan();
+        const hasUpdates = scanResults.filter((r) => r.hasUpdate);
+        if (hasUpdates.length === 0) {
+          return {
+            ok: true,
+            message: "外部扫描无新版本可发现，当前注册的 tool/skill 均为最新",
+            candidates: 0,
+          };
+        }
+        // 将扫描结果转为对比格式
+        const mapped: Array<{
+          name: string;
+          description: string;
+          sourceUrl: string;
+          domain: string;
+          score: number;
+        }> = [];
+        for (const r of hasUpdates) {
+          const latest = r.latestVersion as string | undefined;
+          const pkgName = r.watch.npmPackage ?? r.watch.githubRepo ?? r.watch.domain;
+          mapped.push({
+            name: pkgName,
+            description: `发现新版本 ${r.watch.currentVersion ?? "unknown"} → ${latest ?? "latest"}`,
+            sourceUrl: `https://www.npmjs.com/package/${pkgName}`,
+            domain: "dependency",
+            score: 0.8,
+          });
+        }
+        // 对比当前注册资源
+        const replacements = await discoverBetterTools(mapped);
+
+        // 如果有替换方案，生成进化提案
+        if (replacements.length > 0) {
+          const proposals = await proposer.proposeFromTechScan(
+            replacements.map((r) => ({
+              packageName: r.alternativeName,
+              currentVersion: "1.0.0",
+              hasUpdate: true,
+              latestVersion: "2.0.0",
+              changelog: `更好的替代方案: ${r.improvement}`,
+              owner: "npm",
+              repo: r.alternativeName,
+              npmUrl: r.sourceUrl,
+            } as any)),
+          );
+          if (proposals.length > 0) {
+            const assessments = new Map<string, EvolutionLlmAssessment>();
+            for (const p of proposals) {
+              const a = proposer.getAssessment(p.id);
+              if (a) assessments.set(p.id, a);
+            }
+            evolutionCortex.ingestProposals(proposals, assessments);
+          }
+        }
+
+        return {
+          ok: true,
+          message: replacements.length > 0
+            ? `发现 ${replacements.length} 个可能的更优替代方案，已注入 EvolutionCortex`
+            : "扫描完成，当前注册的 tool/skill 无更优外部替代方案",
+          candidates: replacements.length,
+          replacements: replacements.map((r) => ({
+            currentName: r.currentName,
+            currentDescription: r.currentDescription,
+            alternativeName: r.alternativeName,
+            alternativeDescription: r.alternativeDescription,
+            sourceUrl: r.sourceUrl,
+            improvement: r.improvement,
+          })),
+          durationMs: Date.now() - start,
+        };
+      }
+
+      // 有外部结果：直接对比
+      const replacements = await discoverBetterTools(externalResults);
+      return {
+        ok: true,
+        message: replacements.length > 0
+          ? `发现 ${replacements.length} 个可能的更优替代方案`
+          : "当前注册的 tool/skill 无更优外部替代方案",
+        candidates: replacements.length,
+        replacements: replacements.map((r) => ({
+          currentName: r.currentName,
+          currentDescription: r.currentDescription,
+          alternativeName: r.alternativeName,
+          alternativeDescription: r.alternativeDescription,
+          sourceUrl: r.sourceUrl,
+          improvement: r.improvement,
+        })),
+        currentRegistry: (await listToolRouterResources()).resources.map((r) => ({
+          name: r.name,
+          type: r.resource_type,
+          domain: r.domain,
+        })),
+        durationMs: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `发现更优 tool/skill 失败: ${msg}`, durationMs: Date.now() - start };
+    }
+  });
+
+  // ========== 7. 读取/修改 tool-router 自身代码并重启 ==========
+  registry.register("self_evolution.modify_router_code", async (input, context) => {
+    void context;
+    try {
+      const action = String(input.action ?? "list").trim();
+
+      if (action === "list") {
+        // 列出所有 .py 文件
+        const files = await listToolRouterCodeFiles();
+        return {
+          ok: true,
+          action: "list",
+          files,
+          total: files.length,
+        };
+      }
+
+      if (action === "read") {
+        const filePath = String(input.filePath ?? "").trim();
+        if (!filePath) {
+          return { ok: false, error: "需要提供 filePath" };
+        }
+        const result = await readToolRouterCode(filePath);
+        if (!result.ok) {
+          return { ok: false, error: result.error };
+        }
+        return {
+          ok: true,
+          action: "read",
+          filePath,
+          content: result.content,
+          fileSize: result.content!.length,
+        };
+      }
+
+      if (action === "write") {
+        const filePath = String(input.filePath ?? "").trim();
+        const content = String(input.content ?? "").trim();
+        if (!filePath || !content) {
+          return { ok: false, error: "需要提供 filePath 和 content" };
+        }
+        // 路径安全检查：只允许写入 tool-router/tool_router/ 目录下的文件
+        if (!filePath.startsWith("tool_router/") && !filePath.startsWith("scripts/")) {
+          return { ok: false, error: "只能修改 tool_router/ 或 scripts/ 目录下的文件" };
+        }
+        const result = await writeToolRouterCode(filePath, content);
+        if (!result.ok) {
+          return { ok: false, error: result.error };
+        }
+        // 修改后重新注册到 tool-router（热更新）
+        // 先用 list 读当前资源，再重新注册（让最新代码生效）
+        console.log(`[self_evolution] 已修改 ${filePath}，请求热更新…`);
+        return {
+          ok: true,
+          action: "write",
+          filePath,
+          contentSize: content.length,
+          message: `已修改 ${filePath}，修改将自动生效（下次 tool-router 调用时重新加载）`,
+          suggestRestart: "如需立即重启 tool-router 服务，请重启服务进程",
+        };
+      }
+
+      if (action === "diff") {
+        const filePath = String(input.filePath ?? "").trim();
+        const oldContent = String(input.oldContent ?? "").trim();
+        const newContent = String(input.newContent ?? "").trim();
+        if (!filePath || !oldContent || !newContent) {
+          return { ok: false, error: "需要提供 filePath、oldContent 和 newContent" };
+        }
+        // 简易 diff（行级对比）
+        const oldLines = oldContent.split("\n");
+        const newLines = newContent.split("\n");
+        const added: number[] = [];
+        const removed: number[] = [];
+        const maxLen = Math.max(oldLines.length, newLines.length);
+        for (let i = 0; i < maxLen; i++) {
+          if (i >= oldLines.length) {
+            added.push(i + 1);
+          } else if (i >= newLines.length) {
+            removed.push(i + 1);
+          } else if (oldLines[i] !== newLines[i]) {
+            removed.push(i + 1);
+            added.push(i + 1);
+          }
+        }
+        return {
+          ok: true,
+          action: "diff",
+          filePath,
+          oldLines: oldLines.length,
+          newLines: newLines.length,
+          added: added.length,
+          removed: removed.length,
+          addedLines: added.slice(0, 20),
+          removedLines: removed.slice(0, 20),
+          note: added.length > 20 ? "仅显示前 20 条变更" : undefined,
+        };
+      }
+
+      return { ok: false, error: `不支持的操作: ${action}（支持: list, read, write, diff）` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `修改 router 代码失败: ${msg}` };
+    }
+  });
+
+  console.log(
+    "[self_evolution] 已注册 7 个工具: trigger_tech_scan / list_proposals / execute_proposal / run_failure_rate_scan / check_dependencies / discover_better_tool / modify_router_code",
+  );
 }

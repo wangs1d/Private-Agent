@@ -1,5 +1,7 @@
 import OpenAI from "openai";
 
+import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+
 export type MemoryDecision = "remember" | "reject" | "overwrite" | "decay";
 
 export type MemorySemanticClass =
@@ -117,13 +119,13 @@ async function llmDecision(
   context: MemoryDecisionContext,
   heuristic: MemoryDecisionResult,
 ): Promise<MemoryDecisionResult | null> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return null;
+  const llm = resolvePrimaryLlmClientConfig();
+  if (!llm) return null;
 
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
     const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || "gpt-4.1-mini",
+      model: process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [

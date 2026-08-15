@@ -43,6 +43,16 @@ import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
 
+/**
+ * 从 `userLocation` 注入串（如「…，时区 Asia/Shanghai。…」）提取用户 IANA 时区。
+ * 抽不出则返回 undefined，调用方回退到服务器进程时区。
+ */
+function extractUserTimezoneFromLocation(userLocation?: string): string | undefined {
+  if (!userLocation) return undefined;
+  const m = userLocation.match(/时区\s+([A-Za-z]+(?:\/[A-Za-z0-9_+.-]+)*)/);
+  return m?.[1]?.trim() || undefined;
+}
+
 function buildCompactAgentCapsPrompt(): string {
   const cfg = getAgentRuntimeConfig();
   const lines = [
@@ -176,21 +186,35 @@ export function formatNarrativeRecallPrompt(text: string | undefined): string | 
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  if (rawLines.length === 0) return undefined;
 
-  const items = rawLines
-    .map((line) => {
-      const numbered = line.match(/^\[(\d+)\]\s*(.+)$/);
-      if (numbered?.[2]) return compactSchemaField(numbered[2], 120);
+  const items: string[] = [];
+  for (const line of rawLines) {
+    if (items.length >= 6) break;
 
-      const bullet = line.match(/^[-*•]\s*(.+)$/);
-      if (bullet?.[1]) return compactSchemaField(bullet[1], 120);
+    // 跳过系统头/任务复述/说明行（非用户记忆内容）
+    if (
+      /^(记忆重构结果|当前任务|以下内容为|以下为与|以下为|Mem0|记忆图联想|长期叙事|履历摘录|【)/i.test(line)
+    ) {
+      continue;
+    }
 
-      if (/^(以下|Mem0|记忆图|长时记忆|长期叙事)/i.test(line)) return "";
-      return compactSchemaField(line, 120);
-    })
-    .filter(Boolean)
-    .slice(0, 4);
+    // 提取真实记忆正文：支持 reconstructRecall 事实行 / 长期叙事摘录编号行 / 普通行
+    let content = line;
+    const numbered = line.match(/^\d+\.\s*\[[^\]]+\]\s*(.+)$/);
+    const bracketNum = line.match(/^\[\d+\]\s*(.+)$/);
+    if (numbered?.[1]) content = numbered[1];
+    else if (bracketNum?.[1]) content = bracketNum[1];
+
+    // 过滤无信息量的工具日志 / 时间戳 / digest 系统行（HumanLike 图会记录 HermesLoop 日志节点）
+    if (content.length < 2) continue;
+    if (
+      /^\{"line":"HermesLoop|^\[ts:|^Daily digest|^Tool interaction (succeeded|failed)/i.test(content)
+    ) {
+      continue;
+    }
+
+    items.push(compactSchemaField(content, 200));
+  }
 
   if (items.length === 0) return undefined;
 
@@ -568,7 +592,7 @@ export class PromptContextBuilder {
 
     const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
-      currentTime: buildCurrentTimePrompt(),
+      currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
       ...(personalityCore ? { personalityCore } : {}),
       ...(fromKv.taskContext || effectiveTaskContext || shortTermTaskContext
         ? { taskContext: [fromKv.taskContext, effectiveTaskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }

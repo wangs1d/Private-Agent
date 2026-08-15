@@ -14,10 +14,21 @@ interface MessageListProps {
 export function MessageList({ messages }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const prevCountRef = useRef(0);
 
   useEffect(() => {
-    if (bottomRef.current) {
+    const container = containerRef.current;
+    if (!container || !bottomRef.current) return;
+    const count = messages.length;
+    const isNewMessage = count > prevCountRef.current;
+    prevCountRef.current = count;
+
+    if (isNewMessage) {
+      // 新增了一条消息：平滑滚入到底部
       bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    } else if (container.scrollHeight - container.scrollTop - container.clientHeight < 8) {
+      // 流式追加内容：已贴底时瞬时跟随，避免每次 chunk 平滑滚动导致最新文字持续"动"
+      container.scrollTop = container.scrollHeight;
     }
   }, [messages]);
 

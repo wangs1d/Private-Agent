@@ -28,6 +28,7 @@ import "package:record/record.dart";
 import "../../core/config/api_config.dart";
 import "../../core/services/tts_player.dart";
 import "../../core/services/ws_chat_service.dart";
+import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/assistant_text_sanitizer.dart";
 
 /// 语音对话状态机
@@ -263,13 +264,45 @@ class VoiceOrbState extends State<VoiceOrb>
       _resetToIdle("暂无回复");
       return;
     }
+    // 语音播报取舍：卡片块的 speak=high 时优先朗读「结论」(title+footer)，
+    // 否则剥离卡片块只读正文，避免把卡片 JSON 原文读出来。
+    final String speakText = _resolveSpeakText(text);
+    if (speakText.isEmpty) {
+      if (!mounted) return;
+      _resetToIdle("暂无回复");
+      return;
+    }
     if (!mounted) return;
     setState(() {
-      _turns.add(_OrbTurn(isUser: false, text: text));
-      _subtitle = text;
+      _turns.add(_OrbTurn(isUser: false, text: speakText));
+      _subtitle = speakText;
       _phase = VoiceOrbPhase.speaking;
     });
-    await _synthesizeAndPlay(text);
+    await _synthesizeAndPlay(speakText);
+  }
+
+  /// 根据卡片 speak 优先级决定朗读文本与字幕文本。
+  ///
+  /// - 含结果卡片：剥离 `AGENT_RESULT_CARD_*` 标记，绝不朗读原始 JSON；
+  ///   - `speak=high` → 优先朗读「结论」= title + footer（追问/结论句）；
+  ///   - 其余 → 朗读剥离卡片后的正文字。
+  /// - 无卡片：原样返回清洗后的文本。
+  String _resolveSpeakText(String raw) {
+    final String stripped = stripAssistantTimestampFrames(raw).trim();
+    if (stripped.isEmpty) return "";
+    final AgentResultParseResult parsed = AgentResultParser.parse(stripped);
+    final AgentResultData? data = parsed.data;
+    if (data == null) return stripped;
+
+    final String body = parsed.cleanedText.trim();
+    final String conclusion = <String>[
+      if (data.title.trim().isNotEmpty) data.title.trim(),
+      if (data.footer.trim().isNotEmpty) data.footer.trim(),
+    ].join("。");
+    if (data.speak == "high" && conclusion.isNotEmpty) {
+      return conclusion;
+    }
+    return body.isEmpty ? conclusion : body;
   }
 
   // ============================================================

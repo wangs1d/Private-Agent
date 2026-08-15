@@ -150,6 +150,48 @@ export class AgentTaskOrchestrator {
   }
 
   /**
+   * 创建并后台执行一个「通用复杂任务」（非桌面自动化状态机）。
+   *
+   * 与 createAndRun 共享「后台 fire-and-forget + 任务持久化 + WS 事件推送」骨架，
+   * 但执行逻辑由 executor 决定（子 Agent 委派 / plan_execute 等），
+   * 不经过 runLoop 的桌面自动化状态机（planning→executing→verifying）。
+   *
+   * executor 内部应通过 options.onAssistantDelta 流式推送最终回复，
+   * 通过 options.onToolExecuteStart / onToolExecuted 推送工具进度。
+   */
+  createAndRunGeneric(
+    input: CreateAgentTaskInput,
+    executor: (taskId: string, options: RunTaskOptions) => Promise<void>,
+    options: RunTaskOptions,
+  ): string {
+    const store = getAgentTaskStore();
+    const task = store.create(input);
+
+    void (async () => {
+      try {
+        this.emitProgress(task, "task_created", `复杂任务已开始: ${task.goal.slice(0, 80)}`, options);
+        await executor(task.id, options);
+        store.update(task.id, (t) => {
+          t.status = "done";
+          t.completedAt = new Date().toISOString();
+        });
+        this.emitProgress(task, "task_completed", "复杂任务已完成", options);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[agent-task-orchestrator] 通用复杂任务 ${task.id} 异常:`, err);
+        store.update(task.id, (t) => {
+          t.status = "failed";
+          t.error = msg;
+          t.completedAt = new Date().toISOString();
+        });
+        this.emitProgress(task, "task_failed", `复杂任务失败: ${msg}`, options);
+      }
+    })();
+
+    return task.id;
+  }
+
+  /**
    * 状态机主循环。
    *
    * 每轮:

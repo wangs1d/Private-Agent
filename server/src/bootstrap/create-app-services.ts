@@ -80,6 +80,7 @@ import { InfoHubService } from "../services/info-hub-service.js";
 import { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import { PaymentService } from "../services/payment-service.js";
 import { MeituanService } from "../services/meituan-service.js";
+import { AlipayBotService } from "../services/alipay-bot-service.js";
 import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { SessionService } from "../services/session-service.js";
@@ -107,8 +108,10 @@ import { createIntelligentReminderSystem } from "../services/intelligent-reminde
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { SkillManager } from "../skills/index.js";
+import { registerSkillToToolRouter } from "../services/self-evolution-router-registrar.js";
 import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent-world-identity-skills.js";
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
+import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
@@ -154,6 +157,7 @@ import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry, type ToolContext } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
+import { LocationCoordinator } from "../services/location-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
 import { MessageHubService } from "../services/message-hub-service.js";
@@ -286,6 +290,7 @@ import {
 import { Hand } from "../body/hand.js";
 import { Mouth } from "../body/mouth.js";
 import { Eye } from "../body/eye.js";
+import { createMemoryAssociationSynthesizer } from "../brain/memory-cognitive/memory-association-synthesizer.js";
 import { Ear } from "../body/ear.js";
 import { Skin } from "../body/skin.js";
 import { VestibularApparatus } from "../body/vestibular-apparatus.js";
@@ -318,9 +323,12 @@ export async function createAppServices(): Promise<AppServices> {
   await app.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 
   const sessionService = new SessionService();
-  await getChatThreadPersistence().load();
+  // 启动期并行化：把无相互依赖的持久化 load / MCP 工具发现收集为并行任务，
+  // 在首次使用其结果之前统一等待，避免各文件 IO 串行累加启动耗时。
+  const bootLoads: Promise<unknown>[] = [];
+  bootLoads.push(getChatThreadPersistence().load());
   // 滚动摘要增强器：trim 丢弃历史消息时，LLM 增量生成高质量 recap（模拟人类记忆，保留原意）。
-  // 无 API key 时返回 null（自动保持旧正则 recap），不影响对话主链路。
+  // 未配置任何 provider 密钥时返回 null（仅保留已有 recap 行，不影响对话主链路）。
   getChatThreadStore().setRecapSummarizer(createLlmRollingRecapSummarizer());
   const scheduleTaskService = new ScheduleTaskService();
   const weatherService = new WeatherService();
@@ -331,6 +339,7 @@ export async function createAppServices(): Promise<AppServices> {
   const realFundsWallet = new RealFundsWalletService();
   const paymentService = new PaymentService();
   const meituanService = new MeituanService();
+  const alipayBotService = new AlipayBotService();
   const auditService = new AuditService();
   const computeQuotaService = new ComputeQuotaService();
   const companionService = new CompanionService();
@@ -340,15 +349,15 @@ export async function createAppServices(): Promise<AppServices> {
   const lifeSignalHubService = new LifeSignalHubService(
     join(process.cwd(), "data", "life-signals.json"),
   );
-  await lifeSignalHubService.load();
+  bootLoads.push(lifeSignalHubService.load());
   const anticipationEngineService = new AnticipationEngineService(
     join(process.cwd(), "data", "anticipation-candidates.json"),
   );
-  await anticipationEngineService.load();
+  bootLoads.push(anticipationEngineService.load());
   const marketSignalService = new MarketSignalService(lifeSignalHubService);
   const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
   const messageHubService = new MessageHubService(join(process.cwd(), "data", "message-hub.json"));
-  await messageHubService.load();
+  bootLoads.push(messageHubService.load());
   const messagePlatformGateway = new MessagePlatformGateway();
 
   const skillManager = new SkillManager();
@@ -358,7 +367,7 @@ export async function createAppServices(): Promise<AppServices> {
       return SkillValidator.validateMetadata(metadata as SkillMetadata);
     },
   };
-  await loadPersistedCommunitySkills(skillManager);
+  bootLoads.push(loadPersistedCommunitySkills(skillManager));
   toolRegistry.setSkillManager(skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
@@ -366,16 +375,20 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ========== MCP 客户端服务 ==========
   const mcpClientService = new McpClientService();
-  if (mcpClientService.listServers().length > 0) {
-    await mcpClientService.discoverTools();
-    const mcpToolCount = mcpClientService.listTools().length;
-    if (mcpToolCount > 0) {
-      registerMcpTools(toolRegistry, mcpClientService);
-      setMcpChatTools(buildMcpChatTools(mcpClientService));
-      app.log.info(`[MCP] 已发现并注册 ${mcpToolCount} 个 MCP 工具（${mcpClientService.listServers().map(s => s.alias).join(", ")}）`);
-    } else {
-      app.log.info("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
-    }
+  // MCP 工具发现会 spawn 子进程 / 调 mcporter CLI，可能耗时（单 server 15s 超时），
+  // 与上面的持久化 load 并行启动，避免串行阻塞。
+  const mcpDiscoverTask = mcpClientService.listServers().length > 0
+    ? mcpClientService.discoverTools()
+    : Promise.resolve();
+  // 统一等待全部启动期异步任务（MCP 工具注册依赖 discover 结果）
+  await Promise.all([...bootLoads, mcpDiscoverTask]);
+  const mcpToolCount = mcpClientService.listTools().length;
+  if (mcpToolCount > 0) {
+    registerMcpTools(toolRegistry, mcpClientService);
+    setMcpChatTools(buildMcpChatTools(mcpClientService));
+    app.log.info(`[MCP] 已发现并注册 ${mcpToolCount} 个 MCP 工具（${mcpClientService.listServers().map(s => s.alias).join(", ")}）`);
+  } else if (mcpClientService.listServers().length > 0) {
+    app.log.info("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
   } else {
     app.log.info("[MCP] 未配置 MCP Server（可通过 data/mcp-servers.json 或 MCP_SERVERS 环境变量配置）");
   }
@@ -657,6 +670,11 @@ export async function createAppServices(): Promise<AppServices> {
   registerVirtualPhoneBuiltinSkills((skill) => skillManager.register(skill), {
     virtualPhoneService,
   });
+
+  // 注册支付宝 AI 支付内置Skills（真实购买能力，封装项目内置 alipay-bot CLI）
+  registerAlipayPaymentBuiltinSkills((skill) => skillManager.register(skill), {
+    alipayBotService,
+  });
   
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();
   worldService.onWorldRevision((ev: WorldRevisionEvent) => {
@@ -683,8 +701,11 @@ export async function createAppServices(): Promise<AppServices> {
   registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService });
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
-  const humanLikeMemory = await initHumanLikeMemoryService();
-  const shortTermMemoryGateway = await initShortTermMemoryGatewayService();
+  // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
+  const [humanLikeMemory, shortTermMemoryGateway] = await Promise.all([
+    initHumanLikeMemoryService(),
+    initShortTermMemoryGatewayService(),
+  ]);
   const narrativeMemory = wrapNarrativeWithHybrid(
     createNarrativeMemoryPort({
       agenticIngest: agenticMemoryRuntime?.ingest ?? null,
@@ -761,6 +782,13 @@ export async function createAppServices(): Promise<AppServices> {
               registeredAt: new Date().toISOString(),
             });
           }
+          // 1b. 注册到 tool-router registry，让四级路由可搜索到新 skill
+          // 失败不影响装载结果（fire-and-forget）
+          registerSkillToToolRouter(metadata, skillName).catch((err) => {
+            console.warn(
+              `[create-app-services] 注册 '${skillName}' 到 tool-router 失败: ${err instanceof Error ? err.message : err}`,
+            );
+          });
           // 2. 若 Skill 标记为 fast_lane，注入动态 fastLane（让 Fast 模式可收编）
           const tags = metadata.tags ?? [];
           if (tags.includes("fast_lane") || tags.includes("fast")) {
@@ -1809,12 +1837,6 @@ export async function createAppServices(): Promise<AppServices> {
           };
           const toolExecCtx: ChatToolExecutionContext = {
             executeTool: (name, args) => toolRegistry.execute(name, args, toolContext),
-            onToolExecuteStart: (info) => {
-              void interimController.onToolStart(info.toolName, info.input);
-            },
-            onToolExecuted: (info) => {
-              void interimController.onToolEnd(info.toolName, info.input, info.ok);
-            },
           };
           await externalChat.streamCompletion(
             `proactive:${signal.actorId}:${Date.now()}`,
@@ -1999,6 +2021,10 @@ export async function createAppServices(): Promise<AppServices> {
     audit: auditService,
   });
   agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
+
+  // 按需位置协调器：Agent 需要位置（位置类工具）时向客户端请求实时 GPS。
+  const locationCoordinator = new LocationCoordinator();
+  agentCore.setLocationCoordinator(locationCoordinator);
 
   // ─── Task 4: desktop.event → LifeSignal 转换 ───
   // 将 Python 端推送的桌面事件转为 LifeSignal 并 publish 到 LifeSignalHub，
@@ -2961,6 +2987,14 @@ export async function createAppServices(): Promise<AppServices> {
           inferenceEngine,
         });
 
+        // 记忆联想性增强：LLM 跨记忆关联合成器（无 API key 时返回 null，静默降级）。
+        // 不传显式 key，由工厂内部 resolvePrimaryLlmClientConfig 解析当前主 provider
+        // （auto 模式 Moonshot 优先），避免 OPENAI key 与 Moonshot baseURL 错配。
+        // recall 命中 ≥2 条时异步合成新关联，高置信结论回灌 humanLike 记忆图。
+        memoryCortex.registerAssociationSynthesizer(
+          createMemoryAssociationSynthesizer(),
+        );
+
         // 心跳桥接：BrainStem 45s 心跳 → ForgettingController.continuousScore
         // 让遗忘曲线打分跟随脑干节律，无需额外定时器。
         // 回调内遍历 brainStemRef.getKnownActors()，对每个 actor 执行连续打分。
@@ -3273,6 +3307,7 @@ export async function createAppServices(): Promise<AppServices> {
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    locationCoordinator,
     virtualPhoneService,
     devicePairingService,
     virtualPhoneIncomingCoordinator,

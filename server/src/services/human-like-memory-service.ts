@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import OpenAI from "openai";
 
+import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
@@ -45,7 +46,14 @@ async function computeEmbedding(text: string): Promise<number[] | null> {
   }
   try {
     const model = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
-    const r = await fetchOpenAiCompatibleEmbedding({ apiKey: apiKey!, model, input: text });
+    const r = await fetchOpenAiCompatibleEmbedding({
+      apiKey: apiKey!,
+      model,
+      input: text,
+      // embedding 仅作检索增强：给短超时，慢/失败时降级到本地关键词检索（cosineLikeScore），
+      // 避免把 buildRecall 拖到数秒，进而导致对话链路的记忆注入（prepareNarrativeRecall）超时失败。
+      timeoutMs: 1200,
+    });
     embeddingCache.set(cacheKey, { vector: r.vector, ts: now });
     return r.vector;
   } catch (err) {
@@ -528,13 +536,13 @@ function cosineLikeScore(queryTokens: string[], targetTokens: string[]): number 
 }
 
 async function llmMergeLines(lines: string[]): Promise<string[] | null> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey || lines.length < 2) return null;
+  const llm = resolvePrimaryLlmClientConfig();
+  if (!llm || lines.length < 2) return null;
 
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
     const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || "gpt-4.1-mini",
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -557,13 +565,13 @@ async function llmMergeLines(lines: string[]): Promise<string[] | null> {
 }
 
 async function llmExtractExperience(lines: string[]): Promise<string | null> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey || lines.length < 3) return null;
+  const llm = resolvePrimaryLlmClientConfig();
+  if (!llm || lines.length < 3) return null;
 
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
     const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || "gpt-4.1-mini",
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -589,13 +597,13 @@ async function llmPlanSleepActions(
   nodes: MemoryNodeRecord[],
   policy: HumanLikeMemoryPolicyFile,
 ): Promise<SleepAction[] | null> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey || !policy.sleepAgent.llmPlannerEnabled || nodes.length === 0) return null;
+  const llm = resolvePrimaryLlmClientConfig();
+  if (!llm || !policy.sleepAgent.llmPlannerEnabled || nodes.length === 0) return null;
 
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
     const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || "gpt-4.1-mini",
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.1,
       response_format: { type: "json_object" },
       messages: [
@@ -797,6 +805,28 @@ export class HumanLikeMemoryService {
     // 重建该节点的边（现在用真向量 cosine 算 similarity，边权重更准）
     this.rebuildLinksForNode(node);
     this.schedulePersist();
+  }
+
+  /**
+   * 用户反馈回灌：按语义指纹匹配记忆节点，更新 userFeedbackScore（0-1）。
+   * 由 MemoryCortex.recordMemoryFeedback 在记录用户反馈时调用。
+   * 此前 userFeedbackScore 在 ingest 时固定为 1 且无任何更新路径，
+   * 导致 retrieval 打分中的反馈分量（structureScore/penalty）从未生效。
+   */
+  applyUserFeedback(actorId: string, summary: string, score: number): void {
+    const plain = summary.trim();
+    if (!plain) return;
+    const fingerprint = semanticFingerprint(plain) || normalizeMemoryLine(plain);
+    const clamped = Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : 0;
+
+    for (const node of Object.values(this.store.nodes)) {
+      if (node.actorId !== actorId) continue;
+      if (node.semanticFingerprint !== fingerprint) continue;
+      node.userFeedbackScore = clamped;
+      node.lastAccessedAt = nowIso();
+      this.schedulePersist();
+      break;
+    }
   }
 
   async buildRecall(

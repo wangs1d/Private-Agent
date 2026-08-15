@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { FastifyInstance } from "fastify";
+import type { ScheduleTaskRecord } from "../../services/schedule-task-service.js";
 import {
   scheduleTaskCreateBodySchema,
   scheduleTaskListQuerySchema,
@@ -21,6 +22,45 @@ type Habit = {
 
 /** 模块级内存存储：habitId -> Habit。 */
 const habitStore = new Map<string, Habit>();
+
+type TodayScheduleItem = {
+  id: string;
+  title: string;
+  startAt: string;
+  notes?: string;
+  completed: boolean;
+};
+
+function dayRangeFromQuery(fromRaw?: string, toRaw?: string): { from: string; to: string } {
+  if (fromRaw && toRaw) {
+    return { from: fromRaw, to: toRaw };
+  }
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  end.setMilliseconds(end.getMilliseconds() - 1);
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
+function getTaskDisplayTime(task: ScheduleTaskRecord): string {
+  if (task.status === "completed") {
+    return task.lastRunAt ?? task.runAt;
+  }
+  return task.nextRunAt ?? task.runAt;
+}
+
+function toTodayScheduleItem(task: ScheduleTaskRecord): TodayScheduleItem {
+  const title = task.reminderMessage?.trim() || task.title?.trim() || task.description;
+  return {
+    id: task.taskId,
+    title,
+    startAt: getTaskDisplayTime(task),
+    notes: task.description,
+    completed: task.status === "completed",
+  };
+}
 
 /** 取 ISO 字符串对应的本地日期（YYYY-MM-DD）。 */
 function isoToDateKey(iso: string): string {
@@ -137,6 +177,21 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
     }
     const runs = scheduleTaskService.listRuns(parsed.data.taskId, parsed.data.limit ?? 20);
     return { ok: true, runs };
+  });
+
+  app.get("/api/schedule/today", async (request, reply) => {
+    const query = request.query as { sessionId?: unknown; from?: unknown; to?: unknown };
+    const sessionId = String(query.sessionId ?? "").trim();
+    if (!sessionId) {
+      return reply.code(400).send({ ok: false, error: "sessionId required" });
+    }
+    const { from, to } = dayRangeFromQuery(
+      typeof query.from === "string" ? query.from : undefined,
+      typeof query.to === "string" ? query.to : undefined,
+    );
+    return scheduleTaskService
+      .listTasksBySession(sessionId, { from, to })
+      .map(toTodayScheduleItem);
   });
 
   app.post("/api/schedule/habit", async (request, reply) => {

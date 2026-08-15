@@ -1,5 +1,6 @@
 import "dart:convert";
 
+import "package:flutter_timezone/flutter_timezone.dart";
 import "package:geolocator/geolocator.dart";
 import "package:http/http.dart" as http;
 
@@ -55,36 +56,6 @@ class ClientLocationPayload {
 typedef LocationPrefsReader = Future<dynamic> Function(String key);
 typedef LocationPrefsWriter = Future<void> Function(String key, dynamic value);
 
-/// 根据当前网络出口 IP 解析的大致位置（仅展示，不上报 Agent）。
-class NetworkLocationHint {
-  const NetworkLocationHint({
-    required this.ip,
-    required this.label,
-    this.city,
-    this.region,
-    this.country,
-    this.timezone,
-  });
-
-  final String ip;
-  final String label;
-  final String? city;
-  final String? region;
-  final String? country;
-  final String? timezone;
-
-  factory NetworkLocationHint.fromJson(Map<String, dynamic> json) {
-    return NetworkLocationHint(
-      ip: json["ip"] as String? ?? "",
-      label: json["label"] as String? ?? "",
-      city: json["city"] as String?,
-      region: json["region"] as String?,
-      country: json["country"] as String?,
-      timezone: json["timezone"] as String?,
-    );
-  }
-}
-
 class ClientLocationService {
   ClientLocationService._();
 
@@ -92,12 +63,14 @@ class ClientLocationService {
   static const String _consentKey = "clientLocationConsent";
   static ClientLocationPayload? _cached;
   static DateTime? _cachedAt;
+  /// 仅供 App 启动预热使用；聊天发消息走 `getCurrentLocationForChat()` 实时拉取。
   static const Duration _cacheTtl = Duration(minutes: 10);
 
   static LocationPrefsReader? _readPref;
   static LocationPrefsWriter? _writePref;
   /// `null` 尚未询问；`true`/`false` 用户已选择。
-  static bool? _locationConsent;
+  /// 默认 `true`：让 Agent 实时拿到用户位置；用户可在权限弹窗里显式「暂不允许」回退。
+  static bool? _locationConsent = true;
 
   /// 注入本地持久化（如 IsarLocalHistoryStore.savePreference）。
   static void bindPreferences({
@@ -110,9 +83,9 @@ class ClientLocationService {
 
   static Future<bool?> getLocationConsent() async {
     if (_locationConsent != null) return _locationConsent;
-    if (_readPref == null) return null;
+    if (_readPref == null) return true;
     final dynamic raw = await _readPref!(_consentKey);
-    if (raw == null) return null;
+    if (raw == null) return true;
     _locationConsent = raw == true;
     return _locationConsent;
   }
@@ -127,30 +100,7 @@ class ClientLocationService {
     }
   }
 
-  /// 调用服务端 `/geo/ip`，根据当前连接的网络 IP 解析大致地址。
-  static Future<NetworkLocationHint?> fetchNetworkLocationHint() async {
-    final Uri uri = Uri.parse("${ApiConfig.httpBase}/geo/ip");
-    try {
-      final http.Response res = await http
-          .get(uri, headers: const <String, String>{"Accept": "application/json"})
-          .timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) {
-        print("[ClientLocationService] IP 定位 HTTP ${res.statusCode}");
-        return null;
-      }
-      final Map<String, dynamic> body =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      if (body["ok"] != true) return null;
-      final Map<String, dynamic>? loc =
-          (body["location"] as Map?)?.cast<String, dynamic>();
-      if (loc == null) return null;
-      return NetworkLocationHint.fromJson(loc);
-    } catch (e) {
-      print("[ClientLocationService] IP 定位失败: $e");
-      return null;
-    }
-  }
-
+  /// 启动预热路径：使用 10 分钟缓存，避免重复请求系统定位。
   static Future<ClientLocationPayload?> getCurrentLocation() async {
     if (_locationConsent != true) {
       final bool? consent = await getLocationConsent();
@@ -173,6 +123,38 @@ class ClientLocationService {
       return disk;
     }
 
+    return _fetchFresh(disk);
+  }
+
+  /// 聊天发消息专用：每次都拉新 GPS，确保 Agent 拿到的是用户当下位置。
+  /// 失败时回退到磁盘/内存缓存；不阻塞消息发送。
+  static Future<ClientLocationPayload?> getCurrentLocationForChat() async {
+    if (_locationConsent != true) {
+      final bool? consent = await getLocationConsent();
+      if (consent != true) {
+        return _cached ?? await _loadFromDisk();
+      }
+    }
+    final ClientLocationPayload? disk = await _loadFromDisk();
+    return _fetchFresh(disk);
+  }
+
+  /// 读取设备真实 IANA 时区（如 America/New_York）；失败返回 null（不上报，交服务端判定）。
+  static Future<String?> _deviceTimezone() async {
+    try {
+      final TimezoneInfo tzInfo = await FlutterTimezone.getLocalTimezone();
+      final String tz = tzInfo.identifier;
+      if (tz.trim().isNotEmpty) return tz.trim();
+    } catch (e) {
+      print("[ClientLocationService] 获取设备时区失败: $e");
+    }
+    return null;
+  }
+
+  /// 实际执行一次 GPS 抓取 + 逆地理；任何异常都返回磁盘/内存兜底。
+  static Future<ClientLocationPayload?> _fetchFresh(
+    ClientLocationPayload? disk,
+  ) async {
     try {
       final LocationPermission permission = await _ensurePermission();
       if (permission == LocationPermission.denied ||
@@ -198,10 +180,12 @@ class ClientLocationService {
         return resolved;
       }
 
+      // 服务端逆地理失败兜底：上报设备真实时区（不再硬编码 Asia/Shanghai），
+      // 让服务端拿到正确用户时区，避免「在美国却报北京时间」。
       final ClientLocationPayload coordsOnly = ClientLocationPayload(
         latitude: position.latitude,
         longitude: position.longitude,
-        timezone: "Asia/Shanghai",
+        timezone: await _deviceTimezone(),
         label: "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
       );
       await _remember(coordsOnly);

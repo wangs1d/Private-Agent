@@ -155,7 +155,7 @@ const EXPANDABLE_DOMAINS = new Set<string>([
  *   - social_outreach 走无 `world.` 前缀的 `social.post / social.comment / ...`
  */
 const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
-  wallet: ["wallet."],
+  wallet: ["wallet.", "payment.", "alipay."],
   agent_link: ["agent.link.", "agent.send_to_peer"],
   calendar: ["calendar.", "reminder."],
   weather: ["weather."],
@@ -164,7 +164,7 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   vision: ["vision."],
   desktop: ["desktop.", "browser.session.", "browser.fetch_page"],
   web: ["search_web", "fetch_web", "info."],
-  life_assistant: ["budget.", "shopping.suggest"],
+  life_assistant: ["budget.", "shopping.suggest", "payment.", "alipay."],
   voice: ["voice."],
   phone: ["phone.", "phone_bridge."],
   // entertainment 暂无对应工具

@@ -8,9 +8,11 @@
  *
  * 使用方式：
  *   import { getModelForTask, TASK_TIER } from "../config/model-routing.js";
- *   const model = getModelForTask(TASK_TIER.MINI); // "gpt-4.1-mini"
+ *   const model = getModelForTask(TASK_TIER.MINI); // 默认跟随当前 provider 主模型
  *   provider.streamCompletion(sessionId, userTurn, onDelta, tools, { modelOverride: model });
  */
+
+import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 
 /** 任务分级：按复杂度从低到高 */
 export enum TaskTier {
@@ -29,7 +31,7 @@ export enum TaskTier {
 /** 默认模型映射 */
 const DEFAULT_MODELS: Record<TaskTier, string> = {
   [TaskTier.FAST]: "deepseek-chat",       // DeepSeek Flash（V3 快模型）
-  [TaskTier.COMPLEX]: "deepseek-chat",    // 临时回滚：仍用 V3 验证基础功能；R1 集成后切回 deepseek-reasoner
+  [TaskTier.COMPLEX]: "deepseek-reasoner", // DeepSeek Pro（R1 推理模型）
   [TaskTier.NANO]: "gpt-4.1-nano",
   [TaskTier.MINI]: "gpt-4.1-mini",
   [TaskTier.FULL]: "", // 空字符串表示使用主模型（OPENAI_MODEL / MOONSHOT_MODEL）
@@ -86,7 +88,8 @@ function loadOverride(): Record<string, string> {
  * 优先级：
  * 1. MODEL_ROUTING_OVERRIDE JSON 中的对应 tier
  * 2. 环境变量 MODEL_NANO / MODEL_MINI / MODEL_FULL
- * 3. 默认值（FULL 返回空字符串，表示用主模型）
+ * 3. 默认值（FULL 返回空字符串，表示用主模型；MINI 默认跟随当前生效 provider 的主模型，
+ *    避免在只支持 deepseek-v4-* 等模型名的代理下被 400 拒绝）
  *
  * @param tier 任务分级
  * @returns 模型名（空字符串表示使用 provider 默认主模型）
@@ -104,6 +107,9 @@ export function getModelForTask(tier: TaskTier): string {
   if (envValue) return envValue;
 
   // 3. 默认值
+  if (tier === TaskTier.MINI) {
+    return resolvePrimaryLlmClientConfig()?.model?.trim() || DEFAULT_MODELS[tier];
+  }
   return DEFAULT_MODELS[tier];
 }
 

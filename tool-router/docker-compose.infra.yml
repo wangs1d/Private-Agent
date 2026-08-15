@@ -1,3 +1,5 @@
+# tool-router 可选基础设施（连接后走外部后端；不启动时服务以纯内存模式运行）
+# 用法: docker compose -f docker-compose.infra.yml up -d
 services:
   redis:
     image: redis:7

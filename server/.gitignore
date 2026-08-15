@@ -19,3 +19,4 @@ __tests__/
 !test/
 test/*
 !test/schedule-task-service.test.ts
+!test/short-term-memory-focus.test.ts

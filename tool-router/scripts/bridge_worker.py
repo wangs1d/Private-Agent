@@ -50,6 +50,35 @@ def handle_search(payload: dict) -> dict:
     }
 
 
+def handle_register_resource(payload: dict) -> dict:
+    if container is None:
+        raise RuntimeError("tool-router worker not initialized")
+    resource = ResourceRecord.model_validate(payload["resource"])
+    container.registry.register(resource)
+    return {"ok": True, "data": {"resource_id": resource.level1.resource_id}}
+
+
+def handle_list_resources(payload: dict) -> dict:
+    if container is None:
+        raise RuntimeError("tool-router worker not initialized")
+    records = container.registry.list_records()
+    return {
+        "ok": True,
+        "data": {
+            "resources": [
+                {
+                    "name": record.level1.name,
+                    "resource_type": record.level1.resource_type.value,
+                    "domain": record.level1.domain,
+                    "description": record.level1.description,
+                    "tags": record.level1.tags,
+                }
+                for record in records
+            ],
+        },
+    }
+
+
 def _resource_type_summary(resources: list[ResourceRecord]) -> dict[str, int]:
     out: dict[str, int] = {}
     for resource in resources:
@@ -72,6 +101,10 @@ def main() -> None:
                 response = handle_init_catalog(payload)
             elif command == "search":
                 response = handle_search(payload)
+            elif command == "register_resource":
+                response = handle_register_resource(payload)
+            elif command == "list_resources":
+                response = handle_list_resources(payload)
             else:
                 raise ValueError(f"unknown_command:{command}")
             emit({"id": request_id, **response})

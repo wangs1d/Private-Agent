@@ -9,6 +9,7 @@ import type {
   MemoryItem,
   MemoryItemKind,
 } from "../../brain/types.js";
+import type { MemoryFeedbackOutcome } from "../../brain/memory-feedback-store.js";
 
 /**
  * 从请求体构建 Brain 信号输入（用于 /brain/proactive/test）。
@@ -68,6 +69,8 @@ function buildProposal(
  * - POST /brain/sensory/speak     感官「说」：TTS 合成 + 投递
  * - POST /brain/memory/remember   记忆写入
  * - POST /brain/memory/recall     记忆召回
+ * - POST /brain/memory/feedback   记忆相关性在线反馈（relevant/irrelevant/correction）
+ * - POST /brain/memory/continuity/diagnose  记忆连续性诊断（锚点+反馈+开放环路）
  * - POST /brain/synapse/fire      突触发射（进程内事件）
  * - POST /brain/synapse/sendToAgent  突触跨 Agent 投递（facade 未暴露，503）
  * - POST /brain/limbic/checkSafety   边缘安全检查
@@ -283,6 +286,46 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       const domain = body.domain as MemoryDomainKind | undefined;
       const limit = body.limit != null ? Number(body.limit) : undefined;
       const result = await deps.brainCenter.recall(actorId, query, { domain, limit });
+      return reply.send({ ok: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(500).send({ ok: false, error: message });
+    }
+  });
+
+  // 记忆相关性在线反馈：记录用户对召回记忆的反馈（relevant/irrelevant/correction）
+  app.post("/brain/memory/feedback", async (request, reply) => {
+    try {
+      if (!deps.brainCenter) {
+        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const actorId = String(body.actorId ?? "").trim();
+      if (!actorId) throw new Error("actorId is required");
+      const content = String(body.content ?? "").trim();
+      if (!content) throw new Error("content is required");
+      const outcome = String(body.outcome ?? "").trim() as MemoryFeedbackOutcome;
+      if (!["relevant", "irrelevant", "correction"].includes(outcome)) {
+        throw new Error("outcome must be relevant|irrelevant|correction");
+      }
+      deps.brainCenter.recordMemoryFeedback({ actorId, content, outcome });
+      return reply.send({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(500).send({ ok: false, error: message });
+    }
+  });
+
+  // 记忆连续性诊断：聚合最近召回锚点 + 反馈惩罚 + 跨会话开放环路（定位跳转根因）
+  app.post("/brain/memory/continuity/diagnose", async (request, reply) => {
+    try {
+      if (!deps.brainCenter) {
+        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const actorId = String(body.actorId ?? "").trim();
+      if (!actorId) throw new Error("actorId is required");
+      const result = deps.brainCenter.diagnoseContinuity(actorId);
       return reply.send({ ok: true, result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

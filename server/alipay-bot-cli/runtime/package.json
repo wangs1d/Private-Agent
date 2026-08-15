@@ -1,0 +1,24 @@
+{
+  "name": "alipay-bot-cli",
+  "version": "0.3.40",
+  "bin": {
+    "alipay-bot": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "AlibabaSans102Ver2-Md.ttf",
+    "background.png",
+    "payment-background.png",
+    "original_zfb_logo.png",
+    "README.md",
+    "LEGAL.md"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "qrcode": "^1.5.4"
+  }
+}

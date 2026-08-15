@@ -36,6 +36,7 @@ import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-sta
 import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
+import type { LocationCoordinator } from "../services/location-coordinator.js";
 import {
   AgentWorldClientEventType,
   AgentWorldServerEventType,
@@ -167,6 +168,8 @@ export type WsRouteDeps = {
   unifiedIdempotencyService: UnifiedIdempotencyService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
+  /** 按需位置协调器：Agent 需要位置时向客户端请求实时 GPS */
+  locationCoordinator: LocationCoordinator;
   virtualPhoneService: VirtualPhoneService;
   virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
   userPersonalizationService: UserPersonalizationService;
@@ -197,6 +200,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     unifiedIdempotencyService,
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
+    locationCoordinator,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
@@ -291,6 +295,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         }
         desktopBridgeCoordinator.unbindIfSocket(socket);
         desktopBridgeCoordinator.cancelPendingForSocket(socket);
+        locationCoordinator.unbindSocket(socket);
         if (boundActorId) {
           phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
         }
@@ -611,6 +616,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             getEmbodimentAutonomy()?.registerSession(actorId);
             // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
             morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
+            // 按需位置：绑定 socket，Agent 需要位置时向该客户端请求实时 GPS
+            locationCoordinator.bindSocket(actorId, socket);
           } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
@@ -834,6 +841,21 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           phoneBridgeCoordinator.completeFromSocket(boundActorId, socket, jobId, pl as PhoneBridgeResult);
+          return;
+        }
+
+        if (event.type === ClientEventType.LocationReport) {
+          // 客户端回传实时位置：响应 agent.location_request（携带 jobId）或天气面板主动上报。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const pl = (event.payload ?? {}) as Record<string, unknown>;
+          const consumed = locationCoordinator.completeFromSocket(socket, boundActorId, pl);
+          if (!consumed) {
+            const jobId = String(pl.jobId ?? "").trim();
+            sendUnifiedError("BAD_LOCATION_REPORT", `jobId 与当前连接不匹配或已过期: ${jobId}`);
+          }
           return;
         }
 

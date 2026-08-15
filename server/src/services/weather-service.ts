@@ -20,7 +20,17 @@ export type WeatherBrief = {
   todayMaxC: number;
   peakRainPct: number;
   clothingAdvice: string;
+  hourlyForecast: WeatherHourlyForecast[];
   summaryLine: string;
+};
+
+export type WeatherHourlyForecast = {
+  time: string;
+  hour: string;
+  temperatureC: number;
+  precipitationProbabilityPct: number;
+  weatherCode: number;
+  weatherText: string;
 };
 
 const WMO_TEXT: Record<number, string> = {
@@ -174,7 +184,10 @@ export class WeatherService {
         precipitation?: number;
       };
       hourly?: {
+        time?: string[];
+        temperature_2m?: (number | null)[];
         precipitation_probability?: (number | null)[];
+        weather_code?: (number | null)[];
       };
       daily?: {
         weather_code?: (number | null)[];
@@ -192,6 +205,7 @@ export class WeatherService {
     const peakRainPct = probs.length > 0 ? Math.max(...probs) : Number(raw.daily?.precipitation_probability_max?.[0] ?? 0);
 
     const currentTempC = Number(cur.temperature_2m ?? 0);
+    const hourlyForecast = buildHourlyForecast(raw.hourly);
     const brief: WeatherBrief = {
       source: "open-meteo",
       latitude,
@@ -216,6 +230,7 @@ export class WeatherService {
         weatherCode: code,
         windKmh: Number(cur.wind_speed_10m ?? 0),
       }),
+      hourlyForecast,
       summaryLine: "",
     };
 
@@ -233,4 +248,37 @@ export class WeatherService {
     brief.summaryLine = `${brief.locationLabel} 当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
     return brief;
   }
+}
+
+function buildHourlyForecast(raw: {
+  time?: string[];
+  temperature_2m?: (number | null)[];
+  precipitation_probability?: (number | null)[];
+  weather_code?: (number | null)[];
+} | undefined): WeatherHourlyForecast[] {
+  const times = raw?.time ?? [];
+  const temps = raw?.temperature_2m ?? [];
+  if (times.length === 0 || temps.length === 0) return [];
+
+  const now = Date.now();
+  let start = times.findIndex((time) => new Date(time).getTime() >= now);
+  if (start < 0) start = 0;
+
+  const forecast: WeatherHourlyForecast[] = [];
+  for (let i = start; i < times.length && forecast.length < 6; i += 3) {
+    const temp = temps[i];
+    if (temp == null) continue;
+    const time = times[i];
+    const hour = time.slice(11, 13).replace(/^0/, "") || "0";
+    const weatherCode = Number(raw?.weather_code?.[i] ?? 0);
+    forecast.push({
+      time,
+      hour,
+      temperatureC: Number(temp),
+      precipitationProbabilityPct: Number(raw?.precipitation_probability?.[i] ?? 0),
+      weatherCode,
+      weatherText: wmoText(weatherCode),
+    });
+  }
+  return forecast;
 }

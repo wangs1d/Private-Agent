@@ -19,15 +19,20 @@ export type DelegateStatusPayload = {
   toolName: string;
 };
 
-/** 从工具参数或模型 tool-call 前导文本提取用户可见进度句 */
+/**
+ * 从工具参数（显式 userStatusLine / statusLine 字段）提取用户可见进度句。
+ *
+ * 从根源过滤"过程通报"：不再把 LLM 在 tool_calls 前的自然语言前言
+ * （assistantPreamble，如"我帮你查查，稍等"）透传为 status 展示——
+ * 那正是过程通报，前端会当 chat.agent_status 刷给用户。
+ * 只有工具在设计上显式提供用户可见文案（如子 Agent 委派）时才保留。
+ */
 export function pickToolUserStatusLine(
   input: Record<string, unknown>,
-  assistantPreamble?: string,
+  _assistantPreamble?: string,
 ): string | null {
   const fromInput = String(input.userStatusLine ?? input.statusLine ?? "").trim();
-  if (fromInput.length > 0) return fromInput;
-  const preamble = (assistantPreamble ?? "").trim();
-  return preamble.length > 0 ? preamble : null;
+  return fromInput.length > 0 ? fromInput : null;
 }
 
 /** 主 Agent 调用 master.invoke_sub_agent 时必须填的 UI 文案字段 */

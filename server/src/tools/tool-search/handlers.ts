@@ -107,10 +107,7 @@ export async function executeToolSearchBridge(
     if (!entry) {
       return { kind: "call", ok: false, result: { error: `未找到延迟工具: ${name}` } };
     }
-    const parsedArgs =
-      args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
-        ? (args.arguments as Record<string, unknown>)
-        : {};
+    const parsedArgs = resolveCallArguments(args.arguments);
     recordToolCallFeedback(catalog, entry.registryName);
     return {
       kind: "call",
@@ -121,6 +118,34 @@ export async function executeToolSearchBridge(
   }
 
   return { kind: "search", ok: false, result: { error: `未知桥接工具: ${bridgeName}` } };
+}
+
+/**
+ * 解析 tool_call 的 arguments。
+ *
+ * LLM 偶尔会把 arguments 序列化成 JSON 字符串回传（而非按 schema 传对象），
+ * 若直接丢弃会导致工具以空参数执行——比报错更隐蔽。因此对字符串做 JSON.parse 兜底：
+ *  - 对象（非数组）→ 直接使用
+ *  - JSON 字符串且解析后为对象 → 使用解析结果
+ *  - 其余（数组/数字/布尔/null/非法 JSON）→ 保持空参数，不抛错
+ */
+function resolveCallArguments(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // 非法 JSON 字符串：保持空参数，不抛错
+    }
+  }
+  return {};
 }
 
 function normalizeBridgeName(name: string): string {

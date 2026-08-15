@@ -67,6 +67,8 @@ export const ClientEventType = {
   DeviceEvent: "device.event",
   /** 设备能力变更：如摄像头切换分辨率、新增传感器 */
   DeviceCapabilitiesUpdate: "device.capabilities_update",
+  /** 客户端回传实时位置（响应 agent.location_request，或天气面板主动上报） */
+  LocationReport: "client.location_report",
   /** 心跳检测 */
   Ping: "ping",
 } as const;
@@ -224,6 +226,11 @@ export const ServerEventType = {
   EvolutionApprovalRequest: "evolution.approval_request",
   /** 进化审批结果：用户批准或拒绝后的状态通知 */
   EvolutionApprovalResult: "evolution.approval_result",
+  /**
+   * 服务端按需向客户端请求实时位置（如 weather.get_local 需要经纬度）。
+   * 客户端收到后拉 GPS，通过 `client.location_report` 回传（携带相同 jobId）。
+   */
+  LocationRequest: "agent.location_request",
 } as const;
 
 // ============================================================

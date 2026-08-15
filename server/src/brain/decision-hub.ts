@@ -359,9 +359,10 @@ export class DecisionHub {
         route.confidence = Math.max(route.confidence - 0.1, 0.5); // 略降置信度，表示需要工具支撑
       }
       if (hasPausedTask && route.mode === "fast") {
-        // 有暂停任务时，避免 fast（需要更多上下文）
-        route.mode = "fast";
-        route.reason = `${route.reason}；工作记忆有暂停任务，避免 fast`;
+        // 有暂停任务时，升级 complex（需要更多上下文以正确恢复/延续暂停任务）
+        route.mode = "complex";
+        route.confidence = Math.max(route.confidence - 0.1, 0.5);
+        route.reason = `${route.reason}；工作记忆有暂停任务，升级到 complex`;
       }
     }
 

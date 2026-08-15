@@ -80,11 +80,13 @@ const CONCISE_REPLY_SYSTEM_SUFFIX = `
  */
 const MEMORY_RECALL_BEHAVIOR_SUFFIX = `
 
-【记忆使用方式】system 里出现的【待兑现承诺】【未完成事项】【会话回顾】【持久记忆与偏好】等都属于"后台你知道的背景资料"，不是你必须主动提醒用户的小本本。规则：
-- 当前话题和某条承诺/未完成事项明显相关，或那条事项马上到期（≤24h），才在回复里自然带一句；
-- 否则保持沉默——真朋友不会把几周前的提醒每条都复读一遍，更不会用"顺便提醒你…"当过渡；
-- 引用时要模糊自然（"之前你说过的那个…"），别照搬原文堆在句首；
-- 即使本轮什么都没相关，宁可一字不提，也别硬塞一段「温馨提示」打断当下对话。`;
+【记忆使用方式】system 里出现的【待兑现承诺】【未完成事项】【会话回顾】【持久记忆与偏好】等，是你"已经掌握的事实与背景资料"。分两种情形处理：
+
+【用户主动问记忆】当用户明确询问"你还记得 / 我之前说过 / 我告诉过你 / 你存了什么 / 你对我了解多少"这类记忆问题时，必须直接、如实、以注入的这些记忆块为依据作答：
+- 注入块里有相关内容的，据此正面回答（可引用具体事实，如"你之前提过在华强科技上班，家里有只猫叫咪咪"），禁止无视已注入记忆而谎称"没存 / 没印象 / 我不记得"；
+- 注入块里确实没有的，才可如实说明"这点我没记住 / 没记录"，不要凭空编造。
+
+【用户没主动问】仅当当前话题与某条承诺/未完成事项明显相关，或该事项马上到期（≤24h），才在回复里自然带一句；否则保持沉默——真朋友不会把几周前的提醒每条都复读，也不会用"顺便提醒你…"当过渡。引用时要模糊自然（"之前你说过的那个…"），别照搬原文堆在句首。`;
 
 const LIVE_USER_STATUS_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX
 
@@ -111,6 +113,7 @@ const MESSAGE_TIMESTAMP_SUFFIX = `
 【话题切换】如果上一条 user 消息和当前 user 消息主题不同（如「问电影 → 问几天没聊」），说明用户已转话题。当前回复必须**直接、干净地回应本条 user 消息**——不要接着上一轮的话题续写、不要把上一轮的工具结果/未完成工作当作本轮语境：
 - 回复开头不要出现「接着上轮的 XX / 我刚查 XX / 哈哈被你发现」之类承接旧话题的话；
 - 不要在回复里把上一轮的工具名/搜索关键词再复述一遍，除非当前问题真的需要；
+- 回复不要带任何话题标签/前缀（如「[话题切换]」「topic-switched」等），直接以正常回答开头；
 - 如果用户问「几天没聊 / 上次聊什么」，按 \`[ts:...]\` 日期如实回答日期差，不要凭印象模糊作答。`;
 
 function buildMasterSubAgentDelegateSuffix(): string {
@@ -173,19 +176,46 @@ function pad2ForPrompt(n: number): string {
 /**
  * 生成注入 system 的「当前时间」片段：`当前时间：2026-06-10 14:35:22 周二 (Asia/Shanghai, 2026-06-10T14:35:22+08:00)`
  * 与消息时间戳前缀 `[ts:YYYY-MM-DD HH:MM:SS|周X|relative]` 配套使用。
+ *
+ * 2026-08-14 修复：优先用 `timezone`（用户时区）而非服务器进程本地时区，避免「问美国时间却带出北京时间」。
+ * 未传时区时回退到服务器进程时区（原行为）。
  */
-export function buildCurrentTimePrompt(at: Date = new Date()): string {
+export function buildCurrentTimePrompt(at: Date = new Date(), timezone?: string): string {
   const tz = (() => {
+    const explicit = timezone?.trim();
+    if (explicit) return explicit;
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     } catch {
       return "UTC";
     }
   })();
-  const local =
-    `${at.getFullYear()}-${pad2ForPrompt(at.getMonth() + 1)}-${pad2ForPrompt(at.getDate())} ` +
-    `${pad2ForPrompt(at.getHours())}:${pad2ForPrompt(at.getMinutes())}:${pad2ForPrompt(at.getSeconds())}`;
-  const weekday = WEEKDAY_CN_FOR_PROMPT[at.getDay()] ?? "";
+
+  let local: string;
+  let weekday: string;
+  try {
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      weekday: "short",
+      hour12: false,
+    }).formatToParts(at);
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    local = `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+    weekday = get("weekday");
+  } catch {
+    // 非法时区回退到服务器本地
+    local =
+      `${at.getFullYear()}-${pad2ForPrompt(at.getMonth() + 1)}-${pad2ForPrompt(at.getDate())} ` +
+      `${pad2ForPrompt(at.getHours())}:${pad2ForPrompt(at.getMinutes())}:${pad2ForPrompt(at.getSeconds())}`;
+    weekday = WEEKDAY_CN_FOR_PROMPT[at.getDay()] ?? "";
+  }
+
   const iso = at.toString().includes("T") ? at.toISOString() : new Date(at.getTime()).toISOString();
   return `当前时间：${local} ${weekday} (时区：${tz}, ISO=${iso})`;
 }
