@@ -10,6 +10,7 @@ import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
+import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence-chat-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
@@ -162,6 +163,29 @@ const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
   "info.inspect_webpage": ["sameHostLinks"],
   "info.navigate_site": ["startUrl"],
 };
+
+/**
+ * 元工具 / 能力查询类工具：输出是结构化 JSON（工具 schema、能力清单、匹配列表），
+ * 不是用户可读的自然语言内容。
+ *
+ * 这些工具的输出绝不能进入 `roundToolOutputs`（→ `lastToolOutputFallback`）：
+ * 否则当 LLM 末轮输出道歉式/空回复时，兜底逻辑会把工具 JSON 原样拼成回复推给前端，
+ * 用户会看到「reminder.plan 参数 schema」「availableDomains 数组」这类内部数据。
+ *
+ * 过滤后这些工具的结果仍会作为 tool message 回填给 LLM 供其理解，
+ * 只是不再可能成为面向用户的兜底回复文本。
+ */
+const META_TOOL_NAMES = new Set<string>([
+  "tool_discover",
+  "tool_search",
+  "tool_describe",
+  "tool_call",
+  "agent.query_capabilities",
+  "brain.list_capabilities",
+  "brain.identify_capability_gap",
+  "self.list_custom_skills",
+  "aip.list_my_state",
+]);
 
 function getToolResultBudget(toolName: string): number | undefined {
   return TOOL_RESULT_PRESET_MAX_CHARS[toolName];
@@ -990,6 +1014,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
+          shortTitle: { type: "string", description: "简洁展示标题（用于「今日安排」紧凑列表）：去掉「记得/提醒我/帮我」等指令词与所有时间词，只保留核心事项，如用户说「明天9点提醒我吃药」→shortTitle=\"吃药\"。可选，缺省时服务端按核心事项自动生成。" },
           reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
         },
@@ -1024,7 +1049,8 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          title: { type: "string", description: "任务标题（reminder 类型可选，由 reminderMessage 自动生成友好文案）" },
+          title: { type: "string", description: "完整任务标题（用于日程页完整列表；reminder 类型可选，由 reminderMessage 兜底）" },
+          shortTitle: { type: "string", description: "简洁展示标题（用于「今日安排」紧凑列表）：必须去掉「记得/提醒我/帮我/给我」等指令词和所有时间词，只保留核心事项，如用户说「明天9点提醒我吃药」→shortTitle=\"吃药\"。reminder 类型必填；其他类型缺省时服务端用 title 兜底。" },
           description: { type: "string" },
           kind: {
             type: "string",
@@ -1579,6 +1605,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...VISION_CHAT_TOOLS,
     ...VOICE_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
+    ...INTERNET_INTELLIGENCE_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
@@ -1623,7 +1650,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'web',
     keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate'],
-    toolNames: ['search_web', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
+    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
   },
   {
     category: 'calendar',
@@ -2393,7 +2420,9 @@ export async function streamCompletionWithTools(
       const fullToolContent = typeof ocrText === "string" && ocrText.trim()
         ? `${toolContent}\n\n${ocrText}`
         : toolContent;
-      if (toolContent?.trim()) {
+      // 元工具（tool_discover / agent.query_capabilities 等）输出是结构化 JSON，
+      // 不进 roundToolOutputs，防止「道歉式兜底」把它们原样拼成回复透出到前端。
+      if (toolContent?.trim() && !META_TOOL_NAMES.has(wireToolName)) {
         roundToolOutputs.push(toolContent.trim());
       }
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。

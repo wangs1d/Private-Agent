@@ -1,4 +1,8 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
+import {
+  getToolMetadata as inferToolMetadata,
+  type ToolMetadata,
+} from "../agent/loop/tool-metadata.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import {
   isToolAllowedInAccessMode,
@@ -34,6 +38,22 @@ export type ToolContext = {
 };
 
 export type ToolHandler = (input: Record<string, unknown>, context: ToolContext) => Promise<Record<string, unknown>>;
+
+export type ToolAvailabilityResult =
+  | boolean
+  | {
+      ok: boolean;
+      reason?: string;
+    };
+
+export type ToolAvailabilityCheck = (
+  context: ToolContext,
+) => ToolAvailabilityResult | Promise<ToolAvailabilityResult>;
+
+export type ToolRegistrationMetadata = Partial<Omit<ToolMetadata, "name">> & {
+  /** Runtime availability gate, similar to external agent check_fn design. */
+  checkFn?: ToolAvailabilityCheck;
+};
 
 /** LLM/API 工具名（下划线）→ 注册名（点号），兼容历史会话与未走 prepareToolsForChatApi 的路径。 */
 const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
@@ -73,6 +93,9 @@ const TOOL_CACHE_MAX_SIZE = 100;
 /** 需要缓存的工具名（查询类、无副作用） */
 const CACHEABLE_TOOLS = new Set([
   "weather.get_local",
+  "internet.research",
+  "internet.live_check",
+  "internet.verify",
   "search_web",
   "fetch_web",
   "info.inspect_webpage",
@@ -91,6 +114,7 @@ function buildToolCacheKey(name: string, input: Record<string, unknown>): string
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolHandler>();
+  private readonly metadata = new Map<string, ToolMetadata & { checkFn?: ToolAvailabilityCheck }>();
   private skillManager?: SkillManager;
   private worldService?: WorldService | null;
   private readonly toolCache = new Map<string, ToolCacheEntry>();
@@ -120,8 +144,9 @@ export class ToolRegistry {
   /**
    * 注册传统工具（代码方式）
    */
-  register(name: string, handler: ToolHandler): void {
+  register(name: string, handler: ToolHandler, metadata?: ToolRegistrationMetadata): void {
     this.tools.set(name, handler);
+    this.metadata.set(name, this.mergeMetadata(name, metadata));
   }
 
   list(): string[] {
@@ -137,6 +162,15 @@ export class ToolRegistry {
     return traditionalTools;
   }
 
+  getMetadata(name: string): ToolMetadata & { checkFn?: ToolAvailabilityCheck } {
+    const registryName = resolveRegistryToolName(name);
+    return this.metadata.get(registryName) ?? this.mergeMetadata(registryName);
+  }
+
+  listMetadata(): Array<ToolMetadata & { checkFn?: ToolAvailabilityCheck }> {
+    return this.list().map((name) => this.getMetadata(name));
+  }
+
   async execute(
     name: string,
     input: Record<string, unknown>,
@@ -150,6 +184,14 @@ export class ToolRegistry {
       phoneBridgeOnline: context.phoneBridgeOnline,
     })) {
       return { ok: false, result: { error: sandboxDeniedToolMessage(registryName) } };
+    }
+
+    const availability = await this.checkAvailability(registryName, context);
+    if (!availability.ok) {
+      return {
+        ok: false,
+        result: { error: availability.reason ?? `宸ュ叿褰撳墠涓嶅彲鐢? ${registryName}` },
+      };
     }
 
     // 优先尝试通过 Skill 管理器执行
@@ -181,10 +223,11 @@ export class ToolRegistry {
     if (!tool) return { ok: false, result: { error: `未知工具: ${registryName}` } };
 
     // 工具结果缓存：查询类工具在 TTL 内复用结果
-    if (CACHEABLE_TOOLS.has(registryName)) {
+    if (this.isCacheableTool(registryName)) {
+      const ttlMs = this.resolveToolCacheTtlMs(registryName);
       const cacheKey = buildToolCacheKey(registryName, input);
       const cached = this.toolCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < TOOL_CACHE_TTL_MS) {
+      if (cached && Date.now() - cached.timestamp < ttlMs) {
         return cached.result;
       }
       // 缓存未命中或过期，执行并缓存
@@ -249,10 +292,11 @@ export class ToolRegistry {
     input: Record<string, unknown>,
   ): { ok: boolean; result: Record<string, unknown> } | null {
     const registryName = resolveRegistryToolName(name);
-    if (!CACHEABLE_TOOLS.has(registryName)) return null;
+    if (!this.isCacheableTool(registryName)) return null;
+    const ttlMs = this.resolveToolCacheTtlMs(registryName);
     const cacheKey = buildToolCacheKey(registryName, input);
     const cached = this.toolCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < TOOL_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.timestamp < ttlMs) {
       return cached.result;
     }
     return null;
@@ -262,10 +306,46 @@ export class ToolRegistry {
   cleanupCache(): void {
     const now = Date.now();
     for (const [key, entry] of this.toolCache.entries()) {
-      if (now - entry.timestamp >= TOOL_CACHE_TTL_MS) {
+      const toolName = key.slice(0, key.indexOf(":"));
+      if (now - entry.timestamp >= this.resolveToolCacheTtlMs(toolName)) {
         this.toolCache.delete(key);
       }
     }
+  }
+
+  private mergeMetadata(
+    name: string,
+    metadata?: ToolRegistrationMetadata,
+  ): ToolMetadata & { checkFn?: ToolAvailabilityCheck } {
+    const inferred = inferToolMetadata(name);
+    return {
+      ...inferred,
+      ...metadata,
+      name,
+      category: metadata?.category ?? inferred.category,
+      alternatives: metadata?.alternatives ?? inferred.alternatives,
+      requireHonestFailure: metadata?.requireHonestFailure ?? inferred.requireHonestFailure,
+    };
+  }
+
+  private async checkAvailability(
+    name: string,
+    context: ToolContext,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const checkFn = this.metadata.get(name)?.checkFn;
+    if (!checkFn) return { ok: true };
+    const result = await checkFn(context);
+    if (typeof result === "boolean") return { ok: result };
+    return { ok: result.ok, reason: result.reason };
+  }
+
+  private isCacheableTool(name: string): boolean {
+    const policy = this.getMetadata(name).cachePolicy;
+    return policy?.enabled === true || CACHEABLE_TOOLS.has(name);
+  }
+
+  private resolveToolCacheTtlMs(name: string): number {
+    return this.getMetadata(name).cachePolicy?.ttlMs ?? TOOL_CACHE_TTL_MS;
   }
 }
 

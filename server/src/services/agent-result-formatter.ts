@@ -227,44 +227,187 @@ export function inferCardType(toolName?: string): string {
   return "";
 }
 
-/** 结尾是否属于「征求用户确认」的问句（用于注入抉择按钮） */
-const CONFIRM_QUESTION_RE =
-  /[？?]\s*$|吗\s*$|呢\s*$|要不要|是否|需要.*(调整|修改|继续|确认|下单)|想不想要/i;
+/**
+ * 卡片「场景」：title/items/footer 三者综合判断的卡片类型。
+ * 决定按钮策略——是二元确认、从 items 里挑一个、还是干脆不出按钮。
+ *
+ * 设计要点：
+ *   - 「场景」是结构化的、可解释的，避免靠单一 footer 关键词硬猜
+ *   - 不同场景对应不同按钮形态：confirm/pick_from_items/none
+ *   - 「好的/不用了」这种通用确认只在真正二元决策时才会出现，且措辞按场景变
+ */
+type CardScenario =
+  | "recap_pick"        // 复盘/回顾卡：footer 问"续上哪个/继续聊哪个"，从 items 派生选项
+  | "task_done_review"  // 任务完成卡：footer 问"需要调整/还要改吗"，用任务化措辞
+  | "binary_choice"     // 真正的二元选择："要不要/是否/想不想"——派生具体动词对
+  | "rhetorical"        // 修辞/寒暄问句："有空/真巧/改天"——不出按钮
+  | "no_action";        // 无 footer/无问句——也不出按钮
 
-/** 结尾是否属于「多选/勾选」类（用于注入可选型按钮，variant=select） */
-const SELECT_QUESTION_RE = /选哪|勾选|多选|任选|挑几个|要哪些|哪些合适|想要哪些|选几个/i;
+/** 复盘类标题的提示词（agent 写 recap 卡时常用的开场白） */
+const RECAP_TITLE_HINT_RE = /(捋|回顾|复盘|总结|之前聊|昨天|前天|那天|之前问)/;
+
+/** footer 表达"从 items 里挑一个继续" */
+const PICK_FROM_ITEMS_RE = /(续上|继续聊|继续|选哪|挑|要哪个|聊哪个|想看|想听|想聊|先看|先聊)/;
+
+/** 任务已完成的标题或 footer 提示词 */
+const TASK_DONE_RE = /(已为你|已帮你|已下单|已设置|已创建|已规划|已搞定|已添加|已加入|完成)/;
+
+/** 修辞/寒暄问句——不该出按钮 */
+const RHETORICAL_RE = /(有空|改天|真巧|是吗|有意思|好玩|期待|想想看|下次|回头|记得吗|还记得)/;
+
+/** 真正的二元选择信号 */
+const BINARY_CHOICE_RE = /(要不要|是否|想不想|愿不愿意|需要吗)/;
+
+/** 任务完成后的"调整/修改"信号 */
+const REVIEW_ADJUST_RE = /(需要(调整|修改|改|变|换))|要不要(调|改)|满意吗|可以(吗|么)/;
 
 /**
- * 当卡片结尾是确认问句时，注入通用抉择按钮（好的 / 不用了）。
- * 用户点击后 label 作为 user message 经 chat.user_action 回传，
- * Agent 据此衔接上下文继续执行。
+ * 推断卡片场景。综合 title + items + footer 三者，避免仅凭 footer 一个问号误判。
  */
-function inferConfirmActions(footer: string): Array<{
-  id: string;
-  label: string;
-  variant: string;
-  payload: Record<string, unknown>;
-}> {
-  if (!footer || !CONFIRM_QUESTION_RE.test(footer)) {
-    return [];
+function detectCardScenario(
+  title: string,
+  items: Array<{ type: string; text: string }>,
+  footer: string,
+): CardScenario {
+  const t = title || "";
+  const f = footer || "";
+
+  // 0. 没 footer 或 footer 不是问句 → 视作陈述，不出按钮
+  const endsWithQuestion = /[？?]\s*$|吗\s*$|呢\s*$/.test(f);
+  if (!f || !endsWithQuestion) {
+    return "no_action";
   }
-  return [
-    { id: "confirm", label: "好的", variant: "primary", payload: {} },
-    { id: "decline", label: "不用了", variant: "secondary", payload: {} },
-  ];
+
+  // 1. 复盘卡 + 问"续上哪个" → 让用户从 items 选一个
+  if (RECAP_TITLE_HINT_RE.test(t) && PICK_FROM_ITEMS_RE.test(f) && items.length >= 2) {
+    return "recap_pick";
+  }
+
+  // 2. 任务完成 + 问"需要调整" → 任务化二元
+  if (TASK_DONE_RE.test(t) || TASK_DONE_RE.test(f)) {
+    if (REVIEW_ADJUST_RE.test(f)) return "task_done_review";
+  }
+
+  // 3. 修辞/寒暄问句 → 不出按钮
+  if (RHETORICAL_RE.test(f) || RHETORICAL_RE.test(t)) {
+    return "rhetorical";
+  }
+
+  // 4. 真正的二元选择（不要与 PICK_FROM_ITEMS 混）
+  if (BINARY_CHOICE_RE.test(f) && !PICK_FROM_ITEMS_RE.test(f)) {
+    return "binary_choice";
+  }
+
+  // 5. 兜底：有问号但语义不明 → 保守起见不出按钮（避免硬塞"好的/不用了"）
+  //    之前在这里塞通用按钮被吐槽「毫无逻辑」，现在改用宁缺毋滥
+  return "no_action";
 }
 
 /**
- * 当卡片结尾是「多选/勾选」类问句时，注入可选型按钮（variant=select）。
- * 客户端渲染为可勾选的多选框，用户可多项选择后提交（经 chat.user_action 回传）。
+ * 从 item 文本中抽出可作按钮的短标签。
+ * 规则：取第一个「：或，」之前的短语；去掉前缀词（旅游/科技/新闻 等类目）；截断到 12 字。
  */
-function inferSelectActions(footer: string): Array<{
+function extractItemShortLabel(text: string): string {
+  const t = (text || "").trim();
+  if (!t) return "（未命名）";
+  // 取「：」或第一个「，」「：」前的短语作为核心主题
+  const colonIdx = t.search(/[：:]/);
+  let head = colonIdx > 0 ? t.slice(0, colonIdx) : t;
+  // 进一步取第一个「，」「、」「；」前的短语（更短）
+  const shortIdx = head.search(/[，,、；;]/);
+  if (shortIdx > 0 && shortIdx < 8) head = head.slice(0, shortIdx);
+  // 去掉常见类目前缀
+  head = head.replace(/^(旅游|科技|新闻|财经|体育|娱乐|音乐|电影|游戏|购物|美食|健康|教育)/, "").trim();
+  // 截断到 12 字
+  if (head.length > 12) head = head.slice(0, 12) + "…";
+  return head || "（未命名）";
+}
+
+interface InferredAction {
   id: string;
   label: string;
   variant: string;
   payload: Record<string, unknown>;
-}> {
-  if (!footer || !SELECT_QUESTION_RE.test(footer)) {
+}
+
+/** footer 表达"勾选/多选/挑几个"——触发可选型按钮（variant=select） */
+const SELECT_QUESTION_RE = /选哪|勾选|多选|任选|挑几个|要哪些|哪些合适|想要哪些|选几个/i;
+
+/**
+ * 按场景推断按钮。新逻辑：
+ *   - recap_pick：每个 item 一个按钮（最多 4 个，多了会挤），加一个"都不聊"逃生
+ *   - task_done_review：场景化"就这样"/"调整一下"
+ *   - binary_choice：从 footer 抽出动词生成"动词"/"不动词"
+ *   - rhetorical / no_action：返回空数组（**不出按钮**）
+ */
+function inferActionsForScenario(
+  title: string,
+  items: Array<{ type: string; text: string }>,
+  footer: string,
+): InferredAction[] {
+  const scenario = detectCardScenario(title, items, footer);
+
+  if (scenario === "rhetorical" || scenario === "no_action") {
+    return [];
+  }
+
+  if (scenario === "recap_pick") {
+    const pickable = items.slice(0, 4);
+    const out: InferredAction[] = pickable.map((it, idx) => ({
+      id: `pick_${idx}`,
+      label: extractItemShortLabel(it.text),
+      variant: idx === 0 ? "primary" : "secondary",
+      payload: { picked: it.text },
+    }));
+    // 留一个"都不聊"逃生口，避免被强制选择
+    out.push({ id: "skip", label: "都不聊", variant: "ghost", payload: {} });
+    return out;
+  }
+
+  if (scenario === "task_done_review") {
+    return [
+      { id: "keep", label: "就这样", variant: "primary", payload: {} },
+      { id: "adjust", label: "调整一下", variant: "secondary", payload: {} },
+    ];
+  }
+
+  if (scenario === "binary_choice") {
+    // 从 "要不要X" / "想不想X" 抽出动词 X，生成"X" / "不X"
+    const m = footer.match(/(?:要不要|想不想|是否|愿不愿意)\s*([一-龥A-Za-z0-9]{1,8})/);
+    if (m && m[1]) {
+      const verb = m[1];
+      return [
+        { id: "yes", label: verb, variant: "primary", payload: {} },
+        { id: "no", label: `不${verb}`, variant: "secondary", payload: {} },
+      ];
+    }
+    return [
+      { id: "yes", label: "要", variant: "primary", payload: {} },
+      { id: "no", label: "不要", variant: "secondary", payload: {} },
+    ];
+  }
+
+  return [];
+}
+
+/**
+ * 「多选/勾选」类：仅当 title/footer 明确表达"勾选/多选/挑几个/要哪些"且不是修辞时，
+ * 注入可选型按钮（variant=select）。
+ * 与 inferActionsForScenario 互斥：多选场景优先级更高。
+ *
+ * 与单选场景的差别：select 模式靠 items 旁的勾选框完成选择，按钮只承担"确认/再想想"，
+ * 因此即便 footer 不带问号（标题里写了"挑几个"等），也应触发。
+ */
+function inferSelectActions(
+  title: string,
+  items: Array<{ type: string; text: string }>,
+  footer: string,
+): InferredAction[] {
+  if (!SELECT_QUESTION_RE.test(footer) && !SELECT_QUESTION_RE.test(title)) {
+    return [];
+  }
+  // 修辞/无问号场景下不强行出多选
+  if (detectCardScenario(title, items, footer) === "rhetorical") {
     return [];
   }
   return [
@@ -320,10 +463,11 @@ export function formatAgentResultForChat(
   });
 
   const cardType = inferCardType(toolName);
-  const confirmActions = inferConfirmActions(segment.footer);
-  // 多选/勾选类：优先用可选型按钮替代确认按钮（两者互斥，Select 优先）
-  const selectActions = inferSelectActions(segment.footer);
-  const actions = selectActions.length ? selectActions : confirmActions;
+  // 按钮策略：先看是不是多选/勾选场景，是则走 select；否则按 title/items/footer 推断场景
+  // 不再硬塞"好的/不用了"——见 detectCardScenario 的注释
+  const selectActions = inferSelectActions(segment.title, items, segment.footer);
+  const scenarioActions = inferActionsForScenario(segment.title, items, segment.footer);
+  const actions = selectActions.length ? selectActions : scenarioActions;
 
   // 语音播报优先级：追问/结论句（问句或含"建议/注意/总之"）标记 high，语音端优先朗读
   const speak = /[？?]\s*$|吗\s*$|建议|推荐|注意|警告|总之|结论|提醒/i.test(

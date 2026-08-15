@@ -484,8 +484,8 @@ void ScheduleFloatingWindow::Paint(HWND hwnd, HDC hdc) {
     SelectObject(hdc, old_pen);
     DeleteObject(line_pen);
 
-    // ── 标题列（右）：标题 + 备注 ──
-    int title_x = time_x + time_w + 10;
+    // ── 标题列（右）：标题 + 备注（与时间列保持至少 50px 间距）──
+    int title_x = time_x + time_w + 50;
     int title_right = rc.right - kBodyPadding;
     COLORREF title_color = item.completed ? kCompletedColor : kTextPrimary;
     std::wstring title_text = Utf8ToWide(item.title);

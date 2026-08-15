@@ -19,6 +19,8 @@ import type {
   LearningRecord,
 } from "../services/agent-self-learning-service.js";
 import type {
+  ProceduralSkillGenerationRequest,
+  ProceduralSkillGenerationResult,
   SkillGenerationRequest,
   SkillGenerationResult,
 } from "../services/skill-generator.js";
@@ -42,6 +44,31 @@ interface SelfLearningLike {
 /** 技能生成器外观 */
 interface SkillGeneratorLike {
   generateSkill(request: SkillGenerationRequest): Promise<SkillGenerationResult>;
+  /**
+   * 经验沉淀生成器（procedural 技能）。
+   *
+   * 借鉴外部智能体的经验沉淀思路：把一次复杂任务轨迹交给 LLM 提炼成可复用 SKILL.md。
+   * 未实现时 EvolutionCortex 对 skill_distill 提案降级为 generated（保持非终态）。
+   */
+  generateProceduralSkill?(
+    request: ProceduralSkillGenerationRequest,
+  ): Promise<ProceduralSkillGenerationResult>;
+}
+
+/**
+ * procedural 技能沉淀外观（SkillManager 外观）。
+ *
+ * EvolutionCortex 在 skill_distill 提案执行成功后调用它把 SKILL.md 写入磁盘 +
+ * 注册到内存索引。未注册时降级为 generated（保持非终态，等注册后再执行）。
+ *
+ * 设计原则：与 PromotionPipeline（code 技能装载）解耦——procedural 技能不需要
+ * 编译 handler，不需要用户审批，沉淀即可用。
+ */
+export interface ProceduralSkillSinkLike {
+  registerProceduralSkill(
+    metadata: SkillMetadata,
+    doc: string,
+  ): { ok: boolean; skillName?: string; error?: string; docPath?: string };
 }
 
 /**
@@ -166,9 +193,9 @@ interface ApprovalEmitterLike {
   ): void;
 }
 
-/** Hermes 进化循环外观：cortex 仅注册、观察，不直接驱动 */
-interface HermesLoopLike {
-  // 预留：未来若需查询 Hermes 状态可在此声明
+/** 进化循环外观：cortex 仅注册、观察，不直接驱动 */
+interface EvolutionLoopLike {
+  // 预留：未来若需查询进化循环状态可在此声明
 }
 
 // ---- 内部辅助类型 -----------------------------------------------------
@@ -191,6 +218,11 @@ interface ProposalMeta {
   llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment;
   /** 沙箱测试报告（self_upgrade 提案执行后写入，供 self_evolution 工具查询） */
   sandboxReport?: import("../services/upgrade-sandbox-runner.js").SandboxTestReport;
+  /**
+   * skill_distill 提案的任务轨迹快照（即时反思触发器写入）。
+   * executeSkillDistill 从此字段读取上下文喂给 SkillGenerator.generateProceduralSkill。
+   */
+  distillContext?: ProceduralSkillGenerationRequest;
 }
 
 /** 持久化文件结构 */
@@ -266,13 +298,29 @@ export class EvolutionCortex {
    */
   private knowledgeVerification: KnowledgeVerificationLike | null = null;
   private promotionPipeline: PromotionPipelineLike | null = null;
-  private hermesLoop: HermesLoopLike | null = null;
+  private evolutionLoop: EvolutionLoopLike | null = null;
   /** WS 推送器：向用户推送审批请求 / 审批结果 */
   private approvalEmitter: ApprovalEmitterLike | null = null;
+  /**
+   * procedural 技能沉淀外观（SkillManager 外观）。
+   * skill_distill 提案执行成功后调用 registerProceduralSkill 把 SKILL.md 落盘 + 注册。
+   * 未注册时降级为 generated（保持非终态，等注册后再执行）。
+   */
+  private proceduralSink: ProceduralSkillSinkLike | null = null;
   /** 自动驱动 loop 定时器 */
   private autoLoopTimer: NodeJS.Timeout | null = null;
   /** 自动 loop 默认间隔（5 分钟） */
   private static readonly AUTO_LOOP_INTERVAL_MS = 5 * 60 * 1000;
+
+  /**
+   * 即时反思触发器去重缓存：sessionId → 最近一次触发时间戳。
+   * 防止同一会话短时间内重复创建 skill_distill 提案（防递归 + 防洪）。
+   * TTL = 60s，过期自动失效。
+   */
+  private readonly distillDedup = new Map<string, number>();
+  private static readonly DISTILL_DEDUP_TTL_MS = 60_000;
+  /** 触发 skill_distill 的最小工具调用次数（≥5 次非平凡流程标准） */
+  private static readonly DISTILL_MIN_TOOL_CALLS = 5;
 
   private readonly persistPath: string;
   private persistTimer: NodeJS.Timeout | null = null;
@@ -325,10 +373,21 @@ export class EvolutionCortex {
     console.log("[EvolutionCortex] 已注册 SkillPromotionPipeline");
   }
 
-  registerHermesLoop(svc: HermesLoopLike): void {
-    // Hermes 是独立循环，cortex 仅持有引用以便统一观察，不直接驱动。
-    this.hermesLoop = svc;
-    console.log("[EvolutionCortex] 已注册 HermesEvolutionLoopService（仅观察）");
+  /**
+   * 注册 procedural 技能沉淀外观（SkillManager）。
+   *
+   * skill_distill 提案执行成功后调用它把 SKILL.md 写入磁盘 + 注册到内存索引。
+   * 未注册时 executeSkillDistill 降级为 generated（保持非终态，等注册后再执行）。
+   */
+  registerProceduralSink(svc: ProceduralSkillSinkLike): void {
+    this.proceduralSink = svc;
+    console.log("[EvolutionCortex] 已注册 ProceduralSkillSink（经验沉淀落地）");
+  }
+
+  registerEvolutionLoop(svc: EvolutionLoopLike): void {
+    // 进化循环是独立循环，cortex 仅持有引用以便统一观察，不直接驱动。
+    this.evolutionLoop = svc;
+    console.log("[EvolutionCortex] 已注册进化循环服务（仅观察）");
   }
 
   /** 注册 WS 审批推送器：自主进化闭环的关键依赖 */
@@ -799,6 +858,15 @@ export class EvolutionCortex {
       return this.executeSelfUpgrade(current, meta.llmAssessment);
     }
 
+    // === 经验沉淀分支：skill_distill 走 procedural 技能生成 + 落盘 ===
+    // 触发条件：复杂任务成功后（≥5 次工具调用）即时反思触发器创建提案。
+    // 执行路径：SkillGenerator.generateProceduralSkill → ProceduralSink.registerProceduralSkill
+    //           把任务轨迹提炼成 SKILL.md 并写入磁盘 + 注册到内存索引。
+    // 安全约束：procedural 技能只有文档（无 handler 代码），不需要用户审批，沉淀即可用。
+    if (current.type === "skill_distill") {
+      return this.executeSkillDistill(current, meta);
+    }
+
     // --- 阶段 1：生成 ---
     let generatedSkill: { metadata: SkillMetadata; handlerCode: string; explanation?: string } | null = null;
 
@@ -1095,6 +1163,138 @@ export class EvolutionCortex {
     }
   }
 
+  /**
+   * 经验沉淀执行（skill_distill 提案）。
+   *
+   * 借鉴外部智能体的经验沉淀思路：把已完成的复杂任务轨迹交给 SkillGenerator 提炼成
+   * procedural 技能文档（SKILL.md），通过 ProceduralSink 落盘 + 注册。
+   *
+   * 与 code 技能执行路径完全分离：
+   *  - 不调 SkillGenerator.generateSkill（不生成 handler 代码）
+   *  - 不进 awaiting_user_approval（procedural 技能不是危险操作，沉淀即可用）
+   *  - 成功 → loaded（终态）；失败保持 approved + lastError
+   *
+   * 任务轨迹从 meta.distillContext 读取（由即时反思触发器写入）。
+   * 若 distillContext 缺失（如外部 ingest 的提案），从 proposal.title/description 兜底构造。
+   */
+  private async executeSkillDistill(
+    current: EvolutionProposal,
+    meta: ProposalMeta,
+  ): Promise<EvolutionProposal | null> {
+    const proposalId = current.id;
+
+    if (!this.skillGenerator?.generateProceduralSkill) {
+      meta.warnings.push("SkillGenerator 未实现 generateProceduralSkill，无法沉淀经验");
+      console.log(
+        `[EvolutionCortex] executeSkillDistill ${proposalId}: SkillGenerator 未实现 procedural 生成`,
+      );
+      const next = this.setStatus(current, "generated");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      return next;
+    }
+
+    if (!this.proceduralSink) {
+      meta.warnings.push("ProceduralSink 未注册，无法落盘 procedural 技能");
+      console.log(
+        `[EvolutionCortex] executeSkillDistill ${proposalId}: ProceduralSink 未注册`,
+      );
+      const next = this.setStatus(current, "generated");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      return next;
+    }
+
+    // 构造任务轨迹上下文：优先用 distillContext，缺失时从 proposal 兜底
+    const ctx: ProceduralSkillGenerationRequest =
+      meta.distillContext ?? {
+        userRequest: current.title,
+        toolCallCount: 0,
+        toolCallsSummary: current.description,
+        assistantReply: current.rationale,
+      };
+
+    try {
+      console.log(
+        `[EvolutionCortex] executeSkillDistill ${proposalId}: 启动经验沉淀，toolCalls=${ctx.toolCallCount}`,
+      );
+      const result = await this.skillGenerator.generateProceduralSkill(ctx);
+
+      if (!result.ok || !result.skill) {
+        // LLM 判定不值得沉淀（shouldSave=false）也走这里：直接 reject，不重试
+        const isNotWorth = result.error?.includes("shouldSave=false");
+        if (isNotWorth) {
+          const next = this.setStatus(current, "rejected");
+          this.proposals.set(proposalId, next);
+          this.schedulePersist();
+          console.log(
+            `[EvolutionCortex] executeSkillDistill ${proposalId} LLM 判定不值得沉淀，已 reject`,
+          );
+          return next;
+        }
+        meta.lastError = result.error ?? "SkillGenerator.generateProceduralSkill 返回失败";
+        const next = this.touch(current);
+        this.proposals.set(proposalId, next);
+        this.schedulePersist();
+        console.log(
+          `[EvolutionCortex] executeSkillDistill ${proposalId} 失败：${meta.lastError}`,
+        );
+        return next;
+      }
+
+      // LLM 生成了 SKILL.md，调用 ProceduralSink 落盘 + 注册
+      const skill = result.skill;
+      const skillMeta: SkillMetadata = {
+        name: skill.name,
+        version: "1.0.0",
+        displayName: skill.name,
+        description: skill.description,
+        parameters: [],
+        permissions: [],
+        tags: skill.tags.length > 0 ? skill.tags : ["distilled"],
+        skillType: "procedural",
+        kind: "community",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const sinkResult = this.proceduralSink.registerProceduralSkill(skillMeta, skill.doc);
+      if (!sinkResult.ok) {
+        meta.lastError = sinkResult.error ?? "ProceduralSink.registerProceduralSkill 失败";
+        const next = this.touch(current);
+        this.proposals.set(proposalId, next);
+        this.schedulePersist();
+        console.log(
+          `[EvolutionCortex] executeSkillDistill ${proposalId} 落盘失败：${meta.lastError}`,
+        );
+        return next;
+      }
+
+      meta.generatedSkill = {
+        name: skill.name,
+        handlerCode: skill.doc, // procedural 技能没有 handler 代码，doc 暂存于此
+        explanation: `procedural 技能已沉淀：${skill.description}（${sinkResult.docPath ?? "无磁盘路径"}）`,
+      };
+      const next = this.setStatus(current, "loaded");
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] 经验沉淀提案 ${proposalId} 已生成 procedural 技能 ` +
+        `${skill.name}（${skill.description}），状态=loaded`,
+      );
+      return next;
+    } catch (err) {
+      meta.lastError = err instanceof Error ? err.message : String(err);
+      const next = this.touch(current);
+      this.proposals.set(proposalId, next);
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] executeSkillDistill ${proposalId} 异常：${meta.lastError}`,
+      );
+      return next;
+    }
+  }
+
   // ---- 能力缺口 --------------------------------------------------------
 
   /** 汇总当前所有未解决（非终态）提案关联的能力缺口 */
@@ -1270,6 +1470,13 @@ export class EvolutionCortex {
     errorMessage?: string;
     responseTime?: number;
   }): Promise<void> {
+    // === 经验沉淀即时反思触发器 ===
+    // 借鉴外部智能体的经验沉淀思路：复杂任务（≥5 次成功工具调用）完成后，
+    // 把任务轨迹沉淀为 skill_distill 提案，由 autoLoop 驱动生成 procedural 技能。
+    // 放在方法最前：不依赖 selfLearning（仅依赖 distillBuffer + evolve），
+    // 即使 selfLearning 未注册也能触发沉淀。后台 fork，不阻塞主流程。
+    this.maybeTriggerSkillDistill(params);
+
     if (!this.selfLearning?.recordInteraction) {
       // selfLearning 未注册或未实现 recordInteraction，静默降级
       return;
@@ -1300,6 +1507,127 @@ export class EvolutionCortex {
         console.warn("[EvolutionCortex] knowledgeVerification.observeInteraction 失败:", e);
       }
     }
+  }
+
+  // ---- 内部：经验沉淀即时反思触发器 ------------------------------------
+
+  /** 会话级工具调用轨迹聚合缓冲（skill_distill 触发用） */
+  private readonly distillBuffer = new Map<
+    string,
+    { userRequest: string; toolCalls: Array<{ name: string; ok: boolean }>; startedAt: number }
+  >();
+
+  /** 触发时排除的技能管理类工具：防止"沉淀技能"自身的工具调用递归触发沉淀 */
+  private static readonly DISTILL_EXCLUDED_TOOLS = new Set([
+    "skill.list",
+    "skill.view",
+    "skill.manage",
+    "skill.generate",
+    "skill.promote",
+    "skill.self_upgrade",
+    "self.create_skill",
+    "self.evolution",
+  ]);
+
+  /** 聚合缓冲条目存活时长：超过 10 分钟未更新视为任务已结束，丢弃 */
+  private static readonly DISTILL_BUFFER_TTL_MS = 10 * 60 * 1000;
+
+  /**
+   * 即时反思触发器（纯规则，不调 LLM）。
+   *
+   * 在每次 recordToolInteraction（逐工具调用）时聚合同一会话 + 同一
+   * userRequest 的工具轨迹，当成功工具调用数达到阈值（≥5）时创建
+   * skill_distill 提案，并把任务轨迹快照写入 meta.distillContext，
+   * 供 executeSkillDistill 提炼 SKILL.md。
+   *
+   * 防递归设计（防止"沉淀技能"这个动作本身再次触发沉淀）：
+   *  1. 排除 skill.* 管理类工具（DISTILL_EXCLUDED_TOOLS），它们的调用不计入轨迹
+   *  2. 同一会话 60s 内去重（distillDedup TTL），避免 autoLoop 执行期间重复触发
+   *  3. 触发成功后清空聚合缓冲（一次任务沉淀一次）
+   *  4. 提案去重：evolve() 对同 type + 同 title 的 pending/reviewing 提案自动复用
+   */
+  private maybeTriggerSkillDistill(params: {
+    sessionId: string;
+    userRequest: string;
+    attemptedTools: string[];
+    success: boolean;
+  }): void {
+    const { sessionId, userRequest } = params;
+    if (!sessionId || !userRequest) return;
+
+    // 排除技能管理类工具（防递归）
+    const tools = params.attemptedTools.filter(
+      (t) => !EvolutionCortex.DISTILL_EXCLUDED_TOOLS.has(t),
+    );
+    if (tools.length === 0) return;
+
+    // 聚合到会话缓冲；userRequest 变化视为新任务，重置缓冲
+    const now = Date.now();
+    let entry = this.distillBuffer.get(sessionId);
+    if (!entry || entry.userRequest !== userRequest) {
+      entry = { userRequest, toolCalls: [], startedAt: now };
+      this.distillBuffer.set(sessionId, entry);
+    }
+    for (const name of tools) {
+      entry.toolCalls.push({ name, ok: params.success });
+    }
+
+    // 顺带清理过期缓冲条目（避免 Map 无限增长）
+    for (const [sid, e] of this.distillBuffer) {
+      if (now - e.startedAt > EvolutionCortex.DISTILL_BUFFER_TTL_MS) {
+        this.distillBuffer.delete(sid);
+      }
+    }
+
+    // 未达阈值：继续聚合
+    const successCount = entry.toolCalls.filter((c) => c.ok).length;
+    if (successCount < EvolutionCortex.DISTILL_MIN_TOOL_CALLS) return;
+
+    // 会话级去重：60s 内不重复触发（防 autoLoop 执行期间二次触发）
+    const last = this.distillDedup.get(sessionId);
+    if (last && now - last < EvolutionCortex.DISTILL_DEDUP_TTL_MS) {
+      return;
+    }
+    this.distillDedup.set(sessionId, now);
+    // 顺带清理过期去重条目
+    for (const [sid, ts] of this.distillDedup) {
+      if (now - ts >= EvolutionCortex.DISTILL_DEDUP_TTL_MS) {
+        this.distillDedup.delete(sid);
+      }
+    }
+
+    // 创建 skill_distill 提案，写入任务轨迹快照
+    const userRequestBrief = userRequest.replace(/\s+/g, " ").slice(0, 50);
+    const toolCallsSummary = entry.toolCalls
+      .map((c) => `${c.name}(${c.ok ? "ok" : "fail"})`)
+      .join(", ");
+    const proposal = this.evolve({
+      type: "skill_distill",
+      title: `沉淀技能：${userRequestBrief}`,
+      description:
+        `复杂任务成功完成（${successCount} 次成功工具调用），工具序列：${toolCallsSummary.slice(0, 200)}。` +
+        `值得提炼成 procedural 技能文档（SKILL.md），沉淀操作流程与踩坑经验。`,
+      rationale:
+        `即时反思触发器：会话 ${sessionId} 的请求「${userRequestBrief}」累计 ${successCount} 次成功工具调用` +
+        `（≥${EvolutionCortex.DISTILL_MIN_TOOL_CALLS}），判定为可复用的非平凡流程，触发经验沉淀。`,
+    });
+
+    if (proposal) {
+      const meta = this.ensureMeta(proposal.id);
+      meta.distillContext = {
+        userRequest,
+        toolCallCount: entry.toolCalls.length,
+        toolCallsSummary,
+        assistantReply: "", // 触发器不持有最终回复；executeSkillDistill 用 proposal.rationale 兜底
+      };
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] 即时反思：创建 skill_distill 提案 ${proposal.id}（${successCount} 次成功工具调用）`,
+      );
+    }
+
+    // 触发成功后清空缓冲：一次任务沉淀一次
+    this.distillBuffer.delete(sessionId);
   }
 
   // ---- 内部：状态流转辅助 ----------------------------------------------
@@ -1539,6 +1867,27 @@ export class EvolutionCortex {
       sandboxReport:
         raw.sandboxReport && typeof raw.sandboxReport === "object"
           ? (raw.sandboxReport as ProposalMeta["sandboxReport"])
+          : undefined,
+      distillContext:
+        raw.distillContext && typeof raw.distillContext === "object"
+          ? {
+              userRequest:
+                typeof raw.distillContext.userRequest === "string"
+                  ? raw.distillContext.userRequest
+                  : "",
+              toolCallCount:
+                typeof raw.distillContext.toolCallCount === "number"
+                  ? raw.distillContext.toolCallCount
+                  : 0,
+              toolCallsSummary:
+                typeof raw.distillContext.toolCallsSummary === "string"
+                  ? raw.distillContext.toolCallsSummary
+                  : "",
+              assistantReply:
+                typeof raw.distillContext.assistantReply === "string"
+                  ? raw.distillContext.assistantReply
+                  : "",
+            }
           : undefined,
     };
   }

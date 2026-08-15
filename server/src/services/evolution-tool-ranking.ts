@@ -1,11 +1,11 @@
 import type { ToolRankingHint } from "../external-model/types.js";
 
-type HermesNamespaceOutcome = {
+type EvolutionNamespaceOutcome = {
   success: number;
   failure: number;
 };
 
-type HermesProfileLike = {
+type EvolutionProfileLike = {
   toolNamespaces?: Record<string, unknown>;
   toolNamespaceOutcomes?: Record<string, unknown>;
 };
@@ -19,9 +19,9 @@ function asCount(value: unknown): number {
   return Number.isFinite(count) && count > 0 ? count : 0;
 }
 
-function parseNamespaceOutcomes(raw: unknown): Map<string, HermesNamespaceOutcome> {
+function parseNamespaceOutcomes(raw: unknown): Map<string, EvolutionNamespaceOutcome> {
   if (!isObject(raw)) return new Map();
-  const outcomes = new Map<string, HermesNamespaceOutcome>();
+  const outcomes = new Map<string, EvolutionNamespaceOutcome>();
   for (const [namespace, value] of Object.entries(raw)) {
     if (!isObject(value)) continue;
     const success = asCount(value.success);
@@ -35,7 +35,7 @@ function parseNamespaceOutcomes(raw: unknown): Map<string, HermesNamespaceOutcom
 function scoreNamespace(
   namespace: string,
   totalCalls: number,
-  outcomes: Map<string, HermesNamespaceOutcome>,
+  outcomes: Map<string, EvolutionNamespaceOutcome>,
 ): number {
   const outcome = outcomes.get(namespace);
   if (!outcome) return totalCalls;
@@ -45,12 +45,12 @@ function scoreNamespace(
   return outcome.success * 2 + totalCalls * 0.15 + successRate * 3 - outcome.failure * 0.5;
 }
 
-export function buildToolRankingHintFromHermesProfile(
+export function buildToolRankingHintFromProfile(
   profile: unknown,
   maxNamespaces = 6,
 ): ToolRankingHint | undefined {
   if (!isObject(profile)) return undefined;
-  const shaped = profile as HermesProfileLike;
+  const shaped = profile as EvolutionProfileLike;
   const namespacesRaw = isObject(shaped.toolNamespaces) ? shaped.toolNamespaces : {};
   const outcomes = parseNamespaceOutcomes(shaped.toolNamespaceOutcomes);
 

@@ -71,6 +71,11 @@ export type TurnPanelV2Config = {
   enabled: boolean;
 };
 
+export type ParallelLiveConfig = {
+  enabled: boolean;
+  minChars: number;
+};
+
 export type AgentRuntimeConfig = {
   masterDelegation: MasterDelegationConfig;
   planExecute: PlanExecuteConfig;
@@ -79,6 +84,7 @@ export type AgentRuntimeConfig = {
   messageBatch: MessageBatchConfig;
   interimAck: InterimAckConfig;
   turnPanelV2: TurnPanelV2Config;
+  parallelLive: ParallelLiveConfig;
 };
 
 function loadMasterDelegationConfig(): MasterDelegationConfig {
@@ -189,6 +195,14 @@ function loadTurnPanelV2Config(): TurnPanelV2Config {
   };
 }
 
+function loadParallelLiveConfig(): ParallelLiveConfig {
+  const raw = process.env.AGENT_PARALLEL_LIVE_COMPLEX;
+  return {
+    enabled: raw === undefined ? true : envTruthy(raw),
+    minChars: envPositiveInt(process.env.AGENT_PARALLEL_LIVE_MIN_CHARS, 6),
+  };
+}
+
 export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
   return {
     masterDelegation: loadMasterDelegationConfig(),
@@ -198,6 +212,7 @@ export function loadAgentRuntimeConfig(): AgentRuntimeConfig {
     messageBatch: loadMessageBatchConfig(),
     interimAck: loadInterimAckConfig(),
     turnPanelV2: loadTurnPanelV2Config(),
+    parallelLive: loadParallelLiveConfig(),
   };
 }
 
@@ -234,6 +249,7 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
     `messageBatch=${mb.enabled ? "on(until-processing-ui-off)" : "off"}`,
     `interimAck=${config.interimAck.enabled ? "on" : "off"}`,
     `turnPanelV2=${config.turnPanelV2.enabled ? "on" : "off"}`,
+    `parallelLive=${config.parallelLive.enabled ? "on" : "off"}`,
   ]
     .filter(Boolean)
     .join(", ");

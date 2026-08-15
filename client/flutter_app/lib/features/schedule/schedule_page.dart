@@ -11,7 +11,6 @@ import "../../core/services/schedule_api_client.dart";
 import "../../core/services/schedule_offline_delete_queue.dart";
 import "../../core/services/schedule_recurrence_expand.dart";
 import "../../core/services/schedule_reminder_sync.dart";
-import "../../core/theme/app_theme.dart";
 
 /// 日程：本地持久化事项（日历周视图 + 事项管理）。
 class SchedulePage extends StatefulWidget {
@@ -481,6 +480,11 @@ class _SchedulePageState extends State<SchedulePage> {
 
   Widget _subTabPill(ThemeData theme, int index, String label) {
     final bool on = _subTab == index;
+    // 暗色主题下选中标签用纯白，保证在黑色背景上清晰
+    final Color activeColor =
+        theme.colorScheme.brightness == Brightness.dark
+            ? Colors.white
+            : theme.colorScheme.onSurface;
     return InkWell(
       onTap: () {
         setState(() => _subTab = index);
@@ -500,7 +504,7 @@ class _SchedulePageState extends State<SchedulePage> {
               label,
               style: theme.textTheme.titleSmall?.copyWith(
                 color: on
-                    ? theme.colorScheme.onSurface
+                    ? activeColor
                     : theme.colorScheme.onSurfaceVariant,
                 fontWeight: on ? FontWeight.w600 : FontWeight.w400,
               ),
@@ -510,7 +514,7 @@ class _SchedulePageState extends State<SchedulePage> {
               height: 2,
               width: 40,
               decoration: BoxDecoration(
-                color: on ? theme.colorScheme.onSurface : Colors.transparent,
+                color: on ? activeColor : Colors.transparent,
                 borderRadius: BorderRadius.circular(1),
               ),
             ),

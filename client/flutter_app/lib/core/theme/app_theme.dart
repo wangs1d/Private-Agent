@@ -36,9 +36,12 @@ class AppThemeController extends ValueNotifier<AppThemeVariant> {
 abstract final class AppPalette {
   // ═══════════════════════════════════════════════════════════
   // 深色主题（默认，沿用项目原有配色）
+  // 侧栏/顶栏统一走更深一档的深灰(#131313),与聊天主背景纯黑(#0F0F0F)
+  // 保留 4 级灰阶差,既能区分又能融为一体。
   // ═══════════════════════════════════════════════════════════
   static const Color mainPanel = Color(0xFF0F0F0F);
-  static const Color sidebar = Color(0xFF161616);
+  /// 侧栏/顶栏:深一档的灰(#131313),比主背景略亮、与纯黑可识别
+  static const Color sidebar = Color(0xFF131313);
   static const Color sidebarSeparator = Color(0xFF2A2A2A);
   static const Color appBarForeground = Color(0xFFE8E8E8);
   static const Color sidebarDivider = Color(0xFF27272A);
@@ -225,12 +228,28 @@ abstract final class AppTheme {
         ),
       ),
       scaffoldBackgroundColor: AppPalette.mainPanel,
+      // AppBar 默认走与侧栏一致的深灰色;不显式设置 backgroundColor
+      // 的 AppBar 也会自动跟随此色,避免出现"顶栏纯黑、侧栏深灰"的错位。
       appBarTheme: const AppBarTheme(
-        backgroundColor: AppPalette.mainPanel,
+        backgroundColor: AppPalette.sidebar,
         foregroundColor: AppPalette.appBarForeground,
         elevation: 0,
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
+      ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: Colors.white,
+        unselectedLabelColor: Colors.white70,
+        indicatorColor: cs.onSurface,
+        dividerColor: cs.outline.withValues(alpha: 0.25),
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+        labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        unselectedLabelStyle:
+            const TextStyle(fontWeight: FontWeight.w400, fontSize: 14),
+        indicator: UnderlineTabIndicator(
+          borderSide: BorderSide(width: 2, color: cs.onSurface),
+          insets: const EdgeInsets.symmetric(horizontal: 12),
+        ),
       ),
       cardTheme: CardThemeData(
         color: Colors.transparent,
@@ -325,6 +344,21 @@ abstract final class AppTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
+      ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: AppPalette.warmOnSurface,
+        unselectedLabelColor: AppPalette.warmOnSurfaceVariant,
+        indicatorColor: AppPalette.warmOnSurface,
+        dividerColor: AppPalette.warmOutline.withValues(alpha: 0.55),
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+        labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        unselectedLabelStyle:
+            const TextStyle(fontWeight: FontWeight.w400, fontSize: 14),
+        indicator: UnderlineTabIndicator(
+          borderSide:
+              BorderSide(width: 2, color: AppPalette.warmOnSurface),
+          insets: const EdgeInsets.symmetric(horizontal: 12),
+        ),
       ),
       cardTheme: CardThemeData(
         color: Colors.transparent,

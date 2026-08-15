@@ -1,24 +1,72 @@
-import "dart:async" show Timer, unawaited;
-import "dart:convert";
+import "dart:async" show unawaited;
+import "dart:convert" show jsonDecode;
+import "dart:math" show max, min;
 
 import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
-import "../../core/models/schedule_models.dart";
 import "../../core/config/api_config.dart";
+import "../../core/models/schedule_models.dart";
 import "../../core/services/client_location_service.dart";
 import "../../core/services/desk_pet_session.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
 
-const Color _kAccentBlue = Color(0xFF007AFF);
-const Color _kAccentGreen = Color(0xFF34C759);
-const Color _kAccentOrange = Color(0xFFFF9500);
+const Color _kAccentBlue = Color(0xFF18D6F3);
+const Color _kAccentGreen = Color(0xFF1ED7A6);
+const Color _kAccentOrange = Color(0xFFD7B85A);
 
 /// 右侧快捷功能面板的固定宽度。
 /// 优化后收窄到 220px，减少视觉压迫感，让聊天区更开阔。
 const double kRightSidePanelWidth = 220.0;
+
+/// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
+/// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
+/// （与日程页完整标题区分，也与桌面悬浮窗的 web 端逻辑保持一致）。
+String _simplifyScheduleTitle(String raw) {
+  String s = raw.trim();
+  if (s.isEmpty) return s;
+
+  // 提醒式包装：“该去游泳啦，带上泳衣和浴巾！” -> “去游泳”
+  final RegExp reminderWrapper = RegExp(r'^该([^啦了，。！!?？\s]{1,10})(啦|了)');
+  final Match? wrapper = reminderWrapper.firstMatch(s);
+  if (wrapper != null) s = wrapper.group(1)!;
+
+  final RegExp instruction = RegExp(
+    r'^\s*(请)?(记得|别忘了|不要忘记|不要忘了|提醒用户|提醒我|提醒一下|提醒|帮我|记着|叫我|喊我|给我|让我)'
+    r'\s*(提醒|一下)?',
+  );
+  final RegExp metaPrefix = RegExp(
+    r'^\s*(定时|设置|安排|添加|创建|新增)(一个|一下|个|条)?(提醒|日程|事项)?',
+  );
+  final RegExp timeExpr = RegExp(
+    r'(今天|明天|后天|今晚|明晚|凌晨|早上|上午|中午|下午|傍晚|晚上|夜里|半夜)?'
+    r'(\d{1,2}(点|[:：])[:：]?\d{0,2}(分|分钟)?(半|整|左右)?'
+    r'|[一二三四五六七八九十两]+点(半|整|左右)?'
+    r'|\d{1,2}[:：]\d{2})',
+  );
+  final RegExp pronoun = RegExp(r'^(我(?!们)|帮我|给我)(的)?');
+
+  // 交替剥离指令前缀 / 元描述前缀 / 时间词 / 冗余代词，直到不再变化：
+  // “记得提醒我下午3点帮我买咖啡” -> “我下午3点帮我买咖啡” -> “我帮我买咖啡” -> “买咖啡”
+  String prev;
+  do {
+    prev = s;
+    s = s
+        .replaceAll(instruction, '')
+        .replaceAll(metaPrefix, '')
+        .replaceAll(timeExpr, '')
+        .replaceAll(pronoun, '');
+  } while (s != prev);
+
+  // 清理“的提醒：X”这类残留结构，以及开头的日期词（今日安排均为当天事项）
+  s = s.replaceFirst(RegExp(r'^[^：:]*的?(提醒|闹钟|日程)[：:]'), '');
+  s = s.replaceFirst(RegExp(r'^(今天|明天|后天|明早|明晚|大后天)'), '');
+
+  s = s.replaceAll(RegExp(r'^[\s，,、.。!！?？\-~—－–]+'), '').trim();
+  return s.isEmpty ? "待办事项" : s;
+}
 
 /// 页面右侧快捷功能面板。
 ///
@@ -55,7 +103,6 @@ class RightSidePanel extends StatefulWidget {
 class _RightSidePanelState extends State<RightSidePanel>
     with SingleTickerProviderStateMixin {
   bool _useDesktopFloating = false;
-  bool _scheduleWindowActive = false;
   late AnimationController _breatheController;
   late Animation<double> _breatheOpacity;
 
@@ -79,7 +126,6 @@ class _RightSidePanelState extends State<RightSidePanel>
         if (mounted) {
           setState(() {
             _useDesktopFloating = false;
-            _scheduleWindowActive = false;
           });
           ScheduleFloatingLauncher.activeNotifier
               .removeListener(_onScheduleWindowChanged);
@@ -88,6 +134,16 @@ class _RightSidePanelState extends State<RightSidePanel>
       },
     );
     _loadSchedulePreference();
+  }
+
+  @override
+  void didUpdateWidget(covariant RightSidePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 日程数据刷新（新 future）时，若桌面悬浮窗已开启，同步推送最新安排
+    if (_useDesktopFloating &&
+        oldWidget.scheduleFuture != widget.scheduleFuture) {
+      _pushScheduleToNativeWindow();
+    }
   }
 
   @override
@@ -117,9 +173,6 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   Future<void> _launchDesktopScheduleWindow() async {
     final bool launched = await ScheduleFloatingLauncher.launch();
-    if (mounted) {
-      setState(() => _scheduleWindowActive = launched);
-    }
     ScheduleFloatingLauncher.activeNotifier
         .addListener(_onScheduleWindowChanged);
     if (launched) {
@@ -134,15 +187,17 @@ class _RightSidePanelState extends State<RightSidePanel>
       return;
     }
     future.then((List<ScheduleEvent> events) {
-      final List<ScheduleEvent> sorted = List<ScheduleEvent>.from(events)
-        ..sort((a, b) => a.startAt.compareTo(b.startAt));
+      final DateTime now = DateTime.now();
+      final List<ScheduleEvent> sorted =
+          List<ScheduleEvent>.from(events)
+            ..sort((a, b) => a.startAt.compareTo(b.startAt));
       final List<ScheduleFloatingItem> items = sorted
           .map((e) => ScheduleFloatingItem(
                 id: e.id,
                 timeText:
                     "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
-                title: e.title,
-                notes: (e.notes ?? '').trim(),
+                title: e.shortTitle ?? _simplifyScheduleTitle(e.title),
+                completed: !e.startAt.isAfter(now),
               ))
           .toList();
       ScheduleFloatingLauncher.setSchedule(items);
@@ -151,16 +206,12 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   void _onScheduleWindowChanged() {
     if (mounted) {
-      setState(
-          () => _scheduleWindowActive = ScheduleFloatingLauncher.isRunning);
+      setState(() {});
     }
   }
 
   Future<void> _closeDesktopScheduleWindow() async {
     await ScheduleFloatingLauncher.close();
-    if (mounted) {
-      setState(() => _scheduleWindowActive = false);
-    }
     ScheduleFloatingLauncher.activeNotifier
         .removeListener(_onScheduleWindowChanged);
   }
@@ -172,13 +223,12 @@ class _RightSidePanelState extends State<RightSidePanel>
       if (launched) {
         setState(() {
           _useDesktopFloating = true;
-          _scheduleWindowActive = true;
         });
         ScheduleFloatingLauncher.activeNotifier
             .addListener(_onScheduleWindowChanged);
         _pushScheduleToNativeWindow();
       } else {
-        setState(() => _scheduleWindowActive = false);
+        setState(() {});
       }
     } else {
       await _closeDesktopScheduleWindow();
@@ -219,7 +269,7 @@ class _RightSidePanelState extends State<RightSidePanel>
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Container(
       decoration: BoxDecoration(
-        color: cs.surfaceContainerLow,
+        color: cs.surfaceContainer,
         border: Border(
           left: BorderSide(
             color: cs.outline.withValues(alpha: 0.25),
@@ -242,32 +292,6 @@ class _RightSidePanelState extends State<RightSidePanel>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
                     if (!_useDesktopFloating) ...<Widget>[
-                      AnimatedBuilder(
-                        animation: _breatheOpacity,
-                        builder: (context, child) {
-                          return Container(
-                            decoration: BoxDecoration(
-                              border: Border(
-                                top: BorderSide(
-                                  color: Colors.white.withValues(
-                                    alpha: _breatheOpacity.value,
-                                  ),
-                                ),
-                                bottom: BorderSide(
-                                  color: Colors.white.withValues(
-                                    alpha: _breatheOpacity.value,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            child: child,
-                          );
-                        },
-                        child: _buildScheduleSection(cs),
-                      ),
-                      const SizedBox(height: 16),
-                    ],
                     AnimatedBuilder(
                       animation: _breatheOpacity,
                       builder: (context, child) {
@@ -275,12 +299,12 @@ class _RightSidePanelState extends State<RightSidePanel>
                           decoration: BoxDecoration(
                             border: Border(
                               top: BorderSide(
-                                color: Colors.white.withValues(
+                              color: cs.outline.withValues(
                                   alpha: _breatheOpacity.value,
                                 ),
                               ),
                               bottom: BorderSide(
-                                color: Colors.white.withValues(
+                                color: cs.outline.withValues(
                                   alpha: _breatheOpacity.value,
                                 ),
                               ),
@@ -290,8 +314,34 @@ class _RightSidePanelState extends State<RightSidePanel>
                           child: child,
                         );
                       },
-                      child: _buildToolsSection(cs),
+                      child: _buildScheduleSection(cs),
                     ),
+                    const SizedBox(height: 16),
+                  ],
+                  AnimatedBuilder(
+                    animation: _breatheOpacity,
+                    builder: (context, child) {
+                      return Container(
+                        decoration: BoxDecoration(
+                          border: Border(
+                            top: BorderSide(
+                              color: cs.outline.withValues(
+                                  alpha: _breatheOpacity.value,
+                                ),
+                            ),
+                            bottom: BorderSide(
+                                color: cs.outline.withValues(
+                                  alpha: _breatheOpacity.value,
+                                ),
+                            ),
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: child,
+                      );
+                    },
+                    child: _buildToolsSection(cs),
+                  ),
                   ],
                 ),
               ),
@@ -370,14 +420,15 @@ class _RightSidePanelState extends State<RightSidePanel>
                   ),
                 );
               }
-              final List<ScheduleEvent> items = (snapshot.data ??
-                  <ScheduleEvent>[])
-                ..sort((a, b) => a.startAt.compareTo(b.startAt));
+              final List<ScheduleEvent> items =
+                  (snapshot.data ?? <ScheduleEvent>[])
+                    ..sort((a, b) => a.startAt.compareTo(b.startAt));
               if (items.isEmpty) {
                 return _buildEmptySchedule(cs);
               }
               // 只展示最近 3 条，保持面板精简
-              final List<ScheduleEvent> visible = items.take(3).toList();
+              final List<ScheduleEvent> visible =
+                  items.take(3).toList();
               final int hiddenCount = items.length - visible.length;
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -400,7 +451,7 @@ class _RightSidePanelState extends State<RightSidePanel>
                                 vertical: 4, horizontal: 4),
                             child: Row(
                               children: <Widget>[
-                                const SizedBox(width: 34),
+                                const SizedBox(width: 84),
                                 Text(
                                   "还有 $hiddenCount 项安排",
                                   style: TextStyle(
@@ -434,7 +485,7 @@ class _RightSidePanelState extends State<RightSidePanel>
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
       child: Row(
         children: <Widget>[
-          const SizedBox(width: 34),
+          const SizedBox(width: 84),
           Text(
             "今天还没有安排",
             style: TextStyle(
@@ -448,16 +499,22 @@ class _RightSidePanelState extends State<RightSidePanel>
   }
 
   Widget _buildScheduleRow(ScheduleEvent event, String time, ColorScheme cs) {
+    // 已过时间（视为已完成）的事项：删除线 + 变淡，与日程页的完整卡片样式区分
+    final bool passed = !event.startAt.isAfter(DateTime.now());
     final Color timeColor;
-    final int hour = event.startAt.hour;
-    if (hour < 10) {
-      timeColor = _kAccentBlue;
-    } else if (hour < 14) {
-      timeColor = _kAccentOrange;
-    } else if (hour < 18) {
-      timeColor = _kAccentGreen;
+    if (passed) {
+      timeColor = cs.onSurfaceVariant.withValues(alpha: 0.35);
     } else {
-      timeColor = cs.onSurfaceVariant;
+      final int hour = event.startAt.hour;
+      if (hour < 10) {
+        timeColor = _kAccentBlue;
+      } else if (hour < 14) {
+        timeColor = _kAccentOrange;
+      } else if (hour < 18) {
+        timeColor = _kAccentGreen;
+      } else {
+        timeColor = cs.onSurfaceVariant;
+      }
     }
 
     return Material(
@@ -481,35 +538,23 @@ class _RightSidePanelState extends State<RightSidePanel>
                   ),
                 ),
               ),
+              // 标题与时间保持至少 50px 间距，向右靠不挨着时间
+              const SizedBox(width: 50),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    const SizedBox(height: 1),
-                    Text(
-                      event.title,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: cs.onSurface,
-                        fontWeight: FontWeight.w400,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (event.notes != null && event.notes!.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          event.notes!,
-                          style: TextStyle(
-                            fontSize: 9.5,
-                            color: cs.onSurfaceVariant,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
+                child: Text(
+                  // 优先使用创建时由 LLM 生成的简洁展示标题，旧数据回退到剥离简化
+                  event.shortTitle ?? _simplifyScheduleTitle(event.title),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: passed
+                        ? cs.onSurface.withValues(alpha: 0.35)
+                        : cs.onSurface,
+                    fontWeight: FontWeight.w400,
+                    decoration: passed ? TextDecoration.lineThrough : null,
+                    decorationColor: cs.onSurface.withValues(alpha: 0.4),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
@@ -530,7 +575,8 @@ class _RightSidePanelState extends State<RightSidePanel>
           icon: Icons.account_balance_wallet_outlined,
           label: "钱包",
           onTap: widget.onWallet),
-      _ToolSpec(icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
+      _ToolSpec(
+          icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
       _ToolSpec(
           icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
       _ToolSpec(
@@ -604,13 +650,16 @@ class _RightSidePanelState extends State<RightSidePanel>
               decoration: BoxDecoration(
                 color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: cs.outline.withValues(alpha: 0.3)),
+                border: Border.all(
+                    color: cs.outline.withValues(alpha: 0.3)),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   Icon(
-                    summoned ? Icons.nightlight_round : Icons.wb_sunny_outlined,
+                    summoned
+                        ? Icons.nightlight_round
+                        : Icons.wb_sunny_outlined,
                     size: 13,
                     color: cs.onSurfaceVariant,
                   ),
@@ -713,73 +762,6 @@ class _ToolButtonState extends State<_ToolButton> {
 // ═══════════════════════════════════════════════════════════
 // 天气 Header：作为右侧面板顶部区域，与面板融为一体，顶部贴合
 // ═══════════════════════════════════════════════════════════
-class _WeatherBriefData {
-  const _WeatherBriefData({
-    required this.currentTempC,
-    required this.apparentTempC,
-    required this.weatherText,
-    required this.todayMinC,
-    required this.todayMaxC,
-    required this.peakRainPct,
-    required this.hourlyForecast,
-    required this.updatedAt,
-  });
-
-  final double currentTempC;
-  final double apparentTempC;
-  final String weatherText;
-  final double todayMinC;
-  final double todayMaxC;
-  final int peakRainPct;
-  final List<_WeatherHourData> hourlyForecast;
-  final DateTime updatedAt;
-
-  factory _WeatherBriefData.fromJson(Map<String, dynamic> json) {
-    final List<dynamic> hourly =
-        (json["hourlyForecast"] as List?) ?? const <dynamic>[];
-    final double currentTemp = _asDouble(json["currentTempC"], 26);
-    final String weatherText = (json["weatherText"] as String?)?.trim() ?? "";
-    return _WeatherBriefData(
-      currentTempC: currentTemp,
-      apparentTempC: _asDouble(json["apparentTempC"], currentTemp),
-      weatherText: weatherText.isNotEmpty ? weatherText : "多云",
-      todayMinC: _asDouble(json["todayMinC"], 21),
-      todayMaxC: _asDouble(json["todayMaxC"], 30),
-      peakRainPct: _asDouble(json["peakRainPct"], 0).round(),
-      hourlyForecast: hourly
-          .whereType<Map>()
-          .map((Map item) =>
-              _WeatherHourData.fromJson(item.cast<String, dynamic>()))
-          .toList(growable: false),
-      updatedAt: DateTime.now(),
-    );
-  }
-}
-
-class _WeatherHourData {
-  const _WeatherHourData({
-    required this.hour,
-    required this.temperatureC,
-  });
-
-  final String hour;
-  final double temperatureC;
-
-  factory _WeatherHourData.fromJson(Map<String, dynamic> json) {
-    final String hour = (json["hour"] as String?)?.trim() ?? "";
-    return _WeatherHourData(
-      hour: hour.isNotEmpty ? hour : "--",
-      temperatureC: _asDouble(json["temperatureC"], 0),
-    );
-  }
-}
-
-double _asDouble(Object? value, double fallback) {
-  if (value is num) return value.toDouble();
-  if (value is String) return double.tryParse(value) ?? fallback;
-  return fallback;
-}
-
 class _WeatherHeader extends StatefulWidget {
   const _WeatherHeader({this.onReportLocation});
 
@@ -793,10 +775,8 @@ class _WeatherHeader extends StatefulWidget {
 class _WeatherHeaderState extends State<_WeatherHeader>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
-  Timer? _refreshTimer;
-  _WeatherBriefData? _weather;
-  bool _refreshingWeather = false;
-  String? _weatherError;
+  _WeatherData? _weather;
+  bool _loadingWeather = true;
 
   @override
   void initState() {
@@ -805,104 +785,68 @@ class _WeatherHeaderState extends State<_WeatherHeader>
       vsync: this,
       duration: const Duration(seconds: 10),
     )..repeat();
-    unawaited(_refreshWeather());
-    _refreshTimer = Timer.periodic(
-      const Duration(minutes: 10),
-      (_) => unawaited(_refreshWeather()),
-    );
+    _loadWeather();
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
     _ctrl.dispose();
     super.dispose();
   }
 
-  /// 面板打开/重建时拉一次实时 GPS（实时位置数据），并上报服务端填充位置缓存，
-  /// 供 Agent 需要位置时（如天气工具）按需复用。面板本身不再展示位置文本。
-  Future<void> _refreshWeather() async {
-    if (_refreshingWeather) return;
-    _refreshingWeather = true;
+  /// 用真实定位（GPS 优先，fallback IP/缓存）请求后端真实天气。
+  Future<void> _loadWeather() async {
     try {
       final ClientLocationPayload? loc =
-          await ClientLocationService.getCurrentLocationForChat();
+          await ClientLocationService.getCurrentLocation();
+      final double lat = loc?.latitude ?? double.nan;
+      final double lon = loc?.longitude ?? double.nan;
+      if (!lat.isFinite || !lon.isFinite) {
+        if (mounted) {
+          setState(() => _loadingWeather = false);
+        }
+        return;
+      }
+      // 拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
       if (loc != null) {
         widget.onReportLocation?.call(loc.toJson());
-        final _WeatherBriefData brief = await _fetchWeather(loc);
-        if (!mounted) return;
-        setState(() {
-          _weather = brief;
-          _weatherError = null;
-        });
-      } else if (mounted) {
-        setState(() {
-          _weatherError = "定位不可用";
-        });
       }
-    } catch (e) {
       if (!mounted) return;
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/weather/current").replace(
+        queryParameters: <String, String>{
+          "latitude": lat.toString(),
+          "longitude": lon.toString(),
+          "timezone": (loc?.timezone ?? "Asia/Shanghai"),
+          "label": (loc?.label ?? ""),
+        },
+      );
+      final http.Response res = await http
+          .get(uri, headers: const <String, String>{"Accept": "application/json"})
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (res.statusCode != 200) {
+        setState(() => _loadingWeather = false);
+        return;
+      }
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final Map<String, dynamic>? brief =
+          (body["brief"] as Map?)?.cast<String, dynamic>();
       setState(() {
-        _weatherError = e.toString();
+        _weather = brief == null ? null : _WeatherData.fromJson(brief);
+        _loadingWeather = false;
       });
-    } finally {
-      _refreshingWeather = false;
+    } catch (_) {
+      if (mounted) {
+        setState(() => _loadingWeather = false);
+      }
     }
-  }
-
-  Future<_WeatherBriefData> _fetchWeather(ClientLocationPayload loc) async {
-    final Uri uri = Uri.parse("${ApiConfig.httpBase}/weather/current").replace(
-      queryParameters: <String, String>{
-        "latitude": loc.latitude.toString(),
-        "longitude": loc.longitude.toString(),
-        if (loc.timezone?.isNotEmpty == true) "timezone": loc.timezone!,
-        if (loc.label?.isNotEmpty == true) "label": loc.label!,
-      },
-    );
-    final http.Response res = await http.get(uri,
-        headers: const <String, String>{
-          "Accept": "application/json"
-        }).timeout(const Duration(seconds: 15));
-    if (res.statusCode != 200) {
-      throw Exception("天气接口返回 ${res.statusCode}");
-    }
-    final Map<String, dynamic> body =
-        jsonDecode(res.body) as Map<String, dynamic>;
-    if (body["ok"] != true) {
-      throw Exception(body["message"]?.toString() ?? "天气接口异常");
-    }
-    final Map<String, dynamic>? brief =
-        (body["brief"] as Map?)?.cast<String, dynamic>();
-    if (brief == null) {
-      throw Exception("天气接口缺少数据");
-    }
-    return _WeatherBriefData.fromJson(brief);
   }
 
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final bool isDark = cs.brightness == Brightness.dark;
-    final _WeatherBriefData? weather = _weather;
-    final String currentTempText =
-        weather?.currentTempC.round().toString() ?? "26";
-    final String weatherText =
-        weather?.weatherText ?? (_weatherError == null ? "更新中" : "更新失败");
-    final String feelsLikeText =
-        "体感 ${weather?.apparentTempC.round().toString() ?? "28"}°";
-    final String highText =
-        "H ${weather?.todayMaxC.round().toString() ?? "30"}°";
-    final String lowText =
-        "L ${weather?.todayMinC.round().toString() ?? "21"}°";
-    final int rainPct = weather?.peakRainPct ?? 0;
-    final bool hasRainAlert = rainPct >= 40;
-    final String alertText = hasRainAlert
-        ? "降雨 $rainPct%"
-        : weather == null
-            ? "实时同步"
-            : "刚更新";
-    final Color alertColor =
-        hasRainAlert ? const Color(0xFFFF9500) : _kAccentGreen;
 
     return Container(
       decoration: BoxDecoration(
@@ -911,13 +855,13 @@ class _WeatherHeaderState extends State<_WeatherHeader>
           end: Alignment.bottomCenter,
           colors: isDark
               ? <Color>[
-                  const Color(0xFF007AFF).withValues(alpha: 0.12),
-                  const Color(0xFF007AFF).withValues(alpha: 0.04),
+                  const Color(0xFF18D6F3).withValues(alpha: 0.12),
+                  const Color(0xFF18D6F3).withValues(alpha: 0.04),
                   Colors.transparent,
                 ]
               : <Color>[
-                  const Color(0xFF007AFF).withValues(alpha: 0.06),
-                  const Color(0xFF007AFF).withValues(alpha: 0.02),
+                  const Color(0xFF18D6F3).withValues(alpha: 0.06),
+                  const Color(0xFF18D6F3).withValues(alpha: 0.02),
                   Colors.transparent,
                 ],
         ),
@@ -925,7 +869,7 @@ class _WeatherHeaderState extends State<_WeatherHeader>
       child: Stack(
         children: <Widget>[
           // 飘动的云朵背景
-          _buildCloudLayer(),
+          _buildCloudLayer(cs),
 
           // 太阳光晕
           Positioned(
@@ -935,7 +879,8 @@ class _WeatherHeaderState extends State<_WeatherHeader>
               animation: _ctrl,
               builder: (_, __) {
                 final double t = _ctrl.value;
-                final double scale = 1 + 0.12 * (t < 0.5 ? t * 2 : 2 - t * 2);
+                final double scale =
+                    1 + 0.12 * (t < 0.5 ? t * 2 : 2 - t * 2);
                 return Transform.scale(
                   scale: scale,
                   child: Container(
@@ -968,36 +913,56 @@ class _WeatherHeaderState extends State<_WeatherHeader>
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                // 天气图标（右对齐；「显示当前位置」组件已按需求移除）
+                // 天气图标 + 状况/体感（不再显示当前位置）
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: <Widget>[
-                    const Spacer(),
-                    SizedBox(
-                      width: 26,
-                      height: 26,
-                      child: CustomPaint(
-                        painter: _WeatherIconPainter(),
-                      ),
+                    _WeatherIcon(code: _weather?.weatherCode ?? 2, size: 26),
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          _statusText,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            color: cs.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          _feelsLikeText,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ),
+                    const Spacer(),
+                    if (_loadingWeather)
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
                   ],
                 ),
 
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
 
-                // 温度大字 + 天气状况
+                // 温度大字 + 最高最低温
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: <Widget>[
-                    // must be min: 否则默认 .max 会吃掉全部 Row 宽度,
-                    // 右侧 Spacer+Column 拿到 0 宽度 → "多云转晴"溢出
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.baseline,
                       textBaseline: TextBaseline.alphabetic,
                       children: <Widget>[
                         Text(
-                          currentTempText,
+                          _tempText,
                           style: TextStyle(
                             fontSize: 32,
                             fontWeight: FontWeight.w300,
@@ -1025,21 +990,19 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: <Widget>[
                         Text(
-                          weatherText,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          "最高 $_maxTemp°",
                           style: TextStyle(
-                            fontSize: 11.5,
+                            fontSize: 10,
                             fontWeight: FontWeight.w500,
-                            color: cs.onSurface,
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                         const SizedBox(height: 1),
                         Text(
-                          feelsLikeText,
+                          "最低 $_minTemp°",
                           style: TextStyle(
                             fontSize: 10,
-                            color: cs.onSurfaceVariant,
+                            color: cs.onSurfaceVariant.withValues(alpha: 0.7),
                           ),
                         ),
                       ],
@@ -1049,73 +1012,34 @@ class _WeatherHeaderState extends State<_WeatherHeader>
 
                 const SizedBox(height: 6),
 
-                // 最高最低温 + 预警
-                Row(
-                  children: <Widget>[
-                    Text.rich(
-                      TextSpan(
-                        children: <InlineSpan>[
-                          TextSpan(
-                            text: highText,
-                            style: TextStyle(
+                // 预警（降水概率较高时提示）
+                if (_hasWarning)
+                  Row(
+                    children: <Widget>[
+                      const Spacer(),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          const Icon(Icons.warning_amber_rounded,
+                              size: 10, color: Color(0xFFD7B85A)),
+                          const SizedBox(width: 2),
+                          Text(
+                            _warningText,
+                            style: const TextStyle(
                               fontSize: 10,
+                              color: Color(0xFFD7B85A),
                               fontWeight: FontWeight.w500,
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                          TextSpan(
-                            text: " · ",
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: cs.onSurfaceVariant.withValues(alpha: 0.5),
-                            ),
-                          ),
-                          TextSpan(
-                            text: lowText,
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: cs.onSurfaceVariant.withValues(alpha: 0.7),
                             ),
                           ),
                         ],
                       ),
-                    ),
-                    const Spacer(),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        Icon(Icons.warning_amber_rounded,
-                            size: 10, color: alertColor),
-                        const SizedBox(width: 2),
-                        Text(
-                          alertText,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: alertColor,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
 
-                const SizedBox(height: 8),
+                if (_hasWarning) const SizedBox(height: 8) else const SizedBox(height: 10),
 
-                // 分时温度柱状图:
-                //   - Row 不限定 42px 固定高度(原来是 ConstrainedBox, 引起
-                //     底部高度溢出 3px: Column intrinsic 高度 32+2+13.6+2+13.6
-                //     ≈ 63 > 42, 文字被切)
-                //   - 用 SizedBox(width: 30) 给每根柱固定列宽, 由 Row 自身
-                //     拿父 stretch 传来的 188px 宽度, 6 根 30px = 180, 剩余
-                //     8px 走 spaceBetween 均分 5 个间隔(1.6px/间隔)
-                //   - 不再需要 FittedBox: 数字 intrinsic ~16-18px < 30px 净宽
-                Row(
-                  mainAxisSize: MainAxisSize.max,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: _buildHourlyBars(weather),
-                ),
+                // 分时温度柱状图（真实分时预报）
+                if (_hourlyPoints.isNotEmpty) _buildHourlyBars(cs),
               ],
             ),
           ),
@@ -1124,48 +1048,75 @@ class _WeatherHeaderState extends State<_WeatherHeader>
     );
   }
 
-  List<Widget> _buildHourlyBars(_WeatherBriefData? weather) {
-    final List<_WeatherHourData> hours =
-        weather?.hourlyForecast.take(6).toList(growable: false) ??
-            const <_WeatherHourData>[
-              _WeatherHourData(hour: "9", temperatureC: 23),
-              _WeatherHourData(hour: "12", temperatureC: 27),
-              _WeatherHourData(hour: "15", temperatureC: 30),
-              _WeatherHourData(hour: "18", temperatureC: 28),
-              _WeatherHourData(hour: "21", temperatureC: 24),
-              _WeatherHourData(hour: "0", temperatureC: 22),
-            ];
-    if (hours.isEmpty) {
-      return const <Widget>[
-        _HourTempBar(hour: "9", temp: "23", height: 12, peak: false),
-        _HourTempBar(hour: "12", temp: "27", height: 22, peak: false),
-        _HourTempBar(hour: "15", temp: "30", height: 32, peak: true),
-        _HourTempBar(hour: "18", temp: "28", height: 25, peak: false),
-        _HourTempBar(hour: "21", temp: "24", height: 15, peak: false),
-        _HourTempBar(hour: "0", temp: "22", height: 10, peak: false),
-      ];
-    }
+  // ── 由真实天气数据驱动的展示字段 ──────────────────────────
+  List<_HourPoint> get _hourlyPoints =>
+      _weather?.hourly ?? const <_HourPoint>[];
 
-    final double minTemp =
-        hours.map((h) => h.temperatureC).reduce((a, b) => a < b ? a : b);
-    final double maxTemp =
-        hours.map((h) => h.temperatureC).reduce((a, b) => a > b ? a : b);
-    final double range = (maxTemp - minTemp).abs();
-
-    return hours.map((h) {
-      final bool peak = h.temperatureC == maxTemp;
-      final double normalized =
-          range <= 0 ? 0.5 : (h.temperatureC - minTemp) / range;
-      return _HourTempBar(
-        hour: h.hour,
-        temp: h.temperatureC.round().toString(),
-        height: 10 + normalized * 22,
-        peak: peak,
-      );
-    }).toList(growable: false);
+  String get _statusText {
+    if (_loadingWeather) return "加载中…";
+    if (_weather == null) return "天气不可用";
+    return _weather!.weatherText;
   }
 
-  Widget _buildCloudLayer() {
+  String get _feelsLikeText {
+    if (_weather == null) return "";
+    return "体感 ${_weather!.apparentTempC.round()}°";
+  }
+
+  String get _tempText {
+    if (_weather == null) return "--";
+    return _weather!.currentTempC.round().toString();
+  }
+
+  String get _maxTemp {
+    if (_weather == null) return "--";
+    return _weather!.todayMaxC.round().toString();
+  }
+
+  String get _minTemp {
+    if (_weather == null) return "--";
+    return _weather!.todayMinC.round().toString();
+  }
+
+  /// 降水概率 ≥40% 时给出预警（与后端穿衣建议的雨天判断一致）。
+  bool get _hasWarning =>
+      _weather != null && _weather!.peakRainPct >= 40;
+
+  String get _warningText {
+    final int pct = (_weather?.peakRainPct ?? 0).round();
+    return "降水概率 $pct%";
+  }
+
+  /// 分时温度柱状图：按温度映射柱高（10~32px），最高温标峰值。
+  Widget _buildHourlyBars(ColorScheme cs) {
+    final List<_HourPoint> points = _hourlyPoints;
+    if (points.isEmpty) return const SizedBox.shrink();
+    final List<double> temps =
+        points.map((p) => p.temperatureC).toList();
+    final double minT = temps.reduce(min);
+    final double maxT = temps.reduce(max);
+    double barHeight(double t) {
+      if (maxT <= minT) return 22;
+      return 10 + (t - minT) / (maxT - minT) * 22;
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.max,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: <Widget>[
+        for (int i = 0; i < points.length; i++)
+          _HourTempBar(
+            hour: "${points[i].time.hour}",
+            temp: points[i].temperatureC.round().toString(),
+            height: barHeight(points[i].temperatureC),
+            peak: points[i].temperatureC == maxT,
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCloudLayer(ColorScheme cs) {
     return Positioned.fill(
       child: AnimatedBuilder(
         animation: _ctrl,
@@ -1182,7 +1133,10 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       : t > 0.9
                           ? (1 - t) * 5
                           : 0.35,
-                  child: _CloudShape(size: 38),
+                  child: _CloudShape(
+                    size: 38,
+                    color: cs.onSurface.withValues(alpha: 0.42),
+                  ),
                 ),
               ),
               Positioned(
@@ -1194,7 +1148,10 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       : t > 0.85
                           ? (1 - t) / 0.15 * 0.28
                           : 0.28,
-                  child: _CloudShape(size: 30),
+                  child: _CloudShape(
+                    size: 30,
+                    color: cs.onSurface.withValues(alpha: 0.34),
+                  ),
                 ),
               ),
               Positioned(
@@ -1206,7 +1163,10 @@ class _WeatherHeaderState extends State<_WeatherHeader>
                       : t > 0.8
                           ? (1 - t) / 0.2 * 0.18
                           : 0.18,
-                  child: _CloudShape(size: 22),
+                  child: _CloudShape(
+                    size: 22,
+                    color: cs.onSurface.withValues(alpha: 0.26),
+                  ),
                 ),
               ),
             ],
@@ -1219,16 +1179,15 @@ class _WeatherHeaderState extends State<_WeatherHeader>
 
 /// 云朵形状
 class _CloudShape extends StatelessWidget {
-  const _CloudShape({required this.size});
+  const _CloudShape({required this.size, required this.color});
   final double size;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size(size, size * 0.55),
-      painter: _CloudPainter(
-        color: Colors.white.withValues(alpha: 0.85),
-      ),
+      painter: _CloudPainter(color: color),
     );
   }
 }
@@ -1262,64 +1221,110 @@ class _CloudPainter extends CustomPainter {
       color != oldDelegate.color;
 }
 
-/// 天气图标（太阳+云）
-class _WeatherIconPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    // 太阳
-    final Paint sunPaint = Paint()..color = const Color(0xFFFFB340);
-    final Paint sunInnerPaint = Paint()..color = const Color(0xFFFFD275);
-    final double sunR = size.width * 0.22;
-    final Offset sunCenter = Offset(size.width * 0.35, size.height * 0.4);
-    canvas.drawCircle(sunCenter, sunR, sunPaint);
-    canvas.drawCircle(sunCenter, sunR * 0.62, sunInnerPaint);
+/// 单点分时预报（来自后端 /weather/current 的 hourlyForecast）。
+class _HourPoint {
+  const _HourPoint({
+    required this.time,
+    required this.temperatureC,
+    required this.weatherCode,
+  });
 
-    // 云
-    final Paint cloudPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.fill;
-    final Paint cloudShadowPaint = Paint()
-      ..color = const Color(0xFFE8E8ED).withValues(alpha: 0.8)
-      ..style = PaintingStyle.fill;
+  final DateTime time;
+  final double temperatureC;
+  final int weatherCode;
+}
 
-    final double cy = size.height * 0.62;
+/// 后端 /weather/current 返回的真实天气简报（Open-Meteo）。
+class _WeatherData {
+  const _WeatherData({
+    required this.currentTempC,
+    required this.apparentTempC,
+    required this.weatherCode,
+    required this.weatherText,
+    required this.todayMinC,
+    required this.todayMaxC,
+    required this.peakRainPct,
+    required this.hourly,
+  });
 
-    // 云底阴影
-    canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.15, cy + 2, size.width * 0.5, size.height * 0.3),
-      cloudShadowPaint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.38, cy - 2, size.width * 0.45, size.height * 0.35),
-      cloudShadowPaint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.55, cy + 2, size.width * 0.35, size.height * 0.25),
-      cloudShadowPaint,
-    );
+  final double currentTempC;
+  final double apparentTempC;
+  final int weatherCode;
+  final String weatherText;
+  final double todayMinC;
+  final double todayMaxC;
+  final double peakRainPct;
+  final List<_HourPoint> hourly;
 
-    // 云主体
-    canvas.drawOval(
-      Rect.fromLTWH(size.width * 0.15, cy, size.width * 0.5, size.height * 0.3),
-      cloudPaint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.38, cy - 4, size.width * 0.45, size.height * 0.35),
-      cloudPaint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(
-          size.width * 0.55, cy, size.width * 0.35, size.height * 0.25),
-      cloudPaint,
+  factory _WeatherData.fromJson(Map<String, dynamic> json) {
+    return _WeatherData(
+      currentTempC: (json["currentTempC"] as num?)?.toDouble() ?? 0,
+      apparentTempC: (json["apparentTempC"] as num?)?.toDouble() ?? 0,
+      weatherCode: (json["weatherCode"] as num?)?.toInt() ?? 0,
+      weatherText: json["weatherText"]?.toString() ?? "",
+      todayMinC: (json["todayMinC"] as num?)?.toDouble() ?? 0,
+      todayMaxC: (json["todayMaxC"] as num?)?.toDouble() ?? 0,
+      peakRainPct: (json["peakRainPct"] as num?)?.toDouble() ?? 0,
+      hourly: <_HourPoint>[
+        for (final Object? x
+            in json["hourlyForecast"] as List? ?? const <Object?>[])
+          if (x is Map)
+            _HourPoint(
+              time: DateTime.tryParse(x["time"]?.toString() ?? "") ??
+                  DateTime.now(),
+              temperatureC: (x["temperatureC"] as num?)?.toDouble() ?? 0,
+              weatherCode: (x["weatherCode"] as num?)?.toInt() ?? 0,
+            ),
+      ],
     );
   }
+}
+
+/// 按 WMO 天气码映射的天气图标。
+class _WeatherIcon extends StatelessWidget {
+  const _WeatherIcon({required this.code, required this.size});
+
+  final int code;
+  final double size;
 
   @override
-  bool shouldRepaint(covariant _WeatherIconPainter oldDelegate) => false;
+  Widget build(BuildContext context) {
+    IconData icon;
+    Color color;
+    if (code <= 1) {
+      // 晴
+      icon = Icons.wb_sunny_outlined;
+      color = const Color(0xFFFFB340);
+    } else if (code <= 2) {
+      // 多云
+      icon = Icons.wb_cloudy_outlined;
+      color = const Color(0xFF8A93A5);
+    } else if (code <= 48) {
+      // 阴 / 雾
+      icon = Icons.cloud_outlined;
+      color = const Color(0xFF9AA0A6);
+    } else if (code >= 95) {
+      // 雷暴
+      icon = Icons.thunderstorm_outlined;
+      color = const Color(0xFF5B7BE0);
+    } else if (code >= 71) {
+      // 雪
+      icon = Icons.ac_unit;
+      color = const Color(0xFF6FC3DF);
+    } else if (code >= 61) {
+      // 雨
+      icon = Icons.water_drop_outlined;
+      color = const Color(0xFF4A90D9);
+    } else if (code >= 51) {
+      // 毛毛雨
+      icon = Icons.grain;
+      color = const Color(0xFF4A90D9);
+    } else {
+      icon = Icons.cloud_outlined;
+      color = const Color(0xFF9AA0A6);
+    }
+    return Icon(icon, size: size, color: color);
+  }
 }
 
 /// 单根分时温度柱

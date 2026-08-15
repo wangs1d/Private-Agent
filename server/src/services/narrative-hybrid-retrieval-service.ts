@@ -61,7 +61,7 @@ export class NarrativeHybridRetrievalService {
     return idx;
   }
 
-  /** ingest 单行叙事（Hermes observe、轨迹摘要等）；向量索引在 Qdrant + Key 齐备时异步写入。 */
+  /** ingest 单行叙事（进化循环 observe、轨迹摘要等）；向量索引在 Qdrant + Key 齐备时异步写入。 */
   async ingest(actorId: string, text: string, source: string): Promise<void> {
     const t = text.replace(/\s+/g, " ").trim();
     if (!t || t.length < 4) return;

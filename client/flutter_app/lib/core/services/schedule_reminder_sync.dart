@@ -56,6 +56,7 @@ Future<bool> upsertLocalScheduleFromToolResult(
       rangeStart: rangeStart,
       rangeEnd: rangeEnd,
       title: _pickTitle(result),
+      shortTitle: _pickShortTitle(result),
       notes: _buildNotes(result),
     );
   } catch (_) {
@@ -131,6 +132,7 @@ Future<int> syncServerRemindersToLocal(
           rangeStart: start,
           rangeEnd: end,
           title: _pickTitle(t),
+          shortTitle: _pickShortTitle(t),
           notes: _buildNotes(t),
         )
             ? 1
@@ -158,6 +160,7 @@ Future<bool> _persistExpandedTask(
   required DateTime rangeStart,
   required DateTime rangeEnd,
   required String title,
+  required String? shortTitle,
   required String? notes,
 }) async {
   final List<DateTime> occurrences = expandScheduleOccurrences(
@@ -175,11 +178,25 @@ Future<bool> _persistExpandedTask(
         id: scheduleOccurrenceEventId(taskId, occ),
         startAt: occ,
         title: title,
+        shortTitle: shortTitle,
         notes: notes,
       ),
     );
   }
   return true;
+}
+
+/// 简洁展示标题（「今日安排」紧凑列表用，创建时由 LLM 生成）。
+String? _pickShortTitle(Map<String, dynamic> result) {
+  final String shortTitle = result["shortTitle"]?.toString().trim() ?? "";
+  if (shortTitle.isNotEmpty) return shortTitle;
+  // 旧数据无 shortTitle：仅在能确定得到干净短标题时兜底，否则交给展示端剥离简化
+  final String title = result["title"]?.toString().trim() ?? "";
+  if (title.isNotEmpty && title != "AI 提醒任务") {
+    final String simplified = _displayReminderTitle(title);
+    if (simplified != title && simplified != "定时提醒") return simplified;
+  }
+  return null;
 }
 
 String _pickTitle(Map<String, dynamic> result) {

@@ -37,6 +37,19 @@ export type ToolCategory =
 export interface ToolMetadata {
   name: string;
   category: ToolCategory;
+  /** Logical toolset/domain used for filtering, ranking, and diagnostics. */
+  toolset?: string;
+  /** Whether the tool mutates external state. */
+  sideEffect?: "none" | "read" | "write" | "external";
+  /** Operational risk tier, used by routing/safety/approval policy. */
+  riskLevel?: "low" | "medium" | "high";
+  /** Preferred execution timeout for this tool. */
+  timeoutMs?: number;
+  /** Cache behavior for read-only tools. */
+  cachePolicy?: {
+    enabled: boolean;
+    ttlMs?: number;
+  };
   /** 同类替代工具（按优先级排序，失败时依次尝试） */
   alternatives: string[];
   /** 是否需要"禁止假成功"强约束（用户易感知成败的工具） */
@@ -51,6 +64,9 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   // web
   search_web: "web",
   fetch_web: "web",
+  "internet.research": "web",
+  "internet.live_check": "web",
+  "internet.verify": "web",
   "info.inspect_webpage": "web",
   "info.navigate_site": "web",
   "info.search": "web",
@@ -141,6 +157,9 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
  * P2 初期只覆盖 desktop/web/shopping，其余靠同类 category 自动兜底。
  */
 const TOOL_ALTERNATIVES: Record<string, string[]> = {
+  "internet.research": ["search_web", "fetch_web"],
+  "internet.live_check": ["weather.get_local", "search_web"],
+  "internet.verify": ["search_web"],
   // desktop.open 失败 → 截图确认状态 / run_preset 查找 / run_shell 直接启动
   // （对齐 buildToolFailureReminder L427-428 现有建议）
   "desktop.open": ["desktop.visual.screenshot", "desktop.run_preset", "desktop.run_shell"],
@@ -192,12 +211,44 @@ export function getSameCategoryTools(toolName: string): string[] {
 
 /** 获取工具完整元数据。 */
 export function getToolMetadata(toolName: string): ToolMetadata {
+  const category = getToolCategory(toolName);
   return {
     name: toolName,
-    category: getToolCategory(toolName),
+    category,
+    toolset: category,
+    sideEffect: inferSideEffect(toolName),
+    riskLevel: inferRiskLevel(toolName),
+    cachePolicy: inferCachePolicy(toolName),
     alternatives: getToolAlternatives(toolName),
     requireHonestFailure: HONEST_FAILURE_TOOLS.has(toolName),
   };
+}
+
+function inferSideEffect(toolName: string): ToolMetadata["sideEffect"] {
+  if (/transfer|purchase|place|cancel|create|send|call|control|run_|open|automation|input/.test(toolName)) {
+    return "external";
+  }
+  if (/search|fetch|inspect|get|list|screenshot|query|extract|weather|clock/.test(toolName)) {
+    return "read";
+  }
+  return "read";
+}
+
+function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
+  if (/wallet\.transfer|wallet\.purchase|shopping\.order\.place|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
+    return "high";
+  }
+  if (/desktop\.open|desktop\.run_preset|agent_browser\.click|agent_browser\.type|smart_home\.control/.test(toolName)) {
+    return "medium";
+  }
+  return "low";
+}
+
+function inferCachePolicy(toolName: string): ToolMetadata["cachePolicy"] | undefined {
+  if (/^(weather\.get_local|search_web|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
+    return { enabled: true, ttlMs: 60_000 };
+  }
+  return undefined;
 }
 
 /**

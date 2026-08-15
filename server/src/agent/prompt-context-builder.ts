@@ -13,6 +13,7 @@ import {
 import { buildTaskContextPrompt } from "./task-context.js";
 import { buildMasterAgentChatTools, buildSubAgentChatTools } from "../services/master-agent-tool-filter.js";
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
+import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
 import type { SubAgentCapability } from "../services/master-agent-types.js";
 import { SUB_AGENT_PROMPT_PROFILES } from "./subagent-prompt-profiles.js";
@@ -274,6 +275,66 @@ export type BuildSubAgentInput = BuildPromptContextInput & {
   taskDescription?: string;
 };
 
+export type PromptContextLayers = {
+  /** Stable prefix: identity, durable persona, values, and ability boundaries. */
+  stable: AgentPromptMemoryContext;
+  /** Session context: user/project state that can change across sessions but not every token. */
+  context: AgentPromptMemoryContext;
+  /** Turn-volatile context: time, recalls, task hints, emotion, and current tool plan. */
+  volatile: AgentPromptMemoryContext;
+};
+
+function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContextLayers {
+  const stable: AgentPromptMemoryContext = {};
+  const context: AgentPromptMemoryContext = {};
+  const volatile: AgentPromptMemoryContext = {};
+
+  for (const [key, value] of Object.entries(memory) as Array<
+    [keyof AgentPromptMemoryContext, string | undefined]
+  >) {
+    if (!value) continue;
+    if (
+      key === "persona" ||
+      key === "personalityCore" ||
+      key === "values" ||
+      key === "abilities" ||
+      key === "agentCaps"
+    ) {
+      stable[key] = value;
+    } else if (
+      key === "worldCaps" ||
+      key === "userProfile" ||
+      key === "userProfileSummary" ||
+      key === "memorySummary" ||
+      key === "memoryPreferences" ||
+      key === "memoryFacts" ||
+      key === "memoryCommitments" ||
+      key === "memoryOpenLoops" ||
+      key === "sessionRecap" ||
+      key === "relationshipGuidance" ||
+      key === "relationshipMemory" ||
+      key === "lifeThemeMemory" ||
+      key === "dreamMemory" ||
+      key === "memoryContinuity" ||
+      key === "skillIndex"
+    ) {
+      context[key] = value;
+    } else {
+      volatile[key] = value;
+    }
+  }
+
+  return { stable, context, volatile };
+}
+
+function flattenPromptContextLayers(layers: PromptContextLayers): AgentPromptMemoryContext {
+  return {
+    ...layers.stable,
+    ...layers.context,
+    ...layers.volatile,
+  };
+}
+
 export class PromptContextBuilder {
   constructor(
     private readonly deps: {
@@ -298,7 +359,8 @@ export class PromptContextBuilder {
   }
 
   build(input: BuildPromptContextInput): AgentStreamOptions | undefined {
-    const memory = this.assembleMemory(input);
+    const layers = pickPromptContextLayers(this.assembleMemory(input));
+    const memory = flattenPromptContextLayers(layers);
     const hasMemory = this.hasMemoryContent(memory);
     const chatToolsExtra = this.sessionSkillTools(input.actorId);
     const toolLoop =
@@ -630,10 +692,73 @@ export class PromptContextBuilder {
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
+      ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
 
     // 注入 prompt 前对 memory/facts 等用户内容字段做 PII 脱敏（手机号/邮箱/IP/身份证/银行卡）
     return this.redactMemoryFields(promptMemory);
+  }
+
+  /**
+   * 构建可复用技能轻量索引（Level 0 渐进式召回）。
+   *
+   * 参考 skill_index 设计：只注入 name + description + skillType + tags 的
+   * 紧凑列表（上限 20 条 / 总 500 字符），不含 doc 全文。让 LLM 感知"我有这些
+   * 沉淀的技能"，遇到相关任务时先用 skill.view 工具加载全文（Level 1）再复用。
+   *
+   * 按相关性排序：userText 命中技能名/描述关键词的排在前面，其余按名称排序。
+   * 无技能时返回空（不注入）。
+   */
+  private buildSkillIndexPrompt(userText: string | undefined): { skillIndex: string } | undefined {
+    if (!this.deps.skillManager) return undefined;
+    let manifests;
+    try {
+      manifests = this.deps.skillManager.list(true);
+    } catch {
+      return undefined;
+    }
+    if (!manifests || manifests.length === 0) return undefined;
+
+    const query = (userText ?? "").toLowerCase();
+    const scored = manifests.map((m) => {
+      const haystack =
+        `${m.name} ${m.displayName} ${m.description} ${(m.tags ?? []).join(" ")}`.toLowerCase();
+      let score = 0;
+      const terms = query.match(/[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}/g) ?? [];
+      for (const t of terms) {
+        if (haystack.includes(t)) score += 1;
+      }
+      return { m, score };
+    });
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.m.name.localeCompare(b.m.name);
+    });
+
+    const lines: string[] = [];
+    for (const { m } of scored.slice(0, 20)) {
+      const skillType = m.skillType ?? "code";
+      const desc = m.description.replace(/\s+/g, " ").slice(0, 80);
+      const tags = (m.tags ?? []).slice(0, 3).join("/");
+      lines.push(`- ${m.name}（${skillType}）：${desc}${tags ? `｜${tags}` : ""}`);
+    }
+    const indexBlock = lines.join("\n");
+    if (indexBlock.length > 500) {
+      // 超出上限：按行截断到 500 字符
+      const truncated: string[] = [];
+      let len = 0;
+      for (const line of lines) {
+        if (len + line.length + 1 > 500) break;
+        truncated.push(line);
+        len += line.length + 1;
+      }
+      return {
+        skillIndex: `【可复用技能索引】\n${truncated.join("\n")}\nprocedural 技能需用 skill.view 读取全文后复用；code 技能可直接调用。`,
+      };
+    }
+    return {
+      skillIndex: `【可复用技能索引】\n${indexBlock}\nprocedural 技能需用 skill.view 读取全文后复用；code 技能可直接调用。`,
+    };
   }
 
   /**
@@ -699,6 +824,7 @@ export class PromptContextBuilder {
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
       Boolean(memory.toolPlan) ||
+      Boolean(memory.skillIndex) ||
       Boolean(memory.currentTime) ||
       Boolean(memory.workingMemorySummary) ||
       Boolean(memory.recentConversationHistory)
@@ -706,8 +832,15 @@ export class PromptContextBuilder {
   }
 
   private sessionSkillTools(actorId: string): ChatCompletionTool[] | undefined {
-    if (!this.deps.worldService || !this.deps.skillManager) return undefined;
-    const tools = buildSessionSkillChatTools(actorId, this.deps.worldService, this.deps.skillManager);
+    const tools: ChatCompletionTool[] = [];
+    if (this.deps.worldService && this.deps.skillManager) {
+      const sessionTools = buildSessionSkillChatTools(actorId, this.deps.worldService, this.deps.skillManager);
+      tools.push(...sessionTools);
+    }
+    // 技能管理工具（skill.list / skill.view / skill.manage）始终暴露：
+    // 让 LLM 自主查询轻量索引、按需加载 procedural 全文、沉淀/修补经验。
+    // 与 PromptContextBuilder.buildSkillIndexPrompt 的 Level 0 索引配套使用。
+    tools.push(...SKILL_MANAGE_CHAT_TOOLS);
     return tools.length ? tools : undefined;
   }
 }

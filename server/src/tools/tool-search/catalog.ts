@@ -291,24 +291,65 @@ export function searchDeferredTools(
 
   // ===== Level 2: 类别内搜索 =====
   // 多类别路由时（gap < 0.1 触发 top-2）→ 并行搜两个类别后 RRF 合并
+  let results: DeferredToolSearchMatch[];
   if (categoryNames.length > 1) {
-    return searchMultiCategory(catalog, query, limit, categoryNames, options);
+    results = searchMultiCategory(catalog, query, limit, categoryNames, options);
+  } else {
+    const catName = categoryNames[0]!;
+    const toolNames = catalog.categories.get(catName)?.toolNames ?? [];
+    const categoryEntries = toolNames
+      .map((n) => catalog.byName.get(n))
+      .filter((e): e is DeferredToolEntry => e != null);
+
+    if (categoryEntries.length === 0) {
+      // 类别为空 → 降级全量搜索
+      results = searchWithinTools(catalog, query, limit, catalog.entries, options);
+    } else {
+      // 单类别：优先用该类别的 Bm25 子索引搜索（只扫子集，消除跨类工具挤占排名）
+      const subIndex = catalog.categorySearches.get(catName);
+      results = searchWithinTools(catalog, query, limit, categoryEntries, options, subIndex);
+    }
   }
 
-  const catName = categoryNames[0]!;
-  const toolNames = catalog.categories.get(catName)?.toolNames ?? [];
-  const categoryEntries = toolNames
-    .map((n) => catalog.byName.get(n))
-    .filter((e): e is DeferredToolEntry => e != null);
-
-  if (categoryEntries.length === 0) {
-    // 类别为空 → 降级全量搜索
-    return searchWithinTools(catalog, query, limit, catalog.entries, options);
+  // ===== Level 3: 全量兜底（杜绝漏检）=====
+  // 类别路由只是"倾向"，不是硬排除：
+  //   1. 未分类 / 新注册工具（如 misc）可能不在任何命中类别内
+  //   2. 路由到错类别时，类别内结果要么不足 limit、要么 top-1 分数很低
+  // 此时合并全量召回，按分数取 top-limit，任何工具都不会被永久排除在检索之外。
+  if (results.length < limit || results[0]?.score < MIN_CATEGORY_TOP_SCORE) {
+    const fullResults = searchWithinTools(catalog, query, limit, catalog.entries, options);
+    results = mergeToolMatches(results, fullResults, limit);
   }
 
-  // Level 2：用该类别的 Bm25 子索引搜索（只扫子集，同时消除跨类工具挤占排名）
-  const subIndex = catalog.categorySearches.get(catName);
-  return searchWithinTools(catalog, query, limit, categoryEntries, options, subIndex);
+  return results;
+}
+
+/**
+ * 类别内结果 top-1 的最低可接受分数（rrf 融合后的综合分）。
+ * 低于该值视为"类别路由不自信"，触发全量兜底合并。
+ */
+const MIN_CATEGORY_TOP_SCORE = 0.02;
+
+/**
+ * 合并两批匹配：类别内结果(a)优先保序，全量兜底结果(b)只补位去重。
+ * 这样类别路由命中"强相关"永远排前面，兜底只填充类别内没有的工具，
+ * 不会把无关工具（如 wallet）插进类别结果前排造成干扰。
+ */
+function mergeToolMatches(
+  a: DeferredToolSearchMatch[],
+  b: DeferredToolSearchMatch[],
+  limit: number,
+): DeferredToolSearchMatch[] {
+  const seen = new Set(a.map((m) => m.name));
+  const merged = [...a];
+  for (const m of b) {
+    if (merged.length >= limit) break;
+    if (!seen.has(m.name)) {
+      merged.push(m);
+      seen.add(m.name);
+    }
+  }
+  return merged;
 }
 
 /**

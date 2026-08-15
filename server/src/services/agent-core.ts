@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { humanizeAssistantText } from "./assistant-humanizer.js";
+import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
@@ -10,12 +11,11 @@ import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
-import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
-import type { HermesEvolutionLoopService } from "./hermes-evolution-loop-service.js";
+import type { EvolutionLoopService } from "./evolution-loop-service.js";
 import type { MoodInferenceService } from "./mood-inference-service.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 import type { LifeSignalHubService } from "./life-signal-hub-service.js";
@@ -59,8 +59,8 @@ import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
-import type { AgentTaskOrchestratorDeps } from "./agent-task-orchestrator.js";
-import { buildToolRankingHintFromHermesProfile } from "./hermes-tool-ranking.js";
+import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orchestrator.js";
+import { getAgentTaskStore } from "./agent-task-store.js";
 import { LoopOrchestrator } from "../agent/loop/loop-orchestrator.js";
 import {
   ReactLoopStrategy,
@@ -73,7 +73,18 @@ import { DefaultRecoveryPolicy } from "../agent/loop/default-recovery.js";
 import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
+import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
 import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
+import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
+import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
+import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
+import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
+import {
+  appendLearningDecisionGuidance,
+  appendRecentConversationHistory,
+  appendWorkingMemorySummary,
+  recallItemsToNarrative,
+} from "../agent/execution/narrative-recall-composer.js";
 
 export type MasterAgentDelegationSnapshot = {
   enabled: boolean;
@@ -97,6 +108,8 @@ export type HandleUserMessageOptions = {
   onExternalToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
   onExternalToolExecuted?: (info: ToolExecutedInfo) => void;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
+  onBackgroundAssistantDelta?: (info: { messageId: string; delta: string; source: string }) => void;
+  onBackgroundAssistantDone?: (info: { messageId: string; finalText: string; source: string }) => void;
   chatUserMessageId?: string;
   userId?: string;
   clientIp?: string;
@@ -135,6 +148,10 @@ type ShortTermTurnContext = {
 export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
   private readonly turnLifecycle: TurnLifecycle;
+  private readonly toolContextFactory: ToolContextFactory;
+  private readonly streamOptionsBuilder = new StreamOptionsBuilder();
+  private readonly turnFinalizer: TurnFinalizer;
+  private readonly toolPolicyResolver: ToolPolicyResolver;
   private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
   private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;
   private readonly loopOrchestrator: LoopOrchestrator | null = null;
@@ -152,7 +169,7 @@ export class AgentCore {
     private readonly externalChat: ExternalChatProvider | null = null,
     private readonly computeQuotaService: ComputeQuotaService | null = null,
     private readonly agentMemorySyncService: AgentMemorySyncService | null = null,
-    private readonly hermesEvolutionLoopService: HermesEvolutionLoopService | null = null,
+    private readonly evolutionLoopService: EvolutionLoopService | null = null,
     private readonly userPersonalizationService: UserPersonalizationService | null = null,
     private readonly worldService: WorldService | null = null,
     private readonly skillManager: SkillManager | null = null,
@@ -177,10 +194,24 @@ export class AgentCore {
     this.turnLifecycle = new TurnLifecycle({
       narrativeMemory: this.narrativeMemory,
       computeQuotaService: this.computeQuotaService,
-      hermesEvolutionLoopService: this.hermesEvolutionLoopService,
+      evolutionLoopService: this.evolutionLoopService,
       userPersonalizationService: this.userPersonalizationService,
       agentMemorySyncService: this.agentMemorySyncService,
       shortTermMemoryGateway: this.shortTermMemoryGateway,
+    });
+    this.toolContextFactory = new ToolContextFactory({
+      toolRegistry: this.toolRegistry,
+      getBrainCenter: () => this.brainCenter,
+    });
+    this.toolPolicyResolver = new ToolPolicyResolver({
+      agentMemorySyncService: this.agentMemorySyncService,
+      getBrainCenter: () => this.brainCenter,
+    });
+    this.turnFinalizer = new TurnFinalizer({
+      provider: this.externalChat,
+      turnLifecycle: this.turnLifecycle,
+      shortTermMemoryGateway: this.shortTermMemoryGateway,
+      getBrainCenter: () => this.brainCenter,
     });
 
     if (this.externalChat?.isEnabled() && isMasterAgentDelegationEnabled()) {
@@ -412,6 +443,8 @@ export class AgentCore {
     } | undefined;
     /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
     let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
+    let parallelLiveComplex = false;
+    let parallelLiveOriginalRoute: RouteDecision | null = null;
 
     if (this.brainCenter && text?.trim()) {
       // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeLlmExecution
@@ -419,7 +452,7 @@ export class AgentCore {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
 
-      // 单一权威路由源：task-router 只做硬规则 pre-filter，最终以 DecisionHub 规则路由为准。
+// 单一权威路由源：task-router 只做硬规则 pre-filter，最终以 DecisionHub 规则路由为准。
       // 给 fast 注入规则置信度（纯规则、不调 LLM），低置信度(<0.4)提前升级 complex，
       // 把「低置信度升级」从 hedging 事后检测前移，减少 fast 凭印象答后二次重跑的 LLM 消耗。
       const light = this.brainCenter.routeLight(text);
@@ -428,12 +461,18 @@ export class AgentCore {
       const shouldGoComplex =
         fastRoute.mode === "complex" || light.mode === "complex" || lowConfidence;
 
+      // Parallel-Live：规则判为 fast 高置信但可并行深挖时，fast 先主答，complex 后台并行补充
+      const useParallelLive = this.shouldUseParallelLiveComplex(text, fastRoute, opts);
+      if (useParallelLive) {
+        parallelLiveComplex = true;
+        parallelLiveOriginalRoute = fastRoute;
+      }
+
       if (!shouldGoComplex) {
         // Fast 模式：保留 task-router 硬规则结果 + 注入规则置信度（用于日志/诊断）
-        route = {
-          mode: "fast",
-          reasons: [...fastRoute.reasons, `rule=${light.mode}@${light.confidence.toFixed(2)}`],
-        };
+        route = useParallelLive
+          ? { mode: "fast", reasons: [...fastRoute.reasons, "parallel_live_fast_lane"] }
+          : { mode: "fast", reasons: [...fastRoute.reasons, `rule=${light.mode}@${light.confidence.toFixed(2)}`] };
         shortTermTurn = { recallQuery: text, resumedTask: false };
         cognitiveResponse = "";
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
@@ -523,9 +562,16 @@ export class AgentCore {
       route = routeLlmExecution(text, getAgentRuntimeConfig(), {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
-      shortTermTurn = route.mode === "fast"
-        ? { recallQuery: text, resumedTask: false }
-        : this.buildShortTermTurnContext(sessionId, text);
+      if (this.shouldUseParallelLiveComplex(text, route, opts)) {
+        parallelLiveComplex = true;
+        parallelLiveOriginalRoute = route;
+        route = { mode: "fast", reasons: [...route.reasons, "parallel_live_fast_lane"] };
+        shortTermTurn = { recallQuery: text, resumedTask: false };
+      } else {
+        shortTermTurn = route.mode === "fast"
+          ? { recallQuery: text, resumedTask: false }
+          : this.buildShortTermTurnContext(sessionId, text);
+      }
     }
 
     const perfStartTime = Date.now();
@@ -646,8 +692,8 @@ export class AgentCore {
             : this.resolveUserLocationForPrompt(actorId, opts),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
-
-    const enrichedNarrativeRecall = this.appendLearningDecisionGuidance(
+    
+    const enrichedNarrativeRecall = appendLearningDecisionGuidance(
       narrativeRecall,
       cognitiveRecallItems,
     );
@@ -694,6 +740,10 @@ export class AgentCore {
       workingMemorySummary,
       recentConversationHistory,
     );
+    const parallelLiveRaw =
+      parallelLiveComplex && parallelLiveOriginalRoute
+        ? this.startParallelLiveComplex(actorId, text, opts, orchestrateOpts, parallelLiveOriginalRoute)
+        : null;
 
     try {
       let result: AgentReply;
@@ -791,7 +841,7 @@ export class AgentCore {
         } // end else (orchestrator available)
       }
 
-      if (this.isComplexMode(route.mode)) {
+if (this.isComplexMode(route.mode)) {
         // 异步并行：complex 多线程执行（子 Agent 委派 / plan_execute），
         // fast 通过 LivingInterimController 渐进式垫词先回复多步；
         // complex 完成后结果无缝流式回传，最终结果作为完整回复。
@@ -811,7 +861,7 @@ export class AgentCore {
           cognitiveToolPlan,
         });
 
-        // complex 任务已完成，返回最终结果
+// complex 任务已完成，返回最终结果
         result = {
           text: complexResult,
           streamedChunks: true,
@@ -882,6 +932,18 @@ export class AgentCore {
         }).catch((err) => {
           console.error(`[AgentCore] 兜底 complex 后台任务异常:`, err);
         });
+      }
+
+      // Parallel-Live 续接：fast 主答已给出，后台 complex 结果句级去重后无缝衔接进对话
+      if (parallelLiveRaw) {
+        void this.completeParallelLiveContinuation(
+          parallelLiveRaw,
+          actorId,
+          text,
+          result.text,
+          opts,
+          sessionId,
+        );
       }
 
       return result;
@@ -1032,6 +1094,86 @@ export class AgentCore {
     return this.masterAgentCoordinator.handleBackgroundTaskAction(actorId, taskId, action);
   }
 
+  /**
+   * 服务重启后自动恢复未完成的自主任务（状态机任务，AgentTaskOrchestrator 主循环）。
+   *
+   * 恢复 pending / planning / executing / verifying 的任务（从持久化的断点继续执行）；
+   * 跳过 paused（用户主动暂停，保持暂停待手动恢复）和 awaiting_approval（等待人工审批，不得自动放行）。
+   * 任务进度通过 WS 推送 ChatExecutionEvent（kind=task_progress）。
+   *
+   * @returns 恢复的任务数量
+   */
+  resumeAutonomousTasks(): number {
+    const orchestrator = this.agentTaskOrchestrator;
+    const registry = this.wsRegistry;
+    if (!orchestrator) {
+      console.warn("[agent-core] orchestrator 未初始化，跳过自主任务恢复");
+      return 0;
+    }
+
+    const store = getAgentTaskStore();
+    const runnable = store.list().filter(
+      (t) =>
+        t.status === "pending" ||
+        t.status === "planning" ||
+        t.status === "executing" ||
+        t.status === "verifying",
+    );
+    if (runnable.length === 0) return 0;
+
+    const options: RunTaskOptions = {
+      onProgress: (event) => {
+        if (!registry) return;
+        try {
+          registry.trySend(
+            event.sessionId,
+            JSON.stringify({
+              type: ServerEventType.ChatExecutionEvent,
+              payload: {
+                kind: "task_progress",
+                ...event,
+              },
+            }),
+          );
+        } catch {
+          // 静默失败
+        }
+        // 后台任务失败时推送 fallback 文案，让用户知道任务没成功
+        if (event.type === "task_failed") {
+          try {
+            registry.trySend(
+              event.sessionId,
+              JSON.stringify({
+                type: ServerEventType.ChatAssistantChunk,
+                payload: {
+                  messageId: event.taskId,
+                  delta: FALLBACK_TEXT_BACKGROUND_FAILED(),
+                  source: "task_resume",
+                },
+              }),
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+      },
+    };
+
+    let restored = 0;
+    for (const task of runnable) {
+      if (orchestrator.resumeTask(task.id, options)) {
+        restored += 1;
+        console.log(
+          `[agent-core] 重启恢复自主任务 ${task.id} (status=${task.status}, goal=${task.goal.slice(0, 60)})`,
+        );
+      }
+    }
+    if (restored > 0) {
+      console.log(`[agent-core] 共自动恢复 ${restored} 个未完成的自主任务`);
+    }
+    return restored;
+  }
+
   async runToolIfNeeded(
     actorId: string,
     reply: AgentReply,
@@ -1092,6 +1234,105 @@ export class AgentCore {
     return mode === "fast";
   }
 
+  private shouldUseParallelLiveComplex(
+    text: string,
+    route: RouteDecision,
+    opts?: HandleUserMessageOptions,
+  ): boolean {
+    const cfg = getAgentRuntimeConfig();
+    if (!cfg.parallelLive.enabled) return false;
+    if (!cfg.masterDelegation.enabled || !this.masterAgentCoordinator) return false;
+    if (!this.externalChat?.isEnabled()) return false;
+    if (!opts?.onAssistantDelta) return false;
+    if (opts?.signal?.aborted) return false;
+    const trimmed = text.trim();
+    if (trimmed.length < cfg.parallelLive.minChars) return false;
+    if (route.reasons.includes("desktop_automation") || isDesktopAutomationTask(trimmed)) return false;
+    if (route.reasons.includes("explicit_phone_call_request")) return false;
+    if (this.hasHighSideEffectIntent(trimmed)) return false;
+    return true;
+  }
+
+  private hasHighSideEffectIntent(text: string): boolean {
+    return /(?:创建|新增|设置|提醒我|定个|下单|购买|支付|转账|发给|发送|打电话|拨打|删除|修改|取消|退款|运行|执行|控制|点击|输入|打开|关闭|移动|安装|卸载|create|set|remind|order|buy|pay|transfer|send|call|delete|cancel|run|execute|click|install|uninstall)/i.test(text);
+  }
+
+  private startParallelLiveComplex(
+    actorId: string,
+    text: string,
+    opts: HandleUserMessageOptions | undefined,
+    orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>,
+    originalRoute: RouteDecision,
+  ): Promise<string> | null {
+    const coordinator = this.masterAgentCoordinator;
+    if (!coordinator) return null;
+    const liveSessionId = `parallel-live-${actorId}-${opts?.chatUserMessageId ?? Date.now()}-${randomUUID()}`;
+    console.log(
+      `[AgentCore] parallel live complex started route=${originalRoute.mode} reasons=${originalRoute.reasons.join(",")}`,
+    );
+    return coordinator.orchestrateTask(
+      actorId,
+      text,
+      opts?.onAgentPhaseStatus,
+      undefined,
+      {
+        ...orchestrateOpts,
+        ephemeralSessionId: liveSessionId,
+      },
+    );
+  }
+
+  private async completeParallelLiveContinuation(
+    complexPromise: Promise<string>,
+    actorId: string,
+    userText: string,
+    fastReplyText: string,
+    opts: HandleUserMessageOptions | undefined,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const complexResult = await complexPromise;
+      if (opts?.signal?.aborted) return;
+      const backgroundMessageId = `parallel-live:${opts?.chatUserMessageId ?? Date.now()}`;
+      const continuation = await this.synthesizeFastContinuation(
+        actorId,
+        userText,
+        fastReplyText,
+        complexResult,
+        (delta) => {
+          if (opts?.signal?.aborted) return;
+          opts?.onBackgroundAssistantDelta?.({
+            messageId: backgroundMessageId,
+            delta,
+            source: "parallel_live_complex",
+          });
+        },
+      );
+      if (!continuation.trim()) return;
+
+      const chatSessionId = resolvePrimaryChatSessionId(
+        actorId,
+        getAgentRuntimeConfig().masterDelegation.enabled,
+      );
+      const appended = getChatThreadStore().appendAssistantFollowup(
+        chatSessionId,
+        opts?.chatUserMessageId,
+        continuation,
+      );
+      if (appended) {
+        this.shortTermMemoryGateway?.reconcileTaskAfterTurn(sessionId, userText, appended);
+        opts?.onBackgroundAssistantDone?.({
+          messageId: backgroundMessageId,
+          finalText: appended,
+          source: "parallel_live_complex",
+        });
+      }
+      console.log("[AgentCore] parallel live complex continuation delivered");
+    } catch (err) {
+      console.error("[AgentCore] parallel live complex failed; keeping fast reply:", err);
+    }
+  }
+
   /**
    * 兜底检测：主 Agent direct_llm 路径生成的回复是否暴露"需要外部信息"信号。
    * 命中条件（满足任一即升级到 master_delegate）：
@@ -1140,48 +1381,84 @@ export class AgentCore {
     return false;
   }
 
-  private resolveToolExposureProfile(mode: LlmExecutionMode): AgentStreamOptions["toolExposureProfile"] {
-    // Fast 模式：暴露轻量工具（天气/日历/搜索/计算），不暴露委派工具
-    // Complex 模式：暴露全部工具（含委派/计划），由 master coordinator / orchestrator 自适应
-    if (mode === "fast") return "contextual";
-    if (mode === "complex") return "delegate";
-    return "contextual";
-  }
+  /**
+   * Fast 主答后，把 complex 后台搜集到的结果无缝衔接进对话（Fast 主答 + Complex 后台 架构）。
+   *
+   * 关键约束：
+   *  - complex 的原文不直接推给前端；先做句级去重，剔除与 fast 已说内容重复的句子
+   *    （这是"整段一模一样出现两次"的根源消除点，确定性保证，不依赖 LLM）；
+   *  - 由 fast 用口语化方式把补充信息续接进对话，不机械报"后台研究结果"；
+   *  - 流式过程中再按句做二次防线：与 fast 已说内容重复的句子直接丢弃。
+   */
+  private async synthesizeFastContinuation(
+    actorId: string,
+    userText: string,
+    fastReply: string,
+    complexResult: string,
+    onAssistantDelta?: (delta: string) => void,
+  ): Promise<string> {
+    const provider = this.externalChat;
+    const result = complexResult?.trim();
+    if (!provider?.isEnabled() || !result) return "";
 
-  private resolveHermesToolRankingHint(actorId: string): AgentStreamOptions["toolRankingHint"] {
-    const profile =
-      this.agentMemorySyncService?.getSnapshot(actorId, ["hermes_profile"]).entries.hermes_profile;
-    const hermesHint = buildToolRankingHintFromHermesProfile(profile);
-    const cautiousNamespaces = this.resolveCautiousToolNamespacesFromLearning(actorId);
-    if (cautiousNamespaces.length === 0) return hermesHint;
-    return {
-      ...(hermesHint ?? {}),
-      cautiousNamespaces: [
-        ...new Set([
-          ...(hermesHint?.cautiousNamespaces ?? []),
-          ...cautiousNamespaces,
-        ]),
-      ],
+    // 1) 确定性强去重：剔除 complex 结果里与 fast 已说句子重复的部分。
+    //    若全部重复（complex 只是重答了一遍）→ 无新增信息，保持 fast 回复原样。
+    const freshPart = stripSentencesAlreadySaid(fastReply, result);
+    if (!freshPart) return "";
+
+    const prompt =
+      `你在和用户聊天，刚才已经说了：\n"""${fastReply}"""\n\n` +
+      `你现在通过后台补充检索/执行拿到了新信息：\n"""${freshPart}"""\n\n` +
+      `把新信息自然、无缝地融进对话继续说下去：\n` +
+      `- 不要重复你刚才已经说过的任何话，也不要把补充信息原样复读。\n` +
+      `- 如果新信息更正了你刚才的说法，就自然地更正。\n` +
+      `- 口语化，直接接着往下说，不要用"我查到了/根据搜索/后台研究"这类机械表述开头。\n` +
+      `- 直接输出继续对话的正文，不要任何解释或前缀。`;
+
+    const said = sentenceSet(fastReply);
+    let pending = "";
+    const forwarded: string[] = [];
+    const forward = (text: string): void => {
+      if (!text) return;
+      forwarded.push(text);
+      onAssistantDelta?.(text);
     };
-  }
 
-  private resolveCautiousToolNamespacesFromLearning(actorId: string): string[] {
-    const snapshot = this.brainCenter?.getLearningSnapshot(actorId);
-    if (!snapshot) return [];
-    const namespaces = new Set<string>();
-    for (const belief of snapshot.beliefs) {
-      if (belief.status === "deprecated") continue;
-      if (belief.failureCount <= belief.successCount) continue;
-      if (!/tool|using|risky|failed|failure/i.test(belief.claim)) continue;
-      const match = belief.claim.match(/\busing\s+(.+?)\s+is\s+risky\b/i);
-      const rawTools = match?.[1] ?? "";
-      for (const toolName of rawTools.split(",")) {
-        const namespace = this.pickToolNamespace(toolName.trim());
-        if (namespace) namespaces.add(namespace);
+    try {
+      await provider.streamCompletion(
+        `fast-continuation-${actorId}-${Date.now()}`,
+        { text: prompt },
+        (delta) => {
+          // 2) 流式防线：按句检查，与 fast 已说内容重复的句子丢弃
+          pending += delta;
+          const parts = pending.split(/(?<=[。！？!?；;])/u);
+          pending = parts.pop() ?? "";
+          for (const s of parts) {
+            const t = s.trim();
+            if (!t) continue;
+            if (!said.has(normalizeSentence(t))) forward(s);
+          }
+        },
+        undefined,
+        { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 3 },
+      );
+      // 收尾：剩余未完整句子非重复则补推
+      if (pending.trim() && !said.has(normalizeSentence(pending.trim()))) {
+        forward(pending);
       }
-      if (namespaces.size >= 4) break;
+      const continuation = forwarded.join("").trim();
+      if (continuation) return continuation;
+      // 3) 合成输出被全部去重吞掉（说明无新增信息）→ 回退直推 freshPart（本身已去重）
+      forward(freshPart);
+      return freshPart;
+    } catch (err) {
+      // 合成失败 → 回退把已去重的 complex 内容直推给前端，仍保证不重复
+      console.error("[AgentCore] fast 续接合成失败，回退已去重内容:", err);
+      const buffered = forwarded.join("");
+      if (buffered.trim()) return buffered.trim();
+      forward(freshPart);
+      return freshPart;
     }
-    return [...namespaces];
   }
 
   private pickToolNamespace(toolName: string): string | null {
@@ -1303,24 +1580,6 @@ export class AgentCore {
     }
   }
 
-  private appendLearningDecisionGuidance(
-    narrativeRecall: string | undefined,
-    recallItems: MemoryRecallItem[] | undefined,
-  ): string | undefined {
-    const learningLines = (recallItems ?? [])
-      .filter((item) => item.source === "experience_learning_loop" || item.content.startsWith("belief:"))
-      .map((item) => item.content.replace(/\s+/g, " ").trim())
-      .filter(Boolean)
-      .slice(0, 3);
-    if (learningLines.length === 0) return narrativeRecall;
-    const guidance = [
-      "[learned-decision-guidance]",
-      "Use these learned beliefs when selecting tools, deciding whether to ask for confirmation, or choosing a safer fallback.",
-      ...learningLines.map((line) => `- ${line}`),
-    ].join("\n");
-    return narrativeRecall ? `${narrativeRecall}\n\n${guidance}` : guidance;
-  }
-
   private buildOrchestrateOpts(
     actorId: string,
     userText: string,
@@ -1336,10 +1595,10 @@ export class AgentCore {
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
-      onBatchFromCaller || this.hermesEvolutionLoopService
+      onBatchFromCaller || this.evolutionLoopService
         ? (info: ToolLoopAfterBatchInfo) => {
             onBatchFromCaller?.(info);
-            this.hermesEvolutionLoopService?.onToolBatch(actorId, userText, info);
+            this.evolutionLoopService?.onToolBatch(actorId, userText, info);
           }
         : undefined;
 
@@ -1352,7 +1611,7 @@ export class AgentCore {
       agentAccessMode: access.agentAccessMode,
       desktopBridgeOnline: access.desktopBridgeOnline,
       phoneBridgeOnline: access.phoneBridgeOnline,
-      toolRankingHint: this.resolveHermesToolRankingHint(actorId),
+      toolRankingHint: this.toolPolicyResolver.resolveRankingHint(actorId),
       visionFrames: opts?.visionFrames,
       interruptedContext: opts?.interruptedContext,
       narrativeRecall,
@@ -1604,61 +1863,36 @@ export class AgentCore {
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
-    const toolCtx: ChatToolExecutionContext = {
-      getCachedToolResult: (name, args) => {
-        return this.toolRegistry.getCachedResult(name, args);
-      },
-      executeTool: (name, args) => {
-        // 工具调用前置安全检查统一由 BrainCenter + AgentTaskSafety 负责（含原 RuntimeKernel.checkToolAction 的工具名规则）
-        const brainSafety = this.brainCenter?.checkSafety(
-          { tool: name, args },
-          { actorId, sessionId: ctx.sessionId, userText: text },
-        );
-        if (brainSafety && !brainSafety.allowed) {
-          return Promise.resolve({
-            ok: false,
-            result: {
-              error: brainSafety.reason,
-              severity: brainSafety.severity,
-              blockedBy: "brain_center",
-            },
-          });
-        }
-        // Task 12 工具下沉：先尝试 BodyGateway 路由（前缀匹配 → BodyModule.act + 反射弧硬安全门），
-        // 未下沉工具（hasRoute=false）走原 toolRegistry 直连路径。
-        // BodyGateway 内部对未覆盖的具体工具会自动降级到 fallbackToolRegistry（仍走 toolRegistry.execute）。
-        const bodyGw = this.brainCenter?.getBodyGateway();
-        if (bodyGw && bodyGw.hasRoute(name)) {
-          return bodyGw.execute({
-            tool: name,
-            args,
-            actorId,
-            source: "runStandardLlmPath",
-          });
-        }
-        return this.toolRegistry.execute(name, args, {
-          sessionId: ctx.sessionId,
-          userId: opts?.userId,
-          chatUserMessageId: opts?.chatUserMessageId,
-          clientIp: opts?.clientIp,
-          clientLocation: opts?.clientLocation,
+    const toolCtx: ChatToolExecutionContext = this.toolContextFactory.create(
+      {
+        actorId,
+        sessionId: ctx.sessionId,
+        userId: opts?.userId,
+        chatUserMessageId: opts?.chatUserMessageId,
+        clientIp: opts?.clientIp,
+        clientLocation: opts?.clientLocation,
+        userText: text,
+        source: "runStandardLlmPath",
+        access: {
           agentAccessMode: ctx.orchestrateToolCtx.agentAccessMode,
           desktopBridgeOnline: ctx.orchestrateToolCtx.desktopBridgeOnline,
           phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
-          // 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
+// 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
           requestLocation: () =>
             this.locationCoordinator?.requestLocation(actorId, `tool:${name}`) ??
             Promise.resolve(null),
-        });
+        },
       },
-      onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
-      onAgentStatusLine: opts?.onAgentPhaseStatus,
-      onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
-    };
+      {
+        onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
+        onAgentStatusLine: opts?.onAgentPhaseStatus,
+        onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
+      },
+    );
 
     const onBatchWithEvolution = ctx.orchestrateToolCtx.onToolLoopAfterBatch;
-    const toolExposureProfile = this.resolveToolExposureProfile(mode);
-    const toolRankingHint = this.resolveHermesToolRankingHint(actorId);
+    const toolExposureProfile = this.toolPolicyResolver.resolveExposureProfile(mode);
+    const toolRankingHint = this.toolPolicyResolver.resolveRankingHint(actorId);
     // 2026-07-29 修复 D2：fast_chat 也走 promptContextBuilder.build，把 narrativeRecall 注入 promptContext.memory，
     // 让 LLM 能看到长期记忆 + 工作记忆 + [最近对话] recap。
     // 2026-07-30 重构：Fast 模式作为表达层 + 轻量工具通道（clock/weather/calendar.list 只读工具）。
@@ -1918,7 +2152,7 @@ export class AgentCore {
       /* ignore */
     }
 
-    return await this.finishLlmTurn(actorId, text, full, {
+    return await this.turnFinalizer.finish(actorId, text, full, {
       streamedChunks: true,
       modelCallsConsumed,
       planExecuteUsed: peUsed,
@@ -1961,7 +2195,8 @@ export class AgentCore {
     }
   }
 
-  private async finishLlmTurn(
+
+private async finishLlmTurn(
     actorId: string,
     userText: string,
     assistantText: string,

@@ -15,7 +15,7 @@ import {
 
 /**
  * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
- * 参考 Hermes `prompt_builder`：工具相关说明在单一处维护，避免各 Provider 分叉。
+ * 参考 `prompt_builder` 设计：工具相关说明在单一处维护，避免各 Provider 分叉。
  */
 export const AGENT_TOOL_SYSTEM_SUFFIX_MARKER = "【工具说明】";
 export const CLOCK_TOOL_SYSTEM_SUFFIX_MARKER = "【时钟】";
@@ -58,7 +58,7 @@ export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
 
 /**
  * 「活人感」核心方向（只给方向，不堆 prompt）：
- * 让模型基于"a close friend in WeChat"这个方向自己发挥，
+ * 让模型基于"像熟识的老朋友"这个方向自己发挥，
  * 程序层靠 postValidate 兜底（如检测到客服腔触发重生成）。
  *
  * 不再列举"嘛/呢/呗/哈/哎"等具体语气词——这些应该让模型自己根据上下文选；
@@ -66,12 +66,7 @@ export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
  */
 const CONCISE_REPLY_SYSTEM_SUFFIX = `
 
-【回复方向】像微信里的熟人，不像客服。短、自然、有温度。说重点，别端着，别"您"。
-- 默认 2~4 句内解决，先给结论，再补必要信息。
-- 同一事实只说一次；不要先概述一遍，后面又换个说法重复。
-- 不确定性说明点到为止，说一次就够，不要反复打补丁。
-- 单一事实查询默认「结论 + 依据」两段内结束，不要自己追加“所以现在…”之类的第二遍总结。
-- 除非用户明确要你继续查或继续聊，不要连续抛多个追问、建议或下一步方案。`;
+【回复方向】像熟识的老朋友，不像客服。短、自然、有温度。说重点，别端着，别"您"。`;
 
 /**
  * 记忆召回的使用方式：让 LLM 知道"背景里有这些信息"，但要求像真人一样
@@ -646,6 +641,7 @@ export function buildLayeredSystemPrompt(
     !memory?.followUpAnchor &&
     !memory?.scheduleSnapshot &&
     !memory?.currentTime &&
+    !memory?.skillIndex &&
     !memory?.workingMemorySummary &&
     !memory?.recentConversationHistory
   ) {
@@ -689,6 +685,7 @@ export function buildLayeredSystemPrompt(
   // 元认知与情绪：让 LLM 知道"自己现在怎么想/感觉如何"
   if (memory.metaCognition) parts.push(`【自我认知】\n${memory.metaCognition}`);
   if (memory.emotionState) parts.push(`【当前情绪】\n${memory.emotionState}`);
+  if (memory.skillIndex) parts.push(memory.skillIndex);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -729,6 +726,7 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.followUpAnchor ||
       memory?.scheduleSnapshot ||
       memory?.currentTime ||
+      memory?.skillIndex ||
       memory?.workingMemorySummary ||
       memory?.recentConversationHistory
   );
@@ -780,6 +778,7 @@ export function buildLayeredSystemPromptSections(
   if (m.sessionRecap) dynamicContext.push(`【会话回顾】\n${m.sessionRecap}`);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
+  if (m.skillIndex) dynamicContext.push(m.skillIndex);
 
   return { stablePrefix, dynamicContext };
 }

@@ -25,7 +25,8 @@ bool isMarkdownTableRow(String line) {
 bool isMarkdownTableSeparator(String line) {
   final String trimmed = line.trim();
   if (!trimmed.contains("|") || !trimmed.contains("-")) return false;
-  return RegExp(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$").hasMatch(trimmed);
+  return RegExp(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$")
+      .hasMatch(trimmed);
 }
 
 List<String> parseMarkdownTableCells(String line) {
@@ -104,9 +105,7 @@ List<Widget> formatContentSummaryDetailLines(
         index++;
       }
       if (index < lines.length) index++;
-      final String code = lines
-          .sublist(start + 1, index - 1)
-          .join("\n");
+      final String code = lines.sublist(start + 1, index - 1).join("\n");
       widgets.add(
         Padding(
           padding: const EdgeInsets.only(bottom: 10, top: 4),
@@ -134,11 +133,14 @@ List<Widget> formatContentSummaryDetailLines(
       continue;
     }
 
-    if (sectionHeader.hasMatch(trimmed) || markdownHeader.hasMatch(trimmed)) {
+    if (sectionHeader.hasMatch(trimmed) ||
+        markdownHeader.hasMatch(trimmed) ||
+        _isCompactSectionHeader(trimmed, listItem, orderedListItem)) {
       final String title = markdownHeader.hasMatch(trimmed)
           ? trimmed.replaceFirst(markdownHeader, "").trim()
           : trimmed;
-      final GlobalKey? key = _matchSectionKey(title, sectionTitles, sectionKeys);
+      final GlobalKey? key =
+          _matchSectionKey(title, sectionTitles, sectionKeys);
       widgets.add(
         Padding(
           key: key,
@@ -195,7 +197,8 @@ List<Widget> formatContentSummaryDetailLines(
             children: <Widget>[
               SizedBox(
                 width: 22,
-                child: Text(marker, style: TextStyle(color: cs.onSurfaceVariant)),
+                child:
+                    Text(marker, style: TextStyle(color: cs.onSurfaceVariant)),
               ),
               Expanded(
                 child: buildInlineMarkdownText(
@@ -250,6 +253,19 @@ List<Widget> formatContentSummaryDetailLines(
   }
 
   return widgets;
+}
+
+bool _isCompactSectionHeader(
+  String line,
+  RegExp listItem,
+  RegExp orderedListItem,
+) {
+  if (line.length < 4 || line.length > 42) return false;
+  if (!(line.contains("：") || line.contains(":"))) return false;
+  if (line.contains("。")) return false;
+  if (listItem.hasMatch(line) || orderedListItem.hasMatch(line)) return false;
+  if (line.startsWith(">") || line.startsWith("```")) return false;
+  return true;
 }
 
 GlobalKey? _matchSectionKey(
@@ -479,7 +495,8 @@ class MarkdownTableWidget extends StatelessWidget {
       bodyRows = parsedRows.skip(2).toList();
     }
 
-    final List<List<MarkdownTableCellData>> allRows = <List<MarkdownTableCellData>>[
+    final List<List<MarkdownTableCellData>> allRows =
+        <List<MarkdownTableCellData>>[
       if (headerCells != null) headerCells,
       ...bodyRows,
     ];
@@ -555,7 +572,10 @@ class MarkdownTableWidget extends StatelessWidget {
         colIndex += cell.colspan;
       }
 
-      tableRows.add(IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: cells)));
+      tableRows.add(IntrinsicHeight(
+          child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: cells)));
     }
 
     return DecoratedBox(
@@ -568,7 +588,8 @@ class MarkdownTableWidget extends StatelessWidget {
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: ConstrainedBox(
-            constraints: BoxConstraints(minWidth: 280, maxWidth: columnCount * 140.0),
+            constraints:
+                BoxConstraints(minWidth: 280, maxWidth: columnCount * 140.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: tableRows,

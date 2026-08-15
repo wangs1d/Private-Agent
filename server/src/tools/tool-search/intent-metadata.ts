@@ -92,6 +92,23 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    prefix: "voice.",
+    metadata: {
+      aliases: [
+        "voice", "speak", "tts", "text to speech", "speech synthesis",
+        "audio generation", "voice message", "朗读", "播报", "说话",
+        "语音", "语音合成", "语音播报", "语音消息", "配音", "合成语音",
+        "音频生成", "念给我听", "读给我听", "发语音",
+      ],
+      negativeAliases: ["shopping", "desktop screenshot", "wallet transfer"],
+      examples: [
+        "念给我听", "用语音告诉我", "发一条语音消息", "读一下这段话",
+        "你能做语音合成吗", "帮我把这句话播报出来",
+      ],
+      negativeExamples: ["推荐一款耳机", "现在几点了"],
+    },
+  },
+  {
     prefix: "calendar.",
     metadata: {
       aliases: ["calendar", "schedule", "todo", "reminder", "日程", "提醒", "待办"],

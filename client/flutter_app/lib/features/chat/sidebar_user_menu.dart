@@ -246,6 +246,12 @@ class _UserAvatar extends StatelessWidget {
 
 /// 浮在用户头像右侧的菜单(深色卡片 + 圆角 + 阴影)。
 ///
+/// 配色约定:
+/// - 主弹窗 / 子菜单 / 设备悬浮面板都使用 `cs.surface`,
+///   在深色主题下 `cs.surface = AppPalette.mainPanel = #0F0F0F`(纯黑),
+///   与聊天主背景完全同色,让"展开框"看起来像从主背景里浮出来,
+///   同时与侧栏/顶栏的深灰(#131313)形成清晰的层级对比。
+///
 /// hover 子菜单的实现:
 /// 主题行的 hover 子菜单**作为 outer Stack 的独立
 /// Positioned 渲染**,而不是塞在主弹窗的内部 Stack 里。这样子菜单的

@@ -1,9 +1,9 @@
 /// 右侧抽屉要展示的内容种类。
-enum RightPanelKind { friends, messages, devices }
+enum RightPanelKind { friends, messages, devices, schedule }
 
 /// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
 /// - 消息/好友类：信息密度低，右面板小占比（左大右小）
-/// - 设备类：需要更大展示空间，右面板占比略大
+/// - 设备/日程类：需要更大展示空间，右面板占比略大
 extension RightPanelKindDefaults on RightPanelKind {
   /// 打开时左聊天区占可用宽度的比例（0.1~0.9）。
   /// 越大表示聊天区越宽、右面板越窄。
@@ -15,6 +15,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.58; // 好友列表：右面板较窄
       case RightPanelKind.devices:
         return 0.42; // 设备展示：需要更大空间
+      case RightPanelKind.schedule:
+        return 0.45; // 日程：日历周视图 + 事项列表，需要较大空间
     }
   }
 }
@@ -71,6 +73,8 @@ String rightPanelTitle(RightPanelKind kind) {
       return "消息聚合";
     case RightPanelKind.devices:
       return "我的设备";
+    case RightPanelKind.schedule:
+      return "日程";
   }
 }
 

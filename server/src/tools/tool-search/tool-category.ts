@@ -37,6 +37,16 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
     secondaryTools: [],
   },
   {
+    name: "voice",
+    prefixes: ["voice."],
+    aliases: [
+      "语音", "说话", "播报", "朗读", "念", "读出来", "说出来", "发声",
+      "语音合成", "合成语音", "配音", "语音消息", "录音", "音频",
+      "转写", "听", "asr", "tts", "voice", "speak", "speech", "audio",
+    ],
+    secondaryTools: [],
+  },
+  {
     name: "desktop",
     prefixes: ["desktop."],
     aliases: ["桌面操作", "自动化", "脚本", "shell", "命令", "执行", "电脑", "快捷键", "桌面控制", "计算机", "desktop", "automation", "automate", "run"],
@@ -377,7 +387,8 @@ function routeByBm25(
   categories: Map<string, ToolCategoryInfo>,
 ): string[] {
   const hits = categoryBm25.search(query, 3);
-  if (hits.length === 0) return ["misc"];
+  const valid = hits.filter((h) => categories.has(h.id));
+  if (valid.length === 0) return [];
 
   const top1 = hits[0]!.id;
   const top2 = hits[1];

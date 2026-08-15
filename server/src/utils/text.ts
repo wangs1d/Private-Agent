@@ -33,6 +33,43 @@ export function dedupeAdjacentLines(text: string): string {
   return out.join("\n");
 }
 
+/** 按句末标点切句（保留标点），空白折叠。 */
+export function splitSentences(text: string): string[] {
+  if (!text) return [];
+  return text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[。！？!?；;])/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** 句子规范化：去空白 + 小写，用于重复判定。 */
+export function normalizeSentence(s: string): string {
+  return s.replace(/\s+/g, "").toLowerCase();
+}
+
+/** 提取文本的句子集合（用于重复判定）。 */
+export function sentenceSet(text: string): Set<string> {
+  const set = new Set<string>();
+  for (const s of splitSentences(text)) set.add(normalizeSentence(s));
+  return set;
+}
+
+/**
+ * 剔除 incoming 中与 alreadySaid 句级重复的句子。
+ * 用于 fast 主答后 complex 后台结果回传时去重，
+ * 消除"整段一模一样出现两次"的重复 bug。
+ */
+export function stripSentencesAlreadySaid(alreadySaid: string, incoming: string): string {
+  if (!incoming?.trim()) return incoming ?? "";
+  if (!alreadySaid?.trim()) return incoming;
+  const said = sentenceSet(alreadySaid);
+  const sentences = splitSentences(incoming);
+  const kept = sentences.filter((s) => !said.has(normalizeSentence(s)));
+  if (kept.length === sentences.length) return incoming;
+  return kept.join("");
+}
+
 /**
  * 将 LLM 原始状态行转换为用户友好的简短动作描述。
  *

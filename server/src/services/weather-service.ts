@@ -184,7 +184,7 @@ export class WeatherService {
         precipitation?: number;
       };
       hourly?: {
-        time?: string[];
+time?: (string | null)[];
         temperature_2m?: (number | null)[];
         precipitation_probability?: (number | null)[];
         weather_code?: (number | null)[];
@@ -205,7 +205,7 @@ export class WeatherService {
     const peakRainPct = probs.length > 0 ? Math.max(...probs) : Number(raw.daily?.precipitation_probability_max?.[0] ?? 0);
 
     const currentTempC = Number(cur.temperature_2m ?? 0);
-    const hourlyForecast = buildHourlyForecast(raw.hourly);
+const hourlyForecast = buildHourlyForecast(raw.hourly);
     const brief: WeatherBrief = {
       source: "open-meteo",
       latitude,
@@ -251,7 +251,7 @@ export class WeatherService {
 }
 
 function buildHourlyForecast(raw: {
-  time?: string[];
+  time?: (string | null)[];
   temperature_2m?: (number | null)[];
   precipitation_probability?: (number | null)[];
   weather_code?: (number | null)[];
@@ -261,7 +261,7 @@ function buildHourlyForecast(raw: {
   if (times.length === 0 || temps.length === 0) return [];
 
   const now = Date.now();
-  let start = times.findIndex((time) => new Date(time).getTime() >= now);
+  let start = times.findIndex((time) => time != null && new Date(time).getTime() >= now);
   if (start < 0) start = 0;
 
   const forecast: WeatherHourlyForecast[] = [];
@@ -269,6 +269,7 @@ function buildHourlyForecast(raw: {
     const temp = temps[i];
     if (temp == null) continue;
     const time = times[i];
+    if (time == null) continue;
     const hour = time.slice(11, 13).replace(/^0/, "") || "0";
     const weatherCode = Number(raw?.weather_code?.[i] ?? 0);
     forecast.push({

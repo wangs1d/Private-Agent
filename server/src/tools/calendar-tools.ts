@@ -61,6 +61,7 @@ export function buildScheduleCreateInput(
   if (draft.kind === "reminder") {
     return {
       sessionId,
+      shortTitle: draft.shortTitle?.trim() || undefined,
       description: draft.description,
       kind: "reminder",
       runAt: draft.runAt,
@@ -76,6 +77,7 @@ export function buildScheduleCreateInput(
     return {
       sessionId,
       title: draft.title,
+      shortTitle: draft.shortTitle?.trim() || undefined,
       description: draft.description,
       kind: "action",
       runAt: draft.runAt,
@@ -87,6 +89,7 @@ export function buildScheduleCreateInput(
   return {
     sessionId,
     title: draft.title,
+    shortTitle: draft.shortTitle?.trim() || undefined,
     description: draft.description,
     kind: "weather_brief",
     runAt: draft.runAt,
@@ -131,6 +134,7 @@ export function registerCalendarTools(
         summary: "日程已写入",
         taskId: task.taskId,
         title: task.reminderMessage || task.title,
+        shortTitle: task.shortTitle,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
@@ -148,6 +152,7 @@ export function registerCalendarTools(
   registry.register("calendar.create_task", async (input, context) => {
     const sessionId = resolveActorId(context);
     const title = String(input.title ?? "").trim();
+    const shortTitle = String(input.shortTitle ?? "").trim() || undefined;
     const description = String(input.description ?? "").trim();
     const runAt = String(input.runAt ?? "").trim();
     const kindRaw = String(input.kind ?? "reminder").trim();
@@ -184,6 +189,7 @@ export function registerCalendarTools(
         const task = await scheduleTaskService.createTask({
           sessionId,
           title: title || undefined,
+          shortTitle,
           description,
           kind: "reminder",
           runAt,
@@ -197,6 +203,7 @@ export function registerCalendarTools(
           summary: "提醒已写入日程",
           taskId: task.taskId,
           title: task.reminderMessage || task.title,
+          shortTitle: task.shortTitle,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
@@ -210,6 +217,7 @@ export function registerCalendarTools(
         const task = await scheduleTaskService.createTask({
           sessionId,
           title,
+          shortTitle,
           description,
           kind: "weather_brief",
           runAt,
@@ -222,6 +230,7 @@ export function registerCalendarTools(
           summary: "日程已写入",
           taskId: task.taskId,
           title: task.title,
+          shortTitle: task.shortTitle,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
@@ -239,6 +248,7 @@ export function registerCalendarTools(
         const task = await scheduleTaskService.createTask({
           sessionId,
           title,
+          shortTitle,
           description,
           kind: "agent_task",
           runAt,
@@ -252,6 +262,7 @@ export function registerCalendarTools(
           summary: "Agent 自动化任务已写入日程",
           taskId: task.taskId,
           title: task.title,
+          shortTitle: task.shortTitle,
           kind: task.kind,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
@@ -270,6 +281,7 @@ export function registerCalendarTools(
       const task = await scheduleTaskService.createTask({
         sessionId,
         title,
+        shortTitle,
         description,
         kind: "action",
         runAt,
@@ -283,6 +295,7 @@ export function registerCalendarTools(
         summary: "日程已写入",
         taskId: task.taskId,
         title: task.title,
+        shortTitle: task.shortTitle,
         kind: task.kind,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),

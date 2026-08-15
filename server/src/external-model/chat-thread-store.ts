@@ -812,6 +812,91 @@ export class ChatThreadStore {
     this.persistence?.scheduleSave(sessionId, msgs);
   }
 
+  appendAssistantContinuation(
+    sessionId: string,
+    clientMessageId: string | undefined,
+    continuation: string,
+    maxThreadMessages?: number,
+  ): string | null {
+    const trimmed = continuation.trim();
+    if (!trimmed) return null;
+    const msgs = this.history.get(sessionId);
+    if (!msgs) return null;
+
+    let assistantIndex = -1;
+    if (clientMessageId) {
+      const found = findUserMessageByClientId(msgs, clientMessageId);
+      if (found) {
+        for (let i = found.index + 1; i < msgs.length; i++) {
+          const msg = msgs[i];
+          if (!msg) continue;
+          if (msg.role === "user") break;
+          if (msg.role === "assistant" && typeof msg.content === "string") {
+            assistantIndex = i;
+            break;
+          }
+        }
+      }
+    }
+
+    if (assistantIndex < 0) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const msg = msgs[i];
+        if (msg?.role === "assistant" && typeof msg.content === "string") {
+          assistantIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (assistantIndex < 0) return null;
+    const msg = msgs[assistantIndex];
+    if (!msg || msg.role !== "assistant" || typeof msg.content !== "string") return null;
+
+    const parsed = readMessageTimestampPrefix(msg.content);
+    const body = (parsed?.rest ?? msg.content).trim();
+    const mergedBody = body ? `${body}\n\n${trimmed}` : trimmed;
+    msg.content = parsed ? `${parsed.prefix}\n${mergedBody}` : annotateTimeframe(mergedBody, new Date());
+    this.trimThread(msgs, maxThreadMessages);
+    this.persistence?.scheduleSave(sessionId, msgs);
+    return mergedBody;
+  }
+
+  appendAssistantFollowup(
+    sessionId: string,
+    clientMessageId: string | undefined,
+    text: string,
+    maxThreadMessages?: number,
+  ): string | null {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const msgs = this.history.get(sessionId);
+    if (!msgs) return null;
+
+    let insertAfter = msgs.length - 1;
+    if (clientMessageId) {
+      const found = findUserMessageByClientId(msgs, clientMessageId);
+      if (found) {
+        insertAfter = found.index;
+        for (let i = found.index + 1; i < msgs.length; i++) {
+          const msg = msgs[i];
+          if (!msg) continue;
+          if (msg.role === "user") break;
+          insertAfter = i;
+        }
+      }
+    }
+
+    const assistantMsg = {
+      role: "assistant",
+      content: annotateTimeframe(trimmed, new Date()),
+    } as ChatCompletionMessageParam;
+    msgs.splice(Math.max(0, insertAfter + 1), 0, assistantMsg);
+    this.trimThread(msgs, maxThreadMessages);
+    this.persistence?.scheduleSave(sessionId, msgs);
+    return trimmed;
+  }
+
   afterTurnCompleted(sessionId: string, msgs: ChatCompletionMessageParam[]): void {
     const now = new Date();
     const annotated = msgs.map((msg) =>

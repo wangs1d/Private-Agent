@@ -1,5 +1,5 @@
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
-import type { HermesEvolutionLoopService } from "../services/hermes-evolution-loop-service.js";
+import type { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
@@ -44,7 +44,7 @@ export class TurnLifecycle {
     private readonly deps: {
       narrativeMemory: NarrativeMemoryPort | null;
       computeQuotaService: ComputeQuotaService | null;
-      hermesEvolutionLoopService: HermesEvolutionLoopService | null;
+      evolutionLoopService: EvolutionLoopService | null;
       userPersonalizationService: UserPersonalizationService | null;
       agentMemorySyncService: AgentMemorySyncService | null;
       shortTermMemoryGateway: ShortTermMemoryGatewayService | null;
@@ -169,7 +169,7 @@ export class TurnLifecycle {
       this.ingestTurnArchive(input.actorId, input.userText, full, memContext);
     }
 
-    this.deps.hermesEvolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
+    this.deps.evolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
 
     getMemoryManagerService()?.onTurnCompleted(input.actorId, input.userText, full);
@@ -216,7 +216,7 @@ export class TurnLifecycle {
       meta.planExecuteUsed ? !meta.peExhausted : undefined,
     );
     void trajCap
-      .finalizeHermes(assistantText, {
+      .finalizeEvolution(assistantText, {
         planExecuteEnabled: meta.planExecuteUsed,
         modelCallsApprox: meta.modelCallsApprox,
         pePlan: meta.pePlan,

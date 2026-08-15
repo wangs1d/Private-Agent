@@ -4,11 +4,15 @@ class ScheduleEvent {
     required this.id,
     required this.startAt,
     required this.title,
+    this.shortTitle,
     this.notes,
   });
 
   final String id;
   final DateTime startAt;
+  /// 完整标题（日程页展示）。
   final String title;
+  /// 简洁展示标题（「今日安排」紧凑列表用，创建时由 LLM 生成；旧数据为空时回退 title 简化）。
+  final String? shortTitle;
   final String? notes;
 }

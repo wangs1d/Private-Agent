@@ -15,7 +15,6 @@ class _EntranceAnimationState extends State<EntranceAnimation>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _overlayOpacity;
-  late final Animation<double> _ambientPulse;
   late final Animation<double> _titleReveal;
   late final Animation<double> _titleOpacity;
   late final Animation<double> _titleGlow;
@@ -44,13 +43,6 @@ class _EntranceAnimationState extends State<EntranceAnimation>
       ),
     ]).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic),
-    );
-
-    _ambientPulse = Tween<double>(begin: 0.2, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: const Interval(0.0, 0.82, curve: Curves.easeOutCubic),
-      ),
     );
 
     _titleReveal = Tween<double>(begin: 0.0, end: 1.0).animate(

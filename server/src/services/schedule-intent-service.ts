@@ -2,6 +2,8 @@ import type { ExternalChatProvider } from "../external-model/types.js";
 
 export type ScheduleDraft = {
   title?: string;
+  /** 简洁展示标题（用于「今日安排」紧凑列表：无指令词/无时间词，如「吃药」） */
+  shortTitle?: string;
   description: string;
   kind: "reminder" | "action" | "weather_brief";
   runAt: string;
@@ -121,12 +123,13 @@ export class ScheduleIntentService {
       "{",
       '  "ok": true,',
       '  "task": {',
-      '    "title": "简洁的提醒事项名，如「睡觉」而非「喊我睡觉」（可选；reminder 可不填，由 reminderMessage 自动生成）",',
+      '    "title": "完整标题，如「记得提醒我3点吃药」（可选；reminder 可不填，由 reminderMessage 自动生成）",',
+      '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」。reminder 必填，其他类型与 title 相同或更短（可选）",',
       '    "description": "用户原句",',
       '    "kind": "reminder|action|weather_brief",',
       '    "runAt": "ISO-8601 string",',
       '    "recurrence": "none|daily|weekly|yearly",',
-      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该睡觉啦！」而非「喊我睡觉」或「睡觉」（仅 reminder）",',
+      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」（仅 reminder）",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
       "}",
@@ -177,6 +180,7 @@ export class ScheduleIntentService {
     if (isReminderIntent(normalized)) {
       const reminderText = extractReminderSubject(normalized);
       return {
+        shortTitle: reminderText === "到点提醒" ? undefined : reminderText,
         description: normalized,
         kind: "reminder",
         runAt: runAt.toISOString(),
@@ -208,6 +212,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   if (!input || typeof input !== "object") return null;
   const v = input as Record<string, unknown>;
   const title = String(v.title ?? "").trim();
+  const shortTitle = String(v.shortTitle ?? "").trim() || undefined;
   const description = String(v.description ?? "").trim();
   const kind = v.kind;
   const runAt = String(v.runAt ?? "");
@@ -223,11 +228,18 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   if (Number.isNaN(runAtDate.getTime())) return null;
   if (kind === "weather_brief") {
     if (!title) return null;
-    return { title, description, kind: "weather_brief", runAt: runAtDate.toISOString(), recurrence };
+    return { title, shortTitle, description, kind: "weather_brief", runAt: runAtDate.toISOString(), recurrence };
   }
   if (kind === "reminder") {
     const reminderMessage = String(v.reminderMessage ?? "").trim() || description;
-    return { description, kind, runAt: runAtDate.toISOString(), recurrence, reminderMessage };
+    return {
+      description,
+      shortTitle,
+      kind,
+      runAt: runAtDate.toISOString(),
+      recurrence,
+      reminderMessage,
+    };
   }
   if (!title) return null;
   const actionObj = v.action as Record<string, unknown> | undefined;
@@ -239,6 +251,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     : "POST";
   return {
     title,
+    shortTitle,
     description,
     kind,
     runAt: runAtDate.toISOString(),

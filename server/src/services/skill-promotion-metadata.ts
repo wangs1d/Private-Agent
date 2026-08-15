@@ -22,6 +22,14 @@ export function skillMetadataFromTrajectoryDraft(
     description = `${description}————————`;
   }
 
+  // 兼容迁移：新草稿字段 evolution_reflect 优先，旧字段 hermes_reflect 兜底（历史草稿）
+  const reflectSource =
+    (typeof draft.evolution_reflect === "string" && draft.evolution_reflect.trim()
+      ? draft.evolution_reflect
+      : (typeof draft.hermes_reflect === "string" && draft.hermes_reflect.trim()
+          ? draft.hermes_reflect
+          : "")) as string;
+
   return {
     name: `auto.promoted_${slug.replace(/[^a-z0-9_]/g, "_")}`,
     version: "1.0.0",
@@ -41,8 +49,8 @@ export function skillMetadataFromTrajectoryDraft(
     ],
     permissions: [],
     author:
-      typeof draft.hermes_reflect === "string" && draft.hermes_reflect.trim() ?
-        `hermes-auto:${draft.hermes_reflect.slice(0, 80)}`
+      reflectSource
+        ? `evolution-auto:${reflectSource.slice(0, 80)}`
       : "trajectory-promotion-pipeline",
   };
 }
