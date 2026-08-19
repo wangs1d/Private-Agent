@@ -44,6 +44,7 @@ import { registerNotesRoutes } from "./notes.js";
 import { registerDeviceRoutes } from "./device.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
+import { registerVideoProxyRoutes } from "./video-files.js";
 import { registerUserFileRoutes } from "./user-files.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -79,6 +80,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     voiceCapabilityService: deps.voiceCapabilityService,
   });
   registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
+  registerVideoProxyRoutes(app);
   registerUserFileRoutes(app, { fileProcessingService: deps.fileProcessingService });
   registerWechatClawRoutes(app, deps);
   registerMessageBridgeRoutes(app, { messageBridgeService: deps.messageBridgeService });

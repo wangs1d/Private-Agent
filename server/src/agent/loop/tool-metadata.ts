@@ -63,6 +63,8 @@ export interface ToolMetadata {
 const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   // web
   search_web: "web",
+  search_images: "web",
+  search_videos: "web",
   fetch_web: "web",
   "internet.research": "web",
   "internet.live_check": "web",
@@ -165,6 +167,8 @@ const TOOL_ALTERNATIVES: Record<string, string[]> = {
   "desktop.open": ["desktop.visual.screenshot", "desktop.run_preset", "desktop.run_shell"],
   // search_web 失败 → fetch_web 直接抓取 / info.search 换引擎
   search_web: ["fetch_web", "info.search"],
+  search_images: ["search_web", "info.search"],
+  search_videos: ["search_web", "info.search"],
   // fetch_web 失败 → search_web 先搜再抓 / info.inspect_webpage 换抓取器
   fetch_web: ["search_web", "info.inspect_webpage"],
   // info.navigate_site 失败 → info.inspect_webpage 换方式
@@ -245,7 +249,7 @@ function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
 }
 
 function inferCachePolicy(toolName: string): ToolMetadata["cachePolicy"] | undefined {
-  if (/^(weather\.get_local|search_web|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
+  if (/^(weather\.get_local|search_web|search_images|search_videos|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
     return { enabled: true, ttlMs: 60_000 };
   }
   return undefined;

@@ -40,6 +40,49 @@ export function getAgenticMemoryEmbeddingModel(): string {
   return process.env.AGENT_EMBEDDING_MODEL?.trim() || "text-embedding-3-small";
 }
 
+/**
+ * 解析可用的 Embedding 端点（OpenAI 兼容 /v1/embeddings）。
+ * 优先显式配置，其次 OPENAI_EMBEDDINGS_URL，再退到 OPENAI_BASE_URL——
+ * 但仅当该 Base URL 真的提供 embeddings（DeepSeek 等纯聊天渠道不支持，返回 null）。
+ */
+export function getAgenticMemoryEmbeddingBaseUrl(): string | null {
+  const explicit = process.env.AGENT_EMBEDDING_BASE_URL?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+
+  const embeddingsUrl = process.env.OPENAI_EMBEDDINGS_URL?.trim();
+  if (embeddingsUrl) return embeddingsUrl.replace(/\/+$/, "");
+
+  const chatBase = process.env.OPENAI_BASE_URL?.trim();
+  if (!chatBase) return null;
+  const host = chatBase.toLowerCase();
+  if (/deepseek|moonshot|kimi/.test(host)) return null; // 无 /embeddings 的纯聊天渠道
+  return chatBase.replace(/\/+$/, "");
+}
+
+/** 按模型推导 embedding 维度；AGENT_EMBEDDING_DIMENSIONS 可显式覆盖 */
+export function getAgenticMemoryEmbeddingDims(model: string): number {
+  const explicit = Number.parseInt(process.env.AGENT_EMBEDDING_DIMENSIONS ?? "", 10);
+  if (Number.isInteger(explicit) && explicit > 0) return explicit;
+  const m = model.toLowerCase();
+  if (m.includes("text-embedding-3-large")) return 3072;
+  if (m.includes("text-embedding-3")) return 1536;
+  if (m.includes("bge-m3")) return 1024;
+  if (m.includes("bge-large")) return 1024;
+  if (m.includes("bge-small")) return 512;
+  if (m.includes("m3e")) return 1024;
+  return 1536;
+}
+
+/** Embedding 专用 Key：优先 AGENT_EMBEDDING_API_KEY，其次对话 Key */
+export function resolveEmbeddingApiKey(): string | null {
+  const key =
+    process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim() ||
+    null;
+  if (isPlaceholderApiKey(key)) return null;
+  return key;
+}
+
 export function getAgenticMemoryLlmModel(): string {
   return (
     process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL?.trim() ||

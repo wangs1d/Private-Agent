@@ -3,6 +3,8 @@ import "package:flutter/foundation.dart"
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "dart:async";
+import "package:url_launcher/url_launcher.dart";
+import "content_summary_detail_formatter.dart";
 
 import "../../core/models/chat_models.dart";
 import "../../core/models/turn_state.dart";
@@ -14,11 +16,12 @@ import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/agent_profile_overlay_launcher.dart";
 import "agent_profile_page.dart";
-import "agent_result_card.dart";
 import "agent_action_choice_card.dart";
+import "agent_result_card.dart";
 import "assistant_brief_message.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
+import "inline_video_player.dart";
 import "structured_assistant_message_body.dart";
 import "voice_message_bubble.dart";
 
@@ -1492,7 +1495,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   // ===== 打字机式流式显示 =====
   // 后端 chunk 可能整段/大块到达，这里在气泡渲染层把「已 reveal」的原文前缀
   // 逐字放大，模拟真人打字；历史消息与用户消息直接显示全文。
-  static const int _charsPerTick = 2;
+  static const int _charsPerTick = 1;
   static const Duration _tick = Duration(milliseconds: 24);
   static const Duration _cursorBlink = Duration(milliseconds: 480);
 
@@ -1998,6 +2001,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               if (!widget.isUser &&
                   !_typewriterActive &&
                   widget.contentSummary?.summary == null &&
+                  AgentResultParser.parse(widget.mainMessage.text).data == null &&
                   widget.mainMessage.text.contains(RegExp(r'https?://\S+')))
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -2074,16 +2078,76 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           if (remaining.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 3),
-              child: Text(
-                stripMarkdown(remaining),
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              child: buildInlineMarkdownText(
+                remaining,
+                Theme.of(context).textTheme.bodyMedium!.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.85),
                       height: 1.4,
                     ),
+                cs: cs,
               ),
             ),
         ],
       );
+    }
+
+    // [RENDER_AS:xxx] 标记路由：后端注入的显式展示形式声明
+    {
+      final String raw = typewriterRawText ?? message.text;
+      final String? renderAs = _extractRenderAsMarker(raw);
+      if (renderAs != null) {
+        final String cleanText = _stripRenderAsMarker(raw);
+        switch (renderAs) {
+          case "brief":
+            return AssistantBriefMessage(
+              text: cleanText,
+              colorScheme: cs,
+            );
+          case "structured":
+          case "image_result":
+            return StructuredAssistantMessageBody(
+              text: cleanText,
+              cs: cs,
+              textTheme: Theme.of(context).textTheme,
+              showCursor: typewriterCursor,
+            );
+          case "video": {
+            // 视频抓取：解析 [VIDEO_MEDIA_START] 媒体块，内联渲染可播放视频
+            final ({VideoMediaData? media, String cleaned}) parsed =
+                parseVideoMediaBlock(cleanText);
+            if (parsed.media != null) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  AgentInlineVideoPlayer(data: parsed.media!),
+                  if (parsed.cleaned.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: buildInlineMarkdownText(
+                        parsed.cleaned,
+                        Theme.of(context).textTheme.bodyMedium!.copyWith(
+                              color: cs.onSurface.withValues(alpha: 0.85),
+                              height: 1.4,
+                            ),
+                        cs: cs,
+                      ),
+                    ),
+                ],
+              );
+            }
+            // 无媒体块：回退为普通正文（播放页链接仍可点击）
+            return StructuredAssistantMessageBody(
+              text: cleanText,
+              cs: cs,
+              textTheme: Theme.of(context).textTheme,
+              showCursor: typewriterCursor,
+            );
+          }
+          default:
+            break;
+        }
+      }
     }
 
     if (contentSummary?.summary != null) {
@@ -2099,19 +2163,23 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
-    if (AssistantBriefMessage.shouldEnhance(message.text)) {
-      return AssistantBriefMessage(
-        text: message.text,
-        colorScheme: cs,
-      );
-    }
-
-return StructuredAssistantMessageBody(
+    return StructuredAssistantMessageBody(
       text: typewriterRawText ?? message.text,
       cs: cs,
       textTheme: Theme.of(context).textTheme,
       showCursor: typewriterCursor,
     );
+  }
+
+  /// 提取文本开头的 `[RENDER_AS:xxx]` 标记名，无标记返回 null。
+  static String? _extractRenderAsMarker(String text) {
+    final RegExpMatch? m = RegExp(r'^\[RENDER_AS:(\w+)\]\s*').firstMatch(text);
+    return m?.group(1);
+  }
+
+  /// 剥离文本开头的 `[RENDER_AS:xxx]` 标记。
+  static String _stripRenderAsMarker(String text) {
+    return text.replaceFirst(RegExp(r'^\[RENDER_AS:\w+\]\s*'), '');
   }
 
   static String _visibleAgentResultRemaining(
@@ -2157,31 +2225,57 @@ return StructuredAssistantMessageBody(
         .replaceAll(RegExp(r'''[，。！？、；：,.!?;:()\[\]{}"'`~\-_*#>]+'''), '');
   }
 
-  /// 构建灰色链接显示组件（从父级复用）
+  /// 构建底部来源链接组件：把正文里的裸 URL 抽出来，
+  /// 显示为可点击的文字链接（纯域名），不再展示原始地址。
   static Widget _buildGrayLinksInner(String text, BuildContext context) {
+    // 先剥掉 markdown 链接 [文字](url)，它们已在正文中作为文字链接展示，
+    // 底部只保留真正的裸 URL 作为来源。
+    final String stripped =
+        text.replaceAll(RegExp(r'\[[^\]]+\]\([^)]+\)'), ' ');
     final RegExp urlRegex = RegExp(r'https?://\S+');
-    final Iterable<RegExpMatch> matches = urlRegex.allMatches(text);
+    final Set<String> seen = <String>{};
+    final List<String> urls = <String>[];
+    for (final match in urlRegex.allMatches(stripped)) {
+      final String url = match.group(0)!.replaceAll(RegExp(r'[),.;，。！？]+$'), '');
+      if (seen.add(url)) urls.add(url);
+    }
 
-    if (matches.isEmpty) return const SizedBox.shrink();
+    if (urls.isEmpty) return const SizedBox.shrink();
 
-    final List<Widget> linkWidgets = [];
-    for (final match in matches) {
-      final String url = match.group(0)!;
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final List<Widget> linkWidgets = <Widget>[];
+    for (final String url in urls) {
       linkWidgets.add(Container(
         margin: const EdgeInsets.only(bottom: 2),
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
         decoration: BoxDecoration(
-          color: Colors.grey.withValues(alpha: 0.15),
+          color: cs.primary.withValues(alpha: 0.10),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
+          border: Border.all(color: cs.primary.withValues(alpha: 0.3)),
         ),
-        child: Text(
-          url,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Colors.grey[600],
-                fontSize: 11,
-                height: 1.3,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () {
+            final Uri? uri = Uri.tryParse(url);
+            if (uri == null) return;
+            launchUrl(uri, mode: LaunchMode.externalApplication);
+          },
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.link, size: 11, color: cs.primary),
+              const SizedBox(width: 4),
+              Text(
+                _linkLabel(url),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: cs.primary,
+                      fontSize: 11,
+                      height: 1.3,
+                      fontWeight: FontWeight.w600,
+                    ),
               ),
+            ],
+          ),
         ),
       ));
     }
@@ -2190,6 +2284,14 @@ return StructuredAssistantMessageBody(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: linkWidgets,
     );
+  }
+
+  /// 从 URL 生成简短可读的文字链接标签：取域名并去掉 www，不展示路径与协议。
+  static String _linkLabel(String url) {
+    final Uri? uri = Uri.tryParse(url);
+    final String host = (uri == null || uri.host.isEmpty) ? url : uri.host;
+    final String clean = host.replaceFirst(RegExp(r'^www\.'), '');
+    return clean.isEmpty ? url : clean;
   }
 }
 

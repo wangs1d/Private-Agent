@@ -8,6 +8,8 @@ export type LlmExecutionMode = "fast" | "complex";
 export type RouteDecision = {
   mode: LlmExecutionMode;
   reasons: string[];
+  /** 是否需要对回复做短句分段（闲聊式对话分段，工具/搜索/知识问答不分段）。 */
+  segmentable: boolean;
 };
 
 const DELEGATE_KEYWORDS = [
@@ -181,6 +183,24 @@ export function isDesktopAutomationTask(text: string): boolean {
 }
 
 /**
+ * 判断回复是否需要做短句分段。
+ *
+ * 规则：
+ *  - complex 模式 → 不分段（工具/搜索/子Agent/桌面自动化，全是信息性文本）
+ *  - fast 模式：
+ *     - 纯寒暄/闲聊（CHAT_ONLY_RE / CASUAL_FAST_CHAT_RE）→ 分段
+ *     - 工具查询/知识问答（TOOL_OR_REALTIME_RE / INFORMATIONAL_REQUEST_RE）→ 不分段
+ *     - 其他普通短对话 → 分段
+ */
+export function determineSegmentable(text: string, mode: LlmExecutionMode): boolean {
+  if (mode === "complex") return false;
+  const t = text.trim();
+  if (CHAT_ONLY_RE.test(t) || CASUAL_FAST_CHAT_RE.test(t)) return true;
+  if (TOOL_OR_REALTIME_RE.test(t) || INFORMATIONAL_REQUEST_RE.test(t)) return false;
+  return true;
+}
+
+/**
  * 双模式路由：Fast（前台秒回 + 垫词 + 轻工具）vs Complex（后台并行 + 子 Agent 委派）。
  *
  * 映射规则：
@@ -199,38 +219,38 @@ export function routeLlmExecution(
   if (config.masterDelegation.enabled) {
     if (isExplicitPhoneCallRequest(text)) {
       reasons.push("explicit_phone_call_request");
-      return { mode: "fast", reasons };
+      return { mode: "fast", reasons, segmentable: determineSegmentable(text, "fast") };
     }
 
     // 桌面自动化任务 → complex
     if (shouldUseStateMachineMode(text)) {
       reasons.push("desktop_automation");
-      return { mode: "complex", reasons };
+      return { mode: "complex", reasons, segmentable: false };
     }
 
     // 需要委派子 Agent 的任务 → complex
     if (requiresSubAgent(text)) {
       reasons.push("requires_sub_agent");
-      return { mode: "complex", reasons };
+      return { mode: "complex", reasons, segmentable: false };
     }
 
     // 时效性实体前置：含"最新/最近/版本号"等 → 直接 complex(避免 fast 凭印象答后升级)
     if (hasTimeSensitiveIntent(text)) {
       reasons.push("time_sensitive_intent");
-      return { mode: "complex", reasons };
+      return { mode: "complex", reasons, segmentable: false };
     }
 
     // 其余全部走 fast（含简单工具、寒暄、追问、本地代码任务）
     reasons.push("fast_lane");
-    return { mode: "fast", reasons };
+    return { mode: "fast", reasons, segmentable: determineSegmentable(text, "fast") };
   }
 
   // masterDelegation 未启用时，多步任务走 complex
   if (shouldUsePlanExecuteLoop(text)) {
     reasons.push("plan_execute_heuristic");
-    return { mode: "complex", reasons };
+    return { mode: "complex", reasons, segmentable: false };
   }
 
   reasons.push("default_fast");
-  return { mode: "fast", reasons };
+  return { mode: "fast", reasons, segmentable: determineSegmentable(text, "fast") };
 }

@@ -22,6 +22,9 @@ import {
 } from "./registry/models.js";
 import { getToolEmbeddingsForCatalog } from "./tool-embedding.js";
 import { getEntryCategoryNames, TOOL_CATEGORIES } from "./tool-category.js";
+import { ToolKnowledgeGraphService } from "./knowledge-graph/neo4j-client.js";
+import { ToolGraphRelation } from "./knowledge-graph/graph-relations.js";
+import { ToolRegistryStore } from "./registry/store.js";
 import {
   HybridRetrievalEngine,
   type HybridRetrievedResource,
@@ -104,6 +107,10 @@ const retrievalEngine = new HybridRetrievalEngine();
 const topPSelector = new AdaptiveTopPSelector();
 const rerankingPipeline = new ToolRerankingPipeline();
 const indexCache = new Map<string, { index: AdaptiveCatalogIndex; createdAt: number }>();
+const graphServiceCache = new Map<
+  string,
+  Promise<{ store: ToolRegistryStore; graph: ToolKnowledgeGraphService }>
+>();
 
 export async function adaptiveSearchDeferredTools(
   catalog: DeferredToolCatalog,
@@ -164,7 +171,7 @@ export async function adaptiveSearchDeferredTools(
 
   if (selectedById.size === 0) return [];
 
-  const expandedRecords = expandWithKnowledgeGraph(
+  const expandedRecords = await expandWithKnowledgeGraph(
     index,
     [...selectedById.values()].map((hit) => hit.resource),
     25,
@@ -389,38 +396,83 @@ function routeAdaptiveCatalog(
   };
 }
 
-function expandWithKnowledgeGraph(
+async function expandWithKnowledgeGraph(
   index: AdaptiveCatalogIndex,
   seedRecords: ResourceRecord[],
   limit: number,
-): ResourceRecord[] {
-  const out = new Map<string, ResourceRecord>();
-  const add = (id: string): void => {
-    if (out.size >= limit) return;
-    const record = index.recordsById.get(id);
-    if (record?.level1.status === ResourceStatus.Online) out.set(id, record);
-  };
+): Promise<ResourceRecord[]> {
+  // 实体图检索：走真实 ToolKnowledgeGraphService（SimilarTo/CombineWith/DependsOn/Requires 关系扩展）。
+  const { graph } = await getOrCreateGraphService(index);
+  const expanded = await graph.expandCandidates(seedRecords, limit);
+  return expanded;
+}
 
-  for (const record of seedRecords) add(record.level1.resource_id);
-  for (const record of seedRecords) {
-    if (out.size >= limit) break;
-    for (const dependency of record.level2.dependencies) add(dependency);
-    for (const key of actionKeys(record)) {
-      for (const domain of record.level1.domain) {
-        for (const id of index.byDomainCapability.get(routeKey(domain, `${domain}.${key}`)) ?? []) {
-          if (out.size >= limit) break;
-          add(id);
-        }
-      }
+/** 每个 catalog 签名共享同一个实体内存图（memoryOnly store + ToolKnowledgeGraphService）。 */
+function getOrCreateGraphService(
+  index: AdaptiveCatalogIndex,
+): Promise<{ store: ToolRegistryStore; graph: ToolKnowledgeGraphService }> {
+  const cached = graphServiceCache.get(index.signature);
+  if (cached) return cached;
+
+  const created = (async () => {
+    const store = new ToolRegistryStore({ memoryOnly: true });
+    const graph = new ToolKnowledgeGraphService(store);
+    for (const record of index.recordsById.values()) {
+      await store.upsertRecord(record);
     }
-    for (const capability of record.level1.capability.slice(0, 6)) {
-      for (const id of index.byCapability.get(capability) ?? []) {
-        if (out.size >= limit) break;
-        add(id);
+    await seedGraphEdges(store, index);
+    return { store, graph };
+  })();
+
+  graphServiceCache.set(index.signature, created);
+  return created;
+}
+
+/** 根据 catalog 索引的真实关系灌入图边（depends_on / similar_to）。 */
+async function seedGraphEdges(
+  store: ToolRegistryStore,
+  index: AdaptiveCatalogIndex,
+): Promise<void> {
+  // depends_on：显式声明的依赖
+  for (const record of index.recordsById.values()) {
+    for (const dep of record.level2.dependencies) {
+      if (!index.recordsById.has(dep)) continue;
+      await store.upsertGraphEdge({
+        source_resource_id: record.level1.resource_id,
+        relation_type: ToolGraphRelation.DependsOn,
+        target_resource_id: dep,
+        weight: 1,
+      });
+    }
+  }
+
+  // similar_to：共享 capability 的资源互为相似（每个能力桶两两建边）
+  const capabilityMembers = new Map<string, string[]>();
+  for (const record of index.recordsById.values()) {
+    for (const cap of record.level1.capability) {
+      const members = capabilityMembers.get(cap) ?? [];
+      members.push(record.level1.resource_id);
+      capabilityMembers.set(cap, members);
+    }
+  }
+  for (const members of capabilityMembers.values()) {
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        await store.upsertGraphEdge({
+          source_resource_id: members[i],
+          relation_type: ToolGraphRelation.SimilarTo,
+          target_resource_id: members[j],
+          weight: 0.6,
+        });
+        await store.upsertGraphEdge({
+          source_resource_id: members[j],
+          relation_type: ToolGraphRelation.SimilarTo,
+          target_resource_id: members[i],
+          weight: 0.6,
+        });
       }
     }
   }
-  return [...out.values()].slice(0, limit);
 }
 
 function applyAdaptiveIntentBoost(

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import sharp from "sharp";
 
 import type { ImageGenerationProvider, ImageGenerationResult } from "./image-generation-providers.js";
 import { SiliconFlowImageProvider } from "./image-generation-providers.js";
@@ -69,7 +70,7 @@ export class ImageGenerationService {
           batchSize: options.batchSize ?? 1,
         });
         // 下载第一张图到本地
-        const localUrl = await this.downloadAndStore(result.images[0].url, actorId);
+        const localUrl = await this.downloadAndStorePng(result.images[0].url, actorId);
         return {
           ok: true,
           imageUrl: localUrl,
@@ -86,8 +87,12 @@ export class ImageGenerationService {
     return { ok: false, error: lastError };
   }
 
-  /** 把远程图片下载到本地，返回可访问的相对路径。 */
-  private async downloadAndStore(remoteUrl: string, actorId: string): Promise<string> {
+  /** 把远程图片下载并统一转成 PNG 落盘，返回可访问的相对路径。 */
+  async downloadAndStorePng(
+    remoteUrl: string,
+    actorId: string,
+    timeoutMs = 30_000,
+  ): Promise<string> {
     // actorId 限制为 [a-zA-Z0-9_-]，避免路径穿越
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
@@ -97,13 +102,17 @@ export class ImageGenerationService {
     const fileName = `${imageId}.png`;
     const fullPath = join(dir, fileName);
 
-    // 拉远程图（硅基流动 / OpenAI 都返回公网 URL），30s 超时防止挂起
-    const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(30_000) });
+    // 拉远程图（硅基流动 / OpenAI 都返回公网 URL），可传入更短的预算；默认 30s 超时防止挂起
+    const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) {
       throw new Error(`下载图像失败：HTTP ${res.status} ${res.statusText}`);
     }
     const buf = Buffer.from(await res.arrayBuffer());
-    await writeFile(fullPath, buf);
+    const png = await sharp(buf, { animated: false })
+      .rotate()
+      .png()
+      .toBuffer();
+    await writeFile(fullPath, png);
 
     // 返回相对路径，供客户端拼接 base URL 拉流
     return `/agent/images/${safeActorId}/${fileName}`;

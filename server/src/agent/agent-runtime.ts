@@ -14,6 +14,7 @@ import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import type { LifeSignalHubService } from "../services/life-signal-hub-service.js";
+import type { SemanticIntentParser } from "../services/semantic-intent-types.js";
 
 /**
  * Agent「大脑」装配依赖：CLI/网关等多入口共用同一 AIAgent 核心，本仓库为 AgentCore。
@@ -34,6 +35,7 @@ export type AgentCoreDependencies = {
   shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
   moodInferenceService?: MoodInferenceService | null;
   lifeSignalHubService?: LifeSignalHubService | null;
+  semanticIntentParser?: SemanticIntentParser | null;
 };
 
 /**
@@ -56,5 +58,6 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.shortTermMemoryGateway ?? null,
     deps.moodInferenceService ?? null,
     deps.lifeSignalHubService ?? null,
+    deps.semanticIntentParser ?? null,
   );
 }

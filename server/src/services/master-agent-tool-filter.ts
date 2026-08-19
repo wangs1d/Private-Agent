@@ -61,7 +61,7 @@ export function buildSubAgentChatTools(
   return [
     ...filterChatToolsByRegistryNames(
       getBuiltinAgentChatTools(),
-      new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web", "fetch_web"]),
+      new Set([...SUBAGENT_SHARED_REGISTRY_TOOLS, "search_web", "search_images", "search_videos", "fetch_web"]),
     ),
     askPeerTool,
   ];

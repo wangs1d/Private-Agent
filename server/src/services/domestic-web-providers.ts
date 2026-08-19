@@ -403,13 +403,33 @@ const SEARCH_STOPWORDS = new Set([
 ]);
 
 /** 按原始 query 过滤误匹配条目（导出供单测）。 */
+/**
+ * 通用动词/虚词/时效词锚点。这类词本身没有区分度（如「发布」「更新」），
+ * 必应会把 query 里的动词拆出来匹配，导致返回「某某发布会/某某更新」这类跑题结果。
+ * 判断相关性时，仅命中这些弱锚点、却未命中任何强锚点的条目视为噪音过滤。
+ */
+const WEAK_RELEVANCE_ANCHORS = new Set([
+  "发布", "更新", "下载", "查看", "搜索", "查找", "购买", "推荐", "介绍", "分享",
+  "解读", "盘点", "汇总", "整理", "对比", "测评", "使用", "设置", "上线", "官宣",
+  "如何", "怎么", "怎样", "为什么", "什么", "哪个", "哪些", "是否", "能否", "有没有",
+  "是不是", "区别", "差异", "多少", "哪里", "怎么样", "是什么", "怎么回事",
+  "最新", "最近", "今日", "今天", "现在", "目前", "刚刚", "新闻", "消息", "资讯",
+  "事件", "简报", "动态", "公告", "详情", "信息", "相关", "情况", "时间", "日期",
+]);
+
 export function filterItemsByRelevance(items: InfoSearchItem[], query: string): InfoSearchItem[] {
   const anchors = extractRelevanceAnchors(query);
   if (anchors.length === 0) return items;
-  // 对所有长度的 anchors 都使用 OR 逻辑：结果只需包含任一 anchor 即可
+  // 强锚点 = 非通用动词/虚词/时效词的有区分度锚点（实体、型号、有含义词）
+  const strongAnchors = anchors.filter((a) => !WEAK_RELEVANCE_ANCHORS.has(a) && a.length >= 2);
   return items.filter((item) => {
     const hay = `${item.title}\n${item.snippet}`;
-    return anchors.some((a) => hay.includes(a));
+    const hitAnchors = anchors.filter((a) => hay.includes(a));
+    if (hitAnchors.length === 0) return false;
+    // query 本身只有通用词（无强锚点）：维持原 OR 逻辑，不过度过滤
+    if (strongAnchors.length === 0) return true;
+    // 有强锚点：必须命中强锚点，仅命中通用动词/虚词的条目视为噪音过滤
+    return strongAnchors.some((a) => hay.includes(a));
   });
 }
 
@@ -490,7 +510,6 @@ export async function fetchDomesticTechNews(
   limit: number,
   opts: DomesticFetchOptions,
 ): Promise<InfoSearchItem[]> {
-  const keywords = extractCoreKeywords(topic);
   // 健康检查：过滤降级源
   const feeds = opts.rssHealth
     ? opts.rssHealth.filterAvailable(DOMESTIC_TECH_RSS_FEEDS)
@@ -517,12 +536,8 @@ export async function fetchDomesticTechNews(
   );
 
   let merged = batches.flat();
-  if (keywords.length > 0) {
-    merged = merged.filter((item) => {
-      const hay = `${item.title}\n${item.snippet}`.toLowerCase();
-      return keywords.some((k) => hay.includes(k));
-    });
-  }
+  // 强锚点相关性过滤：剔除仅命中通用动词/时效词（如「发布」）的跑题 RSS 条目
+  merged = filterItemsByRelevance(merged, topic);
   // 不再在此处调用 applySearchFreshness，由调用方统一处理
   return merged.slice(0, limit);
 }
@@ -533,7 +548,6 @@ export async function fetchDomesticOfficialNews(
   limit: number,
   opts: DomesticFetchOptions,
 ): Promise<InfoSearchItem[]> {
-  const keywords = extractCoreKeywords(topic);
   // 健康检查：过滤降级源
   const feeds = opts.rssHealth
     ? opts.rssHealth.filterAvailable(DOMESTIC_NEWS_RSS_FEEDS)
@@ -573,13 +587,8 @@ export async function fetchDomesticOfficialNews(
   ]);
 
   let merged = [...rssBatches.flat(), ...htmlBatches.flat()];
-  // 核心实体过滤：必须包含至少一个核心关键词（如"A股"、"股票"），避免返回无关新闻
-  if (keywords.length > 0) {
-    merged = merged.filter((item) => {
-      const hay = `${item.title}\n${item.snippet}`.toLowerCase();
-      return keywords.some((k) => hay.includes(k));
-    });
-  }
+  // 强锚点相关性过滤：剔除仅命中通用动词/时效词（如「发布」）的跑题新闻
+  merged = filterItemsByRelevance(merged, topic);
   // 不再在此处调用 applySearchFreshness，由调用方统一处理
   return merged.slice(0, limit);
 }
@@ -834,15 +843,9 @@ export async function discoverHtmlSourcesFromResults(
   // 4. 并行执行（最多 6 个任务，避免过多网络请求）
   const batches = await Promise.all(tasks.slice(0, 6));
 
-  // 5. 合并 + 关键词过滤
-  const keywords = extractCoreKeywords(topic);
+  // 5. 合并 + 强锚点相关性过滤
   let merged = batches.flat();
-  if (keywords.length > 0) {
-    merged = merged.filter((item) => {
-      const hay = `${item.title}\n${item.snippet}`.toLowerCase();
-      return keywords.some((k) => hay.includes(k));
-    });
-  }
+  merged = filterItemsByRelevance(merged, topic);
 
   return merged;
 }

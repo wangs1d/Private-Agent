@@ -19,6 +19,8 @@ export const SUBAGENT_SHARED_REGISTRY_TOOLS = [
 export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly string[]>> = {
   info: [
     "search_web",
+    "search_images",
+    "search_videos",
     "fetch_web",
     "info.search",
     "info.read_webpage",
@@ -46,6 +48,8 @@ export const SUB_AGENT_TOOL_ALLOWLISTS: Partial<Record<SubAgentType, readonly st
     "self.generate_from_example",
     "self.generate_tool_template",
     "search_web",
+    "search_images",
+    "search_videos",
     "fetch_web",
   ],
 };

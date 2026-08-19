@@ -131,6 +131,11 @@ export type AgentPromptMemoryContext = {
    * 作为独立块注入，避免被 formatNarrativeRecallPrompt 当作召回条目丢弃。
    */
   recentConversationHistory?: string;
+  /**
+   * 语义意图理解结果：LLM 对用户本轮句子的真实意图解析。
+   * 作为独立块注入，让主 LLM 明确知道"用户想做什么"，避免答非所问。
+   */
+  semanticIntent?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

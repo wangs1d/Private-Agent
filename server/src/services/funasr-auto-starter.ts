@@ -13,7 +13,7 @@
  *  - 首次启动会从 ModelScope 下载 ~1GB 模型到 ~/.cache/funasr/，无超时限制（设 30min 兜底）
  *  - 不自动跑 install 脚本（依赖装好是前置条件，缺依赖会打印提示并 5s 重连）
  */
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, execFileSync, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,11 +38,34 @@ function defaultScriptPath(): string {
   return join(here, "..", "..", "scripts", "funasr_server.py");
 }
 
-function resolvePythonExe(env: NodeJS.ProcessEnv = process.env): string {
+function resolvePythonExe(env: NodeJS.ProcessEnv = process.env): string | null {
   const fromEnv = envStr(env, "FUNASR_PYTHON");
   if (fromEnv) return fromEnv;
-  // Windows 默认 python，linux/mac 也是 python（外部已装好依赖即可）
-  return process.platform === "win32" ? "python.exe" : "python";
+  if (process.platform !== "win32") return "python";
+
+  // Windows 下 python.exe 可能不在 PATH，尝试常见安装路径
+  const candidates = [
+    "python.exe",
+    "python3.exe",
+    "py.exe",
+    `${process.env.LOCALAPPDATA}\\Programs\\Python\\Python313\\python.exe`,
+    `${process.env.LOCALAPPDATA}\\Programs\\Python\\Python312\\python.exe`,
+    `${process.env.LOCALAPPDATA}\\Programs\\Python\\Python311\\python.exe`,
+    `${process.env.ProgramFiles}\\Python313\\python.exe`,
+    `${process.env.ProgramFiles}\\Python312\\python.exe`,
+    `${process.env.ProgramFiles}\\Python311\\python.exe`,
+    `${process.env.SystemRoot}\\py.exe`,
+  ];
+  for (const c of candidates) {
+    try {
+      execFileSync(c, ["--version"], { stdio: "ignore", timeout: 2000 });
+      return c;
+    } catch {
+      // 继续尝试下一个
+    }
+  }
+  // 未找到任何 Python：返回 null，由调用方给出友好提示（不进入 5s 重连刷屏）
+  return null;
 }
 
 export function shouldAutoStartFunasr(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -73,6 +96,15 @@ export function startFunasrServer(
   const log = opts.log ?? ((line: string) => console.log(line));
   const pythonExe = resolvePythonExe(env);
   const scriptPath = envStr(env, "FUNASR_SCRIPT_PATH") || defaultScriptPath();
+
+  if (pythonExe === null) {
+    log(
+      `[funasr] 未找到 Python 解释器（PATH 及常见安装路径均无 python.exe），跳过 ASR 自启动。` +
+        `安装 Python 后重启 server，或设置 FUNASR_PYTHON=/path/to/python.exe 指定解释器。`,
+    );
+    return () => {};
+  }
+
   const host = envStr(env, "FUNASR_HOST", "127.0.0.1");
   const port = envInt(env, "FUNASR_PORT", 8001);
 

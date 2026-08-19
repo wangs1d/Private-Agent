@@ -434,6 +434,18 @@ export class ShortTermMemoryGatewayService {
     return ["STM project memory:", ...merged.map((line) => `- ${line}`)].join("\n");
   }
 
+  /**
+   * 只读判定当前轮用户输入的话题焦点（不修改任何状态）。
+   * 供上层（agent-core）对长期记忆召回做门控：当焦点为 topic_switch
+   * （用户已切换话题、无任务延续、无指代）时，应抑制跨会话/旧话题的长期记忆注入，
+   * 避免"串台"——把别的会话记忆塞进当前新话题。
+   */
+  getTurnFocusKind(sessionId: string, currentInput: string): TurnFocusKind {
+    const state = this.getSessionState(sessionId);
+    const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
+    return this.resolveTurnFocus(currentInput, active, state.conversationMemory).kind;
+  }
+
   buildRecallQuery(sessionId: string, currentInput: string): string {
     const state = this.getSessionState(sessionId);
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;

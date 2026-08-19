@@ -206,10 +206,30 @@ export function formatNarrativeRecallPrompt(text: string | undefined): string | 
     if (numbered?.[1]) content = numbered[1];
     else if (bracketNum?.[1]) content = bracketNum[1];
 
-    // 过滤无信息量的工具日志 / 时间戳 / digest 系统行（HumanLike 图会记录 HermesLoop 日志节点）
+    // HumanLike 图会记录 HermesLoop 对话节点；它们对"上次聊了什么/最后说了什么"很关键，
+    // 不能整条过滤。先把日志壳转成可读对话记忆，再进入 prompt。
+    let conversationLogLine = content;
+    if (content.startsWith('{"line":')) {
+      try {
+        const parsed = JSON.parse(content) as { line?: unknown };
+        if (typeof parsed.line === "string") {
+          conversationLogLine = parsed.line;
+        }
+      } catch {
+        /* keep raw content */
+      }
+    }
+    const directAssistantDone = conversationLogLine.match(
+      /^(?:HermesLoop|EvolutionLoop): assistantDone user="(.+?)" reply="(.+?)"$/i,
+    );
+    if (directAssistantDone?.[1] && directAssistantDone?.[2]) {
+      content = `对话记录：用户说「${directAssistantDone[1]}」，Agent 回复「${directAssistantDone[2]}」`;
+    }
+
+    // 过滤无信息量的工具日志 / 时间戳（保留已转换的 assistantDone 对话节点）
     if (content.length < 2) continue;
     if (
-      /^\{"line":"HermesLoop|^\[ts:|^Daily digest|^Tool interaction (succeeded|failed)/i.test(content)
+      /^\[ts:|^Tool interaction (succeeded|failed)|^\{"line":"(?:HermesLoop|EvolutionLoop): toolBatch/i.test(content)
     ) {
       continue;
     }
@@ -253,7 +273,7 @@ export type BuildPromptContextInput = {
     learningActive?: boolean;
   };
   /**
-   * 深度优化：工具规划链（来自 ToolPlanningCortex），注入 prompt 约束 LLM 工具选择顺序和范围。
+   * 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围。
    * complex 路由时由 ToolPlanningCortex.planTools 产出，让 LLM 按规划顺序调用工具，
    * 避免乱试或遗漏关键工具。
    */
@@ -264,6 +284,10 @@ export type BuildPromptContextInput = {
     estimatedTokens: number;
     estimatedCalls: number;
   };
+  /**
+   * 语义意图理解结果（LLM 解析）。注入 system prompt，让主 LLM 明确用户真实意图。
+   */
+  semanticIntent?: string;
 };
 
 export type BuildMasterDelegateInput = BuildPromptContextInput & {
@@ -692,6 +716,7 @@ export class PromptContextBuilder {
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
+      ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
 
@@ -827,7 +852,8 @@ export class PromptContextBuilder {
       Boolean(memory.skillIndex) ||
       Boolean(memory.currentTime) ||
       Boolean(memory.workingMemorySummary) ||
-      Boolean(memory.recentConversationHistory)
+      Boolean(memory.recentConversationHistory) ||
+      Boolean(memory.semanticIntent)
     );
   }
 

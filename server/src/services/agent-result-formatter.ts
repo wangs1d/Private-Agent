@@ -199,7 +199,8 @@ export function inferCardType(toolName?: string): string {
     return "order";
   }
   if (toolName.includes("file")) return "file";
-  if (toolName === "search_web" || toolName.startsWith("info.")) return "carousel";
+  if (toolName === "search_images" || toolName === "search_videos") return "media";
+  if (toolName === "search_web" || toolName.startsWith("info.")) return "search_result";
   // 新增：对比类（商品/方案 pk）、时间轴类（行程/计划）、媒体类（识图/图片结果）
   if (
     toolName.toLowerCase().includes("compare") ||
@@ -334,6 +335,56 @@ interface InferredAction {
 const SELECT_QUESTION_RE = /选哪|勾选|多选|任选|挑几个|要哪些|哪些合适|想要哪些|选几个/i;
 
 /**
+ * LLM 实时声明按钮的标记：`[AGENT_ACTIONS] [{"label":"...","variant":"primary"}, ...]`
+ * 由 Agent 在生成内容时按当下场景自行决定是否附带；formatter 解析后直接使用，
+ * 未附带的场景才回退到规则推断（见 inferActionsForScenario）。
+ */
+const AGENT_ACTIONS_MARKER_RE = /^\[AGENT_ACTIONS\]\s*(\[[\s\S]*?\])\s*$/m;
+
+/**
+ * 从文本中提取 LLM 声明的按钮，并剥离标记行。
+ * @returns 解析出的按钮（可能为空数组）与去除标记行后的文本
+ */
+function extractLlmActions(text: string): {
+  actions: InferredAction[];
+  cleaned: string;
+} {
+  const m = text.match(AGENT_ACTIONS_MARKER_RE);
+  if (!m) {
+    // 即使 `[AGENT_ACTIONS]` 后面 JSON 损坏（缺闭合），也把该行剥离，
+    // 避免残留标记污染卡片切分/前导/追问。
+    const cleaned = text.replace(/^\[AGENT_ACTIONS\][^\n]*$/m, "").trim();
+    return { actions: [], cleaned };
+  }
+  let actions: InferredAction[] = [];
+  try {
+    const raw: unknown = JSON.parse(m[1]);
+    if (Array.isArray(raw)) {
+      actions = raw
+        .filter(
+          (x): x is Record<string, unknown> =>
+            !!x && typeof x === "object" && typeof (x as Record<string, unknown>).label === "string",
+        )
+        .map((x, i) => {
+          const label = String(x.label).trim();
+          const variant = String(x.variant ?? "");
+          return {
+            id: typeof x.id === "string" && x.id ? x.id : `llm_${i}`,
+            label,
+            variant: ["primary", "secondary", "ghost"].includes(variant) ? variant : "secondary",
+            payload: x.payload && typeof x.payload === "object" ? (x.payload as Record<string, unknown>) : {},
+          };
+        })
+        .filter((a) => a.label.length > 0);
+    }
+  } catch {
+    actions = [];
+  }
+  const cleaned = text.replace(m[0], "").trim();
+  return { actions, cleaned };
+}
+
+/**
  * 按场景推断按钮。新逻辑：
  *   - recap_pick：每个 item 一个按钮（最多 4 个，多了会挤），加一个"都不聊"逃生
  *   - task_done_review：场景化"就这样"/"调整一下"
@@ -425,13 +476,14 @@ export function formatAgentResultForChat(
   text: string,
   toolName?: string,
 ): string | null {
-  const trimmed = text?.trim() ?? "";
-  if (!trimmed) return null;
+  // 先剥离 LLM 实时声明的按钮标记，其余文本继续走卡片切分
+  const { actions: llmActions, cleaned } = extractLlmActions(text?.trim() ?? "");
+  if (!cleaned) return null;
 
-  const segment = findExtractableCardSegment(trimmed);
+  const segment = findExtractableCardSegment(cleaned);
   if (!segment) return null;
 
-  const lines = trimmed.split(/\r?\n/);
+  const lines = cleaned.split(/\r?\n/);
 
   // 1) 前导：startLine 之前的所有非空行
   //    跳过已经被卡片消费的 title 行，避免与卡片标题重复显示
@@ -463,11 +515,16 @@ export function formatAgentResultForChat(
   });
 
   const cardType = inferCardType(toolName);
-  // 按钮策略：先看是不是多选/勾选场景，是则走 select；否则按 title/items/footer 推断场景
-  // 不再硬塞"好的/不用了"——见 detectCardScenario 的注释
+  // 按钮策略优先级：LLM 实时声明 > 多选/勾选 > 场景推断
+  // - LLM 声明：Agent 按当下场景实时给出按钮，最贴合实际
+  // - 场景推断：仅作为 LLM 未声明时的兜底（见 detectCardScenario 的注释，不再硬塞"好的/不用了"）
   const selectActions = inferSelectActions(segment.title, items, segment.footer);
   const scenarioActions = inferActionsForScenario(segment.title, items, segment.footer);
-  const actions = selectActions.length ? selectActions : scenarioActions;
+  const actions = llmActions.length
+    ? llmActions
+    : selectActions.length
+      ? selectActions
+      : scenarioActions;
 
   // 语音播报优先级：追问/结论句（问句或含"建议/注意/总之"）标记 high，语音端优先朗读
   const speak = /[？?]\s*$|吗\s*$|建议|推荐|注意|警告|总之|结论|提醒/i.test(

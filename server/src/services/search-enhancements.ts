@@ -367,10 +367,10 @@ export function classifySearchIntent(query: string): IntentAnalysis {
 
   // 建议参数
   const suggestedLimit =
-    intent === "latest" ? 12 :
-    intent === "compare" ? 12 :
-    intent === "research" ? 10 :
-    intent === "price" ? 8 :
+    intent === "latest" ? 16 :
+    intent === "compare" ? 16 :
+    intent === "research" ? 14 :
+    intent === "price" ? 12 :
     undefined;
 
   const requiresFreshWeb =

@@ -304,11 +304,11 @@ List<InlineSpan> parseInlineMarkdownSpans(
   ColorScheme cs,
 ) {
   final RegExp tokenPattern = RegExp(
-    r"(\*\*.+?\*\*|~~.+?~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|_(.+?)_)",
+    r"(!\[[^\]]*\]\([^)]+\)|\*\*.+?\*\*|~~.+?~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|_(.+?)_)",
   );
 
   if (!tokenPattern.hasMatch(text)) {
-    return <InlineSpan>[TextSpan(text: text)];
+    return _parsePlainLinks(text, baseStyle, cs);
   }
 
   final List<InlineSpan> spans = <InlineSpan>[];
@@ -316,7 +316,9 @@ List<InlineSpan> parseInlineMarkdownSpans(
 
   for (final RegExpMatch match in tokenPattern.allMatches(text)) {
     if (match.start > cursor) {
-      spans.add(TextSpan(text: text.substring(cursor, match.start)));
+      spans.addAll(
+        _parsePlainLinks(text.substring(cursor, match.start), baseStyle, cs),
+      );
     }
 
     final String token = match.group(0)!;
@@ -348,7 +350,24 @@ List<InlineSpan> parseInlineMarkdownSpans(
           ),
         ),
       );
+    } else if (token.startsWith("![")) {
+      // markdown 图片: ![alt](url) → 渲染为内嵌网络图片缩略图，点击打开原图
+      final RegExp imgPattern = RegExp(r"^!\[(.+?)\]\((.+?)\)$");
+      final RegExpMatch? imgMatch = imgPattern.firstMatch(token);
+      if (imgMatch != null) {
+        final String url = imgMatch.group(2)!;
+        final String alt = imgMatch.group(1)!.trim();
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.top,
+            child: _InlineImage(url: url, alt: alt, cs: cs),
+          ),
+        );
+      } else {
+        spans.add(TextSpan(text: token));
+      }
     } else if (token.startsWith("[")) {
+      // markdown 链接: [text](url) → 渲染为文字链接
       final RegExp linkPattern = RegExp(r"^\[(.+?)\]\((.+?)\)$");
       final RegExpMatch? linkMatch = linkPattern.firstMatch(token);
       if (linkMatch != null) {
@@ -359,7 +378,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
             text: label,
             style: baseStyle.copyWith(
               color: cs.primary,
-              decoration: TextDecoration.underline,
+              fontWeight: FontWeight.w700,
             ),
             recognizer: TapGestureRecognizer()
               ..onTap = () => launchUrlFromText(url),
@@ -386,6 +405,73 @@ List<InlineSpan> parseInlineMarkdownSpans(
   }
 
   return spans;
+}
+
+/// 把纯文本段中的裸 URL（未被 markdown 包裹的 http/https 地址）
+/// 转成可点击的文字链接：显示域名、主色加粗、点击打开外部浏览器，
+/// 避免一长串原始地址直接暴露在正文里。
+List<InlineSpan> _parsePlainLinks(
+  String text,
+  TextStyle baseStyle,
+  ColorScheme cs,
+) {
+  final RegExp urlRe = RegExp(r'https?://[^\s]+');
+  if (!urlRe.hasMatch(text)) {
+    return <InlineSpan>[TextSpan(text: text)];
+  }
+
+  final List<InlineSpan> spans = <InlineSpan>[];
+  int cursor = 0;
+  for (final RegExpMatch m in urlRe.allMatches(text)) {
+    if (m.start > cursor) {
+      spans.add(TextSpan(text: text.substring(cursor, m.start)));
+    }
+    final String raw = m.group(0)!;
+    final String url = raw.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
+    if (url.isEmpty) continue;
+    if (_isImageUrl(url)) {
+      // 裸图片 URL → 直接渲染为网络图片缩略图
+      spans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.top,
+          child: _InlineImage(url: url, alt: "", cs: cs),
+        ),
+      );
+    } else {
+      spans.add(
+        TextSpan(
+          text: _linkLabel(url),
+          style: baseStyle.copyWith(
+            color: cs.primary,
+            fontWeight: FontWeight.w700,
+          ),
+          recognizer: TapGestureRecognizer()
+            ..onTap = () => launchUrlFromText(url),
+        ),
+      );
+    }
+    cursor = m.end;
+  }
+  if (cursor < text.length) {
+    spans.add(TextSpan(text: text.substring(cursor)));
+  }
+  return spans;
+}
+
+/// 从 URL 生成简短文字标签：取域名并去掉 www，作为文字链接的显示文本。
+String _linkLabel(String url) {
+  final Uri? uri = Uri.tryParse(url);
+  final String host = (uri == null || uri.host.isEmpty) ? url : uri.host;
+  final String clean = host.replaceFirst(RegExp(r'^www\.'), '');
+  return clean.isEmpty ? url : clean;
+}
+
+/// 判断 URL 是否指向图片资源（按扩展名）。
+bool _isImageUrl(String url) {
+  return RegExp(
+    r'\.(jpe?g|png|gif|webp|bmp|svg|avif|heic)(\?|#|$)',
+    caseSensitive: false,
+  ).hasMatch(url);
 }
 
 Future<void> launchUrlFromText(String url) async {
@@ -594,6 +680,88 @@ class MarkdownTableWidget extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: tableRows,
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// markdown 图片内嵌组件：渲染网络图片缩略图，点击打开原图。
+/// 由 [parseInlineMarkdownSpans] 中的 `![alt](url)` 语法触发。
+class _InlineImage extends StatelessWidget {
+  const _InlineImage({
+    required this.url,
+    required this.alt,
+    required this.cs,
+  });
+
+  final String url;
+  final String alt;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: GestureDetector(
+        onTap: () => launchUrlFromText(url),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(
+            url,
+            width: 220,
+            height: 150,
+            fit: BoxFit.cover,
+            loadingBuilder: (BuildContext context, Widget child,
+                ImageChunkEvent? progress) {
+              if (progress == null) return child;
+              return Container(
+                width: 220,
+                height: 150,
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+                child: const Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            },
+            errorBuilder: (BuildContext context, Object error,
+                StackTrace? stackTrace) {
+              return Container(
+                width: 220,
+                height: 150,
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      Icon(Icons.broken_image_outlined,
+                          color: cs.onSurfaceVariant, size: 26),
+                      if (alt.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 4),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            alt,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: cs.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),

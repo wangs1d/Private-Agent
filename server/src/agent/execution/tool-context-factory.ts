@@ -100,6 +100,9 @@ export class ToolContextFactory {
       agentAccessMode: base.access?.agentAccessMode,
       desktopBridgeOnline: base.access?.desktopBridgeOnline,
       phoneBridgeOnline: base.access?.phoneBridgeOnline,
+      // 按需位置：透传 locationCoordinator 的 requestLocation，天气等位置类工具
+      // 在缺少经纬度时才能向客户端下发 agent.location_request 请求实时 GPS。
+      requestLocation: base.access?.requestLocation,
     };
   }
 }

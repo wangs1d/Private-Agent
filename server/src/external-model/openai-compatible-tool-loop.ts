@@ -124,6 +124,8 @@ async function ocrScreenshot(imageBase64: string, mimeType: string): Promise<str
 // fetch_web 2000：正文摘要足够 LLM 提取关键信息，不过度截断导致信息丢失。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "search_web": 600,
+  "search_images": 1200,
+  "search_videos": 1200,
   "fetch_web": 1000,
   "info.search": 600,
   "info.inspect_webpage": 1000,
@@ -159,6 +161,8 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
 // 注意：url 必须保留（LLM 需要判断哪些结果值得 fetch_web 深读）。
 const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
   search_web: ["provider", "fetchedAt", "notes"],
+  search_images: ["provider", "notes"],
+  search_videos: ["provider", "notes"],
   fetch_web: ["url"],
   "info.inspect_webpage": ["sameHostLinks"],
   "info.navigate_site": ["startUrl"],
@@ -297,6 +301,9 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
     "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
     "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "search_images": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "search_videos": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "video.grab": Number.parseInt(process.env.TOOL_TIMEOUT_VIDEO_GRAB_MS ?? "25000", 10),
     "fetch_web": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.inspect_webpage": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.navigate_site": Number.parseInt(process.env.TOOL_TIMEOUT_NAVIGATE_MS ?? "20000", 10),
@@ -450,6 +457,15 @@ function buildToolSufficiencyHint(toolName: string, content: string): string {
       }
       return "";
     }
+    case "search_images":
+    case "search_videos": {
+      const itemMatch = content.match(/"title"\s*:/g);
+      const itemCount = itemMatch ? itemMatch.length : 0;
+      if (itemCount > 0) {
+        return `\n[提示] 已返回 ${itemCount} 条媒体结果，含标题、预览图/媒体链接和来源页。请直接把最相关的 3-6 条返回给用户；图片可展示 mediaUrl 或 thumbnailUrl，视频请给 pageUrl 供用户打开观看。不要重复搜索相同 query。`;
+      }
+      return "";
+    }
     case "weather.get_local": {
       return "\n[提示] 天气数据已包含当前温度、体感温度、湿度、风力、降水概率和穿衣建议。信息已完整，可直接回答用户，无需再搜索。";
     }
@@ -579,12 +595,6 @@ function resolveForcedToolChoice(
   apiTools: ChatCompletionTool[],
   fastProfile?: boolean,
 ): { type: "function"; function: { name: string } } | "auto" {
-  // 2026-08-01 性能优化：Fast 模式（contextual/light 暴露策略）跳过强制 tool_choice。
-  // 原因：Fast 模式的 system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
-  // LLM 可直接答「现在几点」「今天星期几」等问题，强制调 clock 工具反而多 1 次 round trip
-  // （LLM→tool→LLM，3 次网络往返）。Fast 模式把工具调用决策权完全交给 LLM。
-  if (fastProfile) return "auto";
-
   // 1. 显式电话请求 → 强制 phone_call_user
   if (isExplicitPhoneCallRequest(userText)) {
     const hasPhoneCallTool = apiTools.some(
@@ -596,8 +606,13 @@ function resolveForcedToolChoice(
   }
 
   // 2. 直接时间/日期/位置问题 → 强制 clock_get_current_time
-  //    避免 LLM 在"现在几点"这类事实型问题上瞎编
-  if (DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
+  //    避免 LLM 在"现在几点"这类事实型问题上瞎编。
+  //    2026-08-01 性能优化：Fast 模式跳过本强制——system prompt 已注入
+  //    currentTime / userLocation / scheduleSnapshot，LLM 可直接答"现在几点"，
+  //    强制调 clock 反而多 1 次 round trip（LLM→tool→LLM，3 次网络往返）。
+  //    ⚠️ 只跳过 clock：天气/搜索是真实数据获取，system prompt 未注入结果，
+  //    必须保留强制选择，否则 LLM 会"嘴上说查天气"却实际不调用工具。
+  if (!fastProfile && DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
     const hasClockTool = apiTools.some(
       (tool) => tool.type === "function" && tool.function?.name === "clock_get_current_time",
     );
@@ -703,6 +718,44 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "search_images",
+      description:
+        "搜索公开图片结果，下载并转存为服务端本地 PNG，返回可在对话中直接预览的 mediaUrl/thumbnailUrl（形如 /agent/images/...png），以及可打开来源页的 pageUrl。\n" +
+        "适用场景：用户明确要「搜图片」「找图」「图片素材」「照片参考」「表情包」「壁纸」「风景照」「实拍图」「长什么样」「给我看看」等。\n" +
+        "强约束：用户消息里出现「照片/实拍图/图片/图集/长什么样/找图/配图/壁纸/风景照/看图/看照片/出图」等任何视觉关键词时，**必须**在首轮并行调用本工具（可与 search_web 并行），不要只调 search_web，也不要建议用户去其他平台——直接出图。\n" +
+        "回答时优先展示 3-6 条最相关图片 PNG，附来源页链接；不要把图片搜索误用成 image.generate（生成图）。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "图片搜索关键词，尽量短而具体" },
+          limit: { type: "integer", description: "返回数量，1-12，默认 8" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_videos",
+      description:
+        "搜索公开视频结果并返回标题、播放页 pageUrl、缩略图 thumbnailUrl 与来源。\n" +
+        "适用场景：用户明确要「搜视频」「找视频」「教程视频」「B站/YouTube 视频」「视频素材」等。回答时给出可点击播放页，必要时附缩略图；不要重复用普通 search_web 搜同一视频需求。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "视频搜索关键词，尽量短而具体" },
+          limit: { type: "integer", description: "返回数量，1-12，默认 8" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "info.inspect_webpage",
       description: "巡检网页：返回标题、摘要、内容预览、主要链接和同域链接，便于继续导航。",
       parameters: {
@@ -737,7 +790,10 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "weather.get_local",
       description:
-        "获取当地天气与穿衣建议（Open-Meteo）。优先提供 latitude、longitude（来自浏览器定位）；或仅提供 city 由服务做地理编码。可选 timezone（IANA，默认 Asia/Shanghai）。",
+        "获取当地天气与穿衣建议（Open-Meteo）。\n" +
+        "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
+        "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
+        "可选 timezone（IANA，默认 Asia/Shanghai）。",
       parameters: {
         type: "object",
         properties: {
@@ -1649,8 +1705,8 @@ interface ToolCategoryMapping {
 const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'web',
-    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate'],
-    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
+    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video'],
+    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
   },
   {
     category: 'calendar',
@@ -1674,6 +1730,8 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
       'alipay.query-payment',
       'alipay.pay-402',
       'alipay.proxy-trade',
+      'alipay.merchant-list',
+      'alipay.merchant-order',
     ]
   },
   {
@@ -2043,6 +2101,8 @@ export async function streamCompletionWithTools(
     });
   }
 
+  // TEMP DEBUG（重复工具调用诊断：打印每轮的 tool_calls 数量）
+  console.log(`[DBG-toolloop] maxRounds=${maxRounds} fastProfile=${fastProfile}`);
   for (let round = 0; round < maxRounds; round++) {
     let retriedToolCallIdError = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
@@ -2244,6 +2304,10 @@ export async function streamCompletionWithTools(
       });
       workItems.push({ tc, registryToolName, parsedArgs: args });
     }
+    // TEMP DEBUG（重复工具调用诊断：本轮实际执行的所有工具）
+    console.log(
+      `[DBG-toolloop] round=${round} toolCalls=${workItems.map((w) => w.registryToolName + ":" + JSON.stringify(w.parsedArgs)).join(" | ")}`,
+    );
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {

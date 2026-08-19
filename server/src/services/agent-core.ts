@@ -12,6 +12,11 @@ import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import type { SemanticIntentParser, SemanticIntent } from "./semantic-intent-types.js";
+import type { SemanticIntentService } from "./semantic-intent-service.js";
+
+/** 意图澄清置信度阈值：低于此值且 clarificationNeeded 时触发澄清反问 */
+const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
@@ -47,8 +52,12 @@ import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
-import { routeLlmExecution, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
-import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
+import { routeLlmExecution, determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import {
+  MEMORY_RECALL_HINT_RE,
+  isAmbiguousFollowUpMessage,
+  shouldInjectMemorySummary,
+} from "../agent/memory-signal.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -102,6 +111,9 @@ export type MasterAgentDelegationSnapshot = {
 };
 
 export type { AgentReply } from "../agent/types.js";
+
+const META_CONVERSATION_RECALL_RE =
+  /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
 
 export type HandleUserMessageOptions = {
   onAssistantDelta?: StreamDeltaHandler;
@@ -163,6 +175,8 @@ export class AgentCore {
   private lifeSignalHubService: LifeSignalHubService | null = null;
   /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
   private brainCenter: BrainCenter | null = null;
+  /** 语义意图解析器（LLM 理解用户真实意图；可选注入） */
+  private semanticIntentParser: SemanticIntentParser | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -180,9 +194,11 @@ export class AgentCore {
     private readonly shortTermMemoryGateway: ShortTermMemoryGatewayService | null = null,
     moodInferenceService: MoodInferenceService | null = null,
     lifeSignalHubService: LifeSignalHubService | null = null,
+    semanticIntentParser: SemanticIntentParser | null = null,
   ) {
     this.moodInferenceService = moodInferenceService;
     this.lifeSignalHubService = lifeSignalHubService;
+    this.semanticIntentParser = semanticIntentParser;
     this.promptContextBuilder = new PromptContextBuilder({
       agentMemorySyncService: this.agentMemorySyncService,
       worldService: this.worldService,
@@ -297,6 +313,11 @@ export class AgentCore {
     this.lifeSignalHubService = service;
   }
 
+  /** 注入语义意图解析器（LLM 理解用户真实意图）。未注入时跳过意图解析。 */
+  setSemanticIntentParser(parser: SemanticIntentParser | null): void {
+    this.semanticIntentParser = parser;
+  }
+
   /**
    * 注入 BrainCenter。可用时 handleUserMessage 走 cognize() 端到端认知入口，
    * 替代原切片式 moodInference + routeLlmExecution + buildShortTermTurnContext。
@@ -307,6 +328,27 @@ export class AgentCore {
     if (brain) {
       brain.registerRuntimeKernel(getRuntimeKernel());
     }
+  }
+
+  private formatSemanticIntent(intent: SemanticIntent | undefined): string | undefined {
+    if (!intent) return undefined;
+    const lines: string[] = [
+      `用户真实意图：${intent.intent}`,
+      `类别：${intent.category}｜置信度：${intent.confidence.toFixed(2)}｜建议模式：${intent.preferredMode}`,
+    ];
+    if (intent.preferredToolDomain) {
+      lines.push(`建议工具域：${intent.preferredToolDomain}`);
+    }
+    if (intent.entities.length > 0) {
+      lines.push(`关键实体：${intent.entities.map((e) => `${e.type}=${e.value}`).join("；")}`);
+    }
+    if (intent.subIntents.length > 0) {
+      lines.push(`子意图：${intent.subIntents.join("；")}`);
+    }
+    if (intent.clarificationNeeded && intent.clarificationQuestion?.question) {
+      lines.push(`仍需澄清：${intent.clarificationQuestion.question}`);
+    }
+    return lines.join("\n");
   }
 
   /**
@@ -395,10 +437,47 @@ export class AgentCore {
 
     const sync = this.shortTermMemoryGateway.syncTaskForTurn(sessionId, text);
     return {
-      recallQuery: this.shortTermMemoryGateway.buildRecallQuery(sessionId, text),
+      recallQuery: this.enrichMemoryRecallQuery(
+        this.shortTermMemoryGateway.buildRecallQuery(sessionId, text),
+        text,
+      ),
       activeTaskId: sync.task.taskId,
       resumedTask: sync.resumed,
     };
+  }
+
+  /**
+   * fast 模式（对话主链路）的轻量子孙：不激活任务（避免闲聊污染任务栈），
+   * 但召回 query 用会话感知的 buildRecallQuery，把当前话题/任务锚定进长期记忆召回，
+   * 避免裸文本在用户全局记忆池里随机捞到别的会话的记忆（串台根因之一）。
+   * buildRecallQuery 为只读：话题切换时自动丢弃旧话题上下文（resolveTurnFocus=不相关），
+   * 延续时带上当前任务/话题，让长期召回贴合当前会话。
+   */
+  private buildFastShortTermTurnContext(sessionId: string, text: string): ShortTermTurnContext {
+    const baseRecallQuery = this.shortTermMemoryGateway?.buildRecallQuery(sessionId, text) ?? text;
+    return {
+      recallQuery: this.enrichMemoryRecallQuery(baseRecallQuery, text),
+      resumedTask: false,
+    };
+  }
+
+  private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
+    const normalized = text.trim();
+    if (!META_CONVERSATION_RECALL_RE.test(normalized)) return baseQuery;
+    return [
+      baseQuery,
+      "最近一次对话 上次聊天 最后聊天 最后说了什么 之前聊了什么 对话摘要",
+      "assistantDone user reply EvolutionLoop Daily digest session recap",
+    ].join("\n");
+  }
+
+  /**
+   * 判定当前轮是否"真正切换了话题"（STM 解析为 topic_switch，无任务延续/无指代）。
+   * 命中时抑制长期记忆注入，避免旧话题/跨会话记忆串台。
+   */
+  private isTopicSwitchTurn(sessionId: string, text: string): boolean {
+    if (shouldInjectMemorySummary(text) || MEMORY_RECALL_HINT_RE.test(text)) return false;
+    return this.shortTermMemoryGateway?.getTurnFocusKind(sessionId, text) === "topic_switch";
   }
 
   async handleUserMessage(
@@ -407,11 +486,53 @@ export class AgentCore {
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
     const sessionId = opts?.sessionId ?? actorId;
+    /** 语义意图理解结果 */
+    let semanticIntent: SemanticIntent | undefined;
 
     // 用户开口即打断小脑：清空该 actor 的 defer 队列 + 设 60s 抑制窗口，
     // 让"用户开口时 Agent 不抢话"从注释变成可执行逻辑。
     // 小脑未注册时（BRAIN_NEURO_ENABLED=0）interruptProactive 为空操作。
     this.brainCenter?.interruptProactive(actorId);
+
+    // === 语义意图理解（入口层，路由之前）===
+    // 用 LLM 真实理解用户这句句子的语义（意图/实体/子意图/是否需澄清），
+    // 让后续路由和工具选择基于"理解"而非"关键词命中"。
+    // 仅在注入 SemanticIntentService 且 externalChat 可用时执行；失败静默降级，
+    // 不阻塞主流程。clarificationNeeded 且低置信时直接返回澄清反问。
+    if (text?.trim() && this.semanticIntentParser) {
+      try {
+        semanticIntent = await this.semanticIntentParser.parseIntent(sessionId, text);
+        if (
+          semanticIntent.clarificationNeeded &&
+          semanticIntent.confidence < CLARIFY_CONFIDENCE_THRESHOLD &&
+          semanticIntent.clarificationQuestion?.question
+        ) {
+          const q = semanticIntent.clarificationQuestion.question;
+          this.turnLifecycle.finalizeTurn({
+            actorId,
+            userText: text,
+            assistantText: q,
+            sessionId,
+          });
+          opts?.onAssistantDelta?.(q);
+          return {
+            text: q,
+            streamedChunks: true,
+            clarification: {
+              question: q,
+              options: semanticIntent.clarificationQuestion?.options,
+            },
+          };
+        }
+      } catch (err) {
+        // 意图解析失败不阻断对话，降级到原有路由路径
+        console.log(
+          `[SemanticIntent] 意图解析失败，降级到原路由路径：${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     // === 对话认知入口 ===
     // fast（对话层）与 complex（后台任务执行器）均走轻量路由（routeLight），不调用完整 cognize：
@@ -461,6 +582,21 @@ export class AgentCore {
       const shouldGoComplex =
         fastRoute.mode === "complex" || light.mode === "complex" || lowConfidence;
 
+      let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
+      try {
+        brainCognition = await this.brainCenter.cognize({
+          actorId,
+          text,
+          sessionId,
+        });
+      } catch (err) {
+        console.log(
+          `[AgentCore] BrainCenter.cognize 失败，降级使用轻量记忆路径：${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+
       // Parallel-Live：规则判为 fast 高置信但可并行深挖时，fast 先主答，complex 后台并行补充
       const useParallelLive = this.shouldUseParallelLiveComplex(text, fastRoute, opts);
       if (useParallelLive) {
@@ -471,18 +607,26 @@ export class AgentCore {
       if (!shouldGoComplex) {
         // Fast 模式：保留 task-router 硬规则结果 + 注入规则置信度（用于日志/诊断）
         route = useParallelLive
-          ? { mode: "fast", reasons: [...fastRoute.reasons, "parallel_live_fast_lane"] }
-          : { mode: "fast", reasons: [...fastRoute.reasons, `rule=${light.mode}@${light.confidence.toFixed(2)}`] };
-        shortTermTurn = { recallQuery: text, resumedTask: false };
-        cognitiveResponse = "";
+          ? { mode: "fast", reasons: [...fastRoute.reasons, "parallel_live_fast_lane"], segmentable: fastRoute.segmentable }
+          : {
+              mode: brainCognition?.route.mode ?? "fast",
+              reasons: [
+                ...fastRoute.reasons,
+                `rule=${light.mode}@${light.confidence.toFixed(2)}`,
+                ...(brainCognition ? [`brain=${brainCognition.route.mode}:${brainCognition.rationale}`] : []),
+              ],
+              segmentable: fastRoute.segmentable,
+            };
+        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
+        cognitiveResponse = brainCognition?.response ?? "";
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
-        cognitiveRecallItems = undefined;
-        cognitiveWorkingMemorySummary = "";
-        cognitiveRecentConversationHistory = "";
-        cognitiveMetacog = undefined;
-        cognitiveEmotion = null;
+        cognitiveRecallItems = brainCognition?.recallItems;
+        cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
+        cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
+        cognitiveMetacog = brainCognition?.metacog;
+        cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
-        cognitiveToolPlan = undefined; // fast 模式不生成工具规划
+        cognitiveToolPlan = brainCognition?.toolPlan;
 
         // 异步情绪推断（不阻塞主流程）
         if (this.moodInferenceService) {
@@ -506,23 +650,25 @@ export class AgentCore {
         // 记忆/工作记忆/位置/个性化由后续兜底路径（prepareNarrativeRecall 等）自行拉取。
         // 情绪推送改为异步（不阻塞工具执行），MoodInferred 事件仍正常下发。
         route = {
-          mode: "complex",
+          mode: brainCognition?.route.mode ?? "complex",
           reasons: [
             ...fastRoute.reasons,
             `rule=${light.mode}@${light.confidence.toFixed(2)}`,
+            ...(brainCognition ? [`brain=${brainCognition.route.mode}:${brainCognition.rationale}`] : []),
             "complex_background_executor",
           ],
+          segmentable: false,
         };
-        shortTermTurn = { recallQuery: text, resumedTask: false };
-        cognitiveResponse = "";
+        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
+        cognitiveResponse = brainCognition?.response ?? "";
         cognitiveNeedsToolLoop = true; // 强制走工具循环
-        cognitiveRecallItems = undefined;
-        cognitiveWorkingMemorySummary = "";
-        cognitiveRecentConversationHistory = "";
-        cognitiveMetacog = undefined;
-        cognitiveEmotion = null;
+        cognitiveRecallItems = brainCognition?.recallItems;
+        cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
+        cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
+        cognitiveMetacog = brainCognition?.metacog;
+        cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
-        cognitiveToolPlan = undefined; // 复杂任务不做认知层规划，交给工具循环内 LLM 自行规划
+        cognitiveToolPlan = brainCognition?.toolPlan;
 
         // 异步情绪推断（不阻塞工具执行，MoodInferred 仍推送）
         if (this.moodInferenceService) {
@@ -565,11 +711,11 @@ export class AgentCore {
       if (this.shouldUseParallelLiveComplex(text, route, opts)) {
         parallelLiveComplex = true;
         parallelLiveOriginalRoute = route;
-        route = { mode: "fast", reasons: [...route.reasons, "parallel_live_fast_lane"] };
-        shortTermTurn = { recallQuery: text, resumedTask: false };
+        route = { mode: "fast", reasons: [...route.reasons, "parallel_live_fast_lane"], segmentable: route.segmentable };
+        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
       } else {
         shortTermTurn = route.mode === "fast"
-          ? { recallQuery: text, resumedTask: false }
+          ? this.buildFastShortTermTurnContext(sessionId, text)
           : this.buildShortTermTurnContext(sessionId, text);
       }
     }
@@ -647,15 +793,22 @@ export class AgentCore {
     // 而是作为独立字段透传给 PromptContextBuilder，作为独立块注入 system prompt。
     // 原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt 的 slice(0,4)
     // 当作召回条目丢弃、块结构被拍平、hint 被正则误杀 → agent 看到的上下文跳转、不能针对当前话回复。
+    // 话题切换门控：用户真正切换话题（无任务延续/无指代，STM 解析为 topic_switch）时，
+    // 抑制长期记忆召回，避免把旧话题/跨会话记忆注入当前新话题（串台根治）。
+    // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
+    const suppressNarrativeRecall = this.isTopicSwitchTurn(sessionId, text);
+
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
       .isFastMode(route.mode)
       ? await Promise.all([
           // Fast 模式记忆注入：
           // - 有 cognize 召回结果时直接复用（Complex 路径）
           // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
-          cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          suppressNarrativeRecall
+            ? Promise.resolve(undefined)
+            : (cognitiveRecallItems && cognitiveRecallItems.length > 0
+                ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 最近对话回顾独立透传（含 C1 dedup 判定，hint 由 buildLayeredSystemPrompt 统一添加）
@@ -673,9 +826,11 @@ export class AgentCore {
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
           // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
-          cognitiveRecallItems && cognitiveRecallItems.length > 0
-            ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-            : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery),
+          suppressNarrativeRecall
+            ? Promise.resolve(undefined)
+            : (cognitiveRecallItems && cognitiveRecallItems.length > 0
+                ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)),
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           Promise.resolve(
             this.buildRecentConversationHistoryBlock(
@@ -755,7 +910,7 @@ export class AgentCore {
       if (route.mode === "complex" && isDesktopAutomationTask(text)) {
         if (!this.agentTaskOrchestrator) {
           // orchestrator 不可用，降级到 master/runStandardLlmPath
-          route = { mode: "complex", reasons: [...route.reasons, "fallback_no_orchestrator"] };
+          route = { mode: "complex", reasons: [...route.reasons, "fallback_no_orchestrator"], segmentable: false };
         } else {
         const sessionId = opts?.sessionId ?? actorId;
         const orchestrator = this.agentTaskOrchestrator;
@@ -1223,6 +1378,10 @@ if (this.isComplexMode(route.mode)) {
       agentAccessMode: opts?.agentAccessMode,
       desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
       phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
+      // 按需位置：自主任务/日程触发的工具（如天气）缺经纬度时也能向客户端请求实时 GPS
+      requestLocation: () =>
+        this.locationCoordinator?.requestLocation(actorId, `tool:${reply.toolName}`) ??
+        Promise.resolve(null),
     });
   }
 
@@ -1860,6 +2019,8 @@ if (this.isComplexMode(route.mode)) {
       };
       /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
+      /** 语义意图理解结果（入口层 LLM 解析），注入 prompt 让主 LLM 明确用户真实意图 */
+      semanticIntent?: SemanticIntent;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
@@ -1912,6 +2073,7 @@ if (this.isComplexMode(route.mode)) {
             onToolLoopAfterBatch: undefined, // fast_chat 无工具循环
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
+            semanticIntent: this.formatSemanticIntent(ctx.semanticIntent),
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],

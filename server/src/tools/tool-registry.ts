@@ -97,6 +97,8 @@ const CACHEABLE_TOOLS = new Set([
   "internet.live_check",
   "internet.verify",
   "search_web",
+  "search_images",
+  "search_videos",
   "fetch_web",
   "info.inspect_webpage",
   "info.navigate_site",

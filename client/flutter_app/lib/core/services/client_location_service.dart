@@ -100,7 +100,10 @@ class ClientLocationService {
     }
   }
 
-  /// 启动预热路径：使用 10 分钟缓存，避免重复请求系统定位。
+  /// 获取实时位置（右侧天气面板/启动预热路径）。
+  /// GPS 优先：内存缓存未过期（10 分钟内）直接复用，过期则重新拉真实定位，
+  /// 磁盘缓存仅作失败兜底——不再因为持久化缓存「看似新鲜」而长期停留在旧坐标
+  /// （曾导致天气面板固定在旧位置，如一直显示上海的天气）。
   static Future<ClientLocationPayload?> getCurrentLocation() async {
     if (_locationConsent != true) {
       final bool? consent = await getLocationConsent();
@@ -115,14 +118,8 @@ class ClientLocationService {
       return _cached;
     }
 
+    // 内存缓存已过期/缺失：从磁盘取缓存作兜底，然后强制拉一次新鲜 GPS。
     final ClientLocationPayload? disk = await _loadFromDisk();
-    if (disk != null &&
-        _cachedAt != null &&
-        now.difference(_cachedAt!) < _cacheTtl) {
-      _cached = disk;
-      return disk;
-    }
-
     return _fetchFresh(disk);
   }
 
@@ -250,7 +247,14 @@ class ClientLocationService {
     _cachedAt = DateTime.now();
     print("[ClientLocationService] 定位: ${payload.label ?? payload.city}");
     if (_writePref != null) {
-      await _writePref!(_prefsKey, payload.toJson());
+      // 持久化真实定位时间戳，供下次启动判断缓存是否过期（不再重置为"现在"）。
+      await _writePref!(
+        _prefsKey,
+        <String, dynamic>{
+          "cachedAt": _cachedAt!.toIso8601String(),
+          "location": payload.toJson(),
+        },
+      );
     }
   }
 
@@ -258,11 +262,24 @@ class ClientLocationService {
     if (_readPref == null) return null;
     try {
       final dynamic raw = await _readPref!(_prefsKey);
+      // 新格式：{ cachedAt, location } —— 恢复真实时间戳，过期判断才有意义。
+      if (raw is Map && raw["location"] is Map) {
+        final Map<String, dynamic> loc =
+            (raw["location"] as Map).cast<String, dynamic>();
+        final ClientLocationPayload payload =
+            ClientLocationPayload.fromJson(loc);
+        final DateTime? cachedAt =
+            DateTime.tryParse(raw["cachedAt"]?.toString() ?? "");
+        _cached = payload;
+        _cachedAt = cachedAt;
+        return payload;
+      }
+      // 旧格式：直接是 payload（无时间戳）——视为过期，强制下次重新拉真实 GPS。
       if (raw is Map) {
         final ClientLocationPayload payload =
             ClientLocationPayload.fromJson(raw.cast<String, dynamic>());
         _cached = payload;
-        _cachedAt = DateTime.now();
+        _cachedAt = null;
         return payload;
       }
     } catch (e) {

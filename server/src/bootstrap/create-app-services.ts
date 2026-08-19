@@ -106,12 +106,15 @@ import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm
 import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
+import { VideoGrabService, setVideoGrabServiceRef } from "../services/video-grab-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { SkillManager } from "../skills/index.js";
 import { registerSkillToToolRouter } from "../services/self-evolution-router-registrar.js";
 import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent-world-identity-skills.js";
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
 import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
+import { registerMerchantOrderBuiltinSkills } from "../skills/builtin/merchant-order-skills.js";
+import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
@@ -170,6 +173,7 @@ import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerVideoTools } from "../tools/video-tools.js";
 import { registerInternetIntelligenceTools } from "../tools/internet-intelligence-tools.js";
 import { registerHttpTools } from "../tools/http-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
@@ -339,6 +343,8 @@ export async function createAppServices(): Promise<AppServices> {
   const infoHubService = new InfoHubService();
   const browserSessionService = new BrowserSessionService();
   const upstreamSearchService = new UpstreamSearchService(infoHubService);
+  const videoGrabService = new VideoGrabService();
+  setVideoGrabServiceRef(videoGrabService);
   const internetIntelligenceService = new InternetIntelligenceService({
     search: upstreamSearchService,
     pages: infoHubService,
@@ -348,6 +354,12 @@ export async function createAppServices(): Promise<AppServices> {
   const paymentService = new PaymentService();
   const meituanService = new MeituanService();
   const alipayBotService = new AlipayBotService();
+  // 商家下单服务：从 data/merchants.json 加载商家目录，按意图路由商家并桥接支付宝下单→支付短链
+  const merchantOrderService = new MerchantOrderService(
+    process.env.MERCHANT_REGISTRY_FILE ?? join(process.cwd(), "data", "merchants.json"),
+    alipayBotService,
+  );
+  bootLoads.push(merchantOrderService.load());
   const auditService = new AuditService();
   const computeQuotaService = new ComputeQuotaService();
   const companionService = new CompanionService();
@@ -393,6 +405,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerSkillManageTools(toolRegistry, skillManager);
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService);
+  registerVideoTools(toolRegistry, videoGrabService);
   registerInternetIntelligenceTools(toolRegistry, internetIntelligenceService);
   registerHttpTools(toolRegistry);
 
@@ -507,6 +520,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 初始化图像生成能力服务（硅基流动 text-to-image，下载到本地静态目录）。
   // 与语音消息同模式：独立目录 data/images/{actorId}/{imageId}.png，HTTP 走 /agent/images。
   const imageGenerationService = new ImageGenerationService();
+  upstreamSearchService.setImageStorageService(imageGenerationService);
   // 初始化文件/文档处理能力服务（read/write/parse_pdf/parse_office/export_format）。
   // 独立目录 data/user-files/{actorId}/{fileName}，HTTP 走 /agent/files。
   const fileProcessingService = new FileProcessingService();
@@ -697,6 +711,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 注册支付宝 AI 支付内置Skills（真实购买能力，封装项目内置 alipay-bot CLI）
   registerAlipayPaymentBuiltinSkills((skill) => skillManager.register(skill), {
     alipayBotService,
+  });
+
+  // 注册商家下单内置Skills（官方「智能体接入」模式：下单→alipay_ 短链→submit-payment 支付）
+  registerMerchantOrderBuiltinSkills((skill) => skillManager.register(skill), {
+    merchantOrderService,
   });
   
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();

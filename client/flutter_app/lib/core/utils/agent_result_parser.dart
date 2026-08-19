@@ -12,16 +12,41 @@ import "dart:convert";
 /// [AGENT_RESULT_CARD_END]
 /// ```
 class AgentResultItem {
-  const AgentResultItem({required this.type, required this.text});
+  const AgentResultItem({
+    required this.type,
+    required this.text,
+    this.url,
+    this.mediaType,
+    this.mediaUrl,
+    this.thumbnailUrl,
+    this.pageUrl,
+    this.source,
+  });
 
   /// "check"（✓ 已完成） / "num"（• 序号） / "warn"（! 警告）
   final String type;
   final String text;
 
+  /// 可选的链接 URL（搜索/资讯类卡片使用）
+  final String? url;
+
+  /// 可选媒体元数据（图片/视频搜索结果卡片使用）。
+  final String? mediaType;
+  final String? mediaUrl;
+  final String? thumbnailUrl;
+  final String? pageUrl;
+  final String? source;
+
   factory AgentResultItem.fromJson(Map<String, dynamic> json) {
     return AgentResultItem(
       type: json["type"]?.toString() ?? "check",
       text: json["text"]?.toString() ?? "",
+      url: json["url"]?.toString(),
+      mediaType: json["mediaType"]?.toString() ?? json["kind"]?.toString(),
+      mediaUrl: json["mediaUrl"]?.toString() ?? json["imageUrl"]?.toString(),
+      thumbnailUrl: json["thumbnailUrl"]?.toString() ?? json["thumbUrl"]?.toString(),
+      pageUrl: json["pageUrl"]?.toString() ?? json["sourceUrl"]?.toString(),
+      source: json["source"]?.toString(),
     );
   }
 }

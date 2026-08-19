@@ -3,12 +3,13 @@ import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 
 import {
+  discoverHtmlSourcesFromResults,
   fetchDomesticNews,
   fetchDomesticOfficialNews,
   fetchDomesticTechNews,
+  filterItemsByRelevance,
   searchBingChina,
   searchBingChinaRelaxed,
-  discoverHtmlSourcesFromResults,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
 import { fetchWebPageEnhanced, extractWithReadability, decodeWithEncoding } from "./web-fetch-enhancer.js";
@@ -175,10 +176,10 @@ export class InfoHubService {
     return { topic, items: merged };
   }
 
-  async search(query: string, limit = 8, sessionId?: string): Promise<InfoSearchItem[]> {
+  async search(query: string, limit = 12, sessionId?: string): Promise<InfoSearchItem[]> {
     const keyword = query.trim();
     if (!keyword) return [];
-    const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, limit)) : 8;
+    const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(25, limit)) : 12;
 
     // 意图识别：影响搜索策略
     const intent = classifySearchIntent(keyword);
@@ -251,7 +252,13 @@ export class InfoHubService {
       );
       const relaxedMerged = dedupeByUrl(relaxedBatches.flat());
       if (relaxedMerged.length > 0) {
-        merged = dedupeByUrl([...merged, ...relaxedMerged]);
+        // 宽松扩搜（skipRelevanceFilter）可能带回与主题无关的噪音（如必应对短实体/单字母的误匹配，
+        // 例：query「今天A股最新消息」会混入 AcFun/Ascii 等含「A」的结果）。
+        // 扩宽条数后这类噪音会被一起带进来，这里用相关性过滤兜底，保留真正相关的结果。
+        const relevant = filterItemsByRelevance(relaxedMerged, keyword);
+        if (relevant.length > 0) {
+          merged = dedupeByUrl([...merged, ...relevant]);
+        }
       }
     }
 

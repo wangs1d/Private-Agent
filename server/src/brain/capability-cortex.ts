@@ -163,7 +163,7 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   aip: ["aip."],
   vision: ["vision."],
   desktop: ["desktop.", "browser.session.", "browser.fetch_page"],
-  web: ["search_web", "fetch_web", "info."],
+  web: ["search_web", "search_images", "search_videos", "fetch_web", "info."],
   life_assistant: ["budget.", "shopping.suggest", "payment.", "alipay."],
   voice: ["voice."],
   phone: ["phone.", "phone_bridge."],

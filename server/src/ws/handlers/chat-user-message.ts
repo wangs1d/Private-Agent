@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 
 import type { AgentCore } from "../../services/agent-core.js";
 import type { AuditService } from "../../services/audit-service.js";
@@ -31,13 +32,14 @@ import {
   LivingInterimController,
   shouldUsePhasedAsyncConversation,
 } from "../../agent/interim-ack.js";
+import { StreamSegmenter } from "../../agent/stream-segmenter.js";
 import {
   buildExecutionEventPayload,
   buildIntentDetectedPayload,
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker } from "../../services/tool-result-processor.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
@@ -107,6 +109,19 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
       return `${title}\n\n${content.slice(0, 800)}`.trim();
     }
     return "";
+  }
+  // 视频抓取：列出标题/作者/链接，播放页链接供点击
+  if (t === "video.grab" || t.includes("video_grab") || t.includes("video.grab")) {
+    const title = (result.title ?? "") as string;
+    const author = (result.author ?? "") as string;
+    const pageUrl = (result.playPageUrl ?? result.pageUrl ?? "") as string;
+    const notes = Array.isArray(result.notes) ? result.notes.map(String).join("；") : "";
+    const parts: string[] = [];
+    if (title) parts.push(`视频：${title}`);
+    if (author) parts.push(`作者：${author}`);
+    if (pageUrl) parts.push(`原链接：${pageUrl}`);
+    if (notes) parts.push(notes);
+    return parts.join("\n");
   }
   // 天气/时钟/日历：直接 JSON 转可读文本
   const summary = (result.summary ?? result.description ?? result.text ?? "") as string;
@@ -448,9 +463,10 @@ async function processBatchedMessage(
     );
   }
 
-  // 活体 interim 控制器：智能门控 + 多条进度更新
-  // 被动路径统一用 text_chat（传达动作）
-  // interim 不再用独立 messageId，而是作为同一 assistant 消息的 phase="interim" 首段
+  // 活体 interim 控制器：仅负责「主动在场」互动（complex 后台任务执行期间
+  // 周期性给 LLM 开口机会，生成自然闲聊，像真人边做边聊）。
+  // 垫词不再由独立 LLM 生成（避免与正文脱节、重复），而是主回复流式的一部分，
+  // 由下方 streamSegmenter 按短句切分、同一气泡内逐句推送（同源分段）。
   const interimController = new LivingInterimController({
     sessionId: msgActor,
     traceId: batched.originalMessageId,
@@ -459,24 +475,36 @@ async function processBatchedMessage(
     channel: "text_chat",
     provider: createExternalChatProviderFromEnv(),
     send: (text, _seq) => {
-      // 通过 sendAssistantChunk 推送，phase="interim" 让客户端识别为首段
+      // presence 互动独立于主回复推送，走 phase="interim"
       sendAssistantChunk(text, "interim");
     },
     isStale,
     isMainReplyStarted: () => mainStreamStarted,
   });
 
-  void interimController.maybeEmitInitial(batched.text);
+  // 同源分段器：主回复流式 delta 按自然短句切分，像真人一句一句蹦出来（GPT live 节奏）。
+  // 垫词 = 主回复的首个短句：仅当确认主回复还有后续内容时才作为 phase="interim"
+  // 独立气泡先出现（前端渲染成独立垫词气泡），后续短句走 phase="stream" 追加到正文气泡；
+  // 若整段回复只有一句，则整体走 stream 单个气泡，避免"垫词 + done 全文"双份重复。
+  // 全程同源（都来自主回复流式），天然连续、不重复。
+  const streamSegmenter = new StreamSegmenter(
+    (segment, phase) => sendAssistantChunk(segment, phase),
+    {
+      // pauseMs：每条回复片段（句子）之间的间隔，拉长到 400ms，
+      // 配合前端打字机，让每句逐字打出后都有一段清晰的停顿再输出下一句。
+      pauseMs: 400,
+      minSegmentChars: 6,
+      interimReplyGapMs: 800,
+      // 由路由决策判定：闲聊式对话分段，工具/搜索/知识问答不分段
+      segmentationEnabled: decision.segmentable,
+    },
+  );
 
   // 主动在场：complex 后台执行期间周期性给 LLM 开口机会，
   // 生成自然互动（追问/反馈/闲聊），像真人边做边聊，直到主回复开始/结束。
   if (decision.mode === "complex" && phasedAsyncEnabled) {
     interimController.startPresence(batched.text);
   }
-
-  // 内容驱动的多步回复：主回复流式输出时，由 interim 控制器按自然段落切分，
-  // 每完成一个段落就作为一条独立消息推送（步数 = 段落数，无定时器/随机/模板）。
-  // 复杂任务（complex）后台执行期间，fast 的承接 + 分段推送共同形成"多步回复"效果。
 
   // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
   // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
@@ -579,14 +607,10 @@ async function processBatchedMessage(
       signal: turnAbortController.signal,
       routeDecision: decision,
       onAssistantDelta: (delta) => {
-        // 流式推送最终内容到前端（tool loop 结束后的最终回复 token-by-token）
+        // 主回复流式同源分段：delta 喂给 streamSegmenter，按自然短句切分，
+        // 同一气泡（stream）内逐句推送（GPT live 真人节奏），垫词 = 首个短句。
         if (isStale()) return;
-        // 主回复正文只走 stream 单条通道。不再喂给 interim 分段器：
-        // 否则同一段正文会被 feedStreamDelta 累积成完整段落后以 phase="interim"
-        // 推一份（前端渲染为独立消息），又被这里以 phase="stream" 推一份（前端
-        // 渲染为主回复）——同一回复内容双推送，前端出现两条气泡。
-        // interim 通道只承载垫词 / presence 互动（独立 LLM 生成，内容与正文不同）。
-        sendAssistantChunk(delta, "stream");
+        streamSegmenter.feed(delta);
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
@@ -740,13 +764,16 @@ async function processBatchedMessage(
     if (isStale()) return;
     replyFinished = true;
 
-    // 流式推送已在 onAssistantDelta 中完成；若未启动（兜底路径未走流式），单次推送完整文本
-    if (!mainStreamStarted && reply.text) {
-      sendAssistantChunk(reply.text, "stream");
+    // 流式推送已在 onAssistantDelta 中完成（经 streamSegmenter 逐句推送）。
+    // 兜底：仅当主回复没有任何流式 delta 喂入（如认知捷径重建/工具结果拼接路径，
+    // 其返回的 streamedChunks=false 但实际未走 onAssistantDelta）时，才把完整文本
+    // 喂入分段器作为唯一内容；否则再次喂 reply.text 会与已流式内容叠加 → 整段重复。
+    if (reply.text && !streamSegmenter.hasStreamedContent) {
+      streamSegmenter.feed(reply.text);
     }
 
-    // 多步收尾：把分段器缓冲中剩余的半截文本作为最后一条消息推送
-    interimController.flushRemaining();
+    // 主回复流结束：把分段器缓冲中剩余的半截文本作为最后一段推送
+    await streamSegmenter.flushFinal();
 
     if (isStale()) return;
     replyFinished = true;
@@ -817,6 +844,27 @@ async function processBatchedMessage(
       userText: batched.text,
       toolName: reply.toolName,
     });
+    // 视频抓取：附加可播放媒体标记（[RENDER_AS:video] + [VIDEO_MEDIA_START]），
+    // 前端据此真实内联播放代理后的视频流
+    finalText = attachVideoMediaMarker(finalText, reply.toolName, toolResult?.result);
+    // 媒体搜索：确定性注入 thumbnailUrl 到 media 卡片（不依赖 LLM 转发）
+    finalText = attachMediaSearchMarker(finalText, reply.toolName, toolResult?.result);
+
+    // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
+    try {
+      const debugItems = Array.isArray((toolResult?.result as any)?.items)
+        ? ((toolResult?.result as any).items as unknown[]).length
+        : -1;
+      appendFileSync(
+        "data/debug-image-card.log",
+        `${new Date().toISOString()} toolName=${reply.toolName ?? "undefined"} ` +
+          `toolOk=${toolResult?.ok} items=${debugItems} hasCard=${finalText.includes(
+            "[AGENT_RESULT_CARD_START]",
+          )}\n`,
+      );
+    } catch {
+      /* 调试日志失败不影响主流程 */
+    }
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
       const supplement = scheduleOutcome.startsWith(reply.text.trim())
@@ -889,6 +937,8 @@ async function processBatchedMessage(
     releaseTurn();
     // 停止主动在场 ticker（turn 结束无论成败都停，防定时器泄漏）
     interimController.stopPresence();
+    // 丢弃主回复分段器缓冲（异常路径防残留半截文本）
+    streamSegmenter.discard();
     // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）
     clearAllToolHeartbeats();
     // 清理本轮 AbortController(如未被新消息 abort 则正常清理)

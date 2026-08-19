@@ -7,6 +7,7 @@ import {
   getSearchAnchorNow,
   SearchCache,
 } from "./search-enhancements.js";
+import type { ImageGenerationService } from "./image-generation-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,6 +26,19 @@ export type UnifiedSearchItem = {
   platform: string;
 };
 
+export type MediaSearchItem = {
+  type: "image" | "video";
+  title: string;
+  pageUrl: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
+  source: string;
+  snippet?: string;
+  width?: number;
+  height?: number;
+  duration?: string;
+};
+
 export class UpstreamSearchService {
   // 社交平台搜索结果缓存（3 分钟 TTL，避免重复调用 mcporter）
   private readonly socialCache = new SearchCache<{ provider: string; raw: string; notes: string[] }>({
@@ -32,7 +46,13 @@ export class UpstreamSearchService {
     ttlMs: 3 * 60 * 1000,
   });
 
+  private imageStorageService?: ImageGenerationService;
+
   constructor(private readonly infoHubService: InfoHubService) {}
+
+  setImageStorageService(service: ImageGenerationService): void {
+    this.imageStorageService = service;
+  }
 
   async searchUnified(input: {
     query: string;
@@ -45,7 +65,7 @@ export class UpstreamSearchService {
     notes: string[];
   }> {
     const query = String(input.query ?? "").trim();
-    const limit = clamp(Number(input.limit ?? 8), 1, 20);
+    const limit = clamp(Number(input.limit ?? 12), 1, 25);
     const platform = String(input.platform ?? "auto").trim().toLowerCase();
     if (!query) {
       return { provider: "none", platform, items: [], notes: ["query 不能为空"] };
@@ -155,7 +175,7 @@ export class UpstreamSearchService {
     };
   }
 
-  async searchWeb(query: string, limit = 8): Promise<{
+  async searchWeb(query: string, limit = 12): Promise<{
     provider: string;
     items: InfoSearchItem[];
     fetchedAt: string;
@@ -172,7 +192,7 @@ export class UpstreamSearchService {
         notes: ["query 不能为空"],
       };
     }
-    const boundedLimit = clamp(limit, 1, 20);
+    const boundedLimit = clamp(limit, 1, 25);
     const anchor = getSearchAnchorNow();
     const raw = await this.infoHubService.search(keyword, boundedLimit);
     const fresh = applySearchFreshness(raw, { query: keyword });
@@ -186,6 +206,82 @@ export class UpstreamSearchService {
         "必应中国 RSS + 国内科技 RSS",
         formatSearchFreshnessNote({ anchor, droppedStale: fresh.droppedStale, maxAgeDays }),
       ],
+    };
+  }
+
+  async searchImages(query: string, limit = 8, actorId = "anonymous"): Promise<{
+    provider: string;
+    mediaType: "image";
+    items: MediaSearchItem[];
+    notes: string[];
+  }> {
+    const keyword = String(query ?? "").trim();
+    if (!keyword) {
+      return { provider: "bing-images", mediaType: "image", items: [], notes: ["query 不能为空"] };
+    }
+    const boundedLimit = clamp(limit, 1, 12);
+    const url = `https://cn.bing.com/images/search?q=${encodeURIComponent(keyword)}&form=HDRSC2`;
+    const html = await this.fetchText(url, IMAGE_FETCH_TIMEOUT_MS);
+    const rawItems = parseBingImageResults(html, boundedLimit);
+    const items = await this.materializeImageResults(rawItems, actorId, boundedLimit);
+    if (items.length > 0) {
+      return {
+        provider: "bing-images",
+        mediaType: "image",
+        items,
+        notes: ["mediaUrl/thumbnailUrl 已转存为服务端本地 PNG；pageUrl 保留原始来源页"],
+      };
+    }
+
+    return {
+      provider: "bing-images",
+      mediaType: "image",
+      items: [],
+      notes: ["未能把图片结果转存为 PNG，已避免返回普通网页链接"],
+    };
+  }
+
+  async searchVideos(query: string, limit = 8): Promise<{
+    provider: string;
+    mediaType: "video";
+    items: MediaSearchItem[];
+    notes: string[];
+  }> {
+    const keyword = String(query ?? "").trim();
+    if (!keyword) {
+      return { provider: "bing-videos", mediaType: "video", items: [], notes: ["query 不能为空"] };
+    }
+    const boundedLimit = clamp(limit, 1, 12);
+    const url = `https://cn.bing.com/videos/search?q=${encodeURIComponent(keyword)}`;
+    const html = await this.fetchText(url, 10_000);
+    const parsed = parseBingVideoResults(html, boundedLimit);
+    if (parsed.length >= Math.min(3, boundedLimit)) {
+      return {
+        provider: "bing-videos",
+        mediaType: "video",
+        items: parsed,
+        notes: ["返回 pageUrl 可打开播放页；thumbnailUrl 可用于对话内预览"],
+      };
+    }
+
+    const web = await this.searchWeb(`${keyword} 视频 OR site:bilibili.com OR site:youtube.com`, boundedLimit);
+    const fallback = web.items
+      .filter((item) => isLikelyVideoUrl(item.url) || /视频|youtube|bilibili|哔哩|播放/i.test(`${item.title} ${item.snippet}`))
+      .slice(0, boundedLimit)
+      .map((item) => ({
+        type: "video" as const,
+        title: item.title,
+        pageUrl: item.url,
+        source: inferMediaSource(item.url, item.source),
+        snippet: item.snippet,
+      }));
+    return {
+      provider: parsed.length > 0 ? "bing-videos:mixed" : "bing-videos:fallback-web",
+      mediaType: "video",
+      items: dedupeMediaByPageUrl([...parsed, ...fallback]).slice(0, boundedLimit),
+      notes: parsed.length > 0
+        ? ["视频页结果较少，已补充视频相关网页结果"]
+        : ["视频页解析失败，已降级返回视频相关网页结果"],
     };
   }
 
@@ -270,40 +366,40 @@ export class UpstreamSearchService {
   }> {
     const rawUrl = String(url ?? "").trim();
     if (!rawUrl) {
-      return { provider: "yt-dlp", title: "", channel: "", description: "", notes: ["url 不能为空"] };
+      return { provider: "youtube-oembed", title: "", channel: "", description: "", notes: ["url 不能为空"] };
     }
-    const run = await this.runCommand(resolveBin("yt-dlp"), ["--dump-json", "--skip-download", rawUrl], 25000);
-    if (!run.ok) {
+    // 使用 YouTube oEmbed 公开接口获取标题/作者/封面（无需登录、无外部二进制依赖）
+    try {
+      const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(rawUrl)}&format=json`;
+      const text = await this.fetchText(oembedUrl, 10_000);
+      const parsed = JSON.parse(text) as {
+        title?: string;
+        author_name?: string;
+        thumbnail_url?: string;
+      };
+      if (parsed.title) {
+        return {
+          provider: "youtube-oembed",
+          title: parsed.title ?? "",
+          channel: parsed.author_name ?? "",
+          description: parsed.thumbnail_url ? `封面: ${parsed.thumbnail_url}` : "",
+          notes: [],
+        };
+      }
       return {
-        provider: "yt-dlp",
+        provider: "youtube-oembed",
         title: "",
         channel: "",
         description: "",
-        notes: [formatFailure("yt-dlp", run)],
-      };
-    }
-    try {
-      const parsed = JSON.parse(run.stdout) as {
-        title?: string;
-        uploader?: string;
-        duration?: number;
-        description?: string;
-      };
-      return {
-        provider: "yt-dlp",
-        title: parsed.title ?? "",
-        channel: parsed.uploader ?? "",
-        durationSeconds: Number.isFinite(parsed.duration) ? parsed.duration : undefined,
-        description: String(parsed.description ?? "").slice(0, 5000),
-        notes: [],
+        notes: ["oEmbed 未返回标题，可能链接无效或视频受限"],
       };
     } catch {
       return {
-        provider: "yt-dlp",
+        provider: "youtube-oembed",
         title: "",
         channel: "",
-        description: run.stdout.slice(0, 5000),
-        notes: ["yt-dlp 输出不是 JSON，已返回原始文本片段"],
+        description: "",
+        notes: ["YouTube oEmbed 解析失败，请确认链接可公开访问"],
       };
     }
   }
@@ -342,40 +438,50 @@ export class UpstreamSearchService {
   }> {
     const rawUrl = String(url ?? "").trim();
     if (!rawUrl) {
-      return { provider: "bilibili", title: "", channel: "", description: "", notes: ["url 不能为空"] };
+      return { provider: "bilibili-api", title: "", channel: "", description: "", notes: ["url 不能为空"] };
     }
-    const run = await this.runCommand(resolveBin("yt-dlp"), ["--dump-json", "--skip-download", rawUrl], 25000);
-    if (!run.ok) {
+    // 使用 B站公开信息接口（无需登录、无外部二进制依赖）
+    const bvid = rawUrl.match(/[bB][vV][0-9A-Za-z]{8,}/)?.[0];
+    if (!bvid) {
+      return { provider: "bilibili-api", title: "", channel: "", description: "", notes: ["链接中未找到 bvid"] };
+    }
+    try {
+      const text = await this.fetchText(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, 10_000);
+      const parsed = JSON.parse(text) as {
+        code?: number;
+        data?: {
+          title?: string;
+          desc?: string;
+          pic?: string;
+          duration?: number;
+          owner?: { name?: string };
+        };
+      };
+      const data = parsed.data;
+      if (data?.title) {
+        return {
+          provider: "bilibili-api",
+          title: data.title ?? "",
+          channel: data.owner?.name ?? "",
+          durationSeconds: Number.isFinite(data.duration) ? data.duration : undefined,
+          description: String(data.desc ?? "").slice(0, 5000),
+          notes: data.pic ? [`封面: ${data.pic}`] : [],
+        };
+      }
       return {
-        provider: "bilibili",
+        provider: "bilibili-api",
         title: "",
         channel: "",
         description: "",
-        notes: [formatFailure("yt-dlp", run)],
-      };
-    }
-    try {
-      const parsed = JSON.parse(run.stdout) as {
-        title?: string;
-        uploader?: string;
-        duration?: number;
-        description?: string;
-      };
-      return {
-        provider: "bilibili",
-        title: parsed.title ?? "",
-        channel: parsed.uploader ?? "",
-        durationSeconds: Number.isFinite(parsed.duration) ? parsed.duration : undefined,
-        description: String(parsed.description ?? "").slice(0, 5000),
-        notes: [],
+        notes: ["B站接口未返回视频信息，可能视频已删除或需要登录"],
       };
     } catch {
       return {
-        provider: "bilibili",
+        provider: "bilibili-api",
         title: "",
         channel: "",
-        description: run.stdout.slice(0, 5000),
-        notes: ["yt-dlp 输出不是 JSON，已返回原始文本片段"],
+        description: "",
+        notes: ["B站接口解析失败，请确认链接有效"],
       };
     }
   }
@@ -460,7 +566,6 @@ export class UpstreamSearchService {
       { key: "mcporter", bin: resolveBin("mcporter") },
       { key: "gh", bin: resolveBin("gh") },
       { key: "rdt", bin: resolveBin("rdt") },
-      { key: "yt-dlp", bin: resolveBin("yt-dlp") },
     ];
     const bins: Record<string, { ok: boolean; detail: string }> = {};
     for (const t of targets) {
@@ -524,7 +629,83 @@ export class UpstreamSearchService {
       };
     }
   }
+
+  private async fetchText(url: string, timeoutMs: number): Promise<string> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "user-agent":
+            process.env.WEB_FETCH_USER_AGENT ??
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+        redirect: "follow",
+      });
+      if (!response.ok) return "";
+      return await response.text();
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async materializeImageResults(
+    items: MediaSearchItem[],
+    actorId: string,
+    limit: number,
+  ): Promise<MediaSearchItem[]> {
+    const storage = this.imageStorageService;
+    if (!storage) return items.slice(0, limit);
+    const out: MediaSearchItem[] = [];
+    // 硬预算：整个转存阶段必须在预算内返回（无论是否全部完成），
+    // 否则整次 search_images 会在外圈 12s 工具超时里被整体 kill、items 归零，
+    // 导致前端媒体卡片无法注入、照片展示不出来。这里返回"已达成的部分结果"即可。
+    const deadline = Date.now() + IMAGE_MATERIALIZE_BUDGET_MS;
+    let cursor = 0;
+
+    const workers = Array.from({ length: IMAGE_MATERIALIZE_CONCURRENCY }, async () => {
+      while (out.length < limit) {
+        if (Date.now() >= deadline) return;
+        const idx = cursor++;
+        const item = items[idx];
+        if (!item) return;
+        const remoteUrl = item.mediaUrl || item.thumbnailUrl;
+        if (!remoteUrl) continue;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return;
+        try {
+          // 用剩余预算作为本次下载的截断超时，确保并发任务不会越过预算、
+          // Promise.all 能及时收尾，避免整体超时导致 items 丢失。
+          const pngUrl = await storage.downloadAndStorePng(remoteUrl, actorId, remaining);
+          out.push({
+            ...item,
+            mediaUrl: pngUrl,
+            thumbnailUrl: pngUrl,
+            snippet: [item.snippet, "已转存为 PNG"].filter(Boolean).join("；"),
+          });
+        } catch {
+          // 某些外站图片会防盗链或格式不受支持，跳过该候选，继续转存下一张。
+        }
+      }
+    });
+
+    await Promise.all(workers);
+    return out;
+  }
 }
+
+// 图片转存的并发数（并行下载，避免逐张串行拖垮 12s 工具超时）
+const IMAGE_MATERIALIZE_CONCURRENCY = 3;
+// 图片转存阶段的硬预算：在此时间内返回已达成的部分 items，
+// 保证 search_images 在工具超时前正常 resolve，前端能拿到媒体卡片。
+const IMAGE_MATERIALIZE_BUDGET_MS = 6_500;
+// 图片结果页抓取超时：配合转存预算，保证"抓取 + 转存"总耗时 < 12s 工具预算。
+const IMAGE_FETCH_TIMEOUT_MS = 5_000;
 
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
@@ -574,7 +755,143 @@ function dedupeText(items: string[]): string[] {
   return Array.from(set);
 }
 
-function resolveBin(defaultName: "mcporter" | "gh" | "rdt" | "yt-dlp"): string {
+function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
+  const out: MediaSearchItem[] = [];
+  const seen = new Set<string>();
+  const attrRe = /\bm=(["'])([\s\S]*?)\1/gi;
+  let m: RegExpExecArray | null = null;
+  while ((m = attrRe.exec(html))) {
+    const decoded = decodeHtmlEntities(m[2] ?? "");
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(decoded);
+    } catch {
+      continue;
+    }
+    const mediaUrl = pickString(data.murl);
+    const thumbnailUrl = pickString(data.turl);
+    const pageUrl = pickString(data.purl) || mediaUrl;
+    if (!pageUrl || (!mediaUrl && !thumbnailUrl)) continue;
+    const key = (mediaUrl || pageUrl).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      type: "image",
+      title: pickString(data.t) || pickString(data.desc) || "图片结果",
+      pageUrl,
+      mediaUrl,
+      thumbnailUrl,
+      source: inferMediaSource(pageUrl, "Bing Images"),
+      width: pickNumber(data.w),
+      height: pickNumber(data.h),
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
+  const out: MediaSearchItem[] = [];
+  const seen = new Set<string>();
+  const blockRe = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null = null;
+  while ((m = blockRe.exec(html))) {
+    const rawHref = decodeHtmlEntities(m[2] ?? "").trim();
+    if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue;
+    let pageUrl = rawHref;
+    try {
+      pageUrl = new URL(rawHref, "https://cn.bing.com/videos/search").toString();
+    } catch {
+      continue;
+    }
+    if (!isLikelyVideoUrl(pageUrl) && !/\/videos\//i.test(pageUrl)) continue;
+    const chunk = m[0];
+    const title = decodeHtmlEntities(stripTags(m[3] ?? "")).slice(0, 160) || "视频结果";
+    const imgMatch = chunk.match(/<img\b[^>]*\bsrc=(["'])(.*?)\1/i);
+    const thumbnailUrl = imgMatch ? absolutizeBingUrl(decodeHtmlEntities(imgMatch[2] ?? "")) : undefined;
+    const key = pageUrl.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      type: "video",
+      title,
+      pageUrl,
+      mediaUrl: pageUrl,
+      thumbnailUrl,
+      source: inferMediaSource(pageUrl, "Bing Videos"),
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function dedupeMediaByPageUrl(items: MediaSearchItem[]): MediaSearchItem[] {
+  const seen = new Set<string>();
+  const out: MediaSearchItem[] = [];
+  for (const item of items) {
+    const key = item.pageUrl.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function pickString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function pickNumber(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function stripTags(html: string): string {
+  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function absolutizeBingUrl(raw: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return new URL(raw, "https://cn.bing.com").toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function isLikelyVideoUrl(url: string): boolean {
+  return /(?:youtube\.com\/watch|youtu\.be\/|bilibili\.com\/video\/|v\.qq\.com|ixigua\.com|douyin\.com|kuaishou\.com|youku\.com|iqiyi\.com|mgtv\.com|\/video\/)/i.test(url);
+}
+
+function inferMediaSource(url: string, fallback: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (/youtube\.com|youtu\.be/.test(host)) return "YouTube";
+    if (/bilibili\.com/.test(host)) return "Bilibili";
+    if (/douyin\.com/.test(host)) return "抖音";
+    if (/ixigua\.com/.test(host)) return "西瓜视频";
+    if (/qq\.com/.test(host)) return "腾讯视频";
+    if (/youku\.com/.test(host)) return "优酷";
+    if (/iqiyi\.com/.test(host)) return "爱奇艺";
+    if (/mgtv\.com/.test(host)) return "芒果TV";
+    return host || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
+}
+
+function resolveBin(defaultName: "mcporter" | "gh" | "rdt"): string {
   switch (defaultName) {
     case "mcporter":
       return process.env.MCPORTER_BIN?.trim() || "mcporter";
@@ -582,8 +899,6 @@ function resolveBin(defaultName: "mcporter" | "gh" | "rdt" | "yt-dlp"): string {
       return process.env.GH_BIN?.trim() || "gh";
     case "rdt":
       return process.env.RDT_BIN?.trim() || "rdt";
-    case "yt-dlp":
-      return process.env.YTDLP_BIN?.trim() || "yt-dlp";
     default:
       return defaultName;
   }

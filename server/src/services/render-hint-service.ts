@@ -1,17 +1,16 @@
 /**
  * 渲染形态判断中心
  *
- * 把 LLM 的隐式输出形态（清单/长文/对话）显式化为渲染提示，
+ * 把 LLM 的隐式输出形态显式化为渲染提示，
  * 供 `ToolResultProcessor.processAssistantText` 决定注入哪种卡片标记。
  *
- * 三层优先级（简短汇报优先）：
- *   1. result_card  小汇报场景（≤300 字 + 含可切列表）→ AgentResultCard 小卡片
- *                     把 LLM 输出整段保留为：[对话前导][卡片][追问/结尾]
- *   2. summary_card 长内容（≥800 字 + 可折叠）→ ContentSummaryCard 摘要卡片
- *                     ⚠️ 仅在调用了搜索/网页类工具（search_web、fetch_web、info.*）
- *                     的语境下才会触发；普通对话/桌面控制等场景即使文本很长，
- *                     也保持 plain 走正文，不要错误折叠成"内容详情"。
- *   3. plain        其余 → 普通正文
+ * 六层优先级（动态路由，谁合适谁用）：
+ *   1. image_text    图片识别/OCR 场景 → 结构化富文本（前端无标记时走 StructuredAssistantMessageBody）
+ *   2. search_result 搜索工具结果（3+ 条列表项）→ 专用搜索结果卡片
+ *   3. result_card   小汇报场景（≤300 字 + 含可切列表）→ AgentResultCard 小卡片
+ *   4. summary_card  长内容（≥800 字 + 搜索工具）→ ContentSummaryCard 摘要卡片
+ *   5. long_text     长内容（≥800 字 + 非搜索工具）→ 结构化富文本
+ *   6. plain         其余 → 普通正文
  *
  * 设计要点：
  *   - 不让 LLM 输出 renderHint 元数据（会污染正文且不可靠）
@@ -19,12 +18,14 @@
  *   - 纯规则判断，无 LLM 调用，延迟 <1ms
  */
 
-export type RenderHintType = "plain" | "result_card" | "summary_card";
+export type RenderHintType = "plain" | "result_card" | "summary_card" | "search_result" | "long_text" | "image_text" | "brief";
 
 export interface RenderHint {
   type: RenderHintType;
   /** 命中原因，便于日志排查 */
   reason: string;
+  /** 是否因意图关键词触发结构化 */
+  intent?: boolean;
 }
 
 export interface RenderHintContext {
@@ -36,8 +37,11 @@ export interface RenderHintContext {
 
 /** result_card 字数上限：超过则不算"小汇报"场景（整段对话 + 列表 + 追问） */
 const RESULT_CARD_MAX_CHARS = 300;
-/** summary_card 字数下限：低于则不折叠 */
-const SUMMARY_CARD_MIN_CHARS = 800;
+/** 结构化富文本字数下限：>300 字符倾向输出 Markdown 富文本 */
+const STRUCTURED_TEXT_MIN_CHARS = 300;
+/** 意图语义关键词：用户提问携带这些词 → 无视短字数，强制结构化富文本 */
+const INTENT_KEYWORDS_RE =
+  /整理|对比|总结|方案|清单|步骤|脑图|表格|分析|比较|规划|计划|推荐|排行|排名|区别|异同|优缺点|攻略|分类|归纳|梳理|教程/i;
 
 /** 列表行正则：- / * / • / 1. / 1) / 1、 */
 export const LIST_ITEM_RE = /^(?:[-*•]\s+|\d+[.)、]\s+)/u;
@@ -53,6 +57,21 @@ const TASK_DONE_RE =
 const CAPABILITY_DUMP_RE =
   /当前可用.*工具|【宿主能力|【Agent World】|wallet\.|search_web|master_invoke/i;
 
+/** 图片/视觉类工具正则 */
+const IMAGE_TOOL_RE = /vision|image|photo|识图|图片|ocr|screenshot|capture/i;
+
+const MEDIA_SEARCH_TOOLS = new Set(["search_images", "search_videos"]);
+
+/** 搜索工具集合 */
+const SEARCH_ELIGIBLE_TOOLS = new Set([
+  "search_web",
+  "fetch_web",
+  "info.search",
+  "info.read_webpage",
+  "info.inspect_webpage",
+  "info.navigate_site",
+]);
+
 /** summary_card 仅在搜索/网页类工具的结果里触发，其他场景一律走 plain */
 const SUMMARY_ELIGIBLE_TOOLS = new Set([
   "search_web",
@@ -65,6 +84,15 @@ const SUMMARY_ELIGIBLE_TOOLS = new Set([
 
 function isSummaryEligibleToolName(toolName?: string): boolean {
   return !!toolName && SUMMARY_ELIGIBLE_TOOLS.has(toolName);
+}
+
+function isSearchTool(toolName?: string): boolean {
+  return !!toolName && SEARCH_ELIGIBLE_TOOLS.has(toolName);
+}
+
+function isImageTool(toolName?: string): boolean {
+  if (toolName && MEDIA_SEARCH_TOOLS.has(toolName)) return false;
+  return !!toolName && IMAGE_TOOL_RE.test(toolName);
 }
 
 /**
@@ -95,7 +123,37 @@ export function classifyRenderHint(
     return { type: "plain", reason: "capability-dump" };
   }
 
-  // === 优先级 1：result_card 简短汇报 ===
+  // === 优先级 0：image_text 图片识别/OCR → 直接走结构化富文本 ===
+  if (isImageTool(ctx?.toolName)) {
+    return {
+      type: "image_text",
+      reason: `image-tool(tool=${ctx?.toolName})`,
+    };
+  }
+
+  if (ctx?.toolName && MEDIA_SEARCH_TOOLS.has(ctx.toolName)) {
+    const listResult = analyzeListStructure(trimmed);
+    if (listResult.itemCount >= 3 && listResult.itemCount <= 12) {
+      return {
+        type: "result_card",
+        reason: `media-search-tool+list(items=${listResult.itemCount})`,
+      };
+    }
+  }
+
+  // === 优先级 1：search_result 搜索工具结果（3-10 列表项）→ 专用搜索结果卡片 ===
+  if (isSearchTool(ctx?.toolName)) {
+    const listResult = analyzeListStructure(trimmed);
+    if (listResult.itemCount >= 3 && listResult.itemCount <= 10) {
+      return {
+        type: "search_result",
+        reason: `search-tool+list(items=${listResult.itemCount})`,
+      };
+    }
+    // 搜索结果但 item 太少 或 item 太多 → fall through
+  }
+
+  // === 优先级 2：result_card 简短汇报 ===
   if (trimmed.length <= RESULT_CARD_MAX_CHARS) {
     const listResult = analyzeListStructure(trimmed);
     // (a) 工具上下文是天气 → 强制小卡片
@@ -123,18 +181,42 @@ export function classifyRenderHint(
     }
   }
 
-  // === 优先级 2：summary_card 长内容（仅搜索/网页类工具的结果）===
-  if (trimmed.length >= SUMMARY_CARD_MIN_CHARS) {
+  // === 优先级 3+：brief 简报增强 ===
+  // 短文本 + 引导行 + 列表项，典型晨间简报/资讯汇总结构
+  if (trimmed.length <= RESULT_CARD_MAX_CHARS) {
+    const listResult = analyzeListStructure(trimmed);
+    const hasLeadLine = listResult.nonListLines.some(
+      (l) => (l.length <= 30 && /[:：]$/.test(l)) || /^关于|提醒|补充|备注/i.test(l),
+    );
+    if (listResult.itemCount >= 2 && hasLeadLine) {
+      return { type: "brief", reason: `lead+list(items=${listResult.itemCount})` };
+    }
+    if (listResult.itemCount >= 3 && listResult.nonListLines.length >= 2) {
+      return { type: "brief", reason: `list+context(items=${listResult.itemCount})` };
+    }
+  }
+
+  // === 优先级 4：判断长内容 ===
+  // 内容长度因子：>300 字符 → 倾向结构化富文本（标题、列表、表格、折叠块）
+  // 意图语义判断（权重更高）：特定关键词 → 无视短字数，强制结构化
+  // 闲聊短句（无意图关键词 + 短文本）→ 即使 400 字也走纯段落
+  const hasIntent = !!ctx?.userText && INTENT_KEYWORDS_RE.test(ctx.userText);
+  if (trimmed.length >= STRUCTURED_TEXT_MIN_CHARS || hasIntent) {
     if (isSummaryEligibleToolName(ctx?.toolName)) {
       return {
         type: "summary_card",
-        reason: `long-content+search-tool(len=${trimmed.length},tool=${ctx?.toolName})`,
+        reason: `long-content+search-tool(len=${trimmed.length},tool=${ctx?.toolName},intent=${hasIntent})`,
+        intent: hasIntent,
       };
     }
-    // 普通对话/桌面控制等长文本：保持 plain 正文，不折叠成"内容详情"
+    return {
+      type: "long_text",
+      reason: `long-content+non-search(len=${trimmed.length},tool=${ctx?.toolName},intent=${hasIntent})`,
+      intent: hasIntent,
+    };
   }
 
-  // === 优先级 3：plain 普通正文 ===
+  // === 优先级 4：plain 普通正文 ===
   return {
     type: "plain",
     reason: `default(len=${trimmed.length})`,

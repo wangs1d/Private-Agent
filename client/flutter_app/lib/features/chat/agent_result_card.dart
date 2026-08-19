@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
+import "package:url_launcher/url_launcher.dart";
 
+import "../../core/config/api_config.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "content_summary_detail_formatter.dart";
 
@@ -50,6 +52,8 @@ class AgentResultCard extends StatelessWidget {
       switch (data.cardType) {
         case "carousel":
           return _CarouselCard(data: data, cs: cs);
+        case "search_result":
+          return _SearchResultCard(data: data, cs: cs);
         case "compare":
           return _CompareCard(data: data, cs: cs);
         case "timeline":
@@ -346,13 +350,14 @@ class _SpecializedCard extends StatelessWidget {
                   _ItemMark(type: it.type, colorScheme: cs),
                   const SizedBox(width: 8),
                   Flexible(
-                    child: Text(
+                    child: buildInlineMarkdownText(
                       it.text,
-                      style: TextStyle(
+                      TextStyle(
                         fontSize: 13,
                         color: cs.onSurface.withValues(alpha: 0.82),
                         height: 1.55,
                       ),
+                      cs: cs,
                     ),
                   ),
                 ],
@@ -371,13 +376,14 @@ class _SpecializedCard extends StatelessWidget {
                   ),
                 ),
               ),
-              child: Text(
+              child: buildInlineMarkdownText(
                 data.footer,
-                style: TextStyle(
+                TextStyle(
                   fontSize: 12.5,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
+                cs: cs,
               ),
             ),
           ],
@@ -446,28 +452,37 @@ class _CarouselCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text(
-                      card.title,
+                    Text.rich(
+                      TextSpan(
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          height: 1.3,
+                        ),
+                        children: parseInlineMarkdownSpans(
+                          card.title,
+                          TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: cs.primary,
+                            height: 1.3,
+                          ),
+                          cs,
+                        ),
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: cs.primary,
-                        height: 1.3,
-                      ),
                     ),
                     const SizedBox(height: 4),
                     Expanded(
-                      child: Text(
+                      child: buildInlineMarkdownText(
                         card.desc,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
+                        TextStyle(
                           fontSize: 11.5,
                           color: cs.onSurfaceVariant,
                           height: 1.4,
                         ),
+                        cs: cs,
                       ),
                     ),
                   ],
@@ -479,10 +494,14 @@ class _CarouselCard extends StatelessWidget {
         if (data.footer.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: Text(
+            child: buildInlineMarkdownText(
               data.footer,
-              style: TextStyle(
-                  fontSize: 12.5, color: cs.onSurfaceVariant, height: 1.5),
+              TextStyle(
+                fontSize: 12.5,
+                color: cs.onSurfaceVariant,
+                height: 1.5,
+              ),
+              cs: cs,
             ),
           ),
       ],
@@ -557,14 +576,15 @@ class _CompareCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Expanded(
-                    child: Text(
+                    child: buildInlineMarkdownText(
                       left,
-                      style: TextStyle(
+                      TextStyle(
                         fontSize: 13,
                         color: valueColor,
                         height: 1.5,
                         fontWeight: FontWeight.w600,
                       ),
+                      cs: cs,
                     ),
                   ),
                   const Padding(
@@ -572,13 +592,14 @@ class _CompareCard extends StatelessWidget {
                     child: Text("|", style: TextStyle(color: Color(0xFF9CA3AF))),
                   ),
                   Expanded(
-                    child: Text(
+                    child: buildInlineMarkdownText(
                       right,
-                      style: TextStyle(
+                      TextStyle(
                         fontSize: 13,
                         color: cs.primary,
                         height: 1.5,
                       ),
+                      cs: cs,
                     ),
                   ),
                 ],
@@ -594,13 +615,14 @@ class _CompareCard extends StatelessWidget {
                   top: BorderSide(color: borderColor, width: 1),
                 ),
               ),
-              child: Text(
+              child: buildInlineMarkdownText(
                 data.footer,
-                style: TextStyle(
+                TextStyle(
                   fontSize: 12.5,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
+                cs: cs,
               ),
             ),
           ],
@@ -724,13 +746,14 @@ class _TimelineCard extends StatelessWidget {
                               ),
                             ),
                           if (body.isNotEmpty)
-                            Text(
+                            buildInlineMarkdownText(
                               body,
-                              style: TextStyle(
+                              TextStyle(
                                 fontSize: 13,
                                 color: cs.onSurface.withValues(alpha: 0.82),
                                 height: 1.5,
                               ),
+                              cs: cs,
                             ),
                         ],
                       ),
@@ -743,13 +766,14 @@ class _TimelineCard extends StatelessWidget {
           if (data.footer.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text(
+              child: buildInlineMarkdownText(
                 data.footer,
-                style: TextStyle(
+                TextStyle(
                   fontSize: 12.5,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
+                cs: cs,
               ),
             ),
         ],
@@ -823,8 +847,22 @@ class _MediaCard extends StatelessWidget {
           ],
           ...data.items.map((AgentResultItem it) {
             final String text = it.text.trim();
-            final bool isUrl = RegExp(r"^https?://").hasMatch(text);
-            if (!isUrl) {
+            final String? textUrl = extractUrlFromText(text);
+            final String? previewUrl = _firstNonEmpty(<String?>[
+              it.thumbnailUrl,
+              it.mediaType == "video" ? null : it.mediaUrl,
+              it.url,
+              textUrl,
+            ]);
+            final String? openUrl = _firstNonEmpty(<String?>[
+              it.pageUrl,
+              it.url,
+              it.mediaUrl,
+              textUrl,
+            ]);
+            final bool isVideo = (it.mediaType ?? "").toLowerCase() == "video" ||
+                (openUrl != null && RegExp(r"(youtube\.com|youtu\.be|bilibili\.com|/video/)", caseSensitive: false).hasMatch(openUrl));
+            if (previewUrl == null && openUrl == null) {
               // 非 URL：按普通列表项渲染
               return Padding(
                 padding: const EdgeInsets.symmetric(vertical: 3),
@@ -834,48 +872,259 @@ class _MediaCard extends StatelessWidget {
                     _ItemMark(type: it.type, colorScheme: cs),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
+                      child: buildInlineMarkdownText(
                         text,
-                        style: TextStyle(
+                        TextStyle(
                           fontSize: 13,
                           color: itemColor,
                           height: 1.55,
                         ),
+                        cs: cs,
                       ),
                     ),
                   ],
                 ),
               );
             }
-            // URL：渲染为图片缩略图（横向排列，最多一行）
+            final String label = _mediaLabel(it);
+            final String? source = it.source;
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
-              child: _NetworkThumb(url: text, cs: cs),
+              child: isVideo
+                  ? _VideoResultTile(
+                      title: label,
+                      source: source,
+                      thumbnailUrl: previewUrl,
+                      openUrl: openUrl,
+                      cs: cs,
+                    )
+                  : _ImageResultTile(
+                      title: label,
+                      source: source,
+                      imageUrl: previewUrl ?? openUrl!,
+                      openUrl: openUrl,
+                      cs: cs,
+                    ),
             );
           }),
           if (data.footer.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(
+              child: buildInlineMarkdownText(
                 data.footer,
-                style: TextStyle(
+                TextStyle(
                   fontSize: 12.5,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
+                cs: cs,
               ),
             ),
         ],
       ),
     );
   }
+
+  String? _firstNonEmpty(List<String?> values) {
+    for (final String? value in values) {
+      final String trimmed = value?.trim() ?? "";
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return null;
+  }
+
+  String _mediaLabel(AgentResultItem item) {
+    final String text = item.text.trim();
+    // 纯 URL 文本 → 用 source 或域名代替
+    if (text.isEmpty || RegExp(r"^https?://").hasMatch(text)) {
+      if (item.source?.trim().isNotEmpty == true) return item.source!.trim();
+      final String? domain = _domainFromUrl(text);
+      return domain ?? "媒体结果";
+    }
+    // 混合文本（"标题 - URL"）→ 去掉尾部的 URL 后展示
+    final String urlStripped = text.replaceAll(RegExp(r'\s*https?://\S+'), '').trim();
+    if (urlStripped.isNotEmpty) return urlStripped;
+    return item.source?.trim().isNotEmpty == true ? item.source!.trim() : "媒体结果";
+  }
+
+  /// 从 URL 提取域名（去 www）
+  String? _domainFromUrl(String url) {
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) return null;
+    return uri.host.replaceFirst(RegExp(r'^www\.'), '');
+  }
 }
 
-/// 网络图片缩略图：加载失败时降级为灰色占位图标。
-class _NetworkThumb extends StatelessWidget {
-  const _NetworkThumb({required this.url, required this.cs});
+/// 从任意文本中提取第一个 http(s) URL，去掉尾部标点。
+String? extractUrlFromText(String text) {
+  final RegExpMatch? m = RegExp(r'https?://\S+').firstMatch(text);
+  if (m == null) return null;
+  return m.group(0)!.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
+}
+
+class _ImageResultTile extends StatelessWidget {
+  const _ImageResultTile({
+    required this.title,
+    required this.imageUrl,
+    required this.openUrl,
+    required this.cs,
+    this.source,
+  });
+
+  final String title;
+  final String imageUrl;
+  final String? openUrl;
+  final String? source;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: openUrl == null ? null : () => _launchUrl(openUrl!),
+      borderRadius: BorderRadius.circular(8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _NetworkPreview(
+            url: imageUrl,
+            icon: Icons.broken_image_outlined,
+            cs: cs,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: openUrl == null ? cs.onSurface : cs.primary,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (source != null && source!.trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        source!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: cs.onSurfaceVariant,
+                          height: 1.3,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VideoResultTile extends StatelessWidget {
+  const _VideoResultTile({
+    required this.title,
+    required this.source,
+    required this.thumbnailUrl,
+    required this.openUrl,
+    required this.cs,
+  });
+
+  final String title;
+  final String? source;
+  final String? thumbnailUrl;
+  final String? openUrl;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: openUrl == null ? null : () => _launchUrl(openUrl!),
+      borderRadius: BorderRadius.circular(8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Stack(
+            alignment: Alignment.center,
+            children: <Widget>[
+              if (thumbnailUrl != null)
+                _NetworkPreview(
+                  url: thumbnailUrl!,
+                  icon: Icons.video_file_outlined,
+                  cs: cs,
+                )
+              else
+                _PreviewPlaceholder(icon: Icons.video_file_outlined, cs: cs),
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.48),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 22),
+              ),
+            ],
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: openUrl == null ? cs.onSurface : cs.primary,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (source != null && source!.trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        source!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: cs.onSurfaceVariant,
+                          height: 1.3,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 网络媒体缩略图：加载失败时降级为灰色占位图标。
+class _NetworkPreview extends StatelessWidget {
+  const _NetworkPreview({required this.url, required this.icon, required this.cs});
 
   final String url;
+  final IconData icon;
   final ColorScheme cs;
 
   @override
@@ -883,25 +1132,19 @@ class _NetworkThumb extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Image.network(
-        url,
-        width: 120,
-        height: 88,
+        _resolveMediaUrl(url),
+        width: 112,
+        height: 78,
         fit: BoxFit.cover,
         errorBuilder: (BuildContext context, Object error, StackTrace? st) {
-          return Container(
-            width: 120,
-            height: 88,
-            color: cs.surfaceContainerHighest,
-            alignment: Alignment.center,
-            child: Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant),
-          );
+          return _PreviewPlaceholder(icon: icon, cs: cs);
         },
         loadingBuilder: (BuildContext context, Widget child,
             ImageChunkEvent? loadingProgress) {
           if (loadingProgress == null) return child;
           return Container(
-            width: 120,
-            height: 88,
+            width: 112,
+            height: 78,
             color: cs.surfaceContainerHighest,
             alignment: Alignment.center,
             child: const SizedBox(
@@ -913,5 +1156,221 @@ class _NetworkThumb extends StatelessWidget {
         },
       ),
     );
+  }
+}
+
+class _PreviewPlaceholder extends StatelessWidget {
+  const _PreviewPlaceholder({required this.icon, required this.cs});
+
+  final IconData icon;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 112,
+      height: 78,
+      color: cs.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: Icon(icon, color: cs.onSurfaceVariant),
+    );
+  }
+}
+
+String _resolveMediaUrl(String url) {
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+  final String base = ApiConfig.httpBase;
+  if (url.startsWith("/")) return "$base$url";
+  return "$base/$url";
+}
+
+Future<void> _launchUrl(String url) async {
+  final Uri? uri = Uri.tryParse(_resolveMediaUrl(url));
+  if (uri == null) return;
+  try {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } catch (_) {}
+}
+
+/// 搜索结果卡片 —— 把搜索工具返回的列表项渲染为垂直排列的新闻条目。
+///
+/// 每个 item 解析为「标题 —— 描述」格式，渲染为：
+///   - 标题（粗体，可点击跳转）
+///   - 摘要（灰色小字）
+///   - 来源/时间（更小文字）
+///
+/// 适合搜索/资讯聚合场景，3~10 条垂直排列，清晰可读。
+class _SearchResultCard extends StatelessWidget {
+  const _SearchResultCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    final TextTheme textTheme = Theme.of(context).textTheme;
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 390),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          // 标题头
+          if (data.title.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.travel_explore_outlined,
+                      size: 16, color: cs.primary),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      data.title,
+                      style: textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: cs.onSurface,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // 条目列表
+          ...data.items.map((AgentResultItem it) {
+            final (String t, String d) = _splitSearchItem(it.text);
+            final bool hasUrl = it.url != null && it.url!.isNotEmpty;
+            final String? detectedUrl = hasUrl ? it.url : _detectUrl(d);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: InkWell(
+                onTap: detectedUrl == null
+                    ? null
+                    : () => _launchUrl(detectedUrl),
+                borderRadius: BorderRadius.circular(6),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      // 标题行
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Container(
+                            margin: const EdgeInsets.only(top: 5),
+                            width: 5,
+                            height: 5,
+                            decoration: BoxDecoration(
+                              color: cs.primary.withValues(alpha: 0.55),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text.rich(
+                              TextSpan(
+                                style: textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.35,
+                                ),
+                                children: parseInlineMarkdownSpans(
+                                  t,
+                                  textTheme.bodyMedium!.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    height: 1.35,
+                                  ),
+                                  cs,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      // 摘要/描述
+                      if (d.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 13, top: 3),
+                          child: Text.rich(
+                            TextSpan(
+                              style: textTheme.bodySmall?.copyWith(
+                                color: cs.onSurfaceVariant,
+                                height: 1.45,
+                                fontSize: 12.8,
+                              ),
+                              children: parseInlineMarkdownSpans(
+                                d,
+                                textTheme.bodySmall!.copyWith(
+                                  color: cs.onSurfaceVariant,
+                                  height: 1.45,
+                                  fontSize: 12.8,
+                                ),
+                                cs,
+                              ),
+                            ),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }),
+          if (data.footer.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.only(top: 6),
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                    color: cs.outline.withValues(alpha: 0.28),
+                    width: 1,
+                  ),
+                ),
+              ),
+              child: buildInlineMarkdownText(
+                data.footer,
+                textTheme.bodySmall!.copyWith(
+                  color: cs.onSurfaceVariant,
+                  height: 1.5,
+                ),
+                cs: cs,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 把 item 文本拆成「标题 —— 描述」。
+  (String, String) _splitSearchItem(String raw) {
+    final int sep = _findTitleSep(raw);
+    if (sep <= 0) return (raw, "");
+    return (raw.substring(0, sep).trim(), raw.substring(sep).trim());
+  }
+
+  /// 从文本中检测 http/https URL。
+  String? _detectUrl(String text) {
+    final RegExpMatch? m = RegExp(r'https?://\S+').firstMatch(text);
+    return m?.group(0);
+  }
+
+  Future<void> _launchUrl(String url) async {
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {}
   }
 }

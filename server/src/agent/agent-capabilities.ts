@@ -152,7 +152,8 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "web",
       lines: [
-        "9️⃣ Web浏览：search_web / fetch_web",
+        "9️⃣ Web浏览：search_web / search_images（搜索并转存本地 PNG）/ search_videos / fetch_web",
+        "9️⃣b 图片意图强约束：用户问「照片/实拍图/图片/图集/长什么样/找图/配图/壁纸/风景照」等任何含视觉诉求的查询，必须**并行**调用 search_images（不再只调 search_web），否则前端会显示不出图。同时可调 search_web 获取来源信息。不要建议用户去小红书——直接出图。",
       ],
     },
     {

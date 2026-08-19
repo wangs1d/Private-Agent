@@ -69,8 +69,10 @@ import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
 
 void main() async {
+  _installGlobalErrorHooks();
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    _writeCrashLog("[START]", "app booting", StackTrace.current);
     unawaited(bootstrapWindowsWebView());
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       await windowManager.ensureInitialized();
@@ -91,8 +93,54 @@ void main() async {
     runApp(const PrivateAiApp());
   }, (error, stack) {
     // 兜底所有未捕获的异步异常，防止 Flutter engine 断连崩溃
+    _writeCrashLog("[UNCAUGHT-ZONE]", error, stack);
     debugPrint('[UNCAUGHT] $error\n$stack');
   });
+}
+
+/// 全局错误兜底：把 Dart/Flutter 侧所有致命错误写入本地日志文件。
+/// Windows 下 main.cpp 已把 stderr 重定向到 NUL，崩溃信息默认无处可查；
+/// 落盘后可定位「应用退出」的确切前端位置与堆栈。
+void _installGlobalErrorHooks() {
+  // 构建/布局/绘制阶段异常（默认只弹红色错误屏，不落盘）
+  FlutterError.onError = (FlutterErrorDetails details) {
+    _writeCrashLog(
+      "[FlutterError]",
+      details.exception,
+      details.stack ?? StackTrace.current,
+    );
+    FlutterError.presentError(details);
+  };
+  // 平台调度器层的未捕获致命错误（无法被 runZonedGuarded 捕获）
+  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    _writeCrashLog("[PlatformDispatcher]", error, stack);
+    return true; // 阻止默认的致命退出路径，让应用尽量继续运行
+  };
+}
+
+File? _crashLogFile;
+
+/// 崩溃日志目标文件：%TEMP%/pai_app_crash.log
+File _crashLogTarget() {
+  final File? cached = _crashLogFile;
+  if (cached != null) return cached;
+  final String dir = Platform.environment["TEMP"] ??
+      (Platform.environment["TMP"] ?? Directory.systemTemp.path);
+  final File file = File("$dir${Platform.pathSeparator}pai_app_crash.log");
+  _crashLogFile = file;
+  return file;
+}
+
+void _writeCrashLog(String tag, Object error, StackTrace stack) {
+  try {
+    final String line = "${DateTime.now().toIso8601String()} $tag $error\n"
+        "$stack\n"
+        "----------------------------------------\n";
+    _crashLogTarget()
+        .writeAsStringSync(line, mode: FileMode.append, flush: true);
+  } catch (_) {
+    // 写日志失败不影响应用运行
+  }
 }
 
 /// side 模式下 NextbotChatLayout 内嵌的 [VerticalDragDivider] 宽度。
@@ -106,7 +154,8 @@ class PrivateAiApp extends StatefulWidget {
   State<PrivateAiApp> createState() => _PrivateAiAppState();
 }
 
-class _PrivateAiAppState extends State<PrivateAiApp> {
+class _PrivateAiAppState extends State<PrivateAiApp>
+    with WidgetsBindingObserver {
   final GlobalKey<NavigatorState> _rootNavigatorKey =
       GlobalKey<NavigatorState>();
   final IsarLocalHistoryStore _store =
@@ -325,6 +374,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // 桌面端独立来电悬浮窗事件绑定
     // 所有来电（无论来源）统一走同一套回调
     // accept  : 用户点了接听 → 拉起主窗 + 等待 call_connecting
@@ -363,7 +413,18 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」
+    _writeCrashLog("[LIFECYCLE]", "state=$state", StackTrace.current);
+    if (state == AppLifecycleState.detached) {
+      _writeCrashLog("[EXIT]", "app detached (window closed)", StackTrace.current);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     DesktopBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     unawaited(TtsPlayer.instance.dispose());
@@ -470,10 +531,32 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
     final List<ChatMessage> contentDedupedMessages = <ChatMessage>[];
     final Set<String> contentDuplicateMessageIds = <String>{};
     for (final ChatMessage m in dedupedMessages) {
-      final bool isContentDup = contentDedupedMessages.isNotEmpty &&
-          contentDedupedMessages.last.role == "assistant" &&
-          m.role == "assistant" &&
-          contentDedupedMessages.last.text.trim() == m.text.trim();
+      final ChatMessage? last = contentDedupedMessages.isNotEmpty
+          ? contentDedupedMessages.last
+          : null;
+      final bool isAssistant = m.role == "assistant";
+      final String mText = m.text.trim();
+
+      // 历史遗留：旧版本把主回复首个短句作为独立"垫词"气泡(interim-$trace-$seq)
+      // 推送，随后又推完整正文(assistant-$trace)。两者相邻且正文以垫词开头 →
+      // 内容前缀重叠。此时保留更完整的正文，剔除垫词气泡，避免"垫词 + 全文"双份。
+      final bool isInterimPrefixDup = isAssistant &&
+          last != null &&
+          last.role == "assistant" &&
+          last.messageId.startsWith("interim-") &&
+          mText.length > last.text.trim().length &&
+          mText.startsWith(last.text.trim());
+      if (isInterimPrefixDup) {
+        contentDuplicateMessageIds.add(last.messageId);
+        contentDedupedMessages.removeLast();
+        contentDedupedMessages.add(m);
+        continue;
+      }
+
+      final bool isContentDup = last != null &&
+          last.role == "assistant" &&
+          isAssistant &&
+          last.text.trim() == mText;
       if (isContentDup) {
         contentDuplicateMessageIds.add(m.messageId);
         continue;
@@ -972,7 +1055,10 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
                 "interim-$activeTraceId-$interimSeq";
             final String interimChunk = payload["chunk"]?.toString() ?? "";
             if (interimChunk.isEmpty) return;
-            _appendChunkToMessageList(interimMessageId, interimChunk);
+            // 垫词即时显示（streaming=false，不走打字机逐字动画），
+            // 让用户先快速看到"应声"，随后正文再逐字打出。
+            _appendChunkToMessageList(interimMessageId, interimChunk,
+                streaming: false);
             return;
           }
           _clearInterimAck();
@@ -1051,11 +1137,20 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               : (messageId.startsWith("assistant-")
                   ? messageId.substring("assistant-".length)
                   : "");
+          // 同轮去重（保底）：若正文开头已作为独立垫词(interim)气泡在本轮呈现，
+          // 从 done 文本中剥掉该前缀，避免"垫词气泡 + done 全文"双份重复。
+          final String dedupResolvedText =
+              _stripRedundantInterimPrefix(resolvedText, traceKey);
+          if (dedupResolvedText.isEmpty && _hasInterimBubbleForTrace(traceKey)) {
+            // 回复已完整作为垫词气泡呈现，无需再创建正文气泡（避免整体重复一次）
+            _clearAgentProcessingState(done: true);
+            return;
+          }
           final String? playUrl = (traceKey.isNotEmpty
                   ? _pendingPlayUrlByTraceId.remove(traceKey)
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
-              PlayUrlUtils.fromAssistantText(resolvedText);
+              PlayUrlUtils.fromAssistantText(dedupResolvedText);
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
@@ -1065,8 +1160,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               final ChatMessage previous = _messages[idx];
               final String currentText = previous.text;
               final String nextText =
-                  _shouldReplaceAssistantTextOnDone(currentText, resolvedText)
-                      ? resolvedText
+                  _shouldReplaceAssistantTextOnDone(currentText, dedupResolvedText)
+                      ? dedupResolvedText
                       : currentText;
               final String? existingPlayUrl = previous.playUrl;
               _messages[idx] = ChatMessage(
@@ -1090,7 +1185,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
-              text: resolvedText,
+              text: dedupResolvedText,
               timestamp: DateTime.now(),
               playUrl: playUrl,
             );
@@ -1653,7 +1748,12 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   /// 把 chunk 文字直接追加到消息列表（新建或续写），实现"边说边看"效果。
   /// 与 _enqueueAssistantChunk 配合：前者管缓冲（供 done 兜底），后者管显示。
-  void _appendChunkToMessageList(String messageId, String chunk) {
+  /// [streaming] 控制该消息是否进入打字机逐字展示；垫词气泡传 false 即时显示。
+  void _appendChunkToMessageList(
+    String messageId,
+    String chunk, {
+    bool streaming = true,
+  }) {
     if (chunk.isEmpty) return;
     // 用带兜底的索引查询：即使索引失真也能命中已存在的消息，避免重复插入
     final int? existingIdx = _messageIndexById(messageId);
@@ -1682,7 +1782,7 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         role: "assistant",
         text: chunk,
         timestamp: DateTime.now(),
-        streaming: true,
+        streaming: streaming,
       );
       setState(() {
         _messages.add(newMsg);
@@ -1737,7 +1837,8 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
 
   bool _containsStructuredAssistantMarkers(String text) {
     return text.contains("[CONTENT_SUMMARY_V2_START]") ||
-        text.contains("[AGENT_RESULT_CARD_START]");
+        text.contains("[AGENT_RESULT_CARD_START]") ||
+        text.contains("[VIDEO_MEDIA_START]");
   }
 
   bool _looksLikeRawToolJson(String text) {
@@ -1747,6 +1848,33 @@ class _PrivateAiAppState extends State<PrivateAiApp> {
         (trimmed.contains('"snippet"') ||
             trimmed.contains('"publishedAt"') ||
             trimmed.contains('"searchDateLocal"'));
+  }
+
+  bool _hasInterimBubbleForTrace(String traceId) {
+    if (traceId.isEmpty) return false;
+    final String prefix = "interim-$traceId-";
+    return _messages.any((m) =>
+        m.role == "assistant" && m.messageId.startsWith(prefix));
+  }
+
+  /// 同轮去重（保底）：若 [text] 的开头已作为本轮垫词(interim)气泡呈现过，
+  /// 剥掉该前缀，避免 at.done 全文与垫词气泡重复。返回剥掉后的文本。
+  String _stripRedundantInterimPrefix(String text, String traceId) {
+    if (text.isEmpty || traceId.isEmpty) return text;
+    final String prefix = "interim-$traceId-";
+    String candidate = text.trim();
+    for (final m in _messages) {
+      if (m.role != "assistant") continue;
+      if (!m.messageId.startsWith(prefix)) continue;
+      final String interimText = m.text.trim();
+      if (interimText.isEmpty) continue;
+      if (candidate.startsWith(interimText)) {
+        candidate = candidate.substring(interimText.length).trim();
+        // 剥掉紧跟在垫词后的标点/空白，避免残留"的，"之类碎片
+        candidate = candidate.replaceFirst(RegExp(r'^[，,。、\s]+'), '').trim();
+      }
+    }
+    return candidate;
   }
 
   ChatMessage _sanitizeLoadedChatMessage(ChatMessage message) {

@@ -2,6 +2,7 @@ import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../core/utils/content_summary_parser.dart";
+import "content_summary_detail_formatter.dart";
 
 class ContentSummaryMessageBody extends StatelessWidget {
   const ContentSummaryMessageBody({
@@ -48,7 +49,7 @@ class ContentSummaryMessageBody extends StatelessWidget {
         if (extraText.trim().isNotEmpty &&
             extraText.trim() != briefText.trim()) ...<Widget>[
           const SizedBox(height: 8),
-          Text(extraText.trim(), style: bodyStyle),
+          buildInlineMarkdownText(extraText.trim(), bodyStyle, cs: cs),
         ],
       ],
     );
@@ -173,11 +174,12 @@ class _BriefContentPreview extends StatelessWidget {
             ),
           ),
         ),
-        child: Text(
+        child: buildInlineMarkdownText(
           content,
-          style: style.copyWith(
+          style.copyWith(
             color: cs.onSurface.withValues(alpha: 0.9),
           ),
+          cs: cs,
         ),
       );
     }
@@ -208,12 +210,13 @@ class _BriefContentPreview extends StatelessWidget {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
+                  child: buildInlineMarkdownText(
                     itemText,
-                    style: style.copyWith(
+                    style.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.9),
                       height: 1.5,
                     ),
+                    cs: cs,
                   ),
                 ),
               ],
@@ -223,12 +226,13 @@ class _BriefContentPreview extends StatelessWidget {
 
         return Padding(
           padding: const EdgeInsets.only(bottom: 4),
-          child: Text(
+          child: buildInlineMarkdownText(
             trimmed,
-            style: style.copyWith(
+            style.copyWith(
               color: cs.onSurfaceVariant,
               fontSize: style.fontSize != null ? style.fontSize! - 1 : 13,
             ),
+            cs: cs,
           ),
         );
       }).toList(),
@@ -356,23 +360,18 @@ class _StructuredItemRow extends StatelessWidget {
                           ? cs.primary.withValues(alpha: 0.95)
                           : cs.onSurface.withValues(alpha: 0.9),
                       fontWeight: FontWeight.w600,
-                      decoration: item.url != null
-                          ? TextDecoration.underline
-                          : TextDecoration.none,
-                      decorationColor: cs.primary.withValues(alpha: 0.5),
                       height: 1.35,
                     ),
                   ),
                   if ((item.snippet ?? "").isNotEmpty) ...<Widget>[
                     const SizedBox(height: 2),
-                    Text(
+                    buildInlineMarkdownText(
                       item.snippet!,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: textTheme.bodySmall?.copyWith(
+                      textTheme.bodySmall!.copyWith(
                         color: cs.onSurfaceVariant,
                         height: 1.45,
                       ),
+                      cs: cs,
                     ),
                   ],
                   if (meta != null) ...<Widget>[

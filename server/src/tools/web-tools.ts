@@ -1,11 +1,12 @@
 import type { InfoHubService } from "../services/info-hub-service.js";
 import type { UpstreamSearchService } from "../services/upstream-search-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
+import { resolveActorId } from "../agent/actor-id.js";
 
 function toBoundedLimit(input: unknown, fallback: number): number {
   const limit = Number(input ?? fallback);
   if (!Number.isFinite(limit)) return fallback;
-  return Math.max(1, Math.min(20, Math.floor(limit)));
+  return Math.max(1, Math.min(25, Math.floor(limit)));
 }
 
 export function registerWebTools(
@@ -15,9 +16,23 @@ export function registerWebTools(
 ): void {
   toolRegistry.register("search_web", async (input) => {
     const query = String(input.query ?? "").trim();
-    const limit = toBoundedLimit(input.limit, 8);
+    const limit = toBoundedLimit(input.limit, 12);
     if (!query) return { provider: "none", items: [], notes: ["query 不能为空"] };
     return upstreamSearchService.searchWeb(query, limit);
+  });
+
+  toolRegistry.register("search_images", async (input, context) => {
+    const query = String(input.query ?? "").trim();
+    const limit = toBoundedLimit(input.limit, 8);
+    if (!query) return { provider: "none", mediaType: "image", items: [], notes: ["query 不能为空"] };
+    return upstreamSearchService.searchImages(query, limit, resolveActorId(context));
+  });
+
+  toolRegistry.register("search_videos", async (input) => {
+    const query = String(input.query ?? "").trim();
+    const limit = toBoundedLimit(input.limit, 8);
+    if (!query) return { provider: "none", mediaType: "video", items: [], notes: ["query 不能为空"] };
+    return upstreamSearchService.searchVideos(query, limit);
   });
 
   toolRegistry.register("fetch_web", async (input) => {
@@ -36,7 +51,7 @@ export function registerWebTools(
   // Backward compatibility: keep historical aliases on built-in path.
   toolRegistry.register("info.search", async (input) => {
     const query = String(input.query ?? "").trim();
-    const limit = toBoundedLimit(input.limit, 8);
+    const limit = toBoundedLimit(input.limit, 12);
     if (!query) return { items: [] };
     const items = await infoHubService.search(query, limit);
     return { items };

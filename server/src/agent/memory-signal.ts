@@ -21,9 +21,19 @@ export const AMBIGUOUS_FOLLOWUP_RE =
 const EXPLICIT_FOLLOWUP_TOKEN_RE =
   /再具体|具体点|具体一点|具体一些|再详细|详细点|详细一点|详细一些|展开说说|展开讲讲|展开聊聊|细说|细讲|说细点|讲细点|继续说|继续讲|往下说|往下讲|解释下|解释一下|继续(?!课)|说(说|讲|聊)看|怎么弄|怎么办|咋办|为何|为啥|你说呢|你觉得呢|给我看看|给我讲讲|给我说说|给我聊聊|聊一聊|讲一讲|说一说|具体咋办|具体怎么弄/i;
 
+const IMMEDIATE_ACTION_FOLLOWUP_RE =
+  /^(?=.{1,40}$)(?:快点|快|赶紧|马上|直接|现在|别废话|少说|不要说这么多|别说这么多|不用解释|先别解释|别铺垫|少废话)?\s*(?:去)?(?:搜|搜索|查|查询|检索|查一下|搜一下|看一下|找一下|继续搜|继续查|继续检索)(?:\s*(?:一下|下|吧|啊|呀|哈|呢|先|快点|快|赶紧|直接|别废话|少说|不要说这么多|别说这么多|不用解释|先别解释|别铺垫|少废话))*[。！？?!,\s]*$/i;
+
+export function isImmediateActionFollowUpMessage(message: string): boolean {
+  const t = message.replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  return IMMEDIATE_ACTION_FOLLOWUP_RE.test(t);
+}
+
 export function isAmbiguousFollowUpMessage(message: string): boolean {
   const t = message.trim();
   if (!t) return false;
+  if (isImmediateActionFollowUpMessage(t)) return true;
   // 放宽长度限制：原 20 字放过长追问（"再具体讲讲来龙去脉"已超 20）
   if (t.length > 40) return false;
   // 命中 AMBIGUOUS_FOLLOWUP_RE → 追问
@@ -96,5 +106,11 @@ export function shouldInjectMemorySummary(message: string): boolean {
 
 export function buildFollowUpAnchorPrompt(message: string): string | undefined {
   if (!isAmbiguousFollowUpMessage(message)) return undefined;
+  if (isImmediateActionFollowUpMessage(message)) {
+    return [
+      "FU|anchor=latest-explicit-user-request|topic=last|priority=recent-message-over-memory",
+      "本轮是催促/执行型短追问。必须继承最近一条明确用户请求里的对象和任务；不要从长期记忆、旧任务栈或更早话题里补主语；如果最近消息里没有明确对象，先简短问清楚。",
+    ].join("\n");
+  }
   return "FU|anchor=prev-assistant|topic=last|calendar=schedule-only";
 }

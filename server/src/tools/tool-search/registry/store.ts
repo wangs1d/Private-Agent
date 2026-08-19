@@ -91,6 +91,8 @@ export type ToolRegistryStoreOptions = {
   qdrantApiKey?: string;
   redisUrl?: string;
   sqlitePath?: string;
+  /** 强制纯内存模式：跳过 SQLite/Qdrant/Redis 连接，全部落在内存 Map。 */
+  memoryOnly?: boolean;
 };
 
 /**
@@ -128,6 +130,7 @@ export class ToolRegistryStore {
       opts?.sqlitePath ??
       process.env.AGENT_TOOL_REGISTRY_DB_PATH?.trim() ??
       DEFAULT_SQLITE_PATH;
+    if (opts?.memoryOnly === true) this.memoryMode = true;
   }
 
   // ===== 生命周期 =====
@@ -137,6 +140,9 @@ export class ToolRegistryStore {
    * 绝对不读取任何 Level-3 Schema 数据。
    */
   async initialize(): Promise<void> {
+    // memoryOnly：跳过所有外部连接，纯内存模式
+    if (this.memoryMode) return;
+
     // 1. SQLite（同步 API，先建表）
     try {
       const absPath = resolve(process.cwd(), this.sqlitePath);

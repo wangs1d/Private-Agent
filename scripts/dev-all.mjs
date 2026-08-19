@@ -95,7 +95,9 @@ for (const child of children) {
   });
 }
 
+// 保持进程长驻，收到终止信号时由 shutdown 统一退出
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-await new Promise(() => {});
+// 定期心跳避免被部分运行时标记为"空闲"；永不主动 exit
+setInterval(() => {}, 2_147_483_647); // ~24.8 天一次，等效永久保持

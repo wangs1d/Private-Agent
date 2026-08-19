@@ -73,6 +73,8 @@ export const STATE_MACHINE_TOOL_ALLOWLIST: string[] = [
   "desktop.visual.screenshot",
   // 服务端联网工具
   "search_web",
+  "search_images",
+  "search_videos",
   "fetch_web",
   "http.request",
   "info.inspect_webpage",
@@ -527,6 +529,8 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
 ## 联网能力(服务端工具)
 当任务需要"上网查信息"时,优先用以下工具,不要用 shell curl:
 - search_web {query, limit?}: **服务端联网搜索**,返回标题+URL+摘要。支持多查询并行
+- search_images {query, limit?}: **服务端图片搜索**,返回可预览图片 URL + 来源页 URL
+- search_videos {query, limit?}: **服务端视频搜索**,返回视频标题 + 播放页 URL + 缩略图
 - fetch_web {url, include_links?}: **服务端抓取网页正文**,自动去噪(导航栏/广告/页脚)
 - http.request {url, method?, headers?, body?, timeoutMs?}: **通用 HTTP 客户端**(GET/POST/PUT/DELETE 等),带 SSRF 防护。调外部 API/Webhook 用此工具
 - info.inspect_webpage {url}: 巡检网页,返回链接列表(便于继续导航)
