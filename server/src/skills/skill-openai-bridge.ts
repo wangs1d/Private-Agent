@@ -4,9 +4,15 @@ import type { SkillManager } from "./skill-manager.js";
 import type { SkillManifest, SkillParameter } from "./types.js";
 
 const registeredSkillChatToolNames = new Set<string>();
+/** skill name → 依赖的其他 skill 名称（skill 元数据中的 dependencies 字段）。 */
+const skillDependencyMap = new Map<string, string[]>();
 
 export function isRegisteredSkillChatToolName(name: string): boolean {
   return registeredSkillChatToolNames.has(name);
+}
+
+export function getSkillDependencies(name: string): string[] {
+  return skillDependencyMap.get(name) ?? [];
 }
 
 function paramToJsonSchema(p: SkillParameter): Record<string, unknown> {
@@ -33,6 +39,9 @@ function paramToJsonSchema(p: SkillParameter): Record<string, unknown> {
  */
 export function skillManifestToChatTool(manifest: SkillManifest): ChatCompletionTool {
   registeredSkillChatToolNames.add(manifest.name);
+  if (manifest.dependencies?.length) {
+    skillDependencyMap.set(manifest.name, [...manifest.dependencies]);
+  }
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (const p of manifest.parameters ?? []) {

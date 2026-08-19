@@ -10,7 +10,10 @@ import {
 } from "./catalog.js";
 import { tokenize } from "./bm25.js";
 import { IntentRouter, type ParsedIntent, type QueryConstraints } from "./intent-router/intent-router.js";
-import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
+import {
+  getSkillDependencies,
+  isRegisteredSkillChatToolName,
+} from "../../skills/skill-openai-bridge.js";
 import {
   type Level3McpSchema,
   type Level3Parameter,
@@ -473,6 +476,42 @@ async function seedGraphEdges(
       }
     }
   }
+
+  // combine_with：同 domain 内能力互为补充（互补 capability）的资源可组合协作。
+  // 例如同属 calendric domain 的「创建日程」与「查询空闲时段」可串联成完整编排。
+  const domainMembers = new Map<string, string[]>();
+  for (const record of index.recordsById.values()) {
+    for (const domain of record.level1.domain) {
+      const members = domainMembers.get(domain) ?? [];
+      members.push(record.level1.resource_id);
+      domainMembers.set(domain, members);
+    }
+  }
+  for (const members of domainMembers.values()) {
+    if (members.length < 2) continue;
+    for (let i = 0; i < members.length; i++) {
+      const capA = new Set(index.recordsById.get(members[i])?.level1.capability ?? []);
+      for (let j = i + 1; j < members.length; j++) {
+        const capB = new Set(index.recordsById.get(members[j])?.level1.capability ?? []);
+        // 仅当两边各拥有对方没有的能力才算「互补」，避免与 similar_to 重复
+        const missingFromB = [...capA].filter((c) => !capB.has(c));
+        const missingFromA = [...capB].filter((c) => !capA.has(c));
+        if (missingFromA.length === 0 || missingFromB.length === 0) continue;
+        await store.upsertGraphEdge({
+          source_resource_id: members[i],
+          relation_type: ToolGraphRelation.CombineWith,
+          target_resource_id: members[j],
+          weight: 0.5,
+        });
+        await store.upsertGraphEdge({
+          source_resource_id: members[j],
+          relation_type: ToolGraphRelation.CombineWith,
+          target_resource_id: members[i],
+          weight: 0.5,
+        });
+      }
+    }
+  }
 }
 
 function applyAdaptiveIntentBoost(
@@ -619,7 +658,8 @@ function resourceRecordFromEntry(
       ]).slice(0, 12),
       limitations: inferLimitations(resourceType),
       preconditions: inferPreconditions(resourceType),
-      dependencies: [],
+      dependencies:
+        resourceType === ResourceType.Skill ? getSkillDependencies(name) ?? [] : [],
     },
     level3_pointer: name,
     versions: [
