@@ -69,3 +69,12 @@ data/
 *.tmp
 *.temp
 .cache/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Test / temporary outputs
+server/test-results/
+server/.tmp-*
