@@ -159,9 +159,8 @@ export class BenchmarkSelfAssessment {
   private async runScript(scriptPath: string): Promise<BenchmarkResult | null> {
     return new Promise((resolve) => {
       try {
-        const proc = spawn("npx", ["tsx", scriptPath], {
+        const proc = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", scriptPath], {
           cwd: process.cwd(),
-          shell: true,
           stdio: ["ignore", "pipe", "pipe"],
         });
 

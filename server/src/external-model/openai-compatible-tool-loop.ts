@@ -50,6 +50,7 @@ import {
   consumeNormalizedStream,
   materializeOpenAiToolCalls,
   StreamIdleTimeoutError,
+  stripInternalControlTags,
   type NormalToolCall,
 } from "./stream-chat-helpers.js";
 import type {
@@ -127,6 +128,10 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "search_images": 1200,
   "search_videos": 1200,
   "fetch_web": 1000,
+  // deep_search 返回正文，限制注入量避免整页内容灌给 LLM
+  "deep_search": 2200,
+  // hot_rankings 榜单项字段少，给足即可
+  "hot_rankings": 1400,
   "info.search": 600,
   "info.inspect_webpage": 1000,
   "info.navigate_site": 1200,
@@ -163,6 +168,8 @@ const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
   search_web: ["provider", "fetchedAt", "notes"],
   search_images: ["provider", "notes"],
   search_videos: ["provider", "notes"],
+  deep_search: ["provider", "notes"],
+  hot_rankings: ["fetchedSources", "notes"],
   fetch_web: ["url"],
   "info.inspect_webpage": ["sameHostLinks"],
   "info.navigate_site": ["startUrl"],
@@ -632,6 +639,19 @@ function resolveForcedToolChoice(
     }
   }
 
+  // 3b. 图片/照片意图 → 强制 search_images
+  //     避免 LLM 走 search_web 然后用假域名（duitang.com 这种首页）伪造图片来源，
+  //     导致前端 media 卡片拿不到 thumbnailUrl、照片永远显示不出来。
+  //     命中条件：用户消息里含「照片/实拍图/图片/图集/长什么样/找图/配图/壁纸/风景照/看图/看照片/出图」等视觉关键词。
+  if (IMAGE_INTENT_RE.test(userText)) {
+    const hasImageSearchTool = apiTools.some(
+      (tool) => tool.type === "function" && tool.function?.name === "search_images",
+    );
+    if (hasImageSearchTool) {
+      return { type: "function", function: { name: "search_images" } };
+    }
+  }
+
   // 4. 时效性事实查询 → 强制 search_web
   //    避免 LLM 用训练截止知识回答"最新""近期"类问题
   if (shouldRequireFreshWebLookup(userText, apiTools)) {
@@ -648,6 +668,24 @@ function resolveForcedToolChoice(
 
 const DIRECT_CLOCK_OR_LOCATION_RE =
   /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
+
+// 图片/照片意图触发器：用户问"照片/实拍图/图片/图集/找图/壁纸/风景照/看图/出图"等任何
+// 视觉诉求时，强制走 search_images（必应图片 + 本地 PNG 转存），而不是让 LLM 走
+// search_web 然后用假域名（duitang.com 这种首页）伪造图片来源。
+// 与 search_images 工具 description 中的强约束关键词保持一致，避免漏判/误判。
+//
+// 2026-08-20 扩词：
+//   - 单字「图」/「照」容错（避免漏判"小夜灯图"这种生硬表达）
+//   - 「想看/想找/给我找/帮我找」等意愿动词触发视觉意图
+//   - 「XX的海报/剧照/路透/写真/壁纸/头像/造型/穿搭/ins风/街拍/机场/红毯」+ 视觉类别强信号
+const IMAGE_INTENT_RE =
+  /照片|实拍|图片|图集|配图|找图|壁纸|风景照|看图|看照片|出图|长什么样|长啥样|给我看|有图|有照片|有图吗|头像|poster|photo|picture|image|wallpaper|海报|剧照|路透|写真|造型|穿搭|妆造|ins风|街拍|日常随拍|机场|红毯|想看|想找|给我找|帮我找|图$|照$/i;
+
+// LLM 回复"自救信号"：当 LLM 已经把对话推进到视觉类回复（提到写真/壁纸/剧照/路透/海报/
+// 造型/穿搭/红毯/ins风/街拍/头像/日常随拍），但本轮没调 search_images，强制重调。
+// 修复 LLM 直接用文字编造"duitang.com 上有她写真"这种假链接的根因。
+const IMAGE_RESCUE_RE =
+  /写真|壁纸|海报|剧照|路透|红毯|造型|穿搭|ins风|街拍|日常随拍|头像照|图集|配图|实拍|头像.*照|机场.*造型|图$|照$/i;
 
 const FRESH_WEB_LOOKUP_RE =
   /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
@@ -781,6 +819,44 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
           sameHostOnly: { type: "boolean", description: "默认 true" },
         },
         required: ["startUrl"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "deep_search",
+      description:
+        "深度搜索：一次调用完成「搜索 + 抓取 Top 网页正文」。先按 query 搜索，再并行读取前 N 条结果的完整正文（自动去导航栏/广告噪音），每条结果同时带 snippet 摘要与 content 全文。\n" +
+        "适用场景：需要深入了解某个主题、扒取细节/数据/结论（如产品详情、事件经过、技术细节、行情解读）时，优先用本工具而不是 search_web + 逐个 fetch_web 来回多次。\n" +
+        "若只需快速浏览话题就继续用 search_web。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "搜索关键词，简短具体（2-6 个核心词）" },
+          limit: { type: "integer", description: "搜索返回条数，1-20，默认 8" },
+          fetch_pages: { type: "integer", description: "抓取完整正文的 Top 条数，1-10，默认 3" },
+          content_limit: { type: "integer", description: "单条正文最大字符数，1000-8000，默认 3000" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "hot_rankings",
+      description:
+        "实时热点榜单：聚合微博/百度/知乎/B站 当前热门话题，每条含平台、排名、话题与热度。\n" +
+        "适用场景：用户问「今天有什么热点/大家都在看什么/热搜」「最近关注什么」等要掌握当下时事话题，或需要补充实时热点素材时调用；可指定 platforms（weibo/baidu/zhihu/bilibili）只看特定平台。",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", description: "返回条数，1-60，默认 20" },
+          platforms: { type: "array", items: { type: "string" }, description: "可选平台：weibo/baidu/zhihu/bilibili，默认全部" },
+        },
         additionalProperties: false,
       },
     },
@@ -1857,6 +1933,11 @@ const ALWAYS_INCLUDED_TOOLS = [
   'agent.query_capabilities',
   'brain.list_capabilities',
   'phone.call_user',
+  // search_images 始终暴露：用户问"XX照片"时，意图可能落在上下文里而非首条消息
+  // （如前轮已表态"想看照片"），此工具若被 contextual 过滤掉，LLM 会走 search_web
+  // 然后用假域名（duitang.com 首页这种）伪造图片来源，前端 media 卡片拿不到
+  // thumbnailUrl、照片永远显示不出来。search_images 体积小、token 成本可接受。
+  'search_images',
   // embodiment.* 已在 CORE_TOOL_LIBRARY 的 embodiment tier 整族暴露，每轮必带，
   // 不需要再在 ALWAYS_INCLUDED_TOOLS 重复声明，减少 contextual 筛选时的冗余。
 ];
@@ -1996,9 +2077,30 @@ export function selectRelevantTools(
   }
   
   if (filteredTools.length > maxTools) {
+    // 保底：命中图片/视觉意图但 search_images 被顺序截断裁掉时强制补回。
+    // 否则 fast 模式 selectRelevantTools 按 ALWAYS_INCLUDED_TOOLS + 分类匹配
+    // 累积工具后 slice(0,maxTools)，search_images 若未靠前就会被裁掉，
+    // LLM 看不到它，前端永远拿不到真实照片。
+    if (IMAGE_INTENT_RE.test(userText)) {
+      const sliced = filteredTools.slice(0, maxTools);
+      // 用结果集判断（ALWAYS_INCLUDED 保证 selectedToolNames 含它，但 slice 可能裁掉）
+      if (!sliced.some((t) => (t as { function?: { name?: string } }).function?.name === "search_images")) {
+        const imgTool = allTools.find((t) => (t as { function?: { name?: string } }).function?.name === "search_images");
+        if (imgTool) return [...sliced.slice(0, maxTools - 1), imgTool];
+      }
+      return sliced;
+    }
     return filteredTools.slice(0, maxTools);
   }
-  
+
+  // TEMP DEBUG（图片链路诊断）：打印 fast/complex 实际选中的可见工具，确认 search_images 是否在内
+  if (IMAGE_INTENT_RE.test(userText)) {
+    const names = filteredTools
+      .map((t) => (t as { function?: { name?: string } }).function?.name)
+      .filter(Boolean);
+    console.log(`[image-selected] query="${userText.slice(0, 30)}" selected=[${names.join(", ")}]`);
+  }
+
   return filteredTools;
 }
 
@@ -2079,6 +2181,9 @@ export async function streamCompletionWithTools(
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
+  // 2026-08-20：图片意图自救计数器，本轮最多触发 2 次强制重调，
+  // 超过则放弃（LLM 仍倔强不调 search_images 时按其原回复交付，避免无限循环）。
+  let imageRescueCount = 0;
   // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
   // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
@@ -2097,7 +2202,8 @@ export async function streamCompletionWithTools(
         "1. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
         "2. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "3. 能一轮并行解决的不要拆成多轮串行。多个独立 URL 用一轮多个 fetch_web。\n" +
-        "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。",
+        "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
+        "5. 【图片硬规则】用户问" + "`照片/图片/写真/壁纸/海报/剧照/路透/造型/穿搭/红毯/ins风/街拍/头像/长什么样`" + "等任何视觉/图片类需求时，必须且只能调用 search_images 工具。不要用 search_web 然后编造" + "`duitang.com`" + "等假域名——前端会因此拿不到任何真实图片。",
     });
   }
 
@@ -2225,6 +2331,45 @@ export async function streamCompletionWithTools(
       // 剥离 [ts:] 时间戳前缀（仅供 LLM 上下文，不应展示给用户）
       let finalText = lastAssistantText.trim();
       finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
+
+      // ── 图片意图自救：2026-08-20 ─────────────────────────────────────
+      // 当 LLM 的最终回复提到了写真/壁纸/剧照/路透/海报/造型/穿搭/红毯等视觉类别词，
+      // 但本轮（到目前为止）没调过 search_images 时，注入系统消息强制 LLM 调一次。
+      // 这是修复"LLM 用 duitang.com 这种假域名伪造图片来源"根因的最后一道防线：
+      //   - Layer 1（ALWAYS_INCLUDED_TOOLS）保证 LLM 看到工具
+      //   - Layer 2（IMAGE_INTENT_RE）覆盖大部分用户消息中的视觉关键词
+      //   - Layer 3（本分支）兜底：用户问"小夜灯"等主体名、或追问"写真"这种视觉分类词时
+      //     LLM 已经能识别这是图片任务，但 system prompt 偏 search_web，LLM 选了错误工具，
+      //     此处检测最终回复里的视觉类别词强制重调。
+      //
+      // maxRounds 边界：Fast 模式默认 maxRounds=1（性能优化），正常会跳出循环；
+      // 这里用 `round < maxRounds`（不是 `round + 1 <`）允许最后一轮也触发自救——
+      // 等价于"图片意图给一个额外的 round 配额"，其它非图片轮不受影响。
+      const calledSearchImages = allToolExecResults.some((r) => r.toolName === "search_images");
+      const isImageCategoryReply = finalText.length > 0 && IMAGE_RESCUE_RE.test(finalText);
+      if (isImageCategoryReply && !calledSearchImages && round < maxRounds && imageRescueCount < 2) {
+        console.warn(
+          `[image-rescue] LLM 提到视觉类别词但未调 search_images，本轮强制重调 (${imageRescueCount + 1}/2) -> query="${userText.slice(0, 40)}"`,
+        );
+        // 把 LLM 已经说出来的视觉类回复作为 assistant 消息保留
+        messages.push({
+          role: "assistant",
+          content: finalText || fullText || "(需要调用 search_images 给出真正的图片)",
+        });
+        messages.push({
+          role: "system",
+          content:
+            "你刚才的回复里提到了写真/壁纸/剧照/路透/海报/造型/穿搭/红毯等视觉分类，但本轮你并没有调用 search_images 工具——这意味着前端拿不到任何真实图片，只能展示你编造的假链接。\n" +
+            "请立即调用 search_images 工具（参数里把用户的原始查询当 query，limit 6~8），然后基于真实图片结果重新组织回复。\n" +
+            "search_images 会自动下载并转存为服务端本地 PNG（返回 mediaUrl/thumbnailUrl），前端会直接渲染缩略图卡片，不要再编造 'duitang.com' 这种假域名。",
+        });
+        // 把 maxRounds 临时 +1，让本轮自救可以真正跑到下一轮（否则 Fast 模式 maxRounds=1 永远不会救成功）
+        maxRounds += 1;
+        imageRescueCount += 1;
+        continue;
+      }
+      // ── 图片意图自救结束 ─────────────────────────────────────────────
+
       if (requiresFreshWebLookup && !satisfiedFreshWebLookup) {
         messages.push({
           role: "assistant",
@@ -2243,14 +2388,18 @@ export async function streamCompletionWithTools(
         ? lastToolOutputFallback.trim()
         : finalText;
       // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
-      if (effectiveFinalText) {
-        onDelta(effectiveFinalText);
+      // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
+      // 保证推给前端的气泡不出现这些内部信号（此前在 agent-core finishLlmTurn 后置剥离
+      // 太晚——流式早已透出，无法撤回）。
+      const sanitizedFinalText = stripInternalControlTags(effectiveFinalText);
+      if (sanitizedFinalText) {
+        onDelta(sanitizedFinalText);
       }
       messages.push({
         role: "assistant",
-        content: effectiveFinalText || null,
+        content: sanitizedFinalText || null,
       });
-      return effectiveFinalText;
+      return sanitizedFinalText;
     }
 
     // 把 NormalToolCall[] 物化为 OpenAI SDK 形态（保留 id 兜底 + parsedArgs 预解析）

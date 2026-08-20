@@ -2,6 +2,7 @@ import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "content_summary_detail_formatter.dart";
 
@@ -980,7 +981,15 @@ class _ImageResultTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return InkWell(
-      onTap: openUrl == null ? null : () => _launchUrl(openUrl!),
+      // 图片点击：在右侧双栏大图预览，而非跳转外部浏览器
+      onTap: () {
+        final String url = _resolveMediaUrl(imageUrl);
+        ImagePreviewLauncher.open(
+          url: url,
+          title: title,
+          source: source,
+        );
+      },
       borderRadius: BorderRadius.circular(8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,

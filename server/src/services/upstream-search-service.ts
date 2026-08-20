@@ -7,6 +7,7 @@ import {
   getSearchAnchorNow,
   SearchCache,
 } from "./search-enhancements.js";
+import { searchImagesViaSearchApi, type ImageApiItem } from "./search-api-provider.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +45,20 @@ export class UpstreamSearchService {
   private readonly socialCache = new SearchCache<{ provider: string; raw: string; notes: string[] }>({
     maxSize: 50,
     ttlMs: 3 * 60 * 1000,
+  });
+
+  // 泛网页搜索 query 级缓存（短 TTL）。
+  // 同一 query 在短窗口内被重复搜索（Agent 重问/变体重叠/fetch 前判断）时直接命中，
+  // 省一次 API/爬取网络请求，也避免把同一批结果反复注入给 LLM 造成 token 重复消耗。
+  private readonly webQueryCache = new SearchCache<{
+    provider: string;
+    items: InfoSearchItem[];
+    fetchedAt: string;
+    searchDateLocal: string;
+    notes: string[];
+  }>({
+    maxSize: 120,
+    ttlMs: 30 * 1000,
   });
 
   private imageStorageService?: ImageGenerationService;
@@ -194,19 +209,32 @@ export class UpstreamSearchService {
     }
     const boundedLimit = clamp(limit, 1, 25);
     const anchor = getSearchAnchorNow();
+    const cacheKey = `${keyword.toLowerCase()}|${boundedLimit}`;
+    const cached = this.webQueryCache.get(cacheKey);
+    if (cached) {
+      return {
+        ...cached,
+        notes: [...cached.notes, "命中 30s 搜索缓存"],
+      };
+    }
     const raw = await this.infoHubService.search(keyword, boundedLimit);
     const fresh = applySearchFreshness(raw, { query: keyword });
     const maxAgeDays = Number(process.env.SEARCH_MAX_ITEM_AGE_DAYS ?? 120);
-    return {
-      provider: "domestic-bing-cn",
+    const providerUsed = inferSearchProvider(fresh.items);
+    const result = {
+      provider: providerUsed,
       items: fresh.items,
       fetchedAt: anchor.iso,
       searchDateLocal: anchor.label,
       notes: [
-        "必应中国 RSS + 国内科技 RSS",
+        providerUsed === "domestic-bing-cn"
+          ? "必应中国 RSS + 国内科技 RSS"
+          : `搜索 API(${providerUsed}) 优先 + 必应/国内爬虫补全`,
         formatSearchFreshnessNote({ anchor, droppedStale: fresh.droppedStale, maxAgeDays }),
       ],
     };
+    this.webQueryCache.set(cacheKey, result);
+    return result;
   }
 
   async searchImages(query: string, limit = 8, actorId = "anonymous"): Promise<{
@@ -220,6 +248,34 @@ export class UpstreamSearchService {
       return { provider: "bing-images", mediaType: "image", items: [], notes: ["query 不能为空"] };
     }
     const boundedLimit = clamp(limit, 1, 12);
+
+    // 优先走已接入的搜索 API（search-images-via-search-api）拿真实图源 URL；
+    // 与正文搜索 searchWeb 同源策略：API 优先，爬图片网页仅作兜底。
+    const apiItems = await searchImagesViaSearchApi(keyword, boundedLimit);
+    if (apiItems.length > 0) {
+      const items = await this.materializeImageResults(
+        apiItems.map((it) => ({
+          type: "image" as const,
+          title: it.title,
+          pageUrl: it.pageUrl || it.mediaUrl,
+          mediaUrl: it.mediaUrl,
+          thumbnailUrl: it.thumbnailUrl,
+          source: it.source || "SearchApi",
+        })),
+        actorId,
+        boundedLimit,
+      );
+      if (items.length > 0) {
+        return {
+          provider: "search-api-images",
+          mediaType: "image",
+          items,
+          notes: [`搜索 API 图片搜索优先（已转存 PNG）；pageUrl 保留原始来源页`],
+        };
+      }
+    }
+
+    // API 未接入/缺 key/失败/空结果 → 回退到爬 cn.bing.com 图片网页兜底。
     const url = `https://cn.bing.com/images/search?q=${encodeURIComponent(keyword)}&form=HDRSC2`;
     const html = await this.fetchText(url, IMAGE_FETCH_TIMEOUT_MS);
     const rawItems = parseBingImageResults(html, boundedLimit);
@@ -421,7 +477,7 @@ export class UpstreamSearchService {
     ];
     const run = await this.callMcporterAttempts(attempts, 12_000);
     if (!run.ok) {
-      return { provider: "weibo", raw: "", notes: [run.note] };
+      return this.relayPlatform("weibo", keyword, boundedLimit, run.note);
     }
     const result = { provider: "weibo", raw: run.stdout.slice(0, 12000), notes: [] };
     this.socialCache.set(cacheKey, result);
@@ -503,7 +559,7 @@ export class UpstreamSearchService {
     ];
     const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
-      return { provider: "xiaohongshu", raw: "", notes: [run.note] };
+      return this.relayPlatform("xiaohongshu", keyword, boundedLimit, run.note);
     }
     const result = { provider: "xiaohongshu", raw: run.stdout.slice(0, 12000), notes: [] };
     this.socialCache.set(cacheKey, result);
@@ -527,7 +583,7 @@ export class UpstreamSearchService {
     ];
     const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
-      return { provider: "wechat", raw: "", notes: [run.note] };
+      return this.relayPlatform("wechat", keyword, boundedLimit, run.note);
     }
     const result = { provider: "wechat", raw: run.stdout.slice(0, 12000), notes: [] };
     this.socialCache.set(cacheKey, result);
@@ -551,7 +607,7 @@ export class UpstreamSearchService {
     ];
     const run = await this.callMcporterAttempts(attempts, 15_000);
     if (!run.ok) {
-      return { provider: "douyin", raw: "", notes: [run.note] };
+      return this.relayPlatform("douyin", keyword, boundedLimit, run.note);
     }
     const result = { provider: "douyin", raw: run.stdout.slice(0, 12000), notes: [] };
     this.socialCache.set(cacheKey, result);
@@ -583,6 +639,101 @@ export class UpstreamSearchService {
         douyin: "需要 mcporter 中存在 douyin server alias",
       },
     };
+  }
+
+  // ---- 平台未配置 MCP 时的公开网页兜底 ----
+  // 实测：微博/小红书/抖音的「正文/笔记」在无登录态下均无法直接抓取（访客验证/签名/动态渲染），
+  // 且 Bing 中国忽略 `site:` 语法、DuckDuckGo 超时——通用搜索引擎拿不到真实平台域名页面。
+  // 因此兜底必须做「平台域名过滤」，只保留命中平台域名的条目，命中不了就诚实返回空，
+  // 避免把搜索引擎的泛结果（如财经/知乎页）错标为该平台来源（来源欺骗）。
+  private async relayPlatform(
+    platform: "weibo" | "xiaohongshu" | "wechat" | "douyin",
+    keyword: string,
+    limit: number,
+    reason: string,
+  ): Promise<{ provider: string; raw: string; notes: string[] }> {
+    const MATCH: Record<"weibo" | "xiaohongshu" | "wechat" | "douyin", RegExp> = {
+      weibo: /(^|\.)weibo\.(com|cn)$/i,
+      xiaohongshu: /(^|\.)xiaohongshu\.com$/i,
+      wechat: /(^|\.)(mp\.)?weixin\.qq\.com$/i,
+      douyin: /(^|\.)douyin\.com$/i,
+    };
+    const SUFFIX: Record<"weibo" | "xiaohongshu" | "wechat" | "douyin", string> = {
+      weibo: "weibo.com",
+      xiaohongshu: "xiaohongshu.com",
+      wechat: "mp.weixin.qq.com",
+      douyin: "douyin.com",
+    };
+    const baseNote = `${platform} 未配置 MCP（${reason}），且无登录态无法直接抓取正文`;
+
+    // 先用多引擎做 `site:` 限定并过滤出平台域名条目
+    const relayQuery = `${keyword} site:${SUFFIX[platform]}`;
+    const web = await this.searchWeb(relayQuery, limit);
+    const matched = web.items.filter((it) => {
+      try {
+        return MATCH[platform].test(new URL(it.url).hostname);
+      } catch {
+        return false;
+      }
+    });
+    if (matched.length > 0) {
+      // 格式：相邻行 {标题}\n{url}\n{摘要}，兼容 rawToItems 的「上一行/下一行」解析
+      const raw = matched.map((it) => `${it.title || ""}\n${it.url}\n${(it.snippet || "").slice(0, 220)}`).join("\n");
+      return {
+        provider: `${platform}-relay`,
+        raw,
+        notes: [`${baseNote}，已返回被搜索引擎收录的 ${platform} 页面（间接结果，可能不完整）`],
+      };
+    }
+
+    // 抖音：定向搜索不可得时，官方热榜接口可拿到（word_list），作为「抖音信息」的可得来源
+    if (platform === "douyin") {
+      const hot = await this.fetchDouyinHotSearch(Math.max(5, limit));
+      if (hot.length > 0) {
+        const raw = hot.map((it) => `${it.title}\n${it.url}\n${it.snippet}`).join("\n");
+        return {
+          provider: "douyin-hot",
+          raw,
+          notes: [`${baseNote}，已返回抖音官方热榜（非关键词精确结果，仅热点话题）`],
+        };
+      }
+    }
+
+    return {
+      provider: `${platform}-relay`,
+      raw: "",
+      notes: [`${baseNote}；公开搜索引擎也未返回该平台域名页面，建议配置 mcporter 的 ${platform} server 以获取完整结果`],
+    };
+  }
+
+  /** 抖音官方热榜公开接口（实测 word_list 可拿，无登录态） */
+  private async fetchDouyinHotSearch(limit: number): Promise<UnifiedSearchItem[]> {
+    const text = await this.fetchText(
+      "https://www.douyin.com/aweme/v1/web/hot/search/list/?device_platform=webapp",
+      6000,
+    );
+    if (!text) return [];
+    try {
+      const data = JSON.parse(text) as { data?: { word_list?: Array<{ word?: string; hot_value?: number; sentence?: string }> } };
+      const list = data?.data?.word_list ?? [];
+      return list
+        .slice(0, limit)
+        .map((w) => {
+          const word = String(w?.word ?? "").trim();
+          if (!word) return null;
+          const hotValue = Number.isFinite(w?.hot_value) ? `（热度 ${w?.hot_value}）` : "";
+          return {
+            title: `#${word}${hotValue}`,
+            url: `https://www.douyin.com/search/${encodeURIComponent(word)}`,
+            snippet: String(w?.sentence ?? w?.word ?? "").slice(0, 120) || "抖音热榜",
+            source: "抖音热榜",
+            platform: "douyin" as const,
+          };
+        })
+        .filter((x): x is { title: string; url: string; snippet: string; source: string; platform: "douyin" } => x !== null);
+    } catch {
+      return [];
+    }
   }
 
   private async callMcporterAttempts(
@@ -710,6 +861,24 @@ const IMAGE_FETCH_TIMEOUT_MS = 5_000;
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
   return Math.max(min, Math.min(max, Math.floor(input)));
+}
+
+/**
+ * 依据返回结果中的来源(source)推断实际使用的搜索提供方。
+ * 搜索 API 命中时，其 result 的 source 会带 API 名（search-api-provider 的 toItems 传入）。
+ * 用此判断 API 是否真正生效，避免 provider 恒为爬虫名的可观测盲区。
+ */
+function inferSearchProvider(items: InfoSearchItem[]): string {
+  const apiSources = ["Tavily", "Serper", "Bing API", "Jina", "AnySearch"];
+  const present = new Set<string>();
+  for (const item of items) {
+    if (item.source) present.add(item.source);
+  }
+  // 若 API 来源确实出现在结果里，优先标记为 api:xxx；否则视为未走 API，保持国内爬虫名。
+  for (const name of apiSources) {
+    if (present.has(name)) return `api:${name.toLowerCase().replace(/\s+/g, "-")}`;
+  }
+  return "domestic-bing-cn";
 }
 
 function formatFailure(name: string, run: CommandResult): string {

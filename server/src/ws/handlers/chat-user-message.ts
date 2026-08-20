@@ -39,7 +39,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
@@ -87,6 +87,11 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
   if (META_TOOL_NAMES.has(toolName)) return "";
 
   const t = toolName.toLowerCase();
+  // 媒体搜索（search_images/search_videos）：照片/视频已由 independent 的 mediaCards
+  // 结构化卡片渲染给用户，绝对不能再把工具的 items 原始 JSON 拼成回复文本透出——
+  // 否则会出现"空 thumbnailUrl 的无效项、原始 JSON、脏字段"一起发给用户的脏展示。
+  // 这里直接返回空串，让本轮只呈现干净的媒体卡片（不产生任何文本噪音）。
+  if (t.includes("search_images") || t.includes("search_videos")) return "";
   // 搜索类：把标题/摘要/URL 列出来
   if (t.includes("search_web") || t.includes("web_search") || t.includes("info_hub")) {
     const items = (result.results ?? result.items ?? []) as Array<Record<string, unknown>>;
@@ -130,6 +135,44 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
   const keys = Object.keys(result).filter((k) => !["ok", "error"].includes(k));
   if (keys.length === 0) return "";
   return keys.map((k) => `${k}: ${JSON.stringify(result[k]).slice(0, 200)}`).join("\n");
+}
+
+/**
+ * 从文本中剥离 `[AGENT_RESULT_CARD_START] ... [AGENT_RESULT_CARD_END]` 卡片块。
+ *
+ * 场景：结构化 mediaCards 已由 chat.assistant_done 独立字段下发时，LLM 正文里
+ * 若仍残留 processAssistantText 注入的卡片块，前端会把它当纯文本渲染，
+ * 造成"文字反复/来回渲染"+ 与 mediaCards 双份展示。这里确定性剥除。
+ */
+function stripMediaCardMarker(text: string): string {
+  const START = "[AGENT_RESULT_CARD_START]";
+  const END = "[AGENT_RESULT_CARD_END]";
+  let out = text;
+  // 循环剥除，直到没有完整的一对开始/结束标记（含 ASR/搜索等链式注入最多 5 层）
+  for (let guard = 0; guard < 5; guard++) {
+    const si = out.indexOf(START);
+    const ei = si === -1 ? -1 : out.indexOf(END, si);
+    if (si === -1 || ei === -1) break;
+    out = out.slice(0, si) + out.slice(ei + END.length);
+  }
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * 把 finalText 中以纯文本形式出现的图片地址提升为可见缩略图（Markdown 图片语法）。
+ *
+ * 这是 mediaCards 解析为空时的最后兜底：LLM 若把图片 URL 直接写进正文（如
+ * `http.../a.png`），前端 markdown 默认只当普通链接，用户看到的是地址而非照片。
+ * 仅按常见图片扩展名识别，避免误伤一般超链接；已处于 `![alt](url)` 内则不重复包裹。
+ */
+function promoteImageUrlsToMedia(text: string): string {
+  if (!text) return text;
+  const IMG_URL_RE = /https?:\/\/[^\s)\]}"'<>]+\.(?:png|jpe?g|gif|webp|avif)(?:\?[^\s)\]}"'<>]*)?/gi;
+  return text.replace(IMG_URL_RE, (match: string, offset: number, full: string) => {
+    // 前面紧邻 `](` => 已处于 markdown 图片/链接语法内，不重复包裹
+    if (/\]\($/.test(full.slice(0, offset))) return match;
+    return `![图片](${match})`;
+  });
 }
 
 export type ChatUserMessageHandlerDeps = {
@@ -594,6 +637,17 @@ async function processBatchedMessage(
 
   let turnSucceeded = false;
   let turnError: string | undefined;
+
+  // 收集本轮实际执行的媒体搜索工具结果（search_images / search_videos）。
+  // 原因：LLM 的最终回复 reply.toolName 时常为 undefined（模型在搜完图后仅输出
+  // 正文，不再带工具声明），导致 extractMediaCards 拿不到 items，前端照片无法展示。
+  // 这里绕开 reply.toolName，直接从 onExternalToolExecuted 捕获真实工具结果，
+  // 保证 chat.assistant_done 的 mediaCards 一定有真实缩略图。
+  const executedMediaToolResults: Array<{
+    toolName: string;
+    result: Record<string, unknown>;
+  }> = [];
+
   try {
     const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
       chatUserMessageId: batched.originalMessageId,
@@ -640,6 +694,17 @@ async function processBatchedMessage(
         );
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
+        // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
+        if (
+          info.ok &&
+          info.result &&
+          (info.toolName === "search_images" || info.toolName === "search_videos")
+        ) {
+          executedMediaToolResults.push({
+            toolName: info.toolName,
+            result: info.result as Record<string, unknown>,
+          });
+        }
       },
       onBackgroundAssistantDelta: (info) => {
         if (isStale()) return;
@@ -847,8 +912,38 @@ async function processBatchedMessage(
     // 视频抓取：附加可播放媒体标记（[RENDER_AS:video] + [VIDEO_MEDIA_START]），
     // 前端据此真实内联播放代理后的视频流
     finalText = attachVideoMediaMarker(finalText, reply.toolName, toolResult?.result);
-    // 媒体搜索：确定性注入 thumbnailUrl 到 media 卡片（不依赖 LLM 转发）
-    finalText = attachMediaSearchMarker(finalText, reply.toolName, toolResult?.result);
+    // 结构化媒体卡片（Coze 式架构）：与 LLM 文本解耦，作为独立字段下发。
+    // 前端直接读取 chat.assistant_done 的 mediaCards 字段渲染缩略图，
+    // 不再依赖从 LLM 文本解析 [AGENT_RESULT_CARD_START] 标记。
+    let mediaCards = extractMediaCards(reply.toolName, toolResult?.result);
+    // 兜底：reply.toolName 常为 undefined（模型搜完图只输出正文不带工具声明），
+    // 此时从本轮实际执行的媒体搜索工具结果构建卡片，保证照片一定能展示。
+    if (mediaCards.length === 0 && executedMediaToolResults.length > 0) {
+      for (const mt of executedMediaToolResults) {
+        const cards = extractMediaCards(mt.toolName, mt.result);
+        if (cards.length > 0) {
+          mediaCards = cards;
+          break;
+        }
+      }
+    }
+    // 仅当没有结构化卡片时，才回退走文本标记注入（保持旧客户端兼容、
+    // 以及非图片工具不带结构数据的场景）。有 mediaCards 时不再注入标记，
+    // 避免 finalText 携带标记被前端旧解析路径抢先渲染、且无真实缩略图。
+    if (mediaCards.length === 0) {
+      // 媒体搜索：确定性注入 thumbnailUrl 到 media 卡片（不依赖 LLM 转发）
+      finalText = attachMediaSearchMarker(finalText, reply.toolName, toolResult?.result);
+    } else {
+      // mediaCards 由 toolResult 承载、前端已能独立渲染缩略图；若 finalText 里
+      // 还残留 processAssistantText 注入的 [AGENT_RESULT_CARD_START] 卡片块，
+      // 前端会将其当作纯文本原样展示（重复/来回渲染）。这里剥掉，避免与
+      // mediaCards 双份展示。
+      finalText = stripMediaCardMarker(finalText);
+    }
+    // 提升最终回复文本中图片地址为可见缩略图（mediaCards 为空时的最后兜底）
+    if (mediaCards.length === 0) {
+      finalText = promoteImageUrlsToMedia(finalText);
+    }
 
     // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
     try {
@@ -898,6 +993,8 @@ async function processBatchedMessage(
           traceId: batched.originalMessageId,
           finalText,
           toolCalls: reply.toolName ? [reply.toolName] : [],
+          // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本，前端直接渲染缩略图
+          ...(mediaCards.length > 0 ? { mediaCards } : {}),
         },
       }),
     );
@@ -989,3 +1086,4 @@ async function transcribeAudioFromMediaUrl(
   console.log(`[ASR] 识别成功（actor=${actorId}, ${buffer.length} bytes）: ${result.text.slice(0, 80)}…`);
   return result.text.trim();
 }
+

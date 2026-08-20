@@ -469,6 +469,100 @@ export function pickVisibleText(
 }
 
 /* ------------------------------------------------------------------ *
+ * 内部控制信号标签净化（根源防透出）                                  *
+ * ------------------------------------------------------------------ */
+
+/**
+ * 模型偶发会把「给自身的内部指令 / 控制信号」写成方括号标签混进正式回复，
+ * 例如：
+ *   - 话题切换标签：`[话题切换，只答这个]` / `[Topic switched — don't revisit.]`
+ *   - 停止/待用户输入信号：`[STOP needs a message from the user]`
+ *
+ * 它们不是要给用户看的内容。此前只在 `finishLlmTurn` 里对最终文本剥一次，
+ * 但**流式通路早就把这些标签逐字推给前端了**，后置剥离无法撤回已展示的气泡。
+ * 因此必须在推流的咽喉处（provider delta 回调 / tool-loop 最终推送前）净化，
+ * 本文件是 provider-agnostic 的公共底座，这里统一提供：
+ *   - `stripInternalControlTags(text)`：整串剥离（用于一次性文本，如 tool-loop
+ *     最终回复、emergency regenerate 等）。
+ *   - `createStreamControlTagSanitizer()`：带缓冲的流式净化器（用于 provider
+ *     逐 chunk 直推 onDelta 的场景，能跨多个 chunk 识别被切断的标签后丢弃）。
+ */
+const INTERNAL_CONTROL_TAG_FULL_RE =
+  /^\s*(?:\[话题已?切换[^\]]*\]|\[[Tt]opic[^\]]*\]|\[STOP\s+[^\]]*\])[\s:：—-]*/g;
+/** 是否为「可能是控制标签的开头」（用于流式缓冲：是则继续吞，避免把半截标签吐出去）。 */
+const INTERNAL_CONTROL_TAG_PREFIX_RE =
+  /^\s*\[(?:话题已?切换|Topic|STOP)/i;
+
+/** 整串剥离内部控制标签前缀（可匹配多个连续标签）。 */
+export function stripInternalControlTags(text: string): string {
+  if (!text) return text;
+  let out = text;
+  // 循环剥离，涵盖出现多次/中间含空白的情况
+  for (let i = 0; i < 8; i++) {
+    const next = out.replace(INTERNAL_CONTROL_TAG_FULL_RE, "");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/**
+ * 流式内部控制标签净化器。
+ *
+ * 用法：把 provider 推流的原始增量喂给 `feed(delta)`，返回值是**可以推给前端**
+ * 的净化后增量（返回空串表示这一段全被吞掉 / 仍在缓冲等待识别）。
+ *
+ * 原理：非工具分支是逐 chunk 直推 `onDelta`，`[STOP needs a message from the
+ * user]` 可能被切成多个 chunk。这里维护一个缓冲：只要当前剩余内容是「可能是
+ * 内部控制标签的前缀」，就继续吞住不输出；一旦确认不是标签（出现正常正文），
+ * 就切到直通模式，把已累积内容一次性吐给前端。`maxPendingChars` 是保险丝，
+ * 避免 tag 永不闭合导致无限缓冲。
+ */
+export function createStreamControlTagSanitizer(maxPendingChars = 512) {
+  let pending = "";
+  let passthrough = false;
+
+  return function feed(delta: string): string {
+    if (passthrough) return delta;
+
+    pending += delta;
+
+    // 保险丝：pending 过长判定为正常正文，强制切到直通，避免无限吞。
+    if (pending.length > maxPendingChars) {
+      passthrough = true;
+      const out = pending;
+      pending = "";
+      return out;
+    }
+
+    // 先做整串剥离（循环剥掉完整标签，可能连着多个）。
+    const stripped = stripInternalControlTags(pending);
+
+    if (stripped.length > 0) {
+      // 剥后还有内容：检查剩余内容是否仍可能是某个标签的前缀。
+      // 若是（例如剥掉一个 tag 后又出现另一个 tag 的开头），继续吞；
+      // 否则说明已经是正常正文，切直通并吐出去。
+      if (INTERNAL_CONTROL_TAG_PREFIX_RE.test(stripped)) {
+        pending = stripped;
+        return "";
+      }
+      const rest = stripped.replace(INTERNAL_CONTROL_TAG_FULL_RE, "");
+      if (rest !== stripped && INTERNAL_CONTROL_TAG_PREFIX_RE.test(rest)) {
+        pending = rest;
+        return "";
+      }
+      passthrough = true;
+      pending = "";
+      return stripped;
+    }
+
+    // 全部被剥掉（只剩标签/空白）：可能还有更多标签进来，继续吞。
+    pending = stripped;
+    return "";
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * 4. 兜底异常                                                        *
  * ------------------------------------------------------------------ */
 

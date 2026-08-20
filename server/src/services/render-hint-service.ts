@@ -123,6 +123,11 @@ export function classifyRenderHint(
     return { type: "plain", reason: "capability-dump" };
   }
 
+  // 用户意图是否要「结构化对比/整理」：命中则强制走富文本，优先于卡片路由
+  const hasIntent = !!ctx?.userText && INTENT_KEYWORDS_RE.test(ctx.userText);
+  // 输出是否含 Markdown 表格：表格只能在富文本里渲染，不得被打成卡片/折叠
+  const hasTable = hasMarkdownTable(trimmed);
+
   // === 优先级 0：image_text 图片识别/OCR → 直接走结构化富文本 ===
   if (isImageTool(ctx?.toolName)) {
     return {
@@ -142,7 +147,8 @@ export function classifyRenderHint(
   }
 
   // === 优先级 1：search_result 搜索工具结果（3-10 列表项）→ 专用搜索结果卡片 ===
-  if (isSearchTool(ctx?.toolName)) {
+  // 但对比/分析类意图或含表格时放行，落到优先级 4 走结构化富文本
+  if (isSearchTool(ctx?.toolName) && !hasIntent && !hasTable) {
     const listResult = analyzeListStructure(trimmed);
     if (listResult.itemCount >= 3 && listResult.itemCount <= 10) {
       return {
@@ -153,8 +159,8 @@ export function classifyRenderHint(
     // 搜索结果但 item 太少 或 item 太多 → fall through
   }
 
-  // === 优先级 2：result_card 简短汇报 ===
-  if (trimmed.length <= RESULT_CARD_MAX_CHARS) {
+  // === 优先级 2：result_card 简短汇报（意图/表格放行，避免截胡富文本）===
+  if (trimmed.length <= RESULT_CARD_MAX_CHARS && !hasIntent && !hasTable) {
     const listResult = analyzeListStructure(trimmed);
     // (a) 工具上下文是天气 → 强制小卡片
     if (ctx?.toolName && ctx.toolName.startsWith("weather.")) {
@@ -182,8 +188,8 @@ export function classifyRenderHint(
   }
 
   // === 优先级 3+：brief 简报增强 ===
-  // 短文本 + 引导行 + 列表项，典型晨间简报/资讯汇总结构
-  if (trimmed.length <= RESULT_CARD_MAX_CHARS) {
+  // 短文本 + 引导行 + 列表项，典型晨间简报/资讯汇总结构（意图/表格放行）
+  if (trimmed.length <= RESULT_CARD_MAX_CHARS && !hasIntent && !hasTable) {
     const listResult = analyzeListStructure(trimmed);
     const hasLeadLine = listResult.nonListLines.some(
       (l) => (l.length <= 30 && /[:：]$/.test(l)) || /^关于|提醒|补充|备注/i.test(l),
@@ -198,11 +204,13 @@ export function classifyRenderHint(
 
   // === 优先级 4：判断长内容 ===
   // 内容长度因子：>300 字符 → 倾向结构化富文本（标题、列表、表格、折叠块）
-  // 意图语义判断（权重更高）：特定关键词 → 无视短字数，强制结构化
+  // 意图语义判断（权重更高）：对比/整理/分析等关键词 → 无视短字数，强制结构化
+  // 表格出现（hasTable）→ 强制结构化，避免折叠成摘要卡片丢表格
   // 闲聊短句（无意图关键词 + 短文本）→ 即使 400 字也走纯段落
-  const hasIntent = !!ctx?.userText && INTENT_KEYWORDS_RE.test(ctx.userText);
-  if (trimmed.length >= STRUCTURED_TEXT_MIN_CHARS || hasIntent) {
-    if (isSummaryEligibleToolName(ctx?.toolName)) {
+  const structuredEligible =
+    trimmed.length >= STRUCTURED_TEXT_MIN_CHARS || hasIntent || hasTable;
+  if (structuredEligible) {
+    if (isSummaryEligibleToolName(ctx?.toolName) && !hasIntent && !hasTable) {
       return {
         type: "summary_card",
         reason: `long-content+search-tool(len=${trimmed.length},tool=${ctx?.toolName},intent=${hasIntent})`,
@@ -211,8 +219,8 @@ export function classifyRenderHint(
     }
     return {
       type: "long_text",
-      reason: `long-content+non-search(len=${trimmed.length},tool=${ctx?.toolName},intent=${hasIntent})`,
-      intent: hasIntent,
+      reason: `long-content+non-search(len=${trimmed.length},tool=${ctx?.toolName},intent=${hasIntent},table=${hasTable})`,
+      intent: hasIntent || hasTable,
     };
   }
 
@@ -253,4 +261,22 @@ export function analyzeListStructure(text: string): ListAnalysis {
     nonListLines,
     items,
   };
+}
+
+/**
+ * 判断文本是否含标准 Markdown 表格：≥2 行带 ≥2 个 `|` 分隔符的行
+ * （表头 + 分隔行即满足，如 `| a | b |` + `|---|---|`）。
+ */
+export function hasMarkdownTable(text: string): boolean {
+  let rowCount = 0;
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.includes("|")) continue;
+    // 至少 2 个 | 分隔符 → 3 格以上，视为表格行
+    if (trimmed.split("|").length >= 3) {
+      rowCount++;
+      if (rowCount >= 2) return true;
+    }
+  }
+  return false;
 }

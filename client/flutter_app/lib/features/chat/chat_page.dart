@@ -919,11 +919,17 @@ class _ChatPageState extends State<ChatPage>
                             cs, _processingStatusText(mainMessage));
                       }
 
-                      return _buildHoverableMessage(
-                        cs: cs,
-                        mainMessage: mainMessage,
-                        isUser: isUser,
-                        contentSummary: contentSummary,
+                      // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
+                      // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
+                      // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
+                      return KeyedSubtree(
+                        key: ValueKey<String>('msg-${mainMessage.messageId}'),
+                        child: _buildHoverableMessage(
+                          cs: cs,
+                          mainMessage: mainMessage,
+                          isUser: isUser,
+                          contentSummary: contentSummary,
+                        ),
                       );
                     },
                   ),
@@ -2080,6 +2086,54 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               padding: const EdgeInsets.only(top: 3),
               child: buildInlineMarkdownText(
                 remaining,
+                Theme.of(context).textTheme.bodyMedium!.copyWith(
+                      color: cs.onSurface.withValues(alpha: 0.85),
+                      height: 1.4,
+                    ),
+                cs: cs,
+              ),
+            ),
+        ],
+      );
+    }
+
+    // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本渲染。
+    //
+    // 来自服务端 `chat.assistant_done` 的 `mediaCards` 字段，与 LLM 的文本回复
+    // 完全解耦。前端直接构造 `AgentResultData` 卡片，不再依赖文本中
+    // `[AGENT_RESULT_CARD_START]` 标记。
+    //
+    // 与 `AgentResultParser.parse` 不同：这里读取的是 `ChatMessage.mediaCards`
+    // 字段（结构化数据），而非从消息文本中解析标记。
+    final List<Map<String, dynamic>>? mediaCards = message.mediaCards;
+    if (mediaCards != null && mediaCards.isNotEmpty) {
+      final List<AgentResultItem> items = mediaCards.map((m) {
+        return AgentResultItem(
+          type: m["type"]?.toString() ?? "image",
+          text: m["title"]?.toString() ?? "",
+          mediaType: m["mediaType"]?.toString() ?? m["type"]?.toString() ?? "image",
+          thumbnailUrl: m["thumbnailUrl"]?.toString(),
+          mediaUrl: m["mediaUrl"]?.toString(),
+          pageUrl: m["pageUrl"]?.toString(),
+          source: m["source"]?.toString(),
+        );
+      }).toList();
+      final AgentResultData mediaData = AgentResultData(
+        cardType: "media",
+        title: "相关图片",
+        items: items,
+        footer: "共 ${items.length} 条图片结果，点击可查看原图",
+      );
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          AgentResultCard(data: mediaData),
+          if (message.text.trim().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: buildInlineMarkdownText(
+                message.text,
                 Theme.of(context).textTheme.bodyMedium!.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.85),
                       height: 1.4,

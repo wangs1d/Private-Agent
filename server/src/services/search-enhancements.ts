@@ -119,10 +119,13 @@ export class RssHealthMonitor {
   private readonly health = new Map<string, SourceHealth>();
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
+  private readonly permanentThreshold: number;
 
-  constructor(opts: { failureThreshold?: number; cooldownMs?: number } = {}) {
+  constructor(opts: { failureThreshold?: number; cooldownMs?: number; permanentThreshold?: number } = {}) {
     this.failureThreshold = opts.failureThreshold ?? 3; // 连续失败 3 次降级
     this.cooldownMs = opts.cooldownMs ?? 10 * 60 * 1000; // 降级 10 分钟
+    // 连续失败超过该阈值视为「死源」永久降级，不再反复重试占用配额（直到某次成功才恢复）
+    this.permanentThreshold = opts.permanentThreshold ?? 8;
   }
 
   /** 记录成功 */
@@ -135,7 +138,7 @@ export class RssHealthMonitor {
     });
   }
 
-  /** 记录失败，返回是否触发降级 */
+  /** 记录失败，返回是否触发降级。冷却期随失败次数指数拉长；超过阈值后永久降级。 */
   recordFailure(source: string): boolean {
     const prev = this.health.get(source) ?? {
       consecutiveFailures: 0,
@@ -143,20 +146,25 @@ export class RssHealthMonitor {
       degraded: false,
     };
     const consecutiveFailures = prev.consecutiveFailures + 1;
-    const degraded = consecutiveFailures >= this.failureThreshold;
+    const permanent = consecutiveFailures >= this.permanentThreshold;
+    // 指数冷却：10m → 20m → 40m → …上限 2 小时；死源则永久
+    const escalated = Math.min(this.cooldownMs * Math.pow(2, Math.max(0, consecutiveFailures - this.failureThreshold)), 2 * 60 * 60 * 1000);
+    const degraded = permanent || consecutiveFailures >= this.failureThreshold;
     this.health.set(source, {
       consecutiveFailures,
       lastSuccessAt: prev.lastSuccessAt,
       degraded,
-      degradedUntil: degraded ? Date.now() + this.cooldownMs : undefined,
+      degradedUntil: degraded ? (permanent ? Number.POSITIVE_INFINITY : Date.now() + escalated) : undefined,
     });
     return degraded;
   }
 
-  /** 判断源是否可用（未降级或冷却期已过） */
+  /** 判断源是否可用（未降级或冷却期已过 / 死源已恢复） */
   isAvailable(source: string): boolean {
     const h = this.health.get(source);
     if (!h || !h.degraded) return true;
+    // 永久降级的死源：不自动恢复，需 recordSuccess 手动恢复
+    if (h.degradedUntil === Number.POSITIVE_INFINITY) return false;
     // 冷却期过后自动恢复
     if (h.degradedUntil && Date.now() > h.degradedUntil) {
       h.degraded = false;

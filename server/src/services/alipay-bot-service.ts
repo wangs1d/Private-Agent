@@ -123,14 +123,25 @@ function sanitizeUserKey(userKey: string): string {
 }
 
 export class AlipayBotService {
-  private readonly cliRoot: string;
+  /** CLI 根目录；未补齐 dist 时为 null（服务降级，不阻断启动）。 */
+  private readonly cliRoot: string | null;
   private readonly timeoutMs: number;
   private readonly stateHome: string;
   /** 按用户缓存的钱包实例（每个用户独立 stateHome 目录）。 */
   private readonly userInstances = new Map<string, AlipayBotService>();
 
   constructor(options?: AlipayBotServiceOptions) {
-    this.cliRoot = options?.cliRoot ? resolve(options.cliRoot) : resolveCliRoot();
+    if (options?.cliRoot) {
+      this.cliRoot = resolve(options.cliRoot);
+    } else {
+      try {
+        this.cliRoot = resolveCliRoot();
+      } catch (err) {
+        // CLI 入口（runtime/dist/cli.js）缺失时不阻断服务启动，仅在真正调用支付命令时上报。
+        this.cliRoot = null;
+        console.warn(`[alipay-bot] ${(err as Error).message} —— 支付宝 AI 支付能力暂不可用（服务已进入降级模式，不影响其它能力）；补齐 server/alipay-bot-cli/runtime/dist 后重启即恢复。`);
+      }
+    }
     this.timeoutMs = options?.timeoutMs ?? 60_000;
     this.stateHome = options?.stateHome ? resolve(options.stateHome) : resolveStateHome();
     // 确保状态目录存在，CLI 会把钱包/授权状态写到这里
@@ -150,7 +161,7 @@ export class AlipayBotService {
     let inst = this.userInstances.get(dirName);
     if (!inst) {
       inst = new AlipayBotService({
-        cliRoot: this.cliRoot,
+        cliRoot: this.cliRoot ?? undefined,
         timeoutMs: this.timeoutMs,
         stateHome: join(this.stateHome, "users", dirName),
       });
@@ -164,6 +175,11 @@ export class AlipayBotService {
    * （execFile 在 Windows 上无法直接执行 .cmd，故不走 bin/alipay-bot.cmd）
    */
   private buildExec(): { command: string; argsPrefix: string[] } {
+    if (!this.cliRoot) {
+      throw new Error(
+        "alipay-bot-cli 未找到（runtime/dist/cli.js 缺失）。请将 server/alipay-bot-cli/runtime/dist 补齐，或设置 ALIPAY_BOT_CLI_ROOT 环境变量。",
+      );
+    }
     const cliJs = join(this.cliRoot, "runtime", "dist", "cli.js");
     if (!existsSync(cliJs)) {
       throw new Error(`alipay-bot-cli 入口不存在: ${cliJs}`);

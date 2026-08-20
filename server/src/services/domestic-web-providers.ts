@@ -1,4 +1,5 @@
 import type { InfoSearchItem } from "./info-hub-service.js";
+import { searchViaSearchApi } from "./search-api-provider.js";
 import {
   applySearchFreshness,
   prependRecencyQueryVariants,
@@ -196,6 +197,146 @@ export async function searchBingChinaRelaxed(
   opts: DomesticFetchOptions,
 ): Promise<InfoSearchItem[]> {
   return searchBingChina(query, limit, opts, { skipRelevanceFilter: true });
+}
+
+// ============================================================
+// 多引擎降级链：必应为主，百度/搜狗/DuckDuckGo 兜底（消除单点故障）
+// 任一引擎失败都会返回空数组，整体优雅降级，不会 throw。
+// ============================================================
+
+const BAIDU_SEARCH = "https://www.baidu.com/s";
+const SOGOU_SEARCH = "https://www.sogou.com/web";
+const DUCKDUCKGO_SEARCH = "https://html.duckduckgo.com/html";
+
+/** 百度网页搜索：解析 c-container / result 结果块中的标题链接与摘要。 */
+export async function searchBaiduChina(
+  query: string,
+  limit: number,
+  opts: DomesticFetchOptions,
+): Promise<InfoSearchItem[]> {
+  const keyword = query.trim();
+  if (!keyword) return [];
+  const url = `${BAIDU_SEARCH}?wd=${encodeURIComponent(keyword)}&rn=${clampInt(limit, 1, 20)}`;
+  const html = await fetchText(url, opts);
+  if (!html) return [];
+  return extractSearchLinks(html, "百度").slice(0, limit);
+}
+
+/** 搜狗网页搜索：解析 vrwrap 结果块。 */
+export async function searchSogouChina(
+  query: string,
+  limit: number,
+  opts: DomesticFetchOptions,
+): Promise<InfoSearchItem[]> {
+  const keyword = query.trim();
+  if (!keyword) return [];
+  const url = `${SOGOU_SEARCH}?query=${encodeURIComponent(keyword)}`;
+  const html = await fetchText(url, opts);
+  if (!html) return [];
+  // 搜狗 qrcode/跳转链接去噪：保留可读 URL
+  return extractSearchLinks(html, "搜狗").slice(0, limit);
+}
+
+/** DuckDuckGo HTML 端点：专门面向纯 HTML 抓取设计，结果结构稳定。 */
+export async function searchDuckDuckGo(
+  query: string,
+  limit: number,
+  opts: DomesticFetchOptions,
+): Promise<InfoSearchItem[]> {
+  const keyword = query.trim();
+  if (!keyword) return [];
+  const url = `${DUCKDUCKGO_SEARCH}/?q=${encodeURIComponent(keyword)}&kl=cn-zh`;
+  const html = await fetchText(url, opts);
+  if (!html) return [];
+  const out = extractSearchLinks(html, "DuckDuckGo");
+  return out.slice(0, limit);
+}
+
+/**
+ * 从搜索结果 HTML 中兜底提取「标题 + 链接」对（面向多引擎统一解析）。
+ * 同时从 #content 附近的 <a>:href 里解析标题文本，尽可能保留摘要。
+ */
+function extractSearchLinks(
+  html: string,
+  source: string,
+): InfoSearchItem[] {
+  const out: InfoSearchItem[] = [];
+  const seen = new Set<string>();
+  const re = /<a[^>]+href=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null = null;
+  while ((m = re.exec(html))) {
+    const rawHref = decodeHtmlEntities(m[2] ?? "").trim();
+    const text = decodeHtmlEntities((m[3] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+    if (!rawHref || !text || text.length < 6) continue;
+    if (/^\/+$/.test(rawHref) || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue;
+    // 仅接受绝对 http(s) 链接；相对链接缺少 base 无法可靠还原，跳过
+    if (!/^https?:\/\//i.test(rawHref)) continue;
+    const clean = rawHref.replace(/[),.;]+$/, "");
+    if (seen.has(clean)) continue;
+    seen.add(clean);
+    out.push({ title: text.slice(0, 180), url: clean, snippet: "", source });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+/**
+ * 多引擎组合（API 优先 + 爬虫补全）：
+ *   1) 先走稳定搜索 API（配置 SEARCH_API_PROVIDER 时），返回的结果无论多少都保留作基础集；
+ *   2) 不足当时限用必应补全，必应还不够再用百度/搜狗/DDG 兜底；
+ *   3) 合并去重、相关性过滤、按质量排序后返回。
+ * 关键修复：API 只要有结果就不再整体丢弃（旧逻辑要求 >=need 才采用，少了就白查），
+ * 用「API 结果 + 爬虫增量」混合拼接，避免 API 少数几条也被浪费。
+ */
+export async function searchWebMultiEngine(
+  query: string,
+  limit: number,
+  opts: DomesticFetchOptions,
+  flags: { skipRelevanceFilter?: boolean } = {},
+): Promise<InfoSearchItem[]> {
+  const keyword = query.trim();
+  if (!keyword) return [];
+  const boundedLimit = clampInt(limit, 1, 25);
+
+  // 第一步：优先走稳定搜索 API。未配置(null)/失败([])都会无缝降级到爬虫链。
+  const apiResults = await searchViaSearchApi(keyword, boundedLimit);
+  const apiItems = apiResults
+    ? applySearchFreshness(apiResults, { query: keyword }).items.slice(0, boundedLimit)
+    : [];
+  // API 已经够数，直接返回（最省算力）
+  if (apiItems.length >= boundedLimit) return apiItems;
+  // 记录了「API 命中但数量不足」这一信息，日志便于定位混合策略是否生效
+  if (apiItems.length > 0) {
+    console.log(`[SearchApi] API 命中 ${apiItems.length} 条 < ${boundedLimit}，用爬虫继续补足`);
+  }
+
+  // 第二步：必须用时用必应补足（API 结果保留在基础集中）
+  const primary = await searchBingChina(keyword, boundedLimit, opts, flags);
+  const afterBing = dedupeByUrl([...apiItems, ...primary]);
+  if (afterBing.length >= boundedLimit) return afterBing.slice(0, boundedLimit);
+
+  // 第三步：必应仍不够，并行调百度/搜狗/DDG 兜底
+  const missing = boundedLimit - afterBing.length;
+  const [baidu, sogou, ddg] = await Promise.all([
+    searchBaiduChina(keyword, missing + 2, opts),
+    searchSogouChina(keyword, missing + 2, opts),
+    searchDuckDuckGo(keyword, missing + 2, opts),
+  ]);
+  const fallback = [...baidu, ...sogou, ...ddg].filter((x) => x.url && /^https?:\/\//i.test(x.url));
+  const merged = dedupeByUrl([...afterBing, ...fallback]);
+  let items: InfoSearchItem[];
+  if (flags.skipRelevanceFilter) {
+    items = merged;
+  } else {
+    const relevant = filterItemsByRelevance(merged, keyword);
+    items = relevant.length > 0 ? relevant : merged;
+  }
+  return items.slice(0, boundedLimit);
+}
+
+function clampInt(input: number, min: number, max: number): number {
+  if (!Number.isFinite(input)) return min;
+  return Math.max(min, Math.min(max, Math.floor(input)));
 }
 
 function calculateTimeoutPerVariant(totalBudgetMs: number, variantCount: number): number {
@@ -520,12 +661,14 @@ export async function fetchDomesticTechNews(
   const batches = await Promise.all(
     feeds.map(async (feed) => {
       const xml = await fetchText(feed.url, opts);
-      if (!xml) {
+      const items = xml ? parseRssItems(xml) : [];
+      // 抓取成功但解析为空（返回 HTML 错误页/死链）同样记为失败，避免死源长期占配额
+      if (items.length === 0) {
         opts.rssHealth?.recordFailure(feed.source);
         return [] as InfoSearchItem[];
       }
       opts.rssHealth?.recordSuccess(feed.source);
-      return parseRssItems(xml).map((item) => ({
+      return items.map((item) => ({
         title: item.title,
         url: item.link,
         snippet: item.description.slice(0, 220),
@@ -560,12 +703,14 @@ export async function fetchDomesticOfficialNews(
     Promise.all(
       feeds.map(async (feed) => {
         const xml = await fetchText(feed.url, opts);
-        if (!xml) {
+        const items = xml ? parseRssItems(xml) : [];
+        // 抓取成功但解析为空（返回 HTML 错误页/死链）同样记为失败，避免死源长期占配额
+        if (items.length === 0) {
           opts.rssHealth?.recordFailure(feed.source);
           return [] as InfoSearchItem[];
         }
         opts.rssHealth?.recordSuccess(feed.source);
-        return parseRssItems(xml)
+        return items
           .slice(0, rssPerFeed)
           .map((item) => ({
             title: item.title,
@@ -873,25 +1018,35 @@ export async function fetchDomesticNews(
 
 async function fetchText(url: string, opts: DomesticFetchOptions): Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "user-agent": opts.userAgent,
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      },
-      redirect: "follow",
-    });
-    if (!response.ok) return "";
-    return await response.text();
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(timer);
+  // 网络瞬时抖动自动重试（最多 2 次，指数退避），消除单次失败导致的整体空结果
+  let lastText = "";
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "user-agent": opts.userAgent,
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+        redirect: "follow",
+      });
+      if (!response.ok) {
+        lastText = "";
+      } else {
+        lastText = await response.text();
+        if (lastText) return lastText;
+      }
+    } catch {
+      lastText = "";
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 120 * Math.pow(2, attempt)));
   }
+  return lastText;
 }
 
 function dedupeByUrl(items: InfoSearchItem[]): InfoSearchItem[] {

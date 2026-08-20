@@ -340,6 +340,13 @@ export class InternetIntelligenceService {
   }): InternetIntelligenceResult {
     const sourcesWithEvidence = Array.from(new Set(input.evidence.map((item) => item.platform)));
     const gaps = buildGaps(input.evidence, input.sourcesTried);
+    // 缺失来源显式标注 + 稀缺时提示可能原因，便于上层/用户定位
+    const notes = [...input.notes];
+    if (input.evidence.length === 0) {
+      notes.push("所有来源均未返回有效证据，可能被反爬/限流/源失效，或社交 MCP(weibo/小红书)未配置");
+    } else if (input.evidence.length < 2) {
+      notes.push("可用证据较少，建议加深搜索层级(deep)或调整时间窗后重试");
+    }
     const avgConfidence = input.evidence.length
       ? round(input.evidence.reduce((sum, item) => sum + item.confidence, 0) / input.evidence.length)
       : 0;
@@ -365,7 +372,7 @@ export class InternetIntelligenceService {
         sourcesWithEvidence,
         evidenceCount: input.evidence.length,
         fetchedPageCount: input.fetchedPageCount,
-        notes: input.notes,
+        notes,
       },
       conclusion: {
         summary,
@@ -386,9 +393,9 @@ export class InternetIntelligenceService {
 
 function resolveBudget(depth: InternetDepth = "normal", maxEvidence?: number): Budget {
   const base: Record<InternetDepth, Budget> = {
-    quick: { searchLimit: 5, maxEvidence: 5, fetchPages: 0, mediaPages: 1, maxTextChars: 220, queryCount: 1 },
-    normal: { searchLimit: 8, maxEvidence: 8, fetchPages: 1, mediaPages: 2, maxTextChars: 280, queryCount: 2 },
-    deep: { searchLimit: 12, maxEvidence: 12, fetchPages: 2, mediaPages: 4, maxTextChars: 340, queryCount: 3 },
+    quick: { searchLimit: 6, maxEvidence: 5, fetchPages: 0, mediaPages: 1, maxTextChars: 220, queryCount: 1 },
+    normal: { searchLimit: 12, maxEvidence: 10, fetchPages: 1, mediaPages: 3, maxTextChars: 280, queryCount: 3 },
+    deep: { searchLimit: 18, maxEvidence: 16, fetchPages: 3, mediaPages: 5, maxTextChars: 340, queryCount: 4 },
   };
   const selected = { ...base[depth] };
   if (maxEvidence != null && Number.isFinite(maxEvidence)) {
@@ -618,12 +625,14 @@ function buildQueries(
   const base = cleanText(goal);
   const variants = [base];
   const fresh = intent === "live_situation" || intent === "market_watch" || timeWindow != null;
-  if (fresh) {
+  if (fresh && maxCount > 1) {
     variants.push(`${base} ${new Date().getFullYear()} latest`);
-    variants.push(`${base} \u4eca\u5929 \u521a\u521a \u6700\u65b0`);
-  } else {
+  } else if (maxCount > 1) {
     variants.push(`${base} analysis`);
   }
+  // 不再生成 site:weibo.com / site:xiaohongshu.com 变体，
+  // 因为 searchUnified(platform:"auto") 已在内部原生搜索微博+小红书+微信，
+  // 避免每个变体都触发一次完整的 searchUnified API 调用链。
   return Array.from(new Set(variants.map((item) => item.trim()).filter(Boolean))).slice(0, maxCount);
 }
 

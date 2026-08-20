@@ -106,6 +106,7 @@ class ChatMessage {
     this.durationMs,
     this.waveform,
     this.streaming = false,
+    this.mediaCards,
   });
 
   final String messageId;
@@ -136,4 +137,19 @@ class ChatMessage {
 
   /// 当 contentType=audio 时的波形数据（0.0-1.0）。
   final List<double>? waveform;
+
+  /// 结构化媒体卡片（Coze 式架构）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `mediaCards` 字段，独立于 LLM 文本。
+  /// 前端遍历此列表直接渲染缩略图，不再依赖从 LLM 文本中解析
+  /// `[AGENT_RESULT_CARD_START]` 标记。
+  ///
+  /// 每条包含：
+  ///   - type: "image" | "video"
+  ///   - title: 标题
+  ///   - thumbnailUrl: 缩略图（优先本地 PNG）
+  ///   - mediaUrl: 媒体地址
+  ///   - pageUrl: 来源页
+  ///   - source: 来源名称
+  final List<Map<String, dynamic>>? mediaCards;
 }

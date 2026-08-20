@@ -284,12 +284,15 @@ export function attachMediaSearchMarker(
     const mediaUrl = String(it.mediaUrl ?? "").trim();
     const pageUrl = String(it.pageUrl ?? "").trim();
     const source = String(it.source ?? "").trim();
-    if (!title && !thumbnailUrl && !mediaUrl && !pageUrl) continue;
+    // 丢弃没有任何可加载媒体地址的无效项（空缩略图/空媒体地址），
+    // 保证渲染出来的媒体卡片每个都能看到图，不夹带"占了位置的空白项"。
+    const hasMedia = !!(thumbnailUrl || mediaUrl);
+    if (!hasMedia) continue;
     cardItems.push({
       type: isVideo ? "video" : "image",
-      title,
+      title: title || source || (isVideo ? "相关视频" : "图片结果"),
       // 缩略图优先本地 PNG，其次媒体地址（前端会走代理解析）
-      thumbnailUrl: thumbnailUrl || mediaUrl || pageUrl,
+      thumbnailUrl: thumbnailUrl || mediaUrl || "",
       mediaType: isVideo ? "video" : "image",
       pageUrl,
       source,
@@ -313,4 +316,72 @@ export function attachMediaSearchMarker(
   };
   const block = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload, null, 2)}\n[AGENT_RESULT_CARD_END]`;
   return `${block}\n\n${text.trim()}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 结构化媒体卡片（Coze 式架构：脱离 LLM 文本，独立下发）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 单条媒体卡片条目（前端直接渲染为缩略图+来源）。 */
+export type MediaCardItem = {
+  type: "image" | "video";
+  title: string;
+  /** 缩略图 URL（优先本地 PNG，其次媒体地址） */
+  thumbnailUrl: string;
+  /** 媒体地址 */
+  mediaUrl?: string;
+  /** 来源页 URL */
+  pageUrl?: string;
+  /** 来源名称 */
+  source?: string;
+};
+
+/**
+ * 从工具执行结果中提取结构化媒体卡片数据。
+ *
+ * 与 `attachMediaSearchMarker`（嵌入文本）不同，本函数返回纯数据结构，
+ * 由 `chat.assistant_done` 作为独立 `mediaCards` 字段下发，前端直接渲染。
+ * LLM 只负责"要不要搜图"，不负责"图片怎么展示"。
+ *
+ * 支持的工具：search_images, search_videos
+ * 返回空数组 = 无媒体卡片（不阻塞前端渲染）。
+ */
+export function extractMediaCards(
+  toolName: string | undefined,
+  toolResult: Record<string, unknown> | undefined,
+): MediaCardItem[] {
+  if (toolName !== "search_images" && toolName !== "search_videos") return [];
+  if (!toolResult) return [];
+  const rawItems = Array.isArray(toolResult.items) ? toolResult.items : [];
+  if (rawItems.length === 0) return [];
+
+  const isVideo = toolName === "search_videos";
+  const cards: MediaCardItem[] = [];
+  for (const raw of rawItems.slice(0, 6)) {
+    const it = (raw ?? {}) as Record<string, unknown>;
+    const title = String(it.title ?? "").trim();
+    const thumbnailUrl = String(it.thumbnailUrl ?? "").trim();
+    const mediaUrl = String(it.mediaUrl ?? "").trim();
+    const pageUrl = String(it.pageUrl ?? "").trim();
+    const source = String(it.source ?? "").trim();
+    // 媒体卡片必须是"能看到图/能打开视频"的真实条目：
+    // 若没有任何可加载的媒体地址（缩略图/媒体地址都为空），该条对用户无意义，
+    // 直接丢弃，避免前端出现"占了位置但 thumbnailUrl 为空"的无效项。
+    const hasMedia = !!(
+      thumbnailUrl ||
+      mediaUrl ||
+      (isVideo && pageUrl && /youtu|bilibili|video/i.test(pageUrl))
+    );
+    if (!hasMedia) continue;
+    cards.push({
+      type: isVideo ? "video" : "image",
+      title: title || source || "图片结果",
+      thumbnailUrl: thumbnailUrl || mediaUrl || "",
+      mediaUrl: mediaUrl || undefined,
+      pageUrl: pageUrl || undefined,
+      source: source || undefined,
+    });
+  }
+  // 过滤出至少有一个可展示缩略图的干净列表（双重保险：上面已按 hasMedia 过滤）
+  return cards.filter((c) => !!c.thumbnailUrl);
 }

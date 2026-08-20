@@ -10,6 +10,7 @@ import {
   filterItemsByRelevance,
   searchBingChina,
   searchBingChinaRelaxed,
+  searchWebMultiEngine,
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
 import { fetchWebPageEnhanced, extractWithReadability, decodeWithEncoding } from "./web-fetch-enhancer.js";
@@ -205,27 +206,20 @@ export class InfoHubService {
     const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
     const isNewsKeyword = intent.intent === "latest" || intent.requiresFreshWeb;
 
-    // 必应对长查询效果差，用核心实体构造简洁查询
-    // 关键修复：classifySearchIntent 已经按「具体性优先级」排好序（字母+数字 > 中文+数字 > 中英混合 > 短中文 > 纯英文），
-    // 不能简单地按长度重排（会破坏顺序，例如「今天A股最新消息」按长度会拿到「最新消息」而不是「A股」）。
-    // 策略：取第一个「够长且有信息量」的实体；过短（≤1 字符）或过于泛化（仅含时效词）的实体跳过。
-    let bingQuery = keyword;
+    // 主查询：保留完整原始 query 走向「API 优先 + 多引擎」链。
+    // 关键修复：不再把完整 query 截断成实体去搜——对搜索 API（AnySearch 等）而言完整语义召回更好，
+    // 短实体反而丢失上下文。实体仅作为必应的一条辅助查询，补足搜索引擎对长查询弱的问题。
     const stopwordEntity = /^(最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|动态|头条|怎么|如何|什么|情况)$/i;
-    const bestEntity = intent.entities.find(
-      (e) => e.length >= 2 && !stopwordEntity.test(e),
-    );
-    if (bestEntity && keyword.length > 6) {
-      // 实体存在且短于原 query（避免退化），优先用实体
-      bingQuery = bestEntity;
-    }
+    const bestEntity = intent.entities.find((e) => e.length >= 2 && !stopwordEntity.test(e));
+    const bingEndpointQuery = bestEntity && bestEntity !== keyword ? bestEntity : null;
 
-    // 4. 第一轮：实体化查询（精准）+ 科技/官方 RSS（按关键词）
-    //    同时并行发起完整原始 query 搜索（第二轮回退），避免串行等待
+    // 4. 第一轮：完整 query（主，含 API）+ 实体化必应（辅助）
+    //    同时并行发起，避免串行等待
     const bingPromises: Promise<InfoSearchItem[]>[] = [
-      searchBingChina(bingQuery, effectiveLimit, domesticOpts),
+      searchWebMultiEngine(keyword, effectiveLimit, domesticOpts),
     ];
-    if (bingQuery !== keyword) {
-      bingPromises.push(searchBingChina(keyword, effectiveLimit, domesticOpts));
+    if (bingEndpointQuery) {
+      bingPromises.push(searchBingChina(bingEndpointQuery, effectiveLimit, domesticOpts));
     }
     const [bingResults, tech, official] = await Promise.all([
       Promise.all(bingPromises),
@@ -240,11 +234,11 @@ export class InfoHubService {
     if (merged.length < sparseThreshold) {
       const fallbackQueries = [
         keyword,
-        bingQuery,
+        bingEndpointQuery,
         ...intent.entities.slice(1, 3),
       ]
-        .map((value) => value.trim())
-        .filter(Boolean);
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .map((value) => value.trim());
       const relaxedBatches = await Promise.all(
         [...new Set(fallbackQueries)].slice(0, 3).map((value) =>
           searchBingChinaRelaxed(value, effectiveLimit, domesticOpts),

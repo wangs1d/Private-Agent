@@ -12,8 +12,10 @@ import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
+  createStreamControlTagSanitizer,
   pickVisibleText,
   StreamIdleTimeoutError,
+  stripInternalControlTags,
 } from "./stream-chat-helpers.js";
 import {
   applyPromptCacheMessages,
@@ -319,17 +321,23 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
 
     let visible = "";
     try {
+      const sanitizer = createStreamControlTagSanitizer();
       const result = await consumeNormalizedStream(
         adaptOpenAiChatCompletionStream(
           stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
         ),
         {
-          onContentDelta: (d) => onDelta(d),
+          onContentDelta: (d) => {
+            // 根源净化：model 偶发会把内部控制标签（如 [STOP...] / [话题切换...]）
+            // 混进 content，逐 chunk 直推这里时先过净化器，避免标签透出到前端气泡。
+            const clean = sanitizer(d);
+            if (clean) onDelta(clean);
+          },
           providerId: this.id,
           model,
         },
       );
-      visible = pickVisibleText(result.content, result.reasoning);
+      visible = stripInternalControlTags(pickVisibleText(result.content, result.reasoning));
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
       if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {

@@ -193,6 +193,13 @@ function rememberClauses(line: string, seenClauses: Set<string>): void {
   }
 }
 
+/** 是否为 Markdown 表格行（含 ≥2 个 | 分隔）或表头分隔行：原样保留，不参与改写/去重 */
+function isMarkdownTableLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return false;
+  return trimmed.split("|").length >= 3;
+}
+
 function cleanStructuredReply(text: string): string {
   const lines = text.split(/\r?\n/);
   const out: string[] = [];
@@ -203,6 +210,12 @@ function cleanStructuredReply(text: string): string {
     const trimmed = rawLine.trim();
     if (!trimmed) {
       if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+
+    // Markdown 表格行（含分隔行）原样保留，不做改写/分句去重，避免破坏表格结构
+    if (isMarkdownTableLine(trimmed)) {
+      out.push(trimmed);
       continue;
     }
 

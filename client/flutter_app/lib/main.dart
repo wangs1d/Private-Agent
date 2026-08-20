@@ -34,6 +34,7 @@ import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
+import "core/services/image_preview_launcher.dart";
 import "features/chat/briefing_settings_page.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
@@ -65,6 +66,7 @@ import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
 import "features/wallet/wallet_page.dart";
+import "features/chat/image_preview_panel.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
 
@@ -223,6 +225,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// - RightPanelKind.friends:     好友（MailboxPage）
   /// - RightPanelKind.messages:   消息聚合（MessageHubPage）
   RightPanelKind? _rightPanel;
+
+  /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
+  ImagePreviewSnapshot? _imagePreview;
 
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
@@ -407,6 +412,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       unawaited(_openBriefingFromPayload(payload));
     });
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
+    // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
+    ImagePreviewLauncher.setHandler(_openImagePreview);
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();
@@ -1164,6 +1171,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       ? dedupResolvedText
                       : currentText;
               final String? existingPlayUrl = previous.playUrl;
+              final List<Map<String, dynamic>>? existingMediaCards = previous.mediaCards;
+              // 从 WS 载荷解析结构化媒体卡片（Coze 式架构）
+              final List<Map<String, dynamic>>? mediaCardsFromPayload =
+                  payload["mediaCards"] is List
+                      ? (payload["mediaCards"] as List)
+                          .whereType<Map<String, dynamic>>()
+                          .toList()
+                      : null;
+              // 优先使用 WS 下发的 mediaCards，若没有则保留已有（流式阶段已注入的）
+              final List<Map<String, dynamic>>? resolvedMediaCards =
+                  mediaCardsFromPayload ?? existingMediaCards;
               _messages[idx] = ChatMessage(
                 messageId: previous.messageId,
                 sessionId: previous.sessionId,
@@ -1176,11 +1194,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 contentType: previous.contentType,
                 durationMs: previous.durationMs,
                 waveform: previous.waveform,
+                mediaCards: resolvedMediaCards,
               );
             });
             await _store.saveMessage(_messages[idx]);
           } else {
             // 极端边界：完全没收到任何 chunk（只收到 done），用 finalText 兜底
+            final List<Map<String, dynamic>>? mediaCardsFromPayload =
+                payload["mediaCards"] is List
+                    ? (payload["mediaCards"] as List)
+                        .whereType<Map<String, dynamic>>()
+                        .toList()
+                    : null;
             final ChatMessage finalMessage = ChatMessage(
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
@@ -1188,6 +1213,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               text: dedupResolvedText,
               timestamp: DateTime.now(),
               playUrl: playUrl,
+              mediaCards: mediaCardsFromPayload,
             );
             setState(() {
               _messages.add(finalMessage);
@@ -2551,6 +2577,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 保存 side 模式下的原右面板宽度，关闭时恢复
       _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.schedule.defaultSplitRatio;
+    });
+  }
+
+  /// 图片预览入口：媒体卡点击 → 在右侧双栏中打开大图预览。
+  void _openImagePreview(ImagePreviewSnapshot item) {
+    setState(() {
+      _tabIndex = 0;
+      _imagePreview = item;
+      _rightPanel = RightPanelKind.imagePreview;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.imagePreview.defaultSplitRatio;
     });
   }
 
@@ -4441,6 +4479,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           scheduleApi: _scheduleApi,
           sessionId: ApiConfig.effectiveActorId,
           reloadListenable: _calendarReloadSignal,
+        );
+      case RightPanelKind.imagePreview:
+        final ImagePreviewSnapshot? item = _imagePreview;
+        if (item == null) return const SizedBox.shrink();
+        return ImagePreviewPanel(
+          url: item.url,
+          title: item.title,
+          source: item.source,
         );
       case null:
         return const SizedBox.shrink();

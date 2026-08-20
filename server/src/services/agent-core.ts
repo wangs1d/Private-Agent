@@ -65,6 +65,7 @@ import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-acces
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
+import { stripInternalControlTags } from "../external-model/stream-chat-helpers.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
 import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
@@ -2068,7 +2069,13 @@ if (this.isComplexMode(route.mode)) {
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
-            userLocation: undefined, // fast_chat 跳过位置注入
+            // 2026-08-19 修复「天气/位置在 fast 模式失效」：fast 分支此前强制
+            // userLocation=undefined。但天气类提问在 fast 模式仍会被强制走
+            // weather_get_local（见 openai-compatible-tool-loop.ts 的强制规则），
+            // LLM 拿不到位置只能传空参数 → 天气查询失败。
+            // 改为复用已获取到的位置（ctx.userLocation），让 LLM 用默认/已有位置直接查，
+            // 而非反问用户或空跑工具。没有位置时值仍为 undefined（保持原行为）。
+            userLocation: ctx.userLocation,
             personalization: ctx.personalization,
             onToolLoopAfterBatch: undefined, // fast_chat 无工具循环
             userPattern: ctx.cognitiveUserPattern,
@@ -2381,10 +2388,12 @@ private async finishLlmTurn(
     });
     let sanitizedOutput = outputSafety?.sanitized ?? assistantText;
 
-    // 剥离 LLM 回显的话题切换标签前缀（如 [话题切换，只答这个] / [话题已切换] / [Topic switched — don't revisit.]）：
-    // topic-switched 是注入给模型的内部信号，chat 模型偶发会自创方括号标签回显到回复开头。
+    // 剥离 LLM 回显的内部信号标签前缀（根源净化已在 provider 推流咽喉完成，
+    // 这里是最终兜底，双保险防标签透出）：
+    //  - 话题切换标签：[话题切换，只答这个] / [Topic switched — don't revisit.]
+    //  - 停止/待用户输入信号：[STOP needs a message from the user]
     // 零 token 程序层剥离，不做重生成。
-    sanitizedOutput = sanitizedOutput.replace(/^\s*(?:\[话题已?切换[^\]]*\]|\[[Tt]opic[^\]]*\])[\s:：—-]*/, "");
+    sanitizedOutput = stripInternalControlTags(sanitizedOutput);
 
     // 钩子 3：RuntimeKernel 后置校验（零 token，程序层拦截违规输出）
     // 全程不向 LLM 发任何约束 prompt，纯规则匹配。违规时记录日志但不阻断输出（避免循环重生成）
