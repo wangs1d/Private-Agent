@@ -2245,23 +2245,6 @@ if (this.isComplexMode(route.mode)) {
       const mem = ((baseStreamOpts.promptContext ??= {}).memory ??= {});
       if (!mem.fastVerdictInstruction) mem.fastVerdictInstruction = FAST_VERDICT_PROMPT_INSTRUCTION;
     }
-    // TEMP DEBUG（记忆注入诊断 2：最终 promptContext.memory 是否含记忆）
-    try {
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        ".memory-inject-debug.log",
-        JSON.stringify({
-          t: new Date().toISOString(),
-          phase: "streamOpts",
-          mode,
-          memoryHasNarrative: Boolean(baseStreamOpts.promptContext?.memory?.narrativeRecall),
-          memoryNarrativeHead: String(baseStreamOpts.promptContext?.memory?.narrativeRecall ?? "").slice(0, 200),
-          memoryKeys: Object.keys(baseStreamOpts.promptContext?.memory ?? {}),
-        }) + "\n",
-      );
-    } catch {
-      /* ignore */
-    }
     const runtimeKernel = getRuntimeKernel(actorId);
     // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
     // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
