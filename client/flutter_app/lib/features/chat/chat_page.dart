@@ -2180,7 +2180,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           card,
           if (remaining.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(top: 3),
+              padding: const EdgeInsets.only(top: 8),
               child: buildInlineMarkdownText(
                 remaining,
                 Theme.of(context).textTheme.bodyMedium!.copyWith(
@@ -2224,14 +2224,14 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           if (isSmallCluster) {
             blockWidgets.add(
               Padding(
-                padding: const EdgeInsets.only(top: 6, bottom: 4),
+                padding: const EdgeInsets.only(top: 8),
                 child: MediaInlineRow(items: items, cs: cs),
               ),
             );
           } else {
             blockWidgets.add(
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 8),
                 child: AgentResultCard(
                   data: AgentResultData(
                     cardType: "media",
@@ -2309,7 +2309,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           AgentResultCard(data: mediaData),
           if (displayText.trim().isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(top: 3),
+              padding: const EdgeInsets.only(top: 8),
               child: buildInlineMarkdownText(
                 displayText,
                 Theme.of(context).textTheme.bodyMedium!.copyWith(
@@ -2355,7 +2355,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                   AgentInlineVideoPlayer(data: parsed.media!),
                   if (parsed.cleaned.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(top: 6),
+                      padding: const EdgeInsets.only(top: 8),
                       child: buildInlineMarkdownText(
                         parsed.cleaned,
                         Theme.of(context).textTheme.bodyMedium!.copyWith(

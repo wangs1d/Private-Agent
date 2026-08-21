@@ -5,6 +5,10 @@ import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "content_summary_detail_formatter.dart";
+import "display_effects/compare_slider.dart";
+import "display_effects/display_effects.dart";
+import "media_gallery.dart";
+import "media_thumbnail.dart";
 
 /// 智能体结果卡片 —— 用于呈现「任务执行总结」「工具调用结果」
 /// 这类**短而固定结构**的轻量数据(3~7 条 ✓/• 项 + 可选追问)。
@@ -46,14 +50,22 @@ class AgentResultCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
-    // 工具专用卡片：cardType 非空时委托给专用 UI
-    //（时间轴/媒体等），否则走下方通用列表卡（与历史行为一致）。
+    // 展示效果独立模块（display_effects/）：服务端 display-effect-router
+    // 纯程序路由出 cardType，这里按 cardType 分发到对应效果组件
+    //（steps/metric/carousel/chips/fold_list/compare 滑杆），无 LLM 参与。
+    // 返回 null 的类型走下方既有专用卡，行为与历史版本一致。
     if (data.cardType.isNotEmpty) {
+      final Widget? effect = displayEffectsCard(data: data, cs: cs);
+      if (effect != null) return effect;
       switch (data.cardType) {
         case "search_result":
           return _SearchResultCard(data: data, cs: cs);
         case "timeline":
           return _TimelineCard(data: data, cs: cs);
+        case "progress":
+          return _ProgressCard(data: data, cs: cs);
+        case "quote":
+          return _QuoteCard(data: data, cs: cs);
         case "media":
           return _MediaCard(data: data, cs: cs);
         default:
@@ -389,6 +401,262 @@ class _SpecializedCard extends StatelessWidget {
   }
 }
 
+/// 文字进度条/图表卡：把数值型结论可视化为进度条，比纯列表更直观。
+///
+/// 约定（服务端 `AgentResultFormatter` 输出）：
+///   - item 文本形如 `任务 A 45%` / `完成度 75%` / `效率 90/100`，
+///     正则提取末尾的百分比或 `x/总分`，渲染为横向进度条；
+///   - 提不出数值的 item 回退为普通列表行。
+/// 适合：任务完成度、预算使用、评分对比、达成率等「带数字」的结论。
+class _ProgressCard extends StatelessWidget {
+  const _ProgressCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 390),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (data.title.isNotEmpty) ...<Widget>[
+            Row(
+              children: <Widget>[
+                Icon(Icons.donut_small, size: 16, color: cs.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    data.title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSurface,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+          ],
+          ...data.items.map((AgentResultItem it) {
+            return _ProgressRow(text: it.text, cs: cs);
+          }),
+          if (data.footer.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.only(top: 8),
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                    color: cs.outline.withValues(alpha: 0.28),
+                    width: 1,
+                  ),
+                ),
+              ),
+              child: buildInlineMarkdownText(
+                data.footer,
+                TextStyle(
+                  fontSize: 12.5,
+                  color: cs.onSurfaceVariant,
+                  height: 1.5,
+                ),
+                cs: cs,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 进度卡单行：`标签 xx%`（或 `x/总分`）→ 标签 + 进度条 + 百分比。
+class _ProgressRow extends StatelessWidget {
+  const _ProgressRow({required this.text, required this.cs});
+
+  final String text;
+  final ColorScheme cs;
+
+  /// 提取形如 `75%`、`45 %`、`90/100`、`0.85` 的数值。percent>1 时按 x/max 归一。
+  (String label, double? value, String? tail)? _parse() {
+    final RegExpMatch? m =
+        RegExp(r"^(.*?)\s*(?:[（(]?(\d+(?:\.\d+)?)\s*%[)）]?|(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?))\s*$")
+            .firstMatch(text);
+    if (m == null) return null;
+    final String label = m.group(1)!.trim();
+    double? v;
+    String? tail;
+    if (m.group(2) != null) {
+      v = double.tryParse(m.group(2)!);
+      tail = "${m.group(2)!}%";
+    } else if (m.group(3) != null && m.group(4) != null) {
+      final double? cur = double.tryParse(m.group(3)!);
+      final double? max = double.tryParse(m.group(4)!);
+      if (cur != null && max != null && max > 0) {
+        v = cur / max;
+        tail = "${m.group(3)!}/${m.group(4)!}";
+      }
+    }
+    if (v == null) return (label, null, tail);
+    return (label, v.clamp(0.0, 1.0), tail);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (String label, double? value, String? tail)? parsed = _parse();
+    if (parsed == null || parsed.$2 == null) {
+      // 非数值行 → 回退普通列表行
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _ItemMark(type: "bullet", colorScheme: cs),
+            const SizedBox(width: 8),
+            Expanded(
+              child: buildInlineMarkdownText(
+                text,
+                TextStyle(
+                  fontSize: 13,
+                  color: cs.onSurface.withValues(alpha: 0.82),
+                  height: 1.55,
+                ),
+                cs: cs,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    final double pct = parsed.$2!;
+    final Color barColor = pct >= 1
+        ? const Color(0xFF10B981)
+        : (pct >= 0.5 ? cs.primary : const Color(0xFFF59E0B));
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  parsed.$1,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: cs.onSurface.withValues(alpha: 0.85),
+                    height: 1.3,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                parsed.$3 ?? "${(pct * 100).round()}%",
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: barColor,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: pct,
+              minHeight: 6,
+              backgroundColor: cs.surfaceContainerHighest,
+              valueColor: AlwaysStoppedAnimation<Color>(barColor),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 引用卡：把 agent 的一句话结论做成醒目的引用强调，视觉上区别于普通正文。
+///
+/// 约定：`data.title` 为引述正文，`data.footer` 可选作为来源/出处。
+/// 适合：核心结论、金句、警告提示、强调重点。
+class _QuoteCard extends StatelessWidget {
+  const _QuoteCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    final String body = data.title.isNotEmpty ? data.title : data.footer;
+    final String source =
+        data.title.isNotEmpty ? data.footer : (data.items.isNotEmpty ? data.items.first.text : "");
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 390),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border(
+          left: BorderSide(color: cs.primary, width: 3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Icon(Icons.format_quote, size: 18, color: cs.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: buildInlineMarkdownText(
+                  body,
+                  TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                    height: 1.55,
+                  ),
+                  cs: cs,
+                ),
+              ),
+            ],
+          ),
+          if (source.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(left: 26),
+              child: buildInlineMarkdownText(
+                "— $source",
+                TextStyle(
+                  fontSize: 12,
+                  color: cs.onSurfaceVariant,
+                  height: 1.4,
+                ),
+                cs: cs,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// 在「标题：描述」/「标题 —— 描述」/「标题 — 描述」/「标题 - 描述」中找分隔位置。
 int _findTitleSep(String raw) {
   final RegExp sepRe = RegExp(r"[:：]|——|—|\s-\s|｜|\|");
@@ -626,42 +894,54 @@ class _MediaCard extends StatelessWidget {
         photos.where((p) => p.side != "A" && p.side != "B").toList();
     final bool hasColumns =
         isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
+    // A/B 任一列有独立标签时，渲染对比列头；否则省略表头。
+    final bool hasColumnHeaders =
+        (data.sideA?.trim().isNotEmpty ?? false) ||
+            (data.sideB?.trim().isNotEmpty ?? false);
 
     // A/B 对比逐行配对：A[i] 与 B[i] 同一行并排，便于肉眼逐张对比。
-    // 每张照片带来源说明；某侧缺图时该格显示「暂无图片」占位。
+    // 顶部先渲染 A/B 列头，后续每行图片填满各自列宽（方形自适应），
+    // 保证两列等宽整齐；某侧缺图时该格显示「—」占位。
     List<Widget> buildCompareRows(
       List<({String url, String caption, String side})> aList,
       List<({String url, String caption, String side})> bList,
     ) {
+      final bool showHeader = hasColumnHeaders;
       final int count = aList.length > bList.length ? aList.length : bList.length;
-      final List<Widget> rows = <Widget>[];
-      for (int i = 0; i < count; i++) {
-        rows.add(
+      final List<Widget> rows = <Widget>[
+        if (showHeader) ...<Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(child: _compareColumnHeader(data.sideA)),
+              const SizedBox(width: 8),
+              Expanded(child: _compareColumnHeader(data.sideB)),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        for (int i = 0; i < count; i++) ...<Widget>[
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Expanded(
                 child: _compareCell(
                   i < aList.length ? aList[i] : null,
-                  data.sideA,
-                  isFirstRow: i == 0,
-                  gallery: allPhotoUrls,
+                  allPhotoUrls,
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: _compareCell(
                   i < bList.length ? bList[i] : null,
-                  data.sideB,
-                  isFirstRow: i == 0,
-                  gallery: allPhotoUrls,
+                  allPhotoUrls,
                 ),
               ),
             ],
           ),
-        );
-        if (i < count - 1) rows.add(const SizedBox(height: 8));
-      }
+          if (i < count - 1) const SizedBox(height: 8),
+        ],
+      ];
       return rows;
     }
 
@@ -707,8 +987,18 @@ class _MediaCard extends StatelessWidget {
                 ],
               ),
             ),
-          // A/B 对比（逐行配对，A[i] ↔ B[i] 并排）
-          if (hasColumns)
+          // A/B 对比：恰好两侧各一张图 → 拖动对比滑杆（逐像素对比原图，
+          // 如持妆前后对比）；多张 → 逐行配对并排（A[i] ↔ B[i]）。
+          if (hasColumns && leftPhotos.length == 1 && rightPhotos.length == 1)
+            CompareSlider(
+              urlA: leftPhotos.first.url,
+              urlB: rightPhotos.first.url,
+              labelA: (data.sideA ?? "").trim(),
+              labelB: (data.sideB ?? "").trim(),
+              gallery: allPhotoUrls,
+              cs: cs,
+            )
+          else if (hasColumns)
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -735,24 +1025,19 @@ class _MediaCard extends StatelessWidget {
                   ),
                 if (plainPhotos.length == 1 && photos.length == 1)
                   // 单张：重点大图 + 说明条，点击预览
-                  _SinglePhotoTile(
-                    imageUrl: plainPhotos.first.url,
-                    caption: plainPhotos.first.caption,
+                  MediaGallery(
+                    urls: <String>[plainPhotos.first.url],
+                    captions: <String>[plainPhotos.first.caption],
+                    previewGallery: allPhotoUrls,
                     cs: cs,
                   )
                 else
-                  // 多张：网格并排，每格可点击，同一绿泡内可前后切换
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: List<Widget>.generate(plainPhotos.length, (int i) {
-                      return _GalleryImageTile(
-                        imageUrl: plainPhotos[i].url,
-                        gallery: allPhotoUrls,
-                        index: i,
-                        cs: cs,
-                      );
-                    }),
+                  // 多张：自适应网格（2 列方图 / ≥3 列小图），每格可点击，
+                  // 同一绿泡内可前后切换（预览图池用全部照片）。
+                  MediaGallery(
+                    urls: plainPhotos.map((p) => p.url).toList(),
+                    previewGallery: allPhotoUrls,
+                    cs: cs,
                   ),
               ],
             ),
@@ -789,32 +1074,52 @@ class _MediaCard extends StatelessWidget {
     return null;
   }
 
-  /// A/B 对比单格：首行显示侧标签，每张照片带来源说明；缺图显示「暂无图片」占位。
+  /// 对比列表头胶囊：左侧 A、右侧 B，突出对比维度，空标签显示「—」保持两列对齐。
+  Widget _compareColumnHeader(String? label) {
+    final String t = (label ?? "").trim();
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        t.isEmpty ? "—" : t,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11.5,
+          fontWeight: FontWeight.w700,
+          color: cs.primary,
+        ),
+      ),
+    );
+  }
+
+  /// A/B 对比单格：图片按列宽等比占满（方形自适应），下方带来源说明，点击可预览；
+  /// 该侧缺图时显示统一浅色「—」占位，与有图一侧等高对齐。
   Widget _compareCell(
     ({String url, String caption, String side})? entry,
-    String? sideLabel, {
-    required bool isFirstRow,
-    required List<String> gallery,
-  }) {
+    List<String> gallery,
+  ) {
     if (entry == null) {
-      return Container(
-        height: 96,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(4),
+      return AspectRatio(
+        aspectRatio: 1,
+        child: Container(
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+          ),
+          alignment: Alignment.center,
           child: Text(
-            sideLabel == null || sideLabel.isEmpty
-                ? "暂无图片"
-                : "$sideLabel 暂无图",
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            "—",
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w400,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.5),
+            ),
           ),
         ),
       );
@@ -823,219 +1128,40 @@ class _MediaCard extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        if (isFirstRow && sideLabel != null && sideLabel.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 3, left: 2),
-            child: Text(
-              sideLabel,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w600,
-                color: cs.primary,
-              ),
+        GestureDetector(
+          onTap: () {
+            ImagePreviewLauncher.open(
+              url: entry.url,
+              title: "图片预览",
+              gallery: gallery,
+              index: gallery.indexOf(entry.url),
+            );
+          },
+          child: AspectRatio(
+            aspectRatio: 1,
+            child: MediaThumbnail(
+              url: entry.url,
+              cs: cs,
+              width: double.infinity,
+              borderRadius: 8,
             ),
           ),
-        _GalleryImageTile(
-          imageUrl: entry.url,
-          gallery: gallery,
-          index: gallery.indexOf(entry.url),
-          cs: cs,
         ),
         if (entry.caption.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 3, left: 2),
+            padding: const EdgeInsets.only(top: 4),
             child: Text(
               entry.caption,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant),
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.35,
+                color: cs.onSurfaceVariant,
+              ),
             ),
           ),
       ],
-    );
-  }
-}
-
-/// 单张照片：大图 + 底部说明条，点击在右侧双栏打开大图预览。
-class _SinglePhotoTile extends StatelessWidget {
-  const _SinglePhotoTile({
-    required this.imageUrl,
-    required this.caption,
-    required this.cs,
-  });
-
-  final String imageUrl;
-  final String caption;
-  final ColorScheme cs;
-
-  static const double _height = 200;
-
-  @override
-  Widget build(BuildContext context) {
-    final Widget image = ClipRRect(
-      borderRadius: BorderRadius.circular(10),
-      child: SizedBox(
-        width: double.infinity,
-        height: _height,
-        child: Image.network(
-          imageUrl,
-          fit: BoxFit.cover,
-          errorBuilder: (BuildContext context, Object error,
-              StackTrace? stackTrace) {
-            return Container(
-              color: cs.surfaceContainerHighest,
-              alignment: Alignment.center,
-              child: Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant),
-            );
-          },
-          loadingBuilder: (BuildContext context, Widget child,
-              ImageChunkEvent? progress) {
-            if (progress == null) return child;
-            return Container(
-              color: cs.surfaceContainerHighest,
-              alignment: Alignment.center,
-              child: const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: () {
-          ImagePreviewLauncher.open(
-            url: imageUrl,
-            title: "图片预览",
-            gallery: <String>[imageUrl],
-            index: 0,
-          );
-        },
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            image,
-            if (caption.isNotEmpty)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
-                color: cs.surfaceContainerHighest,
-                child: Text(
-                  caption,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    color: cs.onSurface,
-                    height: 1.3,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 纯照片缩略图：正方网格格，点击在右侧双栏打开大图预览。
-///
-/// [gallery] 为同一绿泡内全部照片（已 resolve），[index] 为当前位次，
-/// 供预览面板内做「上一张 / 下一张」切换。
-class _GalleryImageTile extends StatelessWidget {
-  const _GalleryImageTile({
-    required this.imageUrl,
-    required this.cs,
-    this.gallery,
-    this.index = 0,
-  });
-
-  final String imageUrl;
-  final ColorScheme cs;
-
-  /// 同一绿泡内全部照片（已 resolve 的完整地址列表），null 时仅预览单张。
-  final List<String>? gallery;
-
-  /// 当前照片在 [gallery] 中的位置。
-  final int index;
-
-  static const double _size = 108;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () {
-        ImagePreviewLauncher.open(
-          url: _resolveMediaUrl(imageUrl),
-          title: "图片预览",
-          gallery: gallery,
-          index: index,
-        );
-      },
-      borderRadius: BorderRadius.circular(8),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          _resolveMediaUrl(imageUrl),
-          width: _size,
-          height: _size,
-          fit: BoxFit.cover,
-          errorBuilder: (BuildContext context, Object error,
-              StackTrace? stackTrace) {
-            return _GalleryPlaceholder(
-              icon: Icons.broken_image_outlined,
-              cs: cs,
-              size: _size,
-            );
-          },
-          loadingBuilder: (BuildContext context, Widget child,
-              ImageChunkEvent? loadingProgress) {
-            if (loadingProgress == null) return child;
-            return Container(
-              width: _size,
-              height: _size,
-              color: cs.surfaceContainerHighest,
-              alignment: Alignment.center,
-              child: const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class _GalleryPlaceholder extends StatelessWidget {
-  const _GalleryPlaceholder({
-    required this.icon,
-    required this.cs,
-    this.size = _GalleryImageTile._size,
-  });
-
-  final IconData icon;
-  final ColorScheme cs;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      color: cs.surfaceContainerHighest,
-      alignment: Alignment.center,
-      child: Icon(icon, color: cs.onSurfaceVariant),
     );
   }
 }
@@ -1055,12 +1181,8 @@ String? extractUrlFromText(String text) {
 /// 否则会出现「段落文字 → 大边框卡 → 段落文字」的割裂感，违反用户
 /// 「一段介绍文字然后挨着放一两张图」的产品诉求。
 ///
-/// 这里直接用 108×108 的轻量图块 + 横向 Wrap 渲染（点击仍可走
-/// `ImagePreviewLauncher` 进入右侧双栏预览），跟正文共用一个气泡，
-/// 视觉上才是「文字+图」的自然交错。
-///
-/// 单张照片（caption 非空）走 _SinglePhotoTile（200px 大图 + 说明条）的相同实现；
-/// 1 张图但无 caption 也走大图重点展示；多张走 Wrap 网格。
+/// 交给自适应画廊 [MediaGallery]：单张→Hero 大图（可带说明）；2 张→2 列方图；
+/// ≥3 张→3 列小图。跟正文共用一个气泡，视觉上才是「文字+图」的自然交错。
 class MediaInlineRow extends StatelessWidget {
   const MediaInlineRow({
     super.key,
@@ -1098,26 +1220,13 @@ class MediaInlineRow extends StatelessWidget {
       allUrls.add(resolved);
     }
     if (photos.isEmpty) return const SizedBox.shrink();
-    // 单张且无说明 → 200px 大图；单张有说明 → 200px 大图+说明；
-    // 多张 → 108×108 网格。
-    if (photos.length == 1) {
-      return _SinglePhotoTile(
-        imageUrl: photos.first.url,
-        caption: photos.first.caption,
-        cs: cs,
-      );
-    }
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: List<Widget>.generate(photos.length, (int i) {
-        return _GalleryImageTile(
-          imageUrl: photos[i].url,
-          gallery: allUrls,
-          index: i,
-          cs: cs,
-        );
-      }),
+    // 交给自适应画廊：单张→Hero 大图；2 张→2 列方图；≥3 张→3 列小图。
+    // 预览图池沿用全部照片，画廊内可「上一张 / 下一张」切换。
+    return MediaGallery(
+      urls: allUrls,
+      captions: photos.map((p) => p.caption).toList(),
+      previewGallery: allUrls,
+      cs: cs,
     );
   }
 

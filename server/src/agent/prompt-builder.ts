@@ -545,6 +545,8 @@ export function sliceMemoryEntriesToPromptContext(
   const persona = str(entries["persona"]) || str(entries["soul"]);
   const values = str(entries["values"]) || str(entries["values_profile"]);
   const abilities = str(entries["abilities"]) || str(entries["skill_tendencies"]);
+  // user_profile KV：作为文件版用户画像的后备基底（见 assembleMemory 中 file 优先于 KV 的合并）
+  const userProfileFromKv = str(entries["user_profile"]);
 
   const memoryParts: string[] = [];
   for (const [k, v] of Object.entries(entries)) {
@@ -586,6 +588,7 @@ export function sliceMemoryEntriesToPromptContext(
 
   const out: AgentPromptMemoryContext = {};
   if (persona) out.persona = persona;
+  if (userProfileFromKv) out.userProfile = userProfileFromKv;
   if (values) out.values = values;
   if (abilities) out.abilities = abilities;
   if (memorySummary) out.memorySummary = memorySummary;
@@ -658,7 +661,8 @@ export function buildLayeredSystemPrompt(
     !memory?.skillIndex &&
     !memory?.workingMemorySummary &&
     !memory?.recentConversationHistory &&
-    !memory?.semanticIntent
+    !memory?.semanticIntent &&
+    !memory?.fastVerdictInstruction
   ) {
     return baseSystem.trim();
   }
@@ -703,6 +707,8 @@ export function buildLayeredSystemPrompt(
   // 语义意图理解：让 LLM 明确知道用户本轮真实意图，避免答非所问
   if (memory.semanticIntent) parts.push(`【意图理解】\n${memory.semanticIntent}`);
   if (memory.skillIndex) parts.push(memory.skillIndex);
+  // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
+  if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -746,7 +752,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.skillIndex ||
       memory?.workingMemorySummary ||
       memory?.recentConversationHistory ||
-      memory?.semanticIntent
+      memory?.semanticIntent ||
+      memory?.fastVerdictInstruction
   );
 }
 
@@ -799,6 +806,9 @@ export function buildLayeredSystemPromptSections(
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.skillIndex) dynamicContext.push(m.skillIndex);
+  if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
+  // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
+  if (m.fastVerdictInstruction) dynamicContext.push(m.fastVerdictInstruction);
 
   return { stablePrefix, dynamicContext };
 }

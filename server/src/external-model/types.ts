@@ -136,6 +136,13 @@ export type AgentPromptMemoryContext = {
    * 作为独立块注入，让主 LLM 明确知道"用户想做什么"，避免答非所问。
    */
   semanticIntent?: string;
+  /**
+   * FastVerdict 输出规范（仅 fast 模式 + FAST_VERDICT_ENABLED 时注入）。
+   * 要求 fast 在回复末尾附加隐藏结构化块 `<<<verdict:{json}>>>`，
+   * 供服务端流式解析取出与剥离（判定难度 + 产出给 complex 的封闭任务规范）。
+   * 该块不展示给用户。
+   */
+  fastVerdictInstruction?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

@@ -7,6 +7,7 @@ import {
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { classifyRenderHint } from "./render-hint-service.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
+import { hasBlockquote } from "./display-effect-router.js";
 
 const CONTENT_LENGTH_THRESHOLD = 800;
 
@@ -113,6 +114,17 @@ export class ToolResultProcessor {
         // 同样注入 item 级 url（媒体卡片依赖它渲染缩略图/跳转）
         marked = injectItemUrls(marked);
         console.log(`[ToolResultProcessor] result_card: ${hint.reason}`);
+        return marked;
+      }
+    }
+
+    // 优先级 2.5：markdown 引用块（> xxx）→ quote 引用强调卡。
+    // 纯程序路由（display-effect-router.hasBlockquote），无 LLM 参与；
+    // 引用块天然是一句话结论/强调场景，优先于 brief/structured。
+    if (!opts?.plainTextMode && hasBlockquote(workingText)) {
+      const marked = formatAgentResultForChat(workingText, opts?.toolName);
+      if (marked) {
+        console.log("[ToolResultProcessor] quote: markdown blockquote detected");
         return marked;
       }
     }

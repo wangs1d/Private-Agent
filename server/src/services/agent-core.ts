@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
+import { parseFastVerdict, stripFastVerdictMarker, VerdictStreamGuard, type FastTaskSpec } from "../utils/fast-verdict.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
@@ -14,9 +15,27 @@ import type { LocationCoordinator } from "./location-coordinator.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { SemanticIntentParser, SemanticIntent } from "./semantic-intent-types.js";
 import type { SemanticIntentService } from "./semantic-intent-service.js";
+import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 
 /** 意图澄清置信度阈值：低于此值且 clarificationNeeded 时触发澄清反问 */
 const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
+
+/**
+ * FastVerdict 输出规范（fast 模式注入 system prompt）。
+ * 要求 fast 在回复正文末尾另附一行隐藏结构化块，供服务端解析剥离，不展示给用户：
+ *  `<<<verdict:{单行 JSON}>>>`
+ * 用于：判定本轮是否需并行 complex + 产出交给 complex 的封闭任务规范。
+ * 置于最后，保证正文之后的判定不抢占视觉效果。
+ */
+const FAST_VERDICT_PROMPT_INSTRUCTION = `【隐藏判定块·fast】本轮回复正文结束后，另起一行单独输出下面这个隐藏块（供服务端任务编排，绝不展示给用户，你正文里也不要提到它）：
+<<<verdict:{"need_complex":布尔,"difficulty":"simple|needs_external|multi_step","task_spec":{...}}>>>
+要求：
+- JSON 必须为单行合法 JSON，不要在块前后追加任何说明文字，不要把块写在正文里。
+- need_complex：本轮是否需要在后台并行 complex（查实时/外部信息、调工具/skill/MCP、多步任务）。
+- difficulty：simple=纯闲聊/常识/可直接作答；needs_external=需查实时或外部信息；multi_step=需多步协调/写操作/派子Agent。
+- task_spec 仅当 need_complex 为 true 时给出，为 { goal:简洁目标, expected_output:明确产出要求, constraints:约束或"无", tool_hints:建议工具名数组, budget:{max_tool_rounds,max_llm_calls} }。
+- 判定只取一次：simple 一律 need_complex=false 且不带 task_spec；needs_external/multi_step 才 need_complex=true。
+返回示例（need_complex=true）：<<<verdict:{"need_complex":true,"difficulty":"needs_external","task_spec":{"goal":"查询2026年奥斯卡最佳影片及导演","expected_output":"影片名+导演+一句话获奖说明，以事实为准","constraints":"无","tool_hints":["web.search"],"budget":{"max_tool_rounds":2,"max_llm_calls":3}}}>>>`;
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
@@ -489,6 +508,16 @@ export class AgentCore {
     const sessionId = opts?.sessionId ?? actorId;
     /** 语义意图理解结果 */
     let semanticIntent: SemanticIntent | undefined;
+
+    // 身份/记忆 Markdown 文档懒种子：每个 actor 每进程只做一次（启动种子已覆盖老 actor），
+    // 在构建 prompt 前确保 SOUL/USER/MEMORY.md 已写入 KV，让本轮回复即可感知。
+    if (this.agentMemorySyncService) {
+      try {
+        await seedIdentityMarkdown(this.agentMemorySyncService, actorId);
+      } catch (e) {
+        console.error(`[AgentCore] 身份/记忆懒种子失败(${actorId}):`, e);
+      }
+    }
 
     // 用户开口即打断小脑：清空该 actor 的 defer 队列 + 设 60s 抑制窗口，
     // 让"用户开口时 Agent 不抢话"从注释变成可执行逻辑。
@@ -1028,7 +1057,16 @@ if (this.isComplexMode(route.mode)) {
       // fast 路径：同步执行（秒回）
       const standardStartTime = Date.now();
 
-      result = await this.runStandardLlmPath(actorId, text, "fast", opts, {
+      // 流式尾部防漏：仅当 verdict 特性开启时，缓冲识别并在 live 上吞掉 verdict 块
+      const fastVerdictEnabled = process.env.FAST_VERDICT_ENABLED === "1";
+      let verdictGuard: VerdictStreamGuard | null = null;
+      let guardedFastOpts: HandleUserMessageOptions | undefined = opts;
+      if (fastVerdictEnabled && opts?.onAssistantDelta) {
+        verdictGuard = new VerdictStreamGuard(opts.onAssistantDelta);
+        guardedFastOpts = { ...opts, onAssistantDelta: (delta) => verdictGuard!.push(delta) };
+      }
+
+      result = await this.runStandardLlmPath(actorId, text, "fast", guardedFastOpts, {
         narrativeRecall: enrichedNarrativeRecall,
         workingMemorySummary,
         recentConversationHistory,
@@ -1044,6 +1082,8 @@ if (this.isComplexMode(route.mode)) {
         cognitiveToolPlan,
       });
 
+      verdictGuard?.end();
+
       const standardDuration = Date.now() - standardStartTime;
 
       // 记录标准模式性能
@@ -1058,10 +1098,53 @@ if (this.isComplexMode(route.mode)) {
         success: true,
       });
 
+      // ── FastVerdict 判定（feature flag 灰发布）：fast 单次判难 + 产出交接规范 ──
+      // fast 回复末尾附隐藏 JSON 块 `<<<verdict:{...}>>>`，解析后剥离不推用户。
+      // 命中 need_complex + task_spec 时，用 task_spec 启动后台 complex（而非原始用户文本），
+      // 走 completeParallelLiveContinuation（缓冲 + 句级去重 + fast 口语化续接），不再原样流式推送。
+      const verdict =
+        fastVerdictEnabled && result.text ? parseFastVerdict(result.text) : null;
+      // 对用户可见的正文：剥离 FastVerdict 块（未命中标记则为原样）。
+      const fastReplyForUser = stripFastVerdictMarker(result.text);
+      let verdictDroveUpgrade = false;
+
+      if (
+        verdict?.need_complex &&
+        verdict.task_spec &&
+        this.isFastMode(route.mode) &&
+        !parallelLiveRaw &&
+        this.masterAgentCoordinator &&
+        getAgentRuntimeConfig().masterDelegation.enabled
+      ) {
+        console.log(
+          `[AgentCore] fast verdict 判需并行 complex：difficulty=${verdict.difficulty} ` +
+            `goal="${verdict.task_spec.goal.slice(0, 40)}"`,
+        );
+        verdictDroveUpgrade = true;
+        const verdictComplexPromise = this.startComplexFromVerdict(
+          actorId,
+          verdict.task_spec,
+          opts,
+          orchestrateOpts,
+        );
+        if (verdictComplexPromise) {
+          void this.completeParallelLiveContinuation(
+            verdictComplexPromise,
+            actorId,
+            text,
+            fastReplyForUser,
+            opts,
+            sessionId,
+          );
+        }
+      }
+
       // ── 兜底机制：fast 回复检测 hedging 信号 → 后台升级 complex ──
       // 低置信度已在路由阶段前移升级，此处仅覆盖「规则判 fast 高置信但实际需外部信息」的少数场景。
       // 后台升级：fast 先答，complex 后台补充，完成后结果无缝流式回传。
+      // Verdict 已接管时跳过，避免双重启动 complex。
       if (
+        !verdictDroveUpgrade &&
         this.masterAgentCoordinator &&
         getAgentRuntimeConfig().masterDelegation.enabled &&
         result.text &&
@@ -1096,12 +1179,14 @@ if (this.isComplexMode(route.mode)) {
           parallelLiveRaw,
           actorId,
           text,
-          result.text,
+          fastReplyForUser,
           opts,
           sessionId,
         );
       }
 
+      // FastVerdict 块已剥离，返回对用户可见的正文
+      result.text = fastReplyForUser;
       return result;
       
     } catch (err) {
@@ -1438,6 +1523,32 @@ if (this.isComplexMode(route.mode)) {
       {
         ...orchestrateOpts,
         ephemeralSessionId: liveSessionId,
+      },
+    );
+  }
+
+  /**
+   * FastVerdict 驱动的后台 complex：用 fast 产出的 task_spec 启动，而非原始用户文本。
+   * 不传 onDelta（不原样流式推送），结果交给 completeParallelLiveContinuation
+   * 缓冲 + 句级去重 + fast 口语化续接，避免"整段重复"。
+   */
+  private startComplexFromVerdict(
+    actorId: string,
+    taskSpec: FastTaskSpec,
+    opts: HandleUserMessageOptions | undefined,
+    orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>,
+  ): Promise<string> | null {
+    const coordinator = this.masterAgentCoordinator;
+    if (!coordinator || !taskSpec.goal) return null;
+    const verdictSessionId = `verdict-complex-${actorId}-${opts?.chatUserMessageId ?? Date.now()}-${randomUUID()}`;
+    return coordinator.orchestrateTask(
+      actorId,
+      taskSpec.goal,
+      opts?.onAgentPhaseStatus,
+      undefined,
+      {
+        ...orchestrateOpts,
+        ephemeralSessionId: verdictSessionId,
       },
     );
   }
@@ -2105,6 +2216,14 @@ if (this.isComplexMode(route.mode)) {
           toolExposureProfile,
           toolRankingHint,
         };
+    // FastVerdict 输出规范：仅 fast 模式 + 特性开启时注入。
+    // 要求 fast 在回复末尾附一行隐藏结构化块 `<<<verdict:{json}>>>`，
+    // 供服务端流式解析取出与剥离（判定难度 + 产出给 complex 的封闭任务规范），不展示给用户。
+    const verdictEnabledInLane = process.env.FAST_VERDICT_ENABLED === "1";
+    if (verdictEnabledInLane && this.isFastMode(mode)) {
+      const mem = ((baseStreamOpts.promptContext ??= {}).memory ??= {});
+      if (!mem.fastVerdictInstruction) mem.fastVerdictInstruction = FAST_VERDICT_PROMPT_INSTRUCTION;
+    }
     // TEMP DEBUG（记忆注入诊断 2：最终 promptContext.memory 是否含记忆）
     try {
       const { appendFileSync } = await import("node:fs");
