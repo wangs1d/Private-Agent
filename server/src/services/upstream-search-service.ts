@@ -38,6 +38,10 @@ export type MediaSearchItem = {
   width?: number;
   height?: number;
   duration?: string;
+  /** 对比分组元数据（由 searchImagesBatch 注入，供前端分组渲染） */
+  compareSide?: "A" | "B";
+  compareLabel?: string;
+  compareGroup?: string;
 };
 
 export class UpstreamSearchService {
@@ -237,7 +241,7 @@ export class UpstreamSearchService {
     return result;
   }
 
-  async searchImages(query: string, limit = 8, actorId = "anonymous"): Promise<{
+  async searchImages(query: string, limit = 4, actorId = "anonymous"): Promise<{
     provider: string;
     mediaType: "image";
     items: MediaSearchItem[];
@@ -247,7 +251,10 @@ export class UpstreamSearchService {
     if (!keyword) {
       return { provider: "bing-images", mediaType: "image", items: [], notes: ["query 不能为空"] };
     }
-    const boundedLimit = clamp(limit, 1, 12);
+    // 单次默认 4、上限 8：单 call 不应铺一整面图墙；
+    // LLM 需要更多张时应拆成多个细粒度 query 并行搜（如多个地点/多个主题各搜一次），
+    // 由前端 renderBlocks 把「每段文字→对应一组照片」自然交错。
+    const boundedLimit = clamp(limit, 1, 8);
 
     // 优先走已接入的搜索 API（search-images-via-search-api）拿真实图源 URL；
     // 与正文搜索 searchWeb 同源策略：API 优先，爬图片网页仅作兜底。
@@ -294,6 +301,136 @@ export class UpstreamSearchService {
       mediaType: "image",
       items: [],
       notes: ["未能把图片结果转存为 PNG，已避免返回普通网页链接"],
+    };
+  }
+
+  /**
+   * 对比式批量图片搜索（代码层实现，不依赖 LLM prompt 编排）。
+   *
+   * 一次调用按「对比维度 × 两侧」并行出图，返回分组结构 mediaGroups：
+   *   - query 含 `A vs B`/`A对比B`/`A和B对比` 时自动拆成 sideA/sideB 两侧；
+   *   - dimensions 提供多个维度（水屋/沙屋/餐厅…）时，每个维度生成
+   *     `${sideA} ${维度}` 与 `${sideB} ${维度}` 两组并行搜索；
+   *   - 未提供 dimensions 时退化为单组：用两侧公共子串推断维度标题。
+   *
+   * 每一张图都打上 compareSide / compareLabel / compareGroup 标记，
+   * 前端据此按维度分组、左右两侧分栏渲染（对比图不再混作一张九宫格）。
+   */
+  async searchImagesBatch(
+    query: string,
+    dimensions: string[] | undefined,
+    limitPerGroup: number,
+    actorId: string,
+  ): Promise<{
+    provider: string;
+    mediaType: "image";
+    items: MediaSearchItem[];
+    mediaGroups?: Array<{
+      title: string;
+      sideA: string;
+      sideB?: string;
+      itemsA: MediaSearchItem[];
+      itemsB: MediaSearchItem[];
+    }>;
+    notes: string[];
+  }> {
+    const keyword = String(query ?? "").trim();
+    if (!keyword) {
+      return { provider: "none", mediaType: "image", items: [], mediaGroups: [], notes: ["query 不能为空"] };
+    }
+
+    // 1) 解析两侧：query 内带对比连接词则拆成 A/B，否则整句作为单侧
+    const pair = splitCompareQuery(keyword);
+    const sideA = pair?.sideA ?? keyword;
+    const sideB = pair?.sideB;
+
+    // 2) 组装分组规格：dimensions 优先；否则单组 + LCS 推断维度标题
+    const dimList = (dimensions ?? [])
+      .map((d) => String(d ?? "").trim())
+      .filter((d) => d && d.length <= 20)
+      .slice(0, MAX_COMPARE_GROUPS);
+    const groups: Array<{ title: string; qA: string; qB?: string }> = [];
+    if (dimList.length > 0) {
+      for (const dim of dimList) {
+        groups.push({
+          title: dim,
+          qA: `${sideA} ${dim}`.trim(),
+          qB: sideB ? `${sideB} ${dim}`.trim() : undefined,
+        });
+      }
+    } else {
+      const dim = pair ? cleanDimension(longestCommonSubstring(sideA, sideB ?? "")) : "";
+      groups.push({ title: dim, qA: sideA, qB: sideB });
+    }
+
+    // 3) 每侧保留张数（对比图追求"分类清、不混排"，单侧限制更小）
+    const perSide = Math.max(1, Math.min(limitPerGroup, MAX_IMAGES_PER_SIDE));
+
+    // 4) 所有组 × 两侧并行搜索（组间并行，受 12s 工具超时约束；搜索内部自带转存预算）
+    const settled = await Promise.allSettled(
+      groups.map(async (g) => {
+        const [a, b] = await Promise.all([
+          this.searchImages(g.qA, perSide, actorId),
+          g.qB ? this.searchImages(g.qB, perSide, actorId) : Promise.resolve(null),
+        ]);
+        return { g, a, b };
+      }),
+    );
+
+    const mediaGroups: Array<{
+      title: string;
+      sideA: string;
+      sideB?: string;
+      itemsA: MediaSearchItem[];
+      itemsB: MediaSearchItem[];
+    }> = [];
+    const flatItems: MediaSearchItem[] = [];
+    const oneSidedDims: string[] = [];
+    for (const r of settled) {
+      if (r.status !== "fulfilled") continue;
+      const { g, a, b } = r.value;
+      const itemsA = tagCompareSide(a?.items ?? [], "A", sideA, g.title);
+      const itemsB = tagCompareSide(b?.items ?? [], "B", sideB ?? "", g.title);
+      if (itemsA.length === 0 && itemsB.length === 0) continue;
+      // 容错标注：某维度仅搜到单侧图片时，记录维度名供 notes 透出（前端分栏显示空侧）
+      if (itemsA.length === 0 || itemsB.length === 0) {
+        oneSidedDims.push(g.title);
+      }
+      mediaGroups.push({ title: g.title, sideA, sideB, itemsA, itemsB });
+      flatItems.push(...itemsA, ...itemsB);
+    }
+
+    // 5) 兜底：全组失败 → 退化单侧搜索，保证至少出图
+    if (mediaGroups.length === 0) {
+      const fallback = await this.searchImages(sideA, perSide, actorId);
+      if (fallback.items.length > 0) {
+        const dim = pair ? cleanDimension(longestCommonSubstring(sideA, sideB ?? "")) : "";
+        mediaGroups.push({
+          title: dim,
+          sideA,
+          sideB,
+          itemsA: tagCompareSide(fallback.items, "A", sideA, dim),
+          itemsB: [],
+        });
+        flatItems.push(...fallback.items);
+      }
+    }
+
+    const notes: string[] = [
+      `已按 ${mediaGroups.length} 个维度分组对比出图，每侧各取 ${perSide} 张`,
+    ];
+    if (oneSidedDims.length > 0) {
+      notes.push(
+        `维度「${oneSidedDims.join("、")}」仅搜到单侧图片，另一侧暂无图`,
+      );
+    }
+
+    return {
+      provider: pair ? "compare-batch" : "image-batch",
+      mediaType: "image",
+      items: flatItems,
+      mediaGroups,
+      notes,
     };
   }
 
@@ -861,6 +998,92 @@ const IMAGE_FETCH_TIMEOUT_MS = 5_000;
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
   return Math.max(min, Math.min(max, Math.floor(input)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 对比式批量图片搜索：代码层拆「A vs B」两侧 + 多维度分组（不依赖 LLM prompt）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 对比分组数量上限（受 12s 工具超时约束，避免并行搜索过多拖垮整体） */
+const MAX_COMPARE_GROUPS = 3;
+/** 单侧最多保留图片张数 */
+const MAX_IMAGES_PER_SIDE = 3;
+/** 维度标题里需要剔除的噪音词 */
+const DIMENSION_FILTER_WORDS = [
+  "图片", "照片", "图", "长什么样", "长啥样", "怎么样", "什么样", "样子",
+  "对比", "比較", "比较", "哪个好", "怎么选", "选择", "选哪个", "看看", "有哪些", "推荐",
+];
+
+/**
+ * 从 query 中识别成对对比结构：`A vs B` / `A对比B` / `A比较B` / `A pk B` /
+ * `A和B对比` / `A与B对比`。需要显式对比连接词，避免误拆普通并列（"鱼和薯条"）。
+ * 返回 null 表示非成对 query。
+ */
+function splitCompareQuery(query: string): { sideA: string; sideB: string } | null {
+  const q = String(query ?? "").trim().replace(/\s+/g, " ");
+  if (!q) return null;
+
+  // 1) 中置对比连接词：A vs B / A对比B / A比较B / A pk B
+  const mid = q.match(
+    /^(.*?)\s+(?:vs|VS|pk|PK|对比|比較|比较)(?:\s*[:：]\s*|\s+)(.*)$/,
+  );
+  if (mid && mid[1].trim() && mid[2].trim()) {
+    return { sideA: mid[1].trim(), sideB: mid[2].trim() };
+  }
+
+  // 2) 尾部对比结构：A和B对比 / A与B比较（连接词在句末）
+  const tail = q.match(
+    /^(.*?)(?:和|与)(.*?)(?:对比|比較|比较|PK|pk|哪个好|怎么选|选哪个|选择)(?:\s*)$/,
+  );
+  if (tail && tail[1].trim() && tail[2].trim()) {
+    return { sideA: tail[1].trim(), sideB: tail[2].trim() };
+  }
+
+  return null;
+}
+
+/**
+ * 最长公共子串：用于从「马尔代夫水屋 vs 印尼水屋」这类成对 query 中
+ * 提取两侧公共的维度词（如「水屋」）。query 短（<40 字符），O(n³) 可接受。
+ */
+function longestCommonSubstring(a: string, b: string): string {
+  if (!a || !b) return "";
+  let best = "";
+  const n = a.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j <= n; j++) {
+      const sub = a.slice(i, j);
+      if (sub.trim().length > best.length && b.includes(sub)) {
+        best = sub;
+      }
+    }
+  }
+  return best.trim();
+}
+
+/** 清洗维度标题：剔除「图片/对比/哪个好」等噪音词，压缩空白。 */
+function cleanDimension(dim: string): string {
+  if (!dim) return "";
+  let out = dim.trim();
+  for (const w of DIMENSION_FILTER_WORDS) {
+    out = out.split(w).join(" ");
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/** 给每张图打上对比分组元数据（供前端按维度分组、左右分栏渲染）。 */
+function tagCompareSide(
+  items: MediaSearchItem[],
+  side: "A" | "B",
+  label: string,
+  group: string,
+): MediaSearchItem[] {
+  return items.map((it) => ({
+    ...it,
+    compareSide: side,
+    compareLabel: label,
+    compareGroup: group,
+  }));
 }
 
 /**

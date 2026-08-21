@@ -15,6 +15,7 @@ import "../../core/utils/content_summary_parser.dart";
 import "../../core/utils/markdown_strip.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/agent_profile_overlay_launcher.dart";
+import "../../core/services/image_preview_launcher.dart";
 import "agent_profile_page.dart";
 import "agent_action_choice_card.dart";
 import "agent_result_card.dart";
@@ -230,6 +231,10 @@ class _ChatPageState extends State<ChatPage>
   // （应用重启后自然重置为 false → 滚到底部）
   bool _isRestoringPosition = false; // 恢复锁：正在恢复位置时阻止所有自动滚动
 
+  /// 图片预览锚点：点击图片打开右侧面板前记录当前滚动位置，
+  /// 打开后列表可能因重新布局跳到最底部，用锚点把视图拉回图片所在位置。
+  double? _previewAnchor;
+
   // 预定义常量 - 减少重复创建对象
   static const EdgeInsets _listPadding =
       EdgeInsets.symmetric(horizontal: 12, vertical: 4);
@@ -259,6 +264,8 @@ class _ChatPageState extends State<ChatPage>
     ));
     // 监听滚动：检测用户是否在手动滚动
     _scrollController.addListener(_onScroll);
+    // 图片预览打开前记录滚动锚点，避免打开右侧面板后列表跳到最底部
+    ImagePreviewLauncher.beforeOpen = _savePreviewAnchor;
     // 同步初始 Tab 激活状态（关键：必须与 widget.isActive 一致，否则首次切走时保存会被跳过）
     _isTabActive = widget.isActive;
     // 注意：ListView 使用 reverse=true，天然从底部开始渲染，无需 jumpTo
@@ -310,6 +317,45 @@ class _ChatPageState extends State<ChatPage>
         // 滚回底部时清除新消息标记（仅更新局部状态）
         _hasNewAgentMessage = false;
       }
+    }
+  }
+
+  /// ====== 图片预览滚动锚点 ======
+  ///
+  /// 打开右侧图片预览面板时，列表会因重新布局（分栏宽度变化）被重置，
+  /// 可能跳到最底部。这里在「打开前」记录当前滚动位置，随后分多帧把视图
+  /// 拉回锚点，保证照片仍停留在用户原来看的那条位置。
+  void _savePreviewAnchor() {
+    if (!_scrollController.hasClients) return;
+    _previewAnchor = _scrollController.position.pixels;
+    // 面板 setState 触发的重新布局在下一帧发生，分帧恢复更稳妥
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _restorePreviewAnchor(tries: 3));
+  }
+
+  void _restorePreviewAnchor({int tries = 3}) {
+    final double? target = _previewAnchor;
+    if (target == null) return;
+    if (!_scrollController.hasClients) {
+      if (tries > 0) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _restorePreviewAnchor(tries: tries - 1));
+      } else {
+        _previewAnchor = null;
+      }
+      return;
+    }
+    final double max = _scrollController.position.maxScrollExtent;
+    final double p = target.clamp(0.0, max);
+    if ((_scrollController.position.pixels - p).abs() > 2) {
+      _scrollController.jumpTo(p);
+    }
+    if (tries > 0) {
+      _previewAnchor = p;
+      WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _restorePreviewAnchor(tries: tries - 1));
+    } else {
+      _previewAnchor = null;
     }
   }
 
@@ -401,10 +447,15 @@ class _ChatPageState extends State<ChatPage>
 
   @override
   void dispose() {
+    // 解除图片预览锚点钩子，避免跨页面残留
+    if (ImagePreviewLauncher.beforeOpen == _savePreviewAnchor) {
+      ImagePreviewLauncher.beforeOpen = null;
+    }
     _breathingController?.dispose();
     _speechService.cancel();
     _scrollController.dispose();
     _isUserScrollingNotifier.dispose();
+    _previewAnchor = null;
     super.dispose();
   }
 
@@ -2004,6 +2055,19 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                         : null,
                 typewriterCursor: _typeTimer != null && _typeCursorOn,
               ),
+              // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
+              // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后
+              // pendingMediaCards 被清空，由 renderBlocks 的最终顺序接管。
+              if (!widget.isUser &&
+                  widget.mainMessage.pendingMediaCards != null &&
+                  widget.mainMessage.pendingMediaCards!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: _buildPendingMediaCards(
+                    widget.mainMessage.pendingMediaCards!,
+                    cs,
+                  ),
+                ),
               if (!widget.isUser &&
                   !_typewriterActive &&
                   widget.contentSummary?.summary == null &&
@@ -2026,6 +2090,39 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           ),
         ),
       ),
+    );
+  }
+
+  /// 媒体卡 Map（renderBlocks / mediaCards / pendingMediaCards 三者同构）→ AgentResultItem。
+  /// 三处构建逻辑相同，提取共用，避免重复。
+  static AgentResultItem _cardToItem(Map<String, dynamic> m) {
+    return AgentResultItem(
+      type: m["type"]?.toString() ?? "image",
+      text: m["title"]?.toString() ?? "",
+      mediaType:
+          m["mediaType"]?.toString() ?? m["type"]?.toString() ?? "image",
+      thumbnailUrl: m["thumbnailUrl"]?.toString(),
+      mediaUrl: m["mediaUrl"]?.toString(),
+      pageUrl: m["pageUrl"]?.toString(),
+      source: m["source"]?.toString(),
+      side: m["side"]?.toString(),
+      sideLabel: m["sideLabel"]?.toString(),
+    );
+  }
+
+  /// 边说边出图：把流式阶段 `chat.media_ready` 收到的临时照片渲染成媒体卡。
+  /// 仅流式阶段使用（pendingMediaCards 为瞬态）；`chat.assistant_done` 后
+  /// 该字段被清空，改由 renderBlocks 的最终顺序（一段文字→一组照片）接管。
+  ///
+  /// 用轻量 `MediaInlineRow` 渲染：边说边出图是「文字正在打、图已经查到」阶段，
+  /// 这里就该是「几行文字 + 几张图紧贴文字」的自然形态，不应套大 card 框。
+  static Widget _buildPendingMediaCards(
+    List<Map<String, dynamic>> cards,
+    ColorScheme cs,
+  ) {
+    return MediaInlineRow(
+      items: cards.map(_cardToItem).toList(),
+      cs: cs,
     );
   }
 
@@ -2097,6 +2194,73 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
+    // 交错渲染块（renderBlocks）：服务端已按「分组关键词在正文中的出现位置」
+    // 把最终正文切成有序的「文字段 + 媒体组」，前端按块顺序渲染即可得到
+    // 「一段文字介绍 → 一组照片 → 再一段文字 → 再一组照片」的自然阅读节奏，
+    // 替代旧行为「全部照片一次性铺在最前面」。由代码层确定性完成，不依赖 prompt。
+    final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
+    if (renderBlocks != null && renderBlocks.isNotEmpty) {
+      final List<Widget> blockWidgets = <Widget>[];
+      final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
+            color: cs.onSurface.withValues(alpha: 0.85),
+            height: 1.4,
+          );
+      for (final Map<String, dynamic> block in renderBlocks) {
+        final String type = block["type"]?.toString() ?? "text";
+        if (type == "media") {
+          final List<Map<String, dynamic>> cards =
+              (block["cards"] as List<dynamic>? ?? const <dynamic>[])
+                  .whereType<Map<String, dynamic>>()
+                  .toList();
+          if (cards.isEmpty) continue;
+          final List<AgentResultItem> items = cards.map(_cardToItem).toList();
+          final String groupTitle = (block["groupTitle"] ?? "").toString().trim();
+          final String sideA = (block["sideA"] ?? "").toString().trim();
+          final String sideB = (block["sideB"] ?? "").toString().trim();
+          // 小簇判断：无维度标题/无 A/B 对比 → 走轻量内联行（紧贴文字，不套大卡框）。
+          // 这是「一段介绍文字后挨着放一两张图」的关键视觉决策。
+          final bool isSmallCluster =
+              groupTitle.isEmpty && sideA.isEmpty && sideB.isEmpty;
+          if (isSmallCluster) {
+            blockWidgets.add(
+              Padding(
+                padding: const EdgeInsets.only(top: 6, bottom: 4),
+                child: MediaInlineRow(items: items, cs: cs),
+              ),
+            );
+          } else {
+            blockWidgets.add(
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: AgentResultCard(
+                  data: AgentResultData(
+                    cardType: "media",
+                    title: "",
+                    items: items,
+                    footer: "",
+                    groupTitle: groupTitle.isEmpty ? null : groupTitle,
+                    sideA: sideA.isEmpty ? null : sideA,
+                    sideB: sideB.isEmpty ? null : sideB,
+                  ),
+                ),
+              ),
+            );
+          }
+        } else {
+          final String text = block["text"]?.toString() ?? "";
+          if (text.trim().isEmpty) continue;
+          blockWidgets.add(buildInlineMarkdownText(text, bodyStyle, cs: cs));
+        }
+      }
+      if (blockWidgets.isNotEmpty) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: blockWidgets,
+        );
+      }
+    }
+
     // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本渲染。
     //
     // 来自服务端 `chat.assistant_done` 的 `mediaCards` 字段，与 LLM 的文本回复
@@ -2106,34 +2270,48 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 与 `AgentResultParser.parse` 不同：这里读取的是 `ChatMessage.mediaCards`
     // 字段（结构化数据），而非从消息文本中解析标记。
     final List<Map<String, dynamic>>? mediaCards = message.mediaCards;
-    if (mediaCards != null && mediaCards.isNotEmpty) {
-      final List<AgentResultItem> items = mediaCards.map((m) {
-        return AgentResultItem(
-          type: m["type"]?.toString() ?? "image",
-          text: m["title"]?.toString() ?? "",
-          mediaType: m["mediaType"]?.toString() ?? m["type"]?.toString() ?? "image",
-          thumbnailUrl: m["thumbnailUrl"]?.toString(),
-          mediaUrl: m["mediaUrl"]?.toString(),
-          pageUrl: m["pageUrl"]?.toString(),
-          source: m["source"]?.toString(),
-        );
-      }).toList();
+    // 旧数据恢复：mediaCards 持久化之前的历史消息，照片是以「文本内嵌图片链接」存进
+    // text 的（markdown 图 / /agent/images/ 代理路径 / http 图片扩展名）。重启后这些
+    // 消息 mediaCards 为空，这里从正文把图片链接重新恢复成纯图廊，避免旧照片消失。
+    final List<String> recoveredImageUrls =
+        (mediaCards == null || mediaCards.isEmpty)
+            ? _extractLegacyImageUrls(message.text)
+            : const <String>[];
+    if ((mediaCards != null && mediaCards.isNotEmpty) ||
+        recoveredImageUrls.isNotEmpty) {
+      final List<AgentResultItem> items = recoveredImageUrls.isNotEmpty
+          ? recoveredImageUrls
+              .map(
+                (String url) => AgentResultItem(
+                  type: "image",
+                  text: "图片",
+                  mediaType: "image",
+                  thumbnailUrl: url,
+                  mediaUrl: url,
+                ),
+              )
+              .toList()
+          : mediaCards!.map(_cardToItem).toList();
       final AgentResultData mediaData = AgentResultData(
         cardType: "media",
-        title: "相关图片",
+        title: "",
         items: items,
-        footer: "共 ${items.length} 条图片结果，点击可查看原图",
+        footer: "",
       );
+      // 旧数据正文里可能残留图片链接行，展示前剥掉，避免与图廊重复。
+      final String displayText = recoveredImageUrls.isNotEmpty
+          ? _stripLegacyImageLines(message.text)
+          : message.text;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
           AgentResultCard(data: mediaData),
-          if (message.text.trim().isNotEmpty)
+          if (displayText.trim().isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 3),
               child: buildInlineMarkdownText(
-                message.text,
+                displayText,
                 Theme.of(context).textTheme.bodyMedium!.copyWith(
                       color: cs.onSurface.withValues(alpha: 0.85),
                       height: 1.4,
@@ -2234,6 +2412,55 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   /// 剥离文本开头的 `[RENDER_AS:xxx]` 标记。
   static String _stripRenderAsMarker(String text) {
     return text.replaceFirst(RegExp(r'^\[RENDER_AS:\w+\]\s*'), '');
+  }
+
+  // 旧数据恢复用：识别正文里内嵌的图片链接（markdown 图 / /agent/images/ 路径 / http 图片）。
+  // 用显式允许字符集，避免特殊引号/闭合符在字符类里的转义问题。
+  static final RegExp _legacyImgMarkdown = RegExp(r'!\[[^\]]*\]\(([^)\s]+)\)');
+  static final RegExp _legacyImgPath =
+      RegExp(r'(/agent/images/[A-Za-z0-9_\-.%/]+)');
+  static final RegExp _legacyImgHttp = RegExp(
+    r'(https?://[A-Za-z0-9_\-./:%?&=@#~+]+\.(?:png|jpe?g|gif|webp|avif)(?:[?&][A-Za-z0-9_\-./:%?&=@#~+]+)?)',
+    caseSensitive: false,
+  );
+
+  /// 从消息正文提取旧数据内嵌的图片链接（去重，最多 6 张）。
+  static List<String> _extractLegacyImageUrls(String text) {
+    if (text.isEmpty) return const <String>[];
+    final List<String> out = <String>[];
+    void add(String? url) {
+      final String u = (url ?? '').trim();
+      if (u.isEmpty || out.contains(u)) return;
+      out.add(u);
+    }
+    for (final Match m in _legacyImgMarkdown.allMatches(text)) {
+      add(m.group(1));
+    }
+    for (final Match m in _legacyImgPath.allMatches(text)) {
+      add(m.group(1));
+    }
+    for (final Match m in _legacyImgHttp.allMatches(text)) {
+      add(m.group(1));
+    }
+    return out.take(6).toList(growable: false);
+  }
+
+  /// 剥掉正文里含图片链接的行（避免与恢复出的图廊重复展示）。
+  static String _stripLegacyImageLines(String text) {
+    if (text.isEmpty) return text;
+    return text
+        .split('\n')
+        .map((String line) => line.trim())
+        .where((String line) {
+          if (line.isEmpty) return false;
+          if (_legacyImgMarkdown.hasMatch(line)) return false;
+          if (_legacyImgPath.hasMatch(line)) return false;
+          if (_legacyImgHttp.hasMatch(line)) return false;
+          return true;
+        })
+        .join('\n')
+        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+        .trim();
   }
 
   static String _visibleAgentResultRemaining(

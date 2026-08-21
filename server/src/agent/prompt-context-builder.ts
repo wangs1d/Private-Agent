@@ -717,6 +717,16 @@ export class PromptContextBuilder {
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
+      // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
+      // 此前 assembleMemory 只用 input.userLocation 提取时区给 currentTime,从未把它
+      // 写进 promptMemory。LLM 在 fast 模式查天气/位置类问题时,系统 prompt 缺失
+      // 【用户位置】块,工具调用只能传空参,工具返回「没有拿到真实定位」错误,LLM 在
+      // 第二句(正文气泡)复述工具错误为「没拿到你的定位」,与同会话前面对话
+      // 矛盾。修复:在 promptMemory 顶层注入 userLocation 字段,下游 prompt-builder
+      // (行 672/785) 会自动格式化为「【用户位置】\n${userLocation}」块。
+      // 注:userIsStatingData 已在 agent-core.ts:846-848 提前过滤「陈述具体数据」
+      // 场景,这里不需要再判定。
+      ...(input.userLocation ? { userLocation: input.userLocation } : {}),
       ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
 

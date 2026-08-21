@@ -31,9 +31,42 @@ export function registerWebTools(
 
   toolRegistry.register("search_images", async (input, context) => {
     const query = String(input.query ?? "").trim();
-    const limit = toBoundedLimit(input.limit, 8);
+    // 默认 4、上限 8：贴合「少而精+图文混排」的产品诉求。
+    // 需要多张时应让 LLM 拆成多个细粒度 query 并行搜，
+    // 由前端 renderBlocks 把每段文字对应的照片自然交错展示。
+    const limit = toBoundedLimit(input.limit, 4);
     if (!query) return { provider: "none", mediaType: "image", items: [], notes: ["query 不能为空"] };
     return upstreamSearchService.searchImages(query, limit, resolveActorId(context));
+  });
+
+  /**
+   * 对比式批量图片搜索：一次调用按「多个对比维度 + 每维度两侧」并行出图。
+   *
+   * 适用：用户要「A 和 B 对比」且希望**多方面对比**（水屋/沙屋/餐厅/泳池/潜水…），
+   * 或要「每个维度两侧都要图」。本工具在**代码层**自动把用户意图拆成多组 query：
+   *   - 多维度：自动拆多个维度（水屋/沙屋/餐厅…），并注入 prompt 引导 LLM 明确维度清单
+   *   - 每维度两侧：维度 query 内含 `A vs B`/`A对比B` 时自动拆成两侧并行搜索
+   * 返回分组结构 mediaGroups：每个 group 含维度标题 + 该维度下两侧（sideA/sideB）的图片列表。
+   *
+   * 不匹配任何对比/多面意图时退化为普通 search_images（items 为平铺结果）。
+   */
+  toolRegistry.register("search_images_batch", async (input, context) => {
+    const query = String(input.query ?? "").trim();
+    const actorId = resolveActorId(context);
+    if (!query) {
+      return { provider: "none", mediaType: "image", items: [], mediaGroups: [], notes: ["query 不能为空"] };
+    }
+    const limitPerGroup = Math.max(1, Math.min(4, Math.floor(Number(input.limit_per_group ?? 3)) || 3));
+    // 多维对比维度列表（如 ["持久度","价格","色号"]）；缺省时由服务端按 LCS/对比词推断
+    const dimensions = (Array.isArray(input.dimensions) ? input.dimensions : [])
+      .map((d: unknown) => String(d).trim())
+      .filter((d: string) => d.length > 0);
+    return upstreamSearchService.searchImagesBatch(
+      query,
+      dimensions.length > 0 ? dimensions : undefined,
+      limitPerGroup,
+      actorId,
+    );
   });
 
   toolRegistry.register("search_videos", async (input) => {

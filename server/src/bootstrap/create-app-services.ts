@@ -20,7 +20,7 @@ import type { ChatToolExecutionContext } from "../external-model/types.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
-import { LivingInterimController, interimAckMessageId } from "../agent/interim-ack.js";
+import { StreamSegmenter } from "../agent/stream-segmenter.js";
 import {
   formatAgentStylePrompt,
   loadAgentStyleProfile,
@@ -1723,17 +1723,6 @@ export async function createAppServices(): Promise<AppServices> {
 直接给出话术正文，不要解释你的决定。`;
 
     /** C1: 将消息按标点切成 2-3 段，用于分段发送模拟真人打字节奏 */
-    function splitIntoSegments(text: string): string[] {
-      // 按中文标点（。！？，、；）或英文标点（.!? ,;）切分，保留标点
-      const parts = text.split(/(?<=[。！？，,；;])/u).map((s) => s.trim()).filter(Boolean);
-      if (parts.length <= 1) return [text];
-      // 限制最多 3 段：过多则合并尾部
-      if (parts.length > 3) {
-        return [parts[0], parts.slice(1, -1).join(""), parts[parts.length - 1]].filter(Boolean);
-      }
-      return parts;
-    }
-
     function sleep(ms: number): Promise<void> {
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
@@ -1835,39 +1824,6 @@ export async function createAppServices(): Promise<AppServices> {
       // Task 5: 加载 Agent 自身风格指纹，注入 system prompt 供话术生成遵循
       const styleProfile = loadAgentStyleProfile(agentMemorySyncService);
       const proactiveSystemPrompt = `${PROACTIVE_SYSTEM_PROMPT}\n\n${formatAgentStylePrompt(styleProfile)}`;
-      let mainReplyStarted = false;
-
-      // A3: 主动路径接入 LivingInterimController（proactive_text channel）
-      // 让主动做事期间也能发自然垫词（开口词/进度/完成），而不是冷不丁冒出完整结论
-      const interimController = new LivingInterimController({
-        sessionId: signal.actorId,
-        traceId,
-        mode: "fast",
-        enabled: true,
-        channel: "proactive_text",
-        provider: createExternalChatProviderFromEnv(),
-        send: (text, seq) => {
-          if (mainReplyStarted) return;
-          wsConnectionRegistry.trySend(
-            signal.actorId,
-            JSON.stringify({
-              type: ServerEventType.ChatAssistantInterim,
-              payload: {
-                sessionId: signal.actorId,
-                messageId: interimAckMessageId(traceId, seq),
-                traceId,
-                mode: "fast",
-                text,
-              },
-            }),
-          );
-        },
-        isStale: () => false,
-        isMainReplyStarted: () => mainReplyStarted,
-      });
-
-      // 先发一条开口垫词（异步，不阻塞主流程）
-      void interimController.maybeEmitInitial(signal.title);
 
       // 1. 调 LLM 生成话术（启用 function calling，LLM 可自主调工具做事）
       let message = "";
@@ -1887,7 +1843,6 @@ export async function createAppServices(): Promise<AppServices> {
             { text: await buildProactivePrompt(signal, decision) },
             (delta) => {
               message += delta;
-              mainReplyStarted = true;
             },
             toolExecCtx,
             {
@@ -1944,12 +1899,27 @@ export async function createAppServices(): Promise<AppServices> {
 
       // 3. 通过 SynapseBus.sendToUser 投递（WS + MessageHub 离线降级）
       //    注意：synapseBus 可能在 brainNeuroEnabled=0 时未创建
-      //    C1: 分段发送——按标点切成 2-3 段，间隔 400-900ms 分批 WS 推送，
-      //    模拟真人"打一段发一段"的节奏，而不是一次性冒出完整结论
+      //    垫词 + 分段已统一到 StreamSegmenter（与 chat 主回复同一模块）：
+      //    垫词 = 话术首个分句（interim），信息块分段 + 增量去重后逐段（stream）推送，
+      //    模拟真人"开口一句、再打一段发一段"的节奏，而不是一次性冒出完整结论。
       const targetBus = synapseBus;
       if (targetBus) {
-        const segments = splitIntoSegments(message.trim());
-        if (segments.length <= 1) {
+        const bubbles: Array<{ text: string; phase: "interim" | "stream" }> = [];
+        const proactiveSegmenter = new StreamSegmenter(
+          (seg, phase) => bubbles.push({ text: seg, phase }),
+          {
+            pauseMs: 400,
+            minSegmentChars: 6,
+            interimReplyGapMs: 600,
+            segmentationEnabled: true,
+            blockCharTarget: 56,
+            maxStreamSegments: 3,
+          },
+        );
+        proactiveSegmenter.feed(message.trim());
+        await proactiveSegmenter.flushFinal();
+        if (bubbles.length === 0) {
+          // 极端兜底：分段器未产出（可能全被去重），整条作为单个消息发
           await targetBus.sendToUser(signal.actorId, {
             type: "agent.proactive_message",
             payload: {
@@ -1960,25 +1930,25 @@ export async function createAppServices(): Promise<AppServices> {
             },
           });
         } else {
-          // 分段发送：逐段推送，间隔 400-900ms
-          for (let i = 0; i < segments.length; i++) {
-            const isLast = i === segments.length - 1;
+          // 逐段发送：垫词气泡先行，随后正文逐段，间隔由 StreamSegmenter 的停顿保证
+          for (let i = 0; i < bubbles.length; i++) {
+            const isLast = i === bubbles.length - 1;
             await targetBus.sendToUser(signal.actorId, {
               type: "agent.proactive_message",
               payload: {
                 title: "Agent 主动联系",
-                text: segments[i],
+                text: bubbles[i].text,
                 channel: decision.channel ?? "websocket",
                 reason: isLast ? decision.rationale : undefined,
                 isPartial: !isLast,
               },
             });
             if (!isLast) {
-              await sleep(400 + Math.floor(Math.random() * 500));
+              await sleep(400);
             }
           }
         }
-        console.log(`[BrainCenter] 主动消息已发送给 ${signal.actorId}（${segments.length} 段）: ${message.slice(0, 50)}...`);
+        console.log(`[BrainCenter] 主动消息已发送给 ${signal.actorId}（${bubbles.length} 段）: ${message.slice(0, 50)}...`);
       } else {
         // synapseBus 不存在时降级到 proactiveOutbound
         await proactiveOutbound.send({

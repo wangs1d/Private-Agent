@@ -999,7 +999,7 @@ export class AgentCore {
 
 if (this.isComplexMode(route.mode)) {
         // 异步并行：complex 多线程执行（子 Agent 委派 / plan_execute），
-        // fast 通过 LivingInterimController 渐进式垫词先回复多步；
+        // fast 通过 StreamSegmenter 统一产出垫词 + 信息块分段先回复多步；
         // complex 完成后结果无缝流式回传，最终结果作为完整回复。
         const complexResult = await this.launchComplexBackgroundTask(actorId, text, opts, {
           narrativeRecall: enrichedNarrativeRecall,
@@ -1809,7 +1809,7 @@ if (this.isComplexMode(route.mode)) {
   /**
    * 后台执行复杂任务（子 Agent 委派 / plan_execute），返回最终结果文本。
    *
-   * 异步并行：fast 通过 LivingInterimController 渐进式垫词先回复，
+   * 异步并行：fast 通过 StreamSegmenter 统一产出垫词 + 信息块分段先回复，
    * complex 在多线程中执行，完成后通过 Promise 返回最终结果文本。
    * 流式结果通过 opts.onAssistantDelta 实时回传，最终结果由 caller await。
    */

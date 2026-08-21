@@ -47,16 +47,11 @@ class AgentResultCard extends StatelessWidget {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     // 工具专用卡片：cardType 非空时委托给专用 UI
-    //（天气/日程/钱包/订单/文件/轮播/对比/时间轴/媒体），
-    // 否则走下方通用列表卡（与历史行为一致）。
+    //（时间轴/媒体等），否则走下方通用列表卡（与历史行为一致）。
     if (data.cardType.isNotEmpty) {
       switch (data.cardType) {
-        case "carousel":
-          return _CarouselCard(data: data, cs: cs);
         case "search_result":
           return _SearchResultCard(data: data, cs: cs);
-        case "compare":
-          return _CompareCard(data: data, cs: cs);
         case "timeline":
           return _TimelineCard(data: data, cs: cs);
         case "media":
@@ -394,122 +389,6 @@ class _SpecializedCard extends StatelessWidget {
   }
 }
 
-/// 横向卡片轮播：把「标题：描述」列表项渲染为横滑卡片组（搜索/资讯场景）。
-class _CarouselCard extends StatelessWidget {
-  const _CarouselCard({required this.data, required this.cs});
-
-  final AgentResultData data;
-  final ColorScheme cs;
-
-  @override
-  Widget build(BuildContext context) {
-    final List<({String title, String desc})> cards =
-        data.items.map((AgentResultItem it) {
-      final String raw = it.text.trim();
-      final int sep = _findTitleSep(raw);
-      if (sep <= 0) return (title: raw, desc: "");
-      return (
-        title: raw.substring(0, sep).trim(),
-        desc: raw.substring(sep).trim(),
-      );
-    }).toList(growable: false);
-
-    if (cards.isEmpty) return const SizedBox.shrink();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        if (data.title.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              data.title,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                color: cs.onSurface,
-                height: 1.4,
-              ),
-            ),
-          ),
-        SizedBox(
-          height: 96,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 2),
-            itemCount: cards.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 8),
-            itemBuilder: (BuildContext context, int i) {
-              final ({String title, String desc}) card = cards[i];
-              return Container(
-                width: 180,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: cs.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text.rich(
-                      TextSpan(
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          height: 1.3,
-                        ),
-                        children: parseInlineMarkdownSpans(
-                          card.title,
-                          TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: cs.primary,
-                            height: 1.3,
-                          ),
-                          cs,
-                        ),
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 4),
-                    Expanded(
-                      child: buildInlineMarkdownText(
-                        card.desc,
-                        TextStyle(
-                          fontSize: 11.5,
-                          color: cs.onSurfaceVariant,
-                          height: 1.4,
-                        ),
-                        cs: cs,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-        if (data.footer.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: buildInlineMarkdownText(
-              data.footer,
-              TextStyle(
-                fontSize: 12.5,
-                color: cs.onSurfaceVariant,
-                height: 1.5,
-              ),
-              cs: cs,
-            ),
-          ),
-      ],
-    );
-  }
-}
-
 /// 在「标题：描述」/「标题 —— 描述」/「标题 — 描述」/「标题 - 描述」中找分隔位置。
 int _findTitleSep(String raw) {
   final RegExp sepRe = RegExp(r"[:：]|——|—|\s-\s|｜|\|");
@@ -517,134 +396,6 @@ int _findTitleSep(String raw) {
   if (m == null) return -1;
   final int sep = m.start;
   return sep > 0 ? sep : -1;
-}
-
-/// 左右对比卡：把「A vs B」的每个列表项渲染为左右两列对比行。
-///
-/// 约定：每个 item 文本用 `A vs B` / `A｜B` / `A / B` 分隔左右两列值，
-/// title 作为对比标题，footer 作为结论。适合商品/方案 pk 场景。
-class _CompareCard extends StatelessWidget {
-  const _CompareCard({required this.data, required this.cs});
-
-  final AgentResultData data;
-  final ColorScheme cs;
-
-  @override
-  Widget build(BuildContext context) {
-    const EdgeInsets padding = EdgeInsets.fromLTRB(14, 12, 14, 12);
-    final Color titleColor = cs.onSurface;
-    final Color valueColor = cs.onSurface.withValues(alpha: 0.82);
-    final Color borderColor = cs.outline.withValues(alpha: 0.22);
-
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
-      padding: padding,
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          if (data.title.isNotEmpty) ...<Widget>[
-            Row(
-              children: <Widget>[
-                Icon(Icons.alt_route_outlined, size: 16, color: cs.primary),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    data.title,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: titleColor,
-                      height: 1.4,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-          ],
-          // 对比行：每行是「属性 + 左右两值」
-          ...data.items.map((AgentResultItem it) {
-            final (String left, String right) = _splitCompare(it.text);
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Expanded(
-                    child: buildInlineMarkdownText(
-                      left,
-                      TextStyle(
-                        fontSize: 13,
-                        color: valueColor,
-                        height: 1.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      cs: cs,
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 6),
-                    child: Text("|", style: TextStyle(color: Color(0xFF9CA3AF))),
-                  ),
-                  Expanded(
-                    child: buildInlineMarkdownText(
-                      right,
-                      TextStyle(
-                        fontSize: 13,
-                        color: cs.primary,
-                        height: 1.5,
-                      ),
-                      cs: cs,
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
-          if (data.footer.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.only(top: 8),
-              decoration: BoxDecoration(
-                border: Border(
-                  top: BorderSide(color: borderColor, width: 1),
-                ),
-              ),
-              child: buildInlineMarkdownText(
-                data.footer,
-                TextStyle(
-                  fontSize: 12.5,
-                  color: cs.onSurfaceVariant,
-                  height: 1.5,
-                ),
-                cs: cs,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// 把「A vs B」/「A｜B」/「A / B」拆成左右两值；无分隔时左值=整句、右值=空。
-  (String, String) _splitCompare(String raw) {
-    final RegExp sepRe = RegExp(r"\s+(?:vs|VS|对比)\s+|｜|\|\s*|\s+/\s+");
-    final RegExpMatch? m = sepRe.firstMatch(raw);
-    if (m == null) {
-      return (raw.trim(), "");
-    }
-    final int sep = m.start;
-    return (
-      raw.substring(0, sep).trim(),
-      raw.substring(m.end).trim(),
-    );
-  }
 }
 
 /// 时间轴卡：把每个 item 渲染为时间轴上的一个节点（点 + 时间 + 描述）。
@@ -798,10 +549,11 @@ class _TimelineCard extends StatelessWidget {
   }
 }
 
-/// 图片/媒体结果卡：把每个 item 渲染为一张缩略图 + 描述。
+/// 图片/媒体结果卡：纯图廊。
 ///
-/// 约定：item 文本若是 URL（http/https）则渲染为图片缩略图，
-/// 否则按普通列表项渲染。适合识图/图片搜索结果。
+/// 单张照片以大图重点展示（底部带一句说明），多张照片以网格并排、顶部标注
+/// 总数。点击任意照片在右侧双栏打开大图，同一绿泡内可前后切换
+/// （见 [ImagePreviewPanel]）。视频条目仍展示缩略图 + 来源 + 播放角标。
 class _MediaCard extends StatelessWidget {
   const _MediaCard({required this.data, required this.cs});
 
@@ -810,13 +562,112 @@ class _MediaCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const EdgeInsets padding = EdgeInsets.fromLTRB(14, 12, 14, 12);
-    final Color titleColor = cs.onSurface;
-    final Color itemColor = cs.onSurface.withValues(alpha: 0.82);
+    final List<AgentResultItem> items = data.items;
+    final String groupTitle = (data.groupTitle ?? "").trim();
+    final bool isGrouped = groupTitle.isNotEmpty;
+
+    // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）+ 说明 + 对比侧
+    final List<({String url, String caption, String side})> photos =
+        <({String url, String caption, String side})>[];
+    final List<String> allPhotoUrls = <String>[];
+    final List<Widget> videos = <Widget>[];
+    for (final AgentResultItem it in items) {
+      final String text = it.text.trim();
+      final String? textUrl = extractUrlFromText(text);
+      final String? previewUrl = _firstNonEmpty(<String?>[
+        it.thumbnailUrl,
+        it.mediaType == "video" ? null : it.mediaUrl,
+        it.url,
+        textUrl,
+      ]);
+      final String? openUrl = _firstNonEmpty(<String?>[
+        it.pageUrl,
+        it.url,
+        it.mediaUrl,
+        textUrl,
+      ]);
+      final bool isVideo = (it.mediaType ?? "").toLowerCase() == "video" ||
+          (openUrl != null &&
+              RegExp(r"(youtube\.com|youtu\.be|bilibili\.com|/video/)",
+                      caseSensitive: false)
+                  .hasMatch(openUrl));
+      if (previewUrl == null && openUrl == null) continue;
+      if (isVideo) {
+        videos.add(
+          _VideoResultTile(
+            title: "相关视频",
+            source: it.source,
+            thumbnailUrl: previewUrl,
+            openUrl: openUrl,
+            cs: cs,
+          ),
+        );
+      } else {
+        final String resolved = _resolveMediaUrl(previewUrl!);
+        // 同一张图不重复展示：地址已在集内则跳过（服务端已去重，此处双保险）
+        if (allPhotoUrls.contains(resolved)) continue;
+        photos.add((
+          url: resolved,
+          caption: _photoCaption(it.text),
+          side: (it.side ?? "").trim(),
+        ));
+        allPhotoUrls.add(resolved);
+      }
+    }
+
+    if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
+
+    // 分组/对比模式：左侧(A) + 右侧(B) 分栏；无侧的归入常规网格
+    final List<({String url, String caption, String side})> leftPhotos =
+        photos.where((p) => p.side == "A").toList();
+    final List<({String url, String caption, String side})> rightPhotos =
+        photos.where((p) => p.side == "B").toList();
+    final List<({String url, String caption, String side})> plainPhotos =
+        photos.where((p) => p.side != "A" && p.side != "B").toList();
+    final bool hasColumns =
+        isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
+
+    // A/B 对比逐行配对：A[i] 与 B[i] 同一行并排，便于肉眼逐张对比。
+    // 每张照片带来源说明；某侧缺图时该格显示「暂无图片」占位。
+    List<Widget> buildCompareRows(
+      List<({String url, String caption, String side})> aList,
+      List<({String url, String caption, String side})> bList,
+    ) {
+      final int count = aList.length > bList.length ? aList.length : bList.length;
+      final List<Widget> rows = <Widget>[];
+      for (int i = 0; i < count; i++) {
+        rows.add(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(
+                child: _compareCell(
+                  i < aList.length ? aList[i] : null,
+                  data.sideA,
+                  isFirstRow: i == 0,
+                  gallery: allPhotoUrls,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _compareCell(
+                  i < bList.length ? bList[i] : null,
+                  data.sideB,
+                  isFirstRow: i == 0,
+                  gallery: allPhotoUrls,
+                ),
+              ),
+            ],
+          ),
+        );
+        if (i < count - 1) rows.add(const SizedBox(height: 8));
+      }
+      return rows;
+    }
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 390),
-      padding: padding,
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(12),
@@ -826,104 +677,108 @@ class _MediaCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          if (data.title.isNotEmpty) ...<Widget>[
-            Row(
-              children: <Widget>[
-                Icon(Icons.image_outlined, size: 16, color: cs.primary),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    data.title,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: titleColor,
-                      height: 1.4,
+          // 分组维度标题（如「颜色持久度」）
+          if (isGrouped && groupTitle.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 2, right: 2, bottom: 8),
+              child: Row(
+                children: <Widget>[
+                  Container(
+                    width: 4,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: cs.primary,
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-          ],
-          ...data.items.map((AgentResultItem it) {
-            final String text = it.text.trim();
-            final String? textUrl = extractUrlFromText(text);
-            final String? previewUrl = _firstNonEmpty(<String?>[
-              it.thumbnailUrl,
-              it.mediaType == "video" ? null : it.mediaUrl,
-              it.url,
-              textUrl,
-            ]);
-            final String? openUrl = _firstNonEmpty(<String?>[
-              it.pageUrl,
-              it.url,
-              it.mediaUrl,
-              textUrl,
-            ]);
-            final bool isVideo = (it.mediaType ?? "").toLowerCase() == "video" ||
-                (openUrl != null && RegExp(r"(youtube\.com|youtu\.be|bilibili\.com|/video/)", caseSensitive: false).hasMatch(openUrl));
-            if (previewUrl == null && openUrl == null) {
-              // 非 URL：按普通列表项渲染
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    _ItemMark(type: it.type, colorScheme: cs),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: buildInlineMarkdownText(
-                        text,
-                        TextStyle(
-                          fontSize: 13,
-                          color: itemColor,
-                          height: 1.55,
-                        ),
-                        cs: cs,
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      groupTitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: cs.onSurface,
                       ),
                     ),
-                  ],
-                ),
-              );
-            }
-            final String label = _mediaLabel(it);
-            final String? source = it.source;
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: isVideo
-                  ? _VideoResultTile(
-                      title: label,
-                      source: source,
-                      thumbnailUrl: previewUrl,
-                      openUrl: openUrl,
-                      cs: cs,
-                    )
-                  : _ImageResultTile(
-                      title: label,
-                      source: source,
-                      imageUrl: previewUrl ?? openUrl!,
-                      openUrl: openUrl,
-                      cs: cs,
-                    ),
-            );
-          }),
-          if (data.footer.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: buildInlineMarkdownText(
-                data.footer,
-                TextStyle(
-                  fontSize: 12.5,
-                  color: cs.onSurfaceVariant,
-                  height: 1.5,
-                ),
-                cs: cs,
+                  ),
+                ],
               ),
             ),
+          // A/B 对比（逐行配对，A[i] ↔ B[i] 并排）
+          if (hasColumns)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: buildCompareRows(leftPhotos, rightPhotos),
+            ),
+          if (hasColumns && plainPhotos.isNotEmpty) const SizedBox(height: 8),
+          // 无侧/常规照片网格
+          if (plainPhotos.isNotEmpty || !hasColumns)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                if (photos.length > 1 && !hasColumns)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8, left: 2),
+                    child: Text(
+                      "共 ${photos.length} 张图片",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                if (plainPhotos.length == 1 && photos.length == 1)
+                  // 单张：重点大图 + 说明条，点击预览
+                  _SinglePhotoTile(
+                    imageUrl: plainPhotos.first.url,
+                    caption: plainPhotos.first.caption,
+                    cs: cs,
+                  )
+                else
+                  // 多张：网格并排，每格可点击，同一绿泡内可前后切换
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: List<Widget>.generate(plainPhotos.length, (int i) {
+                      return _GalleryImageTile(
+                        imageUrl: plainPhotos[i].url,
+                        gallery: allPhotoUrls,
+                        index: i,
+                        cs: cs,
+                      );
+                    }),
+                  ),
+              ],
+            ),
+          if (videos.isNotEmpty) ...<Widget>[
+            if (photos.isNotEmpty) const SizedBox(height: 6),
+            ...videos.map((Widget v) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: v,
+              );
+            }),
+          ],
         ],
       ),
     );
+  }
+
+  /// 从 item 文本提取一句话作为照片说明；纯链接 / 占位符则不展示。
+  String _photoCaption(String text) {
+    final String t = text.trim();
+    if (t.isEmpty ||
+        t == "图片" ||
+        RegExp(r'^https?://\S+$').hasMatch(t)) {
+      return "";
+    }
+    return t;
   }
 
   String? _firstNonEmpty(List<String?> values) {
@@ -934,25 +789,254 @@ class _MediaCard extends StatelessWidget {
     return null;
   }
 
-  String _mediaLabel(AgentResultItem item) {
-    final String text = item.text.trim();
-    // 纯 URL 文本 → 用 source 或域名代替
-    if (text.isEmpty || RegExp(r"^https?://").hasMatch(text)) {
-      if (item.source?.trim().isNotEmpty == true) return item.source!.trim();
-      final String? domain = _domainFromUrl(text);
-      return domain ?? "媒体结果";
+  /// A/B 对比单格：首行显示侧标签，每张照片带来源说明；缺图显示「暂无图片」占位。
+  Widget _compareCell(
+    ({String url, String caption, String side})? entry,
+    String? sideLabel, {
+    required bool isFirstRow,
+    required List<String> gallery,
+  }) {
+    if (entry == null) {
+      return Container(
+        height: 96,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Text(
+            sideLabel == null || sideLabel.isEmpty
+                ? "暂无图片"
+                : "$sideLabel 暂无图",
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+          ),
+        ),
+      );
     }
-    // 混合文本（"标题 - URL"）→ 去掉尾部的 URL 后展示
-    final String urlStripped = text.replaceAll(RegExp(r'\s*https?://\S+'), '').trim();
-    if (urlStripped.isNotEmpty) return urlStripped;
-    return item.source?.trim().isNotEmpty == true ? item.source!.trim() : "媒体结果";
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (isFirstRow && sideLabel != null && sideLabel.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 3, left: 2),
+            child: Text(
+              sideLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: cs.primary,
+              ),
+            ),
+          ),
+        _GalleryImageTile(
+          imageUrl: entry.url,
+          gallery: gallery,
+          index: gallery.indexOf(entry.url),
+          cs: cs,
+        ),
+        if (entry.caption.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 3, left: 2),
+            child: Text(
+              entry.caption,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant),
+            ),
+          ),
+      ],
+    );
   }
+}
 
-  /// 从 URL 提取域名（去 www）
-  String? _domainFromUrl(String url) {
-    final Uri? uri = Uri.tryParse(url);
-    if (uri == null || uri.host.isEmpty) return null;
-    return uri.host.replaceFirst(RegExp(r'^www\.'), '');
+/// 单张照片：大图 + 底部说明条，点击在右侧双栏打开大图预览。
+class _SinglePhotoTile extends StatelessWidget {
+  const _SinglePhotoTile({
+    required this.imageUrl,
+    required this.caption,
+    required this.cs,
+  });
+
+  final String imageUrl;
+  final String caption;
+  final ColorScheme cs;
+
+  static const double _height = 200;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget image = ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: SizedBox(
+        width: double.infinity,
+        height: _height,
+        child: Image.network(
+          imageUrl,
+          fit: BoxFit.cover,
+          errorBuilder: (BuildContext context, Object error,
+              StackTrace? stackTrace) {
+            return Container(
+              color: cs.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: Icon(Icons.broken_image_outlined, color: cs.onSurfaceVariant),
+            );
+          },
+          loadingBuilder: (BuildContext context, Widget child,
+              ImageChunkEvent? progress) {
+            if (progress == null) return child;
+            return Container(
+              color: cs.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: () {
+          ImagePreviewLauncher.open(
+            url: imageUrl,
+            title: "图片预览",
+            gallery: <String>[imageUrl],
+            index: 0,
+          );
+        },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            image,
+            if (caption.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+                color: cs.surfaceContainerHighest,
+                child: Text(
+                  caption,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: cs.onSurface,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 纯照片缩略图：正方网格格，点击在右侧双栏打开大图预览。
+///
+/// [gallery] 为同一绿泡内全部照片（已 resolve），[index] 为当前位次，
+/// 供预览面板内做「上一张 / 下一张」切换。
+class _GalleryImageTile extends StatelessWidget {
+  const _GalleryImageTile({
+    required this.imageUrl,
+    required this.cs,
+    this.gallery,
+    this.index = 0,
+  });
+
+  final String imageUrl;
+  final ColorScheme cs;
+
+  /// 同一绿泡内全部照片（已 resolve 的完整地址列表），null 时仅预览单张。
+  final List<String>? gallery;
+
+  /// 当前照片在 [gallery] 中的位置。
+  final int index;
+
+  static const double _size = 108;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () {
+        ImagePreviewLauncher.open(
+          url: _resolveMediaUrl(imageUrl),
+          title: "图片预览",
+          gallery: gallery,
+          index: index,
+        );
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.network(
+          _resolveMediaUrl(imageUrl),
+          width: _size,
+          height: _size,
+          fit: BoxFit.cover,
+          errorBuilder: (BuildContext context, Object error,
+              StackTrace? stackTrace) {
+            return _GalleryPlaceholder(
+              icon: Icons.broken_image_outlined,
+              cs: cs,
+              size: _size,
+            );
+          },
+          loadingBuilder: (BuildContext context, Widget child,
+              ImageChunkEvent? loadingProgress) {
+            if (loadingProgress == null) return child;
+            return Container(
+              width: _size,
+              height: _size,
+              color: cs.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _GalleryPlaceholder extends StatelessWidget {
+  const _GalleryPlaceholder({
+    required this.icon,
+    required this.cs,
+    this.size = _GalleryImageTile._size,
+  });
+
+  final IconData icon;
+  final ColorScheme cs;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      color: cs.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: Icon(icon, color: cs.onSurfaceVariant),
+    );
   }
 }
 
@@ -963,81 +1047,96 @@ String? extractUrlFromText(String text) {
   return m.group(0)!.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
 }
 
-class _ImageResultTile extends StatelessWidget {
-  const _ImageResultTile({
-    required this.title,
-    required this.imageUrl,
-    required this.openUrl,
+/// 轻量内联媒体行（无外层 card 边框）——给「renderBlocks 小簇」用。
+///
+/// 设计：服务端 `buildInterleavedRenderBlocks` 会把一次 `search_images` 的 N 张
+/// 图自动按正文段落切分成 2-3 张的小簇（普通图墙不再一次性铺底）。
+/// 这种小簇适合**紧贴文字**展示，不要再外面套一个完整 `AgentResultCard` 卡框，
+/// 否则会出现「段落文字 → 大边框卡 → 段落文字」的割裂感，违反用户
+/// 「一段介绍文字然后挨着放一两张图」的产品诉求。
+///
+/// 这里直接用 108×108 的轻量图块 + 横向 Wrap 渲染（点击仍可走
+/// `ImagePreviewLauncher` 进入右侧双栏预览），跟正文共用一个气泡，
+/// 视觉上才是「文字+图」的自然交错。
+///
+/// 单张照片（caption 非空）走 _SinglePhotoTile（200px 大图 + 说明条）的相同实现；
+/// 1 张图但无 caption 也走大图重点展示；多张走 Wrap 网格。
+class MediaInlineRow extends StatelessWidget {
+  const MediaInlineRow({
+    super.key,
+    required this.items,
     required this.cs,
-    this.source,
   });
 
-  final String title;
-  final String imageUrl;
-  final String? openUrl;
-  final String? source;
+  final List<AgentResultItem> items;
   final ColorScheme cs;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      // 图片点击：在右侧双栏大图预览，而非跳转外部浏览器
-      onTap: () {
-        final String url = _resolveMediaUrl(imageUrl);
-        ImagePreviewLauncher.open(
-          url: url,
-          title: title,
-          source: source,
+    if (items.isEmpty) return const SizedBox.shrink();
+    // 解析每张图的可用地址 + caption + 侧标签
+    final List<({String url, String caption, String side})> photos =
+        <({String url, String caption, String side})>[];
+    final List<String> allUrls = <String>[];
+    for (final AgentResultItem it in items) {
+      final String text = it.text.trim();
+      final String? textUrl = extractUrlFromText(text);
+      final String? previewUrl = _firstNonEmpty(<String?>[
+        it.thumbnailUrl,
+        it.mediaType == "video" ? null : it.mediaUrl,
+        it.url,
+        textUrl,
+      ]);
+      if (previewUrl == null) continue;
+      final String resolved = _resolveMediaUrl(previewUrl);
+      if (allUrls.contains(resolved)) continue;
+      photos.add((
+        url: resolved,
+        caption: _photoCaption(text),
+        side: (it.side ?? "").trim(),
+      ));
+      allUrls.add(resolved);
+    }
+    if (photos.isEmpty) return const SizedBox.shrink();
+    // 单张且无说明 → 200px 大图；单张有说明 → 200px 大图+说明；
+    // 多张 → 108×108 网格。
+    if (photos.length == 1) {
+      return _SinglePhotoTile(
+        imageUrl: photos.first.url,
+        caption: photos.first.caption,
+        cs: cs,
+      );
+    }
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: List<Widget>.generate(photos.length, (int i) {
+        return _GalleryImageTile(
+          imageUrl: photos[i].url,
+          gallery: allUrls,
+          index: i,
+          cs: cs,
         );
-      },
-      borderRadius: BorderRadius.circular(8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          _NetworkPreview(
-            url: imageUrl,
-            icon: Icons.broken_image_outlined,
-            cs: cs,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: openUrl == null ? cs.onSurface : cs.primary,
-                      height: 1.35,
-                    ),
-                  ),
-                  if (source != null && source!.trim().isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 3),
-                      child: Text(
-                        source!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: cs.onSurfaceVariant,
-                          height: 1.3,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+      }),
     );
+  }
+
+  String? _firstNonEmpty(List<String?> values) {
+    for (final String? v in values) {
+      final String t = (v ?? "").trim();
+      if (t.isNotEmpty) return t;
+    }
+    return null;
+  }
+
+  String _photoCaption(String text) {
+    final String t = text.trim();
+    if (t.isEmpty ||
+        t == "图片" ||
+        RegExp(r'^https?://\S+$').hasMatch(t)) {
+      return "";
+    }
+    return t;
   }
 }
 
