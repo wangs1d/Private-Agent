@@ -2,6 +2,8 @@ import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "media_thumbnail.dart";
+
 class MarkdownTableCellData {
   const MarkdownTableCellData({
     required this.text,
@@ -356,11 +358,10 @@ List<InlineSpan> parseInlineMarkdownSpans(
       final RegExpMatch? imgMatch = imgPattern.firstMatch(token);
       if (imgMatch != null) {
         final String url = imgMatch.group(2)!;
-        final String alt = imgMatch.group(1)!.trim();
         spans.add(
           WidgetSpan(
             alignment: PlaceholderAlignment.top,
-            child: _InlineImage(url: url, alt: alt, cs: cs),
+            child: _InlineImage(url: url, cs: cs),
           ),
         );
       } else {
@@ -434,7 +435,7 @@ List<InlineSpan> _parsePlainLinks(
       spans.add(
         WidgetSpan(
           alignment: PlaceholderAlignment.top,
-          child: _InlineImage(url: url, alt: "", cs: cs),
+          child: _InlineImage(url: url, cs: cs),
         ),
       );
     } else {
@@ -692,12 +693,10 @@ class MarkdownTableWidget extends StatelessWidget {
 class _InlineImage extends StatelessWidget {
   const _InlineImage({
     required this.url,
-    required this.alt,
     required this.cs,
   });
 
   final String url;
-  final String alt;
   final ColorScheme cs;
 
   @override
@@ -706,63 +705,12 @@ class _InlineImage extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: GestureDetector(
         onTap: () => launchUrlFromText(url),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            url,
-            width: 220,
-            height: 150,
-            fit: BoxFit.cover,
-            loadingBuilder: (BuildContext context, Widget child,
-                ImageChunkEvent? progress) {
-              if (progress == null) return child;
-              return Container(
-                width: 220,
-                height: 150,
-                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-                child: const Center(
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-              );
-            },
-            errorBuilder: (BuildContext context, Object error,
-                StackTrace? stackTrace) {
-              return Container(
-                width: 220,
-                height: 150,
-                color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Icon(Icons.broken_image_outlined,
-                          color: cs.onSurfaceVariant, size: 26),
-                      if (alt.isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 4),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Text(
-                            alt,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: cs.primary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
+        child: MediaThumbnail(
+          url: url,
+          cs: cs,
+          width: 220,
+          height: 150,
+          borderRadius: 8,
         ),
       ),
     );

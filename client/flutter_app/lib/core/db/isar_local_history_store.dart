@@ -164,6 +164,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             timestamp: DateTime.parse(map["timestamp"] as String),
             attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
             playUrl: map["playUrl"] as String?,
+            mediaCards: _decryptMediaCards(map["mediaCards"]),
+            renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
           );
         }).toList();
       }
@@ -537,6 +539,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           timestamp: m.timestamp,
           attachmentImageCount: m.attachmentImageCount,
           playUrl: m.playUrl,
+          mediaCards: m.mediaCards,
+          renderBlocks: m.renderBlocks,
         );
       }
     }
@@ -575,6 +579,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             timestamp: message.timestamp,
             attachmentImageCount: message.attachmentImageCount,
             playUrl: message.playUrl,
+            mediaCards: message.mediaCards,
+            renderBlocks: message.renderBlocks,
           ),
         )
         .toList();
@@ -607,6 +613,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           timestamp: message.timestamp,
           attachmentImageCount: message.attachmentImageCount,
           playUrl: message.playUrl,
+          mediaCards: message.mediaCards,
+          renderBlocks: message.renderBlocks,
         );
         changed++;
       }
@@ -637,6 +645,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       timestamp: message.timestamp,
       attachmentImageCount: message.attachmentImageCount,
       playUrl: message.playUrl,
+      mediaCards: message.mediaCards,
+      renderBlocks: message.renderBlocks,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
     // done 后再存完整文本）只保留一条记录，避免本地历史出现重复气泡。
@@ -681,6 +691,46 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     return utf8.decode(output);
   }
 
+  /// 把结构化媒体卡片加密为存储字符串（null/空 → null）。
+  String? _encryptMediaCards(List<Map<String, dynamic>>? cards) {
+    if (cards == null || cards.isEmpty) return null;
+    return _encryptFor(jsonEncode(cards), _userPin);
+  }
+
+  /// 解密存储字符串为媒体卡片；损坏时不抛异常，返回 null（历史兼容）。
+  List<Map<String, dynamic>>? _decryptMediaCards(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! List) return null;
+      return decoded
+          .map((dynamic e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
+  String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
+    if (blocks == null || blocks.isEmpty) return null;
+    return _encryptFor(jsonEncode(blocks), _userPin);
+  }
+
+  /// 解密存储字符串为交错渲染块；损坏时不抛异常，返回 null（历史兼容）。
+  List<Map<String, dynamic>>? _decryptRenderBlocks(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! List) return null;
+      return decoded
+          .map((dynamic e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _flush() async {
     // Web 平台不支持文件系统，跳过写入
     if (kIsWeb || _storageFile == null) {
@@ -712,6 +762,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   "timestamp": m.timestamp.toIso8601String(),
                   "attachmentImageCount": m.attachmentImageCount,
                   if (m.playUrl != null) "playUrl": m.playUrl,
+                  if (m.mediaCards != null)
+                    "mediaCards": _encryptMediaCards(m.mediaCards),
+                  if (m.renderBlocks != null)
+                    "renderBlocks": _encryptRenderBlocks(m.renderBlocks),
                 },
               )
               .toList(),

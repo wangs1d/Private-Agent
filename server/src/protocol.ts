@@ -83,6 +83,13 @@ export const ServerEventType = {
   ChatAssistantChunk: "chat.assistant_chunk",
   ChatAssistantDone: "chat.assistant_done",
   /**
+   * 「边说边出图」：媒体搜索工具（search_images / search_images_batch /
+   * search_videos）执行成功的瞬间推送该批结构化媒体卡片，前端立即把它们
+   * 插到当前流式回复正文下方（pendingMediaCards），无需等 LLM 打完字。
+   * done 时再以 renderBlocks 的最终顺序校正/替换。
+   */
+  ChatMediaReady: "chat.media_ready",
+  /**
    * 即时确认应答（已废弃，保留兼容）：被动聊天路径已改为通过
    * chat.assistant_chunk 携带 phase="interim" 字段推送首段文本，
    * 与主回复共用同一 messageId，避免渲染成两条独立消息。

@@ -219,6 +219,50 @@ function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
 }
 
 /**
+ * Fix3(加固 fast 轻工具链路)：当最终回复是"没查到/道歉式兜底"且没有成功工具数据时，
+ * 用一次反道歉重建调用，让主力 LLM 基于既有上下文给出尽量有帮助、具体的回答，
+ * 而不是把"没查到"式空话直接透出给用户。
+ * 本函数仅缓冲重建结果并返回（不在内部 onDelta），由调用方统一推送一次；
+ * 重建仍为空/道歉时返回 ""，不再下发任何固定道歉文案，交由上层自然处理。
+ */
+async function rebuildWithoutFallback(
+  client: OpenAI,
+  model: string,
+  messages: ChatCompletionMessageParam[],
+): Promise<string> {
+  let rebuilt = "";
+  try {
+    const rebuiltMessages: ChatCompletionMessageParam[] = [
+      ...messages,
+      {
+        role: "user",
+        content:
+          "请不要道歉，也不要声称「没查到/没找到/做不到/信息不足无法回答/稍后重试」。\n" +
+          "请基于当前对话里所有内容和你的知识，直接给出最有用、尽可能具体的回复；" +
+          "如果确实还缺关键信息，就明确指出你缺哪一条线索，并建议用户如何补充。请直接输出内容。",
+      },
+    ];
+    const resp = await client.chat.completions.create({
+      model,
+      messages: rebuiltMessages,
+      temperature: 0.6,
+      max_tokens: 600,
+      stream: true,
+    });
+    await consumeNormalizedStream(
+      adaptOpenAiChatCompletionStream(resp as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>),
+      { onContentDelta: (d) => { rebuilt += d; }, providerId: "openai-compatible", model },
+    );
+  } catch (err) {
+    console.log(
+      `[tool-loop] 反道歉重建失败，回退引导兜底: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "";
+  }
+  return (rebuilt || "").trim();
+}
+
+/**
  * 检测 LLM 最终回复是否是「道歉式兜底」（无法整合工具结果/道歉重试）。
  * 当工具结果已有真实数据时，这种 apology 不应替代搜索结果 — 应回退到工具结果拼接。
  *
@@ -639,18 +683,11 @@ function resolveForcedToolChoice(
     }
   }
 
-  // 3b. 图片/照片意图 → 强制 search_images
-  //     避免 LLM 走 search_web 然后用假域名（duitang.com 这种首页）伪造图片来源，
-  //     导致前端 media 卡片拿不到 thumbnailUrl、照片永远显示不出来。
-  //     命中条件：用户消息里含「照片/实拍图/图片/图集/长什么样/找图/配图/壁纸/风景照/看图/看照片/出图」等视觉关键词。
-  if (IMAGE_INTENT_RE.test(userText)) {
-    const hasImageSearchTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "search_images",
-    );
-    if (hasImageSearchTool) {
-      return { type: "function", function: { name: "search_images" } };
-    }
-  }
+  // 3b.（Coze 思路）图片/照片搜索不再在此处强制工具选择。
+  //   借鉴 Coze：媒体是否展示由「模型真正调用了 search_images」这一服务端事实决定，
+  //   而非靠正则猜意图。search_images 是否被模型使用，由 contextual 筛选决定工具
+  //   可见性 + 模型对当前轮意图的判断共同完成；服务端再把工具结果确定性渲染成图廊。
+  //   宁缺勿滥：普通问答（用户未索图）不会因为关键词命中就被强制导向图片搜索。
 
   // 4. 时效性事实查询 → 强制 search_web
   //    避免 LLM 用训练截止知识回答"最新""近期"类问题
@@ -668,24 +705,6 @@ function resolveForcedToolChoice(
 
 const DIRECT_CLOCK_OR_LOCATION_RE =
   /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
-
-// 图片/照片意图触发器：用户问"照片/实拍图/图片/图集/找图/壁纸/风景照/看图/出图"等任何
-// 视觉诉求时，强制走 search_images（必应图片 + 本地 PNG 转存），而不是让 LLM 走
-// search_web 然后用假域名（duitang.com 这种首页）伪造图片来源。
-// 与 search_images 工具 description 中的强约束关键词保持一致，避免漏判/误判。
-//
-// 2026-08-20 扩词：
-//   - 单字「图」/「照」容错（避免漏判"小夜灯图"这种生硬表达）
-//   - 「想看/想找/给我找/帮我找」等意愿动词触发视觉意图
-//   - 「XX的海报/剧照/路透/写真/壁纸/头像/造型/穿搭/ins风/街拍/机场/红毯」+ 视觉类别强信号
-const IMAGE_INTENT_RE =
-  /照片|实拍|图片|图集|配图|找图|壁纸|风景照|看图|看照片|出图|长什么样|长啥样|给我看|有图|有照片|有图吗|头像|poster|photo|picture|image|wallpaper|海报|剧照|路透|写真|造型|穿搭|妆造|ins风|街拍|日常随拍|机场|红毯|想看|想找|给我找|帮我找|图$|照$/i;
-
-// LLM 回复"自救信号"：当 LLM 已经把对话推进到视觉类回复（提到写真/壁纸/剧照/路透/海报/
-// 造型/穿搭/红毯/ins风/街拍/头像/日常随拍），但本轮没调 search_images，强制重调。
-// 修复 LLM 直接用文字编造"duitang.com 上有她写真"这种假链接的根因。
-const IMAGE_RESCUE_RE =
-  /写真|壁纸|海报|剧照|路透|红毯|造型|穿搭|ins风|街拍|日常随拍|头像照|图集|配图|实拍|头像.*照|机场.*造型|图$|照$/i;
 
 const FRESH_WEB_LOOKUP_RE =
   /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
@@ -759,14 +778,38 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "search_images",
       description:
         "搜索公开图片结果，下载并转存为服务端本地 PNG，返回可在对话中直接预览的 mediaUrl/thumbnailUrl（形如 /agent/images/...png），以及可打开来源页的 pageUrl。\n" +
-        "适用场景：用户明确要「搜图片」「找图」「图片素材」「照片参考」「表情包」「壁纸」「风景照」「实拍图」「长什么样」「给我看看」等。\n" +
-        "强约束：用户消息里出现「照片/实拍图/图片/图集/长什么样/找图/配图/壁纸/风景照/看图/看照片/出图」等任何视觉关键词时，**必须**在首轮并行调用本工具（可与 search_web 并行），不要只调 search_web，也不要建议用户去其他平台——直接出图。\n" +
+        "适用场景：用户**主动表达**想看/找图/照片/实拍图/长什么样/配图/壁纸/风景照/表情包/给我看看等视觉诉求时，并行调用本工具（可与 search_web 并行），直接出图，不要建议用户去其他平台。\n" +
+        "不要误触发：仅当**当前轮**用户明确要图时才调用。若只是普通提及某事物（如聊天里带\"图\"字、或前面轮次搜过图），且本轮用户并未索图，不要调用本工具——宁缺勿滥，避免无关照片刷屏。\n" +
         "回答时优先展示 3-6 条最相关图片 PNG，附来源页链接；不要把图片搜索误用成 image.generate（生成图）。",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "图片搜索关键词，尽量短而具体" },
-          limit: { type: "integer", description: "返回数量，1-12，默认 8" },
+          limit: { type: "integer", description: "返回数量，1-8，默认 4" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_images_batch",
+      description:
+        "多维对比出图：一次调用同时搜索多个维度、每个维度两侧的对比图，返回按维度分组的 mediaGroups（每个 group 含维度标题 + 左/右两侧图片列表），供前端「一段文字介绍后放一组对比照片」交错渲染。\n" +
+        "适用场景：用户要求对比两类事物（如「A 与 B 的区别」「A vs B 哪个好」），或要求从多个方面/维度找图（如「颜色持久度、价格、色号对比」）时，**优先**用本工具代替普通 search_images，以实现多维度、两侧对比而非单批平铺。\n" +
+        "用法：query 写「A 对比 B」（自动拆两侧）；可选 dimensions 数组指定要对比的维度（如 [\"持久度\",\"防水\",\"色号\"]），不传时自动按两侧共同点推断维度标题。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "对比关键词，含「A 对比 B / A vs B / A 和 B 区别」等对比语义" },
+          dimensions: {
+            type: "array",
+            items: { type: "string" },
+            description: "对比维度列表（可选），如 [\"持久度\",\"防水\",\"色号\"]；缺省时按两侧共同点自动推断",
+          },
+          limit_per_group: { type: "integer", description: "每组每侧返回张数，1-4，默认 3" },
         },
         required: ["query"],
         additionalProperties: false,
@@ -1781,8 +1824,8 @@ interface ToolCategoryMapping {
 const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'web',
-    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video'],
-    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
+    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别'],
+    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
   },
   {
     category: 'calendar',
@@ -1933,13 +1976,13 @@ const ALWAYS_INCLUDED_TOOLS = [
   'agent.query_capabilities',
   'brain.list_capabilities',
   'phone.call_user',
-  // search_images 始终暴露：用户问"XX照片"时，意图可能落在上下文里而非首条消息
-  // （如前轮已表态"想看照片"），此工具若被 contextual 过滤掉，LLM 会走 search_web
-  // 然后用假域名（duitang.com 首页这种）伪造图片来源，前端 media 卡片拿不到
-  // thumbnailUrl、照片永远显示不出来。search_images 体积小、token 成本可接受。
-  'search_images',
+  // search_images 不再常驻：
+  //   收敛误触发（2026-08-20，宁缺勿滥）——常驻会让模型在"对话前面搜过图、本轮并
+  //   未要图"时仍被勾着调用。改为回落到 contextual 筛选：只有当当前轮用户意图命
+  //   web/图片类别时才暴露。若模型未搜图但回复里回显了图片链接，服务端
+  //   promoteImageUrlsToMedia 会确定性兜底渲染，不会退回"图显示不出来"。
   // embodiment.* 已在 CORE_TOOL_LIBRARY 的 embodiment tier 整族暴露，每轮必带，
-  // 不需要再在 ALWAYS_INCLUDED_TOOLS 重复声明，减少 contextual 筛选时的冗余。
+  // 不需要再在此重复声明。
 ];
 
 function extractKeywords(text: string): string[] {
@@ -2077,28 +2120,10 @@ export function selectRelevantTools(
   }
   
   if (filteredTools.length > maxTools) {
-    // 保底：命中图片/视觉意图但 search_images 被顺序截断裁掉时强制补回。
-    // 否则 fast 模式 selectRelevantTools 按 ALWAYS_INCLUDED_TOOLS + 分类匹配
-    // 累积工具后 slice(0,maxTools)，search_images 若未靠前就会被裁掉，
-    // LLM 看不到它，前端永远拿不到真实照片。
-    if (IMAGE_INTENT_RE.test(userText)) {
-      const sliced = filteredTools.slice(0, maxTools);
-      // 用结果集判断（ALWAYS_INCLUDED 保证 selectedToolNames 含它，但 slice 可能裁掉）
-      if (!sliced.some((t) => (t as { function?: { name?: string } }).function?.name === "search_images")) {
-        const imgTool = allTools.find((t) => (t as { function?: { name?: string } }).function?.name === "search_images");
-        if (imgTool) return [...sliced.slice(0, maxTools - 1), imgTool];
-      }
-      return sliced;
-    }
+    // 超限截断：直接取前 maxTools 个（保持类别相关性排序），不再无条件补回
+    // search_images。此前这么做是为了"模型多轮里想看图就能用"，但它绕开了
+    // contextual 筛选，是"历史搜图上下文导致后续误触发"的来源之一（宁缺勿滥）。
     return filteredTools.slice(0, maxTools);
-  }
-
-  // TEMP DEBUG（图片链路诊断）：打印 fast/complex 实际选中的可见工具，确认 search_images 是否在内
-  if (IMAGE_INTENT_RE.test(userText)) {
-    const names = filteredTools
-      .map((t) => (t as { function?: { name?: string } }).function?.name)
-      .filter(Boolean);
-    console.log(`[image-selected] query="${userText.slice(0, 30)}" selected=[${names.join(", ")}]`);
   }
 
   return filteredTools;
@@ -2181,9 +2206,6 @@ export async function streamCompletionWithTools(
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
-  // 2026-08-20：图片意图自救计数器，本轮最多触发 2 次强制重调，
-  // 超过则放弃（LLM 仍倔强不调 search_images 时按其原回复交付，避免无限循环）。
-  let imageRescueCount = 0;
   // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
   // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
@@ -2203,13 +2225,18 @@ export async function streamCompletionWithTools(
         "2. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "3. 能一轮并行解决的不要拆成多轮串行。多个独立 URL 用一轮多个 fetch_web。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-        "5. 【图片硬规则】用户问" + "`照片/图片/写真/壁纸/海报/剧照/路透/造型/穿搭/红毯/ins风/街拍/头像/长什么样`" + "等任何视觉/图片类需求时，必须且只能调用 search_images 工具。不要用 search_web 然后编造" + "`duitang.com`" + "等假域名——前端会因此拿不到任何真实图片。",
+        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。",
     });
   }
 
   // TEMP DEBUG（重复工具调用诊断：打印每轮的 tool_calls 数量）
   console.log(`[DBG-toolloop] maxRounds=${maxRounds} fastProfile=${fastProfile}`);
+  // Fix1(加固 fast 轻工具链路)：recoveryGranted 跨轮持久，保证整个工具循环
+  // 最多只授予一次恢复轮，避免失败级联导致无限加轮。
+  let recoveryGranted = false;
   for (let round = 0; round < maxRounds; round++) {
+    // 记录本轮真实取数工具是否失败（供恢复轮判定）
+    let realToolFailedThisRound = false;
     let retriedToolCallIdError = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
 
@@ -2332,43 +2359,11 @@ export async function streamCompletionWithTools(
       let finalText = lastAssistantText.trim();
       finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
 
-      // ── 图片意图自救：2026-08-20 ─────────────────────────────────────
-      // 当 LLM 的最终回复提到了写真/壁纸/剧照/路透/海报/造型/穿搭/红毯等视觉类别词，
-      // 但本轮（到目前为止）没调过 search_images 时，注入系统消息强制 LLM 调一次。
-      // 这是修复"LLM 用 duitang.com 这种假域名伪造图片来源"根因的最后一道防线：
-      //   - Layer 1（ALWAYS_INCLUDED_TOOLS）保证 LLM 看到工具
-      //   - Layer 2（IMAGE_INTENT_RE）覆盖大部分用户消息中的视觉关键词
-      //   - Layer 3（本分支）兜底：用户问"小夜灯"等主体名、或追问"写真"这种视觉分类词时
-      //     LLM 已经能识别这是图片任务，但 system prompt 偏 search_web，LLM 选了错误工具，
-      //     此处检测最终回复里的视觉类别词强制重调。
-      //
-      // maxRounds 边界：Fast 模式默认 maxRounds=1（性能优化），正常会跳出循环；
-      // 这里用 `round < maxRounds`（不是 `round + 1 <`）允许最后一轮也触发自救——
-      // 等价于"图片意图给一个额外的 round 配额"，其它非图片轮不受影响。
-      const calledSearchImages = allToolExecResults.some((r) => r.toolName === "search_images");
-      const isImageCategoryReply = finalText.length > 0 && IMAGE_RESCUE_RE.test(finalText);
-      if (isImageCategoryReply && !calledSearchImages && round < maxRounds && imageRescueCount < 2) {
-        console.warn(
-          `[image-rescue] LLM 提到视觉类别词但未调 search_images，本轮强制重调 (${imageRescueCount + 1}/2) -> query="${userText.slice(0, 40)}"`,
-        );
-        // 把 LLM 已经说出来的视觉类回复作为 assistant 消息保留
-        messages.push({
-          role: "assistant",
-          content: finalText || fullText || "(需要调用 search_images 给出真正的图片)",
-        });
-        messages.push({
-          role: "system",
-          content:
-            "你刚才的回复里提到了写真/壁纸/剧照/路透/海报/造型/穿搭/红毯等视觉分类，但本轮你并没有调用 search_images 工具——这意味着前端拿不到任何真实图片，只能展示你编造的假链接。\n" +
-            "请立即调用 search_images 工具（参数里把用户的原始查询当 query，limit 6~8），然后基于真实图片结果重新组织回复。\n" +
-            "search_images 会自动下载并转存为服务端本地 PNG（返回 mediaUrl/thumbnailUrl），前端会直接渲染缩略图卡片，不要再编造 'duitang.com' 这种假域名。",
-        });
-        // 把 maxRounds 临时 +1，让本轮自救可以真正跑到下一轮（否则 Fast 模式 maxRounds=1 永远不会救成功）
-        maxRounds += 1;
-        imageRescueCount += 1;
-        continue;
-      }
-      // ── 图片意图自救结束 ─────────────────────────────────────────────
+      // （Coze 思路）已移除图片意图"自救"prompt 注入：
+      //   - 不靠正则猜意图 / 不注入 prompt 逼模型重调 search_images。
+      //   - 媒体是否展示完全由「模型是否真的调用了 search_images」这一服务端事实决定，
+      //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
+      //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
 
       if (requiresFreshWebLookup && !satisfiedFreshWebLookup) {
         messages.push({
@@ -2382,11 +2377,20 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
-      // 防 LLM "道歉式兜底"：当已有工具结果但 LLM 输出是 apology/无法整合时，
-      // 直接把工具结果拼接作为回复，避免把真实搜索数据扔掉。
-      const effectiveFinalText = isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()
-        ? lastToolOutputFallback.trim()
-        : finalText;
+      // 防 LLM "道歉式兜底"：
+      //  - 已有成功工具数据但 LLM 输出是 apology/无法整合 → 直接用工具结果拼接，避免扔掉真实数据；
+      //  - 无成功工具数据而 LLM 出 apology/空 → Fix3 反道歉重建一次，绝不让"没查到/没找到"直接透出。
+      let effectiveFinalText: string;
+      if (isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()) {
+        effectiveFinalText = lastToolOutputFallback.trim();
+      } else if (isApologyStyleFallback(finalText)) {
+        effectiveFinalText = await rebuildWithoutFallback(client, model, messages);
+        if (!effectiveFinalText || isApologyStyleFallback(effectiveFinalText)) {
+          effectiveFinalText = "";
+        }
+      } else {
+        effectiveFinalText = finalText;
+      }
       // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
       // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
       // 保证推给前端的气泡不出现这些内部信号（此前在 agent-core finishLlmTurn 后置剥离
@@ -2613,6 +2617,10 @@ export async function streamCompletionWithTools(
       if (exec.ok && FRESH_FACT_TOOL_NAMES.has(wireToolName)) {
         satisfiedFreshWebLookup = true;
       }
+      // Fix1: 非元工具的真实取数失败 → 标记本轮存在工具失败（供恢复轮判定）
+      if (!exec.ok && !META_TOOL_NAMES.has(wireToolName)) {
+        realToolFailedThisRound = true;
+      }
       ctx.onToolExecuted?.({
         toolName: wireToolName,
         input: item.parsedArgs,
@@ -2635,7 +2643,10 @@ export async function streamCompletionWithTools(
         : toolContent;
       // 元工具（tool_discover / agent.query_capabilities 等）输出是结构化 JSON，
       // 不进 roundToolOutputs，防止「道歉式兜底」把它们原样拼成回复透出到前端。
-      if (toolContent?.trim() && !META_TOOL_NAMES.has(wireToolName)) {
+      // Fix2(加固 fast 轻工具链路)：失败的工具输出（含"工具执行超时/error"）也不进
+      // roundToolOutputs —— 否则它们会被 lastToolOutputFallback/拼接兜底当成答案透出给用户，
+      // 表现为 agent 直接回答"工具超时/没查到"。失败信息仍会作为 tool 消息回给 LLM 供其判断。
+      if (toolContent?.trim() && exec.ok && !META_TOOL_NAMES.has(wireToolName)) {
         roundToolOutputs.push(toolContent.trim());
       }
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
@@ -2672,6 +2683,25 @@ export async function streamCompletionWithTools(
           }),
         });
       }
+    }
+    // Fix1(加固 fast 轻工具链路)：本轮存在真实工具失败且轮次预算已耗尽 → 授予 1 次恢复轮，
+    // 并注入失败提示，让 LLM 换参数/换兜底工具重试或如实说明。
+    // 若无此步，fast(maxRounds=1) 下唯一一次工具失败会直接结束循环 → 空回复/"没查到"。
+    // 恢复轮只在最后一次时授予、且全程最多一次（recoveryGranted 持久），避免级联加轮。
+    if (!recoveryGranted && realToolFailedThisRound && maxRounds <= round + 1) {
+      recoveryGranted = true;
+      const prevMax = maxRounds;
+      maxRounds = round + 2;
+      messages.push({
+        role: "system",
+        content:
+          "上一轮调用的工具失败了。请不要向用户道歉，也不要声称「没查到/没找到/做不到/稍后重试」。" +
+          "请尝试：①换更稳妥的查询词或参数重试一次；②或基于已有信息/你的知识直接给出你能确定的部分，" +
+          "并明确告诉用户还缺哪条线索。绝对不要输出空回复或道歉式兜底。",
+      });
+      console.warn(
+        `[tool-loop] round=${round} 存在真实工具失败，授予 1 次恢复轮 (maxRounds ${prevMax}→${maxRounds})`,
+      );
     }
     options?.onAfterToolBatch?.({
       roundIndex: round,
@@ -2760,9 +2790,14 @@ export async function streamCompletionWithTools(
     }
   }
 
-  return (
-    isApologyStyleFallback(lastAssistantText) && lastToolOutputFallback.trim()
-      ? lastToolOutputFallback.trim()
-      : lastAssistantText.trim() || lastToolOutputFallback.trim()
-  );
+  const raw = isApologyStyleFallback(lastAssistantText) && lastToolOutputFallback.trim()
+    ? lastToolOutputFallback.trim()
+    : lastAssistantText.trim() || lastToolOutputFallback.trim();
+  // Fix3(加固 fast 轻工具链路)：循环耗尽后仍拿到"没查到/道歉式/空"回复 →
+  // 反道歉重建一次；重建仍失败落建设性引导，绝不把道歉兜底透出给用户。
+  if (!raw.trim() || isApologyStyleFallback(raw)) {
+    const rebuilt = await rebuildWithoutFallback(client, model, messages);
+    return rebuilt && !isApologyStyleFallback(rebuilt) ? rebuilt : "";
+  }
+  return raw;
 }

@@ -1086,6 +1086,54 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // v2：把 chunk 同步累加进 TurnState.streamBuffer（UI 改造后用作流式正文源）
           _turnState?.appendChunk(visibleChunk);
         }
+        // 边说边出图：媒体工具执行完即推送 `chat.media_ready`，把该批照片
+        // 先挂到当前流式回复的 pendingMediaCards 上，前端实时展示；
+        // done 到达后由 renderBlocks 的最终顺序接管，此字段随之清空。
+        if (type == "chat.media_ready") {
+          final String? mediaMessageId = payload["messageId"]?.toString();
+          final String? mediaTraceId = payload["traceId"]?.toString();
+          final String? activeTraceId = _pendingAgentUserMessageId;
+          // 非当前轮次的迟到照片直接丢弃
+          if (mediaTraceId != null &&
+              mediaTraceId.isNotEmpty &&
+              activeTraceId != null &&
+              mediaTraceId != activeTraceId) {
+            return;
+          }
+          final List<Map<String, dynamic>>? newCards =
+              payload["cards"] is List
+                  ? (payload["cards"] as List)
+                      .whereType<Map<String, dynamic>>()
+                      .toList()
+                  : null;
+          if (newCards == null || newCards.isEmpty) return;
+          final int? existingIdx = _messageIndexById(mediaMessageId ?? "");
+          if (existingIdx == null || existingIdx >= _messages.length) return;
+          setState(() {
+            final ChatMessage previous = _messages[existingIdx];
+            final List<Map<String, dynamic>> updatedPending =
+                (previous.pendingMediaCards ?? <Map<String, dynamic>>[]) +
+                    newCards;
+            _messages[existingIdx] = ChatMessage(
+              messageId: previous.messageId,
+              sessionId: previous.sessionId,
+              role: previous.role,
+              text: previous.text,
+              timestamp: previous.timestamp,
+              attachmentImageCount: previous.attachmentImageCount,
+              playUrl: previous.playUrl,
+              attachments: previous.attachments,
+              contentType: previous.contentType,
+              durationMs: previous.durationMs,
+              waveform: previous.waveform,
+              streaming: previous.streaming,
+              mediaCards: previous.mediaCards,
+              renderBlocks: previous.renderBlocks,
+              pendingMediaCards: updatedPending,
+            );
+          });
+          return;
+        }
         if (type == "chat.assistant_done") {
           final String? doneTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = _pendingAgentUserMessageId;
@@ -1158,6 +1206,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
               PlayUrlUtils.fromAssistantText(dedupResolvedText);
+          // 从 WS 载荷解析结构化媒体卡片与交错渲染块（两分支共用，提取一次）
+          final List<Map<String, dynamic>>? mediaCardsFromPayload =
+              payload["mediaCards"] is List
+                  ? (payload["mediaCards"] as List)
+                      .whereType<Map<String, dynamic>>()
+                      .toList()
+                  : null;
+          final List<Map<String, dynamic>>? renderBlocksFromPayload =
+              payload["renderBlocks"] is List
+                  ? (payload["renderBlocks"] as List)
+                      .whereType<Map<String, dynamic>>()
+                      .toList()
+                  : null;
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
@@ -1172,13 +1233,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       : currentText;
               final String? existingPlayUrl = previous.playUrl;
               final List<Map<String, dynamic>>? existingMediaCards = previous.mediaCards;
-              // 从 WS 载荷解析结构化媒体卡片（Coze 式架构）
-              final List<Map<String, dynamic>>? mediaCardsFromPayload =
-                  payload["mediaCards"] is List
-                      ? (payload["mediaCards"] as List)
-                          .whereType<Map<String, dynamic>>()
-                          .toList()
-                      : null;
               // 优先使用 WS 下发的 mediaCards，若没有则保留已有（流式阶段已注入的）
               final List<Map<String, dynamic>>? resolvedMediaCards =
                   mediaCardsFromPayload ?? existingMediaCards;
@@ -1195,17 +1249,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 durationMs: previous.durationMs,
                 waveform: previous.waveform,
                 mediaCards: resolvedMediaCards,
+                renderBlocks: renderBlocksFromPayload,
               );
             });
             await _store.saveMessage(_messages[idx]);
           } else {
             // 极端边界：完全没收到任何 chunk（只收到 done），用 finalText 兜底
-            final List<Map<String, dynamic>>? mediaCardsFromPayload =
-                payload["mediaCards"] is List
-                    ? (payload["mediaCards"] as List)
-                        .whereType<Map<String, dynamic>>()
-                        .toList()
-                    : null;
             final ChatMessage finalMessage = ChatMessage(
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
@@ -1214,6 +1263,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               timestamp: DateTime.now(),
               playUrl: playUrl,
               mediaCards: mediaCardsFromPayload,
+              renderBlocks: renderBlocksFromPayload,
             );
             setState(() {
               _messages.add(finalMessage);
@@ -1797,6 +1847,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           playUrl: previous.playUrl,
           // 流式追加中，保持 streaming 标志，渲染层打字机持续逐字展示
           streaming: previous.streaming,
+          // 边说边出图：保留已挂载的临时媒体卡片（不随 chunk 重置）
+          pendingMediaCards: previous.pendingMediaCards,
         );
       });
     } else {
@@ -4341,12 +4393,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return const SizedBox.shrink();
     }
     if (_rightPanel != null) {
-      // split 模式：动态宽度 + 顶栏面板
-      return Positioned(
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: _rightPanelWidth,
+      // split 模式：动态宽度 + 顶栏面板。
+      // 从右往左"推出"：面板先整体位于屏幕右侧外(右移自己宽度)，再沿 X 轴
+      // 滑向 0，配合 easeOutCubic 看到明显的"从右往左展出"过程(约 420ms)。
+      return TweenAnimationBuilder<double>(
+        key: ValueKey<RightPanelKind>(_rightPanel!),
+        tween: Tween<double>(begin: _rightPanelWidth, end: 0),
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeOutCubic,
+        builder: (BuildContext context, double offset, Widget? child) {
+          return Positioned(
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: _rightPanelWidth,
+            child: Transform.translate(
+              offset: Offset(offset, 0),
+              child: child,
+            ),
+          );
+        },
         child: _buildSplitPanel(),
       );
     }
@@ -4483,8 +4549,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       case RightPanelKind.imagePreview:
         final ImagePreviewSnapshot? item = _imagePreview;
         if (item == null) return const SizedBox.shrink();
+        // 同一绿泡内的全部照片做「上/下一张」切换；仅单张时退化为单张预览
+        final List<String> urls = (item.gallery != null &&
+                item.gallery!.isNotEmpty)
+            ? item.gallery!
+            : <String>[item.url];
         return ImagePreviewPanel(
-          url: item.url,
+          urls: urls,
+          index: item.index < urls.length ? item.index : 0,
           title: item.title,
           source: item.source,
         );

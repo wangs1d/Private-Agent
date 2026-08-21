@@ -21,6 +21,8 @@ class AgentResultItem {
     this.thumbnailUrl,
     this.pageUrl,
     this.source,
+    this.side,
+    this.sideLabel,
   });
 
   /// "check"（✓ 已完成） / "num"（• 序号） / "warn"（! 警告）
@@ -37,6 +39,12 @@ class AgentResultItem {
   final String? pageUrl;
   final String? source;
 
+  /// 对比侧：A=左侧 / B=右侧（用于媒体卡片 A/B 分栏）。
+  final String? side;
+
+  /// 侧标签（如「A 品牌」「B 品牌」），用于分栏表头。
+  final String? sideLabel;
+
   factory AgentResultItem.fromJson(Map<String, dynamic> json) {
     return AgentResultItem(
       type: json["type"]?.toString() ?? "check",
@@ -47,6 +55,8 @@ class AgentResultItem {
       thumbnailUrl: json["thumbnailUrl"]?.toString() ?? json["thumbUrl"]?.toString(),
       pageUrl: json["pageUrl"]?.toString() ?? json["sourceUrl"]?.toString(),
       source: json["source"]?.toString(),
+      side: json["side"]?.toString(),
+      sideLabel: json["sideLabel"]?.toString(),
     );
   }
 }
@@ -99,6 +109,9 @@ class AgentResultData {
     this.cardId = "",
     this.cardType = "",
     this.speak = "",
+    this.groupTitle,
+    this.sideA,
+    this.sideB,
   });
 
   /// 智能体头像缩写（默认 "NB"）。
@@ -132,6 +145,13 @@ class AgentResultData {
   /// 语音播报优先级:`high`(优先朗读结论) / `low`(可跳过) / 空串(默认)。
   /// 供语音输出端决定取舍。
   final String speak;
+
+  /// 对比媒体分组维度标题（如「颜色持久度」），非空时媒体卡片按分组渲染。
+  final String? groupTitle;
+
+  /// 对比左/右两侧的标签（如「A 品牌」「B 品牌」），配合侧标分栏展示。
+  final String? sideA;
+  final String? sideB;
 
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;

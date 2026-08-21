@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 
 import type { AgentCore } from "../../services/agent-core.js";
 import type { AuditService } from "../../services/audit-service.js";
@@ -27,10 +28,7 @@ import {
 } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import { routeLlmExecution } from "../../agent/task-router.js";
-import {
-  LivingInterimController,
-  shouldUsePhasedAsyncConversation,
-} from "../../agent/interim-ack.js";
+import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter } from "../../agent/stream-segmenter.js";
 import {
   buildExecutionEventPayload,
@@ -38,8 +36,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, type MediaCardItem } from "../../services/tool-result-processor.js";
-import { createExternalChatProviderFromEnv } from "../../external-model/resolve-provider.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
@@ -175,45 +172,26 @@ function promoteImageUrlsToMedia(text: string): string {
 }
 
 /**
- * presence 上下文的工具结果一句话摘要：挑出最"有体感"的 1-2 个字段，
- * 拼成不超过 40 字的小提示（如天气→"上海 28°C 晴"，搜索→"命中 15 条"）。
- * 拿不到关键字段时返回 undefined，上层用"toolName 已返回"兜底。
+ * 从文本中剥离媒体工具 echo：形如 `[/agent/images/.../xxx.png]说明` 或
+ * `![...](http.../xxx.jpg)` 这类「图片路径 + 标题」行。
+ *
+ * 场景：即便 `formatToolResultAsReply` 已对 media 工具返回空串，LLM 仍可能把
+ * `search_images` 的工具项原样抄进自己的正文（如 `[路径]歌名`）。但这些照片已经
+ * 由独立 mediaCards 结构化卡片渲染，正文里再出现 URL 行就会变成底部脏文本。
+ * 这里按行剔除含图片地址的行，保留纯文字叙述（若整段都是 echo 则剩余为空）。
  */
-function buildToolSummaryHeadline(
-  toolName: string,
-  result: Record<string, unknown> | undefined,
-): string | undefined {
-  if (!result) return undefined;
-  const pick = <T>(k: string): T | undefined => {
-    const v = (result as any)[k];
-    return v === null || v === undefined ? undefined : (v as T);
-  };
-  try {
-    // 天气
-    if (/weather/i.test(toolName)) {
-      const city = pick<string>("city") ?? pick<string>("location") ?? pick<string>("area");
-      const temp = pick<string>("temperature") ?? pick<number>("tempC");
-      const desc = pick<string>("condition") ?? pick<string>("text") ?? pick<string>("description");
-      const parts = [city, temp != null ? `${temp}` : null, desc].filter(Boolean) as string[];
-      if (parts.length) return parts.join(" ").slice(0, 40);
-    }
-    // 搜索类：items / results / count
-    if (/search|query/i.test(toolName)) {
-      const items = pick<unknown[]>("items") ?? pick<unknown[]>("results");
-      const count = items?.length ?? pick<number>("total") ?? pick<number>("count");
-      if (typeof count === "number" && count > 0) return `命中 ${count} 条`;
-    }
-    // 通用：summary / description
-    const summary = pick<string>("summary") ?? pick<string>("description") ?? pick<string>("headline");
-    if (summary) return summary.slice(0, 40);
-    // 新闻条数
-    if (Array.isArray((result as any).articles)) {
-      return `返回 ${(result as any).articles.length} 篇`;
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
+function stripMediaEchoText(text: string): string {
+  if (!text) return text;
+  // 图片地址：代理路径 /agent/images/... 或 http(s) 常见图片扩展名
+  const MEDIA_LINE_RE =
+    /(\/agent\/images\/[^\s)\]"']+)|(https?:\/\/[^\s)\]"']+\.(?:png|jpe?g|gif|webp|avif)(?::\d+)?(?:\?[^\s)\]"']*)?)/i;
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => !MEDIA_LINE_RE.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export type ChatUserMessageHandlerDeps = {
@@ -472,45 +450,19 @@ async function processBatchedMessage(
   getEmbodimentAutonomy()?.setProcessing(msgActor, true, (json) => ctx.socket.send(json));
 
   let chunkSeq = 0;
-  // 区分 interim 与 stream：interim 是回复首段（垫词），stream 是主回复正文
-  // mainStreamStarted 一旦为 true，interim 不再插入，保证顺序
-  let mainStreamStarted = false;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
 
-  // v2：tool_call 起始时间表（id → epoch ms），用于在 tool_result 阶段算 elapsedMs。
-  // 仅当 CHAT_TURN_PANEL_V2 开启时分配，避免无谓内存开销。
-  const toolStartedAt: Map<string, number> | undefined = getAgentRuntimeConfig()
-    .turnPanelV2.enabled
-    ? new Map<string, number>()
-    : undefined;
-
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
-  // [RENDER_HINT:xxx] 与 [AGENT_ACTIONS] 块是渲染指令，不展示给用户（在 done 事件中结构化传出）。
-  // 在所有 chunk 出口处统一剥离，流式内容与 done.finalText 共用同一份清理结果，避免两者突变不一致。
+  // 在所有 chunk 出口处统一剥离，避免 LLM 误把格式回显到回复里。
   const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
-  const RENDER_HINT_LINE_RE = /^\s*\[RENDER_HINT:[^\]]*\][ \t]*(?:\r?\n)?/gm;
-  // [AGENT_ACTIONS] 按钮标记：一整行 JSON，从行首到行尾；流式可能不完整，剥离时必须在 chunk 中闭合
-  const AGENT_ACTIONS_STRIP_RE = /^\s*\[AGENT_ACTIONS\][^\n]*\n?/gm;
-
-  /** 清理一条待发送的流式 chunk：剥离所有系统渲染/元数据前缀，得到用户最终看到的纯正文。 */
-  function sanitizeStreamChunk(text: string): string {
-    return stripDsmlToolCallMarkup(
-      text
-        .replace(TS_PREFIX_RE, "")
-        .replace(RENDER_HINT_LINE_RE, "")
-        .replace(AGENT_ACTIONS_STRIP_RE, ""),
-    );
-  }
+  const stripTsPrefix = (text: string): string =>
+    text.replace(TS_PREFIX_RE, "");
 
   const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
     if (isStale()) return;
-    if (phase === "stream") mainStreamStarted = true;
-    const cleaned = sanitizeStreamChunk(chunk);
-    if (!cleaned) return;
     chunkSeq += 1;
-    streamedFinalText += cleaned;
-    // presence 去重同步：跟踪用户实际看到的正文（而非含标记的 LLM 原文）
-    interimController.accumulateMainReplyText(streamedFinalText);
+    // 仅在首块剥离前缀；后续块被剥会丢失合法内容。
+    const cleanedChunk = chunkSeq === 1 ? stripTsPrefix(chunk) : chunk;
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -518,7 +470,7 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
-          chunk: cleaned,
+          chunk: cleanedChunk,
           sequence: chunkSeq,
           phase,
         },
@@ -533,8 +485,6 @@ async function processBatchedMessage(
     },
     enabled: getAgentRuntimeConfig().turnPanelV2.enabled,
   });
-
-  let replyFinished = false;
 
   // 路由决策 & 分阶段异步开关
   const cfg = getAgentRuntimeConfig();
@@ -562,64 +512,30 @@ async function processBatchedMessage(
     );
   }
 
-  // 活体 interim 控制器：仅负责「主动在场」互动（complex 后台任务执行期间
-  // 周期性给 LLM 开口机会，生成自然闲聊，像真人边做边聊）。
-  // 垫词不再由独立 LLM 生成（避免与正文脱节、重复），而是主回复流式的一部分，
-  // 由下方 streamSegmenter 按短句切分、同一气泡内逐句推送（同源分段）。
-  const interimController = new LivingInterimController({
-    sessionId: msgActor,
-    traceId: batched.originalMessageId,
-    mode: decision.mode,
-    enabled: phasedAsyncEnabled,
-    channel: "text_chat",
-    provider: createExternalChatProviderFromEnv(),
-    send: (text, _seq) => {
-      // presence 互动独立于主回复推送，走 phase="interim"
-      sendAssistantChunk(text, "interim");
-    },
-    isStale,
-    isMainReplyStarted: () => mainStreamStarted,
-  });
-
-  // 同源分段器：主回复流式 delta 按自然短句切分，像真人一句一句蹦出来（GPT live 节奏）。
-  // 垫词 = 主回复的首个短句：仅当确认主回复还有后续内容时才作为 phase="interim"
-  // 独立气泡先出现（前端渲染成独立垫词气泡），后续短句走 phase="stream" 追加到正文气泡；
-  // 若整段回复只有一句，则整体走 stream 单个气泡，避免"垫词 + done 全文"双份重复。
+  // 统一分段器：主回复流式 delta 按"信息块"（同话题连贯短句）切分，像真人
+  // 一句一句蹦出来（GPT live 节奏）。垫词、分段、层层递进全部由此模块统一产出：
+  // - 垫词 = 主回复的首个分句：仅当确认主回复还有后续内容时才作为 phase="interim"
+  //   独立气泡先出现（前端渲染成独立垫词气泡），后续信息块走 phase="stream"
+  //   追加到正文气泡；若整段回复只有一句，则整体走 stream 单个气泡。
+  // - 信息块分段 + 段落增量去重：能一个气泡放完的合并，话题切换才切块，
+  //   每块推送前剔除与已推送句级重复的内容，保证层层递进不重复。
+  // - 重量上限 + 首段做结论锚：正文块数封顶（超限并入尾部块），首个信息块承载结论。
   // 全程同源（都来自主回复流式），天然连续、不重复。
-  // 节奏由前端打字机统一控制：后端 pauseMs=0 不额外停顿，前端按字数动态打字间隔。
   const streamSegmenter = new StreamSegmenter(
     (segment, phase) => sendAssistantChunk(segment, phase),
     {
-      pauseMs: 0,
+      // pauseMs：每条回复信息块之间的间隔，拉长到 400ms，
+      // 配合前端打字机，让每块逐字打出后都有一段清晰的停顿再输出下一块。
+      pauseMs: 400,
       minSegmentChars: 6,
-      interimReplyGapMs: 300,
+      interimReplyGapMs: 800,
       // 由路由决策判定：闲聊式对话分段，工具/搜索/知识问答不分段
       segmentationEnabled: decision.segmentable,
+      // 信息块目标字符数（同话题短句累积到该长度切块）与正文块数上限
+      blockCharTarget: 56,
+      maxStreamSegments: 4,
     },
   );
-
-  // 流式输出的正文累积：严格等于"所有 stream/interim chunk 发送给前端的已清理 chunk 拼接"
-  // done 事件的 finalText 直接用它，避免流式与最终文本不一致（突变闪跳）。
-  // 同时把累计正文同步给 presence 去重，避免闲聊与主回复重复。
-  let streamedFinalText = "";
-
-  // 已执行工具的一句话摘要（presence 上下文注入，用做 "快好了，看到价格了" 式暗示）
-  let toolSummaryParts: string[] = [];
-  const pushToolSummaryPart = (toolName: string, ok: boolean, result?: Record<string, unknown>): void => {
-    if (!ok) return;
-    const headline = buildToolSummaryHeadline(toolName, result);
-    const line = headline ? `${toolName}：${headline}` : `${toolName} 已返回`;
-    toolSummaryParts.push(line);
-    // 最多保留最近 3 条，避免 presence 上下文爆炸
-    if (toolSummaryParts.length > 3) toolSummaryParts = toolSummaryParts.slice(-3);
-    interimController.setToolResultsSummary(toolSummaryParts.join("；"));
-  };
-
-  // 主动在场：complex 后台执行期间周期性给 LLM 开口机会，
-  // 生成自然互动（追问/反馈/闲聊），像真人边做边聊，直到主回复开始/结束。
-  if (decision.mode === "complex" && phasedAsyncEnabled) {
-    interimController.startPresence(batched.text);
-  }
 
   // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
   // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
@@ -719,6 +635,12 @@ async function processBatchedMessage(
     toolName: string;
     result: Record<string, unknown>;
   }> = [];
+  // 「边说边出图」已推送过的媒体地址集合：跨工具批去重，避免同一张图被推两次
+  const sentEarlyMediaKeys = new Set<string>();
+  // 方案1：不再把流式 delta 逐段喂入分段器（多段流/工具边界会打断 heldFirst 导致
+  // 多个垫词、顺序错乱、语义重复）。仅累积原始流式文本作兜底，最终只把"最终文本"一次性
+  // 喂入分段器，保证：垫词恰好一个、信息块按最终文本顺序、层层递进不重复。
+  let streamedText = "";
 
   try {
     const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
@@ -733,13 +655,16 @@ async function processBatchedMessage(
       signal: turnAbortController.signal,
       routeDecision: decision,
       onAssistantDelta: (delta) => {
-        // 主回复流式同源分段：delta 喂给 streamSegmenter，按自然短句切分，
-        // 同一气泡（stream）内逐句推送（GPT live 真人节奏），垫词 = 首个短句。
+        // 方案1：只需累积原始流式文本作兜底；不再实时 feed 分段器，
+        // 避免多段流/工具边界打断 heldFirst 造成多个垫词与顺序错乱。
+        // 最终在 reply.text 完成后一次性 feed 进分段器（见下方 flush 前）。
         if (isStale()) return;
-        streamSegmenter.feed(delta);
+        streamedText += delta;
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
+        // 方案1：不再需要 markToolBoundary——分段器只在最终文本一次性喂入时才裁决，
+        // 工具边界不会再产生垫词碎片。
         wireToolExecuteStart(
           {
             sessionId: msgActor,
@@ -766,18 +691,48 @@ async function processBatchedMessage(
         );
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
-        // presence 上下文：把工具结果一句话摘要同步进去（仅成功、且有简略 headline 才写入）
-        pushToolSummaryPart(info.toolName, !!info.ok, info.result as Record<string, unknown> | undefined);
         // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
         if (
           info.ok &&
           info.result &&
-          (info.toolName === "search_images" || info.toolName === "search_videos")
+          (info.toolName === "search_images" ||
+            info.toolName === "search_images_batch" ||
+            info.toolName === "search_videos")
         ) {
           executedMediaToolResults.push({
             toolName: info.toolName,
             result: info.result as Record<string, unknown>,
           });
+          // 边说边出图：媒体工具一执行完，先把该批照片结构化推给前端，
+          // 前端插到当前流式正文下方实时展示；done 时再按 renderBlocks 校正顺序。
+          try {
+            const earlyCards = dedupMediaCards(
+              extractMediaCards(
+                info.toolName,
+                info.result as Record<string, unknown>,
+              ),
+            ).filter((c) => {
+              const key = (c.thumbnailUrl || c.mediaUrl || "").trim();
+              if (!key || sentEarlyMediaKeys.has(key)) return false;
+              sentEarlyMediaKeys.add(key);
+              return true;
+            });
+            if (earlyCards.length > 0) {
+              ctx.socket.send(
+                JSON.stringify({
+                  type: ServerEventType.ChatMediaReady,
+                  payload: {
+                    sessionId: msgActor,
+                    messageId: assistantMessageId,
+                    traceId: batched.originalMessageId,
+                    cards: earlyCards,
+                  },
+                }),
+              );
+            }
+          } catch {
+            /* 边说边出图为可选增强，失败静默不阻塞主流程 */
+          }
         }
       },
       onBackgroundAssistantDelta: (info) => {
@@ -901,21 +856,21 @@ async function processBatchedMessage(
     });
 
     if (isStale()) return;
-    replyFinished = true;
 
-    // 流式推送已在 onAssistantDelta 中完成（经 streamSegmenter 逐句推送）。
-    // 兜底：仅当主回复没有任何流式 delta 喂入（如认知捷径重建/工具结果拼接路径，
-    // 其返回的 streamedChunks=false 但实际未走 onAssistantDelta）时，才把完整文本
-    // 喂入分段器作为唯一内容；否则再次喂 reply.text 会与已流式内容叠加 → 整段重复。
-    if (reply.text && !streamSegmenter.hasStreamedContent) {
-      streamSegmenter.feed(reply.text);
+    // 方案1：主回复流结束后，把"最终文本"一次性喂入分段器作为唯一内容源。
+    // - 优先用 reply.text（最终答复，确定性来源）；为空（如走兜底/工具拼接路径）时
+    //   用流式累积的 streamedText 兜底，保证至少有一段正文可分段。
+    // - 链路保证：只 feed 这一次，分段器内部据此裁决一个垫词 + 按信息块递进，
+    //   避免多段流/工具边界造成的重复、乱序与多个垫词。
+    const finalFeed = (reply.text && reply.text.trim()) ? reply.text : streamedText;
+    if (finalFeed && finalFeed.trim()) {
+      streamSegmenter.feed(finalFeed);
     }
 
     // 主回复流结束：把分段器缓冲中剩余的半截文本作为最后一段推送
     await streamSegmenter.flushFinal();
 
     if (isStale()) return;
-    replyFinished = true;
 
     let toolResult: { ok: boolean; result?: Record<string, unknown> } | undefined;
     if (reply.toolName && reply.toolInput) {
@@ -989,18 +944,24 @@ async function processBatchedMessage(
     // 结构化媒体卡片（Coze 式架构）：与 LLM 文本解耦，作为独立字段下发。
     // 前端直接读取 chat.assistant_done 的 mediaCards 字段渲染缩略图，
     // 不再依赖从 LLM 文本解析 [AGENT_RESULT_CARD_START] 标记。
-    let mediaCards = extractMediaCards(reply.toolName, toolResult?.result);
-    // 兜底：reply.toolName 常为 undefined（模型搜完图只输出正文不带工具声明），
-    // 此时从本轮实际执行的媒体搜索工具结果构建卡片，保证照片一定能展示。
-    if (mediaCards.length === 0 && executedMediaToolResults.length > 0) {
-      for (const mt of executedMediaToolResults) {
-        const cards = extractMediaCards(mt.toolName, mt.result);
-        if (cards.length > 0) {
-          mediaCards = cards;
-          break;
-        }
-      }
+    //
+    // 聚合规则（2026-08-20）：**保留本轮所有**媒体搜索执行结果，而不是只取第一个。
+    // 原因：对比类需求（马尔代夫 vs 印尼）LLM 会多次调用 search_images/
+    // search_images_batch（不同维度/两侧），旧逻辑只取首个非空结果导致
+    // 对比图只显示一侧或单维度。现在全部聚合，配合每条卡片携带的
+    // groupTitle/side/sideLabel 分组元数据，前端按维度分组、左右分栏展示。
+    let mediaCards: MediaCardItem[] = [];
+    for (const mt of executedMediaToolResults) {
+      const cards = extractMediaCards(mt.toolName, mt.result);
+      if (cards.length > 0) mediaCards.push(...cards);
     }
+    // 兜底：reply.toolName 路径执行（runToolIfNeeded 未走 onExternalToolExecuted）时，
+    // 本轮执行结果里没有它，这里直接补齐。
+    if (mediaCards.length === 0 && reply.toolName) {
+      mediaCards = extractMediaCards(reply.toolName, toolResult?.result);
+    }
+    // 同一张图不重复展示：跨轮聚合后按图片地址去重（对比图各维度/两侧常重复返回）
+    mediaCards = dedupMediaCards(mediaCards);
     // 仅当没有结构化卡片时，才回退走文本标记注入（保持旧客户端兼容、
     // 以及非图片工具不带结构数据的场景）。有 mediaCards 时不再注入标记，
     // 避免 finalText 携带标记被前端旧解析路径抢先渲染、且无真实缩略图。
@@ -1013,10 +974,39 @@ async function processBatchedMessage(
       // 前端会将其当作纯文本原样展示（重复/来回渲染）。这里剥掉，避免与
       // mediaCards 双份展示。
       finalText = stripMediaCardMarker(finalText);
+      // 媒体搜索轮次：照片已由 mediaCards 卡片渲染，正文里若还残留 LLM 抄的
+      // 工具项（`[路径]说明` 行）就会变成底部脏文本。按行剔除含图片地址的 echo，
+      // 只保留纯文字叙述（若整段都是 echo 则剩余为空），保证下方只剩干净照片。
+      finalText = stripMediaEchoText(finalText);
     }
     // 提升最终回复文本中图片地址为可见缩略图（mediaCards 为空时的最后兜底）
     if (mediaCards.length === 0) {
       finalText = promoteImageUrlsToMedia(finalText);
+    }
+
+    // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
+    // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，
+    // 替代旧行为「全部照片一次性铺在最前面」。由代码层位置锚定完成，不依赖 prompt。
+    // 仅当有结构化媒体卡片时构建；无媒体时前端走原「文本+标记」路径。
+    const renderBlocks =
+      mediaCards.length > 0
+        ? buildInterleavedRenderBlocks(finalText, mediaCards)
+        : [];
+
+    // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
+    try {
+      const debugItems = Array.isArray((toolResult?.result as any)?.items)
+        ? ((toolResult?.result as any).items as unknown[]).length
+        : -1;
+      appendFileSync(
+        "data/debug-image-card.log",
+        `${new Date().toISOString()} toolName=${reply.toolName ?? "undefined"} ` +
+          `toolOk=${toolResult?.ok} items=${debugItems} hasCard=${finalText.includes(
+            "[AGENT_RESULT_CARD_START]",
+          )}\n`,
+      );
+    } catch {
+      /* 调试日志失败不影响主流程 */
     }
 
     if (scheduleOutcome && scheduleOutcome !== reply.text.trim()) {
@@ -1036,15 +1026,11 @@ async function processBatchedMessage(
     embodimentHappy(msgActor, (json) => ctx.socket.send(json));
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
 
-    // 最终 finalText：严格等于流式推给前端的已清理 chunk 拼接（streamedFinalText）。
-    // 不再对 finalText 做重新 promote/attach/strip 处理——那些变换会导致与流式正文不一致（done 突变闪跳）。
-    // 媒体/图片/结构化卡片通过 mediaCards 结构化字段下发，不靠正文标记兜底。
-    // streamedFinalText 为空（如"零流式 chunk + 零 supplement"的纯工具结果兜底路径）
-    // 时，回退到 sanitizeStreamChunk(reply.text) —— 保证用户看到的始终是同一套清理规则。
-    const finalDoneText = (
-      streamedFinalText.trim() ||
-      sanitizeStreamChunk(finalText || "")
-    ).trim();
+    // 兜底剥离 [ts:] 时间戳前缀（首块已剥，这里再兜底一次以防路径绕过 sendAssistantChunk）
+    finalText = finalText.replace(TS_PREFIX_RE, "").trim();
+    // 兜底再剥一次 DSML 工具调用标记：极少数情况下 DSML 跨多个 chunk 拼接后正则未在 adapter 层
+    // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
+    finalText = stripDsmlToolCallMarkup(finalText);
 
     ctx.socket.send(
       JSON.stringify({
@@ -1053,10 +1039,13 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
-          finalText: finalDoneText,
+          finalText,
           toolCalls: reply.toolName ? [reply.toolName] : [],
           // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本，前端直接渲染缩略图
           ...(mediaCards.length > 0 ? { mediaCards } : {}),
+          // 交错渲染块：按正文顺序切好的「文字段+媒体组」，前端按序渲染
+          // → 「一段文字介绍后放一组照片，再一段文字，再一组照片」。
+          ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
         },
       }),
     );
@@ -1094,8 +1083,6 @@ async function processBatchedMessage(
     }
   } finally {
     releaseTurn();
-    // 停止主动在场 ticker（turn 结束无论成败都停，防定时器泄漏）
-    interimController.stopPresence();
     // 丢弃主回复分段器缓冲（异常路径防残留半截文本）
     streamSegmenter.discard();
     // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）

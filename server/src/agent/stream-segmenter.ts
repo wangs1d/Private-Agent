@@ -1,58 +1,85 @@
+import { stripSentencesAlreadySaid } from "../utils/text.js";
+
 /**
- * StreamSegmenter —— 主回复流式的"同源短句分段器"
+ * StreamSegmenter —— 主回复统一分段器（垫词 + 信息块分段 + 增量去重）
  *
- * 设计动机（GPT live 式真人节奏）：
- * - 垫词不再由独立 LLM 生成（避免与正文脱节、重复），而是主回复流式输出的一部分。
- * - 主回复流式 delta 先累积进缓冲，按自然语义短句边界（。！？；\n 等）切分，
- *   每收集到一个完整句子就作为一段推送给前端（同一气泡 messageId 追加），
- *   像真人一句一句蹦出来，而不是整段一次性吐完。
- * - 句间做轻微停顿（pauseMs），模仿真人说话节奏，聊天感更强。
- * - 与主回复同源：分段内容就是 LLM 输出的正文本身，天然连续、不重复。
+ * 设计动机（GPT live 式真人节奏，2026-08-20 合并为单一模块）：
+ * - 垫词不再由独立 LLM / 独立控制器生成（避免与正文脱节、重复），而是主回复
+ *   流式输出的一部分：首个分句被"按住"为垫词(interim)候选，确认有后续内容时
+ *   才作为独立气泡发出；若整段只有一句则作普通正文(stream)单个气泡。
+ * - 按"信息块"（同话题连贯短句）分段，而非机械逐句分段：能在一 个气泡里放完的
+ *   内容不强拆，避免内容冗余；只有话题转换 / 段落换行 / 列表编号 / 达到目标长度
+ *   时才切新块。
+ * - 段落间增量去重：每个块在推送前剔除与已推送句级重复的内容，保证层层递进不重复。
+ * - 重量上限：正文块数封顶，超限内容并入一个尾部块，防止分段过多造成"刷屏"。
+ * - 首段做结论锚：开头的第一个信息块承载直接回应/结论，不因细碎切分被打散；
+ *   后续块才展开细节——先结论后论据，天然递进。
  *
  * 关键正确性约束（杜绝"垫词 + 正文 + done 全文"三者重复）：
- * 1. 每个完整分句单独成段，绝不允许把多个句子并成一个段（否则整段会全落到
- *    interim 垫词气泡，正文气泡为空，done 时又补一份全文 → 整段重复）。
- * 2. 首个分句先"按住"（heldFirst），不立即分发：只有当确认主回复还有后续内容时，
- *    才把它作为垫词(interim)独立气泡发出；若整段回复只有这一句，则把它作为普通
- *    正文(stream)单个气泡发出——避免"垫词气泡 + done 全文气泡"双份重复。
+ * 1. 首个分句独立成垫词候选，只有确认主回复还有后续时才发；否则并入正文单气泡。
+ * 2. 每次发射前用累积的已推送文本做句级去重，残留重复句直接剔除。
  */
 export type StreamSegmenterOptions = {
-  /** 句间停顿（毫秒），用于模拟真人说话节奏。默认 100ms。 */
+  /** 块间停顿（毫秒），用于模拟真人说话节奏。默认 100ms。 */
   pauseMs?: number;
-  /** 最小句子长度（字符），低于该长度的碎片不单独成段，留待合并。默认 6。 */
+  /** 最小句子长度（字符），低于该长度的纯标点碎片不单独成块。默认 6。 */
   minSegmentChars?: number;
   /** 垫词(interim)气泡与真实回复正文之间的间隔（毫秒），
    *  模拟真人先应一句、稍作停顿再开口细说的节奏。默认 800ms。 */
   interimReplyGapMs?: number;
   /**
-   * 是否启用短句分段。默认 true。
-   * - true：按自然句边界切分，逐句推送（带句间停顿），模拟真人聊天节奏。
+   * 是否启用信息块分段。默认 true。
+   * - true：按信息块切分（同话题短句合并），逐块推送（带块间停顿），模拟真人聊天节奏。
    * - false：不透传分段，全部内容累积后在 flushFinal 一次性推为 stream 段。
    */
   segmentationEnabled?: boolean;
+  /** 信息块目标字符数：同话题短句一直累积到接近该长度才切新块。默认 56。 */
+  blockCharTarget?: number;
+  /** 正文信息块数量上限（重量上限）：超出后剩余内容并入尾部块。默认 4。 */
+  maxStreamSegments?: number;
 };
 
+/** 句子 / 段落边界：中文/英文句末标点与换行。 */
 const SEGMENT_BOUNDARY_RE = /[。！？!?；;\n]/u;
+
+/** 话题转换连词：句首命中则视为开启新的信息块。 */
+const TOPIC_SHIFT_RE =
+  /^(而|但|另|不过|然而|且|同时|另外|此外|还有|至于|再|继而|接着|然后|随后|最后|首先|其次|总之|综上|因此|所以|于是|结果|关于|对于|说到|回到|总而言之|换句话说)/u;
+
+/** 列表 / 编号起始：句首命中则视为独立信息块。 */
+const LIST_ITEM_BREAK_RE =
+  /^\s*(?:[（(]?\d+[\.、)）]|[一二三四五六七八九十]+[\.、)）]|[-*•])\s*/u;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class StreamSegmenter {
   private buffer = "";
+  /** 当前正在累积的信息块（同话题连贯内容，尚未到切块时机）。 */
+  private blockBuffer = "";
+  /** 超出重量上限后并入的尾部块（最后一次性输出）。 */
+  private tailBuffer = "";
   private minSegmentChars: number;
   private pauseMs: number;
   /** 垫词与真实回复正文之间的间隔 */
   private interimReplyGapMs: number;
-  /** 是否启用短句分段 */
+  /** 是否启用信息块分段 */
   private segmentationEnabled: boolean;
+  /** 信息块目标字符数 */
+  private blockCharTarget: number;
+  /** 正文信息块数量上限 */
+  private maxStreamSegments: number;
   /** 串行队列：保证 feed 的异步停顿不交错、乱序 */
   private chain: Promise<void> = Promise.resolve();
   private disposed = false;
-  /** 是否已收到任何流式 delta（用于判定"有无流式内容"，替代不可靠的 streamedChunks 标记）。 */
-  private hasReceived = false;
-  /** 首个完整分句：先按住，等判定主回复是否还有其他内容再决定如何分发。 */
+  /** 首个分句：先按住，等判定主回复是否还有其他内容再决定如何分发（垫词候选）。 */
   private heldFirst: string | null = null;
-  /** 是否已把首个分句作为垫词(interim)发出（此后所有分句一律走 stream）。 */
-  private firstHandled = false;
+  /** 垫词是否已裁决并消耗。保证整条回复只产生一个垫词：
+   *  首句按为空后，后续信息块的句首不再被重复当成垫词候选。 */
+  private interimDone = false;
+  /** 已推送正文块的数量（用于重量上限）。 */
+  private streamBlockCount = 0;
+  /** 累积的已推送文本，用于句级增量去重。 */
+  private emittedText = "";
 
   constructor(
     private readonly emit: (segment: string, phase: "interim" | "stream") => void,
@@ -60,69 +87,81 @@ export class StreamSegmenter {
   ) {
     this.pauseMs = opts.pauseMs ?? 100;
     this.minSegmentChars = opts.minSegmentChars ?? 6;
-    this.interimReplyGapMs = opts.interimReplyGapMs ?? 400;
+    this.interimReplyGapMs = opts.interimReplyGapMs ?? 800;
     this.segmentationEnabled = opts.segmentationEnabled ?? true;
+    this.blockCharTarget = opts.blockCharTarget ?? 56;
+    this.maxStreamSegments = opts.maxStreamSegments ?? 4;
   }
 
   /**
-   * 喂入新的流式 delta，累积并按短句边界切分，逐句推送给 emit。
-   * 未闭合的半截文本留在缓冲，等待后续 delta 或 flushFinal。
-   * 异步串行：句间停顿走 setTimeout，不阻塞事件循环。
+   * 喂入新的流式 delta，累积并按信息块切分，逐块推送给 emit。
+   * 未闭合的半截文本留在缓冲/当前块中，等待后续 delta 或 flushFinal。
+   * 异步串行：块间停顿走 setTimeout，不阻塞事件循环。
    */
   feed(delta: string): void {
     if (!delta || this.disposed) return;
-    this.hasReceived = true;
     this.buffer += delta;
     this.chain = this.chain
-      .then(() => this.flushCompleteSegments())
+      .then(() => this.flushCompleteBlocks())
       .catch((err) => {
         console.error("[StreamSegmenter] feed 异常:", err);
       });
   }
 
-  /** 主回复是否已有流式 delta 被喂入（用于上层决定是否还需兜底喂入完整文本）。 */
-  get hasStreamedContent(): boolean {
-    return this.hasReceived;
-  }
-
   /**
-   * 主回复流结束时调用：把缓冲中剩余的文本作为最后一段推送。
-   * - 启用分段时：按句边界裁决首句 + 推送剩余缓冲
+   * 主回复流结束时调用：把缓冲中剩余的文本（含当前块与尾部块）作为最后内容推送。
+   * - 启用分段时：裁决首句垫词 + 推送剩余正文
    * - 禁用分段时：整个缓冲作为 single stream 段直接推送
+   * 这里是"垫词 + done 全文"重复的最后防线，统一做句级去重。
    */
   async flushFinal(): Promise<void> {
     await this.chain;
     if (this.disposed) return;
-    const rest = this.buffer.trim();
+    const rest = (this.buffer + this.blockBuffer).trim();
     this.buffer = "";
+    this.blockBuffer = "";
+
+    const combined = (rest + this.tailBuffer).trim();
+    this.tailBuffer = "";
 
     if (!this.segmentationEnabled) {
       // 不分段模式：整个缓冲作为一段 stream 发出，无首句裁决
-      if (rest) this.emit(rest, "stream");
+      if (combined) this.emit(combined, "stream");
       return;
     }
 
-    // 分段模式：裁决首句 + 推送剩余缓冲
+    // 分段模式：裁决首句 + 推送剩余正文
     if (this.heldFirst !== null) {
-      if (this.firstHandled) {
-        // 首批后续分句已作为正文发出，此时才补发首个分句为垫词(interim)
-        this.emit(this.heldFirst, "interim");
-      } else if (rest) {
-        // 有首个分句 + 剩余未闭合内容 → 首个作垫词，间隔后剩余作正文
-        this.emit(this.heldFirst, "interim");
+      const first = this.heldFirst;
+      this.heldFirst = null;
+      this.interimDone = true;
+      if (first === combined) {
+        // 整段回复只有这一句：作为单个正文气泡发出，避免"垫词 + done 全文"重复
+        this.trackEmitted(first);
+        this.emit(first, "stream");
+      } else {
+        // 有首个分句 + 剩余内容 → 首个作垫词，间隔后剩余作正文（再做句级去重）
+        const body = stripSentencesAlreadySaid(first, combined).trim();
+        this.trackEmitted(first);
+        this.emit(first, "interim");
         if (this.interimReplyGapMs > 0) {
           await sleep(this.interimReplyGapMs);
           if (this.disposed) return;
         }
-        if (rest) this.emit(rest, "stream");
-      } else {
-        // 整段回复只有这一句：作为单个正文气泡发出，避免"垫词 + done 全文"重复
-        this.emit(this.heldFirst, "stream");
+        if (body) {
+          this.trackEmitted(body);
+          this.emit(body, "stream");
+        }
       }
-      this.heldFirst = null;
-      this.firstHandled = true;
-    } else if (rest) {
-      this.emit(rest, "stream");
+      return;
+    }
+
+    if (combined) {
+      const deduped = stripSentencesAlreadySaid(this.emittedText, combined).trim();
+      if (deduped) {
+        this.trackEmitted(deduped);
+        this.emit(deduped, "stream");
+      }
     }
   }
 
@@ -130,58 +169,110 @@ export class StreamSegmenter {
   discard(): void {
     this.disposed = true;
     this.buffer = "";
+    this.blockBuffer = "";
+    this.tailBuffer = "";
     this.heldFirst = null;
+    this.interimDone = false;
   }
 
-  /** 逐句分发：每个完整分句单独作为一段，串行、带句间停顿。
-   *  禁用分段时直接返回，不分句。 */
-  private async flushCompleteSegments(): Promise<void> {
+  /** 按信息块逐块分发：每个完整语义块单独作为一段，串行、带块间停顿。
+   *  禁用分段时直接返回，不切块。 */
+  private async flushCompleteBlocks(): Promise<void> {
     if (!this.segmentationEnabled) return;
     while (!this.disposed) {
       const brk = this.findBoundary(this.buffer);
       if (brk < 0) break; // 暂无完整句子
-      const complete = this.buffer.slice(0, brk + 1).trim();
+      const sentence = this.buffer.slice(0, brk + 1);
       this.buffer = this.buffer.slice(brk + 1);
-      if (!complete) continue;
-      // 纯标点/无实际内容的碎片（如单个"。"或"！"）不单独成段，直接跳过；
-      // 含汉字/字母/数字的短句（如"好的。"）是真实短句，照常成段，避免被并进正文。
+      const raw = sentence.trim();
+      if (!raw) continue;
+      // 纯标点/无实际内容的碎片（如单个"。"或"！"）不单独成块，直接跳过；
+      // 含汉字/字母/数字的短句（如"好的。"）是真实短句，照常参与信息块。
       if (
-        complete.length < this.minSegmentChars &&
-        !/[A-Za-z0-9\u4e00-\u9fa5]/.test(complete)
+        raw.length < this.minSegmentChars &&
+        !/[A-Za-z0-9\u4e00-\u9fa5]/.test(raw)
       ) {
         continue;
       }
-      if (this.pauseMs > 0) {
-        await sleep(this.pauseMs);
+      // 首个分句按住为垫词候选（仅整条回复第一次：垫词恰好一个）
+      if (this.heldFirst === null && !this.interimDone) {
+        this.heldFirst = raw;
+        continue;
+      }
+      // 判定是否切新块（话题转换 / 段落换行 / 列表编号 / 块已达到目标长度）
+      const shouldBreak = this.shouldBreakBlock(this.blockBuffer, raw);
+      if (shouldBreak) {
+        await this.emitCurrentBlock();
+        if (this.disposed) return;
+        this.blockBuffer = raw;
+      } else {
+        this.blockBuffer += raw;
+      }
+      // 块达到目标长度 → 提前终结当前块（同话题内容也控制单块体量）
+      if (this.blockBuffer.length >= this.blockCharTarget) {
+        await this.emitCurrentBlock();
         if (this.disposed) return;
       }
-      await this.dispatchSegment(complete);
     }
   }
 
-  /** 首个完整分句按"是否还有后续"裁决，其余一律 stream。
-   *  异步：垫词(interim)与真实回复正文之间留一个可感知的间隔。 */
-  private async dispatchSegment(complete: string): Promise<void> {
-    if (!this.firstHandled && this.heldFirst === null) {
-      // 这是整段回复的第一个完整分句：先按住，等后续内容再决定是否作垫词
-      this.heldFirst = complete;
-      return;
+  /** 判断是否应开启新的信息块。 */
+  private shouldBreakBlock(acc: string, next: string): boolean {
+    if (!acc) return false;
+    // 段落换行
+    if (/^\s*\n/.test(next)) return true;
+    // 列表项 / 编号起始
+    if (LIST_ITEM_BREAK_RE.test(next)) return true;
+    // 话题转换连词起始
+    if (TOPIC_SHIFT_RE.test(next)) return true;
+    return false;
+  }
+
+  /** 把当前累积的信息块发射出去（去重 + 重量上限裁决 + 停顿）。 */
+  private async emitCurrentBlock(): Promise<void> {
+    const raw = this.blockBuffer.trim();
+    this.blockBuffer = "";
+    if (!raw) return;
+    const deduped = stripSentencesAlreadySaid(this.emittedText, raw).trim();
+    if (!deduped) return;
+    if (this.pauseMs > 0) {
+      await sleep(this.pauseMs);
+      if (this.disposed) return;
     }
+    await this.dispatchSegment(deduped);
+  }
+
+  /**
+   * 分发一个信息块：
+   * - 首个分句（heldFirst）在首个信息块到来时补发为垫词(interim)，间隔后再发正文；
+   * - 其余信息块按顺序发为正文(stream)；
+   * - 超过重量上限的正文并入尾部块，最后一次性输出（防刷屏）。
+   */
+  private async dispatchSegment(segment: string): Promise<void> {
+    // 有被按住的首句 → 先发垫词，停顿后再发当前正文块
     if (this.heldFirst !== null) {
-      // 已有被按住的首句 + 现在来了后续分句 → 首句补发为垫词(interim)，
-      // 中间停顿一下，再开始逐字输出真实回复正文（模拟真人先应一句再开口）。
-      this.emit(this.heldFirst, "interim");
+      const first = this.heldFirst;
       this.heldFirst = null;
-      this.firstHandled = true;
+      this.interimDone = true;
+      this.trackEmitted(first);
+      this.emit(first, "interim");
       if (this.interimReplyGapMs > 0) {
         await sleep(this.interimReplyGapMs);
         if (this.disposed) return;
       }
-      this.emit(complete, "stream");
+      this.trackEmitted(segment);
+      this.emit(segment, "stream");
+      this.streamBlockCount++;
       return;
     }
-    // 首句已裁决 → 后续分句一律走正文
-    this.emit(complete, "stream");
+    // 重量上限：正文块数已达上限 → 并入尾部块，不再单开气泡
+    if (this.streamBlockCount >= this.maxStreamSegments) {
+      this.tailBuffer += segment;
+      return;
+    }
+    this.trackEmitted(segment);
+    this.emit(segment, "stream");
+    this.streamBlockCount++;
   }
 
   /** 从缓冲中找第一个完整句子的边界下标（不含则 -1）。
@@ -191,6 +282,13 @@ export class StreamSegmenter {
    * 逗号（，,）也算边界。真人说话会在长句中间换气，逗号软边界能把超长并列、
    * 列表说明（"1.xxx，2.yyy，3.zzz"）等更自然地拆开，而不是一口气吞下几十字。
    */
+
+  /** 把新文本并入已推送文本，用于句级增量去重。 */
+  private trackEmitted(text: string): void {
+    if (!text) return;
+    this.emittedText = this.emittedText ? `${this.emittedText} ${text}` : text;
+  }
+
   private findBoundary(buf: string): number {
     const COMMA_SOFT_LEN = 40;
     const COMMA_SOFT_COUNT = 2;

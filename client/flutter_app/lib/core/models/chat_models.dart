@@ -107,6 +107,8 @@ class ChatMessage {
     this.waveform,
     this.streaming = false,
     this.mediaCards,
+    this.renderBlocks,
+    this.pendingMediaCards,
   });
 
   final String messageId;
@@ -152,4 +154,27 @@ class ChatMessage {
   ///   - pageUrl: 来源页
   ///   - source: 来源名称
   final List<Map<String, dynamic>>? mediaCards;
+
+  /// 交错渲染块（renderBlocks）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `renderBlocks` 字段，与 `mediaCards`
+  /// 配套下发：服务端已按「分组关键词在正文中的出现位置」把正文切成有序的
+  /// 文字段与媒体组，前端按块顺序渲染即可实现
+  /// 「一段文字介绍 → 一组照片 → 再一段文字 → 再一组照片」的自然阅读流，
+  /// 替代旧行为「全部照片一次性铺在最前面」。
+  ///
+  /// 每条块：
+  ///   - { type: "text", text: "..." }
+  ///   - { type: "media", groupTitle: "...", sideA: "...", sideB: "...",
+  ///       cards: [ 与 mediaCards 条目同构 ] }
+  ///
+  /// 为空/缺失时前端回退到旧逻辑（mediaCards 图廊 + 正文）。
+  final List<Map<String, dynamic>>? renderBlocks;
+
+  /// 边说边出图的临时媒体卡片（瞬态，不持久化）。
+  ///
+  /// 流式阶段收到 `chat.media_ready` 时，把已搜到的照片先挂到当前回复消息上，
+  /// 前端把图插到正在打字的正文下方实时展示；`chat.assistant_done` 到达后
+  /// 以 `renderBlocks` 的最终顺序渲染，此字段被清空。
+  final List<Map<String, dynamic>>? pendingMediaCards;
 }

@@ -26,13 +26,14 @@
  */
 
 import { LIST_ITEM_RE } from "./render-hint-service.js";
+import { hasBlockquote, routeDisplayEffect } from "./display-effect-router.js";
 
 /** 列表项类型推断 */
 const CHECK_HINT_RE = /已完成|已为你|已帮你|已设置|已创建|已规划|✓|✔|成功/i;
 const WARN_HINT_RE = /警告|注意|失败|异常|未完成|pending|⚠|!/i;
 
-/** 卡片最大列表条数（超过不切，避免和小汇报场景冲突） */
-const MAX_CARD_ITEMS = 7;
+/** 卡片最大列表条数（超过不切；长清单由 fold_list 折叠卡承接，见 display-effect-router） */
+const MAX_CARD_ITEMS = 12;
 /** 卡片最小列表条数 */
 const MIN_CARD_ITEMS = 3;
 
@@ -43,10 +44,10 @@ interface AgentResultPayload {
   items: Array<{ type: string; text: string }>;
   footer: string;
   /**
-   * 工具专用卡片类型：
-   * weather / schedule / wallet / order / file / carousel / compare / timeline / media；
-   * 空串=通用列表卡。
-   * compare=左右对比卡、timeline=时间轴卡、media=图片结果卡。
+   * 展示效果类型（由 display-effect-router.ts 纯程序路由决定，无 LLM 参与）：
+   * weather / schedule / wallet / order / file / search_result / media /
+   * compare / timeline / progress / steps / metric / carousel / chips /
+   * fold_list / quote；空串=通用列表卡。
    */
   cardType?: string;
   /** 底部抉择按钮（客户端渲染为 AgentActionChoiceCard，点击经 chat.user_action 回传） */
@@ -178,54 +179,6 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
     titleLine: titleLineIdx,
     footerLine: footerLineIdx,
   };
-}
-
-/**
- * 根据工具名推断工具专用卡片类型。
- * 命中则客户端按类型渲染专用 UI（天气/日程/钱包/订单/文件/搜索轮播，
- * 以及对比/时间轴/媒体），未命中返回空串 → 客户端渲染通用列表卡。
- */
-export function inferCardType(toolName?: string): string {
-  if (!toolName) return "";
-  if (toolName.startsWith("weather.")) return "weather";
-  if (toolName.includes("calendar") || toolName.includes("schedule")) return "schedule";
-  if (toolName.startsWith("wallet.")) return "wallet";
-  if (
-    toolName.includes("order") ||
-    toolName.includes("payment") ||
-    toolName.includes("pay") ||
-    toolName.includes("alipay")
-  ) {
-    return "order";
-  }
-  if (toolName.includes("file")) return "file";
-  if (toolName === "search_images" || toolName === "search_videos") return "media";
-  if (toolName === "search_web" || toolName.startsWith("info.")) return "search_result";
-  // 新增：对比类（商品/方案 pk）、时间轴类（行程/计划）、媒体类（识图/图片结果）
-  if (
-    toolName.toLowerCase().includes("compare") ||
-    toolName.toLowerCase().includes("pk") ||
-    toolName.toLowerCase().includes("对比")
-  ) {
-    return "compare";
-  }
-  if (
-    toolName.toLowerCase().includes("timeline") ||
-    toolName.toLowerCase().includes("plan") ||
-    toolName.toLowerCase().includes("行程")
-  ) {
-    return "timeline";
-  }
-  if (
-    toolName.toLowerCase().includes("image") ||
-    toolName.toLowerCase().includes("photo") ||
-    toolName.toLowerCase().includes("vision") ||
-    toolName.toLowerCase().includes("识图") ||
-    toolName.toLowerCase().includes("图片")
-  ) {
-    return "media";
-  }
-  return "";
 }
 
 /**
@@ -481,7 +434,11 @@ export function formatAgentResultForChat(
   if (!cleaned) return null;
 
   const segment = findExtractableCardSegment(cleaned);
-  if (!segment) return null;
+  if (!segment) {
+    // 列表段切不出时，尝试 markdown 引用块（> xxx）→ quote 引用强调卡。
+    // 纯程序路由：blockquote 是确定性信号，不依赖 LLM 主动声明。
+    return formatQuoteResultForChat(cleaned, llmActions);
+  }
 
   const lines = cleaned.split(/\r?\n/);
 
@@ -514,7 +471,22 @@ export function formatAgentResultForChat(
     return { type, text: itemText };
   });
 
-  const cardType = inferCardType(toolName);
+  // 顺序编号占比：`1. ` `2、` 前缀会被剥离导致步骤信号丢失，
+  // 在剥离前统计原文编号行比例传给路由器（见 display-effect-router 2.5 规则）。
+  const rawListLines = lines.slice(segment.startLine, segment.endLine + 1);
+  const numberedCount = rawListLines.filter((l) =>
+    /^(?:\d+[.)、]\s+)/u.test(l.trim()),
+  ).length;
+  const numberedItemRatio =
+    rawListLines.length > 0 ? numberedCount / rawListLines.length : 0;
+
+  const cardType = routeDisplayEffect({
+    toolName,
+    title: segment.title,
+    items,
+    footer: segment.footer,
+    numberedItemRatio,
+  });
   // 按钮策略优先级：LLM 实时声明 > 多选/勾选 > 场景推断
   // - LLM 声明：Agent 按当下场景实时给出按钮，最贴合实际
   // - 场景推断：仅作为 LLM 未声明时的兜底（见 detectCardScenario 的注释，不再硬塞"好的/不用了"）
@@ -552,6 +524,91 @@ export function formatAgentResultForChat(
   if (leadingLines.length) parts.push(leadingLines.join("\n"));
   parts.push(cardBlock);
   if (trailingLines.length) parts.push(trailingLines.join("\n"));
+
+  return parts.join("\n\n");
+}
+
+/**
+ * 把 markdown 引用块（`> xxx`，1-4 连续行）切成 quote 引用强调卡。
+ *
+ * 纯程序路由：blockquote 是确定性信号（LLM 无需任何声明），适用于
+ * 一句话结论 / 金句 / 提醒强调场景。
+ *   - title = 引用块剥掉 `>` 后的合并文本；
+ *   - footer = 引用块之后 ≤3 行内的非空短句（≤40 字，作来源/补充）；
+ *   - 引用块之前的前导行、之后的其余行原样保留。
+ * 无引用块（或内容过短）返回 null。
+ */
+export function formatQuoteResultForChat(
+  text: string,
+  llmActions: InferredAction[] = [],
+): string | null {
+  const lines = text.split(/\r?\n/);
+
+  // 找第一段连续引用块
+  let start = -1;
+  let end = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i]!.trim();
+    if (t.startsWith(">")) {
+      if (start === -1) start = i;
+      end = i;
+      // 引用块中间允许一行空行（markdown 惯例）
+    } else if (start !== -1 && t !== "") {
+      break;
+    }
+  }
+  if (start === -1) return null;
+
+  const quoteText = lines
+    .slice(start, end + 1)
+    .map((l) => l!.trim().replace(/^>\s*/, "").trim())
+    .filter((l) => l.length > 0)
+    .join(" ");
+  // 剥掉包裹引号（「」/“”），卡片自带引号视觉，避免双重引号
+  const unquoted = quoteText
+    .replace(/^[“”「『]+/, "")
+    .replace(/[“”」』]+$/, "")
+    .trim();
+  if (unquoted.length < 4) return null;
+
+  // footer：引用块之后 ≤3 行内的非空短句
+  let footer = "";
+  let footerLineIdx = -1;
+  for (let k = end + 1; k < Math.min(lines.length, end + 4); k++) {
+    const ln = lines[k]?.trim() ?? "";
+    if (!ln) continue;
+    if (ln.length > 40 || ln.startsWith(">")) break;
+    footer = ln;
+    footerLineIdx = k;
+    break;
+  }
+
+  const payload: AgentResultPayload = {
+    avatar: "NB",
+    avatarStyle: "default",
+    title: unquoted,
+    items: [],
+    footer,
+    cardType: "quote",
+    actions: llmActions,
+    speak: "high",
+    cardId: `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+  };
+  const cardBlock = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
+
+  const parts: string[] = [];
+  const leading = lines
+    .slice(0, start)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (leading.length) parts.push(leading.join("\n"));
+  parts.push(cardBlock);
+  const trailingSkip = footerLineIdx === -1 ? end : footerLineIdx;
+  const trailing = lines
+    .slice(trailingSkip + 1)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (trailing.length) parts.push(trailing.join("\n"));
 
   return parts.join("\n\n");
 }

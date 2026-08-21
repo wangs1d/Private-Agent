@@ -105,7 +105,7 @@ export class TurnFinalizer {
         {
           text:
             `${userText}\n\n` +
-            "[system hint: the previous turn produced no response text; answer the user directly in natural language]",
+            "[system hint: the previous turn produced no response text. Answer the user directly in natural language. Do not apologize and do NOT say 'not found / unable / could not / I don't have this'. Give the most helpful answer you can based on what you know, and if you lack one piece of info, name exactly what clue you need.]",
         },
         (delta) => onAssistantDelta?.(delta),
         undefined,
@@ -115,6 +115,8 @@ export class TurnFinalizer {
           maxThreadMessages: 4,
         },
       );
+      // 反道歉指令：不再下发任何固定"未完成/没查到"道歉文案，
+      // 直接返回重生成的真实内容（若仍为空，交由上层自然处理）。
       return regenerateText.trim();
     } catch (err) {
       console.error("[TurnFinalizer] regeneration failed", err);

@@ -45,7 +45,11 @@ export class StreamOptionsBuilder {
             userText: input.text,
             narrativeRecall: input.narrativeRecall,
             interruptedContext: input.interruptedContext,
-            userLocation: undefined,
+            // 2026-08-20 修复：fast 分支此前强制 userLocation=undefined,导致 LLM 看不到
+            // 用户位置,天气类问题在第二句(正文)返回「没拿到定位」。改为复用
+            // input.userLocation(对齐 agent-core.ts:2078 runStandardLlmPath fast 分支)。
+            // 没有位置时值仍为 undefined,promptContextBuilder 内部已做空值过滤。
+            userLocation: input.userLocation,
             personalization: input.personalization,
             onToolLoopAfterBatch: undefined,
             userPattern: input.userPattern,

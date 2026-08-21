@@ -141,6 +141,23 @@ export class AgentMemorySyncService {
     });
   }
 
+  /**
+   * 幂等种子：仅当目标 KV 键尚不存在时写入（返回 true），否则跳过（返回 false）。
+   * 供身份/记忆 Markdown 文档加载使用——绝不覆盖运行时学习到的人格/画像/事实，
+   * 只在下层为空时把文档作为默认基底填入。
+   */
+  seedIfAbsent(actorId: string, key: string, value: unknown): Promise<boolean> {
+    return this.enqueueActorWrite(actorId, () => {
+      for (let i = 0; i < 12; i++) {
+        const { revision, entries } = this.getSnapshot(actorId, [key]);
+        if (Object.prototype.hasOwnProperty.call(entries, key)) return false;
+        const result = this.applyPatchUnsafe(actorId, revision, [{ key, op: "put", value }]);
+        if (result.ok) return true;
+      }
+      return false;
+    });
+  }
+
   appendRelationshipHistoryLine(actorId: string, line: string, topicHint?: string): void {
     this.appendMemorySummaryLine(actorId, `【关系线程】${line}`, topicHint ?? "relationship");
   }
