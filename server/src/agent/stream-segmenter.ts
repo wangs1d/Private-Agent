@@ -184,10 +184,24 @@ export class StreamSegmenter {
     this.emit(complete, "stream");
   }
 
-  /** 从缓冲中找第一个完整句子的边界下标（不含则 -1）。 */
+  /** 从缓冲中找第一个完整句子的边界下标（不含则 -1）。
+   *
+   * 硬边界：句号/感叹号/问号/分号/换行（。！？!?；;\n）—— 命中即切。
+   * 软边界：当缓冲长度 > COMMA_SOFT_LEN、且前缀里已有 >= COMMA_SOFT_COUNT 个逗号时，
+   * 逗号（，,）也算边界。真人说话会在长句中间换气，逗号软边界能把超长并列、
+   * 列表说明（"1.xxx，2.yyy，3.zzz"）等更自然地拆开，而不是一口气吞下几十字。
+   */
   private findBoundary(buf: string): number {
+    const COMMA_SOFT_LEN = 40;
+    const COMMA_SOFT_COUNT = 2;
+    let commaCount = 0;
     for (let i = 0; i < buf.length; i++) {
-      if (SEGMENT_BOUNDARY_RE.test(buf[i])) return i;
+      const ch = buf[i];
+      if (SEGMENT_BOUNDARY_RE.test(ch)) return i;
+      if (ch === "，" || ch === ",") {
+        commaCount += 1;
+        if (i + 1 >= COMMA_SOFT_LEN && commaCount >= COMMA_SOFT_COUNT) return i;
+      }
     }
     return -1;
   }

@@ -30,13 +30,7 @@ const PRESENCE_BACKOFF_FACTOR = 1.25;
 /** presence 单次 LLM 生成的超时（给自然表达空间） */
 const PRESENCE_TIMEOUT_MS = 3000;
 
-/**
- * 流式语义段落切分的最小句长：低于该长度的"句"不单独成段，
- * 会与后续内容合并，避免把碎片标点/单字切成独立消息。
- */
-const MIN_SEGMENT_CHARS = 12;
-/** 段落边界：中文/英文句子结束符。命中即视为一个完整语义段落。 */
-const SEGMENT_BOUNDARY_RE = /[。！？!?；;\n]/;
+
 
 const NOISE_PREFIXES = /^(你好|hi|hello|hey|谢谢|thanks|thank you|再见|bye)[!，,。？?\s]*$/i;
 const ANSWERISH_RE =
@@ -51,11 +45,11 @@ export type InterimChannel = "text_chat" | "proactive_text";
 /**
  * interim prompt 集合（初始承接 / 主动在场），按通道分发。
  *
- * 设计原则：只给指导，不给示例。不硬编码具体话术、语气词列表。
- * 文字风格统一为"熟悉朋友式聊天"：放得开、能开玩笑、口语化、围绕话题聊，
- * 严禁任务过程通报（不提"正在查/搜到了/马上好"这类流水账）。
- * 垫词只针对聊天本身，与工具调用过程完全无关。
- * 只有 proactive_text（主动联系）是例外，它保留"开口词"语义。
+ * 设计原则：只描述任务边界与结构约束，不硬编码语气、风格、语气词。
+ * 语气/人格统一由 SOUL.md / USER.md / MEMORY.md few-shot 在会话上下文中注入，
+ * 这里不再重复风格指令，避免多处指令互相打架。
+ * 垫词只针对聊天本身，与工具调用过程完全无关；
+ * 只有 proactive_text（主动联系）保留"开口词"语义。
  */
 interface InterimPromptSet {
   initial: string;
@@ -64,34 +58,27 @@ interface InterimPromptSet {
 }
 
 const PROMPTS_BY_CHANNEL: Record<InterimChannel, InterimPromptSet> = {
-  // 文本聊天：熟悉朋友式聊天，围绕话题交流而非通报任务
   text_chat: {
     initial:
-      "你是用户在聊天软件里的老朋友，关系熟、放得开、偶尔开玩笑。用户刚给你发来一句话，你要开始帮他处理这件事。先自然回应一句，像朋友聊天那样。\n\n" +
-      "要求：\n" +
-      "- 语气口语化、放得开，像熟人聊天，不是客服、不是汇报工作。\n" +
-      "- 接住他刚说的话：表示你 get 到了、有点反应、必要时抛一句反问。\n" +
-      "- 这是一段话的开场，别把答案或方案说出来。\n" +
-      "- 一到两句，别硬凑字数。\n" +
-      "- 输出消息本身。",
+      "用户刚给你发来一句话，你要开始处理这件事。先回应一句，作为一段对话的开场。\n\n" +
+      "规则：\n" +
+      "- 接住他刚说的话：表示你 get 到了、必要时抛一句反问；不要把答案或方案直接说出来。\n" +
+      "- 一到两句，输出消息本身。",
     presence:
-      "你是用户在聊天软件里的老朋友。对话已经进行一会儿了，你正在帮用户处理他刚提出的问题，你们已经聊过几句。中间有一小段空当，但你不让他察觉你在'干活'——就当正常聊天，自然地找话说。\n\n" +
-      "要求：\n" +
-      "- 必须始终围绕他刚才的问题聊：反问、表态、玩笑、延伸相关话题、分享感受，像朋友闲聊；任何一句话都要跟他的话题有关，绝不跳到无关的事，也绝不要重新打招呼或表现得像刚见面。\n" +
-      "- 严禁复述任务过程（不说'在查/马上好/搜到了/稍等'这类），也绝口不提你在看什么文章/网页/资料，不暴露任何查询、读取动作或具体来源。\n" +
+      "你正在帮用户处理他刚提出的问题，对话已经进行了几句。中间有一小段空当，自然地继续围绕他的话题聊。\n\n" +
+      "规则：\n" +
+      "- 始终围绕用户的问题聊：反问、表态、延伸相关话题、分享感受。不跳到无关的事，不重新打招呼。\n" +
+      "- 严禁复述任务过程或进度，不暴露查询、读取动作或具体来源。\n" +
       "- 别急着给答案、别剧透。\n" +
-      "- 放得开，能开玩笑，口语化。\n" +
-      "- 别重复你已经问过或说过的内容（比如刚问过预算就不要再问一遍）。\n" +
-      "- 没话说就沉默（什么都不输出）。\n" +
+      "- 不重复已经问过或说过的内容。\n" +
+      "- 没话说就保持沉默（什么都不输出）。\n" +
       "- 一句到两句，输出消息本身。",
   },
 
-  // 主动文本联系：开口词，告诉对方"我突然想起个事"
   proactive_text: {
     initial:
       "You are proactively reaching out to the user via text. You noticed something worth mentioning. Send ONE opening message in the user's language.\n\n" +
-      "Guidance:\n" +
-      "- Sound like a friend casually bringing something up, not an assistant reporting.\n" +
+      "Rules:\n" +
       "- Indicate why you're reaching out, without being verbose.\n" +
       "- Do not explain or justify the outreach.\n" +
       "- Keep it short.\n" +
@@ -176,13 +163,16 @@ export interface LivingInterimConfig {
 }
 
 /**
- * 内容驱动的多步回复分段器
+ * 活体 Interim 控制器：
+ * - 垫词（maybeEmitInitial）：在主回复生成/执行前，以一句自然承接开头，
+ *   由独立 LLM 生成，简洁、不说答案。
+ * - 主动在场（presence ticker）：仅 complex 模式启用，工具执行长耗时阶段
+ *   周期性给 LLM 开口机会，生成围绕当前话题的自然闲聊（追问/反馈/延伸），
+ *   像真人"边做边聊"，不通报任务过程、不剧透答案。
  *
- * 不再使用定时器、随机、模板。真正的"多步回复"由 LLM 输出内容本身驱动：
- * - 复杂任务执行时，LLM 流式输出完整回复，本控制器按自然语义段落切分，
- *   每完成一个完整段落就作为一条独立消息推送给用户（像真人一句一句发）。
- * - 步数 = LLM 输出的段落数，完全不固定，由回复内容长短决定。
- * - 每段文字都是 LLM 自主生成的完整内容，agent 个性决定措辞。
+ * 主回复流式分段由 StreamSegmenter 统一负责，本控制器不再做内容驱动分段，
+ * 仅通过 accumulateMainReplyText 跟踪主回复已输出文本，防止 presence
+ * 闲聊与主回复或已发垫词重复。
  */
 export class LivingInterimController {
   private messagesSent = 0;
@@ -190,8 +180,10 @@ export class LivingInterimController {
   private readonly channel: InterimChannel;
   /** 已发送的消息历史，用于机制层面去重（非 prompt 注入） */
   private sentHistory: string[] = [];
-  /** 流式累积缓冲：尚未达到段落边界的半截文本 */
-  private segmentBuffer = "";
+  /** 主回复已流式输出的文本，避免 presence 闲聊与主回复重复 */
+  private mainReplyText: string = "";
+  /** tool loop 阶段的工具结果一句话摘要（有则注入 presence 上下文避免凭空瞎说） */
+  private toolResultsSummary: string = "";
 
   // ── 主动在场（presence）状态：complex 后台任务执行期间持续自然互动 ──
   private presenceTimer: NodeJS.Timeout | null = null;
@@ -227,61 +219,21 @@ export class LivingInterimController {
   }
 
   /**
-   * 主回复流式推送入口：累积 LLM 输出的 delta，按自然语义段落切分，
-   * 每完成一个完整段落就推送给用户；未完成的半截文本留待下次。
-   *
-   * 这是"多步回复"的核心：步数完全由 LLM 输出内容决定，无定时器。
+   * 主回复流式文本由 StreamSegmenter 统一分段推送。
+   * 这里仅累积主回复已输出的正文，用于 presence 去重，
+   * 避免主动在场的闲聊与主回复说过的话重复。
    */
-  feedStreamDelta(delta: string): void {
-    if (this.cfg.isStale()) return;
-    if (this.cfg.isMainReplyStarted()) return;
-    this.segmentBuffer += delta;
-    this.flushCompleteSegments();
+  accumulateMainReplyText(fullText: string): void {
+    this.mainReplyText = fullText;
   }
 
   /**
-   * 主回复结束时调用：把缓冲中剩余的半截文本作为最后一条消息推送。
+   * 复杂任务工具执行阶段，把已拿到的工具结果一句话摘要注入，
+   * 让 presence 闲聊贴近事实进度（"快好了，看到价格了"之类），
+   * 避免与主回复最终结论矛盾。不传则保持沉默。
    */
-  flushRemaining(): void {
-    if (this.cfg.isStale()) return;
-    if (this.cfg.isMainReplyStarted()) return;
-    const rest = this.segmentBuffer.trim();
-    this.segmentBuffer = "";
-    if (!rest) return;
-    this.trySend(rest);
-  }
-
-  /**
-   * 丢弃缓冲（例如主回复已接管、turn 过期），避免残留半截文本。
-   */
-  discardBuffer(): void {
-    this.segmentBuffer = "";
-  }
-
-  /**
-   * 按自然语义段落边界把缓冲切成多条完整消息。
-   * 边界：中文/英文句子结束符；低于最小句长的碎片不单独成段，留待合并。
-   */
-  private flushCompleteSegments(): void {
-    // 从缓冲末尾向前扫描，找到最后一个仍"未闭合"的位置
-    let lastBreak = -1;
-    for (let i = 0; i < this.segmentBuffer.length; i++) {
-      if (SEGMENT_BOUNDARY_RE.test(this.segmentBuffer[i])) {
-        lastBreak = i;
-      }
-    }
-    if (lastBreak < 0) return; // 还没有任何完整段落
-
-    const complete = this.segmentBuffer.slice(0, lastBreak + 1).trim();
-    this.segmentBuffer = this.segmentBuffer.slice(lastBreak + 1);
-
-    if (!complete) return;
-    // 太短的碎片合并到下一段，避免把单个标点/短句切成独立消息
-    if (complete.length < MIN_SEGMENT_CHARS) {
-      this.segmentBuffer = complete + this.segmentBuffer;
-      return;
-    }
-    this.trySend(complete);
+  setToolResultsSummary(summary: string): void {
+    this.toolResultsSummary = summary;
   }
 
   // ==================== 主动在场（presence）机制 ====================
@@ -330,11 +282,17 @@ export class LivingInterimController {
       const alreadySaid = this.sentHistory.length
         ? this.sentHistory.slice(-2).join(" | ")
         : "";
+      const mainReplyHead = this.mainReplyText
+        ? this.mainReplyText.slice(0, 200)
+        : "";
+      const toolSummary = this.toolResultsSummary.trim();
       const ackText = await this.generateAck({
         prompt:
           `The user asked you this and you're still working on it for him:\n${this.presenceUserText}\n` +
-          (alreadySaid ? `You've already said: ${alreadySaid}\n` : "") +
-          `The conversation is already in progress — keep chatting with him naturally about this topic. Don't repeat questions or remarks you've already made.`,
+          (alreadySaid ? `You've already said in filler: ${alreadySaid}\n` : "") +
+          (mainReplyHead ? `Main reply already begun showing in chat: ${mainReplyHead}\nDo NOT repeat or contradict it.\n` : "") +
+          (toolSummary ? `Recent findings from real tool results (hint only, do NOT reveal sources): ${toolSummary}\n` : "") +
+          `The conversation is already in progress — keep chatting with him naturally about this topic. Don't repeat questions or remarks you've already made, and don't give away the final answer.`,
         systemPrompt:
           PROMPTS_BY_CHANNEL[this.channel].presence ??
           PROMPTS_BY_CHANNEL.text_chat.presence!, // text_chat 必有 presence
@@ -450,14 +408,16 @@ export class LivingInterimController {
   }
 
   /**
-   * 机制层面去重：检查新生成的垫词是否与已发送的某条垫词高度重叠。
+   * 机制层面去重：检查新生成的垫词是否与已发送垫词或主回复正文高度重叠。
    * 用字符 bigram Jaccard 相似度，> 0.5 视为重复，直接丢弃。
    * 不依赖 prompt 注入，纯程序保证。
    */
   private isDuplicateWithHistory(text: string): boolean {
-    if (this.sentHistory.length === 0) return false;
+    const candidates: string[] = [...this.sentHistory];
+    if (this.mainReplyText) candidates.push(this.mainReplyText);
+    if (candidates.length === 0) return false;
     const newTokens = bigramSet(text);
-    for (const prev of this.sentHistory) {
+    for (const prev of candidates) {
       const prevTokens = bigramSet(prev);
       const intersection = [...newTokens].filter((t) => prevTokens.has(t)).length;
       const union = new Set([...newTokens, ...prevTokens]).size;

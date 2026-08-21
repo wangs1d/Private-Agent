@@ -19,7 +19,11 @@
  */
 
 import type { MemoryRecallItem } from "./types.js";
-import { semanticFingerprint } from "../services/memory-record-utils.js";
+import {
+  contentTokenSet,
+  semanticFingerprint,
+  tokenOverlapRatio,
+} from "../services/memory-record-utils.js";
 
 export type MemoryChannelId =
   | "agentic"
@@ -171,6 +175,8 @@ interface MergedEntry {
   /** 各通道的归一化分（取该通道内最高）。 */
   normalizedScores: Map<MemoryChannelId, number>;
   fingerprint: string;
+  /** 同指纹的其余表述（P1：合并不丢内容，注入时可附注差异）。 */
+  variants: string[];
 }
 
 /**
@@ -196,17 +202,22 @@ function dedupeAcrossChannels(channels: ChannelRecallResult[]): MergedEntry[] {
           channels: new Set<MemoryChannelId>([ch.channel]),
           normalizedScores: new Map([[ch.channel, normScore]]),
           fingerprint: fp,
+          variants: [],
         });
       } else {
         existing.channels.add(ch.channel);
         const existingScore = existing.representative.score ?? 0;
         if (normScore > existingScore) {
-          // 更新代表（保留更高分的 content，但合并 source 信息）
+          // 更新代表（保留更高分的 content，但合并 source 信息）；旧代表降级为 variant，内容不丢
+          const prevContent = existing.representative.content;
           existing.representative = {
             ...item,
             score: normScore,
             source: mergeSource(existing.representative.source, ch.channel),
           };
+          if (prevContent && prevContent !== item.content) existing.variants.push(prevContent);
+        } else if (content !== existing.representative.content) {
+          existing.variants.push(content);
         }
         // 累积该通道最高分
         const prev = existing.normalizedScores.get(ch.channel) ?? 0;
@@ -231,12 +242,50 @@ function mergeSource(existing: string | undefined, channel: MemoryChannelId): st
 }
 
 /**
- * 综合打分：通道权重加权平均 × 多通道命中加成。
+ * 时间感知融合（P0）：按 domain 区分的时间常数 τ（小时），近因因子 = exp(-age/τ)。
+ * 类人记忆特性——事件/情绪记忆衰减快，事实/技能/人格衰减慢。
+ */
+const DOMAIN_RECENCY_TAU_HOURS: Record<string, number> = {
+  working: 6,
+  emotional: 48,
+  episodic: 72,
+  narrative: 96,
+  world: 168,
+  relationship: 480,
+  semantic: 720,
+  procedural: 2160,
+  personality: 8760,
+};
+
+const DEFAULT_RECENCY_TAU_HOURS = 168;
+
+function recencyFactor(item: MemoryRecallItem, now = Date.now()): number {
+  const ts = Date.parse(item.timestamp ?? "");
+  if (!Number.isFinite(ts)) return 0.85; // 无时间信息：轻微折中
+  const tau = DOMAIN_RECENCY_TAU_HOURS[item.domain] ?? DEFAULT_RECENCY_TAU_HOURS;
+  return Math.exp(-Math.max(0, (now - ts) / 3_600_000) / tau);
+}
+
+/** 防串台一致性（P2）：query 与记忆实词重叠过低时强降权，下限 0.3（语义分再高也压不过话题不符）。query 太短不启用（无从判断）。 */
+function overlapFactor(queryTokens: Set<string> | null, item: MemoryRecallItem): number {
+  if (!queryTokens || queryTokens.size < 3) return 1;
+  const ratio = tokenOverlapRatio(queryTokens, contentTokenSet(item.content));
+  return ratio >= 0.15 ? 1 : 0.3 + 0.7 * (ratio / 0.15);
+}
+
+/**
+ * 综合打分：通道权重加权平均 × 多通道命中加成 × 近因调制 × 话题一致性调制。
  * - baseScore = Σ(权重 × 归一化分) / Σ权重
  * - boost = 1 + multiChannelBoost × (命中通道数 - 1)
- * - 多通道一致命中是强信号，boost 放大其最终分。
+ * - recency 软调制（权重 0.25）：刚发生 ×1.0，久远下限 ×0.75，避免旧的重要事实被过度压制
+ * - overlap 调制：聊 A 话题时 B 话题记忆（语义分高但实词零重叠）被压到最低 0.5
  */
-function computeFinalScore(entry: MergedEntry, config: MemoryArbitratorConfig): number {
+function computeFinalScore(
+  entry: MergedEntry,
+  config: MemoryArbitratorConfig,
+  queryTokens: Set<string> | null,
+  now = Date.now(),
+): number {
   const hitChannels = entry.channels.size;
   let weightedSum = 0;
   let weightTotal = 0;
@@ -247,19 +296,43 @@ function computeFinalScore(entry: MergedEntry, config: MemoryArbitratorConfig): 
   }
   const baseScore = weightTotal > 0 ? weightedSum / weightTotal : 0.5;
   const boost = 1 + config.multiChannelBoost * Math.max(0, hitChannels - 1);
-  return baseScore * boost;
+  const recency = 0.75 + 0.25 * recencyFactor(entry.representative, now);
+  return baseScore * boost * recency * overlapFactor(queryTokens, entry.representative);
+}
+
+/** 分类配额（P4）：topN 内单个 domain 的最大占比，保证注入记忆的类型多样性。 */
+const DOMAIN_QUOTA: Record<string, number> = { episodic: 3, semantic: 3, procedural: 1, emotional: 1 };
+
+/** 分类配额分配：高分优先，超配额 domain 的条目让位给其他 domain；全部配额用尽后溢出条目可补位。 */
+function applyDomainQuota(scored: Array<{ item: MemoryRecallItem }>, topN: number): MemoryRecallItem[] {
+  const picked: typeof scored = [];
+  const overflow: typeof scored = [];
+  const counts = new Map<string, number>();
+  for (const s of scored) {
+    const domain = s.item.domain;
+    const quota = DOMAIN_QUOTA[domain];
+    if (quota === undefined || (counts.get(domain) ?? 0) < quota) {
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+      picked.push(s);
+    } else {
+      overflow.push(s);
+    }
+  }
+  return [...picked, ...overflow].slice(0, topN).map((s) => s.item);
 }
 
 /**
- * 主仲裁入口：多通道召回结果 → 通道内归一化 → 跨通道去重 → 综合重排。
+ * 主仲裁入口：多通道召回结果 → 通道内归一化 → 跨通道去重 → 综合重排 → 分类配额。
  *
  * @param channels 各通道的召回结果（条目可带可不带 score）
  * @param config 仲裁配置；未传用默认配置
+ * @param opts.query 本次召回的原始 query（用于防串台一致性调制；不传则跳过该因子）
  * @returns 去重 + 重排后的 MemoryRecallItem[]，每条带融合 score 与合并后的 source
  */
 export function arbitrateMemories(
   channels: ChannelRecallResult[],
   config: MemoryArbitratorConfig = DEFAULT_ARBITRATOR_CONFIG,
+  opts?: { query?: string },
 ): MemoryRecallItem[] {
   if (!config.enabled) {
     // 关闭时简单拼接所有通道（保持向后兼容），不做去重/排序
@@ -272,10 +345,11 @@ export function arbitrateMemories(
     return all.slice(0, config.topN);
   }
 
+  const queryTokens = opts?.query ? contentTokenSet(opts.query) : null;
   const merged = dedupeAcrossChannels(channels);
   const scored = merged
     .map((entry) => {
-      const finalScore = computeFinalScore(entry, config);
+      const finalScore = computeFinalScore(entry, config, queryTokens);
       const sources = [...entry.channels].join(",");
       // tiebreaker：命中通道中的最高权重（同分时高权重通道优先，体现通道可信度）
       const maxChannelWeight = Math.max(
@@ -299,7 +373,7 @@ export function arbitrateMemories(
       return b.maxChannelWeight - a.maxChannelWeight;
     });
 
-  return scored.slice(0, config.topN).map((s) => s.item);
+  return applyDomainQuota(scored, config.topN);
 }
 
 /**

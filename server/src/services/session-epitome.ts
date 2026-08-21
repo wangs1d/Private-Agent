@@ -19,7 +19,7 @@
 
 import type { MemoryItem } from "../brain/types.js";
 import { AGENT_COMMITMENT_RE, MEMORY_EXPLICIT_RE } from "../agent/memory-signal.js";
-import { normalizeMemoryLine } from "./memory-record-utils.js";
+import { contentTokenSet, normalizeMemoryLine, tokenOverlapRatio } from "./memory-record-utils.js";
 
 export type EpitomeEntryKind = "open_loop" | "commitment" | "preference";
 
@@ -34,6 +34,12 @@ export interface SessionEpitomeSnapshot extends SessionEpitomeEntries {
   revision: number;
 }
 
+/** 内部存储条目（P3：带创建时间，支持 TTL 过滤与完成检测）。 */
+interface EpitomeEntry {
+  text: string;
+  createdAt: string;
+}
+
 /** KV 持久化适配器（与 KvSummaryLike 同形状）。 */
 export interface EpitomeKvLike {
   getSnapshot(
@@ -46,6 +52,12 @@ export interface EpitomeKvLike {
 export const EPITOME_KV_KEY = "session_epitome";
 
 const MAX_ENTRIES_PER_KIND = 6;
+/** open loop 生命周期（P3）：7 天未被完成/提及即过期，不再注入【上一会话待办】。 */
+const OPEN_LOOP_TTL_MS = 7 * 86_400_000;
+/** 完成语义（P3）：用户表示某事已搞定/不再需要时，关闭对应的 open loop。 */
+const LOOP_DONE_RE = /搞[定掂]|办[完妥]|已完成|已经完成|做完了|解决了|处理完|不用了|不需要了|取消/i;
+/** loop 与本轮文本的词重叠阈值：足够高才认定"说的是同一件事"。 */
+const LOOP_CLOSE_OVERLAP = 0.2;
 
 // 用户请求信号（开放环路）：请求/待办/安排/提醒 语义
 const USER_REQUEST_RE = /请|帮我|需要|想要|安排|提醒|订|买|查|分析|总结|继续|修复|优化|看看|做一个|我要|我想/i;
@@ -143,15 +155,44 @@ export function extractEpitomeEntries(
   };
 }
 
-function parseStoredSnapshot(value: unknown): SessionEpitomeSnapshot | null {
+/** 旧 KV 条目兼容解析：string（旧格式）或 { text, createdAt }（新格式）。 */
+function parseEntryList(value: unknown): EpitomeEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((x): EpitomeEntry | null => {
+      if (typeof x === "string") return x.trim() ? { text: x.trim(), createdAt: "" } : null;
+      if (x && typeof x === "object") {
+        const o = x as Record<string, unknown>;
+        const text = typeof o.text === "string" ? o.text.trim() : "";
+        const createdAt = typeof o.createdAt === "string" ? o.createdAt : "";
+        return text ? { text, createdAt } : null;
+      }
+      return null;
+    })
+    .filter((x): x is EpitomeEntry => x !== null);
+}
+
+/** 内部存储快照（条目带时间戳）。 */
+interface StoredEpitomeSnapshot {
+  openLoops: EpitomeEntry[];
+  commitments: EpitomeEntry[];
+  preferences: EpitomeEntry[];
+  updatedAt: string;
+  revision: number;
+}
+
+function emptyStored(): StoredEpitomeSnapshot {
+  return { openLoops: [], commitments: [], preferences: [], updatedAt: "", revision: 0 };
+}
+
+/** 解析 KV 值为内部快照（兼容旧 string[] 格式）。 */
+function parseStored(value: unknown): StoredEpitomeSnapshot | null {
   if (!value || typeof value !== "object") return null;
   const o = value as Record<string, unknown>;
-  const asList = (k: string): string[] =>
-    Array.isArray(o[k]) ? (o[k] as unknown[]).filter((x): x is string => typeof x === "string") : [];
   return {
-    openLoops: asList("openLoops"),
-    commitments: asList("commitments"),
-    preferences: asList("preferences"),
+    openLoops: parseEntryList(o.openLoops),
+    commitments: parseEntryList(o.commitments),
+    preferences: parseEntryList(o.preferences),
     updatedAt: typeof o.updatedAt === "string" ? o.updatedAt : nowIso(),
     revision: typeof o.revision === "number" ? o.revision : 0,
   };
@@ -160,10 +201,15 @@ function parseStoredSnapshot(value: unknown): SessionEpitomeSnapshot | null {
 /**
  * 跨会话开放环路存储：进程内 per-actor 缓存 + KV 懒加载持久化。
  * 纯逻辑可单测；KvLike 可注入 mock。
+ *
+ * P3 生命周期：
+ * - open loop 带 createdAt，超过 TTL（7 天）在 get() 时过滤（过期不再注入）；
+ * - 完成检测：record 传入本轮对话文本（turnText），含完成语义且与某 loop 词重叠
+ *   足够高时关闭该 loop（"这事搞定了"不再出现在下一会话的待办里）。
  */
 export class SessionEpitomeStore {
   private kv: EpitomeKvLike | null;
-  private cache = new Map<string, SessionEpitomeSnapshot>();
+  private cache = new Map<string, StoredEpitomeSnapshot>();
 
   constructor(kv: EpitomeKvLike | null = null) {
     this.kv = kv;
@@ -174,23 +220,14 @@ export class SessionEpitomeStore {
     this.kv = kv;
   }
 
-  private load(actorId: string): SessionEpitomeSnapshot {
+  private load(actorId: string): StoredEpitomeSnapshot {
     const cached = this.cache.get(actorId);
     if (cached) return cached;
-    let snapshot: SessionEpitomeSnapshot = {
-      openLoops: [],
-      commitments: [],
-      preferences: [],
-      updatedAt: "",
-      revision: 0,
-    };
+    let snapshot = emptyStored();
     if (this.kv) {
       try {
         const raw = this.kv.getSnapshot(actorId, [EPITOME_KV_KEY]);
-        const parsed = raw?.entries?.[EPITOME_KV_KEY]
-          ? parseStoredSnapshot(raw.entries[EPITOME_KV_KEY])
-          : null;
-        if (parsed) snapshot = parsed;
+        if (raw?.entries?.[EPITOME_KV_KEY]) snapshot = parseStored(raw.entries[EPITOME_KV_KEY]) ?? emptyStored();
       } catch {
         /* KV 读取失败使用空快照 */
       }
@@ -203,36 +240,77 @@ export class SessionEpitomeStore {
     if (!this.kv?.setEntry) return;
     const cached = this.cache.get(actorId);
     if (!cached) return;
-    const next: SessionEpitomeSnapshot = { ...cached, revision: cached.revision + 1 };
-    cached.revision = next.revision;
+    cached.revision += 1;
     try {
-      this.kv.setEntry(actorId, EPITOME_KV_KEY, next);
+      this.kv.setEntry(actorId, EPITOME_KV_KEY, cached);
     } catch {
       /* 持久化失败不阻塞 */
     }
   }
 
-  /** 增量合并本轮提取的条目（去重、限量），并持久化。 */
-  record(actorId: string, entries: SessionEpitomeEntries): SessionEpitomeSnapshot {
+  /**
+   * 增量合并本轮提取的条目（去重、限量、关闭已完成 loop），并持久化。
+   * @param opts.turnText 本轮用户输入 + Agent 回复（用于 open loop 完成检测）
+   */
+  record(actorId: string, entries: SessionEpitomeEntries, opts?: { turnText?: string }): SessionEpitomeSnapshot {
     const current = this.load(actorId);
-    const merge = (existing: string[], incoming: string[]): string[] => {
-      const merged = [...incoming, ...existing];
-      return clampList(merged, MAX_ENTRIES_PER_KIND);
+    const now = nowIso();
+    const toEntries = (texts: string[]): EpitomeEntry[] =>
+      clampList(texts, MAX_ENTRIES_PER_KIND).map((text) => ({ text, createdAt: now }));
+
+    // P3 完成检测：本轮文本含完成语义且与存量 loop 足够相关 → 关闭
+    const survivedLoops = closeCompletedLoops(current.openLoops, opts?.turnText);
+
+    const merge = (existing: EpitomeEntry[], incoming: EpitomeEntry[]): EpitomeEntry[] => {
+      const merged = [...incoming, ...existing.map((e) => ({ ...e, createdAt: e.createdAt || now }))];
+      const seen = new Set<string>();
+      return merged.filter((e) => {
+        const key = normalizeMemoryLine(e.text).slice(0, 40);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, MAX_ENTRIES_PER_KIND);
     };
-    const next: SessionEpitomeSnapshot = {
-      openLoops: merge(current.openLoops, entries.openLoops),
-      commitments: merge(current.commitments, entries.commitments),
-      preferences: merge(current.preferences, entries.preferences),
-      updatedAt: nowIso(),
+
+    const next: StoredEpitomeSnapshot = {
+      openLoops: merge(survivedLoops, toEntries(entries.openLoops)),
+      commitments: merge(current.commitments, toEntries(entries.commitments)),
+      preferences: merge(current.preferences, toEntries(entries.preferences)),
+      updatedAt: now,
       revision: current.revision,
     };
     this.cache.set(actorId, next);
     this.persist(actorId);
-    return next;
+    return this.toSnapshot(next);
   }
 
-  /** 读取某 actor 的 epitome 快照（无数据返回空快照）。 */
+  /** 读取某 actor 的 epitome 快照（open loop 过滤 TTL 过期条目）。 */
   get(actorId: string): SessionEpitomeSnapshot {
-    return this.load(actorId);
+    return this.toSnapshot(this.load(actorId));
   }
+
+  private toSnapshot(stored: StoredEpitomeSnapshot): SessionEpitomeSnapshot {
+    const now = Date.now();
+    const alive = (e: EpitomeEntry): boolean => {
+      const ts = Date.parse(e.createdAt);
+      // createdAt 为空（旧格式存量）保留，等下轮 record 补时间戳
+      return !Number.isFinite(ts) || now - ts < OPEN_LOOP_TTL_MS;
+    };
+    return {
+      openLoops: stored.openLoops.filter(alive).map((e) => e.text),
+      commitments: stored.commitments.map((e) => e.text),
+      preferences: stored.preferences.map((e) => e.text),
+      updatedAt: stored.updatedAt,
+      revision: stored.revision,
+    };
+  }
+}
+
+/** 完成检测：turnText 含完成语义时，关闭与之词重叠达标的存量 loop。 */
+function closeCompletedLoops(loops: EpitomeEntry[], turnText: string | undefined): EpitomeEntry[] {
+  if (!turnText || !LOOP_DONE_RE.test(turnText) || loops.length === 0) return loops;
+  const turnTokens = contentTokenSet(turnText);
+  return loops.filter(
+    (loop) => tokenOverlapRatio(turnTokens, contentTokenSet(loop.text)) < LOOP_CLOSE_OVERLAP,
+  );
 }

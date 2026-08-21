@@ -214,8 +214,8 @@ interface MemoryCortexLike {
   recordMemoryFeedback?(input: MemoryFeedbackInput): void;
   /** 读取某 actor 的记忆反馈快照（调试/统计用）。 */
   getMemoryFeedbackSnapshot?(actorId: string): unknown;
-  /** 跨会话开放环路：记录 open loops / 承诺 / 偏好（KV 持久化）。 */
-  updateSessionEpitome?(actorId: string, entries: SessionEpitomeEntries): void;
+  /** 跨会话开放环路：记录 open loops / 承诺 / 偏好（KV 持久化）；turnText 用于完成检测。 */
+  updateSessionEpitome?(actorId: string, entries: SessionEpitomeEntries, turnText?: string): void;
   /** 读取某 actor 的跨会话开放环路快照（新会话开场注入用）。 */
   getSessionEpitome?(actorId: string): SessionEpitomeSnapshot | null;
   /** 读取某 actor 的最近召回锚点（连续性诊断用）。 */
@@ -1097,10 +1097,10 @@ export class BrainCenter {
   }
 
   /** 跨会话开放环路：转发到 MemoryCortex（KV 持久化）。未注册时静默降级。 */
-  updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries): void {
+  updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries, turnText?: string): void {
     if (!this.memory?.updateSessionEpitome) return;
     try {
-      this.memory.updateSessionEpitome(actorId, entries);
+      this.memory.updateSessionEpitome(actorId, entries, turnText);
     } catch (err) {
       console.warn("[BrainCenter] updateSessionEpitome failed:", err);
     }
@@ -1499,13 +1499,8 @@ export class BrainCenter {
           // 传入 finalResponse（脱敏后的 Agent 回复），让 Agent 回复中的承诺也能被捕获。
           try {
             const epitome = extractEpitomeEntries(query, allWrites, finalResponse);
-            if (
-              epitome.openLoops.length > 0 ||
-              epitome.commitments.length > 0 ||
-              epitome.preferences.length > 0
-            ) {
-              this.updateSessionEpitome(actorId, epitome);
-            }
+            // turnText 供完成检测：用户说"搞定了/不用了"时关闭对应 open loop（P3）
+            this.updateSessionEpitome(actorId, epitome, `${query}\n${finalResponse}`);
           } catch {
             /* epitome 提取失败不影响记忆写入 */
           }
@@ -1526,22 +1521,26 @@ export class BrainCenter {
     }
 
     // === 深度优化（工作记忆主题词）：阶段 3.4.1 LLM 提取主题词 ===
-    // 同步阻塞，确保当前轮 workingMemorySummary 包含新主题词
-    // 用 2s 超时保护，超时或失败不阻塞主流程
+    // 移出首字关键路径，改为 fire-and-forget：
+    // 主题词用于下一轮 working-memory 关联，本轮不读它，因此无需阻塞 cognize。
     if (this.workingMemoryCortex && this.topicExtractor && query) {
-      try {
-        const topics = await Promise.race([
-          this.topicExtractor(query),
-          new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("topic_extract_timeout")), 2000)),
-        ]) as string[];
-        if (topics && topics.length > 0) {
-          this.workingMemoryCortex.setTopicSlots(actorId, topics);
-        }
-      } catch (err) {
-        if (String(err).includes("timeout")) {
-          console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
-        }
-      }
+      void Promise.race([
+        this.topicExtractor(query),
+        new Promise<string[]>((_, reject) =>
+          setTimeout(() => reject(new Error("topic_extract_timeout")), 2000),
+        ),
+      ])
+        .then((topics) => {
+          if (topics && topics.length > 0) {
+            this.workingMemoryCortex!.setTopicSlots(actorId, topics);
+          }
+        })
+        .catch((err) => {
+          if (String(err).includes("timeout")) {
+            console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
+          }
+          // 其他失败静默：主题词是增强项，不影响本轮回复正确性
+        });
     }
 
     // === Step 7 扩展：阶段 3.6 — 在线学习观察 ===

@@ -46,6 +46,19 @@ import type {
   VisionFrame,
 } from "../external-model/types.js";
 import { isApologyStyleFallback, FALLBACK_TEXT_BACKGROUND_FAILED } from "../external-model/fallback-texts.js";
+import { describeMemoryAge } from "./memory-record-utils.js";
+
+/** 记忆 domain → 注入 prompt 时的中文类型标签（分类显性化，P4）。 */
+const MEMORY_DOMAIN_LABELS: Record<string, string> = {
+  episodic: "事件",
+  semantic: "事实",
+  procedural: "技能",
+  emotional: "情绪",
+  narrative: "经历",
+  relationship: "关系",
+  world: "状态",
+  personality: "特质",
+};
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "./trajectory-skill-promotion-service.js";
 import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -115,6 +128,18 @@ export type { AgentReply } from "../agent/types.js";
 
 const META_CONVERSATION_RECALL_RE =
   /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
+
+/** P0 时间窗口查询感知：用户问"昨天/上周做了什么"或询问事件经过时，把时间词锚进召回 query，
+ *  提高对应时间窗口内 episodic 记忆的召回概率（配合注入侧的相对时间标注闭环）。 */
+const TIME_WINDOW_WORD_RE = /昨天|前天|大前天|上周|上礼拜|上个月|前几天|这周|本周|今天早上|今天下午|今天晚上/;
+const EVENT_INQUIRY_RE = /做了|干了|说了|聊了|发生了|安排了|干了啥|做了什么|怎么样了/;
+
+function buildTimeWindowRecallHint(text: string): string {
+  const t = text.trim();
+  return TIME_WINDOW_WORD_RE.test(t) || EVENT_INQUIRY_RE.test(t)
+    ? "时间线 事件 经过 昨天 今天 前几天 上周 做了什么 发生了什么 episodic 事件记忆"
+    : "";
+}
 
 export type HandleUserMessageOptions = {
   onAssistantDelta?: StreamDeltaHandler;
@@ -464,12 +489,16 @@ export class AgentCore {
 
   private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
     const normalized = text.trim();
-    if (!META_CONVERSATION_RECALL_RE.test(normalized)) return baseQuery;
+    const timeHint = buildTimeWindowRecallHint(normalized);
+    if (!META_CONVERSATION_RECALL_RE.test(normalized) && !timeHint) return baseQuery;
     return [
       baseQuery,
+      timeHint,
       "最近一次对话 上次聊天 最后聊天 最后说了什么 之前聊了什么 对话摘要",
       "assistantDone user reply EvolutionLoop Daily digest session recap",
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   /**
@@ -496,42 +525,53 @@ export class AgentCore {
     this.brainCenter?.interruptProactive(actorId);
 
     // === 语义意图理解（入口层，路由之前）===
-    // 用 LLM 真实理解用户这句句子的语义（意图/实体/子意图/是否需澄清），
-    // 让后续路由和工具选择基于"理解"而非"关键词命中"。
-    // 仅在注入 SemanticIntentService 且 externalChat 可用时执行；失败静默降级，
-    // 不阻塞主流程。clarificationNeeded 且低置信时直接返回澄清反问。
-    if (text?.trim() && this.semanticIntentParser) {
-      try {
-        semanticIntent = await this.semanticIntentParser.parseIntent(sessionId, text);
-        if (
-          semanticIntent.clarificationNeeded &&
-          semanticIntent.confidence < CLARIFY_CONFIDENCE_THRESHOLD &&
-          semanticIntent.clarificationQuestion?.question
-        ) {
-          const q = semanticIntent.clarificationQuestion.question;
-          this.turnLifecycle.finalizeTurn({
-            actorId,
-            userText: text,
-            assistantText: q,
-            sessionId,
-          });
-          opts?.onAssistantDelta?.(q);
-          return {
-            text: q,
-            streamedChunks: true,
-            clarification: {
-              question: q,
-              options: semanticIntent.clarificationQuestion?.options,
-            },
-          };
-        }
-      } catch (err) {
-        // 意图解析失败不阻断对话，降级到原有路由路径
+    // 短输入（< 30 字，闲聊/快速问答）：完全跳过意图解析，首字不再额外等一次 LLM。
+    // 中长输入：与后续认知并行启动，200ms 内若返回低置信澄清则短路反问；
+    // 超时则不再等，让 tool-loop 主回复路径接管，语义意图作为可选 hint 稍后汇入。
+    const trimmedText = text?.trim() ?? "";
+    const PARSE_INTENT_RACE_MS = 200;
+    const SHORT_TEXT_SKIP_PARSE_CHARS = 30;
+    if (trimmedText && this.semanticIntentParser && trimmedText.length >= SHORT_TEXT_SKIP_PARSE_CHARS) {
+      const parsePromise = this.semanticIntentParser.parseIntent(sessionId, text).catch((err) => {
         console.log(
           `[SemanticIntent] 意图解析失败，降级到原路由路径：${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        return undefined;
+      });
+      const raceTimer = new Promise<undefined>((r) =>
+        setTimeout(() => r(undefined), PARSE_INTENT_RACE_MS),
+      );
+      try {
+        const maybeIntent = await Promise.race([parsePromise, raceTimer]);
+        if (maybeIntent) {
+          semanticIntent = maybeIntent;
+          if (
+            semanticIntent.clarificationNeeded &&
+            semanticIntent.confidence < CLARIFY_CONFIDENCE_THRESHOLD &&
+            semanticIntent.clarificationQuestion?.question
+          ) {
+            const q = semanticIntent.clarificationQuestion.question;
+            this.turnLifecycle.finalizeTurn({
+              actorId,
+              userText: text,
+              assistantText: q,
+              sessionId,
+            });
+            opts?.onAssistantDelta?.(q);
+            return {
+              text: q,
+              streamedChunks: true,
+              clarification: {
+                question: q,
+                options: semanticIntent.clarificationQuestion?.options,
+              },
+            };
+          }
+        }
+      } catch {
+        // 异常静默降级，不阻塞主流程
       }
     }
 
@@ -856,27 +896,6 @@ export class AgentCore {
 
     const prepDuration = Date.now() - prepStartTime;
 
-    // TEMP DEBUG（记忆注入诊断，验证后移除）
-    try {
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        ".memory-inject-debug.log",
-        JSON.stringify({
-          t: new Date().toISOString(),
-          mode: route.mode,
-          sessionId: opts?.sessionId ?? null,
-          narrativeLen: enrichedNarrativeRecall?.length ?? 0,
-          wmLen: workingMemorySummary?.length ?? 0,
-          recentLen: recentConversationHistory?.length ?? 0,
-          cognitiveRecallCount: cognitiveRecallItems?.length ?? 0,
-          narrativeHead: String(enrichedNarrativeRecall ?? "").slice(0, 300),
-          text: String(text).slice(0, 40),
-        }) + "\n",
-      );
-    } catch {
-      /* debug log 失败忽略 */
-    }
-    
     const trajCap = this.trajectorySkillPromotion?.beginCapture(
       actorId,
       opts?.chatUserMessageId,
@@ -1631,17 +1650,19 @@ if (this.isComplexMode(route.mode)) {
   }
 
   /**
-   * 把 cognize 阶段已召回的 MemoryRecallItem[] 拼接为 narrative recall 字符串。
-   * 用于在 standard path 中复用 cognize 召回结果，替代 prepareNarrativeRecall。
-   * 单条 content 已由 MemoryCortex.textToRecallItems 截断至 800 字符（Task 3），此处不再截断。
-   * 返回 undefined 表示无可用内容（与 prepareNarrativeRecall 的空结果语义一致）。
+   * 把 cognize 阶段已召回的 MemoryRecallItem[] 拼接为 narrative recall 字符串（复用召回结果，替代 prepareNarrativeRecall）。
+   * P0/P4：每条带「[相对时间·记忆类型]」前缀（程序化计算，杜绝 LLM 生成时间标签失真），
+   * 让 LLM 清楚知道每条记忆是什么时候发生的、属于哪类记忆，回答时不会张冠李戴。
    */
   private recallItemsToNarrative(items: MemoryRecallItem[]): string | undefined {
-    const lines: string[] = [];
-    for (const it of items) {
-      const content = typeof it?.content === "string" ? it.content.trim() : "";
-      if (content) lines.push(content);
-    }
+    const lines = items
+      .map((it) => {
+        const content = typeof it?.content === "string" ? it.content.trim() : "";
+        if (!content) return null;
+        const tag = [describeMemoryAge(it.timestamp), MEMORY_DOMAIN_LABELS[it.domain]].filter(Boolean).join("·");
+        return tag ? `[${tag}] ${content}` : content;
+      })
+      .filter((x): x is string => x !== null);
     return lines.length > 0 ? lines.join("\n") : undefined;
   }
 
@@ -2105,23 +2126,6 @@ if (this.isComplexMode(route.mode)) {
           toolExposureProfile,
           toolRankingHint,
         };
-    // TEMP DEBUG（记忆注入诊断 2：最终 promptContext.memory 是否含记忆）
-    try {
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        ".memory-inject-debug.log",
-        JSON.stringify({
-          t: new Date().toISOString(),
-          phase: "streamOpts",
-          mode,
-          memoryHasNarrative: Boolean(baseStreamOpts.promptContext?.memory?.narrativeRecall),
-          memoryNarrativeHead: String(baseStreamOpts.promptContext?.memory?.narrativeRecall ?? "").slice(0, 200),
-          memoryKeys: Object.keys(baseStreamOpts.promptContext?.memory ?? {}),
-        }) + "\n",
-      );
-    } catch {
-      /* ignore */
-    }
     const runtimeKernel = getRuntimeKernel(actorId);
     // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
     // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
@@ -2301,24 +2305,6 @@ if (this.isComplexMode(route.mode)) {
         toolCtx,
         mergedStreamOpts,
       );
-    }
-    // TEMP DEBUG（记忆注入诊断 3：LLM 实际拿到的 thread 上下文）
-    try {
-      const { appendFileSync } = await import("node:fs");
-      const threadMsgs = getChatThreadStore().thread(chatSessionId, "");
-      appendFileSync(
-        ".memory-inject-debug.log",
-        JSON.stringify({
-          t: new Date().toISOString(),
-          phase: "streamCall",
-          chatSessionId,
-          threadMsgCount: threadMsgs.length,
-          threadRoles: threadMsgs.map((m) => m.role).join(","),
-          text: String(text).slice(0, 40),
-        }) + "\n",
-      );
-    } catch {
-      /* ignore */
     }
 
     return await this.turnFinalizer.finish(actorId, text, full, {

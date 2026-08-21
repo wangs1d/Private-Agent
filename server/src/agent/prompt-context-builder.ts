@@ -255,7 +255,7 @@ export type BuildPromptContextInput = {
   /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
-   * 避免被 formatNarrativeRecallPrompt 的 slice(0,4) 截断或块结构被拍平。
+   * 避免被 formatNarrativeRecallPrompt 的条目上限截断或块结构被拍平。
    */
   workingMemorySummary?: string;
   /**

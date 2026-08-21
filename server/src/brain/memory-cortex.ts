@@ -51,6 +51,7 @@ import {
   type SessionEpitomeSnapshot,
 } from "../services/session-epitome.js";
 import { RecallAnchorStore, type RecallAnchorRecord } from "../services/recall-anchor-store.js";
+import { MemoryReinforcementStore } from "./memory-reinforcement-store.js";
 
 // ============================================================
 // 子系统外观接口（最小化，只声明 MemoryCortex 用到的方法）
@@ -240,6 +241,19 @@ interface SynapseBusLike {
 // 域推断 helper
 // ============================================================
 
+/**
+ * 解析 agentic 检索首行的 freshness 标记（「刚刚」/「Nh前」/「Nd前」）为 ISO 时间戳。
+ * 让记忆携带真实发生时间（估算值），供仲裁器做时间衰减打分、注入层做相对时间标注。
+ */
+function parseFreshnessToIso(firstLine: string, now = Date.now()): string | null {
+  if (/刚刚/.test(firstLine)) return new Date(now).toISOString();
+  const h = firstLine.match(/(\d+(?:\.\d+)?)h前/);
+  if (h) return new Date(now - parseFloat(h[1]) * 3_600_000).toISOString();
+  const d = firstLine.match(/(\d+(?:\.\d+)?)d前/);
+  if (d) return new Date(now - parseFloat(d[1]) * 86_400_000).toISOString();
+  return null;
+}
+
 /** 根据 MemoryItemKind 推断默认记忆域 */
 function inferDomain(kind: MemoryItemKind): MemoryDomainKind {
   switch (kind) {
@@ -412,6 +426,9 @@ export class MemoryCortex {
   // ---- 引用锚点诊断（Phase：连续性优化）----
   // 记录每轮 recall 注入的记忆锚点（KV 持久化），配合反馈/开放环路提供连续性诊断。
   private anchorStore: RecallAnchorStore | null = null;
+  // ---- 间隔重复强化（P5：类人巩固）----
+  // 被反复召回命中的记忆按指纹计数，打分时小幅加成（模拟"常用记忆衰减更慢"）。
+  private reinforcementStore: MemoryReinforcementStore | null = null;
 
   // ---- 子系统注册 ----------------------------------------------------------
 
@@ -1067,6 +1084,8 @@ export class MemoryCortex {
       }
 
       if (kvSummaryText) {
+        // P0 修复：不再用召回时刻冒充记忆发生时间（旧实现 timestamp: now 是假时间元数据）；
+        // kvSummary 通道无逐条时间，留空让仲裁器走"无时间信息"折中路径。
         channels.push({
           channel: "kvSummary",
           items: [
@@ -1075,7 +1094,6 @@ export class MemoryCortex {
               domain: "semantic" as MemoryDomainKind,
               source: "kv_summary",
               score: 0.5,
-              timestamp: now,
             },
           ],
         });
@@ -1086,8 +1104,9 @@ export class MemoryCortex {
       }
 
       // 4) 统一仲裁：通道内归一化 + 跨通道指纹去重 + 通道权重综合重排
+      //    （传入原始 query 供防串台一致性调制；时间衰减按条目 timestamp 计算）
       if (channels.length > 0) {
-        mergedItems = arbitrateMemories(channels, this.arbitratorConfig);
+        mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query });
       }
 
       // 5) 仲裁降级：仲裁无结果但 agentic 有结果时回退（保护可用性）
@@ -1234,11 +1253,11 @@ export class MemoryCortex {
    * 跨会话开放环路：记录本轮对话提取的 open loops / 承诺 / 偏好。
    * 由 brain-center 在 cognize 记忆写入阶段异步调用；KV 未注册时静默降级。
    */
-  updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries): void {
+  updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries, turnText?: string): void {
     const store = this.getEpitomeStore();
     if (!store) return;
     try {
-      store.record(actorId, entries);
+      store.record(actorId, entries, { turnText });
     } catch (err) {
       console.log(`[MemoryCortex] updateSessionEpitome failed: ${err}`);
     }
@@ -1335,17 +1354,42 @@ export class MemoryCortex {
     return this.feedbackStore;
   }
 
+  /** 懒初始化强化计数存储（P5：间隔重复强化），绑定 kvSummary 持久化。 */
+  private getReinforcementStore(): MemoryReinforcementStore | null {
+    if (!this.kvSummary) return null;
+    if (!this.reinforcementStore) {
+      this.reinforcementStore = new MemoryReinforcementStore({
+        getSnapshot: (actorId, keys) => {
+          try {
+            return this.kvSummary!.getSnapshot(actorId, keys);
+          } catch {
+            return null;
+          }
+        },
+        setEntry: (actorId, key, value) => {
+          try {
+            this.kvSummary!.setEntry?.(actorId, key, value);
+          } catch {
+            /* 持久化失败静默降级 */
+          }
+        },
+      });
+    }
+    return this.reinforcementStore;
+  }
+
   /**
-   * 反馈加成/惩罚：对召回条目按语义指纹查反馈分，调整 score 并重新排序。
-   * 无反馈返回原数组（保持顺序），避免无谓开销。
+   * 反馈加成/惩罚 + 间隔重复强化：对召回条目按语义指纹查反馈分与命中计数，
+   * 调整 score 并重新排序。无调整返回原数组（保持顺序），避免无谓开销。
    */
   private applyFeedbackBoost(
     items: MemoryRecallItem[],
     actorId: string,
   ): MemoryRecallItem[] {
     if (items.length === 0) return items;
-    const store = this.getFeedbackStore();
-    if (!store) return items;
+    const feedbackStore = this.getFeedbackStore();
+    const reinforcementStore = this.getReinforcementStore();
+    if (!feedbackStore && !reinforcementStore) return items;
 
     const boosted: Array<{ item: MemoryRecallItem; adjusted: number; changed: boolean }> = [];
     for (const item of items) {
@@ -1354,7 +1398,8 @@ export class MemoryCortex {
         boosted.push({ item, adjusted: item.score ?? 0.5, changed: false });
         continue;
       }
-      const multiplier = store.getMultiplier(actorId, content);
+      const multiplier = (feedbackStore?.getMultiplier(actorId, content) ?? 1) *
+        (reinforcementStore?.getBoost(actorId, content) ?? 1);
       if (multiplier === 1) {
         boosted.push({ item, adjusted: item.score ?? 0.5, changed: false });
         continue;
@@ -1473,6 +1518,19 @@ export class MemoryCortex {
       }
     } catch {
       /* 锚点记录失败静默降级 */
+    }
+
+    // 间隔重复强化（P5）：本轮注入的条目按指纹累加计数，高频命中记忆后续召回小幅加成
+    try {
+      const reinforcementStore = this.getReinforcementStore();
+      if (reinforcementStore && finalItems.length > 0) {
+        reinforcementStore.record(
+          actorId,
+          finalItems.map((it) => (typeof it.content === "string" ? it.content : "")),
+        );
+      }
+    } catch {
+      /* 强化计数失败静默降级 */
     }
 
     return finalItems;
@@ -1900,6 +1958,8 @@ export class MemoryCortex {
       if (!match) continue;
       const percent = parseFloat(match[1] ?? "0");
       const score = Math.max(0, Math.min(1, percent / 100));
+      const firstLine = block.split("\n")[0] ?? "";
+      const occurredAt = parseFreshnessToIso(firstLine);
       // 正文 = 去掉首行（序号+相关度行）后的剩余
       const contentLines = block.split("\n").slice(1).join("\n").trim();
       if (contentLines) {
@@ -1908,6 +1968,7 @@ export class MemoryCortex {
           domain: "semantic",
           source,
           score,
+          ...(occurredAt ? { timestamp: occurredAt } : {}),
         });
       }
     }

@@ -1501,12 +1501,24 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   // ===== 打字机式流式显示 =====
   // 后端 chunk 可能整段/大块到达，这里在气泡渲染层把「已 reveal」的原文前缀
   // 逐字放大，模拟真人打字；历史消息与用户消息直接显示全文。
+  // 节奏自适应（模拟真人语速）：短句打得快、长句放慢，句末按本句长度停顿再进下一句。
   static const int _charsPerTick = 1;
-  static const Duration _tick = Duration(milliseconds: 24);
   static const Duration _cursorBlink = Duration(milliseconds: 480);
+  // 逐字步进间隔：短句(剩余≤12字)15ms 快打、中句(13-30字)20ms、长句(>30字)28ms 放慢
+  static const Duration _stepFast = Duration(milliseconds: 15);
+  static const Duration _stepNormal = Duration(milliseconds: 20);
+  static const Duration _stepSlow = Duration(milliseconds: 28);
+  // 句末停顿：本句越短停顿越短（260/380/500ms），长句收尾后多歇一会，像真人换气
+  static const Duration _pauseShort = Duration(milliseconds: 260);
+  static const Duration _pauseMid = Duration(milliseconds: 380);
+  static const Duration _pauseLong = Duration(milliseconds: 500);
+  // 句边界标点：命中并在其后还有内容时，进入句末停顿
+  static final RegExp _sentenceEnd = RegExp(r'[。！？!?；;\n]');
 
   /// 原始文本（未 strip）的已显示前缀；仅 assistant 流式消息逐字增长。
   String _revealedRaw = "";
+  /// 当前句已 reveal 的字符数，用于句末自适应停顿（遇句边界后清零）。
+  int _currentSentenceChars = 0;
   Timer? _typeTimer;
   Timer? _cursorTimer;
   bool _typeCursorOn = false;
@@ -1522,7 +1534,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     if (widget.mainMessage.streaming && widget.mainMessage.text.isNotEmpty) {
       // 流式接收中的新消息：从零开始逐字 reveal（覆盖整段一次性到达的场景）
       _revealedRaw = "";
-      _typeTimer = Timer.periodic(_tick, (_) => _typeTick());
+      _currentSentenceChars = 0;
+      _scheduleTypeTick(_stepNormal);
     } else {
       // 历史消息 / 用户消息直接显示全文
       _revealedRaw = _rawTarget;
@@ -1554,7 +1567,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     if (target.startsWith(_revealedRaw)) {
       // 前缀延伸 = 流式追加：继续逐字 reveal
       if (_revealedRaw.length < target.length && _typeTimer == null) {
-        _typeTimer = Timer.periodic(_tick, (_) => _typeTick());
+        _currentSentenceChars = _countRevealedOfCurrentSentence(target);
+        _scheduleTypeTick(_stepForTarget(target));
       }
     } else {
       // 内容被替换（如删除重发）：直接显示全文
@@ -1564,25 +1578,90 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     }
   }
 
+  /// 用一次性 Timer 排定下一次 tick（替代固定周期 periodic，实现逐字变速 + 句末停顿）。
+  void _scheduleTypeTick(Duration delay) {
+    _typeTimer?.cancel();
+    if (!mounted) return;
+    _typeTimer = Timer(delay, () {
+      if (mounted) _typeTick();
+    });
+  }
+
+  /// 逐字步进 + 按句长变速 + 句末停顿，并自我重排下一个 tick。
   void _typeTick() {
     if (!mounted) {
       _stopTypeTimers();
       return;
     }
     final String target = _rawTarget;
-    if (_revealedRaw.length < target.length) {
-      int end = _revealedRaw.length + _charsPerTick;
-      if (end > target.length) end = target.length;
-      _revealedRaw = target.substring(0, end);
-      _cursorTimer ??= Timer.periodic(_cursorBlink, (_) {
-        if (!mounted) return;
-        setState(() => _typeCursorOn = !_typeCursorOn);
-      });
-      setState(() {});
-      if (_revealedRaw.length >= target.length) _stopTypeTimers();
-    } else {
+    if (_revealedRaw.length >= target.length) {
       _stopTypeTimers();
+      return;
     }
+    int end = _revealedRaw.length + _charsPerTick;
+    if (end > target.length) end = target.length;
+    final int added = end - _revealedRaw.length;
+    _revealedRaw = target.substring(0, end);
+    _currentSentenceChars += added;
+    _cursorTimer ??= Timer.periodic(_cursorBlink, (_) {
+      if (!mounted) return;
+      setState(() => _typeCursorOn = !_typeCursorOn);
+    });
+    setState(() {});
+
+    if (_revealedRaw.length >= target.length) {
+      _stopTypeTimers();
+      return;
+    }
+    // 打标点/换行收尾且后面还有内容 → 句末停顿（按本句长度成比例），否则按灵敏度续打。
+    if (_endedSentence(target)) {
+      _scheduleTypeTick(_pauseForCurrentSentence());
+      _currentSentenceChars = 0;
+    } else {
+      _scheduleTypeTick(_stepForTarget(target));
+    }
+  }
+
+  /// 本句剩余字数（预览到句边界前）。用于决定当前语速：剩得越少打得越快（尾声提速）。
+  int _charsUntilSentenceEnd(String target) {
+    for (int i = _revealedRaw.length; i < target.length; i++) {
+      if (_sentenceEnd.hasMatch(target[i])) return i - _revealedRaw.length;
+    }
+    return target.length - _revealedRaw.length;
+  }
+
+  /// 语速步进：长句放慢、短句/句尾加快。
+  Duration _stepForTarget(String target) {
+    final int remaining = _charsUntilSentenceEnd(target);
+    if (remaining > 30) return _stepSlow;
+    if (remaining >= 12) return _stepNormal;
+    return _stepFast;
+  }
+
+  /// 刚才 reveal 的最后一个字符是否为句边界，且其后还有内容（才会停顿）。
+  bool _endedSentence(String target) {
+    if (_revealedRaw.isEmpty) return false;
+    final lastChar = _revealedRaw[_revealedRaw.length - 1];
+    return _sentenceEnd.hasMatch(lastChar) && _revealedRaw.length < target.length;
+  }
+
+  /// 句末停顿：本句越短停顿越短，长句多歇一会换气。
+  Duration _pauseForCurrentSentence() {
+    if (_currentSentenceChars >= 30) return _pauseLong;
+    if (_currentSentenceChars >= 15) return _pauseMid;
+    return _pauseShort;
+  }
+
+  /// 从已 reveal 文本的尾部往当前句起点回数，算出"当前句已 reveal 字数"（同步中途进场时用）。
+  int _countRevealedOfCurrentSentence(String target) {
+    if (_revealedRaw.isEmpty) return 0;
+    int count = 0;
+    for (int i = _revealedRaw.length - 1; i >= 0; i--) {
+      final ch = target[i];
+      count++;
+      if (_sentenceEnd.hasMatch(ch) && count > 1) break;
+    }
+    return count;
   }
 
   void _stopTypeTimers() {
