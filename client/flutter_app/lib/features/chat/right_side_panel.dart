@@ -778,6 +778,14 @@ class _WeatherHeaderState extends State<_WeatherHeader>
   _WeatherData? _weather;
   bool _loadingWeather = true;
 
+  /// 进程级天气缓存：跨多次界面刷新复用，避免每次进入都退化成
+  /// 「定位 → 后端 → Open-Meteo」的全链路外网拉取（通常耗时数秒）。
+  static _WeatherData? _cachedWeather;
+  static DateTime? _lastFetchAt;
+
+  /// 缓存有效期：期内直接使用缓存，不再发请求。
+  static const Duration _weatherTtl = Duration(minutes: 10);
+
   @override
   void initState() {
     super.initState();
@@ -796,6 +804,20 @@ class _WeatherHeaderState extends State<_WeatherHeader>
 
   /// 用真实定位（GPS 优先，fallback IP/缓存）请求后端真实天气。
   Future<void> _loadWeather() async {
+    // 已有缓存：先立刻渲染旧数据（无需等待），再在后台静默刷新，
+    // 避免每次刷新主界面都卡几秒的“加载中…”。
+    final _WeatherData? cached = _WeatherHeaderState._cachedWeather;
+    if (cached != null && mounted) {
+      setState(() {
+        _weather = cached;
+        _loadingWeather = false;
+      });
+    }
+    // TTL 期内：直接用缓存，跳过整条请求链路。
+    final DateTime? last = _WeatherHeaderState._lastFetchAt;
+    if (last != null && DateTime.now().difference(last) < _weatherTtl) {
+      return;
+    }
     try {
       final ClientLocationPayload? loc =
           await ClientLocationService.getCurrentLocation();
@@ -832,10 +854,16 @@ class _WeatherHeaderState extends State<_WeatherHeader>
           jsonDecode(res.body) as Map<String, dynamic>;
       final Map<String, dynamic>? brief =
           (body["brief"] as Map?)?.cast<String, dynamic>();
+      final _WeatherData? data =
+          brief == null ? null : _WeatherData.fromJson(brief);
       setState(() {
-        _weather = brief == null ? null : _WeatherData.fromJson(brief);
+        _weather = data;
         _loadingWeather = false;
       });
+      if (data != null) {
+        _WeatherHeaderState._cachedWeather = data;
+        _WeatherHeaderState._lastFetchAt = DateTime.now();
+      }
     } catch (_) {
       if (mounted) {
         setState(() => _loadingWeather = false);

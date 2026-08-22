@@ -167,13 +167,17 @@ abstract final class AppTheme {
     return variant == AppThemeVariant.warm ? _buildWarm() : _buildDark();
   }
 
-  /// PingFang SC（苹方）字体族及跨平台回退顺序。
+  /// MiSans 字体族（已内嵌，见 pubspec.yaml fonts 段）。
   ///
-  /// 苹方是 Apple 系（iOS/macOS）默认中文字体；其他平台按以下顺序回退：
+  /// 主字体用小米 MiSans，观感更现代、中英文数字更和谐；
+  /// 回退顺序保留苹方/雅黑/思源，用于覆盖 MiSans 缺失的零星字符（如部分符号）。
+  static const String appFontFamily = 'MiSans';
+
+  /// 跨平台回退顺序。
   ///   - Windows:  Microsoft YaHei（微软雅黑）→ SimHei（黑体）
   ///   - Linux:    Noto Sans CJK SC（思源黑体）
   ///   - 兜底:     系统默认 sans-serif
-  static const List<String> pingFangFontFamilyFallback = <String>[
+  static const List<String> appFontFamilyFallback = <String>[
     'PingFang SC',
     'Microsoft YaHei',
     '微软雅黑',
@@ -214,9 +218,9 @@ abstract final class AppTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
       colorScheme: cs,
-      // 全局字体族：苹方 PingFang SC，并按平台回退到雅黑/思源黑体/系统无衬线
-      fontFamily: 'PingFang SC',
-      fontFamilyFallback: pingFangFontFamilyFallback,
+      // 全局字体族：内嵌 MiSans，并按平台回退到苹方/雅黑/思源/系统无衬线
+      fontFamily: appFontFamily,
+      fontFamilyFallback: appFontFamilyFallback,
       dialogTheme: DialogThemeData(
         backgroundColor: AppPalette.locationDialogBg,
         surfaceTintColor: Colors.transparent,
@@ -325,8 +329,8 @@ abstract final class AppTheme {
       useMaterial3: true,
       brightness: Brightness.light,
       colorScheme: cs,
-      fontFamily: 'PingFang SC',
-      fontFamilyFallback: pingFangFontFamilyFallback,
+      fontFamily: appFontFamily,
+      fontFamilyFallback: appFontFamilyFallback,
       dialogTheme: DialogThemeData(
         backgroundColor: AppPalette.warmLocationDialogBg,
         surfaceTintColor: Colors.transparent,

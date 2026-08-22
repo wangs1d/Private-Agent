@@ -8,6 +8,7 @@ import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { classifyRenderHint } from "./render-hint-service.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
+import type { InfoSearchItem } from "./info-hub-service.js";
 
 const CONTENT_LENGTH_THRESHOLD = 800;
 
@@ -27,6 +28,231 @@ function wrapRenderAs(name: string, text: string): string {
 function extractUrlFromText(text: string): string | undefined {
   const m = text.match(/https?:\/\/\S+/);
   return m ? m[0].replace(/[)}\]。，,]+$/, "") : undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 根因修复：检测 LLM 把 tool result 原始 JSON 直接吐到回复里的情况
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 判断字符串是否「看起来像域名」（用于恢复被 compactor 切掉 https:// 前缀的 URL）。
+ *
+ * 典型场景：compactor 在硬切 search_web 返回的 JSON 时，可能把 `"url":"https://..."`
+ * 切到只剩 `"url":"movie.douban.com/..."`，LLM 又把这段破损 JSON 复制到 reply.text。
+ * 我们要把它补成 `https://movie.douban.com/...`，让搜索结果卡能正常渲染。
+ *
+ * 判定规则（保守、宁缺毋滥）：
+ *   - 含至少一个点（如 example.com / sub.example.co.uk）
+ *   - 第一段（顶级域名前的主域）是合法域名片段（字母数字 + 连字符，不以连字符开头/结尾）
+ *   - 顶级域名是常见 TLD（com/net/org/cn/gov/edu/io/app/dev/ai/...）
+ *   - 不含空白 / 引号 / 反斜杠 / 大括号（这些一定不是 URL）
+ *   - 长度 ≤ 500（防极端长字符串误判）
+ */
+function looksLikeDomain(s: string): boolean {
+  if (!s || s.length > 500) return false;
+  if (/[\s"'\\{}\[\]]/.test(s)) return false;
+  // 必须以 http(s):// 开头以外的形式，但若以单斜杠或残缺 ttp:// 开头也算
+  if (/^https?:\/\//i.test(s)) return true; // 防御性：理论上外层已排除
+  // 形如 example.com / sub.example.com / example.com:8080/path
+  const m = s.match(/^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)(:\d+)?(\/[^\s]*)?$/i);
+  if (!m) return false;
+  const host = m[1].toLowerCase();
+  const tld = host.split(".").pop() ?? "";
+  // 常见 TLD 白名单（含中国常见 .cn / .com.cn 双段）
+  const KNOWN_TLDS = new Set([
+    "com", "net", "org", "cn", "com.cn", "gov", "gov.cn", "edu", "edu.cn",
+    "io", "app", "dev", "ai", "co", "me", "tv", "info", "biz", "xyz",
+    "top", "vip", "cc", "shop", "store", "tech", "cloud", "site", "online",
+    "wiki", "news", "live", "social", "video", "music", "art", "design",
+    "fm", "am", "fm", "cool", "fun", "pro", "group", "team", "world",
+  ]);
+  return KNOWN_TLDS.has(tld);
+}
+
+/**
+ * 检测 LLM 输出中是否包含「搜索结果原始 JSON」（即直接复述 search_web/info.* 的
+ * tool result）。典型形态：
+ *   {"items":[{"title":"...","url":"...","snippet":"...","source":"..."}],"provider":"..."}
+ *
+ * 出现场景：LLM 在整合工具结果时，本应按 prompt 输出自然段或列表，
+ * 但模型把整段 JSON 复制粘贴到回复里，绕过 render_hint 分类器的 list 识别，
+ * 透出到前端让用户看到「`{"items":[{...},...]}... [truncated 870 chars]`」式脏展示。
+ *
+ * 命中条件（严格，避免误伤普通 JSON 描述）：
+ *   1. 文本中能找到完整的 JSON 对象（包络 `{...}`，跨行也支持）
+ *   2. 解析后顶层有 `items` 数组，数组长度 ≥ 2
+ *   3. items 内元素是对象，含 `title`(string) + `url`(http(s) 开头) 字段
+ *   4. 至少 50% 的 items 命中 (3) — 避免把 "items 中夹 1 个搜索项" 的偶发 JSON 误判
+ *
+ * 命中时返回 `{ items, cleanText }`：
+ *   - items：解析出的搜索结果数组
+ *   - cleanText：去掉 JSON 块（含前后引导句）后的纯文字，便于拼到卡片前/后
+ *
+ * 不命中返回 null。
+ */
+function detectRawSearchResultJson(
+  text: string,
+): { items: InfoSearchItem[]; cleanText: string } | null {
+  const trimmed = text?.trim();
+  if (!trimmed || trimmed.length < 30) return null;
+
+  // 0. 防御：若文本已被 [AGENT_RESULT_CARD_START] 等标记包好，视为已结构化，不重复检测
+  if (
+    trimmed.includes("[AGENT_RESULT_CARD_START]") ||
+    trimmed.includes("[CONTENT_SUMMARY_V2_START]") ||
+    trimmed.includes("[RENDER_AS:") ||
+    trimmed.includes("[VIDEO_MEDIA_START]") ||
+    trimmed.includes("[CHAT_MEDIA_START]")
+  ) {
+    return null;
+  }
+
+  // 1. 找最外层 JSON 对象（贪婪配对，处理嵌套 + 跨行）
+  const candidates: string[] = [];
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] !== "{") continue;
+    // 从 i 起扫描，找到匹配的右括号
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let j = i; j < trimmed.length; j++) {
+      const ch = trimmed[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          candidates.push(trimmed.slice(i, j + 1));
+          break;
+        }
+      }
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  // 2. 试解析每个候选，挑出最像「搜索结果 JSON」的那个
+  //    判定：含 items 数组 + 数组里至少 2 个对象、对象含 title+url
+  for (const raw of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const obj = parsed as Record<string, unknown>;
+    const itemsRaw = obj.items;
+    if (!Array.isArray(itemsRaw) || itemsRaw.length < 2) continue;
+    const searchItems: InfoSearchItem[] = [];
+    let validCount = 0;
+    for (const it of itemsRaw) {
+      if (!it || typeof it !== "object") continue;
+      const rec = it as Record<string, unknown>;
+      const title = typeof rec.title === "string" ? rec.title.trim() : "";
+      const rawUrl = typeof rec.url === "string" ? rec.url.trim() : "";
+      if (!title || !rawUrl) continue;
+      // 容错：compactor 在硬切 JSON 时可能把 "https://" 前缀吃掉（变成
+      // "movie.douban.com/..."）。这里对「看起来像域名」的残缺 URL 自动补回
+      // https:// 前缀，确保破损 JSON 也能被识别为搜索结果卡（不再让脏 JSON
+      // 透出到前端）。
+      const url = /^https?:\/\//i.test(rawUrl)
+        ? rawUrl
+        : looksLikeDomain(rawUrl)
+          ? `https://${rawUrl}`
+          : "";
+      if (!url) continue;
+      const snippet = typeof rec.snippet === "string" ? rec.snippet.trim() : "";
+      const source = typeof rec.source === "string" ? rec.source.trim() : "";
+      const publishedAt =
+        typeof rec.publishedAt === "string" ? rec.publishedAt.trim() : undefined;
+      searchItems.push({
+        title: title.slice(0, 180),
+        url,
+        snippet: snippet.slice(0, 220),
+        source: source || "搜索",
+        publishedAt,
+      });
+      validCount++;
+    }
+    if (validCount < 2) continue;
+    if (validCount / itemsRaw.length < 0.5) continue;
+    // 3. 把 JSON 块从原文本中剥掉（含可能的前后引导句），得到 cleanText
+    //    策略：先在 trimmed 里找到 raw 的位置，剥掉 raw 本身；
+    //    再把剥离 JSON 后空出来的相邻短句（"以下是搜索结果：" 等）也合并去掉。
+    const jsonStart = trimmed.indexOf(raw);
+    if (jsonStart < 0) continue;
+    const before = trimmed.slice(0, jsonStart).trim();
+    const after = trimmed.slice(jsonStart + raw.length).trim();
+    // 「搜索结果公告句」：LLM 在 JSON 前写的「以下是搜索结果：」「下面是相关搜索：」等
+    // 引导句。卡片本身已带 "搜索结果" 标题，重复公告无价值，识别后丢弃避免冗余。
+    // 匹配规则：长度 ≤ 60 且命中公告关键词，标点结尾视为完整公告。
+    const announceRe = /(搜索结果|搜到的|搜索到的|相关搜索|检索结果|以下是|下面是|查到了|查询到)/;
+    const beforeIsAnnounce = before.length > 0 && before.length <= 60 && announceRe.test(before);
+    const afterIsAnnounce = after.length > 0 && after.length <= 60 && announceRe.test(after);
+    // after 若超出公告范围（带新结论/追问）则保留，否则视为"希望对您有帮助"等收尾短句丢弃
+    const afterLooksLikeTrailer = after.length > 0 && after.length > 60;
+    const cleanText = [
+      beforeIsAnnounce ? "" : before,
+      afterLooksLikeTrailer ? after : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+    return { items: searchItems, cleanText };
+  }
+  return null;
+}
+
+/**
+ * 把搜索结果 items 数组拼成自然段 + AGENT_RESULT_CARD 卡片，让前端走搜索结果组件渲染。
+ * 这是 detectRawSearchResultJson 的"修复器"——把脏 JSON 转换为结构化卡片。
+ *
+ * item.text 格式遵循 _SearchResultCard 的约定：用 `:` 把标题与摘要拆开，
+ * 让前端组件把第一段当标题（加粗）、后续当描述；URL 走 item.url（可点击跳转）。
+ */
+function buildSearchResultCardFromItems(
+  items: InfoSearchItem[],
+  leadText: string,
+  toolName: string | undefined,
+): string {
+  const title = "搜索结果";
+  const cardItems = items.map((it) => {
+    const head = it.title || it.url;
+    const descParts: string[] = [];
+    if (it.snippet) descParts.push(it.snippet);
+    if (it.source) descParts.push(`来源:${it.source}`);
+    const text = descParts.length > 0 ? `${head}: ${descParts.join("  \n")}` : head;
+    return {
+      type: "num",
+      text,
+      url: it.url,
+      source: it.source || undefined,
+    };
+  });
+  const payload = {
+    avatar: "NB",
+    avatarStyle: "default",
+    title,
+    items: cardItems,
+    footer: `共 ${items.length} 条结果`,
+    cardType: "search_result",
+    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  };
+  const card = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
+  if (!leadText) return card;
+  return `${leadText}\n\n${card}`;
 }
 
 export interface ToolResultProcessorOptions {
@@ -82,6 +308,37 @@ export class ToolResultProcessor {
       trimmed.includes("[AGENT_RESULT_CARD_START]")
     ) {
       return workingText;
+    }
+
+    // === 优先级 -1：LLM 把 tool result 原始 JSON 直接吐到回复里 → 转结构化卡片 ===
+    // 根因修复：search_web/info.* 的 tool result 是 `{"items":[{title,url,snippet,...}]}` 形态，
+    // LLM 偶发会整段复制到 reply.text（而不是按 prompt 输出自然段），
+    // 旧的 classifyRenderHint 只识别 list 格式，JSON 形态落到 plain 透出 → 用户看到
+    // 「`{"items":[{...},...]} ... [truncated 870 chars]`」式脏展示。
+    // 这里在所有 hint 之前优先检测并转换为 [AGENT_RESULT_CARD] 标记，
+    // 保证最终送到前端的始终是结构化搜索结果卡，而不是原始 JSON。
+    //
+    // 注意：不做 plainTextMode 守卫——plainTextMode 是"不要主动注入卡片"，
+    // 但 raw JSON 透出属于"脏展示"必须清理。即使 HTTP 路径会再加工，也要把
+    // 残破 JSON 剥成 cleanText + [AGENT_RESULT_CARD] 标记，避免下游再原样发给前端。
+    const detected = detectRawSearchResultJson(trimmed);
+    if (detected) {
+      console.log(
+        `[ToolResultProcessor] raw_search_result_json: items=${detected.items.length} ` +
+          `tool=${opts?.toolName ?? "unknown"}`,
+      );
+      const cardText = buildSearchResultCardFromItems(
+        detected.items,
+        detected.cleanText,
+        opts?.toolName,
+      );
+      // plainTextMode 时不再输出 [AGENT_RESULT_CARD_START] 标记（下游可能不会解析），
+      // 改为 cleanText + 自然段，把 JSON 块彻底剥掉；结构化数据已通过 toolName=
+      // search_web 等旁路独立下发，前端仍能拿到搜索结果。
+      if (opts?.plainTextMode) {
+        return detected.cleanText;
+      }
+      return cardText;
     }
 
     // === 渲染形态判断中心 ===
@@ -306,8 +563,9 @@ export function attachMediaSearchMarker(
     cardItems.push({
       type: isVideo ? "video" : "image",
       title: title || source || (isVideo ? "相关视频" : "图片结果"),
-      // 缩略图优先本地 PNG，其次媒体地址（前端会走代理解析）
-      thumbnailUrl: thumbnailUrl || mediaUrl || "",
+      // 视频只认真实缩略图，绝不把播放页/搜索页 URL 当图下发；
+      // 图片则优先本地 PNG，其次媒体地址（前端会走代理解析）。
+      thumbnailUrl: isVideo ? thumbnailUrl : thumbnailUrl || mediaUrl || "",
       mediaType: isVideo ? "video" : "image",
       pageUrl,
       source,
@@ -445,8 +703,11 @@ export function extractMediaCards(
     if (!hasMedia) continue;
     cards.push({
       type: isVideo ? "video" : "image",
-      title: title || source || "图片结果",
-      thumbnailUrl: thumbnailUrl || mediaUrl || "",
+      title: title || source || (isVideo ? "相关视频" : "图片结果"),
+      // 视频只认真实缩略图（真实图片地址），绝不把播放页/搜索页 URL 当图下发；
+      // 无真实缩略图时留空，前端显示视频占位图标 + 播放角标。图片则保持
+      // 「本地 PNG 优先、其次媒体地址」的旧逻辑。
+      thumbnailUrl: isVideo ? thumbnailUrl : thumbnailUrl || mediaUrl || "",
       mediaUrl: mediaUrl || undefined,
       pageUrl: pageUrl || undefined,
       source: source || undefined,
@@ -455,8 +716,11 @@ export function extractMediaCards(
       ...(sideLabel ? { sideLabel } : {}),
     });
   }
-  // 过滤出至少有一个可展示缩略图的干净列表（双重保险：上面已按 hasMedia 过滤）
-  return cards.filter((c) => !!c.thumbnailUrl);
+  // 过滤：图片必须有缩略图；视频没有缩略图时只要有可打开的播放页也保留
+  //（前端显示占位图标，点击仍可打开播放页），避免视频结果被整体丢弃。
+  return cards.filter(
+    (c) => !!c.thumbnailUrl || (c.type === "video" && !!c.pageUrl),
+  );
 }
 
 /**
@@ -472,6 +736,59 @@ export function dedupMediaCards(cards: MediaCardItem[]): MediaCardItem[] {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(c);
+  }
+  return out;
+}
+
+export interface TrimMediaCardsOptions {
+  /** 普通分组（空 groupTitle=单次搜索）最多保留张数，少而精 */
+  maxPerGroup: number;
+  /** 对比分组里 A/B 单侧各保留张数，保证两侧同时出现、不偏科 */
+  maxPerSide: number;
+}
+
+/**
+ * 主题粒度自适应裁剪：不设全局总量硬限，而是按主题(分组)保证"少而精、不遗漏"。
+ *
+ * 设计（2026-08-22）：用户反馈"抓回来的照片太多"，但硬砍全局总量会误伤多主题/
+ * 对比场景——总量上限会优先保留前面主题、把后面主题或某一侧的图整个挤掉。这里
+ * 改为按 groupTitle 分组裁剪：
+ *   - 每个分组最多保留 maxPerGroup 张（普通单次搜索=单个空分组，天然少而精）；
+ *   - 对比分组（带 compareSide A/B）每侧各保留 maxPerSide 张，两侧对称；
+ *   - 不设全局总数上限：主题多则每个主题都保留（每组至少前几张），不因总量遗漏主题。
+ * 返回去重、裁剪后的保序卡片列表。
+ */
+export function trimMediaCardsByTopic(
+  cards: MediaCardItem[],
+  opts: TrimMediaCardsOptions,
+): MediaCardItem[] {
+  const { maxPerGroup, maxPerSide } = opts;
+  // 按 groupTitle 分组（空标题=普通单组搜索归入同一组），保留首次出现顺序
+  const groups = new Map<string, MediaCardItem[]>();
+  const order: string[] = [];
+  for (const c of cards) {
+    const key = (c.groupTitle ?? "").trim();
+    let list = groups.get(key);
+    if (!list) {
+      list = [];
+      groups.set(key, list);
+      order.push(key);
+    }
+    list.push(c);
+  }
+  const out: MediaCardItem[] = [];
+  for (const key of order) {
+    const list = groups.get(key)!;
+    const isCompare = list.some((c) => c.side === "A" || c.side === "B");
+    if (isCompare) {
+      // 对比分组：每侧各保留 maxPerSide 张，缺 A/B 任一侧时该侧为空、不强行补
+      const sideA = list.filter((c) => c.side === "A").slice(0, maxPerSide);
+      const sideB = list.filter((c) => c.side === "B").slice(0, maxPerSide);
+      out.push(...sideA, ...sideB);
+    } else {
+      // 普通分组：最多保留 maxPerGroup 张
+      out.push(...list.slice(0, maxPerGroup));
+    }
   }
   return out;
 }

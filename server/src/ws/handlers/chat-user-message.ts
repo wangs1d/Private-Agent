@@ -36,7 +36,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
@@ -962,6 +962,14 @@ async function processBatchedMessage(
     }
     // 同一张图不重复展示：跨轮聚合后按图片地址去重（对比图各维度/两侧常重复返回）
     mediaCards = dedupMediaCards(mediaCards);
+    // 主题粒度自适应裁剪：不设全局总量硬限，按主题(分组)保证"少而精、不遗漏"。
+    // - 普通分组(单次搜索)最多 maxPerGroup 张，不堆一墙；
+    // - 对比分组(A/B)每侧各 maxPerSide 张，两侧对称；
+    // - 主题多则每个主题都保留前几张，不因总量上限把后面的主题/某侧挤掉。
+    mediaCards = trimMediaCardsByTopic(mediaCards, {
+      maxPerGroup: 4,
+      maxPerSide: 2,
+    });
     // 仅当没有结构化卡片时，才回退走文本标记注入（保持旧客户端兼容、
     // 以及非图片工具不带结构数据的场景）。有 mediaCards 时不再注入标记，
     // 避免 finalText 携带标记被前端旧解析路径抢先渲染、且无真实缩略图。
