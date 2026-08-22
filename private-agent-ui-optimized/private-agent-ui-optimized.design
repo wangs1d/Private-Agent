@@ -12,10 +12,10 @@
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 932,
+          "contentHeight": 900,
           "viewportWidth": 1440,
-          "sourceHash": "fnv1a-deb16d64",
-          "measuredAt": 1785816414067
+          "sourceHash": "fnv1a-019e2753",
+          "measuredAt": 1787386676355
         }
       },
       "devMetadata": {
@@ -37,8 +37,8 @@
           "version": 1,
           "contentHeight": 900,
           "viewportWidth": 1440,
-          "sourceHash": "fnv1a-464de4be",
-          "measuredAt": 1785815367147
+          "sourceHash": "fnv1a-f75f533d",
+          "measuredAt": 1787386676355
         }
       },
       "devMetadata": {
@@ -83,12 +83,35 @@
           "version": 1,
           "contentHeight": 974,
           "viewportWidth": 1440,
-          "sourceHash": "fnv1a-537e448f",
-          "measuredAt": 1785852675543
+          "sourceHash": "fnv1a-c0c4163e",
+          "measuredAt": 1787386676355
         }
       },
       "devMetadata": {
         "htmlSrc": "pages/phone-call-ui.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-phone-call-ui-bw",
+      "title": "电话窗口 · 黑白圆角版",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1787385600000,
+      "canvasData": {
+        "x": 998,
+        "y": 1000,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 918,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-ee76a745",
+          "measuredAt": 1787386676355
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/phone-call-ui-bw.html",
         "interactions": []
       }
     },
@@ -104,10 +127,10 @@
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 562,
+          "contentHeight": 900,
           "viewportWidth": 1440,
-          "sourceHash": "fnv1a-cee6dbc5",
-          "measuredAt": 1785815367147
+          "sourceHash": "fnv1a-b6cfe61a",
+          "measuredAt": 1787386676355
         }
       },
       "devMetadata": {
@@ -127,10 +150,10 @@
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 793,
+          "contentHeight": 900,
           "viewportWidth": 1440,
-          "sourceHash": "fnv1a-a4e9d2f0",
-          "measuredAt": 1785852675543
+          "sourceHash": "fnv1a-c39ee36f",
+          "measuredAt": 1787386676355
         }
       },
       "devMetadata": {
@@ -142,6 +165,7 @@
   "config": {
     "autoLayout": false,
     "deviceType": "desktop",
-    "projectName": "Private Agent UI 优化"
+    "projectName": "Private Agent UI 优化",
+    "visualEditorEnabled": false
   }
 }
