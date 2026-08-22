@@ -104,13 +104,15 @@ type FunctionToolDefinition = {
 
 const DEFAULT_TENANT_ID = "default";
 const DEFAULT_CONTEXT_HASH = "tool-search-bridge";
-const ROUTE_CACHE_TTL_MS = 20_000;
+const ROUTE_CACHE_TTL_MS = 300_000; // 5 分钟（原 20s），session 级复用
+const INTENT_CACHE_TTL_MS = 300_000; // 意图分解缓存 5 分钟
 const MAX_INDEX_CACHE = 32;
 const intentRouter = new IntentRouter({ redisUrl: undefined });
 const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
 const topPSelector = new AdaptiveTopPSelector();
 const rerankingPipeline = new ToolRerankingPipeline();
 const indexCache = new Map<string, { index: AdaptiveCatalogIndex; createdAt: number }>();
+const intentCache = new Map<string, { intent: ParsedIntent; expiresAt: number }>();
 const graphServiceCache = new Map<
   string,
   Promise<{ store: ToolRegistryStore; graph: ToolKnowledgeGraphService }>
@@ -127,10 +129,30 @@ export async function adaptiveSearchDeferredTools(
 
   const index = getOrCreateAdaptiveCatalogIndex(catalog);
   const contextHash = options?.agentContextHash?.trim() || DEFAULT_CONTEXT_HASH;
-  const parsedIntent = await intentRouter.decompose({
-    raw_user_query: trimmedQuery,
-    agent_context_hash: contextHash,
-  });
+
+  // Fast path：常见 query 跳过 IntentRouter
+  const fastPathIntent = tryFastPathIntent(trimmedQuery);
+  let parsedIntent: ParsedIntent;
+  if (fastPathIntent) {
+    parsedIntent = fastPathIntent;
+  } else {
+    // 意图分解本地缓存（session 级，基于 query + contextHash 去重）
+    const intentCacheKey = `${trimmedQuery}|${contextHash}`;
+    let cached = intentCache.get(intentCacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      parsedIntent = cached.intent;
+    } else {
+      if (cached) intentCache.delete(intentCacheKey);
+      parsedIntent = await intentRouter.decompose({
+        raw_user_query: trimmedQuery,
+        agent_context_hash: contextHash,
+      });
+      intentCache.set(intentCacheKey, {
+        intent: parsedIntent,
+        expiresAt: Date.now() + INTENT_CACHE_TTL_MS,
+      });
+    }
+  }
 
   const subIntents =
     parsedIntent.is_compound_task && parsedIntent.sub_intents.length > 0
@@ -157,11 +179,35 @@ export async function adaptiveSearchDeferredTools(
         return;
       }
 
+      // 小路由短路径：资源 < 10 时跳过 BM25 检索，直接用 base_score
+      if (route.resources.length < 10) {
+        const sorted = route.resources.map((r) => ({
+          item: {
+            resource: r,
+            final_score: r.level1.base_score,
+            components: {
+              embedding_score: 0,
+              keyword_score: 0,
+              history_success_score: 0,
+              latency_score: 0,
+              failure_penalty: 0,
+              base_score: r.level1.base_score,
+            },
+          } satisfies HybridRetrievedResource,
+          score: r.level1.base_score,
+        })).sort((a, b) => b.score - a.score);
+        topPSelector.select(sorted, { confidence: intent.confidence }).selected.forEach((s) => {
+          selectedById.set(s.item.resource.level1.resource_id, s.item);
+        });
+        routingParts.push({ intent, route, topP: topPForIntent(intent) });
+        return;
+      }
+
       const retrieved = await retrievalEngine.search({
         query: intent.intent || trimmedQuery,
         candidates: route.resources,
         queryVector: options?.queryVector,
-        limit: Math.min(100, Math.max(25, limit * 8)),
+        limit: Math.min(50, Math.max(10, limit * 4)),
       });
       const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
       const topP = topPSelector.select(
@@ -182,6 +228,26 @@ export async function adaptiveSearchDeferredTools(
 
   if (selectedById.size === 0) return [];
 
+  const primaryRoute = routingParts[0];
+  const routing = {
+    intent: parsedIntent.intent,
+    confidence: parsedIntent.confidence,
+    top_p: primaryRoute?.topP ?? topPForIntent(parsedIntent),
+    domain_groups: primaryRoute?.route.domain_groups ?? [],
+    domain_candidates: primaryRoute?.route.domains ?? parsedIntent.domain_candidates,
+    primary_capability: parsedIntent.primary_capability,
+  };
+
+  // 高置信 short-circuit：top-1 置信度 >= 0.85 时跳过后处理（图扩展 + 二次检索 + rerank）
+  // 直接返回 topP 选中的结果，省 40-60% 的 discover 延迟
+  if (parsedIntent.confidence >= 0.85) {
+    const selected = [...selectedById.values()];
+    const boosted = applyAdaptiveIntentBoost(index, selected, trimmedQuery);
+    return boosted
+      .slice(0, Math.max(1, limit))
+      .map((candidate) => matchFromCandidate(catalog, index, candidate, routing, options));
+  }
+
   const expandedRecords = await expandWithKnowledgeGraph(
     index,
     [...selectedById.values()].map((hit) => hit.resource),
@@ -201,16 +267,6 @@ export async function adaptiveSearchDeferredTools(
     candidates: expandedRetrieved,
     blacklist_resource_ids: options?.blacklistResourceIds,
   });
-
-  const primaryRoute = routingParts[0];
-  const routing = {
-    intent: parsedIntent.intent,
-    confidence: parsedIntent.confidence,
-    top_p: primaryRoute?.topP ?? topPForIntent(parsedIntent),
-    domain_groups: primaryRoute?.route.domain_groups ?? [],
-    domain_candidates: primaryRoute?.route.domains ?? parsedIntent.domain_candidates,
-    primary_capability: parsedIntent.primary_capability,
-  };
 
   const boosted = applyAdaptiveIntentBoost(index, reranked.candidates, trimmedQuery);
 
@@ -529,12 +585,34 @@ function applyAdaptiveIntentBoost(
 ): HybridRetrievedResource[] {
   const q = query.toLowerCase();
   const qTokens = new Set(tokenize(q));
+  // 预编译 query 匹配模式，避免逐候选重复 regex 测试
+  const has = (pattern: RegExp): boolean => pattern.test(q);
+  const specialBoostCache = new Map<string, number>();
+  const getSpecialBoost = (resourceId: string): number => {
+    const cached = specialBoostCache.get(resourceId);
+    if (cached !== undefined) return cached;
+    let boost = 0;
+    if (resourceId === "calendar.list_tasks" && has(/\btasks?\b|\btodo\b/)) boost += 0.32;
+    if (resourceId === "search_web" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost += 0.42;
+    if (resourceId === "fetch_web" && has(/\bread\b|\bfetch\b|\bpage\b|\bcontent\b|\burl\b/)) boost += 0.42;
+    if (resourceId === "info.inspect_webpage" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost -= 0.1;
+    if (resourceId === "info.inspect_webpage" && has(/\bread\b|\bfetch\b|\bcontent\b/) && !has(/\binspect\b/)) boost -= 0.08;
+    if (resourceId === "agent.query_capabilities" && has(/\bcapabilit(?:y|ies)\b|\btools?\b|\bcan you\b/)) boost += 0.3;
+    if (resourceId === "self.list_custom_skills" && has(/\bcustom\b|\bskills?\b/)) boost += 0.34;
+    if (resourceId === "wallet.get_transactions" && has(/\btransactions?\b|\brecent\b|\bhistory\b/)) boost += 0.32;
+    if (resourceId === "embodiment.roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost += 0.2;
+    if (resourceId === "embodiment.window_roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost -= 0.12;
+    if (resourceId === "desktop.run_automation" && has(/\bautomation\b|\bscript\b|\btask\b/)) boost += 0.22;
+    if (resourceId === "desktop.visual.run_task" && has(/\bautomation\b|\bscript\b/) && !has(/\bvisual\b|\bscreenshot\b/)) boost -= 0.12;
+    specialBoostCache.set(resourceId, boost);
+    return boost;
+  };
   return candidates
     .map((candidate) => {
       const id = candidate.resource.level1.resource_id;
       const entry = index.entriesById.get(id);
       const boost = clamp(
-        lexicalToolBoost(id, q, qTokens, entry) + specialToolBoost(id, q),
+        lexicalToolBoost(id, q, qTokens, entry) + getSpecialBoost(id),
         -0.25,
         0.45,
       );
@@ -573,26 +651,6 @@ function lexicalToolBoost(
       if (overlap > 0) boost -= Math.min(0.12, overlap * 0.04);
     }
   }
-  return boost;
-}
-
-function specialToolBoost(resourceId: string, query: string): number {
-  let boost = 0;
-  const has = (pattern: RegExp): boolean => pattern.test(query);
-
-  if (resourceId === "calendar.list_tasks" && has(/\btasks?\b|\btodo\b/)) boost += 0.32;
-  if (resourceId === "search_web" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost += 0.42;
-  if (resourceId === "fetch_web" && has(/\bread\b|\bfetch\b|\bpage\b|\bcontent\b|\burl\b/)) boost += 0.42;
-  if (resourceId === "info.inspect_webpage" && has(/\bsearch\b|\bnews\b|\blatest\b/)) boost -= 0.1;
-  if (resourceId === "info.inspect_webpage" && has(/\bread\b|\bfetch\b|\bcontent\b/) && !has(/\binspect\b/)) boost -= 0.08;
-  if (resourceId === "agent.query_capabilities" && has(/\bcapabilit(?:y|ies)\b|\btools?\b|\bcan you\b/)) boost += 0.3;
-  if (resourceId === "self.list_custom_skills" && has(/\bcustom\b|\bskills?\b/)) boost += 0.34;
-  if (resourceId === "wallet.get_transactions" && has(/\btransactions?\b|\brecent\b|\bhistory\b/)) boost += 0.32;
-  if (resourceId === "embodiment.roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost += 0.2;
-  if (resourceId === "embodiment.window_roam" && has(/\broam\b|\baround\b/) && !has(/\bwindow\b/)) boost -= 0.12;
-  if (resourceId === "desktop.run_automation" && has(/\bautomation\b|\bscript\b|\btask\b/)) boost += 0.22;
-  if (resourceId === "desktop.visual.run_task" && has(/\bautomation\b|\bscript\b/) && !has(/\bvisual\b|\bscreenshot\b/)) boost -= 0.12;
-
   return boost;
 }
 
@@ -1160,6 +1218,46 @@ function getFunction(tool: ChatCompletionTool): FunctionToolDefinition | null {
   if (tool.type !== "function") return null;
   const maybeFunction = (tool as { function?: FunctionToolDefinition }).function;
   return maybeFunction?.name ? maybeFunction : null;
+}
+
+/**
+ * Fast path：常见 query 跳过 IntentRouter（同步 regex 匹配，0 async cost）。
+ * 覆盖高频查询：天气、时间、搜索、余额、日程等。
+ */
+function tryFastPathIntent(query: string): ParsedIntent | null {
+  const q = query.toLowerCase().trim();
+  const ro: QueryConstraints = { max_latency_ms: 200, read_only: true, file_type: null, auth_level: "guest" };
+  const rw: QueryConstraints = { max_latency_ms: 200, read_only: false, file_type: null, auth_level: "default" };
+
+  if (/\bweather\b|\b天气\b|\bforecast\b|\b温度\b|\btemperature\b/.test(q)) {
+    return { intent: "天气查询", domain_candidates: ["weather"], primary_capability: "weather.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\btime\b|\bdate\b|\b时间\b|\b日期\b|\bclock\b/.test(q)) {
+    return { intent: "时间查询", domain_candidates: ["clock"], primary_capability: "clock.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bsearch\b|\b搜索\b|\b查找\b|\bfind\b|\bgoogle\b/.test(q) && !/天气|weather/.test(q)) {
+    return { intent: "搜索", domain_candidates: ["search", "browser"], primary_capability: "search.query", confidence: 0.92, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bcalendar\b|\bschedule\b|\bmeeting\b|\b日程\b|\b会议\b|\b日历\b/.test(q)) {
+    return { intent: "日程查询", domain_candidates: ["calendar"], primary_capability: "calendar.query", confidence: 0.9, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bbalance\b|\b余额\b|\bwallet\b|\b钱包\b|\b账户\b/.test(q)) {
+    return { intent: "余额查询", domain_candidates: ["wallet"], primary_capability: "wallet.query", confidence: 0.92, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bremind\b|\btodo\b|\btasks?\b|\b提醒\b|\b待办\b/.test(q)) {
+    return { intent: "待办查询", domain_candidates: ["reminder", "calendar"], primary_capability: "reminder.query", confidence: 0.88, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bphone\b|\bcall\b|\b打电话\b|\b电话\b|\b手机\b/.test(q)) {
+    return { intent: "电话查询", domain_candidates: ["phone"], primary_capability: "phone.query", confidence: 0.9, query_constraints: rw, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bmcp\b|\bintegration\b|\b服务器\b|\bserver\b/.test(q)) {
+    return { intent: "MCP 工具查询", domain_candidates: ["mcp", "misc"], primary_capability: "mcp.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+  if (/\bskill\b|\b技能\b|\bcapabilit(?:y|ies)\b|\b能力\b/.test(q)) {
+    return { intent: "技能查询", domain_candidates: ["self", "agent"], primary_capability: "self.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+  }
+
+  return null;
 }
 
 function topPForIntent(intent: ParsedIntent): number {

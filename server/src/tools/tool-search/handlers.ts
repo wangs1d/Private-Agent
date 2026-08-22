@@ -12,7 +12,6 @@ import { ResourceType } from "./registry/models.js";
 import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
 
 const historyStore: HistoryScoreStore = sharedHistoryStore;
-const EMBED_GRACE_MS = 150;
 
 const ADAPTIVE_AGENT_SEARCH_PATH = [
   "intent_router",
@@ -285,9 +284,14 @@ async function searchAdaptiveAgentPath(
     agentContextHash?: string;
   },
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
-  const queryVector =
-    peekQueryEmbedding(query) ??
-    (await raceWithTimeout(safeQueryEmbedding(query, catalog), EMBED_GRACE_MS));
+  // 不阻塞等待 embedding：先查缓存，miss 则 fire-and-forget 异步预取
+  // 搜索使用本地 hash embedding 实时计算，API embedding 预取后供后续同 query 复用
+  const queryVector = peekQueryEmbedding(query) ?? undefined;
+  if (!queryVector && catalog.embeddingIndex.size > 0) {
+    safeQueryEmbedding(query, catalog).catch(() => {
+      // 静默失败，不影响主搜索
+    });
+  }
   const matches = await searchWithAdaptiveFallback(catalog, query, limit, {
     includeSchema: options.includeSchema,
     queryVector: queryVector ?? undefined,
@@ -365,11 +369,10 @@ function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): v
   }
 }
 
-function raceWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return Promise.race([
-    promise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
-  ]);
+function inferFallbackResourceType(name: string): ResourceType {
+  if (name.startsWith("mcp.")) return ResourceType.McpServer;
+  if (isRegisteredSkillChatToolName(name)) return ResourceType.Skill;
+  return ResourceType.Tool;
 }
 
 async function searchWithAdaptiveFallback(
@@ -454,12 +457,6 @@ async function searchWithAdaptiveFallback(
       } satisfies AdaptiveDeferredToolSearchMatch;
     });
   }
-}
-
-function inferFallbackResourceType(name: string): ResourceType {
-  if (name.startsWith("mcp.")) return ResourceType.McpServer;
-  if (isRegisteredSkillChatToolName(name)) return ResourceType.Skill;
-  return ResourceType.Tool;
 }
 
 function inferFallbackDomain(name: string, resourceType: ResourceType): string[] {
