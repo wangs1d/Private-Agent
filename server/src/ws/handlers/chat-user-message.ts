@@ -27,7 +27,7 @@ import {
   type BatchTurnContext,
 } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
-import { routeLlmExecution } from "../../agent/task-router.js";
+import { routeTask } from "../../gateway/index.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter } from "../../agent/stream-segmenter.js";
 import {
@@ -488,7 +488,7 @@ async function processBatchedMessage(
 
   // 路由决策 & 分阶段异步开关
   const cfg = getAgentRuntimeConfig();
-  const decision = routeLlmExecution(batched.text, cfg, {
+  const decision = routeTask(batched.text, cfg, {
     preferFullPipeline: true,
   });
   const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {

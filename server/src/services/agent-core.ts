@@ -84,7 +84,8 @@ import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
-import { routeLlmExecution, determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { routeTask } from "../gateway/index.js";
 import {
   MEMORY_RECALL_HINT_RE,
   isAmbiguousFollowUpMessage,
@@ -638,8 +639,8 @@ export class AgentCore {
     let parallelLiveOriginalRoute: RouteDecision | null = null;
 
     if (this.brainCenter && text?.trim()) {
-      // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeLlmExecution
-      const fastRoute = opts?.routeDecision ?? routeLlmExecution(text, getAgentRuntimeConfig(), {
+      // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeTask
+      const fastRoute = opts?.routeDecision ?? routeTask(text, getAgentRuntimeConfig(), {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
 
@@ -775,7 +776,7 @@ export class AgentCore {
           // 静默失败，不影响主流程
         });
       }
-      route = routeLlmExecution(text, getAgentRuntimeConfig(), {
+      route = routeTask(text, getAgentRuntimeConfig(), {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
       if (this.shouldUseParallelLiveComplex(text, route, opts)) {
@@ -2202,9 +2203,9 @@ if (this.isComplexMode(route.mode)) {
             recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
             // 2026-08-19 修复「天气/位置在 fast 模式失效」：fast 分支此前强制
-            // userLocation=undefined。但天气类提问在 fast 模式仍会被强制走
-            // weather_get_local（见 openai-compatible-tool-loop.ts 的强制规则），
-            // LLM 拿不到位置只能传空参数 → 天气查询失败。
+            // userLocation=undefined。天气工具（weather.get_local）已并入
+            // tool-router 延迟目录由检索召回（tool_discover → tool_call），
+            // 召回执行时同样需要位置；LLM 拿不到位置只能传空参数 → 天气查询失败。
             // 改为复用已获取到的位置（ctx.userLocation），让 LLM 用默认/已有位置直接查，
             // 而非反问用户或空跑工具。没有位置时值仍为 undefined（保持原行为）。
             userLocation: ctx.userLocation,

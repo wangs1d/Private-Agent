@@ -81,7 +81,7 @@ import type { ToolRegistry } from "./tool-registry.js";
 import type { SkillManager } from "../skills/index.js";
 import type { SkillDefinition, SkillMetadata, SkillParameter } from "../skills/types.js";
 import { SkillValidator } from "../skills/skill-validator.js";
-import { invalidateFullCatalogCache } from "./tool-search/index.js";
+import { invalidateFullCatalogCache } from "../gateway/index.js";
 
 /**
  * 注册自我编程工具

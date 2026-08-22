@@ -184,7 +184,6 @@ const KEYWORDS = {
     "\u5f85\u529e",
     "\u65e5\u5386",
   ],
-  weather: ["weather", "\u5929\u6c14"],
   search: [
     "search",
     "browse",
@@ -428,9 +427,6 @@ export class RuntimeKernel {
     }
     if (hasAnyKeyword(text, KEYWORDS.calendar)) {
       pins.push("calendar.list_tasks", "calendar.create_task", "calendar.create_from_text");
-    }
-    if (hasAnyKeyword(text, KEYWORDS.weather)) {
-      pins.push("weather.get_local");
     }
     if (hasAnyKeyword(text, KEYWORDS.search)) {
       pins.push("search_web", "search_images", "search_videos", "fetch_web");

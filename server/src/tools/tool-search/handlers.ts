@@ -7,11 +7,11 @@ import {
 import { getToolSearchConfig } from "./env.js";
 import { searchDeferredToolsViaToolRouter } from "./tool-router-adapter.js";
 import { getQueryEmbedding, peekQueryEmbedding } from "./tool-embedding.js";
-import { HistoryScoreStore } from "./retrieval/history-score.js";
+import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
 import { ResourceType } from "./registry/models.js";
 import { isRegisteredSkillChatToolName } from "../../skills/skill-openai-bridge.js";
 
-const historyStore = new HistoryScoreStore();
+const historyStore: HistoryScoreStore = sharedHistoryStore;
 const EMBED_GRACE_MS = 150;
 
 const ADAPTIVE_AGENT_SEARCH_PATH = [
@@ -250,6 +250,16 @@ async function executeToolDiscoverByQuery(
     }
   }
 
+  // 高置信只读 top-1 预执行标记：省 1 轮 tool_call round trip
+  // 条件：top-1 置信度 >= 0.85、无必需参数、工具名不涉写操作
+  const preExecution =
+    matches.length > 0 &&
+    matches[0].routing.confidence >= 0.85 &&
+    matches[0].requiredParameters.length === 0 &&
+    !isWriteToolName(matches[0].name)
+      ? { tool_name: matches[0].name, inferred_args: {} as Record<string, unknown>, status: "ready" as const }
+      : undefined;
+
   return {
     kind: "discover",
     ok: true,
@@ -260,6 +270,7 @@ async function executeToolDiscoverByQuery(
       matches,
       search_path: ADAPTIVE_AGENT_SEARCH_PATH,
       hint: "首选 matches[0]；已含 schema 时可直接 tool_call。",
+      ...(preExecution ? { pre_execution: preExecution } : {}),
     },
   };
 }
@@ -300,7 +311,33 @@ function recordSearchContext(
   ctx.lastSearchMatches = matches.slice(0, 5).map((m) => m.name);
 }
 
+// ---- 动态高频工具晋升（高频工具自动晋升 core，省 2 轮 LLM round trip） ----
+
+const _toolCallFrequency = new Map<string, number>();
+const PROMOTE_THRESHOLD = 3; // 累计调用 >= 3 次自动晋升 core
+
+/** 记录一次工具调用（用于晋升统计）。 */
+export function recordToolCallForPromotion(toolName: string): void {
+  const count = (_toolCallFrequency.get(toolName) ?? 0) + 1;
+  _toolCallFrequency.set(toolName, count);
+}
+
+/** 获取当前应晋升到 core 的 deferred 工具名列表。 */
+export function getPromotableCoreTools(): string[] {
+  return [..._toolCallFrequency.entries()]
+    .filter(([, count]) => count >= PROMOTE_THRESHOLD)
+    .map(([name]) => name);
+}
+
+/** 清空晋升统计（测试/重置用）。 */
+export function clearPromotionStats(): void {
+  _toolCallFrequency.clear();
+}
+
 function recordToolCallFeedback(catalog: DeferredToolCatalog, chosen: string): void {
+  // 记录工具调用频率（动态晋升用）
+  recordToolCallForPromotion(chosen);
+
   const ctx = catalog as DeferredToolCatalog & {
     lastSearchQuery?: string;
     lastSearchMatches?: string[];
@@ -348,32 +385,22 @@ async function searchWithAdaptiveFallback(
 ): Promise<AdaptiveDeferredToolSearchMatch[]> {
   const cfg = getToolSearchConfig();
   if (cfg.backend === "tool_router") {
-    const [toolRouterResult, adaptiveResult] = await Promise.allSettled([
-      searchDeferredToolsViaToolRouter(catalog, query, limit, {
+    // 冷备降级：tool-router primary，TS adaptive 兜底，不再并行
+    try {
+      return await searchDeferredToolsViaToolRouter(catalog, query, limit, {
         includeSchema: options.includeSchema,
         tenantId: options.tenantId,
         agentContextHash: options.agentContextHash,
-      }),
-      adaptiveSearchDeferredTools(catalog, query, limit, options),
-    ]);
-
-    if (toolRouterResult.status === "fulfilled" && adaptiveResult.status === "fulfilled") {
-      return mergeBackendMatches(adaptiveResult.value, toolRouterResult.value, limit);
+      });
+    } catch (toolRouterError) {
+      console.warn("[tool-search:bridge] tool-router primary failed, cold standby → adaptive TS path", toolRouterError);
     }
-    if (adaptiveResult.status === "fulfilled") {
-      if (toolRouterResult.status === "rejected") {
-        console.warn("[tool-search:bridge] tool-router backend failed, fallback to adaptive TS path", toolRouterResult.reason);
-      }
-      return adaptiveResult.value;
+    try {
+      return await adaptiveSearchDeferredTools(catalog, query, limit, options);
+    } catch (adaptiveError) {
+      console.warn("[tool-search:bridge] adaptive cold standby also failed, final fallback → legacy BM25", adaptiveError);
     }
-    if (toolRouterResult.status === "fulfilled") {
-      console.warn("[tool-search:bridge] adaptive TS path failed, fallback to tool-router backend");
-      return toolRouterResult.value;
-    }
-    console.warn("[tool-search:bridge] both tool-router and adaptive search failed", {
-      toolRouterError: toolRouterResult.reason,
-      adaptiveError: adaptiveResult.reason,
-    });
+    // 终极兜底：纯 BM25
     const fallback = searchDeferredTools(catalog, query, limit, {
       includeSchema: options.includeSchema,
       queryVector: options.queryVector,
@@ -398,6 +425,7 @@ async function searchWithAdaptiveFallback(
       } satisfies AdaptiveDeferredToolSearchMatch;
     });
   }
+  // backend === "adaptive"：TS adaptive primary，异常时降级 BM25
   try {
     return await adaptiveSearchDeferredTools(catalog, query, limit, options);
   } catch (e) {
@@ -426,26 +454,6 @@ async function searchWithAdaptiveFallback(
       } satisfies AdaptiveDeferredToolSearchMatch;
     });
   }
-}
-
-function mergeBackendMatches(
-  adaptive: AdaptiveDeferredToolSearchMatch[],
-  toolRouter: AdaptiveDeferredToolSearchMatch[],
-  limit: number,
-): AdaptiveDeferredToolSearchMatch[] {
-  const merged = new Map<string, AdaptiveDeferredToolSearchMatch>();
-  for (const match of adaptive) merged.set(match.name, match);
-  for (const match of toolRouter) {
-    if (!merged.has(match.name)) {
-      merged.set(match.name, match);
-      continue;
-    }
-    const current = merged.get(match.name);
-    if (current && match.score > current.score) {
-      merged.set(match.name, { ...current, score: match.score });
-    }
-  }
-  return [...merged.values()].slice(0, Math.max(1, limit));
 }
 
 function inferFallbackResourceType(name: string): ResourceType {
@@ -495,6 +503,14 @@ function inferFallbackDomainGroups(domains: string[], resourceType: ResourceType
     default:
       return ["general"];
   }
+}
+
+/**
+ * 判断工具名是否涉及写操作（预执行跳过）。
+ * 与 adaptive-catalog.ts / reranking-pipeline.ts 的 isLikelyWriteResource 逻辑一致。
+ */
+function isWriteToolName(name: string): boolean {
+  return /(?:^|[._-])(?:accept|call|comment|create|delete|deliver|dispatch|execute|like|pay|post|purchase|reject|remove|respond|run|send|submit|transfer|update|upload|write)(?:[._-]|$)/.test(name);
 }
 
 /**

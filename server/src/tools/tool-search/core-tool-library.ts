@@ -37,7 +37,6 @@ export const CORE_TOOL_LIBRARY = {
       "search_videos",
       "fetch_web",
       "browser.session.list",
-      "weather.get_local",
     ],
   },
   dialogue: {
@@ -101,7 +100,6 @@ export const CORE_TOOL_LIBRARY = {
       "clock.get_user_location",
       "clock.get_date",
       "clock.format_timestamp",
-      "weather.get_local",
       "calendar.list_tasks",
       "calendar.create_from_text",
       "calendar.create_task",

@@ -11,7 +11,7 @@ import {
   selectRelevantTools,
 } from "./openai-compatible-tool-loop.js";
 import type { AgentStreamOptions, ToolExposureProfile } from "./types.js";
-import { estimateToolsSchemaTokens } from "../tools/tool-search/catalog.js";
+import { estimateToolsSchemaTokens } from "../gateway/index.js";
 
 export type ResolvedChatToolPlan = {
   visibleTools: ChatCompletionTool[];

@@ -10,7 +10,7 @@ import { isMasterAgentDelegationVerbose } from "../agent/master-agent-delegate-e
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { PersonalizationPromptSlice } from "./user-personalization/user-personalization-service.js";
-import { routeLlmExecution } from "../agent/task-router.js";
+import { routeTask } from "../gateway/index.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import {
   pickSubAgentDoneLine,
@@ -1221,7 +1221,7 @@ export class MasterAgentCoordinator {
 
     let assistantResult = "";
     try {
-      const route = routeLlmExecution(userMessage);
+      const route = routeTask(userMessage);
       this.log("Route selected", { taskId, mode: route.mode, reasons: route.reasons });
 
       // 只要启用子 Agent，主 Agent 每轮都注入「有小弟、可并行委派」说明 + 委派工具（不限于 master_delegate 路由）

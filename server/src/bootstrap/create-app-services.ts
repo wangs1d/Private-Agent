@@ -131,7 +131,7 @@ import {
 } from "../tools/capability-modules/index.js";
 import { setExtraIntentRules } from "../tools/tool-search/intent-metadata.js";
 import { setCapabilityModuleDeps, getBuiltinAgentChatTools, setDynamicFastLaneSkillTools, invalidateBuiltinToolsCache } from "../external-model/openai-compatible-tool-loop.js";
-import { registerDynamicFastLaneName } from "../tools/tool-search/core-tool-library.js";
+import { registerDynamicFastLaneName } from "../gateway/index.js";
 import { skillManifestToChatTool } from "../skills/skill-openai-bridge.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
@@ -311,7 +311,7 @@ import {
   buildToneGuidance,
   type EmotionState,
 } from "../services/user-personalization/emotion-tone.js";
-import { routeLlmExecution } from "../agent/task-router.js";
+import { routeTask } from "../gateway/index.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
@@ -2543,7 +2543,7 @@ export async function createAppServices(): Promise<AppServices> {
 
     // PlannerCortex（额叶规划皮层）
     const plannerCortex = new PlannerCortex();
-    plannerCortex.registerTaskRouter({ routeLlmExecution });
+    plannerCortex.registerTaskRouter({ routeLlmExecution: routeTask });
 
     // PlanExecuteLoop 适配器：将 runPlanExecuteLoop 函数包装为 { plan, execute, react } 对象。
     // - plan(goal): 调用 runPlanExecuteLoop 生成计划（函数内部已含执行），缓存结果。

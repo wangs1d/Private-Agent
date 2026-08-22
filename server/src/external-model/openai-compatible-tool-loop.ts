@@ -24,17 +24,22 @@ import {
 } from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
-  executeToolSearchBridge,
+  executeBridge,
+  isFastLaneTool,
   isToolSearchBridgeName,
-  prepareToolsWithToolSearch,
-} from "../tools/tool-search/index.js";
-import { isFastLaneTool } from "../tools/tool-search/core-tool-library.js";
+  prepareTools,
+} from "../gateway/index.js";
 import {
   getCapabilityModuleCategoryMappings,
   getCapabilityModuleChatTools,
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
+import {
+  FRESH_FACT_TOOL_NAMES,
+  resolveForcedToolChoice,
+  shouldRequireFreshWebLookup,
+} from "../gateway/forced-tool.js";
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isAssistantWithToolCalls,
@@ -641,102 +646,11 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
   };
 }
 
-function resolveForcedToolChoice(
-  userText: string,
-  apiTools: ChatCompletionTool[],
-  fastProfile?: boolean,
-): { type: "function"; function: { name: string } } | "auto" {
-  // 1. 显式电话请求 → 强制 phone_call_user
-  if (isExplicitPhoneCallRequest(userText)) {
-    const hasPhoneCallTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
-    );
-    if (hasPhoneCallTool) {
-      return { type: "function", function: { name: "phone_call_user" } };
-    }
-  }
-
-  // 2. 直接时间/日期/位置问题 → 强制 clock_get_current_time
-  //    避免 LLM 在"现在几点"这类事实型问题上瞎编。
-  //    2026-08-01 性能优化：Fast 模式跳过本强制——system prompt 已注入
-  //    currentTime / userLocation / scheduleSnapshot，LLM 可直接答"现在几点"，
-  //    强制调 clock 反而多 1 次 round trip（LLM→tool→LLM，3 次网络往返）。
-  //    ⚠️ 只跳过 clock：天气/搜索是真实数据获取，system prompt 未注入结果，
-  //    必须保留强制选择，否则 LLM 会"嘴上说查天气"却实际不调用工具。
-  if (!fastProfile && DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
-    const hasClockTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "clock_get_current_time",
-    );
-    if (hasClockTool) {
-      return { type: "function", function: { name: "clock_get_current_time" } };
-    }
-  }
-
-  // 3. 天气类问题 → 强制 weather_get_local
-  //    避免 LLM 用旧知识编造天气
-  if (/天气|气温|下雨|下雪|forecast|weather|温度多少/i.test(userText)) {
-    const hasWeatherTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "weather_get_local",
-    );
-    if (hasWeatherTool) {
-      return { type: "function", function: { name: "weather_get_local" } };
-    }
-  }
-
-  // 3b.（Coze 思路）图片/照片搜索不再在此处强制工具选择。
-  //   借鉴 Coze：媒体是否展示由「模型真正调用了 search_images」这一服务端事实决定，
-  //   而非靠正则猜意图。search_images 是否被模型使用，由 contextual 筛选决定工具
-  //   可见性 + 模型对当前轮意图的判断共同完成；服务端再把工具结果确定性渲染成图廊。
-  //   宁缺勿滥：普通问答（用户未索图）不会因为关键词命中就被强制导向图片搜索。
-
-  // 4. 时效性事实查询 → 强制 search_web
-  //    避免 LLM 用训练截止知识回答"最新""近期"类问题
-  if (shouldRequireFreshWebLookup(userText, apiTools)) {
-    const hasSearchTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "search_web",
-    );
-    if (hasSearchTool) {
-      return { type: "function", function: { name: "search_web" } };
-    }
-  }
-
-  return "auto";
-}
-
-const DIRECT_CLOCK_OR_LOCATION_RE =
-  /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
-
-const FRESH_WEB_LOOKUP_RE =
-  /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
-
-// 扩展触发 fresh lookup 的场景：用户提到具体模型/产品名 + "新/最新/出/版/v\d|k\d" 等时效信号。
-// 修复 LLM 在"Kimi3 新出的"这种含具体产品名但没显式"搜索"关键词的场景下不主动联网的漏判。
-const FRESH_FACT_ENTITY_HINT_RE =
-  /(?:kimi|gpt|claude|gemini|llama|qwen|deepseek|文心|通义|盘古|智谱|豆包|星火|混元|llm|大模型|foundation model|foundation_model)[\s\-_]*[a-z0-9]*\d|新出|新发|刚出|刚发|新版|新版本|新模型|新上|v\d|k\d|beta|rc\d|preview|alpha/i;
-
-const FRESH_FACT_TOOL_NAMES = new Set([
-  "search_web",
-  "fetch_web",
-  "info.inspect_webpage",
-  "info.navigate_site",
-]);
-
-export function shouldRequireFreshWebLookup(
-  userText: string,
-  apiTools: ChatCompletionTool[],
-): boolean {
-  const text = userText.trim();
-  if (!text) return false;
-  if (DIRECT_CLOCK_OR_LOCATION_RE.test(text)) return false;
-  const hasFreshWebTrigger = FRESH_WEB_LOOKUP_RE.test(text) || FRESH_FACT_ENTITY_HINT_RE.test(text);
-  if (!hasFreshWebTrigger) return false;
-  return apiTools.some(
-    (tool) =>
-      tool.type === "function" &&
-      typeof tool.function?.name === "string" &&
-      FRESH_FACT_TOOL_NAMES.has(tool.function.name),
-  );
-}
+// 强制工具路由（forced tool choice）统一收口到 gateway/forced-tool.ts：
+//   1. 显式电话请求 → phone_call_user
+//   2. 直接时间/日期/位置问题 → clock_get_current_time（Fast 模式跳过）
+//   3. 时效性事实查询 → search_web
+// 注：weather_get_local 已并入 tool-router 延迟目录，由检索召回，不再强制路由。
 
 const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -1825,7 +1739,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'web',
     keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别'],
-    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'weather.get_local']
+    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site']
   },
   {
     category: 'calendar',
@@ -2097,7 +2011,6 @@ export function selectRelevantTools(
       "agent.query_capabilities",
       "brain.list_capabilities",
       "search_web",
-      "weather.get_local",
       "calendar.list_tasks",
       "wallet.get_balance",
       "phone.call_user",
@@ -2185,9 +2098,10 @@ export async function streamCompletionWithTools(
   }
   
   const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
-  const toolSearchPrepared = prepareToolsWithToolSearch(
+  const toolSearchPrepared = await prepareTools(
     mergedRegistryTools,
     options?.toolSearchSourceTools,
+    { userText },
   );
   const registryTools = toolSearchPrepared.visibleTools;
   const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
@@ -2445,7 +2359,7 @@ export async function streamCompletionWithTools(
       let registryToolName = resolveRegistryToolName(fn.name);
       let notifyToolName = registryToolName;
       if (isToolSearchBridgeName(registryToolName) && registryToolName === "tool_call") {
-        const bridge = await executeToolSearchBridge(registryToolName, args, deferredToolCatalog);
+        const bridge = await executeBridge(registryToolName, args, deferredToolCatalog);
         if (bridge.kind === "call" && bridge.ok) {
           notifyToolName = bridge.registryToolName;
         }
@@ -2468,7 +2382,7 @@ export async function streamCompletionWithTools(
         let targetArgs = item.parsedArgs;
 
         if (isToolSearchBridgeName(item.registryToolName)) {
-          const bridge = await executeToolSearchBridge(
+          const bridge = await executeBridge(
             item.registryToolName,
             item.parsedArgs,
             deferredToolCatalog,

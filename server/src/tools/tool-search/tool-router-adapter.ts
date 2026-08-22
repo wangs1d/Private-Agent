@@ -27,6 +27,25 @@ type WorkerState = {
 let workerState: WorkerState | null = null;
 const prewarmPromises = new Map<string, Promise<void>>();
 
+// ===== 搜索 TTL 缓存（含在飞行去重）=====
+// 相同（目录签名 + query + limit + schema 开关）的检索在 TTL 窗口内直接复用；
+// 缓存的是 Promise 而非结果——并发同 query 只打一次 Python 端（预召回与
+// tool_discover 桥接同时发起时不会重复排队）。失败不缓存，允许重试。
+
+type SearchCacheEntry = { promise: Promise<AdaptiveDeferredToolSearchMatch[]>; expiresAt: number };
+const searchCache = new Map<string, SearchCacheEntry>();
+const SEARCH_CACHE_TTL_MS = 30_000;
+const SEARCH_CACHE_MAX = 64;
+
+function catalogCacheKey(catalog: DeferredToolCatalog): string {
+  return catalog.entries.map((e) => e.registryName).join(",");
+}
+
+/** 测试/调试用：清空搜索缓存（目录变更 / MCP 重连后调用）。 */
+export function invalidateToolRouterSearchCache(): void {
+  searchCache.clear();
+}
+
 function isExpectedWorkerLifecycleError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -36,7 +55,43 @@ function isExpectedWorkerLifecycleError(error: unknown): boolean {
   );
 }
 
-export async function searchDeferredToolsViaToolRouter(
+export function searchDeferredToolsViaToolRouter(
+  catalog: DeferredToolCatalog,
+  query: string,
+  limit: number,
+  options?: {
+    includeSchema?: boolean;
+    tenantId?: string;
+    agentContextHash?: string;
+  },
+): Promise<AdaptiveDeferredToolSearchMatch[]> {
+  const cacheKey = `${catalogCacheKey(catalog)}|${query}|${limit}|${options?.includeSchema ? 1 : 0}`;
+
+  const hit = searchCache.get(cacheKey);
+  if (hit && Date.now() <= hit.expiresAt) {
+    return hit.promise;
+  }
+  if (hit) {
+    searchCache.delete(cacheKey);
+  }
+
+  if (searchCache.size >= SEARCH_CACHE_MAX) {
+    const oldest = searchCache.keys().next().value;
+    if (oldest !== undefined) searchCache.delete(oldest);
+  }
+
+  const promise = searchDeferredToolsViaToolRouterUncached(catalog, query, limit, options).catch(
+    (error) => {
+      // 失败不缓存：移除后让后续调用重试
+      searchCache.delete(cacheKey);
+      throw error;
+    },
+  );
+  searchCache.set(cacheKey, { promise, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+  return promise;
+}
+
+async function searchDeferredToolsViaToolRouterUncached(
   catalog: DeferredToolCatalog,
   query: string,
   limit: number,

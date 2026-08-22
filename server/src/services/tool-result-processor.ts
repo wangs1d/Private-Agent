@@ -5,7 +5,7 @@ import {
   shouldSummarizeContent,
 } from "../services/content-summary-service.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
-import { classifyRenderHint } from "./render-hint-service.js";
+import { routeRender } from "../gateway/index.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
 
@@ -84,8 +84,8 @@ export class ToolResultProcessor {
       return workingText;
     }
 
-    // === 渲染形态判断中心 ===
-    const hint = classifyRenderHint(workingText, {
+    // === 渲染形态判断中心（经 gateway 统一路由，含 trace） ===
+    const hint = routeRender(workingText, {
       toolName: opts?.toolName,
       userText: opts?.userText,
     });

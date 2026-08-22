@@ -22,7 +22,7 @@ import {
   preparePromptCachePlan,
 } from "./prefix-cache.js";
 import { resolveChatToolPlanForStream } from "./resolve-chat-tools.js";
-import { prepareToolsWithToolSearch } from "../tools/tool-search/index.js";
+import { prepareTools } from "../gateway/index.js";
 import { streamCompletionWithTools } from "./openai-compatible-tool-loop.js";
 import type {
   AgentPromptMemoryContext,
@@ -37,7 +37,7 @@ import type {
 /** preparePromptCachePlan 的返回类型（含 fullSystemPrompt / promptCache / requestSystemMessages）。 */
 type PromptCachePlan = ReturnType<typeof preparePromptCachePlan>;
 type ToolPlan = ReturnType<typeof resolveChatToolPlanForStream>;
-type ToolSearchPrepared = ReturnType<typeof prepareToolsWithToolSearch>;
+type ToolSearchPrepared = Awaited<ReturnType<typeof prepareTools>>;
 
 /**
  * buildSystemAndPlan 钩子的上下文：基类在调用前已解析好 model / tools / suppressSuffixes 等。
@@ -191,7 +191,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       ? resolveChatToolPlanForStream(userTurn.text, streamOpts)
       : null;
     const toolSearchPrepared: ToolSearchPrepared | null = toolPlan
-      ? prepareToolsWithToolSearch(toolPlan.visibleTools, toolPlan.searchableTools)
+      ? await prepareTools(toolPlan.visibleTools, toolPlan.searchableTools, {
+          userText: userTurn.text,
+        })
       : null;
 
     // 子类构建 sysContent + promptPlan（含 tools 信息，两个分支共用，避免 Kimi 式重复构建）

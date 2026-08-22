@@ -10,6 +10,7 @@ import {
 } from "./catalog.js";
 import { getToolSearchConfig } from "./env.js";
 import { prewarmToolRouterCatalog } from "./tool-router-adapter.js";
+import { getPromotableCoreTools } from "./handlers.js";
 
 export type ToolSearchPreparedTurn = {
   visibleTools: ChatCompletionTool[];
@@ -143,6 +144,30 @@ export function prepareToolsWithToolSearch(
     const name = isFunctionName(tool);
     return Boolean(name) && !visibleNames.has(name as string);
   });
+
+  // 动态晋升：高频调用的 deferred 工具自动晋升为 core（省 2 轮 LLM round trip）
+  const promotedNames = getPromotableCoreTools();
+  if (promotedNames.length > 0) {
+    const promotedToolSchemas: ChatCompletionTool[] = [];
+    const remainingDeferred: ChatCompletionTool[] = [];
+    for (const tool of deferred) {
+      const name = isFunctionName(tool);
+      if (name && promotedNames.includes(name)) {
+        promotedToolSchemas.push(tool);
+        visibleNames.add(name);
+      } else {
+        remainingDeferred.push(tool);
+      }
+    }
+    if (promotedToolSchemas.length > 0) {
+      const allVisible = uniqueTools([...visibleTools, ...promotedToolSchemas]);
+      visibleTools.length = 0;
+      visibleTools.push(...allVisible);
+      // 替换 deferred 为剩余未晋升部分
+      deferred.length = 0;
+      deferred.push(...remainingDeferred);
+    }
+  }
   // 复用全量 BM25 索引（跨轮缓存），每轮只过滤 entries
   const fullCatalog = getOrCreateFullCatalog(searchableTools);
   const deferredCatalog = deriveDeferredCatalog(fullCatalog, visibleNames);

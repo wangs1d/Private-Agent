@@ -79,7 +79,6 @@ export const STATE_MACHINE_TOOL_ALLOWLIST: string[] = [
   "http.request",
   "info.inspect_webpage",
   "info.navigate_site",
-  "weather.get_local",
   // 服务端 Playwright 无头浏览器
   "agent_browser.open",
   "agent_browser.click",

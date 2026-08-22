@@ -2,7 +2,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { buildMasterSubAgentDelegateChatTools, SUBAGENT_ASK_PEER_TOOL } from "../agent/master-subagent-delegate-tools.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
-import { isMasterAgentBuiltinTool } from "../tools/tool-search/core-tool-library.js";
+import { isMasterAgentBuiltinTool } from "../gateway/index.js";
 import type { SubAgentCapability } from "./master-agent-types.js";
 import { filterLifeCapabilityTools } from "./subagent-life-tool-filter.js";
 import {
@@ -10,7 +10,7 @@ import {
   SUBAGENT_SHARED_REGISTRY_TOOLS,
 } from "./subagent-chat-tool-allowlists.js";
 
-export { isMasterAgentBuiltinTool } from "../tools/tool-search/core-tool-library.js";
+export { isMasterAgentBuiltinTool } from "../gateway/index.js";
 export { SUBAGENT_SHARED_REGISTRY_TOOLS };
 
 export function filterChatToolsByRegistryNames(

@@ -34,6 +34,7 @@ import {
 } from "./retrieval/hybrid-retrieval.js";
 import { AdaptiveTopPSelector } from "./top-p-selector/top-p-selector.js";
 import { ToolRerankingPipeline } from "./reranking/reranking-pipeline.js";
+import { sharedHistoryStore } from "./retrieval/history-score.js";
 
 export type AdaptiveDeferredToolSearchMatch = DeferredToolSearchMatch & {
   resource_type: ResourceType;
@@ -106,7 +107,7 @@ const DEFAULT_CONTEXT_HASH = "tool-search-bridge";
 const ROUTE_CACHE_TTL_MS = 20_000;
 const MAX_INDEX_CACHE = 32;
 const intentRouter = new IntentRouter({ redisUrl: undefined });
-const retrievalEngine = new HybridRetrievalEngine();
+const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
 const topPSelector = new AdaptiveTopPSelector();
 const rerankingPipeline = new ToolRerankingPipeline();
 const indexCache = new Map<string, { index: AdaptiveCatalogIndex; createdAt: number }>();
@@ -136,41 +137,48 @@ export async function adaptiveSearchDeferredTools(
       ? parsedIntent.sub_intents
       : [parsedIntent];
 
-  const selectedById = new Map<string, HybridRetrievedResource>();
+  // 复意图并行：子意图路由（同步）+ 检索（异步并行）
+  const intentRoutes = subIntents.map((intent) => {
+    const route = routeAdaptiveCatalog(index, intent, options?.tenantId);
+    return { intent, route };
+  });
+
   const routingParts: Array<{
     intent: ParsedIntent;
     route: RouteResult;
     topP: number;
   }> = [];
+  const selectedById = new Map<string, HybridRetrievedResource>();
 
-  for (const intent of subIntents) {
-    const route = routeAdaptiveCatalog(index, intent, options?.tenantId);
-    if (route.resources.length === 0) {
-      routingParts.push({ intent, route, topP: topPForIntent(intent) });
-      continue;
-    }
-
-    const retrieved = await retrievalEngine.search({
-      query: intent.intent || trimmedQuery,
-      candidates: route.resources,
-      queryVector: options?.queryVector,
-      limit: Math.min(100, Math.max(25, limit * 8)),
-    });
-    const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
-    const topP = topPSelector.select(
-      boostedRetrieved.map((item) => ({ item, score: item.final_score })),
-      { confidence: intent.confidence },
-    );
-    routingParts.push({ intent, route, topP: topP.top_p });
-
-    for (const selected of topP.selected) {
-      const id = selected.item.resource.level1.resource_id;
-      const prev = selectedById.get(id);
-      if (!prev || selected.item.final_score > prev.final_score) {
-        selectedById.set(id, selected.item);
+  await Promise.all(
+    intentRoutes.map(async ({ intent, route }) => {
+      if (route.resources.length === 0) {
+        routingParts.push({ intent, route, topP: topPForIntent(intent) });
+        return;
       }
-    }
-  }
+
+      const retrieved = await retrievalEngine.search({
+        query: intent.intent || trimmedQuery,
+        candidates: route.resources,
+        queryVector: options?.queryVector,
+        limit: Math.min(100, Math.max(25, limit * 8)),
+      });
+      const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
+      const topP = topPSelector.select(
+        boostedRetrieved.map((item) => ({ item, score: item.final_score })),
+        { confidence: intent.confidence },
+      );
+      routingParts.push({ intent, route, topP: topP.top_p });
+
+      for (const selected of topP.selected) {
+        const id = selected.item.resource.level1.resource_id;
+        const prev = selectedById.get(id);
+        if (!prev || selected.item.final_score > prev.final_score) {
+          selectedById.set(id, selected.item);
+        }
+      }
+    }),
+  );
 
   if (selectedById.size === 0) return [];
 

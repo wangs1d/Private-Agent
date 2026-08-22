@@ -219,6 +219,13 @@ function computeScore(
   };
 }
 
+/**
+ * 全局共享的 HistoryScoreStore 单例。
+ * 确保 handlers.ts 记录 feedback 与 HybridRetrievalEngine 消费的是同一份数据。
+ * 注意：必须在 class 声明之后实例化（class 存在 TDZ，前置会 ReferenceError）。
+ */
+export const sharedHistoryStore = new HistoryScoreStore();
+
 function parseSample(raw: string): HistoryFeedbackSample | null {
   try {
     const obj = JSON.parse(raw) as HistoryFeedbackSample;
