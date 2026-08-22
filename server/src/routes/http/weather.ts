@@ -7,6 +7,18 @@ import {
 } from "../../schemas/api.js";
 import type { HttpRouteDeps } from "./types.js";
 
+// ── Open-Meteo 短 TTL 缓存 ──────────────────────────────────────────
+// Open-Meteo 每小时预报，短时间内重复拉取无意义。对相同坐标（保留 3 位小数）
+// 的请求做进程级内存缓存，避免每次主界面刷新都走一次外网并耗时数秒，
+// 也让 Agent / 天气工具复用同一份结果。
+type WeatherCacheEntry = { brief: unknown; expiresAt: number };
+const weatherCache = new Map<string, WeatherCacheEntry>();
+const WEATHER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
+
+function weatherCacheKey(latitude: number, longitude: number): string {
+  return `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+}
+
 export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
   const { weatherService, weatherPrefsService, scheduleTaskService } = deps;
 
@@ -43,6 +55,12 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const { latitude, longitude, timezone, label } = parsed.data;
+    const key = weatherCacheKey(latitude, longitude);
+    const now = Date.now();
+    const hit = weatherCache.get(key);
+    if (hit && hit.expiresAt > now) {
+      return { ok: true, brief: hit.brief, cached: true };
+    }
     try {
       const brief = await weatherService.getBrief(
         latitude,
@@ -50,6 +68,12 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
         timezone?.trim() || "Asia/Shanghai",
         label?.trim() || undefined,
       );
+      // 缓存成功结果；只维护最近若干个条目，防止 Map 无限增长。
+      weatherCache.set(key, { brief, expiresAt: now + WEATHER_CACHE_TTL_MS });
+      if (weatherCache.size > 64) {
+        const oldest = weatherCache.keys().next().value;
+        if (oldest != null) weatherCache.delete(oldest);
+      }
       return { ok: true, brief };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

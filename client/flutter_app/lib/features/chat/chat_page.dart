@@ -230,6 +230,7 @@ class _ChatPageState extends State<ChatPage>
   bool _hasSavedPosition = false; // 是否有已保存的有效位置可供恢复
   // （应用重启后自然重置为 false → 滚到底部）
   bool _isRestoringPosition = false; // 恢复锁：正在恢复位置时阻止所有自动滚动
+  bool _isAutoScrolling = false; // 自动滚动动画进行中标记：防止流式更新打断滚动导致底部抖动
 
   /// 图片预览锚点：点击图片打开右侧面板前记录当前滚动位置，
   /// 打开后列表可能因重新布局跳到最底部，用锚点把视图拉回图片所在位置。
@@ -274,32 +275,30 @@ class _ChatPageState extends State<ChatPage>
   /// 滚动到底部的通用方法（reverse 模式下 bottom = pixels 0）
   void _scrollToBottom({bool instant = false}) {
     if (!_scrollController.hasClients) return;
+    // 已有自动滚动动画进行中时直接忽略，避免流式回答期间反复调用
+    // 打断上一次动画、从当前位置重新启动，造成底部气泡上下抖动的现象。
+    if (_isAutoScrolling) return;
     // reverse 模式下，pixels=0 就是列表底部（最新消息处）
     // instant 时直接 jumpTo(0)，非 instant 用短动画过渡
     if (instant) {
       _scrollController.jumpTo(0);
       return;
     }
+    if (_scrollController.position.pixels <= 1) return; // 已贴近底部，无需滚动
+    _isAutoScrolling = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      if (_scrollController.position.pixels > 1) {
-        _scrollController.animateTo(
-          0,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-        // 桌面端保险：再延迟一帧确认滚动到位
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_scrollController.hasClients) return;
-          if (_scrollController.position.pixels > 1) {
-            _scrollController.animateTo(
-              0,
-              duration: const Duration(milliseconds: 150),
-              curve: Curves.easeOut,
-            );
-          }
-        });
+      if (!_scrollController.hasClients ||
+          _scrollController.position.pixels <= 1) {
+        _isAutoScrolling = false;
+        return;
       }
+      _scrollController
+          .animateTo(
+            0,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          )
+          .whenComplete(() => _isAutoScrolling = false);
     });
   }
 
@@ -945,12 +944,14 @@ class _ChatPageState extends State<ChatPage>
                     ),
                   )
                 else
-                  ListView.builder(
-                    controller: _scrollController,
-                    reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
-                    padding: _listPadding,
-                    cacheExtent: 500,
-                    itemCount: itemCount,
+                  // 使整块消息文字支持鼠标框选复制
+                  SelectionArea(
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
+                      padding: _listPadding,
+                      cacheExtent: 500,
+                      itemCount: itemCount,
                     itemBuilder: (BuildContext context, int index) {
                       // reverse 模式下 index 0 = 视觉底部（最新消息）
                       final Map<String, dynamic> messageGroup =
@@ -983,6 +984,7 @@ class _ChatPageState extends State<ChatPage>
                         ),
                       );
                     },
+                    ),
                   ),
               ],
             ),

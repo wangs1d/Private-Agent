@@ -49,3 +49,15 @@ flutter:
   uses-material-design: true
   assets:
     - assets/agent_avatars/
+    - assets/fonts/
+  fonts:
+    - family: MiSans
+      fonts:
+        - asset: assets/fonts/MiSans-Regular.otf
+          weight: 400
+        - asset: assets/fonts/MiSans-Medium.otf
+          weight: 500
+        - asset: assets/fonts/MiSans-Semibold.otf
+          weight: 600
+        - asset: assets/fonts/MiSans-Bold.otf
+          weight: 700

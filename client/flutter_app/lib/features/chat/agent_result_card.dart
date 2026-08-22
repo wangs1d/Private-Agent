@@ -838,7 +838,15 @@ class _MediaCard extends StatelessWidget {
     final List<({String url, String caption, String side})> photos =
         <({String url, String caption, String side})>[];
     final List<String> allPhotoUrls = <String>[];
-    final List<Widget> videos = <Widget>[];
+    // 收集视频（缩略图可空：后端已保证不把播放页/搜索页 URL 当图下发；
+    // 无缩略图时前端显示视频占位图标，点击仍可打开播放页）
+    final List<
+        ({
+          String title,
+          String? source,
+          String? thumbnailUrl,
+          String? openUrl,
+        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = extractUrlFromText(text);
@@ -861,15 +869,12 @@ class _MediaCard extends StatelessWidget {
                   .hasMatch(openUrl));
       if (previewUrl == null && openUrl == null) continue;
       if (isVideo) {
-        videos.add(
-          _VideoResultTile(
-            title: "相关视频",
-            source: it.source,
-            thumbnailUrl: previewUrl,
-            openUrl: openUrl,
-            cs: cs,
-          ),
-        );
+        videos.add((
+          title: text.isNotEmpty && text != "图片" ? text : (it.source ?? "相关视频"),
+          source: it.source,
+          thumbnailUrl: previewUrl,
+          openUrl: openUrl,
+        ));
       } else {
         final String resolved = _resolveMediaUrl(previewUrl!);
         // 同一张图不重复展示：地址已在集内则跳过（服务端已去重，此处双保险）
@@ -1043,12 +1048,7 @@ class _MediaCard extends StatelessWidget {
             ),
           if (videos.isNotEmpty) ...<Widget>[
             if (photos.isNotEmpty) const SizedBox(height: 6),
-            ...videos.map((Widget v) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: v,
-              );
-            }),
+            _VideoPanel(videos: videos, cs: cs),
           ],
         ],
       ),
@@ -1196,10 +1196,17 @@ class MediaInlineRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    // 解析每张图的可用地址 + caption + 侧标签
+    // 解析每张图的可用地址 + caption + 侧标签；视频单独收集走视频面板
     final List<({String url, String caption, String side})> photos =
         <({String url, String caption, String side})>[];
     final List<String> allUrls = <String>[];
+    final List<
+        ({
+          String title,
+          String? source,
+          String? thumbnailUrl,
+          String? openUrl,
+        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl})>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = extractUrlFromText(text);
@@ -1209,24 +1216,56 @@ class MediaInlineRow extends StatelessWidget {
         it.url,
         textUrl,
       ]);
-      if (previewUrl == null) continue;
-      final String resolved = _resolveMediaUrl(previewUrl);
-      if (allUrls.contains(resolved)) continue;
-      photos.add((
-        url: resolved,
-        caption: _photoCaption(text),
-        side: (it.side ?? "").trim(),
-      ));
-      allUrls.add(resolved);
+      final String? openUrl = _firstNonEmpty(<String?>[
+        it.pageUrl,
+        it.url,
+        it.mediaUrl,
+        textUrl,
+      ]);
+      final bool isVideo = (it.mediaType ?? "").toLowerCase() == "video" ||
+          (openUrl != null &&
+              RegExp(r"(youtube\.com|youtu\.be|bilibili\.com|/video/)",
+                      caseSensitive: false)
+                  .hasMatch(openUrl));
+      if (previewUrl == null && openUrl == null) continue;
+      if (isVideo) {
+        videos.add((
+          title: text.isNotEmpty && text != "图片" ? text : (it.source ?? "相关视频"),
+          source: it.source,
+          thumbnailUrl: previewUrl,
+          openUrl: openUrl,
+        ));
+      } else {
+        final String resolved = _resolveMediaUrl(previewUrl!);
+        if (allUrls.contains(resolved)) continue;
+        photos.add((
+          url: resolved,
+          caption: _photoCaption(text),
+          side: (it.side ?? "").trim(),
+        ));
+        allUrls.add(resolved);
+      }
     }
-    if (photos.isEmpty) return const SizedBox.shrink();
-    // 交给自适应画廊：单张→Hero 大图；2 张→2 列方图；≥3 张→3 列小图。
-    // 预览图池沿用全部照片，画廊内可「上一张 / 下一张」切换。
-    return MediaGallery(
-      urls: allUrls,
-      captions: photos.map((p) => p.caption).toList(),
-      previewGallery: allUrls,
-      cs: cs,
+    if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
+    // 照片走自适应画廊：单张→Hero 大图；2 张→2 列方图；≥3 张→3 列小图。
+    // 视频走与照片同风格的面板：单条→16:9 大图带播放角标；多条→2 列网格。
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (photos.isNotEmpty)
+          MediaGallery(
+            urls: allUrls,
+            captions: photos.map((p) => p.caption).toList(),
+            previewGallery: allUrls,
+            cs: cs,
+          ),
+        if (videos.isNotEmpty)
+          Padding(
+            padding: EdgeInsets.only(top: photos.isNotEmpty ? 6 : 0),
+            child: _VideoPanel(videos: videos, cs: cs),
+          ),
+      ],
     );
   }
 
@@ -1249,147 +1288,132 @@ class MediaInlineRow extends StatelessWidget {
   }
 }
 
-class _VideoResultTile extends StatelessWidget {
-  const _VideoResultTile({
-    required this.title,
-    required this.source,
-    required this.thumbnailUrl,
-    required this.openUrl,
-    required this.cs,
-  });
+/// 视频面板：与照片画廊同风格的网格/大图展示（替代旧的「左图右文字」列表行）。
+///
+/// 设计：视频结果也走「同照片一样面板展示」的产品诉求——
+///   - 单条：全宽 16:9 hero 大图，带播放角标；
+///   - 多条：2 列方图网格（与照片网格一致），每格带播放角标 + 标题。
+/// 缩略图为空时显示视频占位图标（后端已保证不下发播放页/搜索页 URL 当图），
+/// 点击整卡打开播放页。
+class _VideoPanel extends StatelessWidget {
+  const _VideoPanel({required this.videos, required this.cs});
 
-  final String title;
-  final String? source;
-  final String? thumbnailUrl;
-  final String? openUrl;
+  final List<
+      ({String title, String? source, String? thumbnailUrl, String? openUrl})>
+      videos;
   final ColorScheme cs;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: openUrl == null ? null : () => _launchUrl(openUrl!),
+    if (videos.isEmpty) return const SizedBox.shrink();
+    if (videos.length == 1) {
+      return _VideoTile(video: videos.first, cs: cs, hero: true);
+    }
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        const double spacing = 6;
+        const int cols = 2;
+        final double cell =
+            (constraints.maxWidth - spacing * (cols - 1)) / cols;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: 8,
+          children: <Widget>[
+            for (final v in videos)
+              SizedBox(
+                width: cell,
+                child: _VideoTile(video: v, cs: cs),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _VideoTile extends StatelessWidget {
+  const _VideoTile({required this.video, required this.cs, this.hero = false});
+
+  final ({String title, String? source, String? thumbnailUrl, String? openUrl})
+      video;
+  final ColorScheme cs;
+  final bool hero;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget thumb = ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Stack(
-            alignment: Alignment.center,
-            children: <Widget>[
-              if (thumbnailUrl != null)
-                _NetworkPreview(
-                  url: thumbnailUrl!,
-                  icon: Icons.video_file_outlined,
-                  cs: cs,
-                )
-              else
-                _PreviewPlaceholder(icon: Icons.video_file_outlined, cs: cs),
+      child: AspectRatio(
+        aspectRatio: hero ? 16 / 9 : 1,
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            if (video.thumbnailUrl != null &&
+                video.thumbnailUrl!.trim().isNotEmpty)
+              MediaThumbnail(
+                url: _resolveMediaUrl(video.thumbnailUrl!),
+                cs: cs,
+                errorIcon: Icons.video_file_outlined,
+                borderRadius: 0,
+              )
+            else
               Container(
-                width: 30,
-                height: 30,
+                color: cs.surfaceContainerHighest,
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.video_file_outlined,
+                  color: cs.onSurfaceVariant,
+                  size: 30,
+                ),
+              ),
+            Center(
+              child: Container(
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.48),
+                  color: Colors.black.withValues(alpha: 0.45),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 22),
+                child: const Icon(
+                  Icons.play_arrow_rounded,
+                  color: Colors.white,
+                  size: 26,
+                ),
               ),
-            ],
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: openUrl == null ? cs.onSurface : cs.primary,
-                      height: 1.35,
-                    ),
-                  ),
-                  if (source != null && source!.trim().isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 3),
-                      child: Text(
-                        source!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: cs.onSurfaceVariant,
-                          height: 1.3,
-                        ),
-                      ),
-                    ),
-                ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final Widget body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        thumb,
+        if (video.title.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              video.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: cs.onSurface,
+                height: 1.3,
               ),
             ),
           ),
-        ],
-      ),
+      ],
     );
-  }
-}
 
-/// 网络媒体缩略图：加载失败时降级为灰色占位图标。
-class _NetworkPreview extends StatelessWidget {
-  const _NetworkPreview({required this.url, required this.icon, required this.cs});
-
-  final String url;
-  final IconData icon;
-  final ColorScheme cs;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
+    if (video.openUrl == null) return body;
+    return InkWell(
+      onTap: () => _launchUrl(video.openUrl!),
       borderRadius: BorderRadius.circular(8),
-      child: Image.network(
-        _resolveMediaUrl(url),
-        width: 112,
-        height: 78,
-        fit: BoxFit.cover,
-        errorBuilder: (BuildContext context, Object error, StackTrace? st) {
-          return _PreviewPlaceholder(icon: icon, cs: cs);
-        },
-        loadingBuilder: (BuildContext context, Widget child,
-            ImageChunkEvent? loadingProgress) {
-          if (loadingProgress == null) return child;
-          return Container(
-            width: 112,
-            height: 78,
-            color: cs.surfaceContainerHighest,
-            alignment: Alignment.center,
-            child: const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _PreviewPlaceholder extends StatelessWidget {
-  const _PreviewPlaceholder({required this.icon, required this.cs});
-
-  final IconData icon;
-  final ColorScheme cs;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 112,
-      height: 78,
-      color: cs.surfaceContainerHighest,
-      alignment: Alignment.center,
-      child: Icon(icon, color: cs.onSurfaceVariant),
+      child: body,
     );
   }
 }

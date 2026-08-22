@@ -1199,8 +1199,13 @@ function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
     if (!isLikelyVideoUrl(pageUrl) && !/\/videos\//i.test(pageUrl)) continue;
     const chunk = m[0];
     const title = decodeHtmlEntities(stripTags(m[3] ?? "")).slice(0, 160) || "视频结果";
-    const imgMatch = chunk.match(/<img\b[^>]*\bsrc=(["'])(.*?)\1/i);
-    const thumbnailUrl = imgMatch ? absolutizeBingUrl(decodeHtmlEntities(imgMatch[2] ?? "")) : undefined;
+    // 优先取结果块自带的 data-thumbnail（真实缩略图地址），其次 <img> 的 src；
+    // 两者都没有则该视频无真实缩略图（前端显示视频占位图标，不再把播放页/
+    // 搜索页 URL 当作图片地址下发，避免前端 Image.network 加载 HTML 破图）。
+    const dataThumb = chunk.match(/data-thumbnail=(["'])([^"']+)\1/i);
+    const imgSrc = chunk.match(/<img\b[^>]*\bsrc=(["'])([^"']+)\1/i);
+    const rawThumb = dataThumb?.[2] ?? imgSrc?.[2];
+    const thumbnailUrl = rawThumb ? absolutizeBingUrl(decodeHtmlEntities(rawThumb)) : undefined;
     const key = pageUrl.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);

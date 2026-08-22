@@ -237,7 +237,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 保存打开面板前的 side 模式右面板总占位（含 8px 拖拽条），
   /// 关闭时恢复——避免工具面板打开期间被 split 模式改写后回不去。
-  double _previousRightPanelWidth = kRightSidePanelWidth + _kSidePanelDividerWidth;
+  double _previousRightPanelWidth =
+      kRightSidePanelWidth + _kSidePanelDividerWidth;
 
   /// split 模式下右面板的实际宽度，由 [NextbotChatLayout] 通过
   /// [NextbotChatLayout.onRightPanelWidthChanged] 同步过来，
@@ -425,7 +426,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」
     _writeCrashLog("[LIFECYCLE]", "state=$state", StackTrace.current);
     if (state == AppLifecycleState.detached) {
-      _writeCrashLog("[EXIT]", "app detached (window closed)", StackTrace.current);
+      _writeCrashLog(
+          "[EXIT]", "app detached (window closed)", StackTrace.current);
     }
   }
 
@@ -500,10 +502,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 继续运行
     }
 
-    final List<ChatMessage> cachedMessages = (await _store
-            .listMessages(ApiConfig.effectiveActorId))
-        .map(_sanitizeLoadedChatMessage)
-        .toList();
+    final List<ChatMessage> cachedMessages =
+        (await _store.listMessages(ApiConfig.effectiveActorId))
+            .map(_sanitizeLoadedChatMessage)
+            .toList();
 
     // 修复历史遗留的重复消息：旧版本 saveMessage 按 messageId 直接 append，
     // 同一 messageId 可能在本地 store 里被存成多条（流式入列表 + done 兜底 +
@@ -978,7 +980,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // 进度百分比（可选）：长工具心跳推进进度条
           final dynamic rawPercent = payload["percent"];
           final int? percent = rawPercent is num ? rawPercent.toInt() : null;
-          _updateAgentStatusLine(line, ensureProcessing: true, percent: percent);
+          _updateAgentStatusLine(line,
+              ensureProcessing: true, percent: percent);
         }
         if (type == "chat.assistant_interim") {
           // 已废弃：被动聊天路径已改为通过 chat.assistant_chunk + phase="interim"
@@ -1056,8 +1059,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             // 与主回复分开，形成「垫词 → 互动 → 结果」的多步回复效果。
             // interim 是 LLM 自主生成的完整句子（非 token 流），无需 sanitizer
             // 缓冲，也不应污染 _pendingAssistantChunkText 兜底文本。
-            final String interimSeq = payload["sequence"]?.toString() ??
-                "${_interimChunkSeq++}";
+            final String interimSeq =
+                payload["sequence"]?.toString() ?? "${_interimChunkSeq++}";
             final String interimMessageId =
                 "interim-$activeTraceId-$interimSeq";
             final String interimChunk = payload["chunk"]?.toString() ?? "";
@@ -1100,12 +1103,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               mediaTraceId != activeTraceId) {
             return;
           }
-          final List<Map<String, dynamic>>? newCards =
-              payload["cards"] is List
-                  ? (payload["cards"] as List)
-                      .whereType<Map<String, dynamic>>()
-                      .toList()
-                  : null;
+          final List<Map<String, dynamic>>? newCards = payload["cards"] is List
+              ? (payload["cards"] as List)
+                  .whereType<Map<String, dynamic>>()
+                  .toList()
+              : null;
           if (newCards == null || newCards.isEmpty) return;
           final int? existingIdx = _messageIndexById(mediaMessageId ?? "");
           if (existingIdx == null || existingIdx >= _messages.length) return;
@@ -1181,8 +1183,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               ((doneTraceId != null && doneTraceId.isNotEmpty)
                   ? "assistant-$doneTraceId"
                   : "assistant-final");
-          final String finalText =
-              _sanitizeAssistantVisibleText(payload["finalText"]?.toString() ?? "");
+          final String finalText = _sanitizeAssistantVisibleText(
+              payload["finalText"]?.toString() ?? "");
           final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
           final String resolvedText = finalText.trim().isNotEmpty
               ? finalText
@@ -1196,7 +1198,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // 从 done 文本中剥掉该前缀，避免"垫词气泡 + done 全文"双份重复。
           final String dedupResolvedText =
               _stripRedundantInterimPrefix(resolvedText, traceKey);
-          if (dedupResolvedText.isEmpty && _hasInterimBubbleForTrace(traceKey)) {
+          if (dedupResolvedText.isEmpty &&
+              _hasInterimBubbleForTrace(traceKey)) {
             // 回复已完整作为垫词气泡呈现，无需再创建正文气泡（避免整体重复一次）
             _clearAgentProcessingState(done: true);
             return;
@@ -1227,12 +1230,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             setState(() {
               final ChatMessage previous = _messages[idx];
               final String currentText = previous.text;
-              final String nextText =
-                  _shouldReplaceAssistantTextOnDone(currentText, dedupResolvedText)
-                      ? dedupResolvedText
-                      : currentText;
+              final String nextText = _shouldReplaceAssistantTextOnDone(
+                      currentText, dedupResolvedText)
+                  ? dedupResolvedText
+                  : currentText;
               final String? existingPlayUrl = previous.playUrl;
-              final List<Map<String, dynamic>>? existingMediaCards = previous.mediaCards;
+              final List<Map<String, dynamic>>? existingMediaCards =
+                  previous.mediaCards;
               // 优先使用 WS 下发的 mediaCards，若没有则保留已有（流式阶段已注入的）
               final List<Map<String, dynamic>>? resolvedMediaCards =
                   mediaCardsFromPayload ?? existingMediaCards;
@@ -1931,8 +1935,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _hasInterimBubbleForTrace(String traceId) {
     if (traceId.isEmpty) return false;
     final String prefix = "interim-$traceId-";
-    return _messages.any((m) =>
-        m.role == "assistant" && m.messageId.startsWith(prefix));
+    return _messages
+        .any((m) => m.role == "assistant" && m.messageId.startsWith(prefix));
   }
 
   /// 同轮去重（保底）：若 [text] 的开头已作为本轮垫词(interim)气泡呈现过，
@@ -3528,7 +3532,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _invokeVoiceOrb() async {
     if (!Platform.isWindows) {
       // 非桌面平台：保留原入口但不执行（后续可扩展 macOS/Linux）
-      debugPrint("[VoiceOrb] external PySide6 orb is only supported on Windows");
+      debugPrint(
+          "[VoiceOrb] external PySide6 orb is only supported on Windows");
       return;
     }
     if (_voiceOrbProcess != null && _voiceOrbReady) {
@@ -3547,10 +3552,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           "[VoiceOrb] voice-orb-py not found (cwd: ${Directory.current.path})");
       return;
     }
-    final String script =
-        "${orbDir.path}${Platform.pathSeparator}main.py";
+    final String script = "${orbDir.path}${Platform.pathSeparator}main.py";
 
-    final Map<String, String> env = Map<String, String>.from(Platform.environment);
+    final Map<String, String> env =
+        Map<String, String>.from(Platform.environment);
     env["PAI_WS_URL"] = ApiConfig.wsUrl;
     env["PAI_HTTP_BASE"] = ApiConfig.httpBase;
     env["PAI_SESSION_ID"] = ApiConfig.sessionId;
@@ -4367,12 +4372,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// AppBar 右侧需要让出的宽度。
-  /// - side 模式：右面板宽度(由 NextbotChatLayout 同步) — 此宽度是总占位
-  ///   (含 8px 拖拽条)，与 Positioned 的 width 一致。
+  /// - side 模式：右面板实际渲染宽度 [_rightPanelWidth] - 8px 拖拽条，让
+  ///   AppBar 顶栏与右侧天气面板贴平，避免两者之间露出缺口。
   /// - split 模式：[NextbotChatLayout] 同步过来的动态宽度 [_rightPanelWidth]
   /// - 其他：0
   double _appBarRightInset() {
-    if (_shouldShowRightSidePanel()) return _rightPanelWidth;
+    if (_shouldShowRightSidePanel()) {
+      return _rightPanelWidth - _kSidePanelDividerWidth;
+    }
     if (_rightPanel != null && _tabIndex == 0) return _rightPanelWidth;
     return 0;
   }
@@ -4473,8 +4480,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Widget _buildSplitPanelHeader(ColorScheme cs) {
     // 标题栏背景跟随主题主色（黑色主题下为纯黑），
     // 因此文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
-    final bool isDark =
-        Theme.of(context).brightness == Brightness.dark;
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
     final Color fg = isDark ? Colors.white : cs.onSurface;
     final Color fgMuted = isDark ? Colors.white : cs.onSurfaceVariant;
     return Container(
@@ -4490,16 +4496,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ),
       child: Row(
         children: <Widget>[
-          Icon(Icons.drag_indicator, size: 16, color: fgMuted),
-          const SizedBox(width: 8),
-          Text(
-            _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: fg,
+          // 图片预览面板：隐藏左侧拖拽图标与「图片预览」标题，仅保留关闭按钮
+          if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
+            Icon(Icons.drag_indicator, size: 16, color: fgMuted),
+            const SizedBox(width: 8),
+            Text(
+              _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: fg,
+              ),
             ),
-          ),
+          ],
           const Spacer(),
           IconButton(
             icon: Icon(Icons.close, size: 18, color: fgMuted),
@@ -4550,10 +4559,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         final ImagePreviewSnapshot? item = _imagePreview;
         if (item == null) return const SizedBox.shrink();
         // 同一绿泡内的全部照片做「上/下一张」切换；仅单张时退化为单张预览
-        final List<String> urls = (item.gallery != null &&
-                item.gallery!.isNotEmpty)
-            ? item.gallery!
-            : <String>[item.url];
+        final List<String> urls =
+            (item.gallery != null && item.gallery!.isNotEmpty)
+                ? item.gallery!
+                : <String>[item.url];
         return ImagePreviewPanel(
           urls: urls,
           index: item.index < urls.length ? item.index : 0,

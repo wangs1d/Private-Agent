@@ -2,6 +2,9 @@ import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 
+/// 图片预览面板左侧预留的空白侧栏宽度（仅占位留白，为后续侧边栏内容预留位置）。
+const double kImagePreviewSidebarWidth = 56.0;
+
 /// 右侧双栏的「图片预览」面板：
 /// 在右侧分栏中展示单张网络图片原图，并展示标题/来源。
 ///
@@ -51,18 +54,15 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
     super.didUpdateWidget(oldWidget);
     // 从聊天列表重新打开其它照片时，同步到新的位置；
     // 面板内部的上一张/下一张切换不会重建 widget，因此不会触发这里。
-    if (widget.urls != oldWidget.urls ||
-        widget.index != oldWidget.index) {
+    if (widget.urls != oldWidget.urls || widget.index != oldWidget.index) {
       final List<String> oldShown = oldWidget.urls;
       final int oldIdx = oldWidget.urls.isEmpty
           ? 0
           : oldWidget.index.clamp(0, oldWidget.urls.length - 1);
       bool sameTarget = false;
       if (oldShown.isNotEmpty && widget.urls.isNotEmpty) {
-        final String oldUrl =
-            oldShown[oldIdx.clamp(0, oldShown.length - 1)];
-        sameTarget =
-            oldUrl == widget.urls[_clamp(widget.index)];
+        final String oldUrl = oldShown[oldIdx.clamp(0, oldShown.length - 1)];
+        sameTarget = oldUrl == widget.urls[_clamp(widget.index)];
       }
       if (!sameTarget) {
         _index = _clamp(widget.index);
@@ -84,7 +84,8 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
   }
 
   String get _currentUrl {
-    if (widget.urls.isEmpty) return widget.urls.isNotEmpty ? widget.urls.first : "";
+    if (widget.urls.isEmpty)
+      return widget.urls.isNotEmpty ? widget.urls.first : "";
     return widget.urls[_index];
   }
 
@@ -99,112 +100,141 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    return Column(
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        // 原图主体：等比放大展示，居中，可双击缩小/放大；两侧居中叠加切换按钮
-        Expanded(
-          child: Stack(
-            fit: StackFit.expand,
-            children: <Widget>[
-              Container(
-                color: cs.surfaceContainerLow,
-                alignment: Alignment.center,
-                child: InteractiveViewer(
-                  key: ValueKey<String>(_currentUrl),
-                  minScale: 0.6,
-                  maxScale: 6,
-                  child: Center(
-                    child: Image.network(
-                      _resolvedUrl,
-                      fit: BoxFit.contain,
-                      errorBuilder: (BuildContext context, Object error,
-                          StackTrace? stackTrace) {
-                        return _fallback(cs);
-                      },
-                      loadingBuilder: (BuildContext context, Widget child,
-                          ImageChunkEvent? progress) {
-                        if (progress == null) return child;
-                        return const SizedBox(
-                          width: 36,
-                          height: 36,
-                          child: CircularProgressIndicator(strokeWidth: 2.5),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
-              if (_canNav)
-                Positioned(
-                  left: 8,
-                  top: 0,
-                  bottom: 0,
-                  child: Center(child: _buildNavButton(icon: Icons.chevron_left, onTap: _prev, cs: cs)),
-                ),
-              if (_canNav)
-                Positioned(
-                  right: 8,
-                  top: 0,
-                  bottom: 0,
-                  child: Center(child: _buildNavButton(icon: Icons.chevron_right, onTap: _next, cs: cs)),
-                ),
-            ],
-          ),
-        ),
-        // 底部信息条：标题 + 来源 + 计数
+        // 左侧预留空白侧栏：仅占位留白，为后续侧边栏内容预留位置
         Container(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+          width: kImagePreviewSidebarWidth,
           decoration: BoxDecoration(
             color: cs.surface,
             border: Border(
-              top: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
+              right: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
             ),
           ),
+        ),
+        Expanded(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      widget.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w700,
-                        color: cs.onSurface,
-                        height: 1.4,
+              // 原图主体：等比放大展示，居中，可双击缩小/放大；两侧居中叠加切换按钮
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    Container(
+                      color: cs.surfaceContainerLow,
+                      alignment: Alignment.center,
+                      child: InteractiveViewer(
+                        key: ValueKey<String>(_currentUrl),
+                        minScale: 0.6,
+                        maxScale: 6,
+                        child: Center(
+                          child: Image.network(
+                            _resolvedUrl,
+                            fit: BoxFit.contain,
+                            errorBuilder: (BuildContext context, Object error,
+                                StackTrace? stackTrace) {
+                              return _fallback(cs);
+                            },
+                            loadingBuilder: (BuildContext context, Widget child,
+                                ImageChunkEvent? progress) {
+                              if (progress == null) return child;
+                              return const SizedBox(
+                                width: 36,
+                                height: 36,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2.5),
+                              );
+                            },
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                  if (_count > 1)
-                    Text(
-                      "${_index + 1} / $_count",
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
-                        color: cs.onSurfaceVariant,
+                    if (_canNav)
+                      Positioned(
+                        left: 8,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                            child: _buildNavButton(
+                                icon: Icons.chevron_left,
+                                onTap: _prev,
+                                cs: cs)),
                       ),
-                    ),
-                ],
+                    if (_canNav)
+                      Positioned(
+                        right: 8,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                            child: _buildNavButton(
+                                icon: Icons.chevron_right,
+                                onTap: _next,
+                                cs: cs)),
+                      ),
+                  ],
+                ),
               ),
-              if (widget.source != null && widget.source!.trim().isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    widget.source!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: cs.onSurfaceVariant,
-                      height: 1.3,
-                    ),
+              // 底部信息条：标题 + 来源 + 计数
+              Container(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                decoration: BoxDecoration(
+                  color: cs.surface,
+                  border: Border(
+                    top: BorderSide(color: cs.outline.withValues(alpha: 0.2)),
                   ),
                 ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: Text(
+                            widget.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                              color: cs.onSurface,
+                              height: 1.4,
+                            ),
+                          ),
+                        ),
+                        if (_count > 1)
+                          Text(
+                            "${_index + 1} / $_count",
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontFeatures: const <FontFeature>[
+                                FontFeature.tabularFigures()
+                              ],
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ),
+                    if (widget.source != null &&
+                        widget.source!.trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          widget.source!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: cs.onSurfaceVariant,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
