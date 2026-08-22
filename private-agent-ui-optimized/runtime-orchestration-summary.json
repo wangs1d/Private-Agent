@@ -85,11 +85,66 @@
         "sourceHtmlSrc": "pages/chat-main.html",
         "derivationType": "comparison-from-source",
         "inPlaceEditAllowed": false
+      },
+      {
+        "nodeId": "page-phone-call-ui-bw",
+        "packetType": "ExistingEditPagePacket",
+        "pageRuntimeGuide": "intent-workflows/intent-project-mutation/existing-edit-page-runtime.md",
+        "dispatchContract": "intent-workflows/intent-project-mutation/existing-edit-dispatch-contract.md",
+        "allowedWritePaths": [
+          "pages/phone-call-ui-bw.html"
+        ],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "forbiddenWriteRoots": [
+            "*.design",
+            "runtime-orchestration-summary.json",
+            "validation-report.json",
+            "finish-readiness-report.json"
+          ]
+        },
+        "sourcePageId": "page-phone-call-ui",
+        "sourceHtmlSrc": "pages/phone-call-ui.html",
+        "derivationType": "comparison-page",
+        "inPlaceEditAllowed": false
+      },
+      {
+        "nodeId": "page-phone-call-ui",
+        "packetType": "ExistingEditPagePacket",
+        "pageRuntimeGuide": "intent-workflows/intent-project-mutation/existing-edit-page-runtime.md",
+        "dispatchContract": "intent-workflows/intent-project-mutation/existing-edit-dispatch-contract.md",
+        "allowedWritePaths": [
+          "pages/phone-call-ui.html"
+        ],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "forbiddenWriteRoots": [
+            "*.design",
+            "runtime-orchestration-summary.json",
+            "validation-report.json",
+            "finish-readiness-report.json"
+          ]
+        },
+        "sourcePageId": "page-phone-call-ui",
+        "sourceHtmlSrc": "pages/phone-call-ui.html",
+        "derivationType": "in-place-edit",
+        "inPlaceEditAllowed": true
       }
     ],
     "expectedDispatches": [
       {
         "nodeId": "page-chat-main-threejs-weather",
+        "pageId": "page-chat-main-threejs-weather",
+        "targetPageId": "page-chat-main-threejs-weather",
+        "htmlSrc": "pages/chat-main-threejs-weather.html",
         "packetType": "ExistingEditPagePacket",
         "status": "completed",
         "changedFiles": [
@@ -102,7 +157,50 @@
           "previewCalls": 0,
           "validationScriptCalls": 0,
           "helperScriptWrites": 0
-        }
+        },
+        "recordedAt": "2026-07-28T10:34:25.308Z",
+        "source": "main-agent-runtime-trace"
+      },
+      {
+        "nodeId": "page-phone-call-ui-bw",
+        "pageId": "page-phone-call-ui-bw",
+        "targetPageId": "page-phone-call-ui-bw",
+        "htmlSrc": "pages/phone-call-ui-bw.html",
+        "packetType": "ExistingEditPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/phone-call-ui-bw.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "phone-call-ui-bw-dispatch-001",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-08-22T08:15:11.941Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-phone-call-ui",
+        "pageId": "page-phone-call-ui",
+        "targetPageId": "page-phone-call-ui",
+        "packetType": "ExistingEditPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/phone-call-ui.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "phone-call-ui-inplace-dispatch-001",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-08-22T08:34:36.890Z",
+        "source": "record-dispatch-completion.mjs"
       }
     ],
     "styleContinuityAnchors": {
@@ -327,7 +425,8 @@
         "revalidationReportHash": null,
         "revalidationSuccess": null
       }
-    ]
+    ],
+    "mainAgentPostDispatchMutations": []
   },
   "designSource": {
     "operatingMode": "free-explore",
