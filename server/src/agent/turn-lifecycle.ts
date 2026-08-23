@@ -172,7 +172,7 @@ export class TurnLifecycle {
     this.deps.evolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
 
-    getMemoryManagerService()?.onTurnCompleted(input.actorId, input.userText, full);
+    getMemoryManagerService()?.onTurnCompleted(input.actorId, input.sessionId, input.userText, full);
 
     return this.applyQuota(input);
   }

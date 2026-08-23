@@ -13,6 +13,7 @@ import {
   getAgenticMemoryEmbeddingModel,
   getAgenticMemoryLlmModel,
   resolveEmbeddingApiKey,
+  resolveOpenAiApiKey,
 } from "./env.js";
 
 /** 构建 Mem0 OSS 配置；缺少可用 Embedding 端点（如仅配置了 DeepSeek 等纯聊天渠道）时返回 null。 */
@@ -34,6 +35,9 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
   mkdirSync(rootDir, { recursive: true });
 
   const embeddingModel = getAgenticMemoryEmbeddingModel();
+  // 向量库需要维度（本地向量库/维度校验），但 embeddingDims 不能传给 mem0ai 的
+  // OpenAIEmbedder：它会作为 OpenAI 的 `dimensions` 请求参数，而 BAAI/bge-m3 等模型
+  // 不支持该参数，导致 siliconflow 返回 400（code 20015）。
   const embeddingDims = getAgenticMemoryEmbeddingDims(embeddingModel);
   const llmModel = getAgenticMemoryLlmModel();
 
@@ -45,13 +49,13 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
         apiKey,
         model: embeddingModel,
         baseURL: embeddingBaseUrl,
-        embeddingDims,
       },
     },
     llm: {
       provider: "openai",
       config: {
-        apiKey,
+        // LLM 必须用对话 key（OPENAI_API_KEY，如 DeepSeek）；embedding key 打 DeepSeek 端点会 401
+        apiKey: resolveOpenAiApiKey() ?? undefined,
         model: llmModel,
         baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
       },

@@ -114,11 +114,18 @@ export class AgentTaskOrchestrator {
   private readonly audit?: AuditService;
   /** 正在运行的任务 taskId 集合(防并发) */
   private readonly runningTasks = new Set<string>();
+  /** 主动性模块（可选注入）：任务完成时触发主动恭喜 */
+  private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
 
   constructor(deps: AgentTaskOrchestratorDeps) {
     this.provider = deps.provider;
     this.toolRegistry = deps.toolRegistry;
     this.audit = deps.audit;
+  }
+
+  /** 注入主动性模块（任务完成 → 主动恭喜的触发接线） */
+  setProactivityHub(hub: import("../proactivity/proactivity-hub.js").ProactivityHub | null): void {
+    this.proactivityHub = hub;
   }
 
   /**
@@ -689,6 +696,15 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
     options: RunTaskOptions,
     data?: Record<string, unknown>,
   ): void {
+    // 任务完成 → 通知主动性模块（主动恭喜触发源；此前只走 WS 回调，
+    // 主动决策层看不到任务完成事件，恭喜链路是断的）
+    if (type === "task_completed" && this.proactivityHub) {
+      try {
+        this.proactivityHub.onAgentTaskCompleted(task.actorId, task.goal);
+      } catch (err) {
+        console.log(`[agent-task-orchestrator] 主动恭喜触发失败（忽略）: ${err}`);
+      }
+    }
     options.onProgress?.({
       taskId: task.id,
       actorId: task.actorId,

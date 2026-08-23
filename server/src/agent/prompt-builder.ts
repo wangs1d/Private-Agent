@@ -647,6 +647,7 @@ export function buildLayeredSystemPrompt(
     !memory?.relationshipGuidance &&
     !memory?.dailyDigest &&
     !memory?.userProfileSummary &&
+    !memory?.memoryInventory &&
     !memory?.relationshipMemory &&
     !memory?.lifeThemeMemory &&
     !memory?.dreamMemory &&
@@ -657,7 +658,8 @@ export function buildLayeredSystemPrompt(
     !memory?.workingMemorySummary &&
     !memory?.recentConversationHistory &&
     !memory?.semanticIntent &&
-    !memory?.fastVerdictInstruction
+    !memory?.fastVerdictInstruction &&
+    !memory?.proactiveAdvice
   ) {
     return baseSystem.trim();
   }
@@ -677,6 +679,8 @@ export function buildLayeredSystemPrompt(
   if (memory.worldCaps) parts.push(`【Agent World】\n${memory.worldCaps}`);
   if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
+  // 元认知目录：让 LLM 知道"自己记住了什么"（规模/时间分布/高频主题）
+  if (memory.memoryInventory) parts.push(`【记忆目录】\n${memory.memoryInventory}`);
   if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
   if (memory.workingMemorySummary) parts.push(`【当前工作记忆】\n${memory.workingMemorySummary}`);
   if (memory.recentConversationHistory)
@@ -702,6 +706,8 @@ export function buildLayeredSystemPrompt(
   // 语义意图理解：让 LLM 明确知道用户本轮真实意图，避免答非所问
   if (memory.semanticIntent) parts.push(`【意图理解】\n${memory.semanticIntent}`);
   if (memory.skillIndex) parts.push(memory.skillIndex);
+  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
+  if (memory.proactiveAdvice) parts.push(memory.proactiveAdvice);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
   parts.push(baseSystem.trim());
@@ -736,6 +742,7 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.relationshipGuidance ||
       memory?.dailyDigest ||
       memory?.userProfileSummary ||
+      memory?.memoryInventory ||
       memory?.relationshipMemory ||
       memory?.lifeThemeMemory ||
       memory?.dreamMemory ||
@@ -748,7 +755,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.workingMemorySummary ||
       memory?.recentConversationHistory ||
       memory?.semanticIntent ||
-      memory?.fastVerdictInstruction
+      memory?.fastVerdictInstruction ||
+      memory?.proactiveAdvice
   );
 }
 
@@ -770,6 +778,8 @@ export function buildLayeredSystemPromptSections(
   if (m.agentCaps) stablePrefix.push(`【你的 Agent 专属能力】\n${m.agentCaps}`);
   if (m.worldCaps) stablePrefix.push(`【Agent World】\n${m.worldCaps}`);
   if (m.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${m.userProfileSummary}`);
+  // 元认知目录：变化慢（60s TTL），放稳定前缀
+  if (m.memoryInventory) stablePrefix.push(`【记忆目录】\n${m.memoryInventory}`);
   if (m.relationshipMemory) stablePrefix.push(m.relationshipMemory);
   if (m.lifeThemeMemory) stablePrefix.push(m.lifeThemeMemory);
   if (m.dreamMemory) stablePrefix.push(m.dreamMemory);
@@ -802,6 +812,8 @@ export function buildLayeredSystemPromptSections(
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.skillIndex) dynamicContext.push(m.skillIndex);
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
+  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
+  if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (m.fastVerdictInstruction) dynamicContext.push(m.fastVerdictInstruction);
 

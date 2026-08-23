@@ -223,6 +223,8 @@ export class AgentCore {
   private brainCenter: BrainCenter | null = null;
   /** 语义意图解析器（LLM 理解用户真实意图；可选注入） */
   private semanticIntentParser: SemanticIntentParser | null = null;
+  /** 主动性模块（ProactivityHub）：对话轮观察等主动触发的统一入口 */
+  private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
@@ -507,6 +509,15 @@ export class AgentCore {
     };
   }
 
+  /** 注入主动性模块（对话内主动触发等能力的统一入口） */
+  setProactivityHub(hub: import("../proactivity/proactivity-hub.js").ProactivityHub | null): void {
+    this.proactivityHub = hub;
+    // advise 模式接线：hub 的建议队列接入 prompt 注入（【Agent 主动建议】块）
+    this.promptContextBuilder.setAdviceStore(hub ? hub.getAdvices() : null);
+    // 复杂任务完成恭喜接线：编排器持有同一 hub
+    this.agentTaskOrchestrator?.setProactivityHub(hub);
+  }
+
   private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
     const normalized = text.trim();
     const timeHint = buildTimeWindowRecallHint(normalized);
@@ -667,6 +678,11 @@ export class AgentCore {
           }`,
         );
       }
+
+      // 对话内主动钩子：交给主动性模块（ProactivityHub）统一检测与路由，
+      // fire-and-forget 不阻塞主回复。命中强线索时经频控后发布信号 →
+      // 现有主动决策闭环（ProactionCortex）接管。
+      this.proactivityHub?.observeConversationTurn(actorId, text, cognitiveRecentConversationHistory);
 
       // Parallel-Live：规则判为 fast 高置信但可并行深挖时，fast 先主答，complex 后台并行补充
       const useParallelLive = this.shouldUseParallelLiveComplex(text, fastRoute, opts);

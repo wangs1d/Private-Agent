@@ -26,6 +26,7 @@ import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
+import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import {
   buildFollowUpAnchorPrompt,
   isAmbiguousFollowUpMessage,
@@ -40,6 +41,7 @@ import type {
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
+import type { AdviceStore } from "../proactivity/advice-store.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
@@ -373,6 +375,18 @@ export class PromptContextBuilder {
 
   private personalityProvider: ((actorId: string) => PersonalityCore | null) | null = null;
 
+  /** ProactivityHub advise 队列（setProactivityHub 时由 agent-core 注入） */
+  private adviceStore: AdviceStore | null = null;
+
+  /**
+   * 注入 ProactivityHub 的建议队列（advise 模式载体）。
+   * 每轮 assembleMemory 时 drain 出未消费建议注入【Agent 主动建议】块，
+   * 由 agent 在正常回复中自然带出；无建议时零开销。
+   */
+  setAdviceStore(store: AdviceStore | null): void {
+    this.adviceStore = store;
+  }
+
   /**
    * 注入人格内核拉取器（通常来自 BrainCenter.getPersonalityCore → MemoryCortex.getPersonalityCore）。
    * assembleMemory 会调用它获取结构化人格内核，格式化后填入 memory.personalityCore，
@@ -549,6 +563,11 @@ export class PromptContextBuilder {
         : digestService.getRelevantPromptDigest(input.actorId, userText);
     const userProfileFromManager =
       memoryManager?.getProfileForPrompt(input.actorId) ?? undefined;
+    // P2-1 元认知：同步读记忆目录缓存（cognize 阶段刷新，60s TTL；未命中为空串跳过注入）
+    const memoryInventorySummary = compactPromptBlock(
+      getGlobalMemoryInventory()?.getCachedSummary(input.actorId) ?? "",
+      220,
+    );
     const memoryContinuity =
       memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined;
     const relationshipMemory =
@@ -657,6 +676,25 @@ export class PromptContextBuilder {
       }
     }
 
+    // ProactivityHub advise 模式：drain 出排队中的主动建议，注入【Agent 主动建议】块。
+    // 取出即清空（无建议时零开销）；由 agent 在本轮回复中自然带出，不打断用户。
+    let proactiveAdviceBlock: string | undefined;
+    if (this.adviceStore) {
+      try {
+        const advices = this.adviceStore.drain(input.actorId);
+        if (advices.length > 0) {
+          const lines = advices.map((a) => `- ${a.text}`);
+          proactiveAdviceBlock = [
+            `【Agent 主动建议】`,
+            `（以下是你在后台主动观察到的建议，不要逐条宣读，选合适的时机用一两句自然带出即可）`,
+            ...lines,
+          ].join("\n");
+        }
+      } catch (err) {
+        console.log(`[PromptContextBuilder] advice 注入失败（忽略）: ${err}`);
+      }
+    }
+
     const seenMemory = new Set<string>();
     const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
     const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
@@ -716,6 +754,7 @@ export class PromptContextBuilder {
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
+      ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
       // 此前 assembleMemory 只用 input.userLocation 提取时区给 currentTime,从未把它
@@ -851,6 +890,7 @@ export class PromptContextBuilder {
       Boolean(memory.relationshipGuidance) ||
       Boolean(memory.toneGuidance) ||
       Boolean(memory.userProfileSummary) ||
+      Boolean(memory.memoryInventory) ||
       Boolean(memory.memoryContinuity) ||
       Boolean(memory.relationshipMemory) ||
       Boolean(memory.lifeThemeMemory) ||

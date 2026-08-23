@@ -47,8 +47,8 @@ export class NarrativeHybridRetrievalService {
     this.fuseTop = envPositiveInt("AGENT_NARRATIVE_FUSE_TOP", 8);
     this.embeddingModel = process.env.AGENT_EMBEDDING_MODEL?.trim() || "text-embedding-3-small";
     this.embeddingKey =
-      process.env.OPENAI_API_KEY?.trim() ||
       process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
+      process.env.OPENAI_API_KEY?.trim() ||
       null;
   }
 

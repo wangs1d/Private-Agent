@@ -9,7 +9,7 @@ import type {
   MemoryItem,
   MemoryItemKind,
 } from "../../brain/types.js";
-import type { MemoryFeedbackOutcome } from "../../brain/memory-feedback-store.js";
+import type { MemoryFeedbackOutcome } from "../../brain/memory-strength-model.js";
 
 /**
  * 从请求体构建 Brain 信号输入（用于 /brain/proactive/test）。

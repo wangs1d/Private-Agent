@@ -41,9 +41,9 @@ import {
   type MemoryArbitratorConfig,
 } from "./memory-arbitrator.js";
 import {
-  MemoryFeedbackStore,
+  MemoryStrengthModel,
   type MemoryFeedbackInput,
-} from "./memory-feedback-store.js";
+} from "./memory-strength-model.js";
 import type { MemoryAssociationSynthesizer } from "./memory-cognitive/memory-association-synthesizer.js";
 import {
   SessionEpitomeStore,
@@ -51,7 +51,11 @@ import {
   type SessionEpitomeSnapshot,
 } from "../services/session-epitome.js";
 import { RecallAnchorStore, type RecallAnchorRecord } from "../services/recall-anchor-store.js";
-import { MemoryReinforcementStore } from "./memory-reinforcement-store.js";
+import { MemoryInventory } from "./memory-inventory.js";
+import type {
+  ImplicitFeedbackSignal,
+  RecalledMemoryLite,
+} from "./memory-implicit-feedback.js";
 
 // ============================================================
 // 子系统外观接口（最小化，只声明 MemoryCortex 用到的方法）
@@ -144,6 +148,12 @@ interface HumanLikeMemoryLike {
    * 修复 userFeedbackScore 固定为 1 的问题（此前无任何更新路径）。
    */
   applyUserFeedback?(actorId: string, summary: string, score: number): void;
+  /**
+   * 可选：按记忆内容反查图节点 ID（联想种子语义化用）。
+   * recall 结果的 MemoryRecallItem 不携带 nodeId，联想扩散 spread 需要真实
+   * 节点 ID 才能在图上命中；此方法按 content 前缀/包含匹配返回节点 ID。
+   */
+  findNodeIdsByContent?(actorId: string, contents: string[], maxPerContent?: number): string[];
 }
 
 // 叙事记忆睡眠巩固报告外观
@@ -418,17 +428,26 @@ export class MemoryCortex {
   // ---- 记忆相关性在线反馈回灌（Phase：相关性优化）----
   // 用户反馈（显式 API / 隐式纠正信号）按语义指纹持久化到 KV，
   // 召回时对命中条目做加成/惩罚调整排序。懒加载：首次 recall/record 时初始化。
-  private feedbackStore: MemoryFeedbackStore | null = null;
+  private strengthModel: MemoryStrengthModel | null = null;
   // ---- 跨会话开放环路（Phase：连续性优化）----
   // 每轮 cognize 提取 open loops / 承诺 / 偏好，KV 持久化，
   // 新会话开场注入【上一会话待办】，解决"换会话跳转/失忆"。
   private epitomeStore: SessionEpitomeStore | null = null;
+  // ---- open loop 完成监听（ProactivityHub 接线）----
+  // 用户待办被检测为已完成时回调（actorId, loopText），
+  // 由装配层注入 hub.onUserLoopCompleted 触发"待办完成恭喜"。
+  private epitomeLoopClosedListener: ((actorId: string, loopText: string) => void) | null = null;
   // ---- 引用锚点诊断（Phase：连续性优化）----
   // 记录每轮 recall 注入的记忆锚点（KV 持久化），配合反馈/开放环路提供连续性诊断。
   private anchorStore: RecallAnchorStore | null = null;
-  // ---- 间隔重复强化（P5：类人巩固）----
-  // 被反复召回命中的记忆按指纹计数，打分时小幅加成（模拟"常用记忆衰减更慢"）。
-  private reinforcementStore: MemoryReinforcementStore | null = null;
+  // ---- 记忆目录（元认知：知道自己记住了什么）----
+  // 从 kvSummary 统计记忆规模/时间分布/高频主题，生成自然语言目录摘要。
+  private memoryInventory: MemoryInventory | null = null;
+  // ---- 写入时在线关联分析的节流（actorId → 上次触发时间）----
+  // remember 每轮都调用，但 LLM 关联分析按最小间隔节流（默认 45s），
+  // 高频写入（如感官事件流）不会打爆 LLM。
+  private readonly writeAssociationAt = new Map<string, number>();
+  private writeAssociationMinIntervalMs = MemoryCortex.loadWriteAssociationIntervalMs();
 
   // ---- 子系统注册 ----------------------------------------------------------
 
@@ -525,6 +544,115 @@ export class MemoryCortex {
   registerAssociationSynthesizer(svc: MemoryAssociationSynthesizer | null): void {
     this.associationSynthesizer = svc;
     console.log("[MemoryCortex] 已注册 MemoryAssociationSynthesizer（联想合成器）");
+  }
+
+  /** 注册记忆目录（元认知层：统计 + 自然语言目录摘要）。 */
+  registerMemoryInventory(inventory: MemoryInventory | null): void {
+    this.memoryInventory = inventory;
+    console.log("[MemoryCortex] 已注册 MemoryInventory（记忆目录）");
+  }
+
+  /** 写入时在线关联分析的最小间隔（节流，防止高频写入打爆 LLM）。 */
+  private static loadWriteAssociationIntervalMs(): number {
+    const raw = process.env.MEMORY_WRITE_ASSOCIATION_INTERVAL_MS;
+    const n = raw ? parseFloat(raw) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : 45_000;
+  }
+
+  /**
+   * 隐式反馈批量回灌入口：把 ImplicitFeedbackDetector 检测出的信号
+   * 翻译成 MemoryFeedbackInput 交给反馈存储（KV 持久化 + humanLike 节点回灌）。
+   * 弱负反馈用减半 delta（相对纠正信号更温和）。
+   */
+  recordImplicitFeedbacks(actorId: string, signals: ImplicitFeedbackSignal[]): void {
+    if (!signals || signals.length === 0) return;
+    for (const sig of signals.slice(0, 5)) {
+      this.recordMemoryFeedback({
+        actorId,
+        content: sig.memoryContent,
+        outcome: sig.signal === "positive" ? "relevant" : "irrelevant",
+        // weak_negative 折半强度：-0.25 → -0.125
+        ...(sig.signal === "weak_negative" ? { delta: -0.125 } : {}),
+      });
+    }
+  }
+
+  /** 记忆目录摘要（元认知 prompt 注入用；无记忆时返回空串）。 */
+  async getInventorySummary(actorId: string): Promise<string> {
+    if (!this.memoryInventory) return "";
+    try {
+      const report = await this.memoryInventory.getReport(actorId);
+      return report.summary;
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * 写入时在线关联分析（P0-2）：新记忆落库后，立即检索与之相关的旧记忆，
+   * 让 LLM 合成"新记忆 × 旧记忆"的跨时空关联，高置信结论回灌 humanLike 图。
+   *
+   * 与 recall 时的 triggerAssociationSynthesis 互补：
+   *   - recall 时：对"本次召回的多条记忆"做关联（消费侧联想）；
+   *   - 写入时：对"新记忆与历史记忆"做关联（生产侧联想）——像人一样
+   *     "刚发生的事让我想起了以前的事"，新知识即时挂接到已有知识网。
+   *
+   * 节流：按 actor 最小间隔（默认 45s，env MEMORY_WRITE_ASSOCIATION_INTERVAL_MS），
+   * 高频写入（感官事件流）不会打爆 LLM；失败静默降级。
+   */
+  private triggerWriteTimeAssociation(actorId: string, newContent: string): void {
+    const synthesizer = this.associationSynthesizer;
+    if (!synthesizer || !synthesizer.enabled) return;
+    const content = newContent.trim();
+    if (content.length < 8) return; // 太短的写入（如纯符号）不值得分析
+
+    const last = this.writeAssociationAt.get(actorId) ?? 0;
+    const now = Date.now();
+    if (now - last < this.writeAssociationMinIntervalMs) return;
+    this.writeAssociationAt.set(actorId, now);
+
+    void (async () => {
+      try {
+        // 检索与新记忆相关的旧记忆（优先 agentic 混合检索）
+        let relatedText: string | null = null;
+        if (this.agentic) {
+          relatedText = await this.safeRecall(() =>
+            this.agentic!.retrieval.buildRecall(actorId, content),
+          );
+        }
+        const relatedItems = this.parseRecallTextToItems(relatedText ?? "", "agentic")
+          .slice(0, 4)
+          .map((it) => ({ content: it.content, score: it.score }));
+        if (relatedItems.length < 1) return; // 没有旧记忆可关联（冷启动）
+
+        // 新记忆放在首位参与合成
+        const inputs = [{ content, score: 1 }, ...relatedItems];
+        const associations = await synthesizer.synthesize(inputs, content);
+        if (associations.length === 0 || !this.humanLike) return;
+        for (const assoc of associations) {
+          try {
+            void this.humanLike.ingest(actorId, assoc.conclusion, "write_association", {
+              domain: "semantic",
+              metadata: {
+                associated: true,
+                associationConfidence: assoc.confidence,
+                associationReasoning: assoc.reasoning,
+                writeTimeAssociation: true,
+              },
+            }).catch(() => {
+              /* 回灌失败静默降级 */
+            });
+          } catch {
+            /* 单条回灌失败不影响其余 */
+          }
+        }
+        console.log(
+          `[MemoryCortex] 写入时关联分析完成: ${actorId} (新记忆关联 ${relatedItems.length} 条旧记忆, 合成 ${associations.length} 条联想)`,
+        );
+      } catch {
+        /* 写入时关联失败静默降级 */
+      }
+    })();
   }
 
   /** 从召回记忆中异步合成跨记忆关联，高置信结论回灌 humanLike 记忆图。 */
@@ -824,6 +952,10 @@ export class MemoryCortex {
         } catch {
           /* fire 失败不影响主流程 */
         }
+        // 写入时在线关联分析（P0-2）：新记忆 × 相关旧记忆 → LLM 合成联想
+        this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        // 记忆目录缓存失效（新增记忆后目录统计需要刷新）
+        this.memoryInventory?.invalidate(actorId);
         return;
       } catch (err) {
         console.log(`[MemoryCortex] narrative.ingest 失败: ${err}`);
@@ -846,6 +978,9 @@ export class MemoryCortex {
         } catch {
           /* fire 失败不影响主流程 */
         }
+        // 写入时在线关联分析（同 narrative 路径）
+        this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        this.memoryInventory?.invalidate(actorId);
       } catch (err) {
         console.log(`[MemoryCortex] agentic.ingest.ingestText 失败: ${err}`);
       }
@@ -870,6 +1005,12 @@ export class MemoryCortex {
       sessionId?: string;
       /** 是否包含 sensitivity=restricted 的受限记忆，默认 false（restricted 不进 prompt 路径） */
       includeRestricted?: boolean;
+      /**
+       * 多意图并行召回（P2-2）：RecallQueryExpander 拆分出的子 query 列表
+       * （含主 query）。默认路径会并行检索各通道，合并去重后统一仲裁，
+       * 避免"A 和 B 对比"类 query 的 embedding 被两个主题平均稀释。
+       */
+      subQueries?: string[];
     },
   ): Promise<MemoryRecallResult> {
     const domain = opts?.domain;
@@ -1046,11 +1187,37 @@ export class MemoryCortex {
     let mergedItems: MemoryRecallItem[] = [];
 
     // 1) agentic 主通道：解析回多条带 score 的 item（避免被拍平为单条、score 丢失）
+    //    P2-2 多意图并行召回：subQueries 存在时对每个子 query 并行检索，
+    //    各自解析后合并去重（后续统一仲裁），单一 query 时保持原逻辑。
     let agenticItems: MemoryRecallItem[] = [];
     if (this.agentic) {
-      const text =
-        (await this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, query))) ?? "";
-      agenticItems = this.parseRecallTextToItems(text, "agentic");
+      const subQueries = (opts?.subQueries ?? [query])
+        .map((q) => (q ?? "").trim())
+        .filter((q) => q.length > 0 && q !== query)
+        .slice(0, 3);
+      const allQueries = [query, ...subQueries];
+      if (allQueries.length === 1) {
+        const text =
+          (await this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, query))) ?? "";
+        agenticItems = this.parseRecallTextToItems(text, "agentic");
+      } else {
+        const texts = await Promise.all(
+          allQueries.map((q) =>
+            this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, q)),
+          ),
+        );
+        const merged = new Map<string, MemoryRecallItem>();
+        for (const text of texts) {
+          for (const item of this.parseRecallTextToItems(text ?? "", "agentic")) {
+            const key = item.content.trim().slice(0, 64);
+            const existing = merged.get(key);
+            if (!existing || (item.score ?? 0) > (existing.score ?? 0)) {
+              merged.set(key, item);
+            }
+          }
+        }
+        agenticItems = [...merged.values()];
+      }
     }
 
     // 2) 短路判断：仅在显式禁用仲裁时保留旧低延迟路径。
@@ -1172,14 +1339,29 @@ export class MemoryCortex {
     };
 
     // ---- 记忆认知架构升级（Phase 3）：recall 命中后异步触发联想扩散（不阻塞主召回）----
-    // MemoryRecallItem 不携带 nodeId 字段，用 content 长度兜底构造 seed id。
-    // spread 内部按 seed id 匹配图节点，未命中时返回空结果（无副作用）。
+    // P0-3 语义化联想种子：旧实现用 `seed-${idx}-${content.length}` 假 ID，
+    // spread 在图上永远匹配不到真实节点（联想扩散形同虚设）。
+    // 现在优先用 humanLike.findNodeIdsByContent 按 content 反查真实节点 ID；
+    // 反查不可用时保留旧兜底（无副作用空扩散）。
     // recall 命中 downranked/cold 节点的再唤醒由 BrainStem 45s 心跳 →
     // forgettingController.continuousScore 统一处理（见 Phase 4 装配）。
     if (this.associativeGraph && finalResult.items.length > 0) {
-      const seedNodeIds = finalResult.items
-        .slice(0, 3)
-        .map((it, idx) => `seed-${idx}-${it.content.length}`);
+      let seedNodeIds: string[] = [];
+      try {
+        seedNodeIds =
+          this.humanLike?.findNodeIdsByContent?.(
+            actorId,
+            finalResult.items.slice(0, 3).map((it) => it.content),
+            1,
+          ) ?? [];
+      } catch {
+        seedNodeIds = [];
+      }
+      if (seedNodeIds.length === 0) {
+        seedNodeIds = finalResult.items
+          .slice(0, 3)
+          .map((it, idx) => `seed-${idx}-${it.content.length}`);
+      }
       void this.associativeGraph
         .spread(actorId, seedNodeIds)
         .then((spreadResult) => {
@@ -1222,15 +1404,15 @@ export class MemoryCortex {
 
   /**
    * 记忆相关性在线反馈回灌入口：
-   * - 反馈按语义指纹记录到 MemoryFeedbackStore（KV 持久化）；
+   * - 反馈按语义指纹记录到统一记忆强度模型（KV 持久化）；
    * - 同时回灌到 humanLike 记忆节点（更新 userFeedbackScore，修复该字段此前固定为 1 的问题）；
    * - 后续 recall 会对命中条目做加成/惩罚调整排序（见 applyFeedbackBoost）。
    */
   recordMemoryFeedback(input: MemoryFeedbackInput): void {
-    const store = this.getFeedbackStore();
-    if (!store) return;
+    const strengthModel = this.getStrengthModel();
+    if (!strengthModel) return;
     try {
-      const record = store.record(input);
+      const record = strengthModel.recordFeedback(input);
       // 回灌 humanLike 节点：负反馈时把 userFeedbackScore 同步到反馈分数
       if (record && this.humanLike?.applyUserFeedback) {
         try {
@@ -1244,23 +1426,38 @@ export class MemoryCortex {
     }
   }
 
-  /** 读取某 actor 的反馈快照（调试/统计用）。 */
+  /** 读取某 actor 的反馈/强度快照（调试/统计用）。 */
   getMemoryFeedbackSnapshot(actorId: string): unknown {
-    return this.getFeedbackStore()?.snapshot(actorId) ?? null;
+    return this.getStrengthModel()?.snapshot(actorId) ?? null;
   }
 
   /**
    * 跨会话开放环路：记录本轮对话提取的 open loops / 承诺 / 偏好。
    * 由 brain-center 在 cognize 记忆写入阶段异步调用；KV 未注册时静默降级。
+   * 本轮检测到 open loop 完成时，逐条回调 epitomeLoopClosedListener（fire-and-forget）。
    */
   updateSessionEpitome(actorId: string, entries: SessionEpitomeEntries, turnText?: string): void {
     const store = this.getEpitomeStore();
     if (!store) return;
     try {
-      store.record(actorId, entries, { turnText });
+      const { closedLoops } = store.record(actorId, entries, { turnText });
+      if (closedLoops.length > 0 && this.epitomeLoopClosedListener) {
+        for (const loopText of closedLoops) {
+          try {
+            this.epitomeLoopClosedListener(actorId, loopText);
+          } catch {
+            /* 监听器失败不影响主链路 */
+          }
+        }
+      }
     } catch (err) {
       console.log(`[MemoryCortex] updateSessionEpitome failed: ${err}`);
     }
+  }
+
+  /** 注入 open loop 完成监听器（装配层：hub.onUserLoopCompleted）。 */
+  setEpitomeLoopClosedListener(listener: ((actorId: string, loopText: string) => void) | null): void {
+    this.epitomeLoopClosedListener = listener;
   }
 
   /** 读取某 actor 的跨会话开放环路快照（供新会话开场注入）。 */
@@ -1328,13 +1525,13 @@ export class MemoryCortex {
   }
 
   /**
-   * 懒初始化反馈存储：绑定 kvSummary 作为持久化适配器。
-   * kvSummary 未注册时返回 null（反馈记录与调整静默降级，不影响主链路）。
+   * 懒初始化统一记忆强度模型：绑定 kvSummary 作为持久化适配器。
+   * kvSummary 未注册时返回 null（反馈记录、命中强化与召回加成静默降级，不影响主链路）。
    */
-  private getFeedbackStore(): MemoryFeedbackStore | null {
+  private getStrengthModel(): MemoryStrengthModel | null {
     if (!this.kvSummary) return null;
-    if (!this.feedbackStore) {
-      this.feedbackStore = new MemoryFeedbackStore({
+    if (!this.strengthModel) {
+      this.strengthModel = new MemoryStrengthModel({
         getSnapshot: (actorId, keys) => {
           try {
             return this.kvSummary!.getSnapshot(actorId, keys);
@@ -1351,45 +1548,20 @@ export class MemoryCortex {
         },
       });
     }
-    return this.feedbackStore;
-  }
-
-  /** 懒初始化强化计数存储（P5：间隔重复强化），绑定 kvSummary 持久化。 */
-  private getReinforcementStore(): MemoryReinforcementStore | null {
-    if (!this.kvSummary) return null;
-    if (!this.reinforcementStore) {
-      this.reinforcementStore = new MemoryReinforcementStore({
-        getSnapshot: (actorId, keys) => {
-          try {
-            return this.kvSummary!.getSnapshot(actorId, keys);
-          } catch {
-            return null;
-          }
-        },
-        setEntry: (actorId, key, value) => {
-          try {
-            this.kvSummary!.setEntry?.(actorId, key, value);
-          } catch {
-            /* 持久化失败静默降级 */
-          }
-        },
-      });
-    }
-    return this.reinforcementStore;
+    return this.strengthModel;
   }
 
   /**
-   * 反馈加成/惩罚 + 间隔重复强化：对召回条目按语义指纹查反馈分与命中计数，
-   * 调整 score 并重新排序。无调整返回原数组（保持顺序），避免无谓开销。
+   * 统一记忆强度加成：对召回条目按语义指纹查"反馈分 + 命中 + 遗忘曲线"
+   * 算出的总倍率，调整 score 并重新排序。无调整返回原数组（保持顺序），避免无谓开销。
    */
   private applyFeedbackBoost(
     items: MemoryRecallItem[],
     actorId: string,
   ): MemoryRecallItem[] {
     if (items.length === 0) return items;
-    const feedbackStore = this.getFeedbackStore();
-    const reinforcementStore = this.getReinforcementStore();
-    if (!feedbackStore && !reinforcementStore) return items;
+    const strengthModel = this.getStrengthModel();
+    if (!strengthModel) return items;
 
     const boosted: Array<{ item: MemoryRecallItem; adjusted: number; changed: boolean }> = [];
     for (const item of items) {
@@ -1398,14 +1570,13 @@ export class MemoryCortex {
         boosted.push({ item, adjusted: item.score ?? 0.5, changed: false });
         continue;
       }
-      const multiplier = (feedbackStore?.getMultiplier(actorId, content) ?? 1) *
-        (reinforcementStore?.getBoost(actorId, content) ?? 1);
-      if (multiplier === 1) {
+      const factor = strengthModel.boostFactor(actorId, content);
+      if (factor === 1) {
         boosted.push({ item, adjusted: item.score ?? 0.5, changed: false });
         continue;
       }
       const original = item.score ?? 0.5;
-      const adjusted = clamp01(original * multiplier);
+      const adjusted = clamp01(original * factor);
       boosted.push({
         item: { ...item, score: adjusted },
         adjusted,
@@ -1520,11 +1691,12 @@ export class MemoryCortex {
       /* 锚点记录失败静默降级 */
     }
 
-    // 间隔重复强化（P5）：本轮注入的条目按指纹累加计数，高频命中记忆后续召回小幅加成
+    // 间隔重复强化（统一强度模型）：本轮注入的条目按指纹累加计数并刷新遗忘时间，
+    // 高频命中记忆后续召回加成更大、衰减更慢（越常用记得越久）。
     try {
-      const reinforcementStore = this.getReinforcementStore();
-      if (reinforcementStore && finalItems.length > 0) {
-        reinforcementStore.record(
+      const strengthModel = this.getStrengthModel();
+      if (strengthModel && finalItems.length > 0) {
+        strengthModel.recordHits(
           actorId,
           finalItems.map((it) => (typeof it.content === "string" ? it.content : "")),
         );
@@ -1743,13 +1915,15 @@ export class MemoryCortex {
   async recallWithProvenance(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
   ): Promise<MemoryRecallResult> {
     if (this.metacognitionBridge) {
       try {
+        // subQueries 透传给 bridge → bridge 内部透传给 recall（多意图并行召回）
         return await this.metacognitionBridge.recallWithProvenance(actorId, query, {
           domain: opts?.domain,
           limit: opts?.limit,
+          subQueries: opts?.subQueries,
         });
       } catch (err) {
         console.log(`[MemoryCortex] recallWithProvenance 失败（降级到 recall）: ${err}`);

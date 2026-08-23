@@ -130,7 +130,7 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { setExtraIntentRules } from "../tools/tool-search/intent-metadata.js";
-import { setCapabilityModuleDeps, getBuiltinAgentChatTools, setDynamicFastLaneSkillTools, invalidateBuiltinToolsCache } from "../external-model/openai-compatible-tool-loop.js";
+import { setCapabilityModuleDeps, getBuiltinAgentChatTools, setDynamicFastLaneSkillTools, invalidateBuiltinToolsCache, selectRelevantTools } from "../external-model/openai-compatible-tool-loop.js";
 import { registerDynamicFastLaneName } from "../gateway/index.js";
 import { skillManifestToChatTool } from "../skills/skill-openai-bridge.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
@@ -298,6 +298,12 @@ import { Hand } from "../body/hand.js";
 import { Mouth } from "../body/mouth.js";
 import { Eye } from "../body/eye.js";
 import { createMemoryAssociationSynthesizer } from "../brain/memory-cognitive/memory-association-synthesizer.js";
+import { SemanticAwarenessInferrerImpl } from "../brain/semantic-awareness-inferrer.js";
+// 记忆模块整体优化：画像聚合 / 查询扩展 / 隐式反馈 / 记忆目录
+import { createUserProfileAggregator } from "../brain/user-profile-aggregator.js";
+import { RecallQueryExpander } from "../brain/memory-query-expander.js";
+import { MemoryImplicitFeedbackDetector } from "../brain/memory-implicit-feedback.js";
+import { MemoryInventory, setGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import { Ear } from "../body/ear.js";
 import { Skin } from "../body/skin.js";
 import { VestibularApparatus } from "../body/vestibular-apparatus.js";
@@ -316,6 +322,11 @@ import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-ex
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
 import type { SubAgentType } from "../services/master-agent-types.js";
+// 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）
+import { ProactivityHub } from "../proactivity/proactivity-hub.js";
+import { RhythmCore } from "../body/rhythm-core.js";
+import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
+import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
 
 export async function createAppServices(): Promise<AppServices> {
   const app = Fastify({ logger: true });
@@ -1345,6 +1356,10 @@ export async function createAppServices(): Promise<AppServices> {
     // Stage 4 Task 3：注入 AgentSelfLearningService，让 assessConfidence 读取历史失败率
     // 作为元认知置信度评估的因子之一（失败率 > 0.3 → -0.2）。
     awarenessCortex.registerSelfLearning(agentSelfLearningService);
+    // 语义觉察推断器：让 observeWithMental 能产出 UserMentalState（纯规则、零 token）。
+    // 供对话内主动钩子(AgentCore.maybeTriggerConversationProactive)在需要主动开口时
+    // 按需感知用户当下意图，避免常驻注入浪费 token。
+    awarenessCortex.registerSemanticInferrer(new SemanticAwarenessInferrerImpl());
     // 端到端认知装配（registerMemory + registerEndToEndMaker + registerCognitiveEngine）
     // 已移到 memoryCortex 声明之后（见 brainNeuroEnabled 块内），避免作用域问题
     if (legacyProaction) {
@@ -2021,6 +2036,8 @@ export async function createAppServices(): Promise<AppServices> {
         JSON.stringify({ type: ServerEventType.DesktopBridgeSync, payload }),
       );
       desktopPresenceSignalService.handleSync(actorId, payload);
+      // 桌面 presence 同步 = 用户活跃标记，喂节律感知（连续工作/深夜检测）
+      rhythmCore?.noteActivity(actorId, "desktop_presence");
     },
     onTaskResult: (actorId, payload) => {
       desktopPresenceSignalService.handleTaskResult(actorId, payload);
@@ -2105,6 +2122,9 @@ export async function createAppServices(): Promise<AppServices> {
   //   BrainCenter.registerBodyGateway 内部会因 isBodyCenterEnabled() 返回 false 而忽略注入
   let bodyCenter: BodyCenter | null = null;
   let reflexArc: ReflexArc | null = null;
+  // 节律感知核心（body 侧）：连续工作 / 深夜活跃检测；外层声明供
+  // desktopBridgeCoordinator.onSync 闭包与 ProactivityHub 装配层引用。
+  let rhythmCore: RhythmCore | null = null;
   if (bodyCenterEnabled) {
     // 1. BodyBus + ReflexArc（硬安全门，纯规则匹配）
     const bodyBus = new BodyBus();
@@ -2384,6 +2404,10 @@ export async function createAppServices(): Promise<AppServices> {
     bodyCenter.setVestibularApparatus(vestibularApparatus);
     bodyCenter.setHomeostasis(homeostasisCore);
     bodyCenter.setReflex(reflexModuleAdapter);
+    // 6.0 节律感知核心（第 10 个 BodyModule）：连续工作 / 深夜活跃检测，
+    //     越过阈值发布 body.rhythm.overwork_detected（ProactivityHub 订阅后干预）。
+    rhythmCore = new RhythmCore({ bodyBus });
+    bodyCenter.registerModule(rhythmCore);
 
     // 6.1 Task 12 工具下沉：填充 BodyGateway.routeTable（前缀最长匹配）
     //      策略 A：保留独立文件 register 调用，BodyGateway 在 execute 时按前缀拦截，
@@ -3004,10 +3028,41 @@ export async function createAppServices(): Promise<AppServices> {
         // 记忆联想性增强：LLM 跨记忆关联合成器（无 API key 时返回 null，静默降级）。
         // 不传显式 key，由工厂内部 resolvePrimaryLlmClientConfig 解析当前主 provider
         // （auto 模式 Moonshot 优先），避免 OPENAI key 与 Moonshot baseURL 错配。
-        // recall 命中 ≥2 条时异步合成新关联，高置信结论回灌 humanLike 记忆图。
+        // recall 命中 ≥2 条时异步合成新关联，高置信结论回灌 humanLike 记忆图；
+        // remember 写入后（节流 45s）也做"新记忆 × 旧记忆"在线关联分析（P0-2）。
         memoryCortex.registerAssociationSynthesizer(
           createMemoryAssociationSynthesizer(),
         );
+
+        // ─── 记忆模块整体优化装配（P0/P1/P2）──────────────────────────
+        // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（强信号快速路径 +
+        //   每 12 轮 LLM 深度合成 + 巩固钩子反哺）。
+        const userProfileAggregator = createUserProfileAggregator();
+        userProfileAggregator.registerOnlineLearning(onlineLearningCortex);
+        brainCenter.registerUserProfileAggregator(userProfileAggregator);
+        // 巩固钩子：MemoryManager.consolidateNow（夜间 dreaming / 白天 idle）
+        // 完成后触发深度画像合成，让记忆整理反哺画像。
+        const memMgrForProfileHook = getMemoryManagerService();
+        if (memMgrForProfileHook?.setProfileAggregatorHook) {
+          memMgrForProfileHook.setProfileAggregatorHook((actorId) =>
+            userProfileAggregator.triggerSynthesis(actorId),
+          );
+        }
+
+        // P1-1 召回查询扩展器：recall 前指代消解 + 话题扩展 + 多意图拆分
+        //（单窗口长会话优化核心，纯规则零延迟）。
+        brainCenter.registerRecallQueryExpander(new RecallQueryExpander());
+
+        // P1-3 隐式反馈检测器：纠正/认同/重复提问/换话题 → 记忆相关性反馈回灌。
+        brainCenter.registerImplicitFeedbackDetector(new MemoryImplicitFeedbackDetector());
+
+        // P2-1 记忆目录（元认知）：统计记忆规模/时间分布/主题，供 prompt 注入
+        //   "我知道你什么"摘要（brainCenter.getInventorySummary 消费）。
+        //   全局单例：prompt-context-builder assembleMemory 同步读缓存注入【记忆目录】。
+        const memoryInventory = new MemoryInventory(agentMemorySyncService);
+        memoryCortex.registerMemoryInventory(memoryInventory);
+        setGlobalMemoryInventory(memoryInventory);
+        // ────────────────────────────────────────────────────────────
 
         // 心跳桥接：BrainStem 45s 心跳 → ForgettingController.continuousScore
         // 让遗忘曲线打分跟随脑干节律，无需额外定时器。
@@ -3250,6 +3305,153 @@ export async function createAppServices(): Promise<AppServices> {
     narrativeMemory,
   );
 
+  // ─── ProactivityHub 主动性多元化模块装配 ───
+  // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候/兴趣分享）+ 全局频控
+  // （FrequencyGovernor：每日预算 + 分 kind 冷却 + 静默时段）+ 三种行为模式：
+  //   speak → LifeSignalHub 发布 → BrainCenter.decide → ProactionCortex 既有闭环
+  //   act   → 白名单工具静默后台执行（media/calendar/smart_home，无删除类）
+  //   advise → AdviceStore 入队 → 下一轮对话 prompt 注入【Agent 主动建议】
+  const proactivityHub = new ProactivityHub({
+    publishSignal: (signal) => {
+      lifeSignalHubService.publish({
+        id: `proactivity:${signal.kind}:${signal.actorId}:${Date.now()}`,
+        actorId: signal.actorId,
+        source: "agent_inference",
+        kind: signal.kind,
+        title: signal.title,
+        summary: signal.summary,
+        tags: signal.tags,
+        importance: signal.importance,
+        evidence: signal.evidence,
+        occurredAt: new Date().toISOString(),
+        metadata: signal.metadata,
+      });
+    },
+    executeTool: (tool, args, actorId) =>
+      toolRegistry.execute(tool, args, {
+        sessionId: actorId,
+        userId: actorId,
+        agentAccessMode: "full",
+      }),
+    // 兴趣分享触发源：OnlineLearningCortex 画像（偏好权重 = confidence × stability）
+    getProfile: (actorId) => {
+      const olc = brainCenter?.getOnlineLearningCortex();
+      if (!olc) return null;
+      const profile = olc.getProfile(actorId);
+      return {
+        preferences: profile.preferences.map((e) => ({
+          value: e.value,
+          effectiveWeight: e.confidence * e.stability,
+        })),
+        topics: profile.topics,
+      };
+    },
+    // 对话内主动触发时按需感知用户状态（fire-on-demand，省 token）
+    observeUserState: brainCenter
+      ? async (actorId, recentHistory) => {
+          try {
+            const r = await brainCenter!.observeWithMental(actorId, {
+              recentConversationHistory: recentHistory,
+            });
+            return {
+              activity: r.activity ? r.activity.activity : null,
+              mentalIntent:
+                r.mental && r.mental.intentCategory !== "unknown" ? r.mental.intentCategory : null,
+            };
+          } catch {
+            return {};
+          }
+        }
+      : undefined,
+    // 对话活跃事件 → 节律感知（连续工作/深夜检测的数据源之一）
+    onUserActivity: (actorId, source) => rhythmCore?.noteActivity(actorId, source),
+    // ── 通用主动性路径（Jarvis 式：感知 → LLM 自主决策 → speak/act/advise） ──
+    // LLM 完成函数：InitiativeEngine 决策用（ephemeralTurn 不污染会话线程）。
+    // PROACTIVITY_MODEL 可路由到快/便宜模型——主动性决策不需要主力模型的质量
+    llmComplete: externalChat?.isEnabled()
+      ? async (prompt, sessionId) => {
+          let full = "";
+          await externalChat!.streamCompletion(
+            `proactivity-${sessionId}-${Date.now()}`,
+            { text: prompt },
+            (delta: string) => {
+              full += delta;
+            },
+            undefined,
+            {
+              systemPromptOverride: prompt,
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 0,
+              ...(process.env.PROACTIVITY_MODEL
+                ? { modelOverride: process.env.PROACTIVITY_MODEL }
+                : {}),
+            },
+          );
+          return full;
+        }
+      : undefined,
+    // 可用工具清单（act 行动计划的选择范围；ToolMetadata 无长描述，
+    // 用 name + category/toolset 拼简述——工具名自解释，LLM 主要按名选）
+    listTools: () =>
+      toolRegistry
+        .listMetadata()
+        .map((m) => ({
+          name: m.name,
+          description: `分类: ${m.category}${m.toolset ? ` / ${m.toolset}` : ""}`,
+        })),
+    // 按观察选相关工具（复用对话链路的 selectRelevantTools：类别关键词匹配，
+    // 中文描述完整）。hub 只喂 top-K 相关工具 + 核心执行面保底，act 质量不降
+    // 而 prompt token 大幅下降（全量 60+ → ≤18）
+    searchTools: (query, limit) =>
+      selectRelevantTools(query, getBuiltinAgentChatTools(), {
+        minTools: 4,
+        maxTools: limit,
+        includeAlwaysIncluded: true,
+      })
+        .filter((t) => t.type === "function" && t.function?.name)
+        .map((t) => ({
+          name: (t as { function: { name: string } }).function.name,
+          description:
+            (t as { function: { description?: string } }).function.description ?? "",
+        })),
+    // 用户画像 markdown（LLM 决策的画像输入）
+    getProfileText: async (actorId) => {
+      try {
+        const text = await new UserProfileStore().read(actorId);
+        return text.trim() || null;
+      } catch {
+        return null;
+      }
+    },
+    // 今日日程快照（日程感知源：有变化才推观察给 LLM）
+    getScheduleSnapshot: (actorId) => {
+      try {
+        const snapshot = buildSchedulePromptSnapshot(scheduleTaskService, actorId, "");
+        // count=0 表示无日程，返回 null 不推观察
+        return snapshot.includes("count=0") ? null : snapshot;
+      } catch {
+        return null;
+      }
+    },
+  });
+  // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
+  agentCore.setProactivityHub(proactivityHub);
+  // 接线 2：session-epitome 待办闭环（完成检测 → hub.onUserLoopCompleted 恭喜）
+  memoryCortex?.setEpitomeLoopClosedListener((actorId, loopText) => {
+    proactivityHub.onUserLoopCompleted(actorId, loopText);
+  });
+  // 接线 3：body 节律信号（RhythmCore 过劳检测 → act+speak 复合干预）
+  bodyCenter
+    ?.getBus()
+    .subscribe("body.rhythm.overwork_detected", (signal) => {
+      if (signal.actorId) {
+        proactivityHub.onRhythmSignal(signal.actorId, signal.kind, signal.payload);
+      }
+    });
+  proactivityHub.start();
+  console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
+
   registerHttpRoutes(app, {
     toolRegistry,
     skillManager,
@@ -3333,6 +3535,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   app.addHook("onClose", async () => {
+    proactivityHub.stop();
     try {
       await moodInferenceService.flush();
       app.log.info("[MoodInference] 持久化已 flush");

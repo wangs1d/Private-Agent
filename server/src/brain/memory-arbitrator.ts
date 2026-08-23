@@ -64,7 +64,9 @@ export const DEFAULT_ARBITRATOR_CONFIG: MemoryArbitratorConfig = {
     kvSummary: 0.2,
     forgotten: 0.15,
     relationship: 0.25,
-    association: 0.32,
+    // 联想通道权重提升（0.32 → 0.42）：联想记忆是"跨记忆新认知"的来源，
+    // 语义化种子修复后 spread 命中真实节点，联想结果质量提升，值得更高权重。
+    association: 0.42,
     experienceLearning: 0.3,
   },
   topN: 8,

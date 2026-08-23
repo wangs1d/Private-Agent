@@ -2,7 +2,7 @@
  * 引用锚点存储（Recall Anchor Store）—— 记忆连续性诊断（Phase 2）
  *
  * 记录每一轮 recall 实际注入的"记忆锚点"（query + 召回条目摘要），
- * 与反馈存储（memory-feedback-store）、跨会话开放环路（session-epitome）配合，
+ * 与记忆强度模型（memory-strength-model）、跨会话开放环路（session-epitome）配合，
  * 提供"连续性诊断"数据：最近注入了什么记忆、哪些被用户反馈降权、上一会话遗留了什么。
  *
  * 用途：
@@ -15,7 +15,7 @@
  * - KV 持久化失败静默降级（不阻塞 recall 主链路）。
  */
 
-import { FEEDBACK_KV_KEY } from "../brain/memory-feedback-store.js";
+import { STRENGTH_KV_KEY } from "../brain/memory-strength-model.js";
 import { EPITOME_KV_KEY } from "./session-epitome.js";
 
 export interface RecallAnchorItem {
@@ -176,4 +176,4 @@ export function buildContinuityDiagnosis(
   };
 }
 
-export { FEEDBACK_KV_KEY, EPITOME_KV_KEY };
+export { STRENGTH_KV_KEY as FEEDBACK_KV_KEY, EPITOME_KV_KEY };

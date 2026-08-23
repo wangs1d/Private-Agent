@@ -74,6 +74,12 @@ export type AgentPromptMemoryContext = {
   dailyDigest?: string;
   /** 后台记忆管理服务自动合成的用户长期画像（偏好/话题/意图/风险标记） */
   userProfileSummary?: string;
+  /**
+   * 记忆目录（元认知）：MemoryInventory 统计的记忆规模/时间分布/高频主题摘要。
+   * 让 LLM "知道自己记住了什么"，用户问"你知道我什么"时有真实依据可答。
+   * 由 PromptContextBuilder 同步读 MemoryInventory 缓存注入（cognize 阶段刷新）。
+   */
+  memoryInventory?: string;
   memoryContinuity?: string;
   relationshipMemory?: string;
   lifeThemeMemory?: string;
@@ -143,6 +149,13 @@ export type AgentPromptMemoryContext = {
    * 该块不展示给用户。
    */
   fastVerdictInstruction?: string;
+  /**
+   * Agent 主动建议（ProactivityHub advise 模式）。
+   * ProactivityHub 把"不想打断用户"的主动意图（如过劳提醒、日程建议）排入
+   * AdviceStore，PromptContextBuilder 在下一轮对话 drain 出来注入此块，
+   * 由 agent 在正常回复中自然带出。无建议时不注入（零开销）。
+   */
+  proactiveAdvice?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

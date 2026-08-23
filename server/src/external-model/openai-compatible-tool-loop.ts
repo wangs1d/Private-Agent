@@ -211,10 +211,34 @@ function getToolResultStripKeys(toolName: string): string[] | undefined {
   return TOOL_RESULT_STRIP_KEYS[toolName];
 }
 
+/**
+ * 判定工具输出是否是「空洞 JSON」：对象内所有字符串值（含嵌套）均为空。
+ * 典型形态 `{"title":"Untitled","content":"","summary":""}`（空页抓取的空壳结果）。
+ * 这类输出不携带任何信息，不应作为兜底答案透出给用户。
+ */
+function isMeaninglessToolOutput(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  try {
+    const parsed = JSON.parse(t) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const seen: string[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") seen.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(parsed);
+    return !seen.some((s) => s.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
+
 function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
   const lines = outputs
     .map((item) => item.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim())
-    .filter(Boolean);
+    .filter((item) => item && !isMeaninglessToolOutput(item));
   if (lines.length === 0) return "";
   const unique: string[] = [];
   for (const line of lines) {
@@ -2296,7 +2320,11 @@ export async function streamCompletionWithTools(
       //  - 无成功工具数据而 LLM 出 apology/空 → Fix3 反道歉重建一次，绝不让"没查到/没找到"直接透出。
       let effectiveFinalText: string;
       if (isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()) {
-        effectiveFinalText = lastToolOutputFallback.trim();
+        // 已有成功工具数据但 LLM 输出 apology/无法整合 → 先反道歉重建，避免把工具 JSON dump
+        // 直接透出给用户；重建失败才回退到工具结果拼接，保证不丢掉真实数据。
+        const rebuilt = await rebuildWithoutFallback(client, model, messages);
+        effectiveFinalText =
+          rebuilt && !isApologyStyleFallback(rebuilt) ? rebuilt : lastToolOutputFallback.trim();
       } else if (isApologyStyleFallback(finalText)) {
         effectiveFinalText = await rebuildWithoutFallback(client, model, messages);
         if (!effectiveFinalText || isApologyStyleFallback(effectiveFinalText)) {
@@ -2692,14 +2720,23 @@ export async function streamCompletionWithTools(
       if (summaryText && !isApologyStyleFallback(summaryText)) {
         return summaryText;
       }
-      // summary 调用也失败了 → 用工具结果拼接兜底（比空串好）
+      // summary 调用成功但产出为空/道歉式 → 反道歉重建，避免把工具 JSON dump 透出给用户；
+      // 重建仍失败才回退到工具结果拼接（比空串好）。
+      const rebuiltAfterSummary = await rebuildWithoutFallback(client, model, messages);
+      if (rebuiltAfterSummary && !isApologyStyleFallback(rebuiltAfterSummary)) {
+        return rebuiltAfterSummary;
+      }
       return lastToolOutputFallback.trim();
     } catch (summaryErr) {
       console.log(
-        `[tool-loop] summary 调用失败，回退到工具结果拼接: ${
+        `[tool-loop] summary 调用失败，回退到反道歉重建: ${
           summaryErr instanceof Error ? summaryErr.message : String(summaryErr)
         }`,
       );
+      const rebuiltAfterSummaryErr = await rebuildWithoutFallback(client, model, messages);
+      if (rebuiltAfterSummaryErr && !isApologyStyleFallback(rebuiltAfterSummaryErr)) {
+        return rebuiltAfterSummaryErr;
+      }
       return lastToolOutputFallback.trim();
     }
   }

@@ -81,12 +81,21 @@ export function registerWebTools(
     if (!url) return { title: "", content: "", summary: "url 不能为空" };
     const includeLinks = input.include_links === true;
     const result = await infoHubService.readWebpage(url);
+    // 空正文兜底：readWebpage 在反爬/需登录页面会返回空壳 {title:"Untitled",content:"",summary:""}，
+    // 原样返回会被压缩成空 JSON 泄漏给用户。这里补一句语义化说明，让 LLM 能如实向用户交代。
+    const enriched = result.content?.trim()
+      ? result
+      : {
+          ...result,
+          summary:
+            result.summary?.trim() || "页面内容为空或无法读取（可能被反爬拦截或需登录），未能获取到正文。",
+        };
     // 如果需要链接，额外调用 inspectWebpage 补充
     if (includeLinks) {
       const inspect = await infoHubService.inspectWebpage(url);
-      return { ...result, links: inspect.links, sameHostLinks: inspect.sameHostLinks };
+      return { ...enriched, links: inspect.links, sameHostLinks: inspect.sameHostLinks };
     }
-    return result;
+    return enriched;
   });
 
   /**

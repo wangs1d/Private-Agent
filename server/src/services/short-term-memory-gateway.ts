@@ -16,8 +16,33 @@ type SessionTaskState = {
   conversationMemory?: SessionConversationMemory;
 };
 
+/** 会话情景记忆：单窗口下保真收录每轮对话，供"可检索/反查/分层回顾"使用（不硬截断）。 */
+export type EpisodicTurn = {
+  /** 全局递增轮次号（跨会话单调，用于召回时的先后判定） */
+  idx: number;
+  user: string;
+  assistant: string;
+  ts: number;
+};
+
+/** 实体/事实台账条目：保留原句语义，而非只掐首句。 */
+export type EpisodicFact = {
+  kind: "preference" | "fact" | "context";
+  sentence: string;
+  ts: number;
+};
+
+export type PersistedSessionEpisodic = {
+  turns: EpisodicTurn[];
+  facts: EpisodicFact[];
+};
+
 type PersistedTaskState = {
   sessions: Record<string, SessionTaskState>;
+  /** 会话全量情景记忆（按会话持久化，重启后可重建检索索引） */
+  episodic?: Record<string, PersistedSessionEpisodic>;
+  /** 跨会话单调递增的轮次计数（用于召回排序与先后判定） */
+  episodicIdx?: number;
 };
 
 type SessionConversationMemory = {
@@ -51,6 +76,16 @@ type TurnFocusResolution = {
 };
 
 const MEMORY_LIST_LIMIT = 6;
+/** 会话情景记忆容量上限：全量原文入盘（零 token），仅保留最近 N 轮控制磁盘增长。 */
+const EPISODIC_MAX_TURNS = 600;
+/** 单轮 user/assistant 各自截取的最大字符（保真原文，仅防失控长文本撑爆磁盘） */
+const EPISODIC_MAX_TURN_CHARS = 1200;
+/** 实体/事实台账上限（原句去重保留，前缀优先） */
+const EPISODIC_MAX_FACTS = 240;
+/** 会话内即时检索返回的命中轮次上限（直接对应注入 prompt 的 token 费用） */
+const EPISODIC_SEARCH_K = 4;
+/** 会话内即时检索返回的命中原文总字符预算（控制 token 消耗） */
+const EPISODIC_SEARCH_CHAR_BUDGET = 900;
 const ASSISTANT_COMMITMENT_RE =
   /我会|我将|已经帮你|已为你|我先|稍后|接下来|我去|我帮你|i will|i'll|i can/i;
 const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|remember|prefer/i;
@@ -424,6 +459,17 @@ export class ShortTermMemoryGatewayService {
     if (memory?.agentCommitments.length && includeTaskScopedMemory) {
       lines.push(`agent-commitments: ${memory.agentCommitments.join(" || ")}`);
     }
+
+    // ---- 会话情景记忆注入（去硬截断）----
+    // 仅在「延续/指代/回忆/短追问」轮次按需灌回命中的原文（episodic-context）：
+    // 滚动上下文对中早期对话做了硬截断，但保真台账里留有原文。
+    // 这里把命中的完整轮次灌回 prompt，让 LLM 能"看到"之前聊过的细节，
+    // 从而回答"好想他→(刘浩存)"这类指代反查。命中即收费，未命中零开销。
+    const episodicLines = this.buildEpisodicContextForInput(sessionId, currentInput, focus, isTopicFollowUp, memory);
+    if (episodicLines.length) {
+      lines.push(...episodicLines);
+    }
+
     if (currentInput?.trim()) {
       lines.push(`incoming-turn: ${normalizeInput(currentInput).slice(0, 180)}`);
     }
@@ -497,7 +543,18 @@ export class ShortTermMemoryGatewayService {
     if (!this.data.sessions[sessionId]!.conversationMemory) {
       this.data.sessions[sessionId]!.conversationMemory = createEmptyConversationMemory();
     }
+    if (!this.data.episodic) this.data.episodic = {};
+    if (!this.data.episodic[sessionId]) {
+      this.data.episodic[sessionId] = { turns: [], facts: [] };
+    }
     return this.data.sessions[sessionId]!;
+  }
+
+  /** 取全局递增轮次号（跨会话单调，用于召回时的先后判定）。 */
+  private nextEpisodicIdx(): number {
+    const next = (this.data.episodicIdx ?? 0) + 1;
+    this.data.episodicIdx = next;
+    return next;
   }
 
   private observeConversationTurn(
@@ -556,7 +613,260 @@ export class ShortTermMemoryGatewayService {
     }
 
     memory.lastUpdated = nowIso();
+    this.recordEpisodicTurn(sessionId, userText, assistantText);
     this.schedulePersist();
+  }
+
+  /**
+   * 会话情景记忆：保真收录本轮 user/assistant 原文入盘（零 token）。
+   * 单窗口滚动上下文对中早期对话做硬截断后，LLM 丢的是 token 空间，
+   * 但这里保留的是原文本身——后续「会话内即时检索」/「锚点解析」可把命中的
+   * 原文按需灌回 prompt，做到"不被剪、按需收费"。
+   */
+  private recordEpisodicTurn(sessionId: string, userText: string, assistantText: string): void {
+    const user = normalizeInput(userText).slice(0, EPISODIC_MAX_TURN_CHARS);
+    const assistant = normalizeInput(assistantText).slice(0, EPISODIC_MAX_TURN_CHARS);
+    if (!user && !assistant) return;
+
+    const epi = this.data.episodic?.[sessionId];
+    if (!epi) return;
+
+    epi.turns.push({
+      idx: this.nextEpisodicIdx(),
+      user,
+      assistant,
+      ts: Date.now(),
+    });
+    // 磁盘有界：仅保留最近 N 轮原文
+    if (epi.turns.length > EPISODIC_MAX_TURNS) {
+      epi.turns.splice(0, epi.turns.length - EPISODIC_MAX_TURNS);
+    }
+
+    this.recordEpisodicFacts(sessionId, user, assistant);
+  }
+
+  /** 实体/事实台账：保留原句语义（而非只掐首句），供「指代/反查锚点」精确命中。 */
+  private recordEpisodicFacts(sessionId: string, userText: string, assistantText: string): void {
+    const epi = this.data.episodic?.[sessionId];
+    if (!epi) return;
+    const now = Date.now();
+    const candidates: Array<{ kind: EpisodicFact["kind"]; sentence: string }> = [];
+
+    for (const sentence of this.splitSentences(userText)) {
+      if (USER_FACT_RE.test(sentence)) candidates.push({ kind: "fact", sentence });
+      else if (USER_PREFERENCE_RE.test(sentence)) candidates.push({ kind: "preference", sentence });
+    }
+    for (const sentence of this.splitSentences(assistantText)) {
+      if (ASSISTANT_COMMITMENT_RE.test(sentence)) candidates.push({ kind: "context", sentence });
+    }
+    // 兜底：抽取对话中的实体性短句（2-24 字问句/陈述推进事实账），去虚词噪音
+    if (candidates.length === 0) {
+      for (const sentence of this.splitSentences(userText)) {
+        const s = sentence.replace(/[。！？!?]/g, "").trim();
+        if (s.length >= 2 && s.length <= 24 && this.isEntityLike(s)) {
+          candidates.push({ kind: "fact", sentence: s });
+          break;
+        }
+      }
+    }
+
+    for (const c of candidates) {
+      const sentence = normalizeInput(c.sentence);
+      if (!sentence) continue;
+      const dup = epi.facts.some((f) => normalizeInput(f.sentence) === sentence);
+      if (dup) continue;
+      epi.facts.unshift({ kind: c.kind, sentence: sentence.slice(0, 120), ts: now });
+    }
+    if (epi.facts.length > EPISODIC_MAX_FACTS) {
+      epi.facts.length = EPISODIC_MAX_FACTS;
+    }
+  }
+
+  /** 把一段对话拆成句（支持中英文句末标点）。 */
+  private splitSentences(text: string): string[] {
+    if (!text) return [];
+    return normalizeInput(text)
+      .split(/[。！？!?；;\n]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 2);
+  }
+
+  /** 粗略判定是否为实体性短语（不含口语虚词/疑问尾缀的过短判断）。 */
+  private isEntityLike(sentence: string): boolean {
+    if (/^(?:你是|你是谁|你好|谢谢|好的|嗯|来了|在吗|继续|然后)$/i.test(sentence)) return false;
+    return true;
+  }
+
+  /**
+   * 固化取数接口（回喂长期记忆）：返回本会话的实体/事实台账原句。
+   * 由长期记忆固化层（MemoryManagerService）消费，把保真原文写入长期记忆，
+   * 从而让「跨会话召回」能拿到上一会话的细节，强化连续性。
+   */
+  getEpisodicConsolidationFacts(sessionId: string): EpisodicFact[] {
+    const epi = this.data.episodic?.[sessionId];
+    if (!epi) return [];
+    return epi.facts.map((f) => ({ ...f }));
+  }
+
+  /**
+   * 会话内即时检索（省 token 召回）：在保真台账上做零-embedding 词法检索，
+   * 返回与 query 相关度最高的最近 K 轮原文。只把命中内容灌回 prompt。
+   */
+  searchEpisodic(sessionId: string, query: string, k = EPISODIC_SEARCH_K): EpisodicTurn[] {
+    const epi = this.data.episodic?.[sessionId];
+    if (!epi || epi.turns.length === 0) return [];
+    const q = normalizeInput(query);
+    if (!q) return [];
+
+    const scored = epi.turns.map((turn) => {
+      const userScore = this.episodicCosine(turn.user, q);
+      const assistantScore = this.episodicCosine(turn.assistant, q);
+      return { turn, score: Math.max(userScore, assistantScore * 0.9) };
+    });
+
+    // 词法检索只保留有实际命中的轮次（>0），再按近因偏置排序（同分取更新的）
+    const hits = scored
+      .filter((s) => s.score > 0)
+      .sort((a, b) => b.score - a.score || b.turn.idx - a.turn.idx)
+      .slice(0, k);
+
+    // 去重：同一 idx 只保留一次
+    const seen = new Set<number>();
+    const out: EpisodicTurn[] = [];
+    for (const h of hits) {
+      if (seen.has(h.turn.idx)) continue;
+      seen.add(h.turn.idx);
+      out.push(h.turn);
+    }
+    return out;
+  }
+
+  /**
+   * 指代/反查锚点解析：query 为指代/短追问（"好想他""那家公司"）时，
+   * 先从事实台账精确反查最近匹配原句，再从最近原文轮次补齐上下文。
+   */
+  resolveEpisodicAnchors(sessionId: string, query: string): EpisodicTurn[] {
+    const epi = this.data.episodic?.[sessionId];
+    if (!epi) return [];
+    const q = normalizeInput(query);
+    if (!q) return [];
+
+    // 1) 优先从事实台账反查：指代多半落在最近几个实体/事实原句上
+    const anchorTimes: number[] = [];
+    for (const f of epi.facts.slice(0, 40)) {
+      if (this.factRelevance(f.sentence, q)) anchorTimes.push(f.ts);
+    }
+    // 2) 命中台账原句的 ts → 找到最近的完整轮次
+    const anchorIdxs = new Set<number>();
+    for (const t of epi.turns) {
+      for (const at of anchorTimes) {
+        if (Math.abs(t.ts - at) < 6 * 60 * 1000) anchorIdxs.add(t.idx);
+      }
+    }
+    // 3) 兜底：最近 2 轮原文直接作上下文锚点（短追问默认指代最近内容）
+    for (const recentIdx of epi.turns.slice(-2).map((t) => t.idx)) {
+      anchorIdxs.add(recentIdx);
+    }
+
+    const out = epi.turns.filter((t) => anchorIdxs.has(t.idx)).slice(-EPISODIC_SEARCH_K);
+    return out;
+  }
+
+  /**
+   * 决定是否注入情景记忆并渲染为 prompt 行（命中即收 token，未命中零开销）。
+   * 仅「延续/指代/回忆」轮次触发；话题切换（topic_switch）不注入，避免串台 + 省 token。
+   */
+  private buildEpisodicContextForInput(
+    sessionId: string,
+    currentInput: string | undefined,
+    focus: TurnFocusResolution,
+    isTopicFollowUp: boolean,
+    memory?: SessionConversationMemory,
+  ): string[] {
+    const input = normalizeInput(currentInput ?? "");
+    if (!input) return [];
+
+    // 指代/回忆判定：纯指代短句（"好想他""那家公司"）即使被 resolveTurnFocus 视为
+    // topic_switch（无任务锚点），仍是此前内容的延续，必须允许反查。
+    const isReferent =
+      isContinuityTurn(input) ||
+      this.isRecallOrFollowUp(input) ||
+      /(他|她|他们|她们|它|这个|那个|这儿|那儿)/.test(input);
+    // 真正干净的无关话题切换（无指代/回忆信号）才抑制注入，避免串台 + 省 token
+    const isCleanSwitch = focus.kind === "topic_switch" && !focus.preserveRecentContext && !isTopicFollowUp;
+    if (!isReferent && isCleanSwitch) return [];
+
+    let turns: EpisodicTurn[] = [];
+    if (isReferent) {
+      // 指代：锚点反查最近原文 + 当前话题扩展后的会话检索，union 去重
+      const anchors = this.resolveEpisodicAnchors(sessionId, input);
+      const topicExpanded = memory?.activeTopic
+        ? this.searchEpisodic(sessionId, normalizeInput(`${input} ${memory.activeTopic}`))
+        : [];
+      const seen = new Set<number>();
+      for (const t of [...anchors, ...topicExpanded]) {
+        if (seen.has(t.idx)) continue;
+        seen.add(t.idx);
+        turns.push(t);
+      }
+    } else {
+      turns = this.searchEpisodic(sessionId, input);
+    }
+    if (turns.length === 0) return [];
+
+    const parts: string[] = [];
+    let budget = EPISODIC_SEARCH_CHAR_BUDGET;
+    for (const t of turns) {
+      let frag: string;
+      if (t.user && t.assistant) {
+        frag = `U:${t.user.slice(0, 90)} / A:${t.assistant.slice(0, 90)}`;
+      } else if (t.user) {
+        frag = `U:${t.user.slice(0, 120)}`;
+      } else {
+        frag = `A:${t.assistant.slice(0, 120)}`;
+      }
+      if (budget - frag.length <= 0) break;
+      parts.push(frag);
+      budget -= frag.length;
+    }
+    if (parts.length === 0) return [];
+    return [
+      `important episodic-memory: ${parts.join(" || ")}（以上为本会话此前若干轮的原文，非本轮新指令；如与本轮问题相关请直接引用其中内容作答，无关可忽略）`,
+    ];
+  }
+
+  /** 事实台账单句相关度：query 实体词命中原句得分的轻量近似。 */
+  private factRelevance(factSentence: string, query: string): number {
+    let hit = 0;
+    const factTokens = new Set(tokenize(factSentence));
+    const qTokens = new Set(tokenize(query));
+    // 中文场景：zhGrams 覆盖无空格分词
+    const qGrams = this.zhGrams(query);
+    const fGrams = this.zhGrams(factSentence);
+    for (const g of qGrams) if (fGrams.has(g)) hit++;
+    for (const t of qTokens) if (factTokens.has(t)) hit++;
+    return hit > 0 ? 1 : 0;
+  }
+
+  /** 词法相关度（分数>0 即视为命中）：英文 token 集合命中率 与 中文 2-gram 命中率 取最大值。
+ *  中文无空格分词，整句会被 tokenize 切成单个 token 导致精确 include 失效，
+ *  因此中文场景依赖 zhGrams 二元组命中率，英文/实体词用 token 集合。 */
+  private episodicCosine(text: string, query: string): number {
+    if (!text) return 0;
+    const a = tokenize(text);
+    const b = tokenize(query);
+    const bSet = new Set(b);
+    let tokenHit = 0;
+    for (const t of bSet) if (a.includes(t)) tokenHit++;
+    const tokenScore = bSet.size > 0 ? tokenHit / bSet.size : 0;
+
+    const ag = this.zhGrams(text);
+    const bg = this.zhGrams(query);
+    let gramHit = 0;
+    for (const g of bg) if (ag.has(g)) gramHit++;
+    const gramScore = bg.size > 0 ? gramHit / bg.size : 0;
+
+    return Math.max(tokenScore, gramScore);
   }
 
   private inferTopicFromUserText(userText: string): string | null {
@@ -781,9 +1091,9 @@ export function getShortTermMemoryGatewayService(): ShortTermMemoryGatewayServic
   return singleton;
 }
 
-export async function initShortTermMemoryGatewayService(): Promise<ShortTermMemoryGatewayService> {
+export async function initShortTermMemoryGatewayService(filePath?: string): Promise<ShortTermMemoryGatewayService> {
   if (singleton) return singleton;
-  const service = new ShortTermMemoryGatewayService();
+  const service = filePath ? new ShortTermMemoryGatewayService(filePath) : new ShortTermMemoryGatewayService();
   await service.load();
   singleton = service;
   return service;

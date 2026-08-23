@@ -3,6 +3,7 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import OpenAI from "openai";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
+import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 
@@ -27,6 +28,8 @@ export type MemoryManagerConfig = {
   consolidationIntervalMs: number;
   maxSummaryChars: number;
   profileUpdateThreshold: number;
+  /** 单窗口在线固化阈值：白天 pending queue 积累到该条数时立即触发整理 */
+  onlineConsolidationThreshold: number;
 };
 
 export type MemoryConsolidationResult = {
@@ -80,6 +83,8 @@ const DEFAULT_CONFIG: MemoryManagerConfig = {
   consolidationIntervalMs: 10 * 60 * 1000,
   maxSummaryChars: 16_000,
   profileUpdateThreshold: 3,
+  // 单窗口长会话在线固化：白天 pending queue 积累 ≥15 条立即触发整理
+  onlineConsolidationThreshold: 15,
 };
 
 function loadConfig(): MemoryManagerConfig {
@@ -94,6 +99,9 @@ function loadConfig(): MemoryManagerConfig {
     profileUpdateThreshold:
       Number.parseInt(process.env.MEMORY_MANAGER_PROFILE_THRESHOLD ?? "", 10) ||
       DEFAULT_CONFIG.profileUpdateThreshold,
+    onlineConsolidationThreshold:
+      Number.parseInt(process.env.MEMORY_MANAGER_ONLINE_CONSOLIDATION_THRESHOLD ?? "", 10) ||
+      DEFAULT_CONFIG.onlineConsolidationThreshold,
   };
 }
 
@@ -131,6 +139,11 @@ export class MemoryManagerService {
   private readonly relationshipSnapshots = new Map<string, RelationshipMemorySnapshot>();
   private readonly lifeThemeSnapshots = new Map<string, LifeThemeMemorySnapshot>();
   private readonly dreamSnapshots = new Map<string, DreamPhaseSnapshot>();
+  /** 已回喂长期记忆的情景事实指纹（sessionId → 已固化 fingerprint 集合），避免重复固化 */
+  private readonly episodicIngested = new Map<string, Set<string>>();
+  /** 情景固化节流：避免高频轮次追债式反复 embedding */
+  private readonly lastEpisodicIngestAt = new Map<string, number>();
+  private static readonly EPISODIC_INGEST_DEBOUNCE_MS = 90_000;
 
   constructor(
     private readonly narrativeMemory: NarrativeMemoryPort | null,
@@ -140,8 +153,15 @@ export class MemoryManagerService {
     this.config = { ...loadConfig(), ...config };
   }
 
-  onTurnCompleted(actorId: string, userText: string, assistantText: string): void {
+  onTurnCompleted(actorId: string, sessionId: string | undefined, userText: string, assistantText: string): void {
     if (!this.config.enabled) return;
+
+    // 回喂：把本会话情景记忆（保真原文台账）固化进长期记忆
+    // → 跨会话召回能拿到上一会话细节，强化连续性。内部按指纹去重 + 90s 节流。
+    // 注意：STM 台账按 sessionId 收录，narrative 长期记忆按稳定的 actorId 存取。
+    // 稳定 userId/PAI_ACTOR_ID 下二者不同，必须分拆——否则跨会话场景查不到台账、回喂静默失效。
+    const sId = sessionId ?? actorId;
+    void this.ingestEpisodicFactsToLongTerm(actorId, sId).catch(() => {});
 
     const prev = this.turnCounters.get(actorId) ?? 0;
     const next = prev + 1;
@@ -155,12 +175,80 @@ export class MemoryManagerService {
     const nightlyService = getNightlyMemoryTaskService();
     const shouldDefer = nightlyService?.shouldDeferConsolidation() ?? false;
     if (shouldDefer) {
-      console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next}, pending queue: ${this.getDailyPendingQueue(actorId).length} items)`);
+      // P1-2 单窗口长会话在线固化：白天不再无限期 defer。
+      // 原策略：白天只积累 pending queue，整理要等 30min idle 或夜间 dreaming
+      //   → 单窗口长会话（用户一直在线聊）当天记忆始终得不到整理，
+      //     session recap 滚动压缩会丢细节，长期记忆滞后一整天。
+      // 新策略：pending queue 积累超过 onlineConsolidationThreshold（默认 15 轮）
+      //   时立即触发一次在线整理（LLM 评分 + 去重 + 写回 memory_summary），
+      //   长会话每 ~15 轮巩固一次，"整理记忆能力"在会话中真实被使用。
+      const pendingCount = this.getDailyPendingQueue(actorId).length;
+      if (pendingCount >= this.config.onlineConsolidationThreshold) {
+        console.log(
+          `[MemoryManager] Day mode: pending queue ${pendingCount} ≥ ${this.config.onlineConsolidationThreshold}，触发单窗口在线固化 for ${actorId}`,
+        );
+        void this.tryIdleConsolidation(actorId).catch(() => {
+          /* 在线固化失败静默，等待夜间兜底 */
+        });
+      } else {
+        console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next}, pending queue: ${pendingCount} items)`);
+      }
       return;
     }
 
     if (next >= this.config.profileUpdateThreshold && !this.consolidationTimers.has(actorId)) {
       this.scheduleConsolidation(actorId);
+    }
+  }
+
+  /**
+   * 情景记忆 → 长期记忆固化（强化跨会话连续性）。
+   *
+   * 从 STM 网关取【本会话】(sessionId) 的实体/事实台账原句（零 token 数据，非 lossy recap），
+   * 写入【用户级】(actorId) 的 narrative 长期记忆，让后续会话的 recall 能拉到上一会话细节。
+   * - actorId（稳定 userId/PAI_ACTOR_ID）用于 narrative 写入 + 指纹去重 + 90s 节流
+   * - sessionId 仅用于定位 STM 台账（台账按会话收录）
+   */
+  private async ingestEpisodicFactsToLongTerm(actorId: string, sessionId: string): Promise<void> {
+    if (!this.narrativeMemory) return;
+    const gateway = getShortTermMemoryGatewayService();
+    if (!gateway) return;
+
+    const now = Date.now();
+    const lastAt = this.lastEpisodicIngestAt.get(actorId) ?? -Infinity;
+    // 首次维护（lastAt 为 -Infinity）或距上次已过冷却期 → 允许执行；否则跳过本次调用
+    if (now - lastAt < MemoryManagerService.EPISODIC_INGEST_DEBOUNCE_MS) return;
+    this.lastEpisodicIngestAt.set(actorId, now);
+
+    const facts = gateway.getEpisodicConsolidationFacts(sessionId);
+    if (facts.length === 0) return;
+
+    let done = this.episodicIngested.get(actorId);
+    if (!done) {
+      done = new Set<string>();
+      this.episodicIngested.set(actorId, done);
+    }
+
+    let ingested = 0;
+    for (const fact of facts) {
+      const key = semanticFingerprint(fact.sentence);
+      if (done.has(key)) continue;
+      done.add(key);
+      const highSignal = fact.kind === "preference" || fact.kind === "fact";
+      await this.narrativeMemory
+        .ingest(
+          actorId,
+          `[情景固化] ${fact.kind} | ${fact.sentence}`,
+          "episodic:consolidate",
+          { highSignal },
+        )
+        .catch(() => {});
+      ingested++;
+    }
+    if (ingested > 0) {
+      console.log(
+        `[MemoryManager] 情景记忆回喂长期记忆: actor=${actorId} session=${sessionId} 固化 ${ingested} 条事实台账`,
+      );
     }
   }
 
@@ -381,9 +469,29 @@ export class MemoryManagerService {
         await this.performDreamRehearsal(actorId, lastRetention);
       }
     }
+    // 巩固钩子（P0-1）：记忆整理完成后触发 UserProfileAggregator 深度画像合成，
+    // 让"夜间 dreaming / 白天 idle 整理"同时反哺 USER_PROFILE.md
+    // （整理出的稳定偏好/事实进入画像，agent 越来越了解用户）。
+    if (this.profileAggregatorHook) {
+      try {
+        this.profileAggregatorHook(actorId);
+      } catch {
+        /* 钩子失败不影响巩固主流程 */
+      }
+    }
     this.turnCounters.set(actorId, 0);
     return result;
   }
+
+  /**
+   * 注入画像聚合器钩子（由 create-app-services 装配时调用，
+   * 回调指向 UserProfileAggregator.triggerSynthesis）。
+   */
+  setProfileAggregatorHook(hook: ((actorId: string) => void) | null): void {
+    this.profileAggregatorHook = hook;
+  }
+
+  private profileAggregatorHook: ((actorId: string) => void) | null = null;
 
   /**
    * forgotten 自动恢复：把命中的 forgotten 行移回 memory_summary。
@@ -452,8 +560,9 @@ export class MemoryManagerService {
       const forgottenLines = forgottenRaw.split("\n").filter((l) => l.trim());
       if (forgottenLines.length === 0) return [];
 
-      // 路径 A：embedding 语义检索
-      const apiKey = process.env.OPENAI_API_KEY?.trim();
+      // 路径 A：embedding 语义检索（必须用 Embedding 专用 key，对话 LLM key 会 401）
+      const apiKey =
+        process.env.AGENT_EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
       const embeddingModel = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
       if (apiKey) {
         const embeddingHits = await this.recallForgottenByEmbedding(

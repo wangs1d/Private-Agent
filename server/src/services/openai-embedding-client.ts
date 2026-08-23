@@ -67,7 +67,11 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   }
   const model = opts.model ?? ep?.model ?? "text-embedding-3-small";
 
-  const r = await fetch(base, {
+  // baseUrl 约定为"纯 base"（如 https://api.siliconflow.cn/v1，来自 AGENT_EMBEDDING_BASE_URL），
+  // 需补 /embeddings 路径；默认值已含 /embeddings，直接跳过拼接。
+  const endpoint = base.endsWith("/embeddings") ? base : `${base}/embeddings`;
+
+  const r = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,

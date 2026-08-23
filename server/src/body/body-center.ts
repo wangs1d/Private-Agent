@@ -64,6 +64,8 @@ export class BodyCenter {
   private homeostasis: BodyModuleLike | null = null;
   /** 反射弧（脊髓反射）：硬安全门，rm -rf / format 等直接 DENY */
   private reflex: BodyModuleLike | null = null;
+  /** 节律感知核心（生物钟）：连续工作 / 深夜活跃检测，供主动性模块消费 */
+  private rhythm: BodyModuleLike | null = null;
 
   // ---- 总线与网关 ----
   private bodyBus: BodyBus;
@@ -109,6 +111,9 @@ export class BodyCenter {
         break;
       case "reflex":
         this.reflex = module;
+        break;
+      case "rhythm":
+        this.rhythm = module;
         break;
       default:
         console.log(`[BodyCenter] 未知 BodyModule kind: ${module.name}，仅挂到 BodyGateway`);
@@ -266,6 +271,7 @@ export class BodyCenter {
     await this.startModule("VestibularApparatus", this.vestibular);
     await this.startModule("HomeostasisCore", this.homeostasis);
     await this.startModule("ReflexArc", this.reflex);
+    await this.startModule("RhythmCore", this.rhythm);
     this.started = true;
     console.log("[BodyCenter] 启动完成");
   }
@@ -281,6 +287,7 @@ export class BodyCenter {
     }
     console.log("[BodyCenter] 正在停止...");
     // 停止顺序与启动顺序相反（先停感知/运动器官，最后停总线）
+    await this.stopModule("RhythmCore", this.rhythm);
     await this.stopModule("ReflexArc", this.reflex);
     await this.stopModule("HomeostasisCore", this.homeostasis);
     await this.stopModule("VestibularApparatus", this.vestibular);
@@ -304,6 +311,11 @@ export class BodyCenter {
   /** 暴露 BodyGateway 引用（供 BrainCenter.registerBodyGateway 使用） */
   getGateway(): BodyGateway {
     return this.bodyGateway;
+  }
+
+  /** 暴露 RhythmCore 引用（供装配层喂入 presence/awareness 活动数据） */
+  getRhythm(): BodyModuleLike | null {
+    return this.rhythm;
   }
 
   // ---- 内部工具 ----

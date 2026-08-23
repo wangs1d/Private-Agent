@@ -25,6 +25,7 @@ export type BodyModuleKind =
   | "vestibular"  // 前庭器（保留）
   | "homeostasis" // 内脏（保留）
   | "reflex"      // 反射弧（保留）
+  | "rhythm"      // 节律感知（生物钟）：连续工作 / 深夜活跃检测
   // ---- 信号发布源（非真实 BodyModule，仅用于 BodySignal.module 标识）----
   // "action" 标识来自 brain 层 ActionExecutor 的工具执行反馈信号；
   // 不会注册到 BodyGateway/BodyCenter，仅作为 BodySignal.module 合法值。

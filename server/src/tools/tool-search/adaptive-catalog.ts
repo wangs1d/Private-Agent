@@ -8,7 +8,7 @@ import {
   type DeferredToolEntry,
   type DeferredToolSearchMatch,
 } from "./catalog.js";
-import { tokenize } from "./bm25.js";
+import { Bm25Index, tokenize } from "./bm25.js";
 import { IntentRouter, type ParsedIntent, type QueryConstraints } from "./intent-router/intent-router.js";
 import {
   getSkillDependencies,
@@ -85,6 +85,7 @@ type AdaptiveCatalogIndex = {
   signature: string;
   recordsById: Map<string, ResourceRecord>;
   entriesById: Map<string, DeferredToolEntry>;
+  bm25Index: Bm25Index; // 预构建全局 BM25 索引，复用避免每次 search 重建
   byDomainGroup: Map<string, string[]>;
   byDomainGroupDomain: Map<string, string[]>;
   byDomain: Map<string, string[]>;
@@ -208,6 +209,7 @@ export async function adaptiveSearchDeferredTools(
         candidates: route.resources,
         queryVector: options?.queryVector,
         limit: Math.min(50, Math.max(10, limit * 4)),
+        prebuiltIndex: index.bm25Index,
       });
       const boostedRetrieved = applyAdaptiveIntentBoost(index, retrieved, intent.intent || trimmedQuery);
       const topP = topPSelector.select(
@@ -258,6 +260,7 @@ export async function adaptiveSearchDeferredTools(
     candidates: expandedRecords,
     queryVector: options?.queryVector,
     limit: 25,
+    prebuiltIndex: index.bm25Index,
   });
   const reranked = await rerankingPipeline.rerank({
     raw_query: trimmedQuery,
@@ -327,6 +330,7 @@ function buildAdaptiveCatalogIndex(
     signature,
     recordsById: new Map(),
     entriesById: new Map(),
+    bm25Index: new Bm25Index([]), // 占位，下面重建
     byDomainGroup: new Map(),
     byDomainGroupDomain: new Map(),
     byDomain: new Map(),
@@ -374,7 +378,33 @@ function buildAdaptiveCatalogIndex(
     }
   }
 
+  // 预构建全局 BM25 索引（复用，避免每次检索时重新构建）
+  index.bm25Index = new Bm25Index(
+    catalog.entries.map((entry) => {
+      const record = index.recordsById.get(entry.registryName);
+      return {
+        id: entry.registryName,
+        text: record ? searchableTextForRecord(record) : entry.searchText || entry.registryName,
+      };
+    }),
+  );
+
   return index;
+}
+
+function searchableTextForRecord(record: ResourceRecord): string {
+  return [
+    record.level1.name,
+    record.level1.description,
+    ...record.level1.domain,
+    ...record.level1.capability,
+    ...record.level1.tags,
+    record.level2.input_type,
+    record.level2.output_type,
+    ...record.level2.use_cases,
+    ...record.level2.limitations,
+    ...record.level2.preconditions,
+  ].join(" ");
 }
 
 function routeAdaptiveCatalog(

@@ -36,7 +36,8 @@ const EMBEDDING_CACHE_TTL_MS = 30 * 60 * 1000;
  * 带 30min 缓存，避免 ingest 同一文本重复算。
  */
 async function computeEmbedding(text: string): Promise<number[] | null> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const apiKey =
+    process.env.AGENT_EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
   if (isPlaceholderApiKey(apiKey)) return null;
   const cacheKey = semanticFingerprint(text) || text.slice(0, 64);
   const now = Date.now();
@@ -46,8 +47,9 @@ async function computeEmbedding(text: string): Promise<number[] | null> {
   }
   try {
     const model = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
+    // 不显式传 apiKey：让 client 内部 resolveEmbeddingEndpoint 统一走 AGENT_EMBEDDING_API_KEY，
+    // 避免用对话 LLM key（OPENAI_API_KEY，如 DeepSeek）去打 embedding 端点导致 401。
     const r = await fetchOpenAiCompatibleEmbedding({
-      apiKey: apiKey!,
       model,
       input: text,
       // embedding 仅作检索增强：给短超时，慢/失败时降级到本地关键词检索（cosineLikeScore），
@@ -936,6 +938,47 @@ export class HumanLikeMemoryService {
     return Object.values(this.store.nodes)
       .filter((node) => node.actorId === actorId && node.deletionStage !== "hard_deleted")
       .map((node) => ({ ...node }));
+  }
+
+  /**
+   * 按记忆内容反查图节点 ID（联想种子语义化用）。
+   *
+   * MemoryRecallItem 不携带 nodeId，而联想扩散 spread 需要真实节点 ID 才能在
+   * 图上命中。此方法对每条召回内容在节点 content 里做包含匹配（双向：
+   * 节点内容包含查询片段，或查询片段包含节点内容前缀），返回命中的节点 ID。
+   *
+   * 纯内存扫描（节点量级 < 10^4），不触发持久化；无命中返回空数组。
+   */
+  findNodeIdsByContent(actorId: string, contents: string[], maxPerContent = 1): string[] {
+    if (!contents || contents.length === 0) return [];
+    const nodes = Object.values(this.store.nodes).filter(
+      (node) =>
+        node.actorId === actorId &&
+        node.deletionStage !== "hard_deleted" &&
+        typeof node.summary === "string" &&
+        node.summary.length > 0,
+    );
+    const result: string[] = [];
+    for (const raw of contents) {
+      const query = (raw ?? "").trim();
+      if (!query) continue;
+      // 召回文本可能是"标题: 内容"或被截断的形式，取最长可匹配片段
+      const fragments = [query, ...query.split(/[:：\n]/).map((s) => s.trim()).filter((s) => s.length >= 8)]
+        .sort((a, b) => b.length - a.length);
+      let matched = 0;
+      for (const node of nodes) {
+        if (matched >= maxPerContent) break;
+        const summary = node.summary;
+        const hit = fragments.some(
+          (frag) => frag.length >= 8 && (summary.includes(frag.slice(0, 32)) || frag.includes(summary.slice(0, 32))),
+        );
+        if (hit && !result.includes(node.id)) {
+          result.push(node.id);
+          matched++;
+        }
+      }
+    }
+    return result.slice(0, 6);
   }
 
   /**

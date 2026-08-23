@@ -34,6 +34,13 @@ export interface SessionEpitomeSnapshot extends SessionEpitomeEntries {
   revision: number;
 }
 
+/** record() 返回值：合并后快照 + 本轮被关闭（检测为已完成）的 open loop 原文。 */
+export interface RecordEpitomeResult {
+  snapshot: SessionEpitomeSnapshot;
+  /** 本轮被完成语义关闭的 open loops —— 供 ProactivityHub 触发"待办完成恭喜"。 */
+  closedLoops: string[];
+}
+
 /** 内部存储条目（P3：带创建时间，支持 TTL 过滤与完成检测）。 */
 interface EpitomeEntry {
   text: string;
@@ -251,8 +258,9 @@ export class SessionEpitomeStore {
   /**
    * 增量合并本轮提取的条目（去重、限量、关闭已完成 loop），并持久化。
    * @param opts.turnText 本轮用户输入 + Agent 回复（用于 open loop 完成检测）
+   * @returns 合并后快照 + 本轮被关闭的 open loops（供主动恭喜触发）
    */
-  record(actorId: string, entries: SessionEpitomeEntries, opts?: { turnText?: string }): SessionEpitomeSnapshot {
+  record(actorId: string, entries: SessionEpitomeEntries, opts?: { turnText?: string }): RecordEpitomeResult {
     const current = this.load(actorId);
     const now = nowIso();
     const toEntries = (texts: string[]): EpitomeEntry[] =>
@@ -260,6 +268,10 @@ export class SessionEpitomeStore {
 
     // P3 完成检测：本轮文本含完成语义且与存量 loop 足够相关 → 关闭
     const survivedLoops = closeCompletedLoops(current.openLoops, opts?.turnText);
+    // 被关闭项 diff 透出（引用相等：closeCompletedLoops 只 filter 不复制条目）
+    const closedLoops = current.openLoops
+      .filter((loop) => !survivedLoops.includes(loop))
+      .map((loop) => loop.text);
 
     const merge = (existing: EpitomeEntry[], incoming: EpitomeEntry[]): EpitomeEntry[] => {
       const merged = [...incoming, ...existing.map((e) => ({ ...e, createdAt: e.createdAt || now }))];
@@ -281,7 +293,7 @@ export class SessionEpitomeStore {
     };
     this.cache.set(actorId, next);
     this.persist(actorId);
-    return this.toSnapshot(next);
+    return { snapshot: this.toSnapshot(next), closedLoops };
   }
 
   /** 读取某 actor 的 epitome 快照（open loop 过滤 TTL 过期条目）。 */

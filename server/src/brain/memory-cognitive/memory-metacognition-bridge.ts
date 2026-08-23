@@ -190,7 +190,7 @@ export class MemoryMetacognitionBridge {
   async recallWithProvenance(
     actorId: string,
     query: string,
-    opts?: { domain?: string; limit?: number },
+    opts?: { domain?: string; limit?: number; subQueries?: string[] },
   ): Promise<MemoryRecallResult> {
     // 降级开关
     if (!this.isEnabled()) {

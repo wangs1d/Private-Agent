@@ -46,6 +46,13 @@ const SIGNAL_PRIORITY_MAP: Record<string, number> = {
   post_created: 3,
   friend_request_received: 7,
   mood_shift: 4,
+  // ProactivityHub 多元触发 kind（proactivity-types.ts ProactiveIntentKind）
+  overwork_care: 7,
+  task_celebration: 6,
+  care: 5,
+  followup: 4,
+  interest_share: 3,
+  greeting: 3,
 };
 
 const DEFAULT_THRESHOLD = 2.0;
@@ -606,6 +613,9 @@ export class ProactionCortex {
     "calendar.create_task",
     "smart_home.scene",
     "smart_home.control_device",
+    // ProactivityHub act 模式：过劳干预放音乐等场景
+    "media.search",
+    "media.play",
   ]);
 
   /**

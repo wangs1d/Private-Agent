@@ -25,6 +25,7 @@ export type HybridRetrievalInput = {
   candidates: ResourceRecord[];
   queryVector?: number[] | Float32Array;
   limit?: number;
+  prebuiltIndex?: Bm25Index; // 预构建 BM25 索引，复用避免每次新建
 };
 
 export type HybridRetrievalWeights = {
@@ -59,7 +60,7 @@ export class HybridRetrievalEngine {
     if (candidates.length === 0) return [];
     const limit = Math.max(1, Math.min(100, input.limit ?? candidates.length));
     const weights = weightsForQuery(input.query);
-    const keywordScores = scoreKeywords(input.query, candidates);
+    const keywordScores = scoreKeywords(input.query, candidates, input.prebuiltIndex);
 
     const out: HybridRetrievedResource[] = [];
     for (const record of candidates) {
@@ -118,7 +119,25 @@ export function weightsForQuery(query: string): HybridRetrievalWeights {
   });
 }
 
-function scoreKeywords(query: string, candidates: ResourceRecord[]): Map<string, number> {
+function scoreKeywords(
+  query: string,
+  candidates: ResourceRecord[],
+  prebuiltIndex?: Bm25Index,
+): Map<string, number> {
+  // 极短 query（1-2 token）跳过 BM25：lexicalToolBoost 已覆盖 token 重叠
+  if (tokenize(query).length <= 2) return new Map();
+
+  if (prebuiltIndex) {
+    const candidateIds = new Set(candidates.map((r) => r.level1.resource_id));
+    const hits = prebuiltIndex.search(query, candidates.length);
+    const max = Math.max(...hits.map((h) => h.score), 0);
+    const out = new Map<string, number>();
+    for (const hit of hits) {
+      if (!candidateIds.has(hit.id)) continue;
+      out.set(hit.id, max > 0 ? clamp01(hit.score / max) : 0);
+    }
+    return out;
+  }
   const docs = candidates.map((record) => ({
     id: record.level1.resource_id,
     text: searchableText(record),

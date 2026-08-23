@@ -41,6 +41,7 @@ import type {
   SystemRouteDecision,
   TonePolicyResult,
   UserActivityState,
+  UserMentalState,
   VisualInput,
   PersonalityCore,
   InferenceClue,
@@ -51,7 +52,7 @@ import type {
   LearningFeedback,
   LearningSnapshot,
 } from "./memory-cognitive/memory-experience-learning-loop.js";
-import type { MemoryFeedbackInput } from "./memory-feedback-store.js";
+import type { MemoryFeedbackInput } from "./memory-strength-model.js";
 import type { SessionEpitomeEntries, SessionEpitomeSnapshot } from "../services/session-epitome.js";
 import { extractEpitomeEntries } from "../services/session-epitome.js";
 import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
@@ -107,6 +108,15 @@ interface AwarenessCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
   observe(actorId: string): UserActivityState | null;
+  /**
+   * 语义觉察：返回用户活动状态 + 心智状态复合对象。
+   * 供对话内主动钩子等入口按需调用（fire-on-demand），
+   * 只在真正需要感知用户当下状态时取，避免每轮对话都跑浪费 token。
+   */
+  observeWithMental?(
+    actorId: string,
+    opts?: { recentConversationHistory?: string },
+  ): Promise<{ activity: UserActivityState | null; mental: UserMentalState | null }>;
   /**
    * 元认知置信度评估（Stage 4 Task 3）。
    * 在 cognize 路由前调用；score < 0.4 时由 BrainCenter 强制升级到 complex。
@@ -214,6 +224,13 @@ interface MemoryCortexLike {
   recordMemoryFeedback?(input: MemoryFeedbackInput): void;
   /** 读取某 actor 的记忆反馈快照（调试/统计用）。 */
   getMemoryFeedbackSnapshot?(actorId: string): unknown;
+  /** 隐式反馈批量回灌（P1-3）：ImplicitFeedbackDetector 检测结果 → MemoryFeedbackStore。 */
+  recordImplicitFeedbacks?(
+    actorId: string,
+    signals: Array<{ memoryContent: string; signal: "positive" | "negative" | "weak_negative"; reason: string }>,
+  ): void;
+  /** 记忆目录摘要（P2-1 元认知：知道自己记住了什么）。 */
+  getInventorySummary?(actorId: string): Promise<string>;
   /** 跨会话开放环路：记录 open loops / 承诺 / 偏好（KV 持久化）；turnText 用于完成检测。 */
   updateSessionEpitome?(actorId: string, entries: SessionEpitomeEntries, turnText?: string): void;
   /** 读取某 actor 的跨会话开放环路快照（新会话开场注入用）。 */
@@ -223,7 +240,7 @@ interface MemoryCortexLike {
   recall(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
   ): Promise<MemoryRecallResult>;
   recallCrossDomain(actorId: string, query: string): Promise<MemoryRecallResult>;
   consolidate(actorIds: string[]): Promise<MemoryConsolidationStats>;
@@ -237,7 +254,7 @@ interface MemoryCortexLike {
   recallWithProvenance?(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
   ): Promise<MemoryRecallResult>;
   /** 联想预判（委托 AssociativeGraph，未注册返回空结果） */
   predictAssociation?(actorId: string, query: string): Promise<PredictedAssociation>;
@@ -452,6 +469,21 @@ export class BrainCenter {
   private toolPlanningCortex: import("./tool-planning-cortex.js").ToolPlanningCortex | null = null;
   /** 在线学习皮层 */
   private onlineLearningCortex: import("./online-learning-cortex.js").OnlineLearningCortex | null = null;
+  /**
+   * 召回查询扩展器（P1-1 单窗口优化）：recall 前做指代消解 + 话题扩展 +
+   * 多意图拆分，解决长会话里"那个/它/继续"类 query 的召回失焦。
+   */
+  private recallQueryExpander: import("./memory-query-expander.js").RecallQueryExpander | null = null;
+  /**
+   * 用户画像聚合器（P0-1）：以 USER_PROFILE.md 为事实源，
+   * 强信号快速路径 + 每 N 轮 LLM 深度合成，让画像"越来越了解用户"。
+   */
+  private userProfileAggregator: import("./user-profile-aggregator.js").UserProfileAggregator | null = null;
+  /**
+   * 隐式反馈检测器（P1-3）：从对话形态（纠正/认同/重复提问/换话题）中
+   * 检测记忆相关性信号，回灌 MemoryFeedbackStore 参与召回排序。
+   */
+  private implicitFeedbackDetector: import("./memory-implicit-feedback.js").MemoryImplicitFeedbackDetector | null = null;
   /** 意图预判引擎（外部已有服务，可选注入） */
   private anticipationEngine: import("./decision-hub.js").AnticipationEngineLike | null = null;
   /** 情绪调节器（深度优化：情绪影响路由） */
@@ -846,6 +878,27 @@ export class BrainCenter {
     console.log("[BrainCenter] 已注册 AnticipationEngine（意图预判引擎）");
   }
 
+  /** 注册召回查询扩展器（P1-1：recall 前指代消解 + 话题扩展 + 多意图拆分） */
+  registerRecallQueryExpander(expander: import("./memory-query-expander.js").RecallQueryExpander): void {
+    this.recallQueryExpander = expander;
+    console.log("[BrainCenter] 已注册 RecallQueryExpander（召回查询扩展器）");
+  }
+
+  /** 注册用户画像聚合器（P0-1：USER_PROFILE.md 动态更新 + LLM 深度合成） */
+  registerUserProfileAggregator(aggregator: import("./user-profile-aggregator.js").UserProfileAggregator): void {
+    this.userProfileAggregator = aggregator;
+    console.log("[BrainCenter] 已注册 UserProfileAggregator（用户画像聚合器）");
+  }
+  getUserProfileAggregator(): import("./user-profile-aggregator.js").UserProfileAggregator | null {
+    return this.userProfileAggregator;
+  }
+
+  /** 注册隐式反馈检测器（P1-3：对话形态 → 记忆相关性反馈回灌） */
+  registerImplicitFeedbackDetector(detector: import("./memory-implicit-feedback.js").MemoryImplicitFeedbackDetector): void {
+    this.implicitFeedbackDetector = detector;
+    console.log("[BrainCenter] 已注册 MemoryImplicitFeedbackDetector（隐式反馈检测器）");
+  }
+
   registerEmotionModulator(em: import("./emotion-modulator.js").EmotionModulator): void {
     this.emotionModulator = em;
     console.log("[BrainCenter] 已注册 EmotionModulator（情绪调节器）");
@@ -919,6 +972,29 @@ export class BrainCenter {
       return null;
     }
     return this.awareness.observe(actorId);
+  }
+
+  /**
+   * 语义觉察：返回用户活动状态 + 心智状态复合对象。
+   *
+   * fire-on-demand 入口：只在对话内主动钩子命中等真正需要感知用户当下状态时调用，
+   * 避免每轮对话都跑语义推断浪费 token。AwarenessCortex 未注册 / 未注入
+   * semanticInferrer / 调用失败时，mental 降级为 null（activity 仍尽力返回）。
+   */
+  async observeWithMental(
+    actorId: string,
+    opts?: { recentConversationHistory?: string },
+  ): Promise<{ activity: UserActivityState | null; mental: UserMentalState | null }> {
+    if (!this.awareness || typeof this.awareness.observeWithMental !== "function") {
+      // 未暴露 observeWithMental 时，回退到基础 observe（仅 activity）。
+      return { activity: this.observe(actorId), mental: null };
+    }
+    try {
+      return await this.awareness.observeWithMental(actorId, opts);
+    } catch (err) {
+      console.log(`[BrainCenter] observeWithMental 失败（降级 activity）: ${err}`);
+      return { activity: this.observe(actorId), mental: null };
+    }
   }
 
   /**
@@ -1189,6 +1265,75 @@ export class BrainCenter {
     const currentTask = this.taskSwitchingCortex?.getCurrentTask(actorId) ?? null;
     const userPattern = this.onlineLearningCortex?.getProfile(actorId) ?? undefined;
 
+    // === 阶段 0.9：拉取最近对话历史（提前，供 recall query 扩展用）===
+    // 原"阶段 1.5.1"在 recall 之后才拉历史，导致 recall 拿不到上下文。
+    // 单窗口长会话下用户大量使用指代（"那个/它/继续"），query 扩展必须在
+    // recall 之前完成。拉取逻辑与原阶段 1.5.1 完全一致（含 master 会话修复）。
+    let recentConversationHistory = "";
+    try {
+      const chatSessionId =
+        input.sessionId && isNotesChatSessionId(input.sessionId)
+          ? input.sessionId
+          : resolvePrimaryChatSessionId(
+              actorId,
+              getAgentRuntimeConfig().masterDelegation.enabled,
+            );
+      const threadStore = getChatThreadStore();
+      const messages = threadStore.thread(chatSessionId, "");
+      const recentMessages = messages.slice(-12);
+      const currentUserMessage =
+        input.text?.trim()
+          ? ({ role: "user", content: input.text.trim() } satisfies ChatCompletionMessageParam)
+          : null;
+      const recentWindow = currentUserMessage
+        ? [...recentMessages, currentUserMessage].slice(-12)
+        : recentMessages;
+      if (recentWindow.length > 0) {
+        const historyLines = recentWindow
+          .map((msg: ChatCompletionMessageParam) => formatRecentConversationLine(msg))
+          .filter((line): line is string => Boolean(line));
+        recentConversationHistory = historyLines.join("\n");
+      }
+    } catch (err) {
+      console.log(`[BrainCenter] 拉取对话历史失败（忽略）: ${err}`);
+    }
+
+    // === 阶段 0.95：召回 query 扩展（P1-1 单窗口优化）===
+    // 指代消解 + 话题扩展 + 多意图拆分。纯规则毫秒级。
+    // recallQuery 仅用于记忆检索；后续 LLM prompt 仍用用户原始 query。
+    let recallQuery = query;
+    let recallSubQueries: string[] | undefined;
+    if (this.recallQueryExpander && query) {
+      try {
+        const expansion = this.recallQueryExpander.expand({
+          query,
+          recentConversationHistory,
+        });
+        recallQuery = expansion.primaryQuery || query;
+        if (expansion.subQueries.length > 1) {
+          recallSubQueries = expansion.subQueries;
+        }
+        if (expansion.expanded) {
+          console.log(
+            `[BrainCenter] recall query 已扩展: "${query}" → "${recallQuery}"` +
+              (recallSubQueries ? ` (+${recallSubQueries.length - 1} 子意图)` : ""),
+          );
+        }
+      } catch {
+        /* 扩展失败用原始 query */
+      }
+    }
+
+    // === 阶段 0.96：元认知目录缓存刷新（P2-1）===
+    // fire-and-forget 刷新 MemoryInventory 60s TTL 缓存（不阻塞 cognize），
+    // prompt-context-builder assembleMemory 同步读缓存注入【记忆目录】块，
+    // 让主 Agent LLM "知道自己记住了什么"（用户问"你知道我什么"时有真实依据）。
+    if (this.memory && typeof this.memory.getInventorySummary === "function") {
+      void this.memory.getInventorySummary(actorId).catch(() => {
+        /* 目录刷新失败静默，prompt 侧读到空串跳过注入 */
+      });
+    }
+
     const [
       audioResult,
       visualResult,
@@ -1206,8 +1351,15 @@ export class BrainCenter {
         : Promise.resolve(null),
       this.memory
         ? (typeof this.memory.recallWithProvenance === "function"
-            ? this.memory.recallWithProvenance(actorId, query, { limit: 5 })
-            : this.memory.recall(actorId, query, { limit: 5 })
+            ? this.memory.recallWithProvenance(actorId, recallQuery, {
+                limit: 5,
+                // P2-2 多意图并行召回：recallWithProvenance 路径同样透传子意图
+                ...(recallSubQueries ? { subQueries: recallSubQueries } : {}),
+              })
+            : this.memory.recall(actorId, recallQuery, {
+                limit: 5,
+                ...(recallSubQueries ? { subQueries: recallSubQueries } : {}),
+              })
           ).catch(() => null)
         : Promise.resolve(null),
       this.limbic?.inferEmotion
@@ -1255,42 +1407,9 @@ export class BrainCenter {
           : this.sensory.buildSensoryFrame(fusionInputs))
       : undefined;
 
-    // === 阶段 1.5.1：拉取最近对话历史（解决追问断片问题）===
-    // 从 thread store 拉取最近 3 轮对话（6 条消息：3 user + 3 assistant），
-    // 注入到 cognize prompt，让 LLM 能理解追问的上下文。
-    // 例：用户追问"kimi的新模型啊"时，cognize 需要知道上一轮刚聊过 Kimi K3。
-    let recentConversationHistory = "";
-    try {
-      // 修复：主会话 thread 统一存于 `master:{actorId}`（masterDelegation 开启时）。
-      // 原实现用 input.sessionId（裸 actorId）拉取 → 恒为空 → 追问时 cognize 无上下文（失忆）。
-      // notes 会话保留独立前缀，其余统一走 resolvePrimaryChatSessionId（与 agent-core 一致）。
-      const chatSessionId =
-        input.sessionId && isNotesChatSessionId(input.sessionId)
-          ? input.sessionId
-          : resolvePrimaryChatSessionId(
-              actorId,
-              getAgentRuntimeConfig().masterDelegation.enabled,
-            );
-      const threadStore = getChatThreadStore();
-      const messages = threadStore.thread(chatSessionId, "");
-      const recentMessages = messages.slice(-12);
-      const currentUserMessage =
-        input.text?.trim()
-          ? ({ role: "user", content: input.text.trim() } satisfies ChatCompletionMessageParam)
-          : null;
-      const recentWindow = currentUserMessage
-        ? [...recentMessages, currentUserMessage].slice(-12)
-        : recentMessages;
-      if (recentWindow.length > 0) {
-        const historyLines = recentWindow
-          .map((msg: ChatCompletionMessageParam) => formatRecentConversationLine(msg))
-          .filter((line): line is string => Boolean(line));
-        recentConversationHistory = historyLines.join("\n");
-      }
-    } catch (err) {
-      // thread store 拉取失败不影响 cognize，静默跳过
-      console.log(`[BrainCenter] 拉取对话历史失败（忽略）: ${err}`);
-    }
+    // === 阶段 1.5.1：（已上移到阶段 0.9）===
+    // 最近对话历史拉取已提前到 Promise.all 之前（阶段 0.9），
+    // 供 recall query 扩展消费；此处直接复用 recentConversationHistory。
 
     const context: CognitiveContext = {
       memories: recallResult?.items ?? [],
@@ -1558,6 +1677,38 @@ export class BrainCenter {
         this.onlineLearningCortex.observe(actorId, { text: query }, routeForLearning);
       } catch (err) {
         console.log(`[BrainCenter] 在线学习观察失败（忽略）: ${err}`);
+      }
+    }
+
+    // === 阶段 3.6.1 — 用户画像聚合（P0-1）===
+    // 观察本轮对话：强画像信号走快速路径立即更新 USER_PROFILE.md；
+    // 每 N 轮触发 LLM 深度画像合成（异步，不阻塞响应）。
+    if (this.userProfileAggregator) {
+      try {
+        this.userProfileAggregator.observeTurn(actorId, query, cognitive.response ?? "");
+      } catch (err) {
+        console.log(`[BrainCenter] 画像聚合观察失败（忽略）: ${err}`);
+      }
+    }
+
+    // === 阶段 3.6.2 — 记忆隐式反馈检测（P1-3）===
+    // 从对话形态（纠正/认同/重复提问/换话题）检测上一轮召回记忆的相关性信号，
+    // 回灌 MemoryFeedbackStore，影响后续召回排序。纯规则零延迟。
+    if (this.implicitFeedbackDetector && this.memory && typeof this.memory.recordImplicitFeedbacks === "function") {
+      try {
+        const signals = this.implicitFeedbackDetector.detectAndAdvance(actorId, {
+          userText: query,
+          assistantText: cognitive.response ?? "",
+          recalledMemories: (recallResult?.items ?? []).map((it) => ({
+            content: it.content,
+            score: it.score,
+          })),
+        });
+        if (signals.length > 0) {
+          this.memory.recordImplicitFeedbacks(actorId, signals);
+        }
+      } catch (err) {
+        console.log(`[BrainCenter] 隐式反馈检测失败（忽略）: ${err}`);
       }
     }
 
