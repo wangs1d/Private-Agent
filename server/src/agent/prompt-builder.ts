@@ -660,7 +660,8 @@ export function buildLayeredSystemPrompt(
     !memory?.semanticIntent &&
     !memory?.fastVerdictInstruction &&
     !memory?.proactiveAdvice &&
-    !memory?.interestList
+    !memory?.interestList &&
+    !memory?.modeRoleGuidance
   ) {
     return baseSystem.trim();
   }
@@ -713,6 +714,9 @@ export function buildLayeredSystemPrompt(
   if (memory.interestList) parts.push(memory.interestList);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
+  // 本模式职责人格（fast/complex 差异化）：让同一套基座人格在当前"脑"上各有侧重。
+  // 该项由 agent-core 依据路由 mode 注入，需放在人格块之后、远离 baseSystem 的关键约束区。
+  if (memory.modeRoleGuidance) parts.push(`【本模式职责】\n${memory.modeRoleGuidance}`);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -760,7 +764,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.semanticIntent ||
       memory?.fastVerdictInstruction ||
       memory?.proactiveAdvice ||
-      memory?.interestList
+      memory?.interestList ||
+      memory?.modeRoleGuidance
   );
 }
 
@@ -822,6 +827,8 @@ export function buildLayeredSystemPromptSections(
   if (m.interestList) dynamicContext.push(m.interestList);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (m.fastVerdictInstruction) dynamicContext.push(m.fastVerdictInstruction);
+  // 本模式职责人格（fast/complex 差异化）：放动态上下文末尾，紧贴 baseSystem 前的关键约束区
+  if (m.modeRoleGuidance) dynamicContext.push(`【本模式职责】\n${m.modeRoleGuidance}`);
 
   return { stablePrefix, dynamicContext };
 }

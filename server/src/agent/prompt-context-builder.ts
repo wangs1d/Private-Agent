@@ -375,7 +375,7 @@ export class PromptContextBuilder {
 
   private personalityProvider: ((actorId: string) => PersonalityCore | null) | null = null;
 
-  /** ProactivityHub advise 队列（setProactivityHub 时由 agent-core 注入） */
+/** ProactivityHub advise 队列（setProactivityHub 时由 agent-core 注入） */
   private adviceStore: AdviceStore | null = null;
 
   /**
@@ -693,7 +693,7 @@ export class PromptContextBuilder {
       }
     }
 
-    // ProactivityHub advise 模式：drain 出排队中的主动建议，注入【Agent 主动建议】块。
+// ProactivityHub advise 模式：drain 出排队中的主动建议，注入【Agent 主动建议】块。
     // 取出即清空（无建议时零开销）；由 agent 在本轮回复中自然带出，不打断用户。
     let proactiveAdviceBlock: string | undefined;
     if (this.adviceStore) {

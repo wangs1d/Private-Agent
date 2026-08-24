@@ -22,7 +22,7 @@
 //     - speak → LifeSignalHub（现有闭环接管话术）
 //     - act → 黑名单安全门（危险操作永不自动执行）+ 通用工具执行
 //       （LLM 自主选工具，不再限定白名单——与对话中调工具同级安全）
-//     - advise → AdviceStore → 下一轮 prompt 注入【Agent 主动建议】
+//     - advise → 改由 fast speak 车道以主动对话形式投递（不再注入对话 prompt）
 //
 //  4. 护栏：FrequencyGovernor 前置频控（每日预算 + 分 kind 冷却 + 静默时段），
 //     ProactionCortex disturb/repeat_suppress 保留为第二道防线。
@@ -34,14 +34,12 @@ import type {
   ProactiveIntent,
 } from "./proactivity-types.js";
 import { FrequencyGovernor } from "./frequency-governor.js";
-import { AdviceStore } from "./advice-store.js";
 import { PerceptionFeed } from "./perception-feed.js";
 import { InitiativeEngine, type LlmCompleteFn } from "./initiative-engine.js";
 import { InitiativeDecisionCache } from "./initiative-decision-cache.js";
 import { learnExemplar, type TriggerExemplarKind } from "./semantic-trigger-matcher.js";
 import {
   buildConversationIntent,
-  detectConversationProactiveHook,
 } from "./triggers/conversation-triggers.js";
 import {
   buildCelebrationIntent,
@@ -82,11 +80,6 @@ export interface ProactivityHubDeps {
    * 支持 async（磁盘读取）。
    */
   getProfileText?: (actorId: string) => Promise<string | null> | string | null;
-  /** 按需感知用户状态（brainCenter.observeWithMental 的薄包装；fire-on-demand 省 token） */
-  observeUserState?: (
-    actorId: string,
-    recentHistory?: string,
-  ) => Promise<{ activity?: string | null; mentalIntent?: string | null }>;
   /**
    * 最近一次用户交互时间戳 ms；null=从未交互（不主动冷启动）。
    * 可选：未注入时 hub 用自身 observeConversationTurn 记录的时间兜底。
@@ -136,6 +129,13 @@ function readTickIntervalMs(): number {
 /** 通用路径最近主动行为记忆条数（防重复） */
 const RECENT_INITIATIVES_LIMIT = 8;
 
+/** 读布尔 env（默认 fallback） */
+function readEnvBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  return raw === "1" || raw.toLowerCase() === "true";
+}
+
 /** 从 media.search 结果解析第一条曲目（兼容数组 / {tracks:[]} / {result:{tracks:[]}} 结构） */
 export function parseFirstTrack(
   result: Record<string, unknown> | undefined,
@@ -159,11 +159,15 @@ export function parseFirstTrack(
 
 export class ProactivityHub {
   private readonly governor: FrequencyGovernor;
-  private readonly adviceStore: AdviceStore;
   /** 通用感知层：所有源的统一观察流 */
   private readonly feed = new PerceptionFeed();
   /** 通用路径：LLM 自主决策引擎（llmComplete 未注入时禁用，静默只用快路径） */
   private readonly engine: InitiativeEngine;
+  /** 通用路径总开关：默认关（对话主动走 fast 规则车道；LLM 通用路径需显式开启） */
+  private readonly llmInitiativeEnabled: boolean;
+  /** act 审计：最近发起的自主工具执行（安全可查，最多保留近 N 条） */
+  private readonly actAudit = new Map<string, Array<{ at: number; tool: string; args: Record<string, unknown> }>>();
+  private readonly ACT_AUDIT_LIMIT = 20;
   /** 负向决策缓存：同观察指纹近期已判 none 时跳过 LLM（省 token） */
   private readonly decisionCache = new InitiativeDecisionCache();
   /** 已见过的 actor（tick 只对交互过的用户生效，不冷启动打扰） */
@@ -179,13 +183,8 @@ export class ProactivityHub {
 
   constructor(private readonly deps: ProactivityHubDeps) {
     this.governor = deps.frequencyGovernor ?? new FrequencyGovernor();
-    this.adviceStore = new AdviceStore();
     this.engine = new InitiativeEngine(deps.llmComplete ?? null);
-  }
-
-  /** 暴露 advise 队列给 prompt 注入层（prompt-context-builder drain 注入） */
-  getAdvices(): AdviceStore {
-    return this.adviceStore;
+    this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", false);
   }
 
   /** 暴露感知流（诊断/测试用） */
@@ -206,7 +205,10 @@ export class ProactivityHub {
     }, intervalMs);
     // 不阻塞进程退出
     if (typeof this.tickTimer.unref === "function") this.tickTimer.unref();
-    const engineOn = this.engine.isEnabled() ? "+LLM 通用路径" : "（LLM 未接入，仅规则快路径）";
+    const engineOn =
+      this.llmInitiativeEnabled && this.engine.isEnabled()
+        ? "+LLM 通用路径"
+        : "（LLM 通用路径关闭，快路径规则 + complex→fast 主动）";
     console.log(
       `[ProactivityHub] 已启动（tick=${Math.round(intervalMs / 60000)}min，每日预算=${this.governor.getBudget()}${engineOn}）`,
     );
@@ -222,11 +224,16 @@ export class ProactivityHub {
 
   // ---- 对外入口（各模块薄接线点，全部 fire-and-forget 不阻塞调用方） ----
 
-  /** 对话轮观察（agent-core 每轮 cognize 后调用） */
-  observeConversationTurn(actorId: string, text: string, recentHistory?: string): void {
+  /**
+   * 对话轮实时采集（agent-core 每轮接线调用）。
+   * 完全后台化：只把对话内容/活跃推入感知流（供后台理解用户动态 + 喂节律感知），
+   * 不在此同步触发任何主动行为，也不进入对话 prompt。
+   * 是否主动由后台零 LLM 规则判（runConversationRuleJudge）在下一事件循环解耦决定。
+   */
+  observeConversationTurn(actorId: string, text: string): void {
     this.knownActors.add(actorId);
     this.lastInteractionAt.set(actorId, Date.now());
-    // 感知流：对话轮是最高频观察（低显著，供 LLM 理解用户在忙什么）
+    // 感知流：对话轮是最高频观察（低显著，供后台判断用户在忙什么 + 喂节律）
     this.feed.pushObservation(
       actorId,
       "conversation_turn",
@@ -235,10 +242,11 @@ export class ProactivityHub {
     );
     // 用户活跃事件 → 装配层可选消费（如喂 RhythmCore 做节律感知）
     this.noteUserActivity(actorId, "conversation");
-    // 保守规则粗筛（零 LLM）：无强线索直接静默
-    if (!detectConversationProactiveHook(text)) return;
-    void this.handleConversation(actorId, text, recentHistory).catch((err) => {
-      console.log(`[ProactivityHub] 对话触发处理失败（忽略）: ${err}`);
+    // 后台零 LLM 规则判：解耦到下一事件循环（fire-and-forget），不阻塞主回复、不进 prompt。
+    setImmediate(() => {
+      void this.runConversationRuleJudge(actorId, text).catch((err) => {
+        console.log(`[ProactivityHub] 对话规则判断失败（忽略）: ${err}`);
+      });
     });
   }
 
@@ -338,8 +346,12 @@ export class ProactivityHub {
       await this.route(buildGreetingIntent(actorId, greeting));
       return; // 同一 tick 不叠加，单次主动最克制
     }
-    // 通用路径：感知流增量消费 → 有新观察才调 LLM 自主决策
-    await this.evaluateInitiative(actorId, now, lastInteraction);
+    // 通用路径：感知流增量消费 → 有新观察才调 LLM 自主决策。
+    // 默认关闭（LLM 参与需显式 PROACTIVITY_LLM_INITIATIVE=1）：
+    // 对话主动由 fast 规则车道 + complex→fast 主动独占，避免双路径重复主动。
+    if (this.llmInitiativeEnabled) {
+      await this.evaluateInitiative(actorId, now, lastInteraction);
+    }
   }
 
   // ---- 通用路径：LLM 自主决策 ----
@@ -517,11 +529,15 @@ export class ProactivityHub {
         } as ProactiveIntent);
         break;
       case "advise":
-        this.adviceStore.push(actorId, {
-          kind: decision.kind as never,
-          text: `${decision.messageHint || rationale}`.slice(0, 200),
-        });
-        console.log(`[ProactivityHub] advise 已入队（通用）kind=${decision.kind} actor=${actorId}`);
+        // advise 不再注入对话 prompt，改由 fast speak 车道以主动对话形式投递。
+        this.emitSpeakSignal({
+          actorId,
+          kind: decision.kind,
+          importance: decision.importance,
+          title: rationale.slice(0, 60),
+          summary: decision.messageHint || rationale,
+          source,
+        } as ProactiveIntent);
         break;
     }
   }
@@ -546,25 +562,14 @@ export class ProactivityHub {
     }
   }
 
-  private async handleConversation(
-    actorId: string,
-    text: string,
-    recentHistory?: string,
-  ): Promise<void> {
-    // 按需感知用户当下状态：只在真正命中主动线索时取一次（fire-on-demand，省 token）
-    let stateNote = "";
-    if (this.deps.observeUserState) {
-      try {
-        const wm = await this.deps.observeUserState(actorId, recentHistory);
-        if (wm?.activity) stateNote = `用户当前活动状态：${wm.activity}`;
-        if (wm?.mentalIntent && wm.mentalIntent !== "unknown") {
-          stateNote += (stateNote ? "；" : "") + `当下意图：${wm.mentalIntent}`;
-        }
-      } catch {
-        /* 感知失败不阻塞主动触发 */
-      }
-    }
-    const intent = buildConversationIntent(actorId, text, stateNote);
+  /**
+   * 后台零 LLM 规则判：拿到对话内容后，用纯规则（关键词/语义泛化）判断是否有
+   * 值得主动承接的线索（care/followup），命中则经频控后主动 speak。
+   * 不调用 LLM、不进对话 prompt，模拟人类自发性（得到信息→判断→决定→触发）。
+   */
+  private async runConversationRuleJudge(actorId: string, text: string): Promise<void> {
+    // buildConversationIntent 内部已做钩子粗筛（零 LLM），未命中返回 null。
+    const intent = buildConversationIntent(actorId, text, "");
     if (intent) await this.route(intent);
   }
 
@@ -588,11 +593,8 @@ export class ProactivityHub {
         this.emitSpeakSignal(intent);
         break;
       case "advise":
-        this.adviceStore.push(intent.actorId, {
-          kind: intent.kind,
-          text: `${intent.title}：${intent.summary}`.slice(0, 200),
-        });
-        console.log(`[ProactivityHub] advise 已入队 kind=${intent.kind} actor=${intent.actorId}`);
+        // advise 不再注入对话 prompt（会污染对话），改由 fast speak 车道以主动对话形式投递。
+        this.emitSpeakSignal(intent);
         break;
     }
   }
@@ -642,12 +644,31 @@ export class ProactivityHub {
         console.log(
           `[ProactivityHub] act 执行 ${ret?.ok ? "成功" : "失败"} tool=${step.tool} actor=${actorId}`,
         );
+        // act 审计：记录自主执行（时间/工具/参数），供安全复盘；仅内存保留近 N 条
+        this.recordActAudit(actorId, step.tool, args);
         if (!ret?.ok) break; // 前置步骤失败则中断链（如 search 失败不硬播）
       } catch (err) {
         console.log(`[ProactivityHub] act 执行异常 tool=${step.tool}（忽略）: ${err}`);
         break;
       }
     }
+  }
+
+  /** 记录一次自主工具执行（act 审计；内存环形保留近 N 条） */
+  private recordActAudit(
+    actorId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): void {
+    const list = this.actAudit.get(actorId) ?? [];
+    list.push({ at: Date.now(), tool, args });
+    if (list.length > this.ACT_AUDIT_LIMIT) list.splice(0, list.length - this.ACT_AUDIT_LIMIT);
+    this.actAudit.set(actorId, list);
+  }
+
+  /** 读取 act 审计（诊断/安全复盘用） */
+  getActAudit(actorId: string): Array<{ at: number; tool: string; args: Record<string, unknown> }> {
+    return this.actAudit.get(actorId) ?? [];
   }
 
   /** 解析步骤参数：fromStep 引用前序结果（media.search → media.play 链） */

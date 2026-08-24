@@ -225,7 +225,6 @@ class VoiceOrbState extends State<VoiceOrb>
         msgId.isNotEmpty &&
         msgId.endsWith(_activeTraceId!);
     if (!traceMatch && !msgMatch) return;
-    if (payload["phase"]?.toString() == "interim") return;
 
     final String rawChunk = payload["chunk"]?.toString() ?? "";
     if (rawChunk.isEmpty) return;

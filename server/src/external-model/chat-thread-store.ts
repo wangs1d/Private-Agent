@@ -988,6 +988,36 @@ export class ChatThreadStore {
     this.persistence?.scheduleSave(sessionId, msgs);
     return { ok: true, index };
   }
+
+  /**
+   * 跨轮并行冲突检测辅助：返回「clientMessageId 之后、最新一条 user 纯文本」。
+   *
+   * 用途：后台复杂任务被某个 chatUserMessageId 触发；当它在后台执行期间，用户可能
+   * 又发了新消息（新的 user turn）。续接迟到的后台结果前，需要知道这条中断后的
+   * 最新用户话题是否已与原任务目标脱钩，据此决定续接还是丢弃。
+   *
+   * 仅在 clientMessageId 能定位到该消息、且其后存在新的 user 消息时返回其一；
+   * 否则返回 undefined（表示用户没有在任务执行中插话，可安全续接，不触发额外分类）。
+   */
+  latestUserTextAfter(
+    sessionId: string,
+    defaultSystemPrompt: string,
+    clientMessageId: string,
+  ): string | undefined {
+    if (!clientMessageId) return undefined;
+    const msgs = this.thread(sessionId, defaultSystemPrompt);
+    const found = findUserMessageByClientId(msgs, clientMessageId);
+    if (!found) return undefined;
+    // 自触发消息之后向后扫描，取最后一条带文本的 user 消息。
+    for (let i = msgs.length - 1; i > found.index; i--) {
+      const m = msgs[i];
+      if (m && m.role === "user" && typeof m.content === "string") {
+        const text = m.content.trim();
+        if (text && text.length > 0) return text;
+      }
+    }
+    return undefined;
+  }
 }
 
 let sharedStore: ChatThreadStore | null = null;

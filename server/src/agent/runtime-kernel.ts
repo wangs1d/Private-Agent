@@ -111,6 +111,8 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 元认知与情绪：让 LLM 知道"自己现在怎么想/感觉如何"——剥离会让 Agent 失去自我感知
   "metaCognition",
   "emotionState",
+  // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
+  "modeRoleGuidance",
 ];
 
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
@@ -132,6 +134,8 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "currentTime",
   "yesterdayHighlight",
   "memoryContinuity",
+  // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
+  "modeRoleGuidance",
 ];
 
 const KEYWORDS = {

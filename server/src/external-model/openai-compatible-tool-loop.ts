@@ -249,50 +249,6 @@ function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
 }
 
 /**
- * Fix3(加固 fast 轻工具链路)：当最终回复是"没查到/道歉式兜底"且没有成功工具数据时，
- * 用一次反道歉重建调用，让主力 LLM 基于既有上下文给出尽量有帮助、具体的回答，
- * 而不是把"没查到"式空话直接透出给用户。
- * 本函数仅缓冲重建结果并返回（不在内部 onDelta），由调用方统一推送一次；
- * 重建仍为空/道歉时返回 ""，不再下发任何固定道歉文案，交由上层自然处理。
- */
-async function rebuildWithoutFallback(
-  client: OpenAI,
-  model: string,
-  messages: ChatCompletionMessageParam[],
-): Promise<string> {
-  let rebuilt = "";
-  try {
-    const rebuiltMessages: ChatCompletionMessageParam[] = [
-      ...messages,
-      {
-        role: "user",
-        content:
-          "请不要道歉，也不要声称「没查到/没找到/做不到/信息不足无法回答/稍后重试」。\n" +
-          "请基于当前对话里所有内容和你的知识，直接给出最有用、尽可能具体的回复；" +
-          "如果确实还缺关键信息，就明确指出你缺哪一条线索，并建议用户如何补充。请直接输出内容。",
-      },
-    ];
-    const resp = await client.chat.completions.create({
-      model,
-      messages: rebuiltMessages,
-      temperature: 0.6,
-      max_tokens: 600,
-      stream: true,
-    });
-    await consumeNormalizedStream(
-      adaptOpenAiChatCompletionStream(resp as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>),
-      { onContentDelta: (d) => { rebuilt += d; }, providerId: "openai-compatible", model },
-    );
-  } catch (err) {
-    console.log(
-      `[tool-loop] 反道歉重建失败，回退引导兜底: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return "";
-  }
-  return (rebuilt || "").trim();
-}
-
-/**
  * 检测 LLM 最终回复是否是「道歉式兜底」（无法整合工具结果/道歉重试）。
  * 当工具结果已有真实数据时，这种 apology 不应替代搜索结果 — 应回退到工具结果拼接。
  *
@@ -326,7 +282,7 @@ function isApologyStyleFallback(text: string): boolean {
   return false;
 }
 
-const DEFAULT_MAX_ROUNDS = 12;
+const DEFAULT_MAX_ROUNDS = 6;
 
 function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   const fallback = Number.parseInt(process.env.TOOL_EXECUTION_TIMEOUT_MS ?? "30000", 10);
@@ -381,14 +337,14 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   const classTimeouts: Record<string, number> = {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
     "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "8000", 10),
-    "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
-    "search_images": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
-    "search_videos": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
+    "search_images": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
+    "search_videos": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
     "video.grab": Number.parseInt(process.env.TOOL_TIMEOUT_VIDEO_GRAB_MS ?? "25000", 10),
     "fetch_web": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.inspect_webpage": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.navigate_site": Number.parseInt(process.env.TOOL_TIMEOUT_NAVIGATE_MS ?? "20000", 10),
-    "info.search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "12000", 10),
+    "info.search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
     "voice.speak": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "voice.send_message": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "voice.transcribe": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
@@ -443,12 +399,12 @@ function analyzeTaskComplexity(userText: string, messageCount: number): TaskComp
     };
   } else if (complexityScore <= 5) {
     return { 
-      maxRounds: parseInt(process.env.TOOL_LOOP_MEDIUM_ROOUNDS ?? '6'), 
+      maxRounds: parseInt(process.env.TOOL_LOOP_MEDIUM_ROOUNDS ?? '4'), 
       description: '中等任务' 
     };
   } else if (complexityScore <= 7) {
     return { 
-      maxRounds: parseInt(process.env.TOOL_LOOP_COMPLEX_ROOUNDS ?? '9'), 
+      maxRounds: parseInt(process.env.TOOL_LOOP_COMPLEX_ROOUNDS ?? '5'), 
       description: '复杂任务' 
     };
   } else {
@@ -2152,6 +2108,10 @@ export async function streamCompletionWithTools(
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
+  // 搜索类工具在本轮对话中已成功执行的次数：用于"重复搜索制动"。
+  // 实测 LLM 对"搜索/最新"类问题会反复调 search_web（S3 达 9 次），prompt 引导压不住，
+  // 需在代码层拦截，避免多轮工具迭代把响应拖到几十秒 / 超时让前端一直转圈。
+  const freshToolExecCount = new Map<string, number>();
   // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
   // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
@@ -2323,21 +2283,14 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
-      // 防 LLM "道歉式兜底"：
-      //  - 已有成功工具数据但 LLM 输出是 apology/无法整合 → 直接用工具结果拼接，避免扔掉真实数据；
-      //  - 无成功工具数据而 LLM 出 apology/空 → Fix3 反道歉重建一次，绝不让"没查到/没找到"直接透出。
+      // 防 LLM "道歉式兜底"（不做额外 LLM1 重建，减少 LLM 调用）：
+      //  - 已有成功工具数据但 LLM 输出是 apology/无法整合 → 直接用工具结果拼接，不额外调 LLM1；
+      //  - 无成功工具数据而 LLM 出 apology/空 → 返回空串，由上层自然处理，不额外调 LLM1。
       let effectiveFinalText: string;
       if (isApologyStyleFallback(finalText) && lastToolOutputFallback.trim()) {
-        // 已有成功工具数据但 LLM 输出 apology/无法整合 → 先反道歉重建，避免把工具 JSON dump
-        // 直接透出给用户；重建失败才回退到工具结果拼接，保证不丢掉真实数据。
-        const rebuilt = await rebuildWithoutFallback(client, model, messages);
-        effectiveFinalText =
-          rebuilt && !isApologyStyleFallback(rebuilt) ? rebuilt : lastToolOutputFallback.trim();
+        effectiveFinalText = lastToolOutputFallback.trim();
       } else if (isApologyStyleFallback(finalText)) {
-        effectiveFinalText = await rebuildWithoutFallback(client, model, messages);
-        if (!effectiveFinalText || isApologyStyleFallback(effectiveFinalText)) {
-          effectiveFinalText = "";
-        }
+        effectiveFinalText = "";
       } else {
         effectiveFinalText = finalText;
       }
@@ -2361,6 +2314,48 @@ export async function streamCompletionWithTools(
       normalizedToolCalls,
       model,
     );
+
+    // [DEBUG] 临时：观察每轮工具名与已有计数，定位重复搜索制动失效根因
+    console.error(
+      `[DEBUG-tool-loop] 请求工具=${toolCalls
+        .filter((t) => t.type === "function")
+        .map((t) => t.function?.name)
+        .join(",")} , freshCleanCount=${JSON.stringify([...freshToolExecCount.entries()])}`,
+    );
+
+    // 【重复搜索制动】搜索类工具一旦成功执行过 ≥1 次，若 LLM 这一轮又要重复调用搜索类工具
+    // （没有引入任何新工具），说明它陷入了"反复搜索"循环。此时不再执行工具，直接基于已有
+    // 搜索结果收尾，避免多轮工具迭代把响应拖到几十秒甚至超时（前端表现为一直转圈/搜索没结果）。
+    // 语义：一次并行搜索发起后，拿到结果就收尾（count≥1 制动）；只有首轮全部失败(count==0)
+    // 时才允许 LLM 兜底重试一次——对应"一次并行 + 最多一次兜底"。
+    // 只对本轮 *全部* 请求都是"已成功过的搜索工具"时才触发，混用其它工具的正常多步任务不受影响。
+    const REPEAT_SEARCH_LIMIT = 1;
+    const requestedSearchNames = toolCalls
+      .filter((t) => t.type === "function")
+      .map((t) => t.function?.name)
+      .filter(Boolean);
+    const allRepeatedSearch =
+      requestedSearchNames.length > 0 &&
+      requestedSearchNames.every(
+        (n) =>
+          FRESH_FACT_TOOL_NAMES.has(n) &&
+          (freshToolExecCount.get(n) ?? 0) >= REPEAT_SEARCH_LIMIT,
+      );
+    if (allRepeatedSearch) {
+      console.warn(
+        `[tool-loop] 搜索工具重复调用 ${requestedSearchNames.join(",")} 已达 ${REPEAT_SEARCH_LIMIT} 次，强制收尾`,
+      );
+      const fb = lastToolOutputFallback.trim();
+      if (fb) {
+        // 已有搜索结果 → 直接回退拼接，不额外调 LLM1 重建（减少 LLM 调用）
+        const out = fb;
+        if (out) onDelta(stripInternalControlTags(out));
+        return out;
+      }
+      const finalText = (lastAssistantText || fullText || "").trim().replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
+      if (finalText) onDelta(stripInternalControlTags(finalText));
+      return finalText;
+    }
 
     const assistantWithTools: ChatCompletionMessageParam = {
       role: "assistant",
@@ -2566,6 +2561,14 @@ export async function streamCompletionWithTools(
       toolResults.push({ name: wireToolName, ok: exec.ok });
       if (exec.ok && FRESH_FACT_TOOL_NAMES.has(wireToolName)) {
         satisfiedFreshWebLookup = true;
+        freshToolExecCount.set(wireToolName, (freshToolExecCount.get(wireToolName) ?? 0) + 1);
+        // [DEBUG] 临时
+        console.error(`[DEBUG-tool-loop] 工具=${wireToolName} 执行成功 ok=${exec.ok} → count=${freshToolExecCount.get(wireToolName)}`);
+      } else {
+        // [DEBUG] 临时
+        console.error(
+          `[DEBUG-tool-loop] 工具=${wireToolName} 执行 ok=${exec.ok} (在 FRESH_FACT=${FRESH_FACT_TOOL_NAMES.has(wireToolName)}) err=${JSON.stringify(exec.result)}`,
+        );
       }
       // Fix1: 非元工具的真实取数失败 → 标记本轮存在工具失败（供恢复轮判定）
       if (!exec.ok && !META_TOOL_NAMES.has(wireToolName)) {
@@ -2728,23 +2731,14 @@ export async function streamCompletionWithTools(
       if (summaryText && !isApologyStyleFallback(summaryText)) {
         return summaryText;
       }
-      // summary 调用成功但产出为空/道歉式 → 反道歉重建，避免把工具 JSON dump 透出给用户；
-      // 重建仍失败才回退到工具结果拼接（比空串好）。
-      const rebuiltAfterSummary = await rebuildWithoutFallback(client, model, messages);
-      if (rebuiltAfterSummary && !isApologyStyleFallback(rebuiltAfterSummary)) {
-        return rebuiltAfterSummary;
-      }
+      // summary 调用成功但产出为空/道歉式 → 直接回退到工具结果拼接（保留真实数据，不额外调 LLM1）。
       return lastToolOutputFallback.trim();
     } catch (summaryErr) {
       console.log(
-        `[tool-loop] summary 调用失败，回退到反道歉重建: ${
+        `[tool-loop] summary 调用失败，回退到工具结果拼接: ${
           summaryErr instanceof Error ? summaryErr.message : String(summaryErr)
         }`,
       );
-      const rebuiltAfterSummaryErr = await rebuildWithoutFallback(client, model, messages);
-      if (rebuiltAfterSummaryErr && !isApologyStyleFallback(rebuiltAfterSummaryErr)) {
-        return rebuiltAfterSummaryErr;
-      }
       return lastToolOutputFallback.trim();
     }
   }
@@ -2752,11 +2746,10 @@ export async function streamCompletionWithTools(
   const raw = isApologyStyleFallback(lastAssistantText) && lastToolOutputFallback.trim()
     ? lastToolOutputFallback.trim()
     : lastAssistantText.trim() || lastToolOutputFallback.trim();
-  // Fix3(加固 fast 轻工具链路)：循环耗尽后仍拿到"没查到/道歉式/空"回复 →
-  // 反道歉重建一次；重建仍失败落建设性引导，绝不把道歉兜底透出给用户。
+  // 循环耗尽后仍拿到"没查到/道歉式/空"回复 → 直接返回空串或既有工具结果，
+  // 不额外调 LLM1 反道歉重建（减少 LLM 调用）。
   if (!raw.trim() || isApologyStyleFallback(raw)) {
-    const rebuilt = await rebuildWithoutFallback(client, model, messages);
-    return rebuilt && !isApologyStyleFallback(rebuilt) ? rebuilt : "";
+    return "";
   }
   return raw;
 }

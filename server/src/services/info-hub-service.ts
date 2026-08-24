@@ -185,6 +185,7 @@ export class InfoHubService {
     // 意图识别：影响搜索策略
     const intent = classifySearchIntent(keyword);
     const effectiveLimit = Math.max(boundedLimit, intent.suggestedLimit ?? 0);
+    const __t0 = Date.now(); // [DEBUG] 测试搜索耗时
 
     // 1. 会话内复用（相似查询直接返回之前结果）
     if (sessionId) {
@@ -205,6 +206,13 @@ export class InfoHubService {
     const domesticOpts: DomesticFetchOptions = { userAgent: this.userAgent, rssHealth: this.rssHealth };
     const isTechKeyword = /科技|技术|ai|芯片|互联网|数码|it\b/i.test(keyword);
     const isNewsKeyword = intent.intent === "latest" || intent.requiresFreshWeb;
+
+    // 搜索时间预算：整段搜索（含多引擎 + 官方 RSS + 扩搜 + 动态源发现）总耗时软上限，
+    // 超过预算不再追加扩搜/动态发现阶段，避免搜索累积到几十秒造成前端长时间无结果。
+    // 首轮并行已含各引擎自身超时，这里主要兜住后续串行阶段。
+    const SEARCH_BUDGET_MS = Number.parseInt(process.env.SEARCH_TIME_BUDGET_MS ?? "6500", 10) || 6500;
+    const searchDeadline = Date.now() + SEARCH_BUDGET_MS;
+    const overBudget = (): boolean => Date.now() > searchDeadline;
 
     // 主查询：保留完整原始 query 走向「API 优先 + 多引擎」链。
     // 关键修复：不再把完整 query 截断成实体去搜——对搜索 API（AnySearch 等）而言完整语义召回更好，
@@ -228,10 +236,11 @@ export class InfoHubService {
     ]);
 
     let merged = dedupeByUrl([...official, ...bingResults.flat(), ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+    console.error(`[DEBUG-search] 首轮耗时=${Date.now() - __t0}ms items=${merged.length} keyword=${keyword.slice(0,20)}`);
 
     // 5. 第二轮扩搜：结果偏少时就主动放宽，不等到完全 0 条
     const sparseThreshold = Math.min(effectiveLimit, Math.max(4, Math.ceil(effectiveLimit * 0.6)));
-    if (merged.length < sparseThreshold) {
+    if (merged.length < sparseThreshold && !overBudget()) {
       const fallbackQueries = [
         keyword,
         bingEndpointQuery,
@@ -258,13 +267,15 @@ export class InfoHubService {
 
     // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
     // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
+    console.error(`[DEBUG-search] 扩搜后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
     const allBingResults = dedupeByUrl(bingResults.flat());
-    if (merged.length < effectiveLimit && allBingResults.length > 0) {
+    if (merged.length < effectiveLimit && allBingResults.length > 0 && !overBudget()) {
       const discovered = await discoverHtmlSourcesFromResults(allBingResults, keyword, domesticOpts);
       if (discovered.length > 0) {
         merged = dedupeByUrl([...merged, ...discovered]);
       }
     }
+    console.error(`[DEBUG-search] 动态发现后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
 
     // 质量评分排序：相关性(50%) + 权威度(30%) + 时效性(20%)
     const scored = sortByQuality(merged, keyword);

@@ -3349,23 +3349,6 @@ export async function createAppServices(): Promise<AppServices> {
         topics: profile.topics,
       };
     },
-    // 对话内主动触发时按需感知用户状态（fire-on-demand，省 token）
-    observeUserState: brainCenter
-      ? async (actorId, recentHistory) => {
-          try {
-            const r = await brainCenter!.observeWithMental(actorId, {
-              recentConversationHistory: recentHistory,
-            });
-            return {
-              activity: r.activity ? r.activity.activity : null,
-              mentalIntent:
-                r.mental && r.mental.intentCategory !== "unknown" ? r.mental.intentCategory : null,
-            };
-          } catch {
-            return {};
-          }
-        }
-      : undefined,
     // 对话活跃事件 → 节律感知（连续工作/深夜检测的数据源之一）
     onUserActivity: (actorId, source) => rhythmCore?.noteActivity(actorId, source),
     // ── 通用主动性路径（Jarvis 式：感知 → LLM 自主决策 → speak/act/advise） ──
