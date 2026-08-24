@@ -379,12 +379,29 @@ export class PromptContextBuilder {
   private adviceStore: AdviceStore | null = null;
 
   /**
+   * 用户兴趣关注列表拉取器（InterestWatcher.listForPrompt 的薄包装）。
+   * 每轮 assembleMemory 拉取注入【用户兴趣关注列表】块：
+   *  - 让 agent 知道用户在长期关注什么（话题接得住、聊得深）
+   *  - 附工具引导：听到新的长期兴趣时调 interest.manage 记录
+   * 无兴趣时返回 null（零注入）。
+   */
+  private interestListProvider: ((actorId: string) => string | null) | null = null;
+
+  /**
    * 注入 ProactivityHub 的建议队列（advise 模式载体）。
    * 每轮 assembleMemory 时 drain 出未消费建议注入【Agent 主动建议】块，
    * 由 agent 在正常回复中自然带出；无建议时零开销。
    */
   setAdviceStore(store: AdviceStore | null): void {
     this.adviceStore = store;
+  }
+
+  /**
+   * 注入用户兴趣列表拉取器（InterestWatcher 接线；通常经 agent-core 转发）。
+   * 无列表时不注入任何 prompt 块（零开销）。
+   */
+  setInterestListProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.interestListProvider = fn;
   }
 
   /**
@@ -695,6 +712,26 @@ export class PromptContextBuilder {
       }
     }
 
+    // 用户兴趣关注列表（InterestWatcher 接线）：注入【用户兴趣关注列表】块。
+    // 让 agent 知道用户在长期关注什么（话题接得住）；附工具引导：听到新的长期
+    // 兴趣时调 interest.manage 记录。无列表时零注入。
+    let interestListBlock: string | undefined;
+    if (this.interestListProvider) {
+      try {
+        const list = this.interestListProvider(input.actorId);
+        if (list) {
+          interestListBlock = [
+            `【用户兴趣关注列表】`,
+            `（后台按你与用户常聊的话题维护；话题被提起时自然接住，别背诵清单；`,
+            `对话中出现新的长期兴趣时调用 interest.manage 工具的 add/touch 记录，明确不喜欢时用 remove）`,
+            list,
+          ].join("\n");
+        }
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 兴趣列表注入失败（忽略）: ${err}`);
+      }
+    }
+
     const seenMemory = new Set<string>();
     const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
     const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
@@ -755,6 +792,7 @@ export class PromptContextBuilder {
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
+      ...(interestListBlock ? { interestList: interestListBlock } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
       // 此前 assembleMemory 只用 input.userLocation 提取时区给 currentTime,从未把它

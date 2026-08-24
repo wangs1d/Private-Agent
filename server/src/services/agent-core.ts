@@ -518,6 +518,17 @@ export class AgentCore {
     this.agentTaskOrchestrator?.setProactivityHub(hub);
   }
 
+  /**
+   * 注入用户兴趣列表拉取器（InterestWatcher 接线）。
+   * 转发到 PromptContextBuilder，每轮注入【用户兴趣关注列表】块，
+   * 让 agent 知道用户长期关注什么 + 提醒用 interest.manage 工具维护。
+   */
+  setInterestListProvider(
+    fn: ((actorId: string) => string | null) | null,
+  ): void {
+    this.promptContextBuilder.setInterestListProvider(fn);
+  }
+
   private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
     const normalized = text.trim();
     const timeHint = buildTimeWindowRecallHint(normalized);

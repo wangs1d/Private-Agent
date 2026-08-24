@@ -52,6 +52,7 @@ const SIGNAL_PRIORITY_MAP: Record<string, number> = {
   care: 5,
   followup: 4,
   interest_share: 3,
+  interest_alert: 5,
   greeting: 3,
 };
 

@@ -156,6 +156,12 @@ export type AgentPromptMemoryContext = {
    * 由 agent 在正常回复中自然带出。无建议时不注入（零开销）。
    */
   proactiveAdvice?: string;
+  /**
+   * 用户兴趣关注列表（InterestWatcher 接线）：agent 在 system 中看到用户
+   * 长期关注的人/事/物（【用户兴趣关注列表】块），话题接得住，且提示用
+   * interest.manage 工具维护。无列表时不注入（零开销）。
+   */
+  interestList?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

@@ -13,6 +13,7 @@ import type { FrequencyVerdict } from "./proactivity-types.js";
 const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   greeting: 24 * 60 * 60 * 1000,        // 问候：每天最多 1 次
   interest_share: 24 * 60 * 60 * 1000,  // 分享：每天最多 1 次
+  interest_alert: 4 * 60 * 60 * 1000,   // 兴趣热议推送：4h 冷却（同兴趣级去重由 InterestWatcher 指纹+间隔承担）
   care: 8 * 60 * 60 * 1000,             // 对话关怀：8h 冷却
   followup: 4 * 60 * 60 * 1000,         // 待办跟进：4h 冷却
   task_celebration: 30 * 60 * 1000,     // 恭喜：每任务一次（30min 防连发）

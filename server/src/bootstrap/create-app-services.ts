@@ -324,6 +324,9 @@ import { setCapabilityCortex } from "../agent/agent-capabilities.js";
 import type { SubAgentType } from "../services/master-agent-types.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
+import { InterestWatcher } from "../proactivity/interest-watcher.js";
+import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
+import { fetchHotRankings } from "../services/hot-rankings.js";
 import { RhythmCore } from "../body/rhythm-core.js";
 import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
@@ -3449,6 +3452,34 @@ export async function createAppServices(): Promise<AppServices> {
         proactivityHub.onRhythmSignal(signal.actorId, signal.kind, signal.payload);
       }
     });
+  // ─── InterestWatcher 兴趣话题追踪装配（对标扣子主动推送体验）───
+  // 用户长期关注的话题从对话中被 LLM 挖出（interest.manage 工具入库），
+  // 后台每 tick 拉一次实时热搜（微博/百度/知乎/B站聚合），命中用户兴趣 →
+  // 指纹去重 + 2h 间隔 → onInterestAlert → ProactionCortex speak 闭环主动推。
+  // 频控双层：本模块同兴趣去重 + FrequencyGovernor（interest_alert 4h 冷却/每日预算）。
+  const interestWatcher = new InterestWatcher({
+    persistPath:
+      process.env.INTEREST_WATCH_FILE ??
+      join(process.cwd(), "data", "interest-watch.json"),
+    fetchHot: async (limit) => {
+      const res = await fetchHotRankings(limit);
+      return res.items.map((item) => ({
+        title: item.title,
+        platform: item.platform,
+        url: item.url,
+        hot: item.hot,
+      }));
+    },
+    onHit: (actorId, interest, hit) => {
+      proactivityHub.onInterestAlert(actorId, interest.name, hit);
+    },
+  });
+  await interestWatcher.load();
+  // 工具：让 LLM 在对话中自主维护关注列表（add/touch/remove/list）
+  registerInterestWatchTools(toolRegistry, interestWatcher);
+  // prompt 注入：每轮告知 agent 用户关注什么（【用户兴趣关注列表】块）
+  agentCore.setInterestListProvider((actorId) => interestWatcher.listForPrompt(actorId));
+  interestWatcher.start();
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
 
@@ -3536,6 +3567,7 @@ export async function createAppServices(): Promise<AppServices> {
 
   app.addHook("onClose", async () => {
     proactivityHub.stop();
+    interestWatcher.stop();
     try {
       await moodInferenceService.flush();
       app.log.info("[MoodInference] 持久化已 flush");

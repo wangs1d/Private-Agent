@@ -7,6 +7,7 @@
 export type ProactiveIntentKind =
   | "task_celebration" // 任务完成恭喜（复杂任务完成 / 用户待办闭环）
   | "interest_share"   // 兴趣分享（用户喜欢的话题 / agent 自己的视角）
+  | "interest_alert"   // 兴趣话题热议推送（后台盯用户关注话题，热搜命中→主动告知）
   | "greeting"         // 时段问候（早安 / 久别重逢）
   | "overwork_care"    // 过劳关怀干预（连续加班 → 调日程 + 放音乐 + 说话）
   | "care"             // 对话内情绪关怀（迁移自 agent-core 对话钩子）
@@ -41,7 +42,7 @@ export type ProactiveIntent = {
   mode: ProactiveBehaviorMode;
   /** act 模式：直接后台执行的工具调用（白名单内，按序执行） */
   actArgs?: ProactiveActStep[];
-  source: "conversation" | "task" | "rhythm" | "profile" | "time" | "epitome";
+  source: "conversation" | "task" | "rhythm" | "profile" | "time" | "epitome" | "interest_watch";
 };
 
 // ─── 通用主动性层（Jarvis 式：感知 → LLM 自主决策 → 通用执行） ───

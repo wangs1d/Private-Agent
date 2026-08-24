@@ -659,7 +659,8 @@ export function buildLayeredSystemPrompt(
     !memory?.recentConversationHistory &&
     !memory?.semanticIntent &&
     !memory?.fastVerdictInstruction &&
-    !memory?.proactiveAdvice
+    !memory?.proactiveAdvice &&
+    !memory?.interestList
   ) {
     return baseSystem.trim();
   }
@@ -708,6 +709,8 @@ export function buildLayeredSystemPrompt(
   if (memory.skillIndex) parts.push(memory.skillIndex);
   // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
   if (memory.proactiveAdvice) parts.push(memory.proactiveAdvice);
+  // 用户兴趣关注列表（InterestWatcher）：agent 知道用户长期关注什么 + 工具引导
+  if (memory.interestList) parts.push(memory.interestList);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
   parts.push(baseSystem.trim());
@@ -756,7 +759,8 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.recentConversationHistory ||
       memory?.semanticIntent ||
       memory?.fastVerdictInstruction ||
-      memory?.proactiveAdvice
+      memory?.proactiveAdvice ||
+      memory?.interestList
   );
 }
 
@@ -814,6 +818,8 @@ export function buildLayeredSystemPromptSections(
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
   // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
   if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
+  // 用户兴趣关注列表（InterestWatcher）：agent 知道用户长期关注什么 + 工具引导
+  if (m.interestList) dynamicContext.push(m.interestList);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (m.fastVerdictInstruction) dynamicContext.push(m.fastVerdictInstruction);
 

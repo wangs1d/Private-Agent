@@ -11,6 +11,7 @@ import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence-chat-tools.js";
+import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
@@ -1719,6 +1720,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...VOICE_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
     ...INTERNET_INTELLIGENCE_CHAT_TOOLS,
+    ...INTEREST_WATCH_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
@@ -1820,6 +1822,12 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'life',
     keywords: ['预算', 'budget', '计算', 'calculate', '购物', 'shopping', '建议', 'suggest', '比价', 'compare', '推荐', 'recommend', '生活', 'life', '助手', 'assistant'],
     toolNames: ['budget.calculate', 'shopping.suggest']
+  },
+  {
+    // 兴趣话题追踪：用户表达长期关注（喜欢/粉丝/常看/关注）时命中 interest.manage
+    category: 'life',
+    keywords: ['喜欢', 'like', '粉丝', 'fan', '关注', 'follow', '常看', '常聊', '感兴趣', 'interest', '追', '热榜', '热搜', '热点', '动态', 'updates'],
+    toolNames: ['interest.manage']
   },
   {
     category: 'capability',

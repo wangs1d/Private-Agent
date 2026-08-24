@@ -49,6 +49,7 @@ import {
 } from "./triggers/celebration-trigger.js";
 import { buildShareIntent, pickShareTopic, type ShareProfileInput } from "./triggers/share-trigger.js";
 import { buildGreetingIntent, judgeGreeting } from "./triggers/greeting-trigger.js";
+import type { InterestHit } from "./interest-watcher.js";
 import {
   buildOverworkIntent,
   type OverworkRhythmPayload,
@@ -291,6 +292,39 @@ export class ProactivityHub {
     // 快路径：过劳必干预（确定性场景，零 LLM，act+speak 复合）
     void this.route(buildOverworkIntent(actorId, p)).catch((err) => {
       console.log(`[ProactivityHub] 过劳干预失败（忽略）: ${err}`);
+    });
+  }
+
+  /**
+   * 用户兴趣话题热议推送（InterestWatcher 后台轮询命中接线）。
+   * 例：用户长期关注「刘浩存」，热搜出现她的新动态 → 主动 tell。
+   * 走 speak 闭环（ProactionCortex 话术生成），频控由 FrequencyGovernor
+   * interest_alert 冷却（4h）+ 每日预算兜底；同兴趣指纹去重在 watcher 层已完成。
+   */
+  onInterestAlert(actorId: string, name: string, hit: InterestHit): void {
+    this.knownActors.add(actorId);
+    this.feed.pushObservation(
+      actorId,
+      "interest_hot",
+      `用户关注的「${name}」上了「${hit.platform}」热点：${hit.title}`,
+      "medium",
+      Date.now(),
+      { interest: name, title: hit.title, platform: hit.platform, url: hit.url ?? "" },
+    );
+    const hotNote = hit.hot ? `（热度${hit.hot}）` : "";
+    void this.route({
+      actorId,
+      kind: "interest_alert",
+      importance: "medium",
+      title: `你关注的「${name}」有新动态`,
+      summary:
+        `用户长期关注「${name}」。刚才发现「${hit.platform}」热榜上有 TA 的动态：` +
+        `${hit.title}${hotNote}${hit.url ? `（来源：${hit.url}）` : ""}。` +
+        `像朋友想起对方一直在意的东西一样，用一两句自然提起即可，分享你的看法或轻问一句，别写成资讯播报。`,
+      mode: "speak",
+      source: "interest_watch",
+    }).catch((err) => {
+      console.log(`[ProactivityHub] 兴趣热议推送失败（忽略）: ${err}`);
     });
   }
 
