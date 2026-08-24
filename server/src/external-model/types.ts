@@ -165,6 +165,12 @@ export type AgentPromptMemoryContext = {
    * interest.manage 工具维护。无列表时不注入（零开销）。
    */
   interestList?: string;
+  /**
+   * 对话时间线事实（ConversationTimelineService）：首次对话时间 / 累计轮次 /
+   * 最近一次对话时间。回答「第一次对话是什么时候 / 认识多久 / 上次聊什么」时
+   * LLM 有确定信息可用。无记录时不注入（零开销）。
+   */
+  conversationTimeline?: string;
   modeRoleGuidance?: string;
 };
 

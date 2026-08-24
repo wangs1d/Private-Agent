@@ -14,6 +14,7 @@ import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
+import { getConversationTimelineService } from "../services/conversation-timeline.js";
 import { isNotesChatSessionId } from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 
@@ -173,6 +174,11 @@ export class TurnLifecycle {
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
 
     getMemoryManagerService()?.onTurnCompleted(input.actorId, input.sessionId, input.userText, full);
+
+    // 对话时间线：主对话轮次计入时间线（笔记会话不算用户对话），首次对话事实落长期记忆。
+    if (!input.sessionId || !isNotesChatSessionId(input.sessionId)) {
+      getConversationTimelineService()?.recordTurn(input.actorId);
+    }
 
     return this.applyQuota(input);
   }

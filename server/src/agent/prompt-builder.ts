@@ -712,6 +712,8 @@ export function buildLayeredSystemPrompt(
   if (memory.proactiveAdvice) parts.push(memory.proactiveAdvice);
   // 用户兴趣关注列表（InterestWatcher）：agent 知道用户长期关注什么 + 工具引导
   if (memory.interestList) parts.push(memory.interestList);
+  // 对话时间线事实：首次对话/累计轮次/最近对话，回答时间类元问题有确定依据
+  if (memory.conversationTimeline) parts.push(memory.conversationTimeline);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
   // 本模式职责人格（fast/complex 差异化）：让同一套基座人格在当前"脑"上各有侧重。
@@ -765,6 +767,7 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.fastVerdictInstruction ||
       memory?.proactiveAdvice ||
       memory?.interestList ||
+      memory?.conversationTimeline ||
       memory?.modeRoleGuidance
   );
 }
@@ -819,6 +822,7 @@ export function buildLayeredSystemPromptSections(
   if (m.sessionRecap) dynamicContext.push(`【会话回顾】\n${m.sessionRecap}`);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
+  if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
   if (m.skillIndex) dynamicContext.push(m.skillIndex);
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
   // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出

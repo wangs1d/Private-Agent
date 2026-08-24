@@ -24,6 +24,7 @@ import {
 } from "../services/schedule-prompt-snapshot.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
+import { getConversationTimelineService } from "../services/conversation-timeline.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
@@ -736,6 +737,15 @@ export class PromptContextBuilder {
     const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
     const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
     const dedupedDailyDigest = dedupePromptBlock(compactDailyDigest, seenMemory);
+    // 对话时间线事实：首次对话/累计轮次/最近对话（ConversationTimelineService，
+    // 每轮 turn-lifecycle 更新；无记录返回 null 零注入）。
+    let conversationTimeline: string | undefined;
+    try {
+      conversationTimeline =
+        getConversationTimelineService()?.getTimelineForPrompt(input.actorId) ?? undefined;
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 时间线注入失败（忽略）: ${err}`);
+    }
     fromKv = {
       ...fromKv,
       ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
@@ -793,6 +803,7 @@ export class PromptContextBuilder {
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
       ...(interestListBlock ? { interestList: interestListBlock } : {}),
+      ...(conversationTimeline ? { conversationTimeline } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
       // 此前 assembleMemory 只用 input.userLocation 提取时区给 currentTime,从未把它

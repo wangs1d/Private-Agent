@@ -304,6 +304,10 @@ import { createUserProfileAggregator } from "../brain/user-profile-aggregator.js
 import { RecallQueryExpander } from "../brain/memory-query-expander.js";
 import { MemoryImplicitFeedbackDetector } from "../brain/memory-implicit-feedback.js";
 import { MemoryInventory, setGlobalMemoryInventory } from "../brain/memory-inventory.js";
+import {
+  ConversationTimelineService,
+  setConversationTimelineService,
+} from "../services/conversation-timeline.js";
 import { Ear } from "../body/ear.js";
 import { Skin } from "../body/skin.js";
 import { VestibularApparatus } from "../body/vestibular-apparatus.js";
@@ -3065,6 +3069,9 @@ export async function createAppServices(): Promise<AppServices> {
         const memoryInventory = new MemoryInventory(agentMemorySyncService);
         memoryCortex.registerMemoryInventory(memoryInventory);
         setGlobalMemoryInventory(memoryInventory);
+        // 对话时间线：记录首次对话时间/累计轮次/最近对话，首次事实落长期记忆图。
+        // 全局单例：turn-lifecycle 每轮 recordTurn，prompt-context-builder 注入摘要。
+        setConversationTimelineService(new ConversationTimelineService());
         // ────────────────────────────────────────────────────────────
 
         // 心跳桥接：BrainStem 45s 心跳 → ForgettingController.continuousScore
