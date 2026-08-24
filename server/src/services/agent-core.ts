@@ -36,6 +36,28 @@ const FAST_VERDICT_PROMPT_INSTRUCTION = `【隐藏判定块·fast】本轮回复
 - task_spec 仅当 need_complex 为 true 时给出，为 { goal:简洁目标, expected_output:明确产出要求, constraints:约束或"无", tool_hints:建议工具名数组, budget:{max_tool_rounds,max_llm_calls} }。
 - 判定只取一次：simple 一律 need_complex=false 且不带 task_spec；needs_external/multi_step 才 need_complex=true。
 返回示例（need_complex=true）：<<<verdict:{"need_complex":true,"difficulty":"needs_external","task_spec":{"goal":"查询2026年奥斯卡最佳影片及导演","expected_output":"影片名+导演+一句话获奖说明，以事实为准","constraints":"无","tool_hints":["web.search"],"budget":{"max_tool_rounds":2,"max_llm_calls":3}}}>>>`;
+
+/**
+ * 本模式职责人格（fast/complex 差异化 persona，2026-08-24 引入）。
+ *
+ * 设计动机：fast 与 complex 是同一套基座人格的两个"脑"，但职责不同——由 agent-core
+ * 依据路由 mode 在 system prompt 中注入各自【本模式职责】块，让同一人格各有侧重：
+ * - FAST_MODE_ROLE_GUIDANCE：偏对话流畅与活人感。负责 simple 直答、闲聊、节奏衔接；
+ *   也是 complex 后台办完后"把结果自然说出口"的那张嘴（配合 synthesizeFastContinuation）。
+ * - COMPLEX_MODE_ROLE_GUIDANCE：偏逻辑推理与工具调用。负责 complex 后台任务、多步收敛、
+ *   产出可复述的事实结论；不关心口语节奏，输出交给 fast 续接。
+ * 对应「每轮只一个脑主导」：simple→fast 直答；complex→complex 用工具办、不并行 fast；
+ * 仅当复杂任务执行中用户再次发消息时，fast 独等对话、complex 继续后台跑，完成后 fast 口语化收尾。
+ */
+const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"。
+- 面向对话：流畅、自然、口语化，有活人感（先说一句完整照应、稍作停顿再拓展细节，别堆砌）。
+- 轻量问题直接作答，不做重活；话别太密，一句一顿，像真人"说完一段歇一口气"。
+- 需要查实时/外部信息或多步动作时，你在后台完成，完成后自然地把结论说出口，别用"我查到了/根据搜索/后台研究"这类机械表述开头。`;
+
+const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"。
+- 面向任务：逻辑推理 + 工具调用，多步收敛，聚焦把事办好、拿到正确结果。
+- 每次只推进一个确定动作：想清楚→调工具→看结果→决定下一步；明确无法完成时给出达成度说明。
+- 你的产出是"可直接复述的事实结论"，不是口语；最终对外表述由 fast 续接完成。`;
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
@@ -512,8 +534,6 @@ export class AgentCore {
   /** 注入主动性模块（对话内主动触发等能力的统一入口） */
   setProactivityHub(hub: import("../proactivity/proactivity-hub.js").ProactivityHub | null): void {
     this.proactivityHub = hub;
-    // advise 模式接线：hub 的建议队列接入 prompt 注入（【Agent 主动建议】块）
-    this.promptContextBuilder.setAdviceStore(hub ? hub.getAdvices() : null);
     // 复杂任务完成恭喜接线：编排器持有同一 hub
     this.agentTaskOrchestrator?.setProactivityHub(hub);
   }
@@ -679,10 +699,9 @@ export class AgentCore {
         );
       }
 
-      // 对话内主动钩子：交给主动性模块（ProactivityHub）统一检测与路由，
-      // fire-and-forget 不阻塞主回复。命中强线索时经频控后发布信号 →
-      // 现有主动决策闭环（ProactionCortex）接管。
-      this.proactivityHub?.observeConversationTurn(actorId, text, cognitiveRecentConversationHistory);
+      // 对话内推入后台感知底座：完全后台化——只采集对话内容，由 ProactivityHub
+      // 后台零 LLM 规则判决定是否主动 speak/act，不进入对话 prompt，不阻塞主回复。
+      this.proactivityHub?.observeConversationTurn(actorId, text);
 
       // Parallel-Live：规则判为 fast 高置信但可并行深挖时，fast 先主答，complex 后台并行补充
       const useParallelLive = this.shouldUseParallelLiveComplex(text, fastRoute, opts);
@@ -1176,38 +1195,9 @@ if (this.isComplexMode(route.mode)) {
       }
 
       // ── 兜底机制：fast 回复检测 hedging 信号 → 后台升级 complex ──
-      // 低置信度已在路由阶段前移升级，此处仅覆盖「规则判 fast 高置信但实际需外部信息」的少数场景。
-      // 后台升级：fast 先答，complex 后台补充，完成后结果无缝流式回传。
-      // Verdict 已接管时跳过，避免双重启动 complex。
-      if (
-        !verdictDroveUpgrade &&
-        this.masterAgentCoordinator &&
-        getAgentRuntimeConfig().masterDelegation.enabled &&
-        result.text &&
-        this.needsExternalInfoUpgrade(result.text, text)
-      ) {
-        console.log(
-          `[AgentCore] fast 回复命中"需外部信息"兜底信号，后台升级到 complex：` +
-            `userText="${text.slice(0, 40)}" replyHint="${result.text.slice(0, 60)}"`,
-        );
-        this.launchComplexBackgroundTask(actorId, text, opts, {
-          narrativeRecall: enrichedNarrativeRecall,
-          workingMemorySummary,
-          recentConversationHistory,
-          userLocation,
-          personalization,
-          trajCap,
-          orchestrateOpts,
-          sessionId,
-          shortTermTurn,
-          cognitiveMetacog,
-          cognitiveEmotion,
-          cognitiveUserPattern,
-          cognitiveToolPlan,
-        }).catch((err) => {
-          console.error(`[AgentCore] 兜底 complex 后台任务异常:`, err);
-        });
-      }
+      // ⚠️ 已移除对话内 fast→complex 升级：它会在对话 turn 内额外注入 prompt/memory
+      // 再发一次 LLM1，造成重复搜索与额外调用。主动性升级收敛到独立后台进程处理，
+      // 与普通对话解耦，不再跨对话 turn 追加 complex。故此处不再 launchComplexBackgroundTask。
 
       // Parallel-Live 续接：fast 主答已给出，后台 complex 结果句级去重后无缝衔接进对话
       if (parallelLiveRaw) {
@@ -1589,6 +1579,78 @@ if (this.isComplexMode(route.mode)) {
     );
   }
 
+  /**
+   * 跨轮并行冲突检测（轻量 LLM 分类）。
+   *
+   * 目标：后台复杂任务（parallel-live / verdict 驱动）执行期间，用户中途发了新消息。
+   * 判定标准**不是「话题是否切换」**，而是**「这条结果用户现在还需不需要」**——
+   * 用户常常是顺带问别的事，旧任务结果稍后送达依然被期待，不应因话题不同就丢弃。
+   * 仅当用户明确取消/放弃了这个需求时，迟到结果才应丢弃，既省一次续接合成的 token，
+   * 也避免把不再被需要的旧结果硬塞进当前对话。
+   *
+   * 省 token 关键：无中途新 user 消息时**不调用 LLM**，直接放行续接（0 次分类）。
+   * 仅当任务执行期间确实插入了新的 user turn，才走一次单轮轻量分类，输出 DROP/KEEP。
+   */
+  private async shouldDropCrossTurnConflict(
+    actorId: string,
+    originalUserText: string,
+    chatUserMessageId: string | undefined,
+    backgroundMessageId: string,
+  ): Promise<boolean> {
+    if (!chatUserMessageId) return false;
+    const chatSessionId = resolvePrimaryChatSessionId(
+      actorId,
+      getAgentRuntimeConfig().masterDelegation.enabled,
+    );
+    const midTurnText =
+      getChatThreadStore().latestUserTextAfter(chatSessionId, "", chatUserMessageId);
+    if (!midTurnText) return false; // 任务执行中用户未插话 → 0 次 LLM，安全续接
+
+    const provider = this.externalChat;
+    if (!provider?.isEnabled()) return false;
+
+    const prompt =
+      `后台有一个任务在为你搜集信息：\n"""${originalUserText.trim().slice(0, 160)}"""\n\n` +
+      `该任务进行中，用户又发了新消息：\n"""${midTurnText.slice(0, 160)}"""\n\n` +
+      `请判断：这个任务的结果，用户现在还需要听到吗？\n` +
+      `- 用户没有放弃这个结果（哪怕只是顺带问了别的事）→ KEEP\n` +
+      `- 用户已明确取消/放弃了这个需求，结果再讲只会打扰 → DROP\n` +
+      `注意：用户换了话题不代表不需要这个结果，不要因话题不同就 DROP。\n` +
+      `只输出一个词：KEEP 或 DROP。`;
+
+    try {
+      const classification = await this.externalChatCompleteOnce(
+        provider,
+        `cross-turn-conflict-${backgroundMessageId}`,
+        prompt,
+      );
+      // 仅显式 DROP 才丢弃；无法判断或为空一律 KEEP（不误伤正常续接）。
+      return /DROP/i.test(classification);
+    } catch (err) {
+      console.error("[AgentCore] cross-turn conflict classify failed; keeping continuation:", err);
+      return false;
+    }
+  }
+
+  /** 取一次非流式轻量 LLM 回复（用于单轮分类，ephemeral 不落线程）。 */
+  private async externalChatCompleteOnce(
+    provider: ExternalChatProvider,
+    sessionId: string,
+    prompt: string,
+  ): Promise<string> {
+    let collected = "";
+    await provider.streamCompletion(
+      sessionId,
+      { text: prompt },
+      (delta: string) => {
+        collected += delta;
+      },
+      undefined,
+      { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 1 },
+    );
+    return collected.trim();
+  }
+
   private async completeParallelLiveContinuation(
     complexPromise: Promise<string>,
     actorId: string,
@@ -1599,8 +1661,24 @@ if (this.isComplexMode(route.mode)) {
   ): Promise<void> {
     try {
       const complexResult = await complexPromise;
-      if (opts?.signal?.aborted) return;
+      // 跨轮冲突检测已内含「用户新消息 → 这条结果是否仍需要」的判定，
+      // 故此处不再用 signal.aborted 无条件丢弃：用户中途插话 ≠ 放弃结果，
+      // 交由 shouldDropCrossTurnConflict 裁决 KEEP（仍送达）或 DROP（放弃才丢）。
       const backgroundMessageId = `parallel-live:${opts?.chatUserMessageId ?? Date.now()}`;
+      // ── 跨轮冲突检测（轻量 LLM 分类）：后台任务执行期间用户若已换话题，
+      //    迟到的结果不该强行续接进当前对话，直接丢弃，省一次续接合成 + 避免串台。──
+      const dropped = await this.shouldDropCrossTurnConflict(
+        actorId,
+        userText,
+        opts?.chatUserMessageId,
+        backgroundMessageId,
+      );
+      if (dropped) {
+        console.log(
+          "[AgentCore] cross-turn conflict: user no longer needs this result mid-task; dropping stale complex result",
+        );
+        return;
+      }
       const continuation = await this.synthesizeFastContinuation(
         actorId,
         userText,
@@ -1638,54 +1716,6 @@ if (this.isComplexMode(route.mode)) {
     } catch (err) {
       console.error("[AgentCore] parallel live complex failed; keeping fast reply:", err);
     }
-  }
-
-  /**
-   * 兜底检测：主 Agent direct_llm 路径生成的回复是否暴露"需要外部信息"信号。
-   * 命中条件（满足任一即升级到 master_delegate）：
-   *   1. 回复含 hedging 词汇（我不确定/可能已经/建议查询/无法确认/信息可能过时）
-   *   2. 用户消息含时效性实体（最新/最近/新出的/版本号/新产品），但回复未调用任何工具
-   *   3. 回复明确说"我无法获取实时/最新/联网信息"
-   * 排除：回复很短（<10 字符，可能是寒暄）；用户消息也含 hedging（用户自己说的）
-   */
-  private needsExternalInfoUpgrade(replyText: string, userText: string): boolean {
-    const reply = replyText.trim();
-    const user = userText.trim();
-    // 太短的回复（寒暄/确认）不升级
-    if (reply.length < 10) return false;
-
-    // hedging 信号：LLM 自己暴露"不确定/过时/建议查"
-    const hedgingSignals = [
-      "我不确定", "无法确认", "信息可能过时", "可能已经更新", "可能已经变化",
-      "建议查询", "建议查看", "建议搜索", "建议你查", "可以搜索", "可以查询",
-      "我无法获取", "我无法联网", "我无法访问", "没有联网", "无法获取最新",
-      "截至我所知", "截至我的知识", "我的知识截止", "知识库可能没有",
-      "可能不准确", "可能不完整", "可能已过时", "建议核实",
-    ];
-    if (hedgingSignals.some((s) => reply.includes(s))) return true;
-
-    // 用户消息含时效性实体 + 回复未调工具（result.toolName 为空才走到这）→ 升级
-    const timeSensitivitySignals = [
-      "最新", "最近", "新出的", "新出", "刚出", "刚发布", "今年", "去年",
-      "上周", "本周", "这周", "这个月", "上个月", "今天", "昨天", "明天",
-      "现在", "目前", "当前",
-    ];
-    const versionSignals = [
-      "kimi3", "gpt-5", "gpt5", "claude-4", "claude4", "iphone 17", "iphone17",
-      "macbook m5", "m5", "新版", "最新款", "旗舰款", "2024", "2025", "2026",
-    ];
-    const userHasTimeSignal = timeSensitivitySignals.some((s) => user.includes(s));
-    const userHasVersionSignal = versionSignals.some((s) =>
-      user.toLowerCase().includes(s.toLowerCase()),
-    );
-    if (userHasTimeSignal || userHasVersionSignal) {
-      // 排除明显闲聊（"今天天气真好" / "现在几点" 由简单工具处理，不升级）
-      const simpleChatPatterns = ["几点", "天气怎么样", "天气如何", "今日天气"];
-      if (simpleChatPatterns.some((p) => user.includes(p))) return false;
-      return true;
-    }
-
-    return false;
   }
 
   /**
@@ -2261,6 +2291,16 @@ if (this.isComplexMode(route.mode)) {
     if (verdictEnabledInLane && this.isFastMode(mode)) {
       const mem = ((baseStreamOpts.promptContext ??= {}).memory ??= {});
       if (!mem.fastVerdictInstruction) mem.fastVerdictInstruction = FAST_VERDICT_PROMPT_INSTRUCTION;
+    }
+    // 本模式职责人格注入（fast/complex 差异化，不依赖 feature flag）：
+    // fast 偏对话活人感、complex 偏推理与工具，让同一人格在不同"脑"上各有侧重。
+    if ((baseStreamOpts.promptContext ??= {}).memory) {
+      const mem = baseStreamOpts.promptContext.memory;
+      if (!mem.modeRoleGuidance) {
+        mem.modeRoleGuidance = this.isFastMode(mode)
+          ? FAST_MODE_ROLE_GUIDANCE
+          : COMPLEX_MODE_ROLE_GUIDANCE;
+      }
     }
     const runtimeKernel = getRuntimeKernel(actorId);
     // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：

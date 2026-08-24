@@ -150,12 +150,15 @@ export type AgentPromptMemoryContext = {
    */
   fastVerdictInstruction?: string;
   /**
-   * Agent 主动建议（ProactivityHub advise 模式）。
-   * ProactivityHub 把"不想打断用户"的主动意图（如过劳提醒、日程建议）排入
-   * AdviceStore，PromptContextBuilder 在下一轮对话 drain 出来注入此块，
-   * 由 agent 在正常回复中自然带出。无建议时不注入（零开销）。
+   * 本模式职责人格（fast / complex 差异化 persona 注入）。
+   * - fast：偏对话流畅、活人感、口语化，自然衔接，不做重活。
+   * - complex：偏逻辑推理与工具调用，多步收敛，输出可直接复述的事实结论。
+   * 由 agent-core 依据路由 mode 注入，让同一套基座人格在不同"脑"上各有侧重。
+   * 配合 fastVerdictInstruction（fast 判复杂性）与 completeParallelLiveContinuation
+   * （complex 完成后 fast 口语化续接）实现「simple→fast 直答 / complex→complex 后台办，
+   * 每轮只一个脑主导」的架构。
    */
-  proactiveAdvice?: string;
+  modeRoleGuidance?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */

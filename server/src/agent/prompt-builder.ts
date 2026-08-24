@@ -659,7 +659,7 @@ export function buildLayeredSystemPrompt(
     !memory?.recentConversationHistory &&
     !memory?.semanticIntent &&
     !memory?.fastVerdictInstruction &&
-    !memory?.proactiveAdvice
+    !memory?.modeRoleGuidance
   ) {
     return baseSystem.trim();
   }
@@ -706,10 +706,11 @@ export function buildLayeredSystemPrompt(
   // 语义意图理解：让 LLM 明确知道用户本轮真实意图，避免答非所问
   if (memory.semanticIntent) parts.push(`【意图理解】\n${memory.semanticIntent}`);
   if (memory.skillIndex) parts.push(memory.skillIndex);
-  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
-  if (memory.proactiveAdvice) parts.push(memory.proactiveAdvice);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (memory.fastVerdictInstruction) parts.push(memory.fastVerdictInstruction);
+  // 本模式职责人格（fast/complex 差异化）：让同一套基座人格在当前"脑"上各有侧重。
+  // 该项由 agent-core 依据路由 mode 注入，需放在人格块之后、远离 baseSystem 的关键约束区。
+  if (memory.modeRoleGuidance) parts.push(`【本模式职责】\n${memory.modeRoleGuidance}`);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -756,7 +757,7 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.recentConversationHistory ||
       memory?.semanticIntent ||
       memory?.fastVerdictInstruction ||
-      memory?.proactiveAdvice
+      memory?.modeRoleGuidance
   );
 }
 
@@ -812,10 +813,10 @@ export function buildLayeredSystemPromptSections(
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.skillIndex) dynamicContext.push(m.skillIndex);
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
-  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
-  if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
   // FastVerdict 输出规范（仅 fast 模式注入）：要求模型附加隐藏判定块，服务端剥离不推用户
   if (m.fastVerdictInstruction) dynamicContext.push(m.fastVerdictInstruction);
+  // 本模式职责人格（fast/complex 差异化）：放动态上下文末尾，紧贴 baseSystem 前的关键约束区
+  if (m.modeRoleGuidance) dynamicContext.push(`【本模式职责】\n${m.modeRoleGuidance}`);
 
   return { stablePrefix, dynamicContext };
 }

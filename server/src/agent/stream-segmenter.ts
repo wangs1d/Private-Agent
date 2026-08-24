@@ -1,22 +1,23 @@
 import { stripSentencesAlreadySaid } from "../utils/text.js";
 
 /**
- * StreamSegmenter —— 主回复统一分段器（垫词 + 信息块分段 + 增量去重）
+ * StreamSegmenter —— 主回复统一分段器（信息块分段 + 节奏停顿 + 增量去重）
  *
- * 设计动机（GPT live 式真人节奏，2026-08-20 合并为单一模块）：
- * - 垫词不再由独立 LLM / 独立控制器生成（避免与正文脱节、重复），而是主回复
- *   流式输出的一部分：首个分句被"按住"为垫词(interim)候选，确认有后续内容时
- *   才作为独立气泡发出；若整段只有一句则作普通正文(stream)单个气泡。
- * - 按"信息块"（同话题连贯短句）分段，而非机械逐句分段：能在一 个气泡里放完的
+ * 设计动机（GPT live 式真人节奏，2026-08-20 合并为单一模块，080-24 去垫词旁路）：
+ * - 不再有独立的垫词(interim)气泡：主回复首分句被"按住"，先作为正文第一段发出，
+ *   停顿一个间隔后再接其余信息块，保留"先应一句、稍作停顿、再详细说"的真人节奏；
+ *   全部相别统一为 stream，前端同一气泡里分段递进。
+ * - 按"信息块"（同话题连贯短句）分段，而非机械逐句分段：能在一个气泡里放完的
  *   内容不强拆，避免内容冗余；只有话题转换 / 段落换行 / 列表编号 / 达到目标长度
  *   时才切新块。
- * - 段落间增量去重：每个块在推送前剔除与已推送句级重复的内容，保证层层递进不重复。
+ * - 段落间增量去重：每个块在推送前剔除与已推送句级重复的内容，保证层层递进不重复；
+ *   首个信息块还会针对已发出的首句再做一次去重（修复"首句与正文开头复读"）。
  * - 重量上限：正文块数封顶，超限内容并入一个尾部块，防止分段过多造成"刷屏"。
  * - 首段做结论锚：开头的第一个信息块承载直接回应/结论，不因细碎切分被打散；
  *   后续块才展开细节——先结论后论据，天然递进。
  *
- * 关键正确性约束（杜绝"垫词 + 正文 + done 全文"三者重复）：
- * 1. 首个分句独立成垫词候选，只有确认主回复还有后续时才发；否则并入正文单气泡。
+ * 关键正确性约束（杜绝"首句 + 正文 + done 全文"反复）：
+ * 1. 首个分句先被按住，确认主回复还有后续才带间隔发出；否则并入正文单块。
  * 2. 每次发射前用累积的已推送文本做句级去重，残留重复句直接剔除。
  */
 export type StreamSegmenterOptions = {
@@ -24,7 +25,7 @@ export type StreamSegmenterOptions = {
   pauseMs?: number;
   /** 最小句子长度（字符），低于该长度的纯标点碎片不单独成块。默认 6。 */
   minSegmentChars?: number;
-  /** 垫词(interim)气泡与真实回复正文之间的间隔（毫秒），
+  /** 首句正文段与其后信息块之间的间隔（毫秒），
    *  模拟真人先应一句、稍作停顿再开口细说的节奏。默认 800ms。 */
   interimReplyGapMs?: number;
   /**
@@ -136,14 +137,14 @@ export class StreamSegmenter {
       this.heldFirst = null;
       this.interimDone = true;
       if (first === combined) {
-        // 整段回复只有这一句：作为单个正文气泡发出，避免"垫词 + done 全文"重复
+        // 整段回复只有这一句：作为单个正文气泡发出，避免首句重复
         this.trackEmitted(first);
         this.emit(first, "stream");
       } else {
-        // 有首个分句 + 剩余内容 → 首个作垫词，间隔后剩余作正文（再做句级去重）
+        // 有首个分句 + 剩余内容 → 首个先作正文段发出，间隔后剩余作正文（再做句级去重）
         const body = stripSentencesAlreadySaid(first, combined).trim();
         this.trackEmitted(first);
-        this.emit(first, "interim");
+        this.emit(first, "stream");
         if (this.interimReplyGapMs > 0) {
           await sleep(this.interimReplyGapMs);
           if (this.disposed) return;
@@ -194,7 +195,7 @@ export class StreamSegmenter {
       ) {
         continue;
       }
-      // 首个分句按住为垫词候选（仅整条回复第一次：垫词恰好一个）
+      // 首个分句先按住为首句正文段（仅整条回复一次），等后续内容确认后再带间隔发出
       if (this.heldFirst === null && !this.interimDone) {
         this.heldFirst = raw;
         continue;
@@ -244,24 +245,35 @@ export class StreamSegmenter {
 
   /**
    * 分发一个信息块：
-   * - 首个分句（heldFirst）在首个信息块到来时补发为垫词(interim)，间隔后再发正文；
+   * - 首个分句（heldFirst）先作为正文第一段发出，间隔后再接当前正文块，
+   *   保留"先应一句、停顿、再详细说"的节奏；全部统一为 stream 相别，不另开垫词气泡。
    * - 其余信息块按顺序发为正文(stream)；
+   * - 首正文块会针对已发出的首句再做一次句级去重，消除"首句与正文开头重复"。
    * - 超过重量上限的正文并入尾部块，最后一次性输出（防刷屏）。
    */
   private async dispatchSegment(segment: string): Promise<void> {
-    // 有被按住的首句 → 先发垫词，停顿后再发当前正文块
+    // 有被按住的首句 → 先发首句正文段，停顿后再发当前正文块
     if (this.heldFirst !== null) {
       const first = this.heldFirst;
       this.heldFirst = null;
       this.interimDone = true;
       this.trackEmitted(first);
-      this.emit(first, "interim");
+      this.emit(first, "stream");
       if (this.interimReplyGapMs > 0) {
         await sleep(this.interimReplyGapMs);
         if (this.disposed) return;
       }
-      this.trackEmitted(segment);
-      this.emit(segment, "stream");
+      // 关键去重：segment 在 emitCurrentBlock 里的去重是基于首句被 track 之前的
+      // emittedText（当时为空），未覆盖首句本身。这里针对 first 二次去重，
+      // 避免"好的。"等首句在下一段落开头原样复现。
+      const body = stripSentencesAlreadySaid(first, segment).trim();
+      if (!body) {
+        // 正文与首句完全重复（整段复述）→ 不再另行发一段
+        this.streamBlockCount++;
+        return;
+      }
+      this.trackEmitted(body);
+      this.emit(body, "stream");
       this.streamBlockCount++;
       return;
     }

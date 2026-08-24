@@ -343,10 +343,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   final AssistantTextSanitizer _assistantTextSanitizer =
       AssistantTextSanitizer();
 
-  /// 垫词（phase="interim"）独立气泡的本地序号兜底。
-  /// 服务端 chunk 自带 sequence，通常无需走到这里。
-  int _interimChunkSeq = 0;
-
   // Phase 2：429 回压指数退避重试状态
   String? _pendingRetryText;
   int _pendingRetryCount = 0;
@@ -1042,35 +1038,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   chunkTraceId != activeTraceId)) {
             return;
           }
-          // 纯流式渲染：phase="interim" 是「垫词 / 主动在场互动」类首段
-          //（"好的，我帮你看看…" / presence 闲聊）。多步回复架构下它属于
-          // agent 的独立一步（承接 / 边聊边干），应作为独立 assistant 消息入列表，
-          // 让用户实时看到 agent 正在回应，而不是被丢弃。
-          // 主回复（phase="stream"）则走正常流式渲染路径。
-          final String chunkPhase = payload["phase"]?.toString() ?? "";
-          if (chunkPhase == "interim") {
-            // 仍可借助 _clearInterimAck 清掉旧的 interim ack 气泡（若有）
-            _clearInterimAck();
-            if (!_isAgentProcessing) {
-              setState(() => _isAgentProcessing = true);
-              _notifyAgentProcessingUi(true);
-            }
-            // 与服务端共用同一 trace，但用独立 messageId 渲染为独立气泡，
-            // 与主回复分开，形成「垫词 → 互动 → 结果」的多步回复效果。
-            // interim 是 LLM 自主生成的完整句子（非 token 流），无需 sanitizer
-            // 缓冲，也不应污染 _pendingAssistantChunkText 兜底文本。
-            final String interimSeq =
-                payload["sequence"]?.toString() ?? "${_interimChunkSeq++}";
-            final String interimMessageId =
-                "interim-$activeTraceId-$interimSeq";
-            final String interimChunk = payload["chunk"]?.toString() ?? "";
-            if (interimChunk.isEmpty) return;
-            // 垫词即时显示（streaming=false，不走打字机逐字动画），
-            // 让用户先快速看到"应声"，随后正文再逐字打出。
-            _appendChunkToMessageList(interimMessageId, interimChunk,
-                streaming: false);
-            return;
-          }
+          // 统一流式渲染：分段器产出的所有块相别都是 stream（垫词旁路已拆除），
+          // 同一 messageId 续写，形成「先应一句 → 停顿 → 逐段递进」的节奏。
           _clearInterimAck();
           if (!_isAgentProcessing) {
             setState(() => _isAgentProcessing = true);
@@ -1194,21 +1163,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               : (messageId.startsWith("assistant-")
                   ? messageId.substring("assistant-".length)
                   : "");
-          // 同轮去重（保底）：若正文开头已作为独立垫词(interim)气泡在本轮呈现，
-          // 从 done 文本中剥掉该前缀，避免"垫词气泡 + done 全文"双份重复。
-          final String dedupResolvedText =
-              _stripRedundantInterimPrefix(resolvedText, traceKey);
-          if (dedupResolvedText.isEmpty &&
-              _hasInterimBubbleForTrace(traceKey)) {
-            // 回复已完整作为垫词气泡呈现，无需再创建正文气泡（避免整体重复一次）
-            _clearAgentProcessingState(done: true);
-            return;
-          }
-          final String? playUrl = (traceKey.isNotEmpty
+          // 垫词旁路已拆除：不再有独立 interim 气泡，done 文本直接就作为正文兜底。
+          final String playUrl = (traceKey.isNotEmpty
                   ? _pendingPlayUrlByTraceId.remove(traceKey)
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
-              PlayUrlUtils.fromAssistantText(dedupResolvedText);
+              PlayUrlUtils.fromAssistantText(resolvedText);
           // 从 WS 载荷解析结构化媒体卡片与交错渲染块（两分支共用，提取一次）
           final List<Map<String, dynamic>>? mediaCardsFromPayload =
               payload["mediaCards"] is List
@@ -1231,8 +1191,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               final ChatMessage previous = _messages[idx];
               final String currentText = previous.text;
               final String nextText = _shouldReplaceAssistantTextOnDone(
-                      currentText, dedupResolvedText)
-                  ? dedupResolvedText
+                      currentText, resolvedText)
+                  ? resolvedText
                   : currentText;
               final String? existingPlayUrl = previous.playUrl;
               final List<Map<String, dynamic>>? existingMediaCards =
@@ -1263,7 +1223,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
-              text: dedupResolvedText,
+              text: resolvedText,
               timestamp: DateTime.now(),
               playUrl: playUrl,
               mediaCards: mediaCardsFromPayload,
@@ -1930,33 +1890,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         (trimmed.contains('"snippet"') ||
             trimmed.contains('"publishedAt"') ||
             trimmed.contains('"searchDateLocal"'));
-  }
-
-  bool _hasInterimBubbleForTrace(String traceId) {
-    if (traceId.isEmpty) return false;
-    final String prefix = "interim-$traceId-";
-    return _messages
-        .any((m) => m.role == "assistant" && m.messageId.startsWith(prefix));
-  }
-
-  /// 同轮去重（保底）：若 [text] 的开头已作为本轮垫词(interim)气泡呈现过，
-  /// 剥掉该前缀，避免 at.done 全文与垫词气泡重复。返回剥掉后的文本。
-  String _stripRedundantInterimPrefix(String text, String traceId) {
-    if (text.isEmpty || traceId.isEmpty) return text;
-    final String prefix = "interim-$traceId-";
-    String candidate = text.trim();
-    for (final m in _messages) {
-      if (m.role != "assistant") continue;
-      if (!m.messageId.startsWith(prefix)) continue;
-      final String interimText = m.text.trim();
-      if (interimText.isEmpty) continue;
-      if (candidate.startsWith(interimText)) {
-        candidate = candidate.substring(interimText.length).trim();
-        // 剥掉紧跟在垫词后的标点/空白，避免残留"的，"之类碎片
-        candidate = candidate.replaceFirst(RegExp(r'^[，,。、\s]+'), '').trim();
-      }
-    }
-    return candidate;
   }
 
   ChatMessage _sanitizeLoadedChatMessage(ChatMessage message) {
