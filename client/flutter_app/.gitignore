@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Machine-specific local Flutter/Android SDK paths (never commit)
+/android/local.properties
