@@ -442,8 +442,17 @@ function compactToolLoopHistory(
 
   // 找到所有 tool message 的 index（role === "tool"）
   const toolMsgIndexes: number[] = [];
+  // 找到所有带 tool_calls 的 assistant 消息 index（其参数可一并压缩）
+  const assistantToolMsgIndexes: number[] = [];
   for (let i = 0; i < messages.length; i++) {
     if (messages[i].role === "tool") toolMsgIndexes.push(i);
+    if (
+      messages[i].role === "assistant" &&
+      Array.isArray((messages[i] as { tool_calls?: unknown[] }).tool_calls) &&
+      ((messages[i] as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0
+    ) {
+      assistantToolMsgIndexes.push(i);
+    }
   }
 
   // tool 消息总数 ≤ keepRounds 时不压缩（每轮可能有多个 tool result）
@@ -473,6 +482,238 @@ function compactToolLoopHistory(
     const summary = content.slice(0, cap).replace(/\n/g, " ").trim();
     (msg as { content: string }).content = `[已压缩·${content.length}字符→${cap}] ${summary}...`;
   }
+
+  // ── 扩展：压缩旧轮次 assistant(tool_calls) 的 function.arguments ──
+  // 协议硬约束：tool_call.id 必须与 tool 消息的 tool_call_id 严格匹配，绝不动 id/name；
+  // 只截断 function.arguments（参数已执行完，后续轮 LLM 依据的是 tool 结果而非原始参数，
+  // 截断不会导致幻觉，但显著削减每轮重复发送的 JSON 序列化体积）。
+  // 旧区判定：assistant(tool_calls) 总在其 tool 结果之前，位于 firstOldToolIdx 之前的即旧轮。
+  for (const i of assistantToolMsgIndexes) {
+    if (i >= firstOldToolIdx) continue; // 只压缩旧区
+    const msg = messages[i] as { tool_calls?: ChatCompletionMessageToolCall[] };
+    if (!Array.isArray(msg.tool_calls)) continue;
+    for (const tc of msg.tool_calls) {
+      if (tc.type !== "function" || !tc.function) continue;
+      const args = tc.function.arguments;
+      if (typeof args !== "string" || args.length <= 200 || args.startsWith("[已压缩")) continue;
+      tc.function.arguments = `[已压缩·${args.length}字符] ${args.slice(0, 200)}...`;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 子任务链摘要化：对超出保留窗口的已完成工具链段做结构化折叠
+//
+// 与 compactToolLoopHistory 的差异：
+// - compact 只截断单条 tool content（保留全部消息结构，tool_call_id 链完整）
+// - fold 直接把「assistant(tool_calls) + tool*」整段替换为单条 assistant 摘要，
+//   从根上消除旧轮次每轮重发的结构性开销（1 段 N+1 条 → 1 条）
+//
+// 安全性：只折叠旧于最近 keepSegments 轮的已完成段；最新窗口保持全量，
+// 保证 LLM 决策上下文完整（防幻觉）。折叠后的 assistant 消息不带 tool_calls，
+// 无悬挂 tool_call_id，满足 OpenAI/Kimi 消息序列约束。
+// ─────────────────────────────────────────────────────────────────────────
+function foldAncientToolChainSegments(
+  messages: ChatCompletionMessageParam[],
+  keepSegments: number = 3,
+): boolean {
+  if (messages.length <= 4) return false;
+
+  // 找出所有「已完成工具链段」：assistant(tool_calls) + 紧随其后的连续 tool 消息。
+  // 记录段的起点（assistant index）与结束（最后一个 tool index，含）。
+  type Segment = { start: number; end: number };
+  const segments: Segment[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    if (!isAssistantWithToolCalls(m)) continue;
+    const start = i;
+    let end = i;
+    let j = i + 1;
+    while (j < messages.length && messages[j].role === "tool") {
+      end = j;
+      j++;
+    }
+    segments.push({ start, end });
+    i = end;
+  }
+  if (segments.length <= keepSegments) return false;
+
+  // 从后往前保留最后 keepSegments 段；更早的段折叠为单条 assistant 摘要
+  const foldCount = segments.length - keepSegments;
+  const foldable = segments.slice(0, foldCount);
+  if (foldable.length === 0) return false;
+
+  // 为每段生成摘要（工具名 + 成败 + 关键结果前缀）
+  const synopsisLines: string[] = [];
+  for (const seg of foldable) {
+    const names: string[] = [];
+    const details: string[] = [];
+    for (let k = seg.start; k <= seg.end; k++) {
+      const msg = messages[k];
+      if (msg.role === "assistant" && isAssistantWithToolCalls(msg)) {
+        const calls = (msg as { tool_calls?: ChatCompletionMessageToolCall[] }).tool_calls ?? [];
+        for (const tc of calls) {
+          if (tc.type !== "function" || !tc.function?.name) continue;
+          names.push(tc.function.name);
+          let argsPreview = "";
+          try {
+            const parsed = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+            argsPreview = JSON.stringify(parsed).slice(0, 80);
+          } catch {
+            /* 忽略解析失败 */
+          }
+          details.push(`  ${tc.function.name}(${argsPreview})`);
+        }
+      } else if (msg.role === "tool") {
+        const content = typeof msg.content === "string" ? msg.content : "";
+        const flat = content.replace(/\s+/g, " ").trim();
+        details.push(`  ↳ ${flat.slice(0, 80)}${flat.length > 80 ? "…" : ""}`);
+      }
+    }
+    synopsisLines.push(
+      names.length > 0
+        ? `第${foldable.indexOf(seg) + 1}段 调用 ${names.join(" / ")}：\n${details.join("\n")}`
+        : `第${foldable.indexOf(seg) + 1}段（无工具调用）`,
+    );
+  }
+
+  // 逆序替换（从后往前删，避免 index 错位）
+  let changed = false;
+  for (let s = foldable.length - 1; s >= 0; s--) {
+    const seg = foldable[s];
+    const summaryContent = `[已完成工具链摘要]\n${synopsisLines[s]}`;
+    messages.splice(seg.start, seg.end - seg.start + 1, {
+      role: "assistant",
+      content: summaryContent,
+    });
+    changed = true;
+  }
+  return changed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 子代理上下文隔离（最彻底）：长工具链自动升级委派
+//
+// 问题：单条用户消息触发长工具循环时，每轮都要把「固定层 + 已累积的完整工具链」
+// 重发给 LLM，token 随轮数 O(n²) 增长。即使 compact/fold 也只能压缩体积，
+// 无法消除「每轮携带全部历史」这一结构性问题。
+//
+// 方案：当链足够长/结果足够大时，主 loop 自动调用 master.invoke_sub_agent，
+// 把「用户目标 + 已收集信息」交给一个独立上下文的专业子代理继续执行，
+// 子代理跑完后返回结构化报告；主 loop 用报告替换整条工具链，实现真正隔离。
+// ─────────────────────────────────────────────────────────────────────────
+
+const AUTO_DELEGATE_ENABLED = process.env.AUTO_DELEGATE_ENABLED !== "false";
+const AUTO_DELEGATE_MIN_ROUNDS = (() => {
+  const v = Number.parseInt(process.env.AUTO_DELEGATE_MIN_ROUNDS ?? "3", 10);
+  return Number.isFinite(v) && v >= 2 ? v : 3;
+})();
+const AUTO_DELEGATE_MAX_ROUNDS = (() => {
+  const v = Number.parseInt(process.env.AUTO_DELEGATE_MAX_ROUNDS ?? "5", 10);
+  return Number.isFinite(v) && v > AUTO_DELEGATE_MIN_ROUNDS ? v : AUTO_DELEGATE_MIN_ROUNDS + 2;
+})();
+const AUTO_DELEGATE_CHARS = (() => {
+  const v = Number.parseInt(process.env.AUTO_DELEGATE_CHARS ?? "6000", 10);
+  return Number.isFinite(v) && v > 1000 ? v : 6000;
+})();
+const TOOL_CHAIN_FOLD_ENABLED = process.env.TOOL_CHAIN_FOLD_ENABLED !== "false";
+
+export type AutoDelegateChainStep = {
+  toolName: string;
+  ok: boolean;
+  resultPreview: string;
+};
+
+/** 根据已执行工具推断最适合接手的子 Agent 类型 */
+export function determineAutoDelegateAgentType(
+  steps: readonly AutoDelegateChainStep[],
+): "life" | "tech" | "info" {
+  let lifeScore = 0;
+  let techScore = 0;
+  let infoScore = 0;
+  for (const s of steps) {
+    const n = s.toolName;
+    // life：钱包/消费类写操作
+    if (/^(wallet\.|fund\.|market\.|shop\.|purchase\.|a2a\.|trade\.)/.test(n)) lifeScore += 2;
+    // tech：代码/RPA/系统/自编程/周期性视觉
+    if (/^(code\.|rpa\.|terminal|shell|system\.|file\.|docker|git\.|self\.|vision\.)/.test(n)) techScore += 2;
+    else if (/^desktop\.visual\./.test(n)) techScore += 1;
+    // info：检索/深读/比价
+    if (/^(search_web|search_images|search_videos|search_news|fetch_web|info\.|shopping\.suggest|budget\.calculate|browser\.)/.test(n))
+      infoScore += 1;
+  }
+  if (lifeScore > 0 && lifeScore >= techScore && lifeScore >= infoScore) return "life";
+  if (techScore > 0 && techScore >= infoScore) return "tech";
+  if (infoScore > 0) return "info";
+  return "life";
+}
+
+/** 生成交给子代理的任务描述（用户目标 + 主线程已收集信息摘要） */
+function buildAutoDelegateTaskDescription(
+  userText: string,
+  steps: readonly AutoDelegateChainStep[],
+  totalChars: number,
+): string {
+  const lines = steps.map(
+    (s, i) => `${i + 1}. ${s.toolName} → ${s.ok ? "成功" : "失败"}: ${s.resultPreview}`,
+  );
+  return (
+    `用户请求：${(userText || "(未提供)").slice(0, 500)}\n\n` +
+    `主线程已完成 ${steps.length} 次工具调用（累计结果约 ${totalChars} 字符），信息摘要如下：\n${lines.join("\n") || "(无)"}\n\n` +
+    `请基于以上已收集信息完成剩余工作，避免重复调用相同工具，并输出 [REPORT] 结构化报告（含结论/证据/置信度/缺失项）。`
+  );
+}
+
+/**
+ * 尝试把长链升级委派给子代理。成功返回 { report, agentType }，否则返回 null（调用方回退到折叠）。
+ * 仅当 master.invoke_sub_agent 已注册（子代理委派启用）且执行成功时返回非空。
+ */
+async function tryAutoDelegateToSubAgent(params: {
+  ctx: ChatToolExecutionContext;
+  userText: string;
+  steps: readonly AutoDelegateChainStep[];
+  totalChars: number;
+}): Promise<{ report: string; agentType: "life" | "tech" | "info" } | null> {
+  const { ctx, userText, steps, totalChars } = params;
+  if (steps.length === 0) return null;
+  const agentType = determineAutoDelegateAgentType(steps);
+  let out: { ok: boolean; result: Record<string, unknown> };
+  try {
+    out = await ctx.executeTool(MASTER_INVOKE_SUB_AGENT_REGISTRY, {
+      agentType,
+      taskDescription: buildAutoDelegateTaskDescription(userText, steps, totalChars),
+      userStatusLine: "任务步骤较多，已转交专业子代理分步完成…",
+      directive:
+        "你已经接手一个正在进行中的任务。优先复用上方已收集的信息，避免重复调用相同工具；直接完成目标并输出结构化 [REPORT] 报告。",
+    });
+  } catch {
+    return null;
+  }
+  if (!out || !out.ok) return null;
+  const report = typeof out.result?.report === "string" ? out.result.report.trim() : "";
+  if (!report) return null;
+  return { report, agentType };
+}
+
+/** 用子代理报告替换整条工具链，实现上下文隔离（丢弃每轮重发的历史，只保留报告） */
+function replaceChainWithDelegationReport(
+  messages: ChatCompletionMessageParam[],
+  delegateOut: { report: string; agentType: "life" | "tech" | "info" },
+): void {
+  // 找到最后一个 user 消息（用户原始请求 + 可能注入的视觉帧），其后即为工具链
+  let lastUserIdx = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "user") lastUserIdx = i;
+  }
+  const keepEnd = lastUserIdx >= 0 ? lastUserIdx + 1 : messages.length;
+  messages.length = keepEnd;
+  messages.push({
+    role: "user",
+    content:
+      `[子代理执行结果 · ${delegateOut.agentType}]\n` +
+      `主线程检测到任务步骤过多，已转交专业子代理在独立上下文中完成。以下是其结构化报告：\n\n${delegateOut.report}`,
+  });
 }
 
 /**
@@ -610,6 +851,34 @@ function registryNameToApiToolName(name: string): string {
   return name.replace(/\./g, "_");
 }
 
+/**
+ * 压缩 schema 文本中的冗余空白（换行/缩进→单空格）。无损：description 是给 LLM 看的
+ * 自然语言，压缩空白不改变语义，但 JSON 序列化后每轮重复发送的字符数显著下降。
+ */
+function compactSchemaText(text: string | undefined): string | undefined {
+  if (!text) return text;
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * 递归压缩 JSON Schema 中所有层级的 description 字符串（只动 description 键，
+ * 绝不触碰 name/type/enum/const 等语义值），用于工具 schema 发送前的无损瘦身。
+ */
+function compactSchemaDescriptions(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map((v) => compactSchemaDescriptions(v));
+  if (node && typeof node === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      out[k] =
+        k === "description" && typeof v === "string"
+          ? compactSchemaText(v)
+          : compactSchemaDescriptions(v);
+    }
+    return out;
+  }
+  return node;
+}
+
 function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
   apiTools: ChatCompletionTool[];
   resolveRegistryToolName: (apiName: string) => string;
@@ -625,6 +894,10 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
       function: {
         ...tool.function,
         name: apiName,
+        description: compactSchemaText(tool.function.description),
+        parameters: tool.function.parameters
+          ? (compactSchemaDescriptions(tool.function.parameters) as typeof tool.function.parameters)
+          : tool.function.parameters,
       },
     };
   });
@@ -2086,6 +2359,8 @@ export async function streamCompletionWithTools(
     maxOutputTokens?: number;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
     audit?: { sessionId?: string; stage?: "main_chat" };
+    /** 子代理上下文隔离：true 时禁止长链自动升级委派（子 Agent 内部用，防递归） */
+    disableAutoDelegate?: boolean;
   },
 ): Promise<string> {
   // 动态调整工具循环轮次（基于任务复杂度）
@@ -2130,6 +2405,19 @@ export async function streamCompletionWithTools(
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
   const allToolExecResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }> = [];
 
+  // ── 子代理上下文隔离（长链自动升级委派）状态 ──
+  // 仅在非 fast 模式、未显式禁用、且委派能力可用时启用。
+  const autoDelegateActive =
+    AUTO_DELEGATE_ENABLED &&
+    !fastProfile &&
+    !options?.disableAutoDelegate;
+  // 已发生的工具链轮次（含工具调用的一轮记一次）与累计结果体积
+  let chainRounds = 0;
+  let chainToolChars = 0;
+  const chainSteps: AutoDelegateChainStep[] = [];
+  // 本轮 turn 已完成过一次自动委派（防重复/递归追加）
+  let delegatedReport: string | null = null;
+
   // 工具调用克制引导：减少 LLM 对同一工具的冗余重复调用（实测 S3 联网搜索场景
   // LLM 会连续调 3-5 次 search_web，S5 代码沙箱会调 2 次 code.run）。
   // 只在有工具可调时注入，纯对话场景不注入。
@@ -2155,14 +2443,27 @@ export async function streamCompletionWithTools(
     // 记录本轮真实取数工具是否失败（供恢复轮判定）
     let realToolFailedThisRound = false;
     let retriedToolCallIdError = false;
+    // 子代理上下文隔离：本轮是否执行了可委派的真实工具（用于累加 chainRounds）
+    let chainWorkThisRound = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
     // Token 用量审计：本轮发往 LLM 的输入规模（估算）
     let auditInputChars = 0;
 
     while (true) {
-      // 第 2 轮起压缩早期 tool 结果，减少 token 消耗（最新 keepRounds 条保持全量，
-      // 保证 LLM 始终基于完整上下文决策，避免幻觉）
-      if (round >= 1) compactToolLoopHistory(messages, 3);
+      // 第 2 轮起压缩早期 tool 结果 + 折叠更早的已完成链段，减少 token 消耗
+      // （最新 keepRounds 条保持全量，保证 LLM 始终基于完整上下文决策，避免幻觉）
+      if (round >= 1) {
+        if (TOOL_CHAIN_FOLD_ENABLED) {
+          // 子任务链摘要化：把旧于保留窗口的「assistant(tool_calls)+tool*」整段
+          // 折叠为单条结构化摘要（消除结构性重发开销，不影响 tool_call_id 链）
+          try {
+            foldAncientToolChainSegments(messages, 3);
+          } catch {
+            /* 折叠失败不阻断主流程 */
+          }
+        }
+        compactToolLoopHistory(messages, 3);
+      }
       const sanitizedMessages = sanitizeChatMessagesForApi(messages, {
         stripReasoning: thinkingDisabled,
         logPrefix: "[openai-tool-loop]",
@@ -2625,6 +2926,16 @@ export async function streamCompletionWithTools(
       const fullToolContent = typeof ocrText === "string" && ocrText.trim()
         ? `${toolContent}\n\n${ocrText}`
         : toolContent;
+      // 子代理上下文隔离：累计链步骤（工具名/成败/结果预览）与体积
+      if (autoDelegateActive && !META_TOOL_NAMES.has(wireToolName)) {
+        chainWorkThisRound = true;
+        chainToolChars += fullToolContent?.length ?? 0;
+        chainSteps.push({
+          toolName: wireToolName,
+          ok: exec.ok,
+          resultPreview: (fullToolContent ?? "").replace(/\s+/g, " ").trim().slice(0, 120),
+        });
+      }
       // 元工具（tool_discover / agent.query_capabilities 等）输出是结构化 JSON，
       // 不进 roundToolOutputs，防止「道歉式兜底」把它们原样拼成回复透出到前端。
       // Fix2(加固 fast 轻工具链路)：失败的工具输出（含"工具执行超时/error"）也不进
@@ -2668,6 +2979,41 @@ export async function streamCompletionWithTools(
         });
       }
     }
+
+    // ── 子代理上下文隔离（最彻底）：达到阈值时把长工具链升级委派给子代理 ──
+    // 子代理在独立上下文中跑完剩余工作并返回结构化报告；主 loop 用报告替换整条
+    // 工具链（丢弃每轮重发的结构性开销），实现真正隔离。仅非 fast / 未禁用时触发，
+    // 且每 turn 最多一次（delegatedReport 防重复/递归）。
+    if (autoDelegateActive && !delegatedReport && chainSteps.length > 0) {
+      if (chainWorkThisRound) chainRounds += 1;
+      const enoughRounds = chainRounds >= AUTO_DELEGATE_MIN_ROUNDS;
+      const bigEnough =
+        chainRounds >= AUTO_DELEGATE_MIN_ROUNDS - 1 &&
+        chainToolChars >= AUTO_DELEGATE_CHARS;
+      if (enoughRounds || bigEnough) {
+        console.warn(
+          `[tool-loop] 链长=${chainRounds}轮/${chainSteps.length}步/累计${chainToolChars}字符 → 尝试升级委派子代理`,
+        );
+        const delegateOut = await tryAutoDelegateToSubAgent({
+          ctx,
+          userText,
+          steps: chainSteps,
+          totalChars: chainToolChars,
+        });
+        if (delegateOut) {
+          replaceChainWithDelegationReport(messages, delegateOut);
+          delegatedReport = delegateOut.report;
+          // 子代理报告即最终输出：直接流式推送并返回，不再重复组织语言（省一次 LLM 调用）。
+          // 报告已作为 user 消息注入 messages，afterTurnCompleted 会持久化到会话线程。
+          const finalReport = stripInternalControlTags(delegateOut.report);
+          if (finalReport) onDelta(finalReport);
+          // 工具结果兜底也指向报告，防止上层 apology 检测把回复替换为空
+          lastToolOutputFallback = finalReport;
+          console.warn(`[tool-loop] 已委派 ${delegateOut.agentType} 子代理，报告 ${finalReport.length} 字符，隔离主链`);
+          break;
+        }
+      }
+    }
     // Fix1(加固 fast 轻工具链路)：本轮存在真实工具失败且轮次预算已耗尽 → 授予 1 次恢复轮，
     // 并注入失败提示，让 LLM 换参数/换兜底工具重试或如实说明。
     // 若无此步，fast(maxRounds=1) 下唯一一次工具失败会直接结束循环 → 空回复/"没查到"。
@@ -2699,7 +3045,9 @@ export async function streamCompletionWithTools(
   // 如果已有工具结果（lastToolOutputFallback 非空），发一次轻量 LLM 调用让 LLM
   // 用自然语言组织工具结果，避免直接把工具 JSON 摘要 dump 给用户。
   // 同时处理：lastAssistantText 是 apology 风格时，也用 summary 调用重建。
+  // 已自动委派子代理时跳过（报告已直接流式输出，避免重复组织 + 省一次 LLM 调用）。
   const needSummaryCall =
+    !delegatedReport &&
     (!lastAssistantText.trim() || isApologyStyleFallback(lastAssistantText)) &&
     lastToolOutputFallback.trim().length > 0;
 

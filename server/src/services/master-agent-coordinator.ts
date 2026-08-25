@@ -1337,6 +1337,8 @@ export class MasterAgentCoordinator {
       ...access,
       disableThinking: true,
       toolRankingHint: opts?.toolRankingHint,
+      // Master 本身就是委派编排者：禁止其工具循环再自动升级委派，防止递归（master.* 链 → 再次 invoke_sub_agent）
+      toolLoop: { disableAutoDelegate: true },
       // 2026-08-02 模型路由：Master Agent 始终使用 Complex 模式 → deepseek-reasoner（Pro）
       ...buildModelOverrideOpts(TaskTier.COMPLEX),
     };
@@ -1538,7 +1540,7 @@ export class MasterAgentCoordinator {
       toolRankingHint: this.currentTurnOrchestrateOpts?.toolRankingHint,
       // 子 Agent 智能化关键注入：
       systemPromptOverride,
-      toolLoop: { maxRounds },
+      toolLoop: { maxRounds, disableAutoDelegate: true },
       ...(modelConfig.modelOverride ? { modelOverride: modelConfig.modelOverride } : {}),
       // sessionId 复用：限制 thread 长度避免无限累积
       // 收敛到 4（最小化 token 消耗），配合 sessionId 复用仍能跨轮保留关键上下文
