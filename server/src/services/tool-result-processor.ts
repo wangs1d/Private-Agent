@@ -6,11 +6,13 @@ import {
 } from "../services/content-summary-service.js";
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { routeRender } from "../gateway/index.js";
+import { extractDataBriefPayload } from "./render-hint-service.js";
 import { formatAgentResultForChat } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
 
-const CONTENT_LENGTH_THRESHOLD = 800;
+/** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：400） */
+const CONTENT_LENGTH_THRESHOLD = 400;
 
 /** 提取 LLM 输出的 [RENDER_HINT:xxx] 标记，剥离后返回 hint 和清洗后的文本 */
 function extractLlmRenderHint(text: string): { rawHint: string | null; cleanText: string } {
@@ -350,6 +352,18 @@ export class ToolResultProcessor {
         console.log(`[ToolResultProcessor] search_result: ${hint.reason}`);
         return marked;
       }
+    }
+
+    // 优先级 1.5：data_brief 数据快报 → 注入 [RENDER_AS:data_brief] + [DATA_BRIEF_START] payload。
+    // 用原始文本提取（不经过 humanize，避免数值被口语化改写），前端解析失败时回退纯文本。
+    if (hint.type === "data_brief") {
+      console.log(`[ToolResultProcessor] data_brief: ${hint.reason}`);
+      if (opts?.plainTextMode) return humanize(workingText);
+      const payload = extractDataBriefPayload(workingText);
+      return wrapRenderAs(
+        "data_brief",
+        `[DATA_BRIEF_START]${JSON.stringify(payload)}[DATA_BRIEF_END]`,
+      );
     }
 
     // 优先级 2：result_card 简短汇报

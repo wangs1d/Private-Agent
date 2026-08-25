@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { ExternalChatProvider } from "../external-model/types.js";
+import { recordLlmUsageByChars } from "./llm-token-audit.js";
 
 export type MoodInferenceSource = "conversation" | "behavior" | "context";
 
@@ -248,6 +249,7 @@ export class MoodInferenceService {
 {"sentimentScore": <-1 到 1 的小数，-1 极差、0 中性、1 极好>, "confidence": <0 到 1>, "emotionTags": [<中文标签，最多 3 个>], "agentNote": "<给 Agent 自己看的一句话>"}
 
 用户消息：${text.slice(0, 1000)}`;
+      let auditInputChars = prompt.length;
       const result = await this.deps.externalChat.streamCompletion(
         `mood-inference:${sessionId}`,
         { text: prompt },
@@ -255,6 +257,17 @@ export class MoodInferenceService {
         undefined,
         { systemPromptOverride: "你是一个情感分析助手，只输出 JSON，不要任何解释。" },
       );
+      // Token 用量审计：情绪推断（每轮用户消息最多一次）
+      try {
+        recordLlmUsageByChars({
+          stage: "mood_inference",
+          sessionId,
+          inputChars: auditInputChars,
+          outputChars: result?.length ?? 0,
+        });
+      } catch {
+        /* 审计失败静默 */
+      }
       if (!result) return null;
       const jsonMatch = String(result).match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;

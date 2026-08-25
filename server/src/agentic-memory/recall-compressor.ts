@@ -18,25 +18,34 @@ export class AgenticMemoryRecallCompressor {
 
     try {
       const openai = new OpenAI({ apiKey });
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        {
+          role: "system",
+          content: [
+            "你是记忆压缩器。将检索到的记忆条目压缩为极简要点列表，每条不超过一行。",
+            "保留：关键事实、用户偏好、Agent承诺、待办事项、重要日期。",
+            "丢弃：冗余信息、低相关度条目、纯寒暄。",
+            "输出格式：每行一条「- 要点」，不超过15条。",
+          ].join("\n"),
+        },
+        { role: "user", content: recallText },
+      ];
       const response = await openai.chat.completions.create({
         model: getAgenticMemoryLlmModel(),
         temperature: 0.2,
         max_tokens: 600,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "你是记忆压缩器。将检索到的记忆条目压缩为极简要点列表，每条不超过一行。",
-              "保留：关键事实、用户偏好、Agent承诺、待办事项、重要日期。",
-              "丢弃：冗余信息、低相关度条目、纯寒暄。",
-              "输出格式：每行一条「- 要点」，不超过15条。",
-            ].join("\n"),
-          },
-          { role: "user", content: recallText },
-        ],
+        messages,
       });
       const compressed = response.choices[0]?.message?.content?.trim();
       if (!compressed) return this.truncateSimple(recallText, threshold);
+      // Token 审计：召回压缩输入常为大批量记忆，值得单独记账
+      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+      recordLlmUsageByChars({
+        stage: "recall_compress",
+        inputChars: JSON.stringify(messages).length,
+        outputChars: compressed.length,
+        model: getAgenticMemoryLlmModel(),
+      });
 
       return `以下为 Mem0 记忆图联想检索（已压缩）：\n${compressed}`;
     } catch {

@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
@@ -435,7 +436,7 @@ export function getOptimalMaxRounds(userText: string, messageCount: number): num
  */
 function compactToolLoopHistory(
   messages: ChatCompletionMessageParam[],
-  keepRounds: number = 2,
+  keepRounds: number = 3,
 ): void {
   if (messages.length <= 4) return; // 太少不压缩
 
@@ -455,16 +456,22 @@ function compactToolLoopHistory(
 
   if (lastOldToolIdx === undefined || firstOldToolIdx === undefined) return;
 
-  // 压缩 cutoff 之前的 tool message content
-  // 保留 400 字符：足够保留工具名、状态、核心数据，避免信息丢失影响后续决策
+  // 分层压缩 keepRounds 之前的 tool message content：
+  // - 越旧压得越狠：距当前窗口超过 2 条的 → 150 字符（只留工具名/状态/结论要点）
+  // - 刚出窗口的 → 400 字符（保留核心数据，供追溯）
+  // 最新 keepRounds 条永远全量，保证 LLM 决策上下文完整（防幻觉）。
   for (let i = firstOldToolIdx; i <= lastOldToolIdx; i++) {
     const msg = messages[i];
     if (msg.role !== "tool") continue;
     const content = typeof msg.content === "string" ? msg.content : "";
-    if (content.length <= 400) continue; // 已经很短不压缩
-    // 保留前 400 字符作为摘要，加压缩标记
-    const summary = content.slice(0, 400).replace(/\n/g, " ").trim();
-    (msg as { content: string }).content = `[已压缩·${content.length}字符→400] ${summary}...`;
+    if (!content || content.startsWith("[已压缩")) continue; // 已压缩过不重复处理
+    // 该消息在压缩区内的位置序号（0 = 最旧）
+    const posInOld = toolMsgIndexes.indexOf(i);
+    const distanceFromWindow = cutoffIndex - posInOld; // 越大越旧
+    const cap = distanceFromWindow > 2 ? 150 : 400;
+    if (content.length <= cap) continue;
+    const summary = content.slice(0, cap).replace(/\n/g, " ").trim();
+    (msg as { content: string }).content = `[已压缩·${content.length}字符→${cap}] ${summary}...`;
   }
 }
 
@@ -2075,6 +2082,10 @@ export async function streamCompletionWithTools(
     extraBody?: Record<string, unknown>;
     promptCache?: PrefixCacheRequest;
     requestSystemMessages?: ChatCompletionMessageParam[];
+    /** 输出 token 上限（对应 OpenAI 的 max_tokens）；不传则不限制 */
+    maxOutputTokens?: number;
+    /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
+    audit?: { sessionId?: string; stage?: "main_chat" };
   },
 ): Promise<string> {
   // 动态调整工具循环轮次（基于任务复杂度）
@@ -2145,10 +2156,13 @@ export async function streamCompletionWithTools(
     let realToolFailedThisRound = false;
     let retriedToolCallIdError = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
+    // Token 用量审计：本轮发往 LLM 的输入规模（估算）
+    let auditInputChars = 0;
 
     while (true) {
-      // 第 3 轮起压缩早期 tool 结果，减少 token 消耗
-      if (round >= 2) compactToolLoopHistory(messages, 2);
+      // 第 2 轮起压缩早期 tool 结果，减少 token 消耗（最新 keepRounds 条保持全量，
+      // 保证 LLM 始终基于完整上下文决策，避免幻觉）
+      if (round >= 1) compactToolLoopHistory(messages, 3);
       const sanitizedMessages = sanitizeChatMessagesForApi(messages, {
         stripReasoning: thinkingDisabled,
         logPrefix: "[openai-tool-loop]",
@@ -2188,6 +2202,7 @@ export async function streamCompletionWithTools(
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
           stream: true,
+          ...(options?.maxOutputTokens ? { max_tokens: options.maxOutputTokens } : {}),
           ...(options?.promptCache ?? {}),
           // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body` 顶层字段——它会
           // 整个 body JSON.stringify 后把 `extra_body` 当作普通 key 发出去，导致
@@ -2196,6 +2211,7 @@ export async function streamCompletionWithTools(
           ...(options?.extraBody ?? {}),
         };
         stream = await client.chat.completions.create(request as Parameters<typeof client.chat.completions.create>[0]);
+        auditInputChars = JSON.stringify(requestMessages).length + JSON.stringify(apiTools ?? []).length;
         break;
       } catch (e) {
         if (!retriedToolCallIdError && isToolCallIdNotFoundError(e)) {
@@ -2251,6 +2267,21 @@ export async function streamCompletionWithTools(
       } else {
         throw e;
       }
+    }
+
+    // Token 用量审计：记录本轮实际 LLM 调用（工具循环内每次 round 一条）
+    try {
+      if (options?.audit && auditInputChars > 0) {
+        recordLlmUsageByChars({
+          stage: options.audit.stage ?? "main_chat",
+          sessionId: options.audit.sessionId,
+          inputChars: auditInputChars,
+          outputChars: (fullText?.length ?? 0) + (fullReasoning?.length ?? 0),
+          model,
+        });
+      }
+    } catch {
+      /* 审计失败静默 */
     }
 
     // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为思考前导话，

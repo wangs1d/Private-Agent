@@ -246,6 +246,12 @@ export type AgentStreamOptions = {
    * 未传时无法中断(向后兼容)。
    */
   signal?: AbortSignal;
+  /**
+   * 本次回复的输出 token 上限（对应 OpenAI 的 max_tokens）。
+   * - fast 等对话模式建议 600-1000，防止回复失控拉长、控制输出成本
+   * - 不传则不限制（默认行为，对齐 reasoner/工具链复杂输出）
+   */
+  maxOutputTokens?: number;
 };
 
 /** 工具开始执行前（用于 UI 展示模型填写的 userStatusLine 等） */

@@ -158,6 +158,8 @@ export function createLlmRollingRecapSummarizer(opts?: {
         DEFAULT_MODEL;
       const baseURL = binding?.baseURL?.trim() || process.env.OPENAI_BASE_URL?.trim();
       const openai = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
+      // Token 审计：串行化 prompt 估算输入规模
+      const auditInput = JSON.stringify(buildSummarizeMessages(ctx));
       const response = await openai.chat.completions.create({
         model,
         temperature: 0.2,
@@ -165,6 +167,16 @@ export function createLlmRollingRecapSummarizer(opts?: {
         messages: buildSummarizeMessages(ctx),
       });
       const content = response.choices[0]?.message?.content?.trim();
+      {
+        // 防循环依赖：懒加载审计模块
+        const { recordLlmUsageByChars } = await import("./llm-token-audit.js");
+        recordLlmUsageByChars({
+          stage: "rolling_summary",
+          inputChars: auditInput.length,
+          outputChars: content?.length ?? 0,
+          model,
+        });
+      }
       if (!content) return null;
       const lines = parseRecapLinesFromLlmOutput(content, maxLines, maxLineChars);
       return lines.length > 0 ? lines : null;

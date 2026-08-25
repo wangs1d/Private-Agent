@@ -187,19 +187,28 @@ export class AgenticMemoryIngestService {
 
     try {
       const openai = new OpenAI({ apiKey });
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        {
+          role: "system",
+          content:
+            "你是信息摘要器。把多轮低信号对话压缩成简洁中文摘要，保留关键事实、偏好、决定与待办，删除寒暄和无信息量内容。输出纯文本，500字内。",
+        },
+        { role: "user", content: text },
+      ];
       const response = await openai.chat.completions.create({
         model: getAgenticMemoryLlmModel(),
         temperature: 0.3,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是信息摘要器。把多轮低信号对话压缩成简洁中文摘要，保留关键事实、偏好、决定与待办，删除寒暄和无信息量内容。输出纯文本，500字内。",
-          },
-          { role: "user", content: text },
-        ],
+        messages,
       });
       const summary = response.choices[0]?.message?.content?.trim() || text.slice(0, 3000);
+      // Token 审计：低信号批量摘要
+      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+      recordLlmUsageByChars({
+        stage: "memory_flush_summarize",
+        inputChars: JSON.stringify(messages).length,
+        outputChars: summary.length,
+        model: getAgenticMemoryLlmModel(),
+      });
       return [...keyLines, summary].filter(Boolean).join("\n");
     } catch {
       return [...keyLines, text.slice(0, 3000)].filter(Boolean).join("\n");

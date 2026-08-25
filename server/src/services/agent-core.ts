@@ -58,6 +58,18 @@ const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"
 - 面向任务：逻辑推理 + 工具调用，多步收敛，聚焦把事办好、拿到正确结果。
 - 每次只推进一个确定动作：想清楚→调工具→看结果→决定下一步；明确无法完成时给出达成度说明。
 - 你的产出是"可直接复述的事实结论"，不是口语；最终对外表述由 fast 续接完成。`;
+
+/**
+ * fast 对话模式的单次输出 token 上限（防回复失控拉长，控制输出成本）。
+ * 默认 900（约 600 中文字符，fast 短句对话足够）；FAST_MAX_OUTPUT_TOKENS=0 关闭限制。
+ */
+function fastMaxOutputTokens(): number | undefined {
+  const raw = process.env.FAST_MAX_OUTPUT_TOKENS?.trim();
+  if (!raw) return 900;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
@@ -2274,6 +2286,10 @@ if (this.isComplexMode(route.mode)) {
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
+          // 2026-08-25 输出 token 上限：fast 对话模式限制单次输出长度，
+          // 防止回复失控拉长（minimal 风格已要求简短，上限仅作兜底），
+          // 复用同一限制覆盖工具分支与普通分支。可用 FAST_MAX_OUTPUT_TOKENS 覆盖。
+          maxOutputTokens: fastMaxOutputTokens(),
           toolExposureProfile,
           toolRankingHint,
         } satisfies AgentStreamOptions)

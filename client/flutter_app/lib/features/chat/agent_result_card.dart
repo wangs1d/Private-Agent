@@ -8,6 +8,7 @@ import "travel_plan_launcher.dart";
 import "content_summary_detail_formatter.dart";
 import "display_effects/compare_slider.dart";
 import "display_effects/display_effects.dart";
+import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "media_thumbnail.dart";
 
@@ -91,7 +92,7 @@ class AgentResultCard extends StatelessWidget {
     return SizedBox(
       width: double.infinity,
       child: Container(
-        // 卡片宽度自然跟随内容(由外层 bubble 约束),最大不超过 360,
+        // 卡片宽度自然跟随内容(由外层 bubble 约束),最大 390,
         // 避免宽屏下拉成"横幅",实现"刚好包住每行最后那个字"的紧凑效果。
         constraints: const BoxConstraints(maxWidth: 390),
         padding: padding,
@@ -185,7 +186,9 @@ class _InlineMarkdownBody extends StatelessWidget {
   }
 }
 
-/// 列表项前缀符号（✓ / • / !）。
+/// 列表项标记：与卡片标题图标块同一套「浅底圆角芯片 + 实色图标」语言，
+/// 只是走 item 小档（16px 芯片），✓/•/! 从文本符号改为 Material 图标，
+/// 让列表行与专用卡图标块视觉同源。
 class _ItemMark extends StatelessWidget {
   const _ItemMark({required this.type, required this.colorScheme});
 
@@ -194,39 +197,20 @@ class _ItemMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String glyph;
-    final Color color;
-    final double size;
-    switch (type) {
-      case "warn":
-        glyph = "!";
-        color = const Color(0xFFFBBF24);
-        size = 13;
-        break;
-      case "num":
-        glyph = "•";
-        color = colorScheme.primary;
-        size = 16;
-        break;
-      case "check":
-      default:
-        glyph = "✓";
-        color = const Color(0xFF34D399);
-        size = 13;
-        break;
-    }
-    return Container(
-      width: 16,
-      alignment: Alignment.center,
-      child: Text(
-        glyph,
-        style: TextStyle(
-          color: color,
-          fontSize: size,
-          fontWeight: FontWeight.w700,
-          height: 1.4,
+    final (IconData icon, Color color) = switch (type) {
+      "warn" => (Icons.priority_high_rounded, const Color(0xFFFBBF24)),
+      "num" || "bullet" => (
+          Icons.fiber_manual_record_rounded,
+          colorScheme.primary
         ),
-      ),
+      _ => (Icons.check_rounded, const Color(0xFF34D399)),
+    };
+    return SoftIconChip(
+      icon: icon,
+      color: color,
+      chipSize: 16,
+      iconSize: 11,
+      radius: 5,
     );
   }
 }
@@ -312,7 +296,7 @@ class _SpecializedCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final (IconData icon, Color color) = _style;
     return Container(
-      constraints: const BoxConstraints(maxWidth: 360),
+      constraints: const BoxConstraints(maxWidth: 390),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -327,14 +311,7 @@ class _SpecializedCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(icon, size: 18, color: color),
-                ),
+                SoftIconChip(icon: icon, color: color),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -434,8 +411,8 @@ class _ProgressCard extends StatelessWidget {
           if (data.title.isNotEmpty) ...<Widget>[
             Row(
               children: <Widget>[
-                Icon(Icons.donut_small, size: 16, color: cs.primary),
-                const SizedBox(width: 6),
+                SoftIconChip(icon: Icons.donut_small, color: cs.primary),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     data.title,
@@ -542,9 +519,9 @@ class _ProgressRow extends StatelessWidget {
       );
     }
     final double pct = parsed.$2!;
-    final Color barColor = pct >= 1
-        ? const Color(0xFF10B981)
-        : (pct >= 0.5 ? cs.primary : const Color(0xFFF59E0B));
+    // 两态配色：100% 完成绿，其余主色。颜色只表达「完成/未完成」，
+    // 不做三色过载的信号编码，视觉更克制、直接了当。
+    final Color barColor = pct >= 1 ? const Color(0xFF10B981) : cs.primary;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: Column(
@@ -623,7 +600,7 @@ class _QuoteCard extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Icon(Icons.format_quote, size: 18, color: cs.primary),
+              SoftIconChip(icon: Icons.format_quote, color: cs.primary),
               const SizedBox(width: 8),
               Expanded(
                 child: buildInlineMarkdownText(
@@ -642,7 +619,7 @@ class _QuoteCard extends StatelessWidget {
           if (source.isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
             Padding(
-              padding: const EdgeInsets.only(left: 26),
+              padding: const EdgeInsets.only(left: 36),
               child: buildInlineMarkdownText(
                 "— $source",
                 TextStyle(
@@ -700,8 +677,8 @@ class _TimelineCard extends StatelessWidget {
           if (data.title.isNotEmpty) ...<Widget>[
             Row(
               children: <Widget>[
-                Icon(Icons.timeline_outlined, size: 16, color: cs.primary),
-                const SizedBox(width: 6),
+                SoftIconChip(icon: Icons.timeline_outlined, color: cs.primary),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     data.title,
@@ -1256,14 +1233,6 @@ class _TravelItineraryCard extends StatelessWidget {
                   ),
                 ),
               ],
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.open_in_new, size: 15),
-                tooltip: "打开行程规划",
-                visualDensity: VisualDensity.compact,
-                color: cs.onSurfaceVariant,
-                onPressed: hasPlan ? () => TravelPlanLauncher.open(data) : null,
-              ),
             ],
           ),
           if (title.isNotEmpty) ...<Widget>[
@@ -1708,9 +1677,11 @@ class _SearchResultCard extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 10),
               child: Row(
                 children: <Widget>[
-                  Icon(Icons.travel_explore_outlined,
-                      size: 16, color: cs.primary),
-                  const SizedBox(width: 6),
+                  SoftIconChip(
+                    icon: Icons.travel_explore_outlined,
+                    color: cs.primary,
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       data.title,

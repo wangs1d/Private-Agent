@@ -51,6 +51,14 @@ const DEFAULT_SMART_TRIM_CONFIG = {
   preserveRecentTurns: 3,
 };
 
+// 条内压缩配置：对「非最近 N 轮」的超长 assistant 消息（LLM 已消费过的输出）做无损级压缩，
+// 让同一 token 预算保留更多轮次，减少整条 drop 进 recap（信息断层 + 额外一次 LLM 摘要调用）。
+const CHAT_LONG_ASSISTANT_MAX_CHARS = parseInt(
+  process.env.CHAT_LONG_ASSISTANT_MAX_CHARS ?? "800",
+  10,
+);
+const CHAT_COMPRESS_PRESERVE_RECENT_TURNS = 2;
+
 const SESSION_RECAP_PREFIX = "[session-recap]";
 const SESSION_RECAP_TITLE = "Earlier conversation recap:";
 const SESSION_RECAP_MAX_LINES = 14;
@@ -733,12 +741,50 @@ export class ChatThreadStore {
     return true;
   }
 
+  /**
+   * 条内压缩：把「非最近 preserveRecentTurns 轮」的超长 assistant 消息压到 maxChars。
+   *
+   * 背景：历史窗口 token 预算固定（MAX_CONTEXT_TOKENS），超预算时旧逻辑只会
+   * 「整条 drop 进 recap」——长 assistant 回复（LLM 已消费过的输出）占预算越多，
+   * 被 drop 的轮次越多，信息断层越严重，还白触发一次 LLM 滚动摘要（输出也耗 token）。
+   *
+   * 本函数在 drop 之前先压缩超长 assistant 消息（保留头尾、标记已压缩），
+   * 让同一预算保留约 2 倍轮次；仍超预算才走整条 drop。
+   * 安全约束：
+   * - 只动 assistant 纯文本；user / tool / 多模态 content 一律不碰；
+   * - 最近 preserveRecentTurns 轮全量保留（LLM 追赶问需要完整衔接，防幻觉）；
+   * - 已压缩（带 [已压缩 前缀）与 recap 消息跳过。
+   */
+  private compressOversizedAssistantMessages(
+    msgs: ChatCompletionMessageParam[],
+    maxChars: number,
+    preserveRecentTurns: number = CHAT_COMPRESS_PRESERVE_RECENT_TURNS,
+  ): void {
+    if (!Number.isFinite(maxChars) || maxChars < 200 || msgs.length <= 4) return;
+    const recentStart = Math.max(1, msgs.length - preserveRecentTurns * 2);
+    for (let i = 1; i < recentStart; i++) {
+      const msg = msgs[i];
+      if (msg.role !== "assistant" || typeof msg.content !== "string") continue;
+      const text = msg.content;
+      if (text.length <= maxChars) continue;
+      if (text.includes("[session-recap]")) continue; // recap 内容不动
+      if (/^\[已压缩/.test(text)) continue; // 已压缩过（幂等）
+      const keep = Math.floor(maxChars / 2);
+      const head = text.slice(0, keep).trimEnd();
+      const tail = text.slice(-keep).trimStart();
+      msg.content = `[已压缩·${text.length}字符→${maxChars}] ${head} … ${tail}`;
+    }
+  }
+
   private smartTrimByTokens(
     msgs: ChatCompletionMessageParam[],
     config: typeof DEFAULT_SMART_TRIM_CONFIG,
     sessionId?: string,
   ): void {
     if (msgs.length <= 2) return;
+    // 先做条内压缩（非最近 2 轮的超长 assistant 消息压到阈值），释放预算后再决定丢哪些组。
+    // 纯规则、同步、零 LLM 调用；压缩后总 token 仍超才走整条 drop + recap。
+    this.compressOversizedAssistantMessages(msgs, CHAT_LONG_ASSISTANT_MAX_CHARS);
     const sys = msgs[0];
     const separated = separateRecapMessages(msgs.slice(1));
     const rest = separated.body;

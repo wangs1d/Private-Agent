@@ -24,6 +24,7 @@ import {
 import { resolveChatToolPlanForStream } from "./resolve-chat-tools.js";
 import { prepareTools } from "../gateway/index.js";
 import { streamCompletionWithTools } from "./openai-compatible-tool-loop.js";
+import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
@@ -178,6 +179,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
 
     const ephemeral = streamOpts?.ephemeralTurn === true;
     const msgs: ChatCompletionMessageParam[] = ephemeral ? [] : this.thread(sessionId);
+    // Token 用量审计：非工具分支记录实际发往 LLM 的输入规模（估算）
+    let requestAuditInput = 0;
 
     const overrideSys = streamOpts?.systemPromptOverride?.trim();
     const promptMemory = streamOpts?.promptContext?.memory;
@@ -264,6 +267,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
+            maxOutputTokens: effectiveStreamOpts.maxOutputTokens,
+            audit: { sessionId, stage: "main_chat" },
           },
         );
         completed = true;
@@ -309,9 +314,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         model,
         messages: finalMessages,
         stream: true,
+        ...(streamOpts?.maxOutputTokens ? { max_tokens: streamOpts.maxOutputTokens } : {}),
         ...(promptPlan.promptCache ?? {}),
         ...(this.applyExtraBodyToPlainRequest() ? (extraBody ?? {}) : {}),
       };
+      // Token 用量审计：记录发往 LLM 的实际输入规模（估算）
+      requestAuditInput = JSON.stringify(finalMessages).length + (toolPlan ? JSON.stringify(toolPlan.visibleTools).length : 0);
       stream = await client.chat.completions.create(
         request as Parameters<typeof client.chat.completions.create>[0],
         effectiveStreamOpts.signal ? { signal: effectiveStreamOpts.signal } : undefined,
@@ -361,6 +369,18 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     if (!ephemeral) {
       this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
       this.threads.afterTurnCompleted(sessionId, msgs);
+    }
+    // Token 用量审计（非工具分支）：输入为发往 LLM 的 messages + 可见工具 schema
+    try {
+      recordLlmUsageByChars({
+        stage: "main_chat",
+        sessionId,
+        inputChars: requestAuditInput,
+        outputChars: visible.length,
+        model,
+      });
+    } catch {
+      /* 审计失败静默 */
     }
     return visible;
   }
