@@ -27,98 +27,231 @@ class AssistantBriefMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     final List<_BriefBlock> blocks = _parseBriefBlocks(text);
     final TextTheme textTheme = Theme.of(context).textTheme;
+    final ColorScheme cs = colorScheme;
+
+    final List<Widget> children = <Widget>[
+      // 简报日期头部（正文前 2 行解析出的日期；无则回退今天）
+      _DateHeader(
+        dateText: _extractDateHeader(text) ?? _todayDateHeader(),
+        cs: cs,
+        textTheme: textTheme,
+        compact: compact,
+      ),
+    ];
+
+    // 模块分区：同类模块连续出现时，只在该组首项前渲染一次分区标题
+    _BriefModule? shownModule;
+    for (final _BriefBlock block in blocks) {
+      if (block is _BriefItemBlock) {
+        final _BriefModule module = _moduleOf(block);
+        if (module != _BriefModule.other && module != shownModule) {
+          shownModule = module;
+          children.add(_ModuleHeader(
+            module: module,
+            cs: cs,
+            textTheme: textTheme,
+            compact: compact,
+          ));
+        }
+        children.add(_BriefItemCard(
+          block: block,
+          colorScheme: cs,
+          compact: compact,
+        ));
+        continue;
+      }
+
+      if (block is _BriefLeadBlock) {
+        children.add(Padding(
+          padding: EdgeInsets.only(bottom: compact ? 8 : 10),
+          child: buildInlineMarkdownText(
+            block.text,
+            textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: cs.onSurface,
+                  height: 1.35,
+                  letterSpacing: -0.1,
+                ) ??
+                TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: cs.onSurface,
+                  height: 1.35,
+                ),
+            cs: cs,
+          ),
+        ));
+        continue;
+      }
+
+      if (block is _BriefNoteBlock) {
+        children.add(Container(
+          width: double.infinity,
+          margin: EdgeInsets.only(
+            top: compact ? 2 : 4,
+            bottom: compact ? 6 : 8,
+          ),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 10 : 11,
+            vertical: compact ? 8 : 9,
+          ),
+          decoration: BoxDecoration(
+            color: cs.primary.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cs.primary.withValues(alpha: 0.16)),
+          ),
+          child: buildInlineMarkdownText(
+            block.text,
+            textTheme.bodySmall?.copyWith(
+                  color: cs.onSurface.withValues(alpha: 0.82),
+                  height: 1.45,
+                  fontWeight: FontWeight.w600,
+                ) ??
+                TextStyle(
+                  fontSize: 12,
+                  color: cs.onSurface.withValues(alpha: 0.82),
+                  height: 1.45,
+                  fontWeight: FontWeight.w600,
+                ),
+            cs: cs,
+          ),
+        ));
+        continue;
+      }
+
+      final bool isQuestion = block is _BriefClosingQuestionBlock;
+      children.add(Padding(
+        padding:
+            EdgeInsets.only(top: isQuestion ? 2 : 0, bottom: compact ? 5 : 6),
+        child: buildInlineMarkdownText(
+          block.text,
+          textTheme.bodyMedium?.copyWith(
+                color: isQuestion
+                    ? cs.onSurface
+                    : cs.onSurface.withValues(alpha: 0.86),
+                height: 1.45,
+                fontWeight: isQuestion ? FontWeight.w600 : FontWeight.w400,
+              ) ??
+              TextStyle(
+                fontSize: 14,
+                color: isQuestion
+                    ? cs.onSurface
+                    : cs.onSurface.withValues(alpha: 0.86),
+                height: 1.45,
+                fontWeight: isQuestion ? FontWeight.w600 : FontWeight.w400,
+              ),
+          cs: cs,
+        ),
+      ));
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
-      children: blocks.map((block) {
-        if (block is _BriefLeadBlock) {
-          return Padding(
-            padding: EdgeInsets.only(bottom: compact ? 8 : 10),
-            child: buildInlineMarkdownText(
-              block.text,
-              textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    color: colorScheme.onSurface,
-                    height: 1.35,
-                    letterSpacing: -0.1,
-                  ) ??
-                  TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: colorScheme.onSurface,
-                    height: 1.35,
-                  ),
-              cs: colorScheme,
-            ),
-          );
-        }
+      children: children,
+    );
+  }
+}
 
-        if (block is _BriefItemBlock) {
-          return _BriefItemCard(
-            block: block,
-            colorScheme: colorScheme,
-            compact: compact,
-          );
-        }
+/// 简报日期头部：日期 + 星期 + 分隔线，作为简报卡的开场。
+class _DateHeader extends StatelessWidget {
+  const _DateHeader({
+    required this.dateText,
+    required this.cs,
+    required this.textTheme,
+    required this.compact,
+  });
 
-        if (block is _BriefNoteBlock) {
-          return Container(
-            width: double.infinity,
-            margin: EdgeInsets.only(top: compact ? 2 : 4, bottom: compact ? 6 : 8),
-            padding: EdgeInsets.symmetric(
-              horizontal: compact ? 10 : 11,
-              vertical: compact ? 8 : 9,
-            ),
-            decoration: BoxDecoration(
-              color: colorScheme.primary.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: colorScheme.primary.withValues(alpha: 0.16),
+  final String dateText;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: compact ? 8 : 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(
+                Icons.calendar_today_outlined,
+                size: 13,
+                color: cs.onSurfaceVariant.withValues(alpha: 0.8),
               ),
-            ),
-            child: buildInlineMarkdownText(
-              block.text,
-              textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.82),
-                    height: 1.45,
-                    fontWeight: FontWeight.w600,
-                  ) ??
-                  TextStyle(
-                    fontSize: 12,
-                    color: colorScheme.onSurface.withValues(alpha: 0.82),
-                    height: 1.45,
-                    fontWeight: FontWeight.w600,
-                  ),
-              cs: colorScheme,
-            ),
-          );
-        }
+              const SizedBox(width: 6),
+              Text(
+                dateText,
+                style: textTheme.labelMedium?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ) ??
+                    TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Divider(
+            height: 1,
+            color: cs.outline.withValues(alpha: 0.16),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
-        final bool isQuestion = block is _BriefClosingQuestionBlock;
-        return Padding(
-          padding: EdgeInsets.only(top: isQuestion ? 2 : 0, bottom: compact ? 5 : 6),
-          child: buildInlineMarkdownText(
-            block.text,
-            textTheme.bodyMedium?.copyWith(
-                  color: isQuestion
-                      ? colorScheme.onSurface
-                      : colorScheme.onSurface.withValues(alpha: 0.86),
-                  height: 1.45,
-                  fontWeight: isQuestion ? FontWeight.w600 : FontWeight.w400,
+/// 简报模块分区标题：如「☀️ 天气」「📌 日程」「📰 资讯」「⚠️ 提醒」。
+class _ModuleHeader extends StatelessWidget {
+  const _ModuleHeader({
+    required this.module,
+    required this.cs,
+    required this.textTheme,
+    required this.compact,
+  });
+
+  final _BriefModule module;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        top: compact ? 0 : 2,
+        bottom: compact ? 4 : 6,
+      ),
+      child: Row(
+        children: <Widget>[
+          Text(
+            _moduleLabels[module] ?? "",
+            style: textTheme.labelMedium?.copyWith(
+                  color: cs.primary,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.2,
                 ) ??
                 TextStyle(
-                  fontSize: 14,
-                  color: isQuestion
-                      ? colorScheme.onSurface
-                      : colorScheme.onSurface.withValues(alpha: 0.86),
-                  height: 1.45,
-                  fontWeight: isQuestion ? FontWeight.w600 : FontWeight.w400,
+                  fontSize: 12,
+                  color: cs.primary,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.2,
                 ),
-            cs: colorScheme,
           ),
-        );
-      }).toList(),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(height: 1, color: cs.outline.withValues(alpha: 0.14)),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -288,6 +421,98 @@ final RegExp _symbolHeadingRe = RegExp(
   r"^\s*([🔥📌📍📎📱📺📷💡⚠⭐🎯📰🌪✅🔍📈📣💬🧭])\s*(.+)$",
 );
 final RegExp _noteLineRe = RegExp(r"^(关于|补充|顺带|另外|备注|提醒)[:：]?\s*");
+
+/// 简报条目模块归类（模块分区用）。
+enum _BriefModule { weather, schedule, news, remind, other }
+
+const Map<_BriefModule, String> _moduleLabels = <_BriefModule, String>{
+  _BriefModule.weather: "☀️ 天气",
+  _BriefModule.schedule: "📌 日程",
+  _BriefModule.news: "📰 资讯",
+  _BriefModule.remind: "⚠️ 提醒",
+};
+
+final RegExp _weatherKeywords =
+    RegExp(r"天气|气温|温度|降雨|降水|晴|多云|阴|雨|雪|风力|湿度|预警");
+final RegExp _scheduleKeywords =
+    RegExp(r"日程|会议|评审|安排|计划|行程|预约|待办|事项|上班|加班|出差");
+final RegExp _newsKeywords =
+    RegExp(r"资讯|新闻|热点|快讯|报道|热搜|排行|榜单|消息");
+final RegExp _remindKeywords =
+    RegExp(r"提醒|注意|别忘|记得|温馨提示|小心|务必");
+final RegExp _weatherMarkers = RegExp(r"[☀️🌧⛅☁️❄️🌡️🌈]");
+final RegExp _scheduleMarkers = RegExp(r"[📌📍📅🗓️🕐🕘⏰]");
+final RegExp _newsMarkers = RegExp(r"[📰🔥📣💬📈]");
+final RegExp _remindMarkers = RegExp(r"[⚠️💡❗❕]");
+
+/// 根据「标记 + 标题 + 副标题」判定条目所属模块。关键词优先（更具体），
+/// emoji 标记兜底；无法归类的走 [\_BriefModule.other]（不渲染分区标题）。
+_BriefModule _moduleOf(_BriefItemBlock block) {
+  final String hay =
+      "${block.marker} ${block.title} ${block.subtitle} ${block.details.join(' ')}";
+  if (_remindKeywords.hasMatch(hay)) return _BriefModule.remind;
+  if (_weatherKeywords.hasMatch(hay)) return _BriefModule.weather;
+  if (_newsKeywords.hasMatch(hay)) return _BriefModule.news;
+  if (_scheduleKeywords.hasMatch(hay)) return _BriefModule.schedule;
+  if (_weatherMarkers.hasMatch(hay)) return _BriefModule.weather;
+  if (_newsMarkers.hasMatch(hay)) return _BriefModule.news;
+  if (_scheduleMarkers.hasMatch(hay)) return _BriefModule.schedule;
+  if (_remindMarkers.hasMatch(hay)) return _BriefModule.remind;
+  return _BriefModule.other;
+}
+
+const List<String> _weekdayNames = <String>[
+  "星期一",
+  "星期二",
+  "星期三",
+  "星期四",
+  "星期五",
+  "星期六",
+  "星期日",
+];
+
+String _formatDateHeader(int year, int month, int day) {
+  final DateTime d = DateTime(year, month, day);
+  final String weekday = _weekdayNames[d.weekday - 1];
+  final String datePart = year == DateTime.now().year
+      ? "$month月$day日"
+      : "$year年$month月$day日";
+  return "$datePart · $weekday";
+}
+
+String _todayDateHeader() {
+  final DateTime n = DateTime.now();
+  return _formatDateHeader(n.year, n.month, n.day);
+}
+
+/// 从正文前 2 行解析日期（形如「8月25日 / 2026-08-25」），避免误抓正文里的行程日期；
+/// 未命中返回 null（调用方回退今天）。
+String? _extractDateHeader(String text) {
+  final List<String> heads =
+      text.replaceAll("\r\n", "\n").split("\n").take(2).toList();
+  for (final String line in heads) {
+    final RegExpMatch? m1 =
+        RegExp(r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+            .firstMatch(line);
+    if (m1 != null) {
+      return _formatDateHeader(
+        int.tryParse(m1.group(1) ?? "") ?? DateTime.now().year,
+        int.parse(m1.group(2)!),
+        int.parse(m1.group(3)!),
+      );
+    }
+    final RegExpMatch? m2 =
+        RegExp(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})").firstMatch(line);
+    if (m2 != null) {
+      return _formatDateHeader(
+        int.parse(m2.group(1)!),
+        int.parse(m2.group(2)!),
+        int.parse(m2.group(3)!),
+      );
+    }
+  }
+  return null;
+}
 
 List<_BriefBlock> _parseBriefBlocks(String rawText) {
   final List<String> lines = rawText

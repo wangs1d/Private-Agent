@@ -15,6 +15,7 @@ class AgentResultItem {
   const AgentResultItem({
     required this.type,
     required this.text,
+    this.depth = 0,
     this.url,
     this.mediaType,
     this.mediaUrl,
@@ -28,6 +29,10 @@ class AgentResultItem {
   /// "check"（✓ 已完成） / "num"（• 序号） / "warn"（! 警告）
   final String type;
   final String text;
+
+  /// 列表层级：0=一级条目，1=子步骤（steps 卡渲染为缩进子行）。
+  /// 由服务端 formatter 按原文缩进推断。
+  final int depth;
 
   /// 可选的链接 URL（搜索/资讯类卡片使用）
   final String? url;
@@ -49,6 +54,7 @@ class AgentResultItem {
     return AgentResultItem(
       type: json["type"]?.toString() ?? "check",
       text: json["text"]?.toString() ?? "",
+      depth: (json["depth"] as num?)?.toInt() ?? 0,
       url: json["url"]?.toString(),
       mediaType: json["mediaType"]?.toString() ?? json["kind"]?.toString(),
       mediaUrl: json["mediaUrl"]?.toString() ?? json["imageUrl"]?.toString(),

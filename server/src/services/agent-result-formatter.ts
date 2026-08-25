@@ -33,6 +33,17 @@ import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary
 const CHECK_HINT_RE = /已完成|已为你|已帮你|已设置|已创建|已规划|✓|✔|成功/i;
 const WARN_HINT_RE = /警告|注意|失败|异常|未完成|pending|⚠|!/i;
 
+/**
+ * 由原文行的前导空白推断列表层级：≥2 空格（或任意 tab）视为子步骤；
+ * 深嵌（3+ 层）统一按 1 记，前端只消费「一级 / 子步骤」两档。
+ */
+function inferItemDepth(raw: string): number {
+  const m = raw.match(/^(?:[ \t]+)/);
+  if (!m) return 0;
+  const spaces = (m[0].match(/ /g)?.length ?? 0) + (m[0].match(/\t/g)?.length ?? 0) * 2;
+  return spaces >= 2 ? 1 : 0;
+}
+
 /** 卡片最大列表条数（超过不切；长清单由 fold_list 折叠卡承接，见 display-effect-router） */
 const MAX_CARD_ITEMS = 12;
 /** 卡片最小列表条数 */
@@ -42,7 +53,8 @@ interface AgentResultPayload {
   avatar: string;
   avatarStyle: string;
   title: string;
-  items: Array<{ type: string; text: string }>;
+  /** depth：0=一级条目，1=子步骤（由原文缩进推断，前端 steps 卡渲染二级缩进） */
+  items: Array<{ type: string; text: string; depth?: number }>;
   footer: string;
   /**
    * 展示效果类型（由 display-effect-router.ts 纯程序路由决定，无 LLM 参与）：
@@ -71,6 +83,8 @@ export interface CardSegment {
   /** 卡片段（不含 marker 外壳） */
   title: string;
   items: string[];
+  /** 每条 item 的层级（0=一级，1=子步骤；按原文缩进推断并归一化） */
+  depths: number[];
   footer: string;
   /** 卡片在原文本中的起止行号（含前后空行） */
   startLine: number;
@@ -164,21 +178,27 @@ export function findExtractableCardSegment(text: string): CardSegment | null {
   }
   const footer = footerLines[0] ?? "";
 
-  // 提取 items 文本（剥前缀）
+  // 提取 items 文本（剥前缀），并按原文缩进推断层级（depths）
   const items: string[] = [];
+  const depths: number[] = [];
   for (let k = startLine; k <= endLine; k++) {
-    const raw = lines[k]?.trim() ?? "";
-    const m = raw.match(LIST_ITEM_RE);
+    const raw = lines[k] ?? "";
+    const m = raw.trim().match(LIST_ITEM_RE);
     if (m) {
-      items.push(raw.slice(m[0].length).trim());
+      items.push(raw.trim().slice(m[0].length).trim());
+      depths.push(inferItemDepth(raw));
     }
   }
+  // 归一化：把最浅一级对齐到 0，避免整段都是缩进子项时全部落到 1
+  const baseDepth = depths.length ? Math.min(...depths) : 0;
+  const normDepths = depths.map((d) => d - baseDepth);
 
   if (items.length < MIN_CARD_ITEMS) return null;
 
   return {
     title,
     items,
+    depths: normDepths,
     footer,
     startLine,
     endLine,
@@ -466,15 +486,15 @@ export function formatAgentResultForChat(
     if (ln) trailingLines.push(ln);
   }
 
-  // items 类型推断
-  const items = segment.items.map((itemText) => {
+  // items 类型推断 + 层级透传（depth 供前端 steps 卡渲染二级子步骤）
+  const items = segment.items.map((itemText, idx) => {
     let type = "num";
     if (CHECK_HINT_RE.test(itemText)) {
       type = "check";
     } else if (WARN_HINT_RE.test(itemText)) {
       type = "warn";
     }
-    return { type, text: itemText };
+    return { type, text: itemText, depth: segment.depths[idx] ?? 0 };
   });
 
   // 顺序编号占比：`1. ` `2、` 前缀会被剥离导致步骤信号丢失，

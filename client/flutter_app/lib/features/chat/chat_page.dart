@@ -22,6 +22,8 @@ import "agent_result_card.dart";
 import "assistant_brief_message.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_modal.dart";
+import "data_brief_message.dart";
+import "image_result_message.dart";
 import "inline_video_player.dart";
 import "structured_assistant_message_body.dart";
 import "voice_message_bubble.dart";
@@ -2417,13 +2419,38 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
               colorScheme: cs,
             );
           case "structured":
-          case "image_result":
             return StructuredAssistantMessageBody(
               text: cleanText,
               cs: cs,
               textTheme: Theme.of(context).textTheme,
               showCursor: typewriterCursor,
             );
+          case "image_result":
+            return ImageResultMessage(
+              text: cleanText,
+              cs: cs,
+              textTheme: Theme.of(context).textTheme,
+              showCursor: typewriterCursor,
+            );
+          case "data_brief": {
+            final DataBriefPayload? payload =
+                DataBriefMessage.tryParse(cleanText);
+            if (payload == null) {
+              // payload 缺失/损坏：回退结构化正文（保留 DATA_BRIEF 块原文）
+              return StructuredAssistantMessageBody(
+                text: cleanText,
+                cs: cs,
+                textTheme: Theme.of(context).textTheme,
+                showCursor: typewriterCursor,
+              );
+            }
+            return DataBriefMessage(
+              payload: payload,
+              cs: cs,
+              textTheme: Theme.of(context).textTheme,
+              showCursor: typewriterCursor,
+            );
+          }
           case "video": {
             // 视频抓取：解析 [VIDEO_MEDIA_START] 媒体块，内联渲染可播放视频
             final ({VideoMediaData? media, String cleaned}) parsed =

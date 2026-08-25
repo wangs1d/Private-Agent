@@ -316,13 +316,23 @@ export class UserProfileAggregator {
         : "";
       const recentTurns = (this.recentTurns.get(actorId) ?? []).join("\n\n");
 
+      const messages = buildSynthesisMessages(currentProfile, onlineBlock, recentTurns);
       const response = await this.client.chat.completions.create({
         model: this.config.model,
         temperature: 0.2,
         max_tokens: this.config.maxTokens,
-        messages: buildSynthesisMessages(currentProfile, onlineBlock, recentTurns),
+        messages,
       });
       const content = response.choices[0]?.message?.content?.trim();
+      if (content) {
+        const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+        recordLlmUsageByChars({
+          stage: "user_profile_aggregate",
+          inputChars: JSON.stringify(messages).length,
+          outputChars: content.length,
+          model: this.config.model,
+        });
+      }
       if (!content) return false;
 
       const cleaned = cleanProfileMarkdownOutput(content);

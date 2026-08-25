@@ -124,47 +124,58 @@ async function llmDecision(
 
   try {
     const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    // Token 审计：序列化 messages 估算输入规模
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      {
+        role: "system",
+        content:
+          "Decide whether text should enter durable user memory. Use this taxonomy: stable_preference, stable_identity, stable_constraint, mutable_fact, commitment_or_todo, temporary_context, small_talk, low_signal_noise. Map taxonomy to decisions strictly: stable_preference/stable_identity/stable_constraint/commitment_or_todo => remember; mutable_fact => overwrite; temporary_context => decay; small_talk/low_signal_noise => reject. Favor reject/decay unless the text clearly helps future conversations beyond this session. Return JSON only: {\"decision\":\"remember|reject|overwrite|decay\",\"semanticClass\":\"...\",\"confidence\":0-1,\"reasons\":[...]}",
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          text,
+          context,
+          heuristic,
+          guidance: {
+            keep: [
+              "stable user preferences",
+              "durable identity facts",
+              "long-term constraints and risks",
+              "commitments requiring future follow-up",
+            ],
+            reject: [
+              "greetings and acknowledgements",
+              "low-information chat",
+              "single-turn filler",
+            ],
+            decay: [
+              "session-local temporary details",
+              "time-bounded plans unless explicitly long-term",
+            ],
+            overwrite: ["updated preference or fact replacing previous value"],
+          },
+        }),
+      },
+    ];
+    const auditInputChars = JSON.stringify(messages).length;
     const response = await openai.chat.completions.create({
       model: process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0,
       response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "Decide whether text should enter durable user memory. Use this taxonomy: stable_preference, stable_identity, stable_constraint, mutable_fact, commitment_or_todo, temporary_context, small_talk, low_signal_noise. Map taxonomy to decisions strictly: stable_preference/stable_identity/stable_constraint/commitment_or_todo => remember; mutable_fact => overwrite; temporary_context => decay; small_talk/low_signal_noise => reject. Favor reject/decay unless the text clearly helps future conversations beyond this session. Return JSON only: {\"decision\":\"remember|reject|overwrite|decay\",\"semanticClass\":\"...\",\"confidence\":0-1,\"reasons\":[...]}",
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            text,
-            context,
-            heuristic,
-            guidance: {
-              keep: [
-                "stable user preferences",
-                "durable identity facts",
-                "long-term constraints and risks",
-                "commitments requiring future follow-up",
-              ],
-              reject: [
-                "greetings and acknowledgements",
-                "low-information chat",
-                "single-turn filler",
-              ],
-              decay: [
-                "session-local temporary details",
-                "time-bounded plans unless explicitly long-term",
-              ],
-              overwrite: ["updated preference or fact replacing previous value"],
-            },
-          }),
-        },
-      ],
+      messages,
     });
 
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;
+    // Token 审计：记忆写决策是每轮可能触发的旁路，量级可观，单独记账
+    const { recordLlmUsageByChars } = await import("./llm-token-audit.js");
+    recordLlmUsageByChars({
+      stage: "memory_write_decision",
+      inputChars: auditInputChars,
+      outputChars: content.length,
+      model: process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+    });
     const parsed = JSON.parse(content) as Partial<MemoryDecisionResult>;
     const decision = parsed.decision;
     const semanticClass = parsed.semanticClass;

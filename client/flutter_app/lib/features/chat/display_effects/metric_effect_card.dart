@@ -70,8 +70,32 @@ class _MetricTile extends StatelessWidget {
   final String value;
   final ColorScheme cs;
 
+  /// 仅对「纯百分比 / 分数」值生成 0-1 进度比例，用于数值下方的微型语义条，
+  /// 一眼看出「60% 是什么水平」；要求 cur ≤ max（如 120/80 血压类比值
+  /// 不是进度，返回 null 不显示条，避免误导）。
+  static double? _semanticRatio(String value) {
+    final String v = value.trim();
+    final RegExpMatch? pct = RegExp(r"^(\d+(?:\.\d+)?)\s*%$").firstMatch(v);
+    if (pct != null) {
+      final double? n = double.tryParse(pct.group(1)!);
+      if (n != null) return n.clamp(0.0, 1.0).toDouble();
+      return null;
+    }
+    final RegExpMatch? frac =
+        RegExp(r"^(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)$").firstMatch(v);
+    if (frac != null) {
+      final double? cur = double.tryParse(frac.group(1)!);
+      final double? max = double.tryParse(frac.group(2)!);
+      if (cur != null && max != null && max > 0 && cur <= max) {
+        return (cur / max).clamp(0.0, 1.0).toDouble();
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final double? ratio = label.isNotEmpty ? _semanticRatio(value) : null;
     return Container(
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
@@ -107,6 +131,20 @@ class _MetricTile extends StatelessWidget {
               height: 1.35,
             ),
           ),
+          if (ratio != null) ...<Widget>[
+            const SizedBox(height: 4),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: ratio,
+                minHeight: 5,
+                backgroundColor: cs.surfaceContainerHighest,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  cs.primary.withValues(alpha: 0.85),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

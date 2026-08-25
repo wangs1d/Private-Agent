@@ -53,6 +53,13 @@ export class InitiativeEngine {
     let raw: string;
     try {
       raw = await this.llmComplete(prompt, input.actorId);
+      // Token 审计：主动意图决策是低频旁路，量级不大但可查
+      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
+      recordLlmUsageByChars({
+        stage: "proactive_intent",
+        inputChars: prompt.length,
+        outputChars: raw.length,
+      });
     } catch (err) {
       console.log(`[InitiativeEngine] LLM 调用失败（静默跳过）: ${err}`);
       return null;

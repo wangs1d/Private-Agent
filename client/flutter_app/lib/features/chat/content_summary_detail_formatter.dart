@@ -1,5 +1,7 @@
+import "dart:async";
 import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "media_thumbnail.dart";
@@ -101,6 +103,14 @@ List<Widget> formatContentSummaryDetailLines(
     }
 
     if (trimmed.startsWith("```")) {
+      // 代码块：```lang 可选语言 → 语言头部 + 可复制代码体（分层卡片）
+      final String opener = trimmed;
+      String? language;
+      if (opener.length > 3) {
+        final String rest = opener.substring(3).trim();
+        final List<String> parts = rest.split(RegExp(r"\s+")).toList()..removeWhere((e) => e.isEmpty);
+        language = parts.isEmpty ? null : parts.first;
+      }
       final int start = index;
       index++;
       while (index < lines.length && !lines[index].trim().startsWith("```")) {
@@ -111,7 +121,12 @@ List<Widget> formatContentSummaryDetailLines(
       widgets.add(
         Padding(
           padding: const EdgeInsets.only(bottom: 10, top: 4),
-          child: _CodeBlockWidget(code: code, cs: cs, textTheme: textTheme),
+          child: _CodeBlockWidget(
+            code: code,
+            language: language,
+            cs: cs,
+            textTheme: textTheme,
+          ),
         ),
       );
       continue;
@@ -141,20 +156,28 @@ List<Widget> formatContentSummaryDetailLines(
       final String title = markdownHeader.hasMatch(trimmed)
           ? trimmed.replaceFirst(markdownHeader, "").trim()
           : trimmed;
+      final int level = _headingLevel(trimmed, markdownHeader, sectionHeader);
       final GlobalKey? key =
           _matchSectionKey(title, sectionTitles, sectionKeys);
       widgets.add(
         Padding(
           key: key,
-          padding: const EdgeInsets.only(top: 10, bottom: 6),
-          child: buildInlineMarkdownText(
-            title,
-            textTheme.titleSmall!.copyWith(
-              color: cs.onSurface,
-              fontWeight: FontWeight.w700,
-            ),
-            cs: cs,
+          padding: EdgeInsets.only(
+            top: level == 1 ? 14 : 10,
+            bottom: level == 1 ? 7 : 5,
           ),
+          child: level == 1
+              ? _Level1Heading(
+                  title: title,
+                  cs: cs,
+                  textTheme: textTheme,
+                )
+              : _Level2Heading(
+                  title: title,
+                  tertiary: level >= 3,
+                  cs: cs,
+                  textTheme: textTheme,
+                ),
         ),
       );
       index++;
@@ -268,6 +291,95 @@ bool _isCompactSectionHeader(
   if (listItem.hasMatch(line) || orderedListItem.hasMatch(line)) return false;
   if (line.startsWith(">") || line.startsWith("```")) return false;
   return true;
+}
+
+/// 标题层级判定（用于视觉层级区分）：
+///   level 1：# / ## / 一、二、三、 → 大标题（左侧强调条）
+///   level 2：### / #### / 「标题：」短行 → 次级标题
+///   level 3：#####+ → 三级标题（弱化显示）
+int _headingLevel(
+  String line,
+  RegExp markdownHeader,
+  RegExp sectionHeader,
+) {
+  final RegExpMatch? md = markdownHeader.firstMatch(line);
+  if (md != null) {
+    final int hashCount = md.group(1)!.length;
+    if (hashCount <= 2) return 1;
+    if (hashCount <= 4) return 2;
+    return 3;
+  }
+  if (sectionHeader.hasMatch(line)) return 1;
+  return 2;
+}
+
+/// 一级标题：左侧强调条 + 更大字重（对应「一、」「# / ##」）。
+class _Level1Heading extends StatelessWidget {
+  const _Level1Heading({
+    required this.title,
+    required this.cs,
+    required this.textTheme,
+  });
+
+  final String title;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(left: 9, top: 3, bottom: 3),
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(
+            color: cs.primary.withValues(alpha: 0.55),
+            width: 3,
+          ),
+        ),
+        color: cs.primaryContainer.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: buildInlineMarkdownText(
+        title,
+        textTheme.titleMedium!.copyWith(
+          color: cs.onSurface,
+          fontWeight: FontWeight.w800,
+          height: 1.3,
+          letterSpacing: -0.2,
+        ),
+        cs: cs,
+      ),
+    );
+  }
+}
+
+/// 二级/三级标题：次级字号，三级弱化为 onSurfaceVariant。
+class _Level2Heading extends StatelessWidget {
+  const _Level2Heading({
+    required this.title,
+    required this.tertiary,
+    required this.cs,
+    required this.textTheme,
+  });
+
+  final String title;
+  final bool tertiary;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+
+  @override
+  Widget build(BuildContext context) {
+    return buildInlineMarkdownText(
+      title,
+      textTheme.titleSmall!.copyWith(
+        color: tertiary ? cs.onSurfaceVariant : cs.onSurface,
+        fontWeight: FontWeight.w700,
+        height: 1.35,
+      ),
+      cs: cs,
+    );
+  }
 }
 
 GlobalKey? _matchSectionKey(
@@ -481,34 +593,146 @@ Future<void> launchUrlFromText(String url) async {
   await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-class _CodeBlockWidget extends StatelessWidget {
+class _CodeBlockWidget extends StatefulWidget {
   const _CodeBlockWidget({
     required this.code,
+    required this.language,
     required this.cs,
     required this.textTheme,
   });
 
   final String code;
+  final String? language;
   final ColorScheme cs;
   final TextTheme textTheme;
 
   @override
+  State<_CodeBlockWidget> createState() => _CodeBlockWidgetState();
+}
+
+class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
+  bool _copied = false;
+  Timer? _resetTimer;
+
+  @override
+  void dispose() {
+    _resetTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copyCode() async {
+    await Clipboard.setData(ClipboardData(text: widget.code));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _resetTimer?.cancel();
+    _resetTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final ColorScheme cs = widget.cs;
+    final TextTheme textTheme = widget.textTheme;
+    final bool hasLanguage =
+        (widget.language ?? "").isNotEmpty;
+
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: SelectableText(
-          code,
-          style: textTheme.bodySmall!.copyWith(
-            fontFamily: "monospace",
-            height: 1.5,
-            color: cs.onSurface,
-          ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            // 头部：语言徽标 + 复制按钮
+            Container(
+              padding: const EdgeInsets.only(left: 12, right: 4),
+              height: 34,
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.75),
+                border: Border(
+                  bottom: BorderSide(
+                    color: cs.outline.withValues(alpha: 0.14),
+                  ),
+                ),
+              ),
+              child: Row(
+                children: <Widget>[
+                  Icon(
+                    Icons.code_rounded,
+                    size: 13,
+                    color: cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      hasLanguage ? widget.language! : "代码",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: textTheme.labelSmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.3,
+                          ) ??
+                          const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.3,
+                          ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _copyCode,
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      minimumSize: const Size(0, 28),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    icon: Icon(
+                      _copied ? Icons.check_rounded : Icons.copy_rounded,
+                      size: 13,
+                      color: _copied ? Colors.greenAccent : cs.primary,
+                    ),
+                    label: Text(
+                      _copied ? "已复制" : "复制",
+                      style: textTheme.labelSmall?.copyWith(
+                            color: _copied
+                                ? Colors.greenAccent
+                                : cs.primary,
+                            fontWeight: FontWeight.w600,
+                          ) ??
+                          TextStyle(
+                            fontSize: 11,
+                            color: _copied
+                                ? Colors.greenAccent
+                                : cs.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // 代码体
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              child: SelectableText(
+                widget.code,
+                style: textTheme.bodySmall!.copyWith(
+                  fontFamily: "monospace",
+                  height: 1.5,
+                  color: cs.onSurface,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -667,8 +891,9 @@ class MarkdownTableWidget extends StatelessWidget {
 
     return DecoratedBox(
       decoration: BoxDecoration(
+        color: cs.surfaceContainerLow.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.16)),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),

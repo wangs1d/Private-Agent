@@ -126,8 +126,8 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
   },
 };
 
-/** 低于此字数不启用摘要折叠卡 */
-const SUMMARY_THRESHOLD = 800;
+/** 低于此字数不启用摘要折叠卡（原 800 过高导致实际对话几乎不触发；现降为 400） */
+const SUMMARY_MIN_CHARS = 400;
 
 /** 调研报告：主区展示结论类板块，数据类板块仅进详情卡 */
 const CONCLUSION_SECTION_RE =
@@ -152,12 +152,16 @@ function looksLikeCapabilityOrToolDump(content: string): boolean {
 }
 
 /**
- * 仅当内容超过 SUMMARY_THRESHOLD（800 字）时启用摘要卡，避免普通回复频繁出现折叠框。
+ * 摘要折叠资格：仅当内容「长 + 结构化」时启用——与 render-hint-service 的
+ * summary_card 判定一致，避免路由到摘要卡却生成失败退回纯文本。
+ *
+ * 结构化 = 有板块标题（multi_section/多节）/ 有表格 / 列表+段落混排；
+ * 纯长段落（无板块无表格无列表）不折叠，保持原样展示。
  */
 export function isEligibleForSummaryCard(
   _category: ContentCategory,
   content: string,
-  _features: {
+  features: {
     hasSections: boolean;
     hasList: boolean;
     hasTable: boolean;
@@ -166,7 +170,11 @@ export function isEligibleForSummaryCard(
     listItemCount: number;
   },
 ): boolean {
-  return content.length >= SUMMARY_THRESHOLD;
+  if (content.length < SUMMARY_MIN_CHARS) return false;
+  if (features.hasSections) return true;
+  if (features.hasTable) return true;
+  if (features.hasList && features.listItemCount >= 3 && features.lineCount >= 6) return true;
+  return false;
 }
 
 function detectContentType(content: string): {
@@ -605,7 +613,7 @@ export function createContentSummary(
   options: SummarizeOptions & { source?: string } = {}
 ): ContentSummary | null {
   const {
-    maxLength = SUMMARY_THRESHOLD,
+    maxLength = SUMMARY_MIN_CHARS,
     briefPointCount = 6,
     forceSummary = false,
     source,
@@ -714,11 +722,11 @@ export function formatContentSummaryForPlainText(summary: ContentSummary): strin
   return summary.detailContent?.trim() ?? "";
 }
 
-export function shouldSummarizeContent(content: string, _threshold: number = SUMMARY_THRESHOLD): boolean {
+export function shouldSummarizeContent(content: string, threshold: number = SUMMARY_MIN_CHARS): boolean {
   if (!content?.trim()) return false;
   if (content.includes(CONTENT_SUMMARY_MARKER)) return false;
   if (looksLikeCapabilityOrToolDump(content)) return false;
-  if (content.length < SUMMARY_THRESHOLD) return false;
+  if (content.length < threshold) return false;
 
   const contentType = detectContentType(content);
   const category = detectCategory(content);

@@ -1140,21 +1140,31 @@ export class MemoryManagerService {
 
     try {
       const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        {
+          role: "system",
+          content:
+            "You score memory lines for long-term retention. Return JSON only: {\"scores\":[0..1]}. Higher means more durable preference, fact, commitment, risk, or action relevance.",
+        },
+        { role: "user", content: JSON.stringify({ lines }) },
+      ];
+      const auditInputChars = JSON.stringify(messages).length;
       const response = await openai.chat.completions.create({
         model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
         temperature: 0,
         response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You score memory lines for long-term retention. Return JSON only: {\"scores\":[0..1]}. Higher means more durable preference, fact, commitment, risk, or action relevance.",
-          },
-          { role: "user", content: JSON.stringify({ lines }) },
-        ],
+        messages,
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) throw new Error("empty memory score response");
+      // Token 审计：记忆批次评分（consolidate/flush），低频但输入较大
+      const { recordLlmUsageByChars } = await import("./llm-token-audit.js");
+      recordLlmUsageByChars({
+        stage: "memory_flush_summarize",
+        inputChars: auditInputChars,
+        outputChars: content.length,
+        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+      });
       const parsed = JSON.parse(content) as { scores?: number[] };
       if (!Array.isArray(parsed.scores)) throw new Error("invalid memory score payload");
       return lines.map((line, index) => {

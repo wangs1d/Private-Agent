@@ -1,6 +1,7 @@
 import "package:flutter/material.dart";
 
 import "../content_summary_detail_formatter.dart";
+import "soft_icon_chip.dart";
 
 /// 展示效果卡片的公共壳：统一容器、标题行与 footer。
 ///
@@ -8,6 +9,13 @@ import "../content_summary_detail_formatter.dart";
 /// 视觉规格（maxWidth 390 / 圆角 12 / 描边 0.22 / 标题 14 w700 /
 /// footer 分隔线 + 12.5 onSurfaceVariant）在此统一，保证整组卡片风格一致。
 class EffectCardShell extends StatelessWidget {
+  /// 卡片排版 token：整组效果卡共享一条视觉基线，一处改全局生效。
+  static const double kMaxWidth = 390;
+  static const double kTitleSize = 14;
+  static const double kMetaSize = 12.5;
+  static const double kTitleToBodyGap = 10;
+  static const double kBodyToMetaGap = 8;
+
   const EffectCardShell({
     super.key,
     required this.cs,
@@ -17,7 +25,7 @@ class EffectCardShell extends StatelessWidget {
     this.title = "",
     this.footer = "",
     this.padding = const EdgeInsets.fromLTRB(14, 12, 14, 12),
-    this.maxWidth = 390,
+    this.maxWidth = kMaxWidth,
   });
 
   final ColorScheme cs;
@@ -55,14 +63,14 @@ class EffectCardShell extends StatelessWidget {
             Row(
               children: <Widget>[
                 if (icon != null) ...<Widget>[
-                  Icon(icon, size: 16, color: accent),
-                  const SizedBox(width: 6),
+                  SoftIconChip(icon: icon!, color: accent),
+                  const SizedBox(width: 8),
                 ],
                 Expanded(
                   child: Text(
                     title,
                     style: TextStyle(
-                      fontSize: 14,
+                      fontSize: kTitleSize,
                       fontWeight: FontWeight.w700,
                       color: cs.onSurface,
                       height: 1.4,
@@ -71,13 +79,13 @@ class EffectCardShell extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: kTitleToBodyGap),
           ],
           body,
           if (footer.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
+            const SizedBox(height: kBodyToMetaGap),
             Container(
-              padding: const EdgeInsets.only(top: 8),
+              padding: EdgeInsets.only(top: kBodyToMetaGap),
               decoration: BoxDecoration(
                 border: Border(
                   top: BorderSide(
@@ -89,7 +97,7 @@ class EffectCardShell extends StatelessWidget {
               child: buildInlineMarkdownText(
                 footer,
                 TextStyle(
-                  fontSize: 12.5,
+                  fontSize: kMetaSize,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
