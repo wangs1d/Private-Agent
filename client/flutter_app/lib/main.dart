@@ -1164,7 +1164,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   ? messageId.substring("assistant-".length)
                   : "");
           // 垫词旁路已拆除：不再有独立 interim 气泡，done 文本直接就作为正文兜底。
-          final String playUrl = (traceKey.isNotEmpty
+          final String? playUrl = (traceKey.isNotEmpty
                   ? _pendingPlayUrlByTraceId.remove(traceKey)
                   : null) ??
               _playUrlForAssistantMessageId(messageId) ??
