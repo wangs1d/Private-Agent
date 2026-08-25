@@ -114,6 +114,8 @@ import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
 import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
 import { registerMerchantOrderBuiltinSkills } from "../skills/builtin/merchant-order-skills.js";
+import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
+import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
 import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
@@ -734,6 +736,12 @@ export async function createAppServices(): Promise<AppServices> {
   // 注册商家下单内置Skills（官方「智能体接入」模式：下单→alipay_ 短链→submit-payment 支付）
   registerMerchantOrderBuiltinSkills((skill) => skillManager.register(skill), {
     merchantOrderService,
+  });
+
+  // 注册旅游规划内置Skills（承接 3D-Travel 项目能力：规则引擎行程生成 + POI 缓存 + 目的地知识库）
+  const travelPlanningService = new TravelPlanningService();
+  registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
+    travelPlanningService,
   });
   
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();

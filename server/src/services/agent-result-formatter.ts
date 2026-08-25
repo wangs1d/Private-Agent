@@ -27,6 +27,7 @@
 
 import { LIST_ITEM_RE } from "./render-hint-service.js";
 import { hasBlockquote, routeDisplayEffect } from "./display-effect-router.js";
+import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 
 /** 列表项类型推断 */
 const CHECK_HINT_RE = /已完成|已为你|已帮你|已设置|已创建|已规划|✓|✔|成功/i;
@@ -59,6 +60,11 @@ interface AgentResultPayload {
    * 供语音输出端（agent.voice.*）决定取舍。
    */
   speak?: string;
+  /**
+   * 结构化行程数据（仅 travel_itinerary 卡携带）：前端双面板直读渲染，
+   * 无需再从 items 文本正则解析。来自 travel.plan-itinerary 工具的结构化结果。
+   */
+  travelPlan?: unknown;
 }
 
 export interface CardSegment {
@@ -516,6 +522,15 @@ export function formatAgentResultForChat(
     speak,
     cardId: actions.length > 0 || cardType ? `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}` : undefined,
   };
+
+  // travel_itinerary 卡：注入结构化行程数据（前端双面板直读，无则前端回退文本解析）
+  if (cardType === "travel_itinerary") {
+    const snap = travelItineraryStore.get();
+    // 仅接受 2 分钟内的规划结果：防止旧行程串到不相干的卡片上
+    if (snap && Date.now() - snap.ts < 2 * 60 * 1000 && snap.days.length > 0) {
+      payload.travelPlan = snap;
+    }
+  }
 
   const json = JSON.stringify(payload);
   const cardBlock = `[AGENT_RESULT_CARD_START]\n${json}\n[AGENT_RESULT_CARD_END]`;

@@ -51,6 +51,7 @@ export type DisplayEffectType =
   | "chips" // 标签/徽章行（内容：全部为短标签）
   | "fold_list" // 折叠列表卡（内容：≥8 条长清单）
   | "quote" // 引用强调卡（markdown 引用块 / 引用式单句结论）
+  | "travel_itinerary" // 旅游行程双面板卡（工具：travel.*，前端展开为左右双栏规划界面并可全屏）
   | "";
 
 /** 路由输入：一次结构化输出的全部信号。 */
@@ -116,6 +117,9 @@ function ratio(matched: number, total: number): number {
  */
 function inferToolEffect(toolName: string): DisplayEffectType {
   if (!toolName) return "";
+  // 旅游行程：travel.* 工具信号唯一且最强，置于最前避免被下述
+  // `plan`/`行程` 等宽泛关键字先行路由到 timeline。
+  if (toolName.startsWith("travel.")) return "travel_itinerary";
   if (toolName.startsWith("weather.")) return "weather";
   if (toolName.includes("calendar") || toolName.includes("schedule")) return "schedule";
   if (toolName.startsWith("wallet.")) return "wallet";

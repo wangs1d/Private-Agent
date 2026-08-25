@@ -44,6 +44,8 @@ import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/chat_page.dart";
 import "features/chat/chat_layout.dart";
+import "features/chat/travel_plan_launcher.dart";
+import "features/chat/travel_plan_panel.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
@@ -229,6 +231,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
   ImagePreviewSnapshot? _imagePreview;
 
+  /// 行程规划面板当前要展示的行程数据（来自 travel_itinerary 行程卡点击）。
+  AgentResultData? _travelPlan;
+
   /// 左聊天区 / 右分栏面板 的宽度比例（0.1~0.9），持久化到本地。
   double _splitRatio = SplitRatioPreference.defaultRatio;
 
@@ -411,6 +416,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     OutgoingCallLauncher.bindHandlers(onHangUp: _handleOutgoingCallHangup);
     // 右侧双栏「图片预览」面板：媒体卡点击 → 打开右栏大图
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 右侧双栏「行程规划」面板：行程卡点击 → 打开右栏双面板规划界面
+    TravelPlanLauncher.setHandler(_openTravelPlanPanel);
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _bootstrap();
@@ -2581,6 +2588,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 行程规划入口：行程卡(travel_itinerary)点击 → 在右侧双栏中打开行程规划界面。
+  void _openTravelPlanPanel(AgentResultData data) {
+    setState(() {
+      _tabIndex = 0;
+      _travelPlan = data;
+      _rightPanel = RightPanelKind.travelPlan;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.travelPlan.defaultSplitRatio;
+    });
+  }
+
   void _openWalletDialog() {
     // 用 NavigatorState 顶层推 dialog，避免 State context 触发出栈/Localizations 问题
     final NavigatorState? navigator = _rootNavigatorKey.currentState;
@@ -4429,8 +4450,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ),
       child: Row(
         children: <Widget>[
-          // 图片预览面板：隐藏左侧拖拽图标与「图片预览」标题，仅保留关闭按钮
-          if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
+          // 图片预览/行程规划面板：隐藏左侧拖拽图标与标题，仅保留关闭按钮
+          // （面板组件内部自带完整顶栏：图片大图区 / 行程目的地+全屏入口）
+          if (_rightPanel != RightPanelKind.imagePreview &&
+              _rightPanel != RightPanelKind.travelPlan) ...<Widget>[
             Icon(Icons.drag_indicator, size: 16, color: fgMuted),
             const SizedBox(width: 8),
             Text(
@@ -4502,6 +4525,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           title: item.title,
           source: item.source,
         );
+      case RightPanelKind.travelPlan:
+        final AgentResultData? plan = _travelPlan;
+        if (plan == null) return const SizedBox.shrink();
+        return TravelPlanPanel(data: plan);
       case null:
         return const SizedBox.shrink();
     }
