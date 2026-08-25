@@ -1,5 +1,5 @@
 /// 右侧抽屉要展示的内容种类。
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview }
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, travelPlan }
 
 /// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
 /// - 消息/好友类：信息密度低，右面板小占比（左大右小）
@@ -19,6 +19,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.45; // 日程：日历周视图 + 事项列表，需要较大空间
       case RightPanelKind.imagePreview:
         return 0.52; // 图片预览：右栏显示原图，需较大空间
+      case RightPanelKind.travelPlan:
+        return 0.36; // 行程规划：右栏为双面板规划界面，需最大空间
     }
   }
 }
@@ -79,6 +81,8 @@ String rightPanelTitle(RightPanelKind kind) {
       return "日程";
     case RightPanelKind.imagePreview:
       return "图片预览";
+    case RightPanelKind.travelPlan:
+      return "行程规划";
   }
 }
 

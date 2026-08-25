@@ -109,6 +109,7 @@ class AgentResultData {
     this.cardId = "",
     this.cardType = "",
     this.speak = "",
+    this.travelPlan,
     this.groupTitle,
     this.sideA,
     this.sideB,
@@ -146,6 +147,11 @@ class AgentResultData {
   /// 供语音输出端决定取舍。
   final String speak;
 
+  /// 结构化行程数据(仅 travel_itinerary 卡携带,来自服务端结构化结果):
+  /// {toolName, ts, destination, title, days:[{date, items:[{type,name,startTime,...}]}]}。
+  /// 供双面板行程界面直读渲染;为 null 时前端回退到 items 文本解析。
+  final Map<String, dynamic>? travelPlan;
+
   /// 对比媒体分组维度标题（如「颜色持久度」），非空时媒体卡片按分组渲染。
   final String? groupTitle;
 
@@ -156,6 +162,7 @@ class AgentResultData {
   factory AgentResultData.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawItems = json["items"] as List<dynamic>?;
     final List<dynamic>? rawActions = json["actions"] as List<dynamic>?;
+    final Map<String, dynamic>? rawTravelPlan = json["travelPlan"] as Map<String, dynamic>?;
     return AgentResultData(
       avatar: json["avatar"]?.toString() ?? "NB",
       avatarStyle: json["avatarStyle"]?.toString() ?? "default",
@@ -175,6 +182,7 @@ class AgentResultData {
       cardId: json["cardId"]?.toString() ?? "",
       cardType: json["cardType"]?.toString() ?? "",
       speak: json["speak"]?.toString() ?? "",
+      travelPlan: rawTravelPlan,
     );
   }
 }
