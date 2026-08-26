@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 网络安全配置：默认禁止明文流量，仅对局域网后端/本机调试地址放行明文 HTTP/WS。
+     后端地址按局域网 IP 收窄，改动机器或 IP 后请同步更新下方 192.168.10.3。 -->
+<network-security-config>
+    <!-- 全局默认：禁止明文流量（Android 9+ 默认行为），仅信任系统 CA。 -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- 放行明文流量的白名单 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 真实后端：当前电脑的局域网 IP（构建时 dart-define 传 HTTP_BASE=http://192.168.10.3:3000） -->
+        <domain includeSubdomains="false">192.168.10.3</domain>
+        <!-- Android 模拟器访问宿主机的地址 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- 本机调试 -->
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

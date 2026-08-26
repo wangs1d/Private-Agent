@@ -3,14 +3,19 @@ import "package:flutter/material.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
 import "../core/models/chat_models.dart";
+import "../features/chat/message_body_renderer.dart";
 
-/// 手机端对话主界面(白黑极简)。
+/// 手机端对话主界面(白黑极简,跟随主题)。
 ///
 /// - 顶栏：居中标题 + 在线状态点 + 新会话按钮
 /// - 消息区：用户黑底白字右对齐、助手浅灰底黑字左对齐
 /// - 底部输入栏：圆角输入框 + 纯黑发送按钮
+///
+/// [controller] 可选：由外部(根组件)注入以共享连接；不传时自建。
 class MobileChatPage extends StatefulWidget {
-  const MobileChatPage({super.key});
+  const MobileChatPage({super.key, this.controller});
+
+  final MobileChatController? controller;
 
   @override
   State<MobileChatPage> createState() => _MobileChatPageState();
@@ -24,16 +29,51 @@ class _MobileChatPageState extends State<MobileChatPage> {
   int _lastMessageCount = 0;
 
   @override
+  void initState() {
+    super.initState();
+    _controller = widget.controller ?? MobileChatController();
+    _input.addListener(() {
+      final bool now = _input.text.trim().isNotEmpty;
+      if (now != _canSend) {
+        setState(() => _canSend = now);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(MobileChatPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 根组件重建时若注入新的控制器(一般不会),做切换。
+    if (widget.controller != null && widget.controller != _controller) {
+      _controller.dispose();
+      _controller = widget.controller!;
+      _lastMessageCount = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _input.dispose();
+    _scroll.dispose();
+    // 仅当控制器是自建时才负责释放;外部注入的由根组件管理。
+    if (widget.controller == null) {
+      _controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
     return Scaffold(
-      backgroundColor: MobileTheme.background,
+      backgroundColor: p.background,
       appBar: AppBar(
-        title: _buildTitle(),
+        title: _buildTitle(context, p),
         actions: [
           IconButton(
             tooltip: "新会话",
             icon: const Icon(Icons.add_rounded, size: 24),
-            color: MobileTheme.textPrimary,
+            color: p.textPrimary,
             onPressed: () => _controller.reset(),
           ),
         ],
@@ -45,11 +85,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
               listenable: _controller,
               builder: (context, _) {
                 _maybeScrollToBottom();
-                return _buildMessageList();
+                return _buildMessageList(context, p);
               },
             ),
           ),
-          _buildInputBar(),
+          _buildInputBar(context, p),
         ],
       ),
     );
@@ -75,26 +115,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
     });
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = MobileChatController();
-    _input.addListener(() {
-      final bool now = _input.text.trim().isNotEmpty;
-      if (now != _canSend) {
-        setState(() => _canSend = now);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _input.dispose();
-    _scroll.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
   void _send() {
     final String text = _input.text;
     _controller.send(text);
@@ -102,14 +122,14 @@ class _MobileChatPageState extends State<MobileChatPage> {
     _maybeScrollToBottom();
   }
 
-  Widget _buildTitle() {
+  Widget _buildTitle(BuildContext context, MobilePalette p) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Text(
+        Text(
           "智能助手",
           style: TextStyle(
-            color: MobileTheme.textPrimary,
+            color: p.textPrimary,
             fontSize: 17,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.2,
@@ -126,8 +146,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: _controller.isConnected
-                    ? MobileTheme.online
-                    : MobileTheme.textMuted,
+                    ? p.online
+                    : p.textMuted,
               ),
             );
           },
@@ -136,9 +156,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildMessageList() {
+  Widget _buildMessageList(BuildContext context, MobilePalette p) {
     if (_controller.messages.isEmpty) {
-      return _buildEmpty();
+      return _buildEmpty(p);
     }
     return ListView.builder(
       controller: _scroll,
@@ -148,14 +168,14 @@ class _MobileChatPageState extends State<MobileChatPage> {
         final ChatMessage m = _controller.messages[index];
         final bool isUser = m.role == "user";
         if (m.streaming && m.text.isEmpty) {
-          return _buildThinking();
+          return _buildThinking(p);
         }
-        return _buildBubble(m, isUser);
+        return _buildBubble(context, m, isUser, p);
       },
     );
   }
 
-  Widget _buildEmpty() {
+  Widget _buildEmpty(MobilePalette p) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -163,31 +183,31 @@ class _MobileChatPageState extends State<MobileChatPage> {
           Container(
             width: 64,
             height: 64,
-            decoration: const BoxDecoration(
-              color: MobileTheme.surface,
+            decoration: BoxDecoration(
+              color: p.surface,
               shape: BoxShape.circle,
             ),
-            child: const Icon(
+            child: Icon(
               Icons.auto_awesome_outlined,
               size: 30,
-              color: MobileTheme.textPrimary,
+              color: p.textPrimary,
             ),
           ),
           const SizedBox(height: 16),
-          const Text(
+          Text(
             "有什么可以帮你?",
             style: TextStyle(
-              color: MobileTheme.textPrimary,
+              color: p.textPrimary,
               fontSize: 17,
               fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             "随时随地,随聊随答\n同一账号与桌面端数据同步",
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: MobileTheme.textSecondary,
+              color: p.textSecondary,
               fontSize: 13,
               height: 1.6,
             ),
@@ -197,19 +217,19 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildThinking() {
+  Widget _buildThinking(MobilePalette p) {
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 6),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: MobileTheme.assistantBubble,
+          color: p.assistantBubble,
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(6),
-            topRight: const Radius.circular(MobileTheme.bubbleRadius),
-            bottomLeft: const Radius.circular(MobileTheme.bubbleRadius),
-            bottomRight: const Radius.circular(MobileTheme.bubbleRadius),
+            topRight: Radius.circular(MobileTheme.bubbleRadius),
+            bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
+            bottomRight: Radius.circular(MobileTheme.bubbleRadius),
           ),
         ),
         child: const _ThinkingDots(),
@@ -217,9 +237,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildBubble(ChatMessage m, bool isUser) {
-    final Color bubble = isUser ? MobileTheme.userBubble : MobileTheme.assistantBubble;
-    final Color text = isUser ? MobileTheme.userBubbleText : MobileTheme.assistantBubbleText;
+  Widget _buildBubble(BuildContext context, ChatMessage m, bool isUser, MobilePalette p) {
+    final Color bubble = isUser ? p.userBubble : p.assistantBubble;
+    final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -233,25 +253,52 @@ class _MobileChatPageState extends State<MobileChatPage> {
           borderRadius: BorderRadius.only(
             topLeft: Radius.circular(isUser ? MobileTheme.bubbleRadius : 6),
             topRight: Radius.circular(isUser ? 6 : MobileTheme.bubbleRadius),
-            bottomLeft: const Radius.circular(MobileTheme.bubbleRadius),
-            bottomRight: const Radius.circular(MobileTheme.bubbleRadius),
+            bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
+            bottomRight: Radius.circular(MobileTheme.bubbleRadius),
           ),
         ),
-        child: Text(
-          m.text,
-          style: TextStyle(
-            color: text,
-            fontSize: 16,
-            height: 1.5,
-          ),
-        ),
+        child: isUser
+            ? Text(
+                m.text,
+                style: TextStyle(
+                  color: text,
+                  fontSize: 16,
+                  height: 1.5,
+                ),
+              )
+            // 助手消息：复用桌面端同一共享渲染器，保证卡片 / 图文交错 /
+            // [RENDER_AS] 标记等结构化内容与桌面端渲染效果完全一致。
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  buildMessageBody(
+                    context,
+                    Theme.of(context).colorScheme,
+                    m,
+                    isUser: false,
+                  ),
+                  // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
+                  // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后
+                  // 由 renderBlocks 的最终顺序接管（与桌面端一致）。
+                  if (m.pendingMediaCards != null &&
+                      m.pendingMediaCards!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: buildPendingMediaCards(
+                        m.pendingMediaCards!,
+                        Theme.of(context).colorScheme,
+                      ),
+                    ),
+                ],
+              ),
       ),
     );
   }
 
-  Widget _buildInputBar() {
+  Widget _buildInputBar(BuildContext context, MobilePalette p) {
     return Container(
-      color: MobileTheme.surface,
+      color: p.surface,
       padding: EdgeInsets.fromLTRB(12, 10, 12, MediaQuery.of(context).padding.bottom + 10),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -261,7 +308,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
               padding: const EdgeInsets.symmetric(horizontal: 14),
               clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
-                color: MobileTheme.innerFieldBackground,
+                color: p.innerFieldBackground,
                 borderRadius: BorderRadius.circular(MobileTheme.inputRadius),
               ),
               child: TextField(
@@ -270,29 +317,29 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 minLines: 1,
                 maxLines: 5,
                 onSubmitted: (_) => _send(),
-                style: const TextStyle(
-                  color: MobileTheme.textPrimary,
+                style: TextStyle(
+                  color: p.textPrimary,
                   fontSize: 16,
                   height: 1.4,
                 ),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: "输入消息…",
-                  hintStyle: TextStyle(color: MobileTheme.textMuted, fontSize: 16),
+                  hintStyle: TextStyle(color: p.textMuted, fontSize: 16),
                   border: InputBorder.none,
                   isCollapsed: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 12),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
                 ),
               ),
             ),
           ),
           const SizedBox(width: 8),
-          _buildSendButton(),
+          _buildSendButton(p),
         ],
       ),
     );
   }
 
-  Widget _buildSendButton() {
+  Widget _buildSendButton(MobilePalette p) {
     final bool enabled = _canSend;
     return GestureDetector(
       onTap: enabled ? _send : null,
@@ -302,11 +349,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
         height: 44,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: enabled ? MobileTheme.accent : MobileTheme.divider,
+          color: enabled ? p.accent : p.divider,
         ),
         child: Icon(
           Icons.arrow_upward_rounded,
-          color: enabled ? Colors.white : MobileTheme.textSecondary,
+          color: enabled ? p.onAccent : p.textSecondary,
           size: 22,
         ),
       ),
@@ -347,6 +394,7 @@ class _ThinkingDotsState extends State<_ThinkingDots>
 
   @override
   Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) {
@@ -362,8 +410,8 @@ class _ThinkingDotsState extends State<_ThinkingDots>
                   child: Container(
                     width: 7,
                     height: 7,
-                    decoration: const BoxDecoration(
-                      color: MobileTheme.assistantBubbleText,
+                    decoration: BoxDecoration(
+                      color: p.assistantBubbleText,
                       shape: BoxShape.circle,
                     ),
                   ),

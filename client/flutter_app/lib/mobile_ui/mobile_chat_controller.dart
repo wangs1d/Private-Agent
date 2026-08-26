@@ -12,7 +12,8 @@ import "../core/models/chat_models.dart";
 /// - 连接成功 → `session.init`(携带 userId/sessionId,后端按 userId 绑定 actor,两端同步)
 /// - 发送 → `chat.user_message`(messageId/text/timestamp/userId/agentAccessMode)
 /// - 接收 → `chat.turn_started/interim`(思考态)、`chat.assistant_chunk`(流式正文)、
-///   `chat.assistant_done`(收尾最终文本)
+///   `chat.media_ready`(边说边出图临时照片)、`chat.assistant_done`(收尾最终文本,
+///   含结构化 mediaCards/renderBlocks 字段,与桌面端一致)
 class MobileChatController extends ChangeNotifier {
   MobileChatController({String? wsBaseUrl}) {
     _service = WsChatService(url: wsBaseUrl ?? ApiConfig.wsUrl);
@@ -111,6 +112,8 @@ class MobileChatController extends ChangeNotifier {
         notifyListeners();
       case "chat.assistant_chunk":
         _appendChunk(payload);
+      case "chat.media_ready":
+        _handleMediaReady(payload);
       case "chat.assistant_done":
         _finalizeReply(payload);
       case "chat.error":
@@ -154,9 +157,52 @@ class MobileChatController extends ChangeNotifier {
       text: prev.text + chunk,
       timestamp: prev.timestamp,
       streaming: true,
+      // 保留已挂上的「边说边出图」临时照片，避免后续 chunk 覆盖丢失。
+      pendingMediaCards: prev.pendingMediaCards,
     );
     isProcessing = true;
     notifyListeners();
+  }
+
+  /// 边说边出图：`chat.media_ready` 到达时把已搜到的照片先挂到当前流式消息上，
+  /// 前端插到正在打字的正文下方实时展示；`chat.assistant_done` 后以
+  /// renderBlocks 的最终顺序渲染（pendingMediaCards 被清空由最终消息接管）。
+  void _handleMediaReady(Map<String, dynamic> payload) {
+    final List<dynamic>? rawCards = payload["cards"] as List<dynamic>?;
+    if (rawCards == null || rawCards.isEmpty) return;
+    final List<Map<String, dynamic>> cards = rawCards
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+    if (cards.isEmpty) return;
+    _openStreamingMessage(payload);
+    final int idx = messages.indexWhere(
+      (m) => m.messageId == _streamingMessageId,
+    );
+    if (idx < 0) return;
+    final ChatMessage prev = messages[idx];
+    messages[idx] = ChatMessage(
+      messageId: prev.messageId,
+      sessionId: prev.sessionId,
+      role: prev.role,
+      text: prev.text,
+      timestamp: prev.timestamp,
+      streaming: true,
+      pendingMediaCards: cards,
+    );
+    notifyListeners();
+  }
+
+  /// 从 `chat.assistant_done` 载荷解析结构化媒体卡片/交错渲染块。
+  /// 与桌面端一致：无字段时返回 null（前端回退纯文本渲染）。
+  List<Map<String, dynamic>>? _parseStructuredList(
+    Map<String, dynamic> payload,
+    String key,
+  ) {
+    final List<dynamic>? raw = payload[key] as List<dynamic>?;
+    if (raw == null || raw.isEmpty) return null;
+    final List<Map<String, dynamic>> out =
+        raw.whereType<Map<String, dynamic>>().toList(growable: false);
+    return out.isEmpty ? null : out;
   }
 
   void _finalizeReply(Map<String, dynamic> payload) {
@@ -174,6 +220,12 @@ class MobileChatController extends ChangeNotifier {
       );
     }
     final String finalText = payload["finalText"]?.toString() ?? "";
+    // 结构化媒体卡片 / 交错渲染块：与桌面端一致，前端据此渲染卡片与图文交错，
+    // 不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
+    final List<Map<String, dynamic>>? mediaCards =
+        _parseStructuredList(payload, "mediaCards");
+    final List<Map<String, dynamic>>? renderBlocks =
+        _parseStructuredList(payload, "renderBlocks");
     if (idx < 0) {
       // 没有流式占位:直接落一条最终消息
       messages.add(ChatMessage(
@@ -182,6 +234,8 @@ class MobileChatController extends ChangeNotifier {
         role: "assistant",
         text: finalText,
         timestamp: DateTime.now(),
+        mediaCards: mediaCards,
+        renderBlocks: renderBlocks,
       ));
     } else {
       final ChatMessage prev = messages[idx];
@@ -192,6 +246,8 @@ class MobileChatController extends ChangeNotifier {
         text: finalText.isNotEmpty ? finalText : prev.text,
         timestamp: prev.timestamp,
         streaming: false,
+        mediaCards: mediaCards ?? prev.mediaCards,
+        renderBlocks: renderBlocks ?? prev.renderBlocks,
       );
     }
     _streamingMessageId = null;
