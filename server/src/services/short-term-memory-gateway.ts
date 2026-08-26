@@ -492,35 +492,10 @@ export class ShortTermMemoryGatewayService {
     return this.resolveTurnFocus(currentInput, active, state.conversationMemory).kind;
   }
 
-  buildRecallQuery(sessionId: string, currentInput: string): string {
-    const state = this.getSessionState(sessionId);
-    const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
-    const paused = state.tasks.filter((task) => task.status === "paused").slice(0, 2);
-    const parts = [normalizeInput(currentInput)];
-    const focus = this.resolveTurnFocus(currentInput, active, state.conversationMemory);
-    const includeTaskScopedMemory = focus.includeTaskScopedMemory;
-
-    if (active && includeTaskScopedMemory) {
-      parts.push(`current task ${active.title}`);
-      parts.push(active.contextSummary);
-    }
-    if (paused.length > 0 && includeTaskScopedMemory) {
-      parts.push(`suspended tasks ${paused.map((task) => task.title).join(" ")}`);
-    }
-    if (state.conversationMemory?.activeTopic && (includeTaskScopedMemory || focus.preserveRecentContext)) {
-      parts.push(`current topic ${state.conversationMemory.activeTopic}`);
-    }
-    if (state.conversationMemory?.currentMission && includeTaskScopedMemory) {
-      parts.push(`current mission ${state.conversationMemory.currentMission}`);
-    }
-    if (state.conversationMemory?.openLoops.length && includeTaskScopedMemory) {
-      parts.push(`open loops ${state.conversationMemory.openLoops.slice(0, 2).join(" ")}`);
-    }
-    if (state.conversationMemory?.preferences.length) {
-      parts.push(`user preferences ${state.conversationMemory.preferences.slice(0, 2).join(" ")}`);
-    }
-    return parts.filter(Boolean).join(" | ");
-  }
+  // 记忆架构重构：buildRecallQuery 已删除。
+  // 原实现把当前任务/挂起任务/话题/使命/openLoops/用户偏好拼进长期记忆检索 query，
+  // 导致每轮召回永远锚定旧任务簇（召回串台 + 幻觉根因）。
+  // 新架构：长期检索由 agent/recall-gate.ts 白名单门控，query 只用用户原文。
 
   compressContext(lines: string[]): { coreLines: string[]; compressedLines: string[] } {
     const coreLines = lines.filter((line) => /重要|必须|务必|偏好|禁忌|记住|SOP|步骤|流程/.test(line)).slice(0, 8);

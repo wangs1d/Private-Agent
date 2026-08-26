@@ -1,56 +1,16 @@
-import OpenAI from "openai";
+import { getRecallCompressThreshold } from "./env.js";
 
-import {
-  resolveOpenAiApiKey,
-  getAgenticMemoryLlmModel,
-  getRecallCompressThreshold,
-} from "./env.js";
-
+/**
+ * 记忆架构重构：召回压缩器去 LLM 化。
+ * 原实现超阈值时用 LLM（temperature 0.2）把记忆条目重写为要点列表——
+ * 这是标准幻觉注入口（小模型改写会合并/曲解/脑补事实）。
+ * 新实现只做确定性按条目边界截断（不伤语义、不引入改写）。
+ */
 export class AgenticMemoryRecallCompressor {
   async compress(recallText: string): Promise<string> {
     const threshold = getRecallCompressThreshold();
     if (!recallText || recallText.length <= threshold) return recallText;
-
-    const apiKey = resolveOpenAiApiKey();
-    if (!apiKey) {
-      return this.truncateSimple(recallText, threshold);
-    }
-
-    try {
-      const openai = new OpenAI({ apiKey });
-      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        {
-          role: "system",
-          content: [
-            "你是记忆压缩器。将检索到的记忆条目压缩为极简要点列表，每条不超过一行。",
-            "保留：关键事实、用户偏好、Agent承诺、待办事项、重要日期。",
-            "丢弃：冗余信息、低相关度条目、纯寒暄。",
-            "输出格式：每行一条「- 要点」，不超过15条。",
-          ].join("\n"),
-        },
-        { role: "user", content: recallText },
-      ];
-      const response = await openai.chat.completions.create({
-        model: getAgenticMemoryLlmModel(),
-        temperature: 0.2,
-        max_tokens: 600,
-        messages,
-      });
-      const compressed = response.choices[0]?.message?.content?.trim();
-      if (!compressed) return this.truncateSimple(recallText, threshold);
-      // Token 审计：召回压缩输入常为大批量记忆，值得单独记账
-      const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
-      recordLlmUsageByChars({
-        stage: "recall_compress",
-        inputChars: JSON.stringify(messages).length,
-        outputChars: compressed.length,
-        model: getAgenticMemoryLlmModel(),
-      });
-
-      return `以下为 Mem0 记忆图联想检索（已压缩）：\n${compressed}`;
-    } catch {
-      return this.truncateSimple(recallText, threshold);
-    }
+    return this.truncateSimple(recallText, threshold);
   }
 
   private truncateSimple(text: string, maxLen: number): string {

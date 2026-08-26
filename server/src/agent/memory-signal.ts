@@ -1,11 +1,42 @@
 export const MEMORY_EXPLICIT_RE =
   /记住|记得|别忘了|帮我记着|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
 
+/**
+ * 跨会话回忆线索：命中说明用户想衔接「更早会话/窗口外」的内容 → 允许触发长期记忆检索。
+ * 注意：窗口内指代词（刚才/刚刚/前面）不在此列——它们指向当前窗口内，应由 thread/STM 消解，
+ * 一命中就拉长期快照会把昨天/前天的内容注入当前问题，是串台的根因之一（见 recall-gate）。
+ */
 export const MEMORY_RECALL_HINT_RE =
-  /之前|上次|说过|刚才|刚刚|前面|earlier|before|last time|you said/i;
+  /上次|上回|之前|先前|早些时候|说过|谈过|提过|earlier|before|last time|you said/i;
+
+/** 窗口内指代（"刚才那个文件呢"类）：不触发跨会话检索，由 STM/thread 覆盖 */
+export const IN_WINDOW_DEIXIS_RE = /刚才|刚刚|才说|才聊|前面|前面(?:说|聊|讲)的|刚说|刚聊/i;
+
+/**
+ * 跨会话升级词：即使句子同时带窗口内指代词（刚才/刚刚/之前），命中这些词也说明
+ * 用户明确指向「更早的沟通/历史约定」→ 不能短路，应放行长期检索。
+ */
+const CROSS_SESSION_ESCALATE_RE =
+  /(?:上[次回]|昨天|前天|上周|上上周|上上个|那时|那会儿|以前|先前|过去|早先)|(?:说过|谈过|提过|聊过|讲过|聊了|说了|谈了|讲了|商量过|讨论过|约定过|答应过|保证过|告诉过我|提醒过我|记得|还记得|记不记得)|(?:last time|you said|you told|earlier|before|remember)/i;
+
+/**
+ * 窗口内纯指代短路：「刚才/刚刚/前面/之前」等指当前窗口内内容时，
+ * 由 thread/STM 消解即可，触发长期检索会把更早会话的旧记忆注入当前问题——串台根因之一。
+ * 带「上次/昨天/说过/记得」等跨会话升级词时返回 false（放行检索）。
+ */
+export function isWindowDeixisShortCircuit(message: string): boolean {
+  const t = message.trim();
+  if (!t) return false;
+  if (!IN_WINDOW_DEIXIS_RE.test(t) && !/之前/.test(t)) return false;
+  // 显式记忆指令（"记住我刚才说的"）不能短路
+  if (MEMORY_EXPLICIT_RE.test(t)) return false;
+  // 明确的跨会话/跨天/历史谈话线索优先放行
+  if (CROSS_SESSION_ESCALATE_RE.test(t)) return false;
+  return true;
+}
 
 export const MEMORY_SUMMARY_PRIORITY_RE =
-  /之前|上次|说过|刚才|刚刚|记住|记得|偏好|喜欢|讨厌|习惯|禁忌|生日|纪念日|承诺|答应|prefer|remember|you said|last time|promise/i;
+  /之前|上次|上回|先前|说过|谈过|提过|记住|记得|偏好|喜欢|讨厌|习惯|禁忌|生日|纪念日|承诺|答应|earlier|before|prefer|remember|you said|last time|promise/i;
 
 // 追问模式：
 // 1) 短问句（"你确定吗/然后呢"等）—— 用 | 串起
@@ -99,6 +130,8 @@ export function shouldSkipNarrativeRecall(message: string): boolean {
 export function shouldInjectMemorySummary(message: string): boolean {
   const t = message.trim();
   if (!t) return false;
+  // 窗口内纯指代短路：thread/STM 可消解，不注入跨会话记忆摘要（防串台）
+  if (isWindowDeixisShortCircuit(t)) return false;
   if (MEMORY_EXPLICIT_RE.test(t)) return true;
   if (MEMORY_RECALL_HINT_RE.test(t)) return true;
   return MEMORY_SUMMARY_PRIORITY_RE.test(t);

@@ -2,6 +2,7 @@ import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
+import { getDailyJournalService } from "./daily-journal-service.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -43,6 +44,21 @@ const DEFAULT_CONFIG: NightModeConfig = {
   timezone: "Asia/Shanghai",
   consolidationBatchSize: 50,
 };
+
+/**
+ * 固化噪音行过滤（P2-6）：U/A 闲聊/语气填充行不进入长期记忆，避免固化噪音污染召回。
+ * 高信号行（prefer/fact/commit）不过滤；用户实义陈述与助手有效回答保留。
+ */
+const CONSOLIDATE_NOISE_RE =
+  /^(?:嗯+|哦+|噢+|啊+|诶+|哎|哈|嘿|哟|哦哦|嗯嗯|好的?|好嘞|好滴|好呀|好耶|行|可以|知道了|明白|收到|了解|懂了|是的?|对(?:的|呀|吧)?|没错|随便|没啥|没事|无妨|拜拜|再见|晚安|早上好|下午好|晚上好|你好|嗨|呵呵+|嘿嘿+|哈哈+|算了|好吧|行吧|就这样|没了|没有|不知道|不清楚|不晓得|谢谢(?:你|您)?|多谢|感谢|不用了|别客气|不客气|好的谢谢|可以可以|okk?|okay|sure|yeah|yes|no|thx|thanks?)[。！？!?~,.，\s]*$/i;
+
+/** 内容去掉句读后过短且无实义（如"好的。""嗯""哈哈"）也视为噪音 */
+export function isNoiseLogLine(role: string, content: string): boolean {
+  if (role === "fact" || role === "prefer" || role === "commit") return false;
+  const text = content.replace(/\s+/g, "").replace(/[，。！？!?、；;,.\s]/g, "");
+  if (!text) return true;
+  return CONSOLIDATE_NOISE_RE.test(content) || text.length <= 1;
+}
 
 function loadNightConfig(): NightModeConfig {
   return {
@@ -341,12 +357,80 @@ export class NightlyMemoryTaskService {
     try {
       // 缺口 4 修复：归档必须在 dreaming 之前，让 dream phase 能看到当天对话
       await this.triggerDailyArchiveImmediate();
+      // 记忆架构重构：当日对话日志固化（journal → 长期记忆图），
+      // 必须在 dreaming 之前完成，让后续合并/衰减阶段能看到新固化内容。
+      await this.consolidateDailyJournals();
       await this.runDreamPhase();
       await this.syncToLongTermStorage();
       await this.cleanupOldStorage();
       console.log("[NightlyMemory] All night tasks completed successfully");
     } catch (err) {
       console.error("[NightlyMemory] Night tasks error:", err);
+    }
+  }
+
+  /**
+   * 当日对话日志固化（记忆架构重构核心环节）：
+   * - 消费 DailyJournal 未固化日志行（含跨天补跑——服务器隔夜未开机也能追上）；
+   * - 写入 narrative 长期记忆（journal:consolidate 来源，偏好/事实行高信号）；
+   * - 固化完成后标记已处理（journal 文件归档保留，不删除——可重放可审计）。
+   */
+  private async consolidateDailyJournals(): Promise<void> {
+    const journal = getDailyJournalService();
+    if (!journal || !this.narrativeMemory) return;
+
+    const actorIds = this.getAllActorIds();
+    let totalIngested = 0;
+
+    for (const actorId of actorIds) {
+      try {
+        const unconsolidated = await journal.getUnconsolidatedLines(actorId);
+        if (unconsolidated.length === 0) continue;
+
+        const dateKeys: string[] = [];
+        for (const { dateKey, lines } of unconsolidated) {
+          let ingested = 0;
+          for (const line of lines) {
+            // 行格式: - [HH:mm] sessId? U|A|fact|prefer|commit: content
+            const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
+            if (!m) continue;
+            const time = m[1]!;
+            const body = m[2]!;
+            const roleMatch = body.match(/^(?:(\S+)\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+            if (!roleMatch) continue;
+            const role = roleMatch[2]!;
+            const content = roleMatch[3]!;
+            // P2-6：U/A 闲聊/语气填充行不固化（fact/prefer/commit 恒保留）
+            if (isNoiseLogLine(role, content)) continue;
+            const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
+            const highSignal = role === "prefer" || role === "fact" || role === "commit";
+            await this.narrativeMemory!
+              .ingest(
+                actorId,
+                `[日志固化 ${dateKey} ${time}·${roleLabel}] ${content}`,
+                "journal:consolidate",
+                { highSignal },
+              )
+              .catch(() => {});
+            ingested += 1;
+          }
+          if (ingested > 0) dateKeys.push(dateKey);
+          totalIngested += ingested;
+        }
+
+        if (dateKeys.length > 0) {
+          await journal.markConsolidated(actorId, dateKeys);
+          console.log(
+            `[NightlyMemory] journal 固化: actor=${actorId} dates=${dateKeys.join(",")} 已入长期记忆`,
+          );
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] journal consolidation failed for ${actorId}:`, err);
+      }
+    }
+
+    if (totalIngested > 0) {
+      console.log(`[NightlyMemory] journal consolidation total ingested: ${totalIngested} lines`);
     }
   }
 

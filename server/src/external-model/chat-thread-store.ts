@@ -827,6 +827,7 @@ export class ChatThreadStore {
     maxThreadMessages?: number,
     now: Date = new Date(),
     clientMessageId?: string,
+    model?: string,
   ): void {
     const trimmed = assistantText.trim();
     if (!trimmed) return;
@@ -848,7 +849,7 @@ export class ChatThreadStore {
     } else {
       const userMsg = {
         role: "user",
-        content: annotateUserContentIfString(openAiUserContentFromTurn(userTurn), userAt, now),
+        content: annotateUserContentIfString(openAiUserContentFromTurn(userTurn, { model }), userAt, now),
       } as ChatCompletionMessageParam;
       tagUserMessageClientId(userMsg, clientMessageId);
       msgs.push(userMsg);
@@ -945,9 +946,21 @@ export class ChatThreadStore {
 
   afterTurnCompleted(sessionId: string, msgs: ChatCompletionMessageParam[]): void {
     const now = new Date();
-    const annotated = msgs.map((msg) =>
-      annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now),
-    );
+    // P0-1 冻结历史消息时间戳：已有时间戳前缀的消息保持字节级原样（相对时间
+    // 不再随轮次重写），保证 thread 前缀稳定，最大化 DeepSeek 等 provider 的
+    // prompt prefix cache 命中率。仅对缺失时间戳的消息（极旧数据/纯 tool 消息）
+    // 补一次原始时间戳，且补完后不再刷新。相对时间的语义在写入锚点时刻已固定，
+    // 会话临近轮次的绝对时间足够 LLM 判断时序。
+    const annotated = msgs.map((msg) => {
+      if (
+        (msg.role === "user" || msg.role === "assistant") &&
+        typeof msg.content === "string"
+      ) {
+        if (readMessageTimestampPrefix(msg.content)) return msg; // 已有时间戳 → 冻结
+        return annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now);
+      }
+      return msg;
+    });
     msgs.length = 0;
     msgs.push(...annotated);
     // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。

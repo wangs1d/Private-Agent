@@ -683,7 +683,10 @@ export function buildLayeredSystemPrompt(
   if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
   // 元认知目录：让 LLM 知道"自己记住了什么"（规模/时间分布/高频主题）
   if (memory.memoryInventory) parts.push(`【记忆目录】\n${memory.memoryInventory}`);
-  if (memory.narrativeRecall) parts.push(`【记忆图联想检索】\n${memory.narrativeRecall}`);
+  if (memory.narrativeRecall)
+    parts.push(
+      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n${memory.narrativeRecall}`,
+    );
   if (memory.workingMemorySummary) parts.push(`【当前工作记忆】\n${memory.workingMemorySummary}`);
   if (memory.recentConversationHistory)
     parts.push(
@@ -808,7 +811,10 @@ export function buildLayeredSystemPromptSections(
   if (m.userProfile) dynamicContext.push(`【用户画像】\n${m.userProfile}`);
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
   if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
-  if (m.narrativeRecall) dynamicContext.push(`【记忆图联想检索】\n${m.narrativeRecall}`);
+  if (m.narrativeRecall)
+    dynamicContext.push(
+      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n${m.narrativeRecall}`,
+    );
   if (m.workingMemorySummary) dynamicContext.push(`【当前工作记忆】\n${m.workingMemorySummary}`);
   if (m.recentConversationHistory)
     dynamicContext.push(

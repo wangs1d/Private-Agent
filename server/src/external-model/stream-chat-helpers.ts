@@ -34,6 +34,18 @@ export type NormalToolCall = {
   argumentsChunk?: string;
 };
 
+/** 流末尾 chunk 携带的 usage 摘要（provider-agnostic，供 token 审计采集真实计费/缓存数据）。 */
+export type NormalUsage = {
+  /** prefix cache 命中 token 数（OpenAI cached_tokens / DeepSeek prompt_cache_hit_tokens） */
+  promptCacheHitTokens?: number;
+  /** prefix cache 未命中 token 数（DeepSeek prompt_cache_miss_tokens；OpenAI 无此分离） */
+  promptCacheMissTokens?: number;
+  /** 输入 token 总数 */
+  inputTokens?: number;
+  /** 输出 token 总数 */
+  outputTokens?: number;
+};
+
 /** 与具体 SDK 解耦的流式 chunk 形态。每个 provider 的 normalizer 把原生 chunk 映射到这里。 */
 export type NormalChatChunk = {
   /** 正式回复文本增量（不包含思考过程） */
@@ -44,6 +56,8 @@ export type NormalChatChunk = {
   finishReason?: string | null;
   /** 工具调用增量；空数组 = 无 */
   toolCalls?: NormalToolCall[];
+  /** usage 摘要（一般为最后一个 chunk） */
+  usage?: NormalUsage;
 };
 
 /* ------------------------------------------------------------------ *
@@ -78,6 +92,8 @@ export type StreamConsumeResult = {
   finishReason: string | null;
   /** 累计到的 tool_calls（按 index 升序） */
   toolCalls: NormalToolCall[];
+  /** 流末尾 chunk 携带的 usage 摘要（可能缺失——依赖 provider 是否流式返回 usage） */
+  usage?: NormalUsage;
 };
 
 const REASONING_FALLBACK_LOG_PREFIX = "[stream-chat]";
@@ -216,6 +232,7 @@ export async function consumeNormalizedStream(
   let content = "";
   let reasoning = "";
   let finishReason: string | null = null;
+  let usage: NormalUsage | undefined;
   const toolAccByIndex = new Map<number, NormalToolCall>();
 
   const idleMs = resolveIdleTimeoutMs(options.idleTimeoutMs);
@@ -284,6 +301,10 @@ export async function consumeNormalizedStream(
           if (tc.argumentsChunk) acc.argumentsChunk = (acc.argumentsChunk ?? "") + tc.argumentsChunk;
         }
       }
+      // usage 只出现在流末尾 chunk（OpenAI/DeepSeek/Kimi 均如此），后出现覆盖先出现
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
     }
   } finally {
     // 确保底层 iterator 被释放（尤其是超时中断后，避免底层 HTTP 流泄漏）
@@ -322,7 +343,7 @@ export async function consumeNormalizedStream(
     );
   }
 
-  return { content, reasoning, finishReason, toolCalls };
+  return { content, reasoning, finishReason, toolCalls, ...(usage ? { usage } : {}) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -803,15 +824,56 @@ import type {
 } from "openai/resources/chat/completions";
 
 /**
+ * 把 OpenAI-compatible 的 usage 对象解析为 NormalUsage。
+ * 兼容字段差异：
+ * - DeepSeek：`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+ * - OpenAI / Kimi：`prompt_tokens_details.cached_tokens`
+ * - 公共：`prompt_tokens` / `completion_tokens`
+ */
+export function parseOpenAiUsage(raw: unknown): NormalUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const u = raw as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    prompt_cache_hit_tokens?: unknown;
+    prompt_cache_miss_tokens?: unknown;
+    prompt_tokens_details?: { cached_tokens?: unknown };
+  };
+  const hit =
+    typeof u.prompt_cache_hit_tokens === "number"
+      ? u.prompt_cache_hit_tokens
+      : typeof u.prompt_tokens_details?.cached_tokens === "number"
+        ? u.prompt_tokens_details.cached_tokens
+        : undefined;
+  const miss =
+    typeof u.prompt_cache_miss_tokens === "number" ? u.prompt_cache_miss_tokens : undefined;
+  const input = typeof u.prompt_tokens === "number" ? u.prompt_tokens : undefined;
+  const output = typeof u.completion_tokens === "number" ? u.completion_tokens : undefined;
+  if (hit === undefined && miss === undefined && input === undefined && output === undefined) {
+    return undefined;
+  }
+  return {
+    ...(hit !== undefined ? { promptCacheHitTokens: hit } : {}),
+    ...(miss !== undefined ? { promptCacheMissTokens: miss } : {}),
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+  };
+}
+
+/**
  * 把一个 OpenAI ChatCompletionChunk 适配成 NormalChatChunk。
  * 直接用 ChatCompletionChunk 类型，避免 any。
  */
 export function adaptOpenAiChatCompletionChunk(
   chunk: ChatCompletionChunk,
 ): NormalChatChunk | null {
+  const usage = parseOpenAiUsage(chunk.usage);
   const choice = chunk.choices?.[0];
-  if (!choice) return null;
-  const out: NormalChatChunk = {};
+  if (!choice) {
+    // 纯 usage chunk：choices 为空数组（DeepSeek 等流式末尾在此返回 usage）→ 透出供审计采集
+    return usage ? { usage } : null;
+  }
+  const out: NormalChatChunk = usage ? { usage } : {};
 
   if (typeof choice.finish_reason === "string") {
     out.finishReason = choice.finish_reason;

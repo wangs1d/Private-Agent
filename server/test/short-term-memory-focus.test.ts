@@ -23,13 +23,11 @@ test("keeps meta-debug fatigue turns away from an older business task", () => {
   );
 
   const context = service.buildPromptContext(sessionId, "好累呀") ?? "";
-  const recallQuery = service.buildRecallQuery(sessionId, "好累呀");
 
   assert.match(context, /recent-context/);
   assert.match(context, /串台|焦点|agent/i);
   assert.doesNotMatch(context, /current-focus: 小米销量查询/);
   assert.doesNotMatch(context, /focus-summary: 小米 SU7/);
-  assert.doesNotMatch(recallQuery, /小米|SU7|销量|交付/);
 
   const state = service.getTaskState(sessionId);
   assert.equal(state.tasks.find((task) => task.title === "小米销量查询")?.status, "active");
@@ -42,11 +40,9 @@ test("keeps explicit task follow-up continuity", () => {
   service.activateTask(sessionId, "小米销量查询", "小米 SU7 最新月度销量和交付数据");
 
   const context = service.buildPromptContext(sessionId, "继续查") ?? "";
-  const recallQuery = service.buildRecallQuery(sessionId, "继续查");
 
   assert.match(context, /current-focus: 小米销量查询/);
   assert.match(context, /focus-summary: 小米 SU7/);
-  assert.match(recallQuery, /小米|SU7|销量|交付/);
 });
 
 // ===== 串台根治：getTurnFocusKind 话题切换门控 =====
@@ -61,10 +57,6 @@ test("topic switch suppresses long-term recall (电影 vs 搬家串台场景)", 
 
   const focusKind = service.getTurnFocusKind(sessionId, "咱们聊会儿电影吧");
   assert.equal(focusKind, "topic_switch", "电影话题与搬家任务无关，应判定为话题切换");
-
-  // 话题切换时 buildRecallQuery 必须丢弃旧话题上下文，避免召回捞到"搬家"记忆
-  const recallQuery = service.buildRecallQuery(sessionId, "咱们聊会儿电影吧");
-  assert.doesNotMatch(recallQuery, /搬家|报价|公司/, "话题切换时召回 query 不应锚定旧话题");
 });
 
 test("follow-up keeps continuity and enriches recall (不受误杀)", () => {
@@ -76,10 +68,6 @@ test("follow-up keeps continuity and enriches recall (不受误杀)", () => {
   // 延续性追问：继续/指代 → 必须 task_followup，召回不被抑制
   assert.equal(service.getTurnFocusKind(sessionId, "继续查"), "task_followup");
   assert.equal(service.getTurnFocusKind(sessionId, "那个销量数据是多少"), "task_followup");
-
-  // 延续时召回 query 应带上当前任务锚点
-  const recallQuery = service.buildRecallQuery(sessionId, "继续查");
-  assert.match(recallQuery, /小米|SU7|销量|交付/);
 });
 
 test("casual topic switch away from a task drops task scoped memory", () => {

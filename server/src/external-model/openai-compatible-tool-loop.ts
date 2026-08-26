@@ -18,6 +18,7 @@ import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { modelSupportsVision, ocrScreenshot } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import {
   MASTER_INVOKE_SUB_AGENT_REGISTRY,
@@ -44,7 +45,6 @@ import {
 } from "../gateway/forced-tool.js";
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
-  isAssistantWithToolCalls,
   isToolCallIdNotFoundError,
   sanitizeChatMessagesForApi,
 } from "./chat-thread-sanitize.js";
@@ -58,7 +58,9 @@ import {
   materializeOpenAiToolCalls,
   StreamIdleTimeoutError,
   stripInternalControlTags,
+  type NormalChatChunk,
   type NormalToolCall,
+  type NormalUsage,
 } from "./stream-chat-helpers.js";
 import type {
   ChatToolExecutionContext,
@@ -71,62 +73,6 @@ import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 
-/** 检测模型是否支持视觉(多模态图片输入)。
- *  deepseek-chat / gpt-3.5 等纯文本模型不支持,注入 image_url 会导致 API 报错。 */
-function modelSupportsVision(model: string): boolean {
-  const m = model.toLowerCase();
-  // 已知支持视觉的模型系列
-  const visionPatterns = [
-    "gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-4.1",
-    "claude-3", "claude-sonnet", "claude-opus", "claude-haiku",
-    "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qvq",
-    "glm-4v", "glm-4.6v", "glm-4-plus",
-    "moonshot-v1", "kimi",
-    "gemini", "llava", "internvl",
-    "deepseek-vl", "deepseek-vl2",
-  ];
-  return visionPatterns.some((p) => m.includes(p));
-}
-
-/** 调用 PaddleOCR 服务识别截图中的文本和位置。
- *  非视觉模型(deepseek-chat 等)看不到图片,用 OCR 文本+坐标作为视觉替代。 */
-async function ocrScreenshot(imageBase64: string, mimeType: string): Promise<string | null> {
-  const port = process.env.PADDLE_OCR_PORT?.trim() || "8765";
-  const url = `http://127.0.0.1:${port}/ocr`;
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageBase64, mimeType, mergeLines: true }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!resp.ok) return null;
-    const data = (await resp.json()) as {
-      ok: boolean;
-      text?: string;
-      lines?: Array<{ text: string; confidence: number; box: number[][] }>;
-      width?: number;
-      height?: number;
-      error?: string;
-    };
-    if (!data.ok || !data.lines?.length) return null;
-    // 格式化:每个文本元素 + 中心坐标(用于 desktop.run_input 点击)
-    const lines = data.lines.map((ln, i) => {
-      const box = ln.box || [];
-      if (box.length >= 2) {
-        const xs = box.map((p) => p[0]);
-        const ys = box.map((p) => p[1]);
-        const cx = Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
-        const cy = Math.round(ys.reduce((a, b) => a + b, 0) / ys.length);
-        return `${i + 1}. "${ln.text}" → 点击坐标 (${cx}, ${cy}) [置信度: ${ln.confidence}]`;
-      }
-      return `${i + 1}. "${ln.text}" [置信度: ${ln.confidence}]`;
-    });
-    return `屏幕 OCR 识别结果 (${data.width}x${data.height},共 ${data.lines.length} 个文本元素,坐标可用于 desktop.run_input 点击):\n${lines.join("\n")}`;
-  } catch {
-    return null;
-  }
-}
 // 工具结果字符预算：在信息完整性和 token 节省之间取平衡。
 // search_web 1200：保留足够 title+snippet（约 5-6 条结果）让 LLM 判断哪些值得 fetch_web。
 // fetch_web 2000：正文摘要足够 LLM 提取关键信息，不过度截断导致信息丢失。
@@ -283,8 +229,6 @@ function isApologyStyleFallback(text: string): boolean {
   return false;
 }
 
-const DEFAULT_MAX_ROUNDS = 6;
-
 function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   const fallback = Number.parseInt(process.env.TOOL_EXECUTION_TIMEOUT_MS ?? "30000", 10);
   const defaultMs = Number.isFinite(fallback) && fallback > 0 ? fallback : 30_000;
@@ -357,422 +301,6 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
     return Math.min(classMs, defaultMs);
   }
   return defaultMs;
-}
-
-/**
- * 动态工具轮次配置：基于任务复杂度自动调整最大工具调用轮次
- * 预期效果：简单任务总耗时 -30%，复杂任务保持完整能力
- */
-interface TaskComplexityConfig {
-  maxRounds: number;
-  description: string;
-}
-
-function analyzeTaskComplexity(userText: string, messageCount: number): TaskComplexityConfig {
-  const textLength = userText.length;
-  const hasMultipleQuestions = (userText.match(/[？?。]/g) || []).length > 2;
-  const hasComplexKeywords = ['分析', 'analyze', '比较', 'compare', '总结', 'summarize', '优化', 'optimize', '设计', 'design', '实现', 'implement']
-    .some(kw => userText.toLowerCase().includes(kw));
-  const isLongContext = messageCount > 8;
-  
-  let complexityScore = 0;
-  
-  // 文本长度评分 (0-3)
-  if (textLength > 500) complexityScore += 3;
-  else if (textLength > 200) complexityScore += 2;
-  else if (textLength > 50) complexityScore += 1;
-  
-  // 问题数量评分 (0-2)
-  if (hasMultipleQuestions) complexityScore += 2;
-  
-  // 关键词评分 (0-2)
-  if (hasComplexKeywords) complexityScore += 2;
-  
-  // 上下文长度评分 (0-2)
-  if (isLongContext) complexityScore += 2;
-  else if (messageCount > 4) complexityScore += 1;
-  
-  // 根据分数返回配置
-  if (complexityScore <= 2) {
-    return { 
-      maxRounds: Math.max(2, parseInt(process.env.TOOL_LOOP_MIN_ROOUNDS ?? '3')), 
-      description: '简单任务' 
-    };
-  } else if (complexityScore <= 5) {
-    return { 
-      maxRounds: parseInt(process.env.TOOL_LOOP_MEDIUM_ROOUNDS ?? '4'), 
-      description: '中等任务' 
-    };
-  } else if (complexityScore <= 7) {
-    return { 
-      maxRounds: parseInt(process.env.TOOL_LOOP_COMPLEX_ROOUNDS ?? '5'), 
-      description: '复杂任务' 
-    };
-  } else {
-    return { 
-      maxRounds: DEFAULT_MAX_ROUNDS, 
-      description: '高度复杂任务' 
-    };
-  }
-}
-
-export function getOptimalMaxRounds(userText: string, messageCount: number): number {
-  const config = analyzeTaskComplexity(userText, messageCount);
-  return config.maxRounds;
-}
-
-/**
- * tool loop 内消息历史滑动窗口压缩。
- *
- * 问题：tool loop 每轮 push assistant(tool_calls) + N 条 tool(result)，N 轮后 messages
- * 单调增长。第 3 轮以后，前几轮的 tool 结果对 LLM 决策价值递减，但仍消耗大量 token。
- *
- * 策略：保留最近 `keepRounds` 轮的完整 tool 对（assistant+tool_messages），更早的 tool
- * 消息 content 替换为摘要（前 400 字符），保留关键信息（工具名、状态、核心数据）。
- * system/user 消息不动，保持 prefix cache 稳定。
- *
- * 安全性：只压缩 tool message content，不删除消息（保持 tool_call_id 链完整），
- * 避免 Kimi/OpenAI API 报 tool_call_id 不匹配。400 字符足够保留关键结论。
- */
-function compactToolLoopHistory(
-  messages: ChatCompletionMessageParam[],
-  keepRounds: number = 3,
-): void {
-  if (messages.length <= 4) return; // 太少不压缩
-
-  // 找到所有 tool message 的 index（role === "tool"）
-  const toolMsgIndexes: number[] = [];
-  // 找到所有带 tool_calls 的 assistant 消息 index（其参数可一并压缩）
-  const assistantToolMsgIndexes: number[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "tool") toolMsgIndexes.push(i);
-    if (
-      messages[i].role === "assistant" &&
-      Array.isArray((messages[i] as { tool_calls?: unknown[] }).tool_calls) &&
-      ((messages[i] as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0
-    ) {
-      assistantToolMsgIndexes.push(i);
-    }
-  }
-
-  // tool 消息总数 ≤ keepRounds 时不压缩（每轮可能有多个 tool result）
-  if (toolMsgIndexes.length <= keepRounds) return;
-
-  // 从第 keepRounds 个 tool 消息（从后往前数）开始，之前的都压缩
-  const cutoffIndex = toolMsgIndexes.length - keepRounds;
-  const firstOldToolIdx = toolMsgIndexes[0];
-  const lastOldToolIdx = toolMsgIndexes[cutoffIndex - 1];
-
-  if (lastOldToolIdx === undefined || firstOldToolIdx === undefined) return;
-
-  // 分层压缩 keepRounds 之前的 tool message content：
-  // - 越旧压得越狠：距当前窗口超过 2 条的 → 150 字符（只留工具名/状态/结论要点）
-  // - 刚出窗口的 → 400 字符（保留核心数据，供追溯）
-  // 最新 keepRounds 条永远全量，保证 LLM 决策上下文完整（防幻觉）。
-  for (let i = firstOldToolIdx; i <= lastOldToolIdx; i++) {
-    const msg = messages[i];
-    if (msg.role !== "tool") continue;
-    const content = typeof msg.content === "string" ? msg.content : "";
-    if (!content || content.startsWith("[已压缩")) continue; // 已压缩过不重复处理
-    // 该消息在压缩区内的位置序号（0 = 最旧）
-    const posInOld = toolMsgIndexes.indexOf(i);
-    const distanceFromWindow = cutoffIndex - posInOld; // 越大越旧
-    const cap = distanceFromWindow > 2 ? 150 : 400;
-    if (content.length <= cap) continue;
-    const summary = content.slice(0, cap).replace(/\n/g, " ").trim();
-    (msg as { content: string }).content = `[已压缩·${content.length}字符→${cap}] ${summary}...`;
-  }
-
-  // ── 扩展：压缩旧轮次 assistant(tool_calls) 的 function.arguments ──
-  // 协议硬约束：tool_call.id 必须与 tool 消息的 tool_call_id 严格匹配，绝不动 id/name；
-  // 只截断 function.arguments（参数已执行完，后续轮 LLM 依据的是 tool 结果而非原始参数，
-  // 截断不会导致幻觉，但显著削减每轮重复发送的 JSON 序列化体积）。
-  // 旧区判定：assistant(tool_calls) 总在其 tool 结果之前，位于 firstOldToolIdx 之前的即旧轮。
-  for (const i of assistantToolMsgIndexes) {
-    if (i >= firstOldToolIdx) continue; // 只压缩旧区
-    const msg = messages[i] as { tool_calls?: ChatCompletionMessageToolCall[] };
-    if (!Array.isArray(msg.tool_calls)) continue;
-    for (const tc of msg.tool_calls) {
-      if (tc.type !== "function" || !tc.function) continue;
-      const args = tc.function.arguments;
-      if (typeof args !== "string" || args.length <= 200 || args.startsWith("[已压缩")) continue;
-      tc.function.arguments = `[已压缩·${args.length}字符] ${args.slice(0, 200)}...`;
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 子任务链摘要化：对超出保留窗口的已完成工具链段做结构化折叠
-//
-// 与 compactToolLoopHistory 的差异：
-// - compact 只截断单条 tool content（保留全部消息结构，tool_call_id 链完整）
-// - fold 直接把「assistant(tool_calls) + tool*」整段替换为单条 assistant 摘要，
-//   从根上消除旧轮次每轮重发的结构性开销（1 段 N+1 条 → 1 条）
-//
-// 安全性：只折叠旧于最近 keepSegments 轮的已完成段；最新窗口保持全量，
-// 保证 LLM 决策上下文完整（防幻觉）。折叠后的 assistant 消息不带 tool_calls，
-// 无悬挂 tool_call_id，满足 OpenAI/Kimi 消息序列约束。
-// ─────────────────────────────────────────────────────────────────────────
-function foldAncientToolChainSegments(
-  messages: ChatCompletionMessageParam[],
-  keepSegments: number = 3,
-): boolean {
-  if (messages.length <= 4) return false;
-
-  // 找出所有「已完成工具链段」：assistant(tool_calls) + 紧随其后的连续 tool 消息。
-  // 记录段的起点（assistant index）与结束（最后一个 tool index，含）。
-  type Segment = { start: number; end: number };
-  const segments: Segment[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    if (!isAssistantWithToolCalls(m)) continue;
-    const start = i;
-    let end = i;
-    let j = i + 1;
-    while (j < messages.length && messages[j].role === "tool") {
-      end = j;
-      j++;
-    }
-    segments.push({ start, end });
-    i = end;
-  }
-  if (segments.length <= keepSegments) return false;
-
-  // 从后往前保留最后 keepSegments 段；更早的段折叠为单条 assistant 摘要
-  const foldCount = segments.length - keepSegments;
-  const foldable = segments.slice(0, foldCount);
-  if (foldable.length === 0) return false;
-
-  // 为每段生成摘要（工具名 + 成败 + 关键结果前缀）
-  const synopsisLines: string[] = [];
-  for (const seg of foldable) {
-    const names: string[] = [];
-    const details: string[] = [];
-    for (let k = seg.start; k <= seg.end; k++) {
-      const msg = messages[k];
-      if (msg.role === "assistant" && isAssistantWithToolCalls(msg)) {
-        const calls = (msg as { tool_calls?: ChatCompletionMessageToolCall[] }).tool_calls ?? [];
-        for (const tc of calls) {
-          if (tc.type !== "function" || !tc.function?.name) continue;
-          names.push(tc.function.name);
-          let argsPreview = "";
-          try {
-            const parsed = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
-            argsPreview = JSON.stringify(parsed).slice(0, 80);
-          } catch {
-            /* 忽略解析失败 */
-          }
-          details.push(`  ${tc.function.name}(${argsPreview})`);
-        }
-      } else if (msg.role === "tool") {
-        const content = typeof msg.content === "string" ? msg.content : "";
-        const flat = content.replace(/\s+/g, " ").trim();
-        details.push(`  ↳ ${flat.slice(0, 80)}${flat.length > 80 ? "…" : ""}`);
-      }
-    }
-    synopsisLines.push(
-      names.length > 0
-        ? `第${foldable.indexOf(seg) + 1}段 调用 ${names.join(" / ")}：\n${details.join("\n")}`
-        : `第${foldable.indexOf(seg) + 1}段（无工具调用）`,
-    );
-  }
-
-  // 逆序替换（从后往前删，避免 index 错位）
-  let changed = false;
-  for (let s = foldable.length - 1; s >= 0; s--) {
-    const seg = foldable[s];
-    const summaryContent = `[已完成工具链摘要]\n${synopsisLines[s]}`;
-    messages.splice(seg.start, seg.end - seg.start + 1, {
-      role: "assistant",
-      content: summaryContent,
-    });
-    changed = true;
-  }
-  return changed;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 子代理上下文隔离（最彻底）：长工具链自动升级委派
-//
-// 问题：单条用户消息触发长工具循环时，每轮都要把「固定层 + 已累积的完整工具链」
-// 重发给 LLM，token 随轮数 O(n²) 增长。即使 compact/fold 也只能压缩体积，
-// 无法消除「每轮携带全部历史」这一结构性问题。
-//
-// 方案：当链足够长/结果足够大时，主 loop 自动调用 master.invoke_sub_agent，
-// 把「用户目标 + 已收集信息」交给一个独立上下文的专业子代理继续执行，
-// 子代理跑完后返回结构化报告；主 loop 用报告替换整条工具链，实现真正隔离。
-// ─────────────────────────────────────────────────────────────────────────
-
-const AUTO_DELEGATE_ENABLED = process.env.AUTO_DELEGATE_ENABLED !== "false";
-const AUTO_DELEGATE_MIN_ROUNDS = (() => {
-  const v = Number.parseInt(process.env.AUTO_DELEGATE_MIN_ROUNDS ?? "3", 10);
-  return Number.isFinite(v) && v >= 2 ? v : 3;
-})();
-const AUTO_DELEGATE_MAX_ROUNDS = (() => {
-  const v = Number.parseInt(process.env.AUTO_DELEGATE_MAX_ROUNDS ?? "5", 10);
-  return Number.isFinite(v) && v > AUTO_DELEGATE_MIN_ROUNDS ? v : AUTO_DELEGATE_MIN_ROUNDS + 2;
-})();
-const AUTO_DELEGATE_CHARS = (() => {
-  const v = Number.parseInt(process.env.AUTO_DELEGATE_CHARS ?? "6000", 10);
-  return Number.isFinite(v) && v > 1000 ? v : 6000;
-})();
-const TOOL_CHAIN_FOLD_ENABLED = process.env.TOOL_CHAIN_FOLD_ENABLED !== "false";
-
-export type AutoDelegateChainStep = {
-  toolName: string;
-  ok: boolean;
-  resultPreview: string;
-};
-
-/** 根据已执行工具推断最适合接手的子 Agent 类型 */
-export function determineAutoDelegateAgentType(
-  steps: readonly AutoDelegateChainStep[],
-): "life" | "tech" | "info" {
-  let lifeScore = 0;
-  let techScore = 0;
-  let infoScore = 0;
-  for (const s of steps) {
-    const n = s.toolName;
-    // life：钱包/消费类写操作
-    if (/^(wallet\.|fund\.|market\.|shop\.|purchase\.|a2a\.|trade\.)/.test(n)) lifeScore += 2;
-    // tech：代码/RPA/系统/自编程/周期性视觉
-    if (/^(code\.|rpa\.|terminal|shell|system\.|file\.|docker|git\.|self\.|vision\.)/.test(n)) techScore += 2;
-    else if (/^desktop\.visual\./.test(n)) techScore += 1;
-    // info：检索/深读/比价
-    if (/^(search_web|search_images|search_videos|search_news|fetch_web|info\.|shopping\.suggest|budget\.calculate|browser\.)/.test(n))
-      infoScore += 1;
-  }
-  if (lifeScore > 0 && lifeScore >= techScore && lifeScore >= infoScore) return "life";
-  if (techScore > 0 && techScore >= infoScore) return "tech";
-  if (infoScore > 0) return "info";
-  return "life";
-}
-
-/** 生成交给子代理的任务描述（用户目标 + 主线程已收集信息摘要） */
-function buildAutoDelegateTaskDescription(
-  userText: string,
-  steps: readonly AutoDelegateChainStep[],
-  totalChars: number,
-): string {
-  const lines = steps.map(
-    (s, i) => `${i + 1}. ${s.toolName} → ${s.ok ? "成功" : "失败"}: ${s.resultPreview}`,
-  );
-  return (
-    `用户请求：${(userText || "(未提供)").slice(0, 500)}\n\n` +
-    `主线程已完成 ${steps.length} 次工具调用（累计结果约 ${totalChars} 字符），信息摘要如下：\n${lines.join("\n") || "(无)"}\n\n` +
-    `请基于以上已收集信息完成剩余工作，避免重复调用相同工具，并输出 [REPORT] 结构化报告（含结论/证据/置信度/缺失项）。`
-  );
-}
-
-/**
- * 尝试把长链升级委派给子代理。成功返回 { report, agentType }，否则返回 null（调用方回退到折叠）。
- * 仅当 master.invoke_sub_agent 已注册（子代理委派启用）且执行成功时返回非空。
- */
-async function tryAutoDelegateToSubAgent(params: {
-  ctx: ChatToolExecutionContext;
-  userText: string;
-  steps: readonly AutoDelegateChainStep[];
-  totalChars: number;
-}): Promise<{ report: string; agentType: "life" | "tech" | "info" } | null> {
-  const { ctx, userText, steps, totalChars } = params;
-  if (steps.length === 0) return null;
-  const agentType = determineAutoDelegateAgentType(steps);
-  let out: { ok: boolean; result: Record<string, unknown> };
-  try {
-    out = await ctx.executeTool(MASTER_INVOKE_SUB_AGENT_REGISTRY, {
-      agentType,
-      taskDescription: buildAutoDelegateTaskDescription(userText, steps, totalChars),
-      userStatusLine: "任务步骤较多，已转交专业子代理分步完成…",
-      directive:
-        "你已经接手一个正在进行中的任务。优先复用上方已收集的信息，避免重复调用相同工具；直接完成目标并输出结构化 [REPORT] 报告。",
-    });
-  } catch {
-    return null;
-  }
-  if (!out || !out.ok) return null;
-  const report = typeof out.result?.report === "string" ? out.result.report.trim() : "";
-  if (!report) return null;
-  return { report, agentType };
-}
-
-/** 用子代理报告替换整条工具链，实现上下文隔离（丢弃每轮重发的历史，只保留报告） */
-function replaceChainWithDelegationReport(
-  messages: ChatCompletionMessageParam[],
-  delegateOut: { report: string; agentType: "life" | "tech" | "info" },
-): void {
-  // 找到最后一个 user 消息（用户原始请求 + 可能注入的视觉帧），其后即为工具链
-  let lastUserIdx = -1;
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "user") lastUserIdx = i;
-  }
-  const keepEnd = lastUserIdx >= 0 ? lastUserIdx + 1 : messages.length;
-  messages.length = keepEnd;
-  messages.push({
-    role: "user",
-    content:
-      `[子代理执行结果 · ${delegateOut.agentType}]\n` +
-      `主线程检测到任务步骤过多，已转交专业子代理在独立上下文中完成。以下是其结构化报告：\n\n${delegateOut.report}`,
-  });
-}
-
-/**
- * 为工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
- *
- * 不同工具的结果有不同的「完整度」信号：
- * - search_web: 有 N 条结果，告诉 LLM 已有足够信息判断哪些值得深读
- * - weather: 数据已包含当前温度+未来预报，无需再查
- * - code.run: 执行结果已包含 stdout/stderr，无需重跑
- * - fetch_web: 正文已提取，无需再抓
- *
- * 提示是轻量的（一行），只追加到成功的工具结果末尾。
- */
-function buildToolSufficiencyHint(toolName: string, content: string): string {
-  // 如果结果太短，不需要加提示
-  if (!content || content.length < 50) return "";
-
-  // 检测结果中是否已有足够信息（按工具类型判断）
-  switch (toolName) {
-    case "search_web": {
-      // 统计结果条数（items 数组）
-      const itemMatch = content.match(/"title"\s*:/g);
-      const itemCount = itemMatch ? itemMatch.length : 0;
-      if (itemCount >= 3) {
-        return `\n[提示] 已返回 ${itemCount} 条搜索结果，含标题/链接/摘要。如需深入某条结果请用 fetch_web 读取该 URL，否则可直接基于已有摘要回答。不要用相同 query 重复搜索。若用户问的是单一事实判断，请直接给结论和一条依据，不要做第二遍总结。`;
-      }
-      return "";
-    }
-    case "search_images":
-    case "search_videos": {
-      const itemMatch = content.match(/"title"\s*:/g);
-      const itemCount = itemMatch ? itemMatch.length : 0;
-      if (itemCount > 0) {
-        return `\n[提示] 已返回 ${itemCount} 条媒体结果，含标题、预览图/媒体链接和来源页。请直接把最相关的 3-6 条返回给用户；图片可展示 mediaUrl 或 thumbnailUrl，视频请给 pageUrl 供用户打开观看。不要重复搜索相同 query。`;
-      }
-      return "";
-    }
-    case "weather.get_local": {
-      return "\n[提示] 天气数据已包含当前温度、体感温度、湿度、风力、降水概率和穿衣建议。信息已完整，可直接回答用户，无需再搜索。";
-    }
-    case "code.run": {
-      // 如果执行成功且 stdout 非空
-      if (content.includes('"ok":true') || content.includes('"ok": true')) {
-        return "\n[提示] 代码已执行完成，stdout/stderr 已返回。如需读取文件产物请用 code.read_file，不要用相同代码重跑。";
-      }
-      return "";
-    }
-    case "code.shell": {
-      if (content.includes('"ok":true') || content.includes('"ok": true')) {
-        return "\n[提示] shell 命令已执行完成，stdout/stderr 已返回。如被策略拒绝请改用白名单内命令，或用 code.run 写脚本实现等效逻辑。";
-      }
-      return "";
-    }
-    case "fetch_web": {
-      return "\n[提示] 网页正文已提取完成。如已有足够信息可直接回答，无需重复抓取同一页面。";
-    }
-    default:
-      return "";
-  }
 }
 
 /**
@@ -905,6 +433,66 @@ function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
     apiTools,
     resolveRegistryToolName: (apiName) => apiToRegistry.get(apiName) ?? apiName,
   };
+}
+
+/**
+ * P2：会话级工具 schema 稳定（排序 + 快照）。
+ *
+ * 背景：多分类工具检索每轮召回顺序可能不同，同一会话内请求体 `tools` 数组顺序
+ * 一抖动，DeepSeek / Kimi 等基于「请求前缀」的上下文缓存命中率就下降（tools 参与
+ * 服务端请求哈希/前缀比对）。
+ *
+ * 方案：
+ * - 首轮按工具名确定性排序（字母序）建立会话基准快照；
+ * - 后续轮已知工具严格按基准序重排，仅本轮动态新召回的匹配工具追加到末尾，
+ *   同时吸收进基准（保留多分类检索的动态召回能力，不让快照变成死工具集）。
+ *
+ * 模块级 LRU 防膨胀：只保留最近 128 个会话的顺序基准。
+ */
+const SESSION_TOOL_ORDER = new Map<string, Map<string, number>>();
+const SESSION_TOOL_ORDER_MAX = 128;
+
+function apiToolNameOf(tool: ChatCompletionTool): string {
+  return tool.type === "function" ? (tool.function?.name ?? "") : "";
+}
+
+function stabilizeToolOrderForSession(
+  apiTools: ChatCompletionTool[],
+  sessionId: string | undefined,
+): ChatCompletionTool[] {
+  const sorted = [...apiTools].sort((a, b) =>
+    apiToolNameOf(a).localeCompare(apiToolNameOf(b)),
+  );
+  if (!sessionId) return sorted;
+
+  if (SESSION_TOOL_ORDER.size >= SESSION_TOOL_ORDER_MAX) {
+    const oldest = SESSION_TOOL_ORDER.keys().next().value as string | undefined;
+    if (oldest !== undefined) SESSION_TOOL_ORDER.delete(oldest);
+  }
+
+  let order = SESSION_TOOL_ORDER.get(sessionId);
+  if (!order) {
+    order = new Map(sorted.map((t, i) => [apiToolNameOf(t), i]));
+    SESSION_TOOL_ORDER.set(sessionId, order);
+    return sorted;
+  }
+  const known: ChatCompletionTool[] = [];
+  const fresh: ChatCompletionTool[] = [];
+  for (const t of sorted) {
+    const n = apiToolNameOf(t);
+    (order.has(n) ? known : fresh).push(t);
+  }
+  known.sort(
+    (a, b) => (order!.get(apiToolNameOf(a)) ?? 0) - (order!.get(apiToolNameOf(b)) ?? 0),
+  );
+  const stabilized = [...known, ...fresh];
+  if (fresh.length > 0) {
+    const next = new Map(order);
+    let idx = next.size;
+    for (const t of fresh) next.set(apiToolNameOf(t), idx++);
+    SESSION_TOOL_ORDER.set(sessionId, next);
+  }
+  return stabilized;
 }
 
 // 强制工具路由（forced tool choice）统一收口到 gateway/forced-tool.ts：
@@ -2340,6 +1928,275 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 /**
  * OpenAI 兼容 Chat Completions：流式输出 + tool_calls 多轮执行（Kimi / OpenAI 共用）。
  */
+// ═══════════════════════════════════════════════════════════════════
+// Plan-and-Execute 工具编排（2026-08-26 起替代已删除的 ReAct 多轮循环）
+//
+// 架构（每轮对话最多 3 类 LLM 调用，消除"每轮重发历史 + 全量 schema"的循环开销）：
+//   ① PLAN      —— 单次带 schema 的规划调用：LLM 一次性列出本轮需要的全部工具
+//                  调用（parallel_tool_calls），不再逐轮"想一步调一步"。
+//   ② EXECUTE   —— 系统层并行执行全部 tool_calls，LLM 不参与调度。执行器内置
+//                  轮内去重缓存（同工具+同参数只真实执行一次，用完即丢）与
+//                  失败确定性重试（非超时失败自动重试 1 次）。
+//   ③ SUMMARIZE —— 单次不带 schema 的汇总调用（流式）：工具结果已作为 tool
+//                  消息在上下文里，不再重发工具 schema。
+//
+// 波次（wave）与 replan：
+//   - 首个 PLAN 波次执行完毕后，若"全部成功 + 无元工具 + 强制联网已满足 +
+//     未用交互式工具"，先做一次「充分性探测」（不带 schema，首行输出
+//     NEED_MORE_TOOLS 可升级）；探测通过 → 直接 SUMMARIZE 收尾（2 次调用，
+//     token 最省路径）。
+//   - 存在失败 / 元工具（tool_search 桥接）/ 交互式工具（浏览器/桌面/代码链路）
+//     时，进入带 schema 的 replan 波次（上限 maxRounds，默认
+//     PLAN_EXECUTE_MAX_WAVES=4，fast 模式 1）：模型基于已有结果继续规划或
+//     直接给出最终回答（文本回复即流式返回）。
+//   - 波次耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）。
+// ═══════════════════════════════════════════════════════════════════
+
+/** 规划波次（plan + replan）默认上限；可用环境变量 PLAN_EXECUTE_MAX_WAVES 调整。 */
+const PLAN_EXECUTE_MAX_WAVES_DEFAULT = (() => {
+  const raw = Number.parseInt(process.env.PLAN_EXECUTE_MAX_WAVES ?? "", 10);
+  return Number.isFinite(raw) && raw >= 1 ? raw : 4;
+})();
+
+/** 充分性探测的升级标记：汇总调用首行输出该标记表示"结果不足，需要 replan"。 */
+const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS";
+
+/**
+ * 规划调用输出 token 上限（仅「非思考」模型生效，思考模型的 reasoning 空间不被压缩）。
+ * 防止规划轮模型输出冗长正文（非 tool_calls）时烧 token；正常回答长度远低于该值。
+ * 可用环境变量 `PLAN_CALL_MAX_OUTPUT_TOKENS` 调整，设 0 关闭。
+ */
+const PLAN_CALL_MAX_OUTPUT_TOKENS = (() => {
+  const raw = Number.parseInt(process.env.PLAN_CALL_MAX_OUTPUT_TOKENS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 256 ? raw : 3000;
+})();
+
+/**
+ * 规划轮是否走非流式请求（内容与流式完全一致，协议更省、usage 更确定——含 prefix
+ * cache token）。仅对「非思考」模型生效。可用 `PLAN_NON_STREAMING=0` 关闭。
+ */
+const PLAN_NON_STREAMING = process.env.PLAN_NON_STREAMING !== "0";
+
+/**
+ * 档3：SUMMARIZE 探测（NEED_MORE_TOOLS）报结果不足时，若剩余工作命中探索型
+ * （纵挖）信号，则向后续 replan 波次注入「单次委派」引导——让模型把剩余深链
+ * 打包成一次 master.invoke_sub_agent（子 Agent 在独立上下文完成），而不是在主循环
+ * 反复 replan（每波重发全量工具 schema）。仅引导、不强制：剩余 1~2 个直接小调用
+ * 即可补齐时模型仍可直接执行。可用 `PLAN_DELEGATE_STEER=0` 关闭。
+ */
+const PLAN_DELEGATE_STEER = process.env.PLAN_DELEGATE_STEER !== "0";
+
+/** 深度探索/纵挖意图信号：命中 → 剩余链条适合交给子 Agent 纵深执行。 */
+const DELEGATE_STEER_INTENT_RE =
+  /调研|研究|深挖|深度|调查|比价|货比|监控|跟踪|交叉验证|多.?个来源|全网|多渠道|搜集|收集信息|找.?更多|继续.?找|搜.?几个|搜.?多家|对比.?多|多.?对比|查.?行情|查.?资料|背景信息/i;
+
+/** 探索形态工具前缀：本波已用这些工具 → 链条呈"查→深读→整理"的纵挖形状。 */
+const DELEGATE_STEER_TOOL_PREFIXES = ["search_", "fetch_web", "info."];
+
+function usedExploratoryTool(toolResults: Array<{ name: string; ok: boolean }>): boolean {
+  return toolResults.some(
+    (r) => r.ok && DELEGATE_STEER_TOOL_PREFIXES.some((p) => r.name.startsWith(p)),
+  );
+}
+
+/** 确定性判据（无 LLM 调用）：剩余工作是否为值得委派的探索型链条（横切留主循环，纵挖给委派）。 */
+function shouldSteerRemainingWorkToDelegate(
+  userText: string,
+  toolResults: Array<{ name: string; ok: boolean }>,
+): boolean {
+  if (DELEGATE_STEER_INTENT_RE.test(userText)) return true;
+  return usedExploratoryTool(toolResults);
+}
+
+/** 委派引导文案：仅作用在 replan 波次的单次请求，不写入持久历史（避免污染最终 SUMMARIZE）。 */
+function buildDelegateSteerMessage(): string {
+  return [
+    "【系统提示·探索委派引导】现有工具结果仍不足，剩余工作需要在主循环外继续深入。",
+    "为避免主循环反复 replan（每波重发全部工具 schema 烧 token）：若剩余链条需多步深入" +
+      "（再查多个来源→交叉验证→整理结论），请把剩余工作打包成**一次** master.invoke_sub_agent 调用：",
+    "- type 选最匹配的子 Agent：info=信息检索与深度调研；life=生活操作；tech=技术操作。",
+    "- taskDescription 写清：剩余目标、已拿到的中间结论（含关键数据）、必须覆盖的点。",
+    "调用后若返回任务 id，用 master.poll_sub_agent_tasks 等待结果，拿到后直接向用户汇总。",
+    "若剩余只需 1~2 个直接小调用即可补齐，直接并行补齐即可，不要委派。",
+  ].join("\n");
+}
+
+/** replan 历史瘦身：折叠旧波次工具结果时保留的结果要点长度（确定性截断，不经 LLM）。 */
+const REPLAN_FOLD_DIGEST_CHARS = 160;
+
+/**
+ * 确定性安全截断：普通超长文本按 maxChars 截断；若截断点恰好落在 URL 中间
+ * （http(s):// 已开始但未收尾），向后延伸到 URL 结束，避免 replan 规划拿到半截
+ * URL 后自行脑补补齐（幻觉来源）。纯字符串操作，不经 LLM。
+ */
+export function safeTruncateDigest(raw: string, maxChars: number): string {
+  if (raw.length <= maxChars) return raw;
+  const cut = raw.slice(0, maxChars);
+  const urlMatch = cut.match(/https?:\/\/\S*$/);
+  if (urlMatch && urlMatch[0].length >= 10) {
+    const rest = raw.slice(maxChars);
+    const tail = rest.match(/^[^\s"',)}\]]*/);
+    if (tail && tail[0].length > 0) {
+      return cut + tail[0] + "…";
+    }
+  }
+  return cut + "…";
+}
+
+/** summary 历史裁剪：保留最近 N 个用户回合（含其后的全部工具链），丢弃更早纯对话。 */
+const SUMMARY_KEEP_USER_TURNS = 4;
+/** summary 历史裁剪生效的消息数阈值：短对话不裁剪（避免丢失引用上下文）。 */
+const SUMMARY_TRIM_MIN_MESSAGES = 14;
+/**
+ * 质量保护闸：当前用户消息命中「指代早期对话」的措辞（刚才/上面/之前/继续/深入等）时，
+ * 禁止 summary 历史裁剪——模型需要完整历史来消解引用，裁剪会让它失去所指对象、
+ * 基于猜测作答（幻觉）。命中的概率不高，命中一次省不了多少 token，宁可保留。
+ */
+const SUMMARY_TRIM_REFERENCE_CUES =
+  /刚才|刚刚|刚说|刚聊|前面|上面|上一条|之前|上次|上一|刚才说|上面说|前面说|继续说|接着|继续|展开|深入|再看|回顾|再说一遍/i;
+
+/**
+ * 交互式/自动化工具：结果几乎总是需要模型继续决策下一步（浏览器/桌面/代码/
+ * 手机/具身链路）。这类波次不做「充分性探测」——探测大概率升级 replan，
+ * 徒增一次无 schema 调用的延迟——直接进入下一轮带 schema 的 replan。
+ */
+const INTERACTIVE_TOOL_PREFIXES = [
+  "agent_browser.",
+  "desktop.",
+  "code.",
+  "phone.",
+  "embodiment.",
+  "browser.",
+];
+
+function isInteractiveToolName(name: string): boolean {
+  return INTERACTIVE_TOOL_PREFIXES.some((p) => name.startsWith(p));
+}
+
+/** 工具执行结果（executeTool 的返回形状）。 */
+type ToolExecOutcome = { ok: boolean; result: Record<string, unknown> };
+
+/** 轮内去重缓存的参数键：对参数做稳定序列化（键排序），语义相同的参数命中同一键。 */
+function stableArgsKey(args: Record<string, unknown>): string {
+  const keys = Object.keys(args).sort();
+  return keys.map((k) => `${k}=${JSON.stringify(args[k] ?? null)}`).join("&");
+}
+
+/** 判断一条 assistant 消息是否携带 tool_calls。 */
+function isAssistantWithToolCalls(m: ChatCompletionMessageParam): boolean {
+  if (m.role !== "assistant") return false;
+  const calls = (m as { tool_calls?: unknown[] }).tool_calls;
+  return Array.isArray(calls) && calls.length > 0;
+}
+
+/** 取 assistant tool_calls 的函数名列表（用于折叠摘要的标注）。 */
+function assistantToolCallNames(m: ChatCompletionMessageParam): string {
+  const calls = ((m as { tool_calls?: Array<{ function?: { name?: string } }> }).tool_calls ?? []).map(
+    (c) => c.function?.name ?? "?",
+  );
+  return calls.length > 0 ? calls.join("/") : "工具";
+}
+
+/**
+ * replan 历史瘦身：把「早于当前波次」的已完成工具链（assistant tool_calls + 其 tool
+ * 回复）折叠为一条确定性摘要 user 消息，仅保留最近一个波次的完整链。replan 规划只需
+ * 「上一步拿到了什么」，不必重发全部细节。折叠是确定性截断（保留工具名 + 结果要点），
+ * 不经过 LLM，杜绝幻觉；最终汇总（runSchemaLessSummary）仍用未折叠的完整历史作答，
+ * 因此最终回答质量与完整数据不受影响。
+ */
+function foldOldWaveToolChains(msgs: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+  // 定位所有工具链起点；最后一个链 = 当前波次（必须原样保留）
+  const chainStarts: number[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (isAssistantWithToolCalls(msgs[i])) chainStarts.push(i);
+  }
+  if (chainStarts.length <= 1) return msgs;
+  const keepFrom = chainStarts[chainStarts.length - 1];
+
+  const out: ChatCompletionMessageParam[] = [];
+  let foldedLines: string[] = [];
+  const flushFolded = () => {
+    if (foldedLines.length === 0) return;
+    out.push({
+      role: "user",
+      content: "【历史工具结果摘要（早于当前规划轮，供参考）】\n" + foldedLines.join(""),
+    });
+    foldedLines = [];
+  };
+
+  let i = 0;
+  while (i < msgs.length) {
+    const m = msgs[i];
+    if (!isAssistantWithToolCalls(m)) {
+      out.push(m);
+      i += 1;
+      continue;
+    }
+    // 收集完整链：assistant + 紧随其后的全部 tool 消息
+    const chain: ChatCompletionMessageParam[] = [m];
+    let j = i + 1;
+    while (j < msgs.length && msgs[j].role === "tool") {
+      chain.push(msgs[j]);
+      j += 1;
+    }
+    if (i >= keepFrom) {
+      // 当前波次链：先把已折叠的旧块落盘，再原样保留本链
+      flushFolded();
+      out.push(...chain);
+    } else {
+      // 旧波次链：折叠为确定性摘要（URL 安全截断，防止规划拿半截 URL 脑补）
+      const names = assistantToolCallNames(m);
+      for (const tm of chain.slice(1)) {
+        const raw = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content ?? "");
+        const digest = safeTruncateDigest(raw, REPLAN_FOLD_DIGEST_CHARS);
+        foldedLines.push(`- ${names}[结果]: ${digest}`);
+      }
+    }
+    i = j;
+  }
+  flushFolded();
+  return out;
+}
+
+/**
+ * summary 历史裁剪：仅保留全部 system 消息 + 最近 N 个用户回合及其后的所有内容
+ * （含全部工具链），丢弃更早的纯对话。工具结果永远完整保留，最终回答依赖的真实数据
+ * 不丢；短对话（低于阈值）为无操作。若传入的当前用户文本命中「指代早期对话」的措辞，
+ * 直接返回原历史（保护引用消解，防止上下文丢失导致的幻觉）。
+ */
+export function trimHistoryForSummary(
+  msgs: ChatCompletionMessageParam[],
+  keepUserTurns = SUMMARY_KEEP_USER_TURNS,
+  protectUserText?: string,
+): ChatCompletionMessageParam[] {
+  if (protectUserText && SUMMARY_TRIM_REFERENCE_CUES.test(protectUserText)) {
+    return msgs;
+  }
+  const userIdx: number[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (msgs[i].role === "user") userIdx.push(i);
+  }
+  if (msgs.length < SUMMARY_TRIM_MIN_MESSAGES || userIdx.length <= keepUserTurns) {
+    return msgs;
+  }
+  const startIdx = userIdx[userIdx.length - keepUserTurns];
+  const head = msgs.slice(0, startIdx).filter((m) => m.role === "system");
+  return [...head, ...msgs.slice(startIdx)];
+}
+
+/** 单元素 async iterable：把非流式完整响应归一化为一个 chunk 喂给统一 consumer。 */
+async function* singleChunkSource(chunk: NormalChatChunk): AsyncGenerator<NormalChatChunk> {
+  yield chunk;
+}
+
+/**
+ * 工具结果充分性提示：明确告诉 LLM「结果已完整」，减少不确定驱动的重复调用。
+ */
+function buildToolSufficiencyHint(toolName: string, content: string | undefined): string {
+  if (!content || content.length < 8) return "";
+  return `[系统提示] ${toolName} 的结果已完整返回，信息通常足以直接回答；除非结果明确缺失关键字段，不要重复调用同一工具。`;
+}
+
 export async function streamCompletionWithTools(
   client: OpenAI,
   model: string,
@@ -2347,6 +2204,7 @@ export async function streamCompletionWithTools(
   onDelta: StreamDeltaHandler,
   ctx: ChatToolExecutionContext,
   options?: {
+    /** 规划波次上限（plan + replan 总次数）；fast 场景传 1 */
     maxRounds?: number;
     tools?: ChatCompletionTool[];
     toolSearchSourceTools?: ChatCompletionTool[];
@@ -2355,21 +2213,23 @@ export async function streamCompletionWithTools(
     extraBody?: Record<string, unknown>;
     promptCache?: PrefixCacheRequest;
     requestSystemMessages?: ChatCompletionMessageParam[];
+    /** volatile 动态上下文（记忆/时间等），沉底注入到最新 user 消息尾部，保护前缀缓存 */
+    tailDynamicContext?: string;
     /** 输出 token 上限（对应 OpenAI 的 max_tokens）；不传则不限制 */
     maxOutputTokens?: number;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
     audit?: { sessionId?: string; stage?: "main_chat" };
-    /** 子代理上下文隔离：true 时禁止长链自动升级委派（子 Agent 内部用，防递归） */
-    disableAutoDelegate?: boolean;
   },
 ): Promise<string> {
-  // 动态调整工具循环轮次（基于任务复杂度）
-  let maxRounds = options?.maxRounds;
   const userText = extractUserTextFromMessages(messages) || "";
-
-  if (!maxRounds) {
-    maxRounds = getOptimalMaxRounds(userText, messages.length);
-  }
+  // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
+  // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
+  // 强制工具调用会多 1 次 round trip，徒增延迟。
+  const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
+  const maxWaves = Math.max(
+    1,
+    options?.maxRounds ?? (fastProfile ? 1 : PLAN_EXECUTE_MAX_WAVES_DEFAULT),
+  );
   
   const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
   const toolSearchPrepared = await prepareTools(
@@ -2390,120 +2250,109 @@ export async function streamCompletionWithTools(
   }
 
   const { apiTools, resolveRegistryToolName } = prepareToolsForChatApi(registryTools);
+  // P2：会话级工具 schema 稳定——首轮确定性排序 + 会话基准快照，后续轮保持顺序，
+  // 避免多分类检索的顺序抖动破坏 DeepSeek/Kimi 等 provider 的前缀上下文缓存。
+  const stableApiTools = stabilizeToolOrderForSession(apiTools, options?.audit?.sessionId);
   let lastAssistantText = "";
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
-  // 搜索类工具在本轮对话中已成功执行的次数：用于"重复搜索制动"。
-  // 实测 LLM 对"搜索/最新"类问题会反复调 search_web（S3 达 9 次），prompt 引导压不住，
-  // 需在代码层拦截，避免多轮工具迭代把响应拖到几十秒 / 超时让前端一直转圈。
-  const freshToolExecCount = new Map<string, number>();
-  // 2026-08-01 性能优化：从 extraBody 推断 Fast 模式，传递给 resolveForcedToolChoice 跳过强制 tool_choice。
-  // Fast 模式 = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
-  // 强制工具调用会多 1 次 round trip，徒增延迟。
-  const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
   const allToolExecResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }> = [];
+  // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
+  // 不跨轮持久——跨轮缓存由 ctx.getCachedToolResult 的 TTL 缓存负责）。
+  // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
+  // 消除并行重复执行；失败结果落定后立即摘除，后续 replan 波次仍可重新执行。
+  const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
+  // 强制联网兜底（模型未调搜索工具就收尾时注入提示重规划）只授予一次
+  let freshLookupEnforced = false;
+  // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
+  // 注入「单次委派」引导（仅该波请求，不写持久历史）。delegateSteerDone 保证
+  // 一轮只引导一次——模型该波要么委派、要么直接补齐，反复提示只会增加噪音。
+  let delegateSteerMessage: string | null = null;
+  let delegateSteerDone = false;
+  // 前缀缓存命中统计（本调用内聚合，结束时打印一行，验证优化前后命中率变化）
+  const prefixCacheStats = { hit: 0, miss: 0 };
+  const accumulatePrefixCacheUsage = (usage?: NormalUsage) => {
+    if (!usage) return;
+    if (typeof usage.promptCacheHitTokens === "number") prefixCacheStats.hit += usage.promptCacheHitTokens;
+    if (typeof usage.promptCacheMissTokens === "number") prefixCacheStats.miss += usage.promptCacheMissTokens;
+  };
+  const logPrefixCacheStats = () => {
+    const total = prefixCacheStats.hit + prefixCacheStats.miss;
+    if (total <= 0) return;
+    console.info(
+      `[prefix-cache] 本调用聚合: hit=${prefixCacheStats.hit} miss=${prefixCacheStats.miss} ` +
+        `hitRate=${((prefixCacheStats.hit / total) * 100).toFixed(1)}%`,
+    );
+  };
 
-  // ── 子代理上下文隔离（长链自动升级委派）状态 ──
-  // 仅在非 fast 模式、未显式禁用、且委派能力可用时启用。
-  const autoDelegateActive =
-    AUTO_DELEGATE_ENABLED &&
-    !fastProfile &&
-    !options?.disableAutoDelegate;
-  // 已发生的工具链轮次（含工具调用的一轮记一次）与累计结果体积
-  let chainRounds = 0;
-  let chainToolChars = 0;
-  const chainSteps: AutoDelegateChainStep[] = [];
-  // 本轮 turn 已完成过一次自动委派（防重复/递归追加）
-  let delegatedReport: string | null = null;
-
-  // 工具调用克制引导：减少 LLM 对同一工具的冗余重复调用（实测 S3 联网搜索场景
-  // LLM 会连续调 3-5 次 search_web，S5 代码沙箱会调 2 次 code.run）。
+  // 规划引导：Plan-and-Execute 要求模型在单次回复里一次性规划全部工具调用，
+  // 减少串行波次（每多一波 = 多一次带 schema 的全量历史重发）。
   // 只在有工具可调时注入，纯对话场景不注入。
-  if (apiTools.length > 0) {
+  if (stableApiTools.length > 0) {
     messages.push({
       role: "system",
       content:
-        "工具调用原则：\n" +
-        "1. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
-        "2. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
-        "3. 能一轮并行解决的不要拆成多轮串行。多个独立 URL 用一轮多个 fetch_web。\n" +
+        "工具调用原则（Plan-and-Execute）：\n" +
+        "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
+        "2. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
+        "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
         "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。",
     });
   }
 
-  // TEMP DEBUG（重复工具调用诊断：打印每轮的 tool_calls 数量）
-  console.log(`[DBG-toolloop] maxRounds=${maxRounds} fastProfile=${fastProfile}`);
-  // Fix1(加固 fast 轻工具链路)：recoveryGranted 跨轮持久，保证整个工具循环
-  // 最多只授予一次恢复轮，避免失败级联导致无限加轮。
-  let recoveryGranted = false;
-  for (let round = 0; round < maxRounds; round++) {
-    // 记录本轮真实取数工具是否失败（供恢复轮判定）
-    let realToolFailedThisRound = false;
+  for (let wave = 0; wave < maxWaves; wave++) {
     let retriedToolCallIdError = false;
-    // 子代理上下文隔离：本轮是否执行了可委派的真实工具（用于累加 chainRounds）
-    let chainWorkThisRound = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
+    // ③/④ 规划轮：非思考模型走非流式 + 输出上限（协议更省、usage 确定、防正文烧 token）；
+    // 思考模型（deepseek-reasoner 等）保持流式 + 不限 max_tokens，避免压缩 reasoning 空间。
+    const planNonStreaming = PLAN_NON_STREAMING && thinkingDisabled;
+    const planMaxTokens = options?.maxOutputTokens
+      ? options.maxOutputTokens
+      : thinkingDisabled
+        ? PLAN_CALL_MAX_OUTPUT_TOKENS
+        : undefined;
     // Token 用量审计：本轮发往 LLM 的输入规模（估算）
     let auditInputChars = 0;
 
     while (true) {
-      // 第 2 轮起压缩早期 tool 结果 + 折叠更早的已完成链段，减少 token 消耗
-      // （最新 keepRounds 条保持全量，保证 LLM 始终基于完整上下文决策，避免幻觉）
-      if (round >= 1) {
-        if (TOOL_CHAIN_FOLD_ENABLED) {
-          // 子任务链摘要化：把旧于保留窗口的「assistant(tool_calls)+tool*」整段
-          // 折叠为单条结构化摘要（消除结构性重发开销，不影响 tool_call_id 链）
-          try {
-            foldAncientToolChainSegments(messages, 3);
-          } catch {
-            /* 折叠失败不阻断主流程 */
-          }
-        }
-        compactToolLoopHistory(messages, 3);
-      }
-      const sanitizedMessages = sanitizeChatMessagesForApi(messages, {
-        stripReasoning: thinkingDisabled,
-        logPrefix: "[openai-tool-loop]",
-      });
-      const requestMessages = options?.requestSystemMessages
-        ? applyPromptCacheMessages(sanitizedMessages, options.requestSystemMessages)
+      // ① replan 历史瘦身：wave>0 时把早于当前波次的旧工具链折叠为确定性摘要
+      //（仅保留最近波次完整链），replan 规划不必重发旧波次全部细节。
+      const sanitizedMessages = sanitizeChatMessagesForApi(
+        wave > 0 ? foldOldWaveToolChains(messages) : messages,
+        {
+          stripReasoning: thinkingDisabled,
+          logPrefix: "[openai-tool-loop]",
+        },
+      );
+      // 档3 委派引导注入：仅作用于 replan 波次（wave>0）的这一次请求——
+      // 在 sanitized 副本上追加，不改动 messages 持久历史，避免污染最终 SUMMARIZE；
+      // 注入后立即清空，保证一轮只提示一次。
+      const steerMsg = delegateSteerMessage && wave > 0 ? delegateSteerMessage : null;
+      if (steerMsg) delegateSteerMessage = null;
+      const baseRequestMessages = options?.requestSystemMessages
+        ? applyPromptCacheMessages(
+            sanitizedMessages,
+            options.requestSystemMessages,
+            options.tailDynamicContext,
+          )
         : sanitizedMessages;
-      // TEMP DEBUG（记忆注入诊断 6：工具分支实际发送的 system 是否含记忆）
-      try {
-        const sysJoined = requestMessages
-          .filter((m) => m.role === "system" && typeof m.content === "string")
-          .map((m) => String(m.content))
-          .join("\n");
-        const { appendFileSync } = await import("node:fs");
-        appendFileSync(
-          ".memory-inject-debug.log",
-          JSON.stringify({
-            t: new Date().toISOString(),
-            phase: "finalRequestTools",
-            round,
-            sysMsgCount: requestMessages.filter((m) => m.role === "system").length,
-            finalSysHasNarrative: sysJoined.includes("记忆图联想检索"),
-            planSysHasNarrative: String(options?.requestSystemMessages?.[0]?.content ?? "").includes("记忆图联想检索"),
-            sysHead: sysJoined.slice(0, 100),
-          }) + "\n",
-        );
-      } catch {
-        /* ignore */
-      }
+      const requestMessages = steerMsg
+        ? [...baseRequestMessages, { role: "system", content: steerMsg }]
+        : baseRequestMessages;
       try {
         const request = {
           model,
           messages: requestMessages,
-          tools: apiTools,
-          tool_choice: resolveForcedToolChoice(userText, apiTools, fastProfile),
+          tools: stableApiTools,
+          tool_choice: resolveForcedToolChoice(userText, stableApiTools, fastProfile),
           // 明确启用并行工具调用，让 LLM 在单轮内返回多个 tool_calls。
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
-          stream: true,
-          ...(options?.maxOutputTokens ? { max_tokens: options.maxOutputTokens } : {}),
+          stream: planNonStreaming ? false : true,
+          ...(planMaxTokens ? { max_tokens: planMaxTokens } : {}),
           ...(options?.promptCache ?? {}),
           // ⚠️ OpenAI Node SDK v6 不识别 Python 风格的 `extra_body` 顶层字段——它会
           // 整个 body JSON.stringify 后把 `extra_body` 当作普通 key 发出去，导致
@@ -2512,7 +2361,7 @@ export async function streamCompletionWithTools(
           ...(options?.extraBody ?? {}),
         };
         stream = await client.chat.completions.create(request as Parameters<typeof client.chat.completions.create>[0]);
-        auditInputChars = JSON.stringify(requestMessages).length + JSON.stringify(apiTools ?? []).length;
+        auditInputChars = JSON.stringify(requestMessages).length + JSON.stringify(stableApiTools ?? []).length;
         break;
       } catch (e) {
         if (!retriedToolCallIdError && isToolCallIdNotFoundError(e)) {
@@ -2529,31 +2378,86 @@ export async function streamCompletionWithTools(
     let fullReasoning = "";
     let finishReason: string | null = null;
     const normalizedToolCalls: NormalToolCall[] = [];
+    // 流末尾 chunk 的 usage（可能缺失）；声明在 try 外，供块外审计使用
+    let streamUsage: NormalUsage | undefined;
 
     try {
-      // 流式消费走统一的 provider-agnostic helper：自动累积 content + reasoning_content
-      // + tool_calls。任何 provider 的 chunk 只需先经 `adaptOpenAiChatCompletionStream`
-      // 适配成 NormalChatChunk 即可。后续若要接入 Anthropic/Google，只换 adapter 即可。
-      const result = await consumeNormalizedStream(
-        adaptOpenAiChatCompletionStream(
-          stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
-        ),
-        {
-          onContentDelta: (d) => {
-            fullText += d;
-            // 不在 tool loop 期间推送 delta：避免"思考前导话"流式输出给前端。
-            // 最终内容在 round 结束后（finishReason !== "tool_calls"）统一推送到 onDelta。
-          },
+      if (planNonStreaming) {
+        // ④ 非流式规划响应：把完整 message 归一化为单个 NormalChatChunk 走同一 consumer。
+        // 内容与流式完全一致（DSML 工具调用提取、reasoning 累积都在 consumer 内完成），
+        // 但协议更省、usage 更确定（含 prefix cache token）。
+        const resp = stream as OpenAI.Chat.Completions.ChatCompletion;
+        const choice = resp.choices?.[0];
+        const msg = choice?.message;
+        const usageRaw = resp.usage as OpenAI.CompletionUsage | undefined;
+        const usageExtras = usageRaw as unknown as Record<string, unknown> | undefined;
+        const toolCalls: NormalToolCall[] = (
+          (msg?.tool_calls ?? []) as Array<{
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>
+        ).map((tc, i) => ({
+          index: i,
+          id: tc.id ?? null,
+          name: tc.function?.name,
+          argumentsChunk: tc.function?.arguments,
+        }));
+        const chunk: NormalChatChunk = {
+          content: typeof msg?.content === "string" && msg.content.length > 0 ? msg.content : undefined,
+          reasoning: (msg as { reasoning_content?: string }).reasoning_content,
+          finishReason: choice?.finish_reason ?? null,
+          ...(toolCalls.length > 0 ? { toolCalls } : {}),
+          ...(usageRaw
+            ? {
+                usage: {
+                  inputTokens: usageRaw.prompt_tokens,
+                  outputTokens: usageRaw.completion_tokens,
+                  promptCacheHitTokens:
+                    (usageExtras?.prompt_cache_hit_tokens as number | undefined) ??
+                    ((usageExtras?.prompt_tokens_details as { cached_tokens?: number } | undefined)
+                      ?.cached_tokens),
+                  promptCacheMissTokens: usageExtras?.prompt_cache_miss_tokens as number | undefined,
+                },
+              }
+            : {}),
+        };
+        const result = await consumeNormalizedStream(singleChunkSource(chunk), {
           onToolCallsComplete: (calls) => {
             for (const c of calls) normalizedToolCalls.push(c);
           },
           providerId: "openai-compatible",
           model,
-        },
-      );
-      fullText = result.content;
-      fullReasoning = result.reasoning;
-      finishReason = result.finishReason;
+        });
+        fullText = result.content;
+        fullReasoning = result.reasoning;
+        finishReason = result.finishReason;
+        streamUsage = result.usage;
+      } else {
+        // 流式消费走统一的 provider-agnostic helper：自动累积 content + reasoning_content
+        // + tool_calls。任何 provider 的 chunk 只需先经 `adaptOpenAiChatCompletionStream`
+        // 适配成 NormalChatChunk 即可。后续若要接入 Anthropic/Google，只换 adapter 即可。
+        const result = await consumeNormalizedStream(
+          adaptOpenAiChatCompletionStream(
+            stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
+          ),
+          {
+            onContentDelta: (d) => {
+              fullText += d;
+              // 不在 tool loop 期间推送 delta：避免"思考前导话"流式输出给前端。
+              // 最终内容在 round 结束后（finishReason !== "tool_calls"）统一推送到 onDelta。
+            },
+            onToolCallsComplete: (calls) => {
+              for (const c of calls) normalizedToolCalls.push(c);
+            },
+            providerId: "openai-compatible",
+            model,
+          },
+        );
+        fullText = result.content;
+        fullReasoning = result.reasoning;
+        finishReason = result.finishReason;
+        streamUsage = result.usage;
+      }
     } catch (e) {
       // 流式空闲超时：如果有 partial content 且没有 tool_calls，用 partial content 兜底。
       // tool_calls 不完整时不能兜底（会导致 LLM 收到半截 JSON 参数）。
@@ -2570,7 +2474,11 @@ export async function streamCompletionWithTools(
       }
     }
 
-    // Token 用量审计：记录本轮实际 LLM 调用（工具循环内每次 round 一条）
+    // 前缀缓存统计聚合（本调用内）
+    accumulatePrefixCacheUsage(streamUsage);
+
+    // Token 用量审计：记录本轮实际 LLM 调用（工具循环内每次 round 一条），
+    // 附带 API 真实返回的 prefix cache 命中/未命中 token（若流末尾带 usage）
     try {
       if (options?.audit && auditInputChars > 0) {
         recordLlmUsageByChars({
@@ -2579,6 +2487,8 @@ export async function streamCompletionWithTools(
           inputChars: auditInputChars,
           outputChars: (fullText?.length ?? 0) + (fullReasoning?.length ?? 0),
           model,
+          promptCacheHitTokens: streamUsage?.promptCacheHitTokens,
+          promptCacheMissTokens: streamUsage?.promptCacheMissTokens,
         });
       }
     } catch {
@@ -2603,7 +2513,16 @@ export async function streamCompletionWithTools(
       //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
       //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
 
-      if (requiresFreshWebLookup && !satisfiedFreshWebLookup) {
+      // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
+      // 重规划一次（不额外消耗波次预算，全程最多授予一次）。
+      if (
+        requiresFreshWebLookup &&
+        !satisfiedFreshWebLookup &&
+        !freshLookupEnforced &&
+        wave + 1 < maxWaves
+      ) {
+        freshLookupEnforced = true;
+        wave -= 1; // 补回本次被消耗的波次： enforcement 轮不计入规划预算
         messages.push({
           role: "assistant",
           content: finalText || fullText || "(需要调用搜索工具获取最新信息)",
@@ -2638,6 +2557,7 @@ export async function streamCompletionWithTools(
         role: "assistant",
         content: sanitizedFinalText || null,
       });
+      logPrefixCacheStats();
       return sanitizedFinalText;
     }
 
@@ -2646,48 +2566,6 @@ export async function streamCompletionWithTools(
       normalizedToolCalls,
       model,
     );
-
-    // [DEBUG] 临时：观察每轮工具名与已有计数，定位重复搜索制动失效根因
-    console.error(
-      `[DEBUG-tool-loop] 请求工具=${toolCalls
-        .filter((t) => t.type === "function")
-        .map((t) => t.function?.name)
-        .join(",")} , freshCleanCount=${JSON.stringify([...freshToolExecCount.entries()])}`,
-    );
-
-    // 【重复搜索制动】搜索类工具一旦成功执行过 ≥1 次，若 LLM 这一轮又要重复调用搜索类工具
-    // （没有引入任何新工具），说明它陷入了"反复搜索"循环。此时不再执行工具，直接基于已有
-    // 搜索结果收尾，避免多轮工具迭代把响应拖到几十秒甚至超时（前端表现为一直转圈/搜索没结果）。
-    // 语义：一次并行搜索发起后，拿到结果就收尾（count≥1 制动）；只有首轮全部失败(count==0)
-    // 时才允许 LLM 兜底重试一次——对应"一次并行 + 最多一次兜底"。
-    // 只对本轮 *全部* 请求都是"已成功过的搜索工具"时才触发，混用其它工具的正常多步任务不受影响。
-    const REPEAT_SEARCH_LIMIT = 1;
-    const requestedSearchNames = toolCalls
-      .filter((t) => t.type === "function")
-      .map((t) => t.function?.name)
-      .filter(Boolean);
-    const allRepeatedSearch =
-      requestedSearchNames.length > 0 &&
-      requestedSearchNames.every(
-        (n) =>
-          FRESH_FACT_TOOL_NAMES.has(n) &&
-          (freshToolExecCount.get(n) ?? 0) >= REPEAT_SEARCH_LIMIT,
-      );
-    if (allRepeatedSearch) {
-      console.warn(
-        `[tool-loop] 搜索工具重复调用 ${requestedSearchNames.join(",")} 已达 ${REPEAT_SEARCH_LIMIT} 次，强制收尾`,
-      );
-      const fb = lastToolOutputFallback.trim();
-      if (fb) {
-        // 已有搜索结果 → 直接回退拼接，不额外调 LLM1 重建（减少 LLM 调用）
-        const out = fb;
-        if (out) onDelta(stripInternalControlTags(out));
-        return out;
-      }
-      const finalText = (lastAssistantText || fullText || "").trim().replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
-      if (finalText) onDelta(stripInternalControlTags(finalText));
-      return finalText;
-    }
 
     const assistantWithTools: ChatCompletionMessageParam = {
       role: "assistant",
@@ -2703,6 +2581,8 @@ export async function streamCompletionWithTools(
 
     const toolResults: ToolLoopAfterBatchInfo["toolResults"] = [];
     const roundToolOutputs: string[] = [];
+    // 本波次是否使用了交互式工具（浏览器/桌面/代码链路）：影响波次终止决策
+    let waveUsedInteractiveTool = false;
 
     type ToolCallWorkItem = {
       tc: (typeof toolCalls)[number];
@@ -2734,10 +2614,6 @@ export async function streamCompletionWithTools(
       });
       workItems.push({ tc, registryToolName, parsedArgs: args });
     }
-    // TEMP DEBUG（重复工具调用诊断：本轮实际执行的所有工具）
-    console.log(
-      `[DBG-toolloop] round=${round} toolCalls=${workItems.map((w) => w.registryToolName + ":" + JSON.stringify(w.parsedArgs)).join(" | ")}`,
-    );
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
@@ -2790,24 +2666,26 @@ export async function streamCompletionWithTools(
 
         const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(targetToolName);
 
-        let exec: Awaited<ReturnType<ChatToolExecutionContext['executeTool']>>;
+        let exec: ToolExecOutcome;
 
-        // 工具结果缓存：查询类工具在 TTL 内相同参数直接返回缓存，跳过安全检查/BodyGateway 等中间层
-        const cachedResult = ctx.getCachedToolResult?.(targetToolName, targetArgs);
-        if (cachedResult) {
-          exec = cachedResult;
-        } else {
+        // 单次执行尝试：重型工具经并发限制器（code.run / image.generate / voice.* 等），
+        // 限流等待不占超时预算：只有 acquire 成功后才开始 Promise.race 计时
+        const attemptExec = () =>
+          executeWithToolLimit(targetToolName, () =>
+            Promise.race([
+              ctx.executeTool(targetToolName, targetArgs),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
+              )
+            ])
+          );
+
+        // 完整执行流程（超时兜底 + 非超时失败确定性重试 1 次），作为共享 Promise 的载荷：
+        // 同一波内并发的相同工具调用复用同一次执行，不再各自真实执行。
+        const runExecWithRetry = async (): Promise<ToolExecOutcome> => {
+          let exec: ToolExecOutcome;
           try {
-            // 重型工具经并发限制器（code.run / image.generate / voice.* 等），
-            // 限流等待不占超时预算：只有 acquire 成功后才开始 Promise.race 计时
-            exec = await executeWithToolLimit(targetToolName, () =>
-              Promise.race([
-                ctx.executeTool(targetToolName, targetArgs),
-                new Promise<never>((_, reject) =>
-                  setTimeout(() => reject(new Error(`工具 "${targetToolName}" 执行超时 (${TOOL_TIMEOUT_MS}ms)`)), TOOL_TIMEOUT_MS)
-                )
-              ])
-            );
+            exec = await attemptExec();
           } catch (timeoutError) {
             console.error(`[工具超时] ${targetToolName}:`, timeoutError instanceof Error ? timeoutError.message : timeoutError);
             exec = {
@@ -2819,6 +2697,46 @@ export async function streamCompletionWithTools(
               }
             };
           }
+          // 失败确定性重试：非超时失败（瞬时故障/网络抖动）自动重试 1 次；
+          // 超时已烧完整个时间预算，重试只会让前端再等一倍时间，不再重试。
+          const isTimeoutFailure =
+            (exec.result as Record<string, unknown> | undefined)?.timeout === true;
+          if (!exec.ok && !isTimeoutFailure) {
+            console.warn(
+              `[plan-execute] ${targetToolName} 首次执行失败，确定性重试 1 次: ` +
+                JSON.stringify(exec.result).slice(0, 200),
+            );
+            try {
+              const retried = await attemptExec();
+              if (retried.ok) exec = retried;
+            } catch {
+              /* 保留首次失败结果 */
+            }
+          }
+          return exec;
+        };
+
+        // 轮内去重缓存：同工具+同参数 → 共享同一次执行（含确定性重试）。
+        // 替代旧 ReAct 循环的"重复搜索制动"——波次有界 + 去重，从源头消除重复执行。
+        const dedupeKey = `${targetToolName}::${stableArgsKey(targetArgs)}`;
+        // 跨轮 TTL 缓存：查询类工具在 TTL 内相同参数直接返回缓存，跳过安全检查/BodyGateway 等中间层
+        const cachedResult = ctx.getCachedToolResult?.(targetToolName, targetArgs);
+
+        const inflight = turnDedupeCache.get(dedupeKey);
+        if (inflight) {
+          // 命中（进行中或已成功落定）：直接复用同一次执行的结果
+          exec = await inflight;
+        } else if (cachedResult) {
+          exec = cachedResult;
+        } else {
+          const shared = runExecWithRetry().then((settled) => {
+            // 失败结果不驻留缓存：本轮后续 replan 波次仍可重新执行；
+            // 同波内已在等待的并发调用持有同一 Promise 引用，不受删除影响。
+            if (!settled.ok) turnDedupeCache.delete(dedupeKey);
+            return settled;
+          });
+          turnDedupeCache.set(dedupeKey, shared);
+          exec = await shared;
         }
         
         let injectFrames: VisionFrame[] | undefined;
@@ -2893,18 +2811,9 @@ export async function streamCompletionWithTools(
       toolResults.push({ name: wireToolName, ok: exec.ok });
       if (exec.ok && FRESH_FACT_TOOL_NAMES.has(wireToolName)) {
         satisfiedFreshWebLookup = true;
-        freshToolExecCount.set(wireToolName, (freshToolExecCount.get(wireToolName) ?? 0) + 1);
-        // [DEBUG] 临时
-        console.error(`[DEBUG-tool-loop] 工具=${wireToolName} 执行成功 ok=${exec.ok} → count=${freshToolExecCount.get(wireToolName)}`);
-      } else {
-        // [DEBUG] 临时
-        console.error(
-          `[DEBUG-tool-loop] 工具=${wireToolName} 执行 ok=${exec.ok} (在 FRESH_FACT=${FRESH_FACT_TOOL_NAMES.has(wireToolName)}) err=${JSON.stringify(exec.result)}`,
-        );
       }
-      // Fix1: 非元工具的真实取数失败 → 标记本轮存在工具失败（供恢复轮判定）
-      if (!exec.ok && !META_TOOL_NAMES.has(wireToolName)) {
-        realToolFailedThisRound = true;
+      if (isInteractiveToolName(wireToolName)) {
+        waveUsedInteractiveTool = true;
       }
       ctx.onToolExecuted?.({
         toolName: wireToolName,
@@ -2926,16 +2835,6 @@ export async function streamCompletionWithTools(
       const fullToolContent = typeof ocrText === "string" && ocrText.trim()
         ? `${toolContent}\n\n${ocrText}`
         : toolContent;
-      // 子代理上下文隔离：累计链步骤（工具名/成败/结果预览）与体积
-      if (autoDelegateActive && !META_TOOL_NAMES.has(wireToolName)) {
-        chainWorkThisRound = true;
-        chainToolChars += fullToolContent?.length ?? 0;
-        chainSteps.push({
-          toolName: wireToolName,
-          ok: exec.ok,
-          resultPreview: (fullToolContent ?? "").replace(/\s+/g, " ").trim().slice(0, 120),
-        });
-      }
       // 元工具（tool_discover / agent.query_capabilities 等）输出是结构化 JSON，
       // 不进 roundToolOutputs，防止「道歉式兜底」把它们原样拼成回复透出到前端。
       // Fix2(加固 fast 轻工具链路)：失败的工具输出（含"工具执行超时/error"）也不进
@@ -2980,86 +2879,97 @@ export async function streamCompletionWithTools(
       }
     }
 
-    // ── 子代理上下文隔离（最彻底）：达到阈值时把长工具链升级委派给子代理 ──
-    // 子代理在独立上下文中跑完剩余工作并返回结构化报告；主 loop 用报告替换整条
-    // 工具链（丢弃每轮重发的结构性开销），实现真正隔离。仅非 fast / 未禁用时触发，
-    // 且每 turn 最多一次（delegatedReport 防重复/递归）。
-    if (autoDelegateActive && !delegatedReport && chainSteps.length > 0) {
-      if (chainWorkThisRound) chainRounds += 1;
-      const enoughRounds = chainRounds >= AUTO_DELEGATE_MIN_ROUNDS;
-      const bigEnough =
-        chainRounds >= AUTO_DELEGATE_MIN_ROUNDS - 1 &&
-        chainToolChars >= AUTO_DELEGATE_CHARS;
-      if (enoughRounds || bigEnough) {
-        console.warn(
-          `[tool-loop] 链长=${chainRounds}轮/${chainSteps.length}步/累计${chainToolChars}字符 → 尝试升级委派子代理`,
-        );
-        const delegateOut = await tryAutoDelegateToSubAgent({
-          ctx,
-          userText,
-          steps: chainSteps,
-          totalChars: chainToolChars,
-        });
-        if (delegateOut) {
-          replaceChainWithDelegationReport(messages, delegateOut);
-          delegatedReport = delegateOut.report;
-          // 子代理报告即最终输出：直接流式推送并返回，不再重复组织语言（省一次 LLM 调用）。
-          // 报告已作为 user 消息注入 messages，afterTurnCompleted 会持久化到会话线程。
-          const finalReport = stripInternalControlTags(delegateOut.report);
-          if (finalReport) onDelta(finalReport);
-          // 工具结果兜底也指向报告，防止上层 apology 检测把回复替换为空
-          lastToolOutputFallback = finalReport;
-          console.warn(`[tool-loop] 已委派 ${delegateOut.agentType} 子代理，报告 ${finalReport.length} 字符，隔离主链`);
-          break;
-        }
-      }
-    }
-    // Fix1(加固 fast 轻工具链路)：本轮存在真实工具失败且轮次预算已耗尽 → 授予 1 次恢复轮，
-    // 并注入失败提示，让 LLM 换参数/换兜底工具重试或如实说明。
-    // 若无此步，fast(maxRounds=1) 下唯一一次工具失败会直接结束循环 → 空回复/"没查到"。
-    // 恢复轮只在最后一次时授予、且全程最多一次（recoveryGranted 持久），避免级联加轮。
-    if (!recoveryGranted && realToolFailedThisRound && maxRounds <= round + 1) {
-      recoveryGranted = true;
-      const prevMax = maxRounds;
-      maxRounds = round + 2;
-      messages.push({
-        role: "system",
-        content:
-          "上一轮调用的工具失败了。请不要向用户道歉，也不要声称「没查到/没找到/做不到/稍后重试」。" +
-          "请尝试：①换更稳妥的查询词或参数重试一次；②或基于已有信息/你的知识直接给出你能确定的部分，" +
-          "并明确告诉用户还缺哪条线索。绝对不要输出空回复或道歉式兜底。",
-      });
-      console.warn(
-        `[tool-loop] round=${round} 存在真实工具失败，授予 1 次恢复轮 (maxRounds ${prevMax}→${maxRounds})`,
-      );
-    }
     options?.onAfterToolBatch?.({
-      roundIndex: round,
+      roundIndex: wave,
       assistantText: fullText,
       toolResults,
     });
     lastToolOutputFallback = buildFallbackAnswerFromToolOutputs(roundToolOutputs);
+
+    // ── 波次终止决策 ──
+    const wavesRemaining = wave + 1 < maxWaves;
+    if (!wavesRemaining) {
+      // 预算耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）
+      break;
+    }
+
+    const allSucceeded = toolResults.length > 0 && toolResults.every((r) => r.ok);
+    const hasMetaTool = toolResults.some((r) => META_TOOL_NAMES.has(r.name));
+    const freshSatisfied = !requiresFreshWebLookup || satisfiedFreshWebLookup;
+
+    if (allSucceeded && !hasMetaTool && freshSatisfied && !waveUsedInteractiveTool) {
+      // 充分性探测（token 最省路径）：不带 schema 的轻量汇总调用。工具结果已完整
+      // 存在于上方 tool 消息里（无压缩/折叠），汇总指令不再重复 dump。
+      // 首行输出 NEED_MORE_TOOLS → 结果不足，升级一次 replan（带 schema）。
+      const probe = await runSchemaLessSummary(true);
+      if (!probe.needMore) {
+        console.info(
+          `[plan-execute] wave=${wave} ${toolResults.length} 个工具全部成功，探测通过 → 无 schema 汇总收尾（工具 schema 不再重发）`,
+        );
+        logPrefixCacheStats();
+        return probe.text;
+      }
+      console.info(`[plan-execute] wave=${wave} 汇总探测报告结果不足，进入 replan 波次`);
+      // 档3：结果不足且剩余链条命中探索型信号（且当前工具集确实含委派工具）→
+      // 向下一次 replan 波次注入「单次委派」引导，避免主循环反复 replan 重发全量 schema。
+      // 仅作用于探测点路径；失败/交互式工具链的 replan 不引导（重试/续跑由主循环承接）。
+      // 注意：stableApiTools 里的工具名经 registryNameToApiToolName 将 `.` 转成 `_`，
+      // 判据必须用 api 形态名比较。
+      if (
+        !delegateSteerDone &&
+        shouldSteerRemainingWorkToDelegate(userText, toolResults) &&
+        stableApiTools.some(
+          (t) =>
+            t.type === "function" &&
+            t.function?.name === registryNameToApiToolName(MASTER_INVOKE_SUB_AGENT_REGISTRY),
+        )
+      ) {
+        delegateSteerMessage = buildDelegateSteerMessage();
+        delegateSteerDone = true;
+        console.info(
+          `[plan-execute] wave=${wave} 命中探索型信号 → 已注入单次委派引导（master.invoke_sub_agent）`,
+        );
+      }
+      continue;
+    }
+    // 存在失败 / 元工具（tool_search 桥接）/ 交互式工具 → replan（带 schema，
+    // 模型基于已有结果继续规划或直接给出最终回答）
   }
 
-  // ⚠️ 工具循环结束兜底：maxRounds 用完或 LLM 一直没出 finalText 时，
-  // 如果已有工具结果（lastToolOutputFallback 非空），发一次轻量 LLM 调用让 LLM
-  // 用自然语言组织工具结果，避免直接把工具 JSON 摘要 dump 给用户。
-  // 同时处理：lastAssistantText 是 apology 风格时，也用 summary 调用重建。
-  // 已自动委派子代理时跳过（报告已直接流式输出，避免重复组织 + 省一次 LLM 调用）。
-  const needSummaryCall =
-    !delegatedReport &&
-    (!lastAssistantText.trim() || isApologyStyleFallback(lastAssistantText)) &&
-    lastToolOutputFallback.trim().length > 0;
+  // ── 兜底 SUMMARIZE：波次耗尽仍未收尾的工具链（无逃生门的最终汇总，流式输出）──
+  const finalSummary = await runSchemaLessSummary(false);
+  logPrefixCacheStats();
+  return finalSummary.text;
 
-  if (needSummaryCall) {
+  /**
+   * SUMMARIZE 阶段：单次不带工具 schema 的汇总调用（流式）。
+   *
+   * - 工具结果已完整存在于 messages 的 tool 消息里（Plan-and-Execute 不做
+   *   循环内压缩/折叠），汇总指令不再重复 dump 工具结果，省一份 token。
+   * - escapeAllowed=true 时为「充分性探测」：首行输出 NEED_MORE_TOOLS 表示
+   *   结果不足以回答，调用方据此升级一次 replan。为避免标记透出到前端，
+   *   首行（或前 48 字符）先缓冲，判定不是标记后才 flush 给 onDelta。
+   * - 产出为空/道歉式 → 确定性回退到工具结果拼接（不额外调 LLM 重建）。
+   * - 调用异常 → 同样回退到工具结果拼接，保证真实数据不丢。
+   */
+  async function runSchemaLessSummary(
+    escapeAllowed: boolean,
+  ): Promise<{ text: string; needMore: boolean }> {
     try {
       // 过滤无效 assistant message：OpenAI API 要求 assistant 消息必须有 content 或 tool_calls
       const sanitizedMessages = messages.filter((m) => {
         if (m.role !== "assistant") return true;
         const hasContent = typeof m.content === "string" && m.content.trim().length > 0;
-        const hasToolCalls = Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0;
+        const hasToolCalls =
+          Array.isArray((m as { tool_calls?: unknown }).tool_calls) &&
+          ((m as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0;
         return hasContent || hasToolCalls;
       });
+
+      // ② summary 历史裁剪：只保留全部 system + 最近 N 个用户回合（含其后的全部工具链），
+      // 丢弃更早纯对话。工具结果完整保留，最终回答的真实数据不丢；短对话为无操作。
+      // 质量保护：当前用户文本命中指代早期对话的措辞（刚才/上面/继续等）时跳过裁剪。
+      const trimmedMessages = trimHistoryForSummary(sanitizedMessages, SUMMARY_KEEP_USER_TURNS, userText);
 
       // 数据驱动策略评估：根据工具收集到的真实数据质量选择回复策略
       const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText);
@@ -3072,17 +2982,19 @@ export async function streamCompletionWithTools(
           `内容=${strategyDirective.quality.totalContentLength}字符 理由=${strategyDirective.quality.reason}`,
       );
 
+      const baseDirective =
+        `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
+        `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
+        `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。` +
+        strategyBlock;
+      const escapeDirective = escapeAllowed
+        ? `\n\n【重要】如果你认为现有工具结果不足以回答用户的问题（例如还需要抓取某个具体网页、` +
+          `还需要换关键词再查一次），第一行只输出 ${NEED_MORE_TOOLS_MARKER}，不要输出任何其他内容。` +
+          `能回答时直接回答，禁止输出该标记。`
+        : "";
       const summaryMessages: ChatCompletionMessageParam[] = [
-        ...sanitizedMessages,
-        {
-          role: "user",
-          content:
-            `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
-            `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
-            `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。` +
-            strategyBlock +
-            `\n\n工具结果：\n${lastToolOutputFallback.slice(0, 4000)}`,
-        },
+        ...trimmedMessages,
+        { role: "user", content: baseDirective + escapeDirective },
       ];
       const summaryResp = await client.chat.completions.create({
         model,
@@ -3091,44 +3003,81 @@ export async function streamCompletionWithTools(
         max_tokens: 800,
         stream: true,
       });
-      // 流式消费 summary 调用：每个 delta 通过 onDelta 实时推送给前端
+
       let summaryText = "";
-      await consumeNormalizedStream(
+      let needMore = false;
+      // 逃生模式下先缓冲首行（或前 48 字符）再决定是否推送给前端，防止标记透出
+      let headDecided = !escapeAllowed;
+      let pendingHead = "";
+      const summaryConsumeResult = await consumeNormalizedStream(
         adaptOpenAiChatCompletionStream(
           summaryResp as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
         ),
         {
           onContentDelta: (d) => {
             summaryText += d;
-            onDelta(d);
+            if (headDecided) {
+              if (!needMore) onDelta(d);
+              return;
+            }
+            pendingHead += d;
+            const nl = pendingHead.indexOf("\n");
+            if (nl >= 0 || pendingHead.trim().length >= 48) {
+              headDecided = true;
+              const firstLine = (nl >= 0 ? pendingHead.slice(0, nl) : pendingHead).trim();
+              if (firstLine.startsWith(NEED_MORE_TOOLS_MARKER)) {
+                needMore = true;
+              } else {
+                onDelta(pendingHead);
+              }
+              pendingHead = "";
+            }
           },
           providerId: "openai-compatible",
           model,
         },
       );
-      summaryText = summaryText.trim();
-      if (summaryText && !isApologyStyleFallback(summaryText)) {
-        return summaryText;
+      // 汇总调用同样计入前缀缓存统计（该调用无 schema，命中率反映「system+历史前缀」的缓存质量）
+      accumulatePrefixCacheUsage(summaryConsumeResult.usage);
+      // 流结束仍未触发首行判定（回答极短且无换行）
+      if (!headDecided) {
+        headDecided = true;
+        if (pendingHead.trim().startsWith(NEED_MORE_TOOLS_MARKER)) {
+          needMore = true;
+        } else if (pendingHead) {
+          onDelta(pendingHead);
+        }
+        pendingHead = "";
       }
-      // summary 调用成功但产出为空/道歉式 → 直接回退到工具结果拼接（保留真实数据，不额外调 LLM1）。
-      return lastToolOutputFallback.trim();
+      summaryText = summaryText.trim();
+      // Token 用量审计：summary/探测调用统一并入 main_chat 环节，与规划轮次同一把尺子。
+      // needMore 的探测也是一次真实 LLM 调用，必须计入（否则低估 token 消耗）。
+      try {
+        recordLlmUsageByChars({
+          stage: "main_chat",
+          sessionId: options?.audit?.sessionId,
+          inputChars: JSON.stringify(summaryMessages).length,
+          outputChars: summaryText.length,
+          model,
+        });
+      } catch {
+        /* 审计失败静默 */
+      }
+      if (needMore) {
+        return { text: "", needMore: true };
+      }
+      if (summaryText && !isApologyStyleFallback(summaryText)) {
+        return { text: summaryText, needMore: false };
+      }
+      // summary 调用成功但产出为空/道歉式 → 直接回退到工具结果拼接（保留真实数据，不额外调 LLM）。
+      return { text: lastToolOutputFallback.trim(), needMore: false };
     } catch (summaryErr) {
       console.log(
-        `[tool-loop] summary 调用失败，回退到工具结果拼接: ${
+        `[plan-execute] summary 调用失败，回退到工具结果拼接: ${
           summaryErr instanceof Error ? summaryErr.message : String(summaryErr)
         }`,
       );
-      return lastToolOutputFallback.trim();
+      return { text: lastToolOutputFallback.trim(), needMore: false };
     }
   }
-
-  const raw = isApologyStyleFallback(lastAssistantText) && lastToolOutputFallback.trim()
-    ? lastToolOutputFallback.trim()
-    : lastAssistantText.trim() || lastToolOutputFallback.trim();
-  // 循环耗尽后仍拿到"没查到/道歉式/空"回复 → 直接返回空串或既有工具结果，
-  // 不额外调 LLM1 反道歉重建（减少 LLM 调用）。
-  if (!raw.trim() || isApologyStyleFallback(raw)) {
-    return "";
-  }
-  return raw;
 }

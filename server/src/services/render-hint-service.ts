@@ -76,14 +76,19 @@ const DATA_BRIEF_MAX_CHARS = 800;
  *   B. 数据动词 + 数字：成交额 5600 / 同比增长 15%（单位缺失时的补救）
  */
 const DATA_TOKEN_RE =
-  /(?:[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿|万元|亿元|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家))|(?:(?:上涨|下跌|增长|下降|下滑|攀升|回落|同比|环比|净流入|净流出|成交额|成交|市值|营收|利润|评分|得分|涨幅|跌幅)\s*[:：]?\s*[+\-−±]?\d)/g;
+  /(?:[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿元|万元|亿|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家))|(?:(?:上涨|下跌|增长|下降|下滑|攀升|回落|同比|环比|净流入|净流出|成交额|成交|市值|营收|利润|评分|得分|涨幅|跌幅)\s*[:：]?\s*[+\-−±]?\d)/g;
 
 /** 单从句内提取 KPI 值（单位可缺省，如「创业板指 2876.54（+2.01%）」） */
 const DATA_VALUE_RE =
-  /[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿|万元|亿元|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家)?/;
+  /[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿元|万元|亿|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家)?/;
 
 /** 从句内提取涨跌幅变化（带符号百分比） */
 const DATA_CHANGE_RE = /[+\-−±]\d+(?:\.\d+)?%/;
+/** 纯涨跌方向词（不作为独立 KPI 标签，而是挂到上一 KPI 的 change，如「涨 +1.23%」） */
+const CHANGE_WORD_ONLY_RE =
+  /^(?:上涨|下跌|上漲|下漲|收涨|收跌|涨|跌|升|降|攀升|回落|走强|走弱|上扬|下挫)$/;
+/** 指标标签尾部的动词噪声（如「上证指数收于」→「上证指数」） */
+const LABEL_TAIL_VERB_RE = /(?:收于|收报|报收|收在|现报|收盘报|收盘价)$/;
 /** 意图语义关键词：用户提问携带这些词 → 无视短字数，强制结构化富文本 */
 const INTENT_KEYWORDS_RE =
   /整理|对比|总结|方案|清单|步骤|脑图|表格|分析|比较|规划|计划|推荐|排行|排名|区别|异同|优缺点|攻略|分类|归纳|梳理|教程/i;
@@ -422,9 +427,11 @@ export interface DataBriefPayload {
  *   1. 结论：首句字数 ≤40 且不含 KPI 数据点 → 作为一句话结论；
  *   2. KPI：按 [。！？!?；;\n] 切句、再按 [，,、；;] 切从句，
  *      从句中取「标签 + 数值（+单位）」，标签必须非空且不含数字；
+ *      纯涨跌方向词从句（「涨 +1.23%」）不新建 KPI，挂到上一 KPI 的 change；
  *   3. 涨跌幅：[+−-1.23%] 从句内存在时挂到 change 字段，
  *      若本身就是数值（如「环比 +15%」）则保留为 value；
- *   4. 去重（label|value|change），上限 8 条。
+ *   4. 去重（label|value|change），上限 8 条；
+ *   5. 详情：保留原文结构，仅从原文本移除结论句（不重排句子，保住列表/换行）。
  */
 export function extractDataBriefPayload(text: string): DataBriefPayload {
   const trimmed = text?.trim() ?? "";
@@ -457,15 +464,20 @@ export function extractDataBriefPayload(text: string): DataBriefPayload {
       const valueMatch = clause.match(DATA_VALUE_RE);
       if (!valueMatch) continue;
       const idx = valueMatch.index ?? 0;
-      // 标签 = 数值前缀文本，剔除前导标点/连接词；若仍含「：」取最后一段语义
+      // 标签 = 数值前缀文本，剔除前导标点/列表标记/数字序号；若仍含「：」取最后一段语义
       // （如「对比两款手机：A 款」→「A 款」）
       let label = clause
         .slice(0, idx)
-        .replace(/^[\s：:，,、;；（(【[「"'、]+/, "")
+        .replace(/^[\s：:，,、;；（(【[「"'、\-*•.．\d]+/, "")
         .trim();
       const lastColon = Math.max(label.lastIndexOf("："), label.lastIndexOf(":"));
       if (lastColon >= 0) label = label.slice(lastColon + 1).trim();
-      label = label.replace(/[为是：:]$/, "").trim();
+      // 尾部动词噪声（如「收于/报收」）与修饰语（如「为/是」），折叠内部空白
+      label = label
+        .replace(LABEL_TAIL_VERB_RE, "")
+        .replace(/[为是：:]$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
       if (!label || label.length > 20 || /\d/.test(label)) continue;
       if (label.length > 16) label = label.slice(-16);
 
@@ -488,6 +500,16 @@ export function extractDataBriefPayload(text: string): DataBriefPayload {
       }
       if (!value) continue;
 
+      // 纯涨跌方向词从句（「涨 +1.23%」「下跌 -0.45%」）：不新建 KPI，
+      // 归并到上一 KPI 作为涨跌幅变化，避免出现「涨 / 跌」这类无信息量标签。
+      if (CHANGE_WORD_ONLY_RE.test(label) && kpis.length > 0) {
+        const previous = kpis[kpis.length - 1];
+        if (previous.change == null) {
+          previous.change = change ?? value;
+        }
+        continue;
+      }
+
       const key = `${label}|${value}|${change ?? ""}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -497,9 +519,8 @@ export function extractDataBriefPayload(text: string): DataBriefPayload {
     }
   }
 
-  const restText = conclusion
-    ? sentences.slice(1).join("\n").trim()
-    : trimmed;
+  const restText =
+    conclusion && first.length > 0 ? trimmed.replace(first, "").trim() : trimmed;
 
   return { conclusion, kpis, restText };
 }

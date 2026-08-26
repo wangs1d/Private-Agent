@@ -33,6 +33,7 @@ import {
   isAmbiguousFollowUpMessage,
   shouldInjectMemorySummary,
 } from "./memory-signal.js";
+import { shouldRecallLongTerm } from "./recall-gate.js";
 import type { PersonalityCore } from "../brain/types.js";
 import type {
   AgentPromptMemoryContext,
@@ -40,12 +41,43 @@ import type {
   ToolLoopAfterBatchInfo,
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
-import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
+import { dedupeMemoryLines, semanticFingerprint, contentTokenSet, tokenOverlapRatio } from "../services/memory-record-utils.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import type { AdviceStore } from "../proactivity/advice-store.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
+
+/**
+ * STM 会话情景记忆 与 journal 当日日志检索 双轨去重（P0-3）。
+ * 同一批"今天早些时候的对话"可能同时出现在 STM（延续/指代轮注入原文，保真度高）
+ * 与 journal 命中里。过滤掉与 STM 上下文词法重叠 ≥ 0.7 的 journal 行，
+ * 只保留 STM 没覆盖的（跨 session / 更早时间段）行，防止同一内容双份注入导致重复/串台。
+ * 无法解析的裸行（非 "[time role] content" 格式）原样保留。
+ */
+function dedupeJournalVsStm(journalRecall?: string, stmContext?: string): string | undefined {
+  if (!journalRecall || !stmContext) return journalRecall;
+
+  const stmTokens = contentTokenSet(stmContext);
+  const kept: string[] = [];
+  for (const line of journalRecall.split("\n")) {
+    const t = line.trim();
+    if (!t) {
+      continue;
+    }
+    // journal 行格式为 "[标签 时间·角色] 内容"，取第一个 ] 之后作为内容做词汇重叠比对
+    const content = t.startsWith("[") ? t.slice(t.indexOf("]") + 1).trim() : t;
+    if (!content) {
+      kept.push(line);
+      continue;
+    }
+    const overlap = tokenOverlapRatio(contentTokenSet(content), stmTokens);
+    if (overlap < 0.7) {
+      kept.push(line);
+    }
+  }
+  return kept.length > 0 ? kept.join("\n") : undefined;
+}
 
 /**
  * 从 `userLocation` 注入串（如「…，时区 Asia/Shanghai。…」）提取用户 IANA 时区。
@@ -256,6 +288,14 @@ export type BuildPromptContextInput = {
   userLocation?: string;
   personalization?: PersonalizationPromptSlice;
   /**
+   * 当前 thread 非 system 消息数。用于长期快照注入门控（recall-gate）：
+   * 新会话开场（thread ≤ 2）才注入 memoryContinuity / relationshipMemory /
+   * lifeThemeMemory / dreamMemory / yesterdayHighlight 等长期快照块，
+   * 普通轮次跳过（避免"昨天/前天的对话"每轮污染当前上下文——串台根治）。
+   * 缺省 undefined 时快照门控退化为仅文本线索触发（保守，不误判新会话）。
+   */
+  threadMessageCount?: number;
+  /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
    * 避免被 formatNarrativeRecallPrompt 的条目上限截断或块结构被拍平。
@@ -267,6 +307,13 @@ export type BuildPromptContextInput = {
    * 作为独立块注入，"非用户最新指令"提示由 buildLayeredSystemPrompt 统一添加。
    */
   recentConversationHistory?: string;
+  /**
+   * 当日/近几天对话日志检索命中（DailyJournalService.searchRange 结果）。
+   * 作为独立块注入——拼进 narrativeRecall 会被 formatNarrativeRecallPrompt
+   * 的条目上限/免责头过滤/字符压缩拍平（workingMemorySummary 同款旧 bug）。
+   * 与 STM 会话情景记忆是双轨（同一批对话两处都可能命中），组装端做指纹去重。
+   */
+  journalRecall?: string;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
   /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
   userPattern?: {
@@ -504,6 +551,17 @@ export class PromptContextBuilder {
     const digestService = getDailyDigestService();
     const memoryManager = getMemoryManagerService();
 
+    // 长期快照注入门控（记忆架构重构）：memoryContinuity / relationshipMemory /
+    // lifeThemeMemory / dreamMemory / yesterdayHighlight 这类"历史整理快照"每轮无条件
+    // 注入是串台根因（昨天/前天的对话被当成当前上下文）。与 narrativeRecall 同源，
+    // 走同一白名单门控（recall-gate）：新会话开场 / 显式记忆线索 / 个人事实陈述 /
+    // 长会话指代升级时才注入，普通轮次跳过。
+    const longTermSnapshotEnabled = shouldRecallLongTerm({
+      text: userText,
+      threadMessageCount: input.threadMessageCount,
+      ambiguousFollowUp,
+    }).trigger;
+
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
     // 追问场景也拉取 KV snapshot（原策略追问时跳过，导致 memorySummary 等丢失 → 记忆跳）
@@ -587,16 +645,26 @@ export class PromptContextBuilder {
       220,
     );
     const memoryContinuity =
-      memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined;
+      longTermSnapshotEnabled
+        ? memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined
+        : undefined;
     const relationshipMemory =
-      memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? undefined;
+      longTermSnapshotEnabled
+        ? memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? undefined
+        : undefined;
     const lifeThemeMemory =
-      memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? undefined;
+      longTermSnapshotEnabled
+        ? memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? undefined
+        : undefined;
     const dreamMemory =
-      memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? undefined;
+      longTermSnapshotEnabled
+        ? memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? undefined
+        : undefined;
     // 优化 2：主动跨天 recall，注入昨天/前天的关键事件
     const yesterdayHighlight =
-      memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined;
+      longTermSnapshotEnabled
+        ? memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined
+        : undefined;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
     const scheduleSnapshot =
       this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
@@ -612,6 +680,14 @@ export class PromptContextBuilder {
       input.sessionId && this.deps.shortTermMemoryGateway
         ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), shortTermTaskContextLimit)
         : undefined;
+    // 当日日志检索块：独立注入（不拼 narrativeRecall，防 formatNarrativeRecallPrompt 拍平）。
+    // 与 STM 会话情景记忆双轨去重：同一批今天早些时候的对话，STM（延续/指代轮注入原文、
+    // 保真度高）优先保留；journal 命中与 STM 词汇重叠 ≥ 0.7 的行剔除，只留 STM 没覆盖的
+    // （跨 session / 更早时间段的行）。
+    const journalRecall = compactPromptBlock(
+      dedupeJournalVsStm(input.journalRecall, shortTermTaskContext),
+      700,
+    );
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     // 追问场景压缩 narrativeRecall：800 → 400 字（仍注入，保留上下文）
