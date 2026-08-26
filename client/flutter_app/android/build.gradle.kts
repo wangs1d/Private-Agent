@@ -27,6 +27,22 @@ subprojects {
             }
         }
     }
+
+    // isar_flutter_libs 3.1.0 硬编码 compileSdkVersion 30,但其资源引用了
+    // android:lStar(API 33+ 才存在),低版本 SDK 下 AAPT 链接报错。
+    // 需在插件自己的 build.gradle(android{} 块)执行完后、AGP 固化 DSL 之前改掉,
+    // 因此在 root 的 subprojects 阶段先注册 afterEvaluate(先于 AGP 注册的回调执行)。
+    if (!project.state.executed) {
+        project.afterEvaluate {
+            project.plugins.withId("com.android.library") {
+                project.extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
+                    if ((compileSdk ?: 0) < 33) {
+                        compileSdk = 35
+                    }
+                }
+            }
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {

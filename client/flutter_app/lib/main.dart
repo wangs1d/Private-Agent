@@ -67,7 +67,6 @@ import "features/devices/devices_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
 import "features/schedule/schedule_page.dart";
-import "features/wallet/wallet_page.dart";
 import "features/chat/image_preview_panel.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
@@ -2602,25 +2601,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  void _openWalletDialog() {
-    // 用 NavigatorState 顶层推 dialog，避免 State context 触发出栈/Localizations 问题
-    final NavigatorState? navigator = _rootNavigatorKey.currentState;
-    if (navigator == null) {
-      // 兜底走原 showDialog 路径
-      final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-      final BuildContext ctx = navCtx ?? context;
-      if (!ctx.mounted) return;
-      WalletDialog.show(ctx, balance: _balance);
-      return;
-    }
-    showDialog<void>(
-      context: navigator.context,
-      useRootNavigator: true,
-      barrierDismissible: true,
-      builder: (BuildContext _) => WalletDialog(balance: _balance),
-    );
-  }
-
   /// 常用工具「手机」入口：跳转到"真实手机"功能页
   /// 与"虚拟电话"区分——这里对接的是用户自己的手机（拨号/通讯录/短信等）。
   void _openPhoneDevicesDialog() {
@@ -4392,7 +4372,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         scheduleFuture: _cachedScheduleFuture,
         onAgentLink: _openAgentLinkTab,
         onSchedule: _openSchedulePanel,
-        onWallet: _openWalletDialog,
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
         // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）

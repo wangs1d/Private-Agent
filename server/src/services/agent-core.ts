@@ -983,15 +983,17 @@ export class AgentCore {
                 : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          // 最近对话回顾独立透传（含 C1 dedup 判定，hint 由 buildLayeredSystemPrompt 统一添加）
-          Promise.resolve(
-            this.buildRecentConversationHistoryBlock(
-              cognitiveRecentConversationHistory,
-              threadMessageCount,
-              actorId,
-              text,
-            ),
-          ),
+          // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出（含错误卡片/数据快报）被 LLM 复读
+          suppressNarrativeRecall
+            ? Promise.resolve(undefined)
+            : Promise.resolve(
+                this.buildRecentConversationHistoryBlock(
+                  cognitiveRecentConversationHistory,
+                  threadMessageCount,
+                  actorId,
+                  text,
+                ),
+              ),
           Promise.resolve(undefined),
           Promise.resolve({} as PersonalizationPromptSlice),
         ])
@@ -1004,14 +1006,17 @@ export class AgentCore {
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
                 : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          Promise.resolve(
-            this.buildRecentConversationHistoryBlock(
-              cognitiveRecentConversationHistory,
-              threadMessageCount,
-              actorId,
-              text,
-            ),
-          ),
+          // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
+          suppressNarrativeRecall
+            ? Promise.resolve(undefined)
+            : Promise.resolve(
+                this.buildRecentConversationHistoryBlock(
+                  cognitiveRecentConversationHistory,
+                  threadMessageCount,
+                  actorId,
+                  text,
+                ),
+              ),
           // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开。
           // 位置只读缓存，不主动请求——实时 GPS 仅在位置类工具执行时（requestLocation）产生一次开销。
           userIsStatingData

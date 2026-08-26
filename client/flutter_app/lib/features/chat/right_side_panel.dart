@@ -80,7 +80,6 @@ class RightSidePanel extends StatefulWidget {
     this.scheduleFuture,
     this.onAgentLink,
     this.onSchedule,
-    this.onWallet,
     this.onPhone,
     this.onMessages,
     this.onReportLocation,
@@ -89,7 +88,6 @@ class RightSidePanel extends StatefulWidget {
   final Future<List<ScheduleEvent>>? scheduleFuture;
   final VoidCallback? onAgentLink;
   final VoidCallback? onSchedule;
-  final VoidCallback? onWallet;
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
 
@@ -571,10 +569,6 @@ class _RightSidePanelState extends State<RightSidePanel>
     final List<_ToolSpec> allTools = <_ToolSpec>[
       _ToolSpec(
           icon: Icons.people_outline, label: "好友", onTap: widget.onAgentLink),
-      _ToolSpec(
-          icon: Icons.account_balance_wallet_outlined,
-          label: "钱包",
-          onTap: widget.onWallet),
       _ToolSpec(
           icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
       _ToolSpec(
