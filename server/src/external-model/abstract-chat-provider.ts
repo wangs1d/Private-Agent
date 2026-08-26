@@ -268,6 +268,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
             maxOutputTokens: effectiveStreamOpts.maxOutputTokens,
+            // 子代理上下文隔离：显式禁用长链自动委派时透传给工具循环（子 Agent / Master 内部用，防递归）
+            disableAutoDelegate: effectiveStreamOpts.toolLoop?.disableAutoDelegate,
             audit: { sessionId, stage: "main_chat" },
           },
         );
