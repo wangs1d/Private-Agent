@@ -2943,6 +2943,68 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 删除全部聊天记录：确认弹窗 → 调服务端清空接口(聊天线程+Agent 记忆) → 清空本地。
+  /// 无论服务端成功与否,本地历史一律清空(本地历史属于设备侧)。
+  Future<void> _confirmClearAllChat() async {
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null || !mounted) return;
+
+    final bool? confirmed = await showDialog<bool>(
+      context: ctx,
+      builder: (BuildContext dialogCtx) => AlertDialog(
+        title: const Text("清空所有聊天记录？"),
+        content: const Text("将删除全部聊天内容，并同时清空 AI 助手的记忆。此操作不可恢复。"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    String tip = "已清空本地聊天记录(服务端未连接)";
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/clear-all");
+      final http.Response res = await http
+          .post(
+            uri,
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{
+              "sessionId": ApiConfig.effectiveActorId,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 200) {
+        tip = "已清空全部聊天记录与 AI 记忆";
+      } else {
+        tip = "已清空本地记录(服务端清理失败 ${res.statusCode})";
+      }
+    } catch (_) {
+      // 网络不可达兜底
+    }
+
+    // 通知服务端同步清除 ChatThreadStore 内存上下文 + 本地历史
+    _ws.sendEvent("chat.clear_history", <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+    });
+    await _store.clearAllMessages();
+    if (mounted) {
+      setState(() {
+        _messages.clear();
+        _relayInbound.clear();
+        _backgroundRunningTaskIds.clear();
+        _rebuildAssistantIndex();
+      });
+      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(tip)));
+    }
+  }
+
   /// 重建 assistant 消息索引（删除后索引失效需重建）
   void _rebuildAssistantIndex() {
     _assistantMessageIndexById.clear();
@@ -3886,7 +3948,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                           )
                                         : null,
                                     title: _buildAppBarTitle(),
-                                    actions: const <Widget>[],
+                                    actions: _tabIndex == 0
+                                        ? <Widget>[
+                                            IconButton(
+                                              tooltip: "删除全部聊天记录",
+                                              icon: const Icon(
+                                                  Icons.delete_sweep_outlined,
+                                                  size: 22),
+                                              color: AppPalette
+                                                  .resolveAppBarForeground(
+                                                      variant),
+                                              onPressed: _confirmClearAllChat,
+                                            ),
+                                          ]
+                                        : const <Widget>[],
                                   ),
                                 ),
                                 Expanded(

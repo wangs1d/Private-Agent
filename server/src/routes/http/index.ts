@@ -27,6 +27,7 @@ import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
 import { registerMessageHubRoutes } from "./messages.js";
 import { registerMessageBridgeRoutes } from "./message-bridge.js";
+import { registerChatDataRoutes } from "./chat-data.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerDownloadRoutes } from "./downloads.js";
@@ -89,6 +90,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     messageHubService: deps.messageHubService,
     messagePlatformGateway: deps.messagePlatformGateway,
     agentCore: deps.agentCore!,
+  });
+  registerChatDataRoutes(app, {
+    externalChat: deps.externalChat ?? null,
+    agentMemorySyncService: deps.agentMemorySyncService,
   });
   registerBrowserSessionRoutes(app, deps);
   registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });

@@ -1043,6 +1043,47 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 清空指定 actor 的全部记忆（节点 + 边 + 社区 + 版本），并落盘。
+   * 供“删除全部聊天记录 / 清空记忆”类功能使用。返回被移除的节点数量。
+   */
+  clearActorMemory(actorId: string): number {
+    const nodeIds = Object.values(this.store.nodes)
+      .filter((node) => node.actorId === actorId)
+      .map((node) => node.id);
+
+    for (const nodeId of nodeIds) {
+      const versionIds = this.store.nodes[nodeId]?.versionIds ?? [];
+      for (const versionId of versionIds) {
+        delete this.store.versions[versionId];
+      }
+      delete this.store.nodes[nodeId];
+    }
+
+    const edgeIds = Object.values(this.store.edges)
+      .filter((edge) => edge.actorId === actorId)
+      .map((edge) => edge.id);
+    for (const edgeId of edgeIds) {
+      delete this.store.edges[edgeId];
+    }
+
+    const communityIds = Object.values(this.store.communities)
+      .filter((community) => community.actorId === actorId)
+      .map((community) => community.id);
+    for (const communityId of communityIds) {
+      delete this.store.communities[communityId];
+    }
+
+    if (nodeIds.length > 0 || edgeIds.length > 0 || communityIds.length > 0) {
+      this.schedulePersist();
+    }
+
+    console.log(
+      `[HumanLikeMemory] clearActorMemory 完成：删除 ${nodeIds.length} 节点 / ${edgeIds.length} 条边 / ${communityIds.length} 个社区 (actorId=${actorId})`,
+    );
+    return nodeIds.length;
+  }
+
+  /**
    * 获取指定 actor 的所有边（供 MemoryAssociativeGraph.spread 扩散激活调用）。
    * 返回边数组的浅拷贝，避免外部修改内部状态。
    */

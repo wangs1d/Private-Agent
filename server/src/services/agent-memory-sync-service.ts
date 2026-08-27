@@ -81,6 +81,22 @@ export class AgentMemorySyncService {
     return Object.keys(this.data.sessions);
   }
 
+  /**
+   * 清空指定 actor（sessionId/actorId）的全部结构化记忆条目并落盘。
+   * 供“删除全部聊天记录 / 清空 Agent 记忆”类功能使用。
+   */
+  clearActor(actorId: string): boolean {
+    if (!this.data.sessions[actorId]) {
+      return false;
+    }
+    delete this.data.sessions[actorId];
+    // 丢弃该 actor 的排队写入，避免清空后又被旧动作回写。
+    this.writeQueues.delete(actorId);
+    this.schedulePersist();
+    console.log(`[AgentMemorySync] clearActor 完成 (actorId=${actorId})`);
+    return true;
+  }
+
   private enqueueActorWrite<T>(actorId: string, fn: () => T | Promise<T>): Promise<T> {
     const prev = this.writeQueues.get(actorId) ?? Promise.resolve();
     const next = prev.then(() => fn(), () => fn());

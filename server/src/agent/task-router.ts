@@ -2,6 +2,7 @@ import { getAgentRuntimeConfig, type AgentRuntimeConfig } from "./agent-runtime-
 import { isExplicitPhoneCallRequest } from "./phone-call-intent.js";
 import { isPlanExecuteLoopEnabled, shouldUsePlanExecuteLoop } from "./plan-execute-loop.js";
 import { isSimpleDirectTask, shouldSkipNarrativeRecall } from "./simple-task.js";
+import { isActionableTaskRequest } from "./task-intent.js";
 
 export type LlmExecutionMode = "fast" | "complex";
 
@@ -140,6 +141,16 @@ function requiresSubAgent(message: string): boolean {
   return text.length > 120 && MULTI_STEP_RE.test(text);
 }
 
+/**
+ * 任务执行意图检测已收敛到单一来源 task-intent.ts（Option A）：
+ * 被 task-router(routeTask) 与 brain/rule-router(routeLight) 共同消费，
+ * 避免三套分类各自漂移。此处仅复用其判定。
+ *
+ * 背景：fast 模式被限制为 toolLoop.maxRounds=1 + 轻量工具子集，无法完成真实多步任务；
+ * 而 DELEGATE_KEYWORDS 覆盖太窄，大量自由表达的任务指令（整理/下载/翻译/设置/美化/
+ * 做成图表/同步进度…）从关键词夹缝落到 default_fast，导致"完成任务基本不成功"。
+ */
+
 function shouldUseFastChatLane(message: string): boolean {
   const text = message.trim();
   if (!text) return true;
@@ -237,6 +248,19 @@ export function routeLlmExecution(
     // 时效性实体前置：含"最新/最近/版本号"等 → 直接 complex(避免 fast 凭印象答后升级)
     if (hasTimeSensitiveIntent(text)) {
       reasons.push("time_sensitive_intent");
+      return { mode: "complex", reasons, segmentable: false };
+    }
+
+    // 任务执行意图：整理/下载/翻译/设置/美化/做成图表/同步进度等祈使指令 →
+    // complex（fast 只有 maxRounds=1 + 轻量工具，无法完成真实多步任务）
+    if (isActionableTaskRequest(text)) {
+      reasons.push("task_execution_intent");
+      return { mode: "complex", reasons, segmentable: false };
+    }
+
+    // 多步任务 / 明确做事意图 → complex（让 plan-execute 在本分支也生效）
+    if (shouldUsePlanExecuteLoop(text)) {
+      reasons.push("plan_execute_heuristic");
       return { mode: "complex", reasons, segmentable: false };
     }
 

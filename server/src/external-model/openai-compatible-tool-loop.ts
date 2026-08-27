@@ -203,6 +203,34 @@ function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
  *  - 含"抱歉/请稍后重试/无法生成回复/不太清楚/我不太确定"等认错短语
  *  - 长度很短（< 60 字符）且不含任何事实/数字/链接（说明 LLM 没尝试整合）
  */
+/**
+ * 行动宣告正则：识别「我这就去查…」/「稍后告诉你」/「别急」这类面向未来动作的
+ * 承诺性表述（真人感·行动宣告提示词的产物），但此时 LLM 未必真正调用工具。
+ *
+ * 覆盖模式：
+ *  - 主体身份 + 动作动词：我这就去/我来/我去/让我 + 查/看/找/搜/瞅/问/读/取/确认
+ *  - 未来承诺收尾：稍后/回头/待会/等一下 + 告诉/发/回/结果
+ *  - 安抚等待：别急/别着急/稍等/马上 + 告诉/结果/回复/联系/就去
+ *  - 完成通知：查到/找到/弄到/搞定 + 告诉你/发给你/再说
+ */
+const ACTION_ANNOUNCE_RE =
+  /(?:我这就|我来|我去|让我|我先).{0,14}(?:查|看|找|搜|瞅|问|读|取|打听|确认|翻一下|点点|设个|安排|处理|说一声)|(?:稍后|回头|待会|等一下).{0,8}(?:告诉|发|回|结果|更(?:新|我))|(?:别急|别着急|稍等(?:一下)?).{0,6}(?:告诉|结果|回复|联系|就好|就去)|(?:查到|找到|弄到|搞定|问到|看到)?(?:就|便|再).{0,4}(?:告诉|发你|发给你|再说|通知|更新你)/i;
+
+/** 是否「只有行动宣告、未兑现任何真实结果」：命中宣告模式 且 不含数据锚点。 */
+function isActionAnnouncementOnly(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (!ACTION_ANNOUNCE_RE.test(t)) return false;
+  // 含具体结果锚点（数字/链接/引述的具体内容/冒号引导数据）→ 视为已兑现，不拦截。
+  // 注意：不把「是/为」等高频口语字当锚点，避免把「其实我这就去…」这类纯宣告漏拦。
+  const hasConcrete =
+    /\d/.test(t) ||
+    /https?:\/\//.test(t) ||
+    /[「"“]/.test(t) ||
+    /[：:]\s*\S/.test(t);
+  return !hasConcrete;
+}
+
 function isApologyStyleFallback(text: string): boolean {
   const t = text.trim();
   if (!t) return true;
@@ -2266,6 +2294,10 @@ export async function streamCompletionWithTools(
   const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
   // 强制联网兜底（模型未调搜索工具就收尾时注入提示重规划）只授予一次
   let freshLookupEnforced = false;
+  // 行动宣告未兑现兜底（模型只承诺要查/去办、却一个工具都没调就收尾）只授予一次。
+  // 与 freshLookupEnforced 区分：fresh 只看用户文本是否含搜索意图，管不到「LLM 宣告
+  // 了要办某件事却空手收尾」这条；此标志专治后者。
+  let announcementEnforced = false;
   // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
   // 注入「单次委派」引导（仅该波请求，不写持久历史）。delegateSteerDone 保证
   // 一轮只引导一次——模型该波要么委派、要么直接补齐，反复提示只会增加噪音。
@@ -2512,6 +2544,33 @@ export async function streamCompletionWithTools(
       //   - 媒体是否展示完全由「模型是否真的调用了 search_images」这一服务端事实决定，
       //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
       //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
+
+      // ── 行动宣告未兑现兜底（根治「回复了却没结果」）──
+      // 真人感·行动宣告提示词诱导 LLM 先输出「我这就去查…」「稍后告诉你」这类承诺，
+      // 但某些轮次（尤其 fast 单波）LLM 宣告完就 finishReason=stop，结果一个工具都没调，
+      // 最终被当成正式答复返回 → 用户只看到承诺、拿不到结果。
+      // 此处检测：文本命中行动宣告模式 且 本轮从未执行过任何工具 且 未强制过 → 注入
+      // 指令强制补打一波真实工具调用，不允许空头宣告当作收尾。全程最多授予一次。
+      // 不受 maxWaves / requiresFreshWebLookup 限制——fast 模式唯一波次也要兜住。
+      if (
+        isActionAnnouncementOnly(finalText) &&
+        allToolExecResults.length === 0 &&
+        !announcementEnforced
+      ) {
+        announcementEnforced = true;
+        messages.push({
+          role: "assistant",
+          content: finalText || fullText || "",
+        });
+        messages.push({
+          role: "system",
+          content:
+            "你刚才只向用户宣告了要做某件事（查/搜/看/办…）但还没有真正调用任何工具、也没有给出任何结果。" +
+            "请立即调用相应工具真正完成这件事并基于真实结果回答用户；若工具不可用或确实办不到，请如实向用户说明。" +
+            "严禁只重复「我去查/稍后告诉你」这类承诺而不兑现。",
+        });
+        continue;
+      }
 
       // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
       // 重规划一次（不额外消耗波次预算，全程最多授予一次）。

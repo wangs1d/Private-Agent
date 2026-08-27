@@ -31,6 +31,7 @@ import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import {
   buildFollowUpAnchorPrompt,
   isAmbiguousFollowUpMessage,
+  MEMORY_EXPLICIT_RE,
   shouldInjectMemorySummary,
 } from "./memory-signal.js";
 import { shouldRecallLongTerm } from "./recall-gate.js";
@@ -95,7 +96,7 @@ function buildCompactAgentCapsPrompt(): string {
     "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
     "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务可派专业小弟（子 Agent）执行。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
-    "【真人感·行动宣告】凡是要调工具或派子 Agent 时，必须在调用前先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」「我让技术小弟去看一眼…」），不要直接调用工具。这句话会作为独立消息先送达用户，让对话像真人交互一样有反馈节奏。",
+    "【真人感·行动宣告】凡是要调工具或派子 Agent 时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），然后在同一回合紧接着真正调用对应工具并基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。",
   ];
   if (cfg.masterDelegation.enabled) {
     lines.push(
@@ -296,6 +297,14 @@ export type BuildPromptContextInput = {
    */
   threadMessageCount?: number;
   /**
+   * #1 统一门控单点（串台根治）：由 agent-core 在决策层计算并透传——
+   * 等于「召回未触发 ∥ topic_switch 抑制」。为 true 时，KV 长期字段
+   * (memory_facts/preferences/commitments/open_loops/session_recap/
+   * memory_current_mission/memory_summary) 与图谱 narrativeRecall 走同一
+   * 白名单，话题切换时不注入任何跨会话长期记忆（persona 稳定人设除外）。
+   */
+  longTermRecallSuppressed?: boolean;
+  /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
    * 避免被 formatNarrativeRecallPrompt 的条目上限截断或块结构被拍平。
@@ -308,7 +317,8 @@ export type BuildPromptContextInput = {
    */
   recentConversationHistory?: string;
   /**
-   * 当日/近几天对话日志检索命中（DailyJournalService.searchRange 结果）。
+   * 当日对话日志检索命中（DailyJournalService.searchToday 结果，短期记忆）。
+   * 只扫当天；过往日期已固化进长期记忆图，跨天由图谱/KV 召回兜底。
    * 作为独立块注入——拼进 narrativeRecall 会被 formatNarrativeRecallPrompt
    * 的条目上限/免责头过滤/字符压缩拍平（workingMemorySummary 同款旧 bug）。
    * 与 STM 会话情景记忆是双轨（同一批对话两处都可能命中），组装端做指纹去重。
@@ -464,6 +474,15 @@ export class PromptContextBuilder {
   build(input: BuildPromptContextInput): AgentStreamOptions | undefined {
     const layers = pickPromptContextLayers(this.assembleMemory(input));
     const memory = flattenPromptContextLayers(layers);
+    // #7 记忆注入审计日志（诊断用，可 grep "mem-inject-audit"）：记录本轮实际注入了哪些
+    // 记忆块、是否被统一门控抑制（topic_switch/未触发），便于定位每次"串台"由哪一块引起。
+    if (memory) {
+      const gated = input.longTermRecallSuppressed ? "suppressed" : "allowed";
+      const injected = (Object.keys(memory) as (keyof AgentPromptMemoryContext)[])
+        .filter((k) => memory[k] != null && memory[k] !== "")
+        .join(",");
+      console.log(`[mem-inject-audit] actor=${input.actorId} gate=${gated} injected=[${injected}]`);
+    }
     const hasMemory = this.hasMemoryContent(memory);
     const chatToolsExtra = this.sessionSkillTools(input.actorId);
     const toolLoop =
@@ -571,11 +590,34 @@ export class PromptContextBuilder {
       memoryKeys &&
       memoryKeys.length > 0
     ) {
+      // #1 统一门控单点：KV 长期字段（非人设）与图谱 narrativeRecall 走同一白名单。
+      // 触发 = 图谱门控命中(新会话/记忆线索/个人事实/长会话指代升级) ∥ 摘要线索命中，
+      //   且未被 topic_switch 抑制（input.longTermRecallSuppressed，agent-core 决策层透传）。
+      // 未触发时仅保留稳定人设（persona/values/abilities），杜绝旧话题/跨会话记忆每轮注入。
       const includeMemorySummary = shouldInjectMemorySummary(userText);
-      const snapshotKeys = includeMemorySummary
-        ? memoryKeys
-        : memoryKeys.filter((key) => key !== "memory_summary");
-      if (!snapshotKeys.includes("memory_current_mission")) {
+      const kvLongTermGate =
+        !input.longTermRecallSuppressed &&
+        (longTermSnapshotEnabled || includeMemorySummary);
+      const includeCurrentMission =
+        kvLongTermGate || MEMORY_EXPLICIT_RE.test(userText);
+      // #2 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
+      // memory_facts/preferences 等"用户档案/动态记忆"仅在个人化/记忆线索/新会话触发时注入。
+      const STABLE_MEMORY_KEYS = new Set(["persona", "values", "abilities"]);
+      const LONG_TERM_MEMORY_KEYS = new Set([
+        "memory_summary",
+        "memory_current_mission",
+        "memory_preferences",
+        "memory_facts",
+        "memory_commitments",
+        "memory_open_loops",
+        "session_recap",
+      ]);
+      const snapshotKeys = memoryKeys.filter((key) => {
+        if (STABLE_MEMORY_KEYS.has(key)) return true;
+        if (!kvLongTermGate) return false;
+        return LONG_TERM_MEMORY_KEYS.has(key);
+      });
+      if (includeCurrentMission && !snapshotKeys.includes("memory_current_mission")) {
         snapshotKeys.push("memory_current_mission");
       }
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
@@ -862,6 +904,8 @@ export class PromptContextBuilder {
       // 工作记忆 / 最近对话回顾：独立块，不参与跨字段语义去重（结构化上下文，非召回条目）
       ...(workingMemorySummary ? { workingMemorySummary } : {}),
       ...(recentConversationHistory ? { recentConversationHistory } : {}),
+      // 当日对话日志检索：当天 md 承载的对话历史，注入供 agent 读取当前对话历史（短期记忆）
+      ...(journalRecall ? { journalRecall } : {}),
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
       ...(userProfileFromManagerCompact ? { userProfileSummary: userProfileFromManagerCompact } : {}),
       ...(memoryContinuityCompact ? { memoryContinuity: memoryContinuityCompact } : {}),
@@ -989,6 +1033,7 @@ export class PromptContextBuilder {
       sessionRecap: redact(ctx.sessionRecap),
       workingMemorySummary: redact(ctx.workingMemorySummary),
       recentConversationHistory: redact(ctx.recentConversationHistory),
+      journalRecall: redact(ctx.journalRecall),
     };
   }
 

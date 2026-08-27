@@ -361,6 +361,22 @@ export class DailyDigestService {
     }
   }
 
+  /** 清空某 actor 的全部当日摘要（内存 + 持久化），用于"清空聊天/失忆"。 */
+  clearActorDigests(actorId: string): number {
+    let removed = 0;
+    for (const key of Object.keys(this.data.digests)) {
+      if (key.startsWith(`${actorId}::`)) {
+        delete this.data.digests[key];
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.schedulePersist();
+      console.log(`[DailyDigest] clearActorDigests 完成：删除 ${removed} 条 (actorId=${actorId})`);
+    }
+    return removed;
+  }
+
   private pruneStaleFromMemory(): void {
     const today = getCalendarDay();
     const keepDays = new Set([today]);

@@ -72,6 +72,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
         title: _buildTitle(context, p),
         actions: [
           IconButton(
+            tooltip: "删除全部聊天记录",
+            icon: const Icon(Icons.delete_sweep_outlined, size: 22),
+            color: p.textPrimary,
+            onPressed: _confirmClearAllChat,
+          ),
+          IconButton(
             tooltip: "新会话",
             icon: const Icon(Icons.add_rounded, size: 24),
             color: p.textPrimary,
@@ -121,6 +127,41 @@ class _MobileChatPageState extends State<MobileChatPage> {
     _controller.send(text);
     _input.clear();
     _maybeScrollToBottom();
+  }
+
+  /// 删除全部聊天记录：确认弹窗 → 调服务端清空接口 → 清空本地。
+  Future<void> _confirmClearAllChat() async {
+    final MobilePalette p = MobileTheme.of(context);
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogCtx) => AlertDialog(
+        title: const Text("清空所有聊天记录？"),
+        content: const Text("将删除全部聊天内容，并同时清空 AI 助手的记忆。此操作不可恢复。"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final bool ok = await _controller.clearAllChat();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: p.surface,
+        content: Text(
+          ok ? "已清空全部聊天记录与 AI 记忆" : "已清空本地记录(服务端未连接)",
+          style: TextStyle(color: p.textPrimary),
+        ),
+      ),
+    );
   }
 
   Widget _buildTitle(BuildContext context, MobilePalette p) {

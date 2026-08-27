@@ -1,6 +1,8 @@
 import "dart:async";
+import "dart:convert";
 
 import "package:flutter/foundation.dart";
+import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "../core/services/ws_chat_service.dart";
@@ -51,6 +53,38 @@ class MobileChatController extends ChangeNotifier {
     currentToolName = null;
     isProcessing = false;
     notifyListeners();
+  }
+
+  /// 删除全部聊天记录：调服务端清空接口(聊天线程+Agent 记忆)，并通知服务端、
+  /// 清空本地内存。返回是否成功(接口可达且返回 200)。
+  Future<bool> clearAllChat() async {
+    bool ok = false;
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/clear-all");
+      final http.Response res = await http
+          .post(
+            uri,
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{
+              "sessionId": ApiConfig.effectiveActorId,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      ok = res.statusCode == 200;
+    } catch (_) {
+      ok = false;
+    }
+    // 通知服务端同步清除 ChatThreadStore 内存上下文
+    _service.sendEvent("chat.clear_history", <String, dynamic>{
+      "sessionId": ApiConfig.sessionId,
+    });
+    messages.clear();
+    _streamingMessageId = null;
+    currentToolName = null;
+    isProcessing = false;
+    errorMessage = ok ? null : "服务端清理失败,已清空本地";
+    notifyListeners();
+    return ok;
   }
 
   void _sendSessionInit() {

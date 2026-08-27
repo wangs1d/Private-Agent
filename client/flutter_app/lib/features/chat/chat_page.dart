@@ -17,7 +17,6 @@ import "../../core/services/image_preview_launcher.dart";
 import "agent_profile_page.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
-import "agent_sphere_webview.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -829,61 +828,42 @@ class _ChatPageState extends State<ChatPage>
     final String tool = widget.currentToolName?.trim() ?? "";
     final bool active = tool.isNotEmpty;
 
-    // 桌面端：真 3D 球形机器人（WebView2 内嵌 DG2 模型）。常驻挂载，仅切换
-    // visible，避免每次工具调用都重建 WebView2；徽标整体仅在 active 时显现。
-    final Widget sphere = SizedBox(
-      width: 20,
-      height: 20,
-      child: AgentSphereWebView(
-        showOverlayButton: false,
-        visible: active,
-      ),
-    );
-
+    // 纯文字徽标：仅在有工具调用时显现；紧凑横排，浮在输入框外左上角。
     if (!active) {
-      // 空闲：保留 3D 组件状态（清理时销毁），但不参与布局/渲染
-      return Visibility(
-        visible: false,
-        maintainState: true,
-        maintainAnimation: true,
-        maintainSemantics: true,
-        maintainSize: false,
-        child: sphere,
-      );
+      return const SizedBox.shrink();
     }
 
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        margin: const EdgeInsets.only(left: 4, bottom: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: cs.primaryContainer.withValues(alpha: 0.5),
+          color: cs.primaryContainer.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(999),
           border: Border.all(
-            color: cs.primary.withValues(alpha: 0.3),
+            color: cs.primary.withValues(alpha: 0.4),
             width: 1,
           ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            sphere,
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                "正在调用：$tool",
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: cs.primary,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-              ),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.08),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
             ),
           ],
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 200),
+          child: Text(
+            "正在调用：$tool",
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: cs.primary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+          ),
         ),
       ),
     );
@@ -1175,205 +1155,228 @@ class _ChatPageState extends State<ChatPage>
                     // 主输入框容器
                     // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
                     // - 空闲时：维持原本的浅灰描边 + 柔和投影
-                    AnimatedBuilder(
-                      animation: _breathingAnimation!,
-                      builder: (context, child) {
-                        final double breath = _breathingAnimation!.value;
-                        final bool busy = widget.isAgentProcessing;
-                        // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
-                        final double pulse =
-                            busy ? (0.6 + 0.4 * breath) : (0.05 + 0.2 * breath);
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: cs.surface,
-                            borderRadius: BorderRadius.circular(20),
-                            // 外层描边：busy 强白光，idle 弱白光，随呼吸脉动
-                            border: Border.all(
-                              color: Colors.white
-                                  .withValues(alpha: 0.15 + 0.45 * pulse),
-                              width: 0.8 + 0.6 * pulse,
-                            ),
-                            boxShadow: <BoxShadow>[
-                              if (busy) ...<BoxShadow>[
-                                // 外圈白色光晕（主呼吸）
-                                BoxShadow(
+                    // 工具徽标（真 3D 球形机器人）通过 Stack 浮在输入框外左上角，
+                    // 不计入内部布局，不挤压输入框高度。
+                    Stack(
+                      clipBehavior: Clip.none,
+                      alignment: Alignment.topLeft,
+                      children: <Widget>[
+                        AnimatedBuilder(
+                          animation: _breathingAnimation!,
+                          builder: (context, child) {
+                            final double breath = _breathingAnimation!.value;
+                            final bool busy = widget.isAgentProcessing;
+                            // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
+                            final double pulse = busy
+                                ? (0.6 + 0.4 * breath)
+                                : (0.05 + 0.2 * breath);
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: cs.surface,
+                                borderRadius: BorderRadius.circular(20),
+                                // 外层描边：busy 强白光，idle 弱白光，随呼吸脉动
+                                border: Border.all(
                                   color: Colors.white
-                                      .withValues(alpha: 0.18 * pulse),
-                                  blurRadius: 14 + 10 * breath,
-                                  spreadRadius: 0.5 + 1.5 * breath,
+                                      .withValues(alpha: 0.15 + 0.45 * pulse),
+                                  width: 0.8 + 0.6 * pulse,
                                 ),
-                                // 内圈近场白雾
-                                BoxShadow(
-                                  color: Colors.white
-                                      .withValues(alpha: 0.28 * breath),
-                                  blurRadius: 4,
-                                ),
-                              ] else ...<BoxShadow>[
-                                // 柔和投影，更轻盈
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.08),
-                                  blurRadius: 20,
-                                  spreadRadius: 0,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
-                            ],
-                          ),
-                          child: child,
-                        );
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            // 左上角：当前调用的工具徽标（真 3D 球形机器人图标）。
-                            // 常驻挂载以复用 WebView2，内部仅在调用工具时显现。
-                            _buildCurrentToolBadge(cs),
-                            // 第一行：输入框 + 发送/停止按钮
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.end,
+                                boxShadow: <BoxShadow>[
+                                  if (busy) ...<BoxShadow>[
+                                    // 外圈白色光晕（主呼吸）
+                                    BoxShadow(
+                                      color: Colors.white
+                                          .withValues(alpha: 0.18 * pulse),
+                                      blurRadius: 14 + 10 * breath,
+                                      spreadRadius: 0.5 + 1.5 * breath,
+                                    ),
+                                    // 内圈近场白雾
+                                    BoxShadow(
+                                      color: Colors.white
+                                          .withValues(alpha: 0.28 * breath),
+                                      blurRadius: 4,
+                                    ),
+                                  ] else ...<BoxShadow>[
+                                    // 柔和投影，更轻盈
+                                    BoxShadow(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.08),
+                                      blurRadius: 20,
+                                      spreadRadius: 0,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              child: child,
+                            );
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                // 中间：输入框
-                                Expanded(
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 4, vertical: 2),
-                                    child: Focus(
-                                      // Enter 键发送消息；Shift+Enter 换行
-                                      onKeyEvent:
-                                          (FocusNode node, KeyEvent event) {
-                                        if (event is! KeyDownEvent) {
-                                          return KeyEventResult.ignored;
-                                        }
-                                        final bool isEnter = event.logicalKey ==
-                                                LogicalKeyboardKey.enter ||
-                                            event.logicalKey ==
-                                                LogicalKeyboardKey.numpadEnter;
-                                        if (!isEnter) {
-                                          return KeyEventResult.ignored;
-                                        }
-                                        if (HardwareKeyboard
-                                            .instance.isShiftPressed) {
-                                          return KeyEventResult.ignored;
-                                        }
-                                        // agent 回复中也允许发送：会打断当前回复并开新轮次
-                                        if (widget.controller.text
-                                            .trim()
-                                            .isNotEmpty) {
-                                          widget.onSend();
-                                          return KeyEventResult.handled;
-                                        }
-                                        return KeyEventResult.ignored;
-                                      },
-                                      child: TextField(
-                                        controller: widget.controller,
-                                        focusNode: widget.inputFocusNode,
-                                        style: TextStyle(
-                                            color: cs.onSurface, fontSize: 15),
-                                        cursorColor: cs.primary,
-                                        maxLines: 6,
-                                        minLines: 1,
-                                        textInputAction:
-                                            TextInputAction.newline,
-                                        keyboardType: TextInputType.multiline,
-                                        decoration: InputDecoration(
-                                          hintText: "",
-                                          // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
-                                          border: InputBorder.none,
-                                          enabledBorder: InputBorder.none,
-                                          focusedBorder: InputBorder.none,
-                                          disabledBorder: InputBorder.none,
-                                          errorBorder: InputBorder.none,
-                                          focusedErrorBorder: InputBorder.none,
-                                          hintStyle: TextStyle(
-                                            color: cs.onSurfaceVariant
-                                                .withValues(alpha: 0.5),
-                                            fontSize: 15,
+                                // 第一行：输入框 + 发送/停止按钮
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: <Widget>[
+                                    // 中间：输入框
+                                    Expanded(
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 4, vertical: 2),
+                                        child: Focus(
+                                          // Enter 键发送消息；Shift+Enter 换行
+                                          onKeyEvent: (FocusNode node,
+                                              KeyEvent event) {
+                                            if (event is! KeyDownEvent) {
+                                              return KeyEventResult.ignored;
+                                            }
+                                            final bool isEnter = event
+                                                        .logicalKey ==
+                                                    LogicalKeyboardKey.enter ||
+                                                event.logicalKey ==
+                                                    LogicalKeyboardKey
+                                                        .numpadEnter;
+                                            if (!isEnter) {
+                                              return KeyEventResult.ignored;
+                                            }
+                                            if (HardwareKeyboard
+                                                .instance.isShiftPressed) {
+                                              return KeyEventResult.ignored;
+                                            }
+                                            // agent 回复中也允许发送：会打断当前回复并开新轮次
+                                            if (widget.controller.text
+                                                .trim()
+                                                .isNotEmpty) {
+                                              widget.onSend();
+                                              return KeyEventResult.handled;
+                                            }
+                                            return KeyEventResult.ignored;
+                                          },
+                                          child: TextField(
+                                            controller: widget.controller,
+                                            focusNode: widget.inputFocusNode,
+                                            style: TextStyle(
+                                                color: cs.onSurface,
+                                                fontSize: 15),
+                                            cursorColor: cs.primary,
+                                            maxLines: 6,
+                                            minLines: 1,
+                                            textInputAction:
+                                                TextInputAction.newline,
+                                            keyboardType:
+                                                TextInputType.multiline,
+                                            decoration: InputDecoration(
+                                              hintText: "",
+                                              // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
+                                              border: InputBorder.none,
+                                              enabledBorder: InputBorder.none,
+                                              focusedBorder:
+                                                  InputBorder.none,
+                                              disabledBorder:
+                                                  InputBorder.none,
+                                              errorBorder: InputBorder.none,
+                                              focusedErrorBorder:
+                                                  InputBorder.none,
+                                              hintStyle: TextStyle(
+                                                color: cs.onSurfaceVariant
+                                                    .withValues(alpha: 0.5),
+                                                fontSize: 15,
+                                              ),
+                                              contentPadding: EdgeInsets.zero,
+                                              isDense: true,
+                                            ),
                                           ),
-                                          contentPadding: EdgeInsets.zero,
-                                          isDense: true,
                                         ),
                                       ),
                                     ),
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                // 右侧：发送/停止按钮（常显，根据状态切换）
-                                // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
-                                // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
-                                ValueListenableBuilder<TextEditingValue>(
-                                  valueListenable: widget.controller,
-                                  builder: (_, TextEditingValue value, __) {
-                                    final bool hasText =
-                                        value.text.trim().isNotEmpty;
-                                    return AnimatedSwitcher(
-                                      duration:
-                                          const Duration(milliseconds: 180),
-                                      switchInCurve: Curves.easeOutCubic,
-                                      switchOutCurve: Curves.easeInCubic,
-                                      transitionBuilder: (Widget child,
-                                          Animation<double> anim) {
-                                        return FadeTransition(
-                                          opacity: anim,
-                                          child: ScaleTransition(
-                                            scale: Tween<double>(
-                                                    begin: 0.85, end: 1)
-                                                .animate(anim),
-                                            child: child,
-                                          ),
+                                    const SizedBox(width: 4),
+                                    // 右侧：发送/停止按钮（常显，根据状态切换）
+                                    // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
+                                    // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
+                                    ValueListenableBuilder<TextEditingValue>(
+                                      valueListenable: widget.controller,
+                                      builder: (_, TextEditingValue value,
+                                          __) {
+                                        final bool hasText =
+                                            value.text.trim().isNotEmpty;
+                                        return AnimatedSwitcher(
+                                          duration: const Duration(
+                                              milliseconds: 180),
+                                          switchInCurve: Curves.easeOutCubic,
+                                          switchOutCurve: Curves.easeInCubic,
+                                          transitionBuilder: (Widget child,
+                                              Animation<double> anim) {
+                                            return FadeTransition(
+                                              opacity: anim,
+                                              child: ScaleTransition(
+                                                scale: Tween<double>(
+                                                        begin: 0.85, end: 1)
+                                                    .animate(anim),
+                                                child: child,
+                                              ),
+                                            );
+                                          },
+                                          child:
+                                              widget.isAgentProcessing &&
+                                                      !hasText
+                                                  ? _buildStopButton(cs)
+                                                  : _buildSendButton(cs),
                                         );
                                       },
-                                      child:
-                                          widget.isAgentProcessing && !hasText
-                                              ? _buildStopButton(cs)
-                                              : _buildSendButton(cs),
-                                    );
-                                  },
+                                    ),
+                                  ],
+                                ),
+                                // 第二行：辅助功能按钮（左下：上传图片；右下：语音/通话）
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Row(
+                                    children: <Widget>[
+                                      // 左下：上传图片
+                                      if (widget.onPickGalleryImage != null)
+                                        _buildInputIconButton(
+                                          icon: Icons.add_rounded,
+                                          tooltip: "上传图片",
+                                          onTap: widget.onPickGalleryImage,
+                                          cs: cs,
+                                          size: 18,
+                                        ),
+                                      const Spacer(),
+                                      // 右下：语音对话模式 —— 召唤屏幕右下角悬浮球
+                                      if (widget.onEnterVoiceMode != null)
+                                        _buildInputIconButton(
+                                          icon: Icons.mic_rounded,
+                                          tooltip: "语音对话模式",
+                                          onTap: widget.onEnterVoiceMode,
+                                          cs: cs,
+                                          size: 20,
+                                          tone: InputIconTone.primary,
+                                        ),
+                                      const SizedBox(width: 4),
+                                      // 右下：电话按钮
+                                      if (widget.onOpenPhoneDialer != null)
+                                        _buildInputIconButton(
+                                          icon: Icons.phone_in_talk,
+                                          tooltip:
+                                              VoiceCallUiLabels.chatTooltip,
+                                          onTap: widget.onOpenPhoneDialer,
+                                          cs: cs,
+                                          size: 18,
+                                        ),
+                                    ],
+                                  ),
                                 ),
                               ],
                             ),
-                            // 第二行：辅助功能按钮（左下：上传图片；右下：语音/通话）
-                            Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Row(
-                                children: <Widget>[
-                                  // 左下：上传图片
-                                  if (widget.onPickGalleryImage != null)
-                                    _buildInputIconButton(
-                                      icon: Icons.add_rounded,
-                                      tooltip: "上传图片",
-                                      onTap: widget.onPickGalleryImage,
-                                      cs: cs,
-                                      size: 18,
-                                    ),
-                                  const Spacer(),
-                                  // 右下：语音对话模式 —— 召唤屏幕右下角悬浮球
-                                  if (widget.onEnterVoiceMode != null)
-                                    _buildInputIconButton(
-                                      icon: Icons.mic_rounded,
-                                      tooltip: "语音对话模式",
-                                      onTap: widget.onEnterVoiceMode,
-                                      cs: cs,
-                                      size: 20,
-                                      tone: InputIconTone.primary,
-                                    ),
-                                  const SizedBox(width: 4),
-                                  // 右下：电话按钮
-                                  if (widget.onOpenPhoneDialer != null)
-                                    _buildInputIconButton(
-                                      icon: Icons.phone_in_talk,
-                                      tooltip: VoiceCallUiLabels.chatTooltip,
-                                      onTap: widget.onOpenPhoneDialer,
-                                      cs: cs,
-                                      size: 18,
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
+                        // 浮在输入框外左上角的工具调用徽标（纯文字）
+                        Positioned(
+                          top: -12,
+                          left: 18,
+                          child: _buildCurrentToolBadge(cs),
+                        ),
+                      ],
                     ),
                   ],
                 ),

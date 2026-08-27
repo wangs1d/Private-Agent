@@ -300,23 +300,70 @@ function buildSessionRecapContent(lines: string[]): string {
   return `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${ordered.map((l) => `- ${l}`).join("\n")}`;
 }
 
+/**
+ * 中文相对天数标签（与 recap 时间线前缀统一）：今天 / 昨天 / N天前。
+ * 供无 LLM 摘要器时的兜底 recap 行使用，保证时间线可追溯。
+ */
+function relativeDayCnLabel(at: Date, now: Date = new Date()): string {
+  const daysElapsed = dayDiff(at, now);
+  if (daysElapsed <= 0) return "今天";
+  if (daysElapsed === 1) return "昨天";
+  return `${daysElapsed}天前`;
+}
+
+/**
+ * 从被 trim 丢弃的消息中生成兜底 recap 行（无 LLM 摘要器时保证连续性）。
+ * 每条 `[今天]/[昨天]/[N天前] 内容`，去重、限长、限条数。
+ * 语义化精炼仍由异步 enhanceRecap（LLM 滚动摘要）负责，本函数只是「先用原文占位」，
+ * 避免旧消息被丢弃后彻底无痕、跨天记忆断层。
+ */
+function minimalRecapLinesFromDropped(
+  droppedMessages: ChatCompletionMessageParam[],
+  now: Date = new Date(),
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const msg of droppedMessages) {
+    if (msg.role !== "user" && msg.role !== "assistant") continue;
+    if (typeof msg.content !== "string") continue;
+    const ts = extractMessageTimestamp(msg) ?? now;
+    const text = stripTimestampText(msg.content);
+    if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
+    const label = relativeDayCnLabel(ts, now);
+    const norm = normalizeRecapLine(`[${label}] ${text}`);
+    if (!norm || norm.length > SESSION_RECAP_MAX_CHARS) continue;
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+    if (out.length >= SESSION_RECAP_MAX_LINES) break;
+  }
+  return out;
+}
+
 function buildSessionRecapMessage(
   existingLines: string[],
   droppedMessages: ChatCompletionMessageParam[],
 ): ChatCompletionMessageParam | null {
   // 同步路径只合并已有的 recap 行（去重、排序、预算裁剪），不再做旧的正则提取；
-  // 被丢弃消息的具体摘要交由 LLM 滚动摘要异步生成（enhanceRecap）。
-  // droppedMessages 非空但无已有行时返回 null，由 enhanceRecap 在完成后插入 recap 消息。
+  // 被丢弃消息的具体摘要交由 LLM 滚动摘要异步增强（enhanceRecap）。
+  // 但无已有行时不再返回 null：用被丢弃消息原文生成兜底 recap（含 [今天]/[昨天]/[N天前]
+  // 日期标签）占位，保证跨天连续性不因摘要器缺失/未完成而断层；异步增强完成后会替换为精炼版。
+  // 同步兜底：已有 recap 行 + 本次被丢弃历史消息生成的原文兜底行，二者合并（去重）。
+  // 修复原逻辑「已有 recap 行时完全忽略 droppedMessages」导致的跨天断层：
+  // 若仅靠异步 enhanceRecap（LLM 摘要）吸收新丢弃消息，而增强器缺失/失败时，
+  // 这些新历史消息将永久丢失。合并后即便无 LLM，也能以原文占位形式保留。
   const merged: string[] = [];
   for (const line of existingLines) pushRecapLine(merged, line);
+  for (const line of minimalRecapLinesFromDropped(droppedMessages)) pushRecapLine(merged, line);
 
-  if (merged.length === 0 && droppedMessages.length === 0) return null;
+  const base = merged;
+  if (base.length === 0) return null;
 
   // 字符预算截断（1600 chars）先行；行数预算交给 buildSessionRecapContent 的
   // layerRecapLinesByBudget 按时间桶裁剪（近层全量、远层压缩），避免简单 slice 丢近因。
   const lines: string[] = [];
   let totalChars = SESSION_RECAP_PREFIX.length + SESSION_RECAP_TITLE.length + 2;
-  for (const line of merged) {
+  for (const line of base) {
     if (totalChars + line.length + 4 > SESSION_RECAP_MAX_CHARS) break;
     lines.push(`- ${line}`);
     totalChars += line.length + 4;

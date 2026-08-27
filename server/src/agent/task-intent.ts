@@ -1,0 +1,66 @@
+// Agent — TaskIntent（任务执行意图的"单一来源"判定）
+//
+// 收敛背景：此前 task-router / rule-router / 早期 isTaskExecutionRequest 各维护一套
+// 任务分类正则，彼此易漂移，大量"自由表达的任务指令"从关键词夹缝落到默认 fast 而失败。
+// 本模块作为唯一的"泛化任务意图"判定源，被以下两个权威共同消费，保证两条判定一致：
+//   - task-router.routeLlmExecution（WS 层的 routeTask，实际路由权威）
+//   - brain/rule-router.route（DecisionHub 声明的单一权威）
+//
+// 设计原则（Option A）：
+//   - fast 是 maxRounds=1 + 轻量工具 的有损模式：fast 接任务 = 任务直接失败，fast 接闲聊只是
+//     慢一点。代价严重不对称，因此"带做事意图但无法自信判定为简单闲聊/纯提问/实时单一查询"
+//     的指令 → 一律视为 actionable task，路由到 complex。
+//   - 用"祈使结构 + 动作动词/对象"识别，比穷举短语泛化得多：新句式只要有祈使前缀或足够具体，
+//     即便动词不在表中也能命中第 4 条规则。
+//
+// 本判定不替代域名关键词（转账/下单/写代码/部署/桌面自动化等），那些精确且强意作法保留在原处。
+
+// 强"做某事"动作动词（任务句式里常见核心动词；无需穷举，祈使结构兜底）
+const ACTION_VERB_RE =
+  /整理|归纳|归类|分类|排序|分组|重命名|归档|下载|上传|导入|导出|转换|压缩|解压|打包|解包|合并|拆分|分割|拼接|剪辑|翻译|改写|润色|润饰|校对|重写|概括|总结|摘要|生成|制作|创建|新建|撰写|起草|设计|策划|拟定|做成|画|绘|设置|设定|配置|修改|调整|取消|删除|清除|重置|启用|禁用|开通|备份|恢复|迁移|同步|清理|美化|优化|升级|发送|发给|分享|转发|推送|截图|录屏|采集|抓取|收集|搜集|统计|汇总|修复|调试|重构|搭建|开发|实现|安装|卸载|解析|分析|对比|比价|核验|验证|校验|调研|查看|看看|安排|筹备|预约|制定|规划/i;
+
+// 祈使句式引导词：明确"要我做某事"
+const IMPERATIVE_RE =
+  /帮我|帮我把|请帮我|请把|麻烦|帮我一下|拜托|帮我处理|帮我弄|帮我搞|给我|去帮忙|帮忙/i;
+
+// 实时单一查询（由 fast 的简单工具循环覆盖）→ 不应判为任务
+const REALTIME_ONLY_RE =
+  /现在.*几点|几点了|今天(?:的)?天气|天气(?:怎么|如何|怎么样|如何)|星期几|今天.*几号|当前.*时间|你叫什么|你是谁/i;
+
+// 纯提问句式（以问词引导）→ 交 fast 正常作答
+const QUESTION_OPENING_RE =
+  /^(?:什么是|啥是|为什么|为何|怎么[样么一]|如何|能不能|会不会|有没有|是不是|要不要|在哪里|哪个更好|选哪个|几点)/;
+
+// 寒暄/简短闲聊 → 保留 fast
+const CASUAL_SHORT_RE =
+  /^(?:在吗|还在吗|哈哈|haha|lol|嗯|嗯嗯|好的|哦|噢|喔|行|好嘞|收到|谢谢你|辛苦啦|睡了吗|吃了吗|ok|okay)[呼号。．、？！?,!\s]*$/i;
+
+/**
+ * 判定消息是否为"要做某事"的可执行任务（路由到 complex）。
+ *
+ * 返回 true 的判定路径：
+ *   1. 祈使引导词 + 动作动词 → 明确任务；
+ *   2. 动作动词 + 足够具体（长度 ≥ 10，对象语境）→ 任务；
+ *   3. 祈使句式本身（无需枚举动词，如"帮我把这个搞定"）→ 任务。
+ */
+export function isActionableTaskRequest(message: string): boolean {
+  const t = (message ?? "").trim();
+  if (!t) return false;
+
+  // 1) 寒暄 / 纯提问 / 实时单一查询优先排除（这些保留 fast）
+  if (CASUAL_SHORT_RE.test(t)) return false;
+  if (QUESTION_OPENING_RE.test(t)) return false;
+  if (REALTIME_ONLY_RE.test(t)) return false;
+
+  const imperative = IMPERATIVE_RE.test(t);
+  const verbHit = ACTION_VERB_RE.test(t);
+
+  // 2) 祈使 + 动作动词 → 明确任务
+  if (imperative && verbHit) return true;
+  // 3) 动作动词 + 具体对象/语境 → 任务
+  if (verbHit && t.length >= 10) return true;
+  // 4) 祈使句式本身（动词超出枚举也命中）→ 任务
+  if (imperative && t.length >= 8) return true;
+
+  return false;
+}

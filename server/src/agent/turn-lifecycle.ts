@@ -70,7 +70,13 @@ export class TurnLifecycle {
 
   ingestTurnArchive(actorId: string, userText: string, assistantText: string, context: "main" | "notes" = "main"): void {
     if (!this.deps.narrativeMemory) return;
-    const body = `Turn archive | user: ${userText.slice(0, 600)} | assistant: ${assistantText.slice(0, 1800)}`;
+    // #3 写入精度：不再把整段 "Turn archive | user…| assistant…" 原文灌进长期记忆图
+    // （那是噪声/串台源）。只抽取高价值原子片段（用户要求记住 / Agent 承诺/结论）；
+    // 无高价值信号时只落一行极短的"用户意图主干"，再交 decideMemoryWrite 判定是否值得保留。
+    // 完整轮次仍由 turn-wal / daily-digest / chat-threads 独立留存，不回落到长期图谱。
+    const signal = detectMemorySignals(userText, assistantText);
+    const body = buildTurnArchiveSnapshot(userText, assistantText, signal);
+    if (!body) return;
     void (async () => {
       const decision = await decideMemoryWrite(body, {
         actorId,
@@ -230,4 +236,23 @@ export class TurnLifecycle {
       })
       .catch(() => {});
   }
+}
+
+/**
+ * #3 写入精度：把一轮对话压成"高价值原子片段"。有显式记忆信号时只保留
+ * 那些原子行；否则只留一行用户意图主干（≤120 字），避免把整段 assistant
+ * 输出灌进长期记忆图（噪声/串台源）。低价值闲聊大概率不会被 decideMemoryWrite
+ * 判为 remember，从而不落长期图谱。
+ */
+function buildTurnArchiveSnapshot(
+  userText: string,
+  assistantText: string,
+  signal: ReturnType<typeof detectMemorySignals>,
+): string {
+  if (signal.extractLines.length > 0) {
+    return signal.extractLines.join("\n");
+  }
+  const user = userText.trim().replace(/\s+/g, " ");
+  if (!user) return "";
+  return `Turn | user: ${user.slice(0, 120)}`;
 }

@@ -50,6 +50,7 @@ class AgentSphereWebView extends StatelessWidget {
     this.onDragStart,
     this.onDragEnd,
     this.visible = true,
+    this.mini = false,
   });
 
   final bool showOverlayButton;
@@ -57,6 +58,7 @@ class AgentSphereWebView extends StatelessWidget {
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
   final bool visible;
+  final bool mini;
 
   @override
   Widget build(BuildContext context) {

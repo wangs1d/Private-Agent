@@ -14,13 +14,41 @@
         overflow: hidden;
         background: transparent !important;
       }
+      /* mini 模式：徽标内嵌，去掉最小尺寸与圆角，让 3D 球完整可见 */
+      html.embed-root.is-mini,
+      html.embed-root.is-mini body,
+      html.embed-root.is-mini #root {
+        min-width: 0 !important;
+        min-height: 0 !important;
+      }
+      html.embed-root.is-mini .mode-embed {
+        min-width: 0 !important;
+        min-height: 0 !important;
+        border-radius: 0 !important;
+      }
+      html.embed-root.is-mini .mode-embed-hint,
+      html.embed-root.is-mini .task-feed,
+      html.embed-root.is-mini .task-notification-hub,
+      html.embed-root.is-mini .embed-drag-surface {
+        display: none !important;
+      }
     </style>
-    <script type="module" crossorigin src="/chat/assets/avatar/assets/embed-Dv1tbdp4.js"></script>
+    <script>
+      // 命中 ?mini=1 时给 <html> 加类，CSS 立即生效，避免首帧闪过完整 UI
+      (function () {
+        try {
+          if (new URLSearchParams(window.location.search).get("mini") === "1") {
+            document.documentElement.classList.add("is-mini");
+          }
+        } catch (_) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/chat/assets/avatar/assets/embed-CIgyEHvN.js"></script>
     <link rel="modulepreload" crossorigin href="/chat/assets/avatar/assets/client-BQA3iFgX.js">
     <link rel="modulepreload" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-BbdJrZxJ.js">
     <link rel="stylesheet" crossorigin href="/chat/assets/avatar/assets/useTaskEventStream-DdBSiJab.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>
   </body>
 </html>

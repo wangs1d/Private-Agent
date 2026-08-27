@@ -1052,6 +1052,28 @@ export class ShortTermMemoryGatewayService {
     target.splice(0, target.length, ...filtered);
   }
 
+  /**
+   * 清空指定会话的短期任务栈与情景记忆（内存 + 持久化），用于"清空聊天/失忆"。
+   * 返回被清理的 session 数量。
+   */
+  clearSessions(sessionIds: string[]): number {
+    let removed = 0;
+    for (const sessionId of sessionIds) {
+      if (this.data.sessions?.[sessionId]) {
+        delete this.data.sessions[sessionId];
+        removed++;
+      }
+      if (this.data.episodic?.[sessionId]) {
+        delete this.data.episodic[sessionId];
+      }
+    }
+    if (removed > 0) {
+      this.schedulePersist();
+      console.log(`[STM] clearSessions 完成：清理 ${removed} 个会话`);
+    }
+    return removed;
+  }
+
   private schedulePersist(): void {
     this.persistChain = this.persistChain.then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true });

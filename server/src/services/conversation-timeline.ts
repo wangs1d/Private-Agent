@@ -85,6 +85,13 @@ export class ConversationTimelineService {
     }
   }
 
+  /** 清空某 actor 的时间线内存态（用于"清空聊天/失忆"） */
+  clearActor(actorId: string): void {
+    if (this.timelines.delete(actorId)) {
+      console.log(`[ConversationTimeline] clearActor 完成 (actorId=${actorId})`);
+    }
+  }
+
   /** 生成注入 prompt 的时间线摘要（无记录时返回 null，零注入） */
   getTimelineForPrompt(actorId: string): string | null {
     const state = this.timelines.get(actorId);

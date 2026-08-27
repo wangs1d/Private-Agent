@@ -103,6 +103,18 @@ export class AgentSelfLearningService {
     return this.recentRecords;
   }
 
+  /** 清空交互学习日志（内存 + 文件），用于"清空记忆"。 */
+  async clearLearningLog(): Promise<void> {
+    this.recentRecords = [];
+    try {
+      await mkdir(join(process.cwd(), "data"), { recursive: true });
+      await writeFile(this.learningLogPath, "", "utf8");
+      console.log("[AgentSelfLearning] clearLearningLog 完成");
+    } catch (error) {
+      console.error("[AgentSelfLearning] 清空学习日志失败:", error);
+    }
+  }
+
   /**
    * 分析最近的交互记录，生成改进建议
    */

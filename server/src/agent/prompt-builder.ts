@@ -441,6 +441,69 @@ function sortAndTruncateMemoryLines(
   return result;
 }
 
+/**
+ * #5 KV 摘要主题分桶：memory_summary 按「主题×时间」分桶召回，而非全量相关度排序。
+ *
+ * 存储格式形如 `[ISO时间] [topic:tech] 内容`（见 agent-memory-sync-service）。
+ * 召回策略（配合 recall-gate 门控，仅门控触发时才有 query）：
+ *  - 有 query：先取「与 query 同主题」桶（按时间倒序），再补 `general` 全局事实，
+ *    最后少量补「跨主题」最近记录防信息孤岛；配额偏向同主题，整体再硬上限 maxLines。
+ *  - 无 query / 未知主题：仅按时间倒序取最近 maxLines 行（保新鲜、不引入旧话题噪声）。
+ * minRelevance>0 且启用时，仅保留相关度达标行（不足则整桶降级为最近时间，保底可用）。
+ */
+function recallMemorySummaryByTopic(
+  raw: string,
+  maxChars: number,
+  maxLines: number,
+  userQuery?: string,
+  opts?: { minRelevance?: number; perBucket?: number },
+): string {
+  const minRelevance = opts?.minRelevance ?? 0;
+  const perBucket = opts?.perBucket ?? maxLines;
+
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return "";
+
+  const scored = lines.map((line) => ({
+    line,
+    timestamp: extractTimestamp(line)?.getTime() ?? 0,
+    topic: extractMemoryTopicFromLine(line),
+    relevance: userQuery ? calculateRelevanceScore(line, userQuery) : 0.5,
+  }));
+
+  const eligible = minRelevance > 0 && userQuery ? scored.filter((s) => s.relevance >= minRelevance) : scored;
+  const pool = eligible.length > 0 ? eligible : scored;
+  if (pool.length === 0) return "";
+
+  const byTimeDesc = (arr: typeof pool) =>
+    [...arr].sort((a, b) => b.timestamp - a.timestamp || b.relevance - a.relevance);
+
+  let selected: typeof pool;
+  if (!userQuery) {
+    selected = byTimeDesc(pool).slice(0, maxLines);
+  } else {
+    const queryTopic = inferMemoryTopic(userQuery);
+    const sameTopic = pool.filter((s) => s.topic !== "general" && s.topic === queryTopic);
+    const general = pool.filter((s) => s.topic === "general");
+    const others = pool.filter((s) => s.topic !== "general" && s.topic !== queryTopic);
+    const ordered = [
+      ...byTimeDesc(sameTopic).slice(0, Math.max(1, Math.ceil(maxLines / 2))),
+      ...byTimeDesc(general).slice(0, perBucket),
+      ...byTimeDesc(others).slice(0, Math.max(1, Math.floor(maxLines / 2))),
+    ];
+    // 去重（同一行不会跨桶，仅防御）后硬上限
+    const seen = new Set<string>();
+    selected = ordered.filter((s) => (seen.has(s.line) ? false : (seen.add(s.line), true))).slice(0, maxLines);
+  }
+
+  const truncated = selected.map((s) => s.line);
+  let result = truncated.join("\n");
+  if (result.length > maxChars) {
+    result = `…（较早记录已截断）\n${result.slice(-maxChars)}`;
+  }
+  return result;
+}
+
 function calculateRelevanceScore(line: string, query: string): number {
   const queryLower = query.toLowerCase();
   const lineLower = line.toLowerCase();
@@ -543,19 +606,39 @@ export function sliceMemoryEntriesToPromptContext(
   // user_profile KV：作为文件版用户画像的后备基底（见 assembleMemory 中 file 优先于 KV 的合并）
   const userProfileFromKv = str(entries["user_profile"]);
 
-  const memoryParts: string[] = [];
-  for (const [k, v] of Object.entries(entries)) {
-    if (SLICE_RESERVED_KEYS.has(k)) continue;
-    const s = str(v);
-    if (s) memoryParts.push(`【${k}】\n${s}`);
-  }
-  memoryParts.sort();
+  // #2 废弃 all-in-one 大杂烩：memorySummary 只承载真正的 memory_summary 摘要，
+  // 不再把 facts/preferences/commitments/open_loops 等拼进同一串（那正是记忆模糊/串台的源）。
+  // 这些字段已各自独立注入，避免重复 + 跨话题串扰。
   const maxChars = promptMemorySummaryMaxChars();
-  let memorySummary = memoryParts.join("\n\n");
+  let memorySummary: string | undefined;
   const rawSummary = str(entries["memory_summary"]);
+  if (rawSummary) {
+    // #5 主题×时间分桶召回：优先本话题桶，再补全局与最近跨主题，收敛跨话题串台
+    const sorted = recallMemorySummaryByTopic(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery, {
+      minRelevance: 0.3,
+    });
+    memorySummary = sorted;
+  }
+  if (memorySummary && memorySummary.length > maxChars) {
+    memorySummary = `…（较早记录已截断）\n${memorySummary.slice(-maxChars)}`;
+  }
   const memoryCurrentMission = sortAndTruncateMemoryLines(str(entries["memory_current_mission"]), 240, 1, userQuery);
-  const memoryPreferences = sortAndTruncateMemoryLines(str(entries["memory_preferences"]), 400, 3, userQuery);
-  const memoryFacts = sortAndTruncateMemoryLines(str(entries["memory_facts"]), 400, 3, userQuery);
+  // #4 补齐相关度门槛：memory_facts / memory_preferences 与 commitments/open_loops 一致，
+  // 仅在相关度 ≥ 0.3 时才注入（避免"用户档案"里的旧事实每轮无脑进当前上下文）。
+  const memoryPreferences = sortAndTruncateMemoryLines(
+    str(entries["memory_preferences"]),
+    400,
+    3,
+    userQuery,
+    { minRelevance: 0.3, fallbackOnEmpty: false },
+  );
+  const memoryFacts = sortAndTruncateMemoryLines(
+    str(entries["memory_facts"]),
+    400,
+    3,
+    userQuery,
+    { minRelevance: 0.3, fallbackOnEmpty: false },
+  );
   // 「待兑现承诺 / 未完成事项」默认仅在 topic 相关时才注入 prompt；
   // 计算得分低于 0.45 的行直接丢弃（与用户当前话题弱相关就别让 LLM 主动提）。
   const memoryCommitments = sortAndTruncateMemoryLines(
@@ -573,13 +656,6 @@ export function sliceMemoryEntriesToPromptContext(
     { minRelevance: 0.45, fallbackOnEmpty: false },
   );
   const sessionRecap = sortAndTruncateMemoryLines(str(entries["session_recap"]), 400, 3, userQuery);
-  if (opts?.includeMemorySummary !== false && rawSummary) {
-    const sorted = sortAndTruncateMemoryLines(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery);
-    memorySummary = memorySummary ? `${sorted}\n\n${memorySummary}` : sorted;
-  }
-  if (memorySummary.length > maxChars) {
-    memorySummary = `…（较早记录已截断）\n${memorySummary.slice(-maxChars)}`;
-  }
 
   const out: AgentPromptMemoryContext = {};
   if (persona) out.persona = persona;
@@ -608,11 +684,13 @@ export function sliceSubAgentMemoryEntries(
 
   const rawSummary = str(entries["memory_summary"]);
   if (rawSummary) {
-    const sorted = sortAndTruncateMemoryLines(
+    // #5 子 Agent 同样按主题分桶召回，避免无关旧摘要污染子任务上下文
+    const sorted = recallMemorySummaryByTopic(
       rawSummary,
       promptSubAgentMemorySummaryMaxChars(),
       promptSubAgentMemorySummaryMaxLines(),
       taskQuery,
+      { minRelevance: 0.25 },
     );
     if (sorted) out.memorySummary = sorted;
   }
@@ -657,6 +735,7 @@ export function buildLayeredSystemPrompt(
     !memory?.skillIndex &&
     !memory?.workingMemorySummary &&
     !memory?.recentConversationHistory &&
+    !memory?.journalRecall &&
     !memory?.semanticIntent &&
     !memory?.fastVerdictInstruction &&
     !memory?.proactiveAdvice &&
@@ -666,6 +745,11 @@ export function buildLayeredSystemPrompt(
     return baseSystem.trim();
   }
   const parts: string[] = [];
+  // #6 收敛 prompting：把所有记忆/回顾/画像/摘要块统一标注为“历史背景”，
+  // 强化“用户最新一条消息优先于任何历史记忆”的约束，降低大杂烩对当前轮的稀释。
+  parts.push(
+    "【记忆使用规则】\n下方所有“记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项”块均为历史背景，仅供衔接与指代消解，不是用户的最新指令。「用户最新一条消息」才是本轮的唯一指令基准。除非用户明确要求回忆历史，否则一律以最新消息为准；当历史记忆与最新消息冲突时，以最新消息为准，并仅就最新消息作答。",
+  );
   if (memory.followUpAnchor) parts.push(memory.followUpAnchor);
   if (memory.scheduleSnapshot) parts.push(memory.scheduleSnapshot);
   if (memory.taskContext) parts.push(`[Turn Task Context]\n${memory.taskContext}`);
@@ -692,6 +776,8 @@ export function buildLayeredSystemPrompt(
     parts.push(
       `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${memory.recentConversationHistory}`,
     );
+  // 当日对话日志检索：当天 md 承载的对话历史（块内已自带「今日对话日志检索」标题与免责声明）
+  if (memory.journalRecall) parts.push(memory.journalRecall);
   if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
   if (memory.memoryPreferences) parts.push(`【用户偏好】\n${memory.memoryPreferences}`);
   if (memory.memoryFacts) parts.push(`【用户事实】\n${memory.memoryFacts}`);
@@ -766,6 +852,7 @@ function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
       memory?.skillIndex ||
       memory?.workingMemorySummary ||
       memory?.recentConversationHistory ||
+      memory?.journalRecall ||
       memory?.semanticIntent ||
       memory?.fastVerdictInstruction ||
       memory?.proactiveAdvice ||
@@ -820,6 +907,8 @@ export function buildLayeredSystemPromptSections(
     dynamicContext.push(
       `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${m.recentConversationHistory}`,
     );
+  // 当日对话日志检索：当天 md 承载的对话历史（块内已自带标题与免责声明）
+  if (m.journalRecall) dynamicContext.push(m.journalRecall);
   if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
   if (m.memoryPreferences) dynamicContext.push(`【用户偏好】\n${m.memoryPreferences}`);
   if (m.memoryFacts) dynamicContext.push(`【用户事实】\n${m.memoryFacts}`);

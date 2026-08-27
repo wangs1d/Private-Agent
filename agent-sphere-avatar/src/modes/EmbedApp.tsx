@@ -25,6 +25,8 @@ import "./modes.css";
 /** 网页聊天侧边嵌入 — 可对话、3D 漫游、接收主 Agent 具身指令 */
 export function EmbedApp() {
   const wsOff = isWsOffMode();
+  const mini = typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("mini") === "1";
   const { state, apply, setFocused } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -33,20 +35,21 @@ export function EmbedApp() {
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
+  // mini 模式：不挂 WebSocket / 任务流，徽标位只需一个静默的 3D 球
   const { connected, sendWake, sendChat } = useAgentWebSocket(stableApply, {
     wsUrl: wsUrl ?? undefined,
     sessionId: sessionId ?? undefined,
-    enabled: !wsOff,
+    enabled: !wsOff && !mini,
   });
 
   useEmbedParentBridge({ apply });
-  useEmbedFloatPan(true);
+  useEmbedFloatPan(!mini);
 
   // 桌面嵌入模式 — 启用 DOM 级自主漫游（替换 useEmbedFloatPan 的纯拖动平移）
   const livingMotion = useLivingMotion({
-    enabled: false,
-    containerW: EMBED_SCENE.containerW,
-    containerH: EMBED_SCENE.containerH,
+    enabled: !mini,
+    containerW: mini ? 64 : EMBED_SCENE.containerW,
+    containerH: mini ? 64 : EMBED_SCENE.containerH,
     mood: state.mood,
     energy: state.energy,
   });
@@ -192,32 +195,36 @@ export function EmbedApp() {
         />
       </div>
 
-      <EmbedDragSurface
-        disabled={menuOpen || speech.listening}
-        onTap={handleEyeClick}
-      />
+      {!mini && (
+        <>
+          <EmbedDragSurface
+            disabled={menuOpen || speech.listening}
+            onTap={handleEyeClick}
+          />
 
-      <TaskFeed events={taskEvents} />
-      <TaskNotificationCenter events={taskEvents} />
+          <TaskFeed events={taskEvents} />
+          <TaskNotificationCenter events={taskEvents} />
 
-      <p className="mode-embed-hint">拖动旋转 · 轻点打开菜单 · Shift+拖动移动窗口</p>
+          <p className="mode-embed-hint">拖动旋转 · 轻点打开菜单 · Shift+拖动移动窗口</p>
 
-      <OverlayQuickMenu
-        open={menuOpen || speech.listening}
-        connected={wsOff || connected}
-        voiceListening={speech.listening}
-        voiceInterim={speech.interim}
-        onSelect={handleCommand}
-        onClose={() => {
-          speech.stop();
-          setMenuOpen(false);
-        }}
-      />
+          <OverlayQuickMenu
+            open={menuOpen || speech.listening}
+            connected={wsOff || connected}
+            voiceListening={speech.listening}
+            voiceInterim={speech.interim}
+            onSelect={handleCommand}
+            onClose={() => {
+              speech.stop();
+              setMenuOpen(false);
+            }}
+          />
 
-      <ScheduleSidebar
-        open={scheduleOpen}
-        onClose={() => setScheduleOpen(false)}
-      />
+          <ScheduleSidebar
+            open={scheduleOpen}
+            onClose={() => setScheduleOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 }

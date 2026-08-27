@@ -1,15 +1,15 @@
 {
   "sessions": {
     "session-casual-test": {
-      "activeTaskId": "task_mt0ae957_3d8d",
+      "activeTaskId": "task_mtbfd79n_ql7h",
       "tasks": [
         {
-          "taskId": "task_mt0ae957_3d8d",
+          "taskId": "task_mtbfd79n_ql7h",
           "title": "continue fixing the memory continuit",
           "status": "active",
           "contextSummary": "continue fixing the memory continuity issue in the agent",
-          "createdAt": "2026-08-19T16:09:19.051Z",
-          "updatedAt": "2026-08-19T16:09:19.051Z"
+          "createdAt": "2026-08-27T11:13:55.979Z",
+          "updatedAt": "2026-08-27T11:13:55.979Z"
         }
       ],
       "conversationMemory": {
@@ -27,19 +27,49 @@
         "agentCommitments": [
           "I will keep working on the memory continuity repair"
         ],
-        "lastUpdated": "2026-08-19T16:09:19.052Z"
+        "lastUpdated": "2026-08-27T11:13:55.980Z"
       }
     }
-  }
+  },
+  "episodic": {
+    "session-casual-test": {
+      "turns": [
+        {
+          "idx": 1,
+          "user": "please continue fixing the memory continuity issue in the agent",
+          "assistant": "I will keep working on the memory continuity repair",
+          "ts": 1787829235980
+        }
+      ],
+      "facts": [
+        {
+          "kind": "context",
+          "sentence": "I will keep working on the memory continuity repair",
+          "ts": 1787829235980
+        }
+      ]
+    }
+  },
+  "episodicIdx": 1
 }
-continue fixing the Flutter chat context continuity issue",
-          "I will inspect the short-term memory and trimming flow, then continue the fix"
-        ],
-        "agentCommitments": [
-          "I will inspect the short-term memory and trimming flow, then continue the fix"
-        ],
-        "lastUpdated": "2026-08-19T16:09:19.007Z"
-      }
+xing the Flutter chat context continuity issue",
+          "assistant": "I will inspect the short-term memory and trimming flow, then continue the fix",
+          "ts": 1787829235963
+        }
+      ],
+      "facts": [
+        {
+          "kind": "context",
+          "sentence": "I will inspect the short-term memory and trimming flow, then continue the fix",
+          "ts": 1787829235964
+        },
+        {
+          "kind": "preference",
+          "sentence": "I prefer concise replies, but please keep fixing the Flutter chat context continuity issue",
+          "ts": 1787829235964
+        }
+      ]
     }
-  }
+  },
+  "episodicIdx": 1
 }

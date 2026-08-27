@@ -1,0 +1,1 @@
+"LEN=6\nsystem => system\nassistant => [session-recap]\nEarlier conversation recap:\n- [2天前] 前天我去公园了\n- [2天前] 公园好玩吗\nuser => [ts:2026-08-26 19:23:02|周三|yesterday evening] 昨天买了新手机\nassistant => [ts:2026-08-26 19:23:02|周三|yesterday evening] 什么型号\nuser => [ts:2026-08-27 19:23:02|周四|just now] 今天天气怎么样\nassistant => [ts:2026-08-27 19:23:02|周四|just now] 今天晴天"

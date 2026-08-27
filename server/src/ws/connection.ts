@@ -66,6 +66,7 @@ import {
 } from "@private-ai-agent/agent-world";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { clearAllMemoryForActor } from "../services/memory-clear-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { aipDispatchWsSchema, walletRequestSchema } from "../schemas/api.js";
@@ -972,12 +973,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
             return;
           }
-          const provider = createExternalChatProviderFromEnv();
-          if (provider?.clearSession) {
-            const masterOn = getAgentRuntimeConfig().masterDelegation.enabled;
-            const chatSessionId = resolvePrimaryChatSessionId(boundActorId, masterOn);
-            provider.clearSession(chatSessionId);
-          }
+          await clearAllMemoryForActor(boundActorId, {
+            externalChat: createExternalChatProviderFromEnv(),
+            agentMemorySyncService,
+          });
           return;
         }
 

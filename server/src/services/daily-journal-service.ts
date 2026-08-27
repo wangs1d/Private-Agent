@@ -7,13 +7,14 @@
  * - 同一天多 session 追加写同一文件，时间戳天然区分；
  * - 当天的问题只对这一个文件做零-embedding 词法检索（searchToday）；
  * - 夜晚固化（NightlyMemoryTaskService）消费未固化日志 → 入长期记忆图
- *   → 标记已固化（consolidated.json 记录已处理日期，文件归档不删除）。
+ *   → 标记已固化（consolidated.json 记录已处理日期）→ 删除对应 md 原始对话，
+ *     实现短期/长期隔离：md 只承载「未固化的当天记忆」，固化后改由图谱/KV 长期召回。
  *
  * 写入零 LLM、零 embedding：事实提取复用 STM gateway 同款正则
  * （USER_FACT_RE / USER_PREFERENCE_RE / ASSISTANT_COMMITMENT_RE）。
  */
 
-import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 /** 单行内容截断（精简记录，防失控长文本） */
@@ -214,18 +215,26 @@ export class DailyJournalService {
 
   /**
    * 近 N 天词法检索：扫最近 days 天的 journal 文件（从今天向前数），按相关度返回命中行。
-   * 供「昨天/前天」类跨天问题使用——夜晚固化前，昨天的内容只存在昨天的 journal 文件里，
-   * 长期记忆图还查不到，必须回到文件层。命中行带 dateKey，调用方可按今天/昨天/日期打标签。
+   * 短期/长期隔离：已固化的日期跳过（改由长期记忆图/图谱-KV 召回兜底），只扫尚未固化的
+   * 日期（今天一定未固化；跨天仅在服务器隔夜未开机、固化追不上时回退读文件）。
+   * 命中行带 dateKey，调用方可按今天/昨天/日期打标签。
    */
   async searchRange(actorId: string, query: string, days = 1, k = JOURNAL_SEARCH_K): Promise<JournalHit[]> {
     const q = normalizeLine(query);
     if (!q || !actorId || days < 1) return [];
 
+    // 短期/长期隔离（扣子式）：当天记忆由 md 文件承担，一旦被夜晚固化进长期记忆图，
+    // 该日期就不再由文件层召回（改由图谱/KV 长期召回兜底）。
+    // 只有「未固化」的日期才允许回退读文件——覆盖服务器隔夜未开机导致固化追不上的场景。
+    const consolidated = await this.loadConsolidated(actorId);
+
     const dateKeys: string[] = [];
     for (let i = 0; i < days; i += 1) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      dateKeys.push(toDateKey(d));
+      const key = toDateKey(d);
+      if (consolidated.has(key)) continue; // 已固化：跳过文件扫描，交由长期召回
+      dateKeys.push(key);
     }
 
     const scored: Array<{ hit: JournalHit; score: number }> = [];
@@ -320,8 +329,9 @@ export class DailyJournalService {
   }
 
   /**
-   * 标记日期已固化（归档不删除：journal 文件保留，consolidated.json 记录已处理日期）。
-   * 幂等：重复标记同一日期无副作用。
+   * 标记日期已固化（短期/长期隔离：固化后删除 md 原始对话历史，
+   * 内容已入长期记忆图，md 只承载「未固化的当天记忆」，不再留存已处理的对话）。
+   * 幂等：重复标记同一日期无副作用（文件已删则跳过）。
    */
   async markConsolidated(actorId: string, dateKeys: string[]): Promise<void> {
     if (dateKeys.length === 0) return;
@@ -331,6 +341,10 @@ export class DailyJournalService {
     try {
       await mkdir(this.actorDir(actorId), { recursive: true });
       await writeFile(this.consolidatedFile(actorId), `${JSON.stringify([...set], null, 2)}\n`, "utf8");
+      // 固化成功后再删 md，避免落盘失败导致已处理日期记录与文件状态不一致
+      for (const key of dateKeys) {
+        await unlink(this.journalFile(actorId, key)).catch(() => {});
+      }
     } catch (err) {
       console.log(`[DailyJournal] markConsolidated 失败: ${err}`);
     }

@@ -138,6 +138,12 @@ export type AgentPromptMemoryContext = {
    */
   recentConversationHistory?: string;
   /**
+   * 当日对话日志检索命中（DailyJournalService.searchToday 结果）。
+   * 短期记忆：当天对话由 md 文件承载，注入 prompt 供 agent 读取当前对话历史；
+   * 过往日期已固化进长期记忆图，不再走本条文件检索（跨天由图谱/KV 召回兜底）。
+   */
+  journalRecall?: string;
+  /**
    * 语义意图理解结果：LLM 对用户本轮句子的真实意图解析。
    * 作为独立块注入，让主 LLM 明确知道"用户想做什么"，避免答非所问。
    */

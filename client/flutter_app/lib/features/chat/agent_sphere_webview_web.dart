@@ -20,6 +20,7 @@ class AgentSphereWebView extends StatefulWidget {
     this.onDragStart,
     this.onDragEnd,
     this.visible = true,
+    this.mini = false,
   });
 
   final bool showOverlayButton;
@@ -27,6 +28,7 @@ class AgentSphereWebView extends StatefulWidget {
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
   final bool visible;
+  final bool mini;
 
   @override
   State<AgentSphereWebView> createState() => _AgentSphereWebViewState();
@@ -101,8 +103,11 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   }
 
   void _inject() {
+    final String session = Uri.encodeComponent(ApiConfig.effectiveActorId);
+    final String ws = Uri.encodeComponent(ApiConfig.wsUrl);
+    final String mini = widget.mini ? "&mini=1" : "";
     final String src =
-        "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}";
+        "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=$session&ws=$ws$mini";
 
     _host = html.DivElement()
       ..setAttribute("data-pai-sphere", "host")

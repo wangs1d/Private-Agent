@@ -19,6 +19,10 @@ class AgentSphereWebView extends StatefulWidget {
     this.onDragStart,
     this.onDragEnd,
     this.visible = true,
+
+    /// mini 模式：用于输入框徽标等极小尺寸场景，跳过任务流/菜单/浮窗，
+    /// 仅渲染 3D 球体本身。
+    this.mini = false,
   });
 
   /// 是否显示「启动桌面悬浮」按钮（语音模式页可关闭）
@@ -27,6 +31,7 @@ class AgentSphereWebView extends StatefulWidget {
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEnd;
   final bool visible;
+  final bool mini;
 
   @override
   State<AgentSphereWebView> createState() => _AgentSphereWebViewState();
@@ -70,7 +75,8 @@ class _AgentSphereWebViewState extends State<AgentSphereWebView> {
   String _deskPetUrl() {
     final String session = Uri.encodeComponent(ApiConfig.effectiveActorId);
     final String ws = Uri.encodeComponent(ApiConfig.wsUrl);
-    return "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=$session&ws=$ws";
+    final String mini = widget.mini ? "&mini=1" : "";
+    return "${ApiConfig.httpBase}/chat/assets/avatar/embed.html?wsOff=1&sessionId=$session&ws=$ws$mini";
   }
 
   Future<void> _initWebView() async {

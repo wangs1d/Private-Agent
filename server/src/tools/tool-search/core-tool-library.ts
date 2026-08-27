@@ -88,10 +88,11 @@ export const CORE_TOOL_LIBRARY = {
    * 新增工具时声明到此分组即可自动被 Fast 模式收编，无需改其他代码。
    * 未声明的工具默认走 Complex 模式（全量工具集 + tool search 桥接）。
    *
-   * 2026-08-03 修复：fastLane 原本只有只读的 calendar.list_tasks，用户设置提醒
-   * 被路由到 fast 模式时 LLM 看不到任何创建工具 → 只能口头答应"已设置"却未真正写入日程。
-   * 把 reminder.plan / calendar.create_from_text / calendar.create_task / calendar.delete_task
-   * 加入 fastLane：设置/删除提醒是轻量交互，fast 模式可直接落地（工具执行后走 summary 兜底生成回复）。
+   * 2026-08-27 调整：fast 走"对话 + 复杂任务结果汇报"的定位。
+   * fastLane 只保留"一轮可答完的轻量单点查询"（时间/只读日程/单点核查/能力查询/纯语音等）；
+   * 多结果搜索、网页抓取、研究、浏览器、以及设置提醒/写日历/拨号等有副作用的写入
+   * 全部下沉 Complex——它们常常需要多步或组合多个工具，放进 fast 会在 maxRounds=1
+   * 或被截断时"只口头答应却未真正落地/抓取不完整"。
    */
   fastLane: {
     label: "Fast 模式轻量工具",
@@ -101,25 +102,12 @@ export const CORE_TOOL_LIBRARY = {
       "clock.get_date",
       "clock.format_timestamp",
       "calendar.list_tasks",
-      "calendar.create_from_text",
-      "calendar.create_task",
-      "calendar.delete_task",
       "reminder.plan",
-      "internet.research",
       "internet.live_check",
       "internet.verify",
-      "search_web",
-      "search_images",
-      "search_images_batch",
-      "search_videos",
-      "fetch_web",
-      "browser.session.list",
       "agent.query_capabilities",
       "phone.ensure_my_number",
-      "phone.virtual_call",
-      "phone.call_user",
       "voice.speak",
-      "voice.send_message",
       "voice.transcribe",
       "budget.calculate",
       "shopping.suggest",

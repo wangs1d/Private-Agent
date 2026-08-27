@@ -17,6 +17,7 @@ import type {
   SystemRouteDecision,
   SystemRouteMode,
 } from "./types.js";
+import { isActionableTaskRequest } from "../agent/task-intent.js";
 
 // ---- 规则匹配结果 --------------------------------------------------------
 
@@ -340,6 +341,24 @@ export class RuleRouter {
         reason: `单步任务带工具意图（步骤数≈${stepCount}，匹配${matchedAgentType}类关键词，主 Agent 自处理）`,
         matchedRules,
         system: "system1",
+      };
+    }
+
+    // === 规则 6.5：泛化任务执行意图（无强域名关键词时兜底） ===
+    // 与 task-router 共用单一来源 task-intent.ts，避免两套分类漂移。
+    // fast 是 maxRounds=1 + 轻量工具 的有损模式，带做事意图但无法自信判定为
+    // 简单闲聊/纯提问/实时单一查询的指令 → complex，确保自由表达的任务指令被真正执行。
+    // 注：路由最终门控为 OR（agent-core: shouldGoComplex = routeTask复杂 || routeLight复杂），
+    // 此处的 complex 只会让任务升级，不会把 fast 降级，因此安全。
+    if (isActionableTaskRequest(text)) {
+      matchedRules.push("task_execution_intent");
+      return {
+        mode: "complex",
+        confidence: 0.75,
+        reason: "泛化任务执行意图命中（祈使/动作-对象，无法自信判定为闲聊/纯提问，升 complex 确保执行）",
+        matchedRules,
+        system: "system2",
+        agentType: "tech",
       };
     }
 

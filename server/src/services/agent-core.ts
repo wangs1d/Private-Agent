@@ -60,12 +60,13 @@ const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"
 - 你的产出是"可直接复述的事实结论"，不是口语；最终对外表述由 fast 续接完成。`;
 
 /**
- * fast 对话模式的单次输出 token 上限（防回复失控拉长，控制输出成本）。
- * 默认 900（约 600 中文字符，fast 短句对话足够）；FAST_MAX_OUTPUT_TOKENS=0 关闭限制。
+ * fast 对话模式的单次输出 token 上限。
+ * 默认关闭（不传 max_tokens）：fast 也承担复杂任务完成后的对外汇报，需保留足够的表述空间；
+ * 如需重新限制，显式设 FAST_MAX_OUTPUT_TOKENS 为正整数即可（0 表示关闭）。
  */
 function fastMaxOutputTokens(): number | undefined {
   const raw = process.env.FAST_MAX_OUTPUT_TOKENS?.trim();
-  if (!raw) return 900;
+  if (!raw) return undefined;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
@@ -126,7 +127,7 @@ import {
   isAmbiguousFollowUpMessage,
   shouldInjectMemorySummary,
 } from "../agent/memory-signal.js";
-import { shouldRecallLongTerm, DATE_DEIXIS_RE } from "../agent/recall-gate.js";
+import { shouldRecallLongTerm } from "../agent/recall-gate.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -195,16 +196,6 @@ function buildTimeWindowRecallHint(text: string): string {
   return TIME_WINDOW_WORD_RE.test(t) || EVENT_INQUIRY_RE.test(t)
     ? "时间线 事件 经过 昨天 今天 前几天 上周 做了什么 发生了什么 episodic 事件记忆"
     : "";
-}
-
-/** YYYY-MM-DD（Asia/Shanghai），与 daily-journal-service 的 toDateKey 同口径 */
-function toDateKeyLabel(d: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(d);
 }
 
 export type HandleUserMessageOptions = {
@@ -579,24 +570,17 @@ export class AgentCore {
   }
 
   /**
-   * 当日 journal 命中块：带时间标签 + 免责声明（这是今天早些时候/昨天的对话记录，
+   * 当日 journal 命中块：带时间标签 + 免责声明（这是今天早些时候的对话记录，
    * 不是用户本轮消息），供 LLM 区分「检索到的历史」与「当前对话」。
-   * 命中行按 dateKey 打"今天/昨天/日期"标签。
+   * 仅扫当天（短期记忆），过往日期已固化进长期记忆图，不走文件检索。
    */
   private buildJournalRecallBlock(hits: JournalHit[]): string | undefined {
     if (hits.length === 0) return undefined;
     const roleLabel = (role: JournalHit["role"]) =>
       role === "user" ? "用户" : role === "assistant" ? "助手" : "事实";
-    const todayKey = toDateKeyLabel(new Date());
-    const yesterdayKey = toDateKeyLabel(new Date(Date.now() - 24 * 60 * 60 * 1000));
-    const dateLabel = (dateKey: string): string => {
-      if (dateKey === todayKey) return "今天";
-      if (dateKey === yesterdayKey) return "昨天";
-      return dateKey.slice(5); // MM-DD
-    };
-    const lines = hits.map((h) => `[${dateLabel(h.dateKey)} ${h.time}·${roleLabel(h.role)}] ${h.text}`);
+    const lines = hits.map((h) => `[今天 ${h.time}·${roleLabel(h.role)}] ${h.text}`);
     return [
-      "【今日对话日志检索】（今天/昨天早些时候的对话记录检索结果，非用户本轮消息；与当前对话冲突时以用户最新消息为准）",
+      "【今日对话日志检索】（今天早些时候的对话记录检索结果，非用户本轮消息；与当前对话冲突时以用户最新消息为准）",
       ...lines,
     ].join("\n");
   }
@@ -752,8 +736,11 @@ export class AgentCore {
       // 后台零 LLM 规则判决定是否主动 speak/act，不进入对话 prompt，不阻塞主回复。
       this.proactivityHub?.observeConversationTurn(actorId, text);
 
-      // Parallel-Live：规则判为 fast 高置信但可并行深挖时，fast 先主答，complex 后台并行补充
-      const useParallelLive = this.shouldUseParallelLiveComplex(text, fastRoute, opts);
+      // Parallel-Live：仅当消息最终走 fast（非 shouldGoComplex）且可并行深挖时，
+      // fast 先主答、complex 后台并行补充。已判 complex（含 task_execution_intent）则
+      // 直接走同步 complex 主链，避免与 launchComplexBackgroundTask 重复执行同一任务。
+      const useParallelLive =
+        !shouldGoComplex && this.shouldUseParallelLiveComplex(text, fastRoute, opts);
       if (useParallelLive) {
         parallelLiveComplex = true;
         parallelLiveOriginalRoute = fastRoute;
@@ -962,12 +949,11 @@ export class AgentCore {
     });
     const suppressNarrativeRecall = !recallGate.trigger || this.isTopicSwitchTurn(sessionId, text);
 
-    // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索）。
-    // 跨天指代（昨天/前天/上周…）时窗口扩到近 3 天——夜晚固化前昨天的内容只存在于 journal 文件，
-    // 长期记忆图查不到；但"刚才/刚刚"不进这里（窗口内指代，走 thread/STM，见 IN_WINDOW_DEIXIS_RE）。
-    const journalSearchDays = DATE_DEIXIS_RE.test(text) ? 3 : 1;
+    // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索，短期记忆）。
+    // 只扫当天；过往日期已固化进长期记忆图，跨天指代由图谱/KV 召回兜底（见 recallGate）。
+    // "刚才/刚刚"窗口内指代走 thread/STM（IN_WINDOW_DEIXIS_RE），不进入这里。
     const journalHitsPromise: Promise<JournalHit[]> = recallGate.trigger
-      ? (getDailyJournalService()?.searchRange(actorId, text, journalSearchDays).catch(() => []) ?? Promise.resolve([]))
+      ? (getDailyJournalService()?.searchToday(actorId, text).catch(() => []) ?? Promise.resolve([]))
       : Promise.resolve([]);
 
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
@@ -1057,6 +1043,7 @@ export class AgentCore {
       workingMemorySummary,
       recentConversationHistory,
       journalRecallBlock,
+      suppressNarrativeRecall,
     );
     const parallelLiveRaw =
       parallelLiveComplex && parallelLiveOriginalRoute
@@ -2011,6 +1998,7 @@ if (this.isComplexMode(route.mode)) {
     workingMemorySummary: string | undefined,
     recentConversationHistory: string | undefined,
     journalRecall: string | undefined,
+    longTermRecallSuppressed: boolean,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -2038,6 +2026,10 @@ if (this.isComplexMode(route.mode)) {
       recentConversationHistory,
       journalRecall,
       personalization,
+      // #1 统一门控单点：把"topic_switch 抑制 / 召回未触发"透传给 prompt 装配层，
+      // 让 KV 长期字段（memory_facts/preferences/commitments/open_loops/session_recap…）
+      // 与图谱（narrativeRecall）走同一白名单，话题切换时全部抑制（串台根治）。
+      longTermRecallSuppressed,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
@@ -2350,6 +2342,8 @@ if (this.isComplexMode(route.mode)) {
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
             semanticIntent: this.formatSemanticIntent(ctx.semanticIntent),
+            // #1 统一门控单点：KV 长期字段与图谱走同一 gate
+            longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
@@ -2376,6 +2370,8 @@ if (this.isComplexMode(route.mode)) {
             onToolLoopAfterBatch: onBatchWithEvolution,
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
+            // #1 统一门控单点：KV 长期字段与图谱走同一 gate
+            longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
           }) ?? {}),
           toolExposureProfile,
           toolRankingHint,
