@@ -9,6 +9,7 @@ import {
 } from "./chat-thread-store.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { modelSupportsVision, ocrImageText } from "./vision-support.js";
 import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
@@ -16,6 +17,7 @@ import {
   pickVisibleText,
   StreamIdleTimeoutError,
   stripInternalControlTags,
+  type NormalUsage,
 } from "./stream-chat-helpers.js";
 import {
   applyPromptCacheMessages,
@@ -110,8 +112,18 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     userTurn: ChatUserTurn,
     assistantText: string,
     maxThreadMessages?: number,
+    model?: string,
   ): void {
-    this.threads.appendTurn(sessionId, this.systemPrompt, userTurn, assistantText, maxThreadMessages);
+    this.threads.appendTurn(
+      sessionId,
+      this.systemPrompt,
+      userTurn,
+      assistantText,
+      maxThreadMessages,
+      undefined,
+      undefined,
+      model ?? this.model,
+    );
   }
 
   protected thread(sessionId: string): ChatCompletionMessageParam[] {
@@ -233,9 +245,25 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     const turnStartLen = msgs.length;
 
     // ★ 防串台关键步骤 1：user 消息时间戳注入 + clientMessageId 标记（固化，子类无法跳过）
+    // 用户照片注入分流：纯文本模型（deepseek-chat 等）无法接收 image_url，注入会直接
+    // 报 400 导致整轮失败——照片"发不进对话"。此处先尽力把照片 OCR 成文本（失败静默），
+    // 再由 openAiUserContentFromTurn 按模型能力决定：视觉模型注入 image_url，非视觉降级文本。
+    let contentTurn = userTurn;
+    if (userTurn.visionFrames?.length && !modelSupportsVision(model)) {
+      const ocrParts: string[] = [];
+      const ocrResults = await Promise.allSettled(
+        userTurn.visionFrames.slice(0, 2).map((f) => ocrImageText(f.dataBase64, f.mimeType)),
+      );
+      for (const r of ocrResults) {
+        if (r.status === "fulfilled" && r.value) ocrParts.push(r.value);
+      }
+      if (ocrParts.length > 0) {
+        contentTurn = { ...userTurn, text: `${userTurn.text}\n\n${ocrParts.join("\n\n")}` };
+      }
+    }
     const userMsg = {
       role: "user",
-      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn)),
+      content: annotateUserContentForLlm(openAiUserContentFromTurn(contentTurn, { model })),
     } as ChatCompletionMessageParam;
     tagUserMessageClientId(userMsg, userTurn.clientMessageId);
     msgs.push(userMsg);
@@ -267,9 +295,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
+            tailDynamicContext: promptPlan.tailDynamicContext,
             maxOutputTokens: effectiveStreamOpts.maxOutputTokens,
-            // 子代理上下文隔离：显式禁用长链自动委派时透传给工具循环（子 Agent / Master 内部用，防递归）
-            disableAutoDelegate: effectiveStreamOpts.toolLoop?.disableAutoDelegate,
             audit: { sessionId, stage: "main_chat" },
           },
         );
@@ -290,7 +317,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // ── 非工具分支 ──
     let stream;
     try {
-      const finalMessages = applyPromptCacheMessages(msgs, promptPlan.requestSystemMessages);
+      const finalMessages = applyPromptCacheMessages(
+        msgs,
+        promptPlan.requestSystemMessages,
+        promptPlan.tailDynamicContext,
+      );
       // TEMP DEBUG（记忆注入诊断 5：实际发给 LLM 的最终 messages 是否含记忆）
       try {
         const sysJoined = finalMessages
@@ -305,7 +336,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             overrideSys: Boolean(overrideSys),
             sysMsgCount: finalMessages.filter((m) => m.role === "system").length,
             finalSysHasNarrative: sysJoined.includes("记忆图联想检索"),
-            promptPlanSysHasNarrative: String(promptPlan.requestSystemMessages[0]?.content ?? "").includes("记忆图联想检索"),
+            hasTailDynamicContext: Boolean(promptPlan.tailDynamicContext),
+            tailHasNarrative: String(promptPlan.tailDynamicContext ?? "").includes("记忆图联想检索"),
+            tailInUser: finalMessages
+              .slice(-1)
+              .some((m) => m.role === "user" && JSON.stringify(m.content).includes("记忆图联想检索")),
             finalSysHead: sysJoined.slice(0, 120),
           }) + "\n",
         );
@@ -332,6 +367,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     }
 
     let visible = "";
+    // API 流末尾 chunk 返回的 prefix cache 计费数据（scope 提升供下方 token 审计采集）
+    let streamUsage: NormalUsage | undefined;
     try {
       const sanitizer = createStreamControlTagSanitizer();
       const result = await consumeNormalizedStream(
@@ -349,6 +386,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           model,
         },
       );
+      streamUsage = result.usage;
       visible = stripInternalControlTags(pickVisibleText(result.content, result.reasoning));
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
@@ -372,7 +410,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
       this.threads.afterTurnCompleted(sessionId, msgs);
     }
-    // Token 用量审计（非工具分支）：输入为发往 LLM 的 messages + 可见工具 schema
+    // Token 用量审计（非工具分支）：输入为发往 LLM 的 messages + 可见工具 schema，
+    // 并附带 API 真实返回的 prefix cache 命中/未命中 token（若流末尾带 usage）
     try {
       recordLlmUsageByChars({
         stage: "main_chat",
@@ -380,6 +419,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         inputChars: requestAuditInput,
         outputChars: visible.length,
         model,
+        promptCacheHitTokens: streamUsage?.promptCacheHitTokens,
+        promptCacheMissTokens: streamUsage?.promptCacheMissTokens,
       });
     } catch {
       /* 审计失败静默 */

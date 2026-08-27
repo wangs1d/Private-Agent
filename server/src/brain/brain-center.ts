@@ -57,6 +57,7 @@ import type { SessionEpitomeEntries, SessionEpitomeSnapshot } from "../services/
 import { extractEpitomeEntries } from "../services/session-epitome.js";
 import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
+import { shouldRecallLongTerm } from "../agent/recall-gate.js";
 import type { BodyGatewayLike, BodyState } from "../body/types.js";
 import { isMultimodalFusionEnabled } from "./multimodal-fusion-cortex.js";
 
@@ -1270,6 +1271,7 @@ export class BrainCenter {
     // 单窗口长会话下用户大量使用指代（"那个/它/继续"），query 扩展必须在
     // recall 之前完成。拉取逻辑与原阶段 1.5.1 完全一致（含 master 会话修复）。
     let recentConversationHistory = "";
+    let cognizeThreadMessageCount = -1;
     try {
       const chatSessionId =
         input.sessionId && isNotesChatSessionId(input.sessionId)
@@ -1280,6 +1282,7 @@ export class BrainCenter {
             );
       const threadStore = getChatThreadStore();
       const messages = threadStore.thread(chatSessionId, "");
+      cognizeThreadMessageCount = messages.length;
       const recentMessages = messages.slice(-12);
       const currentUserMessage =
         input.text?.trim()
@@ -1298,12 +1301,24 @@ export class BrainCenter {
       console.log(`[BrainCenter] 拉取对话历史失败（忽略）: ${err}`);
     }
 
+    // === 阶段 0.93：长期记忆召回门控（记忆架构重构）===
+    // 白名单触发（显式记忆线索 / 新会话开场 / 个人事实陈述）才执行长期检索；
+    // 未触发时跳过 recall 通道（省 token + 根治召回串台）。
+    // 当天的问题由 DailyJournalService.searchToday（当日日志词法检索）覆盖。
+    const recallGate = shouldRecallLongTerm({
+      text: query,
+      threadMessageCount: cognizeThreadMessageCount,
+    });
+    if (recallGate.trigger) {
+      console.log(`[BrainCenter] recall gate triggered (${recallGate.reason})`);
+    }
+
     // === 阶段 0.95：召回 query 扩展（P1-1 单窗口优化）===
     // 指代消解 + 话题扩展 + 多意图拆分。纯规则毫秒级。
     // recallQuery 仅用于记忆检索；后续 LLM prompt 仍用用户原始 query。
     let recallQuery = query;
     let recallSubQueries: string[] | undefined;
-    if (this.recallQueryExpander && query) {
+    if (this.recallQueryExpander && query && recallGate.trigger) {
       try {
         const expansion = this.recallQueryExpander.expand({
           query,
@@ -1349,7 +1364,9 @@ export class BrainCenter {
       input.visual && this.sensory
         ? this.sensory.look(input.visual).catch(() => null)
         : Promise.resolve(null),
-      this.memory
+      // 记忆架构重构：recall 通道受白名单门控（recall-gate），
+      // 未触发时直接返回 null（不检索长期记忆），query 扩展仅在触发时执行。
+      this.memory && recallGate.trigger
         ? (typeof this.memory.recallWithProvenance === "function"
             ? this.memory.recallWithProvenance(actorId, recallQuery, {
                 limit: 5,

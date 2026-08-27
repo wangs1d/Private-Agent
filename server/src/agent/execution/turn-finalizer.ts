@@ -5,6 +5,7 @@ import { TurnLifecycle } from "../turn-lifecycle.js";
 import type { TaskExecutionPlan } from "../plan-execute-loop.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import type { ShortTermMemoryGatewayService } from "../../services/short-term-memory-gateway.js";
+import { getDailyJournalService } from "../../services/daily-journal-service.js";
 import type { TrajectorySkillPromotionService } from "../../services/trajectory-skill-promotion-service.js";
 
 export type FinishTurnMeta = {
@@ -83,6 +84,12 @@ export class TurnFinalizer {
 
     if (this.deps.shortTermMemoryGateway && meta.sessionId) {
       this.deps.shortTermMemoryGateway.reconcileTaskAfterTurn(meta.sessionId, userText, trimmed);
+    }
+
+    // 当日对话日志：规则精简行落盘（零 LLM，fire-and-forget），
+    // 供「当天问题扫日志」与夜晚固化消费。
+    if (meta.sessionId) {
+      getDailyJournalService()?.appendTurn(actorId, meta.sessionId, userText, trimmed);
     }
 
     return {

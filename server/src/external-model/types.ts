@@ -198,14 +198,9 @@ export type ToolRankingHint = {
 export type AgentStreamOptions = {
   promptContext?: { memory?: AgentPromptMemoryContext };
   toolLoop?: {
-    /** 工具多轮上限；建议 1 */
+    /** 规划波次上限（plan + replan 总次数，Plan-and-Execute）；fast 场景建议 1 */
     maxRounds?: number;
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
-    /**
-     * 子代理上下文隔离：true 时禁止工具循环自动升级委派（master.invoke_sub_agent）。
-     * 子 Agent 内部 / 临时 summary 等嵌套 turn 必须置 true，防止递归委派。
-     */
-    disableAutoDelegate?: boolean;
   };
   /** 单轮快路径：不写入 provider 会话 thread（避免历史越积越慢） */
   ephemeralTurn?: boolean;
@@ -369,5 +364,6 @@ export interface ExternalChatProvider {
     userTurn: ChatUserTurn,
     assistantText: string,
     maxThreadMessages?: number,
+    model?: string,
   ): void;
 }

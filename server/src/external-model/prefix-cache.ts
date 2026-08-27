@@ -40,6 +40,8 @@ export type PreparedPromptCachePlan = {
   profile: PromptCacheProfile;
   fullSystemPrompt: string;
   requestSystemMessages: ChatCompletionMessageParam[];
+  /** 需要沉底注入到「最新 user 消息尾部」的 volatile 动态上下文（记忆/时间/意图等）。 */
+  tailDynamicContext?: string;
   promptCache?: PrefixCacheRequest;
 };
 
@@ -174,11 +176,13 @@ export function preparePromptCachePlan(
     args.finalizeOptions,
   );
 
+  // P0-2 前缀稳定化：requestSystemMessages 只保留静态 system（stable）——
+  // volatile 动态上下文（记忆图联想检索/当前时间/意图理解等）不再作为独立 system
+  // 放在请求头部（任何记忆变化都会使整段前缀缓存失效），改经 tailDynamicContext
+  // 沉底注入到「最新 user 消息尾部」。DeepSeek 等 provider 的自动 prefix cache
+  // 因此能命中稳定的 system+历史对话前缀，只有尾部动态增量产生新的缓存放量。
   const requestSystemMessages: ChatCompletionMessageParam[] = [
     { role: "system", content: stableSystemPrompt },
-    ...(dynamicSystemPrompt
-      ? [{ role: "system", content: dynamicSystemPrompt } satisfies ChatCompletionMessageParam]
-      : []),
   ];
 
   const promptCache =
@@ -201,15 +205,85 @@ export function preparePromptCachePlan(
     profile,
     fullSystemPrompt,
     requestSystemMessages,
+    tailDynamicContext: dynamicSystemPrompt,
     promptCache,
   };
+}
+
+/** 沉底块的包裹标签：让 LLM 明确这是本轮系统注入的上下文，而非用户消息正文。 */
+const DYNAMIC_CONTEXT_WRAP_BEGIN = "[system-context]";
+const DYNAMIC_CONTEXT_WRAP_END = "[/system-context]";
+
+function wrapTailDynamicContext(tail: string): string {
+  return (
+    `\n\n${DYNAMIC_CONTEXT_WRAP_BEGIN}\n` +
+    `（本轮系统注入的上下文：记忆/时间/任务等，非用户消息正文，按 system 指令同等遵循）\n` +
+    `${tail}\n${DYNAMIC_CONTEXT_WRAP_END}`
+  );
+}
+
+/** 找到最新一条 user 消息（从尾部向前扫）；无 user 消息返回 null。 */
+function findLastUserMessage(
+  messages: ChatCompletionMessageParam[],
+): ChatCompletionMessageParam | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg && msg.role === "user") return msg;
+  }
+  return null;
+}
+
+/**
+ * 把 volatile 动态上下文沉底注入到「最新 user 消息尾部」，返回克隆后的消息数组。
+ * - string content：追加一行包裹标签文本
+ * - content parts 数组：追加一个 text part（保留 image_url 等既有 part）
+ * - 找不到 user 消息（极罕见）：回退为附加到 system 之后，兼容旧行为，不丢语义
+ *
+ * 只克隆被修改的 user 消息，绝不改写调用方持有的 thread 消息对象（防污染会话历史）。
+ */
+export function applyTailDynamicContext(
+  messages: ChatCompletionMessageParam[],
+  tailDynamicContext: string,
+): ChatCompletionMessageParam[] {
+  if (!tailDynamicContext) return messages;
+  const lastUser = findLastUserMessage(messages);
+  if (!lastUser) {
+    return [...messages, { role: "system", content: tailDynamicContext }];
+  }
+  // 只克隆被修改的 user 消息，绝不改写调用方持有的 thread 消息对象（防污染会话历史）。
+  return messages.map(
+    // TS 断言返回值：openai v6 的 content part 类型组合在 spread 后会被 TS 展成
+    // 带 refusal/developer 的过宽并集，运行时内容本身仍是合法 text part。
+    (msg): ChatCompletionMessageParam => {
+      if (msg !== lastUser) return msg;
+      const wrapped = wrapTailDynamicContext(tailDynamicContext);
+      if (typeof msg.content === "string") {
+        return { ...msg, content: `${msg.content}${wrapped}` };
+      }
+      if (Array.isArray(msg.content)) {
+        const parts = msg.content as Array<
+          Record<string, unknown> & { type?: string; text?: string; refusal?: string }
+        >;
+        return {
+          ...msg,
+          content: [...parts, { type: "text", text: wrapped }],
+        } as ChatCompletionMessageParam;
+      }
+      return msg;
+    },
+  ) as ChatCompletionMessageParam[];
 }
 
 export function applyPromptCacheMessages(
   messages: ChatCompletionMessageParam[],
   requestSystemMessages: ChatCompletionMessageParam[],
+  tailDynamicContext?: string,
 ): ChatCompletionMessageParam[] {
   if (messages.length === 0) return [...requestSystemMessages];
-  if (messages[0]?.role !== "system") return [...requestSystemMessages, ...messages];
-  return [...requestSystemMessages, ...messages.slice(1)];
+  if (messages[0]?.role !== "system") {
+    const base = [...requestSystemMessages, ...messages];
+    return tailDynamicContext ? applyTailDynamicContext(base, tailDynamicContext) : base;
+  }
+  const base = [...requestSystemMessages, ...messages.slice(1)];
+  return tailDynamicContext ? applyTailDynamicContext(base, tailDynamicContext) : base;
 }

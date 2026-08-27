@@ -115,6 +115,7 @@ const MEMORY_DOMAIN_LABELS: Record<string, string> = {
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "./trajectory-skill-promotion-service.js";
 import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
+import { getDailyJournalService, type JournalHit } from "./daily-journal-service.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
@@ -125,6 +126,7 @@ import {
   isAmbiguousFollowUpMessage,
   shouldInjectMemorySummary,
 } from "../agent/memory-signal.js";
+import { shouldRecallLongTerm, DATE_DEIXIS_RE } from "../agent/recall-gate.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -195,6 +197,16 @@ function buildTimeWindowRecallHint(text: string): string {
     : "";
 }
 
+/** YYYY-MM-DD（Asia/Shanghai），与 daily-journal-service 的 toDateKey 同口径 */
+function toDateKeyLabel(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
 export type HandleUserMessageOptions = {
   onAssistantDelta?: StreamDeltaHandler;
   onExternalToolExecuteStart?: (info: ToolExecuteStartInfo) => void;
@@ -230,7 +242,6 @@ export type HandleUserMessageOptions = {
 };
 
 type ShortTermTurnContext = {
-  recallQuery: string;
   activeTaskId?: string;
   resumedTask: boolean;
 };
@@ -512,33 +523,25 @@ export class AgentCore {
   private buildShortTermTurnContext(sessionId: string, text: string): ShortTermTurnContext {
     if (!this.shortTermMemoryGateway || text.length < 8) {
       return {
-        recallQuery: text,
         resumedTask: false,
       };
     }
 
     const sync = this.shortTermMemoryGateway.syncTaskForTurn(sessionId, text);
     return {
-      recallQuery: this.enrichMemoryRecallQuery(
-        this.shortTermMemoryGateway.buildRecallQuery(sessionId, text),
-        text,
-      ),
       activeTaskId: sync.task.taskId,
       resumedTask: sync.resumed,
     };
   }
 
   /**
-   * fast 模式（对话主链路）的轻量子孙：不激活任务（避免闲聊污染任务栈），
-   * 但召回 query 用会话感知的 buildRecallQuery，把当前话题/任务锚定进长期记忆召回，
-   * 避免裸文本在用户全局记忆池里随机捞到别的会话的记忆（串台根因之一）。
-   * buildRecallQuery 为只读：话题切换时自动丢弃旧话题上下文（resolveTurnFocus=不相关），
-   * 延续时带上当前任务/话题，让长期召回贴合当前会话。
+   * fast 模式（对话主链路）的轻量子孙：不激活任务（避免闲聊污染任务栈）。
+   * 记忆架构重构后不再构造召回 query（原 buildRecallQuery 拼接链已删除——
+   * 任务/偏好/openLoops 加料是召回串台根因）；长期检索由 recall-gate 门控，
+   * query 只用用户原文。
    */
-  private buildFastShortTermTurnContext(sessionId: string, text: string): ShortTermTurnContext {
-    const baseRecallQuery = this.shortTermMemoryGateway?.buildRecallQuery(sessionId, text) ?? text;
+  private buildFastShortTermTurnContext(_sessionId: string, _text: string): ShortTermTurnContext {
     return {
-      recallQuery: this.enrichMemoryRecallQuery(baseRecallQuery, text),
       resumedTask: false,
     };
   }
@@ -573,6 +576,29 @@ export class AgentCore {
     ]
       .filter(Boolean)
       .join("\n");
+  }
+
+  /**
+   * 当日 journal 命中块：带时间标签 + 免责声明（这是今天早些时候/昨天的对话记录，
+   * 不是用户本轮消息），供 LLM 区分「检索到的历史」与「当前对话」。
+   * 命中行按 dateKey 打"今天/昨天/日期"标签。
+   */
+  private buildJournalRecallBlock(hits: JournalHit[]): string | undefined {
+    if (hits.length === 0) return undefined;
+    const roleLabel = (role: JournalHit["role"]) =>
+      role === "user" ? "用户" : role === "assistant" ? "助手" : "事实";
+    const todayKey = toDateKeyLabel(new Date());
+    const yesterdayKey = toDateKeyLabel(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    const dateLabel = (dateKey: string): string => {
+      if (dateKey === todayKey) return "今天";
+      if (dateKey === yesterdayKey) return "昨天";
+      return dateKey.slice(5); // MM-DD
+    };
+    const lines = hits.map((h) => `[${dateLabel(h.dateKey)} ${h.time}·${roleLabel(h.role)}] ${h.text}`);
+    return [
+      "【今日对话日志检索】（今天/昨天早些时候的对话记录检索结果，非用户本轮消息；与当前对话冲突时以用户最新消息为准）",
+      ...lines,
+    ].join("\n");
   }
 
   /**
@@ -923,10 +949,26 @@ export class AgentCore {
     // 原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt 的 slice(0,4)
     // 当作召回条目丢弃、块结构被拍平、hint 被正则误杀 → agent 看到的上下文跳转、不能针对当前话回复。
     // 话题切换门控：用户真正切换话题（无任务延续/无指代，STM 解析为 topic_switch）时，
-    // 抑制长期记忆召回（narrativeRecall）与最近对话历史（recentConversationHistory），
-    // 避免上一轮的 agent 输出（含错误卡片/数据快报）被 LLM 当作「事实」复读，实现串台根治。
-    // 工作记忆摘要（workingMemorySummary）和 taskContext 不受影响，保留必要上下文。
-    const suppressNarrativeRecall = this.isTopicSwitchTurn(sessionId, text);
+    // 抑制长期记忆召回，避免把旧话题/跨会话记忆注入当前新话题（串台根治）。
+    // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
+    //
+    // 召回门控（记忆架构重构）：长期记忆检索从「每轮默认」改为「白名单触发」
+    // （显式记忆线索 / 新会话开场 / 个人事实陈述 / 长会话指代消解失败升级）。
+    // 未触发时跳过长期检索，当天的问题由当日 journal 词法检索覆盖。
+    const recallGate = shouldRecallLongTerm({
+      text,
+      threadMessageCount,
+      ambiguousFollowUp: isAmbiguousFollowUpMessage(text),
+    });
+    const suppressNarrativeRecall = !recallGate.trigger || this.isTopicSwitchTurn(sessionId, text);
+
+    // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索）。
+    // 跨天指代（昨天/前天/上周…）时窗口扩到近 3 天——夜晚固化前昨天的内容只存在于 journal 文件，
+    // 长期记忆图查不到；但"刚才/刚刚"不进这里（窗口内指代，走 thread/STM，见 IN_WINDOW_DEIXIS_RE）。
+    const journalSearchDays = DATE_DEIXIS_RE.test(text) ? 3 : 1;
+    const journalHitsPromise: Promise<JournalHit[]> = recallGate.trigger
+      ? (getDailyJournalService()?.searchRange(actorId, text, journalSearchDays).catch(() => []) ?? Promise.resolve([]))
+      : Promise.resolve([]);
 
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
       .isFastMode(route.mode)
@@ -938,7 +980,7 @@ export class AgentCore {
             ? Promise.resolve(undefined)
             : (cognitiveRecallItems && cognitiveRecallItems.length > 0
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)),
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出（含错误卡片/数据快报）被 LLM 复读
@@ -962,7 +1004,7 @@ export class AgentCore {
             ? Promise.resolve(undefined)
             : (cognitiveRecallItems && cognitiveRecallItems.length > 0
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, shortTermTurn.recallQuery)),
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
           suppressNarrativeRecall
@@ -983,6 +1025,12 @@ export class AgentCore {
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
     
+    // 当日日志命中块：作为独立字段透传（当天问题优先命中今天日志，而非长期图）。
+    // 不并入 narrativeRecall——formatNarrativeRecallPrompt 会对 narrativeRecall 做
+    // 6 条截断 + 「【」免责头过滤 + 字符压缩，拼进去会被拍平丢框架（workingMemorySummary 同款旧 bug）。
+    const journalHits = await journalHitsPromise;
+    const journalRecallBlock = this.buildJournalRecallBlock(journalHits);
+
     const enrichedNarrativeRecall = appendLearningDecisionGuidance(
       narrativeRecall,
       cognitiveRecallItems,
@@ -1008,6 +1056,7 @@ export class AgentCore {
       shortTermTurn,
       workingMemorySummary,
       recentConversationHistory,
+      journalRecallBlock,
     );
     const parallelLiveRaw =
       parallelLiveComplex && parallelLiveOriginalRoute
@@ -1735,6 +1784,7 @@ if (this.isComplexMode(route.mode)) {
       );
       if (appended) {
         this.shortTermMemoryGateway?.reconcileTaskAfterTurn(sessionId, userText, appended);
+        getDailyJournalService()?.appendTurn(actorId, sessionId, userText, appended);
         opts?.onBackgroundAssistantDone?.({
           messageId: backgroundMessageId,
           finalText: appended,
@@ -1960,6 +2010,7 @@ if (this.isComplexMode(route.mode)) {
     shortTermTurn: ShortTermTurnContext,
     workingMemorySummary: string | undefined,
     recentConversationHistory: string | undefined,
+    journalRecall: string | undefined,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -1985,6 +2036,7 @@ if (this.isComplexMode(route.mode)) {
       narrativeRecall,
       workingMemorySummary,
       recentConversationHistory,
+      journalRecall,
       personalization,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
@@ -2011,6 +2063,8 @@ if (this.isComplexMode(route.mode)) {
         });
       },
       onToolLoopAfterBatch: onBatchWithEvolution,
+      // 记忆架构重构：thread 消息数透传给 prompt 装配层（长期快照注入门控用）
+      threadMessageCount: this.peekThreadMessageCount(actorId, sessionId),
     };
   }
 
@@ -2029,6 +2083,8 @@ if (this.isComplexMode(route.mode)) {
       narrativeRecall?: string;
       workingMemorySummary?: string;
       recentConversationHistory?: string;
+      /** 当日/近几天对话日志检索命中（独立块注入） */
+      journalRecall?: string;
       userLocation?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>;
@@ -2084,6 +2140,7 @@ if (this.isComplexMode(route.mode)) {
               narrativeRecall: ctx.narrativeRecall,
               workingMemorySummary: ctx.workingMemorySummary,
               recentConversationHistory: ctx.recentConversationHistory,
+              journalRecall: ctx.journalRecall,
               userLocation: ctx.userLocation,
               trajCap: ctx.trajCap,
               orchestrateToolCtx: ctx.orchestrateOpts,
@@ -2206,6 +2263,8 @@ if (this.isComplexMode(route.mode)) {
       workingMemorySummary?: string;
       /** 最近对话回顾（独立块注入，thread 较短时填充） */
       recentConversationHistory?: string;
+      /** 当日/近几天对话日志检索命中（独立块注入，不复用 formatNarrativeRecallPrompt，防拍平） */
+      journalRecall?: string;
       userLocation?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
@@ -2273,9 +2332,11 @@ if (this.isComplexMode(route.mode)) {
             actorId,
             sessionId: ctx.sessionId,
             userText: text,
+            threadMessageCount: ctx.orchestrateToolCtx.threadMessageCount,
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
+            journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
             // 2026-08-19 修复「天气/位置在 fast 模式失效」：fast 分支此前强制
             // userLocation=undefined。天气工具（weather.get_local）已并入
@@ -2304,9 +2365,11 @@ if (this.isComplexMode(route.mode)) {
             actorId,
             sessionId: ctx.sessionId,
             userText: text,
+            threadMessageCount: ctx.orchestrateToolCtx.threadMessageCount,
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
+            journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             personalization: ctx.personalization,
@@ -2664,6 +2727,7 @@ private async finishLlmTurn(
 
     if (this.shortTermMemoryGateway && meta.sessionId) {
       this.shortTermMemoryGateway.reconcileTaskAfterTurn(meta.sessionId, userText, trimmed);
+      getDailyJournalService()?.appendTurn(actorId, meta.sessionId, userText, trimmed);
     }
 
     return {

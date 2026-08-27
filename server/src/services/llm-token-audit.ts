@@ -48,6 +48,13 @@ export type LlmUsageRecord = {
   outputChars: number;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * API 真实返回的 prefix cache 命中 token 数（OpenAI prompt_tokens_details.cached_tokens /
+   * DeepSeek prompt_cache_hit_tokens）。仅主对话与工具循环从响应 usage 采集，旁路估算调用无此值。
+   */
+  promptCacheHitTokens?: number;
+  /** API 真实返回的 prefix cache 未命中 token 数（DeepSeek prompt_cache_miss_tokens）。 */
+  promptCacheMissTokens?: number;
 };
 
 export type LlmUsageAggregate = {
@@ -130,7 +137,19 @@ export function recordLlmUsage(rec: Omit<LlmUsageRecord, "t" | "inputTokens" | "
     ensureAuditFile();
     appendFileSync(
       auditLogPath(),
-      JSON.stringify({ ...rec, t: new Date().toISOString(), inputTokens, outputTokens }) + "\n",
+      JSON.stringify({
+        ...rec,
+        t: new Date().toISOString(),
+        inputTokens,
+        outputTokens,
+        // 只落盘真实缓存值，undefined 不序列化
+        ...(typeof rec.promptCacheHitTokens === "number"
+          ? { promptCacheHitTokens: rec.promptCacheHitTokens }
+          : {}),
+        ...(typeof rec.promptCacheMissTokens === "number"
+          ? { promptCacheMissTokens: rec.promptCacheMissTokens }
+          : {}),
+      }) + "\n",
     );
   } catch {
     /* 写盘失败静默，不影响主链路 */
@@ -147,6 +166,10 @@ export function recordLlmUsageByChars(args: {
   actorId?: string;
   sessionId?: string;
   model?: string;
+  /** API 真实返回的 prefix cache 命中 token 数（可选，仅主链路从响应 usage 采集） */
+  promptCacheHitTokens?: number;
+  /** API 真实返回的 prefix cache 未命中 token 数（可选） */
+  promptCacheMissTokens?: number;
 }): void {
   recordLlmUsage({
     stage: args.stage,
@@ -155,6 +178,8 @@ export function recordLlmUsageByChars(args: {
     actorId: args.actorId,
     sessionId: args.sessionId,
     model: args.model,
+    promptCacheHitTokens: args.promptCacheHitTokens,
+    promptCacheMissTokens: args.promptCacheMissTokens,
   });
 }
 

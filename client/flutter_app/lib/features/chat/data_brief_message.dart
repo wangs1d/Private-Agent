@@ -95,18 +95,29 @@ class _DataBriefMessageState extends State<DataBriefMessage> {
                   color: cs.primary.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Text(
-                  "📊 数据快报${hasKpis ? " · ${p.kpis.length} 项指标" : ""}",
-                  style: textTheme.labelSmall?.copyWith(
-                        color: cs.primary,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.1,
-                      ) ??
-                      TextStyle(
-                        fontSize: 11,
-                        color: cs.primary,
-                        fontWeight: FontWeight.w700,
-                      ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(
+                      Icons.bar_chart_rounded,
+                      size: 13,
+                      color: cs.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      "数据快报${hasKpis ? " · ${p.kpis.length} 项指标" : ""}",
+                      style: textTheme.labelSmall?.copyWith(
+                            color: cs.primary,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.1,
+                          ) ??
+                          TextStyle(
+                            fontSize: 11,
+                            color: cs.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -122,7 +133,7 @@ class _DataBriefMessageState extends State<DataBriefMessage> {
                 borderRadius: BorderRadius.circular(9),
                 border: Border(
                   left: BorderSide(
-                    color: cs.outline.withValues(alpha: 0.38),
+                    color: cs.primary.withValues(alpha: 0.5),
                     width: 2.5,
                   ),
                 ),
@@ -165,7 +176,9 @@ class _DataBriefMessageState extends State<DataBriefMessage> {
           ],
           // 详情（默认折叠）
           if (hasDetails) ...<Widget>[
-            const SizedBox(height: 4),
+            const SizedBox(height: 10),
+            Divider(height: 1, color: cs.outline.withValues(alpha: 0.10)),
+            const SizedBox(height: 2),
             TextButton.icon(
               onPressed: () =>
                   setState(() => _detailsExpanded = !_detailsExpanded),
@@ -213,7 +226,10 @@ class _DataBriefMessageState extends State<DataBriefMessage> {
   }
 }
 
-/// KPI 指标瓦片：标签 + 数值 + 变化（带涨跌色）。
+/// KPI 指标瓦片：标签 + 数值 + 变化（带涨跌色 pill）。
+///
+/// 布局：第一行 = 标签（省略号截断）+ 右上角涨跌 pill（▲/▼ + 百分比）；
+/// 第二行 = 大号数值（FittedBox 缩放，长数字不被截断）。
 class _KpiTile extends StatelessWidget {
   const _KpiTile({
     required this.point,
@@ -230,65 +246,70 @@ class _KpiTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color? changeColor = _changeColor(point.change);
+    final String? change = point.change;
+    final Color? changeColor = change == null ? null : _changeColor(change);
+    final bool hasChange = change != null && change.isNotEmpty;
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
       decoration: BoxDecoration(
-        color: cs.surface.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(10),
+        color: cs.surface.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(11),
         border: Border.all(color: cs.outline.withValues(alpha: 0.10)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Text(
-            point.label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.labelSmall?.copyWith(
-                  color: cs.onSurfaceVariant,
-                  fontWeight: FontWeight.w500,
-                ) ??
-                const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 4),
           Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: <Widget>[
-              Flexible(
+              Expanded(
                 child: Text(
-                  point.value,
+                  point.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        color: cs.onSurface,
-                        letterSpacing: -0.2,
+                  style: textTheme.labelSmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
                       ) ??
                       const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
                 ),
               ),
-              if (point.change != null && point.change!.isNotEmpty) ...<Widget>[
+              if (hasChange) ...<Widget>[
                 const SizedBox(width: 6),
-                Text(
-                  point.change!,
-                  style: textTheme.labelSmall?.copyWith(
-                        color: changeColor,
-                        fontWeight: FontWeight.w700,
-                      ) ??
-                      TextStyle(
-                        fontSize: 11,
-                        color: changeColor,
-                        fontWeight: FontWeight.w700,
-                      ),
+                _ChangePill(
+                  text: change,
+                  color: changeColor,
+                  cs: cs,
+                  textTheme: textTheme,
                 ),
               ],
             ],
+          ),
+          const SizedBox(height: 7),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              point.value,
+              maxLines: 1,
+              style: textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: cs.onSurface,
+                    letterSpacing: -0.4,
+                    height: 1.1,
+                  ) ??
+                  const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.4,
+                    height: 1.1,
+                  ),
+            ),
           ),
         ],
       ),
@@ -302,6 +323,52 @@ class _KpiTile extends StatelessWidget {
     if (c.startsWith("+")) return _upColor;
     if (c.startsWith("-") || c.startsWith("−")) return _downColor;
     return null;
+  }
+}
+
+/// 涨跌幅小 pill：▲ / ▼ 箭头 + 文本，底色铺同色透明层。
+class _ChangePill extends StatelessWidget {
+  const _ChangePill({
+    required this.text,
+    required this.color,
+    required this.cs,
+    required this.textTheme,
+  });
+
+  final String text;
+  final Color? color;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+
+  @override
+  Widget build(BuildContext context) {
+    final String trimmed = text.trim();
+    final bool up = trimmed.startsWith("+");
+    final bool down = trimmed.startsWith("-") || trimmed.startsWith("−");
+    final String arrow = up ? "▲" : (down ? "▼" : "");
+    final Color c = color ?? cs.onSurfaceVariant;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        arrow.isEmpty ? trimmed : "$arrow $trimmed",
+        style: textTheme.labelSmall?.copyWith(
+              color: c,
+              fontWeight: FontWeight.w700,
+              fontSize: 10.5,
+              height: 1.1,
+            ) ??
+            const TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              height: 1.1,
+            ),
+      ),
+    );
   }
 }
 

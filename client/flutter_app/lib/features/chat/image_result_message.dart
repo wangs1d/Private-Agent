@@ -164,18 +164,29 @@ class ImageResultMessage extends StatelessWidget {
                   color: cs.primary.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Text(
-                  "🔍 识图结果${urls.isNotEmpty ? " · ${urls.length} 图" : ""}",
-                  style: textTheme.labelSmall?.copyWith(
-                        color: cs.primary,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.1,
-                      ) ??
-                      TextStyle(
-                        fontSize: 11,
-                        color: cs.primary,
-                        fontWeight: FontWeight.w700,
-                      ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(
+                      Icons.image_search_rounded,
+                      size: 13,
+                      color: cs.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      "识图结果${urls.isNotEmpty ? " · ${urls.length} 图" : ""}",
+                      style: textTheme.labelSmall?.copyWith(
+                            color: cs.primary,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.1,
+                          ) ??
+                          TextStyle(
+                            fontSize: 11,
+                            color: cs.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ],
                 ),
               ),
             ],

@@ -48,6 +48,7 @@ import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
+import { initDailyJournalService } from "../services/daily-journal-service.js";
 import {
   initNightlyMemoryTaskService,
   getNightlyMemoryTaskService,
@@ -770,10 +771,12 @@ export async function createAppServices(): Promise<AppServices> {
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
+  // DailyJournal：当日对话日志（白天写入 + 当天词法检索 + 夜晚固化数据源）。
   const [humanLikeMemory, shortTermMemoryGateway] = await Promise.all([
     initHumanLikeMemoryService(),
     initShortTermMemoryGatewayService(),
   ]);
+  initDailyJournalService();
   const narrativeMemory = wrapNarrativeWithHybrid(
     createNarrativeMemoryPort({
       agenticIngest: agenticMemoryRuntime?.ingest ?? null,
