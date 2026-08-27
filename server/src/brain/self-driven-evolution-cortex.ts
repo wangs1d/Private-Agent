@@ -261,46 +261,22 @@ export class SelfDrivenEvolutionProposer {
       const target = `${result.watch.domain}:${result.latestVersion}`;
       if (this.isRecentlyProposed(target)) continue;
 
-      // LLM 深度评估
-      const assessment = await evaluateWithLlm(this.llm, {
-        scenario: "tech_scan",
-        domain: result.watch.domain,
-        currentVersion: result.watch.currentVersion,
-        latestVersion: result.latestVersion ?? undefined,
-        scanAssessment: result.assessment,
-      });
-
-      // LLM 评估结果：shouldProceed=false 则跳过
-      if (assessment && !assessment.shouldProceed) {
-        console.log(`[SelfDrivenEvolution] LLM 评估不建议升级 ${target}：${assessment.rationale}`);
-        continue;
-      }
-
+      // self_upgrade 是纯后台自动能力，不依赖 LLM 评估：规则层（benefit=high + risk≠high）
+      // 已筛出高收益低风险升级，直接交给沙箱测试执行器（ok → loaded / 失败 → 封顶重试后 rejected）。
       const proposalId = `self-upgrade-tech-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      // 将 LLM 评估结果编码到 description 中
-      const llmDesc = assessment
-        ? `\n[LLM 评估] 风险：${assessment.riskLevel}；破坏性变更：${assessment.breakingChanges.length > 0 ? assessment.breakingChanges.join("; ") : "无"}；策略：${assessment.upgradeStrategy}；测试计划：${assessment.testPlan.join(", ")}`
-        : "";
-      const llmRationale = assessment ? `\n[LLM 理由] ${assessment.rationale}` : "";
 
       const proposal: EvolutionProposal = {
         id: proposalId,
         type: "self_upgrade",
         title: `升级 ${result.watch.domain} 到 ${result.latestVersion}`,
-        description: `${suggestedAction}${llmDesc}`,
-        rationale: `ExternalTechScanner 发现新版本。理由：${rationale}${llmRationale}`,
+        description: suggestedAction,
+        rationale: `ExternalTechScanner 发现新版本。理由：${rationale}`,
         status: "pending",
         createdAt: now,
         updatedAt: now,
       };
       proposals.push(proposal);
       this.proposedAt.set(target, Date.now());
-
-      // 缓存 LLM 评估结果
-      if (assessment) {
-        this.assessments.set(proposalId, assessment);
-      }
     }
 
     return proposals;
@@ -325,42 +301,21 @@ export class SelfDrivenEvolutionProposer {
       const target = `failure:${stat.capabilityId}`;
       if (this.isRecentlyProposed(target)) continue;
 
-      // LLM 深度评估
-      const assessment = await evaluateWithLlm(this.llm, {
-        scenario: "failure_rate",
-        domain: stat.capabilityId,
-        failureStats: stat,
-      });
-
-      // LLM 评估结果：shouldProceed=false 则跳过
-      if (assessment && !assessment.shouldProceed) {
-        console.log(`[SelfDrivenEvolution] LLM 评估不建议优化 ${target}：${assessment.rationale}`);
-        continue;
-      }
-
+      // 纯规则产出（不调 LLM）：失败率持续超阈值已达规则闸门，直接交给自我修复执行器
       const proposalId = `self-upgrade-failure-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      const llmDesc = assessment
-        ? `\n[LLM 评估] 策略：${assessment.upgradeStrategy}；测试计划：${assessment.testPlan.join(", ")}`
-        : "";
-      const llmRationale = assessment ? `\n[LLM 理由] ${assessment.rationale}` : "";
 
       const proposal: EvolutionProposal = {
         id: proposalId,
         type: "self_upgrade",
         title: `优化能力「${stat.capabilityName}」（失败率 ${(stat.failureRate * 100).toFixed(0)}% 持续 ${stat.consecutiveDaysAboveThreshold} 天）`,
-        description: `能力失败率持续超阈值，需优化工具实现或补充知识${llmDesc}`,
-        rationale: `AgentSelfLearningService 显示 ${stat.capabilityId} 失败率 ${stat.failureRate.toFixed(2)} 持续 ${stat.consecutiveDaysAboveThreshold} 天${llmRationale}`,
+        description: `能力失败率持续超阈值，需优化工具实现或补充知识`,
+        rationale: `AgentSelfLearningService 显示 ${stat.capabilityId} 失败率 ${stat.failureRate.toFixed(2)} 持续 ${stat.consecutiveDaysAboveThreshold} 天`,
         status: "pending",
         createdAt: now,
         updatedAt: now,
       };
       proposals.push(proposal);
       this.proposedAt.set(target, Date.now());
-
-      if (assessment) {
-        this.assessments.set(proposalId, assessment);
-      }
     }
 
     return proposals;
@@ -384,42 +339,21 @@ export class SelfDrivenEvolutionProposer {
       const target = `benchmark:${regression.benchmarkName}`;
       if (this.isRecentlyProposed(target)) continue;
 
-      // LLM 深度评估
-      const assessment = await evaluateWithLlm(this.llm, {
-        scenario: "benchmark",
-        domain: regression.benchmarkName,
-        regression,
-      });
-
-      // LLM 评估结果：shouldProceed=false 则跳过
-      if (assessment && !assessment.shouldProceed) {
-        console.log(`[SelfDrivenEvolution] LLM 评估不建议修复 ${target}：${assessment.rationale}`);
-        continue;
-      }
-
+      // 纯规则产出（不调 LLM）：回归幅度已达规则闸门，直接交给自我修复执行器
       const proposalId = `self-upgrade-bench-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      const llmDesc = assessment
-        ? `\n[LLM 评估] 策略：${assessment.upgradeStrategy}；测试计划：${assessment.testPlan.join(", ")}`
-        : "";
-      const llmRationale = assessment ? `\n[LLM 理由] ${assessment.rationale}` : "";
 
       const proposal: EvolutionProposal = {
         id: proposalId,
         type: "self_upgrade",
         title: `修复性能回归：${regression.benchmarkName}（回归 ${regression.regressionPercent.toFixed(1)}%）`,
-        description: `Benchmark 检测到性能回归，当前 ${regression.currentValue} vs 基线 ${regression.baselineValue}${llmDesc}`,
-        rationale: `BenchmarkSelfAssessment 检测到 ${regression.benchmarkName} 回归 ${regression.regressionPercent.toFixed(1)}%${llmRationale}`,
+        description: `Benchmark 检测到性能回归，当前 ${regression.currentValue} vs 基线 ${regression.baselineValue}`,
+        rationale: `BenchmarkSelfAssessment 检测到 ${regression.benchmarkName} 回归 ${regression.regressionPercent.toFixed(1)}%`,
         status: "pending",
         createdAt: now,
         updatedAt: now,
       };
       proposals.push(proposal);
       this.proposedAt.set(target, Date.now());
-
-      if (assessment) {
-        this.assessments.set(proposalId, assessment);
-      }
     }
 
     return proposals;

@@ -204,6 +204,8 @@ interface EvolutionLoopLike {
 interface ProposalMeta {
   /** 最近一次执行错误 */
   lastError?: string;
+  /** 连续执行失败次数（达到 MAX_EXECUTE_RETRIES 后转 rejected，防无限重试/烧 LLM） */
+  retryCount?: number;
   /** 执行过程中产生的 warning 列表 */
   warnings: string[];
   /** 拒绝原因 */
@@ -452,9 +454,49 @@ export class EvolutionCortex {
       return;
     }
     await this.load();
+    this.sweepLegacyProposals();
     this.started = true;
     this.startAutoEvolutionLoop();
     console.log("[EvolutionCortex] 启动完成（自动进化 loop 已启动）");
+  }
+
+  /**
+   * 启动时清理历史遗留的非终态堆积提案（修复"approved 越堆越多 + 后台反复空转"问题）。
+   *
+   * 背景：早期版本（无失败封顶、无断生成）会让大量提案卡在 pending/reviewing/approved/generated
+   * 状态并随时间累积；启动时统一收口——仍待处理的 reset 其失败计数，长时间无进展的堆积直接转
+   * rejected（终态），从而一次重启即可清空历史债，且不阻塞新提案的正常涌现。
+   */
+  private sweepLegacyProposals(): void {
+    const now = Date.now();
+    let swept = 0;
+    let reset = 0;
+    for (const [id, proposal] of this.proposals) {
+      const isTerminal = TERMINAL_STATUS.has(proposal.status);
+      const ageMs =
+        now - (proposal.createdAt ? Date.parse(proposal.createdAt) : Number.NaN);
+      const stale = Number.isNaN(ageMs) ? true : ageMs > 60 * 60 * 1000; // >1h 视为堆积
+      if (isTerminal) continue;
+      if (stale) {
+        const meta = this.ensureMeta(id);
+        meta.retryCount = 0;
+        meta.rejectReason = "历史遗留堆积清理（启动时收口超出 1h 未解决的非终态提案）";
+        const next = this.transition(id, [proposal.status], "rejected");
+        this.proposals.set(id, next ?? proposal);
+        swept++;
+      } else {
+        // 新建的提案保留，但重置失败计数，给一次干净的重试机会
+        const meta = this.ensureMeta(id);
+        meta.retryCount = 0;
+        reset++;
+      }
+    }
+    if (swept || reset) {
+      this.schedulePersist();
+      console.log(
+        `[EvolutionCortex] 启动清理：堆积收口 ${swept} 条 → rejected，重置 ${reset} 条待处理`,
+      );
+    }
   }
 
   async stop(): Promise<void> {
@@ -507,52 +549,74 @@ export class EvolutionCortex {
    */
   private async runAutoEvolutionCycle(): Promise<void> {
     if (!this.selfLearning) return;
-
-    // 阶段 1：识别缺口 → 创建提案
-    const newProposal = this.fromSelfLearningGap();
-    if (newProposal) {
-      console.log(`[EvolutionCortex] autoLoop 识别到能力缺口，创建提案 ${newProposal.id}`);
+    if (this.autoLoopRunning) {
+      console.log("[EvolutionCortex] autoLoop 上一轮仍在执行，跳过本轮（防并发叠加）");
+      return;
     }
-
-    // 阶段 2：推进 pending → reviewing → approved
-    for (const proposal of this.proposals.values()) {
-      if (proposal.status === "pending") {
-        this.review(proposal.id);
+    this.autoLoopRunning = true;
+    try {
+      // 阶段 1：识别缺口 → 创建提案
+      const newProposal = this.fromSelfLearningGap();
+      if (newProposal) {
+        console.log(`[EvolutionCortex] autoLoop 识别到能力缺口，创建提案 ${newProposal.id}`);
       }
-      if (proposal.status === "reviewing") {
-        // 规则自动批准（非 LLM）：目前所有通过 review 的提案都自动批准
-        this.approve(proposal.id);
-        console.log(`[EvolutionCortex] autoLoop 自动批准提案 ${proposal.id}`);
-      }
-    }
 
-    // 阶段 3：执行 approved → 直接装载（不再等用户审批）
-    // execute() 内部已直接调用 PromotionPipeline.promote 完成 skill 装载：
-    //  - new_capability/optimize_existing：LLM 生成 → promote → loaded
-    //  - knowledge_gap：RAG 召回 + 联网兜底 + 沉淀 → loaded
-    // 失败时保持 approved + lastError，下一轮 autoLoop 会重试
-    for (const proposal of this.proposals.values()) {
-      if (proposal.status === "approved") {
-        const executed = await this.execute(proposal.id);
-        if (executed) {
-          console.log(
-            `[EvolutionCortex] autoLoop 提案 ${proposal.id} 执行完成，状态=${executed.status}`,
-          );
+      // 阶段 2：推进 pending → reviewing → approved
+      for (const proposal of this.proposals.values()) {
+        if (proposal.status === "pending") {
+          this.review(proposal.id);
+        }
+        if (proposal.status === "reviewing") {
+          // 规则自动批准（非 LLM）：目前所有通过 review 的提案都自动批准
+          this.approve(proposal.id);
+          console.log(`[EvolutionCortex] autoLoop 自动批准提案 ${proposal.id}`);
         }
       }
-    }
 
-    // 阶段 4：处理遗留的 generated 提案（PromotionPipeline 未注册时的兜底路径）
-    // 当 PromotionPipeline 未注册时，execute() 会降级为标记 generated。
-    // 此处重试 execute()，期待 PromotionPipeline 已就绪后能完成装载。
-    for (const proposal of this.proposals.values()) {
-      if (proposal.status === "generated") {
-        // 重置为 approved 让下一轮能再次执行
-        this.transition(proposal.id, ["generated"], "approved");
-        console.log(
-          `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退为 approved（等下轮重试装载）`,
-        );
+      // 阶段 3：执行 approved → 直接装载（不再等用户审批）
+      // execute() 内部已直接调用 PromotionPipeline.promote 完成 skill 装载：
+      //  - new_capability/optimize_existing：LLM 生成 → promote → loaded
+      //  - knowledge_gap：RAG 召回 + 联网兜底 + 沉淀 → loaded
+      // 失败时保持 approved + lastError，下一轮 autoLoop 会重试（有 MAX_EXECUTE_RETRIES 封顶）
+      // 每轮最多处理 MAX_EXECUTE_PER_CYCLE 个，避免单轮执行过久与并发叠加
+      let executedCount = 0;
+      for (const proposal of this.proposals.values()) {
+        if (executedCount >= EvolutionCortex.MAX_EXECUTE_PER_CYCLE) break;
+        if (proposal.status === "approved") {
+          const executed = await this.execute(proposal.id);
+          executedCount++;
+          if (executed) {
+            console.log(
+              `[EvolutionCortex] autoLoop 提案 ${proposal.id} 执行完成，状态=${executed.status}`,
+            );
+          }
+        }
       }
+
+      // 阶段 4：处理遗留的 generated 提案（PromotionPipeline 未注册时的兜底路径）
+      // 原来无限回退 generated → approved 会造成无限竞态（generated/approved 乒乓）。
+      // 现在改为带失败计数：超 MAX_EXECUTE_RETRIES 次的 generated 直接收口为 rejected（终态）；
+      // 未超限的才回退为 approved 让下一轮重试一次。
+      for (const proposal of this.proposals.values()) {
+        if (proposal.status === "generated") {
+          const retry = this.bumpRetry(proposal.id);
+          if (retry >= EvolutionCortex.MAX_EXECUTE_RETRIES) {
+            const meta = this.ensureMeta(proposal.id);
+            meta.rejectReason = "generated 提案多次回退后仍无法装载，终止";
+            this.transition(proposal.id, ["generated"], "rejected");
+            console.log(
+              `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退达上限，转 rejected`,
+            );
+          } else {
+            this.transition(proposal.id, ["generated"], "approved");
+            console.log(
+              `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退为 approved（第${retry}次）`,
+            );
+          }
+        }
+      }
+    } finally {
+      this.autoLoopRunning = false;
     }
   }
 
@@ -592,13 +656,17 @@ export class EvolutionCortex {
   evolve(
     proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
   ): EvolutionProposal {
-    // 去重检查：若已有同 type + 同 title 的 pending/reviewing 提案，复用之，不重复生成
-    // 避免 DMN 多次触发时累积大量相同提案
+    // 去重检查：若已有同 type + 同 title 的非终态提案（pending/reviewing/approved/generated），
+    // 复用之，不重复生成。只有在彻底收口为 rejected/loaded（终态）后才允许重建，
+    // 避免同一 gap 在 autoLoop 多轮里反复产生重复堆积。
     const existing = [...this.proposals.values()].find(
       (p) =>
         p.type === proposal.type &&
         p.title === proposal.title &&
-        (p.status === "pending" || p.status === "reviewing"),
+        (p.status === "pending" ||
+          p.status === "reviewing" ||
+          p.status === "approved" ||
+          p.status === "generated"),
     );
     if (existing) {
       console.log(
@@ -879,21 +947,15 @@ export class EvolutionCortex {
       try {
         const result: SkillGenerationResult = await this.skillGenerator.generateSkill(request);
         if (!result.ok || !result.skill) {
-          meta.lastError = result.error ?? "SkillGenerator 返回失败但未提供错误信息";
-          const next = this.touch(current);
-          this.proposals.set(proposalId, next);
-          this.schedulePersist();
-          console.log(`[EvolutionCortex] execute ${proposalId} 生成失败：${meta.lastError}`);
-          return next;
+          const err = result.error ?? "SkillGenerator 返回失败但未提供错误信息";
+          console.log(`[EvolutionCortex] execute ${proposalId} 生成失败：${err}`);
+          return this.recordRetryFailure(proposalId, current, err);
         }
         generatedSkill = result.skill;
       } catch (err) {
-        meta.lastError = err instanceof Error ? err.message : String(err);
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(`[EvolutionCortex] execute ${proposalId} 生成异常：${meta.lastError}`);
-        return next;
+        const errText = err instanceof Error ? err.message : String(err);
+        console.log(`[EvolutionCortex] execute ${proposalId} 生成异常：${errText}`);
+        return this.recordRetryFailure(proposalId, current, errText);
       }
     }
 
@@ -938,25 +1000,14 @@ export class EvolutionCortex {
           );
           return next;
         } else {
-          // 装载失败：保持 approved + lastError，等下一轮 autoLoop 重试
-          meta.lastError = promoteResult.error ?? "PromotionPipeline.promote 返回失败";
-          const next = this.touch(current);
-          this.proposals.set(proposalId, next);
-          this.schedulePersist();
-          console.log(
-            `[EvolutionCortex] 提案 ${proposalId} 装载失败：${meta.lastError}（保持 approved，等下轮重试）`,
-          );
-          return next;
+          // 装载失败：带失败计数重试，超限自动收口为 rejected
+          const err = promoteResult.error ?? "PromotionPipeline.promote 返回失败";
+          return this.recordRetryFailure(proposalId, current, err);
         }
       } catch (err) {
-        meta.lastError = err instanceof Error ? err.message : String(err);
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(
-          `[EvolutionCortex] 提案 ${proposalId} promote 异常：${meta.lastError}`,
-        );
-        return next;
+        const errText = err instanceof Error ? err.message : String(err);
+        console.log(`[EvolutionCortex] 提案 ${proposalId} promote 异常：${errText}`);
+        return this.recordRetryFailure(proposalId, current, errText);
       }
     }
 
@@ -1023,14 +1074,9 @@ export class EvolutionCortex {
       });
 
       if (!result.ok) {
-        meta.lastError = result.error ?? "KnowledgeGapExecutor 返回失败但未提供错误信息";
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(
-          `[EvolutionCortex] executeKnowledgeGap ${proposalId} 失败：${meta.lastError}`,
-        );
-        return next;
+        const err = result.error ?? "KnowledgeGapExecutor 返回失败但未提供错误信息";
+        console.log(`[EvolutionCortex] executeKnowledgeGap ${proposalId} 失败：${err}`);
+        return this.recordRetryFailure(proposalId, current, err);
       }
 
       // 知识沉淀成功 → 标记 loaded（终态）
@@ -1052,14 +1098,9 @@ export class EvolutionCortex {
       );
       return next;
     } catch (err) {
-      meta.lastError = err instanceof Error ? err.message : String(err);
-      const next = this.touch(current);
-      this.proposals.set(proposalId, next);
-      this.schedulePersist();
-      console.log(
-        `[EvolutionCortex] executeKnowledgeGap ${proposalId} 异常：${meta.lastError}`,
-      );
-      return next;
+      const errText = err instanceof Error ? err.message : String(err);
+      console.log(`[EvolutionCortex] executeKnowledgeGap ${proposalId} 异常：${errText}`);
+      return this.recordRetryFailure(proposalId, current, errText);
     }
   }
 
@@ -1087,14 +1128,13 @@ export class EvolutionCortex {
     const meta = this.ensureMeta(proposalId);
 
     if (!this.codeRepairRef?.executeUpgrade) {
-      meta.warnings.push("CodeRepairExecutor 未注册，无法执行自我升级");
-      console.log(
-        `[EvolutionCortex] executeSelfUpgrade ${proposalId}: CodeRepairExecutor 未注册`,
-      );
-      const next = this.setStatus(current, "generated");
-      this.proposals.set(proposalId, next);
+      const err = "CodeRepairExecutor 未注册，无法执行自我升级（收口为 rejected，避免无限 generated 乒乓）";
+      meta.warnings.push(err);
+      meta.rejectReason = err;
+      console.log(`[EvolutionCortex] executeSelfUpgrade ${proposalId}: ${err}`);
+      const next = this.transition(proposalId, [current.status], "rejected");
       this.schedulePersist();
-      return next;
+      return next ?? current;
     }
 
     try {
@@ -1109,9 +1149,8 @@ export class EvolutionCortex {
       });
 
       if (!result.ok) {
-        meta.lastError = result.error ?? "升级沙箱测试失败";
         if (result.sandboxReport) {
-          // 保存完整沙箱报告，供 self_evolution 工具查询
+          // 保存完整沙箱报告，供 self_evolution 工具查询（审计记录）
           meta.sandboxReport = result.sandboxReport;
           meta.warnings.push(
             `tscPassed=${result.sandboxReport.tscPassed}, ` +
@@ -1119,13 +1158,9 @@ export class EvolutionCortex {
             `rolledBack=${result.sandboxReport.rolledBack}`,
           );
         }
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(
-          `[EvolutionCortex] executeSelfUpgrade ${proposalId} 沙箱测试失败：${meta.lastError}`,
-        );
-        return next;
+        const err = result.error ?? "升级沙箱测试失败";
+        console.log(`[EvolutionCortex] executeSelfUpgrade ${proposalId} 沙箱测试失败：${err}`);
+        return this.recordRetryFailure(proposalId, current, err);
       }
 
       // 升级沙箱测试通过 → 标记 loaded（终态）
@@ -1152,14 +1187,9 @@ export class EvolutionCortex {
       );
       return next;
     } catch (err) {
-      meta.lastError = err instanceof Error ? err.message : String(err);
-      const next = this.touch(current);
-      this.proposals.set(proposalId, next);
-      this.schedulePersist();
-      console.log(
-        `[EvolutionCortex] executeSelfUpgrade ${proposalId} 异常：${meta.lastError}`,
-      );
-      return next;
+      const errText = err instanceof Error ? err.message : String(err);
+      console.log(`[EvolutionCortex] executeSelfUpgrade ${proposalId} 异常：${errText}`);
+      return this.recordRetryFailure(proposalId, current, errText);
     }
   }
 
@@ -1233,13 +1263,7 @@ export class EvolutionCortex {
           return next;
         }
         meta.lastError = result.error ?? "SkillGenerator.generateProceduralSkill 返回失败";
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(
-          `[EvolutionCortex] executeSkillDistill ${proposalId} 失败：${meta.lastError}`,
-        );
-        return next;
+        return this.recordRetryFailure(proposalId, current, meta.lastError);
       }
 
       // LLM 生成了 SKILL.md，调用 ProceduralSink 落盘 + 注册
@@ -1260,14 +1284,11 @@ export class EvolutionCortex {
 
       const sinkResult = this.proceduralSink.registerProceduralSkill(skillMeta, skill.doc);
       if (!sinkResult.ok) {
-        meta.lastError = sinkResult.error ?? "ProceduralSink.registerProceduralSkill 失败";
-        const next = this.touch(current);
-        this.proposals.set(proposalId, next);
-        this.schedulePersist();
-        console.log(
-          `[EvolutionCortex] executeSkillDistill ${proposalId} 落盘失败：${meta.lastError}`,
+        return this.recordRetryFailure(
+          proposalId,
+          current,
+          sinkResult.error ?? "ProceduralSink.registerProceduralSkill 失败",
         );
-        return next;
       }
 
       meta.generatedSkill = {
@@ -1284,14 +1305,9 @@ export class EvolutionCortex {
       );
       return next;
     } catch (err) {
-      meta.lastError = err instanceof Error ? err.message : String(err);
-      const next = this.touch(current);
-      this.proposals.set(proposalId, next);
-      this.schedulePersist();
-      console.log(
-        `[EvolutionCortex] executeSkillDistill ${proposalId} 异常：${meta.lastError}`,
-      );
-      return next;
+      const errText = err instanceof Error ? err.message : String(err);
+      console.log(`[EvolutionCortex] executeSkillDistill ${proposalId} 异常：${errText}`);
+      return this.recordRetryFailure(proposalId, current, errText);
     }
   }
 
@@ -1671,6 +1687,50 @@ export class EvolutionCortex {
     return m;
   }
 
+  /** 触发一次已处理的提案过滤（autoLoop 每轮最多处理的数量，防止单轮执行过多堆积） */
+  private static readonly MAX_EXECUTE_PER_CYCLE = 20;
+  /** 单提案最大执行失败重试次数，超过则直接转 rejected（终态），防无限重试/烧 LLM */
+  private static readonly MAX_EXECUTE_RETRIES = 3;
+
+  /** 递增某提案的连续失败次数 */
+  private bumpRetry(proposalId: string): number {
+    const m = this.ensureMeta(proposalId);
+    m.retryCount = (m.retryCount ?? 0) + 1;
+    return m.retryCount;
+  }
+
+  /**
+   * 统一记录一次执行失败：递增失败计数，若超过 MAX_EXECUTE_RETRIES 则转 rejected（终态），
+   * 否则保持原状态 touch（下一轮 autoLoop 重试）。杜绝失败提案无限重试。
+   */
+  private recordRetryFailure(
+    proposalId: string,
+    current: EvolutionProposal,
+    error: string,
+  ): EvolutionProposal {
+    const meta = this.ensureMeta(proposalId);
+    meta.lastError = error;
+    const retry = this.bumpRetry(proposalId);
+    console.log(`[EvolutionCortex] 提案 ${proposalId} 执行失败(第${retry}次)：${error}`);
+    if (retry >= EvolutionCortex.MAX_EXECUTE_RETRIES) {
+      meta.rejectReason = `执行连续失败 ${retry} 次后终止：${error}`;
+      const next = this.transition(proposalId, [current.status], "rejected");
+      if (next) {
+        console.log(
+          `[EvolutionCortex] 提案 ${proposalId} 连续失败达 ${EvolutionCortex.MAX_EXECUTE_RETRIES} 次，转 rejected（终态）`,
+        );
+      }
+      return next ?? current;
+    }
+    const next = this.touch(current);
+    this.proposals.set(proposalId, next);
+    this.schedulePersist();
+    return next;
+  }
+
+  /** autoLoop 是否正在运行（防止执行耗时长导致多个 cycle 并发叠加） */
+  private autoLoopRunning = false;
+
   // ---- 内部：SkillGenerator 请求构造 ----------------------------------
 
   private buildSkillGenerationRequest(
@@ -1854,6 +1914,7 @@ export class EvolutionCortex {
   private normalizeMeta(raw: Partial<ProposalMeta>): ProposalMeta {
     return {
       lastError: typeof raw.lastError === "string" ? raw.lastError : undefined,
+      retryCount: typeof raw.retryCount === "number" ? raw.retryCount : undefined,
       warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
       rejectReason: typeof raw.rejectReason === "string" ? raw.rejectReason : undefined,
       generatedSkill:

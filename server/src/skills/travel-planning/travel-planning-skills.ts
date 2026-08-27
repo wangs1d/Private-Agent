@@ -77,7 +77,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         pricingSummary: "价格汇总",
       },
       permissions: ["network:external"],
-      timeoutMs: 30_000,
+      // 首次冷启动（缓存未命中：地理编码+POI搜索+批量抓图）需 30s+，放宽到 120s（validator 上限已同步放宽）
+      timeoutMs: 120_000,
     },
     handler: async (input) => {
       const rawInput = typeof input.input === "string" ? input.input.trim() : "";

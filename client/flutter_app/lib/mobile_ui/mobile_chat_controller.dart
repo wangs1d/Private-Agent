@@ -40,10 +40,15 @@ class MobileChatController extends ChangeNotifier {
   /// 当前流式助手消息 id。
   String? _streamingMessageId;
 
+  /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
+  /// 输入框左上角据此展示「球形图标 + 正在调用:xxx」。
+  String? currentToolName;
+
   /// 打开一个新会话：仅清空本地内存，仍连接同一后端。
   void reset() {
     messages.clear();
     _streamingMessageId = null;
+    currentToolName = null;
     isProcessing = false;
     notifyListeners();
   }
@@ -114,6 +119,14 @@ class MobileChatController extends ChangeNotifier {
         _appendChunk(payload);
       case "chat.media_ready":
         _handleMediaReady(payload);
+      case "tool.call":
+        currentToolName = payload["toolName"]?.toString().trim() ?? "";
+        isProcessing = true;
+        notifyListeners();
+      case "tool.result":
+        // 当前这把工具结束，让位给下一把（若链式调用，紧随的 tool.call 会重新置位）
+        currentToolName = null;
+        notifyListeners();
       case "chat.assistant_done":
         _finalizeReply(payload);
       case "chat.error":
@@ -251,6 +264,7 @@ class MobileChatController extends ChangeNotifier {
       );
     }
     _streamingMessageId = null;
+    currentToolName = null;
     isProcessing = false;
     notifyListeners();
   }

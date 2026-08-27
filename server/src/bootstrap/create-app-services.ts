@@ -1522,13 +1522,9 @@ export async function createAppServices(): Promise<AppServices> {
           // 从 proposal title 中解析包名和版本
           const target = params.target;
 
-          // 有 breaking changes 时不自动升级，需人工确认
-          if (params.llmAssessment?.breakingChanges?.length) {
-            return {
-              ok: false,
-              error: `LLM 识别到 ${params.llmAssessment.breakingChanges.length} 个潜在 breaking changes，需人工确认：${params.llmAssessment.breakingChanges.join("; ")}`,
-            };
-          }
+          // 纯规则 + 沙箱自动升级（不再依赖 LLM 评估做 breaking-changes 人工确认闸门）。
+          // 设计变更：self_upgrade 是纯后台自动能力，规则层已筛掉高风险升级，
+          // 这里交给 UpgradeSandboxRunner 以"备份→安装→tsc/test→通过才应用，失败必回滚"决定成败。
 
           // 尝试从 title/suggestedAction 中查找白名单包名
           const allowedPkgs = UpgradeSandboxRunner.getAllowedPackages();
@@ -1585,7 +1581,7 @@ export async function createAppServices(): Promise<AppServices> {
       });
       console.log(
         "[EvolutionCortex] 已注册 Phase 5 自我进化：" +
-        "TechScanner(24h) + Benchmark(7d) + LLM评估 + 沙箱测试执行器",
+        "TechScanner(24h) + Benchmark(7d) + 纯规则筛选 + 沙箱测试执行器（无 LLM）",
       );
     } catch (err) {
       console.log("[EvolutionCortex] Phase 5 模块注册失败（忽略）:", err);

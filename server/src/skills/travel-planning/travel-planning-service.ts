@@ -1592,6 +1592,17 @@ export class PlanningService {
    * Nominatim 地理编码：地名 → 经纬度
    */
   private async geocode(query: string): Promise<{ center: Coordinates; displayName: string }> {
+    // 提速优化：先查本地已知坐标表。命中则毫秒级返回，跳过 Nominatim 网络请求。
+    // 绝大多数热门/常见目的地都命中本地表，首询可省掉最长 20s 的地理编码网络等待，
+    // 只有冷门目的地才回落到 Nominatim 兜底。
+    const knownLocal = this.findKnownCoordinates(query);
+    if (knownLocal) {
+      console.log(
+        `[OSM] 使用本地坐标: ${knownLocal.name} [${knownLocal.center.longitude}, ${knownLocal.center.latitude}]`,
+      );
+      return { center: knownLocal.center, displayName: knownLocal.name };
+    }
+
     const url = `${OSM_NOMINATIM_BASE}?` +
       `q=${encodeURIComponent(query)}&format=json&limit=1&addressdetails=1&accept-language=zh`;
 
@@ -1620,7 +1631,7 @@ export class PlanningService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[OSM] 地理编码失败(${query}):`, msg);
-      // 优先从已知目的地坐标表查找
+      // 优先从已知目的地坐标表查找（本地未命中过，此处作最终兜底）
       const known = this.findKnownCoordinates(query);
       if (known) {
         console.log(`[OSM] 使用已知坐标: ${known.name} [${known.center.longitude}, ${known.center.latitude}]`);

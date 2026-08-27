@@ -315,6 +315,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 服务端`chat.agent_status` 推送的口语化进度（替换固定「思考中」）
   String? _agentStatusLine;
 
+  /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
+  /// 输入框左上角据此展示「球形图标 + 正在调用:xxx」。
+  String? _currentToolName;
+
   /// `chat.agent_status` 携带的可选进度百分比（0-90，长工具心跳推进）。
   /// null = 无进度条（仅文本状态）；非 null = 渲染进度条。
   int? _agentStatusPercent;
@@ -768,6 +772,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "tool.call") {
           if (_isAgentProcessing) {
             final String toolName = payload["toolName"]?.toString() ?? "";
+            // 输入框左上角「当前工具」徽标：记录正在调用的工具名
+            if (toolName.isNotEmpty && _currentToolName != toolName) {
+              setState(() => _currentToolName = toolName);
+            } else if (toolName.isNotEmpty) {
+              _currentToolName = toolName;
+            }
             if (_subAgentDelegationActive &&
                 !isMasterInvokeSubAgentTool(toolName)) {
               return;
@@ -793,6 +803,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
         }
         if (type == "tool.result") {
+          // 当前工具结束，让位给下一把（若链式调用，紧随的 tool.call 会重新置位）
+          if (_currentToolName != null) {
+            setState(() => _currentToolName = null);
+          }
           final Map<String, dynamic>? result =
               (payload["result"] as Map?)?.cast<String, dynamic>();
           final String? playUrl = PlayUrlUtils.fromToolResult(result);
@@ -1921,6 +1935,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (!_isAgentProcessing &&
         _agentStatusLine == null &&
         _agentStatusPercent == null &&
+        _currentToolName == null &&
         _interimAckText == null &&
         !_subAgentDelegationActive &&
         _turnState == null &&
@@ -1931,6 +1946,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _isAgentProcessing = false;
       _agentStatusLine = null;
       _agentStatusPercent = null;
+      _currentToolName = null;
       _interimAckText = null;
       _subAgentDelegationActive = false;
       // v2：按调用方语义收尾 TurnState。
@@ -4551,6 +4567,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       isAgentProcessing: _isAgentProcessing,
       agentStatusLine: _agentStatusLine,
       agentStatusPercent: _agentStatusPercent,
+      currentToolName: _currentToolName,
       interimAckText: _interimAckText,
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,

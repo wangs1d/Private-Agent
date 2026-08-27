@@ -40,11 +40,12 @@ export class SkillSandbox {
     };
 
     try {
-      // 设置超时保护：优先使用 Skill 声明的 timeoutMs（验证器保证在 100-30000ms 之间），
+      // 设置超时保护：优先使用 Skill 声明的 timeoutMs（验证器保证在 100-120000ms 之间），
       // 未声明时回退构造参数 maxExecutionTime。
       const effectiveTimeout = skill.metadata.timeoutMs ?? this.maxExecutionTime;
+      let timeoutId: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutId = setTimeout(() => {
           reject(new Error(`Skill 执行超时 (${effectiveTimeout}ms)`));
         }, effectiveTimeout);
       });
@@ -54,6 +55,10 @@ export class SkillSandbox {
         skill.handler(input, execContext),
         timeoutPromise,
       ]);
+      // handler 先完成时清理超时定时器，避免句柄残留
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
 
       const executionTime = Date.now() - startTime;
 

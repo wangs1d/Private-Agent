@@ -4,6 +4,7 @@ import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
 import "../core/models/chat_models.dart";
 import "../features/chat/message_body_renderer.dart";
+import "../core/presentation/agent_avatar_catalog.dart";
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
@@ -297,10 +298,64 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 
   Widget _buildInputBar(BuildContext context, MobilePalette p) {
+    final String? toolName = _controller.currentToolName?.trim();
     return Container(
       color: p.surface,
       padding: EdgeInsets.fromLTRB(12, 10, 12, MediaQuery.of(context).padding.bottom + 10),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          // 输入框左上角：当前调用的工具徽标（有工具调用时显示，带球形机器人图标）
+          if (toolName != null && toolName.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: p.accent.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: p.accent.withValues(alpha: 0.30),
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      // 项目已有的球形机器人形象：圆形底色内以 contain 完整露出整个球
+                      ClipOval(
+                        child: Container(
+                          width: 16,
+                          height: 16,
+                          color: p.accent.withValues(alpha: 0.12),
+                          padding: const EdgeInsets.all(2),
+                          child: Image.asset(
+                            agentAvatarAssetPath("dawn"),
+                            fit: BoxFit.contain,
+                            errorBuilder: (_, __, ___) => const Padding(
+                              padding: EdgeInsets.all(2),
+                              child: Icon(Icons.smart_toy, size: 12),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        "正在调用：$toolName",
+                        style: TextStyle(
+                          color: p.accent,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
@@ -336,6 +391,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           _buildSendButton(p),
         ],
       ),
+      ],
+    ),
     );
   }
 

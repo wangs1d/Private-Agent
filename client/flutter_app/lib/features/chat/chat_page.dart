@@ -17,6 +17,7 @@ import "../../core/services/image_preview_launcher.dart";
 import "agent_profile_page.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
+import "agent_sphere_webview.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -42,6 +43,10 @@ class ChatPage extends StatefulWidget {
     this.isAgentProcessing = false,
     this.agentStatusLine,
     this.agentStatusPercent,
+
+    /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
+    /// 非空时在输入框左上角渲染「球形图标 + 正在调用:xxx」徽标。
+    this.currentToolName,
 
     /// 「分阶段异步对话交互」阶段一文本：在多步/工具型请求开始时显示的
     /// 即时确认应答（如「好的，让我查一下…」），real chunk 抵达后由父组件清空。
@@ -104,6 +109,9 @@ class ChatPage extends StatefulWidget {
   /// `chat.agent_status` 携带的进度百分比（0-90，长工具心跳）。
   /// 非 null 时处理中气泡下方渲染进度条。
   final int? agentStatusPercent;
+
+  /// 当前正在调用的工具名；非空时输入框左上角渲染当前工具徽标。
+  final String? currentToolName;
 
   /// `chat.assistant_interim` 推送的即时确认应答（生命周期更短：real chunk 一到就清空）
   final String? interimAckText;
@@ -817,6 +825,70 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
+  Widget _buildCurrentToolBadge(ColorScheme cs) {
+    final String tool = widget.currentToolName?.trim() ?? "";
+    final bool active = tool.isNotEmpty;
+
+    // 桌面端：真 3D 球形机器人（WebView2 内嵌 DG2 模型）。常驻挂载，仅切换
+    // visible，避免每次工具调用都重建 WebView2；徽标整体仅在 active 时显现。
+    final Widget sphere = SizedBox(
+      width: 20,
+      height: 20,
+      child: AgentSphereWebView(
+        showOverlayButton: false,
+        visible: active,
+      ),
+    );
+
+    if (!active) {
+      // 空闲：保留 3D 组件状态（清理时销毁），但不参与布局/渲染
+      return Visibility(
+        visible: false,
+        maintainState: true,
+        maintainAnimation: true,
+        maintainSemantics: true,
+        maintainSize: false,
+        child: sphere,
+      );
+    }
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        margin: const EdgeInsets.only(left: 4, bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: cs.primaryContainer.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: cs.primary.withValues(alpha: 0.3),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            sphere,
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                "正在调用：$tool",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showAgentProfilePopover(GlobalKey avatarKey) {
     if (widget.agentProfile == null) return;
 
@@ -1155,6 +1227,9 @@ class _ChatPageState extends State<ChatPage>
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
+                            // 左上角：当前调用的工具徽标（真 3D 球形机器人图标）。
+                            // 常驻挂载以复用 WebView2，内部仅在调用工具时显现。
+                            _buildCurrentToolBadge(cs),
                             // 第一行：输入框 + 发送/停止按钮
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.end,

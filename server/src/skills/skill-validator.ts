@@ -79,10 +79,12 @@ export class SkillValidator {
     }
 
     // 验证超时时间
-    if (metadata.timeoutMs !== undefined && (metadata.timeoutMs < 100 || metadata.timeoutMs > 30000)) {
+    // 上限放宽到 120s：travel.plan-itinerary 首次冷启动（地理编码+POI搜索+批量抓图）需 30s+，
+    // 原 30s 硬顶导致首询稳定超时。其它 skill 不主动设超过本身所需即不受影响。
+    if (metadata.timeoutMs !== undefined && (metadata.timeoutMs < 100 || metadata.timeoutMs > 120000)) {
       errors.push({
         field: "timeoutMs",
-        message: "超时时间必须在 100ms 到 30000ms 之间",
+        message: "超时时间必须在 100ms 到 120000ms 之间",
         code: "INVALID_TIMEOUT",
       });
     }
