@@ -35,6 +35,12 @@ const QUESTION_OPENING_RE =
 const CASUAL_SHORT_RE =
   /^(?:在吗|还在吗|哈哈|haha|lol|嗯|嗯嗯|好的|哦|噢|喔|行|好嘞|收到|谢谢你|辛苦啦|睡了吗|吃了吗|ok|okay)[呼号。．、？！?,!\s]*$/i;
 
+// 纯知识问答 / 概念解释（无需任何工具即可作答）→ 交 fast，不判为任务。
+// 覆盖"帮我解释一下X区别 / 讲讲 / 介绍一下 / 原理 / 是什么意思"这类纯口头问答；
+// 不含"看看/查查/整理/下载"等需要取料的动作，避免把真实任务误放回 fast。
+const KNOWLEDGE_QA_RE =
+  /帮我解释|解释[一下一]?|讲[一]?下|讲讲|介绍一下|怎么理解|的区别|的原理?|意味着什么|什么是|是什么|指的是|啥意思|什么意思|为什么.*?(?:会|能|要|这么)/i;
+
 /**
  * 判定消息是否为"要做某事"的可执行任务（路由到 complex）。
  *
@@ -47,10 +53,11 @@ export function isActionableTaskRequest(message: string): boolean {
   const t = (message ?? "").trim();
   if (!t) return false;
 
-  // 1) 寒暄 / 纯提问 / 实时单一查询优先排除（这些保留 fast）
+  // 1) 寒暄 / 纯提问 / 实时单一查询 / 纯知识问答优先排除（这些保留 fast）
   if (CASUAL_SHORT_RE.test(t)) return false;
   if (QUESTION_OPENING_RE.test(t)) return false;
   if (REALTIME_ONLY_RE.test(t)) return false;
+  if (KNOWLEDGE_QA_RE.test(t)) return false;
 
   const imperative = IMPERATIVE_RE.test(t);
   const verbHit = ACTION_VERB_RE.test(t);

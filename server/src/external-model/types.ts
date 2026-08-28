@@ -149,20 +149,10 @@ export type AgentPromptMemoryContext = {
    */
   semanticIntent?: string;
   /**
-   * FastVerdict 输出规范（仅 fast 模式 + FAST_VERDICT_ENABLED 时注入）。
-   * 要求 fast 在回复末尾附加隐藏结构化块 `<<<verdict:{json}>>>`，
-   * 供服务端流式解析取出与剥离（判定难度 + 产出给 complex 的封闭任务规范）。
-   * 该块不展示给用户。
-   */
-  fastVerdictInstruction?: string;
-  /**
    * 本模式职责人格（fast / complex 差异化 persona 注入）。
    * - fast：偏对话流畅、活人感、口语化，自然衔接，不做重活。
    * - complex：偏逻辑推理与工具调用，多步收敛，输出可直接复述的事实结论。
    * 由 agent-core 依据路由 mode 注入，让同一套基座人格在不同"脑"上各有侧重。
-   * 配合 fastVerdictInstruction（fast 判复杂性）与 completeParallelLiveContinuation
-   * （complex 完成后 fast 口语化续接）实现「simple→fast 直答 / complex→complex 后台办，
-   * 每轮只一个脑主导」的架构。
    */
   proactiveAdvice?: string;
   /**

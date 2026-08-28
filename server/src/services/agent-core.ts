@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
-import { parseFastVerdict, stripFastVerdictMarker, VerdictStreamGuard, type FastTaskSpec } from "../utils/fast-verdict.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
@@ -21,33 +20,14 @@ import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 
 /**
- * FastVerdict 输出规范（fast 模式注入 system prompt）。
- * 要求 fast 在回复正文末尾另附一行隐藏结构化块，供服务端解析剥离，不展示给用户：
- *  `<<<verdict:{单行 JSON}>>>`
- * 用于：判定本轮是否需并行 complex + 产出交给 complex 的封闭任务规范。
- * 置于最后，保证正文之后的判定不抢占视觉效果。
- */
-const FAST_VERDICT_PROMPT_INSTRUCTION = `【隐藏判定块·fast】本轮回复正文结束后，另起一行单独输出下面这个隐藏块（供服务端任务编排，绝不展示给用户，你正文里也不要提到它）：
-<<<verdict:{"need_complex":布尔,"difficulty":"simple|needs_external|multi_step","task_spec":{...}}>>>
-要求：
-- JSON 必须为单行合法 JSON，不要在块前后追加任何说明文字，不要把块写在正文里。
-- need_complex：本轮是否需要在后台并行 complex（查实时/外部信息、调工具/skill/MCP、多步任务）。
-- difficulty：simple=纯闲聊/常识/可直接作答；needs_external=需查实时或外部信息；multi_step=需多步协调/写操作/派子Agent。
-- task_spec 仅当 need_complex 为 true 时给出，为 { goal:简洁目标, expected_output:明确产出要求, constraints:约束或"无", tool_hints:建议工具名数组, budget:{max_tool_rounds,max_llm_calls} }。
-- 判定只取一次：simple 一律 need_complex=false 且不带 task_spec；needs_external/multi_step 才 need_complex=true。
-返回示例（need_complex=true）：<<<verdict:{"need_complex":true,"difficulty":"needs_external","task_spec":{"goal":"查询2026年奥斯卡最佳影片及导演","expected_output":"影片名+导演+一句话获奖说明，以事实为准","constraints":"无","tool_hints":["web.search"],"budget":{"max_tool_rounds":2,"max_llm_calls":3}}}>>>`;
-
-/**
  * 本模式职责人格（fast/complex 差异化 persona，2026-08-24 引入）。
  *
  * 设计动机：fast 与 complex 是同一套基座人格的两个"脑"，但职责不同——由 agent-core
  * 依据路由 mode 在 system prompt 中注入各自【本模式职责】块，让同一人格各有侧重：
  * - FAST_MODE_ROLE_GUIDANCE：偏对话流畅与活人感。负责 simple 直答、闲聊、节奏衔接；
- *   也是 complex 后台办完后"把结果自然说出口"的那张嘴（配合 synthesizeFastContinuation）。
  * - COMPLEX_MODE_ROLE_GUIDANCE：偏逻辑推理与工具调用。负责 complex 后台任务、多步收敛、
- *   产出可复述的事实结论；不关心口语节奏，输出交给 fast 续接。
- * 对应「每轮只一个脑主导」：simple→fast 直答；complex→complex 用工具办、不并行 fast；
- * 仅当复杂任务执行中用户再次发消息时，fast 独等对话、complex 继续后台跑，完成后 fast 口语化收尾。
+ *   产出可复述的事实结论。
+ * 对应「每轮只一个脑主导」：simple→fast 直答；complex→complex 用工具办。
  */
 const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"。
 - 面向对话：流畅、自然、口语化，有活人感（先说一句完整照应、稍作停顿再拓展细节，别堆砌）。
@@ -121,6 +101,8 @@ import { resolveUserLocationPrompt } from "../services/user-location-service.js"
 import type { ClientLocationWire } from "../types/client-location.js";
 import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
 import { determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { isActionableTaskRequest } from "../agent/task-intent.js";
+import { shouldUseSimpleToolFastLane } from "../agent/simple-task.js";
 import { routeTask } from "../gateway/index.js";
 import {
   MEMORY_RECALL_HINT_RE,
@@ -699,8 +681,6 @@ export class AgentCore {
     } | undefined;
     /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
     let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
-    let parallelLiveComplex = false;
-    let parallelLiveOriginalRoute: RouteDecision | null = null;
 
     if (this.brainCenter && text?.trim()) {
       // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeTask
@@ -736,29 +716,17 @@ export class AgentCore {
       // 后台零 LLM 规则判决定是否主动 speak/act，不进入对话 prompt，不阻塞主回复。
       this.proactivityHub?.observeConversationTurn(actorId, text);
 
-      // Parallel-Live：仅当消息最终走 fast（非 shouldGoComplex）且可并行深挖时，
-      // fast 先主答、complex 后台并行补充。已判 complex（含 task_execution_intent）则
-      // 直接走同步 complex 主链，避免与 launchComplexBackgroundTask 重复执行同一任务。
-      const useParallelLive =
-        !shouldGoComplex && this.shouldUseParallelLiveComplex(text, fastRoute, opts);
-      if (useParallelLive) {
-        parallelLiveComplex = true;
-        parallelLiveOriginalRoute = fastRoute;
-      }
-
       if (!shouldGoComplex) {
         // Fast 模式：保留 task-router 硬规则结果 + 注入规则置信度（用于日志/诊断）
-        route = useParallelLive
-          ? { mode: "fast", reasons: [...fastRoute.reasons, "parallel_live_fast_lane"], segmentable: fastRoute.segmentable }
-          : {
-              mode: brainCognition?.route.mode ?? "fast",
-              reasons: [
-                ...fastRoute.reasons,
-                `rule=${light.mode}@${light.confidence.toFixed(2)}`,
-                ...(brainCognition ? [`brain=${brainCognition.route.mode}:${brainCognition.rationale}`] : []),
-              ],
-              segmentable: fastRoute.segmentable,
-            };
+        route = {
+          mode: brainCognition?.route.mode ?? "fast",
+          reasons: [
+            ...fastRoute.reasons,
+            `rule=${light.mode}@${light.confidence.toFixed(2)}`,
+            ...(brainCognition ? [`brain=${brainCognition.route.mode}:${brainCognition.rationale}`] : []),
+          ],
+          segmentable: fastRoute.segmentable,
+        };
         shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
         cognitiveResponse = brainCognition?.response ?? "";
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
@@ -850,16 +818,9 @@ export class AgentCore {
       route = routeTask(text, getAgentRuntimeConfig(), {
         preferFullPipeline: opts?.preferFullPipeline === true,
       });
-      if (this.shouldUseParallelLiveComplex(text, route, opts)) {
-        parallelLiveComplex = true;
-        parallelLiveOriginalRoute = route;
-        route = { mode: "fast", reasons: [...route.reasons, "parallel_live_fast_lane"], segmentable: route.segmentable };
-        shortTermTurn = this.buildFastShortTermTurnContext(sessionId, text);
-      } else {
-        shortTermTurn = route.mode === "fast"
-          ? this.buildFastShortTermTurnContext(sessionId, text)
-          : this.buildShortTermTurnContext(sessionId, text);
-      }
+      shortTermTurn = route.mode === "fast"
+        ? this.buildFastShortTermTurnContext(sessionId, text)
+        : this.buildShortTermTurnContext(sessionId, text);
     }
 
     const perfStartTime = Date.now();
@@ -1045,10 +1006,6 @@ export class AgentCore {
       journalRecallBlock,
       suppressNarrativeRecall,
     );
-    const parallelLiveRaw =
-      parallelLiveComplex && parallelLiveOriginalRoute
-        ? this.startParallelLiveComplex(actorId, text, opts, orchestrateOpts, parallelLiveOriginalRoute)
-        : null;
 
     try {
       let result: AgentReply;
@@ -1177,16 +1134,7 @@ if (this.isComplexMode(route.mode)) {
       // fast 路径：同步执行（秒回）
       const standardStartTime = Date.now();
 
-      // 流式尾部防漏：仅当 verdict 特性开启时，缓冲识别并在 live 上吞掉 verdict 块
-      const fastVerdictEnabled = process.env.FAST_VERDICT_ENABLED === "1";
-      let verdictGuard: VerdictStreamGuard | null = null;
-      let guardedFastOpts: HandleUserMessageOptions | undefined = opts;
-      if (fastVerdictEnabled && opts?.onAssistantDelta) {
-        verdictGuard = new VerdictStreamGuard(opts.onAssistantDelta);
-        guardedFastOpts = { ...opts, onAssistantDelta: (delta) => verdictGuard!.push(delta) };
-      }
-
-      result = await this.runStandardLlmPath(actorId, text, "fast", guardedFastOpts, {
+      result = await this.runStandardLlmPath(actorId, text, "fast", opts, {
         narrativeRecall: enrichedNarrativeRecall,
         workingMemorySummary,
         recentConversationHistory,
@@ -1202,8 +1150,6 @@ if (this.isComplexMode(route.mode)) {
         cognitiveToolPlan,
       });
 
-      verdictGuard?.end();
-
       const standardDuration = Date.now() - standardStartTime;
 
       // 记录标准模式性能
@@ -1218,66 +1164,6 @@ if (this.isComplexMode(route.mode)) {
         success: true,
       });
 
-      // ── FastVerdict 判定（feature flag 灰发布）：fast 单次判难 + 产出交接规范 ──
-      // fast 回复末尾附隐藏 JSON 块 `<<<verdict:{...}>>>`，解析后剥离不推用户。
-      // 命中 need_complex + task_spec 时，用 task_spec 启动后台 complex（而非原始用户文本），
-      // 走 completeParallelLiveContinuation（缓冲 + 句级去重 + fast 口语化续接），不再原样流式推送。
-      const verdict =
-        fastVerdictEnabled && result.text ? parseFastVerdict(result.text) : null;
-      // 对用户可见的正文：剥离 FastVerdict 块（未命中标记则为原样）。
-      const fastReplyForUser = stripFastVerdictMarker(result.text);
-      let verdictDroveUpgrade = false;
-
-      if (
-        verdict?.need_complex &&
-        verdict.task_spec &&
-        this.isFastMode(route.mode) &&
-        !parallelLiveRaw &&
-        this.masterAgentCoordinator &&
-        getAgentRuntimeConfig().masterDelegation.enabled
-      ) {
-        console.log(
-          `[AgentCore] fast verdict 判需并行 complex：difficulty=${verdict.difficulty} ` +
-            `goal="${verdict.task_spec.goal.slice(0, 40)}"`,
-        );
-        verdictDroveUpgrade = true;
-        const verdictComplexPromise = this.startComplexFromVerdict(
-          actorId,
-          verdict.task_spec,
-          opts,
-          orchestrateOpts,
-        );
-        if (verdictComplexPromise) {
-          void this.completeParallelLiveContinuation(
-            verdictComplexPromise,
-            actorId,
-            text,
-            fastReplyForUser,
-            opts,
-            sessionId,
-          );
-        }
-      }
-
-      // ── 兜底机制：fast 回复检测 hedging 信号 → 后台升级 complex ──
-      // ⚠️ 已移除对话内 fast→complex 升级：它会在对话 turn 内额外注入 prompt/memory
-      // 再发一次 LLM1，造成重复搜索与额外调用。主动性升级收敛到独立后台进程处理，
-      // 与普通对话解耦，不再跨对话 turn 追加 complex。故此处不再 launchComplexBackgroundTask。
-
-      // Parallel-Live 续接：fast 主答已给出，后台 complex 结果句级去重后无缝衔接进对话
-      if (parallelLiveRaw) {
-        void this.completeParallelLiveContinuation(
-          parallelLiveRaw,
-          actorId,
-          text,
-          fastReplyForUser,
-          opts,
-          sessionId,
-        );
-      }
-
-      // FastVerdict 块已剥离，返回对用户可见的正文
-      result.text = fastReplyForUser;
       return result;
       
     } catch (err) {
@@ -1570,300 +1456,6 @@ if (this.isComplexMode(route.mode)) {
     return mode === "fast";
   }
 
-  private shouldUseParallelLiveComplex(
-    text: string,
-    route: RouteDecision,
-    opts?: HandleUserMessageOptions,
-  ): boolean {
-    const cfg = getAgentRuntimeConfig();
-    if (!cfg.parallelLive.enabled) return false;
-    if (!cfg.masterDelegation.enabled || !this.masterAgentCoordinator) return false;
-    if (!this.externalChat?.isEnabled()) return false;
-    if (!opts?.onAssistantDelta) return false;
-    if (opts?.signal?.aborted) return false;
-    const trimmed = text.trim();
-    if (trimmed.length < cfg.parallelLive.minChars) return false;
-    if (route.reasons.includes("desktop_automation") || isDesktopAutomationTask(trimmed)) return false;
-    if (route.reasons.includes("explicit_phone_call_request")) return false;
-    if (this.hasHighSideEffectIntent(trimmed)) return false;
-    return true;
-  }
-
-  private hasHighSideEffectIntent(text: string): boolean {
-    return /(?:创建|新增|设置|提醒我|定个|下单|购买|支付|转账|发给|发送|打电话|拨打|删除|修改|取消|退款|运行|执行|控制|点击|输入|打开|关闭|移动|安装|卸载|create|set|remind|order|buy|pay|transfer|send|call|delete|cancel|run|execute|click|install|uninstall)/i.test(text);
-  }
-
-  private startParallelLiveComplex(
-    actorId: string,
-    text: string,
-    opts: HandleUserMessageOptions | undefined,
-    orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>,
-    originalRoute: RouteDecision,
-  ): Promise<string> | null {
-    const coordinator = this.masterAgentCoordinator;
-    if (!coordinator) return null;
-    const liveSessionId = `parallel-live-${actorId}-${opts?.chatUserMessageId ?? Date.now()}-${randomUUID()}`;
-    console.log(
-      `[AgentCore] parallel live complex started route=${originalRoute.mode} reasons=${originalRoute.reasons.join(",")}`,
-    );
-    return coordinator.orchestrateTask(
-      actorId,
-      text,
-      opts?.onAgentPhaseStatus,
-      undefined,
-      {
-        ...orchestrateOpts,
-        ephemeralSessionId: liveSessionId,
-      },
-    );
-  }
-
-  /**
-   * FastVerdict 驱动的后台 complex：用 fast 产出的 task_spec 启动，而非原始用户文本。
-   * 不传 onDelta（不原样流式推送），结果交给 completeParallelLiveContinuation
-   * 缓冲 + 句级去重 + fast 口语化续接，避免"整段重复"。
-   */
-  private startComplexFromVerdict(
-    actorId: string,
-    taskSpec: FastTaskSpec,
-    opts: HandleUserMessageOptions | undefined,
-    orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>,
-  ): Promise<string> | null {
-    const coordinator = this.masterAgentCoordinator;
-    if (!coordinator || !taskSpec.goal) return null;
-    const verdictSessionId = `verdict-complex-${actorId}-${opts?.chatUserMessageId ?? Date.now()}-${randomUUID()}`;
-    return coordinator.orchestrateTask(
-      actorId,
-      taskSpec.goal,
-      opts?.onAgentPhaseStatus,
-      undefined,
-      {
-        ...orchestrateOpts,
-        ephemeralSessionId: verdictSessionId,
-      },
-    );
-  }
-
-  /**
-   * 跨轮并行冲突检测（轻量 LLM 分类）。
-   *
-   * 目标：后台复杂任务（parallel-live / verdict 驱动）执行期间，用户中途发了新消息。
-   * 判定标准**不是「话题是否切换」**，而是**「这条结果用户现在还需不需要」**——
-   * 用户常常是顺带问别的事，旧任务结果稍后送达依然被期待，不应因话题不同就丢弃。
-   * 仅当用户明确取消/放弃了这个需求时，迟到结果才应丢弃，既省一次续接合成的 token，
-   * 也避免把不再被需要的旧结果硬塞进当前对话。
-   *
-   * 省 token 关键：无中途新 user 消息时**不调用 LLM**，直接放行续接（0 次分类）。
-   * 仅当任务执行期间确实插入了新的 user turn，才走一次单轮轻量分类，输出 DROP/KEEP。
-   */
-  private async shouldDropCrossTurnConflict(
-    actorId: string,
-    originalUserText: string,
-    chatUserMessageId: string | undefined,
-    backgroundMessageId: string,
-  ): Promise<boolean> {
-    if (!chatUserMessageId) return false;
-    const chatSessionId = resolvePrimaryChatSessionId(
-      actorId,
-      getAgentRuntimeConfig().masterDelegation.enabled,
-    );
-    const midTurnText =
-      getChatThreadStore().latestUserTextAfter(chatSessionId, "", chatUserMessageId);
-    if (!midTurnText) return false; // 任务执行中用户未插话 → 0 次 LLM，安全续接
-
-    const provider = this.externalChat;
-    if (!provider?.isEnabled()) return false;
-
-    const prompt =
-      `后台有一个任务在为你搜集信息：\n"""${originalUserText.trim().slice(0, 160)}"""\n\n` +
-      `该任务进行中，用户又发了新消息：\n"""${midTurnText.slice(0, 160)}"""\n\n` +
-      `请判断：这个任务的结果，用户现在还需要听到吗？\n` +
-      `- 用户没有放弃这个结果（哪怕只是顺带问了别的事）→ KEEP\n` +
-      `- 用户已明确取消/放弃了这个需求，结果再讲只会打扰 → DROP\n` +
-      `注意：用户换了话题不代表不需要这个结果，不要因话题不同就 DROP。\n` +
-      `只输出一个词：KEEP 或 DROP。`;
-
-    try {
-      const classification = await this.externalChatCompleteOnce(
-        provider,
-        `cross-turn-conflict-${backgroundMessageId}`,
-        prompt,
-      );
-      // 仅显式 DROP 才丢弃；无法判断或为空一律 KEEP（不误伤正常续接）。
-      return /DROP/i.test(classification);
-    } catch (err) {
-      console.error("[AgentCore] cross-turn conflict classify failed; keeping continuation:", err);
-      return false;
-    }
-  }
-
-  /** 取一次非流式轻量 LLM 回复（用于单轮分类，ephemeral 不落线程）。 */
-  private async externalChatCompleteOnce(
-    provider: ExternalChatProvider,
-    sessionId: string,
-    prompt: string,
-  ): Promise<string> {
-    let collected = "";
-    await provider.streamCompletion(
-      sessionId,
-      { text: prompt },
-      (delta: string) => {
-        collected += delta;
-      },
-      undefined,
-      { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 1 },
-    );
-    return collected.trim();
-  }
-
-  private async completeParallelLiveContinuation(
-    complexPromise: Promise<string>,
-    actorId: string,
-    userText: string,
-    fastReplyText: string,
-    opts: HandleUserMessageOptions | undefined,
-    sessionId: string,
-  ): Promise<void> {
-    try {
-      const complexResult = await complexPromise;
-      // 跨轮冲突检测已内含「用户新消息 → 这条结果是否仍需要」的判定，
-      // 故此处不再用 signal.aborted 无条件丢弃：用户中途插话 ≠ 放弃结果，
-      // 交由 shouldDropCrossTurnConflict 裁决 KEEP（仍送达）或 DROP（放弃才丢）。
-      const backgroundMessageId = `parallel-live:${opts?.chatUserMessageId ?? Date.now()}`;
-      // ── 跨轮冲突检测（轻量 LLM 分类）：后台任务执行期间用户若已换话题，
-      //    迟到的结果不该强行续接进当前对话，直接丢弃，省一次续接合成 + 避免串台。──
-      const dropped = await this.shouldDropCrossTurnConflict(
-        actorId,
-        userText,
-        opts?.chatUserMessageId,
-        backgroundMessageId,
-      );
-      if (dropped) {
-        console.log(
-          "[AgentCore] cross-turn conflict: user no longer needs this result mid-task; dropping stale complex result",
-        );
-        return;
-      }
-      const continuation = await this.synthesizeFastContinuation(
-        actorId,
-        userText,
-        fastReplyText,
-        complexResult,
-        (delta) => {
-          if (opts?.signal?.aborted) return;
-          opts?.onBackgroundAssistantDelta?.({
-            messageId: backgroundMessageId,
-            delta,
-            source: "parallel_live_complex",
-          });
-        },
-      );
-      if (!continuation.trim()) return;
-
-      const chatSessionId = resolvePrimaryChatSessionId(
-        actorId,
-        getAgentRuntimeConfig().masterDelegation.enabled,
-      );
-      const appended = getChatThreadStore().appendAssistantFollowup(
-        chatSessionId,
-        opts?.chatUserMessageId,
-        continuation,
-      );
-      if (appended) {
-        this.shortTermMemoryGateway?.reconcileTaskAfterTurn(sessionId, userText, appended);
-        getDailyJournalService()?.appendTurn(actorId, sessionId, userText, appended);
-        opts?.onBackgroundAssistantDone?.({
-          messageId: backgroundMessageId,
-          finalText: appended,
-          source: "parallel_live_complex",
-        });
-      }
-      console.log("[AgentCore] parallel live complex continuation delivered");
-    } catch (err) {
-      console.error("[AgentCore] parallel live complex failed; keeping fast reply:", err);
-    }
-  }
-
-  /**
-   * Fast 主答后，把 complex 后台搜集到的结果无缝衔接进对话（Fast 主答 + Complex 后台 架构）。
-   *
-   * 关键约束：
-   *  - complex 的原文不直接推给前端；先做句级去重，剔除与 fast 已说内容重复的句子
-   *    （这是"整段一模一样出现两次"的根源消除点，确定性保证，不依赖 LLM）；
-   *  - 由 fast 用口语化方式把补充信息续接进对话，不机械报"后台研究结果"；
-   *  - 流式过程中再按句做二次防线：与 fast 已说内容重复的句子直接丢弃。
-   */
-  private async synthesizeFastContinuation(
-    actorId: string,
-    userText: string,
-    fastReply: string,
-    complexResult: string,
-    onAssistantDelta?: (delta: string) => void,
-  ): Promise<string> {
-    const provider = this.externalChat;
-    const result = complexResult?.trim();
-    if (!provider?.isEnabled() || !result) return "";
-
-    // 1) 确定性强去重：剔除 complex 结果里与 fast 已说句子重复的部分。
-    //    若全部重复（complex 只是重答了一遍）→ 无新增信息，保持 fast 回复原样。
-    const freshPart = stripSentencesAlreadySaid(fastReply, result);
-    if (!freshPart) return "";
-
-    const prompt =
-      `你在和用户聊天，刚才已经说了：\n"""${fastReply}"""\n\n` +
-      `你现在通过后台补充检索/执行拿到了新信息：\n"""${freshPart}"""\n\n` +
-      `把新信息自然、无缝地融进对话继续说下去：\n` +
-      `- 不要重复你刚才已经说过的任何话，也不要把补充信息原样复读。\n` +
-      `- 如果新信息更正了你刚才的说法，就自然地更正。\n` +
-      `- 口语化，直接接着往下说，不要用"我查到了/根据搜索/后台研究"这类机械表述开头。\n` +
-      `- 直接输出继续对话的正文，不要任何解释或前缀。`;
-
-    const said = sentenceSet(fastReply);
-    let pending = "";
-    const forwarded: string[] = [];
-    const forward = (text: string): void => {
-      if (!text) return;
-      forwarded.push(text);
-      onAssistantDelta?.(text);
-    };
-
-    try {
-      await provider.streamCompletion(
-        `fast-continuation-${actorId}-${Date.now()}`,
-        { text: prompt },
-        (delta) => {
-          // 2) 流式防线：按句检查，与 fast 已说内容重复的句子丢弃
-          pending += delta;
-          const parts = pending.split(/(?<=[。！？!?；;])/u);
-          pending = parts.pop() ?? "";
-          for (const s of parts) {
-            const t = s.trim();
-            if (!t) continue;
-            if (!said.has(normalizeSentence(t))) forward(s);
-          }
-        },
-        undefined,
-        { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 3 },
-      );
-      // 收尾：剩余未完整句子非重复则补推
-      if (pending.trim() && !said.has(normalizeSentence(pending.trim()))) {
-        forward(pending);
-      }
-      const continuation = forwarded.join("").trim();
-      if (continuation) return continuation;
-      // 3) 合成输出被全部去重吞掉（说明无新增信息）→ 回退直推 freshPart（本身已去重）
-      forward(freshPart);
-      return freshPart;
-    } catch (err) {
-      // 合成失败 → 回退把已去重的 complex 内容直推给前端，仍保证不重复
-      console.error("[AgentCore] fast 续接合成失败，回退已去重内容:", err);
-      const buffered = forwarded.join("");
-      if (buffered.trim()) return buffered.trim();
-      forward(freshPart);
-      return freshPart;
-    }
-  }
-
   private pickToolNamespace(toolName: string): string | null {
     if (!toolName) return null;
     const dotIndex = toolName.indexOf(".");
@@ -2106,6 +1698,31 @@ if (this.isComplexMode(route.mode)) {
     return new Promise<string>((resolve, reject) => {
       const run = async (_taskId: string): Promise<void> => {
         try {
+          // 简单单点工具快车道：只需一次工具调用即可完成的任务，
+          // 跳过子 Agent 委派 / plan-execute 慢车道，直接跑单轮工具循环，
+          // 让"工具被极快找到并完成"，避免多轮编排的开销。
+          if (shouldUseSimpleToolFastLane(text)) {
+            const result = await this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
+              narrativeRecall: ctx.narrativeRecall,
+              workingMemorySummary: ctx.workingMemorySummary,
+              recentConversationHistory: ctx.recentConversationHistory,
+              journalRecall: ctx.journalRecall,
+              userLocation: ctx.userLocation,
+              trajCap: ctx.trajCap,
+              orchestrateToolCtx: ctx.orchestrateOpts,
+              personalization: ctx.personalization,
+              sessionId: ctx.sessionId,
+              shortTermTurn: ctx.shortTermTurn,
+              cognitiveMetacog: ctx.cognitiveMetacog,
+              cognitiveEmotion: ctx.cognitiveEmotion,
+              cognitiveUserPattern: ctx.cognitiveUserPattern,
+              cognitiveToolPlan: ctx.cognitiveToolPlan,
+              simpleToolLane: true,
+            });
+            resolve(result.text ?? "");
+            return;
+          }
+
           if (useSubAgent && this.masterAgentCoordinator) {
             // 子 Agent 委派：后台执行 Master Agent，结果通过 onAssistantDelta 流式回传
             const masterResult = await this.masterAgentCoordinator.orchestrateTask(
@@ -2281,6 +1898,8 @@ if (this.isComplexMode(route.mode)) {
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
       /** 语义意图理解结果（入口层 LLM 解析），注入 prompt 让主 LLM 明确用户真实意图 */
       semanticIntent?: SemanticIntent;
+      /** 简单单点工具快车道：跳过 plan-execute，单轮工具循环即可完成 */
+      simpleToolLane?: boolean;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
@@ -2376,14 +1995,6 @@ if (this.isComplexMode(route.mode)) {
           toolExposureProfile,
           toolRankingHint,
         };
-    // FastVerdict 输出规范：仅 fast 模式 + 特性开启时注入。
-    // 要求 fast 在回复末尾附一行隐藏结构化块 `<<<verdict:{json}>>>`，
-    // 供服务端流式解析取出与剥离（判定难度 + 产出给 complex 的封闭任务规范），不展示给用户。
-    const verdictEnabledInLane = process.env.FAST_VERDICT_ENABLED === "1";
-    if (verdictEnabledInLane && this.isFastMode(mode)) {
-      const mem = ((baseStreamOpts.promptContext ??= {}).memory ??= {});
-      if (!mem.fastVerdictInstruction) mem.fastVerdictInstruction = FAST_VERDICT_PROMPT_INSTRUCTION;
-    }
     // 本模式职责人格注入（fast/complex 差异化，不依赖 feature flag）：
     // fast 偏对话活人感、complex 偏推理与工具，让同一人格在不同"脑"上各有侧重。
     if ((baseStreamOpts.promptContext ??= {}).memory) {
@@ -2466,7 +2077,8 @@ if (this.isComplexMode(route.mode)) {
       // 2026-08-01 性能优化：Fast 模式 maxRounds 限制为 1。
       // Fast 模式以对话为主，单次工具调用足够（LLM 可基于 system prompt 的 currentTime/userLocation
       // 直接答时间/位置/天气类问题）。Complex 模式交给 plan_execute / master_subagent 处理重活。
-      ...(this.isFastMode(mode)
+      // 简单单点工具快车道（simpleToolLane）同样限制 maxRounds=1：单轮工具循环即可完成。
+      ...(this.isFastMode(mode) || ctx.simpleToolLane
         ? {
             toolLoop: {
               ...(baseStreamOpts.toolLoop ?? {}),
@@ -2488,7 +2100,8 @@ if (this.isComplexMode(route.mode)) {
 
     let full = "";
     let modelCallsConsumed = 1;
-    const peUsed = mode === "complex";
+    // 简单单点工具快车道跳过 plan-execute，直接跑单轮工具循环（provider.streamCompletion）
+    const peUsed = mode === "complex" && !ctx.simpleToolLane;
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 
