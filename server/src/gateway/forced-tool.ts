@@ -21,7 +21,7 @@ const DIRECT_CLOCK_OR_LOCATION_RE =
   /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
 
 const FRESH_WEB_LOOKUP_RE =
-  /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|搜索|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
+  /search|look up|browse|web|latest|recent|news|headline|price|pricing|stock|market|quote|announcement|release|version|movie|ticket|showtime|box office|gossip|rumor|drama|search|查查|查一查|帮我查|帮我看看|搜索|搜一下|查一下|查询|联网|浏览|网页|最新|最近|新闻|资讯|头条|八卦|吃瓜|爆料|热搜|近况|怎么样了|怎么样子|什么情况|什么动静|价格|票价|股价|行情|大盘|a股|港股|美股|公告|发布|版本|电影|热映|排片|影讯/i;
 
 // 扩展触发 fresh lookup 的场景：用户提到具体模型/产品名 + "新/最新/出/版/v\d|k\d" 等时效信号。
 const FRESH_FACT_ENTITY_HINT_RE =

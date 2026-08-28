@@ -1,11 +1,5 @@
 import OpenAI from "openai";
-import { appendFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 
-import {
-  buildLayeredSystemPrompt,
-  finalizeChatSystemPrompt,
-} from "../../agent/prompt-builder.js";
 import { preparePromptCachePlan } from "../prefix-cache.js";
 import {
   AbstractChatProvider,
@@ -41,15 +35,6 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
   protected readonly client: OpenAI | null;
   protected readonly model: string;
 
-  /**
-   * System Prompt 缓存：避免重复构建相同的 System Prompt
-   * 预期效果：System prompt 构建时间减少 90%
-   */
-  private systemPromptCache = new Map<string, { content: string; timestamp: number }>();
-
-  private static readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5分钟缓存
-  private static readonly MAX_CACHE_SIZE = 100; // 最大缓存条目数
-
   constructor() {
     super();
     const apiKey = process.env.OPENAI_API_KEY?.trim();
@@ -58,72 +43,6 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
     this.client = apiKey
       ? new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 2 })
       : null;
-
-    // 定期清理过期缓存（每10分钟）
-    setInterval(() => this.cleanupCache(), 10 * 60 * 1000).unref();
-  }
-
-  /**
-   * 清理过期的 System Prompt 缓存
-   */
-  private cleanupCache(): void {
-    const now = Date.now();
-    for (const [key, value] of this.systemPromptCache) {
-      if (now - value.timestamp > OpenAiOfficialProvider.CACHE_TTL_MS) {
-        this.systemPromptCache.delete(key);
-      }
-    }
-    // 如果缓存仍然过大，删除最旧的条目
-    if (this.systemPromptCache.size > OpenAiOfficialProvider.MAX_CACHE_SIZE) {
-      const entries = [...this.systemPromptCache.entries()]
-        .sort((a, b) => a[1].timestamp - b[1].timestamp);
-      const toDelete = entries.slice(0, this.systemPromptCache.size - OpenAiOfficialProvider.MAX_CACHE_SIZE);
-      toDelete.forEach(([key]) => this.systemPromptCache.delete(key));
-    }
-  }
-
-  /**
-   * 获取或构建缓存的 System Prompt
-   */
-  private getCachedOrBuildSystemPrompt(
-    baseContent: string,
-    finalizeOptions: NonNullable<Parameters<typeof finalizeChatSystemPrompt>[1]>,
-  ): string {
-    const cacheKey = JSON.stringify({
-      // 修复：不能只取 baseContent 前 500 字符——narrativeRecall 等动态记忆块排在
-      // buildLayeredSystemPrompt 渲染顺序的靠后位置，若被前 500 字符覆盖到，记忆变化
-      // 不会使缓存失效，导致每轮都命中旧的"无记忆" system prompt（对话中长期记忆永不生效）。
-      // 改用完整 baseContent 的 sha1 指纹，动态记忆一变缓存即失效。
-      baseContent: createHash("sha1").update(baseContent).digest("hex"),
-      tools: finalizeOptions.tools,
-      masterSubAgentDelegate: finalizeOptions.masterSubAgentDelegate,
-      agentAccessMode: finalizeOptions.agentAccessMode,
-      desktopBridgeOnline: finalizeOptions.desktopBridgeOnline,
-      phoneBridgeOnline: finalizeOptions.phoneBridgeOnline,
-      suppressRuntimeSuffixes: finalizeOptions.suppressRuntimeSuffixes,
-      functionalSuffixes: finalizeOptions.functionalSuffixes,
-    });
-
-    const cached = this.systemPromptCache.get(cacheKey);
-    const now = Date.now();
-
-    if (cached && (now - cached.timestamp) < OpenAiOfficialProvider.CACHE_TTL_MS) {
-      return cached.content;
-    }
-
-    const sysContent = finalizeChatSystemPrompt(baseContent, finalizeOptions);
-
-    this.systemPromptCache.set(cacheKey, {
-      content: sysContent,
-      timestamp: now,
-    });
-
-    return sysContent;
-  }
-
-  /** 手动清除所有缓存（用于配置变更等场景） */
-  clearSystemPromptCache(): void {
-    this.systemPromptCache.clear();
   }
 
   /**
@@ -230,7 +149,10 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
   }
 
   /**
-   * 构建 system 内容（走 5 分钟 LRU 缓存 + 分层 prompt）与 prompt cache plan。
+   * 构建 system 内容与 prompt cache plan（2026-08-28 注入路径统一）：
+   * 单一出口 assembleSystemPrompt——minimal/overrideSys 与完整模式共用同一条
+   * 组装链（finalize → 分层 → 家族合并），旧版"先 buildLayeredSystemPrompt 再
+   * preparePromptCachePlan 内部重复渲染 + 5 分钟缓存"的三重构建已删除。
    */
   protected buildSystemAndPlan(ctx: SystemAndPlanContext): SystemAndPlanResult {
     const finalizeOptions = {
@@ -245,49 +167,18 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
       } : {}),
     };
 
-    const baseContent = ctx.overrideSys
-      ? // 修复：overrideSys（minimal/fast 模式的身份 prompt）不能直接跳过记忆分层——
-        // 否则 promptMemory（narrativeRecall 等）永远不注入，对话中长期记忆失忆。
-        // 把 overrideSys 作为 baseSystem 传入 buildLayeredSystemPrompt，memory 为空时
-        // 原样返回 overrideSys（行为兼容），memory 非空时正常附加记忆块。
-        buildLayeredSystemPrompt(ctx.overrideSys, ctx.promptMemory)
-      : buildLayeredSystemPrompt(SYSTEM_PROMPT, ctx.promptMemory);
-    const sysContent = this.getCachedOrBuildSystemPrompt(baseContent, finalizeOptions);
-
-    // TEMP DEBUG（记忆注入诊断 4：最终 system prompt 是否含记忆）
-    try {
-      appendFileSync(
-        ".memory-inject-debug.log",
-        JSON.stringify({
-          t: new Date().toISOString(),
-          phase: "sysContent",
-          memoryInSystem: sysContent.includes("记忆图联想检索"),
-          memoryBlock: sysContent.slice(sysContent.indexOf("记忆图联想检索"), sysContent.indexOf("记忆图联想检索") + 300),
-          hasOverride: Boolean(ctx.overrideSys),
-          promptMemoryNarrative: Boolean(ctx.promptMemory?.narrativeRecall),
-          baseContentHasNarrative: baseContent.includes("记忆图联想检索"),
-          baseContentHead: baseContent.slice(0, 200),
-        }) + "\n",
-      );
-    } catch {
-      /* ignore */
-    }
-
     const promptPlan = preparePromptCachePlan({
       providerId: this.id,
       model: ctx.model,
+      // overrideSys（minimal/fast 身份）与默认 SYSTEM_PROMPT 走同一条组装链，
+      // 记忆块统一由 assembler 附加（memory 为空时原样返回 base，行为兼容）。
       baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
-      // 修复：之前 overrideSys 时 memory 传 undefined，导致 promptPlan.requestSystemMessages
-      // 只含稳定 system（无记忆）。而发送阶段 applyPromptCacheMessages 会用
-      // requestSystemMessages 覆盖 msgs[0]（带记忆的 sysContent），
-      // 于是 overrideSys（fast/minimal）实际发给 LLM 的请求里记忆被丢弃，
-      // 表现为"记忆已注入但 LLM 失忆"。改为始终传入 memory。
       memory: ctx.promptMemory,
       finalizeOptions,
       tools: ctx.toolSearchPrepared?.visibleTools,
       variant: ctx.tools ? "chat-tools" : "chat",
     });
 
-    return { sysContent, promptPlan };
+    return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
   }
 }

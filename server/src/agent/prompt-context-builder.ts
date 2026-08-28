@@ -31,8 +31,6 @@ import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import {
   buildFollowUpAnchorPrompt,
   isAmbiguousFollowUpMessage,
-  MEMORY_EXPLICIT_RE,
-  shouldInjectMemorySummary,
 } from "./memory-signal.js";
 import { shouldRecallLongTerm } from "./recall-gate.js";
 import type { PersonalityCore } from "../brain/types.js";
@@ -570,38 +568,30 @@ export class PromptContextBuilder {
     const digestService = getDailyDigestService();
     const memoryManager = getMemoryManagerService();
 
-    // 长期快照注入门控（记忆架构重构）：memoryContinuity / relationshipMemory /
-    // lifeThemeMemory / dreamMemory / yesterdayHighlight 这类"历史整理快照"每轮无条件
-    // 注入是串台根因（昨天/前天的对话被当成当前上下文）。与 narrativeRecall 同源，
-    // 走同一白名单门控（recall-gate）：新会话开场 / 显式记忆线索 / 个人事实陈述 /
-    // 长会话指代升级时才注入，普通轮次跳过。
-    const longTermSnapshotEnabled = shouldRecallLongTerm({
-      text: userText,
-      threadMessageCount: input.threadMessageCount,
-      ambiguousFollowUp,
-    }).trigger;
+    // 长期记忆注入门控（记忆架构重构，单一开关）：memoryContinuity / relationshipMemory /
+    // lifeThemeMemory / dreamMemory / yesterdayHighlight / KV 长期字段这类"历史整理快照"
+    // 每轮无条件注入是串台根因（昨天/前天的对话被当成当前上下文）。
+    // 统一走 recall-gate 白名单：新会话开场（仅本 session 首条用户消息）/ 显式记忆线索 /
+    // 个人事实陈述 / 长会话指代升级时才注入，且未被 topic_switch 抑制。
+    // 未命中时只保留稳定人设（persona/values/abilities），长期记忆交给 brain.recall
+    // 工具按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
+    const longTermEnabled =
+      !input.longTermRecallSuppressed &&
+      shouldRecallLongTerm({
+        text: userText,
+        threadMessageCount: input.threadMessageCount,
+        ambiguousFollowUp,
+      }).trigger;
 
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
-    // 追问场景也拉取 KV snapshot（原策略追问时跳过，导致 memorySummary 等丢失 → 记忆跳）
-    // 追问时压缩到 200 字（非追问保持原长度）
     if (
       this.deps.agentMemorySyncService &&
       memoryKeys &&
       memoryKeys.length > 0
     ) {
-      // #1 统一门控单点：KV 长期字段（非人设）与图谱 narrativeRecall 走同一白名单。
-      // 触发 = 图谱门控命中(新会话/记忆线索/个人事实/长会话指代升级) ∥ 摘要线索命中，
-      //   且未被 topic_switch 抑制（input.longTermRecallSuppressed，agent-core 决策层透传）。
-      // 未触发时仅保留稳定人设（persona/values/abilities），杜绝旧话题/跨会话记忆每轮注入。
-      const includeMemorySummary = shouldInjectMemorySummary(userText);
-      const kvLongTermGate =
-        !input.longTermRecallSuppressed &&
-        (longTermSnapshotEnabled || includeMemorySummary);
-      const includeCurrentMission =
-        kvLongTermGate || MEMORY_EXPLICIT_RE.test(userText);
-      // #2 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
-      // memory_facts/preferences 等"用户档案/动态记忆"仅在个人化/记忆线索/新会话触发时注入。
+      // 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
+      // memory_facts/preferences 等"用户档案/动态记忆"仅门控命中时注入。
       const STABLE_MEMORY_KEYS = new Set(["persona", "values", "abilities"]);
       const LONG_TERM_MEMORY_KEYS = new Set([
         "memory_summary",
@@ -612,37 +602,16 @@ export class PromptContextBuilder {
         "memory_open_loops",
         "session_recap",
       ]);
-      const snapshotKeys = memoryKeys.filter((key) => {
-        if (STABLE_MEMORY_KEYS.has(key)) return true;
-        if (!kvLongTermGate) return false;
-        return LONG_TERM_MEMORY_KEYS.has(key);
-      });
-      if (includeCurrentMission && !snapshotKeys.includes("memory_current_mission")) {
-        snapshotKeys.push("memory_current_mission");
-      }
+      const snapshotKeys = memoryKeys.filter(
+        (key) => STABLE_MEMORY_KEYS.has(key) || (longTermEnabled && LONG_TERM_MEMORY_KEYS.has(key)),
+      );
       const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
-      fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined, {
-        includeMemorySummary,
-      });
+      fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
       const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
       if (kvCurrentMission) {
         fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
       }
-      // 追问场景压缩 KV 摘要记忆字段到 200 字（仍注入，保留长期记忆上下文）
-      if (ambiguousFollowUp) {
-        if (fromKv.memorySummary) {
-          fromKv.memorySummary = compactPromptBlock(fromKv.memorySummary, 200);
-        }
-        if (fromKv.memoryFacts) {
-          fromKv.memoryFacts = compactPromptBlock(fromKv.memoryFacts, 150);
-        }
-      }
     }
-
-    const capabilityQueryHint =
-      this.deps.skillManager || config.masterDelegation.enabled || this.deps.worldService
-        ? "需要完整能力或 world 细节时，调用 agent.query_capabilities。"
-        : undefined;
 
     const agentCaps =
       config.memoryPrompt.agentCapsInPrompt &&
@@ -669,12 +638,10 @@ export class PromptContextBuilder {
       ? `【上一轮回复被打断的残留内容——仅供背景参考，不要在回复中承接、提及或道歉它】\n${input.interruptedContext.trim()}\n【用户已发送新消息，请直接、干净地回答新消息，不要以"哈哈被你看穿""我刚查XX"之类的话开头】`
       : undefined;
 
-    // 追问场景下的降权策略：
-    //   原策略（已废弃）：ambiguousFollowUp=true 时清空所有记忆字段 → 导致追问时「记忆跳」
-    //   新策略：追问场景压缩长度而非清空，保留上下文连续性
-    //     - 非追问：narrativeRecall=520 / memoryContinuity 等保留原长度
-    //     - 追问：  narrativeRecall=240 / memoryContinuity 等压缩到 150 字（仍注入）
-    //   dailyDigest 仍只在非追问场景注入（digest 与追问语义无关，省 token）
+    // 追问降权策略（记忆架构重构后简化）：长期记忆字段已由 longTermEnabled 单一门控，
+    // 门控未命中时直接为 undefined，不再需要追问压缩分支；追问场景仅保留
+    // 短期上下文（STM/recentHistory/followUpAnchor）的差异化长度，服务指代消解。
+    // dailyDigest 仍只在非追问场景注入（digest 与追问语义无关，省 token）
     const dailyDigest =
       ambiguousFollowUp || !userText
         ? undefined
@@ -687,24 +654,24 @@ export class PromptContextBuilder {
       220,
     );
     const memoryContinuity =
-      longTermSnapshotEnabled
+      longTermEnabled
         ? memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined
         : undefined;
     const relationshipMemory =
-      longTermSnapshotEnabled
+      longTermEnabled
         ? memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? undefined
         : undefined;
     const lifeThemeMemory =
-      longTermSnapshotEnabled
+      longTermEnabled
         ? memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? undefined
         : undefined;
     const dreamMemory =
-      longTermSnapshotEnabled
+      longTermEnabled
         ? memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? undefined
         : undefined;
     // 优化 2：主动跨天 recall，注入昨天/前天的关键事件
     const yesterdayHighlight =
-      longTermSnapshotEnabled
+      longTermEnabled
         ? memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined
         : undefined;
     const followUpAnchor = buildFollowUpAnchorPrompt(userText);
@@ -732,10 +699,8 @@ export class PromptContextBuilder {
     );
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
-    // 追问场景压缩 narrativeRecall：800 → 400 字（仍注入，保留上下文）
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
-    const narrativeRecallLimit = ambiguousFollowUp ? 400 : 800;
-    const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), narrativeRecallLimit);
+    const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 800);
     // 工作记忆摘要 / 最近对话回顾：作为独立块注入，不走 formatNarrativeRecallPrompt。
     // 修复"上下文跳转"：原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt
     // 的 slice(0,4) 当作召回条目丢弃，或块结构被拍平、hint 被正则误杀。
@@ -752,28 +717,16 @@ export class PromptContextBuilder {
     const followUpAnchorLimit = ambiguousFollowUp ? 400 : 180;
     const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
     const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
-    // 追问场景压缩 userProfile/memoryContinuity 等到 150 字（仍注入，保留关系/情绪上下文）
-    const memoryFollowUpLimit = 150;
-    const userProfileFromManagerCompact = ambiguousFollowUp
-      ? compactPromptBlock(userProfileFromManager, memoryFollowUpLimit)
-      : userProfileFromManager;
-    const memoryContinuityCompact = ambiguousFollowUp
-      ? compactPromptBlock(memoryContinuity, memoryFollowUpLimit)
-      : memoryContinuity;
-    const relationshipMemoryCompact = ambiguousFollowUp
-      ? compactPromptBlock(relationshipMemory, memoryFollowUpLimit)
-      : compactPromptBlock(relationshipMemory, 480, "normal");
-    // Phase 6.2 修正：非追问场景压缩策略调整，避免丢失连续记忆。
+    // 长期记忆字段压缩（追问分支已随单一门控移除，只保留常规压缩策略）：
     // - lifeThemeMemory：背景性上下文，用 low importance 压到 280*0.7≈196 字（保留前 N 个主题）
     // - dreamMemory：跨会话整理结果，含「核心主题」高价值抽象，不能用 low 压缩会丢末尾主题。
     //   改用 normal importance + preserve="both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），
     //   中间被省略号替换，既省 token 又保住记忆连续性。
-    const lifeThemeMemoryCompact = ambiguousFollowUp
-      ? compactPromptBlock(lifeThemeMemory, memoryFollowUpLimit)
-      : compactPromptBlock(lifeThemeMemory, 280, "low");
-    const dreamMemoryCompact = ambiguousFollowUp
-      ? compactPromptBlock(dreamMemory, memoryFollowUpLimit)
-      : compactPromptBlock(dreamMemory, 500, "normal", "both");
+    const userProfileFromManagerCompact = userProfileFromManager;
+    const memoryContinuityCompact = memoryContinuity;
+    const relationshipMemoryCompact = compactPromptBlock(relationshipMemory, 480, "normal");
+    const lifeThemeMemoryCompact = compactPromptBlock(lifeThemeMemory, 280, "low");
+    const dreamMemoryCompact = compactPromptBlock(dreamMemory, 500, "normal", "both");
     const userProfile =
       userProfileFromManagerCompact == null ? rawUserProfile : undefined;
 
@@ -886,7 +839,6 @@ export class PromptContextBuilder {
       ...(fromKv.taskContext || effectiveTaskContext || shortTermTaskContext
         ? { taskContext: [fromKv.taskContext, effectiveTaskContext, shortTermTaskContext].filter(Boolean).join("\n\n") }
         : {}),
-      ...(capabilityQueryHint ? { abilities: fromKv.abilities ? `${fromKv.abilities}\n${capabilityQueryHint}` : capabilityQueryHint } : {}),
       ...(toneGuidance
         ? { toneGuidance }
         : {}),
@@ -996,11 +948,11 @@ export class PromptContextBuilder {
         len += line.length + 1;
       }
       return {
-        skillIndex: `【可复用技能索引】\n${truncated.join("\n")}\nprocedural 技能需用 skill.view 读取全文后复用；code 技能可直接调用。`,
+        skillIndex: `【可复用技能索引】\n${truncated.join("\n")}`,
       };
     }
     return {
-      skillIndex: `【可复用技能索引】\n${indexBlock}\nprocedural 技能需用 skill.view 读取全文后复用；code 技能可直接调用。`,
+      skillIndex: `【可复用技能索引】\n${indexBlock}`,
     };
   }
 

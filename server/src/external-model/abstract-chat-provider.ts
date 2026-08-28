@@ -1,6 +1,5 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { appendFileSync } from "node:fs";
 
 import {
   annotateUserContentForLlm,
@@ -322,31 +321,6 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         promptPlan.requestSystemMessages,
         promptPlan.tailDynamicContext,
       );
-      // TEMP DEBUG（记忆注入诊断 5：实际发给 LLM 的最终 messages 是否含记忆）
-      try {
-        const sysJoined = finalMessages
-          .filter((m) => m.role === "system" && typeof m.content === "string")
-          .map((m) => String(m.content))
-          .join("\n");
-        appendFileSync(
-          ".memory-inject-debug.log",
-          JSON.stringify({
-            t: new Date().toISOString(),
-            phase: "finalRequest",
-            overrideSys: Boolean(overrideSys),
-            sysMsgCount: finalMessages.filter((m) => m.role === "system").length,
-            finalSysHasNarrative: sysJoined.includes("记忆图联想检索"),
-            hasTailDynamicContext: Boolean(promptPlan.tailDynamicContext),
-            tailHasNarrative: String(promptPlan.tailDynamicContext ?? "").includes("记忆图联想检索"),
-            tailInUser: finalMessages
-              .slice(-1)
-              .some((m) => m.role === "user" && JSON.stringify(m.content).includes("记忆图联想检索")),
-            finalSysHead: sysJoined.slice(0, 120),
-          }) + "\n",
-        );
-      } catch {
-        /* ignore */
-      }
       const request = {
         model,
         messages: finalMessages,

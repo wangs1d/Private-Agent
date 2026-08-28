@@ -56,8 +56,15 @@ export type RecallGateResult = {
     | "off"; // 未触发（默认）
 };
 
-/** 新会话开场判定阈值：thread 内 user/assistant 消息总数 ≤ 2 视为新会话 */
-const NEW_SESSION_THREAD_MAX = 2;
+/**
+ * 新会话开场判定阈值：仅 thread 内 user/assistant 消息总数 ≤ 1 视为新会话
+ * （本 session 首条用户消息）。
+ * 原阈值 2 的误判（串台根因之一）：首轮问答完成后 thread 已有 2 条消息，
+ * 第二轮（如任务追问"你确定？"）仍命中 new_session → relationshipMemory/
+ * 跨会话记忆全量注入任务轮 → agent 用角色关系语境盖过任务语境。
+ * 修正后跨会话衔接只在真正的会话开场注入一次。
+ */
+const NEW_SESSION_THREAD_MAX = 1;
 /**
  * 指代升级判定阈值：thread 消息数超过此值说明早期轮次已被截出窗口，
  * 模糊指代（"那个/它/继续"）有可能指向窗口外内容，需要升级长期检索。

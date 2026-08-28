@@ -1616,8 +1616,17 @@ interface ToolCategoryMapping {
 const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'web',
-    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别'],
+    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别', '查查', '查一查', '搜一下', '八卦', '吃瓜', '爆料', '热搜', '近况', '怎么样了', '什么情况'],
     toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site']
+  },
+  {
+    // 记忆检索工具化（Letta/MemGPT agentic retrieval 模式）：
+    // 长期记忆召回不再只靠系统层注入，LLM 可在 PLAN 阶段自主决定调 brain.recall
+    // 按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
+    // 用户提到记忆类措辞时命中，让 brain.recall / brain.remember 进入可见工具集。
+    category: 'memory',
+    keywords: ['记得', '回忆', '记忆', '忘了', '忘记', '上次聊', '上回聊', '之前说过', '之前提到', '提过', '聊过', 'remember', 'recall', 'memory'],
+    toolNames: ['brain.recall', 'brain.remember']
   },
   {
     category: 'calendar',
@@ -1899,8 +1908,13 @@ export function selectRelevantTools(
       "wallet.get_balance",
       "phone.call_user",
     ];
+    // 兜底填充黑名单：记忆工具（brain.recall/brain.remember）只能由 memory 分类
+    // 关键词召回（用户显式提及记忆时）。若经兜底混进低意图轮次（如"你确定？"），
+    // LLM 可能自发调用 brain.recall → 跨会话记忆灌回任务轮（串台回归向量）。
+    const PADDING_EXCLUDED_TOOLS = new Set(["brain.recall", "brain.remember"]);
     const remainingTools = allTools.filter((tool) => {
       if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
+      if (PADDING_EXCLUDED_TOOLS.has(tool.function.name)) return false;
       return !selectedToolNames.has(tool.function.name);
     });
     // 优先级排序：FALLBACK_PRIORITY 中的按顺序排前，其余保持原序
@@ -1924,13 +1938,6 @@ export function selectRelevantTools(
   }
 
   return filteredTools;
-}
-
-export function getSmartToolsForContext(userText: string, extraTools?: ChatCompletionTool[]): ChatCompletionTool[] {
-  const allBuiltinTools = getBuiltinAgentChatTools();
-  const allTools = extraTools ? [...allBuiltinTools, ...extraTools] : allBuiltinTools;
-  
-  return selectRelevantTools(userText, allTools);
 }
 
 function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): string | null {
@@ -2574,11 +2581,13 @@ export async function streamCompletionWithTools(
 
       // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
       // 重规划一次（不额外消耗波次预算，全程最多授予一次）。
+      // 2026-08-28 修复：移除 `wave + 1 < maxWaves` 门槛——该条件把 fast 模式
+      // （maxWaves=1）的强制联网兜底整个挡死，fast 轮"宣告查过实则没调工具"
+      // 的假搜索回复无防线。wave -= 1 已补偿波次预算，fast 模式也允许强制补搜。
       if (
         requiresFreshWebLookup &&
         !satisfiedFreshWebLookup &&
-        !freshLookupEnforced &&
-        wave + 1 < maxWaves
+        !freshLookupEnforced
       ) {
         freshLookupEnforced = true;
         wave -= 1; // 补回本次被消耗的波次： enforcement 轮不计入规划预算
@@ -3041,11 +3050,24 @@ export async function streamCompletionWithTools(
           `内容=${strategyDirective.quality.totalContentLength}字符 理由=${strategyDirective.quality.reason}`,
       );
 
+      // 零工具结果守卫（2026-08-28）：本轮没有任何工具执行（含搜索）时，
+      // 明确告知 LLM 禁止虚构"已查询/已翻阅/公开渠道没查到"——假搜索回复的
+      // 最后防线。正则门控（forced-tool）+ 强制联网兜底已在前置层拦住绝大多数，
+      // 这里兜住漏网：模型在无任何证据下编造"查过了"的叙述。
+      const zeroToolGuard =
+        allToolExecResults.length === 0
+          ? `\n\n【重要】本轮没有执行任何工具或检索。严禁声称已经查询、搜索、翻阅过任何资料` +
+            `（包括"翻了一圈""公开渠道没查到""据我了解最新消息"等说法）；` +
+            `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
+          : "";
       const baseDirective =
-        `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
-        `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
-        `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。` +
-        strategyBlock;
+        (allToolExecResults.length > 0
+          ? `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
+            `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
+            `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。`
+          : `请基于本轮对话上下文用自然的口语回答用户的问题。`) +
+        strategyBlock +
+        zeroToolGuard;
       const escapeDirective = escapeAllowed
         ? `\n\n【重要】如果你认为现有工具结果不足以回答用户的问题（例如还需要抓取某个具体网页、` +
           `还需要换关键词再查一次），第一行只输出 ${NEED_MORE_TOOLS_MARKER}，不要输出任何其他内容。` +

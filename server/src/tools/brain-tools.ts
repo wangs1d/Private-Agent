@@ -1020,6 +1020,11 @@ export function registerBrainTools(
         items: result.items,
         domain: result.domain,
         mode: result.mode,
+        // 记忆免责声明（与【记忆图联想检索】注入块同款）：tool 消息进上下文时
+        // 明确身份隔离，防止历史记忆被当成当前轮语境（串台防线）。
+        note:
+          "历史记忆检索结果，可能来自较早的对话，并非用户本轮陈述；" +
+          "与当前对话冲突时，以用户最新消息为准。",
       };
     } catch (err) {
       return {

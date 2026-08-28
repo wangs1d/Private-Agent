@@ -529,11 +529,19 @@ async function processBatchedMessage(
       pauseMs: 400,
       minSegmentChars: 6,
       interimReplyGapMs: 800,
-      // 由路由决策判定：闲聊式对话分段，工具/搜索/知识问答不分段
-      segmentationEnabled: decision.segmentable,
-      // 信息块目标字符数（同话题短句累积到该长度切块）与正文块数上限
+      // 2026-08-28 修复"分段回复一次性整段渲染"：原按路由决策
+      // （decision.segmentable）关闭工具/搜索/知识问答轮的分段，工具循环的
+      // 最终文本只在收尾时经一次 onDelta 整段喂入 → segmentationEnabled=false
+      // 时 flushFinal 把全文作为单个 stream chunk 推出，前端一条气泡一次性
+      // 渲染全部内容。改为所有轮次统一启用信息块分段：无论闲聊还是工具轮，
+      // 回复都按信息块逐条推送（块间 400ms 停顿），前端一条一条渲染。
+      segmentationEnabled: true,
+      // 信息块目标字符数（同话题短句累积到该长度切块）；正文块数上限从 8 提到 24：
+      // 8 块 × 56 字 ≈ 450 字，普通长回复就会触顶，超限内容并入 tailBuffer 后在
+      // flushFinal 一次性输出——长回复尾部"同时渲染"的根因。24 块 ≈ 1300 字，
+      // 覆盖真实回复体量，尾部合并只对病态超长输出生效（保留为防刷屏极端阀）。
       blockCharTarget: 56,
-      maxStreamSegments: 4,
+      maxStreamSegments: 24,
     },
   );
 

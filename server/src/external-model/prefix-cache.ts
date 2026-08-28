@@ -5,12 +5,8 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
-import {
-  buildLayeredSystemPrompt,
-  buildLayeredSystemPromptSections,
-  finalizeChatSystemPrompt,
-  type FinalizeChatSystemPromptOpts,
-} from "../agent/prompt-builder.js";
+import { finalizeChatSystemPrompt, type FinalizeChatSystemPromptOpts } from "../agent/prompt-builder.js";
+import { assembleSystemPrompt } from "../agent/prompt-assembler.js";
 import type { AgentPromptMemoryContext } from "./types.js";
 
 export type PrefixCacheRequest = {
@@ -123,25 +119,10 @@ function buildStableSystemPrompt(
   memory: AgentPromptMemoryContext | undefined,
   finalizeOptions: FinalizeChatSystemPromptOpts | undefined,
 ): { fullSystemPrompt: string; stableSystemPrompt: string; dynamicSystemPrompt?: string } {
+  // 单一出口：finalize（规则后缀）→ assemble（全局规则 + stable/dynamic 分层）一次完成。
+  // 旧版在此处连调 finalize + Sections + buildLayeredSystemPrompt 三次重复渲染。
   const finalizedBaseSystem = finalizeChatSystemPrompt(baseSystemPrompt, finalizeOptions);
-  const { stablePrefix, dynamicContext } = buildLayeredSystemPromptSections(memory);
-  const fullSystemPrompt = buildLayeredSystemPrompt(finalizedBaseSystem, memory);
-
-  if (stablePrefix.length === 0 && dynamicContext.length === 0) {
-    return {
-      fullSystemPrompt,
-      stableSystemPrompt: finalizedBaseSystem,
-    };
-  }
-
-  const stableSystemPrompt = [finalizedBaseSystem, ...stablePrefix].join("\n\n").trim();
-  const dynamicSystemPrompt = dynamicContext.join("\n\n").trim() || undefined;
-
-  return {
-    fullSystemPrompt,
-    stableSystemPrompt,
-    dynamicSystemPrompt,
-  };
+  return assembleSystemPrompt(finalizedBaseSystem, memory);
 }
 
 function buildPromptCacheKey(args: {

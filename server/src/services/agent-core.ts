@@ -552,19 +552,16 @@ export class AgentCore {
   }
 
   /**
-   * 当日 journal 命中块：带时间标签 + 免责声明（这是今天早些时候的对话记录，
-   * 不是用户本轮消息），供 LLM 区分「检索到的历史」与「当前对话」。
+   * 当日 journal 命中块：只产出带时间标签的命中行（2026-08-28 注入路径统一后，
+   * 块标题与免责声明由 prompt-assembler 的【短期上下文】家族统一添加，
+   * 服务层不再手拼【】标题头）。
    * 仅扫当天（短期记忆），过往日期已固化进长期记忆图，不走文件检索。
    */
   private buildJournalRecallBlock(hits: JournalHit[]): string | undefined {
     if (hits.length === 0) return undefined;
     const roleLabel = (role: JournalHit["role"]) =>
       role === "user" ? "用户" : role === "assistant" ? "助手" : "事实";
-    const lines = hits.map((h) => `[今天 ${h.time}·${roleLabel(h.role)}] ${h.text}`);
-    return [
-      "【今日对话日志检索】（今天早些时候的对话记录检索结果，非用户本轮消息；与当前对话冲突时以用户最新消息为准）",
-      ...lines,
-    ].join("\n");
+    return hits.map((h) => `[今天 ${h.time}·${roleLabel(h.role)}] ${h.text}`).join("\n");
   }
 
   /**

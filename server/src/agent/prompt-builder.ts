@@ -12,6 +12,7 @@ import {
   inferMemoryTopic,
   topicRelevanceBoost,
 } from "./memory-topic.js";
+import { assembleLayeredSections, GLOBAL_MEMORY_RULE } from "./prompt-assembler.js";
 
 /**
  * 与 `USER_AGENT_TOOL_SYSTEM_SUFFIX` 首段一致，用于判断 system 是否已拼接工具说明（幂等追加）。
@@ -46,18 +47,18 @@ const PHONE_CALL_SYSTEM_SUFFIX =
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  */
 export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
-export const LIVE_USER_STATUS_MARKER = "【回复方向】";
-export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复方向】";
+export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复规则】";
 export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
 
 /**
- * 回复结构性要求（语气/人格由 SOUL.md / USER.md / MEMORY.md few-shot 统一注入，
- * 此处仅保留分段与事实边界规则，不重复任何风格/口吻指令）。
+ * 回复规则（2026-08-28 收敛）：原【回复方向】+【记忆使用方式】两个后缀合并为一个块。
+ * 语气/人格由 SOUL.md / USER.md / MEMORY.md few-shot 与 system 的【回复指南】统一注入，
+ * 此处仅保留分段结构、事实边界与记忆使用边界三类硬规则。
  */
-const CONCISE_REPLY_SYSTEM_SUFFIX = `
+const REPLY_RULE_SYSTEM_SUFFIX = `
 
-【回复方向】日常聊天每句以句号/问号/感叹号收尾，方便按短句分条推送；需要交代多件事时拆成几句短话，不写成长篇大段。
-不要擅自补全用户和某个人的关系、关注对象、代词指向；当前轮或明确记忆没有依据时，保持中性或先问清楚。`;
+【回复规则】日常聊天每句以句号/问号/感叹号收尾，方便按短句分条推送；需要交代多件事时拆成几句短话，不写成长篇大段。不要擅自补全用户和某个人的关系、关注对象、代词指向；当前轮或明确记忆没有依据时，保持中性或先问清楚。
+system 里的【记忆整理】【用户档案】【待办与承诺】【短期上下文】等块是"你已经掌握的事实"：用户主动问记忆时如实引用注入块作答，禁止说"没印象"；用户没主动问时仅话题明显相关或临期（≤24h）自然带一句，否则保持沉默，引用时模糊自然，别照搬原文。`;
 
 export const CARD_ACTION_SYSTEM_SUFFIX_MARKER = "【展示形式】";
 
@@ -97,19 +98,6 @@ export function appendRenderCardSystemSuffix(systemContent: string): string {
 }
 
 /**
- * 记忆召回的使用方式：让 LLM 知道"背景里有这些信息"，但要求像真人一样
- * 只在话题相关或临期时再主动提起，不要每轮都把承诺/未完成事项/历史提醒
- * 复读一遍。系统注入只是给 agent 后台认知，发言权仍由话题相关性决定。
- */
-const MEMORY_RECALL_BEHAVIOR_SUFFIX = `
-
-【记忆使用方式】system 里的【待兑现承诺】【未完成事项】【会话回顾】等是"你已经掌握的事实"。
-- 【用户主动问记忆】如实引用注入块作答，禁止说"没印象"。
-- 【用户没主动问】仅话题明显相关或临期（≤24h）时自然带一句；否则保持沉默。引用时模糊自然，别照搬原文。`;
-
-const LIVE_USER_STATUS_SUFFIX = ""; // 已合并到 CONCISE_REPLY_SYSTEM_SUFFIX
-
-/**
  * 时间戳系统说明：让 LLM 知道每条 user/assistant 消息首行都带 `[ts:...]` 前缀。
  * 配合 AgentPromptMemoryContext.currentTime，Agent 能精确感知「几时发的」「距今多久」。
  */
@@ -146,24 +134,16 @@ function buildMasterSubAgentDelegateSuffix(): string {
 - 用户处于「沙箱」时勿派需要 desktop.visual.run_task / vision.periodic_* / self.* 的任务；须提醒开启「完全访问」。`;
 }
 
-/** 追加「尽量精简」的回复风格说明（已包含则跳过）。 */
+/** 追加「回复规则」（分段结构 + 事实边界 + 记忆使用边界，已包含则跳过）。 */
 export function appendConciseReplySystemSuffix(systemContent: string): string {
   if (systemContent.includes(CONCISE_REPLY_SYSTEM_SUFFIX_MARKER)) return systemContent;
-  return systemContent + CONCISE_REPLY_SYSTEM_SUFFIX;
+  return systemContent + REPLY_RULE_SYSTEM_SUFFIX;
 }
 
 /** 追加「事实可靠性」说明：缺真实数据时承认缺口，禁止用想象补全。 */
 export function appendTruthfulnessSystemSuffix(systemContent: string): string {
   if (systemContent.includes(TRUTHFULNESS_SYSTEM_SUFFIX_MARKER)) return systemContent;
   return systemContent + TRUTHFULNESS_SYSTEM_SUFFIX;
-}
-
-export const MEMORY_RECALL_BEHAVIOR_MARKER = "【记忆使用方式】";
-
-/** 追加「记忆召回使用方式」说明：让 LLM 知道 background memory 的使用边界，不主动复读无关提醒。 */
-export function appendMemoryRecallBehaviorSuffix(systemContent: string): string {
-  if (systemContent.includes(MEMORY_RECALL_BEHAVIOR_MARKER)) return systemContent;
-  return systemContent + MEMORY_RECALL_BEHAVIOR_SUFFIX;
 }
 
 /** 追加「消息时间戳」系统说明（已包含则跳过），让 LLM 理解每条消息首行 `[ts:...]` 前缀。 */
@@ -221,8 +201,7 @@ export function buildCurrentTimePrompt(at: Date = new Date(), timezone?: string)
     weekday = WEEKDAY_CN_FOR_PROMPT[at.getDay()] ?? "";
   }
 
-  const iso = at.toString().includes("T") ? at.toISOString() : new Date(at.getTime()).toISOString();
-  return `当前时间：${local} ${weekday} (时区：${tz}, ISO=${iso})`;
+  return `当前时间：${local} ${weekday}（${tz}）`;
 }
 
 export type FinalizeChatSystemPromptOpts = {
@@ -284,8 +263,6 @@ export function finalizeChatSystemPrompt(
   out = appendTruthfulnessSystemSuffix(out);
   out = appendRenderCardSystemSuffix(out);
   out = appendMessageTimestampSystemSuffix(out);
-  // 记忆召回使用方式：让 LLM 知道 background memory 怎么用，不主动复读无关提醒
-  out = appendMemoryRecallBehaviorSuffix(out);
   if (opts?.tools) {
     out = appendAgentToolCallingSystemSuffix(out);
     if (opts.masterSubAgentDelegate) {
@@ -312,9 +289,6 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   }
   if (!out.includes(PHONE_CALL_SYSTEM_SUFFIX_MARKER)) {
     out += PHONE_CALL_SYSTEM_SUFFIX;
-  }
-  if (!out.includes(LIVE_USER_STATUS_MARKER)) {
-    out += LIVE_USER_STATUS_SUFFIX;
   }
   return out;
 }
@@ -596,7 +570,6 @@ const SLICE_RESERVED_KEYS = new Set([
 export function sliceMemoryEntriesToPromptContext(
   entries: Record<string, unknown>,
   userQuery?: string,
-  opts?: { includeMemorySummary?: boolean },
 ): AgentPromptMemoryContext {
   const str = (v: unknown): string => formatKvValueForPrompt(v);
 
@@ -697,114 +670,26 @@ export function sliceSubAgentMemoryEntries(
   return out;
 }
 
-/** 人格 → 价值观 → 能力倾向 → 履历，最后接厂商默认安全提示（长期演化友好顺序）。 */
+/**
+ * 分层 system prompt（2026-08-28 注入路径统一重构后为薄委托）。
+ *
+ * 渲染逻辑唯一来源：`prompt-assembler.ts`（家族合并 + 统一免责 + stable/dynamic 分层）。
+ * 本函数保持旧签名兼容存量调用方（providers / 测试）：
+ * baseSystem → 全局记忆规则 → 稳定层 → 动态层（含【回复指南】）。
+ */
 export function buildLayeredSystemPrompt(
   baseSystem: string,
   memory?: AgentPromptMemoryContext,
 ): string {
-  if (
-    !memory?.persona &&
-    !memory?.personalityCore &&
-    !memory?.values &&
-    !memory?.abilities &&
-    !memory?.agentCaps &&
-    !memory?.worldCaps &&
-    !memory?.narrativeRecall &&
-    !memory?.memorySummary &&
-    !memory?.memoryCurrentMission &&
-    !memory?.memoryPreferences &&
-    !memory?.memoryFacts &&
-    !memory?.memoryCommitments &&
-    !memory?.memoryOpenLoops &&
-    !memory?.sessionRecap &&
-    !memory?.interruptedContext &&
-    !memory?.userLocation &&
-    !memory?.taskContext &&
-    !memory?.userProfile &&
-    !memory?.toneGuidance &&
-    !memory?.relationshipGuidance &&
-    !memory?.dailyDigest &&
-    !memory?.userProfileSummary &&
-    !memory?.memoryInventory &&
-    !memory?.relationshipMemory &&
-    !memory?.lifeThemeMemory &&
-    !memory?.dreamMemory &&
-    !memory?.followUpAnchor &&
-    !memory?.scheduleSnapshot &&
-    !memory?.currentTime &&
-    !memory?.skillIndex &&
-    !memory?.workingMemorySummary &&
-    !memory?.recentConversationHistory &&
-    !memory?.journalRecall &&
-    !memory?.semanticIntent &&
-    !memory?.proactiveAdvice &&
-    !memory?.interestList &&
-    !memory?.modeRoleGuidance
-  ) {
+  const { stablePrefix, dynamicContext } = assembleLayeredSections(memory);
+  if (stablePrefix.length === 0 && dynamicContext.length === 0) {
     return baseSystem.trim();
   }
   const parts: string[] = [];
-  // #6 收敛 prompting：把所有记忆/回顾/画像/摘要块统一标注为“历史背景”，
-  // 强化“用户最新一条消息优先于任何历史记忆”的约束，降低大杂烩对当前轮的稀释。
-  parts.push(
-    "【记忆使用规则】\n下方所有“记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项”块均为历史背景，仅供衔接与指代消解，不是用户的最新指令。「用户最新一条消息」才是本轮的唯一指令基准。除非用户明确要求回忆历史，否则一律以最新消息为准；当历史记忆与最新消息冲突时，以最新消息为准，并仅就最新消息作答。",
-  );
-  if (memory.followUpAnchor) parts.push(memory.followUpAnchor);
-  if (memory.scheduleSnapshot) parts.push(memory.scheduleSnapshot);
-  if (memory.taskContext) parts.push(`[Turn Task Context]\n${memory.taskContext}`);
-  if (memory.toneGuidance) parts.push(`【本轮语气与情绪适配】\n${memory.toneGuidance}`);
-  if (memory.relationshipGuidance) parts.push(`【回复风格与关系边界】\n${memory.relationshipGuidance}`);
-  if (memory.userProfile) parts.push(`【用户画像】\n${memory.userProfile}`);
-  if (memory.userLocation) parts.push(`【用户位置】\n${memory.userLocation}`);
-  if (memory.personalityCore) parts.push(`【人格内核】\n${memory.personalityCore}`);
-  if (memory.persona) parts.push(`【人格与角色】\n${memory.persona}`);
-  if (memory.values) parts.push(`【价值观与原则】\n${memory.values}`);
-  if (memory.abilities) parts.push(`【能力倾向】\n${memory.abilities}`);
-  if (memory.agentCaps) parts.push(`【你的 Agent 专属能力】\n${memory.agentCaps}`);
-  if (memory.worldCaps) parts.push(`【Agent World】\n${memory.worldCaps}`);
-  if (memory.dailyDigest) parts.push(`【今日对话摘要】\n${memory.dailyDigest}`);
-  if (memory.userProfileSummary) parts.push(`【用户长期画像】\n${memory.userProfileSummary}`);
-  // 元认知目录：让 LLM 知道"自己记住了什么"（规模/时间分布/高频主题）
-  if (memory.memoryInventory) parts.push(`【记忆目录】\n${memory.memoryInventory}`);
-  if (memory.narrativeRecall)
-    parts.push(
-      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n${memory.narrativeRecall}`,
-    );
-  if (memory.workingMemorySummary) parts.push(`【当前工作记忆】\n${memory.workingMemorySummary}`);
-  if (memory.recentConversationHistory)
-    parts.push(
-      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${memory.recentConversationHistory}`,
-    );
-  // 当日对话日志检索：当天 md 承载的对话历史（块内已自带「今日对话日志检索」标题与免责声明）
-  if (memory.journalRecall) parts.push(memory.journalRecall);
-  if (memory.memorySummary) parts.push(`【持久记忆与偏好】\n${memory.memorySummary}`);
-  if (memory.memoryPreferences) parts.push(`【用户偏好】\n${memory.memoryPreferences}`);
-  if (memory.memoryFacts) parts.push(`【用户事实】\n${memory.memoryFacts}`);
-  if (memory.memoryCommitments) parts.push(`【待兑现承诺】\n${memory.memoryCommitments}`);
-  if (memory.memoryOpenLoops) parts.push(`【未完成事项】\n${memory.memoryOpenLoops}`);
-  if (memory.sessionRecap) parts.push(`【会话回顾】\n${memory.sessionRecap}`);
-  if (memory.relationshipMemory) parts.push(memory.relationshipMemory);
-  if (memory.lifeThemeMemory) parts.push(memory.lifeThemeMemory);
-  if (memory.dreamMemory) parts.push(memory.dreamMemory);
-  if (memory.yesterdayHighlight) parts.push(memory.yesterdayHighlight);
-  if (memory.memoryContinuity) parts.push(memory.memoryContinuity);
-  if (memory.interruptedContext) parts.push(memory.interruptedContext);
-  if (memory.currentTime) parts.push(`【当前时间】\n${memory.currentTime}`);
-  // 元认知与情绪：让 LLM 知道"自己现在怎么想/感觉如何"
-  if (memory.metaCognition) parts.push(`【自我认知】\n${memory.metaCognition}`);
-  if (memory.emotionState) parts.push(`【当前情绪】\n${memory.emotionState}`);
-  // 语义意图理解：让 LLM 明确知道用户本轮真实意图，避免答非所问
-  if (memory.semanticIntent) parts.push(`【意图理解】\n${memory.semanticIntent}`);
-  if (memory.skillIndex) parts.push(memory.skillIndex);
-  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
-  if (memory.proactiveAdvice) parts.push(memory.proactiveAdvice);
-  // 用户兴趣关注列表（InterestWatcher）：agent 知道用户长期关注什么 + 工具引导
-  if (memory.interestList) parts.push(memory.interestList);
-  // 对话时间线事实：首次对话/累计轮次/最近对话，回答时间类元问题有确定依据
-  if (memory.conversationTimeline) parts.push(memory.conversationTimeline);
-  // 本模式职责人格（fast/complex 差异化）：让同一套基座人格在当前"脑"上各有侧重。
-  // 该项由 agent-core 依据路由 mode 注入，需放在人格块之后、远离 baseSystem 的关键约束区。
-  if (memory.modeRoleGuidance) parts.push(`【本模式职责】\n${memory.modeRoleGuidance}`);
+  // 全局记忆使用规则：所有历史块统一标注为"背景"，用户最新一条消息为唯一指令基准。
+  parts.push(GLOBAL_MEMORY_RULE);
+  parts.push(...stablePrefix);
+  parts.push(...dynamicContext);
   parts.push(baseSystem.trim());
   return parts.join("\n\n");
 }
@@ -814,114 +699,9 @@ export type LayeredSystemPromptSections = {
   dynamicContext: string[];
 };
 
-function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
-  return Boolean(
-    memory?.persona ||
-      memory?.personalityCore ||
-      memory?.values ||
-      memory?.abilities ||
-      memory?.agentCaps ||
-      memory?.worldCaps ||
-      memory?.narrativeRecall ||
-      memory?.memorySummary ||
-      memory?.memoryPreferences ||
-      memory?.memoryFacts ||
-      memory?.memoryCommitments ||
-      memory?.memoryOpenLoops ||
-      memory?.sessionRecap ||
-      memory?.interruptedContext ||
-      memory?.userLocation ||
-      memory?.taskContext ||
-      memory?.userProfile ||
-      memory?.toneGuidance ||
-      memory?.relationshipGuidance ||
-      memory?.dailyDigest ||
-      memory?.userProfileSummary ||
-      memory?.memoryInventory ||
-      memory?.relationshipMemory ||
-      memory?.lifeThemeMemory ||
-      memory?.dreamMemory ||
-      memory?.yesterdayHighlight ||
-      memory?.memoryContinuity ||
-      memory?.followUpAnchor ||
-      memory?.scheduleSnapshot ||
-      memory?.currentTime ||
-      memory?.skillIndex ||
-      memory?.workingMemorySummary ||
-      memory?.recentConversationHistory ||
-      memory?.journalRecall ||
-      memory?.semanticIntent ||
-      memory?.proactiveAdvice ||
-      memory?.interestList ||
-      memory?.conversationTimeline ||
-      memory?.modeRoleGuidance
-  );
-}
-
+/** 分层 sections（薄委托）：stable 在前缀缓存请求中，dynamic 沉底注入。 */
 export function buildLayeredSystemPromptSections(
   memory?: AgentPromptMemoryContext,
 ): LayeredSystemPromptSections {
-  if (!hasAnyPromptMemory(memory)) {
-    return { stablePrefix: [], dynamicContext: [] };
-  }
-  const m = memory as AgentPromptMemoryContext;
-
-  const stablePrefix: string[] = [];
-  const dynamicContext: string[] = [];
-
-  if (m.personalityCore) stablePrefix.push(`【人格内核】\n${m.personalityCore}`);
-  if (m.persona) stablePrefix.push(`【人格与角色】\n${m.persona}`);
-  if (m.values) stablePrefix.push(`【价值观与原则】\n${m.values}`);
-  if (m.abilities) stablePrefix.push(`【能力倾向】\n${m.abilities}`);
-  if (m.agentCaps) stablePrefix.push(`【你的 Agent 专属能力】\n${m.agentCaps}`);
-  if (m.worldCaps) stablePrefix.push(`【Agent World】\n${m.worldCaps}`);
-  if (m.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${m.userProfileSummary}`);
-  // 元认知目录：变化慢（60s TTL），放稳定前缀
-  if (m.memoryInventory) stablePrefix.push(`【记忆目录】\n${m.memoryInventory}`);
-  if (m.relationshipMemory) stablePrefix.push(m.relationshipMemory);
-  if (m.lifeThemeMemory) stablePrefix.push(m.lifeThemeMemory);
-  if (m.dreamMemory) stablePrefix.push(m.dreamMemory);
-
-  if (m.yesterdayHighlight) dynamicContext.push(m.yesterdayHighlight);
-  if (m.memoryContinuity) dynamicContext.push(m.memoryContinuity);
-  // 语义意图理解：让 LLM 明确知道用户本轮真实意图
-  if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
-  if (m.followUpAnchor) dynamicContext.push(m.followUpAnchor);
-  if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
-  if (m.taskContext) dynamicContext.push(`[Turn Task Context]\n${m.taskContext}`);
-  if (m.toneGuidance) dynamicContext.push(`【本轮语气与情绪适配】\n${m.toneGuidance}`);
-  if (m.relationshipGuidance) dynamicContext.push(`【回复风格与关系边界】\n${m.relationshipGuidance}`);
-  if (m.userProfile) dynamicContext.push(`【用户画像】\n${m.userProfile}`);
-  if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
-  if (m.dailyDigest) dynamicContext.push(`【今日对话摘要】\n${m.dailyDigest}`);
-  if (m.narrativeRecall)
-    dynamicContext.push(
-      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n${m.narrativeRecall}`,
-    );
-  if (m.workingMemorySummary) dynamicContext.push(`【当前工作记忆】\n${m.workingMemorySummary}`);
-  if (m.recentConversationHistory)
-    dynamicContext.push(
-      `【最近对话回顾】\n（用于指代消解与话题衔接，不是用户的最新指令；当前轮请以「用户最新一条」为准）\n${m.recentConversationHistory}`,
-    );
-  // 当日对话日志检索：当天 md 承载的对话历史（块内已自带标题与免责声明）
-  if (m.journalRecall) dynamicContext.push(m.journalRecall);
-  if (m.memorySummary) dynamicContext.push(`【持久记忆与偏好】\n${m.memorySummary}`);
-  if (m.memoryPreferences) dynamicContext.push(`【用户偏好】\n${m.memoryPreferences}`);
-  if (m.memoryFacts) dynamicContext.push(`【用户事实】\n${m.memoryFacts}`);
-  if (m.memoryCommitments) dynamicContext.push(`【待兑现承诺】\n${m.memoryCommitments}`);
-  if (m.memoryOpenLoops) dynamicContext.push(`【未完成事项】\n${m.memoryOpenLoops}`);
-  if (m.sessionRecap) dynamicContext.push(`【会话回顾】\n${m.sessionRecap}`);
-  if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
-  if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
-  if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
-  if (m.skillIndex) dynamicContext.push(m.skillIndex);
-  if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
-  // ProactivityHub advise：agent 后台主动观察到的建议，本轮回复中自然带出
-  if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
-  // 用户兴趣关注列表（InterestWatcher）：agent 知道用户长期关注什么 + 工具引导
-  if (m.interestList) dynamicContext.push(m.interestList);
-  // 本模式职责人格（fast/complex 差异化）：放动态上下文末尾，紧贴 baseSystem 前的关键约束区
-  if (m.modeRoleGuidance) dynamicContext.push(`【本模式职责】\n${m.modeRoleGuidance}`);
-
-  return { stablePrefix, dynamicContext };
+  return assembleLayeredSections(memory);
 }
