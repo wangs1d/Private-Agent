@@ -489,6 +489,42 @@ function extractKeywords(text: string): string[] {
   return uniqueStrings([...zh, ...en], 14);
 }
 
+/**
+ * 汉字串 token → 字符 bigram 集合（英文 token 保持原样）。
+ *
+ * extractKeywords 抽的是连续汉字串（"我对芒果过敏"整段），查询与事实只要
+ * 断句方式不同就零重叠。bigram 化后"过敏/芒果/妻子"等词面片段可部分匹配，
+ * 无需分词库即可让换说法的查询命中（见 test/memory-recall-benchmark.test.ts）。
+ */
+function keywordBigrams(tokens: string[]): Set<string> {
+  const grams = new Set<string>();
+  for (const token of tokens) {
+    if (/^[\u4e00-\u9fff]+$/.test(token)) {
+      if (token.length === 1) {
+        grams.add(token);
+      }
+      for (let i = 0; i < token.length - 1; i++) {
+        grams.add(token.slice(i, i + 2));
+      }
+    } else {
+      grams.add(token);
+    }
+  }
+  return grams;
+}
+
+/** query 与 target 关键词的 bigram 覆盖率（0-1，按较小集合归一）。 */
+function bigramOverlapScore(queryTokens: string[], targetTokens: string[]): number {
+  const q = keywordBigrams(queryTokens);
+  const t = keywordBigrams(targetTokens);
+  if (q.size === 0 || t.size === 0) return 0;
+  let overlap = 0;
+  for (const gram of q) {
+    if (t.has(gram)) overlap += 1;
+  }
+  return overlap / Math.min(q.size, t.size);
+}
+
 function extractEntityTags(text: string): string[] {
   const candidates = text.match(/[\u4e00-\u9fffA-Za-z0-9_-]{2,20}/g) ?? [];
   return uniqueStrings(candidates.filter((token) => /[\u4e00-\u9fffA-Z]/.test(token[0] ?? "")), 10);
@@ -1458,7 +1494,7 @@ export class HumanLikeMemoryService {
           node.domainScore * 0.08 +
           node.userFeedbackScore * 0.08;
         const keywordScore =
-          queryKeywords.filter((keyword) => node.keywords.includes(keyword)).length * 0.15 +
+          bigramOverlapScore(queryKeywords, node.keywords) * 0.45 +
           queryEntities.filter((entity) => node.entityTags.includes(entity)).length * 0.12;
         // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到 cosineLikeScore
         let vectorScore: number;
@@ -1469,6 +1505,12 @@ export class HumanLikeMemoryService {
         } else {
           // 降级路径：旧节点无真向量或无 query 向量，用关键词集合 cosine
           vectorScore = cosineLikeScore(queryKeywords, node.keywords) * 0.26;
+        }
+        // 相关性下限：词面/语义零重叠的候选不入选。纯结构分（重要性/置信度等）
+        // 不构成召回理由——否则任意无关查询都会拖回 top-N 噪声（串台感的
+        // 检索层根源，见 test/memory-recall-benchmark.test.ts 基准 B）。
+        if (keywordScore <= 0 && vectorScore <= 0) {
+          return null;
         }
         // W2 新增：inactivityPenalty — 长期未命中的节点在召回排序时降权
         // 与人类记忆"经常提起就记忆犹新，不提起就逐渐淡忘"机制一致
@@ -1502,6 +1544,7 @@ export class HumanLikeMemoryService {
           (node.userFeedbackScore < 0.5 ? this.policy.retrieval.userNegativeFeedbackPenalty : 0);
         return { node, structureScore, keywordScore, vectorScore, finalScore };
       })
+      .filter((candidate): candidate is HybridRetrievalCandidate => candidate !== null)
       .sort((a, b) => b.finalScore - a.finalScore);
 
     if (mode === "cross_domain") {

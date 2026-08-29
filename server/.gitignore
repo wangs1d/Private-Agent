@@ -8,15 +8,6 @@ dist/
 # Development documentation
 SUBAGENT-REFACTORING.md
 
-# Test files
-*.test.ts
-*.test.js
-*.spec.ts
-*.spec.js
-test/
-tests/
+# 测试是记忆系统的回归防线，必须入库（2026-08-29 移除对 test/ 的忽略）。
+# 一次性调试脚本请放 scripts/（历史脚本归档于 scripts/archive/）。
 __tests__/
-!test/
-test/*
-!test/schedule-task-service.test.ts
-!test/short-term-memory-focus.test.ts
