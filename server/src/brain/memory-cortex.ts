@@ -167,6 +167,12 @@ interface HumanLikeMemoryLike {
     nodeIds: string[],
     max?: number,
   ): Array<{ id: string; summary: string }>;
+  /**
+   * 可选：查询给定节点中处于可再唤醒状态（downranked/cold）的节点 ID。
+   * 召回命中褪色记忆时，MemoryCortex 据此触发 ForgettingController.reawakenAndStrengthen
+   * （遗忘反弹：deletionStage 回退一级 + frequencyScore 反弹）。
+   */
+  findReawakenableNodeIds?(actorId: string, nodeIds: string[]): string[];
 }
 
 // 叙事记忆睡眠巩固报告外观
@@ -1134,6 +1140,7 @@ export class MemoryCortex {
             limit: opts?.limit,
           }),
         );
+        this.triggerReawakenForFadedHits(actorId, result);
         return {
           actorId,
           query,
@@ -1333,8 +1340,9 @@ export class MemoryCortex {
     // P0-3 语义化联想种子：用 humanLike.findNodeIdsByContent 反查真实节点 ID；
     // 反查不可用（无真实种子）时直接跳过，不做无副作用的假 ID 扩散。
     // 扩散后的探索触发（知识缺口）保持 fire-and-forget。
-    // recall 命中 downranked/cold 节点的再唤醒由 BrainStem 45s 心跳 →
-    // forgettingController.continuousScore 统一处理（见 Phase 4 装配）。
+    // recall 命中 downranked/cold 节点的再唤醒反弹由 triggerReawakenForFadedHits
+    // 在 buildRecall 返回后触发（遗忘控制器 Phase 2 接线）；BrainStem 45s 心跳 →
+    // forgettingController.continuousScore 负责反方向的衰减/剪枝（见 Phase 4 装配）。
     if (this.associativeGraph && this.humanLike && mergedItems.length > 0) {
       try {
         const seedNodeIds =
@@ -1785,6 +1793,7 @@ export class MemoryCortex {
           detailLevel: "summary",
         }),
       );
+      this.triggerReawakenForFadedHits(actorId, result);
       return {
         actorId,
         query,
@@ -2165,6 +2174,32 @@ export class MemoryCortex {
     } catch (err) {
       console.log(`[MemoryCortex] recall 调用失败: ${err}`);
       return null;
+    }
+  }
+
+  /**
+   * 再唤醒反弹（遗忘控制器 Phase 2 接线）：召回命中 downranked/cold 节点时，
+   * 触发 ForgettingController.reawakenAndStrengthen —— deletionStage 回退一级 +
+   * frequencyScore 反弹 + synapse memory.reawakened 事件。反复被提起的记忆会
+   * 从遗忘曲线边缘爬回来，这正是"再唤醒"语义；从未命中的则继续走遗忘曲线。
+   * fire-and-forget，不阻塞召回返回。
+   */
+  private triggerReawakenForFadedHits(
+    actorId: string,
+    result: { recalledNodeIds: string[] } | null,
+  ): void {
+    if (!this.forgettingController || !this.humanLike) return;
+    if (!result || result.recalledNodeIds.length === 0) return;
+    try {
+      const reawakenable =
+        this.humanLike.findReawakenableNodeIds?.(actorId, result.recalledNodeIds) ?? [];
+      for (const nodeId of reawakenable) {
+        void this.forgettingController.reawakenAndStrengthen(actorId, nodeId).catch(() => {
+          /* 静默：再唤醒失败不影响召回 */
+        });
+      }
+    } catch (err) {
+      console.log(`[MemoryCortex] 再唤醒触发失败（忽略）: ${err}`);
     }
   }
 

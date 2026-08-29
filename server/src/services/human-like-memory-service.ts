@@ -1058,6 +1058,19 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 查询给定节点中处于可再唤醒状态（downranked / cold）的节点 ID。
+   * 供 MemoryCortex 召回后触发 ForgettingController.reawakenAndStrengthen：
+   * 只有被召回命中的褪色记忆才值得反弹，其余节点维持遗忘曲线。
+   */
+  findReawakenableNodeIds(actorId: string, nodeIds: string[]): string[] {
+    return nodeIds.filter((nodeId) => {
+      const node = this.store.nodes[nodeId];
+      if (!node || node.actorId !== actorId) return false;
+      return node.deletionStage === "downranked" || node.deletionStage === "cold";
+    });
+  }
+
+  /**
    * 节点再唤醒（供 ForgettingController.reawakenAndStrengthen 调用）。
    * - frequencyScore += 0.3（远超普通 recall 的 +0.06，体现"再唤醒反弹"）
    * - deletionStage 回退一级：cold → downranked → active

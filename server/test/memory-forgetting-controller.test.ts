@@ -723,3 +723,70 @@ test("优雅降级: getAllNodes 返回空数组时不抛错", async () => {
   assert.equal(mockHuman.calls.updateDeletionStage.length, 0, "空节点列表不应推进 deletionStage");
   assert.equal(mockHuman.calls.pruneNodeEdges.length, 0, "空节点列表不应剪枝");
 });
+
+// ── Phase 2 接线集成测试：真实服务 + MemoryCortex 召回触发再唤醒 ──────────────
+
+test("集成: 召回命中 downranked 节点时触发再唤醒反弹（deletionStage 回退）", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { HumanLikeMemoryService } = await import(
+    "../src/services/human-like-memory-service.js"
+  );
+  const { MemoryCortex } = await import("../src/brain/memory-cortex.js");
+
+  const LLM_ENV_KEYS = [
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "OPENAI_EMBEDDINGS_MODEL",
+    "AGENT_EMBEDDING_API_KEY",
+    "MOONSHOT_API_KEY",
+    "EXTERNAL_MODEL_PROVIDER",
+    "EXTERNAL_MODEL_FAILOVER_CHAIN",
+  ] as const;
+  const savedEnv = new Map(LLM_ENV_KEYS.map((key) => [key, process.env[key]] as const));
+  for (const key of LLM_ENV_KEYS) delete process.env[key];
+
+  const dir = await mkdtemp(join(tmpdir(), "forget-integration-"));
+  const humanLike = new HumanLikeMemoryService(join(dir, "memory.json"), join(dir, "policy.json"));
+  try {
+    await humanLike.load();
+
+    // 低价值一次性事实 → sleep cycle 后进入 downranked
+    await humanLike.ingest("user-int", "The loading spinner appeared briefly on this page.", "chat:user", {
+      metadata: { salience: 0.1, userImportance: 0.1 },
+    });
+    await humanLike.runSleepCycleForActors(["user-int"]);
+    const store = (humanLike as unknown as { store: { nodes: Record<string, { deletionStage: string; frequencyScore: number }> } }).store;
+    const nodeIds = Object.keys(store.nodes);
+    assert.ok(nodeIds.length >= 1, "应已产生记忆节点");
+    const nodeId = nodeIds[0];
+    assert.equal(store.nodes[nodeId].deletionStage, "downranked");
+
+    // 装配 MemoryCortex + 遗忘控制器（真实接线）
+    const controller = new MemoryForgettingController();
+    controller.registerHumanLikeMemory(humanLike);
+    const cortex = new MemoryCortex();
+    cortex.registerHumanLike(humanLike);
+    cortex.registerForgettingController(controller);
+
+    // 召回命中该褪色节点 → 应触发再唤醒反弹
+    // （生产链路经跨域召回；单域召回因 domain 推断与节点所属域不同可能落空）
+    const result = await cortex.recallCrossDomain("user-int", "loading spinner page");
+    assert.ok(result.items.length > 0, "downranked 节点应仍可被召回");
+    // fire-and-forget，让异步链落地
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const node = store.nodes[nodeId];
+    assert.equal(node.deletionStage, "active", "再唤醒后 deletionStage 应回退到 active");
+    assert.ok(node.frequencyScore >= 0.3, "再唤醒后 frequencyScore 应获得反弹加成");
+  } finally {
+    await humanLike.shutdown();
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+});

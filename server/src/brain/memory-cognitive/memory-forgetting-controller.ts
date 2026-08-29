@@ -11,9 +11,11 @@
 //
 // 设计原则：不让 LLM 决定是否遗忘/加强。所有判断均由规则计算。
 //
-// 注意：HumanLikeMemoryService 当前没有 getAllNodes / updateDeletionStage / reawakenNode /
-// pruneNodeEdges 方法，这些会在 Phase 2 中添加。本模块只定义外观接口与控制器逻辑，
-// 不修改 HumanLikeMemoryService。
+// 接线（2026-08-29 Phase 2 完成）：
+//  - continuousScore / pruneConnections：create-app-services 实例化时注册
+//    humanLikeMemory，BrainStem 45s 心跳驱动衰减/剪枝；
+//  - reawakenAndStrengthen：MemoryCortex 召回路径在命中 downranked/cold 节点后
+//    经 triggerReawakenForFadedHits 触发（遗忘反弹）。
 
 import type { MemoryDeletionStage } from "../../services/human-like-memory-service.js";
 
@@ -33,7 +35,7 @@ interface MemoryNodeLike {
 
 /**
  * HumanLikeMemoryService 的最小化外观接口。
- * 真实 HumanLikeMemoryService 将在 Phase 2 实现这些方法，结构兼容即可注入。
+ * 真实实现已提供这些方法（Phase 2 已完成），结构兼容即可注入。
  */
 export interface HumanLikeMemoryForgettingLike {
   /** 获取指定 actor 的所有节点 */
