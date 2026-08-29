@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { join } from "node:path";
 
 import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
 import {
@@ -58,8 +59,7 @@ export class AgentMemorySyncService {
   }
 
   private async flushToDisk(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(this.filePath, this.data);
   }
 
   getSnapshot(sessionId: string, keys?: string[]): { revision: number; entries: Record<string, unknown> } {

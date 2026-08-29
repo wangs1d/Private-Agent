@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { join } from "node:path";
 
 import OpenAI from "openai";
 
@@ -1344,14 +1345,12 @@ export class HumanLikeMemoryService {
   }
 
   private async persistPolicy(): Promise<void> {
-    await mkdir(dirname(this.policyFilePath), { recursive: true });
-    await writeFile(this.policyFilePath, `${JSON.stringify(this.policy, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(this.policyFilePath, this.policy);
   }
 
   private schedulePersist(): void {
     this.persistChain = this.persistChain.then(async () => {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(this.filePath, `${JSON.stringify(this.store, null, 2)}\n`, "utf8");
+      await writeJsonAtomic(this.filePath, this.store);
     });
   }
 
