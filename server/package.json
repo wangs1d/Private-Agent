@@ -15,6 +15,7 @@
     "start": "node scripts/start-with-gateway.mjs",
     "start:server": "node dist/index.js",
     "test": "tsx --test test/**/*.test.ts",
+    "eval:recall": "tsx scripts/eval-memory-recall.ts",
     "test:master-agent": "tsx test/master-agent.test.ts",
     "bench:ttft": "tsx scripts/bench-ttft.ts"
   },

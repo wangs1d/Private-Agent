@@ -4,6 +4,7 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { UserFactStore } from "./user-fact-store.js";
 import OpenAI from "openai";
 import { mkdir, writeFile } from "node:fs/promises";
 import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
@@ -79,6 +80,7 @@ export class NightlyMemoryTaskService {
   private isNightMode = false;
   private lastProcessedDay = "";
   private memoryManager: MemoryManagerService | null = null;
+  private factStore: UserFactStore | null = null;
   private dailyDigest: DailyDigestService | null = null;
   private memorySync: AgentMemorySyncService | null = null;
   private narrativeMemory: NarrativeMemoryPort | null = null;
@@ -439,6 +441,19 @@ export class NightlyMemoryTaskService {
     }
   }
 
+  /** 事实主库（懒初始化；可用 USER_FACT_STORE_DIR 覆盖存储目录，测试注入用） */
+  getFactStore(): UserFactStore {
+    if (!this.factStore) {
+      const dir = process.env.USER_FACT_STORE_DIR?.trim();
+      this.factStore = dir ? new UserFactStore(dir) : new UserFactStore();
+    }
+    return this.factStore;
+  }
+
+  setFactStore(store: UserFactStore): void {
+    this.factStore = store;
+  }
+
   /**
    * 夜间事实提炼（巩固管线 episodic → semantic）：
    * 在 journal 固化前，把当日（含跨天补跑）对话日志一次性喂给 LLM，
@@ -457,6 +472,7 @@ export class NightlyMemoryTaskService {
     const llm = resolvePrimaryLlmClientConfig();
     if (!llm) return;
 
+    const factStore = this.getFactStore();
     const actorIds = this.getAllActorIds();
     for (const actorId of actorIds) {
       try {
@@ -483,23 +499,37 @@ export class NightlyMemoryTaskService {
         const facts = await this.extractDurableFacts(llm, transcript);
         if (facts.length === 0) continue;
 
-        let written = 0;
+        let canonical = 0;
+        let kvWritten = 0;
         for (const fact of facts) {
           const text = fact.text.trim().slice(0, 200);
           if (!text) continue;
-          const prefixed =
-            fact.kind === "preference"
-              ? `偏好：${text}`
-              : fact.kind === "commitment"
-                ? `承诺：${text}`
-                : text;
-          this.memorySync.appendMemorySummaryLine(actorId, prefixed, "consolidate");
-          written += 1;
+          if (fact.kind === "preference" || fact.kind === "fact") {
+            // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）
+            await this.getFactStore().upsertFact(actorId, {
+              kind: fact.kind,
+              value: text,
+              source: "nightly-extract",
+              confidence: 0.7,
+            });
+            canonical += 1;
+          } else {
+            // 承诺/待办（时效性内容）→ KV 槽位快速路径
+            this.memorySync.appendMemorySummaryLine(actorId, `承诺：${text}`, "consolidate");
+            kvWritten += 1;
+          }
         }
-        if (written > 0) {
+        // 派生视图同步：事实主库 → KV 结构化槽位（事实为主、槽位为视图，
+        // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
+        if (canonical > 0) {
+          const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync);
           console.log(
-            `[NightlyMemory] 事实提炼: actor=${actorId} 提取 ${written} 条持久事实写入结构化槽位`,
+            `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
+              `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
+              `槽位保留近期行 ${sync.keptRecent}`,
           );
+        } else if (kvWritten > 0) {
+          console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
         }
       } catch (err) {
         console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
