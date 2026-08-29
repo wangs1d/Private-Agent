@@ -26,7 +26,6 @@ export { DecisionHub, type PassiveDecisionResult, type SharedContext, type Antic
 // Step 7 扩展：7 个新皮层模块（4 类人化 + 3 agent 特化）
 export { WorkingMemoryCortex, type WorkingMemorySnapshot, type WorkingMemorySlot, type ActiveGoal, type TodoItem } from "./working-memory-cortex.js";
 export { TaskSwitchingCortex, type TaskContext, type SwitchIntent } from "./task-switching-cortex.js";
-export { MetaCognitionCortex, type MetacogAssessment, type ReflectionRecord, type MetaCognitionWorldModelLike, type RewardSignal } from "./meta-cognition-cortex.js";
 export { ContextCortex, type SituatedContext, type DesktopActivityLike, type ScheduleLike, type DeviceStateLike } from "./context-cortex.js";
 export { ToolPlanningCortex, type ToolPlan, type PlannedTool, type ToolMetadata } from "./tool-planning-cortex.js";
 export { OnlineLearningCortex, type UserProfile, type UserPatternEntry } from "./online-learning-cortex.js";
@@ -36,10 +35,8 @@ export { EmotionModulator, type EmotionModulationResult } from "./emotion-modula
 
 // 记忆认知架构升级（Phase 0-5）：7 个子模块
 export { MemoryAssociativeGraph } from "./memory-cognitive/memory-associative-graph.js";
-export { MemoryReconstructionValidator } from "./memory-cognitive/memory-reconstruction-validator.js";
 export { MemoryMetacognitionBridge } from "./memory-cognitive/memory-metacognition-bridge.js";
 export { MemoryForgettingController } from "./memory-cognitive/memory-forgetting-controller.js";
-export { MemoryProceduralAutomation } from "./memory-cognitive/memory-procedural-automation.js";
 export { MemorySchemaFormation } from "./memory-cognitive/memory-schema-formation.js";
 export { MemorySalienceFilter } from "./memory-cognitive/memory-salience-filter.js";
 export { MemoryExperienceLearningLoop } from "./memory-cognitive/memory-experience-learning-loop.js";

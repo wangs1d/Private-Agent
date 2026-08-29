@@ -982,6 +982,30 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 按节点 ID 批量取节点摘要（联想扩散结果 → 当轮召回候选用）。
+   *
+   * 联想扩散 spread 返回的是激活节点 ID 列表，不含内容；召回侧需要把
+   * 2 度节点的内容并入候选池。仅返回 actorId 匹配且未硬删除的节点，
+   * 保持传入顺序。纯内存读取，不触发持久化。
+   */
+  getNodeSummariesByIds(
+    actorId: string,
+    nodeIds: string[],
+    max = 4,
+  ): Array<{ id: string; summary: string }> {
+    if (!nodeIds || nodeIds.length === 0) return [];
+    const result: Array<{ id: string; summary: string }> = [];
+    for (const nodeId of nodeIds) {
+      if (result.length >= max) break;
+      const node = this.store.nodes[nodeId];
+      if (!node || node.actorId !== actorId || node.deletionStage === "hard_deleted") continue;
+      if (typeof node.summary !== "string" || node.summary.length === 0) continue;
+      result.push({ id: node.id, summary: node.summary });
+    }
+    return result;
+  }
+
+  /**
    * 更新节点 deletionStage（供 ForgettingController.continuousScore 调用）。
    * 写入后立即持久化到 store。
    */
@@ -1106,45 +1130,6 @@ export class HumanLikeMemoryService {
           node.sceneTags.includes(sceneTag),
       )
       .map((node) => ({ ...node }));
-  }
-
-  /**
-   * 获取单个节点（供 MemoryReconstructionValidator 校验与来源追溯调用）。
-   * 节点不存在或 actorId 不匹配时返回 null。返回浅拷贝。
-   */
-  getNode(actorId: string, nodeId: string): MemoryNodeRecord | null {
-    const node = this.store.nodes[nodeId];
-    if (!node || node.actorId !== actorId) return null;
-    return { ...node };
-  }
-
-  /**
-   * 获取版本记录（供 MemoryReconstructionValidator.getProvenanceChain 来源链路追溯调用）。
-   * 版本不存在时返回 null。返回浅拷贝。
-   */
-  getVersion(actorId: string, versionId: string): MemoryVersionRecord | null {
-    const version = this.store.versions[versionId];
-    if (!version) return null;
-    // 版本记录不直接关联 actorId，通过节点链间接关联；
-    // 此处不强制 actorId 校验（调用方已通过 getNode 确认归属）。
-    void actorId; // 显式标记 actorId 保留供未来扩展
-    return { ...version };
-  }
-
-  /**
-   * 标记节点 correctness（供 MemoryReconstructionValidator 标记 suspected_error 调用）。
-   * 写入后立即持久化。节点不存在或 actorId 不匹配时静默跳过。
-   */
-  markNodeCorrectness(actorId: string, nodeId: string, correctness: string): void {
-    const node = this.store.nodes[nodeId];
-    if (!node || node.actorId !== actorId) {
-      console.log(
-        `[HumanLikeMemory] markNodeCorrectness 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
-      );
-      return;
-    }
-    node.correctness = correctness as MemoryNodeRecord["correctness"];
-    this.schedulePersist();
   }
 
   /**

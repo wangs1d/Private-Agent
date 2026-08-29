@@ -20,10 +20,44 @@ type Deps = {
   travelPlanningService: PlanningService;
 };
 
-/** 生成结果中按天行程的摘要（避免 handler 返回超长 payload 前先压缩关键字段） */
+/**
+ * 生成结果中按天行程的摘要（LLM 工具返回值）。
+ *
+ * 瘦身原则：本返回值会整体进入 LLM 上下文，只保留 LLM 转述行程所需的最小字段集。
+ * 图片/评论/视频/地址/电话等渲染字段一律剥离 —— 前端双面板经
+ * travelItineraryStore → travel_itinerary 卡结构化直读完整数据，不经过 LLM，
+ * 在这里带上它们纯属浪费 token（5 天行程可省数千 token/轮）。
+ */
 function summarizeItinerary(result: unknown): Record<string, unknown> {
   const r = result as Record<string, unknown> | null;
   if (!r || typeof r !== "object") return { ok: false, error: "规划引擎未返回有效结果" };
+  const days = Array.isArray(r.days)
+    ? (r.days as Array<Record<string, unknown>>).map((d) => ({
+        date: d?.date,
+        items: Array.isArray(d?.items)
+          ? (d.items as Array<Record<string, unknown>>).map((it) => ({
+              type: it?.type,
+              name: it?.name,
+              startTime: it?.startTime,
+              endTime: it?.endTime,
+              visitDuration: it?.visitDuration,
+              transportFromPrev: it?.transportFromPrev,
+              rating: it?.rating,
+              priceInfo: it?.priceInfo,
+              description: it?.description,
+              tips: it?.tips,
+              bookingNote: it?.bookingNote,
+            }))
+          : [],
+      }))
+    : [];
+  const pois = Array.isArray(r.pois)
+    ? (r.pois as Array<Record<string, unknown>>).map((p) => ({
+        name: p?.name,
+        type: p?.type,
+        rating: p?.rating,
+      }))
+    : [];
   return {
     ok: true,
     id: r.id,
@@ -33,8 +67,8 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
     startDate: r.startDate,
     endDate: r.endDate,
     center: r.center,
-    days: r.days,
-    pois: r.pois,
+    days,
+    pois,
     travelInfo: r.travelInfo,
     pricingSummary: r.pricingSummary,
     fromCache: r.fromCache,
@@ -77,7 +111,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         pricingSummary: "价格汇总",
       },
       permissions: ["network:external"],
-      // 首次冷启动（缓存未命中：地理编码+POI搜索+批量抓图）需 30s+，放宽到 120s（validator 上限已同步放宽）
+      // 冷启动（缓存未命中：地理编码+POI搜索）仍需 10~30s，保留 120s；
+      // 图片/评论/视频已改为本地媒体库直读 + 后台离线回填，不再占用请求时间
       timeoutMs: 120_000,
     },
     handler: async (input) => {
@@ -113,6 +148,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
               description: item.description ?? "",
               tips: item.tips,
               images: item.images,
+              reviews: item.reviews,
+              videos: item.videos,
             })),
           })),
         });

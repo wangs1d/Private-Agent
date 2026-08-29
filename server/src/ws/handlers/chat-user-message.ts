@@ -27,7 +27,11 @@ import {
   type BatchTurnContext,
 } from "../message-batch-processor.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
-import { routeTask } from "../../gateway/index.js";
+import { getChatThreadStore } from "../../external-model/chat-thread-store.js";
+import {
+  isNotesChatSessionId,
+  resolvePrimaryChatSessionId,
+} from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter } from "../../agent/stream-segmenter.js";
 import {
@@ -487,10 +491,26 @@ async function processBatchedMessage(
   });
 
   // 路由决策 & 分阶段异步开关
+  // 2026-08-29：语义 LLM 路由为唯一权威（词法硬规则退出判定链，仅作其失败降级）。
+  // 拉最近几条用户消息供 LLM 理解短追问（"娱乐圈的""新鲜的"）继承的话题意图；
+  // 拉取失败不阻塞，LLM 路由内部对 provider 异常也有词法降级兜底。
   const cfg = getAgentRuntimeConfig();
-  const decision = routeTask(batched.text, cfg, {
-    preferFullPipeline: true,
-  });
+  let recentUserTurns: string[] = [];
+  try {
+    const chatSessionId =
+      batched.sessionId && typeof batched.sessionId === "string" && isNotesChatSessionId(batched.sessionId)
+        ? batched.sessionId
+        : resolvePrimaryChatSessionId(msgActor, cfg.masterDelegation.enabled);
+    const current = batched.text.trim();
+    recentUserTurns = getChatThreadStore()
+      .thread(chatSessionId, "")
+      .filter((m) => m.role === "user" && typeof m.content === "string" && m.content.trim() && m.content.trim() !== current)
+      .slice(-4)
+      .map((m) => (m.content as string).trim());
+  } catch {
+    recentUserTurns = [];
+  }
+  const decision = await deps.agentCore.routeTurnForWs(msgActor, batched.text, recentUserTurns);
   const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
     enabled: cfg.interimAck.enabled,
   });

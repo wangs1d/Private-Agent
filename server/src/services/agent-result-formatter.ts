@@ -545,9 +545,11 @@ export function formatAgentResultForChat(
 
   // travel_itinerary 卡：注入结构化行程数据（前端双面板直读，无则前端回退文本解析）
   if (cardType === "travel_itinerary") {
-    const snap = travelItineraryStore.get();
-    // 仅接受 2 分钟内的规划结果：防止旧行程串到不相干的卡片上
-    if (snap && Date.now() - snap.ts < 2 * 60 * 1000 && snap.days.length > 0) {
+    // 按卡片文本匹配目的地对应快照（并发规划多个目的地时不再串卡），仍限 2 分钟时效
+    const snap = travelItineraryStore.findForText(
+      `${segment.title ?? ""} ${segment.footer ?? ""}`,
+    );
+    if (snap && snap.days.length > 0) {
       payload.travelPlan = snap;
     }
   }

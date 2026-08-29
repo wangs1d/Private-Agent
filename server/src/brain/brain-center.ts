@@ -26,10 +26,8 @@ import type {
   MemoryRecallItem,
   MemoryRecallResult,
   PredictedAssociation,
-  ProceduralMatch,
   PlanResult,
   SalienceDecision,
-  SchemaMatchResult,
   ReActObservation,
   SafetyCheckResult,
   SensoryFrame,
@@ -265,18 +263,10 @@ interface MemoryCortexLike {
   ): Promise<MemoryRecallResult>;
   /** 联想预判（委托 AssociativeGraph，未注册返回空结果） */
   predictAssociation?(actorId: string, query: string): Promise<PredictedAssociation>;
-  /** 图式同化（委托 SchemaFormation，未注册返回 null） */
-  matchSchema?(situation: {
-    sceneTag?: string;
-    keywords?: string[];
-    summary?: string;
-  }): SchemaMatchResult | null;
   /** 显著性评估（委托 SalienceFilter，未注册返回默认接受） */
   evaluateSalience?(item: MemoryItem): SalienceDecision;
-  /** 再唤醒反弹（委托 ForgettingController，未注册空操作） */
-  reawakenAndStrengthen?(actorId: string, nodeId: string): Promise<void>;
-  /** 程序性技能匹配（委托 ProceduralAutomation，未注册返回 null） */
-  matchProceduralSkill?(query: string): ProceduralMatch | null;
+  /** 向量预筛（recall-gate 白名单外的放行通道；未注册返回 false） */
+  semanticRecallPreScreen?(actorId: string, query: string): Promise<boolean>;
   /** 多线索交叉推理（委托 InferenceEngine，未注册返回空结果） */
   inferFromClues?(
     actorId: string,
@@ -468,8 +458,6 @@ export class BrainCenter {
   private workingMemoryCortex: import("./working-memory-cortex.js").WorkingMemoryCortex | null = null;
   /** 任务切换皮层 */
   private taskSwitchingCortex: import("./task-switching-cortex.js").TaskSwitchingCortex | null = null;
-  /** 元认知皮层 */
-  private metaCognitionCortex: import("./meta-cognition-cortex.js").MetaCognitionCortex | null = null;
   /** 情境皮层（多源融合） */
   private contextCortex: import("./context-cortex.js").ContextCortex | null = null;
   /** 工具规划皮层 */
@@ -577,6 +565,16 @@ export class BrainCenter {
     console.log("[BrainCenter] 已注入 TopicExtractor（LLM 驱动）");
   }
 
+  private moodTopicProvider: ((sessionId: string, text: string) => string[]) | null = null;
+
+  /**
+   * 注入 mood 话题提供器（每轮 LLM 调用削减）：读取 MoodInferenceService 缓存中
+   * 与情绪推断同一次调用产出的 topics。返回空数组表示未命中（回退独立 TopicExtractor）。
+   */
+  setMoodTopicProvider(provider: ((sessionId: string, text: string) => string[]) | null): void {
+    this.moodTopicProvider = provider;
+  }
+
   registerSensory(c: SensoryCortexLike): void {
     this.sensory = c;
     console.log("[BrainCenter] 已注册 SensoryCortex");
@@ -599,11 +597,8 @@ export class BrainCenter {
    */
   registerMemoryCognitiveSubmodules(submodules: {
     associativeGraph?: unknown;
-    reconstructionValidator?: unknown;
     metacognitionBridge?: unknown;
     forgettingController?: unknown;
-    proceduralAutomation?: unknown;
-    schemaFormation?: unknown;
     salienceFilter?: unknown;
     experienceLearningLoop?: unknown;
     inferenceEngine?: unknown;
@@ -625,11 +620,8 @@ export class BrainCenter {
       }
     };
     reg("registerAssociativeGraph", submodules.associativeGraph);
-    reg("registerReconstructionValidator", submodules.reconstructionValidator);
     reg("registerMetacognitionBridge", submodules.metacognitionBridge);
     reg("registerForgettingController", submodules.forgettingController);
-    reg("registerProceduralAutomation", submodules.proceduralAutomation);
-    reg("registerSchemaFormation", submodules.schemaFormation);
     reg("registerSalienceFilter", submodules.salienceFilter);
     reg("registerExperienceLearningLoop", submodules.experienceLearningLoop);
     reg("registerInferenceEngine", submodules.inferenceEngine);
@@ -643,6 +635,19 @@ export class BrainCenter {
    */
   getPersonalityCore(actorId: string): PersonalityCore | null {
     return this.memory?.getPersonalityCore?.(actorId) ?? null;
+  }
+
+  /**
+   * recall-gate 向量预筛（P0-4）：白名单未命中时对用户原文做一次廉价向量检索，
+   * top1 分数 ≥ 阈值即放行长期记忆注入。委托 MemoryCortex.semanticRecallPreScreen；
+   * 未注册或检索失败时返回 false（fail-closed，保持白名单行为）。
+   */
+  async semanticRecallPreScreen(actorId: string, query: string): Promise<boolean> {
+    try {
+      return (await this.memory?.semanticRecallPreScreen?.(actorId, query)) ?? false;
+    } catch {
+      return false;
+    }
   }
 
   registerSynapse(c: SynapseBusLike): void {
@@ -851,14 +856,6 @@ export class BrainCenter {
   }
   getTaskSwitchingCortex(): import("./task-switching-cortex.js").TaskSwitchingCortex | null {
     return this.taskSwitchingCortex;
-  }
-
-  registerMetaCognitionCortex(mc: import("./meta-cognition-cortex.js").MetaCognitionCortex): void {
-    this.metaCognitionCortex = mc;
-    console.log("[BrainCenter] 已注册 MetaCognitionCortex（元认知皮层）");
-  }
-  getMetaCognitionCortex(): import("./meta-cognition-cortex.js").MetaCognitionCortex | null {
-    return this.metaCognitionCortex;
   }
 
   registerContextCortex(cc: import("./context-cortex.js").ContextCortex): void {
@@ -1676,27 +1673,45 @@ export class BrainCenter {
       }
     }
 
-    // === 深度优化（工作记忆主题词）：阶段 3.4.1 LLM 提取主题词 ===
-    // 移出首字关键路径，改为 fire-and-forget：
+    // === 深度优化（工作记忆主题词）：阶段 3.4.1 提取主题词 ===
+    // 每轮 LLM 调用削减：优先消费情绪推断（MoodInferenceService，阶段 1 已跑）
+    // 同一次调用顺带产出的 topics（缓存读取，零额外 LLM）；未覆盖时才回退
+    // 独立 TopicExtractor LLM 调用。仍是 fire-and-forget：
     // 主题词用于下一轮 working-memory 关联，本轮不读它，因此无需阻塞 cognize。
-    if (this.workingMemoryCortex && this.topicExtractor && query) {
-      void Promise.race([
-        this.topicExtractor(query),
-        new Promise<string[]>((_, reject) =>
-          setTimeout(() => reject(new Error("topic_extract_timeout")), 2000),
-        ),
-      ])
-        .then((topics) => {
-          if (topics && topics.length > 0) {
-            this.workingMemoryCortex!.setTopicSlots(actorId, topics);
-          }
-        })
-        .catch((err) => {
-          if (String(err).includes("timeout")) {
-            console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
-          }
-          // 其他失败静默：主题词是增强项，不影响本轮回复正确性
-        });
+    if (this.workingMemoryCortex && query) {
+      const applyTopics = (topics: string[]): boolean => {
+        if (topics && topics.length > 0) {
+          this.workingMemoryCortex!.setTopicSlots(actorId, topics);
+          return true;
+        }
+        return false;
+      };
+
+      // 快路径：mood 缓存命中（阶段 1 情绪推断已完成且产出 topics）
+      let applied = false;
+      try {
+        applied = applyTopics(this.moodTopicProvider?.(actorId, query) ?? []);
+      } catch {
+        /* provider 失败静默，走 LLM 回退 */
+      }
+
+      if (!applied && this.topicExtractor) {
+        void Promise.race([
+          this.topicExtractor(query),
+          new Promise<string[]>((_, reject) =>
+            setTimeout(() => reject(new Error("topic_extract_timeout")), 2000),
+          ),
+        ])
+          .then((topics) => {
+            applyTopics(topics);
+          })
+          .catch((err) => {
+            if (String(err).includes("timeout")) {
+              console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
+            }
+            // 其他失败静默：主题词是增强项，不影响本轮回复正确性
+          });
+      }
     }
 
     // === Step 7 扩展：阶段 3.6 — 在线学习观察 ===
@@ -2325,7 +2340,6 @@ export class BrainCenter {
         { name: "DecisionHub", registered: this.decisionHub !== null },
         { name: "WorkingMemoryCortex", registered: this.workingMemoryCortex !== null },
         { name: "TaskSwitchingCortex", registered: this.taskSwitchingCortex !== null },
-        { name: "MetaCognitionCortex", registered: this.metaCognitionCortex !== null },
         { name: "ContextCortex", registered: this.contextCortex !== null },
         { name: "ToolPlanningCortex", registered: this.toolPlanningCortex !== null },
         { name: "OnlineLearningCortex", registered: this.onlineLearningCortex !== null },

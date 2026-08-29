@@ -55,8 +55,8 @@ export class MoodInferenceService {
   private readonly maxPerSession = 5000; // Increased from 500
   /** Care rate limit: sessionId+reason -> last sent timestamp */
   private readonly lastCareAt = new Map<string, number>();
-  /** Analysis cache: hash -> timestamp */
-  private readonly analysisCache = new Map<string, number>();
+  /** Analysis cache: hash -> { ts, topics }（topics 供 TopicExtractor 合并复用，省一次每轮 LLM 调用） */
+  private readonly analysisCache = new Map<string, { ts: number; topics: string[] }>();
   private readonly analysisCacheTtlMs = 5 * 60 * 1000;
   /** Write queue: serialize file appends */
   private writeQueue: Promise<void> = Promise.resolve();
@@ -223,6 +223,10 @@ export class MoodInferenceService {
   /**
    * Use LLM to analyze a user message and infer mood.
    * Returns null if LLM is unavailable, analysis fails, or message is cached.
+   *
+   * 与 TopicExtractor 合并（每轮 LLM 调用削减）：同一次调用顺带提取 1-3 个
+   * 话题关键词，缓存于 analysisCache；brain-center 通过 getTopicsFromCache
+   * 读取并写入 working memory 主题槽，仅在本调用未覆盖时才回退独立 TopicExtractor。
    */
   async analyzeMessage(sessionId: string, userMessage: string): Promise<MoodInference | null> {
     if (!this.deps.externalChat || !this.deps.externalChat.isEnabled()) return null;
@@ -231,22 +235,22 @@ export class MoodInferenceService {
 
     // Cache check
     const cacheKey = createHash("sha256").update(`${sessionId}:${text}`).digest("hex").slice(0, 32);
-    const lastAnalyzed = this.analysisCache.get(cacheKey);
-    if (lastAnalyzed && Date.now() - lastAnalyzed < this.analysisCacheTtlMs) {
+    const cached = this.analysisCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < this.analysisCacheTtlMs) {
       return null;
     }
-    this.analysisCache.set(cacheKey, Date.now());
+    this.analysisCache.set(cacheKey, { ts: Date.now(), topics: [] });
     // Trim cache periodically
     if (this.analysisCache.size > 1000) {
       const cutoff = Date.now() - this.analysisCacheTtlMs;
-      for (const [k, t] of this.analysisCache) {
-        if (t < cutoff) this.analysisCache.delete(k);
+      for (const [k, v] of this.analysisCache) {
+        if (v.ts < cutoff) this.analysisCache.delete(k);
       }
     }
 
     try {
-      const prompt = `分析用户消息的情感，输出 JSON 格式（仅输出 JSON，无其他内容）：
-{"sentimentScore": <-1 到 1 的小数，-1 极差、0 中性、1 极好>, "confidence": <0 到 1>, "emotionTags": [<中文标签，最多 3 个>], "agentNote": "<给 Agent 自己看的一句话>"}
+      const prompt = `分析用户消息的情感，并提取话题关键词，输出 JSON 格式（仅输出 JSON，无其他内容）：
+{"sentimentScore": <-1 到 1 的小数，-1 极差、0 中性、1 极好>, "confidence": <0 到 1>, "emotionTags": [<中文标签，最多 3 个>], "topics": [<1-3 个业务领域/话题关键词，如 "旅行","编程","健康">], "agentNote": "<给 Agent 自己看的一句话>"}
 
 用户消息：${text.slice(0, 1000)}`;
       let auditInputChars = prompt.length;
@@ -278,6 +282,12 @@ export class MoodInferenceService {
       const tags = Array.isArray(parsed.emotionTags)
         ? parsed.emotionTags.map((t) => String(t)).filter(Boolean).slice(0, 3)
         : [];
+      const topics = Array.isArray(parsed.topics)
+        ? parsed.topics.map((t) => String(t).trim()).filter(Boolean).slice(0, 3)
+        : [];
+      // 回填 topics 到缓存（供 TopicExtractor 合并消费；含空结果，避免重复回退调用）
+      const entry = this.analysisCache.get(cacheKey);
+      if (entry) entry.topics = topics;
       return this.record({
         sessionId,
         sentimentScore: Math.max(-1, Math.min(1, score)),
@@ -291,5 +301,18 @@ export class MoodInferenceService {
       this.deps.logger?.warn(`[MoodInference] analyzeMessage failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }
+  }
+
+  /**
+   * 读取最近一次 analyzeMessage 顺带提取的话题关键词（不触发 LLM）。
+   * 缓存未命中 / 已过期 / 该次调用未产出话题时返回 null（调用方回退独立 TopicExtractor）。
+   */
+  getTopicsFromCache(sessionId: string, userMessage: string): string[] | null {
+    const text = userMessage.trim();
+    if (!text) return null;
+    const cacheKey = createHash("sha256").update(`${sessionId}:${text}`).digest("hex").slice(0, 32);
+    const cached = this.analysisCache.get(cacheKey);
+    if (!cached || Date.now() - cached.ts >= this.analysisCacheTtlMs) return null;
+    return cached.topics.length > 0 ? cached.topics : null;
   }
 }

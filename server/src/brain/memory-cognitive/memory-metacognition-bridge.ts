@@ -1,6 +1,6 @@
 // Agent Brain Center — MemoryMetacognitionBridge（元记忆桥接器）
 //
-// 职责：桥接 MemoryCortex 与 MetaCognitionCortex / KnowledgeVerificationService，
+// 职责：桥接 MemoryCortex 与 KnowledgeVerificationService（元认知能力由本模块自身承载），
 //   程序化实现"知之为知之，不知为不知"，防幻觉并触发自我探索。
 //   **不通过 prompt 实现**——所有置信分层、防幻觉标记、探索触发都是规则计算。
 //
@@ -19,7 +19,7 @@
 //
 // 设计要点：
 //   - 纯规则计算，不调 LLM（避免幻觉）
-//   - 任何依赖（MemoryCortex / MetaCognition / KnowledgeVerification / KnowledgeGapExecutor）
+//   - 任何依赖（MemoryCortex / KnowledgeVerification / KnowledgeGapExecutor）
 //     均可缺失，缺失时优雅降级
 //   - BRAIN_MEMORY_METACOGNITION_ENABLED=0 可全局关闭，方法空操作
 
@@ -45,16 +45,6 @@ export interface MemoryCortexLike {
     query: string,
     opts?: { domain?: string; limit?: number },
   ): Promise<MemoryRecallResult>;
-}
-
-/**
- * MetaCognitionCortex 的最小化外观接口。
- *
- * 只需要 markShouldExplore：低置信召回时标记"建议自我探索"。
- */
-export interface MetaCognitionLike {
-  /** 标记 shouldExplore，供上层决策读取 */
-  markShouldExplore(actorId: string, reason: string): void;
 }
 
 /**
@@ -126,8 +116,6 @@ const VALID_SOURCE_TYPES = new Set<string>(["chat", "tool", "digest", "world", "
 export interface MemoryMetacognitionBridgeOpts {
   /** 记忆皮层（基础召回来源）；null 时优雅降级为空召回 */
   memoryCortex?: MemoryCortexLike | null;
-  /** 元认知皮层（标记 shouldExplore）；null 时跳过标记 */
-  metaCognition?: MetaCognitionLike | null;
   /** 知识验证服务（查询验证状态）；null 时跳过验证状态查询 */
   knowledgeVerification?: KnowledgeVerificationLike | null;
   /** 知识缺口执行器（触发联网学习）；null 时跳过自我探索 */
@@ -141,11 +129,11 @@ export interface MemoryMetacognitionBridgeOpts {
 /**
  * 元记忆桥接器。
  *
- * 桥接 MemoryCortex（召回）与 MetaCognitionCortex / KnowledgeVerificationService，
+ * 桥接 MemoryCortex（召回）与 KnowledgeVerificationService，
  * 程序化实现"知之为知之，不知为不知"。
  *
  * 用法：
- *   const bridge = new MemoryMetacognitionBridge({ memoryCortex, metaCognition, ... });
+ *   const bridge = new MemoryMetacognitionBridge({ memoryCortex, ... });
  *   const result = await bridge.recallWithProvenance(actorId, query);
  *   // result.items 已附带 provenance / confidenceTier
  *   // confidenceTier=unknown 的条目已附加防幻觉标记
@@ -153,13 +141,11 @@ export interface MemoryMetacognitionBridgeOpts {
  */
 export class MemoryMetacognitionBridge {
   private readonly memoryCortex: MemoryCortexLike | null;
-  private readonly metaCognition: MetaCognitionLike | null;
   private readonly knowledgeVerification: KnowledgeVerificationLike | null;
   private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
   constructor(opts: MemoryMetacognitionBridgeOpts = {}) {
     this.memoryCortex = opts.memoryCortex ?? null;
-    this.metaCognition = opts.metaCognition ?? null;
     this.knowledgeVerification = opts.knowledgeVerification ?? null;
     // 依赖形状校验：只保留真正实现了 executeGapQuery 的执行器，
     // 误传类构造函数 / mock / 空壳对象时统一降级为 null（符合"依赖可缺失、缺失时优雅降级"约定）。
@@ -329,15 +315,6 @@ export class MemoryMetacognitionBridge {
     const ratio = this.computeUnknownRatio(items);
     if (ratio <= this.exploreThreshold) {
       return;
-    }
-
-    // 标记 shouldExplore（同步，若可用）
-    if (this.metaCognition?.markShouldExplore) {
-      try {
-        this.metaCognition.markShouldExplore(actorId, "low_confidence_recall");
-      } catch (e) {
-        console.error("[MemoryMetacognitionBridge] markShouldExplore 失败（忽略）:", e);
-      }
     }
 
     // 异步触发联网学习（fire-and-forget，不阻塞）

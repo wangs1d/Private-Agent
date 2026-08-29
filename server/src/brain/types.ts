@@ -743,14 +743,6 @@ export interface CognitiveResult {
    */
   recentConversationHistory?: string;
   /**
-   * 元认知评估结果（cognize 阶段 3.5 已评估，原样透出给 agent-core）。
-   * 由 agent-core 格式化为方向化短字符串注入 promptContext.memory.metaCognition，
-   * 让 LLM 知道"自己当前对哪些点不确定、是否需要先反思"——但不堆 prompt，
-   * 只给方向，让模型基于上下文自己调整。
-   * 缺失时 agent-core 不注入该字段。
-   */
-  metacog?: import("./meta-cognition-cortex.js").MetacogAssessment;
-  /**
    * 工具规划链（cognize 阶段 2 由 DecisionHub 或 ToolPlanningCortex 生成）。
    * complex 路由时由 ToolPlanningCortex.planTools 产出，注入到 streamCompletion 的
    * system prompt【建议工具链】块，约束 LLM 工具选择顺序和范围。
@@ -926,22 +918,6 @@ export interface SalienceDecision {
   reason: string;
   /** 是否降级为 decay（短期保留） */
   degraded: boolean;
-}
-
-/** 程序性技能匹配结果 */
-export interface ProceduralMatch {
-  /** 匹配的技能 id */
-  skillId: string;
-  /** 匹配分数 0-1 */
-  matchScore: number;
-  /** 是否可绕过 LLM */
-  canBypassLlm: boolean;
-  /** 触发模式（关键词或 embedding 匹配描述） */
-  triggerPattern: string;
-  /** 热更新版本号 */
-  hotUpdateVersion: number;
-  /** 匹配时间 */
-  matchedAt: string;
 }
 
 // ============================================================

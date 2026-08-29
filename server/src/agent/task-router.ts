@@ -167,7 +167,65 @@ function shouldUseFastChatLane(message: string): boolean {
 
 export type RouteLlmExecutionOptions = {
   preferFullPipeline?: boolean;
+  /** 最近几条用户消息（时间正序），供短追问继承上一轮的任务意图。 */
+  recentUserTurns?: string[];
 };
+
+// ── 联网信息需求信号（路由级，2026-08-29）──
+// fast 车道只有轻量工具（clock/calendar 等），没有 search_web/deep_search；
+// 凡回答必须依赖外部实时信息（吃瓜/新闻/近况/行情/比分…）的轮次都是"要完成查询任务"，
+// 一律下沉 complex，由后台真正调搜索工具后回传结果。
+// 不复用 forced-tool 的 FRESH_WEB_LOOKUP_RE：它含"怎么样了/什么情况"等宽泛问候语，
+// 在路由级会把"你最近怎么样"这类寒暄误升级 complex。
+const FRESH_INFO_LOOKUP_RE =
+  /搜一搜|搜下|搜索|查查|查一下|查一查|帮我查|联网|八卦|吃瓜|爆料|热搜|头条|资讯|近况|的瓜|新瓜|有什么瓜|扒一扒|扒下|新闻|比分|票房|股价|行情|汇率|上新|新出了|发布了|上映|排片|影讯/i;
+const FRESH_INFO_CHAT_OVERRIDE_RE =
+  /你最近(怎么样|如何|咋样)|最近(过得|过|咋|怎)么样|最近忙|在忙(什么|啥)|你的近况|你近况/i;
+
+function requiresFreshExternalInfo(text: string): boolean {
+  if (!text) return false;
+  if (FRESH_INFO_CHAT_OVERRIDE_RE.test(text)) return false;
+  return FRESH_INFO_LOOKUP_RE.test(text);
+}
+
+// ── 短追问任务意图继承（2026-08-29）──
+// "娱乐圈的""新鲜的""景甜的"这类短追问，单看消息本身没有任何任务信号，
+// 但在"上一轮还在要求查/办某事"的语境里，它们是同一任务的继续 → 应继承 complex。
+// 判定 = 当前消息是短追问（非寒暄/非时间天气）+ 向前找到的第一个"话题锚点"轮次
+// 是任务/联网查询（锚点之前连续的短追问视为同一话题链的一部分，跳过）。
+const FOLLOWUP_MAX_LEN = 16;
+
+export function isInheritableFollowUpText(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > FOLLOWUP_MAX_LEN) return false;
+  if (CHAT_ONLY_RE.test(t) || CASUAL_FAST_CHAT_RE.test(t)) return false;
+  if (SIMPLE_CHAT_OVERRIDE_RE.test(t)) return false;
+  return true;
+}
+
+/**
+ * 判断短追问是否应继承任务模式（complex）。
+ * recentUserTurns 为时间正序（最旧→最新，不含当前消息）。
+ */
+export function shouldInheritTaskContinuation(
+  text: string,
+  recentUserTurns: string[],
+  config?: AgentRuntimeConfig,
+): boolean {
+  if (!isInheritableFollowUpText(text)) return false;
+  for (let i = recentUserTurns.length - 1; i >= 0; i--) {
+    const turn = (recentUserTurns[i] ?? "").trim();
+    if (!turn) continue;
+    // 先判任务信号：短任务轮（如"帮我写个方案"）本身就是话题锚点，不能当短追问跳过
+    if (routeLlmExecution(turn, config).mode === "complex" || requiresFreshExternalInfo(turn)) {
+      return true;
+    }
+    // 短而无任务信号 → 同一话题链的中间一环，继续回溯；长且无信号 → 锚点是闲聊
+    if (isInheritableFollowUpText(turn)) continue;
+    return false;
+  }
+  return false;
+}
 
 /**
  * 时效性实体检测：用户消息含"最新/最近/版本号/新发布"等时效信号时,
@@ -178,7 +236,8 @@ const TIME_SENSITIVITY_RE =
   /最新|最近|新出的|新出|刚出|刚发布|今年|去年|上周|本周|这周|这个月|上个月/i;
 const VERSION_SIGNAL_RE =
   /kimi\s*3|gpt[-\s]*5|claude[-\s]*4|iphone\s*17|macbook\s*m\d|新版|最新款|旗舰款|20\d{2}/i;
-const SIMPLE_CHAT_OVERRIDE_RE = /几点|天气怎么样|天气如何|今日天气|今天.*天气|天气.*今天/;
+const SIMPLE_CHAT_OVERRIDE_RE =
+  /几点|天气怎么样|天气如何|今日天气|今天.*天气|天气.*今天|你最近(怎么样|如何|咋样)|最近(过得|过|咋|怎)么样|过得(怎么样|如何|咋样)|在忙(什么|啥)|忙什么呢/i;
 
 function hasTimeSensitiveIntent(text: string): boolean {
   if (SIMPLE_CHAT_OVERRIDE_RE.test(text)) return false;
@@ -222,7 +281,7 @@ export function determineSegmentable(text: string, mode: LlmExecutionMode): bool
 export function routeLlmExecution(
   message: string,
   config: AgentRuntimeConfig = getAgentRuntimeConfig(),
-  _options?: RouteLlmExecutionOptions,
+  options?: RouteLlmExecutionOptions,
 ): RouteDecision {
   const text = message.trim();
   const reasons: string[] = [];
@@ -261,6 +320,21 @@ export function routeLlmExecution(
     // 多步任务 / 明确做事意图 → complex（让 plan-execute 在本分支也生效）
     if (shouldUsePlanExecuteLoop(text)) {
       reasons.push("plan_execute_heuristic");
+      return { mode: "complex", reasons, segmentable: false };
+    }
+
+    // 联网信息需求 → complex：fast 没有搜索工具，"要查才能答"的轮次必须后台真查
+    if (requiresFreshExternalInfo(text)) {
+      reasons.push("fresh_external_info");
+      return { mode: "complex", reasons, segmentable: false };
+    }
+
+    // 短追问继承：单条消息无任务信号，但话题锚点轮次是任务/查询 → 沿用 complex
+    if (
+      options?.recentUserTurns?.length &&
+      shouldInheritTaskContinuation(text, options.recentUserTurns, config)
+    ) {
+      reasons.push("follow_up_task_continuation");
       return { mode: "complex", reasons, segmentable: false };
     }
 
