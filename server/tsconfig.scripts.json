@@ -7,9 +7,9 @@
   },
   "include": [
     "src/**/*.ts",
-    "scripts/test-tool-registry.ts",
-    "scripts/test-adaptive-tool-search-recall.ts",
-    "scripts/test-adaptive-resource-type-routing.ts",
+    "scripts/archive/test-tool-registry.ts",
+    "scripts/archive/test-adaptive-tool-search-recall.ts",
+    "scripts/archive/test-adaptive-resource-type-routing.ts",
     "scripts/compare-tool-search-backends.ts",
     "scripts/benchmark-tool-router-bridge.ts"
   ]

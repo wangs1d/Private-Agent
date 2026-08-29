@@ -1,0 +1,451 @@
+// ConsumptionLedgerListener —— 消费管家闭环（Task 16 场景B）
+//
+// 链路：工具执行成功 → HookBus "tool.executed" 事件 → 本监听器：
+//   1. 消费类工具（payment.* / wallet.* / meituan.* / shopping.order.place）
+//      → finance-deep 自动入账（金额/分类按工具类型映射/来源工具/时间）
+//   2. 入账后预算超支检测（getBudgetStatus level=exceeded）
+//      → onBudgetAlert 回调（装配层接 ProactivityHub，life_reminder kind）
+//   3. 每日扫描（定时触发 runDailyScan）：全 actor 预算检查
+//      + 每月 1 日生成上月消费月报（确定性数据拼接 + 单次 LLM 总结）
+//      → onMonthlyReport 回调（monthly_report kind）
+//
+// 设计约束：不依赖 ProactivityHub 具体类型（回调注入，如 InterestWatcher.onHit）；
+// 入账/报告失败静默日志，绝不影响工具执行主链路。
+import type { HookBus, HookEvent } from "./hooks/index.js";
+import type {
+  FinanceCategory,
+  FinanceDeepService,
+  SpendingAnalysis,
+} from "./finance-deep-service.js";
+
+/** 消费类工具判定（正则；仅这些工具成功后入账，查询/取消类不重复入账） */
+const CONSUMPTION_TOOL_RE =
+  /^(payment\.create_order|wallet\.(transfer|purchase|recharge)|meituan\.create_order|shopping\.order\.place)$/;
+
+/** 消费管家依赖（装配层注入，全部可 mock） */
+export interface ConsumptionLedgerListenerDeps {
+  financeDeepService: FinanceDeepService;
+  /** 预算超支提醒回调（装配层接 ProactivityHub speak，life_reminder kind） */
+  onBudgetAlert?: (actorId: string, message: string) => void;
+  /** 月度报告生成完成回调（装配层接 ProactivityHub speak，monthly_report kind） */
+  onMonthlyReport?: (actorId: string, reportText: string) => void;
+  /**
+   * 单次 LLM 总结函数（月报措辞；externalChat.streamCompletion 的薄包装，
+   * 与 ProactivityHub llmComplete 同模式）。未注入时月报退化为确定性拼接文本。
+   */
+  llmComplete?: (prompt: string) => Promise<string>;
+  /** 测试注入时钟 */
+  now?: () => Date;
+}
+
+/** wallet.purchase 的细分类别 → 财务账本大类映射 */
+const WALLET_CATEGORY_MAP: Record<string, FinanceCategory> = {
+  // 餐饮
+  food_delivery: "餐饮",
+  dine_in: "餐饮",
+  // 交通
+  taxi: "交通",
+  ride_hailing: "交通",
+  public_transit: "交通",
+  parking: "交通",
+  bus_ticket: "交通",
+  train: "交通",
+  flight: "交通",
+  travel: "交通",
+  courier: "交通",
+  // 购物
+  shopping: "购物",
+  digital: "购物",
+  software: "购物",
+  cloud_service: "购物",
+  office: "购物",
+  printing: "购物",
+  book: "购物",
+  gift: "购物",
+  flower: "购物",
+  pet: "购物",
+  pet_food: "购物",
+  pet_grooming: "购物",
+  rental: "购物",
+  // 娱乐
+  entertainment: "娱乐",
+  concert: "娱乐",
+  sports_event: "娱乐",
+  exhibition: "娱乐",
+  movie: "娱乐",
+  beauty: "娱乐",
+  spa: "娱乐",
+  hair_salon: "娱乐",
+  massage: "娱乐",
+  gym: "娱乐",
+  subscription: "娱乐",
+  // 医疗
+  medical: "医疗",
+  pharmacy: "医疗",
+  health: "医疗",
+  pet_medical: "医疗",
+  // 教育
+  education: "教育",
+  course: "教育",
+  // 居住
+  utility: "居住",
+  phone_bill: "居住",
+  electricity: "居住",
+  water: "居住",
+  gas: "居住",
+  internet: "居住",
+  hotel: "居住",
+  home_service: "居住",
+  cleaning: "居住",
+  repair: "居住",
+  moving: "居住",
+  insurance: "居住",
+};
+
+/** 判断工具是否消费类（装配层据此过滤 tool.executed 事件发布） */
+export function isConsumptionTool(toolName: string): boolean {
+  return CONSUMPTION_TOOL_RE.test(toolName);
+}
+
+/**
+ * 工具事件 payload 摘要化：长字符串截断（如支付二维码 dataURL）、
+ * 大数组/对象裁剪，保留金额/订单号/描述等短字段原样——消费入账
+ * 监听器可直接从摘要化后的 payload 提取入账字段。
+ */
+export function summarizeToolPayload(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    return value.length > 160 ? `${value.slice(0, 160)}...` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 10).map((item) => summarizeToolPayload(item, depth + 1));
+  }
+  if (value && typeof value === "object" && depth < 4) {
+    const out: Record<string, unknown> = {};
+    for (const [k, item] of Object.entries(value as Record<string, unknown>).slice(0, 20)) {
+      out[k] = summarizeToolPayload(item, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** 从工具执行信息中提取一条入账（无法提取金额时返回 null，不入账） */
+export function extractLedgerEntry(info: {
+  tool: string;
+  input: Record<string, unknown>;
+  result: Record<string, unknown>;
+}): {
+  amount: number;
+  type: "income" | "expense";
+  category: FinanceCategory;
+  merchant?: string;
+  description: string;
+  source: string;
+} | null {
+  const { tool, input, result } = info;
+  const amountOf = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+
+  switch (tool) {
+    case "payment.create_order": {
+      // 支付下单成功：amount/description 在结果里
+      const amount = amountOf(result.amount ?? input.amount);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "购物",
+        description: String(result.description ?? input.description ?? "扫码支付"),
+        source: "payment_tool",
+      };
+    }
+    case "wallet.transfer": {
+      const amount = amountOf(result.amount ?? input.amount);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "其他",
+        description: `转账给 ${String(result.recipientId ?? input.recipientId ?? "好友")}`,
+        source: "wallet_tool",
+      };
+    }
+    case "wallet.recharge": {
+      // 充值记为收入（账本净额平衡；非真实工资）
+      const amount = amountOf(result.amount ?? input.amount);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "income",
+        category: "其他",
+        description: "钱包充值",
+        source: "wallet_tool",
+      };
+    }
+    case "wallet.purchase": {
+      const amount = amountOf(result.amount ?? input.amount);
+      if (!amount) return null;
+      const rawCategory = String(result.category ?? input.category ?? "other");
+      return {
+        amount,
+        type: "expense",
+        category: WALLET_CATEGORY_MAP[rawCategory] ?? "购物",
+        merchant: result.merchant ? String(result.merchant) : undefined,
+        description: String(result.description ?? input.description ?? "钱包消费"),
+        source: "wallet_tool",
+      };
+    }
+    case "meituan.create_order": {
+      // 跑腿订单：入账配送总费用（totalFee 优先，缺省 deliveryFee）
+      const amount = amountOf(result.totalFee ?? result.deliveryFee);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "交通",
+        description: `美团跑腿：${String(result.itemDescription ?? input.itemDescription ?? "代跑腿")}`,
+        source: "meituan_tool",
+      };
+    }
+    case "shopping.order.place": {
+      // 两阶段下单：确认提交成功后才有金额（阶段一无金额不入账）
+      const amount = amountOf(result.amount ?? result.totalAmount ?? result.price);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "购物",
+        merchant: result.platform ? String(result.platform) : undefined,
+        description: `网购下单：${String(result.item ?? input.item ?? "商品")}`,
+        source: "shopping_tool",
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** 去重指纹（同订单/同交易不重复入账；防事件重放与重复 emit） */
+function entryFingerprint(
+  actorId: string,
+  tool: string,
+  input: Record<string, unknown>,
+  result: Record<string, unknown>,
+): string {
+  const orderId =
+    result.orderId ?? result.outTradeNo ?? result.transactionId ?? result.deliveryId ?? "";
+  const amount = String(result.amount ?? result.totalFee ?? result.totalAmount ?? "");
+  return `${actorId}|${tool}|${orderId}|${amount}`;
+}
+
+export class ConsumptionLedgerListener {
+  private readonly deps: ConsumptionLedgerListenerDeps;
+  /** 已入账指纹（防重；环形淘汰） */
+  private readonly seenFingerprints: string[] = [];
+  private readonly SEEN_LIMIT = 500;
+  /** 本月已提醒的超支预算（actorId|period|category），防重复打扰 */
+  private readonly alertedBudgetKeys = new Set<string>();
+  /** 每日扫描调度 */
+  private scanTimer: ReturnType<typeof setInterval> | null = null;
+  private lastScanDay = "";
+  private started = false;
+  private unsubscribe?: () => void;
+
+  constructor(deps: ConsumptionLedgerListenerDeps) {
+    this.deps = deps;
+  }
+
+  /** 订阅 HookBus 的 tool.executed 事件（装配层接线） */
+  subscribe(hookBus: HookBus): void {
+    this.unsubscribe?.();
+    this.unsubscribe = hookBus.subscribeType("tool.executed", (event) => {
+      void this.handleToolExecuted(event).catch((err) => {
+        console.log(`[ConsumptionLedger] 事件处理失败（忽略）: ${err}`);
+      });
+    });
+  }
+
+  /** 启动每日扫描调度（每小时检查一次是否到达扫描时刻；测试可直调 runDailyScan） */
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.scanTimer = setInterval(() => {
+      try {
+        void this.tickScan();
+      } catch (err) {
+        console.log(`[ConsumptionLedger] 扫描 tick 失败（忽略）: ${err}`);
+      }
+    }, 60 * 60 * 1000);
+    if (typeof this.scanTimer.unref === "function") this.scanTimer.unref();
+    console.log("[ConsumptionLedger] 消费管家监听已启动（自动入账 + 预算扫描 + 月报）");
+  }
+
+  stop(): void {
+    if (this.scanTimer) {
+      clearInterval(this.scanTimer);
+      this.scanTimer = null;
+    }
+    this.started = false;
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+  }
+
+  // ─── 事件消费：自动入账 + 入账时预算检测 ───
+
+  private async handleToolExecuted(event: HookEvent): Promise<void> {
+    const data = event.data as {
+      toolName?: string;
+      args?: Record<string, unknown>;
+      result?: Record<string, unknown>;
+      actorId?: string;
+    };
+    const tool = String(data.toolName ?? "");
+    if (!isConsumptionTool(tool)) return;
+    const actorId = String(data.actorId ?? event.actorId ?? "");
+    if (!actorId) return;
+
+    const input = data.args ?? {};
+    const result = data.result ?? {};
+
+    // 去重：同订单指纹已入账则跳过
+    const fp = entryFingerprint(actorId, tool, input, result);
+    if (this.seenFingerprints.includes(fp)) return;
+    this.seenFingerprints.push(fp);
+    if (this.seenFingerprints.length > this.SEEN_LIMIT) {
+      this.seenFingerprints.splice(0, this.seenFingerprints.length - this.SEEN_LIMIT);
+    }
+
+    const entry = extractLedgerEntry({ tool, input, result });
+    if (!entry) return;
+
+    // 自动入账（金额/分类映射/来源工具/时间）
+    await this.deps.financeDeepService.importTransactions(actorId, [
+      {
+        id: `auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        date: event.timestamp ?? new Date().toISOString(),
+        amount: entry.amount,
+        type: entry.type,
+        category: entry.category,
+        ...(entry.merchant ? { merchant: entry.merchant } : {}),
+        description: entry.description,
+        source: entry.source,
+      },
+    ]);
+    console.log(
+      `[ConsumptionLedger] 自动入账 actor=${actorId} tool=${tool} 金额=¥${entry.amount} 分类=${entry.category}`,
+    );
+
+    // 入账后预算超支检测
+    this.checkBudgetOverrun(actorId);
+  }
+
+  // ─── 预算超支检测（入账时 + 每日扫描共用） ───
+
+  /** 检查某 actor 本月预算，超支且未提醒过 → onBudgetAlert（单次提醒） */
+  checkBudgetOverrun(actorId: string): void {
+    try {
+      const statuses = this.deps.financeDeepService.getBudgetStatus(actorId);
+      for (const s of statuses) {
+        if (s.level !== "exceeded") continue;
+        const key = `${actorId}|${s.periodLabel}|${s.budget.category}`;
+        if (this.alertedBudgetKeys.has(key)) continue;
+        this.alertedBudgetKeys.add(key);
+        const over = s.spent - s.budget.amount;
+        const message =
+          `${s.budget.category}预算已超支：本月已花 ¥${s.spent.toFixed(2)}（预算 ¥${s.budget.amount.toFixed(2)}，` +
+          `超出 ¥${over.toFixed(2)}）。最近几笔消费我已自动记账，可以帮你看看都花在哪了。`;
+        this.deps.onBudgetAlert?.(actorId, message);
+        console.log(`[ConsumptionLedger] 预算超支提醒 actor=${actorId} ${s.budget.category}`);
+      }
+    } catch (err) {
+      console.log(`[ConsumptionLedger] 预算检查失败（忽略）: ${err}`);
+    }
+  }
+
+  // ─── 每日扫描 + 月报 ───
+
+  /** 每小时 tick：到达扫描时刻（默认 9 点，env 可调）且今日未扫 → 执行 */
+  private tickScan(): void {
+    const now = this.deps.now?.() ?? new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    if (this.lastScanDay === today) return;
+    const scanHour = Number(process.env.CONSUMPTION_SCAN_HOUR ?? 9);
+    if (now.getHours() < (Number.isFinite(scanHour) ? scanHour : 9)) return;
+    this.lastScanDay = today;
+    void this.runDailyScan(now).catch((err) => {
+      console.log(`[ConsumptionLedger] 每日扫描失败（忽略）: ${err}`);
+    });
+  }
+
+  /**
+   * 每日扫描：全部有账本的 actor 预算检查；
+   * 每月 1 日追加生成上月消费月报（确定性数据 + 单次 LLM 总结）。
+   * 测试可直调（注入 now）。
+   */
+  async runDailyScan(now: Date = new Date()): Promise<void> {
+    const actors = this.deps.financeDeepService.listActorIds();
+    for (const actorId of actors) {
+      this.checkBudgetOverrun(actorId);
+    }
+    // 每月 1 日生成上月月报（挂在每日扫描末尾）
+    if (now.getDate() === 1) {
+      for (const actorId of actors) {
+        try {
+          await this.generateMonthlyReport(actorId, now);
+        } catch (err) {
+          console.log(`[ConsumptionLedger] 月报生成失败（忽略）actor=${actorId}: ${err}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * 月度消费报告：确定性数据拼接（总额/分类/Top/趋势）+ 单次 LLM 总结。
+   * LLM 未注入时退化为纯确定性文本（克制原则：统计零 LLM，措辞一次 LLM）。
+   */
+  async generateMonthlyReport(actorId: string, now: Date = new Date()): Promise<string> {
+    // 上月时间范围（本地月首/月尾，转 ISO）
+    const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const to = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+    const analysis: SpendingAnalysis = this.deps.financeDeepService.analyzeSpending(
+      actorId,
+      from.toISOString(),
+      to.toISOString(),
+      "month",
+    );
+    const monthLabel = `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, "0")}`;
+
+    // 确定性数据拼接（无 LLM 也完整可读）
+    const catLines = analysis.byCategory
+      .sort((a, b) => b.total - a.total)
+      .map((c) => `- ${c.category}：¥${c.total.toFixed(2)}（${c.count} 笔，占 ${(c.ratio * 100).toFixed(0)}%）`)
+      .join("\n");
+    const deterministic =
+      `${monthLabel} 消费月报：总支出 ¥${analysis.totalExpense.toFixed(2)}（${analysis.count} 笔），` +
+      `总收入 ¥${analysis.totalIncome.toFixed(2)}，净额 ¥${analysis.net.toFixed(2)}。\n` +
+      `分类明细：\n${catLines || "（无支出记录）"}`;
+
+    let reportText = deterministic;
+    // 单次 LLM 总结（可选；失败退化确定性文本）
+    if (this.deps.llmComplete && analysis.count > 0) {
+      try {
+        const trendLabel =
+          analysis.trend === "rising" ? "上升" : analysis.trend === "falling" ? "下降" : "平稳";
+        const prompt =
+          `你是用户的私人财务管家。基于下月上月消费数据，用 3-5 句口语化中文写一份简短月报，` +
+          `像朋友聊天一样点出总支出、大头分类、值得注意的趋势（${trendLabel}），` +
+          `末尾给一条具体可行的下月建议。不要罗列全部数据，数据仅供参考：\n${deterministic}`;
+        const llmText = (await this.deps.llmComplete(prompt))?.trim();
+        if (llmText) reportText = llmText;
+      } catch (err) {
+        console.log(`[ConsumptionLedger] 月报 LLM 总结失败（退化为确定性文本）: ${err}`);
+      }
+    }
+
+    this.deps.onMonthlyReport?.(actorId, reportText);
+    console.log(`[ConsumptionLedger] ${monthLabel} 月报已生成 actor=${actorId}`);
+    return reportText;
+  }
+}

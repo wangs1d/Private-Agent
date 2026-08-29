@@ -64,6 +64,7 @@ import {
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
 } from "@private-ai-agent/agent-world";
+import { isAgentWorldSocialEnabled } from "../config/env.js";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { clearAllMemoryForActor } from "../services/memory-clear-service.js";
@@ -79,6 +80,7 @@ import {
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
 import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
+import type { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
 
 type SocketWithHeartbeat = {
@@ -182,6 +184,8 @@ export type WsRouteDeps = {
   voiceMessageService?: VoiceMessageService;
   /** 早间简报调度器：WS 连接建立时 subscribe，断开时 unsubscribe */
   morningBriefingScheduler?: MorningBriefingScheduler;
+  /** 晚间 digest 调度器（Task 15 生活节律）：WS 连接建立时 subscribe，断开时 unsubscribe */
+  eveningDigestScheduler?: EveningDigestScheduler;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -210,6 +214,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     voiceCapabilityService,
     voiceMessageService,
     morningBriefingScheduler,
+    eveningDigestScheduler,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -309,6 +314,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             wsConnectionRegistry.unregister(boundActorId, socket);
             getEmbodimentAutonomy()?.unregisterSession(boundActorId);
             morningBriefingScheduler?.unsubscribe(boundActorId);
+            eveningDigestScheduler?.unsubscribe(boundActorId);
             boundActorId = undefined;
           }
       });
@@ -617,6 +623,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             getEmbodimentAutonomy()?.registerSession(actorId);
             // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
             morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
+            // 晚间 digest（Task 15 生活节律）：连接建立时订阅，到点推送今日回顾+明日预告
+            eveningDigestScheduler?.subscribe(actorId);
             // 按需位置：绑定 socket，Agent 需要位置时向该客户端请求实时 GPS
             locationCoordinator.bindSocket(actorId, socket);
           } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
@@ -1126,6 +1134,22 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           worldPartitionWsRegistry.detachSocket(socket);
           broadcastPartitionPresence(targetPid);
+          return;
+        }
+
+        // Agent World 社交经济域开关（AGENT_WORLD_SOCIAL_ENABLED，实验性子系统默认关闭）：
+        // 关闭时拒绝 world.social.* 社交事件（保留 identity/注册/房间 partition 能力），
+        // 开启后行为与现状一致。
+        if (!isAgentWorldSocialEnabled() && event.type.startsWith("world.social.")) {
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.ErrorEvent,
+              payload: {
+                code: "WORLD_SOCIAL_DISABLED",
+                message: "Agent World 社交域已关闭（AGENT_WORLD_SOCIAL_ENABLED=1 可开启）",
+              },
+            }),
+          );
           return;
         }
 

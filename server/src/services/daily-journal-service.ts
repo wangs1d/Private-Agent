@@ -214,6 +214,32 @@ export class DailyJournalService {
   }
 
   /**
+   * 读取当日 journal 的全部记录行（按时间顺序解析；Task 15 晚间 digest
+   * "今日回顾"数据源）。零检索打分：晚间回顾要的是当天全貌而非相关性。
+   * 今天一定未固化（固化发生在深夜/次日），无需检查 consolidated。
+   */
+  async readTodayLines(actorId: string): Promise<JournalHit[]> {
+    if (!actorId) return [];
+    const dateKey = toDateKey(new Date());
+    let raw: string;
+    try {
+      raw = await readFile(this.journalFile(actorId, dateKey), "utf8");
+    } catch {
+      return [];
+    }
+    const hits: JournalHit[] = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("- [")) continue;
+      const m = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:[\w-]{0,10}\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+      if (!m) continue;
+      const role = m[2] === "U" ? "user" : m[2] === "A" ? "assistant" : "fact";
+      hits.push({ dateKey, time: m[1]!, role: role as JournalHit["role"], text: m[3]! });
+    }
+    return hits;
+  }
+
+  /**
    * 近 N 天词法检索：扫最近 days 天的 journal 文件（从今天向前数），按相关度返回命中行。
    * 短期/长期隔离：已固化的日期跳过（改由长期记忆图/图谱-KV 召回兜底），只扫尚未固化的
    * 日期（今天一定未固化；跨天仅在服务器隔夜未开机、固化追不上时回退读文件）。

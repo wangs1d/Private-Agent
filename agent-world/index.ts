@@ -77,6 +77,7 @@ export {
   USER_AGENT_TOOL_SYSTEM_SUFFIX,
   USER_FACING_AGENT_WORLD_CHAT_TOOLS,
   WORLD_FREE_MARKET_USER_CHAT_TOOLS,
+  filterSocialChatTools,
 } from "./agent-world-chat-tools.js";
 export * from "./schemas.js";
 export type {

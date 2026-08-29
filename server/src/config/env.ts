@@ -101,3 +101,42 @@ export function getLoopMaxReplans(env: NodeJS.ProcessEnv = process.env): number 
   if (!Number.isFinite(n)) return 2;
   return Math.max(0, Math.min(5, n));
 }
+
+/**
+ * 统一读取「默认关闭」的环境变量开关（实验性子系统装配用）。
+ *
+ * 仅当主变量（或任一兼容旧变量）被显式设为 1/true/yes/on 时视为开启；
+ * 其余取值（未设置 / 0 / false / off / no 等）一律关闭。
+ *
+ * @param name 主变量名
+ * @param legacyNames 兼容旧变量名列表（任一为真值即等效开启）
+ */
+export function envFlagEnabled(name: string, legacyNames: readonly string[] = []): boolean {
+  const isTruthy = (raw: string | undefined): boolean => {
+    const v = raw?.trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+  };
+  return isTruthy(process.env[name]) || legacyNames.some((legacy) => isTruthy(process.env[legacy]));
+}
+
+/**
+ * BRAIN_EVOLUTION_ENABLED：EvolutionCortex 四子系统（自学习/技能生成/晋升管道/进化循环）总开关。
+ * 实验性子系统，默认 0=关闭（整个 EvolutionCortex 块跳过装配、Phase 5 定时器不创建）。
+ * 兼容旧变量：BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED=1 或 AGENT_EVOLUTION_LOOP_ENABLED=1
+ * 等效开启（旧变量读法参考 services/evolution-loop-service.ts 的 isEvolutionLoopEnabled）。
+ */
+export function isBrainEvolutionEnabled(): boolean {
+  return envFlagEnabled(
+    "BRAIN_EVOLUTION_ENABLED",
+    ["BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED", "AGENT_EVOLUTION_LOOP_ENABLED"],
+  );
+}
+
+/**
+ * AGENT_WORLD_SOCIAL_ENABLED：Agent World 社交经济域开关。
+ * 实验性子系统，默认 0=关闭：跳过 world-free-market / world-music / world-social /
+ * a2a-outsourcing / community-skill-store，保留 identity / pairing / registration 最小集。
+ */
+export function isAgentWorldSocialEnabled(): boolean {
+  return envFlagEnabled("AGENT_WORLD_SOCIAL_ENABLED");
+}

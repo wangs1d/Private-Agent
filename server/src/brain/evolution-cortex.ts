@@ -93,11 +93,28 @@ export interface KnowledgeGapExecutorLike {
   }): Promise<{ ok: boolean; knowledge?: string; source?: string; ragHit?: boolean; error?: string }>;
 }
 
+/** self_upgrade 提案可携带的 LLM 深度评估摘要（结构保持与原评估对象兼容） */
+interface EvolutionLlmAssessment {
+  recommendation?: string;
+  riskLevel?: "low" | "medium" | "high" | string;
+  confidence?: number;
+  summary?: string;
+}
+
+/** 沙箱测试报告摘要（self_upgrade 执行后写入，供外部查询） */
+interface SandboxTestReport {
+  tscPassed: boolean;
+  testsPassed: boolean;
+  rolledBack: boolean;
+  testFilesRun: string[];
+  totalMs: number;
+}
+
 /**
  * 升级执行器外观（Phase 5：self_upgrade 执行路径）。
  *
  * EvolutionCortex 对 self_upgrade 提案路由到这里执行。
- * 实现方应使用 UpgradeSandboxRunner 做沙箱测试：备份 → 安装新版本 → tsc + test → 通过才应用。
+ * 实现方负责沙箱测试先行：备份 → 安装新版本 → tsc + test → 通过才应用。
  */
 export interface CodeRepairExecutorLike {
   /**
@@ -115,12 +132,12 @@ export interface CodeRepairExecutorLike {
     target: string;          // 升级目标（如 "升级 @modelcontextprotocol/sdk 到 1.0.0"）
     rationale: string;       // 升级理由
     suggestedAction: string; // 建议操作（LLM 评估产出）
-    llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment;
+    llmAssessment?: EvolutionLlmAssessment;
   }): Promise<{
     ok: boolean;
     patchApplied?: boolean;
     error?: string;
-    sandboxReport?: import("../services/upgrade-sandbox-runner.js").SandboxTestReport;
+    sandboxReport?: SandboxTestReport;
   }>;
 }
 
@@ -216,10 +233,10 @@ interface ProposalMeta {
     handlerCode: string;
     explanation?: string;
   };
-  /** LLM 深度评估结果（self_upgrade 提案专用，来自 SelfDrivenEvolutionProposer） */
-  llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment;
-  /** 沙箱测试报告（self_upgrade 提案执行后写入，供 self_evolution 工具查询） */
-  sandboxReport?: import("../services/upgrade-sandbox-runner.js").SandboxTestReport;
+  /** LLM 深度评估结果（self_upgrade 提案专用，执行方回填） */
+  llmAssessment?: EvolutionLlmAssessment;
+  /** 沙箱测试报告（self_upgrade 提案执行后写入，供查询） */
+  sandboxReport?: SandboxTestReport;
   /**
    * skill_distill 提案的任务轨迹快照（即时反思触发器写入）。
    * executeSkillDistill 从此字段读取上下文喂给 SkillGenerator.generateProceduralSkill。
@@ -257,7 +274,7 @@ const LONG_TERM_PATTERN_MIN_HOURS = 24;      // 首末出现至少间隔 24 小�
 /**
  * 进化皮层。
  *
- * 状态机（自主进化闭环）：
+ * 状态机（进化闭环）：
  * ```
  * pending → reviewing → approved → generated → awaiting_user_approval → loaded
  *                                              ↘ rejected (用户拒绝，终态)
@@ -268,13 +285,14 @@ const LONG_TERM_PATTERN_MIN_HOURS = 24;      // 首末出现至少间隔 24 小�
  * - review()            pending → reviewing
  * - approve()           pending | reviewing → approved
  * - reject()            任意非终态 → rejected
- * - execute()           approved → 调用 SkillGenerator 生成 Skill → generated
- * - runAutoEvolutionCycle()  自动驱动 loop：pending → reviewing → approved → generated → awaiting_user_approval
+ * - execute()           approved → 调用 SkillGenerator 生成 Skill / 执行 self_upgrade、skill_distill 分支
+ * - executeProposal()   显式入口：外部（用户 / Agent）按 id 触发单个提案执行
  * - approveByUser()     awaiting_user_approval → 调用 PromotionPipeline.promote 装载 → loaded（终态）
  * - rejectByUser()      awaiting_user_approval → rejected（终态）
  *
- * 设计原则：完全自主进化 + 用户同意闸门。
- * 自动 loop 自主完成缺口识别、提案创建、自动审批、Skill 代码生成；
+ * 设计原则：显式触发 + 用户同意闸门。
+ * 进化提案不再由后台 autoLoop 自动识别、自动批准、自动执行；
+ * 由外部（用户 / Agent）显式按 id 调用 executeProposal 触发单个提案执行。
  * LLM 生成 Skill 代码后必须等待用户同意才装载（approveByUser）。
  */
 export class EvolutionCortex {
@@ -309,10 +327,6 @@ export class EvolutionCortex {
    * 未注册时降级为 generated（保持非终态，等注册后再执行）。
    */
   private proceduralSink: ProceduralSkillSinkLike | null = null;
-  /** 自动驱动 loop 定时器 */
-  private autoLoopTimer: NodeJS.Timeout | null = null;
-  /** 自动 loop 默认间隔（5 分钟） */
-  private static readonly AUTO_LOOP_INTERVAL_MS = 5 * 60 * 1000;
 
   /**
    * 即时反思触发器去重缓存：sessionId → 最近一次触发时间戳。
@@ -398,54 +412,6 @@ export class EvolutionCortex {
     console.log("[EvolutionCortex] 已注册 ApprovalEmitter");
   }
 
-  /**
-   * 注入外部提案（来自 SelfDrivenEvolutionProposer）。
-   *
-   * 将外部提案合并到内部 proposals Map，状态保持 pending，
-   * 由 runAutoEvolutionCycle 自动推进到 reviewing → approved → execute。
-   * 同 id 提案不重复注入。
-   *
-   * @param assessments LLM 评估结果（proposalId → assessment），可选
-   */
-  ingestProposals(
-    proposals: EvolutionProposal[],
-    assessments?: Map<string, import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment>,
-  ): void {
-    if (proposals.length === 0) return;
-    let ingested = 0;
-    let updated = 0;
-    for (const proposal of proposals) {
-      const assessment = assessments?.get(proposal.id);
-      // 提案已存在：仅补充 LLM 评估（如果有），不覆盖提案本体
-      // 对应真实场景：EvolutionCortex 自主 evolve 的提案，后续由
-      // SelfDrivenEvolutionProposer 异步产出 assessment 后回填。
-      if (this.proposals.has(proposal.id)) {
-        if (assessment) {
-          const existing = this.meta.get(proposal.id);
-          if (existing) {
-            existing.llmAssessment = assessment;
-          } else {
-            this.meta.set(proposal.id, { warnings: [], llmAssessment: assessment });
-          }
-          updated++;
-        }
-        continue;
-      }
-      this.proposals.set(proposal.id, proposal);
-      this.meta.set(proposal.id, {
-        warnings: [],
-        llmAssessment: assessment,
-      });
-      ingested++;
-    }
-    if (ingested > 0 || updated > 0) {
-      console.log(
-        `[EvolutionCortex] 注入 ${ingested} 个外部提案（self_upgrade）${updated > 0 ? `，补充 ${updated} 个提案的 LLM 评估` : ""}`,
-      );
-      void this.flush();
-    }
-  }
-
   // ---- 生命周期 --------------------------------------------------------
 
   async start(): Promise<void> {
@@ -456,8 +422,7 @@ export class EvolutionCortex {
     await this.load();
     this.sweepLegacyProposals();
     this.started = true;
-    this.startAutoEvolutionLoop();
-    console.log("[EvolutionCortex] 启动完成（自动进化 loop 已启动）");
+    console.log("[EvolutionCortex] 启动完成（显式触发模式，无后台自动进化 loop）");
   }
 
   /**
@@ -504,120 +469,9 @@ export class EvolutionCortex {
       console.log("[EvolutionCortex] 未启动，跳过 stop");
       return;
     }
-    if (this.autoLoopTimer) {
-      clearInterval(this.autoLoopTimer);
-      this.autoLoopTimer = null;
-    }
     await this.flush();
     this.started = false;
     console.log("[EvolutionCortex] 已停止");
-  }
-
-  // ---- 自动进化驱动 loop ------------------------------------------------
-
-  /**
-   * 启动自动进化循环。每 5 分钟扫描一次：
-   * 1. 从 AgentSelfLearningService 失败轨迹识别能力缺口 → 创建 pending 提案
-   * 2. pending → reviewing → approved（规则自动批准，非 LLM）
-   * 3. approved → execute：
-   *    - new_capability/optimize_existing → LLM 生成 Skill 代码 → 直接 promote 装载 → loaded
-   *    - knowledge_gap → RAG 召回 + 联网兜底 + 沉淀 → loaded
-   *
-   * 设计原则（用户明确要求）：自我学习是 Agent 自己的事，不需要用户确认。
-   * 三层学习闭环全部自主完成：
-   *  - 学经验：AgentSelfLearningService 自动沉淀失败轨迹
-   *  - 学技能：LLM 生成 handler 代码后直接装载（LimbicCortex 安全闸门做硬拦截）
-   *  - 学知识：联网沉淀 + 验证状态机（pending → verified / disputed → rejected）
-   */
-  private startAutoEvolutionLoop(): void {
-    if (this.autoLoopTimer) clearInterval(this.autoLoopTimer);
-    this.autoLoopTimer = setInterval(() => {
-      void this.runAutoEvolutionCycle().catch((err) => {
-        console.error("[EvolutionCortex] autoEvolutionCycle 异常:", err);
-      });
-    }, EvolutionCortex.AUTO_LOOP_INTERVAL_MS);
-    if (typeof this.autoLoopTimer.unref === "function") {
-      this.autoLoopTimer.unref();
-    }
-  }
-
-  /**
-   * 单次自动进化循环：
-   * 1. 从失败轨迹识别缺口 → 创建 pending 提案
-   * 2. 把 pending 提案推进到 approved
-   * 3. 把 approved 提案执行到 awaiting_user_approval（生成 Skill 后停下等用户）
-   */
-  private async runAutoEvolutionCycle(): Promise<void> {
-    if (!this.selfLearning) return;
-    if (this.autoLoopRunning) {
-      console.log("[EvolutionCortex] autoLoop 上一轮仍在执行，跳过本轮（防并发叠加）");
-      return;
-    }
-    this.autoLoopRunning = true;
-    try {
-      // 阶段 1：识别缺口 → 创建提案
-      const newProposal = this.fromSelfLearningGap();
-      if (newProposal) {
-        console.log(`[EvolutionCortex] autoLoop 识别到能力缺口，创建提案 ${newProposal.id}`);
-      }
-
-      // 阶段 2：推进 pending → reviewing → approved
-      for (const proposal of this.proposals.values()) {
-        if (proposal.status === "pending") {
-          this.review(proposal.id);
-        }
-        if (proposal.status === "reviewing") {
-          // 规则自动批准（非 LLM）：目前所有通过 review 的提案都自动批准
-          this.approve(proposal.id);
-          console.log(`[EvolutionCortex] autoLoop 自动批准提案 ${proposal.id}`);
-        }
-      }
-
-      // 阶段 3：执行 approved → 直接装载（不再等用户审批）
-      // execute() 内部已直接调用 PromotionPipeline.promote 完成 skill 装载：
-      //  - new_capability/optimize_existing：LLM 生成 → promote → loaded
-      //  - knowledge_gap：RAG 召回 + 联网兜底 + 沉淀 → loaded
-      // 失败时保持 approved + lastError，下一轮 autoLoop 会重试（有 MAX_EXECUTE_RETRIES 封顶）
-      // 每轮最多处理 MAX_EXECUTE_PER_CYCLE 个，避免单轮执行过久与并发叠加
-      let executedCount = 0;
-      for (const proposal of this.proposals.values()) {
-        if (executedCount >= EvolutionCortex.MAX_EXECUTE_PER_CYCLE) break;
-        if (proposal.status === "approved") {
-          const executed = await this.execute(proposal.id);
-          executedCount++;
-          if (executed) {
-            console.log(
-              `[EvolutionCortex] autoLoop 提案 ${proposal.id} 执行完成，状态=${executed.status}`,
-            );
-          }
-        }
-      }
-
-      // 阶段 4：处理遗留的 generated 提案（PromotionPipeline 未注册时的兜底路径）
-      // 原来无限回退 generated → approved 会造成无限竞态（generated/approved 乒乓）。
-      // 现在改为带失败计数：超 MAX_EXECUTE_RETRIES 次的 generated 直接收口为 rejected（终态）；
-      // 未超限的才回退为 approved 让下一轮重试一次。
-      for (const proposal of this.proposals.values()) {
-        if (proposal.status === "generated") {
-          const retry = this.bumpRetry(proposal.id);
-          if (retry >= EvolutionCortex.MAX_EXECUTE_RETRIES) {
-            const meta = this.ensureMeta(proposal.id);
-            meta.rejectReason = "generated 提案多次回退后仍无法装载，终止";
-            this.transition(proposal.id, ["generated"], "rejected");
-            console.log(
-              `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退达上限，转 rejected`,
-            );
-          } else {
-            this.transition(proposal.id, ["generated"], "approved");
-            console.log(
-              `[EvolutionCortex] autoLoop 遗留 generated 提案 ${proposal.id} 回退为 approved（第${retry}次）`,
-            );
-          }
-        }
-      }
-    } finally {
-      this.autoLoopRunning = false;
-    }
   }
 
   /** 推送审批请求给用户（WS） */
@@ -658,7 +512,7 @@ export class EvolutionCortex {
   ): EvolutionProposal {
     // 去重检查：若已有同 type + 同 title 的非终态提案（pending/reviewing/approved/generated），
     // 复用之，不重复生成。只有在彻底收口为 rejected/loaded（终态）后才允许重建，
-    // 避免同一 gap 在 autoLoop 多轮里反复产生重复堆积。
+    // 避免同一缺口反复产生重复提案堆积。
     const existing = [...this.proposals.values()].find(
       (p) =>
         p.type === proposal.type &&
@@ -912,15 +766,14 @@ export class EvolutionCortex {
     //  - 不调 SkillGenerator（不生成 handler 代码）
     //  - 不进 awaiting_user_approval（知识不是危险操作，不需要用户审批）
     //  - 执行成功直接 → loaded（终态）
-    //  - 执行失败保持 approved + lastError，等下一轮 autoLoop 重试
+    //  - 执行失败保持 approved + lastError，等待外部显式再次触发
     if (current.type === "knowledge_gap") {
       return this.executeKnowledgeGap(current);
     }
 
     // === Phase 5：自我改写分支：self_upgrade 走沙箱测试先行升级 ===
-    // 触发条件：ExternalTechScanner 发现高收益+低风险升级，或 Benchmark 检测到回归。
-    // 执行路径：路由到 UpgradeSandboxRunner（备份 → 安装新版本 → tsc + test → 通过才应用），
-    //           失败自动回滚，保持 approved + lastError 等下轮重试。
+    // 执行路径：委托 CodeRepairExecutor 做沙箱测试先行（备份 → 安装新版本 → tsc + test → 通过才应用），
+    //           失败自动回滚，保持 approved + lastError。
     // 安全约束：npm 包白名单 + 失败必回滚。
     if (current.type === "self_upgrade") {
       return this.executeSelfUpgrade(current, meta.llmAssessment);
@@ -1022,6 +875,50 @@ export class EvolutionCortex {
   }
 
   /**
+   * 显式执行入口：由外部（用户 / Agent）按 id 显式触发单个提案执行。
+   *
+   * 内部委托 execute(proposalId) 走已有状态机（approved → 生成/装载，
+   * 含 self_upgrade / skill_distill / knowledge_gap 分支）。
+   * 不再由后台 autoLoop 自动驱动；同一提案重复调用会被状态机拒绝。
+   *
+   * @param proposalId 提案 id
+   * @returns ok=false 当：提案不存在，或已是终态（loaded / rejected），或未处于 approved 状态。
+   */
+  async executeProposal(proposalId: string): Promise<{
+    ok: boolean;
+    proposal: EvolutionProposal | null;
+    error?: string;
+  }> {
+    const current = this.proposals.get(proposalId);
+    if (!current) {
+      return { ok: false, proposal: null, error: `提案 ${proposalId} 不存在` };
+    }
+    if (TERMINAL_STATUS.has(current.status)) {
+      return {
+        ok: false,
+        proposal: current,
+        error: `提案 ${proposalId} 已是终态（status=${current.status}），无法再次执行`,
+      };
+    }
+    if (current.status !== "approved") {
+      return {
+        ok: false,
+        proposal: current,
+        error: `提案 ${proposalId} 状态为 ${current.status}，仅 approved 状态可执行`,
+      };
+    }
+    const executed = await this.execute(proposalId);
+    if (!executed) {
+      return {
+        ok: false,
+        proposal: null,
+        error: `提案 ${proposalId} 执行失败（状态机未返回执行结果）`,
+      };
+    }
+    return { ok: true, proposal: executed };
+  }
+
+  /**
    * 知识层执行器：knowledge_gap 提案的专属执行路径。
    *
    * 与技能层 execute() 完全分离：
@@ -1114,15 +1011,15 @@ export class EvolutionCortex {
    * 4. 全部通过才保留（loaded）；任一失败回滚 + 记录错误
    *
    * 安全约束：
-   *  - npm 包白名单（UpgradeSandboxRunner 内部拦截）
+   *  - npm 包白名单（执行器内部拦截）
    *  - 失败必回滚（rollback 是 finally 级别保证）
-   *  - 执行失败保持 approved + lastError，等下一轮 autoLoop 重试
+   *  - 执行失败保持 approved + lastError，等待外部显式再次触发
    *
-   * @param llmAssessment LLM 深度评估结果（可选，来自 SelfDrivenEvolutionProposer）
+   * @param llmAssessment LLM 深度评估结果（可选）
    */
   private async executeSelfUpgrade(
     current: EvolutionProposal,
-    llmAssessment?: import("./self-driven-evolution-cortex.js").EvolutionLlmAssessment,
+    llmAssessment?: EvolutionLlmAssessment,
   ): Promise<EvolutionProposal | null> {
     const proposalId = current.id;
     const meta = this.ensureMeta(proposalId);
@@ -1443,9 +1340,9 @@ export class EvolutionCortex {
   }
 
   /**
-   * DMN 调用入口：基于规则产出能力进化提案统计。
+   * 显式查询入口：基于规则产出能力进化提案统计。
    *
-   * 包装 fromSelfLearningGap + pending 列表统计，返回 DMN 期望的简单结构。
+   * 包装 fromSelfLearningGap + pending 列表统计，返回调用方期望的简单结构。
    * 不调用 LLM，纯规则。失败时返回 proposals=0。
    */
   proposeEvolution(actorId: string): { proposals: number; reason: string } {
@@ -1471,7 +1368,7 @@ export class EvolutionCortex {
    *
    * 这是自我进化闭环的真正入口：AgentCore 在工具调用结束（无论成功失败）时
    * 通过 BrainCenter 转发到此。EvolutionCortex 再委托 selfLearning.recordInteraction
-   * 持久化。DMN 后续扫描时即可读到失败轨迹，触发 proposeEvolution。
+   * 持久化失败轨迹，供后续显式 proposeEvolution 扫描。
    *
    * 设计要点：
    *  - 不阻塞调用方（fire-and-forget，错误静默吞掉）
@@ -1488,7 +1385,7 @@ export class EvolutionCortex {
   }): Promise<void> {
     // === 经验沉淀即时反思触发器 ===
     // 借鉴外部智能体的经验沉淀思路：复杂任务（≥5 次成功工具调用）完成后，
-    // 把任务轨迹沉淀为 skill_distill 提案，由 autoLoop 驱动生成 procedural 技能。
+    // 把任务轨迹沉淀为 skill_distill 提案，由外部显式 executeProposal 触发生成 procedural 技能。
     // 放在方法最前：不依赖 selfLearning（仅依赖 distillBuffer + evolve），
     // 即使 selfLearning 未注册也能触发沉淀。后台 fork，不阻塞主流程。
     this.maybeTriggerSkillDistill(params);
@@ -1558,7 +1455,7 @@ export class EvolutionCortex {
    *
    * 防递归设计（防止"沉淀技能"这个动作本身再次触发沉淀）：
    *  1. 排除 skill.* 管理类工具（DISTILL_EXCLUDED_TOOLS），它们的调用不计入轨迹
-   *  2. 同一会话 60s 内去重（distillDedup TTL），避免 autoLoop 执行期间重复触发
+   *  2. 同一会话 60s 内去重（distillDedup TTL），避免执行期间重复触发
    *  3. 触发成功后清空聚合缓冲（一次任务沉淀一次）
    *  4. 提案去重：evolve() 对同 type + 同 title 的 pending/reviewing 提案自动复用
    */
@@ -1599,7 +1496,7 @@ export class EvolutionCortex {
     const successCount = entry.toolCalls.filter((c) => c.ok).length;
     if (successCount < EvolutionCortex.DISTILL_MIN_TOOL_CALLS) return;
 
-    // 会话级去重：60s 内不重复触发（防 autoLoop 执行期间二次触发）
+    // 会话级去重：60s 内不重复触发（防执行期间二次触发）
     const last = this.distillDedup.get(sessionId);
     if (last && now - last < EvolutionCortex.DISTILL_DEDUP_TTL_MS) {
       return;
@@ -1687,8 +1584,6 @@ export class EvolutionCortex {
     return m;
   }
 
-  /** 触发一次已处理的提案过滤（autoLoop 每轮最多处理的数量，防止单轮执行过多堆积） */
-  private static readonly MAX_EXECUTE_PER_CYCLE = 20;
   /** 单提案最大执行失败重试次数，超过则直接转 rejected（终态），防无限重试/烧 LLM */
   private static readonly MAX_EXECUTE_RETRIES = 3;
 
@@ -1701,7 +1596,7 @@ export class EvolutionCortex {
 
   /**
    * 统一记录一次执行失败：递增失败计数，若超过 MAX_EXECUTE_RETRIES 则转 rejected（终态），
-   * 否则保持原状态 touch（下一轮 autoLoop 重试）。杜绝失败提案无限重试。
+   * 否则保持原状态 touch。杜绝失败提案无限重试。
    */
   private recordRetryFailure(
     proposalId: string,
@@ -1727,9 +1622,6 @@ export class EvolutionCortex {
     this.schedulePersist();
     return next;
   }
-
-  /** autoLoop 是否正在运行（防止执行耗时长导致多个 cycle 并发叠加） */
-  private autoLoopRunning = false;
 
   // ---- 内部：SkillGenerator 请求构造 ----------------------------------
 

@@ -11,7 +11,11 @@ export type ProactiveIntentKind =
   | "greeting"         // 时段问候（早安 / 久别重逢）
   | "overwork_care"    // 过劳关怀干预（连续加班 → 调日程 + 放音乐 + 说话）
   | "care"             // 对话内情绪关怀（迁移自 agent-core 对话钩子）
-  | "followup";        // 对话内待办跟进（迁移自 agent-core 对话钩子）
+  | "followup"         // 对话内待办跟进（迁移自 agent-core 对话钩子）
+  // ── C 端生活管家场景（Task 20 统一频控注册）──
+  | "weather_alert"    // 恶劣天气预警联动（暴雨/高温/寒潮等 + 当日有日程 → 合并提醒）
+  | "life_reminder"    // 生活提醒（重要日子/预算超支/节律喝水睡觉运动等）
+  | "monthly_report";  // 月度报告（消费月报等，确定性数据拼接 + 单次 LLM 总结）
 
 /** 主动行为模式：主动性不只表现为"发消息" */
 export type ProactiveBehaviorMode =
@@ -42,7 +46,19 @@ export type ProactiveIntent = {
   mode: ProactiveBehaviorMode;
   /** act 模式：直接后台执行的工具调用（白名单内，按序执行） */
   actArgs?: ProactiveActStep[];
-  source: "conversation" | "task" | "rhythm" | "profile" | "time" | "epitome" | "interest_watch";
+  source:
+    | "conversation"
+    | "task"
+    | "rhythm"
+    | "profile"
+    | "time"
+    | "epitome"
+    | "interest_watch"
+    // ── C 端生活管家场景触发源 ──
+    | "weather"       // 天气预警联动（晨报/天气服务检测）
+    | "finance"       // 消费管家（自动入账/预算超支/月报）
+    | "relationship"  // 人情关系（重要日子扫描/祝福草稿）
+    | "health";       // 健康关怀（节律提醒等）
 };
 
 // ─── 通用主动性层（Jarvis 式：感知 → LLM 自主决策 → 通用执行） ───

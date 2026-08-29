@@ -54,7 +54,7 @@ import type {
 } from "./memory-cognitive/memory-experience-learning-loop.js";
 import type { MemoryFeedbackInput } from "./memory-strength-model.js";
 import type { SessionEpitomeEntries, SessionEpitomeSnapshot } from "../services/session-epitome.js";
-import { extractEpitomeEntries } from "../services/session-epitome.js";
+import { extractEpitomeEntries, SessionEpitomeTurnGate } from "../services/session-epitome.js";
 import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { shouldRecallLongTerm } from "../agent/recall-gate.js";
@@ -146,7 +146,7 @@ interface EvolutionCortexLike {
     proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
   ): EvolutionProposal;
   listPending?(actorId?: string): EvolutionProposal[];
-  /** DMN 调用入口：基于规则产出能力进化提案统计 */
+  /** 显式查询入口：基于规则产出能力进化提案统计 */
   proposeEvolution?(actorId: string): { proposals: number; reason: string };
   /** 真正的失败时自我学习入口：AgentCore 工具调用结束（含失败）时通过 BrainCenter 转发到此 */
   recordToolInteraction?(params: {
@@ -157,6 +157,12 @@ interface EvolutionCortexLike {
     errorMessage?: string;
     responseTime?: number;
   }): Promise<void>;
+  /** 显式执行入口：外部（用户 / Agent）按 id 触发单个提案执行 */
+  executeProposal?(proposalId: string): Promise<{
+    ok: boolean;
+    proposal: EvolutionProposal | null;
+    error?: string;
+  }>;
   approveByUser?(
     proposalId: string,
     sessionId?: string,
@@ -489,8 +495,6 @@ export class BrainCenter {
   private anticipationEngine: import("./decision-hub.js").AnticipationEngineLike | null = null;
   /** 情绪调节器（深度优化：情绪影响路由） */
   private emotionModulator: import("./emotion-modulator.js").EmotionModulator | null = null;
-  /** 默认模式网络（深度优化：空闲时整合记忆） */
-  private defaultModeNetwork: import("./default-mode-network.js").DefaultModeNetwork | null = null;
   /**
    * 主题词提取器（深度优化：让工作记忆真正"记住在聊什么"）。
    *
@@ -499,6 +503,13 @@ export class BrainCenter {
    * 未注入时降级为不提取（保持纯规则驱动）。
    */
   private topicExtractor: ((text: string) => Promise<string[]>) | null = null;
+
+  /**
+   * 跨会话开放环路提取轮次门控（记忆链路 LLM 调用收敛 / 降频改造）：
+   * 每 N 轮（SESSION_EPITOME_EVERY_N_TURNS，默认 5）批量提取一次，
+   * 新会话开场轮检测到上一会话残留时兜底提取（保证跨会话待办不丢）。
+   */
+  private readonly epitomeTurnGate = new SessionEpitomeTurnGate();
 
   private started = false;
 
@@ -908,14 +919,6 @@ export class BrainCenter {
     return this.emotionModulator;
   }
 
-  registerDefaultModeNetwork(dmn: import("./default-mode-network.js").DefaultModeNetwork): void {
-    this.defaultModeNetwork = dmn;
-    console.log("[BrainCenter] 已注册 DefaultModeNetwork（默认模式网络）");
-  }
-  getDefaultModeNetwork(): import("./default-mode-network.js").DefaultModeNetwork | null {
-    return this.defaultModeNetwork;
-  }
-
   getAnticipationEngine(): import("./decision-hub.js").AnticipationEngineLike | null {
     return this.anticipationEngine;
   }
@@ -1004,8 +1007,8 @@ export class BrainCenter {
    * AgentCore 在工具调用结束（无论成功失败）时调用此方法。BrainCenter 转发到
    * EvolutionCortex.recordToolInteraction → selfLearning.recordInteraction 持久化。
    *
-   * DMN 周期扫描时从 selfLearning.getRecentRecords() 即可读到失败轨迹，
-   * 触发 proposeEvolution 生成进化提案。这是"失败时自我学习"的真正入口。
+   * 后续显式 proposeEvolution 查询时从 selfLearning.getRecentRecords() 即可读到失败轨迹，
+   * 生成进化提案。这是"失败时自我学习"的真正入口。
    *
    * 设计要点：
    *  - fire-and-forget，错误不抛回调用方
@@ -1239,17 +1242,6 @@ export class BrainCenter {
         this.onlineLearningCortex?.recordCorrection(actorId, query);
       } catch {
         /* onlineLearning correction is non-blocking */
-      }
-    }
-
-    // === 深度优化：记录用户输入到 DefaultModeNetwork（让 DMN 知道用户活跃）===
-    // DMN 依靠 recordUserInput 维持"最后活跃时间"，BrainStem 周期性扫描时检查
-    // isIdle -> 5 分钟无输入则触发 onIdle（记忆固化 + 反思 + 进化）。
-    if (this.defaultModeNetwork) {
-      try {
-        this.defaultModeNetwork.recordUserInput(actorId);
-      } catch {
-        /* ignore */
       }
     }
 
@@ -1630,20 +1622,48 @@ export class BrainCenter {
               }
             }
           }
-          // 跨会话开放环路（记忆连续性 Phase 2）：每轮提取 open loops / 承诺 / 偏好，
-          // 持久化到 KV，新会话开场注入【上一会话待办】。fire-and-forget，失败静默。
-          // 传入 finalResponse（脱敏后的 Agent 回复），让 Agent 回复中的承诺也能被捕获。
-          try {
-            const epitome = extractEpitomeEntries(query, allWrites, finalResponse);
-            // turnText 供完成检测：用户说"搞定了/不用了"时关闭对应 open loop（P3）
-            this.updateSessionEpitome(actorId, epitome, `${query}\n${finalResponse}`);
-          } catch {
-            /* epitome 提取失败不影响记忆写入 */
-          }
         } catch {
           /* ignore memory write failure */
         }
       })();
+    }
+
+    // 跨会话开放环路（记忆连续性 Phase 2）：提取 open loops / 承诺 / 偏好，
+    // 持久化到 KV，新会话开场注入【上一会话待办】。
+    // 降频改造（记忆链路 LLM 调用收敛）：从每轮提取改为每 N 轮批量提取
+    // （SESSION_EPITOME_EVERY_N_TURNS，默认 5）；会话边界（新会话开场轮，
+    // thread 极短）检测到上一会话残留时兜底批量提取，保证跨会话待办不丢。
+    // 提取为纯规则 + 同步内存合并 + 一次 KV 写（毫秒级），在 cognize 主路径
+    // 同步执行——新会话开场轮 cognize 返回后，agent-core 读取
+    // 【上一会话待办】（buildRecentConversationHistoryBlock → KV session_epitome）
+    // 时兜底数据已落盘，无竞态。提取原料用 query / memoryWrites / 脱敏后的
+    // finalResponse（Agent 回复中的承诺也能被捕获）；无 memoryWrites 的轮次
+    // 同样登记（query 中的用户请求不漏提取）。
+    if (this.memory) {
+      try {
+        const batch = this.epitomeTurnGate.registerTurn(
+          actorId,
+          { query, writes: cognitive.memoryWrites, assistantText: finalResponse },
+          { newSession: cognizeThreadMessageCount >= 0 && cognizeThreadMessageCount <= 1 },
+        );
+        if (batch.length > 0) {
+          const merged: SessionEpitomeEntries = { openLoops: [], commitments: [], preferences: [] };
+          const turnTexts: string[] = [];
+          for (const turn of batch) {
+            const entries = extractEpitomeEntries(turn.query, turn.writes, turn.assistantText);
+            merged.openLoops.push(...entries.openLoops);
+            merged.commitments.push(...entries.commitments);
+            merged.preferences.push(...entries.preferences);
+            if (turn.query || turn.assistantText) {
+              // turnText 供完成检测：用户说"搞定了/不用了"时关闭对应 open loop（P3）
+              turnTexts.push(`${turn.query}\n${turn.assistantText ?? ""}`);
+            }
+          }
+          this.updateSessionEpitome(actorId, merged, turnTexts.join("\n"));
+        }
+      } catch {
+        /* epitome 提取失败不影响对话主链路 */
+      }
     }
 
     // === 深度优化（工作记忆连贯性）：阶段 3.4 自动提取对话要点写入槽位 ===
@@ -1847,6 +1867,21 @@ export class BrainCenter {
       return { ok: false, proposal: null };
     }
     return this.evolution.rejectByUser(proposalId, reason, sessionId);
+  }
+
+  /**
+   * 显式执行入口：外部（用户 / Agent）按 id 触发单个进化提案执行。
+   * 委托 EvolutionCortex.executeProposal；未注册 / 未实现时返回 ok=false。
+   */
+  async executeEvolution(proposalId: string): Promise<{
+    ok: boolean;
+    proposal: EvolutionProposal | null;
+    error?: string;
+  }> {
+    if (!this.evolution?.executeProposal) {
+      return { ok: false, proposal: null, error: "EvolutionCortex 或 executeProposal 未注册" };
+    }
+    return this.evolution.executeProposal(proposalId);
   }
 
   /** 听：委托 SensoryCortex.listen 做语音识别；缺失时返回空结果 */
@@ -2295,7 +2330,6 @@ export class BrainCenter {
         { name: "ToolPlanningCortex", registered: this.toolPlanningCortex !== null },
         { name: "OnlineLearningCortex", registered: this.onlineLearningCortex !== null },
         { name: "EmotionModulator", registered: this.emotionModulator !== null },
-        { name: "DefaultModeNetwork", registered: this.defaultModeNetwork !== null },
         { name: "BodyGateway", registered: this.bodyGateway !== null },
       ],
     };

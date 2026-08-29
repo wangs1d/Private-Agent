@@ -103,6 +103,24 @@ export const BRAIN_PROPOSE_CAPABILITY_TOOL: ChatCompletionTool = {
   },
 };
 
+/** brain.execute_proposal —— 显式按 id 触发单个进化提案执行 */
+export const BRAIN_EXECUTE_PROPOSAL_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "brain.execute_proposal",
+    description:
+      "显式按 id 触发单个进化提案的执行（approved → 生成 Skill / 装载）。当你或用户已确认一个进化提案需要真正落地时调用。返回执行结果与提案最新状态；若提案不存在、已是终态或未处于 approved 状态则返回 error。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "进化提案 id（evolve 创建或 listPending 返回的 id）。" },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+};
+
 /** brain.observe_user —— 查询当前用户活动状态 */
 export const BRAIN_OBSERVE_USER_TOOL: ChatCompletionTool = {
   type: "function",
@@ -541,6 +559,7 @@ export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_LIST_CAPABILITIES_TOOL,
   BRAIN_IDENTIFY_GAP_TOOL,
   BRAIN_PROPOSE_CAPABILITY_TOOL,
+  BRAIN_EXECUTE_PROPOSAL_TOOL,
   BRAIN_OBSERVE_USER_TOOL,
   BRAIN_LISTEN_TOOL,
   BRAIN_LOOK_TOOL,
@@ -836,6 +855,38 @@ export function registerBrainTools(
       return {
         ok: false,
         error: `brain.propose_capability 失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  });
+
+  // ---- brain.execute_proposal ----
+  registry.register("brain.execute_proposal", async (input) => {
+    try {
+      const rawInput =
+        typeof input === "object" && input !== null && !Array.isArray(input)
+          ? (input as Record<string, unknown>)
+          : {};
+      const id = typeof rawInput.id === "string" ? rawInput.id.trim() : "";
+      if (!id) {
+        return { ok: false, error: "缺少必填字段：id（进化提案 id）" };
+      }
+      const result = await brainCenter.executeEvolution(id);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.error ?? `提案 ${id} 执行未成功`,
+        };
+      }
+      return {
+        ok: true,
+        proposalId: id,
+        status: result.proposal?.status,
+        message: `提案 ${id} 执行完成，状态=${result.proposal?.status}`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `brain.execute_proposal 失败：${err instanceof Error ? err.message : String(err)}`,
       };
     }
   });

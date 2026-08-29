@@ -3,10 +3,11 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 /**
  * 健康 / 运动数据能力域 —— ChatCompletionTool schema。
  *
- * 共 6 个工具：
+ * 共 7 个工具：
  *   - health.log_metric    记录单条指标
  *   - health.get_metrics   查询历史记录
  *   - health.get_summary   周期汇总（周 / 月 / 年）
+ *   - health.query         确定性统计问答（「这周跑了几次步」类，Task 19）
  *   - health.set_goal      设置健康目标
  *   - health.get_goals     查询目标 + 完成进度
  *   - health.import_data   批量导入（Apple Health / 手环导出 JSON / CSV）
@@ -111,6 +112,56 @@ export const HEALTH_FITNESS_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["type", "period"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "health.query",
+      description:
+        "健康数据确定性统计问答（服务端聚合，返回数字，你只负责口语化转述）。\n" +
+        "适用场景：「这周跑了几次步」（type=exercise_duration, note_keyword=跑步, aggregate=count）、\n" +
+        "「这周总共运动了多少分钟」（aggregate=sum）、「有几天在锻炼」（aggregate=days）、\n" +
+        "「日均步数」（type=steps, aggregate=mean_daily）。\n" +
+        "与 health.get_summary 的区别：get_summary 返回全量统计对象（均值/极值/趋势/按天），\n" +
+        "本工具直接回答「一个数字」的问题，且支持按备注关键词（如运动类型「跑步」）过滤。",
+      parameters: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            description:
+              "指标类型，与 log_metric 一致。如 exercise_duration（运动时长）/ steps（步数）/ sleep_duration（睡眠）。",
+          },
+          aggregate: {
+            type: "string",
+            enum: ["count", "days", "sum", "mean", "mean_daily"],
+            description:
+              "聚合口径：count 记录条数（跑了几次，默认）/ days 有记录天数（有几天在锻炼）/ sum 总和 / mean 单次均值 / mean_daily 日均值。",
+          },
+          period: {
+            type: "string",
+            enum: ["week", "month", "year", "custom"],
+            description:
+              "统计周期：week 最近7天（默认）/ month 最近30天 / year 最近365天 / custom 自定义（需传 from/to）。",
+          },
+          from: {
+            type: "string",
+            description: "起始时间 ISO 8601（仅 period=custom 时必填）。",
+          },
+          to: {
+            type: "string",
+            description: "结束时间 ISO 8601（仅 period=custom 时必填）。",
+          },
+          note_keyword: {
+            type: "string",
+            description:
+              "备注关键词过滤（可选）。如只统计 note 含「跑步」的运动记录（区分跑步/游泳/撸铁等运动类型）。",
+          },
+        },
+        required: ["type"],
         additionalProperties: false,
       },
     },

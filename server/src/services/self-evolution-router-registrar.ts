@@ -1,11 +1,10 @@
 /**
- * 自我进化 → tool-router 注册桥接器
+ * Skill → tool-router 注册桥接器
  *
- * 把自我进化生成的 Skill 注册到 tool-router 的 registry 中，
- * 使其能被四级分层路由搜索到。同时提供发现和替换工具的能力。
+ * 把（自学习/技能生成产出的）Skill 注册到 tool-router 的 registry 中，
+ * 使其能被四级分层路由搜索到。
  */
 
-import { readFile, writeFile, readdir, stat } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -60,16 +59,6 @@ export interface ToolRouterResourceRecord {
   failure_penalty: number;
   latency_score: number;
   consecutive_failures: number;
-}
-
-interface ToolRouterListResponse {
-  resources: Array<{
-    name: string;
-    resource_type: string;
-    domain: string;
-    description: string;
-    tags: string[];
-  }>;
 }
 
 // ============================================================
@@ -151,7 +140,7 @@ export function skillMetadataToResourceRecord(
   const now = new Date().toISOString();
   const domain = metadata.tags?.find((t) => t.startsWith("domain:"))?.slice(7) ?? "evolved";
   const tags = metadata.tags ?? [];
-  const description = metadata.description || `Self-evolved skill: ${skillName}`;
+  const description = metadata.description || `Evolved skill: ${skillName}`;
 
   return {
     level1: {
@@ -211,7 +200,7 @@ function hashTextToVector(text: string, dims: number): number[] {
 }
 
 // ============================================================
-// 注册 / 列表 / 删除 API
+// 注册 API
 // ============================================================
 
 /**
@@ -241,10 +230,10 @@ export async function registerSkillToToolRouter(
       if (payload.ok === false) {
         return { ok: false, error: payload.error ?? "unknown error" };
       }
-      console.log(`[SelfEvolutionRouterRegistrar] ✅ 已注册 '${skillName}' 到 tool-router (HTTP)`);
+      console.log(`[SkillRouterRegistrar] ✅ 已注册 '${skillName}' 到 tool-router (HTTP)`);
       return { ok: true };
     } catch (err) {
-      console.warn(`[SelfEvolutionRouterRegistrar] HTTP 注册失败，回退 stdio: ${err instanceof Error ? err.message : err}`);
+      console.warn(`[SkillRouterRegistrar] HTTP 注册失败，回退 stdio: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -264,221 +253,12 @@ export async function registerSkillToToolRouter(
     if (!result?.ok) {
       return { ok: false, error: result?.error ?? "stdio register failed" };
     }
-    console.log(`[SelfEvolutionRouterRegistrar] ✅ 已注册 '${skillName}' 到 tool-router (stdio)`);
+    console.log(`[SkillRouterRegistrar] ✅ 已注册 '${skillName}' 到 tool-router (stdio)`);
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `stdio 注册失败: ${msg}` };
   }
-}
-
-/**
- * 从 tool-router 获取当前注册的所有资源列表。
- */
-export async function listToolRouterResources(): Promise<ToolRouterListResponse> {
-  const httpUrl = resolveToolRouterHttpUrl();
-  if (httpUrl) {
-    try {
-      const response = await fetch(`${httpUrl}/api/resource/health-check`, {
-        method: "GET",
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (response.ok) {
-        const payload = (await response.json()) as any;
-        return { resources: payload?.data?.catalog ?? [] };
-      }
-    } catch {
-      // fallback
-    }
-  }
-
-  try {
-    const root = resolveToolRouterRoot();
-    if (!root) return { resources: [] };
-    const pythonBin = resolvePythonBin();
-    const script = join(root, "scripts", "bridge_worker.py");
-    if (!existsSync(script)) return { resources: [] };
-
-    const result = await runStdioCommand(pythonBin, script, "list_resources", {});
-    if (result?.ok && result?.data?.resources) {
-      return { resources: result.data.resources };
-    }
-  } catch {
-    // ignore
-  }
-  return { resources: [] };
-}
-
-/**
- * 从 tool-router 删除一个资源。
- */
-export async function removeToolRouterResource(
-  resourceId: string,
-): Promise<{ ok: boolean; error?: string }> {
-  // tool-router 没有直接的删除 API，标记为 deprecated
-  // 用 register 覆盖 status 为 deprecated
-  try {
-    const httpUrl = resolveToolRouterHttpUrl();
-    if (httpUrl) {
-      const response = await fetch(`${httpUrl}/api/resource/register`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          resource: {
-            level1: {
-              resource_id: resourceId,
-              resource_type: "skill",
-              status: "deprecated",
-            },
-          },
-        }),
-        signal: AbortSignal.timeout(5_000),
-      });
-      return { ok: response.ok };
-    }
-  } catch {
-    // ignore
-  }
-  return { ok: false, error: "tool-router not reachable" };
-}
-
-// ============================================================
-// 工具：发现更好的替代方案
-// ============================================================
-
-/**
- * 扫描当前 tool-router 注册的资源，与外部发现对比，返回更优方案列表。
- */
-export async function discoverBetterTools(
-  externalScanResults: Array<{
-    name: string;
-    description: string;
-    sourceUrl: string;
-    domain: string;
-    score: number;
-  }>,
-): Promise<Array<{
-  currentName: string;
-  currentDescription: string;
-  alternativeName: string;
-  alternativeDescription: string;
-  sourceUrl: string;
-  improvement: string;
-}>> {
-  const current = await listToolRouterResources();
-  const replacements: Array<{
-    currentName: string;
-    currentDescription: string;
-    alternativeName: string;
-    alternativeDescription: string;
-    sourceUrl: string;
-    improvement: string;
-  }> = [];
-
-  for (const external of externalScanResults) {
-    // 按 domain 对比当前注册的资源
-    const candidates = current.resources.filter(
-      (r) => r.domain === external.domain || r.tags?.includes(external.domain),
-    );
-    for (const candidate of candidates) {
-      // 简单语义对比：如果外部方案的描述更丰富或得分更高，标记为替代方案
-      if (external.score > 0.7 && external.description.length > candidate.description.length) {
-        replacements.push({
-          currentName: candidate.name,
-          currentDescription: candidate.description,
-          alternativeName: external.name,
-          alternativeDescription: external.description,
-          sourceUrl: external.sourceUrl,
-          improvement: `外部发现更优方案: ${external.name}（${external.description}），来自 ${external.sourceUrl}`,
-        });
-      }
-    }
-  }
-
-  return replacements;
-}
-
-// ============================================================
-// 工具：读取/修改 tool-router 代码
-// ============================================================
-
-/**
- * 读取 tool-router 的指定代码文件内容。
- */
-export async function readToolRouterCode(
-  relativePath: string,
-): Promise<{ ok: boolean; content?: string; error?: string }> {
-  const root = resolveToolRouterRoot();
-  if (!root) return { ok: false, error: "tool-router root not found" };
-
-  const fullPath = join(root, relativePath);
-  if (!fullPath.startsWith(root)) {
-    return { ok: false, error: "Path traversal detected" };
-  }
-  if (!existsSync(fullPath)) {
-    return { ok: false, error: `File not found: ${relativePath}` };
-  }
-
-  try {
-    const content = await readFile(fullPath, "utf8");
-    return { ok: true, content };
-  } catch (err) {
-    return { ok: false, error: `Read failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-}
-
-/**
- * 写入修改后的 tool-router 代码文件。
- */
-export async function writeToolRouterCode(
-  relativePath: string,
-  content: string,
-): Promise<{ ok: boolean; error?: string }> {
-  const root = resolveToolRouterRoot();
-  if (!root) return { ok: false, error: "tool-router root not found" };
-
-  const fullPath = join(root, relativePath);
-  if (!fullPath.startsWith(root)) {
-    return { ok: false, error: "Path traversal detected" };
-  }
-
-  try {
-    await writeFile(fullPath, content, "utf8");
-    console.log(`[SelfEvolutionRouterRegistrar] ✅ 已写入 ${relativePath}`);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: `Write failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-}
-
-/**
- * 列出 tool-router 目录下的所有 .py 文件。
- */
-export async function listToolRouterCodeFiles(): Promise<string[]> {
-  const root = resolveToolRouterRoot();
-  if (!root) return [];
-
-  const files: string[] = [];
-  const dirsToVisit = [""];
-
-  while (dirsToVisit.length > 0) {
-    const relative = dirsToVisit.pop()!;
-    const fullDir = join(root, relative);
-    try {
-      const entries = await readdir(fullDir, { withFileTypes: true });
-      for (const entry of entries) {
-        const relPath = relative ? `${relative}/${entry.name}` : entry.name;
-        if (entry.isDirectory() && !entry.name.startsWith(".") && !entry.name.startsWith("__pycache__") && !entry.name.startsWith("node_modules") && !entry.name.startsWith(".venv")) {
-          dirsToVisit.push(relPath);
-        } else if (entry.isFile() && entry.name.endsWith(".py")) {
-          files.push(relPath);
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-  return files.sort();
 }
 
 // ============================================================

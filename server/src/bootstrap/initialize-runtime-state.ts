@@ -1,6 +1,7 @@
 import { reconcileWorldA2aEscrows, restorePurchasedSkillsFromWorldState } from "@private-ai-agent/agent-world";
 import type { AppServices } from "./types.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
+import { isAgentWorldSocialEnabled } from "../config/env.js";
 
 export async function initializeRuntimeState(services: AppServices): Promise<void> {
   // 无相互依赖的持久化加载并行执行（文件读 + JSON.parse 均为异步 IO，
@@ -47,23 +48,31 @@ export async function initializeRuntimeState(services: AppServices): Promise<voi
   }
 
   // World 链路存在顺序依赖（load → 恢复技能 → 对账 → 落盘），保持串行。
+  // Agent World 社交经济域开关（AGENT_WORLD_SOCIAL_ENABLED，实验性子系统默认关闭）：
+  // 关闭时跳过技能商店购买恢复与 A2A escrow 对账（社交经济域不参与启动恢复），
+  // 开启后行为与现状一致。
+  const worldSocialEnabled = isAgentWorldSocialEnabled();
   await services.worldService.load();
   await services.socialFeedService.load();
-  await restorePurchasedSkillsFromWorldState(
-    services.worldService,
-    services.skillManager,
-    services.auditService,
-  );
+  if (worldSocialEnabled) {
+    await restorePurchasedSkillsFromWorldState(
+      services.worldService,
+      services.skillManager,
+      services.auditService,
+    );
+  }
   services.skillManager.loadEnabledFromDisk();
   // 跨重启恢复"越用越强"的技能：procedural（经验文档）+ 自我进化 code（handlerCode）
   services.skillManager.loadProceduralSkillsFromDisk();
   services.skillManager.loadEvolvedSkillsFromDisk();
   await services.a2aOutsourcingService.load();
-  await reconcileWorldA2aEscrows(
-    services.worldService,
-    services.a2aOutsourcingService,
-    services.auditService,
-  );
+  if (worldSocialEnabled) {
+    await reconcileWorldA2aEscrows(
+      services.worldService,
+      services.a2aOutsourcingService,
+      services.auditService,
+    );
+  }
   await services.worldService.flushPersist();
   await services.socialFeedService.flushPersist();
 }

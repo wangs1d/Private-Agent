@@ -43,6 +43,19 @@ const PHONE_CALL_SYSTEM_SUFFIX =
   + "3. phone.call_user（电话通话）: 用户说「给我打电话」→ 振铃-接通-TTS。参数 spokenMessage 填要说的话，ringStyle 默认 peer（reminder 为闹钟式）。\n\n"
   + "【禁止】回复中提前告知或复述「马上打过去」「现在给你打」等；phone.call_user 一轮只调一次，多次无效。发语音消息后不要在文本回复里复述语音内容。";
 
+/** 生活管家能力清单（能力描述区）：给 LLM 一份口语化的日常代办范围，减少"只口头建议不动手"。 */
+export const LIFE_STEWARD_SYSTEM_SUFFIX_MARKER = "【生活管家】";
+
+/**
+ * C 端生活管家能力清单（2026-08-29）：
+ * - 措辞口语化、控制在一两行内：fast 模式有 900 token 输出限制与 prefix cache 考量，
+ *   system 增量必须小；纯静态文本、追加在工具描述后缀族末尾，不重排其他内容。
+ * - 与 TOOL_CATEGORY_MAPPINGS 的生活域关键词召回（支付/外卖/热搜/晨报/记账/提醒）配合，
+ *   让两类对话模式下这些需求都能"想到 + 找到工具 + 直接办"。
+ */
+const LIFE_STEWARD_SYSTEM_SUFFIX =
+  "\n\n【生活管家】你可以帮用户：查天气、点外卖、支付缴费、看热搜、早晚简报、记账提醒；这类需求直接调工具去办，别只口头建议。";
+
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
  */
@@ -289,6 +302,11 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   }
   if (!out.includes(PHONE_CALL_SYSTEM_SUFFIX_MARKER)) {
     out += PHONE_CALL_SYSTEM_SUFFIX;
+  }
+  // 生活管家能力清单：追加在工具描述后缀族末尾（fast/complex 两模式共享，
+  // 仅在启用工具时注入；minimal/suppressRuntimeSuffixes 路径不追加，保持极致精简）
+  if (!out.includes(LIFE_STEWARD_SYSTEM_SUFFIX_MARKER)) {
+    out += LIFE_STEWARD_SYSTEM_SUFFIX;
   }
   return out;
 }

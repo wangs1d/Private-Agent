@@ -117,10 +117,6 @@ const DENY_FILES = new Set<string>([
   "src/services/agent-self-learning-service.ts", // 学习数据源：禁止污染
   "src/services/skill-promotion-pipeline.ts", // skill 装载：禁止改安全闸门
   "scripts/start-with-gateway.mjs", // 启动入口：禁止改
-  // Phase 5.5 安全约束：禁止自我修改扫描逻辑和进化提案器
-  "src/services/external-tech-scanner.ts", // 禁止改扫描逻辑（防自我削弱扫描范围）
-  "src/brain/self-driven-evolution-cortex.ts", // 禁止改进化提案规则
-  "src/services/benchmark-self-assessment.ts", // 禁止改基线评估逻辑
 ]);
 
 /**

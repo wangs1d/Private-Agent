@@ -18,6 +18,10 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   followup: 4 * 60 * 60 * 1000,         // 待办跟进：4h 冷却
   task_celebration: 30 * 60 * 1000,     // 恭喜：每任务一次（30min 防连发）
   overwork_care: 8 * 60 * 60 * 1000,    // 过劳干预：8h 冷却
+  // ── C 端生活管家场景（Task 20 统一频控注册）──
+  weather_alert: 30 * 60 * 1000,        // 恶劣天气预警：预警类需即时触达，30min 冷却防同一场雨连发
+  life_reminder: 4 * 60 * 60 * 1000,    // 生活提醒（重要日子/预算超支/节律提醒等）：4h 冷却
+  monthly_report: 24 * 60 * 60 * 1000,  // 月度报告（消费月报等）：每日最多 1 次
 };
 
 /**

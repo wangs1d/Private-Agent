@@ -22,6 +22,18 @@ export type WeatherBrief = {
   clothingAdvice: string;
   hourlyForecast: WeatherHourlyForecast[];
   summaryLine: string;
+  /** 次日预报（结构化；Task 15 晚间 digest"明日预告"与次日预警检测用） */
+  tomorrow?: WeatherTomorrow;
+};
+
+/** 次日预报摘要（来自 open-meteo daily 数组第 2 天） */
+export type WeatherTomorrow = {
+  weatherCode: number;
+  weatherText: string;
+  minC: number;
+  maxC: number;
+  /** 降水概率（0-100） */
+  rainPct: number;
 };
 
 export type WeatherHourlyForecast = {
@@ -245,9 +257,58 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       tomorrowSummary = ` 明日${tomorrowText}，${tomorrowMin.toFixed(0)}–${tomorrowMax.toFixed(0)}°C${rainInfo}。`;
     }
 
+    // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）
+    if (tomorrowMax != null && tomorrowMin != null) {
+      brief.tomorrow = {
+        weatherCode: Number(raw.daily?.weather_code?.[1] ?? 0),
+        weatherText: wmoText(Number(raw.daily?.weather_code?.[1] ?? 0)),
+        minC: Number(tomorrowMin),
+        maxC: Number(tomorrowMax),
+        rainPct: Number(tomorrowRainPct ?? 0),
+      };
+    }
+
     brief.summaryLine = `${brief.locationLabel} 当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
     return brief;
   }
+}
+
+/**
+ * 恶劣天气预警检测（Task 15 生活节律：确定性规则，零 LLM）。
+ * 输入当日或次日的天气要素，返回预警标签列表（空数组 = 无预警）：
+ *   - 强降雨/雷暴/冻雨/大雪：WMO 天气码 + 文本兜底匹配
+ *   - 高温：最高温 ≥ 35°C（高温橙色预警量级）
+ *   - 严寒：最低温 ≤ -8°C（寒潮量级）
+ *   - 大风：风速 ≥ 40km/h（大风蓝色预警量级）
+ */
+export function detectSevereWeatherAlerts(input: {
+  weatherCode?: number;
+  weatherText?: string;
+  maxC?: number;
+  minC?: number;
+  rainPct?: number;
+  windKmh?: number;
+}): string[] {
+  const alerts: string[] = [];
+  const code = input.weatherCode ?? 0;
+  const text = input.weatherText ?? "";
+
+  // 强降雨（大雨/强阵雨）与暴雨（WMO 无独立暴雨码，强阵雨即暴雨量级）
+  if ([65, 82].includes(code) || /大雨|暴雨|强阵雨/.test(text)) alerts.push("强降雨");
+  // 雷暴（伴冰雹）
+  if ([95, 96, 99].includes(code) || /雷暴/.test(text)) alerts.push("雷暴");
+  // 冻雨
+  if ([56, 57, 66, 67].includes(code) || /冻雨/.test(text)) alerts.push("冻雨");
+  // 大雪/暴雪
+  if ([75, 77].includes(code) || /大雪|暴雪/.test(text)) alerts.push("大雪");
+  // 高温
+  if (typeof input.maxC === "number" && input.maxC >= 35) alerts.push("高温");
+  // 严寒/寒潮
+  if (typeof input.minC === "number" && input.minC <= -8) alerts.push("寒潮");
+  // 大风
+  if (typeof input.windKmh === "number" && input.windKmh >= 40) alerts.push("大风");
+
+  return alerts;
 }
 
 function buildHourlyForecast(raw: {

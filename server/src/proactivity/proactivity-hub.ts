@@ -104,6 +104,17 @@ export interface ProactivityHubDeps {
   getScheduleSnapshot?: (actorId: string) => string | null;
   /** 测试注入：自定义频控器（默认 new FrequencyGovernor()） */
   frequencyGovernor?: FrequencyGovernor;
+  /**
+   * 负反馈抑制表（Task 20 统一频控框架）：用户「别再提醒我这个」类负反馈的
+   * 持久化抑制。注入后 hub 在频控判定前先查抑制（用户意愿优先于时间冷却）。
+   */
+  suppressionStore?: {
+    isSuppressed: (
+      actorId: string,
+      kind: string,
+      text?: string,
+    ) => { suppressed: boolean; reason: string };
+  };
 }
 
 /**
@@ -336,6 +347,19 @@ export class ProactivityHub {
     });
   }
 
+  /**
+   * 外部场景接线：提交一条主动意图（C 端生活管家场景通用入口）。
+   * 走与内部快路径完全相同的 route()（负反馈抑制 → 频控 → speak/act/advise），
+   * fire-and-forget 不阻塞调用方。供消费管家（预算超支/月报）、人情关系
+   * （重要日子）、健康关怀（节律提醒）、天气预警等外部服务接入。
+   */
+  submitIntent(intent: ProactiveIntent): void {
+    this.knownActors.add(intent.actorId);
+    void this.route(intent).catch((err) => {
+      console.log(`[ProactivityHub] submitIntent 失败（忽略）kind=${intent.kind}: ${err}`);
+    });
+  }
+
   /** 周期 tick（问候快路径 + 通用 LLM 路径；测试可直调） */
   async onTick(actorId: string, now: Date = new Date()): Promise<void> {
     // 快路径 1：问候（时段判定 + 24h 冷却兜底）
@@ -488,12 +512,24 @@ export class ProactivityHub {
     }
   }
 
-  /** 把 LLM 决策路由到三种行为模式（频控 → speak/act/advise） */
+  /** 把 LLM 决策路由到三种行为模式（抑制 → 频控 → speak/act/advise） */
   private async routeDecision(
     actorId: string,
     decision: InitiativeDecision,
     source: string,
   ): Promise<void> {
+    // 负反馈抑制检查（用户意愿优先于时间冷却）：kind 级或关键词级命中即放弃
+    const suppression = this.deps.suppressionStore?.isSuppressed(
+      actorId,
+      decision.kind,
+      `${decision.rationale} ${decision.messageHint}`,
+    );
+    if (suppression?.suppressed) {
+      console.log(
+        `[ProactivityHub] 负反馈抑制拦截（通用）kind=${decision.kind} actor=${actorId} reason=${suppression.reason}`,
+      );
+      return;
+    }
     const verdict = this.governor.canTrigger(actorId, decision.kind, decision.importance);
     if (!verdict.allowed) {
       console.log(
@@ -573,8 +609,20 @@ export class ProactivityHub {
     if (intent) await this.route(intent);
   }
 
-  /** 快路径核心：意图 → 频控 → 按行为模式分发 */
+  /** 快路径核心：意图 → 抑制 → 频控 → 按行为模式分发 */
   private async route(intent: ProactiveIntent): Promise<void> {
+    // 负反馈抑制检查（用户意愿优先于时间冷却）：kind 级或关键词级命中即放弃
+    const suppression = this.deps.suppressionStore?.isSuppressed(
+      intent.actorId,
+      intent.kind,
+      `${intent.title} ${intent.summary}`,
+    );
+    if (suppression?.suppressed) {
+      console.log(
+        `[ProactivityHub] 负反馈抑制拦截 kind=${intent.kind} actor=${intent.actorId} reason=${suppression.reason}`,
+      );
+      return;
+    }
     const verdict = this.governor.canTrigger(intent.actorId, intent.kind, intent.importance);
     if (!verdict.allowed) {
       console.log(`[ProactivityHub] 频控拦截 kind=${intent.kind} actor=${intent.actorId} reason=${verdict.reason}`);

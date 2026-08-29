@@ -326,3 +326,72 @@ function closeCompletedLoops(loops: EpitomeEntry[], turnText: string | undefined
     (loop) => tokenOverlapRatio(turnTokens, contentTokenSet(loop.text)) < LOOP_CLOSE_OVERLAP,
   );
 }
+
+// ── 轮次门控（记忆链路 LLM 调用收敛 / 降频改造）───────────────
+
+/** 一轮对话的提取原料快照（轻量引用，供批量提取）。 */
+export interface EpitomeTurnSnapshot {
+  /** 用户输入原文（open loop 提取的第一来源） */
+  query: string;
+  /** 本轮认知产出的记忆写入（MemoryItem[]） */
+  writes: MemoryItem[];
+  /** Agent 回复文本（提取承诺） */
+  assistantText?: string;
+}
+
+/**
+ * 从环境变量读取 epitome 提取轮次间隔。
+ * 默认 5；非法值或 <1 按 5 处理（传 1 即恢复每轮提取的旧行为由调用方 clamp 保证）。
+ */
+export function loadSessionEpitomeEveryNTurns(): number {
+  const raw = process.env.SESSION_EPITOME_EVERY_N_TURNS?.trim();
+  if (!raw) return 5;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : 5;
+}
+
+/**
+ * session epitome 提取轮次门控：把「每轮提取」降频为「每 N 轮批量提取」。
+ *
+ * 背景：epitome 提取本身是纯规则（零 LLM），但每轮提取意味着每轮一次 KV 写与
+ * revision 自增；按 N 轮批量可把写频降为 1/N。
+ *
+ * - 常规触发：轮次计数达 everyNTurns（SESSION_EPITOME_EVERY_N_TURNS，默认 5）
+ *   时，把 pending 中累积的 N 轮快照一次性批量提取；
+ * - 会话边界兜底：新会话开场轮（thread 极短）检测到 pending 有上一会话残留
+ *   时立即批量提取——上一会话最后一轮的待办不丢；新会话开场注入
+ *   【上一会话待办】（buildRecentConversationHistoryBlock 读 KV session_epitome）
+ *   前数据已落盘（提取为同步纯内存操作，无竞态）；
+ * - pending 只存轻量引用（每 actor 最多 N 条快照），提取后即清空。
+ */
+export class SessionEpitomeTurnGate {
+  private readonly everyNTurns: number;
+  private state = new Map<string, { turns: number; pending: EpitomeTurnSnapshot[] }>();
+
+  constructor(everyNTurns: number = loadSessionEpitomeEveryNTurns()) {
+    this.everyNTurns = Math.max(1, Math.floor(everyNTurns));
+  }
+
+  /**
+   * 登记一轮；返回应提取的轮次批次（空数组 = 本轮不提取）。
+   * @param opts.newSession 本轮是否为会话开场（thread 极短，兜底信号）
+   */
+  registerTurn(
+    actorId: string,
+    snapshot: EpitomeTurnSnapshot,
+    opts?: { newSession?: boolean },
+  ): EpitomeTurnSnapshot[] {
+    const st = this.state.get(actorId) ?? { turns: 0, pending: [] };
+    // 会话边界兜底：上一会话有残留未提取 → 连同本轮立即批量提取
+    const boundary = Boolean(opts?.newSession) && st.pending.length > 0;
+    st.pending.push(snapshot);
+    st.turns += 1;
+    if (boundary || st.turns >= this.everyNTurns) {
+      const batch = st.pending;
+      this.state.delete(actorId);
+      return batch;
+    }
+    this.state.set(actorId, st);
+    return [];
+  }
+}

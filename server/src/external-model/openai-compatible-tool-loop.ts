@@ -6,13 +6,18 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
-import { AGENT_WORLD_CHAT_TOOLS } from "@private-ai-agent/agent-world";
+import { AGENT_WORLD_CHAT_TOOLS, filterSocialChatTools } from "@private-ai-agent/agent-world";
+import { isAgentWorldSocialEnabled } from "../config/env.js";
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence-chat-tools.js";
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
+import { AGENT_TASKS_CHAT_TOOLS } from "../tools/agent-tasks-tools.js";
+import { RHYTHM_REMINDER_CHAT_TOOLS } from "../tools/rhythm-reminder-tools.js";
+import { PROACTIVITY_FEEDBACK_CHAT_TOOLS } from "../tools/proactivity-feedback-tools.js";
+import { CARE_REMINDER_CHAT_TOOLS } from "../tools/care-reminder-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
@@ -1553,13 +1558,25 @@ export function setBodyChatTools(tools: ChatCompletionTool[]): void {
   _fastLaneToolsCache = null;
 }
 
+/**
+ * Agent World 对话工具注入：AGENT_WORLD_SOCIAL_ENABLED（默认关闭）时仅注入
+ * identity/注册/房间最小集（filterSocialChatTools 过滤 free_market/social/music
+ * 社交经济域工具），开启时注入全量 AGENT_WORLD_CHAT_TOOLS，行为与现状一致。
+ * 延迟求值：首次构建 builtin 工具集时读取 env（确保 .env 已加载完成）。
+ */
+function getAgentWorldChatToolsForLlm(): ChatCompletionTool[] {
+  return isAgentWorldSocialEnabled()
+    ? AGENT_WORLD_CHAT_TOOLS
+    : filterSocialChatTools(AGENT_WORLD_CHAT_TOOLS);
+}
+
 export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
   if (_builtinToolsCache) return _builtinToolsCache;
   const capabilityModuleTools = _capabilityModuleDeps
     ? getCapabilityModuleChatTools(_capabilityModuleDeps)
     : [];
   _builtinToolsCache = [
-    ...AGENT_WORLD_CHAT_TOOLS,
+    ...getAgentWorldChatToolsForLlm(),
     ...AIP_CHAT_TOOLS,
     ...INFO_WEB_CHAT_TOOLS,
     ...LIFE_ASSISTANT_CHAT_TOOLS,
@@ -1573,6 +1590,10 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...CLOCK_CHAT_TOOLS,
     ...INTERNET_INTELLIGENCE_CHAT_TOOLS,
     ...INTEREST_WATCH_CHAT_TOOLS,
+    ...AGENT_TASKS_CHAT_TOOLS,
+    ...RHYTHM_REMINDER_CHAT_TOOLS,
+    ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
+    ...CARE_REMINDER_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
@@ -1615,9 +1636,12 @@ interface ToolCategoryMapping {
 
 const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
+    // 2026-08-29 C 端生活管家强化：补齐热搜/晨报口语关键词，并把 hot_rankings
+    // （实时热点榜单工具，注册于 web-tools.ts）纳入本分类工具清单——此前它不在
+    // 任何分类映射里，"热搜/吃瓜"命中 web 分类后 hot_rankings 也不会被召回。
     category: 'web',
-    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别', '查查', '查一查', '搜一下', '八卦', '吃瓜', '爆料', '热搜', '近况', '怎么样了', '什么情况'],
-    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site']
+    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别', '查查', '查一查', '搜一下', '八卦', '吃瓜', '爆料', '热搜', '热点', '热榜', '上热搜', '简报', '早报', '晨报', '早安', '今日要点', '近况', '怎么样了', '什么情况'],
+    toolNames: ['internet.research', 'internet.live_check', 'internet.verify', 'search_web', 'search_images', 'search_images_batch', 'search_videos', 'fetch_web', 'info.inspect_webpage', 'info.navigate_site', 'hot_rankings']
   },
   {
     // 记忆检索工具化（Letta/MemGPT agentic retrieval 模式）：
@@ -1629,13 +1653,18 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     toolNames: ['brain.recall', 'brain.remember']
   },
   {
+    // 2026-08-29 C 端生活管家强化：补齐提醒类口语关键词（提醒我/别忘了/到点叫我/
+    // 定个闹钟），让 fast 模式下 reminder.plan / calendar.* 能被可靠召回。
     category: 'calendar',
-    keywords: ['提醒', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment'],
+    keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment'],
     toolNames: ['reminder.plan', 'calendar.create_from_text', 'calendar.create_task', 'calendar.list_tasks']
   },
   {
+    // 2026-08-29 C 端生活管家强化：补齐支付/记账口语关键词（付钱/买单/代付/缴费/
+    // 记账/花了）。注意：钱包域工具有真实资金副作用，只做关键词映射召回，
+    // 不做强推（forced tool choice），最终是否调用仍由 LLM 在用户授权语境下决定。
     category: 'wallet',
-    keywords: ['钱包', 'wallet', '余额', 'balance', '支付', 'pay', '转账', 'transfer', '充值', 'recharge', '消费', 'purchase', '交易', 'transaction', '账单', 'bill', '钱', 'money', '金额', 'amount'],
+    keywords: ['钱包', 'wallet', '余额', 'balance', '支付', 'pay', '转账', 'transfer', '充值', 'recharge', '付钱', '买单', '代付', '缴费', '记账', '花了', '消费', 'purchase', '交易', 'transaction', '账单', 'bill', '钱', 'money', '金额', 'amount'],
     toolNames: [
       'wallet.get_balance',
       'wallet.get_transactions',
@@ -1689,6 +1718,37 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'life',
     keywords: ['喜欢', 'like', '粉丝', 'fan', '关注', 'follow', '常看', '常聊', '感兴趣', 'interest', '追', '热榜', '热搜', '热点', '动态', 'updates'],
     toolNames: ['interest.manage']
+  },
+  {
+    // Task 20 统一频控框架：用户对主动提醒/推送表达负反馈（别再提醒/别推了/
+    // 太烦了）时命中 proactivity.feedback，LLM 调它写入持久抑制表。
+    category: 'life',
+    keywords: ['别再提醒', '别提醒', '不要提醒', '别再推', '别推', '别发了', '别再发', '别打扰', '不打扰', '太烦了', '烦死了', '安静点', '别唠叨', '别再给我', '退订', 'unsubscribe', 'suppress'],
+    toolNames: ['proactivity.feedback']
+  },
+  {
+    // Task 17 人情关系管家：提到生日/纪念日/重要日子时召回录入与查询工具
+    category: 'life',
+    keywords: ['生日', 'birthday', '纪念日', '周年', '重要日子', '重要日期', '谁要过生日', '记住这个日子'],
+    toolNames: ['care.set_important_date', 'care.get_important_dates', 'care.delete_important_date']
+  },
+  {
+    // Task 19 健康关怀：健康数据确定性统计问答（这周跑了几次步/步数/睡眠）
+    category: 'life',
+    keywords: ['跑步', '跑了几次', '跑了多少', '步数', '步行', '锻炼', '健身', '运动量', '运动了几天', '睡眠时长', '体重', '健康数据', 'health'],
+    toolNames: ['health.query']
+  },
+  {
+    // Task 19 节律提醒：喝水/睡觉/运动预设模板开关（默认不创建，用户明说才开）
+    category: 'life',
+    keywords: ['喝水', '饮水', '睡觉提醒', '早睡提醒', '运动提醒', '节律', '久坐', '起来活动'],
+    toolNames: ['care.rhythm_reminder']
+  },
+  {
+    // Task 18 管家任务闭环：任务状态查询（我还有什么待办/之前的任务跑完了吗）
+    category: 'life',
+    keywords: ['待办', '还有什么任务', '任务列表', '任务进度', '跑完了吗', '进行到哪', '任务状态'],
+    toolNames: ['agent.tasks.list']
   },
   {
     category: 'capability',

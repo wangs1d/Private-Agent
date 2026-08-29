@@ -102,6 +102,115 @@ export function createHealthGetSummaryHandler(
 }
 
 /**
+ * health.query 工具 handler（Task 19 健康关怀）。
+ *
+ * 「这周跑了几次步」类确定性统计：服务端按时间范围聚合（可选按备注关键词
+ * 过滤，如只看 note 含「跑步」的运动记录），返回数字，LLM 只负责措辞。
+ * 聚合口径：
+ *   - count      记录条数（每次一条记录 → 「跑了几次」）
+ *   - days       有记录的天数（「有几天在运动」）
+ *   - sum        总和（「这周总共运动了多少分钟」）
+ *   - mean       均值（「平均每次跑多久」）
+ *   - mean_daily 日均值（按有记录的天分组求均值，「日均步数」）
+ */
+export function createHealthQueryHandler(
+  service: HealthFitnessService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const type = String(input.type ?? "").trim();
+    if (!type) {
+      return { ok: false, error: "缺少 type（指标类型，如 exercise_duration / steps）" };
+    }
+    const aggregate = String(input.aggregate ?? "count").trim();
+    if (!["count", "days", "sum", "mean", "mean_daily"].includes(aggregate)) {
+      return {
+        ok: false,
+        error: "aggregate 必须为 count / days / sum / mean / mean_daily",
+      };
+    }
+    const noteKeyword =
+      typeof input.note_keyword === "string" && input.note_keyword.trim()
+        ? input.note_keyword.trim()
+        : undefined;
+
+    // 时间范围：period=week/month/year 按回看窗口；custom 用 from/to
+    const periodRaw = String(input.period ?? "week").trim();
+    let fromIso: string;
+    let toIso: string;
+    if (periodRaw === "custom") {
+      fromIso = String(input.from ?? "").trim();
+      toIso = String(input.to ?? "").trim();
+      if (!fromIso || !toIso) {
+        return { ok: false, error: "period=custom 需要提供 from / to（ISO 8601）" };
+      }
+    } else {
+      if (periodRaw !== "week" && periodRaw !== "month" && periodRaw !== "year") {
+        return { ok: false, error: "period 必须为 week / month / year / custom" };
+      }
+      const periodMs =
+        periodRaw === "week" ? 7 * 86_400_000 : periodRaw === "month" ? 30 * 86_400_000 : 365 * 86_400_000;
+      fromIso = new Date(Date.now() - periodMs).toISOString();
+      toIso = new Date().toISOString();
+    }
+
+    const actorId = resolveActorId(context);
+    let metrics = service.getMetrics(actorId, type, fromIso, toIso, 10_000);
+    if (noteKeyword) {
+      const kw = noteKeyword.toLowerCase();
+      metrics = metrics.filter((m) => (m.note ?? "").toLowerCase().includes(kw));
+    }
+
+    // 确定性聚合（零 LLM）
+    const days = new Set(metrics.map((m) => m.timestamp.slice(0, 10)));
+    const sum = metrics.reduce((acc, m) => acc + m.value, 0);
+    let value = 0;
+    let label = "";
+    switch (aggregate) {
+      case "count":
+        value = metrics.length;
+        label = "记录条数";
+        break;
+      case "days":
+        value = days.size;
+        label = "有记录的天数";
+        break;
+      case "sum":
+        value = Number(sum.toFixed(2));
+        label = "总和";
+        break;
+      case "mean":
+        value = metrics.length > 0 ? Number((sum / metrics.length).toFixed(2)) : 0;
+        label = "均值";
+        break;
+      case "mean_daily":
+        value = days.size > 0 ? Number((sum / days.size).toFixed(2)) : 0;
+        label = "日均值";
+        break;
+    }
+
+    const unit = metrics[0]?.unit ?? "";
+    return {
+      ok: true,
+      aggregate,
+      label,
+      value,
+      unit,
+      period: periodRaw,
+      from: fromIso,
+      to: toIso,
+      type,
+      note_keyword: noteKeyword,
+      matched: metrics.length,
+      matched_days: days.size,
+      summary:
+        metrics.length === 0
+          ? `${periodRaw} 内没有${noteKeyword ? `备注含「${noteKeyword}」的` : ""}${type}记录`
+          : `${periodRaw} 内${noteKeyword ? `备注含「${noteKeyword}」的` : ""}${type} ${label}为 ${value}${unit ? unit : ""}（匹配 ${metrics.length} 条 / ${days.size} 天）`,
+    };
+  };
+}
+
+/**
  * health.set_goal 工具 handler。
  */
 export function createHealthSetGoalHandler(

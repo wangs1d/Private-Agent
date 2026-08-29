@@ -1536,7 +1536,9 @@ if (this.isComplexMode(route.mode)) {
             ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`),
           ];
           if (lines.length > 0) {
-            block += `\n\n【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}`;
+            block +=
+              `\n\n【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}` +
+              `\n（管家提示：其中若有适合到点提醒的事项，可主动提议「要不要我到点提醒你」，经用户确认后用 reminder/日程工具落成定时提醒）`;
           }
         }
       } catch {

@@ -33,7 +33,6 @@ export { OnlineLearningCortex, type UserProfile, type UserPatternEntry } from ".
 
 // 深度优化：增强模块（让 BrainCenter 更接近人脑）
 export { EmotionModulator, type EmotionModulationResult } from "./emotion-modulator.js";
-export { DefaultModeNetwork, type DMNResult, type DMNWorldModelLike, type CounterfactualSimulation } from "./default-mode-network.js";
 
 // 记忆认知架构升级（Phase 0-5）：7 个子模块
 export { MemoryAssociativeGraph } from "./memory-cognitive/memory-associative-graph.js";

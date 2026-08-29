@@ -48,7 +48,9 @@ import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
-import { initDailyJournalService } from "../services/daily-journal-service.js";
+import { initDailyJournalService, getDailyJournalService } from "../services/daily-journal-service.js";
+import { EveningDigestService } from "../services/evening-digest-service.js";
+import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import {
   initNightlyMemoryTaskService,
   getNightlyMemoryTaskService,
@@ -193,7 +195,12 @@ import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { registerSkillManageTools } from "../tools/skill-manage-tools.js";
 import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
-import { MorningBriefingService } from "../services/morning-briefing-service.js";
+import {
+  MorningBriefingService,
+  generateImportantDayBlessing,
+  importantDayTypeLabel,
+  type MorningBriefingImportantDay,
+} from "../services/morning-briefing-service.js";
 import { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import { markMorningBriefingDelivered } from "../routes/http/user-preferences.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
@@ -210,7 +217,11 @@ import { registerProtocolUnifiedTools } from "../tools/protocol-unified-tools.js
 import { registerWebSocketRoute } from "../ws/connection.js";
 import { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { join } from "path";
-import { getHttpRateLimitRuntime } from "../config/env.js";
+import {
+  getHttpRateLimitRuntime,
+  isAgentWorldSocialEnabled,
+  isBrainEvolutionEnabled,
+} from "../config/env.js";
 import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
 import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
@@ -248,7 +259,6 @@ import {
   ToolPlanningCortex,
   OnlineLearningCortex,
   EmotionModulator,
-  DefaultModeNetwork,
   type BrainSignalInput,
   type BrainDecision,
   type BrainDecisionAction,
@@ -332,7 +342,16 @@ import type { SubAgentType } from "../services/master-agent-types.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
 import { InterestWatcher } from "../proactivity/interest-watcher.js";
+import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js";
 import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
+import { registerProactivityFeedbackTools } from "../tools/proactivity-feedback-tools.js";
+import { registerAgentTasksTools } from "../tools/agent-tasks-tools.js";
+import { registerRhythmReminderTools } from "../tools/rhythm-reminder-tools.js";
+import {
+  ConsumptionLedgerListener,
+  isConsumptionTool,
+  summarizeToolPayload,
+} from "../services/consumption-ledger-listener.js";
 import { fetchHotRankings } from "../services/hot-rankings.js";
 import { RhythmCore } from "../body/rhythm-core.js";
 import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
@@ -631,6 +650,11 @@ export async function createAppServices(): Promise<AppServices> {
     );
   });
 
+  // Task 18 管家任务闭环：到点提醒 → proactivity speak 的晚绑定回调
+  // （proactivityHub 在下方装配段创建，创建后注入实现；此前到点提醒仅 WS 推送）
+  let onReminderFiredToProactivity:
+    | ((sessionId: string, title: string, message: string) => void)
+    | undefined;
   scheduleTaskService.setReminderHandler(async (task, message) => {
     const displayMessage = formatReminderDisplayMessage(message);
     wsConnectionRegistry.trySend(
@@ -654,6 +678,9 @@ export async function createAppServices(): Promise<AppServices> {
       displayMessage,
       "schedule.reminder_fired",
     );
+    // Task 18：到点提醒经 ProactivityHub speak 主动发起（followup kind 频控接入，
+    // 负反馈抑制兜底）；proactivityHub 未装配前静默跳过
+    onReminderFiredToProactivity?.(task.sessionId, task.title ?? "", displayMessage);
     // 不再根据"起床/叫醒"等关键词自动拨打电话
     // 日程提醒应仅通过 WebSocket 推送 + embodimentAlert 通知用户
     // 如需电话提醒，用户应显式使用 phone.call_user 工具
@@ -764,8 +791,18 @@ export async function createAppServices(): Promise<AppServices> {
   socialFeedService.attachWebSocketRegistry(wsConnectionRegistry);
   registerWorldOpenRegistryTools(toolRegistry, worldService);
   registerWorldRoomTools(toolRegistry, worldService);
-  registerWorldSocialTools(toolRegistry, socialFeedService);
-  registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
+  // ─── Agent World 社交经济域开关（AGENT_WORLD_SOCIAL_ENABLED，实验性子系统默认关闭） ───
+  // 关闭时跳过社交经济域（world-free-market / world-music / world-social /
+  // a2a-outsourcing / community-skill-store）的工具注册，仅保留 identity / pairing /
+  // registration 最小集（open_registry + room）；HTTP 社交路由与 WS 社交事件同步跳过
+  // （见 routes/http/index.ts、ws/connection.ts），LLM 工具列表走 filterSocialChatTools
+  // 过滤（见 external-model/openai-compatible-tool-loop.ts）。开启后行为与现状一致。
+  if (isAgentWorldSocialEnabled()) {
+    registerWorldSocialTools(toolRegistry, socialFeedService);
+    registerWorldFreeMarketTools(toolRegistry, worldService, a2aOutsourcingService, skillManager);
+  } else {
+    console.log("[skip] AgentWorld social domain disabled by ENV");
+  }
   toolRegistry.setWorldService(worldService);
   registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService });
 
@@ -939,12 +976,27 @@ export async function createAppServices(): Promise<AppServices> {
     agentMemorySyncService,
     externalChat,
   );
+  // Task 17：当天命中重要日子回调（proactivityHub 在下方创建后注入实现；
+  // 晨报每日生成即每日扫描，当天命中 → 单次 LLM 祝福草稿 → life_reminder 主动提醒）
+  let onImportantDayToday:
+    | ((sessionId: string, day: MorningBriefingImportantDay) => void)
+    | undefined;
+  // Task 15：恶劣天气预警回调（proactivityHub 在下方创建后注入实现；
+  // 晨报生成时检测预警 + 当日有日程 → weather_alert 合并提醒）
+  let onSevereWeatherAlert:
+    | ((sessionId: string, alerts: string[], scheduleCount: number) => void)
+    | undefined;
   const morningBriefingService = new MorningBriefingService({
     weatherService,
     weatherPrefsService,
     scheduleTaskService,
     notesService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
+    // 第五源：近期重要日子（读 care.set_important_date 写入的 KV）
+    agentMemorySyncService,
+    onImportantDayToday: (sessionId, day) => onImportantDayToday?.(sessionId, day),
+    onSevereWeatherAlert: (sessionId, alerts, scheduleCount) =>
+      onSevereWeatherAlert?.(sessionId, alerts, scheduleCount),
   });
 
   const morningBriefingScheduler = new MorningBriefingScheduler({
@@ -970,6 +1022,36 @@ export async function createAppServices(): Promise<AppServices> {
   });
   morningBriefingScheduler.start();
   app.log.info("[MorningBriefing] 调度器已启动");
+
+  // ─── Task 15 生活节律：晚间 digest「今日回顾 + 明日预告」（场景A）───
+  // 数据源全确定性（journal 当日要点 / 当日账本新增 / 明日日程 / 次日天气预警），
+  // 零 LLM；送达链路参考晨报（WS 推送 EveningDigest 事件），调度模式参考
+  // MorningBriefingScheduler（每分钟 tick，全局 EVENING_DIGEST_HOUR 默认 21 点）。
+  const eveningDigestService = new EveningDigestService({
+    journalService: getDailyJournalService(),
+    financeDeepService,
+    scheduleTaskService,
+    weatherService,
+    weatherPrefsService,
+  });
+  const eveningDigestScheduler = new EveningDigestScheduler({
+    digestService: eveningDigestService,
+    onDigestTriggered: (sessionId, digest) => {
+      wsConnectionRegistry.trySend(
+        sessionId,
+        JSON.stringify({
+          type: ServerEventType.EveningDigest,
+          payload: {
+            sessionId,
+            narrationText: digest.narrationText,
+            digest,
+          },
+        }),
+      );
+    },
+  });
+  eveningDigestScheduler.start();
+  app.log.info("[EveningDigest] 晚间 digest 调度器已启动");
 
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
@@ -1214,6 +1296,11 @@ export async function createAppServices(): Promise<AppServices> {
     (process.env.BRAIN_PROACTION_LEGACY ?? "").trim().toLowerCase(),
   );
 
+  // ─── 实验性子系统开关（默认关闭，偏离 C 端私人管家主链路；见 .env.example 末尾注释块） ───
+  // BRAIN_EVOLUTION_ENABLED：EvolutionCortex 子系统总开关（兼容旧变量
+  //   BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED / AGENT_EVOLUTION_LOOP_ENABLED，=1 等效开启）。
+  const brainEvolutionEnabled = isBrainEvolutionEnabled();
+
   const proactiveLifeRuntimeService = new ProactiveLifeRuntimeService(
     lifeSignalHubService,
     anticipationEngineService,
@@ -1263,8 +1350,7 @@ export async function createAppServices(): Promise<AppServices> {
   //  DecisionHub 装配块在两者之外，故需提升至外层作用域）
   let capabilityCortex: CapabilityCortex | null = null;
   let limbicCortex: LimbicCortex | null = null;
-  // evolutionCortex 外层声明：brainEnabled 块创建，brainNeuroEnabled 块内 DMN 装配需访问
-  // （DefaultModeNetwork.registerEvolutionCortex 期望 DMNEvolutionCortexLike 接口）
+  // evolutionCortex 外层声明：brainEnabled 块创建，后续 brainNeuroEnabled 块与工具装配需访问
   let evolutionCortex: EvolutionCortex | null = null;
   // 记忆认知架构升级（Phase 4）：knowledge 服务外层声明
   // brainEnabled 块内实例化，brainNeuroEnabled 块内 7 子模块装配需访问。
@@ -1284,7 +1370,14 @@ export async function createAppServices(): Promise<AppServices> {
     capabilityCortex = new CapabilityCortex();
     awarenessCortex = new AwarenessCortex();
     proactionCortex = new ProactionCortex();
-    evolutionCortex = new EvolutionCortex();
+    // EvolutionCortex 四子系统总开关（BRAIN_EVOLUTION_ENABLED，实验性子系统默认关闭）：
+    // 关闭时整个 EvolutionCortex 块跳过装配（evolutionCortex 保持 null），Phase 5
+    // 定时器与 self_evolution.* 工具均不创建；开启后行为与现状一致。
+    if (brainEvolutionEnabled) {
+      evolutionCortex = new EvolutionCortex();
+    } else {
+      console.log("[skip] EvolutionCortex disabled by ENV");
+    }
 
     // CapabilityCortex：注入回 prompt builder（让能力域出现在 prompt 中）
     setCapabilityCortex(capabilityCortex);
@@ -1387,14 +1480,17 @@ export async function createAppServices(): Promise<AppServices> {
     }
 
     // EvolutionCortex：注册四个子系统（自学习 / 技能生成 / 晋升管道 / 进化循环）
-    evolutionCortex.registerSelfLearning(agentSelfLearningService);
-    evolutionCortex.registerSkillGenerator(skillGenerator);
-    if (trajectoryPromotionPipeline) {
-      evolutionCortex.registerPromotionPipeline(trajectoryPromotionPipeline);
+    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，整块跳过
+    if (evolutionCortex) {
+      evolutionCortex.registerSelfLearning(agentSelfLearningService);
+      evolutionCortex.registerSkillGenerator(skillGenerator);
+      if (trajectoryPromotionPipeline) {
+        evolutionCortex.registerPromotionPipeline(trajectoryPromotionPipeline);
+      }
+      // 经验沉淀落地：skill_distill 提案执行成功后把 SKILL.md 写入磁盘 + 注册
+      evolutionCortex.registerProceduralSink(skillManager);
+      evolutionCortex.registerEvolutionLoop(evolutionLoopService);
     }
-    // 经验沉淀落地：skill_distill 提案执行成功后把 SKILL.md 写入磁盘 + 注册
-    evolutionCortex.registerProceduralSink(skillManager);
-    evolutionCortex.registerEvolutionLoop(evolutionLoopService);
 
     // 知识缺口执行器（学知识层）：RAG 召回 + 联网兜底 + LLM 摘要 + 记忆沉淀 + 验证状态机
     // - 复用 toolRegistry 调 desktop.http_get（享受 URL 白名单+超时+审计）
@@ -1412,217 +1508,51 @@ export async function createAppServices(): Promise<AppServices> {
       verification: knowledgeVerificationService,
       chatProvider: externalChat,
     });
-    evolutionCortex.registerKnowledgeExecutor(knowledgeGapExecutor);
-    // 反馈回路：每次工具交互都通知 verification service，触发状态机演进
-    evolutionCortex.registerKnowledgeVerification(knowledgeVerificationService);
-
-    // ─── Phase 5：自我驱动进化（规则触发 + LLM 深度评估 + 沙箱测试先行）───
-    // 流程：ExternalTechScanner / BenchmarkSelfAssessment 规则触发 →
-    //       SelfDrivenEvolutionProposer LLM 深度评估 →
-    //       ingestProposals 注入 EvolutionCortex →
-    //       autoLoop 推进到 approved → executeSelfUpgrade →
-    //       UpgradeSandboxRunner 沙箱测试（备份 → 安装 → tsc + test → 通过才应用）
-    try {
-      const { ExternalTechScanner } = await import("../services/external-tech-scanner.js");
-      const { SelfDrivenEvolutionProposer } = await import("../brain/self-driven-evolution-cortex.js");
-      const { BenchmarkSelfAssessment } = await import("../services/benchmark-self-assessment.js");
-      const { UpgradeSandboxRunner } = await import("../services/upgrade-sandbox-runner.js");
-      const { getModelOverrideForTask, TaskTier } = await import("../config/model-routing.js");
-
-      const techScanner = new ExternalTechScanner(externalChat);
-      const selfDrivenProposer = new SelfDrivenEvolutionProposer();
-      const benchmarkAssessment = new BenchmarkSelfAssessment();
-      await benchmarkAssessment.load();
-
-      // 注册 LLM 评估器到 SelfDrivenEvolutionProposer
-      // 复用主聊天通道，用 mini 模型 + ephemeralTurn 避免污染会话历史
-      if (externalChat?.isEnabled()) {
-        selfDrivenProposer.registerLlm({
-          async complete(systemPrompt, userPrompt, opts) {
-            let fullContent = "";
-            await externalChat.streamCompletion(
-              `evolution-eval-${Date.now()}`,
-              { text: userPrompt },
-              (delta) => { fullContent += delta; },
-              undefined,
-              {
-                systemPromptOverride: systemPrompt,
-                ephemeralTurn: true,
-                disableThinking: true,
-                maxThreadMessages: 0,
-                modelOverride: getModelOverrideForTask(TaskTier.MINI),
-              },
-            );
-            if (opts?.maxTokens && fullContent.length > opts.maxTokens * 4) {
-              return fullContent.slice(0, opts.maxTokens * 4);
-            }
-            return fullContent;
-          },
-        });
-      }
-
-      // 沙箱测试运行器：self_upgrade 执行的核心
-      const sandboxRunner = new UpgradeSandboxRunner(process.cwd());
-
-      // 定时器：每日技术扫描 → LLM 评估 → 提案 → 注入 EvolutionCortex
-      const TECH_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
-      const runTechScan = async () => {
-        try {
-          const results = await techScanner.scan();
-          // proposeFromTechScan 现在是 async（内部调 LLM 评估）
-          const proposals = await selfDrivenProposer.proposeFromTechScan(results);
-          if (proposals.length > 0) {
-            // 收集 LLM 评估结果传给 EvolutionCortex
-            const assessments = new Map();
-            for (const p of proposals) {
-              const a = selfDrivenProposer.getAssessment(p.id);
-              if (a) assessments.set(p.id, a);
-            }
-            evolutionCortex?.ingestProposals(proposals, assessments);
-          }
-        } catch (err) {
-          console.log("[Phase5] tech scan 异常:", err);
-        }
-      };
-      const techScanTimer = setInterval(() => { void runTechScan(); }, TECH_SCAN_INTERVAL_MS);
-      techScanTimer.unref?.();
-      // 启动后 5 分钟执行首次扫描
-      setTimeout(() => { void runTechScan(); }, 5 * 60 * 1000)?.unref?.();
-
-      // 定时器：每周运行 benchmark 自评 → LLM 评估 → 提案 → 注入 EvolutionCortex
-      const runBenchmark = async () => {
-        try {
-          const benchScripts: string[] = [];
-          const raw = process.env.BENCH_SCRIPTS?.trim();
-          if (raw) benchScripts.push(...raw.split(",").map((s) => s.trim()).filter(Boolean));
-          const { regressions } = await benchmarkAssessment.runAssessment(benchScripts);
-          // proposeFromBenchmark 现在是 async（内部调 LLM 评估）
-          const proposals = await selfDrivenProposer.proposeFromBenchmark(regressions);
-          if (proposals.length > 0) {
-            const assessments = new Map();
-            for (const p of proposals) {
-              const a = selfDrivenProposer.getAssessment(p.id);
-              if (a) assessments.set(p.id, a);
-            }
-            evolutionCortex?.ingestProposals(proposals, assessments);
-          }
-        } catch (err) {
-          console.log("[Phase5] benchmark 异常:", err);
-        }
-      };
-      const BENCH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
-      const benchTimer = setInterval(() => { void runBenchmark(); }, BENCH_INTERVAL_MS);
-      benchTimer.unref?.();
-
-      // 注册真实的 self_upgrade 执行器（沙箱测试先行）
-      // 替换原来的 stub：从 "self_upgrade_requires_manual_approval" 改为真实沙箱测试
-      evolutionCortex.registerCodeRepairExecutor({
-        executeUpgrade: async (params) => {
-          console.log(
-            `[EvolutionCortex] self_upgrade 启动沙箱测试：${params.target}`,
-          );
-
-          // 从 proposal title 中解析包名和版本
-          const target = params.target;
-
-          // 纯规则 + 沙箱自动升级（不再依赖 LLM 评估做 breaking-changes 人工确认闸门）。
-          // 设计变更：self_upgrade 是纯后台自动能力，规则层已筛掉高风险升级，
-          // 这里交给 UpgradeSandboxRunner 以"备份→安装→tsc/test→通过才应用，失败必回滚"决定成败。
-
-          // 尝试从 title/suggestedAction 中查找白名单包名
-          const allowedPkgs = UpgradeSandboxRunner.getAllowedPackages();
-          let resolvedPkg: string | undefined;
-          let resolvedVer: string | undefined;
-
-          for (const pkg of allowedPkgs) {
-            if (params.suggestedAction.includes(pkg) || target.includes(pkg)) {
-              resolvedPkg = pkg;
-              break;
-            }
-          }
-
-          // 从 title 提取版本号（格式："到 X.Y.Z"）
-          const versionMatch = target.match(/到\s*(\d+\.\d+\.\d+)/);
-          if (versionMatch) {
-            resolvedVer = versionMatch[1];
-          }
-
-          if (!resolvedPkg || !resolvedVer) {
-            return {
-              ok: false,
-              error: `无法从提案中解析包名和版本（target="${target}"）。建议操作：${params.suggestedAction}`,
-            };
-          }
-
-          // 执行沙箱测试
-          const report = await sandboxRunner.testUpgrade({
-            type: "npm_dependency",
-            description: target,
-            packageName: resolvedPkg,
-            targetVersion: resolvedVer,
-            llmAssessment: params.llmAssessment,
-          });
-
-          if (!report.ok) {
-            console.log(
-              `[EvolutionCortex] 沙箱测试失败：${report.error}，已回滚=${report.rolledBack}`,
-            );
-          } else {
-            console.log(
-              `[EvolutionCortex] 沙箱测试通过：tsc=${report.tscPassed}, tests=${report.testsPassed}, ` +
-              `testFiles=[${report.testFilesRun.join(", ")}], 耗时=${(report.totalMs / 1000).toFixed(1)}s`,
-            );
-          }
-
-          return {
-            ok: report.ok,
-            patchApplied: report.ok,
-            error: report.ok ? undefined : report.error,
-            sandboxReport: report,
-          };
-        },
-      });
-      console.log(
-        "[EvolutionCortex] 已注册 Phase 5 自我进化：" +
-        "TechScanner(24h) + Benchmark(7d) + 纯规则筛选 + 沙箱测试执行器（无 LLM）",
-      );
-    } catch (err) {
-      console.log("[EvolutionCortex] Phase 5 模块注册失败（忽略）:", err);
+    if (evolutionCortex) {
+      evolutionCortex.registerKnowledgeExecutor(knowledgeGapExecutor);
+      // 反馈回路：每次工具交互都通知 verification service，触发状态机演进
+      evolutionCortex.registerKnowledgeVerification(knowledgeVerificationService);
     }
 
     // 注册 WS 审批推送器：自主进化闭环的关键依赖
     // EvolutionCortex 自动生成 Skill 后，通过此推送器向用户发送审批请求 WS 事件
-    evolutionCortex.registerApprovalEmitter({
-      emitApprovalRequest: (sessionId, request) => {
-        try {
-          const payload = {
-            type: "evolution.approval_request" as const,
-            payload: { sessionId, ...request, timestamp: new Date().toISOString() },
-          };
-          // 推送给所有活跃连接（自主进化不绑定特定 session）
-          wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
-        } catch {
-          // 静默失败
-        }
-      },
-      emitApprovalResult: (sessionId, result) => {
-        try {
-          const payload = {
-            type: "evolution.approval_result" as const,
-            payload: { sessionId, ...result, timestamp: new Date().toISOString() },
-          };
-          wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
-        } catch {
-          // 静默失败
-        }
-      },
-    });
+    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，跳过注册
+    if (evolutionCortex) {
+      evolutionCortex.registerApprovalEmitter({
+        emitApprovalRequest: (sessionId, request) => {
+          try {
+            const payload = {
+              type: "evolution.approval_request" as const,
+              payload: { sessionId, ...request, timestamp: new Date().toISOString() },
+            };
+            // 推送给所有活跃连接（自主进化不绑定特定 session）
+            wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
+          } catch {
+            // 静默失败
+          }
+        },
+        emitApprovalResult: (sessionId, result) => {
+          try {
+            const payload = {
+              type: "evolution.approval_result" as const,
+              payload: { sessionId, ...result, timestamp: new Date().toISOString() },
+            };
+            wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
+          } catch {
+            // 静默失败
+          }
+        },
+      });
+    }
 
     // 注册皮层到 BrainCenter
     brainCenter.registerCapability(capabilityCortex);
     brainCenter.registerAwareness(awarenessCortex);
     brainCenter.registerProaction(proactionCortex);
-    brainCenter.registerEvolution(evolutionCortex);
+    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，不注册进化皮层
+    if (evolutionCortex) {
+      brainCenter.registerEvolution(evolutionCortex);
+    }
 
     // ─── 自我修复皮层（CodeRepairCortex）装配 ───
     // 默认开启（BRAIN_CODE_REPAIR_ENABLED=0 关闭）。
@@ -2034,6 +1964,25 @@ export async function createAppServices(): Promise<AppServices> {
   // 其中 WebhookService 已经自动订阅，会推送到外部端点。
   marketSignalService.bindHookBus(hookBus);
   lifeSignalHubService.bindHookBus(hookBus);
+
+  // ── Task 16 消费管家：工具执行成功事件（tool.executed）发布 ──
+  // 工具执行统一出口（ToolRegistry.execute 成功路径）→ 通知器 → 仅消费类
+  // 工具（支付/钱包/跑腿/下单）成功后 emit（副作用工具仅成功时发布；
+  // 摘要化 payload：长字符串截断防二维码 dataURL 撑爆事件历史）。
+  toolRegistry.setToolExecutedNotifier((info) => {
+    if (!isConsumptionTool(info.tool)) return;
+    hookBus.emit(
+      "tool.executed",
+      {
+        toolName: info.tool,
+        args: summarizeToolPayload(info.input),
+        result: summarizeToolPayload(info.result),
+        actorId: info.actorId,
+        timestamp: info.timestamp,
+      },
+      { actorId: info.actorId, source: "tool-registry" },
+    );
+  });
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
@@ -2702,7 +2651,7 @@ export async function createAppServices(): Promise<AppServices> {
 
     // ─── 世界模型（World Model）装配：第一部分 ───
     // plannerCortex 在此块内创建，注入 WorldModel 开启 model-based planning 能力。
-    // PredictiveCoding/MetaCognition/DMN 在第二块创建，由第二部分注入。
+    // predictiveCodingFeed / metaCognition 在第二块创建，由第二部分注入。
     if (worldModel) {
       plannerCortex.registerWorldModel(worldModel);
       console.log("[BrainCenter] WorldModel 已注入 PlannerCortex（model-based planning）");
@@ -2833,38 +2782,17 @@ export async function createAppServices(): Promise<AppServices> {
     brainCenter.registerEmotionModulator(emotionModulator);
     decisionHub.registerEmotionModulator(emotionModulator);
 
-    const defaultModeNetwork = new DefaultModeNetwork();
-    brainCenter.registerDefaultModeNetwork(defaultModeNetwork);
-
-    // 深度优化：DMN 接入三个依赖皮层（让 onIdle 时记忆固化 + 反思 + 进化建议真正生效）
-    defaultModeNetwork.registerMemoryCortex(memoryCortex);
-    // EvolutionCortex 已提升至外层作用域，DMN 可访问其 proposeEvolution
-    // （EvolutionCortex 类现已实现 proposeEvolution(actorId) 方法）
-    if (evolutionCortex) {
-      defaultModeNetwork.registerEvolutionCortex(evolutionCortex);
-    }
-
-    // ─── 世界模型（World Model）装配：第二部分 ───
-    // DefaultModeNetwork 在此块创建，注入 WorldModel 开启空闲反事实模拟。
-    // worldModel 在外层声明（第一部分已注入 PlannerCortex）。
-    if (worldModel) {
-      defaultModeNetwork.registerWorldModel(worldModel);
-      console.log("[BrainCenter] WorldModel 已注入 DefaultModeNetwork");
-    }
-
-    // 深度优化：让脑干定期调度 WorkingMemoryCortex.decay() 和 DefaultModeNetwork.onIdle()
+    // 深度优化：让脑干定期调度 WorkingMemoryCortex.decay() 和白天 idle 记忆整理
     // 通过 BrainCenter.getBrainStem() 拿回 brainStem 引用（brainStem 在上方 if 块内创建）
     const brainStemRef = brainCenter.getBrainStem() as unknown as
       | (import("../brain/brain-stem.js").BrainStem & {
           registerWorkingMemory(wm: import("../brain/brain-stem.js").BrainStemWorkingMemoryLike): void;
-          registerDefaultModeNetwork(dmn: import("../brain/brain-stem.js").BrainStemDefaultModeNetworkLike): void;
           registerMemoryConsolidator(mc: import("../brain/brain-stem.js").BrainStemMemoryConsolidatorLike): void;
           registerSequencePatternMiner(miner: import("../services/sequence-pattern-miner.js").SequencePatternMiner): void;
         })
       | null;
     if (brainStemRef) {
       brainStemRef.registerWorkingMemory(workingMemoryCortex);
-      brainStemRef.registerDefaultModeNetwork(defaultModeNetwork);
       // 仿人记忆连续性：白天 idle 时触发轻量记忆整理，不必等到夜晚 dreaming
       const memMgrForBrainStem = getMemoryManagerService();
       if (memMgrForBrainStem) {
@@ -3122,7 +3050,7 @@ export async function createAppServices(): Promise<AppServices> {
   // ─── Brain Center 启动 + 工具注册（移至此处确保 9 分区均注册后再启动）───
   if (brainEnabled && brainCenter) {
     await brainCenter.start();
-    // 预热：启动后立即触发一次 BrainStem 扫描（加速 DMN 首次触发）
+    // 预热：启动后立即触发一次 BrainStem 扫描（加速首次记忆整理触发）
     void brainCenter.sweepBrainStem().catch(() => {});
     console.log("[BrainCenter] 预热完成（BrainStem 首次扫描已触发）");
 
@@ -3242,78 +3170,6 @@ export async function createAppServices(): Promise<AppServices> {
   registerSelfProgrammingTools(toolRegistry, skillManager);
   registerAISkillGenerationTools(toolRegistry, externalChat, skillManager, skillGenerator);
   registerSelfLearningTools(toolRegistry, externalChat, skillManager, agentSelfLearningService);
-
-  // ========== 注册自我驱动进化工具（fast/complex 模式都能用）==========
-  // 接入自我驱动进化管线：用户说"自我进化"/"扫描新版本"/"升级依赖"时，
-  // Agent 调 self_evolution.* 工具触发真实的技术扫描 + LLM 评估 + 沙箱测试
-  try {
-    const { registerSelfEvolutionTools } = await import("../tools/self-evolution-tools.js");
-    const { SelfDrivenEvolutionProposer } = await import("../brain/self-driven-evolution-cortex.js");
-    const { UpgradeSandboxRunner } = await import("../services/upgrade-sandbox-runner.js");
-    const { ExternalTechScanner } = await import("../services/external-tech-scanner.js");
-
-    // 复用上文 Phase 5 已创建的实例（如果存在），否则新建
-    type SelfEvoProposerType = typeof SelfDrivenEvolutionProposer;
-    type SelfEvoTechScannerType = typeof ExternalTechScanner;
-    type SelfEvoSandboxRunnerType = typeof UpgradeSandboxRunner;
-    const globalAny = globalThis as {
-      __selfEvoProposer?: InstanceType<SelfEvoProposerType>;
-      __selfEvoTechScanner?: InstanceType<SelfEvoTechScannerType>;
-      __selfEvoSandboxRunner?: InstanceType<SelfEvoSandboxRunnerType>;
-    };
-
-    const selfEvoProposer =
-      globalAny.__selfEvoProposer ?? new SelfDrivenEvolutionProposer();
-    globalAny.__selfEvoProposer = selfEvoProposer;
-
-    const selfEvoTechScanner =
-      globalAny.__selfEvoTechScanner ?? new ExternalTechScanner(externalChat);
-    globalAny.__selfEvoTechScanner = selfEvoTechScanner;
-
-    const selfEvoSandboxRunner =
-      globalAny.__selfEvoSandboxRunner ?? new UpgradeSandboxRunner(process.cwd());
-    globalAny.__selfEvoSandboxRunner = selfEvoSandboxRunner;
-
-    // 同步 LLM 评估器（如果未注册）
-    if (externalChat?.isEnabled()) {
-      // 尝试访问 llm 字段（已注册则跳过）
-      const isLlmRegistered = (selfEvoProposer as unknown as { llm?: unknown }).llm;
-      if (!isLlmRegistered) {
-        selfEvoProposer.registerLlm({
-          async complete(systemPrompt: string, userPrompt: string, opts?: { maxTokens?: number }) {
-            let fullContent = "";
-            await externalChat.streamCompletion(
-              `self-evo-tool-${Date.now()}`,
-              { text: userPrompt },
-              (delta: string) => { fullContent += delta; },
-              undefined,
-              {
-                systemPromptOverride: systemPrompt,
-                ephemeralTurn: true,
-                disableThinking: true,
-                maxThreadMessages: 0,
-              },
-            );
-            if (opts?.maxTokens && fullContent.length > opts.maxTokens * 4) {
-              return fullContent.slice(0, opts.maxTokens * 4);
-            }
-            return fullContent;
-          },
-        });
-      }
-    }
-
-    registerSelfEvolutionTools(toolRegistry, {
-      evolutionCortex: evolutionCortex!,
-      externalChat,
-      techScanner: selfEvoTechScanner,
-      proposer: selfEvoProposer,
-      sandboxRunner: selfEvoSandboxRunner,
-    });
-    console.log("[Bootstrap] self-evolution 工具已注册（5 个工具）");
-  } catch (err) {
-    console.warn("[Bootstrap] 注册 self-evolution 工具失败（不影响主流程）:", err);
-  }
   registerNotesTools(
     toolRegistry,
     notesService,
@@ -3328,6 +3184,16 @@ export async function createAppServices(): Promise<AppServices> {
   //   speak → LifeSignalHub 发布 → BrainCenter.decide → ProactionCortex 既有闭环
   //   act   → 白名单工具静默后台执行（media/calendar/smart_home，无删除类）
   //   advise → AdviceStore 入队 → 下一轮对话 prompt 注入【Agent 主动建议】
+  //
+  // 负反馈抑制表（Task 20 统一频控框架）：用户「别再提醒我这个」类负反馈的
+  // 持久化抑制（data/proactivity-suppression/{actorId}.json，kind + 关键词），
+  // hub 每次主动发送前检查；对话工具 proactivity.feedback + HTTP 路由负责写入。
+  const proactivitySuppressionStore = new ProactivitySuppressionStore({
+    dirPath:
+      process.env.PROACTIVITY_SUPPRESSION_DIR ??
+      join(process.cwd(), "data", "proactivity-suppression"),
+  });
+  await proactivitySuppressionStore.load();
   const proactivityHub = new ProactivityHub({
     publishSignal: (signal) => {
       lifeSignalHubService.publish({
@@ -3434,6 +3300,8 @@ export async function createAppServices(): Promise<AppServices> {
         return null;
       }
     },
+    // 负反馈抑制表：用户「别再提醒」意愿优先于时间冷却，发送前检查
+    suppressionStore: proactivitySuppressionStore,
   });
   // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
   agentCore.setProactivityHub(proactivityHub);
@@ -3474,11 +3342,167 @@ export async function createAppServices(): Promise<AppServices> {
   await interestWatcher.load();
   // 工具：让 LLM 在对话中自主维护关注列表（add/touch/remove/list）
   registerInterestWatchTools(toolRegistry, interestWatcher);
+  // 工具：主对话识别负反馈（别再提醒/别推了）后写入抑制表（suppress/remove/list）
+  registerProactivityFeedbackTools(toolRegistry, proactivitySuppressionStore);
   // prompt 注入：每轮告知 agent 用户关注什么（【用户兴趣关注列表】块）
   agentCore.setInterestListProvider((actorId) => interestWatcher.listForPrompt(actorId));
   interestWatcher.start();
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
+
+  // ─── Task 16 消费管家闭环装配（场景B）───
+  // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
+  // → 预算超支检测（life_reminder 单次提醒）→ 每月 1 日上月消费月报
+  // （确定性数据 + 单次 LLM 总结，monthly_report kind）。
+  const consumptionLedgerListener = new ConsumptionLedgerListener({
+    financeDeepService,
+    // 预算超支 → 经 ProactivityHub speak 闭环（life_reminder kind 频控）
+    onBudgetAlert: (actorId, message) => {
+      proactivityHub.submitIntent({
+        actorId,
+        kind: "life_reminder",
+        importance: "medium",
+        title: "预算超支提醒",
+        summary: message,
+        mode: "speak",
+        source: "finance",
+      });
+    },
+    // 月报生成完成 → monthly_report kind 推送
+    onMonthlyReport: (actorId, reportText) => {
+      proactivityHub.submitIntent({
+        actorId,
+        kind: "monthly_report",
+        importance: "low",
+        title: "上月消费月报",
+        summary: reportText,
+        mode: "speak",
+        source: "finance",
+      });
+    },
+    // 单次 LLM 总结（与 ProactivityHub llmComplete 同模式，克制调用）
+    llmComplete: externalChat?.isEnabled()
+      ? async (prompt) => {
+          let full = "";
+          await externalChat!.streamCompletion(
+            `finance-report-${Date.now()}`,
+            { text: prompt },
+            (delta: string) => {
+              full += delta;
+            },
+            undefined,
+            {
+              systemPromptOverride: prompt,
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 0,
+            },
+          );
+          return full;
+        }
+      : undefined,
+  });
+  consumptionLedgerListener.subscribe(hookBus);
+  consumptionLedgerListener.start();
+
+  // ─── Task 17 人情关系管家装配（场景C）───
+  // 晨报每日生成 = 每日扫描：当天命中重要日子（KV important_dates，由
+  // care.set_important_date 录入）→ 单次 LLM 祝福草稿（关系标签+交往摘要）
+  // → life_reminder 主动提醒，草稿附带给用户改写；频控 4h + 负反馈抑制兜底。
+  onImportantDayToday = (sessionId, day) => {
+    const label = importantDayTypeLabel(day.type);
+    const rel = day.relationship ? `（${day.relationship}）` : "";
+    void generateImportantDayBlessing(
+      day,
+      // 单次 LLM 祝福草稿（与消费管家月报同模式，克制调用）
+      externalChat?.isEnabled()
+        ? async (prompt) => {
+            let full = "";
+            await externalChat!.streamCompletion(
+              `blessing-${day.id}-${Date.now()}`,
+              { text: prompt },
+              (delta: string) => {
+                full += delta;
+              },
+              undefined,
+              {
+                systemPromptOverride: prompt,
+                ephemeralTurn: true,
+                disableThinking: true,
+                maxThreadMessages: 0,
+              },
+            );
+            return full;
+          }
+        : undefined,
+    )
+      .then((draft) => {
+        proactivityHub.submitIntent({
+          actorId: sessionId,
+          kind: "life_reminder",
+          importance: "high",
+          title: `今天是${day.name}的${label}`,
+          summary:
+            `今天是${day.name}${rel}的${label}。我拟了一条祝福草稿，你可以直接发，` +
+            `也可以改改再发：${draft}`,
+          mode: "speak",
+          source: "relationship",
+        });
+      })
+      .catch((err) => {
+        console.log(`[Bootstrap] 重要日子祝福提醒失败（忽略）: ${err}`);
+      });
+  };
+  console.log("[Bootstrap] 人情关系管家已装配（晨报近期重要日子块 + 当天命中祝福提醒）");
+
+  // ─── Task 15 恶劣天气预警联动装配（场景A）───
+  // 晨报生成时检测当日预警（暴雨/雷暴/冻雨/大雪/高温/寒潮/大风，确定性规则）
+  // → 预警且当日有日程 → weather_alert kind 合并提醒（30min 频控 + 负反馈抑制兜底）。
+  onSevereWeatherAlert = (sessionId, alerts, scheduleCount) => {
+    proactivityHub.submitIntent({
+      actorId: sessionId,
+      kind: "weather_alert",
+      importance: "high",
+      title: `恶劣天气预警：${alerts.join("、")}`,
+      summary:
+        `今天有${alerts.join("、")}预警，而你今天还有${scheduleCount}件事要办。` +
+        `像朋友顺手提醒一样：出门注意安全，该带伞带伞、该添衣添衣，` +
+        `行程如果受影响可以帮你调整或取消。`,
+      mode: "speak",
+      source: "weather",
+    });
+  };
+  console.log("[Bootstrap] 恶劣天气预警联动已装配（晨报检测 + weather_alert 合并提醒）");
+
+  // ─── Task 18 管家任务闭环装配（场景D）───
+  // 1) 提醒到点 → proactivity speak 主动发起：schedule-task 到点 handler（上方
+  //    setReminderHandler）在 WS 推送之外，经 hub submitIntent 以 followup kind
+  //    说话（4h 频控 + 负反馈抑制兜底）；epitome【上一会话待办】块的
+  //    "可主动提议转定时提醒"提示语在 agent-core 注入。
+  onReminderFiredToProactivity = (sessionId, title, message) => {
+    proactivityHub.submitIntent({
+      actorId: sessionId,
+      kind: "followup",
+      importance: "medium",
+      title,
+      summary: message,
+      mode: "speak",
+      source: "task",
+    });
+  };
+  // 2) 任务状态可查询："我还有什么待办" → agent.tasks.list 工具（只读查
+  //    agent-task-store，确定性状态列表，LLM 只负责措辞）
+  registerAgentTasksTools(toolRegistry);
+  console.log("[Bootstrap] 管家任务闭环已装配（到点提醒 speak + agent.tasks.list 查询）");
+
+  // ─── Task 19 健康关怀装配（场景E）───
+  // 1) health.query 已随 health-fitness 能力模块注册（"这周跑了几次步"类确定性
+  //    统计，服务端聚合返回数字，LLM 只负责措辞）
+  // 2) 节律提醒模板：喝水/睡觉/运动预设（care.rhythm_reminder 工具，默认不创建），
+  //    开启 → ScheduleTaskService 每日任务 → 到点 reminderHandler → WS 推送 +
+  //    proactivity speak（Task 18 已接通）
+  registerRhythmReminderTools(toolRegistry, scheduleTaskService);
+  console.log("[Bootstrap] 健康关怀已装配（health.query 统计问答 + 节律提醒模板）");
 
   registerHttpRoutes(app, {
     toolRegistry,
@@ -3487,6 +3511,7 @@ export async function createAppServices(): Promise<AppServices> {
     realFundsWallet,
     scheduleTaskService,
     scheduleIntentService,
+    proactivitySuppressionStore,
     infoHubService,
     upstreamSearchService,
     worldService,
@@ -3560,11 +3585,14 @@ export async function createAppServices(): Promise<AppServices> {
     voiceCapabilityService,
     voiceMessageService,
     morningBriefingScheduler,
+    eveningDigestScheduler,
   });
 
   app.addHook("onClose", async () => {
     proactivityHub.stop();
     interestWatcher.stop();
+    consumptionLedgerListener.stop();
+    eveningDigestScheduler.stop();
     try {
       await moodInferenceService.flush();
       app.log.info("[MoodInference] 持久化已 flush");

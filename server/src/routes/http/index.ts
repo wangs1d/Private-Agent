@@ -22,6 +22,7 @@ import {
   registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
 import { registerChatWeb } from "./chat-web.js";
+import { isAgentWorldSocialEnabled } from "../../config/env.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
 import { registerNightlyMemoryRoutes } from "./nightly-memory.js";
 import { registerWechatClawRoutes } from "./wechat-claw.js";
@@ -36,6 +37,7 @@ import { registerMoodInferenceRoutes } from "./mood-inferences.js";
 import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
+import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
@@ -70,8 +72,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
   registerWorldRoutes(app, worldRouteDeps);
-  registerWorldFreeMarketRoutes(app, worldRouteDeps);
-  registerWorldSocialRoutes(app, worldRouteDeps);
+  // Agent World 社交经济域开关（AGENT_WORLD_SOCIAL_ENABLED，实验性子系统默认关闭）：
+  // 关闭时跳过社交经济域路由 mount（自由市场/技能商店/A2A 外包/社交动态），
+  // 仅保留 world.ts 的 identity/注册/房间路由；开启后行为与现状一致。
+  if (isAgentWorldSocialEnabled()) {
+    registerWorldFreeMarketRoutes(app, worldRouteDeps);
+    registerWorldSocialRoutes(app, worldRouteDeps);
+  }
   registerChatWeb(app);
   registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
@@ -128,6 +135,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     notesService: deps.notesService,
   });
   registerBriefingDeliveryRoutes(app);
+  if (deps.proactivitySuppressionStore) {
+    registerProactivitySuppressionRoutes(app, {
+      suppressionStore: deps.proactivitySuppressionStore,
+    });
+  }
   registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   registerUserPreferencesRoutes(app);

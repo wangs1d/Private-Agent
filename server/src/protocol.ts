@@ -166,6 +166,8 @@ export const ServerEventType = {
   ErrorEvent: "error.event",
   /** 晨间简报：调度器到点触发后推送 */
   MorningBriefing: "morning.briefing",
+  /** 晚间 digest（今日回顾+明日预告）：调度器到点触发后推送（Task 15 生活节律） */
+  EveningDigest: "evening.digest",
   /** Agent 推断的用户心情变化（实时通知） */
   MoodInferred: "mood.inferred",
   /** 心跳响应 */

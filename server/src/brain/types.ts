@@ -135,7 +135,7 @@ export interface BrainDecision {
 // 进化提案
 // - new_capability / optimize_existing / add_tool / update_prompt：技能层（缺工具或工具需优化）
 // - knowledge_gap：知识层（工具齐全且调用成功，但用户反复问同类问题 → 缺背景知识）
-// - self_upgrade：自我改写层（Phase 5，ExternalTechScanner 发现高收益升级或 benchmark 检测到回归）
+// - self_upgrade：自我改写层（依赖升级/代码修复，经 CodeRepairCortex 显式执行路径）
 // - skill_distill：经验沉淀层（复杂任务成功后，把踩坑经验提炼成 procedural 技能文档 SKILL.md）
 export type EvolutionProposalType =
   | "new_capability"

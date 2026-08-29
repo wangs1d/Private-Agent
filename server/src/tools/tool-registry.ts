@@ -39,6 +39,24 @@ export type ToolContext = {
 
 export type ToolHandler = (input: Record<string, unknown>, context: ToolContext) => Promise<Record<string, unknown>>;
 
+/**
+ * 工具执行成功通知（Task 16 消费管家：工具执行统一出口的钩子）。
+ * 仅在工具执行成功（ok=true 且非缓存命中）后回调一次；装配层据此向
+ * HookBus 发布 tool.executed 事件（消费类工具 → 自动入账等下游消费）。
+ */
+export type ToolExecutedNotifier = (info: {
+  /** 注册表内的规范工具名 */
+  tool: string;
+  /** 原始入参（消费方自行摘取金额/描述等字段） */
+  input: Record<string, unknown>;
+  /** 工具返回结果（JSON 安全化后） */
+  result: Record<string, unknown>;
+  /** 稳定用户标识 */
+  actorId: string;
+  /** 执行完成时刻（ISO 时间戳） */
+  timestamp: string;
+}) => void;
+
 export type ToolAvailabilityResult =
   | boolean
   | {
@@ -120,6 +138,37 @@ export class ToolRegistry {
   private skillManager?: SkillManager;
   private worldService?: WorldService | null;
   private readonly toolCache = new Map<string, ToolCacheEntry>();
+  /** 工具执行成功通知器（装配层注入：消费类工具成功 → HookBus tool.executed） */
+  private toolExecutedNotifier?: ToolExecutedNotifier;
+
+  /**
+   * 注入工具执行成功通知器（Task 16 消费管家事件源）。
+   * 通知器异常静默吞掉——事件发布失败不能影响工具执行主链路。
+   */
+  setToolExecutedNotifier(fn: ToolExecutedNotifier | undefined): void {
+    this.toolExecutedNotifier = fn;
+  }
+
+  /** 工具执行成功后通知（fire-and-forget，永不抛出） */
+  private notifyToolExecuted(
+    registryName: string,
+    input: Record<string, unknown>,
+    result: Record<string, unknown>,
+    context: ToolContext,
+  ): void {
+    if (!this.toolExecutedNotifier) return;
+    try {
+      this.toolExecutedNotifier({
+        tool: registryName,
+        input,
+        result,
+        actorId: resolveActorId(context),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.log(`[ToolRegistry] tool.executed 通知失败（忽略）tool=${registryName}: ${err}`);
+    }
+  }
 
   /**
    * 用于校验社区 Skill 是否已被当前会话购买（个人房 `roomId === sessionId`）。
@@ -212,7 +261,9 @@ export class ToolRegistry {
       }
       const skillResult = await this.skillManager.execute(registryName, input, context);
       if (skillResult.ok) {
-        return { ok: true, result: jsonSafeResult(skillResult.result || {}) };
+        const safe = jsonSafeResult(skillResult.result || {});
+        this.notifyToolExecuted(registryName, input, safe, context);
+        return { ok: true, result: safe };
       }
       // 如果 Skill 不存在，继续尝试传统工具
       if (skillResult.error?.code !== "SKILL_NOT_FOUND") {
@@ -236,6 +287,7 @@ export class ToolRegistry {
       try {
         const result = await tool(input, context);
         const safeResult = jsonSafeResult(result);
+        this.notifyToolExecuted(registryName, input, safeResult, context);
         const entry = { result: { ok: true, result: safeResult }, timestamp: Date.now() };
         // LRU 淘汰：超过最大容量时删除最旧的
         if (this.toolCache.size >= TOOL_CACHE_MAX_SIZE) {
@@ -254,7 +306,9 @@ export class ToolRegistry {
 
     try {
       const result = await tool(input, context);
-      return { ok: true, result: jsonSafeResult(result) };
+      const safeResult = jsonSafeResult(result);
+      this.notifyToolExecuted(registryName, input, safeResult, context);
+      return { ok: true, result: safeResult };
     } catch (error) {
       const message = error instanceof Error ? error.message : "工具执行失败";
       return { ok: false, result: { error: message } };

@@ -463,6 +463,29 @@ export const AGENT_WORLD_CHAT_TOOLS: ChatCompletionTool[] = dedupeChatToolsByNam
   ...WORLD_MUSIC_CHAT_TOOLS,
 ]);
 
+/**
+ * 按工具名前缀过滤 Agent World 社交经济域对话工具。
+ *
+ * AGENT_WORLD_SOCIAL_ENABLED=0（默认）时，server 侧注入点（LLM 工具列表）使用
+ * 过滤后集合：保留 identity / 注册 / 房间（pairing）类最小集
+ * （world.open_registry.* / world.room.*），过滤社交经济交易类工具
+ * （world.free_market.* 技能商店与 A2A 外包 / world.social.* 社交动态 /
+ * world.music.* 一起听音乐）。开关开启时注入全量集合，行为与现状一致。
+ */
+export function filterSocialChatTools(tools: ChatCompletionTool[]): ChatCompletionTool[] {
+  // 社交经济域工具名前缀（含 community-skill-store / a2a-outsourcing，均挂 free_market 前缀）
+  const SOCIAL_ECONOMIC_TOOL_PREFIXES = [
+    "world.free_market.",
+    "world.social.",
+    "world.music.",
+  ];
+  return tools.filter((tool) => {
+    const name = tool.type === "function" ? tool.function?.name : undefined;
+    if (!name) return true;
+    return !SOCIAL_ECONOMIC_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
+  });
+}
+
 /** @deprecated 使用 {@link AGENT_WORLD_CHAT_TOOLS} */
 export const USER_FACING_AGENT_WORLD_CHAT_TOOLS = AGENT_WORLD_CHAT_TOOLS;
 

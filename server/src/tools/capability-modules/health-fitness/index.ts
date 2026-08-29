@@ -19,6 +19,7 @@ import {
   createHealthGetSummaryHandler,
   createHealthImportDataHandler,
   createHealthLogMetricHandler,
+  createHealthQueryHandler,
   createHealthSetGoalHandler,
 } from "./handlers.js";
 
@@ -38,6 +39,7 @@ export function registerHealthFitnessTools(
   registry.register("health.log_metric", createHealthLogMetricHandler(service));
   registry.register("health.get_metrics", createHealthGetMetricsHandler(service));
   registry.register("health.get_summary", createHealthGetSummaryHandler(service));
+  registry.register("health.query", createHealthQueryHandler(service));
   registry.register("health.set_goal", createHealthSetGoalHandler(service));
   registry.register("health.get_goals", createHealthGetGoalsHandler(service));
   registry.register("health.import_data", createHealthImportDataHandler(service));

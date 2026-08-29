@@ -33,7 +33,7 @@
 | 目录 / 文件 | 建议理解 |
 | --- | --- |
 | `windows_dist/` | 打包产物 |
-| `private-agent-ui-optimized/` | UI 设计稿 / 页面草案 |
+| `docs/design-drafts/private-agent-ui-optimized/` | UI 设计稿 / 页面草案（已归档至 docs/design-drafts/，含 flutter-app-ui/） |
 | `*.html` 顶层预览页 | 独立预览，不一定是正式入口 |
 | `.uploads/` `data/` | 运行数据 / 上传内容 |
 

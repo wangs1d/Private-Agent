@@ -321,6 +321,13 @@ export class FinanceDeepService {
   }
 
   /**
+   * 全部有账本数据的 actor 列表（Task 16 消费管家：每日预算扫描遍历用）。
+   */
+  listActorIds(): string[] {
+    return Array.from(this.stores.keys());
+  }
+
+  /**
    * 查询交易（按时间段 + 类别过滤）。
    *
    * @param from 起始日期 ISO 8601（含）

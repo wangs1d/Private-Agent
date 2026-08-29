@@ -24,6 +24,7 @@ export type WebhookEventType =
   | "agent.task_completed" // Agent 任务执行完成
   | "agent.task_failed"   // Agent 任务执行失败
   | "agent.tool_called"   // Agent 调用了工具
+  | "tool.executed"       // 工具执行成功（Task 16 消费管家：消费类工具成功后 emit，payload 含 toolName/args 摘要/result 摘要/actorId/timestamp）
   | "schedule.reminder_fired" // 日程提醒触发
   | "life.signal"         // 生命信号产生
   // ─── 监控/价格/数据 信号事件（外部系统接入价格/数据 webhook 后触发）───

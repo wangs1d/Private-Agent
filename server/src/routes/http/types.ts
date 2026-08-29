@@ -52,6 +52,7 @@ import type { DeviceRegistry } from "../../device-bus/device-registry.js";
 import type { BrainCenter } from "../../brain/index.js";
 import type { BodyCenter } from "../../body/index.js";
 import type { ReflexArc } from "../../body/reflex-arc.js";
+import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
 
 /** 各 HTTP 子域注册函数共用的依赖 */
 export type HttpRouteDeps = {
@@ -98,6 +99,8 @@ export type HttpRouteDeps = {
   agentCore?: AgentCore;
   wsConnectionRegistry?: WsConnectionRegistry;
   lifeSignalHubService?: LifeSignalHubService;
+  /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */
+  proactivitySuppressionStore?: ProactivitySuppressionStore;
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;

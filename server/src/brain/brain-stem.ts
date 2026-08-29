@@ -69,15 +69,6 @@ export interface BrainStemWorkingMemoryLike {
 }
 
 /**
- * DefaultModeNetwork 的最小化结构接口。
- * BrainStem 周期性扫描时调用 isIdle/onIdle，触发"空闲时整合"。
- */
-export interface BrainStemDefaultModeNetworkLike {
-  isIdle(actorId: string, now?: number): boolean;
-  onIdle(actorId: string): Promise<unknown>;
-}
-
-/**
  * 记忆整理器最小化接口：白天 idle 时触发轻量记忆整理。
  * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
  */
@@ -196,18 +187,12 @@ export class BrainStem {
   private static readonly DECAY_EVERY_N_SWEEPS = 5;
   /** decay 累计统计 */
   private decayStats = { triggered: 0, totalDecayed: 0, totalForgotten: 0 };
-  /** 默认模式网络引用，用于空闲时整合 */
-  private dmn: BrainStemDefaultModeNetworkLike | null = null;
-  /** DMN 调度计数器：每 7 次 sweepOnce（约 7×45s=5.25min）触发一次 DMN 检查 */
-  private dmnSweepCounter = 0;
-  /** DMN 触发间隔（sweep 次数） */
-  private static readonly DMN_CHECK_EVERY_N_SWEEPS = 7;
-  /** DMN 累计统计 */
-  private dmnStats = { triggered: 0, idleActors: 0, failed: 0 };
   /** 记忆整理器引用，白天 idle 时触发轻量整理 */
   private memoryConsolidator: BrainStemMemoryConsolidatorLike | null = null;
-  /** 记忆整理调度计数器：与 DMN 同周期检查 */
+  /** 记忆整理调度计数器 */
   private idleMemSweepCounter = 0;
+  /** 记忆整理触发间隔（sweep 次数，≈ 5 分钟） */
+  private static readonly DMN_CHECK_EVERY_N_SWEEPS = 7;
   /** 记忆整理累计统计 */
   private idleMemStats = { triggered: 0, skipped: 0, failed: 0 };
   private unsubscribe: (() => void) | null = null;
@@ -292,20 +277,9 @@ export class BrainStem {
   }
 
   /**
-   * 深度优化：注册 DefaultModeNetwork，让脑干定期调度 onIdle()（空闲时整合）。
-   *
-   * DMN 模拟人脑"默认模式网络"——用户空闲时触发记忆固化 + 反思 + 进化提案。
-   * 由脑干每 7 次扫描（约 5 分钟）检查一次各 actor 是否空闲，命中则异步触发 onIdle。
-   */
-  registerDefaultModeNetwork(dmn: BrainStemDefaultModeNetworkLike): void {
-    this.dmn = dmn;
-    console.log("[BrainStem] 已注册 DefaultModeNetwork（每 7 次扫描触发 onIdle 检查）");
-  }
-
-  /**
    * 注册记忆整理器：白天 idle 时触发轻量记忆整理。
    * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
-   * 与 DMN 同周期检查（每 7 次 sweepOnce ≈ 5 分钟），仅在用户 idle 时触发。
+   * 与 DMN 同周期检查（每 7 次 sweepOnce ≈ 5 分钟，见 DMN_CHECK_EVERY_N_SWEEPS），仅在用户 idle 时触发。
    */
   registerMemoryConsolidator(consolidator: BrainStemMemoryConsolidatorLike): void {
     this.memoryConsolidator = consolidator;
@@ -626,35 +600,8 @@ export class BrainStem {
       });
     }
 
-    // 深度优化：定期调度 DefaultModeNetwork.onIdle()（空闲时整合）
-    // 每 7 次 sweep（约 5 分钟）检查一次各 actor 是否空闲，命中则异步触发 onIdle
-    // 异步触发不阻塞主循环；onIdle 内部有 10 分钟最小间隔抑制，不会频繁跑
-    this.dmnSweepCounter++;
-    if (this.dmn && this.dmnSweepCounter >= BrainStem.DMN_CHECK_EVERY_N_SWEEPS) {
-      this.dmnSweepCounter = 0;
-      for (const actorId of this.knownActors) {
-        try {
-          if (!this.dmn.isIdle(actorId)) continue;
-          this.dmnStats.idleActors++;
-          // 异步触发，不阻塞 sweepOnce
-          void this.dmn.onIdle(actorId).then((result) => {
-            const r = result as { triggered?: boolean } | null | undefined;
-            if (r?.triggered) {
-              this.dmnStats.triggered++;
-              console.log(`[BrainStem] DMN onIdle 触发 actor=${actorId}`);
-            }
-          }).catch((e) => {
-            this.dmnStats.failed++;
-            console.error(`[BrainStem] DMN onIdle ${actorId} 失败:`, e);
-          });
-        } catch (e) {
-          console.error(`[BrainStem] DMN isIdle 检查 ${actorId} 失败:`, e);
-        }
-      }
-    }
-
     // 仿人记忆连续性：白天 idle 时触发轻量记忆整理
-    // 与 DMN 同周期（每 7 次 sweep ≈ 5 分钟），仅在用户 idle 且有待整理队列时触发
+    // 与 DMN 同周期（每 7 次 sweep ≈ 5 分钟，见 DMN_CHECK_EVERY_N_SWEEPS），仅在用户 idle 且有待整理队列时触发
     // tryIdleConsolidation 内部检查队列是否为空，空则直接返回 false，不会空跑
     this.idleMemSweepCounter++;
     if (this.memoryConsolidator && this.idleMemSweepCounter >= BrainStem.DMN_CHECK_EVERY_N_SWEEPS) {
@@ -697,11 +644,6 @@ export class BrainStem {
         console.error("[BrainStem] 心跳回调异常:", e);
       }
     }
-  }
-
-  /** 获取 DMN 调度统计 */
-  getDmnStats(): { triggered: number; idleActors: number; failed: number } {
-    return { ...this.dmnStats };
   }
 
   /** 获取 decay 统计 */

@@ -3,6 +3,7 @@ import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import { resolveActorId } from "../agent/actor-id.js";
+import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 /**
  * 重要日期类型
@@ -22,6 +23,94 @@ export type ImportantDateRecord = {
   notes?: string; // 备注
   createdAt: string;
 };
+
+/**
+ * care.* 重要日子工具的 LLM 声明（并入 getBuiltinAgentChatTools）。
+ * Task 17 人情关系管家的对话录入路径：用户说「记住我妈生日是 5 月 20」
+ * 「下个月是我们结婚纪念日」时，LLM 调 care.set_important_date 写入
+ * important_dates KV（晨报第五源 + 当天命中祝福提醒都从这里读）。
+ */
+export const CARE_REMINDER_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "care.set_important_date",
+      description: [
+        "记录重要日子（生日/纪念日等，人情关系管家）。",
+        "当用户提到亲友生日、结婚纪念日、重要纪念日期并希望被记住/提醒时（如「记住我妈生日是 5 月 20」「下月 3 号是我们纪念日」），",
+        "调本工具录入：会自动创建每年提前 1 天的提醒任务，当天晨报会预告、命中当天管家会主动送上祝福草稿。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "人物或事件名称，如「妈妈」「结婚纪念日」",
+          },
+          date: {
+            type: "string",
+            description: "日期，YYYY-MM-DD（如 1970-05-20）或 MM-DD（如 05-20）格式",
+          },
+          type: {
+            type: "string",
+            enum: ["birthday", "anniversary", "custom"],
+            description: "类型：birthday 生日 / anniversary 纪念日 / custom 其他特殊日期",
+          },
+          relationship: {
+            type: "string",
+            description: "（可选）关系描述，如「母亲」「配偶」「朋友」",
+          },
+          year: {
+            type: "number",
+            description: "（可选）出生年份（生日用，用于计算年龄）",
+          },
+          notes: {
+            type: "string",
+            description: "（可选）备注（如喜好、准备事项）",
+          },
+        },
+        required: ["name", "date"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "care.get_important_dates",
+      description: [
+        "查看已记录的重要日子列表（生日/纪念日）。",
+        "当用户问「我记了哪些重要日子」「最近谁要过生日了」「都有什么纪念日」时调用。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "care.delete_important_date",
+      description: [
+        "删除一条重要日子记录。",
+        "当用户说「把这个生日删了」「不用记这个纪念日了」时，先调 care.get_important_dates 拿到 id 再删除。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "要删除的重要日期记录 id（从 care.get_important_dates 获取）",
+          },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
 
 /**
  * 关怀提醒工具集：管理重要日期并自动创建年度周期性提醒任务
