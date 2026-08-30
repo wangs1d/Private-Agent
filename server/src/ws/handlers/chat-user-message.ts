@@ -40,7 +40,8 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
@@ -145,27 +146,6 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
   const keys = Object.keys(result).filter((k) => !["ok", "error"].includes(k));
   if (keys.length === 0) return "";
   return keys.map((k) => `${k}: ${JSON.stringify(result[k]).slice(0, 200)}`).join("\n");
-}
-
-/**
- * 从文本中剥离 `[AGENT_RESULT_CARD_START] ... [AGENT_RESULT_CARD_END]` 卡片块。
- *
- * 场景：结构化 mediaCards 已由 chat.assistant_done 独立字段下发时，LLM 正文里
- * 若仍残留 processAssistantText 注入的卡片块，前端会把它当纯文本渲染，
- * 造成"文字反复/来回渲染"+ 与 mediaCards 双份展示。这里确定性剥除。
- */
-function stripMediaCardMarker(text: string): string {
-  const START = "[AGENT_RESULT_CARD_START]";
-  const END = "[AGENT_RESULT_CARD_END]";
-  let out = text;
-  // 循环剥除，直到没有完整的一对开始/结束标记（含 ASR/搜索等链式注入最多 5 层）
-  for (let guard = 0; guard < 5; guard++) {
-    const si = out.indexOf(START);
-    const ei = si === -1 ? -1 : out.indexOf(END, si);
-    if (si === -1 || ei === -1) break;
-    out = out.slice(0, si) + out.slice(ei + END.length);
-  }
-  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
@@ -692,6 +672,11 @@ async function processBatchedMessage(
     toolName: string;
     result: Record<string, unknown>;
   }> = [];
+  // 行程规划工具（tool-loop 路径）：LLM 末轮通常只输出正文不带工具声明，
+  // reply.toolName/toolResult 均为空 → attachTravelItineraryCard 拿不到原始
+  // 结果、行程卡永远附不上（右侧面板不自动展开）。这里从 onExternalToolExecuted
+  // 捕获真实结果作为附卡数据源。
+  let executedTravelPlanResult: Record<string, unknown> | undefined;
   // 「边说边出图」已推送过的媒体地址集合：跨工具批去重，避免同一张图被推两次
   const sentEarlyMediaKeys = new Set<string>();
   // 方案1：不再把流式 delta 逐段喂入分段器（多段流/工具边界会打断 heldFirst 导致
@@ -749,6 +734,9 @@ async function processBatchedMessage(
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
         // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
+        if (info.ok && info.result && info.toolName === "travel.plan-itinerary") {
+          executedTravelPlanResult = info.result as Record<string, unknown>;
+        }
         if (
           info.ok &&
           info.result &&
@@ -999,7 +987,34 @@ async function processBatchedMessage(
     // 能被切卡的逐日列表，卡片由代码直接从工具原始结果生成（autoOpen=true，
     // 前端 assistant_done 收到即自动展开双面板；卡片保留在消息中供回看）。
     // 正文已有卡片标记时不重复附加。
-    finalText = attachTravelItineraryCard(finalText, reply.toolName, toolResult?.result);
+    let travelCardToolName = reply.toolName
+      ?? (executedTravelPlanResult ? "travel.plan-itinerary" : undefined);
+    let travelCardResult = toolResult?.result ?? executedTravelPlanResult;
+    if (travelCardToolName === "travel.plan-itinerary") {
+      // 工具回执是瘦身摘要（只有 id/title，无 days）：按 planId 从冷层取完整行程供附卡
+      const planId = String(
+        (travelCardResult as Record<string, unknown> | undefined)?.id ?? "",
+      ).trim();
+      const fullPlan = planId ? travelPlanStore.get(planId) : null;
+      if (fullPlan) travelCardResult = fullPlan as unknown as Record<string, unknown>;
+    }
+    if (!travelCardToolName && !travelCardResult) {
+      // tool-loop 内执行的工具不经过 onExternalToolExecuted（回调只覆盖单工具直跑路径），
+      // 这里从行程冷层确定性回捞：只认「最近 60s 内生成」的行程（工具成功即落盘，
+      // 附卡在其后几秒内执行），正文点名目的地时优先，避免把旧行程误挂到后续闲聊轮。
+      const candidates = travelPlanStore
+        .listSummaries(5)
+        .filter((s) => Date.now() - s.createdAt < 60 * 1000);
+      const picked =
+        candidates.find((s) => s.destination && finalText.includes(s.destination)) ??
+        candidates[0];
+      const recentPlan = picked ? travelPlanStore.get(picked.planId) : null;
+      if (recentPlan) {
+        travelCardToolName = "travel.plan-itinerary";
+        travelCardResult = recentPlan as unknown as Record<string, unknown>;
+      }
+    }
+    finalText = attachTravelItineraryCard(finalText, travelCardToolName, travelCardResult);
     // 视频抓取：附加可播放媒体标记（[RENDER_AS:video] + [VIDEO_MEDIA_START]），
     // 前端据此真实内联播放代理后的视频流
     finalText = attachVideoMediaMarker(finalText, reply.toolName, toolResult?.result);

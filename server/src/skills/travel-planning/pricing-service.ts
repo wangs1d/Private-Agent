@@ -614,4 +614,25 @@ export class PricingService {
   }
 }
 
+/**
+ * 把报价格式化为行程条目的 priceInfo 显示文本（行程路由域/规划服务共用）：
+ *  - 优惠时：¥实付（原价¥xx，省¥yy · 优惠来源）
+ *  - 无优惠：¥原价
+ *  - 免费：免费
+ */
+export function formatQuotePriceInfo(q: PriceQuote): string {
+  if (q.originalPrice === 0) return '免费';
+  const fmt = (n: number) => `¥${n.toLocaleString('zh-CN')}`;
+  if (q.discount > 0) {
+    const labels: string[] = [];
+    if (q.breakdown.member) labels.push(q.breakdown.member.label);
+    if (q.breakdown.platformBenefits) {
+      q.breakdown.platformBenefits.forEach(pb => labels.push(`${pb.platformName} ${pb.benefit}`));
+    }
+    if (q.breakdown.bundle) labels.push(q.breakdown.bundle.label);
+    return `${fmt(q.finalPrice)}（原价${fmt(q.originalPrice)}，省${fmt(q.discount)} · ${labels.join(' / ')}）`;
+  }
+  return fmt(q.originalPrice);
+}
+
 export const pricingService = new PricingService();

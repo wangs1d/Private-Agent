@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>旅游行程地图</title>
+<!-- MapLibre GL JS v4.7.1（与 3D-Travel 项目同版本） -->
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+  /* 深色主题底色（面板为深色 UI） */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b1220; overflow: hidden;
+    font-family: "MiSans", "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  #map { position: absolute; inset: 0; }
+  .maplibregl-ctrl-attrib { background: rgba(11, 18, 32, 0.7) !important; color: #94a3b8 !important; }
+  .maplibregl-ctrl-attrib a { color: #cbd5e1 !important; }
+  .maplibregl-popup-content {
+    background: #111a2c; color: #e2e8f0; border: 1px solid rgba(24, 214, 243, 0.35);
+    border-radius: 10px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    min-width: 120px;
+  }
+  .maplibregl-popup-close-button { color: #94a3b8; font-size: 15px; padding: 2px 6px; }
+  .maplibregl-popup-tip { border-top-color: #111a2c !important; }
+
+  /* POI 标记（四色圆形徽标） */
+  .poi-marker {
+    --mc: #3B82F6;
+    width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+    background: var(--mc); border: 2px solid rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mc) 35%, transparent), 0 3px 10px rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.15s ease;
+  }
+  .poi-marker:hover { transform: scale(1.15); }
+  .poi-marker .poi-marker-icon { font-size: 14px; line-height: 1; }
+  .poi-marker.is-active { transform: scale(1.2); box-shadow: 0 0 0 5px color-mix(in srgb, var(--mc) 45%, transparent); }
+
+  /* POI 弹窗 */
+  .poi-popup-name { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+  .poi-popup-type { font-size: 11px; color: #94a3b8; }
+  .poi-popup-splat {
+    margin-top: 7px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+    color: #fff; background: #0e7490; border: none; border-radius: 8px;
+    font-family: inherit;
+  }
+  .poi-popup-splat:hover { background: #0891b2; }
+
+  /* 途经点徽标 */
+  .route-waypoint-badge {
+    width: 20px; height: 20px; border-radius: 50%; background: #18d6f3; color: #04212b;
+    font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+    border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
+  .route-waypoint-badge.route-waypoint-start { background: #1ed7a6; }
+
+  /* 右上角小工具条 */
+  #toolbar {
+    position: absolute; top: 10px; right: 10px; z-index: 20;
+    display: flex; gap: 6px; align-items: center;
+    background: rgba(17, 26, 44, 0.85); border: 1px solid rgba(24, 214, 243, 0.25);
+    border-radius: 10px; padding: 5px 7px; backdrop-filter: blur(6px);
+  }
+  .tb-btn {
+    padding: 4px 10px; font-size: 11px; color: #cbd5e1; cursor: pointer;
+    background: transparent; border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 7px; font-family: inherit; white-space: nowrap;
+  }
+  .tb-btn:hover { background: rgba(24, 214, 243, 0.12); }
+  .tb-btn.active { background: rgba(24, 214, 243, 0.18); border-color: #18d6f3; color: #18d6f3; }
+
+  /* 左下角图例 */
+  #legend {
+    position: absolute; left: 10px; bottom: 10px; z-index: 20;
+    background: rgba(17, 26, 44, 0.85); border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 10px; padding: 8px 12px; backdrop-filter: blur(6px);
+    font-size: 10.5px; color: #cbd5e1; line-height: 1.7;
+  }
+  .legend-title { font-size: 10px; color: #64748b; margin-bottom: 2px; }
+  .legend-items { display: flex; gap: 10px; flex-wrap: wrap; max-width: 320px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .legend-bar { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+
+  /* 加载遮罩 */
+  #loading-overlay {
+    position: absolute; inset: 0; z-index: 30;
+    background: #0b1220; display: flex; flex-direction: column; gap: 12px;
+    align-items: center; justify-content: center; color: #64748b; font-size: 12px;
+    transition: opacity 0.5s ease;
+  }
+  .loading-spinner {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 3px solid rgba(24, 214, 243, 0.2); border-top-color: #18d6f3;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 离线兜底地图 */
+  #fallback-map { position: absolute; inset: 0; overflow: hidden; }
+  #fallback-markers { position: absolute; inset: 0; }
+  .js-fallback-marker { position: absolute; transform: translate(-50%, -100%); cursor: pointer; }
+
+  /* 3DGS 沉浸式实景全屏遮罩 */
+  #splat-overlay {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: #05080f;
+  }
+  #splat-overlay.active { display: block; }
+  #splat-container { position: absolute; inset: 0; }
+  #splat-title {
+    position: absolute; top: 14px; left: 16px; z-index: 2;
+    color: #e2e8f0; font-size: 13px; font-weight: 600;
+    background: rgba(17, 26, 44, 0.7); border-radius: 8px; padding: 5px 12px;
+  }
+  #splat-close {
+    position: absolute; top: 12px; right: 14px; z-index: 3;
+    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    background: rgba(17, 26, 44, 0.8); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4);
+    font-size: 14px;
+  }
+  #splat-loading, #splat-error {
+    position: absolute; inset: 0; z-index: 2;
+    display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; color: #94a3b8; font-size: 12px;
+  }
+  #splat-error { color: #f87171; }
+  #splat-error .sub { color: #64748b; font-size: 11px; max-width: 320px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="fallback-map" style="display:none"></div>
+
+  <!-- 右上角小工具条：样式切换 / 3D / 复位 -->
+  <div id="toolbar">
+    <button type="button" class="tb-btn style-btn active" data-style="0" title="街道图层">街道</button>
+    <button type="button" class="tb-btn style-btn" data-style="1" title="卫星影像（含注记）">卫星</button>
+    <button type="button" class="tb-btn style-btn" data-style="2" title="暗色地形">暗色</button>
+    <button type="button" id="btn-3d" class="tb-btn active" title="3D 视角开关">3D</button>
+    <button type="button" id="btn-reset" class="tb-btn" title="复位视角">复位</button>
+  </div>
+
+  <!-- 左下角图例：POI 四色 + 路线配色 -->
+  <div id="legend">
+    <div class="legend-title">图例</div>
+    <div class="legend-items" id="legend-poi"></div>
+    <div class="legend-items" id="legend-route" style="margin-top:2px"></div>
+  </div>
+
+  <div id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div>地图加载中…</div>
+  </div>
+
+  <!-- 3DGS 沉浸式实景 -->
+  <div id="splat-overlay">
+    <div id="splat-container"></div>
+    <div id="splat-title"></div>
+    <button type="button" id="splat-close" title="关闭实景">✕</button>
+    <div id="splat-loading"><div class="loading-spinner"></div><div>3D 实景加载中…</div></div>
+    <div id="splat-error" style="display:none">
+      <div>3D 实景素材不可用</div>
+      <div class="sub" id="splat-error-msg"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // ══════════════ 常量（移植自 3D-Travel constants.ts / Map3DController.ts）══════════════
+    // 路线配色：按交通方式（ROUTE_COLORS）
+    var ROUTE_COLORS = {
+      driving: { color: '#2563eb', glow: '#93c5fd', label: '驾车' },
+      taxi:    { color: '#7c3aed', glow: '#c4b5fd', label: '打车' },
+      transit: { color: '#dc2626', glow: '#fca5a5', label: '公交' },
+      walking: { color: '#059669', glow: '#6ee7b7', label: '步行' },
+      cycling: { color: '#ea580c', glow: '#fdba74', label: '骑行' }
+    };
+    // POI 四色 + 图标 + 类型标签（沿用 3D-Travel _addPOIMarkers 配色）
+    var POI_STYLES = {
+      hotel:      { color: '#F59E0B', icon: '🏨', label: '住宿' },
+      attraction: { color: '#10B981', icon: '📷', label: '景点' },
+      restaurant: { color: '#EF4444', icon: '🍴', label: '美食' },
+      transport:  { color: '#8B5CF6', icon: '🚌', label: '交通' }
+    };
+    var DEFAULT_CENTER = [100.1595, 25.6904]; // 与 3D-Travel 默认中心一致（大理古城）
+    var DEFAULT_ZOOM = 13;
+    var MAP_PITCH = 55;
+    var MAP_BEARING = -15;
+    var MAP_LOAD_TIMEOUT = 15000; // 总加载超时
+    var SOURCE_TIMEOUT = 6000;    // 单个源超时
+
+    var ROUTE_SOURCE_ID = 'route-source';
+    var ROUTE_LAYER_ID = 'route-layer';
+
+    // ══════════════ 运行时状态 ══════════════
+    var state = {
+      httpBase: '',
+      maptilerKey: '',
+      map: null,
+      popup: null,
+      markers: [],        // { poi, marker }
+      waypointBadges: [],
+      styleIndex: 0,      // 0 街道 1 卫星 2 暗色
+      is3D: true,
+      currentSourceIndex: 0,
+      fallbackMode: false,
+      fallbackZoom: 13,
+      fallbackCenter: { lng: DEFAULT_CENTER[0], lat: DEFAULT_CENTER[1] },
+      pois: [],
+      routeSegments: null, // 最近一次 drawRoute 数据（切样式后重绘用）
+      libPromise: null,
+      booted: false,
+      routeHasData: false
+    };
+
+    // ══════════════ 工具函数 ══════════════
+    function postEvent(obj) {
+      // JS → Dart：走 webview_windows 的 webMessage 通道
+      try {
+        if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage) {
+          window.chrome.webview.postMessage(JSON.stringify(obj));
+        }
+      } catch (e) { /* 非宿主环境忽略 */ }
+    }
+
+    function poiStyle(type) {
+      return POI_STYLES[type] || { color: '#3B82F6', icon: '📍', label: '地点' };
+    }
+
+    function validCoord(c) {
+      return c && typeof c[0] === 'number' && typeof c[1] === 'number' &&
+        (c[0] !== 0 || c[1] !== 0) && isFinite(c[0]) && isFinite(c[1]);
+    }
+
+    // splatUrl 相对路径 → 拼 httpBase 前缀（与 Dart 侧 resolveMediaUrl 约定一致）
+    function resolveUrl(u) {
+      var s = (u || '').trim();
+      if (!s) return s;
+      if (/^https?:/i.test(s)) return s;
+      var base = (state.httpBase || '').replace(/\/+$/, '');
+      return base + (s.charAt(0) === '/' ? s : '/' + s);
+    }
+
+    // ══════════════ 地图源定义（降级链，移植自 config.ts DEFAULT_MAP_SOURCES）══════════════
+    function osmRasterStyle() {
+      return {
+        version: 8,
+        sources: {
+          'osm-tiles': {
+            type: 'raster',
+            tiles: [
+              'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+            ],
+            tileSize: 256,
+            attribution: '© OpenStreetMap',
+            maxzoom: 19
+          }
+        },
+        layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm-tiles' }],
+        glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf'
+      };
+    }
+
+    // 卫星 hybrid：ESRI World Imagery 影像 + ESRI 注记叠加（免费无密钥）
+    function satelliteStyle() {
+      return {
+        version: 8,
+        sources: {
+          'esri-imagery': {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256, maxzoom: 19, attribution: '© Esri World Imagery'
+          },
+          'esri-labels': {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256, maxzoom: 19, attribution: '© Esri'
+          }
+        },
+        layers: [
+          { id: 'esri-imagery', type: 'raster', source: 'esri-imagery' },
+          { id: 'esri-labels', type: 'raster', source: 'esri-labels', paint: { 'raster-opacity': 0.85 } }
+        ]
+      };
+    }
+
+    function buildSources() {
+      var sources = [
+        { name: 'OSM Raster', style: osmRasterStyle, terrainUrl: null, has3DBuildings: false },
+        { name: 'OpenFreeMap', style: 'https://tiles.openfreemap.org/styles/liberty', terrainUrl: null, has3DBuildings: true }
+      ];
+      // 宿主提供 maptilerKey 时追加 MapTiler 源（含 3D 地形 + 3D 建筑）
+      if (state.maptilerKey) {
+        sources.push({
+          name: 'MapTiler (3D 地形)',
+          style: 'https://api.maptiler.com/streets-v2/style.json?key=' + state.maptilerKey,
+          terrainUrl: 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey,
+          has3DBuildings: true
+        });
+      }
+      return sources;
+    }
+
+    var MAP_SOURCES = [];
+
+    // ══════════════ 初始化：多地图源降级链 ══════════════
+    function boot() {
+      if (state.booted) return;
+      state.booted = true;
+      MAP_SOURCES = buildSources();
+      buildLegend();
+      initMapChain();
+    }
+
+    function initMapChain() {
+      // 清理旧实例（setHttpBase 补充 key 后可能重入）
+      destroyMapOnly();
+      hideFallback();
+      tryLoadChain(0);
+    }
+
+    function tryLoadChain(index) {
+      if (index >= MAP_SOURCES.length) {
+        // 所有在线源失败 → 离线兜底
+        console.warn('[Map] 所有在线地图源失败，使用离线兜底模式');
+        showFallback();
+        return;
+      }
+      state.currentSourceIndex = index;
+      var source = MAP_SOURCES[index];
+      console.log('[Map] 尝试加载地图源: ' + source.name);
+      tryLoadMap(source).then(function () {
+        console.log('[Map] 地图源 "' + source.name + '" 加载成功');
+        hideLoadingOverlay();
+        postEvent({ event: 'ready' });
+      }).catch(function (err) {
+        console.warn('[Map] 地图源 "' + source.name + '" 失败:', err && err.message);
+        destroyMapOnly();
+        tryLoadChain(index + 1);
+      });
+    }
+
+    function tryLoadMap(source) {
+      return new Promise(function (resolve, reject) {
+        try {
+          var container = document.getElementById('map');
+          container.innerHTML = '';
+          var styleUrl = typeof source.style === 'function' ? source.style() : source.style;
+          var map = new maplibregl.Map({
+            container: container,
+            style: styleUrl,
+            center: DEFAULT_CENTER,
+            zoom: DEFAULT_ZOOM,
+            pitch: state.is3D ? MAP_PITCH : 0,
+            bearing: state.is3D ? MAP_BEARING : 0,
+            attributionControl: false
+          });
+          state.map = map;
+          var resolved = false;
+          map.on('load', function () {
+            if (resolved) return;
+            resolved = true;
+            try {
+              map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+              map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
+            } catch (e) { /* 控件失败非致命 */ }
+            state.popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '300px' });
+            // 3D 地形 + 3D 建筑 + 路线图层
+            tryAdd3DTerrain(source);
+            tryAdd3DBuildings();
+            addRouteLayers();
+            state.routeHasData = false;
+            if (state.routeSegments) { drawRoute(state.routeSegments); }
+            renderPois();
+            update3DButton();
+            resolve(true);
+          });
+          map.on('error', function (e) {
+            if (resolved) return;
+            console.error('[Map] MapLibre error 事件:', (e && e.error && e.error.message) || e);
+            resolved = true;
+            reject(new Error((e && e.error && e.error.message) || '地图资源加载失败'));
+          });
+          // 单源超时保护
+          setTimeout(function () {
+            if (resolved) return;
+            resolved = true;
+            reject(new Error('地图源加载超时'));
+          }, SOURCE_TIMEOUT);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function destroyMapOnly() {
+      if (state.map) {
+        try { state.map.remove(); } catch (e) { /* ignore */ }
+        state.map = null;
+      }
+      document.getElementById('map').innerHTML = '';
+      state.markers = [];
+      state.waypointBadges = [];
+      state.popup = null;
+    }
+
+    function hideLoadingOverlay() {
+      var overlay = document.getElementById('loading-overlay');
+      if (overlay) {
+        overlay.style.opacity = '0';
+        setTimeout(function () { overlay.style.display = 'none'; }, 500);
+      }
+    }
+
+    // ══════════════ 3D：地形（exaggeration 1.2）+ 建筑 fill-extrusion ══════════════
+    function terrainUrlOf(source) {
+      if (source && source.terrainUrl) return typeof source.terrainUrl === 'function' ? source.terrainUrl() : source.terrainUrl;
+      if (state.maptilerKey) return 'https://api.maptiler.com/tiles/terrain-tiles.json?key=' + state.maptilerKey;
+      return null;
+    }
+
+    function tryAdd3DTerrain(source) {
+      if (!state.map) return;
+      var url = terrainUrlOf(source);
+      if (!url) { console.log('[Map] 当前地图源不支持3D地形，跳过'); return; }
+      try {
+        if (!state.map.getSource('terrain')) {
+          state.map.addSource('terrain', { type: 'raster-dem', url: url, tileSize: 256 });
+        }
+        if (state.is3D) {
+          state.map.setTerrain({ source: 'terrain', exaggeration: 1.2 });
+          console.log('[Map] 3D地形已启用');
+        }
+      } catch (e) {
+        console.warn('[Map] 3D地形添加失败（非致命）:', e && e.message);
+      }
+    }
+
+    function tryAdd3DBuildings() {
+      if (!state.map) return;
+      try {
+        var sources = (state.map.getStyle() || {}).sources || {};
+        var buildingSource = Object.keys(sources).filter(function (s) {
+          return s.indexOf('openmaptiles') >= 0 || s.indexOf('maptiler') >= 0;
+        })[0];
+        if (buildingSource && !state.map.getLayer('building-3d')) {
+          state.map.addLayer({
+            id: 'building-3d',
+            type: 'fill-extrusion',
+            source: buildingSource,
+            'source-layer': 'building',
+            minzoom: 14,
+            paint: {
+              'fill-extrusion-color': ['interpolate', ['linear'], ['zoom'], 14, '#e2e8f0', 16, '#94a3b8'],
+              'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 5],
+              'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+              'fill-extrusion-opacity': 0.85
+            }
+          });
+          console.log('[Map] 3D建筑图层已启用');
+        }
+      } catch (e) {
+        console.warn('[Map] 3D建筑添加失败（非致命）:', e && e.message);
+      }
+    }
+
+    // ══════════════ 路线图层：辉光 / 底色 / 流光（移植 _addRouteLayer）══════════════
+    function findFirstLabelLayerId() {
+      if (!state.map) return undefined;
+      var layers = (state.map.getStyle() || {}).layers || [];
+      for (var i = 0; i < layers.length; i++) {
+        if (layers[i].type === 'symbol' && layers[i].id.indexOf('label') >= 0) return layers[i].id;
+      }
+      return undefined;
+    }
+
+    function addRouteLayers() {
+      if (!state.map || state.map.getSource(ROUTE_SOURCE_ID)) return;
+      try {
+        state.map.addSource(ROUTE_SOURCE_ID, {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] }
+        });
+        var beforeLayer = findFirstLabelLayerId();
+        // 1. 辉光层（最底，宽 + 模糊，data-driven 颜色）
+        state.map.addLayer({
+          id: ROUTE_LAYER_ID + '-glow',
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          paint: {
+            'line-color': ['get', 'glowColor'],
+            'line-width': 14,
+            'line-opacity': 0.25,
+            'line-blur': 6
+          }
+        }, beforeLayer);
+        // 2. 底色层（中间，实色，线宽 5）
+        state.map.addLayer({
+          id: ROUTE_LAYER_ID,
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          paint: {
+            'line-color': ['get', 'color'],
+            'line-width': 5,
+            'line-opacity': 0.95
+          }
+        }, beforeLayer);
+        // 3. 流光动画层（最顶，白色虚线）
+        state.map.addLayer({
+          id: ROUTE_LAYER_ID + '-flow',
+          type: 'line',
+          source: ROUTE_SOURCE_ID,
+          paint: {
+            'line-color': '#ffffff',
+            'line-width': 2.5,
+            'line-opacity': 0.8,
+            'line-dasharray': DASH_SEQ[0]
+          }
+        }, beforeLayer);
+      } catch (e) {
+        console.warn('[Map] 路线图层初始化失败:', e);
+      }
+    }
+
+    // 流光 dash 动画序列（MapLibre "Animate a line" 官方套路）
+    var DASH_SEQ = [
+      [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1],
+      [2.5, 4, 0.5], [3, 4, 0], [0, 0.5, 3, 3.5], [0, 1, 3, 3], [0, 1.5, 3, 2.5],
+      [0, 2, 3, 2], [0, 2.5, 3, 1.5], [0, 3, 3, 1], [0, 3.5, 3, 0.5]
+    ];
+    var dashIdx = 0;
+    setInterval(function () {
+      dashIdx = (dashIdx + 1) % DASH_SEQ.length;
+      try {
+        if (state.map && state.routeHasData && state.map.getLayer(ROUTE_LAYER_ID + '-flow')) {
+          state.map.setPaintProperty(ROUTE_LAYER_ID + '-flow', 'line-dasharray', DASH_SEQ[dashIdx]);
+        }
+      } catch (e) { /* ignore */ }
+    }, 90);
+
+    function setRouteData(features) {
+      if (!state.map || !state.map.getSource(ROUTE_SOURCE_ID)) return;
+      state.map.getSource(ROUTE_SOURCE_ID).setData({
+        type: 'FeatureCollection', features: features
+      });
+      state.routeHasData = features.length > 0;
+    }
+
+    function drawRoute(segments) {
+      state.routeSegments = segments || [];
+      if (state.fallbackMode) { drawFallbackRoute(); return; }
+      if (!state.map || !state.routeSegments.length) return;
+      var features = [];
+      var waypoints = [];
+      for (var i = 0; i < state.routeSegments.length; i++) {
+        var seg = state.routeSegments[i];
+        var pts = [];
+        for (var p = 0; p < (seg.points || []).length; p++) {
+          var c = [Number(seg.points[p].longitude), Number(seg.points[p].latitude)];
+          if (validCoord(c)) pts.push(c);
+        }
+        if (pts.length < 2) continue;
+        if (waypoints.length === 0) waypoints.push(pts[0]);
+        waypoints.push(pts[pts.length - 1]);
+        var palette = ROUTE_COLORS[seg.mode] || ROUTE_COLORS.driving;
+        features.push({
+          type: 'Feature',
+          properties: {
+            color: palette.color, glowColor: palette.glow, modeLabel: palette.label,
+            mode: seg.mode, fromName: seg.fromName || '', toName: seg.toName || '', segIndex: i
+          },
+          geometry: { type: 'LineString', coordinates: pts }
+        });
+      }
+      if (!features.length) return;
+      // 适配视野（整体范围）
+      var bounds = new maplibregl.LngLatBounds();
+      waypoints.forEach(function (c) { bounds.extend(c); });
+      state.map.fitBounds(bounds, {
+        padding: 100, duration: 1200,
+        pitch: state.is3D ? MAP_PITCH : 0, bearing: state.is3D ? MAP_BEARING : 0,
+        maxZoom: 15
+      });
+      // 先清空再绘制（从空白开始）
+      setRouteData([]);
+      setRouteData(features);
+      addWaypointBadges(waypoints);
+    }
+
+    function addWaypointBadges(coords) {
+      clearWaypointBadges();
+      coords.forEach(function (coord, i) {
+        var el = document.createElement('div');
+        el.className = 'route-waypoint-badge' + (i === 0 ? ' route-waypoint-start' : '');
+        el.textContent = i === 0 ? '起' : String(i + 1);
+        var marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat(coord)
+          .addTo(state.map);
+        state.waypointBadges.push(marker);
+      });
+    }
+
+    function clearWaypointBadges() {
+      state.waypointBadges.forEach(function (m) { try { m.remove(); } catch (e) { /* ignore */ } });
+      state.waypointBadges = [];
+    }
+
+    function clearRoute() {
+      state.routeSegments = null;
+      setRouteData([]);
+      clearWaypointBadges();
+      if (state.fallbackMode) clearFallbackRoute();
+    }
+
+    // ══════════════ POI 标记 ══════════════
+    function setPois(pois) {
+      state.pois = pois || [];
+      renderPois();
+    }
+
+    function renderPois() {
+      if (state.fallbackMode) { renderFallbackPois(); return; }
+      if (!state.map) return;
+      clearMarkers();
+      for (var i = 0; i < state.pois.length; i++) {
+        var poi = state.pois[i];
+        var lat = Number(poi.latitude), lng = Number(poi.longitude);
+        if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0)) continue;
+        var st = poiStyle(poi.type);
+        var el = document.createElement('div');
+        el.className = 'poi-marker';
+        el.style.setProperty('--mc', st.color);
+        var icon = document.createElement('span');
+        icon.className = 'poi-marker-icon';
+        icon.textContent = st.icon;
+        el.appendChild(icon);
+        el.addEventListener('click', (function (p) {
+          return function (e) {
+            e.stopPropagation();
+            postEvent({ event: 'poiTap', name: p.name || '' });
+            showPoiPopup(p);
+            if (state.map) {
+              state.map.flyTo({
+                center: [Number(p.longitude), Number(p.latitude)],
+                zoom: 16, pitch: state.is3D ? 60 : 0, duration: 1200, essential: true
+              });
+            }
+          };
+        })(poi));
+        var marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([lng, lat])
+          .addTo(state.map);
+        state.markers.push({ poi: poi, marker: marker });
+      }
+      applyDayFilter();
+    }
+
+    function clearMarkers() {
+      state.markers.forEach(function (m) { try { m.marker.remove(); } catch (e) { /* ignore */ } });
+      state.markers = [];
+      if (state.popup) { try { state.popup.remove(); } catch (e) { /* ignore */ } }
+    }
+
+    // 点击弹窗：名称 + 类型 +（有 splatUrl 时）沉浸式 3D 实景按钮
+    function showPoiPopup(poi) {
+      if (!state.map || !state.popup) return;
+      var st = poiStyle(poi.type);
+      var wrap = document.createElement('div');
+      wrap.className = 'poi-popup';
+      var name = document.createElement('div');
+      name.className = 'poi-popup-name';
+      name.textContent = poi.name || '';
+      var meta = document.createElement('div');
+      meta.className = 'poi-popup-type';
+      meta.textContent = st.label + (poi.address ? ' · ' + poi.address : '');
+      wrap.appendChild(name);
+      wrap.appendChild(meta);
+      if (poi.splatUrl) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'poi-popup-splat';
+        btn.textContent = '沉浸式 3D 实景';
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          try { state.popup.remove(); } catch (err) { /* ignore */ }
+          openSplat(poi.splatUrl, poi.name);
+        });
+        wrap.appendChild(btn);
+      }
+      state.popup.setLngLat([Number(poi.longitude), Number(poi.latitude)])
+        .setDOMContent(wrap)
+        .addTo(state.map);
+    }
+
+    // 按天过滤显隐（dayIndex 为 null 的 POI 始终可见）
+    function visibleInDay(poi, dayIndex) {
+      if (dayIndex == null) return true;
+      if (poi.dayIndex == null) return true;
+      return Number(poi.dayIndex) === Number(dayIndex);
+    }
+
+    function showDay(dayIndex) {
+      state.dayFilter = dayIndex;
+      applyDayFilter();
+    }
+
+    function applyDayFilter() {
+      var visible = [];
+      state.markers.forEach(function (m) {
+        var el = m.marker.getElement && m.marker.getElement();
+        var ok = visibleInDay(m.poi, state.dayFilter);
+        if (el) el.style.display = ok ? '' : 'none';
+        if (ok) visible.push(m.poi);
+      });
+      fitBoundsOfPois(visible);
+    }
+
+    function fitBoundsOfPois(pois) {
+      if (state.fallbackMode) { centerFallback(pois); return; }
+      if (!state.map || !pois.length) return;
+      var coords = [];
+      pois.forEach(function (p) {
+        var c = [Number(p.longitude), Number(p.latitude)];
+        if (validCoord(c)) coords.push(c);
+      });
+      if (!coords.length) return;
+      var bounds = new maplibregl.LngLatBounds();
+      coords.forEach(function (c) { bounds.extend(c); });
+      state.map.fitBounds(bounds, {
+        padding: 90, duration: 1000, maxZoom: 15,
+        pitch: state.is3D ? MAP_PITCH : 0, bearing: state.is3D ? MAP_BEARING : 0
+      });
+    }
+
+    // ══════════════ 视角控制 ══════════════
+    function flyTo(lat, lng, zoom) {
+      if (state.fallbackMode) {
+        state.fallbackCenter = { lng: lng, lat: lat };
+        state.fallbackZoom = Math.max(1, Math.min(18, zoom || 16));
+        loadFallbackTiles();
+        positionFallbackPois();
+        return;
+      }
+      if (!state.map) return;
+      state.map.flyTo({
+        center: [lng, lat],
+        zoom: zoom || 16,
+        pitch: state.is3D ? MAP_PITCH : 0,
+        bearing: state.is3D ? MAP_BEARING : 0,
+        duration: 1500, essential: true
+      });
+    }
+
+    function resetView() {
+      if (state.fallbackMode) {
+        state.fallbackCenter = { lng: DEFAULT_CENTER[0], lat: DEFAULT_CENTER[1] };
+        state.fallbackZoom = DEFAULT_ZOOM;
+        loadFallbackTiles();
+        positionFallbackPois();
+        return;
+      }
+      if (!state.map) return;
+      var all = state.pois.filter(function (p) { return visibleInDay(p, state.dayFilter); });
+      if (all.length) { fitBoundsOfPois(all); return; }
+      state.map.flyTo({
+        center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM,
+        pitch: state.is3D ? MAP_PITCH : 0,
+        bearing: state.is3D ? MAP_BEARING : 0, duration: 1500
+      });
+    }
+
+    // ══════════════ 3D 开关 ══════════════
+    function toggle3D() {
+      state.is3D = !state.is3D;
+      update3DButton();
+      if (state.fallbackMode || !state.map) return;
+      if (state.is3D) {
+        var source = MAP_SOURCES[state.currentSourceIndex];
+        tryAdd3DTerrain(source);
+        state.map.setPitch(MAP_PITCH);
+        state.map.setBearing(MAP_BEARING);
+      } else {
+        try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
+        state.map.setPitch(0);
+        state.map.setBearing(0);
+      }
+    }
+
+    function update3DButton() {
+      var btn = document.getElementById('btn-3d');
+      if (btn) btn.classList.toggle('active', state.is3D);
+    }
+
+    // ══════════════ 样式切换：0 街道 / 1 卫星 hybrid / 2 暗色 ══════════════
+    function setStyle(index) {
+      state.styleIndex = index;
+      document.querySelectorAll('.style-btn').forEach(function (b) {
+        b.classList.toggle('active', Number(b.getAttribute('data-style')) === index);
+      });
+      if (state.fallbackMode || !state.map) return;
+      var keepCenter = state.map.getCenter();
+      var keepZoom = state.map.getZoom();
+      var styleDef;
+      if (index === 1) {
+        styleDef = satelliteStyle();
+      } else if (index === 2) {
+        styleDef = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+      } else {
+        var source = MAP_SOURCES[state.currentSourceIndex];
+        styleDef = source ? (typeof source.style === 'function' ? source.style() : source.style) : osmRasterStyle();
+      }
+      try { state.map.setTerrain(null); } catch (e) { /* ignore */ }
+      state.map.setStyle(styleDef);
+      state.map.once('style.load', function () {
+        if (!state.map) return;
+        var src = MAP_SOURCES[state.currentSourceIndex];
+        tryAdd3DTerrain(src);
+        tryAdd3DBuildings();
+        addRouteLayers();
+        if (state.routeSegments) { drawRoute(state.routeSegments); }
+        state.map.jumpTo({ center: keepCenter, zoom: keepZoom });
+        if (state.is3D) { state.map.setPitch(MAP_PITCH); state.map.setBearing(MAP_BEARING); }
+      });
+      postEvent({ event: 'styleChanged', index: index });
+    }
+
+    // ══════════════ 3DGS 沉浸式实景（移植 ImmersiveViewer，双 CDN 懒加载）══════════════
+    function loadSplatLib() {
+      if (!state.libPromise) {
+        state.libPromise = import('https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@3.0.1/+esm')
+          .catch(function () {
+            return import('https://esm.sh/@mkkellogg/gaussian-splats-3d@3.0.1')
+              .catch(function (e2) { state.libPromise = null; throw e2; });
+          });
+      }
+      return state.libPromise;
+    }
+
+    function openSplat(rawUrl, title) {
+      var url = resolveUrl(rawUrl);
+      if (!url) return;
+      // 通知 Dart 侧（宿主可做埋点 / 联动）
+      postEvent({ event: 'splat', url: url });
+      var overlay = document.getElementById('splat-overlay');
+      var loading = document.getElementById('splat-loading');
+      var errorEl = document.getElementById('splat-error');
+      var errorMsg = document.getElementById('splat-error-msg');
+      var titleEl = document.getElementById('splat-title');
+      var container = document.getElementById('splat-container');
+      overlay.classList.add('active');
+      loading.style.display = 'flex';
+      errorEl.style.display = 'none';
+      container.innerHTML = '';
+      titleEl.textContent = title || '3D 实景';
+
+      loadSplatLib().then(function (GaussianSplats3D) {
+        // 销毁旧 viewer 释放显存
+        disposeSplatViewer();
+        state.viewer = new GaussianSplats3D.Viewer({
+          cameraUp: [0, -1, -0.6],
+          initialCameraPosition: [-1, -4, 6],
+          initialCameraLookAt: [0, 4, 0],
+          sharedMemoryForWorkers: false,
+          integerBasedSort: true
+        });
+        return state.viewer.addSplatScene(url, {
+          splatAlphaRemovalThreshold: 5,
+          showLoadingUI: false,
+          progressiveLoad: true
+        }).then(function () {
+          loading.style.display = 'none';
+          state.viewer.start();
+        });
+      }).catch(function (err) {
+        console.error('[ImmersiveViewer] 加载失败:', err);
+        loading.style.display = 'none';
+        errorEl.style.display = 'flex';
+        errorMsg.textContent = (err && err.message) ? String(err.message) : '网络或格式错误';
+        disposeSplatViewer();
+      });
+    }
+
+    function disposeSplatViewer() {
+      if (state.viewer) {
+        try { state.viewer.dispose(); } catch (e) { /* ignore */ }
+        state.viewer = null;
+      }
+      document.getElementById('splat-container').innerHTML = '';
+    }
+
+    function closeSplat() {
+      document.getElementById('splat-overlay').classList.remove('active');
+      document.getElementById('splat-loading').style.display = 'none';
+      document.getElementById('splat-error').style.display = 'none';
+      disposeSplatViewer();
+    }
+
+    // ══════════════ 离线兜底：OSM 瓦片 + DOM 模拟标记（移植 _showFallbackMap）══════════════
+    function showFallback() {
+      state.fallbackMode = true;
+      destroyMapOnly();
+      hideLoadingOverlay();
+      var fb = document.getElementById('fallback-map');
+      fb.style.display = 'block';
+      fb.innerHTML =
+        '<div id="tile-layer" style="position:absolute;inset:0"></div>' +
+        '<div id="fallback-markers" style="position:absolute;inset:0"></div>' +
+        '<div style="position:absolute;top:52px;left:10px;background:rgba(17,26,44,0.85);border-radius:8px;' +
+        'padding:4px 10px;font-size:11px;color:#94a3b8;">离线模式 · 简化地图</div>';
+      loadFallbackTiles();
+      renderFallbackPois();
+      postEvent({ event: 'ready' });
+    }
+
+    function hideFallback() {
+      state.fallbackMode = false;
+      document.getElementById('fallback-map').style.display = 'none';
+    }
+
+    function loadFallbackTiles() {
+      var tileContainer = document.getElementById('tile-layer');
+      if (!tileContainer) return;
+      var z = Math.max(1, Math.min(18, Math.round(state.fallbackZoom || 13)));
+      var lng = state.fallbackCenter.lng;
+      var lat = state.fallbackCenter.lat;
+      var x = Math.floor(((lng + 180) / 360) * Math.pow(2, z));
+      var y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z));
+      var html = '';
+      for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          html += '<img src="https://tile.openstreetmap.org/' + z + '/' + (x + dx) + '/' + (y + dy) + '.png" ' +
+            'loading="lazy" onerror="this.style.display=\'none\'" ' +
+            'style="position:absolute;left:' + ((dx + 1) * 33.33) + '%;top:' + ((dy + 1) * 33.33) + '%;' +
+            'width:33.33%;height:33.33%;object-fit:cover;">';
+        }
+      }
+      tileContainer.innerHTML = html;
+    }
+
+    function fallbackLngLatToPx(lng, lat, container) {
+      var cx = container.offsetWidth / 2;
+      var cy = container.offsetHeight / 2;
+      var scale = 8000 / Math.pow(2, state.fallbackZoom || 13);
+      return [
+        cx + (lng - state.fallbackCenter.lng) * scale,
+        cy - (lat - state.fallbackCenter.lat) * scale
+      ];
+    }
+
+    function centerFallback(pois) {
+      if (!pois || !pois.length) return;
+      var sx = 0, sy = 0;
+      pois.forEach(function (p) { sx += Number(p.longitude); sy += Number(p.latitude); });
+      state.fallbackCenter = { lng: sx / pois.length, lat: sy / pois.length };
+      loadFallbackTiles();
+      positionFallbackPois();
+    }
+
+    function renderFallbackPois() {
+      var container = document.getElementById('fallback-markers');
+      if (!container) return;
+      container.querySelectorAll('.js-fallback-marker').forEach(function (el) { el.remove(); });
+      state.pois.forEach(function (poi) {
+        var lat = Number(poi.latitude), lng = Number(poi.longitude);
+        if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0)) return;
+        var st = poiStyle(poi.type);
+        var px = fallbackLngLatToPx(lng, lat, container);
+        var el = document.createElement('div');
+        el.className = 'js-fallback-marker';
+        el.style.left = px[0] + 'px';
+        el.style.top = px[1] + 'px';
+        var badge = document.createElement('div');
+        badge.className = 'poi-marker';
+        badge.style.setProperty('--mc', st.color);
+        badge.style.width = '26px';
+        badge.style.height = '26px';
+        badge.textContent = st.icon;
+        el.appendChild(badge);
+        el.addEventListener('click', function () {
+          postEvent({ event: 'poiTap', name: poi.name || '' });
+        });
+        el._fbVisible = visibleInDay(poi, state.dayFilter);
+        el.style.display = el._fbVisible ? '' : 'none';
+        el._fbPoi = poi;
+        container.appendChild(el);
+      });
+      if (state.routeSegments) drawFallbackRoute();
+    }
+
+    function positionFallbackPois() {
+      var container = document.getElementById('fallback-markers');
+      if (!container) return;
+      container.querySelectorAll('.js-fallback-marker').forEach(function (el) {
+        var poi = el._fbPoi;
+        if (!poi) return;
+        var px = fallbackLngLatToPx(Number(poi.longitude), Number(poi.latitude), container);
+        el.style.left = px[0] + 'px';
+        el.style.top = px[1] + 'px';
+      });
+      if (state.routeSegments) {
+        clearFallbackRoute();
+        drawFallbackRoute();
+      }
+    }
+
+    function drawFallbackRoute() {
+      var container = document.getElementById('fallback-markers');
+      if (!container || !state.routeSegments) return;
+      var segPaths = [];
+      var allWps = [];
+      state.routeSegments.forEach(function (seg) {
+        var pts = (seg.points || [])
+          .map(function (p) { return [Number(p.longitude), Number(p.latitude)]; })
+          .filter(function (c) { return validCoord(c); });
+        if (pts.length < 2) return;
+        if (!allWps.length) allWps.push(pts[0]);
+        allWps.push(pts[pts.length - 1]);
+        var palette = ROUTE_COLORS[seg.mode] || ROUTE_COLORS.driving;
+        segPaths.push({ points: pts, color: palette.color, glow: palette.glow });
+      });
+      if (!segPaths.length) return;
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'fallback-route-svg');
+      svg.setAttribute('style', 'position:absolute;inset:0;pointer-events:none;width:100%;height:100%');
+      var inner = '';
+      segPaths.forEach(function (s) {
+        var ptsStr = s.points.map(function (c) {
+          var px = fallbackLngLatToPx(c[0], c[1], container);
+          return px[0].toFixed(1) + ',' + px[1].toFixed(1);
+        }).join(' ');
+        inner += '<polyline points="' + ptsStr + '" fill="none" stroke="' + s.glow + '" stroke-width="12" stroke-linecap="round" opacity="0.25"/>';
+        inner += '<polyline points="' + ptsStr + '" fill="none" stroke="' + s.color + '" stroke-width="4" stroke-linecap="round" opacity="0.95"/>';
+        inner += '<polyline points="' + ptsStr + '" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.8" stroke-dasharray="6 6"/>';
+      });
+      svg.innerHTML = inner;
+      container.insertBefore(svg, container.firstChild);
+      allWps.forEach(function (coord, i) {
+        var px = fallbackLngLatToPx(coord[0], coord[1], container);
+        var badge = document.createElement('div');
+        badge.className = 'route-waypoint-badge' + (i === 0 ? ' route-waypoint-start' : '');
+        badge.textContent = i === 0 ? '起' : String(i + 1);
+        badge.style.cssText = 'position:absolute;left:' + px[0] + 'px;top:' + px[1] + 'px;transform:translate(-50%,-50%);z-index:5;';
+        container.appendChild(badge);
+      });
+    }
+
+    function clearFallbackRoute() {
+      var container = document.getElementById('fallback-markers');
+      if (!container) return;
+      container.querySelectorAll('.fallback-route-svg').forEach(function (el) { el.remove(); });
+      container.querySelectorAll('.route-waypoint-badge').forEach(function (el) { el.remove(); });
+    }
+
+    // 窗口尺寸变化时重排离线标记与路线
+    window.addEventListener('resize', function () {
+      if (state.fallbackMode) {
+        positionFallbackPois();
+      }
+    });
+
+    // ══════════════ 图例 ══════════════
+    function buildLegend() {
+      var poiLegend = document.getElementById('legend-poi');
+      var routeLegend = document.getElementById('legend-route');
+      if (poiLegend) {
+        poiLegend.innerHTML = Object.keys(POI_STYLES).map(function (k) {
+          return '<span class="legend-item"><span class="legend-dot" style="background:' +
+            POI_STYLES[k].color + '"></span>' + POI_STYLES[k].label + '</span>';
+        }).join('');
+      }
+      if (routeLegend) {
+        routeLegend.innerHTML = Object.keys(ROUTE_COLORS).map(function (k) {
+          return '<span class="legend-item"><span class="legend-bar" style="background:' +
+            ROUTE_COLORS[k].color + '"></span>' + ROUTE_COLORS[k].label + '</span>';
+        }).join('');
+      }
+    }
+
+    // ══════════════ 工具条事件绑定 ══════════════
+    document.querySelectorAll('.style-btn').forEach(function (b) {
+      b.addEventListener('click', function () { setStyle(Number(b.getAttribute('data-style'))); });
+    });
+    document.getElementById('btn-3d').addEventListener('click', toggle3D);
+    document.getElementById('btn-reset').addEventListener('click', resetView);
+    document.getElementById('splat-close').addEventListener('click', closeSplat);
+
+    // ══════════════ 对外桥接 API（Dart → JS）══════════════
+    window.__travelMap = {
+      setPois: function (pois) { setPois(pois); },
+      showDay: function (dayIndex) { showDay(dayIndex == null ? null : Number(dayIndex)); },
+      flyTo: function (lat, lng, zoom) { flyTo(Number(lat), Number(lng), zoom == null ? 16 : Number(zoom)); },
+      drawRoute: function (segments) { drawRoute(segments); },
+      clearRoute: function () { clearRoute(); },
+      toggle3D: function () { toggle3D(); },
+      setStyle: function (index) { setStyle(Number(index)); },
+      resetView: function () { resetView(); },
+      // httpBase：splatUrl 相对路径前缀；maptilerKey：可选（有则追加 3D 地形源）
+      setHttpBase: function (httpBase, maptilerKey) {
+        state.httpBase = httpBase || '';
+        var keyChanged = maptilerKey && maptilerKey !== state.maptilerKey;
+        if (keyChanged) {
+          state.maptilerKey = maptilerKey;
+          MAP_SOURCES = buildSources();
+          if (state.booted) { initMapChain(); return; } // 已启动则重建源链
+        }
+        boot();
+      }
+    };
+
+    // 兜底启动：宿主未来得及调 setHttpBase 时也能自行加载（400ms 延迟等配置注入）
+    setTimeout(boot, 400);
+  })();
+  </script>
+</body>
+</html>

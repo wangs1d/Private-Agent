@@ -55,7 +55,7 @@ export const BODY_LIST_MODULES_TOOL: ChatCompletionTool = {
   function: {
     name: "body.list_modules",
     description:
-      "列出所有身体模块（运动/发声/视觉/听觉/体感/前庭/稳态/反射）及其工具清单。当你需要知道自己有哪些身体能力、可调用哪些身体器官时调用。",
+      "列出所有身体模块（视觉/听觉/体感/前庭/稳态/反射）及其工具清单。当你需要知道自己有哪些身体能力、可调用哪些身体器官时调用。",
     parameters: {
       type: "object",
       properties: {},
@@ -77,7 +77,7 @@ export const BODY_CALIBRATE_TOOL: ChatCompletionTool = {
         module: {
           type: "string",
           description: "模块名",
-          enum: ["hand", "mouth", "eye", "ear", "skin", "vestibular", "homeostasis"],
+          enum: ["eye", "ear", "skin", "vestibular", "homeostasis"],
         },
       },
       required: ["module"],
@@ -100,8 +100,6 @@ const DEFAULT_ACTOR_ID = "default";
 
 /** body.calibrate 工具允许的模块名（不含 reflex，反射弧不需要校准） */
 const VALID_CALIBRATE_MODULES: ReadonlySet<BodyModuleKind> = new Set<BodyModuleKind>([
-  "hand",
-  "mouth",
   "eye",
   "ear",
   "skin",

@@ -1795,7 +1795,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     keywords: [
       '身体器官', '器官', '大脑结构', '大脑', 'brain', '身体结构', '身体能力', '身体模块',
       '我有哪些身体', '我有什么身体', '我的身体', '我在哪台设备', '我在哪里渲染',
-      '手', '眼', '耳', '嘴', '皮肤', '前庭', '稳态', '反射', 'hand', 'eye', 'ear', 'mouth', 'skin',
+      '眼', '耳', '皮肤', '前庭', '稳态', '反射', 'eye', 'ear', 'skin',
       '电量', 'battery', '算力配额', '负载', '疲劳度', 'fatigue',
       'body.list_modules', 'body.where_am_i', 'body.state', 'body.calibrate',
     ],

@@ -5,8 +5,8 @@
 //
 // 与 BodyCenter 器官的分工：
 //   - BrainCenter.SensoryCortex（本类）= 脑内感官皮层，做语义理解（图像→描述、音频→文本、文本→话术）
-//   - BodyCenter.Eye/Ear/Mouth = 身体感觉器官与发声执行器，做硬件采集与执行（拉截屏、收音频、TTS 合成）
-//   - 协作通路：BodyCenter 器官发布 body.eye.frame / body.ear.transcript / body.mouth.spoken 信号到 BodyBus，
+//   - BodyCenter.Eye/Ear = 身体感觉器官，做硬件采集（拉截屏、收音频、ASR 转写）
+//   - 协作通路：BodyCenter 器官发布 body.eye.frame / body.ear.transcript 信号到 BodyBus，
 //     SensoryCortex 通过 attachBodyBus 订阅这些信号填充 SensoryFrame；决策后通过 BodyGateway 下行控制器官
 //
 // 设计原则：
@@ -167,12 +167,11 @@ export class SensoryCortex {
   }
 
   /**
-   * 订阅 BodyBus 上行信号，把 body.eye.frame / body.ear.transcript /
-   * body.mouth.spoken 信号接入感官皮层。
+   * 订阅 BodyBus 上行信号，把 body.eye.frame / body.ear.transcript
+   * 信号接入感官皮层。
    *
    * - body.eye.frame → 更新内部缓存 lastVisualFrame（供 buildSensoryFrame 优先使用）
    * - body.ear.transcript → 更新内部缓存 lastAudioText
-   * - body.mouth.spoken → 仅记日志（发声完成事件，感官皮层无需缓存）
    *
    * 返回取消订阅函数（调用后移除所有 BodyBus 订阅）。
    * 此方法由 create-app-services.ts 在装配阶段调用，注入 BodyBus 引用。
@@ -211,20 +210,6 @@ export class SensoryCortex {
       }),
     );
 
-    // body.mouth.spoken → 仅记日志（发声完成事件）
-    unsubs.push(
-      bodyBus.subscribe("body.mouth.spoken", (signal) => {
-        try {
-          const s = signal as { payload?: Record<string, unknown> };
-          console.log(
-            `[SensoryCortex] body.mouth.spoken: ${JSON.stringify(s?.payload ?? {}).slice(0, 100)}`,
-          );
-        } catch {
-          /* ignore */
-        }
-      }),
-    );
-
     const unsubAll = () => {
       for (const unsub of unsubs) {
         try {
@@ -235,7 +220,7 @@ export class SensoryCortex {
       }
     };
     this.bodyBusUnsubscribe = unsubAll;
-    console.log("[SensoryCortex] 已订阅 BodyBus（eye.frame / ear.transcript / mouth.spoken）");
+    console.log("[SensoryCortex] 已订阅 BodyBus（eye.frame / ear.transcript）");
     return unsubAll;
   }
 

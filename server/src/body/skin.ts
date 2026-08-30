@@ -1,18 +1,21 @@
 // Agent Body Center — Skin 皮肤/触觉与环境传感器
 //
-// 职责：
-//   1. 智能家居控制：smart_home.control_device / smart_home.scene / smart_home.get_state
-//   2. 设备传感器读取：device.sensor.read
-//   3. 设备状态变化订阅 → body.skin.device_change 信号
-//   4. 传感器读数流订阅 → body.skin.sensor_reading 信号
+// 职责（纯感知，无下行工具）：
+//   1. 设备状态变化订阅 → body.skin.device_change 信号
+//   2. 传感器读数流订阅 → body.skin.sensor_reading 信号
+//   3. 感官查询：skin.devices / skin.sensor_history / skin.last_change
 //
 // 与人体器官对照：皮肤感知触压/温度/疼痛等体感信号；
 // 在 Agent Body 中对应智能家居设备状态与传感器读数。
 //
+// 注：smart_home.control_device / smart_home.scene / smart_home.get_state /
+//     device.sensor.read 等下行控制工具已移除，统一由 tools/smart-home-tools.ts /
+//     tools/device-tools.ts 直接注册到 ToolRegistry（避免同一工具双注册互相覆盖）。
+//
 // 设计原则：
 //   - 子系统缺失时优雅降级：smartHome / deviceRegistry 任一缺失时仅日志提示，不抛错
 //   - async/await：所有 I/O 走 async/await，不依赖 callback
-//   - 信号广播：所有动作执行后发布 body.skin.* 信号到 BodyBus
+//   - 信号广播：感知事件发布 body.skin.* 信号到 BodyBus（AwarenessCortex 订阅消费）
 //   - 资源释放：stop() 取消所有订阅与活跃的流消费任务
 
 import type { BodyBus } from "./body-bus.js";
@@ -24,7 +27,6 @@ import type {
   BodySenseQuery,
   BodySenseResult,
   BodySignal,
-  BodyToolRegistry,
 } from "./types.js";
 
 // ---- 外观接口（与具体实现解耦）-----------------------------------------
@@ -36,18 +38,6 @@ import type {
  * Skin 只依赖此接口，便于测试 mock 与未来替换为非 HA 实现。
  */
 export interface SmartHomeLike {
-  /** 控制单个设备（开关/调亮度/调温度等） */
-  controlDevice?(opts: {
-    deviceId?: string;
-    entityType?: string;
-    entityId?: string;
-    action?: string;
-    params?: Record<string, unknown>;
-  }): Promise<{ ok: boolean; state?: Record<string, unknown> }>;
-  /** 激活场景 */
-  activateScene?(sceneId: string): Promise<{ ok: boolean }>;
-  /** 查询单个设备状态 */
-  getState?(entityId: string): Promise<{ state: Record<string, unknown> } | null>;
   /** 查询所有设备状态快照 */
   getAllStates?(): Promise<Record<string, Record<string, unknown>>>;
   /** 订阅设备状态变化事件；返回取消订阅函数 */
@@ -65,17 +55,11 @@ export interface SmartHomeLike {
  * 设备注册表外观接口。
  *
  * 与 device-bus/device-registry.ts 的 DeviceRegistry 解耦：
- * 仅暴露 Skin 需要的查询/调用/流订阅能力。
+ * 仅暴露 Skin 需要的流订阅能力。
  */
 export interface DeviceRegistryLike {
   /** 按能力前缀列出设备（如 "sensor." 命中所有传感器） */
   listByCapability?(cap: string): Array<{ deviceId: string; kind: string }>;
-  /** 调用设备的某个 action */
-  invoke(
-    deviceId: string,
-    action: string,
-    params: Record<string, unknown>,
-  ): Promise<{ ok: boolean; result?: unknown }>;
   /** 打开数据流；返回 AsyncIterable，调用方按需消费 */
   openStream?(
     deviceId: string,
@@ -96,29 +80,20 @@ export interface SkinDeps {
 // ---- Skin 主类 -------------------------------------------------
 
 /**
- * 皮肤/触觉与环境传感器：智能家居 + 设备传感器入口。
+ * 皮肤/触觉与环境传感器：智能家居 + 设备传感器感知入口。
  *
  * 与 BodyCenter 的关系：
  *  - BodyCenter 通过 setSkin(this) 注入
- *  - BodyGateway 通过 registerModule + registerToolRoute("smart_home." → skin) 路由
+ *  - 无下行工具路由（act 仅返回不支持，感知事件走 BodyBus 上行）
  *
  * 信号广播（发布到 BodyBus）：
  *  - body.skin.device_change：设备状态变化（来自 smartHome.onStateChange）
  *  - body.skin.sensor_reading：传感器读数（来自 deviceRegistry.openStream）
- *  - body.skin.device_control：control_device 动作执行后
- *  - body.skin.scene_activated：scene 动作执行后
- *  - body.skin.state_query：get_state 动作执行后
- *  - body.skin.sensor_read：sensor.read 动作执行后
  */
 export class Skin implements BodyModuleLike {
   readonly name = "skin" as const;
   readonly label = "皮肤/触觉与环境传感器";
-  readonly tools = [
-    "smart_home.control_device",
-    "smart_home.scene",
-    "smart_home.get_state",
-    "device.sensor.read",
-  ];
+  readonly tools: string[] = [];
 
   private readonly bodyBus: BodyBus;
   private readonly smartHome?: SmartHomeLike;
@@ -160,6 +135,7 @@ export class Skin implements BodyModuleLike {
     if (this.smartHome?.onStateChange) {
       try {
         const unsubscribe = this.smartHome.onStateChange((event) => {
+          this.markActivity();
           this.bodyBus.publish({
             kind: "body.skin.device_change",
             module: "skin",
@@ -227,6 +203,7 @@ export class Skin implements BodyModuleLike {
         const result = await iter.next();
         if (result.done) break;
         const chunk = result.value;
+        this.markActivity();
         this.bodyBus.publish({
           kind: "body.skin.sensor_reading",
           module: "skin",
@@ -283,172 +260,14 @@ export class Skin implements BodyModuleLike {
   // ─── 动作执行 ────────────────────────────────────────────────
 
   /**
-   * 执行动作：按 action.tool 分发到对应子系统。
-   *
-   * - smart_home.control_device → smartHome.controlDevice
-   * - smart_home.scene          → smartHome.activateScene
-   * - smart_home.get_state      → smartHome.getState
-   * - device.sensor.read        → deviceRegistry.invoke(deviceId, "sensor.read", params)
-   *
-   * 未识别的 tool 返回 ok=false + tool_not_supported。
-   * 子系统缺失时返回 ok=false + subsystem_unavailable。
+   * Skin 已无下行工具（控制类工具由 tools/smart-home-tools.ts 等直接承接）。
+   * 保留 act 以满足 BodyModuleLike 接口；万一被路由到时优雅返回。
    */
   async act(action: BodyAction): Promise<BodyActionResult> {
-    const startedAt = Date.now();
-    const args = action.args ?? {};
-
-    try {
-      switch (action.tool) {
-        case "smart_home.control_device":
-          return await this.actControlDevice(args, startedAt);
-        case "smart_home.scene":
-          return await this.actScene(args, startedAt);
-        case "smart_home.get_state":
-          return await this.actGetState(args, startedAt);
-        case "device.sensor.read":
-          return await this.actSensorRead(args, startedAt);
-        default:
-          return {
-            ok: false,
-            result: { error: `tool_not_supported:${action.tool}` },
-            errorMessage: `tool_not_supported:${action.tool}`,
-            durationMs: Date.now() - startedAt,
-          };
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.log(`[Skin] act 异常 tool=${action.tool} err=${errMsg}`);
-      return {
-        ok: false,
-        result: { error: errMsg },
-        errorMessage: errMsg,
-        durationMs: Date.now() - startedAt,
-      };
-    }
-  }
-
-  /** smart_home.control_device：委托 smartHome.controlDevice */
-  private async actControlDevice(
-    args: Record<string, unknown>,
-    startedAt: number,
-  ): Promise<BodyActionResult> {
-    if (!this.smartHome || !this.smartHome.controlDevice) {
-      return this.unavailable("smart_home.control_device", startedAt);
-    }
-    const entityId = this.pickString(args, ["entityId", "entity_id"]);
-    const actionStr = this.pickString(args, ["action"]);
-    const result = await this.smartHome.controlDevice({
-      deviceId: this.pickString(args, ["deviceId", "device_id"]),
-      entityType: this.pickString(args, ["entityType", "entity_type"]),
-      entityId,
-      action: actionStr,
-      params: args,
-    });
-    this.publishSignal("body.skin.device_control", {
-      tool: "smart_home.control_device",
-      entityId,
-      action: actionStr,
-      result,
-    });
-    this.markActivity();
     return {
-      ok: result.ok,
-      result: { ...result } as Record<string, unknown>,
-      durationMs: Date.now() - startedAt,
-    };
-  }
-
-  /** smart_home.scene：委托 smartHome.activateScene */
-  private async actScene(
-    args: Record<string, unknown>,
-    startedAt: number,
-  ): Promise<BodyActionResult> {
-    if (!this.smartHome || !this.smartHome.activateScene) {
-      return this.unavailable("smart_home.scene", startedAt);
-    }
-    const sceneId = this.pickString(args, ["sceneId", "scene_name", "sceneName"]) ?? "";
-    if (!sceneId) {
-      return {
-        ok: false,
-        result: { error: "scene_id_required" },
-        errorMessage: "scene_id_required",
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    const result = await this.smartHome.activateScene(sceneId);
-    this.publishSignal("body.skin.scene_activated", {
-      tool: "smart_home.scene",
-      sceneId,
-      result,
-    });
-    this.markActivity();
-    return {
-      ok: result.ok,
-      result: { sceneId, ...result } as Record<string, unknown>,
-      durationMs: Date.now() - startedAt,
-    };
-  }
-
-  /** smart_home.get_state：委托 smartHome.getState */
-  private async actGetState(
-    args: Record<string, unknown>,
-    startedAt: number,
-  ): Promise<BodyActionResult> {
-    if (!this.smartHome || !this.smartHome.getState) {
-      return this.unavailable("smart_home.get_state", startedAt);
-    }
-    const entityId = this.pickString(args, ["entityId", "entity_id"]) ?? "";
-    if (!entityId) {
-      return {
-        ok: false,
-        result: { error: "entity_id_required" },
-        errorMessage: "entity_id_required",
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    const state = await this.smartHome.getState(entityId);
-    this.publishSignal("body.skin.state_query", {
-      tool: "smart_home.get_state",
-      entityId,
-      state,
-    });
-    this.markActivity();
-    return {
-      ok: true,
-      result: { entityId, state } as Record<string, unknown>,
-      durationMs: Date.now() - startedAt,
-    };
-  }
-
-  /** device.sensor.read：委托 deviceRegistry.invoke(deviceId, "sensor.read", params) */
-  private async actSensorRead(
-    args: Record<string, unknown>,
-    startedAt: number,
-  ): Promise<BodyActionResult> {
-    if (!this.deviceRegistry) {
-      return this.unavailable("device.sensor.read", startedAt);
-    }
-    const deviceId = this.pickString(args, ["deviceId", "device_id"]) ?? "";
-    if (!deviceId) {
-      return {
-        ok: false,
-        result: { error: "device_id_required" },
-        errorMessage: "device_id_required",
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    const params = (args.params as Record<string, unknown> | undefined) ?? {};
-    const result = await this.deviceRegistry.invoke(deviceId, "sensor.read", params);
-    this.publishSignal("body.skin.sensor_read", {
-      tool: "device.sensor.read",
-      deviceId,
-      result,
-    });
-    this.markActivity();
-    return {
-      ok: result.ok,
-      result: { deviceId, ...result } as Record<string, unknown>,
-      durationMs: Date.now() - startedAt,
+      ok: false,
+      result: {},
+      errorMessage: `skin is sense-only; tool not routed here: ${action.tool ?? "(none)"}`,
     };
   }
 
@@ -547,72 +366,10 @@ export class Skin implements BodyModuleLike {
     };
   }
 
-  // ─── 工具注册 ────────────────────────────────────────────────
-
-  /**
-   * 把 smart_home.control_device / smart_home.scene / smart_home.get_state /
-   * device.sensor.read 工具挂到外部 ToolRegistry，handler 内部委托 this.act()。
-   *
-   * actorId 暂时无法获取（BodyToolRegistry 接口未传 context），保持 undefined。
-   * 返回值：成功 { ok: true, ...result.result }；失败 { ok: false, error, ...result.result }。
-   */
-  registerTools(registry: BodyToolRegistry): void {
-    for (const toolName of this.tools) {
-      registry.register(toolName, async (input) => {
-        const result = await this.act({
-          tool: toolName,
-          args: input,
-          source: "body_module",
-        });
-        if (!result.ok) {
-          return {
-            ok: false,
-            error:
-              result.errorMessage ??
-              result.reason ??
-              "body module action failed",
-            ...result.result,
-          };
-        }
-        return { ok: true, ...result.result };
-      });
-    }
-  }
-
   // ─── 内部工具 ────────────────────────────────────────────────
-
-  /** 发布 body.skin.* 信号到 BodyBus */
-  private publishSignal(kind: string, payload: Record<string, unknown>): void {
-    this.bodyBus.publish({
-      kind,
-      module: "skin",
-      payload,
-      timestamp: new Date().toISOString(),
-    });
-  }
 
   /** 标记最近一次活动时间 */
   private markActivity(): void {
     this.lastActivityAt = new Date().toISOString();
-  }
-
-  /** 子系统缺失时返回标准错误 */
-  private unavailable(tool: string, startedAt: number): BodyActionResult {
-    return {
-      ok: false,
-      result: { error: `subsystem_unavailable:${tool}` },
-      errorMessage: `subsystem_unavailable:${tool}`,
-      durationMs: Date.now() - startedAt,
-    };
-  }
-
-  /** 从 args 中按优先级取出字符串值（兼容 snake_case / camelCase） */
-  private pickString(args: Record<string, unknown>, keys: string[]): string | undefined {
-    for (const key of keys) {
-      const val = args[key];
-      if (typeof val === "string" && val.length > 0) return val;
-      if (typeof val === "number" && Number.isFinite(val)) return String(val);
-    }
-    return undefined;
   }
 }

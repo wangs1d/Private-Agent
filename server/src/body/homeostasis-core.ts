@@ -4,10 +4,10 @@
 // 并在指标越过阈值时通过 BodyBus 发布告警信号。
 //
 // P0-3 重构要点：
-//  - fatigue 基于活动量（Hand 活跃任务 + 近期 LLM 调用 + 信号密度），不再纯线性时间模型
+//  - fatigue 基于活动量（近期 LLM 调用 + 信号密度），不再纯线性时间模型
 //  - mood 维度迁回 HomeostasisCore（权威源），VestibularApparatus 保留 mood 作为渲染态
 //  - 新增 hunger 维度（算力/能量消耗率），>0.8 发布 hunger_high 信号
-//  - 订阅 BodyBus 信号（body.hand.task_done / body.action.executed / body.skin.*）估算活动量
+//  - 订阅 BodyBus 信号（body.action.executed / body.skin.*）估算活动量
 //
 // 与其他 BodyModule 不同：纯聚合服务，tools=[]，不直接接受动作。
 // BrainCenter 通过 BodyCenter.state() 读取 BodyState，HomeostasisCore 是其权威数据源。
@@ -172,8 +172,6 @@ export class HomeostasisCore implements BodyModuleLike {
   private hunger: number = 0;
 
   // ---- P0-3 新增：活动量追踪（来自 BodyBus 信号订阅） ----
-  /** 当前 Hand 活跃任务数（body.hand.task_progress ++ / body.hand.task_done --） */
-  private activeHandTasks: number = 0;
   /** 近期动作执行次数（body.action.executed 计数，每轮 pollOnce 后重置） */
   private recentActionCount: number = 0;
   /** 近期信号时间戳列表（ms，用于计算信号密度，prune 到 5 分钟窗口） */
@@ -222,8 +220,8 @@ export class HomeostasisCore implements BodyModuleLike {
    * 定时器调用 unref() 避免阻塞进程退出。首次启动立即轮询一次，
    * 避免等一个完整 interval 才有数据。
    *
-   * P0-3：订阅 body.hand.task_progress / task_done / body.action.executed /
-   * body.action.failed / body.skin.* 信号，用于估算活动量（fatigue/hunger 依赖）。
+   * P0-3：订阅 body.action.executed / body.action.failed / body.skin.* 信号，
+   * 用于估算活动量（fatigue/hunger 依赖）。
    * 订阅失败不阻断启动（降级到纯轮询模式，活动量估算回退到 0）。
    */
   async start(): Promise<void> {
@@ -567,10 +565,9 @@ export class HomeostasisCore implements BodyModuleLike {
   /**
    * 更新 fatigue：P0-3 重构为基于活动量的非线性模型 + 风险点2 高负载冷却机制。
    *
-   * 活动量（activityLevel 0-1）由三个因子加权：
-   *  - Hand 活跃任务数（0.4 权重）：activeHandTasks / 3，上限 1
-   *  - 近期 LLM/工具调用次数（0.4 权重）：recentActionCount / 20，上限 1
-   *  - 信号密度（0.2 权重）：近 5 分钟 BodyBus 信号数 / 100，上限 1
+   * 活动量（activityLevel 0-1）由两个因子加权：
+   *  - 近期 LLM/工具调用次数（0.6 权重）：recentActionCount / 20，上限 1
+   *  - 信号密度（0.4 权重）：近 5 分钟 BodyBus 信号数 / 100，上限 1
    *
    * 疲劳增长/恢复规则（每次 poll，默认 60s 间隔）：
    *  - activityLevel > 0.2：fatigue += activityLevel * 0.01（活动量越高增长越快）
@@ -649,19 +646,17 @@ export class HomeostasisCore implements BodyModuleLike {
   /**
    * 计算当前活动量水平（0-1）。
    *
-   * 三因子加权：
-   *  - Hand 活跃任务数（0.4 权重）：min(activeHandTasks / 3, 1)
-   *  - 近期动作执行次数（0.4 权重）：min(recentActionCount / 20, 1)
-   *  - 信号密度（0.2 权重）：min(近5分钟信号数 / 100, 1)
+   * 两因子加权：
+   *  - 近期动作执行次数（0.6 权重）：min(recentActionCount / 20, 1)
+   *  - 信号密度（0.4 权重）：min(近5分钟信号数 / 100, 1)
    *
-   * BodyBus 不可用时（无订阅），activeHandTasks/recentActionCount 为 0，
+   * BodyBus 不可用时（无订阅），recentActionCount 为 0，
    * 信号密度回退到 BodyBus.getRecentSignals 查询（若可用）。
    */
   private computeActivityLevel(): number {
-    const taskFactor = Math.min(this.activeHandTasks / 3, 1);
     const actionFactor = Math.min(this.recentActionCount / 20, 1);
     const signalDensity = this.computeSignalDensity();
-    return clamp01(taskFactor * 0.4 + actionFactor * 0.4 + signalDensity * 0.2);
+    return clamp01(actionFactor * 0.6 + signalDensity * 0.4);
   }
 
   /**
@@ -708,7 +703,7 @@ export class HomeostasisCore implements BodyModuleLike {
    *  2. quota < 0.1 → idle（无算力资源，无法工作）
    *  3. hunger > 0.8 → alert（高饥饿，需要"进食"/补充能量）
    *  4. fatigue > 0.8 → idle（过度疲劳，需要休息）
-   *  5. activeHandTasks > 0 → thinking（正在执行任务）
+   *  5. recentActionCount > 0 → thinking（近期有动作执行）
    *  6. 信号密度高 + battery > 0.5 → listening（接收大量输入）
    *  7. valence > 0.7 → happy（一切顺利）
    *  8. 默认 → idle
@@ -738,7 +733,7 @@ export class HomeostasisCore implements BodyModuleLike {
       newMood = "alert";
     } else if (this.fatigue > 0.8) {
       newMood = "idle";
-    } else if (this.activeHandTasks > 0) {
+    } else if (this.recentActionCount > 0) {
       newMood = "thinking";
     } else if (activityLevel > 0.3 && this.battery > 0.5) {
       newMood = "listening";
@@ -774,8 +769,6 @@ export class HomeostasisCore implements BodyModuleLike {
    * P0-3 新增：订阅 BodyBus 信号，用于估算活动量 + 环境感知联动。
    *
    * 订阅的信号 kind：
-   *  - body.hand.task_progress → activeHandTasks++，记录信号时间
-   *  - body.hand.task_done → activeHandTasks--（下限 0），hunger 降低（满足），记录信号时间
    *  - body.action.executed → recentActionCount++，hunger 微增，记录信号时间
    *  - body.action.failed → 记录信号时间（失败也消耗能量）
    *  - body.skin.* → 记录信号时间（环境感知联动）
@@ -793,31 +786,6 @@ export class HomeostasisCore implements BodyModuleLike {
     };
 
     try {
-      // body.hand.task_progress → 活跃任务数 +1
-      const unsubProgress = this.bodyBus.subscribe(
-        BODY_SIGNAL_KIND.HAND_TASK_PROGRESS,
-        () => {
-          this.activeHandTasks++;
-          recordSignal();
-        },
-      );
-      this.unsubscribers.push(unsubProgress);
-
-      // body.hand.task_done → 活跃任务数 -1，hunger 降低（满足）
-      const unsubDone = this.bodyBus.subscribe(
-        BODY_SIGNAL_KIND.HAND_TASK_DONE,
-        (signal) => {
-          this.activeHandTasks = Math.max(0, this.activeHandTasks - 1);
-          // 任务完成 → "满足"，hunger 降低
-          const success = signal.payload?.success;
-          if (success === true || success === undefined) {
-            this.hunger = clamp01(this.hunger - 0.1);
-          }
-          recordSignal();
-        },
-      );
-      this.unsubscribers.push(unsubDone);
-
       // body.action.executed → 动作计数 +1，hunger 微增
       const unsubExec = this.bodyBus.subscribe(
         BODY_SIGNAL_KIND.ACTION_EXECUTED,
@@ -847,7 +815,7 @@ export class HomeostasisCore implements BodyModuleLike {
       this.unsubscribers.push(unsubSkin);
 
       console.log(
-        `[HomeostasisCore] 已订阅 BodyBus 信号（hand.task_progress/task_done/action.executed/action.failed/skin.*）`,
+        `[HomeostasisCore] 已订阅 BodyBus 信号（action.executed/action.failed/skin.*）`,
       );
     } catch (err) {
       // 订阅失败不阻断启动，降级到纯轮询模式

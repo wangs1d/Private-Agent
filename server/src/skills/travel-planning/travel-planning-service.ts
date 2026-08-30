@@ -16,7 +16,7 @@
 import type { Coordinates, AgentTrace } from './types.js';
 import type { IPlanningAgent, AgentRequest } from './interfaces.js';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
-import { pricingService, type MemberTier, type PriceQuote, type BoundPlatform } from './pricing-service.js';
+import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
 import { travelMediaStore } from './travel-media-store.js';
 
 /** 行程条目可挂载的本地媒体（来自 POI 媒体库） */
@@ -557,6 +557,103 @@ export class PlanningService {
       restaurants: cacheEntry.data.restaurants,
       fromCache,
     };
+  }
+
+  /**
+   * 公开入口：为 POI 生成行程条目描述文本（替代条目替换时复用规划引擎的文案口径）。
+   */
+  describePoi(poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): string {
+    return this.generateDescription(poi, type);
+  }
+
+  /**
+   * 公开入口：按类型+坐标找「同类替代 POI」（行程面板「提意见换一个」）。
+   * 复用现有 Overpass 周边搜索（以条目坐标为圆心，不做地理编码）：
+   * 排除同名 POI → 按 comment 关键词粗略加权（命中名称/标签越多越靠前）→
+   * 关键词全不命中时自然回退「距离最近」→ 取排序后第一个。
+   * 找不到候选（网络失败/无结果）返回 null，由调用方决定 404 语义。
+   */
+  async findAlternativePoi(
+    type: 'attraction' | 'hotel' | 'restaurant',
+    latitude: number,
+    longitude: number,
+    excludeName: string,
+    comment?: string,
+  ): Promise<RawPOI | null> {
+    const center: Coordinates = { latitude, longitude };
+    let candidates: RawPOI[] = [];
+    try {
+      if (type === 'hotel') candidates = await this.searchHotels(center, '');
+      else if (type === 'restaurant') candidates = await this.searchRestaurants(center, '');
+      else candidates = await this.searchAttractions(center, '');
+    } catch (err) {
+      console.warn(`[PlanningService] 替代 POI 搜索失败(${type}):`, err instanceof Error ? err.message : String(err));
+      return null;
+    }
+    const exclude = excludeName.trim().toLowerCase();
+    const pool = candidates.filter(p => p.name && p.name.trim().toLowerCase() !== exclude);
+    if (pool.length === 0) return null;
+
+    // comment 关键词粗略分词（保留 ≥2 字符 token），命中名称/标签加分
+    const keywords = (comment ?? '')
+      .split(/[\s，。！？、,.!?;；:：()（）[\]【】]+/)
+      .map(t => t.trim().toLowerCase())
+      .filter(t => t.length >= 2);
+    const scored = pool.map(poi => {
+      const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
+      let score = keywords.reduce((acc, kw) => (hay.includes(kw) ? acc + 100 : acc), 0);
+      score -= this.haversineKm(latitude, longitude, poi.latitude, poi.longitude);
+      return { poi, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0]?.poi ?? null;
+  }
+
+  /**
+   * 公开入口：搜索目的地指定类型 POI（行程面板「单项编辑器」备选搜索）。
+   * 走 searchDestination 的缓存/网络/知识库全链路，可按关键词粗滤名称/标签，
+   * 逐条用 PricingService 报价生成 priceInfo，最多返回 limit 条。
+   */
+  async searchPois(
+    destination: string,
+    type: 'attraction' | 'hotel' | 'restaurant',
+    keyword?: string,
+    limit: number = 8,
+  ): Promise<Array<{
+    name: string;
+    type: 'attraction' | 'hotel' | 'restaurant';
+    latitude: number;
+    longitude: number;
+    address: string;
+    priceInfo: string;
+    tags: string[];
+    /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（缓存 POI 带有时透传） */
+    splatUrl?: string;
+  }>> {
+    const result = await this.searchDestination(destination, type);
+    const bucket = type === 'hotel' ? result.hotels : type === 'restaurant' ? result.restaurants : result.attractions;
+    const kw = keyword?.trim().toLowerCase() ?? '';
+    const matched = kw
+      ? bucket.filter(p => `${p.name} ${(p.tags || []).join(' ')}`.toLowerCase().includes(kw))
+      : bucket;
+    const pricingCtx: PricingContext = { destination, preferences: {} };
+    return matched.slice(0, Math.max(1, limit)).map(p => {
+      const quote = type === 'hotel'
+        ? pricingService.quoteHotel(p.name, p.tags || [], pricingCtx)
+        : type === 'attraction'
+          ? pricingService.quoteAttraction(p.name, p.tags || [], pricingCtx)
+          : pricingService.quoteRestaurant(p.name, p.tags || [], pricingCtx);
+      return {
+        name: p.name,
+        type,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        address: p.address,
+        priceInfo: formatQuotePriceInfo(quote),
+        tags: p.tags || [],
+        ...(p.splatUrl ? { splatUrl: p.splatUrl } : {}),
+      };
+    });
   }
 
   /**
@@ -1251,15 +1348,31 @@ export class PlanningService {
     );
 
     // Step 3: 如果所有API都返回空结果，生成改进的合成数据
+    let syntheticFallback = false;
     if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
       console.warn(`[PlanningService] 所有API均无结果，使用知名景点降级方案`);
       const synthetic = this.generateSyntheticPOIs(center, destName);
       attractions = synthetic.attractions;
       hotels = synthetic.hotels;
       restaurants = synthetic.restaurants;
+      syntheticFallback = true;
     }
 
-    // Step 4: 写入缓存（内存+文件持久化，全局共享）
+    // Step 4: 写入缓存（内存+文件持久化，全局共享）。
+    // 全空结果与合成降级结果都不落缓存：否则一次网络故障会把空/占位 POI
+    // 永久污染该目的地（缓存命中后直接编排出 0 项行程，且 TTL 内无法自愈）。
+    if (syntheticFallback || (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0)) {
+      console.warn(`[PlanningService] 跳过 POI 缓存写入（${syntheticFallback ? "合成降级" : "空结果"} 不缓存）`);
+      return {
+        destination: destName,
+        queryKey: normalizedKey,
+        data: { attractions, hotels, restaurants },
+        center,
+        createdAt: new Date().toISOString(),
+        lastAccessedAt: new Date().toISOString(),
+        accessCount: 0,
+      };
+    }
     const entry = poiCache.set(normalizedKey, { attractions, hotels, restaurants }, center);
 
     return entry;
@@ -1812,7 +1925,8 @@ export class PlanningService {
         way["leisure"~"park|garden"](around:25000,${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >; out skel qt;);
+      (._; >;);
+      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1841,7 +1955,8 @@ export class PlanningService {
         way["tourism"="hotel"](around:25000,${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >; out skel qt;);
+      (._; >;);
+      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1862,7 +1977,8 @@ export class PlanningService {
         node["amenity"="cafe"](around:15000,${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >; out skel qt;);
+      (._; >;);
+      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1922,12 +2038,18 @@ export class PlanningService {
     }
 
     return winner.elements
-      .filter(el => el.lat !== undefined && el.lon !== undefined)
+      .filter(el => {
+        if (el.lat !== undefined && el.lon !== undefined) return true;
+        // way/relation 元素：out center 输出的是 center.{lat,lon}
+        const center = el.center as { lat?: unknown; lon?: unknown } | undefined;
+        return center?.lat !== undefined && center?.lon !== undefined;
+      })
       .map((el, idx) => {
         const tags = el.tags as Record<string, string> | undefined;
         const name = tags?.name || tags?.['name:zh'] || tags?.['name:en'] || `地点${idx + 1}`;
-        const lat = typeof el.lat === 'number' ? el.lat : parseFloat(String(el.lat));
-        const lon = typeof el.lon === 'number' ? el.lon : parseFloat(String(el.lon));
+        const center = el.center as { lat?: unknown; lon?: unknown } | undefined;
+        const lat = typeof el.lat === 'number' ? el.lat : parseFloat(String(el.lat ?? center?.lat));
+        const lon = typeof el.lon === 'number' ? el.lon : parseFloat(String(el.lon ?? center?.lon));
 
         // 构建地址
         let address = '';
@@ -3119,18 +3241,7 @@ export class PlanningService {
    *  - 免费：免费
    */
   private _formatPriceInfo(q: PriceQuote): string {
-    if (q.originalPrice === 0) return '免费';
-    const fmt = (n: number) => `¥${n.toLocaleString('zh-CN')}`;
-    if (q.discount > 0) {
-      const labels: string[] = [];
-      if (q.breakdown.member) labels.push(q.breakdown.member.label);
-      if (q.breakdown.platformBenefits) {
-        q.breakdown.platformBenefits.forEach(pb => labels.push(`${pb.platformName} ${pb.benefit}`));
-      }
-      if (q.breakdown.bundle) labels.push(q.breakdown.bundle.label);
-      return `${fmt(q.finalPrice)}（原价${fmt(q.originalPrice)}，省${fmt(q.discount)} · ${labels.join(' / ')}）`;
-    }
-    return fmt(q.originalPrice);
+    return formatQuotePriceInfo(q);
   }
 
   // ======================== 辅助方法 ========================

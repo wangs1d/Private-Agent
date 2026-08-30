@@ -506,12 +506,117 @@ function buildTravelItineraryCardFromPlan(
 }
 
 /**
+ * 从文本中剥离 `[AGENT_RESULT_CARD_START] ... [AGENT_RESULT_CARD_END]` 卡片块。
+ *
+ * 场景：结构化 mediaCards 已由 chat.assistant_done 独立字段下发时，LLM 正文里
+ * 若仍残留 cardType=media 的卡片块（attachMediaSearchMarker 注入的同一批照片），
+ * 前端会把它当纯文本渲染，造成"文字反复/来回渲染"+ 与 mediaCards 双份展示。
+ * 这类**重复的媒体卡**要确定性剥除。
+ *
+ * 其余卡片一律保留（2026-08-30 用户反馈：文本场景里的媒体/结果卡有自己的
+ * 展示价值，不能一刀切拦截）：
+ *   - travel_itinerary 行程卡：携带 autoOpen 与结构化行程数据，剥掉会丢右侧
+ *     双面板的自动展开和面板数据；
+ *   - search_result / 通用列表卡：正文场景的搜索结果、结论列表，与 mediaCards
+ *     内容不同源，剥掉等于把有价值的信息一起扔掉；
+ *   - 解析失败的卡片块：按可剥处理（防止 LLM 抄坏的 JSON 透出到前端）。
+ */
+export function stripMediaCardMarker(text: string): string {
+  const START = "[AGENT_RESULT_CARD_START]";
+  const END = "[AGENT_RESULT_CARD_END]";
+  let out = "";
+  let rest = text;
+  // 循环剥除，直到没有完整的一对开始/结束标记（含 ASR/搜索等链式注入）
+  for (let guard = 0; guard < 20; guard++) {
+    const si = rest.indexOf(START);
+    const ei = si === -1 ? -1 : rest.indexOf(END, si);
+    if (si === -1 || ei === -1) break;
+    const rawJson = rest.slice(si + START.length, ei).trim();
+    // 保留：行程卡（autoOpen+结构化数据）与可解析的非 media 卡（搜索结果/列表等
+    // 文本场景卡）。剥除：与 mediaCards 重复的 media 卡，以及解析失败的损坏块
+    //（防止 LLM 抄坏的 JSON 透出到前端）。
+    let keep = isTravelItineraryCardJson(rawJson);
+    if (!keep) {
+      try {
+        const parsed: unknown = JSON.parse(rawJson);
+        // 可解析对象且不是 media 卡 → 保留（文本场景卡）；media 卡/损坏块 → 剥除
+        keep = !!parsed && typeof parsed === "object" && !isMediaCardJson(rawJson);
+      } catch {
+        keep = false;
+      }
+    }
+    if (keep) {
+      out += rest.slice(0, ei + END.length);
+    } else {
+      out += rest.slice(0, si);
+    }
+    rest = rest.slice(ei + END.length);
+  }
+  out += rest;
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * 判断一段卡片块内的 JSON 是否为 cardType=media 的媒体卡（与 mediaCards
+ * 独立字段重复下发的那类）。解析失败返回 false —— 失败的块由调用方单独
+ * 剥除（防损坏 JSON 透到前端），不走本判定。
+ */
+function isMediaCardJson(rawJson: string): boolean {
+  if (!rawJson.includes("cardType")) return false;
+  try {
+    const parsed: unknown = JSON.parse(rawJson);
+    return (
+      !!parsed &&
+      typeof parsed === "object" &&
+      (parsed as Record<string, unknown>)["cardType"] === "media"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断一段卡片块内的 JSON 是否为 travel_itinerary 行程卡。
+ *
+ * 解析失败（LLM 抄坏的 JSON / 非卡片块）一律视为非行程卡，由调用方按
+ * 普通卡片块处理。
+ */
+export function isTravelItineraryCardJson(rawJson: string): boolean {
+  if (!rawJson.includes("travel_itinerary")) return false;
+  try {
+    const parsed: unknown = JSON.parse(rawJson);
+    return (
+      !!parsed &&
+      typeof parsed === "object" &&
+      (parsed as Record<string, unknown>)["cardType"] === "travel_itinerary"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 判断文本中是否已存在 travel_itinerary 行程卡块（扫描全部卡片块，不只第一对）。 */
+export function containsTravelItineraryCard(text: string): boolean {
+  if (!text.includes("[AGENT_RESULT_CARD_START]")) return false;
+  const re =
+    /\[AGENT_RESULT_CARD_START\]([\s\S]*?)\[AGENT_RESULT_CARD_END\]/g;
+  for (const match of text.matchAll(re)) {
+    if (isTravelItineraryCardJson(match[1]?.trim() ?? "")) return true;
+  }
+  return false;
+}
+
+/**
  * 旅游行程的确定性附卡（chat.assistant_done 前的最后防线，Coze 式架构）。
  *
  * 工具返回值已瘦身（summarizeItinerary 只留极简摘要），LLM 的口头回复不再携带
- * 行程明细，也就写不出能被 formatAgentResultForChat 切卡的逐日列表——卡片必须
+ * 行程明细，也就写不出能被切卡的逐日列表——卡片必须
  * 由代码直接从工具原始结果生成，不依赖 LLM 转发：
- *   - 若正文已有卡片标记（LLM 列表路径/检测器路径已出卡）→ 不重复附加；
+ *   - 若正文已有 travel_itinerary 行程卡（LLM 列表路径/检测器路径已出卡）→
+ *     不重复附加；
+ *   - 正文只有普通卡片块（如 processAssistantText 把口语回复切成了通用列表卡）
+ *     时仍要附加：通用卡没有 autoOpen/结构化数据，客户端解析器会优先取行程卡，
+ *     缺卡会导致右侧双面板既不自动展开也没有数据；
  *   - 否则以原始工具结果（全量字段：坐标/图片/评论/视频）构建 travel_itinerary
  *     卡（autoOpen=true），拼在正文之后。正文（LLM 的自然口语回复）保留为卡前导。
  */
@@ -523,7 +628,7 @@ export function attachTravelItineraryCard(
   if (toolName !== "travel.plan-itinerary" || !toolResult) return text;
   const days = toolResult.days;
   if (!Array.isArray(days) || days.length === 0) return text;
-  if (text.includes("[AGENT_RESULT_CARD_START]")) return text;
+  if (containsTravelItineraryCard(text)) return text;
   return buildTravelItineraryCardFromPlan(toolResult, text.trim());
 }
 
@@ -1145,11 +1250,13 @@ export type RenderBlock =
  * 把最终正文 + 媒体卡片列表构建成交错渲染块数组。
  *
  * 算法（位置锚定，代码层确定性）：
- * 1. 按 groupTitle 把 mediaCards 分成若干组（保留首次出现顺序）；
+ * 1. 按 groupTitle 把 mediaCards 分成若干组（保留首次出现顺序）；单组无标题的
+ *    普通图墙会先按正文段落数拆成「每簇 1 张」的子组（见 1.5 步）；
  * 2. 对每个分组，在正文中寻找「锚点」——精确命中（标题/两侧标签，含标题子串
  *    与同义词扩展）优先，未命中再用「标题 ↔ 句段」字符级 LCS 相似度做模糊锚定；
- * 3. 按锚点位置升序切分正文：每个锚点之前的文字成为一个 text 块，
- *    紧跟其后的 media 块承载该组照片 → 天然形成「说到这个维度→看它的图」；
+ * 3. 锚点吸附到所在句段开头，按位置升序切分正文：媒体块插在该段文字**之前**
+ *    → 天然形成「一张照片 → 一段对它的简短介绍」的阅读节奏（2026-08-30 用户
+ *    指定的一图一文顺序）；锚点不吞掉任何正文文字；
  * 4. 正文尾部残段作为最后一个 text 块；未命中任何锚点的分组追加到末尾兜底。
  *
  * @param finalText 最终回复正文（已剥离媒体标记后的干净文本）
@@ -1264,37 +1371,33 @@ export function buildInterleavedRenderBlocks(
 
   const text = String(finalText ?? "");
 
-  // 1.5) 普适拆分：单 search_images（groupTitle 为空）一张大图墙 → 切成多簇，按正文段落对齐
+  // 1.5) 普适拆分：单 search_images（groupTitle 为空）一张大图墙 → 每张图独立成簇
   //
-  // 背景：用户多次反馈「图片全堆在一起，不分段落交错」的根本原因是
-  // 单次 search_images 返回 N 张图全部进同一 "" group，renderBlocks 只能锚到
-  // 一个位置 → 一大坨全堆在文本末尾。这里把「单组且组内 ≥3 张」的情况
-  // 自动按正文段落数拆成多个子组，让「文字→几张图→文字→几张图」自然形成。
+  // 背景：用户反馈「图片全堆在一起，不分段落交错」的根因是单次 search_images
+  // 返回 N 张图全部进同一 "" group，renderBlocks 只能锚到一个位置 → 一大坨
+  // 全堆在文本末尾。这里把「单组且组内 ≥2 张」的情况按正文段落数拆簇，
+  // 且每簇只放 1 张图，配合「图在介绍段之前」的锚定（见第 2/2.5 步），
+  // 形成「一张照片 → 一段对这张照片的简短介绍 → 下一张照片 → …」的节奏。
   //
   // 拆分原则：
-  //   - 取正文段数 N（≥1），目标每簇 2-3 张；
-  //   - 若图比段多（cards.length > N*3），把超出的并入最后一簇（不强行打散），
-  //     避免出现「1 张图一簇」的过度碎片化；
+  //   - 簇数 = min(正文段数, 图数)，图比段多时多余图片并入最后一簇；
   //   - 子组的 groupTitle 保持空（仍走普通图廊渲染），不伪造维度标题。
   const segmentsForSplit = splitTextSegments(text);
   if (
     groups.length === 1 &&
     groups[0].title === "" &&
-    groups[0].cards.length >= 3 &&
+    groups[0].cards.length >= 2 &&
     segmentsForSplit.length >= 1
   ) {
     const flat = groups[0].cards;
-    // 目标簇数：min(段落数, ceil(图数 / 每簇目标 3))，最少 2 簇才有交错效果
-    const targetClusters = Math.max(
-      2,
-      Math.min(segmentsForSplit.length, Math.ceil(flat.length / 3)),
-    );
+    const targetClusters = Math.min(segmentsForSplit.length, flat.length);
     if (targetClusters >= 2) {
-      // 等分切成 targetClusters 簇
       const split: Array<{ title: string; cards: MediaCardItem[] }> = [];
-      const per = Math.ceil(flat.length / targetClusters);
+      // 前面各簇只放 1 张图（保证一图一段介绍），图比段多时多余图并入最后一簇
       for (let i = 0; i < targetClusters; i++) {
-        const slice = flat.slice(i * per, (i + 1) * per);
+        const start = i;
+        const end = i === targetClusters - 1 ? flat.length : start + 1;
+        const slice = flat.slice(start, end);
         if (slice.length === 0) break;
         split.push({ title: "", cards: slice });
       }
@@ -1306,9 +1409,11 @@ export function buildInterleavedRenderBlocks(
 
   // 2) 为每个分组计算锚点（锚定媒体组应插入的正文位置）
   //    策略（代码层确定性，不依赖 prompt）：
-  //    a) 精确命中：分组标题/两侧标签（含标题子串与同义词）在正文的最早出现位置；
+  //    a) 精确命中：分组标题/两侧标签（含标题子串与同义词）在正文的最早出现位置，
+  //       吸附到所在句段的开头 —— 媒体块插在该段之前，形成
+  //       「一张照片 → 一段对它的介绍」；end=pos，不吞掉任何正文文字；
   //    b) 模糊命中：无精确命中时，用「分组标题 ↔ 句段」的字符级 LCS 相似度，
-  //       把媒体组锚定到最相关句段之后（覆盖换说法/意译场景）。
+  //       把媒体组锚定到最相关句段之前（覆盖换说法/意译场景）。
   type Anchor = { gi: number; pos: number; end: number };
   const anchors: Anchor[] = [];
   const segments = splitTextSegments(text);
@@ -1327,7 +1432,10 @@ export function buildInterleavedRenderBlocks(
     for (const kw of candidates) {
       const pos = text.indexOf(kw);
       if (pos >= 0 && (best === null || pos < best.pos)) {
-        best = { gi, pos, end: pos + kw.length };
+        // 吸附到关键词所在句段开头：照片在该段介绍文字之前出现
+        const host = segments.find((s) => pos >= s.start && pos < s.start + s.text.length);
+        const anchorPos = host ? host.start : pos;
+        best = { gi, pos: anchorPos, end: anchorPos };
       }
     }
     // b) 模糊命中：仅当没有精确命中且标题足够长时
@@ -1342,19 +1450,17 @@ export function buildInterleavedRenderBlocks(
         }
       }
       if (bestSeg && bestScore >= 0.5) {
-        best = { gi, pos: bestSeg.start, end: bestSeg.start + bestSeg.text.length };
+        best = { gi, pos: bestSeg.start, end: bestSeg.start };
       }
     }
     if (best) anchors.push(best);
   }
 
   // 2.5) 兜底锚定：没有标题/两侧标签可命中的分组（典型：1.5 节拆分出来的空 title 子组）
-  //       按数组顺序均匀分布到正文各句段**末尾**，避免「全堆末尾」。
-  //       只对尚未有 anchor 的 group 起作用。
-  //       注意：anchor 必须定位到句段末尾（pos=end=段尾），这样第 4 步切分时
-  //       上一条媒体块到本 anchor 之间的整段文字会完整成为 text 块、
-  //       媒体块则紧跟该段之后 → 正确形成「文字→图→文字→图」。若锚到段首，
-  //       相邻锚点之间文字会被砍空，媒体块一个接一个堆叠，视觉上退回「全堆一起」。
+  //       按数组顺序均匀分布到正文各句段**开头**：第 i 组的照片插在第
+  //       floor(i * segCount / N) 段之前，紧跟着该段文字就是这组照片的介绍
+  //       → 「一张照片 → 一段介绍 → 下一张照片」。pos=end=段首，
+  //       正文文字一个字都不会被吞掉。
   const anchoredGis = new Set(anchors.map((a) => a.gi));
   if (segments.length > 0) {
     const titleLessGis: number[] = [];
@@ -1362,16 +1468,15 @@ export function buildInterleavedRenderBlocks(
       if (!anchoredGis.has(gi)) titleLessGis.push(gi);
     }
     if (titleLessGis.length > 0) {
-      // 把 N 个无锚点组均匀分到 N 个句段：第 i 组 → 第 floor(i * segCount / N) 段末
+      // 把 N 个无锚点组均匀分到 N 个句段：第 i 组 → 第 floor(i * segCount / N) 段首
       for (let i = 0; i < titleLessGis.length; i++) {
         const gi = titleLessGis[i];
         const segIdx = Math.min(
           segments.length - 1,
           Math.floor((i * segments.length) / titleLessGis.length),
         );
-        const seg = segments[segIdx];
-        const end = seg.start + seg.text.length;
-        anchors.push({ gi, pos: end, end });
+        const start = segments[segIdx].start;
+        anchors.push({ gi, pos: start, end: start });
       }
     }
   }

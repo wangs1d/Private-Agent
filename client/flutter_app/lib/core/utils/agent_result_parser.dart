@@ -222,28 +222,61 @@ class AgentResultParser {
 
   /// 解析一段消息文本：若包含结果卡片标记则返回 [data] 与剥离后的 cleanedText；
   /// 否则 [data] 为 null，cleanedText 与原文本相同。
+  ///
+  /// 文本含多个卡片块时（如通用列表卡之后确定性附加的行程卡），
+  /// [data] 优先取 travel_itinerary 行程卡——它是唯一携带 autoOpen
+  /// （右侧双面板自动展开）与结构化行程数据的卡；cleanedText 剥离
+  /// 全部卡片块，避免剩余块的原始标记/JSON 混进正文展示。
   static AgentResultParseResult parse(String text) {
     if (text.isEmpty) {
       return AgentResultParseResult(data: null, cleanedText: text);
     }
-    final RegExpMatch? match = _blockPattern.firstMatch(text);
-    if (match == null) {
+    final List<RegExpMatch> matches =
+        _blockPattern.allMatches(text).toList(growable: false);
+    if (matches.isEmpty) {
       return AgentResultParseResult(data: null, cleanedText: text);
     }
-    final String rawJson = match.group(1)?.trim() ?? "";
     AgentResultData? data;
-    if (rawJson.isNotEmpty) {
-      try {
-        final dynamic decoded = jsonDecode(rawJson);
-        if (decoded is Map<String, dynamic>) {
-          data = AgentResultData.fromJson(decoded);
-        }
-      } catch (_) {
-        // JSON 损坏 → 静默回退为普通文本
-        data = null;
+    // 优先取行程卡，否则回退第一张卡
+    RegExpMatch? chosen;
+    for (final RegExpMatch match in matches) {
+      final AgentResultData? parsed = _parseCardJson(
+        match.group(1)?.trim() ?? "",
+      );
+      if (parsed == null) continue;
+      chosen ??= match;
+      if (parsed.cardType == "travel_itinerary") {
+        chosen = match;
+        data = parsed;
+        break;
       }
     }
-    final String cleaned = text.replaceRange(match.start, match.end, "").trim();
+    // 仍然为 null 说明所有块都解析失败 → 回退第一个块的位置
+    chosen ??= matches.first;
+    data ??= _parseCardJson(chosen.group(1)?.trim() ?? "");
+    final String cleaned = _stripAllCardBlocks(text, matches);
     return AgentResultParseResult(data: data, cleanedText: cleaned);
+  }
+
+  static AgentResultData? _parseCardJson(String rawJson) {
+    if (rawJson.isEmpty) return null;
+    try {
+      final dynamic decoded = jsonDecode(rawJson);
+      if (decoded is Map<String, dynamic>) {
+        return AgentResultData.fromJson(decoded);
+      }
+    } catch (_) {
+      // JSON 损坏 → 静默回退为普通文本
+    }
+    return null;
+  }
+
+  /// 剥离全部完整卡片块；无配对的孤立标记原样保留。
+  static String _stripAllCardBlocks(String text, List<RegExpMatch> matches) {
+    String cleaned = text;
+    for (final RegExpMatch match in matches.reversed) {
+      cleaned = cleaned.replaceRange(match.start, match.end, "");
+    }
+    return cleaned.trim();
   }
 }

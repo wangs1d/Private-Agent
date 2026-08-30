@@ -305,8 +305,6 @@ import {
   type BodySenseResult,
   type BodyModuleSnapshot,
 } from "../body/index.js";
-import { Hand } from "../body/hand.js";
-import { Mouth } from "../body/mouth.js";
 import { Eye } from "../body/eye.js";
 import { createMemoryAssociationSynthesizer } from "../brain/memory-cognitive/memory-association-synthesizer.js";
 import { SemanticAwarenessInferrerImpl } from "../brain/semantic-awareness-inferrer.js";
@@ -2133,7 +2131,7 @@ export async function createAppServices(): Promise<AppServices> {
   );
 
   // ─── Body Center 装配 ───
-  // 启用 body 时：实例化 8 个 BodyModule + BodyBus + ReflexArc + BodyGateway + BodyCenter
+  // 启用 body 时：实例化 BodyModule（Eye/Ear/Skin/Vestibular/Homeostasis/Rhythm）+ BodyBus + ReflexArc + BodyGateway + BodyCenter
   // 关闭 body 时（BODY_CENTER_ENABLED=0）：整个 body/ 模块不实例化、不启动，
   //   BrainCenter.registerBodyGateway 内部会因 isBodyCenterEnabled() 返回 false 而忽略注入
   let bodyCenter: BodyCenter | null = null;
@@ -2283,70 +2281,9 @@ export async function createAppServices(): Promise<AppServices> {
       },
     };
 
-    // 4. 8 个 BodyModule（注入现有服务 + 适配器为子系统）
-    const hand = new Hand({
-      bodyBus,
-      desktopBridge: desktopBridgeCoordinator,
-      desktopVisualPort: desktopVisual,
-      agentBrowserService,
-      fileProcessingService,
-      codeSandboxService,
-    });
-
-    // Mouth 子系统适配器：真实服务接口包装为 BodyModule 期望的最小化接口
-    const mouth = new Mouth({
-      bodyBus,
-      voiceDialogue: voiceDialogueService,
-      ttsService: {
-        // 真实 TtsService.synthesizeMp3Base64 → 适配为 synthesize(text, opts?)
-        async synthesize(text: string, _opts?: { voiceId?: string }) {
-          const r = await ttsService.synthesizeMp3Base64(text);
-          if (!r.ok) return {};
-          return {
-            base64: r.base64,
-            format: "mp3",
-            provider: r.provider,
-          };
-        },
-      },
-      voiceCapability: voiceCapabilityService,
-      voiceMessageService: {
-        // 真实 VoiceMessageService.composeAndStore → 适配为 send({to, audioUrl, text})
-        async send(opts: { to?: string; audioUrl?: string; text?: string }) {
-          const text = String(opts.text ?? "");
-          if (!text) return { ok: false, error: "missing text" };
-          // to 字段在 VoiceMessageLike 接口中是 to?: string，与 actorId 含义一致；
-          // 默认用 "default"，真实 send 路径会从 args.actorId 传入
-          const actorId = String(opts.to ?? "default");
-          const r = await voiceMessageService.composeAndStore(text, actorId);
-          if (!r.ok) return { ok: false, error: r.reason };
-          return { ok: true, messageId: r.msgId };
-        },
-      },
-      phoneBridge: {
-        // 真实 PhoneBridgeCoordinator.invoke(actorId, "outbound_speak", params)
-        // → 适配为 outboundSpeak({text, voiceId?})
-        async outboundSpeak(opts: { text: string; voiceId?: string }) {
-          // actorId 无法从此接口拿到，Body 模块调用时通过 args.actorId 传入
-          // 此处默认 "default"，真实路径会从 args.actorId 传入
-          const r = await phoneBridgeCoordinator.invoke(
-            "default",
-            "outbound_speak",
-            { text: opts.text, voiceId: opts.voiceId },
-          );
-          // PhoneBridgeResult 的 error 字段为 unknown，需强制转为 string
-          if (!r.ok) {
-            const err = r.error;
-            return {
-              ok: false,
-              error: typeof err === "string" ? err : "phone_bridge_outbound_speak_failed",
-            };
-          }
-          return { ok: true };
-        },
-      },
-    });
-
+    // 4. BodyModule（注入现有服务 + 适配器为子系统）
+    // 注：Hand / Mouth 已移除——工具执行统一走 capability-modules / 各 tools/*.ts
+    //     直接注册到 ToolRegistry，经 BodyGateway fallback 兜底，不再有器官门面。
     const eye = new Eye({
       bodyBus,
       desktopVisualPort: desktopVisual,
@@ -2412,8 +2349,6 @@ export async function createAppServices(): Promise<AppServices> {
 
     // 6. BodyCenter 外观类
     bodyCenter = new BodyCenter(bodyGateway, bodyBus);
-    bodyCenter.setHand(hand);
-    bodyCenter.setMouth(mouth);
     bodyCenter.setEye(eye);
     bodyCenter.setEar(ear);
     bodyCenter.setSkin(skin);
@@ -2425,40 +2360,17 @@ export async function createAppServices(): Promise<AppServices> {
     rhythmCore = new RhythmCore({ bodyBus });
     bodyCenter.registerModule(rhythmCore);
 
-    // 6.1 Task 12 工具下沉：填充 BodyGateway.routeTable（前缀最长匹配）
-    //      策略 A：保留独立文件 register 调用，BodyGateway 在 execute 时按前缀拦截，
-    //      BodyModule.act() 未覆盖的具体工具会降级到 fallbackToolRegistry（独立 handler 兜底）。
-    //      前缀按 BodyModule 归属组织：
-    //        - hand：desktop.* / agent_browser.* / file_doc.* / file.* / code_sandbox.* / code.*
-    //        - vestibular：embodiment.*
-    //        - skin：smart_home.* / device.*
-    //        - mouth：tts.* / voice.* / voice_message.* / phone_bridge.*
-    //      注：eye.* / ear.* 走 BodyGateway.sense 上行通路，不走 execute 下行，
-    //          故不在此注册；reflex 是反射弧硬安全门，在 execute 入口已先于路由生效。
-    bodyGateway.registerToolRoute("desktop.visual.", "hand");
-    bodyGateway.registerToolRoute("desktop.", "hand");
-    bodyGateway.registerToolRoute("agent_browser.", "hand");
-    bodyGateway.registerToolRoute("file_doc.", "hand");
-    bodyGateway.registerToolRoute("file.", "hand");
-    bodyGateway.registerToolRoute("code_sandbox.", "hand");
-    bodyGateway.registerToolRoute("code.", "hand");
-    bodyGateway.registerToolRoute("embodiment.", "vestibular");
-    bodyGateway.registerToolRoute("smart_home.", "skin");
-    bodyGateway.registerToolRoute("device.sensor.", "skin");
-    bodyGateway.registerToolRoute("device.", "skin");
-    bodyGateway.registerToolRoute("tts.", "mouth");
-    bodyGateway.registerToolRoute("voice_message.", "mouth");
-    bodyGateway.registerToolRoute("voice.", "mouth");
-    bodyGateway.registerToolRoute("phone_bridge.", "mouth");
+    // 6.1 工具路由：仅保留仍有 BodyModule 承接的前缀（当前为空——
+    //      工具执行统一由 capability-modules / tools/*.ts 直接注册的 handler 承接，
+    //      BodyGateway.execute 对未路由工具走 fallbackToolRegistry 兜底，
+    //      并在入口先过 ReflexArc 硬安全门）。
+    //      eye.* / ear.* 走 BodyGateway.sense 上行通路，不走 execute 下行。
+    //      reflex 是反射弧硬安全门，在 execute 入口已先于路由生效。
 
-    // 5. 工具下沉：各 BodyModule 通过 registerTools 把工具挂到 ToolRegistry，
+    // 5. 工具下沉：仍有工具门面的 BodyModule 通过 registerTools 挂到 ToolRegistry，
     //    handler 内部委托 this.act()；handler 调用栈：ToolRegistry → BodyModule.act → 子系统执行
-    hand.registerTools(toolRegistry);
-    mouth.registerTools(toolRegistry);
     eye.registerTools(toolRegistry);
     ear.registerTools(toolRegistry);
-    skin.registerTools(toolRegistry);
-    vestibularApparatus.registerTools(toolRegistry);
     // homeostasisCore.tools=[] 跳过
     // reflexArc 无 registerTools 方法（不在 BodyModuleLike 工具下沉范围内）
 
@@ -2468,7 +2380,7 @@ export async function createAppServices(): Promise<AppServices> {
     // bodyCenterEnabled=false 时本分支不进入，BODY_CHAT_TOOLS 不注入，保持原 getBuiltinAgentChatTools 行为。
     setBodyChatTools(BODY_CHAT_TOOLS);
 
-    app.log.info(`[BodyCenter] 已装配 8 个 BodyModule（Hand/Mouth/Eye/Ear/Skin/Vestibular/Homeostasis/Reflex）`);
+    app.log.info(`[BodyCenter] 已装配 BodyModule（Eye/Ear/Skin/Vestibular/Homeostasis/Reflex/Rhythm）`);
     app.log.info(`[BodyCenter] 已下沉工具到 ToolRegistry（body.* 工具已注册）`);
     app.log.info(`[BodyCenter] ReflexArc 已加载 ${reflexArc.listPatterns().length} 条内置危险模式`);
   }
@@ -2505,7 +2417,7 @@ export async function createAppServices(): Promise<AppServices> {
     if (bodyCenter) {
       const bodyBus = bodyCenter.getBus();
       bodyBus.bridgeToSynapse(synapseBus);
-      // SensoryCortex 订阅 BodyBus 的 body.eye.frame / body.ear.transcript / body.mouth.spoken
+      // SensoryCortex 订阅 BodyBus 的 body.eye.frame / body.ear.transcript
       sensoryCortex.attachBodyBus(bodyBus);
       // AwarenessCortex 订阅 body.homeostasis.battery_low / body.skin.device_change / body.vestibular.device_switch
       awarenessCortex?.attachBodyBus(bodyBus);

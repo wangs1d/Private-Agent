@@ -1,10 +1,13 @@
 import "dart:async" show Timer, unawaited;
+import "dart:math" show min;
 
 import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
 
 import "../../core/models/schedule_models.dart";
 import "../../core/services/desk_pet_session.dart";
+import "../../core/services/device_api_client.dart";
+import "../../core/services/right_panel_tool_preference.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
 import "agent_activity_section.dart";
@@ -84,6 +87,8 @@ class RightSidePanel extends StatefulWidget {
     this.onSchedule,
     this.onPhone,
     this.onMessages,
+    this.onReportLocation,
+    this.messagesUnread = 0,
   });
 
   final Future<List<ScheduleEvent>>? scheduleFuture;
@@ -92,6 +97,11 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
 
+  /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
+  final int messagesUnread;
+
+  /// 天气面板拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
+  final void Function(Map<String, dynamic> location)? onReportLocation;
 
   @override
   State<RightSidePanel> createState() => _RightSidePanelState();
@@ -104,6 +114,17 @@ class _RightSidePanelState extends State<RightSidePanel> {
   /// 周期刷新：让 now 游标、「接下来 · X分钟后」倒计时随时间前进。
   Timer? _scheduleTicker;
 
+  // 工具区：布局偏好 / 编辑模式 / 手机在线状态
+  bool _editingTools = false;
+  RightPanelToolLayout _toolLayout = const RightPanelToolLayout();
+  int? _phoneOnline;
+  int? _phoneTotal;
+  Timer? _devicePollTimer;
+  final DeviceApiClient _deviceApi = DeviceApiClient();
+
+  // 「日程」工具副标签用的已解析日程数据（与上方 FutureBuilder 消费同一 Future）
+  List<ScheduleEvent>? _resolvedScheduleEvents;
+
   @override
   void initState() {
     super.initState();
@@ -111,6 +132,13 @@ class _RightSidePanelState extends State<RightSidePanel> {
       if (mounted) setState(() {});
     });
     DeskPetSession.instance.addListener(_onDeskPetChanged);
+    unawaited(_loadToolLayout());
+    _refreshDeviceStatus();
+    _devicePollTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _refreshDeviceStatus(),
+    );
+    _resolveScheduleFuture();
     ScheduleFloatingLauncher.bindHandlers(
       onCloseClicked: () {
         if (mounted) {
@@ -134,15 +162,60 @@ class _RightSidePanelState extends State<RightSidePanel> {
         oldWidget.scheduleFuture != widget.scheduleFuture) {
       _pushScheduleToNativeWindow();
     }
+    if (oldWidget.scheduleFuture != widget.scheduleFuture) {
+      _resolveScheduleFuture();
+    }
+  }
+
+  void _resolveScheduleFuture() {
+    final Future<List<ScheduleEvent>>? future = widget.scheduleFuture;
+    if (future == null) {
+      _resolvedScheduleEvents = null;
+      return;
+    }
+    future
+        .then((List<ScheduleEvent> events) {
+      if (!mounted) return;
+      setState(() => _resolvedScheduleEvents = events);
+    })
+        .catchError((Object _) {});
   }
 
   @override
   void dispose() {
     _scheduleTicker?.cancel();
+    _devicePollTimer?.cancel();
     DeskPetSession.instance.removeListener(_onDeskPetChanged);
     ScheduleFloatingLauncher.activeNotifier
         .removeListener(_onScheduleWindowChanged);
     super.dispose();
+  }
+
+  Future<void> _loadToolLayout() async {
+    final RightPanelToolLayout layout = await RightPanelToolPreference.load();
+    if (mounted) setState(() => _toolLayout = layout);
+  }
+
+  Future<void> _refreshDeviceStatus() async {
+    try {
+      final DeviceApiResult<List<DeviceInfo>> result =
+          await _deviceApi.listDevices();
+      if (!mounted) return;
+      if (result.ok && result.value != null) {
+        final List<DeviceInfo> devices = result.value!;
+        setState(() {
+          _phoneTotal = devices.length;
+          _phoneOnline = devices.where((DeviceInfo d) => d.online).length;
+        });
+      } else {
+        setState(() {
+          _phoneOnline = null;
+          _phoneTotal = null;
+        });
+      }
+    } catch (_) {
+      // 静默失败：手机工具不显示副标签即可
+    }
   }
 
   void _onDeskPetChanged() {
@@ -1057,21 +1130,72 @@ class _RightSidePanelState extends State<RightSidePanel> {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 工具区块：紧凑网格布局，一屏展示全部 5 个工具
+  // 工具区块：单行自适应布局（≤4 个一行，更多时分行），
+  // 每个工具带可感知状态（角标 / 副标签），长按或点右上角图标进入编辑模式
   // ═══════════════════════════════════════════════════════════
-  Widget _buildToolsSection(ColorScheme cs) {
-    final List<_ToolSpec> allTools = <_ToolSpec>[
+  List<_ToolSpec> _allToolSpecs() {
+    return <_ToolSpec>[
       _ToolSpec(
-          icon: Icons.people_outline, label: "好友", onTap: widget.onAgentLink),
+          id: "friends",
+          icon: Icons.people_outline,
+          label: "好友",
+          onTap: widget.onAgentLink),
       _ToolSpec(
-          icon: Icons.phone_iphone, label: "手机", onTap: widget.onPhone),
+          id: "phone",
+          icon: Icons.phone_iphone,
+          label: "手机",
+          onTap: widget.onPhone,
+          subLabelBuilder: () => _phoneSubLabel),
       _ToolSpec(
-          icon: Icons.message_outlined, label: "消息", onTap: widget.onMessages),
+          id: "messages",
+          icon: Icons.message_outlined,
+          label: "消息",
+          onTap: widget.onMessages,
+          badgeCount: widget.messagesUnread),
       _ToolSpec(
+          id: "schedule",
           icon: Icons.calendar_today_outlined,
           label: "日程",
-          onTap: widget.onSchedule),
+          onTap: widget.onSchedule,
+          subLabelBuilder: () => _scheduleSubLabel),
     ];
+  }
+
+  /// 「手机」副标签：在线设备数（未配对 / 拉取失败时不显示）
+  String? get _phoneSubLabel {
+    final int? total = _phoneTotal;
+    final int? online = _phoneOnline;
+    if (total == null || online == null) return null;
+    if (total == 0) return "未配对";
+    return "$online/$total 在线";
+  }
+
+  /// 「日程」副标签：下一条未开始事项的时间；没有则显示空闲
+  String? get _scheduleSubLabel {
+    final List<ScheduleEvent> events =
+        _resolvedScheduleEvents ?? const <ScheduleEvent>[];
+    final DateTime now = DateTime.now();
+    for (final ScheduleEvent e in events) {
+      if (e.startAt.isAfter(now)) {
+        return "${e.startAt.hour.toString().padLeft(2, '0')}:"
+            "${e.startAt.minute.toString().padLeft(2, '0')}";
+      }
+    }
+    return events.isEmpty ? null : "今日空闲";
+  }
+
+  Widget _buildToolsSection(ColorScheme cs) {
+    final List<_ToolSpec> allSpecs = _allToolSpecs();
+    final List<String> sortedIds = _toolLayout.sortIds(
+      allSpecs.map((_ToolSpec s) => s.id).toList(),
+    );
+    final Map<String, _ToolSpec> specById = <String, _ToolSpec>{
+      for (final _ToolSpec s in allSpecs) s.id: s,
+    };
+    final List<_ToolSpec> visibleSpecs = sortedIds
+        .where((String id) => !_toolLayout.isHidden(id))
+        .map((String id) => specById[id]!)
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1079,26 +1203,82 @@ class _RightSidePanelState extends State<RightSidePanel> {
       children: <Widget>[
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: Text(
-            "常用工具",
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: cs.onSurface,
-              letterSpacing: 0.2,
-            ),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  _editingTools ? "编辑工具" : "常用工具",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ),
+              _ToolsEditButton(
+                editing: _editingTools,
+                onTap: () => setState(() => _editingTools = !_editingTools),
+                cs: cs,
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 10),
-        GridView.count(
-          crossAxisCount: 3,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 4,
-          crossAxisSpacing: 4,
-          childAspectRatio: 1.0,
-          children: allTools.map((tool) => _ToolButton(spec: tool)).toList(),
-        ),
+        if (_editingTools)
+          _ToolsEditorPanel(
+            specs: allSpecs,
+            layout: _toolLayout,
+            onChanged: (RightPanelToolLayout layout) {
+              setState(() => _toolLayout = layout);
+              unawaited(RightPanelToolPreference.save(layout));
+            },
+            onDone: () => setState(() => _editingTools = false),
+          )
+        else if (visibleSpecs.isEmpty)
+          // 全部隐藏时的占位：保留编辑入口
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPress: () => setState(() => _editingTools = true),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Text(
+                "工具已全部隐藏，点击右上角编辑恢复",
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+            ),
+          )
+        else
+          // 长按工具区任意位置进入编辑模式
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPress: () => setState(() => _editingTools = true),
+            child: _buildToolRows(cs, visibleSpecs),
+          ),
+      ],
+    );
+  }
+
+  /// 单行自适应：≤4 个一行铺满；超过 4 个时按每行 4 个折行。
+  Widget _buildToolRows(ColorScheme cs, List<_ToolSpec> specs) {
+    const int kPerRow = 4;
+    final List<List<_ToolSpec>> rows = <List<_ToolSpec>>[
+      for (int i = 0; i < specs.length; i += kPerRow)
+        specs.sublist(i, min(i + kPerRow, specs.length)),
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (final List<_ToolSpec> row in rows)
+          Row(
+            children: <Widget>[
+              for (final _ToolSpec spec in row)
+                Expanded(child: _ToolButton(spec: spec)),
+            ],
+          ),
       ],
     );
   }
@@ -1322,11 +1502,206 @@ class _SchedSkin {
 }
 
 class _ToolSpec {
-  _ToolSpec({required this.icon, required this.label, this.onTap});
+  _ToolSpec({
+    required this.id,
+    required this.icon,
+    required this.label,
+    this.onTap,
+    this.badgeCount,
+    String? Function()? subLabelBuilder,
+  }) : _subLabelBuilder = subLabelBuilder;
 
+  final String id;
   final IconData icon;
   final String label;
   final VoidCallback? onTap;
+
+  /// 未读等数字角标（null/0 不显示）
+  final int? badgeCount;
+  final String? Function()? _subLabelBuilder;
+
+  /// 副标签（如「14:30」「2/1 在线」），null 不显示
+  String? get subLabel => _subLabelBuilder?.call();
+}
+
+/// 「常用工具」标题右侧的编辑入口（铅笔 / 完成）
+class _ToolsEditButton extends StatelessWidget {
+  const _ToolsEditButton({
+    required this.editing,
+    required this.onTap,
+    required this.cs,
+  });
+
+  final bool editing;
+  final VoidCallback onTap;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: editing ? "完成" : "编辑工具",
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(
+              editing ? Icons.check_rounded : Icons.tune,
+              size: 14,
+              color: editing ? cs.primary : cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 编辑模式面板：拖拽排序 + 显隐切换，变更即时持久化。
+class _ToolsEditorPanel extends StatelessWidget {
+  const _ToolsEditorPanel({
+    required this.specs,
+    required this.layout,
+    required this.onChanged,
+    required this.onDone,
+  });
+
+  /// 全量工具（含已隐藏的），编辑始终操作全集
+  final List<_ToolSpec> specs;
+  final RightPanelToolLayout layout;
+  final ValueChanged<RightPanelToolLayout> onChanged;
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final List<String> sortedIds = layout.sortIds(
+      specs.map((_ToolSpec s) => s.id).toList(),
+    );
+    final Map<String, _ToolSpec> specById = <String, _ToolSpec>{
+      for (final _ToolSpec s in specs) s.id: s,
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        ReorderableListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          buildDefaultDragHandles: false,
+          itemCount: sortedIds.length,
+          onReorderItem: (int oldIndex, int newIndex) {
+            final List<String> next = List<String>.from(sortedIds);
+            final String moved = next.removeAt(oldIndex);
+            next.insert(newIndex, moved);
+            onChanged(layout.copyWith(order: next));
+          },
+          proxyDecorator: (Widget child, int index, Animation<double> anim) {
+            return AnimatedBuilder(
+              animation: anim,
+              builder: (BuildContext context, Widget? w) => Material(
+                color: cs.surfaceContainerHigh.withValues(
+                  alpha: 0.6 + 0.4 * anim.value,
+                ),
+                borderRadius: BorderRadius.circular(8),
+                elevation: 0,
+                child: w,
+              ),
+              child: child,
+            );
+          },
+          itemBuilder: (BuildContext context, int index) {
+            final String id = sortedIds[index];
+            final _ToolSpec spec = specById[id]!;
+            final bool hidden = layout.isHidden(id);
+            return ReorderableDragStartListener(
+              key: ValueKey<String>(id),
+              index: index,
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.drag_indicator,
+                      size: 16, color: cs.onSurfaceVariant),
+                  const SizedBox(width: 4),
+                  Icon(spec.icon,
+                      size: 15,
+                      color: hidden
+                          ? cs.onSurfaceVariant.withValues(alpha: 0.4)
+                          : cs.onSurfaceVariant),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      spec.label,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: hidden
+                            ? cs.onSurface.withValues(alpha: 0.4)
+                            : cs.onSurface,
+                      ),
+                    ),
+                  ),
+                  // 显隐切换
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(999),
+                      onTap: () {
+                        final List<String> nextHidden =
+                            List<String>.from(layout.hidden);
+                        if (hidden) {
+                          nextHidden.remove(id);
+                        } else {
+                          nextHidden.add(id);
+                        }
+                        onChanged(layout.copyWith(hidden: nextHidden));
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(5),
+                        child: Icon(
+                          hidden
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                          size: 15,
+                          color: hidden
+                              ? cs.onSurfaceVariant.withValues(alpha: 0.5)
+                              : cs.primary,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(999),
+              onTap: onDone,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                child: Text(
+                  "完成",
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: cs.primary,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _ToolButton extends StatefulWidget {
@@ -1344,40 +1719,95 @@ class _ToolButtonState extends State<_ToolButton> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final _ToolSpec spec = widget.spec;
+    final String? subLabel = spec.subLabel;
+    final bool active = _hovering;
+    final Color fg =
+        active ? cs.onSurface : cs.onSurfaceVariant;
+
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
       cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: () => widget.spec.onTap?.call(),
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          decoration: BoxDecoration(
-            color: _hovering
-                ? cs.surfaceContainerHigh.withValues(alpha: 0.8)
-                : Colors.transparent,
+      child: Tooltip(
+        message: subLabel == null ? spec.label : "${spec.label} · $subLabel",
+        waitDuration: const Duration(milliseconds: 500),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
             borderRadius: BorderRadius.circular(10),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              Icon(
-                widget.spec.icon,
-                size: 17,
-                color: _hovering ? cs.onSurface : cs.onSurfaceVariant,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                widget.spec.label,
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                  color: _hovering ? cs.onSurface : cs.onSurfaceVariant,
+            onTap: () => spec.onTap?.call(),
+            child: AnimatedScale(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              scale: _hovering ? 1.06 : 1.0,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    // 图标 + 数字角标
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: <Widget>[
+                        Icon(spec.icon, size: 18, color: fg),
+                        if (spec.badgeCount != null && spec.badgeCount! > 0)
+                          Positioned(
+                            top: -5,
+                            right: -9,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 3.5, vertical: 1),
+                              constraints:
+                                  const BoxConstraints(minWidth: 13),
+                              decoration: BoxDecoration(
+                                color: cs.error,
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                spec.badgeCount! > 99
+                                    ? "99+"
+                                    : "${spec.badgeCount}",
+                                style: const TextStyle(
+                                  fontSize: 8,
+                                  height: 1.2,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      spec.label,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w500,
+                        color: fg,
+                      ),
+                    ),
+                    // 副标签：可感知状态（下一条日程时间 / 在线设备数）
+                    if (subLabel != null) ...<Widget>[
+                      const SizedBox(height: 1),
+                      Text(
+                        subLabel,
+                        style: TextStyle(
+                          fontSize: 8.5,
+                          height: 1.2,
+                          fontWeight: FontWeight.w500,
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.75),
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ),

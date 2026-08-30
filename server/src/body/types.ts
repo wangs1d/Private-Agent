@@ -7,18 +7,18 @@
  * BodyModule 标识种类。
  *
  * 与人体器官对照：
- *  - hand        手（运动执行器）：UI 自动化 / 浏览器 / 文件 / 代码沙盒
- *  - mouth       嘴（发声）：TTS / voice-dialogue / voice-message / phone-bridge 出站
  *  - eye         眼（视觉）：截屏 / 摄像头 / VLM 描述
  *  - ear         耳（听觉）：ASR / phone-bridge 入站音频
- *  - skin        皮肤（体感）：智能家居 / 设备传感器
- *  - vestibular  前庭器（平衡）：3D 具身位置 / 多设备渲染状态
+ *  - skin        皮肤（体感）：智能家居 / 设备传感器（纯感知，无下行工具）
+ *  - vestibular  前庭器（平衡）：多设备渲染状态（纯感知，无下行工具）
  *  - homeostasis 稳态（内脏）：电量 / 位置 / 算力配额 / 负载 / 疲劳度
  *  - reflex      反射弧（脊髓反射）：硬安全门，rm -rf / format 等直接 DENY
+ *
+ * 注：hand（运动执行器）/ mouth（发声）已移除——下行工具执行统一由
+ *     capability-modules 与 tools/*.ts 直接注册到 ToolRegistry，
+ *     经 BodyGateway fallback 兜底，不再有器官门面。
  */
 export type BodyModuleKind =
-  | "hand"        // 手（原 motor）
-  | "mouth"       // 嘴（原 vocal）
   | "eye"         // 眼（原 visual）
   | "ear"         // 耳（原 auditory）
   | "skin"        // 皮肤（原 somato）
@@ -77,15 +77,14 @@ export interface BodyActionResult {
  * AwarenessCortex 通过 SynapseBus 桥接订阅 body.* 主题。
  *
  * 信号 kind 命名空间（统一前缀 `body.`）：
- *  - body.hand.task_progress / body.hand.task_done        — Hand 任务进度/完成
  *  - body.action.executed / body.action.failed            — ActionExecutor 工具执行反馈（brain→body 闭环）
  *  - body.homeostasis.battery_low / quota_low / hunger_high — 稳态阈值告警
- *  - body.vestibular.moved / device_switch                — 前庭器位置/设备切换
+ *  - body.vestibular.device_switch                        — 前庭器设备切换
  *  - body.skin.device_change / sensor_reading / ...        — 皮肤感知
- *  - body.eye.frame / body.ear.transcript / body.mouth.spoken — 感官通路
+ *  - body.eye.frame / body.ear.transcript                 — 感官通路
  */
 export interface BodySignal {
-  /** 信号类型，如 "body.eye.frame" / "body.hand.task_done" / "body.homeostasis.battery_low" */
+  /** 信号类型，如 "body.eye.frame" / "body.homeostasis.battery_low" */
   kind: string;
   /** 信号负载 */
   payload: Record<string, unknown>;
@@ -103,13 +102,9 @@ export interface BodySignal {
  * ActionExecutor 工具执行反馈信号 kind。
  *
  * P0-2 工具执行反馈闭环：ActionExecutor.execute 成功/失败后通过 BodyBus
- * 发布对应信号，让下一轮 cognize 能感知上一轮 hand 做了什么。
+ * 发布对应信号，让下一轮 cognize 能感知上一轮执行了什么。
  */
 export const BODY_SIGNAL_KIND = {
-  /** Hand 任务开始执行 */
-  HAND_TASK_PROGRESS: "body.hand.task_progress",
-  /** Hand 任务执行完成 */
-  HAND_TASK_DONE: "body.hand.task_done",
   /** ActionExecutor 工具执行成功（含 tool/actorId/result摘要/success:true） */
   ACTION_EXECUTED: "body.action.executed",
   /** ActionExecutor 工具执行失败（含 tool/actorId/error/success:false） */
@@ -239,8 +234,8 @@ export interface BodyToolRegistry {
 /**
  * BodyModule 外观接口。
  *
- * 8 个具体 BodyModule（Hand / Mouth / Eye / Ear / Skin /
- * VestibularApparatus / HomeostasisCore / ReflexArc）均实现此接口。
+ * 8 个具体 BodyModule（Eye / Ear / Skin /
+ * VestibularApparatus / HomeostasisCore / ReflexArc / RhythmCore）均实现此接口。
  *
  * 设计原则（与 brain 的 CortexLike 一致）：
  *  - start/stop 可选，缺失时 BodyCenter 跳过
