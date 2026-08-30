@@ -83,10 +83,11 @@ class ConnectedCallWindow {
   void Paint(HWND hwnd, HDC hdc);
   void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,
                        COLORREF border);
-  void DrawActionButton(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border,
-                        const std::wstring& label);
-  void DrawAvatar(HDC hdc, const RECT& rc, const std::wstring& initial,
-                  COLORREF bg);
+  void DrawRoundActionButton(HDC hdc, const RECT& rc, wchar_t glyph,
+                             COLORREF fill, COLORREF glyph_color,
+                             bool draw_off_slash);
+  void DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph, COLORREF color,
+                 int font_size, const wchar_t* font_family);
 
   static void CALLBACK TickProc(HWND hwnd, UINT msg, UINT_PTR id,
                                 DWORD time) noexcept;

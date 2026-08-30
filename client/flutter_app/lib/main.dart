@@ -1756,7 +1756,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<List<ScheduleEvent>> _loadTodayScheduleFuture() {
     final DateTime now = DateTime.now();
     return _store
-        .listScheduleEventsForDay(DateTime(now.year, now.month, now.day));
+        .listScheduleEventsForDay(DateTime(now.year, now.month, now.day))
+        .then(
+          (List<ScheduleEvent> events) => events
+              // 节律提醒（喝水/睡觉等）只做到点推送，不进「今日安排」（日程页仍展示）
+              .where((ScheduleEvent e) => !e.isRhythm)
+              .toList(growable: false),
+        );
   }
 
   Future<void> _syncScheduleFromServer() async {

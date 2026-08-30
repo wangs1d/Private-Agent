@@ -74,10 +74,16 @@ class IncomingCallWindow {
   void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,
                        COLORREF border);
   void DrawAvatar(HDC hdc, const RECT& rc, const std::wstring& initial,
-                  COLORREF bg);
-  // 自绘药丸按钮（仿微信PC来电按钮风格）
-  void DrawPillButton(HDC hdc, const RECT& rc, const wchar_t* text,
-                      bool is_accept, bool hovered);
+                  COLORREF bg, COLORREF letter_color);
+  // 自绘圆形图标按钮（新版设计：左侧红拒接 / 右侧绿接听）
+  void DrawRoundIconButton(HDC hdc, const RECT& rc, wchar_t glyph,
+                           bool is_accept, bool hovered);
+  // 用指定字体画一个居中字形（Segoe MDL2 Assets 图标）
+  void DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph, COLORREF color,
+                 int font_size, const wchar_t* font_family);
+  // 挂断图标：电话字形 + 斜线
+  void DrawPhoneOffGlyph(HDC hdc, const RECT& rc, COLORREF color,
+                         int font_size);
 
   HWND window_handle_ = nullptr;
   HWND accept_btn_ = nullptr;

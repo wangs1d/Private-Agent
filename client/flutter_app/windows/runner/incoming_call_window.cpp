@@ -28,35 +28,35 @@ constexpr LPCWSTR kRingAliasIncoming = L"IncomingCall";
 constexpr UINT kFlashCount = 6;
 constexpr DWORD kFlashTimeoutMs = 0;
 
-// ── 窗口尺寸（仿微信PC来电：紧凑横条） ──
+// ── 窗口尺寸（新版来电：紧凑横条，Apple 风格） ──
 constexpr int kWindowWidth = 300;
 constexpr int kWindowHeight = 88;
 constexpr int kMargin = 20;       // 距屏幕边缘距离
-constexpr int kCornerRadius = 12; // 卡片圆角
+constexpr int kCornerRadius = 32; // 卡片圆角（设计稿 radius-xl）
 
 // ── 内部布局 ──
 constexpr int kPadX = 16;         // 水平内边距
-constexpr int kAvatarSize = 44;   // 头像直径（微信PC风格略大）
+constexpr int kAvatarSize = 48;   // 头像直径（设计稿 w-12 h-12）
 constexpr int kTextGap = 12;      // 头像与文字间距
 constexpr int kTextLeft = kPadX + kAvatarSize + kTextGap;
 
-// ── 按钮规格（药丸形） ──
-constexpr int kBtnW = 64;
-constexpr int kBtnH = 30;         // 按钮高度
-constexpr int kBtnGap = 10;       // 两按钮间距
-constexpr int kBtnRadius = kBtnH / 2; // 药丸形 = 半圆角
-constexpr int kBtnBottom = 14;    // 按钮距底部
+// ── 圆形图标按钮规格 ──
+constexpr int kBtnSize = 44;      // 直径（设计稿 w-11 h-11）
+constexpr int kBtnGap = 12;       // 两按钮间距（设计稿 gap-3）
+constexpr int kBtnRadius = kBtnSize / 2;
 
-// ── 微信PC配色 ──
-constexpr COLORREF kBgColor        = RGB(0xFF, 0xFF, 0xFF);  // 纯白背景
-constexpr COLORREF kShadowColor    = RGB(0xC0, 0xC4, 0xCC);  // 投影色
-constexpr COLORREF kNameColor      = RGB(0x1A, 0x1A, 0x1A);  // 名称：近黑
-constexpr COLORREF kSubColor       = RGB(0x99, 0x9A, 0x9E);  // 副标题：中灰
-constexpr COLORREF kAcceptBg       = RGB(0x07, 0xC1, 0x60);  // 接听绿（微信同款）
-constexpr COLORREF kAcceptHover    = RGB(0x06, 0xAD, 0x56);  // 接听悬停深绿
-constexpr COLORREF kDeclineBg      = RGB(0xE6, 0x4D, 0x4D);  // 挂断红
-constexpr COLORREF kDeclineHover   = RGB(0xD4, 0x3B, 0x3B);  // 挂断悬停深红
-constexpr COLORREF kBtnText        = RGB(0xFF, 0xFF, 0xFF);  // 按钮白字
+// ── 新版配色（Apple 风格） ──
+constexpr COLORREF kBgColor     = RGB(0xFF, 0xFF, 0xFF);  // 白卡
+constexpr COLORREF kNameColor   = RGB(0x1D, 0x1D, 0x1F);  // 名称近黑
+constexpr COLORREF kMutedColor  = RGB(0x6E, 0x6E, 0x73);  // 副标题中灰
+constexpr COLORREF kAcceptBg    = RGB(0x34, 0xC7, 0x59);  // 接听绿
+constexpr COLORREF kAcceptHover = RGB(0x2E, 0xB0, 0x4F);  // 接听悬停深绿
+constexpr COLORREF kDeclineBg   = RGB(0xFF, 0x3B, 0x30);  // 拒接红
+constexpr COLORREF kDeclineHover= RGB(0xE0, 0x33, 0x2A);  // 拒接悬停深红
+constexpr COLORREF kGlyphColor  = RGB(0xFF, 0xFF, 0xFF);  // 按钮白图标
+
+// 字形（Segoe MDL2 Assets）：E717 = Phone
+constexpr wchar_t kGlyphPhone = L'\uE717';
 
 COLORREF ParseArgb(uint32_t argb) {
   return RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
@@ -72,18 +72,15 @@ std::wstring Utf8ToWide(const std::string& s) {
   return out;
 }
 
-// 启用 DWM 圆角阴影（仿微信PC的柔和投影）
+// 启用 DWM 圆角阴影（柔和投影）
 void EnableDwmShadow(HWND hwnd) {
-  // 开启非客户区渲染以获得阴影
   DWMNCRENDERINGPOLICY policy = static_cast<DWMNCRENDERINGPOLICY>(DWMNCR_ENABLED);
   DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY,
                         &policy, sizeof(policy));
 
-  // 扩展边框到客户端区域，让阴影包裹圆角
   MARGINS margins = {0, 0, 0, 1};
   DwmExtendFrameIntoClientArea(hwnd, &margins);
 
-  // 使用圆角窗口模式（Win11）
   BOOL prefer_angular_corners = FALSE;
   DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
                         &prefer_angular_corners, sizeof(prefer_angular_corners));
@@ -150,17 +147,16 @@ bool IncomingCallWindow::CreateWindowIfNeeded() {
   // 启用 DWM 阴影
   EnableDwmShadow(hwnd);
 
-  // 创建自绘按钮（BS_OWNERDRAW 实现药丸形状）
+  // 自绘圆形图标按钮（BS_OWNERDRAW）
   accept_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u63A5\u542C",
+      0, L"BUTTON", L"",
       WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(1), GetModuleHandle(nullptr), nullptr);
   decline_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u6302\u65AD",
+      0, L"BUTTON", L"",
       WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(2), GetModuleHandle(nullptr), nullptr);
 
-  // 设置按钮字体
   HFONT ui_font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
   SendMessage(accept_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
   SendMessage(decline_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
@@ -182,14 +178,14 @@ void IncomingCallWindow::PositionAtBottomRight() {
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-  // 按钮靠右排列（仿微信PC：接听/挂断在右侧，药丸形）
-  const int btn_y = kWindowHeight - kBtnH - kBtnBottom;
-  const int total_btn_w = kBtnW * 2 + kBtnGap;
+  // 圆形按钮靠右：拒接在左、接听在右（垂直居中）
+  const int btn_y = (kWindowHeight - kBtnSize) / 2;
+  const int total_btn_w = kBtnSize * 2 + kBtnGap;
   const int btn_x_start = kWindowWidth - kPadX - total_btn_w;
-  SetWindowPos(accept_btn_, nullptr, btn_x_start, btn_y, kBtnW, kBtnH,
+  SetWindowPos(decline_btn_, nullptr, btn_x_start, btn_y, kBtnSize, kBtnSize,
                SWP_NOZORDER | SWP_NOACTIVATE);
-  SetWindowPos(decline_btn_, nullptr, btn_x_start + kBtnW + kBtnGap, btn_y, kBtnW, kBtnH,
-               SWP_NOZORDER | SWP_NOACTIVATE);
+  SetWindowPos(accept_btn_, nullptr, btn_x_start + kBtnSize + kBtnGap, btn_y,
+               kBtnSize, kBtnSize, SWP_NOZORDER | SWP_NOACTIVATE);
 
   StartAcceptButtonGlow();
 }
@@ -202,7 +198,7 @@ void IncomingCallWindow::Show(const std::string& caller_name,
   caller_name_ = Utf8ToWide(caller_name);
   subtitle_ = Utf8ToWide(subtitle);
   caller_initial_ = Utf8ToWide(caller_initial);
-  accent_color_ = accent_color_hex ? accent_color_hex : 0xFF07C160;
+  accent_color_ = accent_color_hex ? accent_color_hex : 0xFF34C759;
   ring_timeout_ms_ = ring_timeout_ms > 0 ? ring_timeout_ms : 30000;
 
   if (!CreateWindowIfNeeded()) return;
@@ -323,31 +319,44 @@ void IncomingCallWindow::DrawRoundedRect(HDC hdc, const RECT& rc, int radius,
   DeleteObject(pen);
 }
 
+void IncomingCallWindow::DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph,
+                                   COLORREF color, int font_size,
+                                   const wchar_t* font_family) {
+  HFONT f = CreateFontW(-font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                        DEFAULT_PITCH | FF_SWISS, font_family);
+  HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, color);
+  RECT r = rc;
+  DrawTextW(hdc, &glyph, 1, &r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  SelectObject(hdc, old);
+  DeleteObject(f);
+}
+
+void IncomingCallWindow::DrawPhoneOffGlyph(HDC hdc, const RECT& rc,
+                                           COLORREF color, int font_size) {
+  DrawGlyph(hdc, rc, kGlyphPhone, color, font_size, L"Segoe MDL2 Assets");
+  // 斜线模拟挂断（phone-off）：从右下到左上穿过电话图标
+  HPEN pen = CreatePen(PS_SOLID, 2, color);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  int cx = (rc.left + rc.right) / 2;
+  int cy = (rc.top + rc.bottom) / 2;
+  int off = font_size / 3;
+  MoveToEx(hdc, cx + off, cy + off, nullptr);
+  LineTo(hdc, cx - off, cy - off);
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+}
+
 void IncomingCallWindow::DrawAvatar(HDC hdc, const RECT& rc,
                                     const std::wstring& initial,
-                                    COLORREF bg) {
+                                    COLORREF bg, COLORREF letter_color) {
   int cx = (rc.left + rc.right) / 2;
   int cy = (rc.top + rc.bottom) / 2;
   int base_r = (std::min)(rc.right - rc.left, rc.bottom - rc.top) / 2;
-
-  // 呼吸光晕（头像外圈脉冲）
-  if (pulse_phase_ > 0) {
-    double t = pulse_phase_ / 30.0;
-    int glow_r = base_r + static_cast<int>(6 * std::sin(t * 6.28318));
-    // 微信风格光晕：淡绿色半透明感
-    BYTE alpha = static_cast<BYTE>(40 + 30 * std::sin(t * 6.28318));
-    HBRUSH glow_brush = CreateSolidBrush(RGB(
-        (GetRValue(bg) * alpha + 255 * (255 - alpha)) / 255,
-        (GetGValue(bg) * alpha + 255 * (255 - alpha)) / 255,
-        (GetBValue(bg) * alpha + 255 * (255 - alpha)) / 255));
-    HPEN null_pen = static_cast<HPEN>(GetStockObject(NULL_PEN));
-    HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, glow_brush));
-    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, null_pen));
-    Ellipse(hdc, cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    DeleteObject(glow_brush);
-  }
 
   // 实心圆形头像底色
   HRGN rgn = CreateEllipticRgn(rc.left, rc.top, rc.right, rc.bottom);
@@ -359,7 +368,6 @@ void IncomingCallWindow::DrawAvatar(HDC hdc, const RECT& rc,
   // 首字母
   if (!initial.empty()) {
     std::wstring s(1, static_cast<wchar_t>(std::towupper(initial[0])));
-    // 字号适配头像大小
     int font_size = base_r - 2;
     HFONT f = CreateFontW(font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
@@ -367,7 +375,7 @@ void IncomingCallWindow::DrawAvatar(HDC hdc, const RECT& rc,
                           DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(255, 255, 255));
+    SetTextColor(hdc, letter_color);
     RECT tr = {cx - base_r, cy - base_r, cx + base_r, cy + base_r};
     DrawTextW(hdc, s.c_str(), 1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(hdc, old);
@@ -375,45 +383,49 @@ void IncomingCallWindow::DrawAvatar(HDC hdc, const RECT& rc,
   }
 }
 
-// 绘制药丸形按钮（仿微信PC来电按钮）
-void IncomingCallWindow::DrawPillButton(HDC hdc, const RECT& rc,
-                                        const wchar_t* text,
-                                        bool is_accept, bool hovered) {
+// 绘制圆形图标按钮（设计稿：红拒接/绿接听圆钮 + 白色图标）
+void IncomingCallWindow::DrawRoundIconButton(HDC hdc, const RECT& rc,
+                                             wchar_t glyph, bool is_accept,
+                                             bool hovered) {
+  // 先把按钮矩形铺成白卡背景，避免圆形按钮四角露出系统底色
+  RECT fill_rc = rc;
+  HBRUSH bg_brush = CreateSolidBrush(kBgColor);
+  FillRect(hdc, &fill_rc, bg_brush);
+  DeleteObject(bg_brush);
+
   COLORREF bg = is_accept ? (hovered ? kAcceptHover : kAcceptBg)
                           : (hovered ? kDeclineHover : kDeclineBg);
 
-  // 药丸形背景（圆角 = 高度的一半）
-  DrawRoundedRect(hdc, rc, kBtnRadius, bg, CLR_NONE);
+  // 圆形背景
+  HRGN rgn = CreateEllipticRgn(rc.left, rc.top, rc.right, rc.bottom);
+  HBRUSH brush = CreateSolidBrush(bg);
+  FillRgn(hdc, rgn, brush);
+  DeleteObject(brush);
+  DeleteObject(rgn);
 
   // 接听按钮呼吸发光效果
   if (is_accept && accept_glow_ && !hovered) {
     double phase = (pulse_phase_ % 30) / 30.0;
     int g = static_cast<int>(180 + 50 * std::sin(phase * 6.28318));
     RECT glow_rc = rc;
-    InflateRect(&glow_rc, 1, 1);
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(7, g, 96));
+    InflateRect(&glow_rc, 2, 2);
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(52, g, 89));
     HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
     HBRUSH null_brush = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
     HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, null_brush));
-    RoundRect(hdc, glow_rc.left, glow_rc.top, glow_rc.right, glow_rc.bottom,
-              kBtnRadius + 1, kBtnRadius + 1);
+    Ellipse(hdc, glow_rc.left, glow_rc.top, glow_rc.right, glow_rc.bottom);
     SelectObject(hdc, old_brush);
     SelectObject(hdc, old_pen);
     DeleteObject(pen);
   }
 
-  // 白色文字居中
-  HFONT f = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
-  HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, kBtnText);
-  DrawTextW(hdc, text, -1, const_cast<RECT*>(&rc),
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-  SelectObject(hdc, old);
-  DeleteObject(f);
+  // 白色图标（拒接画 phone-off，接听画 phone）
+  if (glyph == kGlyphPhone && !is_accept) {
+    DrawPhoneOffGlyph(hdc, rc, kGlyphColor, kBtnSize / 2);
+  } else {
+    DrawGlyph(hdc, rc, glyph, kGlyphColor, kBtnSize / 2,
+              L"Segoe MDL2 Assets");
+  }
 }
 
 void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
@@ -424,7 +436,7 @@ void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
 
-  // ── 纯白背景（无可见边框线，靠DWM阴影区分层次） ──
+  // ── 白卡背景（无可见边框线，靠 DWM 阴影区分层次） ──
   HBRUSH bg_brush = CreateSolidBrush(kBgColor);
   FillRect(mem, &rc, bg_brush);
   DeleteObject(bg_brush);
@@ -434,39 +446,46 @@ void IncomingCallWindow::Paint(HWND hwnd, HDC hdc) {
                                      kCornerRadius, kCornerRadius);
   SelectClipRgn(mem, clip_rgn);
 
-  // ── 头像（左侧垂直居中） ──
+  // ── 头像（左侧垂直居中，浅色底 + accent 字母，贴合设计稿 primary/10） ──
+  COLORREF accent = ParseArgb(accent_color_);
   const int av_top = (kWindowHeight - kAvatarSize) / 2;
   RECT avatar_rc = {kPadX, av_top, kPadX + kAvatarSize, av_top + kAvatarSize};
-  DrawAvatar(mem, avatar_rc, caller_initial_, ParseArgb(accent_color_));
+  // 浅色底 = 10% accent 混合 90% 白
+  COLORREF avatar_bg = RGB(
+      (GetRValue(accent) * 10 + 255 * 90) / 100,
+      (GetGValue(accent) * 10 + 255 * 90) / 100,
+      (GetBValue(accent) * 10 + 255 * 90) / 100);
+  DrawAvatar(mem, avatar_rc, caller_initial_, avatar_bg, accent);
 
-  // ── 文字区域（头像右侧垂直居中） ──
+  // ── 文字区域（头像右侧垂直居中两行） ──
+  const int total_btn_w = kBtnSize * 2 + kBtnGap;
+  const int text_right = kWindowWidth - kPadX - total_btn_w - kBtnGap;
   SetBkMode(mem, TRANSPARENT);
   HFONT old_font = nullptr;
 
-  // 名称 —— 13pt 近黑色 Semibold（微信风格）
-  HFONT name_font = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+  // 名称 —— 16px 近黑 Semibold
+  HFONT name_font = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
+                                DEFAULT_PITCH | FF_SWISS,
+                                L"Microsoft YaHei UI");
   old_font = static_cast<HFONT>(SelectObject(mem, name_font));
   SetTextColor(mem, kNameColor);
-  const int text_top = av_top + 4;
-  // 右侧留出按钮空间
-  const int text_right = kWindowWidth - kPadX - kBtnW * 2 - kBtnGap - 10;
-  RECT name_rc = {kTextLeft, text_top, text_right, text_top + 20};
+  RECT name_rc = {kTextLeft, 22, text_right, 44};
   DrawTextW(mem, caller_name_.c_str(), -1, &name_rc,
             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(name_font);
 
-  // 副标题 —— 11pt 中灰色（如"来电中"/"语音提醒"）
-  HFONT sub_font = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+  // 副标题 —— 14px 中灰
+  HFONT sub_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
+                               DEFAULT_PITCH | FF_SWISS,
+                               L"Microsoft YaHei UI");
   old_font = static_cast<HFONT>(SelectObject(mem, sub_font));
-  SetTextColor(mem, kSubColor);
-  RECT sub_rc = {kTextLeft, text_top + 17, text_right, text_top + 33};
+  SetTextColor(mem, kMutedColor);
+  RECT sub_rc = {kTextLeft, 44, text_right, 66};
   DrawTextW(mem, subtitle_.c_str(), -1, &sub_rc,
             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
@@ -513,7 +532,7 @@ LRESULT IncomingCallWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_ERASEBKGND:
       return 1;
 
-    // 自绘按钮：绘制药丸形状
+    // 自绘按钮：绘制圆形图标
     case WM_DRAWITEM: {
       auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
       if (dis->CtlType == ODT_BUTTON) {
@@ -522,9 +541,8 @@ LRESULT IncomingCallWindow::HandleMessage(HWND hwnd, UINT message,
                        (dis->itemState & ODS_HOTLIGHT);
         if (is_accept) accept_hovered_ = hovered;
         else decline_hovered_ = hovered;
-        DrawPillButton(dis->hDC, dis->rcItem,
-                       is_accept ? L"\u63A5\u542C" : L"\u6302\u65AD",
-                       is_accept, hovered);
+        DrawRoundIconButton(dis->hDC, dis->rcItem, kGlyphPhone, is_accept,
+                            hovered);
         return TRUE;
       }
       break;
@@ -582,8 +600,10 @@ LRESULT IncomingCallWindow::HandleMessage(HWND hwnd, UINT message,
     case WM_NCHITTEST: {
       POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ScreenToClient(hwnd, &pt);
-      // 按钮区域不拖动，其余区域可拖动
-      if (pt.y < kWindowHeight - kBtnH - kBtnBottom) return HTCAPTION;
+      // 左侧（头像+文字）区域可拖动，右侧按钮区域不拖动
+      const int total_btn_w = kBtnSize * 2 + kBtnGap;
+      const int btn_x_start = kWindowWidth - kPadX - total_btn_w;
+      if (pt.x < btn_x_start - 4) return HTCAPTION;
       return HTCLIENT;
     }
 

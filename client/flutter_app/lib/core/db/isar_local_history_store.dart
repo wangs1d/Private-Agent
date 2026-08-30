@@ -402,6 +402,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       title: m["title"] as String,
       shortTitle: m["shortTitle"] as String?,
       notes: m["notes"] as String?,
+      isRhythm: m["isRhythm"] == true,
     );
   }
 
@@ -412,6 +413,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       "title": e.title,
       "shortTitle": e.shortTitle,
       "notes": e.notes,
+      "isRhythm": e.isRhythm,
     };
   }
 
