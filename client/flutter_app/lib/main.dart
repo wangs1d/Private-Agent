@@ -4548,6 +4548,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onSchedule: _openSchedulePanel,
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
+        messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
         // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
         onReportLocation: (location) {
           _ws.sendEvent("client.location_report", location);

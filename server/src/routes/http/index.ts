@@ -52,6 +52,7 @@ import { registerImageFileRoutes } from "./image-files.js";
 import { registerVideoProxyRoutes } from "./video-files.js";
 import { registerUserFileRoutes } from "./user-files.js";
 import { registerTravelMediaRoutes } from "./travel-media.js";
+import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -70,6 +71,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerWeatherRoutes(app, deps);
   registerGeoRoutes(app);
   registerTravelMediaRoutes(app, deps);
+  // 行程路由域（编辑/搜索/预订/分享；travelPlanningService 未装配时端点返回 503）
+  registerTravelPlanRoutes(app, deps);
   registerPhoneRoutes(app, deps);
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);

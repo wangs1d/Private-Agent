@@ -17,6 +17,8 @@ export interface TravelItinerarySnapshot {
   toolName: string;
   /** 写入时间戳（毫秒） */
   ts: number;
+  /** 行程 ID（travel-planning-service 生成，形如 plan-1788076649218；供前端面板调行程路由域编辑/预订/分享） */
+  planId: string;
   destination: string;
   title: string;
   startDate: string;
@@ -34,6 +36,8 @@ export interface TravelItinerarySnapshot {
       description: string;
       tips?: string[];
       images?: string[];
+      /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat，无则省略） */
+      splatUrl?: string;
       /** 本地评论（媒体库，最新优先，前端行程面板直读） */
       reviews?: unknown[];
       /** 相关视频元数据（播放页跳转，不自托管） */

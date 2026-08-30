@@ -43,6 +43,8 @@ export interface StoredTravelPlan {
       description: string;
       tips?: string[];
       images?: string[];
+      /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat，无则省略） */
+      splatUrl?: string;
       reviews?: unknown[];
       videos?: Array<Record<string, unknown>>;
     }>;

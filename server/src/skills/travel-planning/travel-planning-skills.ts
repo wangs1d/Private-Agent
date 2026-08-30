@@ -122,6 +122,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         travelItineraryStore.set({
           toolName: "travel.plan-itinerary",
           ts: Date.now(),
+          planId: String(result.id ?? ""),
           destination: result.destination,
           title: result.title,
           startDate: result.startDate ?? "",
@@ -139,6 +140,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
               description: item.description ?? "",
               tips: item.tips,
               images: item.images,
+              splatUrl: item.splatUrl,
               reviews: item.reviews,
               videos: item.videos,
             })),
@@ -171,6 +173,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
               description: item.description ?? "",
               tips: item.tips,
               images: item.images,
+              splatUrl: item.splatUrl,
               reviews: item.reviews,
               videos: item.videos,
             })),

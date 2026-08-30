@@ -16,18 +16,7 @@
     "setup:openclaw-wechat-bridge": "node scripts/install-openclaw-wechat-bridge.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.99.0",
-    "@azure/identity": "^4.13.1",
-    "@azure/search-documents": "^13.0.0",
-    "@google/genai": "^2.6.0",
-    "@langchain/core": "^1.1.48",
-    "@mistralai/mistralai": "^2.2.5",
-    "@supabase/supabase-js": "^2.106.2",
-    "better-sqlite3": "^12.10.0",
-    "compromise": "^14.15.0",
-    "groq-sdk": "^1.2.0",
-    "natural": "^8.1.1",
-    "ollama": "^0.6.3"
+    "better-sqlite3": "^12.10.0"
   },
   "overrides": {
     "gcp-metadata": "^8.1.2",
