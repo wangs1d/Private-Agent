@@ -239,11 +239,18 @@ function mergeDecision(
   return llm.confidence >= heuristic.confidence ? llm : heuristic;
 }
 
+/**
+ * 写入决策主入口：启发式先行，置信不足时 LLM 复判融合。
+ * opts.allowLlm = false 时只用启发式（供已有 LLM 产物的路径复用，
+ * 如低信号摘要后的落库裁决——摘要本身已是 LLM 输出，无需再花一次调用复判）。
+ */
 export async function decideMemoryWrite(
   text: string,
   context: MemoryDecisionContext = {},
+  opts?: { allowLlm?: boolean },
 ): Promise<MemoryDecisionResult> {
   const heuristic = classifyHeuristically(text, context);
+  if (opts?.allowLlm === false) return heuristic;
   const llm = shouldTrustHeuristic(heuristic) ? null : await llmDecision(text, context, heuristic);
   return mergeDecision(heuristic, llm);
 }

@@ -12,6 +12,7 @@
 // 安全性：只操作当前 actor 自己的日程任务（按 sessionId 过滤），删除严格限定
 // 在节律标记前缀内，不会误删用户手动创建的提醒。
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
+import { RHYTHM_MARK } from "../services/schedule-task-service.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -38,8 +39,7 @@ export const RHYTHM_PRESETS: Record<
   },
 };
 
-/** 节律任务标记前缀（写入 description；disable 时按此前缀精准匹配删除，「今日安排」等紧凑展示据此过滤） */
-export const RHYTHM_MARK = "[节律提醒:";
+/** 节律任务标记前缀（RHYTHM_MARK 定义并导出自 schedule-task-service；写入 description，disable 时精准匹配删除） */
 
 /**
  * care.rhythm_reminder 的 LLM 工具声明（并入 getBuiltinAgentChatTools）。
@@ -139,6 +139,8 @@ export function registerRhythmReminderTools(
                 shortTitle: `${preset.label}提醒 ${time}`,
                 description: `${RHYTHM_MARK}${presetKey}] ${preset.label}提醒 ${time}`,
                 kind: "reminder",
+                // 节律提醒只做后台到点推送，不进「今日安排」紧凑列表
+                category: "trivia",
                 runAt: nextOccurrence(time).toISOString(),
                 recurrence: "daily",
                 timezone: "Asia/Shanghai",

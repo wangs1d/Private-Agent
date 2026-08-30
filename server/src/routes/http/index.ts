@@ -38,6 +38,7 @@ import { registerMarketSignalRoutes } from "./market-signals.js";
 import { registerMorningBriefingRoutes } from "./morning-briefing.js";
 import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
+import { registerProactivityPipelineRoutes } from "./proactivity.js";
 import { registerBriefingTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
@@ -142,6 +143,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       suppressionStore: deps.proactivitySuppressionStore,
     });
   }
+  registerProactivityPipelineRoutes(app, { pipeline: deps.proactivePipeline ?? null });
   registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   registerUserPreferencesRoutes(app);

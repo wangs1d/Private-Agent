@@ -61,12 +61,23 @@ type ActorFrequencyState = {
   kindLastAt: Map<string, number>;
 };
 
+/** 频控状态快照（重启恢复用：预算计数 + 分 kind 冷却 + 自适应调整结果） */
+export type GovernorSnapshot = {
+  actors: Array<{ actorId: string; dateKey: string; dailyCount: number; kindLastAt: Array<[string, number]> }>;
+  cooldowns: Record<string, number>;
+};
+
+/** 自适应冷却边界（outcome 反馈调整 kind 冷却时的上下限） */
+const ADAPTIVE_COOLDOWN_MAX_MS = 48 * 60 * 60 * 1000;
+
 export class FrequencyGovernor {
   private readonly actors = new Map<string, ActorFrequencyState>();
 
   private readonly dailyBudget: number;
   private readonly kindCooldownMs: Record<string, number>;
   private readonly disableQuietHours: boolean;
+  /** env 显式覆盖过的 kind（restore 时不落盘值覆盖 env 意图） */
+  private readonly envOverriddenKinds = new Set<string>();
 
   constructor(opts?: {
     dailyBudget?: number;
@@ -88,9 +99,61 @@ export class FrequencyGovernor {
       // env 覆盖单 kind 冷却：PROACTIVITY_COOLDOWN_CARE=3600000
       for (const kind of Object.keys(this.kindCooldownMs)) {
         const envName = `PROACTIVITY_COOLDOWN_${kind.toUpperCase()}`;
-        this.kindCooldownMs[kind] = readEnvInt(envName, this.kindCooldownMs[kind]);
+        if (process.env[envName] !== undefined) {
+          this.kindCooldownMs[kind] = readEnvInt(envName, this.kindCooldownMs[kind]);
+          this.envOverriddenKinds.add(kind);
+        }
       }
     }
+  }
+
+  /**
+   * 自适应冷却（outcome 反馈回灌）：负反馈冷却 ×1.5（上限 48h），正反馈向默认值回落 ×0.9。
+   * 连续被忽略的话题自动沉寂、高接受率话题恢复活跃——分寸感来自真实反馈而非固定 cron。
+   */
+  noteOutcome(kind: string, positive: boolean): void {
+    const base = DEFAULT_KIND_COOLDOWN_MS[kind] ?? DEFAULT_UNKNOWN_KIND_COOLDOWN_MS;
+    const current = this.kindCooldownMs[kind] ?? DEFAULT_UNKNOWN_KIND_COOLDOWN_MS;
+    const next = positive
+      ? Math.max(base, Math.round(current * 0.9))
+      : Math.min(Math.round(current * 1.5), ADAPTIVE_COOLDOWN_MAX_MS);
+    this.kindCooldownMs[kind] = next;
+  }
+
+  /** 频控状态快照（ProactivePipeline 落盘 data/proactivity/frequency.json） */
+  snapshot(): GovernorSnapshot {
+    return {
+      actors: [...this.actors].map(([actorId, s]) => ({
+        actorId,
+        dateKey: s.dateKey,
+        dailyCount: s.dailyCount,
+        kindLastAt: [...s.kindLastAt],
+      })),
+      cooldowns: { ...this.kindCooldownMs },
+    };
+  }
+
+  /** 从快照恢复（env 显式覆盖的 kind 不被落盘值覆盖） */
+  restore(snapshot: GovernorSnapshot): void {
+    for (const a of snapshot.actors ?? []) {
+      this.actors.set(a.actorId, {
+        dateKey: a.dateKey,
+        dailyCount: a.dailyCount,
+        kindLastAt: new Map(a.kindLastAt ?? []),
+      });
+    }
+    for (const [kind, ms] of Object.entries(snapshot.cooldowns ?? {})) {
+      if (!this.envOverriddenKinds.has(kind) && Number.isFinite(ms)) this.kindCooldownMs[kind] = ms;
+    }
+  }
+
+  /** 预算用量（诊断接口展示） */
+  usageSnapshot(): Array<{ actorId: string; dailyCount: number; budget: number }> {
+    return [...this.actors].map(([actorId, s]) => ({
+      actorId,
+      dailyCount: s.dailyCount,
+      budget: this.dailyBudget,
+    }));
   }
 
   private stateOf(actorId: string, now: Date): ActorFrequencyState {

@@ -1,5 +1,4 @@
 import type { MemoryManagerService } from "./memory-manager-service.js";
-import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
@@ -81,7 +80,6 @@ export class NightlyMemoryTaskService {
   private lastProcessedDay = "";
   private memoryManager: MemoryManagerService | null = null;
   private factStore: UserFactStore | null = null;
-  private dailyDigest: DailyDigestService | null = null;
   private memorySync: AgentMemorySyncService | null = null;
   private narrativeMemory: NarrativeMemoryPort | null = null;
   /**
@@ -113,12 +111,10 @@ export class NightlyMemoryTaskService {
 
   setDependencies(
     memoryManager: MemoryManagerService | null,
-    dailyDigest: DailyDigestService | null,
     memorySync: AgentMemorySyncService | null,
     narrativeMemory?: NarrativeMemoryPort | null,
   ): void {
     this.memoryManager = memoryManager;
-    this.dailyDigest = dailyDigest;
     this.memorySync = memorySync;
     this.narrativeMemory = narrativeMemory ?? null;
   }
@@ -191,8 +187,9 @@ export class NightlyMemoryTaskService {
     };
 
     try {
-      // 缺口 4 修复：归档必须在 dreaming 之前
-      await this.triggerDailyArchiveImmediate();
+      // 记忆架构收敛：原「DailyDigest 归档 → 长期图」已移除——与下方
+      // consolidateDailyJournals（journal → 长期图）对同批当天对话双写长期记忆，
+      // 白天只写 journal 一份原始流水，夜间固化单一入口。
       result.archived = true;
 
       await this.runDreamPhase();
@@ -359,8 +356,9 @@ export class NightlyMemoryTaskService {
     console.log(`[NightlyMemory] Running night tasks for ${today}`);
 
     try {
-      // 缺口 4 修复：归档必须在 dreaming 之前，让 dream phase 能看到当天对话
-      await this.triggerDailyArchiveImmediate();
+      // 记忆架构收敛：原「DailyDigest 归档」步骤已移除——它与下方 consolidateDailyJournals
+      // （journal → 长期记忆图）对同批当天对话双写长期记忆。白天只写 journal 一份原始流水，
+      // 夜间固化走 consolidateDailyJournals 单一入口。
       // 巩固管线（episodic → semantic）：journal 固化前先做事实提炼，
       // 此时未固化日志仍在，提炼出的稳定事实写入结构化槽位（latest-wins 归并）。
       await this.extractFactsFromJournals();
@@ -586,27 +584,6 @@ export class NightlyMemoryTaskService {
     }
   }
 
-  /**
-   * 立即归档今天的 digest（缺口 4 修复）。
-   * 调用 DailyDigestService.archiveDayForTodayImmediately()，绕过 tickArchive 时间窗。
-   */
-  private async triggerDailyArchiveImmediate(): Promise<void> {
-    if (!this.dailyDigest) return;
-    try {
-      console.log("[NightlyMemory] Triggering immediate daily digest archive (before dream phase)");
-      const method = this.dailyDigest as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
-      if (typeof method.archiveDayForTodayImmediately === "function") {
-        await method.archiveDayForTodayImmediately();
-      } else {
-        // 兜底：降级到原 triggerDailyArchive（带时间窗）
-        await this.triggerDailyArchive();
-      }
-    } catch (err) {
-      console.log(`[NightlyMemory] archiveDayForTodayImmediately 失败（降级原逻辑）: ${err}`);
-      await this.triggerDailyArchive();
-    }
-  }
-
   private async runDreamPhase(): Promise<void> {
     const actorIds = this.getAllActorIds().slice(0, this.config.consolidationBatchSize);
     if (actorIds.length === 0) return;
@@ -669,20 +646,6 @@ export class NightlyMemoryTaskService {
       await writeFile(this.reportFilePath, `${JSON.stringify(this.recentReports, null, 2)}\n`, "utf8");
     } catch (err) {
       console.error("[NightlyMemory] Failed to persist sleep agent report:", err);
-    }
-  }
-
-  private async triggerDailyArchive(): Promise<void> {
-    if (!this.dailyDigest) return;
-
-    try {
-      console.log("[NightlyMemory] Triggering daily digest archive");
-      const method = this.dailyDigest as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
-      if (typeof method.tickArchive === "function") {
-        await method.tickArchive();
-      }
-    } catch (err) {
-      console.error("[NightlyMemory] Archive trigger failed:", err);
     }
   }
 
@@ -780,7 +743,8 @@ export class NightlyMemoryTaskService {
     for (const actorId of this.memorySync?.listSessionIds?.() ?? []) {
       if (actorId && actorId !== "system") actorIds.add(actorId);
     }
-    for (const actorId of this.dailyDigest?.listActorIds?.() ?? []) {
+    // journal 目录兜底：digest 依赖移除后，用当日/历史 journal 目录补充 actor 列表
+    for (const actorId of getDailyJournalService()?.listActorIds?.() ?? []) {
       if (actorId) actorIds.add(actorId);
     }
     return [...actorIds];

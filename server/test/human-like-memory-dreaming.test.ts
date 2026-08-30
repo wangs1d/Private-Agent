@@ -10,7 +10,11 @@ import {
 } from "../src/services/human-like-memory-service.js";
 import { AgentMemorySyncService } from "../src/services/agent-memory-sync-service.js";
 import { MemoryManagerService } from "../src/services/memory-manager-service.js";
+import { DailyJournalService } from "../src/services/daily-journal-service.js";
 import type { NarrativeMemoryPort } from "../src/services/narrative-memory-port.js";
+
+/** 等待 journal writeChain 落盘（appendTurn 为 fire-and-forget） */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // LLM 密钥环境变量：测试必须封闭（不依赖外部 API）。
 // llmExtractExperience / llmPlanSleepActions 会读取 resolvePrimaryLlmClientConfig()，
@@ -162,7 +166,25 @@ test("recall marks a faded memory as a candidate and repeated discussion reactiv
   });
 });
 
-test("daily candidates are acknowledged only after narrative ingest succeeds", async () => {
+/** 记忆整理测试统一封闭 LLM 环境：retention 走确定性关键词路径，杜绝异步写入与临时目录清理竞态 */
+function withScrubbedLlmEnv(fn: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    const savedEnv = new Map(
+      LLM_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+    );
+    for (const key of LLM_ENV_KEYS) delete process.env[key];
+    try {
+      await fn();
+    } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+}
+
+test("daily candidates are acknowledged only after narrative ingest succeeds", withScrubbedLlmEnv(async () => {
   const dir = await mkdtemp(join(tmpdir(), "dream-daily-buffer-"));
   try {
     const sync = new AgentMemorySyncService(join(dir, "sync.json"));
@@ -173,26 +195,34 @@ test("daily candidates are acknowledged only after narrative ingest succeeds", a
         ingested.push({ text, highSignal: opts?.highSignal });
       },
     } as NarrativeMemoryPort;
+    // 记忆架构收敛：当天待整理内容改由 DailyJournal 承载（原 RAM pending queue 已删除），
+    // 通过构造函数注入临时目录的 journal 服务。
+    const journal = new DailyJournalService(join(dir, "journal"));
     const manager = new MemoryManagerService(narrative, sync, {
       consolidationIntervalMs: 60_000,
       profileUpdateThreshold: 99,
-    });
+    }, journal);
 
-    manager.onTurnCompleted("user-buffer", "sess-buffer", "Please remember that I prefer quiet mornings.", "I will remember that.");
+    journal.appendTurn("user-buffer", "sess-buffer", "Please remember that I prefer quiet mornings.", "I will remember that.");
+    await sleep(80);
     await manager.consolidateNow("user-buffer");
+    // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
+    await sleep(80);
 
     // 新设计：consolidateNow 通过 performDreamRehearsal 将当天待整理内容以
     // dream:replay / dream:theme_merge 等形式 ingest 到 narrative memory（多次调用）。
     assert.ok(ingested.length >= 1);
     assert.ok(ingested.some((item) => item.text.includes("prefer quiet mornings")));
-    // 当天待整理队列在 consolidateNow 中被消费（consumeDailyPendingQueue）。
-    assert.equal(manager.getDailyPendingQueue("user-buffer").length, 0);
+    // journal 消费游标已推进 = 当天行已被消费（原 getDailyPendingQueue().length === 0 语义）。
+    const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
+      .journalConsumeCursor.get("user-buffer");
+    assert.ok(cursor && cursor.lines >= 1, "journal 行应已被消费");
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
-});
+}));
 
-test("daily buffer survives a failed Dreaming ingest", async () => {
+test("daily buffer survives a failed Dreaming ingest", withScrubbedLlmEnv(async () => {
   const dir = await mkdtemp(join(tmpdir(), "dream-daily-buffer-failure-"));
   try {
     const sync = new AgentMemorySyncService(join(dir, "sync.json"));
@@ -202,23 +232,34 @@ test("daily buffer survives a failed Dreaming ingest", async () => {
         throw new Error("simulated ingest failure");
       },
     } as unknown as NarrativeMemoryPort;
+    const journal = new DailyJournalService(join(dir, "journal"));
     const manager = new MemoryManagerService(narrative, sync, {
       consolidationIntervalMs: 60_000,
       profileUpdateThreshold: 99,
-    });
+    }, journal);
 
-    manager.onTurnCompleted("user-failure", "sess-failure", "Remember my weekly planning habit.", "Understood.");
+    journal.appendTurn("user-failure", "sess-failure", "Remember my weekly planning habit.", "Understood.");
+    await sleep(80);
     // 新设计：consolidateNow 内部用 try/catch 和 .catch(() => {}) 吞掉 ingest 错误，
-    // 不再向上抛出，队列在 consumeDailyPendingQueue 阶段已被消费。
+    // 不再向上抛出；journal 消费游标正常推进，原始行保留在 journal 文件中（夜间固化兜底）。
     await manager.consolidateNow("user-failure");
-    assert.equal(manager.getDailyPendingQueue("user-failure").length, 0);
+    await sleep(80);
+    const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
+      .journalConsumeCursor.get("user-failure");
+    assert.ok(cursor && cursor.lines >= 1, "消费游标应推进（journal 行保留作夜间固化兜底）");
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
-});
+}));
 
 test("a repeated archived memory is restored and logged", async () => {
   const dir = await mkdtemp(join(tmpdir(), "dream-archive-reactivation-"));
+  // 与文件内其他用例一致：封闭 LLM 环境，retention 走确定性关键词路径，
+  // 避免本机配置真实密钥时异步 embedding 写入与临时目录清理竞态。
+  const savedEnv = new Map(
+    LLM_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+  );
+  for (const key of LLM_ENV_KEYS) delete process.env[key];
   try {
     const sync = new AgentMemorySyncService(join(dir, "sync.json"));
     await sync.load();
@@ -234,6 +275,8 @@ test("a repeated archived memory is restored and logged", async () => {
 
     manager.onTurnCompleted("user-archive", "sess-archive", "I prefer quiet mornings.", "I remember.");
     await manager.consolidateNow("user-archive");
+    // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
+    await sleep(80);
 
     const entries = sync.getSnapshot("user-archive", [
       "memory_summary",
@@ -247,6 +290,10 @@ test("a repeated archived memory is restored and logged", async () => {
     assert.ok(String(entries.memory_summary_forgotten).includes("I prefer quiet mornings"));
     assert.equal(entries.memory_reactivation_log, undefined);
   } finally {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 });

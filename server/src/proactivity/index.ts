@@ -36,3 +36,21 @@ export {
   tomorrowEveningRunAt,
   type OverworkRhythmPayload,
 } from "./triggers/overwork-trigger.js";
+// ─── 统一主动性管道（docs/proactivity-architecture.md）───
+export type {
+  ProactiveProposal,
+  ProactiveImportance,
+  PresenceState,
+  ProposalVerdict,
+  ProactiveOutcome,
+  DeliveryChannel,
+  ArbitrationDecision,
+} from "./pipeline-types.js";
+export { arbitrate, isQuietHourNow, nextQuietEnd, type ArbiterContext } from "./arbiter.js";
+export { PresenceService } from "./presence-service.js";
+export { ProposalStore } from "./proposal-store.js";
+export { ProactiveDeliveryService, type DeliveredMessage } from "./delivery-service.js";
+export { OutcomeStore, type OutcomeRecord } from "./outcome-store.js";
+export { UpcomingScheduleWatcher } from "./upcoming-schedule-watcher.js";
+export { ProactivePipeline, type ProactivePipelineDeps } from "./proactive-pipeline.js";
+export { readJson, writeJson } from "./persist-file.js";

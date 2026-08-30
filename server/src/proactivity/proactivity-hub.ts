@@ -198,6 +198,21 @@ export class ProactivityHub {
     this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", false);
   }
 
+  // ---- 已知 actor 持久化（重启恢复主动性资格：否则重启后 agent 永不主动） ----
+
+  /** 恢复已知 actor 及其最近交互时刻（ProactivePipeline 从 data/proactivity/known-actors.json 调用） */
+  restoreActors(entries: Array<{ actorId: string; lastInteractionAt: number }>): void {
+    for (const e of entries) {
+      this.knownActors.add(e.actorId);
+      this.lastInteractionAt.set(e.actorId, e.lastInteractionAt);
+    }
+  }
+
+  /** 导出已知 actor 状态（落盘用） */
+  exportActors(): Array<{ actorId: string; lastInteractionAt: number }> {
+    return [...this.lastInteractionAt].map(([actorId, lastInteractionAt]) => ({ actorId, lastInteractionAt }));
+  }
+
   /** 暴露感知流（诊断/测试用） */
   getFeed(): PerceptionFeed {
     return this.feed;

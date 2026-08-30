@@ -61,20 +61,27 @@ export type RecallGateResult = {
     | "off"; // 未触发（默认）
 };
 
+/** 读取正整数环境变量；未设置/非法时用默认值 */
+function envPositiveInt(name: string, fallback: number): number {
+  const v = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
 /**
- * 新会话开场判定阈值：仅 thread 内 user/assistant 消息总数 ≤ 1 视为新会话
- * （本 session 首条用户消息）。
+ * 新会话开场判定阈值：仅 thread 内 user/assistant 消息总数 ≤ 阈值视为新会话
+ * （本 session 首条用户消息）。可用 AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS 覆盖。
  * 原阈值 2 的误判（串台根因之一）：首轮问答完成后 thread 已有 2 条消息，
  * 第二轮（如任务追问"你确定？"）仍命中 new_session → relationshipMemory/
  * 跨会话记忆全量注入任务轮 → agent 用角色关系语境盖过任务语境。
  * 修正后跨会话衔接只在真正的会话开场注入一次。
  */
-const NEW_SESSION_THREAD_MAX = 1;
+const NEW_SESSION_THREAD_MAX = envPositiveInt("AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS", 1);
 /**
  * 指代升级判定阈值：thread 消息数超过此值说明早期轮次已被截出窗口，
  * 模糊指代（"那个/它/继续"）有可能指向窗口外内容，需要升级长期检索。
+ * 可用 AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS 覆盖。
  */
-const ANAPHORA_ESCALATION_THREAD_MIN = 24;
+const ANAPHORA_ESCALATION_THREAD_MIN = envPositiveInt("AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS", 24);
 
 export function shouldRecallLongTerm(input: RecallGateInput): RecallGateResult {
   const text = input.text.trim();

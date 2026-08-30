@@ -1,6 +1,7 @@
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
+import { getDailyJournalService, DailyJournalService } from "./daily-journal-service.js";
 import OpenAI from "openai";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -144,26 +145,37 @@ export class MemoryManagerService {
     private readonly narrativeMemory: NarrativeMemoryPort | null,
     private readonly memorySync: AgentMemorySyncService | null,
     config?: Partial<MemoryManagerConfig>,
+    /** 当日 journal 来源（可注入便于测试）；缺省用全局单例 */
+    journal?: DailyJournalService | null,
   ) {
     this.config = { ...loadConfig(), ...config };
+    this.journal = journal ?? null;
+  }
+
+  /** 当日待整理内容的唯一来源：注入的 journal 服务或全局单例 */
+  private resolveJournal(): DailyJournalService | null {
+    return this.journal ?? getDailyJournalService();
   }
 
   onTurnCompleted(actorId: string, sessionId: string | undefined, userText: string, assistantText: string): void {
     if (!this.config.enabled) return;
 
-    // 记忆架构重构：白天不再实时回喂长期记忆图（原 ingestEpisodicFactsToLongTerm 已移除）。
-    // 白天只写当日 journal（DailyJournalService.appendTurn，由轮末链路触发），
-    // 长期记忆固化统一收敛到夜晚 consolidateDailyJournals（journal → narrative 长期图），
-    // 消除"白天 episodic 回喂 + 夜晚 journal 固化"双写同批事实导致长期图陈旧/重复的串台源。
+    // 记忆架构收敛（2026-08）：白天不再实时回喂长期记忆图，也不再在内存里
+    // 自建「当日待整理队列」——原始轮次由 TurnFinalizer 统一落盘 DailyJournal，
+    // 整理时（consolidateNow）直接读 journal，消除同批原始数据的第二份存储。
+    // 这里只维护「今日轮数」计数器，供在线固化阈值判断。
 
     const prev = this.turnCounters.get(actorId) ?? 0;
     const next = prev + 1;
     this.turnCounters.set(actorId, next);
-
-    // 缺口 1 修复：白天累积"当天待整理队列"
-    // 原策略：白天直接 return 不做任何积累 → dreaming 晚上拿不到当天原始内容
-    // 新策略：白天每轮都把内容推入"当天待整理队列"，dreaming 时优先消费此队列
-    this.pushToDailyPendingQueue(actorId, { userText, assistantText });
+    {
+      const today = this.getTodayDayKey();
+      const entry = this.dailyTurnCounters.get(actorId);
+      this.dailyTurnCounters.set(actorId, {
+        day: today,
+        count: entry && entry.day === today ? entry.count + 1 : 1,
+      });
+    }
 
     const nightlyService = getNightlyMemoryTaskService();
     const shouldDefer = nightlyService?.shouldDeferConsolidation() ?? false;
@@ -172,19 +184,19 @@ export class MemoryManagerService {
       // 原策略：白天只积累 pending queue，整理要等 30min idle 或夜间 dreaming
       //   → 单窗口长会话（用户一直在线聊）当天记忆始终得不到整理，
       //     session recap 滚动压缩会丢细节，长期记忆滞后一整天。
-      // 新策略：pending queue 积累超过 onlineConsolidationThreshold（默认 15 轮）
+      // 新策略：当日轮数超过 onlineConsolidationThreshold（默认 15 轮）
       //   时立即触发一次在线整理（LLM 评分 + 去重 + 写回 memory_summary），
       //   长会话每 ~15 轮巩固一次，"整理记忆能力"在会话中真实被使用。
-      const pendingCount = this.getDailyPendingQueue(actorId).length;
+      const pendingCount = this.getTodayTurnCount(actorId);
       if (pendingCount >= this.config.onlineConsolidationThreshold) {
         console.log(
-          `[MemoryManager] Day mode: pending queue ${pendingCount} ≥ ${this.config.onlineConsolidationThreshold}，触发单窗口在线固化 for ${actorId}`,
+          `[MemoryManager] Day mode: today turns ${pendingCount} ≥ ${this.config.onlineConsolidationThreshold}，触发单窗口在线固化 for ${actorId}`,
         );
         void this.tryIdleConsolidation(actorId).catch(() => {
           /* 在线固化失败静默，等待夜间兜底 */
         });
       } else {
-        console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next}, pending queue: ${pendingCount} items)`);
+        console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next}, today turns: ${pendingCount})`);
       }
       return;
     }
@@ -194,14 +206,18 @@ export class MemoryManagerService {
     }
   }
 
+  /** 注入的 journal 服务（可测性 DI）；null 时用全局单例 */
+  private readonly journal: DailyJournalService | null;
+
   /**
-   * 当天待整理队列：actorId → 当天累积的 turn 文本数组。
-   *
-   * 白天每轮对话结束后（onTurnCompleted）都推入此队列，
-   * dreaming 时优先消费此队列，确保"晚上整理当天新增的记忆"。
-   * 队列按日切分，新一天开始时自动清空。
+   * 今日轮数计数器（actorId → { day, count }）：仅用于在线固化阈值判断。
+   * 原始轮次内容统一由 DailyJournal 落盘（TurnFinalizer 触发），整理时直接读
+   * journal——不再在内存里重复存一份原始对话（原 dailyPendingQueues 已删除）。
    */
-  private dailyPendingQueues = new Map<string, { day: string; items: string[] }>();
+  private dailyTurnCounters = new Map<string, { day: string; count: number }>();
+
+  /** journal 行消费游标（actorId → { day, lines }）：记录本日已被 consolidateNow 消费的行数 */
+  private journalConsumeCursor = new Map<string, { day: string; lines: number }>();
 
   /**
    * 获取今天的日 key（YYYY-MM-DD，基于 Asia/Shanghai 时区）。
@@ -214,14 +230,11 @@ export class MemoryManagerService {
     return fmt.format(new Date()); // 输出 YYYY-MM-DD
   }
 
-  /**
-   * 推入当天待整理队列（白天累积，dreaming 时消费）。
-   */
-  /**
-   * 当天话题频次统计：用于 consolidate 时给"用户当天重复提到的话题"加分。
-   * key = actorId，value = Map<词, 出现次数>。每日队列清空时一并清空。
-   */
-  private dailyTopicFrequency = new Map<string, Map<string, number>>();
+  private getTodayTurnCount(actorId: string): number {
+    const today = this.getTodayDayKey();
+    const entry = this.dailyTurnCounters.get(actorId);
+    return entry && entry.day === today ? entry.count : 0;
+  }
 
   private static readonly STOP_WORDS = new Set([
     "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "这", "那", "有", "不", "就",
@@ -259,68 +272,53 @@ export class MemoryManagerService {
     return words;
   }
 
-  private pushToDailyPendingQueue(actorId: string, turn: { userText?: string; assistantText?: string }): void {
+  /**
+   * 消费当日 journal 行（自游标起），返回供 LLM 整理的文本与用户侧文本。
+   * journal 行不删除（夜间固化同用），靠游标记录已消费位置，跨天自动重置。
+   */
+  private async consumeTodayJournalLines(
+    actorId: string,
+  ): Promise<{ text: string; userText: string }> {
     const today = this.getTodayDayKey();
-    let entry = this.dailyPendingQueues.get(actorId);
-    if (!entry || entry.day !== today) {
-      entry = { day: today, items: [] };
-      this.dailyPendingQueues.set(actorId, entry);
-      this.dailyTopicFrequency.delete(actorId); // 新一天清空频次统计
-    }
-    const parts: string[] = [];
-    if (turn.userText) {
-      parts.push(`用户: ${turn.userText.slice(0, 200)}`);
-      // 统计用户话题词频（仅 userText，避免 assistant 文本污染）
-      const words = this.extractTopicWords(turn.userText);
-      let freq = this.dailyTopicFrequency.get(actorId);
-      if (!freq) {
-        freq = new Map();
-        this.dailyTopicFrequency.set(actorId, freq);
-      }
-      for (const w of words) {
-        freq.set(w, (freq.get(w) ?? 0) + 1);
-      }
-    }
-    if (turn.assistantText) parts.push(`Agent: ${turn.assistantText.slice(0, 200)}`);
-    if (parts.length > 0) {
-      entry.items.push(`[${new Date().toISOString()}] ${parts.join(" | ")}`);
-    }
+    const cursor = this.journalConsumeCursor.get(actorId);
+    const from = cursor && cursor.day === today ? cursor.lines : 0;
+
+    const hits =
+      (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
+    this.journalConsumeCursor.set(actorId, { day: today, lines: Math.max(from, hits.length) });
+
+    const consumed = hits.slice(from);
+    if (consumed.length === 0) return { text: "", userText: "" };
+
+    const formatRole = (role: string): string =>
+      role === "user" ? "用户" : role === "assistant" ? "Agent" : role;
+    const text = consumed
+      .map((h) => `[${h.time}] ${formatRole(h.role)}: ${h.text}`)
+      .join("\n");
+    // 话题频次统计只用用户侧行（U/fact/prefer 行在 readTodayLines 中归为 user/fact），
+    // 避免 assistant 文本污染词频
+    const userText = consumed
+      .filter((h) => h.role === "user" || h.role === "fact")
+      .map((h) => h.text)
+      .join("\n");
+    return { text, userText };
   }
 
   /**
    * 获取当天 top N 高频话题词（用于 consolidate 加分）。
-   * 只返回出现 >=2 次的词，按频次降序。
+   * 从本次消费的 journal 用户侧行即时统计，只返回出现 >=2 次的词，按频次降序。
    */
-  private getTopDailyTopics(actorId: string, topN = 5): string[] {
-    const freq = this.dailyTopicFrequency.get(actorId);
-    if (!freq || freq.size === 0) return [];
+  private getTopDailyTopics(userText: string, topN = 5): string[] {
+    if (!userText) return [];
+    const freq = new Map<string, number>();
+    for (const w of this.extractTopicWords(userText)) {
+      freq.set(w, (freq.get(w) ?? 0) + 1);
+    }
     return [...freq.entries()]
       .filter(([, count]) => count >= 2)
       .sort((a, b) => b[1] - a[1])
       .slice(0, topN)
       .map(([word]) => word);
-  }
-
-  /**
-   * 获取指定 actor 当天待整理队列（dreaming 时消费）。
-   */
-  getDailyPendingQueue(actorId: string): string[] {
-    const today = this.getTodayDayKey();
-    const entry = this.dailyPendingQueues.get(actorId);
-    if (!entry || entry.day !== today) return [];
-    return entry.items;
-  }
-
-  /**
-   * 消费指定 actor 当天待整理队列，返回拼接文本并清空队列。
-   * 供 consolidateNow 在 dreaming 阶段调用。
-   */
-  consumeDailyPendingQueue(actorId: string): string {
-    const items = this.getDailyPendingQueue(actorId);
-    if (items.length === 0) return "";
-    const today = this.getTodayDayKey();
-    this.dailyPendingQueues.set(actorId, { day: today, items: [] });
-    return items.join("\n");
   }
 
   async consolidateNow(actorId: string): Promise<MemoryConsolidationResult> {
@@ -344,15 +342,15 @@ export class MemoryManagerService {
       ]);
       let raw = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
 
-      // 缺口 2 修复：优先消费"当天待整理队列"
-      // 原策略：consolidateNow 只读全量 memory_summary，当天新增可能被老记忆挤掉
-      // 新策略：先把当天待整理队列的内容追加到 raw 顶部，确保 dreaming 优先整理当天内容
-      const dailyPending = this.consumeDailyPendingQueue(actorId);
-      if (dailyPending && dailyPending.length > 0) {
+      // 缺口 2 修复 → journal 统一来源：当天待整理内容直接读当日 journal 行
+      // （自上次消费游标起），追加到 raw 顶部，确保 dreaming/在线固化优先整理当天内容。
+      // 原实现自建 RAM 队列存一份原始轮次，与 DailyJournal 双写同批数据，已删除。
+      const dailyPending = await this.consumeTodayJournalLines(actorId);
+      if (dailyPending.text) {
         const todayKey = this.getTodayDayKey();
-        const dailyBlock = `\n[当日待整理 ${todayKey}]\n${dailyPending}\n[/当日待整理]\n`;
+        const dailyBlock = `\n[当日待整理 ${todayKey}]\n${dailyPending.text}\n[/当日待整理]\n`;
         raw = dailyBlock + raw;
-        console.log(`[MemoryManager] consolidateNow: 注入当天待整理队列 ${dailyPending.split("\n").length} 条到 ${actorId}`);
+        console.log(`[MemoryManager] consolidateNow: 注入当日 journal 行 ${dailyPending.text.split("\n").length} 条到 ${actorId}`);
       }
 
       if (!raw || raw.length < 50) return result;
@@ -368,7 +366,7 @@ export class MemoryManagerService {
       result.entriesMerged = lines.length - consolidated.length;
 
       // 建议 3：取当天高频话题词，传给评分函数给"用户重复问过的话题"加分
-      const topTopics = this.getTopDailyTopics(actorId);
+      const topTopics = this.getTopDailyTopics(dailyPending.userText);
       if (topTopics.length > 0) {
         console.log(`[MemoryManager] consolidateNow: 当天高频话题加分 ${topTopics.length} 词 → ${actorId}`);
       }
@@ -799,14 +797,15 @@ export class MemoryManagerService {
   /**
    * 白天 idle 轻量整理：用户离开 30min+ 后，即使白天也触发一次记忆整理。
    * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
-   * 仅当当天待整理队列有内容时才执行，避免空跑。
+   * 以当日 journal 实际内容为门槛（轮数计数器只是触发启发），无可整理内容直接跳过。
    */
   async tryIdleConsolidation(actorId: string): Promise<boolean> {
-    const pending = this.getDailyPendingQueue(actorId);
-    if (pending.length === 0) return false;
+    const hits =
+      (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
+    if (hits.length === 0) return false;
 
     console.log(
-      `[MemoryManager] Daytime idle consolidation for ${actorId} (${pending.length} pending items)`,
+      `[MemoryManager] Daytime idle consolidation for ${actorId} (${hits.length} journal lines)`,
     );
     try {
       await this.consolidateNow(actorId);

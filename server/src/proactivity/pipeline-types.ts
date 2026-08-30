@@ -1,0 +1,60 @@
+// 统一主动性管道类型（架构见 docs/proactivity-architecture.md §4 L1-L5）
+// 所有触发源只提交 ProactiveProposal，仲裁/投递/反馈由管道统一承担。
+
+export type ProactiveImportance = "critical" | "high" | "medium" | "low";
+
+export type PresenceState = "active" | "idle" | "offline";
+
+/** 一次主动提案：发现"值得主动"的唯一提交格式（提案-仲裁分离，源只举证不投递） */
+export type ProactiveProposal = {
+  proposalId: string;
+  actorId: string;
+  kind: string;
+  /** must=用户点名要的事（日程/提醒/预警），绕过社交预算；social=主动社交行为 */
+  tier: "must" | "social";
+  importance: ProactiveImportance;
+  /** 指纹去重键（如 schedule_upcoming:{taskId}:{runAt}）：待发区内同键合并 */
+  dedupKey: string;
+  title: string;
+  summary: string;
+  /** 触发证据（诊断接口展示"为什么提案"） */
+  evidence: string[];
+  /** 现成文案：有值则零 LLM 直投；无值走 speak 闭环（现有 ProactionCortex，唯一 LLM 点） */
+  directText?: string;
+  createdAt: number;
+  /** 最早可发时刻 ms（提前量/择时下界） */
+  deliverAfter?: number;
+  /** 保质期 ms：过期作废（如会议开始后"提前提醒"提案无意义） */
+  expiresAt?: number;
+  /** 是否允许打断进行中的对话（critical 默认允许） */
+  interruptible?: boolean;
+  source: string;
+};
+
+export type ProposalVerdict =
+  | "delivered"
+  | "deferred"
+  | "merged"
+  | "suppressed"
+  | "throttled"
+  | "expired"
+  | "dropped";
+
+/** 一次触达的生命周期结果（delivered 为初始态，由客户端回传更新） */
+export type ProactiveOutcome =
+  | "delivered"
+  | "accepted"
+  | "dismissed"
+  | "snoozed"
+  | "ignored"
+  | "replied";
+
+export type DeliveryChannel = "in_app" | "offline_store";
+
+/** 仲裁结果（决策链可解释：verdict + 每步原因） */
+export type ArbitrationDecision = {
+  proposal: ProactiveProposal;
+  verdict: ProposalVerdict;
+  reasonChain: string[];
+  deliverAfter?: number;
+};

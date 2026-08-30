@@ -303,6 +303,12 @@ export type BuildPromptContextInput = {
    */
   semanticRecallHit?: boolean;
   /**
+   * recall-gate 白名单判定结果（门控单点化）：cognize 已用完整输入评估过，
+   * agent-core 透传至此。提供时不再本地重评 shouldRecallLongTerm（消除
+   * 多处独立评估正则的漂移空间）；缺省时保持本地评估（向后兼容其他调用方）。
+   */
+  recallGateTriggered?: boolean;
+  /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
    * 避免被 formatNarrativeRecallPrompt 的条目上限截断或块结构被拍平。
@@ -506,12 +512,14 @@ export class PromptContextBuilder {
     // 工具按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
     const longTermEnabled =
       !input.longTermRecallSuppressed &&
-      (shouldRecallLongTerm({
-        text: userText,
-        threadMessageCount: input.threadMessageCount,
-        ambiguousFollowUp,
-      }).trigger ||
-        input.semanticRecallHit === true);
+      // 门控单点化：cognize 评估的判定结果直接复用；未透传时本地评估（兼容其他调用方）
+      (input.recallGateTriggered ??
+        shouldRecallLongTerm({
+          text: userText,
+          threadMessageCount: input.threadMessageCount,
+          ambiguousFollowUp,
+        }).trigger) ||
+      input.semanticRecallHit === true;
 
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;

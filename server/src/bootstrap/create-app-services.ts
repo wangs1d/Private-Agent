@@ -333,10 +333,16 @@ import { routeTask } from "../gateway/index.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
-// 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）
+// 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）+ 统一主动性管道
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
 import { InterestWatcher } from "../proactivity/interest-watcher.js";
 import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js";
+import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
+import { PresenceService } from "../proactivity/presence-service.js";
+import { ProactiveDeliveryService } from "../proactivity/delivery-service.js";
+import { OutcomeStore } from "../proactivity/outcome-store.js";
+import { UpcomingScheduleWatcher } from "../proactivity/upcoming-schedule-watcher.js";
+import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
 import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
 import { registerProactivityFeedbackTools } from "../tools/proactivity-feedback-tools.js";
 import { registerAgentTasksTools } from "../tools/agent-tasks-tools.js";
@@ -644,14 +650,15 @@ export async function createAppServices(): Promise<AppServices> {
     );
   });
 
-  // Task 18 管家任务闭环：到点提醒 → proactivity speak 的晚绑定回调
-  // （proactivityHub 在下方装配段创建，创建后注入实现；此前到点提醒仅 WS 推送）
-  let onReminderFiredToProactivity:
-    | ((sessionId: string, title: string, message: string) => void)
+  // 统一主动性管道（docs/proactivity-architecture.md）：到点提醒的离线必达晚绑定回调。
+  // 管道在下方装配段创建后注入；在线时 ScheduleReminderFired 原生弹窗即唯一触达
+  // （不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
+  let onReminderOfflineToPipeline:
+    | ((taskId: string, sessionId: string, title: string, message: string, runAt: string) => void)
     | undefined;
   scheduleTaskService.setReminderHandler(async (task, message) => {
     const displayMessage = formatReminderDisplayMessage(message);
-    wsConnectionRegistry.trySend(
+    const wsDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
         type: ServerEventType.ScheduleReminderFired,
@@ -666,15 +673,23 @@ export async function createAppServices(): Promise<AppServices> {
         },
       }),
     );
-    embodimentAlert(
-      task.sessionId,
-      (json) => wsConnectionRegistry.trySend(task.sessionId, json),
-      displayMessage,
-      "schedule.reminder_fired",
-    );
-    // Task 18：到点提醒经 ProactivityHub speak 主动发起（followup kind 频控接入，
-    // 负反馈抑制兜底）；proactivityHub 未装配前静默跳过
-    onReminderFiredToProactivity?.(task.sessionId, task.title ?? "", displayMessage);
+    if (wsDelivered) {
+      embodimentAlert(
+        task.sessionId,
+        (json) => wsConnectionRegistry.trySend(task.sessionId, json),
+        displayMessage,
+        "schedule.reminder_fired",
+      );
+    } else {
+      // 人不在电脑前：WS 推送静默丢失 → 管道提案（directText 零 LLM）→ MessageHub 离线落库必达
+      onReminderOfflineToPipeline?.(
+        task.taskId,
+        task.sessionId,
+        task.title ?? "",
+        displayMessage,
+        task.nextRunAt ?? task.runAt,
+      );
+    }
     // 不再根据"起床/叫醒"等关键词自动拨打电话
     // 日程提醒应仅通过 WebSocket 推送 + embodimentAlert 通知用户
     // 如需电话提醒，用户应显式使用 phone.call_user 工具
@@ -818,14 +833,13 @@ export async function createAppServices(): Promise<AppServices> {
     createNarrativeHybridRetrievalDefault(),
   );
 
+  // DailyDigest 仅承载当日 RAM 摘要（prompt 注入），长期归档已收敛到 journal 夜间固化
   const dailyDigestService = getDailyDigestService();
-  dailyDigestService.setNarrativeMemory(narrativeMemory);
   await dailyDigestService.load();
-  dailyDigestService.startScheduler();
 
   initMemoryManagerService(narrativeMemory, agentMemorySyncService);
   const stmConfig = getShortTermMemoryConfig();
-  
+
   const nightlyMemoryService = initNightlyMemoryTaskService({
     timezone: stmConfig.digestTimezone,
   });
@@ -833,7 +847,6 @@ export async function createAppServices(): Promise<AppServices> {
     const memoryManager = (await import("../services/memory-manager-service.js")).getMemoryManagerService();
     nightlyMemoryService.setDependencies(
       memoryManager,
-      dailyDigestService,
       agentMemorySyncService,
       narrativeMemory,
     );
@@ -3070,7 +3083,13 @@ export async function createAppServices(): Promise<AppServices> {
       join(process.cwd(), "data", "proactivity-suppression"),
   });
   await proactivitySuppressionStore.load();
+  // 共享频控器：hub 快路径与统一管道同一预算口径（单一预算才是真预算），
+  // 状态由 ProactivePipeline 落盘 data/proactivity/frequency.json，重启恢复
+  const proactivityGovernor = new FrequencyGovernor();
+  // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
+  const proactivityPresence = new PresenceService();
   const proactivityHub = new ProactivityHub({
+    frequencyGovernor: proactivityGovernor,
     publishSignal: (signal) => {
       lifeSignalHubService.publish({
         id: `proactivity:${signal.kind}:${signal.actorId}:${Date.now()}`,
@@ -3105,8 +3124,11 @@ export async function createAppServices(): Promise<AppServices> {
         topics: profile.topics,
       };
     },
-    // 对话活跃事件 → 节律感知（连续工作/深夜检测的数据源之一）
-    onUserActivity: (actorId, source) => rhythmCore?.noteActivity(actorId, source),
+    // 对话活跃事件 → 节律感知 + 在场感知（连续工作/深夜检测 + active/idle 判定的数据源）
+    onUserActivity: (actorId, source) => {
+      rhythmCore?.noteActivity(actorId, source);
+      proactivityPresence.noteActivity(actorId);
+    },
     // ── 通用主动性路径（Jarvis 式：感知 → LLM 自主决策 → speak/act/advise） ──
     // LLM 完成函数：InitiativeEngine 决策用（ephemeralTurn 不污染会话线程）。
     // PROACTIVITY_MODEL 可路由到快/便宜模型——主动性决策不需要主力模型的质量
@@ -3350,24 +3372,70 @@ export async function createAppServices(): Promise<AppServices> {
   };
   console.log("[Bootstrap] 恶劣天气预警联动已装配（晨报检测 + weather_alert 合并提醒）");
 
-  // ─── Task 18 管家任务闭环装配（场景D）───
-  // 1) 提醒到点 → proactivity speak 主动发起：schedule-task 到点 handler（上方
-  //    setReminderHandler）在 WS 推送之外，经 hub submitIntent 以 followup kind
-  //    说话（4h 频控 + 负反馈抑制兜底）；epitome【上一会话待办】块的
-  //    "可主动提议转定时提醒"提示语在 agent-core 注入。
-  onReminderFiredToProactivity = (sessionId, title, message) => {
-    proactivityHub.submitIntent({
+  // ─── 统一主动性管道装配（docs/proactivity-architecture.md §4）───
+  // 触发源只提交提案；管道承担 去重 → 仲裁（过期/负反馈抑制/静默择时/分层预算/在场择时，
+  // 纯规则零 LLM）→ 投递（在线 WS 直投 / 离线 MessageHub 落库必达）→ outcome 回传自适应冷却。
+  // 频控与 hub 共用 proactivityGovernor（单一预算口径）；known actor 状态随管道落盘重启恢复，
+  // 重启后 hub 才能在用户开口前自主发起问候。
+  wsConnectionRegistry.onConnectionChange = (actorId, connected) =>
+    connected
+      ? proactivityPresence.markConnected(actorId)
+      : proactivityPresence.markDisconnected(actorId);
+  const proactivePipeline = new ProactivePipeline({
+    dataPath: join(process.cwd(), "data", "proactivity"),
+    governor: proactivityGovernor,
+    suppression: proactivitySuppressionStore,
+    presence: proactivityPresence,
+    delivery: new ProactiveDeliveryService({
+      trySend: (actorId, json) => wsConnectionRegistry.trySend(actorId, json),
+      offlineStore: messageHubService,
+    }),
+    outcomes: new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json")),
+    // 无 directText 的提案走 speak 闭环（现有 ProactionCortex 话术——管道唯一 LLM 调用点）
+    speak: (p) =>
+      proactivityHub.submitIntent({
+        actorId: p.actorId,
+        kind: "followup",
+        importance: p.importance === "critical" ? "high" : p.importance,
+        title: p.title,
+        summary: p.summary,
+        mode: "speak",
+        source: "task",
+      }),
+    exportActors: () => proactivityHub.exportActors(),
+    restoreActors: (entries) => proactivityHub.restoreActors(entries),
+  });
+  proactivePipeline.start();
+  // 到点提醒 WS 推送失败（人不在电脑前）→ 管道提案 directText 零 LLM → MessageHub 离线必达
+  onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt) => {
+    proactivePipeline.submitProposal({
+      proposalId: `p_${Date.now().toString(36)}_rm${taskId.slice(-6)}`,
       actorId: sessionId,
-      kind: "followup",
-      importance: "medium",
+      kind: "schedule_reminder",
+      tier: "must",
+      importance: "high",
+      dedupKey: `schedule_reminder:${taskId}:${runAt}`,
       title,
       summary: message,
-      mode: "speak",
-      source: "task",
+      evidence: [`taskId=${taskId}`, `runAt=${runAt}`, "ws_push_failed"],
+      directText: message,
+      createdAt: Date.now(),
+      source: "schedule",
     });
   };
-  // 2) 任务状态可查询："我还有什么待办" → agent.tasks.list 工具（只读查
-  //    agent-task-store，确定性状态列表，LLM 只负责措辞）
+  // 临近日程感知：itinerary 提醒任务 nextRunAt 前 15min 产出提前提案（零 LLM，must 层必达）
+  const upcomingScheduleWatcher = new UpcomingScheduleWatcher({
+    listTasks: () => scheduleTaskService.listAllTasks(),
+    submit: (p) => {
+      proactivePipeline.submitProposal(p);
+    },
+  });
+  upcomingScheduleWatcher.start();
+  console.log(
+    "[Bootstrap] 统一主动性管道已装配（提案→仲裁→投递→反馈 + 临近日程提前感知 + known actor 持久化）",
+  );
+  // 任务状态可查询："我还有什么待办" → agent.tasks.list 工具（只读查
+  // agent-task-store，确定性状态列表，LLM 只负责措辞）
   registerAgentTasksTools(toolRegistry);
   console.log("[Bootstrap] 管家任务闭环已装配（到点提醒 speak + agent.tasks.list 查询）");
 
@@ -3389,6 +3457,7 @@ export async function createAppServices(): Promise<AppServices> {
     scheduleTaskService,
     scheduleIntentService,
     proactivitySuppressionStore,
+    proactivePipeline,
     infoHubService,
     upstreamSearchService,
     worldService,
@@ -3466,6 +3535,8 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   app.addHook("onClose", async () => {
+    proactivePipeline.stop();
+    upcomingScheduleWatcher.stop();
     proactivityHub.stop();
     interestWatcher.stop();
     consumptionLedgerListener.stop();

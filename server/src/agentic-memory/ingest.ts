@@ -137,49 +137,68 @@ export class AgenticMemoryIngestService {
     this.lowSignalBuffer.delete(actorId);
     this.lowSignalTotalChars.delete(actorId);
 
-    // 按 context 分桶：每桶独立成一段，方便后续按 context 检索
-    const grouped = new Map<"main" | "notes", BufferEntry[]>();
-    for (const e of entries) {
-      const key = e.context;
-      let arr = grouped.get(key);
-      if (!arr) {
-        arr = [];
-        grouped.set(key, arr);
+    try {
+      // 按 context 分桶：每桶独立成一段，方便后续按 context 检索
+      const grouped = new Map<"main" | "notes", BufferEntry[]>();
+      for (const e of entries) {
+        const key = e.context;
+        let arr = grouped.get(key);
+        if (!arr) {
+          arr = [];
+          grouped.set(key, arr);
+        }
+        arr.push(e);
       }
-      arr.push(e);
-    }
 
-    for (const [context, ctxEntries] of grouped.entries()) {
-      const sorted = [...ctxEntries].sort((a, b) => a.createdAt - b.createdAt);
-      const combined = sorted
-        .map((entry) => `[${entry.sourceId}] ${entry.text}`)
-        .join("\n\n---\n\n");
+      for (const [context, ctxEntries] of grouped.entries()) {
+        const sorted = [...ctxEntries].sort((a, b) => a.createdAt - b.createdAt);
+        const combined = sorted
+          .map((entry) => `[${entry.sourceId}] ${entry.text}`)
+          .join("\n\n---\n\n");
 
-      if (combined.length < 20) continue;
+        if (combined.length < 20) continue;
 
-      const summarized = await this.summarizeLowSignal(combined);
-      const decision = await decideMemoryWrite(summarized, {
+        const summarized = await this.summarizeLowSignal(combined);
+        // 摘要已是 LLM 产物，落库裁决不再二次调 LLM 复判——原路径一次 flush 最多
+        // 三次 LLM（摘要 + 决策复判 + Mem0 infer 抽取），中间这次收益最低。
+        const decision = await decideMemoryWrite(
+          summarized,
+          {
+            actorId,
+            source: "chat:low_signal_summary",
+            heuristicHint: "decay",
+          },
+          { allowLlm: false },
+        );
+
+        // reject 的摘要不落库；decay 保留（临时上下文仍可短期召回，由遗忘机制回收）
+        if (decision.decision === "reject") continue;
+
+        const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
+        await this.memory.add([{ role: "user", content: body }], {
+          userId: actorId,
+          metadata: {
+            source: "chat:low_signal_summary",
+            actorId,
+            context,
+            highSignal: decision.decision === "remember" || decision.decision === "overwrite",
+            memoryDecision: decision.decision,
+            memorySemanticClass: decision.semanticClass,
+          },
+          infer: true,
+        });
+      }
+    } catch (err) {
+      // 失败回灌：原实现先删 buffer 再写库，摘要/落库中途异常会静默丢失整批内容。
+      // 回灌到该 actor 的 buffer 头部（保持时间序），由下一次 flush 重试。
+      const existing = this.lowSignalBuffer.get(actorId) ?? [];
+      this.lowSignalBuffer.set(actorId, [...entries, ...existing]);
+      const retriedChars = entries.reduce((sum, e) => sum + e.text.length, 0);
+      this.lowSignalTotalChars.set(
         actorId,
-        source: "chat:low_signal_summary",
-        heuristicHint: "decay",
-      });
-
-      // reject 的摘要不落库；decay 保留（临时上下文仍可短期召回，由遗忘机制回收）
-      if (decision.decision === "reject") continue;
-
-      const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
-      await this.memory.add([{ role: "user", content: body }], {
-        userId: actorId,
-        metadata: {
-          source: "chat:low_signal_summary",
-          actorId,
-          context,
-          highSignal: decision.decision === "remember" || decision.decision === "overwrite",
-          memoryDecision: decision.decision,
-          memorySemanticClass: decision.semanticClass,
-        },
-        infer: true,
-      });
+        retriedChars + (this.lowSignalTotalChars.get(actorId) ?? 0),
+      );
+      console.error("[agentic-memory] flushBuffer 失败（内容已回灌待重试）:", err);
     }
   }
 

@@ -1290,13 +1290,16 @@ export class BrainCenter {
       console.log(`[BrainCenter] 拉取对话历史失败（忽略）: ${err}`);
     }
 
-    // === 阶段 0.93：长期记忆召回门控（记忆架构重构）===
-    // 白名单触发（显式记忆线索 / 新会话开场 / 个人事实陈述）才执行长期检索；
-    // 未触发时跳过 recall 通道（省 token + 根治召回串台）。
+    // === 阶段 0.93：长期记忆召回门控（记忆架构重构，单点评估）===
+    // 白名单触发（显式记忆线索 / 新会话开场 / 个人事实陈述 / 长会话指代升级）才执行
+    // 长期检索；未触发时跳过 recall 通道（省 token + 根治召回串台）。
     // 当天的问题由 DailyJournalService.searchToday（当日日志词法检索）覆盖。
+    // 判定结果随 CognitiveResult.recallGate 透出，agent-core / prompt 装配层
+    // 直接复用，不再各自重评（此前三处独立评估正则白名单，改一处漏两处）。
     const recallGate = shouldRecallLongTerm({
       text: query,
       threadMessageCount: cognizeThreadMessageCount,
+      ambiguousFollowUp: input.ambiguousFollowUp,
     });
     if (recallGate.trigger) {
       console.log(`[BrainCenter] recall gate triggered (${recallGate.reason})`);
@@ -1811,6 +1814,8 @@ export class BrainCenter {
       cognizedAt: now,
       // 携带阶段 1 已召回的记忆条目，供后续 standard path 复用，避免重复 MemoryCortex.recall
       recallItems: recallResult?.items ?? [],
+      // 门控单点化：白名单判定结果透出，agent-core / prompt 装配层复用，不再各自重评
+      recallGate: { trigger: recallGate.trigger, reason: recallGate.reason },
       // 深度优化：工作记忆摘要（活跃目标+槽位+待办），供 streamCompletion 注入 prompt
       workingMemorySummary,
       // 最近 6 轮对话历史，供 streamCompletion 注入 prompt【最近对话】块（解决追问断片）

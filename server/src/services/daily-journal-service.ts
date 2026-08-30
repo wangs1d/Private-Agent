@@ -15,6 +15,7 @@
  */
 
 import { mkdir, readFile, writeFile, appendFile, readdir, unlink } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /** 单行内容截断（精简记录，防失控长文本） */
@@ -211,6 +212,20 @@ export class DailyJournalService {
    */
   async searchToday(actorId: string, query: string, k = JOURNAL_SEARCH_K): Promise<JournalHit[]> {
     return this.searchRange(actorId, query, 1, k);
+  }
+
+  /**
+   * 列出有 journal 目录的 actorId（目录名为 sanitize 后的 id，特殊字符会被替换，
+   * 仅作夜间固化的 actor 兜底来源，精确名单以 AgentMemorySync.listSessionIds 为准）。
+   */
+  listActorIds(): string[] {
+    try {
+      return readdirSync(this.rootDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      return [];
+    }
   }
 
   /**

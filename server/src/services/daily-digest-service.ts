@@ -1,7 +1,16 @@
+/**
+ * 当日 RAM digest：为 prompt 注入「今天聊了什么」的轻量上下文（查询相关性行优先）。
+ *
+ * 记忆架构收敛（2026-08）：
+ * - 长期归档职责已移除——原 tickArchive/archiveDayForTodayImmediately 会把 digest
+ *   再灌一遍 narrativeMemory 长期图，与 NightlyMemoryTaskService.consolidateDailyJournals
+ *   （journal → 长期图）对同批当天对话双写，是长期记忆重复/陈旧的来源之一。
+ *   当天对话的长期固化统一走 journal 单一入口；
+ * - 本服务仅保留 RAM/磁盘层面的当日摘要：observeTurn 写入、prompt 读取、失忆清理。
+ */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import {
   getCalendarDay,
   getShortTermMemoryConfig,
@@ -130,17 +139,10 @@ export class DailyDigestService {
   private readonly filePath: string;
   private data: PersistedShape = { digests: {} };
   private persistChain: Promise<void> = Promise.resolve();
-  private schedulerTimer: NodeJS.Timeout | null = null;
-  private lastArchiveDay = "";
-  private narrativeMemory: NarrativeMemoryPort | null = null;
 
   constructor(config?: ShortTermMemoryConfig) {
     this.config = config ?? getShortTermMemoryConfig();
     this.filePath = join(process.cwd(), this.config.digestFile);
-  }
-
-  setNarrativeMemory(port: NarrativeMemoryPort | null): void {
-    this.narrativeMemory = port;
   }
 
   async load(): Promise<void> {
@@ -159,17 +161,6 @@ export class DailyDigestService {
           : "";
       if (code !== "ENOENT") throw e;
     }
-  }
-
-  startScheduler(): void {
-    if (!this.config.digestEnabled || this.schedulerTimer) return;
-    this.schedulerTimer = setInterval(() => this.tickArchive(), 60_000);
-    this.tickArchive();
-  }
-
-  stopScheduler(): void {
-    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
-    this.schedulerTimer = null;
   }
 
   getPromptDigest(actorId: string, day = getCalendarDay()): string | undefined {
@@ -292,75 +283,6 @@ export class DailyDigestService {
     return [...new Set(Object.values(this.data.digests).map((rec) => rec.actorId).filter(Boolean))];
   }
 
-  private tickArchive(): void {
-    if (!this.config.digestEnabled || !this.config.deferTurnArchive) return;
-
-    const today = getCalendarDay();
-    if (this.lastArchiveDay === today) return;
-
-    const now = new Date();
-    const hour = Number(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: this.config.digestTimezone,
-        hour: "numeric",
-        hour12: false,
-      }).format(now),
-    );
-    const minute = Number(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: this.config.digestTimezone,
-        minute: "numeric",
-      }).format(now),
-    );
-
-    if (hour !== 0 || minute >= 5) return;
-
-    this.lastArchiveDay = today;
-    const yesterday = getCalendarDay(new Date(now.getTime() - 86_400_000));
-    void this.archiveDayForAllActors(yesterday);
-  }
-
-  private async archiveDayForAllActors(day: string): Promise<void> {
-    for (const rec of Object.values(this.data.digests)) {
-      if (rec.day !== day || rec.archived || !rec.text.trim()) continue;
-      await this.archiveRecord(rec);
-    }
-    this.schedulePersist();
-  }
-
-  /**
-   * 立即归档"今天"的 digest 到 narrativeMemory，绕过 tickArchive 的时间窗检查。
-   *
-   * 缺口 4 修复：原 triggerDailyArchive 通过反射调 tickArchive，
-   * 但 tickArchive 内部有 `hour === 0 && minute < 5` 限制，
-   * 导致 23:00 触发时归档无效。此方法供 nightly 服务在 runDreamPhase 之前调用，
-   * 确保 dreaming 阶段能看到当天的对话归档。
-   */
-  async archiveDayForTodayImmediately(): Promise<void> {
-    if (!this.config.digestEnabled) return;
-    const today = getCalendarDay();
-    console.log(`[DailyDigest] archiveDayForTodayImmediately: 归档 ${today} 的 digest（绕过时间窗）`);
-    await this.archiveDayForAllActors(today);
-    // 标记今天已归档，避免 00:00 时重复归档（但 00:00 时 yesterday 已是新一天，会归档昨天）
-    this.lastArchiveDay = today;
-  }
-
-  private async archiveRecord(rec: DigestRecord): Promise<void> {
-    if (!this.narrativeMemory) return;
-    const header = `Daily digest ${rec.day} | ${rec.turnCount} turns`;
-    const body = materializeDigestText(rec).trim();
-    try {
-      await this.narrativeMemory.ingest(
-        rec.actorId,
-        `${header}\n${body}`,
-        "chat:daily_digest",
-      );
-      rec.archived = true;
-    } catch {
-      /* fire-and-forget */
-    }
-  }
-
   /** 清空某 actor 的全部当日摘要（内存 + 持久化），用于"清空聊天/失忆"。 */
   clearActorDigests(actorId: string): number {
     let removed = 0;
@@ -379,12 +301,12 @@ export class DailyDigestService {
 
   private pruneStaleFromMemory(): void {
     const today = getCalendarDay();
-    const keepDays = new Set([today]);
     const yesterday = getCalendarDay(new Date(Date.now() - 86_400_000));
-    keepDays.add(yesterday);
+    // 长期归档移除后 digest 仅服务当日/昨日 prompt 注入，超期一律滚动清理
+    const keepDays = new Set([today, yesterday]);
 
     for (const [key, rec] of Object.entries(this.data.digests)) {
-      if (!keepDays.has(rec.day) && rec.archived) {
+      if (!keepDays.has(rec.day)) {
         delete this.data.digests[key];
       }
     }

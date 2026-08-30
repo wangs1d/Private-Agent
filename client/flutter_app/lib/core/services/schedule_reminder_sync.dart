@@ -13,11 +13,14 @@ const Set<String> _scheduleReminderTools = <String>{
   "calendar_create_task",
 };
 
-/// 服务端节律任务标记（与 server/src/tools/rhythm-reminder-tools.ts 的 RHYTHM_MARK 对应）。
-/// 带此标记的任务照常到点推送，但不进「今日安排」紧凑列表。
+/// 服务端节律任务标记（与 server/src/services/schedule-task-service.ts 的 RHYTHM_MARK 对应）。
+/// 仅作为旧数据兜底：新任务由 category=trivia 识别。
 const String kRhythmTaskMark = "[节律提醒:";
 
-bool _isRhythmTask(Map<String, dynamic> task) {
+/// 琐事提醒（喝水/睡觉等）：照常到点推送，但不进「今日安排」紧凑列表。
+bool _isTriviaTask(Map<String, dynamic> task) {
+  final String category = task["category"]?.toString() ?? "";
+  if (category == "trivia") return true;
   final String description = task["description"]?.toString() ?? "";
   return description.startsWith(kRhythmTaskMark);
 }
@@ -67,7 +70,7 @@ Future<bool> upsertLocalScheduleFromToolResult(
       title: _pickTitle(result),
       shortTitle: _pickShortTitle(result),
       notes: _buildNotes(result),
-      isRhythm: _isRhythmTask(result),
+      isTrivia: _isTriviaTask(result),
     );
   } catch (_) {
     return false;
@@ -144,7 +147,7 @@ Future<int> syncServerRemindersToLocal(
           title: _pickTitle(t),
           shortTitle: _pickShortTitle(t),
           notes: _buildNotes(t),
-          isRhythm: _isRhythmTask(t),
+          isTrivia: _isTriviaTask(t),
         )
             ? 1
             : 0;
@@ -173,7 +176,7 @@ Future<bool> _persistExpandedTask(
   required String title,
   required String? shortTitle,
   required String? notes,
-  bool isRhythm = false,
+  bool isTrivia = false,
 }) async {
   final List<DateTime> occurrences = expandScheduleOccurrences(
     anchorLocal: anchorLocal,
@@ -192,7 +195,7 @@ Future<bool> _persistExpandedTask(
         title: title,
         shortTitle: shortTitle,
         notes: notes,
-        isRhythm: isRhythm,
+        isTrivia: isTrivia,
       ),
     );
   }
