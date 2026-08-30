@@ -67,7 +67,11 @@ const DESKTOP_VISUAL_SCREENSHOT_TOOL: ChatCompletionTool = {
   function: {
     name: "desktop.visual.screenshot",
     description:
-      "【桌面·截图】截取电脑屏幕（或指定区域）并返回 PNG 图片。可用于查看当前屏幕内容、获取界面信息、记录屏幕状态等场景。需要 DESKTOP_VISUAL_ENABLED=1 或电脑桥接在线。",
+      "【桌面·截图】截取电脑屏幕（支持多显示器与指定区域）并返回 PNG 图片。" +
+      "返回字段含图片尺寸 width/height、实际截取区域 screenWidth/screenHeight、坐标倍率 scale" +
+      "（scale>1 表示图片被降采样，此时若要用图片上的坐标操作屏幕，请在 desktop.run_input 传 " +
+      "coordSpace:'image' + imageWidth/imageHeight，由系统自动换算；scale=1 时坐标可直接使用）。" +
+      "需要 DESKTOP_VISUAL_ENABLED=1 或电脑桥接在线。",
     parameters: {
       type: "object",
       properties: {
@@ -76,7 +80,15 @@ const DESKTOP_VISUAL_SCREENSHOT_TOOL: ChatCompletionTool = {
           items: { type: "integer" },
           minItems: 4,
           maxItems: 4,
-          description: "可选截屏区域 [left, top, width, height]；省略则截取全屏",
+          description: "可选截屏区域 [left, top, width, height]（相对显示器左上角的物理像素）；省略则截取整屏",
+        },
+        display: {
+          type: "integer",
+          description: "可选显示器编号（1-based，从 desktop.window list 或截图返回值得知）；省略则主屏",
+        },
+        maxDim: {
+          type: "integer",
+          description: "可选图片最长边像素上限（≥200，如 1568）；超出时等比降采样并返回 scale",
         },
       },
       additionalProperties: false,
@@ -212,16 +224,19 @@ const DESKTOP_UIA_QUERY_TOOL: ChatCompletionTool = {
     name: "desktop.uia_query",
     description:
       "【桌面·UIAutomation 查询】Windows UIAutomation 结构化查询，读取控件树/按 AutomationId 定位/检查坐标处元素。" +
-      "场景：读 ListView/Tree 内容、按控件名精准定位、检查 (x,y) 处元素信息（含 Invoke 等支持的 pattern）。" +
-      "非 Windows 或 pywinauto 未安装时返回 ok:false。返回元素含 name/automation_id/control_type/bbox/patterns。",
+      "场景：读 ListView/Tree 内容、按控件名精准定位、检查 (x,y) 处元素信息（含 Invoke 等支持的 pattern）、" +
+      "对整个窗口做控件树快照（snapshot，元素带 path，可传给 desktop.run_automation 的 selector.path 复用）。" +
+      "非 Windows 或 pywinauto 未安装时返回 ok:false。返回元素含 name/automation_id/control_type/bbox/patterns。" +
+      "bbox 为屏幕物理像素，可直接作为 desktop.run_input 的坐标。",
     parameters: {
       type: "object",
       properties: {
         mode: {
           type: "string",
-          enum: ["query", "read_children", "inspect_point"],
+          enum: ["query", "read_children", "inspect_point", "snapshot"],
           description:
-            "query=按 selector 查找元素；read_children=读父元素子树（ListView/Tree 内容）；inspect_point=检查 (x,y) 处元素",
+            "query=按 selector 查找元素；read_children=读父元素子树（ListView/Tree 内容）；inspect_point=检查 (x,y) 处元素；" +
+            "snapshot=前台/指定窗口的控件树扁平快照（推荐先 snapshot 再按 name/automation_id/path 操作）",
         },
         selector: {
           type: "object",
@@ -237,8 +252,16 @@ const DESKTOP_UIA_QUERY_TOOL: ChatCompletionTool = {
             y: { type: "integer" },
           },
         },
+        windowTitle: {
+          type: "string",
+          description: "可选：把查询范围限定到标题含此子串的顶层窗口（大小写不敏感）；snapshot 模式省略时取前台窗口",
+        },
+        maxDepth: {
+          type: "integer",
+          description: "snapshot 模式：控件树最大深度，默认 6",
+        },
         topOnly: { type: "boolean", description: "query 模式：仅顶层（true）或递归（false），默认 true" },
-        limit: { type: "integer", description: "返回元素上限，query 默认 100，read_children 默认 200" },
+        limit: { type: "integer", description: "返回元素上限，query 默认 100，read_children 默认 200，snapshot 默认 150" },
       },
       required: ["mode"],
       additionalProperties: false,
@@ -253,34 +276,55 @@ const DESKTOP_RUN_INPUT_TOOL: ChatCompletionTool = {
     description:
       "【桌面·原生输入·优先用】操作系统的键盘/鼠标模拟输入，**不走 VLM**，不消耗 VLM token，任何时候可用。" +
       "⚠ **打开软件后，打字 / 点击 / 快捷键 / 滚动必须优先用本工具**，不要用 desktop.visual.run_task（靠 VLM 看屏幕再点，又慢又贵还容易挂）。" +
-      "支持的操作:\n" +
+      "支持的操作（对齐主流 computer-use 动作空间）:\n" +
       "- click {x,y,button?}: 鼠标移动到 (x,y) 点击（button=left/right/middle，默认 left）\n" +
-      "- double_click {x,y}: 双击\n" +
-      "- right_click {x,y}: 右键\n" +
+      "- double_click {x,y} / triple_click {x,y}: 双击 / 三击（三击常用于选中整段文字）\n" +
+      "- right_click {x,y} / middle_click {x,y}: 右键 / 中键\n" +
       "- move {x,y}: 移动鼠标不点击\n" +
-      "- type {text}: 在光标位置输入文字（支持中文）\n" +
-      "- key {key}: 按单键（enter/tab/esc/backspace/space/up/down/left/right/f1-f12 等）\n" +
-      "- shortcut {keys}: 组合键（如 'ctrl+v' 粘贴，'ctrl+c' 复制，'alt+tab' 切换窗口）\n" +
-      "- drag {x,y,toX,toY}: 拖拽\n" +
-      "- scroll {scrollClicks}: 滚轮（正=向上，负=向下）\n" +
-      "⚠ 使用前通常先调 desktop.uia_query 定位目标控件的 bbox 中心坐标，再对本工具传坐标。",
+      "- type {text}: 在光标位置输入文字；中文/emoji 自动走剪贴板粘贴，ASCII 逐字输入\n" +
+      "- key {key}: 按单键（enter/tab/esc/backspace/space/delete/up/down/left/right/f1-f12 等）\n" +
+      "- shortcut {keys}: 组合键（如 'ctrl+v' 粘贴，'alt+tab' 切换窗口）\n" +
+      "- hold_key {key,holdSeconds?}: 按住某键一段时间\n" +
+      "- drag {x,y,toX,toY,button?}: 拖拽\n" +
+      "- scroll {scrollClicks?,scrollX?,x?,y?}: 滚轮（scrollClicks 正=上/负=下；scrollX 正=右/负=左；传 x,y 可先移到目标位置再滚）\n" +
+      "- wait {waitMs?}: 等待界面加载（默认 500ms，上限 10s）。点击触发加载后建议 wait 1-2s\n" +
+      "- cursor_position {}: 读取当前鼠标坐标\n" +
+      "⚠ 坐标默认为屏幕物理像素。使用前通常先调 desktop.uia_query 定位目标控件的 bbox 中心；" +
+      "若用的是降采样截图上的坐标，传 coordSpace:'image' + 截图返回的 imageWidth/imageHeight。",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["click", "double_click", "right_click", "move", "type", "key", "shortcut", "drag", "scroll"],
+          enum: [
+            "click", "double_click", "triple_click", "middle_click", "right_click",
+            "move", "type", "key", "shortcut", "drag", "scroll",
+            "wait", "cursor_position", "hold_key",
+          ],
           description: "输入操作类型",
         },
-        x: { type: "number", description: "鼠标目标 X 坐标（click/move/double_click/right_click/drag 需要）" },
+        x: { type: "number", description: "鼠标目标 X 坐标（click/move/drag/scroll 需要；屏幕物理像素或 image 空间）" },
         y: { type: "number", description: "鼠标目标 Y 坐标" },
         toX: { type: "number", description: "拖拽终点 X 坐标（仅 drag 需要）" },
         toY: { type: "number", description: "拖拽终点 Y 坐标（仅 drag 需要）" },
         button: { type: "string", enum: ["left", "right", "middle"], description: "鼠标按键，默认 left" },
-        text: { type: "string", description: "要输入的文本（仅 type 需要，支持中文）" },
-        key: { type: "string", description: "单键名（仅 key 需要），如 enter, tab, esc, backspace, space, f1-f12" },
+        text: { type: "string", description: "要输入的文本（仅 type 需要，支持中文/emoji）" },
+        key: { type: "string", description: "单键名（key/hold_key 需要），如 enter, tab, esc, backspace, space, f1-f12" },
         keys: { type: "string", description: "组合键（仅 shortcut 需要），用 + 分隔，如 'ctrl+v'、'alt+tab'" },
-        scrollClicks: { type: "integer", description: "滚轮量（仅 scroll 需要），正=向上，负=向下" },
+        scrollClicks: { type: "integer", description: "垂直滚轮量（scroll），正=向上，负=向下" },
+        scrollX: { type: "integer", description: "水平滚轮量（scroll 可选），正=向右，负=向左" },
+        waitMs: { type: "integer", description: "等待毫秒（仅 wait，默认 500，上限 10000）" },
+        holdSeconds: { type: "number", description: "按住秒数（仅 hold_key，默认 0.5，上限 5）" },
+        interval: { type: "number", description: "按键间隔秒数（type/click 可选）" },
+        moveDuration: { type: "number", description: "鼠标平滑移动秒数（click/move/drag 可选，0=瞬间）" },
+        imageWidth: { type: "number", description: "coordSpace='image' 时必传：截图返回的 width" },
+        imageHeight: { type: "number", description: "coordSpace='image' 时必传：截图返回的 height" },
+        coordSpace: {
+          type: "string",
+          enum: ["screen", "image"],
+          description: "坐标空间：screen=屏幕物理像素（默认）；image=截图像素（配合 imageWidth/imageHeight）",
+        },
+        display: { type: "integer", description: "image 坐标对应的显示器编号（默认主屏）" },
       },
       required: ["action"],
       additionalProperties: false,
@@ -302,8 +346,13 @@ const DESKTOP_RUN_AUTOMATION_TOOL: ChatCompletionTool = {
       "- get_value: 读 ValuePattern.CurrentValue\n" +
       "- toggle: 调 TogglePattern.Toggle(复选框/单选)\n" +
       "- focus: 调 SetFocus(设焦点)\n" +
-      "\nselector 字段:name/name_contains/control_type/class_name/automation_id 任一组合。" +
-      "匹配多个时默认操作第一个,可用 index 选第 N 个。" +
+      "- select: 调 SelectionItemPattern.Select(选中列表项/树节点)\n" +
+      "- expand / collapse: 调 ExpandCollapsePattern(展开/折叠下拉框、树节点)\n" +
+      "- scroll_into_view: 调 ScrollItemPattern(把元素滚动到可见区域)\n" +
+      "\n定位方式(二选一):\n" +
+      "- selector: name/name_contains/control_type/class_name/automation_id 组合;" +
+      "- selector.path: desktop.uia_query(mode='snapshot') 输出的元素 path(如 '2.1.3'),跨调用稳定,推荐用。\n" +
+      "windowTitle 可把查找范围限定到指定窗口,避免跨应用误匹配。" +
       "\n典型用法:\n" +
       "- 记事本输入:selector={control_type:'Edit'} action=set_value value='内容'\n" +
       "- 点按钮:selector={name:'确定',control_type:'Button'} action=click\n" +
@@ -313,25 +362,92 @@ const DESKTOP_RUN_AUTOMATION_TOOL: ChatCompletionTool = {
       properties: {
         action: {
           type: "string",
-          enum: ["click", "set_value", "get_value", "toggle", "focus"],
+          enum: [
+            "click", "set_value", "get_value", "toggle", "focus",
+            "select", "expand", "collapse", "scroll_into_view",
+          ],
           description: "原生控件操作类型",
         },
         selector: {
           type: "object",
-          description: "UIA 查询条件,至少给一个字段",
+          description: "UIA 查询条件,至少给一个字段;path 与其他字段二选一",
           properties: {
             name: { type: "string", description: "元素 Name 精确匹配" },
             name_contains: { type: "string", description: "Name 子串匹配" },
             control_type: { type: "string", description: "控件类型:Button/Edit/List/ListItem/Window/Tree/TreeItem 等" },
             class_name: { type: "string", description: "ClassName 精确匹配" },
             automation_id: { type: "string", description: "AutomationId 精确匹配" },
+            path: { type: "string", description: "snapshot 输出的元素路径(如 '2.1.3'),按控制视图子索引复原元素" },
           },
         },
         value: { type: "string", description: "set_value 时要设置的文本内容" },
         index: { type: "integer", description: "匹配多个元素时选第 N 个(0-based,默认 0)", default: 0 },
         topOnly: { type: "boolean", description: "是否仅查顶层(默认 true)", default: true },
+        windowTitle: { type: "string", description: "限定目标窗口(标题子串,大小写不敏感),避免跨应用误匹配" },
       },
       required: ["action", "selector"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const DESKTOP_WINDOW_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "desktop.window",
+    description:
+      "【桌面·窗口管理】枚举与操控电脑上的顶层窗口（主流 computer-use / OS agent 标配）。" +
+      "支持的操作:\n" +
+      "- list: 枚举所有可见顶层窗口（标题/hwnd/位置/进程名/是否前台），编号 index 用于后续定位\n" +
+      "- activate: 激活窗口到前台（配合打字/快捷键前使用）\n" +
+      "- close: 关闭窗口（走应用正常关闭流程，可能弹保存确认）\n" +
+      "- minimize / maximize / restore: 最小化 / 最大化 / 还原\n" +
+      "- move {x,y}: 移动窗口到指定位置（屏幕物理像素）\n" +
+      "- resize {width,height}: 调整窗口尺寸（物理像素）\n" +
+      "\n定位方式（list 之外的操作必填其一）: title（标题子串，大小写不敏感）、hwnd、index（list 输出的编号）。" +
+      "典型用法:先 list 找到目标窗口 → activate → 再用 desktop.uia_query / desktop.run_input 操作。",
+    parameters: {
+      type: "object",
+      properties: {
+        op: {
+          type: "string",
+          enum: ["list", "activate", "close", "minimize", "maximize", "restore", "move", "resize"],
+          description: "窗口操作类型",
+        },
+        title: { type: "string", description: "窗口标题子串（大小写不敏感）" },
+        hwnd: { type: "integer", description: "窗口句柄（list 输出）" },
+        index: { type: "integer", description: "list 输出的窗口编号（1-based）" },
+        x: { type: "integer", description: "move 的目标 X（屏幕物理像素）" },
+        y: { type: "integer", description: "move 的目标 Y" },
+        width: { type: "integer", description: "resize 的目标宽（物理像素）" },
+        height: { type: "integer", description: "resize 的目标高（物理像素）" },
+      },
+      required: ["op"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const DESKTOP_CLIPBOARD_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "desktop.clipboard",
+    description:
+      "【桌面·剪贴板】读写电脑剪贴板文本（get / set）。" +
+      "用途：把长文本放入剪贴板后用 desktop.run_input 的 ctrl+v 粘贴；" +
+      "读取用户复制的文本（如选中的一段话）供后续处理。" +
+      "注意：set 会覆盖用户当前剪贴板内容，仅在确有必要时使用。",
+    parameters: {
+      type: "object",
+      properties: {
+        op: {
+          type: "string",
+          enum: ["get", "set"],
+          description: "get=读取剪贴板文本；set=写入剪贴板",
+        },
+        text: { type: "string", description: "set 时要写入的文本" },
+      },
+      required: ["op"],
       additionalProperties: false,
     },
   },
@@ -434,6 +550,7 @@ const DESKTOP_WEB_FETCH_TOOL: ChatCompletionTool = {
  *
  * 全部暴露给 LLM：desktop.open / desktop.run_preset / desktop.run_shell / desktop.uia_query
  * / desktop.run_automation / desktop.http_get / desktop.web_search / desktop.web_fetch
+ * / desktop.window / desktop.clipboard
  */
 export const DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS: ChatCompletionTool[] = [
   DESKTOP_VISUAL_SCREENSHOT_TOOL,
@@ -444,6 +561,8 @@ export const DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS: ChatCompletionTool[] = [
   DESKTOP_UIA_QUERY_TOOL,
   DESKTOP_RUN_INPUT_TOOL,
   DESKTOP_RUN_AUTOMATION_TOOL,
+  DESKTOP_WINDOW_TOOL,
+  DESKTOP_CLIPBOARD_TOOL,
   DESKTOP_HTTP_GET_TOOL,
   DESKTOP_WEB_SEARCH_TOOL,
   DESKTOP_WEB_FETCH_TOOL,

@@ -150,6 +150,10 @@ const DESKTOP_VISUAL_PINNED_TOOLS = [
   "desktop.http_get",
   "desktop.web_search",
   "desktop.web_fetch",
+  // 2026-08-31：对齐主流 computer-use 动作空间（键鼠输入此前漏 pin）
+  "desktop.run_input",
+  "desktop.window",
+  "desktop.clipboard",
 ] as const;
 
 /** 桥接在线或完全访问时，桌面工具不得被 contextual 筛选掉。 */

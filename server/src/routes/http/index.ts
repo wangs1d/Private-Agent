@@ -52,6 +52,7 @@ import { registerImageFileRoutes } from "./image-files.js";
 import { registerVideoProxyRoutes } from "./video-files.js";
 import { registerUserFileRoutes } from "./user-files.js";
 import { registerTravelMediaRoutes } from "./travel-media.js";
+import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -143,7 +144,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       suppressionStore: deps.proactivitySuppressionStore,
     });
   }
-  registerProactivityPipelineRoutes(app, { pipeline: deps.proactivePipeline ?? null });
+  registerProactivityPipelineRoutes(app, { pipeline: deps.proactivePipeline ?? null, pushService: deps.proactivePushService ?? null });
+  registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore });
   registerBriefingTestRoutes(app, { wsConnectionRegistry: deps.wsConnectionRegistry });
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   registerUserPreferencesRoutes(app);

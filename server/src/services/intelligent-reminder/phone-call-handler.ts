@@ -2,6 +2,7 @@ import type { ReminderInstance, PhoneCallConfig } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
 import type { DialogueContext } from "../voice-dialogue/types.js";
+import { ServerEventType } from "../../protocol.js";
 
 export interface PhoneCallHandlerDeps {
   virtualPhoneService: VirtualPhoneService;
@@ -44,7 +45,7 @@ export class PhoneCallHandler {
     let retryCount = 0;
     let callSuccessful = false;
 
-    while (retryCount <= maxRetries && !callSuccessful) {
+    while (!callSuccessful && retryCount <= maxRetries) {
       try {
         callSuccessful = await this.executePhoneCall(
           instance,
@@ -57,11 +58,11 @@ export class PhoneCallHandler {
         this.deps.logger?.error(`Phone call attempt ${retryCount + 1} failed: ${error}`);
       }
 
-      if (!callSuccessful && retryCount < maxRetries) {
-        retryCount++;
-        this.deps.logger?.info(`Retrying phone call... Attempt ${retryCount + 1}/${maxRetries}`);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
+      if (callSuccessful) break;
+      if (retryCount >= maxRetries) break;
+      retryCount++;
+      this.deps.logger?.info(`Retrying phone call... Attempt ${retryCount + 1}/${maxRetries}`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
     }
 
     if (!callSuccessful) {
@@ -149,111 +150,110 @@ export class PhoneCallHandler {
     const callState = this.activeCalls.get(instance.config.id);
     if (!callState || !callState.isActive) return;
 
-    const maxDurationSec = config.maxRingDurationSec ?? 300;
+    const maxDurationMs = (config.maxRingDurationSec ?? 300) * 1000;
     const startTime = Date.now();
     let userAcknowledged = false;
 
-    const initialMessage = `${instance.config.message}\n\n（请回复"退下"或"收到"结束通话）`;
-
+    // 通话内后续回应统一经 VirtualPhoneService.pushVoiceReply 推送
+    // （TTS 合成 + agent.phone.voice_reply WS 事件）；接通首帧正文已由
+    // callUserWithRinging 随 call_connecting 下发，此处不再重复播报。
     try {
-      const audioBuffer = await this.deps.voiceDialogueService.generateAndSpeak(initialMessage, {
-        voiceId: "alloy",
-        speed: 1.0,
-      });
-
-      this.deps.logger?.info(`Playing initial TTS message for call ${callId}`);
-    } catch (error) {
-      this.deps.logger?.error(`Failed to generate initial TTS: ${error}`);
-    }
-
-    while (callState.isActive && !userAcknowledged) {
-      const elapsedSec = (Date.now() - startTime) / 1000;
-      if (elapsedSec >= maxDurationSec) {
-        this.deps.logger?.info(`Call timeout after ${maxDurationSec}s`);
-        break;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      const mockUserInput = await this.waitForUserInput(callId);
-
-      if (!mockUserInput) {
-        continue;
-      }
-
-      this.deps.logger?.info(`User input received: "${mockUserInput}"`);
-
-      const shouldDisconnect = disconnectCommands.some((cmd) =>
-        mockUserInput.toLowerCase().includes(cmd.toLowerCase()),
-      );
-
-      if (shouldDisconnect) {
-        userAcknowledged = true;
-        this.deps.logger?.info(`User acknowledged with: "${mockUserInput}"`);
-
-        try {
-          const goodbyeAudio = await this.deps.voiceDialogueService.generateAndSpeak(
-            "好的，提醒已送达。再见！",
-            { voiceId: "alloy", speed: 1.0 },
-          );
-          this.deps.logger?.info("Played goodbye message");
-        } catch (error) {
-          this.deps.logger?.error(`Failed to generate goodbye TTS: ${error}`);
+      while (callState.isActive && !userAcknowledged) {
+        const remainingMs = maxDurationMs - (Date.now() - startTime);
+        if (remainingMs <= 0) {
+          this.deps.logger?.info(`Call timeout after ${maxDurationMs / 1000}s`);
+          break;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      } else {
-        context.conversationHistory.push({
-          role: "user",
-          content: mockUserInput,
-        });
+        // 等待用户在通话中的真实回复（客户端经 phone.call_reply 上行，
+        // 打字或本地 ASR 转写均可）；超时/挂断返回 null
+        const input = await this.deps.virtualPhoneService.waitForCallReply(callId, remainingMs);
+        if (!input) break;
+        const userText = input.text.trim();
+        if (!userText) continue;
 
-        try {
-          const llmResponse = await this.deps.voiceDialogueService.chatCompletion(
-            context.conversationHistory,
-            {
-              temperature: 0.7,
-              systemPrompt:
-                "你是提醒助手，简短回应用户，并引导他们说'退下'或'收到'来结束通话。",
-            },
-          );
+        this.deps.logger?.info(`User input received on call ${callId}: "${userText}"`);
 
-          context.conversationHistory.push({
-            role: "assistant",
-            content: llmResponse,
-          });
+        const shouldDisconnect = disconnectCommands.some((cmd) =>
+          userText.toLowerCase().includes(cmd.toLowerCase()),
+        );
 
-          const responseAudio = await this.deps.voiceDialogueService.generateAndSpeak(llmResponse, {
-            voiceId: "alloy",
-            speed: 1.0,
-          });
+        if (shouldDisconnect) {
+          userAcknowledged = true;
+          this.deps.logger?.info(`User acknowledged with: "${userText}"`);
+          await this.pushVoiceReply(callId, userId, "好的，提醒已送达。再见！");
+          // 给客户端留出播报告别语的缓冲，再走挂断清理
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        } else {
+          context.conversationHistory.push({ role: "user", content: userText });
 
-          this.deps.logger?.info(`LLM response: "${llmResponse}"`);
-        } catch (error) {
-          this.deps.logger?.error(`Error in LLM dialogue: ${error}`);
+          let assistantText = "";
+          try {
+            assistantText = await this.deps.voiceDialogueService.chatCompletion(
+              context.conversationHistory,
+              {
+                temperature: 0.7,
+                systemPrompt:
+                  "你是提醒助手，简短回应用户，并引导他们说'退下'或'收到'来结束通话。",
+              },
+            );
+          } catch (error) {
+            this.deps.logger?.error(`Error in LLM dialogue: ${error}`);
+            assistantText = `我听到了您说"${userText}"。请回复"退下"结束通话。`;
+          }
 
-          const fallbackAudio = await this.deps.voiceDialogueService.generateAndSpeak(
-            `我听到了您说"${mockUserInput}"。请回复"退下"结束通话。`,
-            { voiceId: "alloy", speed: 1.0 },
-          );
+          assistantText = assistantText.trim();
+          if (assistantText) {
+            context.conversationHistory.push({ role: "assistant", content: assistantText });
+            await this.pushVoiceReply(callId, userId, assistantText);
+            this.deps.logger?.info(`Assistant voice reply: "${assistantText}"`);
+          }
         }
       }
+    } finally {
+      callState.isActive = false;
+      this.activeCalls.delete(instance.config.id);
+      // 兜底清空本通话的回复等待方，避免客户端迟到回复挂进新通话
+      this.deps.virtualPhoneService.cancelCallReplyWaiters(callId);
     }
-
-    callState.isActive = false;
-    this.activeCalls.delete(instance.config.id);
 
     if (userAcknowledged) {
       await this.sendCallCompletedNotification(userId, instance);
     }
+    // 通话收尾：推 ended 状态让客户端关闭通话 UI（手机端全屏通话页 / 桌面 Win32 通话窗）
+    await this.sendCallEndedStatus(userId, callId, userAcknowledged ? "acknowledged" : "timeout");
   }
 
-  private async waitForUserInput(callId: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve(null);
-      }, 1000);
-    });
+  private async sendCallEndedStatus(
+    userId: string,
+    callId: string,
+    reason: "acknowledged" | "timeout",
+  ): Promise<void> {
+    if (!callId) return;
+    try {
+      await this.deps.sendToClient(userId, {
+        type: ServerEventType.VirtualPhoneCallStatus,
+        payload: {
+          callId,
+          direction: "agent_to_user",
+          status: "ended",
+          reason,
+        },
+      });
+    } catch (error) {
+      this.deps.logger?.error(`Failed to send call ended status for ${callId}: ${error}`);
+    }
+  }
+
+  private async pushVoiceReply(callId: string, userId: string, text: string): Promise<void> {
+    try {
+      const result = await this.deps.virtualPhoneService.pushVoiceReply(callId, userId, text);
+      if (!result.pushed) {
+        this.deps.logger?.info(`Voice reply not delivered (user offline): call ${callId}`);
+      }
+    } catch (error) {
+      this.deps.logger?.error(`Failed to push voice reply for call ${callId}: ${error}`);
+    }
   }
 
   /**
@@ -327,6 +327,7 @@ export class PhoneCallHandler {
 
     callState.isActive = false;
     this.activeCalls.delete(reminderId);
+    this.deps.virtualPhoneService.cancelCallReplyWaiters(callState.callId);
     this.deps.logger?.info(`Force ended call: ${reminderId}`);
     return true;
   }
@@ -338,6 +339,7 @@ export class PhoneCallHandler {
   cleanup(): void {
     for (const [id, state] of this.activeCalls) {
       state.isActive = false;
+      this.deps.virtualPhoneService.cancelCallReplyWaiters(state.callId);
     }
     this.activeCalls.clear();
   }

@@ -100,4 +100,34 @@ export class QdrantNarrativeStore {
       payload: h.payload as NarrativePointPayload,
     }));
   }
+
+  /**
+   * 按 actor 分页拉取全部点（payload 含原文）。
+   * 用途：BM25/文本缓存是进程内的，进程重启即丢；Qdrant 是唯一事实源，
+   * 首次召回时据此回灌重建词法索引。
+   */
+  async scrollByActor(
+    actorId: string,
+    limit: number,
+  ): Promise<Array<{ id: string | number; payload: NarrativePointPayload }>> {
+    if (!this.client) return [];
+    const out: Array<{ id: string | number; payload: NarrativePointPayload }> = [];
+    let offset: string | number | undefined;
+    for (let page = 0; page < 64 && out.length < limit; page++) {
+      const res = await this.client.scroll(this.collection, {
+        limit: Math.min(256, limit - out.length),
+        offset,
+        filter: {
+          must: [{ key: "actorId", match: { value: actorId } }],
+        },
+        with_payload: true,
+      });
+      for (const p of res.points ?? []) {
+        out.push({ id: p.id, payload: p.payload as NarrativePointPayload });
+      }
+      if (res.next_page_offset == null) break;
+      offset = res.next_page_offset as string | number;
+    }
+    return out.slice(0, limit);
+  }
 }

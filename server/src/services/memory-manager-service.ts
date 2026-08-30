@@ -5,7 +5,7 @@ import { getDailyJournalService, DailyJournalService } from "./daily-journal-ser
 import OpenAI from "openai";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
-import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
+import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 
 /**
@@ -503,7 +503,7 @@ export class MemoryManagerService {
       // 路径 A：embedding 语义检索（必须用 Embedding 专用 key，对话 LLM key 会 401）
       const apiKey =
         process.env.AGENT_EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-      const embeddingModel = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
+      const embeddingModel = resolveEmbeddingModel();
       if (apiKey) {
         const embeddingHits = await this.recallForgottenByEmbedding(
           query, forgottenLines, apiKey, embeddingModel,
@@ -573,8 +573,12 @@ export class MemoryManagerService {
   ): Promise<string[]> {
     const llm = resolvePrimaryLlmClientConfig();
     if (!llm) return [];
+    // 补捞发生在"主召回已不足"的轮次，LLM 判断不能无限等：
+    // 超时按无命中处理（fail-closed），避免把整条 recall 链路拖过 3s 叙事超时。
+    const timeoutRaw = Number(process.env.MEMORY_FORGOTTEN_LLM_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 2500;
     try {
-      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, timeout: timeoutMs });
       const response = await openai.chat.completions.create({
         model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
         temperature: 0,

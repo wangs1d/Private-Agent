@@ -1,7 +1,7 @@
 // ProactivityHub —— 全局频控器（FrequencyGovernor）
 //
 // 职责：主动性多元化后防止"频繁打扰"。三层规则：
-//  1. 每 actor 每日总预算（默认 6 次，env 可调）
+//  1. 每 actor 每日总预算（默认 3 次，env 可调；必达类提案在管道层绕过本预算）
 //  2. 分 kind 冷却（greeting/分享每天最多 1 次，关怀 8h 一次……）
 //  3. 静默时段（23-7 点）：仅 importance=high 放行
 //
@@ -88,7 +88,7 @@ export class FrequencyGovernor {
     disableQuietHours?: boolean;
   }) {
     this.disableQuietHours = opts?.disableQuietHours === true;
-    this.dailyBudget = opts?.dailyBudget ?? readEnvInt("PROACTIVITY_DAILY_BUDGET", 6);
+    this.dailyBudget = opts?.dailyBudget ?? readEnvInt("PROACTIVITY_DAILY_BUDGET", 3);
     this.kindCooldownMs = { ...DEFAULT_KIND_COOLDOWN_MS };
     for (const [kind, ms] of Object.entries(opts?.kindCooldownMs ?? {})) {
       if (typeof ms === "number" && Number.isFinite(ms)) {

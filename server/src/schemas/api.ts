@@ -380,6 +380,31 @@ export const weatherLinkTaskBodySchema = z.object({
   taskId: z.string().uuid(),
 });
 
+// ── 助手动态台账（右侧面板「助手动态」卡）─────────────────────────
+
+export const agentActivityListQuerySchema = z.object({
+  actorId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
+
+export const agentActivityReadBodySchema = z.object({
+  actorId: z.string().min(1).optional(),
+  /** 缺省时标记该 actor 全部未读为已读 */
+  ids: z.array(z.string().min(1)).max(100).optional(),
+});
+
+export const agentActivityRecordBodySchema = z.object({
+  actorId: z.string().min(1),
+  /** 动作类型，建议 action.purchase / action.payment / action.schedule 前缀 */
+  kind: z.string().min(1).max(80),
+  title: z.string().min(1).max(120),
+  summary: z.string().min(1).max(500),
+  status: z.enum(["pending", "done", "failed", "changed"]).optional(),
+  statusLabel: z.string().max(40).optional(),
+  detail: z.record(z.string().max(200)).optional(),
+  dedupKey: z.string().min(1).max(200).optional(),
+});
+
 export const chatScheduleDraftBodySchema = z.object({
   sessionId: z.string().min(1),
   text: z.string().min(1).max(4000),

@@ -13,8 +13,12 @@ export type DesktopVisualRunInput = {
 };
 
 export type DesktopVisualScreenshotInput = {
-  /** 可选 [left, top, width, height]，与 pyautogui.screenshot(region=...) 一致；省略则全屏 */
+  /** 可选 [left, top, width, height]，相对显示器左上角的物理像素；省略则整屏 */
   region?: [number, number, number, number];
+  /** 1-based 显示器编号（省略 = 主屏） */
+  display?: number;
+  /** 图片最长边像素上限，超出时等比降采样；返回 scale 供坐标换算 */
+  maxDim?: number;
 };
 
 export type DesktopVisualScreenshotResult = {
@@ -23,10 +27,20 @@ export type DesktopVisualScreenshotResult = {
   imageBase64?: string;
   /** 图片 MIME 类型，固定为 image/png */
   mimeType?: string;
-  /** 图片宽度（像素） */
+  /** 图片宽度（像素，降采样后） */
   width?: number;
-  /** 图片高度（像素） */
+  /** 图片高度（像素，降采样后） */
   height?: number;
+  /** 实际截取区域宽（屏幕物理像素） */
+  screenWidth?: number;
+  /** 实际截取区域高（屏幕物理像素） */
+  screenHeight?: number;
+  /** image→screen 坐标倍率（>1 表示已降采样；screen = image * scale） */
+  scale?: number;
+  /** 实际使用的显示器编号 */
+  display?: number;
+  /** 显示器在虚拟屏幕中的原点 [x, y]（物理像素） */
+  origin?: [number, number];
   /** 截图时间戳 ISO 8601 */
   capturedAt?: string;
   error?: string;
@@ -81,15 +95,22 @@ export type DesktopVisualOpenResult = {
 };
 
 export type DesktopVisualUiaQueryInput = {
-  /** 查询模式：query=按 selector 查找；read_children=读父元素子树；inspect_point=检查 (x,y) 处元素 */
-  mode: "query" | "read_children" | "inspect_point";
+  /**
+   * 查询模式：query=按 selector 查找；read_children=读父元素子树；inspect_point=检查 (x,y) 处元素；
+   * snapshot=前台/指定窗口控件树快照（元素带 path，可在 run_automation 里复用）
+   */
+  mode: "query" | "read_children" | "inspect_point" | "snapshot";
   /** query/read_children 模式的选择条件，如 {control_type:"Button", name:"确定"} */
   selector?: Record<string, unknown> | null;
   /** inspect_point 模式的坐标 */
   point?: { x: number; y: number } | null;
+  /** query/read_children/snapshot 模式：限定目标窗口（标题子串，大小写不敏感）；snapshot 省略时取前台窗口 */
+  windowTitle?: string | null;
+  /** snapshot 模式：控件树最大深度，默认 6 */
+  maxDepth?: number | null;
   /** query 模式：仅顶层（true）或递归（false），默认 true */
   topOnly?: boolean | null;
-  /** 返回元素上限，query 默认 100，read_children 默认 200 */
+  /** 返回元素上限，query 默认 100，read_children 默认 200，snapshot 默认 150 */
   limit?: number | null;
 };
 
@@ -118,9 +139,23 @@ export type DesktopVisualUiaQueryResult = {
 };
 
 export type DesktopVisualRunInputInput = {
-  /** 操作类型 */
-  action: "click" | "double_click" | "right_click" | "move" | "type" | "key" | "shortcut" | "drag" | "scroll";
-  /** click/move/drag 的目标坐标 */
+  /** 操作类型（对齐主流 computer-use 动作空间） */
+  action:
+    | "click"
+    | "double_click"
+    | "triple_click"
+    | "middle_click"
+    | "right_click"
+    | "move"
+    | "type"
+    | "key"
+    | "shortcut"
+    | "drag"
+    | "scroll"
+    | "wait"
+    | "cursor_position"
+    | "hold_key";
+  /** click/move/drag/scroll(可选) 的目标坐标；默认为屏幕物理像素 */
   x?: number;
   y?: number;
   /** drag 的终点坐标 */
@@ -128,18 +163,32 @@ export type DesktopVisualRunInputInput = {
   toY?: number;
   /** click 的鼠标按键: left / right / middle，默认 left */
   button?: string;
-  /** type 要输入的文本 */
+  /** type 要输入的文本；含非 ASCII 字符时 Python 端自动走剪贴板粘贴路径 */
   text?: string;
-  /** key 要按的单键: enter, tab, esc, backspace, space, up, down, left, right 等 */
+  /** key/hold_key 要按的单键: enter, tab, esc, backspace, space, up, down, left, right 等 */
   key?: string;
   /** shortcut 组合键: "ctrl+c", "ctrl+v", "alt+tab" 等，用 + 分隔 */
   keys?: string;
-  /** scroll 滚动量: 正=向上, 负=向下 */
+  /** scroll 垂直滚动量: 正=向上, 负=向下 */
   scrollClicks?: number;
+  /** scroll 水平滚动量: 正=向右, 负=向左 */
+  scrollX?: number;
+  /** wait 等待毫秒（1-10000，默认 500） */
+  waitMs?: number;
+  /** hold_key 按住秒数（0.05-5，默认 0.5） */
+  holdSeconds?: number;
   /** 按键间隔秒数，默认 type=0.02, 其他=0.05 */
   interval?: number;
   /** 鼠标移动平滑时间秒数，0=瞬间到位 */
   moveDuration?: number;
+  /** coordSpace="image" 时必传：截图返回的 width（模型给的是截图上的坐标） */
+  imageWidth?: number;
+  /** coordSpace="image" 时必传：截图返回的 height */
+  imageHeight?: number;
+  /** 坐标空间：screen=屏幕物理像素（默认）；image=截图像素（需 imageWidth/imageHeight） */
+  coordSpace?: "screen" | "image";
+  /** image 坐标对应的显示器编号（默认主屏） */
+  display?: number;
 };
 
 export type DesktopVisualRunInputResult = {
@@ -242,12 +291,33 @@ export interface DesktopVisualPort {
   webFetch?(
     input: DesktopVisualWebFetchInput,
   ): Promise<DesktopVisualWebFetchResult>;
+
+  /**
+   * 窗口管理（主流 computer-use / OS agent 标配）。
+   * list 枚举可见顶层窗口；activate/close/minimize/maximize/restore/move/resize
+   * 按 hwnd / title 子串 / list 编号定位。仅 Windows。
+   */
+  window?(input: DesktopVisualWindowInput): Promise<DesktopVisualWindowResult>;
+
+  /** 剪贴板读写（get / set）。type 工具的非 ASCII 粘贴路径与这里共用底层。 */
+  clipboard?(
+    input: DesktopVisualClipboardInput,
+  ): Promise<DesktopVisualClipboardResult>;
 }
 
 export type DesktopVisualRunAutomationInput = {
   /** 原生控件操作类型 */
-  action: "click" | "set_value" | "get_value" | "toggle" | "focus";
-  /** UIA 查询条件 */
+  action:
+    | "click"
+    | "set_value"
+    | "get_value"
+    | "toggle"
+    | "focus"
+    | "select"
+    | "expand"
+    | "collapse"
+    | "scroll_into_view";
+  /** UIA 查询条件；也可用 { path: "2.1.3" } 复用 snapshot 输出的元素路径 */
   selector: Record<string, unknown>;
   /** set_value 时要设置的文本 */
   value?: string;
@@ -255,6 +325,8 @@ export type DesktopVisualRunAutomationInput = {
   index?: number;
   /** 是否仅查顶层(默认 true) */
   topOnly?: boolean;
+  /** 限定目标窗口（标题子串，大小写不敏感）；省略时查询整个桌面 */
+  windowTitle?: string;
 };
 
 export type DesktopVisualRunAutomationResult = {
@@ -326,5 +398,61 @@ export type DesktopVisualWebFetchResult = {
   statusCode?: number;
   contentType?: string;
   bytesReceived?: number;
+  error?: string;
+};
+
+export type DesktopVisualWindowInput = {
+  /** 窗口操作：list 枚举；其余按 hwnd / title / index 定位 */
+  op: "list" | "activate" | "close" | "minimize" | "maximize" | "restore" | "move" | "resize";
+  /** 窗口标题子串（大小写不敏感，优先级低于 hwnd） */
+  title?: string;
+  /** list 输出的窗口编号（1-based） */
+  index?: number;
+  /** 窗口句柄（list 输出的 hwnd） */
+  hwnd?: number;
+  /** move 的目标位置（屏幕物理像素） */
+  x?: number;
+  y?: number;
+  /** resize 的目标尺寸（物理像素） */
+  width?: number;
+  height?: number;
+};
+
+export type DesktopVisualWindowInfo = {
+  index?: number;
+  hwnd?: number;
+  title?: string;
+  /** [left, top, right, bottom] 物理像素 */
+  bbox?: [number, number, number, number];
+  minimized?: boolean;
+  maximized?: boolean;
+  foreground?: boolean;
+  processName?: string;
+};
+
+export type DesktopVisualWindowResult = {
+  ok: boolean;
+  op?: string;
+  count?: number;
+  windows?: DesktopVisualWindowInfo[];
+  window?: DesktopVisualWindowInfo;
+  hwnd?: number;
+  error?: string;
+};
+
+export type DesktopVisualClipboardInput = {
+  /** get 读取 / set 写入 */
+  op: "get" | "set";
+  /** set 时要写入的文本 */
+  text?: string;
+};
+
+export type DesktopVisualClipboardResult = {
+  ok: boolean;
+  op?: string;
+  /** get 时的文本内容（超长截断） */
+  text?: string;
+  length?: number;
+  truncated?: boolean;
   error?: string;
 };

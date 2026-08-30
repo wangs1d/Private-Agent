@@ -364,3 +364,38 @@ console.log("Generated World Caps for", actorId, ":\n", lines.join("\n"));
 **测试日期**: 2026-05-17  
 **测试人员**: ___________  
 **测试结果**: ☐ 通过  ☐ 失败  ☐ 部分通过
+
+---
+
+## 🔁 双向通话协议事件（2026-08 新增）
+
+通话链路已从「TTS 单向播报」升级为「双向交互」，新增以下协议事件：
+
+| 方向 | 事件 | 说明 |
+|------|------|------|
+| 客户端 → 服务端 | `phone.call_reply` | 通话中用户回复，payload: `{ callId, text }`（打字或客户端本地 ASR 转写） |
+| 客户端 → 服务端 | `phone.call_hangup` | 用户挂断，payload: `{ callId }`；服务端清理会话并推 `ended` |
+| 服务端 → 客户端 | `agent.phone.voice_reply` | 通话中 Agent 的语音回应，payload 含 `callId / transcript / tts` |
+
+服务端行为变化：
+
+1. **提醒电话（phone_call 级提醒）**：接通后进入交互循环——用户回复确认词（默认
+   「退下/知道了/收到/挂断」）即播告别语并推 `reminder_call_completed`；其他回复走
+   LLM 对话并经 `agent.phone.voice_reply` 回播；无输入按 `maxRingDurationSec` 超时退出。
+2. **用户 → Agent 呼叫**：状态序列补全为 `ringing → connecting → connected → ended`；
+   `connected` 携带 Agent 的接通回应（transcript + TTS，经 AgentCore 主对话管线生成，
+   超时 25s 或失败按兜底话术接通）。拨通留言经 `userMessage` 传入 Agent。
+3. **Agent → 用户通话（phone.call_user）**：`replyEnabled` 现在真实生效——通话中的
+   `phone.call_reply` 会路由进 Agent 对话并以 `voice_reply` 回播。
+4. 通话会话保活 10 分钟，挂断/超时后 `call_reply` 报「通话不存在或已结束」。
+
+### 手工验证步骤
+
+1. 创建 phone_call 级提醒并触发（或让 Agent 调 `phone.call_user`）→ 客户端接听；
+2. 在通话 UI 输入（或语音转写）回复「等等，几点开会？」→ 应听到 Agent 的 LLM 回应；
+3. 回复「收到」→ 应听到告别语，通话结束，提醒状态变为已确认；
+4. 让 Agent 拨打用户 → 接听后直接说话发送（`phone.call_reply`）→ 应持续多轮对话；
+5. 用户呼叫 Agent（拨号盘）→ 应听到 Agent 问候/回应留言的语音；点挂断 → 双方状态清理。
+
+自动化覆盖：`server/test/phone-call-handler.test.ts`、`server/test/virtual-phone-service.test.ts`、
+`server/test/phone-call-intent.test.ts`、`server/test/forced-tool.test.ts`（`npm test`）。

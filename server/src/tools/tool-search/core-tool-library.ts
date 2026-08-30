@@ -46,6 +46,7 @@ export const CORE_TOOL_LIBRARY = {
       "budget.calculate",
       "shopping.suggest",
       "self.list_custom_skills",
+      "surface.show",
     ],
     prefixes: [
       "calendar.",
@@ -100,6 +101,7 @@ export const CORE_TOOL_LIBRARY = {
       "phone.ensure_my_number",
       "voice.speak",
       "voice.transcribe",
+      "surface.show",
       "budget.calculate",
       "shopping.suggest",
       "self.list_custom_skills",

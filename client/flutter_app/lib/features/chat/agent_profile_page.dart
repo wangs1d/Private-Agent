@@ -167,7 +167,6 @@ class _AgentProfilePageState extends State<AgentProfilePage> {
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: <Widget>[
                     _AvatarPreview(
-                      displayName: _profile.displayName,
                       avatarPreset: _profile.avatarPreset,
                     ),
                     const SizedBox(width: 16),
@@ -231,43 +230,16 @@ class _AgentProfilePageState extends State<AgentProfilePage> {
 }
 
 class _AvatarPreview extends StatelessWidget {
-  const _AvatarPreview({
-    required this.displayName,
-    required this.avatarPreset,
-  });
+  const _AvatarPreview({required this.avatarPreset});
 
-  final String displayName;
   final String avatarPreset;
 
   @override
   Widget build(BuildContext context) {
-    const double size = 92;
-    final Widget fallback = Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        displayName.isEmpty ? "A" : displayName.characters.first.toUpperCase(),
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 33,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-
-    return ClipOval(
-      child: Image.asset(
-        agentAvatarAssetPath(avatarPreset),
-        width: size,
-        height: size,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => fallback,
-      ),
+    // 「轨道光球」矢量头像（与聊天列表 36px 头像同一实现）
+    return AgentOrbAvatar(
+      size: 92,
+      palette: AgentAvatarPalette.fromPreset(avatarPreset),
     );
   }
 }

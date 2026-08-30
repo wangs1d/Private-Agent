@@ -2,6 +2,9 @@ import { join } from "node:path";
 
 import { envBool } from "../config/memory-env.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
+// 统一嵌入模型解析：AGENT_EMBEDDING_MODEL → OPENAI_EMBEDDINGS_MODEL → 默认，
+// 与 humanLike / narrative-hybrid / forgotten 等通道保持同一模型（阈值与分数才可比）。
+import { resolveEmbeddingModel } from "../services/openai-embedding-client.js";
 
 function envPositiveInt(name: string, fallback: number): number {
   const v = Number.parseInt(process.env[name] ?? "", 10);
@@ -37,7 +40,7 @@ export function getAgenticMemorySearchTopK(): number {
 }
 
 export function getAgenticMemoryEmbeddingModel(): string {
-  return process.env.AGENT_EMBEDDING_MODEL?.trim() || "text-embedding-3-small";
+  return resolveEmbeddingModel();
 }
 
 /**

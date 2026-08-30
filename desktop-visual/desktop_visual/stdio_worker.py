@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from datetime import datetime, timezone
 
@@ -21,6 +22,16 @@ from desktop_visual.shell_policy import (
     format_command_for_log,
     sanitize_env,
 )
+
+
+def ensure_dpi_aware() -> None:
+    """启动时声明 DPI 感知（幂等）；之后全链路坐标统一为物理像素。"""
+    try:
+        from desktop_visual.runtime.dpi import ensure_per_monitor_dpi_aware
+
+        ensure_per_monitor_dpi_aware()
+    except Exception:
+        pass
 
 
 def _stub_env_on() -> bool:
@@ -38,9 +49,14 @@ def _normalize_openai_base(url: str) -> str:
 
 
 async def _handle_screenshot(req: dict) -> dict:
-    """截整屏或区域，返回 base64 PNG + 尺寸。"""
+    """截整屏 / 指定显示器 / 区域，返回 base64 PNG + 尺寸 + 坐标标定。
+
+    - display: 1-based 显示器编号（省略 = 主屏）
+    - maxDim: 图片最长边上限，超出时等比降采样；返回 scale 供坐标换算
+      （screen = image * scale）。region 相对该显示器左上角（物理像素）。
+    """
     try:
-        from desktop_visual.runtime.capture import grab_screen_png
+        from desktop_visual.runtime.capture import grab_display_png
 
         region = req.get("region")
         region_t: tuple[int, int, int, int] | None = None
@@ -49,17 +65,29 @@ async def _handle_screenshot(req: dict) -> dict:
                 return {"ok": False, "error": "region must be [left, top, width, height]"}
             region_t = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
 
-        png_bytes, (width, height) = grab_screen_png(region=region_t)
-        image_base64 = base64.b64encode(png_bytes).decode("ascii")
+        display = req.get("display")
+        display_int = int(display) if isinstance(display, (int, float)) else None
+        max_dim_raw = req.get("maxDim")
+        max_dim = int(max_dim_raw) if isinstance(max_dim_raw, (int, float)) and int(max_dim_raw) >= 200 else None
+
+        grab = grab_display_png(display=display_int, region=region_t, max_dim=max_dim)
+        image_base64 = base64.b64encode(grab.png).decode("ascii")
 
         return {
             "ok": True,
             "imageBase64": image_base64,
             "mimeType": "image/png",
-            "width": width,
-            "height": height,
-            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "width": grab.width,
+            "height": grab.height,
+            "screenWidth": grab.screen_width,
+            "screenHeight": grab.screen_height,
+            "scale": grab.scale,
+            "display": grab.display,
+            "origin": [grab.origin_x, grab.origin_y],
+            "capturedAt": grab.captured_at,
         }
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
         logging.exception("screenshot failed")
         return {"ok": False, "error": f"截图失败: {str(e)}"}
@@ -500,6 +528,27 @@ def _resolve_window_hints(exe_path: str, fallback_hints_from_name: str | None = 
     return hints
 
 
+def _activate_window(hwnd: int) -> None:
+    """恢复最小化 + 置顶到前台（窗口激活的标准套路）。"""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    SW_RESTORE = 9
+    SW_SHOW = 5
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.ShowWindow(hwnd, SW_SHOW)
+    foreground_thread_id = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    target_thread_id = user32.GetWindowThreadProcessId(hwnd, None)
+    if foreground_thread_id != target_thread_id:
+        user32.AttachThreadInput(foreground_thread_id, target_thread_id, True)
+        user32.SetForegroundWindow(hwnd)
+        user32.AttachThreadInput(foreground_thread_id, target_thread_id, False)
+    else:
+        user32.SetForegroundWindow(hwnd)
+    user32.BringWindowToTop(hwnd)
+
+
 def _launch_and_verify_window(
     exe_path: str,
     wait_seconds: float = 5.0,
@@ -527,20 +576,7 @@ def _launch_and_verify_window(
         hints = _resolve_window_hints(exe_path, fallback_hints_from_name)
 
         def _activate(hwnd: int) -> None:
-            """恢复最小化 + 置顶到前台。"""
-            SW_RESTORE = 9
-            SW_SHOW = 5
-            user32.ShowWindow(hwnd, SW_RESTORE)
-            user32.ShowWindow(hwnd, SW_SHOW)
-            foreground_thread_id = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-            target_thread_id = user32.GetWindowThreadProcessId(hwnd, None)
-            if foreground_thread_id != target_thread_id:
-                user32.AttachThreadInput(foreground_thread_id, target_thread_id, True)
-                user32.SetForegroundWindow(hwnd)
-                user32.AttachThreadInput(foreground_thread_id, target_thread_id, False)
-            else:
-                user32.SetForegroundWindow(hwnd)
-            user32.BringWindowToTop(hwnd)
+            _activate_window(hwnd)
 
         def _find_existing_by_hints() -> int | None:
             """按 hints 在所有可见顶层窗口里找已存在的窗口。"""
@@ -775,21 +811,51 @@ async def _handle_run_shell(req: dict) -> dict:
 
 
 # ---- run_input ----
-# 原生键盘/鼠标模拟输入（不依赖 VLM，直接操作系统输入）
-VALID_ACTIONS = {"click", "double_click", "right_click", "move", "type", "key", "shortcut", "drag", "scroll"}
-VALID_KEYS = {
-    "enter", "tab", "esc", "backspace", "space", "delete", "home", "end", "pageup", "pagedown",
-    "up", "down", "left", "right",
-    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
-    "alt", "ctrl", "shift", "win", "capslock", "numlock", "printscreen", "scrolllock",
-}
+# 原生键盘/鼠标模拟输入（不依赖 VLM，直接操作系统输入）。
+# 动作空间与参数校验在 desktop_visual.input_actions（纯逻辑、可单测）；
+# 本函数只做效果执行。坐标系 = 屏幕物理像素（进程已 DPI aware）。
+
+
+def _type_text_smart(pointer, text: str, *, interval_s: float) -> tuple[str | None, str | None]:
+    """输入文本：纯 ASCII 走逐字；含非 ASCII 走剪贴板粘贴（备份→粘贴→恢复）。
+
+    pyautogui.write 只能发 ASCII 虚拟键，中文/emoji 会静默丢失，
+    因此非 ASCII 文本统一走剪贴板 + Ctrl+V（主流 computer-use agent 的标准做法）。
+    返回 (method, error)：method 为 write / clipboard_paste；error 非 None 表示失败。
+    """
+    if all(ord(ch) < 128 for ch in text):
+        pointer.type_text(text, interval_s=interval_s)
+        return "write", None
+
+    from desktop_visual.runtime import clipboard
+
+    backup = clipboard.get_text()
+    if not clipboard.set_text(text):
+        return None, "剪贴板不可用，无法输入非 ASCII 文本（中文/emoji 等）。可尝试仅输入 ASCII 内容。"
+    time.sleep(0.08)
+    import pyautogui
+
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.08)
+    if backup:
+        clipboard.set_text(backup)  # 尽力恢复原剪贴板内容
+    return "clipboard_paste", None
 
 
 def _handle_run_input(req: dict) -> dict:
-    action = req.get("inputAction") or req.get("action")
-    if not isinstance(action, str) or action not in VALID_ACTIONS:
-        return {"ok": False, "error": f"action 必须是 {VALID_ACTIONS} 之一，收到 {action!r}"}
+    from desktop_visual.input_actions import RunInputError, normalize_run_input
+    from desktop_visual.runtime.displays import resolve_monitor
 
+    def monitor_lookup(display):
+        m = resolve_monitor(display)
+        return (m.left, m.top, m.width, m.height)
+
+    try:
+        norm = normalize_run_input(req, monitor_lookup)
+    except RunInputError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    action = norm["action"]
     try:
         from desktop_visual.runtime.mouse_controller import HybridPointer
 
@@ -798,84 +864,300 @@ def _handle_run_input(req: dict) -> dict:
         return {"ok": False, "error": f"启动输入控制器失败: {e}"}
 
     try:
-        if action in ("click", "double_click", "right_click", "move"):
-            x = req.get("x")
-            y = req.get("y")
-            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                return {"ok": False, "error": "click/move 需要 x 和 y 坐标"}
-            x = int(x)
-            y = int(y)
-            move_dur = float(req.get("moveDuration", 0))
-            if action == "move":
-                pointer.move(x, y, duration_s=max(0, move_dur))
-                return {"ok": True, "action": "move", "x": x, "y": y}
-            clicks = 2 if action == "double_click" else 1
-            button = str(req.get("button", "left")).lower()
-            if button not in ("left", "right", "middle"):
-                button = "left" if action != "right_click" else "right"
-            pointer.move(x, y, duration_s=max(0, move_dur))
-            interval = float(req.get("interval", 0.08))
-            pointer.click(x, y, button=button, clicks=clicks, interval_s=max(0.01, interval))
-            return {"ok": True, "action": action, "x": x, "y": y, "button": button}
+        if action in ("click", "double_click", "triple_click", "right_click", "middle_click"):
+            clicks = {"click": 1, "double_click": 2, "triple_click": 3, "right_click": 1, "middle_click": 1}[action]
+            x, y = norm["x"], norm["y"]
+            pointer.move(x, y, duration_s=norm["moveDuration"])
+            pointer.click(x, y, button=norm["button"], clicks=clicks, interval_s=max(0.02, norm["interval"]))
+            return {"ok": True, "action": action, "x": x, "y": y, "button": norm["button"]}
+
+        if action == "move":
+            x, y = norm["x"], norm["y"]
+            pointer.move(x, y, duration_s=norm["moveDuration"])
+            return {"ok": True, "action": "move", "x": x, "y": y}
 
         if action == "drag":
-            x = req.get("x")
-            y = req.get("y")
-            toX = req.get("toX")
-            toY = req.get("toY")
-            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                return {"ok": False, "error": "drag 需要起点 x, y"}
-            if not isinstance(toX, (int, float)) or not isinstance(toY, (int, float)):
-                return {"ok": False, "error": "drag 需要终点 toX, toY"}
-            import pyautogui
-            move_dur = float(req.get("moveDuration", 0.3))
-            pyautogui.moveTo(int(x), int(y))
-            pyautogui.drag(int(toX) - int(x), int(toY) - int(y), duration=max(0.05, move_dur))
-            return {"ok": True, "action": "drag", "x": int(x), "y": int(y), "toX": int(toX), "toY": int(toY)}
+            pointer.drag_to(
+                norm["x"], norm["y"], norm["toX"], norm["toY"],
+                duration_s=norm["moveDuration"] or 0.3,
+                button=norm["button"],
+            )
+            return {"ok": True, "action": "drag", "x": norm["x"], "y": norm["y"],
+                    "toX": norm["toX"], "toY": norm["toY"]}
 
         if action == "type":
-            text = req.get("text")
-            if not isinstance(text, str) or not text:
-                return {"ok": False, "error": "type 需要 text"}
-            interval = float(req.get("interval", 0.02))
-            pointer.type_text(text, interval_s=max(0.001, interval))
-            return {"ok": True, "action": "type", "text": text}
+            method, err = _type_text_smart(pointer, norm["text"], interval_s=norm["interval"])
+            if err:
+                return {"ok": False, "error": err}
+            text = norm["text"]
+            return {
+                "ok": True,
+                "action": "type",
+                "text": text[:50] + ("…" if len(text) > 50 else ""),
+                "length": len(text),
+                "method": method,
+            }
 
         if action == "key":
-            key = req.get("key")
-            if not isinstance(key, str) or not key:
-                return {"ok": False, "error": "key 需要 key 参数"}
-            if key.lower() not in VALID_KEYS and len(key) == 1:
-                pointer.key_tap(key)
-            elif key.lower() in VALID_KEYS:
-                pointer.key_tap(key.lower())
-            else:
-                return {"ok": False, "error": f"不支持的按键: {key}"}
+            key = norm["key"]
+            import pyautogui
+
+            if key not in pyautogui.KEYBOARD_KEYS and len(key) != 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"不支持的按键: {key!r}。可用键: enter/tab/escape/backspace/space/delete/"
+                        "home/end/pageup/pagedown/方向键/f1-f12/insert/capslock 等，或任意单个字符"
+                    ),
+                }
+            pointer.key_tap(key)
             return {"ok": True, "action": "key", "key": key}
 
+        if action == "hold_key":
+            pointer.hold_key(norm["key"], norm["holdSeconds"])
+            return {"ok": True, "action": "hold_key", "key": norm["key"], "holdSeconds": norm["holdSeconds"]}
+
         if action == "shortcut":
-            keys = req.get("keys")
-            if not isinstance(keys, str) or not keys:
-                return {"ok": False, "error": "shortcut 需要 keys 参数（如 'ctrl+v'）"}
             import pyautogui
-            parts = [k.strip().lower() for k in keys.split("+")]
-            if len(parts) < 2:
-                return {"ok": False, "error": f"shortcut 至少需要 2 个键，收到 {keys!r}"}
+
+            parts = norm["keys"]
             pyautogui.hotkey(*parts)
-            return {"ok": True, "action": "shortcut", "keys": keys}
+            return {"ok": True, "action": "shortcut", "keys": "+".join(parts)}
 
         if action == "scroll":
-            scroll_clicks = req.get("scrollClicks")
-            if not isinstance(scroll_clicks, (int, float)):
-                return {"ok": False, "error": "scroll 需要 scrollClicks（正=上滚，负=下滚）"}
-            pointer.scroll(int(scroll_clicks))
-            return {"ok": True, "action": "scroll", "clicks": int(scroll_clicks)}
+            v = norm.get("scrollClicks", 0)
+            h = norm.get("scrollX", 0)
+            if "x" in norm and "y" in norm:
+                pointer.scroll_at(norm["x"], norm["y"], v, hclicks=h)
+            elif h:
+                pointer.hscroll(h)
+            elif v:
+                pointer.scroll(v)
+            return {"ok": True, "action": "scroll", "scrollClicks": v, "scrollX": h}
+
+        if action == "wait":
+            time.sleep(norm["waitMs"] / 1000.0)
+            return {"ok": True, "action": "wait", "waitMs": norm["waitMs"]}
+
+        if action == "cursor_position":
+            import pyautogui
+
+            pos = pyautogui.position()
+            return {"ok": True, "action": "cursor_position", "x": int(pos.x), "y": int(pos.y)}
 
     except Exception as e:
         logging.exception("run_input failed")
         return {"ok": False, "error": f"输入操作失败: {e}"}
 
     return {"ok": False, "error": f"未知 action: {action}"}
+
+
+# ---- window ----
+# 窗口管理（主流 computer-use / OS agent 标配）：
+# list 枚举可见顶层窗口；activate/close/minimize/maximize/restore/move/resize
+# 按 hwnd / title 子串 / list 编号定位。仅 Windows。
+
+_WINDOW_OPS = ("list", "activate", "close", "minimize", "maximize", "restore", "move", "resize")
+
+
+def _process_name_of_hwnd(hwnd: int) -> str | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return None
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            size = wintypes.DWORD(512)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return os.path.basename(buf.value)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+    return None
+
+
+def _list_top_windows() -> list[dict]:
+    """可见、有标题的顶层窗口列表（物理像素 bbox），index 为 1-based 稳定序号。"""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    out: list[dict] = []
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value.strip()
+        if not title:
+            return True
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return True
+        info: dict = {
+            "index": len(out) + 1,
+            "hwnd": int(hwnd),
+            "title": title[:120],
+            "bbox": [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)],
+            "minimized": bool(user32.IsIconic(hwnd)),
+            "maximized": bool(user32.IsZoomed(hwnd)),
+            "foreground": int(hwnd) == int(user32.GetForegroundWindow()),
+        }
+        pname = _process_name_of_hwnd(int(hwnd))
+        if pname:
+            info["processName"] = pname
+        out.append(info)
+        return len(out) < 80
+
+    user32.EnumWindows(EnumWindowsProc(_cb), 0)
+    return out
+
+
+def _resolve_window_hwnd(req: dict) -> int | None:
+    """按 hwnd / title 子串 / list 编号三种方式定位窗口。"""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    hwnd = req.get("hwnd")
+    if isinstance(hwnd, (int, float)) and int(hwnd) > 0 and user32.IsWindow(int(hwnd)):
+        return int(hwnd)
+    windows = _list_top_windows()
+    title = req.get("title")
+    if isinstance(title, str) and title.strip():
+        needle = title.strip().lower()
+        for w in windows:
+            if needle in w["title"].lower():
+                return w["hwnd"]
+        return None
+    index = req.get("index")
+    if isinstance(index, (int, float)) and int(index) >= 1:
+        for w in windows:
+            if w["index"] == int(index):
+                return w["hwnd"]
+    return None
+
+
+def _window_info(hwnd: int) -> dict:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1) if length > 0 else None
+    title = ""
+    if buf:
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value
+    rect = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    info: dict = {
+        "hwnd": int(hwnd),
+        "title": title[:120],
+        "bbox": [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)],
+        "minimized": bool(user32.IsIconic(hwnd)),
+        "maximized": bool(user32.IsZoomed(hwnd)),
+        "foreground": int(hwnd) == int(user32.GetForegroundWindow()),
+    }
+    pname = _process_name_of_hwnd(hwnd)
+    if pname:
+        info["processName"] = pname
+    return info
+
+
+def _handle_window(req: dict) -> dict:
+    if os.name != "nt":
+        return {"ok": False, "error": "窗口管理仅支持 Windows"}
+    op = req.get("windowOp") or req.get("op")
+    if op not in _WINDOW_OPS:
+        return {"ok": False, "error": f"windowOp 必须是 {'/'.join(_WINDOW_OPS)}，收到 {op!r}"}
+
+    try:
+        if op == "list":
+            windows = _list_top_windows()
+            return {"ok": True, "op": "list", "count": len(windows), "windows": windows}
+
+        hwnd = _resolve_window_hwnd(req)
+        if hwnd is None:
+            return {
+                "ok": False,
+                "error": "未找到目标窗口：请传 hwnd、title（标题子串，大小写不敏感）"
+                "或 index（desktop.window list 输出的编号）。",
+            }
+
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        if op == "activate":
+            _activate_window(hwnd)
+            return {"ok": True, "op": op, "window": _window_info(hwnd)}
+        if op == "close":
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE，走应用正常关闭流程（可被取消）
+            return {"ok": True, "op": op, "hwnd": hwnd}
+        if op == "minimize":
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        elif op == "maximize":
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        elif op == "restore":
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        elif op == "move":
+            x, y = req.get("x"), req.get("y")
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                return {"ok": False, "error": "move 需要 x, y（屏幕物理像素）"}
+            user32.SetWindowPos(hwnd, 0, int(x), int(y), 0, 0, 0x0001 | 0x0004)  # SWP_NOSIZE|NOZORDER
+        elif op == "resize":
+            w, h = req.get("width"), req.get("height")
+            if not isinstance(w, (int, float)) or not isinstance(h, (int, float)) or w <= 0 or h <= 0:
+                return {"ok": False, "error": "resize 需要 width, height（正数，物理像素）"}
+            user32.SetWindowPos(hwnd, 0, 0, 0, int(w), int(h), 0x0002 | 0x0004)  # SWP_NOMOVE|NOZORDER
+        return {"ok": True, "op": op, "window": _window_info(hwnd)}
+    except Exception as e:
+        logging.exception("window op failed")
+        return {"ok": False, "error": f"窗口操作失败: {e}"}
+
+
+# ---- clipboard ----
+# 剪贴板读写（desktop.clipboard 工具 + 中文输入的粘贴路径共用）。
+
+def _handle_clipboard(req: dict) -> dict:
+    op = req.get("clipboardOp") or req.get("op")
+    if op not in ("get", "set"):
+        return {"ok": False, "error": f"clipboardOp 必须是 get 或 set，收到 {op!r}"}
+    from desktop_visual.runtime import clipboard
+
+    if op == "get":
+        text = clipboard.get_text()
+        if text is None:
+            return {"ok": False, "error": "剪贴板无文本或读取失败"}
+        limit = 8000
+        return {
+            "ok": True,
+            "op": "get",
+            "text": text[:limit],
+            "length": len(text),
+            "truncated": len(text) > limit,
+        }
+
+    text = req.get("text")
+    if not isinstance(text, str):
+        return {"ok": False, "error": "set 需要 text 字符串参数"}
+    if not clipboard.set_text(text):
+        return {"ok": False, "error": "剪贴板写入失败（可能被其他进程占用）"}
+    return {"ok": True, "op": "set", "length": len(text)}
 
 
 # ---- show_message ----
@@ -970,6 +1252,7 @@ def _handle_show_message(req: dict) -> dict:
 
 async def _run() -> dict:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    ensure_dpi_aware()
     raw = sys.stdin.buffer.read()
     if not raw:
         return {"ok": False, "error": "empty stdin"}
@@ -1001,6 +1284,10 @@ async def _run() -> dict:
         return _handle_run_input(req)
     if action == "run_automation":
         return _handle_run_automation(req)
+    if action == "window":
+        return _handle_window(req)
+    if action == "clipboard":
+        return _handle_clipboard(req)
     if action == "http_get":
         return _handle_http_get(req)
     if action == "web_search":
@@ -1018,6 +1305,13 @@ async def _run() -> dict:
         if not isinstance(region, list) or len(region) != 4:
             return {"ok": False, "error": "region must be [left, top, width, height]"}
         region_t = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
+
+    max_shot_raw = req.get("maxScreenshotDim")
+    max_shot_dim = (
+        int(max_shot_raw)
+        if isinstance(max_shot_raw, (int, float)) and int(max_shot_raw) >= 200
+        else None
+    )
 
     stub = bool(req.get("stub")) or _stub_env_on()
 
@@ -1042,8 +1336,19 @@ async def _run() -> dict:
             model=cfg["model"],
         )
 
-    loop = VisualDesktopLoop(vlm, uia=_get_uia_for_loop())
-    out = await loop.run(LoopConfig(max_steps=max_steps, task=task, region=region_t))
+    def _emit_step(payload: dict) -> None:
+        # 步骤事件经 stderr "##STEP {json}" 行上报，桥接转发为 desktop.task.step
+        try:
+            line = json.dumps(payload, ensure_ascii=False)
+            sys.stderr.write("##STEP " + line[:2000] + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    loop = VisualDesktopLoop(vlm, uia=_get_uia_for_loop(), on_step=_emit_step)
+    out = await loop.run(
+        LoopConfig(max_steps=max_steps, task=task, region=region_t, max_screenshot_dim=max_shot_dim)
+    )
     return out
 
 
@@ -1059,7 +1364,7 @@ def _get_uia_for_loop():
 
 
 def _handle_uia_query(req: dict) -> dict:
-    """UIA 结构化查询。mode: query | read_children | inspect_point。"""
+    """UIA 结构化查询。mode: query | read_children | inspect_point | snapshot。"""
     from desktop_visual.runtime.uia_controller import get_uia_controller
 
     ctrl = get_uia_controller()
@@ -1078,29 +1383,69 @@ def _handle_uia_query(req: dict) -> dict:
             y = int(point.get("y", 0))
             return ctrl.inspect_point(x, y)
 
+        if mode == "snapshot":
+            # 整树快照（主流"快照→按元素操作"模式）：
+            # windowTitle 省略时取前台窗口；path 可在 run_automation 里复用
+            window_title = req.get("windowTitle") or None
+            try:
+                max_depth = int(req.get("maxDepth") or 6)
+            except (TypeError, ValueError):
+                max_depth = 6
+            try:
+                limit = int(req.get("limit") or 150)
+            except (TypeError, ValueError):
+                limit = 150
+            root_ref, win_title = ctrl.find_window_root(window_title)
+            if root_ref is None:
+                return {
+                    "ok": False,
+                    "error": f"未找到窗口: {window_title!r}" if window_title else "当前无可用窗口",
+                    "mode": "snapshot",
+                }
+            items = ctrl.snapshot_tree(root_ref, max_depth=max_depth, limit=limit)
+            return {
+                "ok": True,
+                "mode": "snapshot",
+                "windowTitle": win_title,
+                "count": len(items),
+                "elements": [_strip_ref(e) for e in items],
+            }
+
+        # query / read_children 支持 windowTitle 限定查询范围到某个顶层窗口
+        scope_selector: dict | None = None
+        window_title = req.get("windowTitle")
+        if window_title:
+            root_ref, _win = ctrl.find_window_root(window_title)
+            if root_ref is None:
+                return {"ok": False, "error": f"未找到窗口: {window_title!r}", "mode": mode}
+            scope_selector = {"parent": root_ref}
+
         if mode == "query":
-            selector = req.get("selector") or {}
+            selector = {**(req.get("selector") or {}), **(scope_selector or {})}
             top_only = bool(req.get("topOnly", True))
             limit_raw = req.get("limit")
             limit = int(limit_raw) if isinstance(limit_raw, (int, float)) else 100
             elements = ctrl.query(selector, top_only=top_only, limit=limit)
-            # 剥掉 __ref 字段（不可序列化）
+            # 剥掉 __ref / parent（不可序列化；parent 是 COM 元素引用）
+            echo_selector = {k: v for k, v in selector.items() if k != "parent"}
             return {
                 "ok": True,
                 "mode": "query",
-                "selector": selector,
+                "selector": echo_selector,
                 "count": len(elements),
                 "elements": [_strip_ref(e) for e in elements],
             }
 
         if mode == "read_children":
             # 先用 selector 找父元素，再读子树
-            selector = req.get("selector") or {}
+            selector = {**(req.get("selector") or {}), **(scope_selector or {})}
             limit_raw = req.get("limit")
             limit = int(limit_raw) if isinstance(limit_raw, (int, float)) else 200
             parents = ctrl.query(selector, top_only=True, limit=1)
             if not parents:
-                return {"ok": False, "error": "未找到匹配父元素", "selector": selector}
+                return {"ok": False, "error": "未找到匹配父元素", "selector": {
+                    k: v for k, v in selector.items() if k != "parent"
+                }}
             parent_ref = parents[0].get("__ref")
             children = ctrl.read_children(parent_ref, limit=limit)
             return {
@@ -1111,7 +1456,7 @@ def _handle_uia_query(req: dict) -> dict:
                 "elements": [_strip_ref(c) for c in children],
             }
 
-        return {"ok": False, "error": f"未知 mode: {mode!r}（应为 query/read_children/inspect_point）"}
+        return {"ok": False, "error": f"未知 mode: {mode!r}（应为 query/read_children/inspect_point/snapshot）"}
     except Exception as exc:
         return {"ok": False, "error": f"UIA 查询失败: {exc}", "mode": mode}
 
@@ -1132,6 +1477,14 @@ def _handle_run_automation(req: dict) -> dict:
     - get_value: 读 ValuePattern.CurrentValue
     - toggle: 调 TogglePattern.Toggle(复选框/单选)
     - focus: 调 SetFocus(设焦点,不激活窗口)
+    - select: 调 SelectionItemPattern.Select(列表项/树节点选中)
+    - expand / collapse: 调 ExpandCollapsePattern(下拉框/树节点展开折叠)
+    - scroll_into_view: 调 ScrollItemPattern(滚动到可见区域)
+
+    定位方式(二选一):
+    - selector: name/name_contains/control_type/class_name/automation_id 组合查询
+    - selector.path: desktop.uia_query(mode=snapshot) 输出的元素 path(如 "2.1.3")
+    windowTitle 可把查询范围限定到指定顶层窗口。
 
     返回值包含 matched 元素信息(不含 __ref)和操作结果。
     若 selector 匹配多个元素,默认操作第一个,可在 selector 里加 index 字段选第 N 个。
@@ -1154,15 +1507,19 @@ def _handle_run_automation(req: dict) -> dict:
     # 兼容字段名:外部可能直接传 action(会和顶层 action 冲突),所以优先 action_name
     if not action:
         action = req.get("action")
-    if action not in ("click", "set_value", "get_value", "toggle", "focus"):
+    VALID_AUTOMATION_ACTIONS = (
+        "click", "set_value", "get_value", "toggle", "focus",
+        "select", "expand", "collapse", "scroll_into_view",
+    )
+    if action not in VALID_AUTOMATION_ACTIONS:
         return {
             "ok": False,
-            "error": f"automation_action 必须是 click/set_value/get_value/toggle/focus,收到 {action!r}",
+            "error": f"automation_action 必须是 {'/'.join(VALID_AUTOMATION_ACTIONS)},收到 {action!r}",
         }
 
     selector = req.get("selector") or {}
     if not isinstance(selector, dict) or not selector:
-        return {"ok": False, "error": "selector 不能为空(至少给 name/control_type/automation_id 之一)"}
+        return {"ok": False, "error": "selector 不能为空(至少给 name/control_type/automation_id/path 之一)"}
 
     value = req.get("value")
     if action == "set_value" and not isinstance(value, str):
@@ -1173,28 +1530,54 @@ def _handle_run_automation(req: dict) -> dict:
         index = 0
 
     try:
-        # 查询元素
-        elements = ctrl.query(selector, top_only=bool(req.get("topOnly", True)), limit=max(index + 1, 10))
-        if not elements:
-            return {
-                "ok": False,
-                "error": (
-                    f"未找到匹配元素(selector={selector})。"
-                    "若目标应用是 Electron/自绘 UI(微信新版/腾讯视频/QQ),"
-                    "UIA 只能看到顶层窗口读不到内部控件,本工具无法操作,需走 desktop.run_input 坐标路径。"
-                ),
-                "matchedCount": 0,
-                "action": action,
-            }
-        if index >= len(elements):
-            return {
-                "ok": False,
-                "error": f"index={index} 超出匹配元素数量({len(elements)})",
-                "matchedCount": len(elements),
-                "action": action,
-            }
+        elem: dict | None = None
+        matched_count = 0
 
-        elem = elements[index]
+        # windowTitle：把查询范围限定到指定顶层窗口
+        scope_parent = None
+        window_title = req.get("windowTitle")
+        if window_title:
+            scope_parent, _win = ctrl.find_window_root(window_title)
+            if scope_parent is None:
+                return {"ok": False, "error": f"未找到窗口: {window_title!r}", "action": action}
+
+        if isinstance(selector.get("path"), str) and selector["path"].strip():
+            # 按 snapshot 输出的 path 复原元素（跨进程稳定，主流"快照→按元素操作"）
+            if scope_parent is None:
+                scope_parent, _win = ctrl.find_window_root(None)
+            elem = ctrl.element_by_path(scope_parent, selector["path"]) if scope_parent is not None else None
+            matched_count = 1 if elem is not None else 0
+            if elem is None:
+                return {
+                    "ok": False,
+                    "error": f"path {selector['path']!r} 未解析到元素（窗口结构可能已变化，请重新 snapshot）",
+                    "matchedCount": 0,
+                    "action": action,
+                }
+        else:
+            query_selector = {**selector, **({"parent": scope_parent} if scope_parent is not None else {})}
+            elements = ctrl.query(query_selector, top_only=bool(req.get("topOnly", True)), limit=max(index + 1, 10))
+            matched_count = len(elements)
+            if not elements:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"未找到匹配元素(selector={ {k: v for k, v in selector.items() if k != 'parent'} })。"
+                        "若目标应用是 Electron/自绘 UI(微信新版/腾讯视频/QQ),"
+                        "UIA 只能看到顶层窗口读不到内部控件,本工具无法操作,需走 desktop.run_input 坐标路径。"
+                    ),
+                    "matchedCount": 0,
+                    "action": action,
+                }
+            if index >= len(elements):
+                return {
+                    "ok": False,
+                    "error": f"index={index} 超出匹配元素数量({len(elements)})",
+                    "matchedCount": len(elements),
+                    "action": action,
+                }
+            elem = elements[index]
+
         elem_info = _strip_ref(elem)
 
         # 执行操作
@@ -1211,11 +1594,19 @@ def _handle_run_automation(req: dict) -> dict:
             ok = ctrl.toggle(elem)
         elif action == "focus":
             ok = ctrl.focus(elem)
+        elif action == "select":
+            ok = ctrl.select(elem)
+        elif action == "expand":
+            ok = ctrl.expand(elem, expand=True)
+        elif action == "collapse":
+            ok = ctrl.expand(elem, expand=False)
+        elif action == "scroll_into_view":
+            ok = ctrl.scroll_into_view(elem)
 
         return {
             "ok": ok,
             "action": action,
-            "matchedCount": len(elements),
+            "matchedCount": matched_count,
             "matchedElement": elem_info,
             "value": result_value if action == "get_value" else None,
             "error": None if ok else (

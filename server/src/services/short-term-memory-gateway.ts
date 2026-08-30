@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
+import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
+import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 
 export type TaskStackEntry = {
   taskId: string;
@@ -220,6 +222,8 @@ export class ShortTermMemoryGatewayService {
   private readonly filePath: string;
   private data: PersistedTaskState = { sessions: {} };
   private persistChain: Promise<void> = Promise.resolve();
+  /** 会话级 BM25 索引缓存（searchEpisodic 用），key = sessionId */
+  private episodicBmCache = new Map<string, { idx: Bm25LiteIndex; count: number; firstIdx: number }>();
 
   constructor(filePath?: string) {
     this.filePath =
@@ -685,8 +689,40 @@ export class ShortTermMemoryGatewayService {
   }
 
   /**
+   * 会话级 BM25 索引缓存：台账只在追加/修剪时变化。
+   * firstIdx 未变 → 只增量 upsert 新轮次；前端修剪 / 缩短 → 整体重建。
+   * maxDocs 固定为 EPISODIC_MAX_TURNS，增量追加期间不触发 LRU 淘汰。
+   */
+  private episodicBm25(sessionId: string, epi: PersistedSessionEpisodic): Bm25LiteIndex {
+    const turns = epi.turns;
+    const firstIdx = turns[0]?.idx ?? -1;
+    const cached = this.episodicBmCache.get(sessionId);
+    if (cached && cached.firstIdx === firstIdx && turns.length >= cached.count) {
+      for (let i = cached.count; i < turns.length; i++) {
+        const turn = turns[i]!;
+        cached.idx.upsert(String(turn.idx), `${turn.user ?? ""} ${turn.assistant ?? ""}`);
+      }
+      cached.count = turns.length;
+      return cached.idx;
+    }
+    const idx = new Bm25LiteIndex(EPISODIC_MAX_TURNS);
+    for (const turn of turns) {
+      idx.upsert(String(turn.idx), `${turn.user ?? ""} ${turn.assistant ?? ""}`);
+    }
+    // 防长驻进程会话数无界增长
+    if (this.episodicBmCache.size >= 200) this.episodicBmCache.clear();
+    this.episodicBmCache.set(sessionId, { idx, count: turns.length, firstIdx });
+    return idx;
+  }
+
+  /**
    * 会话内即时检索（省 token 召回）：在保真台账上做零-embedding 词法检索，
    * 返回与 query 相关度最高的最近 K 轮原文。只把命中内容灌回 prompt。
+   *
+   * 打分升级（2026-08）：主排序改为 BM25（IDF 加权——"的/我/吗"这类高频字不再
+   * 平权，罕见实词命中权重更高），保留原覆盖余弦作兜底（BM25 零命中时的短查询
+   * 兜底），取二者较大值。台账 ≤600 条，索引按会话缓存，新轮次增量 upsert，
+   * 前端修剪（超 EPISODIC_MAX_TURNS）时整体重建。
    */
   searchEpisodic(sessionId: string, query: string, k = EPISODIC_SEARCH_K): EpisodicTurn[] {
     const epi = this.data.episodic?.[sessionId];
@@ -694,10 +730,19 @@ export class ShortTermMemoryGatewayService {
     const q = normalizeInput(query);
     if (!q) return [];
 
+    const bm25 = this.episodicBm25(sessionId, epi);
+    const bm25Hits = new Map(
+      bm25.search(query, epi.turns.length).map((h) => [h.id, h.score] as const),
+    );
+
     const scored = epi.turns.map((turn) => {
       const userScore = this.episodicCosine(turn.user, q);
       const assistantScore = this.episodicCosine(turn.assistant, q);
-      return { turn, score: Math.max(userScore, assistantScore * 0.9) };
+      const cosine = Math.max(userScore, assistantScore * 0.9);
+      const rawBm25 = bm25Hits.get(String(turn.idx)) ?? 0;
+      // BM25 原始分平滑到 (0,1)（单调：分越高越接近 1），与余弦同尺度可比
+      const bm25Norm = rawBm25 > 0 ? rawBm25 / (rawBm25 + 3) : 0;
+      return { turn, score: Math.max(bm25Norm, cosine * 0.85) };
     });
 
     // 词法检索只保留有实际命中的轮次（>0），再按近因偏置排序（同分取更新的）
@@ -764,9 +809,11 @@ export class ShortTermMemoryGatewayService {
 
     // 指代/回忆判定：纯指代短句（"好想他""那家公司"）即使被 resolveTurnFocus 视为
     // topic_switch（无任务锚点），仍是此前内容的延续，必须允许反查。
+    // 模糊追问（"你确定吗/然后呢/再具体讲讲"）同属延续轮：命中检索才有上文可接。
     const isReferent =
       isContinuityTurn(input) ||
       this.isRecallOrFollowUp(input) ||
+      isAmbiguousFollowUpMessage(input) ||
       /(他|她|他们|她们|它|这个|那个|这儿|那儿)/.test(input);
     // 真正干净的无关话题切换（无指代/回忆信号）才抑制注入，避免串台 + 省 token
     const isCleanSwitch = focus.kind === "topic_switch" && !focus.preserveRecentContext && !isTopicFollowUp;

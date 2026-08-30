@@ -98,6 +98,8 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "voice.speak": "voice",
   "voice.send_message": "voice",
   "voice.transcribe": "voice",
+  // surface（召唤客户端悬浮卡）
+  "surface.show": "ui",
   // clock
   "clock.get_current_time": "clock",
   "clock.get_user_location": "clock",
@@ -118,6 +120,8 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "desktop.http_get": "desktop",
   "desktop.web_search": "desktop",
   "desktop.web_fetch": "desktop",
+  "desktop.window": "desktop",
+  "desktop.clipboard": "desktop",
   // agent_browser (Playwright 无头浏览器)
   "agent_browser.open": "web",
   "agent_browser.click": "web",
@@ -178,6 +182,8 @@ const TOOL_ALTERNATIVES: Record<string, string[]> = {
   // desktop.uia_query 失败（selector 找不到）→ 截图切视觉策略
   // （对齐状态机 prompt "uia_query count:0 时切视觉策略"）
   "desktop.uia_query": ["desktop.visual.screenshot"],
+  // desktop.run_automation 失败（Electron 等读不到控件）→ 坐标路径兜底
+  "desktop.run_automation": ["desktop.uia_query", "desktop.run_input", "desktop.visual.screenshot"],
 };
 
 // 需要"禁止假成功"强约束的工具（用户易感知成败）

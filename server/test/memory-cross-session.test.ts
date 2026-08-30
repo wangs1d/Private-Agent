@@ -75,3 +75,24 @@ test("跨会话连续性持久：固化完成后 journal 标记不重复轮询",
   const after = await journal.getUnconsolidatedLines(actorId);
   assert.equal(after.length, 0, "固化完成后不应再有未处理日志（幂等，不重复固化）");
 });
+// ---- searchEpisodic BM25 混合打分升级 ----
+
+test("searchEpisodic BM25 升级：罕见实词命中的轮次排序前置，检索契约不变", () => {
+  const sA = "session-bm25-a";
+  const sB = "session-bm25-b";
+  // 轮 1：含罕见实体词（高 IDF）
+  gateway.reconcileTaskAfterTurn(sA, "帮我确认 QUANTUM_FLUX_PARAM 的校准值", "QUANTUM_FLUX_PARAM 校准值为 0.87。");
+  // 轮 2-3：只有高频字（的/我/吗）与 query 部分重叠的低信息轮
+  gateway.reconcileTaskAfterTurn(sA, "我的的确认一下的吗", "好的的确认完了。");
+  gateway.reconcileTaskAfterTurn(sA, "那之后我们就收尾吧", "好的，收尾完成。");
+
+  const hits = gateway.searchEpisodic(sA, "QUANTUM_FLUX_PARAM 校准确认");
+  assert.ok(hits.length > 0, "应命中");
+  assert.ok(
+    hits[0]!.user.includes("QUANTUM_FLUX_PARAM"),
+    `罕见实词轮应排第一，实际: ${JSON.stringify(hits.map((h) => h.user))}`,
+  );
+
+  // 跨会话隔离契约不受升级影响
+  assert.equal(gateway.searchEpisodic(sB, "QUANTUM_FLUX_PARAM").length, 0);
+});

@@ -20,6 +20,7 @@ import type { VoiceMessageService } from "../services/voice-message-service.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import { setVoiceMode } from "../proactivity/voice-mode-state.js";
 import type {
   IncomingPhoneUserAction,
   VirtualPhoneIncomingCoordinator,
@@ -484,6 +485,72 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        // 通话中用户回复：路由进通话回复总线（提醒电话交互 / Agent 主对话管线）
+        if (event.type === ClientEventType.VirtualPhoneCallReply) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const replyPl = event.payload as Record<string, unknown>;
+          const replyCallId = String(replyPl.callId ?? "").trim();
+          const replyText = String(replyPl.text ?? replyPl.message ?? "").trim();
+          if (!replyCallId) {
+            sendUnifiedError("BAD_PHONE_CALL", "缺少 callId");
+            return;
+          }
+          if (!replyText) {
+            sendUnifiedError("BAD_PHONE_CALL", "缺少回复内容（text）");
+            return;
+          }
+          const replyResult = virtualPhoneService.deliverCallReply(
+            replyCallId,
+            replyText,
+            boundActorId,
+          );
+          if (!replyResult.ok) {
+            sendUnifiedError("PHONE_CALL_FAILED", replyResult.error ?? "回复投递失败");
+            return;
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.VirtualPhoneCallStatus,
+              payload: {
+                ok: true,
+                callId: replyCallId,
+                status: "reply_received",
+                handled: replyResult.handled ?? "chat",
+              },
+            }),
+          );
+          return;
+        }
+
+        // 用户挂断当前通话
+        if (event.type === ClientEventType.VirtualPhoneCallHangup) {
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const hangupPl = event.payload as Record<string, unknown>;
+          const hangupCallId = String(hangupPl.callId ?? "").trim();
+          if (!hangupCallId) {
+            sendUnifiedError("BAD_PHONE_CALL", "缺少 callId");
+            return;
+          }
+          const hangupResult = virtualPhoneService.endCall(hangupCallId, "user_hangup");
+          if (!hangupResult.ok) {
+            sendUnifiedError("PHONE_CALL_FAILED", hangupResult.error ?? "挂断失败");
+            return;
+          }
+          socket.send(
+            JSON.stringify({
+              type: ServerEventType.VirtualPhoneCallStatus,
+              payload: { ok: true, callId: hangupCallId, status: "ended", reason: "user_hangup" },
+            }),
+          );
+          return;
+        }
+
         if (event.type === ClientEventType.CompanionContactFeedback) {
           if (!boundActorId) {
             sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
@@ -865,6 +932,21 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             const jobId = String(pl.jobId ?? "").trim();
             sendUnifiedError("BAD_LOCATION_REPORT", `jobId 与当前连接不匹配或已过期: ${jobId}`);
           }
+          return;
+        }
+
+        if (event.type === ClientEventType.ModeChanged) {
+          // 语音模式切换上报：记录 per-actor 状态（诊断 + Phase2 投递矩阵消费）。
+          // 纯状态记录，无副作用，未上报过的旧客户端不受影响。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const modePl = (event.payload ?? {}) as Record<string, unknown>;
+          const active = modePl.active === true;
+          const source = String(modePl.source ?? "client").trim() || "client";
+          setVoiceMode(boundActorId, active, source);
+          app.log.debug({ actorId: boundActorId, active, source }, "voice mode changed");
           return;
         }
 

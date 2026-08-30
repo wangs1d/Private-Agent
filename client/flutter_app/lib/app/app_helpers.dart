@@ -1,6 +1,9 @@
 /// 右侧抽屉要展示的内容种类。
 enum RightPanelKind { friends, messages, devices, schedule, imagePreview, travelPlan }
 
+/// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
+const double kWideLayoutBreakpoint = 820;
+
 /// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
 /// - 消息/好友类：信息密度低，右面板小占比（左大右小）
 /// - 设备/日程类：需要更大展示空间，右面板占比略大

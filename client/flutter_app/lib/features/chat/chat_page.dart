@@ -236,11 +236,14 @@ class _ChatPageState extends State<ChatPage>
   double? _previewAnchor;
 
   // 预定义常量 - 减少重复创建对象
+  /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
+  /// 避免长文本横向铺满整个窗口。
+  static const double _contentMaxWidth = 860;
   static const EdgeInsets _listPadding =
       EdgeInsets.symmetric(horizontal: 12, vertical: 4);
   static const EdgeInsets _cardPadding = EdgeInsets.all(7);
   static const EdgeInsets _inputHorizontalPadding =
-      EdgeInsets.symmetric(horizontal: 4, vertical: 6);
+      EdgeInsets.symmetric(horizontal: 12, vertical: 6);
 
   @override
   void initState() {
@@ -578,8 +581,11 @@ class _ChatPageState extends State<ChatPage>
   }
 
   /// 按时间倒序生成所有消息的渲染项列表（最新在 reverse ListView 的 index 0）。
+  /// `assistant_progress`（处理中占位消息）不再进入消息流——处理状态统一由
+  /// 输入框上方的状态条呈现（见 [_buildAgentStatusStrip]）。
   List<Map<String, dynamic>> _getRenderItems() {
     final List<ChatMessage> sorted = List<ChatMessage>.from(widget.messages)
+      ..removeWhere((ChatMessage m) => m.role == "assistant_progress")
       ..sort(
           (ChatMessage a, ChatMessage b) => b.timestamp.compareTo(a.timestamp));
     return sorted.map(_messageToGroup).toList();
@@ -746,124 +752,95 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
-  Widget _buildProgressBubble(ColorScheme cs, String text) {
+  /// 输入框上方的统一 Agent 状态条。
+  ///
+  /// 处理状态收拢到这一处（取代旧的「消息流内进度气泡 + 工具徽标」两处展示）：
+  /// - 工具调用中：优先显示「正在调用：xxx」
+  /// - 其余处理中：显示口语化进度（`agent_status` > interim ack > 默认，
+  ///   复用 [_processingStatusText] 的优先级）
+  /// - 长工具心跳带 percent 时附进度百分比 + 细进度条
+  Widget _buildAgentStatusStrip(ColorScheme cs) {
+    final String tool = widget.currentToolName?.trim() ?? "";
+    final bool active = widget.isAgentProcessing || tool.isNotEmpty;
+    if (!active) {
+      return const SizedBox.shrink();
+    }
+
+    final String text = tool.isNotEmpty ? "正在调用：$tool" : _processingStatusText();
     final int? percent = widget.agentStatusPercent;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: AnimatedBuilder(
-        animation: _breathingAnimation!,
-        builder: (context, child) {
-          return Container(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: cs.onSurface
-                  .withValues(alpha: 0.08 * _breathingAnimation!.value),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: cs.onSurface
-                    .withValues(alpha: 0.2 * _breathingAnimation!.value),
-                width: 1,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Row(
+
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: cs.onSurface.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: cs.outline.withValues(alpha: 0.4),
+            width: 1,
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            AnimatedBuilder(
+              animation: _breathingAnimation!,
+              builder: (BuildContext context, Widget? child) {
+                final double breath = _breathingAnimation!.value;
+                return Row(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
                     CustomPaint(
                       size: const Size(10, 10),
-                      painter: _BreathingDotPainter(
-                        opacity: _breathingAnimation!.value,
-                      ),
+                      painter: _BreathingDotPainter(opacity: breath),
                     ),
                     const SizedBox(width: 6),
-                    Text(
-                      text,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.onSurface.withValues(
-                                alpha: 0.6 * _breathingAnimation!.value),
-                            fontWeight: FontWeight.w500,
-                          ),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: Text(
+                        text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            Theme.of(context).textTheme.labelSmall?.copyWith(
+                                  color: cs.onSurface.withValues(alpha: 0.75),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                      ),
                     ),
                     if (percent != null) ...<Widget>[
                       const SizedBox(width: 8),
                       Text(
                         "$percent%",
-                        style: Theme.of(context)
-                            .textTheme
-                            .labelSmall
-                            ?.copyWith(
-                              color: cs.primary.withValues(alpha: 0.8),
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: cs.primary,
                               fontWeight: FontWeight.w700,
                             ),
                       ),
                     ],
                   ],
-                ),
-                // 进度条：长工具心跳带 percent 时渲染
-                if (percent != null) ...<Widget>[
-                  const SizedBox(height: 6),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: percent / 100,
-                      minHeight: 4,
-                      backgroundColor: cs.outline.withValues(alpha: 0.15),
-                      valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
-                    ),
+                );
+              },
+            ),
+            // 进度条：长工具心跳带 percent 时渲染
+            if (percent != null) ...<Widget>[
+              const SizedBox(height: 6),
+              SizedBox(
+                width: 220,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    value: percent / 100,
+                    minHeight: 4,
+                    backgroundColor: cs.outline.withValues(alpha: 0.15),
+                    valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
                   ),
-                ],
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildCurrentToolBadge(ColorScheme cs) {
-    final String tool = widget.currentToolName?.trim() ?? "";
-    final bool active = tool.isNotEmpty;
-
-    // 纯文字徽标：仅在有工具调用时显现；紧凑横排，浮在输入框外左上角。
-    if (!active) {
-      return const SizedBox.shrink();
-    }
-
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: cs.primaryContainer.withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: cs.primary.withValues(alpha: 0.4),
-            width: 1,
-          ),
-          boxShadow: <BoxShadow>[
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.08),
-              blurRadius: 10,
-              offset: const Offset(0, 3),
-            ),
-          ],
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 200),
-          child: Text(
-            "正在调用：$tool",
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: cs.primary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
                 ),
-          ),
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -988,46 +965,50 @@ class _ChatPageState extends State<ChatPage>
                     ),
                   )
                 else
-                  // 使整块消息文字支持鼠标框选复制
+                  // 使整块消息文字支持鼠标框选复制。
+                  // 居中内容列：宽屏下消息流和输入框共同收敛到同一最大宽度，
+                  // 避免长文本横向铺满整个窗口。
                   SelectionArea(
-                    child: ListView.builder(
-                      controller: _scrollController,
-                      reverse: true, // 从底部开始渲染，首次进入直接显示最新消息
-                      padding: _listPadding,
-                      cacheExtent: 500,
-                      itemCount: itemCount,
-                    itemBuilder: (BuildContext context, int index) {
-                      // reverse 模式下 index 0 = 视觉底部（最新消息）
-                      final Map<String, dynamic> messageGroup =
-                          renderItems[index];
-                      final bool isUser = messageGroup['isUser'] as bool;
-                      final ChatMessage mainMessage =
-                          messageGroup['main'] as ChatMessage;
-                      final bool isProgress =
-                          messageGroup['isProgress'] as bool;
-                      final ContentSummaryParseResult? contentSummary = isUser
-                          ? null
-                          : ContentSummaryParser.parse(mainMessage.text);
+                    child: Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                            maxWidth: _contentMaxWidth),
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          reverse: true,
+                          padding: _listPadding,
+                          cacheExtent: 500,
+                          itemCount: itemCount,
+                          itemBuilder: (BuildContext context, int index) {
+                            // reverse 模式下 index 0 = 视觉底部（最新消息）
+                            final Map<String, dynamic> messageGroup =
+                                renderItems[index];
+                            final bool isUser =
+                                messageGroup['isUser'] as bool;
+                            final ChatMessage mainMessage =
+                                messageGroup['main'] as ChatMessage;
+                            final ContentSummaryParseResult? contentSummary =
+                                isUser
+                                    ? null
+                                    : ContentSummaryParser.parse(
+                                        mainMessage.text);
 
-                      // 进度消息：特殊渲染（文案按 agent_status > interim ack > 历史 > 默认 优先级计算）
-                      if (isProgress) {
-                        return _buildProgressBubble(
-                            cs, _processingStatusText(mainMessage));
-                      }
-
-                      // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
-                      // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
-                      // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
-                      return KeyedSubtree(
-                        key: ValueKey<String>('msg-${mainMessage.messageId}'),
-                        child: _buildHoverableMessage(
-                          cs: cs,
-                          mainMessage: mainMessage,
-                          isUser: isUser,
-                          contentSummary: contentSummary,
+                            // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
+                            // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
+                            // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
+                            return KeyedSubtree(
+                              key: ValueKey<String>(
+                                  'msg-${mainMessage.messageId}'),
+                              child: _buildHoverableMessage(
+                                cs: cs,
+                                mainMessage: mainMessage,
+                                isUser: isUser,
+                                contentSummary: contentSummary,
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
+                      ),
                     ),
                   ),
               ],
@@ -1037,11 +1018,17 @@ class _ChatPageState extends State<ChatPage>
             color: cs.surface,
             child: SafeArea(
               top: false,
-              child: Padding(
-                padding: _inputHorizontalPadding,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
+              // 输入区与消息流共用同一居中内容列宽度
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(maxWidth: _contentMaxWidth),
+                  child: Padding(
+                    padding: _inputHorizontalPadding,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
                     // 语音识别状态提示
                     if (_isListening)
                       Container(
@@ -1151,8 +1138,8 @@ class _ChatPageState extends State<ChatPage>
                         );
                       },
                     ),
-                    // 工具调用徽标：作为独立布局节点固定在输入框外左上方，
-                    // 不与输入框重合、不随输入框高度跳动；淡入淡出避免闪现/抖动
+                    // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
+                    // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动
                     Align(
                       alignment: Alignment.centerLeft,
                       child: AnimatedSwitcher(
@@ -1172,9 +1159,15 @@ class _ChatPageState extends State<ChatPage>
                           );
                         },
                         child: KeyedSubtree(
-                          key: ValueKey(
-                              widget.currentToolName?.trim() ?? "__idle__"),
-                          child: _buildCurrentToolBadge(cs),
+                          key: ValueKey<String>(
+                            widget.isAgentProcessing ||
+                                    (widget.currentToolName?.trim()
+                                        .isNotEmpty ??
+                                        false)
+                                ? "status-${widget.currentToolName?.trim() ?? ""}"
+                                : "__idle__",
+                          ),
+                          child: _buildAgentStatusStrip(cs),
                         ),
                       ),
                     ),
@@ -1197,28 +1190,40 @@ class _ChatPageState extends State<ChatPage>
                             final double pulse = busy
                                 ? (0.6 + 0.4 * breath)
                                 : (0.05 + 0.2 * breath);
+                            // 描边/光晕主题色化：深色主题沿用白光呼吸，
+                            // 暖色主题下白色在近白背景上不可见，
+                            // 改用中性灰描边 + 暖棕光晕（与主题种子色一致）。
+                            final bool isDark =
+                                Theme.of(context).brightness == Brightness.dark;
+                            final Color rimColor =
+                                isDark ? Colors.white : const Color(0xFF9AA3B2);
+                            final Color glowColor = isDark
+                                ? Colors.white
+                                : const Color(0xFFB98B43);
+                            final double rimAlpha = isDark
+                                ? 0.15 + 0.45 * pulse
+                                : 0.35 + 0.3 * pulse;
                             return Container(
                               decoration: BoxDecoration(
                                 color: cs.surface,
                                 borderRadius: BorderRadius.circular(20),
-                                // 外层描边：busy 强白光，idle 弱白光，随呼吸脉动
+                                // 外层描边：busy 强光，idle 弱光，随呼吸脉动
                                 border: Border.all(
-                                  color: Colors.white
-                                      .withValues(alpha: 0.15 + 0.45 * pulse),
+                                  color: rimColor.withValues(alpha: rimAlpha),
                                   width: 0.8 + 0.6 * pulse,
                                 ),
                                 boxShadow: <BoxShadow>[
                                   if (busy) ...<BoxShadow>[
-                                    // 外圈白色光晕（主呼吸）
+                                    // 外圈光晕（主呼吸）
                                     BoxShadow(
-                                      color: Colors.white
+                                      color: glowColor
                                           .withValues(alpha: 0.18 * pulse),
                                       blurRadius: 14 + 10 * breath,
                                       spreadRadius: 0.5 + 1.5 * breath,
                                     ),
-                                    // 内圈近场白雾
+                                    // 内圈近场光雾
                                     BoxShadow(
-                                      color: Colors.white
+                                      color: glowColor
                                           .withValues(alpha: 0.28 * breath),
                                       blurRadius: 4,
                                     ),
@@ -1400,6 +1405,8 @@ class _ChatPageState extends State<ChatPage>
                       ],
                     ),
                   ],
+                ),
+              ),
                 ),
               ),
             ),
@@ -1901,7 +1908,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           );
         },
       );
-    } else {
+    } else if (widget.isUser) {
+      // 用户消息保留 IM 气泡形态（屏宽 72% 上限）。
+      // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
       bubble = LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
           final double maxBubbleWidth = constraints.maxWidth * 0.72;
@@ -1911,6 +1920,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           );
         },
       );
+    } else {
+      // Agent 消息去气泡：全宽平铺排版（结构化卡片/长 Markdown 可读性更好），
+      // 身份层级由头像 + 名称行承担。
+      bubble = _buildMessageCard(context, highlight: widget.isSelected);
     }
 
     if (widget.inSelectableRange) {
@@ -2002,6 +2015,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   Widget _buildAvatar(BuildContext context, {required bool isUser}) {
     if (isUser) {
+      final bool isDark = Theme.of(context).brightness == Brightness.dark;
       return Container(
         width: 36,
         height: 36,
@@ -2024,7 +2038,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             ),
           ],
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.5),
+            // 深色下用白色发丝边，暖色下白边不可见，换成浅灰描边
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.5)
+                : Theme.of(context).colorScheme.surfaceContainerHighest,
             width: 1,
           ),
         ),
@@ -2061,65 +2078,21 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   }
 
   Widget _buildDefaultAgentAvatar() {
-    final _AgentAvatarPalette palette =
-        _AgentAvatarPalette.fromPreset(widget.agentAvatarPreset);
-    final Widget fallback = Container(
-      width: 36,
-      height: 36,
-      margin: const EdgeInsets.only(right: 10, top: 4),
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: RadialGradient(
-          center: const Alignment(-0.3, -0.3),
-          colors: palette.colors,
-        ),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: palette.colors.first.withValues(alpha: 0.32),
-            blurRadius: 20,
-            offset: Offset.zero,
-          ),
-        ],
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.4),
-          width: 1,
-        ),
-      ),
-      alignment: Alignment.center,
-      child: Icon(
-        _AgentMoodGlyph.fromMood(widget.agentMoodStyle),
-        size: 18,
-        color: Colors.white,
-      ),
-    );
-    return Container(
-      width: 36,
-      height: 36,
-      margin: const EdgeInsets.only(right: 10, top: 4),
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.4),
-          width: 1,
-        ),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: palette.colors.first.withValues(alpha: 0.32),
-            blurRadius: 20,
-            offset: Offset.zero,
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Image.asset(
-        agentAvatarAssetPath(widget.agentAvatarPreset),
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => fallback,
+    // 「轨道光球」矢量头像：与桌面悬浮球形 Agent 的意象一致，
+    // 配色跟随 Agent 自选的 avatarPreset（dawn/ember/tide/...）。
+    return Padding(
+      padding: const EdgeInsets.only(right: 10, top: 4),
+      child: AgentOrbAvatar(
+        size: 36,
+        palette: AgentAvatarPalette.fromPreset(widget.agentAvatarPreset),
       ),
     );
   }
 
-  /// 构建消息卡片（支持高亮态）
+  /// 构建消息卡片（支持高亮态）。
+  ///
+  /// 视觉分层：用户消息保留主题色气泡；Agent 消息去气泡平铺
+  /// （透明背景、零内边距），只有删除选择高亮时才出现描边容器。
   Widget _buildMessageCard(BuildContext context, {bool highlight = false}) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final BorderRadius borderRadius = widget.isUser
@@ -2129,12 +2102,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             bottomLeft: Radius.circular(16),
             bottomRight: Radius.circular(16),
           )
-        : const BorderRadius.only(
-            topLeft: Radius.circular(6),
-            topRight: Radius.circular(16),
-            bottomLeft: Radius.circular(16),
-            bottomRight: Radius.circular(16),
-          );
+        : BorderRadius.zero;
 
     final Decoration decoration;
     if (widget.isUser) {
@@ -2150,26 +2118,15 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         ],
       );
     } else {
-      decoration = BoxDecoration(
-        borderRadius: borderRadius,
-        color: cs.surfaceContainerHigh,
-        border: Border.all(
-          color: cs.outline.withValues(alpha: 0.35),
-        ),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: cs.outline.withValues(alpha: 0.15),
-            blurRadius: 12,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      );
+      // Agent 消息：无底色无边框，正文直接落在聊天背景上
+      decoration = const BoxDecoration();
     }
 
     return Container(
       decoration: highlight
           ? BoxDecoration(
-              borderRadius: borderRadius,
+              borderRadius:
+                  widget.isUser ? borderRadius : BorderRadius.circular(12),
               color: Colors.red.withValues(alpha: 0.08),
               border: Border.all(
                 color: Colors.red.withValues(alpha: 0.4),
@@ -2177,9 +2134,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             )
           : decoration,
       child: ClipRRect(
-        borderRadius: borderRadius,
+        borderRadius:
+            widget.isUser ? borderRadius : BorderRadius.circular(12),
         child: Padding(
-          padding: widget.cardPadding,
+          padding: widget.isUser
+              ? widget.cardPadding
+              : const EdgeInsets.symmetric(vertical: 2),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
@@ -2367,73 +2327,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   }
 }
 
-class _AgentMoodGlyph {
-  static IconData fromMood(String? moodStyle) {
-    switch (moodStyle) {
-      case "funny":
-        return Icons.sentiment_very_satisfied_outlined;
-      case "sad":
-        return Icons.cloud_outlined;
-      case "cool":
-        return Icons.ac_unit_outlined;
-      case "energetic":
-        return Icons.bolt_outlined;
-      case "mysterious":
-        return Icons.nightlight_round_outlined;
-      case "gentle":
-      default:
-        return Icons.smart_toy_outlined;
-    }
-  }
-}
-
-class _AgentAvatarPalette {
-  const _AgentAvatarPalette(this.colors);
-
-  final List<Color> colors;
-
-  static _AgentAvatarPalette fromPreset(String? preset) {
-    switch (preset) {
-      case "ember":
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFFFFA24B),
-          Color(0xFFFF5A36),
-          Color(0xFFC12A2A),
-        ]);
-      case "tide":
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFF62D6FF),
-          Color(0xFF118AB2),
-          Color(0xFF124E78),
-        ]);
-      case "eclipse":
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFF8C7DFF),
-          Color(0xFF473BF0),
-          Color(0xFF171738),
-        ]);
-      case "neon":
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFFB8FF52),
-          Color(0xFF00C853),
-          Color(0xFF00796B),
-        ]);
-      case "mist":
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFFB0BEC5),
-          Color(0xFF78909C),
-          Color(0xFF455A64),
-        ]);
-      case "dawn":
-      default:
-        return const _AgentAvatarPalette(<Color>[
-          Color(0xFF3DA4FF),
-          Color(0xFF0D6EFD),
-          Color(0xFF123A9E),
-        ]);
-    }
-  }
-}
 
 /// 删除选择模式下的确认/取消按钮栏
 class _DeleteConfirmBar extends StatelessWidget {

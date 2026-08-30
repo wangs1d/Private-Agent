@@ -51,11 +51,56 @@ export type UserCallAgentParams = {
   ringPhase?: RingPhaseConfig;
 };
 
+/** 用户→Agent 通话接通后的 Agent 回应生成器（bootstrap 接线到 AgentCore） */
+export type UserCallAgentHandler = (params: {
+  callId: string;
+  fromUserId: string;
+  toActorId: string;
+  userMessage: string;
+}) => Promise<{ replyText: string } | null>;
+
+/** 通话中用户回复处理器（bootstrap 接线到 AgentCore 主对话管线） */
+export type UserCallReplyHandler = (params: {
+  callId: string;
+  fromActorId: string;
+  toUserId: string;
+  text: string;
+}) => Promise<void>;
+
+type ActiveCallSession = {
+  callId: string;
+  /** 通话中的 Agent 一侧（user_to_agent=被叫 Agent；agent_to_user=主叫 Agent） */
+  fromActorId: string;
+  /** 通话中的用户一侧 */
+  toUserId: string;
+  direction: "user_to_agent" | "agent_to_user";
+  createdAt: number;
+};
+
+type ReplyWaiter = {
+  resolve: (value: { text: string } | null) => void;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
+/** 通话会话保活时长：超时后 call_reply 不再路由进 Agent，防映射表无界增长 */
+const CALL_SESSION_TTL_MS = 10 * 60_000;
+/** 用户→Agent 通话 Agent 生成回应的超时；超时按兜底话术接通 */
+const USER_CALL_AGENT_TIMEOUT_MS = (() => {
+  const n = Number(process.env.VIRTUAL_PHONE_USER_CALL_AGENT_TIMEOUT_MS ?? 25_000);
+  return Number.isFinite(n) && n > 0 ? n : 25_000;
+})();
+
 export class VirtualPhoneService {
   private readonly byActor = new Map<string, string>();
   private readonly byPhone = new Map<string, string>();
   private persistChain: Promise<void> = Promise.resolve();
   private incomingCoordinator: VirtualPhoneIncomingCoordinator | null = null;
+  /** 通话回复总线：提醒电话等场景等待用户在通话中输入（phone.call_reply 喂入） */
+  private readonly replyWaiters = new Map<string, ReplyWaiter[]>();
+  /** 活跃通话会话：callId → 双方身份，用于通话中回复路由与挂断清理 */
+  private readonly callSessions = new Map<string, ActiveCallSession>();
+  private userCallAgentHandler: UserCallAgentHandler | null = null;
+  private userReplyHandler: UserCallReplyHandler | null = null;
 
   constructor(
     private readonly tts: TtsService,
@@ -65,6 +110,177 @@ export class VirtualPhoneService {
 
   setIncomingCoordinator(coordinator: VirtualPhoneIncomingCoordinator): void {
     this.incomingCoordinator = coordinator;
+  }
+
+  /** 注入用户→Agent 通话的接通回应生成器（应在启动时由 bootstrap 调用一次） */
+  setUserCallAgentHandler(handler: UserCallAgentHandler): void {
+    this.userCallAgentHandler = handler;
+  }
+
+  /** 注入通话中用户回复的处理器（应在启动时由 bootstrap 调用一次） */
+  setUserReplyHandler(handler: UserCallReplyHandler): void {
+    this.userReplyHandler = handler;
+  }
+
+  // ============================================================
+  // 通话回复总线：通话中的用户输入（phone.call_reply）与等待方（提醒电话
+  // 交互循环 / Agent 主对话管线）在此汇合。
+  // ============================================================
+
+  /**
+   * 等待用户在指定通话中的下一条输入。
+   * 超时或被取消（挂断/强制结束）返回 null；收到输入返回 { text }。
+   */
+  waitForCallReply(callId: string, timeoutMs: number): Promise<{ text: string } | null> {
+    const id = callId.trim();
+    if (!id || !(timeoutMs > 0)) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const waiter: ReplyWaiter = { resolve };
+      const list = this.replyWaiters.get(id) ?? [];
+      const timer = setTimeout(() => {
+        const arr = this.replyWaiters.get(id);
+        if (arr) {
+          const idx = arr.indexOf(waiter);
+          if (idx >= 0) arr.splice(idx, 1);
+          if (arr.length === 0) this.replyWaiters.delete(id);
+        }
+        resolve(null);
+      }, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      waiter.timer = timer;
+      list.push(waiter);
+      this.replyWaiters.set(id, list);
+    });
+  }
+
+  /** 取消某通电话的全部等待方（以 null 收尾），用于挂断/强制结束时不留悬空 Promise */
+  cancelCallReplyWaiters(callId: string): void {
+    const id = callId.trim();
+    const waiters = this.replyWaiters.get(id);
+    if (!waiters) return;
+    this.replyWaiters.delete(id);
+    for (const waiter of waiters) {
+      if (waiter.timer) clearTimeout(waiter.timer);
+      waiter.resolve(null);
+    }
+  }
+
+  /**
+   * 投递用户在通话中的回复。
+   * 优先唤醒等待方（提醒电话交互循环）；否则若该通话有活跃会话且已注入
+   * userReplyHandler，则路由进 Agent 主对话管线（回复经 TTS 推回用户）。
+   */
+  deliverCallReply(
+    callId: string,
+    text: string,
+    fromUserId?: string,
+  ): { ok: boolean; handled?: "reminder_dialogue" | "chat"; error?: string } {
+    const id = callId.trim();
+    const body = text.trim();
+    if (!id) return { ok: false, error: "缺少 callId" };
+    if (!body) return { ok: false, error: "缺少回复内容" };
+
+    const waiters = this.replyWaiters.get(id);
+    if (waiters && waiters.length > 0) {
+      const waiter = waiters.shift()!;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      if (waiters.length === 0) this.replyWaiters.delete(id);
+      waiter.resolve({ text: body });
+      return { ok: true, handled: "reminder_dialogue" };
+    }
+
+    const session = this.callSessions.get(id);
+    if (session) {
+      if (fromUserId && session.toUserId && fromUserId !== session.toUserId) {
+        return { ok: false, error: "该通话不属于当前会话" };
+      }
+      const handler = this.userReplyHandler;
+      if (handler) {
+        void handler({ callId: id, fromActorId: session.fromActorId, toUserId: session.toUserId, text: body })
+          .catch((err) => console.error("[virtual-phone] 通话回复处理失败:", err));
+        return { ok: true, handled: "chat" };
+      }
+      return { ok: false, error: "通话回复处理未启用" };
+    }
+
+    return { ok: false, error: "通话不存在或已结束" };
+  }
+
+  // ============================================================
+  // 通话会话与通话内语音推送
+  // ============================================================
+
+  private registerCallSession(session: ActiveCallSession): void {
+    // 清理过期会话，防长期运行下映射表无界增长
+    const now = Date.now();
+    for (const [id, s] of this.callSessions) {
+      if (now - s.createdAt > CALL_SESSION_TTL_MS) this.callSessions.delete(id);
+    }
+    this.callSessions.set(session.callId, session);
+  }
+
+  /**
+   * 用户挂断/服务端结束通话：清理会话与等待方，并向用户端推 ended 状态。
+   */
+  endCall(callId: string, reason = "hangup"): { ok: boolean; error?: string } {
+    const id = callId.trim();
+    if (!id) return { ok: false, error: "缺少 callId" };
+    const session = this.callSessions.get(id);
+    if (!session && !this.replyWaiters.has(id)) {
+      return { ok: false, error: "通话不存在或已结束" };
+    }
+    this.callSessions.delete(id);
+    this.cancelCallReplyWaiters(id);
+    if (session) {
+      this.wsRegistry.trySend(
+        session.toUserId,
+        JSON.stringify({
+          type: ServerEventType.VirtualPhoneCallStatus,
+          payload: {
+            callId: id,
+            direction: session.direction,
+            status: "ended",
+            reason,
+          },
+        }),
+      );
+    }
+    return { ok: true };
+  }
+
+  /**
+   * 通话中向用户推送 Agent 语音回应（TTS + transcript）。
+   * 用于提醒电话交互循环与通话中多轮回复；接通首帧请随 call_connecting 下发。
+   */
+  async pushVoiceReply(
+    callId: string,
+    toUserId: string,
+    transcript: string,
+  ): Promise<{ ok: boolean; pushed?: boolean; error?: string }> {
+    const id = callId.trim();
+    const toUser = toUserId.trim();
+    const text = transcript.trim();
+    if (!id || !toUser || !text) {
+      return { ok: false, error: "缺少 callId / toUserId / transcript" };
+    }
+    const ttsResult = await this.tts.synthesizeMp3Base64(text).catch(() =>
+      ({ ok: false as const, reason: "tts_synth_failed" }),
+    );
+    const pushed = this.wsRegistry.trySend(
+      toUser,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneVoiceReply,
+        payload: {
+          callId: id,
+          direction: "agent_to_user" as const,
+          transcript: text,
+          tts: ttsResult.ok
+            ? { format: ttsResult.format, base64: ttsResult.base64 }
+            : { format: null, skippedReason: ttsResult.reason },
+        },
+      }),
+    );
+    return { ok: true, pushed };
   }
 
   private get persistPath(): string {
@@ -293,6 +509,16 @@ export class VirtualPhoneService {
       }),
     );
 
+    if (pushed) {
+      this.registerCallSession({
+        callId,
+        fromActorId,
+        toUserId,
+        direction: "agent_to_user",
+        createdAt: Date.now(),
+      });
+    }
+
     return {
       ok: true,
       callId,
@@ -396,6 +622,16 @@ export class VirtualPhoneService {
       }),
     );
 
+    if (pushed) {
+      this.registerCallSession({
+        callId,
+        fromActorId,
+        toUserId,
+        direction: "agent_to_user",
+        createdAt: Date.now(),
+      });
+    }
+
     return {
       ok: true,
       callId,
@@ -474,7 +710,81 @@ export class VirtualPhoneService {
       }),
     );
 
+    // 登记通话会话：接通后用户可在通话中继续回复（phone.call_reply 路由进 Agent）
+    this.registerCallSession({
+      callId,
+      fromActorId: toActorId,
+      toUserId: fromUserId,
+      direction: "user_to_agent",
+      createdAt: Date.now(),
+    });
+
+    // Agent 回应生成走异步续体：不阻塞本次 WS 事件处理（避免 Agent 回合
+    // 期间同 socket 的后续消息——如 call_reply——被串行阻塞）。
+    void this.completeUserCallAgent({
+      callId,
+      fromUserId,
+      toActorId,
+      toPhone: toPhone ?? null,
+      userMessage: (params.userMessage ?? "").trim(),
+    }).catch((err) => console.error("[virtual-phone] user call completion failed:", err));
+
     return { ok: true, callId };
+  }
+
+  /**
+   * 用户→Agent 通话的接通续体：等待 Agent 生成回应（带超时兜底），
+   * 推送 connected（含回应 transcript + TTS）。后续多轮经 userReplyHandler 走 voice_reply。
+   */
+  private async completeUserCallAgent(args: {
+    callId: string;
+    fromUserId: string;
+    toActorId: string;
+    toPhone: string | null;
+    userMessage: string;
+  }): Promise<void> {
+    let replyText = "";
+    const handler = this.userCallAgentHandler;
+    if (handler) {
+      try {
+        const result = await Promise.race([
+          handler(args),
+          new Promise<null>((resolve) => {
+            const t = setTimeout(() => resolve(null), USER_CALL_AGENT_TIMEOUT_MS);
+            if (typeof t.unref === "function") t.unref();
+          }),
+        ]);
+        replyText = result?.replyText?.trim() ?? "";
+      } catch (err) {
+        console.error("[virtual-phone] user call agent handler failed:", err);
+      }
+    }
+    if (!replyText) {
+      replyText = "您好，我已接通。刚才没能整理出回复，请稍后在对话里告诉我您想说的话。";
+    }
+
+    const ttsResult = await this.tts.synthesizeMp3Base64(replyText).catch(() =>
+      ({ ok: false as const, reason: "tts_synth_failed" }),
+    );
+
+    this.wsRegistry.trySend(
+      args.fromUserId,
+      JSON.stringify({
+        type: ServerEventType.VirtualPhoneCallStatus,
+        payload: {
+          callId: args.callId,
+          toActorId: args.toActorId,
+          toPhone: args.toPhone,
+          direction: "user_to_agent" as const,
+          status: "connected",
+          transcript: replyText,
+          tts: ttsResult.ok
+            ? { format: ttsResult.format, base64: ttsResult.base64 }
+            : { format: null, skippedReason: ttsResult.reason },
+          message: "Agent 已接听",
+        },
+      }),
+    );
   }
 }
 

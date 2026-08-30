@@ -799,6 +799,16 @@ void FlutterWindow::HandleScheduleFloatingMethodCall(
 
   if (method == "setSchedule") {
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      // DPR 缩放先行：SetSchedule 里会按新系数重算窗口高度
+      const auto dpr_it = args->find(flutter::EncodableValue("devicePixelRatio"));
+      if (schedule_floating_window_ && dpr_it != args->end()) {
+        if (auto* dpr = std::get_if<double>(&dpr_it->second)) {
+          schedule_floating_window_->SetDpiScale(*dpr);
+        } else if (auto* dpr_int = std::get_if<int32_t>(&dpr_it->second)) {
+          schedule_floating_window_->SetDpiScale(
+              static_cast<double>(*dpr_int));
+        }
+      }
       auto items_it = args->find(flutter::EncodableValue("items"));
       auto* list = (items_it != args->end())
                        ? std::get_if<flutter::EncodableList>(&items_it->second)

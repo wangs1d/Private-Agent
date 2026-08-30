@@ -20,6 +20,12 @@ export type NarrativeMemoryPort = {
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
   buildDetailedRecall(actorId: string, query: string): Promise<string>;
   buildSourceRecall(actorId: string, query: string): Promise<string>;
+  /**
+   * 词法预筛分数（0~1，进程内 BM25 归一）。
+   * 供 recall-gate 的廉价放行通道在 embedding 预筛前快筛，省掉非门控轮次的 API 调用。
+   * 未实现（纯 facade）/ 无索引时返回 0。
+   */
+  lexicalPreScreen?(actorId: string, query: string): Promise<number>;
   runSleepConsolidation(actorIds: string[]): Promise<
     Array<{
       actorId: string;
@@ -223,6 +229,10 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
       this.hybrid.buildNarrativeRecall(actorId, query),
     ]);
     return [facadeResult, hybridResult].filter(Boolean).join("\n\n");
+  }
+
+  async lexicalPreScreen(actorId: string, query: string): Promise<number> {
+    return this.hybrid.lexicalPreScreen(actorId, query);
   }
 
   async buildCrossContextRecall(actorId: string, query: string): Promise<string> {

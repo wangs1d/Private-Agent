@@ -7,7 +7,7 @@ import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
-import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
+import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
 import type { InferenceNode } from "../brain/types.js";
 
@@ -47,7 +47,7 @@ async function computeEmbedding(text: string): Promise<number[] | null> {
     return cached.vector;
   }
   try {
-    const model = process.env.OPENAI_EMBEDDINGS_MODEL?.trim() || "text-embedding-3-small";
+    const model = resolveEmbeddingModel();
     // 不显式传 apiKey：让 client 内部 resolveEmbeddingEndpoint 统一走 AGENT_EMBEDDING_API_KEY，
     // 避免用对话 LLM key（OPENAI_API_KEY，如 DeepSeek）去打 embedding 端点导致 401。
     const r = await fetchOpenAiCompatibleEmbedding({

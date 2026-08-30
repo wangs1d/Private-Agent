@@ -2,6 +2,7 @@ import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "open
 
 import { adoptLegacyMasterDelegateThread, adoptPrimaryThreadFromMasterThread } from "./chat-thread-adopt.js";
 import { masterChatSessionId } from "../agent/master-chat-session.js";
+import { AGENT_COMMITMENT_RE, MEMORY_EXPLICIT_RE } from "../agent/memory-signal.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
@@ -821,7 +822,11 @@ export class ChatThreadStore {
    * 安全约束：
    * - 只动 assistant 纯文本；user / tool / 多模态 content 一律不碰；
    * - 最近 preserveRecentTurns 轮全量保留（LLM 追赶问需要完整衔接，防幻觉）；
-   * - 已压缩（带 [已压缩 前缀）与 recap 消息跳过。
+   * - 已压缩（带 [已压缩 前缀）与 recap 消息跳过；
+   * - 防过度压缩守卫（2026-08）：承诺/结论轮不压缩（与窗口 pin 同一保护类，
+   *   "答应过的事"被腰斩比占 token 危害大）；含代码围栏的消息不压缩
+   *   （代码被头尾截断后完全不可用，用户"再发一下那段代码"时模型只能看到残骸）；
+   * - 切点对齐句子边界（见 compressAssistantTextForWindow），压缩无收益则保持原文。
    */
   private compressOversizedAssistantMessages(
     msgs: ChatCompletionMessageParam[],
@@ -837,10 +842,11 @@ export class ChatThreadStore {
       if (text.length <= maxChars) continue;
       if (text.includes("[session-recap]")) continue; // recap 内容不动
       if (/^\[已压缩/.test(text)) continue; // 已压缩过（幂等）
-      const keep = Math.floor(maxChars / 2);
-      const head = text.slice(0, keep).trimEnd();
-      const tail = text.slice(-keep).trimStart();
-      msg.content = `[已压缩·${text.length}字符→${maxChars}] ${head} … ${tail}`;
+      if (AGENT_COMMITMENT_RE.test(text)) continue; // 承诺/结论轮不压缩
+      if (text.includes("```")) continue; // 含代码块的消息不压缩
+      const compressed = compressAssistantTextForWindow(text, maxChars);
+      if (!compressed) continue;
+      msg.content = compressed;
     }
   }
 
@@ -1198,7 +1204,71 @@ function groupMessagesPreservingToolPairs(
   return groups;
 }
 
-function trimPreservingToolPairs(
+/**
+ * pin 判定（滑动窗口驱逐 → 优先级驱逐）：用户显式要求记住的轮次、agent 做出
+ * 承诺/结论的轮次，不允许被更新的内容无声挤出窗口——被挤掉后"答应过的事"
+ * 只能靠 recap 兜底重注入，保真度和时序都变差。
+ */
+function isPinnedGroup(group: ChatCompletionMessageParam[]): boolean {
+  for (const msg of group) {
+    const content = typeof msg.content === "string" ? msg.content : "";
+    if (!content) continue;
+    if (msg.role === "user" && MEMORY_EXPLICIT_RE.test(content)) return true;
+    if (msg.role === "assistant" && AGENT_COMMITMENT_RE.test(content)) return true;
+  }
+  return false;
+}
+
+/**
+ * 头尾保留 + 句子边界对齐的确定性压缩（零 LLM）。
+ * 防过度压缩设计：
+ * - 头尾切点优先对齐句末标点（。！？!?\n…），避免截出半句话污染上下文；
+ *   但边界对齐最多只牺牲窗口的一半（保不住就退回原始切点），防止信息过度损失；
+ * - 压缩无收益（边界回退后没有变短）返回 null，调用方保持原文。
+ * 返回文本以 [已压缩 前缀标注（调用方的幂等检查依赖此前缀）。
+ */
+export function compressAssistantTextForWindow(text: string, maxChars: number): string | null {
+  if (!Number.isFinite(maxChars) || maxChars < 200 || text.length <= maxChars) return null;
+  const keep = Math.floor(maxChars / 2);
+  if (keep <= 0) return null;
+
+  const headRaw = text.slice(0, keep);
+  const tailRaw = text.slice(-keep);
+
+  // 头段：回退到最后一个句末标点（含标点本身）；回退超过窗口一半则放弃对齐
+  const headBoundary = Math.max(
+    headRaw.lastIndexOf("。"),
+    headRaw.lastIndexOf("！"),
+    headRaw.lastIndexOf("？"),
+    headRaw.lastIndexOf("!"),
+    headRaw.lastIndexOf("?"),
+    headRaw.lastIndexOf("\n"),
+    headRaw.lastIndexOf("…"),
+  );
+  const head =
+    headBoundary >= Math.floor(headRaw.length / 2)
+      ? headRaw.slice(0, headBoundary + 1)
+      : headRaw;
+
+  // 尾段：前进到第一个句末标点之后；前进超过窗口一半则放弃对齐
+  const tailBoundaryMatch = tailRaw.match(/[。！？!?\n…]/);
+  const tailBoundary = tailBoundaryMatch?.index ?? -1;
+  const tail =
+    tailBoundary >= 0 && tailBoundary <= Math.floor(tailRaw.length / 2)
+      ? tailRaw.slice(tailBoundary + 1)
+      : tailRaw;
+
+  const headTrimmed = head.trimEnd();
+  const tailTrimmed = tail.trimStart();
+  if (!headTrimmed || !tailTrimmed) return null;
+
+  const result = `[已压缩·${text.length}字符→${headTrimmed.length + tailTrimmed.length}] ${headTrimmed} … ${tailTrimmed}`;
+  // 压缩无收益（标记+边界对齐反而变长/等长）就不压
+  if (result.length >= text.length) return null;
+  return result;
+}
+
+export function trimPreservingToolPairs(
   messages: ChatCompletionMessageParam[],
   maxMessages: number,
 ): { kept: ChatCompletionMessageParam[]; dropped: ChatCompletionMessageParam[] } {
@@ -1209,15 +1279,42 @@ function trimPreservingToolPairs(
     };
   }
   const groups = groupMessagesPreservingToolPairs(messages);
-  const keptGroups: ChatCompletionMessageParam[][] = [];
+
+  // 选择改为"预算内优先级"而非纯尾部截断：
+  // 1) 从尾部向后贪心装填（原行为，近因优先）；
+  // 2) pin 回填：被挤出的显式记忆/承诺组，预算不足时从保留窗口的**最旧端**
+  //    驱逐非 pin 组腾位——早期"帮我记住 X / 我会帮你 Y"不再被新闲聊顶掉，
+  //    同时保证最近的对话尾部完整无损。
+  const selected = new Array<boolean>(groups.length).fill(false);
   let total = 0;
   for (let g = groups.length - 1; g >= 0; g--) {
-    if (total + groups[g].length > maxMessages) continue;
-    keptGroups.unshift(groups[g]);
-    total += groups[g].length;
+    if (total + groups[g]!.length > maxMessages) continue;
+    selected[g] = true;
+    total += groups[g]!.length;
   }
-  const keptSet = new Set(keptGroups.flat());
-  const kept = sanitizeToolCallMessageChain(keptGroups.flat(), "[chat-thread-store-trim]");
+  for (let g = 0; g < groups.length; g++) {
+    if (selected[g] || !isPinnedGroup(groups[g]!)) continue;
+    const need = groups[g]!.length;
+    if (total + need > maxMessages) {
+      let freed = 0;
+      for (let s = 0; s < groups.length && freed < need; s++) {
+        if (!selected[s] || s === g || isPinnedGroup(groups[s]!)) continue;
+        selected[s] = false;
+        freed += groups[s]!.length;
+      }
+      total -= freed;
+    }
+    if (total + need <= maxMessages) {
+      selected[g] = true;
+      total += need;
+    }
+  }
+
+  const kept = sanitizeToolCallMessageChain(
+    groups.filter((_, g) => selected[g]).flat(),
+    "[chat-thread-store-trim]",
+  );
+  const keptSet = new Set(kept);
   const dropped = messages.filter((msg) => !keptSet.has(msg));
   return { kept, dropped };
 }

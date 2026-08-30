@@ -15,6 +15,37 @@
 > （6 场景端到端）。LLM 调用约束：仲裁链路零 LLM；每条主动消息仅在无 `directText` 时走一次
 > speak 话术生成；到点提醒改为"在线只发 ScheduleReminderFired 弹窗、离线落 MessageHub"，
 > 不再叠加话术二次调用。
+>
+> **第二批（同日，按用户反馈）**：① 社交每日预算 6→3；② **多端互通**——`ws-connection-registry.ts`
+> 改为每 actor 多连接 fan-out（电脑端 + 手机端同时在线都收到，全部掉线才算离线），
+> `presence-service.ts` 改引用计数；电脑端关闭但手机端在线时消息直达手机端；
+> ③ 决策：**不引入短信**，通道 = 两端应用内消息/弹窗 + MessageHub 离线信箱 + critical 电话升级；
+> ④ 电话升级链现状判定：仅作用于 intelligent-reminder 创建的提醒
+> （popup 后 10min 无响应→TTS，再 12min 无响应→电话，按用户响应历史自适应初始级与规则，
+> 响应即停）；统一管道的 critical 升级接线仍为 Phase 3 待办。测试 28/28。
+>
+> **第三批（同日，按用户反馈）**：① **MessageHub 离线信箱从主动管道移除**——投递模型收敛为
+> "全部在线设备 fan-out 直推"；两端离线时提案挂起待发区，任一设备重连立即直推（重连触发 flushDue），
+> 投递竞态 30s 自动重试；预算计数与 outcome 只在真正送达后记录。② **弹窗保证**——payload 带
+> `display:"popup"`，客户端原生弹窗失败（如移动端）降级为应用内弹窗卡片（不用 SnackBar），
+> 确认/关闭经 `onUserConfirm/onUserDismiss` 回传 outcome。③ must 层提醒在对话进行中也不再延迟
+> （用户点名要的事即时直推）。测试 28/28 + 端到端 7/7。
+>
+> **第四批（同日）：移动端推送通道**——服务部署到云主机后无需电脑开机，两端都离线时必达/critical
+> 提案自动升级手机系统级推送。新增 `mobile-push-service.ts`（JPush/Bark/通用 webhook 三 provider，
+> env 门控 + token 注册表 `push-tokens.json`），管道集成（离线/竞态升级、5min 退避、成功出队防重），
+> HTTP 路由（`POST/DELETE /api/proactivity/push/register`、`GET /api/proactivity/push/status`、
+> `POST /api/proactivity/push/test` 测试推送），客户端 `mobile_push_service.dart`（MethodChannel
+> `pai/mobile_push` 上报 token，原生侧未接厂商推送时静默跳过）。测试 39/39 + 端到端 8/8。
+> 待用户操作：申请极光账号填 `JPUSH_APP_KEY/JPUSH_MASTER_SECRET`（或配 BARK_URL/通用 webhook），
+> 并在 App 原生侧接入厂商推送 SDK 实现 getPushToken（详见 mobile_push_service.dart 头注释）。
+>
+> **第五批（同日）：手机常在线模型（类微信）**——用户设定手机端常在线，消息一到就提醒。
+> 新增 `flutter_local_notifications` 依赖 + `local_notification_service.dart`（Android 通道
+> "proactive" 高优先级 / iOS timeSensitive）；客户端跟踪 App 生命周期：**手机后台/锁屏时**
+> 收到 `agent.proactive_message`（高重要度）或 `schedule.reminder_fired` 一律走**系统通知**
+> （点开回前台并按 deliveryId 回传 outcome），前台仍走应用内弹窗不重复打扰；Windows 桌面
+> 不受影响（走原生弹窗）。后续项：Android 前台服务保活 WS（厂商杀进程场景由推送通道兜底）。
 
 ---
 
@@ -203,12 +234,23 @@ type ProactiveProposal = {
 |---|---|---|---|---|
 | active + 前台 | in_app 卡片（常驻+确认） | in_app 卡片 | in_app 卡片 | 静默进消息列表 |
 | idle / away | native popup | native popup | native popup（低干扰样式） | 静默 |
-| offline | **IM 推送** + 离线补发 | 必达类 IM 推送，其余离线补发 | 离线补发 | 静默/合并 |
+| offline | **手机端应用内推送** + 离线补发 | 手机端推送（必达类），其余离线补发 | 离线补发 | 静默/合并 |
 
 - **in_app**：现有 `agent.proactive_message` WS 事件（保留格式，加 `deliveryId` 与 `actions[]` 字段）。
-- **native popup**：客户端把 `agent.proactive_message` 从 SnackBar 升级为复用 `DesktopNotificationLauncher`（`client/flutter_app/lib/core/services/desktop_notification_launcher.dart`，与 `schedule.reminder_fired` 同级待遇），并把原生弹窗已有的 confirm/dismiss/timeout 回调（`.cpp` 层已实现）按 `deliveryId` 回传服务端。**这是"有感"的最小改动、最大收益点。**
-- **IM 推送**：接通 `message-platform-gateway.ts` 已预留的 wechat/feishu bridge 出站（微信走既有 OpenClaw 网关通道，加发送限频）；发送失败/未配置 → 降级为离线补发并记录。
-- **离线补发**：MessageHub（`message-hub-service.ts`）落库保留，WS 重连时补推未读主动消息（现有机制扩展一个 replay 标记）。
+- **多端互通（已实现）**：`ws-connection-registry.ts` 改为每 actor 多连接 fan-out（电脑端 + 手机端同时在线都收到）；
+  `presence-service.ts` 引用计数——任一设备在线即在线，全部掉线才算 offline。**电脑端关闭但手机端在线 → 直达手机端**。
+  决策：**不引入短信、不落离线信箱**——两端都离线时提案保留在待发区（`offline_wait_reconnect`），
+  任一设备重连（`onConnectionChange`）即触发 `flushDue` 立即直推；投递竞态（仲裁时在线、发送时掉线）30s 后自动重试。
+- **弹窗保证（已实现）**：高重要度提案 payload 带 `display:"popup"`；客户端 `agent.proactive_message` 处理器对
+  high/critical 走 `DesktopNotificationLauncher` 原生弹窗，原生窗口不可用（如移动端）时降级为应用内弹窗卡片
+  （`_showReminderPopupDialog`，扩展 `onUserConfirm/onUserDismiss` 回调回传 outcome）——**保证以弹窗形式展示，不用 SnackBar**。
+- **移动端推送通道（已实现，离线必达升级）**：两端都不在线（或 WS 投递竞态失败）时，必达层/critical 提案
+  自动升级手机系统级推送（App 被杀也能收到系统通知，通知即弹窗）。`mobile-push-service.ts` Provider 可插拔：
+  `jpush`（极光 REST v3，`JPUSH_APP_KEY`+`JPUSH_MASTER_SECRET`，聚合国内厂商通道）/ `bark`（iOS，`BARK_URL`）/
+  `webhook`（通用 HTTP，`MOBILE_PUSH_WEBHOOK_URL`），未配置自动禁用。设备 token 由客户端启动时上报
+  （`POST /api/proactivity/push/register`，注册表 `data/proactivity/push-tokens.json`）；推送成功即出队
+  （重连后不重复投递），失败 5min 退避重试；social 层永不推送。
+- **离线补发**：~~MessageHub 落库~~ 已按用户决策从主动管道移除；MessageHub 仅保留其原有的消息平台会话职责。
 
 每条投递生成 `deliveryId`，客户端回传 outcome：`accepted / dismissed / snoozed / ignored(timeout) / replied`。
 
@@ -257,7 +299,7 @@ type ProactiveProposal = {
 | `PROACTIVITY_LLM_INITIATIVE` | false | true（职责改为竞争仲裁+机会发现） | 通用主动性从未运行过 |
 | ProactivityHub tick | 30min | 扫描类拆走后 5min（只跑问候/机会发现） | 提前量由 UpcomingScheduleWatcher 事件驱动承担，tick 降级为兜底 |
 | knownActors | 内存，重启清空 | 落盘 + 启动时从 chat-threads/schedule-tasks/user_profiles 恢复 | 重启后 agent 才能自主早问好（受静默时段+预算保护） |
-| 每日预算 | 6 次单一池 | 社交池 6 + 必达池独立 | 提醒是用户要的，不该被社交配额挤掉 |
+| 每日预算 | 6 次单一池 | **社交池 3**（用户反馈 6 太多；`PROACTIVITY_DAILY_BUDGET` 可调）+ 必达池独立 | 问候/兴趣/关怀合计每天至多两三次才像管家 |
 | 静默时段命中 | 直接拦截丢弃 | defer 到早晨合并进早报 | "没发"和"择机发"是两种产品体验 |
 | proactive_message 客户端 | SnackBar | 原生弹窗 + 操作按钮回传 | 触达层级断裂的最小修复 |
 
@@ -296,8 +338,8 @@ type ProactiveProposal = {
 **验收**：同类信号自动合并；对话进行中的主动消息延迟到回合结束；诊断接口能回答任意一条"为什么发/为什么没发"。
 
 ### Phase 3：离线必达
-10. 接通 message-platform-gateway 微信/飞书出站（限频）。
-11. critical 未确认 → intelligent-reminder 升级链接入仲裁层。
+10. ~~接通 message-platform-gateway 微信/飞书出站~~ → **多端互通（已完成）**：注册表 fan-out + 在场引用计数，电脑端掉线但手机端在线时消息直达手机端；不引入短信。
+11. critical 未确认 → intelligent-reminder 升级链接入仲裁层（popup→TTS→电话，判定见 §4 L3）。
 12. 可协商提醒：snooze/done/cancel 回写 schedule。
 13. 桌面 presence 信号（前台/锁屏）接入 PresenceService。
 

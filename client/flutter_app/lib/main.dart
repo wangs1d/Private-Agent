@@ -35,9 +35,9 @@ import "core/services/desktop_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
-import "features/chat/briefing_settings_page.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/ws_chat_service.dart";
+import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
@@ -51,18 +51,22 @@ import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
-// 语音对话模式已迁移到独立的 PySide6 桌面悬浮球（client/voice-orb-py）。
+// 语音对话模式已迁移到独立的 PySide6 声纹波形进程（client/voice-orb-py）：
+// 无常驻悬浮球，待机隐身只跑唤醒监听，唤醒/对话时浮现声纹波形。
 import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
 import "core/services/briefing_delivery_api.dart";
 import "core/services/desktop_notification_launcher.dart";
 import "core/services/incoming_call_launcher.dart";
+import "core/services/phone_call_session.dart";
+import "core/presentation/phone_call_page.dart";
+import "core/services/local_notification_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
+import "core/services/mobile_push_service.dart";
 import "core/services/outgoing_call_launcher.dart";
 import "core/services/tts_player.dart";
 import "core/services/windows_titlebar_theme.dart";
-import "features/integrations/wechat_claw_binding_page.dart";
 import "features/devices/devices_page.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
@@ -363,6 +367,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // ignore: unused_field
   String? _phoneCallStatus;
   String? _phoneCallToActorId;
+  /// 当前活跃通话的 callId（phone.call_reply / phone.call_hangup 需携带）
+  String? _activeCallId;
 
   /// 已弹窗处理的「其与 Agent 来电」callId，避免重复弹)
   String? _peerIncomingDialogCallId;
@@ -395,6 +401,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onDecline: _handleNativeCallDecline,
       onTimeout: _handleNativeCallTimeout,
     );
+    // 手机端全屏通话页：会话动作钩子（语义与桌面原生悬浮窗回调一致）
+    PhoneCallSession.instance
+      ..transport = _ws.sendEvent
+      ..onAccept = _handleNativeCallAccept
+      ..onDecline = _handleNativeCallDecline
+      ..onHangup = _handlePhonePageHangup
+      ..onTimeout = _handleNativeCallTimeout;
     // 加载持久化的分栏比例
     _loadSplitRatio();
     // 桌面端独立"通话中"窗口事件绑定
@@ -412,6 +425,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onTimeout: _handleDesktopNotificationTimeout,
     );
     MobileBriefingLauncher.bind();
+    // 移动端推送通道：上报 push token（原生侧未接入厂商推送时静默跳过）
+    unawaited(MobilePushRegistrar.registerIfNeeded());
     _mobileBriefingTapSub =
         MobileBriefingLauncher.payloads.listen((String payload) {
       unawaited(_openBriefingFromPayload(payload));
@@ -429,6 +444,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+    // 在场跟踪：手机后台时主动消息走系统通知（类微信），前台走应用内弹窗
+    _lifecycleState = state;
     // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」
     _writeCrashLog("[LIFECYCLE]", "state=$state", StackTrace.current);
     if (state == AppLifecycleState.detached) {
@@ -455,11 +472,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _scheduleReloadSignal.dispose();
     _calendarReloadSignal.dispose();
     _stopMessagePolling();
+    _surfaceAutoHideTimer?.cancel();
     _voiceOrbProcess?.kill();
     super.dispose();
   }
 
   Future<void> _bootstrap() async {
+    // 移动端系统通知初始化（后台收 WS 消息时用系统通知提醒，类微信）
+    await LocalNotificationService.init();
+    LocalNotificationService.onOutcome = (String deliveryId, String outcome) {
+      _sendProactiveOutcome(deliveryId, outcome);
+    };
     try {
       await _store.init();
     } catch (e) {
@@ -686,6 +709,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       await _promptLocationConsentIfNeeded();
+      // 启动时静默拉一次定位并上报（无 jobId 纯上报，填充服务端位置缓存供 Agent 复用）。
+      // 原由右侧面板天气 Header 触发，组件移除后改由应用启动兜底；
+      // Agent 运行中仍可走 agent.location_request 按需再拉。
+      unawaited(_reportStartupLocation());
     });
     _ws.events.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
@@ -957,7 +984,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     : (payload["reminderMessage"]?.toString().trim() ?? "到点了");
 
             final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-            if (navCtx != null && navCtx.mounted) {
+            // 手机后台（类微信常在线）：到点提醒走系统通知，点开回前台
+            if (_isMobile && _appBackgrounded) {
+              unawaited(LocalNotificationService.show(title: title, body: message));
+            } else if (navCtx != null && navCtx.mounted) {
               _showReminderPopupDialog(
                 navCtx,
                 title,
@@ -972,6 +1002,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           } catch (e, st) {
             debugPrint("[schedule] schedule.reminder_fired failed: $e\n$st");
           }
+        }
+        if (type == "surface.show") {
+          // Surface-on-Demand：服务端 surface.show 工具召唤桌面悬浮卡。
+          // 语音模式下主窗口已隐藏，悬浮窗由本进程独立 HWND 承载，不受影响。
+          unawaited(_handleSurfaceShow(payload));
         }
         if (type == "chat.agent_status") {
           final String line = payload["line"]?.toString().trim() ?? "";
@@ -1370,7 +1405,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String importance = payload["importance"]?.toString() ?? "";
           final String deliveryId = payload["deliveryId"]?.toString() ?? "";
           final bool important = importance == "high" || importance == "critical";
-          if (mounted &&
+          // 手机后台（类微信常在线）：系统通知触达，点开回前台并回传 outcome
+          if (_isMobile && _appBackgrounded && important && deliveryId.isNotEmpty) {
+            unawaited(LocalNotificationService.show(
+              title: title, body: text, deliveryId: deliveryId,
+            ));
+          } else if (mounted &&
               important &&
               deliveryId.isNotEmpty &&
               !DesktopNotificationLauncher.isVisible.value) {
@@ -1519,22 +1559,39 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           setState(() {
             _phoneCallStatus = "ringing";
             _phoneCallToActorId = callerLabel;
+            _activeCallId = payload["callId"]?.toString();
           });
 
-          // 唤起独立悬浮来电窗（脱离主窗口存在，主窗最小化也能看到 + 听到铃声）。
-          // Windows 桌面端走原生 Win32 窗；其他平台由 IncomingCallLauncher
-          // 内部 MissingPluginException 兜底，silently return false。
           unawaited(OutgoingCallLauncher.hide());
           unawaited(ConnectedCallLauncher.hide());
-          unawaited(
-            IncomingCallLauncher.show(
-              callerName: callerLabel,
+          if (_isMobile) {
+            // 手机端：应用内全屏来电页（无 Win32 原生悬浮窗）
+            PhoneCallSession.instance.showIncoming(
+              callId: _activeCallId ?? "",
+              callerLabel: callerLabel,
               subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
-              callerInitial:
+              initial:
                   callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
               ringTimeoutMs: ringMs,
-            ),
-          );
+            );
+            final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
+            if (pageCtx != null && pageCtx.mounted) {
+              unawaited(showPhoneCallPage(pageCtx));
+            }
+          } else {
+            // 唤起独立悬浮来电窗（脱离主窗口存在，主窗最小化也能看到 + 听到铃声）。
+            // Windows 桌面端走原生 Win32 窗；其他平台由 IncomingCallLauncher
+            // 内部 MissingPluginException 兜底，silently return false。
+            unawaited(
+              IncomingCallLauncher.show(
+                callerName: callerLabel,
+                subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
+                callerInitial:
+                    callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
+                ringTimeoutMs: ringMs,
+              ),
+            );
+          }
         }
 
         // ====== 电话接通事件（call_connecting）—— 前摇结束后推送 ======
@@ -1550,35 +1607,53 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             direction: direction,
             fromPhone: fromPhone,
           );
+          final String connectingCallId =
+              payload["callId"]?.toString() ?? "";
 
           if (!mounted) return;
           setState(() {
             _phoneCallStatus = "connected";
             _phoneCallToActorId = callerLabel;
+            _activeCallId = connectingCallId;
             _phoneMuted = false;
             _phoneSpeakerOn = true;
           });
 
-          // 关掉来电/拨号时可能残留的过渡弹窗
-          final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-          if (navCtx != null && navCtx.mounted) {
-            final nav = Navigator.of(navCtx, rootNavigator: true);
-            int maxPops = 10;
-            while (nav.canPop() && maxPops-- > 0 && navCtx.mounted) {
-              nav.pop();
+          if (_isMobile) {
+            // 手机端：应用内全屏通话页随会话切到"通话中"（不弹窗清栈，
+            // 否则会把已打开的来电页一起弹掉）
+            PhoneCallSession.instance.markInCall(
+              callId: connectingCallId,
+              transcriptText: payload["transcript"]?.toString() ?? "",
+            );
+            if (PhoneCallSession.instance.consumeOpenedFromIdle()) {
+              final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
+              if (pageCtx != null && pageCtx.mounted) {
+                unawaited(showPhoneCallPage(pageCtx));
+              }
             }
-          }
+          } else {
+            // 桌面端：关掉来电/拨号时可能残留的过渡弹窗
+            final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+            if (navCtx != null && navCtx.mounted) {
+              final nav = Navigator.of(navCtx, rootNavigator: true);
+              int maxPops = 10;
+              while (nav.canPop() && maxPops-- > 0 && navCtx.mounted) {
+                nav.pop();
+              }
+            }
 
-          // 弹独立"通话中"窗口
-          unawaited(IncomingCallLauncher.hide());
-          unawaited(OutgoingCallLauncher.hide());
-          unawaited(
-            ConnectedCallLauncher.show(
-              callerName: callerLabel,
-              callerInitial:
-                  callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
-            ),
-          );
+            // 弹独立"通话中"窗口
+            unawaited(IncomingCallLauncher.hide());
+            unawaited(OutgoingCallLauncher.hide());
+            unawaited(
+              ConnectedCallLauncher.show(
+                callerName: callerLabel,
+                callerInitial:
+                    callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
+              ),
+            );
+          }
 
           // 取 TTS 音频（mp3 base64），后台播放；同时开启头像呼吸光
           final Object? ttsRaw = payload["tts"];
@@ -1594,6 +1669,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (ttsBase64 != null) {
             unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
             unawaited(ConnectedCallLauncher.setTalking(true));
+            PhoneCallSession.instance.setTalking(true);
             // TTS 播完自动关掉呼吸光（TtsPlayer 完成后回调）
             TtsPlayer.instance.addOnCompleted(_onTtsCompleted);
           }
@@ -1639,18 +1715,59 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           setState(() {
             _phoneCallStatus = "ringing";
             _phoneCallToActorId = callerLabel;
+            _activeCallId = payload["callId"]?.toString();
           });
 
-          // 统一走原生独立悬浮窗
-          unawaited(
-            IncomingCallLauncher.show(
-              callerName: callerLabel,
+          if (_isMobile) {
+            // 手机端：应用内全屏来电页
+            PhoneCallSession.instance.showIncoming(
+              callId: _activeCallId ?? "",
+              callerLabel: callerLabel,
               subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
-              callerInitial:
+              initial:
                   callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
               ringTimeoutMs: ringMs,
-            ),
-          );
+            );
+            final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
+            if (pageCtx != null && pageCtx.mounted) {
+              unawaited(showPhoneCallPage(pageCtx));
+            }
+          } else {
+            // 统一走原生独立悬浮窗
+            unawaited(
+              IncomingCallLauncher.show(
+                callerName: callerLabel,
+                subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
+                callerInitial:
+                    callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
+                ringTimeoutMs: ringMs,
+              ),
+            );
+          }
+        }
+
+        // ====== 通话中 Agent 语音回应（voice_reply）—— 双向交互的多轮播报 ======
+        if (type == "agent.phone.voice_reply") {
+          final String vrTranscript = payload["transcript"]?.toString() ?? "";
+          if (!mounted) return;
+          PhoneCallSession.instance.appendAgentVoice(transcriptText: vrTranscript);
+          final Object? vrTts = payload["tts"];
+          String? vrBase64;
+          if (vrTts is Map) {
+            final Object? fmt = vrTts["format"];
+            final Object? b64 = vrTts["base64"];
+            if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+              vrBase64 = b64;
+            }
+          }
+          if (vrBase64 != null) {
+            unawaited(TtsPlayer.instance.playFromBase64(vrBase64));
+            unawaited(ConnectedCallLauncher.setTalking(true));
+            TtsPlayer.instance.addOnCompleted(_onTtsCompleted);
+          } else {
+            // 无音频（TTS 未配置）：直接结束"播报中"状态
+            PhoneCallSession.instance.setTalking(false);
+          }
         }
         if (type == "morning.briefing") {
           await _handleMorningBriefingEvent(payload);
@@ -1659,6 +1776,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String status = payload["status"]?.toString() ?? "unknown";
           final String toActorId = payload["toActorId"]?.toString() ?? "";
           final String? fromPhone = payload["fromPhone"]?.toString();
+          final String statusCallId = payload["callId"]?.toString() ?? "";
           if (!mounted) return;
           final bool shouldClearPhoneState =
               status == "ended" || status == "agent_handled";
@@ -1672,10 +1790,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               _phoneCallToActorId =
                   toActorId.isNotEmpty ? toActorId : _phoneCallToActorId;
             }
+            if (statusCallId.isNotEmpty) {
+              _activeCallId = statusCallId;
+            }
             if (shouldClearPhoneState) {
               // 通话结束：立刻清状态
               _phoneCallStatus = null;
               _phoneCallToActorId = null;
+              _activeCallId = null;
               _peerIncomingDialogCallId = null;
               _phoneMuted = false;
               _phoneSpeakerOn = true;
@@ -1685,6 +1807,32 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               _phoneCallStatus = status;
             }
           });
+          if (status == "connected" &&
+              payload["direction"]?.toString() == "user_to_agent") {
+            // 用户呼出 Agent 的接通事件：connected 携带 Agent 回应（transcript + TTS），
+            // 手机端切应用内通话页，两端统一播报接通语音
+            PhoneCallSession.instance.markInCall(
+              callId: statusCallId,
+              transcriptText: payload["transcript"]?.toString() ?? "",
+            );
+            if (_isMobile && PhoneCallSession.instance.consumeOpenedFromIdle()) {
+              final BuildContext? pageCtx = _rootNavigatorKey.currentContext;
+              if (pageCtx != null && pageCtx.mounted) {
+                unawaited(showPhoneCallPage(pageCtx));
+              }
+            }
+            final Object? csTts = payload["tts"];
+            if (csTts is Map) {
+              final Object? fmt = csTts["format"];
+              final Object? b64 = csTts["base64"];
+              if (fmt?.toString() == "mp3" && b64 is String && b64.isNotEmpty) {
+                unawaited(TtsPlayer.instance.playFromBase64(b64));
+                unawaited(ConnectedCallLauncher.setTalking(true));
+                PhoneCallSession.instance.setTalking(true);
+                TtsPlayer.instance.addOnCompleted(_onTtsCompleted);
+              }
+            }
+          }
           if (status == "answered_by_user") {
             _sendContactFeedback(
               channel: "phone_call",
@@ -1695,7 +1843,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
           if (shouldClearPhoneState) {
             // 通话结束/转交：摘掉 TTS 完成回调 + 停 TTS + 关独立"通话中"窗口
-            // （不弹任何 UI；清状态由原生 hangup 回调或后续事件统一处理）
+            // （手机端通话页随 session.end() 自动关闭）
+            PhoneCallSession.instance.end();
             TtsPlayer.instance.removeOnCompleted(_onTtsCompleted);
             unawaited(TtsPlayer.instance.stop());
             unawaited(IncomingCallLauncher.hide());
@@ -2926,12 +3075,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  Future<void> _openWechatClawBinding() async {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    await openWechatClawBinding(navCtx);
-  }
-
   /// 删除单条消息（本地 + 通知服务端清除上下文）
   Future<void> _deleteSingleMessage(String messageId) async {
     await _store.deleteMessage(messageId);
@@ -3127,6 +3270,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 待回传 outcome 的主动消息 deliveryId（原生弹窗生命周期内有效）
   String? _pendingProactiveDeliveryId;
 
+  /// App 生命周期（手机后台时主动消息走系统通知，类微信常在线提醒）
+  AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+  bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  bool get _appBackgrounded => _lifecycleState != AppLifecycleState.resumed;
+
   void _sendProactiveOutcome(String deliveryId, String outcome) {
     unawaited(
       http
@@ -3142,7 +3290,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 高重要度主动消息 → 原生弹窗（与日程提醒同级触达）；原生窗口不可用时回落 SnackBar
+  /// 高重要度主动消息 → 原生弹窗（与日程提醒同级触达）；原生窗口不可用（如移动端）
+  /// 时降级为应用内弹窗卡片——保证弹窗形式展示，outcome 照常回传
   Future<void> _showProactiveNativeNotification(String title, String text, String deliveryId) async {
     _pendingProactiveDeliveryId = deliveryId;
     _desktopNotificationNeedsFeedback = false;
@@ -3158,8 +3307,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (!shown) {
       _pendingProactiveDeliveryId = null;
       if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text("$title\n$text"), duration: const Duration(seconds: 8)),
+        await _showReminderPopupDialog(
+          context,
+          title,
+          text,
+          "high",
+          true,
+          "我知道了",
+          onUserConfirm: () => _sendProactiveOutcome(deliveryId, "accepted"),
+          onUserDismiss: () => _sendProactiveOutcome(deliveryId, "dismissed"),
         );
       }
     }
@@ -3275,9 +3431,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
+  /// 手机端全屏通话页点挂断：WS 事件已由 PhoneCallSession.hangup() 先行发出
+  /// （phone.call_hangup，服务端清理会话并回推 ended），这里做本地收尾。
+  void _handlePhonePageHangup() {
+    unawaited(TtsPlayer.instance.stop());
+    unawaited(IncomingCallLauncher.hide());
+    unawaited(OutgoingCallLauncher.hide());
+    unawaited(ConnectedCallLauncher.hide());
+    if (mounted) {
+      setState(() {
+        _phoneCallStatus = null;
+        _phoneCallToActorId = null;
+        _activeCallId = null;
+        _peerIncomingDialogCallId = null;
+        _phoneMuted = false;
+        _phoneSpeakerOn = true;
+      });
+    }
+    PhoneCallSession.instance.end();
+  }
+
   /// TTS 播完回调：关头像呼吸光
   void _onTtsCompleted() {
     unawaited(ConnectedCallLauncher.setTalking(false));
+    // 手机端通话页同步结束"正在播报"呼吸动画
+    PhoneCallSession.instance.setTalking(false);
   }
 
   /// "通话中"窗口里点了静音：本地状态同步 + 通知 server
@@ -3337,12 +3515,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _handleOutgoingCallHangup() {
-    _ws.sendEvent("phone.hang_up", <String, dynamic>{});
+    // 修复：此前发的是 phone.hang_up（服务端无此事件，挂断从未生效）；
+    // 正确事件为 phone.call_hangup，并携带当前通话 callId
+    _ws.sendEvent("phone.call_hangup", <String, dynamic>{
+      if (_activeCallId?.isNotEmpty ?? false) "callId": _activeCallId,
+    });
     unawaited(OutgoingCallLauncher.hide());
     if (!mounted) return;
     setState(() {
       _phoneCallStatus = null;
       _phoneCallToActorId = null;
+      _activeCallId = null;
     });
   }
 
@@ -3354,8 +3537,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     String message,
     String priority,
     bool showConfirm,
-    String confirmText,
-  ) async {
+    String confirmText, {
+    VoidCallback? onUserConfirm,
+    VoidCallback? onUserDismiss,
+  }) async {
     // 提醒弹窗接管共享原生通知窗口：未决的主动消息 outcome 不再有效
     _pendingProactiveDeliveryId = null;
     _desktopNotificationNeedsFeedback = showConfirm;
@@ -3442,7 +3627,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                             ),
                             // 关闭按钮
                             GestureDetector(
-                              onTap: () => Navigator.of(ctx).pop(),
+                              onTap: () {
+                                onUserDismiss?.call();
+                                Navigator.of(ctx).pop();
+                              },
                               child: Icon(
                                 Icons.close,
                                 size: 18,
@@ -3477,6 +3665,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                             alignment: Alignment.centerRight,
                             child: TextButton(
                               onPressed: () {
+                                onUserConfirm?.call();
                                 _sendContactFeedback(
                                   channel: "websocket",
                                   responded: true,
@@ -3588,6 +3777,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
+  /// 启动时静默拉一次定位并上报（无 jobId 纯上报，填充服务端位置缓存供 Agent
+  /// 按需复用）。原由右侧面板天气 Header 触发，组件移除后改由应用启动兜底；
+  /// WS 未连接时 [WsChatService.sendEvent] 自动排队，连接后补发。
+  Future<void> _reportStartupLocation() async {
+    try {
+      final ClientLocationPayload? loc =
+          await ClientLocationService.getCurrentLocation();
+      if (loc == null) return;
+      _ws.sendEvent("client.location_report", loc.toJson());
+    } catch (_) {
+      // 定位失败静默：Agent 运行中需要位置时会走 agent.location_request 按需再拉
+    }
+  }
+
   void _showDesktopBridgeToast(String message) {
     if (!mounted) return;
     final ScaffoldMessengerState? messenger =
@@ -3618,8 +3821,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return Text(title);
   }
 
-  /// 启动独立的 PySide6 语音悬浮球进程，并隐藏当前 Flutter 窗口，
-  /// 进入纯语音模式（屏幕上只保留悬浮球）。
+  /// 启动独立的 PySide6 语音波形进程，并隐藏当前 Flutter 窗口，
+  /// 进入纯语音模式（桌面无常驻 UI，仅唤醒/对话时浮现声纹）。
   /// 由 ChatPage 输入框中的语音按钮通过 onEnterVoiceMode 回调触发。
   ///
   /// 环境变量 PAI_WS_URL / PAI_HTTP_BASE / PAI_SESSION_ID / PAI_ACTOR_ID
@@ -3632,8 +3835,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
     if (_voiceOrbProcess != null && _voiceOrbReady) {
-      // 已有进程在跑且悬浮球已就绪：直接隐藏主窗口并把焦点交过去
+      // 已有进程在跑且波形已就绪：直接隐藏主窗口，交互交给语音模式
       await windowManager.hide();
+      _ws.sendEvent("mode.changed", <String, dynamic>{
+        "active": true,
+        "source": "voice_orb",
+      });
       return;
     }
     if (_voiceOrbProcess != null && !_voiceOrbReady) {
@@ -3705,8 +3912,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  /// 恢复 Flutter 主窗口（从悬浮球模式回到页面模式）。
+  /// 恢复 Flutter 主窗口（从语音模式回到页面模式）。
+  /// 所有退出路径（语音指令"打开界面" / 波形右键菜单 / 进程退出 / 看门狗）
+  /// 都汇到这里，并顺带向服务端上报 mode.changed=false。
   Future<void> _restorePageMode() async {
+    _ws.sendEvent("mode.changed", <String, dynamic>{
+      "active": false,
+      "source": "voice_orb",
+    });
     await windowManager.show();
     await windowManager.focus();
   }
@@ -3714,6 +3927,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Process? _voiceOrbProcess;
   bool _voiceOrbReady = false;
   Timer? _voiceOrbReadyTimer;
+
+  /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
+  Timer? _surfaceAutoHideTimer;
 
   /// 从进程工作目录 / 可执行文件目录向上逐级查找 client/voice-orb-py。
   /// 兼容 flutter run（cwd = client/flutter_app）与从仓库根目录启动两种形态。
@@ -3747,11 +3963,67 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _voiceOrbReadyTimer?.cancel();
       _voiceOrbReadyTimer = null;
       _voiceOrbReady = true;
-      // 悬浮球窗口已就绪，隐藏 Flutter 主窗口进入纯语音模式
+      // 波形就绪（orb 隐身待命），隐藏 Flutter 主窗口进入纯语音模式
       windowManager.hide();
+      _ws.sendEvent("mode.changed", <String, dynamic>{
+        "active": true,
+        "source": "voice_orb",
+      });
     } else if (line.contains("__VOICE_ORB_EVENT__:PAGE_MODE_REQUESTED")) {
-      // 用户点击悬浮球的"回到页面模式"，恢复 Flutter 主窗口
+      // 语音指令（"打开界面"）或波形右键菜单请求恢复页面模式
       _restorePageMode();
+    } else if (line.contains("__VOICE_ORB_EVENT__:MIC_UNAVAILABLE")) {
+      // 麦克风不可用：orb 会自行退出。立即恢复主窗口，避免"窗口消失且无法找回"。
+      debugPrint("[VoiceOrb] mic unavailable, restoring page mode");
+      _voiceOrbProcess?.kill();
+      _restorePageMode();
+    }
+  }
+
+  /// 处理服务端 surface.show：按 surface 名召唤对应悬浮卡（Surface-on-Demand）。
+  /// 目前支持 today_schedule（今日安排悬浮窗）；未知 surface 静默忽略。
+  /// 数据由客户端自取（_loadTodayScheduleFuture），服务端只下发指令不搬日程数据。
+  Future<void> _handleSurfaceShow(Map<String, dynamic> payload) async {
+    if (kIsWeb || !Platform.isWindows) return;
+    final String surface = payload["surface"]?.toString().trim() ?? "";
+    if (surface != "today_schedule") return;
+    final int ttlSeconds =
+        int.tryParse(payload["ttlSeconds"]?.toString() ?? "") ?? 30;
+    try {
+      final List<ScheduleEvent> events = await _loadTodayScheduleFuture();
+      final DateTime now = DateTime.now();
+      final List<ScheduleEvent> sorted = List<ScheduleEvent>.from(events)
+        ..sort((a, b) => a.startAt.compareTo(b.startAt));
+      final List<ScheduleFloatingItem> items = sorted
+          .map(
+            (ScheduleEvent e) => ScheduleFloatingItem(
+              id: e.id,
+              timeText:
+                  "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
+              title: e.shortTitle ?? simplifyScheduleTitle(e.title),
+              notes: (e.notes ?? "").trim(),
+              completed: !e.startAt.isAfter(now),
+            ),
+          )
+          .toList();
+      final bool wasVisible = ScheduleFloatingLauncher.isVisible.value;
+      final bool ok = await ScheduleFloatingLauncher.show();
+      if (!ok) {
+        debugPrint("[surface.show] failed to launch schedule floating window");
+        return;
+      }
+      await ScheduleFloatingLauncher.setSchedule(items);
+      // 召唤前未常驻的窗口按 TTL 自动淡出；用户本来就开着的只刷新数据，不打扰
+      if (!wasVisible) {
+        _surfaceAutoHideTimer?.cancel();
+        _surfaceAutoHideTimer = Timer(Duration(seconds: ttlSeconds), () {
+          if (ScheduleFloatingLauncher.isVisible.value) {
+            ScheduleFloatingLauncher.hide();
+          }
+        });
+      }
+    } catch (e, st) {
+      debugPrint("[surface.show] $surface failed: $e\n$st");
     }
   }
 
@@ -3981,9 +4253,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           onOpenMessages: _openMessagesPanel,
                           onOpenUserMenuSettings: _openUserMenuSettings,
                           onOpenUserMenuHelp: _openUserMenuHelp,
-                          onOpenWechatClaw: _openWechatClawBinding,
                           onOpenDevices: _openDevicesPage,
-                          onOpenBriefingSettings: _openBriefingSettings,
                           onLogout: _logout,
                           totalUnread: _unreadByPlatform.values
                               .fold(0, (int a, int b) => a + b),
@@ -4008,43 +4278,67 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   ),
                                   child: AppBar(
                                     automaticallyImplyLeading: false,
-                                    // 顶栏与左侧边栏同色(深色主题下为 #131313 的深灰),
-                                    // 与聊天主背景的纯黑 (#0F0F0F) 形成可识别但克制的对比
-                                    backgroundColor:
-                                        AppPalette.resolveSidebar(variant),
-                                    foregroundColor:
-                                        AppPalette.resolveAppBarForeground(
-                                            variant),
-                                    surfaceTintColor: Colors.transparent,
-                                    elevation: 0,
-                                    scrolledUnderElevation: 0,
-                                    leadingWidth: 160,
-                                    leading: _tabIndex == 0
-                                        ? Align(
-                                            alignment: Alignment.centerLeft,
-                                            child: Padding(
-                                              padding: const EdgeInsets.only(
-                                                  left: 4),
-                                              child:
-                                                  _buildMessageNotificationBadge(),
-                                            ),
-                                          )
-                                        : null,
-                                    title: _buildAppBarTitle(),
-                                    actions: _tabIndex == 0
-                                        ? <Widget>[
-                                            IconButton(
-                                              tooltip: "删除全部聊天记录",
-                                              icon: const Icon(
-                                                  Icons.delete_sweep_outlined,
-                                                  size: 22),
+                                  // 顶栏与左侧边栏同色(深色主题下为 #131313 的深灰),
+                                  // 与聊天主背景的纯黑 (#0F0F0F) 形成可识别但克制的对比
+                                  backgroundColor:
+                                      AppPalette.resolveSidebar(variant),
+                                  foregroundColor:
+                                      AppPalette.resolveAppBarForeground(
+                                          variant),
+                                  surfaceTintColor: Colors.transparent,
+                                  elevation: 0,
+                                  scrolledUnderElevation: 0,
+                                  leadingWidth: 160,
+                                  leading: _tabIndex == 0
+                                      ? Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: Padding(
+                                            padding: const EdgeInsets.only(
+                                                left: 4),
+                                            child:
+                                                _buildMessageNotificationBadge(),
+                                          ),
+                                        )
+                                      : null,
+                                  title: _buildAppBarTitle(),
+                                  actions: _tabIndex == 0
+                                      ? <Widget>[
+                                          PopupMenuButton<String>(
+                                            tooltip: "更多操作",
+                                            icon: Icon(
+                                              Icons.more_vert_rounded,
+                                              size: 22,
                                               color: AppPalette
                                                   .resolveAppBarForeground(
                                                       variant),
-                                              onPressed: _confirmClearAllChat,
                                             ),
-                                          ]
-                                        : const <Widget>[],
+                                            itemBuilder:
+                                                (BuildContext ctx) =>
+                                                    <PopupMenuEntry<String>>[
+                                              const PopupMenuItem<String>(
+                                                value: "clear_all_chat",
+                                                height: 40,
+                                                child: Row(
+                                                  children: <Widget>[
+                                                    Icon(
+                                                      Icons
+                                                          .delete_sweep_outlined,
+                                                      size: 18,
+                                                    ),
+                                                    SizedBox(width: 10),
+                                                    Text("删除全部聊天记录"),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                            onSelected: (String value) {
+                                              if (value == "clear_all_chat") {
+                                                _confirmClearAllChat();
+                                              }
+                                            },
+                                          ),
+                                        ]
+                                      : const <Widget>[],
                                   ),
                                 ),
                                 Expanded(
@@ -4144,20 +4438,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.devices.defaultSplitRatio;
     });
-  }
-
-  /// 用户菜单「每日简报」:打开简报设置页（启用开关 / 时间 / 模式 / sections）
-  void _openBriefingSettings() {
-    final BuildContext? ctx = _rootNavigatorKey.currentContext;
-    if (ctx == null) return;
-    Navigator.of(ctx).push<void>(
-      MaterialPageRoute<void>(
-        builder: (BuildContext _) => BriefingSettingsPage(
-          api: _preferencesApi,
-          sessionId: ApiConfig.effectiveActorId,
-        ),
-      ),
-    );
   }
 
   /// 用户菜单「退出登录」:先弹确认,确认后弹 SnackBar 占位
@@ -4476,7 +4756,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _shouldShowRightSidePanel() {
     if (_tabIndex != 0) return false;
     if (_rightPanel != null) return false;
-    return MediaQuery.sizeOf(context).width >= 820;
+    return MediaQuery.sizeOf(context).width >= kWideLayoutBreakpoint;
   }
 
   /// AppBar 右侧需要让出的宽度。
@@ -4504,7 +4784,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return const SizedBox.shrink();
     }
     final double screenWidth = MediaQuery.sizeOf(context).width;
-    if (screenWidth < 820) {
+    if (screenWidth < kWideLayoutBreakpoint) {
       return const SizedBox.shrink();
     }
     if (_rightPanel != null) {
@@ -4548,15 +4828,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onSchedule: _openSchedulePanel,
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
-        // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
-        onReportLocation: (location) {
-          _ws.sendEvent("client.location_report", location);
-        },
       ),
     );
   }
 
-  /// split 模式的右分栏面板：顶栏（标题 + 关闭按钮）+ 自定义内容。
+  /// Dock 功能面板：顶栏（标题 + 关闭按钮）+ 自定义内容。
   /// 背景使用 cs.surface 跟随主题（黑/白）。
   Widget _buildSplitPanel() {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -4583,7 +4859,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// split 面板顶栏：拖拽指示 + 标题 + 关闭按钮。
+  /// Dock 功能面板顶栏：拖拽指示 + 标题 + 关闭按钮。
   Widget _buildSplitPanelHeader(ColorScheme cs) {
     // 标题栏背景跟随主题主色（黑色主题下为纯黑），
     // 因此文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
@@ -4630,24 +4906,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /* 旧浮层实现（已替换为 NextbotChatLayout 内嵌分栏）
-  Widget _buildRightPanelOverlayLegacy() {
-    if (_rightPanel == null) {
-      return const SizedBox.shrink();
-    }
-    // 根据屏幕宽度计算面板绝对像素宽度:小屏几乎占满,宽屏固定 480
-    final double screenWidth = MediaQuery.sizeOf(context).width;
-    final double panelWidth = screenWidth < 820 ? screenWidth * 0.92 : 480.0;
-    return RightSidePanel(
-      visible: true,
-      title: rightPanelTitle(_rightPanel!),
-      onClose: _closeRightPanel,
-      panelWidth: panelWidth,
-      child: _buildRightPanelContent(),
-    );
-  }
-  */
-
   /// 右侧面板要渲染的具体内容
   Widget _buildRightPanelContent() {
     switch (_rightPanel) {
@@ -4690,7 +4948,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Widget _buildMainContent() {
     final double screenWidth = MediaQuery.sizeOf(context).width;
 
-    if (_tabIndex != 0 || screenWidth < 820) {
+    if (_tabIndex != 0 || screenWidth < kWideLayoutBreakpoint) {
       return _buildTabStack();
     }
     return NextbotChatLayout(

@@ -229,13 +229,21 @@ class ScheduleFloatingLauncher {
     }
   }
 
-  /// 替换整个日程列表
-  static Future<bool> setSchedule(List<ScheduleFloatingItem> items) async {
+  /// 替换整个日程列表。
+  ///
+  /// [devicePixelRatio]：宿主 FlutterView 的 DPR。GDI 悬浮窗按物理像素绘制，
+  /// 用它把逻辑布局缩放到与 in-app 面板完全一致的物理尺寸
+  /// （进程内 GetDpiForWindow 在部分环境下被虚拟化成 96，不可靠）。
+  static Future<bool> setSchedule(
+    List<ScheduleFloatingItem> items, {
+    double? devicePixelRatio,
+  }) async {
     try {
       await _channel.invokeMethod<bool>(
         "setSchedule",
         <String, dynamic>{
           "items": items.map((e) => e.toMap()).toList(),
+          if (devicePixelRatio != null) "devicePixelRatio": devicePixelRatio,
         },
       );
       return true;

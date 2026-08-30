@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from desktop_visual.actions import DELUXE_SYSTEM_PROMPT, SYSTEM_PROMPT, parse_action_json, validate_action_output
 from desktop_visual.agent_history import AgentHistory
-from desktop_visual.runtime.capture import grab_screen_png
+from desktop_visual.runtime.capture import grab_display_png
 from desktop_visual.runtime.mouse_controller import HybridPointer
 from desktop_visual.runtime.uia_controller import UiaController
 from desktop_visual.structured_output import ActionKind, LoopResult
@@ -28,6 +28,9 @@ class LoopConfig:
     ocr_context: Optional[str] = None
     max_vlm_retries: int = 2
     vlm_retry_delay_s: float = 1.0
+    # 截图最长边像素上限（如 1568）。None=不缩放（坐标即物理像素）。
+    # 设置后 VLM 输出的是截图上的坐标，执行前按 scale 放大回屏幕物理像素。
+    max_screenshot_dim: Optional[int] = None
 
 
 @dataclass
@@ -88,7 +91,11 @@ class VisualDesktopLoop:
         system_prompt = DELUXE_SYSTEM_PROMPT if cfg.deluxe_prompt else SYSTEM_PROMPT
 
         for step in range(cfg.max_steps):
-            png, (width, height) = grab_screen_png(cfg.region)
+            grab = grab_display_png(region=cfg.region, max_dim=cfg.max_screenshot_dim)
+            png = grab.png
+            width, height = grab.width, grab.height
+            # VLM 看到的是（可能降采样后的）截图，坐标需按 scale 放大回物理像素
+            coord_scale = grab.scale
 
             if cfg.use_history and state.history.step_count > 0:
                 messages = state.history.build_context_messages(
@@ -155,7 +162,7 @@ class VisualDesktopLoop:
                 if asyncio.iscoroutine(maybe):
                     await maybe
 
-            done, history_note = await self._execute(action.kind, action.payload)
+            done, history_note = await self._execute(action.kind, action.payload, coord_scale=coord_scale)
 
             if cfg.use_history:
                 state.history.record(
@@ -194,9 +201,10 @@ class VisualDesktopLoop:
                     await asyncio.sleep(delay)
         raise RuntimeError(f"VLM failed after {cfg.max_vlm_retries + 1} attempts") from last_exception
 
-    async def _execute(self, kind: str, payload: dict[str, Any]) -> tuple[bool, str]:
+    async def _execute(self, kind: str, payload: dict[str, Any], *, coord_scale: float = 1.0) -> tuple[bool, str]:
         def xy() -> tuple[int, int]:
-            return int(payload.get("x", 0)), int(payload.get("y", 0))
+            # VLM 输出截图坐标，按 scale 映射回屏幕物理像素
+            return int(int(payload.get("x", 0)) * coord_scale), int(int(payload.get("y", 0)) * coord_scale)
 
         if kind == "move":
             x, y = xy()

@@ -24,10 +24,39 @@ from pathlib import Path
 
 import websockets
 
+from desktop_visual.bridge_actions import UnknownBridgeAction, build_worker_request
+
 ROOT = str(Path(__file__).resolve().parent.parent)
 
+# stdio_worker 在 stderr 上以 "##STEP {json}" 行上报 run_task 的每步动作，
+# 桥接转发为 desktop.task.step 事件，server 端可实时展示操作步骤。
+STEP_LINE_PREFIX = "##STEP "
 
-async def run_stdio_worker_on_pc(payload: dict) -> dict:
+
+async def _pump_stderr_steps(stream: asyncio.StreamReader, job_id: str | None) -> str:
+    """逐行读 stderr：##STEP 行转发为 desktop.task.step 事件，其余收集为尾部日志。"""
+    tail: list[str] = []
+    while True:
+        try:
+            line = await stream.readline()
+        except Exception:
+            break
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if text.startswith(STEP_LINE_PREFIX):
+            try:
+                step = json.loads(text[len(STEP_LINE_PREFIX):])
+            except json.JSONDecodeError:
+                tail.append(text)
+                continue
+            send_event("desktop.task.step", {"jobId": job_id, **step})
+        else:
+            tail.append(text)
+    return "\n".join(tail[-50:])
+
+
+async def run_stdio_worker_on_pc(payload: dict, job_id: str | None = None) -> dict:
     exe = sys.executable
     proc = await asyncio.create_subprocess_exec(
         exe,
@@ -39,11 +68,20 @@ async def run_stdio_worker_on_pc(payload: dict) -> dict:
         cwd=ROOT,
         env={**os.environ},
     )
+    # communicate() 会接管全部管道，无法边读边转发；改为手动 pump：
+    # stdout 读到 EOF，stderr 逐行转发 ##STEP 事件后收集尾部日志。
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     line = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-    out_b, err_b = await proc.communicate(input=line)
+    proc.stdin.write(line)
+    await proc.stdin.drain()
+    proc.stdin.close()
+    stderr_task = asyncio.create_task(_pump_stderr_steps(proc.stderr, job_id))
+    stdout_task = asyncio.create_task(proc.stdout.read())
+    await proc.wait()
+    out_b = await stdout_task
+    err_text = await stderr_task
     if proc.returncode != 0:
-        err = err_b.decode("utf-8", errors="replace").strip()
-        return {"ok": False, "error": err or f"stdio_worker exit {proc.returncode}"}
+        return {"ok": False, "error": err_text.strip() or f"stdio_worker exit {proc.returncode}"}
     text = out_b.decode("utf-8", errors="replace").strip()
     if not text:
         return {"ok": False, "error": "empty stdout from stdio_worker"}
@@ -142,47 +180,17 @@ async def one_connection(url: str, token: str | None, init_payload: dict) -> Non
                 job_id = pl.get("jobId")
                 if not job_id:
                     continue
-                action = pl.get("action") or "run_task"
-                if action == "screenshot":
-                    worker_req: dict = {
-                        "action": "screenshot",
-                        "region": pl.get("region"),
-                    }
-                elif action == "open":
-                    worker_req: dict = {
-                        "action": "open",
-                        "target": pl.get("target"),
-                        "path": pl.get("path"),
-                    }
-                elif action == "uia_query":
-                    worker_req: dict = {
-                        "action": "uia_query",
-                        "mode": pl.get("mode", "query"),
-                        "selector": pl.get("selector"),
-                        "point": pl.get("point"),
-                        "topOnly": pl.get("topOnly"),
-                        "limit": pl.get("limit"),
-                    }
-                elif action == "run_shell":
-                    worker_req: dict = {
-                        "action": "run_shell",
-                        "command": pl.get("command"),
-                        "shell": pl.get("shell"),
-                        "cwd": pl.get("cwd"),
-                        "timeoutMs": pl.get("timeoutMs"),
-                        "allowDestructive": bool(pl.get("allowDestructive")),
-                    }
+                try:
+                    worker_req = build_worker_request(pl)
+                except UnknownBridgeAction as exc:
+                    # 未登记的 action 直接回错误，绝不能误路由成 run_task
+                    logging.warning("拒绝未知桥接 action: %s", exc)
+                    out: dict = {"ok": False, "error": str(exc)}
                 else:
-                    worker_req: dict = {
-                        "action": "run_task",
-                        "task": pl.get("task"),
-                        "maxSteps": pl.get("maxSteps", 40),
-                        "region": pl.get("region"),
-                        "stub": bool(pl.get("stub")),
-                    }
+                    # vlm 配置由 server 附加在 payload 顶层，仅 run_task 会消费
                     if isinstance(pl.get("vlm"), dict):
                         worker_req["vlm"] = pl.get("vlm")
-                out = await run_stdio_worker_on_pc(worker_req)
+                    out = await run_stdio_worker_on_pc(worker_req, job_id)
                 await ws.send(
                     json.dumps(
                         {

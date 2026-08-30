@@ -128,6 +128,7 @@ import { registerPaymentTools } from "../tools/payment-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
+import { registerSurfaceTools } from "../tools/surface-tools.js";
 import {
   buildCapabilityModules,
   getAllCapabilityModuleIntentRules,
@@ -342,8 +343,11 @@ import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js
 import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
 import { PresenceService } from "../proactivity/presence-service.js";
 import { ProactiveDeliveryService } from "../proactivity/delivery-service.js";
+import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
 import { UpcomingScheduleWatcher } from "../proactivity/upcoming-schedule-watcher.js";
+import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
+import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
 import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
 import { registerProactivityFeedbackTools } from "../tools/proactivity-feedback-tools.js";
@@ -728,6 +732,10 @@ export async function createAppServices(): Promise<AppServices> {
   );
   registerAgentPhoneTools(toolRegistry, virtualPhoneService);
   registerAgentVoiceTools(toolRegistry, voiceCapabilityService, voiceMessageService);
+  // Surface-on-Demand：LLM 可召唤客户端信息面板（语音模式"念+显"双通道）
+  registerSurfaceTools(toolRegistry, {
+    trySend: (actorId, data) => wsConnectionRegistry.trySend(actorId, data),
+  });
   // 注册能力模块（image-gen / file-doc / email-sms / ...）
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
@@ -1194,6 +1202,42 @@ export async function createAppServices(): Promise<AppServices> {
     wsConnectionRegistry,
   );
   virtualPhoneService.setIncomingCoordinator(virtualPhoneIncomingCoordinator);
+
+  // 用户→Agent 通话接通后：走 AgentCore 主对话管线生成回应（转 TTS 随 connected 下发）
+  virtualPhoneService.setUserCallAgentHandler(async ({ fromUserId, toActorId, userMessage }) => {
+    const prompt = [
+      "【系统通知 · 用户来电】",
+      "用户通过虚拟电话呼叫你，通话已接通。",
+      userMessage
+        ? `用户在拨通时留言：${userMessage}`
+        : "用户拨通时没有留言，请简短问候并询问有什么可以帮忙。",
+      "",
+      "请用简短中文口语直接回应（将转为语音播报给用户），不要输出 Markdown、列表或表情符号。",
+    ].join("\n");
+    const reply = await agentCore.handleUserMessage(toActorId, prompt, {
+      chatUserMessageId: `phone-user-call:${fromUserId}:${Date.now()}`,
+      preferFullPipeline: true,
+    });
+    await agentCore.runToolIfNeeded(toActorId, reply, {
+      chatUserMessageId: `phone-user-call-tool:${fromUserId}:${Date.now()}`,
+    });
+    return { replyText: reply.text.trim() };
+  });
+
+  // 通话中用户回复（phone.call_reply → deliverCallReply）：进 Agent 对话，回应经 TTS 推回通话
+  virtualPhoneService.setUserReplyHandler(async ({ callId, fromActorId, toUserId, text }) => {
+    const prompt = `【通话中用户回复】用户在当前通话中说了：「${text}」。请用简短中文口语直接回应（将转为语音播报），不要输出 Markdown。`;
+    const reply = await agentCore.handleUserMessage(fromActorId, prompt, {
+      chatUserMessageId: `phone-reply:${callId}:${Date.now()}`,
+      preferFullPipeline: true,
+    });
+    await agentCore.runToolIfNeeded(fromActorId, reply, {
+      chatUserMessageId: `phone-reply-tool:${callId}:${Date.now()}`,
+    });
+    const replyText = reply.text.trim() || "抱歉，我刚才没听清，麻烦您再说一遍。";
+    await virtualPhoneService.pushVoiceReply(callId, toUserId, replyText);
+  });
+
   scheduleTaskService.setAgentTaskHandler(async (task) => {
     const prompt = task.agentTask?.prompt?.trim();
     if (!prompt) {
@@ -3462,13 +3506,16 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ─── 统一主动性管道装配（docs/proactivity-architecture.md §4）───
   // 触发源只提交提案；管道承担 去重 → 仲裁（过期/负反馈抑制/静默择时/分层预算/在场择时，
-  // 纯规则零 LLM）→ 投递（在线 WS 直投 / 离线 MessageHub 落库必达）→ outcome 回传自适应冷却。
+  // 纯规则零 LLM）→ 投递（全部在线设备 fan-out 直推，两端离线升级手机推送）→ outcome 回传自适应冷却。
   // 频控与 hub 共用 proactivityGovernor（单一预算口径）；known actor 状态随管道落盘重启恢复，
   // 重启后 hub 才能在用户开口前自主发起问候。
-  wsConnectionRegistry.onConnectionChange = (actorId, connected) =>
-    connected
-      ? proactivityPresence.markConnected(actorId)
-      : proactivityPresence.markDisconnected(actorId);
+  const proactivePushService = new MobilePushService({
+    registryPath: join(process.cwd(), "data", "proactivity", "push-tokens.json"),
+  });
+  // 助手动态台账：action.* 代办提案投递成功后落一条记录，右侧面板「助手动态」卡读取
+  const agentActivityStore = new AgentActivityStore(
+    join(process.cwd(), "data", "proactivity", "activities.json"),
+  );
   const proactivePipeline = new ProactivePipeline({
     dataPath: join(process.cwd(), "data", "proactivity"),
     governor: proactivityGovernor,
@@ -3476,7 +3523,18 @@ export async function createAppServices(): Promise<AppServices> {
     presence: proactivityPresence,
     delivery: new ProactiveDeliveryService({
       trySend: (actorId, json) => wsConnectionRegistry.trySend(actorId, json),
-      offlineStore: messageHubService,
+      ledger: {
+        record: (p) =>
+          agentActivityStore.record({
+            actorId: p.actorId,
+            kind: p.kind,
+            title: p.title,
+            summary: p.summary,
+            // status 不传：由 store 按 kind 推导（schedule_change → 已调整，其余 → 已完成）
+            detail: p.detail,
+            dedupKey: p.dedupKey,
+          }),
+      },
     }),
     outcomes: new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json")),
     // 无 directText 的提案走 speak 闭环（现有 ProactionCortex 话术——管道唯一 LLM 调用点）
@@ -3492,9 +3550,39 @@ export async function createAppServices(): Promise<AppServices> {
       }),
     exportActors: () => proactivityHub.exportActors(),
     restoreActors: (entries) => proactivityHub.restoreActors(entries),
+    // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
+    // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
+    mobilePush: proactivePushService,
   });
   proactivePipeline.start();
-  // 到点提醒 WS 推送失败（人不在电脑前）→ 管道提案 directText 零 LLM → MessageHub 离线必达
+  // 在场感知接线：任一设备连上即刷新在场并立即直推挂起的提醒（电脑不在线→手机一连就弹窗）；
+  // 全部设备断开才判离线（提案挂起待重连，不落离线信箱）
+  wsConnectionRegistry.onConnectionChange = (actorId, connected) => {
+    if (connected) {
+      proactivityPresence.markConnected(actorId);
+      proactivePipeline.flushDue();
+    } else {
+      proactivityPresence.markDisconnected(actorId);
+    }
+  };
+  // 消息监控触发器：手机入站消息（微信桥/通用消息桥统一汇入 MessageHub）落库后
+  // 识别「日程变动」信号（延迟/改期/取消×会议/时间语境，零 LLM 规则）→ 主动提案。
+  // 投递成功后由 delivery 层按 action.* 前缀自动落入代办足迹台账。
+  const messageWatchTrigger = new MessageWatchTrigger({
+    submitProposal: (p) => {
+      proactivePipeline.submitProposal(p);
+    },
+    // MESSAGE_WATCH_IMPORTANCE=critical 时夜间立即投递（默认 high：静默时段顺延到早7点）
+    importance:
+      process.env.MESSAGE_WATCH_IMPORTANCE?.trim().toLowerCase() === "critical"
+        ? "critical"
+        : undefined,
+  });
+  messageHubService.onInbound = (input) => {
+    messageWatchTrigger.handleInbound(input);
+  };
+  // 到点提醒 WS 推送失败（两端都不在线）→ 管道提案 directText 零 LLM → 挂起待重连直推，
+  // 或升级手机系统推送（proactivePushService 已配置时）
   onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt) => {
     proactivePipeline.submitProposal({
       proposalId: `p_${Date.now().toString(36)}_rm${taskId.slice(-6)}`,
@@ -3546,6 +3634,8 @@ export async function createAppServices(): Promise<AppServices> {
     scheduleIntentService,
     proactivitySuppressionStore,
     proactivePipeline,
+    proactivePushService,
+    agentActivityStore,
     infoHubService,
     upstreamSearchService,
     worldService,

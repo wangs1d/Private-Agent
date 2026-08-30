@@ -8,8 +8,8 @@ import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
  * 避免 LLM 在事实型问题上编造。
  *
  * 规则：
- * 1. 显式电话请求 → 强制 phone_call_user
- * 2. 直接时间/日期/位置问题 → 强制 clock_get_current_time（Fast 模式跳过：
+ * 1. 显式电话请求 → 强制 phone.call_user
+ * 2. 直接时间/日期/位置问题 → 强制 clock.get_current_time（Fast 模式跳过：
  *    system prompt 已注入 currentTime/userLocation，强制调用徒增 1 次 round trip）
  * 3. 时效性事实查询 → 强制 search_web
  *
@@ -61,13 +61,15 @@ export function resolveForcedToolChoice(
   apiTools: ChatCompletionTool[],
   fastProfile?: boolean,
 ): ForcedToolChoice {
-  // 1. 显式电话请求 → 强制 phone_call_user
+  // 1. 显式电话请求 → 强制 phone.call_user
+  //    ⚠️ 工具名以注册名为准（点号分族，见 agent-phone-tools.ts）；
+  //    旧实现写成下划线 phone_call_user，与注册名永不匹配，等于死分支。
   if (isExplicitPhoneCallRequest(userText)) {
     const hasPhoneCallTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "phone_call_user",
+      (tool) => tool.type === "function" && tool.function?.name === "phone.call_user",
     );
     if (hasPhoneCallTool) {
-      return { type: "function", function: { name: "phone_call_user" } };
+      return { type: "function", function: { name: "phone.call_user" } };
     }
   }
 
@@ -76,10 +78,10 @@ export function resolveForcedToolChoice(
   //    跳过强制省 1 次 round trip（LLM→tool→LLM 共 3 次网络往返）。
   if (!fastProfile && DIRECT_CLOCK_OR_LOCATION_RE.test(userText)) {
     const hasClockTool = apiTools.some(
-      (tool) => tool.type === "function" && tool.function?.name === "clock_get_current_time",
+      (tool) => tool.type === "function" && tool.function?.name === "clock.get_current_time",
     );
     if (hasClockTool) {
-      return { type: "function", function: { name: "clock_get_current_time" } };
+      return { type: "function", function: { name: "clock.get_current_time" } };
     }
   }
 

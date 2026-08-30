@@ -93,6 +93,10 @@ export class MessageHubService {
 
   constructor(private readonly filePath: string) {}
 
+  /** 入站消息统一回调（bootstrap 装配 proactivity 消息监控触发器用）：
+   * 每条 inbound 落库后同步触发；回调自身异常已在触发器内静默，不影响落库。 */
+  onInbound?: (input: MessageHubInboundInput, message: MessageHubMessage) => void;
+
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, "utf8");
@@ -187,6 +191,7 @@ export class MessageHubService {
     };
     this.store.messages.push(message);
     await this.persist();
+    this.onInbound?.(input, message);
     return { conversation, message };
   }
 

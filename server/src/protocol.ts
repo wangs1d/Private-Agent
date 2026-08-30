@@ -38,6 +38,10 @@ export const ClientEventType = {
   VirtualPhoneCallMyAgent: "phone.call_my_agent",
   /** 用户对「其他 Agent 虚拟来电」的响应：接听 / 拒接 / 委托 Agent 代接 */
   VirtualPhoneIncomingResponse: "phone.incoming_response",
+  /** 通话中用户回复：携带 callId + 文本（打字输入或客户端本地 ASR 转写），进通话回复总线 */
+  VirtualPhoneCallReply: "phone.call_reply",
+  /** 用户挂断当前通话：服务端推送 ended 状态并清理通话会话 */
+  VirtualPhoneCallHangup: "phone.call_hangup",
   /** 球形 Agent 具身交互：唤醒、发消息、聚焦聊天等 */
   AgentEmbodimentInteract: "agent.embodiment.interact",
   /** 客户端回报球形窗口在屏幕上的位置（配合 embodiment.observe 闭环） */
@@ -69,6 +73,12 @@ export const ClientEventType = {
   DeviceCapabilitiesUpdate: "device.capabilities_update",
   /** 客户端回传实时位置（响应 agent.location_request，或天气面板主动上报） */
   LocationReport: "client.location_report",
+  /**
+   * 客户端上报语音模式切换（进入/退出纯语音模式）。
+   * 服务端记录 per-actor 状态（proactivity/voice-mode-state），供诊断与
+   * 后续主动消息投递通道矩阵（语音播报 vs 原生弹窗）消费。
+   */
+  ModeChanged: "mode.changed",
   /** 心跳检测 */
   Ping: "ping",
 } as const;
@@ -147,6 +157,12 @@ export const ServerEventType = {
    * 仅在 ringing_start 之后发送；若不需要前摇则直接发 incoming（向后兼容）。
    */
   VirtualPhoneCallConnecting: "agent.phone.call_connecting",
+  /**
+   * 通话中 Agent 语音回应 —— 用户在通话里回复（phone.call_reply）后，
+   * Agent 的后续回应以此事件推回（含 TTS 音频 + transcript），客户端在通话 UI 内续播。
+   * 与 call_connecting 的区别：call_connecting 只出现在接通瞬间，voice_reply 用于通话中的多轮交互。
+   */
+  VirtualPhoneVoiceReply: "agent.phone.voice_reply",
   /** 电脑端桥接绑定成功 */
   DesktopBridgeRegisterAck: "desktop.bridge.register_ack",
   /** 发往电脑端：执行一轮纯视觉桌面任务 */
@@ -240,6 +256,13 @@ export const ServerEventType = {
    * 客户端收到后拉 GPS，通过 `client.location_report` 回传（携带相同 jobId）。
    */
   LocationRequest: "agent.location_request",
+  /**
+   * Surface-on-Demand：服务端（`surface.show` 工具）要求客户端展示一个
+   * 按需召唤的信息面板（如"今日安排"悬浮窗）。客户端按 surface 名执行，
+   * 不支持的面板静默忽略；ttlSeconds 后自动淡出。
+   * payload: { surface: string, ttlSeconds?: number, jobId?: string }
+   */
+  SurfaceShow: "surface.show",
 } as const;
 
 // ============================================================

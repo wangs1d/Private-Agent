@@ -1,30 +1,30 @@
-import "dart:async" show unawaited;
-import "dart:convert" show jsonDecode;
-import "dart:math" show max, min;
+import "dart:async" show Timer, unawaited;
 
 import "package:flutter/foundation.dart" show kIsWeb, defaultTargetPlatform;
 import "package:flutter/material.dart";
-import "package:http/http.dart" as http;
 
-import "../../core/config/api_config.dart";
 import "../../core/models/schedule_models.dart";
-import "../../core/services/client_location_service.dart";
 import "../../core/services/desk_pet_session.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
+import "agent_activity_section.dart";
 
 const Color _kAccentBlue = Color(0xFF18D6F3);
-const Color _kAccentGreen = Color(0xFF1ED7A6);
-const Color _kAccentOrange = Color(0xFFD7B85A);
 
 /// 右侧快捷功能面板的固定宽度。
 /// 优化后收窄到 220px，减少视觉压迫感，让聊天区更开阔。
 const double kRightSidePanelWidth = 220.0;
 
+/// 时间轴单行高度（标题固定单行省略，行高恒定才能让竖向点线精确对齐圆点圆心）。
+const double _kTimelineRowHeight = 24.0;
+
+/// 时间轴最多展示的行数，超出的折叠进底部「查看全部」。
+const int _kMaxVisibleEvents = 5;
+
 /// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
 /// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
 /// （与日程页完整标题区分，也与桌面悬浮窗的 web 端逻辑保持一致）。
-String _simplifyScheduleTitle(String raw) {
+String simplifyScheduleTitle(String raw) {
   String s = raw.trim();
   if (s.isEmpty) return s;
 
@@ -73,7 +73,9 @@ String _simplifyScheduleTitle(String raw) {
 /// 设计理念：简洁、轻盈、不抢视线
 /// - 去掉厚重卡片阴影，改用细腻的分隔线区分区块
 /// - 工具图标更紧凑，一屏展示全部，无需展开/收起
-/// - 日程只展示最近 3 条，保持面板精简
+/// - 「今日安排」采用焦点时间轴卡片（设计稿
+///   docs/design/today-schedule-redesign）：24h 日程带 + 下一事项焦点卡 +
+///   时间轴列表，now 游标与倒计时每 30s 刷新
 class RightSidePanel extends StatefulWidget {
   const RightSidePanel({
     super.key,
@@ -82,7 +84,6 @@ class RightSidePanel extends StatefulWidget {
     this.onSchedule,
     this.onPhone,
     this.onMessages,
-    this.onReportLocation,
   });
 
   final Future<List<ScheduleEvent>>? scheduleFuture;
@@ -91,33 +92,24 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
 
-  /// 天气面板拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
-  final void Function(Map<String, dynamic> location)? onReportLocation;
 
   @override
   State<RightSidePanel> createState() => _RightSidePanelState();
 }
 
-class _RightSidePanelState extends State<RightSidePanel>
-    with SingleTickerProviderStateMixin {
+class _RightSidePanelState extends State<RightSidePanel> {
   bool _useDesktopFloating = false;
-  late AnimationController _breatheController;
-  late Animation<double> _breatheOpacity;
+  /// 焦点卡 hover 态：描边增亮。
+  bool _focusHover = false;
+  /// 周期刷新：让 now 游标、「接下来 · X分钟后」倒计时随时间前进。
+  Timer? _scheduleTicker;
 
   @override
   void initState() {
     super.initState();
-    _breatheController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-    _breatheOpacity = Tween<double>(
-      begin: 0.08,
-      end: 0.35,
-    ).animate(CurvedAnimation(
-      parent: _breatheController,
-      curve: Curves.easeInOut,
-    ));
+    _scheduleTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
     DeskPetSession.instance.addListener(_onDeskPetChanged);
     ScheduleFloatingLauncher.bindHandlers(
       onCloseClicked: () {
@@ -146,7 +138,7 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   @override
   void dispose() {
-    _breatheController.dispose();
+    _scheduleTicker?.cancel();
     DeskPetSession.instance.removeListener(_onDeskPetChanged);
     ScheduleFloatingLauncher.activeNotifier
         .removeListener(_onScheduleWindowChanged);
@@ -159,6 +151,7 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   Future<void> _loadSchedulePreference() async {
     final ScheduleDisplayMode mode = await SchedulePreference.getDisplayMode();
+    debugPrint("[RightSidePanel] displayMode=$mode");
     if (mounted) {
       setState(() {
         _useDesktopFloating = mode == ScheduleDisplayMode.desktopFloating;
@@ -171,6 +164,7 @@ class _RightSidePanelState extends State<RightSidePanel>
 
   Future<void> _launchDesktopScheduleWindow() async {
     final bool launched = await ScheduleFloatingLauncher.launch();
+    debugPrint("[RightSidePanel] floating launched=$launched");
     ScheduleFloatingLauncher.activeNotifier
         .addListener(_onScheduleWindowChanged);
     if (launched) {
@@ -179,9 +173,14 @@ class _RightSidePanelState extends State<RightSidePanel>
   }
 
   void _pushScheduleToNativeWindow() {
+    if (!mounted) return;
     final Future<List<ScheduleEvent>>? future = widget.scheduleFuture;
+    // 悬浮窗按物理像素自绘，用宿主 DPR 把逻辑布局缩放到与 in-app 面板一致
+    final double dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    debugPrint("[RightSidePanel] float dpr=$dpr");
     if (future == null) {
-      ScheduleFloatingLauncher.setSchedule(<ScheduleFloatingItem>[]);
+      ScheduleFloatingLauncher.setSchedule(<ScheduleFloatingItem>[],
+          devicePixelRatio: dpr);
       return;
     }
     future.then((List<ScheduleEvent> events) {
@@ -194,11 +193,12 @@ class _RightSidePanelState extends State<RightSidePanel>
                 id: e.id,
                 timeText:
                     "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}",
-                title: e.shortTitle ?? _simplifyScheduleTitle(e.title),
+                title: e.shortTitle ?? simplifyScheduleTitle(e.title),
+                notes: (e.notes ?? "").trim(),
                 completed: !e.startAt.isAfter(now),
               ))
           .toList();
-      ScheduleFloatingLauncher.setSchedule(items);
+      ScheduleFloatingLauncher.setSchedule(items, devicePixelRatio: dpr);
     });
   }
 
@@ -280,8 +280,6 @@ class _RightSidePanelState extends State<RightSidePanel>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            // 顶部天气 Header：与面板融为一体，顶部贴合
-            _WeatherHeader(onReportLocation: widget.onReportLocation),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -289,57 +287,14 @@ class _RightSidePanelState extends State<RightSidePanel>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
+                    // 助手动态卡：Agent 主动代办结果台账（顶替原天气 Header 的面板首位）
+                    const AgentActivitySection(),
+                    const SizedBox(height: 12),
                     if (!_useDesktopFloating) ...<Widget>[
-                    AnimatedBuilder(
-                      animation: _breatheOpacity,
-                      builder: (context, child) {
-                        return Container(
-                          decoration: BoxDecoration(
-                            border: Border(
-                              top: BorderSide(
-                              color: cs.outline.withValues(
-                                  alpha: _breatheOpacity.value,
-                                ),
-                              ),
-                              bottom: BorderSide(
-                                color: cs.outline.withValues(
-                                  alpha: _breatheOpacity.value,
-                                ),
-                              ),
-                            ),
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          child: child,
-                        );
-                      },
-                      child: _buildScheduleSection(cs),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  AnimatedBuilder(
-                    animation: _breatheOpacity,
-                    builder: (context, child) {
-                      return Container(
-                        decoration: BoxDecoration(
-                          border: Border(
-                            top: BorderSide(
-                              color: cs.outline.withValues(
-                                  alpha: _breatheOpacity.value,
-                                ),
-                            ),
-                            bottom: BorderSide(
-                                color: cs.outline.withValues(
-                                  alpha: _breatheOpacity.value,
-                                ),
-                            ),
-                          ),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        child: child,
-                      );
-                    },
-                    child: _buildToolsSection(cs),
-                  ),
+                      _buildScheduleSection(),
+                      const SizedBox(height: 16),
+                    ],
+                    _buildToolsSection(cs),
                   ],
                 ),
               ),
@@ -352,214 +307,753 @@ class _RightSidePanelState extends State<RightSidePanel>
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 日程区块：精简展示最近 3 条，轻量分割线
+  // 日程区块：「焦点时间轴」卡片
+  // 头部完成计数 + 24h 日程带（now 游标）+ 下一事项焦点卡 + 时间轴列表
   // ═══════════════════════════════════════════════════════════
-  Widget _buildScheduleSection(ColorScheme cs) {
-    final DateTime now = DateTime.now();
-    final String dateLabel =
-        "${now.month}月${now.day}日 ${_weekdayLabel(now.weekday)}";
+  Widget _buildScheduleSection() {
+    final _SchedSkin skin = _SchedSkin.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+      decoration: BoxDecoration(
+        color: skin.cardFill,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: skin.cardBorder),
+        boxShadow: skin.cardShadow,
+      ),
+      child: FutureBuilder<List<ScheduleEvent>>(
+        future: widget.scheduleFuture,
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<List<ScheduleEvent>> snapshot,
+        ) {
+          final bool waiting = snapshot.connectionState ==
+                  ConnectionState.waiting &&
+              snapshot.data == null;
+          final List<ScheduleEvent> items = (snapshot.data ??
+                  <ScheduleEvent>[])
+              ..sort((a, b) => a.startAt.compareTo(b.startAt));
+          final DateTime now = DateTime.now();
+          final int doneCount =
+              items.where((e) => !e.startAt.isAfter(now)).length;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: Row(
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              const Icon(Icons.calendar_today_outlined,
-                  size: 14, color: _kAccentBlue),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  "今日安排",
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: cs.onSurface,
-                    letterSpacing: 0.2,
-                  ),
-                ),
-              ),
-              Text(
-                dateLabel,
-                style: TextStyle(
-                    fontSize: 10,
-                    color: cs.onSurfaceVariant,
-                    fontWeight: FontWeight.w500),
-              ),
-              const SizedBox(width: 4),
-              _ScheduleModeCircleButton(
-                active: _useDesktopFloating,
-                onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 10),
-        if (widget.scheduleFuture == null)
-          _buildEmptySchedule(cs)
-        else
-          FutureBuilder<List<ScheduleEvent>>(
-            future: widget.scheduleFuture,
-            builder: (
-              BuildContext context,
-              AsyncSnapshot<List<ScheduleEvent>> snapshot,
-            ) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(12),
+              _buildScheduleHeader(skin, doneCount, items.length,
+                  showCount: !waiting),
+              const SizedBox(height: 10),
+              _buildDayStrip(skin, items, now),
+              if (waiting)
+                const SizedBox(
+                  height: 44,
+                  child: Center(
                     child: SizedBox(
                       width: 14,
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   ),
-                );
-              }
-              final List<ScheduleEvent> items =
-                  (snapshot.data ?? <ScheduleEvent>[])
-                    ..sort((a, b) => a.startAt.compareTo(b.startAt));
-              if (items.isEmpty) {
-                return _buildEmptySchedule(cs);
-              }
-              // 只展示最近 3 条，保持面板精简
-              final List<ScheduleEvent> visible =
-                  items.take(3).toList();
-              final int hiddenCount = items.length - visible.length;
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  ...visible.map((ScheduleEvent e) {
-                    final String time =
-                        "${e.startAt.hour.toString().padLeft(2, '0')}:${e.startAt.minute.toString().padLeft(2, '0')}";
-                    return _buildScheduleRow(e, time, cs);
-                  }),
-                  if (hiddenCount > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(6),
-                          onTap: widget.onSchedule,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                vertical: 4, horizontal: 4),
-                            child: Row(
-                              children: <Widget>[
-                                const SizedBox(width: 84),
-                                Text(
-                                  "还有 $hiddenCount 项安排",
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: cs.onSurfaceVariant,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                const Spacer(),
-                                Icon(
-                                  Icons.chevron_right,
-                                  size: 14,
-                                  color: cs.onSurfaceVariant,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              );
-            },
+                )
+              else if (items.isEmpty)
+                _buildEmptySchedule(skin)
+              else ...<Widget>[
+                _buildFocusArea(skin, items, now),
+                _buildTimeline(skin, items, now),
+                _buildScheduleFooter(skin, items, now),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildScheduleHeader(
+    _SchedSkin skin,
+    int done,
+    int total, {
+    required bool showCount,
+  }) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 20,
+          height: 20,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(6),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: skin.chipGradient,
+            ),
           ),
+          child: Icon(Icons.calendar_today_outlined,
+              size: 11, color: skin.accent),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            "今日安排",
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: skin.titleText,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ),
+        if (showCount && total > 0) ...<Widget>[
+          Text.rich(
+            TextSpan(children: <TextSpan>[
+              TextSpan(
+                text: "$done",
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: skin.accentSoft),
+              ),
+              TextSpan(
+                text: "/$total",
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: skin.mutedText),
+              ),
+            ]),
+          ),
+          const SizedBox(width: 8),
+        ],
+        _ScheduleModeCircleButton(
+          active: _useDesktopFloating,
+          onTap: () => _onDesktopFloatingToggled(!_useDesktopFloating),
+        ),
       ],
     );
   }
 
-  Widget _buildEmptySchedule(ColorScheme cs) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-      child: Row(
-        children: <Widget>[
-          const SizedBox(width: 84),
-          Text(
-            "今天还没有安排",
-            style: TextStyle(
+  /// 24h 日程带：事项按真实时间落成彩色刻度，游标指示「现在」。
+  Widget _buildDayStrip(
+    _SchedSkin skin,
+    List<ScheduleEvent> events,
+    DateTime now,
+  ) {
+    final ScheduleEvent? next = _nextEvent(events, now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints c) {
+            final double w = c.maxWidth;
+            double frac(DateTime t) =>
+                ((t.hour * 60 + t.minute) / 1440.0).clamp(0.0, 1.0);
+            final double nowX = frac(now) * w;
+            return SizedBox(
+              height: 14,
+              width: w,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: <Widget>[
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 5,
+                    child: Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: skin.track,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                  // 已流逝时段：底色渐入强调色
+                  if (nowX > 2)
+                    Positioned(
+                      left: 0,
+                      top: 5,
+                      child: Container(
+                        height: 4,
+                        width: nowX,
+                        decoration: BoxDecoration(
+                          borderRadius: const BorderRadius.horizontal(
+                            left: Radius.circular(4),
+                            right: Radius.circular(2),
+                          ),
+                          gradient: LinearGradient(colors: <Color>[
+                            skin.elapsedStart,
+                            skin.elapsedEnd,
+                          ]),
+                        ),
+                      ),
+                    ),
+                  for (final ScheduleEvent e in events)
+                    _buildStripTick(skin, e, frac(e.startAt) * w, w, next, now),
+                  // now 游标
+                  Positioned(
+                    left: (nowX - 1).clamp(0.0, w - 2),
+                    top: 1,
+                    child: Container(
+                      width: 2,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: skin.needle,
+                        borderRadius: BorderRadius.circular(2),
+                        boxShadow: <BoxShadow>[
+                          BoxShadow(
+                              color: skin.needleGlow, blurRadius: 6),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 3),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: List<Text>.generate(
+            5,
+            (int i) => Text(
+              "${i * 6}点",
+              style: TextStyle(
+                  fontSize: 8.5,
+                  color: skin.tickLabel,
+                  fontWeight: FontWeight.w500),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Positioned _buildStripTick(
+    _SchedSkin skin,
+    ScheduleEvent e,
+    double pos,
+    double stripWidth,
+    ScheduleEvent? next,
+    DateTime now,
+  ) {
+    final bool passed = !e.startAt.isAfter(now);
+    final bool isNext = identical(e, next);
+    final double size = isNext ? 5.0 : 4.0;
+    return Positioned(
+      left: (pos - size / 2).clamp(0.0, stripWidth - size),
+      top: isNext ? 4.5 : 5,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: passed
+              ? skin.doneDotFill
+              : (isNext ? skin.accent : _categoryDot(skin, e.startAt.hour)),
+          borderRadius: BorderRadius.circular(isNext ? 2 : 4),
+          boxShadow: isNext
+              ? <BoxShadow>[BoxShadow(color: skin.needleGlow, blurRadius: 5)]
+              : null,
+        ),
+      ),
+    );
+  }
+
+  /// 焦点区：下一个事项强调卡（倒计时 + 备注），全部完成时显示完成横幅。
+  Widget _buildFocusArea(
+    _SchedSkin skin,
+    List<ScheduleEvent> items,
+    DateTime now,
+  ) {
+    final ScheduleEvent? next = _nextEvent(items, now);
+    if (next == null) {
+      return Container(
+        margin: const EdgeInsets.only(top: 10),
+        padding:
+            const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: BoxDecoration(
+          color: skin.dotGreen.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+          border:
+              Border.all(color: skin.dotGreen.withValues(alpha: 0.25)),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(Icons.check_circle_outline,
+                size: 12, color: skin.dotGreen),
+            const SizedBox(width: 6),
+            Text(
+              "今日安排已全部完成",
+              style: TextStyle(
                 fontSize: 11,
-                color: cs.onSurfaceVariant,
-                fontWeight: FontWeight.w400),
+                fontWeight: FontWeight.w600,
+                color: skin.dotGreen,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final String? notes = next.notes?.trim();
+    return MouseRegion(
+      onEnter: (_) {
+        if (!_focusHover) setState(() => _focusHover = true);
+      },
+      onExit: (_) {
+        if (_focusHover) setState(() => _focusHover = false);
+      },
+      child: Container(
+        margin: const EdgeInsets.only(top: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(10),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: skin.focusGradient,
+          ),
+          border: Border.all(
+            color: _focusHover ? skin.focusBorderHover : skin.focusBorder,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: widget.onSchedule,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 9),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    "接下来 · ${_countdownLabel(next.startAt, now)}",
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1,
+                      color: skin.accentSoft,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: <Widget>[
+                      Text(
+                        _formatTime(next.startAt),
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: skin.focusTime,
+                          fontFeatures: const <FontFeature>[
+                            FontFeature.tabularFigures(),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          _displayTitle(next),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: skin.bodyText,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (notes != null && notes.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: <Widget>[
+                        Icon(Icons.location_on_outlined,
+                            size: 10, color: skin.focusNote),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            notes,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 10, color: skin.focusNote),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 时间轴列表：点线结构，圆点压在竖线上，行高恒定保证对齐。
+  Widget _buildTimeline(
+    _SchedSkin skin,
+    List<ScheduleEvent> items,
+    DateTime now,
+  ) {
+    final ScheduleEvent? next = _nextEvent(items, now);
+    final List<ScheduleEvent> visible =
+        items.take(_kMaxVisibleEvents).toList();
+    final int n = visible.length;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: SizedBox(
+        height: n * _kTimelineRowHeight,
+        child: Stack(
+          children: <Widget>[
+            // 竖向点线：从首行圆心连到末行圆心（46.25 = 38 时间列 + 18 节点列一半 - 线宽一半）
+            if (n > 1)
+              Positioned(
+                left: 46.25,
+                top: _kTimelineRowHeight / 2,
+                width: 1.5,
+                height: (n - 1) * _kTimelineRowHeight,
+                child: ColoredBox(color: skin.line),
+              ),
+            Column(
+              children: List<Widget>.generate(n, (int i) {
+                final ScheduleEvent e = visible[i];
+                return _buildTimelineRow(
+                  skin,
+                  e,
+                  passed: !e.startAt.isAfter(now),
+                  isNext: identical(e, next),
+                );
+              }),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimelineRow(
+    _SchedSkin skin,
+    ScheduleEvent e, {
+    required bool passed,
+    required bool isNext,
+  }) {
+    return SizedBox(
+      height: _kTimelineRowHeight,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: skin.rowHover,
+          onTap: widget.onSchedule,
+          child: Row(
+            children: <Widget>[
+              SizedBox(
+                width: 38,
+                child: Text(
+                  _formatTime(e.startAt),
+                  maxLines: 1,
+                  overflow: TextOverflow.clip,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: passed
+                        ? skin.dimTime
+                        : (isNext ? skin.accent : skin.mutedText),
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures(),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: 18,
+                child: Center(
+                  child: passed
+                      ? _buildDoneDot(skin)
+                      : _buildEventDot(
+                          skin,
+                          color: isNext
+                              ? skin.accent
+                              : _categoryDot(skin, e.startAt.hour),
+                          glow: isNext,
+                        ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  _displayTitle(e),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight:
+                        isNext ? FontWeight.w600 : FontWeight.w400,
+                    color: passed
+                        ? skin.dimTitle
+                        : (isNext ? skin.titleText : skin.bodyText),
+                    decoration: passed
+                        ? TextDecoration.lineThrough
+                        : null,
+                    decorationColor: skin.dimStrike,
+                  ),
+                ),
+              ),
+              if (isNext) ...<Widget>[
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: skin.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    "NOW",
+                    style: TextStyle(
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
+                      color: skin.accentSoft,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDoneDot(_SchedSkin skin) {
+    return Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(
+        color: skin.doneDotFill,
+        shape: BoxShape.circle,
+        border: Border.all(color: skin.doneDotRing, width: 1.5),
+      ),
+    );
+  }
+
+  Widget _buildEventDot(_SchedSkin skin,
+      {required Color color, required bool glow}) {
+    return Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: color.withValues(alpha: glow ? 0.35 : 0.18),
+            spreadRadius: glow ? 3 : 2.5,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildScheduleRow(ScheduleEvent event, String time, ColorScheme cs) {
-    // 已过时间（视为已完成）的事项：删除线 + 变淡，与日程页的完整卡片样式区分
-    final bool passed = !event.startAt.isAfter(DateTime.now());
-    final Color timeColor;
-    if (passed) {
-      timeColor = cs.onSurfaceVariant.withValues(alpha: 0.35);
-    } else {
-      final int hour = event.startAt.hour;
-      if (hour < 10) {
-        timeColor = _kAccentBlue;
-      } else if (hour < 14) {
-        timeColor = _kAccentOrange;
-      } else if (hour < 18) {
-        timeColor = _kAccentGreen;
-      } else {
-        timeColor = cs.onSurfaceVariant;
-      }
-    }
-
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: widget.onSchedule,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 4),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              SizedBox(
-                width: 34,
-                child: Text(
-                  time,
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w600,
-                    color: timeColor,
-                  ),
+  Widget _buildScheduleFooter(
+    _SchedSkin skin,
+    List<ScheduleEvent> items,
+    DateTime now,
+  ) {
+    final int hidden = items.length - _kMaxVisibleEvents;
+    if (hidden <= 0) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: widget.onSchedule,
+          child: Padding(
+            padding:
+                const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                Text.rich(
+                  TextSpan(children: <TextSpan>[
+                    TextSpan(
+                      text: "还有 ",
+                      style: TextStyle(
+                          fontSize: 10,
+                          color: skin.mutedText,
+                          fontWeight: FontWeight.w500),
+                    ),
+                    TextSpan(
+                      text: "$hidden",
+                      style: TextStyle(
+                          fontSize: 10,
+                          color: skin.accentSoft,
+                          fontWeight: FontWeight.w700),
+                    ),
+                    TextSpan(
+                      text: " 项安排 · 查看全部 ›",
+                      style: TextStyle(
+                          fontSize: 10,
+                          color: skin.mutedText,
+                          fontWeight: FontWeight.w500),
+                    ),
+                  ]),
                 ),
-              ),
-              // 标题与时间保持至少 50px 间距，向右靠不挨着时间
-              const SizedBox(width: 50),
-              Expanded(
-                child: Text(
-                  // 优先使用创建时由 LLM 生成的简洁展示标题，旧数据回退到剥离简化
-                  event.shortTitle ?? _simplifyScheduleTitle(event.title),
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: passed
-                        ? cs.onSurface.withValues(alpha: 0.35)
-                        : cs.onSurface,
-                    fontWeight: FontWeight.w400,
-                    decoration: passed ? TextDecoration.lineThrough : null,
-                    decorationColor: cs.onSurface.withValues(alpha: 0.4),
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
+  }
+
+  /// 空状态：插画式空态 + 一句话引导 + 新建入口。
+  Widget _buildEmptySchedule(_SchedSkin skin) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 6),
+      child: Column(
+        children: <Widget>[
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: skin.chipGradient,
+              ),
+              border: Border.all(
+                  color: skin.accent.withValues(alpha: 0.22)),
+            ),
+            child: Stack(
+              children: <Widget>[
+                Positioned(
+                  top: 9,
+                  left: 10,
+                  right: 10,
+                  child: Container(
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: skin.accent.withValues(alpha: 0.45),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                for (final (double dx, double dy) in const <(double, double)>[
+                  (10, 20),
+                  (27, 20),
+                  (10, 29),
+                  (27, 29),
+                ])
+                  Positioned(
+                    top: dy,
+                    left: dx,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: skin.emptyCell,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            "今天还没有安排",
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: skin.titleText,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "对我说「明天 9 点提醒我开会」\n我来帮你记录并到点提醒",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 10,
+              height: 1.5,
+              color: skin.mutedText,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(999),
+              onTap: widget.onSchedule,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 5),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(999),
+                  color: skin.accent.withValues(alpha: 0.08),
+                  border: Border.all(
+                      color: skin.accent.withValues(alpha: 0.35)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(Icons.add, size: 11, color: skin.accentSoft),
+                    const SizedBox(width: 5),
+                    Text(
+                      "新建安排",
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: skin.accentSoft,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _categoryDot(_SchedSkin skin, int hour) {
+    if (hour < 10) return skin.dotBlue;
+    if (hour < 14) return skin.dotAmber;
+    if (hour < 18) return skin.dotGreen;
+    return skin.dotGray;
+  }
+
+  ScheduleEvent? _nextEvent(List<ScheduleEvent> items, DateTime now) {
+    for (final ScheduleEvent e in items) {
+      if (e.startAt.isAfter(now)) return e;
+    }
+    return null;
+  }
+
+  String _formatTime(DateTime t) =>
+      "${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}";
+
+  String _countdownLabel(DateTime target, DateTime now) {
+    final Duration d = target.difference(now);
+    if (d.inMinutes < 1) return "马上开始";
+    if (d.inHours < 1) return "${d.inMinutes}分钟后";
+    final int h = d.inHours;
+    final int m = d.inMinutes - h * 60;
+    return m == 0 ? "$h小时后" : "$h小时$m分后";
+  }
+
+  /// 展示标题：优先 LLM 生成的简洁标题，旧数据回退剥离简化。
+  String _displayTitle(ScheduleEvent e) {
+    final String? short = e.shortTitle?.trim();
+    if (short != null && short.isNotEmpty) return short;
+    return simplifyScheduleTitle(e.title);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -674,19 +1168,157 @@ class _RightSidePanelState extends State<RightSidePanel>
     );
   }
 
-  String _weekdayLabel(int weekday) {
-    const List<String> labels = <String>[
-      "",
-      "周一",
-      "周二",
-      "周三",
-      "周四",
-      "周五",
-      "周六",
-      "周日"
-    ];
-    return labels[weekday];
-  }
+}
+
+/// 「今日安排」卡片的配色皮肤：深色 / 暖色两套，
+/// 与 docs/design/today-schedule-redesign 设计稿一一对应。
+class _SchedSkin {
+  const _SchedSkin({
+    required this.accent,
+    required this.accentSoft,
+    required this.titleText,
+    required this.bodyText,
+    required this.mutedText,
+    required this.cardFill,
+    required this.cardBorder,
+    required this.cardShadow,
+    required this.track,
+    required this.elapsedStart,
+    required this.elapsedEnd,
+    required this.doneDotFill,
+    required this.doneDotRing,
+    required this.line,
+    required this.dotBlue,
+    required this.dotAmber,
+    required this.dotGreen,
+    required this.dotGray,
+    required this.focusGradient,
+    required this.focusBorder,
+    required this.focusBorderHover,
+    required this.focusNote,
+    required this.focusTime,
+    required this.chipGradient,
+    required this.needle,
+    required this.needleGlow,
+    required this.tickLabel,
+    required this.dimTitle,
+    required this.dimStrike,
+    required this.dimTime,
+    required this.rowHover,
+    required this.emptyCell,
+  });
+
+  final Color accent;
+  /// 在浅色底上可读的强调色（暖色主题下比 accent 更深一档）。
+  final Color accentSoft;
+  final Color titleText;
+  final Color bodyText;
+  final Color mutedText;
+  final Color cardFill;
+  final Color cardBorder;
+  final List<BoxShadow>? cardShadow;
+  final Color track;
+  final Color elapsedStart;
+  final Color elapsedEnd;
+  final Color doneDotFill;
+  final Color doneDotRing;
+  final Color line;
+  final Color dotBlue;
+  final Color dotAmber;
+  final Color dotGreen;
+  final Color dotGray;
+  final List<Color> focusGradient;
+  final Color focusBorder;
+  final Color focusBorderHover;
+  final Color focusNote;
+  final Color focusTime;
+  final List<Color> chipGradient;
+  final Color needle;
+  final Color needleGlow;
+  final Color tickLabel;
+  final Color dimTitle;
+  final Color dimStrike;
+  final Color dimTime;
+  final Color rowHover;
+  final Color emptyCell;
+
+  static _SchedSkin of(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark ? _dark : _warm;
+
+  static final _SchedSkin _dark = _SchedSkin(
+    accent: const Color(0xFF18D6F3),
+    accentSoft: const Color(0xFF18D6F3),
+    titleText: const Color(0xFFE8E8E8),
+    bodyText: const Color(0xFFDEDEDE),
+    mutedText: const Color(0xFF989898),
+    cardFill: const Color(0x07FFFFFF),
+    cardBorder: const Color(0x12FFFFFF),
+    cardShadow: null,
+    track: const Color(0x12FFFFFF),
+    elapsedStart: const Color(0x1AFFFFFF),
+    elapsedEnd: const Color(0x5918D6F3),
+    doneDotFill: const Color(0xFF3A3D42),
+    doneDotRing: const Color(0xFF6B7076),
+    line: const Color(0x17FFFFFF),
+    dotBlue: const Color(0xFF4E9CFF),
+    dotAmber: const Color(0xFFF2B94B),
+    dotGreen: const Color(0xFF1ED7A6),
+    dotGray: const Color(0xFF8A8F96),
+    focusGradient: const <Color>[Color(0x2118D6F3), Color(0x121ED7A6)],
+    focusBorder: const Color(0x4D18D6F3),
+    focusBorderHover: const Color(0x8C18D6F3),
+    focusNote: const Color(0xFF8FA6AD),
+    focusTime: const Color(0xFFEAFDFF),
+    chipGradient: const <Color>[Color(0x3818D6F3), Color(0x2E1ED7A6)],
+    needle: const Color(0xFFF2F5F9),
+    needleGlow: const Color(0xE618D6F3),
+    tickLabel: const Color(0xFF55595F),
+    dimTitle: const Color(0xFF5C6066),
+    dimStrike: const Color(0x38FFFFFF),
+    dimTime: const Color(0xFF4E5157),
+    rowHover: const Color(0x0BFFFFFF),
+    emptyCell: const Color(0x2EFFFFFF),
+  );
+
+  static final _SchedSkin _warm = _SchedSkin(
+    accent: const Color(0xFFB98B43),
+    accentSoft: const Color(0xFFA8792F),
+    titleText: const Color(0xFF232833),
+    bodyText: const Color(0xFF232833),
+    mutedText: const Color(0xFF98A2B3),
+    cardFill: const Color(0xFFFFFFFF),
+    cardBorder: const Color(0xFFDCE3EC),
+    cardShadow: const <BoxShadow>[
+      BoxShadow(
+          color: Color(0x0D101828),
+          offset: Offset(0, 1),
+          blurRadius: 3),
+    ],
+    track: const Color(0xFFE8EDF4),
+    elapsedStart: const Color(0xFFE1E7F0),
+    elapsedEnd: const Color(0x4DB98B43),
+    doneDotFill: const Color(0xFFDDE3EC),
+    doneDotRing: const Color(0xFFAEB8C6),
+    line: const Color(0x14232833),
+    dotBlue: const Color(0xFF5B8DEF),
+    dotAmber: const Color(0xFFC08A2D),
+    dotGreen: const Color(0xFF2FAE84),
+    dotGray: const Color(0xFF98A2B3),
+    focusGradient: const <Color>[Color(0x1AB98B43), Color(0x0D5B8DEF)],
+    focusBorder: const Color(0x59B98B43),
+    focusBorderHover: const Color(0x8CB98B43),
+    focusNote: const Color(0xFF8A94A6),
+    focusTime: const Color(0xFF232833),
+    chipGradient: const <Color>[Color(0x29B98B43), Color(0x1A5B8DEF)],
+    needle: const Color(0xFF232833),
+    needleGlow: const Color(0xCCB98B43),
+    tickLabel: const Color(0xFF98A2B3),
+    dimTitle: const Color(0xFF98A2B3),
+    dimStrike: const Color(0x40232833),
+    dimTime: const Color(0xFFB3BCC9),
+    rowHover: const Color(0xFFF0F4F9),
+    emptyCell: const Color(0x38232833),
+  );
 }
 
 class _ToolSpec {
@@ -748,685 +1380,6 @@ class _ToolButtonState extends State<_ToolButton> {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-// 天气 Header：作为右侧面板顶部区域，与面板融为一体，顶部贴合
-// ═══════════════════════════════════════════════════════════
-class _WeatherHeader extends StatefulWidget {
-  const _WeatherHeader({this.onReportLocation});
-
-  /// 拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
-  final void Function(Map<String, dynamic> location)? onReportLocation;
-
-  @override
-  State<_WeatherHeader> createState() => _WeatherHeaderState();
-}
-
-class _WeatherHeaderState extends State<_WeatherHeader>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  _WeatherData? _weather;
-  bool _loadingWeather = true;
-
-  /// 进程级天气缓存：跨多次界面刷新复用，避免每次进入都退化成
-  /// 「定位 → 后端 → Open-Meteo」的全链路外网拉取（通常耗时数秒）。
-  static _WeatherData? _cachedWeather;
-  static DateTime? _lastFetchAt;
-
-  /// 缓存有效期：期内直接使用缓存，不再发请求。
-  static const Duration _weatherTtl = Duration(minutes: 10);
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 10),
-    )..repeat();
-    _loadWeather();
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  /// 用真实定位（GPS 优先，fallback IP/缓存）请求后端真实天气。
-  Future<void> _loadWeather() async {
-    // 已有缓存：先立刻渲染旧数据（无需等待），再在后台静默刷新，
-    // 避免每次刷新主界面都卡几秒的“加载中…”。
-    final _WeatherData? cached = _WeatherHeaderState._cachedWeather;
-    if (cached != null && mounted) {
-      setState(() {
-        _weather = cached;
-        _loadingWeather = false;
-      });
-    }
-    // TTL 期内：直接用缓存，跳过整条请求链路。
-    final DateTime? last = _WeatherHeaderState._lastFetchAt;
-    if (last != null && DateTime.now().difference(last) < _weatherTtl) {
-      return;
-    }
-    try {
-      final ClientLocationPayload? loc =
-          await ClientLocationService.getCurrentLocation();
-      final double lat = loc?.latitude ?? double.nan;
-      final double lon = loc?.longitude ?? double.nan;
-      if (!lat.isFinite || !lon.isFinite) {
-        if (mounted) {
-          setState(() => _loadingWeather = false);
-        }
-        return;
-      }
-      // 拿到实时位置后回调上报（填充服务端位置缓存，供 Agent 按需复用）。
-      if (loc != null) {
-        widget.onReportLocation?.call(loc.toJson());
-      }
-      if (!mounted) return;
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/weather/current").replace(
-        queryParameters: <String, String>{
-          "latitude": lat.toString(),
-          "longitude": lon.toString(),
-          "timezone": (loc?.timezone ?? "Asia/Shanghai"),
-          "label": (loc?.label ?? ""),
-        },
-      );
-      final http.Response res = await http
-          .get(uri, headers: const <String, String>{"Accept": "application/json"})
-          .timeout(const Duration(seconds: 15));
-      if (!mounted) return;
-      if (res.statusCode != 200) {
-        setState(() => _loadingWeather = false);
-        return;
-      }
-      final Map<String, dynamic> body =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      final Map<String, dynamic>? brief =
-          (body["brief"] as Map?)?.cast<String, dynamic>();
-      final _WeatherData? data =
-          brief == null ? null : _WeatherData.fromJson(brief);
-      setState(() {
-        _weather = data;
-        _loadingWeather = false;
-      });
-      if (data != null) {
-        _WeatherHeaderState._cachedWeather = data;
-        _WeatherHeaderState._lastFetchAt = DateTime.now();
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _loadingWeather = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final bool isDark = cs.brightness == Brightness.dark;
-
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: isDark
-              ? <Color>[
-                  const Color(0xFF18D6F3).withValues(alpha: 0.12),
-                  const Color(0xFF18D6F3).withValues(alpha: 0.04),
-                  Colors.transparent,
-                ]
-              : <Color>[
-                  const Color(0xFF18D6F3).withValues(alpha: 0.06),
-                  const Color(0xFF18D6F3).withValues(alpha: 0.02),
-                  Colors.transparent,
-                ],
-        ),
-      ),
-      child: Stack(
-        children: <Widget>[
-          // 飘动的云朵背景
-          _buildCloudLayer(cs),
-
-          // 太阳光晕
-          Positioned(
-            top: -14,
-            right: 4,
-            child: AnimatedBuilder(
-              animation: _ctrl,
-              builder: (_, __) {
-                final double t = _ctrl.value;
-                final double scale =
-                    1 + 0.12 * (t < 0.5 ? t * 2 : 2 - t * 2);
-                return Transform.scale(
-                  scale: scale,
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: <Color>[
-                          const Color(0xFFFFB432).withValues(alpha: 0.22),
-                          const Color(0xFFFFB432).withValues(alpha: 0.05),
-                          Colors.transparent,
-                        ],
-                        stops: const <double>[0.0, 0.4, 0.7],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          // 内容
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
-            child: Column(
-              // stretch 让子 Row 撑满父 Padding 给的 188px 宽度, 否则
-              // default center 不会拉伸, Row 宽度=子项总和=180px, 6 根
-              // 柱子挤在一起没间距, 数字看起来会贴边.
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                // 天气图标 + 状况/体感（不再显示当前位置）
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: <Widget>[
-                    _WeatherIcon(code: _weather?.weatherCode ?? 2, size: 26),
-                    const SizedBox(width: 8),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(
-                          _statusText,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w500,
-                            color: cs.onSurface,
-                          ),
-                        ),
-                        const SizedBox(height: 1),
-                        Text(
-                          _feelsLikeText,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: cs.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const Spacer(),
-                    if (_loadingWeather)
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                  ],
-                ),
-
-                const SizedBox(height: 6),
-
-                // 温度大字 + 最高最低温
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: <Widget>[
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: <Widget>[
-                        Text(
-                          _tempText,
-                          style: TextStyle(
-                            fontSize: 32,
-                            fontWeight: FontWeight.w300,
-                            color: cs.onSurface,
-                            height: 1.0,
-                            letterSpacing: -1,
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.only(left: 1, bottom: 4),
-                          child: Text(
-                            "°C",
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w300,
-                              color: cs.onSurfaceVariant,
-                              height: 1.0,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const Spacer(),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: <Widget>[
-                        Text(
-                          "最高 $_maxTemp°",
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w500,
-                            color: cs.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: 1),
-                        Text(
-                          "最低 $_minTemp°",
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: cs.onSurfaceVariant.withValues(alpha: 0.7),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 6),
-
-                // 预警（降水概率较高时提示）
-                if (_hasWarning)
-                  Row(
-                    children: <Widget>[
-                      const Spacer(),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          const Icon(Icons.warning_amber_rounded,
-                              size: 10, color: Color(0xFFD7B85A)),
-                          const SizedBox(width: 2),
-                          Text(
-                            _warningText,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Color(0xFFD7B85A),
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-
-                if (_hasWarning) const SizedBox(height: 8) else const SizedBox(height: 10),
-
-                // 分时温度柱状图（真实分时预报）
-                if (_hourlyPoints.isNotEmpty) _buildHourlyBars(cs),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── 由真实天气数据驱动的展示字段 ──────────────────────────
-  List<_HourPoint> get _hourlyPoints =>
-      _weather?.hourly ?? const <_HourPoint>[];
-
-  String get _statusText {
-    if (_loadingWeather) return "加载中…";
-    if (_weather == null) return "天气不可用";
-    return _weather!.weatherText;
-  }
-
-  String get _feelsLikeText {
-    if (_weather == null) return "";
-    return "体感 ${_weather!.apparentTempC.round()}°";
-  }
-
-  String get _tempText {
-    if (_weather == null) return "--";
-    return _weather!.currentTempC.round().toString();
-  }
-
-  String get _maxTemp {
-    if (_weather == null) return "--";
-    return _weather!.todayMaxC.round().toString();
-  }
-
-  String get _minTemp {
-    if (_weather == null) return "--";
-    return _weather!.todayMinC.round().toString();
-  }
-
-  /// 降水概率 ≥40% 时给出预警（与后端穿衣建议的雨天判断一致）。
-  bool get _hasWarning =>
-      _weather != null && _weather!.peakRainPct >= 40;
-
-  String get _warningText {
-    final int pct = (_weather?.peakRainPct ?? 0).round();
-    return "降水概率 $pct%";
-  }
-
-  /// 分时温度柱状图：按温度映射柱高（10~32px），最高温标峰值。
-  Widget _buildHourlyBars(ColorScheme cs) {
-    final List<_HourPoint> points = _hourlyPoints;
-    if (points.isEmpty) return const SizedBox.shrink();
-    final List<double> temps =
-        points.map((p) => p.temperatureC).toList();
-    final double minT = temps.reduce(min);
-    final double maxT = temps.reduce(max);
-    double barHeight(double t) {
-      if (maxT <= minT) return 22;
-      return 10 + (t - minT) / (maxT - minT) * 22;
-    }
-
-    return Row(
-      mainAxisSize: MainAxisSize.max,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: <Widget>[
-        for (int i = 0; i < points.length; i++)
-          _HourTempBar(
-            hour: "${points[i].time.hour}",
-            temp: points[i].temperatureC.round().toString(),
-            height: barHeight(points[i].temperatureC),
-            peak: points[i].temperatureC == maxT,
-          ),
-      ],
-    );
-  }
-
-  Widget _buildCloudLayer(ColorScheme cs) {
-    return Positioned.fill(
-      child: AnimatedBuilder(
-        animation: _ctrl,
-        builder: (_, __) {
-          final double t = _ctrl.value;
-          return Stack(
-            children: <Widget>[
-              Positioned(
-                top: 6,
-                left: -16 + t * 120,
-                child: Opacity(
-                  opacity: t < 0.1
-                      ? t * 5
-                      : t > 0.9
-                          ? (1 - t) * 5
-                          : 0.35,
-                  child: _CloudShape(
-                    size: 38,
-                    color: cs.onSurface.withValues(alpha: 0.42),
-                  ),
-                ),
-              ),
-              Positioned(
-                top: 20,
-                right: -8 + (1 - t) * 85,
-                child: Opacity(
-                  opacity: t < 0.15
-                      ? t / 0.15 * 0.28
-                      : t > 0.85
-                          ? (1 - t) / 0.15 * 0.28
-                          : 0.28,
-                  child: _CloudShape(
-                    size: 30,
-                    color: cs.onSurface.withValues(alpha: 0.34),
-                  ),
-                ),
-              ),
-              Positioned(
-                top: 36,
-                left: 24 + (t * 22),
-                child: Opacity(
-                  opacity: t < 0.2
-                      ? t / 0.2 * 0.18
-                      : t > 0.8
-                          ? (1 - t) / 0.2 * 0.18
-                          : 0.18,
-                  child: _CloudShape(
-                    size: 22,
-                    color: cs.onSurface.withValues(alpha: 0.26),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// 云朵形状
-class _CloudShape extends StatelessWidget {
-  const _CloudShape({required this.size, required this.color});
-  final double size;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      size: Size(size, size * 0.55),
-      painter: _CloudPainter(color: color),
-    );
-  }
-}
-
-class _CloudPainter extends CustomPainter {
-  _CloudPainter({required this.color});
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Paint paint = Paint()..color = color;
-    final double w = size.width;
-    final double h = size.height;
-    // 三个椭圆组成云朵
-    canvas.drawOval(
-      Rect.fromLTWH(w * 0.05, h * 0.35, w * 0.45, h * 0.6),
-      paint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(w * 0.3, h * 0.1, w * 0.5, h * 0.8),
-      paint,
-    );
-    canvas.drawOval(
-      Rect.fromLTWH(w * 0.55, h * 0.3, w * 0.4, h * 0.6),
-      paint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _CloudPainter oldDelegate) =>
-      color != oldDelegate.color;
-}
-
-/// 单点分时预报（来自后端 /weather/current 的 hourlyForecast）。
-class _HourPoint {
-  const _HourPoint({
-    required this.time,
-    required this.temperatureC,
-    required this.weatherCode,
-  });
-
-  final DateTime time;
-  final double temperatureC;
-  final int weatherCode;
-}
-
-/// 后端 /weather/current 返回的真实天气简报（Open-Meteo）。
-class _WeatherData {
-  const _WeatherData({
-    required this.currentTempC,
-    required this.apparentTempC,
-    required this.weatherCode,
-    required this.weatherText,
-    required this.todayMinC,
-    required this.todayMaxC,
-    required this.peakRainPct,
-    required this.hourly,
-  });
-
-  final double currentTempC;
-  final double apparentTempC;
-  final int weatherCode;
-  final String weatherText;
-  final double todayMinC;
-  final double todayMaxC;
-  final double peakRainPct;
-  final List<_HourPoint> hourly;
-
-  factory _WeatherData.fromJson(Map<String, dynamic> json) {
-    return _WeatherData(
-      currentTempC: (json["currentTempC"] as num?)?.toDouble() ?? 0,
-      apparentTempC: (json["apparentTempC"] as num?)?.toDouble() ?? 0,
-      weatherCode: (json["weatherCode"] as num?)?.toInt() ?? 0,
-      weatherText: json["weatherText"]?.toString() ?? "",
-      todayMinC: (json["todayMinC"] as num?)?.toDouble() ?? 0,
-      todayMaxC: (json["todayMaxC"] as num?)?.toDouble() ?? 0,
-      peakRainPct: (json["peakRainPct"] as num?)?.toDouble() ?? 0,
-      hourly: <_HourPoint>[
-        for (final Object? x
-            in json["hourlyForecast"] as List? ?? const <Object?>[])
-          if (x is Map)
-            _HourPoint(
-              time: DateTime.tryParse(x["time"]?.toString() ?? "") ??
-                  DateTime.now(),
-              temperatureC: (x["temperatureC"] as num?)?.toDouble() ?? 0,
-              weatherCode: (x["weatherCode"] as num?)?.toInt() ?? 0,
-            ),
-      ],
-    );
-  }
-}
-
-/// 按 WMO 天气码映射的天气图标。
-class _WeatherIcon extends StatelessWidget {
-  const _WeatherIcon({required this.code, required this.size});
-
-  final int code;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    IconData icon;
-    Color color;
-    if (code <= 1) {
-      // 晴
-      icon = Icons.wb_sunny_outlined;
-      color = const Color(0xFFFFB340);
-    } else if (code <= 2) {
-      // 多云
-      icon = Icons.wb_cloudy_outlined;
-      color = const Color(0xFF8A93A5);
-    } else if (code <= 48) {
-      // 阴 / 雾
-      icon = Icons.cloud_outlined;
-      color = const Color(0xFF9AA0A6);
-    } else if (code >= 95) {
-      // 雷暴
-      icon = Icons.thunderstorm_outlined;
-      color = const Color(0xFF5B7BE0);
-    } else if (code >= 71) {
-      // 雪
-      icon = Icons.ac_unit;
-      color = const Color(0xFF6FC3DF);
-    } else if (code >= 61) {
-      // 雨
-      icon = Icons.water_drop_outlined;
-      color = const Color(0xFF4A90D9);
-    } else if (code >= 51) {
-      // 毛毛雨
-      icon = Icons.grain;
-      color = const Color(0xFF4A90D9);
-    } else {
-      icon = Icons.cloud_outlined;
-      color = const Color(0xFF9AA0A6);
-    }
-    return Icon(icon, size: size, color: color);
-  }
-}
-
-/// 单根分时温度柱
-class _HourTempBar extends StatelessWidget {
-  const _HourTempBar({
-    required this.hour,
-    required this.temp,
-    required this.height,
-    required this.peak,
-  });
-
-  final String hour;
-  final String temp;
-  final double height;
-  final bool peak;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    // 用 SizedBox 而非 Flexible: 每根柱固定 30px 净宽 (188/6≈31.33 - 0.66 间隙),
-    // 由父 Row spaceBetween 自动均分剩余 1.98px 间隙; 数字/时间 intrinsic
-    // ≤18px, 永不超过 30px, 从根上避免 1px 溢出.
-    return SizedBox(
-      width: 30,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: <Widget>[
-          // 温度文字
-          Text(
-            temp,
-            maxLines: 1,
-            softWrap: false,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 9.5,
-              fontWeight: peak ? FontWeight.w600 : FontWeight.w500,
-              color: peak ? _kAccentBlue : cs.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 2),
-          // 柱体居中
-          Center(
-            child: Container(
-              width: peak ? 3.5 : 2.5,
-              height: height,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(2),
-                gradient: LinearGradient(
-                  begin: Alignment.bottomCenter,
-                  end: Alignment.topCenter,
-                  colors: peak
-                      ? <Color>[
-                          _kAccentOrange.withValues(alpha: 0.4),
-                          _kAccentBlue.withValues(alpha: 0.8),
-                        ]
-                      : <Color>[
-                          _kAccentBlue.withValues(alpha: 0.15),
-                          _kAccentBlue.withValues(alpha: 0.45),
-                        ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 2),
-          // 时间标签
-          Text(
-            hour,
-            maxLines: 1,
-            softWrap: false,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 9.5,
-              fontWeight: peak ? FontWeight.w500 : FontWeight.w400,
-              color: peak
-                  ? cs.onSurfaceVariant
-                  : cs.onSurfaceVariant.withValues(alpha: 0.7),
-            ),
-          ),
-        ],
       ),
     );
   }

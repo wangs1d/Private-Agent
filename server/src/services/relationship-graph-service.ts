@@ -1,3 +1,6 @@
+/** 关系摘要缓存 TTL：里程碑写入低频，60s 内的重复召回直读缓存即可 */
+const RELATIONSHIP_SUMMARY_TTL_MS = 60_000;
+
 /**
  * 关系图谱服务（Phase 1.2）
  *
@@ -91,6 +94,11 @@ export class RelationshipGraphService {
   /** 内存缓存：最近的关系状态快照（用于里程碑检测） */
   private lastWarmthMap = new Map<string, number>();
   private lastRapportMap = new Map<string, number>();
+  /**
+   * 摘要缓存：getRelationshipSummary 与 query 无关却挂在每轮默认召回上，
+   * 底层是对固定 query 的完整 humanLike 召回（含 embedding）。TTL 内直读缓存。
+   */
+  private summaryCache = new Map<string, { text: string; ts: number }>();
 
   constructor(storage: RelationshipStorageLike) {
     this.storage = storage;
@@ -117,6 +125,7 @@ export class RelationshipGraphService {
           ...milestone.metadata,
         },
       });
+      this.summaryCache.delete(actorId);
       return milestone;
     } catch (err) {
       console.log(`[RelationshipGraph] recordMilestone 失败: ${err}`);
@@ -239,8 +248,14 @@ export class RelationshipGraphService {
    * 获取关系记忆摘要（压缩为 ≤ 200 char，用于 prompt 注入）
    */
   async getRelationshipSummary(actorId: string): Promise<string> {
+    const cached = this.summaryCache.get(actorId);
+    if (cached && Date.now() - cached.ts < RELATIONSHIP_SUMMARY_TTL_MS) {
+      return cached.text;
+    }
     const trajectory = await this.getRelationshipTrajectory(actorId);
     if (trajectory.milestones.length === 0) {
+      // 空结果也进缓存：无关系记忆的 actor 不必每轮重复完整召回
+      this.summaryCache.set(actorId, { text: "", ts: Date.now() });
       return "";
     }
 
@@ -253,7 +268,9 @@ export class RelationshipGraphService {
     const summary = `关系: warmth=${trajectory.currentWarmth.toFixed(2)}, rapport=${trajectory.currentRapport.toFixed(2)}; ${lines.join("; ")}`;
 
     // 压缩到 200 char
-    return summary.length > 200 ? summary.slice(0, 197) + "..." : summary;
+    const text = summary.length > 200 ? summary.slice(0, 197) + "..." : summary;
+    this.summaryCache.set(actorId, { text, ts: Date.now() });
+    return text;
   }
 
   // ---- 内部工具 ----

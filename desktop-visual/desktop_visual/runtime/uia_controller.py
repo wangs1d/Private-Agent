@@ -6,7 +6,8 @@ UiaController 采取懒加载策略：首次调用 UIA API 时才 import pywinau
 设计要点：
 - 坐标兜底：element_at(x, y) 用 IUIAutomation.ElementFromPoint 拿元素
 - 结构化查询：query(selector) 按 name/automation_id/control_type 组合查询
-- DPI 处理：VLM 输出物理坐标，UIA 需逻辑坐标，_to_logical_point 内部转换
+- 坐标系：进程为 Per-Monitor V2 DPI aware，输入输出均为屏幕物理像素
+  （与截图、鼠标一致；快照额外输出 path 供 run_automation 复用）
 - 异常隔离：所有 UIA 调用 try/except，失败返回 None/[]，不阻塞视觉循环
 """
 from __future__ import annotations
@@ -93,8 +94,10 @@ class UiaController:
         return 1.0
 
     def _to_logical_point(self, x: int, y: int) -> tuple[int, int]:
-        """VLM 物理坐标 → UIA 逻辑坐标（除以 DPI 缩放比）。"""
-        return int(x / self._dpi_scale), int(y / self._dpi_scale)
+        """坐标换算：进程已声明 Per-Monitor V2 DPI aware（stdio_worker 启动时），
+        UIA ElementFromPoint 直接接受屏幕物理坐标，无需再除以缩放比。
+        保留方法签名以兼容既有调用点。"""
+        return int(x), int(y)
 
     # ---- 坐标兜底 --------------------------------------------------------
     def element_at(self, x: int, y: int) -> Optional[ElementInfo]:
@@ -214,6 +217,195 @@ class UiaController:
         except Exception as exc:
             logger.warning("focus 失败: %s", exc)
         return False
+
+    def select(self, element_info: ElementInfo) -> bool:
+        """对元素调用 SelectionItemPattern.Select(列表项/树节点选中)。失败返回 False。"""
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            unk = ref.GetCurrentPattern(10010)  # UIA_SelectionItemPatternId = 10010
+            if not unk:
+                return False
+            from comtypes.gen.UIAutomationClient import IUIAutomationSelectionItemPattern
+            sel_pat = unk.QueryInterface(IUIAutomationSelectionItemPattern)
+            sel_pat.Select()
+            return True
+        except Exception as exc:
+            logger.warning("select 失败: %s", exc)
+        return False
+
+    def expand(self, element_info: ElementInfo, *, expand: bool = True) -> bool:
+        """对元素调用 ExpandCollapsePattern.Expand/Collapse(下拉框/树节点展开折叠)。失败返回 False。"""
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            unk = ref.GetCurrentPattern(10005)  # UIA_ExpandCollapsePatternId = 10005
+            if not unk:
+                return False
+            from comtypes.gen.UIAutomationClient import IUIAutomationExpandCollapsePattern
+            ec_pat = unk.QueryInterface(IUIAutomationExpandCollapsePattern)
+            if expand:
+                ec_pat.Expand()
+            else:
+                ec_pat.Collapse()
+            return True
+        except Exception as exc:
+            logger.warning("expand(%s) 失败: %s", expand, exc)
+        return False
+
+    def scroll_into_view(self, element_info: ElementInfo) -> bool:
+        """对元素调用 ScrollItemPattern.ScrollIntoView(滚动到可见区域)。失败返回 False。"""
+        if not self.is_available():
+            return False
+        ref = element_info.get("__ref")
+        if ref is None:
+            return False
+        try:
+            unk = ref.GetCurrentPattern(10017)  # UIA_ScrollItemPatternId = 10017
+            if not unk:
+                return False
+            from comtypes.gen.UIAutomationClient import IUIAutomationScrollItemPattern
+            si_pat = unk.QueryInterface(IUIAutomationScrollItemPattern)
+            si_pat.ScrollIntoView()
+            return True
+        except Exception as exc:
+            logger.warning("scroll_into_view 失败: %s", exc)
+        return False
+
+    # ---- 窗口根与控件树快照（主流"快照→按元素操作"模式） ------------------
+
+    def find_window_root(self, title: str | None = None) -> tuple[Optional[Any], str]:
+        """定位顶层窗口元素作为查询/快照根。
+
+        - title 非空：按窗口标题子串匹配（大小写不敏感），返回第一个命中；
+        - title 为空：优先前台窗口（GetForegroundWindow → ElementFromHandle），
+          失败退化为桌面根。
+
+        返回 (element_ref, window_title)；找不到返回 (None, "")。
+        """
+        if not self.is_available():
+            return None, ""
+        try:
+            if title:
+                needle = title.strip().lower()
+                root = self._uia.GetRootElement()
+                walker = self._uia.CreateControlViewWalker()
+                child = walker.GetFirstChildElement(root)
+                while child is not None:
+                    try:
+                        name = (child.CurrentName or "").strip()
+                        if needle in name.lower():
+                            return child, name
+                    except Exception:
+                        pass
+                    try:
+                        child = walker.GetNextSiblingElement(child)
+                    except Exception:
+                        break
+                return None, ""
+            # 前台窗口优先
+            try:
+                import ctypes
+
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                if hwnd:
+                    elem = self._uia.ElementFromHandle(hwnd)
+                    if elem is not None:
+                        return elem, (elem.CurrentName or "")
+            except Exception:
+                pass
+            root = self._uia.GetRootElement()
+            return root, "Desktop"
+        except Exception as exc:
+            logger.warning("find_window_root(%r) 失败: %s", title, exc)
+            return None, ""
+
+    def snapshot_tree(self, root_ref: Any, *, max_depth: int = 6, limit: int = 150) -> list[dict[str, Any]]:
+        """控制视图扁平遍历，产出可复用的元素快照列表。
+
+        每项含 path（形如 "2.1.3"，相对 root 的 1-based 控制视图子索引链），
+        同一进程内 / 跨进程都可用 element_by_path(root, path) 确定性复原。
+        """
+        if not self.is_available() or root_ref is None:
+            return []
+        out: list[dict[str, Any]] = []
+        walker = self._uia.CreateControlViewWalker()
+        self._snapshot_walk(walker, root_ref, "", 0, min(max(1, max_depth), 12), min(max(1, limit), 500), out)
+        return out
+
+    def _snapshot_walk(
+        self,
+        walker: Any,
+        node: Any,
+        parent_path: str,
+        depth: int,
+        max_depth: int,
+        limit: int,
+        out: list[dict[str, Any]],
+    ) -> None:
+        if len(out) >= limit or depth >= max_depth:
+            return
+        try:
+            child = walker.GetFirstChildElement(node)
+        except Exception:
+            child = None
+        sibling = 0
+        while child is not None and len(out) < limit:
+            sibling += 1
+            path = f"{sibling}" if not parent_path else f"{parent_path}.{sibling}"
+            snap = self._snapshot(child)
+            if snap is not None:
+                snap["path"] = path
+                snap["depth"] = depth
+                out.append(snap)
+                if len(out) < limit:
+                    self._snapshot_walk(walker, child, path, depth + 1, max_depth, limit, out)
+            try:
+                child = walker.GetNextSiblingElement(child)
+            except Exception:
+                break
+
+    def element_by_path(self, root_ref: Any, path: str) -> Optional[ElementInfo]:
+        """按 snapshot_tree 输出的 path 复原元素（控制视图子索引，1-based）。"""
+        if not self.is_available() or root_ref is None:
+            return None
+        parts = [p for p in str(path).strip().split(".") if p]
+        if not parts:
+            return None
+        walker = self._uia.CreateControlViewWalker()
+        node = root_ref
+        for part in parts:
+            try:
+                index = int(part)
+            except ValueError:
+                return None
+            if index < 1:
+                return None
+            try:
+                child = walker.GetFirstChildElement(node)
+            except Exception:
+                return None
+            target = None
+            sibling = 0
+            while child is not None:
+                sibling += 1
+                if sibling == index:
+                    target = child
+                    break
+                try:
+                    child = walker.GetNextSiblingElement(child)
+                except Exception:
+                    break
+            if target is None:
+                return None
+            node = target
+        return self._snapshot(node)
 
     # ---- 结构化查询 ------------------------------------------------------
     def query(self, selector: dict[str, Any], *, top_only: bool = True, limit: int = 100) -> list[ElementInfo]:

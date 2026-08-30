@@ -71,12 +71,25 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
 
   registry.register("desktop.visual.screenshot", async (input, ctx) => {
     const region = parseRegion(input);
+    const display =
+      typeof input.display === "number" && Number.isFinite(input.display)
+        ? Math.max(1, Math.floor(input.display))
+        : undefined;
+    const maxDim =
+      typeof input.maxDim === "number" && Number.isFinite(input.maxDim) && input.maxDim >= 200
+        ? Math.floor(input.maxDim)
+        : undefined;
     const actorId = resolveActorId(ctx);
 
     if (deps.bridge.hasExecutor(actorId)) {
       const remote = await deps.bridge.invoke(
         actorId,
-        bridgeInvokePayload({ action: "screenshot", region: region ?? null }),
+        bridgeInvokePayload({
+          action: "screenshot",
+          region: region ?? null,
+          display: display ?? null,
+          maxDim: maxDim ?? null,
+        }),
         Math.min(desktopBridgeInvokeTimeoutMs(), 120_000),
       );
       if (remote?.ok && remote.imageBase64) {
@@ -86,6 +99,11 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
           mimeType: remote.mimeType ?? "image/png",
           width: remote.width,
           height: remote.height,
+          screenWidth: remote.screenWidth,
+          screenHeight: remote.screenHeight,
+          scale: remote.scale,
+          display: remote.display,
+          origin: remote.origin,
           capturedAt: remote.capturedAt,
           message: `已通过电脑桥接截取屏幕${region ? `区域 [${region.join(", ")}]` : ""}，尺寸 ${remote.width ?? "?"}x${remote.height ?? "?"}`,
         };
@@ -96,7 +114,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     }
 
     if (deps.localVisual.isEnabled() && deps.localVisual.screenshot) {
-      const result = await deps.localVisual.screenshot({ region });
+      const result = await deps.localVisual.screenshot({ region, display, maxDim });
       if (!result.ok) {
         return { ok: false, error: result.error ?? "截图失败" };
       }
@@ -106,6 +124,11 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
         mimeType: result.mimeType ?? "image/png",
         width: result.width,
         height: result.height,
+        screenWidth: result.screenWidth,
+        screenHeight: result.screenHeight,
+        scale: result.scale,
+        display: result.display,
+        origin: result.origin,
         capturedAt: result.capturedAt,
         message: `已截取屏幕${region ? `区域 [${region.join(", ")}]` : ""}，尺寸 ${result.width}x${result.height}`,
       };
@@ -337,8 +360,8 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
   // -------------------------------------------------------------------------
   registry.register("desktop.uia_query", async (input, ctx) => {
     const mode = input.mode;
-    if (mode !== "query" && mode !== "read_children" && mode !== "inspect_point") {
-      return { ok: false, error: "mode 必须是 query / read_children / inspect_point" };
+    if (mode !== "query" && mode !== "read_children" && mode !== "inspect_point" && mode !== "snapshot") {
+      return { ok: false, error: "mode 必须是 query / read_children / inspect_point / snapshot" };
     }
     recordToolCallForTurn(ctx, "desktop.uia_query");
 
@@ -348,7 +371,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       ?.record({
         kind: "desktop.uia_query",
         actorId,
-        command: `${mode} ${JSON.stringify(input.selector ?? input.point ?? {}).slice(0, 300)}`,
+        command: `${mode} ${JSON.stringify(input.selector ?? input.point ?? input.windowTitle ?? {}).slice(0, 300)}`,
         shell: null,
         allowDestructive: false,
         cwd: null,
@@ -362,6 +385,8 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       mode,
       selector: input.selector ?? null,
       point: input.point ?? null,
+      windowTitle: typeof input.windowTitle === "string" && input.windowTitle.trim() ? input.windowTitle.trim() : null,
+      maxDepth: typeof input.maxDepth === "number" && Number.isFinite(input.maxDepth) ? Math.floor(input.maxDepth) : null,
       topOnly: input.topOnly ?? null,
       limit: input.limit ?? null,
     };
@@ -389,6 +414,8 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
         mode,
         selector,
         point,
+        windowTitle: typeof input.windowTitle === "string" && input.windowTitle.trim() ? input.windowTitle.trim() : null,
+        maxDepth: typeof input.maxDepth === "number" && Number.isFinite(input.maxDepth) ? Math.floor(input.maxDepth) : null,
         topOnly,
         limit,
       });
@@ -407,15 +434,17 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
   // -------------------------------------------------------------------------
   registry.register("desktop.run_input", async (input, ctx) => {
     const action = String(input.action ?? "");
-    const VALID = ["click", "double_click", "right_click", "move", "type", "key", "shortcut", "drag", "scroll"];
+    const VALID = [
+      "click", "double_click", "triple_click", "middle_click", "right_click",
+      "move", "type", "key", "shortcut", "drag", "scroll",
+      "wait", "cursor_position", "hold_key",
+    ];
     if (!VALID.includes(action)) {
       return { ok: false, error: `action 必须是 ${VALID.join("/")} 之一，收到 ${action}` };
     }
     recordToolCallForTurn(ctx, "desktop.run_input");
-    if (
-      (action === "click" || action === "double_click" || action === "right_click" || action === "move" || action === "drag") &&
-      (typeof input.x !== "number" || typeof input.y !== "number")
-    ) {
+    const needsXY = ["click", "double_click", "triple_click", "middle_click", "right_click", "move", "drag"];
+    if (needsXY.includes(action) && (typeof input.x !== "number" || typeof input.y !== "number")) {
       return { ok: false, error: `${action} 需要 x, y 坐标` };
     }
     if (action === "drag" && (typeof input.toX !== "number" || typeof input.toY !== "number")) {
@@ -424,14 +453,14 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
     if (action === "type" && typeof input.text !== "string") {
       return { ok: false, error: "type 需要 text" };
     }
-    if (action === "key" && typeof input.key !== "string") {
-      return { ok: false, error: "key 需要 key 参数" };
+    if ((action === "key" || action === "hold_key") && typeof input.key !== "string") {
+      return { ok: false, error: `${action} 需要 key 参数` };
     }
     if (action === "shortcut" && typeof input.keys !== "string") {
       return { ok: false, error: "shortcut 需要 keys 参数" };
     }
-    if (action === "scroll" && typeof input.scrollClicks !== "number") {
-      return { ok: false, error: "scroll 需要 scrollClicks" };
+    if (action === "scroll" && typeof input.scrollClicks !== "number" && typeof input.scrollX !== "number") {
+      return { ok: false, error: "scroll 需要 scrollClicks（垂直）或 scrollX（水平）" };
     }
 
     const actorId = resolveActorId(ctx);
@@ -444,31 +473,69 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
         shell: null,
         allowDestructive: false,
         cwd: null,
-        timeoutMs: 10_000,
+        timeoutMs: 30_000,
         startedAt,
       })
       .catch(() => undefined);
 
-    // run_input 不走 bridge（键盘/鼠标只能在服务器本机做），只走 localVisual
-    if (!deps.localVisual.isEnabled()) {
-      return { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    // 键鼠输入 bridge 优先（2026-08-31 修复：此前硬编码仅 localVisual，
+    // 手机远控电脑时无法模拟键鼠）。桥接与子进程使用同一报文（inputAction 字段）。
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        {
+          action: "run_input",
+          inputAction: action,
+          x: typeof input.x === "number" ? input.x : null,
+          y: typeof input.y === "number" ? input.y : null,
+          toX: typeof input.toX === "number" ? input.toX : null,
+          toY: typeof input.toY === "number" ? input.toY : null,
+          button: typeof input.button === "string" ? input.button : null,
+          text: typeof input.text === "string" ? input.text : null,
+          key: typeof input.key === "string" ? input.key : null,
+          keys: typeof input.keys === "string" ? input.keys : null,
+          scrollClicks: typeof input.scrollClicks === "number" ? input.scrollClicks : null,
+          scrollX: typeof input.scrollX === "number" ? input.scrollX : null,
+          waitMs: typeof input.waitMs === "number" ? input.waitMs : null,
+          holdSeconds: typeof input.holdSeconds === "number" ? input.holdSeconds : null,
+          interval: typeof input.interval === "number" ? input.interval : null,
+          moveDuration: typeof input.moveDuration === "number" ? input.moveDuration : null,
+          imageWidth: typeof input.imageWidth === "number" ? input.imageWidth : null,
+          imageHeight: typeof input.imageHeight === "number" ? input.imageHeight : null,
+          coordSpace: typeof input.coordSpace === "string" ? input.coordSpace : null,
+          display: typeof input.display === "number" ? input.display : null,
+        },
+        Math.min(desktopBridgeInvokeTimeoutMs(), 30_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (!deps.localVisual.isEnabled()) {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    } else if (!deps.localVisual.runInput) {
+      out = { ok: false, error: "桌面输入服务未实现 runInput" };
+    } else {
+      out = await deps.localVisual.runInput({
+        action: action as DesktopVisualRunInputInput["action"],
+        x: typeof input.x === "number" ? input.x : undefined,
+        y: typeof input.y === "number" ? input.y : undefined,
+        toX: typeof input.toX === "number" ? input.toX : undefined,
+        toY: typeof input.toY === "number" ? input.toY : undefined,
+        button: typeof input.button === "string" ? input.button : undefined,
+        text: typeof input.text === "string" ? input.text : undefined,
+        key: typeof input.key === "string" ? input.key : undefined,
+        keys: typeof input.keys === "string" ? input.keys : undefined,
+        scrollClicks: typeof input.scrollClicks === "number" ? input.scrollClicks : undefined,
+        scrollX: typeof input.scrollX === "number" ? input.scrollX : undefined,
+        waitMs: typeof input.waitMs === "number" ? input.waitMs : undefined,
+        holdSeconds: typeof input.holdSeconds === "number" ? input.holdSeconds : undefined,
+        interval: typeof input.interval === "number" ? input.interval : undefined,
+        moveDuration: typeof input.moveDuration === "number" ? input.moveDuration : undefined,
+        imageWidth: typeof input.imageWidth === "number" ? input.imageWidth : undefined,
+        imageHeight: typeof input.imageHeight === "number" ? input.imageHeight : undefined,
+        coordSpace: input.coordSpace === "image" ? "image" : undefined,
+        display: typeof input.display === "number" ? input.display : undefined,
+      });
     }
-    if (!deps.localVisual.runInput) {
-      return { ok: false, error: "桌面输入服务未实现 runInput" };
-    }
-
-    const out = await deps.localVisual.runInput({
-      action: action as DesktopVisualRunInputInput["action"],
-      x: typeof input.x === "number" ? input.x : undefined,
-      y: typeof input.y === "number" ? input.y : undefined,
-      toX: typeof input.toX === "number" ? input.toX : undefined,
-      toY: typeof input.toY === "number" ? input.toY : undefined,
-      button: typeof input.button === "string" ? input.button : undefined,
-      text: typeof input.text === "string" ? input.text : undefined,
-      key: typeof input.key === "string" ? input.key : undefined,
-      keys: typeof input.keys === "string" ? input.keys : undefined,
-      scrollClicks: typeof input.scrollClicks === "number" ? input.scrollClicks : undefined,
-    });
 
     await auditPromise;
     return out;
@@ -482,7 +549,10 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
   // -------------------------------------------------------------------------
   registry.register("desktop.run_automation", async (input, ctx) => {
     const action = String(input.action ?? "");
-    const VALID = ["click", "set_value", "get_value", "toggle", "focus"];
+    const VALID = [
+      "click", "set_value", "get_value", "toggle", "focus",
+      "select", "expand", "collapse", "scroll_into_view",
+    ];
     if (!VALID.includes(action)) {
       return { ok: false, error: `action 必须是 ${VALID.join("/")} 之一，收到 ${action}` };
     }
@@ -491,7 +561,10 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
         ? (input.selector as Record<string, unknown>)
         : null;
     if (!selector || Object.keys(selector).length === 0) {
-      return { ok: false, error: "selector 不能为空(至少给 name/control_type/automation_id 之一)" };
+      return {
+        ok: false,
+        error: "selector 不能为空(至少给 name/control_type/automation_id/path 之一)",
+      };
     }
     if (action === "set_value" && typeof input.value !== "string") {
       return { ok: false, error: "set_value 需要 value 字符串参数" };
@@ -508,7 +581,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
         shell: null,
         allowDestructive: false,
         cwd: null,
-        timeoutMs: 15_000,
+        timeoutMs: 20_000,
         startedAt,
       })
       .catch(() => undefined);
@@ -521,6 +594,7 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       value: typeof input.value === "string" ? input.value : null,
       index: typeof input.index === "number" ? input.index : 0,
       topOnly: typeof input.topOnly === "boolean" ? input.topOnly : true,
+      windowTitle: typeof input.windowTitle === "string" && input.windowTitle.trim() ? input.windowTitle.trim() : null,
     };
 
     let out: Record<string, unknown>;
@@ -528,16 +602,153 @@ export function registerDesktopVisualTools(registry: ToolRegistry, deps: Desktop
       const remote = await deps.bridge.invoke(
         actorId,
         payload,
-        Math.min(desktopBridgeInvokeTimeoutMs(), 20_000),
+        Math.min(desktopBridgeInvokeTimeoutMs(), 25_000),
       );
       out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
     } else if (deps.localVisual.isEnabled() && deps.localVisual.runAutomation) {
       out = await deps.localVisual.runAutomation({
-        action: action as "click" | "set_value" | "get_value" | "toggle" | "focus",
+        action: action as "click" | "set_value" | "get_value" | "toggle" | "focus" | "select" | "expand" | "collapse" | "scroll_into_view",
         selector,
         value: typeof input.value === "string" ? input.value : undefined,
         index: typeof input.index === "number" ? input.index : 0,
         topOnly: typeof input.topOnly === "boolean" ? input.topOnly : true,
+        windowTitle: typeof input.windowTitle === "string" && input.windowTitle.trim() ? input.windowTitle.trim() : undefined,
+      });
+    } else {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    }
+
+    await auditPromise;
+    return out;
+  });
+
+  // -------------------------------------------------------------------------
+  // desktop.window：窗口管理（主流 computer-use / OS agent 标配）
+  // list 枚举可见顶层窗口；activate/close/minimize/maximize/restore/move/resize
+  // 按 hwnd / title 子串 / list 编号定位。close 走 WM_CLOSE（应用可弹保存确认）。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.window", async (input, ctx) => {
+    const op = String(input.op ?? "");
+    const VALID_OPS = ["list", "activate", "close", "minimize", "maximize", "restore", "move", "resize"];
+    if (!VALID_OPS.includes(op)) {
+      return { ok: false, error: `op 必须是 ${VALID_OPS.join("/")} 之一，收到 ${op}` };
+    }
+    if (
+      op !== "list" &&
+      typeof input.title !== "string" &&
+      typeof input.hwnd !== "number" &&
+      typeof input.index !== "number"
+    ) {
+      return { ok: false, error: `${op} 需要 title / hwnd / index 之一来定位窗口` };
+    }
+    if (op === "move" && (typeof input.x !== "number" || typeof input.y !== "number")) {
+      return { ok: false, error: "move 需要 x, y（屏幕物理像素）" };
+    }
+    if (op === "resize" && (typeof input.width !== "number" || typeof input.height !== "number")) {
+      return { ok: false, error: "resize 需要 width, height（物理像素）" };
+    }
+
+    const actorId = resolveActorId(ctx);
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.window",
+        actorId,
+        command: `${op} ${String(input.title ?? input.hwnd ?? input.index ?? "")}`.slice(0, 200),
+        shell: null,
+        allowDestructive: false,
+        cwd: null,
+        timeoutMs: 10_000,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "window",
+      windowOp: op,
+      title: typeof input.title === "string" ? input.title : null,
+      index: typeof input.index === "number" ? input.index : null,
+      hwnd: typeof input.hwnd === "number" ? input.hwnd : null,
+      x: typeof input.x === "number" ? input.x : null,
+      y: typeof input.y === "number" ? input.y : null,
+      width: typeof input.width === "number" ? input.width : null,
+      height: typeof input.height === "number" ? input.height : null,
+    };
+
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), 15_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.window) {
+      out = await deps.localVisual.window({
+        op: op as "list" | "activate" | "close" | "minimize" | "maximize" | "restore" | "move" | "resize",
+        title: typeof input.title === "string" ? input.title : undefined,
+        index: typeof input.index === "number" ? input.index : undefined,
+        hwnd: typeof input.hwnd === "number" ? input.hwnd : undefined,
+        x: typeof input.x === "number" ? input.x : undefined,
+        y: typeof input.y === "number" ? input.y : undefined,
+        width: typeof input.width === "number" ? input.width : undefined,
+        height: typeof input.height === "number" ? input.height : undefined,
+      });
+    } else {
+      out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };
+    }
+
+    await auditPromise;
+    return out;
+  });
+
+  // -------------------------------------------------------------------------
+  // desktop.clipboard：剪贴板读写（get / set）。
+  // 主流 agent 的可靠文本传输通道；desktop.run_input 的 type 对非 ASCII
+  // 文本自动走同一粘贴底层。
+  // -------------------------------------------------------------------------
+  registry.register("desktop.clipboard", async (input, ctx) => {
+    const op = String(input.op ?? "");
+    if (op !== "get" && op !== "set") {
+      return { ok: false, error: "op 必须是 get 或 set" };
+    }
+    if (op === "set" && typeof input.text !== "string") {
+      return { ok: false, error: "set 需要 text 字符串参数" };
+    }
+
+    const actorId = resolveActorId(ctx);
+    const startedAt = new Date().toISOString();
+    const auditPromise = deps.audit
+      ?.record({
+        kind: "desktop.clipboard",
+        actorId,
+        command: `${op}(${typeof input.text === "string" ? input.text.length : 0} chars)`.slice(0, 200),
+        shell: null,
+        allowDestructive: false,
+        cwd: null,
+        timeoutMs: 5_000,
+        startedAt,
+      })
+      .catch(() => undefined);
+
+    const payload: Record<string, unknown> = {
+      action: "clipboard",
+      clipboardOp: op,
+      text: typeof input.text === "string" ? input.text : null,
+    };
+
+    let out: Record<string, unknown>;
+    if (deps.bridge.hasExecutor(actorId)) {
+      const remote = await deps.bridge.invoke(
+        actorId,
+        payload,
+        Math.min(desktopBridgeInvokeTimeoutMs(), 10_000),
+      );
+      out = remote ? { ...remote } : { ok: false, error: "电脑端执行器在调度瞬间不可用，请重试" };
+    } else if (deps.localVisual.isEnabled() && deps.localVisual.clipboard) {
+      out = await deps.localVisual.clipboard({
+        op: op as "get" | "set",
+        text: typeof input.text === "string" ? input.text : undefined,
       });
     } else {
       out = { ok: false, error: desktopUnavailableMessage(bridgeEnabled) };

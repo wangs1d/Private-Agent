@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { arbitrate, nextQuietEnd, type ArbiterContext } from "../src/proactivity/arbiter.js";
+import { arbitrate, DELIVERY_RETRY_MS, nextQuietEnd, type ArbiterContext } from "../src/proactivity/arbiter.js";
 import { ProactiveDeliveryService } from "../src/proactivity/delivery-service.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import type { ProactiveProposal } from "../src/proactivity/pipeline-types.js";
@@ -14,6 +14,7 @@ import { OutcomeStore } from "../src/proactivity/outcome-store.js";
 import { PresenceService } from "../src/proactivity/presence-service.js";
 import { ProposalStore } from "../src/proactivity/proposal-store.js";
 import { UpcomingScheduleWatcher } from "../src/proactivity/upcoming-schedule-watcher.js";
+import { WsConnectionRegistry } from "../src/services/ws-connection-registry.js";
 import type { ScheduleTaskRecord } from "../src/services/schedule-task-service.js";
 
 // 固定本地时钟：正午（非静默时段）
@@ -110,16 +111,14 @@ test("arbiter: social 层预算耗尽被节流", () => {
   assert.ok(d.reasonChain[0].startsWith("frequency_governor:"));
 });
 
-test("arbiter: 用户离线 social 提案挂起待重连", () => {
-  const d = arbitrate(proposal({ tier: "social", importance: "medium" }), ctx({ presence: "offline" }));
-  assert.equal(d.verdict, "deferred");
-  assert.ok(d.reasonChain.includes("offline_wait_reconnect"));
-});
-
-test("arbiter: must 层离线照发（投递层换通道必达）", () => {
-  const d = arbitrate(proposal({ tier: "must" }), ctx({ presence: "offline" }));
-  assert.equal(d.verdict, "delivered");
-  assert.ok(d.reasonChain.includes("deliver_now"));
+test("arbiter: 两端都不在线一律挂起待重连（不落离线信箱）", () => {
+  const social = arbitrate(proposal({ tier: "social", importance: "medium" }), ctx({ presence: "offline" }));
+  assert.equal(social.verdict, "deferred");
+  assert.ok(social.reasonChain.includes("offline_wait_reconnect"));
+  const must = arbitrate(proposal({ tier: "must" }), ctx({ presence: "offline" }));
+  assert.equal(must.verdict, "deferred", "必达层离线同样挂起，重连即达");
+  const critical = arbitrate(proposal({ importance: "critical" }), ctx({ presence: "offline" }));
+  assert.equal(critical.verdict, "deferred");
 });
 
 test("arbiter: 对话中不打断非 interruptible 提案（短延迟 90s）", () => {
@@ -143,7 +142,53 @@ test("presence: active/idle/offline 三态", () => {
   presence.markConnected("u", NOON - 11 * 60_000);
   assert.equal(presence.getPresence("u", NOON), "idle");
   presence.markDisconnected("u");
+  presence.markDisconnected("u");
   assert.equal(presence.getPresence("u", NOON), "offline");
+});
+
+test("presence: 多端引用计数（任一设备在线即在线，全部掉线才离线）", () => {
+  const presence = new PresenceService();
+  presence.markConnected("u", NOON);
+  presence.markConnected("u", NOON); // 手机端第二连接
+  presence.markDisconnected("u"); // 电脑端断开 → 手机仍在线
+  assert.equal(presence.getPresence("u", NOON), "active");
+  presence.markDisconnected("u"); // 全部掉线
+  assert.equal(presence.getPresence("u", NOON), "offline");
+});
+
+test("registry: 多设备 fan-out（电脑+手机都收到；单端断开不误判离线）", () => {
+  const registry = new WsConnectionRegistry();
+  const states: boolean[] = [];
+  registry.onConnectionChange = (_actorId, connected) => states.push(connected);
+  const sent: string[] = [];
+  const desktop = { send: (d: string) => void sent.push(`desktop:${d}`) };
+  const mobile = { send: (d: string) => void sent.push(`mobile:${d}`) };
+  registry.register("u", desktop);
+  registry.register("u", mobile);
+  assert.ok(registry.trySend("u", "m1"), "双端在线应投递成功");
+  assert.equal(sent.filter((s) => s.startsWith("desktop:")).length, 1, "电脑端收到");
+  assert.equal(sent.filter((s) => s.startsWith("mobile:")).length, 1, "手机端也收到");
+  registry.unregister("u", desktop); // 电脑端关闭 → 手机仍在线，不算离线
+  assert.deepEqual(states, [true]);
+  assert.ok(registry.trySend("u", "m2"));
+  registry.unregister("u", mobile);
+  assert.deepEqual(states, [true, false]);
+  assert.equal(registry.trySend("u", "m3"), false);
+});
+
+test("registry: 死连接 trySend 兜底清理并正确判定离线", () => {
+  const registry = new WsConnectionRegistry();
+  const states: boolean[] = [];
+  registry.onConnectionChange = (_actorId, connected) => states.push(connected);
+  registry.register("u", { send: () => {}, readyState: 3 }); // 已关闭的僵尸连接
+  assert.equal(registry.trySend("u", "m"), false, "无健康连接不投递");
+  assert.deepEqual(states, [true, false], "僵尸连接清理后应标记离线");
+  // 混合：僵尸 + 健康手机端 → 投递成功且不离线
+  states.length = 0;
+  registry.register("u", { send: () => {}, readyState: 3 });
+  registry.register("u", { send: () => {} });
+  assert.ok(registry.trySend("u", "m"));
+  assert.deepEqual(states, [true]);
 });
 
 // ─── 提案队列 ───
@@ -186,8 +231,8 @@ type Harness = {
   presence: PresenceService;
   governor: FrequencyGovernor;
   delivered: Array<{ actorId: string; json: string }>;
-  offlineStored: Array<{ actorId: string; text: string }>;
   spoken: ProactiveProposal[];
+  flags: { failSend: boolean };
   dir: string;
 };
 
@@ -196,8 +241,8 @@ function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: bool
   const presence = new PresenceService();
   const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: opts.dailyBudget ?? 6 });
   const delivered: Array<{ actorId: string; json: string }> = [];
-  const offlineStored: Array<{ actorId: string; text: string }> = [];
   const spoken: ProactiveProposal[] = [];
+  const flags = { failSend: opts.failSend ?? false };
   const pipeline = new ProactivePipeline({
     dataPath: dir,
     governor,
@@ -205,22 +250,16 @@ function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: bool
     presence,
     delivery: new ProactiveDeliveryService({
       trySend: (actorId, json) => {
-        if (opts.failSend) return false;
+        if (flags.failSend) return false;
         delivered.push({ actorId, json });
         return true;
-      },
-      offlineStore: {
-        createOutbound: async (input) => {
-          offlineStored.push({ actorId: input.actorId, text: input.text });
-          return {};
-        },
       },
     }),
     outcomes: new OutcomeStore(join(dir, "outcomes.json")),
     speak: (p) => spoken.push(p),
     nowFn: () => opts.now ?? NOON,
   });
-  return { pipeline, presence, governor, delivered, offlineStored, spoken, dir };
+  return { pipeline, presence, governor, delivered, spoken, flags, dir };
 }
 
 test("pipeline: 在线 directText 零 LLM 直投 + outcome 记录", async () => {
@@ -274,18 +313,39 @@ test("pipeline: 同 dedupKey 二次提交合并（待发区内 + 已投递窗口
   }
 });
 
-test("pipeline: 离线 social 提案挂起 → 重连 flush 后经 MessageHub 离线必达", async () => {
-  const h = makeHarness({ failSend: true });
+test("pipeline: 两端离线提案挂起 → 任一设备重连后直推（弹窗保证）", async () => {
+  const h = makeHarness();
   try {
     const d1 = h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium" }));
     assert.equal(d1.verdict, "deferred");
     assert.equal(h.pipeline.diagnostics().pending.length, 1);
-    // 重连（idle：11 分钟前标记，非对话中）→ flush 重仲裁 → WS 失败 → MessageHub 落库
+    assert.equal(h.delivered.length, 0, "离线不投递");
+    // 手机端重连（idle：11 分钟前标记，非对话中）→ flush 重仲裁 → 直推
     h.presence.markConnected("user-a", NOON - 11 * 60_000);
     h.pipeline.flushDue(NOON);
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.offlineStored.length, 1, "离线应落 MessageHub");
+    assert.equal(h.delivered.length, 1, "重连后立即直推");
     assert.equal(h.pipeline.diagnostics().pending.length, 0);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.pipeline.diagnostics().recentOutcomes.at(-1)?.outcome, "delivered");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: 投递竞态（仲裁在线但发送失败）→ 30s 后重试不丢失", async () => {
+  const h = makeHarness({ failSend: true });
+  try {
+    h.presence.markConnected("user-a", NOON - 5 * 60_000);
+    const d = h.pipeline.submitProposal(proposal());
+    assert.equal(d.verdict, "delivered");
+    assert.equal(h.delivered.length, 0, "发送失败不产出投递");
+    assert.equal(h.pipeline.diagnostics().pending.length, 1, "提案保留待发区等待重试");
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.pipeline.diagnostics().recentOutcomes.length, 0, "未送达不记 outcome");
+    // 设备恢复 → 重试成功
+    h.flags.failSend = false;
+    h.pipeline.flushDue(NOON + DELIVERY_RETRY_MS + 1);
+    assert.equal(h.delivered.length, 1, "重试投递成功");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
@@ -406,4 +466,111 @@ test("watcher: itinerary 提醒在提前量窗口内产出提案；trivia/agent_
   // 二次扫描不重复提案
   watcher.scan(NOON);
   assert.equal(submitted.length, 1);
+});
+
+// ─── 助手动态台账（action.* 提案投递成功落库）───
+
+test("ledger: action.* 提案投递成功落库，非 action.* 不落", () => {
+  const recorded: ProactiveProposal[] = [];
+  const delivery = new ProactiveDeliveryService({
+    trySend: () => true,
+    ledger: { record: (p) => recorded.push(p) },
+  });
+  const r1 = delivery.deliver(proposal({ kind: "action.purchase", dedupKey: "buy-milk" }), "牛奶订好啦", "已为你订购牛奶");
+  const r2 = delivery.deliver(proposal({ kind: "schedule_upcoming", dedupKey: "k2" }), "评审提醒", "评审");
+  assert.ok(r1.ok && r2.ok);
+  assert.equal(recorded.length, 1, "只有 action.* 提案进台账");
+  assert.equal(recorded[0]!.kind, "action.purchase");
+});
+
+test("ledger: 投递失败（两端离线）不落台账", () => {
+  const recorded: ProactiveProposal[] = [];
+  const delivery = new ProactiveDeliveryService({
+    trySend: () => false,
+    ledger: { record: (p) => recorded.push(p) },
+  });
+  const r = delivery.deliver(proposal({ kind: "action.payment" }), "水电费已缴", "已缴纳水电费");
+  assert.equal(r.ok, false);
+  assert.equal(recorded.length, 0, "挂起重投的提案在送达前不进台账");
+});
+
+test("ledger: AgentActivityStore 记录/去重/已读/裁剪", async () => {
+  const { AgentActivityStore } = await import("../src/proactivity/activity-store.js");
+  const dir = mkdtempSync(join(tmpdir(), "activity-store-"));
+  const file = join(dir, "activities.json");
+  const store = new AgentActivityStore(file);
+  const a = store.record({
+    actorId: "user-a", kind: "action.purchase", title: "已为你订购牛奶",
+    summary: "光明每日鲜语 950ml ×1", status: "pending", statusLabel: "配送中",
+    detail: { 商品: "光明每日鲜语 950ml ×1", 金额: "¥15.80" }, dedupKey: "buy-milk",
+  });
+  assert.ok(a && a.category === "purchase" && a.readAt === null);
+  // 同 dedupKey 重投不重复
+  assert.equal(store.record({ actorId: "user-a", kind: "action.purchase", title: "x", summary: "y", dedupKey: "buy-milk" }), null);
+  // 其他 actor / 其他 dedupKey 正常
+  store.record({ actorId: "user-b", kind: "action.payment", title: "已缴纳水电费", summary: "8月账单 ¥128.50", dedupKey: "pay-1" });
+  assert.equal(store.unreadCount("user-a"), 1);
+  assert.equal(store.unreadCount(), 2);
+  assert.equal(store.markRead("user-a", [a!.id]), 1);
+  assert.equal(store.unreadCount("user-a"), 0);
+  assert.equal(store.unreadCount("user-b"), 1);
+  // 重启恢复（同文件再开一遍）
+  const store2 = new AgentActivityStore(file);
+  assert.equal(store2.list("user-a").length, 1);
+  assert.equal(store2.list("user-a")[0]!.statusLabel, "配送中");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ─── 消息监控触发器（日程变动识别 → action.* 提案）───
+
+test("message_watch: 延迟开会消息 → 提交 action.schedule_change 提案", async () => {
+  const { MessageWatchTrigger, detectScheduleChange } = await import("../src/proactivity/triggers/message-watch-trigger.js");
+  const submitted: ProactiveProposal[] = [];
+  const trigger = new MessageWatchTrigger({ submitProposal: (p) => submitted.push(p) });
+  trigger.handleInbound({
+    actorId: "user-a", platform: "wechat", channelId: "conv-1",
+    text: "王哥，下午的评审会议要延迟到4点了，你那边别走开",
+    participantName: "王工",
+  });
+  assert.equal(submitted.length, 1);
+  const p = submitted[0]!;
+  assert.equal(p.kind, "action.schedule_change");
+  assert.equal(p.tier, "must");
+  assert.equal(p.importance, "high");
+  assert.ok(p.directText?.includes("评审会议"));
+  assert.equal(p.detail?.["发件人"], "王工");
+  assert.equal(p.detail?.["来源"], "微信");
+  assert.ok(detectScheduleChange("明天的面试取消") != null);
+});
+
+test("message_watch: 噪声/无关消息不提案", async () => {
+  const { MessageWatchTrigger, detectScheduleChange } = await import("../src/proactivity/triggers/message-watch-trigger.js");
+  const submitted: ProactiveProposal[] = [];
+  const trigger = new MessageWatchTrigger({ submitProposal: (p) => submitted.push(p) });
+  const hub = await import("../src/services/message-hub-service.js");
+  const mk = (text: string): hub.MessageHubInboundInput => ({
+    actorId: "user-a", platform: "generic", channelId: "c1", text,
+  });
+  trigger.handleInbound(mk("您的验证码是 882233，请勿泄露"));
+  trigger.handleInbound(mk("今天天气真不错，周末去爬山吧"));
+  trigger.handleInbound(mk("订单已取消，退款将在3个工作日内退回")); // 无日程语境
+  assert.equal(submitted.length, 0);
+  assert.equal(detectScheduleChange(""), null);
+});
+
+test("message_watch: 同会话 10 分钟冷却 + 同文本指纹去重", async () => {
+  const { MessageWatchTrigger } = await import("../src/proactivity/triggers/message-watch-trigger.js");
+  const submitted: ProactiveProposal[] = [];
+  let now = 1_000_000;
+  const trigger = new MessageWatchTrigger({ submitProposal: (p) => submitted.push(p), now: () => now });
+  const mk = (text: string): import("../src/services/message-hub-service.js").MessageHubInboundInput => ({
+    actorId: "user-a", platform: "wechat", channelId: "grp-1", text,
+  });
+  trigger.handleInbound(mk("会议推迟到明天上午十点"));
+  trigger.handleInbound(mk("会议推迟到明天上午十点"));   // 冷却期内
+  assert.equal(submitted.length, 1);
+  now += 11 * 60_000;
+  trigger.handleInbound(mk("会议推迟到明天上午十点"));   // 冷却期外，同文本 → 同 dedupKey 由管道去重
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[0]!.dedupKey, submitted[1]!.dedupKey);
 });

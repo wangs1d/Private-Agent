@@ -2,7 +2,6 @@ import "dart:async";
 
 import "package:flutter/material.dart";
 
-import "../../core/region/region_config.dart";
 import "../../core/services/device_api_client.dart";
 import "../../core/theme/app_theme.dart";
 
@@ -21,10 +20,9 @@ enum ThemeChoice { light, dark, system }
 /// - 点击后:在头像右侧弹出列表面板,模仿"设置菜单"
 /// - 列表面板内容(根据当前需求裁剪):
 ///   - 主题           亮色 / 暗色 / 跟随系统   (hover 浮出 3 选 1 子菜单)
-///   - (文档 / 检测更新 暂不做)
 ///   - 设置
 ///   - 帮助与反馈
-///   - 绑定微信 Claw
+///   - 我的设备
 ///   - 站内信          (带未读小红点)
 ///   - 退出登录
 ///
@@ -43,9 +41,7 @@ class SidebarUserMenu extends StatefulWidget {
     required this.onOpenMessages,
     required this.onOpenSettings,
     required this.onOpenHelp,
-    this.onOpenWechatClaw,
     required this.onOpenDevices,
-    required this.onOpenBriefingSettings,
     required this.onLogout,
   });
 
@@ -76,17 +72,8 @@ class SidebarUserMenu extends StatefulWidget {
   /// 点击「帮助与反馈」:后续接帮助页
   final VoidCallback onOpenHelp;
 
-  /// 点击「微信 Claw 绑定」:复用原侧栏底部入口。
-  ///
-  /// 可选：当 [RegionCapabilities.wechatClaw] 为 false（国际版）时
-  /// 该行不渲染，回调可为 null。
-  final VoidCallback? onOpenWechatClaw;
-
   /// 点击「我的设备」:打开终端互连平台设备管理页
   final VoidCallback onOpenDevices;
-
-  /// 点击「每日简报」:打开简报设置页（启用开关/时间/模式/sections）
-  final VoidCallback onOpenBriefingSettings;
 
   /// 点击「退出登录」:后续接账号注销
   final VoidCallback onLogout;
@@ -143,19 +130,9 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenHelp();
           },
-          onOpenWechatClaw: widget.onOpenWechatClaw == null
-              ? null
-              : () {
-                  Navigator.of(context, rootNavigator: true).pop();
-                  widget.onOpenWechatClaw!();
-                },
           onOpenDevices: () {
             Navigator.of(context, rootNavigator: true).pop();
             widget.onOpenDevices();
-          },
-          onOpenBriefingSettings: () {
-            Navigator.of(context, rootNavigator: true).pop();
-            widget.onOpenBriefingSettings();
           },
           onLogout: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -244,13 +221,13 @@ class _UserAvatar extends StatelessWidget {
   }
 }
 
-/// 浮在用户头像右侧的菜单(深色卡片 + 圆角 + 阴影)。
+/// 浮在用户头像右侧的菜单(浮层卡片 + 圆角 + 阴影)。
 ///
 /// 配色约定:
-/// - 主弹窗 / 子菜单 / 设备悬浮面板都使用 `cs.surface`,
-///   在深色主题下 `cs.surface = AppPalette.mainPanel = #0F0F0F`(纯黑),
-///   与聊天主背景完全同色,让"展开框"看起来像从主背景里浮出来,
-///   同时与侧栏/顶栏的深灰(#131313)形成清晰的层级对比。
+/// - 主弹窗 / 子菜单 / 设备悬浮面板都使用 `cs.surfaceContainerHigh`,
+///   深色主题下为 #232323、暖色主题下为 #F0F4F9——都比各自的页面主背景
+///   (`cs.surface`)亮/暗一档,浮层无论在哪种主题下都能从背景里"浮出来",
+///   配合 1px 描边 + 阴影形成清晰层级。
 ///
 /// hover 子菜单的实现:
 /// 主题行的 hover 子菜单**作为 outer Stack 的独立
@@ -270,9 +247,7 @@ class _UserMenuOverlay extends StatefulWidget {
     required this.onOpenMessages,
     required this.onOpenSettings,
     required this.onOpenHelp,
-    this.onOpenWechatClaw,
     required this.onOpenDevices,
-    required this.onOpenBriefingSettings,
     required this.onLogout,
   });
 
@@ -286,9 +261,7 @@ class _UserMenuOverlay extends StatefulWidget {
   final VoidCallback onOpenMessages;
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenHelp;
-  final VoidCallback? onOpenWechatClaw;
   final VoidCallback onOpenDevices;
-  final VoidCallback onOpenBriefingSettings;
   final VoidCallback onLogout;
 
   @override
@@ -390,7 +363,8 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
     // 这样弹窗是从头像位置往上长的,视觉上紧贴头像,不会跑到屏幕最底端。
     final double screenHeight = MediaQuery.of(context).size.height;
     // 预估面板高度,用来在面板太高时夹一下避免溢出屏幕顶部
-    const double estimatedPanelHeight = 470;
+    // (header + 主题/设置/帮助/设备/站内信/退出 6 行 + 3 条分隔线)
+    const double estimatedPanelHeight = 330;
     double bottom = screenHeight - widget.anchor.bottom + 8;
     final double maxBottom = screenHeight - 8 - estimatedPanelHeight;
     if (bottom > maxBottom) bottom = maxBottom;
@@ -425,10 +399,13 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
           left: left,
           bottom: bottom,
           child: Material(
-            color: cs.surface,
-            surfaceTintColor: cs.surfaceTint,
+            color: cs.surfaceContainerHigh,
+            surfaceTintColor: Colors.transparent,
             elevation: 12,
-            borderRadius: BorderRadius.circular(14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: cs.outline.withValues(alpha: 0.28)),
+            ),
             // 关闭裁剪(子菜单虽然已经挪到外层,但保留 Clip.none 也不会出错)
             clipBehavior: Clip.none,
             child: SizedBox(
@@ -438,7 +415,9 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   _Header(userName: widget.userName),
-                  const Divider(height: 1, thickness: 1),
+                  Divider(
+                      height: 1, thickness: 1,
+                      color: cs.outline.withValues(alpha: 0.2)),
                   _ThemeRow(
                     rowKey: _themeRowKey,
                     currentTheme: widget.currentTheme,
@@ -446,18 +425,13 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onHover: _onThemeHover,
                     onUnhover: _onThemeUnhover,
                   ),
-                  const Divider(height: 1, thickness: 1),
+                  Divider(
+                      height: 1, thickness: 1,
+                      color: cs.outline.withValues(alpha: 0.2)),
                   _Row(
                     leading: const Icon(Icons.settings_outlined, size: 18),
                     title: "设置",
                     onTap: widget.onOpenSettings,
-                  ),
-                  _Row(
-                    leading:
-                        const Icon(Icons.wb_sunny_outlined, size: 18),
-                    title: "每日简报",
-                    trailing: const _TrailingValue(showChevron: true),
-                    onTap: widget.onOpenBriefingSettings,
                   ),
                   _Row(
                     leading: const Icon(Icons.help_outline, size: 18),
@@ -471,13 +445,6 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                     onUnhover: _onDeviceUnhover,
                     onTap: widget.onOpenDevices,
                   ),
-                  if (RegionConfig.capabilities.wechatClaw &&
-                      widget.onOpenWechatClaw != null)
-                    _Row(
-                      leading: const Icon(Icons.qr_code_2_outlined, size: 18),
-                      title: "绑定微信 Claw",
-                      onTap: widget.onOpenWechatClaw!,
-                    ),
                   _Row(
                     leading:
                         const Icon(Icons.notifications_outlined, size: 18),
@@ -487,7 +454,9 @@ class _UserMenuOverlayState extends State<_UserMenuOverlay> {
                         : const _TrailingValue(showChevron: true),
                     onTap: widget.onOpenMessages,
                   ),
-                  const Divider(height: 1, thickness: 1),
+                  Divider(
+                      height: 1, thickness: 1,
+                      color: cs.outline.withValues(alpha: 0.2)),
                   _Row(
                     leading: Icon(
                       Icons.logout,
@@ -627,10 +596,13 @@ class _ThemeSubmenu extends StatelessWidget {
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Material(
-      color: cs.surface,
-      surfaceTintColor: cs.surfaceTint,
+      color: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
       elevation: 12,
-      borderRadius: BorderRadius.circular(10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.28)),
+      ),
       clipBehavior: Clip.antiAlias,
       child: SizedBox(
         width: _UserMenuOverlayState._submenuWidth,
@@ -1105,10 +1077,13 @@ class _DeviceHoverPanelState extends State<_DeviceHoverPanel> {
     }
 
     return Material(
-      color: cs.surface,
-      surfaceTintColor: cs.surfaceTint,
+      color: cs.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
       elevation: 12,
-      borderRadius: BorderRadius.circular(10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: cs.outline.withValues(alpha: 0.28)),
+      ),
       clipBehavior: Clip.antiAlias,
       child: SizedBox(
         width: _UserMenuOverlayState._devicePanelWidth,

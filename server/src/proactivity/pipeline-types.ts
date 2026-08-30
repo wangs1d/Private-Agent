@@ -29,6 +29,9 @@ export type ProactiveProposal = {
   /** 是否允许打断进行中的对话（critical 默认允许） */
   interruptible?: boolean;
   source: string;
+  /** 代办结果详情（仅 action.* 提案）：键值对形式（商品/金额/渠道...），
+   * 投递成功后随提案落入助手动态台账，客户端详情浮层直接展示 */
+  detail?: Record<string, string>;
 };
 
 export type ProposalVerdict =
@@ -49,7 +52,8 @@ export type ProactiveOutcome =
   | "ignored"
   | "replied";
 
-export type DeliveryChannel = "in_app" | "offline_store";
+/** 触达通道：两端在线 WS fan-out 直推；两端离线时必达/critical 升级手机系统推送 */
+export type DeliveryChannel = "in_app" | "mobile_push";
 
 /** 仲裁结果（决策链可解释：verdict + 每步原因） */
 export type ArbitrationDecision = {

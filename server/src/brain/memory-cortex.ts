@@ -201,6 +201,8 @@ interface NarrativeMemoryLike {
   ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
+  /** 词法预筛分数（0~1，进程内 BM25 归一）；仅 hybrid 适配器实现，未注册时为 undefined */
+  lexicalPreScreen?(actorId: string, query: string): Promise<number>;
   runSleepConsolidation(actorIds: string[]): Promise<NarrativeSleepReport[]>;
 }
 
@@ -439,6 +441,8 @@ export class MemoryCortex {
   private inferenceEngine: MemoryInferenceEngine | null = null;
   // ---- 记忆联想性增强：LLM 合成跨记忆新关联（异步，不阻塞 recall）----
   private associationSynthesizer: MemoryAssociationSynthesizer | null = null;
+  /** 联想合成冷却（per-actor）：合成是异步 LLM 调用且结论回灌记忆图，无冷却会自我增殖烧 token */
+  private associationSynthLastRun = new Map<string, number>();
   // ---- 三层记忆通道统一仲裁（agentic / humanLike / narrative / kvSummary）----
   // 改造前：降级链串行 fallback，同一时刻只用一条通道，分数丢失、无法跨通道融合。
   // 改造后：agentic 充足时短路；不足时并行多通道，交 arbitrateMemories 归一化+去重+重排。
@@ -671,6 +675,12 @@ export class MemoryCortex {
   ): void {
     const synthesizer = this.associationSynthesizer;
     if (!synthesizer || !synthesizer.enabled || items.length < 2) return;
+    const cooldownRaw = Number(process.env.MEMORY_ASSOCIATION_SYNTH_COOLDOWN_MS);
+    const cooldownMs =
+      Number.isFinite(cooldownRaw) && cooldownRaw >= 0 ? cooldownRaw : 5 * 60_000;
+    const lastRun = this.associationSynthLastRun.get(actorId) ?? 0;
+    if (Date.now() - lastRun < cooldownMs) return;
+    this.associationSynthLastRun.set(actorId, Date.now());
     // 只取前 5 条参与合成（限制 prompt 规模）
     const inputs = items
       .slice(0, 5)
@@ -1450,9 +1460,18 @@ export class MemoryCortex {
    */
   async semanticRecallPreScreen(actorId: string, query: string): Promise<boolean> {
     const q = query.trim();
-    if (!this.agentic || !q) return false;
+    if (!q) return false;
     const raw = process.env.MEMORY_PRESCREEN_TOP_SCORE;
     const threshold = raw && Number.isFinite(parseFloat(raw)) ? parseFloat(raw) : 0.45;
+    // 词法快筛：进程内 BM25 强命中直接放行，非门控轮次不再每次都打 embedding 预筛。
+    // 无实现 / 低分时落回 Mem0 向量预筛，不改变既有放行行为。
+    try {
+      const lex = (await this.narrative?.lexicalPreScreen?.(actorId, q)) ?? null;
+      if (lex != null && lex >= threshold) return true;
+    } catch {
+      /* 词法快筛失败不阻塞向量预筛 */
+    }
+    if (!this.agentic) return false;
     try {
       const candidates = await this.agentic.retrieval.searchStructured(actorId, q);
       return (candidates[0]?.score ?? 0) >= threshold;

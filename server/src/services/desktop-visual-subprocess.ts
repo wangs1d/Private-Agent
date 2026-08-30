@@ -25,6 +25,10 @@ import type {
   DesktopVisualWebSearchResult,
   DesktopVisualWebFetchInput,
   DesktopVisualWebFetchResult,
+  DesktopVisualWindowInput,
+  DesktopVisualWindowResult,
+  DesktopVisualClipboardInput,
+  DesktopVisualClipboardResult,
 } from "./desktop-visual-port.js";
 import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
 
@@ -233,6 +237,8 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
       {
         action: "screenshot",
         region: input?.region ?? null,
+        display: input?.display ?? null,
+        maxDim: input?.maxDim ?? null,
       },
       {
         pythonExe: this.pythonExe,
@@ -296,13 +302,15 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
     if (!this.enabled) {
       return { ok: false, error: "桌面纯视觉未启用（DESKTOP_VISUAL_ENABLED）" };
     }
-    // UIA 查询走 stdio_worker，给 30s（read_children 可能慢）
+    // UIA 查询走 stdio_worker，给 30s（read_children / snapshot 可能慢）
     return runStdioWorker<DesktopVisualUiaQueryResult>(
       {
         action: "uia_query",
         mode: input.mode,
         selector: input.selector ?? null,
         point: input.point ?? null,
+        windowTitle: input.windowTitle ?? null,
+        maxDepth: input.maxDepth ?? null,
         topOnly: input.topOnly ?? null,
         limit: input.limit ?? null,
       },
@@ -319,6 +327,7 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
     if (!this.enabled) {
       return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
     }
+    // wait（≤10s）/ 剪贴板粘贴长文本都在预算内，30s 足够
     return runStdioWorker<DesktopVisualRunInputResult>(
       {
         action: "run_input",
@@ -332,13 +341,20 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         key: input.key ?? null,
         keys: input.keys ?? null,
         scrollClicks: input.scrollClicks ?? null,
+        scrollX: input.scrollX ?? null,
+        waitMs: input.waitMs ?? null,
+        holdSeconds: input.holdSeconds ?? null,
         interval: input.interval ?? null,
         moveDuration: input.moveDuration ?? null,
+        imageWidth: input.imageWidth ?? null,
+        imageHeight: input.imageHeight ?? null,
+        coordSpace: input.coordSpace ?? null,
+        display: input.display ?? null,
       },
       {
         pythonExe: this.pythonExe,
         packageRoot: this.packageRoot,
-        timeoutMs: 10_000,
+        timeoutMs: 30_000,
         timeoutLabel: "run_input 子进程超时",
       },
     );
@@ -350,7 +366,7 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
     if (!this.enabled) {
       return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
     }
-    // run_automation 内部完成 query + pattern 操作,给 15s(query 遍历可能慢)
+    // run_automation 内部完成 query + pattern 操作,给 20s(query 遍历可能慢)
     return runStdioWorker<DesktopVisualRunAutomationResult>(
       {
         action: "run_automation",
@@ -360,11 +376,12 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         value: input.value ?? null,
         index: input.index ?? 0,
         topOnly: input.topOnly ?? true,
+        windowTitle: input.windowTitle ?? null,
       },
       {
         pythonExe: this.pythonExe,
         packageRoot: this.packageRoot,
-        timeoutMs: 15_000,
+        timeoutMs: 20_000,
         timeoutLabel: "run_automation 子进程超时",
       },
     );
@@ -432,6 +449,50 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         packageRoot: this.packageRoot,
         timeoutMs: 25_000,
         timeoutLabel: "web_fetch 子进程超时",
+      },
+    );
+  }
+
+  async window(input: DesktopVisualWindowInput): Promise<DesktopVisualWindowResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualWindowResult>(
+      {
+        action: "window",
+        windowOp: input.op,
+        title: input.title ?? null,
+        index: input.index ?? null,
+        hwnd: input.hwnd ?? null,
+        x: input.x ?? null,
+        y: input.y ?? null,
+        width: input.width ?? null,
+        height: input.height ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 10_000,
+        timeoutLabel: "window 子进程超时",
+      },
+    );
+  }
+
+  async clipboard(input: DesktopVisualClipboardInput): Promise<DesktopVisualClipboardResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualClipboardResult>(
+      {
+        action: "clipboard",
+        clipboardOp: input.op,
+        text: input.text ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 5_000,
+        timeoutLabel: "clipboard 子进程超时",
       },
     );
   }

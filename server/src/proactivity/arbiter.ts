@@ -20,6 +20,8 @@ export const QUIET_HOUR_END = 7;
 export const IN_CONVERSATION_WINDOW_MS = 90_000;
 /** 对话中被打断提案的短延迟 */
 export const CONVERSATION_DEFER_MS = 90_000;
+/** 投递竞态重试间隔（仲裁时在线、发送时已全部掉线 → 待发区保留稍后重试，重连即达） */
+export const DELIVERY_RETRY_MS = 30_000;
 
 export function isQuietHourNow(d: Date): boolean {
   return d.getHours() >= QUIET_HOUR_START || d.getHours() < QUIET_HOUR_END;
@@ -61,13 +63,14 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
   } else {
     chain.push("tier=must_bypass_social_budget");
   }
-  // 在场择时：social 层离线 → 挂起待重连（闲聊不打扰离开的人）；must 层照发，
-  // 投递层 trySend 失败自动落 MessageHub（离线换通道=必达语义）。critical 默认允许打断。
-  if (ctx.presence === "offline" && p.tier !== "must" && p.importance !== "critical") {
+  // 在场择时：两端都不在线 → 挂起待重连（不落离线信箱；任一设备重连后 flush 立即直推）。
+  // 对话中且不打断 → 短延迟（本轮对话结束再发，仅 social 层；must 层是用户点名要的事，即时直推）。
+  // critical 默认允许打断。
+  if (ctx.presence === "offline") {
     return { proposal: p, verdict: "deferred", reasonChain: [...chain, "offline_wait_reconnect"], deliverAfter: p.deliverAfter };
   }
   const interruptible = p.interruptible ?? p.importance === "critical";
-  if (ctx.inConversation && !interruptible) {
+  if (ctx.inConversation && p.tier !== "must" && !interruptible) {
     return {
       proposal: p,
       verdict: "deferred",

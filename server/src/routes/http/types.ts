@@ -103,6 +103,10 @@ export type HttpRouteDeps = {
   proactivitySuppressionStore?: ProactivitySuppressionStore;
   /** 统一主动性管道（docs/proactivity-architecture.md）；可选，未注入时诊断路由不挂载 */
   proactivePipeline?: import("../../proactivity/proactive-pipeline.js").ProactivePipeline | null;
+  /** 移动端推送通道（离线必达升级）；可选，未注入时推送注册路由禁用 */
+  proactivePushService?: import("../../proactivity/mobile-push-service.js").MobilePushService | null;
+  /** 助手动态台账（右侧面板「助手动态」卡数据源） */
+  agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;

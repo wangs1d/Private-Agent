@@ -1284,6 +1284,43 @@ const VISION_CHAT_TOOLS: ChatCompletionTool[] = VISION_SANDBOX_RESTRICTED_CHAT_T
  * 与 phone.call_user 的区别：phone 走 `isExplicitPhoneCallRequest` 旁路注入，
  * voice 工具族走常规 tool-search 选择 + 关键词分类。
  */
+
+/**
+ * Surface-on-Demand：召唤客户端信息面板（语音模式"念+显"双通道的"显"）。
+ * handler 在 ToolRegistry（surface-tools.ts）；核心库 dialogue 分组收录，
+ * 每轮注入。典型场景：语音模式下用户问"今天有什么安排"→ 调用本工具把
+ * 「今日安排」悬浮窗召唤到桌面，同时文本给出简短口头摘要（会被 TTS 朗读）。
+ */
+const SURFACE_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "surface.show",
+      description:
+        "【召唤桌面悬浮卡】要求客户端在桌面上展示一个信息面板（悬浮卡），配合文本回答形成" +
+        "\"念+显\"双通道：文本回答给口头摘要（语音模式下会被朗读），悬浮卡给可视化细节。" +
+        "典型场景：用户问「今天有什么安排」「看看日程」「今天要做什么」→ 调用本工具展示" +
+        "today_schedule，同时用一两句话口头概括今日要点。不要为纯闲聊调用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          surface: {
+            type: "string",
+            enum: ["today_schedule"],
+            description: "要召唤的面板：today_schedule=今日安排悬浮卡",
+          },
+          ttlSeconds: {
+            type: "number",
+            description: "可选：悬浮卡展示时长（秒，5~300，默认 30，到期自动淡出）",
+          },
+        },
+        required: ["surface"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
@@ -1577,6 +1614,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...CALENDAR_CHAT_TOOLS,
     ...PHONE_CHAT_TOOLS,
     ...VISION_CHAT_TOOLS,
+    ...SURFACE_CHAT_TOOLS,
     ...VOICE_CHAT_TOOLS,
     ...CLOCK_CHAT_TOOLS,
     ...INTERNET_INTELLIGENCE_CHAT_TOOLS,
