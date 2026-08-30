@@ -1255,6 +1255,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             });
             await _store.saveMessage(finalMessage);
           }
+          // 行程卡自动展开：本轮规划实时完成且带 autoOpen 的 travel_itinerary 卡
+          // → 直接打开右侧双面板，无需用户点按钮。卡片已随消息入列/落库，
+          // 历史回看时可随时点卡片按钮重开；历史加载不走本事件，不会重复弹开。
+          final AgentResultParseResult doneParsed =
+              AgentResultParser.parse(resolvedText);
+          final AgentResultData? doneCard = doneParsed.data;
+          if (doneCard != null &&
+              doneCard.cardType == "travel_itinerary" &&
+              doneCard.autoOpen) {
+            _openTravelPlanPanel(doneCard);
+          }
           unawaited(_loadAgentProfile());
         }
         if (type == "agent.peer_message") {

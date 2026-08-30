@@ -307,7 +307,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           {
             onAfterToolBatch: effectiveStreamOpts.toolLoop?.onAfterToolBatch,
             tools: toolPlan.visibleTools,
-            toolSearchSourceTools: toolPlan.searchableTools,
+            // disableToolSearch（fast 车道）必须同样作用于循环内的延迟目录：
+            // 此前只有 prompt 侧的 prepareTools 吃到 searchableForTurn，这里仍传
+            // 全量 searchableTools → 循环内部 prepareTools 重建目录并注入
+            // tool_discover/tool_call 桥，"discover→call 两波召回必断头"的死路
+            // 复活——提醒/搜索轮 discover 成功后 call 不到工具，只剩口头承诺。
+            toolSearchSourceTools: searchableForTurn,
             maxRounds: effectiveStreamOpts.toolLoop?.maxRounds,
             extraBody,
             promptCache: promptPlan.promptCache,

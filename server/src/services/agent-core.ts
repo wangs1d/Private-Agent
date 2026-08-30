@@ -2006,7 +2006,15 @@ if (this.isComplexMode(route.mode)) {
             functionalSuffixes: runtimePlan.functionalSuffixes !== false,
           }
         : {}),
-      toolExposureProfile: runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile,
+      // 2026-08-30 修复：fast 车道不允许 RuntimeKernel 把 profile 覆盖成 scoped。
+      // scoped 会让 buildExtraBody 丢掉 fastProfile 标志（仅 contextual/light 注入）
+      // → 工具循环里 fast 升级保底（fastProfile && 纯宣告/需联网 → 升级 complex）
+      // 整个失效、maxWaves 从 1 静默变 4，且可见工具被 filterScopedTools 砍到只剩
+      // pinned（提醒/搜索/照片关键词轮必然命中，恰是升级需求最高的轮次）。
+      // RK 的 pinned 工具已通过下方 pinnedToolNames 合并保留，fast 下无需 profile 劫持。
+      toolExposureProfile: this.isFastMode(mode)
+        ? baseStreamOpts.toolExposureProfile
+        : (runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile),
       pinnedToolNames: runtimePlan.enabled
         ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
         : baseStreamOpts.pinnedToolNames,

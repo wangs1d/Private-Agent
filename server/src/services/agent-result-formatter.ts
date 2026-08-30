@@ -82,6 +82,13 @@ interface AgentResultPayload {
    * 无需再从 items 文本正则解析。来自 travel.plan-itinerary 工具的结构化结果。
    */
   travelPlan?: unknown;
+  /**
+   * 前端自动展开标志（目前仅 travel_itinerary 卡使用）：为 true 时前端在本轮
+   * chat.assistant_done 实时收到卡片即直接展开双面板，无需用户点按钮；
+   * 卡片仍保留在消息里，历史回看可手动重开。仅在 WS 实时完成事件触发，
+   * 历史加载不走 done 路径，不会重复弹开。
+   */
+  autoOpen?: boolean;
 }
 
 export interface CardSegment {
@@ -559,6 +566,8 @@ export function formatAgentResultForChat(
     if (snap && snap.days.length > 0) {
       payload.travelPlan = snap;
     }
+    // 本轮规划实时完成 → 前端直接展开双面板（卡片仍保留供回看）
+    payload.autoOpen = true;
   }
 
   const json = JSON.stringify(payload);
@@ -592,11 +601,12 @@ export function formatSemanticResultForChat(
   toolName?: string,
 ): string | null {
   const trimmed = text?.trim() ?? "";
-  if (trimmed.length < 20) return null;
+  // ≥12 字：两条例程（"上午10点例会，下午3点见客户"≈17 字）能进；一句话闲聊进不来
+  if (trimmed.length < 12) return null;
 
   const items = extractSemanticItems(trimmed).map((t) => ({ text: t, type: "num" }));
-  // 至少 3 个语义条目才撑得起一张内容卡
-  if (items.length < 3) return null;
+  // 至少 2 个语义条目；2 条目仅当形态证据最强（timeline/metric，见下方门控）
+  if (items.length < 2) return null;
 
   const titleLines = trimmed.split(/\r?\n/).map((l) => l.trim());
   const title = (titleLines.find((l) => l.length > 0 && validTitleLine(l)) ?? "")
@@ -616,6 +626,9 @@ export function formatSemanticResultForChat(
     if (routeDisplayEffectByForm(routeInput) !== cardType) cardType = "";
   }
   if (!CONTENT_CARD_TYPES.has(cardType)) return null;
+  // 2 条目只放行 timeline/metric：两者形态校验本身严格（时间/标签数值全命中）；
+  // 2 条碎句的步骤/对比意图（"先A，再B"）不足以撑卡，保持纯文本
+  if (items.length === 2 && cardType !== "timeline" && cardType !== "metric") return null;
 
   const payload: AgentResultPayload = {
     avatar: "NB",

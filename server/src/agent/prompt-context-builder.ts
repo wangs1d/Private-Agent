@@ -19,6 +19,10 @@ import {
   buildSchedulePromptSnapshot,
   shouldInjectScheduleSnapshot,
 } from "../services/schedule-prompt-snapshot.js";
+import {
+  buildTravelStatePrompt,
+  shouldInjectTravelState,
+} from "../services/travel-prompt-snapshot.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
@@ -613,6 +617,11 @@ export class PromptContextBuilder {
       this.deps.scheduleTaskService != null && shouldInjectScheduleSnapshot(userText)
         ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId, userText)
         : undefined;
+    // 行程状态热层：仅行程语义命中时注入一行回执列表（目的地/日期/planId），
+    // 完整明细不进上下文，由 travel.get-itinerary 按需回查（见 travel-prompt-snapshot.ts）
+    const travelState = shouldInjectTravelState(userText)
+      ? buildTravelStatePrompt(userText)
+      : undefined;
     const taskContext =
       config.memoryPrompt.taskContextInPrompt && userText
         ? compactPromptBlock(buildTaskContextPrompt(userText), 320)
@@ -667,6 +676,7 @@ export class PromptContextBuilder {
     const followUpAnchorLimit = ambiguousFollowUp ? 400 : 180;
     const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
     const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
+    const compactTravelState = compactPromptBlock(travelState, 300);
     // 长期记忆字段压缩（追问分支已随单一门控移除，只保留常规压缩策略）：
     // - lifeThemeMemory：背景性上下文，用 low importance 压到 280*0.7≈196 字（保留前 N 个主题）
     // - dreamMemory：跨会话整理结果，含「核心主题」高价值抽象，不能用 low 压缩会丢末尾主题。
@@ -821,6 +831,7 @@ export class PromptContextBuilder {
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
+      ...(compactTravelState ? { travelState: compactTravelState } : {}),
       ...(userPatternBlock ? { userProfile: userProfile ? `${userProfile}\n\n${userPatternBlock}` : userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
@@ -932,6 +943,7 @@ export class PromptContextBuilder {
       userProfileSummary: redact(ctx.userProfileSummary),
       userProfile: redact(ctx.userProfile),
       taskContext: redact(ctx.taskContext),
+      travelState: redact(ctx.travelState),
       sessionRecap: redact(ctx.sessionRecap),
       workingMemorySummary: redact(ctx.workingMemorySummary),
       recentConversationHistory: redact(ctx.recentConversationHistory),
@@ -970,6 +982,7 @@ export class PromptContextBuilder {
       Boolean(memory.yesterdayHighlight) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
+      Boolean(memory.travelState) ||
       Boolean(memory.toolPlan) ||
       Boolean(memory.skillIndex) ||
       Boolean(memory.currentTime) ||

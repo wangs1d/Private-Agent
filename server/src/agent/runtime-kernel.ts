@@ -90,6 +90,7 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "currentTime",
   "narrativeRecall",
   "scheduleSnapshot",
+  "travelState",
   "interruptedContext",
   "followUpAnchor",
   // 会话连续性核心字段：剥离会导致 Agent 失忆用户偏好/承诺/未完成事项
@@ -117,6 +118,7 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "followUpAnchor",
   "scheduleSnapshot",
+  "travelState",
   "taskContext",
   "userProfile",
   "userLocation",

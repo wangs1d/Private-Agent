@@ -116,6 +116,7 @@ class AgentResultData {
     this.cardType = "",
     this.speak = "",
     this.travelPlan,
+    this.autoOpen = false,
     this.groupTitle,
     this.sideA,
     this.sideB,
@@ -158,6 +159,11 @@ class AgentResultData {
   /// 供双面板行程界面直读渲染;为 null 时前端回退到 items 文本解析。
   final Map<String, dynamic>? travelPlan;
 
+  /// 自动展开标志(目前仅 travel_itinerary 卡使用):服务端在本轮规划实时完成时置
+  /// true,chat.assistant_done 收到后直接展开双面板,无需用户点按钮。卡片仍保留
+  /// 在消息里供回看;历史加载不走 done 事件,不会重复弹开。
+  final bool autoOpen;
+
   /// 对比媒体分组维度标题（如「颜色持久度」），非空时媒体卡片按分组渲染。
   final String? groupTitle;
 
@@ -189,6 +195,7 @@ class AgentResultData {
       cardType: json["cardType"]?.toString() ?? "",
       speak: json["speak"]?.toString() ?? "",
       travelPlan: rawTravelPlan,
+      autoOpen: json["autoOpen"] == true,
     );
   }
 }

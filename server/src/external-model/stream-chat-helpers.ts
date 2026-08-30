@@ -101,7 +101,11 @@ const REASONING_FALLBACK_LOG_PREFIX = "[stream-chat]";
 /** 默认 chunk 间空闲超时：30s 无新 chunk 则判定流卡死。可用 `STREAM_IDLE_TIMEOUT_MS` 覆盖。 */
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
-const DSML_PIPE = "\\|";
+// 竖线字符类：兼容半角 `|` (U+007C) 与全角 `｜` (U+FF5C)。
+// Moonshot/Kimi/DeepSeek 在不同 token 化下两种形式都会输出；此前只匹配半角，
+// 全角变体的 DSML 块整段解析失败——parameter 值吞串后污染工具名，
+// 触发"未找到延迟工具: voice.speak\"> <｜｜DSML｜｜parameter ..."这类执行失败。
+const DSML_PIPE = "[\\|\\uFF5C]";
 const DSML_TAG_PREFIX = `<\\s*\\/?\\s*${DSML_PIPE}\\s*${DSML_PIPE}\\s*DSML\\s*${DSML_PIPE}\\s*${DSML_PIPE}\\s*`;
 
 function parseDsmlAttributes(raw: string): Record<string, string> {
@@ -410,7 +414,7 @@ export function stripDsmlToolCallMarkup(content: string): string {
 
   // 竖线字符类：兼容半角 `|` (U+007C) 和全角 `｜` (U+FF5C)
   // Moonshot/Kimi 在不同 token 化下会输出两种形式，必须都覆盖。
-  const pipe = "\\|";
+  const pipe = DSML_PIPE;
 
   // 关键修复：DSML 实际格式里开标签在 `DSML` 之后**不一定有 `| |`**（`tool_calls` 直接接在 `|` 后面）。
   // 兼容形式：DSML 之后允许 `| |tool_calls` / `| | tool_calls` / `| |  tool_calls` 任意空白/无空白。

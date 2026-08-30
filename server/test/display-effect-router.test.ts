@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   hasBlockquote,
   routeDisplayEffect,
+  scoreDisplayEffects,
 } from "../src/services/display-effect-router.js";
 import {
   formatAgentResultForChat,
@@ -429,5 +430,201 @@ test("formatSemanticResultForChat returns null for conversational narrative with
       "这个报名流程有点复杂啊，到底要怎么弄才对，你之前办过吗？跟我说说呗。",
     ),
     null,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 路由精度回归（2026-08-30 文本效果路由优化）：内容必须落到对应的效果
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("compare: Chinese intent words (区别/怎么选/相比) route to compare card", () => {
+  // 修复前：意图正则把 \b 追在中文词后面——JS 把汉字视为非 \w，
+  // 「区别」后紧跟汉字永远不满足词边界，中文对比意图全灭。
+  assert.equal(
+    routeDisplayEffect({
+      title: "",
+      items: [{ text: "方案A 便宜" }, { text: "方案B 灵活" }, { text: "看你预算" }],
+      fullText: "方案A和方案B有什么区别？哪个更适合我？",
+    }),
+    "compare",
+  );
+  assert.equal(
+    routeDisplayEffect({
+      title: "",
+      items: [{ text: "方案A 价格低" }, { text: "方案B 功能全" }, { text: "各有侧重" }],
+      fullText: "这两款怎么选？方案A相比方案B价格更低",
+    }),
+    "compare",
+  );
+});
+
+test("travel itinerary: numbered/day-marked plan under travel.* tool keeps travel card", () => {
+  // 修复前：编号行程按 steps 形态计 1 分（0.78），压过纯工具分 0.45，
+  // 导致 formatter 丢失 travelPlan 结构化注入、双面板行程卡退化成步骤卡。
+  const input = {
+    toolName: "travel.plan",
+    title: "巴厘岛5日行程",
+    items: [{ text: "到达乌布，入住酒店" }, { text: "圣泉寺+梯田" }, { text: "情人崖看日落" }],
+    fullText: "巴厘岛5日行程：\n1. 到达乌布，入住酒店\n2. 圣泉寺+梯田\n3. 情人崖看日落",
+    numberedItemRatio: 1,
+  };
+  assert.equal(routeDisplayEffect(input), "travel_itinerary");
+  // Day 标记形态同样互证
+  assert.equal(
+    routeDisplayEffect({
+      toolName: "travel.plan",
+      title: "京都三日游",
+      items: [{ text: "Day 1 清水寺" }, { text: "Day 2 伏见稻荷" }, { text: "Day 3 岚山" }],
+    }),
+    "travel_itinerary",
+  );
+  // 无 travel 工具时同形态绝不误判成行程卡（普通编号清单仍是 steps）
+  assert.equal(
+    routeDisplayEffect({
+      title: "待办清单",
+      items: [{ text: "买菜" }, { text: "取快递" }, { text: "交水电费" }],
+      numberedItemRatio: 1,
+    }),
+    "steps",
+  );
+});
+
+test("metric: dual-representation scoring keeps form score despite prose noise", () => {
+  // 修复前：语义碎片条目数 ≥ 结构化条目时整体替换，前导碎句打破
+  // metric 的 every() 校验（1.0 掉到 0.5），遇强工具竞争即丢卡。
+  const input = {
+    toolName: "calendar.list_tasks",
+    title: "手机参数",
+    items: [{ text: "屏幕尺寸：6.7英寸" }, { text: "机身重量：199g" }, { text: "峰值亮度：2000nit" }],
+    fullText:
+      "帮你整理好了这款手机的参数。\n- 屏幕尺寸：6.7英寸\n- 机身重量：199g\n- 峰值亮度：2000nit\n需要我再对比续航吗",
+  };
+  const detail = scoreDisplayEffects(input).find((d) => d.type === "metric");
+  assert.ok(detail, "metric should be a candidate");
+  assert.equal(detail.contentScore, 1, "structural items should still score full form");
+  assert.equal(routeDisplayEffect(input), "metric");
+});
+
+test("generic containers (fold_list/chips) yield to strong tool scene", () => {
+  const nineItems = Array.from({ length: 9 }, (_, i) => ({ text: `搜索结果条目${i + 1}` }));
+  const fullText = "搜索结果：\n" + Array.from({ length: 9 }, (_, i) => `- 搜索结果条目${i + 1}`).join("\n");
+  // 修复前：fold_list 内容分 0.65 → 0.507，抢走 search_result 的 0.45
+  assert.equal(
+    routeDisplayEffect({ toolName: "search_web", title: "搜索结果", items: nineItems, fullText }),
+    "search_result",
+  );
+  // chips 同理让位（强工具在场）；无工具时不受折减、照常命中
+  const tags = [{ text: "健身" }, { text: "摄影" }, { text: "烘焙" }, { text: "旅行" }];
+  assert.equal(
+    routeDisplayEffect({ toolName: "search_web", title: "热门标签", items: tags }),
+    "search_result",
+  );
+  assert.equal(routeDisplayEffect({ title: "你的兴趣标签", items: tags }), "chips");
+  // 无工具时 9 条长清单仍折叠（折减只作用于强工具场景）
+  assert.equal(
+    routeDisplayEffect({ title: "购物清单", items: nineItems, fullText }),
+    "fold_list",
+  );
+});
+
+test("e2e: travel numbered plan routes to travel_itinerary card", () => {
+  const marked = formatAgentResultForChat(
+    "巴厘岛5日行程：\n1. 到达乌布，入住酒店\n2. 圣泉寺+梯田\n3. 情人崖看日落\n4. 金巴兰海滩",
+    "travel.plan",
+  );
+  assert.equal(extractCardType(marked), "travel_itinerary");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 真实对话触发率回归（2026-08-30）：口语化回复（无 markdown 列表）必须能上卡
+// ─────────────────────────────────────────────────────────────────────────────
+
+function semanticCard(text: string, toolName?: string): string {
+  const marked = formatSemanticResultForChat(text, toolName);
+  assert.ok(marked, `should produce a card: ${text}`);
+  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
+  assert.ok(m, "card block should exist");
+  return JSON.parse(m![1]!).cardType;
+}
+
+test("real-dialog: 2-item schedule with clock times becomes timeline card", () => {
+  assert.equal(
+    semanticCard("上午10点部门例会，下午3点见客户。"),
+    "timeline",
+  );
+});
+
+test("real-dialog: 先/再/最后 narrative steps become steps card", () => {
+  assert.equal(semanticCard("先把数据导出，再清洗一遍，最后跑模型。"), "steps");
+});
+
+test("real-dialog: inline Chinese-numeral enumeration becomes steps card", () => {
+  // 修复前：isValidSemanticEntry 把「二、续签合同」当标题引导行丢弃，
+  // 只剩首段，凑不出条目集
+  assert.equal(
+    semanticCard("本周要办三件事：一、交报表；二、续签合同；三、回复客户邮件。"),
+    "steps",
+  );
+});
+
+test("real-dialog: colloquial label+value+unit list becomes metric card", () => {
+  // 修复前：条目带尾部句读（"重量199克，"），尾部锚定的形态校验全灭
+  assert.equal(
+    semanticCard("这款屏幕尺寸是6.7英寸，重量199克，峰值亮度2000尼特。"),
+    "metric",
+  );
+});
+
+test("real-dialog: two colon metric items become metric card", () => {
+  assert.equal(semanticCard("屏幕尺寸：6.7英寸，重量：199g。"), "metric");
+});
+
+test("real-dialog: bare A/B labeled items become compare card", () => {
+  // 修复前：compare 意图（区别/怎么选）有分但缺形态证据，被 ByForm 门拦下
+  assert.equal(
+    semanticCard("两款手机的区别主要在屏幕和续航。A便宜些，B性能强，看你怎么选。"),
+    "compare",
+  );
+});
+
+test("real-dialog: 2-item day-word-only narrative stays plain (no clock)", () => {
+  // 2 条目 timeline 门槛收紧：必须带钟点，日期泛指（明天/后天）不算
+  assert.equal(formatSemanticResultForChat("明天上午可能下雨，后天下午就放晴了。"), null);
+});
+
+test("real-dialog: 2-item step-ish narrative stays plain", () => {
+  // 2 条目只放行 timeline/metric；「先A，再B」两步闲聊不上卡
+  assert.equal(formatSemanticResultForChat("先把碗筷收好，再擦一遍桌子。"), null);
+});
+
+test("real-dialog: 第X天 narrative itinerary becomes timeline card", () => {
+  // 修复前：TIME_MARK_RE 不认「第X天」，多日行程叙事上不了时间轴
+  assert.equal(
+    semanticCard("第一天去乌布看梯田，第二天去圣泉寺，第三天金巴兰看日落。"),
+    "timeline",
+  );
+});
+
+test("real-dialog: date-range plan becomes timeline card", () => {
+  // 2 条目守门认精确日期（X月X号），泛指日期（明天/后天）仍不上卡
+  assert.equal(semanticCard("3月5号出发，3月8号回程。"), "timeline");
+});
+
+test("real-dialog: 8+ item markdown list folds into fold_list card", () => {
+  // 修复前：routeRender 的 result_card 上限 7 条，8-12 条 markdown 清单
+  // 永远上不了卡（带意图词的问句还会被推去 structured 富文本）
+  const items = Array.from({ length: 8 }, (_, i) => `- 物品${i + 1}`).join("\n");
+  assert.equal(
+    extractCardType(formatAgentResultForChat(`采购清单：\n${items}`, undefined)),
+    "fold_list",
+  );
+});
+
+test("real-dialog: 顿号 enumeration becomes chips card", () => {
+  // 修复前：顿号不在子句切分符里（语义路径看不见并列项）；
+  // 修复后切分、且尾顿号/短名词句号被剥掉，chips 标点护栏不再误伤
+  assert.equal(
+    semanticCard("去超市需要买：苹果、香蕉、橙子、牛奶、鸡蛋。"),
+    "chips",
   );
 });
