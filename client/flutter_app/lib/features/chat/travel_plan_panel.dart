@@ -1,6 +1,10 @@
 import "package:flutter/material.dart";
+import "package:url_launcher/url_launcher.dart";
 
+import "../../core/config/api_config.dart";
+import "../../core/services/image_preview_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
+import "media_thumbnail.dart";
 
 /// 行程条目类型（决定右栏时间线图标）。
 enum TravelEntryKind {
@@ -11,6 +15,58 @@ enum TravelEntryKind {
   other,
 }
 
+/// 条目评论（来自服务端 POI 媒体库，仅结构化 travelPlan 携带）。
+class TravelEntryReview {
+  const TravelEntryReview({
+    required this.author,
+    required this.rating,
+    required this.text,
+  });
+
+  factory TravelEntryReview.fromJson(Map<String, dynamic> json) {
+    return TravelEntryReview(
+      author: json["author"]?.toString() ?? "",
+      rating: (num.tryParse(json["rating"]?.toString() ?? "") ?? 0).toDouble(),
+      text: json["text"]?.toString() ?? "",
+    );
+  }
+
+  final String author;
+  final double rating;
+  final String text;
+}
+
+/// 条目相关视频（只存元数据 + 播放页链接，点击跳外部平台）。
+class TravelEntryVideo {
+  const TravelEntryVideo({
+    required this.platform,
+    required this.title,
+    required this.playPageUrl,
+    this.author = "",
+  });
+
+  factory TravelEntryVideo.fromJson(Map<String, dynamic> json) {
+    return TravelEntryVideo(
+      platform: json["platform"]?.toString() ?? "",
+      title: json["title"]?.toString() ?? "",
+      playPageUrl: json["playPageUrl"]?.toString() ?? "",
+      author: json["author"]?.toString() ?? "",
+    );
+  }
+
+  final String platform;
+  final String title;
+  final String playPageUrl;
+  final String author;
+}
+
+/// 相对路径（/travel/media/assets/...）→ 服务端绝对地址；外链原样返回。
+String _resolveMediaUrl(String url) {
+  final String u = url.trim();
+  if (u.isEmpty || u.startsWith("http")) return u;
+  return "${ApiConfig.httpBase}$u";
+}
+
 /// 单条行程条目（右栏时间线的一行）。
 class TravelDayEntry {
   const TravelDayEntry({
@@ -18,6 +74,9 @@ class TravelDayEntry {
     required this.title,
     required this.note,
     required this.kind,
+    this.images = const <String>[],
+    this.reviews = const <TravelEntryReview>[],
+    this.videos = const <TravelEntryVideo>[],
   });
 
   /// 时间前缀（如「09:00」「上午」），查不到为空串。
@@ -25,6 +84,15 @@ class TravelDayEntry {
   final String title;
   final String note;
   final TravelEntryKind kind;
+
+  /// 实拍图（已 resolve 为绝对地址，最多取 6 张）。
+  final List<String> images;
+
+  /// 本地评论（最多取 2 条内联展示）。
+  final List<TravelEntryReview> reviews;
+
+  /// 相关视频（最多取 3 条）。
+  final List<TravelEntryVideo> videos;
 }
 
 /// 按天分组（左栏一个 tab）。
@@ -102,7 +170,7 @@ class TravelPlanData {
     );
   }
 
-  /// 结构化行程条目 → 时间线行（type 直接映射图标，免正则推断）。
+  /// 结构化行程条目 → 时间线行（type 直接映射图标，免正则推断；媒体字段随行携带）。
   static TravelDayEntry _entryFromJson(Map<String, dynamic> raw) {
     final String name = raw["name"]?.toString() ?? "";
     final String startTime = raw["startTime"]?.toString() ?? "";
@@ -118,12 +186,34 @@ class TravelPlanData {
       if (address.trim().isNotEmpty) address.trim(),
     ];
 
+    // 实拍图（相对路径 → 服务端绝对地址）
+    final List<String> images = <String>[
+      for (final dynamic img in (raw["images"] as List<dynamic>? ?? const <dynamic>[]))
+        if (img?.toString().trim().isNotEmpty ?? false)
+          _resolveMediaUrl(img!.toString().trim()),
+    ].take(6).toList(growable: false);
+
+    // 评论（最新优先由服务端排好，这里取前 2 条内联展示）
+    final List<TravelEntryReview> reviews = <TravelEntryReview>[
+      for (final dynamic r in (raw["reviews"] as List<dynamic>? ?? const <dynamic>[]))
+        if (r is Map<String, dynamic>) TravelEntryReview.fromJson(r),
+    ].take(2).toList(growable: false);
+
+    // 视频（元数据 + 播放页，点击跳外部平台）
+    final List<TravelEntryVideo> videos = <TravelEntryVideo>[
+      for (final dynamic v in (raw["videos"] as List<dynamic>? ?? const <dynamic>[]))
+        if (v is Map<String, dynamic>) TravelEntryVideo.fromJson(v),
+    ].take(3).toList(growable: false);
+
     final String type = raw["type"]?.toString() ?? "";
     return TravelDayEntry(
       time: startTime,
       title: name.isEmpty ? "行程安排" : name,
       note: noteParts.join(" · "),
       kind: _kindFromType(type),
+      images: images,
+      reviews: reviews,
+      videos: videos,
     );
   }
 
@@ -785,6 +875,21 @@ class _EntryTile extends StatelessWidget {
                           ),
                         ),
                       ),
+                    if (entry.images.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: _buildImageStrip(context, cs),
+                      ),
+                    if (entry.reviews.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 7),
+                        child: _buildReviewLines(cs),
+                      ),
+                    if (entry.videos.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 7),
+                        child: _buildVideoChips(context, cs),
+                      ),
                   ],
                 ),
               ),
@@ -792,6 +897,132 @@ class _EntryTile extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  // ── 媒体区：实拍图条（点击开右侧大图预览）──────────────────────
+  Widget _buildImageStrip(BuildContext context, ColorScheme cs) {
+    return SizedBox(
+      height: 64,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: entry.images.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (BuildContext context, int i) {
+          return GestureDetector(
+            onTap: () => ImagePreviewLauncher.open(
+              url: entry.images[i],
+              title: entry.title,
+              gallery: entry.images,
+              index: i,
+            ),
+            child: MediaThumbnail(
+              url: entry.images[i],
+              cs: cs,
+              width: 84,
+              height: 64,
+              borderRadius: 6,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ── 媒体区：本地评论（最多 2 条，超出以「共 N 条」提示）─────────
+  Widget _buildReviewLines(ColorScheme cs) {
+    final int total = entry.reviews.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        for (final TravelEntryReview review in entry.reviews)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
+              children: <Widget>[
+                const Icon(Icons.star_rounded,
+                    size: 13, color: Color(0xFFF5B942)),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    "${review.rating.toStringAsFixed(1)} · "
+                    "${review.author.isEmpty ? "旅友" : review.author}：${review.text}",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (total >= 2)
+          Padding(
+            padding: const EdgeInsets.only(top: 3, left: 17),
+            child: Text(
+              "共 $total 条评论",
+              style: TextStyle(
+                fontSize: 10,
+                color: cs.onSurfaceVariant.withValues(alpha: 0.75),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // ── 媒体区：视频入口（元数据 chip，点击跳原平台播放页）──────────
+  Widget _buildVideoChips(BuildContext context, ColorScheme cs) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: <Widget>[
+        for (final TravelEntryVideo video in entry.videos)
+          if (video.playPageUrl.isNotEmpty)
+            InkWell(
+              borderRadius: BorderRadius.circular(999),
+              onTap: () {
+                final Uri? uri = Uri.tryParse(video.playPageUrl);
+                if (uri != null) {
+                  launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: _kAccentBlue.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(
+                      color: _kAccentBlue.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    const Icon(Icons.play_circle_outline,
+                        size: 13, color: _kAccentBlue),
+                    const SizedBox(width: 4),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 150),
+                      child: Text(
+                        video.title.isEmpty
+                            ? (video.platform.isEmpty ? "相关视频" : video.platform)
+                            : "${video.platform.isEmpty ? "" : "${video.platform} · "}${video.title}",
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          color: _kAccentBlue,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+      ],
     );
   }
 }

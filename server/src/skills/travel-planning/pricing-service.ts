@@ -6,7 +6,11 @@
  * 2. 优惠落地 - 会员/优惠码/季节/套餐折扣
  * 3. 价格透明 - 每条价格都带 priceSource（api/database/estimated/original）
  * 4. 未来可升级 - 留出 Booking/Agoda 实时 API 接入位（PRICING_MODE=real-api 时启用）
+ * 5. POI 级覆盖 - data/travel-pricing-overrides.json 支持按 POI 名称/正则覆盖基价（热加载）
  */
+
+import fs from 'fs';
+import path from 'path';
 
 export type PriceSource = 'api' | 'database' | 'estimated' | 'list';
 export type MemberTier = 'normal' | 'silver' | 'gold' | 'diamond' | 'platinum';
@@ -115,9 +119,32 @@ export interface PricingContext {
   startDate?: string;
 }
 
+/**
+ * POI 级价格覆盖（data/travel-pricing-overrides.json，文件改动自动热加载）
+ *
+ * 文件格式：
+ * {
+ *   "overrides": [
+ *     { "match": "故宫博物院", "type": "attraction", "price": 60 },
+ *     { "match": "/迪士尼/", "destination": "上海", "type": "attraction", "price": 475, "note": "旺季平日票" }
+ *   ]
+ * }
+ * match：精确名称（忽略大小写）或 /正则/；destination/type 可选限定条件。
+ * price 为折扣前原价（货币随目的地），会员/平台/套餐折扣仍会正常叠加。
+ */
+export interface PriceOverride {
+  match: string;
+  destination?: string;
+  type?: 'hotel' | 'attraction' | 'restaurant';
+  price: number;
+  note?: string;
+}
+
 export class PricingService {
   private mode: PricingMode;
   private platformBenefits: PlatformBenefit[];
+  private overrideFileMtimeMs = 0;
+  private overrides: PriceOverride[] = [];
 
   constructor() {
     this.mode = (process.env.PRICING_MODE as PricingMode) || 'real-database';
@@ -125,53 +152,65 @@ export class PricingService {
   }
 
   /**
-   * 酒店实时价格：按目的地+档次查表
+   * 酒店实时价格：POI 级覆盖优先，否则按目的地+档次查表
    */
   quoteHotel(poiName: string, poiTags: string[], ctx: PricingContext): PriceQuote {
     const tier = this._resolveHotelTier(ctx);
     const country = this._resolveCountry(ctx.destination);
     const basePrice = this._lookupHotelBase(country, tier);
     const seasonal = this._seasonalRate(ctx.startDate, country);
-    const originalPrice = Math.round(basePrice * seasonal.rate);
+    const override = this._lookupOverride(poiName, ctx.destination, 'hotel');
+    const originalPrice = override ? override.price : Math.round(basePrice * seasonal.rate);
     return this._buildQuote(originalPrice, 'hotel', poiName, ctx, seasonal, {
-      note: this.mode === 'real-api'
-        ? '价格来自预订平台实时 API，最终以下单为准'
-        : `${country.label} · ${tier}`,
+      note: override
+        ? (override.note ?? '价格来自本地价格库')
+        : (this.mode === 'real-api'
+            ? '价格来自预订平台实时 API，最终以下单为准'
+            : `${country.label} · ${tier}`),
+      priceSource: override ? 'list' : undefined,
     });
   }
 
   /**
-   * 景点门票价格：按目的地+类型查表
+   * 景点门票价格：POI 级覆盖优先，否则按目的地+类型查表
    */
   quoteAttraction(poiName: string, poiTags: string[], ctx: PricingContext): PriceQuote {
     const country = this._resolveCountry(ctx.destination);
     const type = this._classifyAttraction(poiName, poiTags);
     const basePrice = this._lookupAttractionBase(country, type);
     const seasonal = this._seasonalRate(ctx.startDate, country);
-    const originalPrice = Math.round(basePrice * seasonal.rate);
-    const free = basePrice === 0;
+    const override = this._lookupOverride(poiName, ctx.destination, 'attraction');
+    const originalPrice = override ? override.price : Math.round(basePrice * seasonal.rate);
+    const free = originalPrice === 0;
     return this._buildQuote(originalPrice, 'attraction', poiName, ctx, seasonal, {
-      note: free
-        ? '免费景点'
-        : (this.mode === 'real-api'
-            ? '价格来自景点官方/分销平台实时 API'
-            : `${country.label} · ${type}`),
+      note: override
+        ? (override.note ?? '价格来自本地价格库')
+        : (free
+            ? '免费景点'
+            : (this.mode === 'real-api'
+                ? '价格来自景点官方/分销平台实时 API'
+                : `${country.label} · ${type}`)),
+      priceSource: override ? 'list' : undefined,
     });
   }
 
   /**
-   * 餐厅人均价：按目的地+菜系
+   * 餐厅人均价：POI 级覆盖优先，否则按目的地+菜系查表
    */
   quoteRestaurant(poiName: string, poiTags: string[], ctx: PricingContext): PriceQuote {
     const country = this._resolveCountry(ctx.destination);
     const cuisine = this._classifyCuisine(poiName, poiTags);
     const basePrice = this._lookupRestaurantBase(country, cuisine);
     const seasonal = this._seasonalRate(ctx.startDate, country);
-    const originalPrice = Math.round(basePrice * seasonal.rate);
+    const override = this._lookupOverride(poiName, ctx.destination, 'restaurant');
+    const originalPrice = override ? override.price : Math.round(basePrice * seasonal.rate);
     return this._buildQuote(originalPrice, 'restaurant', poiName, ctx, seasonal, {
-      note: this.mode === 'real-api'
-        ? '价格来自餐饮平台实时 API'
-        : `${country.label} · ${cuisine}`,
+      note: override
+        ? (override.note ?? '价格来自本地价格库')
+        : (this.mode === 'real-api'
+            ? '价格来自餐饮平台实时 API'
+            : `${country.label} · ${cuisine}`),
+      priceSource: override ? 'list' : undefined,
     });
   }
 
@@ -213,7 +252,7 @@ export class PricingService {
     poiName: string,
     ctx: PricingContext,
     seasonal: { season: 'peak' | 'shoulder' | 'low'; rate: number; label: string },
-    extra: { note?: string }
+    extra: { note?: string; priceSource?: PriceSource }
   ): PriceQuote {
     const breakdown: DiscountBreakdown = {};
     let running = originalPrice;
@@ -275,11 +314,55 @@ export class PricingService {
       finalPrice,
       discount,
       breakdown,
-      priceSource: this.mode === 'estimated' ? 'estimated' : 'database',
+      priceSource: extra.priceSource ?? (this.mode === 'estimated' ? 'estimated' : 'database'),
       boundPlatforms: ctx.boundPlatforms && ctx.boundPlatforms.length ? ctx.boundPlatforms : undefined,
       lastUpdated: new Date().toISOString(),
       note: extra.note,
     };
+  }
+
+  // ======================== POI 级价格覆盖 ========================
+
+  /** 热加载 data/travel-pricing-overrides.json（mtime 变化才重读） */
+  private _loadOverrides(): PriceOverride[] {
+    const file = path.join(process.cwd(), 'data', 'travel-pricing-overrides.json');
+    try {
+      const st = fs.statSync(file);
+      if (st.mtimeMs !== this.overrideFileMtimeMs) {
+        this.overrideFileMtimeMs = st.mtimeMs;
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as { overrides?: PriceOverride[] };
+        this.overrides = Array.isArray(parsed.overrides) ? parsed.overrides : [];
+      }
+    } catch {
+      // 文件不存在/损坏 → 清空覆盖（回到查表基价），下次文件恢复后自动生效
+      this.overrideFileMtimeMs = 0;
+      this.overrides = [];
+    }
+    return this.overrides;
+  }
+
+  /** 按 名称精确（忽略大小写）或 /正则/ 匹配覆盖条目，destination/type 为可选限定 */
+  private _lookupOverride(
+    poiName: string,
+    destination: string,
+    type: 'hotel' | 'attraction' | 'restaurant',
+  ): PriceOverride | null {
+    const list = this._loadOverrides();
+    if (list.length === 0) return null;
+    const nameLower = poiName.toLowerCase();
+    const destLower = destination.toLowerCase();
+    for (const ov of list) {
+      if (ov.type && ov.type !== type) continue;
+      if (ov.destination && !destLower.includes(ov.destination.toLowerCase())) continue;
+      if (ov.match.length > 2 && ov.match.startsWith('/') && ov.match.endsWith('/')) {
+        try {
+          if (new RegExp(ov.match.slice(1, -1), 'i').test(poiName)) return ov;
+        } catch { /* 非法正则跳过 */ }
+      } else if (nameLower === ov.match.toLowerCase()) {
+        return ov;
+      }
+    }
+    return null;
   }
 
   // ======================== 会员等级 ========================

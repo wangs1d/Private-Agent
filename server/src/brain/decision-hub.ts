@@ -324,7 +324,7 @@ export class DecisionHub {
    * 替代原 CognitiveEngine.cognize 的 LLM 路由判断，纯规则产出：
    *  1. RuleRouter.route() 产出 {mode, confidence, reason, system}
    *  2. Step 7 扩展：TaskSwitchingCortex 识别任务切换意图（不破坏路由）
-   *  3. Step 7 扩展：MetaCognitionCortex 评估置信度（叠加到路由 confidence 上）
+   *  3. Step 7 扩展：元认知桥评估置信度（叠加到路由 confidence 上）
    *  4. Step 7 扩展：ToolPlanningCortex 规划工具链（complex 时）
    *  5. 响应始终为空字符串（由 streamCompletion 生成，避免幻觉）
    *  6. 规则化生成记忆条目

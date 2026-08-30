@@ -3,6 +3,9 @@ import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
+import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { UserFactStore } from "./user-fact-store.js";
+import OpenAI from "openai";
 import { mkdir, writeFile } from "node:fs/promises";
 import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -77,6 +80,7 @@ export class NightlyMemoryTaskService {
   private isNightMode = false;
   private lastProcessedDay = "";
   private memoryManager: MemoryManagerService | null = null;
+  private factStore: UserFactStore | null = null;
   private dailyDigest: DailyDigestService | null = null;
   private memorySync: AgentMemorySyncService | null = null;
   private narrativeMemory: NarrativeMemoryPort | null = null;
@@ -357,6 +361,9 @@ export class NightlyMemoryTaskService {
     try {
       // 缺口 4 修复：归档必须在 dreaming 之前，让 dream phase 能看到当天对话
       await this.triggerDailyArchiveImmediate();
+      // 巩固管线（episodic → semantic）：journal 固化前先做事实提炼，
+      // 此时未固化日志仍在，提炼出的稳定事实写入结构化槽位（latest-wins 归并）。
+      await this.extractFactsFromJournals();
       // 记忆架构重构：当日对话日志固化（journal → 长期记忆图），
       // 必须在 dreaming 之前完成，让后续合并/衰减阶段能看到新固化内容。
       await this.consolidateDailyJournals();
@@ -431,6 +438,151 @@ export class NightlyMemoryTaskService {
 
     if (totalIngested > 0) {
       console.log(`[NightlyMemory] journal consolidation total ingested: ${totalIngested} lines`);
+    }
+  }
+
+  /** 事实主库（懒初始化；可用 USER_FACT_STORE_DIR 覆盖存储目录，测试注入用） */
+  getFactStore(): UserFactStore {
+    if (!this.factStore) {
+      const dir = process.env.USER_FACT_STORE_DIR?.trim();
+      this.factStore = dir ? new UserFactStore(dir) : new UserFactStore();
+    }
+    return this.factStore;
+  }
+
+  setFactStore(store: UserFactStore): void {
+    this.factStore = store;
+  }
+
+  /**
+   * 夜间事实提炼（巩固管线 episodic → semantic）：
+   * 在 journal 固化前，把当日（含跨天补跑）对话日志一次性喂给 LLM，
+   * 抽取"值得跨会话记住"的稳定偏好/事实/承诺，写入结构化记忆槽位
+   * （AgentMemorySyncService.appendMemorySummaryLine 会按 subject/slot
+   * 自动做 latest-wins 归并，旧值被新值替换而不是无限累积）。
+   *
+   * 设计要点：
+   * - 单 actor 单次 LLM 批处理调用（替代逐条实时写入决策，便宜且质量更高）；
+   * - LLM 不可用 / 提炼失败 → 静默跳过该 actor，不影响后续固化与 dreaming；
+   * - 行文本按 kind 加类型前缀，命中槽位分类正则后自动归入对应槽位。
+   */
+  private async extractFactsFromJournals(): Promise<void> {
+    const journal = getDailyJournalService();
+    if (!journal || !this.memorySync) return;
+    const llm = resolvePrimaryLlmClientConfig();
+    if (!llm) return;
+
+    const factStore = this.getFactStore();
+    const actorIds = this.getAllActorIds();
+    for (const actorId of actorIds) {
+      try {
+        const unconsolidated = await journal.getUnconsolidatedLines(actorId);
+        if (unconsolidated.length === 0) continue;
+
+        // 拼装精简日志（保留日期/时间/角色/内容，过滤噪音行，限最近 120 行）
+        const transcriptLines: string[] = [];
+        for (const { dateKey, lines } of unconsolidated) {
+          for (const line of lines) {
+            const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
+            if (!m) continue;
+            const roleMatch = m[2]!.match(/^(?:(\S+)\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+            if (!roleMatch) continue;
+            const role = roleMatch[2]!;
+            const content = roleMatch[3]!.slice(0, 300);
+            if (isNoiseLogLine(role, content)) continue;
+            transcriptLines.push(`[${dateKey} ${m[1]} ${role}] ${content}`);
+          }
+        }
+        if (transcriptLines.length < 4) continue;
+        const transcript = transcriptLines.slice(-120).join("\n");
+
+        const facts = await this.extractDurableFacts(llm, transcript);
+        if (facts.length === 0) continue;
+
+        let canonical = 0;
+        let kvWritten = 0;
+        for (const fact of facts) {
+          const text = fact.text.trim().slice(0, 200);
+          if (!text) continue;
+          if (fact.kind === "preference" || fact.kind === "fact") {
+            // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）
+            await this.getFactStore().upsertFact(actorId, {
+              kind: fact.kind,
+              value: text,
+              source: "nightly-extract",
+              confidence: 0.7,
+            });
+            canonical += 1;
+          } else {
+            // 承诺/待办（时效性内容）→ KV 槽位快速路径
+            this.memorySync.appendMemorySummaryLine(actorId, `承诺：${text}`, "consolidate");
+            kvWritten += 1;
+          }
+        }
+        // 派生视图同步：事实主库 → KV 结构化槽位（事实为主、槽位为视图，
+        // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
+        if (canonical > 0) {
+          const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync);
+          console.log(
+            `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
+              `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
+              `槽位保留近期行 ${sync.keptRecent}`,
+          );
+        } else if (kvWritten > 0) {
+          console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
+      }
+    }
+  }
+
+  /** 单次 LLM 调用：从日志中抽取持久事实（失败返回空数组，不抛错） */
+  private async extractDurableFacts(
+    llm: { apiKey: string; baseURL?: string; model?: string },
+    transcript: string,
+  ): Promise<Array<{ kind: "preference" | "fact" | "commitment"; text: string }>> {
+    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL });
+    const model =
+      process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini";
+    try {
+      const response = await openai.chat.completions.create({
+        model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是记忆巩固器。从对话日志中提取「值得跨会话长期记住」的用户信息，忽略闲聊、临时上下文和一次性任务细节。" +
+              "只输出 JSON：{\"facts\":[{\"kind\":\"preference|fact|commitment\",\"text\":\"...\"}]}，最多 12 条。" +
+              "规则：preference=稳定偏好/习惯（text 需含「喜欢/偏好/讨厌/习惯」等词）；" +
+              "fact=稳定身份/背景事实（text 以「我是/我在/我住在/我的」开头）；" +
+              "commitment=需要后续跟进的承诺或待办（text 需含「我会/我将/计划/待办」等词）。" +
+              "text 用第一人称中文短句。没有可提取内容时返回 {\"facts\":[]}。",
+          },
+          { role: "user", content: transcript.slice(0, 12_000) },
+        ],
+      });
+      const content = response.choices[0]?.message?.content?.trim();
+      if (!content) return [];
+      const parsed = JSON.parse(content) as {
+        facts?: Array<{ kind?: string; text?: string }>;
+      };
+      const validKinds = new Set(["preference", "fact", "commitment"]);
+      return (parsed.facts ?? [])
+        .filter(
+          (f): f is { kind: "preference" | "fact" | "commitment"; text: string } =>
+            !!f &&
+            typeof f.text === "string" &&
+            f.text.trim().length > 0 &&
+            typeof f.kind === "string" &&
+            validKinds.has(f.kind),
+        )
+        .slice(0, 12);
+    } catch (err) {
+      console.log(`[NightlyMemory] extractDurableFacts LLM 调用失败（跳过提炼）: ${err}`);
+      return [];
     }
   }
 

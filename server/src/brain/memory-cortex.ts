@@ -14,16 +14,13 @@ import type {
   PredictedAssociation,
   SchemaMatchResult,
   SalienceDecision,
-  ProceduralMatch,
   InferenceClue,
   InferenceResult,
 } from "./types.js";
 import type { RelationshipGraphService } from "../services/relationship-graph-service.js";
 import type { MemoryAssociativeGraph } from "./memory-cognitive/memory-associative-graph.js";
-import type { MemoryReconstructionValidator } from "./memory-cognitive/memory-reconstruction-validator.js";
 import type { MemoryMetacognitionBridge } from "./memory-cognitive/memory-metacognition-bridge.js";
 import type { MemoryForgettingController } from "./memory-cognitive/memory-forgetting-controller.js";
-import type { MemoryProceduralAutomation } from "./memory-cognitive/memory-procedural-automation.js";
 import type { MemorySchemaFormation } from "./memory-cognitive/memory-schema-formation.js";
 import type { MemorySalienceFilter } from "./memory-cognitive/memory-salience-filter.js";
 import type { MemoryInferenceEngine } from "./memory-cognitive/memory-inference-engine.js";
@@ -51,6 +48,8 @@ import {
   type SessionEpitomeSnapshot,
 } from "../services/session-epitome.js";
 import { RecallAnchorStore, type RecallAnchorRecord } from "../services/recall-anchor-store.js";
+import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
+import type { AgenticMemoryCandidate } from "../agentic-memory/retrieval.js";
 import { MemoryInventory } from "./memory-inventory.js";
 import type {
   ImplicitFeedbackSignal,
@@ -109,6 +108,11 @@ interface AgenticMemoryLike {
   retrieval: {
     buildRecall(actorId: string, queryText: string): Promise<string>;
     buildCrossContextRecall(actorId: string, queryText: string): Promise<string>;
+    searchStructured(
+      actorId: string,
+      queryText: string,
+      opts?: { context?: "main" | "notes" | "any" },
+    ): Promise<AgenticMemoryCandidate[]>;
   };
 }
 
@@ -154,6 +158,21 @@ interface HumanLikeMemoryLike {
    * 节点 ID 才能在图上命中；此方法按 content 前缀/包含匹配返回节点 ID。
    */
   findNodeIdsByContent?(actorId: string, contents: string[], maxPerContent?: number): string[];
+  /**
+   * 可选：按节点 ID 批量取摘要（联想扩散结果 → 当轮召回候选）。
+   * spread 返回激活节点 ID 列表，召回侧需要内容才能并入候选池。
+   */
+  getNodeSummariesByIds?(
+    actorId: string,
+    nodeIds: string[],
+    max?: number,
+  ): Array<{ id: string; summary: string }>;
+  /**
+   * 可选：查询给定节点中处于可再唤醒状态（downranked/cold）的节点 ID。
+   * 召回命中褪色记忆时，MemoryCortex 据此触发 ForgettingController.reawakenAndStrengthen
+   * （遗忘反弹：deletionStage 回退一级 + frequencyScore 反弹）。
+   */
+  findReawakenableNodeIds?(actorId: string, nodeIds: string[]): string[];
 }
 
 // 叙事记忆睡眠巩固报告外观
@@ -408,12 +427,10 @@ export class MemoryCortex {
   private personalityCache = new Map<string, PersonalityCore>();
   // relationship 域：关系图谱服务（Phase 1.2，里程碑/轨迹/共同经历）
   private relationshipGraph: RelationshipGraphService | null = null;
-  // ---- 记忆认知架构升级（Phase 3）：7 个子组件 ---------------------------
+  // ---- 记忆认知架构升级（Phase 3）：子组件 ---------------------------
   private associativeGraph: MemoryAssociativeGraph | null = null;
-  private reconstructionValidator: MemoryReconstructionValidator | null = null;
   private metacognitionBridge: MemoryMetacognitionBridge | null = null;
   private forgettingController: MemoryForgettingController | null = null;
-  private proceduralAutomation: MemoryProceduralAutomation | null = null;
   private schemaFormation: MemorySchemaFormation | null = null;
   private salienceFilter: MemorySalienceFilter | null = null;
   private experienceLearningLoop: MemoryExperienceLearningLoop | null = null;
@@ -499,11 +516,6 @@ export class MemoryCortex {
     console.log("[MemoryCortex] 已注册 MemoryAssociativeGraph");
   }
 
-  registerReconstructionValidator(svc: MemoryReconstructionValidator): void {
-    this.reconstructionValidator = svc;
-    console.log("[MemoryCortex] 已注册 MemoryReconstructionValidator");
-  }
-
   registerMetacognitionBridge(svc: MemoryMetacognitionBridge): void {
     this.metacognitionBridge = svc;
     console.log("[MemoryCortex] 已注册 MemoryMetacognitionBridge");
@@ -512,11 +524,6 @@ export class MemoryCortex {
   registerForgettingController(svc: MemoryForgettingController): void {
     this.forgettingController = svc;
     console.log("[MemoryCortex] 已注册 MemoryForgettingController");
-  }
-
-  registerProceduralAutomation(svc: MemoryProceduralAutomation): void {
-    this.proceduralAutomation = svc;
-    console.log("[MemoryCortex] 已注册 MemoryProceduralAutomation");
   }
 
   registerSchemaFormation(svc: MemorySchemaFormation): void {
@@ -739,31 +746,6 @@ export class MemoryCortex {
     }
   }
 
-  /**
-   * 触发 LLM 规则归纳（LLM 规则归纳器扩展）。
-   *
-   * 与 autoLearn 的关系：
-   *   - autoLearn 内部会优先用 LLM 归纳（若 llmInducer 已注入），降级到算法
-   *   - autoLearnWithLLM 是显式入口，语义上明确"用 LLM 归纳"
-   *   - 两者底层都走 inferenceEngine.autoLearn，区别仅在语义清晰度
-   *
-   * LLM 只参与"学规则"（一次性归纳），不参与"用规则推理"。
-   * 推理阶段仍是程序化算法（matchRule + fillTemplate）。
-   *
-   * @param actorId 指定 actor 的记忆图（可选）
-   * @returns 本次学习到的新规则列表（推理引擎未注册或 LLM 不可用时返回空）
-   */
-  async autoLearnWithLLM(actorId?: string): Promise<unknown[]> {
-    if (!this.inferenceEngine?.autoLearn) return [];
-    // autoLearn 内部会优先用 LLM 归纳（若 llmInducer 已注入），降级到算法
-    try {
-      return await this.inferenceEngine.autoLearn(actorId);
-    } catch (err) {
-      console.log(`[MemoryCortex] autoLearnWithLLM 失败: ${err}`);
-      return [];
-    }
-  }
-
   /** 获取已学习的规则（未注册推理引擎时返回空） */
   getLearnedRules(): unknown[] {
     if (!this.inferenceEngine) return [];
@@ -849,6 +831,12 @@ export class MemoryCortex {
    * 不调用 LLM。
    */
   async remember(actorId: string, item: MemoryItem): Promise<void> {
+    // 匿名身份治理：无稳定身份的写入只允许会话内短期记忆，禁止进入长期记忆共享桶（防串台）
+    if (isEphemeralActorId(actorId) && (item.importance === "high" || item.importance === "critical" || (item.domain ?? inferDomain(item.kind)) !== "working")) {
+      warnEphemeralActorMemoryBlocked(actorId, "长期记忆写入");
+      return;
+    }
+
     // ---- 记忆认知架构升级（Phase 3）：salience filter 守门 ----
     // 在 domain / importance 计算之前评估原 item；失败时降级为正常写入（不阻塞主流程）。
     if (this.salienceFilter) {
@@ -1077,6 +1065,20 @@ export class MemoryCortex {
       };
     }
 
+    // 匿名身份治理：工作记忆（按 sessionId 隔离）已放行，其余长期记忆通道全部拦截——
+    // anonymous 共享桶里的历史数据本身就是跨请求串台源，读取与写入一并禁止。
+    if (isEphemeralActorId(actorId)) {
+      warnEphemeralActorMemoryBlocked(actorId, "长期记忆读取");
+      return {
+        actorId,
+        query,
+        items: [],
+        domain: "semantic",
+        mode: "single_domain",
+        recalledAt: now,
+      };
+    }
+
     // 叙事记忆 → narrative.buildNarrativeRecall
     if (domain === "narrative") {
       const text = this.narrative
@@ -1138,6 +1140,7 @@ export class MemoryCortex {
             limit: opts?.limit,
           }),
         );
+        this.triggerReawakenForFadedHits(actorId, result);
         return {
           actorId,
           query,
@@ -1153,15 +1156,17 @@ export class MemoryCortex {
         };
       }
       if (this.agentic) {
-        const text =
-          (await this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, query))) ?? "";
+        const candidates =
+          (await this.safeRecall(() =>
+            this.agentic!.retrieval.searchStructured(actorId, query),
+          )) ?? [];
         return {
           actorId,
           query,
           items: this.finalizeRecallItems(
             actorId,
             query,
-            this.textToRecallItems(text, domain),
+            this.agenticCandidatesToItems(candidates, domain),
             opts,
           ),
           domain,
@@ -1186,9 +1191,10 @@ export class MemoryCortex {
     //         三通道结果交 MemoryArbitrator 做归一化 + 跨通道指纹去重 + 综合重排。
     let mergedItems: MemoryRecallItem[] = [];
 
-    // 1) agentic 主通道：解析回多条带 score 的 item（避免被拍平为单条、score 丢失）
+    // 1) agentic 主通道：结构化召回（带原始时间戳，时间衰减统一交仲裁器按 domain τ 施加）。
+    //    此前走「格式化文本 → 正则解析」往返，时间戳粒度退化且检索层多扣一次全局半衰期。
     //    P2-2 多意图并行召回：subQueries 存在时对每个子 query 并行检索，
-    //    各自解析后合并去重（后续统一仲裁），单一 query 时保持原逻辑。
+    //    各自合并去重（后续统一仲裁），单一 query 时保持原逻辑。
     let agenticItems: MemoryRecallItem[] = [];
     if (this.agentic) {
       const subQueries = (opts?.subQueries ?? [query])
@@ -1197,18 +1203,20 @@ export class MemoryCortex {
         .slice(0, 3);
       const allQueries = [query, ...subQueries];
       if (allQueries.length === 1) {
-        const text =
-          (await this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, query))) ?? "";
-        agenticItems = this.parseRecallTextToItems(text, "agentic");
+        const candidates =
+          (await this.safeRecall(() =>
+            this.agentic!.retrieval.searchStructured(actorId, query),
+          )) ?? [];
+        agenticItems = this.agenticCandidatesToItems(candidates);
       } else {
-        const texts = await Promise.all(
+        const candidateLists = await Promise.all(
           allQueries.map((q) =>
-            this.safeRecall(() => this.agentic!.retrieval.buildRecall(actorId, q)),
+            this.safeRecall(() => this.agentic!.retrieval.searchStructured(actorId, q)),
           ),
         );
         const merged = new Map<string, MemoryRecallItem>();
-        for (const text of texts) {
-          for (const item of this.parseRecallTextToItems(text ?? "", "agentic")) {
+        for (const candidates of candidateLists) {
+          for (const item of this.agenticCandidatesToItems(candidates ?? [])) {
             const key = item.content.trim().slice(0, 64);
             const existing = merged.get(key);
             if (!existing || (item.score ?? 0) > (existing.score ?? 0)) {
@@ -1325,6 +1333,61 @@ export class MemoryCortex {
       }
     }
 
+    // ---- 联想扩散并入当轮仲裁（当轮关联）----
+    // 旧实现 spread 是 fire-and-forget，扩散结果只影响未来轮次，本轮"提到 A 想起 B"缺失。
+    // 现在 await（内存图遍历，无 LLM，延迟可控），把扩散命中的 2 度节点作为
+    // 联想候选并入 mergedItems，一起走敏感过滤/反馈加成/去重/限长与引用锚点记录。
+    // P0-3 语义化联想种子：用 humanLike.findNodeIdsByContent 反查真实节点 ID；
+    // 反查不可用（无真实种子）时直接跳过，不做无副作用的假 ID 扩散。
+    // 扩散后的探索触发（知识缺口）保持 fire-and-forget。
+    // recall 命中 downranked/cold 节点的再唤醒反弹由 triggerReawakenForFadedHits
+    // 在 buildRecall 返回后触发（遗忘控制器 Phase 2 接线）；BrainStem 45s 心跳 →
+    // forgettingController.continuousScore 负责反方向的衰减/剪枝（见 Phase 4 装配）。
+    if (this.associativeGraph && this.humanLike && mergedItems.length > 0) {
+      try {
+        const seedNodeIds =
+          this.humanLike.findNodeIdsByContent?.(
+            actorId,
+            mergedItems.slice(0, 3).map((it) => it.content),
+            1,
+          ) ?? [];
+        if (seedNodeIds.length > 0) {
+          const spreadResult = await this.associativeGraph.spread(actorId, seedNodeIds);
+          void this.associativeGraph
+            .triggerExplorationIfNeeded(actorId, spreadResult, query)
+            .catch(() => {
+              /* 静默 */
+            });
+
+          const activated = spreadResult.activatedNodes
+            .filter((n) => !seedNodeIds.includes(n.nodeId) && n.activationValue > 0)
+            .sort((a, b) => b.activationValue - a.activationValue)
+            .slice(0, 2);
+          const summaries =
+            this.humanLike.getNodeSummariesByIds?.(
+              actorId,
+              activated.map((n) => n.nodeId),
+              2,
+            ) ?? [];
+          const activationById = new Map(activated.map((n) => [n.nodeId, n.activationValue]));
+          const existing = new Set(mergedItems.map((it) => (it.content ?? "").trim()));
+          for (const s of summaries) {
+            const content = `联想记忆: ${s.summary}`;
+            if (!s.summary || existing.has(content)) continue;
+            existing.add(content);
+            mergedItems.push({
+              content,
+              domain: "semantic",
+              source: "association",
+              score: clamp01(0.3 + 0.2 * (activationById.get(s.id) ?? 0)),
+            });
+          }
+        }
+      } catch (err) {
+        console.log(`[MemoryCortex] 联想扩散并入当轮召回失败（忽略）: ${err}`);
+      }
+    }
+
     // 统一召回收尾：敏感过滤 → 反馈加成/惩罚重排 → 去重限长，
     // 并异步触发记忆联想合成 + 引用锚点记录（与分域召回共用同一收尾，见 finalizeRecallItems）
     const feedbackAdjustedItems = this.finalizeRecallItems(actorId, query, mergedItems, opts);
@@ -1337,44 +1400,6 @@ export class MemoryCortex {
       mode: "single_domain",
       recalledAt: now,
     };
-
-    // ---- 记忆认知架构升级（Phase 3）：recall 命中后异步触发联想扩散（不阻塞主召回）----
-    // P0-3 语义化联想种子：旧实现用 `seed-${idx}-${content.length}` 假 ID，
-    // spread 在图上永远匹配不到真实节点（联想扩散形同虚设）。
-    // 现在优先用 humanLike.findNodeIdsByContent 按 content 反查真实节点 ID；
-    // 反查不可用时保留旧兜底（无副作用空扩散）。
-    // recall 命中 downranked/cold 节点的再唤醒由 BrainStem 45s 心跳 →
-    // forgettingController.continuousScore 统一处理（见 Phase 4 装配）。
-    if (this.associativeGraph && finalResult.items.length > 0) {
-      let seedNodeIds: string[] = [];
-      try {
-        seedNodeIds =
-          this.humanLike?.findNodeIdsByContent?.(
-            actorId,
-            finalResult.items.slice(0, 3).map((it) => it.content),
-            1,
-          ) ?? [];
-      } catch {
-        seedNodeIds = [];
-      }
-      if (seedNodeIds.length === 0) {
-        seedNodeIds = finalResult.items
-          .slice(0, 3)
-          .map((it, idx) => `seed-${idx}-${it.content.length}`);
-      }
-      void this.associativeGraph
-        .spread(actorId, seedNodeIds)
-        .then((spreadResult) => {
-          void this.associativeGraph!
-            .triggerExplorationIfNeeded(actorId, spreadResult, query)
-            .catch(() => {
-              /* 静默 */
-            });
-        })
-        .catch(() => {
-          /* 静默 */
-        });
-    }
 
     // ---- 推理引擎：recall 命中 ≥ 2 条时异步触发多线索交叉推理 ----
     // 把召回的前 3 条记忆作为"memory_recalled"线索喂给推理引擎，
@@ -1389,6 +1414,28 @@ export class MemoryCortex {
     }
 
     return finalResult;
+  }
+
+  /**
+   * 向量预筛（recall-gate 白名单外的廉价放行通道）：
+   * 对用户原文做一次 Mem0 向量检索（无 LLM），top1 原始分 ≥ 阈值即视为
+   * "当前话题与既有长期记忆强相关"，放行长期记忆注入——弥补纯 regex 白名单
+   * 的漏召（agent 明明记得却因为没命中关键词而"忘了你"）。
+   * 检索失败 / 无 agentic 通道 / query 为空时返回 false（fail-closed，保持白名单行为）。
+   * 阈值可用 MEMORY_PRESCREEN_TOP_SCORE 覆盖（缺省 0.45）。
+   */
+  async semanticRecallPreScreen(actorId: string, query: string): Promise<boolean> {
+    const q = query.trim();
+    if (!this.agentic || !q) return false;
+    const raw = process.env.MEMORY_PRESCREEN_TOP_SCORE;
+    const threshold = raw && Number.isFinite(parseFloat(raw)) ? parseFloat(raw) : 0.45;
+    try {
+      const candidates = await this.agentic.retrieval.searchStructured(actorId, q);
+      return (candidates[0]?.score ?? 0) >= threshold;
+    } catch (err) {
+      console.log(`[MemoryCortex] semanticRecallPreScreen 失败（保持白名单行为）: ${err}`);
+      return false;
+    }
   }
 
   async recordLearningFeedback(feedback: LearningFeedback): Promise<LearningSnapshot | null> {
@@ -1746,6 +1793,7 @@ export class MemoryCortex {
           detailLevel: "summary",
         }),
       );
+      this.triggerReawakenForFadedHits(actorId, result);
       return {
         actorId,
         query,
@@ -1871,22 +1919,7 @@ export class MemoryCortex {
     }
 
     // ---- 记忆认知架构升级（Phase 3）：consolidate 后置钩子 ----
-    // 1) reconstruction validator 钩子：narrative 内部 merge/abstract 时已通过
-    //    本类对外方法暴露校验能力，此处仅发射 synapse 事件标记 validator 就绪，
-    //    避免双重调用导致性能损耗。
-    if (this.reconstructionValidator) {
-      try {
-        this.synapseBus?.fire(
-          "memory.consolidate.validator_ready",
-          { actorIds },
-          { source: "memory" },
-        );
-      } catch {
-        /* fire 失败不影响主流程 */
-      }
-    }
-
-    // 2) connection pruning 钩子：对每个 actor 调用 forgettingController.pruneConnections，
+    // connection pruning 钩子：对每个 actor 调用 forgettingController.pruneConnections，
     //    清除 score < 阈值节点的所有 edge（保留节点本体供历史追溯）。
     //    失败时静默降级，不阻塞 consolidate 主流程。
     if (this.forgettingController) {
@@ -1956,26 +1989,6 @@ export class MemoryCortex {
   }
 
   /**
-   * 图式同化：从新场景匹配最相似的图式，返回建议操作序列（仅建议，不强制）。
-   *
-   * 委托 SchemaFormation.matchSchema；未注册时返回 null。
-   * 不调 LLM——匹配是关键词 overlap 计算。
-   */
-  matchSchema(situation: {
-    sceneTag?: string;
-    keywords?: string[];
-    summary?: string;
-  }): SchemaMatchResult | null {
-    if (!this.schemaFormation) return null;
-    try {
-      return this.schemaFormation.matchSchema(situation);
-    } catch (err) {
-      console.log(`[MemoryCortex] matchSchema 失败: ${err}`);
-      return null;
-    }
-  }
-
-  /**
    * 显著性评估：在写入前评估记忆的 salienceScore，返回写入决策。
    *
    * 委托 SalienceFilter.evaluateSalience；未注册时返回默认接受决策。
@@ -1990,37 +2003,6 @@ export class MemoryCortex {
     } catch (err) {
       console.log(`[MemoryCortex] evaluateSalience 失败（默认接受）: ${err}`);
       return { accept: true, score: 1, reason: "salience_eval_error", degraded: false };
-    }
-  }
-
-  /**
-   * 再唤醒反弹：recall 命中 downranked/cold 节点时调用。
-   *
-   * 委托 ForgettingController.reawakenAndStrengthen；未注册时空操作。
-   * 不调 LLM——reawaken 是状态机回退 + frequencyScore += 0.3。
-   */
-  async reawakenAndStrengthen(actorId: string, nodeId: string): Promise<void> {
-    if (!this.forgettingController) return;
-    try {
-      await this.forgettingController.reawakenAndStrengthen(actorId, nodeId);
-    } catch (err) {
-      console.log(`[MemoryCortex] reawakenAndStrengthen 失败: ${err}`);
-    }
-  }
-
-  /**
-   * 程序性技能匹配：检查是否已有匹配的 procedural 记忆可绕过 LLM。
-   *
-   * 委托 ProceduralAutomation.matchProceduralSkill；未注册时返回 null。
-   * 不调 LLM——匹配是 Jaccard 相似度计算。
-   */
-  matchProceduralSkill(query: string): ProceduralMatch | null {
-    if (!this.proceduralAutomation) return null;
-    try {
-      return this.proceduralAutomation.matchProceduralSkill(query);
-    } catch (err) {
-      console.log(`[MemoryCortex] matchProceduralSkill 失败: ${err}`);
-      return null;
     }
   }
 
@@ -2114,6 +2096,22 @@ export class MemoryCortex {
    * 这样仲裁器能拿到结构化分数做跨通道归一化与重排，避免被 formatNarrativeRecallPrompt
    * 的 slice(0,4) 截断到仅剩 1-2 条记忆。
    */
+  /** agentic 结构化候选 → MemoryRecallItem（保留原始时间戳与分数） */
+  private agenticCandidatesToItems(
+    candidates: AgenticMemoryCandidate[],
+    domain: MemoryDomainKind = "semantic",
+  ): MemoryRecallItem[] {
+    return candidates
+      .filter((c) => typeof c.content === "string" && c.content.trim())
+      .map((c) => ({
+        content: c.content,
+        domain,
+        source: c.source ?? "agentic",
+        score: c.score,
+        ...(c.timestamp ? { timestamp: c.timestamp } : {}),
+      }));
+  }
+
   private parseRecallTextToItems(text: string, source: string): MemoryRecallItem[] {
     if (!text || !text.trim()) return [];
     const trimmed = text.trim();
@@ -2176,6 +2174,32 @@ export class MemoryCortex {
     } catch (err) {
       console.log(`[MemoryCortex] recall 调用失败: ${err}`);
       return null;
+    }
+  }
+
+  /**
+   * 再唤醒反弹（遗忘控制器 Phase 2 接线）：召回命中 downranked/cold 节点时，
+   * 触发 ForgettingController.reawakenAndStrengthen —— deletionStage 回退一级 +
+   * frequencyScore 反弹 + synapse memory.reawakened 事件。反复被提起的记忆会
+   * 从遗忘曲线边缘爬回来，这正是"再唤醒"语义；从未命中的则继续走遗忘曲线。
+   * fire-and-forget，不阻塞召回返回。
+   */
+  private triggerReawakenForFadedHits(
+    actorId: string,
+    result: { recalledNodeIds: string[] } | null,
+  ): void {
+    if (!this.forgettingController || !this.humanLike) return;
+    if (!result || result.recalledNodeIds.length === 0) return;
+    try {
+      const reawakenable =
+        this.humanLike.findReawakenableNodeIds?.(actorId, result.recalledNodeIds) ?? [];
+      for (const nodeId of reawakenable) {
+        void this.forgettingController.reawakenAndStrengthen(actorId, nodeId).catch(() => {
+          /* 静默：再唤醒失败不影响召回 */
+        });
+      }
+    } catch (err) {
+      console.log(`[MemoryCortex] 再唤醒触发失败（忽略）: ${err}`);
     }
   }
 

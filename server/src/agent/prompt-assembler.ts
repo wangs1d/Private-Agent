@@ -78,7 +78,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "modeRoleGuidance",
   "toneGuidance",
   "emotionState",
-  "metaCognition",
   "relationshipGuidance",
 ];
 
@@ -90,7 +89,7 @@ export function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
 /**
  * 动态风格层 → 单一【回复指南】块（收敛为唯一风格决策源）。
  * - 基准行恒在：短句、先结论、有人味。
- * - 语气/情绪/元认知/关系边界/模式职责五路合并为小节。
+ * - 语气/情绪/关系边界/模式职责四路合并为小节。
  */
 function buildReplyStyleGuide(memory: AgentPromptMemoryContext): string {
   const lines = [
@@ -99,7 +98,6 @@ function buildReplyStyleGuide(memory: AgentPromptMemoryContext): string {
   if (memory.modeRoleGuidance) lines.push(`模式：${memory.modeRoleGuidance}`);
   if (memory.toneGuidance) lines.push(`语气：${memory.toneGuidance}`);
   if (memory.emotionState) lines.push(`情绪：${memory.emotionState}`);
-  if (memory.metaCognition) lines.push(`认知：${memory.metaCognition}`);
   if (memory.relationshipGuidance) lines.push(`关系：${memory.relationshipGuidance}`);
   return `【回复指南】\n${lines.join("\n\n")}`;
 }

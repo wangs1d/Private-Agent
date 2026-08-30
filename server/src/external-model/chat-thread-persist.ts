@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { join } from "node:path";
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
@@ -294,13 +295,11 @@ export class ChatThreadPersistence {
   }
 
   private async flushToDisk(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(this.filePath, this.data);
     // 仅在 notes 存储非空时落盘
     if (Object.keys(this.notesData.sessions).length > 0 || this.notesDataWasFlushedOnce) {
       this.notesDataWasFlushedOnce = true;
-      await mkdir(dirname(this.notesFilePath), { recursive: true });
-      await writeFile(this.notesFilePath, `${JSON.stringify(this.notesData, null, 2)}\n`, "utf8");
+      await writeJsonAtomic(this.notesFilePath, this.notesData);
     }
   }
 }

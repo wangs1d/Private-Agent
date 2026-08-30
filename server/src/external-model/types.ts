@@ -100,13 +100,6 @@ export type AgentPromptMemoryContext = {
    */
   currentTime?: string;
   /**
-   * 元认知评估结果：MetaCognitionCortex.assess() 的输出。
-   * 包含 uncertaintyMarkers / confidence / shouldReflect 等字段的可读摘要，
-   * 让 LLM 知道自己当前对哪些点不确定、是否应该先反思再答。
-   * 由 agent-core 从 brainCenter.metaCognition.assess() 拉取并格式化注入。
-   */
-  metaCognition?: string;
-  /**
    * 当前情绪状态摘要：LimbicCortex/EmotionModulator 的 VAD 值可读化输出。
    * 让 LLM 知道自己当前的情绪（如低落、兴奋、关注），影响回复语气。
    * 由 agent-core 从 brainCenter.limbicCortex.getEmotion() 拉取并格式化注入。

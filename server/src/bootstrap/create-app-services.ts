@@ -254,7 +254,6 @@ import {
   DecisionHub,
   WorkingMemoryCortex,
   TaskSwitchingCortex,
-  MetaCognitionCortex,
   ContextCortex,
   ToolPlanningCortex,
   OnlineLearningCortex,
@@ -279,10 +278,8 @@ import {
   getTransitionStore,
   // 记忆认知架构升级（Phase 4）：7 个子模块
   MemoryAssociativeGraph,
-  MemoryReconstructionValidator,
   MemoryMetacognitionBridge,
   MemoryForgettingController,
-  MemoryProceduralAutomation,
   MemorySchemaFormation,
   MemorySalienceFilter,
   MemoryExperienceLearningLoop,
@@ -2762,7 +2759,6 @@ export async function createAppServices(): Promise<AppServices> {
     const workingMemoryCortex = new WorkingMemoryCortex();
     const taskSwitchingCortex = new TaskSwitchingCortex();
     taskSwitchingCortex.registerWorkingMemory(workingMemoryCortex); // 任务切换联动工作记忆
-    const metaCognitionCortex = new MetaCognitionCortex();
     const contextCortexLocal = new ContextCortex();
     if (awarenessCortex) {
       contextCortexLocal.registerAwareness(awarenessCortex as unknown as import("../brain/context-cortex.js").ContextAwarenessLike);
@@ -2776,7 +2772,6 @@ export async function createAppServices(): Promise<AppServices> {
     brainCenter.registerContextCortex(contextCortexLocal);
     brainCenter.registerToolPlanningCortex(toolPlanningCortex);
     brainCenter.registerOnlineLearningCortex(onlineLearningCortex);
-    brainCenter.registerMetaCognitionCortex(metaCognitionCortex);
 
     const emotionModulator = new EmotionModulator();
     brainCenter.registerEmotionModulator(emotionModulator);
@@ -2823,18 +2818,13 @@ export async function createAppServices(): Promise<AppServices> {
     );
     if (memoryCognitiveEnabled) {
       try {
-        // 实例化 7 个子模块（依赖注入：humanLikeMemory / metaCognitionCortex / knowledge 服务 / synapseBus）
+        // 实例化子模块（依赖注入：humanLikeMemory / knowledge 服务 / synapseBus）
         const associativeGraph = new MemoryAssociativeGraph({
           humanLike: humanLikeMemory as unknown as import("../brain/memory-cognitive/memory-associative-graph.js").HumanLikeMemoryAssociativeLike,
-          metaCognition: metaCognitionCortex as unknown as import("../brain/memory-cognitive/memory-associative-graph.js").MetaCognitionLike,
           knowledgeGapExecutor: knowledgeGapExecutor as unknown as import("../brain/memory-cognitive/memory-associative-graph.js").KnowledgeGapExecutorLike,
         });
-        const reconstructionValidator = new MemoryReconstructionValidator(
-          humanLikeMemory as unknown as import("../brain/memory-cognitive/memory-reconstruction-validator.js").HumanLikeMemoryReconstructionLike,
-        );
         const metacognitionBridge = new MemoryMetacognitionBridge({
           memoryCortex: memoryCortex as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").MemoryCortexLike,
-          metaCognition: metaCognitionCortex as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").MetaCognitionLike,
           knowledgeVerification: knowledgeVerificationService as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").KnowledgeVerificationLike,
           knowledgeGapExecutor: knowledgeGapExecutor as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").KnowledgeGapExecutorLike,
         });
@@ -2847,7 +2837,6 @@ export async function createAppServices(): Promise<AppServices> {
             synapseBus as unknown as import("../brain/memory-cognitive/memory-forgetting-controller.js").SynapseBusLike,
           );
         }
-        const proceduralAutomation = new MemoryProceduralAutomation();
         const schemaFormation = new MemorySchemaFormation({
           humanLike: humanLikeMemory as unknown as import("../brain/memory-cognitive/memory-schema-formation.js").HumanLikeMemorySchemaLike,
         });
@@ -2957,11 +2946,8 @@ export async function createAppServices(): Promise<AppServices> {
         // 通过 BrainCenter.registerMemoryCognitiveSubmodules 统一注入到 MemoryCortex
         brainCenter.registerMemoryCognitiveSubmodules({
           associativeGraph,
-          reconstructionValidator,
           metacognitionBridge,
           forgettingController,
-          proceduralAutomation,
-          schemaFormation,
           salienceFilter,
           experienceLearningLoop,
           inferenceEngine,
@@ -3032,9 +3018,14 @@ export async function createAppServices(): Promise<AppServices> {
     // 让 BrainCenter.cognize 每轮异步调一次轻量 LLM 提取 1-3 个业务领域关键词，
     // 写入工作记忆槽位，使 toSummary 真正反映"在聊什么"。
     // 决策器实现已抽到 brain/decision-maker-factory.ts，支持未来"换大脑"时同步替换。
+    // 每轮 LLM 调用削减：情绪推断（阶段 1）的同一次调用顺带产出 topics，
+    // cognize 阶段 3.4.1 优先读 mood 缓存，仅未命中时才回退独立 TopicExtractor 调用。
     if (externalChat?.isEnabled()) {
       const topicExtractor = createDefaultTopicExtractor(externalChat);
       brainCenter.setTopicExtractor(topicExtractor.extract.bind(topicExtractor));
+      brainCenter.setMoodTopicProvider((sessionId, text) =>
+        moodInferenceService.getTopicsFromCache(sessionId, text) ?? [],
+      );
     }
 
     // 注入到 DecisionHub（让 decidePassive 调用新模块）
@@ -3507,6 +3498,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerHttpRoutes(app, {
     toolRegistry,
     skillManager,
+    travelPlanningService,
     skillMetadataValidator,
     realFundsWallet,
     scheduleTaskService,

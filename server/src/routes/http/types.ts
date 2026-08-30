@@ -119,4 +119,6 @@ export type HttpRouteDeps = {
   bodyCenter?: BodyCenter | null;
   /** 反射弧（身体侧硬安全门），用于 /body/reflex/patterns 热加载与列出；未装配时为 null */
   reflexArc?: ReflexArc | null;
+  /** 旅游规划服务：媒体库手动回填接口依赖（未装配时回填端点返回 503） */
+  travelPlanningService?: import("../../skills/travel-planning/travel-planning-service.js").PlanningService;
 };

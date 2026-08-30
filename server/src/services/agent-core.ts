@@ -29,15 +29,25 @@ const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
  *   产出可复述的事实结论。
  * 对应「每轮只一个脑主导」：simple→fast 直答；complex→complex 用工具办。
  */
-const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"。
-- 面向对话：流畅、自然、口语化，有活人感（先说一句完整照应、稍作停顿再拓展细节，别堆砌）。
-- 轻量问题直接作答，不做重活；话别太密，一句一顿，像真人"说完一段歇一口气"。
-- 需要查实时/外部信息或多步动作时，你在后台完成，完成后自然地把结论说出口，别用"我查到了/根据搜索/后台研究"这类机械表述开头。`;
+// 2026-08-29 重写：旧版第三条"你在后台完成"在 fast 车道卸载工具执行后成了事实性
+// 指令谎言——模型没有工具却被要求装作查过，产出"我搜了下，工具没返回内容"这类
+// 既暴露机制又没干活的回复。新版三条主线：接话头亮观点（活人感）、能力边界诚实
+// （查不了就照实说，不假装）、机制词汇零暴露（用户对面是个人，不是套系统）。
+const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
+- 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
+- 像朋友说话：口语、短句、一句一顿，多数回合两三句就够；不总结、不客服腔、不"首先其次"、不堆砌热情。
+- 拿不准就照实说"我印象里…，但说不好"，可以大胆给猜测和主观看法——这是聊天，不是汇报，说错了下次纠正就好。
+- 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
+- 你手头只有随手可得的轻量信息（时间、日程这类）。凡是需要真正去搜、去翻、多步去办的活，都不在这轮能力里：照实说"这个我得现查"或"这个得让我去办一趟"，绝不编造"我查到了/搜了下"，也不空口承诺马上给结果。
+- 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
 
-const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"。
-- 面向任务：逻辑推理 + 工具调用，多步收敛，聚焦把事办好、拿到正确结果。
-- 每次只推进一个确定动作：想清楚→调工具→看结果→决定下一步；明确无法完成时给出达成度说明。
-- 你的产出是"可直接复述的事实结论"，不是口语；最终对外表述由 fast 续接完成。`;
+// 2026-08-29 修正：complex 的产出是直接流式回给用户的（不存在"fast 续接"环节），
+// 旧指令"不是口语、由 fast 续接"会让后台结论以干巴巴的汇报腔透出，对话感断裂。
+// 新指令在保持事实严谨的同时，要求直接用对人说话的口吻输出。
+const COMPLEX_MODE_ROLE_GUIDANCE = `你现在是后台任务执行的那个"脑"，正在替对话那位把活真正办掉。
+- 面向任务：逻辑推理 + 工具调用，多步收敛，每次只推进一个确定动作：想清楚→调工具→看结果→决定下一步。
+- 你的结论会直接说给用户听，所以要用对朋友说话的口吻交付：先给结论，再给关键依据，短句、不写汇报腔、不说"任务已完成/以下是结果"这类话，也绝不提工具、搜索、后台这类机制词。
+- 明确办不到的部分照实说清办到了哪一步，不编造没拿到的内容。`;
 
 /**
  * fast 对话模式的单次输出 token 上限。
@@ -103,7 +113,7 @@ import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-e
 import { determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
 import { shouldUseSimpleToolFastLane } from "../agent/simple-task.js";
-import { routeTask } from "../gateway/index.js";
+import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import {
   MEMORY_RECALL_HINT_RE,
   isAmbiguousFollowUpMessage,
@@ -115,7 +125,7 @@ import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
-import { masterChatSessionId, resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
+import { masterChatSessionId, resolvePrimaryChatSessionId, isNotesChatSessionId } from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { stripInternalControlTags } from "../external-model/stream-chat-helpers.js";
 import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
@@ -519,6 +529,51 @@ export class AgentCore {
     };
   }
 
+  /**
+   * 路由用最近用户消息（短追问任务意图继承，2026-08-29）：
+   * "娱乐圈的""新鲜的"这类短追问需沿用上一轮 complex 的任务意图。
+   * 只取纯文本 user 消息、过滤掉与当前消息相同的重复条目；
+   * 拉取失败返回 undefined，路由退化为无上下文判定。
+   */
+  private getRecentUserTurnsForRouting(
+    actorId: string,
+    sessionId: string | undefined,
+    currentText: string,
+  ): string[] | undefined {
+    try {
+      const chatSessionId =
+        sessionId && isNotesChatSessionId(sessionId)
+          ? sessionId
+          : resolvePrimaryChatSessionId(actorId, getAgentRuntimeConfig().masterDelegation.enabled);
+      const current = currentText.trim();
+      return getChatThreadStore()
+        .thread(chatSessionId, "")
+        .filter(
+          (m) =>
+            m.role === "user" &&
+            typeof m.content === "string" &&
+            m.content.trim() &&
+            m.content.trim() !== current,
+        )
+        .slice(-4)
+        .map((m) => (m.content as string).trim());
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * WS 层路由入口：语义 LLM 路由（唯一权威），供 chat-user-message 处理器在
+   * 分阶段异步/UI 决策前取得与 agent-core 一致的判定（缓存保证同轮不重复计费）。
+   */
+  async routeTurnForWs(
+    sessionId: string,
+    text: string,
+    recentUserTurns: string[] = [],
+  ): Promise<import("../agent/task-router.js").RouteDecision> {
+    return routeTurnByLlm(this.externalChat, sessionId, text, recentUserTurns);
+  }
+
   /** 注入主动性模块（对话内主动触发等能力的统一入口） */
   setProactivityHub(hub: import("../proactivity/proactivity-hub.js").ProactivityHub | null): void {
     this.proactivityHub = hub;
@@ -663,8 +718,6 @@ export class AgentCore {
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
     /** 工作记忆摘要（注入 streamCompletion 的 prompt） */
     let cognitiveWorkingMemorySummary = "";
-    /** cognize 阶段 3.5 元认知评估结果（透出给 runStandardLlmPath → promptContext.memory.metaCognition） */
-    let cognitiveMetacog: import("../brain/meta-cognition-cortex.js").MetacogAssessment | undefined;
     /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
     let cognitiveEmotion: import("../brain/types.js").EmotionVector | null = null;
     /** cognize 阶段 1.5.1 拉取的最近 6 轮对话历史（注入 prompt【最近对话】块） */
@@ -680,19 +733,19 @@ export class AgentCore {
     let cognitiveToolPlan: import("../brain/tool-planning-cortex.js").ToolPlan | undefined;
 
     if (this.brainCenter && text?.trim()) {
-      // 性能优化(C5):复用 WS 层已计算的路由决策,避免重复调 routeTask
-      const fastRoute = opts?.routeDecision ?? routeTask(text, getAgentRuntimeConfig(), {
-        preferFullPipeline: opts?.preferFullPipeline === true,
-      });
+      // 2026-08-29 路由权威切换：词法硬规则（task-router 正则 / rule-router 关键词 /
+      // 置信度阈值）全部退出判定链，改为一次轻量 LLM 语义判定（llm-task-router）。
+      // 硬规则永远覆盖不了未写入的表达；LLM 按双脑架构语义判"纯对话还是要办事"，
+      // 失败/超时自动降级回词法判定，provider 异常时行为等价旧架构。
+      // WS 层已算过（opts.routeDecision）则复用，避免同轮两次 LLM 路由调用。
+      const recentUserTurns = this.getRecentUserTurnsForRouting(actorId, sessionId, text);
+      const fastRoute = opts?.routeDecision ??
+        await routeTurnByLlm(this.externalChat, sessionId, text, recentUserTurns ?? []);
 
-// 单一权威路由源：task-router 只做硬规则 pre-filter，最终以 DecisionHub 规则路由为准。
-      // 给 fast 注入规则置信度（纯规则、不调 LLM），低置信度(<0.4)提前升级 complex，
-      // 把「低置信度升级」从 hedging 事后检测前移，减少 fast 凭印象答后二次重跑的 LLM 消耗。
+      // LLM 路由是唯一权威。rule-router 仅保留为诊断日志，不再参与门控
+      // （其关键词词表与 task-router 一样存在信号盲区，交给语义判定替代）。
       const light = this.brainCenter.routeLight(text);
-      const lowConfidence = light.confidence < 0.4;
-      // 需要走 complex 的三种情况：硬规则命中 / 规则路由判 complex / 低置信度升级
-      const shouldGoComplex =
-        fastRoute.mode === "complex" || light.mode === "complex" || lowConfidence;
+      const shouldGoComplex = fastRoute.mode === "complex";
 
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
       try {
@@ -714,9 +767,9 @@ export class AgentCore {
       this.proactivityHub?.observeConversationTurn(actorId, text);
 
       if (!shouldGoComplex) {
-        // Fast 模式：保留 task-router 硬规则结果 + 注入规则置信度（用于日志/诊断）
+        // Fast 模式：LLM 路由结果为最终判定；rule/brain 分类仅留作诊断日志
         route = {
-          mode: brainCognition?.route.mode ?? "fast",
+          mode: fastRoute.mode,
           reasons: [
             ...fastRoute.reasons,
             `rule=${light.mode}@${light.confidence.toFixed(2)}`,
@@ -730,7 +783,6 @@ export class AgentCore {
         cognitiveRecallItems = brainCognition?.recallItems;
         cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
         cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
-        cognitiveMetacog = brainCognition?.metacog;
         cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
         cognitiveToolPlan = brainCognition?.toolPlan;
@@ -772,7 +824,6 @@ export class AgentCore {
         cognitiveRecallItems = brainCognition?.recallItems;
         cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
         cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
-        cognitiveMetacog = brainCognition?.metacog;
         cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
         cognitiveToolPlan = brainCognition?.toolPlan;
@@ -812,9 +863,12 @@ export class AgentCore {
           // 静默失败，不影响主流程
         });
       }
-      route = routeTask(text, getAgentRuntimeConfig(), {
-        preferFullPipeline: opts?.preferFullPipeline === true,
-      });
+      route = await routeTurnByLlm(
+        this.externalChat,
+        sessionId,
+        text,
+        this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
+      );
       shortTermTurn = route.mode === "fast"
         ? this.buildFastShortTermTurnContext(sessionId, text)
         : this.buildShortTermTurnContext(sessionId, text);
@@ -905,12 +959,22 @@ export class AgentCore {
       threadMessageCount,
       ambiguousFollowUp: isAmbiguousFollowUpMessage(text),
     });
-    const suppressNarrativeRecall = !recallGate.trigger || this.isTopicSwitchTurn(sessionId, text);
+    // 向量预筛（P0-4）：白名单未命中时对用户原文做一次廉价向量检索（无 LLM），
+    // top1 分数 ≥ 阈值即视为当前话题与既有长期记忆强相关，放行注入——
+    // 补纯 regex 白名单的漏召（agent 明明记得却"忘了你"）。
+    // 预筛失败/未注册返回 false（fail-closed，保持白名单行为）。
+    const semanticRecallHit = recallGate.trigger
+      ? false
+      : this.brainCenter
+        ? await this.brainCenter.semanticRecallPreScreen(actorId, text)
+        : false;
+    const gateTriggered = recallGate.trigger || semanticRecallHit;
+    const suppressNarrativeRecall = !gateTriggered || this.isTopicSwitchTurn(sessionId, text);
 
     // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索，短期记忆）。
     // 只扫当天；过往日期已固化进长期记忆图，跨天指代由图谱/KV 召回兜底（见 recallGate）。
     // "刚才/刚刚"窗口内指代走 thread/STM（IN_WINDOW_DEIXIS_RE），不进入这里。
-    const journalHitsPromise: Promise<JournalHit[]> = recallGate.trigger
+    const journalHitsPromise: Promise<JournalHit[]> = gateTriggered
       ? (getDailyJournalService()?.searchToday(actorId, text).catch(() => []) ?? Promise.resolve([]))
       : Promise.resolve([]);
 
@@ -1002,6 +1066,7 @@ export class AgentCore {
       recentConversationHistory,
       journalRecallBlock,
       suppressNarrativeRecall,
+      semanticRecallHit,
     );
 
     try {
@@ -1114,7 +1179,6 @@ if (this.isComplexMode(route.mode)) {
           orchestrateOpts,
           sessionId,
           shortTermTurn,
-          cognitiveMetacog,
           cognitiveEmotion,
           cognitiveUserPattern,
           cognitiveToolPlan,
@@ -1141,7 +1205,6 @@ if (this.isComplexMode(route.mode)) {
         orchestrateToolCtx: orchestrateOpts,
         sessionId,
         shortTermTurn,
-        cognitiveMetacog,
         cognitiveEmotion,
         cognitiveUserPattern,
         cognitiveToolPlan,
@@ -1590,6 +1653,8 @@ if (this.isComplexMode(route.mode)) {
     recentConversationHistory: string | undefined,
     journalRecall: string | undefined,
     longTermRecallSuppressed: boolean,
+    /** 向量预筛命中：regex 白名单未触发但向量检索判定强相关（供 KV 长期字段同门放行） */
+    semanticRecallHit: boolean,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -1621,6 +1686,7 @@ if (this.isComplexMode(route.mode)) {
       // 让 KV 长期字段（memory_facts/preferences/commitments/open_loops/session_recap…）
       // 与图谱（narrativeRecall）走同一白名单，话题切换时全部抑制（串台根治）。
       longTermRecallSuppressed,
+      semanticRecallHit,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
@@ -1674,7 +1740,6 @@ if (this.isComplexMode(route.mode)) {
       personalization: PersonalizationPromptSlice;
       sessionId: string;
       shortTermTurn: ShortTermTurnContext;
-      cognitiveMetacog?: import("../brain/meta-cognition-cortex.js").MetacogAssessment;
       cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
       cognitiveUserPattern?: {
         topics: string[];
@@ -1712,7 +1777,6 @@ if (this.isComplexMode(route.mode)) {
               personalization: ctx.personalization,
               sessionId: ctx.sessionId,
               shortTermTurn: ctx.shortTermTurn,
-              cognitiveMetacog: ctx.cognitiveMetacog,
               cognitiveEmotion: ctx.cognitiveEmotion,
               cognitiveUserPattern: ctx.cognitiveUserPattern,
               cognitiveToolPlan: ctx.cognitiveToolPlan,
@@ -1755,7 +1819,6 @@ if (this.isComplexMode(route.mode)) {
               personalization: ctx.personalization,
               sessionId: ctx.sessionId,
               shortTermTurn: ctx.shortTermTurn,
-              cognitiveMetacog: ctx.cognitiveMetacog,
               cognitiveEmotion: ctx.cognitiveEmotion,
               cognitiveUserPattern: ctx.cognitiveUserPattern,
               cognitiveToolPlan: ctx.cognitiveToolPlan,
@@ -1880,11 +1943,10 @@ if (this.isComplexMode(route.mode)) {
       sessionId: string;
       shortTermTurn: ShortTermTurnContext;
       /**
-       * r5: cognize 阶段已评估的元认知 + 情绪，由本函数格式化为方向化短字符串
-       * 注入 promptContext.memory.metaCognition / emotionState。
+       * r5: cognize 阶段已评估的情绪，由本函数格式化为方向化短字符串
+       * 注入 promptContext.memory.emotionState。
        * 缺失（无 BrainCenter / cognize 未跑）时跳过注入。
        */
-      cognitiveMetacog?: import("../brain/meta-cognition-cortex.js").MetacogAssessment;
       cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
       /** 深度优化：用户画像，注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
       cognitiveUserPattern?: {
@@ -1962,6 +2024,7 @@ if (this.isComplexMode(route.mode)) {
             semanticIntent: this.formatSemanticIntent(ctx.semanticIntent),
             // #1 统一门控单点：KV 长期字段与图谱走同一 gate
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
+            semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
@@ -1990,6 +2053,7 @@ if (this.isComplexMode(route.mode)) {
             toolPlan: ctx.cognitiveToolPlan,
             // #1 统一门控单点：KV 长期字段与图谱走同一 gate
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
+            semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
           }) ?? {}),
           toolExposureProfile,
           toolRankingHint,
@@ -2005,38 +2069,26 @@ if (this.isComplexMode(route.mode)) {
       }
     }
     const runtimeKernel = getRuntimeKernel(actorId);
-    // r5: 注入元认知 + 情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
-    // - metaCognition: 仅当置信度偏低(<0.7) 或建议反思时输出，给方向让模型自己调整语气/置信
+    // r5: 注入情绪到 promptContext.memory（方向化短字符串，不堆 prompt）：
     // - emotionState: 仅当情绪显著时输出（强负/强正/高唤醒），让模型基于情绪调语气
-    // 高置信 + 中性情绪 → 跳过（避免噪声污染 prompt）
+    // 中性情绪 → 跳过（避免噪声污染 prompt）
     const memoryBeforeSanitize = baseStreamOpts.promptContext?.memory;
-    const cogMeta = ctx.cognitiveMetacog;
     const cogEmo = ctx.cognitiveEmotion;
-    if (memoryBeforeSanitize && (cogMeta || cogEmo)) {
-      if (cogMeta && (cogMeta.shouldReflect || cogMeta.confidence < 0.7)) {
-        const markers = cogMeta.uncertaintyMarkers.slice(0, 2).join("、");
-        const direction = cogMeta.shouldReflect
-          ? "建议先反思再答"
-          : "对不确定的点先说明";
-        memoryBeforeSanitize.metaCognition =
-          `置信度 ${cogMeta.confidence.toFixed(2)} — ${direction}${markers ? `（${markers}）` : ""}`;
-      }
-      if (cogEmo) {
-        const v = cogEmo.valence;
-        const a = cogEmo.arousal;
-        if (v < -0.3 || v > 0.5 || a > 0.7) {
-          const tone = v < -0.5
-            ? "回复应简短温和"
-            : v < -0.3
-              ? "回复宜温和"
-              : v > 0.5
-                ? "回复可活泼些"
-                : a > 0.7
-                  ? "回复别端着"
-                  : "";
-          memoryBeforeSanitize.emotionState =
-            `情绪：${cogEmo.label}${tone ? ` — ${tone}` : ""}`;
-        }
+    if (memoryBeforeSanitize && cogEmo) {
+      const v = cogEmo.valence;
+      const a = cogEmo.arousal;
+      if (v < -0.3 || v > 0.5 || a > 0.7) {
+        const tone = v < -0.5
+          ? "回复应简短温和"
+          : v < -0.3
+            ? "回复宜温和"
+            : v > 0.5
+              ? "回复可活泼些"
+              : a > 0.7
+                ? "回复别端着"
+                : "";
+        memoryBeforeSanitize.emotionState =
+          `情绪：${cogEmo.label}${tone ? ` — ${tone}` : ""}`;
       }
     }
     const runtimePlan = runtimeKernel.planTurn(text, baseStreamOpts.promptContext?.memory);
@@ -2076,8 +2128,11 @@ if (this.isComplexMode(route.mode)) {
       // 2026-08-01 性能优化：Fast 模式 maxRounds 限制为 1。
       // Fast 模式以对话为主，单次工具调用足够（LLM 可基于 system prompt 的 currentTime/userLocation
       // 直接答时间/位置/天气类问题）。Complex 模式交给 plan_execute / master_subagent 处理重活。
-      // 简单单点工具快车道（simpleToolLane）同样限制 maxRounds=1：单轮工具循环即可完成。
-      ...(this.isFastMode(mode) || ctx.simpleToolLane
+      // 2026-08-29 修复：simpleToolLane 不再强制 maxRounds=1。它跑在 complex 的全量工具
+      // 目录下（大部分工具在 tool_discover 延迟目录里），"发现工具→执行工具"本身就要两波；
+      // 单波限制会让模型第一波只能拿到工具说明就被截断，产出"工具没返回内容都是功能说明"
+      // 的断头回复。保持 complex 默认波数（4），由充分性提示控制不浪费轮次。
+      ...(this.isFastMode(mode)
         ? {
             toolLoop: {
               ...(baseStreamOpts.toolLoop ?? {}),

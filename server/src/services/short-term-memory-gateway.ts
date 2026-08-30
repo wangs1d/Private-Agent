@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { join } from "node:path";
 
 export type TaskStackEntry = {
   taskId: string;
@@ -1076,8 +1077,7 @@ export class ShortTermMemoryGatewayService {
 
   private schedulePersist(): void {
     this.persistChain = this.persistChain.then(async () => {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf8");
+      await writeJsonAtomic(this.filePath, this.data);
     });
   }
 }

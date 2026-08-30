@@ -2,7 +2,7 @@
 //
 // 职责：仿突触的扩散激活算法，让 agent 基于细微/隐性关联联想记忆。
 //   在 recall 命中后沿 MemoryEdgeRecord 边扩散激活，返回激活值超阈值的"联想记忆"。
-//   当联想置信度低时，触发 MetaCognitionCortex 标记 shouldExplore，
+//   当联想置信度低时，经 MemoryMetacognitionBridge 标记 shouldExplore，
 //   并（若 KnowledgeGapExecutor 可用）异步主动学习验证。
 //
 // 核心原则：
@@ -43,18 +43,6 @@ export interface HumanLikeMemoryAssociativeLike {
     decayFactor: number;
     hopCost: number;
   }>;
-}
-
-/**
- * MetaCognitionCortex 的最小化外观接口。
- *
- * 注：MetaCognitionCortex 当前没有 markShouldExplore 方法，
- * 本任务只定义外观接口，不修改 MetaCognitionCortex。
- * 后续接入时由 MetaCognitionCortex 补齐，或通过 adapter 包装 recordReflection。
- */
-export interface MetaCognitionLike {
-  /** 标记 shouldExplore（建议主动探索） */
-  markShouldExplore(actorId: string, reason: string): void;
 }
 
 /**
@@ -138,16 +126,13 @@ const OUTCOME_SEPARATOR = " | ";
  */
 export class MemoryAssociativeGraph {
   private readonly humanLike: HumanLikeMemoryAssociativeLike | null;
-  private readonly metaCognition: MetaCognitionLike | null;
   private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
   constructor(opts: {
     humanLike?: HumanLikeMemoryAssociativeLike | null;
-    metaCognition?: MetaCognitionLike | null;
     knowledgeGapExecutor?: KnowledgeGapExecutorLike | null;
   } = {}) {
     this.humanLike = opts.humanLike ?? null;
-    this.metaCognition = opts.metaCognition ?? null;
     this.knowledgeGapExecutor = opts.knowledgeGapExecutor ?? null;
   }
 
@@ -396,15 +381,6 @@ export class MemoryAssociativeGraph {
 
     const ratio = lowConfidenceCount / result.activatedNodes.length;
     if (ratio <= cfg.exploreThreshold) return;
-
-    // 触发元认知标记
-    if (this.metaCognition) {
-      try {
-        this.metaCognition.markShouldExplore(actorId, "low_confidence_association");
-      } catch (err) {
-        console.error("[MemoryAssociativeGraph] markShouldExplore 失败（忽略）:", err);
-      }
-    }
 
     // 异步触发知识缺口查询（不阻塞，不 await）
     if (this.knowledgeGapExecutor && query) {

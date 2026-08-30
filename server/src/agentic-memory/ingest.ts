@@ -8,6 +8,7 @@ import {
   getLowSignalBufferMaxChars,
 } from "./env.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
+import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
 
 interface BufferEntry {
   actorId: string;
@@ -49,6 +50,12 @@ export class AgenticMemoryIngestService {
     const t = text.trim();
     if (!t || t.length < 4) return;
 
+    // 匿名身份治理：无稳定身份的对话不进长期记忆（共享桶 = 跨请求串台源）
+    if (isEphemeralActorId(actorId)) {
+      warnEphemeralActorMemoryBlocked(actorId, "Mem0 长期记忆写入");
+      return;
+    }
+
     const context = opts?.context ?? "main";
 
     if (opts?.highSignal) {
@@ -70,6 +77,9 @@ export class AgenticMemoryIngestService {
       source: sourceId,
       heuristicHint: "remember",
     });
+
+    // 写入决策真正拦截：reject 的内容不落库（此前决策只写 metadata，无否决权）
+    if (decision.decision === "reject") return;
 
     const trimmed = body.length > 12_000 ? `${body.slice(0, 12_000)}...` : body;
     await this.memory.add([{ role: "user", content: trimmed }], {
@@ -153,6 +163,9 @@ export class AgenticMemoryIngestService {
         source: "chat:low_signal_summary",
         heuristicHint: "decay",
       });
+
+      // reject 的摘要不落库；decay 保留（临时上下文仍可短期召回，由遗忘机制回收）
+      if (decision.decision === "reject") continue;
 
       const body = summarized.length > 12_000 ? `${summarized.slice(0, 12_000)}...` : summarized;
       await this.memory.add([{ role: "user", content: body }], {

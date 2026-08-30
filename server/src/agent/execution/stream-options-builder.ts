@@ -5,7 +5,6 @@ import type { PersonalizationPromptSlice } from "../../services/user-personaliza
 import type { LlmExecutionMode } from "../task-router.js";
 import { getRuntimeKernel } from "../runtime-kernel.js";
 import { TaskTier, buildModelOverrideOpts } from "../../config/model-routing.js";
-import type { MetacogAssessment } from "../../brain/meta-cognition-cortex.js";
 import type { EmotionVector } from "../../brain/types.js";
 import type { ToolPlan } from "../../brain/tool-planning-cortex.js";
 
@@ -29,7 +28,6 @@ export type BuildStreamOptionsInput = {
   toolPlan?: ToolPlan;
   toolExposureProfile: AgentStreamOptions["toolExposureProfile"];
   toolRankingHint: AgentStreamOptions["toolRankingHint"];
-  cognitiveMetacog?: MetacogAssessment;
   cognitiveEmotion?: EmotionVector | null;
   signal?: AbortSignal;
 };
@@ -77,7 +75,7 @@ export class StreamOptionsBuilder {
           toolRankingHint: input.toolRankingHint,
         };
 
-    this.applyCognitiveHints(baseStreamOpts, input.cognitiveMetacog, input.cognitiveEmotion);
+    this.applyCognitiveHints(baseStreamOpts, input.cognitiveEmotion);
 
     const runtimeKernel = getRuntimeKernel(input.actorId);
     const runtimePlan = runtimeKernel.planTurn(input.text, baseStreamOpts.promptContext?.memory);
@@ -131,17 +129,10 @@ export class StreamOptionsBuilder {
 
   private applyCognitiveHints(
     streamOpts: AgentStreamOptions,
-    metacog: MetacogAssessment | undefined,
     emotion: EmotionVector | null | undefined,
   ): void {
     const memory = streamOpts.promptContext?.memory;
-    if (!memory || (!metacog && !emotion)) return;
-
-    if (metacog && (metacog.shouldReflect || metacog.confidence < 0.7)) {
-      const markers = metacog.uncertaintyMarkers.slice(0, 2).join("; ");
-      const direction = metacog.shouldReflect ? "reflect briefly before answering" : "state uncertain points clearly";
-      memory.metaCognition = `confidence=${metacog.confidence.toFixed(2)}; ${direction}${markers ? `; ${markers}` : ""}`;
-    }
+    if (!memory || !emotion) return;
 
     if (emotion) {
       const { valence, arousal } = emotion;

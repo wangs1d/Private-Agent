@@ -50,6 +50,7 @@ import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
 import { registerVideoProxyRoutes } from "./video-files.js";
 import { registerUserFileRoutes } from "./user-files.js";
+import { registerTravelMediaRoutes } from "./travel-media.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -67,6 +68,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerScheduleRoutes(app, deps);
   registerWeatherRoutes(app, deps);
   registerGeoRoutes(app);
+  registerTravelMediaRoutes(app, deps);
   registerPhoneRoutes(app, deps);
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);

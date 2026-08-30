@@ -13,6 +13,11 @@
  * 触发时检索 query 只用用户原文（禁止拼接任务/偏好/openLoops 等加料，
  * 那是召回串台的根因——检索结果永远偏向旧任务簇）。
  *
+ * 白名单外的补充通道（P0-4 向量预筛）：正则白名单天然存在漏召（用户换个说法
+ * 提到旧话题时 agent"忘了你"）。agent-core 在白名单未命中时会对用户原文做一次
+ * 廉价向量检索（MemoryCortex.semanticRecallPreScreen，无 LLM），top1 分数 ≥
+ * 阈值即放行长期记忆注入。本文件保持纯正则、无 IO——预筛在调用方叠加。
+ *
  * 当天的问题不走长期检索，只扫当日 journal（DailyJournalService.searchToday）。
  */
 

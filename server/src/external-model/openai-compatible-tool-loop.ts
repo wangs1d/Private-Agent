@@ -3114,6 +3114,20 @@ export async function streamCompletionWithTools(
       // 明确告知 LLM 禁止虚构"已查询/已翻阅/公开渠道没查到"——假搜索回复的
       // 最后防线。正则门控（forced-tool）+ 强制联网兜底已在前置层拦住绝大多数，
       // 这里兜住漏网：模型在无任何证据下编造"查过了"的叙述。
+      // 元工具兜底守卫（2026-08-29）：本轮只执行了 tool_discover / agent.query_capabilities
+      // 这类"查工具目录"的元工具（或全部失败）时，LLM 手里的"工具结果"只有能力描述文本。
+      // 若仍按"基于这些结果回答"引导，会产出"工具没返回内容，都是些功能说明"这种
+      // 把机制话透给用户的回复（fast maxRounds=1 下是高发路径：发现→执行需两轮，单波必断头）。
+      const substantiveToolResults = allToolExecResults.filter(
+        (r) => !META_TOOL_NAMES.has(r.toolName) && r.ok,
+      );
+      const metaOnlyGuard =
+        allToolExecResults.length > 0 && substantiveToolResults.length === 0
+          ? `\n\n【重要】本轮只查询了工具目录/能力清单（或工具全部执行失败），没有拿到任何真实的外部内容。` +
+            `严禁把工具说明、能力描述、参数列表当作查询结果复述给用户；` +
+            `严禁说"工具没返回""都是些功能说明"这类暴露机制的话；也不要声称已经查到资料。` +
+            `请基于对话上下文自然回应；若用户要的是需要真正查询才能拿到的信息，就照实说你得现查。`
+          : "";
       const zeroToolGuard =
         allToolExecResults.length === 0
           ? `\n\n【重要】本轮没有执行任何工具或检索。严禁声称已经查询、搜索、翻阅过任何资料` +
@@ -3121,13 +3135,14 @@ export async function streamCompletionWithTools(
             `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
           : "";
       const baseDirective =
-        (allToolExecResults.length > 0
+        (substantiveToolResults.length > 0
           ? `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
             `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
             `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。`
           : `请基于本轮对话上下文用自然的口语回答用户的问题。`) +
         strategyBlock +
-        zeroToolGuard;
+        zeroToolGuard +
+        metaOnlyGuard;
       const escapeDirective = escapeAllowed
         ? `\n\n【重要】如果你认为现有工具结果不足以回答用户的问题（例如还需要抓取某个具体网页、` +
           `还需要换关键词再查一次），第一行只输出 ${NEED_MORE_TOOLS_MARKER}，不要输出任何其他内容。` +

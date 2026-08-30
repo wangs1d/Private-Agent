@@ -336,11 +336,26 @@ export function resolveChatToolsForStream(
   return resolveChatToolPlanForStream(userText, streamOpts).visibleTools;
 }
 
+/**
+ * 桌面桥明确离线时，把 desktop.* 从可见工具中剔除（2026-08-29 真实链路测试发现）。
+ * 桥离线的 desktop.* 是"必然执行失败的工具"——模型会优先尝试它（pinned 权重高），
+ * 连续失败耗尽工具波次后才有概率回退 search_web，浪费 10s+ 延迟甚至整轮查不了。
+ * 仅在 desktopBridgeOnline === false（明确离线）时剔除；undefined（未知）保持原行为。
+ */
+function dropOfflineDesktopTools(
+  tools: ChatCompletionTool[],
+  accessCtx?: ChatToolsAccessContext,
+): ChatCompletionTool[] {
+  if (accessCtx?.desktopBridgeOnline !== false) return tools;
+  return tools.filter(
+    (tool) => tool.type !== "function" || !/^desktop\./.test(tool.function?.name ?? ""),
+  );
+}
+
 export function resolveChatToolPlanForStream(
   userText?: string,
   streamOpts?: AgentStreamOptions,
-): ResolvedChatToolPlan {
-  // 2026-08-01 性能优化：Fast 模式小工具集短路。
+): ResolvedChatToolPlan {  // 2026-08-01 性能优化：Fast 模式小工具集短路。
   // 当调用方显式传入 chatToolsBuiltin 且总工具数 ≤ 12 时，调用方明确声明
   // "我只要这 N 个工具"，跳过 access-mode 合并 + contextual 过滤 + ranking。
   // 这些步骤是给 Complex 模式（几十上百工具）准备的，Fast 模式套用反而会：
@@ -362,7 +377,15 @@ export function resolveChatToolPlanForStream(
       maxTools: 6,
       includeAlwaysIncluded: true,
     });
-    return { visibleTools: selected, searchableTools: merged };
+    // 排序 hint（经验学习循环的 cautiousNamespaces 降权等）不参与短路：
+    // 有 hint 时仍需一次微秒级排序，否则学到的高危工具降权在 Fast 模式下失效。
+    const hasRankingHint =
+      (streamOpts?.toolRankingHint?.preferredNamespaces?.filter(Boolean).length ?? 0) > 0 ||
+      (streamOpts?.toolRankingHint?.cautiousNamespaces?.filter(Boolean).length ?? 0) > 0;
+    return {
+      visibleTools: hasRankingHint ? applyToolRankingHint(selected, streamOpts) : selected,
+      searchableTools: merged,
+    };
   }
 
   const key = resolvedToolsCacheKey(userText, streamOpts);
@@ -400,15 +423,19 @@ export function resolveChatToolPlanForStream(
       const firstKey = _resolvedToolsCache.keys().next().value;
       if (firstKey !== undefined) _resolvedToolsCache.delete(firstKey);
     }
-    _resolvedToolsCache.set(key, result);
+    const scopedVisible = dropOfflineDesktopTools(result, accessCtx);
+    _resolvedToolsCache.set(key, scopedVisible);
     return {
-      visibleTools: result,
+      visibleTools: scopedVisible,
       searchableTools: accessFiltered,
     };
   }
-  const ranked = pinSpecifiedTools(
-    pinDesktopVisualTools(applyToolRankingHint(result, streamOpts), streamOpts),
-    streamOpts,
+  const ranked = dropOfflineDesktopTools(
+    pinSpecifiedTools(
+      pinDesktopVisualTools(applyToolRankingHint(result, streamOpts), streamOpts),
+      streamOpts,
+    ),
+    accessCtx,
   );
 
   if (_resolvedToolsCache.size >= MAX_RESOLVED_TOOLS_CACHE) {

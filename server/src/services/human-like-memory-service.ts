@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { join } from "node:path";
 
 import OpenAI from "openai";
 
@@ -487,6 +488,42 @@ function extractKeywords(text: string): string[] {
   const en =
     text.toLowerCase().match(/[a-z][a-z0-9_-]{2,24}/g)?.filter((token) => token.length >= 3) ?? [];
   return uniqueStrings([...zh, ...en], 14);
+}
+
+/**
+ * 汉字串 token → 字符 bigram 集合（英文 token 保持原样）。
+ *
+ * extractKeywords 抽的是连续汉字串（"我对芒果过敏"整段），查询与事实只要
+ * 断句方式不同就零重叠。bigram 化后"过敏/芒果/妻子"等词面片段可部分匹配，
+ * 无需分词库即可让换说法的查询命中（见 test/memory-recall-benchmark.test.ts）。
+ */
+function keywordBigrams(tokens: string[]): Set<string> {
+  const grams = new Set<string>();
+  for (const token of tokens) {
+    if (/^[\u4e00-\u9fff]+$/.test(token)) {
+      if (token.length === 1) {
+        grams.add(token);
+      }
+      for (let i = 0; i < token.length - 1; i++) {
+        grams.add(token.slice(i, i + 2));
+      }
+    } else {
+      grams.add(token);
+    }
+  }
+  return grams;
+}
+
+/** query 与 target 关键词的 bigram 覆盖率（0-1，按较小集合归一）。 */
+function bigramOverlapScore(queryTokens: string[], targetTokens: string[]): number {
+  const q = keywordBigrams(queryTokens);
+  const t = keywordBigrams(targetTokens);
+  if (q.size === 0 || t.size === 0) return 0;
+  let overlap = 0;
+  for (const gram of q) {
+    if (t.has(gram)) overlap += 1;
+  }
+  return overlap / Math.min(q.size, t.size);
 }
 
 function extractEntityTags(text: string): string[] {
@@ -982,6 +1019,30 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 按节点 ID 批量取节点摘要（联想扩散结果 → 当轮召回候选用）。
+   *
+   * 联想扩散 spread 返回的是激活节点 ID 列表，不含内容；召回侧需要把
+   * 2 度节点的内容并入候选池。仅返回 actorId 匹配且未硬删除的节点，
+   * 保持传入顺序。纯内存读取，不触发持久化。
+   */
+  getNodeSummariesByIds(
+    actorId: string,
+    nodeIds: string[],
+    max = 4,
+  ): Array<{ id: string; summary: string }> {
+    if (!nodeIds || nodeIds.length === 0) return [];
+    const result: Array<{ id: string; summary: string }> = [];
+    for (const nodeId of nodeIds) {
+      if (result.length >= max) break;
+      const node = this.store.nodes[nodeId];
+      if (!node || node.actorId !== actorId || node.deletionStage === "hard_deleted") continue;
+      if (typeof node.summary !== "string" || node.summary.length === 0) continue;
+      result.push({ id: node.id, summary: node.summary });
+    }
+    return result;
+  }
+
+  /**
    * 更新节点 deletionStage（供 ForgettingController.continuousScore 调用）。
    * 写入后立即持久化到 store。
    */
@@ -995,6 +1056,19 @@ export class HumanLikeMemoryService {
     }
     node.deletionStage = stage;
     this.schedulePersist();
+  }
+
+  /**
+   * 查询给定节点中处于可再唤醒状态（downranked / cold）的节点 ID。
+   * 供 MemoryCortex 召回后触发 ForgettingController.reawakenAndStrengthen：
+   * 只有被召回命中的褪色记忆才值得反弹，其余节点维持遗忘曲线。
+   */
+  findReawakenableNodeIds(actorId: string, nodeIds: string[]): string[] {
+    return nodeIds.filter((nodeId) => {
+      const node = this.store.nodes[nodeId];
+      if (!node || node.actorId !== actorId) return false;
+      return node.deletionStage === "downranked" || node.deletionStage === "cold";
+    });
   }
 
   /**
@@ -1106,45 +1180,6 @@ export class HumanLikeMemoryService {
           node.sceneTags.includes(sceneTag),
       )
       .map((node) => ({ ...node }));
-  }
-
-  /**
-   * 获取单个节点（供 MemoryReconstructionValidator 校验与来源追溯调用）。
-   * 节点不存在或 actorId 不匹配时返回 null。返回浅拷贝。
-   */
-  getNode(actorId: string, nodeId: string): MemoryNodeRecord | null {
-    const node = this.store.nodes[nodeId];
-    if (!node || node.actorId !== actorId) return null;
-    return { ...node };
-  }
-
-  /**
-   * 获取版本记录（供 MemoryReconstructionValidator.getProvenanceChain 来源链路追溯调用）。
-   * 版本不存在时返回 null。返回浅拷贝。
-   */
-  getVersion(actorId: string, versionId: string): MemoryVersionRecord | null {
-    const version = this.store.versions[versionId];
-    if (!version) return null;
-    // 版本记录不直接关联 actorId，通过节点链间接关联；
-    // 此处不强制 actorId 校验（调用方已通过 getNode 确认归属）。
-    void actorId; // 显式标记 actorId 保留供未来扩展
-    return { ...version };
-  }
-
-  /**
-   * 标记节点 correctness（供 MemoryReconstructionValidator 标记 suspected_error 调用）。
-   * 写入后立即持久化。节点不存在或 actorId 不匹配时静默跳过。
-   */
-  markNodeCorrectness(actorId: string, nodeId: string, correctness: string): void {
-    const node = this.store.nodes[nodeId];
-    if (!node || node.actorId !== actorId) {
-      console.log(
-        `[HumanLikeMemory] markNodeCorrectness 跳过：节点不存在或 actorId 不匹配 (actorId=${actorId}, nodeId=${nodeId})`,
-      );
-      return;
-    }
-    node.correctness = correctness as MemoryNodeRecord["correctness"];
-    this.schedulePersist();
   }
 
   /**
@@ -1310,14 +1345,12 @@ export class HumanLikeMemoryService {
   }
 
   private async persistPolicy(): Promise<void> {
-    await mkdir(dirname(this.policyFilePath), { recursive: true });
-    await writeFile(this.policyFilePath, `${JSON.stringify(this.policy, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(this.policyFilePath, this.policy);
   }
 
   private schedulePersist(): void {
     this.persistChain = this.persistChain.then(async () => {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(this.filePath, `${JSON.stringify(this.store, null, 2)}\n`, "utf8");
+      await writeJsonAtomic(this.filePath, this.store);
     });
   }
 
@@ -1473,7 +1506,7 @@ export class HumanLikeMemoryService {
           node.domainScore * 0.08 +
           node.userFeedbackScore * 0.08;
         const keywordScore =
-          queryKeywords.filter((keyword) => node.keywords.includes(keyword)).length * 0.15 +
+          bigramOverlapScore(queryKeywords, node.keywords) * 0.45 +
           queryEntities.filter((entity) => node.entityTags.includes(entity)).length * 0.12;
         // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到 cosineLikeScore
         let vectorScore: number;
@@ -1484,6 +1517,12 @@ export class HumanLikeMemoryService {
         } else {
           // 降级路径：旧节点无真向量或无 query 向量，用关键词集合 cosine
           vectorScore = cosineLikeScore(queryKeywords, node.keywords) * 0.26;
+        }
+        // 相关性下限：词面/语义零重叠的候选不入选。纯结构分（重要性/置信度等）
+        // 不构成召回理由——否则任意无关查询都会拖回 top-N 噪声（串台感的
+        // 检索层根源，见 test/memory-recall-benchmark.test.ts 基准 B）。
+        if (keywordScore <= 0 && vectorScore <= 0) {
+          return null;
         }
         // W2 新增：inactivityPenalty — 长期未命中的节点在召回排序时降权
         // 与人类记忆"经常提起就记忆犹新，不提起就逐渐淡忘"机制一致
@@ -1517,6 +1556,7 @@ export class HumanLikeMemoryService {
           (node.userFeedbackScore < 0.5 ? this.policy.retrieval.userNegativeFeedbackPenalty : 0);
         return { node, structureScore, keywordScore, vectorScore, finalScore };
       })
+      .filter((candidate): candidate is HybridRetrievalCandidate => candidate !== null)
       .sort((a, b) => b.finalScore - a.finalScore);
 
     if (mode === "cross_domain") {

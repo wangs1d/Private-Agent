@@ -2,6 +2,7 @@ import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
+import { formatAgentStylePrompt, loadAgentStyleProfile } from "./agent-style-profile.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   buildCurrentTimePrompt,
@@ -303,6 +304,12 @@ export type BuildPromptContextInput = {
    */
   longTermRecallSuppressed?: boolean;
   /**
+   * 向量预筛命中（P0-4）：agent-core 侧 regex 白名单未触发，但廉价向量检索
+   * 判定当前话题与长期记忆强相关（top1 ≥ 阈值）。为 true 时与白名单命中等效，
+   * 放行 KV 长期字段与图谱召回（topic_switch 抑制仍然优先）。
+   */
+  semanticRecallHit?: boolean;
+  /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
    * 避免被 formatNarrativeRecallPrompt 的条目上限截断或块结构被拍平。
@@ -577,11 +584,12 @@ export class PromptContextBuilder {
     // 工具按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
     const longTermEnabled =
       !input.longTermRecallSuppressed &&
-      shouldRecallLongTerm({
+      (shouldRecallLongTerm({
         text: userText,
         threadMessageCount: input.threadMessageCount,
         ambiguousFollowUp,
-      }).trigger;
+      }).trigger ||
+        input.semanticRecallHit === true);
 
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
@@ -697,7 +705,23 @@ export class PromptContextBuilder {
       dedupeJournalVsStm(input.journalRecall, shortTermTaskContext),
       700,
     );
-    const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 320);
+    // 风格指纹（StyleProfile）并入语气指南：主聊天与主动消息共用同一风格决策源，
+    // 让回复句长/语气词/用词偏好跟随同一份 profile 演化（此前只有主动消息用它）。
+    let styleProfileBlock: string | undefined;
+    if (this.deps.agentMemorySyncService) {
+      try {
+        const styleText = formatAgentStylePrompt(
+          loadAgentStyleProfile(this.deps.agentMemorySyncService),
+        );
+        if (styleText.trim()) styleProfileBlock = styleText;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 风格指纹注入失败（忽略）: ${err}`);
+      }
+    }
+    const toneGuidance = compactPromptBlock(
+      [input.personalization?.toneGuidance, styleProfileBlock].filter(Boolean).join("\n"),
+      480,
+    );
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
     const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 800);

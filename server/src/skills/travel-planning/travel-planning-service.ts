@@ -17,11 +17,29 @@ import type { Coordinates, AgentTrace } from './types.js';
 import type { IPlanningAgent, AgentRequest } from './interfaces.js';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { pricingService, type MemberTier, type PriceQuote, type BoundPlatform } from './pricing-service.js';
+import { travelMediaStore } from './travel-media-store.js';
+
+/** 行程条目可挂载的本地媒体（来自 POI 媒体库） */
+interface PoiMediaMeta {
+  reviewCount: number;
+  reviews: Array<{ author: string; rating: number; text: string; createdAt: string }>;
+  videos: Array<{
+    platform: string;
+    title: string;
+    author: string;
+    durationSeconds?: number;
+    thumbnailUrl?: string;
+    playPageUrl: string;
+  }>;
+}
+
+/** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
+type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
 
 // ==================== 行程级二级缓存 ====================
 // 相同的 目的地+天数+偏好 组合，在 POI 缓存未刷新时整份行程直接复用。
 // POI 缓存 set 时 createdAt 变化 → 行程缓存自然失效；图片回写不进 createdAt，
-// 二次规划仍享受图片命中缓存（见 batchFetchImages）。
+// 二次规划仍享受图片命中（见 collectMediaForDays）。
 const ITINERARY_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const ITINERARY_CACHE_MAX = 48;
 const itineraryCache = new Map<
@@ -134,7 +152,15 @@ export interface ItineraryItem {
   tags: string[];
   reviewCount: number;
   images: string[];
-  videos: Array<Record<string, string>>;
+  /** 相关视频（媒体库登记的元数据+播放页，不自托管文件） */
+  videos: Array<{
+    platform: string;
+    title: string;
+    author: string;
+    durationSeconds?: number;
+    thumbnailUrl?: string;
+    playPageUrl: string;
+  }>;
   reviews: unknown[];
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL */
   splatUrl?: string;
@@ -252,10 +278,63 @@ const AMAP_POI_TYPES: Record<string, string> = {
 
 export class PlanningService {
 
+  /** 当天行程最晚结束时间（分钟，21:00）。超预算的景点顺延丢弃，时钟不再绕回次日。 */
+  private static readonly DAY_END_MIN = 21 * 60;
+
+  /** 交通腿缓存（坐标 ~100m 网格），OSRM 结果 24h 复用 */
+  private legCache = new Map<string, { transport: TransportLeg; ts: number }>();
+
+  /** OSRM 熔断：不可用时 10 分钟内直接走本地估算，避免编排被外网超时拖住 */
+  private osrmDisabledUntil = 0;
+
+  /**
+   * 编排阶段的交通腿查询：OSRM 真实路网优先（带 24h 缓存），失败降级 haversine 估算。
+   * OSRM 一次失败即熔断 10 分钟（本批其余腿与后续规划直接走本地估算）。
+   */
+  private async transportLeg(fromLat: number, fromLon: number, toLat: number, toLon: number): Promise<TransportLeg> {
+    const key = `${fromLat.toFixed(3)},${fromLon.toFixed(3)}|${toLat.toFixed(3)},${toLon.toFixed(3)}`;
+    const hit = this.legCache.get(key);
+    if (hit && Date.now() - hit.ts < 24 * 3600 * 1000) return hit.transport;
+
+    let transport: TransportLeg;
+    if (Date.now() < this.osrmDisabledUntil) {
+      transport = this.computeTransport(fromLat, fromLon, toLat, toLon);
+    } else {
+      const osrm = await this.osrmRoute(fromLat, fromLon, toLat, toLon);
+      if (osrm) {
+        transport = osrm;
+      } else {
+        this.osrmDisabledUntil = Date.now() + 10 * 60 * 1000;
+        transport = this.computeTransport(fromLat, fromLon, toLat, toLon);
+      }
+    }
+
+    this.legCache.set(key, { transport, ts: Date.now() });
+    // 简单容量上限：FIFO 淘汰
+    if (this.legCache.size > 500) {
+      const oldest = this.legCache.keys().next().value;
+      if (oldest) this.legCache.delete(oldest);
+    }
+    return transport;
+  }
+
+  /**
+   * 本地评论聚合分与 POI 原始评分混合：
+   * 媒体库无评论 → 原样返回；评论 <5 条按数量线性加权，≥5 条以本地评论为主。
+   */
+  private effectiveRating(poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number {
+    const agg = travelMediaStore.aggregate(type, poi.name);
+    if (!agg || agg.ratingCount === 0) return poi.rating || 0;
+    const w = Math.min(1, agg.ratingCount / 5);
+    const base = poi.rating || 0;
+    return base > 0 ? base * (1 - w) + agg.ratingAvg * w : agg.ratingAvg;
+  }
+
   /**
    * 主入口：根据用户输入生成完整行程
    */
   async generateItinerary(request: PlanningRequest): Promise<PlanningResult> {
+    const t0 = Date.now();
     console.log(`[PlanningService] 开始规划: "${request.input}"`);
 
     // 1. 解析用户输入
@@ -311,6 +390,7 @@ export class PlanningService {
       cacheEntry.data.restaurants,
       preferences
     );
+    const tParsed = Date.now() - t0;
 
     // 7. 提取目的地实用信息（用户没问也补）
     const travelInfo = this.extractTravelInfo(destName);
@@ -324,20 +404,27 @@ export class PlanningService {
       startDate,
     };
 
-    // === 阶段1：快速构建行程数据（不含图片，<100ms）===
+    // === 阶段1：构建行程数据（聚类+交通腿+排时，交通腿走 OSRM 缓存）===
     console.log(`[PlanningService] 阶段1：构建行程数据...`);
-    const { days: daysRaw, pois } = this.buildDaysFast(
+    const tBuild0 = Date.now();
+    const { days: daysRaw, pois } = await this.buildDaysFast(
       dayCount, startDate,
       ranked.attractions, ranked.hotels, ranked.restaurants,
       cacheEntry.center, preferences, travelInfo, pricingCtx
     );
+    const tBuild = Date.now() - tBuild0;
 
-    // === 阶段2：并行批量获取所有POI的真实图片（命中 POI 缓存直接复用，并发受限+重试）===
-    const imageMap = await this.batchFetchImages(daysRaw, cacheEntry);
+    // === 阶段2：媒体装配（纯本地读：媒体库/POI 缓存直图，网络抓取已移出请求路径）===
+    const tMedia0 = Date.now();
+    const { imageMap, mediaMeta, missing } = this.collectMediaForDays(daysRaw, cacheEntry);
+    const days = this.enrichDaysWithMedia(daysRaw, imageMap, mediaMeta);
+    const tMedia = Date.now() - tMedia0;
 
-    // 将图片合并回行程数据
-    const days = this.mergeImagesIntoDays(daysRaw, imageMap);
-    console.log(`[PlanningService] 图片获取完成，行程就绪`);
+    // 缺图 POI 交给后台回填（TRAVEL_MEDIA_BACKFILL=off 时关闭自动抓取，
+    // 由管理员经 /travel/media/backfill 手动触发或后台上传），不阻塞本次请求
+    if (missing.length > 0 && PlanningService.AUTO_BACKFILL_ENABLED) {
+      this.backfillMediaBackground(missing, cacheEntry);
+    }
 
     // 8. 汇总价格
     const pricingSummary = this._summarizePricing(days, pricingCtx);
@@ -364,6 +451,11 @@ export class PlanningService {
       poiUpdatedAt: cacheEntry.createdAt,
       result,
     });
+
+    console.log(
+      `[PlanningService] 规划完成: ${destName} ${dayCount}天 | 解析+取数 ${tParsed}ms, 编排 ${tBuild}ms, 媒体装配 ${tMedia}ms, 总计 ${Date.now() - t0}ms` +
+      ` | 图片 ${imageMap.size} 个POI本地直读, 缺图 ${missing.length} 个转后台回填`,
+    );
 
     return result;
   }
@@ -2108,7 +2200,7 @@ export class PlanningService {
   ): { attractions: RawPOI[]; hotels: RawPOI[]; restaurants: RawPOI[] } {
     const score = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number => {
       const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
-      let s = poi.rating || 0;
+      let s = this.effectiveRating(poi, type); // 本地评论聚合分混合（媒体库优先）
       if (type === 'hotel') {
         if (prefs.seaside && /(海|滩|湾|beach|bay|coast|seaside|ocean)/i.test(hay)) s += 5;
         if (prefs.pool && /(泳池|游泳池|pool|swimming)/i.test(hay)) s += 4;
@@ -2172,9 +2264,9 @@ export class PlanningService {
 
   /**
    * 阶段1：快速构建行程数据（不获取图片，纯数据操作，<100ms完成）
-   * 图片在阶段2通过 batchFetchImages 并行获取后合并
+   * 图片/评论/视频在阶段2通过 collectMediaForDays 本地装配
    */
-  private buildDaysFast(
+  private async buildDaysFast(
     dayCount: number,
     startDate: string,
     attractions: RawPOI[],
@@ -2184,8 +2276,7 @@ export class PlanningService {
     preferences: TripPreferences,
     travelInfo: TravelInfo,
     pricingCtx: import('./pricing-service.js').PricingContext
-  ): { days: PlannedDay[]; pois: POISummary[] } {
-    const days: PlannedDay[] = [];
+  ): Promise<{ days: PlannedDay[]; pois: POISummary[] }> {
     const allPois: POISummary[] = [];
 
     const toSummary = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): POISummary => ({
@@ -2219,8 +2310,13 @@ export class PlanningService {
       });
     }
 
-    // 地理聚类分配景点
-    const clusteredDays = this.clusterAttractionsByGeo(attractions, dayCount, center, maxAttractionsPerDay);
+    // 起点优先用酒店（第一天入住后出发、其余天从酒店往返），无酒店退回目的地中心
+    const startPoint: Coordinates = hotels[0]
+      ? { latitude: hotels[0]!.latitude, longitude: hotels[0]!.longitude }
+      : center;
+
+    // 地理聚类分配景点（farthest-first 初始化 + 空簇回收 + 每天内 NN+2-opt 排序）
+    const clusteredDays = this.clusterAttractionsByGeo(attractions, dayCount, startPoint, maxAttractionsPerDay);
     const primaryHotel = hotels[0];
     // 餐厅去重：按名称去除重复
     const seenRestNames = new Set<string>();
@@ -2232,92 +2328,154 @@ export class PlanningService {
     const usedRestaurantIds = new Set<string>();
     const restaurantUsageCount = new Map<string, number>();
 
-    const formatTime = (min: number) =>
-      `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(Math.round(min % 60)).padStart(2, '0')}`;
-
+    /**
+     * 第一步：确定每天访问序列（酒店→上午景点→午餐→下午景点→晚餐）。
+     * 午/晚餐先按位置锚定（午餐靠上午最后景点、晚餐靠下午最后景点），时间后面统一排。
+     */
+    interface DaySequence {
+      date: string;
+      hotel?: RawPOI;
+      entries: Array<{ kind: 'attraction' | 'lunch' | 'dinner'; poi: RawPOI }>;
+    }
+    const sequences: DaySequence[] = [];
     for (let i = 0; i < dayCount; i++) {
       const date = new Date(new Date(startDate).getTime() + i * 86400000).toISOString().split('T')[0] ?? startDate;
-      const items: ItineraryItem[] = [];
-      let currentTimeMin = 9 * 60;
-      let lastPoint: { lat: number; lon: number } | null = null;
-
-      if (i === 0 && primaryHotel) {
-        items.push(this.convertToItemSync(primaryHotel, 'hotel', date, '08:00', preferences, travelInfo, pricingCtx));
-        lastPoint = { lat: primaryHotel.latitude, lon: primaryHotel.longitude };
-        currentTimeMin = 9 * 60;
-      } else if (primaryHotel) {
-        lastPoint = { lat: primaryHotel.latitude, lon: primaryHotel.longitude };
-      }
-
       const dayAttrs = clusteredDays[i] || [];
-      // 将当天景点分为上午/下午两批，午餐插入中间（顺路）
       const morningCount = Math.ceil(dayAttrs.length / 2);
       const morningAttrs = dayAttrs.slice(0, morningCount);
       const afternoonAttrs = dayAttrs.slice(morningCount);
 
-      // 上午景点
-      for (const attr of morningAttrs) {
-        let transportTime = 0;
-        if (lastPoint) {
-          transportTime = this.computeTransport(lastPoint.lat, lastPoint.lon, attr.latitude, attr.longitude).durationMin;
-        }
-        const visitMin = this.inferVisitDuration('attraction', preferences);
-        const startTimeStr = formatTime(currentTimeMin);
-        const item = this.convertToItemSync(attr, 'attraction', date, startTimeStr, preferences, travelInfo, pricingCtx);
-        if (lastPoint) item.transportFromPrev = this.computeTransport(lastPoint.lat, lastPoint.lon, attr.latitude, attr.longitude);
-        items.push(item);
-        lastPoint = { lat: attr.latitude, lon: attr.longitude };
-        currentTimeMin += visitMin + transportTime;
-      }
+      const entries: DaySequence['entries'] = [];
+      for (const attr of morningAttrs) entries.push({ kind: 'attraction', poi: attr });
 
-      // 午餐：选择靠近上午最后一个景点的餐厅（顺路用餐）
+      // 午餐：靠近上午最后一个景点（顺路用餐）
       if (dedupedRestaurants.length > 0 && dayAttrs.length > 0) {
-        const lunchRef = lastPoint ?? { lat: center.latitude, lon: center.longitude };
-        const lunchRest = this.pickRestaurantOnRoute(dedupedRestaurants, lunchRef.lat, lunchRef.lon, usedRestaurantIds, preferences, restaurantUsageCount);
-        if (lunchRest) {
-          usedRestaurantIds.add(lunchRest.id);
-          restaurantUsageCount.set(lunchRest.id, (restaurantUsageCount.get(lunchRest.id) || 0) + 1);
-          const lunchTime = Math.max(11 * 60, Math.min(13 * 60, currentTimeMin));
-          const lunchStr = formatTime(lunchTime);
-          const restItem = this.convertToItemSync(lunchRest, 'restaurant', date, lunchStr, preferences, travelInfo, pricingCtx);
-          if (lastPoint) restItem.transportFromPrev = this.computeTransport(lastPoint.lat, lastPoint.lon, lunchRest.latitude, lunchRest.longitude);
-          items.push(restItem);
-          lastPoint = { lat: lunchRest.latitude, lon: lunchRest.longitude };
-          currentTimeMin = lunchTime + 75;
+        const lunchRef = morningAttrs.length > 0
+          ? morningAttrs[morningAttrs.length - 1]!
+          : primaryHotel ?? null;
+        if (lunchRef) {
+          const lunchRest = this.pickRestaurantOnRoute(dedupedRestaurants, lunchRef.latitude, lunchRef.longitude, usedRestaurantIds, preferences, restaurantUsageCount);
+          if (lunchRest) {
+            usedRestaurantIds.add(lunchRest.id);
+            restaurantUsageCount.set(lunchRest.id, (restaurantUsageCount.get(lunchRest.id) || 0) + 1);
+            entries.push({ kind: 'lunch', poi: lunchRest });
+          }
         }
       }
 
-      // 下午景点
-      for (const attr of afternoonAttrs) {
-        let transportTime = 0;
-        if (lastPoint) {
-          transportTime = this.computeTransport(lastPoint.lat, lastPoint.lon, attr.latitude, attr.longitude).durationMin;
-        }
-        const visitMin = this.inferVisitDuration('attraction', preferences);
-        const startTimeStr = formatTime(currentTimeMin);
-        const item = this.convertToItemSync(attr, 'attraction', date, startTimeStr, preferences, travelInfo, pricingCtx);
-        if (lastPoint) item.transportFromPrev = this.computeTransport(lastPoint.lat, lastPoint.lon, attr.latitude, attr.longitude);
-        items.push(item);
-        lastPoint = { lat: attr.latitude, lon: attr.longitude };
-        currentTimeMin += visitMin + transportTime;
-      }
+      for (const attr of afternoonAttrs) entries.push({ kind: 'attraction', poi: attr });
 
-      // 晚餐：选择靠近当天最后一个景点的餐厅（顺路用餐）
+      // 晚餐：靠近下午最后一个景点（顺路用餐）
       if (dedupedRestaurants.length > 0) {
-        const dinnerRef = lastPoint ?? { lat: center.latitude, lon: center.longitude };
-        const dinnerRest = this.pickRestaurantOnRoute(dedupedRestaurants, dinnerRef.lat, dinnerRef.lon, usedRestaurantIds, preferences, restaurantUsageCount);
-        if (dinnerRest) {
-          usedRestaurantIds.add(dinnerRest.id);
-          restaurantUsageCount.set(dinnerRest.id, (restaurantUsageCount.get(dinnerRest.id) || 0) + 1);
-          const dinnerTime = Math.max(17.5 * 60, currentTimeMin + 30);
-          const dinnerStr = formatTime(dinnerTime);
-          const restItem = this.convertToItemSync(dinnerRest, 'restaurant', date, dinnerStr, preferences, travelInfo, pricingCtx);
-          if (lastPoint) restItem.transportFromPrev = this.computeTransport(lastPoint.lat, lastPoint.lon, dinnerRest.latitude, dinnerRest.longitude);
-          items.push(restItem);
+        const dinnerRef = afternoonAttrs.length > 0
+          ? afternoonAttrs[afternoonAttrs.length - 1]!
+          : (entries.length > 0 ? entries[entries.length - 1]!.poi : primaryHotel ?? null);
+        if (dinnerRef) {
+          const dinnerRest = this.pickRestaurantOnRoute(dedupedRestaurants, dinnerRef.latitude, dinnerRef.longitude, usedRestaurantIds, preferences, restaurantUsageCount);
+          if (dinnerRest) {
+            usedRestaurantIds.add(dinnerRest.id);
+            restaurantUsageCount.set(dinnerRest.id, (restaurantUsageCount.get(dinnerRest.id) || 0) + 1);
+            entries.push({ kind: 'dinner', poi: dinnerRest });
+          }
         }
       }
 
-      days.push({ date, items });
+      sequences.push({ date, hotel: primaryHotel, entries });
+    }
+
+    /**
+     * 第二步：并行计算所有交通腿（OSRM 真实路网优先 + 缓存，失败降级 haversine）。
+     * 先收集全部腿再一次并发发出，总耗时 ≈ 单次最慢请求（外网不可用时也只有一轮超时）。
+     */
+    const legMap = new Map<string, TransportLeg>();
+    const pendingLegs: Array<{ key: string; fromLat: number; fromLon: number; toLat: number; toLon: number }> = [];
+    sequences.forEach((seq, dayIdx) => {
+      let prev: { lat: number; lon: number } | null = seq.hotel
+        ? { lat: seq.hotel.latitude, lon: seq.hotel.longitude }
+        : null;
+      seq.entries.forEach((entry, e) => {
+        if (prev) {
+          pendingLegs.push({
+            key: `${dayIdx}:${e}`,
+            fromLat: prev.lat, fromLon: prev.lon,
+            toLat: entry.poi.latitude, toLon: entry.poi.longitude,
+          });
+        }
+        prev = { lat: entry.poi.latitude, lon: entry.poi.longitude };
+      });
+    });
+    await Promise.all(pendingLegs.map(async (leg) => {
+      legMap.set(leg.key, await this.transportLeg(leg.fromLat, leg.fromLon, leg.toLat, leg.toLon));
+    }));
+
+    const formatTime = (min: number) =>
+      `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(Math.round(min % 60)).padStart(2, '0')}`;
+
+    /**
+     * 第三步：排时间。景点受当天预算约束（超出 DAY_END_MIN 的景点顺延丢弃，
+     * 时钟不再绕回次日）；午/晚餐固定时段锚定。
+     */
+    const days: PlannedDay[] = [];
+    for (let i = 0; i < dayCount; i++) {
+      const seq = sequences[i]!;
+      const items: ItineraryItem[] = [];
+      let currentTimeMin = 9 * 60;
+      let lastPoint: { lat: number; lon: number } | null = seq.hotel
+        ? { lat: seq.hotel.latitude, lon: seq.hotel.longitude }
+        : null;
+
+      if (i === 0 && seq.hotel) {
+        items.push(this.convertToItemSync(seq.hotel, 'hotel', seq.date, '08:00', preferences, travelInfo, pricingCtx));
+        currentTimeMin = 9 * 60;
+      }
+
+      let dayFull = false;        // 当天预算已满：剩余景点丢弃，餐食保留
+      let legsFallback = false;   // 丢弃景点后预计算腿的起点失效 → 改用 haversine 同步估算
+      for (let e = 0; e < seq.entries.length; e++) {
+        const entry = seq.entries[e]!;
+
+        const legFor = (): TransportLeg | undefined => {
+          if (!lastPoint) return undefined;
+          if (legsFallback) return this.computeTransport(lastPoint.lat, lastPoint.lon, entry.poi.latitude, entry.poi.longitude);
+          return legMap.get(`${i}:${e}`);
+        };
+
+        if (entry.kind === 'attraction') {
+          if (dayFull) continue;
+          const leg = legFor();
+          const transportMin = lastPoint ? (leg?.durationMin ?? 0) : 0;
+          const visitMin = this.inferVisitDuration('attraction', preferences);
+          // 当天预算：装不下就丢掉该景点（之后所有景点同样丢弃），晚餐仍保留
+          if (lastPoint && currentTimeMin + transportMin + visitMin > PlanningService.DAY_END_MIN) {
+            dayFull = true;
+            legsFallback = true;
+            continue;
+          }
+          const item = this.convertToItemSync(entry.poi, 'attraction', seq.date, formatTime(currentTimeMin), preferences, travelInfo, pricingCtx);
+          if (leg) item.transportFromPrev = leg;
+          items.push(item);
+          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
+          currentTimeMin += transportMin + visitMin;
+        } else if (entry.kind === 'lunch') {
+          const lunchTime = Math.max(11 * 60, Math.min(13 * 60, currentTimeMin));
+          const item = this.convertToItemSync(entry.poi, 'restaurant', seq.date, formatTime(lunchTime), preferences, travelInfo, pricingCtx);
+          const leg = legFor();
+          if (leg) item.transportFromPrev = leg;
+          items.push(item);
+          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
+          currentTimeMin = lunchTime + 75;
+        } else {
+          const dinnerTime = Math.max(17.5 * 60, currentTimeMin + 30);
+          const item = this.convertToItemSync(entry.poi, 'restaurant', seq.date, formatTime(dinnerTime), preferences, travelInfo, pricingCtx);
+          const leg = legFor();
+          if (leg) item.transportFromPrev = leg;
+          items.push(item);
+          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
+          currentTimeMin = dinnerTime + 75;
+        }
+      }
+
+      days.push({ date: seq.date, items });
     }
 
     return { days, pois: allPois };
@@ -2354,7 +2512,9 @@ export class PlanningService {
     for (const r of candidates) {
       const dist = this.haversineKm(refLat, refLon, r.latitude, r.longitude);
       const distScore = Math.max(0, 100 - dist * 1.5);
-      const ratingScore = (r.rating || 4.0) * 5;
+      // 评分采用本地评论聚合分混合（无本地评论时退回默认 4.0 口径）
+      const blended = this.effectiveRating(r, 'restaurant');
+      const ratingScore = (blended > 0 ? blended : 4.0) * 5;
       let prefScore = 0;
       const hay = `${r.name} ${(r.tags || []).join(' ')}`.toLowerCase();
       if (prefs.cuisine) {
@@ -2376,25 +2536,27 @@ export class PlanningService {
   }
 
   /**
-   * 阶段2：并行批量获取所有POI的真实图片
+   * 阶段2（请求路径内）：媒体装配 —— 纯本地读，不发任何网络请求。
    *
-   * 优化点：
-   * - 所有POI的图片请求同时发出（Promise.allSettled），而非串行等待
-   * - 单个请求超时缩短到4秒，失败立即跳过
-   * - 总耗时 ≈ max(单个请求时间) 而非 N × 单个请求时间
+   * 取图优先级：媒体库本地上传/精选图 > POI 缓存中已落盘的回填图（wikimedia）。
+   * 两级都未命中的 POI 进入 missing 列表，交由 backfillMediaBackground 离线回填。
+   * 同时从媒体库带出评论（最新3条）与视频（≤5条）供行程卡片直读。
    */
-  private async batchFetchImages(
+  private collectMediaForDays(
     days: PlannedDay[],
     entry: CacheEntry | null,
-  ): Promise<Map<string, string[]>> {
-    // 收集所有需要获取图片的唯一POI（含坐标，去重）
+  ): {
+    imageMap: Map<string, string[]>;
+    mediaMeta: Map<string, PoiMediaMeta>;
+    missing: Array<{ poiId?: string; type: ItineraryItem['type']; name: string; latitude: number; longitude: number }>;
+  } {
+    // 收集所有唯一 POI（含坐标，去重）
     const poiSet = new Map<string, {
       poiId?: string;
       type: ItineraryItem['type'];
       name: string;
       lat: number;
       lon: number;
-      city: string;
     }>();
     for (const day of days) {
       for (const item of day.items) {
@@ -2406,46 +2568,120 @@ export class PlanningService {
             name: item.name,
             lat: item.latitude,
             lon: item.longitude,
-            // 城市提示（取名称前2字）
-            city: (item.name || '').slice(0, 2),
           });
         }
       }
     }
 
     const imageMap = new Map<string, string[]>();
-    const fetchQueue: Array<[string, NonNullable<ReturnType<typeof poiSet.get>>]> = [];
+    const mediaMeta = new Map<string, PoiMediaMeta>();
+    const missing: Array<{ poiId?: string; type: ItineraryItem['type']; name: string; latitude: number; longitude: number }> = [];
 
-    // === 1. 优先复用 POI 缓存中已落盘的图片（同一目的地二次规划免抓图）===
     for (const [key, info] of poiSet) {
-      const cached = this.findCachedPOIImages(entry, info.type, info.poiId);
-      if (cached.length > 0) {
-        imageMap.set(key, cached);
+      // 1. 媒体库：本地上传/精选优先，其次历史回填图
+      let images = travelMediaStore.imageUrls(info.type, info.name, 'user');
+      if (images.length === 0) images = travelMediaStore.imageUrls(info.type, info.name, 'wikimedia');
+      // 2. POI 缓存中已落盘的回填图（旧数据兜底）
+      if (images.length === 0 && info.poiId) {
+        images = this.findCachedPOIImages(entry, info.type, info.poiId);
+      }
+
+      // 评论/视频元数据（有才挂）
+      const agg = travelMediaStore.aggregate(info.type, info.name);
+      if (agg && (agg.reviewCount > 0 || agg.videoCount > 0)) {
+        const mediaEntry = travelMediaStore.get(info.type, info.name);
+        mediaMeta.set(key, {
+          reviewCount: agg.reviewCount,
+          reviews: (mediaEntry?.reviews ?? [])
+            .slice()
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+            .slice(0, 3)
+            .map((r) => ({ author: r.author, rating: r.rating, text: r.text, createdAt: r.createdAt })),
+          videos: (mediaEntry?.videos ?? []).slice(0, 5).map((v) => ({
+            platform: v.platform,
+            title: v.title,
+            author: v.author,
+            durationSeconds: v.durationSeconds,
+            thumbnailUrl: v.thumbnailUrl,
+            playPageUrl: v.playPageUrl,
+          })),
+        });
+      }
+
+      if (images.length > 0) {
+        imageMap.set(key, images);
       } else {
-        fetchQueue.push([key, info]);
+        missing.push({
+          poiId: info.poiId,
+          type: info.type,
+          name: info.name,
+          latitude: info.lat,
+          longitude: info.lon,
+        });
       }
     }
 
-    if (fetchQueue.length > 0) {
-      console.log(
-        `[PlanningService] 图片获取: 命中缓存 ${imageMap.size} 个，抓取 ${fetchQueue.length} 个（并发限制 + 失败重试）`,
-      );
+    console.log(`[PlanningService] 媒体装配(本地直读): ${imageMap.size}/${poiSet.size} 个POI有图, ${mediaMeta.size} 个POI带评论/视频`);
+    return { imageMap, mediaMeta, missing };
+  }
 
-      // === 2. 并发受限抓取（默认 6，避免一次性几十个请求触发图片源限流）+ 失败退避重试 ===
-      const CONCURRENCY = 6;
+  /** 自动回填开关：TRAVEL_MEDIA_BACKFILL=off 时只走管理员手动触发/本地上传 */
+  private static readonly AUTO_BACKFILL_ENABLED =
+    (process.env.TRAVEL_MEDIA_BACKFILL ?? 'on').toLowerCase() !== 'off';
+
+  /**
+   * 管理端手动回填：对单个 POI 抓一次 Wikimedia 图片并写入媒体库。
+   * 供 /travel/media/backfill 接口调用（自动回填关闭时的替代路径）。
+   */
+  async backfillMediaForPoi(
+    name: string,
+    type: ItineraryItem['type'],
+    latitude?: number,
+    longitude?: number,
+  ): Promise<string[]> {
+    const images = await this.fetchSingleWithRetry(name, type, latitude, longitude);
+    if (images.length > 0 && latitude !== undefined && longitude !== undefined) {
+      travelMediaStore.attachBackfilledImages(type, name, images, { latitude, longitude });
+    } else if (images.length > 0) {
+      travelMediaStore.attachBackfilledImages(type, name, images);
+    }
+    return images;
+  }
+
+  /**
+   * 阶段2.5（后台，不阻塞请求）：缺图 POI 的离线回填。
+   * Wikimedia 抓取（复用原有校验链）成功后同时写入媒体库与 POI 缓存，
+   * 下次规划请求路径内直接命中。同目的地同时只跑一轮（并发 3）。
+   */
+  private backfillInFlight = new Set<string>();
+  private backfillMediaBackground(
+    missing: Array<{ poiId?: string; type: ItineraryItem['type']; name: string; latitude: number; longitude: number }>,
+    entry: CacheEntry | null,
+  ): void {
+    const tag = entry?.destination ?? 'unknown';
+    if (this.backfillInFlight.has(tag)) {
+      console.log(`[PlanningService] 后台媒体回填进行中，跳过本次: ${tag}`);
+      return;
+    }
+    this.backfillInFlight.add(tag);
+    console.log(`[PlanningService] 后台媒体回填启动: ${tag}，${missing.length} 个POI（不阻塞当前请求）`);
+
+    void (async () => {
+      const CONCURRENCY = 3;
       let cursor = 0;
       const worker = async (): Promise<void> => {
         while (true) {
           const idx = cursor++;
-          if (idx >= fetchQueue.length) return;
-          const pair = fetchQueue[idx];
-          if (!pair) return;
-          const [key, info] = pair;
+          if (idx >= missing.length) return;
+          const info = missing[idx]!;
           try {
-            const images = await this.fetchSingleWithRetry(info.name, info.type, info.lat, info.lon);
+            const images = await this.fetchSingleWithRetry(info.name, info.type, info.latitude, info.longitude);
             if (images.length > 0) {
-              imageMap.set(key, images);
-              // 写回 POI 缓存并持久化：图片是 POI 稳定属性，后续规划直接复用
+              travelMediaStore.attachBackfilledImages(info.type, info.name, images, {
+                latitude: info.latitude,
+                longitude: info.longitude,
+              });
+              // 同步写回 POI 缓存（请求路径内的旧数据兜底层）
               if (entry && info.poiId) {
                 poiCache.updatePOIImages(entry.destination, info.type, info.poiId, images);
               }
@@ -2453,17 +2689,14 @@ export class PlanningService {
           } catch { /* 单点失败不影响整体 */ }
         }
       };
-      await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, fetchQueue.length) }, () => worker()),
-      );
-    }
-
-    console.log(`[PlanningService] 图片获取完成: ${imageMap.size}/${poiSet.size} 个POI有真实图片`);
-    return imageMap;
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, missing.length) }, () => worker()));
+      console.log(`[PlanningService] 后台媒体回填完成: ${tag}`);
+    })().finally(() => this.backfillInFlight.delete(tag));
   }
 
   /**
    * 单 POI 图片抓取：失败自动重试 1 次（300ms 起指数退避）
+   * 仅由后台回填调用，不再出现在请求路径上。
    */
   private async fetchSingleWithRetry(
     poiName: string,
@@ -2504,25 +2737,34 @@ export class PlanningService {
   }
 
   /**
-   * 将并行获取到的图片合并回行程数据
+   * 将本地媒体装配回行程数据：图片 + 评论（最新3条）+ 视频 + 评论数
    */
-  private mergeImagesIntoDays(daysRaw: PlannedDay[], imageMap: Map<string, string[]>): PlannedDay[] {
+  private enrichDaysWithMedia(
+    daysRaw: PlannedDay[],
+    imageMap: Map<string, string[]>,
+    mediaMeta: Map<string, PoiMediaMeta>,
+  ): PlannedDay[] {
     return daysRaw.map(day => ({
       ...day,
       items: day.items.map(item => {
         const key = `${item.type}-${item.itemId}`;
         const images = imageMap.get(key);
-        if (images && images.length > 0) {
-          return { ...item, images };
-        }
-        return item; // 无图片则保持空数组
+        const meta = mediaMeta.get(key);
+        if ((!images || images.length === 0) && !meta) return item;
+        return {
+          ...item,
+          images: images && images.length > 0 ? images : item.images,
+          reviewCount: meta ? meta.reviewCount : item.reviewCount,
+          reviews: meta && meta.reviews.length > 0 ? meta.reviews : item.reviews,
+          videos: meta && meta.videos.length > 0 ? meta.videos : item.videos,
+        };
       }),
     }));
   }
 
   /**
-   * 同步版本 convertToItem（不含图片获取，用于阶段1快速构建）
-   * 图片在阶段2通过 batchFetchImages 并行获取后合并
+   * 同步版本 convertToItem（纯数据构建）
+   * 图片/评论/视频在阶段2通过 collectMediaForDays 本地装配
    */
   private convertToItemSync(
     poi: RawPOI,
@@ -2627,7 +2869,7 @@ export class PlanningService {
   private clusterAttractionsByGeo(
     attractions: RawPOI[],
     dayCount: number,
-    center: Coordinates,
+    startPoint: Coordinates,
     maxPerDay: number
   ): RawPOI[][] {
     // 去重：按名称（忽略大小写/空格）去除重复景点
@@ -2646,28 +2888,41 @@ export class PlanningService {
 
     const result: RawPOI[][] = Array.from({ length: dayCount }, () => []);
 
-    // 如果景点少于天数，直接按距离分配
+    // 如果景点少于天数：按距起点远近顺序逐日分配（避免全堆在第一天）
     if (attractions.length <= dayCount) {
-      attractions.forEach((attr, idx) => {
+      const sorted = [...attractions].sort((a, b) =>
+        this.haversineKm(startPoint.latitude, startPoint.longitude, a.latitude, a.longitude) -
+        this.haversineKm(startPoint.latitude, startPoint.longitude, b.latitude, b.longitude));
+      sorted.forEach((attr, idx) => {
         result[idx % dayCount]?.push(attr);
       });
+      this.reorderDays(result, dayCount, startPoint, maxPerDay);
       return result;
     }
 
-    // ===== Step 1: K-means 初始化聚类中心 =====
-    // 使用均匀分布的初始中心（基于景点范围）
-    const lats = attractions.map(a => a.latitude);
-    const lons = attractions.map(a => a.longitude);
-    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-    const minLon = Math.min(...lons), maxLon = Math.max(...lons);
-
-    // 初始化聚类中心（均匀分布在景点范围内）
-    let centroids: Array<{ lat: number; lon: number }> = [];
-    for (let i = 0; i < dayCount; i++) {
-      centroids.push({
-        lat: minLat + (maxLat - minLat) * ((i + 0.5) / dayCount),
-        lon: minLon + (maxLon - minLon) * ((i % 3 + 0.5) / 3),
-      });
+    // ===== Step 1: farthest-first 初始化聚类中心（确定性与散布性兼顾）=====
+    // 首个中心取距起点最近的景点；其后每轮选「距已有中心最小距离最大」的点，
+    // 避免旧网格初始化（经度只按 i%3 摆 3 列）在天数>3 时中心重叠、聚出空簇。
+    const centroids: Array<{ lat: number; lon: number }> = [];
+    {
+      const first = attractions.reduce((best, a) => {
+        const d = this.haversineKm(startPoint.latitude, startPoint.longitude, a.latitude, a.longitude);
+        const bd = this.haversineKm(startPoint.latitude, startPoint.longitude, best.latitude, best.longitude);
+        return d < bd ? a : best;
+      }, attractions[0]!);
+      centroids.push({ lat: first.latitude, lon: first.longitude });
+      while (centroids.length < dayCount) {
+        let far = attractions[0]!;
+        let farDist = -1;
+        for (const a of attractions) {
+          const minD = Math.min(...centroids.map(c => this.haversineKm(a.latitude, a.longitude, c.lat, c.lon)));
+          if (minD > farDist) {
+            farDist = minD;
+            far = a;
+          }
+        }
+        centroids.push({ lat: far.latitude, lon: far.longitude });
+      }
     }
 
     // ===== Step 2: K-means 迭代（最多10轮）=====
@@ -2713,39 +2968,35 @@ export class PlanningService {
       result[cluster]?.push(attractions[i]!);
     }
 
-    // ===== Step 4: 每天内按最近邻算法优化顺序 =====
-    for (let d = 0; d < dayCount; d++) {
-      const dayPois = result[d]!;
-      if (dayPois.length <= 1) continue;
-
-      // 从中心点出发的最近邻排序
-      const ordered: RawPOI[] = [];
-      const visited = new Set<number>();
-      let currentLat = center.latitude;
-      let currentLon = center.longitude;
-
-      for (let count = 0; count < dayPois.length; count++) {
-        let bestIdx = -1;
-        let bestDist = Infinity;
-        for (let j = 0; j < dayPois.length; j++) {
-          if (visited.has(j)) continue;
-          const dist = this.haversineKm(currentLat, currentLon, dayPois[j]!.latitude, dayPois[j]!.longitude);
-          if (dist < bestDist) {
-            bestDist = dist;
-            bestIdx = j;
-          }
-        }
-        if (bestIdx >= 0) {
-          visited.add(bestIdx);
-          const chosen = dayPois[bestIdx]!;
-          ordered.push(chosen);
-          currentLat = chosen.latitude;
-          currentLon = chosen.longitude;
+    // ===== Step 3.5: 空簇回收：从最大簇借走离空簇中心最近的点 =====
+    for (let c = 0; c < dayCount; c++) {
+      if ((result[c]?.length ?? 0) > 0) continue;
+      let biggest = -1;
+      let biggestLen = 1;
+      for (let d = 0; d < dayCount; d++) {
+        if ((result[d]?.length ?? 0) > biggestLen) {
+          biggestLen = result[d]!.length;
+          biggest = d;
         }
       }
-
-      result[d] = ordered.slice(0, maxPerDay); // 限制每天最大数量
+      if (biggest < 0) break;
+      let stealIdx = -1;
+      let stealDist = Infinity;
+      for (let j = 0; j < result[biggest]!.length; j++) {
+        const p = result[biggest]![j]!;
+        const d = this.haversineKm(p.latitude, p.longitude, centroids[c]!.lat, centroids[c]!.lon);
+        if (d < stealDist) {
+          stealDist = d;
+          stealIdx = j;
+        }
+      }
+      if (stealIdx >= 0) {
+        result[c]!.push(result[biggest]!.splice(stealIdx, 1)[0]!);
+      }
     }
+
+    // ===== Step 4: 每天内按最近邻 + 2-opt 优化顺序 =====
+    this.reorderDays(result, dayCount, startPoint, maxPerDay);
 
     // 处理未被分配的景点（被 maxPerDay 截断的，重新分配到有空位的日期）
     // 用 ID 集合追踪已分配的景点，避免重复添加
@@ -2756,6 +3007,7 @@ export class PlanningService {
       }
     }
     const unassigned = attractions.filter(a => !assignedIds.has(a.id));
+    const touchedDays = new Set<number>();
     unassigned.forEach((attr) => {
       // 找有空位且距离该景点最近的日期加入
       let bestDay = -1;
@@ -2776,11 +3028,88 @@ export class PlanningService {
       }
       if (bestDay >= 0) {
         result[bestDay]!.push(attr);
+        touchedDays.add(bestDay);
       }
     });
 
+    // 补位后受影响的天重跑排序（否则补进去的点会破坏最优邻接序）
+    if (touchedDays.size > 0) {
+      this.reorderDays(result, dayCount, startPoint, maxPerDay);
+    }
+
     console.log(`[PlanningService] 地理聚类完成: ${result.map((d, i) => `Day${i+1}:${d.length}个景点`).join(', ')}`);
     return result;
+  }
+
+  /**
+   * 每天内排序：从起点最近邻出发，再做 2-opt 改进（开放式路径，消除交叉），
+   * 最后截断到 maxPerDay。天数少、点少，2-opt 全量扫描代价可忽略。
+   */
+  private reorderDays(
+    result: RawPOI[][],
+    dayCount: number,
+    startPoint: Coordinates,
+    maxPerDay: number,
+  ): void {
+    const pathLen = (arr: RawPOI[]): number => {
+      let s = 0;
+      let prev: Coordinates = startPoint;
+      for (const p of arr) {
+        s += this.haversineKm(prev.latitude, prev.longitude, p.latitude, p.longitude);
+        prev = { latitude: p.latitude, longitude: p.longitude };
+      }
+      return s;
+    };
+
+    for (let d = 0; d < dayCount; d++) {
+      const dayPois = result[d]!;
+      if (dayPois.length <= 1) continue;
+
+      // 最近邻：从起点出发
+      const ordered: RawPOI[] = [];
+      const visited = new Set<number>();
+      let current: Coordinates = startPoint;
+      for (let count = 0; count < dayPois.length; count++) {
+        let bestIdx = -1;
+        let bestDist = Infinity;
+        for (let j = 0; j < dayPois.length; j++) {
+          if (visited.has(j)) continue;
+          const dist = this.haversineKm(current.latitude, current.longitude, dayPois[j]!.latitude, dayPois[j]!.longitude);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = j;
+          }
+        }
+        if (bestIdx >= 0) {
+          visited.add(bestIdx);
+          const chosen = dayPois[bestIdx]!;
+          ordered.push(chosen);
+          current = { latitude: chosen.latitude, longitude: chosen.longitude };
+        }
+      }
+
+      // 2-opt 改进：若反转某段能缩短路径则采纳（有守卫上限，防极端退化）
+      let improved = true;
+      let guard = 0;
+      while (improved && guard++ < 20) {
+        improved = false;
+        const base = pathLen(ordered);
+        for (let i = 0; i < ordered.length - 1; i++) {
+          for (let k = i + 1; k < ordered.length; k++) {
+            const cand = [...ordered.slice(0, i), ...ordered.slice(i, k + 1).reverse(), ...ordered.slice(k + 1)];
+            if (pathLen(cand) < base - 1e-9) {
+              ordered.length = 0;
+              ordered.push(...cand);
+              improved = true;
+              break;
+            }
+          }
+          if (improved) break;
+        }
+      }
+
+      result[d] = ordered.slice(0, maxPerDay); // 限制每天最大数量
+    }
   }
 
   /**
