@@ -90,7 +90,7 @@ import type {
   VisionFrame,
 } from "../external-model/types.js";
 import { isApologyStyleFallback, FALLBACK_TEXT_BACKGROUND_FAILED } from "../external-model/fallback-texts.js";
-import { describeMemoryAge } from "./memory-record-utils.js";
+import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
 
 /** 记忆 domain → 注入 prompt 时的中文类型标签（分类显性化，P4）。 */
 const MEMORY_DOMAIN_LABELS: Record<string, string> = {
@@ -716,6 +716,8 @@ export class AgentCore {
     let cognitiveNeedsToolLoop = true;
     /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
+    /** cognize 阶段 0.93 的 recall-gate 判定（门控单点化）；cognize 未运行时为 null，降级本地评估 */
+    let cognizeRecallGate: { trigger: boolean; reason: string } | null = null;
     /** 工作记忆摘要（注入 streamCompletion 的 prompt） */
     let cognitiveWorkingMemorySummary = "";
     /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
@@ -748,12 +750,17 @@ export class AgentCore {
       const shouldGoComplex = fastRoute.mode === "complex";
 
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
+      // 模糊指代/短追问判定提前：cognize 的 recall-gate 需要（anaphora_escalation 输入），
+      // 门控单点化后 cognize 是白名单唯一评估点，输入必须完整。
+      const ambiguousFollowUp = isAmbiguousFollowUpMessage(text);
       try {
         brainCognition = await this.brainCenter.cognize({
           actorId,
           text,
           sessionId,
+          ambiguousFollowUp,
         });
+        cognizeRecallGate = brainCognition?.recallGate ?? null;
       } catch (err) {
         console.log(
           `[AgentCore] BrainCenter.cognize 失败，降级使用轻量记忆路径：${
@@ -951,14 +958,18 @@ export class AgentCore {
     // 抑制长期记忆召回，避免把旧话题/跨会话记忆注入当前新话题（串台根治）。
     // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
     //
-    // 召回门控（记忆架构重构）：长期记忆检索从「每轮默认」改为「白名单触发」
+    // 召回门控（记忆架构重构 + 门控单点化）：长期记忆检索从「每轮默认」改为「白名单触发」
     // （显式记忆线索 / 新会话开场 / 个人事实陈述 / 长会话指代消解失败升级）。
+    // cognize 阶段 0.93 已用完整输入（含 ambiguousFollowUp）评估过白名单，直接复用其判定；
+    // cognize 未运行（降级/后台路径）时才本地评估——消除同一轮多处独立判 gate 的漂移空间。
     // 未触发时跳过长期检索，当天的问题由当日 journal 词法检索覆盖。
-    const recallGate = shouldRecallLongTerm({
-      text,
-      threadMessageCount,
-      ambiguousFollowUp: isAmbiguousFollowUpMessage(text),
-    });
+    const recallGate =
+      cognizeRecallGate ??
+      shouldRecallLongTerm({
+        text,
+        threadMessageCount,
+        ambiguousFollowUp: isAmbiguousFollowUpMessage(text),
+      });
     // 向量预筛（P0-4）：白名单未命中时对用户原文做一次廉价向量检索（无 LLM），
     // top1 分数 ≥ 阈值即视为当前话题与既有长期记忆强相关，放行注入——
     // 补纯 regex 白名单的漏召（agent 明明记得却"忘了你"）。
@@ -1067,6 +1078,7 @@ export class AgentCore {
       journalRecallBlock,
       suppressNarrativeRecall,
       semanticRecallHit,
+      recallGate.trigger,
     );
 
     try {
@@ -1444,13 +1456,37 @@ if (this.isComplexMode(route.mode)) {
 
     // 跨会话开放环路（记忆连续性 Phase 2）：新会话开场（thread 较短）时，
     // 并入上一会话未完成的待办与承诺，让连续性跨会话延续（解决"换会话跳转"）。
+    // 注入去重（记忆架构收敛）：新会话开场必触发 recall gate，KV 长期槽
+    // memory_open_loops/memory_commitments 同轮也会注入待办/承诺行——
+    // 同一事项会出现在两个块里。按语义指纹过滤，KV 已有的不再经 epitome 重复注入。
     if (actorId && this.brainCenter?.getSessionEpitome) {
       try {
         const epitome = this.brainCenter.getSessionEpitome(actorId);
         if (epitome) {
+          const kvFingerprints = new Set<string>();
+          try {
+            const { entries } =
+              this.agentMemorySyncService?.getSnapshot(actorId, [
+                "memory_open_loops",
+                "memory_commitments",
+              ]) ?? { entries: {} as Record<string, unknown> };
+            for (const raw of [entries.memory_open_loops, entries.memory_commitments]) {
+              if (typeof raw !== "string") continue;
+              for (const line of raw.split("\n")) {
+                const fp = semanticFingerprint(line);
+                if (fp) kvFingerprints.add(fp);
+              }
+            }
+          } catch {
+            /* KV 读取失败时跳过去重，保持原注入行为 */
+          }
+          const isDuplicate = (line: string): boolean => {
+            const fp = semanticFingerprint(line);
+            return fp !== "" && kvFingerprints.has(fp);
+          };
           const lines: string[] = [
-            ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`),
-            ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`),
+            ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`).filter((l) => !isDuplicate(l)),
+            ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`).filter((l) => !isDuplicate(l)),
           ];
           if (lines.length > 0) {
             block +=
@@ -1509,6 +1545,8 @@ if (this.isComplexMode(route.mode)) {
     longTermRecallSuppressed: boolean,
     /** 向量预筛命中：regex 白名单未触发但向量检索判定强相关（供 KV 长期字段同门放行） */
     semanticRecallHit: boolean,
+    /** recall-gate 白名单判定结果（门控单点化）：cognize 评估后透传，prompt 装配层免重算 */
+    recallGateTriggered: boolean,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
     const onBatchWithEvolution =
@@ -1541,6 +1579,7 @@ if (this.isComplexMode(route.mode)) {
       // 与图谱（narrativeRecall）走同一白名单，话题切换时全部抑制（串台根治）。
       longTermRecallSuppressed,
       semanticRecallHit,
+      recallGateTriggered,
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
@@ -1863,6 +1902,7 @@ if (this.isComplexMode(route.mode)) {
             // #1 统一门控单点：KV 长期字段与图谱走同一 gate
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
+            recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
@@ -1898,6 +1938,7 @@ if (this.isComplexMode(route.mode)) {
             // #1 统一门控单点：KV 长期字段与图谱走同一 gate
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
+            recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
           toolExposureProfile,
           toolRankingHint,

@@ -1354,7 +1354,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "agent.proactive_message") {
           final String title = payload["title"]?.toString() ?? "Agent 主动联系";
           final String text = payload["text"]?.toString() ?? "";
-          if (mounted) {
+          // 统一主动性管道：高重要度主动消息走原生弹窗触达（与日程提醒同级），
+          // 确认/关闭/超时经 _handleDesktopNotification* 回传 outcome 反馈
+          final String importance = payload["importance"]?.toString() ?? "";
+          final String deliveryId = payload["deliveryId"]?.toString() ?? "";
+          final bool important = importance == "high" || importance == "critical";
+          if (mounted &&
+              important &&
+              deliveryId.isNotEmpty &&
+              !DesktopNotificationLauncher.isVisible.value) {
+            unawaited(_showProactiveNativeNotification(title, text, deliveryId));
+          } else if (mounted) {
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
                 content: Text("$title\n$text"),
@@ -1759,8 +1769,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         .listScheduleEventsForDay(DateTime(now.year, now.month, now.day))
         .then(
           (List<ScheduleEvent> events) => events
-              // 节律提醒（喝水/睡觉等）只做到点推送，不进「今日安排」（日程页仍展示）
-              .where((ScheduleEvent e) => !e.isRhythm)
+              // 琐事提醒（喝水/睡觉等 trivia 分类）只做后台到点推送，不进「今日安排」（日程页仍展示）
+              .where((ScheduleEvent e) => !e.isTrivia)
               .toList(growable: false),
         );
   }
@@ -3102,6 +3112,48 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return hour >= 23 || hour < 8;
   }
 
+  // ====== 统一主动性管道：outcome 反馈回传 ======
+  // 待回传 outcome 的主动消息 deliveryId（原生弹窗生命周期内有效）
+  String? _pendingProactiveDeliveryId;
+
+  void _sendProactiveOutcome(String deliveryId, String outcome) {
+    unawaited(
+      http
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/proactivity/outcome"),
+            headers: const {"Content-Type": "application/json"},
+            body: jsonEncode(<String, String>{"deliveryId": deliveryId, "outcome": outcome}),
+          )
+          .then(
+            (_) {},
+            onError: (Object e) => debugPrint("[proactive] outcome post failed: $e"),
+          ),
+    );
+  }
+
+  /// 高重要度主动消息 → 原生弹窗（与日程提醒同级触达）；原生窗口不可用时回落 SnackBar
+  Future<void> _showProactiveNativeNotification(String title, String text, String deliveryId) async {
+    _pendingProactiveDeliveryId = deliveryId;
+    _desktopNotificationNeedsFeedback = false;
+    _desktopNotificationFeedbackChannel = "websocket";
+    final bool shown = await DesktopNotificationLauncher.show(
+      title: title,
+      message: text,
+      priority: "high",
+      showConfirmButton: true,
+      confirmText: "我知道了",
+      autoCloseMs: 45000,
+    );
+    if (!shown) {
+      _pendingProactiveDeliveryId = null;
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text("$title\n$text"), duration: const Duration(seconds: 8)),
+        );
+      }
+    }
+  }
+
   // ====== 桌面端独立来电悬浮窗回调 ======
 
   /// 原生悬浮窗点接听：
@@ -3240,6 +3292,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           _handleMorningBriefingEvent(pendingBriefing, forceDialog: true));
       return;
     }
+    if (_pendingProactiveDeliveryId != null) {
+      _sendProactiveOutcome(_pendingProactiveDeliveryId!, "accepted");
+      _pendingProactiveDeliveryId = null;
+    }
     if (_desktopNotificationNeedsFeedback) {
       _sendContactFeedback(
         channel: _desktopNotificationFeedbackChannel,
@@ -3252,11 +3308,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   void _handleDesktopNotificationDismiss() {
+    if (_pendingProactiveDeliveryId != null) {
+      _sendProactiveOutcome(_pendingProactiveDeliveryId!, "dismissed");
+      _pendingProactiveDeliveryId = null;
+    }
     _desktopNotificationNeedsFeedback = false;
     _pendingDesktopBriefingPayload = null;
   }
 
   void _handleDesktopNotificationTimeout() {
+    if (_pendingProactiveDeliveryId != null) {
+      _sendProactiveOutcome(_pendingProactiveDeliveryId!, "ignored");
+      _pendingProactiveDeliveryId = null;
+    }
     _desktopNotificationNeedsFeedback = false;
     _pendingDesktopBriefingPayload = null;
   }
@@ -3281,6 +3345,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     bool showConfirm,
     String confirmText,
   ) async {
+    // 提醒弹窗接管共享原生通知窗口：未决的主动消息 outcome 不再有效
+    _pendingProactiveDeliveryId = null;
     _desktopNotificationNeedsFeedback = showConfirm;
     _desktopNotificationFeedbackChannel = "websocket";
     final bool shown = await DesktopNotificationLauncher.show(

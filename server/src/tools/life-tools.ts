@@ -7,6 +7,7 @@ import type {
   ScheduleRecurrence,
   ScheduleTaskService,
 } from "../services/schedule-task-service.js";
+import { parseScheduleTaskCategory } from "../services/schedule-task-service.js";
 import { buildScheduleCreateInput, formatNextRunAtLocal } from "./calendar-tools.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import {
@@ -84,6 +85,7 @@ export function registerLifeTools(
           shortTitle,
           description: subject,
           kind: "reminder",
+          category: parseScheduleTaskCategory(input.category),
           runAt,
           recurrence,
           timezone: tz,
@@ -99,6 +101,7 @@ export function registerLifeTools(
           title: task.reminderMessage || task.title,
           shortTitle: task.shortTitle,
           kind: task.kind,
+          category: task.category,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
           recurrence: task.recurrence,
@@ -146,6 +149,7 @@ export function registerLifeTools(
         title: task.reminderMessage || task.title,
         shortTitle: task.shortTitle,
         kind: task.kind,
+        category: task.category,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         recurrence: task.recurrence,

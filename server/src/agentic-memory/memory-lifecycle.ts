@@ -105,51 +105,74 @@ export class AgenticMemoryLifecycleService {
       const allMemories = allResult.results ?? [];
       if (allMemories.length < 2) return 0;
 
-      const keep = new Set<string>();
-      const remove = new Set<string>();
-
-      for (let i = 0; i < allMemories.length; i++) {
-        const a = allMemories[i]!;
-        if (remove.has(a.id)) continue;
-
-        for (let j = i + 1; j < allMemories.length; j++) {
-          const b = allMemories[j]!;
-          if (remove.has(b.id) || keep.has(b.id)) continue;
-
-          const similarity = await this.computeJaccardSimilarity(a.memory, b.memory);
-          if (similarity >= threshold) {
-            const aIsHighSignal = a.metadata?.highSignal === true;
-            const bIsHighSignal = b.metadata?.highSignal === true;
-
-            const aAge = this.parseTimestamp(a.createdAt ?? a.updatedAt);
-            const bAge = this.parseTimestamp(b.createdAt ?? b.updatedAt);
-
-            if (aIsHighSignal && !bIsHighSignal) {
-              remove.add(b.id);
-            } else if (!aIsHighSignal && bIsHighSignal) {
-              remove.add(a.id);
-            } else if (aAge > bAge) {
-              remove.add(b.id);
-            } else {
-              remove.add(a.id);
-            }
-          }
-        }
-        if (!remove.has(a.id)) {
-          keep.add(a.id);
-        }
+      // 按 actor 分组后各自去重。getAll 未按 user_id 过滤会返回全部用户的记忆，
+      // 若不分组，相似文本（"喜欢喝咖啡"这类）会跨用户互删——用户 A 的写入
+      // 可能顶掉用户 B 的既有记忆。缺失 actorId 的旧数据跳过去重（宁保留不误删）。
+      const byActor = new Map<string, Mem0MemoryItem[]>();
+      for (const mem of allMemories) {
+        const actorId =
+          typeof mem.metadata?.actorId === "string"
+            ? mem.metadata.actorId
+            : typeof mem.metadata?.user_id === "string"
+              ? mem.metadata.user_id
+              : "";
+        if (!actorId) continue;
+        const group = byActor.get(actorId);
+        if (group) group.push(mem);
+        else byActor.set(actorId, [mem]);
       }
 
-      if (remove.size > 0) {
-        for (const id of remove) {
-          await this.memory.delete(id).catch(() => {});
-        }
-        console.info(`[memory-lifecycle] merged ${remove.size} duplicate memories`);
+      let removed = 0;
+      for (const group of byActor.values()) {
+        removed += this.dedupeActorGroup(group, threshold);
       }
-      return remove.size;
+
+      if (removed > 0) {
+        console.info(`[memory-lifecycle] merged ${removed} duplicate memories`);
+      }
+      return removed;
     } catch {
       return 0;
     }
+  }
+
+  private dedupeActorGroup(memories: Mem0MemoryItem[], threshold: number): number {
+    const remove = new Set<string>();
+
+    for (let i = 0; i < memories.length; i++) {
+      const a = memories[i]!;
+      if (remove.has(a.id)) continue;
+
+      for (let j = i + 1; j < memories.length; j++) {
+        const b = memories[j]!;
+        if (remove.has(b.id)) continue;
+
+        const similarity = this.computeTextSimilarity(a.memory, b.memory);
+        if (similarity >= threshold) {
+          const aIsHighSignal = a.metadata?.highSignal === true;
+          const bIsHighSignal = b.metadata?.highSignal === true;
+
+          const aAge = this.parseTimestamp(a.createdAt ?? a.updatedAt);
+          const bAge = this.parseTimestamp(b.createdAt ?? b.updatedAt);
+
+          if (aIsHighSignal && !bIsHighSignal) {
+            remove.add(b.id);
+          } else if (!aIsHighSignal && bIsHighSignal) {
+            remove.add(a.id);
+          } else if (aAge > bAge) {
+            remove.add(b.id);
+          } else {
+            remove.add(a.id);
+          }
+        }
+      }
+    }
+
+    if (remove.size === 0) return 0;
+    for (const id of remove) {
+      void this.memory.delete(id).catch(() => {});
+    }
+    return remove.size;
   }
 
   private parseTimestamp(ts: string | undefined): number {
@@ -160,18 +183,26 @@ export class AgenticMemoryLifecycleService {
     return 0;
   }
 
-  private async computeJaccardSimilarity(a: string, b: string): Promise<number> {
-    const normalize = (s: string) => {
-      const chars = new Set(s.replace(/\s+/g, ""));
-      return chars;
+  /**
+   * 文本相似度：单字 + 二元组（bigram）混合 Jaccard。
+   * 原实现仅单字集合——中文单字粒度太粗（功能字"的/了/我"共享率高），
+   * 改一字就绕过判重；混入 bigram 后语序/词组差异能正确拉开相似度差距。
+   */
+  private computeTextSimilarity(a: string, b: string): number {
+    const grams = (s: string): Set<string> => {
+      const t = s.replace(/\s+/g, "");
+      const set = new Set<string>();
+      for (const ch of t) set.add(ch);
+      for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2));
+      return set;
     };
 
-    const setA = normalize(a);
-    const setB = normalize(b);
+    const setA = grams(a);
+    const setB = grams(b);
 
     let intersect = 0;
-    for (const ch of setA) {
-      if (setB.has(ch)) intersect++;
+    for (const g of setA) {
+      if (setB.has(g)) intersect++;
     }
 
     const union = setA.size + setB.size - intersect;

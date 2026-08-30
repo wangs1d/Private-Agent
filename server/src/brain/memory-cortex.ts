@@ -37,6 +37,7 @@ import {
   type ChannelRecallResult,
   type MemoryArbitratorConfig,
 } from "./memory-arbitrator.js";
+import { semanticFingerprint } from "../services/memory-record-utils.js";
 import {
   MemoryStrengthModel,
   type MemoryFeedbackInput,
@@ -837,43 +838,42 @@ export class MemoryCortex {
       return;
     }
 
-    // ---- 记忆认知架构升级（Phase 3）：salience filter 守门 ----
-    // 在 domain / importance 计算之前评估原 item；失败时降级为正常写入（不阻塞主流程）。
+    // ---- salience 统一闸门重构：降级为打分输入，不再独立否决 ----
+    // 原实现 salience filter 有独立否决权（reject 直接丢弃 / decay 仅写短期），
+    // 与 service 侧 decideMemoryWrite（带 LLM 复判的决策引擎）形成两套互不知情的
+    // 写入标准，同一 item 在高信号路径会被两道闸门先后裁决。
+    // 现在 salience 只产出分数：写入 metadata 供诊断/调参，低分条目下调写入信号档位
+    // （走低信号缓冲路径），是否落库统一由 decideMemoryWrite 裁量
+    // （reject 不落库 / decay 保留并由 TTL 遗忘机制回收）。
+    let salienceScore: number | undefined;
+    let salienceDowngraded = false;
     if (this.salienceFilter) {
       try {
         const salience = this.salienceFilter.evaluateSalience(item);
-        if (!salience.accept) {
+        salienceScore = salience.score;
+        if (!salience.accept || salience.degraded) {
+          salienceDowngraded = true;
           console.log(
-            `[MemoryCortex] salience filter 拒绝写入 (score=${salience.score}, reason=${salience.reason})`,
+            `[MemoryCortex] salience ${salience.accept ? "低分降级" : "拒绝降档"} (score=${salience.score}) → 低信号档位，最终由 decideMemoryWrite 裁量`,
           );
-          return; // 拒绝写入
-        }
-        if (salience.degraded) {
-          // 降级为 decay：写入但不进入长期记忆，仅写短期记忆（如果有 sessionId）
-          console.log(`[MemoryCortex] salience filter 降级为 decay (score=${salience.score})`);
+          // 降级条目仍进体验学习环观察（原 decay 路径行为保留）
           try {
             this.experienceLearningLoop?.observeMemoryItem(actorId, item);
           } catch {
             /* learning loop failure is non-blocking */
           }
-          if (item.sessionId && this.shortTerm) {
-            try {
-              this.shortTerm.syncTaskForTurn(item.sessionId, item.content);
-            } catch {
-              /* 静默 */
-            }
-          }
-          return;
         }
       } catch (err) {
-        console.log(`[MemoryCortex] salience filter 异常（降级为正常写入）: ${err}`);
+        console.log(`[MemoryCortex] salience filter 异常（按正常信号处理）: ${err}`);
       }
     }
 
     const domain = item.domain ?? inferDomain(item.kind);
     const importance = item.importance ?? "medium";
     const sourceId = item.source ?? "system";
-    const highSignal = importance === "high" || importance === "critical";
+    // salience 低分条目下调为低信号档位（进低信号缓冲，由 decideMemoryWrite 最终裁量）
+    const highSignal =
+      !salienceDowngraded && (importance === "high" || importance === "critical");
 
     // 多模态记忆预处理：若携带 media.blob，先持久化到本地文件系统，
     // 在 metadata 中记录 mediaRef（storageId + kind + mime + caption）。
@@ -896,6 +896,20 @@ export class MemoryCortex {
         // content 补充占位符，让召回时 LLM 知道有图但当前不能直接看
         const placeholder = `[${item.media.kind === "image" ? "图片" : item.media.kind === "audio" ? "音频" : "视频"}：${item.media.caption ?? item.content.slice(0, 60)}]`;
         effectiveContent = item.content ? `${item.content}\n${placeholder}` : placeholder;
+      }
+    }
+
+    // salience 分数入 metadata：检索/仲裁层可读，诊断与调参有据可查
+    if (salienceScore !== undefined) {
+      effectiveMetadata = { ...(effectiveMetadata ?? {}), memorySalienceScore: salienceScore };
+    }
+
+    // 降级条目沿用原 decay 路径的短期记忆同步（working 域由下方统一处理，避免重复）
+    if (salienceDowngraded && item.sessionId && this.shortTerm && domain !== "working") {
+      try {
+        this.shortTerm.syncTaskForTurn(item.sessionId, item.content);
+      } catch {
+        /* 静默 */
       }
     }
 
@@ -1190,6 +1204,8 @@ export class MemoryCortex {
     // 改造后：agentic 充足且高分时短路返回（低延迟）；不足时并行 narrative + kvSummary，
     //         三通道结果交 MemoryArbitrator 做归一化 + 跨通道指纹去重 + 综合重排。
     let mergedItems: MemoryRecallItem[] = [];
+    /** 仲裁阶段已应用强度加成时为 true（finalize 收尾跳过二次强度重排） */
+    let strengthBoostApplied = false;
 
     // 1) agentic 主通道：结构化召回（带原始时间戳，时间衰减统一交仲裁器按 domain τ 施加）。
     //    此前走「格式化文本 → 正则解析」往返，时间戳粒度退化且检索层多扣一次全局半衰期。
@@ -1281,7 +1297,11 @@ export class MemoryCortex {
       // 4) 统一仲裁：通道内归一化 + 跨通道指纹去重 + 通道权重综合重排
       //    （传入原始 query 供防串台一致性调制；时间衰减按条目 timestamp 计算）
       if (channels.length > 0) {
-        mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query });
+        // 强度模型作为一等因子参与统一排序：原实现在仲裁后由 finalizeRecallItems
+        // 二次按强度重排，会破坏仲裁器的 domain 配额多样性保证（两次排序互相覆盖）。
+        const strengthBoost = this.buildStrengthBoostMap(actorId, channels);
+        mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query, strengthBoost });
+        strengthBoostApplied = strengthBoost !== undefined;
       }
 
       // 5) 仲裁降级：仲裁无结果但 agentic 有结果时回退（保护可用性）
@@ -1389,8 +1409,12 @@ export class MemoryCortex {
     }
 
     // 统一召回收尾：敏感过滤 → 反馈加成/惩罚重排 → 去重限长，
-    // 并异步触发记忆联想合成 + 引用锚点记录（与分域召回共用同一收尾，见 finalizeRecallItems）
-    const feedbackAdjustedItems = this.finalizeRecallItems(actorId, query, mergedItems, opts);
+    // 并异步触发记忆联想合成 + 引用锚点记录（与分域召回共用同一收尾，见 finalizeRecallItems）。
+    // 仲裁路径已把强度并入统一排序，此处跳过二次强度重排，避免破坏 domain 配额。
+    const feedbackAdjustedItems = this.finalizeRecallItems(actorId, query, mergedItems, {
+      ...opts,
+      skipStrengthBoost: strengthBoostApplied,
+    });
 
     const finalResult: MemoryRecallResult = {
       actorId,
@@ -1641,6 +1665,33 @@ export class MemoryCortex {
       .map((b) => b.item);
   }
 
+  /**
+   * 构建语义指纹 → 强度倍率映射，供仲裁器把强度模型作为一等排序因子参与统一排序。
+   * 无强度模型 / 所有条目倍率均为 1 时返回 undefined（仲裁器按无加成处理）。
+   * 指纹键与仲裁器内部去重键一致：semanticFingerprint(content) || content.slice(0, 48)。
+   */
+  private buildStrengthBoostMap(
+    actorId: string,
+    channels: ChannelRecallResult[],
+  ): Map<string, number> | undefined {
+    const strengthModel = this.getStrengthModel();
+    if (!strengthModel) return undefined;
+
+    const map = new Map<string, number>();
+    for (const ch of channels) {
+      for (const item of ch.items) {
+        const content = typeof item.content === "string" ? item.content.trim() : "";
+        if (!content) continue;
+        const factor = strengthModel.boostFactor(actorId, content);
+        if (factor === 1) continue;
+        const fp = semanticFingerprint(content) || content.slice(0, 48);
+        const prev = map.get(fp);
+        if (prev === undefined || factor > prev) map.set(fp, factor);
+      }
+    }
+    return map.size > 0 ? map : undefined;
+  }
+
   private async buildAssociationRecallItems(
     actorId: string,
     query: string,
@@ -1704,16 +1755,16 @@ export class MemoryCortex {
     actorId: string,
     query: string,
     items: MemoryRecallItem[],
-    opts?: { includeRestricted?: boolean; limit?: number },
+    opts?: { includeRestricted?: boolean; limit?: number; skipStrengthBoost?: boolean },
   ): MemoryRecallItem[] {
     const limit = Math.max(1, opts?.limit ?? this.arbitratorConfig.topN);
-    const finalItems = this.dedupeAndLimitRecallItems(
-      this.applyFeedbackBoost(
-        this.filterBySensitivity(items, opts?.includeRestricted),
-        actorId,
-      ),
-      limit,
-    );
+    const filtered = this.filterBySensitivity(items, opts?.includeRestricted);
+    // 仲裁路径（skipStrengthBoost=true）已在统一排序中应用强度因子，此处跳过，
+    // 避免仲裁后二次重排；分域/短路等未走仲裁的路径仍保留强度重排。
+    const boosted = opts?.skipStrengthBoost
+      ? filtered
+      : this.applyFeedbackBoost(filtered, actorId);
+    const finalItems = this.dedupeAndLimitRecallItems(boosted, limit);
 
     // 记忆联想性增强：命中 ≥ 2 条时异步用 LLM 合成跨记忆新关联（高置信回灌 humanLike 图）
     if (finalItems.length >= 2) {

@@ -101,6 +101,8 @@ export type HttpRouteDeps = {
   lifeSignalHubService?: LifeSignalHubService;
   /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */
   proactivitySuppressionStore?: ProactivitySuppressionStore;
+  /** 统一主动性管道（docs/proactivity-architecture.md）；可选，未注入时诊断路由不挂载 */
+  proactivePipeline?: import("../../proactivity/proactive-pipeline.js").ProactivePipeline | null;
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;

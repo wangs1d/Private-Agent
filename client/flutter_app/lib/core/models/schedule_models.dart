@@ -6,7 +6,7 @@ class ScheduleEvent {
     required this.title,
     this.shortTitle,
     this.notes,
-    this.isRhythm = false,
+    this.isTrivia = false,
   });
 
   final String id;
@@ -16,6 +16,6 @@ class ScheduleEvent {
   /// 简洁展示标题（「今日安排」紧凑列表用，创建时由 LLM 生成；旧数据为空时回退 title 简化）。
   final String? shortTitle;
   final String? notes;
-  /// 节律提醒（喝水/睡觉等）：照常到点推送，但不进「今日安排」紧凑列表（日程页仍展示）。
-  final bool isRhythm;
+  /// 琐事提醒（喝水/睡觉等，trivia 分类）：照常到点推送，但不进「今日安排」（日程页仍展示）。
+  final bool isTrivia;
 }

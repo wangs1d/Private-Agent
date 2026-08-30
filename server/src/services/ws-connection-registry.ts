@@ -9,8 +9,16 @@ export type WsLike = {
 export class WsConnectionRegistry {
   private readonly connections = new Map<string, WsLike>();
 
+  /** 连接变化回调（PresenceService 在场感知接线；fire-and-forget 不影响收发） */
+  onConnectionChange?: (actorId: string, connected: boolean) => void;
+
   register(sessionId: string, socket: WsLike): void {
     this.connections.set(sessionId, socket);
+    try {
+      this.onConnectionChange?.(sessionId, true);
+    } catch {
+      /* 回调失败不影响连接登记 */
+    }
   }
 
   /**
@@ -19,6 +27,11 @@ export class WsConnectionRegistry {
   unregister(sessionId: string, socket: WsLike): void {
     if (this.connections.get(sessionId) !== socket) return;
     this.connections.delete(sessionId);
+    try {
+      this.onConnectionChange?.(sessionId, false);
+    } catch {
+      /* 回调失败不影响连接清理 */
+    }
   }
 
   get(sessionId: string): WsLike | undefined {

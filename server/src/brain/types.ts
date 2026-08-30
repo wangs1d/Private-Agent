@@ -670,6 +670,12 @@ export interface CognitiveInput {
   visual?: VisualInput;       // 视觉输入
   signal?: BrainSignalInput;  // 主动信号（被动认知时为空）
   sessionId?: string;
+  /**
+   * 本轮是否为模糊指代/短追问（"那个方案呢""它后来怎么样"类）。
+   * 供 recall-gate 的 anaphora_escalation 判定使用——门控单点化后 cognize 是
+   * 白名单唯一评估点，必须拿到完整输入（agent-core 用 isAmbiguousFollowUpMessage 预计算）。
+   */
+  ambiguousFollowUp?: boolean;
 }
 
 // 端到端认知上下文：各脑区并行收集的感知/记忆/情绪/活动/能力，一次性交给 CognitiveEngine
@@ -728,6 +734,12 @@ export interface CognitiveResult {
    * 缺失或为空时（如 memory 未注册 / 召回失败），后续 standard path 仍走原 prepareNarrativeRecall 逻辑。
    */
   recallItems?: MemoryRecallItem[];
+  /**
+   * 长期记忆召回门控结果（门控单点化）：cognize 阶段 0.93 用完整输入评估的
+   * recall-gate 白名单判定。agent-core / prompt 装配层直接复用本判定，
+   * 不再各自重评（三处独立评估正则易漂移）。缺失时消费方自行降级评估。
+   */
+  recallGate?: { trigger: boolean; reason: string };
   /**
    * 工作记忆摘要（深度链接优化）：含活跃目标 + 槽位 + 待办。
    * 由 BrainCenter.cognize 阶段 3 生成，注入到 streamCompletion 的 system prompt，

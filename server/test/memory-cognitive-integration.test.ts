@@ -101,7 +101,7 @@ async function captureConsole<T>(fn: () => Promise<T>): Promise<{ logs: string[]
 
 // ---- 场景 A: salience filter 拒绝写入 -----------------------------------
 
-test("场景 A: remember → salience filter 守门拒绝路径", async () => {
+test("场景 A: remember → salience 低分降档为低信号写入", async () => {
   const brain = new MemoryCortex();
   const salienceFilter = new MemorySalienceFilter();
   brain.registerSalienceFilter(salienceFilter);
@@ -124,17 +124,13 @@ test("场景 A: remember → salience filter 守门拒绝路径", async () => {
     salience.score < 0.2,
     `salience score 应 < 0.2（reject 阈值），实际: ${salience.score}`,
   );
-  assert.equal(salience.accept, false, "应拒绝写入");
+  assert.equal(salience.accept, false, "应判定为低分");
 
-  const { logs } = await captureConsole(async () => {
-    await brain.remember("user-a", item);
-  });
+  await brain.remember("user-a", item);
 
-  assert.equal(ingestRef.count, 0, "narrative.ingest 不应被调用");
-  assert.ok(
-    logs.some((l) => l.includes("salience filter 拒绝写入")),
-    `console.log 应输出 "salience filter 拒绝写入"，实际: ${logs.join("\n")}`,
-  );
+  // 统一闸门重构：salience 不再有独立否决权，低分条目下调为低信号档位
+  // （走低信号缓冲），是否落库由下游 decideMemoryWrite 最终裁量。
+  assert.equal(ingestRef.count, 1, "低信号路径仍应进入 narrative 门面（非高信号）");
 });
 
 // ---- 场景 B: salience filter 降级 decay 路径 ----------------------------

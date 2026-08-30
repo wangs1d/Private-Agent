@@ -1,7 +1,9 @@
 import { randomUUID } from "crypto";
 import type { FastifyInstance } from "fastify";
-import type { ScheduleTaskRecord } from "../../services/schedule-task-service.js";
-import { RHYTHM_MARK } from "../../tools/rhythm-reminder-tools.js";
+import {
+  isTriviaTask,
+  type ScheduleTaskRecord,
+} from "../../services/schedule-task-service.js";
 import {
   scheduleTaskCreateBodySchema,
   scheduleTaskListQuerySchema,
@@ -190,10 +192,10 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
       typeof query.from === "string" ? query.from : undefined,
       typeof query.to === "string" ? query.to : undefined,
     );
-    // 节律提醒（喝水/睡觉等）只做到点推送，不进「今日安排」紧凑列表
+    // 琐事类提醒（喝水/睡觉等 trivia 分类、旧数据节律标记）只做后台到点推送，不进「今日安排」
     return scheduleTaskService
       .listTasksBySession(sessionId, { from, to })
-      .filter((task) => !task.description.startsWith(RHYTHM_MARK))
+      .filter((task) => !isTriviaTask(task))
       .map(toTodayScheduleItem);
   });
 

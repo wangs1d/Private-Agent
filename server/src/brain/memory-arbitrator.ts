@@ -276,16 +276,19 @@ function overlapFactor(queryTokens: Set<string> | null, item: MemoryRecallItem):
 }
 
 /**
- * 综合打分：通道权重加权平均 × 多通道命中加成 × 近因调制 × 话题一致性调制。
+ * 综合打分：通道权重加权平均 × 多通道命中加成 × 近因调制 × 话题一致性调制 × 强度加成。
  * - baseScore = Σ(权重 × 归一化分) / Σ权重
  * - boost = 1 + multiChannelBoost × (命中通道数 - 1)
  * - recency 软调制（权重 0.25）：刚发生 ×1.0，久远下限 ×0.75，避免旧的重要事实被过度压制
  * - overlap 调制：聊 A 话题时 B 话题记忆（语义分高但实词零重叠）被压到最低 0.5
+ * - strengthBoost：记忆强度模型（反馈 + 命中次数 + 遗忘曲线）的倍率，作为一等因子
+ *   参与统一排序（原实现在仲裁后二次重排，会破坏 domain 配额的多样性保证）
  */
 function computeFinalScore(
   entry: MergedEntry,
   config: MemoryArbitratorConfig,
   queryTokens: Set<string> | null,
+  strengthBoost: Map<string, number> | undefined,
   now = Date.now(),
 ): number {
   const hitChannels = entry.channels.size;
@@ -299,7 +302,8 @@ function computeFinalScore(
   const baseScore = weightTotal > 0 ? weightedSum / weightTotal : 0.5;
   const boost = 1 + config.multiChannelBoost * Math.max(0, hitChannels - 1);
   const recency = 0.75 + 0.25 * recencyFactor(entry.representative, now);
-  return baseScore * boost * recency * overlapFactor(queryTokens, entry.representative);
+  const strength = strengthBoost?.get(entry.fingerprint) ?? 1;
+  return baseScore * boost * recency * overlapFactor(queryTokens, entry.representative) * strength;
 }
 
 /** 分类配额（P4）：topN 内单个 domain 的最大占比，保证注入记忆的类型多样性。 */
@@ -329,12 +333,14 @@ function applyDomainQuota(scored: Array<{ item: MemoryRecallItem }>, topN: numbe
  * @param channels 各通道的召回结果（条目可带可不带 score）
  * @param config 仲裁配置；未传用默认配置
  * @param opts.query 本次召回的原始 query（用于防串台一致性调制；不传则跳过该因子）
+ * @param opts.strengthBoost 语义指纹 → 强度倍率（记忆强度模型产出，缺省 1）。
+ *        作为一等因子参与统一排序，替代仲裁后的二次重排。
  * @returns 去重 + 重排后的 MemoryRecallItem[]，每条带融合 score 与合并后的 source
  */
 export function arbitrateMemories(
   channels: ChannelRecallResult[],
   config: MemoryArbitratorConfig = DEFAULT_ARBITRATOR_CONFIG,
-  opts?: { query?: string },
+  opts?: { query?: string; strengthBoost?: Map<string, number> },
 ): MemoryRecallItem[] {
   if (!config.enabled) {
     // 关闭时简单拼接所有通道（保持向后兼容），不做去重/排序
@@ -351,7 +357,7 @@ export function arbitrateMemories(
   const merged = dedupeAcrossChannels(channels);
   const scored = merged
     .map((entry) => {
-      const finalScore = computeFinalScore(entry, config, queryTokens);
+      const finalScore = computeFinalScore(entry, config, queryTokens, opts?.strengthBoost);
       const sources = [...entry.channels].join(",");
       // tiebreaker：命中通道中的最高权重（同分时高权重通道优先，体现通道可信度）
       const maxChannelWeight = Math.max(

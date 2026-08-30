@@ -11,6 +11,29 @@ export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_
 export type ScheduleTaskStatus = "active" | "paused" | "completed" | "cancelled";
 export type ScheduleRunStatus = "success" | "failed";
 
+/**
+ * 任务分类：itinerary=行程/正事（会议、约会、截止等，进「今日安排」展示）；
+ * trivia=生活琐事提醒（喝水、睡觉、活动身体等，只做后台到点提醒，不进「今日安排」）。
+ * 缺省（含旧数据）按 itinerary 处理，保证展示兜底。
+ */
+export type ScheduleTaskCategory = "itinerary" | "trivia";
+
+/** 节律任务标记前缀（care.rhythm_reminder 写入 description；旧数据无 category 时的兜底识别） */
+export const RHYTHM_MARK = "[节律提醒:";
+
+/** 宽松解析外部输入（工具参数/HTTP body）中的分类字段，非法值回退 undefined（=按 itinerary 展示）。 */
+export function parseScheduleTaskCategory(value: unknown): ScheduleTaskCategory | undefined {
+  const v = String(value ?? "").trim();
+  return v === "itinerary" || v === "trivia" ? v : undefined;
+}
+
+/** 是否为「仅后台提醒、不进今日安排」的任务：显式 trivia 分类，或旧数据带节律标记。 */
+export function isTriviaTask(
+  task: Pick<ScheduleTaskRecord, "category" | "description">,
+): boolean {
+  return task.category === "trivia" || task.description.startsWith(RHYTHM_MARK);
+}
+
 export type ScheduleActionConfig = {
   url: string;
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -31,6 +54,7 @@ export type ScheduleTaskRecord = {
   shortTitle?: string;
   description: string;
   kind: ScheduleTaskKind;
+  category?: ScheduleTaskCategory;
   recurrence: ScheduleRecurrence;
   timezone: string;
   runAt: string;
@@ -68,6 +92,7 @@ export type CreateScheduleTaskInput = {
   shortTitle?: string;
   description: string;
   kind: ScheduleTaskKind;
+  category?: ScheduleTaskCategory;
   runAt?: string;
   recurrence: ScheduleRecurrence;
   timezone?: string;
@@ -82,6 +107,7 @@ type UpdateScheduleTaskInput = {
   title?: string;
   shortTitle?: string;
   description?: string;
+  category?: ScheduleTaskCategory;
   recurrence?: ScheduleRecurrence;
   runAt?: string;
   timezone?: string;
@@ -182,6 +208,11 @@ export class ScheduleTaskService {
     await writeFile(this.persistPath, JSON.stringify({ tasks, runs }, null, 2), "utf8");
   }
 
+  /** 全量任务列表（跨会话；UpcomingScheduleWatcher 临近日程扫描用） */
+  listAllTasks(): ScheduleTaskRecord[] {
+    return Array.from(this.byTaskId.values());
+  }
+
   listTasksBySession(
     sessionId: string,
     range?: { from?: string; to?: string },
@@ -249,6 +280,7 @@ export class ScheduleTaskService {
       shortTitle: input.shortTitle?.trim() || undefined,
       description: input.description.trim(),
       kind: input.kind,
+      category: input.category,
       recurrence: schedule.recurrence,
       timezone: tz,
       runAt: schedule.runAt,
@@ -281,6 +313,7 @@ export class ScheduleTaskService {
       title: input.title?.trim() || task.title,
       shortTitle: input.shortTitle?.trim() || task.shortTitle,
       description: input.description?.trim() || task.description,
+      category: input.category ?? task.category,
       recurrence: input.recurrence ?? task.recurrence,
       timezone: input.timezone?.trim() || task.timezone,
       cronExpression:

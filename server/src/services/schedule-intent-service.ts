@@ -1,4 +1,5 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
+import type { ScheduleTaskCategory } from "./schedule-task-service.js";
 
 export type ScheduleDraft = {
   title?: string;
@@ -6,6 +7,8 @@ export type ScheduleDraft = {
   shortTitle?: string;
   description: string;
   kind: "reminder" | "action" | "weather_brief";
+  /** 行程分类：itinerary=行程/正事（默认）；trivia=生活琐事（只后台提醒，不进「今日安排」） */
+  category?: ScheduleTaskCategory;
   runAt: string;
   recurrence: "none" | "daily" | "weekly" | "yearly";
   reminderMessage?: string;
@@ -119,6 +122,7 @@ export class ScheduleIntentService {
       "recurrence 规则：仅当用户明确说出「每天/每日/每周/每年」等重复词时用 daily、weekly 或 yearly；明确单次（仅一次/明天/今天/后天）用 none。",
       "若只有时刻与提醒事项、未说明单次或每天/每周/每年，返回 {\"ok\":false,\"reason\":\"needs_recurrence\"}，不要猜测 recurrence。",
       "若用户要「天气/气温/穿衣/带伞」类定时简报，kind 用 weather_brief，不要填 reminderMessage 或 action。",
+      "category：行程/正事用 itinerary；喝水/睡觉/锻炼等生活琐事用 trivia（照常提醒，不进今日安排）；不确定用 itinerary。",
       "JSON 结构：",
       "{",
       '  "ok": true,',
@@ -127,6 +131,7 @@ export class ScheduleIntentService {
       '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」。reminder 必填，其他类型与 title 相同或更短（可选）",',
       '    "description": "用户原句",',
       '    "kind": "reminder|action|weather_brief",',
+      '    "category": "itinerary|trivia",',
       '    "runAt": "ISO-8601 string",',
       '    "recurrence": "none|daily|weekly|yearly",',
       '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」（仅 reminder）",',
@@ -173,6 +178,8 @@ export class ScheduleIntentService {
         title: "每日天气与穿衣提示",
         description: normalized,
         kind: "weather_brief",
+        // 周期性天气简报属例行琐事；一次性（如「明早提醒我带伞」）是真实安排，保持展示
+        category: recurrence === "none" ? undefined : "trivia",
         runAt: runAt.toISOString(),
         recurrence,
       };
@@ -183,6 +190,8 @@ export class ScheduleIntentService {
         shortTitle: reminderText === "到点提醒" ? undefined : reminderText,
         description: normalized,
         kind: "reminder",
+        // 规则路径没有 LLM，用保守关键词兜底识别琐事（宁漏勿误：漏判只是多展示一条，误判会藏掉正事）
+        category: RULE_PATH_TRIVIA_PATTERN.test(normalized) ? "trivia" : undefined,
         runAt: runAt.toISOString(),
         recurrence,
         reminderMessage: formatReminderMessage(reminderText),
@@ -191,6 +200,10 @@ export class ScheduleIntentService {
     return null;
   }
 }
+
+/** 规则路径（无 LLM）的琐事兜底识别：仅命中明确的自我照顾类措辞才判 trivia。 */
+const RULE_PATH_TRIVIA_PATTERN =
+  /喝水|喝口水|补水|睡觉|午睡|小睡|小憩|午休|休息一下|休息一会儿|休息会儿|运动|锻炼|健身|散步|伸懒腰|活动筋骨|活动一下|远眺|护眼|眨眨眼|上厕所/;
 
 function safeParseJsonObject(text: string): Record<string, unknown> | null {
   const trimmed = text.trim();
@@ -226,9 +239,11 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   if (!description || !validKind || !validRecurrence) return null;
   const runAtDate = new Date(runAt);
   if (Number.isNaN(runAtDate.getTime())) return null;
+  const category: ScheduleTaskCategory | undefined =
+    v.category === "trivia" || v.category === "itinerary" ? v.category : undefined;
   if (kind === "weather_brief") {
     if (!title) return null;
-    return { title, shortTitle, description, kind: "weather_brief", runAt: runAtDate.toISOString(), recurrence };
+    return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence };
   }
   if (kind === "reminder") {
     const reminderMessage = String(v.reminderMessage ?? "").trim() || description;
@@ -236,6 +251,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
       description,
       shortTitle,
       kind,
+      category,
       runAt: runAtDate.toISOString(),
       recurrence,
       reminderMessage,
@@ -254,6 +270,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     shortTitle,
     description,
     kind,
+    category,
     runAt: runAtDate.toISOString(),
     recurrence,
     action: { url, method, body: actionObj?.body },

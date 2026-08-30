@@ -810,6 +810,28 @@ class _SchedulePageState extends State<SchedulePage> {
     );
   }
 
+  /// 琐事标签：标识生活琐事提醒（照常到点推送，不进「今日安排」）。
+  Widget _triviaTag(ThemeData theme) {
+    final ColorScheme cs = theme.colorScheme;
+    return Tooltip(
+      message: "生活琐事提醒：照常到点提醒，不进「今日安排」列表",
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(4),
+          color: cs.onSurfaceVariant.withValues(alpha: 0.10),
+        ),
+        child: Text(
+          "琐事",
+          style: theme.textTheme.labelSmall?.copyWith(
+            fontSize: 10,
+            color: cs.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _scheduleCard(ThemeData theme, ScheduleEvent e) {
     final ColorScheme cs = theme.colorScheme;
     final bool done = _isEventCompleted(e);
@@ -823,15 +845,26 @@ class _SchedulePageState extends State<SchedulePage> {
     final Widget body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text(
-          e.title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: cs.onSurface,
-            fontWeight: FontWeight.w600,
-            height: 1.25,
-          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                e.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: cs.onSurface,
+                  fontWeight: FontWeight.w600,
+                  height: 1.25,
+                ),
+              ),
+            ),
+            if (e.isTrivia) ...<Widget>[
+              const SizedBox(width: 6),
+              _triviaTag(theme),
+            ],
+          ],
         ),
         if (e.notes != null && e.notes!.isNotEmpty) ...<Widget>[
           const SizedBox(height: 4),
@@ -1055,11 +1088,22 @@ class _SchedulePageState extends State<SchedulePage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(
-                        representative.title,
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              representative.title,
+                              style: theme.textTheme.bodyLarge?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (representative.isTrivia) ...<Widget>[
+                            const SizedBox(width: 6),
+                            _triviaTag(theme),
+                          ],
+                        ],
                       ),
                       const SizedBox(height: 4),
                       Text(

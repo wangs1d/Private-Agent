@@ -130,14 +130,12 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
       };
 
       const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      // onTurnCompleted 签名: (actorId, sessionId, userText, assistantText)
-      svc.onTurnCompleted("user1", "s1", "我买的股票涨了", "不错");
-      svc.onTurnCompleted("user1", "s2", "股票要不要卖出", "看情况");
-      svc.onTurnCompleted("user1", "s3", "最近股票行情如何", "在涨");
-      svc.onTurnCompleted("user1", "s4", "今天吃什么", "火锅");
+      // 记忆架构收敛后：高频话题从「本次消费的 journal 用户侧行」即时统计
+      // （getTopDailyTopics(userText)），onTurnCompleted 只维护轮数计数器。
+      const journalUserLines = ["我买的股票涨了", "股票要不要卖出", "最近股票行情如何", "今天吃什么"].join("\n");
 
       const getTop = (svc as any).getTopDailyTopics.bind(svc);
-      const topics = getTop("user1");
+      const topics = getTop(journalUserLines);
 
       assert.ok(topics.length > 0, "应识别到高频话题");
       // 中文分词是滑动窗口，"股票"可能作为"买的股票"/"股票涨了"等片段出现
@@ -158,10 +156,9 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
       };
 
       const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      svc.onTurnCompleted("user1", "s1", "今天天气不错", "是啊");
-
+      // 同上：高频话题从消费的 journal 用户行即时统计
       const getTop = (svc as any).getTopDailyTopics.bind(svc);
-      const topics = getTop("user1");
+      const topics = getTop("今天天气不错");
 
       assert.ok(
         !topics.includes("天气") && !topics.includes("不错"),

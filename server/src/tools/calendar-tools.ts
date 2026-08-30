@@ -6,6 +6,7 @@ import { resolveActorId } from "../agent/actor-id.js";
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
 import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
+import { parseScheduleTaskCategory } from "../services/schedule-task-service.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import {
   checkScheduleCreateDedup,
@@ -64,6 +65,7 @@ export function buildScheduleCreateInput(
       shortTitle: draft.shortTitle?.trim() || undefined,
       description: draft.description,
       kind: "reminder",
+      category: draft.category,
       runAt: draft.runAt,
       recurrence: draft.recurrence,
       timezone: tz,
@@ -80,6 +82,7 @@ export function buildScheduleCreateInput(
       shortTitle: draft.shortTitle?.trim() || undefined,
       description: draft.description,
       kind: "action",
+      category: draft.category,
       runAt: draft.runAt,
       recurrence: draft.recurrence,
       timezone: tz,
@@ -92,6 +95,7 @@ export function buildScheduleCreateInput(
     shortTitle: draft.shortTitle?.trim() || undefined,
     description: draft.description,
     kind: "weather_brief",
+    category: draft.category,
     runAt: draft.runAt,
     recurrence: draft.recurrence,
     timezone: tz,
@@ -136,6 +140,7 @@ export function registerCalendarTools(
         title: task.reminderMessage || task.title,
         shortTitle: task.shortTitle,
         kind: task.kind,
+        category: task.category,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         recurrence: task.recurrence,
@@ -158,6 +163,7 @@ export function registerCalendarTools(
     const kindRaw = String(input.kind ?? "reminder").trim();
     const recurrenceRaw = String(input.recurrence ?? "none").trim();
     const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    const category = parseScheduleTaskCategory(input.category);
     if (!description || !runAt) {
       return { ok: false, error: "description、runAt（ISO 时间字符串）必填" };
     }
@@ -192,6 +198,7 @@ export function registerCalendarTools(
           shortTitle,
           description,
           kind: "reminder",
+          category,
           runAt,
           recurrence,
           timezone,
@@ -205,6 +212,7 @@ export function registerCalendarTools(
           title: task.reminderMessage || task.title,
           shortTitle: task.shortTitle,
           kind: task.kind,
+          category: task.category,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
@@ -220,6 +228,7 @@ export function registerCalendarTools(
           shortTitle,
           description,
           kind: "weather_brief",
+          category,
           runAt,
           recurrence,
           timezone,
@@ -232,6 +241,7 @@ export function registerCalendarTools(
           title: task.title,
           shortTitle: task.shortTitle,
           kind: task.kind,
+          category: task.category,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
@@ -251,6 +261,7 @@ export function registerCalendarTools(
           shortTitle,
           description,
           kind: "agent_task",
+          category,
           runAt,
           recurrence,
           timezone,
@@ -264,6 +275,7 @@ export function registerCalendarTools(
           title: task.title,
           shortTitle: task.shortTitle,
           kind: task.kind,
+          category: task.category,
           nextRunAt: task.nextRunAt,
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
           recurrence: task.recurrence,
@@ -284,6 +296,7 @@ export function registerCalendarTools(
         shortTitle,
         description,
         kind: "action",
+        category,
         runAt,
         recurrence,
         timezone,
@@ -297,6 +310,7 @@ export function registerCalendarTools(
         title: task.title,
         shortTitle: task.shortTitle,
         kind: task.kind,
+        category: task.category,
         nextRunAt: task.nextRunAt,
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
         recurrence: task.recurrence,

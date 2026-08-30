@@ -969,6 +969,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
           shortTitle: { type: "string", description: "简洁展示标题（用于「今日安排」紧凑列表）：去掉「记得/提醒我/帮我」等指令词与所有时间词，只保留核心事项，如用户说「明天9点提醒我吃药」→shortTitle=\"吃药\"。可选，缺省时服务端按核心事项自动生成。" },
+          category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
           reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
         },
@@ -1010,6 +1011,11 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             type: "string",
             enum: ["reminder", "action", "weather_brief", "agent_task"],
             description: "weather_brief 需用户已在天气页保存定位；agent_task 会在到点后让 Agent 执行 prompt",
+          },
+          category: {
+            type: "string",
+            enum: ["itinerary", "trivia"],
+            description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。",
           },
           runAt: { type: "string", description: "ISO-8601" },
           recurrence: {

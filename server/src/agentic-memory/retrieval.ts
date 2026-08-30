@@ -69,6 +69,18 @@ function freshnessLabel(ageHours: number): string {
       : `${Math.round(ageHours / 24)}d前`;
 }
 
+function buildSearchFilters(
+  actorId: string,
+  context: "main" | "notes" | "any",
+): Record<string, unknown> {
+  const filters: Record<string, unknown> = { user_id: actorId };
+  // 仅 notes 做下推：Qdrant/本地 store 均支持任意 payload 字段过滤，notes 大时
+  // 不再白占 topK。main 不下推——旧数据 payload 无 context 字段，需靠后置
+  // contextMatches 的「缺省视为 main」兼容逻辑兜住，不能在向量层把旧记忆排除掉。
+  if (context === "notes") filters.context = "notes";
+  return filters;
+}
+
 export class AgenticMemoryRetrievalService {
   constructor(private readonly memory: Memory) {}
 
@@ -94,7 +106,7 @@ export class AgenticMemoryRetrievalService {
 
     const searchTopK = getAgenticMemorySearchTopK();
     const result = (await this.memory.search(query, {
-      filters: { user_id: actorId },
+      filters: buildSearchFilters(actorId, opts.context),
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
@@ -160,7 +172,7 @@ export class AgenticMemoryRetrievalService {
     const context: "main" | "notes" | "any" = opts?.context ?? "main";
     const searchTopK = getAgenticMemorySearchTopK();
     const result = (await this.memory.search(query, {
-      filters: { user_id: actorId },
+      filters: buildSearchFilters(actorId, context),
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
