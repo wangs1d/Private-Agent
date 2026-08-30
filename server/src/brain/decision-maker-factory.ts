@@ -14,9 +14,8 @@
 //   - 未来换大脑时可整体替换为 AGI 驱动的决策器实现
 
 import type { EndToEndDecisionMaker } from "./proaction-cortex.js";
-import type { DelegateJudge } from "./planner-cortex.js";
+import type { DelegateJudge, SubAgentType } from "./planner-cortex.js";
 import type { BrainDecisionAction } from "./types.js";
-import type { SubAgentType } from "../services/master-agent-types.js";
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 
@@ -164,9 +163,9 @@ export function createDefaultDelegateJudge(): DelegateJudge {
         const parsed = JSON.parse(match[0]);
         const delegate = parsed.delegate === true;
         const agentTypeRaw = typeof parsed.agentType === "string" ? parsed.agentType : "";
-        const agentType: SubAgentType | undefined =
+        const agentType =
           agentTypeRaw === "tech" || agentTypeRaw === "info" || agentTypeRaw === "life"
-            ? agentTypeRaw
+            ? (agentTypeRaw as SubAgentType)
             : undefined;
         const confidence = typeof parsed.confidence === "number"
           ? Math.max(0, Math.min(1, parsed.confidence))

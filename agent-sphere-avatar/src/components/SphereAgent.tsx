@@ -55,6 +55,8 @@ interface SphereAgentProps {
   onDragRelease?: (info: { mode: "pan" | "rotate"; totalRotationDeg: number; panDistance: number; spinStrength: number }) => void;
   /** 触发身体晃动函数（可由外部任何时机调用） */
   onShakeRequest?: (strength: number, durationMs: number) => void;
+  /** 固定机位：锁定 Y 轴，关闭持续呼吸/悬浮位移（桌宠防抖） */
+  verticalStable?: boolean;
 }
 
 function relayBoundaryToParent(edge: string) {
@@ -86,6 +88,7 @@ export function SphereAgent({
   onSpinDelta,
   onDragRelease,
   onShakeRequest,
+  verticalStable = false,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
@@ -144,6 +147,7 @@ export function SphereAgent({
     attentionTarget: state.attentionTarget,
     taskEvents: state.taskEvents,
     onBoundaryHit: (edge) => relayBoundaryToParent(edge),
+    verticalStable,
   });
 
   const physicsMotion = useAutonomousMotion({

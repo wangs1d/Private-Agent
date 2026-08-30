@@ -37,8 +37,8 @@ const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
 - 像朋友说话：口语、短句、一句一顿，多数回合两三句就够；不总结、不客服腔、不"首先其次"、不堆砌热情。
 - 拿不准就照实说"我印象里…，但说不好"，可以大胆给猜测和主观看法——这是聊天，不是汇报，说错了下次纠正就好。
+- 你手头只有随手可得的轻量工具（时间、只读日程、能力查询）。凡是需要搜索/查实时信息、创建提醒/写日程、发消息下单等多步操作——也就是手头工具办不完全的事：不要口头答应，不要说"我去查/稍后告诉你"，也不要凭印象编答案，直接调用 agent.escalate_to_complex（参数里写一句为什么需要转交）把这事交给后台办，转交后这轮不再输出任何内容。绝不编造"我查到了/搜了下"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
-- 你手头只有随手可得的轻量信息（时间、日程这类）。凡是需要真正去搜、去翻、多步去办的活，都不在这轮能力里：照实说"这个我得现查"或"这个得让我去办一趟"，绝不编造"我查到了/搜了下"，也不空口承诺马上给结果。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
 
 // 2026-08-29 修正：complex 的产出是直接流式回给用户的（不存在"fast 续接"环节），
@@ -109,8 +109,7 @@ import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.
 import { getDailyJournalService, type JournalHit } from "./daily-journal-service.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
-import { isMasterAgentDelegationEnabled } from "../agent/master-agent-delegate-env.js";
-import { determineSegmentable, isDesktopAutomationTask, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
+import { determineSegmentable, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
 import { shouldUseSimpleToolFastLane } from "../agent/simple-task.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
@@ -125,11 +124,9 @@ import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
-import { masterChatSessionId, resolvePrimaryChatSessionId, isNotesChatSessionId } from "../agent/master-chat-session.js";
+import { resolvePrimaryChatSessionId, isNotesChatSessionId } from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { stripInternalControlTags } from "../external-model/stream-chat-helpers.js";
-import { MasterAgentCoordinator } from "./master-agent-coordinator.js";
-import type { PerformanceMetrics, SubAgentPerformanceMetrics } from "./master-agent-coordinator.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
 import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orchestrator.js";
 import { getAgentTaskStore } from "./agent-task-store.js";
@@ -137,7 +134,6 @@ import { LoopOrchestrator } from "../agent/loop/loop-orchestrator.js";
 import {
   ReactLoopStrategy,
   PlanExecuteLoopStrategy,
-  StateMachineStrategy,
   type LoopStrategy,
 } from "../agent/loop/loop-strategy.js";
 import { DefaultTerminationPolicy } from "../agent/loop/default-termination.js";
@@ -146,6 +142,7 @@ import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
+import { ESCALATION_TOOL_NAME, isEscalationSignal } from "../tools/escalation-tool.js";
 import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
@@ -158,25 +155,57 @@ import {
   recallItemsToNarrative,
 } from "../agent/execution/narrative-recall-composer.js";
 
-export type MasterAgentDelegationSnapshot = {
-  enabled: boolean;
-  metrics: PerformanceMetrics | null;
-  subAgentMetrics: Record<string, SubAgentPerformanceMetrics> | null;
-  history: Array<unknown>;
-  suggestions: string[];
-  config: {
-    taskTimeoutMs: number;
-    techSubtaskTimeoutMs: number;
-    infoSubtaskTimeoutMs: number;
-    maxSubAgentInvocationsPerTurn: number;
-    maxParallelTasks: number;
-  } | null;
-};
-
 export type { AgentReply } from "../agent/types.js";
 
 const META_CONVERSATION_RECALL_RE =
   /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
+
+/* ------------------------------------------------------------------ *
+ * fast 路径流式 delta 闸门（2026-08-29）                              *
+ * ------------------------------------------------------------------ *
+ * 背景：fast → complex 车道内升级路径在升级判定通过前，LLM 已经在
+ * 流式回文本（"印尼一周..."），原实现在判定升级时也来不及撤销——已
+ * 推给前端的气泡会留在屏幕上，造成"上一轮转入规划任务..."这种不
+ * 一致体感。
+ *
+ * 解决：fast 路径的 onAssistantDelta 改为「暂存」：
+ *   - 升级时整段丢弃（discard）
+ *   - 未升级时一次性推给前端（flush）
+ *
+ * 之所以用暂存而非逐 chunk 直推：升级判定取决于 fast 完成后才能确认
+ * 的「升级哨兵」（isEscalationSignal(full)），逐 chunk 直推会提早把
+ * 内容暴露到前端，事后无法回收。
+ * ------------------------------------------------------------------ */
+
+type FastPathDeltaGate = {
+  feed: (delta: string) => void;
+  flush: () => void;
+  discard: () => void;
+};
+
+let _activeFastGate: FastPathDeltaGate | null = null;
+
+function createFastPathDeltaGate(
+  real: ((delta: string) => void) | undefined,
+): (delta: string) => void {
+  let buffer = "";
+  const gate: FastPathDeltaGate = {
+    feed(delta: string) {
+      buffer += delta;
+    },
+    flush() {
+      if (buffer && real) real(buffer);
+      buffer = "";
+      _activeFastGate = null;
+    },
+    discard() {
+      buffer = "";
+      _activeFastGate = null;
+    },
+  };
+  _activeFastGate = gate;
+  return (delta) => gate.feed(delta);
+}
 
 /** P0 时间窗口查询感知：用户问"昨天/上周做了什么"或询问事件经过时，把时间词锚进召回 query，
  *  提高对应时间窗口内 episodic 记忆的召回概率（配合注入侧的相对时间标注闭环）。 */
@@ -238,7 +267,6 @@ export class AgentCore {
   private readonly streamOptionsBuilder = new StreamOptionsBuilder();
   private readonly turnFinalizer: TurnFinalizer;
   private readonly toolPolicyResolver: ToolPolicyResolver;
-  private readonly masterAgentCoordinator: MasterAgentCoordinator | null = null;
   private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;
   private readonly loopOrchestrator: LoopOrchestrator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
@@ -305,34 +333,6 @@ export class AgentCore {
       shortTermMemoryGateway: this.shortTermMemoryGateway,
       getBrainCenter: () => this.brainCenter,
     });
-
-    if (this.externalChat?.isEnabled() && isMasterAgentDelegationEnabled()) {
-      const cfg = getAgentRuntimeConfig().masterDelegation;
-      this.masterAgentCoordinator = new MasterAgentCoordinator(
-        this.externalChat,
-        this.toolRegistry,
-        this.promptContextBuilder,
-        {
-          enableSubAgents: true,
-          maxParallelTasks: cfg.maxParallelSubAgents,
-          taskTimeoutMs: cfg.subtaskTimeoutMs,
-          techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
-          infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
-          allowFallback: true,
-          onBackgroundJobUpdate: (update) => {
-            const registry = this.wsRegistry;
-            if (!registry) return;
-            registry.trySend(
-              update.sessionId,
-              JSON.stringify({
-                type: ServerEventType.AgentAsyncTaskUpdate,
-                payload: update,
-              }),
-            );
-          },
-        },
-      );
-    }
 
     // 初始化状态机编排器(桌面自动化任务,外部状态机驱动 LLM 多轮调用)
     if (this.externalChat && this.toolRegistry) {
@@ -1072,98 +1072,9 @@ export class AgentCore {
     try {
       let result: AgentReply;
 
-      // Complex 模式分发:
-      //  - 桌面自动化(desktop_automation)→ 后台 createAndRun(多轮 UI 操作,立即返回 task id)
-      //  - 其他 complex(信息查询/子agent委派/时效性查询)→ fallthrough 到 master 同步流式或 runStandardLlmPath
-      //    (这些场景用户期望直接看到流式回复,而非"已创建任务"占位)
-      if (route.mode === "complex" && isDesktopAutomationTask(text)) {
-        if (!this.agentTaskOrchestrator) {
-          // orchestrator 不可用，降级到 master/runStandardLlmPath
-          route = { mode: "complex", reasons: [...route.reasons, "fallback_no_orchestrator"], segmentable: false };
-        } else {
-        const sessionId = opts?.sessionId ?? actorId;
-        const orchestrator = this.agentTaskOrchestrator;
-        const registry = this.wsRegistry;
-        const onDelta = opts?.onAssistantDelta;
-
-        // 创建任务并异步启动主循环
-        const taskId = orchestrator.createAndRun(
-          {
-            actorId,
-            sessionId,
-            chatUserMessageId: opts?.chatUserMessageId,
-            goal: text,
-            maxRounds: 30,
-            tags: ["desktop_automation"],
-          },
-          {
-            onProgress: (event) => {
-              if (!registry) return;
-              try {
-                registry.trySend(
-                  event.sessionId,
-                  JSON.stringify({
-                    type: ServerEventType.ChatExecutionEvent,
-                    payload: {
-                      kind: "task_progress",
-                      ...event,
-                    },
-                  }),
-                );
-              } catch {
-                // 静默失败
-              }
-              // 后台任务失败时推送 fallback 文案,让用户知道任务没成功
-              if (event.type === "task_failed") {
-                try {
-                  onDelta?.(FALLBACK_TEXT_BACKGROUND_FAILED());
-                } catch {
-                  /* ignore */
-                }
-              }
-            },
-            onAssistantDelta: (delta) => {
-              onDelta?.(delta);
-            },
-            onToolExecuteStart: (info) => {
-              opts?.onExternalToolExecuteStart?.({
-                toolName: info.name,
-                input: info.args,
-              });
-            },
-            onToolExecuted: (info) => {
-              opts?.onExternalToolExecuted?.({
-                toolName: info.name,
-                input: {},
-                ok: info.ok,
-                result: (info.result as Record<string, unknown>) ?? {},
-              });
-              // 失败时自我学习闭环（orchestrator 路径）：写入 selfLearning
-              this.brainCenter?.recordToolInteraction({
-                actorId,
-                sessionId,
-                userRequest: text,
-                attemptedTools: [info.name],
-                success: info.ok,
-                errorMessage: info.ok
-                  ? undefined
-                  : typeof (info.result as Record<string, unknown>)?.error === "string"
-                    ? String((info.result as Record<string, unknown>).error).slice(0, 200)
-                    : undefined,
-              });
-            },
-          },
-        );
-
-        // 立即返回任务已创建的回复(主循环在后台异步执行)
-        result = {
-          text: `已创建自动化任务 #${taskId.slice(-8)},正在后台执行: ${text}\n\n任务进度会通过事件实时推送。`,
-          streamedChunks: false,
-        };
-
-        return result;
-        } // end else (orchestrator available)
-      }
+      // 2026-08-29 桌面自动化特判已删除：桌面任务与一切任务轮统一走
+      // plan-and-execute（desktop.visual.run_task / desktop.run_preset 等工具
+      // 在 complex 全量工具目录内，长链路 UI 操作由工具内部的多轮执行承担）。
 
 if (this.isComplexMode(route.mode)) {
         // 异步并行：complex 多线程执行（子 Agent 委派 / plan_execute），
@@ -1246,7 +1157,7 @@ if (this.isComplexMode(route.mode)) {
         error: err instanceof Error ? err.message : String(err),
       });
 
-      if (this.isComplexMode(route.mode) && this.masterAgentCoordinator) {
+      if (this.isComplexMode(route.mode)) {
         console.error("[AgentCore] Master Agent orchestration failed, falling back to standard mode:", err);
         try {
           return await this.runStandardLlmPath(actorId, text, "fast", opts, {
@@ -1313,63 +1224,6 @@ if (this.isComplexMode(route.mode)) {
     if (process.env.NODE_ENV === 'development') {
       // 开发环境可在此添加调试逻辑
     }
-  }
-
-  /** 主 Agent 委派监控快照（metrics / history / suggestions） */
-  getMasterAgentDelegationSnapshot(): MasterAgentDelegationSnapshot {
-    const cfg = getAgentRuntimeConfig().masterDelegation;
-    if (!this.masterAgentCoordinator) {
-      return {
-        enabled: false,
-        metrics: null,
-        subAgentMetrics: null,
-        history: [],
-        suggestions: ["主 Agent 委派未启用。设置 ENABLE_MASTER_AGENT_DELEGATION=1 并配置外部模型。"],
-        config: null,
-      };
-    }
-    return {
-      enabled: true,
-      metrics: this.masterAgentCoordinator.getMetricsSnapshot(),
-      subAgentMetrics: this.masterAgentCoordinator.getSubAgentMetricsSnapshot(),
-      history: this.masterAgentCoordinator.getExecutionHistory(),
-      suggestions: this.masterAgentCoordinator.getOptimizationSuggestions(),
-      config: {
-        taskTimeoutMs: cfg.subtaskTimeoutMs,
-        techSubtaskTimeoutMs: cfg.techSubtaskTimeoutMs,
-        infoSubtaskTimeoutMs: cfg.infoSubtaskTimeoutMs,
-        maxSubAgentInvocationsPerTurn: cfg.maxSubAgentInvocationsPerTurn,
-        maxParallelTasks: this.masterAgentCoordinator?.getMaxParallelTasks() ?? cfg.maxParallelSubAgents,
-      },
-    };
-  }
-
-  /** 暴露 MasterAgentCoordinator 引用供 BrainCenter/PlannerCortex 注册委派能力 */
-  getMasterAgentCoordinator(): MasterAgentCoordinator | null {
-    return this.masterAgentCoordinator;
-  }
-
-  adjustMasterAgentConcurrency(_newMaxParallel: number): void {
-    this.masterAgentCoordinator?.adjustConcurrency(_newMaxParallel);
-  }
-
-  /** 查询子 Agent 后台任务与委派报告（供客户端「查看后台任务」面板）。 */
-  getSubAgentBackgroundTasks(actorId: string, chatUserMessageId?: string): Record<string, unknown> {
-    if (!this.masterAgentCoordinator) {
-      return { ok: false, error: "主 Agent 委派未启用" };
-    }
-    return this.masterAgentCoordinator.getSubAgentTasksSnapshot(actorId, chatUserMessageId);
-  }
-
-  async handleSubAgentBackgroundTaskAction(
-    actorId: string,
-    taskId: string,
-    action: "confirm" | "retry" | "continue_processing",
-  ): Promise<Record<string, unknown>> {
-    if (!this.masterAgentCoordinator) {
-      return { ok: false, error: "主 Agent 委派未启用" };
-    }
-    return this.masterAgentCoordinator.handleBackgroundTaskAction(actorId, taskId, action);
   }
 
   /**
@@ -1750,7 +1604,6 @@ if (this.isComplexMode(route.mode)) {
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
     },
   ): Promise<string> {
-    const useSubAgent = this.masterAgentCoordinator !== null;
     const registry = this.wsRegistry;
     const onDelta = opts?.onAssistantDelta;
     // 后台执行不继承外层 signal（turn 已返回占位，避免用户发新消息时中断后台任务）
@@ -1762,69 +1615,54 @@ if (this.isComplexMode(route.mode)) {
     return new Promise<string>((resolve, reject) => {
       const run = async (_taskId: string): Promise<void> => {
         try {
+          // 共用 complex 上下文参数：三个分支都以"complex 全量工具目录"跑工具循环，
+          // 仅在是否跳过 plan-execute 慢车道上不同。抽成函数避免三份重复。
+          const runComplex = (simpleToolLane: boolean) =>
+            this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
+              narrativeRecall: ctx.narrativeRecall,
+              workingMemorySummary: ctx.workingMemorySummary,
+              recentConversationHistory: ctx.recentConversationHistory,
+              journalRecall: ctx.journalRecall,
+              userLocation: ctx.userLocation,
+              trajCap: ctx.trajCap,
+              orchestrateToolCtx: ctx.orchestrateOpts,
+              personalization: ctx.personalization,
+              sessionId: ctx.sessionId,
+              shortTermTurn: ctx.shortTermTurn,
+              cognitiveEmotion: ctx.cognitiveEmotion,
+              cognitiveUserPattern: ctx.cognitiveUserPattern,
+              cognitiveToolPlan: ctx.cognitiveToolPlan,
+              ...(simpleToolLane ? { simpleToolLane: true } : {}),
+            });
+          // 结果兜底：任何 complex 分支必须产出非空最终文本，杜绝"调用工具但
+          // 结果空转"→ resolve("") → 前端只有垫词/进度、正文缺失的残链。
+          const finalize = async (raw: string): Promise<string> => {
+            const trimmed = (raw ?? "").trim();
+            if (trimmed) return trimmed;
+            // 原回复为空：尝试一次最小化 LLM 调用生成真实回复，避免把空串交到上层。
+            console.warn(`[AgentCore][complex-route] "${text}" 返回空结果，尝试应急重生成`);
+            const emergencyText = await this.emergencyRegenerate(actorId, text, onDelta);
+            return emergencyText.trim();
+          };
+
           // 简单单点工具快车道：只需一次工具调用即可完成的任务，
           // 跳过子 Agent 委派 / plan-execute 慢车道，直接跑单轮工具循环，
           // 让"工具被极快找到并完成"，避免多轮编排的开销。
           if (shouldUseSimpleToolFastLane(text)) {
-            const result = await this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
-              narrativeRecall: ctx.narrativeRecall,
-              workingMemorySummary: ctx.workingMemorySummary,
-              recentConversationHistory: ctx.recentConversationHistory,
-              journalRecall: ctx.journalRecall,
-              userLocation: ctx.userLocation,
-              trajCap: ctx.trajCap,
-              orchestrateToolCtx: ctx.orchestrateOpts,
-              personalization: ctx.personalization,
-              sessionId: ctx.sessionId,
-              shortTermTurn: ctx.shortTermTurn,
-              cognitiveEmotion: ctx.cognitiveEmotion,
-              cognitiveUserPattern: ctx.cognitiveUserPattern,
-              cognitiveToolPlan: ctx.cognitiveToolPlan,
-              simpleToolLane: true,
-            });
-            resolve(result.text ?? "");
+            console.log(
+              `[AgentCore][complex-route] "${text}" → simpleToolLane (fastLane判定结果)`,
+            );
+            const result = await runComplex(true);
+            resolve(await finalize(result.text ?? ""));
             return;
           }
 
-          if (useSubAgent && this.masterAgentCoordinator) {
-            // 子 Agent 委派：后台执行 Master Agent，结果通过 onAssistantDelta 流式回传
-            const masterResult = await this.masterAgentCoordinator.orchestrateTask(
-              actorId,
-              text,
-              opts?.onAgentPhaseStatus,
-              onDelta,
-              ctx.orchestrateOpts,
-            );
-            await this.finishLlmTurn(actorId, text, masterResult, {
-              streamedChunks: true,
-              modelCallsConsumed: 1,
-              planExecuteUsed: false,
-              pePlan: null,
-              peExhausted: false,
-              trajCap: ctx.trajCap,
-              messageId: opts?.chatUserMessageId,
-              sessionId: ctx.sessionId,
-            }, onDelta);
-            resolve(masterResult);
-          } else {
-            // plan_execute：执行标准复杂路径
-            const result = await this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
-              narrativeRecall: ctx.narrativeRecall,
-              workingMemorySummary: ctx.workingMemorySummary,
-              recentConversationHistory: ctx.recentConversationHistory,
-              journalRecall: ctx.journalRecall,
-              userLocation: ctx.userLocation,
-              trajCap: ctx.trajCap,
-              orchestrateToolCtx: ctx.orchestrateOpts,
-              personalization: ctx.personalization,
-              sessionId: ctx.sessionId,
-              shortTermTurn: ctx.shortTermTurn,
-              cognitiveEmotion: ctx.cognitiveEmotion,
-              cognitiveUserPattern: ctx.cognitiveUserPattern,
-              cognitiveToolPlan: ctx.cognitiveToolPlan,
-            });
-            resolve(result.text ?? "");
-          }
+          // plan_execute：complex 的唯一执行路径（2026-08-29 master 委派层已删除：
+          // 任务轮统一走 plan-execute 全量工具循环，多子任务由波内并行工具调用承担；
+          // simpleToolLane 是 plan 的单步退化形态，不是独立编排层）。
+          console.log(`[AgentCore][complex-route] "${text}" → plan_execute`);
+          const result = await runComplex(false);
+          resolve(await finalize(result.text ?? ""));
         } catch (err) {
           reject(err);
         }
@@ -2028,6 +1866,12 @@ if (this.isComplexMode(route.mode)) {
           }) ?? {}),
           chatToolsBuiltin: getFastLaneTools(),
           chatToolsExtra: [],
+          // 车道内升级逃生舱：escalate 工具在 fast 任何暴露策略下都不可被裁掉
+          // （升级通道本身不能依赖正则类别映射）。
+          pinnedToolNames: [ESCALATION_TOOL_NAME],
+          // fast maxRounds=1 下 tool_discover→tool_call 两波召回必断头：
+          // 禁用延迟目录，轻量工具全量可见，超出能力范围由 escalate 升级兜底。
+          disableToolSearch: true,
           // 2026-08-25 输出 token 上限：fast 对话模式限制单次输出长度，
           // 防止回复失控拉长（minimal 风格已要求简短，上限仅作兜底），
           // 复用同一限制覆盖工具分支与普通分支。可用 FAST_MAX_OUTPUT_TOKENS 覆盖。
@@ -2236,10 +2080,28 @@ if (this.isComplexMode(route.mode)) {
       full = await provider.streamCompletion(
         chatSessionId,
         userTurn,
-        (delta) => opts?.onAssistantDelta?.(delta),
+        // ★ fast 路径流式 delta 必须暂存：只有确定不走 fast→complex 升级时
+        // 才一次性推到前端；升级场景下整段丢弃（注释见下方）。
+        createFastPathDeltaGate(opts?.onAssistantDelta),
         toolCtx,
         mergedStreamOpts,
       );
+
+      // ── 车道内升级（2026-08-29）：fast 轮办不成的事重放 complex ──
+      // 升级哨兵由工具循环在三种情形返回：模型调用 agent.escalate_to_complex、
+      // 纯宣告未兑现、需要联网信息但 fast 无搜索工具。fast 路径上 LLM
+      // 已经产生的流式文本通过上面的 createFastPathDeltaGate 暂存，升级时
+      // 调用 gate.discard() 整段丢弃；非升级时调用 gate.flush() 一次性推前端，
+      // 保证升级场景下用户只看到 complex 的最终回复，不会先看到 fast 残文。
+      if (this.isFastMode(mode) && isEscalationSignal(full)) {
+        console.info(`[AgentCore] fast→complex 车道内升级：${text.slice(0, 48)}`);
+        (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
+          ._current?.discard();
+        full = await this.escalateFastTurnToComplex(actorId, text, opts, ctx);
+      } else {
+        (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
+          ._current?.flush();
+      }
     }
 
     return await this.turnFinalizer.finish(actorId, text, full, {
@@ -2252,6 +2114,65 @@ if (this.isComplexMode(route.mode)) {
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
     }, opts?.onAssistantDelta);
+  }
+
+  /**
+   * 车道内升级重放：fast 轮触发升级后，把整轮交给 complex 执行脑重跑。
+   *
+   * 先清掉 fast 轮写进主线程的残迹（user 消息 + 可能的工具链/部分回复，按
+   * clientMessageId 定位），再走 launchComplexBackgroundTask（plan-and-execute，
+   * complex 的唯一执行路径）。重放结果由 complex 分支自行落回主线程；调用方
+   * 拿到的文本走 runStandardLlmPath 的统一收尾（turnFinalizer 记忆写入只发生一次）。
+   *
+   * 不会无限递归：complex 分支内部所有路径（含 simpleToolLane 的直连
+   * streamCompletion）都不含 fastLane 的 escalate 工具，无法再次触发升级。
+   */
+  private async escalateFastTurnToComplex(
+    actorId: string,
+    text: string,
+    opts: HandleUserMessageOptions | undefined,
+    ctx: {
+      narrativeRecall?: string;
+      workingMemorySummary?: string;
+      recentConversationHistory?: string;
+      journalRecall?: string;
+      userLocation?: string;
+      trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
+      orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
+      personalization: PersonalizationPromptSlice;
+      sessionId: string;
+      shortTermTurn: ShortTermTurnContext;
+      cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
+      cognitiveUserPattern?: {
+        topics: string[];
+        preferredToolDomain?: string;
+        negativeFeedbackCount: number;
+        learningActive?: boolean;
+      };
+      cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
+    },
+  ): Promise<string> {
+    const provider = this.externalChat!;
+    const chatSessionId = resolvePrimaryChatSessionId(
+      actorId,
+      getAgentRuntimeConfig().masterDelegation.enabled,
+    );
+    provider.removeUserTurnAndAfter?.(chatSessionId, opts?.chatUserMessageId);
+    return this.launchComplexBackgroundTask(actorId, text, opts, {
+      narrativeRecall: ctx.narrativeRecall,
+      workingMemorySummary: ctx.workingMemorySummary,
+      recentConversationHistory: ctx.recentConversationHistory,
+      journalRecall: ctx.journalRecall,
+      userLocation: ctx.userLocation,
+      personalization: ctx.personalization,
+      trajCap: ctx.trajCap,
+      orchestrateOpts: ctx.orchestrateToolCtx,
+      sessionId: ctx.sessionId,
+      shortTermTurn: ctx.shortTermTurn,
+      cognitiveEmotion: ctx.cognitiveEmotion,
+      cognitiveUserPattern: ctx.cognitiveUserPattern,
+      cognitiveToolPlan: ctx.cognitiveToolPlan,
+    });
   }
 
   /**

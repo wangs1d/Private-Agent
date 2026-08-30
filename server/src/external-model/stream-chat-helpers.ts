@@ -514,6 +514,90 @@ const INTERNAL_CONTROL_TAG_FULL_RE =
 const INTERNAL_CONTROL_TAG_PREFIX_RE =
   /^\s*\[(?:话题已?切换|Topic|STOP)/i;
 
+/* ------------------------------------------------------------------ *
+ * 元术语整句净化（2026-08-29）                                        *
+ * ------------------------------------------------------------------ *
+ * 兜底防御 LLM 复读系统元术语（如「执行脑/规划任务/已接手/处理中」）
+ * 混入回复文本。规则：单句内若同时出现 ≥2 个"内部机制"关键词（且无
+ * 任何正常内容主题词），整句丢弃。流式场景下跨 chunk 缓冲：直到遇
+ * 到句末标点（。！？!?\n）才提交判定。
+ *
+ * 触发关键词已结合 system prompt 实际出现的术语：对话脑/执行脑/
+ * 规划任务/已接手/处理中/转交/后台处理/正在处理 等。
+ * ------------------------------------------------------------------ */
+const META_TERM_KEYWORDS = [
+  "对话脑",
+  "执行脑",
+  "规划任务",
+  "已接手",
+  "转交",
+  "后台处理",
+  "正在处理",
+  "上一轮",
+  "任务规划",
+  "执行脑已",
+  "规划任务,",
+  "执行脑,",
+];
+/** 单句内同时出现 ≥ MIN_HITS 个元术语即视为元描述整句，整句丢弃。 */
+const MIN_META_HITS = 2;
+const SENTENCE_END_RE = /[。！？!?\n]/;
+
+function isMetaOnlySentence(sentence: string): boolean {
+  if (!sentence) return false;
+  let hits = 0;
+  for (const kw of META_TERM_KEYWORDS) {
+    if (sentence.includes(kw)) hits++;
+    if (hits >= MIN_META_HITS) return true;
+  }
+  return false;
+}
+
+/**
+ * 流式元术语整句净化器（兜底）。
+ *
+ * 用法：把 provider 推流的原始增量喂给 `feed(delta)`，返回值为可推前端的
+ * 净化后增量。判定粒度：按句末标点切片，每个完整句独立检查；未遇到句末
+ * 标点的尾部内容留在缓冲里继续累积。
+ *
+ * 与 createStreamControlTagSanitizer 的区别：本函数针对的是「整句描述
+ * 元机制」（如「上一轮转入规划任务，执行脑已接手处理中」），而非方括
+ * 号控制标签。
+ */
+export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
+  let pending = "";
+
+  return function feed(delta: string): string {
+    pending += delta;
+    // 保险丝：缓冲过长直接切到直通，避免长段落被无限拦截。
+    if (pending.length > maxPendingChars) {
+      const out = pending;
+      pending = "";
+      return out;
+    }
+    // 没有句末标点 → 继续累积，不输出
+    const lastEnd = Math.max(
+      pending.lastIndexOf("。"),
+      pending.lastIndexOf("！"),
+      pending.lastIndexOf("？"),
+      pending.lastIndexOf("!"),
+      pending.lastIndexOf("?"),
+      pending.lastIndexOf("\n"),
+    );
+    if (lastEnd < 0) return "";
+    // 切出已完成的句子，逐句过滤
+    const complete = pending.slice(0, lastEnd + 1);
+    pending = pending.slice(lastEnd + 1);
+    const kept: string[] = [];
+    for (const sentence of complete.split(/(?<=[。！？!?\n])/)) {
+      if (!sentence) continue;
+      if (isMetaOnlySentence(sentence)) continue; // 元描述整句丢弃
+      kept.push(sentence);
+    }
+    return kept.join("");
+  };
+}
+
 /** 整串剥离内部控制标签前缀（可匹配多个连续标签）。 */
 export function stripInternalControlTags(text: string): string {
   if (!text) return text;

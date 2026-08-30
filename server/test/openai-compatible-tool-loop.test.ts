@@ -47,3 +47,42 @@ test("does not require fresh web lookup when the tool is unavailable", () => {
     false,
   );
 });
+
+// ── 车道内升级（in-trajectory escalation）回归 ──
+
+test("fast lane toolset always carries the escalation escape hatch", async () => {
+  const { getFastLaneTools } = await import(
+    "../src/external-model/openai-compatible-tool-loop.js"
+  );
+  const tools = getFastLaneTools();
+  const names = tools.map((t) => ("function" in t ? t.function?.name : undefined));
+  assert.ok(names.includes("agent.escalate_to_complex"));
+});
+
+test("selectRelevantTools keeps the escalation tool visible for any user text", async () => {
+  const { getFastLaneTools, selectRelevantTools } = await import(
+    "../src/external-model/openai-compatible-tool-loop.js"
+  );
+  for (const userText of ["2分钟后提醒我睡觉", "在吗", "今天天气怎么样", "帮我搜下新闻"]) {
+    const selected = selectRelevantTools(userText, getFastLaneTools(), {
+      minTools: 4,
+      maxTools: 15,
+      includeAlwaysIncluded: true,
+    });
+    const names = selected.map((t) => ("function" in t ? t.function?.name : undefined));
+    assert.ok(
+      names.includes("agent.escalate_to_complex"),
+      `escalate tool must survive contextual selection for: ${userText}`,
+    );
+  }
+});
+
+test("isEscalationSignal detects the sentinel and ignores normal replies", async () => {
+  const { isEscalationSignal, ESCALATION_SENTINEL } = await import(
+    "../src/tools/escalation-tool.js"
+  );
+  assert.equal(isEscalationSignal(ESCALATION_SENTINEL), true);
+  assert.equal(isEscalationSignal("好的，2分钟后叫你睡觉哦"), false);
+  assert.equal(isEscalationSignal(""), false);
+  assert.equal(isEscalationSignal(undefined), false);
+});

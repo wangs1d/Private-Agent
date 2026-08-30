@@ -170,6 +170,7 @@ export function SphereAgentScene({
           modelScale={isOverlay ? OVERLAY_SCENE.modelScale : EMBED_SCENE.modelScale}
           motionBounds={isOverlay ? 0 : 1.15}
           hardMotionClamp={isEmbed}
+          verticalStable={isOverlay}
           onEyeInteractionChange={onEyeInteractionChange}
           userDragRotate={userDragRotate}
           onUserTouch={onUserTouch}

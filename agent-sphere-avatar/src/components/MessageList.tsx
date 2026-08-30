@@ -24,8 +24,8 @@ export function MessageList({ messages }: MessageListProps) {
     prevCountRef.current = count;
 
     if (isNewMessage) {
-      // 新增了一条消息：平滑滚入到底部
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+      // 新增了一条消息：即时贴底（不做平滑滚动，避免与流式即时跟随冲突导致画面抖动）
+      container.scrollTop = container.scrollHeight;
     } else if (container.scrollHeight - container.scrollTop - container.clientHeight < 8) {
       // 流式追加内容：已贴底时瞬时跟随，避免每次 chunk 平滑滚动导致最新文字持续"动"
       container.scrollTop = container.scrollHeight;

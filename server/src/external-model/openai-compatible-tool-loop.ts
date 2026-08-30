@@ -25,11 +25,6 @@ import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tool
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { modelSupportsVision, ocrScreenshot } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
-import {
-  MASTER_INVOKE_SUB_AGENT_REGISTRY,
-  MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
-  SUBAGENT_ASK_PEER_REGISTRY,
-} from "../agent/master-subagent-delegate-tools.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
 import {
   executeBridge,
@@ -43,6 +38,12 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
+import { requiresFreshExternalInfo } from "../agent/task-router.js";
+import {
+  ESCALATE_TOOL_SCHEMA,
+  ESCALATION_SENTINEL,
+  ESCALATION_TOOL_NAME,
+} from "../tools/escalation-tool.js";
 import {
   FRESH_FACT_TOOL_NAMES,
   resolveForcedToolChoice,
@@ -51,6 +52,7 @@ import {
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isToolCallIdNotFoundError,
+  isToolChoiceRejectedError,
   sanitizeChatMessagesForApi,
 } from "./chat-thread-sanitize.js";
 import {
@@ -63,6 +65,7 @@ import {
   materializeOpenAiToolCalls,
   StreamIdleTimeoutError,
   stripInternalControlTags,
+  createStreamMetaSentenceFilter,
   type NormalChatChunk,
   type NormalToolCall,
   type NormalUsage,
@@ -217,9 +220,13 @@ function buildFallbackAnswerFromToolOutputs(outputs: string[]): string {
  *  - 未来承诺收尾：稍后/回头/待会/等一下 + 告诉/发/回/结果
  *  - 安抚等待：别急/别着急/稍等/马上 + 告诉/结果/回复/联系/就去
  *  - 完成通知：查到/找到/弄到/搞定 + 告诉你/发给你/再说
+ *  - 假装在办（2026-08-29 补漏，真实案例「规划呢→我在帮你琢磨呢…等我理好了一股脑给你」
+ *    从旧正则漏网，垫话被当正式回复放行）：
+ *    「我在/正在帮你 + 琢磨/想/研究/盘算/整理/捋/规划/排/弄/办/处理/准备」
+ *    「等…理好/想好/弄好/排好/安排好…给你/告诉你」
  */
 const ACTION_ANNOUNCE_RE =
-  /(?:我这就|我来|我去|让我|我先).{0,14}(?:查|看|找|搜|瞅|问|读|取|打听|确认|翻一下|点点|设个|安排|处理|说一声)|(?:稍后|回头|待会|等一下).{0,8}(?:告诉|发|回|结果|更(?:新|我))|(?:别急|别着急|稍等(?:一下)?).{0,6}(?:告诉|结果|回复|联系|就好|就去)|(?:查到|找到|弄到|搞定|问到|看到)?(?:就|便|再).{0,4}(?:告诉|发你|发给你|再说|通知|更新你)/i;
+  /(?:我这就|我来|我去|让我|我先).{0,14}(?:查|看|找|搜|瞅|问|读|取|打听|确认|翻一下|点点|设个|安排|处理|说一声)|(?:稍后|回头|待会|等一下).{0,8}(?:告诉|发|回|结果|更(?:新|我))|(?:别急|别着急|稍等(?:一下)?).{0,6}(?:告诉|结果|回复|联系|就好|就去)|(?:查到|找到|弄到|搞定|问到|看到)?(?:就|便|再).{0,4}(?:告诉|发你|发给你|再说|通知|更新你)|(?:我在|正在|这就)帮你?(?:琢磨|想|研究|盘算|整理|捋|规划|排|弄|办|处理|准备)|等.{0,8}(?:理好|想好|弄好|搞好|准备好|琢磨好|研究好|排好|整理好|安排好|规划好).{0,10}(?:给你|发你|告诉你|发给你|再说|通知你)|帮你琢磨/i;
 
 /** 是否「只有行动宣告、未兑现任何真实结果」：命中宣告模式 且 不含数据锚点。 */
 function isActionAnnouncementOnly(text: string): boolean {
@@ -265,30 +272,6 @@ function isApologyStyleFallback(text: string): boolean {
 function resolveToolExecutionTimeoutMs(registryToolName: string): number {
   const fallback = Number.parseInt(process.env.TOOL_EXECUTION_TIMEOUT_MS ?? "30000", 10);
   const defaultMs = Number.isFinite(fallback) && fallback > 0 ? fallback : 30_000;
-  if (registryToolName === MASTER_INVOKE_SUB_AGENT_REGISTRY) {
-    const rt = getAgentRuntimeConfig().masterDelegation;
-    return (
-      Math.max(
-        rt.subtaskTimeoutMs,
-        rt.techSubtaskTimeoutMs,
-        rt.infoSubtaskTimeoutMs,
-      ) + 5_000
-    );
-  }
-  if (registryToolName === MASTER_POLL_SUB_AGENT_TASKS_REGISTRY) {
-    return Math.max(defaultMs, 10_000);
-  }
-  // subagent.ask_peer 内部跑一次完整子 Agent 执行，需与 master.invoke_sub_agent 同级超时
-  if (registryToolName === SUBAGENT_ASK_PEER_REGISTRY) {
-    const rt = getAgentRuntimeConfig().masterDelegation;
-    return (
-      Math.max(
-        rt.subtaskTimeoutMs,
-        rt.techSubtaskTimeoutMs,
-        rt.infoSubtaskTimeoutMs,
-      ) + 5_000
-    );
-  }
   // code.run 内部 spawn 超时上限 120s，外层需 ≥ 内层，避免外层先超时产生孤儿进程
   if (registryToolName === "code.run") {
     const sandboxMax = Number.parseInt(process.env.CODE_SANDBOX_TIMEOUT_MS ?? "30000", 10);
@@ -972,7 +955,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "reminder.plan",
       description:
-        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。若用户只说时刻与事项、未说明「单次/每天/每周/连续」，返回 needsRecurrenceConfirm=true，须先追问用户，确认后再调用。系统会智能分析任务内容（如「开会」→建议单次、「吃药」→建议每天、「接下来3天」→建议连续），并在结果中返回 suggestedQuestion、suggestedType、confidence、reason 和 examples 供你参考。请根据这些建议向用户提问，提供清晰的选项让用户选择。例：「明天 9:00 提醒我开会」可直接创建；「早上七点叫我起床」「提醒我每天喝水」须先根据建议询问用户重复方式。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。\n**提醒方式规则（重要）**：默认使用弹窗（popup）方式通知用户。仅当用户明确要求时才使用 TTS 语音闹钟或电话呼叫方式，例如用户说「打电话提醒我」「语音喊我」「电话叫醒我」。不要主动升级到 TTS 或电话方式，除非用户有明确偏好或主动提出需求。",
+        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（如「2分钟后提醒我睡觉」「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具创建，不要追问、不要口头答应而不调用。仅当工具结果返回 needsRecurrenceConfirm=true（服务端判定重复方式确实无法推断）时，才根据返回的 suggestedQuestion 向用户追问一次，确认后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。\n**提醒方式规则（重要）**：默认使用弹窗（popup）方式通知用户。仅当用户明确要求时才使用 TTS 语音闹钟或电话呼叫方式，例如用户说「打电话提醒我」「语音喊我」「电话叫醒我」。不要主动升级到 TTS 或电话方式，除非用户有明确偏好或主动提出需求。",
       parameters: {
         type: "object",
         properties: {
@@ -999,7 +982,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_from_text",
       description:
-        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。提醒类若未说明单次或每天/每周/连续，返回 needsRecurrenceConfirm=true，须向用户确认后再创建。系统会智能分析任务类型并提供建议（含 suggestedQuestion、examples 等），请据此向用户提问。例「明天 9:00 提醒我开会」「每天 7 点天气提醒」「接下来3天提醒我复习」。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）；解析失败则 matched=false。",
+        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。带明确时间点的单次日程/提醒（如「明天 9:00 提醒我开会」）必须直接调用本工具创建，不要追问。仅当工具结果返回 needsRecurrenceConfirm=true（服务端判定重复方式无法推断）时，才根据返回的 suggestedQuestion 向用户追问一次，确认后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）；解析失败则 matched=false。",
       parameters: {
         type: "object",
         properties: {
@@ -1468,7 +1451,9 @@ export function getFastLaneTools(): ChatCompletionTool[] {
     if (!("function" in t) || !t.function?.name) return false;
     return !seen.has(t.function.name);
   });
-  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique];
+  // 车道内升级逃生舱：fast 每轮必带。模型发现轻量工具办不完全这件事时
+  // 调用 agent.escalate_to_complex，工具循环短路返回哨兵，agent-core 重放 complex。
+  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique, ESCALATE_TOOL_SCHEMA];
   return _fastLaneToolsCache;
 }
 
@@ -1843,6 +1828,9 @@ const ALWAYS_INCLUDED_TOOLS = [
   'agent.query_capabilities',
   'brain.list_capabilities',
   'phone.call_user',
+  // 车道内升级逃生舱：fast 轮无论命中哪个类别都可见（正则类别映射不可靠，
+  // 升级通道本身不能依赖它）。
+  ESCALATION_TOOL_NAME,
   // search_images 不再常驻：
   //   收敛误触发（2026-08-20，宁缺勿滥）——常驻会让模型在"对话前面搜过图、本轮并
   //   未要图"时仍被勾着调用。改为回落到 contextual 筛选：只有当当前轮用户意图命
@@ -2072,49 +2060,6 @@ const PLAN_CALL_MAX_OUTPUT_TOKENS = (() => {
  */
 const PLAN_NON_STREAMING = process.env.PLAN_NON_STREAMING !== "0";
 
-/**
- * 档3：SUMMARIZE 探测（NEED_MORE_TOOLS）报结果不足时，若剩余工作命中探索型
- * （纵挖）信号，则向后续 replan 波次注入「单次委派」引导——让模型把剩余深链
- * 打包成一次 master.invoke_sub_agent（子 Agent 在独立上下文完成），而不是在主循环
- * 反复 replan（每波重发全量工具 schema）。仅引导、不强制：剩余 1~2 个直接小调用
- * 即可补齐时模型仍可直接执行。可用 `PLAN_DELEGATE_STEER=0` 关闭。
- */
-const PLAN_DELEGATE_STEER = process.env.PLAN_DELEGATE_STEER !== "0";
-
-/** 深度探索/纵挖意图信号：命中 → 剩余链条适合交给子 Agent 纵深执行。 */
-const DELEGATE_STEER_INTENT_RE =
-  /调研|研究|深挖|深度|调查|比价|货比|监控|跟踪|交叉验证|多.?个来源|全网|多渠道|搜集|收集信息|找.?更多|继续.?找|搜.?几个|搜.?多家|对比.?多|多.?对比|查.?行情|查.?资料|背景信息/i;
-
-/** 探索形态工具前缀：本波已用这些工具 → 链条呈"查→深读→整理"的纵挖形状。 */
-const DELEGATE_STEER_TOOL_PREFIXES = ["search_", "fetch_web", "info."];
-
-function usedExploratoryTool(toolResults: Array<{ name: string; ok: boolean }>): boolean {
-  return toolResults.some(
-    (r) => r.ok && DELEGATE_STEER_TOOL_PREFIXES.some((p) => r.name.startsWith(p)),
-  );
-}
-
-/** 确定性判据（无 LLM 调用）：剩余工作是否为值得委派的探索型链条（横切留主循环，纵挖给委派）。 */
-function shouldSteerRemainingWorkToDelegate(
-  userText: string,
-  toolResults: Array<{ name: string; ok: boolean }>,
-): boolean {
-  if (DELEGATE_STEER_INTENT_RE.test(userText)) return true;
-  return usedExploratoryTool(toolResults);
-}
-
-/** 委派引导文案：仅作用在 replan 波次的单次请求，不写入持久历史（避免污染最终 SUMMARIZE）。 */
-function buildDelegateSteerMessage(): string {
-  return [
-    "【系统提示·探索委派引导】现有工具结果仍不足，剩余工作需要在主循环外继续深入。",
-    "为避免主循环反复 replan（每波重发全部工具 schema 烧 token）：若剩余链条需多步深入" +
-      "（再查多个来源→交叉验证→整理结论），请把剩余工作打包成**一次** master.invoke_sub_agent 调用：",
-    "- type 选最匹配的子 Agent：info=信息检索与深度调研；life=生活操作；tech=技术操作。",
-    "- taskDescription 写清：剩余目标、已拿到的中间结论（含关键数据）、必须覆盖的点。",
-    "调用后若返回任务 id，用 master.poll_sub_agent_tasks 等待结果，拿到后直接向用户汇总。",
-    "若剩余只需 1~2 个直接小调用即可补齐，直接并行补齐即可，不要委派。",
-  ].join("\n");
-}
 
 /** replan 历史瘦身：折叠旧波次工具结果时保留的结果要点长度（确定性截断，不经 LLM）。 */
 const REPLAN_FOLD_DIGEST_CHARS = 160;
@@ -2365,11 +2310,13 @@ export async function streamCompletionWithTools(
   // 与 freshLookupEnforced 区分：fresh 只看用户文本是否含搜索意图，管不到「LLM 宣告
   // 了要办某件事却空手收尾」这条；此标志专治后者。
   let announcementEnforced = false;
+  // 空正文整合兜底（2026-08-29）：模型调完工具只发 tool_calls 就收尾、零正文时，
+  // 强制它基于工具结果说人话（而非把工具 JSON 原文糊给用户），只授予一次。
+  let narrationEnforced = false;
+  // 车道内升级：fast 轮模型调用 agent.escalate_to_complex 后置位，本波工具批
+  // 结束即返回升级哨兵（agent-core 的 fast 分支据此重放 complex）。
+  let escalationRequested = false;
   // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
-  // 注入「单次委派」引导（仅该波请求，不写持久历史）。delegateSteerDone 保证
-  // 一轮只引导一次——模型该波要么委派、要么直接补齐，反复提示只会增加噪音。
-  let delegateSteerMessage: string | null = null;
-  let delegateSteerDone = false;
   // 前缀缓存命中统计（本调用内聚合，结束时打印一行，验证优化前后命中率变化）
   const prefixCacheStats = { hit: 0, miss: 0 };
   const accumulatePrefixCacheUsage = (usage?: NormalUsage) => {
@@ -2398,12 +2345,14 @@ export async function streamCompletionWithTools(
         "2. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。",
+        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。\n" +
+        "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。",
     });
   }
 
   for (let wave = 0; wave < maxWaves; wave++) {
     let retriedToolCallIdError = false;
+    let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
     // ③/④ 规划轮：非思考模型走非流式 + 输出上限（协议更省、usage 确定、防正文烧 token）；
     // 思考模型（deepseek-reasoner 等）保持流式 + 不限 max_tokens，避免压缩 reasoning 空间。
@@ -2426,27 +2375,19 @@ export async function streamCompletionWithTools(
           logPrefix: "[openai-tool-loop]",
         },
       );
-      // 档3 委派引导注入：仅作用于 replan 波次（wave>0）的这一次请求——
-      // 在 sanitized 副本上追加，不改动 messages 持久历史，避免污染最终 SUMMARIZE；
-      // 注入后立即清空，保证一轮只提示一次。
-      const steerMsg = delegateSteerMessage && wave > 0 ? delegateSteerMessage : null;
-      if (steerMsg) delegateSteerMessage = null;
-      const baseRequestMessages = options?.requestSystemMessages
+      const requestMessages = options?.requestSystemMessages
         ? applyPromptCacheMessages(
             sanitizedMessages,
             options.requestSystemMessages,
             options.tailDynamicContext,
           )
         : sanitizedMessages;
-      const requestMessages = steerMsg
-        ? [...baseRequestMessages, { role: "system", content: steerMsg }]
-        : baseRequestMessages;
       try {
         const request = {
           model,
           messages: requestMessages,
           tools: stableApiTools,
-          tool_choice: resolveForcedToolChoice(userText, stableApiTools, fastProfile),
+          tool_choice: retriedToolChoice ? "auto" : resolveForcedToolChoice(userText, stableApiTools, fastProfile),
           // 明确启用并行工具调用，让 LLM 在单轮内返回多个 tool_calls。
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
@@ -2467,6 +2408,16 @@ export async function streamCompletionWithTools(
           retriedToolCallIdError = true;
           repairMessagesAfterToolCallIdError(messages, thinkingDisabled);
           console.warn("[openai-tool-loop] Retrying completion after tool_call_id repair");
+          continue;
+        }
+        // tool_choice 兼容性保护：部分端点（DeepSeek、thinking 模式 Moonshot 等）
+        // 拒绝非 auto 的 tool_choice（"Thinking mode does not support this tool_choice"→400）。
+        // 首次带强制 tool_choice 失败后，降级为 auto 重试一次，不丢强制工具的优化收益。
+        if (!retriedToolChoice && isToolChoiceRejectedError(e)) {
+          retriedToolChoice = true;
+          console.warn(
+            `[openai-tool-loop] tool_choice 被端点拒绝（${(e as { status?: number }).status}），降级 auto 重试`,
+          );
           continue;
         }
         throw e;
@@ -2619,6 +2570,28 @@ export async function streamCompletionWithTools(
       // 此处检测：文本命中行动宣告模式 且 本轮从未执行过任何工具 且 未强制过 → 注入
       // 指令强制补打一波真实工具调用，不允许空头宣告当作收尾。全程最多授予一次。
       // 不受 maxWaves / requiresFreshWebLookup 限制——fast 模式唯一波次也要兜住。
+      // ── fast 车道升级保底（2026-08-29 车道内升级）──
+      // fast 是 maxRounds=1 + 轻量工具子集的有损模式。注意：fast 下宣告补打的
+      // `continue` 会越过 maxWaves=1 直接落进无 schema 的 summary 调用——模型重试
+      // 时根本没有工具可调，补打在 fast 是死路。因此 fast 命中以下两种情形时
+      // 跳过补打、直接升级 complex 重放：
+      //   1. 回复是纯宣告（"我这就去查/稍后告诉你"）且没调任何工具；
+      //   2. 用户明确要求查实时信息（requiresFreshExternalInfo），但 fast 车道没有
+      //      搜索工具且模型一个工具都没调（forced-tool 的强制联网兜底在此静默失效）。
+      // 仅 fastProfile 生效：complex 有全量工具与多波预算，保留原补打链。
+      if (
+        fastProfile &&
+        allToolExecResults.length === 0 &&
+        (isActionAnnouncementOnly(finalText) || requiresFreshExternalInfo(userText))
+      ) {
+        console.info(
+          `[openai-tool-loop] fast 车道升级：${
+            isActionAnnouncementOnly(finalText) ? "宣告未兑现" : "需要联网信息但 fast 无搜索工具"
+          } → 重放 complex`,
+        );
+        logPrefixCacheStats();
+        return ESCALATION_SENTINEL;
+      }
       if (
         isActionAnnouncementOnly(finalText) &&
         allToolExecResults.length === 0 &&
@@ -2662,6 +2635,30 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
+      // 空正文整合兜底（2026-08-29）：isApologyStyleFallback("")=true，旧行为会
+      // 把 lastToolOutputFallback（工具输出原文，如 travel.plan-itinerary 的
+      // summarizeItinerary JSON）整段糊给用户。这里先注入一次指令强制模型基于
+      // 工具结果用自然口语回复；仍失败才落到下方工具原文拼接。
+      // wave 预算守卫：fast（maxWaves=1）与最后一波不授予，避免 continue 越过预算。
+      if (
+        !finalText.trim() &&
+        allToolExecResults.length > 0 &&
+        !narrationEnforced &&
+        wave + 1 < maxWaves
+      ) {
+        narrationEnforced = true;
+        messages.push({
+          role: "assistant",
+          content: fullText || "",
+        });
+        messages.push({
+          role: "system",
+          content:
+            "你刚才调用了工具但还没有向用户输出任何正文。请立即基于以上工具结果用自然口语回复用户，把关键信息讲清楚；" +
+            "不要输出 JSON 或原始数据结构（那由前端结构化渲染负责）。若结果为空或失败，请如实向用户说明。",
+        });
+        continue;
+      }
       // 防 LLM "道歉式兜底"（不做额外 LLM1 重建，减少 LLM 调用）：
       //  - 已有成功工具数据但 LLM 输出是 apology/无法整合 → 直接用工具结果拼接，不额外调 LLM1；
       //  - 无成功工具数据而 LLM 出 apology/空 → 返回空串，由上层自然处理，不额外调 LLM1。
@@ -2677,7 +2674,14 @@ export async function streamCompletionWithTools(
       // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
       // 保证推给前端的气泡不出现这些内部信号（此前在 agent-core finishLlmTurn 后置剥离
       // 太晚——流式早已透出，无法撤回）。
-      const sanitizedFinalText = stripInternalControlTags(effectiveFinalText);
+      //
+      // 2026-08-29 扩展：再走一次元术语整句过滤，兜底 LLM 把系统元描述（"上一轮转入
+      // 规划任务，执行脑已接手处理中"）写成完整句子的场景——这类整句与正常内容混编
+      // 时整段丢弃，避免污染前端气泡。
+      const metaFilter = createStreamMetaSentenceFilter();
+      const sanitizedFinalText = stripInternalControlTags(
+        metaFilter(effectiveFinalText),
+      );
       if (sanitizedFinalText) {
         onDelta(sanitizedFinalText);
       }
@@ -2745,6 +2749,22 @@ export async function streamCompletionWithTools(
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
+        // 车道内升级逃生舱：escalate 是控制信号不是真实工具，短路执行直接上报。
+        if (item.registryToolName === ESCALATION_TOOL_NAME) {
+          escalationRequested = true;
+          return {
+            exec: { ok: true, result: { escalated: true } },
+            compacted: {
+              content: JSON.stringify({ escalated: true }),
+              rawBytes: 0,
+              compactBytes: 0,
+              compacted: false,
+            },
+            injectFrames: undefined,
+            resultForWire: { escalated: true },
+            wireToolName: ESCALATION_TOOL_NAME,
+          } as const;
+        }
         let targetToolName = item.registryToolName;
         let targetArgs = item.parsedArgs;
 
@@ -2927,6 +2947,16 @@ export async function streamCompletionWithTools(
       }),
     );
 
+    // 车道内升级：escalate 被调用 → 立即终止 fast 工具循环，交还 agent-core 重放 complex。
+    // 不再向 messages 追加 tool 结果（本轮消息序列废弃，重放从干净线程重新开始）。
+    if (escalationRequested) {
+      console.info(
+        `[openai-tool-loop] fast 车道升级：${ESCALATION_TOOL_NAME} 被调用 → 重放 complex`,
+      );
+      logPrefixCacheStats();
+      return ESCALATION_SENTINEL;
+    }
+
     for (let i = 0; i < workItems.length; i++) {
       const item = workItems[i];
       const settled = settledResults[i];
@@ -3038,26 +3068,6 @@ export async function streamCompletionWithTools(
         return probe.text;
       }
       console.info(`[plan-execute] wave=${wave} 汇总探测报告结果不足，进入 replan 波次`);
-      // 档3：结果不足且剩余链条命中探索型信号（且当前工具集确实含委派工具）→
-      // 向下一次 replan 波次注入「单次委派」引导，避免主循环反复 replan 重发全量 schema。
-      // 仅作用于探测点路径；失败/交互式工具链的 replan 不引导（重试/续跑由主循环承接）。
-      // 注意：stableApiTools 里的工具名经 registryNameToApiToolName 将 `.` 转成 `_`，
-      // 判据必须用 api 形态名比较。
-      if (
-        !delegateSteerDone &&
-        shouldSteerRemainingWorkToDelegate(userText, toolResults) &&
-        stableApiTools.some(
-          (t) =>
-            t.type === "function" &&
-            t.function?.name === registryNameToApiToolName(MASTER_INVOKE_SUB_AGENT_REGISTRY),
-        )
-      ) {
-        delegateSteerMessage = buildDelegateSteerMessage();
-        delegateSteerDone = true;
-        console.info(
-          `[plan-execute] wave=${wave} 命中探索型信号 → 已注入单次委派引导（master.invoke_sub_agent）`,
-        );
-      }
       continue;
     }
     // 存在失败 / 元工具（tool_search 桥接）/ 交互式工具 → replan（带 schema，

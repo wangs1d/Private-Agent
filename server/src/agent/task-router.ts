@@ -182,7 +182,12 @@ const FRESH_INFO_LOOKUP_RE =
 const FRESH_INFO_CHAT_OVERRIDE_RE =
   /你最近(怎么样|如何|咋样)|最近(过得|过|咋|怎)么样|最近忙|在忙(什么|啥)|你的近况|你近况/i;
 
-function requiresFreshExternalInfo(text: string): boolean {
+/**
+ * 判断用户消息是否明确要求查外部实时信息（搜索/查一下/吃瓜/行情…）。
+ * 导出供 tool-loop 的 fast 车道升级保底复用：fast 没有搜索工具，
+ * 这类轮次模型不调任何工具就作答必然是凭印象编造。
+ */
+export function requiresFreshExternalInfo(text: string): boolean {
   if (!text) return false;
   if (FRESH_INFO_CHAT_OVERRIDE_RE.test(text)) return false;
   return FRESH_INFO_LOOKUP_RE.test(text);
@@ -242,14 +247,6 @@ const SIMPLE_CHAT_OVERRIDE_RE =
 function hasTimeSensitiveIntent(text: string): boolean {
   if (SIMPLE_CHAT_OVERRIDE_RE.test(text)) return false;
   return TIME_SENSITIVITY_RE.test(text) || VERSION_SIGNAL_RE.test(text);
-}
-
-/**
- * 判断是否为桌面自动化任务(用于 complex 分支区分后台 vs 同步)。
- * 导出供 agent-core 复用,避免重复调 shouldUseStateMachineMode。
- */
-export function isDesktopAutomationTask(text: string): boolean {
-  return shouldUseStateMachineMode(text);
 }
 
 /**

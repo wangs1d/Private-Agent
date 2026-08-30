@@ -214,7 +214,6 @@ export {
   classifyToolExposureTier,
   isCoreToolRegistryName,
   isFastLaneTool,
-  isMasterAgentBuiltinTool,
   registerDynamicFastLaneName,
   registerDynamicFastLaneNames,
   clearDynamicFastLaneNames,

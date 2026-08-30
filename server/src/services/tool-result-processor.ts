@@ -7,7 +7,10 @@ import {
 import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { routeRender } from "../gateway/index.js";
 import { extractDataBriefPayload } from "./render-hint-service.js";
-import { formatAgentResultForChat } from "./agent-result-formatter.js";
+import {
+  formatAgentResultForChat,
+  formatSemanticResultForChat,
+} from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
 
@@ -391,6 +394,10 @@ export class ToolResultProcessor {
     // 优先级 3+：brief 简报增强 → 注入 [RENDER_AS:brief]
     if (hint.type === "brief") {
       console.log(`[ToolResultProcessor] brief: ${hint.reason}`);
+      // 简报若实为结构化内容（步骤/指标/时序/对比…），由内容信号直接上更重要
+      // —— 不再一律按"简报"正文类型处理（内容为主判据）
+      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
+      if (sc) return sc;
       return wrapRenderAs("brief", humanize(workingText));
     }
 
@@ -428,10 +435,19 @@ export class ToolResultProcessor {
       if (hint.intent) {
         return wrapRenderAs("structured", humanize(workingText));
       }
+      // 长文本若实际是结构化内容（步骤/指标/折叠/时序…），由内容信号直接上特效卡
+      // —— 不再被列表语法/J渲染门闸挡住（内容为主判据）
+      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
+      if (sc) return sc;
       return humanize(workingText);
     }
 
     // 优先级 5：plain 普通正文
+    // 普通叙述若显示是结构化内容，同样按内容信号上卡；否则保持纯文本
+    {
+      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
+      if (sc) return sc;
+    }
     return humanize(workingText);
   }
 }

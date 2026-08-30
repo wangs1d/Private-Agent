@@ -75,10 +75,6 @@ export type ToolRegistrationMetadata = Partial<Omit<ToolMetadata, "name">> & {
 
 /** LLM/API 工具名（下划线）→ 注册名（点号），兼容历史会话与未走 prepareToolsForChatApi 的路径。 */
 const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
-  master_invoke_sub_agent: "master.invoke_sub_agent",
-  master_list_sub_agents: "master.list_sub_agents",
-  master_poll_sub_agent_tasks: "master.poll_sub_agent_tasks",
-  subagent_ask_peer: "subagent.ask_peer",
   embodiment_roam: "embodiment.roam",
   embodiment_move: "embodiment.move",
   embodiment_stop: "embodiment.stop",

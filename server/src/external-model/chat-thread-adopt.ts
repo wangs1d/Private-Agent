@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import {
   MASTER_CHAT_SESSION_PREFIX,
   legacyMasterDelegateSessionId,
+  masterChatSessionId,
 } from "../agent/master-chat-session.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
 
@@ -41,5 +42,22 @@ export function adoptLegacyMasterDelegateThread(
     return rawActorThread;
   }
 
+  return masterThread;
+}
+
+/**
+ * 主会话收养（2026-08-29 master 委派层删除后的所有权迁移）：
+ * 裸 `actorId` 是唯一主线程；内存中缺失时从存量 `master:{actorId}` 线程**复制**收养。
+ * 复制而非移动：旧 master: 条目原样保留，回滚（重新启用委派）后历史不丢。
+ */
+export function adoptPrimaryThreadFromMasterThread(
+  history: Map<string, ChatCompletionMessageParam[]>,
+  sessionId: string,
+): ChatCompletionMessageParam[] | undefined {
+  if (!sessionId || sessionId.includes(":")) return undefined;
+  if (history.has(sessionId)) return undefined;
+  const masterThread = history.get(masterChatSessionId(sessionId));
+  if (!masterThread?.length) return undefined;
+  history.set(sessionId, masterThread);
   return masterThread;
 }

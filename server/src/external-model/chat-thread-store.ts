@@ -1,6 +1,7 @@
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
-import { adoptLegacyMasterDelegateThread } from "./chat-thread-adopt.js";
+import { adoptLegacyMasterDelegateThread, adoptPrimaryThreadFromMasterThread } from "./chat-thread-adopt.js";
+import { masterChatSessionId } from "../agent/master-chat-session.js";
 import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
@@ -647,6 +648,10 @@ export class ChatThreadStore {
     if (!t) {
       t = adoptLegacyMasterDelegateThread(this.history, sessionId);
     }
+    if (!t) {
+      // master 委派层删除后的所有权迁移：裸 actorId 主线程缺失时从 master: 收养
+      t = adoptPrimaryThreadFromMasterThread(this.history, sessionId);
+    }
     if (!t && this.persistence) {
       const restored = this.persistence.loadRestoredMessages(sessionId);
       if (restored?.length) {
@@ -656,6 +661,22 @@ export class ChatThreadStore {
           ...repairKimiAssistantToolCallReasoning(
             compactValidChatMessages(
               restored.map((msg) => annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now)),
+            ),
+          ),
+        ];
+        this.history.set(sessionId, t);
+      }
+    }
+    if (!t && this.persistence && !sessionId.includes(":")) {
+      // 持久层同规则收养：裸会话无落盘数据但存量 master:{actorId} 有 → 复制恢复
+      const masterRestored = this.persistence.loadRestoredMessages(masterChatSessionId(sessionId));
+      if (masterRestored?.length) {
+        const now = new Date();
+        t = [
+          { role: "system", content: sessionSys ?? defaultSystemPrompt },
+          ...repairKimiAssistantToolCallReasoning(
+            compactValidChatMessages(
+              masterRestored.map((msg) => annotateMessageIfNeeded(msg, extractMessageTimestamp(msg) ?? now, now)),
             ),
           ),
         ];

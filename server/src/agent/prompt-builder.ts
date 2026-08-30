@@ -124,28 +124,6 @@ const MESSAGE_TIMESTAMP_SUFFIX = `
 
 【话题切换】如果上一条 user 消息和当前主题不同，回复必须直接回应本条，不要接着上轮续写，不要把上轮工具结果当作本轮语境。回复开头不要出现「接着上轮」「我刚查」等承接话，也不要带话题标签前缀。`;
 
-function buildMasterSubAgentDelegateSuffix(): string {
-  const maxParallel = getAgentRuntimeConfig().masterDelegation.maxParallelSubAgents;
-  return `
-
-【主 Agent 调度】你是主 Agent（带头大哥），手下有 3 类专业「小弟」子 Agent，由你调度、对用户只呈现一份整合后的答复：
-- life（生活）：钱包写操作、订票下单、电脑操控等复杂生活执行
-- tech（技术）：深度 RPA、写代码、部署运维、批量自动化
-- info（信息）：深度搜索、比价调研、多轮检索（只查不买）；电商实价需用户导入 Cookie 并授权 browser.fetch_page
-
-【何时自己干 vs 派小弟】
-- 简单、单一事项：优先直接用 clock、calendar、search_web 等，不必派小弟。
-- 需要专业能力、多步骤、或你一个人搞不定时：调用 master_invoke_sub_agent 派对应小弟。
-
-【并行委派】用户一次提多件互不依赖的事，或你拆成多个独立子任务时，应在同一轮 tool 批次里并行多次 master_invoke_sub_agent（服务端最多同时跑 ${maxParallel} 个小弟）。例：「查北京天气 + 调研某商品价格」→ 可并行派 info 做调研，主 Agent 自己查天气。
-- 无依赖务必并行，不要无谓排队。
-- 耗时任务可 runInBackground=true，再用 master_poll_sub_agent_tasks 收齐小弟报告后统一回复用户。
-
-【对用户说话】每次 master_invoke_sub_agent 必须填 userStatusLine：口语化、有活人感（如「我让小弟去查价，你稍等」），禁止只写工具名或固定套话。
-- 小弟报告仅供你整合；最终由你精简回复用户，不要甩内部 taskId。
-- 不确定派谁时先 master_list_sub_agents 看名册。
-- 用户处于「沙箱」时勿派需要 desktop.visual.run_task / vision.periodic_* / self.* 的任务；须提醒开启「完全访问」。`;
-}
 
 /** 追加「回复规则」（分段结构 + 事实边界 + 记忆使用边界，已包含则跳过）。 */
 export function appendConciseReplySystemSuffix(systemContent: string): string {
@@ -278,9 +256,6 @@ export function finalizeChatSystemPrompt(
   out = appendMessageTimestampSystemSuffix(out);
   if (opts?.tools) {
     out = appendAgentToolCallingSystemSuffix(out);
-    if (opts.masterSubAgentDelegate) {
-      out = appendMasterSubAgentDelegateSuffix(out);
-    }
   }
   out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
     desktopBridgeOnline: opts?.desktopBridgeOnline,
@@ -309,12 +284,6 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
     out += LIFE_STEWARD_SYSTEM_SUFFIX;
   }
   return out;
-}
-
-/** 主 Agent 启用子 Agent 委派工具时追加的 system 说明 */
-export function appendMasterSubAgentDelegateSuffix(systemContent: string): string {
-  if (systemContent.includes(MASTER_SUBAGENT_DELEGATE_MARKER)) return systemContent;
-  return systemContent + buildMasterSubAgentDelegateSuffix();
 }
 
 /** 未设置 `AGENT_PROMPT_MEMORY_KEYS` 时默认注入的 UAP 键（可用 env 覆盖或 `off` 关闭）。 */

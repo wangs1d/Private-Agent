@@ -18,7 +18,8 @@ import type {
   SystemRouteDecision,
   SystemRouteMode,
 } from "./types.js";
-import type { SubAgentType } from "../services/master-agent-types.js";
+// master 委派层已删除：SubAgentType 本地定义，仅保留 shouldDelegate/delegate 的降级接口形状
+export type SubAgentType = "life" | "tech" | "info";
 import type {
   WorldModel,
   WorldState,

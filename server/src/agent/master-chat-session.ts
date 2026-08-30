@@ -17,13 +17,17 @@ export function notesChatSessionId(actorId: string): string {
 }
 
 /**
- * 用户主会话线程 id：启用主 Agent 委派时统一 `master:{actorId}`，否则裸 actorId。
+ * 用户主会话线程 id。
+ *
+ * 2026-08-29 master 委派层删除：主会话统一回归裸 `actorId`，对话脑是主线程的
+ * 唯一所有者与写者。`masterDelegationEnabled` 参数保留仅为调用方兼容，不再影响结果。
+ * 存量 `master:{actorId}` 线程由 chat-thread-adopt 在首访裸会话时一次性收养（复制）。
  */
 export function resolvePrimaryChatSessionId(
   actorId: string,
-  masterDelegationEnabled: boolean,
+  _masterDelegationEnabled?: boolean,
 ): string {
-  return masterDelegationEnabled ? masterChatSessionId(actorId) : actorId;
+  return actorId;
 }
 
 /** 旧版委派模式使用的 session 键（升级时合并到 {@link masterChatSessionId}）。 */

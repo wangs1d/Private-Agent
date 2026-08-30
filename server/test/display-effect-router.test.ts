@@ -330,3 +330,104 @@ test("e2e: confident content signal wins over tool fallback", () => {
   );
   assert.equal(extractCardType(marked), "progress");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 内容语义路径：普通文本/长文也能命中结构化卡（不依赖列表语法）
+// ─────────────────────────────────────────────────────────────────────────────
+
+import {
+  extractSemanticItems,
+  routeDisplayEffectByForm,
+} from "../src/services/display-effect-router.js";
+import { formatSemanticResultForChat } from "../src/services/agent-result-formatter.js";
+
+test("extractSemanticItems splits narrative without list markers", () => {
+  const items = extractSemanticItems(
+    "先把水烧开，然后放入面条，最后加上调料拌一拌。",
+  );
+  // 按句号切开成独立语义条目
+  assert.ok(items.length >= 2);
+  assert.ok(items.some((i) => i.includes("烧开")));
+});
+
+test("extractSemanticItems drops heading-guide lines", () => {
+  // 标题引导行（结尾冒号）不应被当作文本条目
+  const items = extractSemanticItems("屏幕参数：\n尺寸：6.7英寸\n重量：199g");
+  assert.ok(!items.some((i) => i === "屏幕参数："));
+  assert.equal(items[0], "尺寸：6.7英寸");
+});
+
+test("routeDisplayEffect hits steps for narrative via intent; pure-form misses it", () => {
+  const input = {
+    title: "",
+    items: [{ text: "先把水烧开" }, { text: "然后放入面条" }, { text: "最后加上调料" }],
+    fullText: "先把水烧开，然后放入面条，最后加上调料拌一拌，就可以开吃了。",
+  };
+  // 含意图加成：步骤语义词（先/然后/最后）→ steps 卡
+  assert.equal(routeDisplayEffect(input), "steps");
+  // 纯形态（关意图）：没有"第X步/数字."标记 → 不命中（需意图加成）
+  assert.equal(routeDisplayEffectByForm(input), "");
+});
+
+test("timeline weak-intent without form proof stays plain (no false card)", () => {
+  // 闲聊里出现"安排/明天"等弱意图词，但无真实时间戳形态 → 守卫拦截，保持纯文本
+  const marked = formatSemanticResultForChat(
+    "我帮你把明天的安排记一下，到时候提醒你，你今晚好好休息就行。",
+  );
+  assert.equal(marked, null);
+});
+
+test("timeline with real timestamps gets a card", () => {
+  const marked = formatSemanticResultForChat(
+    "明天的安排：早上9点开会，10点半约客户，中午12点吃饭，下午2点健身。",
+    "schedule.make",
+  );
+  assert.ok(marked, "real timeline content should produce a card");
+  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
+  assert.ok(m);
+  const payload = JSON.parse(m![1]!);
+  assert.equal(payload.cardType, "timeline");
+});
+
+test("formatSemanticResultForChat builds steps card from narrative", () => {
+  const marked = formatSemanticResultForChat(
+    "做法很简单。先把水烧开，然后放入面条，最后加上调料拌一拌，就可以开吃了。",
+    "cooking.make",
+  );
+  assert.ok(marked, "should produce content card from plain text");
+  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
+  assert.ok(m);
+  const payload = JSON.parse(m![1]!);
+  assert.equal(payload.cardType, "steps");
+});
+
+test("formatSemanticResultForChat returns null for chit-chat", () => {
+  // 普通闲聊无结构化信号 → 不生成卡片（保持纯文本）
+  assert.equal(
+    formatSemanticResultForChat(
+      "好的，这个问题我记下来了，等我查一下资料再回复你，你稍等一下哦。",
+    ),
+    null,
+  );
+});
+
+test("formatSemanticResultForChat returns null for conversational narrative with single connective", () => {
+  // 真实误判回归（2026-08-29 印尼行程追问轮）：对话叙述只含一个「然后」，
+  // 且逗号碎片能凑满 fold_list 的条目数——修复前被切成碎片卡片。
+  // 修复：steps 意图需 ≥2 个不同顺序引导词；fold_list 移出纯文本路径白名单。
+  assert.equal(
+    formatSemanticResultForChat(
+      "雅加达开个头不错，第一天先落地歇脚嘛。不过雅加达本身海景一般，待两天就够了。\n\n" +
+        "我的想法是：雅加达2天然后飞巴厘岛或者去日惹，剩下5天好好玩。\n\n" +
+        "你更想海滩晒太阳，还是历史文化加自然风光？这个你定，我按你的偏好排。",
+    ),
+    null,
+  );
+  // 单个「怎么弄」的闲聊问句同样不上卡（教程词单独出现降为 0.5，不足以建卡）
+  assert.equal(
+    formatSemanticResultForChat(
+      "这个报名流程有点复杂啊，到底要怎么弄才对，你之前办过吗？跟我说说呗。",
+    ),
+    null,
+  );
+});

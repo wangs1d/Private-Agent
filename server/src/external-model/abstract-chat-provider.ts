@@ -13,6 +13,7 @@ import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
   createStreamControlTagSanitizer,
+  createStreamMetaSentenceFilter,
   pickVisibleText,
   StreamIdleTimeoutError,
   stripInternalControlTags,
@@ -104,6 +105,16 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
 
   clearSession(sessionId: string): void {
     this.threads.clearSession(sessionId);
+  }
+
+  /**
+   * 按 clientMessageId 移除该 user 消息及其后的全部线程内容（fast→complex 升级
+   * 重放前清理 fast 轮写入的残迹，防 user 消息/部分回复在重放后重复落盘）。
+   * 无 clientMessageId 时 no-op（无法定位，保持原线程）。
+   */
+  removeUserTurnAndAfter(sessionId: string, clientMessageId?: string): void {
+    if (!clientMessageId) return;
+    this.threads.removeUserMessageAndAfter(sessionId, clientMessageId);
   }
 
   appendThreadTurn(
@@ -204,8 +215,15 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     const toolPlan: ToolPlan | null = tools
       ? resolveChatToolPlanForStream(userTurn.text, streamOpts)
       : null;
+    // disableToolSearch（fast 车道）：visible 全量即 searchable，不构建延迟目录。
+    // fast maxRounds=1 下 tool_discover→tool_call 两波召回必断头，目录只会造成
+    // "发现工具说明就被截断"的断头回复。
+    const searchableForTurn =
+      streamOpts?.disableToolSearch === true
+        ? toolPlan?.visibleTools
+        : toolPlan?.searchableTools;
     const toolSearchPrepared: ToolSearchPrepared | null = toolPlan
-      ? await prepareTools(toolPlan.visibleTools, toolPlan.searchableTools, {
+      ? await prepareTools(toolPlan.visibleTools, searchableForTurn, {
           userText: userTurn.text,
         })
       : null;
@@ -345,6 +363,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     let streamUsage: NormalUsage | undefined;
     try {
       const sanitizer = createStreamControlTagSanitizer();
+      const metaFilter = createStreamMetaSentenceFilter();
       const result = await consumeNormalizedStream(
         adaptOpenAiChatCompletionStream(
           stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>,
@@ -353,7 +372,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           onContentDelta: (d) => {
             // 根源净化：model 偶发会把内部控制标签（如 [STOP...] / [话题切换...]）
             // 混进 content，逐 chunk 直推这里时先过净化器，避免标签透出到前端气泡。
-            const clean = sanitizer(d);
+            // 2026-08-29 扩展：再叠一层元术语整句过滤（"上一轮转入规划任务..."），
+            // 兜底 LLM 在流式中把系统元描述整段写进回复。
+            const clean = metaFilter(sanitizer(d));
             if (clean) onDelta(clean);
           },
           providerId: this.id,

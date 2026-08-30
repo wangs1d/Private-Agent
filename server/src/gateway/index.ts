@@ -37,7 +37,6 @@ export {
   estimateToolsSchemaTokens,
   isCoreToolRegistryName,
   isFastLaneTool,
-  isMasterAgentBuiltinTool,
   isToolSearchBridgeName,
   invalidateFullCatalogCache,
   registerDynamicFastLaneName,

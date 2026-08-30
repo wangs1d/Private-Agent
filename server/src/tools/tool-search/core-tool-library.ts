@@ -1,9 +1,3 @@
-import {
-  MASTER_INVOKE_SUB_AGENT_REGISTRY,
-  MASTER_LIST_SUB_AGENTS_REGISTRY,
-  MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
-} from "../../agent/master-subagent-delegate-tools.js";
-
 /**
  * 核心工具库：与「延迟工具目录」分离，每轮直接注入 LLM `tools` 列表。
  *
@@ -25,9 +19,6 @@ export const CORE_TOOL_LIBRARY = {
       "clock.get_date",
       "clock.format_timestamp",
       "agent.query_capabilities",
-      MASTER_INVOKE_SUB_AGENT_REGISTRY,
-      MASTER_LIST_SUB_AGENTS_REGISTRY,
-      MASTER_POLL_SUB_AGENT_TASKS_REGISTRY,
       "internet.research",
       "internet.live_check",
       "internet.verify",
@@ -127,7 +118,6 @@ const CORE_PREFIXES: readonly string[] = [
   ...CORE_TOOL_LIBRARY.embodiment.prefixes,
   ...CORE_TOOL_LIBRARY.desktop.prefixes,
   ...CORE_TOOL_LIBRARY.browser.prefixes,
-  "master.",
 ];
 
 // ---- Fast 模式工具判定（单一数据源：CORE_TOOL_LIBRARY.fastLane + 动态名单） ----
@@ -187,9 +177,6 @@ export function isFastLaneTool(registryName: string): boolean {
   return false;
 }
 
-/** 主 Agent 过滤用：与核心库一致，但不包含 master.*（委派工具另附）。 */
-const MASTER_AGENT_EXCLUDED_PREFIXES: readonly string[] = ["master."];
-
 export type ToolExposureTier = "core" | "deferred";
 
 export function classifyToolExposureTier(registryName: string): ToolExposureTier {
@@ -199,17 +186,6 @@ export function classifyToolExposureTier(registryName: string): ToolExposureTier
 export function isCoreToolRegistryName(name: string): boolean {
   if (CORE_EXACT_NAMES.has(name)) return true;
   return CORE_PREFIXES.some((p) => name.startsWith(p));
-}
-
-/**
- * 主 Agent 内置 builtin 工具判定（单一数据源：{@link CORE_TOOL_LIBRARY}）。
- * 用于 `filterMasterBasicTools`；`master.invoke_sub_agent` 等由委派模块单独追加。
- */
-export function isMasterAgentBuiltinTool(registryName: string): boolean {
-  if (MASTER_AGENT_EXCLUDED_PREFIXES.some((p) => registryName.startsWith(p))) {
-    return false;
-  }
-  return isCoreToolRegistryName(registryName);
 }
 
 /** @deprecated 使用 {@link isCoreToolRegistryName}；保留别名供旧 import。 */

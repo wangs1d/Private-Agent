@@ -39,6 +39,8 @@
  *   4. test/display-effect-router.test.ts 补用例。
  */
 
+import { LIST_ITEM_RE } from "./render-hint-service.js";
+
 /** 全部展示效果类型；空串 = 通用列表卡（前端默认）。 */
 export type DisplayEffectType =
   | "weather" // 天气卡（工具：weather.*）
@@ -68,6 +70,13 @@ export interface DisplayRouteInput {
   title: string;
   /** 结构化条目（text 为剥掉列表前缀后的正文）。 */
   items: ReadonlyArray<{ text: string; type?: string }>;
+  /**
+   * 原始全文（未切分）。提供后，「内容语义」成为主判据：
+   * 即使 LLM 没用 `-`/`1.` 列表语法，也能按语义掐出条目（分层叙述、
+   * 一是…二是…、首先…最后…、顿号列举等），不再强依赖列表格式。
+   * 语义条目数 ≥ items 时以语义条目为准（max 不降级）。
+   */
+  fullText?: string;
   /** 卡片 footer（追问/补充说明）。 */
   footer?: string;
   /**
@@ -183,7 +192,7 @@ const IMAGE_URL_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:[?#]\S*)?/
 
 /** 时间标记：HH:mm / HH:mm-HH:mm / 周X / 今天明天后天 / X月X日 / MM-dd。 */
 const TIME_MARK_RE =
-  /^(?:\d{1,2}[:：]\d{2}(?:[-~]\d{1,2}[:：]\d{2})?|周[一二三四五六日天]|今天|明天|后天|\d{1,2}月\d{1,2}[日号]?|\d{1,2}[-/]\d{1,2})/;
+  /^(?:(?:早上|上午|中午|下午|傍晚|晚上|凌晨|夜里)\s*)?(?:\d{1,2}[:：]\d{2}(?:[-~]\d{1,2}[:：]\d{2})?|\d{1,2}点(?:半|钟|半钟)?)|周[一二三四五六日天]|今天|明天|后天|\d{1,2}月\d{1,2}[日号]?|\d{1,2}[-/]\d{1,2}/;
 
 /** 引用式标题：含引号或结论性引导词。 */
 const QUOTE_TITLE_RE = /[“”「『]|一句话|结论|重点|提醒|注意|金句/;
@@ -349,6 +358,128 @@ function scoreCompare(input: DisplayRouteInput): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 内容语义提取与意图评分（不依赖列表语法，兑现「内容信号为主判据」）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 语义条目有效性：非标题引导行、非问句、非纯语气、长度适中。 */
+function isValidSemanticEntry(entry: string): boolean {
+  const t = entry.trim();
+  if (t.length < 2 || t.length > 80) return false;
+  // 标题/列表引导行（如「屏幕参数：」「你的兴趣标签：」）不当作条目
+  if (/[：:]\s*$/.test(t)) return false;
+  if (/^(?:[一二三四五六七八九十]{1,3}[、.．]|#+\s+)\S+$/.test(t)) return false;
+  if (/[？?]\s*$|们?\s*(呢|啊|哦)\s*$|^(好的|好的呀|嗯|好的呢|好滴|没问题)\b/.test(t)) return false;
+  return true;
+}
+
+/** 分项引导词：句内出现「一是X，二是Y」/「首先X，其次Y」时可再拆。 */
+const SEMANTIC_SEQUENCE_RE =
+  /(?:一是|二是|三是|四是|五是|首先|其次|再次|最后|然后|接着|之后|第一步|第二步|第三步|其一|其二|其三)/;
+
+/** 分项引导词切分点（在逗号前一个引导词处断开）。 */
+const SEMANTIC_SPLIT_RE =
+  /[，,](?=一是|二是|三是|四是|五是|首先|其次|再次|最后|然后|接着|其一|其二|其三|第一|第二)/;
+
+/** 句/短句切分点：逗号、句号、分号后的位置（仅作用于非列表行，不拆列表条目）。 */
+const SEMANTIC_CLAUSE_RE = /(?<=[。；;，,])\s*/;
+
+/**
+ * 从原始全文掐出语义条目，不依赖 `-`/`1.` 列表符号。
+ *
+ * 按「行 → 分项引导词 → 句号/分号」逐级切分，再过滤无效片段（问句、
+ * 纯语气、过长/过短行）。适合 LLM 用分层叙述、一是…二是…、首先…最后…、
+ * 顿号列举等自然表达时，仍然能提取出可评分的条目集。
+ *
+ * @param text 原始全文
+ * @returns 语义条目正文数组（已剥列表前缀、不含编号）
+ */
+export function extractSemanticItems(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const out: string[] = [];
+
+  for (const raw of lines) {
+    // 已是列表行 → 剥前缀作为单条目，不继续拆
+    const listMatch = raw.match(LIST_ITEM_RE);
+    if (listMatch) {
+      const text_ = raw.slice(listMatch[0].length).trim();
+      if (isValidSemanticEntry(text_)) out.push(text_);
+      continue;
+    }
+    // 序号标题行（一、二、 / 1. / #）：本身是条目
+    if (/^(?:[一二三四五六七八九十]{1,3}[、.．]|#+\s+)\S+/.test(raw)) {
+      const text_ = raw.replace(/^(?:[一二三四五六七八九十]{1,3}[、.．]|#+\s+)/, "").trim();
+      if (isValidSemanticEntry(text_)) out.push(text_);
+      continue;
+    }
+    // 只取有实质句子的行（过滤纯标题短句、过渡语）
+    let segments = raw.split(SEMANTIC_SPLIT_RE);
+    if (segments.length === 1 && SEMANTIC_SEQUENCE_RE.test(raw)) {
+      // 数值/短标题行不拆；其余保留整行后按句号再切
+    }
+    for (const seg of segments) {
+      const clauses = seg.split(SEMANTIC_CLAUSE_RE).map((s) => s.trim()).filter(Boolean);
+      for (const clause of clauses) {
+        if (isValidSemanticEntry(clause)) out.push(clause);
+      }
+    }
+  }
+  return out;
+}
+
+/** 全文语义意图信号：给对应效果一个内容分加成（0 = 无信号）。 */
+const SEMANTIC_INTENT_SCORERS: Readonly<
+  Partial<Record<Exclude<DisplayEffectType, "">, (fullText: string) => number>>
+> = {
+  // steps：单个连接词（"然后"）或单个教程词（"怎么弄"）在对话里太常见，
+  // 不足以支撑上卡（真实误判案例："先落地歇脚…然后飞巴厘岛…"、"报名到底要
+  // 怎么弄" 都被切成碎片卡）。要求 ≥2 个不同的顺序引导词才给意图分；
+  // 真教程/流程几乎必带列表语法或编号，由形态评分器（scoreSteps）承接。
+  steps: (t) => {
+    const markers = new Set(
+      t.match(/(?:首先|其次|再次|然后|接着|最后|第[一二三四五六七八九十]+步)/g) ?? [],
+    );
+    return markers.size >= 2 ? 0.62 : 0;
+  },
+  compare: (t) =>
+    /(?:vs\.?|对比|区别|哪个(更好|更合适|更值得)|跟.*比|和.*比|怎么选|优缺点)\b/i.test(t)
+      ? 0.62
+      : 0,
+  timeline: (t) =>
+    /(?:周[一二三四五六日天]|今天|明天|后天|昨天|\d{1,2}[:：]\d{2}|\d{1,2}月\d{1,2}|先后|之后|安排|日程)/i.test(t)
+      ? 0.45
+      : 0,
+  // metric：只认「标签 + 冒号 + 数值」结构，避免「9点开会/2本书/50元」等闲聊被误判成数据卡
+  metric: (t) => {
+    const pairs = (t.match(/[^：:\n，。,]{1,14}[：:]\s*[+\-−±]?\d[\d,.，]*\s*\S{0,6}/g) ?? []).length;
+    return pairs >= 2 ? 0.5 : 0;
+  },
+};
+
+/**
+ * 依据 fullText 构建「内容语义优先」的生效输入：
+ * 语义条目数 ≥ 原列表 items 时，用语义条目替代表 list items（max 不降级），
+ * 使形态评分器能基于真实内容打分，而不是被列表语法绑死。
+ */
+function buildEffectiveInput(input: DisplayRouteInput): DisplayRouteInput {
+  if (!input.fullText) return input;
+  const semantic = extractSemanticItems(input.fullText).map((text) => ({ text, type: "num" }));
+  if (semantic.length < input.items.length) return input;
+  return { ...input, items: semantic };
+}
+
+/**
+ * 全文语义意图分：对指定效果查询 fullText 的意图信号。
+ * 形态分不足但语义意图明确时，作为 contentScore 的兜底加成。
+ */
+function semanticIntentScore(type: Exclude<DisplayEffectType, "">, input: DisplayRouteInput): number {
+  if (!input.fullText) return 0;
+  return SEMANTIC_INTENT_SCORERS[type]?.(input.fullText) ?? 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 聚合与决策
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -357,13 +488,25 @@ function scoreCompare(input: DisplayRouteInput): number {
  * 仅含 contentScore 或 toolScore 任一 >0 的候选）。
  * 独立导出：路由决策可观测、可测试；也是 routeDisplayEffect 的唯一数据源。
  */
-export function scoreDisplayEffects(input: DisplayRouteInput): DisplayEffectScore[] {
+export function scoreDisplayEffects(
+  input: DisplayRouteInput,
+  opts: { semanticIntent?: boolean } = {},
+): DisplayEffectScore[] {
+  const { semanticIntent = true } = opts;
   const toolSignal = matchToolSignal((input.toolName ?? "").trim());
   const results: DisplayEffectScore[] = [];
+  // 内容语义优先：fullText 提供时用语义条目替代表 items（max 不降级）
+  const effective = buildEffectiveInput(input);
 
   const addCandidate = (type: DisplayEffectType) => {
-    // 收紧类型：""（通用卡）没有评分器；其余效果查注册表
-    const contentScore = (type !== "" ? CONTENT_SCORERS[type]?.(input) : 0) ?? 0;
+    if (type === "") return;
+    // 收紧类型：形态评分器走「内容语义优先」的生效输入
+    let contentScore = CONTENT_SCORERS[type]?.(effective) ?? 0;
+    // 全文语义意图兜底（默认开启）：形态不足但意图明确（如"对比/怎么选/首先然后"）
+    if (semanticIntent) {
+      const intent = semanticIntentScore(type, effective);
+      contentScore = clamp01(Math.max(contentScore, intent));
+    }
     const toolScore = toolSignal && toolSignal.effect === type ? toolSignal.score : 0;
     if (contentScore <= 0 && toolScore <= 0) return;
     results.push({
@@ -383,16 +526,11 @@ export function scoreDisplayEffects(input: DisplayRouteInput): DisplayEffectScor
   return results;
 }
 
-/**
- * 展示效果动态路由主入口（纯函数）。
- *
- * 在 [scoreDisplayEffects] 明细分上取最高分当选；得分相同（含浮点误差）
- * 时保留顺序靠前者（CANDIDATE_ORDER 兜底）。全部候选 0 分 → 通用列表卡（""）。
- */
-export function routeDisplayEffect(input: DisplayRouteInput): DisplayEffectType {
+/** 在评分明细上取最高分当选（用于 route* 主入口与语义卡片构造）。 */
+function pickBest(scores: DisplayEffectScore[]): DisplayEffectType {
   let best: DisplayEffectType = "";
   let bestScore = 0;
-  for (const d of scoreDisplayEffects(input)) {
+  for (const d of scores) {
     // 严格大于：首个同分者保留
     if (d.score > bestScore + 1e-9) {
       bestScore = d.score;
@@ -400,6 +538,25 @@ export function routeDisplayEffect(input: DisplayRouteInput): DisplayEffectType 
     }
   }
   return best;
+}
+
+/**
+ * 展示效果动态路由主入口（纯函数）。
+ *
+ * 在 [scoreDisplayEffects] 明细分上取最高分当选；得分相同（含浮点误差）
+ * 时保留顺序靠前者（CANDIDATE_ORDER 兜底）。全部候选 0 分 → 通用列表卡（""）。
+ */
+export function routeDisplayEffect(input: DisplayRouteInput): DisplayEffectType {
+  return pickBest(scoreDisplayEffects(input));
+}
+
+/**
+ * 纯形态路由：关闭全文语义意图加成，仅凭条目形态/结构判定。
+ * 用于「普通文本/长文 → 内容卡片」路径的守门——只有显而易见的结构化内容
+ * （步骤/指标/折叠/时序/对比标签等）才上卡，避免闲聊因弱意图被误判成卡片。
+ */
+export function routeDisplayEffectByForm(input: DisplayRouteInput): DisplayEffectType {
+  return pickBest(scoreDisplayEffects(input, { semanticIntent: false }));
 }
 
 /**

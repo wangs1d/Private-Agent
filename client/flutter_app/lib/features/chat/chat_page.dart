@@ -1151,6 +1151,33 @@ class _ChatPageState extends State<ChatPage>
                         );
                       },
                     ),
+                    // 工具调用徽标：作为独立布局节点固定在输入框外左上方，
+                    // 不与输入框重合、不随输入框高度跳动；淡入淡出避免闪现/抖动
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        reverseDuration: const Duration(milliseconds: 200),
+                        transitionBuilder: (Widget child,
+                            Animation<double> animation) {
+                          return FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: Tween<Offset>(
+                                begin: const Offset(0, -0.15),
+                                end: Offset.zero,
+                              ).animate(animation),
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: KeyedSubtree(
+                          key: ValueKey(
+                              widget.currentToolName?.trim() ?? "__idle__"),
+                          child: _buildCurrentToolBadge(cs),
+                        ),
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     // 主输入框容器
                     // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
@@ -1369,12 +1396,6 @@ class _ChatPageState extends State<ChatPage>
                               ],
                             ),
                           ),
-                        ),
-                        // 浮在输入框外左上角的工具调用徽标（纯文字）
-                        Positioned(
-                          top: -12,
-                          left: 18,
-                          child: _buildCurrentToolBadge(cs),
                         ),
                       ],
                     ),

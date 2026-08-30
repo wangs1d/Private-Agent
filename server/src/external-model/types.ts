@@ -218,6 +218,13 @@ export type AgentStreamOptions = {
   /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
   pinnedToolNames?: string[];
   /**
+   * 禁用 BM25 延迟工具目录（tool_discover→tool_call 两波召回）。
+   * fast 车道必须置 true：maxRounds=1 下"发现→执行"两波必断头，延迟目录在
+   * fast 是永远用不了的摆设。禁用后 visible 工具全量暴露（fastLane ≤ 16 个轻 schema），
+   * 超出能力范围的任务改由 agent.escalate_to_complex 升级兜底。
+   */
+  disableToolSearch?: boolean;
+  /**
    * RuntimeKernel minimal 模式控制位：true 时 provider 跳过身份/风格/时间戳说明类后缀追加，
    * 但仍保留功能性后缀（工具说明/主 Agent 调度/用户可见进度/访问权限）。
    * 配合 RuntimeKernel.buildSessionSystem() 实现"层 A 不进 prompt"。
@@ -355,4 +362,10 @@ export interface ExternalChatProvider {
     maxThreadMessages?: number,
     model?: string,
   ): void;
+
+  /**
+   * 可选：按 clientMessageId 移除该 user 消息及其后的全部线程内容。
+   * 用于 fast→complex 升级重放前清理 fast 轮写入的线程残迹（防重复落盘）。
+   */
+  removeUserTurnAndAfter?(sessionId: string, clientMessageId?: string): void;
 }

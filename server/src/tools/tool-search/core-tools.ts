@@ -4,7 +4,6 @@ export {
   TOOL_SEARCH_CORE_REGISTRY_PREFIXES,
   classifyToolExposureTier,
   isCoreToolRegistryName,
-  isMasterAgentBuiltinTool,
   isToolSearchCoreRegistryName,
   summarizeCoreToolLibrary,
   type ToolExposureTier,

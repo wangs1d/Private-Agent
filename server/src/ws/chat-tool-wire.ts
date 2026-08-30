@@ -1,12 +1,34 @@
-import {
-  buildDelegateDonePayload,
-  buildDelegateStartPayload,
-  buildLiveAgentStatusPayload,
-  isMasterInvokeSubAgentTool,
-  pickToolUserStatusLine,
-  type DelegateStatusPayload,
-} from "../agent/delegate-status.js";
-import { parseSubAgentType } from "../agent/master-subagent-delegate-tools.js";
+// ── 工具执行「活人感」状态文案（原 agent/delegate-status.ts 的通用部分内联：
+//     master 委派层删除后仅保留 live/tool_start 状态透传）──
+
+type DelegateStatusPhase = "live" | "tool_start";
+
+type DelegateStatusPayload = {
+  phase: DelegateStatusPhase;
+  /** 模型生成的口语化短句，直接展示给用户 */
+  line: string;
+  toolName: string;
+};
+
+/**
+ * 从工具参数（显式 userStatusLine / statusLine 字段）提取用户可见进度句。
+ * 不透传 LLM 的自然语言前言（assistantPreamble）——那是过程通报，会刷屏 status。
+ */
+function pickToolUserStatusLine(
+  input: Record<string, unknown>,
+  _assistantPreamble?: string,
+): string | null {
+  const fromInput = String(input.userStatusLine ?? input.statusLine ?? "").trim();
+  return fromInput.length > 0 ? fromInput : null;
+}
+
+function buildLiveAgentStatusPayload(
+  line: string,
+  phase: DelegateStatusPhase = "live",
+  toolName = "agent",
+): DelegateStatusPayload {
+  return { phase, line, toolName };
+}
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { buildExecutionEventPayload } from "../agent/turn-events.js";
 import type { ToolExecutedInfo, ToolExecuteStartInfo } from "../external-model/types.js";
@@ -104,9 +126,7 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
   if (!displayLine) return;
   embodimentThinking(ctx.sessionId, ctx.send, displayLine, {
     phase: status.phase,
-    subAgentType: status.agentType,
-    subAgentDisplayName: status.subAgentDisplayName,
-    source: status.toolName ? "tool" : "delegate",
+    source: "tool",
   });
   ctx.send(
     JSON.stringify({
@@ -117,8 +137,6 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
         traceId: ctx.traceId,
         phase: status.phase,
         line: displayLine,
-        agentType: status.agentType,
-        subAgentDisplayName: status.subAgentDisplayName,
         toolName: status.toolName,
       },
     }),
@@ -157,41 +175,9 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
     },
   });
 
-  if (!isMasterInvokeSubAgentTool(info.toolName)) {
-    if (userStatusLine) {
-      sendAgentStatus(ctx, buildLiveAgentStatusPayload(userStatusLine, "tool_start", info.toolName));
-    }
-    return;
+  if (userStatusLine) {
+    sendAgentStatus(ctx, buildLiveAgentStatusPayload(userStatusLine, "tool_start", info.toolName));
   }
-
-  const agentType = parseSubAgentType(info.input.agentType);
-  const SUB_AGENT_LABELS: Record<string, string> = {
-    life: "生活助手",
-    work: "工作助手",
-    social: "社交助手",
-    entertainment: "娱乐助手",
-    finance: "金融助手",
-    tech: "技术助手",
-    info: "信息助手",
-    security: "安全助手",
-  };
-  const agentName = agentType ? (SUB_AGENT_LABELS[agentType] ?? agentType) : "助手";
-  if (!agentType) return;
-
-  const start = buildDelegateStartPayload(info.input, agentName, agentType);
-  if (start) sendAgentStatus(ctx, start);
-
-  // v2：结构化 agent_start 卡片
-  const taskText = String(
-    info.input.task ?? info.input.query ?? info.input.userMessage ?? "",
-  ).trim();
-  sendExecutionEvent(ctx, "agent_start", {
-    agentStart: {
-      id: `${ctx.traceId}:${agentType}`,
-      role: agentName,
-      ...(taskText ? { task: taskText.length > 200 ? `${taskText.slice(0, 200)}…` : taskText } : {}),
-    },
-  });
 }
 
 function sendScheduleTasksChanged(ctx: ChatToolWireContext, result: Record<string, unknown>): void {
@@ -281,27 +267,4 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
     });
   }
 
-  if (!isMasterInvokeSubAgentTool(info.toolName) || !info.ok) return;
-  if (info.result.ok === false) return;
-
-  const agentType = parseSubAgentType(info.result.agentType ?? info.input.agentType);
-  const agentName = String(info.result.agentName ?? info.input.agentType ?? "助手").trim();
-  const line =
-    String(info.result.uiDoneLine ?? "").trim() ||
-    (info.result.background === true
-      ? String(info.result.message ?? "助手已在后台处理，稍后会汇总结果…").trim()
-      : "");
-  if (!agentType || !line) return;
-
-  sendAgentStatus(ctx, buildDelegateDonePayload(line, agentName, agentType));
-
-  // v2：结构化 agent_done 卡片
-  sendExecutionEvent(ctx, "agent_done", {
-    agentDone: {
-      id: `${ctx.traceId}:${agentType}`,
-      role: agentName,
-      ok: true,
-      elapsedMs,
-    },
-  });
 }

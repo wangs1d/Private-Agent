@@ -9,15 +9,11 @@ import {
   formatKvValueForPrompt,
   formatPersonalityCorePrompt,
   sliceMemoryEntriesToPromptContext,
-  sliceSubAgentMemoryEntries,
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
-import { buildMasterAgentChatTools, buildSubAgentChatTools } from "../services/master-agent-tool-filter.js";
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
-import type { SubAgentCapability } from "../services/master-agent-types.js";
-import { SUB_AGENT_PROMPT_PROFILES } from "./subagent-prompt-profiles.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import {
   buildSchedulePromptSnapshot,
@@ -90,19 +86,12 @@ function extractUserTimezoneFromLocation(userLocation?: string): string | undefi
 }
 
 function buildCompactAgentCapsPrompt(): string {
-  const cfg = getAgentRuntimeConfig();
   const lines = [
     "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
-    "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务可派专业小弟（子 Agent）执行。",
+    "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务交给后台任务执行流程处理。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
-    "【真人感·行动宣告】凡是要调工具或派子 Agent 时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），然后在同一回合紧接着真正调用对应工具并基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。",
+    "【真人感·行动宣告】凡是要调工具时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），然后在同一回合紧接着真正调用对应工具并基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。",
   ];
-  if (cfg.masterDelegation.enabled) {
-    lines.push(
-      `【你的小弟】life / tech / info 三类子 Agent 听你的调度；互不依赖的子任务可在同一轮并行委派（最多 ${cfg.masterDelegation.maxParallelSubAgents} 个同时进行）。`,
-      "【工具】master_invoke_sub_agent 派活；master_list_sub_agents 看名册；master_poll_sub_agent_tasks 查后台小弟进度。",
-    );
-  }
   lines.push("需要完整能力明细时调用 agent.query_capabilities。");
   return lines.join("\n");
 }
@@ -355,15 +344,6 @@ export type BuildPromptContextInput = {
   semanticIntent?: string;
 };
 
-export type BuildMasterDelegateInput = BuildPromptContextInput & {
-  subAgentCapabilities: Iterable<SubAgentCapability>;
-};
-
-export type BuildSubAgentInput = BuildPromptContextInput & {
-  capability: SubAgentCapability;
-  taskDescription?: string;
-};
-
 export type PromptContextLayers = {
   /** Stable prefix: identity, durable persona, values, and ability boundaries. */
   stable: AgentPromptMemoryContext;
@@ -506,68 +486,6 @@ export class PromptContextBuilder {
     };
   }
 
-  buildForMasterDelegate(input: BuildMasterDelegateInput): AgentStreamOptions {
-    const base = this.build(input) ?? {};
-    const chatToolsExtra = base.chatToolsExtra ?? [];
-    return {
-      ...base,
-      masterSubAgentDelegate: true,
-      chatToolsBuiltin: buildMasterAgentChatTools(input.subAgentCapabilities, chatToolsExtra),
-      chatToolsExtra: [],
-    };
-  }
-
-  buildForSubAgent(input: BuildSubAgentInput): AgentStreamOptions {
-    const memory = this.assembleMemoryForSubAgent(input);
-    const hasMemory = this.hasMemoryContent(memory);
-    const chatToolsExtra = this.sessionSkillTools(input.actorId);
-    const toolLoop =
-      input.onToolLoopAfterBatch != null
-        ? { onAfterToolBatch: input.onToolLoopAfterBatch }
-        : undefined;
-    const taskText = input.taskDescription?.trim() || input.userText?.trim() || "";
-    const scopedBuiltin = buildSubAgentChatTools(input.capability, taskText, chatToolsExtra ?? []);
-
-    return {
-      ...(hasMemory ? { promptContext: { memory } } : {}),
-      ...(toolLoop ? { toolLoop } : {}),
-      chatToolsBuiltin: scopedBuiltin,
-      chatToolsExtra: [],
-    };
-  }
-
-  private assembleMemoryForSubAgent(input: BuildSubAgentInput): AgentPromptMemoryContext {
-    const profile = SUB_AGENT_PROMPT_PROFILES[input.capability.type];
-    const taskText = input.taskDescription?.trim() || input.userText?.trim() || "";
-
-    let scoped: AgentPromptMemoryContext = {};
-    if (this.deps.agentMemorySyncService && (profile.includePersona || profile.includeMemorySummary)) {
-      const keys: string[] = [];
-      if (profile.includePersona) keys.push("persona", "soul");
-      if (profile.includeMemorySummary) keys.push("memory_summary");
-      const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, keys);
-      scoped = sliceSubAgentMemoryEntries(entries, taskText || undefined);
-      if (!profile.includePersona) delete scoped.persona;
-      if (!profile.includeMemorySummary) delete scoped.memorySummary;
-    }
-
-    const full = this.assembleMemory(input);
-
-    return {
-      ...(profile.includeTaskContext && full.taskContext ? { taskContext: full.taskContext } : {}),
-      ...(profile.includeToneGuidance && full.toneGuidance ? { toneGuidance: full.toneGuidance } : {}),
-      ...(profile.includeUserProfile && full.userProfile ? { userProfile: full.userProfile } : {}),
-      ...(profile.includeUserLocation && full.userLocation ? { userLocation: full.userLocation } : {}),
-      ...(profile.includePersona && scoped.persona ? { persona: scoped.persona } : {}),
-      ...(profile.includeValues && full.values ? { values: full.values } : {}),
-      ...(profile.includeAbilities && full.abilities ? { abilities: full.abilities } : {}),
-      ...(profile.includeAgentCaps && full.agentCaps ? { agentCaps: full.agentCaps } : {}),
-      ...(profile.includeWorldCaps && full.worldCaps ? { worldCaps: full.worldCaps } : {}),
-      ...(profile.includeMemorySummary && scoped.memorySummary ? { memorySummary: scoped.memorySummary } : {}),
-      ...(full.interruptedContext ? { interruptedContext: full.interruptedContext } : {}),
-    };
-  }
-
   private assembleMemory(input: BuildPromptContextInput): AgentPromptMemoryContext {
     const config = getAgentRuntimeConfig();
     const userText = input.userText?.trim() ?? "";
@@ -623,7 +541,7 @@ export class PromptContextBuilder {
 
     const agentCaps =
       config.memoryPrompt.agentCapsInPrompt &&
-      (this.deps.skillManager || config.masterDelegation.enabled)
+      this.deps.skillManager
         ? buildCompactAgentCapsPrompt()
         : undefined;
 

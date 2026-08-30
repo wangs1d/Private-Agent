@@ -335,7 +335,6 @@ import { routeTask } from "../gateway/index.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
-import type { SubAgentType } from "../services/master-agent-types.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
 import { InterestWatcher } from "../proactivity/interest-watcher.js";
@@ -2572,34 +2571,8 @@ export async function createAppServices(): Promise<AppServices> {
       },
     });
 
-    // 注册 MasterAgentCoordinator：让 PlannerCortex.delegate 真实委派子 Agent。
-    // MasterAgentCoordinator 在 AgentCore 内部创建，这里通过 getter 取出引用，
-    // 包装为 { invokeSubAgent } 注入。未启用委派时 masterCoordinator 仍为 null，
-    // delegate 恒返回失败（保持原降级行为）。
-    const masterCoord = agentCore.getMasterAgentCoordinator();
-    if (masterCoord) {
-      plannerCortex.registerMasterCoordinator({
-        invokeSubAgent: async (subAgentType, task, opts) => {
-          const actorId = (opts as { actorId?: string } | undefined)?.actorId ?? "brain-delegate";
-          const goal = (task as { goal?: string } | undefined)?.goal ?? "";
-          return masterCoord.handleInvokeSubAgentTool(
-            {
-              agentType: subAgentType,
-              taskDescription: goal,
-              priorContext: String((task as { input?: unknown } | undefined)?.input ?? ""),
-            },
-            {
-              sessionId: actorId,
-              userId: actorId,
-              agentAccessMode: "full",
-            },
-          );
-        },
-      });
-      console.log("[PlannerCortex] 已注册 MasterAgentCoordinator（子 Agent 委派能力）");
-    } else {
-      console.log("[PlannerCortex] MasterAgentCoordinator 未启用，delegate 将降级");
-    }
+    // 2026-08-29 master 委派层已删除：PlannerCortex.delegate 无真实委派目标，
+    // 不再注册 MasterCoordinator（任务统一走 plan-and-execute 全量工具循环）。
 
     brainCenter.registerPlanner(plannerCortex);
 

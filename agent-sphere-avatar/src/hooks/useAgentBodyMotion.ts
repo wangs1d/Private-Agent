@@ -85,6 +85,8 @@ interface UseAgentBodyMotionOptions {
   };
   taskEvents?: TaskEvent[];
   onBoundaryHit?: (edge: "left" | "right" | "top" | "bottom" | "front" | "back") => void;
+  /** 固定机位模式：锁定 Y 轴，关闭持续呼吸/悬浮位移（桌宠防抖） */
+  verticalStable?: boolean;
 }
 
 /** 具身物理 — 持续有生命力，兴奋时更狂，说话时有节奏摆动感 */
@@ -103,10 +105,14 @@ export function useAgentBodyMotion({
   attentionTarget,
   taskEvents,
   onBoundaryHit,
+  verticalStable = false,
 }: UseAgentBodyMotionOptions) {
   const pos = useRef(new THREE.Vector3(0, 1.45, 0));
   const vel = useRef(new THREE.Vector3());
   const target = useRef(new THREE.Vector3(0, 1.45, 0));
+  /** 固定机位 Y 轴锚点（取初始高度，保持当前构图不变） */
+  const verticalAnchorRef = useRef(pos.current.y);
+  const verticalStableRef = useRef(verticalStable);
   const pauseUntil = useRef(0);
   const visitRef = useRef<Map<string, number>>(new Map());
   const excitementRef = useRef(0);
@@ -176,6 +182,7 @@ export function useAgentBodyMotion({
   focusedRef.current = focused;
   boundsRef.current = bounds;
   onBoundaryHitRef.current = onBoundaryHit;
+  verticalStableRef.current = verticalStable;
   phaseRef.current = phase;
   captionRef.current = caption;
   sourceRef.current = source;
@@ -488,6 +495,7 @@ export function useAgentBodyMotion({
     if (!enabledRef.current) return;
 
     const t = clock.elapsedTime;
+    const verticalStable = verticalStableRef.current;
     const profile = MOOD_PROFILE[moodRef.current];
     const b = boundsRef.current;
     const nowMs = performance.now();
@@ -557,7 +565,10 @@ export function useAgentBodyMotion({
 
     const vitality = profile.vitality * (0.5 + energyRef.current * 0.5);
     vel.current.x += Math.sin(t * 2.1 + 0.5) * vitality * 0.022;
-    vel.current.y += Math.sin(t * 1.55) * profile.breath * 0.35;
+    if (!verticalStable) {
+      // 固定机位关闭持续呼吸导致的 Y 向漂移
+      vel.current.y += Math.sin(t * 1.55) * profile.breath * 0.35;
+    }
     vel.current.z += Math.cos(t * 1.85) * vitality * 0.018;
 
     if (excited) {
@@ -626,10 +637,12 @@ export function useAgentBodyMotion({
       pickTarget(t);
     }
 
-    const breathY =
-      Math.sin(t * 1.65) * profile.breath * (0.5 + energyRef.current * 0.5) +
-      Math.sin(t * 3.4) * profile.breath * 0.22;
-    const dy = target.current.y + breathY - pos.current.y;
+    // 固定机位：无呼吸目标与呼吸弹簧，Y 轴由下方锁定
+    const breathY = verticalStable
+      ? 0
+      : Math.sin(t * 1.65) * profile.breath * (0.5 + energyRef.current * 0.5) +
+        Math.sin(t * 3.4) * profile.breath * 0.22;
+    const dy = verticalStable ? 0 : target.current.y + breathY - pos.current.y;
 
     const springK = (focusedRef.current ? 2.6 : 4.8) * (excited ? 1.65 : 1);
     const forceScale = speedMul / MASS;
@@ -649,6 +662,11 @@ export function useAgentBodyMotion({
     const maxSpeed = excited ? 3.8 : 1.85;
     if (vel.current.length() > maxSpeed) vel.current.setLength(maxSpeed);
 
+    if (verticalStable) {
+      // 固定机位：Y 轴锁定在锚点，彻底消除上下微动（保留旋转与水平反应）
+      pos.current.y = verticalAnchorRef.current;
+      vel.current.y = 0;
+    }
     pos.current.addScaledVector(vel.current, dt);
 
     if (pos.current.x < -b) resolveBoundary("x", "left", -b);
@@ -768,11 +786,14 @@ export function useAgentBodyMotion({
     const hoverLift =
       (intent.phase === "observe" ? 0.012 : intent.phase === "inspect" ? 0.02 : 0.007) *
       (0.55 + energyRef.current * 0.55);
+    // 固定机位：视觉组 Y 向回中，关闭悬浮浮沉
     group.position.y = THREE.MathUtils.lerp(
       group.position.y,
-      Math.sin(t * (2.1 + excitementRef.current * 1.1)) * hoverLift +
-        (shakeActive ? Math.sin(t * 16) * 0.006 * shakeAmp : 0) +
-        (deliberate ? Math.sin(t * (1.3 + emotion.diligence * 0.8)) * 0.01 : 0),
+      verticalStable
+        ? 0
+        : Math.sin(t * (2.1 + excitementRef.current * 1.1)) * hoverLift +
+          (shakeActive ? Math.sin(t * 16) * 0.006 * shakeAmp : 0) +
+          (deliberate ? Math.sin(t * (1.3 + emotion.diligence * 0.8)) * 0.01 : 0),
       dt * 5,
     );
   });

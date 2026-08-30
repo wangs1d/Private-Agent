@@ -96,6 +96,13 @@ html.embed-root #root {
 
 .overlay-pet-pane .inner-thought {
   top: calc(100% - 60px);
+  /* 桌宠仅透明度渐显，禁用基类 translateY/scale 入场，避免流式时轻微位移 */
+  animation: overlay-inner-in 0.25s ease-out;
+}
+
+@keyframes overlay-inner-in {
+  from { opacity: 0; transform: translateX(-50%); }
+  to { opacity: 1; transform: translateX(-50%); }
 }
 
 /* ── 对话消息列表（追加渲染，替代单字段 caption） ── */
@@ -112,6 +119,8 @@ html.embed-root #root {
   pointer-events: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(136, 187, 255, 0.3) transparent;
+  /* 桌宠列表是 left:0/right:0 定位，禁用基类 translateX(-50%) 入场动画，避免流式时整体横移 */
+  animation: none;
 }
 .overlay-pet-pane .message-list::-webkit-scrollbar {
   width: 4px;
@@ -135,8 +144,8 @@ html.embed-root #root {
   animation: msg-in 0.2s ease-out;
 }
 @keyframes msg-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .overlay-pet-pane .message--agent {
   background: rgba(8, 12, 20, 0.55);

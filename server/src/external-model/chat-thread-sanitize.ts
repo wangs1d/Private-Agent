@@ -121,6 +121,16 @@ export function isToolCallIdNotFoundError(err: unknown): boolean {
   return /tool_call_id\s+is\s+not\s+found/i.test(msg);
 }
 
+/**
+ * 端点拒绝非 auto 的 tool_choice（如 DeepSeek / thinking 模式 Moonshot）：
+ * "Thinking mode does not support this tool_choice" → 400。
+ * 命中后由调用方降级 tool_choice 为 auto 重试一次，避免整轮 planner 卡死。
+ */
+export function isToolChoiceRejectedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /tool_choice|tool choice/i.test(msg) && /not support|does not support|invalid/i.test(msg);
+}
+
 export function sanitizeChatMessagesForApi(
   messages: ChatCompletionMessageParam[],
   opts?: { stripReasoning?: boolean; logPrefix?: string },

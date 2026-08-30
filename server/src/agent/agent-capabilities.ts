@@ -44,7 +44,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   agent_link: "Agent Link 好友（列表/请求/中继消息）",
   calendar: "日程与提醒（创建/查询）",
   weather: "天气查询",
-  sub_agent: "子Agent委派（4个专业子Agent调度）",
+  sub_agent: "任务执行（后台 plan-and-execute 统一执行）",
   aip: "AIP协议（dispatch/状态/提案）",
   vision: "视觉能力（HTTP抓帧/定时巡检）",
   desktop: "桌面自动化（VLM视觉操控电脑）",
@@ -125,9 +125,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "sub_agent",
       lines: [
-        "5️⃣ 子Agent委派（3个核心）：master_list_sub_agents / master_invoke_sub_agent / master_poll_sub_agent_tasks（支持并行与后台委派）",
-        "   路由表：life(复杂生活操作:钱包写/视觉操控) | tech(深度RPA/代码开发/系统运维) | info(深度调研比价)",
-        "   ⚠️ 主 agent 拥有基本能力(查天气/查余额/设日程/好友管理/搜信息)，先自己处理，搞不定才委派。",
+        "5️⃣ 任务执行：复杂任务由后台 plan-and-execute 流程统一执行（全量工具 + 多步收敛），无需委派子 Agent。",
       ],
     },
     {
