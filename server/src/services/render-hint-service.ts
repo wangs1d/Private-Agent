@@ -222,10 +222,10 @@ export function classifyRenderHint(
     }
   }
 
-  // === 优先级 2：result_card 简短汇报（意图/表格放行，避免截胡富文本）===
-  if (trimmed.length <= RESULT_CARD_MAX_CHARS && !hasIntent && !hasTable) {
+  // === 优先级 2：result_card 简短汇报（表格放行到富文本，避免截胡）===
+  if (trimmed.length <= RESULT_CARD_MAX_CHARS && !hasTable) {
     const listResult = analyzeListStructure(trimmed);
-    // (a) 工具上下文是天气 → 强制小卡片
+    // (a) 工具上下文是天气 → 强制小卡片（意图词不放行，天气形态唯一）
     if (ctx?.toolName && ctx.toolName.startsWith("weather.")) {
       if (listResult.itemCount >= 2 || WEATHER_HINT_RE.test(trimmed)) {
         return {
@@ -234,15 +234,16 @@ export function classifyRenderHint(
         };
       }
     }
-    // (b) 列表结构 3-7 条
-    if (listResult.itemCount >= 3 && listResult.itemCount <= 7) {
+    // (b) 列表结构 3-12 条（真实 markdown 列表是强意图信号——即使带用户意图词，
+    // 短回复的列表也该上卡而不是 structured 富文本；8+ 条由 fold_list 折叠）
+    if (listResult.itemCount >= 3 && listResult.itemCount <= 12) {
       return {
         type: "result_card",
-        reason: `list-structure(items=${listResult.itemCount})`,
+        reason: `list-structure(items=${listResult.itemCount},intent=${hasIntent})`,
       };
     }
     // (c) 任务完成汇报 + 至少 2 条列表项
-    if (TASK_DONE_RE.test(trimmed) && listResult.itemCount >= 2) {
+    if (!hasIntent && TASK_DONE_RE.test(trimmed) && listResult.itemCount >= 2) {
       return {
         type: "result_card",
         reason: `task-done(items=${listResult.itemCount})`,

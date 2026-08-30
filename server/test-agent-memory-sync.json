@@ -1,9 +1,12 @@
 {
   "sessions": {
-    "actor-5": {
+    "actor-3": {
       "revision": 2,
       "entries": {
-        "memory_current_mission": ""
+        "memory_summary": "[2026-08-30T09:28:13.868Z] [topic:general] user prefers concise answers\n[2026-08-30T09:28:13.869Z] [topic:general] user dislikes concise answers",
+        "memory_summary_forgotten": "",
+        "memory_preferences": "[2026-08-30T09:28:13.869Z] [topic:general] user dislikes concise answers",
+        "session_recap": "[2026-08-30T09:28:13.868Z] [topic:general] user prefers concise answers\n[2026-08-30T09:28:13.869Z] [topic:general] user dislikes concise answers"
       }
     }
   }

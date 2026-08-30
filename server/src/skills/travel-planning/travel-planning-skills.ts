@@ -15,6 +15,7 @@
 import type { SkillDefinition } from "../types.js";
 import type { PlanningService } from "./travel-planning-service.js";
 import { travelItineraryStore } from "./travel-itinerary-store.js";
+import { travelPlanStore } from "./travel-plan-store.js";
 
 type Deps = {
   travelPlanningService: PlanningService;
@@ -23,55 +24,45 @@ type Deps = {
 /**
  * 生成结果中按天行程的摘要（LLM 工具返回值）。
  *
- * 瘦身原则：本返回值会整体进入 LLM 上下文，只保留 LLM 转述行程所需的最小字段集。
- * 图片/评论/视频/地址/电话等渲染字段一律剥离 —— 前端双面板经
- * travelItineraryStore → travel_itinerary 卡结构化直读完整数据，不经过 LLM，
- * 在这里带上它们纯属浪费 token（5 天行程可省数千 token/轮）。
+ * 瘦身原则：本返回值会整体进入 LLM 上下文。行程明细（按天条目/时间/坐标/
+ * 图片/评论/价格/贴士）一律不下发——前端经 travelItineraryStore →
+ * travel_itinerary 卡结构化直读完整数据并展开双面板，全程不经过 LLM。
+ * LLM 只需要知道「规划成功了、大致是什么」：目的地/天数/日期/总花费 +
+ * 少量亮点名（让口头转述自然），外加展示指令（禁止复述 JSON/逐条罗列）。
+ * 5 天行程可省数千 token/轮。
  */
 function summarizeItinerary(result: unknown): Record<string, unknown> {
   const r = result as Record<string, unknown> | null;
   if (!r || typeof r !== "object") return { ok: false, error: "规划引擎未返回有效结果" };
-  const days = Array.isArray(r.days)
-    ? (r.days as Array<Record<string, unknown>>).map((d) => ({
-        date: d?.date,
-        items: Array.isArray(d?.items)
-          ? (d.items as Array<Record<string, unknown>>).map((it) => ({
-              type: it?.type,
-              name: it?.name,
-              startTime: it?.startTime,
-              endTime: it?.endTime,
-              visitDuration: it?.visitDuration,
-              transportFromPrev: it?.transportFromPrev,
-              rating: it?.rating,
-              priceInfo: it?.priceInfo,
-              description: it?.description,
-              tips: it?.tips,
-              bookingNote: it?.bookingNote,
-            }))
-          : [],
-      }))
-    : [];
-  const pois = Array.isArray(r.pois)
-    ? (r.pois as Array<Record<string, unknown>>).map((p) => ({
-        name: p?.name,
-        type: p?.type,
-        rating: p?.rating,
-      }))
-    : [];
+  const days = Array.isArray(r.days) ? (r.days as Array<Record<string, unknown>>) : [];
+  // 亮点：每天前 2 个条目名（只取名字，无任何明细），总量封顶 10 个
+  const highlights: string[] = [];
+  for (const day of days) {
+    const items = Array.isArray(day?.items) ? (day.items as Array<Record<string, unknown>>) : [];
+    for (const it of items.slice(0, 2)) {
+      if (highlights.length >= 10) break;
+      const name = typeof it?.name === "string" ? it.name.trim() : "";
+      if (name) highlights.push(name);
+    }
+    if (highlights.length >= 10) break;
+  }
+  const pricing = r.pricingSummary as Record<string, unknown> | null | undefined;
+  const totalFinal = Number(pricing?.totalFinal);
   return {
     ok: true,
     id: r.id,
     title: r.title,
-    description: r.description,
     destination: r.destination,
     startDate: r.startDate,
     endDate: r.endDate,
-    center: r.center,
-    days,
-    pois,
-    travelInfo: r.travelInfo,
-    pricingSummary: r.pricingSummary,
-    fromCache: r.fromCache,
+    dayCount: days.length,
+    ...(Number.isFinite(totalFinal) && totalFinal > 0 ? { totalCost: Math.round(totalFinal) } : {}),
+    ...(highlights.length > 0 ? { highlights } : {}),
+    displayNote:
+      "完整行程已生成，前端会自动展开行程卡（双面板规划界面）向用户展示全部明细，" +
+      "且卡片会保留在回复中供用户随时回看。" +
+      "请勿在回复中复述 JSON、逐条罗列行程或重复任何明细数据；" +
+      "用一两句话自然告知用户行程已排好（目的地/天数/亮点一句带过）即可。",
   };
 }
 
@@ -135,6 +126,38 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           title: result.title,
           startDate: result.startDate ?? "",
           endDate: result.endDate ?? "",
+          days: (result.days ?? []).map((day) => ({
+            date: day.date ?? "",
+            items: (day.items ?? []).map((item) => ({
+              type: item.type,
+              name: item.name,
+              startTime: item.startTime ?? item.name,
+              latitude: item.latitude,
+              longitude: item.longitude,
+              address: item.address ?? "",
+              priceInfo: item.priceInfo ?? "",
+              description: item.description ?? "",
+              tips: item.tips,
+              images: item.images,
+              reviews: item.reviews,
+              videos: item.videos,
+            })),
+          })),
+        });
+        // 冷层落盘：完整明细按 planId 持久化，供跨轮/跨重启的 travel.get-itinerary
+        // 按需回查；LLM 上下文只留 summarizeItinerary 的极简回执
+        travelPlanStore.save({
+          planId: String(result.id ?? ""),
+          destination: result.destination,
+          title: result.title,
+          startDate: result.startDate ?? "",
+          endDate: result.endDate ?? "",
+          requestInput: rawInput,
+          preferences: Array.isArray(input.preferences)
+            ? input.preferences.filter((p): p is string => typeof p === "string")
+            : undefined,
+          totalCost: (result as { pricingSummary?: { totalFinal?: number } }).pricingSummary
+            ?.totalFinal,
           days: (result.days ?? []).map((day) => ({
             date: day.date ?? "",
             items: (day.items ?? []).map((item) => ({
@@ -316,7 +339,96 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  return [plan_itinerary, search_poi, destination_info, compute_route];
+  /** 5. 行程明细回查（冷层按需读取，替代把明细常驻上下文） */
+  const get_itinerary: SkillDefinition = {
+    metadata: {
+      name: "travel.get-itinerary",
+      version: "1.0.0",
+      displayName: "回查已生成的行程明细",
+      description:
+        "按 planId 或目的地回查已生成的行程明细（分天条目：时间/名称/价格/地址/贴士）。" +
+        "行程规划完成后对话中只保留摘要，用户追问行程细节（如「第一天住哪」「第二天怎么安排」「酒店多少钱」）" +
+        "或要求调整某天安排时调用此工具按需读取。不传 day 返回逐天概览（条目名级），传 day 返回该天完整明细。" +
+        "两者都不传时返回最近几份行程列表（供确认用户指的是哪份）。",
+      kind: "builtin",
+      tags: ["travel", "行程", "回查", "明细", "itinerary"],
+      icon: "🔎",
+      parameters: [
+        { name: "planId", type: "string", required: false, description: "行程 ID（回执中的 id 字段，如 plan-1788076649218）" },
+        { name: "destination", type: "string", required: false, description: "目的地（无 planId 时按目的地匹配最近一份）" },
+        { name: "day", type: "number", required: false, description: "天序号（1 起）。传入时返回该天完整明细，否则返回逐天概览" },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        plan: "行程概要 {planId,title,destination,startDate,endDate,dayCount,totalCost}",
+        days: "逐天概览 [{date, items:[{type,name,startTime,priceInfo}]}]（不传 day 时）",
+        dayDetail: "单天完整明细（传 day 时）：{date, items:[…含地址/描述/贴士/坐标]}",
+        hint: "展示提示",
+      },
+      permissions: [],
+      timeoutMs: 5_000,
+    },
+    handler: async (input) => {
+      const planId = typeof input.planId === "string" ? input.planId.trim() : "";
+      const destination = typeof input.destination === "string" ? input.destination.trim() : "";
+      const day = typeof input.day === "number" && input.day > 0 ? Math.floor(input.day) : 0;
+
+      let plan = planId ? travelPlanStore.get(planId) : null;
+      if (!plan && destination) plan = travelPlanStore.findByDestination(destination);
+      if (!plan) {
+        const recent = travelPlanStore.listSummaries(5);
+        if (recent.length === 0) {
+          return { ok: false, error: "还没有已保存的行程", hint: "可先用 travel.plan-itinerary 生成行程" };
+        }
+        return {
+          ok: true,
+          recentPlans: recent,
+          hint: "未指定 planId/destination，以上是最近生成的行程列表；请确认后带上 planId 再查明细",
+        };
+      }
+
+      const overview = {
+        planId: plan.planId,
+        title: plan.title,
+        destination: plan.destination,
+        startDate: plan.startDate,
+        endDate: plan.endDate,
+        dayCount: plan.days.length,
+        ...(plan.totalCost != null ? { totalCost: plan.totalCost } : {}),
+      };
+
+      if (day > 0) {
+        const d = plan.days[day - 1];
+        if (!d) {
+          return { ok: true, plan: overview, error: `只有 ${plan.days.length} 天，没有第 ${day} 天` };
+        }
+        return {
+          ok: true,
+          plan: overview,
+          dayDetail: d,
+          hint: "以上是完整天明细，仅用于回答用户本次追问；不要逐条复述，对话保持自然",
+        };
+      }
+
+      // 概览：条目名级（不含描述/贴士/坐标），控制 token
+      return {
+        ok: true,
+        plan: overview,
+        days: plan.days.map((d) => ({
+          date: d.date,
+          items: d.items.map((it) => ({
+            type: it.type,
+            name: it.name,
+            startTime: it.startTime,
+            priceInfo: it.priceInfo,
+          })),
+        })),
+        hint: "需要某天完整明细（地址/贴士/坐标）时带上 day 参数再调",
+      };
+    },
+  };
+
+  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary];
 }
 
 /**

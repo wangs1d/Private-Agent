@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>主聊天界面 - Three.js 天气</title>
+    <title>主聊天界面</title>
     <style id="theme-vars">
 /* ================================================
    Private Agent UI - Unified Theme Color Palette
@@ -116,7 +116,6 @@
     </style>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
     <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <style type="text/tailwindcss">
   @theme inline {
     --color-primary: var(--pa-primary);
@@ -243,124 +242,72 @@
 
       <!-- ============ Right panel (w-72) ============ -->
       <aside class="w-72 shrink-0 flex-col gap-4 p-4 overflow-y-auto no-scrollbar hidden lg:flex" style="background: var(--pa-bg-surface); border-left: 1px solid var(--pa-border);">
-        <!-- Weather widget — Three.js 3D animated -->
-        <div class="weather-card relative overflow-hidden" style="border-radius: var(--pa-radius-lg); padding: 18px 20px; background: var(--pa-bg-surface); border: 1px solid var(--pa-border);">
-          <!-- Three.js canvas background -->
-          <canvas id="weather-canvas" class="absolute inset-0 pointer-events-none" style="z-index: 0; width: 100%; height: 100%;"></canvas>
-
-          <!-- Bottom gradient overlay for text readability -->
-          <div class="absolute inset-x-0 bottom-0 pointer-events-none" style="z-index: 1; height: 50%; background: linear-gradient(to top, var(--pa-bg-surface) 0%, transparent 100%); opacity: 0.7;"></div>
-
-          <!-- Top row: city + icon -->
-          <div class="relative flex items-start justify-between" style="z-index: 2;">
-            <div>
-              <div class="flex items-center gap-1.5">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--pa-text-muted);"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
-                <span style="font-size: 13px; font-weight: 500; color: var(--pa-text-secondary);">北京</span>
-              </div>
-              <div style="font-size: 11px; color: var(--pa-text-muted); margin-top: 2px;">6月18日 周四</div>
-            </div>
-            <!-- Weather icon -->
-            <div class="weather-icon relative" style="width: 36px; height: 36px;">
-              <svg viewBox="0 0 48 48" fill="none">
-                <!-- Sun -->
-                <circle cx="18" cy="18" r="8" fill="#FFB340" opacity="0.9"/>
-                <circle cx="18" cy="18" r="5" fill="#FFD275"/>
-                <!-- Cloud -->
-                <ellipse cx="26" cy="28" rx="14" ry="8" fill="white"/>
-                <ellipse cx="32" cy="25" rx="12" ry="8" fill="white"/>
-                <ellipse cx="20" cy="27" rx="10" ry="6" fill="white"/>
-              </svg>
-            </div>
+        <!-- Today schedule — vertical timeline -->
+        <div class="panel-card" style="background: var(--pa-bg-surface); border: 1px solid var(--pa-border); border-radius: var(--pa-radius-lg); padding: 16px 14px 12px; box-shadow: var(--pa-shadow-sm);">
+          <div class="flex items-baseline justify-between px-1">
+            <span class="text-sm font-semibold" style="color: var(--pa-text-primary);">今日安排</span>
+            <span style="font-size: 11px; color: var(--pa-text-muted);">6月18日 周四</span>
           </div>
-
-          <!-- Center: temperature -->
-          <div class="relative mt-2" style="z-index: 2;">
-            <div class="flex items-baseline gap-0.5">
-              <span style="font-size: 48px; font-weight: 200; line-height: 1; letter-spacing: -2px; color: var(--pa-text-primary);">26</span>
-              <span style="font-size: 18px; font-weight: 300; line-height: 1; color: var(--pa-text-secondary);">°C</span>
+          <div class="flex items-center gap-2 mt-1.5 mb-2 px-1">
+            <div class="flex-1" style="height: 3px; border-radius: 2px; background: var(--pa-border-soft); overflow: hidden;">
+              <div class="day-progress-fill" style="width: 25%; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--pa-primary-medium), var(--pa-primary));"></div>
             </div>
-            <div style="font-size: 12px; color: var(--pa-text-secondary); margin-top: 2px;">多云转晴 · 体感 28°</div>
+            <span style="font-size: 11px; color: var(--pa-text-muted); white-space: nowrap;">已完成 1/4</span>
           </div>
-
-          <!-- H/L + warning -->
-          <div class="relative mt-2.5 flex items-center justify-between" style="z-index: 2;">
-            <div style="font-size: 11px; color: var(--pa-text-muted);">
-              <span style="color: var(--pa-text-secondary); font-weight: 500;">H 30°</span>
-              <span style="margin: 0 4px;">·</span>
-              <span>L 21°</span>
+          <div class="flex flex-col">
+            <div class="tl-row done">
+              <span class="tl-time">09:00</span>
+              <span class="tl-dot" style="--tl-color: var(--pa-primary);"></span>
+              <span class="tl-text">产品评审会议</span>
             </div>
-            <div class="flex items-center gap-1" style="font-size: 11px; color: var(--state-warning);">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-              <span>下午有雷阵雨</span>
+            <div class="tl-row now">
+              <span class="tl-time">11:30</span>
+              <span class="tl-dot" style="--tl-color: var(--state-success);"></span>
+              <span class="tl-text">设计团队同步</span>
+              <span class="tl-tag">即将开始</span>
             </div>
-          </div>
-
-          <!-- Hourly forecast -->
-          <div class="relative mt-3 pt-3" style="z-index: 2; border-top: 1px solid var(--pa-border-soft);">
-            <div class="flex items-end justify-between gap-1 h-20">
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">23°</span>
-                <div style="width: 3px; height: 26px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.15), rgba(0,122,255,0.35));"></div>
-                <span style="font-size: 10px; color: var(--pa-text-muted);">9时</span>
-              </div>
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">27°</span>
-                <div style="width: 3px; height: 38px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.2), rgba(0,122,255,0.5));"></div>
-                <span style="font-size: 10px; color: var(--pa-text-muted);">12时</span>
-              </div>
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 600; color: var(--pa-primary);">30°</span>
-                <div style="width: 4px; height: 52px; border-radius: 2px; background: linear-gradient(to top, rgba(255,150,0,0.35), rgba(0,122,255,0.7));"></div>
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">15时</span>
-              </div>
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">28°</span>
-                <div style="width: 3px; height: 42px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.2), rgba(0,122,255,0.55));"></div>
-                <span style="font-size: 10px; color: var(--pa-text-muted);">18时</span>
-              </div>
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-secondary);">24°</span>
-                <div style="width: 3px; height: 30px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.15), rgba(0,122,255,0.4));"></div>
-                <span style="font-size: 10px; color: var(--pa-text-muted);">21时</span>
-              </div>
-              <div class="flex flex-col items-center gap-1 flex-1">
-                <span style="font-size: 10px; font-weight: 500; color: var(--pa-text-muted);">22°</span>
-                <div style="width: 3px; height: 22px; border-radius: 2px; background: linear-gradient(to top, rgba(0,122,255,0.1), rgba(0,122,255,0.25));"></div>
-                <span style="font-size: 10px; color: var(--pa-text-muted);">0时</span>
-              </div>
+            <div class="tl-row">
+              <span class="tl-time">14:00</span>
+              <span class="tl-dot" style="--tl-color: var(--state-warning);"></span>
+              <span class="tl-text">客户演示准备</span>
+            </div>
+            <div class="tl-row">
+              <span class="tl-time">16:30</span>
+              <span class="tl-dot" style="--tl-color: #af52de;"></span>
+              <span class="tl-text">周度复盘</span>
             </div>
           </div>
         </div>
 
-        <!-- Schedule card -->
-        <div class="px-4 py-4" style="background: var(--pa-bg-surface); border: 1px solid var(--pa-border); border-radius: var(--pa-radius-md);">
-          <div class="flex items-baseline justify-between mb-3">
-            <span class="text-sm font-semibold" style="color: var(--pa-text-primary);">今日安排</span>
-            <span style="font-size:11px; color: var(--pa-text-muted);">6月18日 周四</span>
+        <!-- Focus timer -->
+        <div class="panel-card" style="background: var(--pa-bg-surface); border: 1px solid var(--pa-border); border-radius: var(--pa-radius-lg); padding: 16px; box-shadow: var(--pa-shadow-sm);">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-semibold" style="color: var(--pa-text-primary);">专注模式</span>
+            <div class="flex items-center gap-1.5">
+              <button class="pomo-mode active" data-mode="focus">专注 25</button>
+              <button class="pomo-mode" data-mode="rest">休息 5</button>
+            </div>
           </div>
-          <div class="flex flex-col gap-2">
-            <div class="sched-item flex gap-2.5 px-2.5 py-1.5" style="border-left: 3px solid var(--pa-primary); border-radius: 4px;">
-              <span class="font-semibold shrink-0" style="font-size:11px; color: var(--pa-text-secondary);">09:00</span>
-              <span class="text-[13px] truncate" style="color: var(--pa-text-primary);">产品评审会议</span>
+          <div class="flex items-center gap-4">
+            <div class="relative shrink-0">
+              <svg width="84" height="84" viewBox="0 0 84 84">
+                <circle cx="42" cy="42" r="36" fill="none" stroke="var(--pa-border-soft)" stroke-width="6"/>
+                <circle id="pomo-arc" cx="42" cy="42" r="36" fill="none" stroke="var(--pa-primary)" stroke-width="6" stroke-linecap="round" stroke-dasharray="226.19" stroke-dashoffset="0" transform="rotate(-90 42 42)"/>
+              </svg>
+              <div class="absolute inset-0 flex items-center justify-center">
+                <span id="pomo-time" style="font-family: var(--pa-font-mono); font-size: 19px; font-weight: 600; letter-spacing: 0.5px; color: var(--pa-text-primary);">25:00</span>
+              </div>
             </div>
-            <div class="sched-item flex gap-2.5 px-2.5 py-1.5" style="border-left: 3px solid var(--state-success); border-radius: 4px;">
-              <span class="font-semibold shrink-0" style="font-size:11px; color: var(--pa-text-secondary);">11:30</span>
-              <span class="text-[13px] truncate" style="color: var(--pa-text-primary);">设计团队同步</span>
-            </div>
-            <div class="sched-item flex gap-2.5 px-2.5 py-1.5" style="border-left: 3px solid var(--state-warning); border-radius: 4px;">
-              <span class="font-semibold shrink-0" style="font-size:11px; color: var(--pa-text-secondary);">14:00</span>
-              <span class="text-[13px] truncate" style="color: var(--pa-text-primary);">客户演示准备</span>
-            </div>
-            <div class="sched-item flex gap-2.5 px-2.5 py-1.5" style="border-left: 3px solid #af52de; border-radius: 4px;">
-              <span class="font-semibold shrink-0" style="font-size:11px; color: var(--pa-text-secondary);">16:30</span>
-              <span class="text-[13px] truncate" style="color: var(--pa-text-primary);">周度复盘</span>
+            <div class="flex-1 min-w-0 flex flex-col gap-2">
+              <button id="pomo-start" class="pomo-btn">开始专注</button>
+              <button id="pomo-reset" class="pomo-btn">重置</button>
+              <div style="font-size: 11px; color: var(--pa-text-muted);">今日已完成 <span id="pomo-count" style="font-weight: 600; color: var(--pa-primary);">2</span> 个番茄</div>
             </div>
           </div>
         </div>
 
         <!-- Tools section -->
-        <div>
+        <div class="panel-card">
           <div class="text-xs font-semibold mb-2" style="color: var(--pa-text-secondary);">常用工具</div>
           <div class="grid grid-cols-4 gap-2 p-3 justify-items-center" style="background: var(--pa-glass-bg); border: 1px solid var(--pa-border-soft); border-radius: var(--pa-radius-md);">
             <button class="tool-btn flex flex-col items-center justify-center gap-1 w-12 h-12" style="border-radius: var(--pa-radius-md); color: var(--pa-text-secondary);" aria-label="好友">
@@ -383,7 +330,7 @@
         </div>
 
         <!-- Pet avatar -->
-        <div class="mt-auto flex flex-col items-center gap-2 pb-1">
+        <div class="panel-card mt-auto flex flex-col items-center gap-2 pb-1">
           <div class="relative">
             <div class="pet-orb w-16 h-16 rounded-full"></div>
             <div class="pet-glow"></div>
@@ -439,9 +386,148 @@
       .send-btn:active { transform: translateY(0); }
       .send-btn:focus-visible { outline: 2px solid var(--pa-primary); outline-offset: 2px; }
 
-      /* Schedule items */
-      .sched-item { transition: background-color 0.15s ease; }
-      .sched-item:hover { background: var(--pa-bg-hover); }
+      /* ── Panel cards: staggered entrance ── */
+      .panel-card {
+        opacity: 0;
+        transform: translateY(10px);
+        animation: card-in 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+      }
+      .panel-card:nth-child(1) { animation-delay: 0.05s; }
+      .panel-card:nth-child(2) { animation-delay: 0.13s; }
+      .panel-card:nth-child(3) { animation-delay: 0.21s; }
+      .panel-card:nth-child(4) { animation-delay: 0.29s; }
+      @keyframes card-in {
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      /* ── Schedule: vertical timeline ── */
+      .tl-row {
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 4px 8px 4px 2px;
+        border-radius: 8px;
+      }
+      .tl-row:hover { background: var(--pa-bg-hover); }
+      .tl-time {
+        width: 40px;
+        flex-shrink: 0;
+        text-align: right;
+        font-family: var(--pa-font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--pa-text-secondary);
+        line-height: 21px;
+      }
+      .tl-dot { position: relative; width: 20px; flex-shrink: 0; align-self: stretch; }
+      .tl-dot::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        top: -12px;
+        bottom: -12px;
+        width: 2px;
+        border-radius: 1px;
+        background: var(--pa-border-soft);
+      }
+      .tl-row:first-child .tl-dot::before { top: 11px; }
+      .tl-row:last-child .tl-dot::before { bottom: auto; height: 24px; }
+      .tl-dot::after {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: 6px;
+        transform: translateX(-50%);
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--tl-color, var(--pa-border-strong));
+        box-shadow: 0 0 0 3px var(--pa-bg-surface);
+      }
+      .tl-text {
+        font-size: 13px;
+        line-height: 21px;
+        color: var(--pa-text-primary);
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tl-row.done .tl-time { color: var(--pa-text-muted); font-weight: 400; }
+      .tl-row.done .tl-text { color: var(--pa-text-muted); text-decoration: line-through; }
+      .tl-row.done .tl-dot::after {
+        content: '✓';
+        background: var(--state-success);
+        color: #ffffff;
+        font-size: 7px;
+        font-weight: 700;
+        line-height: 9px;
+        text-align: center;
+      }
+      .tl-row.now { background: var(--pa-primary-light); }
+      .tl-row.now .tl-time, .tl-row.now .tl-text { color: var(--pa-primary); }
+      .tl-row.now .tl-dot::after {
+        background: var(--pa-primary);
+        animation: tl-ping 2.2s ease-out infinite;
+      }
+      @keyframes tl-ping {
+        0% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.35), 0 0 0 3px var(--pa-bg-surface); }
+        70%, 100% { box-shadow: 0 0 0 7px rgba(0, 122, 255, 0), 0 0 0 3px var(--pa-bg-surface); }
+      }
+      .tl-tag {
+        flex-shrink: 0;
+        align-self: center;
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 16px;
+        padding: 1px 7px;
+        border-radius: var(--pa-radius-full);
+        color: var(--pa-primary);
+        background: var(--pa-primary-medium);
+      }
+
+      /* ── Schedule: day progress ── */
+      .day-progress-fill {
+        transform-origin: left;
+        animation: bar-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.4s both;
+      }
+      @keyframes bar-in {
+        from { transform: scaleX(0); }
+      }
+
+      /* ── Focus timer ── */
+      .pomo-mode {
+        font-size: 11px;
+        line-height: 16px;
+        padding: 2px 9px;
+        border-radius: var(--pa-radius-full);
+        border: 1px solid var(--pa-border);
+        color: var(--pa-text-muted);
+        transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+      }
+      .pomo-mode:hover { color: var(--pa-text-secondary); border-color: var(--pa-border-strong); }
+      .pomo-mode.active {
+        background: var(--pa-primary-light);
+        border-color: var(--pa-primary-border);
+        color: var(--pa-primary);
+        font-weight: 600;
+      }
+      .pomo-btn {
+        height: 30px;
+        border-radius: var(--pa-radius-md);
+        font-size: 12px;
+        font-weight: 600;
+        transition: transform 0.15s ease, background-color 0.15s ease;
+      }
+      .pomo-btn:hover { transform: translateY(-1px); }
+      .pomo-btn:active { transform: translateY(0); }
+      #pomo-start { background: var(--pa-primary); color: #ffffff; box-shadow: var(--pa-shadow-primary); }
+      #pomo-start:hover { background: var(--pa-primary-hover); }
+      #pomo-reset { background: var(--pa-bg-hover); color: var(--pa-text-secondary); }
+      .pomo-running #pomo-arc { filter: drop-shadow(0 0 4px rgba(0, 122, 255, 0.45)); }
+      .pomo-running #pomo-time { color: var(--pa-primary); }
 
       /* Input */
       .chat-input::placeholder { color: var(--pa-text-muted); }
@@ -475,415 +561,81 @@
 
       @media (prefers-reduced-motion: reduce) {
         .pet-orb, .pet-glow { animation: none; }
-        .tool-btn:hover, .send-btn:hover, .nav-btn:hover, .sched-item:hover { transform: none; }
+        .panel-card { animation: none; opacity: 1; transform: none; }
+        .day-progress-fill { animation: none; }
+        .tl-row.now .tl-dot::after { animation: none; }
+        .tool-btn:hover, .send-btn:hover, .nav-btn:hover { transform: none; }
       }
       @media (hover: none) {
         .tool-btn:hover, .send-btn:hover { transform: none; }
       }
     </style>
     <script>
-      // Three.js Weather Scene for the weather card
+      // 专注番茄钟
       (function() {
-        var canvas = document.getElementById('weather-canvas');
-        if (!canvas || typeof THREE === 'undefined') return;
+        var arc = document.getElementById('pomo-arc');
+        var timeEl = document.getElementById('pomo-time');
+        var startBtn = document.getElementById('pomo-start');
+        var resetBtn = document.getElementById('pomo-reset');
+        var countEl = document.getElementById('pomo-count');
+        var card = startBtn ? startBtn.closest('.panel-card') : null;
+        if (!arc || !card) return;
 
-        var weatherCard = canvas.parentElement;
-        var scene, camera, renderer;
-        var clouds = [];
-        var particles = [];
-        var sunMesh, sunGlowMesh, sunLight;
-        var animationId = null;
-        var isVisible = true;
-        var clock = new THREE.Clock();
-        var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        var isDark = document.documentElement.classList.contains('dark');
+        var CIRC = 226.19;
+        var MODES = { focus: 25 * 60, rest: 5 * 60 };
+        var mode = 'focus';
+        var remain = MODES[mode];
+        var timer = null;
+        var finished = 2;
 
-        // Speed multiplier for reduced motion
-        var speedMul = reducedMotion ? 0.15 : 1.0;
-
-        function init() {
-          // Scene
-          scene = new THREE.Scene();
-
-          // Camera — orthographic for 2.5D card feel
-          var aspect = canvas.clientWidth / canvas.clientHeight;
-          var frustumSize = 10;
-          camera = new THREE.OrthographicCamera(
-            frustumSize * aspect / -2, frustumSize * aspect / 2,
-            frustumSize / 2, frustumSize / -2,
-            0.1, 100
-          );
-          camera.position.z = 10;
-          camera.lookAt(0, 0, 0);
-
-          // Renderer
-          try {
-            renderer = new THREE.WebGLRenderer({
-              canvas: canvas,
-              alpha: true,
-              antialias: true
-            });
-          } catch(e) {
-            // WebGL not available — graceful fallback
-            canvas.style.display = 'none';
-            return;
-          }
-
-          renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-          renderer.setClearColor(0x000000, 0);
-          resize();
-
-          // Sky gradient background (via a large plane with shader)
-          createSkyGradient();
-
-          // Lighting
-          var ambientLight = new THREE.AmbientLight(0xffffff, isDark ? 0.3 : 0.6);
-          scene.add(ambientLight);
-
-          var directionalLight = new THREE.DirectionalLight(0xffffff, isDark ? 0.4 : 0.8);
-          directionalLight.position.set(3, 5, 5);
-          scene.add(directionalLight);
-
-          // Sun with glow
-          createSun();
-
-          // Clouds
-          createClouds();
-
-          // Atmospheric particles
-          createParticles();
-
-          // Start animation
-          animate();
-
-          // Listeners
-          window.addEventListener('resize', onResize);
-          document.addEventListener('visibilitychange', onVisibilityChange);
-
-          // Watch for theme changes
-          var observer = new MutationObserver(function(mutations) {
-            mutations.forEach(function(mutation) {
-              if (mutation.attributeName === 'class') {
-                isDark = document.documentElement.classList.contains('dark');
-                updateThemeColors();
-              }
-            });
-          });
-          observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+        function fmt(s) {
+          var m = Math.floor(s / 60), r = s % 60;
+          return (m < 10 ? '0' + m : '' + m) + ':' + (r < 10 ? '0' + r : '' + r);
         }
-
-        function createSkyGradient() {
-          var geometry = new THREE.PlaneGeometry(20, 15);
-          var uniforms = {
-            topColor: { value: new THREE.Color(isDark ? 0x1a2744 : 0x87ceeb) },
-            bottomColor: { value: new THREE.Color(isDark ? 0x0f172a : 0xe8f4fd) },
-            offset: { value: 0.3 },
-            exponent: { value: 0.8 },
-            time: { value: 0 }
-          };
-
-          var material = new THREE.ShaderMaterial({
-            uniforms: uniforms,
-            vertexShader: [
-              'varying vec3 vWorldPosition;',
-              'void main() {',
-              '  vec4 worldPosition = modelMatrix * vec4(position, 1.0);',
-              '  vWorldPosition = worldPosition.xyz;',
-              '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-              '}'
-            ].join('\n'),
-            fragmentShader: [
-              'uniform vec3 topColor;',
-              'uniform vec3 bottomColor;',
-              'uniform float offset;',
-              'uniform float exponent;',
-              'uniform float time;',
-              'varying vec3 vWorldPosition;',
-              'void main() {',
-              '  float h = normalize(vWorldPosition + offset).y;',
-              '  // Subtle hue shift over time',
-              '  float shift = sin(time * 0.05) * 0.03;',
-              '  vec3 top = topColor + vec3(shift * 0.5, shift, shift * 1.5);',
-              '  vec3 bottom = bottomColor + vec3(shift * 0.3, shift * 0.5, shift);',
-              '  gl_FragColor = vec4(mix(bottom, top, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);',
-              '}'
-            ].join('\n'),
-            transparent: true,
-            opacity: isDark ? 0.4 : 0.6
-          });
-
-          var sky = new THREE.Mesh(geometry, material);
-          sky.position.z = -5;
-          sky.name = 'sky';
-          scene.add(sky);
+        function render() {
+          timeEl.textContent = fmt(remain);
+          arc.setAttribute('stroke-dashoffset', (CIRC * (1 - remain / MODES[mode])).toFixed(2));
         }
-
-        function createSun() {
-          // Sun core
-          var sunGeometry = new THREE.SphereGeometry(0.8, 32, 32);
-          var sunMaterial = new THREE.MeshBasicMaterial({
-            color: isDark ? 0xffa500 : 0xffb340
-          });
-          sunMesh = new THREE.Mesh(sunGeometry, sunMaterial);
-          sunMesh.position.set(3.2, 2.8, 1);
-          scene.add(sunMesh);
-
-          // Sun glow (additive blending halo)
-          var glowGeometry = new THREE.SphereGeometry(1.4, 32, 32);
-          var glowMaterial = new THREE.MeshBasicMaterial({
-            color: isDark ? 0xff8c00 : 0xffd275,
-            transparent: true,
-            opacity: isDark ? 0.15 : 0.25,
-            blending: THREE.AdditiveBlending,
-            side: THREE.BackSide
-          });
-          sunGlowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
-          sunGlowMesh.position.copy(sunMesh.position);
-          scene.add(sunGlowMesh);
-
-          // Point light from sun
-          sunLight = new THREE.PointLight(isDark ? 0xffa500 : 0xffd275, isDark ? 0.5 : 1.0, 15);
-          sunLight.position.copy(sunMesh.position);
-          scene.add(sunLight);
+        function stop() {
+          if (timer) { clearInterval(timer); timer = null; }
+          card.classList.remove('pomo-running');
+          startBtn.textContent = mode === 'focus' ? '开始专注' : '开始休息';
         }
-
-        function createCloudMesh(size, opacity) {
-          // Build a cloud from multiple overlapping spheres for puffy look
-          var cloudGroup = new THREE.Group();
-          var cloudMaterial = new THREE.MeshLambertMaterial({
-            color: isDark ? 0x4a5568 : 0xffffff,
-            transparent: true,
-            opacity: opacity
+        function switchMode(next) {
+          mode = next;
+          stop();
+          remain = MODES[mode];
+          document.querySelectorAll('.pomo-mode').forEach(function(btn) {
+            btn.classList.toggle('active', btn.dataset.mode === mode);
           });
-
-          var parts = [
-            { r: size * 0.5, x: -size * 0.4, y: 0, z: 0 },
-            { r: size * 0.6, x: 0, y: size * 0.1, z: 0 },
-            { r: size * 0.45, x: size * 0.4, y: 0, z: 0 },
-            { r: size * 0.35, x: -size * 0.15, y: -size * 0.15, z: 0 },
-            { r: size * 0.3, x: size * 0.2, y: -size * 0.1, z: 0 }
-          ];
-
-          parts.forEach(function(part) {
-            var geom = new THREE.SphereGeometry(part.r, 16, 12);
-            var mesh = new THREE.Mesh(geom, cloudMaterial);
-            mesh.position.set(part.x, part.y, part.z);
-            cloudGroup.add(mesh);
-          });
-
-          return cloudGroup;
+          render();
         }
-
-        function createClouds() {
-          var cloudConfigs = [
-            { size: 0.6, y: 2.5, z: 2, speed: 0.008, opacity: 0.9 },
-            { size: 0.45, y: 1.8, z: 1, speed: 0.012, opacity: 0.7 },
-            { size: 0.7, y: 3.0, z: 0, speed: 0.006, opacity: 0.85 },
-            { size: 0.35, y: 1.2, z: 3, speed: 0.015, opacity: 0.6 },
-            { size: 0.55, y: 2.2, z: -1, speed: 0.01, opacity: 0.75 },
-            { size: 0.4, y: 0.8, z: 1.5, speed: 0.018, opacity: 0.5 }
-          ];
-
-          cloudConfigs.forEach(function(config, i) {
-            var cloud = createCloudMesh(config.size, config.opacity);
-            // Random starting X
-            var startX = -6 + Math.random() * 12;
-            cloud.position.set(startX, config.y + (Math.random() - 0.5) * 0.5, config.z);
-            cloud.userData = {
-              speed: config.speed * (Math.random() * 0.4 + 0.8),
-              baseY: cloud.position.y,
-              baseScale: 1,
-              phase: Math.random() * Math.PI * 2,
-              rotSpeed: (Math.random() - 0.5) * 0.003
-            };
-            clouds.push(cloud);
-            scene.add(cloud);
-          });
-        }
-
-        function createParticles() {
-          var particleCount = 40;
-          var geometry = new THREE.BufferGeometry();
-          var positions = new Float32Array(particleCount * 3);
-          var sizes = new Float32Array(particleCount);
-          var speeds = new Float32Array(particleCount);
-          var phases = new Float32Array(particleCount);
-
-          for (var i = 0; i < particleCount; i++) {
-            positions[i * 3] = (Math.random() - 0.5) * 10;     // x
-            positions[i * 3 + 1] = (Math.random() - 0.5) * 6;  // y
-            positions[i * 3 + 2] = (Math.random() - 0.5) * 4;  // z
-            sizes[i] = Math.random() * 0.06 + 0.02;
-            speeds[i] = Math.random() * 0.003 + 0.001;
-            phases[i] = Math.random() * Math.PI * 2;
-          }
-
-          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-          geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
-          geometry.setAttribute('speed', new THREE.BufferAttribute(speeds, 1));
-          geometry.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
-
-          var material = new THREE.PointsMaterial({
-            color: isDark ? 0x93c5fd : 0xffffff,
-            size: 0.05,
-            transparent: true,
-            opacity: isDark ? 0.3 : 0.5,
-            sizeAttenuation: true
-          });
-
-          var particleSystem = new THREE.Points(geometry, material);
-          particleSystem.userData = { speeds: speeds, phases: phases };
-          particles.push(particleSystem);
-          scene.add(particleSystem);
-        }
-
-        function updateThemeColors() {
-          if (!scene) return;
-
-          // Update sky
-          var sky = scene.getObjectByName('sky');
-          if (sky && sky.material.uniforms) {
-            sky.material.uniforms.topColor.value.set(isDark ? 0x1a2744 : 0x87ceeb);
-            sky.material.uniforms.bottomColor.value.set(isDark ? 0x0f172a : 0xe8f4fd);
-            sky.material.opacity = isDark ? 0.4 : 0.6;
-          }
-
-          // Update sun
-          if (sunMesh) sunMesh.material.color.set(isDark ? 0xffa500 : 0xffb340);
-          if (sunGlowMesh) {
-            sunGlowMesh.material.color.set(isDark ? 0xff8c00 : 0xffd275);
-            sunGlowMesh.material.opacity = isDark ? 0.15 : 0.25;
-          }
-          if (sunLight) {
-            sunLight.color.set(isDark ? 0xffa500 : 0xffd275);
-            sunLight.intensity = isDark ? 0.5 : 1.0;
-          }
-
-          // Update clouds
-          clouds.forEach(function(cloud) {
-            cloud.traverse(function(child) {
-              if (child.isMesh && child.material) {
-                child.material.color.set(isDark ? 0x4a5568 : 0xffffff);
-              }
-            });
-          });
-
-          // Update particles
-          particles.forEach(function(p) {
-            if (p.material) {
-              p.material.color.set(isDark ? 0x93c5fd : 0xffffff);
-              p.material.opacity = isDark ? 0.3 : 0.5;
-            }
-          });
-
-          // Update ambient and directional lights
-          scene.traverse(function(obj) {
-            if (obj.isAmbientLight) obj.intensity = isDark ? 0.3 : 0.6;
-            if (obj.isDirectionalLight) obj.intensity = isDark ? 0.4 : 0.8;
-          });
-        }
-
-        function resize() {
-          if (!renderer || !camera) return;
-          var width = canvas.clientWidth;
-          var height = canvas.clientHeight;
-          if (width === 0 || height === 0) return;
-
-          renderer.setSize(width, height, false);
-
-          var aspect = width / height;
-          var frustumSize = 10;
-          camera.left = frustumSize * aspect / -2;
-          camera.right = frustumSize * aspect / 2;
-          camera.top = frustumSize / 2;
-          camera.bottom = frustumSize / -2;
-          camera.updateProjectionMatrix();
-        }
-
-        function onResize() {
-          resize();
-        }
-
-        function onVisibilityChange() {
-          isVisible = !document.hidden;
-          if (isVisible && !animationId) {
-            clock.start();
-            animate();
+        function tick() {
+          remain--;
+          if (remain > 0) { render(); return; }
+          if (mode === 'focus') {
+            finished++;
+            countEl.textContent = finished;
+            switchMode('rest');
+          } else {
+            switchMode('focus');
           }
         }
-
-        function animate() {
-          if (!isVisible) {
-            animationId = null;
-            return;
-          }
-
-          animationId = requestAnimationFrame(animate);
-
-          var delta = clock.getDelta();
-          var elapsed = clock.getElapsedTime();
-          var s = speedMul;
-
-          // Animate sky gradient time uniform
-          var sky = scene.getObjectByName('sky');
-          if (sky && sky.material.uniforms) {
-            sky.material.uniforms.time.value = elapsed;
-          }
-
-          // Animate sun pulsing
-          if (sunMesh && sunGlowMesh) {
-            var pulse = 1 + Math.sin(elapsed * 1.2 * s) * 0.05;
-            sunMesh.scale.setScalar(pulse);
-            sunGlowMesh.scale.setScalar(pulse * 1.02);
-          }
-
-          // Animate clouds
-          clouds.forEach(function(cloud) {
-            var data = cloud.userData;
-            // Horizontal drift
-            cloud.position.x += data.speed * s * 60 * delta;
-            // Wrap around
-            if (cloud.position.x > 7) cloud.position.x = -7;
-            if (cloud.position.x < -7) cloud.position.x = 7;
-            // Gentle vertical breathing
-            cloud.position.y = data.baseY + Math.sin(elapsed * 0.8 * s + data.phase) * 0.1;
-            // Subtle rotation
-            cloud.rotation.z += data.rotSpeed * s;
-            // Subtle scale breathing
-            var scaleBreath = 1 + Math.sin(elapsed * 0.5 * s + data.phase) * 0.03;
-            cloud.scale.setScalar(scaleBreath);
-          });
-
-          // Animate particles
-          particles.forEach(function(system) {
-            var positions = system.geometry.attributes.position.array;
-            var speeds = system.userData.speeds;
-            var phases = system.userData.phases;
-            var count = positions.length / 3;
-
-            for (var i = 0; i < count; i++) {
-              // Drift upward
-              positions[i * 3 + 1] += speeds[i] * s * 60 * delta * 3;
-              // Horizontal sway
-              positions[i * 3] += Math.sin(elapsed * 0.5 * s + phases[i]) * 0.002 * s;
-              // Wrap around
-              if (positions[i * 3 + 1] > 4) {
-                positions[i * 3 + 1] = -3;
-                positions[i * 3] = (Math.random() - 0.5) * 10;
-              }
-            }
-            system.geometry.attributes.position.needsUpdate = true;
-          });
-
-          renderer.render(scene, camera);
-        }
-
-        // Initialize when DOM is ready
-        if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', init);
-        } else {
-          init();
-        }
+        startBtn.addEventListener('click', function() {
+          if (timer) { stop(); return; }
+          card.classList.add('pomo-running');
+          startBtn.textContent = '暂停';
+          timer = setInterval(tick, 1000);
+        });
+        resetBtn.addEventListener('click', function() {
+          stop();
+          remain = MODES[mode];
+          render();
+        });
+        document.querySelectorAll('.pomo-mode').forEach(function(btn) {
+          btn.addEventListener('click', function() { switchMode(btn.dataset.mode); });
+        });
+        render();
       })();
     </script>
     <script>lucide.createIcons();</script>

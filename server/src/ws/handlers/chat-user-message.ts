@@ -40,7 +40,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
@@ -92,6 +92,16 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
   // 否则会出现"空 thumbnailUrl 的无效项、原始 JSON、脏字段"一起发给用户的脏展示。
   // 这里直接返回空串，让本轮只呈现干净的媒体卡片（不产生任何文本噪音）。
   if (t.includes("search_images") || t.includes("search_videos")) return "";
+  // 旅游行程规划：行程的正确呈现形态是 travel_itinerary 双面板卡，手工拼文本只会
+  // 得到 `days: [{...}]` 式 key:value 垃圾展示。这里原样返回 summarizeItinerary JSON，
+  // 交由 processAssistantText 的行程检测器（detectRawTravelItineraryJson）确定性转卡。
+  if (t.startsWith("travel.plan-itinerary")) {
+    try {
+      return JSON.stringify(result);
+    } catch {
+      return "";
+    }
+  }
   // 搜索类：把标题/摘要/URL 列出来
   if (t.includes("search_web") || t.includes("web_search") || t.includes("info_hub")) {
     const items = (result.results ?? result.items ?? []) as Array<Record<string, unknown>>;
@@ -168,11 +178,30 @@ function stripMediaCardMarker(text: string): string {
 function promoteImageUrlsToMedia(text: string): string {
   if (!text) return text;
   const IMG_URL_RE = /https?:\/\/[^\s)\]}"'<>]+\.(?:png|jpe?g|gif|webp|avif)(?:\?[^\s)\]}"'<>]*)?/gi;
-  return text.replace(IMG_URL_RE, (match: string, offset: number, full: string) => {
-    // 前面紧邻 `](` => 已处于 markdown 图片/链接语法内，不重复包裹
-    if (/\]\($/.test(full.slice(0, offset))) return match;
-    return `![图片](${match})`;
-  });
+  const promote = (segment: string): string =>
+    segment.replace(IMG_URL_RE, (match: string, offset: number, full: string) => {
+      // 前面紧邻 `](` => 已处于 markdown 图片/链接语法内，不重复包裹
+      if (/\]\($/.test(full.slice(0, offset))) return match;
+      return `![图片](${match})`;
+    });
+  // 卡片标记段内是结构化 JSON（travelPlan.images 等自带图片字段，前端直读渲染），
+  // 往 JSON 字符串值里注入 markdown 会让面板图片地址解析失败。只处理卡片外的纯文本段。
+  const START = "[AGENT_RESULT_CARD_START]";
+  const END = "[AGENT_RESULT_CARD_END]";
+  if (!text.includes(START)) return promote(text);
+  let out = "";
+  let cursor = 0;
+  for (let guard = 0; guard < 10; guard++) {
+    const si = text.indexOf(START, cursor);
+    if (si === -1) break;
+    const ei = text.indexOf(END, si);
+    if (ei === -1) break;
+    out += promote(text.slice(cursor, si));
+    out += text.slice(si, ei + END.length);
+    cursor = ei + END.length;
+  }
+  out += promote(text.slice(cursor));
+  return out;
 }
 
 /**
@@ -966,6 +995,11 @@ async function processBatchedMessage(
       userText: batched.text,
       toolName: reply.toolName,
     });
+    // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
+    // 能被切卡的逐日列表，卡片由代码直接从工具原始结果生成（autoOpen=true，
+    // 前端 assistant_done 收到即自动展开双面板；卡片保留在消息中供回看）。
+    // 正文已有卡片标记时不重复附加。
+    finalText = attachTravelItineraryCard(finalText, reply.toolName, toolResult?.result);
     // 视频抓取：附加可播放媒体标记（[RENDER_AS:video] + [VIDEO_MEDIA_START]），
     // 前端据此真实内联播放代理后的视频流
     finalText = attachVideoMediaMarker(finalText, reply.toolName, toolResult?.result);

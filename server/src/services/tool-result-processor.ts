@@ -12,6 +12,7 @@ import {
   formatSemanticResultForChat,
 } from "./agent-result-formatter.js";
 import { hasBlockquote } from "./display-effect-router.js";
+import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：400） */
@@ -38,6 +39,50 @@ function extractUrlFromText(text: string): string | undefined {
 // ─────────────────────────────────────────────────────────────────────────────
 // 根因修复：检测 LLM 把 tool result 原始 JSON 直接吐到回复里的情况
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 找出文本中所有「最外层 JSON 对象包络」（贪婪配对，处理嵌套 + 跨行）。
+ *
+ * 供 detectRawSearchResultJson / detectRawTravelItineraryJson 共用：
+ * 对每个 `{` 起扫描到配对 `}`（跳过字符串字面量内的括号），返回按出现
+ * 顺序排列的候选子串。嵌套对象也会作为候选出现（外层包络在前），
+ * 由各检测器的签名判定决定哪个命中。
+ */
+function extractJsonEnvelopes(text: string): string[] {
+  const candidates: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    // 从 i 起扫描，找到匹配的右括号
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          candidates.push(text.slice(i, j + 1));
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+}
 
 /**
  * 判断字符串是否「看起来像域名」（用于恢复被 compactor 切掉 https:// 前缀的 URL）。
@@ -112,39 +157,8 @@ function detectRawSearchResultJson(
     return null;
   }
 
-  // 1. 找最外层 JSON 对象（贪婪配对，处理嵌套 + 跨行）
-  const candidates: string[] = [];
-  for (let i = 0; i < trimmed.length; i++) {
-    if (trimmed[i] !== "{") continue;
-    // 从 i 起扫描，找到匹配的右括号
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    for (let j = i; j < trimmed.length; j++) {
-      const ch = trimmed[j];
-      if (escape) {
-        escape = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escape = true;
-        continue;
-      }
-      if (ch === '"') {
-        inString = !inString;
-        continue;
-      }
-      if (inString) continue;
-      if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) {
-          candidates.push(trimmed.slice(i, j + 1));
-          break;
-        }
-      }
-    }
-  }
+  // 1. 找最外层 JSON 对象包络
+  const candidates = extractJsonEnvelopes(trimmed);
   if (candidates.length === 0) return null;
 
   // 2. 试解析每个候选，挑出最像「搜索结果 JSON」的那个
@@ -260,6 +274,273 @@ function buildSearchResultCardFromItems(
   return `${leadText}\n\n${card}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 根因修复②：检测 LLM 把 travel.plan-itinerary 行程 JSON 直接吐到回复里的情况
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 安全读字符串字段。 */
+function strField(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/**
+ * 检测 LLM 输出中是否包含「旅游行程原始 JSON」（即直接复述 travel.plan-itinerary
+ * 的 summarizeItinerary 结果）。典型形态：
+ *   {"ok":true,"title":"马尔代夫2日游…","destination":"马尔代夫",
+ *    "days":[{"date":"2026-08-30","items":[{"type":"hotel","name":"…","startTime":"…"}]}]}
+ *
+ * 出现场景（真实案例）：
+ *   1. 工具循环的「道歉式兜底」把 lastToolOutputFallback（工具输出原文）整段
+ *      糊成回复（openai-compatible-tool-loop 的 effectiveFinalText 路径）；
+ *   2. LLM 末轮直接把 tool result JSON 复制进正文。
+ * 两种情况都会让原始 JSON 透出到前端（脏展示），而本应由 travel_itinerary
+ * 双面板卡渲染。与 detectRawSearchResultJson 同构：命中后由
+ * buildTravelItineraryCardFromPlan 确定性转卡。
+ *
+ * 命中条件（严格，避免误伤普通 JSON）：
+ *   1. 文本中能找到完整 JSON 对象（包络 `{...}`，跨行也支持）；
+ *   2. 顶层 `days` 是非空数组（≤30 天）；
+ *   3. days[].items 里至少一半元素像行程条目：有非空 `name` 且带 `type`/`startTime`；
+ *   4. 顶层 `title` 或 `destination` 至少一个非空（行程 JSON 顶层签名）。
+ *
+ * 命中时返回 `{ plan, cleanText }`：plan 为解析出的行程对象；
+ * cleanText 为剥掉 JSON 块后的正文（LLM 在 JSON 前后写的引导/收尾句）。
+ */
+function detectRawTravelItineraryJson(
+  text: string,
+): { plan: Record<string, unknown>; cleanText: string } | null {
+  const trimmed = text?.trim();
+  if (!trimmed || trimmed.length < 30) return null;
+
+  for (const raw of extractJsonEnvelopes(trimmed)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const obj = parsed as Record<string, unknown>;
+    const days = obj.days;
+    if (!Array.isArray(days) || days.length < 1 || days.length > 30) continue;
+
+    let totalItems = 0;
+    let validItems = 0;
+    for (const day of days) {
+      if (!day || typeof day !== "object") continue;
+      const items = (day as Record<string, unknown>).items;
+      if (!Array.isArray(items)) continue;
+      for (const it of items) {
+        if (!it || typeof it !== "object") continue;
+        totalItems++;
+        const rec = it as Record<string, unknown>;
+        const name = strField(rec.name);
+        if (name && (strField(rec.type) || strField(rec.startTime))) validItems++;
+      }
+    }
+    if (totalItems === 0 || validItems === 0) continue;
+    if (validItems / totalItems < 0.5) continue;
+    if (!strField(obj.title) && !strField(obj.destination)) continue;
+
+    // 剥掉 JSON 块，保留前后正文
+    const jsonStart = trimmed.indexOf(raw);
+    if (jsonStart < 0) continue;
+    const before = trimmed.slice(0, jsonStart).trim();
+    const after = trimmed.slice(jsonStart + raw.length).trim();
+    const cleanText = [before, after].filter(Boolean).join("\n\n");
+    return { plan: obj, cleanText };
+  }
+  return null;
+}
+
+/** 行程逐天摘要行：`Day 1 · 2026-08-30：入住民宿 → 环礁浮潜 → 老城晚餐`。 */
+function buildTravelDaySummaryItems(plan: Record<string, unknown>): string[] {
+  const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
+  const out: string[] = [];
+  days.forEach((day, i) => {
+    const date = strField(day?.date);
+    const names = Array.isArray(day?.items)
+      ? (day.items as Array<Record<string, unknown>>)
+          .map((it) => strField(it?.name))
+          .filter(Boolean)
+      : [];
+    let line = `Day ${i + 1}${date ? ` · ${date}` : ""}`;
+    if (names.length > 0) {
+      let body = names.slice(0, 4).join(" → ");
+      if (names.length > 4) body += " 等";
+      line += `：${body}`;
+    }
+    if (line.length > 80) line = `${line.slice(0, 79)}…`;
+    out.push(line);
+  });
+  return out;
+}
+
+/** 行程卡 footer：天数/项数汇总 +（有价格汇总时）预计总花费。 */
+function buildTravelItineraryFooter(plan: Record<string, unknown>): string {
+  const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
+  const totalItems = days.reduce(
+    (n, d) => n + (Array.isArray(d?.items) ? (d.items as unknown[]).length : 0),
+    0,
+  );
+  const parts = [`共 ${days.length} 天 · ${totalItems} 项安排`];
+  const pricing = plan.pricingSummary;
+  if (pricing && typeof pricing === "object" && !Array.isArray(pricing)) {
+    const totalFinal = Number((pricing as Record<string, unknown>).totalFinal);
+    if (Number.isFinite(totalFinal) && totalFinal > 0) {
+      parts.push(`预计约 ¥${Math.round(totalFinal).toLocaleString("en-US")}`);
+    }
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * 由 LLM 回显的行程 JSON 构建结构化快照（travelItineraryStore 未命中时的兜底）。
+ *
+ * 回显 JSON 是 summarizeItinerary 的瘦身版（无图片/评论/坐标），双面板仍可
+ * 完整渲染天/条目骨架，只是没有实拍图 —— 优于不注入 travelPlan（前端退回
+ * 文本正则解析，信息更少）。
+ */
+function snapshotFromRawPlan(
+  plan: Record<string, unknown>,
+  title: string,
+  destination: string,
+): {
+  toolName: string;
+  ts: number;
+  destination: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  days: Array<{
+    date: string;
+    items: Array<{
+      type: string;
+      name: string;
+      startTime: string;
+      latitude: number;
+      longitude: number;
+      address: string;
+      priceInfo: string;
+      description: string;
+      tips?: string[];
+      images?: string[];
+      reviews?: unknown[];
+      videos?: Array<Record<string, unknown>>;
+    }>;
+  }>;
+} {
+  const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
+  return {
+    toolName: "travel.plan-itinerary",
+    ts: Date.now(),
+    destination,
+    title,
+    startDate: strField(plan.startDate),
+    endDate: strField(plan.endDate),
+    days: days.map((day) => ({
+      date: strField(day?.date),
+      items: (Array.isArray(day?.items) ? (day.items as Array<Record<string, unknown>>) : []).map(
+        (it) => ({
+          type: strField(it?.type) || "other",
+          name: strField(it?.name),
+          startTime: strField(it?.startTime) || strField(it?.name),
+          latitude: Number(it?.latitude) || 0,
+          longitude: Number(it?.longitude) || 0,
+          address: strField(it?.address),
+          priceInfo: strField(it?.priceInfo),
+          description: strField(it?.description),
+          tips: Array.isArray(it?.tips) ? (it.tips as unknown[]).map(String) : undefined,
+          // 原始工具结果（attachTravelItineraryCard 路径）携带媒体字段，直接透传；
+          // LLM 回显的瘦身 JSON 无这些字段，缺省 undefined 不影响前端渲染
+          images: Array.isArray(it?.images) ? (it.images as unknown[]).map(String) : undefined,
+          reviews: Array.isArray(it?.reviews) ? (it.reviews as unknown[]) : undefined,
+          videos: Array.isArray(it?.videos)
+            ? (it.videos as unknown[]).filter(
+                (v): v is Record<string, unknown> => !!v && typeof v === "object",
+              )
+            : undefined,
+        }),
+      ),
+    })),
+  };
+}
+
+/**
+ * 把行程 JSON 转换成 travel_itinerary 双面板卡（detectRawTravelItineraryJson 的修复器）。
+ *
+ * 卡片结构化数据（travelPlan）来源优先级：
+ *   1. travelItineraryStore 快照（skill 执行时写入，含图片/评论/坐标全量字段）；
+ *   2. 回显 JSON 本身（summarizeItinerary 瘦身版，仅缺媒体字段）。
+ * 逐天摘要行（Day N · 日期：亮点 → 亮点）供前端行程卡预览胶囊展示；
+ * leadText（LLM 在 JSON 前写的引导句）保留在卡片之前。
+ */
+function buildTravelItineraryCardFromPlan(
+  plan: Record<string, unknown>,
+  leadText: string,
+): string {
+  const destination = strField(plan.destination);
+  const title = strField(plan.title) || (destination ? `${destination}行程规划` : "行程规划");
+  const items = buildTravelDaySummaryItems(plan).map((text) => ({ type: "num", text }));
+  const footer = buildTravelItineraryFooter(plan);
+
+  const snap = travelItineraryStore.findForText(`${title} ${destination} ${leadText}`);
+  const travelPlan =
+    snap && snap.days.length > 0 ? snap : snapshotFromRawPlan(plan, title, destination);
+
+  const payload = {
+    avatar: "NB",
+    avatarStyle: "default",
+    title,
+    items,
+    footer,
+    cardType: "travel_itinerary",
+    // 本轮规划实时完成 → 前端在 assistant_done 直接收卡即自动展开双面板
+    autoOpen: true,
+    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    travelPlan,
+  };
+  const card = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
+  if (!leadText) return card;
+  return `${leadText}\n\n${card}`;
+}
+
+/**
+ * 旅游行程的确定性附卡（chat.assistant_done 前的最后防线，Coze 式架构）。
+ *
+ * 工具返回值已瘦身（summarizeItinerary 只留极简摘要），LLM 的口头回复不再携带
+ * 行程明细，也就写不出能被 formatAgentResultForChat 切卡的逐日列表——卡片必须
+ * 由代码直接从工具原始结果生成，不依赖 LLM 转发：
+ *   - 若正文已有卡片标记（LLM 列表路径/检测器路径已出卡）→ 不重复附加；
+ *   - 否则以原始工具结果（全量字段：坐标/图片/评论/视频）构建 travel_itinerary
+ *     卡（autoOpen=true），拼在正文之后。正文（LLM 的自然口语回复）保留为卡前导。
+ */
+export function attachTravelItineraryCard(
+  text: string,
+  toolName: string | undefined,
+  toolResult: Record<string, unknown> | undefined,
+): string {
+  if (toolName !== "travel.plan-itinerary" || !toolResult) return text;
+  const days = toolResult.days;
+  if (!Array.isArray(days) || days.length === 0) return text;
+  if (text.includes("[AGENT_RESULT_CARD_START]")) return text;
+  return buildTravelItineraryCardFromPlan(toolResult, text.trim());
+}
+
+/**
+ * 行程 JSON 的纯文本摘要（plainTextMode 兜底，微信桥等不支持卡片渲染的端）：
+ * 标题 + 逐天摘要行，不携带任何原始 JSON。
+ */
+function buildTravelPlainTextSummary(
+  plan: Record<string, unknown>,
+  leadText: string,
+): string {
+  const title = strField(plan.title) || `${strField(plan.destination)}行程规划`;
+  const lines = buildTravelDaySummaryItems(plan);
+  const footer = buildTravelItineraryFooter(plan);
+  return [leadText, title, ...lines, footer].filter(Boolean).join("\n");
+}
+
 export interface ToolResultProcessorOptions {
   enabled?: boolean;
   threshold?: number;
@@ -332,6 +613,24 @@ export class ToolResultProcessor {
         return detected.cleanText;
       }
       return cardText;
+    }
+
+    // === 优先级 -1.5：LLM 把 travel 行程 JSON 直接吐到回复里 → 转 travel_itinerary 双面板卡 ===
+    // 与上方搜索 JSON 检测同构（两者签名互斥：items+title+url vs days+name+startTime），
+    // 在 routeRender 之前拦截，确保行程 JSON 不以脏文本透出、直接上双面板卡。
+    const travelDetected = detectRawTravelItineraryJson(trimmed);
+    if (travelDetected) {
+      const dayCount = Array.isArray(travelDetected.plan.days)
+        ? (travelDetected.plan.days as unknown[]).length
+        : 0;
+      console.log(
+        `[ToolResultProcessor] raw_travel_itinerary_json: days=${dayCount} ` +
+          `tool=${opts?.toolName ?? "unknown"}`,
+      );
+      if (opts?.plainTextMode) {
+        return buildTravelPlainTextSummary(travelDetected.plan, travelDetected.cleanText);
+      }
+      return buildTravelItineraryCardFromPlan(travelDetected.plan, travelDetected.cleanText);
     }
 
     // === 渲染形态判断中心（经 gateway 统一路由，含 trace） ===
@@ -431,14 +730,16 @@ export class ToolResultProcessor {
     // 优先级 4：long_text 长内容（非搜索工具）
     if (hint.type === "long_text") {
       console.log(`[ToolResultProcessor] long_text: ${hint.reason}`);
+      // 内容若实际是结构化形态（步骤/指标/时序/对比…），优先上特效卡——
+      // 包括 intent 触发的场景：用户问「明天怎么安排」时回复是条理清晰的
+      // 口语短句，特效卡比 [RENDER_AS:structured] 富文本更贴合内容形态；
+      // 语义评分器自身有形态/意图门控，长 markdown 文档不会误上卡。
+      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
+      if (sc) return sc;
       // 意图触发的 long_text → 注入 [RENDER_AS:structured]
       if (hint.intent) {
         return wrapRenderAs("structured", humanize(workingText));
       }
-      // 长文本若实际是结构化内容（步骤/指标/折叠/时序…），由内容信号直接上特效卡
-      // —— 不再被列表语法/J渲染门闸挡住（内容为主判据）
-      const sc = formatSemanticResultForChat(workingText, opts?.toolName);
-      if (sc) return sc;
       return humanize(workingText);
     }
 

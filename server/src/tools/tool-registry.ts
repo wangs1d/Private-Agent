@@ -85,6 +85,10 @@ const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
   embodiment_observe: "embodiment.observe",
   desktop_visual_screenshot: "desktop.visual.screenshot",
   desktop_visual_run_task: "desktop.visual.run_task",
+  // 2026-08-30 修复：self.list_custom_skills 只有 chat schema（fast 车道可见），
+  // 注册表里没有执行器——模型一调用就报"未知工具"。语义与 skill.list 一致，走别名。
+  // 注意键用 LLM 实际传的点号名（underscore 别名表匹配不到它）。
+  "self.list_custom_skills": "skill.list",
 };
 
 export function resolveRegistryToolName(name: string): string {

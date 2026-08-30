@@ -164,6 +164,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   const dynamicContext: string[] = [];
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
+  if (m.travelState) dynamicContext.push(m.travelState);
   // 任务家族（3→1）：任务上下文 / 追问锚点 / 建议工具链
   const taskBlock = buildFamilyBlock("[Turn Task Context]", undefined, [
     { label: "任务", content: m.taskContext },

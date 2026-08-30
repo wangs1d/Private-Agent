@@ -95,6 +95,12 @@ export type AgentPromptMemoryContext = {
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
   scheduleSnapshot?: string;
   /**
+   * 行程状态热层快照（travel-prompt-snapshot）：已生成行程的一行回执列表
+   * （目的地/日期/planId），仅用户消息命中行程语义时注入。完整明细不进上下文，
+   * 由 travel.get-itinerary 按需回查。
+   */
+  travelState?: string;
+  /**
    * 当前精确时间（年/月/日/时/分/秒 + 星期 + 时区），每轮注入。
    * 与对话历史中每条消息的 `[ts:...]` 前缀对应，供 LLM 做时间维度计算与对齐。
    */
