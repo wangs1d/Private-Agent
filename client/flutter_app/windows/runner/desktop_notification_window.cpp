@@ -5,31 +5,47 @@
 
 #include <algorithm>
 
-// ── 透明度：整窗 Alpha（WS_EX_LAYERED 配合 COLORREF 通道混合） ──
-//    面板底色 rgba(58,58,64, 72%) ≈ 72% 不透明
-constexpr BYTE kWindowAlpha = 184;  // 255 * 0.72 ≈ 184
+#pragma comment(lib, "dwmapi.lib")
 
 namespace {
 
-// 新版配色：深色半透明 macOS 风格
-constexpr COLORREF kPanelBg       = RGB(0x3A, 0x3A, 0x40);  // 面板深色底
-constexpr COLORREF kPanelBorder   = RGB(0x60, 0x60, 0x68);  // 1px 边（GDI 实色，透明度由整窗 Alpha 稀释）
-constexpr COLORREF kDivider       = RGB(0x8C, 0x8C, 0x96);  // 顶部分隔线
-constexpr COLORREF kTextWhite     = RGB(0xFF, 0xFF, 0xFF);
-constexpr COLORREF kTextDim       = RGB(0xBD, 0xBD, 0xBD);  // 副标题 55% 明度
-constexpr COLORREF kTextBody      = RGB(0xDD, 0xDD, 0xDF);  // 正文 82% 明度
-constexpr COLORREF kIconBg        = RGB(0x8A, 0x8A, 0x93);  // 图标胶囊 14% 白（实色+整窗alpha=透明）
-constexpr COLORREF kCloseBg       = RGB(0x00, 0x00, 0x00);  // 关闭钮深色底 25%
-constexpr COLORREF kCloseBgHover  = RGB(0x30, 0x30, 0x36);  // 关闭 hover
-constexpr COLORREF kCloseGlyph    = RGB(0xE8, 0xE8, 0xEC);  // × 白
-constexpr COLORREF kBtnDismissBg  = RGB(0x70, 0x70, 0x76);  // "稍后" 弱按钮 12%
-constexpr COLORREF kBtnDismissBd  = RGB(0x86, 0x86, 0x90);  // 弱化描边
-constexpr COLORREF kBtnConfirmBg  = RGB(0xF5, 0xF5, 0xF7);  // "知道了" 白填
-constexpr COLORREF kBtnConfirmTx  = RGB(0x1D, 0x1D, 0x1F);  // 知道了 深色字
-constexpr COLORREF kInnerHighlight= RGB(0x9A, 0x9A, 0xA0);  // 内 1px 高光（极淡）
+// ═══════════════════════════ 配色（实色近似，压在深色毛玻璃上） ═══════════════════════════
+// 说明：Acrylic 层提供 rgba(30,30,30,0.7) 底色 + 桌面模糊；
+// 这里的控件色 = 设计稿半透明色 与 毛玻璃底 混合后的“等效实色”，
+// 保证 GDI 直接绘制时视觉与设计稿一致。
+constexpr COLORREF kTextWhite    = RGB(0xFF, 0xFF, 0xFF);
+constexpr COLORREF kTextSub      = RGB(0x8C, 0x8C, 0x94);  // "刚刚"  ≈ 白 55%
+constexpr COLORREF kTextBody     = RGB(0xC4, 0xC4, 0xC8);  // 正文   ≈ 白 78%
+constexpr COLORREF kDividerColor = RGB(0x40, 0x40, 0x48);  // 分隔线 ≈ 白 12%
+constexpr COLORREF kIconBg       = RGB(0x4A, 0x4A, 0x52);  // 铃铛圆底 ≈ 白 16%
+constexpr COLORREF kCloseBg      = RGB(0x1F, 0x1F, 0x24);  // 关闭圆底 ≈ 黑 25%
+constexpr COLORREF kCloseBgHover = RGB(0x3A, 0x3A, 0x42);  // 关闭 hover
+constexpr COLORREF kBtnBorder    = RGB(0x6E, 0x6E, 0x76);  // 按钮描边 ≈ 白 35%
+constexpr COLORREF kBtnHoverFill = RGB(0x35, 0x35, 0x3D);  // 按钮 hover 填充 ≈ 白 10%
+constexpr COLORREF kBtnText      = RGB(0xFF, 0xFF, 0xFF);
 
-// 字形（Segoe MDL2 Assets：EA2F = Bell 通知铃铛 近似）
-// 用线条自绘小铃铛图标更稳，不依赖字体存在与否
+// ── DWM Acrylic（未公开 user32 接口，Win10 1803+ / Win11 稳定可用） ──
+struct AccentPolicy {
+  int   accent_state;
+  int   flags;
+  DWORD gradient_color;  // 0xAABBGGRR
+  int   animation_id;
+};
+struct WindowCompositionAttributeData {
+  int     attribute;
+  PVOID   data;
+  size_t  size;
+};
+using SetWindowCompositionAttributeFn =
+    BOOL (WINAPI*)(HWND, WindowCompositionAttributeData*);
+
+constexpr int kWcaAccentPolicy              = 19;
+constexpr int kAccentEnableAcrylicBlurBehind = 4;
+// rgba(30,30,30,0.7) → A=0xB2, B=0x1E, G=0x1E, R=0x1E
+constexpr DWORD kAcrylicTint = 0xB21E1E1Eu;
+
+constexpr int kDwmwaWindowCornerPreference = 33;
+constexpr int kDwmwcpRound                 = 2;
 
 std::wstring Utf8ToWide(const std::string& s) {
   if (s.empty()) return L"";
@@ -41,27 +57,24 @@ std::wstring Utf8ToWide(const std::string& s) {
   return out;
 }
 
-COLORREF PriorityAccent(const std::wstring& priority) {
-  // 只在"图标胶囊"上叠一层主题色高光，不是满版顶色条
-  if (priority == L"urgent") return RGB(0xFF, 0x3B, 0x30);  // 红
-  if (priority == L"high")   return RGB(0xFF, 0x95, 0x00);  // 橙
-  return RGB(0x34, 0xC7, 0x59);  // 默认绿（提醒）
+// 过滤 GDI 字体无法渲染的 emoji / 杂项符号（避免豆腐块 □）
+std::wstring StripUnrenderable(std::wstring s) {
+  std::wstring out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    wchar_t c = s[i];
+    if (c >= 0xD800 && c <= 0xDFFF) continue;   // 代理对（emoji 等）
+    if (c == 0xFE0F || c == 0xFE0E) continue;   // 变体选择符
+    if (c >= 0x2600 && c <= 0x27BF) continue;   // 杂项符号 / dingbats
+    if (c >= 0x2B00 && c <= 0x2BFF) continue;   // 箭头补充
+    out.push_back(c);
+  }
+  return out;
 }
 
-// 启用 DWM 阴影 + 圆角
-void EnableDwmShadow(HWND hwnd) {
-  DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
-  DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY,
-                        &policy, sizeof(policy));
-  MARGINS margins = {0, 0, 0, 1};
-  DwmExtendFrameIntoClientArea(hwnd, &margins);
-  BOOL prefer_rounded = DWMWCP_ROUNDSMALL;
-  DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
-                        &prefer_rounded, sizeof(prefer_rounded));
-}
-
-void SetRectEx(RECT* rc, int l, int t, int r, int b) {
-  SetRect(rc, l, t, r, b);
+bool PtIn(const POINT& pt, const RECT& rc) {
+  return pt.x >= rc.left && pt.x < rc.right &&
+         pt.y >= rc.top && pt.y < rc.bottom;
 }
 
 }  // namespace
@@ -89,20 +102,47 @@ void DesktopNotificationWindow::EnsureClassRegistered() {
   wc.lpfnWndProc   = DesktopNotificationWindow::WndProc;
   wc.hInstance     = GetModuleHandle(nullptr);
   wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-  wc.hbrBackground = nullptr;
+  wc.hbrBackground = nullptr;   // 背景由 Acrylic 层提供，绝不填充
   wc.lpszClassName = kClassName;
   RegisterClassExW(&wc);
   registered = true;
+}
+
+void DesktopNotificationWindow::ApplyAcrylicBlur(HWND hwnd) {
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  if (!user32) return;
+  auto set_attr = reinterpret_cast<SetWindowCompositionAttributeFn>(
+      reinterpret_cast<void*>(GetProcAddress(
+          user32, "SetWindowCompositionAttribute")));
+  if (!set_attr) return;
+
+  AccentPolicy accent = {};
+  accent.accent_state   = kAccentEnableAcrylicBlurBehind;
+  accent.flags          = 2;
+  accent.gradient_color = kAcrylicTint;
+  accent.animation_id   = 0;
+
+  WindowCompositionAttributeData data = {};
+  data.attribute = kWcaAccentPolicy;
+  data.data      = &accent;
+  data.size      = sizeof(accent);
+  set_attr(hwnd, &data);
+}
+
+void DesktopNotificationWindow::ApplyRoundedCorners(HWND hwnd) {
+  // Win11：系统级圆角（带抗锯齿，Acrylic 自动跟随裁剪，无黑角）
+  DWORD pref = kDwmwcpRound;
+  DwmSetWindowAttribute(hwnd, kDwmwaWindowCornerPreference,
+                        &pref, sizeof(pref));
 }
 
 bool DesktopNotificationWindow::CreateWindowIfNeeded() {
   if (window_handle_) return true;
   EnsureClassRegistered();
 
-  // WS_EX_LAYERED + SetLayeredWindowAttributes 提供整窗 alpha，
-  // 面板实色填充经过整窗alpha稀释后得到半透明毛玻璃底观感。
-  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
-  DWORD style    = WS_POPUP | WS_CLIPCHILDREN;
+  // 注意：不要使用 WS_EX_LAYERED——它与 Acrylic 冲突且只会让整窗变淡。
+  DWORD ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+  DWORD style    = WS_POPUP;
 
   HWND hwnd = CreateWindowExW(
       ex_style, kClassName, L"", style, 0, 0, kWindowWidth, kWindowHeight,
@@ -110,72 +150,34 @@ bool DesktopNotificationWindow::CreateWindowIfNeeded() {
   if (!hwnd) return false;
   window_handle_ = hwnd;
 
-  // 整窗 Alpha ≈ 72%（COLORREF 颜色通道仍用实色，透过度由 LWA_ALPHA 统一控）
-  SetLayeredWindowAttributes(hwnd, 0, kWindowAlpha, LWA_ALPHA);
-  EnableDwmShadow(hwnd);
-
-  // ── 稍后（左按钮） ──
-  dismiss_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdDismiss)),
-      GetModuleHandle(nullptr), nullptr);
-  // ── 知道了（右按钮） ──
-  confirm_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdConfirm)),
-      GetModuleHandle(nullptr), nullptr);
-  // ── 右上角 × 圆形关闭钮 ──
-  close_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"",
-      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdClose)),
-      GetModuleHandle(nullptr), nullptr);
-
-  HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-  SendMessage(dismiss_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  SendMessage(confirm_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  SendMessage(close_btn_,   WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-  dismiss_brush_        = CreateSolidBrush(kBtnDismissBg);
-  dismiss_border_brush_ = CreateSolidBrush(kBtnDismissBd);
-  confirm_brush_        = CreateSolidBrush(kBtnConfirmBg);
+  ApplyAcrylicBlur(hwnd);
+  ApplyRoundedCorners(hwnd);
   return true;
 }
 
-void DesktopNotificationWindow::LayoutChildren() {
-  if (!window_handle_) return;
-  // ── 关闭钮：右上角 22×22 ──
-  SetWindowPos(close_btn_, nullptr, kWindowWidth - 22 - 14, 14, 22, 22,
-               SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+void DesktopNotificationWindow::ComputeLayout() {
+  // 顶部栏
+  SetRect(&rc_close_, kWindowWidth - 16 - 26, 12, kWindowWidth - 16, 38);
+  // 底部按钮：右下角并排
+  const int btn_h = 32;
+  const int btn_y = kWindowHeight - 12 - btn_h;      // 128
+  auto text_width = [](const std::wstring& t) {
+    int n = static_cast<int>(t.size());
+    return std::max(72, std::min(140, n * 14 + 24));
+  };
+  const int confirm_w = text_width(confirm_text_);
+  const int dismiss_w = text_width(L"\u7A0D\u540E" /*稍后*/);
+  const int gap       = 10;
+  const int confirm_x = kWindowWidth - 16 - confirm_w;
+  const int dismiss_x = confirm_x - gap - dismiss_w;
 
-  // ── 底部按钮：右下对齐并排 ──
-  //  高度 32 · 稍后 auto-width（默认 64） · 知道了 auto（默认 84） · gap 10
-  constexpr int kBtnH   = 32;
-  constexpr int kGap    = 10;
-  constexpr int kPadB   = 12;
-  constexpr int kPadRL  = 16;
-  const int btn_y       = kWindowHeight - kPadB - kBtnH;
-
-  int confirm_w = 84;
-  if (!confirm_text_.empty() && confirm_text_.size() > 4) confirm_w = 100;
-  const int confirm_x = kWindowWidth - kPadRL - confirm_w;
-
+  SetRect(&rc_confirm_, confirm_x, btn_y,
+          confirm_x + confirm_w, btn_y + btn_h);
   if (show_confirm_button_) {
-    const int dismiss_w = 64;
-    const int dismiss_x = confirm_x - kGap - dismiss_w;
-    SetWindowPos(dismiss_btn_, nullptr, dismiss_x, btn_y, dismiss_w, kBtnH,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    SetWindowPos(confirm_btn_, nullptr, confirm_x, btn_y, confirm_w, kBtnH,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetRect(&rc_dismiss_, dismiss_x, btn_y,
+            dismiss_x + dismiss_w, btn_y + btn_h);
   } else {
-    // 无确认按钮：仅一个按钮居中偏右（替代稍后作为"知道了"唯一入口）
-    if (dismiss_btn_) ShowWindow(dismiss_btn_, SW_HIDE);
-    const int single_w = 100;
-    SetWindowPos(confirm_btn_, nullptr, kWindowWidth - kPadRL - single_w, btn_y,
-                 single_w, kBtnH,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetRectEmpty(&rc_dismiss_);
   }
 }
 
@@ -188,28 +190,27 @@ void DesktopNotificationWindow::PositionAtBottomRight() {
   const int y = mi.rcWork.bottom - kWindowHeight - kMargin;
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  LayoutChildren();
 }
 
 void DesktopNotificationWindow::Show(const std::string& title,
                                      const std::string& message,
-                                     const std::string& priority,
+                                     const std::string& /*priority*/,
                                      bool show_confirm_button,
                                      const std::string& confirm_text,
                                      int auto_close_ms) {
-  // header_title 固定"系统通知"（对齐设计稿图示），message 的首行做正文标题+正文拆
-  // 为了保持最小改动：把 title 填进 header 主标题；没有的话用 priority 对应标签
-  header_title_         = Utf8ToWide(title.empty() ? "系统通知" : title);
-  message_              = Utf8ToWide(message);
-  priority_             = Utf8ToWide(priority);
-  confirm_text_         = Utf8ToWide(confirm_text.empty() ? "知道了" : confirm_text);
-  dismiss_text_         = L"\u7A0D\u540E";  // "稍后"
-  show_confirm_button_  = show_confirm_button;
-  auto_close_ms_        = auto_close_ms;
+  title_              = StripUnrenderable(Utf8ToWide(title));
+  message_            = StripUnrenderable(Utf8ToWide(message));
+  confirm_text_       = StripUnrenderable(
+      Utf8ToWide(confirm_text.empty() ? "\u6211\u77E5\u9053\u4E86"
+                                      /*我知道了*/ : confirm_text));
+  show_confirm_button_ = show_confirm_button;
+  auto_close_ms_       = auto_close_ms;
   if (!CreateWindowIfNeeded()) return;
+  ComputeLayout();
+  hover_id_ = 0;
   PositionAtBottomRight();
   StartTimer();
-  InvalidateRect(window_handle_, nullptr, TRUE);
+  Repaint();
 }
 
 void DesktopNotificationWindow::Hide() {
@@ -235,243 +236,210 @@ void DesktopNotificationWindow::StopTimer() {
 
 void DesktopNotificationWindow::DestroyNativeWindow() {
   StopTimer();
-  if (dismiss_btn_ && IsWindow(dismiss_btn_)) DestroyWindow(dismiss_btn_);
-  if (confirm_btn_ && IsWindow(confirm_btn_)) DestroyWindow(confirm_btn_);
-  if (close_btn_   && IsWindow(close_btn_))   DestroyWindow(close_btn_);
-  dismiss_btn_ = nullptr; confirm_btn_ = nullptr; close_btn_ = nullptr;
-  if (dismiss_brush_)        DeleteObject(dismiss_brush_);
-  if (dismiss_border_brush_) DeleteObject(dismiss_border_brush_);
-  if (confirm_brush_)        DeleteObject(confirm_brush_);
-  dismiss_brush_ = dismiss_border_brush_ = confirm_brush_ = nullptr;
   if (window_handle_ && IsWindow(window_handle_)) DestroyWindow(window_handle_);
   window_handle_ = nullptr;
 }
 
-// ═════════════════════════════════ 绘制 ═════════════════════════════════
-
-void DesktopNotificationWindow::DrawRoundedFill(HDC hdc, const RECT& rc,
-                                                 int radius, COLORREF fill) {
-  HBRUSH brush = CreateSolidBrush(fill);
-  HPEN pen = CreatePen(PS_NULL, 0, 0);
-  HBRUSH ob = static_cast<HBRUSH>(SelectObject(hdc, brush));
-  HPEN op = static_cast<HPEN>(SelectObject(hdc, pen));
-  RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
-  SelectObject(hdc, ob); SelectObject(hdc, op);
-  DeleteObject(brush); DeleteObject(pen);
+void DesktopNotificationWindow::Repaint() {
+  if (!window_handle_) return;
+  InvalidateRect(window_handle_, nullptr, FALSE);  // 不擦除，保护 Acrylic 底
 }
 
-void DesktopNotificationWindow::DrawBellIcon(HDC hdc, const RECT& rc,
-                                             COLORREF bg, COLORREF glyph) {
-  // 28×28 胶囊底 + 白色铃铛线条图标
-  // 先画圆角方（胶囊：高度=28 圆角=8 或一半=14 即圆形）
-  DrawRoundedFill(hdc, rc, 8, bg);
+int DesktopNotificationWindow::HitTest(const POINT& pt) const {
+  if (PtIn(pt, rc_close_))   return 1;
+  if (PtIn(pt, rc_dismiss_)) return 2;
+  if (PtIn(pt, rc_confirm_)) return 3;
+  return 0;
+}
 
-  // 铃铛：用多条直线 + 半圆拼（在 16×16 居中画布上画）
-  const int cx = (rc.left + rc.right) / 2;
-  const int cy = (rc.top + rc.bottom) / 2;
-  HPEN pen = CreatePen(PS_SOLID, 1, glyph);
-  HPEN op  = static_cast<HPEN>(SelectObject(hdc, pen));
-  HBRUSH bg_brush = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
-  HBRUSH ob = static_cast<HBRUSH>(SelectObject(hdc, bg_brush));
+// ═══════════════════════════════ 绘制 ════════════════════════════════
 
-  // 铃体：椭圆
-  Ellipse(hdc, cx - 5, cy - 7, cx + 5, cy + 4);
-  // 底部小圆（铃舌）
-  Ellipse(hdc, cx - 2, cy + 4, cx + 2, cy + 7);
-  // 铃把：顶部短弧
-  Arc(hdc, cx - 3, cy - 8, cx + 3, cy - 2, cx - 3, cy - 5, cx + 3, cy - 5);
-
-  SelectObject(hdc, ob); SelectObject(hdc, op);
+void DesktopNotificationWindow::FillSolidCircle(HDC hdc, const RECT& rc,
+                                                COLORREF fill) {
+  HBRUSH brush = CreateSolidBrush(fill);
+  HBRUSH old   = static_cast<HBRUSH>(SelectObject(hdc, brush));
+  HPEN pen     = CreatePen(PS_NULL, 0, 0);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+  SelectObject(hdc, old);
+  SelectObject(hdc, old_pen);
+  DeleteObject(brush);
   DeleteObject(pen);
 }
 
-void DesktopNotificationWindow::DrawCloseButton(HDC hdc, const RECT& rc,
-                                                 bool hovered) {
-  // 圆形底
-  HRGN rgn = CreateEllipticRgn(rc.left, rc.top, rc.right, rc.bottom);
-  COLORREF fill = hovered ? kCloseBgHover : kCloseBg;
-  HBRUSH b = CreateSolidBrush(fill);
-  FillRgn(hdc, rgn, b);
-  DeleteObject(b); DeleteObject(rgn);
+void DesktopNotificationWindow::DrawLine(HDC hdc, int x1, int y1, int x2,
+                                         int y2, COLORREF color, int width) {
+  HPEN pen     = CreatePen(PS_SOLID, width, color);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  MoveToEx(hdc, x1, y1, nullptr);
+  LineTo(hdc, x2, y2);
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+}
 
-  // × 两划
+// 几何铃铛：钟顶小圆钮 + 半圆钟身 + 外撇钟摆裙 + 底部钟舌
+void DesktopNotificationWindow::DrawBell(HDC hdc, int cx, int cy,
+                                         COLORREF color) {
+  HBRUSH brush = CreateSolidBrush(color);
+  HBRUSH old_b = static_cast<HBRUSH>(SelectObject(hdc, brush));
+  HPEN pen     = CreatePen(PS_NULL, 0, 0);
+  HPEN old_p   = static_cast<HPEN>(SelectObject(hdc, pen));
+
+  // 钟身（圆头）：以 (cx, cy-3) 为中心、半径 6 的圆，上半是钟顶
+  Ellipse(hdc, cx - 6, cy - 9, cx + 6, cy + 3);
+  // 钟摆裙：梯形从钟身底部外撇
+  const POINT skirt[4] = {
+      {cx - 9, cy + 5}, {cx - 6, cy + 1},
+      {cx + 6, cy + 1}, {cx + 9, cy + 5}};
+  Polygon(hdc, skirt, 4);
+  // 钟舌（底部小铃锤）
+  Ellipse(hdc, cx - 3, cy + 3, cx + 3, cy + 9);
+  // 顶部小吊钮
+  Ellipse(hdc, cx - 2, cy - 12, cx + 2, cy - 8);
+
+  SelectObject(hdc, old_b);
+  SelectObject(hdc, old_p);
+  DeleteObject(brush);
+  DeleteObject(pen);
+}
+
+void DesktopNotificationWindow::DrawCloseGlyph(HDC hdc, const RECT& rc,
+                                               COLORREF color) {
   const int cx = (rc.left + rc.right) / 2;
   const int cy = (rc.top + rc.bottom) / 2;
   const int s  = 5;
-  HPEN pen = CreatePen(PS_SOLID, 1, kCloseGlyph);
-  HPEN op = static_cast<HPEN>(SelectObject(hdc, pen));
-  MoveToEx(hdc, cx - s, cy - s, nullptr); LineTo(hdc, cx + s, cy + s);
-  MoveToEx(hdc, cx + s, cy - s, nullptr); LineTo(hdc, cx - s, cy + s);
-  SelectObject(hdc, op); DeleteObject(pen);
+  DrawLine(hdc, cx - s, cy - s, cx + s, cy + s, color, 2);
+  DrawLine(hdc, cx + s, cy - s, cx - s, cy + s, color, 2);
 }
 
-void DesktopNotificationWindow::DrawRoundedPillButton(HDC hdc, const RECT& rc,
-    COLORREF fill, COLORREF border, const std::wstring& label,
-    COLORREF text_color) {
-  // 填充
-  DrawRoundedFill(hdc, rc, 8, fill);
-  // 描边（仅当 border 存在）
-  HRGN rgn = CreateRoundRectRgn(rc.left, rc.top, rc.right, rc.bottom, 16, 16);
-  FrameRgn(hdc, rgn, CreateSolidBrush(border), 1, 1);
-  DeleteObject(rgn);
-  // 文字
-  HFONT f = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
-  HFONT of = static_cast<HFONT>(SelectObject(hdc, f));
+// 透明底 + 浅灰描边圆角按钮（Acrylic 透过未填充区域显示）
+void DesktopNotificationWindow::DrawOutlineButton(HDC hdc, const RECT& rc,
+                                                  const std::wstring& label,
+                                                  bool hovered) {
+  if (hovered) {
+    // hover 浅色填充（等效实色），与描边同圆角
+    HBRUSH fill = CreateSolidBrush(kBtnHoverFill);
+    HBRUSH ob   = static_cast<HBRUSH>(SelectObject(hdc, fill));
+    HPEN np     = CreatePen(PS_NULL, 0, 0);
+    HPEN op     = static_cast<HPEN>(SelectObject(hdc, np));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 16, 16);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(fill);
+    DeleteObject(np);
+  }
+
+  HPEN pen     = CreatePen(PS_SOLID, 1, kBtnBorder);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  HBRUSH null_b = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
+  HBRUSH old_b = static_cast<HBRUSH>(SelectObject(hdc, null_b));
+  RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 16, 16);
+  SelectObject(hdc, old_b);
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+
+  HFONT font = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
+  HFONT old_f = static_cast<HFONT>(SelectObject(hdc, font));
   SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, text_color);
+  SetTextColor(hdc, kBtnText);
   RECT tr = rc;
   DrawTextW(hdc, label.c_str(), -1, &tr,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-  SelectObject(hdc, of); DeleteObject(f);
-}
-
-void DesktopNotificationWindow::DrawHeaderText(HDC hdc,
-    const std::wstring& main, const std::wstring& sub, const RECT& rc) {
-  // 主标题 14px semibold 白
-  HFONT main_f = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
-  HFONT of = static_cast<HFONT>(SelectObject(hdc, main_f));
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, kTextWhite);
-  RECT mr = rc; mr.bottom = rc.top + 16;
-  DrawTextW(hdc, main.c_str(), -1, &mr,
-            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-  SelectObject(hdc, of); DeleteObject(main_f);
-
-  // 副标题 12px dim
-  HFONT sub_f = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
-  of = static_cast<HFONT>(SelectObject(hdc, sub_f));
-  SetTextColor(hdc, kTextDim);
-  RECT sr = rc; sr.top = rc.top + 15;
-  DrawTextW(hdc, sub.c_str(), -1, &sr,
-            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-  SelectObject(hdc, of); DeleteObject(sub_f);
+  SelectObject(hdc, old_f);
+  DeleteObject(font);
 }
 
 void DesktopNotificationWindow::Paint(HWND hwnd, HDC hdc) {
-  RECT rc; GetClientRect(hwnd, &rc);
-  HDC mem = CreateCompatibleDC(hdc);
-  HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-  HBITMAP ob  = static_cast<HBITMAP>(SelectObject(mem, bmp));
+  SetBkMode(hdc, TRANSPARENT);
 
-  // ── 1) 面板深色实色底（整窗 Alpha 负责半透明） ──
-  DrawRoundedFill(mem, rc, kCornerRadius, kPanelBg);
+  // ── 顶部：铃铛圆形图标 ──
+  const RECT icon_rc = {16, 12, 46, 42};
+  FillSolidCircle(hdc, icon_rc, kIconBg);
+  DrawBell(hdc, 31, 27, kTextWhite);
 
-  // ── 2) 1px 细描边（外） ──
+  // ── 顶部：标题「系统通知」+ 副标题「刚刚」 ──
+  const int text_left = 56;
+  const int text_right = rc_close_.left - 8;
   {
-    HRGN rgn = CreateRoundRectRgn(rc.left, rc.top, rc.right, rc.bottom,
-                                  kCornerRadius * 2, kCornerRadius * 2);
-    HBRUSH bd = CreateSolidBrush(kPanelBorder);
-    FrameRgn(mem, rgn, bd, 1, 1);
-    DeleteObject(bd); DeleteObject(rgn);
-  }
-
-  // ── 3) 内 1px 高光（靠上 1/2 边，模拟毛玻璃反射） ──
-  {
-    HPEN pen = CreatePen(PS_SOLID, 1, kInnerHighlight);
-    HPEN op = static_cast<HPEN>(SelectObject(mem, pen));
-    HBRUSH nb = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
-    HBRUSH ob2 = static_cast<HBRUSH>(SelectObject(mem, nb));
-    // 仅画上边 + 左右上 1/3 的弧，模拟"顶部高光"
-    Arc(mem, 0, 0, kCornerRadius * 2, kCornerRadius * 2,
-        0, kCornerRadius, kCornerRadius, 0);                       // 左上 1/4
-    MoveToEx(mem, kCornerRadius, 0, nullptr);
-    LineTo(mem, kWindowWidth - kCornerRadius, 0);                   // 上边
-    Arc(mem, kWindowWidth - kCornerRadius * 2, 0, kWindowWidth, kCornerRadius * 2,
-        kWindowWidth - kCornerRadius, 0, kWindowWidth, kCornerRadius);  // 右上
-    SelectObject(mem, ob2); SelectObject(mem, op); DeleteObject(pen);
-  }
-
-  // ── 4) 顶部栏：图标 + 主副文字 ──
-  constexpr int kPad = 16;
-  constexpr int kHeaderTop = 14;
-  constexpr int kIconSize = 28;
-  RECT icon_rc;
-  SetRectEx(&icon_rc, kPad, kHeaderTop, kPad + kIconSize, kHeaderTop + kIconSize);
-  // 图标胶囊色：用局部非 const 变量阻止编译期常量折叠
-  COLORREF accent_col = PriorityAccent(priority_);
-  COLORREF icon_base = kIconBg;  // 运行时拷贝，避免 const 折叠
-  int ir = int(GetRValue(icon_base)) * 85 + int(GetRValue(accent_col)) * 15;
-  int ig = int(GetGValue(icon_base)) * 85 + int(GetGValue(accent_col)) * 15;
-  int ib = int(GetBValue(icon_base)) * 85 + int(GetBValue(accent_col)) * 15;
-  ir = (ir > 25500) ? 255 : ((ir < 0) ? 0 : ir / 100);
-  ig = (ig > 25500) ? 255 : ((ig < 0) ? 0 : ig / 100);
-  ib = (ib > 25500) ? 255 : ((ib < 0) ? 0 : ib / 100);
-  unsigned uir = unsigned(ir & 0xFF);
-  unsigned uig = unsigned(ig & 0xFF);
-  unsigned uib = unsigned(ib & 0xFF);
-  COLORREF icon_bg = COLORREF(uir | (uig << 8) | (uib << 16));
-  DrawBellIcon(mem, icon_rc, icon_bg, kTextWhite);
-
-  RECT header_rc;
-  SetRectEx(&header_rc, kPad + kIconSize + 10, kHeaderTop,
-            kWindowWidth - 22 - 14 - 10, kHeaderTop + 28);
-  DrawHeaderText(mem, header_title_, L"\u521A\u521A" /*刚刚*/, header_rc);
-
-  // ── 5) 分隔线 ──
-  {
-    HPEN pen = CreatePen(PS_SOLID, 1, kDivider);
-    HPEN op = static_cast<HPEN>(SelectObject(mem, pen));
-    MoveToEx(mem, kPad, 52, nullptr);
-    LineTo(mem, kWindowWidth - kPad, 52);
-    SelectObject(mem, op); DeleteObject(pen);
-  }
-
-  // ── 6) 正文标题（16px semibold 白） ──
-  HFONT body_title_f = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                   CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                   DEFAULT_PITCH | FF_SWISS,
-                                   L"Microsoft YaHei UI");
-  HFONT of = static_cast<HFONT>(SelectObject(mem, body_title_f));
-  SetBkMode(mem, TRANSPARENT);
-  SetTextColor(mem, kTextWhite);
-  RECT bt_rc;
-  SetRectEx(&bt_rc, kPad, 62, kWindowWidth - kPad, 84);
-  // 正文标题：用 message_ 首行（到第一个换行），没有则整个 message_
-  size_t brk = message_.find(L'\n');
-  std::wstring body_title = (brk == std::wstring::npos)
-                              ? message_
-                              : message_.substr(0, brk);
-  // 如果 message 是单段短的，优先做 body_title；body 可留空。
-  DrawTextW(mem, body_title.c_str(), -1, &bt_rc,
-            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-  SelectObject(mem, of); DeleteObject(body_title_f);
-
-  // ── 7) 正文内容（13px dim） ──
-  HFONT body_f = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HFONT font = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
-  of = static_cast<HFONT>(SelectObject(mem, body_f));
-  SetTextColor(mem, kTextBody);
-  RECT body_rc;
-  const int body_top    = 88;
-  const int body_bottom = show_confirm_button_ ? 122 : 138;
-  SetRectEx(&body_rc, kPad, body_top, kWindowWidth - kPad, body_bottom);
-  std::wstring body;
-  if (brk != std::wstring::npos && brk + 1 < message_.size()) {
-    body = message_.substr(brk + 1);
+                             DEFAULT_PITCH | FF_SWISS,
+                             L"Microsoft YaHei UI");
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, font));
+    SetTextColor(hdc, kTextWhite);
+    RECT r = {text_left, 10, text_right, 30};
+    DrawTextW(hdc, L"\u7CFB\u7EDF\u901A\u77E5" /*系统通知*/, -1, &r,
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    DeleteObject(font);
   }
-  DrawTextW(mem, body.c_str(), -1, &body_rc,
-            DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-  SelectObject(mem, of); DeleteObject(body_f);
+  {
+    HFONT font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS,
+                             L"Microsoft YaHei UI");
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, font));
+    SetTextColor(hdc, kTextSub);
+    RECT r = {text_left, 28, text_right, 44};
+    DrawTextW(hdc, L"\u521A\u521A" /*刚刚*/, -1, &r,
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+  }
 
-  // ── 8) 圆角裁剪（防止边外画溢出）── 已靠 RoundRect 主填充完成。
-  BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-  SelectObject(mem, ob);
-  DeleteObject(bmp); DeleteDC(mem);
+  // ── 顶部：右侧圆形关闭钮 ──
+  FillSolidCircle(hdc, rc_close_, hover_id_ == 1 ? kCloseBgHover : kCloseBg);
+  DrawCloseGlyph(hdc, rc_close_, kTextWhite);
+
+  // ── 分隔线 ──
+  DrawLine(hdc, 16, 52, kWindowWidth - 16, 52, kDividerColor, 1);
+
+  // ── 中部：粗体标题 ──
+  {
+    HFONT font = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS,
+                             L"Microsoft YaHei UI");
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, font));
+    SetTextColor(hdc, kTextWhite);
+    RECT r = {16, 62, kWindowWidth - 16, 86};
+    DrawTextW(hdc, title_.c_str(), -1, &r,
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+  }
+
+  // ── 中部：正文描述 ──
+  if (!message_.empty()) {
+    HFONT font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS,
+                             L"Microsoft YaHei UI");
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, font));
+    SetTextColor(hdc, kTextBody);
+    RECT r = {16, 90, kWindowWidth - 16, 122};
+    DrawTextW(hdc, message_.c_str(), -1, &r,
+              DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+  }
+
+  // ── 底部右侧：双按钮（稍后 / 我知道了），透明底 + 浅灰描边 ──
+  if (show_confirm_button_) {
+    DrawOutlineButton(hdc, rc_dismiss_,
+                      L"\u7A0D\u540E" /*稍后*/, hover_id_ == 2);
+  }
+  DrawOutlineButton(hdc, rc_confirm_, confirm_text_, hover_id_ == 3);
 }
 
-// ═══════════════════════════════ 消息处理 ════════════════════════════════
+// ═══════════════════════════════ 消息处理 ══════════════════════════════
 
 LRESULT CALLBACK DesktopNotificationWindow::WndProc(HWND hwnd, UINT message,
                                                     WPARAM wparam,
@@ -500,35 +468,8 @@ LRESULT DesktopNotificationWindow::HandleMessage(HWND hwnd, UINT message,
       return 0;
     }
     case WM_ERASEBKGND:
+      // Acrylic 层是背景，绝不用画刷擦除（否则黑底/闪烁）
       return 1;
-
-    // ── 自绘按钮 / 关闭钮 ──
-    case WM_DRAWITEM: {
-      auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
-      if (dis->CtlType == ODT_BUTTON) {
-        const bool hovered =
-            (dis->itemState & ODS_HOTLIGHT) || (dis->itemState & ODS_SELECTED);
-        if (dis->CtlID == kIdClose) {
-          close_hovered_ = hovered;
-          DrawCloseButton(dis->hDC, dis->rcItem, hovered);
-          return TRUE;
-        }
-        if (dis->CtlID == kIdConfirm) {
-          DrawRoundedPillButton(dis->hDC, dis->rcItem, kBtnConfirmBg,
-                                kBtnConfirmBg, confirm_text_.empty()
-                                    ? L"\u77E5\u9053\u4E86"  /*知道了*/
-                                    : confirm_text_,
-                                kBtnConfirmTx);
-          return TRUE;
-        }
-        if (dis->CtlID == kIdDismiss) {
-          DrawRoundedPillButton(dis->hDC, dis->rcItem, kBtnDismissBg,
-                                kBtnDismissBd, dismiss_text_, kTextWhite);
-          return TRUE;
-        }
-      }
-      break;
-    }
 
     case WM_TIMER:
       if (wparam == kAutoCloseTimerId) {
@@ -539,34 +480,56 @@ LRESULT DesktopNotificationWindow::HandleMessage(HWND hwnd, UINT message,
       }
       break;
 
-    case WM_COMMAND: {
-      const int id = LOWORD(wparam);
-      if (id == kIdConfirm) {
+    case WM_MOUSEMOVE: {
+      POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      const int id = HitTest(pt);
+      if (id != hover_id_) {
+        hover_id_ = id;
+        Repaint();
+      }
+      if (!mouse_tracking_) {
+        TRACKMOUSEEVENT tme = {sizeof(tme)};
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        mouse_tracking_ = true;
+      }
+      return 0;
+    }
+
+    case WM_MOUSELEAVE:
+      mouse_tracking_ = false;
+      if (hover_id_ != 0) {
+        hover_id_ = 0;
+        Repaint();
+      }
+      return 0;
+
+    case WM_SETCURSOR:
+      if (LOWORD(lparam) == HTCLIENT) {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        SetCursor(LoadCursor(nullptr,
+                             HitTest(pt) ? IDC_HAND : IDC_ARROW));
+        return TRUE;
+      }
+      break;
+
+    case WM_LBUTTONUP: {
+      POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      const int id = HitTest(pt);
+      if (id == 3) {
         if (on_confirm_) on_confirm_();
         Hide();
         return 0;
       }
-      if (id == kIdDismiss || id == kIdClose) {
+      if (id == 1 || id == 2) {
         if (on_dismiss_) on_dismiss_();
         Hide();
         return 0;
       }
       break;
-    }
-
-    case WM_CTLCOLORBTN: {
-      // 自绘按钮（BS_OWNERDRAW）不走 CTLCOLORBTN；保留作为兜底
-      HDC btn_dc = reinterpret_cast<HDC>(wparam);
-      SetBkMode(btn_dc, TRANSPARENT);
-      return reinterpret_cast<INT_PTR>(GetStockObject(NULL_BRUSH));
-    }
-
-    case WM_NCHITTEST: {
-      POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-      ScreenToClient(hwnd, &pt);
-      // 顶部 52px 范围内可拖动
-      if (pt.y < 52) return HTCAPTION;
-      return HTCLIENT;
     }
 
     case WM_DESTROY:

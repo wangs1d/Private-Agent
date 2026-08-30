@@ -6,9 +6,9 @@
 #include <functional>
 #include <string>
 
-// ── 新版桌面通知：macOS 风格深色半透明毛玻璃 ──
-//    360×172 · 20px 圆角 · 顶部图标胶囊+标题/副标题+圆形关闭
-//    分隔线 · 正文标题+正文内容 · 底部稍后/知道了双按钮
+// ── macOS 风格系统通知弹窗（v2） ──
+//    DWM Acrylic 真毛玻璃（桌面背景真实模糊）+ DWM 系统级圆角（无黑角）
+//    全部控件由父窗口 GDI 自绘（无子控件黑底），点击热区自管理
 class DesktopNotificationWindow {
  public:
   using ConfirmCallback = std::function<void()>;
@@ -39,58 +39,53 @@ class DesktopNotificationWindow {
 
   void EnsureClassRegistered();
   bool CreateWindowIfNeeded();
+  void ApplyAcrylicBlur(HWND hwnd);
+  void ApplyRoundedCorners(HWND hwnd);
   void PositionAtBottomRight();
-  void LayoutChildren();
+  void ComputeLayout();
   void DestroyNativeWindow();
   void StartTimer();
   void StopTimer();
+  void Repaint();
 
   // ── 绘制 ──
   void Paint(HWND hwnd, HDC hdc);
-  void DrawRoundedFill(HDC hdc, const RECT& rc, int radius, COLORREF fill);
-  void DrawBellIcon(HDC hdc, const RECT& rc, COLORREF bg, COLORREF glyph);
-  void DrawCloseButton(HDC hdc, const RECT& rc, bool hovered);
-  void DrawRoundedPillButton(HDC hdc, const RECT& rc, COLORREF fill,
-                             COLORREF border, const std::wstring& label,
-                             COLORREF text_color);
-  void DrawHeaderText(HDC hdc, const std::wstring& main,
-                      const std::wstring& sub, const RECT& rc);
+  void FillSolidCircle(HDC hdc, const RECT& rc, COLORREF fill);
+  void DrawBell(HDC hdc, int cx, int cy, COLORREF color);
+  void DrawCloseGlyph(HDC hdc, const RECT& rc, COLORREF color);
+  void DrawOutlineButton(HDC hdc, const RECT& rc,
+                         const std::wstring& label, bool hovered);
+  void DrawLine(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color,
+                int width);
 
-  // ── 窗口句柄 / 控件 ──
+  // 热区命中：0=无，1=关闭，2=稍后(dismiss)，3=知道了(confirm)
+  int  HitTest(const POINT& pt) const;
+
   HWND window_handle_ = nullptr;
-  HWND dismiss_btn_ = nullptr;   // 稍后（左）
-  HWND confirm_btn_ = nullptr;   // 知道了（右）
-  HWND close_btn_ = nullptr;     // 右上角圆形 ×
-  HBRUSH dismiss_brush_ = nullptr;
-  HBRUSH dismiss_border_brush_ = nullptr;
-  HBRUSH confirm_brush_ = nullptr;
 
-  // ── 文本 ──
-  std::wstring header_title_;
-  std::wstring message_;
-  std::wstring priority_;
-  std::wstring confirm_text_;
-  std::wstring dismiss_text_;
+  std::wstring title_;         // 正文粗标题（原 title 字段）
+  std::wstring message_;       // 正文描述
+  std::wstring confirm_text_;  // 主按钮文字
   bool show_confirm_button_ = false;
   int auto_close_ms_ = 0;
 
-  // ── 悬停状态 ──
-  bool close_hovered_ = false;
+  // 布局热区
+  RECT rc_close_{};
+  RECT rc_dismiss_{};
+  RECT rc_confirm_{};
 
-  // ── 回调 ──
+  // 交互状态
+  int  hover_id_ = 0;
+  bool mouse_tracking_ = false;
+
   ConfirmCallback on_confirm_;
   DismissCallback on_dismiss_;
   TimeoutCallback on_timeout_;
 
-  // ── 常量 ──
   static constexpr UINT_PTR kAutoCloseTimerId = 3001;
   static constexpr int kWindowWidth  = 360;
   static constexpr int kWindowHeight = 172;
-  static constexpr int kCornerRadius = 20;
   static constexpr int kMargin       = 16;
-  static constexpr int kIdDismiss    = 21;
-  static constexpr int kIdConfirm    = 22;
-  static constexpr int kIdClose      = 23;
   static constexpr const wchar_t* kClassName =
       L"PAI_DesktopNotification_Window";
 };

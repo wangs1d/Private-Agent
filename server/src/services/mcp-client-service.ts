@@ -1,9 +1,10 @@
 /**
  * MCP 客户端服务 —— 与 MCP Server 交互
  *
- * 支持两种连接方式：
+ * 支持三种连接方式：
  * 1. mcporter 模式：通过 mcporter CLI 代理调用（与 UpstreamSearchService 一致）
  * 2. stdio 模式：直接 spawn MCP Server 子进程，通过 JSON-RPC 2.0 / stdio 通信
+ * 3. http 模式：远程 streamable-http 端点（如 RollingGo 酒店 MCP），请求头鉴权
  */
 
 import { ChildProcess, execFile, spawn } from "node:child_process";
@@ -22,14 +23,20 @@ export type McpServerConfig = {
   description?: string;
   /** 启用/禁用，默认 true */
   enabled?: boolean;
-  /** 连接类型：mcporter（通过 mcporter CLI）| npm（直接 stdio 子进程） */
-  type?: "mcporter" | "npm";
+  /** 连接类型：mcporter（通过 mcporter CLI）| npm（直接 stdio 子进程）| http（远程 streamable-http 端点） */
+  type?: "mcporter" | "npm" | "http";
   /** npm 模式：启动命令（如 npx） */
   command?: string;
   /** npm 模式：命令参数 */
   args?: string[];
   /** npm 模式：环境变量 */
   env?: Record<string, string>;
+  /** http 模式：MCP streamable-http 端点 URL */
+  url?: string;
+  /** http 模式：附加请求头（值支持 ${ENV_VAR} 形式展开环境变量） */
+  headers?: Record<string, string>;
+  /** http 模式：单次请求超时毫秒（默认 30000；搜索类服务可调大，取 max(调用方超时, 此值)） */
+  timeoutMs?: number;
   /** 备注 */
   notes?: string;
 };
@@ -60,6 +67,12 @@ type StdioServerInstance = {
   requestId: number;
   pendingRequests: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
   buffer: string;
+  initialized: boolean;
+};
+
+/** http MCP 会话（streamable-http：session id 由服务端通过响应头下发，需在后续请求回传） */
+type HttpSession = {
+  sessionId?: string;
   initialized: boolean;
 };
 
@@ -99,6 +112,21 @@ function resolveMcporterBin(): string {
   return process.env.MCPORTER_BIN?.trim() || "mcporter";
 }
 
+/** 从 SSE 文本中解析 data: 载荷（取最后一条可解析的 JSON，单请求响应通常只有一条） */
+function parseSseDataPayload(raw: string): unknown {
+  const lines = raw.split(/\r?\n/).filter((l) => l.startsWith("data:"));
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const payload = lines[i].slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      return JSON.parse(payload);
+    } catch {
+      // 继续向前找
+    }
+  }
+  return null;
+}
+
 // ---------- 服务类 ----------
 
 export class McpClientService {
@@ -108,6 +136,9 @@ export class McpClientService {
   private cachePopulating: Promise<void> | null = null;
   /** stdio 模式的活跃子进程池 */
   private readonly stdioInstances = new Map<string, StdioServerInstance>();
+  /** http 模式的会话池 */
+  private readonly httpSessions = new Map<string, HttpSession>();
+  private httpRequestId = 0;
 
   constructor() {
     this.servers = loadServerConfigs().filter((s) => s.enabled !== false);
@@ -129,6 +160,7 @@ export class McpClientService {
    * 发现所有已配置 server 的可用工具
    * - mcporter 类型：调用 `mcporter list <alias>`
    * - npm/stdio 类型：spawn 子进程 → initialize → tools/list
+   * - http 类型：POST initialize → tools/list（streamable-http）
    */
   async discoverTools(): Promise<void> {
     if (this.cachePopulating) return this.cachePopulating;
@@ -139,7 +171,10 @@ export class McpClientService {
       await Promise.all(
         this.servers.map(async (server) => {
           try {
-            if (server.type === "npm") {
+            if (server.type === "http") {
+              if (!server.url) return;
+              await this.discoverHttpTools(server);
+            } else if (server.type === "npm") {
               await this.discoverStdioTools(server);
             } else {
               // 默认 mcporter 模式
@@ -158,7 +193,7 @@ export class McpClientService {
 
   /**
    * 调用 MCP 工具
-   * 根据服务器类型自动选择 mcporter 或 stdio 路径
+   * 根据服务器类型自动选择 http / mcporter / stdio 路径
    */
   async callTool(
     serverAlias: string,
@@ -168,6 +203,9 @@ export class McpClientService {
   ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
     const server = this.servers.find((s) => s.alias === serverAlias);
 
+    if (server?.type === "http") {
+      return this.callHttpTool(serverAlias, toolName, args, timeoutMs);
+    }
     if (server?.type === "npm") {
       return this.callStdioTool(serverAlias, toolName, args, timeoutMs);
     }
@@ -203,7 +241,7 @@ export class McpClientService {
       servers[server.alias] = {
         ok: tools.length > 0,
         toolCount: tools.length,
-        mode: server.type === "npm" ? "stdio" : "mcporter",
+        mode: server.type === "npm" ? "stdio" : server.type === "http" ? "http" : "mcporter",
       };
     }
 
@@ -216,7 +254,7 @@ export class McpClientService {
     };
   }
 
-  /** 关闭所有 stdio 子进程 */
+  /** 关闭所有 stdio 子进程并清理 http 会话 */
   closeAll(): void {
     for (const [alias, instance] of this.stdioInstances) {
       try {
@@ -226,6 +264,7 @@ export class McpClientService {
       }
       this.stdioInstances.delete(alias);
     }
+    this.httpSessions.clear();
   }
 
   // ========== mcporter 模式 ==========
@@ -481,6 +520,222 @@ export class McpClientService {
     }
 
     instance.buffer = instance.buffer.slice(pos);
+  }
+
+  // ========== http 模式（streamable-http：JSON-RPC 2.0 over HTTP POST）==========
+
+  private async discoverHttpTools(server: McpServerConfig): Promise<void> {
+    try {
+      const response = await this.sendHttpRpc(server, "tools/list", {}) as {
+        tools?: Array<{ name?: string; description?: string; inputSchema?: Record<string, unknown> }>;
+      } | null;
+      if (response?.tools) {
+        for (const tool of response.tools) {
+          if (typeof tool !== "object" || !tool.name) continue;
+          this.toolCache.set(`mcp.${server.alias}.${tool.name}`, {
+            name: `mcp.${server.alias}.${tool.name}`,
+            description: tool.description || `${server.alias} MCP 工具: ${tool.name}`,
+            parameters: tool.inputSchema || { type: "object", properties: {} },
+            serverAlias: server.alias,
+            rawToolName: tool.name,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn(`[MCP] http 工具发现失败 (${server.alias}): ${(e as Error).message}`);
+    }
+  }
+
+  private async callHttpTool(
+    serverAlias: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<{ ok: boolean; result: Record<string, unknown> }> {
+    const server = this.servers.find((s) => s.alias === serverAlias);
+    if (!server?.url) {
+      return { ok: false, result: { error: `MCP http 服务 ${serverAlias} 未配置 url` } };
+    }
+
+    try {
+      await this.ensureHttpSession(server);
+
+      // http 工具调用（如酒店实时搜索）可能比默认 30s 慢，取调用方与配置中的较大值
+      const effectiveTimeout = Math.max(timeoutMs, server.timeoutMs ?? 0);
+      let response = await this.sendHttpRpc(server, "tools/call", {
+        name: toolName,
+        arguments: args,
+      }, effectiveTimeout) as { content?: Array<{ type?: string; text?: string }> } | null;
+
+      // MCP tools/call 返回 { content: [{ type: "text", text: "..." }] }
+      if (response?.content) {
+        const texts = response.content
+          .filter((c: { type?: string; text?: string }) => c.type === "text")
+          .map((c: { text?: string }) => c.text)
+          .join("\n");
+
+        // 尝试解析为 JSON
+        try {
+          const parsed = JSON.parse(texts);
+          return { ok: true, result: typeof parsed === "object" && parsed !== null ? parsed : { text: texts } };
+        } catch {
+          return { ok: true, result: { text: texts } };
+        }
+      }
+
+      return { ok: true, result: (response as Record<string, unknown>) || {} };
+    } catch (e) {
+      // 会话失效（404）时重置会话并重试一次
+      if (this.isSessionExpiredError(e)) {
+        this.httpSessions.delete(serverAlias);
+        try {
+          await this.ensureHttpSession(server);
+          const retry = await this.sendHttpRpc(server, "tools/call", {
+            name: toolName,
+            arguments: args,
+          }) as { content?: Array<{ type?: string; text?: string }> } | null;
+
+          if (retry?.content) {
+            const texts = retry.content
+              .filter((c: { type?: string; text?: string }) => c.type === "text")
+              .map((c: { text?: string }) => c.text)
+              .join("\n");
+            try {
+              const parsed = JSON.parse(texts);
+              return { ok: true, result: typeof parsed === "object" && parsed !== null ? parsed : { text: texts } };
+            } catch {
+              return { ok: true, result: { text: texts } };
+            }
+          }
+          return { ok: true, result: (retry as Record<string, unknown>) || {} };
+        } catch (retryErr) {
+          return {
+            ok: false,
+            result: { error: `MCP http 调用失败(${serverAlias}.${toolName}): ${(retryErr as Error).message}` },
+          };
+        }
+      }
+
+      return {
+        ok: false,
+        result: { error: `MCP http 调用失败(${serverAlias}.${toolName}): ${(e as Error).message}` },
+      };
+    }
+  }
+
+  /** 确保 http 会话已初始化（initialize + notifications/initialized） */
+  private async ensureHttpSession(server: McpServerConfig): Promise<void> {
+    const existing = this.httpSessions.get(server.alias);
+    if (existing?.initialized) return;
+
+    await this.sendHttpRpc(server, "initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "private-ai-agent", version: "1.0.0" },
+    });
+
+    const session: HttpSession = this.httpSessions.get(server.alias) ?? { initialized: false };
+    session.initialized = true;
+    this.httpSessions.set(server.alias, session);
+
+    // initialized 通知：服务端通常返回 202 空响应，失败不影响后续调用
+    try {
+      await this.httpPost(server, { jsonrpc: "2.0", method: "notifications/initialized" }, 5_000);
+    } catch {
+      // ignore
+    }
+  }
+
+  /** 发送 JSON-RPC 请求（有响应）；session id 由 httpPost 从响应头捕获 */
+  private async sendHttpRpc(
+    server: McpServerConfig,
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    const id = ++this.httpRequestId;
+    const { status, data } = await this.httpPost(
+      server,
+      { jsonrpc: "2.0", id, method, params },
+      timeoutMs ?? server.timeoutMs ?? 30_000,
+    );
+
+    if (status === 404 || status === 410) {
+      // streamable-http 约定：404/410 表示会话过期或不存在
+      const err = new Error(`MCP http 会话失效 (HTTP ${status}): ${method}`);
+      (err as Error & { sessionExpired?: boolean }).sessionExpired = true;
+      throw err;
+    }
+    if (status >= 400) {
+      throw new Error(`MCP http 请求失败 (HTTP ${status}): ${method}`);
+    }
+
+    const msg = data as { id?: unknown; error?: { message?: string }; result?: unknown } | null;
+    if (msg && typeof msg === "object" && msg.error) {
+      throw new Error(msg.error.message || "MCP http 错误");
+    }
+    return msg?.result ?? msg;
+  }
+
+  /** 底层 HTTP POST：附加鉴权头与会话头，兼容纯 JSON 与 SSE 两种响应格式 */
+  private async httpPost(
+    server: McpServerConfig,
+    body: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<{ status: number; data: unknown }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      // streamable-http 要求同时接受 JSON 与 SSE
+      Accept: "application/json, text/event-stream",
+    };
+    for (const [key, value] of Object.entries(server.headers ?? {})) {
+      headers[key] = this.expandEnvVars(value);
+    }
+    const session = this.httpSessions.get(server.alias);
+    if (session?.sessionId) {
+      headers["Mcp-Session-Id"] = session.sessionId;
+    }
+
+    const response = await fetch(server.url!, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    // 捕获服务端下发的会话 id
+    const sessionId = response.headers.get("mcp-session-id");
+    if (sessionId) {
+      const sessionEntry: HttpSession = this.httpSessions.get(server.alias) ?? { initialized: false };
+      sessionEntry.sessionId = sessionId;
+      this.httpSessions.set(server.alias, sessionEntry);
+    }
+
+    const raw = await response.text();
+    let data: unknown = null;
+    if (raw) {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/event-stream")) {
+        data = parseSseDataPayload(raw);
+      } else {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = { text: raw };
+        }
+      }
+    }
+
+    return { status: response.status, data };
+  }
+
+  private isSessionExpiredError(e: unknown): boolean {
+    return Boolean((e as Error & { sessionExpired?: boolean })?.sessionExpired);
+  }
+
+  /** 展开 ${ENV_VAR} 形式的环境变量引用 */
+  private expandEnvVars(value: string): string {
+    return value.replace(/\$\{([A-Za-z0-9_]+)\}/g, (match, name: string) => process.env[name] ?? match);
   }
 
   // ========== 通用工具方法 ==========
