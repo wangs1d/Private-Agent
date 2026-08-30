@@ -1,10 +1,23 @@
 #include "outgoing_call_window.h"
 
+#include <dwmapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+
+#ifndef CLR_NONE
+#define CLR_NONE static_cast<COLORREF>(0xFFFFFFFFL)
+#endif
+
+#ifndef DWMNCR_ENABLED
+#define DWMNCR_ENABLED 1
+#endif
+
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 namespace {
 
@@ -20,6 +33,60 @@ std::wstring Utf8ToWide(const std::string& s) {
 
 COLORREF ParseArgb(uint32_t argb) {
   return RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+}
+
+// 启用 DWM 圆角阴影（柔和投影）
+void EnableDwmShadow(HWND hwnd) {
+  DWMNCRENDERINGPOLICY policy = static_cast<DWMNCRENDERINGPOLICY>(DWMNCR_ENABLED);
+  DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY,
+                        &policy, sizeof(policy));
+
+  MARGINS margins = {0, 0, 0, 1};
+  DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+  BOOL prefer_angular_corners = FALSE;
+  DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                        &prefer_angular_corners, sizeof(prefer_angular_corners));
+}
+
+// 用指定字体画一个居中字形
+void DrawGlyph(HDC hdc, const RECT& rc, wchar_t glyph, COLORREF color,
+               int font_size, const wchar_t* font_family) {
+  HFONT f = CreateFontW(-font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                        DEFAULT_PITCH | FF_SWISS, font_family);
+  HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, color);
+  RECT r = rc;
+  DrawTextW(hdc, &glyph, 1, &r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  SelectObject(hdc, old);
+  DeleteObject(f);
+}
+
+// 挂断图标：电话字形 + 斜线（phone-off）
+void DrawPhoneOffGlyph(HDC hdc, const RECT& rc, COLORREF color, int font_size) {
+  DrawGlyph(hdc, rc, L'\uE717', color, font_size, L"Segoe MDL2 Assets");
+  HPEN pen = CreatePen(PS_SOLID, 2, color);
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+  int cx = (rc.left + rc.right) / 2;
+  int cy = (rc.top + rc.bottom) / 2;
+  int off = font_size / 3;
+  MoveToEx(hdc, cx + off, cy + off, nullptr);
+  LineTo(hdc, cx - off, cy - off);
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+}
+
+// 在 hdc 上画一个实心圆
+void FillCircle(HDC hdc, int cx, int cy, int r, COLORREF fill) {
+  HRGN rgn = CreateEllipticRgn(cx - r, cy - r, cx + r, cy + r);
+  HBRUSH brush = CreateSolidBrush(fill);
+  FillRgn(hdc, rgn, brush);
+  DeleteObject(brush);
+  DeleteObject(rgn);
 }
 
 }  // namespace
@@ -56,14 +123,16 @@ bool OutgoingCallWindow::CreateWindowIfNeeded() {
   if (!hwnd) return false;
   window_handle_ = hwnd;
 
+  // 自绘圆形图标按钮
   hangup_btn_ = CreateWindowExW(
-      0, L"BUTTON", L"\u6302\u65AD",
-      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT, 0, 0, 0, 0, hwnd,
+      0, L"BUTTON", L"",
+      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdHangup)),
       GetModuleHandle(nullptr), nullptr);
   HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
   SendMessage(hangup_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  hangup_brush_ = CreateSolidBrush(RGB(239, 68, 68));
+  hangup_brush_ = CreateSolidBrush(RGB(255, 59, 48));
+  EnableDwmShadow(hwnd);
   return true;
 }
 
@@ -76,8 +145,12 @@ void OutgoingCallWindow::PositionAtBottomRight() {
   const int y = mi.rcWork.bottom - kWindowHeight - kMargin;
   SetWindowPos(window_handle_, HWND_TOPMOST, x, y, kWindowWidth, kWindowHeight,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
-   SetWindowPos(hangup_btn_, nullptr, (kWindowWidth - 112) / 2, kWindowHeight - 54,
-                112, 34, SWP_NOZORDER | SWP_NOACTIVATE);
+  // 挂断圆钮（居中偏下）
+  constexpr int kBtnSize = 50;
+  const int btn_x = (kWindowWidth - kBtnSize) / 2;
+  const int btn_y = kWindowHeight - kBtnSize - 18;
+  SetWindowPos(hangup_btn_, nullptr, btn_x, btn_y, kBtnSize, kBtnSize,
+               SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void OutgoingCallWindow::Show(const std::string& caller_name,
@@ -87,7 +160,7 @@ void OutgoingCallWindow::Show(const std::string& caller_name,
   caller_name_ = Utf8ToWide(caller_name);
   subtitle_ = Utf8ToWide(subtitle);
   caller_initial_ = Utf8ToWide(caller_initial);
-  accent_color_ = accent_color_hex;
+  accent_color_ = accent_color_hex ? accent_color_hex : 0xFF34C759;
   if (!CreateWindowIfNeeded()) return;
   PositionAtBottomRight();
   StartPulse();
@@ -128,82 +201,90 @@ void OutgoingCallWindow::Paint(HWND hwnd, HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
 
-  HBRUSH bg = CreateSolidBrush(RGB(249, 250, 252));
+  // 白卡背景（Apple 风格，32px 大圆角，DWM 阴影区分层次）
+  constexpr COLORREF kBg = RGB(0xFF, 0xFF, 0xFF);
+  HBRUSH bg = CreateSolidBrush(kBg);
   FillRect(mem, &rc, bg);
   DeleteObject(bg);
 
-  HPEN border = CreatePen(PS_SOLID, 1, RGB(223, 228, 234));
-  HBRUSH fill = CreateSolidBrush(RGB(249, 250, 252));
-  HPEN old_pen = static_cast<HPEN>(SelectObject(mem, border));
-  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(mem, fill));
-  RoundRect(mem, rc.left, rc.top, rc.right, rc.bottom, 18, 18);
-  SelectObject(mem, old_pen);
-  SelectObject(mem, old_brush);
-  DeleteObject(border);
-  DeleteObject(fill);
+  constexpr int kRadius = 32;
+  HRGN clip_rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1,
+                                     kRadius, kRadius);
+  SelectClipRgn(mem, clip_rgn);
 
-  RECT top_bar = {0, 0, rc.right, 4};
-  HBRUSH top_bar_brush = CreateSolidBrush(ParseArgb(accent_color_));
-  FillRect(mem, &top_bar, top_bar_brush);
-  DeleteObject(top_bar_brush);
-
-  const int cx = kWindowWidth / 2;
-  const int cy = 78;
-  const int base_r = 40;
-  const int glow_r = base_r + static_cast<int>(6 * std::sin(pulse_phase_ / 8.0));
-  HBRUSH glow = CreateSolidBrush(RGB(217, 245, 208));
-  HBRUSH old_glow = static_cast<HBRUSH>(SelectObject(mem, glow));
-  HPEN null_pen = static_cast<HPEN>(GetStockObject(NULL_PEN));
-  HPEN old_null = static_cast<HPEN>(SelectObject(mem, null_pen));
-  Ellipse(mem, cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r);
-  SelectObject(mem, old_null);
-  SelectObject(mem, old_glow);
-  DeleteObject(glow);
-
-  HBRUSH avatar = CreateSolidBrush(ParseArgb(accent_color_));
-  HBRUSH old_avatar = static_cast<HBRUSH>(SelectObject(mem, avatar));
-  Ellipse(mem, cx - base_r, cy - base_r, cx + base_r, cy + base_r);
-  SelectObject(mem, old_avatar);
-  DeleteObject(avatar);
-
-  HFONT initial_font = CreateFontW(30, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                   CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                   DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  HFONT old_font = static_cast<HFONT>(SelectObject(mem, initial_font));
+  COLORREF accent = ParseArgb(accent_color_);
   SetBkMode(mem, TRANSPARENT);
-  SetTextColor(mem, RGB(255, 255, 255));
-  std::wstring initial =
-      caller_initial_.empty() ? L"A" : std::wstring(1, std::towupper(caller_initial_[0]));
-  RECT initial_rc = {cx - base_r, cy - base_r, cx + base_r, cy + base_r};
-  DrawTextW(mem, initial.c_str(), -1, &initial_rc,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-  SelectObject(mem, old_font);
-  DeleteObject(initial_font);
+  HFONT old_font = nullptr;
 
-  HFONT title_font = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-  old_font = static_cast<HFONT>(SelectObject(mem, title_font));
-  SetTextColor(mem, RGB(31, 35, 41));
-  RECT title_rc = {20, 130, kWindowWidth - 20, 158};
-  DrawTextW(mem, caller_name_.c_str(), -1, &title_rc,
+  // ── 名称（28px 偏大，空间受限取 24px Semibold） ──
+  HFONT name_font = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_SWISS,
+                                L"Microsoft YaHei UI");
+  old_font = static_cast<HFONT>(SelectObject(mem, name_font));
+  SetTextColor(mem, RGB(0x1D, 0x1D, 0x1F));
+  RECT name_rc = {20, 14, kWindowWidth - 20, 44};
+  DrawTextW(mem, caller_name_.c_str(), -1, &name_rc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
-  DeleteObject(title_font);
+  DeleteObject(name_font);
 
-  HFONT sub_font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+  // ── 状态（"正在呼叫…" 14px 中灰） ──
+  HFONT sub_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                               DEFAULT_PITCH | FF_SWISS,
+                               L"Microsoft YaHei UI");
   old_font = static_cast<HFONT>(SelectObject(mem, sub_font));
-  SetTextColor(mem, RGB(107, 114, 128));
-  RECT sub_rc = {32, 160, kWindowWidth - 32, 190};
+  SetTextColor(mem, RGB(0x6E, 0x6E, 0x73));
+  RECT sub_rc = {20, 44, kWindowWidth - 20, 66};
   DrawTextW(mem, subtitle_.c_str(), -1, &sub_rc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(sub_font);
+
+  // ── 中央电话圆 + 呼吸光环（scale 1 → 1.55，两层相位错开） ──
+  const int cx = kWindowWidth / 2;
+  const int cy = 122;
+  const int base_r = 38;
+  double t = (pulse_phase_ % 60) / 60.0;
+  double t2 = fmod(t + 0.5, 1.0);
+
+  // 光环 1
+  {
+    double scale = 1.0 + 0.55 * t;
+    double fade = 0.35 * (1.0 - t);
+    int r = static_cast<int>(base_r * scale);
+    COLORREF ring = RGB(
+        static_cast<int>(GetRValue(accent) * fade + 255 * (1 - fade)),
+        static_cast<int>(GetGValue(accent) * fade + 255 * (1 - fade)),
+        static_cast<int>(GetBValue(accent) * fade + 255 * (1 - fade)));
+    FillCircle(mem, cx, cy, r, ring);
+  }
+  // 光环 2（错开半周期）
+  {
+    double scale = 1.0 + 0.55 * t2;
+    double fade = 0.35 * (1.0 - t2);
+    int r = static_cast<int>(base_r * scale);
+    COLORREF ring = RGB(
+        static_cast<int>(GetRValue(accent) * fade + 255 * (1 - fade)),
+        static_cast<int>(GetGValue(accent) * fade + 255 * (1 - fade)),
+        static_cast<int>(GetBValue(accent) * fade + 255 * (1 - fade)));
+    FillCircle(mem, cx, cy, r, ring);
+  }
+
+  // 实心电话圆（accent 色 + 白色 Phone 图标）
+  FillCircle(mem, cx, cy, base_r, accent);
+  {
+    RECT icon_rc = {cx - base_r, cy - base_r, cx + base_r, cy + base_r};
+    DrawGlyph(mem, icon_rc, L'\uE717', RGB(255, 255, 255), 34,
+              L"Segoe MDL2 Assets");
+  }
+
+  // 清除圆角裁剪
+  SelectClipRgn(mem, nullptr);
+  DeleteObject(clip_rgn);
 
   BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
   SelectObject(mem, old_bmp);
@@ -253,14 +334,27 @@ LRESULT OutgoingCallWindow::HandleMessage(HWND hwnd, UINT message,
         return 0;
       }
       break;
-    case WM_CTLCOLORBTN: {
-      HDC btn_dc = reinterpret_cast<HDC>(wparam);
-      SetBkMode(btn_dc, TRANSPARENT);
-      SetTextColor(btn_dc, RGB(255, 255, 255));
-      if (hangup_brush_) {
-        return reinterpret_cast<INT_PTR>(hangup_brush_);
+    case WM_DRAWITEM: {
+      auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+      if (dis->CtlType == ODT_BUTTON && dis->CtlID == kIdHangup) {
+        // 圆钮底色铺白，避免四角露出系统底色
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(dis->hDC, &dis->rcItem, bg);
+        DeleteObject(bg);
+        bool hovered = (dis->itemState & ODS_SELECTED) ||
+                       (dis->itemState & ODS_HOTLIGHT);
+        COLORREF fill = hovered ? RGB(0xE0, 0x33, 0x2A) : RGB(0xFF, 0x3B, 0x30);
+        HRGN rgn = CreateEllipticRgn(dis->rcItem.left, dis->rcItem.top,
+                                     dis->rcItem.right, dis->rcItem.bottom);
+        HBRUSH brush = CreateSolidBrush(fill);
+        FillRgn(dis->hDC, rgn, brush);
+        DeleteObject(brush);
+        DeleteObject(rgn);
+        RECT icon_rc = dis->rcItem;
+        DrawPhoneOffGlyph(dis->hDC, icon_rc, RGB(255, 255, 255), 24);
+        return TRUE;
       }
-      return DefWindowProc(hwnd, message, wparam, lparam);
+      break;
     }
     case WM_NCHITTEST: {
       POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};

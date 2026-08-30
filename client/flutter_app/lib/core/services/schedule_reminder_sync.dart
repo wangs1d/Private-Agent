@@ -13,6 +13,15 @@ const Set<String> _scheduleReminderTools = <String>{
   "calendar_create_task",
 };
 
+/// 服务端节律任务标记（与 server/src/tools/rhythm-reminder-tools.ts 的 RHYTHM_MARK 对应）。
+/// 带此标记的任务照常到点推送，但不进「今日安排」紧凑列表。
+const String kRhythmTaskMark = "[节律提醒:";
+
+bool _isRhythmTask(Map<String, dynamic> task) {
+  final String description = task["description"]?.toString() ?? "";
+  return description.startsWith(kRhythmTaskMark);
+}
+
 bool isScheduleReminderToolName(String toolName) {
   final String n = toolName.trim();
   if (_scheduleReminderTools.contains(n)) return true;
@@ -58,6 +67,7 @@ Future<bool> upsertLocalScheduleFromToolResult(
       title: _pickTitle(result),
       shortTitle: _pickShortTitle(result),
       notes: _buildNotes(result),
+      isRhythm: _isRhythmTask(result),
     );
   } catch (_) {
     return false;
@@ -134,6 +144,7 @@ Future<int> syncServerRemindersToLocal(
           title: _pickTitle(t),
           shortTitle: _pickShortTitle(t),
           notes: _buildNotes(t),
+          isRhythm: _isRhythmTask(t),
         )
             ? 1
             : 0;
@@ -162,6 +173,7 @@ Future<bool> _persistExpandedTask(
   required String title,
   required String? shortTitle,
   required String? notes,
+  bool isRhythm = false,
 }) async {
   final List<DateTime> occurrences = expandScheduleOccurrences(
     anchorLocal: anchorLocal,
@@ -180,6 +192,7 @@ Future<bool> _persistExpandedTask(
         title: title,
         shortTitle: shortTitle,
         notes: notes,
+        isRhythm: isRhythm,
       ),
     );
   }

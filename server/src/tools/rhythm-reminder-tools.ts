@@ -38,8 +38,8 @@ export const RHYTHM_PRESETS: Record<
   },
 };
 
-/** 节律任务标记前缀（写入 description，disable 时按此前缀精准匹配删除） */
-const RHYTHM_MARK = "[节律提醒:";
+/** 节律任务标记前缀（写入 description；disable 时按此前缀精准匹配删除，「今日安排」等紧凑展示据此过滤） */
+export const RHYTHM_MARK = "[节律提醒:";
 
 /**
  * care.rhythm_reminder 的 LLM 工具声明（并入 getBuiltinAgentChatTools）。
