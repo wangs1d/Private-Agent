@@ -1183,12 +1183,86 @@ function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
 }
 
 function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
+  // 必应视频页每条真实结果由两个互补的 JSON 属性描述，普通 <a> 链接几乎全是
+  // 站内筛选/翻页链接（"全部/短视频/时长筛选"等），旧的 <a> 启发式解析抓到的
+  // 正是这些假结果，导致视频搜索"有返回但全是废链接"：
+  //   - 结果容器 <div class="mc_vtvc ..." mmeta="{...}">：murl/pgurl(播放页) +
+  //     turl(真实缩略图)；
+  //   - 结果内 <div class="vrhdata" vrhm="{...}">：vt(标题) + du(时长) + purl。
+  // 两者按播放页 URL 合并；仅当两者都缺失（页面结构变化）时才退回旧 <a> 解析。
   const out: MediaSearchItem[] = [];
   const seen = new Set<string>();
-  const blockRe = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+
+  // 1) mmeta：播放页 + 缩略图（aria-label 兜底标题跟在容器后的首个 <a> 上）
+  const metaByKey = new Map<string, { pageUrl: string; thumbnailUrl?: string; ariaLabel?: string }>();
+  const mmetaRe =
+    /class="mc_vtvc[^"]*"[^>]*\smmeta="([^"]*)"[^>]*>\s*<a[^>]*aria-label="([^"]*)"/g;
   let m: RegExpExecArray | null = null;
-  while ((m = blockRe.exec(html))) {
-    const rawHref = decodeHtmlEntities(m[2] ?? "").trim();
+  while ((m = mmetaRe.exec(html))) {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(decodeHtmlEntities(m[1] ?? ""));
+    } catch {
+      continue;
+    }
+    const pageUrl = pickString(data.purl) || pickString(data.murl) || pickString(data.pgurl);
+    if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) continue;
+    const key = pageUrl.toLowerCase();
+    if (metaByKey.has(key)) continue;
+    metaByKey.set(key, {
+      pageUrl,
+      thumbnailUrl: pickString(data.turl),
+      ariaLabel: m[2],
+    });
+  }
+
+  // 2) vrhm：标题 + 时长（按播放页 URL 关联到 mmeta 条目）
+  const titleByKey = new Map<string, { title?: string; duration?: string }>();
+  const vrhmRe = /class="vrhdata"[^>]*\svrhm="([^"]*)"/g;
+  while ((m = vrhmRe.exec(html))) {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(decodeHtmlEntities(m[1] ?? ""));
+    } catch {
+      continue;
+    }
+    const pageUrl = pickString(data.purl) || pickString(data.murl) || pickString(data.pgurl);
+    if (!pageUrl) continue;
+    const key = pageUrl.toLowerCase();
+    if (titleByKey.has(key)) continue;
+    titleByKey.set(key, { title: pickString(data.vt), duration: pickString(data.du) });
+  }
+
+  // 3) 合并输出：mmeta 有缩略图的条目优先；缺标题时用容器 aria-label 兜底
+  for (const { pageUrl, thumbnailUrl, ariaLabel } of metaByKey.values()) {
+    const key = pageUrl.toLowerCase();
+    const meta = titleByKey.get(key);
+    const title =
+      meta?.title ||
+      decodeHtmlEntities(ariaLabel ?? "")
+        .replace(/来源:.*$/, "")
+        .replace(/·\s*时长.*$/, "")
+        .trim()
+        .slice(0, 160);
+    seen.add(key);
+    out.push({
+      type: "video",
+      title: title || "视频结果",
+      pageUrl,
+      mediaUrl: pageUrl,
+      thumbnailUrl,
+      duration: meta?.duration,
+      source: inferMediaSource(pageUrl, "Bing Videos"),
+    });
+    if (out.length >= limit) break;
+  }
+  if (out.length > 0) return out;
+
+  // 兜底：mmeta/vrhm 都缺失时退回 <a> 链接启发式解析（结果质量差但聊胜于无）
+  const blockRe = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let a: RegExpExecArray | null = null;
+  while ((a = blockRe.exec(html))) {
+    const rawHref = decodeHtmlEntities(a[2] ?? "").trim();
     if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue;
     let pageUrl = rawHref;
     try {
@@ -1197,8 +1271,10 @@ function parseBingVideoResults(html: string, limit: number): MediaSearchItem[] {
       continue;
     }
     if (!isLikelyVideoUrl(pageUrl) && !/\/videos\//i.test(pageUrl)) continue;
-    const chunk = m[0];
-    const title = decodeHtmlEntities(stripTags(m[3] ?? "")).slice(0, 160) || "视频结果";
+    // 排除站内筛选/翻页链接（"全部/短视频/时长筛选"），只留外部播放页
+    if (/cn\.bing\.com\/videos\/search/i.test(pageUrl)) continue;
+    const chunk = a[0];
+    const title = decodeHtmlEntities(stripTags(a[3] ?? "")).slice(0, 160) || "视频结果";
     // 优先取结果块自带的 data-thumbnail（真实缩略图地址），其次 <img> 的 src；
     // 两者都没有则该视频无真实缩略图（前端显示视频占位图标，不再把播放页/
     // 搜索页 URL 当作图片地址下发，避免前端 Image.network 加载 HTML 破图）。

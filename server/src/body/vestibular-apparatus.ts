@@ -1,18 +1,17 @@
 // Agent Body Center —— VestibularApparatus 前庭器/平衡器官
 //
-// 职责：
+// 职责（纯感知，无下行工具）：
 //  1. 维护 Agent 在多设备上的"渲染存在"状态（哪台设备正在显示球形身体 / 当前情绪）
-//  2. 路由 embodiment.* 工具族到 emitEmbodimentPatch / pushEmbodimentCommand
-//  3. 设备上下线时切换渲染主体，发布 body.vestibular.device_switch 信号
-//  4. 提供 where_am_i / vestibular.devices 两种 sense 查询
+//  2. 设备上下线时切换渲染主体，发布 body.vestibular.device_switch 信号
+//  3. 提供 where_am_i / vestibular.devices 两种 sense 查询
+//
+// 注：embodiment.* 下行控制工具已移除，统一由 tools/embodiment-tools.ts 直接注册
+//     到 ToolRegistry（避免同一工具双注册互相覆盖）。
 //
 // 设计原则：
-//  - 子系统缺失时优雅降级：wsRegistry 不可用 -> ok=false + errorMessage
 //  - 不持有 LLM，所有智能判断在 BrainCenter 侧
-//  - BodyBus 信号 fire-and-forget，不阻塞 act
-//  - EmbodimentMood / EmbodimentPatch / emitEmbodimentPatch / EmbodimentCommand 复用
-//    agent-embodiment.ts 中已有实现，不重复造轮子（pushEmbodimentCommand 因依赖
-//    具体 WsConnectionRegistry 类型，本模块改用 WsRegistryLike.trySend 直接发送）
+//  - BodyBus 信号 fire-and-forget
+//  - EmbodimentMood / EmbodimentPatch 类型复用 agent-embodiment.ts，不重复造轮子
 
 import type { BodyBus } from "./body-bus.js";
 import type {
@@ -22,13 +21,10 @@ import type {
   BodyModuleSnapshot,
   BodySenseQuery,
   BodySenseResult,
-  BodyToolRegistry,
 } from "./types.js";
-import {
-  emitEmbodimentPatch,
-  type EmbodimentCommand,
-  type EmbodimentMood,
-  type EmbodimentPatch,
+import type {
+  EmbodimentMood,
+  EmbodimentPatch,
 } from "../services/agent-embodiment.js";
 
 // ---- 外观接口（解耦具体 WsConnectionRegistry / EmbodimentAutonomyService）--
@@ -91,27 +87,6 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** 安全 clamp 数值到 [min, max] */
-function clamp(n: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, n));
-}
-
-/** 合法 mood 枚举校验 */
-const VALID_MOODS: EmbodimentMood[] = [
-  "idle",
-  "listening",
-  "thinking",
-  "happy",
-  "alert",
-];
-
-function normalizeMood(raw: unknown): EmbodimentMood {
-  if (typeof raw === "string" && VALID_MOODS.includes(raw as EmbodimentMood)) {
-    return raw as EmbodimentMood;
-  }
-  return "idle";
-}
-
 // ---- VestibularApparatus 主类 --------------------------------------------
 
 /**
@@ -124,16 +99,7 @@ function normalizeMood(raw: unknown): EmbodimentMood {
 export class VestibularApparatus implements BodyModuleLike {
   readonly name = "vestibular" as const;
   readonly label = "前庭器/平衡器官";
-  readonly tools = [
-    "embodiment.roam",
-    "embodiment.move",
-    "embodiment.stop",
-    "embodiment.set_state",
-    "embodiment.excite",
-    "embodiment.window_roam",
-    "embodiment.window_place",
-    "embodiment.observe",
-  ];
+  readonly tools: string[] = [];
 
   private readonly bodyBus: BodyBus;
   private readonly wsRegistry: WsRegistryLike | null;
@@ -237,293 +203,17 @@ export class VestibularApparatus implements BodyModuleLike {
     console.log("[VestibularApparatus] 已停止");
   }
 
-  // ─── 工具执行 ────────────────────────────────────────────────
+  // ─── 动作执行 ────────────────────────────────────────────────
 
   /**
-   * 执行 embodiment.* 工具调用。
-   *
-   * 按 action.tool 路由：
-   *  - embodiment.window_place -> emitEmbodimentPatch + screenX/screenY
-   *  - embodiment.set_state    -> emitEmbodimentPatch mood/energy/caption
-   *  - embodiment.roam / move / stop / excite / window_roam -> pushEmbodimentCommand
-   *  - embodiment.observe      -> 返回当前渲染设备状态快照
-   *
-   * wsRegistry 不可用时返回 ok=false + errorMessage="ws registry offline"。
+   * Vestibular 已无下行工具（embodiment.* 由 tools/embodiment-tools.ts 直接承接）。
+   * 保留 act 以满足 BodyModuleLike 接口；万一被路由到时优雅返回。
    */
   async act(action: BodyAction): Promise<BodyActionResult> {
-    const startTime = Date.now();
-    const tool = action.tool;
-    const args = action.args ?? {};
-    const sessionId =
-      typeof args.sessionId === "string"
-        ? args.sessionId
-        : (action.actorId ?? "");
-    const deviceId =
-      typeof args.deviceId === "string" ? args.deviceId : "desktop";
-
-    try {
-      switch (tool) {
-        case "embodiment.window_place":
-          return await this.actWindowPlace(sessionId, deviceId, args, startTime);
-        case "embodiment.set_state":
-          return await this.actSetState(sessionId, deviceId, args, startTime);
-        case "embodiment.roam":
-          return await this.actCommand(
-            sessionId,
-            deviceId,
-            {
-              action: "roam",
-              strength:
-                typeof args.strength === "number" && Number.isFinite(args.strength)
-                  ? clamp(args.strength, 0.2, 2)
-                  : 1,
-              source: "tool:embodiment.roam",
-            },
-            startTime,
-          );
-        case "embodiment.move":
-          return await this.actMove(sessionId, deviceId, args, startTime);
-        case "embodiment.stop":
-          return await this.actCommand(
-            sessionId,
-            deviceId,
-            { action: "stop", source: "tool:embodiment.stop" },
-            startTime,
-          );
-        case "embodiment.excite":
-          return await this.actCommand(
-            sessionId,
-            deviceId,
-            {
-              action: "excite",
-              strength:
-                typeof args.strength === "number" && Number.isFinite(args.strength)
-                  ? clamp(args.strength, 0.5, 2)
-                  : 1.4,
-              source: "tool:embodiment.excite",
-            },
-            startTime,
-          );
-        case "embodiment.window_roam":
-          return await this.actCommand(
-            sessionId,
-            deviceId,
-            { action: "window_roam", source: "tool:embodiment.window_roam" },
-            startTime,
-          );
-        case "embodiment.observe":
-          return await this.actObserve(deviceId, startTime);
-        default:
-          return {
-            ok: false,
-            result: { error: `unknown_tool:${tool}` },
-            errorMessage: `unknown_tool:${tool}`,
-            durationMs: Date.now() - startTime,
-          };
-      }
-    } catch (err) {
-      const errMsg = String(err).slice(0, 120);
-      console.log(`[VestibularApparatus] act 异常 tool=${tool} err=${errMsg}`);
-      return {
-        ok: false,
-        result: { error: errMsg },
-        errorMessage: errMsg,
-        durationMs: Date.now() - startTime,
-      };
-    }
-  }
-
-  /** embodiment.window_place —— 屏幕归一化坐标 */
-  private async actWindowPlace(
-    sessionId: string,
-    deviceId: string,
-    args: Record<string, unknown>,
-    startTime: number,
-  ): Promise<BodyActionResult> {
-    const screenX =
-      typeof args.screenX === "number" && Number.isFinite(args.screenX)
-        ? clamp(args.screenX, 0, 1)
-        : undefined;
-    const screenY =
-      typeof args.screenY === "number" && Number.isFinite(args.screenY)
-        ? clamp(args.screenY, 0, 1)
-        : undefined;
-    if (screenX === undefined || screenY === undefined) {
-      return {
-        ok: false,
-        result: { error: "需要 screenX 与 screenY（0～1）" },
-        errorMessage: "需要 screenX 与 screenY（0～1）",
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    if (!this.wsRegistry) {
-      return this.offlineResult(
-        { screenX, screenY },
-        startTime,
-      );
-    }
-
-    const patch: EmbodimentPatch = {
-      mood: undefined,
-      source: "tool:embodiment.window_place",
-    };
-    const delivered = this.sendPatch(sessionId, patch);
-    // 同时下发 window_place 指令（与现有 embodiment-tools 保持一致）
-    const cmdDelivered = this.sendCommand(sessionId, {
-      action: "window_place",
-      screenX,
-      screenY,
-      source: "tool:embodiment.window_place",
-    });
-
-    const ok = delivered || cmdDelivered;
-    this.updateDevice(deviceId, {
-      screenX,
-      screenY,
-      mood: undefined,
-    });
-    this.publishMoved(deviceId, { screenX, screenY });
-
     return {
-      ok,
-      result: { delivered: ok, screenX, screenY, deviceId },
-      errorMessage: ok ? undefined : "ws registry offline",
-      durationMs: Date.now() - startTime,
-    };
-  }
-
-  /** embodiment.set_state —— 设置 mood/energy/caption */
-  private async actSetState(
-    sessionId: string,
-    deviceId: string,
-    args: Record<string, unknown>,
-    startTime: number,
-  ): Promise<BodyActionResult> {
-    const mood = normalizeMood(args.mood);
-    const energy =
-      typeof args.energy === "number" && Number.isFinite(args.energy)
-        ? clamp(args.energy, 0, 1)
-        : undefined;
-    const captionRaw = args.caption;
-    const caption =
-      captionRaw === "" || captionRaw === null
-        ? null
-        : typeof captionRaw === "string"
-          ? captionRaw.slice(0, 120)
-          : undefined;
-
-    if (!this.wsRegistry) {
-      return this.offlineResult({ mood, energy, caption }, startTime);
-    }
-
-    const patch: EmbodimentPatch = {
-      mood,
-      energy,
-      caption,
-      source: "tool:embodiment.set_state",
-    };
-    const delivered = this.sendPatch(sessionId, patch);
-    this.updateDevice(deviceId, { mood, caption });
-    this.publishMoved(deviceId, { mood });
-
-    return {
-      ok: delivered,
-      result: { delivered, mood, energy, caption, deviceId },
-      errorMessage: delivered ? undefined : "ws registry offline",
-      durationMs: Date.now() - startTime,
-    };
-  }
-
-  /** embodiment.move —— 3D 场景坐标移动 */
-  private async actMove(
-    sessionId: string,
-    deviceId: string,
-    args: Record<string, unknown>,
-    startTime: number,
-  ): Promise<BodyActionResult> {
-    const x = typeof args.x === "number" && Number.isFinite(args.x) ? args.x : 0;
-    const z = typeof args.z === "number" && Number.isFinite(args.z) ? args.z : 0;
-    const y =
-      typeof args.y === "number" && Number.isFinite(args.y)
-        ? clamp(args.y, 0.8, 2.6)
-        : 1.6;
-
-    if (!this.wsRegistry) {
-      return this.offlineResult({ x, y, z }, startTime);
-    }
-
-    const delivered = this.sendCommand(sessionId, {
-      action: "move",
-      x: clamp(x, -2.4, 2.4),
-      y,
-      z: clamp(z, -2.4, 2.4),
-      source: "tool:embodiment.move",
-    });
-    this.updateDevice(deviceId, { x, y, z });
-
-    return {
-      ok: delivered,
-      result: { delivered, x, y, z, deviceId },
-      errorMessage: delivered ? undefined : "ws registry offline",
-      durationMs: Date.now() - startTime,
-    };
-  }
-
-  /** 通用 command 路由（roam / stop / excite / window_roam） */
-  private async actCommand(
-    sessionId: string,
-    deviceId: string,
-    command: EmbodimentCommand,
-    startTime: number,
-  ): Promise<BodyActionResult> {
-    if (!this.wsRegistry) {
-      return this.offlineResult({ action: command.action }, startTime);
-    }
-    const delivered = this.sendCommand(sessionId, command);
-    return {
-      ok: delivered,
-      result: {
-        delivered,
-        action: command.action,
-        strength: command.strength,
-        deviceId,
-      },
-      errorMessage: delivered ? undefined : "ws registry offline",
-      durationMs: Date.now() - startTime,
-    };
-  }
-
-  /** embodiment.observe —— 返回当前渲染设备状态快照 */
-  private async actObserve(
-    deviceId: string,
-    startTime: number,
-  ): Promise<BodyActionResult> {
-    const device =
-      this.devices.get(deviceId) ?? this.getCurrentRenderingDevice();
-    if (!device) {
-      return {
-        ok: false,
-        result: { error: "no_rendering_device" },
-        errorMessage: "no_rendering_device",
-        durationMs: Date.now() - startTime,
-      };
-    }
-    return {
-      ok: true,
-      result: {
-        device: device.deviceId,
-        screenX: device.screenX,
-        screenY: device.screenY,
-        x: device.x,
-        y: device.y,
-        z: device.z,
-        mood: device.mood,
-        caption: device.caption,
-        rendering: device.rendering,
-        online: device.online,
-      },
-      durationMs: Date.now() - startTime,
+      ok: false,
+      result: {},
+      errorMessage: `vestibular is sense-only; tool not routed here: ${action.tool ?? "(none)"}`,
     };
   }
 
@@ -604,39 +294,6 @@ export class VestibularApparatus implements BodyModuleLike {
         rendering: Boolean(renderingDevice?.rendering),
       },
     };
-  }
-
-  // ─── 工具注册 ────────────────────────────────────────────────
-
-  /**
-   * 把 embodiment.roam / embodiment.move / embodiment.stop / embodiment.set_state /
-   * embodiment.excite / embodiment.window_roam / embodiment.window_place /
-   * embodiment.observe 工具挂到外部 ToolRegistry，handler 内部委托 this.act()。
-   *
-   * actorId 暂时无法获取（BodyToolRegistry 接口未传 context），保持 undefined。
-   * 返回值：成功 { ok: true, ...result.result }；失败 { ok: false, error, ...result.result }。
-   */
-  registerTools(registry: BodyToolRegistry): void {
-    for (const toolName of this.tools) {
-      registry.register(toolName, async (input) => {
-        const result = await this.act({
-          tool: toolName,
-          args: input,
-          source: "body_module",
-        });
-        if (!result.ok) {
-          return {
-            ok: false,
-            error:
-              result.errorMessage ??
-              result.reason ??
-              "body module action failed",
-            ...result.result,
-          };
-        }
-        return { ok: true, ...result.result };
-      });
-    }
   }
 
   // ─── 设备上下线（供 device-bus 调用） ─────────────────────────
@@ -723,80 +380,6 @@ export class VestibularApparatus implements BodyModuleLike {
     return Array.from(this.devices.values()).map((d) => ({ ...d }));
   }
 
-  /** 发送 embodiment patch（走 emitEmbodimentPatch，触发 autonomy.onPatch） */
-  private sendPatch(sessionId: string, patch: EmbodimentPatch): boolean {
-    if (!this.wsRegistry) return false;
-    const send = (json: string): void => {
-      this.wsRegistry?.trySend(sessionId, json);
-    };
-    try {
-      emitEmbodimentPatch(send, sessionId, patch);
-      return true;
-    } catch (err) {
-      console.log(`[VestibularApparatus] sendPatch 异常: ${err}`);
-      return false;
-    }
-  }
-
-  /** 发送 embodiment command（通过 WsRegistryLike.trySend，与 pushEmbodimentCommand 行为等价） */
-  private sendCommand(sessionId: string, command: EmbodimentCommand): boolean {
-    if (!this.wsRegistry) return false;
-    try {
-      // pushEmbodimentCommand 依赖具体 WsConnectionRegistry 类型，
-      // 此处通过 WsRegistryLike 外观直接组装同款 JSON 并调用 trySend
-      const json = JSON.stringify({
-        type: "agent.embodiment.command",
-        payload: { sessionId, ...command },
-      });
-      return this.wsRegistry.trySend(sessionId, json);
-    } catch (err) {
-      console.log(`[VestibularApparatus] sendCommand 异常: ${err}`);
-      return false;
-    }
-  }
-
-  /** 更新指定设备的部分字段（不存在则忽略） */
-  private updateDevice(
-    deviceId: string,
-    patch: Partial<
-      Pick<
-        DevicePresence,
-        "screenX" | "screenY" | "x" | "y" | "z" | "mood" | "caption"
-      >
-    >,
-  ): void {
-    const d = this.devices.get(deviceId);
-    if (!d) return;
-    if (patch.screenX !== undefined) d.screenX = patch.screenX;
-    if (patch.screenY !== undefined) d.screenY = patch.screenY;
-    if (patch.x !== undefined) d.x = patch.x;
-    if (patch.y !== undefined) d.y = patch.y;
-    if (patch.z !== undefined) d.z = patch.z;
-    if (patch.mood !== undefined) d.mood = patch.mood;
-    if (patch.caption !== undefined) d.caption = patch.caption;
-    d.lastUpdatedAt = nowIso();
-    this.lastActivityAt = d.lastUpdatedAt;
-  }
-
-  /** 发布 body.vestibular.moved 信号 */
-  private publishMoved(
-    deviceId: string,
-    extra: { screenX?: number; screenY?: number; mood?: EmbodimentMood },
-  ): void {
-    const device = this.devices.get(deviceId);
-    this.bodyBus.publish({
-      kind: "body.vestibular.moved",
-      module: "vestibular",
-      payload: {
-        device: deviceId,
-        screenX: extra.screenX ?? device?.screenX,
-        screenY: extra.screenY ?? device?.screenY,
-        mood: extra.mood ?? device?.mood,
-      },
-      timestamp: nowIso(),
-    });
-  }
-
   /** 发布 body.vestibular.device_switch 信号 */
   private publishDeviceSwitch(
     fromDevice: string,
@@ -815,18 +398,5 @@ export class VestibularApparatus implements BodyModuleLike {
       },
       timestamp: nowIso(),
     });
-  }
-
-  /** wsRegistry 不可用时的统一兜底返回 */
-  private offlineResult(
-    extra: Record<string, unknown>,
-    startTime: number,
-  ): BodyActionResult {
-    return {
-      ok: false,
-      result: { delivered: false, ...extra },
-      errorMessage: "ws registry offline",
-      durationMs: Date.now() - startTime,
-    };
   }
 }

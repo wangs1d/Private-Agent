@@ -40,7 +40,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
@@ -145,27 +145,6 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
   const keys = Object.keys(result).filter((k) => !["ok", "error"].includes(k));
   if (keys.length === 0) return "";
   return keys.map((k) => `${k}: ${JSON.stringify(result[k]).slice(0, 200)}`).join("\n");
-}
-
-/**
- * 从文本中剥离 `[AGENT_RESULT_CARD_START] ... [AGENT_RESULT_CARD_END]` 卡片块。
- *
- * 场景：结构化 mediaCards 已由 chat.assistant_done 独立字段下发时，LLM 正文里
- * 若仍残留 processAssistantText 注入的卡片块，前端会把它当纯文本渲染，
- * 造成"文字反复/来回渲染"+ 与 mediaCards 双份展示。这里确定性剥除。
- */
-function stripMediaCardMarker(text: string): string {
-  const START = "[AGENT_RESULT_CARD_START]";
-  const END = "[AGENT_RESULT_CARD_END]";
-  let out = text;
-  // 循环剥除，直到没有完整的一对开始/结束标记（含 ASR/搜索等链式注入最多 5 层）
-  for (let guard = 0; guard < 5; guard++) {
-    const si = out.indexOf(START);
-    const ei = si === -1 ? -1 : out.indexOf(END, si);
-    if (si === -1 || ei === -1) break;
-    out = out.slice(0, si) + out.slice(ei + END.length);
-  }
-  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**

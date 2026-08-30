@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 import {
   getToolResultProcessor,
   attachTravelItineraryCard,
+  stripMediaCardMarker,
+  containsTravelItineraryCard,
+  buildInterleavedRenderBlocks,
+  type MediaCardItem,
 } from "../src/services/tool-result-processor.js";
 import { travelItineraryStore } from "../src/skills/travel-planning/travel-itinerary-store.js";
 
@@ -270,4 +274,170 @@ test("attach: non-travel tool or empty days → unchanged", () => {
     reply,
   );
   assert.equal(attachTravelItineraryCard(reply, "travel.plan-itinerary", undefined), reply);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stripMediaCardMarker：媒体卡轮次剥除残留卡片块，但 travel_itinerary 必须保留
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("strip: generic card blocks removed, surrounding text kept", () => {
+  const text =
+    "前导文字\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"media\",\"title\":\"图集\"}\n[AGENT_RESULT_CARD_END]\n尾随文字";
+  const out = stripMediaCardMarker(text);
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"));
+  assert.ok(out.includes("前导文字"));
+  assert.ok(out.includes("尾随文字"));
+});
+
+test("strip: travel_itinerary card preserved even among generic blocks (autoOpen + travelPlan intact)", () => {
+  const travelCard =
+    "[AGENT_RESULT_CARD_START]\n" +
+    JSON.stringify({
+      cardType: "travel_itinerary",
+      title: "马尔代夫2日游",
+      autoOpen: true,
+      travelPlan: { destination: "马尔代夫", days: [{ date: "2026-08-30", items: [] }] },
+    }) +
+    "\n[AGENT_RESULT_CARD_END]";
+  const text =
+    `介绍\n[AGENT_RESULT_CARD_START]\n{"cardType":"media","title":"图集"}\n[AGENT_RESULT_CARD_END]\n${travelCard}\n结语`;
+  const out = stripMediaCardMarker(text);
+  assert.ok(out.includes(travelCard), "行程卡必须原样保留");
+  const kept = parseCard(out);
+  assert.equal(kept.cardType, "travel_itinerary");
+  assert.equal(kept.autoOpen, true);
+  assert.ok(!out.includes('"cardType":"media"'), "通用媒体卡仍应被剥除");
+  assert.ok(out.includes("介绍") && out.includes("结语"), "卡片外文本不受影响");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// attachTravelItineraryCard：正文已有「非行程」卡片时仍要附行程卡
+// （通用卡没有 autoOpen/结构化数据，缺卡会让右侧双面板无法自动展开）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("attach: generic card in reply → travel card still appended after it", () => {
+  const reply =
+    "行程好了\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"\",\"title\":\"LLM 列表卡\"}\n[AGENT_RESULT_CARD_END]";
+  const out = attachTravelItineraryCard(reply, "travel.plan-itinerary", buildRawToolResult());
+  assert.ok(out.startsWith(reply), "原正文（含通用卡）保留在前");
+  // 附加的行程卡在通用卡之后，且携带 autoOpen 与结构化数据
+  const second = out.indexOf("[AGENT_RESULT_CARD_START]", reply.length - 1);
+  assert.ok(second !== -1, "应追加第二张卡");
+  const card = JSON.parse(
+    out.slice(second + "[AGENT_RESULT_CARD_START]".length, out.indexOf("[AGENT_RESULT_CARD_END]", second)).trim(),
+  );
+  assert.equal(card.cardType, "travel_itinerary");
+  assert.equal(card.autoOpen, true);
+});
+
+test("attach: existing travel_itinerary card → still no double card", () => {
+  const reply =
+    "行程好了\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"travel_itinerary\",\"title\":\"已有行程卡\",\"autoOpen\":true}\n[AGENT_RESULT_CARD_END]";
+  const out = attachTravelItineraryCard(reply, "travel.plan-itinerary", buildRawToolResult());
+  assert.equal(out, reply);
+  assert.equal(containsTravelItineraryCard(reply), true);
+});
+
+test("containsTravelItineraryCard: only true for parsable travel_itinerary blocks", () => {
+  assert.equal(containsTravelItineraryCard("纯文本"), false);
+  assert.equal(
+    containsTravelItineraryCard(
+      "[AGENT_RESULT_CARD_START]\n{\"cardType\":\"media\"}\n[AGENT_RESULT_CARD_END]",
+    ),
+    false,
+  );
+  assert.equal(
+    containsTravelItineraryCard(
+      "前缀\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"travel_itinerary\"}\n[AGENT_RESULT_CARD_END]",
+    ),
+    true,
+  );
+  // LLM 抄坏的 JSON → 不算行程卡
+  assert.equal(
+    containsTravelItineraryCard(
+      "[AGENT_RESULT_CARD_START]\n{\"cardType\":\"travel_itinerary\"\n[AGENT_RESULT_CARD_END]",
+    ),
+    false,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stripMediaCardMarker 剥除策略（2026-08-30）：只剥与 mediaCards 重复的
+// cardType=media 卡；搜索结果卡/通用列表卡等文本场景卡必须保留
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("strip: non-media cards (search_result etc.) are preserved", () => {
+  const searchCard =
+    "[AGENT_RESULT_CARD_START]\n" +
+    JSON.stringify({ cardType: "search_result", title: "搜索结果", items: [{ text: "a: b" }] }) +
+    "\n[AGENT_RESULT_CARD_END]";
+  const out = stripMediaCardMarker(`正文\n${searchCard}\n结语`);
+  assert.ok(out.includes(searchCard), "非 media 卡不能被剥掉");
+});
+
+test("strip: corrupted card JSON removed (no raw JSON leak)", () => {
+  const out = stripMediaCardMarker(
+    "前导\n[AGENT_RESULT_CARD_START]\n{\"cardType\":\"media\"\n[AGENT_RESULT_CARD_END]\n尾随",
+  );
+  assert.ok(!out.includes("cardType"), "损坏 JSON 不透出");
+  assert.ok(out.includes("前导") && out.includes("尾随"));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildInterleavedRenderBlocks（2026-08-30）：一图一段介绍的交错顺序
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 造 N 张无分组的图片卡。 */
+function buildPhotoCards(n: number): MediaCardItem[] {
+  return Array.from({ length: n }, (_, i) => ({
+    type: "image" as const,
+    title: `图片结果${i + 1}`,
+    thumbnailUrl: `https://example.com/img${i + 1}.png`,
+  }));
+}
+
+test("renderBlocks: single-group photos split one-per-cluster, photo before its intro text", () => {
+  const text = "第一段介绍。第二段介绍。第三段介绍。第四段介绍。";
+  const blocks = buildInterleavedRenderBlocks(text, buildPhotoCards(4));
+  const types = blocks.map((b) => b.type);
+  // 期望节奏：图1 → 段1 → 图2 → 段2 → 图3 → 段3 → 图4 → 段4
+  assert.deepEqual(types, [
+    "media", "text", "media", "text", "media", "text", "media", "text",
+  ]);
+  // 每个媒体块只放 1 张图（不再两张一簇）
+  for (const b of blocks) {
+    if (b.type === "media") assert.equal(b.cards.length, 1);
+  }
+  // 照片在前、介绍段紧随其后，正文一字不丢
+  const joined = blocks
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("");
+  assert.ok(joined.includes("第一段介绍"));
+  assert.ok(joined.includes("第四段介绍"));
+});
+
+test("renderBlocks: more photos than paragraphs → extras join the last cluster", () => {
+  const text = "第一段。第二段。";
+  const blocks = buildInterleavedRenderBlocks(text, buildPhotoCards(3));
+  const mediaBlocks = blocks.filter((b) => b.type === "media");
+  assert.equal(mediaBlocks.length, 2);
+  assert.equal(mediaBlocks[0].type === "media" && mediaBlocks[0].cards.length, 1);
+  assert.equal(mediaBlocks[1].type === "media" && mediaBlocks[1].cards.length, 2);
+});
+
+test("renderBlocks: all original text preserved (no keyword swallowed by anchors)", () => {
+  const text = "水屋是马代特色。沙滩别墅也不错。";
+  const cards: MediaCardItem[] = [
+    { type: "image", title: "水屋", thumbnailUrl: "https://example.com/a.png" },
+    { type: "image", title: "沙滩", thumbnailUrl: "https://example.com/b.png" },
+  ];
+  const blocks = buildInterleavedRenderBlocks(text, cards);
+  const joined = blocks.map((b) => (b.type === "text" ? b.text : "")).join("");
+  // 「水屋」「沙滩别墅」等关键词不能被锚点吞掉
+  assert.ok(joined.includes("水屋是马代特色"), "关键词正文必须保留");
+  assert.ok(joined.includes("沙滩别墅也不错"), "关键词正文必须保留");
+  // 照片出现在对应介绍文字之前
+  const firstMediaIdx = blocks.findIndex((b) => b.type === "media");
+  const firstTextIdx = blocks.findIndex((b) => b.type === "text");
+  assert.ok(firstMediaIdx < firstTextIdx, "图在介绍文字之前");
 });

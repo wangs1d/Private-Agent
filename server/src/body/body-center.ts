@@ -3,8 +3,8 @@
 // 与 brain/brain-center.ts 对称：身体中心的统一外观与编排器。
 //
 // 持有：
-//  - 8 个 BodyModule 引用（hand / mouth / eye / ear / skin /
-//    vestibular / homeostasis / reflex），均可选，缺失时方法优雅降级
+//  - BodyModule 引用（eye / ear / skin / vestibular / homeostasis / reflex /
+//    rhythm），均可选，缺失时方法优雅降级
 //  - BodyBus 引用（身体内部消息总线）
 //  - BodyGateway 引用（大脑→身体下行网关）
 //
@@ -16,7 +16,7 @@
 //  - snapshot()：委托到 BodyGateway.snapshot
 //  - start()/stop()：调用各 module 的 start/stop，失败不阻断其他
 //  - getBus()/getGateway()：暴露内部引用
-//  - 8 个模块 setter（setHand/setMouth/...）：供装配阶段注入具体实现
+//  - 模块 setter（setEye/setEar/...）：供装配阶段注入具体实现
 //
 // 设计原则（与 BrainCenter 一致）：
 //  - 任一模块缺失时方法优雅降级，不抛异常
@@ -38,20 +38,16 @@ import type {
 /**
  * BodyCenter —— 身体中心外观类。
  *
- * 持有 8 个 BodyModule 引用 + BodyBus + BodyGateway，对外提供统一入口。
+ * 持有 BodyModule 引用 + BodyBus + BodyGateway，对外提供统一入口。
  *
  * 与 BrainCenter 的对称关系：
  *  - BrainCenter 持有 11 个皮层 + 2 个皮下分区 + ActionExecutor
- *  - BodyCenter 持有 8 个 BodyModule + BodyBus + BodyGateway
+ *  - BodyCenter 持有 BodyModule + BodyBus + BodyGateway
  *  - BrainCenter.cognize 阶段 1 调 bodyGateway.sense 补全身体状态
  *  - BrainCenter.ActionExecutor.execute 委托到 bodyGateway.execute
  */
 export class BodyCenter {
-  // ---- 8 个 BodyModule 引用（均可选，缺失时降级） ----
-  /** 手（运动执行器）：UI 自动化 / 浏览器 / 文件 / 代码沙盒 */
-  private hand: BodyModuleLike | null = null;
-  /** 嘴（发声）：TTS / voice-dialogue / voice-message / phone-bridge 出站 */
-  private mouth: BodyModuleLike | null = null;
+  // ---- BodyModule 引用（均可选，缺失时降级） ----
   /** 眼（视觉）：截屏 / 摄像头 / VLM 描述 */
   private eye: BodyModuleLike | null = null;
   /** 耳（听觉）：ASR / phone-bridge 入站音频 */
@@ -88,12 +84,6 @@ export class BodyCenter {
     this.bodyGateway.registerModule(module);
     // 按模块种类挂到本地字段
     switch (module.name) {
-      case "hand":
-        this.hand = module;
-        break;
-      case "mouth":
-        this.mouth = module;
-        break;
       case "eye":
         this.eye = module;
         break;
@@ -120,21 +110,7 @@ export class BodyCenter {
     }
   }
 
-  // ---- 8 个模块 setter（供装配阶段注入具体实现） ----
-
-  /** 注入手（运动执行器） */
-  setHand(m: BodyModuleLike): void {
-    this.hand = m;
-    this.bodyGateway.registerModule(m);
-    console.log("[BodyCenter] 已注入 Hand（手/运动执行器）");
-  }
-
-  /** 注入嘴（发声） */
-  setMouth(m: BodyModuleLike): void {
-    this.mouth = m;
-    this.bodyGateway.registerModule(m);
-    console.log("[BodyCenter] 已注入 Mouth（嘴/发声）");
-  }
+  // ---- 模块 setter（供装配阶段注入具体实现） ----
 
   /** 注入眼（视觉） */
   setEye(m: BodyModuleLike): void {
@@ -178,15 +154,7 @@ export class BodyCenter {
     console.log("[BodyCenter] 已注入 ReflexArc（反射弧/脊髓反射）");
   }
 
-  // ---- 8 个模块 getter（供外部装配层访问具体模块扩展能力） ----
-
-  getHand(): BodyModuleLike | null {
-    return this.hand;
-  }
-
-  getMouth(): BodyModuleLike | null {
-    return this.mouth;
-  }
+  // ---- 模块 getter（供外部装配层访问具体模块扩展能力） ----
 
   getEye(): BodyModuleLike | null {
     return this.eye;
@@ -263,8 +231,6 @@ export class BodyCenter {
     }
     console.log("[BodyCenter] 正在启动...");
     await this.startModule("BodyBus", this.bodyBus);
-    await this.startModule("Hand", this.hand);
-    await this.startModule("Mouth", this.mouth);
     await this.startModule("Eye", this.eye);
     await this.startModule("Ear", this.ear);
     await this.startModule("Skin", this.skin);
@@ -294,8 +260,6 @@ export class BodyCenter {
     await this.stopModule("Skin", this.skin);
     await this.stopModule("Ear", this.ear);
     await this.stopModule("Eye", this.eye);
-    await this.stopModule("Mouth", this.mouth);
-    await this.stopModule("Hand", this.hand);
     await this.stopModule("BodyBus", this.bodyBus);
     this.started = false;
     console.log("[BodyCenter] 已停止");

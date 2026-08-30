@@ -12,9 +12,10 @@
 //  BodyGateway 内部对 BrainDecisionAction 做反射弧 + 模块路由，未下沉工具 fallback 到 toolRegistry。
 //
 // 工具前缀路由表（routeTable）：
-//  Task 1 仅提供空的 routeTable + registerToolRoute(prefix, module) 方法，
-//  Task 12 会按归属填充实际映射（如 "desktop.visual." → hand、
-//  "embodiment." → vestibular、"tts." → mouth、"smart_home." → skin 等）。
+//  Task 1 仅提供空的 routeTable + registerToolRoute(prefix, module) 方法。
+//  当前 routeTable 为空（Hand/Mouth 器官移除后，下行工具统一由
+//  capability-modules / tools/*.ts 直接注册到 ToolRegistry 承接），
+//  execute 全部走 fallbackToolRegistry 兜底，ReflexArc 硬安全门在入口先生效。
 
 import type {
   BodyAction,
@@ -244,10 +245,8 @@ export class BodyGateway {
     if (module) {
       try {
         const result = await module.act(action);
-        // Task 12 工具下沉策略 A：BodyModule.act() 返回 "unknown tool" 类错误时，
-        // 说明该工具前缀虽匹配 routeTable，但 BodyModule 内部 dispatch 未覆盖该具体工具
-        // （如 desktop.run_shell 前缀匹配 "desktop." → hand，但 Hand.dispatch 只处理
-        // desktop.visual.* / agent_browser.* / file_doc.* / code_sandbox.*）。
+        // BodyModule.act() 返回 "unknown tool" 类错误时，说明该工具前缀虽匹配
+        // routeTable，但 BodyModule 内部 dispatch 未覆盖该具体工具；
         // 此时降级到 fallbackToolRegistry，让独立注册的 handler 兜底执行。
         const errMsg = result.errorMessage ?? "";
         const isUnknownTool =
@@ -447,16 +446,6 @@ export class BodyGateway {
       ear: "ear",
       asr: "ear",
       auditory: "ear",
-      // 发声类工具前缀 → mouth 域
-      mouth: "mouth",
-      tts: "mouth",
-      vocal: "mouth",
-      speak: "mouth",
-      // 运动类工具前缀 → hand 域
-      hand: "hand",
-      motor: "hand",
-      browser: "hand",
-      desktop: "hand",
       // 体感类工具前缀 → skin 域
       skin: "skin",
       somato: "skin",
