@@ -26,7 +26,7 @@ import type { SocialOutreachService } from "../../services/social-outreach-servi
 import type { CodeSandboxService } from "../../services/code-sandbox-service.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
-import type { WsConnectionRegistry } from "../../services/ws-connection-registry.js";
+import type { ClientPushPort } from "../../ports/client-push-port.js";
 
 import {
   IMAGE_GEN_CHAT_TOOLS,
@@ -119,7 +119,7 @@ export interface CapabilityModuleDeps {
   emailSmsService: EmailSmsService;
   mediaMusicService: MediaMusicService;
   /** media-music 模块需要 ws 推送播放控制事件给客户端 */
-  wsConnectionRegistry: WsConnectionRegistry;
+  wsConnectionRegistry: ClientPushPort;
   healthFitnessService: HealthFitnessService;
   financeDeepService: FinanceDeepService;
   socialOutreachService: SocialOutreachService;

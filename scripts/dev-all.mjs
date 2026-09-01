@@ -14,10 +14,15 @@ if (isWin) {
   try { execSync("chcp 65001", { stdio: "ignore" }); } catch {}
 }
 
-/** server 最后启动，减少与其它进程抢 3000 的竞态 */
+/** server 最后启动，减少与其它进程抢 3000 的竞态；
+ *  --remote：server 项切换为 runtime 守护进程（内部端口 3211，
+ *  gateway 随 dev-server-watch 一并拉起，对外仍占 3000） */
+const isRemote = process.argv.includes("--remote");
 const SERVICES = [
   { name: "world", port: 3333, npmScript: "dev:all:world" },
-  { name: "server", port: 3000, npmScript: "dev:all:server" },
+  isRemote
+    ? { name: "runtime", port: 3211, npmScript: "dev:all:runtime" }
+    : { name: "server", port: 3000, npmScript: "dev:all:server" },
 ];
 
 function spawnNpm(args, opts = {}) {

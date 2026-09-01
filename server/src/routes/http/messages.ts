@@ -4,7 +4,7 @@ import { z } from "zod";
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { MessagePlatformGateway } from "../../services/message-platform-gateway.js";
 import { runChatTurnForActor } from "../../services/chat-turn-runner.js";
-import type { AgentCore } from "../../services/agent-core.js";
+import type { RuntimeFacade } from "../../runtime/runtime-facade.js";
 import type { MessageHubService } from "../../services/message-hub-service.js";
 
 const actorQuerySchema = z.object({
@@ -48,7 +48,7 @@ export function registerMessageHubRoutes(
   deps: {
     messageHubService: MessageHubService;
     messagePlatformGateway: MessagePlatformGateway;
-    agentCore: AgentCore;
+    runtime: RuntimeFacade;
   },
 ): void {
   app.get("/messages/conversations", async (request, reply) => {
@@ -136,7 +136,7 @@ export function registerMessageHubRoutes(
       .join("\n");
     const style = parsed.data.style?.trim() ? `回复风格要求：${parsed.data.style!.trim()}\n` : "";
     const prompt = `请基于以下聊天记录，生成一条适合直接发送的简短中文回复。只输出回复正文，不要解释，不要加引号。\n${style}聊天记录：\n${transcript}`;
-    const result = await runChatTurnForActor(deps.agentCore, actorId, {
+    const result = await runChatTurnForActor(deps.runtime, actorId, {
       text: prompt,
       userId: parsed.data.userId ?? actorId,
       preferFullPipeline: true,

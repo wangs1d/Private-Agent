@@ -1,9 +1,5 @@
-export const UnifiedErrorCode = {
-  ValidationError: "VALIDATION_ERROR",
-  SessionRequired: "SESSION_REQUIRED",
-  Forbidden: "FORBIDDEN",
-  BadRequest: "BAD_REQUEST",
-  IdempotencyConflict: "IDEMPOTENCY_CONFLICT",
-} as const;
-
-export type UnifiedErrorCodeValue = (typeof UnifiedErrorCode)[keyof typeof UnifiedErrorCode];
+/**
+ * 统一错误码契约已抽到 `@private-ai-agent/agent-protocol`。
+ * 本文件保留为 re-export shim，旧引用路径无需改动。
+ */
+export * from "@private-ai-agent/agent-protocol";

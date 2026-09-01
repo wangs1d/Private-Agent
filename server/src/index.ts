@@ -1,7 +1,16 @@
 import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
-import { getRuntimeConfig } from "./config/env.js";
+import { getRuntimeConfig, getRuntimeTopologyConfig } from "./config/env.js";
+
+// remote 拓扑下本入口（embedded 单进程形态）不再使用：改用 runtime-main + gateway-main，
+// 否则会出现双世界装配与 sidecar 端口冲突。
+if (getRuntimeTopologyConfig().mode === "remote") {
+  console.error(
+    "[server] RUNTIME_MODE=remote 下请运行 runtime 进程与 gateway：npm run start:runtime / start:gateway（开发态 npm run dev:remote）",
+  );
+  process.exit(2);
+}
 
 // ─── 全局 HTTP Agent 配置：必须在第一次 fetch 之前执行 ───
 // 配置 undici 连接池 / keepAlive / strictContentLength=false，

@@ -1,5 +1,5 @@
 import { ServerEventType } from "../protocol.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 
 /** 客户端上报的球形窗口在屏幕上的位置（逻辑/物理坐标由客户端说明）。 */
 export type EmbodimentClientState = {
@@ -44,7 +44,7 @@ export class EmbodimentObserveService {
     }
   }
 
-  requestClientState(wsRegistry: WsConnectionRegistry, sessionId: string): boolean {
+  requestClientState(wsRegistry: ClientPushPort, sessionId: string): boolean {
     return wsRegistry.trySend(
       sessionId,
       JSON.stringify({

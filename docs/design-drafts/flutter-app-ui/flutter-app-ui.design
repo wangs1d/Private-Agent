@@ -1,165 +1,55 @@
 {
   "data": [
     {
-      "id": "page-home",
-      "title": "首页",
       "type": "page",
+      "id": "page-preview-light",
+      "title": "桌面端浅色预览",
       "version": 1,
-      "createdAt": 1756097100000,
+      "createdAt": 1788249600,
       "canvasData": {
         "x": 0,
         "y": 0,
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 936,
-          "viewportWidth": 375,
-          "sourceHash": "fnv1a-25c443ad",
-          "measuredAt": 1787633933642
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-251a5b8d",
+          "measuredAt": 1788247807792
         }
       },
       "devMetadata": {
-        "htmlSrc": "pages/home.html",
-        "interactions": [
-          {
-            "domId": "nav-discover",
-            "targetPageId": "page-discover",
-            "transitionLabel": "发现"
-          },
-          {
-            "domId": "nav-messages",
-            "targetPageId": "page-messages",
-            "transitionLabel": "消息"
-          },
-          {
-            "domId": "nav-profile",
-            "targetPageId": "page-profile",
-            "transitionLabel": "我的"
-          }
-        ]
+        "htmlSrc": "pages/preview-light.html",
+        "interactions": []
       }
     },
     {
-      "id": "page-discover",
-      "title": "发现",
       "type": "page",
+      "id": "page-preview-dark",
+      "title": "桌面端暗色预览",
       "version": 1,
-      "createdAt": 1756097100001,
+      "createdAt": 1788249600,
       "canvasData": {
-        "x": 169,
+        "x": 1400,
         "y": 0,
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 1149,
-          "viewportWidth": 375,
-          "sourceHash": "fnv1a-9cc3ca5e",
-          "measuredAt": 1787633933642
-        }
-      },
-      "devMetadata": {
-        "htmlSrc": "pages/discover.html",
-        "interactions": [
-          {
-            "domId": "nav-home",
-            "targetPageId": "page-home",
-            "transitionLabel": "首页"
-          },
-          {
-            "domId": "nav-messages",
-            "targetPageId": "page-messages",
-            "transitionLabel": "消息"
-          },
-          {
-            "domId": "nav-profile",
-            "targetPageId": "page-profile",
-            "transitionLabel": "我的"
-          }
-        ]
-      }
-    },
-    {
-      "id": "page-messages",
-      "title": "消息",
-      "type": "page",
-      "version": 1,
-      "createdAt": 1756097100002,
-      "canvasData": {
-        "x": 169,
-        "y": 346,
-        "group": 0,
-        "layoutSnapshot": {
-          "version": 1,
           "contentHeight": 900,
-          "viewportWidth": 375,
-          "sourceHash": "fnv1a-ea678889",
-          "measuredAt": 1787633933642
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-d7cb0804",
+          "measuredAt": 1788247807792
         }
       },
       "devMetadata": {
-        "htmlSrc": "pages/messages.html",
-        "interactions": [
-          {
-            "domId": "nav-home",
-            "targetPageId": "page-home",
-            "transitionLabel": "首页"
-          },
-          {
-            "domId": "nav-discover",
-            "targetPageId": "page-discover",
-            "transitionLabel": "发现"
-          },
-          {
-            "domId": "nav-profile",
-            "targetPageId": "page-profile",
-            "transitionLabel": "我的"
-          }
-        ]
-      }
-    },
-    {
-      "id": "page-profile",
-      "title": "我的",
-      "type": "page",
-      "version": 1,
-      "createdAt": 1756097100003,
-      "canvasData": {
-        "x": 169,
-        "y": 692,
-        "group": 0,
-        "layoutSnapshot": {
-          "version": 1,
-          "contentHeight": 900,
-          "viewportWidth": 375,
-          "sourceHash": "fnv1a-2f8137aa",
-          "measuredAt": 1787633933642
-        }
-      },
-      "devMetadata": {
-        "htmlSrc": "pages/profile.html",
-        "interactions": [
-          {
-            "domId": "nav-home",
-            "targetPageId": "page-home",
-            "transitionLabel": "首页"
-          },
-          {
-            "domId": "nav-discover",
-            "targetPageId": "page-discover",
-            "transitionLabel": "发现"
-          },
-          {
-            "domId": "nav-messages",
-            "targetPageId": "page-messages",
-            "transitionLabel": "消息"
-          }
-        ]
+        "htmlSrc": "pages/preview-dark.html",
+        "interactions": []
       }
     }
   ],
   "config": {
-    "autoLayout": true,
-    "deviceType": "mobile",
+    "autoLayout": false,
+    "deviceType": "desktop",
     "projectName": "Flutter App UI",
     "designLibrary": null
   }

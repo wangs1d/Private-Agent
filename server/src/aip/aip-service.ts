@@ -6,7 +6,7 @@ import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { AgentRelayService, RelayMessageRecord } from "../services/agent-relay-service.js";
 import { relayRequiresPairEnv } from "../services/agent-pairing-service.js";
 import type { AuditService } from "../services/audit-service.js";
-import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import { ServerEventType } from "../protocol.js";
 
 import type {
@@ -36,7 +36,7 @@ export class AipService {
 
   constructor(
     private readonly relay: AgentRelayService,
-    private readonly wsRegistry: WsConnectionRegistry,
+    private readonly wsRegistry: ClientPushPort,
     private readonly pairing: AgentPairingService,
     private readonly audit?: AuditService,
   ) {}

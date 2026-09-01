@@ -37,7 +37,7 @@ import type { MessageHubService } from "../../services/message-hub-service.js";
 import type { MessagePlatformGateway } from "../../services/message-platform-gateway.js";
 import type { MessageBridgeService } from "../../services/message-bridge-service.js";
 import type { BrowserSessionService } from "../../services/browser-session-service.js";
-import type { AgentCore } from "../../services/agent-core.js";
+import type { RuntimeFacade } from "../../runtime/runtime-facade.js";
 import type { CompanionService } from "../../services/companion-service.js";
 import type { WsConnectionRegistry } from "../../services/ws-connection-registry.js";
 import type { LifeSignalHubService } from "../../services/life-signal-hub-service.js";
@@ -96,7 +96,7 @@ export type HttpRouteDeps = {
   browserSessionService: BrowserSessionService;
   friendService: FriendService;
   companionService: CompanionService;
-  agentCore?: AgentCore;
+  runtime?: RuntimeFacade;
   wsConnectionRegistry?: WsConnectionRegistry;
   lifeSignalHubService?: LifeSignalHubService;
   /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */

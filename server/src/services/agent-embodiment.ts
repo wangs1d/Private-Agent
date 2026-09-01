@@ -1,5 +1,5 @@
 import { ServerEventType } from "../protocol.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import { getEmbodimentAutonomy } from "./embodiment-autonomy-service.js";
 
 /** 球形 Agent 视觉状态 — 与 agent-sphere-avatar 对齐 */
@@ -134,7 +134,7 @@ export function emitEmbodimentCommand(
 
 /** 向已注册 WS 会话推送具身指令（主 Agent 工具用） */
 export function pushEmbodimentCommand(
-  wsRegistry: WsConnectionRegistry,
+  wsRegistry: ClientPushPort,
   sessionId: string,
   command: EmbodimentCommand,
 ): boolean {

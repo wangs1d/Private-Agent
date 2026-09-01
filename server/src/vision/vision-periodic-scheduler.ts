@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { AgentCore } from "../services/agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { getToolResultProcessor } from "../services/tool-result-processor.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { ServerEventType } from "../protocol.js";
@@ -8,7 +8,7 @@ import { chunkText, dedupeAdjacentLines } from "../utils/text.js";
 import { fetchHttpVisionFrame } from "./fetch-http-vision-frame.js";
 
 export type VisionPeriodicSchedulerDeps = {
-  agentCore: AgentCore;
+  runtime: RuntimeFacade;
   wsRegistry: WsConnectionRegistry;
 };
 
@@ -156,7 +156,7 @@ export class VisionPeriodicScheduler {
       }
 
       let chunkSeq = 0;
-      const reply = await this.deps.agentCore.handleUserMessage(job.actorId, job.prompt, {
+      const reply = await this.deps.runtime.handleUserMessage(job.actorId, job.prompt, {
         chatUserMessageId: messageId,
         visionFrames: [frame],
         onAssistantDelta: (delta) => {

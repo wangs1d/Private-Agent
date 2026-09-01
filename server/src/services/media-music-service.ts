@@ -1,5 +1,5 @@
 import { ServerEventType } from "../protocol.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 
 /**
  * 媒体音乐播放服务。
@@ -7,7 +7,7 @@ import type { WsConnectionRegistry } from "./ws-connection-registry.js";
  * 职责：
  *   - {@link searchTracks}：调网易云开放搜索 API（无需鉴权），返回曲目列表
  *   - {@link play} / {@link pause} / {@link resume} / {@link stop}：
- *     通过 {@link WsConnectionRegistry.trySend} 推 `agent.media.*` 事件给客户端
+ *     通过 {@link ClientPushPort.trySend} 推 `agent.media.*` 事件给客户端
  *   - {@link getNowPlaying}：查询内存 Map<actorId, NowPlayingState>
  *
  * 设计要点：
@@ -61,7 +61,7 @@ export class MediaMusicService {
   /** actorId → 当前播放状态。 */
   private readonly states = new Map<string, MediaNowPlayingState>();
 
-  constructor(private readonly wsRegistry: WsConnectionRegistry) {}
+  constructor(private readonly wsRegistry: ClientPushPort) {}
 
   /**
    * 搜索曲目。

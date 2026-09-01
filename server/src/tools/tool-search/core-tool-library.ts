@@ -95,8 +95,16 @@ export const CORE_TOOL_LIBRARY = {
       "clock.format_timestamp",
       "calendar.list_tasks",
       "reminder.plan",
+      // 2026-08-31 需求：把搜索/联网能力直接给 fast 上下文。
+      // fast 不再只能靠 escalate 升级才能查实时信息，而是可先自己搜来答；
+      // 搜索也办不完全（需写数据/多步研究/多来源核实）时再由 prompt 引导 escalate。
       "internet.live_check",
       "internet.verify",
+      "internet.research",
+      "search_web",
+      "search_images",
+      "search_videos",
+      "fetch_web",
       "agent.query_capabilities",
       "phone.ensure_my_number",
       "voice.speak",

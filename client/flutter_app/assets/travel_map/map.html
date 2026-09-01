@@ -6,92 +6,121 @@
 <!-- MapLibre GL JS v4.7.1（与 3D-Travel 项目同版本） -->
 <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
 <style>
-  /* 深色主题底色（面板为深色 UI） */
+  /* 浅色中性主题（对应 itinerary.html 的 --gt-* 变量，白色卡片 + 灰边框） */
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #0b1220; overflow: hidden;
+    background: #ffffff; overflow: hidden;
     font-family: "MiSans", "Segoe UI", "Microsoft YaHei", sans-serif;
   }
   #map { position: absolute; inset: 0; }
-  .maplibregl-ctrl-attrib { background: rgba(11, 18, 32, 0.7) !important; color: #94a3b8 !important; }
-  .maplibregl-ctrl-attrib a { color: #cbd5e1 !important; }
+  .maplibregl-ctrl-attrib { background: rgba(255, 255, 255, 0.75) !important; color: #71717a !important; }
+  .maplibregl-ctrl-attrib a { color: #52525b !important; }
   .maplibregl-popup-content {
-    background: #111a2c; color: #e2e8f0; border: 1px solid rgba(24, 214, 243, 0.35);
-    border-radius: 10px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    background: #ffffff; color: #18181b; border: 1px solid #e4e4e7;
+    border-radius: 10px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
     min-width: 120px;
   }
-  .maplibregl-popup-close-button { color: #94a3b8; font-size: 15px; padding: 2px 6px; }
-  .maplibregl-popup-tip { border-top-color: #111a2c !important; }
+  .maplibregl-popup-close-button { color: #71717a; font-size: 15px; padding: 2px 6px; }
+  .maplibregl-popup-tip { border-top-color: #ffffff !important; }
 
-  /* POI 标记（四色圆形徽标） */
+  /* POI 标记（四色圆形徽标，浅色卡片描边） */
   .poi-marker {
     --mc: #3B82F6;
     width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
-    background: var(--mc); border: 2px solid rgba(255, 255, 255, 0.85);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mc) 35%, transparent), 0 3px 10px rgba(0, 0, 0, 0.5);
+    background: var(--mc); border: 2px solid rgba(255, 255, 255, 0.95);
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.12), 0 3px 10px rgba(0, 0, 0, 0.22);
     display: flex; align-items: center; justify-content: center;
     transition: transform 0.15s ease;
   }
   .poi-marker:hover { transform: scale(1.15); }
   .poi-marker .poi-marker-icon { font-size: 14px; line-height: 1; }
-  .poi-marker.is-active { transform: scale(1.2); box-shadow: 0 0 0 5px color-mix(in srgb, var(--mc) 45%, transparent); }
+  .poi-marker.is-active { transform: scale(1.2); box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.16); }
 
   /* POI 弹窗 */
   .poi-popup-name { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
-  .poi-popup-type { font-size: 11px; color: #94a3b8; }
+  .poi-popup-type { font-size: 11px; color: #71717a; }
   .poi-popup-splat {
     margin-top: 7px; padding: 4px 10px; font-size: 11px; cursor: pointer;
-    color: #fff; background: #0e7490; border: none; border-radius: 8px;
+    color: #ffffff; background: #18181b; border: none; border-radius: 8px;
     font-family: inherit;
   }
-  .poi-popup-splat:hover { background: #0891b2; }
+  .poi-popup-splat:hover { background: #27272a; }
 
   /* 途经点徽标 */
   .route-waypoint-badge {
-    width: 20px; height: 20px; border-radius: 50%; background: #18d6f3; color: #04212b;
+    width: 20px; height: 20px; border-radius: 50%; background: #18181b; color: #ffffff;
     font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
-    border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    border: 2px solid #ffffff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
   }
-  .route-waypoint-badge.route-waypoint-start { background: #1ed7a6; }
+  .route-waypoint-badge.route-waypoint-start { background: #3f3f46; }
 
-  /* 右上角小工具条 */
-  #toolbar {
-    position: absolute; top: 10px; right: 10px; z-index: 20;
-    display: flex; gap: 6px; align-items: center;
-    background: rgba(17, 26, 44, 0.85); border: 1px solid rgba(24, 214, 243, 0.25);
-    border-radius: 10px; padding: 5px 7px; backdrop-filter: blur(6px);
+  /* ── 左上角控制栏（图层/定位）—— 还原 gt-map-controls ── */
+  #map-controls {
+    position: absolute; top: 12px; left: 12px; z-index: 20;
+    display: flex; align-items: center;
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px;
+    padding: 4px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
   }
-  .tb-btn {
-    padding: 4px 10px; font-size: 11px; color: #cbd5e1; cursor: pointer;
-    background: transparent; border: 1px solid rgba(148, 163, 184, 0.35);
-    border-radius: 7px; font-family: inherit; white-space: nowrap;
+  .gt-map-ctrl-btn {
+    width: 32px; height: 32px; display: inline-flex; align-items: center;
+    justify-content: center; border-radius: 6px; color: #18181b; cursor: pointer;
+    background: transparent; border: none; padding: 0; font-family: inherit;
+    transition: background-color 0.15s ease;
   }
-  .tb-btn:hover { background: rgba(24, 214, 243, 0.12); }
-  .tb-btn.active { background: rgba(24, 214, 243, 0.18); border-color: #18d6f3; color: #18d6f3; }
+  .gt-map-ctrl-btn:hover { background: #f4f4f5; }
+  .gt-map-ctrl-btn:active { transform: scale(0.95); }
+  .gt-map-ctrl-divider { width: 1px; height: 18px; background: #e4e4e7; margin: 0 2px; }
 
-  /* 左下角图例 */
+  /* 图层下拉面板 */
+  #layer-popover {
+    position: absolute; top: 52px; left: 12px; z-index: 21; display: none;
+    flex-direction: column; gap: 2px; min-width: 132px;
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px;
+    padding: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+  #layer-popover.open { display: flex; }
+  .lp-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border-radius: 6px; font-size: 12px; color: #18181b; cursor: pointer;
+    background: transparent; border: none; font-family: inherit; text-align: left;
+  }
+  .lp-item:hover { background: #f4f4f5; }
+  .lp-item.active { background: #f4f4f5; font-weight: 600; }
+  .lp-item .lp-check { width: 14px; text-align: center; color: #18181b; }
+  .lp-divider { height: 1px; background: #e4e4e7; margin: 4px 2px; }
+
+  /* ── 左下角图例（还原 gt-map-legend）── */
   #legend {
-    position: absolute; left: 10px; bottom: 10px; z-index: 20;
-    background: rgba(17, 26, 44, 0.85); border: 1px solid rgba(148, 163, 184, 0.25);
-    border-radius: 10px; padding: 8px 12px; backdrop-filter: blur(6px);
-    font-size: 10.5px; color: #cbd5e1; line-height: 1.7;
+    position: absolute; left: 12px; bottom: 12px; z-index: 20;
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px;
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 999px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+    font-size: 11px; color: #71717a; line-height: 1;
   }
-  .legend-title { font-size: 10px; color: #64748b; margin-bottom: 2px; }
-  .legend-items { display: flex; gap: 10px; flex-wrap: wrap; max-width: 320px; }
-  .legend-item { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .legend-items { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .legend-bar { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+
+  /* ── 右下角缩放（还原 gt-map-zoom）── */
+  #map-zoom {
+    position: absolute; bottom: 12px; right: 12px; z-index: 20;
+    display: flex; flex-direction: column; gap: 2px;
+    background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px;
+    padding: 4px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  }
 
   /* 加载遮罩 */
   #loading-overlay {
     position: absolute; inset: 0; z-index: 30;
-    background: #0b1220; display: flex; flex-direction: column; gap: 12px;
-    align-items: center; justify-content: center; color: #64748b; font-size: 12px;
+    background: #ffffff; display: flex; flex-direction: column; gap: 12px;
+    align-items: center; justify-content: center; color: #71717a; font-size: 12px;
     transition: opacity 0.5s ease;
   }
   .loading-spinner {
     width: 26px; height: 26px; border-radius: 50%;
-    border: 3px solid rgba(24, 214, 243, 0.2); border-top-color: #18d6f3;
+    border: 3px solid rgba(24, 24, 27, 0.15); border-top-color: #18181b;
     animation: spin 0.9s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -132,20 +161,40 @@
   <div id="map"></div>
   <div id="fallback-map" style="display:none"></div>
 
-  <!-- 右上角小工具条：样式切换 / 3D / 复位 -->
-  <div id="toolbar">
-    <button type="button" class="tb-btn style-btn active" data-style="0" title="街道图层">街道</button>
-    <button type="button" class="tb-btn style-btn" data-style="1" title="卫星影像（含注记）">卫星</button>
-    <button type="button" class="tb-btn style-btn" data-style="2" title="暗色地形">暗色</button>
-    <button type="button" id="btn-3d" class="tb-btn active" title="3D 视角开关">3D</button>
-    <button type="button" id="btn-reset" class="tb-btn" title="复位视角">复位</button>
+  <!-- 左上角控制栏（图层/定位）—— 还原 gt-map-controls -->
+  <div id="map-controls">
+    <button type="button" class="gt-map-ctrl-btn" id="btn-layers" aria-label="图层" title="图层">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+    </button>
+    <div class="gt-map-ctrl-divider"></div>
+    <button type="button" class="gt-map-ctrl-btn" id="btn-locate" aria-label="定位" title="定位">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/></svg>
+    </button>
+  </div>
+
+  <!-- 图层下拉：样式（街道/卫星/暗色）+ 3D 开关 -->
+  <div id="layer-popover">
+    <button type="button" class="lp-item style-btn active" data-style="0"><span class="lp-check">✓</span><span>街道</span></button>
+    <button type="button" class="lp-item style-btn" data-style="1"><span class="lp-check"></span><span>卫星</span></button>
+    <button type="button" class="lp-item style-btn" data-style="2"><span class="lp-check"></span><span>暗色</span></button>
+    <div class="lp-divider"></div>
+    <button type="button" class="lp-item" id="btn-3d"><span class="lp-check" id="lp-3d-check">✓</span><span id="lp-3d-label">3D 视角</span></button>
   </div>
 
   <!-- 左下角图例：POI 四色 + 路线配色 -->
   <div id="legend">
-    <div class="legend-title">图例</div>
     <div class="legend-items" id="legend-poi"></div>
-    <div class="legend-items" id="legend-route" style="margin-top:2px"></div>
+    <div class="legend-items" id="legend-route"></div>
+  </div>
+
+  <!-- 右下角缩放（还原 gt-map-zoom） -->
+  <div id="map-zoom">
+    <button type="button" class="gt-map-ctrl-btn" id="btn-zoom-in" aria-label="放大" title="放大">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+    </button>
+    <button type="button" class="gt-map-ctrl-btn" id="btn-zoom-out" aria-label="缩小" title="缩小">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+    </button>
   </div>
 
   <div id="loading-overlay">
@@ -179,12 +228,12 @@
       walking: { color: '#059669', glow: '#6ee7b7', label: '步行' },
       cycling: { color: '#ea580c', glow: '#fdba74', label: '骑行' }
     };
-    // POI 四色 + 图标 + 类型标签（沿用 3D-Travel _addPOIMarkers 配色）
+    // POI 四色 + 图标 + 类型标签（浅色设计稿：灰阶 chart 色，与 TravelDesign 一致）
     var POI_STYLES = {
-      hotel:      { color: '#F59E0B', icon: '🏨', label: '住宿' },
-      attraction: { color: '#10B981', icon: '📷', label: '景点' },
-      restaurant: { color: '#EF4444', icon: '🍴', label: '美食' },
-      transport:  { color: '#8B5CF6', icon: '🚌', label: '交通' }
+      hotel:      { color: '#D4D4D8', icon: '🏨', label: '住宿' },
+      attraction: { color: '#3F3F46', icon: '📷', label: '景点' },
+      restaurant: { color: '#71717A', icon: '🍴', label: '餐厅' },
+      transport:  { color: '#A1A1AA', icon: '🚌', label: '交通' }
     };
     var DEFAULT_CENTER = [100.1595, 25.6904]; // 与 3D-Travel 默认中心一致（大理古城）
     var DEFAULT_ZOOM = 13;
@@ -367,8 +416,8 @@
             if (resolved) return;
             resolved = true;
             try {
-              map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
-              map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
+              // 自定义浅色 chrome（左上图层/定位、左下图例、右下缩放），
+              // 不再叠加 MapLibre 默认的缩放/比例尺控件
             } catch (e) { /* 控件失败非致命 */ }
             state.popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '300px' });
             // 3D 地形 + 3D 建筑 + 路线图层
@@ -793,15 +842,24 @@
     }
 
     function update3DButton() {
-      var btn = document.getElementById('btn-3d');
-      if (btn) btn.classList.toggle('active', state.is3D);
+      var item = document.getElementById('btn-3d');
+      if (item) {
+        item.classList.toggle('active', state.is3D);
+        var check = document.getElementById('lp-3d-check');
+        if (check) check.textContent = state.is3D ? '✓' : '';
+        var label = document.getElementById('lp-3d-label');
+        if (label) label.textContent = state.is3D ? '3D 视角' : '2D 平面';
+      }
     }
 
     // ══════════════ 样式切换：0 街道 / 1 卫星 hybrid / 2 暗色 ══════════════
     function setStyle(index) {
       state.styleIndex = index;
       document.querySelectorAll('.style-btn').forEach(function (b) {
-        b.classList.toggle('active', Number(b.getAttribute('data-style')) === index);
+        var on = Number(b.getAttribute('data-style')) === index;
+        b.classList.toggle('active', on);
+        var check = b.querySelector('.lp-check');
+        if (check) check.textContent = on ? '✓' : '';
       });
       if (state.fallbackMode || !state.map) return;
       var keepCenter = state.map.getCenter();
@@ -1082,12 +1140,50 @@
       }
     }
 
-    // ══════════════ 工具条事件绑定 ══════════════
+    // ══════════════ 控制栏事件绑定（图层/定位/缩放）══════════════
+    document.getElementById('btn-layers').addEventListener('click', function (e) {
+      e.stopPropagation();
+      document.getElementById('layer-popover').classList.toggle('open');
+    });
+    document.getElementById('btn-locate').addEventListener('click', function (e) {
+      e.stopPropagation();
+      resetView();
+    });
+    document.getElementById('btn-zoom-in').addEventListener('click', function (e) {
+      e.stopPropagation();
+      zoomStep(1);
+    });
+    document.getElementById('btn-zoom-out').addEventListener('click', function (e) {
+      e.stopPropagation();
+      zoomStep(-1);
+    });
+    document.addEventListener('click', function () {
+      document.getElementById('layer-popover').classList.remove('open');
+    });
+    document.getElementById('layer-popover').addEventListener('click', function (e) {
+      e.stopPropagation();
+      // 点击样式/3D 后收起下拉
+      if (e.target.closest('.style-btn') || e.target.closest('#btn-3d')) {
+        document.getElementById('layer-popover').classList.remove('open');
+      }
+    });
+
+    // 缩放一步（±1 级；离线兜底模式同样生效）
+    function zoomStep(delta) {
+      if (state.fallbackMode) {
+        state.fallbackZoom = Math.max(1, Math.min(18, Math.round(state.fallbackZoom || 13) + delta));
+        loadFallbackTiles();
+        positionFallbackPois();
+        return;
+      }
+      if (!state.map) return;
+      state.map.easeTo({ zoom: state.map.getZoom() + delta, duration: 250 });
+    }
+
     document.querySelectorAll('.style-btn').forEach(function (b) {
       b.addEventListener('click', function () { setStyle(Number(b.getAttribute('data-style'))); });
     });
     document.getElementById('btn-3d').addEventListener('click', toggle3D);
-    document.getElementById('btn-reset').addEventListener('click', resetView);
     document.getElementById('splat-close').addEventListener('click', closeSplat);
 
     // ══════════════ 对外桥接 API（Dart → JS）══════════════

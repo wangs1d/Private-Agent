@@ -2,13 +2,13 @@ import { ServerEventType as S } from "../protocol.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import { relayRequiresPairEnv } from "../services/agent-pairing-service.js";
 import type { AgentRelayService } from "../services/agent-relay-service.js";
-import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export function registerAgentRelayTools(
   registry: ToolRegistry,
   relay: AgentRelayService,
-  wsRegistry: WsConnectionRegistry,
+  wsRegistry: ClientPushPort,
   pairing: AgentPairingService,
 ): void {
   registry.register("agent.send_to_peer", async (input, context) => {

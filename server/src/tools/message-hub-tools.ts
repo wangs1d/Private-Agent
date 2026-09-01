@@ -2,12 +2,12 @@ import { resolveActorId } from "../agent/actor-id.js";
 import type { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import type { MessageHubService } from "../services/message-hub-service.js";
 import { runChatTurnForActor } from "../services/chat-turn-runner.js";
-import type { AgentCore } from "../services/agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { ToolContext, ToolRegistry } from "./tool-registry.js";
 
 export function registerMessageHubTools(
   registry: ToolRegistry,
-  deps: { hub: MessageHubService; gateway: MessagePlatformGateway; agentCore: AgentCore },
+  deps: { hub: MessageHubService; gateway: MessagePlatformGateway; runtime: RuntimeFacade },
 ): void {
   registry.register("messages.list_conversations", async (params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);
@@ -92,7 +92,7 @@ export function registerMessageHubTools(
     const prompt =
       `请基于以下聊天记录，生成一条适合直接发送的简短中文回复。` +
       `只输出回复正文，不要解释，不要加引号。\n${style}聊天记录：\n${transcript}`;
-    const result = await runChatTurnForActor(deps.agentCore, actorId, {
+    const result = await runChatTurnForActor(deps.runtime, actorId, {
       text: prompt,
       userId: ctx.userId ?? actorId,
       preferFullPipeline: true,

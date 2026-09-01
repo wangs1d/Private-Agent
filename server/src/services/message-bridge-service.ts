@@ -2,7 +2,7 @@ import type { FastifyRequest } from "fastify";
 
 import { resolveActorId } from "../agent/actor-id.js";
 import { runChatTurnForActor } from "./chat-turn-runner.js";
-import type { AgentCore } from "./agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { MessageHubPlatform, MessageHubService } from "./message-hub-service.js";
 
 function parseBooleanEnv(raw: string | undefined): boolean {
@@ -27,7 +27,7 @@ export type UnifiedBridgeInboundBody = {
 
 export class MessageBridgeService {
   constructor(
-    private readonly agentCore: AgentCore,
+    private readonly runtime: RuntimeFacade,
     private readonly hub: MessageHubService,
     private readonly env: NodeJS.ProcessEnv = process.env,
   ) {}
@@ -95,7 +95,7 @@ export class MessageBridgeService {
       };
     }
 
-    const reply = await runChatTurnForActor(this.agentCore, actorId, {
+    const reply = await runChatTurnForActor(this.runtime, actorId, {
       text,
       messageId: body.messageId,
       userId: body.userId ?? actorId,

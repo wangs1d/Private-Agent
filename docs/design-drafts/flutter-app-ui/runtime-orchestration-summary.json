@@ -9,32 +9,29 @@
     "read_status": "loaded"
   },
   "project": {
-    "operation": "create",
-    "resolvedLane": "complex_html_page",
+    "operation": "mutation",
+    "resolvedLane": "existing_edit_add_comparison",
     "intentProfile": {
       "caseFamily": "app_ui",
-      "platforms": [
-        "android",
-        "harmonyos"
-      ],
+      "platforms": ["windows", "macos", "linux"],
       "framework": "flutter",
-      "style": "minimalist_monochrome",
-      "density": "space_efficient"
+      "style": "modern_desktop",
+      "density": "medium"
     },
     "selectedIntentWorkflowRead": true,
-    "deviceType": "mobile",
-    "viewportMode": "document-scroll",
+    "deviceType": "desktop",
+    "viewportMode": "app-shell",
     "projectName": "Flutter App UI",
-    "designRead": "Mobile app UI / general users / minimalist professional / medium density / avoid visual clutter and wasted space",
+    "designRead": "Desktop Flutter app UI redesign with Dart native widgets; modern SaaS aesthetic; light and dark themes; blue accent; 72px sidebar; whole-window preview.",
     "designDials": {
       "layoutVariance": 2,
       "motionIntensity": 1,
-      "visualDensity": 3
+      "visualDensity": 2
     },
-    "styleDefinitionBrief": "Monochrome black and white minimalist mobile app UI, clean Material Design inspired layout adapted for Android and HarmonyOS via Flutter, efficient use of screen space.",
+    "styleDefinitionBrief": "Modern desktop Flutter app UI with light and dark themes, blue brand accent, glass-inspired surfaces, and a 72px icon sidebar.",
     "contextRequirementsLoaded": [
       {
-        "path": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
+        "path": "intent-workflows/intent-project-mutation/INTENT_WORKFLOW.md",
         "readStatus": "loaded",
         "bodyRead": true
       },
@@ -72,19 +69,11 @@
         "path": "visual-experience/visual-experience-guidelines.md",
         "readStatus": "loaded",
         "bodyRead": true
-      },
-      {
-        "path": "visual-experience/visual-checkpoint-protocol.md",
-        "readStatus": "loaded",
-        "bodyRead": true
       }
     ],
     "contextReadScope": {
-      "intentWorkflow": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
-      "phaseRunbooksRead": [
-        "00-requirement-and-style-intake.md",
-        "02-page-composition.md"
-      ],
+      "intentWorkflow": "intent-workflows/intent-project-mutation/INTENT_WORKFLOW.md",
+      "phaseRunbooksRead": [],
       "sharedRuntimeRead": [
         "lane-dispatch-index.md",
         "shared-page-rendering-kernel.md"
@@ -95,62 +84,33 @@
         "delivery-evidence-contract.md"
       ],
       "visualExperienceRead": [
-        "visual-experience-guidelines.md",
-        "visual-checkpoint-protocol.md"
+        "visual-experience-guidelines.md"
       ]
     },
-    "readScopeLedger": [
-      {
-        "actor": "page-sub-agent",
-        "lane": "complex_html_page",
-        "path": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-        "reason": "page runtime guide",
-        "scopeClass": "page-runtime",
-        "declaredBeforeRead": true,
-        "recordedAt": "2026-08-25T04:50:06.943Z",
-        "nodeId": "page-home",
-        "htmlSrc": "pages/home.html"
-      },
-      {
-        "actor": "page-sub-agent",
-        "lane": "complex_html_page",
-        "path": "intent-workflows/intent-project-complex-build/complex-page-dispatch-contract.md",
-        "reason": "dispatch contract",
-        "scopeClass": "dispatch-contract",
-        "declaredBeforeRead": true,
-        "recordedAt": "2026-08-25T04:50:06.943Z",
-        "nodeId": "page-home",
-        "htmlSrc": "pages/home.html"
-      }
-    ],
+    "readScopeLedger": [],
     "dispatchPreflightManifest": [
       {
-        "recorded_at": "2026-08-25T04:50:06.943Z",
-        "generatedBy": "build-page-dispatch-manifest.mjs",
-        "packetType": "ComplexPagePacket",
+        "recorded_at": "2026-09-01T00:00:00.000Z",
+        "generatedBy": "main-agent",
+        "packetType": "ExistingEditPagePacket",
         "laneContract": {
-          "resolvedLane": "complex_html_page",
-          "packetType": "ComplexPagePacket",
-          "pageRuntimeGuide": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-          "dispatchContract": "intent-workflows/intent-project-complex-build/complex-page-dispatch-contract.md"
+          "resolvedLane": "existing_edit_add_comparison",
+          "packetType": "ExistingEditPagePacket",
+          "pageRuntimeGuide": "intent-workflows/intent-project-mutation/existing-edit-page-runtime.md",
+          "dispatchContract": "intent-workflows/intent-project-mutation/existing-edit-dispatch-contract.md"
         },
         "taskLinePresent": true,
         "outputPathPresent": true,
-        "sharedTemplate": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-        "nodeId": "page-home",
-        "htmlSrc": "pages/home.html",
+        "sharedTemplate": null,
+        "nodeId": "page-preview-light",
+        "htmlSrc": "pages/preview-light.html",
         "supplementaryReads": [],
-        "allowedWritePaths": [
-          "pages/home.html",
-          "assets/"
-        ],
+        "allowedWritePaths": ["pages/preview-light.html", "assets/"],
         "forbiddenWriteRoots": [
           "*.design",
           "runtime-orchestration-summary.json",
           "validation-report.json",
-          "finish-readiness-report.json",
-          "restore-contract-report.json",
-          "page-generation-summary.json"
+          "finish-readiness-report.json"
         ],
         "toolPolicy": {
           "todoWriteAllowed": false,
@@ -158,111 +118,56 @@
           "previewAllowed": false,
           "helperScriptsAllowed": false,
           "designFileWriteAllowed": false,
-          "allowedWritePaths": [
-            "pages/home.html",
-            "assets/"
-          ]
+          "allowedWritePaths": ["pages/preview-light.html", "assets/"]
         },
         "skillRuntime": {
-          "skillDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
-          "deterministicToolDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
+          "skillDir": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
+          "deterministicToolDir": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
           "toolPaths": {
-            "applyHtmlHeadContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
-            "recordDispatchCompletion": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
-            "buildPageDispatchManifest": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
-            "validateDesignWorkspace": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
-            "validateFinishReadiness": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs",
-            "validateRestoreContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-restore-contract.mjs"
-          },
-          "requiredForPageSubAgent": [
-            "applyHtmlHeadContract",
-            "recordDispatchCompletion"
-          ],
-          "pathInjection": "absolute",
-          "pathContract": "Do not use {SKILL_DIR} placeholders inside Page Sub-Agent packets; use toolPaths.* absolute paths.",
-          "commandTemplates": {
-            "recordDispatchCompletion": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\" --node-id=\"page-home\" --html-src=\"pages/home.html\" --status=completed --changed-files=<comma-separated-project-relative-files> --trace-digest=<main-agent-runtime-trace-digest> --tool-ledger-json=<tool-ledger-json-or-file>"
+            "applyHtmlHeadContract": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
+            "recordDispatchCompletion": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
+            "buildPageDispatchManifest": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
+            "validateDesignWorkspace": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
+            "validateFinishReadiness": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs"
           }
         },
-        "cssFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css",
-        "htmlFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\home.html",
-        "brandPrefix": "mono",
+        "cssFilePath": "e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\colors_and_type_desktop.css",
+        "htmlFilePath": "e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\pages\\preview-light.html",
+        "brandPrefix": "desktop",
         "aestheticsMode": "free-explore",
         "toolDisciplineBlockPresent": true,
-        "fillHtmlHeadCommand": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\home.html\" --title=\"首页\" --lang=\"zh-CN\" --prefix=\"mono\"",
+        "fillHtmlHeadCommand": "node \"c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\colors_and_type_desktop.css\" \"e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\pages\\preview-light.html\" --title=\"桌面端浅色预览\" --lang=\"zh-CN\" --prefix=\"desktop\"",
         "headFillMode": "skeleton-first",
-        "viewportMode": "document-scroll",
+        "viewportMode": "app-shell",
         "completionSchemaExpected": "full",
-        "restoreFields": null,
-        "restoreContractStatus": null,
-        "restoreCompactPacket": null,
-        "deterministicCommands": null,
-        "sourceAuthorityLock": null,
-        "preDispatchFileHashes": {
-          "flutter-app-ui.design": "5a7327d3f4b10ea42eae81528c9144801f78fd6a55530344c4b31d4237e746f9"
-        },
-        "contextPreflight": {
-          "workflowPath": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
-          "requiredContextFiles": [
-            "shared-runtime/runtime-boundaries/lane-runtime-contracts.md",
-            "shared-runtime/agent-dispatch-runtime/lane-dispatch-index.md",
-            "shared-runtime/agent-dispatch-runtime/shared-page-rendering-kernel.md",
-            "delivery-quality/page-rendering-quality-gate.md",
-            "delivery-quality/design-artifact-validation.md",
-            "delivery-quality/delivery-evidence-contract.md",
-            "visual-experience/visual-experience-guidelines.md",
-            "visual-experience/visual-checkpoint-protocol.md"
-          ],
-          "optionalContextFiles": [],
-          "passed": true
-        },
-        "pageSliceOnly": true,
+        "pageSliceOnly": false,
         "requiredFieldsPresent": true,
         "missingFields": [],
         "fillHtmlHeadCommandValid": true,
-        "mobileNavigation": {
-          "required": true,
-          "appliesToThisPage": true,
-          "activeKey": "home",
-          "contractPresent": true,
-          "structurePresent": true,
-          "canonicalHtmlIncluded": true,
-          "canonicalHtmlSource": "sharedProjectShellContract.mobileNavigation.structure.canonicalHtmlByKey.home",
-          "structureHash": "23232a9e5a1dd7ef15d5fb853bbe735de44f885b6c7d89ae402f73759034e27b",
-          "missingFields": []
-        },
-        "persistedToSummary": true,
-        "taskQueryAudited": false,
-        "proofSource": "summary-only",
-        "largeWorkflowFilesInTaskQuery": null
+        "persistedToSummary": true
       },
       {
-        "recorded_at": "2026-08-25T04:50:06.943Z",
-        "generatedBy": "build-page-dispatch-manifest.mjs",
-        "packetType": "ComplexPagePacket",
+        "recorded_at": "2026-09-01T00:00:00.000Z",
+        "generatedBy": "main-agent",
+        "packetType": "ExistingEditPagePacket",
         "laneContract": {
-          "resolvedLane": "complex_html_page",
-          "packetType": "ComplexPagePacket",
-          "pageRuntimeGuide": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-          "dispatchContract": "intent-workflows/intent-project-complex-build/complex-page-dispatch-contract.md"
+          "resolvedLane": "existing_edit_add_comparison",
+          "packetType": "ExistingEditPagePacket",
+          "pageRuntimeGuide": "intent-workflows/intent-project-mutation/existing-edit-page-runtime.md",
+          "dispatchContract": "intent-workflows/intent-project-mutation/existing-edit-dispatch-contract.md"
         },
         "taskLinePresent": true,
         "outputPathPresent": true,
-        "sharedTemplate": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-        "nodeId": "page-discover",
-        "htmlSrc": "pages/discover.html",
+        "sharedTemplate": null,
+        "nodeId": "page-preview-dark",
+        "htmlSrc": "pages/preview-dark.html",
         "supplementaryReads": [],
-        "allowedWritePaths": [
-          "pages/discover.html",
-          "assets/"
-        ],
+        "allowedWritePaths": ["pages/preview-dark.html", "assets/"],
         "forbiddenWriteRoots": [
           "*.design",
           "runtime-orchestration-summary.json",
           "validation-report.json",
-          "finish-readiness-report.json",
-          "restore-contract-report.json",
-          "page-generation-summary.json"
+          "finish-readiness-report.json"
         ],
         "toolPolicy": {
           "todoWriteAllowed": false,
@@ -270,318 +175,42 @@
           "previewAllowed": false,
           "helperScriptsAllowed": false,
           "designFileWriteAllowed": false,
-          "allowedWritePaths": [
-            "pages/discover.html",
-            "assets/"
-          ]
+          "allowedWritePaths": ["pages/preview-dark.html", "assets/"]
         },
         "skillRuntime": {
-          "skillDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
-          "deterministicToolDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
+          "skillDir": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
+          "deterministicToolDir": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
           "toolPaths": {
-            "applyHtmlHeadContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
-            "recordDispatchCompletion": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
-            "buildPageDispatchManifest": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
-            "validateDesignWorkspace": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
-            "validateFinishReadiness": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs",
-            "validateRestoreContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-restore-contract.mjs"
-          },
-          "requiredForPageSubAgent": [
-            "applyHtmlHeadContract",
-            "recordDispatchCompletion"
-          ],
-          "pathInjection": "absolute",
-          "pathContract": "Do not use {SKILL_DIR} placeholders inside Page Sub-Agent packets; use toolPaths.* absolute paths.",
-          "commandTemplates": {
-            "recordDispatchCompletion": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\" --node-id=\"page-discover\" --html-src=\"pages/discover.html\" --status=completed --changed-files=<comma-separated-project-relative-files> --trace-digest=<main-agent-runtime-trace-digest> --tool-ledger-json=<tool-ledger-json-or-file>"
+            "applyHtmlHeadContract": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
+            "recordDispatchCompletion": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
+            "buildPageDispatchManifest": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
+            "validateDesignWorkspace": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
+            "validateFinishReadiness": "c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs"
           }
         },
-        "cssFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css",
-        "htmlFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\discover.html",
-        "brandPrefix": "mono",
+        "cssFilePath": "e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\colors_and_type_desktop.css",
+        "htmlFilePath": "e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\pages\\preview-dark.html",
+        "brandPrefix": "desktop",
         "aestheticsMode": "free-explore",
         "toolDisciplineBlockPresent": true,
-        "fillHtmlHeadCommand": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\discover.html\" --title=\"发现\" --lang=\"zh-CN\" --prefix=\"mono\"",
+        "fillHtmlHeadCommand": "node \"c:\\Users\\Administrator\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\colors_and_type_desktop.css\" \"e:\\ws-project\\Private-Agent\\docs\\design-drafts\\flutter-app-ui\\pages\\preview-dark.html\" --title=\"桌面端暗色预览\" --lang=\"zh-CN\" --prefix=\"desktop\"",
         "headFillMode": "skeleton-first",
-        "viewportMode": "document-scroll",
+        "viewportMode": "app-shell",
         "completionSchemaExpected": "full",
-        "restoreFields": null,
-        "restoreContractStatus": null,
-        "restoreCompactPacket": null,
-        "deterministicCommands": null,
-        "sourceAuthorityLock": null,
-        "preDispatchFileHashes": {
-          "flutter-app-ui.design": "5a7327d3f4b10ea42eae81528c9144801f78fd6a55530344c4b31d4237e746f9"
-        },
-        "contextPreflight": {
-          "workflowPath": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
-          "requiredContextFiles": [
-            "shared-runtime/runtime-boundaries/lane-runtime-contracts.md",
-            "shared-runtime/agent-dispatch-runtime/lane-dispatch-index.md",
-            "shared-runtime/agent-dispatch-runtime/shared-page-rendering-kernel.md",
-            "delivery-quality/page-rendering-quality-gate.md",
-            "delivery-quality/design-artifact-validation.md",
-            "delivery-quality/delivery-evidence-contract.md",
-            "visual-experience/visual-experience-guidelines.md",
-            "visual-experience/visual-checkpoint-protocol.md"
-          ],
-          "optionalContextFiles": [],
-          "passed": true
-        },
-        "pageSliceOnly": true,
+        "pageSliceOnly": false,
         "requiredFieldsPresent": true,
         "missingFields": [],
         "fillHtmlHeadCommandValid": true,
-        "mobileNavigation": {
-          "required": true,
-          "appliesToThisPage": true,
-          "activeKey": "discover",
-          "contractPresent": true,
-          "structurePresent": true,
-          "canonicalHtmlIncluded": true,
-          "canonicalHtmlSource": "sharedProjectShellContract.mobileNavigation.structure.canonicalHtmlByKey.discover",
-          "structureHash": "23232a9e5a1dd7ef15d5fb853bbe735de44f885b6c7d89ae402f73759034e27b",
-          "missingFields": []
-        },
-        "persistedToSummary": true,
-        "taskQueryAudited": false,
-        "proofSource": "summary-only",
-        "largeWorkflowFilesInTaskQuery": null
-      },
-      {
-        "recorded_at": "2026-08-25T04:50:06.943Z",
-        "generatedBy": "build-page-dispatch-manifest.mjs",
-        "packetType": "ComplexPagePacket",
-        "laneContract": {
-          "resolvedLane": "complex_html_page",
-          "packetType": "ComplexPagePacket",
-          "pageRuntimeGuide": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-          "dispatchContract": "intent-workflows/intent-project-complex-build/complex-page-dispatch-contract.md"
-        },
-        "taskLinePresent": true,
-        "outputPathPresent": true,
-        "sharedTemplate": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-        "nodeId": "page-messages",
-        "htmlSrc": "pages/messages.html",
-        "supplementaryReads": [],
-        "allowedWritePaths": [
-          "pages/messages.html",
-          "assets/"
-        ],
-        "forbiddenWriteRoots": [
-          "*.design",
-          "runtime-orchestration-summary.json",
-          "validation-report.json",
-          "finish-readiness-report.json",
-          "restore-contract-report.json",
-          "page-generation-summary.json"
-        ],
-        "toolPolicy": {
-          "todoWriteAllowed": false,
-          "validationScriptsAllowed": false,
-          "previewAllowed": false,
-          "helperScriptsAllowed": false,
-          "designFileWriteAllowed": false,
-          "allowedWritePaths": [
-            "pages/messages.html",
-            "assets/"
-          ]
-        },
-        "skillRuntime": {
-          "skillDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
-          "deterministicToolDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
-          "toolPaths": {
-            "applyHtmlHeadContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
-            "recordDispatchCompletion": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
-            "buildPageDispatchManifest": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
-            "validateDesignWorkspace": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
-            "validateFinishReadiness": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs",
-            "validateRestoreContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-restore-contract.mjs"
-          },
-          "requiredForPageSubAgent": [
-            "applyHtmlHeadContract",
-            "recordDispatchCompletion"
-          ],
-          "pathInjection": "absolute",
-          "pathContract": "Do not use {SKILL_DIR} placeholders inside Page Sub-Agent packets; use toolPaths.* absolute paths.",
-          "commandTemplates": {
-            "recordDispatchCompletion": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\" --node-id=\"page-messages\" --html-src=\"pages/messages.html\" --status=completed --changed-files=<comma-separated-project-relative-files> --trace-digest=<main-agent-runtime-trace-digest> --tool-ledger-json=<tool-ledger-json-or-file>"
-          }
-        },
-        "cssFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css",
-        "htmlFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\messages.html",
-        "brandPrefix": "mono",
-        "aestheticsMode": "free-explore",
-        "toolDisciplineBlockPresent": true,
-        "fillHtmlHeadCommand": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\messages.html\" --title=\"消息\" --lang=\"zh-CN\" --prefix=\"mono\"",
-        "headFillMode": "skeleton-first",
-        "viewportMode": "document-scroll",
-        "completionSchemaExpected": "full",
-        "restoreFields": null,
-        "restoreContractStatus": null,
-        "restoreCompactPacket": null,
-        "deterministicCommands": null,
-        "sourceAuthorityLock": null,
-        "preDispatchFileHashes": {
-          "flutter-app-ui.design": "5a7327d3f4b10ea42eae81528c9144801f78fd6a55530344c4b31d4237e746f9"
-        },
-        "contextPreflight": {
-          "workflowPath": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
-          "requiredContextFiles": [
-            "shared-runtime/runtime-boundaries/lane-runtime-contracts.md",
-            "shared-runtime/agent-dispatch-runtime/lane-dispatch-index.md",
-            "shared-runtime/agent-dispatch-runtime/shared-page-rendering-kernel.md",
-            "delivery-quality/page-rendering-quality-gate.md",
-            "delivery-quality/design-artifact-validation.md",
-            "delivery-quality/delivery-evidence-contract.md",
-            "visual-experience/visual-experience-guidelines.md",
-            "visual-experience/visual-checkpoint-protocol.md"
-          ],
-          "optionalContextFiles": [],
-          "passed": true
-        },
-        "pageSliceOnly": true,
-        "requiredFieldsPresent": true,
-        "missingFields": [],
-        "fillHtmlHeadCommandValid": true,
-        "mobileNavigation": {
-          "required": true,
-          "appliesToThisPage": true,
-          "activeKey": "messages",
-          "contractPresent": true,
-          "structurePresent": true,
-          "canonicalHtmlIncluded": true,
-          "canonicalHtmlSource": "sharedProjectShellContract.mobileNavigation.structure.canonicalHtmlByKey.messages",
-          "structureHash": "23232a9e5a1dd7ef15d5fb853bbe735de44f885b6c7d89ae402f73759034e27b",
-          "missingFields": []
-        },
-        "persistedToSummary": true,
-        "taskQueryAudited": false,
-        "proofSource": "summary-only",
-        "largeWorkflowFilesInTaskQuery": null
-      },
-      {
-        "recorded_at": "2026-08-25T04:50:06.943Z",
-        "generatedBy": "build-page-dispatch-manifest.mjs",
-        "packetType": "ComplexPagePacket",
-        "laneContract": {
-          "resolvedLane": "complex_html_page",
-          "packetType": "ComplexPagePacket",
-          "pageRuntimeGuide": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-          "dispatchContract": "intent-workflows/intent-project-complex-build/complex-page-dispatch-contract.md"
-        },
-        "taskLinePresent": true,
-        "outputPathPresent": true,
-        "sharedTemplate": "intent-workflows/intent-project-complex-build/complex-page-runtime.md",
-        "nodeId": "page-profile",
-        "htmlSrc": "pages/profile.html",
-        "supplementaryReads": [],
-        "allowedWritePaths": [
-          "pages/profile.html",
-          "assets/"
-        ],
-        "forbiddenWriteRoots": [
-          "*.design",
-          "runtime-orchestration-summary.json",
-          "validation-report.json",
-          "finish-readiness-report.json",
-          "restore-contract-report.json",
-          "page-generation-summary.json"
-        ],
-        "toolPolicy": {
-          "todoWriteAllowed": false,
-          "validationScriptsAllowed": false,
-          "previewAllowed": false,
-          "helperScriptsAllowed": false,
-          "designFileWriteAllowed": false,
-          "allowedWritePaths": [
-            "pages/profile.html",
-            "assets/"
-          ]
-        },
-        "skillRuntime": {
-          "skillDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design",
-          "deterministicToolDir": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling",
-          "toolPaths": {
-            "applyHtmlHeadContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs",
-            "recordDispatchCompletion": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs",
-            "buildPageDispatchManifest": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\build-page-dispatch-manifest.mjs",
-            "validateDesignWorkspace": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-design-workspace.mjs",
-            "validateFinishReadiness": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-finish-readiness.mjs",
-            "validateRestoreContract": "c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\validate-restore-contract.mjs"
-          },
-          "requiredForPageSubAgent": [
-            "applyHtmlHeadContract",
-            "recordDispatchCompletion"
-          ],
-          "pathInjection": "absolute",
-          "pathContract": "Do not use {SKILL_DIR} placeholders inside Page Sub-Agent packets; use toolPaths.* absolute paths.",
-          "commandTemplates": {
-            "recordDispatchCompletion": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\record-dispatch-completion.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\" --node-id=\"page-profile\" --html-src=\"pages/profile.html\" --status=completed --changed-files=<comma-separated-project-relative-files> --trace-digest=<main-agent-runtime-trace-digest> --tool-ledger-json=<tool-ledger-json-or-file>"
-          }
-        },
-        "cssFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css",
-        "htmlFilePath": "d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\profile.html",
-        "brandPrefix": "mono",
-        "aestheticsMode": "free-explore",
-        "toolDisciplineBlockPresent": true,
-        "fillHtmlHeadCommand": "node \"c:\\Users\\lenovo\\.trae-cn\\builtin\\design\\default\\skills\\solo-design\\shared-runtime\\deterministic-tooling\\apply-html-head-contract.mjs\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\colors_and_type.css\" \"d:\\ws-project\\Private-Agent\\flutter-app-ui\\pages\\profile.html\" --title=\"我的\" --lang=\"zh-CN\" --prefix=\"mono\"",
-        "headFillMode": "skeleton-first",
-        "viewportMode": "document-scroll",
-        "completionSchemaExpected": "full",
-        "restoreFields": null,
-        "restoreContractStatus": null,
-        "restoreCompactPacket": null,
-        "deterministicCommands": null,
-        "sourceAuthorityLock": null,
-        "preDispatchFileHashes": {
-          "flutter-app-ui.design": "5a7327d3f4b10ea42eae81528c9144801f78fd6a55530344c4b31d4237e746f9"
-        },
-        "contextPreflight": {
-          "workflowPath": "intent-workflows/intent-project-complex-build/INTENT_WORKFLOW.md",
-          "requiredContextFiles": [
-            "shared-runtime/runtime-boundaries/lane-runtime-contracts.md",
-            "shared-runtime/agent-dispatch-runtime/lane-dispatch-index.md",
-            "shared-runtime/agent-dispatch-runtime/shared-page-rendering-kernel.md",
-            "delivery-quality/page-rendering-quality-gate.md",
-            "delivery-quality/design-artifact-validation.md",
-            "delivery-quality/delivery-evidence-contract.md",
-            "visual-experience/visual-experience-guidelines.md",
-            "visual-experience/visual-checkpoint-protocol.md"
-          ],
-          "optionalContextFiles": [],
-          "passed": true
-        },
-        "pageSliceOnly": true,
-        "requiredFieldsPresent": true,
-        "missingFields": [],
-        "fillHtmlHeadCommandValid": true,
-        "mobileNavigation": {
-          "required": true,
-          "appliesToThisPage": true,
-          "activeKey": "profile",
-          "contractPresent": true,
-          "structurePresent": true,
-          "canonicalHtmlIncluded": true,
-          "canonicalHtmlSource": "sharedProjectShellContract.mobileNavigation.structure.canonicalHtmlByKey.profile",
-          "structureHash": "23232a9e5a1dd7ef15d5fb853bbe735de44f885b6c7d89ae402f73759034e27b",
-          "missingFields": []
-        },
-        "persistedToSummary": true,
-        "taskQueryAudited": false,
-        "proofSource": "summary-only",
-        "largeWorkflowFilesInTaskQuery": null
+        "persistedToSummary": true
       }
     ],
     "expectedDispatches": [
       {
-        "nodeId": "page-home",
-        "packetType": "ComplexPagePacket",
+        "nodeId": "page-preview-light",
+        "packetType": "ExistingEditPagePacket",
         "status": "completed",
-        "changedFiles": ["pages/home.html"],
+        "changedFiles": ["pages/preview-light.html"],
         "toolCallLedger": {
-          "source": "main-agent-runtime-trace",
-          "traceDigest": "sub-agent-completion-json",
           "todoWriteCalls": 0,
           "previewCalls": 0,
           "validationScriptCalls": 0,
@@ -589,41 +218,11 @@
         }
       },
       {
-        "nodeId": "page-discover",
-        "packetType": "ComplexPagePacket",
+        "nodeId": "page-preview-dark",
+        "packetType": "ExistingEditPagePacket",
         "status": "completed",
-        "changedFiles": ["pages/discover.html"],
+        "changedFiles": ["pages/preview-dark.html"],
         "toolCallLedger": {
-          "source": "main-agent-runtime-trace",
-          "traceDigest": "sub-agent-completion-json",
-          "todoWriteCalls": 0,
-          "previewCalls": 0,
-          "validationScriptCalls": 0,
-          "helperScriptWrites": 0
-        }
-      },
-      {
-        "nodeId": "page-messages",
-        "packetType": "ComplexPagePacket",
-        "status": "completed",
-        "changedFiles": ["pages/messages.html"],
-        "toolCallLedger": {
-          "source": "main-agent-runtime-trace",
-          "traceDigest": "sub-agent-completion-json",
-          "todoWriteCalls": 0,
-          "previewCalls": 0,
-          "validationScriptCalls": 0,
-          "helperScriptWrites": 0
-        }
-      },
-      {
-        "nodeId": "page-profile",
-        "packetType": "ComplexPagePacket",
-        "status": "completed",
-        "changedFiles": ["pages/profile.html"],
-        "toolCallLedger": {
-          "source": "main-agent-runtime-trace",
-          "traceDigest": "sub-agent-completion-json",
           "todoWriteCalls": 0,
           "previewCalls": 0,
           "validationScriptCalls": 0,
@@ -634,35 +233,15 @@
     "mainAgentPostDispatchMutations": [
       {
         "file": "flutter-app-ui.design",
-        "reason": "Added interaction wiring for bottom navigation",
-        "mutatedBy": "main-agent"
-      },
-      {
-        "file": "pages/home.html",
-        "reason": "Mobile navigation repair - added whitespace-nowrap/truncate to label spans",
-        "mutatedBy": "main-agent"
-      },
-      {
-        "file": "pages/discover.html",
-        "reason": "Mobile navigation repair - added whitespace-nowrap/truncate to label spans",
-        "mutatedBy": "main-agent"
-      },
-      {
-        "file": "pages/messages.html",
-        "reason": "Mobile navigation repair - added whitespace-nowrap/truncate to label spans",
-        "mutatedBy": "main-agent"
-      },
-      {
-        "file": "pages/profile.html",
-        "reason": "Mobile navigation repair - added whitespace-nowrap/truncate to label spans",
+        "reason": "Registered new desktop preview page nodes",
         "mutatedBy": "main-agent"
       }
     ],
     "validationRunDiscipline": {
-      "runFullValidation": true,
-      "validateDesignFile": true,
-      "validatePageFiles": true,
-      "validateInteractions": true
+      "maxFullValidationRuns": 2,
+      "softWarningsTriggerRepair": false,
+      "blockingRepairMode": "targeted-once",
+      "forbiddenRepairTriggers": ["soft-warning-only", "provenance-warning-only", "style-warning-only"]
     },
     "validationHistory": [],
     "validationRepairLedger": [],
@@ -672,324 +251,72 @@
       "noProgressNextAction": "move-to-readiness",
       "maxIdleTurns": 5
     },
-    "cssPreflightEvidence": {
-      "preflightFile": ".preflight/preflight.html",
-      "exitCode": 0,
-      "prefix": "mono",
-      "themeVarsPresent": true,
-      "semanticTokenFallbackPresent": true,
-      "tailwindCdnPresent": true,
-      "themeInlinePresent": true
-    },
-    "generationTree": {
-      "root": {
-        "nodeId": "gen-project-shell",
-        "kind": "project-shell",
-        "pageIds": [
-          "page-home",
-          "page-discover",
-          "page-messages",
-          "page-profile"
-        ],
-        "output": null,
-        "sharedRegions": [
-          "mobile-bottom-nav"
-        ],
-        "privateRegions": [],
-        "mutableSlots": [],
-        "status": "generated",
-        "children": [
-          {
-            "nodeId": "page-home",
-            "kind": "page-leaf",
-            "pageIds": [
-              "page-home"
-            ],
-            "output": "pages/home.html",
-            "sharedRegions": [],
-            "privateRegions": [
-              "page-content"
-            ],
-            "mutableSlots": [
-              "page-title",
-              "page-body"
-            ],
-            "status": "planned",
-            "children": []
-          },
-          {
-            "nodeId": "page-discover",
-            "kind": "page-leaf",
-            "pageIds": [
-              "page-discover"
-            ],
-            "output": "pages/discover.html",
-            "sharedRegions": [],
-            "privateRegions": [
-              "page-content"
-            ],
-            "mutableSlots": [
-              "page-title",
-              "page-body"
-            ],
-            "status": "planned",
-            "children": []
-          },
-          {
-            "nodeId": "page-messages",
-            "kind": "page-leaf",
-            "pageIds": [
-              "page-messages"
-            ],
-            "output": "pages/messages.html",
-            "sharedRegions": [],
-            "privateRegions": [
-              "page-content"
-            ],
-            "mutableSlots": [
-              "page-title",
-              "page-body"
-            ],
-            "status": "planned",
-            "children": []
-          },
-          {
-            "nodeId": "page-profile",
-            "kind": "page-leaf",
-            "pageIds": [
-              "page-profile"
-            ],
-            "output": "pages/profile.html",
-            "sharedRegions": [],
-            "privateRegions": [
-              "page-content"
-            ],
-            "mutableSlots": [
-              "page-title",
-              "page-body"
-            ],
-            "status": "planned",
-            "children": []
-          }
-        ]
-      }
-    },
-    "sharedProjectShellContract": {
-      "deviceType": "mobile",
-      "viewportMode": "document-scroll",
-      "radiusScale": {
-        "sm": "4px",
-        "md": "8px",
-        "lg": "12px",
-        "full": "9999px"
-      },
-      "surfaceDepthModel": {
-        "staticSurfaces": "border-led",
-        "staticShadowAlphaMax": 0.05,
-        "floatingLayers": "may-use-deeper-elevation"
-      },
-      "shapeSystem": {
+    "designSource": {
+      "operatingMode": "free-explore",
+      "libraryIdentity": null,
+      "cssFilePath": "colors_and_type_desktop.css",
+      "brandPrefix": "desktop",
+      "styleConstraints": {
         "radiusMax": 16,
-        "cornerStyle": "rounded"
+        "staticShadowAlphaMax": 0.05,
+        "singleBrandHueOnly": true,
+        "noSecondaryAccent": true
       },
-      "typographySystem": {
-        "sansFontStack": "'Roboto', 'HarmonyOS Sans', 'PingFang SC', 'Noto Sans SC', system-ui, -apple-system, sans-serif",
-        "monoFontStack": "'Roboto Mono', 'JetBrains Mono', monospace"
-      },
-      "mobileNavigation": {
-        "applies": true,
-        "type": "bottom-tab",
-        "items": [
-          {
-            "key": "home",
-            "label": "首页",
-            "icon": "home"
-          },
-          {
-            "key": "discover",
-            "label": "发现",
-            "icon": "search"
-          },
-          {
-            "key": "messages",
-            "label": "消息",
-            "icon": "message"
-          },
-          {
-            "key": "profile",
-            "label": "我的",
-            "icon": "user"
-          }
-        ],
-        "heightPx": 56,
-        "position": "flow-bottom",
-        "activeState": "primary icon+label color only; geometry stays identical",
-        "structure": {
-          "navTag": "nav",
-          "navClass": "fixed bottom-0 left-0 right-0 h-[56px] bg-white border-t border-gray-200 z-50",
-          "innerClass": "w-full max-w-md mx-auto grid grid-cols-4 h-full",
-          "itemTag": "button",
-          "itemClass": "min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full",
-          "iconClass": "w-5 h-5 shrink-0",
-          "labelClass": "text-[11px] leading-none whitespace-nowrap max-w-full truncate",
-          "activeRule": "only color/font-weight/data-active may change; no class changes that affect layout",
-          "markerAttr": "data-mobile-nav=\"global\"",
-          "canonicalHtmlByKey": {
-            "home": "<nav data-mobile-nav=\"global\" class=\"fixed bottom-0 left-0 right-0 h-[56px] bg-white border-t border-gray-200 z-50\"><div class=\"w-full max-w-md mx-auto grid grid-cols-4 h-full\"><button data-nav-key=\"home\" data-dom-id=\"nav-home\" data-active=\"true\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-black\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6\"></path></svg><span class=\"text-[11px] leading-none font-medium\">首页</span></button><button data-nav-key=\"discover\" data-dom-id=\"nav-discover\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z\"></path></svg><span class=\"text-[11px] leading-none\">发现</span></button><button data-nav-key=\"messages\" data-dom-id=\"nav-messages\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z\"></path></svg><span class=\"text-[11px] leading-none\">消息</span></button><button data-nav-key=\"profile\" data-dom-id=\"nav-profile\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z\"></path></svg><span class=\"text-[11px] leading-none\">我的</span></button></div></nav>",
-            "discover": "<nav data-mobile-nav=\"global\" class=\"fixed bottom-0 left-0 right-0 h-[56px] bg-white border-t border-gray-200 z-50\"><div class=\"w-full max-w-md mx-auto grid grid-cols-4 h-full\"><button data-nav-key=\"home\" data-dom-id=\"nav-home\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6\"></path></svg><span class=\"text-[11px] leading-none\">首页</span></button><button data-nav-key=\"discover\" data-dom-id=\"nav-discover\" data-active=\"true\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-black\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z\"></path></svg><span class=\"text-[11px] leading-none font-medium\">发现</span></button><button data-nav-key=\"messages\" data-dom-id=\"nav-messages\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z\"></path></svg><span class=\"text-[11px] leading-none\">消息</span></button><button data-nav-key=\"profile\" data-dom-id=\"nav-profile\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z\"></path></svg><span class=\"text-[11px] leading-none\">我的</span></button></div></nav>",
-            "messages": "<nav data-mobile-nav=\"global\" class=\"fixed bottom-0 left-0 right-0 h-[56px] bg-white border-t border-gray-200 z-50\"><div class=\"w-full max-w-md mx-auto grid grid-cols-4 h-full\"><button data-nav-key=\"home\" data-dom-id=\"nav-home\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6\"></path></svg><span class=\"text-[11px] leading-none\">首页</span></button><button data-nav-key=\"discover\" data-dom-id=\"nav-discover\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z\"></path></svg><span class=\"text-[11px] leading-none\">发现</span></button><button data-nav-key=\"messages\" data-dom-id=\"nav-messages\" data-active=\"true\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-black\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z\"></path></svg><span class=\"text-[11px] leading-none font-medium\">消息</span></button><button data-nav-key=\"profile\" data-dom-id=\"nav-profile\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z\"></path></svg><span class=\"text-[11px] leading-none\">我的</span></button></div></nav>",
-            "profile": "<nav data-mobile-nav=\"global\" class=\"fixed bottom-0 left-0 right-0 h-[56px] bg-white border-t border-gray-200 z-50\"><div class=\"w-full max-w-md mx-auto grid grid-cols-4 h-full\"><button data-nav-key=\"home\" data-dom-id=\"nav-home\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6\"></path></svg><span class=\"text-[11px] leading-none\">首页</span></button><button data-nav-key=\"discover\" data-dom-id=\"nav-discover\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z\"></path></svg><span class=\"text-[11px] leading-none\">发现</span></button><button data-nav-key=\"messages\" data-dom-id=\"nav-messages\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-gray-500\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z\"></path></svg><span class=\"text-[11px] leading-none\">消息</span></button><button data-nav-key=\"profile\" data-dom-id=\"nav-profile\" data-active=\"true\" class=\"min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 h-full text-black\"><svg class=\"w-5 h-5 shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z\"></path></svg><span class=\"text-[11px] leading-none font-medium\">我的</span></button></div></nav>"
-          }
-        }
-      }
-    },
-    "styleContinuityAnchors": {
-      "colorSystem": "monochrome black and white, pure black primary, white background, gray scale neutrals",
-      "typographySystem": "Roboto / HarmonyOS Sans sans-serif stack, clean hierarchy",
-      "shapeSystem": "rounded corners 4-16px, Material Design inspired",
-      "depthModel": "subtle borders and low-alpha shadows, flat design aesthetic"
-    },
-    "visualQualityCheckpoints": [
-      {
-        "id": "visual-anchor",
-        "description": "Pure black (#000) on white (#fff) primary color relationship; all accents use gray scale only",
-        "observableTarget": "Primary action buttons and active states use pure black; no colored accents (no blue, green, red etc.)"
-      },
-      {
-        "id": "information-hierarchy",
-        "description": "Clear typographic hierarchy with at least 3 distinct levels; dense but readable",
-        "observableTarget": "Page title (large/bold), section headers (medium), body text (regular), secondary text (small/gray)"
-      },
-      {
-        "id": "composition-structure",
-        "description": "Space-efficient mobile layout with minimal padding, content prioritized over chrome",
-        "observableTarget": "Horizontal padding 16px or less; list items compact; cards use borders not heavy shadows"
-      },
-      {
-        "id": "implementation-strategy",
-        "description": "Tailwind utility classes + CSS variables; static HTML, no framework dependencies",
-        "observableTarget": "Uses inline SVG icons; bottom nav fixed at 56px; document-scroll viewport"
-      }
-    ]
-  },
-  "designSource": {
-    "operatingMode": "free-explore",
-    "libraryIdentity": null,
-    "cssFilePath": "colors_and_type.css",
-    "brandPrefix": "mono",
-    "styleConstraints": {
-      "radiusMax": 16,
-      "staticShadowAlphaMax": 0.05,
-      "singleBrandHueOnly": true,
-      "noSecondaryAccent": true
-    },
-    "referenceMaterials": []
+      "referenceMaterials": []
+    }
   },
   "pages": [
     {
-      "nodeId": "page-home",
-      "title": "首页",
-      "htmlSrc": "pages/home.html",
+      "nodeId": "page-preview-light",
+      "title": "桌面端浅色预览",
+      "htmlSrc": "pages/preview-light.html",
       "pageIndex": 1,
-      "pageType": "information-dense",
-      "mobileNavigationActiveKey": "home",
-      "viewportMode": "document-scroll",
-      "visualNorthStar": "Clean feed-style home page with status bar, app header, horizontal scroll categories, and vertical content list. Monochrome aesthetic with strong typographic hierarchy.",
-      "compositionPattern": "feed-list",
+      "pageType": "showcase",
+      "viewportMode": "app-shell",
+      "visualNorthStar": "High-fidelity whole-window preview of the redesigned Flutter desktop app in light theme, showing the 72px sidebar, top bar, chat list, and conversation detail.",
+      "compositionPattern": "app-shell",
       "continuityAnchors": [
-        "Monochrome black and white color system",
-        "Roboto / HarmonyOS Sans typography stack",
-        "Bottom tab navigation (56px)",
-        "Border-led surfaces with subtle shadows"
+        "Blue brand accent",
+        "72px icon sidebar",
+        "Light/dark theme pair",
+        "Glass-inspired surfaces"
       ],
       "componentPlan": [
-        "Status bar",
-        "App header with title and action icons",
-        "Horizontal scroll category chips",
-        "Content card list (with thumbnail + title + meta)",
-        "Bottom navigation bar"
+        "Window chrome",
+        "Brand logo sidebar",
+        "Icon navigation",
+        "Top app bar",
+        "Chat list panel",
+        "Conversation detail panel",
+        "Message input bar"
       ],
       "imagePlan": [],
       "chartsRequired": false,
       "miniProgramStyle": false
     },
     {
-      "nodeId": "page-discover",
-      "title": "发现",
-      "htmlSrc": "pages/discover.html",
+      "nodeId": "page-preview-dark",
+      "title": "桌面端暗色预览",
+      "htmlSrc": "pages/preview-dark.html",
       "pageIndex": 2,
-      "pageType": "task-driven",
-      "mobileNavigationActiveKey": "discover",
-      "viewportMode": "document-scroll",
-      "visualNorthStar": "Search/explore page with prominent search bar at top, trending tags, and categorized discovery sections. Space-efficient grid layout.",
-      "compositionPattern": "search-grid",
+      "pageType": "showcase",
+      "viewportMode": "app-shell",
+      "visualNorthStar": "High-fidelity whole-window preview of the redesigned Flutter desktop app in dark theme, matching the light layout with inverted surfaces.",
+      "compositionPattern": "app-shell",
       "continuityAnchors": [
-        "Monochrome black and white color system",
-        "Roboto / HarmonyOS Sans typography stack",
-        "Bottom tab navigation (56px)",
-        "Border-led surfaces with subtle shadows"
+        "Blue brand accent",
+        "72px icon sidebar",
+        "Light/dark theme pair",
+        "Glass-inspired surfaces"
       ],
       "componentPlan": [
-        "Status bar",
-        "Search bar (sticky)",
-        "Trending / hot tags section",
-        "Category grid",
-        "Recommended content list",
-        "Bottom navigation bar"
-      ],
-      "imagePlan": [],
-      "chartsRequired": false,
-      "miniProgramStyle": false
-    },
-    {
-      "nodeId": "page-messages",
-      "title": "消息",
-      "htmlSrc": "pages/messages.html",
-      "pageIndex": 3,
-      "pageType": "information-dense",
-      "mobileNavigationActiveKey": "messages",
-      "viewportMode": "document-scroll",
-      "visualNorthStar": "Message/notification center with conversation list. Each row shows avatar, name, preview text, and time. Clean list layout with divider lines.",
-      "compositionPattern": "list-detail",
-      "continuityAnchors": [
-        "Monochrome black and white color system",
-        "Roboto / HarmonyOS Sans typography stack",
-        "Bottom tab navigation (56px)",
-        "Border-led surfaces with subtle shadows"
-      ],
-      "componentPlan": [
-        "Status bar",
-        "Page header with title",
-        "Message list items (avatar + name + preview + time + unread indicator)",
-        "Section dividers",
-        "Bottom navigation bar"
-      ],
-      "imagePlan": [],
-      "chartsRequired": false,
-      "miniProgramStyle": false
-    },
-    {
-      "nodeId": "page-profile",
-      "title": "我的",
-      "htmlSrc": "pages/profile.html",
-      "pageIndex": 4,
-      "pageType": "information-dense",
-      "mobileNavigationActiveKey": "profile",
-      "viewportMode": "document-scroll",
-      "visualNorthStar": "User profile page with avatar, name, stats row, and settings menu list. Clean profile layout with grouped list sections.",
-      "compositionPattern": "profile-settings",
-      "continuityAnchors": [
-        "Monochrome black and white color system",
-        "Roboto / HarmonyOS Sans typography stack",
-        "Bottom tab navigation (56px)",
-        "Border-led surfaces with subtle shadows"
-      ],
-      "componentPlan": [
-        "Status bar",
-        "Profile header (avatar + name + bio)",
-        "Stats row (followers / following / posts)",
-        "Settings menu list (icon + label + chevron)",
-        "Bottom navigation bar"
+        "Window chrome",
+        "Brand logo sidebar",
+        "Icon navigation",
+        "Top app bar",
+        "Chat list panel",
+        "Conversation detail panel",
+        "Message input bar"
       ],
       "imagePlan": [],
       "chartsRequired": false,
@@ -997,91 +324,6 @@
     }
   ],
   "assets": [],
-  "wiringPlan": [
-    {
-      "sourcePageId": "page-home",
-      "domId": "nav-discover",
-      "targetPageId": "page-discover",
-      "transitionLabel": "发现",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-home",
-      "domId": "nav-messages",
-      "targetPageId": "page-messages",
-      "transitionLabel": "消息",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-home",
-      "domId": "nav-profile",
-      "targetPageId": "page-profile",
-      "transitionLabel": "我的",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-discover",
-      "domId": "nav-home",
-      "targetPageId": "page-home",
-      "transitionLabel": "首页",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-discover",
-      "domId": "nav-messages",
-      "targetPageId": "page-messages",
-      "transitionLabel": "消息",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-discover",
-      "domId": "nav-profile",
-      "targetPageId": "page-profile",
-      "transitionLabel": "我的",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-messages",
-      "domId": "nav-home",
-      "targetPageId": "page-home",
-      "transitionLabel": "首页",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-messages",
-      "domId": "nav-discover",
-      "targetPageId": "page-discover",
-      "transitionLabel": "发现",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-messages",
-      "domId": "nav-profile",
-      "targetPageId": "page-profile",
-      "transitionLabel": "我的",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-profile",
-      "domId": "nav-home",
-      "targetPageId": "page-home",
-      "transitionLabel": "首页",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-profile",
-      "domId": "nav-discover",
-      "targetPageId": "page-discover",
-      "transitionLabel": "发现",
-      "hideEdge": false
-    },
-    {
-      "sourcePageId": "page-profile",
-      "domId": "nav-messages",
-      "targetPageId": "page-messages",
-      "transitionLabel": "消息",
-      "hideEdge": false
-    }
-  ],
+  "wiringPlan": [],
   "hiddenInteractionPlan": []
 }

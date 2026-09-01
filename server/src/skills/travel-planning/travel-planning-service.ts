@@ -18,6 +18,7 @@ import type { IPlanningAgent, AgentRequest } from './interfaces.js';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
 import { travelMediaStore } from './travel-media-store.js';
+import { WeatherService, type WeatherBrief } from '../../services/weather-service.js';
 
 /** 行程条目可挂载的本地媒体（来自 POI 媒体库） */
 interface PoiMediaMeta {
@@ -35,6 +36,30 @@ interface PoiMediaMeta {
 
 /** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
 type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
+
+/** 单个时段的天气语境（供天气×时段智能排程） */
+interface SlotWeatherCtx {
+  rainy: boolean;
+  hot: boolean;
+  cold: boolean;
+  precipPct: number;
+}
+
+/** 整日天气语境：上午/下午/晚间三段 + 全天聚合（天气获取失败时为 null，按中性天气排程） */
+interface TripWeatherCtx {
+  morning: SlotWeatherCtx;
+  afternoon: SlotWeatherCtx;
+  evening: SlotWeatherCtx;
+  /** 白天（上午或下午）有雨 → 全天内景区分需室内优先 */
+  isRainyDay: boolean;
+  isHotDay: boolean;
+  isColdDay: boolean;
+  /** 一句话摘要（提示文案用） */
+  summary: string;
+}
+
+/** 降雨相关 WMO 天气码（Open-Meteo） */
+const RAIN_WEATHER_CODES = new Set([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]);
 
 // ==================== 行程级二级缓存 ====================
 // 相同的 目的地+天数+偏好 组合，在 POI 缓存未刷新时整份行程直接复用。
@@ -288,6 +313,11 @@ export class PlanningService {
   private osrmDisabledUntil = 0;
 
   /**
+   * @param weatherService 可选天气服务（未注入则跳过天气感知，按中性天气排程）
+   */
+  constructor(private readonly weatherService?: WeatherService) {}
+
+  /**
    * 编排阶段的交通腿查询：OSRM 真实路网优先（带 24h 缓存），失败降级 haversine 估算。
    * OSRM 一次失败即熔断 10 分钟（本批其余腿与后续规划直接走本地估算）。
    */
@@ -364,10 +394,21 @@ export class PlanningService {
       console.log(`[PlanningService] 缓存命中! (已访问${cacheEntry.accessCount}次)`);
     }
 
-    // 4. 行程级二级缓存：同 目的地+天数+偏好 且 POI 数据未刷新时整体复用
-    //    （省去重排序+编排+图片匹配，二次规划毫秒级返回）
+    // 3.5 天气感知：目的地实时/预报天气（失败降级为中性天气，不阻塞规划）
+    const weatherCtx = await this.fetchDestinationWeather(cacheEntry.center, destName);
+
+    // 3.6 语义属性打标（室内/室外/夜景/夜间专属，幂等，兼容旧缓存无标签数据）
+    this.enrichPoiAttributes(cacheEntry.data.attractions);
+    this.enrichPoiAttributes(cacheEntry.data.hotels);
+    this.enrichPoiAttributes(cacheEntry.data.restaurants);
+
+    // 4. 行程级二级缓存：同 目的地+天数+偏好+天气 且 POI 数据未刷新时整体复用
+    //    （省去重排序+编排+图片匹配，二次规划毫秒级返回；天气签名变化自动重算）
+    const weatherSig = weatherCtx
+      ? `${weatherCtx.morning.rainy ? 1 : 0}${weatherCtx.afternoon.rainy ? 1 : 0}${weatherCtx.evening.rainy ? 1 : 0}${weatherCtx.isHotDay ? 1 : 0}`
+      : 'N';
     const itinKey =
-      `itin|${normalizedDest}|${dayCount}|${JSON.stringify(preferences)}`;
+      `itin|${normalizedDest}|${dayCount}|${JSON.stringify(preferences)}|${weatherSig}`;
     const cachedItin = itineraryCache.get(itinKey);
     if (
       cachedItin &&
@@ -383,12 +424,13 @@ export class PlanningService {
     const startDate: string = today.toISOString().split('T')[0] ?? '';
     const endDate: string = new Date(today.getTime() + (dayCount - 1) * 86400000).toISOString().split('T')[0] ?? '';
 
-    // 6. 依据偏好对POI排序/筛选
+    // 6. 依据偏好+天气对POI排序/筛选（只排序不删除，保留回退池）
     const ranked = this.rankPOIsByPreferences(
       cacheEntry.data.attractions,
       cacheEntry.data.hotels,
       cacheEntry.data.restaurants,
-      preferences
+      preferences,
+      weatherCtx
     );
     const tParsed = Date.now() - t0;
 
@@ -410,7 +452,8 @@ export class PlanningService {
     const { days: daysRaw, pois } = await this.buildDaysFast(
       dayCount, startDate,
       ranked.attractions, ranked.hotels, ranked.restaurants,
-      cacheEntry.center, preferences, travelInfo, pricingCtx
+      cacheEntry.center, preferences, travelInfo, pricingCtx,
+      weatherCtx
     );
     const tBuild = Date.now() - tBuild0;
 
@@ -1346,6 +1389,27 @@ export class PlanningService {
       `[PlanningService] 搜索完成: 景点${attractions.length} 酒店${hotels.length} 餐厅${restaurants.length}` +
       ` (数据源: ${domestic ? '高德' : 'OSM'})`
     );
+
+    // Step 2.5: 类别缺口补齐（鲁棒性）：任一类别为空而知名库有该类别数据时，
+    // 用知识库真实 POI 补齐。避免「酒店有、景点/餐厅空」的部分搜索结果被缓存
+    // 永久污染该目的地（缓存命中后直接编排出 0 个景点/餐厅的残缺行程）。
+    if (attractions.length === 0 || hotels.length === 0 || restaurants.length === 0) {
+      const known = this.findKnownPOIs(destName);
+      if (known) {
+        if (attractions.length === 0 && known.attractions.length > 0) {
+          console.log(`[PlanningService] 景点结果为空，用知名库补齐 ${known.attractions.length} 个`);
+          attractions = known.attractions;
+        }
+        if (hotels.length === 0 && known.hotels.length > 0) {
+          console.log(`[PlanningService] 酒店结果为空，用知名库补齐 ${known.hotels.length} 个`);
+          hotels = known.hotels;
+        }
+        if (restaurants.length === 0 && known.restaurants.length > 0) {
+          console.log(`[PlanningService] 餐厅结果为空，用知名库补齐 ${known.restaurants.length} 个`);
+          restaurants = known.restaurants;
+        }
+      }
+    }
 
     // Step 3: 如果所有API都返回空结果，生成改进的合成数据
     let syntheticFallback = false;
@@ -2312,13 +2376,17 @@ export class PlanningService {
   }
 
   /**
-   * 根据偏好对POI进行重排序（不删除，只把更匹配的放前面）
+   * 根据偏好+天气对POI进行重排序（不删除，只把更匹配的放前面）
+   *
+   * 天气感知（B3）：雨天/高温时把室内景点前置、室外景点后置；
+   * 夜景/夜间专属景点小幅前置，具体晚间分槽在 buildDaysFast 中进一步处理。
    */
   private rankPOIsByPreferences(
     attractions: RawPOI[],
     hotels: RawPOI[],
     restaurants: RawPOI[],
-    prefs: TripPreferences
+    prefs: TripPreferences,
+    weather?: TripWeatherCtx | null
   ): { attractions: RawPOI[]; hotels: RawPOI[]; restaurants: RawPOI[] } {
     const score = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number => {
       const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
@@ -2340,6 +2408,20 @@ export class PlanningService {
         if (prefs.activities) s += 2; // 想看"有什么好玩的" → 把景点都前置
         if (prefs.seaside && /(海|滩|湾|岛|beach|coast|reef|dive|潜水|冲浪)/i.test(hay)) s += 3;
         if (prefs.kids && /(乐园|动物园|主题|family|amusement|zoo)/i.test(hay)) s += 2;
+        if (weather) {
+          const t = poi.tags || [];
+          if (t.includes('indoor')) {
+            // 雨天/高温 → 室内景点优先
+            if (weather.isRainyDay) s += 5;
+            if (weather.isHotDay) s += 3;
+          } else if (t.includes('outdoor')) {
+            if (weather.isRainyDay) s -= 5;
+            if (weather.isHotDay) s -= 2;
+          }
+          // 夜景/夜间专属：整体小幅前置（晚间分槽时进一步放大）
+          if (t.includes('nightview')) s += 1.5;
+          if (t.includes('eveningOnly')) s += 1;
+        }
       }
       return s;
     };
@@ -2352,6 +2434,149 @@ export class PlanningService {
       hotels: sortBy(hotels, 'hotel'),
       restaurants: sortBy(restaurants, 'restaurant'),
     };
+  }
+
+  /**
+   * 天气感知取数：拉取目的地当天/预报天气 → 时段化语境。
+   * 失败时返回 null（按中性天气排程），绝不阻塞规划主流程。
+   */
+  private async fetchDestinationWeather(center: Coordinates, destName: string): Promise<TripWeatherCtx | null> {
+    if (!this.weatherService) return null;
+    try {
+      const brief = await this.weatherService.getBrief(center.latitude, center.longitude, 'auto', destName);
+      const ctx = this.buildWeatherContext(brief);
+      console.log(
+        `[PlanningService] 天气感知: ${destName} ${brief.summaryLine} | ` +
+        `上午${ctx.morning.rainy ? '☔' : '☀'} 下午${ctx.afternoon.rainy ? '☔' : '☀'} 晚间${ctx.evening.rainy ? '☔' : '☀'} ` +
+        `室内优先=${ctx.isRainyDay} 高温=${ctx.isHotDay}`
+      );
+      return ctx;
+    } catch (err) {
+      console.warn(`[PlanningService] 天气获取失败，按中性天气规划: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /** 将 Open-Meteo 逐小时预报折叠为 上午/下午/晚间 三时段天气语境 */
+  private buildWeatherContext(brief: WeatherBrief): TripWeatherCtx {
+    const slotCtx = (hours: number[]): SlotWeatherCtx => {
+      const rows = brief.hourlyForecast.filter(f => {
+        const h = parseInt((f.hour || f.time || '').split(':')[0] || '0', 10);
+        return hours.includes(h);
+      });
+      const precipPct = rows.length ? Math.max(...rows.map(r => r.precipitationProbabilityPct ?? 0)) : 0;
+      const maxTemp = rows.length ? Math.max(...rows.map(r => r.temperatureC ?? -999)) : -999;
+      const hasRain = rows.some(r => RAIN_WEATHER_CODES.has(r.weatherCode));
+      return { rainy: hasRain || precipPct >= 60, hot: maxTemp >= 32, cold: maxTemp <= 5, precipPct };
+    };
+    const morning = slotCtx([9, 10, 11, 12]);
+    const afternoon = slotCtx([13, 14, 15, 16]);
+    const evening = slotCtx([18, 19, 20, 21]);
+    return {
+      morning,
+      afternoon,
+      evening,
+      isRainyDay: morning.rainy || afternoon.rainy,
+      isHotDay: morning.hot || afternoon.hot,
+      isColdDay: morning.cold || afternoon.cold,
+      summary: brief.summaryLine,
+    };
+  }
+
+  /**
+   * 语义属性打标（B1）：根据 名称 + 原始 tags + 已有标签 推导 室内/室外/混合、夜景、夜间专属。
+   * 幂等（已含目标标签则跳过），随缓存/内存复用，供天气×时段排序与分槽使用。
+   */
+  private enrichPoiAttributes(list: RawPOI[]): void {
+    if (!list) return;
+    for (const poi of list) {
+      const existing = poi.tags || [];
+      if (existing.includes('indoor') || existing.includes('outdoor') || existing.includes('mixed')) {
+        continue; // 已打标，跳过
+      }
+      const rawTags = (poi.raw as { tags?: Record<string, unknown> } | undefined)?.tags;
+      const hay = `${poi.name} ${existing.join(' ')} ${rawTags ? Object.values(rawTags).join(' ') : ''}`;
+
+      // 室内（博物馆/水族馆/商场/展览/剧院/购物/温泉等）
+      const indoorRe = /(博物馆|美术馆|科技馆|科学馆|水族馆|海洋馆|图书馆|展览|展馆|展厅|剧院|演出剧场|商场|购物中心|商城|购物|免税|室内|乐园室内|蜡像|纪念馆|艺术馆|画廊|电影院|影城|冰雪世界|水世界|温泉|水疗|spa|书店|密室|剧本杀|保龄球|健身房|室内冰场)/i;
+      // 室外（公园/海滩/山/湖/塔/峡谷/瀑布/草原/森林/观景台等）
+      const outdoorRe = /(公园|海滩|沙滩|海滨|海边|山|峰|湖|江|河|海景|塔|寺庙|古寺|大佛|峡谷|瀑布|草原|森林|湿地|观景台|观景|缆车|索道|动物园|植物园|户外|游乐场|过山车|漂流|潜水|冲浪|骑行|徒步|露营|景区|风景|岛|湾|沙滩浴场)/i;
+
+      const tags = new Set<string>(existing);
+      if (indoorRe.test(hay) && !outdoorRe.test(hay)) tags.add('indoor');
+      else if (outdoorRe.test(hay) && !indoorRe.test(hay)) tags.add('outdoor');
+      else tags.add('mixed');
+
+      // 夜景/晚上适合（观景台/夜市/灯光秀/酒吧/摩天轮等）
+      const nightRe = /(夜景|观景台|观景塔|夜市|灯光秀|灯光|灯会|烟花|烟花秀|酒吧|club|夜店|江景|海景餐厅|天台|露台|屋顶|夜游|游船|摩天轮|演出|演艺|show)/i;
+      if (nightRe.test(hay)) tags.add('nightview');
+
+      // 仅夜间开放（夜市/酒吧/夜店/夜间演出）
+      const eveningOnlyRe = /(夜市|酒吧|夜店|club|夜间演出|夜场|灯会|烟花秀|夜游)/i;
+      if (eveningOnlyRe.test(hay)) tags.add('eveningOnly');
+
+      poi.tags = Array.from(tags);
+    }
+  }
+
+  /** 单个景点在某时段天气下的适宜分（用于分槽贪心指派） */
+  private slotScore(a: RawPOI, rainy: boolean, hot: boolean): number {
+    const t = a.tags || [];
+    if (t.includes('indoor')) return (rainy || hot) ? 3 : 1;
+    if (t.includes('outdoor')) return rainy ? 0 : 2;
+    return 1; // mixed / 未知 → 中性
+  }
+
+  /**
+   * 按 天气×时段 拆分当天景点（B4）：
+   * - eveningOnly / nightview → 晚间槽（夜景/夜市夜间游玩）
+   * - 其余景点按上午/下午天气贪心指派（雨天/高温把室内放对应槽，晴天室外优先）
+   * - 各槽内保持地理聚类原有顺序（不重排，减小路程）
+   */
+  private splitAttractionsBySlot(
+    dayAttrs: RawPOI[],
+    weather?: TripWeatherCtx | null
+  ): { morning: RawPOI[]; afternoon: RawPOI[]; evening: RawPOI[] } {
+    const evening: RawPOI[] = [];
+    const rest: RawPOI[] = [];
+    for (const a of dayAttrs) {
+      const t = a.tags || [];
+      if (t.includes('eveningOnly')) { evening.push(a); continue; }
+      if (t.includes('nightview') && evening.length < 1) { evening.push(a); continue; }
+      rest.push(a);
+    }
+
+    const n = rest.length;
+    const morningCap = Math.ceil(n / 2);
+    const morning: RawPOI[] = [];
+    const afternoon: RawPOI[] = [];
+    const mRain = weather?.morning.rainy ?? false;
+    const mHot = weather?.morning.hot ?? false;
+    const aRain = weather?.afternoon.rainy ?? false;
+    const aHot = weather?.afternoon.hot ?? false;
+    for (const a of rest) {
+      if (morning.length >= morningCap) { afternoon.push(a); continue; }
+      if (afternoon.length >= n - morningCap) { morning.push(a); continue; }
+      (this.slotScore(a, aRain, aHot) > this.slotScore(a, mRain, mHot) ? afternoon : morning).push(a);
+    }
+    return { morning, afternoon, evening };
+  }
+
+  /** 生成"为何这样排"的天气/时段说明文案（B5，追加到条目贴士） */
+  private slotNote(
+    entry: { slot?: 'morning' | 'afternoon' | 'evening'; poi: RawPOI },
+    weather: TripWeatherCtx | null | undefined,
+    slot: 'morning' | 'afternoon' | 'evening'
+  ): string {
+    if (!weather) return '';
+    const t = entry.poi.tags || [];
+    const w = slot === 'morning' ? weather.morning : slot === 'evening' ? weather.evening : weather.afternoon;
+    const notes: string[] = [];
+    if (w.rainy && t.includes('indoor')) notes.push('今日有雨，已为您改排室内');
+    if (slot === 'evening' && (t.includes('nightview') || t.includes('eveningOnly'))) notes.push('此景点适合傍晚/晚间前往，已安排在夜晚时段');
+    if (weather.isHotDay && slot !== 'evening' && !t.includes('indoor')) notes.push('白天较热，注意防晒补水');
+    if (w.rainy && !t.includes('indoor') && t.includes('outdoor')) notes.push('预计有雨，请备好雨具');
+    return notes.join('；');
   }
 
   /**
@@ -2397,20 +2622,33 @@ export class PlanningService {
     center: Coordinates,
     preferences: TripPreferences,
     travelInfo: TravelInfo,
-    pricingCtx: import('./pricing-service.js').PricingContext
+    pricingCtx: import('./pricing-service.js').PricingContext,
+    weather?: TripWeatherCtx | null
   ): Promise<{ days: PlannedDay[]; pois: POISummary[] }> {
     const allPois: POISummary[] = [];
 
-    const toSummary = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): POISummary => ({
-      id: poi.id, name: poi.name, type,
-      latitude: poi.latitude, longitude: poi.longitude,
-      address: poi.address, rating: poi.rating ?? 4.5,
-      cost: poi.tags?.[0], description: poi.tags?.join(','),
-      splatUrl: poi.splatUrl,
-    });
-    attractions.forEach(a => allPois.push(toSummary(a, 'attraction')));
-    hotels.forEach(h => allPois.push(toSummary(h, 'hotel')));
-    restaurants.forEach(r => allPois.push(toSummary(r, 'restaurant')));
+    // A4：过滤非法坐标（(0,0)/非有限值/越界），避免把 POI 画到错误位置
+    const isValidCoord = (p: RawPOI): boolean =>
+      isFinite(p.latitude) && isFinite(p.longitude) &&
+      !(p.latitude === 0 && p.longitude === 0) &&
+      Math.abs(p.latitude) <= 90 && Math.abs(p.longitude) <= 180;
+    attractions = attractions.filter(isValidCoord);
+    hotels = hotels.filter(isValidCoord);
+    restaurants = restaurants.filter(isValidCoord);
+
+    const toSummary = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): POISummary | null => {
+      if (!isValidCoord(poi)) return null;
+      return {
+        id: poi.id, name: poi.name, type,
+        latitude: poi.latitude, longitude: poi.longitude,
+        address: poi.address, rating: poi.rating ?? 4.5,
+        cost: poi.tags?.[0], description: poi.tags?.join(','),
+        splatUrl: poi.splatUrl,
+      };
+    };
+    attractions.forEach(a => { const s = toSummary(a, 'attraction'); if (s) allPois.push(s); });
+    hotels.forEach(h => { const s = toSummary(h, 'hotel'); if (s) allPois.push(s); });
+    restaurants.forEach(r => { const s = toSummary(r, 'restaurant'); if (s) allPois.push(s); });
 
     const paceCap: Record<TripPreferences['pace'], number> = { relaxed: 2, balanced: 3, intensive: 4 };
     let maxAttractionsPerDay = paceCap[preferences.pace];
@@ -2451,30 +2689,29 @@ export class PlanningService {
     const restaurantUsageCount = new Map<string, number>();
 
     /**
-     * 第一步：确定每天访问序列（酒店→上午景点→午餐→下午景点→晚餐）。
+     * 第一步：确定每天访问序列（酒店→上午景点→午餐→下午景点→晚餐→晚间景点）。
      * 午/晚餐先按位置锚定（午餐靠上午最后景点、晚餐靠下午最后景点），时间后面统一排。
+     * 景点拆分采用 天气×时段 槽位法（B4）：夜间专属/夜景→晚间，其余按上午/下午天气贪心指派。
      */
     interface DaySequence {
       date: string;
       hotel?: RawPOI;
-      entries: Array<{ kind: 'attraction' | 'lunch' | 'dinner'; poi: RawPOI }>;
+      entries: Array<{ kind: 'attraction' | 'lunch' | 'dinner'; poi: RawPOI; slot?: 'morning' | 'afternoon' | 'evening' }>;
     }
     const sequences: DaySequence[] = [];
     for (let i = 0; i < dayCount; i++) {
       const date = new Date(new Date(startDate).getTime() + i * 86400000).toISOString().split('T')[0] ?? startDate;
       const dayAttrs = clusteredDays[i] || [];
-      const morningCount = Math.ceil(dayAttrs.length / 2);
-      const morningAttrs = dayAttrs.slice(0, morningCount);
-      const afternoonAttrs = dayAttrs.slice(morningCount);
+      const { morning: morningAttrs, afternoon: afternoonAttrs, evening: eveningAttrs } = this.splitAttractionsBySlot(dayAttrs, weather);
 
       const entries: DaySequence['entries'] = [];
-      for (const attr of morningAttrs) entries.push({ kind: 'attraction', poi: attr });
+      for (const attr of morningAttrs) entries.push({ kind: 'attraction', poi: attr, slot: 'morning' });
 
-      // 午餐：靠近上午最后一个景点（顺路用餐）
+      // 午餐：靠近上午最后一个景点（顺路用餐）；全为晚间景点时退回到酒店
       if (dedupedRestaurants.length > 0 && dayAttrs.length > 0) {
         const lunchRef = morningAttrs.length > 0
           ? morningAttrs[morningAttrs.length - 1]!
-          : primaryHotel ?? null;
+          : (afternoonAttrs.length > 0 ? afternoonAttrs[0]! : primaryHotel ?? null);
         if (lunchRef) {
           const lunchRest = this.pickRestaurantOnRoute(dedupedRestaurants, lunchRef.latitude, lunchRef.longitude, usedRestaurantIds, preferences, restaurantUsageCount);
           if (lunchRest) {
@@ -2485,13 +2722,13 @@ export class PlanningService {
         }
       }
 
-      for (const attr of afternoonAttrs) entries.push({ kind: 'attraction', poi: attr });
+      for (const attr of afternoonAttrs) entries.push({ kind: 'attraction', poi: attr, slot: 'afternoon' });
 
-      // 晚餐：靠近下午最后一个景点（顺路用餐）
+      // 晚餐：靠近下午最后一个景点（顺路用餐）；无下午景点时退回上午最后景点
       if (dedupedRestaurants.length > 0) {
         const dinnerRef = afternoonAttrs.length > 0
           ? afternoonAttrs[afternoonAttrs.length - 1]!
-          : (entries.length > 0 ? entries[entries.length - 1]!.poi : primaryHotel ?? null);
+          : (morningAttrs.length > 0 ? morningAttrs[morningAttrs.length - 1]! : primaryHotel ?? null);
         if (dinnerRef) {
           const dinnerRest = this.pickRestaurantOnRoute(dedupedRestaurants, dinnerRef.latitude, dinnerRef.longitude, usedRestaurantIds, preferences, restaurantUsageCount);
           if (dinnerRest) {
@@ -2501,6 +2738,9 @@ export class PlanningService {
           }
         }
       }
+
+      // B4：晚间景点（夜景/夜市/夜间演出等）排到晚餐后，夜晚时段游览
+      for (const attr of eveningAttrs) entries.push({ kind: 'attraction', poi: attr, slot: 'evening' });
 
       sequences.push({ date, hotel: primaryHotel, entries });
     }
@@ -2567,13 +2807,20 @@ export class PlanningService {
           const leg = legFor();
           const transportMin = lastPoint ? (leg?.durationMin ?? 0) : 0;
           const visitMin = this.inferVisitDuration('attraction', preferences);
-          // 当天预算：装不下就丢掉该景点（之后所有景点同样丢弃），晚餐仍保留
-          if (lastPoint && currentTimeMin + transportMin + visitMin > PlanningService.DAY_END_MIN) {
+          // 当天预算：装不下就丢掉该景点（之后所有景点同样丢弃），晚餐仍保留。
+          // 晚间槽（夜景/夜市等）放宽上限至 22:30，保证夜间景点能排进去
+          const dayEndMin = entry.slot === 'evening'
+            ? PlanningService.DAY_END_MIN + 90
+            : PlanningService.DAY_END_MIN;
+          if (lastPoint && currentTimeMin + transportMin + visitMin > dayEndMin) {
             dayFull = true;
             legsFallback = true;
             continue;
           }
           const item = this.convertToItemSync(entry.poi, 'attraction', seq.date, formatTime(currentTimeMin), preferences, travelInfo, pricingCtx);
+          // B5：追加"为何这样排"的天气/时段说明
+          const slotNoteText = this.slotNote({ slot: entry.slot, poi: entry.poi }, weather, entry.slot ?? 'morning');
+          if (slotNoteText) item.tips = [...(item.tips || []), slotNoteText];
           if (leg) item.transportFromPrev = leg;
           items.push(item);
           lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };

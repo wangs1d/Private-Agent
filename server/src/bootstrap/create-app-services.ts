@@ -31,6 +31,7 @@ import { AgentAccountService } from "../services/agent-account-service.js";
 import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
+import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-facade.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import {
@@ -784,7 +785,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   // 注册旅游规划内置Skills（承接 3D-Travel 项目能力：规则引擎行程生成 + POI 缓存 + 目的地知识库）
-  const travelPlanningService = new TravelPlanningService();
+  const travelPlanningService = new TravelPlanningService(weatherService);
   registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
     travelPlanningService,
   });
@@ -1195,8 +1196,12 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
 
+  // Runtime 统一入口：进程无关契约。同进程模式直接包裹 AgentCore；
+  // 拆进程后此处的实现可替换为 WsRuntimeClient（RUNTIME_MODE=remote）。
+  const runtime: RuntimeFacade = new DirectRuntimeAdapter(agentCore);
+
   const virtualPhoneIncomingCoordinator = new VirtualPhoneIncomingCoordinator(
-    agentCore,
+    runtime,
     wsConnectionRegistry,
   );
   virtualPhoneService.setIncomingCoordinator(virtualPhoneIncomingCoordinator);
@@ -1212,11 +1217,11 @@ export async function createAppServices(): Promise<AppServices> {
       "",
       "请用简短中文口语直接回应（将转为语音播报给用户），不要输出 Markdown、列表或表情符号。",
     ].join("\n");
-    const reply = await agentCore.handleUserMessage(toActorId, prompt, {
+    const reply = await runtime.handleUserMessage(toActorId, prompt, {
       chatUserMessageId: `phone-user-call:${fromUserId}:${Date.now()}`,
       preferFullPipeline: true,
     });
-    await agentCore.runToolIfNeeded(toActorId, reply, {
+    await runtime.runToolIfNeeded(toActorId, reply, {
       chatUserMessageId: `phone-user-call-tool:${fromUserId}:${Date.now()}`,
     });
     return { replyText: reply.text.trim() };
@@ -1225,11 +1230,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 通话中用户回复（phone.call_reply → deliverCallReply）：进 Agent 对话，回应经 TTS 推回通话
   virtualPhoneService.setUserReplyHandler(async ({ callId, fromActorId, toUserId, text }) => {
     const prompt = `【通话中用户回复】用户在当前通话中说了：「${text}」。请用简短中文口语直接回应（将转为语音播报），不要输出 Markdown。`;
-    const reply = await agentCore.handleUserMessage(fromActorId, prompt, {
+    const reply = await runtime.handleUserMessage(fromActorId, prompt, {
       chatUserMessageId: `phone-reply:${callId}:${Date.now()}`,
       preferFullPipeline: true,
     });
-    await agentCore.runToolIfNeeded(fromActorId, reply, {
+    await runtime.runToolIfNeeded(fromActorId, reply, {
       chatUserMessageId: `phone-reply-tool:${callId}:${Date.now()}`,
     });
     const replyText = reply.text.trim() || "抱歉，我刚才没听清，麻烦您再说一遍。";
@@ -1260,7 +1265,7 @@ export async function createAppServices(): Promise<AppServices> {
       task.title || "自动化任务执行中",
       { phase: "agent_task", source: "schedule.agent_task_fired" },
     );
-    const reply = await agentCore.handleUserMessage(task.sessionId, prompt, {
+    const reply = await runtime.handleUserMessage(task.sessionId, prompt, {
       chatUserMessageId: `schedule:${task.taskId}:${Date.now()}`,
       agentAccessMode: accessMode,
       onAssistantDelta: (delta) => {
@@ -1277,7 +1282,7 @@ export async function createAppServices(): Promise<AppServices> {
         );
       },
     });
-    const toolRun = await agentCore.runToolIfNeeded(task.sessionId, reply, {
+    const toolRun = await runtime.runToolIfNeeded(task.sessionId, reply, {
       chatUserMessageId: `schedule:${task.taskId}:tool`,
       agentAccessMode: accessMode,
     });
@@ -2038,7 +2043,7 @@ export async function createAppServices(): Promise<AppServices> {
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
   const visionPeriodicScheduler = new VisionPeriodicScheduler({
-    agentCore,
+    runtime,
     wsRegistry: wsConnectionRegistry,
   });
 
@@ -3084,14 +3089,14 @@ export async function createAppServices(): Promise<AppServices> {
 
   const wechatClawBindingService = new WechatClawBindingService();
   void wechatClawBindingService.load();
-  const wechatClawBridgeService = new WechatClawBridgeService(agentCore, {
+  const wechatClawBridgeService = new WechatClawBridgeService(runtime, {
     weatherPrefsService,
     ttsService,
     messageHubService,
   });
-  messageBridgeService = new MessageBridgeService(agentCore, messageHubService);
+  messageBridgeService = new MessageBridgeService(runtime, messageHubService);
 
-  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, agentCore });
+  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime });
 
   registerEmbodimentTools(toolRegistry, {
     wsRegistry: wsConnectionRegistry,
@@ -3577,7 +3582,7 @@ export async function createAppServices(): Promise<AppServices> {
     browserSessionService,
     friendService,
     companionService,
-    agentCore,
+    runtime,
     wsConnectionRegistry,
     lifeSignalHubService,
     marketSignalService,
@@ -3605,7 +3610,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentPairingService,
     aipService,
     worldPartitionWsRegistry,
-    agentCore,
+    runtime,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -3657,6 +3662,7 @@ export async function createAppServices(): Promise<AppServices> {
     agentAccountService,
     emailRegistrationService,
     agentCore,
+    runtime,
     worldService,
   a2aOutsourcingService,
   socialFeedService,

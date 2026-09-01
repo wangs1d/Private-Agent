@@ -17,13 +17,24 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
 const isWin = process.platform === "win32";
 
+// `node dev-server-watch.mjs runtime` → remote 拓扑：runtime watch（内部端口）
+// + gateway watch（对外端口）；缺省参数 → embedded 单进程（src/index.ts）
+const entryArg = process.argv[2] ?? "";
+const isRemoteEntry = entryArg === "runtime";
+const entry = isRemoteEntry ? "src/runtime-main.ts" : "src/index.ts";
+
 config({ path: join(serverDir, ".env"), quiet: true });
 config({ path: join(serverDir, ".env.local"), quiet: true });
 
 const portRaw = Number(process.env.PORT ?? "3000");
 const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw < 65536 ? portRaw : 3000;
+const runtimeHttpPortRaw = Number(process.env.RUNTIME_HTTP_PORT ?? "3211");
+const runtimeHttpPort =
+  Number.isInteger(runtimeHttpPortRaw) && runtimeHttpPortRaw > 0 && runtimeHttpPortRaw < 65536
+    ? runtimeHttpPortRaw
+    : 3211;
 
-if (await isTcpPortInUse(port)) {
+if (await isTcpPortInUse(isRemoteEntry ? runtimeHttpPort : port)) {
   process.exit(0);
 }
 
@@ -42,12 +53,13 @@ if (!(await isTcpPortInUse(gatewayPort))) {
 // tool-router FastAPI：与 TS 服务异步并行拉起（端口占用时自动跳过）
 const toolRouterChild = await spawnToolRouter();
 
-const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", "src/index.ts"], {
+const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", entry], {
   cwd: serverDir,
   stdio: "inherit",
   shell: isWin,
   env: {
     ...process.env,
+    ...(isRemoteEntry ? { RUNTIME_MODE: "remote" } : {}),
     NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=512"].filter(Boolean).join(" "),
     AGENT_WORLD_PLACEHOLDER_REGISTER: "1",
     ALLOW_WORLD_HTTP_MUTATIONS: "1",
@@ -55,6 +67,22 @@ const child = spawn("npx", ["tsx", "watch", "--clear-screen=false", "src/index.t
     ENABLE_MASTER_AGENT_DELEGATION: "1",
   },
 });
+
+// remote 拓扑：runtime 之外加挂 gateway watch（对外端口 3000；被占用则跳过）
+let gatewayWatchChild = null;
+if (isRemoteEntry && !(await isTcpPortInUse(port))) {
+  gatewayWatchChild = spawn("npx", ["tsx", "watch", "--clear-screen=false", "src/gateway-main.ts"], {
+    cwd: serverDir,
+    stdio: "inherit",
+    shell: isWin,
+    env: { ...process.env, RUNTIME_MODE: "remote" },
+  });
+  gatewayWatchChild.on("exit", (code) => {
+    if (code !== 0 && code !== null) {
+      console.error(`[dev-server] gateway watch 异常退出: code=${code}`);
+    }
+  });
+}
 
 function stopGateway() {
   if (gatewayChild && !gatewayChild.killed) {
@@ -79,6 +107,13 @@ function stopToolRouter() {
 function stopAll() {
   stopGateway();
   stopToolRouter();
+  if (gatewayWatchChild && !gatewayWatchChild.killed) {
+    try {
+      gatewayWatchChild.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 child.on("error", (err) => {

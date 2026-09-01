@@ -232,8 +232,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     const { messageId, newText, sessionId, userId, agentAccessMode } = parsed.data;
     const actorKey = userId?.trim() || sessionId.trim();
 
-    const { agentCore, wsConnectionRegistry } = deps;
-    if (!agentCore) {
+    const { runtime, wsConnectionRegistry } = deps;
+    if (!runtime) {
       return reply.code(503).send({ ok: false, message: "AgentCore 未就绪" });
     }
     if (!wsConnectionRegistry?.get(actorKey)) {
@@ -263,7 +263,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     let chunkSeq = 0;
     void (async () => {
       try {
-        const reply0 = await agentCore.handleUserMessage(actorKey, newText, {
+        const reply0 = await runtime.handleUserMessage(actorKey, newText, {
           chatUserMessageId: messageId,
           agentAccessMode: accessMode,
           onAssistantDelta: (delta) => {

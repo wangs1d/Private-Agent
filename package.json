@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "server",
-    "agent-world"
+    "agent-world",
+    "packages/agent-protocol"
   ],
   "scripts": {
     "dev:all": "node scripts/dev-all.mjs",
@@ -13,7 +14,9 @@
     "dev:all:world": "npm run standalone --workspace=agent-world",
     "dev:ports:free": "powershell -ExecutionPolicy Bypass -File scripts/free-dev-ports.ps1",
     "setup:openclaw": "npm install -g openclaw @tencent-weixin/openclaw-weixin",
-    "setup:openclaw-wechat-bridge": "node scripts/install-openclaw-wechat-bridge.mjs"
+    "setup:openclaw-wechat-bridge": "node scripts/install-openclaw-wechat-bridge.mjs",
+    "dev:remote": "node scripts/dev-all.mjs --remote",
+    "dev:all:runtime": "npm run dev:runtime --workspace=server"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0"

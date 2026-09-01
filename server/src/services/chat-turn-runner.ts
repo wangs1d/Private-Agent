@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import type { ClientLocationWire } from "../types/client-location.js";
-import type { AgentCore } from "./agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
 import { AssistantRewriterService } from "./assistant-rewriter.js";
@@ -76,7 +76,7 @@ function stringifyToolResult(result: Record<string, unknown>): string {
   }
 }
 export async function runChatTurnForActor(
-  agentCore: AgentCore,
+  runtime: RuntimeFacade,
   actorId: string,
   input: ChatTurnInput,
 ): Promise<ChatTurnResult | ChatTurnError> {
@@ -92,7 +92,7 @@ export async function runChatTurnForActor(
   try {
     const rewriteProvider = createExternalChatProviderFromEnv();
     const rewriter = new AssistantRewriterService(rewriteProvider);
-    const reply = await agentCore.handleUserMessage(actorId, text, {
+    const reply = await runtime.handleUserMessage(actorId, text, {
       chatUserMessageId: messageId,
       userId,
       agentAccessMode,
@@ -104,7 +104,7 @@ export async function runChatTurnForActor(
     if (reply.toolName && reply.toolInput) {
       toolResult = reply.toolResult
         ? { ok: true, result: reply.toolResult }
-        : await agentCore.runToolIfNeeded(actorId, reply, {
+        : await runtime.runToolIfNeeded(actorId, reply, {
             chatUserMessageId: messageId,
             userId,
             agentAccessMode,

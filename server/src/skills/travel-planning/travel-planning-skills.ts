@@ -145,6 +145,16 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
               videos: item.videos,
             })),
           })),
+          // 候选 POI 池：全量酒店/餐厅/景点摘要（含未排入日程的备选），前端地图一并展示
+          pois: (result.pois ?? []).map((p) => ({
+            id: p.id,
+            name: p.name,
+            type: p.type,
+            latitude: p.latitude,
+            longitude: p.longitude,
+            address: p.address,
+            rating: p.rating,
+          })),
         });
         // 冷层落盘：完整明细按 planId 持久化，供跨轮/跨重启的 travel.get-itinerary
         // 按需回查；LLM 上下文只留 summarizeItinerary 的极简回执

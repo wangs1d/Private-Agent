@@ -103,7 +103,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerMessageHubRoutes(app, {
     messageHubService: deps.messageHubService,
     messagePlatformGateway: deps.messagePlatformGateway,
-    agentCore: deps.agentCore!,
+    runtime: deps.runtime!,
   });
   registerChatDataRoutes(app, {
     externalChat: deps.externalChat ?? null,
@@ -112,7 +112,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerBrowserSessionRoutes(app, deps);
   registerPhoneBridgeRoutes(app, { phoneBridgeCoordinator: deps.phoneBridgeCoordinator });
   registerMultiAgentMonitorRoutes(app, {
-    agentCore: deps.agentCore,
+    runtime: deps.runtime,
     scheduleTaskService: deps.scheduleTaskService,
   });
   registerNightlyMemoryRoutes(app);

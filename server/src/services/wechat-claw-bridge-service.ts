@@ -9,7 +9,7 @@ import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import type { ClientLocationWire } from "../types/client-location.js";
-import type { AgentCore } from "./agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { runChatTurnForActor, type ChatTurnInput } from "./chat-turn-runner.js";
 import { isWechatClawFeatureEnabled } from "./openclaw-gateway-client.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
@@ -87,7 +87,7 @@ export type WechatClawBridgeChatBody = {
 
 export class WechatClawBridgeService {
   constructor(
-    private readonly agentCore: AgentCore,
+    private readonly runtime: RuntimeFacade,
     private readonly deps: {
       weatherPrefsService?: WeatherPrefsService;
       ttsService?: TtsService;
@@ -211,7 +211,7 @@ export class WechatClawBridgeService {
       `[wechat-claw-bridge] turn actor=${actorId} textLen=${text.length} access=${accessMode} location=${turnInput.clientLocation?.label ?? "none"}`,
     );
 
-    const result = await runChatTurnForActor(this.agentCore, actorId, turnInput);
+    const result = await runChatTurnForActor(this.runtime, actorId, turnInput);
     if (!result.ok) {
       return { ok: false, message: result.message };
     }

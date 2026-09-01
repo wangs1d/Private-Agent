@@ -91,15 +91,14 @@ class ScheduleFloatingWindow {
   static constexpr int kFocusHeightNoNotes = 54; // 焦点卡高（无备注）
   static constexpr int kFocusHeightNotes = 68;   // 焦点卡高（含备注行）
   static constexpr int kAllDoneBannerHeight = 28; // 全部完成横幅高
-  static constexpr int kRowHeight = 24;          // 时间轴单行高（无备注）
-  static constexpr int kRowHeightNotes = 40;     // 时间轴单行高（含备注）
+  static constexpr int kRowHeight = 24;          // 时间轴单行高（恒定，对齐 in-app）
   static constexpr int kFooterHeight = 26;       // 底部「还有 N 项」行高
-  static constexpr int kMaxVisibleItems = 6;     // 时间轴最多展示条数，超出进底部折叠
+  static constexpr int kMaxVisibleItems = 5;     // 时间轴最多展示条数（对齐 in-app）
   static constexpr int kTimeColWidth = 38;       // 时间列宽
   static constexpr int kNodeColWidth = 18;       // 圆点节点列宽
   static constexpr int kCloseBtnSize = 22;
   static constexpr int kCollapseBtnSize = 22;
-  static constexpr int kCornerRadius = 12;
+  static constexpr int kCornerRadius = 16;   // 窗口四角圆角
   static constexpr int kHeaderChipSize = 20;    // 标题栏图标底座（圆角方块）
   static constexpr int kCalIconSize = 11;       // 标题栏日历图标尺寸
 
@@ -143,6 +142,9 @@ class ScheduleFloatingWindow {
   /// 绘制实心圆（时间轴圆点 / 日程带刻度）。
   void DrawCircle(HDC hdc, int cx, int cy, double radius, COLORREF fill,
                   COLORREF ring = 0);
+  /// 绘制带圆角裁剪的纵向渐变圆角矩形（对齐 in-app 的渐变卡片/底座）。
+  void DrawGradientRounded(HDC hdc, const RECT& rc, int radius,
+                           COLORREF top, COLORREF bottom);
   /// 24h 日程带：4px 轨道 + 事项刻度 + now 游标 + 0/6/12/18/24 点标签。
   void DrawDayStrip(HDC hdc, int y, int width);
   /// 下一事项焦点卡：倒计时说明 + 时间 + 标题 + 备注。
@@ -154,6 +156,8 @@ class ScheduleFloatingWindow {
   void DrawTimeline(HDC hdc, int y, int width, const ScheduleItem* next);
   /// 底部「还有 N 项安排」。
   void DrawFooter(HDC hdc, int y, int width, int hidden_count);
+  /// 空态：插画式日历块 + 文案 + 新建按钮（对齐 in-app 空态）。
+  void DrawEmptyState(HDC hdc, int y, int width);
   /// 从 "HH:MM" 时间文本解析当天分钟数，失败返回 -1。
   int ParseMinutes(const std::string& time_text) const;
   /// 从 "HH:MM" 时间文本中解析小时。
@@ -180,6 +184,7 @@ class ScheduleFloatingWindow {
   HFONT font_caption_ = nullptr; // 焦点卡说明/刻度标签小字
   HFONT font_strike_ = nullptr;  // 完成事项删除线
   HFONT font_focus_time_ = nullptr; // 焦点卡时间大字
+  HFONT font_body_lg_ = nullptr; // 空态引导/按钮正文（加大加粗）
 
   // 状态
   bool on_top_ = true;

@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { ServerEventType } from "../protocol.js";
-import type { AgentCore } from "./agent-core.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import { dedupeAdjacentLines } from "../utils/text.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
 import { AssistantRewriterService } from "./assistant-rewriter.js";
@@ -53,8 +53,8 @@ export class VirtualPhoneIncomingCoordinator {
   private readonly pending = new Map<string, PendingPeerCall>();
 
   constructor(
-    private readonly agentCore: AgentCore,
-    private readonly wsRegistry: WsConnectionRegistry,
+    private readonly runtime: RuntimeFacade,
+    private readonly wsRegistry: ClientPushPort,
   ) {}
 
   /**
@@ -198,13 +198,13 @@ export class VirtualPhoneIncomingCoordinator {
     };
 
     try {
-      const reply = await this.agentCore.handleUserMessage(actorId, prompt, {
+      const reply = await this.runtime.handleUserMessage(actorId, prompt, {
         chatUserMessageId: `phone-incoming:${call.callId}`,
         preferFullPipeline: true,
         onAssistantDelta: sendChunk,
       });
 
-      await this.agentCore.runToolIfNeeded(actorId, reply, {
+      await this.runtime.runToolIfNeeded(actorId, reply, {
         chatUserMessageId: `phone-incoming-tool:${call.callId}`,
       });
 

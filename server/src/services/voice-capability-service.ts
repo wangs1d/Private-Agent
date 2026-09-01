@@ -3,7 +3,7 @@ import { ServerEventType } from "../protocol.js";
 import type { TtsService } from "./tts-service.js";
 import type { VoiceMessageService } from "./voice-message-service.js";
 import type { VoiceDialogueService } from "./voice-dialogue/voice-dialogue-service.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { AudioBuffer } from "./voice-dialogue/types.js";
 
 /**
@@ -102,7 +102,7 @@ export interface VoiceCapabilityInfo {
 export interface VoiceCapabilityDeps {
   ttsService: TtsService;
   voiceDialogueService: VoiceDialogueService;
-  wsRegistry: WsConnectionRegistry;
+  wsRegistry: ClientPushPort;
   /** 语音消息落盘服务（可选；未注入时 voice.send_message 工具不可用）。 */
   voiceMessageService?: VoiceMessageService;
   logger?: {

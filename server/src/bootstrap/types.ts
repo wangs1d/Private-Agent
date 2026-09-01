@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { AgentCore } from "../services/agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { AgentAccountService } from "../services/agent-account-service.js";
 import type { AipService } from "../aip/aip-service.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
@@ -78,7 +79,10 @@ export type AppServices = {
   aipService: AipService;
   agentAccountService: AgentAccountService;
   emailRegistrationService: EmailRegistrationService;
+  /** Agent 编排核心（具体类；仅装配层 setter 注入与诊断用） */
   agentCore: AgentCore;
+  /** Runtime 统一入口（进程无关契约；一切 Turn 调用方使用本字段） */
+  runtime: RuntimeFacade;
   worldService: WorldService;
   a2aOutsourcingService: A2aOutsourcingService;
   socialFeedService: SocialFeedService;

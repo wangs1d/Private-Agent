@@ -44,6 +44,20 @@ export interface TravelItinerarySnapshot {
       videos?: Array<Record<string, unknown>>;
     }>;
   }>;
+  /**
+   * 候选 POI 池（规划涉及的酒店/餐厅/景点全量摘要，含未排入日程的备选）。
+   * 前端地图以 dayIndex=null 展示 → 默认全量显示、按天过滤时也常驻，满足
+   * 「规划的酒店/吃饭/游玩地都要有 POI 展示」。
+   */
+  pois?: Array<{
+    id?: string;
+    name: string;
+    type: string;
+    latitude: number;
+    longitude: number;
+    address?: string;
+    rating?: number;
+  }>;
 }
 
 const MAX_RECENT = 8;

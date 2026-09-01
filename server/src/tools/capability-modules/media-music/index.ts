@@ -17,7 +17,7 @@
  */
 import type { ToolRegistry } from "../../tool-registry.js";
 import type { MediaMusicService } from "../../../services/media-music-service.js";
-import type { WsConnectionRegistry } from "../../../services/ws-connection-registry.js";
+import type { ClientPushPort } from "../../../ports/client-push-port.js";
 
 import {
   createMediaSearchHandler,
@@ -36,13 +36,13 @@ export { MEDIA_MUSIC_INTENT_RULES } from "./intent.js";
  *
  * 调用方：`create-app-services.ts` 启动阶段（通过 capability-modules/index.ts 合并）。
  *
- * @param deps.mediaMusicService    媒体音乐服务（搜索 + WS 推送）
- * @param deps.wsConnectionRegistry WebSocket 连接注册表（已封装在 MediaMusicService 内部，
+ * @param deps.mediaMusicService    媒体音乐服务（搜索 + 反向推送）
+ * @param deps.wsConnectionRegistry 客户端推送端口（已封装在 MediaMusicService 内部，
  *                                  此处保留入参以符合模块约定，便于未来扩展直推场景）
  */
 export function registerMediaMusicTools(
   registry: ToolRegistry,
-  deps: { mediaMusicService: MediaMusicService; wsConnectionRegistry: WsConnectionRegistry },
+  deps: { mediaMusicService: MediaMusicService; wsConnectionRegistry: ClientPushPort },
 ): void {
   // wsConnectionRegistry 已封装在 MediaMusicService 内部，这里仅访问 mediaMusicService。
   registry.register("media.search", createMediaSearchHandler(deps.mediaMusicService));

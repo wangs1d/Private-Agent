@@ -36,8 +36,8 @@ const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
 - 像朋友说话：口语、短句、一句一顿，多数回合两三句就够；不总结、不客服腔、不"首先其次"、不堆砌热情。
-- 拿不准就照实说"我印象里…，但说不好"，可以大胆给猜测和主观看法——这是聊天，不是汇报，说错了下次纠正就好。
-- 你手头只有随手可得的轻量工具（时间、只读日程、能力查询）。凡是需要搜索/查实时信息、创建提醒/写日程、发消息下单等多步操作——也就是手头工具办不完全的事：不要口头答应，不要说"我去查/稍后告诉你"，也不要凭印象编答案，直接调用 agent.escalate_to_complex（参数里写一句为什么需要转交）把这事交给后台办，转交后这轮不再输出任何内容。绝不编造"我查到了/搜了下"。
+- 拿不准、需要查事实/最新信息/具体数据时，不要猜、不要凭印象答——立即调用 agent.escalate_to_complex 转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
+- 凡是需要查事实/最新信息/具体数据、或要做多步操作（写数据、发消息下单等、手头工具办不完全的事）：不要口头答应，不要说"我去查/稍后告诉你"，也不要凭印象编答案，立即调用 agent.escalate_to_complex（参数里写一句为什么需要转交）把这事交给后台办，转交后这轮不再输出任何内容。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
 
@@ -66,7 +66,7 @@ import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
 import type { EvolutionLoopService } from "./evolution-loop-service.js";
 import type { MoodInferenceService } from "./mood-inference-service.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { LifeSignalHubService } from "./life-signal-hub-service.js";
 import { ServerEventType } from "../protocol.js";
 import type {
@@ -273,7 +273,7 @@ export class AgentCore {
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
   private moodInferenceService: MoodInferenceService | null = null;
-  private wsRegistry: WsConnectionRegistry | null = null;
+  private wsRegistry: ClientPushPort | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
   /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
   private brainCenter: BrainCenter | null = null;
@@ -380,7 +380,7 @@ export class AgentCore {
   }
 
   /** 在 bootstrap 注册 WS 连接注册表后注入，用于将情绪事件推送给客户端。 */
-  setWsRegistry(registry: WsConnectionRegistry | null): void {
+  setWsRegistry(registry: ClientPushPort | null): void {
     this.wsRegistry = registry;
   }
 
@@ -2025,11 +2025,14 @@ if (this.isComplexMode(route.mode)) {
       // 目录下（大部分工具在 tool_discover 延迟目录里），"发现工具→执行工具"本身就要两波；
       // 单波限制会让模型第一波只能拿到工具说明就被截断，产出"工具没返回内容都是功能说明"
       // 的断头回复。保持 complex 默认波数（4），由充分性提示控制不浪费轮次。
+      // 2026-08-31 需求：fast 已直接携带搜索/联网工具（search_web/fetch_web/internet.*），
+      // maxRounds 从 1 放宽到 2，支撑"先搜→再抓取/核实"两波；保持 2 而非放开默认，
+      // 避免 fast 在秒回定位下多轮搜索失控。
       ...(this.isFastMode(mode)
         ? {
             toolLoop: {
               ...(baseStreamOpts.toolLoop ?? {}),
-              maxRounds: 1,
+              maxRounds: 2,
             },
           }
         : baseStreamOpts.toolLoop

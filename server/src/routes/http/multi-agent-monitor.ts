@@ -9,11 +9,11 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import type { AgentCore } from "../../services/agent-core.js";
+import type { RuntimeFacade } from "../../runtime/runtime-facade.js";
 import type { ScheduleTaskService } from "../../services/schedule-task-service.js";
 
 function buildAsyncCenterPayload(
-  _agentCore: AgentCore,
+  _runtime: RuntimeFacade,
   scheduleTaskService: ScheduleTaskService,
   sessionId: string,
   messageId?: string,
@@ -84,7 +84,7 @@ function buildAsyncCenterPayload(
 
 export function registerMultiAgentMonitorRoutes(
   app: FastifyInstance,
-  deps: { agentCore?: AgentCore; scheduleTaskService: ScheduleTaskService },
+  deps: { runtime?: RuntimeFacade; scheduleTaskService: ScheduleTaskService },
 ): void {
   /**
    * GET /api/agent/async-center?sessionId=&messageId=
@@ -96,9 +96,9 @@ export function registerMultiAgentMonitorRoutes(
   app.get<{ Querystring: { sessionId?: string; messageId?: string } }>(
     "/api/agent/async-center",
     async (request, reply) => {
-      const agentCore = deps.agentCore;
-      if (!agentCore) {
-        return reply.code(503).send({ ok: false, error: "AgentCore 未就绪" });
+      const runtime = deps.runtime;
+      if (!runtime) {
+        return reply.code(503).send({ ok: false, error: "Agent Runtime 未就绪" });
       }
       const sessionId = String(request.query.sessionId ?? "").trim();
       if (!sessionId) {
@@ -106,7 +106,7 @@ export function registerMultiAgentMonitorRoutes(
       }
       const messageId = String(request.query.messageId ?? "").trim() || undefined;
       return {
-        ...buildAsyncCenterPayload(agentCore, deps.scheduleTaskService, sessionId, messageId),
+        ...buildAsyncCenterPayload(runtime, deps.scheduleTaskService, sessionId, messageId),
         timestamp: new Date().toISOString(),
       };
     },
@@ -120,7 +120,7 @@ export function registerMultiAgentMonitorRoutes(
       targetId?: string;
     };
   }>("/api/agent/async-center/actions", async (request, reply) => {
-    const agentCore = deps.agentCore;
+    const runtime = deps.runtime;
     const sessionId = String(request.body?.sessionId ?? "").trim();
     const channel = String(request.body?.channel ?? "").trim();
     const action = String(request.body?.action ?? "").trim();
@@ -128,8 +128,8 @@ export function registerMultiAgentMonitorRoutes(
     if (!sessionId || !channel || !action || !targetId) {
       return reply.code(400).send({ ok: false, error: "sessionId, channel, action, targetId are required" });
     }
-    if (!agentCore) {
-      return reply.code(503).send({ ok: false, error: "AgentCore 未就绪" });
+    if (!runtime) {
+      return reply.code(503).send({ ok: false, error: "Agent Runtime 未就绪" });
     }
 
     if (channel === "background_task") {
@@ -161,7 +161,7 @@ export function registerMultiAgentMonitorRoutes(
         channel,
         action,
         targetId,
-        snapshot: buildAsyncCenterPayload(agentCore, deps.scheduleTaskService, sessionId),
+        snapshot: buildAsyncCenterPayload(runtime, deps.scheduleTaskService, sessionId),
       };
     }
 

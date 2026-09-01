@@ -7,7 +7,7 @@ import {
   type EventEnvelope,
   type WalletAction,
 } from "../protocol.js";
-import type { AgentCore } from "../services/agent-core.js";
+import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { AuditService } from "../services/audit-service.js";
 import type { SessionService } from "../services/session-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
@@ -165,7 +165,7 @@ export type WsRouteDeps = {
   agentPairingService: AgentPairingService;
   aipService: AipService;
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
-  agentCore: AgentCore;
+  runtime: RuntimeFacade;
   socialFeedService: SocialFeedService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
@@ -199,7 +199,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     agentPairingService,
     aipService,
     worldPartitionWsRegistry,
-    agentCore,
+    runtime,
     socialFeedService,
     computeQuotaService,
     agentMemorySyncService,
@@ -1013,7 +1013,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             },
             userMessagePayload,
             {
-              agentCore,
+              runtime,
               auditService,
               voiceCapabilityService,
               voiceMessageService,
@@ -1034,7 +1034,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             },
             event.payload,
             {
-              agentCore,
+              runtime,
               auditService,
               voiceCapabilityService,
               voiceMessageService,
@@ -1081,7 +1081,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               sendUnifiedError,
             },
             event.payload,
-            { agentCore, auditService },
+            { runtime, auditService },
           );
           return;
         }

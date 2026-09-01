@@ -9,7 +9,7 @@ import {
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { DesktopVisualPort } from "../services/desktop-visual-port.js";
 import { getEmbodimentObserveService } from "../services/embodiment-observe-service.js";
-import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { VisionFrame } from "../external-model/types.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
@@ -28,7 +28,7 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 function sendPatch(
-  wsRegistry: WsConnectionRegistry,
+  wsRegistry: ClientPushPort,
   sessionId: string,
   patch: Parameters<typeof emitEmbodimentPatch>[2],
 ): { delivered: boolean } {
@@ -43,7 +43,7 @@ function sendPatch(
 }
 
 export type EmbodimentToolsDeps = {
-  wsRegistry: WsConnectionRegistry;
+  wsRegistry: ClientPushPort;
   localVisual?: DesktopVisualPort;
   bridge?: DesktopBridgeCoordinator;
 };

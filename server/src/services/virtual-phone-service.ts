@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { ServerEventType } from "../protocol.js";
 import type { TtsService } from "./tts-service.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 import { relayRequiresPairEnv } from "./agent-pairing-service.js";
 import type { AgentPairingService } from "./agent-pairing-service.js";
 import type {
@@ -104,7 +104,7 @@ export class VirtualPhoneService {
 
   constructor(
     private readonly tts: TtsService,
-    private readonly wsRegistry: WsConnectionRegistry,
+    private readonly wsRegistry: ClientPushPort,
     private readonly pairing: AgentPairingService,
   ) {}
 

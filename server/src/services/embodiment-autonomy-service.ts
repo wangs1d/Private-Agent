@@ -5,7 +5,7 @@ import type {
   EmbodimentPatch,
   EmbodimentSender,
 } from "./agent-embodiment.js";
-import type { WsConnectionRegistry } from "./ws-connection-registry.js";
+import type { ClientPushPort } from "../ports/client-push-port.js";
 
 type SessionAutonomyState = {
   mood: EmbodimentMood;
@@ -37,7 +37,7 @@ export class EmbodimentAutonomyService {
   private readonly tickTimer: ReturnType<typeof setInterval>;
   private readonly enabled: boolean;
 
-  constructor(private readonly wsRegistry: WsConnectionRegistry) {
+  constructor(private readonly wsRegistry: ClientPushPort) {
     this.enabled = envAutonomyEnabled();
     this.tickTimer = setInterval(() => this.tick(), 4500);
   }
@@ -152,7 +152,7 @@ export class EmbodimentAutonomyService {
     if (!this.enabled) return;
     const now = Date.now();
     for (const [sessionId, st] of this.sessions) {
-      if (!st.registered || !this.wsRegistry.get(sessionId)) continue;
+      if (!st.registered || !this.wsRegistry.isOnline(sessionId)) continue;
 
       if (st.processing) {
         if (st.mood === "thinking" && now - st.lastCommandAt > randBetween(6500, 9500)) {

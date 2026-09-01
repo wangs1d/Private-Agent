@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { appendFileSync } from "node:fs";
 
-import type { AgentCore } from "../../services/agent-core.js";
+import type { RuntimeFacade } from "../../runtime/runtime-facade.js";
 import type { AuditService } from "../../services/audit-service.js";
 import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
@@ -208,7 +208,7 @@ function stripMediaEchoText(text: string): string {
 }
 
 export type ChatUserMessageHandlerDeps = {
-  agentCore: AgentCore;
+  runtime: RuntimeFacade;
   auditService: AuditService;
   /** 语音能力中枢（可选；注入后支持 contentType=audio 的 ASR 链路） */
   voiceCapabilityService?: VoiceCapabilityService;
@@ -519,7 +519,7 @@ async function processBatchedMessage(
   } catch {
     recentUserTurns = [];
   }
-  const decision = await deps.agentCore.routeTurnForWs(msgActor, batched.text, recentUserTurns);
+  const decision = await deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns);
   const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
     enabled: cfg.interimAck.enabled,
   });
@@ -685,7 +685,7 @@ async function processBatchedMessage(
   let streamedText = "";
 
   try {
-    const reply = await deps.agentCore.handleUserMessage(msgActor, batched.text, {
+    const reply = await deps.runtime.handleUserMessage(msgActor, batched.text, {
       chatUserMessageId: batched.originalMessageId,
       userId: batched.userId,
       agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
@@ -933,7 +933,7 @@ async function processBatchedMessage(
       const startedAt = Date.now();
       toolResult = reply.toolResult
         ? { ok: true, result: reply.toolResult }
-        : await deps.agentCore.runToolIfNeeded(msgActor, reply, {
+        : await deps.runtime.runToolIfNeeded(msgActor, reply, {
             chatUserMessageId: batched.originalMessageId,
             userId: batched.userId,
             agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),

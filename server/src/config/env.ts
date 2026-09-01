@@ -45,8 +45,38 @@ export function getRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RuntimeC
   };
 }
 
-/** 令牌桶 + 滑动窗口 HTTP 限流；默认关闭，生产可设 HTTP_RATE_LIMIT_ENABLED=1。 */
-export function getHttpRateLimitRuntime(env: NodeJS.ProcessEnv = process.env): HttpRateLimitRuntime {
+/**
+ * 进程拓扑配置（Agent runtime 独立后台进程）：
+ *   embedded —— 单进程（今天的形态）：server 同时承担 runtime 与对外网关
+ *   remote   —— 双进程：runtime-main 绑内部 HTTP/WS 端口 + 链路端口；
+ *               gateway-main 绑对外端口做 WS 隧道 + HTTP 反代（可替换的外壳适配器）
+ */
+export type RuntimeTopologyConfig = {
+  mode: "embedded" | "remote";
+  /** runtime 进程内部 HTTP/WS 监听端口（remote 模式；仅本机回环） */
+  runtimeHttpPort: number;
+  /** runtime 链路端口（RuntimeFacade RPC over WS，供非隧道型网关/外壳使用） */
+  runtimeLinkPort: number;
+  /** 链路鉴权 token；设置后客户端须在连接 query 中携带 token */
+  runtimeLinkToken: string | null;
+  /** gateway 对外监听端口（remote 模式） */
+  gatewayPort: number;
+};
+
+export function getRuntimeTopologyConfig(env: NodeJS.ProcessEnv = process.env): RuntimeTopologyConfig {
+  // 缺省 embedded：保持既有单进程行为（npm start / dev:all 不受影响）；
+  // remote 由 runtime-main / gateway-main 入口显式声明
+  const modeRaw = (env.RUNTIME_MODE ?? "embedded").trim().toLowerCase();
+  return {
+    mode: modeRaw === "remote" ? "remote" : "embedded",
+    runtimeHttpPort: parseInteger(env.RUNTIME_HTTP_PORT, 3211),
+    runtimeLinkPort: parseInteger(env.RUNTIME_LINK_PORT, 3210),
+    runtimeLinkToken: env.RUNTIME_LINK_TOKEN?.trim() || null,
+    gatewayPort: parseInteger(env.GATEWAY_PORT, parseInteger(env.PORT, 3000)),
+  };
+}
+
+/** 令牌桶 + 滑动窗口 HTTP 限流；默认关闭，生产可设 HTTP_RATE_LIMIT_ENABLED=1。 */export function getHttpRateLimitRuntime(env: NodeJS.ProcessEnv = process.env): HttpRateLimitRuntime {
   const slidingWindowMs = parsePositiveNumber(env.HTTP_RATE_LIMIT_SLIDING_WINDOW_MS, 60_000);
   const slidingMax = parseInteger(env.HTTP_RATE_LIMIT_SLIDING_MAX, 600);
   const bucketCapacity = parseInteger(env.HTTP_RATE_LIMIT_BUCKET_CAPACITY, 80);

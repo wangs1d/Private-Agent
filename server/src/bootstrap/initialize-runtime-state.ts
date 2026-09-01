@@ -39,7 +39,7 @@ export async function initializeRuntimeState(services: AppServices): Promise<voi
   // 重启后自动恢复未完成的自主任务（状态机任务：pending/planning/executing/verifying，
   // 跳过 paused 与 awaiting_approval），从持久化断点继续执行
   try {
-    const restored = services.agentCore.resumeAutonomousTasks();
+    const restored = await services.runtime.resumeAutonomousTasks();
     if (restored > 0) {
       console.log(`[initialize-runtime-state] 已自动恢复 ${restored} 个未完成的自主任务`);
     }

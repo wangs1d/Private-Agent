@@ -4,20 +4,24 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev:server": "npm run build --prefix ../agent-world",
+    "predev:server": "npm run build --prefix ../agent-world && npm run build --prefix ../packages/agent-protocol",
     "dev:server:watch": "node ../scripts/dev-server-watch.mjs",
     "dev:server": "npm run predev:server && npm run dev:server:watch",
     "dev:stack": "npm run dev:all --prefix ..",
     "dev:all": "npm run dev:all --prefix ..",
     "dev": "npm run dev:all --prefix ..",
+    "dev:remote": "node ../scripts/dev-all.mjs --remote",
     "dev:ports:free": "npm run dev:ports:free --prefix ..",
-    "build": "npm run build --prefix ../agent-world && tsc -p tsconfig.json",
+    "build": "npm run build --prefix ../agent-world && npm run build --prefix ../packages/agent-protocol && tsc -p tsconfig.json",
     "start": "node scripts/start-with-gateway.mjs",
     "start:server": "node dist/index.js",
+    "start:runtime": "node dist/runtime-main.js",
+    "start:gateway": "node dist/gateway-main.js",
     "test": "tsx --test test/**/*.test.ts",
     "eval:recall": "tsx scripts/eval-memory-recall.ts",
     "test:master-agent": "tsx test/master-agent.test.ts",
-    "bench:ttft": "tsx scripts/bench-ttft.ts"
+    "bench:ttft": "tsx scripts/bench-ttft.ts",
+    "dev:runtime": "npm run predev:server && node ../scripts/dev-server-watch.mjs runtime"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
@@ -41,7 +45,9 @@
     "sharp": "^0.35.3",
     "tokenjuice": "^0.7.1",
     "xlsx": "^0.18.5",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@private-ai-agent/agent-protocol": "0.1.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.3",
