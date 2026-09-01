@@ -295,7 +295,7 @@ class UiaController:
             if title:
                 needle = title.strip().lower()
                 root = self._uia.GetRootElement()
-                walker = self._uia.CreateControlViewWalker()
+                walker = self._uia.ControlViewWalker
                 child = walker.GetFirstChildElement(root)
                 while child is not None:
                     try:
@@ -335,7 +335,7 @@ class UiaController:
         if not self.is_available() or root_ref is None:
             return []
         out: list[dict[str, Any]] = []
-        walker = self._uia.CreateControlViewWalker()
+        walker = self._uia.ControlViewWalker
         self._snapshot_walk(walker, root_ref, "", 0, min(max(1, max_depth), 12), min(max(1, limit), 500), out)
         return out
 
@@ -378,7 +378,7 @@ class UiaController:
         parts = [p for p in str(path).strip().split(".") if p]
         if not parts:
             return None
-        walker = self._uia.CreateControlViewWalker()
+        walker = self._uia.ControlViewWalker
         node = root_ref
         for part in parts:
             try:

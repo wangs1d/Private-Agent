@@ -1,9 +1,13 @@
 """剪贴板读写（CF_UNICODETEXT）。
 
-Windows 用 ctypes（零第三方依赖）；macOS/Linux 回退 pbcopy/pbxclip/xclip/xsel
+Windows 用 ctypes（零第三方依赖）；macOS/Linux 回退 pbcopy/xclip/xsel
 命令行工具；均不可用时 get 返回 None、set 返回 False，调用方自行降级。
 
 剪贴板可能被其他进程短暂锁住，统一带 3 次重试（50ms 间隔）。
+
+Windows ctypes 注意：所有返回 HANDLE/HGLOBAL 的 API 必须显式声明
+restype = c_void_p——64 位进程下默认 restype 是 c_int，会把 64 位指针
+截断成 32 位导致句柄无效（GlobalAlloc 返回值 >4GB 时必现）。
 """
 from __future__ import annotations
 
@@ -68,11 +72,36 @@ def set_text(text: str) -> bool:
 
 # ---- Windows ctypes 实现 ----
 
-def _get_text_win32() -> str | None:
+def _win32_libs():
+    """加载 user32/kernel32 并显式声明句柄相关签名（见模块 docstring）。"""
     import ctypes
 
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.CloseClipboard.argtypes = []
+    user32.EmptyClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.argtypes = []
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_bool
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    return user32, kernel32
+
+
+def _get_text_win32() -> str | None:
+    user32, kernel32 = _win32_libs()
     if not user32.OpenClipboard(None):
         raise OSError("OpenClipboard 失败（被其他进程占用）")
     try:
@@ -83,6 +112,8 @@ def _get_text_win32() -> str | None:
         if not ptr:
             return None
         try:
+            import ctypes
+
             return ctypes.wstring_at(ptr)
         finally:
             kernel32.GlobalUnlock(handle)
@@ -93,8 +124,7 @@ def _get_text_win32() -> str | None:
 def _set_text_win32(text: str) -> bool:
     import ctypes
 
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    user32, kernel32 = _win32_libs()
     if not user32.OpenClipboard(None):
         raise OSError("OpenClipboard 失败（被其他进程占用）")
     try:

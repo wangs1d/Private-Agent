@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 class ActionKind(str, Enum):
     CLICK = "click"
     DOUBLE_CLICK = "double_click"
+    TRIPLE_CLICK = "triple_click"
     RIGHT_CLICK = "right_click"
     MOVE = "move"
     SCROLL = "scroll"
@@ -40,7 +41,10 @@ class DesktopActionOutput(BaseModel):
 
     @model_validator(mode="after")
     def validate_coordinates(self) -> "DesktopActionOutput":
-        actions_needing_coords = {ActionKind.CLICK, ActionKind.DOUBLE_CLICK, ActionKind.RIGHT_CLICK, ActionKind.MOVE}
+        actions_needing_coords = {
+            ActionKind.CLICK, ActionKind.DOUBLE_CLICK, ActionKind.TRIPLE_CLICK,
+            ActionKind.RIGHT_CLICK, ActionKind.MOVE,
+        }
         if self.action in actions_needing_coords:
             if self.x is None or self.y is None:
                 raise ValueError(f"Action '{self.action.value}' requires x and y coordinates")

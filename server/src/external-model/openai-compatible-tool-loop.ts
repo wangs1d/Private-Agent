@@ -320,6 +320,41 @@ function resolveToolExecutionTimeoutMs(registryToolName: string): number {
 }
 
 /**
+ * 桥接调用（tool_discover / tool_search / tool_describe / tool_call 解析）超时上限。
+ * 桥接只做检索与参数解析（真实工具执行另有 TOOL_TIMEOUT 竞速），但底层走
+ * tool-router（HTTP 30s / stdio worker 60s 命令超时）+ 冷备 TS 检索，历史上
+ * 无任何超时包装——worker 假死时整个工具循环永不返回，会话队列锁死。
+ * 默认 70s = worker 命令超时 60s + 余量，env TOOL_BRIDGE_TIMEOUT_MS 可调。
+ */
+function resolveToolBridgeTimeoutMs(): number {
+  const n = Number.parseInt(process.env.TOOL_BRIDGE_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 70_000;
+}
+
+function executeBridgeWithTimeout(
+  bridgeName: string,
+  args: Record<string, unknown>,
+  catalog: Parameters<typeof executeBridge>[2],
+): Promise<Awaited<ReturnType<typeof executeBridge>>> {
+  const timeoutMs = resolveToolBridgeTimeoutMs();
+  return new Promise<Awaited<ReturnType<typeof executeBridge>>>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`tool bridge timeout: ${bridgeName} exceeded ${timeoutMs}ms`));
+    }, timeoutMs);
+    executeBridge(bridgeName, args, catalog).then(
+      (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
  * 失败工具结果的强约束 reminder。
  *
  * 为什么需要：LLM 在面对 user 期待型请求（如"打开微信"）时，训练倾向会让它
@@ -2301,6 +2336,12 @@ export async function streamCompletionWithTools(
     tailDynamicContext?: string;
     /** 输出 token 上限（对应 OpenAI 的 max_tokens）；不传则不限制 */
     maxOutputTokens?: number;
+    /**
+     * 中断信号：透传到循环内每次 LLM 请求（规划轮 + 总结轮）。
+     * 用户发新消息 abort 旧轮时，工具分支的流式请求同样会被中断——
+     * 此前只有非工具分支传了 signal，工具分支挂死时只能吃满 SDK 默认超时。
+     */
+    signal?: AbortSignal;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
     audit?: { sessionId?: string; stage?: "main_chat" };
   },
@@ -2444,7 +2485,10 @@ export async function streamCompletionWithTools(
           // → 撞上 tool_choice='specified' 直接 400。直接 spread 到顶层。
           ...(options?.extraBody ?? {}),
         };
-        stream = await client.chat.completions.create(request as Parameters<typeof client.chat.completions.create>[0]);
+        stream = await client.chat.completions.create(
+          request as Parameters<typeof client.chat.completions.create>[0],
+          options?.signal ? { signal: options.signal } : undefined,
+        );
         auditInputChars = JSON.stringify(requestMessages).length + JSON.stringify(stableApiTools ?? []).length;
         break;
       } catch (e) {
@@ -2778,7 +2822,7 @@ export async function streamCompletionWithTools(
       let registryToolName = resolveRegistryToolName(fn.name);
       let notifyToolName = registryToolName;
       if (isToolSearchBridgeName(registryToolName) && registryToolName === "tool_call") {
-        const bridge = await executeBridge(registryToolName, args, deferredToolCatalog);
+        const bridge = await executeBridgeWithTimeout(registryToolName, args, deferredToolCatalog);
         if (bridge.kind === "call" && bridge.ok) {
           notifyToolName = bridge.registryToolName;
         }
@@ -2813,7 +2857,7 @@ export async function streamCompletionWithTools(
         let targetArgs = item.parsedArgs;
 
         if (isToolSearchBridgeName(item.registryToolName)) {
-          const bridge = await executeBridge(
+          const bridge = await executeBridgeWithTimeout(
             item.registryToolName,
             item.parsedArgs,
             deferredToolCatalog,
@@ -3212,7 +3256,7 @@ export async function streamCompletionWithTools(
         temperature: 0.5,
         max_tokens: 800,
         stream: true,
-      });
+      }, options?.signal ? { signal: options.signal } : undefined);
 
       let summaryText = "";
       let needMore = false;

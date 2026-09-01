@@ -64,6 +64,8 @@ BUILTIN_ACTION_SCHEMA = """Allowed actions:
     Example: {"action":"click","x":512,"y":340,"reasoning":"Clicking the Start button"}
   double_click: Double click at (x,y). Requires x, y.
     Example: {"action":"double_click","x":200,"y":150,"reasoning":"Opening the file"}
+  triple_click: Triple click at (x,y) to select a whole paragraph. Requires x, y.
+    Example: {"action":"triple_click","x":300,"y":200,"reasoning":"Selecting the paragraph"}
   right_click: Right click at (x,y). Requires x, y.
     Example: {"action":"right_click","x":300,"y":400,"reasoning":"Opening context menu"}
   move: Move mouse to (x,y). Requires x, y. Optional: move_duration_s (0-5s).
@@ -103,7 +105,7 @@ You may only reason from the provided screenshot.
 Return exactly one JSON object and nothing else.
 
 Allowed schema:
-- action: click | double_click | right_click | move | scroll | type | key | wait | done
+- action: click | double_click | triple_click | right_click | move | scroll | type | key | wait | done
 - x, y: integer pixel coordinates relative to the screenshot
 - button: optional, left|right|middle, default left
 - clicks: optional integer, default 1

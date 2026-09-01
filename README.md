@@ -6,7 +6,7 @@
 - `client/flutter_app/`：Windows / Flutter 客户端
 - `agent-world/`：独立的 Agent World 模块
 - `agent-sphere-avatar/`：3D 球形 Agent 形象与悬浮层
-- `desktop-visual/`：桌面视觉与自动化桥接
+- `desktop-visual/`：桌面视觉与自动化桥接（工具地图见 [docs/desktop-control.md](docs/desktop-control.md)）
 - `openclaw-plugins/`：外部插件桥接
 
 ## 先看哪里

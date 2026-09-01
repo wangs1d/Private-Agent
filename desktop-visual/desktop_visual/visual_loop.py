@@ -227,6 +227,11 @@ class VisualDesktopLoop:
             self._pointer.click(x, y, clicks=2)
             return False, f"double_click ({x},{y})"
 
+        if kind == "triple_click":
+            x, y = xy()
+            self._pointer.click(x, y, clicks=3)
+            return False, f"triple_click ({x},{y})"
+
         if kind == "right_click":
             x, y = xy()
             self._pointer.click(x, y, button="right", clicks=1)
