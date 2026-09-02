@@ -33,11 +33,14 @@ const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 // 指令谎言——模型没有工具却被要求装作查过，产出"我搜了下，工具没返回内容"这类
 // 既暴露机制又没干活的回复。新版三条主线：接话头亮观点（活人感）、能力边界诚实
 // （查不了就照实说，不假装）、机制词汇零暴露（用户对面是个人，不是套系统）。
+// 2026-09-02 对齐 search-first 分工：fast 已携带 search_web/search_images（链路
+// AnySearch 优先、多引擎兜底），查实时信息先自己搜，不再"一律升级"；escalate 只接
+// 写数据/多步/搜索办不完全——消除两套指令打架导致模型两头都不调的静默失败。
 const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
 - 像朋友说话：口语、短句、一句一顿，多数回合两三句就够；不总结、不客服腔、不"首先其次"、不堆砌热情。
-- 拿不准、需要查事实/最新信息/具体数据时，不要猜、不要凭印象答——立即调用 agent.escalate_to_complex 转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
-- 凡是需要查事实/最新信息/具体数据、或要做多步操作（写数据、发消息下单等、手头工具办不完全的事）：不要口头答应，不要说"我去查/稍后告诉你"，也不要凭印象编答案，立即调用 agent.escalate_to_complex（参数里写一句为什么需要转交）把这事交给后台办，转交后这轮不再输出任何内容。绝不编造"我查到了/搜了下/结果是"。
+- 要查实时信息（新闻、某人近况、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
+- 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，才调用 agent.escalate_to_complex（参数里写一句原因）转交后台，转交后这轮不再输出其他内容。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
 - 永远不暴露机制词汇：不提工具、接口、返回、路由、后台、任务系统，不说"工具没返回内容"这类话。用户对面是一个人，不是一套系统。`;
 
@@ -142,7 +145,12 @@ import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
 import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
-import { ESCALATION_TOOL_NAME, isEscalationSignal } from "../tools/escalation-tool.js";
+import {
+  ESCALATION_TOOL_NAME,
+  formatEscalationAttempts,
+  isEscalationSignal,
+  parseEscalationPayload,
+} from "../tools/escalation-tool.js";
 import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
@@ -1641,6 +1649,8 @@ if (this.isComplexMode(route.mode)) {
         learningActive?: boolean;
       };
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
+      /** 升级继承（2026-09-02）：fast 车道已尝试工具调用记录块，注入 complex prompt */
+      inheritedToolContext?: string;
     },
   ): Promise<string> {
     const registry = this.wsRegistry;
@@ -1671,6 +1681,7 @@ if (this.isComplexMode(route.mode)) {
               cognitiveEmotion: ctx.cognitiveEmotion,
               cognitiveUserPattern: ctx.cognitiveUserPattern,
               cognitiveToolPlan: ctx.cognitiveToolPlan,
+              inheritedToolContext: ctx.inheritedToolContext,
               ...(simpleToolLane ? { simpleToolLane: true } : {}),
             });
           // 结果兜底：任何 complex 分支必须产出非空最终文本，杜绝"调用工具但
@@ -1838,6 +1849,8 @@ if (this.isComplexMode(route.mode)) {
       semanticIntent?: SemanticIntent;
       /** 简单单点工具快车道：跳过 plan-execute，单轮工具循环即可完成 */
       simpleToolLane?: boolean;
+      /** 升级继承（2026-09-02）：fast 车道已尝试工具调用记录块，complex prompt 注入 */
+      inheritedToolContext?: string;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
@@ -1930,6 +1943,7 @@ if (this.isComplexMode(route.mode)) {
             recentConversationHistory: ctx.recentConversationHistory,
             journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
+            inheritedToolContext: ctx.inheritedToolContext,
             userLocation: ctx.userLocation,
             personalization: ctx.personalization,
             onToolLoopAfterBatch: onBatchWithEvolution,
@@ -2140,16 +2154,24 @@ if (this.isComplexMode(route.mode)) {
       );
 
       // ── 车道内升级（2026-08-29）：fast 轮办不成的事重放 complex ──
-      // 升级哨兵由工具循环在三种情形返回：模型调用 agent.escalate_to_complex、
-      // 纯宣告未兑现、需要联网信息但 fast 无搜索工具。fast 路径上 LLM
-      // 已经产生的流式文本通过上面的 createFastPathDeltaGate 暂存，升级时
-      // 调用 gate.discard() 整段丢弃；非升级时调用 gate.flush() 一次性推前端，
-      // 保证升级场景下用户只看到 complex 的最终回复，不会先看到 fast 残文。
+      // 升级哨兵由工具循环在以下情形返回：模型调用 agent.escalate_to_complex、
+      // 统一出口仲裁判定「诉求未满足」（调了工具但失败/道歉式收场/需联网未搜）。
+      // 2026-09-02 起哨兵携带 fast 轮工具尝试记录（升级继承）：complex 重放时
+      // 注入【上游尝试记录】块，首波带着部分成果续办而非从头盲搜。fast 路径上
+      // 已产生的流式文本通过 createFastPathDeltaGate 暂存，升级时 gate.discard()
+      // 整段丢弃；非升级时 gate.flush() 一次性推前端。
       if (this.isFastMode(mode) && isEscalationSignal(full)) {
-        console.info(`[AgentCore] fast→complex 车道内升级：${text.slice(0, 48)}`);
+        const escalation = parseEscalationPayload(full);
+        const inheritedBlock = escalation?.attempts.length
+          ? formatEscalationAttempts(escalation.attempts)
+          : undefined;
+        console.info(
+          `[AgentCore] fast→complex 车道内升级：${text.slice(0, 48)}` +
+            (escalation?.attempts.length ? `（继承 ${escalation.attempts.length} 条工具尝试）` : ""),
+        );
         (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
           ._current?.discard();
-        full = await this.escalateFastTurnToComplex(actorId, text, opts, ctx);
+        full = await this.escalateFastTurnToComplex(actorId, text, opts, ctx, inheritedBlock);
       } else {
         (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
           ._current?.flush();
@@ -2203,6 +2225,8 @@ if (this.isComplexMode(route.mode)) {
       };
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
     },
+    /** 升级继承：fast 轮已尝试工具调用的格式化记录块（可为空） */
+    inheritedToolContext?: string,
   ): Promise<string> {
     const provider = this.externalChat!;
     const chatSessionId = resolvePrimaryChatSessionId(
@@ -2224,6 +2248,7 @@ if (this.isComplexMode(route.mode)) {
       cognitiveEmotion: ctx.cognitiveEmotion,
       cognitiveUserPattern: ctx.cognitiveUserPattern,
       cognitiveToolPlan: ctx.cognitiveToolPlan,
+      inheritedToolContext,
     });
   }
 

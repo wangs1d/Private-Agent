@@ -628,3 +628,33 @@ test("real-dialog: 顿号 enumeration becomes chips card", () => {
     "chips",
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// steps 意图标记回归（2026-09-02「性感一点的女生照片」案例）：
+// 「先/再」是口语最高频的连接词，不构成步骤语义——修复前含「你先看看…
+// 我再往红毯那边翻翻」的纯闲聊被切成 8 条编号碎片上步骤卡。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("steps intent ignores 先/再 connectives (photo-chat regression)", () => {
+  const reply =
+    "给你找了几张景甜的，偏温婉甜美那一挂，也有套海蓝色亮片薄纱裙的，带点清凉性感味。" +
+    "你先看看合不合口味。要是想要更性感火辣的那种，我再往红毯活动造型那边翻翻。";
+  const items = extractSemanticItems(reply).map((text) => ({ text, type: "num" }));
+  // 全文只有「先/再」两个口语连接词 → steps 意图分为 0，不路由到 steps
+  const type = routeDisplayEffect({ title: "", items, fullText: reply });
+  assert.ok(type !== "steps", `闲聊不应上步骤卡，实际: ${type}`);
+  // 闲聊文本整体不上任何内容卡（保持纯文本聊天节奏）
+  assert.equal(formatSemanticResultForChat(reply), null);
+});
+
+test("steps intent still fires on strong sequence markers", () => {
+  // 「先A，然后B，最后C」含 然后+最后 两个强标记 → 步骤语义保留
+  const marked = formatSemanticResultForChat(
+    "先把水烧开，然后放入面条，最后加上调料拌一拌，就可以开吃了。",
+    "cooking.make",
+  );
+  assert.ok(marked, "强顺序标记的叙述仍应上步骤卡");
+  const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
+  assert.ok(m);
+  assert.equal(JSON.parse(m![1]!).cardType, "steps");
+});

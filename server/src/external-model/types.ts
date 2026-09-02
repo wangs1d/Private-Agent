@@ -61,6 +61,8 @@ export type AgentPromptMemoryContext = {
   sessionRecap?: string;
   /** 用户打断的回复上下文，用于整合到下一次回复中 */
   interruptedContext?: string;
+  /** 升级继承（2026-09-02）：fast 车道已尝试未成功的工具调用记录，供 complex 续办 */
+  inheritedToolContext?: string;
   /** 基于 IP 识别的用户所在地（注入 system，供位置相关问答使用） */
   userLocation?: string;
   /** Per-turn task profile and operating policy injected into the system prompt. */

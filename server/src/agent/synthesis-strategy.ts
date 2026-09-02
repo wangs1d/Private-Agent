@@ -1,4 +1,4 @@
-import { isDirectFactQuery } from "./direct-fact-query.js";
+import { isDirectFactQuery, isDigestRoundupQuery } from "./direct-fact-query.js";
 
 /**
  * 数据驱动回复策略评估器
@@ -48,6 +48,7 @@ export interface DataQualityAssessment {
 /** 回复策略 */
 export type SynthesisStrategy =
   | "framework_attribution" // 高质量数据：结论先行 + 2-4 维度归因
+  | "digest_roundup"        // 动态/近况盘点：按主题分组汇总，信息用足
   | "layered_progressive"   // 中等数据：先事实后推断，分层递进
   | "honest_sparse"          // 低质量数据：坦诚说明已知+未知
   | "multi_perspective"      // 矛盾数据：多视角对比
@@ -79,19 +80,26 @@ function isFetchTool(name: string): boolean {
 
 /** 从工具结果中提取文本内容 */
 function extractToolText(result: Record<string, unknown>): string {
-  // 常见字段优先级：text > content > snippet > answer > summary > body
-  const fields = ["text", "content", "snippet", "answer", "summary", "body", "results", "data"];
+  // 常见字段优先级：text > content > snippet > answer > summary > body。
+  // items 必须在列：search_web / search_images 等搜索工具的结果都挂在 items 数组下，
+  // 之前漏掉该字段导致整份搜索结果走 JSON 兜底被截到 500 字符，
+  // 质量评估长期误判为「medium/500字符」，策略指令随之退化成求简模式。
+  const fields = ["text", "content", "snippet", "answer", "summary", "body", "items", "results", "data"];
   for (const field of fields) {
     const val = result[field];
     if (typeof val === "string" && val.trim()) return val;
     if (Array.isArray(val)) {
-      // 搜索结果数组：拼接每条的 snippet/title
+      // 搜索结果数组：拼接每条的 snippet/title（含时间/来源，供策略判断信息密度）
       const texts = val
         .map((item) => {
           if (typeof item === "string") return item;
           if (item && typeof item === "object") {
             const obj = item as Record<string, unknown>;
-            return String(obj.snippet ?? obj.content ?? obj.text ?? obj.title ?? "");
+            const body = String(obj.snippet ?? obj.content ?? obj.text ?? obj.summary ?? "");
+            const title = typeof obj.title === "string" ? obj.title : "";
+            const when = String(obj.publishedAt ?? obj.time ?? obj.date ?? "");
+            const line = [title, body, when].map((s) => s.trim()).filter(Boolean).join(" | ");
+            return line;
           }
           return "";
         })
@@ -150,7 +158,12 @@ export function assessDataQuality(toolData: CollectedToolData[]): DataQualityAss
   } else if (successCount === 0) {
     level = "low";
     reason = `全部工具调用失败（${failureCount}次）`;
-  } else if (successCount >= 3 && totalContentLength > 800 && toolDiversity >= 2) {
+  } else if (
+    (successCount >= 3 && totalContentLength > 800 && toolDiversity >= 2) ||
+    // 单工具也能拿到充分数据：一次搜索返回大量条目（内容总量充足）时按高质量对待，
+    // 不能因为「只调了一种工具」就把多来源检索结果压成 medium 去做求简回复
+    (successCount >= 1 && totalContentLength > 1500)
+  ) {
     level = "high";
     reason = `多源充分（${successCount}个成功结果，${toolDiversity}种工具，${totalContentLength}字符）`;
   } else if (successCount >= 1 && totalContentLength > 200) {
@@ -178,6 +191,16 @@ export function assessDataQuality(toolData: CollectedToolData[]): DataQualityAss
 export function selectStrategy(quality: DataQualityAssessment, userMessage: string): StrategyDirective {
   const isAnalysisQuestion = /为什么|分析|怎么回事|原因|导致|影响|怎么回事|怎么回事|背后|逻辑/i.test(userMessage);
   const directFactQuery = isDirectFactQuery(userMessage);
+  const digestRoundup = isDigestRoundupQuery(userMessage);
+
+  /** 动态/近况盘点类：按主题分组、信息用足——对齐「用户要的是一份汇总」的预期 */
+  const digestInstruction = (label: string): string =>
+    `你${label}检索结果，用户要的是「动态/近况盘点」类汇总。请组织一份信息充分的回答：\n` +
+    `1. 开头一两句给出总体印象（如"最近主要围绕X和Y两件事"）\n` +
+    `2. 按主题分组展开（如：事件进展 / 新作品 / 日常动态），每组用小标题或自然分段\n` +
+    `3. 保留具体细节：日期、数字、人名、作品名、原话——这些是用户最想看的\n` +
+    `4. 多条结果讲同一件事时合并为一个条目；不同事件不要遗漏\n` +
+    `5. 结尾一句话自然收束；篇幅与信息量匹配，信息多就写充分，不要人为压缩成几句话`;
 
   let strategy: SynthesisStrategy;
   let instruction: string;
@@ -190,6 +213,14 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
       break;
 
     case "high":
+      // 高质量数据 + 盘点类问题 → 按主题分组汇总
+      if (digestRoundup) {
+        strategy = "digest_roundup";
+        instruction = digestInstruction(
+          `已拿到多来源检索结果（${quality.successCount}个来源，共${quality.totalContentLength}字符），`,
+        );
+        break;
+      }
       // 高质量数据 + 分析类问题 → 框架归因
       if (isAnalysisQuestion) {
         strategy = "framework_attribution";
@@ -217,6 +248,17 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
       break;
 
     case "medium":
+      // 中等数据 + 盘点类 → 仍按分组汇总组织，能确认多少整理多少，
+      // 不用「推断/待验证」框架把答案写虚
+      if (digestRoundup) {
+        strategy = "digest_roundup";
+        instruction =
+          digestInstruction(
+            `拿到了部分检索结果（${quality.successCount}个来源，共${quality.totalContentLength}字符），`,
+          ) +
+          `\n6. 只整理检索结果里能确认的内容，信息不足的部分结尾一句话带过，不要虚构细节填充`;
+        break;
+      }
       // 中等数据 → 分层递进（先事实后推断）
       strategy = "layered_progressive";
       instruction =

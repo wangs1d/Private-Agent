@@ -278,6 +278,12 @@ export type BuildPromptContextInput = {
   userText?: string;
   narrativeRecall?: string;
   interruptedContext?: string;
+  /**
+   * 升级继承（2026-09-02）：fast 车道升级 complex 时携带的「上游已尝试工具调用」
+   * 记录块（已由 agent-core 格式化为可注入文本）。complex 据此避免原样重试已失败
+   * 的调用，带着部分成果续办。
+   */
+  inheritedToolContext?: string;
   userLocation?: string;
   personalization?: PersonalizationPromptSlice;
   /**
@@ -576,6 +582,12 @@ export class PromptContextBuilder {
       ? `【上一轮回复被打断的残留内容——仅供背景参考，不要在回复中承接、提及或道歉它】\n${input.interruptedContext.trim()}\n【用户已发送新消息，请直接、干净地回答新消息，不要以"哈哈被你看穿""我刚查XX"之类的话开头】`
       : undefined;
 
+    // 升级继承块（2026-09-02）：fast 车道已尝试但未成功的工具调用记录。
+    // 目的有二：①不原样重试已失败的调用；②基于已尝试方向换关键词/换工具续办。
+    const inheritedToolContext = input.inheritedToolContext?.trim()
+      ? `【上游尝试记录——本轮前置车道已试过以下工具调用但未拿到实质结果】\n${input.inheritedToolContext.trim()}\n【要求】不要原样重试上面已失败的调用；基于这些尝试换关键词、换工具（如文本搜索/网页抓取）或换数据源继续，真正把事办成后如实汇报；若确实办不成，具体说明卡在哪。不要向用户复述这份记录或提及"前置车道/升级"等机制词。`
+      : undefined;
+
     // 追问降权策略（记忆架构重构后简化）：长期记忆字段已由 longTermEnabled 单一门控，
     // 门控未命中时直接为 undefined，不再需要追问压缩分支；追问场景仅保留
     // 短期上下文（STM/recentHistory/followUpAnchor）的差异化长度，服务指代消解。
@@ -829,6 +841,7 @@ export class PromptContextBuilder {
         ? { yesterdayHighlight: compactPromptBlock(yesterdayHighlight, 200) }
         : {}),
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
+      ...(inheritedToolContext ? { inheritedToolContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
       ...(compactTravelState ? { travelState: compactTravelState } : {}),

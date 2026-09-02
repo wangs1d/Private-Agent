@@ -6,11 +6,20 @@ import { isActionableTaskRequest } from "./task-intent.js";
 
 export type LlmExecutionMode = "fast" | "complex";
 
+/**
+ * 能力需求标签（2026-09-02 路由标签化）：LLM 语义路由不再直接输出二值车道，
+ * 而是输出「这轮需要什么能力」，车道由 intent-router 的路由表确定性映射。
+ */
+export type RouteNeed = import("./intent-router.js").IntentLabel;
+
 export type RouteDecision = {
   mode: LlmExecutionMode;
   reasons: string[];
   /** 是否需要对回复做短句分段（闲聊式对话分段，工具/搜索/知识问答不分段）。 */
   segmentable: boolean;
+  /** 语义路由识别的意图标签 + 置信度（词法降级路径可能缺省）。 */
+  intent?: import("./intent-router.js").IntentLabel;
+  confidence?: number;
 };
 
 const DELEGATE_KEYWORDS = [
@@ -157,6 +166,9 @@ function shouldUseFastChatLane(message: string): boolean {
   if (CHAT_ONLY_RE.test(text)) return true;
   if (CASUAL_FAST_CHAT_RE.test(text)) return true;
   if (requiresSubAgent(text)) return false;
+  // 媒体诉求（照片/图片/壁纸…）不短路：L0 无意图标签，吞掉会让 L1 语义分类
+  // 失去机会——「性感一点的女生照片」这类短诉求必须落到 media_retrieval 车道。
+  if (MEDIA_REQUEST_RE.test(text)) return false;
   if (!shouldSkipNarrativeRecall(text)) return false;
   if (TOOL_OR_REALTIME_RE.test(text)) return false;
   if (INFORMATIONAL_REQUEST_RE.test(text)) return false;
@@ -164,6 +176,7 @@ function shouldUseFastChatLane(message: string): boolean {
   if (MULTI_STEP_RE.test(text) && text.length > 48) return false;
   return text.length <= 12;
 }
+export { shouldUseFastChatLane };
 
 export type RouteLlmExecutionOptions = {
   preferFullPipeline?: boolean;
@@ -177,10 +190,28 @@ export type RouteLlmExecutionOptions = {
 // 一律下沉 complex，由后台真正调搜索工具后回传结果。
 // 不复用 forced-tool 的 FRESH_WEB_LOOKUP_RE：它含"怎么样了/什么情况"等宽泛问候语，
 // 在路由级会把"你最近怎么样"这类寒暄误升级 complex。
+// 2026-09-02 补"消息|动态"：真实案例「刘浩存最近的消息」因缺词漏判，fast 车道
+// 无搜索工具时模型含糊作答、兜底正则也未命中，静默失败。
+// ── 媒体诉求信号（路由级，2026-09-02）──
+// 「性感一点的女生照片」线上真实案例：短（≤12 字）且不含任何既有硬信号词，
+// 被 L0 词法短路直接判成 chat——聊天语境没有媒体工具束与出口仲裁加持，
+// 模型只能凭空编「给你找了几张」，照片永远出不来。媒体诉求与搜索诉求同权：
+// L0 不得吞掉（放行给 L1 语义分类 → media_retrieval → fast+媒体工具束+strict 仲裁），
+// 回复也不做闲聊式分段（媒体轮是信息性内容）。
+// 词表与 tool-loop 的 MEDIA_NEED_RE 对齐：「图」不单独成词，防图书/地图误伤。
+const MEDIA_REQUEST_RE =
+  /照片|图片|美照|壁纸|表情包|头像|搜图|找图|出图|视频|写真|自拍|帅照|靓照/i;
+
+/** 判断用户消息是否明确要求找图/照片/视频等媒体内容。 */
+export function requiresMediaRetrieval(text: string): boolean {
+  if (!text) return false;
+  return MEDIA_REQUEST_RE.test(text);
+}
+
 const FRESH_INFO_LOOKUP_RE =
-  /搜一搜|搜下|搜索|查查|查一下|查一查|帮我查|联网|八卦|吃瓜|爆料|热搜|头条|资讯|近况|的瓜|新瓜|有什么瓜|扒一扒|扒下|新闻|比分|票房|股价|行情|汇率|上新|新出了|发布了|上映|排片|影讯/i;
+  /搜一搜|搜下|搜索|查查|查一下|查一查|帮我查|联网|八卦|吃瓜|爆料|热搜|头条|资讯|近况|的瓜|新瓜|有什么瓜|扒一扒|扒下|新闻|消息|动态|比分|票房|股价|行情|汇率|上新|新出了|发布了|上映|排片|影讯/i;
 const FRESH_INFO_CHAT_OVERRIDE_RE =
-  /你最近(怎么样|如何|咋样)|最近(过得|过|咋|怎)么样|最近忙|在忙(什么|啥)|你的近况|你近况/i;
+  /你最近(怎么样|如何|咋样)|你最近忙|你在忙(什么|啥)|最近(过得|过|咋|怎)么样|你的近况|你近况/i;
 
 /**
  * 判断用户消息是否明确要求查外部实时信息（搜索/查一下/吃瓜/行情…）。
@@ -263,7 +294,10 @@ export function determineSegmentable(text: string, mode: LlmExecutionMode): bool
   if (mode === "complex") return false;
   const t = text.trim();
   if (CHAT_ONLY_RE.test(t) || CASUAL_FAST_CHAT_RE.test(t)) return true;
-  if (TOOL_OR_REALTIME_RE.test(t) || INFORMATIONAL_REQUEST_RE.test(t)) return false;
+  // 媒体/工具/知识轮是信息性内容（常伴随照片墙/结构化卡片），不做闲聊分段
+  if (MEDIA_REQUEST_RE.test(t) || TOOL_OR_REALTIME_RE.test(t) || INFORMATIONAL_REQUEST_RE.test(t)) {
+    return false;
+  }
   return true;
 }
 

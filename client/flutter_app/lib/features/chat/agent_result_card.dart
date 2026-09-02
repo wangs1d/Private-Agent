@@ -799,9 +799,10 @@ class _TimelineCard extends StatelessWidget {
 
 /// 图片/媒体结果卡：纯图廊。
 ///
-/// 单张照片以大图重点展示（底部带一句说明），多张照片以网格并排、顶部标注
-/// 总数。点击任意照片在右侧双栏打开大图，同一绿泡内可前后切换
-/// （见 [ImagePreviewPanel]）。视频条目仍展示缩略图 + 来源 + 播放角标。
+/// 竖向大图流版式：每张照片全宽展示（优先自然宽高比，竖幅人像不再被
+/// 裁成横条），下方带一句说明；顶部标注总数。点击任意照片在右侧双栏
+/// 打开大图，同一绿泡内可前后切换（见 [ImagePreviewPanel]）。
+/// 视频条目仍展示缩略图 + 来源 + 播放角标。
 class _MediaCard extends StatelessWidget {
   const _MediaCard({required this.data, required this.cs});
 
@@ -814,9 +815,10 @@ class _MediaCard extends StatelessWidget {
     final String groupTitle = (data.groupTitle ?? "").trim();
     final bool isGrouped = groupTitle.isNotEmpty;
 
-    // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）+ 说明 + 对比侧
-    final List<({String url, String caption, String side})> photos =
-        <({String url, String caption, String side})>[];
+    // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）
+    // + 说明 + 自然宽高比 + 对比侧
+    final List<({String url, String caption, double? aspect, String side})> photos =
+        <({String url, String caption, double? aspect, String side})>[];
     final List<String> allPhotoUrls = <String>[];
     // 收集视频（缩略图可空：后端已保证不把播放页/搜索页 URL 当图下发；
     // 无缩略图时前端显示视频占位图标，点击仍可打开播放页）
@@ -862,6 +864,7 @@ class _MediaCard extends StatelessWidget {
         photos.add((
           url: resolved,
           caption: _photoCaption(it.text),
+          aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
         ));
         allPhotoUrls.add(resolved);
@@ -871,11 +874,11 @@ class _MediaCard extends StatelessWidget {
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
 
     // 分组/对比模式：左侧(A) + 右侧(B) 分栏；无侧的归入常规网格
-    final List<({String url, String caption, String side})> leftPhotos =
+    final List<({String url, String caption, double? aspect, String side})> leftPhotos =
         photos.where((p) => p.side == "A").toList();
-    final List<({String url, String caption, String side})> rightPhotos =
+    final List<({String url, String caption, double? aspect, String side})> rightPhotos =
         photos.where((p) => p.side == "B").toList();
-    final List<({String url, String caption, String side})> plainPhotos =
+    final List<({String url, String caption, double? aspect, String side})> plainPhotos =
         photos.where((p) => p.side != "A" && p.side != "B").toList();
     final bool hasColumns =
         isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
@@ -888,8 +891,8 @@ class _MediaCard extends StatelessWidget {
     // 顶部先渲染 A/B 列头，后续每行图片填满各自列宽（方形自适应），
     // 保证两列等宽整齐；某侧缺图时该格显示「—」占位。
     List<Widget> buildCompareRows(
-      List<({String url, String caption, String side})> aList,
-      List<({String url, String caption, String side})> bList,
+      List<({String url, String caption, double? aspect, String side})> aList,
+      List<({String url, String caption, double? aspect, String side})> bList,
     ) {
       final bool showHeader = hasColumnHeaders;
       final int count = aList.length > bList.length ? aList.length : bList.length;
@@ -1013,14 +1016,17 @@ class _MediaCard extends StatelessWidget {
                   MediaGallery(
                     urls: <String>[plainPhotos.first.url],
                     captions: <String>[plainPhotos.first.caption],
+                    aspects: <double?>[plainPhotos.first.aspect],
                     previewGallery: allPhotoUrls,
                     cs: cs,
                   )
                 else
-                  // 多张：自适应网格（2 列方图 / ≥3 列小图），每格可点击，
+                  // 多张：竖向逐张大图流（自然宽高比 + 逐张说明），每张可点击，
                   // 同一绿泡内可前后切换（预览图池用全部照片）。
                   MediaGallery(
                     urls: plainPhotos.map((p) => p.url).toList(),
+                    captions: plainPhotos.map((p) => p.caption).toList(),
+                    aspects: plainPhotos.map((p) => p.aspect).toList(),
                     previewGallery: allPhotoUrls,
                     cs: cs,
                   ),
@@ -1080,7 +1086,7 @@ class _MediaCard extends StatelessWidget {
   /// A/B 对比单格：图片按列宽等比占满（方形自适应），下方带来源说明，点击可预览；
   /// 该侧缺图时显示统一浅色「—」占位，与有图一侧等高对齐。
   Widget _compareCell(
-    ({String url, String caption, String side})? entry,
+    ({String url, String caption, double? aspect, String side})? entry,
     List<String> gallery,
   ) {
     if (entry == null) {
@@ -1387,8 +1393,8 @@ String? extractUrlFromText(String text) {
 /// 否则会出现「段落文字 → 大边框卡 → 段落文字」的割裂感，违反用户
 /// 「一段介绍文字然后挨着放一两张图」的产品诉求。
 ///
-/// 交给自适应画廊 [MediaGallery]：单张→Hero 大图（可带说明）；2 张→2 列方图；
-/// ≥3 张→3 列小图。跟正文共用一个气泡，视觉上才是「文字+图」的自然交错。
+/// 交给自适应画廊 [MediaGallery]：竖向逐张铺排全宽大图（自然宽高比）+ 逐张说明，
+/// 跟正文共用一个气泡，视觉上才是「文字+图」的自然交错。
 class MediaInlineRow extends StatelessWidget {
   const MediaInlineRow({
     super.key,
@@ -1402,9 +1408,9 @@ class MediaInlineRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    // 解析每张图的可用地址 + caption + 侧标签；视频单独收集走视频面板
-    final List<({String url, String caption, String side})> photos =
-        <({String url, String caption, String side})>[];
+    // 解析每张图的可用地址 + caption + 自然宽高比 + 侧标签；视频单独收集走视频面板
+    final List<({String url, String caption, double? aspect, String side})> photos =
+        <({String url, String caption, double? aspect, String side})>[];
     final List<String> allUrls = <String>[];
     final List<
         ({
@@ -1447,14 +1453,15 @@ class MediaInlineRow extends StatelessWidget {
         photos.add((
           url: resolved,
           caption: _photoCaption(text),
+          aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
         ));
         allUrls.add(resolved);
       }
     }
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
-    // 照片走自适应画廊：单张→Hero 大图；2 张→2 列方图；≥3 张→3 列小图。
-    // 视频走与照片同风格的面板：单条→16:9 大图带播放角标；多条→2 列网格。
+    // 照片走自适应画廊：竖向逐张大图 + 说明。视频走与照片同风格的面板：
+    // 单条→16:9 大图带播放角标；多条→2 列网格。
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -1463,6 +1470,7 @@ class MediaInlineRow extends StatelessWidget {
           MediaGallery(
             urls: allUrls,
             captions: photos.map((p) => p.caption).toList(),
+            aspects: photos.map((p) => p.aspect).toList(),
             previewGallery: allUrls,
             cs: cs,
           ),

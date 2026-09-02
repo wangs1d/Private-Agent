@@ -24,6 +24,8 @@ class AgentResultItem {
     this.source,
     this.side,
     this.sideLabel,
+    this.width,
+    this.height,
   });
 
   /// "check"（✓ 已完成） / "num"（• 序号） / "warn"（! 警告）
@@ -50,6 +52,21 @@ class AgentResultItem {
   /// 侧标签（如「A 品牌」「B 品牌」），用于分栏表头。
   final String? sideLabel;
 
+  /// 原图宽/高（像素，可选）：照片按自然宽高比渲染大图，竖幅人像不再被裁切。
+  final int? width;
+  final int? height;
+
+  /// 自然宽高比（width/height），缺数据时返回 null。
+  double? get naturalAspect {
+    final int? w = width;
+    final int? h = height;
+    if (w == null || h == null || w <= 0 || h <= 0) return null;
+    final double aspect = w / h;
+    // 过滤明显异常的比例（极端长图/宽条），异常时回退默认版式
+    if (aspect < 0.4 || aspect > 2.8) return null;
+    return aspect;
+  }
+
   factory AgentResultItem.fromJson(Map<String, dynamic> json) {
     return AgentResultItem(
       type: json["type"]?.toString() ?? "check",
@@ -63,6 +80,8 @@ class AgentResultItem {
       source: json["source"]?.toString(),
       side: json["side"]?.toString(),
       sideLabel: json["sideLabel"]?.toString(),
+      width: (json["width"] as num?)?.toInt(),
+      height: (json["height"] as num?)?.toInt(),
     );
   }
 }

@@ -980,6 +980,8 @@ export function attachMediaSearchMarker(
     const mediaUrl = String(it.mediaUrl ?? "").trim();
     const pageUrl = String(it.pageUrl ?? "").trim();
     const source = String(it.source ?? "").trim();
+    const width = Number(it.width);
+    const height = Number(it.height);
     // 丢弃没有任何可加载媒体地址的无效项（空缩略图/空媒体地址），
     // 保证渲染出来的媒体卡片每个都能看到图，不夹带"占了位置的空白项"。
     const hasMedia = !!(thumbnailUrl || mediaUrl);
@@ -993,6 +995,8 @@ export function attachMediaSearchMarker(
       mediaType: isVideo ? "video" : "image",
       pageUrl,
       source,
+      ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+      ...(Number.isFinite(height) && height > 0 ? { height } : {}),
     });
   }
   if (cardItems.length === 0) return text;
@@ -1031,6 +1035,10 @@ export type MediaCardItem = {
   pageUrl?: string;
   /** 来源名称 */
   source?: string;
+  /** 原图宽（像素，可选）：前端按原始宽高比渲染大图，避免竖幅人像被裁切 */
+  width?: number;
+  /** 原图高（像素，可选）：与 width 配合得出自然宽高比 */
+  height?: number;
   /**
    * 对比分组维度标题（如「水屋」「沙屋」）。为空表示不分组，
    * 前端按普通图廊渲染；非空时按此字段分组、左右两侧分栏展示。
@@ -1112,6 +1120,8 @@ export function extractMediaCards(
     const mediaUrl = String(it.mediaUrl ?? "").trim();
     const pageUrl = String(it.pageUrl ?? "").trim();
     const source = String(it.source ?? "").trim();
+    const width = Number(it.width);
+    const height = Number(it.height);
     const groupTitle = String(it.compareGroup ?? "").trim();
     const sideRaw = String(it.compareSide ?? "").trim();
     const side = sideRaw === "A" || sideRaw === "B" ? sideRaw : undefined;
@@ -1135,6 +1145,8 @@ export function extractMediaCards(
       mediaUrl: mediaUrl || undefined,
       pageUrl: pageUrl || undefined,
       source: source || undefined,
+      ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+      ...(Number.isFinite(height) && height > 0 ? { height } : {}),
       ...(groupTitle ? { groupTitle } : {}),
       ...(side ? { side } : {}),
       ...(sideLabel ? { sideLabel } : {}),

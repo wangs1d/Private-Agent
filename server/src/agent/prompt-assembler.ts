@@ -70,6 +70,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "memoryOpenLoops",
   "sessionRecap",
   "interruptedContext",
+  "inheritedToolContext",
   "currentTime",
   "conversationTimeline",
   "skillIndex",
@@ -203,6 +204,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   ]);
   if (todoBlock) dynamicContext.push(todoBlock);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
+  if (m.inheritedToolContext) dynamicContext.push(m.inheritedToolContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
   if (m.skillIndex) dynamicContext.push(m.skillIndex);

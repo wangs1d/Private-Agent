@@ -544,16 +544,20 @@ export function extractSemanticItems(text: string): string[] {
 const SEMANTIC_INTENT_SCORERS: Readonly<
   Partial<Record<Exclude<DisplayEffectType, "">, (fullText: string) => number>>
 > = {
-  // steps：单个连接词（"然后"）或单个教程词（"怎么弄"）在对话里太常见，
-  // 不足以支撑上卡（真实误判案例："先落地歇脚…然后飞巴厘岛…"、"报名到底要
-  // 怎么弄" 都被切成碎片卡）。要求 ≥2 个不同的顺序引导词才给意图分；
-  // 真教程/流程几乎必带列表语法或编号，由形态评分器（scoreSteps）承接。
-  // 先/再 是口语最高频的顺序引导词（"先A再B最后C"），一并计入。
+  // steps：只认成套的顺序话语标记（≥2 个不同标记才给意图分）。
+  // 「先/再」单独出现只是口语连接词，不构成步骤语义（真实误判案例：
+  // 「你先看看合不合口味…我再往红毯活动造型那边翻翻」这句纯闲聊曾被
+  // 切成 8 条编号碎片上步骤卡）——降级为辅助证据：仅在已有一个强标记
+  // （首先/然后/最后/第X步…）时参与计数，保住「先A，再B，最后C」这类
+  // 真步骤叙述；真教程/流程带列表语法的由形态评分器承接。
   steps: (t) => {
     const markers = new Set(
-      t.match(/(?:首先|其次|再次|然后|接着|最后|第[一二三四五六七八九十]+步|先|再)/g) ?? [],
+      t.match(/(?:首先|其次|再次|然后|接着|最后|第[一二三四五六七八九十百\d]+步)/g) ?? [],
     );
-    return markers.size >= 2 ? 0.62 : 0;
+    if (markers.size >= 2) return 0.62;
+    // 辅助证据：已有强标记时，「先/再」可补足第二个标记（"先A，再B，最后C"）
+    if (markers.size >= 1 && /先|再/.test(t)) return 0.62;
+    return 0;
   },
   compare: (t) =>
     // 词边界 \b 只对 ASCII 词（vs/pk）有意义：中文词后跟 \b 时，JS 把汉字

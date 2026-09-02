@@ -40,9 +40,10 @@ import {
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
 import { requiresFreshExternalInfo } from "../agent/task-router.js";
 import {
+  buildEscalationSentinel,
   ESCALATE_TOOL_SCHEMA,
-  ESCALATION_SENTINEL,
   ESCALATION_TOOL_NAME,
+  type EscalationToolAttempt,
 } from "../tools/escalation-tool.js";
 import {
   FRESH_FACT_TOOL_NAMES,
@@ -78,22 +79,25 @@ import type {
 } from "./types.js";
 import { executeWithToolLimit } from "../services/concurrency-limiter.js";
 import { evaluateAndSelectStrategy } from "../agent/synthesis-strategy.js";
+import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 
 // 工具结果字符预算：在信息完整性和 token 节省之间取平衡。
-// search_web 1200：保留足够 title+snippet（约 5-6 条结果）让 LLM 判断哪些值得 fetch_web。
-// fetch_web 2000：正文摘要足够 LLM 提取关键信息，不过度截断导致信息丢失。
+// search_web 5000：一次搜索默认返回 12-16 条 title+snippet（约 3000-4500 字符），
+// 之前压到 600 字符只露出约 4 条标题，LLM 在「看不到结果」的状态下收尾，
+// 是「搜到 16 条却答得潦草」的最大数据瓶颈。
+// fetch_web 3000 / deep_search 6000：深读正文要支撑细节复述，截太狠等于白抓。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
-  "search_web": 600,
+  "search_web": 5000,
   "search_images": 1200,
   "search_videos": 1200,
-  "fetch_web": 1000,
+  "fetch_web": 3000,
   // deep_search 返回正文，限制注入量避免整页内容灌给 LLM
-  "deep_search": 2200,
+  "deep_search": 6000,
   // hot_rankings 榜单项字段少，给足即可
   "hot_rankings": 1400,
-  "info.search": 600,
+  "info.search": 5000,
   "info.inspect_webpage": 1000,
   "info.navigate_site": 1200,
   "browser.session.list": 600,
@@ -102,7 +106,7 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "aip.list_my_state": 800,
   "self.list_custom_skills": 800,
   "agent.query_capabilities": 900,
-  "search": 600,
+  "search": 5000,
   "describe": 800,
   "tool_search": 800,
   "tool_discover": 800,
@@ -157,6 +161,18 @@ const META_TOOL_NAMES = new Set<string>([
   "brain.identify_capability_gap",
   "self.list_custom_skills",
   "aip.list_my_state",
+]);
+
+/**
+ * 满足「拿到外部实时/媒体内容」诉求的工具集（出口仲裁的 satisfied 判定用，2026-09-02）。
+ * 比 FRESH_FACT_TOOL_NAMES（强制 search_web 的判定集）宽：图片/视频诉求由
+ * search_images/search_videos 满足，不必强迫走文本搜索。
+ */
+const FRESH_SATISFYING_TOOL_NAMES = new Set([
+  ...FRESH_FACT_TOOL_NAMES,
+  "search_images",
+  "search_images_batch",
+  "search_videos",
 ]);
 
 function getToolResultBudget(toolName: string): number | undefined {
@@ -523,7 +539,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期；用简短编号句或自然段口语化呈现，禁止使用 Markdown 表格、管道符、简报格式。若用户只问单一事实判断，默认输出“结论 + 1句依据”，不要再把同一判断换句式复述一遍。",
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用口语化分段或小标题呈现，禁止使用 Markdown 表格、管道符；只有用户问单一事实判断时才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。",
       parameters: {
         type: "object",
         properties: {
@@ -2278,7 +2294,11 @@ async function* singleChunkSource(chunk: NormalChatChunk): AsyncGenerator<Normal
  */
 function buildToolSufficiencyHint(toolName: string, content: string | undefined): string {
   if (!content || content.length < 8) return "";
-  return `[系统提示] ${toolName} 的结果已完整返回，信息通常足以直接回答；除非结果明确缺失关键字段，不要重复调用同一工具。`;
+  return (
+    `[系统提示] ${toolName} 的结果已完整返回，不要重复同一查询。` +
+    `但若这些摘要/片段不足以覆盖用户要的细节（如具体事件经过、正文内容、多主题盘点），` +
+    `应继续用 fetch_web / deep_search 深读相关链接，而不是仅凭摘要直接收尾。`
+  );
 }
 
 export async function streamCompletionWithTools(
@@ -2342,7 +2362,65 @@ export async function streamCompletionWithTools(
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
   let satisfiedFreshWebLookup = false;
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
-  const allToolExecResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }> = [];
+  const allToolExecResults: Array<{
+    toolName: string;
+    ok: boolean;
+    input?: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }> = [];
+
+  // ── 统一出口仲裁（2026-09-02）──
+  // 之前升级/重试判定散落在多个收尾分支出口，且判据用「allToolExecResults.length === 0」
+  // （零工具执行）——把「调了工具但失败」这种恰恰最需要升级的形态排除在外（真实案例：
+  // 「帮我搜索景甜的照片」search_images 失败后模型拿机制话收场，无任何兜底接住）。
+  // 现收敛为单一判定：有外部信息/媒体诉求（或收尾是道歉式机制话）+ 没有任何成功的
+  // 实质工具结果 → 诉求未满足。fast 车道在该出口升级 complex，complex 车道仅触发重试。
+  // 媒体诉求：找图/照片/视频类需求。保守起见「图」不单独成词（避免图书/地图误伤），
+  // 只匹配完整词。
+  const MEDIA_NEED_RE = /照片|图片|壁纸|表情包|头像|搜图|找图|出图|视频/i;
+  /** 有实质产出的成功工具数：元工具（能力查询/目录检索）与失败执行不计入。 */
+  const countSubstantiveOkResults = (): number =>
+    allToolExecResults.filter((r) => r.ok && !META_TOOL_NAMES.has(r.toolName)).length;
+  /** fast 出口仲裁：本轮收尾是否「用户诉求未满足」。null = 满足，可正常收尾。 */
+  const assessTurnUnsatisfied = (finalText: string): string | null => {
+    if (countSubstantiveOkResults() > 0) return null;
+    if (requiresFreshExternalInfo(userText) || MEDIA_NEED_RE.test(userText)) {
+      return "user_needs_external_info_but_no_tool_succeeded";
+    }
+    // 无外部信息/媒体诉求时，仅当「确实尝试过实质工具仍失败且道歉式收场」才升级；
+    // 纯闲聊里的一句「我不知道」不升级（避免情绪对话被重放 complex 改变人格节奏）。
+    const substantiveFailureSeen = allToolExecResults.some(
+      (r) => !r.ok && !META_TOOL_NAMES.has(r.toolName),
+    );
+    if (substantiveFailureSeen && isApologyStyleFallback(finalText.trim())) {
+      return "tool_attempted_but_failed_with_apology";
+    }
+    return null;
+  };
+  /** 压缩尝试记录的单字段：优先取 query/url/keyword/error 等关键键，截断到 120 字。 */
+  const compactAttemptField = (value: unknown): string | undefined => {
+    if (value == null) return undefined;
+    let s: string;
+    if (typeof value === "string") {
+      s = value;
+    } else if (typeof value === "object") {
+      const rec = value as Record<string, unknown>;
+      const key = rec.query ?? rec.keyword ?? rec.url ?? rec.searchTerm ?? rec.error;
+      s = typeof key === "string" ? key : JSON.stringify(value);
+    } else {
+      s = String(value);
+    }
+    s = s.replace(/\s+/g, " ").trim();
+    return s ? s.slice(0, 120) : undefined;
+  };
+  /** fast 轮工具尝试记录：随升级哨兵带给 complex，首波带着部分成果续办（升级继承）。 */
+  const buildAttemptRecords = (): EscalationToolAttempt[] =>
+    allToolExecResults.slice(-6).map((r) => ({
+      tool: r.toolName,
+      ok: r.ok,
+      input: compactAttemptField(r.input),
+      detail: compactAttemptField((r.result as Record<string, unknown> | undefined)?.error ?? r.result),
+    }));
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
   // 不跨轮持久——跨轮缓存由 ctx.getCachedToolResult 的 TTL 缓存负责）。
   // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
@@ -2389,12 +2467,19 @@ export async function streamCompletionWithTools(
         "2. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。\n" +
+        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。正文按「一图一句」组织：对搜到的照片逐张给一句 ≤24 字的观感/卖点介绍（一段一句、顺序与图片一致），前端会把照片与介绍逐张交错排版；不要写成编号清单，也不要把图片链接复述进正文。\n" +
         "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。",
     });
   }
 
-  for (let wave = 0; wave < maxWaves; wave++) {
+  // 失败换路预算（2026-09-02）：存在失败的工具执行时，fast 追加 1 波
+  // 「换工具重试」预算（如 search_images 失败 → 改 search_web/fetch_web），
+  // 不挤占正常收尾预算；complex 波次充裕不追加。总上限 4，防失败循环膨胀。
+  // 用闭包函数而非常量：for 条件与波次终止决策读取同一份动态预算（失败发生后生效）。
+  const effectiveMaxWaves = (): number =>
+    fastProfile ? Math.min(maxWaves + (allToolExecResults.some((r) => !r.ok) ? 1 : 0), 4) : maxWaves;
+
+  for (let wave = 0; wave < effectiveMaxWaves(); wave++) {
     let retriedToolCallIdError = false;
     let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
@@ -2607,35 +2692,37 @@ export async function streamCompletionWithTools(
       //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
       //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
 
-      // ── 行动宣告未兑现兜底（根治「回复了却没结果」）──
-      // 真人感·行动宣告提示词诱导 LLM 先输出「我这就去查…」「稍后告诉你」这类承诺，
-      // 但某些轮次（尤其 fast 单波）LLM 宣告完就 finishReason=stop，结果一个工具都没调，
-      // 最终被当成正式答复返回 → 用户只看到承诺、拿不到结果。
-      // 此处检测：文本命中行动宣告模式 且 本轮从未执行过任何工具 且 未强制过 → 注入
-      // 指令强制补打一波真实工具调用，不允许空头宣告当作收尾。全程最多授予一次。
-      // 不受 maxWaves / requiresFreshWebLookup 限制——fast 模式唯一波次也要兜住。
-      // ── fast 车道升级保底（2026-08-29 车道内升级）──
-      // fast 是 maxRounds=1 + 轻量工具子集的有损模式。注意：fast 下宣告补打的
-      // `continue` 会越过 maxWaves=1 直接落进无 schema 的 summary 调用——模型重试
-      // 时根本没有工具可调，补打在 fast 是死路。因此 fast 命中以下两种情形时
-      // 跳过补打、直接升级 complex 重放：
-      //   1. 回复是纯宣告（"我这就去查/稍后告诉你"）且没调任何工具；
-      //   2. 用户明确要求查实时信息（requiresFreshExternalInfo），但 fast 车道没有
-      //      搜索工具且模型一个工具都没调（forced-tool 的强制联网兜底在此静默失效）。
-      // 仅 fastProfile 生效：complex 有全量工具与多波预算，保留原补打链。
+      // ── 收尾兜底链（2026-09-02 重构：先便宜重试，再统一仲裁升级）──
+      // 旧实现把「fast 零工具升级保底」放在最前，且判据 allToolExecResults.length===0
+      // 把「调了工具但失败」排除在升级之外。新顺序：
+      //   1) 强制联网重试（complex/fast 通用，一次）——比整轮升级便宜，优先给机会；
+      //   2) 宣告未兑现补打（零工具 + 纯宣告，一次）；
+      //   3) fast 统一出口仲裁——成功口径判据（无任何成功的实质工具结果 + 用户诉求
+      //      未满足），覆盖「调了但失败」「宣告」「假搜索」全部形态 → 升级 complex。
+      // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
+      // 重规划一次（不额外消耗波次预算，全程最多授予一次）。
+      // 2026-08-28 修复：移除 `wave + 1 < maxWaves` 门槛。wave -= 1 已补偿波次预算。
       if (
-        fastProfile &&
-        allToolExecResults.length === 0 &&
-        (isActionAnnouncementOnly(finalText) || requiresFreshExternalInfo(userText))
+        requiresFreshWebLookup &&
+        !satisfiedFreshWebLookup &&
+        !freshLookupEnforced
       ) {
-        console.info(
-          `[openai-tool-loop] fast 车道升级：${
-            isActionAnnouncementOnly(finalText) ? "宣告未兑现" : "需要联网信息但 fast 无搜索工具"
-          } → 重放 complex`,
-        );
-        logPrefixCacheStats();
-        return ESCALATION_SENTINEL;
+        freshLookupEnforced = true;
+        wave -= 1; // 补回本次被消耗的波次： enforcement 轮不计入规划预算
+        messages.push({
+          role: "assistant",
+          content: finalText || fullText || "(需要调用搜索工具获取最新信息)",
+        });
+        messages.push({
+          role: "system",
+          content:
+            "This turn requires fresh web evidence. Do not send a final answer yet. Call search_web first, then use fetch_web or info.* if needed, and only answer after you have real search results.",
+        });
+        continue;
       }
+      // 行动宣告未兑现兜底（根治「回复了却没结果」）：文本命中行动宣告模式 且
+      // 本轮从未执行过任何工具 且 未强制过 → 注入指令强制补打一波真实工具调用。
+      // 全程最多授予一次。
       if (
         isActionAnnouncementOnly(finalText) &&
         allToolExecResults.length === 0 &&
@@ -2655,29 +2742,19 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
-
-      // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
-      // 重规划一次（不额外消耗波次预算，全程最多授予一次）。
-      // 2026-08-28 修复：移除 `wave + 1 < maxWaves` 门槛——该条件把 fast 模式
-      // （maxWaves=1）的强制联网兜底整个挡死，fast 轮"宣告查过实则没调工具"
-      // 的假搜索回复无防线。wave -= 1 已补偿波次预算，fast 模式也允许强制补搜。
-      if (
-        requiresFreshWebLookup &&
-        !satisfiedFreshWebLookup &&
-        !freshLookupEnforced
-      ) {
-        freshLookupEnforced = true;
-        wave -= 1; // 补回本次被消耗的波次： enforcement 轮不计入规划预算
-        messages.push({
-          role: "assistant",
-          content: finalText || fullText || "(需要调用搜索工具获取最新信息)",
-        });
-        messages.push({
-          role: "system",
-          content:
-            "This turn requires fresh web evidence. Do not send a final answer yet. Call search_web first, then use fetch_web or info.* if needed, and only answer after you have real search results.",
-        });
-        continue;
+      // fast 统一出口仲裁：轨迹内便宜重试已用尽（或不可用）仍「诉求未满足」→
+      // 升级 complex 重放，携带本轮工具尝试记录供 complex 续办（升级继承）。
+      // 仅 fastProfile 生效：complex 是顶层车道，无再升级出口。
+      if (fastProfile) {
+        const unsatisfiedReason = assessTurnUnsatisfied(finalText);
+        if (unsatisfiedReason) {
+          console.info(
+            `[openai-tool-loop] fast 出口仲裁：${unsatisfiedReason}` +
+              `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 重放 complex`,
+          );
+          logPrefixCacheStats();
+          return buildEscalationSentinel(buildAttemptRecords());
+        }
       }
       // 空正文整合兜底（2026-08-29）：isApologyStyleFallback("")=true，旧行为会
       // 把 lastToolOutputFallback（工具输出原文，如 travel.plan-itinerary 的
@@ -2993,12 +3070,13 @@ export async function streamCompletionWithTools(
 
     // 车道内升级：escalate 被调用 → 立即终止 fast 工具循环，交还 agent-core 重放 complex。
     // 不再向 messages 追加 tool 结果（本轮消息序列废弃，重放从干净线程重新开始）。
+    // 哨兵携带本轮工具尝试记录（升级继承）：complex 首波避免原样重试已失败的调用。
     if (escalationRequested) {
       console.info(
-        `[openai-tool-loop] fast 车道升级：${ESCALATION_TOOL_NAME} 被调用 → 重放 complex`,
+        `[openai-tool-loop] fast 车道升级：${ESCALATION_TOOL_NAME} 被调用 → 重放 complex（携带 ${allToolExecResults.length} 条尝试记录）`,
       );
       logPrefixCacheStats();
-      return ESCALATION_SENTINEL;
+      return buildEscalationSentinel(buildAttemptRecords());
     }
 
     for (let i = 0; i < workItems.length; i++) {
@@ -3011,7 +3089,9 @@ export async function streamCompletionWithTools(
         settled.status === "fulfilled" ? settled.value.wireToolName : item.registryToolName;
 
       toolResults.push({ name: wireToolName, ok: exec.ok });
-      if (exec.ok && FRESH_FACT_TOOL_NAMES.has(wireToolName)) {
+      // B 判据修正（2026-09-02）：图片/视频诉求由 search_images/search_videos 满足，
+      // 不再只认 web 检索四件套——否则图片搜索成功也算「联网诉求未满足」被误升级。
+      if (exec.ok && FRESH_SATISFYING_TOOL_NAMES.has(wireToolName)) {
         satisfiedFreshWebLookup = true;
       }
       if (isInteractiveToolName(wireToolName)) {
@@ -3023,10 +3103,11 @@ export async function streamCompletionWithTools(
         ok: exec.ok,
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
       });
-      // 累积工具结果供 summary 调用做策略评估
+      // 累积工具结果供 summary 调用做策略评估（input 供升级继承记录关键入参）
       allToolExecResults.push({
         toolName: wireToolName,
         ok: exec.ok,
+        input: item.parsedArgs,
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
       });
       const toolContent = compacted.content;
@@ -3088,8 +3169,8 @@ export async function streamCompletionWithTools(
     });
     lastToolOutputFallback = buildFallbackAnswerFromToolOutputs(roundToolOutputs);
 
-    // ── 波次终止决策 ──
-    const wavesRemaining = wave + 1 < maxWaves;
+    // ── 波次终止决策 ──（与 for 条件共用 effectiveMaxWaves：失败发生后预算 +1）
+    const wavesRemaining = wave + 1 < effectiveMaxWaves();
     if (!wavesRemaining) {
       // 预算耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）
       break;
@@ -3121,6 +3202,20 @@ export async function streamCompletionWithTools(
   // ── 兜底 SUMMARIZE：波次耗尽仍未收尾的工具链（无逃生门的最终汇总，流式输出）──
   const finalSummary = await runSchemaLessSummary(false);
   logPrefixCacheStats();
+  // fast 统一出口仲裁（summary 路径，2026-09-02）：summary 收尾不经过上方
+  // final-text 分支的仲裁，这里补一道——「帮我搜索景甜的照片」案例的漏点：
+  // search_images 失败 → 波次耗尽 → schema-less summary 产出机制话直接返回，
+  // 既不重试也不升级。此处拦截后升级 complex 续办。
+  if (fastProfile) {
+    const summaryUnsatisfiedReason = assessTurnUnsatisfied(finalSummary.text);
+    if (summaryUnsatisfiedReason) {
+      console.info(
+        `[openai-tool-loop] fast summary 出口仲裁：${summaryUnsatisfiedReason}` +
+          `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 重放 complex`,
+      );
+      return buildEscalationSentinel(buildAttemptRecords());
+    }
+  }
   return finalSummary.text;
 
   /**
@@ -3137,6 +3232,10 @@ export async function streamCompletionWithTools(
   async function runSchemaLessSummary(
     escapeAllowed: boolean,
   ): Promise<{ text: string; needMore: boolean }> {
+    // summary 输出预算：跟随调用方的 maxOutputTokens（fast 主链路默认不设限），
+    // 未配置时给 2000 兜底，保证多来源汇总有展开空间
+    const summaryMaxTokens =
+      options?.maxOutputTokens && options.maxOutputTokens > 0 ? options.maxOutputTokens : 2000;
     try {
       // 过滤无效 assistant message：OpenAI API 要求 assistant 消息必须有 content 或 tool_calls
       const sanitizedMessages = messages.filter((m) => {
@@ -3188,11 +3287,15 @@ export async function streamCompletionWithTools(
             `（包括"翻了一圈""公开渠道没查到""据我了解最新消息"等说法）；` +
             `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
           : "";
+      // 求简指令只对真正的单一事实查询生效；盘点/汇总类问题要求把回答组织充分
+      const singleFactClause = isDirectFactQuery(userText)
+        ? `单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。`
+        : `数据丰富时把回答组织充分（可按主题分组），不要为了简短丢掉用户想看的细节。`;
       const baseDirective =
         (substantiveToolResults.length > 0
           ? `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
             `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
-            `同一事实不要换个说法再总结第二遍；单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。`
+            `同一事实不要换个说法再总结第二遍；${singleFactClause}`
           : `请基于本轮对话上下文用自然的口语回答用户的问题。`) +
         strategyBlock +
         zeroToolGuard +
@@ -3210,7 +3313,10 @@ export async function streamCompletionWithTools(
         model,
         messages: summaryMessages,
         temperature: 0.5,
-        max_tokens: 800,
+        // 输出上限跟随调用方配置；默认 2000 保证盘点/汇总类回答有充分展开空间。
+        // 之前硬编码 800，把多来源汇总硬截成一小段，是「回复潦草」的直接原因之一
+        // （主链路设计是默认不限 max_tokens，见 agent-core fastMaxOutputTokens 注释）。
+        ...(summaryMaxTokens ? { max_tokens: summaryMaxTokens } : {}),
         stream: true,
       });
 

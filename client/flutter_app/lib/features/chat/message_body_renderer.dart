@@ -335,6 +335,8 @@ AgentResultItem _cardToItem(Map<String, dynamic> m) {
     source: m["source"]?.toString(),
     side: m["side"]?.toString(),
     sideLabel: m["sideLabel"]?.toString(),
+    width: (m["width"] as num?)?.toInt(),
+    height: (m["height"] as num?)?.toInt(),
   );
 }
 

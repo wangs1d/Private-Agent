@@ -46,3 +46,24 @@ test("uses phased async conversation for complex mode", () => {
   assert.equal(result.mode, "complex");
   assert.equal(shouldUsePhasedAsyncConversation(text, result.mode), true);
 });
+
+// ── 媒体诉求路由回归（2026-09-02「性感一点的女生照片」案例）──
+import { shouldUseFastChatLane, determineSegmentable, requiresMediaRetrieval } from "../src/agent/task-router.js";
+
+test("media requests bypass the L0 chat short-circuit", () => {
+  // 线上真实案例：短（≤12 字）且不含任何既有硬信号词的找图请求，
+  // 被 L0 词法短路判成 chat——聊天语境没有媒体工具，模型只能凭空编
+  // 「给你找了几张」。修复：媒体诉求词法信号命中时不允许 L0 短路，
+  // 放行给 L1 语义分类（media_retrieval → fast + 媒体工具束 + strict 仲裁）。
+  assert.equal(requiresMediaRetrieval("性感一点的女生照片"), true);
+  assert.equal(shouldUseFastChatLane("性感一点的女生照片"), false);
+  assert.equal(shouldUseFastChatLane("来点性感一点的女生的照片"), false);
+  assert.equal(shouldUseFastChatLane("找几张海蓝色亮片薄纱裙的图"), false);
+});
+
+test("media request replies are not chat-segmented", () => {
+  // 媒体轮是信息性内容（照片墙 + 逐张介绍），不做闲聊式短句分段
+  assert.equal(determineSegmentable("性感一点的女生照片", "fast"), false);
+  // 纯寒暄仍分段
+  assert.equal(determineSegmentable("在吗", "fast"), true);
+});
