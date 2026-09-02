@@ -319,6 +319,10 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             requestSystemMessages: promptPlan.requestSystemMessages,
             tailDynamicContext: promptPlan.tailDynamicContext,
             maxOutputTokens: effectiveStreamOpts.maxOutputTokens,
+            // 工具分支同样透传 AbortSignal：用户发新消息中断旧轮时，
+            // 工具循环内的 LLM 流式请求（规划轮 + 总结轮）一并中断，
+            // 不再吃满 SDK 默认超时（与非工具分支对齐）。
+            signal: effectiveStreamOpts.signal,
             audit: { sessionId, stage: "main_chat" },
           },
         );

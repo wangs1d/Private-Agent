@@ -9,7 +9,10 @@ import { resolveActorId } from "../../agent/actor-id.js";
 import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
 import { agentProcessingUiSchema, userMessageSchema } from "../../schemas/api.js";
-import { sanitizeVisionFramesFromWire } from "../../vision/sanitize-vision-frames.js";
+import {
+  sanitizeVisionFramesFromWire,
+  type VisionWireInput,
+} from "../../vision/sanitize-vision-frames.js";
 import { formatStatusForDisplay, stripSentencesAlreadySaid } from "../../utils/text.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
@@ -58,6 +61,47 @@ export { messageBatchProcessor };
  * 与 messageBatchProcessor 的 isStaleTurn 门控配合:isStale 抑制输出,abort 中断请求。
  */
 const activeTurnAborters = new Map<string, AbortController>();
+
+/**
+ * 单轮主回复的硬超时：handleUserMessage 挂死（底层 LLM/桥接/工具链永不 settle）时
+ * finally 里的 releaseTurn() 永不执行，全局并发上限（默认 8）会被逐个耗尽，
+ * 最终所有用户收到 BUSY。超时后 abort 本轮 controller 并抛错走 catch 路径，
+ * 保证 turn 槽位、心跳定时器、批处理锁全部释放。
+ * 默认 540s（略小于 message-batch-processor 的 600s 硬超时，让本层先触发、
+ * 用户能收到明确错误提示）；env CHAT_TURN_TIMEOUT_MS 可调。
+ */
+function resolveChatTurnTimeoutMs(): number {
+  const n = Number.parseInt(process.env.CHAT_TURN_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 540_000;
+}
+
+function withTurnHardTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        onTimeout();
+      } catch {
+        /* ignore */
+      }
+      reject(new Error(`chat turn hard timeout: exceeded ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 /** 中断指定 actor 当前进行中的 LLM 请求(如有)。 */
 function abortActiveTurn(actorId: string): void {
@@ -282,7 +326,12 @@ export async function handleChatUserMessageEvent(
 
   let visionFrames: VisionFrame[] | undefined;
   try {
-    visionFrames = sanitizeVisionFramesFromWire(data.visionFrames);
+    // 边界收敛：zod 双实例（agent-protocol 与 server 各自的 zod 副本）会让
+    // 跨包 z.infer 把枚举字段退化成 unknown；schema 本身已校验 sourceKind，
+    // 这里仅做类型断言，无运行时行为差异。
+    visionFrames = sanitizeVisionFramesFromWire(
+      data.visionFrames as VisionWireInput[] | undefined,
+    );
   } catch (ve) {
     ctx.socket.send(
       JSON.stringify({
@@ -403,7 +452,7 @@ export async function handleChatUserMessageEvent(
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
     sessionId: ctx.sessionId,
-    contentType: data.contentType,
+    contentType: typeof data.contentType === "string" ? data.contentType : undefined,
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
   return true;
@@ -577,6 +626,13 @@ async function processBatchedMessage(
   // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
   // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
   const TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
+  // 心跳总时长封顶（自本轮 turnStartedAt 起算），env TOOL_HEARTBEAT_MAX_MS 可调。
+  // 默认 5 分钟：超时后客户端 watchdog（3 分钟）可在 8 分钟内正常触发；
+  // 本层硬超时（CHAT_TURN_TIMEOUT_MS 默认 540s）作为最终兜底。
+  const TOOL_HEARTBEAT_MAX_MS = (() => {
+    const n = Number.parseInt(process.env.TOOL_HEARTBEAT_MAX_MS ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : 300_000;
+  })();
   const toolHeartbeatTimers = new Map<string, NodeJS.Timeout>();
   let heartbeatLineCache: string | null = null;
   // 进度条：每个心跳累计 15%，封顶 90%（留 10% 给最终收尾），支持客户端渲染进度条
@@ -593,6 +649,16 @@ async function processBatchedMessage(
     if (toolHeartbeatTimers.has(toolName)) return;
     const timer = setInterval(() => {
       if (isStale()) {
+        stopToolHeartbeat(toolName);
+        return;
+      }
+      // 心跳总时长封顶：心跳每 30s 重置客户端 3 分钟 watchdog，会把挂死轮次
+      // 掩盖成永远"正在调用工具"。超过封顶后停止心跳，让客户端 watchdog 正常
+      // 超时（合法长任务如 shopping.order.place 180s 远小于该值，不受影响）。
+      if (Date.now() - turnStartedAt > TOOL_HEARTBEAT_MAX_MS) {
+        console.warn(
+          `[WS] tool heartbeat capped at ${TOOL_HEARTBEAT_MAX_MS}ms (tool=${toolName})，停止重置客户端 watchdog`,
+        );
         stopToolHeartbeat(toolName);
         return;
       }
@@ -685,7 +751,11 @@ async function processBatchedMessage(
   let streamedText = "";
 
   try {
-    const reply = await deps.runtime.handleUserMessage(msgActor, batched.text, {
+    // 硬超时兜底：挂死时 abort 本轮 controller（中断 LLM 流式请求）并抛错，
+    // 让 catch/finally 路径释放 turn 槽位与全部定时器（见 withTurnHardTimeout 注释）。
+    const chatTurnTimeoutMs = resolveChatTurnTimeoutMs();
+    const reply = await withTurnHardTimeout(
+      deps.runtime.handleUserMessage(msgActor, batched.text, {
       chatUserMessageId: batched.originalMessageId,
       userId: batched.userId,
       agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
@@ -898,7 +968,19 @@ async function processBatchedMessage(
           );
         }
       },
-    });
+    }),
+      chatTurnTimeoutMs,
+      () => {
+        console.error(
+          `[WS] chat turn hard timeout (${chatTurnTimeoutMs}ms), actor=${msgActor}，abort 本轮并释放并发槽位`,
+        );
+        try {
+          turnAbortController.abort();
+        } catch {
+          /* ignore */
+        }
+      },
+    );
 
     if (isStale()) return;
 

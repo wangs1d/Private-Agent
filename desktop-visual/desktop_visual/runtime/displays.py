@@ -60,7 +60,7 @@ def _list_monitors_win32() -> list[MonitorInfo]:
     monitors: list[MonitorInfo] = []
 
     MonitorEnumProc = ctypes.WINFUNCTYPE(
-        wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
+        wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
     )
 
     class MONITORINFOEXW(ctypes.Structure):

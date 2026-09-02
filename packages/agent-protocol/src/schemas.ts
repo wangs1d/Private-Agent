@@ -66,7 +66,7 @@ export const userMessageSchema = z
 /** WebSocket：AIP 投递 */
 export const aipDispatchWsSchema = z.object({
   toSessionId: z.string().min(1),
-  envelope: z.record(z.unknown()),
+  envelope: z.record(z.string(), z.unknown()),
   /** 可选：与当前主会话用户消息关联（同 `chat.user_message.messageId`） */
   chatUserMessageId: z.string().min(1).optional(),
 });

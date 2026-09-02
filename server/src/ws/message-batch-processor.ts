@@ -29,6 +29,17 @@ const DEFAULT_CONFIG: MessageBatchProcessorConfig = {
 };
 
 /**
+ * 单轮回复的硬超时兜底：onReady 挂死（如底层 LLM/工具链永不 settle）时
+ * processing 标志永不清除，该会话后续所有消息无限排队且无任何错误提示。
+ * 超时后放弃本轮（bump generation 让迟到的 settle no-op），继续处理队列。
+ * 真实长任务（多波工具 + 180s 级工具）远小于该值，正常路径不受影响。
+ */
+function resolveTurnHardTimeoutMs(): number {
+  const n = Number.parseInt(process.env.BATCH_TURN_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 600_000;
+}
+
+/**
  * 消息队列处理器：用户持续输入时排队，依次回复。
  *
  * 核心机制：
@@ -195,34 +206,49 @@ export class MessageBatchProcessor {
     const onReady = this.onReadyHandlers.get(sessionId);
     if (!onReady) return;
 
-    void Promise.resolve(onReady(merged, turn)).finally(() => {
-      if (this.processingGeneration.get(sessionId) !== turn.generation) {
-        return;
-      }
-      this.processing.delete(sessionId);
-      this.turnCommitted.delete(sessionId);
-      this.inFlightMerged.delete(sessionId);
-
-      // 处理队列中的下一条消息
-      const queue = this.messageQueue.get(sessionId);
-      if (queue && queue.length > 0) {
-        const next = queue.shift();
-        if (!next) return;
-        if (queue.length === 0) {
-          this.messageQueue.delete(sessionId);
-        }
-        const nextTurn = this.bumpGeneration(sessionId);
-        this.inFlightMerged.set(sessionId, next);
-        this.processing.add(sessionId);
-        this.turnCommitted.delete(sessionId);
-        void this.invokeReady(sessionId, next, nextTurn);
-        return;
-      }
-
-      if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
-        this.scheduleFlush(sessionId);
-      }
+    // 硬超时兜底：onReady 永不 settle（底层挂死）时强制放弃本轮并解锁队列。
+    // 迟到的 settle 会被 generation 不匹配守卫拦下，不会重复清理。
+    const hardTimeoutMs = resolveTurnHardTimeoutMs();
+    const hardTimeout = new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`batch turn hard timeout: session=${sessionId} exceeded ${hardTimeoutMs}ms`));
+      }, hardTimeoutMs);
+      timer.unref?.();
     });
+
+    void Promise.race([Promise.resolve(onReady(merged, turn)), hardTimeout])
+      .catch((error) => {
+        // onReady 内部已有错误处理；这里兜底超时/异常，保证 finally 一定执行
+        console.error("[message-batch-processor] turn failed or timed out:", error);
+      })
+      .finally(() => {
+        if (this.processingGeneration.get(sessionId) !== turn.generation) {
+          return;
+        }
+        this.processing.delete(sessionId);
+        this.turnCommitted.delete(sessionId);
+        this.inFlightMerged.delete(sessionId);
+
+        // 处理队列中的下一条消息
+        const queue = this.messageQueue.get(sessionId);
+        if (queue && queue.length > 0) {
+          const next = queue.shift();
+          if (!next) return;
+          if (queue.length === 0) {
+            this.messageQueue.delete(sessionId);
+          }
+          const nextTurn = this.bumpGeneration(sessionId);
+          this.inFlightMerged.set(sessionId, next);
+          this.processing.add(sessionId);
+          this.turnCommitted.delete(sessionId);
+          void this.invokeReady(sessionId, next, nextTurn);
+          return;
+        }
+
+        if ((this.buffers.get(sessionId)?.length ?? 0) > 0) {
+          this.scheduleFlush(sessionId);
+        }
+      });
   }
 
   private mergeMessageList(messages: BatchedMessage[]): BatchedMessage | null {

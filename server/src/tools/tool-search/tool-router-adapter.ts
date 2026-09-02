@@ -27,6 +27,21 @@ type WorkerState = {
 let workerState: WorkerState | null = null;
 const prewarmPromises = new Map<string, Promise<void>>();
 
+/**
+ * 单条 worker 命令的超时上限。stdio 子进程没有任何内建超时：Python 冷启动、
+ * 懒加载模型、进程假死都会让 pending Promise 永不 settle——这曾是「对话调用
+ * 工具永久卡住」的根因（initPromise 挂死后跨轮次永久卡死）。超时即判定 worker
+ * 已不可信，直接 kill 让下次调用重新 spawn。
+ */
+function resolveWorkerCommandTimeoutMs(): number {
+  const n = Number.parseInt(process.env.TOOL_ROUTER_WORKER_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 60_000;
+}
+
+function isWorkerCommandTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("tool-router worker command timeout");
+}
+
 // ===== 搜索 TTL 缓存（含在飞行去重）=====
 // 相同（目录签名 + query + limit + schema 开关）的检索在 TTL 窗口内直接复用；
 // 缓存的是 Promise 而非结果——并发同 query 只打一次 Python 端（预召回与
@@ -262,6 +277,16 @@ async function ensureWorker(): Promise<WorkerState> {
     if (text) console.warn("[tool-search:tool-router:stderr]", text);
   });
 
+  // spawn 本身失败（ENOENT / 权限等）不会触发 exit，必须在此 reject 所有 pending，
+  // 否则调用方 promise 永不 settle。
+  proc.on("error", (error) => {
+    state.closed = true;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    for (const pendingCall of pending.values()) pendingCall.reject(failure);
+    pending.clear();
+    if (workerState === state) workerState = null;
+  });
+
   proc.stdin.on("error", (error) => {
     if (state.closed) return;
     const failure = error instanceof Error ? error : new Error(String(error));
@@ -301,6 +326,31 @@ export function shutdownToolRouterWorker(): void {
   prewarmPromises.clear();
 }
 
+/**
+ * 超时后判定 worker 不可信：kill 进程、reject 全部 pending、清空 initPromise，
+ * 让下一次调用重新 spawn。若只 reject 单条命令而留着假死进程，后续命令会逐条
+ * 等满超时（N 条挂起命令 = N × timeout 的连环等待）。
+ */
+function killWorkerOnTimeout(worker: WorkerState, command: string): void {
+  const message = `tool-router worker command timeout: ${command} exceeded ${resolveWorkerCommandTimeoutMs()}ms`;
+  console.error(`[tool-search:tool-router] ${message}，kill worker 重新 spawn`);
+  worker.closed = true;
+  worker.initPromise = null;
+  for (const pendingCall of worker.pending.values()) {
+    pendingCall.reject(new Error("tool-router worker command timeout"));
+  }
+  worker.pending.clear();
+  if (workerState === worker) workerState = null;
+  try {
+    worker.proc.stdin.end();
+  } catch {
+    // ignore
+  }
+  if (worker.proc.exitCode == null && !worker.proc.killed) {
+    worker.proc.kill();
+  }
+}
+
 function sendWorkerCommand(
   worker: WorkerState,
   command: string,
@@ -318,15 +368,37 @@ function sendWorkerCommand(
       reject(new Error("tool-router worker is not writable"));
       return;
     }
-    worker.pending.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      const pendingCall = worker.pending.get(id);
+      if (!pendingCall) return;
+      killWorkerOnTimeout(worker, command);
+      pendingCall.reject(
+        new Error(`tool-router worker command timeout: ${command} exceeded ${resolveWorkerCommandTimeoutMs()}ms`),
+      );
+    }, resolveWorkerCommandTimeoutMs());
+    timer.unref?.();
+    const settle = () => clearTimeout(timer);
+    // resolve/reject 后清定时器：把包装塞回 pending，让 stdout 行处理器调用包装
+    worker.pending.set(id, {
+      resolve: (value) => {
+        settle();
+        resolve(value);
+      },
+      reject: (error) => {
+        settle();
+        reject(error);
+      },
+    });
     try {
       worker.proc.stdin.write(`${JSON.stringify({ id, command, payload })}\n`, "utf8", (error) => {
         if (!error) return;
         worker.pending.delete(id);
+        settle();
         reject(error);
       });
     } catch (error) {
       worker.pending.delete(id);
+      settle();
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
