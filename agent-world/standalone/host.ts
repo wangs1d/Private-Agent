@@ -39,7 +39,6 @@ import {
   WorldService,
   type WorldRevisionEvent,
 } from "../index.js";
-import { registerStandaloneWebUi } from "./web-ui.js";
 import { registerStandaloneWorldWebSocket } from "./ws-lite.js";
 
 function resolveStandalonePort(): number {
@@ -135,8 +134,6 @@ app.get("/.well-known/agent-world", async () => ({
   },
   room: { createTool: "world.room.create", sharedRoomIdPrefix: "wr-" },
 }));
-
-registerStandaloneWebUi(app);
 
 await worldService.load();
 await socialFeedService.load();

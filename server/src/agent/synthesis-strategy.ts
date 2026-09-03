@@ -243,7 +243,7 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
           `2. 如有必要，补充关键细节（数据/时间/来源）\n` +
           `3. 合并多源冗余信息，只保留最有价值的部分\n` +
           `4. 用自然的口语表述，不要罗列工具调用过程\n` +
-          `5. ${directFactQuery ? "这是单一事实查询，默认压到 2~3 句：结论 + 依据，不要再做总结性复述" : "同一事实不要换句话重复第二遍"}`;
+          `5. ${directFactQuery ? "用户求证的是单一事实：先给明确结论，再给支撑依据，不必展开无关面，也不要做总结性复述" : "信息用足、组织充分（可按主题分节），同一事实不要换句话重复第二遍"}`;
       }
       break;
 
@@ -268,7 +268,7 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
         `2. 再给出合理推断（基于已有信息的推测，标注是推断）\n` +
         `3. 最后说明待验证点（信息缺口在哪）\n` +
         `4. 不要道歉说"信息不完整"，用"已知X未知Y"替代\n` +
-        `5. ${directFactQuery ? "如果用户只问一个事实点，最多 3 句：事实、推断、缺口；不要再来一遍“所以现在...”总结" : "禁止把事实层和推断层重复表述两次"}`;
+        `5. ${directFactQuery ? "用户求证的是单一事实：先给明确结论，再补关键依据与缺口，不要重复总结" : "禁止把事实层和推断层重复表述两次"}`;
       break;
 
     case "contradictory":

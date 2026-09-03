@@ -3701,6 +3701,8 @@ export async function createAppServices(): Promise<AppServices> {
   });
   messageHubService.onInbound = (input) => {
     messageWatchTrigger.handleInbound(input);
+    // 微信支付服务通知 → 零 LLM 解析 → 静默自动入账（只落库不推送，查询走 finance.* 工具）
+    void financeIngestService.handleInboundMessage(input).catch(() => {});
   };
   // 到点提醒 WS 推送失败（两端都不在线）→ 管道提案 directText 零 LLM → 挂起待重连直推，
   // 或升级手机系统推送（proactivePushService 已配置时）

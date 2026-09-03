@@ -1,5 +1,5 @@
 /**
- * 启动本地三服务；端口已占用则跳过（绑定探测，启动前再检一次）。
+ * 启动本地服务；端口已占用则跳过（绑定探测，启动前再检一次）。
  */
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -19,7 +19,6 @@ if (isWin) {
  *  gateway 随 dev-server-watch 一并拉起，对外仍占 3000） */
 const isRemote = process.argv.includes("--remote");
 const SERVICES = [
-  { name: "world", port: 3333, npmScript: "dev:all:world" },
   isRemote
     ? { name: "runtime", port: 3211, npmScript: "dev:all:runtime" }
     : { name: "server", port: 3000, npmScript: "dev:all:server" },

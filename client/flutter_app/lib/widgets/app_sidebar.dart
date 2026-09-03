@@ -75,7 +75,7 @@ class _AppSidebarState extends State<AppSidebar> {
   ];
 
   // 预定义常量
-  static const double _sidebarWidth = 64.0;
+  static const double _sidebarWidth = 256.0;
   static const EdgeInsets _sidebarPadding =
       EdgeInsets.symmetric(horizontal: 10, vertical: 8);
 
@@ -85,7 +85,7 @@ class _AppSidebarState extends State<AppSidebar> {
     // AppThemeController 的值，父级 ValueListenableBuilder 触发
     // 整个 MaterialApp 重建，使这里取到新色）。
     final AppThemeVariant variant = AppThemeController.instance.value;
-    final Color bgColor = AppPalette.resolveSidebar(variant);
+    final Color bgColor = AppPalette.resolveSidebarPanel(variant);
 
     return Container(
       width: _sidebarWidth,
@@ -133,28 +133,25 @@ class _AppSidebarState extends State<AppSidebar> {
                   ),
                 ),
               ),
-              // 头像锚定在最底端(留 8px 视觉间距,不贴死底边)
+              // 头像锚定在最底端靠左(与上方导航图标左边距 10 对齐,
+              // 留 8px 底间距,不贴死底边)
               Positioned(
-                left: 0,
-                right: 0,
+                left: 10,
                 bottom: 8,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  child: Tooltip(
-                    message: "用户菜单",
-                    child: SidebarUserMenu(
-                      userName: "king",
-                      totalUnread: widget.totalUnread,
-                      currentTheme: widget.currentTheme,
-                      onSetLightTheme: widget.onSetLightTheme,
-                      onSetDarkTheme: widget.onSetDarkTheme,
-                      onSetSystemTheme: widget.onSetSystemTheme,
-                      onOpenMessages: widget.onOpenMessages,
-                      onOpenSettings: widget.onOpenUserMenuSettings,
-                      onOpenHelp: widget.onOpenUserMenuHelp,
-                      onOpenDevices: widget.onOpenDevices,
-                      onLogout: widget.onLogout,
-                    ),
+                child: Tooltip(
+                  message: "用户菜单",
+                  child: SidebarUserMenu(
+                    userName: "king",
+                    totalUnread: widget.totalUnread,
+                    currentTheme: widget.currentTheme,
+                    onSetLightTheme: widget.onSetLightTheme,
+                    onSetDarkTheme: widget.onSetDarkTheme,
+                    onSetSystemTheme: widget.onSetSystemTheme,
+                    onOpenMessages: widget.onOpenMessages,
+                    onOpenSettings: widget.onOpenUserMenuSettings,
+                    onOpenHelp: widget.onOpenUserMenuHelp,
+                    onOpenDevices: widget.onOpenDevices,
+                    onLogout: widget.onLogout,
                   ),
                 ),
               ),
@@ -207,11 +204,17 @@ class _SidebarNavItemState extends State<SidebarNavItem> {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final AppThemeVariant variant = AppThemeController.instance.value;
 
+    // 选中态加深:用最高一档 surface 容器色,在浅色侧栏上明显更深;
+    // 未选中时只显示描边(框),hover 给一层浅底
     final Color bgColor = selected
-        ? cs.surfaceContainerHigh.withValues(alpha: 0.6)
+        ? cs.surfaceContainerHighest
         : (hovering
             ? cs.surfaceContainer.withValues(alpha: 0.6)
             : Colors.transparent);
+
+    // 框:始终有描边,选中时描边加深一档
+    final Color borderColor =
+        cs.outline.withValues(alpha: selected ? 0.6 : 0.35);
 
     final Color iconColor = selected
         ? AppPalette.resolveSidebarIconSelected(variant)
@@ -239,6 +242,7 @@ class _SidebarNavItemState extends State<SidebarNavItem> {
           decoration: BoxDecoration(
             color: bgColor,
             borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: borderColor, width: 1),
           ),
           child: Icon(
             selected ? spec.iconFilled : spec.iconOutlined,

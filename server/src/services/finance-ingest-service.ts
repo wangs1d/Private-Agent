@@ -11,6 +11,11 @@
 //
 // 银行短信/通知文案：无邮件网关时走对话路径——用户把短信粘给 agent，
 // 由 finance.import_transactions 导入（抽取逻辑与邮件一致，由对话 LLM 完成）。
+//
+// 微信支付服务通知通道（实时、零 LLM、静默）：微信桥把「微信支付」会话的
+// 服务通知作为入站消息汇入 MessageHub → 装配层 onInbound 回调
+// handleInboundMessage() → 确定性正则解析 → 指纹去重 → 入账（source=wechat_notice）。
+// 用户要求：只落库，agent 经 finance.* 工具查询，不做主动推送。
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,6 +23,7 @@ import type { FinanceDeepService } from "./finance-deep-service.js";
 import type { AgentAccountService } from "./agent-account-service.js";
 import { parseRecipientToEmail } from "./email-registration-service.js";
 import { getAgentMailInboundSecret } from "../config/mail.js";
+import { isWechatPaymentContact, parseWechatPaymentNotice } from "./wechat-payment-notice.js";
 
 /** 账单/支付类邮件判定关键词（命中任一即进入 LLM 抽取）。 */
 const BILL_KEYWORDS = [
@@ -334,6 +340,78 @@ export class FinanceIngestService {
     );
     console.log(`[FinanceIngest] 手动入账 actor=${actorId} ${imported} 笔`);
     return { ok: true, ingested: imported, message: `已入账 ${imported} 笔交易` };
+  }
+
+  // ─── 微信支付服务通知通道（实时、零 LLM、静默入账） ──────────
+
+  /**
+   * MessageHub 入站消息统一回调：命中「微信支付」联系人 → 确定性解析 → 静默入账。
+   *
+   * 异常全部吞掉（不阻断消息落库主链路，与 MessageWatchTrigger 同契约）；
+   * 只落库不做主动推送——查询走 agent 的 finance.* 工具。
+   */
+  async handleInboundMessage(input: {
+    platform: string;
+    actorId: string;
+    text: string;
+    senderId?: string;
+    senderName?: string;
+    participantId?: string;
+    participantName?: string;
+    title?: string;
+    channelId?: string;
+  }): Promise<void> {
+    try {
+      if (!input.actorId || !input.text) return;
+      // 「微信支付」联系人信号是唯一入口：普通聊天里提到"微信支付了xx"不会误记账
+      if (!isWechatPaymentContact(input)) return;
+      await this.ingestWechatNotice(input.actorId, input.text);
+    } catch {
+      /* 入账失败静默，不影响消息主链路 */
+    }
+  }
+
+  /**
+   * 解析单条微信支付通知并入账（零 LLM）。
+   * 指纹与邮件/文本通道共用同一份 seen 集：同一笔交易不会因多通道重复入账。
+   */
+  async ingestWechatNotice(
+    actorId: string,
+    text: string,
+  ): Promise<{ ok: boolean; ingested: number; message: string }> {
+    const parsed = parseWechatPaymentNotice(text, this.now());
+    if (!parsed) {
+      return { ok: false, ingested: 0, message: "非可识别的支付通知" };
+    }
+
+    const seen = await this.loadSeen(actorId);
+    const fp = `${parsed.date}|${parsed.amount}|${parsed.type}|${parsed.merchant ?? parsed.description ?? ""}`;
+    if (seen.includes(fp)) {
+      return { ok: false, ingested: 0, message: "该笔交易已入账（去重跳过）" };
+    }
+    seen.push(fp);
+    if (seen.length > this.SEEN_LIMIT) seen.splice(0, seen.length - this.SEEN_LIMIT);
+    await this.saveSeen(actorId, seen);
+
+    const imported = await this.deps.financeDeepService.importTransactions(actorId, [
+      {
+        id: `ingest-wx-${Date.now()}-${randomUUID().slice(0, 8)}`,
+        date: parsed.date,
+        amount: parsed.amount,
+        type: parsed.type,
+        category: "其他" as const, // 落账时由 finance-deep 按 merchant/description 自动分类
+        ...(parsed.merchant ? { merchant: parsed.merchant } : {}),
+        ...(parsed.description ? { description: parsed.description } : {}),
+        source: "wechat_notice",
+      },
+    ]);
+    if (imported > 0) {
+      console.log(
+        `[FinanceIngest] 微信支付通知入账 actor=${actorId} ` +
+          `¥${parsed.amount.toFixed(2)} ${parsed.type === "income" ? "收入" : "支出"} ${parsed.merchant ?? ""}`,
+      );
+    }
+    return { ok: true, ingested: imported, message: "已自动入账" };
   }
 
   /**

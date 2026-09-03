@@ -50,7 +50,6 @@ export { replyIfWorldRegistrationRequired } from "./config/world-registration-ga
 export { allowAgentWorldPlaceholderRegister } from "./config/world-register-placeholder.js";
 export { allowWorldHttpMutations, replyIfWorldHttpMutationsForbidden } from "./config/world-http-mutations.js";
 
-export { registerStandaloneWebUi as registerAgentWorldWebUi } from "./standalone/web-ui.js";
 export { AgentWorldClientEventType, AgentWorldServerEventType } from "./protocol-world.js";
 export {
   UNIFIED_LAYER_MANIFEST,

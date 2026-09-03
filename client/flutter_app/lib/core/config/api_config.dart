@@ -105,12 +105,6 @@ class ApiConfig {
     defaultValue: "123456",
   );
 
-  /// Agent World 独立站 Web（观战 / 世界 UI；与 `npm run dev:all` 中 :3333 一致）。
-  static const String agentWorldUrl = String.fromEnvironment(
-    "AGENT_WORLD_URL",
-    defaultValue: "http://127.0.0.1:3333",
-  );
-
   static const String _defaultSocialFeedUrl = "http://127.0.0.1:3001";
 
   /// @deprecated 社交推文站（social-platform）已移除，此配置保留仅为兼容旧 dart-define，不再使用。

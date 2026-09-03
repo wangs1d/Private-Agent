@@ -23,7 +23,7 @@
 | 开发启动 | `npm run dev`（= `dev:all`） | `npm run dev:remote` |
 | 切换 | `RUNTIME_MODE` 未设 = embedded | `RUNTIME_MODE=remote`（两个入口自带语义） |
 
-world（agent-world 独立进程 :3333）与拓扑无关，两种模式下都照常拉起。
+world 能力由 server 经 npm workspace（`@private-ai-agent/agent-world`）在进程内运行，与拓扑无关；原 :3333 独立进程已从启动链路移除（需要独立部署时在 `agent-world` 目录手动 `npm run standalone`）。
 
 ## 2. 四层边界（换外壳的契约面）
 

@@ -20,7 +20,6 @@ import {
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
   registerWorldSocialRoutes,
-  registerAgentWorldWebUi,
 } from "@private-ai-agent/agent-world";
 import { registerChatWeb } from "./chat-web.js";
 import { isAgentWorldSocialEnabled } from "../../config/env.js";
@@ -88,7 +87,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     registerWorldSocialRoutes(app, worldRouteDeps);
   }
   registerChatWeb(app);
-  registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
   registerFinanceIngestRoutes(app, deps);

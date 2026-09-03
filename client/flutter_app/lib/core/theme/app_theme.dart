@@ -71,6 +71,8 @@ abstract final class AppPalette {
   static const Color warmSidebarSeparator = Color(0xFFE5EAF1);
   static const Color warmAppBarForeground = Color(0xFF21242B);
   static const Color warmSidebarDivider = Color(0xFFE8EDF4);
+  /// 仅左侧边栏区域使用的浅灰色底（不共享给顶栏/标题栏）
+  static const Color warmSidebarPanel = Color(0xFFF0F1F3);
   static const Color warmSidebarIconDefault = Color(0xFF747C88);
   static const Color warmSidebarIconHover = Color(0xFF2C3440);
   static const Color warmSidebarIconSelected = Color(0xFF4B5563);
@@ -120,6 +122,10 @@ abstract final class AppPalette {
 
   static Color resolveSidebar(AppThemeVariant v) =>
       v == AppThemeVariant.warm ? warmSidebar : sidebar;
+
+  /// 仅左侧边栏面板：浅色主题下用米色，与顶栏/标题栏区分
+  static Color resolveSidebarPanel(AppThemeVariant v) =>
+      v == AppThemeVariant.warm ? warmSidebarPanel : sidebar;
 
   static Color resolveSidebarSeparator(AppThemeVariant v) =>
       v == AppThemeVariant.warm ? warmSidebarSeparator : sidebarSeparator;

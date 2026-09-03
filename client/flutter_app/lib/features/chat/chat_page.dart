@@ -15,10 +15,12 @@ import "../../core/services/speech_service.dart";
 import "../../core/services/agent_profile_overlay_launcher.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
+import "../../core/theme/app_theme.dart";
 import "agent_profile_page.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "typewriter_reveal.dart";
+import "emotion_ball_view.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -783,49 +785,44 @@ class _ChatPageState extends State<ChatPage>
             width: 1,
           ),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            AnimatedBuilder(
-              animation: _breathingAnimation!,
-              builder: (BuildContext context, Widget? child) {
-                final double breath = _breathingAnimation!.value;
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    CustomPaint(
-                      size: const Size(10, 10),
-                      painter: _BreathingDotPainter(opacity: breath),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  // 思考动画首位:emotion-ball 小球(工具调用中切「检索资料」表情)。
+                  EmotionBallView(
+                    emotion: tool.isNotEmpty ? "40" : "30",
+                    size: 22,
+                    bodyColor: cs.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
+                    child: Text(
+                      text,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: cs.onSurface.withValues(alpha: 0.75),
+                            fontWeight: FontWeight.w500,
+                          ),
                     ),
-                    const SizedBox(width: 6),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 420),
-                      child: Text(
-                        text,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style:
-                            Theme.of(context).textTheme.labelSmall?.copyWith(
-                                  color: cs.onSurface.withValues(alpha: 0.75),
-                                  fontWeight: FontWeight.w500,
-                                ),
-                      ),
+                  ),
+                  if (percent != null) ...<Widget>[
+                    const SizedBox(width: 8),
+                    Text(
+                      "$percent%",
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: cs.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
                     ),
-                    if (percent != null) ...<Widget>[
-                      const SizedBox(width: 8),
-                      Text(
-                        "$percent%",
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                              color: cs.primary,
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                    ],
                   ],
-                );
-              },
-            ),
+                ],
+              ),
             // 进度条：长工具心跳带 percent 时渲染
             if (percent != null) ...<Widget>[
               const SizedBox(height: 6),
@@ -954,16 +951,12 @@ class _ChatPageState extends State<ChatPage>
             child: Stack(
               children: <Widget>[
                 if (widget.messages.isEmpty)
+                  // 空会话背景:emotion-ball 小球待机(放空)动画作为背景展示。
                   Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: <Widget>[
-                        Icon(
-                          Icons.chat_bubble_outline,
-                          size: 64,
-                          color: cs.onSurfaceVariant.withValues(alpha: 0.3),
-                        ),
-                      ],
+                    child: EmotionBallView(
+                      emotion: "02",
+                      size: 200,
+                      bodyColor: cs.primary,
                     ),
                   )
                 else
@@ -2009,9 +2002,13 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     } else {
       // Agent 回复：扣子式描边框（浅底 + 清晰描边），不再是「无底色无边框平铺」。
+      // 浅色模式下底色与左侧边栏面板同色（2026-09-03 用户反馈）；深色模式维持原浅底。
+      final AppThemeVariant themeVariant = AppThemeController.instance.value;
       decoration = BoxDecoration(
         borderRadius: borderRadius,
-        color: cs.surfaceContainerLow.withValues(alpha: 0.4),
+        color: themeVariant == AppThemeVariant.warm
+            ? AppPalette.resolveSidebarPanel(themeVariant)
+            : cs.surfaceContainerLow.withValues(alpha: 0.4),
         border: Border.all(color: cs.outline.withValues(alpha: 0.32)),
       );
     }
@@ -2345,43 +2342,6 @@ class _ActionButton extends StatelessWidget {
       ),
       onPressed: onPressed,
     );
-  }
-}
-
-/// 呼吸灯小球绘制器 - 中间浅外边深
-class _BreathingDotPainter extends CustomPainter {
-  final double opacity;
-
-  _BreathingDotPainter({required this.opacity});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2;
-
-    // 创建径向渐变：中间浅，外边深（纯灰色系）
-    final gradient = RadialGradient(
-      colors: [
-        Colors.grey.withValues(alpha: opacity * 0.4), // 中间浅色（灰色）
-        Colors.grey.withValues(alpha: opacity * 0.6), // 中间过渡
-        Colors.grey.withValues(alpha: opacity * 0.9), // 外边深色
-      ],
-      stops: const [0.0, 0.5, 1.0],
-      center: Alignment.center,
-    );
-
-    final paint = Paint()
-      ..shader = gradient.createShader(
-        Rect.fromCircle(center: center, radius: radius),
-      )
-      ..style = PaintingStyle.fill;
-
-    canvas.drawCircle(center, radius, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _BreathingDotPainter oldDelegate) {
-    return oldDelegate.opacity != opacity;
   }
 }
 

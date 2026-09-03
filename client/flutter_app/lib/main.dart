@@ -74,6 +74,7 @@ import "features/schedule/schedule_page.dart";
 import "features/chat/image_preview_panel.dart";
 import "app/app_helpers.dart";
 import "widgets/app_sidebar.dart";
+import "widgets/app_window_titlebar.dart";
 
 void main() async {
   _installGlobalErrorHooks();
@@ -88,9 +89,9 @@ void main() async {
         center: true,
         backgroundColor: Colors.transparent,
         skipTaskbar: false,
-        // 保留原生标题栏（关闭/最小化/最大化按钮），
-        // 与 windows/runner 里的 pai/window_titlebar 深色标题栏主题一致。
-        titleBarStyle: TitleBarStyle.normal,
+        // 隐藏原生标题栏，由自绘的 AppWindowTitleBar 接管
+        // （拖拽区 + 最小化/最大化/关闭按钮）。
+        titleBarStyle: TitleBarStyle.hidden,
       );
       await windowManager.waitUntilReadyToShow(options, () async {
         await windowManager.show();
@@ -4012,6 +4013,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         debugPrint("[surface.show] failed to launch schedule floating window");
         return;
       }
+      // 悬浮窗配色跟随当前 App 主题（保证与主界面面板一致）
+      await ScheduleFloatingLauncher.syncAppTheme();
       await ScheduleFloatingLauncher.setSchedule(items);
       // 召唤前未常驻的窗口按 TTL 自动淡出；用户本来就开着的只刷新数据，不打扰
       if (!wasVisible) {
@@ -4198,23 +4201,32 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             theme: AppTheme.of(variant),
             home: Scaffold(
               backgroundColor: AppPalette.resolveMainPanel(variant),
-              body: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircularProgressIndicator(
-                      color: loadingColor,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      '正在初始化...',
-                      style: TextStyle(
-                        color: loadingColor.withValues(alpha: 0.7),
-                        fontSize: 14,
+              // 初始化页也铺自绘标题栏，保证窗口可拖拽/可关闭。
+              body: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  const AppWindowTitleBar(),
+                  Expanded(
+                    child: Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(
+                            color: loadingColor,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            '正在初始化...',
+                            style: TextStyle(
+                              color: loadingColor.withValues(alpha: 0.7),
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           );
@@ -4237,9 +4249,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           home: Builder(
             builder: (BuildContext context) {
               return Scaffold(
-                body: Stack(
-                  clipBehavior: Clip.none,
+                body: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
+                    // 自绘标题栏：与左侧边栏同色，最右侧窗口按钮。
+                    const AppWindowTitleBar(),
+                    Expanded(
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: <Widget>[
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
@@ -4278,6 +4296,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   ),
                                   child: AppBar(
                                     automaticallyImplyLeading: false,
+                                  // 与自绘标题栏(40px)和右侧面板顶栏(40px)对齐
+                                  toolbarHeight: kWindowTitleBarHeight,
                                   // 顶栏与左侧边栏同色(深色主题下为 #131313 的深灰),
                                   // 与聊天主背景的纯黑 (#0F0F0F) 形成可识别但克制的对比
                                   backgroundColor:
@@ -4354,8 +4374,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                     ),
                     const FloatingAgentSphere(),
                     _buildAsyncConfirmationOverlay(),
-                    // 右侧面板：top:0 顶到屏幕最顶部，
-                    // 在面板宽度范围内覆盖 AppBar / 侧边栏 / 主内容。
+                    // 右侧面板：顶到自绘标题栏下沿（Stack 顶端），
+                    // 在面板宽度范围内覆盖 AppBar / 主内容。
                     // side 模式 288px，split 模式动态宽度。
                     // 仅在 chat tab + 宽屏时显示。
                     _buildRightPanelOverlay(),
@@ -4370,6 +4390,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                           },
                         ),
                       ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               );
@@ -4773,7 +4796,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 在外层 Stack 顶层用 [Positioned] 渲染右侧面板（side 或 split 模式），
-  /// 使面板从屏幕最顶部 (top:0) 贯通到底部，覆盖宽度范围内的 AppBar。
+  /// 使面板从 Stack 顶端（自绘标题栏下沿）贯通到底部，覆盖宽度范围内的 AppBar。
   ///
   /// - side 模式：宽度 = [_rightPanelWidth]（由 NextbotChatLayout 拖动条控制），
   ///   渲染 [RightSidePanel]（今日安排 / 常用工具 / 桌宠）。
@@ -4798,6 +4821,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         curve: Curves.easeOutCubic,
         builder: (BuildContext context, double offset, Widget? child) {
           return Positioned(
+            // Stack 顶端即自绘标题栏下沿，top:0 让面板上顶到标题栏。
             top: 0,
             right: 0,
             bottom: 0,
@@ -4818,6 +4842,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 这里 Positioned 只覆盖占位(不含 divider 8px), 拖拽条才能在 chat 与
     // 面板之间露出来, 用户才能拖动。
     return Positioned(
+      // Stack 顶端即自绘标题栏下沿，top:0 让面板上顶到标题栏。
       top: 0,
       right: 0,
       bottom: 0,
@@ -4866,8 +4891,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// Dock 功能面板顶栏：拖拽指示 + 标题 + 关闭按钮。
   Widget _buildSplitPanelHeader(ColorScheme cs) {
-    // 标题栏背景跟随主题主色（黑色主题下为纯黑），
-    // 因此文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
+    // 背景与自绘标题栏同色(resolveSidebar)，
+    // 文字/图标在暗色下用纯白保证可读性，暖色下用主题前景色。
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
     final Color fg = isDark ? Colors.white : cs.onSurface;
     final Color fgMuted = isDark ? Colors.white : cs.onSurfaceVariant;
@@ -4875,8 +4900,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       height: 40,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        // 标题栏与主面板同色，显式绑定主题主色，杜绝任何残留的浅色渲染
-        color: AppPalette.resolveMainPanel(AppThemeController.instance.value),
+        // 与自绘标题栏/左侧 AppBar 同色(resolveSidebar #131313)，
+        // 保证顶部整条横带无缝衔接；面板主体用 cs.surface 区分层次。
+        color: AppPalette.resolveSidebar(AppThemeController.instance.value),
         border: Border(
           left: BorderSide(color: cs.outline.withValues(alpha: 0.35)),
           bottom: BorderSide(color: cs.outline.withValues(alpha: 0.25)),

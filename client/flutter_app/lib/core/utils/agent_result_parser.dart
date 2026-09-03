@@ -22,6 +22,7 @@ class AgentResultItem {
     this.thumbnailUrl,
     this.pageUrl,
     this.source,
+    this.caption,
     this.side,
     this.sideLabel,
     this.width,
@@ -45,6 +46,10 @@ class AgentResultItem {
   final String? thumbnailUrl;
   final String? pageUrl;
   final String? source;
+
+  /// 图片的真实画面描述（服务端视觉模型看图生成，2026-09-03）。
+  /// 渲染在对应照片下方；为空表示未生成（不显示说明文字）。
+  final String? caption;
 
   /// 对比侧：A=左侧 / B=右侧（用于媒体卡片 A/B 分栏）。
   final String? side;
@@ -78,6 +83,7 @@ class AgentResultItem {
       thumbnailUrl: json["thumbnailUrl"]?.toString() ?? json["thumbUrl"]?.toString(),
       pageUrl: json["pageUrl"]?.toString() ?? json["sourceUrl"]?.toString(),
       source: json["source"]?.toString(),
+      caption: json["caption"]?.toString(),
       side: json["side"]?.toString(),
       sideLabel: json["sideLabel"]?.toString(),
       width: (json["width"] as num?)?.toInt(),

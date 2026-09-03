@@ -452,7 +452,10 @@ export function applySearchFreshness(
 ): ApplySearchFreshnessResult {
   const maxAgeDays = input.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS;
   const nowMs = input.nowMs ?? Date.now();
-  const allowStale = queryAllowsStaleResults(input.query);
+  // 2026-09-03 改为按意图裁剪：只有 query 带时效诉求（最新/新闻/价格/天气…）时才丢旧条目；
+  // 中性/知识型查询保留全部结果（仍按发布时间倒序），避免「搜历史资料被静默砍掉大半」。
+  // 旧逻辑对所有非白名单 query 一刀切丢 >120 天条目，是「搜索信息不全面」的根因之一。
+  const dropStale = shouldBoostQueryRecency(input.query);
   const maxAgeMs = maxAgeDays * 86_400_000;
 
   const enriched = items.map((item) => ({
@@ -461,14 +464,14 @@ export function applySearchFreshness(
   }));
 
   let droppedStale = 0;
-  const kept = allowStale
-    ? enriched
-    : enriched.filter(({ publishedMs }) => {
+  const kept = dropStale
+    ? enriched.filter(({ publishedMs }) => {
         if (publishedMs == null) return true;
         if (nowMs - publishedMs <= maxAgeMs) return true;
         droppedStale += 1;
         return false;
-      });
+      })
+    : enriched;
 
   kept.sort((a, b) => {
     const aMs = a.publishedMs;

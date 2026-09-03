@@ -5,10 +5,8 @@
     "ws": "ws://127.0.0.1:3000/ws",
     "chatWeb": "http://127.0.0.1:3000/chat"
   },
-  "agentWorldStandalone": "http://127.0.0.1:3333",
   "flutterDartDefine": {
     "HTTP_BASE": "http://127.0.0.1:3000",
-    "WS_URL": "ws://127.0.0.1:3000",
-    "AGENT_WORLD_URL": "http://127.0.0.1:3333"
+    "WS_URL": "ws://127.0.0.1:3000"
   }
 }

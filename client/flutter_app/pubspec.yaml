@@ -42,6 +42,8 @@ flutter:
     - assets/fonts/
     # 旅游行程地图模块（内嵌 MapLibre GL JS 单文件页面）
     - assets/travel_map/
+    # emotion-ball 小球表情动画（自包含宿主页，来源 aora-bot，见目录内 ATTRIBUTION.md）
+    - assets/emotion_ball/
   fonts:
     - family: MiSans
       fonts:

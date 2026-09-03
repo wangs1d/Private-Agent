@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 
 import {
   annotateUserContentForLlm,
+  buildTimestampFreeLlmView,
   getChatThreadStore,
   tagUserMessageClientId,
 } from "./chat-thread-store.js";
@@ -294,6 +295,23 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     const effectiveStreamOpts = this.resolveEffectiveStreamOpts(streamOpts);
     const extraBody = this.buildExtraBody(effectiveStreamOpts);
 
+    // ★ 时间戳根治视图（2026-09-03）：发往 LLM 的副本剥掉历史正文首行的 [ts:] 前缀，
+    //   并在末尾前注入「对话时间轴」system 块。存储层（msgs）前缀原样保留（按天裁剪 /
+    //   recap / 恢复 / 编辑都依赖解析它）——模型上下文里不再有「每条消息以 [ts: 开头」
+    //   的 in-context 模仿源，从根源消除时间戳帧复述泄漏到用户气泡的问题。
+    const llmView = buildTimestampFreeLlmView(msgs).messages;
+    // 线程原有消息的对象身份集合：工具循环只应往线程回写「视图新增」的消息，
+    // 视图剥离产生的克隆与线程原消息一律不回写。
+    const llmViewLiveObjects = new Set<ChatCompletionMessageParam>(msgs);
+    // 回写边界：视图里最后一个「线程原有对象」即本轮 user 消息（循环只在它之后追加）。
+    let llmViewTurnBoundary = -1;
+    for (let i = llmView.length - 1; i >= 0; i--) {
+      if (llmViewLiveObjects.has(llmView[i])) {
+        llmViewTurnBoundary = i;
+        break;
+      }
+    }
+
     // ── 工具分支 ──
     if (tools && toolPlan && toolSearchPrepared) {
       let completed = false;
@@ -301,7 +319,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         const full = await streamCompletionWithTools(
           client,
           model,
-          msgs,
+          llmView,
           onDelta,
           tools,
           {
@@ -328,6 +346,14 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         );
         completed = true;
         if (!ephemeral) {
+          // 回写工具循环新增的消息（assistant tool_calls / tool 结果 / 规划注入）到线程。
+          // 循环操作的是视图副本；这里按边界 + 对象身份只回写新增，剥离克隆不入线程。
+          if (llmViewTurnBoundary >= 0) {
+            for (let i = llmViewTurnBoundary + 1; i < llmView.length; i++) {
+              const m = llmView[i];
+              if (m && !llmViewLiveObjects.has(m)) msgs.push(m);
+            }
+          }
           this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
           this.threads.afterTurnCompleted(sessionId, msgs);
         }
@@ -344,7 +370,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     let stream;
     try {
       const finalMessages = applyPromptCacheMessages(
-        msgs,
+        llmView,
         promptPlan.requestSystemMessages,
         promptPlan.tailDynamicContext,
       );

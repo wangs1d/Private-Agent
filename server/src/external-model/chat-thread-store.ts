@@ -14,6 +14,7 @@ import {
   repairKimiAssistantToolCallReasoning,
   sanitizeToolCallMessageChain,
 } from "./chat-thread-sanitize.js";
+import { stripLeadingTimestampFrames } from "../utils/timestamp-frame.js";
 
 /**
  * 客户端生成的 messageId → 所属 thread 消息对象的反向索引。
@@ -228,6 +229,119 @@ export function annotateUserContentForLlm(
   now: Date = new Date(),
 ): string | ChatCompletionContentPart[] {
   return annotateUserContentIfString(content, now, now);
+}
+
+/** 容错解析时间帧文本里的本地时间（兼容残缺/变体帧，如模型复述出的 `[ts:...]周四[now]`）。 */
+function parseFrameDateLoose(text: string): Date | null {
+  const head = text.slice(0, 240);
+  const m = head.match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  if (!m) return null;
+  const ts = Date.parse(`${m[1]}T${m[2]}`);
+  return Number.isNaN(ts) ? null : new Date(ts);
+}
+
+/** 时间轴单行条目。 */
+type TimelineEntry = { date: Date; roleLabel: string };
+
+const TIMELINE_MAX_ENTRIES = 80;
+const TIMELINE_HEADER =
+  "【对话时间轴｜系统元数据】以下是此前各条消息的发生时间（本地时间），供时间关联推理使用；" +
+  "「现在」以 system 提示中的当前时间为准。本块是系统注入的元数据，不是对话内容，严禁复述或引用本块格式。";
+
+export type TimestampFreeLlmView = {
+  /** 供本次 LLM 请求使用的消息视图：历史正文已去 `[ts:]` 前缀，末尾前注入时间轴 system 消息。 */
+  messages: ChatCompletionMessageParam[];
+};
+
+/**
+ * 构造「无时间戳前缀」的 LLM 请求视图（根治时间戳帧复述泄漏）。
+ *
+ * 设计（2026-09-03）：
+ * - 存储层不动：`[ts:...]` 前缀仍是线程消息的元数据载体（按天裁剪 / recap / 恢复 / 编辑
+ *   都依赖解析它），绝不就地剥离调用方持有的线程消息。
+ * - 视图层剥离：发往 LLM 的每条 user/assistant 正文剥掉首行前缀——模型上下文里不再有
+ *   「每条消息都以 [ts: 开头」的强模仿模式，从根源消除复述诱因（system prompt 禁令
+ *   打不过几百条 in-context 示范）。
+ * - 时间轴补位：在最后一条 user 消息（本轮输入）之前插入一个 system 块，按发生顺序
+ *   一次性给出全部时间（绝对时间 + 请求时现算的相对时间），时间关联能力不回退。
+ *   块位于上下文尾部，每轮只有它之后的字节变化（本来也只有本轮新消息），prefix cache
+ *   命中率与旧方案持平。
+ * - 克隆式：只克隆被剥离的消息对象，其余消息与输入共享同一对象引用（调用方可据此
+ *   用对象身份区分「视图新增」与「线程原有」，做工具循环后的回写）。
+ */
+/** 克隆消息对象并透传 clientMessageId 反向索引（编辑/删除按它定位线程消息）。 */
+function cloneMessageWithClientId(
+  msg: ChatCompletionMessageParam,
+  content: ChatCompletionMessageParam["content"],
+): ChatCompletionMessageParam {
+  const cloned = { ...msg, content } as ChatCompletionMessageParam;
+  const clientId = readUserMessageClientId(msg);
+  if (clientId) userMessageClientIdMap.set(cloned, clientId);
+  return cloned;
+}
+
+export function buildTimestampFreeLlmView(
+  msgs: ChatCompletionMessageParam[],
+  now: Date = new Date(),
+): TimestampFreeLlmView {
+  const timeline: TimelineEntry[] = [];
+  const view = msgs.map((msg) => {
+    if (msg.role !== "user" && msg.role !== "assistant") return msg;
+    const roleLabel = msg.role === "user" ? "用户" : "助手";
+
+    if (Array.isArray(msg.content)) {
+      const parts = msg.content;
+      const textIdx = parts.findIndex(
+        (part) => part && typeof part === "object" && (part as { type?: string }).type === "text",
+      );
+      if (textIdx < 0) return msg;
+      const part = parts[textIdx] as { type: "text"; text: string };
+      const original = part.text ?? "";
+      const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
+      const stripped = stripLeadingTimestampFrames(original);
+      if (date && !stripped.startsWith("[session-recap]")) {
+        timeline.push({ date, roleLabel });
+      }
+      if (stripped === original) return msg;
+      const clonedParts = parts.slice();
+      clonedParts[textIdx] = { ...part, text: stripped };
+      return cloneMessageWithClientId(msg, clonedParts);
+    }
+
+    if (typeof msg.content !== "string") return msg;
+    const original = msg.content;
+    const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
+    const stripped = stripLeadingTimestampFrames(original);
+    if (date && !stripped.startsWith("[session-recap]")) {
+      timeline.push({ date, roleLabel });
+    }
+    if (stripped === original) return msg;
+    return cloneMessageWithClientId(msg, stripped);
+  });
+
+  // 时间轴注入点：最后一条 user 消息（本轮输入）之前。条目过少（<2，如 ephemeral 单轮）
+  // 时时间轴无增量价值，跳过注入，只保留剥离。
+  if (timeline.length >= 2) {
+    let lastUserIdx = -1;
+    for (let i = view.length - 1; i >= 0; i--) {
+      if (view[i]?.role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    const rows = timeline.slice(-TIMELINE_MAX_ENTRIES).map((entry) => {
+      const relative = describeRelativeTime(entry.date, now);
+      return `- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}（${relative}）`;
+    });
+    const timelineMsg: ChatCompletionMessageParam = {
+      role: "system",
+      content: `${TIMELINE_HEADER}\n${rows.join("\n")}`,
+    };
+    const insertAt = lastUserIdx >= 0 ? lastUserIdx : view.length;
+    view.splice(insertAt, 0, timelineMsg);
+  }
+
+  return { messages: view };
 }
 
 /** 比较一条 user 消息的纯文本是否等于 `incoming`（去时间戳前缀后比较，避免重复追加）。 */

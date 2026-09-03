@@ -823,9 +823,9 @@ class _MediaCard extends StatelessWidget {
     final bool isGrouped = groupTitle.isNotEmpty;
 
     // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）
-    // + 自然宽高比 + 对比侧
-    final List<({String url, double? aspect, String side})> photos =
-        <({String url, double? aspect, String side})>[];
+    // + 自然宽高比 + 对比侧 + 图片描述（服务端视觉模型生成）
+    final List<({String url, double? aspect, String side, String? caption})> photos =
+        <({String url, double? aspect, String side, String? caption})>[];
     final List<String> allPhotoUrls = <String>[];
     // 收集视频（缩略图可空：后端已保证不把播放页/搜索页 URL 当图下发；
     // 无缩略图时前端显示视频占位图标，点击仍可打开播放页）
@@ -872,6 +872,7 @@ class _MediaCard extends StatelessWidget {
           url: resolved,
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
+          caption: (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
         ));
         allPhotoUrls.add(resolved);
       }
@@ -880,11 +881,11 @@ class _MediaCard extends StatelessWidget {
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
 
     // 分组/对比模式：左侧(A) + 右侧(B) 分栏；无侧的归入常规网格
-    final List<({String url, double? aspect, String side})> leftPhotos =
+    final List<({String url, double? aspect, String side, String? caption})> leftPhotos =
         photos.where((p) => p.side == "A").toList();
-    final List<({String url, double? aspect, String side})> rightPhotos =
+    final List<({String url, double? aspect, String side, String? caption})> rightPhotos =
         photos.where((p) => p.side == "B").toList();
-    final List<({String url, double? aspect, String side})> plainPhotos =
+    final List<({String url, double? aspect, String side, String? caption})> plainPhotos =
         photos.where((p) => p.side != "A" && p.side != "B").toList();
     final bool hasColumns =
         isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
@@ -897,8 +898,8 @@ class _MediaCard extends StatelessWidget {
     // 顶部先渲染 A/B 列头，后续每行图片填满各自列宽（方形自适应），
     // 保证两列等宽整齐；某侧缺图时该格显示「—」占位。
     List<Widget> buildCompareRows(
-      List<({String url, double? aspect, String side})> aList,
-      List<({String url, double? aspect, String side})> bList,
+      List<({String url, double? aspect, String side, String? caption})> aList,
+      List<({String url, double? aspect, String side, String? caption})> bList,
     ) {
       final bool showHeader = hasColumnHeaders;
       final int count = aList.length > bList.length ? aList.length : bList.length;
@@ -1018,19 +1019,22 @@ class _MediaCard extends StatelessWidget {
                     ),
                   ),
                 if (plainPhotos.length == 1 && photos.length == 1)
-                  // 单张：半宽贴左展示，点击预览
+                  // 单张：半宽贴左展示（带图片描述），点击预览
                   MediaGallery(
                     urls: <String>[plainPhotos.first.url],
                     aspects: <double?>[plainPhotos.first.aspect],
+                    captions: <String?>[plainPhotos.first.caption],
                     previewGallery: allPhotoUrls,
                     cs: cs,
                   )
                 else
-                  // 多张：竖向逐张半宽贴左（自然宽高比），每张可点击，
-                  // 同一回复框内可前后切换（预览图池用全部照片）。
+                  // 多张：竖向逐张半宽贴左（自然宽高比），每张下方带各自的
+                  // 图片描述（Coze 式一图一句），每张可点击，同一回复框内
+                  // 可前后切换（预览图池用全部照片）。
                   MediaGallery(
                     urls: plainPhotos.map((p) => p.url).toList(),
                     aspects: plainPhotos.map((p) => p.aspect).toList(),
+                    captions: plainPhotos.map((p) => p.caption).toList(),
                     previewGallery: allPhotoUrls,
                     cs: cs,
                   ),
@@ -1079,7 +1083,7 @@ class _MediaCard extends StatelessWidget {
   /// A/B 对比单格：图片按列宽等比占满（方形自适应），不携带说明文字，点击可预览；
   /// 该侧缺图时显示统一浅色「—」占位，与有图一侧等高对齐。
   Widget _compareCell(
-    ({String url, double? aspect, String side})? entry,
+    ({String url, double? aspect, String side, String? caption})? entry,
     List<String> gallery,
   ) {
     if (entry == null) {
@@ -1372,7 +1376,8 @@ String? extractUrlFromText(String text) {
 /// 否则会出现「段落文字 → 大边框卡 → 段落文字」的割裂感，违反用户
 /// 「一段介绍文字然后挨着放一两张图」的产品诉求。
 ///
-/// 交给自适应画廊 [MediaGallery]：竖向逐张铺排全宽大图（自然宽高比）+ 逐张说明，
+/// 交给自适应画廊 [MediaGallery]：竖向逐张半宽贴左铺排（自然宽高比），
+/// 每张照片下方带服务端视觉模型生成的真实图片描述（Coze 式一图一句），
 /// 跟正文共用一个气泡，视觉上才是「文字+图」的自然交错。
 class MediaInlineRow extends StatelessWidget {
   const MediaInlineRow({
@@ -1387,9 +1392,9 @@ class MediaInlineRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    // 解析每张图的可用地址 + 自然宽高比 + 侧标签；视频单独收集走视频面板
-    final List<({String url, double? aspect, String side})> photos =
-        <({String url, double? aspect, String side})>[];
+    // 解析每张图的可用地址 + 自然宽高比 + 侧标签 + 图片描述；视频单独收集走视频面板
+    final List<({String url, double? aspect, String side, String? caption})> photos =
+        <({String url, double? aspect, String side, String? caption})>[];
     final List<String> allUrls = <String>[];
     final List<
         ({
@@ -1433,12 +1438,14 @@ class MediaInlineRow extends StatelessWidget {
           url: resolved,
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
+          caption: (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
         ));
         allUrls.add(resolved);
       }
     }
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
-    // 照片走自适应画廊：竖向逐张半宽贴左展示，不携带说明文字。
+    // 照片走自适应画廊：竖向逐张半宽贴左展示，每张下方带各自的图片描述
+    // （服务端视觉模型看图生成；未生成时不显示文字）。
     // 视频走与照片同风格的面板：单条→16:9 大图带播放角标；多条→2 列网格。
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1448,6 +1455,7 @@ class MediaInlineRow extends StatelessWidget {
           MediaGallery(
             urls: allUrls,
             aspects: photos.map((p) => p.aspect).toList(),
+            captions: photos.map((p) => p.caption).toList(),
             previewGallery: allUrls,
             cs: cs,
           ),

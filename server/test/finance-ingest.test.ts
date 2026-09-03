@@ -23,6 +23,10 @@ import {
 } from "../src/services/finance-ingest-service.js";
 import { ConsumptionLedgerListener } from "../src/services/consumption-ledger-listener.js";
 import { createFinanceIngestBuiltinSkills } from "../src/skills/builtin/finance-ingest-skills.js";
+import {
+  isWechatPaymentContact,
+  parseWechatPaymentNotice,
+} from "../src/services/wechat-payment-notice.js";
 
 const ACTOR = "actor-finance-p1-test";
 
@@ -339,6 +343,94 @@ test("builtin skills：guide/bind/text/status 四个快捷指示全链路", asyn
     assert.equal(status.ok, true);
     assert.equal(status.ready, true);
     assert.ok(String(status.summary).includes("已就绪"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── E. 微信支付服务通知通道（实时、零 LLM、静默入账） ──────────────
+
+test("parseWechatPaymentNotice：商户消费通知 → 支出 + 商户 + 时间", () => {
+  const now = new Date("2026-09-03T20:00:00");
+  const tx = parseWechatPaymentNotice(
+    "微信支付凭证\n支付成功\n¥35.00\n【瑞幸咖啡】\n支付时间：2026-09-03 12:34:56\n支付方式：零钱",
+    now,
+  );
+  assert.ok(tx);
+  assert.equal(tx.type, "expense");
+  assert.equal(tx.amount, 35);
+  assert.equal(tx.merchant, "瑞幸咖啡");
+  assert.equal(tx.date, "2026-09-03 12:34:56");
+});
+
+test("parseWechatPaymentNotice：收款 → 收入；无时间用消息到达时间兜底", () => {
+  const now = new Date("2026-09-03T18:30:00");
+  const tx = parseWechatPaymentNotice("微信支付收款0.01元（朋友）", now);
+  assert.ok(tx);
+  assert.equal(tx.type, "income");
+  assert.equal(tx.amount, 0.01);
+  assert.equal(tx.date, "2026-09-03 18:30:00");
+});
+
+test("parseWechatPaymentNotice：退款/提现/汇总明细/无金额/语义不明 → null", () => {
+  const now = new Date("2026-09-03T18:30:00");
+  assert.equal(parseWechatPaymentNotice("微信支付：退款 ¥35.00 已原路退回", now), null);
+  assert.equal(parseWechatPaymentNotice("您已成功提现 ¥500.00 到银行卡", now), null);
+  assert.equal(parseWechatPaymentNotice("你的零钱明细已生成，点击查看", now), null);
+  assert.equal(parseWechatPaymentNotice("支付成功，交易正在处理中", now), null);
+  // 同时含收支关键词（收款 × 支付成功并存，语义矛盾）宁可漏记
+  assert.equal(parseWechatPaymentNotice("微信支付\n收款 ¥10.00\n支付成功", now), null);
+});
+
+test("isWechatPaymentContact：会话名为微信支付才命中，普通聊天不命中", () => {
+  assert.ok(isWechatPaymentContact({ participantName: "微信支付", title: "微信 · 微信支付" }));
+  assert.ok(isWechatPaymentContact({ channelId: "weixin-pay-notify", senderName: "微信支付" }));
+  assert.ok(!isWechatPaymentContact({ participantName: "妈妈" }));
+  assert.ok(!isWechatPaymentContact({ participantName: "张三", title: "微信 · 张三" }));
+});
+
+test("微信支付通知入账：落库 source=wechat_notice + 重投去重 + 普通聊天不入账 + 不推送", async () => {
+  const { dir, finance, service } = await makeIngestFixture();
+  const ingestedMsgs: string[] = [];
+  service.setOnIngested((_actor, message) => ingestedMsgs.push(message));
+  try {
+    // ① 微信支付服务通知 → 自动入账
+    await service.handleInboundMessage({
+      platform: "wechat",
+      actorId: ACTOR,
+      text: "微信支付凭证\n支付成功\n¥35.00\n【瑞幸咖啡】\n支付时间：2026-09-03 12:34:56",
+      participantName: "微信支付",
+      title: "微信 · 微信支付",
+    });
+    const txs = finance.getTransactions(ACTOR);
+    assert.equal(txs.length, 1);
+    assert.equal(txs[0]!.source, "wechat_notice");
+    assert.equal(txs[0]!.amount, 35);
+    assert.equal(txs[0]!.type, "expense");
+    assert.equal(txs[0]!.merchant, "瑞幸咖啡");
+
+    // ② 桥重投同一条通知 → 指纹去重
+    await service.handleInboundMessage({
+      platform: "wechat",
+      actorId: ACTOR,
+      text: "微信支付凭证\n支付成功\n¥35.00\n【瑞幸咖啡】\n支付时间：2026-09-03 12:34:56",
+      participantName: "微信支付",
+      title: "微信 · 微信支付",
+    });
+    assert.equal(finance.getTransactions(ACTOR).length, 1);
+
+    // ③ 普通聊天提到"微信支付了35" → 联系人不符，不入账
+    await service.handleInboundMessage({
+      platform: "wechat",
+      actorId: ACTOR,
+      text: "我今天微信支付了35块买咖啡",
+      participantName: "妈妈",
+      title: "微信 · 妈妈",
+    });
+    assert.equal(finance.getTransactions(ACTOR).length, 1);
+
+    // ④ 静默要求：微信通道入账不触发 onIngested 推送
+    assert.equal(ingestedMsgs.length, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

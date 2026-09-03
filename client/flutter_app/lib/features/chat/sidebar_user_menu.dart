@@ -174,6 +174,11 @@ class _SidebarUserMenuState extends State<SidebarUserMenu> {
             decoration: BoxDecoration(
               color: bgColor,
               borderRadius: BorderRadius.circular(8),
+              // 与导航按钮一致:常驻描边框,hover 时底色加深一档
+              border: Border.all(
+                color: cs.outline.withValues(alpha: 0.35),
+                width: 1,
+              ),
             ),
             child: _UserAvatar(
               name: widget.userName,

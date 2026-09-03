@@ -604,7 +604,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         if (message.role != "assistant") continue;
 
         final String plainText = _decryptFor(message.text, _userPin);
-        final String sanitizedText = stripAssistantTimestampFrames(plainText);
+        final String sanitizedText = stripAllTimestampFrameLines(plainText);
         if (sanitizedText == plainText) continue;
 
         encryptedMessages[index] = ChatMessage(

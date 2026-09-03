@@ -338,6 +338,7 @@ AgentResultItem _cardToItem(Map<String, dynamic> m) {
     mediaUrl: m["mediaUrl"]?.toString(),
     pageUrl: m["pageUrl"]?.toString(),
     source: m["source"]?.toString(),
+    caption: m["caption"]?.toString(),
     side: m["side"]?.toString(),
     sideLabel: m["sideLabel"]?.toString(),
     width: (m["width"] as num?)?.toInt(),

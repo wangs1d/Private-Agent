@@ -282,7 +282,8 @@ function toItems(
     out.push({
       title: title.slice(0, 180),
       url,
-      snippet: (item.snippet ?? "").slice(0, 220),
+      // 2026-09-03：220→400 字符。原上限只够一两句话，LLM 拿不到细节只能潦草收尾。
+      snippet: (item.snippet ?? "").slice(0, 400),
       source,
       publishedAt: item.date,
     });

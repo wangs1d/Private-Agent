@@ -43,9 +43,15 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachVideoMediaMarker, attachMediaSearchMarker, attachTravelItineraryCard, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
+import {
+  isOnlyTimestampFrames,
+  stripAllTimestampFrameLines,
+  stripLeadingTimestampFrames,
+} from "../../utils/timestamp-frame.js";
 import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
 
@@ -515,16 +521,18 @@ async function processBatchedMessage(
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
 
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
-  // 在所有 chunk 出口处统一剥离，避免 LLM 误把格式回显到回复里。
-  const TS_PREFIX_RE = /^\[ts:[^\]]*\]\s*/gm;
-  const stripTsPrefix = (text: string): string =>
-    text.replace(TS_PREFIX_RE, "");
-
+  // 2026-09-03 收紧：此前只剥首块，后续块里模型复述的时间戳帧（含残缺帧）会直透前端。
+  // 现在每个 chunk 出口都剥"帧"：
+  // - stripLeadingTimestampFrames：剥块首的帧（分段器的信息块经常以复述的帧开头）；
+  // - 整块恰好是一帧/一串帧（复述的帧独立成块时）→ 整块丢弃；
+  // - 首块额外做全量整行清洗（兜底模型把帧复述在正文中间的行）。
+  // 剥离容忍残缺帧（[ts 后断行/丢冒号），杜绝"严格正则匹配不上所以漏网"。
   const sendAssistantChunk = (chunk: string, phase: "interim" | "stream" = "stream"): void => {
     if (isStale()) return;
     chunkSeq += 1;
-    // 仅在首块剥离前缀；后续块被剥会丢失合法内容。
-    const cleanedChunk = chunkSeq === 1 ? stripTsPrefix(chunk) : chunk;
+    let cleanedChunk = stripLeadingTimestampFrames(chunk);
+    if (chunkSeq === 1) cleanedChunk = stripAllTimestampFrameLines(cleanedChunk);
+    if (isOnlyTimestampFrames(cleanedChunk)) cleanedChunk = "";
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -989,7 +997,10 @@ async function processBatchedMessage(
     //   用流式累积的 streamedText 兜底，保证至少有一段正文可分段。
     // - 链路保证：只 feed 这一次，分段器内部据此裁决一个垫词 + 按信息块递进，
     //   避免多段流/工具边界造成的重复、乱序与多个垫词。
-    const finalFeed = (reply.text && reply.text.trim()) ? reply.text : streamedText;
+    // - 入料前统一清一遍时间戳帧（streamedText 分支是原始流式累积、从未清洗过；
+    //   复述的帧不在这里剥掉，就会成为独立信息块推给前端）。
+    const finalFeedRaw = (reply.text && reply.text.trim()) ? reply.text : streamedText;
+    const finalFeed = stripAllTimestampFrameLines(finalFeedRaw);
     if (finalFeed && finalFeed.trim()) {
       streamSegmenter.feed(finalFeed);
     }
@@ -1129,6 +1140,20 @@ async function processBatchedMessage(
       maxPerGroup: 4,
       maxPerSide: 2,
     });
+    // 真实图片描述（Coze 式「一图一句」）：对裁剪后的图片卡逐张看图生成 caption。
+    // 视觉模型批量调用（与主对话同 provider），失败/超时/模型不支持视觉时
+    // 静默跳过——卡片保持无 caption，渲染回退旧的正文交错排版。
+    if (mediaCards.length > 0 && isImageCaptionEnabled()) {
+      try {
+        await captionMediaCards(mediaCards);
+      } catch (err) {
+        console.info(
+          `[chat] 图片描述生成异常（忽略，回退旧渲染）: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     // 仅当没有结构化卡片时，才回退走文本标记注入（保持旧客户端兼容、
     // 以及非图片工具不带结构数据的场景）。有 mediaCards 时不再注入标记，
     // 避免 finalText 携带标记被前端旧解析路径抢先渲染、且无真实缩略图。
@@ -1155,9 +1180,15 @@ async function processBatchedMessage(
     // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，
     // 替代旧行为「全部照片一次性铺在最前面」。由代码层位置锚定完成，不依赖 prompt。
     // 仅当有结构化媒体卡片时构建；无媒体时前端走原「文本+标记」路径。
+    //
+    // 2026-09-03：图片卡全部带真实描述（caption）时改走 buildCaptionedRenderBlocks——
+    // 正文保持完整一段，照片逐张附各自的 caption（描述由视觉模型看图生成），
+    // 不再用位置启发式把正文切段钉到照片旁（那是「文字与照片对不上」的根源）。
     const renderBlocks =
       mediaCards.length > 0
-        ? buildInterleavedRenderBlocks(finalText, mediaCards)
+        ? allImageCardsHaveCaption(mediaCards)
+          ? buildCaptionedRenderBlocks(finalText, mediaCards)
+          : buildInterleavedRenderBlocks(finalText, mediaCards)
         : [];
 
     // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
@@ -1193,8 +1224,9 @@ async function processBatchedMessage(
     embodimentHappy(msgActor, (json) => ctx.socket.send(json));
     getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
 
-    // 兜底剥离 [ts:] 时间戳前缀（首块已剥，这里再兜底一次以防路径绕过 sendAssistantChunk）
-    finalText = finalText.replace(TS_PREFIX_RE, "").trim();
+    // 兜底剥离 [ts:] 时间戳帧（chunk 出口已逐块剥，这里对 finalText 再整行兜底一次，
+    // 容忍残缺帧，防路径绕过 sendAssistantChunk）
+    finalText = stripAllTimestampFrameLines(finalText).trim();
     // 兜底再剥一次 DSML 工具调用标记：极少数情况下 DSML 跨多个 chunk 拼接后正则未在 adapter 层
     // 命中（极端异步路径），这里二次清理避免内部格式透出到用户可见消息。
     finalText = stripDsmlToolCallMarkup(finalText);

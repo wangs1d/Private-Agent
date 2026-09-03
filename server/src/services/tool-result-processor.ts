@@ -1048,6 +1048,12 @@ export type MediaCardItem = {
   side?: "A" | "B";
   /** 侧标签（如「马尔代夫」「印尼」），用于左右分栏表头 */
   sideLabel?: string;
+  /**
+   * 真实图片描述（Coze 式「一图一句」，2026-09-03）：
+   * 由视觉模型看图生成（image-caption-service），描述画面实际可见内容。
+   * 前端渲染在对应照片下方；为空表示未生成（回退旧的正文交错排版）。
+   */
+  caption?: string;
 };
 
 /**
@@ -1516,4 +1522,62 @@ export function buildInterleavedRenderBlocks(
   }
 
   return blocks;
+}
+
+/**
+ * 有真实图片描述（caption）时的渲染块构建（Coze 式「一图一句」，2026-09-03）。
+ *
+ * 与 `buildInterleavedRenderBlocks` 的区别：caption 已经是对单张照片的准确描述
+ * （视觉模型看图生成、随卡片下发、前端渲染在照片下方），正文不再需要被切成
+ * 句段"钉"到照片旁边充当介绍——位置启发式切段正是此前「文字与照片对不上」
+ * 的根源。因此这里：
+ *   1. 正文作为整体一个 text 块（保持行结构，不切句、不锚定）；
+ *   2. 照片按 groupTitle 分组（对比分组原样保留），每组一个 media 块跟在正文后，
+ *      每张照片下方各带自己的 caption。
+ *
+ * 前端效果 = 扣子：一段回复正文 + 逐张「照片 + 对这张照片的一句描述」。
+ *
+ * @param finalText 清洗后的回复正文
+ * @param mediaCards 已带 caption 的媒体卡片（全部图片卡都有 caption 时才应调用）
+ */
+export function buildCaptionedRenderBlocks(
+  finalText: string,
+  mediaCards: MediaCardItem[],
+): RenderBlock[] {
+  const blocks: RenderBlock[] = [];
+  const text = String(finalText ?? "").trim();
+  if (text) blocks.push({ type: "text", text });
+
+  // 按 groupTitle 分组（空标题=普通单组，归入 "" 组），保留首次出现顺序
+  const groups: Array<{ title: string; cards: MediaCardItem[] }> = [];
+  const idxByTitle = new Map<string, number>();
+  for (const card of mediaCards) {
+    const title = (card.groupTitle ?? "").trim();
+    let gi = idxByTitle.get(title);
+    if (gi === undefined) {
+      gi = groups.length;
+      groups.push({ title, cards: [] });
+      idxByTitle.set(title, gi);
+    }
+    groups[gi].cards.push(card);
+  }
+  for (const g of groups) {
+    const sideA = g.cards.find((c) => c.side === "A")?.sideLabel;
+    const sideB = g.cards.find((c) => c.side === "B")?.sideLabel;
+    blocks.push({
+      type: "media",
+      ...(g.title ? { groupTitle: g.title } : {}),
+      ...(sideA ? { sideA } : {}),
+      ...(sideB ? { sideB } : {}),
+      cards: g.cards,
+    });
+  }
+  return blocks;
+}
+
+/** 判断媒体卡片里的图片卡是否全部带有非空 caption（决定走哪条渲染块路径）。 */
+export function allImageCardsHaveCaption(cards: MediaCardItem[]): boolean {
+  const imageCards = cards.filter((c) => c.type === "image");
+  if (imageCards.length === 0) return false;
+  return imageCards.every((c) => !!(c.caption ?? "").trim());
 }

@@ -7,6 +7,8 @@ import {
   stripMediaCardMarker,
   containsTravelItineraryCard,
   buildInterleavedRenderBlocks,
+  buildCaptionedRenderBlocks,
+  allImageCardsHaveCaption,
   type MediaCardItem,
 } from "../src/services/tool-result-processor.js";
 import { travelItineraryStore } from "../src/skills/travel-planning/travel-itinerary-store.js";
@@ -440,4 +442,69 @@ test("renderBlocks: all original text preserved (no keyword swallowed by anchors
   const firstMediaIdx = blocks.findIndex((b) => b.type === "media");
   const firstTextIdx = blocks.findIndex((b) => b.type === "text");
   assert.ok(firstMediaIdx < firstTextIdx, "图在介绍文字之前");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildCaptionedRenderBlocks（2026-09-03）：有真实图片描述时的 Coze 式排版
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 造 N 张带 caption 的图片卡。 */
+function buildCaptionedPhotoCards(n: number): MediaCardItem[] {
+  return Array.from({ length: n }, (_, i) => ({
+    type: "image" as const,
+    title: `图片结果${i + 1}`,
+    thumbnailUrl: `https://example.com/img${i + 1}.png`,
+    caption: `第${i + 1}张的描述`,
+  }));
+}
+
+test("captioned renderBlocks: text stays whole, photos follow with captions", () => {
+  const text = "这是整体介绍。这是补充建议。";
+  const blocks = buildCaptionedRenderBlocks(text, buildCaptionedPhotoCards(3));
+  const types = blocks.map((b) => b.type);
+  // 正文一个 text 块在前，照片一个 media 块在后（不再切句锚定）
+  assert.deepEqual(types, ["text", "media"]);
+  assert.equal(blocks[0].type === "text" && blocks[0].text, text);
+  assert.equal(blocks[1].type === "media" && blocks[1].cards.length, 3);
+  // 每张卡都带着自己的描述
+  const media = blocks[1];
+  assert.ok(media.type === "media");
+  assert.deepEqual(
+    media.cards.map((c) => c.caption),
+    ["第1张的描述", "第2张的描述", "第3张的描述"],
+  );
+});
+
+test("captioned renderBlocks: compare groups preserved as separate media blocks", () => {
+  const cards: MediaCardItem[] = [
+    { type: "image", title: "a", thumbnailUrl: "u1", caption: "ca", groupTitle: "水屋", side: "A", sideLabel: "马代" },
+    { type: "image", title: "b", thumbnailUrl: "u2", caption: "cb", groupTitle: "水屋", side: "B", sideLabel: "印尼" },
+    { type: "image", title: "c", thumbnailUrl: "u3", caption: "cc", groupTitle: "沙屋", side: "A", sideLabel: "马代" },
+    { type: "image", title: "d", thumbnailUrl: "u4", caption: "cd", groupTitle: "沙屋", side: "B", sideLabel: "印尼" },
+  ];
+  const blocks = buildCaptionedRenderBlocks("对比介绍。", cards);
+  const mediaBlocks = blocks.filter((b) => b.type === "media");
+  // 两个对比维度各自成块，组内元数据原样保留
+  assert.equal(mediaBlocks.length, 2);
+  assert.ok(mediaBlocks[0].type === "media" && mediaBlocks[0].groupTitle === "水屋");
+  assert.ok(mediaBlocks[0].type === "media" && mediaBlocks[0].sideA === "马代");
+  assert.ok(mediaBlocks[1].type === "media" && mediaBlocks[1].groupTitle === "沙屋");
+});
+
+test("allImageCardsHaveCaption: true only when every image card has non-empty caption", () => {
+  assert.equal(allImageCardsHaveCaption([]), false);
+  assert.equal(allImageCardsHaveCaption(buildPhotoCards(2)), false);
+  assert.equal(allImageCardsHaveCaption(buildCaptionedPhotoCards(2)), true);
+  // 视频卡不要求 caption，不影响判定
+  const mixed: MediaCardItem[] = [
+    ...buildCaptionedPhotoCards(1),
+    { type: "video", title: "v", thumbnailUrl: "" },
+  ];
+  assert.equal(allImageCardsHaveCaption(mixed), true);
+  // 部分图片卡缺 caption → 回退旧路径
+  const partial: MediaCardItem[] = [
+    ...buildCaptionedPhotoCards(1),
+    ...buildPhotoCards(1),
+  ];
+  assert.equal(allImageCardsHaveCaption(partial), false);
 });

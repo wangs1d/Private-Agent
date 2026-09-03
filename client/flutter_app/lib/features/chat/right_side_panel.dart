@@ -10,6 +10,7 @@ import "../../core/services/device_api_client.dart";
 import "../../core/services/right_panel_tool_preference.dart";
 import "../../core/services/schedule_floating_launcher.dart";
 import "../../core/services/schedule_preference.dart";
+import "../../core/theme/app_theme.dart";
 import "agent_activity_section.dart";
 
 const Color _kAccentBlue = Color(0xFF18D6F3);
@@ -132,6 +133,8 @@ class _RightSidePanelState extends State<RightSidePanel> {
       if (mounted) setState(() {});
     });
     DeskPetSession.instance.addListener(_onDeskPetChanged);
+    // 主题切换时同步悬浮窗配色（窗口未创建时为 no-op）
+    AppThemeController.instance.addListener(_onAppThemeChanged);
     unawaited(_loadToolLayout());
     _refreshDeviceStatus();
     _devicePollTimer = Timer.periodic(
@@ -186,9 +189,15 @@ class _RightSidePanelState extends State<RightSidePanel> {
     _scheduleTicker?.cancel();
     _devicePollTimer?.cancel();
     DeskPetSession.instance.removeListener(_onDeskPetChanged);
+    AppThemeController.instance.removeListener(_onAppThemeChanged);
     ScheduleFloatingLauncher.activeNotifier
         .removeListener(_onScheduleWindowChanged);
     super.dispose();
+  }
+
+  /// 主题切换 → 同步桌面悬浮窗配色（保持与 in-app 面板一致）。
+  void _onAppThemeChanged() {
+    ScheduleFloatingLauncher.syncAppTheme();
   }
 
   Future<void> _loadToolLayout() async {
@@ -241,6 +250,8 @@ class _RightSidePanelState extends State<RightSidePanel> {
     ScheduleFloatingLauncher.activeNotifier
         .addListener(_onScheduleWindowChanged);
     if (launched) {
+      // 首次创建即按当前 App 主题取色（默认深色，浅色主题需先下发）
+      await ScheduleFloatingLauncher.syncAppTheme();
       _pushScheduleToNativeWindow();
     }
   }
@@ -297,6 +308,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
         });
         ScheduleFloatingLauncher.activeNotifier
             .addListener(_onScheduleWindowChanged);
+        await ScheduleFloatingLauncher.syncAppTheme();
         _pushScheduleToNativeWindow();
       } else {
         setState(() {});
@@ -1058,39 +1070,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
               color: skin.mutedText,
             ),
           ),
-          const SizedBox(height: 12),
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(999),
-              onTap: widget.onSchedule,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 14, vertical: 5),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(999),
-                  color: skin.accent.withValues(alpha: 0.08),
-                  border: Border.all(
-                      color: skin.accent.withValues(alpha: 0.35)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(Icons.add, size: 11, color: skin.accentSoft),
-                    const SizedBox(width: 5),
-                    Text(
-                      "新建安排",
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: skin.accentSoft,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -1426,8 +1405,8 @@ class _SchedSkin {
       Theme.of(context).brightness == Brightness.dark ? _dark : _warm;
 
   static final _SchedSkin _dark = _SchedSkin(
-    accent: const Color(0xFF18D6F3),
-    accentSoft: const Color(0xFF18D6F3),
+    accent: const Color(0xFF000000),
+    accentSoft: const Color(0xFF000000),
     titleText: const Color(0xFFE8E8E8),
     bodyText: const Color(0xFFDEDEDE),
     mutedText: const Color(0xFF989898),
@@ -1436,22 +1415,22 @@ class _SchedSkin {
     cardShadow: null,
     track: const Color(0x12FFFFFF),
     elapsedStart: const Color(0x1AFFFFFF),
-    elapsedEnd: const Color(0x5918D6F3),
+    elapsedEnd: const Color(0x59A3A3A3),
     doneDotFill: const Color(0xFF3A3D42),
     doneDotRing: const Color(0xFF6B7076),
     line: const Color(0x17FFFFFF),
-    dotBlue: const Color(0xFF4E9CFF),
+    dotBlue: const Color(0xFF000000),
     dotAmber: const Color(0xFFF2B94B),
-    dotGreen: const Color(0xFF1ED7A6),
+    dotGreen: const Color(0xFF000000),
     dotGray: const Color(0xFF8A8F96),
-    focusGradient: const <Color>[Color(0x2118D6F3), Color(0x121ED7A6)],
-    focusBorder: const Color(0x4D18D6F3),
-    focusBorderHover: const Color(0x8C18D6F3),
+    focusGradient: const <Color>[Color(0x21000000), Color(0x12000000)],
+    focusBorder: const Color(0x4D000000),
+    focusBorderHover: const Color(0x8C000000),
     focusNote: const Color(0xFF8FA6AD),
     focusTime: const Color(0xFFEAFDFF),
-    chipGradient: const <Color>[Color(0x3818D6F3), Color(0x2E1ED7A6)],
+    chipGradient: const <Color>[Color(0x38A3A3A3), Color(0x2EA3A3A3)],
     needle: const Color(0xFFF2F5F9),
-    needleGlow: const Color(0xE618D6F3),
+    needleGlow: const Color(0xE6000000),
     tickLabel: const Color(0xFF55595F),
     dimTitle: const Color(0xFF5C6066),
     dimStrike: const Color(0x38FFFFFF),

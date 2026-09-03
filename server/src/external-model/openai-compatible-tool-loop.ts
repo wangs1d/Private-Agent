@@ -23,6 +23,7 @@ import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
+import { stripAllTimestampFrameLines } from "../utils/timestamp-frame.js";
 import { modelSupportsVision, ocrScreenshot } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
@@ -84,15 +85,14 @@ import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 const TOOL_RESULT_VISION_INJECT_KEY = "_injectVisionUserMessage";
 
 // 工具结果字符预算：在信息完整性和 token 节省之间取平衡。
-// search_web 5000：一次搜索默认返回 12-16 条 title+snippet（约 3000-4500 字符），
-// 之前压到 600 字符只露出约 4 条标题，LLM 在「看不到结果」的状态下收尾，
-// 是「搜到 16 条却答得潦草」的最大数据瓶颈。
-// fetch_web 3000 / deep_search 6000：深读正文要支撑细节复述，截太狠等于白抓。
+// search_web 7000：2026-09-03 需求「检索/任务型回复要信息全面」，snippet 上限同步放宽到
+// 400 字符，预算随之上调（原 5000），保证多来源标题+摘要不因截断丢细节。
+// fetch_web 4500 / deep_search 6000：深读正文要支撑细节复述，截太狠等于白抓。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
-  "search_web": 5000,
+  "search_web": 7000,
   "search_images": 1200,
   "search_videos": 1200,
-  "fetch_web": 3000,
+  "fetch_web": 4500,
   // deep_search 返回正文，限制注入量避免整页内容灌给 LLM
   "deep_search": 6000,
   // hot_rankings 榜单项字段少，给足即可
@@ -574,7 +574,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用口语化分段或小标题呈现，禁止使用 Markdown 表格、管道符；只有用户问单一事实判断时才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。",
+        "联网搜索公开网页信息（按发布时间从新到旧）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点/对比类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用 Markdown 小标题/加粗/表格组织成结构清晰的充分回答；只有真正的单一事实判断（是/否、单个数据点）才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。",
       parameters: {
         type: "object",
         properties: {
@@ -2516,10 +2516,10 @@ export async function streamCompletionWithTools(
       content:
         "工具调用原则（Plan-and-Execute）：\n" +
         "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
-        "2. 同一工具的结果通常一次就够了。如果 search_web 已返回相关结果，不要用相同或近似 query 再搜一遍——直接基于已有结果回答或 fetch_web 深读。\n" +
+        "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n" +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。正文按「一图一句」组织：对搜到的照片逐张给一句 ≤24 字的观感/卖点介绍（一段一句、顺序与图片一致），前端会把照片与介绍逐张交错排版；不要写成编号清单，也不要把图片链接复述进正文。\n" +
+        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
         "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。",
     });
   }
@@ -2737,9 +2737,9 @@ export async function streamCompletionWithTools(
 
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       // 对话结束：返回最终回复文本。
-      // 剥离 [ts:] 时间戳前缀（仅供 LLM 上下文，不应展示给用户）
-      let finalText = lastAssistantText.trim();
-      finalText = finalText.replace(/^\[ts:[^\]]*\]\s*/gm, "").trim();
+      // 剥离 [ts:] 时间戳帧（仅供 LLM 上下文，不应展示给用户）；
+      // 用容错版本，连模型复述出的残缺帧（[ts 后断行/丢冒号）一并清掉。
+      let finalText = stripAllTimestampFrameLines(lastAssistantText.trim()).trim();
 
       // （Coze 思路）已移除图片意图"自救"prompt 注入：
       //   - 不靠正则猜意图 / 不注入 prompt 逼模型重调 search_images。
@@ -3342,16 +3342,17 @@ export async function streamCompletionWithTools(
             `（包括"翻了一圈""公开渠道没查到""据我了解最新消息"等说法）；` +
             `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
           : "";
-      // 求简指令只对真正的单一事实查询生效；盘点/汇总类问题要求把回答组织充分
+      // 求简指令只对真正的单一事实求证生效；其余一律要求把信息组织充分（2026-09-03：
+      // 检索/任务型回复不再受「口语求简」约束，需按主题分节、可用 Markdown 排版）
       const singleFactClause = isDirectFactQuery(userText)
-        ? `单一事实查询默认“结论 + 1句依据”，最多保留一个简短追问。`
-        : `数据丰富时把回答组织充分（可按主题分组），不要为了简短丢掉用户想看的细节。`;
+        ? `这是单一事实求证（是/否、一个数据点）：给「结论 + 1 句依据」即可，最多保留一个简短追问。`
+        : `把检索到的信息组织充分：按主题分节，用 Markdown 小标题/加粗/表格排版，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。`;
       const baseDirective =
         (substantiveToolResults.length > 0
-          ? `刚才调用工具拿到了以下结果，请基于这些结果用自然的口语回答用户的问题。` +
+          ? `刚才调用工具拿到了以下结果，请基于这些结果回答用户的问题：语气自然像朋友，但内容要充分、结构清晰。` +
             `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
             `同一事实不要换个说法再总结第二遍；${singleFactClause}`
-          : `请基于本轮对话上下文用自然的口语回答用户的问题。`) +
+          : `请基于本轮对话上下文，用自然、像朋友一样的语气回答用户的问题。`) +
         strategyBlock +
         zeroToolGuard +
         metaOnlyGuard;

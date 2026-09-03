@@ -797,6 +797,19 @@ void FlutterWindow::HandleScheduleFloatingMethodCall(
     return;
   }
 
+  if (method == "setTheme") {
+    // 同步 in-app 主题到悬浮窗配色（true=深色 / false=暖色浅色）
+    bool dark = true;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      dark = GetEncodableBool(args, "dark", true);
+    }
+    if (schedule_floating_window_) {
+      schedule_floating_window_->SetTheme(dark);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
   if (method == "setSchedule") {
     if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
       // DPR 缩放先行：SetSchedule 里会按新系数重算窗口高度

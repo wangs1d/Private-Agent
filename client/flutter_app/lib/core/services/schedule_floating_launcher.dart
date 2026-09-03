@@ -3,6 +3,8 @@ import "dart:async";
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 
+import "../theme/app_theme.dart";
+
 /// 今日安排独立悬浮窗启动器。
 ///
 /// 实现：同进程 HWND + GDI 自绘（不依赖 Electron / 独立后台进程）。
@@ -228,6 +230,29 @@ class ScheduleFloatingLauncher {
       return false;
     }
   }
+
+  /// 设置悬浮窗主题配色（true=深色 / false=暖色浅色）。
+  ///
+  /// 悬浮窗为原生 GDI 自绘，配色需由 Dart 端按当前 App 主题下发，
+  /// 保证与主界面右侧面板的「今日安排」卡片（_SchedSkin）观感一致。
+  static Future<bool> setTheme({required bool dark}) async {
+    try {
+      await _channel.invokeMethod<bool>(
+        "setTheme",
+        <String, dynamic>{"dark": dark},
+      );
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 读取当前 App 主题变体并同步到悬浮窗（AppThemeController 变化时调用）。
+  static Future<bool> syncAppTheme() => setTheme(
+        dark: AppThemeController.instance.value == AppThemeVariant.dark,
+      );
 
   /// 替换整个日程列表。
   ///

@@ -19,10 +19,61 @@
 ///   - 空态提示；折叠时只剩顶栏
 ///
 /// 通过 MethodChannel `pai/schedule_floating` 与 Dart 端通信：
-///   - Dart -> C++：create / show / hide / destroy / setBounds / setSchedule
+///   - Dart -> C++：create / show / hide / destroy / setBounds / setSchedule / setTheme
 ///   - C++ -> Dart：onClose / onCollapseChanged
 class ScheduleFloatingWindow {
  public:
+  /// 主题调色板：逐字段对齐 right_side_panel.dart 的 _SchedSkin
+  /// （_dark / _warm 两套皮肤）。半透明色按「alpha 混入对应底层」预计算为实色
+  /// （GDI 不支持 alpha），保证与 in-app 卡片逐层叠加后的最终渲染色一致。
+  struct Palette {
+    COLORREF surface_bg;      // 窗口卡底 = surfaceContainer 上叠 cardFill 后的实色
+    COLORREF border;          // 窗口描边 = cardBorder 混合后实色
+    COLORREF text_primary;    // titleText 顶栏标题 / 空态标题
+    COLORREF text_body;       // bodyText 事项标题
+    COLORREF text_secondary;  // mutedText 次文字（未完成时间 / 底部计数）
+    COLORREF text_dim;        // dimTitle 完成标题
+    COLORREF text_strike;     // dimStrike 完成删除线
+    COLORREF time_dim;        // dimTime 完成时间
+    COLORREF accent;          // accent（深色皮肤为纯黑，见 _SchedSkin._dark）
+    COLORREF accent_soft;     // accentSoft「接下来·倒计时」/ NOW 文字 / done 计数
+    COLORREF focus_border;    // focusBorder 混合后实色
+    COLORREF focus_time;      // focusTime 焦点时间
+    COLORREF focus_note;      // focusNote 焦点备注
+    COLORREF dot_blue;        // dotBlue（<10 点）
+    COLORREF dot_amber;       // dotAmber（10-14 点）
+    COLORREF dot_green;       // dotGreen（14-18 点）
+    COLORREF dot_gray;        // dotGray（其它时段）
+    COLORREF glow_blue;       // 圆点光晕 = dot 色 alpha 混入卡底
+    COLORREF glow_amber;
+    COLORREF glow_green;
+    COLORREF glow_gray;
+    COLORREF glow_accent;     // 下一事项光晕 = accent alpha 混入卡底
+    COLORREF dot_done_fill;   // doneDotFill 完成圆点
+    COLORREF dot_done_ring;   // doneDotRing 完成圆环
+    COLORREF timeline_line;   // line 竖向点线
+    COLORREF track;           // 日程带轨道
+    COLORREF elapsed_start;   // 已流逝段渐变起点
+    COLORREF elapsed_end;     // 已流逝段渐变终点
+    COLORREF needle;          // now 游标
+    COLORREF needle_glow;     // now 游标光晕
+    COLORREF tick_label;      // tickLabel 刻度标签
+    COLORREF now_tag_bg;      // NOW 标签底 = accent 12% 混入卡底
+    COLORREF all_done_fill;   // 完成横幅底 = dotGreen 8% 混入卡底
+    COLORREF all_done_border; // 完成横幅描边 = dotGreen 25% 混入卡底
+    COLORREF all_done_text;   // 完成横幅文字 = dotGreen
+    COLORREF btn_bg;          // 顶栏按钮底（in-app 无对应，随主题取中性色）
+    COLORREF btn_border;      // 顶栏按钮描边
+    COLORREF btn_text;        // 顶栏按钮文字
+    COLORREF chip_grad_top;    // 头部图标底座渐变起点（chipGradient[0] 混入卡底）
+    COLORREF chip_grad_bottom; // 头部图标底座渐变终点（chipGradient[1] 混入卡底）
+    COLORREF focus_grad_top;   // 焦点卡渐变起点（focusGradient[0] 混入卡底）
+    COLORREF focus_grad_bottom;// 焦点卡渐变终点（focusGradient[1] 混入卡底）
+    COLORREF empty_icon_border; // 空态插画边框 = accent 22% 混入卡底
+    COLORREF empty_bar;         // 空态插画顶部横条 = accent 45% 混入卡底
+    COLORREF empty_cell;        // 空态插画格子 = emptyCell 混入卡底
+  };
+
   /// 一条日程事项。
   struct ScheduleItem {
     std::string id;         // 唯一 id
@@ -68,6 +119,11 @@ class ScheduleFloatingWindow {
 
   /// 替换整个日程列表。
   void SetSchedule(std::vector<ScheduleItem> items);
+
+  /// 设置主题配色（true=深色 / false=浅色暖色），变化时立即重绘。
+  /// 对齐 in-app AppThemeVariant.dark / warm（_SchedSkin._dark / _warm）。
+  void SetTheme(bool dark);
+  bool IsDarkTheme() const { return dark_theme_; }
 
   /// 由 Dart 端下发 FlutterView 的 devicePixelRatio 作为缩放系数
   /// （进程内 GetDpiForWindow 可能被虚拟化，DPR 才是与 in-app 一致的基准）。
@@ -162,6 +218,8 @@ class ScheduleFloatingWindow {
   int ParseMinutes(const std::string& time_text) const;
   /// 从 "HH:MM" 时间文本中解析小时。
   int ParseHour(const std::string& time_text) const;
+  /// 当前主题调色板（深 / 浅两套，见 .cpp 中 kDarkPalette / kLightPalette）。
+  const Palette& pal() const;
   /// 根据小时返回类别圆点颜色（<10 蓝 / <14 琥珀 / <18 绿 / 其它灰）。
   COLORREF CategoryColor(int hour) const;
   /// 距下一事项的倒计时文案（分钟数）。
@@ -189,6 +247,7 @@ class ScheduleFloatingWindow {
   // 状态
   bool on_top_ = true;
   bool collapsed_ = false;
+  bool dark_theme_ = true;  // true=深色皮肤（_SchedSkin._dark）/ false=暖色（_warm）
   double dpi_scale_ = 1.0;  // 窗口 DPI / 96，渲染几何与字号按此缩放
   std::vector<ScheduleItem> items_;
 
