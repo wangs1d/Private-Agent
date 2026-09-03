@@ -101,7 +101,7 @@ class _SubStepRow extends StatelessWidget {
             child: buildInlineMarkdownText(
               text,
               TextStyle(
-                fontSize: 12.5,
+                fontSize: 13,
                 color: cs.onSurface.withValues(alpha: 0.65),
                 height: 1.5,
               ),

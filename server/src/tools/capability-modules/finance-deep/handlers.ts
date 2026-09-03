@@ -6,6 +6,11 @@ import type {
   FinanceCategory,
 } from "../../../services/finance-deep-service.js";
 import { FINANCE_CATEGORIES } from "../../../services/finance-deep-service.js";
+import type {
+  SubscriptionAuditService,
+  SubscriptionStatus,
+} from "../../../services/subscription-audit-service.js";
+import { monthlyCost, periodLabel } from "../../../services/subscription-audit-service.js";
 
 /**
  * finance.import_transactions 工具 handler。
@@ -334,8 +339,176 @@ export function createFinanceExportReportHandler(
   };
 }
 
-// ─── 内部工具：CSV 解析 ────────────────────────────────────────
+/**
+ * finance.list_subscriptions 工具 handler。
+ *
+ * 先自动刷新疑似订阅候选（确定性检测），再按状态过滤列出。
+ */
+export function createFinanceListSubscriptionsHandler(
+  service: SubscriptionAuditService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const statusRaw = String(input.status ?? "all").trim();
+    const statuses: SubscriptionStatus[] | undefined =
+      statusRaw === "all" || !statusRaw
+        ? undefined
+        : ([statusRaw].filter((s): s is SubscriptionStatus =>
+            ["candidate", "confirmed", "cancelled", "ignored"].includes(s),
+          ) as SubscriptionStatus[]);
+    if (statusRaw !== "all" && statusRaw && (statuses?.length ?? 0) === 0) {
+      return {
+        ok: false,
+        error: "status 必须为 all / candidate / confirmed / cancelled / ignored",
+      };
+    }
 
+    const actorId = resolveActorId(context);
+    const newCandidates = await service.refreshCandidates(actorId);
+    const records = await service.listSubscriptions(actorId, statuses);
+
+    const summaryParts: string[] = [];
+    const confirmed = records.filter((r) => r.status === "confirmed");
+    const candidates = records.filter((r) => r.status === "candidate");
+    if (records.length === 0) {
+      summaryParts.push("暂无订阅记录");
+    } else {
+      if (confirmed.length > 0) {
+        const monthly = confirmed.reduce((acc, r) => acc + monthlyCost(r.amount, r.periodDays), 0);
+        summaryParts.push(
+          `确认订阅 ${confirmed.length} 个，折算月成本约 ¥${monthly.toFixed(2)}` +
+            `（${confirmed.map((r) => `${r.merchant} ¥${r.amount.toFixed(2)}/${periodLabel(r.periodDays)}`).join("、")}）`,
+        );
+      }
+      if (candidates.length > 0) {
+        summaryParts.push(
+          `疑似订阅 ${candidates.length} 个待确认` +
+            `（${candidates.map((r) => r.merchant).join("、")}）`,
+        );
+      }
+      const settled = records.filter(
+        (r) => r.status === "cancelled" || r.status === "ignored",
+      );
+      if (settled.length > 0) summaryParts.push(`已退订/忽略 ${settled.length} 个`);
+      if (newCandidates > 0) summaryParts.push(`本次新检测到 ${newCandidates} 个候选`);
+    }
+
+    return {
+      ok: true,
+      subscriptions: records,
+      newCandidates,
+      summary: summaryParts.join("，"),
+    };
+  };
+}
+
+/**
+ * finance.confirm_subscription 工具 handler。
+ */
+export function createFinanceConfirmSubscriptionHandler(
+  service: SubscriptionAuditService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const merchant = String(input.merchant ?? "").trim();
+    const amount = Number(input.amount);
+    const periodDays = Number(input.periodDays);
+    if (!merchant) return { ok: false, error: "缺少 merchant（商户/服务名）" };
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { ok: false, error: "amount 必须为正数" };
+    }
+    if (!Number.isFinite(periodDays) || periodDays < 1 || periodDays > 366) {
+      return { ok: false, error: "periodDays 必须为 1~366 的天数（常见 7/30/90/365）" };
+    }
+    const subscriptionId =
+      typeof input.subscriptionId === "string" && input.subscriptionId.trim()
+        ? input.subscriptionId.trim()
+        : undefined;
+    const nextRenewalDate =
+      typeof input.nextRenewalDate === "string" && input.nextRenewalDate.trim()
+        ? input.nextRenewalDate.trim()
+        : undefined;
+    const categoryRaw = typeof input.category === "string" ? input.category.trim() : "";
+    const category = (FINANCE_CATEGORIES as readonly string[]).includes(categoryRaw)
+      ? (categoryRaw as FinanceCategory)
+      : undefined;
+
+    const actorId = resolveActorId(context);
+    const record = await service.confirmSubscription(actorId, {
+      ...(subscriptionId ? { subscriptionId } : {}),
+      merchant,
+      amount,
+      periodDays,
+      ...(nextRenewalDate ? { nextRenewalDate } : {}),
+      ...(category ? { category } : {}),
+    });
+    if (!record) {
+      return { ok: false, error: "确认失败：找不到对应订阅记录（可先 list_subscriptions 查看）" };
+    }
+
+    return {
+      ok: true,
+      subscription: record,
+      summary:
+        `已确认订阅「${record.merchant}」：¥${record.amount.toFixed(2)}/${periodLabel(record.periodDays)}` +
+        (record.nextRenewalDate ? `，下次续费 ${record.nextRenewalDate}（前 3 天会提醒你）` : ""),
+    };
+  };
+}
+
+/**
+ * finance.update_subscription 工具 handler。
+ */
+export function createFinanceUpdateSubscriptionHandler(
+  service: SubscriptionAuditService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const subscriptionId = String(input.subscriptionId ?? "").trim();
+    const action = String(input.action ?? "").trim();
+    if (!subscriptionId) return { ok: false, error: "缺少 subscriptionId" };
+    const validActions = ["used", "cancel", "ignore", "reactivate", "set_renewal", "note"];
+    if (!validActions.includes(action)) {
+      return { ok: false, error: `action 必须为：${validActions.join(" / ")}` };
+    }
+    if (action === "set_renewal" && !String(input.nextRenewalDate ?? "").trim()) {
+      return { ok: false, error: "action=set_renewal 时必须传 nextRenewalDate" };
+    }
+    if (action === "note" && !String(input.note ?? "").trim()) {
+      return { ok: false, error: "action=note 时必须传 note" };
+    }
+
+    const actorId = resolveActorId(context);
+    const record = await service.updateSubscription(actorId, {
+      subscriptionId,
+      action: action as "used" | "cancel" | "ignore" | "reactivate" | "set_renewal" | "note",
+      ...(typeof input.lastUsedAt === "string" && input.lastUsedAt.trim()
+        ? { lastUsedAt: input.lastUsedAt.trim() }
+        : {}),
+      ...(typeof input.nextRenewalDate === "string" && input.nextRenewalDate.trim()
+        ? { nextRenewalDate: input.nextRenewalDate.trim() }
+        : {}),
+      ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
+    });
+    if (!record) {
+      return { ok: false, error: "找不到该订阅记录（可先 list_subscriptions 查看）" };
+    }
+
+    const actionLabels: Record<string, string> = {
+      used: `已记录使用${record.lastUsedAt ? `（最近使用 ${record.lastUsedAt}）` : ""}`,
+      cancel: "已标记为退订（不再参与续费提醒）",
+      ignore: "已忽略（不再出候选）",
+      reactivate: "已恢复为确认订阅",
+      set_renewal: `下次续费日已改为 ${record.nextRenewalDate}`,
+      note: "备注已更新",
+    };
+
+    return {
+      ok: true,
+      subscription: record,
+      summary: `「${record.merchant}」${actionLabels[action]}`,
+    };
+  };
+}
+
+// ─── 内部工具：CSV 解析 ────────────────────────────────────────
 /** 简易 CSV 解析：支持带引号字段与可选字段为空。 */
 function parseCsv(text: string): FinanceTransaction[] {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);

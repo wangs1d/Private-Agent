@@ -47,27 +47,18 @@
  */
 
 import { LIST_ITEM_RE } from "./render-hint-service.js";
+import {
+  aggregateScore,
+  clamp01,
+  COMPARISON_INTENT_RE,
+  CONTENT_WEIGHT,
+  ratio,
+  TOOL_WEIGHT,
+} from "./render-scoring.js";
+import type { DisplayEffectType } from "@private-ai-agent/agent-protocol";
 
-/** 全部展示效果类型；空串 = 通用列表卡（前端默认）。 */
-export type DisplayEffectType =
-  | "weather" // 天气卡（工具：weather.*）
-  | "schedule" // 日程卡（工具：calendar/schedule）
-  | "wallet" // 钱包卡（工具：wallet.*）
-  | "order" // 订单卡（工具：order/payment/alipay）
-  | "file" // 文件卡（工具：file）
-  | "search_result" // 搜索结果卡（工具：search_web/info.*）
-  | "media" // 媒体图廊卡（工具：search_images/search_videos 等）
-  | "compare" // A/B 对比卡（工具：compare/pk；或内容含对比词）
-  | "timeline" // 时间轴卡（工具：plan/timeline；或条目以时间开头）
-  | "progress" // 文字进度条卡（内容：百分比/分数占多数）
-  | "steps" // 数字步骤卡（内容：第X步/Step N/数字. 开头占多数）
-  | "metric" // 数据面板卡（内容：全部为「标签：数值」）
-  | "carousel" // 轮播横滑卡（内容：多数条目内嵌图片 URL）
-  | "chips" // 标签/徽章行（内容：全部为短标签）
-  | "fold_list" // 折叠列表卡（内容：≥8 条长清单）
-  | "quote" // 引用强调卡（markdown 引用块 / 引用式单句结论）
-  | "travel_itinerary" // 旅游行程双面板卡（工具：travel.*，前端展开为左右双栏规划界面并可全屏）
-  | "";
+/** 展示效果类型枚举的唯一契约源：@private-ai-agent/agent-protocol（display-effects.ts）。 */
+export type { DisplayEffectType };
 
 /** 路由输入：一次结构化输出的全部信号。 */
 export interface DisplayRouteInput {
@@ -107,13 +98,22 @@ export interface DisplayEffectScore {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 聚合权重（内容为主判据，工具为兜底）
+// 聚合权重：CONTENT_WEIGHT / TOOL_WEIGHT / ratio / clamp01 / aggregateScore
+// 统一从 render-scoring.ts 引入（与消息级路由共享同一套聚合内核）。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 内容形态分权重：内容信号是主判据，README 见文件头语义约定。 */
-const CONTENT_WEIGHT = 0.78;
-/** 工具场景分权重：无内容信号时保证落到正确场景，弱工具只是倾向。 */
-const TOOL_WEIGHT = 0.45;
+/**
+ * 工具名分词：按非字母数字切分并归一（>3 字符的复数去尾 s），供片段精确匹配。
+ * 取代旧的 includes() 宽匹配——includes("file") 会误命中 profile_view，
+ * includes("pay") 会误命中 prepay_query；分词后 "profile_view" 的片段是
+ * {profile, view}，不会撞上 {file}。
+ */
+function toolTokens(toolName: string): Set<string> {
+  const raw = toolName.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return new Set(
+    raw.map((t) => (t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t)),
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 工具路由表（数据驱动；强工具=语义唯一场景，弱工具=宽泛倾向）
@@ -129,7 +129,8 @@ const TOOL_SCORE: Record<ToolStrength, number> = { strong: 1, weak: 0.5 };
 interface ToolRule {
   effect: DisplayEffectType;
   strength: ToolStrength;
-  test: (toolName: string) => boolean;
+  /** toolName 已小写；tokens 为分词结果（见 toolTokens）。 */
+  test: (toolName: string, tokens: Set<string>) => boolean;
 }
 
 /** 工具路由规则表；命中顺序即规则顺序，首个命中生效（等价于旧的先判先赢）。 */
@@ -141,16 +142,30 @@ const TOOL_RULES: ReadonlyArray<ToolRule> = [
   {
     effect: "schedule",
     strength: "strong",
-    test: (t) => t.includes("calendar") || t.includes("schedule"),
+    test: (_t, tok) => tok.has("calendar") || tok.has("schedule"),
   },
   { effect: "wallet", strength: "strong", test: (t) => t.startsWith("wallet.") },
+  // 财务深度能力（finance.*）：订阅清单走折叠列表、预算执行走数据面板、
+  // 消费分析给数据面板倾向、报告导出走文件卡
+  {
+    effect: "fold_list",
+    strength: "strong",
+    test: (t) => t === "finance.list_subscriptions",
+  },
+  {
+    effect: "metric",
+    strength: "strong",
+    test: (t) => t === "finance.get_budget_status",
+  },
+  { effect: "metric", strength: "weak", test: (t) => t === "finance.analyze_spending" },
+  { effect: "file", strength: "strong", test: (t) => t === "finance.export_report" },
   {
     effect: "order",
     strength: "strong",
-    test: (t) =>
-      t.includes("order") || t.includes("payment") || t.includes("pay") || t.includes("alipay"),
+    test: (_t, tok) =>
+      tok.has("order") || tok.has("payment") || tok.has("pay") || tok.has("alipay"),
   },
-  { effect: "file", strength: "strong", test: (t) => t.includes("file") },
+  { effect: "file", strength: "strong", test: (_t, tok) => tok.has("file") },
   {
     effect: "media",
     strength: "strong",
@@ -161,10 +176,23 @@ const TOOL_RULES: ReadonlyArray<ToolRule> = [
     strength: "strong",
     test: (t) => t === "search_web" || t.startsWith("info."),
   },
-  // ── 弱工具（宽泛关键字命中，只给倾向分）──
-  { effect: "compare", strength: "weak", test: (t) => /compare|pk|对比/i.test(t) },
-  { effect: "timeline", strength: "weak", test: (t) => /timeline|plan|行程/i.test(t) },
-  { effect: "media", strength: "weak", test: (t) => /image|photo|vision|识图|图片/i.test(t) },
+  // ── 弱工具（宽泛关键字命中，只给倾向分；分词精确匹配避免误命中）──
+  {
+    effect: "compare",
+    strength: "weak",
+    test: (t, tok) => tok.has("compare") || tok.has("pk") || tok.has("vs") || /对比/.test(t),
+  },
+  {
+    effect: "timeline",
+    strength: "weak",
+    test: (t, tok) => tok.has("timeline") || tok.has("plan") || /行程/.test(t),
+  },
+  {
+    effect: "media",
+    strength: "weak",
+    test: (t, tok) =>
+      tok.has("image") || tok.has("photo") || tok.has("vision") || /识图|图片/.test(t),
+  },
 ];
 
 /** 匹配工具路由表：首个命中规则生效；未命中返回 null。 */
@@ -172,8 +200,9 @@ function matchToolSignal(
   toolName: string,
 ): { effect: DisplayEffectType; score: number; strength: ToolStrength } | null {
   if (!toolName) return null;
+  const tokens = toolTokens(toolName);
   for (const rule of TOOL_RULES) {
-    if (rule.test(toolName))
+    if (rule.test(toolName, tokens))
       return { effect: rule.effect, score: TOOL_SCORE[rule.strength], strength: rule.strength };
   }
   return null;
@@ -247,16 +276,6 @@ const CHIP_MAX_LEN = 10;
 /** fold_list 折叠门槛：条目数 ≥ 该值时长清单折叠展示。 */
 const FOLD_MIN_ITEMS = 8;
 
-/** 命中比例工具函数。 */
-function ratio(matched: number, total: number): number {
-  return total === 0 ? 0 : matched / total;
-}
-
-/** 归一到 [0,1]。 */
-function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 内容评分器注册表（一个效果一个独立评分函数，互相竞争、各自可测）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +295,7 @@ const CONTENT_SCORERS: Readonly<Partial<Record<Exclude<DisplayEffectType, "">, C
   fold_list: scoreFoldList,
   chips: scoreChips,
   quote: scoreQuote,
+  comparison_table: scoreComparisonTable,
   compare: scoreCompare,
   travel_itinerary: scoreTravelItinerary,
 };
@@ -294,6 +314,7 @@ const CANDIDATE_ORDER: ReadonlyArray<DisplayEffectType> = [
   "fold_list",
   "chips",
   "quote",
+  "comparison_table",
   "compare",
 ];
 
@@ -327,6 +348,12 @@ function scoreCarousel(input: DisplayRouteInput): number {
   const items = input.items;
   const n = items.length;
   if (n < 2) return 0;
+  // 恰好两条 A/B 标签的带图条目是 compare 双图滑杆的典型载荷
+  // （前后对比/两两对比），轮播不抢——3 条以上才轮播。
+  if (n === 2) {
+    const labels = items.map((it) => AB_LABEL_RE.exec(it.text.trim())?.[1]?.toUpperCase() ?? null);
+    if (labels.includes("A") && labels.includes("B")) return 0;
+  }
   const imgHits = items.filter((it) => IMAGE_URL_RE.test(it.text)).length;
   const r = ratio(imgHits, n);
   return r >= 0.8 ? r : 0;
@@ -419,18 +446,62 @@ function scoreQuote(input: DisplayRouteInput): number {
 }
 
 /**
- * compare 内容形态：多数条目带明确对比词，或条目呈 A/B 标签对峙
- * （「A便宜些」「B性能强」「方案A…」「方案B…」）——纯文本 A/B 对比
- * 即使无工具信号也能被识别。A/B 对峙要求两侧都在场，单侧不成对比。
+ * 文本 A/B 对比双栏卡（cardType = "comparison_table"）：
+ * 条目呈 A/B 标签成对出现（裸 A/B 开头，或「方案A：…」「产品B：…」带前缀
+ * 冒号形态），两侧各 ≥1 条即构成可双栏展示的文本对比。
+ * 与 compare（双图滑杆）的分工：滑杆必须两侧各有可解析图片——条目含图片
+ * URL 时本评分器让位；纯文本对比不再落进「路由到 compare → 前端静默回退
+ * 通用卡」的断链。
+ */
+/**
+ * 带前缀词的 A/B 条目：「方案A…」「产品B：…」——选项枚举形态。裸 A/B 由
+ * AB_LABEL_RE 承接；带前缀词的形态（compare 的 abPair 刻意不认，避免把
+ * 普通清单当 A/B 对峙）在 comparison_table 里恰恰是对比表想要的成对结构。
+ */
+const AB_COLUMN_RE = /^(?:方案|产品|选项|品牌|款)\s*([ABab])(?![A-Za-z0-9])/;
+
+function scoreComparisonTable(input: DisplayRouteInput): number {
+  const items = input.items;
+  const n = items.length;
+  if (n < 2) return 0;
+  // 含图片 URL 的条目是 compare 双图滑杆的领域，文本对比卡不抢
+  if (items.some((it) => IMAGE_URL_RE.test(it.text))) return 0;
+  let a = 0;
+  let b = 0;
+  for (const it of items) {
+    const t = it.text.trim();
+    let label = AB_LABEL_RE.exec(t)?.[1]?.toUpperCase() ?? null;
+    if (!label) {
+      label = AB_COLUMN_RE.exec(t)?.[1]?.toUpperCase() ?? null;
+    }
+    if (label === "A") a++;
+    else if (label === "B") b++;
+  }
+  // 两侧各 ≥2 条：结构完整的对比表
+  if (a >= 2 && b >= 2) return 0.9;
+  // 两侧各 ≥1 条：两行薄对比（「A便宜些 / B性能强」）
+  if (a >= 1 && b >= 1) return 0.65;
+  return 0;
+}
+
+/**
+ * compare 内容形态（双图对比滑杆）：多数条目带明确对比词，或条目呈 A/B
+ * 标签对峙——但滑杆必须两侧各有一张可解析图片，条目不含任何图片 URL 时
+ * 返回 0（纯文本对比由 comparison_table 承接，避免「路由到 compare 但
+ * 前端因无图回退通用卡」的路由-渲染断链）。
  */
 function scoreCompare(input: DisplayRouteInput): number {
   const items = input.items;
   const n = items.length;
   if (n < 2) return 0;
+  if (!items.some((it) => IMAGE_URL_RE.test(it.text))) return 0;
   const cmpHits = items.filter((it) => COMPARE_MARK_RE.test(it.text)).length;
   const r = ratio(cmpHits, n);
   const labels = items.map((it) => AB_LABEL_RE.exec(it.text.trim())?.[1]?.toUpperCase() ?? null);
-  const abPair = labels.includes("A") && labels.includes("B") ? 0.55 : 0;
+  // 恰好两条 A/B 带图条目（前后对比）是滑杆的标志性载荷，给足置信；
+  // 3 条以上带图 A/B 更适合轮播/图廊，只给常规对峙分。
+  const abPair =
+    labels.includes("A") && labels.includes("B") ? (n === 2 ? 0.9 : 0.55) : 0;
   return Math.max(r >= 0.6 ? r : 0, abPair);
 }
 
@@ -560,14 +631,13 @@ const SEMANTIC_INTENT_SCORERS: Readonly<
     return 0;
   },
   compare: (t) =>
-    // 词边界 \b 只对 ASCII 词（vs/pk）有意义：中文词后跟 \b 时，JS 把汉字
-    // 视为非 \w，「区别」后面紧跟汉字永远不满足边界——导致中文对比意图
-    // 几乎全灭（真实漏判案例：「方案A和方案B有什么区别」出不了对比卡）。
-    // 因此 \b 仅保留在 vs/pk 之后；「跟/和…相比」限定 ≤8 字跨度并只认
-    // 相比/比起来/比较收尾，避免「和朋友聚餐比萨」这类伪对比。
-    /(?:vs\.?|pk)\b|对比|区别|怎么选|优缺点|哪个(?:更)?(?:好|合适|值得)|(?:跟|和|与).{0,8}(?:相比|比起来|比较)/i.test(
-      t,
-    )
+    // 词表见 render-scoring.COMPARISON_INTENT_RE（两层路由共用，含中文 \b
+    // 边界陷阱的处理说明：\b 只追在 vs/pk 之后，中文词后不能用）。
+    // 另：compare 卡是双图滑杆，正文不含图片 URL 时意图分归零——纯文本
+    // 对比由 comparison_table 按形态承接，避免路由到 compare 后前端因无图
+    // 静默回退通用卡的路由-渲染断链。
+    /https?:\/\/\S+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:[?#]\S*)?/i.test(t) &&
+    COMPARISON_INTENT_RE.test(t)
       ? 0.62
       : 0,
   timeline: (t) =>
@@ -655,7 +725,7 @@ export function scoreDisplayEffects(
       type,
       contentScore,
       toolScore,
-      score: clamp01(contentScore * CONTENT_WEIGHT + toolScore * TOOL_WEIGHT),
+      score: aggregateScore(contentScore, toolScore),
     });
   };
 

@@ -299,10 +299,26 @@ export interface DesktopVisualPort {
    */
   window?(input: DesktopVisualWindowInput): Promise<DesktopVisualWindowResult>;
 
-  /** 剪贴板读写（get / set）。type 工具的非 ASCII 粘贴路径与这里共用底层。 */
+  /**
+   * 剪贴板读写（get / set）。type 工具的非 ASCII 粘贴路径与这里共用底层。
+   */
   clipboard?(
     input: DesktopVisualClipboardInput,
   ): Promise<DesktopVisualClipboardResult>;
+
+  /**
+   * 本机文档文本提取（文本类/pdf/docx）。情境感知（文档摘要）专用，
+   * 不暴露给 LLM 工具循环。
+   */
+  readDocument?(
+    input: DesktopVisualReadDocumentInput,
+  ): Promise<DesktopVisualReadDocumentResult>;
+
+  /**
+   * 系统通知勿扰开关（注册表主开关，best-effort，仅 Windows）。
+   * 会议场景自动免打扰专用，不暴露给 LLM 工具循环。
+   */
+  setDnd?(input: DesktopVisualSetDndInput): Promise<DesktopVisualSetDndResult>;
 }
 
 export type DesktopVisualRunAutomationInput = {
@@ -454,5 +470,42 @@ export type DesktopVisualClipboardResult = {
   text?: string;
   length?: number;
   truncated?: boolean;
+  error?: string;
+};
+
+export type DesktopVisualReadDocumentInput = {
+  /** 完整路径，或桌面/文档/下载目录下的文件名 */
+  path: string;
+  /** 返回文本最大字符数（默认 16000，上限 60000） */
+  maxChars?: number;
+};
+
+export type DesktopVisualReadDocumentResult = {
+  ok: boolean;
+  path?: string;
+  /** 文件名去扩展名 */
+  title?: string;
+  ext?: string;
+  text?: string;
+  chars?: number;
+  /** 仅 PDF：总页数 */
+  pages?: number;
+  truncated?: boolean;
+  error?: string;
+};
+
+export type DesktopVisualSetDndInput = {
+  /** enable=静音系统通知；disable=恢复；query=只查状态 */
+  op: "enable" | "disable" | "query";
+};
+
+export type DesktopVisualSetDndResult = {
+  ok: boolean;
+  op?: string;
+  /** query/操作后的 toast 开关状态 */
+  enabled?: boolean;
+  /** enable 时记录的原值 */
+  previous?: number | null;
+  already?: boolean;
   error?: string;
 };

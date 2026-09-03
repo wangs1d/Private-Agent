@@ -209,7 +209,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
         title: const Text("移除该行程项", style: TextStyle(fontSize: 15)),
         content: Text(
           "确定移除「${_plan.days[dayIndex].entries[itemIndex].title}」吗？",
-          style: const TextStyle(fontSize: 12.5),
+          style: const TextStyle(fontSize: 13),
         ),
         actions: <Widget>[
           TextButton(
@@ -460,7 +460,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                             const SizedBox(height: 6),
                             TextField(
                               controller: timeCtrl,
-                              style: const TextStyle(fontSize: 12.5),
+                              style: const TextStyle(fontSize: 13),
                               decoration: InputDecoration(
                                 isDense: true,
                                 hintText: "09:00",
@@ -565,12 +565,12 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
       context: context,
       position: const RelativeRect.fromLTRB(double.maxFinite, 60, 12, double.maxFinite),
       items: const <PopupMenuEntry<String>>[
-        PopupMenuItem<String>(value: "export-json", child: Text("导出 JSON", style: TextStyle(fontSize: 12.5))),
-        PopupMenuItem<String>(value: "export-text", child: Text("导出文本", style: TextStyle(fontSize: 12.5))),
-        PopupMenuItem<String>(value: "export-calendar", child: Text("导出日历 (ICS)", style: TextStyle(fontSize: 12.5))),
+        PopupMenuItem<String>(value: "export-json", child: Text("导出 JSON", style: TextStyle(fontSize: 13))),
+        PopupMenuItem<String>(value: "export-text", child: Text("导出文本", style: TextStyle(fontSize: 13))),
+        PopupMenuItem<String>(value: "export-calendar", child: Text("导出日历 (ICS)", style: TextStyle(fontSize: 13))),
         PopupMenuDivider(),
-        PopupMenuItem<String>(value: "share", child: Text("生成分享码", style: TextStyle(fontSize: 12.5))),
-        PopupMenuItem<String>(value: "mobile", child: Text("发送到手机", style: TextStyle(fontSize: 12.5))),
+        PopupMenuItem<String>(value: "share", child: Text("生成分享码", style: TextStyle(fontSize: 13))),
+        PopupMenuItem<String>(value: "mobile", child: Text("发送到手机", style: TextStyle(fontSize: 13))),
       ],
     );
     if (action == null || !mounted) return;
@@ -621,7 +621,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                 ),
                 const SizedBox(height: 10),
                 Text("手机扫码查看「${_plan.destination}」行程",
-                    style: const TextStyle(fontSize: 11.5)),
+                    style: const TextStyle(fontSize: 12)),
                 const SizedBox(height: 4),
                 SelectableText(url,
                     style: const TextStyle(fontSize: 10, color: Colors.grey)),
@@ -649,7 +649,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                         letterSpacing: 4)),
                 const SizedBox(height: 8),
                 const Text("对方在行程面板输入分享码即可查看完整行程",
-                    style: TextStyle(fontSize: 11.5)),
+                    style: TextStyle(fontSize: 12)),
               ],
             ),
             actions: <Widget>[
@@ -781,7 +781,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 13.5,
+                fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface,
               ),
@@ -894,7 +894,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
               const SizedBox(width: 5),
               Text(label,
                   style: const TextStyle(
-                      fontSize: 11.5, fontWeight: FontWeight.w600,
+                      fontSize: 12, fontWeight: FontWeight.w600,
                       color: Colors.white)),
             ],
           ),
@@ -927,7 +927,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                     "${route.totalDistanceText} · ${route.totalDurationText} · "
                     "人流${route.averageCrowdIndex}/10 · 优化分 ${route.optimizationScore}",
                     style: const TextStyle(
-                        fontSize: 11.5, fontWeight: FontWeight.w600,
+                        fontSize: 12, fontWeight: FontWeight.w600,
                         color: Colors.white),
                   ),
                   const Spacer(),
@@ -942,7 +942,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontSize: 10.5,
+                      fontSize: 11,
                       color: _kAccentGreen.withValues(alpha: 0.9))),
               const Divider(height: 10, color: Colors.white24),
               // 分段建议（可滚动）
@@ -958,7 +958,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                             "• ${seg.instruction}"
                             "（${(seg.distanceMeters / 1000).toStringAsFixed(1)}km · ${seg.durationMinutes}分钟）",
                             style: const TextStyle(
-                                fontSize: 10.5, height: 1.4,
+                                fontSize: 11, height: 1.4,
                                 color: Colors.white70),
                           ),
                         ),
@@ -968,7 +968,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                           child: Text(
                             "⚠ ${w.message}",
                             style: TextStyle(
-                                fontSize: 10.5, height: 1.4,
+                                fontSize: 11, height: 1.4,
                                 color: w.severity == "high"
                                     ? const Color(0xFFF87171)
                                     : const Color(0xFFFBBF24)),
@@ -1001,7 +1001,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                         child: Text(
                           "${_modeName(alt.mode)} ${alt.reason}",
                           style: const TextStyle(
-                              fontSize: 9.5, color: Colors.white70),
+                              fontSize: 10, color: Colors.white70),
                         ),
                       ),
                     ),
@@ -1065,7 +1065,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
             const SizedBox(width: 4),
             Text(label,
                 style: const TextStyle(
-                    fontSize: 10.5, fontWeight: FontWeight.w600,
+                    fontSize: 11, fontWeight: FontWeight.w600,
                     color: Colors.white)),
           ],
         ),
@@ -1189,7 +1189,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
                 Text(
                   "${entries.length} 项安排",
                   style: TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 11,
                     color: cs.onSurfaceVariant,
                   ),
                 ),
@@ -1260,7 +1260,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
             child: Text(
               _plan.footer,
               style: TextStyle(
-                fontSize: 11.5,
+                fontSize: 12,
                 height: 1.5,
                 color: cs.onSurfaceVariant,
               ),
@@ -1431,7 +1431,7 @@ class _EntryTileState extends State<_EntryTile> {
                     entry.time,
                     textAlign: TextAlign.right,
                     style: TextStyle(
-                      fontSize: 10.5,
+                      fontSize: 11,
                       fontWeight: FontWeight.w600,
                       color: cs.onSurfaceVariant,
                     ),
@@ -1489,7 +1489,7 @@ class _EntryTileState extends State<_EntryTile> {
                               child: Text(
                                 entry.title,
                                 style: TextStyle(
-                                  fontSize: 12.5,
+                                  fontSize: 13,
                                   fontWeight: FontWeight.w600,
                                   color: cs.onSurface,
                                 ),
@@ -1651,7 +1651,7 @@ class _EntryTileState extends State<_EntryTile> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 10.5,
+                      fontSize: 11,
                       color: cs.onSurfaceVariant,
                     ),
                   ),
@@ -1714,7 +1714,7 @@ class _EntryTileState extends State<_EntryTile> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 10.5,
+                          fontSize: 11,
                           color: _kAccentBlue,
                         ),
                       ),

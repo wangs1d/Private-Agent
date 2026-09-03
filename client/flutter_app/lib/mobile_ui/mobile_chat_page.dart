@@ -1,9 +1,11 @@
 import "package:flutter/material.dart";
 
+import "../core/models/chat_models.dart";
+import "../core/theme/app_typography.dart";
+import "../features/chat/message_body_renderer.dart";
+import "../features/chat/typewriter_reveal.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
-import "../core/models/chat_models.dart";
-import "../features/chat/message_body_renderer.dart";
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
@@ -301,37 +303,17 @@ class _MobileChatPageState extends State<MobileChatPage> {
         child: isUser
             ? Text(
                 m.text,
-                style: TextStyle(
-                  color: text,
-                  fontSize: 16,
-                  height: 1.5,
-                ),
+                style: const TextStyle(
+                  fontSize: AppTypography.bodyLarge,
+                  height: AppTypography.bodyLineHeight,
+                ).copyWith(color: text),
               )
             // 助手消息：复用桌面端同一共享渲染器，保证卡片 / 图文交错 /
-            // [RENDER_AS] 标记等结构化内容与桌面端渲染效果完全一致。
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  buildMessageBody(
-                    context,
-                    Theme.of(context).colorScheme,
-                    m,
-                    isUser: false,
-                  ),
-                  // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
-                  // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后
-                  // 由 renderBlocks 的最终顺序接管（与桌面端一致）。
-                  if (m.pendingMediaCards != null &&
-                      m.pendingMediaCards!.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: buildPendingMediaCards(
-                        m.pendingMediaCards!,
-                        Theme.of(context).colorScheme,
-                      ),
-                    ),
-                ],
+            // [RENDER_AS] 标记等结构化内容与桌面端渲染效果完全一致；
+            // 并接入与桌面端共用的打字机逐字 reveal。
+            : _TypewriterAssistantBody(
+                message: m,
+                cs: Theme.of(context).colorScheme,
               ),
       ),
     );
@@ -363,8 +345,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 onSubmitted: (_) => _send(),
                 style: TextStyle(
                   color: p.textPrimary,
-                  fontSize: 16,
-                  height: 1.4,
+                  fontSize: AppTypography.bodyLarge,
+                  height: AppTypography.uiLineHeight,
                 ),
                 decoration: InputDecoration(
                   hintText: "输入消息…",
@@ -403,6 +385,78 @@ class _MobileChatPageState extends State<MobileChatPage> {
           size: 22,
         ),
       ),
+    );
+  }
+}
+
+/// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器与
+/// [TypewriterReveal] 打字机控制器,保证两端结构与流式节奏一致。
+class _TypewriterAssistantBody extends StatefulWidget {
+  const _TypewriterAssistantBody({required this.message, required this.cs});
+
+  final ChatMessage message;
+  final ColorScheme cs;
+
+  @override
+  State<_TypewriterAssistantBody> createState() =>
+      _TypewriterAssistantBodyState();
+}
+
+class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
+  late final TypewriterReveal _typewriter = TypewriterReveal(
+    widget.message.text,
+    animate: widget.message.streaming && widget.message.text.isNotEmpty,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _typewriter.addListener(_onTypewriterChanged);
+  }
+
+  void _onTypewriterChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant _TypewriterAssistantBody oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.message.text != oldWidget.message.text) {
+      _typewriter.updateTarget(widget.message.text);
+    }
+  }
+
+  @override
+  void dispose() {
+    _typewriter.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ChatMessage m = widget.message;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        buildMessageBody(
+          context,
+          widget.cs,
+          m,
+          isUser: false,
+          // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
+          typewriterRawText: _typewriter.isPartial ? _typewriter.revealed : null,
+          typewriterCursor: _typewriter.isRevealing && _typewriter.cursorOn,
+        ),
+        // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
+        // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后
+        // 由 renderBlocks 的最终顺序接管（与桌面端一致）。
+        if (m.pendingMediaCards != null && m.pendingMediaCards!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: buildPendingMediaCards(m.pendingMediaCards!, widget.cs),
+          ),
+      ],
     );
   }
 }

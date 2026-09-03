@@ -506,7 +506,7 @@ const DESKTOP_WEB_SEARCH_TOOL: ChatCompletionTool = {
       properties: {
         query: {
           type: "string",
-          description: "搜索关键词(2-6 个核心词效果最佳)",
+          description: "搜索关键词（完整、具体，按要查的内容语义组织）",
         },
         limit: {
           type: "integer",

@@ -84,6 +84,36 @@ cd desktop-visual && py -3.12 -m pytest tests -q
 cd server && DESKTOP_VISUAL_ENABLED=1 npx tsx scripts/verify-desktop-control.ts --live
 ```
 
+## 桌面情境感知（SceneWatcher，默认关闭）
+
+`DESKTOP_SCENE_WATCHER_ENABLED=1` 启用。检测层完全零 token：复用 desktop.event
+的 `focus_change` / `window_open` / `window_close`，外加 Python 侧
+`event_subscribers.start_scene_reporter()` 每 30s 推送的 `scene_tick` 前台心跳
+（`DESKTOP_SCENE_TICK_SECONDS` 可调，0 关闭）。`DesktopSceneWatcherService`
+（`server/src/services/desktop-scene-watcher-service.ts`）按「窗口标题 + 进程名 +
+停留时长」做纯规则分类，三个场景：
+
+| 场景 | 判定 | 触发动作 | token |
+| --- | --- | --- | --- |
+| 会议 | 专用会议进程（腾讯会议/Zoom）任意窗口；或标题含「会议/Meeting」 | `set_dnd` 静音系统通知，`window_close` 或前台离开宽限后恢复并回报 | 0 |
+| 文档 | 标题含 pdf/docx/pptx/txt/md 等文档名，前台停留 ≥60s | `read_document` 提取文本（桌面/文档/下载目录可按文件名定位）→ 一次 LLM 摘要+3 个关键问题 | 每文档一次 |
+| 商品页 | 浏览器进程 + 标题命中电商关键词，停留 ≥45s | UIA 读地址栏 URL（失败退化为标题搜索）→ `web_fetch`+`web_search` → 一次 LLM 比价 | 每商品一次 |
+
+实现约定：
+
+- 检测/节流/冷却（同文档与同商品页默认 6h）全在 watcher，纯代码不调模型；
+  触发后由 `desktop-scene-handlers.ts` 的 handler 执行，LLM 走
+  `ephemeralTurn` 单轮（不污染会话线程，`maxOutputTokens` 封顶）。
+- 新增 Python action：`read_document`（path/maxChars）、`set_dnd`（dndOp），
+  已登记 `bridge_actions.ACTION_FIELD_ALLOWLIST`，仅情境感知内部使用，
+  **不暴露给 LLM 工具循环**。
+- `set_dnd` 为 best-effort：写注册表 toast 主开关
+  `NOC_GLOBAL_SETTING_TOASTS_ENABLED`（enable 前把原值记到临时状态文件，
+  disable 恢复），失败时如实告知用户，不谎报。
+- 处理器动作执行走「桥接优先、本机子进程兜底」（与 desktop 工具策略一致）；
+  结果经 `agent.proactive_message` 推给客户端。
+- 失败静默降级（仅记日志），只有会议勿扰开关失败才发消息纠正。
+
 ## LLM 工具暴露策略
 
 `desktop.*` 仅在 Complex/delegate/full 模式或桥接在线时进入 LLM 视野

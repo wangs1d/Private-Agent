@@ -43,6 +43,11 @@ export const FINANCE_DEEP_INTENT_RULES: ToolIntentRule[] = [
         // 导入
         "import transactions", "import csv", "import json", "batch import",
         "导入账单", "批量导入", "导入流水",
+        // 订阅盘点（P0 财务管家）
+        "subscription", "subscriptions", "auto renewal", "auto-renew", "renewal",
+        "recurring payment", "recurring charge", "membership", "member fee",
+        "订阅", "自动续费", "续费", "会员", "包月", "包年", "年费", "月费",
+        "订阅盘点", "订阅列表", "我的订阅", "订阅管理", "哪些订阅", "扣费周期",
       ],
       negativeAliases: [
         // 与 wallet.* 区分：单条转账 / 余额查询走 wallet
@@ -66,11 +71,14 @@ export const FINANCE_DEEP_INTENT_RULES: ToolIntentRule[] = [
         "帮我跟银行流水对账",
         "麦当劳算什么类别",
         "导出7月财务报告",
+        "盘点一下我有哪些自动续费的订阅",
+        "B站大会员还在用，别的订阅看看哪些该取消",
         "import these transactions as csv",
         "analyze my spending this month",
         "set a monthly dining budget of 2000",
         "reconcile my bank statement",
         "export july finance report as markdown",
+        "list my subscriptions and recurring charges",
       ],
       negativeExamples: [
         "查一下钱包余额",

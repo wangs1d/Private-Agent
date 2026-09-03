@@ -125,6 +125,35 @@ export const accountEmailInboundBodySchema = z.object({
   subject: z.string().optional(),
 });
 
+/** 财务入站邮件 Inbound Webhook（账单/支付邮件自动记账回调） */
+export const financeIngestInboundBodySchema = z.object({
+  to: z.string().min(1),
+  from: z.string().optional(),
+  text: z.string().optional(),
+  html: z.string().optional(),
+  subject: z.string().optional(),
+  /** 跳过账单关键词预过滤（网关侧已确认为账单转发时用） */
+  force: z.boolean().optional(),
+});
+
+/** 财务接入状态查询（引导卡数据源） */
+export const financeIngestSetupQuerySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .superRefine(accountActorRefine);
+
+/** 财务账单邮箱绑定/解绑 */
+export const financeIngestBindBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    email: z.string().min(3),
+    action: z.enum(["bind", "unbind"]).optional(),
+  })
+  .superRefine(accountActorRefine);
+
 /* ============================================================
  *  学习笔记（notes）相关 schema
  * ============================================================ */

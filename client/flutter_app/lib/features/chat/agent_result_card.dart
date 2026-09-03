@@ -41,6 +41,7 @@ class AgentResultCard extends StatelessWidget {
     super.key,
     required this.data,
     this.compact = true,
+    this.onUserAction,
   });
 
   final AgentResultData data;
@@ -48,16 +49,22 @@ class AgentResultCard extends StatelessWidget {
   /// 紧凑模式:行高/字号/内边距整体更小,适合聊天消息流。默认 `true`。
   final bool compact;
 
+  /// 用户动作回调（与 AgentActionChoiceCard 同一链路）：透传给
+  /// display_effects 中可交互的效果卡（如 chips 标签点击追问）。
+  final void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction;
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     // 展示效果独立模块（display_effects/）：服务端 display-effect-router
     // 纯程序路由出 cardType，这里按 cardType 分发到对应效果组件
-    //（steps/metric/carousel/chips/fold_list/compare 滑杆），无 LLM 参与。
+    //（steps/metric/carousel/chips/fold_list/compare 滑杆等），无 LLM 参与。
     // 返回 null 的类型走下方既有专用卡，行为与历史版本一致。
     if (data.cardType.isNotEmpty) {
-      final Widget? effect = displayEffectsCard(data: data, cs: cs);
+      final Widget? effect =
+          displayEffectsCard(data: data, cs: cs, onUserAction: onUserAction);
       if (effect != null) return effect;
       switch (data.cardType) {
         case "search_result":
@@ -367,7 +374,7 @@ class _SpecializedCard extends StatelessWidget {
               child: buildInlineMarkdownText(
                 data.footer,
                 TextStyle(
-                  fontSize: 12.5,
+                  fontSize: 13,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
@@ -446,7 +453,7 @@ class _ProgressCard extends StatelessWidget {
               child: buildInlineMarkdownText(
                 data.footer,
                 TextStyle(
-                  fontSize: 12.5,
+                  fontSize: 13,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
@@ -545,7 +552,7 @@ class _ProgressRow extends StatelessWidget {
               Text(
                 parsed.$3 ?? "${(pct * 100).round()}%",
                 style: TextStyle(
-                  fontSize: 12.5,
+                  fontSize: 13,
                   fontWeight: FontWeight.w700,
                   color: barColor,
                 ),
@@ -739,7 +746,7 @@ class _TimelineCard extends StatelessWidget {
                             Text(
                               time,
                               style: TextStyle(
-                                fontSize: 11.5,
+                                fontSize: 12,
                                 fontWeight: FontWeight.w700,
                                 color: cs.primary,
                                 height: 1.3,
@@ -769,7 +776,7 @@ class _TimelineCard extends StatelessWidget {
               child: buildInlineMarkdownText(
                 data.footer,
                 TextStyle(
-                  fontSize: 12.5,
+                  fontSize: 13,
                   color: cs.onSurfaceVariant,
                   height: 1.5,
                 ),
@@ -816,9 +823,9 @@ class _MediaCard extends StatelessWidget {
     final bool isGrouped = groupTitle.isNotEmpty;
 
     // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）
-    // + 说明 + 自然宽高比 + 对比侧
-    final List<({String url, String caption, double? aspect, String side})> photos =
-        <({String url, String caption, double? aspect, String side})>[];
+    // + 自然宽高比 + 对比侧
+    final List<({String url, double? aspect, String side})> photos =
+        <({String url, double? aspect, String side})>[];
     final List<String> allPhotoUrls = <String>[];
     // 收集视频（缩略图可空：后端已保证不把播放页/搜索页 URL 当图下发；
     // 无缩略图时前端显示视频占位图标，点击仍可打开播放页）
@@ -863,7 +870,6 @@ class _MediaCard extends StatelessWidget {
         if (allPhotoUrls.contains(resolved)) continue;
         photos.add((
           url: resolved,
-          caption: _photoCaption(it.text),
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
         ));
@@ -874,11 +880,11 @@ class _MediaCard extends StatelessWidget {
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
 
     // 分组/对比模式：左侧(A) + 右侧(B) 分栏；无侧的归入常规网格
-    final List<({String url, String caption, double? aspect, String side})> leftPhotos =
+    final List<({String url, double? aspect, String side})> leftPhotos =
         photos.where((p) => p.side == "A").toList();
-    final List<({String url, String caption, double? aspect, String side})> rightPhotos =
+    final List<({String url, double? aspect, String side})> rightPhotos =
         photos.where((p) => p.side == "B").toList();
-    final List<({String url, String caption, double? aspect, String side})> plainPhotos =
+    final List<({String url, double? aspect, String side})> plainPhotos =
         photos.where((p) => p.side != "A" && p.side != "B").toList();
     final bool hasColumns =
         isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
@@ -891,8 +897,8 @@ class _MediaCard extends StatelessWidget {
     // 顶部先渲染 A/B 列头，后续每行图片填满各自列宽（方形自适应），
     // 保证两列等宽整齐；某侧缺图时该格显示「—」占位。
     List<Widget> buildCompareRows(
-      List<({String url, String caption, double? aspect, String side})> aList,
-      List<({String url, String caption, double? aspect, String side})> bList,
+      List<({String url, double? aspect, String side})> aList,
+      List<({String url, double? aspect, String side})> bList,
     ) {
       final bool showHeader = hasColumnHeaders;
       final int count = aList.length > bList.length ? aList.length : bList.length;
@@ -966,7 +972,7 @@ class _MediaCard extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 13.5,
+                        fontSize: 14,
                         fontWeight: FontWeight.w700,
                         color: cs.onSurface,
                       ),
@@ -1012,20 +1018,18 @@ class _MediaCard extends StatelessWidget {
                     ),
                   ),
                 if (plainPhotos.length == 1 && photos.length == 1)
-                  // 单张：重点大图 + 说明条，点击预览
+                  // 单张：半宽贴左展示，点击预览
                   MediaGallery(
                     urls: <String>[plainPhotos.first.url],
-                    captions: <String>[plainPhotos.first.caption],
                     aspects: <double?>[plainPhotos.first.aspect],
                     previewGallery: allPhotoUrls,
                     cs: cs,
                   )
                 else
-                  // 多张：竖向逐张大图流（自然宽高比 + 逐张说明），每张可点击，
-                  // 同一绿泡内可前后切换（预览图池用全部照片）。
+                  // 多张：竖向逐张半宽贴左（自然宽高比），每张可点击，
+                  // 同一回复框内可前后切换（预览图池用全部照片）。
                   MediaGallery(
                     urls: plainPhotos.map((p) => p.url).toList(),
-                    captions: plainPhotos.map((p) => p.caption).toList(),
                     aspects: plainPhotos.map((p) => p.aspect).toList(),
                     previewGallery: allPhotoUrls,
                     cs: cs,
@@ -1039,17 +1043,6 @@ class _MediaCard extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  /// 从 item 文本提取一句话作为照片说明；纯链接 / 占位符则不展示。
-  String _photoCaption(String text) {
-    final String t = text.trim();
-    if (t.isEmpty ||
-        t == "图片" ||
-        RegExp(r'^https?://\S+$').hasMatch(t)) {
-      return "";
-    }
-    return t;
   }
 
   String? _firstNonEmpty(List<String?> values) {
@@ -1075,7 +1068,7 @@ class _MediaCard extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
-          fontSize: 11.5,
+          fontSize: 12,
           fontWeight: FontWeight.w700,
           color: cs.primary,
         ),
@@ -1083,10 +1076,10 @@ class _MediaCard extends StatelessWidget {
     );
   }
 
-  /// A/B 对比单格：图片按列宽等比占满（方形自适应），下方带来源说明，点击可预览；
+  /// A/B 对比单格：图片按列宽等比占满（方形自适应），不携带说明文字，点击可预览；
   /// 该侧缺图时显示统一浅色「—」占位，与有图一侧等高对齐。
   Widget _compareCell(
-    ({String url, String caption, double? aspect, String side})? entry,
+    ({String url, double? aspect, String side})? entry,
     List<String> gallery,
   ) {
     if (entry == null) {
@@ -1133,20 +1126,6 @@ class _MediaCard extends StatelessWidget {
             ),
           ),
         ),
-        if (entry.caption.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              entry.caption,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.35,
-                color: cs.onSurfaceVariant,
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -1246,7 +1225,7 @@ class _TravelItineraryCard extends StatelessWidget {
             Text(
               title,
               style: TextStyle(
-                fontSize: 13.5,
+                fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface,
                 height: 1.4,
@@ -1275,7 +1254,7 @@ class _TravelItineraryCard extends StatelessWidget {
                 icon: const Icon(Icons.splitscreen, size: 15),
                 label: const Text(
                   "打开行程规划（双面板·可全屏）",
-                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
               ),
             ),
@@ -1322,7 +1301,7 @@ class _TravelItineraryCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600,
                     color: cs.onSurface,
                   ),
@@ -1348,7 +1327,7 @@ class _TravelItineraryCard extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 11.5,
+              fontSize: 12,
               height: 1.4,
               color: cs.onSurfaceVariant,
             ),
@@ -1408,9 +1387,9 @@ class MediaInlineRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    // 解析每张图的可用地址 + caption + 自然宽高比 + 侧标签；视频单独收集走视频面板
-    final List<({String url, String caption, double? aspect, String side})> photos =
-        <({String url, String caption, double? aspect, String side})>[];
+    // 解析每张图的可用地址 + 自然宽高比 + 侧标签；视频单独收集走视频面板
+    final List<({String url, double? aspect, String side})> photos =
+        <({String url, double? aspect, String side})>[];
     final List<String> allUrls = <String>[];
     final List<
         ({
@@ -1452,7 +1431,6 @@ class MediaInlineRow extends StatelessWidget {
         if (allUrls.contains(resolved)) continue;
         photos.add((
           url: resolved,
-          caption: _photoCaption(text),
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
         ));
@@ -1460,8 +1438,8 @@ class MediaInlineRow extends StatelessWidget {
       }
     }
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
-    // 照片走自适应画廊：竖向逐张大图 + 说明。视频走与照片同风格的面板：
-    // 单条→16:9 大图带播放角标；多条→2 列网格。
+    // 照片走自适应画廊：竖向逐张半宽贴左展示，不携带说明文字。
+    // 视频走与照片同风格的面板：单条→16:9 大图带播放角标；多条→2 列网格。
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -1469,7 +1447,6 @@ class MediaInlineRow extends StatelessWidget {
         if (photos.isNotEmpty)
           MediaGallery(
             urls: allUrls,
-            captions: photos.map((p) => p.caption).toList(),
             aspects: photos.map((p) => p.aspect).toList(),
             previewGallery: allUrls,
             cs: cs,
@@ -1489,16 +1466,6 @@ class MediaInlineRow extends StatelessWidget {
       if (t.isNotEmpty) return t;
     }
     return null;
-  }
-
-  String _photoCaption(String text) {
-    final String t = text.trim();
-    if (t.isEmpty ||
-        t == "图片" ||
-        RegExp(r'^https?://\S+$').hasMatch(t)) {
-      return "";
-    }
-    return t;
   }
 }
 
@@ -1613,7 +1580,7 @@ class _VideoTile extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 11.5,
+                fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface,
                 height: 1.3,
@@ -1763,14 +1730,14 @@ class _SearchResultCard extends StatelessWidget {
                               style: textTheme.bodySmall?.copyWith(
                                 color: cs.onSurfaceVariant,
                                 height: 1.45,
-                                fontSize: 12.8,
+                                fontSize: 13,
                               ),
                               children: parseInlineMarkdownSpans(
                                 d,
                                 textTheme.bodySmall!.copyWith(
                                   color: cs.onSurfaceVariant,
                                   height: 1.45,
-                                  fontSize: 12.8,
+                                  fontSize: 13,
                                 ),
                                 cs,
                               ),

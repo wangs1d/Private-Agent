@@ -184,6 +184,12 @@ const performShutdown = (): void => {
     reason: "graceful_shutdown",
     timestamp: new Date().toISOString(),
   });
+  // 统一记忆写入者：关停前尽力补一次候选整合（队列已持久化，失败也不丢数据）
+  void import("./services/memory-consolidation-service.js").then(
+    ({ getMemoryConsolidationService }) => {
+      getMemoryConsolidationService()?.flushAll().catch(() => {});
+    },
+  );
   services.webhookService.stop();
   stopDesktopBridge();
   stopPaddleOcr();

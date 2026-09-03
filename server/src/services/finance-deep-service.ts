@@ -327,6 +327,11 @@ export class FinanceDeepService {
     return Array.from(this.stores.keys());
   }
 
+  /** 账本数据根目录（data/finance；订阅盘点等同目录扩展数据落盘用）。 */
+  getDataRoot(): string {
+    return this.dataRoot;
+  }
+
   /**
    * 查询交易（按时间段 + 类别过滤）。
    *

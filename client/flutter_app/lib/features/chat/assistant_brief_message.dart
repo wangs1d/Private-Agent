@@ -284,10 +284,10 @@ class _BriefItemCard extends StatelessWidget {
     final TextStyle detailStyle = textTheme.bodySmall?.copyWith(
           color: colorScheme.onSurface.withValues(alpha: 0.84),
           height: 1.48,
-          fontSize: 12.8,
+          fontSize: 13,
         ) ??
         TextStyle(
-          fontSize: 12.8,
+          fontSize: 13,
           color: colorScheme.onSurface.withValues(alpha: 0.84),
           height: 1.48,
         );

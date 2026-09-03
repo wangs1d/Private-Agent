@@ -230,13 +230,23 @@ async def main() -> None:
     # 不会因 ws 未连接而抛错。此处 try/finally 保证 bridge 退出时调用 stop。
     from desktop_visual.event_subscribers import (
         start_focus_listener,
+        start_scene_reporter,
         start_window_listener,
         stop_focus_listener,
+        stop_scene_reporter,
         stop_window_listener,
     )
 
     start_focus_listener()
     start_window_listener()
+    # 场景心跳：每 30s 上报前台窗口，供 server 情境感知计算停留时长
+    # （DESKTOP_SCENE_TICK_SECONDS=0 可关闭；默认 30s，钳制在 10-300s）
+    try:
+        tick = float(os.environ.get("DESKTOP_SCENE_TICK_SECONDS", "30") or "30")
+    except ValueError:
+        tick = 30.0
+    if tick > 0:
+        start_scene_reporter(tick)
     try:
         while True:
             try:
@@ -252,6 +262,7 @@ async def main() -> None:
     finally:
         stop_focus_listener()
         stop_window_listener()
+        stop_scene_reporter()
 
 
 if __name__ == "__main__":

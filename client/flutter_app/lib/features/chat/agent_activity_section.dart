@@ -139,7 +139,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                   child: Text(
                     "$unreadCount 条新",
                     style: const TextStyle(
-                      fontSize: 9.5,
+                      fontSize: 10,
                       fontWeight: FontWeight.w700,
                       color: Color(0xFF06252C),
                       letterSpacing: 0.3,
@@ -157,7 +157,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                   child: Text(
                     "共 ${_activities.length} 条",
                     style: TextStyle(
-                      fontSize: 9.5,
+                      fontSize: 10,
                       fontWeight: FontWeight.w600,
                       color: cs.onSurfaceVariant,
                     ),
@@ -220,7 +220,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
           Text(
             "还没有足迹",
             style: TextStyle(
-              fontSize: 11.5,
+              fontSize: 12,
               fontWeight: FontWeight.w600,
               color: cs.onSurfaceVariant,
             ),
@@ -256,7 +256,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                 Text(
                   "查看全部足迹",
                   style: TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 11,
                     fontWeight: FontWeight.w500,
                     color: cs.onSurfaceVariant,
                   ),
@@ -370,7 +370,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                 Text(
                   activity.summary,
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12,
                     height: 1.55,
                     color: cs.onSurface.withValues(alpha: 0.85),
                   ),
@@ -390,7 +390,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                             child: Text(
                               entry.key,
                               style: TextStyle(
-                                fontSize: 10.5,
+                                fontSize: 11,
                                 color: cs.onSurfaceVariant,
                               ),
                             ),
@@ -400,7 +400,7 @@ class _AgentActivitySectionState extends State<AgentActivitySection>
                               entry.value,
                               textAlign: TextAlign.right,
                               style: TextStyle(
-                                fontSize: 10.5,
+                                fontSize: 11,
                                 fontWeight: FontWeight.w500,
                                 color: cs.onSurface,
                               ),
@@ -659,7 +659,7 @@ class _ActivityTile extends StatelessWidget {
                       Text(
                         activity.title,
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12,
                           fontWeight:
                               unread ? FontWeight.w600 : FontWeight.w500,
                           color: unread
@@ -688,7 +688,7 @@ class _ActivityTile extends StatelessWidget {
                           Text(
                             _timeLabel(activity.createdAt),
                             style: TextStyle(
-                              fontSize: 9.5,
+                              fontSize: 10,
                               color: cs.onSurfaceVariant,
                             ),
                           ),

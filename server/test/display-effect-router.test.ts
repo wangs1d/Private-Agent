@@ -42,7 +42,8 @@ test("tool signals win when no confident content signal", () => {
   assert.equal(route("文件", ["a.pdf"], "file.read"), "file");
   assert.equal(route("图片", ["结果"], "search_images"), "media");
   assert.equal(route("搜索", ["条目"], "search_web"), "search_result");
-  assert.equal(route("对比", ["A", "B"], "compare_products"), "compare");
+  // 文本 A/B（无图）→ comparison_table 双栏卡；compare 双图滑杆只接带图对比
+  assert.equal(route("对比", ["A", "B"], "compare_products"), "comparison_table");
   assert.equal(route("行程", ["day1"], "plan_trip"), "timeline");
 });
 
@@ -437,22 +438,35 @@ test("formatSemanticResultForChat returns null for conversational narrative with
 // 路由精度回归（2026-08-30 文本效果路由优化）：内容必须落到对应的效果
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("compare: Chinese intent words (区别/怎么选/相比) route to compare card", () => {
-  // 修复前：意图正则把 \b 追在中文词后面——JS 把汉字视为非 \w，
-  // 「区别」后紧跟汉字永远不满足词边界，中文对比意图全灭。
+test("comparison_table: text A/B comparisons route to the two-column card", () => {
+  // 修复前：纯文本对比路由到 compare，但 compare 卡是双图滑杆，
+  // 前端因无图静默回退通用卡（路由决策与实际渲染断链）。
+  // 修复后：compare 内容/意图分要求图片在场；文本 A/B 由 comparison_table 承接。
   assert.equal(
     routeDisplayEffect({
       title: "",
       items: [{ text: "方案A 便宜" }, { text: "方案B 灵活" }, { text: "看你预算" }],
       fullText: "方案A和方案B有什么区别？哪个更适合我？",
     }),
-    "compare",
+    "comparison_table",
   );
   assert.equal(
     routeDisplayEffect({
       title: "",
       items: [{ text: "方案A 价格低" }, { text: "方案B 功能全" }, { text: "各有侧重" }],
       fullText: "这两款怎么选？方案A相比方案B价格更低",
+    }),
+    "comparison_table",
+  );
+  // 带图片的对比仍走 compare 双图滑杆
+  assert.equal(
+    routeDisplayEffect({
+      title: "",
+      items: [
+        { text: "A 持妆前 https://img.example.com/before.jpg" },
+        { text: "B 持妆后 https://img.example.com/after.jpg" },
+      ],
+      fullText: "对比一下持妆效果",
     }),
     "compare",
   );
@@ -579,11 +593,13 @@ test("real-dialog: two colon metric items become metric card", () => {
   assert.equal(semanticCard("屏幕尺寸：6.7英寸，重量：199g。"), "metric");
 });
 
-test("real-dialog: bare A/B labeled items become compare card", () => {
-  // 修复前：compare 意图（区别/怎么选）有分但缺形态证据，被 ByForm 门拦下
+test("real-dialog: bare A/B labeled items become comparison_table card", () => {
+  // 修复前：compare 意图（区别/怎么选）有分但缺形态证据，被 ByForm 门拦下，
+  // 即使路由到 compare 也因无图在前端静默回退通用卡；
+  // 修复后：A/B 成对条目直接上 comparison_table 双栏对比卡。
   assert.equal(
     semanticCard("两款手机的区别主要在屏幕和续航。A便宜些，B性能强，看你怎么选。"),
-    "compare",
+    "comparison_table",
   );
 });
 
@@ -657,4 +673,29 @@ test("steps intent still fires on strong sequence markers", () => {
   const m = marked!.match(/\[AGENT_RESULT_CARD_START\]\n(.*)\n\[AGENT_RESULT_CARD_END\]/);
   assert.ok(m);
   assert.equal(JSON.parse(m![1]!).cardType, "steps");
+});
+
+// ── 财务能力域（finance.*）工具路由 ──────────────────────────────
+
+test("finance tools route to their domain cards", () => {
+  // 订阅清单 → 折叠列表卡（强工具）
+  assert.equal(
+    routeDisplayEffect({ toolName: "finance.list_subscriptions", title: "订阅盘点", items: [{ text: "Netflix：¥45.00/月" }] }),
+    "fold_list",
+  );
+  // 预算执行 → 数据面板卡（强工具）
+  assert.equal(
+    routeDisplayEffect({ toolName: "finance.get_budget_status", title: "预算执行", items: [{ text: "餐饮：¥85.00 / ¥100.00" }] }),
+    "metric",
+  );
+  // 消费分析 → 数据面板倾向（弱工具，无内容信号时保底）
+  assert.equal(
+    routeDisplayEffect({ toolName: "finance.analyze_spending", title: "消费分析", items: [] }),
+    "metric",
+  );
+  // 报告导出 → 文件卡（强工具）
+  assert.equal(
+    routeDisplayEffect({ toolName: "finance.export_report", title: "财务报告", items: [{ text: "report.md" }] }),
+    "file",
+  );
 });

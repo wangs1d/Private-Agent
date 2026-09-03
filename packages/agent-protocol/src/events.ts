@@ -184,6 +184,12 @@ export const ServerEventType = {
   MorningBriefing: "morning.briefing",
   /** 晚间 digest（今日回顾+明日预告）：调度器到点触发后推送（Task 15 生活节律） */
   EveningDigest: "evening.digest",
+  /**
+   * 生活节律画像更新（Task 20 生活节律引擎）：夜间分析完成后推送。
+   * 客户端可用于展示"管家眼中的你"（睡眠窗口/高效时段/节律洞察），
+   * 以及节律提醒时间被自适应调整后的说明。
+   */
+  RhythmProfileUpdated: "rhythm.profile_updated",
   /** Agent 推断的用户心情变化（实时通知） */
   MoodInferred: "mood.inferred",
   /** 心跳响应 */
@@ -268,6 +274,25 @@ export const ServerEventType = {
 // ============================================================
 // 「分阶段异步对话交互 v2」事件载荷类型
 // ============================================================
+
+/** rhythm.profile_updated 载荷：节律画像摘要（Task 20 生活节律引擎） */
+export type RhythmProfileUpdatedPayload = {
+  actorId: string;
+  /** 本轮有变化的节律维度 */
+  changedDimensions: string[];
+  /** 被自适应重排的节律提醒任务（出口 A） */
+  adjustedReminderTaskIds: string[];
+  /** 统计洞察（入睡趋势/加班日/高效时段等，纯统计生成） */
+  insights: Array<{
+    id: string;
+    dimension: string;
+    kind: string;
+    text: string;
+    confidence: number;
+    generatedAt: string;
+  }>;
+  updatedAt: string;
+};
 
 /**
  * 阶段 0 载荷：路由开始打点。

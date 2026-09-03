@@ -19,6 +19,14 @@ interface BufferEntry {
   context: "main" | "notes";
 }
 
+/** 低信号统一写入者接管后的投递口（memory-consolidation-service，bootstrap 接线） */
+export type LowSignalSink = (entry: {
+  actorId: string;
+  sourceId: string;
+  text: string;
+  context: "main" | "notes";
+}) => void;
+
 function extractKeyLowSignalLines(text: string): string[] {
   return text
     .split(/\n+/)
@@ -35,8 +43,18 @@ export class AgenticMemoryIngestService {
   private lowSignalBuffer: Map<string, BufferEntry[]> = new Map();
   private lowSignalTotalChars: Map<string, number> = new Map();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private lowSignalSink: LowSignalSink | null = null;
 
   constructor(private readonly memory: Memory) {}
+
+  /**
+   * 注入统一写入者接管口。设置后低信号内容不再走内置内存缓冲，
+   * 而是投递给 memory-consolidation-service 的候选队列（唯一整合链路）；
+   * 未设置（统一写入者关闭/测试）时保持原缓冲行为。
+   */
+  setLowSignalSink(sink: LowSignalSink | null): void {
+    this.lowSignalSink = sink;
+  }
 
   /**
    * 兼容旧调用（默认 context=main）。新调用请显式传 context 区分主会话 vs 笔记会话。
@@ -60,6 +78,11 @@ export class AgenticMemoryIngestService {
 
     if (opts?.highSignal) {
       await this.ingestHighSignal(actorId, sourceId, t, context);
+      return;
+    }
+
+    if (this.lowSignalSink) {
+      this.lowSignalSink({ actorId, sourceId, text: t, context });
       return;
     }
 
@@ -91,6 +114,39 @@ export class AgenticMemoryIngestService {
         highSignal: true,
         memoryDecision: decision.decision,
         memorySemanticClass: decision.semanticClass,
+      },
+      infer: true,
+    });
+  }
+
+  /**
+   * 统一写入者出口：候选已由 memory-consolidation-service 裁决过，
+   * 这里直接落库（不再调 decideMemoryWrite），消除高信号路径的双重 LLM 决策。
+   */
+  async writeDecided(
+    actorId: string,
+    sourceId: string,
+    body: string,
+    context: "main" | "notes",
+    highSignal: boolean,
+  ): Promise<void> {
+    const t = body.trim();
+    if (!t || t.length < 4) return;
+
+    if (isEphemeralActorId(actorId)) {
+      warnEphemeralActorMemoryBlocked(actorId, "Mem0 长期记忆写入");
+      return;
+    }
+
+    const trimmed = t.length > 12_000 ? `${t.slice(0, 12_000)}...` : t;
+    await this.memory.add([{ role: "user", content: trimmed }], {
+      userId: actorId,
+      metadata: {
+        source: sourceId,
+        actorId,
+        context,
+        highSignal,
+        memoryDecision: highSignal ? "remember" : "decay",
       },
       infer: true,
     });

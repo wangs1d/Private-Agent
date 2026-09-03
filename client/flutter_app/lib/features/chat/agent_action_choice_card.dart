@@ -411,7 +411,7 @@ class _AgentActionChoiceCardState extends State<AgentActionChoiceCard>
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 13.5,
+                    fontSize: 14,
                     fontWeight: FontWeight.w600,
                     color: fg,
                     height: 1.2,

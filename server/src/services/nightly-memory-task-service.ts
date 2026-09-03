@@ -5,9 +5,11 @@ import { getDailyJournalService } from "./daily-journal-service.js";
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 import { UserFactStore } from "./user-fact-store.js";
 import OpenAI from "openai";
-import { mkdir, writeFile } from "node:fs/promises";
-import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 export type NightlySleepAgentReport = {
   runAt: string;
@@ -642,8 +644,7 @@ export class NightlyMemoryTaskService {
     this.recentReports = this.recentReports.slice(0, 30);
 
     try {
-      await mkdir(dirname(this.reportFilePath), { recursive: true });
-      await writeFile(this.reportFilePath, `${JSON.stringify(this.recentReports, null, 2)}\n`, "utf8");
+      await writeJsonAtomic(this.reportFilePath, this.recentReports);
     } catch (err) {
       console.error("[NightlyMemory] Failed to persist sleep agent report:", err);
     }
@@ -684,7 +685,7 @@ export class NightlyMemoryTaskService {
             memorySummaryForgotten: forgotten,
           };
           const filePath = join(longTermDir, `${actorId}.json`);
-          writeFileSync(filePath, JSON.stringify(archive, null, 2), "utf-8");
+          await writeJsonAtomic(filePath, archive);
           syncedCount++;
         } catch (err) {
           console.log(`[NightlyMemory] sync ${actorId} 失败: ${err}`);

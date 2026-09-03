@@ -306,7 +306,7 @@ class _StructuredItemsPanel extends StatelessWidget {
               child: Text(
                 "…还有 $overflow 条，详见详情卡",
                 style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: 12,
                   color: cs.onSurfaceVariant.withValues(alpha: 0.8),
                 ),
               ),
@@ -382,7 +382,7 @@ class _StructuredItemRow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: textTheme.labelSmall?.copyWith(
                         color: cs.onSurfaceVariant.withValues(alpha: 0.72),
-                        fontSize: 10.5,
+                        fontSize: 11,
                       ),
                     ),
                   ],

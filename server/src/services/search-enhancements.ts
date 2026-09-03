@@ -202,82 +202,11 @@ export type SearchIntent =
 
 export type IntentAnalysis = {
   intent: SearchIntent;
-  /** 提取的核心实体（用于搜索变体生成） */
-  entities: string[];
   /** 建议的 limit */
   suggestedLimit?: number;
   /** 是否需要强制联网 */
   requiresFreshWeb: boolean;
 };
-
-export function buildIntentAwareQueryVariants(
-  query: string,
-  intentAnalysis: IntentAnalysis,
-  maxVariants = 8,
-): string[] {
-  const raw = query.trim();
-  if (!raw) return [];
-
-  const variants: string[] = [];
-  const push = (value: string) => {
-    const normalized = value.trim();
-    if (!normalized || variants.includes(normalized) || variants.length >= maxVariants) return;
-    variants.push(normalized);
-  };
-
-  const primaryEntities = intentAnalysis.entities
-    .filter((entity) => entity.length >= 2)
-    .slice(0, 3);
-  const primary = primaryEntities[0];
-  const secondary = primaryEntities[1];
-
-  if (primary) {
-    push(`"${primary}"`);
-    push(primary);
-  }
-  if (secondary) {
-    push(`"${secondary}"`);
-    push(secondary);
-  }
-
-  switch (intentAnalysis.intent) {
-    case "latest":
-      if (primary) {
-        push(`${primary} 最新`);
-        push(`${primary} 最新动态`);
-      }
-      break;
-    case "price":
-      if (primary) {
-        push(`${primary} 价格`);
-        push(`${primary} 报价`);
-      }
-      break;
-    case "research":
-      if (primary) {
-        push(`${primary} 介绍`);
-        push(`${primary} 分析`);
-      }
-      break;
-    case "definition":
-      if (primary) {
-        push(`${primary} 是什么`);
-      }
-      break;
-    case "compare":
-      if (primary && secondary) {
-        push(`${primary} ${secondary} 对比`);
-        push(`${primary} ${secondary} 区别`);
-        push(`${primary} vs ${secondary}`);
-      }
-      break;
-    default:
-      break;
-  }
-
-  push(raw);
-  return variants;
-}
 
 const INTENT_PATTERNS: Array<{ intent: SearchIntent; re: RegExp }> = [
   { intent: "latest", re: /最新|最近|今日|今天|现在|目前|刚刚|新闻|事件|发生|breaking|news|event|latest|recent|current|today/i },
@@ -300,79 +229,6 @@ export function classifySearchIntent(query: string): IntentAnalysis {
     }
   }
 
-  // 提取核心实体（按优先级：先抓「最具体」的实体，如 GPT-5、A股、蜘蛛侠4）
-  const entities: string[] = [];
-  const pushEntity = (s: string) => {
-    const t = s.trim();
-    if (!t) return;
-    if (!entities.includes(t)) entities.push(t);
-  };
-
-  // 1. 移除时效性词汇，剩余部分作为核心实体
-  const cleaned = q.replace(/最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|怎么样|如何|是什么|什么是|什么意思|breaking|news|event|latest|recent|current|today/gi, " ");
-
-  // 2. 英文-数字型号（如 GPT-5、Claude-4、iPhone 17、MacBook M5、Switch 2、PS5）— 最具体的实体，优先
-  //    模式：英文(可含数字) + 可选分隔符 + 数字/字母数字
-  const enDigitRuns = [
-    ...cleaned.matchAll(/[A-Za-z][A-Za-z0-9]{0,15}[\s\-_]?\d{1,3}[A-Za-z]?\b/g),
-  ].map((m) => m[0].trim());
-  for (const run of enDigitRuns) {
-    if (/^\d+$/.test(run)) continue;
-    pushEntity(run);
-  }
-
-  // 2.5 中文-数字型号（如 蜘蛛侠4、华为Mate60、iPhone15Pro）— 中文主体+数字版本
-  //     模式：1-N 个中文字符 + 可选 1-N 个英文/数字 + 1-3 个数字
-  const cnDigitRuns = [
-    ...cleaned.matchAll(/[\u4e00-\u9fff]{1,8}[A-Za-z0-9]{0,8}[\s\-_]?\d{1,3}[A-Za-z]?\b/g),
-  ].map((m) => m[0].trim()).filter((s) => /[\u4e00-\u9fff]/.test(s) && /\d/.test(s));
-  for (const run of cnDigitRuns) {
-    if (/^\d+$/.test(run)) continue;
-    pushEntity(run);
-  }
-
-  // 3. 中英混合词（如 A股、B股、H股、AI芯片）— 关键实体
-  const mixedRuns = [...cleaned.matchAll(/[a-zA-Z]{1,3}[\u4e00-\u9fff]{1,4}/gu)].map((m) => m[0]);
-  for (const run of mixedRuns) {
-    pushEntity(run);
-  }
-
-  // 4. 中文连续段（2 字以上）
-  const cnRuns = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,10}/gu)].map((m) => m[0]);
-  for (const run of cnRuns.sort((a, b) => b.length - a.length).slice(0, 3)) {
-    if (!/^(最新|最近|今日|今天|什么|怎么|为什么|怎么样|了解|调研|分析|介绍|发生|事件|动态|新闻|消息|资讯|情况|怎么样|如何|意思|含义)$/u.test(run)) {
-      pushEntity(run);
-    }
-  }
-
-  // 5. 英文实体（大写开头的词组，如 OpenAI、Apple）
-  const enRuns = [...cleaned.matchAll(/\b[A-Z][a-zA-Z]{2,}\b/g)].map((m) => m[0]);
-  for (const e of enRuns.slice(0, 2)) {
-    pushEntity(e);
-  }
-
-  // 6. 英文小写词（如 ai、gpt、tesla）
-  const enLower = [...cleaned.matchAll(/\b[a-z]{2,}\b/gi)].map((m) => m[0].toLowerCase())
-    .filter((w) => !/^(the|and|for|with|how|what|when|where|why|how|is|are)$/i.test(w));
-  for (const w of enLower.slice(0, 2)) {
-    pushEntity(w);
-  }
-
-  // === 实体排序：把「最具体」的实体放前面 ===
-  // 优先级：英文-数字型号 > 中文-数字型号 > 中英混合 > 长中文段 > 短中文段 > 纯英文
-  const entityPriority = (e: string): number => {
-    if (/[A-Za-z]/.test(e) && /\d/.test(e)) return 0; // 字母+数字
-    if (/[\u4e00-\u9fff]/.test(e) && /\d/.test(e)) return 1; // 中文+数字
-    if (/[a-zA-Z][\u4e00-\u9fff]|[\u4e00-\u9fff][a-zA-Z]/.test(e)) return 2; // 中英混合
-    if (/^[\u4e00-\u9fff]+$/.test(e)) {
-      // 中文实体：长度优先（4+ 字 > 3 字 > 2 字）
-      return 6 - Math.min(e.length, 4);
-    }
-    if (/^[A-Z]/.test(e)) return 10; // 大写英文
-    return 20; // 小写英文
-  };
-  entities.sort((a, b) => entityPriority(a) - entityPriority(b));
-
   // 建议参数
   const suggestedLimit =
     intent === "latest" ? 16 :
@@ -386,7 +242,9 @@ export function classifySearchIntent(query: string): IntentAnalysis {
     intent === "price" ||
     /最新|最近|今日|现在|价格|报价|news|latest|price/i.test(q);
 
-  return { intent, entities, suggestedLimit, requiresFreshWeb };
+  // 不再提取实体/关键词（机械断句代码已删除）：query 由 LLM 组织、原样透传给
+  // 搜索引擎，意图识别只服务于建议条数与时效性判定。
+  return { intent, suggestedLimit, requiresFreshWeb };
 }
 
 // ============================================================

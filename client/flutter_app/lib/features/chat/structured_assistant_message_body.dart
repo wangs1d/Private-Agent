@@ -1,5 +1,6 @@
 import "package:flutter/material.dart";
 
+import "../../core/theme/app_typography.dart";
 import "content_summary_detail_formatter.dart";
 
 class StructuredAssistantMessageBody extends StatelessWidget {
@@ -25,7 +26,7 @@ class StructuredAssistantMessageBody extends StatelessWidget {
               "▍",
               style: textTheme.bodyMedium?.copyWith(
                 color: cs.primary,
-                height: 1.4,
+                height: AppTypography.uiLineHeight,
               ),
             )
           : const SizedBox.shrink();
@@ -34,7 +35,7 @@ class StructuredAssistantMessageBody extends StatelessWidget {
     final _StructuredMessageParts parts = _splitStructuredMessage(normalized);
     final TextStyle bodyStyle = textTheme.bodyMedium!.copyWith(
       color: cs.onSurface,
-      height: 1.56,
+      height: AppTypography.bodyLineHeight,
     );
 
     if (!parts.structured) {
@@ -81,7 +82,7 @@ class StructuredAssistantMessageBody extends StatelessWidget {
               bodyStyle.copyWith(
                 fontWeight: FontWeight.w500,
                 color: cs.onSurfaceVariant,
-                height: 1.55,
+                height: AppTypography.bodyLineHeight,
               ),
               cs: cs,
             ),

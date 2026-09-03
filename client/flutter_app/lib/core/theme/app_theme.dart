@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
 
+import "app_typography.dart";
+
 /// 主题配色变体。
 ///
 /// - [dark]：深色（默认，沿用项目原有配色）
@@ -214,7 +216,7 @@ abstract final class AppTheme {
       surfaceContainerHigh: const Color(0xFF232323),
       surfaceContainerHighest: const Color(0xFF2A2A2A),
     );
-    return ThemeData(
+    final ThemeData theme = ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
       colorScheme: cs,
@@ -291,6 +293,10 @@ abstract final class AppTheme {
         actionTextColor: cs.primary,
       ),
     );
+    // 统一排版:把全局行高 token 写入 TextTheme(正文 1.6 / 标题 1.3 等)
+    return theme.copyWith(
+      textTheme: AppTypography.applyLineHeights(theme.textTheme),
+    );
   }
 
   /// 暖色 / 米色主题。
@@ -325,7 +331,7 @@ abstract final class AppTheme {
       surfaceContainerHigh: AppPalette.warmSurfaceContainerHigh,
       surfaceContainerHighest: AppPalette.warmSurfaceContainerHighest,
     );
-    return ThemeData(
+    final ThemeData theme = ThemeData(
       useMaterial3: true,
       brightness: Brightness.light,
       colorScheme: cs,
@@ -399,6 +405,9 @@ abstract final class AppTheme {
         contentTextStyle: TextStyle(color: cs.onSurface, fontSize: 14),
         actionTextColor: cs.primary,
       ),
+    );
+    return theme.copyWith(
+      textTheme: AppTypography.applyLineHeights(theme.textTheme),
     );
   }
 

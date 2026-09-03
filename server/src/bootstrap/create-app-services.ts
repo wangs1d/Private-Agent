@@ -52,6 +52,16 @@ import { initShortTermMemoryGatewayService } from "../services/short-term-memory
 import { initDailyJournalService, getDailyJournalService } from "../services/daily-journal-service.js";
 import { EveningDigestService } from "../services/evening-digest-service.js";
 import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
+import { LifeRhythmEngine } from "../rhythm/engine.js";
+import { RhythmProfileStore } from "../rhythm/profile-store.js";
+import { NightlyRhythmAnalyzer } from "../rhythm/nightly-rhythm-analyzer.js";
+import { SleepWindowSensor } from "../rhythm/sensors/sleep-window-sensor.js";
+import { DesktopActivitySensor } from "../rhythm/sensors/desktop-activity-sensor.js";
+import { InteractionSignalSensor } from "../rhythm/sensors/interaction-signal-sensor.js";
+import { createReminderReschedulerConsumer } from "../rhythm/consumers/reminder-rescheduler.js";
+import { createReceptiveHoursWriterConsumer } from "../rhythm/consumers/receptive-hours-writer.js";
+import { createProactiveCandidateSourceConsumer } from "../rhythm/consumers/proactive-candidate-source.js";
+import type { RhythmProfileUpdatedPayload } from "@private-ai-agent/agent-protocol";
 import {
   initNightlyMemoryTaskService,
   getNightlyMemoryTaskService,
@@ -99,6 +109,8 @@ import { EmailSmsService } from "../services/email-sms-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
 import { HealthFitnessService } from "../services/health-fitness-service.js";
 import { FinanceDeepService } from "../services/finance-deep-service.js";
+import { SubscriptionAuditService } from "../services/subscription-audit-service.js";
+import { FinanceIngestService } from "../services/finance-ingest-service.js";
 import { SocialOutreachService } from "../services/social-outreach-service.js";
 import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
@@ -118,7 +130,9 @@ import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
 import { registerAlipayPaymentBuiltinSkills } from "../skills/builtin/alipay-payment-skills.js";
 import { registerMerchantOrderBuiltinSkills } from "../skills/builtin/merchant-order-skills.js";
+import { registerFinanceIngestBuiltinSkills } from "../skills/builtin/finance-ingest-skills.js";
 import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
+import { registerTravelCommuteBuiltinSkills } from "../skills/travel-planning/travel-commute-skills.js";
 import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
 import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
@@ -167,6 +181,16 @@ import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry, type ToolContext } from "../tools/tool-registry.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
+import {
+  DesktopSceneWatcherService,
+  isDesktopSceneWatcherEnabled,
+} from "../services/desktop-scene-watcher-service.js";
+import {
+  createDesktopSceneActionExecutor,
+  DesktopSceneDocumentHandler,
+  DesktopSceneMeetingHandler,
+  DesktopScenePriceHandler,
+} from "../services/desktop-scene-handlers.js";
 import { LocationCoordinator } from "../services/location-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
@@ -186,8 +210,10 @@ import { registerHttpTools } from "../tools/http-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
-import { setMcpChatTools, setBrainChatTools, setBodyChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import { setMcpChatTools, setBrainChatTools, setBodyChatTools, setMemoryChatTools } from "../external-model/openai-compatible-tool-loop.js";
 import { registerBrainTools, BRAIN_TOOLS } from "../tools/brain-tools.js";
+import { registerMemoryRecallTools, MEMORY_RECALL_CHAT_TOOLS } from "../tools/memory-recall-tools.js";
+import { configureMemoryConsolidation } from "../services/memory-consolidation-service.js";
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
 import { InternetIntelligenceService } from "../services/internet-intelligence-service.js";
@@ -319,7 +345,7 @@ import {
   setConversationTimelineService,
 } from "../services/conversation-timeline.js";
 import { Ear } from "../body/ear.js";
-import { Skin } from "../body/skin.js";
+import { Skin, type SmartHomeLike } from "../body/skin.js";
 import { VestibularApparatus } from "../body/vestibular-apparatus.js";
 import { HomeostasisCore } from "../body/homeostasis-core.js";
 import { registerBodyTools, BODY_CHAT_TOOLS } from "../tools/body-tools.js";
@@ -577,6 +603,11 @@ export async function createAppServices(): Promise<AppServices> {
   const healthFitnessService = new HealthFitnessService(join(process.cwd(), "data", "health"));
   // 初始化财务深度服务（data/finance/{actorId}/{transactions,budgets}.json + reports/）。
   const financeDeepService = new FinanceDeepService(join(process.cwd(), "data", "finance"));
+  // 初始化订阅盘点服务（财务管家 P0：候选检测/确认/使用率/续费前提醒，
+  // 与账本同目录 subscriptions.json，懒加载 + 写穿）。
+  const subscriptionAuditService = new SubscriptionAuditService({
+    financeDeepService,
+  });
   // 初始化社交主动出击服务（Twitter OAuth 1.0a + 微博 + 小红书/朋友圈占位，凭证从环境变量读取）。
   const socialOutreachService = new SocialOutreachService();
   // 初始化代码执行沙盒服务（python/node 子进程，独立工作目录 data/sandbox/{actorId}/{workspaceId}/）。
@@ -704,7 +735,12 @@ export async function createAppServices(): Promise<AppServices> {
   const agentAccountService = new AgentAccountService();
   const emailRegistrationService = new EmailRegistrationService();
   const friendService = new FriendService();
-  
+  // 财务入站记账服务（构造提前到 skill 注册之前；LLM/推送回调由装配层后置注入）。
+  const financeIngestService = new FinanceIngestService({
+    financeDeepService,
+    agentAccountService,
+  });
+
   // 加载持久化数据
   await Promise.all([
     scheduleTaskService.load(),
@@ -747,6 +783,7 @@ export async function createAppServices(): Promise<AppServices> {
     wsConnectionRegistry,
     healthFitnessService,
     financeDeepService,
+    subscriptionAuditService,
     socialOutreachService,
     codeSandboxService,
     shoppingOrderService,
@@ -784,12 +821,23 @@ export async function createAppServices(): Promise<AppServices> {
     merchantOrderService,
   });
 
+  // 注册财务管家接入内置Skills（快捷指示：开启自动记账/绑定账单邮箱/粘贴账单入账/状态）
+  registerFinanceIngestBuiltinSkills((skill) => skillManager.register(skill), {
+    financeIngestService,
+  });
+
   // 注册旅游规划内置Skills（承接 3D-Travel 项目能力：规则引擎行程生成 + POI 缓存 + 目的地知识库）
   const travelPlanningService = new TravelPlanningService(weatherService);
   registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
     travelPlanningService,
   });
-  
+
+  // 注册出行通勤内置Skills（实时路况出发建议 + 票夹 + 打包清单；复用同一 WeatherService）
+  registerTravelCommuteBuiltinSkills((skill) => skillManager.register(skill), {
+    travelPlanningService,
+    weatherService,
+  });
+
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();
   worldService.onWorldRevision((ev: WorldRevisionEvent) => {
     worldPartitionWsRegistry.broadcastToPartition(
@@ -841,6 +889,32 @@ export async function createAppServices(): Promise<AppServices> {
     }),
     createNarrativeHybridRetrievalDefault(),
   );
+
+  // ─── 统一记忆写入者（四路合一）：对话衍生的写入候选全部进整合队列，
+  // 由单一链路完成 回声过滤 → 裁决 → 低信号摘要 → supersession → 落库。
+  // 未启用（env 关闭/依赖缺失）时返回 null，各链路自动回退旧直写路径。
+  const memoryConsolidation = configureMemoryConsolidation({
+    narrative: narrativeMemory,
+    kvSync: agentMemorySyncService,
+    memory: agenticMemoryRuntime?.memory ?? null,
+  });
+  agenticMemoryRuntime?.ingest.setLowSignalSink(
+    memoryConsolidation
+      ? (entry) =>
+          memoryConsolidation.submitCandidate({
+            actorId: entry.actorId,
+            text: entry.text,
+            source: "cortex:low_signal",
+            context: entry.context,
+            highSignal: false,
+            createdAt: new Date().toISOString(),
+          })
+      : null,
+  );
+
+  // ─── 记忆回查工具：把会话情景台账暴露为 memory.recall_episodic（压缩+按需展开）───
+  registerMemoryRecallTools(toolRegistry, { shortTermMemoryGateway });
+  setMemoryChatTools(MEMORY_RECALL_CHAT_TOOLS);
 
   // DailyDigest 仅承载当日 RAM 摘要（prompt 注入），长期归档已收敛到 journal 夜间固化
   const dailyDigestService = getDailyDigestService();
@@ -1068,6 +1142,76 @@ export async function createAppServices(): Promise<AppServices> {
   });
   eveningDigestScheduler.start();
   app.log.info("[EveningDigest] 晚间 digest 调度器已启动");
+
+  // ─── Task 20 生活节律引擎：观察 → 建模 → 调整 闭环 ───
+  // 中枢只拥有节律画像（data/rhythm_profiles/*.json，atomic 落盘）；数据从
+  // 既有源拉取（AwarenessCortex 睡眠样本 / LifeSignalHub 桌面与交互信号 /
+  // 触达反馈回灌），产出经三个消费方落权：A 重排节律提醒、B 回填
+  // receptiveHours（ContactPolicy 直接受益）、C rhythm_insight 关怀信号
+  // 走现有主动管线。决策权仍归 ContactPolicy/Fatigue/ProactionCortex。
+  // RHYTHM_ENGINE_ENABLED=0 可整体关闭。
+  const rhythmEnabled = !["0", "false", "off"].includes(
+    (process.env.RHYTHM_ENGINE_ENABLED ?? "").trim().toLowerCase(),
+  );
+  let rhythmSleepSensor: SleepWindowSensor | null = null;
+  let rhythmEngine: LifeRhythmEngine | null = null;
+  if (rhythmEnabled) {
+    const rhythmProfileStore = new RhythmProfileStore(join(process.cwd(), "data", "rhythm_profiles"));
+    await rhythmProfileStore.load();
+    rhythmEngine = new LifeRhythmEngine({ profileStore: rhythmProfileStore });
+    rhythmSleepSensor = new SleepWindowSensor();
+    rhythmEngine.registerSensor(rhythmSleepSensor);
+    rhythmEngine.registerSensor(new DesktopActivitySensor(lifeSignalHubService));
+    rhythmEngine.registerSensor(new InteractionSignalSensor(lifeSignalHubService));
+    rhythmEngine.subscribe(createReminderReschedulerConsumer(scheduleTaskService, rhythmEngine));
+    rhythmEngine.subscribe(createReceptiveHoursWriterConsumer(userPersonalizationService));
+    rhythmEngine.subscribe(createProactiveCandidateSourceConsumer(lifeSignalHubService, rhythmEngine));
+    // WS 摘要推送（客户端可展示节律洞察 / 调整说明；离线静默跳过）
+    rhythmEngine.subscribe((update) => {
+      const adjusted: string[] = [];
+      for (const [taskId, slot] of Object.entries(update.profile.reminderSlots)) {
+        if (slot.lastAdjustedAt && !slot.pinnedByUser) adjusted.push(taskId);
+      }
+      const payload: RhythmProfileUpdatedPayload = {
+        actorId: update.actorId,
+        changedDimensions: update.changedDimensions,
+        adjustedReminderTaskIds: adjusted,
+        insights: update.insights.map((insight) => ({
+          id: insight.id,
+          dimension: insight.dimension,
+          kind: insight.kind,
+          text: insight.text,
+          confidence: insight.confidence,
+          generatedAt: insight.generatedAt,
+        })),
+        updatedAt: update.profile.updatedAt,
+      };
+      wsConnectionRegistry.trySend(
+        update.actorId,
+        JSON.stringify({ type: ServerEventType.RhythmProfileUpdated, payload }),
+      );
+    });
+    // 触达结果回灌：personalization 的既有 outcome 消费点桥接到引擎（在线 EWMA）
+    userPersonalizationService.registerContactOutcomeListener((actorId, params) => {
+      const outcome = params.responded ? "accepted" : params.feedback === "negative" ? "dismissed" : "ignored";
+      rhythmEngine?.recordContactOutcome(actorId, outcome, params.at);
+    });
+    const rhythmAnalyzer = new NightlyRhythmAnalyzer({
+      engine: rhythmEngine,
+      listActorIds: () => {
+        const actorIds = new Set<string>();
+        for (const id of agentMemorySyncService.listSessionIds()) {
+          if (id && id !== "system") actorIds.add(id);
+        }
+        for (const id of getDailyJournalService()?.listActorIds?.() ?? []) {
+          if (id) actorIds.add(id);
+        }
+        return [...actorIds];
+      },
+    });
+    rhythmAnalyzer.start();
+    app.log.info("[RhythmEngine] 生活节律引擎已启动（夜间统计建模 + 三出口落权）");
+  }
 
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService);
@@ -1511,6 +1655,9 @@ export async function createAppServices(): Promise<AppServices> {
     awarenessCortex.registerAnticipation(anticipationEngineService);
     // Stage 3 Task 4：注入 schedule-task-service，用于 meeting 状态识别
     awarenessCortex.registerScheduleTask(scheduleTaskService);
+    // Task 20：节律引擎睡眠传感器接 AwarenessCortex 逐日睡眠样本
+    // （brain 关闭时传感器无数据源，静默空转，其余维度不受影响）
+    rhythmSleepSensor?.bindSource(awarenessCortex);
 
     // ProactionCortex：注册 contact policy + awareness + legacy 主动服务（仅 BRAIN_PROACTION_LEGACY=1）
     const proactiveContactPolicyService = new ProactiveContactPolicyService();
@@ -2128,6 +2275,44 @@ export async function createAppServices(): Promise<AppServices> {
     });
   });
 
+  // ─── 桌面情境感知（SceneWatcher）：会议勿扰 / 文档速读 / 商品比价 ───
+  // 检测全部为本地零 token 规则（窗口标题 + 进程 + 停留时长，scene_tick 心跳）；
+  // LLM 只在场景确认后单次调用（ephemeralTurn + maxOutputTokens 封顶）。
+  // 默认关闭：情境监测涉及隐私，须用户显式 DESKTOP_SCENE_WATCHER_ENABLED=1。
+  if (isDesktopSceneWatcherEnabled()) {
+    const sceneExec = createDesktopSceneActionExecutor(desktopVisual, desktopBridgeCoordinator);
+    // proactiveOutbound.send 的入参是 ProactiveOutboundLike 的超集，可直接复用
+    const meetingHandler = new DesktopSceneMeetingHandler(sceneExec, proactiveOutbound);
+    const documentHandler = new DesktopSceneDocumentHandler(sceneExec, externalChat, proactiveOutbound);
+    const priceHandler = new DesktopScenePriceHandler(sceneExec, externalChat, proactiveOutbound);
+    const sceneWatcher = new DesktopSceneWatcherService({
+      onMeetingStarted: (actorId, info) => {
+        void meetingHandler.onMeetingStarted(actorId, info).catch(() => {});
+      },
+      onMeetingEnded: (actorId, session) => {
+        void meetingHandler.onMeetingEnded(actorId, session).catch(() => {});
+      },
+      onDocumentDetected: (actorId, info) => {
+        void documentHandler.onDocumentDetected(actorId, info).catch(() => {});
+      },
+      onProductPageDetected: (actorId, info) => {
+        void priceHandler.onProductPageDetected(actorId, info).catch(() => {});
+      },
+    });
+    desktopBridgeCoordinator.subscribeEvents((actorId, event) => {
+      if (
+        event.eventType === "focus_change" ||
+        event.eventType === "scene_tick" ||
+        event.eventType === "window_open"
+      ) {
+        sceneWatcher.handleDesktopEvent(actorId, event.eventType, event.payload);
+      } else if (event.eventType === "window_close") {
+        sceneWatcher.handleWindowClose(actorId, event.payload);
+      }
+    });
+    app.log.info("[DesktopSceneWatcher] 情境感知已启用（meeting DND / document digest / price check）");
+  }
+
   // ─── Body Center 开关 ───
   // BODY_CENTER_ENABLED 未设置或非 "0"/"false"/"off" → 默认启用身体中心
   // 关闭时：整个 body/ 模块不实例化、BrainCenter.registerBodyGateway 会内部跳过
@@ -2170,7 +2355,7 @@ export async function createAppServices(): Promise<AppServices> {
     // 3. 子系统适配器：真实服务接口 → BodyModule 期望的最小化结构接口
     //    （避免修改 body/ 目录，所有适配在装配层完成）
 
-    // 3.1 DeviceRegistry → DeviceRegistryLike（Eye & Skin & HomeostasisCore 共用）
+    // 3.1 DeviceRegistry → DeviceRegistryLike（Eye & HomeostasisCore 共用）
     //     真实 DeviceRegistry.invoke 返回 DeviceInvokeResult {ok, data?, error?}，
     //     期望 {ok, result?}；真实 openStream(deviceId, params) 返回 {ok, streamId, stream, error?}，
     //     期望 openStream(deviceId, streamId, params) 返回 AsyncIterable<{type, payload}>
@@ -2302,10 +2487,11 @@ export async function createAppServices(): Promise<AppServices> {
       funasrAdapter,
     });
 
+    // SmartHomeService 目前未提供状态变化订阅（无 onStateChange），
+    // Skin 的 device_change 信号处于休眠；待 SmartHomeService 补充事件后自动生效。
     const skin = new Skin({
       bodyBus,
-      smartHomeService: smartHomeAdapter,
-      deviceRegistry: deviceRegistryAdapter,
+      smartHomeService: smartHomeAdapter as SmartHomeLike,
     });
 
     const vestibularApparatus = new VestibularApparatus({
@@ -3303,6 +3489,8 @@ export async function createAppServices(): Promise<AppServices> {
   // （确定性数据 + 单次 LLM 总结，monthly_report kind）。
   const consumptionLedgerListener = new ConsumptionLedgerListener({
     financeDeepService,
+    // 订阅盘点：月报末尾追加订阅盘点段（确认订阅/月成本/低使用率/疑似候选）
+    subscriptionAudit: subscriptionAuditService,
     // 预算超支 → 经 ProactivityHub speak 闭环（life_reminder kind 频控）
     onBudgetAlert: (actorId, message) => {
       proactivityHub.submitIntent({
@@ -3351,6 +3539,22 @@ export async function createAppServices(): Promise<AppServices> {
   });
   consumptionLedgerListener.subscribe(hookBus);
   consumptionLedgerListener.start();
+
+  // ─── 订阅盘点装配（财务管家 P0）───
+  // 每日扫描：续费日前 3 天 → life_reminder 主动提醒（同一续费日单次）；
+  // 候选检测在 list_subscriptions 工具与月报订阅段里按需触发，不占扫描。
+  subscriptionAuditService.setOnRenewalReminder((actorId, message) => {
+    proactivityHub.submitIntent({
+      actorId,
+      kind: "life_reminder",
+      importance: "medium",
+      title: "订阅续费提醒",
+      summary: message,
+      mode: "speak",
+      source: "finance",
+    });
+  });
+  subscriptionAuditService.start();
 
   // ─── Task 17 人情关系管家装配（场景C）───
   // 晨报每日生成 = 每日扫描：当天命中重要日子（KV important_dates，由
@@ -3541,6 +3745,43 @@ export async function createAppServices(): Promise<AppServices> {
   registerRhythmReminderTools(toolRegistry, scheduleTaskService);
   console.log("[Bootstrap] 健康关怀已装配（health.query 统计问答 + 节律提醒模板）");
 
+  // ─── 财务入站邮件记账装配（财务管家 P1）───
+  // 服务已在 agentAccountService 旁构造（skill 注册需要）；
+  // 这里后置注入 LLM 抽取与入账告知回调。
+  // 链路：邮件网关 → POST /finance/ingest/email/inbound → 关键词预过滤 →
+  // 单次 LLM 抽取交易 → 去重 → finance-deep 入账 → 轻量告知。
+  if (externalChat?.isEnabled()) {
+    financeIngestService.setLlmComplete(async (prompt) => {
+      let full = "";
+      await externalChat!.streamCompletion(
+        `finance-ingest-${Date.now()}`,
+        { text: prompt },
+        (delta: string) => {
+          full += delta;
+        },
+        undefined,
+        {
+          systemPromptOverride: prompt,
+          ephemeralTurn: true,
+          disableThinking: true,
+          maxThreadMessages: 0,
+        },
+      );
+      return full;
+    });
+  }
+  financeIngestService.setOnIngested((actorId, message) => {
+    proactivityHub.submitIntent({
+      actorId,
+      kind: "life_reminder",
+      importance: "low",
+      title: "账单邮件已自动记账",
+      summary: message,
+      mode: "speak",
+      source: "finance",
+    });
+  });
+
   registerHttpRoutes(app, {
     toolRegistry,
     skillManager,
@@ -3563,6 +3804,7 @@ export async function createAppServices(): Promise<AppServices> {
     aipService,
     agentAccountService,
     emailRegistrationService,
+    financeIngestService,
     computeQuotaService,
     agentMemorySyncService,
     weatherService,
@@ -3635,6 +3877,7 @@ export async function createAppServices(): Promise<AppServices> {
     proactivityHub.stop();
     interestWatcher.stop();
     consumptionLedgerListener.stop();
+    subscriptionAuditService.stop();
     eveningDigestScheduler.stop();
     try {
       await moodInferenceService.flush();

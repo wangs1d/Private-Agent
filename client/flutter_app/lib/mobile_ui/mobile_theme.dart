@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
 
+import "../core/theme/app_typography.dart";
+
 /// 手机端配色(浅 / 深两套)。
 ///
 /// 遵循「简洁现代、白黑为主」的方向:
@@ -153,7 +155,7 @@ abstract final class MobileTheme {
       surfaceContainerLowest: p.surface,
     );
 
-    return ThemeData(
+    final ThemeData theme = ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: cs,
@@ -206,6 +208,10 @@ abstract final class MobileTheme {
       focusColor: Colors.transparent,
       hoverColor: Colors.transparent,
       highlightColor: isLight ? const Color(0x0D000000) : const Color(0x14FFFFFF),
+    );
+    // 统一排版:与桌面端共用同一套行高 token
+    return theme.copyWith(
+      textTheme: AppTypography.applyLineHeights(theme.textTheme),
     );
   }
 }

@@ -9,11 +9,22 @@ import "effect_card_shell.dart";
 /// ≤10 字的短标签（无句末标点、无数字、无时间前缀）。
 /// 前端渲染为 Wrap 胶囊墙：圆角胶囊 + primary 浅底 + primary 文字，
 /// 适合兴趣标签、关键词、类目聚合这类「一组词」的场景。
+///
+/// 交互：传入 [onChipTap] 时标签可点击（涟漪反馈），点击把标签文本
+/// 作为追问发出（由外层 onUserAction → 卡片动作链路承接）。
 class ChipsEffectCard extends StatelessWidget {
-  const ChipsEffectCard({super.key, required this.data, required this.cs});
+  const ChipsEffectCard({
+    super.key,
+    required this.data,
+    required this.cs,
+    this.onChipTap,
+  });
 
   final AgentResultData data;
   final ColorScheme cs;
+
+  /// 单个标签点击回调；null 时标签为纯展示（无涟漪、无点击态）。
+  final void Function(String tag)? onChipTap;
 
   @override
   Widget build(BuildContext context) {
@@ -31,20 +42,24 @@ class ChipsEffectCard extends StatelessWidget {
         runSpacing: 8,
         children: <Widget>[
           for (final String chip in chips)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
-              decoration: BoxDecoration(
-                color: cs.primary.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: cs.primary.withValues(alpha: 0.28)),
-              ),
-              child: Text(
-                chip,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: cs.primary,
-                  height: 1.25,
+            InkWell(
+              onTap: onChipTap == null ? null : () => onChipTap!(chip),
+              borderRadius: BorderRadius.circular(20),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: cs.primary.withValues(alpha: 0.28)),
+                ),
+                child: Text(
+                  chip,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: cs.primary,
+                    height: 1.25,
+                  ),
                 ),
               ),
             ),

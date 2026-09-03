@@ -29,6 +29,10 @@ import type {
   DesktopVisualWindowResult,
   DesktopVisualClipboardInput,
   DesktopVisualClipboardResult,
+  DesktopVisualReadDocumentInput,
+  DesktopVisualReadDocumentResult,
+  DesktopVisualSetDndInput,
+  DesktopVisualSetDndResult,
 } from "./desktop-visual-port.js";
 import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
 
@@ -493,6 +497,43 @@ export class SubprocessDesktopVisual implements DesktopVisualPort {
         packageRoot: this.packageRoot,
         timeoutMs: 5_000,
         timeoutLabel: "clipboard 子进程超时",
+      },
+    );
+  }
+
+  async readDocument(input: DesktopVisualReadDocumentInput): Promise<DesktopVisualReadDocumentResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualReadDocumentResult>(
+      {
+        action: "read_document",
+        path: input.path,
+        maxChars: input.maxChars ?? null,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 20_000,
+        timeoutLabel: "read_document 子进程超时",
+      },
+    );
+  }
+
+  async setDnd(input: DesktopVisualSetDndInput): Promise<DesktopVisualSetDndResult> {
+    if (!this.enabled) {
+      return { ok: false, error: "桌面操控未启用（DESKTOP_VISUAL_ENABLED）" };
+    }
+    return runStdioWorker<DesktopVisualSetDndResult>(
+      {
+        action: "set_dnd",
+        dndOp: input.op,
+      },
+      {
+        pythonExe: this.pythonExe,
+        packageRoot: this.packageRoot,
+        timeoutMs: 8_000,
+        timeoutLabel: "set_dnd 子进程超时",
       },
     );
   }

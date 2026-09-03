@@ -105,7 +105,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                         if (widget.dayLabel.isNotEmpty)
                           Text(widget.dayLabel,
                               style: TextStyle(
-                                  fontSize: 10.5, color: cs.onSurfaceVariant)),
+                                  fontSize: 11, color: cs.onSurfaceVariant)),
                         const SizedBox(height: 2),
                         Text(entry.title,
                             style: const TextStyle(
@@ -182,7 +182,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                       Expanded(
                         child: Text(entry.priceInfo,
                             style: const TextStyle(
-                                fontSize: 12.5,
+                                fontSize: 13,
                                 fontWeight: FontWeight.w600,
                                 color: _kAccentOrange)),
                       ),
@@ -217,7 +217,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                           const SizedBox(width: 6),
                           Text("实用贴士",
                               style: TextStyle(
-                                  fontSize: 11.5,
+                                  fontSize: 12,
                                   fontWeight: FontWeight.w700,
                                   color: cs.onSurfaceVariant)),
                         ],
@@ -228,7 +228,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                           padding: const EdgeInsets.only(bottom: 3),
                           child: Text("· $tip",
                               style: TextStyle(
-                                  fontSize: 11.5,
+                                  fontSize: 12,
                                   height: 1.45,
                                   color: cs.onSurfaceVariant)),
                         ),
@@ -241,7 +241,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                 const SizedBox(height: 14),
                 Text("评论 (${entry.reviews.length})",
                     style: const TextStyle(
-                        fontSize: 12.5, fontWeight: FontWeight.w700)),
+                        fontSize: 13, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 for (final TravelEntryReview review in entry.reviews)
                   Container(
@@ -269,7 +269,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                         const SizedBox(height: 4),
                         Text(review.text,
                             style:
-                                const TextStyle(fontSize: 11.5, height: 1.45)),
+                                const TextStyle(fontSize: 12, height: 1.45)),
                       ],
                     ),
                   ),
@@ -279,7 +279,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                 const SizedBox(height: 10),
                 Text("相关视频",
                     style: const TextStyle(
-                        fontSize: 12.5, fontWeight: FontWeight.w700)),
+                        fontSize: 13, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 Wrap(
                   spacing: 6,
@@ -343,7 +343,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
                   ),
                   icon: const Icon(Icons.navigation_outlined, size: 16),
                   label: const Text("在高德地图中导航",
-                      style: TextStyle(fontSize: 12.5)),
+                      style: TextStyle(fontSize: 13)),
                   onPressed: () {
                     final Uri uri = Uri.parse(
                         "https://uri.amap.com/marker?position=${entry.longitude},${entry.latitude}&callnative=0");
@@ -367,7 +367,7 @@ class _TravelDetailSheetState extends State<TravelDetailSheet> {
         Expanded(
           child: Text(text,
               style: TextStyle(
-                  fontSize: 11.5, height: 1.5, color: cs.onSurfaceVariant)),
+                  fontSize: 12, height: 1.5, color: cs.onSurfaceVariant)),
         ),
       ],
     );

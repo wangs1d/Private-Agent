@@ -3,7 +3,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 /**
  * 深度财务分析能力域 —— ChatCompletionTool schema。
  *
- * 共 7 个工具：
+ * 共 10 个工具：
  *   - finance.import_transactions  批量导入交易记录（CSV/JSON）
  *   - finance.analyze_spending    消费分析（按类别 / 时间段聚合）
  *   - finance.set_budget          设置预算（按月 / 按类别）
@@ -11,15 +11,18 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - finance.reconcile           自动对账：找出账单 vs 已记录差异
  *   - finance.categorize          自动分类一笔交易
  *   - finance.export_report       导出财务报告（markdown / csv / json）
+ *   - finance.list_subscriptions  订阅盘点：列出自动续费订阅 + 疑似候选
+ *   - finance.confirm_subscription 确认候选 / 手动登记订阅
+ *   - finance.update_subscription 更新订阅状态 / 使用记录
  *
  * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
  *   1. 用户不是每轮都会查账本 / 预算
- *   2. 关键词触发（"账单" / "预算" / "对账" / "月度报告"）时由 tool_discover 拉出
+ *   2. 关键词触发（"账单" / "预算" / "对账" / "月度报告" / "订阅"）时由 tool_discover 拉出
  *
  * 与 wallet.* / budget.calculate 区分：
  *   - wallet.* 是单条即时操作（转账 / 充值 / 单笔购买）
  *   - budget.calculate 是一次性粗略估算（输入 income/rent/food/transport 出 remain）
- *   - finance.* 维护完整账本 + 预算执行 + 对账 + 报告
+ *   - finance.* 维护完整账本 + 预算执行 + 对账 + 报告 + 订阅盘点
  */
 export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -238,6 +241,114 @@ export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["from", "to"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.list_subscriptions",
+      description:
+        "订阅服务盘点：列出自动续费订阅（已确认 + 已退订/忽略）以及账本中检测到的疑似订阅候选。\n" +
+        "每条含：merchant / amount（每期金额）/ periodDays（周期天数）/ status / nextRenewalDate（下次续费日）/\n" +
+        "lastUsedAt（最近使用）/ monthlyCost（折算月成本）/ evidence（检测证据）。\n" +
+        "调用时会先自动扫描账本刷新疑似候选，无需先跑检测。\n" +
+        "适用场景：「我有哪些订阅」「盘点一下自动续费」「订阅一个月多少钱」「有什么疑似订阅待确认」。",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["all", "candidate", "confirmed", "cancelled", "ignored"],
+            description:
+              "状态过滤（可选，默认 all）。candidate=疑似待确认 / confirmed=已确认 / cancelled=已退订 / ignored=已忽略。",
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.confirm_subscription",
+      description:
+        "确认/登记一个订阅服务：把疑似订阅候选（finance.list_subscriptions 返回的 candidate）确认为正式订阅，\n" +
+        "或直接手动登记新订阅。确认后参与月度订阅盘点与续费前提醒（下次续费日前 3 天主动提醒）。\n" +
+        "适用场景：「这个订阅是真的，每月25」「登记一下我的B站大会员」「Netflix确认还在订」。\n" +
+        "注意：不传 subscriptionId 时会按商户名自动关联同名候选或新建。",
+      parameters: {
+        type: "object",
+        properties: {
+          merchant: {
+            type: "string",
+            description: "商户/服务名。如 \"Netflix\" / \"B站大会员\" / \"iCloud\"。",
+          },
+          amount: {
+            type: "number",
+            description: "每期金额（正数）。如 25 表示每期 25 元。",
+          },
+          periodDays: {
+            type: "number",
+            description: "周期天数。常见：7（周付）/ 30（月付）/ 90（季付）/ 365（年付）。",
+          },
+          subscriptionId: {
+            type: "string",
+            description: "候选订阅 ID（可选）。确认 list_subscriptions 返回的某个 candidate 时传入。",
+          },
+          nextRenewalDate: {
+            type: "string",
+            description:
+              "下次续费日 YYYY-MM-DD（可选）。未传则不设，后续可用 update_subscription 补。",
+          },
+          category: {
+            type: "string",
+            enum: ["餐饮", "交通", "购物", "娱乐", "医疗", "教育", "居住", "工资", "其他"],
+            description: "分类（可选）。订阅多归娱乐/购物。",
+          },
+        },
+        required: ["merchant", "amount", "periodDays"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finance.update_subscription",
+      description:
+        "更新订阅状态/使用记录。使用率评估的数据入口：用户说「还在用/没怎么用」时记 used，\n" +
+        "「已退订」记 cancel，「这个不算订阅」记 ignore。也支持改下次续费日 / 恢复 / 备注。\n" +
+        "适用场景：「B站我还在用」→ used；「Netflix我已经退了」→ cancel；\n" +
+        "「那个不是订阅，是一次性买断」→ ignore；「爱奇艺下月5号续费」→ set_renewal。",
+      parameters: {
+        type: "object",
+        properties: {
+          subscriptionId: {
+            type: "string",
+            description: "订阅记录 ID（finance.list_subscriptions 返回的 id）。",
+          },
+          action: {
+            type: "string",
+            enum: ["used", "cancel", "ignore", "reactivate", "set_renewal", "note"],
+            description:
+              "操作：used=标记最近使用 / cancel=已退订 / ignore=忽略（非订阅）/ reactivate=恢复确认 / set_renewal=改下次续费日 / note=写备注。",
+          },
+          lastUsedAt: {
+            type: "string",
+            description: "最近使用日期 YYYY-MM-DD（可选，action=used 时默认今天）。",
+          },
+          nextRenewalDate: {
+            type: "string",
+            description: "下次续费日 YYYY-MM-DD（action=set_renewal 时必传）。",
+          },
+          note: {
+            type: "string",
+            description: "备注（action=note 时必传）。如 \"shared with family\"。",
+          },
+        },
+        required: ["subscriptionId", "action"],
         additionalProperties: false,
       },
     },

@@ -31,8 +31,33 @@ import {
   hasBlockquote,
   routeDisplayEffect,
   routeDisplayEffectByForm,
+  scoreDisplayEffects,
+  type DisplayRouteInput,
 } from "./display-effect-router.js";
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
+
+/**
+ * 路由决策日志：cardType 与评分明细 top-2 落日志（低频：每次上卡一条），
+ * 线上误判/漏判可直接对照 content/tool 分数排查，不必复现文本重跑路由。
+ */
+function logRoutingDecision(
+  where: string,
+  toolName: string | undefined,
+  cardType: string,
+  input: DisplayRouteInput,
+): void {
+  const top = [...scoreDisplayEffects(input)]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 2)
+    .map(
+      (d) =>
+        `${d.type || "(generic)"}=${d.score.toFixed(3)}(content=${d.contentScore.toFixed(2)},tool=${d.toolScore.toFixed(2)})`,
+    )
+    .join(" | ");
+  console.log(
+    `[DisplayRoute] ${where}: card=${cardType || "(generic)"} tool=${toolName ?? "-"} top: ${top || "none"}`,
+  );
+}
 
 /** 列表项类型推断 */
 const CHECK_HINT_RE = /已完成|已为你|已帮你|已设置|已创建|已规划|✓|✔|成功/i;
@@ -527,6 +552,14 @@ export function formatAgentResultForChat(
     footer: segment.footer,
     numberedItemRatio,
   });
+  logRoutingDecision("result-card", toolName, cardType, {
+    toolName,
+    title: segment.title,
+    items,
+    fullText: cleaned,
+    footer: segment.footer,
+    numberedItemRatio,
+  });
   // 按钮策略优先级：LLM 实时声明 > 多选/勾选 > 场景推断
   // - LLM 声明：Agent 按当下场景实时给出按钮，最贴合实际
   // - 场景推断：仅作为 LLM 未声明时的兜底（见 detectCardScenario 的注释，不再硬塞"好的/不用了"）
@@ -622,6 +655,7 @@ export function formatSemanticResultForChat(
   // timeline/compare 的意图词（安排/明天/之后/区别…）在日常对话里出现太频繁，
   // 必须额外有形态支撑（真正的时间戳/对比结构）才上卡，避免闲聊被误判。
   let cardType = routeDisplayEffect(routeInput);
+  logRoutingDecision("semantic-card", toolName, cardType, routeInput);
   if (cardType === "timeline" || cardType === "compare") {
     if (routeDisplayEffectByForm(routeInput) !== cardType) cardType = "";
   }
@@ -656,6 +690,7 @@ const CONTENT_CARD_TYPES: ReadonlySet<string> = new Set([
   "chips",
   "timeline",
   "compare",
+  "comparison_table",
   "progress",
   "carousel",
 ]);

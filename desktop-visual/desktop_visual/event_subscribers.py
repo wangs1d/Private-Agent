@@ -133,6 +133,9 @@ def _setup_signatures() -> None:
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.restype = wintypes.BOOL
 
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+
     user32.GetMessageW.argtypes = [
         ctypes.POINTER(wintypes.MSG),
         wintypes.HWND,
@@ -631,9 +634,83 @@ def stop_window_listener() -> None:
     _maybe_stop_loop()
 
 
+# ============================================================
+# 场景心跳上报（scene_tick）
+# 每 interval 秒上报一次前台窗口（title/process/hwnd），供 server 端
+# 情境感知做「停留时长」计算——focus_change 只在前台切换时触发，
+# 用户停在某一窗口不动时没有事件，心跳补足时间维度。
+# ============================================================
+_scene_state: dict = {"thread": None, "stop": None}
+_scene_lock = threading.Lock()
+
+
+def _scene_reporter_loop(interval: float) -> None:
+    logging.info("场景心跳上报已启动 interval=%.0fs", interval)
+    while True:
+        stop_event = _scene_state.get("stop")
+        if stop_event is not None:
+            if stop_event.is_set():
+                break
+            stop_event.wait(interval)
+        else:
+            time.sleep(interval)
+            stop_event = _scene_state.get("stop")
+            if stop_event is not None and stop_event.is_set():
+                break
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                continue
+            title = _get_window_title(hwnd)
+            pid = _get_window_pid(hwnd)
+            process = _get_process_name(pid) if pid else ""
+            if not title and not process:
+                continue
+            from desktop_visual.bridge_ws_client import send_event
+
+            send_event("scene_tick", {"title": title, "process": process, "hwnd": int(hwnd)})
+        except Exception as e:
+            logging.debug("scene_tick 上报失败: %s", e)
+    logging.info("场景心跳上报已停止")
+
+
+def start_scene_reporter(interval_seconds: float = 30.0) -> bool:
+    """启动场景心跳上报线程。非 Windows 返回 False。"""
+    if not _IS_WINDOWS:
+        logging.info("非 Windows 平台，场景心跳上报不可用")
+        return False
+    interval = max(10.0, min(float(interval_seconds or 30.0), 300.0))
+    with _scene_lock:
+        t = _scene_state.get("thread")
+        if t is not None and t.is_alive():
+            return True
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=_scene_reporter_loop,
+            args=(interval,),
+            name="desktop-scene-reporter",
+            daemon=True,
+        )
+        _scene_state["thread"] = t
+        _scene_state["stop"] = stop_event
+    t.start()
+    return True
+
+
+def stop_scene_reporter() -> None:
+    with _scene_lock:
+        stop_event = _scene_state.get("stop")
+        _scene_state["thread"] = None
+        _scene_state["stop"] = None
+    if stop_event is not None:
+        stop_event.set()
+
+
 __all__ = [
     "start_focus_listener",
     "stop_focus_listener",
     "start_window_listener",
     "stop_window_listener",
+    "start_scene_reporter",
+    "stop_scene_reporter",
 ]

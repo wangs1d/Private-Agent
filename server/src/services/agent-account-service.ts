@@ -66,6 +66,16 @@ export class AgentAccountService {
     return this.byActorId.get(actorId.trim());
   }
 
+  /** 按绑定的验证邮箱反查账号（财务入站邮件记账：收件人 → actorId）。 */
+  getByEmail(email: string): AgentAccountRecord | undefined {
+    const e = email.trim().toLowerCase();
+    if (!e) return undefined;
+    for (const a of this.byActorId.values()) {
+      if (a.email && a.email.toLowerCase() === e) return a;
+    }
+    return undefined;
+  }
+
   /** @deprecated 使用 {@link getByActorId}（参数为登录主体 id） */
   getBySession(sessionId: string): AgentAccountRecord | undefined {
     return this.getByActorId(sessionId);

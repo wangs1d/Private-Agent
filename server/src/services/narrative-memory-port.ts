@@ -16,6 +16,17 @@ export type NarrativeMemoryPort = {
     source: string,
     opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
   ): Promise<void>;
+  /**
+   * 统一写入者出口：候选已经过整合链路裁决（decideMemoryWrite / 回声过滤 /
+   * supersession），此处直接落库，不再二次决策。语义与 ingest 相同
+   * （海马体 + Mem0 [+ hybrid 索引]），只是免去重复 LLM 裁决。
+   */
+  writeDecided(
+    actorId: string,
+    text: string,
+    source: string,
+    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+  ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
   buildDetailedRecall(actorId: string, query: string): Promise<string>;
@@ -82,6 +93,24 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
         highSignal: opts?.highSignal,
         context,
       });
+    }
+  }
+
+  async writeDecided(
+    actorId: string,
+    text: string,
+    source: string,
+    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+  ): Promise<void> {
+    const context = opts.context as MemoryContextKind;
+    if (this.humanLikeMemory) {
+      await this.humanLikeMemory.ingest(actorId, text, source, {
+        context,
+        metadata: { highSignal: opts.highSignal },
+      });
+    }
+    if (this.agenticIngest) {
+      await this.agenticIngest.writeDecided(actorId, source, text, context, opts.highSignal);
     }
   }
 
@@ -219,6 +248,18 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
   ): Promise<void> {
     await Promise.all([
       this.facade.ingest(actorId, text, source, opts),
+      this.hybrid.ingest(actorId, text, source),
+    ]);
+  }
+
+  async writeDecided(
+    actorId: string,
+    text: string,
+    source: string,
+    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+  ): Promise<void> {
+    await Promise.all([
+      this.facade.writeDecided(actorId, text, source, opts),
       this.hybrid.ingest(actorId, text, source),
     ]);
   }

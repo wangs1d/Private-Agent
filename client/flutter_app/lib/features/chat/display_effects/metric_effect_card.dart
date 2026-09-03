@@ -112,23 +112,27 @@ class _MetricTile extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 11.5,
+                fontSize: 12,
                 color: cs.onSurfaceVariant,
                 height: 1.3,
               ),
             ),
           const SizedBox(height: 2),
-          Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: label.isEmpty
-                  ? cs.onSurface.withValues(alpha: 0.85)
-                  : cs.primary,
-              height: 1.35,
+          // 数值可长按复制；FittedBox 缩放代替截断——「3.2万亿元」这类长值
+          // 不再被 ellipsis 吃掉
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: SelectableText(
+              value,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: label.isEmpty
+                    ? cs.onSurface.withValues(alpha: 0.85)
+                    : cs.primary,
+                height: 1.35,
+              ),
             ),
           ),
           if (ratio != null) ...<Widget>[

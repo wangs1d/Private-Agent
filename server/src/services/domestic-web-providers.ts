@@ -3,15 +3,12 @@ import { searchViaSearchApi } from "./search-api-provider.js";
 import {
   applySearchFreshness,
   prependRecencyQueryVariants,
-  classifySearchIntent,
-  buildIntentAwareQueryVariants,
   type RssHealthMonitor,
 } from "./search-enhancements.js";
 
 const BING_CN_SEARCH = "https://cn.bing.com/search";
 const DEFAULT_TIMEOUT_MS = 6_000;
 const MAX_QUERY_VARIANTS = 6;
-const PRIMARY_QUERY_VARIANTS = 4;
 
 const DOMESTIC_TECH_RSS_FEEDS: Array<{ source: string; url: string }> = [
   { source: "36氪", url: "https://36kr.com/feed" },
@@ -148,55 +145,38 @@ export type DomesticFetchOptions = {
   rssHealth?: RssHealthMonitor;
 };
 
-/** 必应中国搜索（并行变体 + 快速返回）。长句会误匹配，故自动简化 query 并过滤无关结果。 */
+/**
+ * 必应中国搜索（并行变体 + 快速返回）。query 由 LLM 按语义组织、原样透传：
+ * 不做拆短变体、实体提取、锚点过滤等机械断句处理（历史版本把这些做在服务端，
+ * 曾把「金色亮片抹胸鱼尾·红毯杀手」切碎成噪音查询并误删正确结果，2026-09 删除）。
+ * 时效性话题由 prependRecencyQueryVariants 在完整 query 基础上追加年月/「最新」。
+ */
 export async function searchBingChina(
   query: string,
   limit: number,
   opts: DomesticFetchOptions,
-  flags: { skipRelevanceFilter?: boolean } = {},
 ): Promise<InfoSearchItem[]> {
   const keyword = query.trim();
   if (!keyword) return [];
 
-  const allVariants = prependRecencyQueryVariants(buildSearchQueryVariants(keyword), keyword);
-  const variants = allVariants.slice(0, MAX_QUERY_VARIANTS);
-
+  const variants = prependRecencyQueryVariants([keyword], keyword)
+    .slice(0, MAX_QUERY_VARIANTS)
+    .map((v) => v.trim())
+    .filter(Boolean);
   if (variants.length === 0) return [];
 
-  const primaryVariants = variants.slice(0, PRIMARY_QUERY_VARIANTS);
-  const secondaryVariants = variants.slice(PRIMARY_QUERY_VARIANTS);
-  const primaryResults = await fetchBingVariantBatch(primaryVariants, limit, opts);
-
-  let collected: InfoSearchItem[] = [];
-  for (const batch of primaryResults) {
-    const relevant = flags.skipRelevanceFilter ? batch : filterItemsByRelevance(batch, keyword);
-    if (relevant.length > 0) {
-      collected = [...collected, ...relevant];
-    }
-  }
-
-  const recallThreshold = Math.min(limit, Math.max(3, Math.ceil(limit * 0.6)));
-  if (secondaryVariants.length > 0 && collected.length < recallThreshold) {
-    const secondaryResults = await fetchBingVariantBatch(secondaryVariants, limit, opts);
-    for (const batch of secondaryResults) {
-      const relevant = flags.skipRelevanceFilter ? batch : filterItemsByRelevance(batch, keyword);
-      if (relevant.length > 0) {
-        collected = [...collected, ...relevant];
-      }
-    }
-  }
-
+  const batches = await fetchBingVariantBatch(variants, limit, opts);
   // 合并去重后只调用一次 applySearchFreshness（避免冗余排序）
-  return applySearchFreshness(dedupeByUrl(collected), { query: keyword }).items.slice(0, limit);
+  return applySearchFreshness(dedupeByUrl(batches.flat()), { query: keyword }).items.slice(0, limit);
 }
 
-/** 宽松模式必应搜索：跳过相关性过滤 + 不要求最低命中数，返回所有能找到的结果。 */
+/** 兼容别名：与 searchBingChina 一致（历史上是「跳过相关性过滤」的宽松版，现在主路径即宽松）。 */
 export async function searchBingChinaRelaxed(
   query: string,
   limit: number,
   opts: DomesticFetchOptions,
 ): Promise<InfoSearchItem[]> {
-  return searchBingChina(query, limit, opts, { skipRelevanceFilter: true });
+  return searchBingChina(query, limit, opts);
 }
 
 // ============================================================
@@ -292,7 +272,6 @@ export async function searchWebMultiEngine(
   query: string,
   limit: number,
   opts: DomesticFetchOptions,
-  flags: { skipRelevanceFilter?: boolean } = {},
 ): Promise<InfoSearchItem[]> {
   const keyword = query.trim();
   if (!keyword) return [];
@@ -311,7 +290,7 @@ export async function searchWebMultiEngine(
   }
 
   // 第二步：必须用时用必应补足（API 结果保留在基础集中）
-  const primary = await searchBingChina(keyword, boundedLimit, opts, flags);
+  const primary = await searchBingChina(keyword, boundedLimit, opts);
   const afterBing = dedupeByUrl([...apiItems, ...primary]);
   if (afterBing.length >= boundedLimit) return afterBing.slice(0, boundedLimit);
 
@@ -323,15 +302,9 @@ export async function searchWebMultiEngine(
     searchDuckDuckGo(keyword, missing + 2, opts),
   ]);
   const fallback = [...baidu, ...sogou, ...ddg].filter((x) => x.url && /^https?:\/\//i.test(x.url));
+  // 引擎结果原样返回，不做关键词锚点过滤（引擎已按完整 query 匹配，锚点砍只会误删）
   const merged = dedupeByUrl([...afterBing, ...fallback]);
-  let items: InfoSearchItem[];
-  if (flags.skipRelevanceFilter) {
-    items = merged;
-  } else {
-    const relevant = filterItemsByRelevance(merged, keyword);
-    items = relevant.length > 0 ? relevant : merged;
-  }
-  return items.slice(0, boundedLimit);
+  return merged.slice(0, boundedLimit);
 }
 
 function clampInt(input: number, min: number, max: number): number {
@@ -401,250 +374,6 @@ async function fetchBingChinaOnce(
   return extractBingHtmlResults(html);
 }
 
-/** 从自然语言任务句中抽出 3-10 字中文专名（如「调研航天电子这家公司」→「航天电子」）。 */
-export function extractPrimaryChineseEntity(query: string): string | null {
-  let core = query
-    .trim()
-    .replace(/^(调研|查询|搜索|了解|介绍|分析|对比|看看|帮我|请)+/u, "")
-    .replace(/(这家公司|该公司|公司|股份|集团|有限|怎么样|如何|的主营|主营业务|业务|情况)+$/u, "")
-    .trim();
-  if (core.length >= 3 && core.length <= 10 && /^[\u4e00-\u9fff]+$/u.test(core)) return core;
-  const runs = [...query.matchAll(/[\u4e00-\u9fff]{4,8}/gu)].map((m) => m[0]!);
-  for (const run of runs.sort((a, b) => b.length - a.length)) {
-    if (SEARCH_STOPWORDS.has(run)) continue;
-    if (/^(这家|那家|如何|怎么)/u.test(run)) continue;
-    return run;
-  }
-  return null;
-}
-
-/** 长 query 在必应上易误匹配（如「航天电子…主营业务」→ 宏观航天新闻），生成短查询变体。优化：限制变体数量并按优先级排序。 */
-export function buildSearchQueryVariants(query: string): string[] {
-  const raw = query.trim();
-  if (!raw) return [];
-
-  const variants: string[] = [];
-  const push = (v: string) => {
-    const t = v.trim();
-    if (t && !variants.includes(t) && variants.length < MAX_QUERY_VARIANTS) variants.push(t);
-  };
-
-  const intentAnalysis = classifySearchIntent(raw);
-  const priorityVariants = buildIntentAwareQueryVariants(raw, intentAnalysis, MAX_QUERY_VARIANTS + 4);
-
-  for (const m of raw.matchAll(/["'「『]([^"'」』]+)["'」』]/g)) {
-    priorityVariants.push(m[1] ?? "");
-  }
-
-  const stockCode = raw.match(/\b[036]\d{5}\b/)?.[0];
-  if (stockCode) priorityVariants.push(stockCode);
-
-  // 关键修复：使用 classifySearchIntent 的实体提取（支持中英混合、英文+数字等），
-  // 不要只用 extractPrimaryChineseEntity（它只支持纯中文，会丢失「A」在「A股」中的角色）。
-  // 这样「今天A股最新消息」会得到 [A股, 今天A股最新消息, ...] 而不是 [今天A股, ...]
-  const intentEntity = intentAnalysis.entities.find(
-    (e) =>
-      e.length >= 2 &&
-      !/^(最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|动态|头条|怎么|如何|什么|情况)$/i.test(e),
-  );
-
-  // 兼容旧逻辑：纯中文实体（如果 intent 没找到好实体，再用 extractPrimaryChineseEntity）
-  const entity = intentEntity ?? extractPrimaryChineseEntity(raw);
-
-  if (entity) {
-    priorityVariants.push(`"${entity}"`);
-    if (/公司|股份|股票|调研|主营|行情|股价|上市|财报/.test(raw)) {
-      priorityVariants.push(`${entity} 股票`);
-    }
-    priorityVariants.push(entity);
-    if (stockCode) priorityVariants.push(`${entity} ${stockCode}`);
-  }
-
-  for (const v of priorityVariants) {
-    push(v);
-  }
-
-  if (variants.length >= MAX_QUERY_VARIANTS) return variants;
-
-  const tokens = raw
-    .split(/[\s,，、。；;:：/|]+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length >= 2 && !SEARCH_STOPWORDS.has(t));
-
-  if (tokens.length > 0 && variants.length < MAX_QUERY_VARIANTS) {
-    const primary = tokens[0]!;
-    if (!entity && /^[\u4e00-\u9fff]{3,10}$/u.test(primary)) {
-      push(`"${primary}"`);
-      if (/公司|股份|股票|调研|主营|行情|股价|上市|财报/.test(raw) && variants.length < MAX_QUERY_VARIANTS) {
-        push(`${primary} 股票`);
-      }
-    }
-    if (variants.length < MAX_QUERY_VARIANTS) push(tokens.slice(0, 2).join(" "));
-    if (variants.length < MAX_QUERY_VARIANTS) push(primary);
-    if (stockCode && variants.length < MAX_QUERY_VARIANTS) push(`${primary} ${stockCode}`);
-
-    if (variants.length < MAX_QUERY_VARIANTS) {
-      for (const token of tokens) {
-        if (token.length >= 5 && /^[\u4e00-\u9fff]{2}[\u4e00-\u9fff]+$/.test(token)) {
-          push(`${token.slice(0, 2)} ${token.slice(2)}`);
-          if (tokens[1] && variants.length < MAX_QUERY_VARIANTS) {
-            push(`${token.slice(0, 2)} ${token.slice(2)} ${tokens[1]}`);
-          }
-        }
-      }
-    }
-  }
-
-  if (variants.length < MAX_QUERY_VARIANTS && !variants.includes(raw)) {
-    push(raw);
-  }
-
-  return variants;
-}
-
-const SEARCH_STOPWORDS = new Set([
-  "公司",
-  "股份",
-  "有限",
-  "集团",
-  "产品",
-  "介绍",
-  "主营",
-  "业务",
-  "包括",
-  "以及",
-  "最新",
-  "消息",
-  "公告",
-  "股价",
-  "走势",
-  "市值",
-  "财务",
-  "数据",
-  "营收",
-  "净利润",
-  "概念",
-  "板块",
-  "行业",
-  "地位",
-  "优势",
-  "竞争",
-  "报告",
-  "调研",
-  "深度",
-  "整理",
-  "返回",
-  "搜索",
-  "查询",
-  "请",
-  "使用",
-  "进行",
-  "等",
-  "年",
-]);
-
-/** 按原始 query 过滤误匹配条目（导出供单测）。 */
-/**
- * 通用动词/虚词/时效词锚点。这类词本身没有区分度（如「发布」「更新」），
- * 必应会把 query 里的动词拆出来匹配，导致返回「某某发布会/某某更新」这类跑题结果。
- * 判断相关性时，仅命中这些弱锚点、却未命中任何强锚点的条目视为噪音过滤。
- */
-const WEAK_RELEVANCE_ANCHORS = new Set([
-  "发布", "更新", "下载", "查看", "搜索", "查找", "购买", "推荐", "介绍", "分享",
-  "解读", "盘点", "汇总", "整理", "对比", "测评", "使用", "设置", "上线", "官宣",
-  "如何", "怎么", "怎样", "为什么", "什么", "哪个", "哪些", "是否", "能否", "有没有",
-  "是不是", "区别", "差异", "多少", "哪里", "怎么样", "是什么", "怎么回事",
-  "最新", "最近", "今日", "今天", "现在", "目前", "刚刚", "新闻", "消息", "资讯",
-  "事件", "简报", "动态", "公告", "详情", "信息", "相关", "情况", "时间", "日期",
-]);
-
-export function filterItemsByRelevance(items: InfoSearchItem[], query: string): InfoSearchItem[] {
-  const anchors = extractRelevanceAnchors(query);
-  if (anchors.length === 0) return items;
-  // 强锚点 = 非通用动词/虚词/时效词的有区分度锚点（实体、型号、有含义词）
-  const strongAnchors = anchors.filter((a) => !WEAK_RELEVANCE_ANCHORS.has(a) && a.length >= 2);
-  return items.filter((item) => {
-    const hay = `${item.title}\n${item.snippet}`;
-    const hitAnchors = anchors.filter((a) => hay.includes(a));
-    if (hitAnchors.length === 0) return false;
-    // query 本身只有通用词（无强锚点）：维持原 OR 逻辑，不过度过滤
-    if (strongAnchors.length === 0) return true;
-    // 有强锚点：必须命中强锚点，仅命中通用动词/虚词的条目视为噪音过滤
-    return strongAnchors.some((a) => hay.includes(a));
-  });
-}
-
-function extractRelevanceAnchors(query: string): string[] {
-  const anchors: string[] = [];
-  const push = (v: string) => {
-    const t = v.trim();
-    if (t.length >= 2 && !anchors.includes(t)) anchors.push(t);
-  };
-
-  const entity = extractPrimaryChineseEntity(query);
-  if (entity) push(entity);
-  for (const entityCandidate of classifySearchIntent(query).entities.slice(0, 3)) {
-    push(entityCandidate);
-  }
-
-  const code = query.match(/\b[036]\d{5}\b/)?.[0];
-  if (code) push(code);
-
-  for (const m of query.matchAll(/["'「『]([^"'」』]+)["'」』]/g)) {
-    push(m[1] ?? "");
-  }
-
-  // === 关键修复：拆解无分隔符的混合 query ===
-  // 原 bug：对 "今天A股最新消息" 这种无空格的 query，整个字符串被当一个 token，
-  // 导致 anchors = ["今天A股最新消息"]，任何 item.title/snippet 都不含这个完整短语，全部被过滤掉。
-  // 修复：从 query 中拆出"更具体"的子串（中英混合、英文-数字、中文-数字、英文+数字型号）。
-  // 1. 中英混合词（如 A股、B股、H股、AI芯片）
-  for (const m of query.matchAll(/[a-zA-Z]{1,3}[\u4e00-\u9fff]{1,4}/g)) {
-    push(m[0]);
-  }
-  // 2. 英文-数字型号（GPT-5、iPhone 17、Claude 4）
-  for (const m of query.matchAll(/[A-Za-z][A-Za-z0-9]{0,15}[\s\-_]?\d{1,3}[A-Za-z]?\b/g)) {
-    push(m[0].trim());
-  }
-  // 3. 中文-数字型号（蜘蛛侠4、华为Mate60）— 中文主体+数字版本
-  for (const m of query.matchAll(/[\u4e00-\u9fff]{1,8}[A-Za-z0-9]{0,8}[\s\-_]?\d{1,3}[A-Za-z]?\b/g)) {
-    const s = m[0].trim();
-    if (/[\u4e00-\u9fff]/.test(s) && /\d/.test(s)) push(s);
-  }
-  // 4. 中文连续段（2-6 字）— 比 8-10 字阈值更小，避免过短噪音
-  for (const m of query.matchAll(/[\u4e00-\u9fff]{2,6}/gu)) {
-    const s = m[0];
-    if (!SEARCH_STOPWORDS.has(s)) push(s);
-  }
-
-  for (const token of query.split(/[\s,，、。；;:：/|]+/)) {
-    const t = token.trim();
-    if (t.length < 2 || SEARCH_STOPWORDS.has(t)) continue;
-    if (/^\d+$/.test(t)) continue;
-    push(t);
-  }
-
-  return anchors;
-}
-
-/** 从查询中提取核心实体关键词（移除时效性词汇后分段） */
-function extractCoreKeywords(topic: string): string[] {
-  const q = topic.trim().toLowerCase();
-  // 移除常见时效性词汇（作为分隔符，切分出核心实体）
-  const cleaned = q.replace(/最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|breaking|news|event|latest|recent|current|today/gi, " ");
-  // 按非中文/非英文/非数字字符切分
-  const words = cleaned
-    .split(/[\s,，、。；;:：/|?？!！]+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length >= 2);
-  // 中文连续段（2 字以上）
-  const cnRuns = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,}/gu)].map((m) => m[0]);
-  // 英文/数字词（如 a股、ai、gpt）
-  const enRuns = [...cleaned.matchAll(/[a-z0-9]{1,}[股市]?/gi)].map((m) => m[0].toLowerCase())
-    .filter((w) => w.length >= 2);
-  return [...new Set([...words, ...cnRuns, ...enRuns])];
-}
-
 /** 国内科技 RSS 聚合；可按关键词过滤标题/摘要。 */
 export async function fetchDomesticTechNews(
   topic: string,
@@ -678,11 +407,8 @@ export async function fetchDomesticTechNews(
     }),
   );
 
-  let merged = batches.flat();
-  // 强锚点相关性过滤：剔除仅命中通用动词/时效词（如「发布」）的跑题 RSS 条目
-  merged = filterItemsByRelevance(merged, topic);
-  // 不再在此处调用 applySearchFreshness，由调用方统一处理
-  return merged.slice(0, limit);
+  // 不做关键词锚点过滤（机械断句代码已删除）；条目相关性由调用方的质量评分排序兜底
+  return batches.flat().slice(0, limit);
 }
 
 /** 国内官方媒体 RSS 聚合 + HTML 列表爬取（中国新闻网/人民网 RSS + 央视网/新浪/网易/中国日报等 HTML）。 */
@@ -731,11 +457,8 @@ export async function fetchDomesticOfficialNews(
     ),
   ]);
 
-  let merged = [...rssBatches.flat(), ...htmlBatches.flat()];
-  // 强锚点相关性过滤：剔除仅命中通用动词/时效词（如「发布」）的跑题新闻
-  merged = filterItemsByRelevance(merged, topic);
-  // 不再在此处调用 applySearchFreshness，由调用方统一处理
-  return merged.slice(0, limit);
+  // 不做关键词锚点过滤（机械断句代码已删除）；条目相关性由调用方的质量评分排序兜底
+  return [...rssBatches.flat(), ...htmlBatches.flat()].slice(0, limit);
 }
 
 /**
@@ -864,7 +587,12 @@ async function extractRelatedLinksFromPage(
   const links = [...html.matchAll(/<a[^>]+href=["']([^"']+)["'][^>]*>([^<]{8,100})<\/a>/gi)];
   const items: InfoSearchItem[] = [];
   const seen = new Set<string>();
-  const keywords = extractCoreKeywords(topic);
+  // 主题词匹配：只按 query 自身的空格/标点边界取词（LLM 写好的词单元），
+  // 不做实体提取/中文再切分等机械断句；标题或链接含任一词即视为相关。
+  const keywords = topic
+    .split(/[\s,，、。；;:：/|]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 2);
   const baseUrlHost = extractDomain(site.baseUrl);
 
   for (const m of links) {
@@ -988,11 +716,8 @@ export async function discoverHtmlSourcesFromResults(
   // 4. 并行执行（最多 6 个任务，避免过多网络请求）
   const batches = await Promise.all(tasks.slice(0, 6));
 
-  // 5. 合并 + 强锚点相关性过滤
-  let merged = batches.flat();
-  merged = filterItemsByRelevance(merged, topic);
-
-  return merged;
+  // 5. 合并返回（不做关键词锚点过滤，机械断句代码已删除）
+  return batches.flat();
 }
 
 /** 国内新闻：必应 RSS + 科技 RSS + 官方媒体 RSS（实时性最优组合）。 */

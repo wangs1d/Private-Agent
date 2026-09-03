@@ -3,8 +3,9 @@
 // 链路：工具执行成功 → HookBus "tool.executed" 事件 → 本监听器：
 //   1. 消费类工具（payment.* / wallet.* / meituan.* / shopping.order.place）
 //      → finance-deep 自动入账（金额/分类按工具类型映射/来源工具/时间）
-//   2. 入账后预算超支检测（getBudgetStatus level=exceeded）
-//      → onBudgetAlert 回调（装配层接 ProactivityHub，life_reminder kind）
+//   2. 入账后检测：预算 warning（80%）/ exceeded（100%）分级提醒
+//      （getBudgetStatus level）+ 异常消费检测（≥ 近30天同分类均值 3 倍且 ≥ ¥100）
+//      → onBudgetAlert / onAnomalyAlert 回调（装配层接 ProactivityHub，life_reminder kind）
 //   3. 每日扫描（定时触发 runDailyScan）：全 actor 预算检查
 //      + 每月 1 日生成上月消费月报（确定性数据拼接 + 单次 LLM 总结）
 //      → onMonthlyReport 回调（monthly_report kind）
@@ -27,6 +28,8 @@ export interface ConsumptionLedgerListenerDeps {
   financeDeepService: FinanceDeepService;
   /** 预算超支提醒回调（装配层接 ProactivityHub speak，life_reminder kind） */
   onBudgetAlert?: (actorId: string, message: string) => void;
+  /** 异常消费提醒回调（装配层接 ProactivityHub speak，life_reminder kind） */
+  onAnomalyAlert?: (actorId: string, message: string) => void;
   /** 月度报告生成完成回调（装配层接 ProactivityHub speak，monthly_report kind） */
   onMonthlyReport?: (actorId: string, reportText: string) => void;
   /**
@@ -34,9 +37,19 @@ export interface ConsumptionLedgerListenerDeps {
    * 与 ProactivityHub llmComplete 同模式）。未注入时月报退化为确定性拼接文本。
    */
   llmComplete?: (prompt: string) => Promise<string>;
+  /**
+   * 订阅盘点服务（P0 财务管家）：月报末尾追加订阅盘点段
+   * （确认订阅/月成本/低使用率名单/疑似候选）。未注入时跳过。
+   * 结构化最小接口，便于测试 mock。
+   */
+  subscriptionAudit?: { buildAuditSummary(actorId: string): Promise<string> };
   /** 测试注入时钟 */
   now?: () => Date;
 }
+
+/** 异常检测阈值：≥ 近 30 天同分类均值 3 倍且 ≥ ¥100 */
+const ANOMALY_MULTIPLIER = 3;
+const MIN_ANOMALY_AMOUNT = 100;
 
 /** wallet.purchase 的细分类别 → 财务账本大类映射 */
 const WALLET_CATEGORY_MAP: Record<string, FinanceCategory> = {
@@ -245,8 +258,10 @@ export class ConsumptionLedgerListener {
   /** 已入账指纹（防重；环形淘汰） */
   private readonly seenFingerprints: string[] = [];
   private readonly SEEN_LIMIT = 500;
-  /** 本月已提醒的超支预算（actorId|period|category），防重复打扰 */
+  /** 本月已提醒的预算级别（actorId|period|category|level），防重复打扰 */
   private readonly alertedBudgetKeys = new Set<string>();
+  /** 已提醒的异常消费（actorId|date|amount|category），防重复打扰 */
+  private readonly alertedAnomalyKeys = new Set<string>();
   /** 每日扫描调度 */
   private scanTimer: ReturnType<typeof setInterval> | null = null;
   private lastScanDay = "";
@@ -337,30 +352,79 @@ export class ConsumptionLedgerListener {
       `[ConsumptionLedger] 自动入账 actor=${actorId} tool=${tool} 金额=¥${entry.amount} 分类=${entry.category}`,
     );
 
-    // 入账后预算超支检测
+    // 入账后预算检测（warning/exceeded）+ 异常消费检测
     this.checkBudgetOverrun(actorId);
+    this.checkAnomaly(actorId, {
+      amount: entry.amount,
+      category: entry.category,
+      description: entry.description,
+      date: event.timestamp ?? new Date().toISOString(),
+    });
   }
 
-  // ─── 预算超支检测（入账时 + 每日扫描共用） ───
+  // ─── 预算检测（warning 80% + exceeded 100%；入账时 + 每日扫描共用） ───
 
-  /** 检查某 actor 本月预算，超支且未提醒过 → onBudgetAlert（单次提醒） */
+  /** 检查某 actor 本月预算，warning/exceeded 且该级别未提醒过 → onBudgetAlert（单次提醒） */
   checkBudgetOverrun(actorId: string): void {
     try {
       const statuses = this.deps.financeDeepService.getBudgetStatus(actorId);
       for (const s of statuses) {
-        if (s.level !== "exceeded") continue;
-        const key = `${actorId}|${s.periodLabel}|${s.budget.category}`;
+        if (s.level === "ok") continue;
+        const key = `${actorId}|${s.periodLabel}|${s.budget.category}|${s.level}`;
         if (this.alertedBudgetKeys.has(key)) continue;
         this.alertedBudgetKeys.add(key);
-        const over = s.spent - s.budget.amount;
         const message =
-          `${s.budget.category}预算已超支：本月已花 ¥${s.spent.toFixed(2)}（预算 ¥${s.budget.amount.toFixed(2)}，` +
-          `超出 ¥${over.toFixed(2)}）。最近几笔消费我已自动记账，可以帮你看看都花在哪了。`;
+          s.level === "exceeded"
+            ? `${s.budget.category}预算已超支：本月已花 ¥${s.spent.toFixed(2)}（预算 ¥${s.budget.amount.toFixed(2)}，` +
+              `超出 ¥${(s.spent - s.budget.amount).toFixed(2)}）。最近几笔消费我已自动记账，可以帮你看看都花在哪了。`
+            : `${s.budget.category}预算快用完了：本月已花 ¥${s.spent.toFixed(2)}（预算 ¥${s.budget.amount.toFixed(2)}，` +
+              `还剩 ¥${s.remaining.toFixed(2)}）。接下来的消费我会帮你盯着。`;
         this.deps.onBudgetAlert?.(actorId, message);
-        console.log(`[ConsumptionLedger] 预算超支提醒 actor=${actorId} ${s.budget.category}`);
+        console.log(`[ConsumptionLedger] 预算${s.level === "exceeded" ? "超支" : "预警"}提醒 actor=${actorId} ${s.budget.category}`);
       }
     } catch (err) {
       console.log(`[ConsumptionLedger] 预算检查失败（忽略）: ${err}`);
+    }
+  }
+
+  // ─── 异常消费检测（入账时增量触发；与 analyze_spending 同阈值：3 倍均值） ───
+
+  /**
+   * 入账后对该笔做增量异常检测：金额 ≥ 近 30 天同分类单笔均值 3 倍
+   * 且 ≥ ¥100（避免小额均值的噪声放大）→ onAnomalyAlert（单笔单次）。
+   */
+  checkAnomaly(
+    actorId: string,
+    entry: { amount: number; category: FinanceCategory; description: string; date: string },
+  ): void {
+    try {
+      if (entry.amount < MIN_ANOMALY_AMOUNT) return;
+      const toMs = Date.parse(entry.date);
+      if (!Number.isFinite(toMs)) return;
+      const fromIso = new Date(toMs - 30 * 86_400_000).toISOString();
+      const toIso = new Date(toMs - 1).toISOString(); // 排除本笔，只对比历史
+      const prior = this.deps.financeDeepService
+        .getTransactions(actorId, fromIso, toIso, entry.category, 10_000)
+        .filter((t) => t.type === "expense");
+      if (prior.length < 2) return; // 历史样本太少不判异常（首笔大额很常见）
+      const avg = prior.reduce((acc, t) => acc + t.amount, 0) / prior.length;
+      if (avg <= 0) return;
+      const multiplier = entry.amount / avg;
+      if (multiplier < ANOMALY_MULTIPLIER) return;
+      const key = `${actorId}|${entry.date}|${entry.amount}|${entry.category}`;
+      if (this.alertedAnomalyKeys.has(key)) return;
+      this.alertedAnomalyKeys.add(key);
+      if (this.alertedAnomalyKeys.size > 200) {
+        this.alertedAnomalyKeys.delete(this.alertedAnomalyKeys.values().next().value as string);
+      }
+      const message =
+        `刚入账一笔大额消费：${entry.description} ¥${entry.amount.toFixed(2)}，` +
+        `是近 30 天「${entry.category}」平均单笔（¥${avg.toFixed(2)}）的 ${multiplier.toFixed(1)} 倍。` +
+        `正常支出忽略这条即可；不认识这笔的话告诉我，我帮你查。`;
+      this.deps.onAnomalyAlert?.(actorId, message);
+      console.log(`[ConsumptionLedger] 异常消费提醒 actor=${actorId} ${entry.category} ¥${entry.amount.toFixed(2)}（${multiplier.toFixed(1)}x）`);
+    } catch (err) {
+      console.log(`[ConsumptionLedger] 异常检测失败（忽略）: ${err}`);
     }
   }
 
@@ -427,7 +491,19 @@ export class ConsumptionLedgerListener {
       `总收入 ¥${analysis.totalIncome.toFixed(2)}，净额 ¥${analysis.net.toFixed(2)}。\n` +
       `分类明细：\n${catLines || "（无支出记录）"}`;
 
-    let reportText = deterministic;
+    // 追加订阅盘点段（失败忽略，不影响月报主体）
+    let auditSummary = "";
+    let fullDeterministic = deterministic;
+    if (this.deps.subscriptionAudit) {
+      try {
+        auditSummary = (await this.deps.subscriptionAudit.buildAuditSummary(actorId)).trim();
+        if (auditSummary) fullDeterministic = `${deterministic}\n\n${auditSummary}`;
+      } catch (err) {
+        console.log(`[ConsumptionLedger] 订阅盘点段生成失败（忽略）: ${err}`);
+      }
+    }
+
+    let reportText = fullDeterministic;
     // 单次 LLM 总结（可选；失败退化确定性文本）
     if (this.deps.llmComplete && analysis.count > 0) {
       try {
@@ -436,7 +512,7 @@ export class ConsumptionLedgerListener {
         const prompt =
           `你是用户的私人财务管家。基于下月上月消费数据，用 3-5 句口语化中文写一份简短月报，` +
           `像朋友聊天一样点出总支出、大头分类、值得注意的趋势（${trendLabel}），` +
-          `末尾给一条具体可行的下月建议。不要罗列全部数据，数据仅供参考：\n${deterministic}`;
+          `末尾给一条具体可行的下月建议。不要罗列全部数据，数据仅供参考：\n${fullDeterministic}`;
         const llmText = (await this.deps.llmComplete(prompt))?.trim();
         if (llmText) reportText = llmText;
       } catch (err) {

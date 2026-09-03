@@ -2,6 +2,7 @@ import type { AipService } from "../../aip/aip-service.js";
 import type { AgentPairingService } from "../../services/agent-pairing-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
 import type { EmailRegistrationService } from "../../services/email-registration-service.js";
+import type { FinanceIngestService } from "../../services/finance-ingest-service.js";
 import type { AgentRelayService } from "../../services/agent-relay-service.js";
 import type { FriendService } from "../../services/friend-service.js";
 import type { ScheduleTaskService } from "../../services/schedule-task-service.js";
@@ -72,6 +73,8 @@ export type HttpRouteDeps = {
   aipService: AipService;
   agentAccountService: AgentAccountService;
   emailRegistrationService: EmailRegistrationService;
+  /** 财务入站邮件记账（未装配时 /finance/ingest/* 端点返回 503） */
+  financeIngestService?: FinanceIngestService;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
   weatherService: WeatherService;

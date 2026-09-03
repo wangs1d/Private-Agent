@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildIntentAwareQueryVariants,
   classifySearchIntent,
   prependRecencyQueryVariants,
   shouldBoostQueryRecency,
@@ -27,12 +26,4 @@ test("timeless definition queries do not get forced recency variants", () => {
     prependRecencyQueryVariants(["OpenAI 是什么"], "OpenAI 是什么"),
     ["OpenAI 是什么"],
   );
-});
-
-test("intent-aware variants expand compare queries with multiple entities", () => {
-  const intent = classifySearchIntent("iPhone 17 和 iPhone 16 对比");
-  const variants = buildIntentAwareQueryVariants("iPhone 17 和 iPhone 16 对比", intent, 8);
-
-  assert.equal(variants.some((value) => value.includes("iPhone 17 iPhone 16 对比")), true);
-  assert.equal(variants.some((value) => value.includes("vs")), true);
 });

@@ -632,6 +632,19 @@ export class AwarenessCortex {
     };
   }
 
+  /**
+   * 暴露最近若干个原始睡眠样本（按 dayKey 记录的入睡/醒来小时）。
+   *
+   * getLearnedSleepWindow 只返回中位数；LifeRhythmEngine 的睡眠模型器
+   * 需要逐日样本才能算趋势与做同日去重，故新增此只读取样口。
+   */
+  getRecentSleepWindowSamples(
+    actorId: string,
+    limit = 14,
+  ): Array<{ date: string; startHour: number; endHour: number }> {
+    return [...(this.sleepWindowSamples.get(actorId) ?? [])].slice(-limit);
+  }
+
   private appendHistory(state: UserActivityState): void {
     const list = this.history.get(state.actorId) ?? [];
     list.push(state);

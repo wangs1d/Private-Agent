@@ -1250,6 +1250,29 @@ def _handle_show_message(req: dict) -> dict:
     }
 
 
+# ---- read_document ----
+# 本机文档文本提取（文本类/pdf/docx），供 server 端情境感知（文档摘要）直接调用，
+# 不暴露给 LLM 工具循环。路径支持完整路径或桌面/文档/下载目录下的文件名。
+
+def _handle_read_document(req: dict) -> dict:
+    from desktop_visual.document_reader import read_document
+
+    path = req.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return {"ok": False, "error": "path 不能为空"}
+    return read_document(path, max_chars=req.get("maxChars"))
+
+
+# ---- set_dnd ----
+# 系统通知勿扰开关（注册表主开关，best-effort），供会议场景自动免打扰。
+# 不走 shell、不经过 shell_policy；仅 enable/disable/query 三个只读可逆操作。
+
+def _handle_set_dnd(req: dict) -> dict:
+    from desktop_visual.notifications_policy import set_dnd
+
+    return set_dnd(str(req.get("dndOp") or "query"))
+
+
 async def _run() -> dict:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     ensure_dpi_aware()
@@ -1294,6 +1317,10 @@ async def _run() -> dict:
         return _handle_web_search(req)
     if action == "web_fetch":
         return _handle_web_fetch(req)
+    if action == "read_document":
+        return _handle_read_document(req)
+    if action == "set_dnd":
+        return _handle_set_dnd(req)
 
     task = str(req.get("task", "")).strip()
     if not task:

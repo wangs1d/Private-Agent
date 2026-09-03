@@ -173,7 +173,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                     child: Text(
                       "不满意？提意见让 AI 重新推荐",
                       style: TextStyle(
-                          fontSize: 11.5, color: cs.onSurfaceVariant),
+                          fontSize: 12, color: cs.onSurfaceVariant),
                     ),
                   ),
                 ],
@@ -184,7 +184,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                   Expanded(
                     child: TextField(
                       controller: _commentCtrl,
-                      style: const TextStyle(fontSize: 12.5),
+                      style: const TextStyle(fontSize: 13),
                       decoration: InputDecoration(
                         isDense: true,
                         hintText: "例如：人太多 / 想要安静一点 / 换个便宜的",
@@ -209,7 +209,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                           .pop(TravelItemEditorResult.comment(comment));
                     },
                     child: const Text("重新推荐",
-                        style: TextStyle(fontSize: 12.5)),
+                        style: TextStyle(fontSize: 13)),
                   ),
                 ],
               ),
@@ -266,7 +266,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                            fontSize: 12.5, fontWeight: FontWeight.w600)),
+                            fontSize: 13, fontWeight: FontWeight.w600)),
                     if (address.isNotEmpty || priceInfo.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
@@ -276,7 +276,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                              fontSize: 10.5, color: cs.onSurfaceVariant),
+                              fontSize: 11, color: cs.onSurfaceVariant),
                         ),
                       ),
                   ],
@@ -288,7 +288,7 @@ class _TravelItemEditorState extends State<TravelItemEditor> {
                   visualDensity: VisualDensity.compact,
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  textStyle: const TextStyle(fontSize: 11.5),
+                  textStyle: const TextStyle(fontSize: 12),
                 ),
                 onPressed: () => Navigator.of(context)
                     .pop(TravelItemEditorResult.replace(poi)),

@@ -469,7 +469,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
           child: Text(
             "今日安排",
             style: TextStyle(
-              fontSize: 12.5,
+              fontSize: 13,
               fontWeight: FontWeight.w700,
               color: skin.titleText,
               letterSpacing: 0.2,
@@ -591,7 +591,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
             (int i) => Text(
               "${i * 6}点",
               style: TextStyle(
-                  fontSize: 8.5,
+                  fontSize: 9,
                   color: skin.tickLabel,
                   fontWeight: FontWeight.w500),
             ),
@@ -831,7 +831,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   maxLines: 1,
                   overflow: TextOverflow.clip,
                   style: TextStyle(
-                    fontSize: 10.5,
+                    fontSize: 11,
                     fontWeight: FontWeight.w700,
                     color: passed
                         ? skin.dimTime
@@ -862,7 +862,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 11.5,
+                    fontSize: 12,
                     fontWeight:
                         isNext ? FontWeight.w600 : FontWeight.w400,
                     color: passed
@@ -887,7 +887,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   child: Text(
                     "NOW",
                     style: TextStyle(
-                      fontSize: 8.5,
+                      fontSize: 9,
                       fontWeight: FontWeight.w700,
                       letterSpacing: 0.5,
                       color: skin.accentSoft,
@@ -1081,7 +1081,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                     Text(
                       "新建安排",
                       style: TextStyle(
-                        fontSize: 10.5,
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
                         color: skin.accentSoft,
                       ),
@@ -1245,7 +1245,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
               child: Text(
                 "工具已全部隐藏，点击右上角编辑恢复",
                 style: TextStyle(
-                  fontSize: 10.5,
+                  fontSize: 11,
                   color: cs.onSurfaceVariant,
                 ),
               ),
@@ -1335,7 +1335,7 @@ class _RightSidePanelState extends State<RightSidePanel> {
                   Text(
                     summoned ? "休眠桌宠" : "唤醒桌宠",
                     style: TextStyle(
-                        fontSize: 10.5,
+                        fontSize: 11,
                         color: cs.onSurfaceVariant,
                         fontWeight: FontWeight.w500),
                   ),
@@ -1635,7 +1635,7 @@ class _ToolsEditorPanel extends StatelessWidget {
                     child: Text(
                       spec.label,
                       style: TextStyle(
-                        fontSize: 11.5,
+                        fontSize: 12,
                         color: hidden
                             ? cs.onSurface.withValues(alpha: 0.4)
                             : cs.onSurface,
@@ -1795,7 +1795,7 @@ class _ToolButtonState extends State<_ToolButton> {
                       Text(
                         subLabel,
                         style: TextStyle(
-                          fontSize: 8.5,
+                          fontSize: 9,
                           height: 1.2,
                           fontWeight: FontWeight.w500,
                           color: cs.onSurfaceVariant.withValues(alpha: 0.75),

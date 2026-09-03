@@ -22,6 +22,7 @@ import type { EmailSmsService } from "../../services/email-sms-service.js";
 import type { MediaMusicService } from "../../services/media-music-service.js";
 import type { HealthFitnessService } from "../../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../../services/finance-deep-service.js";
+import type { SubscriptionAuditService } from "../../services/subscription-audit-service.js";
 import type { SocialOutreachService } from "../../services/social-outreach-service.js";
 import type { CodeSandboxService } from "../../services/code-sandbox-service.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
@@ -122,6 +123,8 @@ export interface CapabilityModuleDeps {
   wsConnectionRegistry: ClientPushPort;
   healthFitnessService: HealthFitnessService;
   financeDeepService: FinanceDeepService;
+  /** 订阅盘点服务（finance.list/confirm/update_subscription 工具与月报订阅段的数据源） */
+  subscriptionAuditService: SubscriptionAuditService;
   socialOutreachService: SocialOutreachService;
   codeSandboxService: CodeSandboxService;
   shoppingOrderService: ShoppingOrderService;
@@ -222,14 +225,20 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       label: "财务深度能力",
       chatTools: FINANCE_DEEP_CHAT_TOOLS,
       intentRules: FINANCE_DEEP_INTENT_RULES,
-      register: (registry) => registerFinanceDeepTools(registry, { financeDeepService: deps.financeDeepService }),
+      register: (registry) =>
+        registerFinanceDeepTools(registry, {
+          financeDeepService: deps.financeDeepService,
+          subscriptionAuditService: deps.subscriptionAuditService,
+        }),
       category: {
         name: "finance_deep",
         keywords: [
           "finance", "transaction", "budget", "spending", "reconcile",
           "categorize", "report", "import", "money", "expense",
+          "subscription", "renewal", "membership",
           "财务", "交易", "预算", "支出", "对账",
           "分类", "报告", "导入", "钱", "花费", "账单",
+          "订阅", "续费", "会员",
         ],
       },
     },

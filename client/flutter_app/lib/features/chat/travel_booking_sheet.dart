@@ -213,7 +213,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                     const SizedBox(width: 8),
                     const Text("预订清单",
                         style: TextStyle(
-                            fontSize: 14.5, fontWeight: FontWeight.w700)),
+                            fontSize: 15, fontWeight: FontWeight.w700)),
                     const SizedBox(width: 8),
                     Text("${_items.length} 项",
                         style: TextStyle(
@@ -285,7 +285,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                         children: <Widget>[
                           Text("实付合计",
                               style: TextStyle(
-                                  fontSize: 10.5, color: cs.onSurfaceVariant)),
+                                  fontSize: 11, color: cs.onSurfaceVariant)),
                           Text("¥${_totalFinal.toStringAsFixed(0)}",
                               style: const TextStyle(
                                   fontSize: 19,
@@ -298,7 +298,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                       Text(
                         "已省 ¥${(_totalOriginal - _totalFinal).toStringAsFixed(0)}",
                         style: const TextStyle(
-                            fontSize: 12.5,
+                            fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: _kAccentGreen),
                       ),
@@ -374,7 +374,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 12.5, fontWeight: FontWeight.w600)),
+                        fontSize: 13, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 2),
                 Text(
                   <String>[
@@ -385,7 +385,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontSize: 10.5, color: cs.onSurfaceVariant),
+                      fontSize: 11, color: cs.onSurfaceVariant),
                 ),
               ],
             ),
@@ -396,7 +396,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
             children: <Widget>[
               Text("¥${it.finalPrice.toStringAsFixed(0)}",
                   style: const TextStyle(
-                      fontSize: 13.5,
+                      fontSize: 14,
                       fontWeight: FontWeight.w700,
                       color: _kAccentOrange)),
               if (it.originalPrice > it.finalPrice)
@@ -512,7 +512,7 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                                     children: <Widget>[
                                       Text(p.displayName,
                                           style: const TextStyle(
-                                              fontSize: 12.5,
+                                              fontSize: 13,
                                               fontWeight: FontWeight.w600)),
                                       Text(p.category,
                                           style: TextStyle(
@@ -561,19 +561,19 @@ class _TravelBookingSheetState extends State<TravelBookingSheet> {
                             tempPlatforms.clear();
                           }),
                           child: const Text("清空",
-                              style: TextStyle(fontSize: 12.5)),
+                              style: TextStyle(fontSize: 13)),
                         ),
                         const Spacer(),
                         TextButton(
                           onPressed: () => Navigator.of(context).pop(false),
                           child: const Text("取消",
-                              style: TextStyle(fontSize: 12.5)),
+                              style: TextStyle(fontSize: 13)),
                         ),
                         const SizedBox(width: 6),
                         FilledButton(
                           onPressed: () => Navigator.of(context).pop(true),
                           child: const Text("应用",
-                              style: TextStyle(fontSize: 12.5)),
+                              style: TextStyle(fontSize: 13)),
                         ),
                       ],
                     ),

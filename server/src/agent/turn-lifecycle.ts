@@ -17,6 +17,7 @@ import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
 import { isNotesChatSessionId } from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
+import { getMemoryConsolidationService } from "../services/memory-consolidation-service.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -69,14 +70,30 @@ export class TurnLifecycle {
   }
 
   ingestTurnArchive(actorId: string, userText: string, assistantText: string, context: "main" | "notes" = "main"): void {
-    if (!this.deps.narrativeMemory) return;
     // #3 写入精度：不再把整段 "Turn archive | user…| assistant…" 原文灌进长期记忆图
     // （那是噪声/串台源）。只抽取高价值原子片段（用户要求记住 / Agent 承诺/结论）；
-    // 无高价值信号时只落一行极短的"用户意图主干"，再交 decideMemoryWrite 判定是否值得保留。
+    // 无高价值信号时只落一行极短的"用户意图主干"，再交整合链路裁决是否值得保留。
     // 完整轮次仍由 turn-wal / daily-digest / chat-threads 独立留存，不回落到长期图谱。
     const signal = detectMemorySignals(userText, assistantText);
     const body = buildTurnArchiveSnapshot(userText, assistantText, signal);
     if (!body) return;
+
+    // 统一写入者：候选只入队，裁决/回声过滤/supersession/落库都在整合链路单点完成
+    const consolidation = getMemoryConsolidationService();
+    if (consolidation) {
+      consolidation.submitCandidate({
+        actorId,
+        text: body,
+        source: "chat:turn_archive",
+        context,
+        highSignal: signal.isHighSignal,
+        createdAt: new Date().toISOString(),
+        topicHint: inferMemoryTopic(userText),
+      });
+      return;
+    }
+
+    if (!this.deps.narrativeMemory) return;
     void (async () => {
       const decision = await decideMemoryWrite(body, {
         actorId,
@@ -92,8 +109,28 @@ export class TurnLifecycle {
     })().catch(() => {});
   }
 
-  ingestFastPath(actorId: string, lines: string[], context: "main" | "notes" = "main"): void {
-    if (!this.deps.narrativeMemory || lines.length === 0) return;
+  ingestFastPath(actorId: string, lines: string[], context: "main" | "notes" = "main", topicHint?: string): void {
+    if (lines.length === 0) return;
+
+    // 统一写入者：每条高信号原子行一个候选；KV summary 行由整合链路统一落
+    const consolidation = getMemoryConsolidationService();
+    if (consolidation) {
+      const now = new Date().toISOString();
+      for (const line of lines) {
+        consolidation.submitCandidate({
+          actorId,
+          text: line,
+          source: "chat:fast_path",
+          context,
+          highSignal: true,
+          createdAt: now,
+          topicHint,
+        });
+      }
+      return;
+    }
+
+    if (!this.deps.narrativeMemory) return;
     const body = lines.join("\n");
     void (async () => {
       const decision = await decideMemoryWrite(body, {
@@ -141,9 +178,11 @@ export class TurnLifecycle {
     }
 
     if (signal.isHighSignal) {
-      this.ingestFastPath(input.actorId, signal.extractLines, memContext);
-      if (this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
-        const topic = inferMemoryTopic(input.userText);
+      // 高信号原子行：统一写入者启用时同时覆盖长期图（Mem0/海马体）与
+      // KV summary 行两个出口（每候选一次决策，替代旧 fast-path + KV 双链路双决策）；
+      // 未启用时走 ingestFastPath 旧链路 + 下方 KV fast-path 直写。
+      this.ingestFastPath(input.actorId, signal.extractLines, memContext, inferMemoryTopic(input.userText));
+      if (!getMemoryConsolidationService() && this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
         void (async () => {
           for (const line of signal.extractLines) {
             const decision = await decideMemoryWrite(line, {
@@ -156,7 +195,7 @@ export class TurnLifecycle {
             this.deps.agentMemorySyncService?.appendMemorySummaryLine(
               input.actorId,
               `[fast-path][${decision.decision}][${decision.semanticClass}] ${line}`,
-              topic,
+              inferMemoryTopic(input.userText),
             );
           }
         })().catch(() => {});

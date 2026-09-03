@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
 
+import "../../core/theme/app_typography.dart";
+
 import "../../core/models/chat_models.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
@@ -67,7 +69,10 @@ Widget buildMessageBody(
                 ? null
                 : (AgentResultAction a) => onUserAction(a, cardData: data),
           )
-        : AgentResultCard(data: data);
+        : AgentResultCard(
+            data: data,
+            onUserAction: onUserAction,
+          );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -80,7 +85,7 @@ Widget buildMessageBody(
               remaining,
               Theme.of(context).textTheme.bodyMedium!.copyWith(
                     color: cs.onSurface.withValues(alpha: 0.85),
-                    height: 1.4,
+                    height: AppTypography.bodyLineHeight,
                   ),
               cs: cs,
             ),
@@ -98,7 +103,7 @@ Widget buildMessageBody(
     final List<Widget> blockWidgets = <Widget>[];
     final TextStyle bodyStyle = Theme.of(context).textTheme.bodyMedium!.copyWith(
           color: cs.onSurface.withValues(alpha: 0.85),
-          height: 1.4,
+          height: AppTypography.bodyLineHeight,
         );
     for (final Map<String, dynamic> block in renderBlocks) {
       final String type = block["type"]?.toString() ?? "text";
@@ -209,7 +214,7 @@ Widget buildMessageBody(
               displayText,
               Theme.of(context).textTheme.bodyMedium!.copyWith(
                     color: cs.onSurface.withValues(alpha: 0.85),
-                    height: 1.4,
+                    height: AppTypography.bodyLineHeight,
                   ),
               cs: cs,
             ),
@@ -279,7 +284,7 @@ Widget buildMessageBody(
                       parsed.cleaned,
                       Theme.of(context).textTheme.bodyMedium!.copyWith(
                             color: cs.onSurface.withValues(alpha: 0.85),
-                            height: 1.4,
+                            height: AppTypography.bodyLineHeight,
                           ),
                       cs: cs,
                     ),

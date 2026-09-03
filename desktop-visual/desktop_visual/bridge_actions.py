@@ -29,6 +29,9 @@ ACTION_FIELD_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "window": ("windowOp", "title", "index", "hwnd", "x", "y", "width", "height"),
     "clipboard": ("clipboardOp", "text"),
     "run_task": ("task", "maxSteps", "region", "stub", "vlm", "maxScreenshotDim"),
+    # 情境感知专用（不暴露给 LLM 工具循环）：文档文本提取 / 系统通知勿扰
+    "read_document": ("path", "maxChars"),
+    "set_dnd": ("dndOp",),
 }
 
 

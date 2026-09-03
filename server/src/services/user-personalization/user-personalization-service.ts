@@ -740,6 +740,10 @@ export class UserPersonalizationService {
   private readonly personalityAdjuster: PersonalityAdjuster;
   /** MemoryCortex 引用，用于人格内核读写（registerMemoryCortex 注入） */
   private memoryCortex: MemoryCortexLike | null = null;
+  /** 触达结果外发监听（Task 20 节律引擎桥接，registerContactOutcomeListener 注入） */
+  private contactOutcomeListener:
+    | ((actorId: string, params: { responded: boolean; feedback?: string; at: Date }) => void)
+    | null = null;
 
   constructor(
     private readonly memory: AgentMemorySyncService | null,
@@ -803,6 +807,50 @@ export class UserPersonalizationService {
     return this.loadTimeRhythmState(actorId);
   }
 
+  /**
+   * 回填 LifeRhythmEngine 学到的按小时触达接受度（Task 20 出口 B）。
+   *
+   * 引擎给的是 0..1 归一化分数，而本服务的 receptiveHours 是"该小时用户
+   * 在场且 receptive 的累计次数"（ContactPolicy 按相对大小消费）。直接覆写
+   * 会破坏量纲——这里把两套分布各自归一化后按 0.6/0.4 加权混合，再按当前
+   * 总量重新标定回计数尺度，保证与既有消费方语义兼容。
+   */
+  applyLearnedReceptivity(actorId: string, learnedByHour: Record<string, number>): void {
+    const current = this.loadTimeRhythmState(actorId);
+    const normalize = (map: Record<string, number>): number[] => {
+      const arr = new Array<number>(24).fill(0);
+      let total = 0;
+      for (let h = 0; h < 24; h++) {
+        const v = Number(map[String(h)]) || 0;
+        arr[h] = v;
+        total += v;
+      }
+      if (total <= 0) return arr;
+      return arr.map((v) => v / total);
+    };
+    const learned = normalize(learnedByHour);
+    const existing = normalize(current.receptiveHours);
+    const blended = learned.map((v, h) => v * 0.6 + existing[h]! * 0.4);
+    const total = blended.reduce((sum, v) => sum + v, 0);
+    const scale = total > 0 ? Math.max(24, Object.values(current.receptiveHours).reduce((s, v) => s + v, 0)) / total : 0;
+    const next: TimeRhythmState = {
+      ...current,
+      receptiveHours: Object.fromEntries(blended.map((v, h) => [String(h), Math.round(v * scale)])),
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.saveJsonState(actorId, USER_TIME_RHYTHM_KEY, next);
+  }
+
+  /**
+   * 注册触达结果外发监听（Task 20：桥接到 LifeRhythmEngine.recordContactOutcome）。
+   * 只暴露最小参数面，不影响既有 observeContactOutcome 调用方。
+   */
+  registerContactOutcomeListener(
+    listener: (actorId: string, params: { responded: boolean; feedback?: string; at: Date }) => void,
+  ): void {
+    this.contactOutcomeListener = listener;
+  }
+
   getBehaviorBaseline(actorId: string): BehaviorBaseline {
     return this.loadBehaviorBaseline(actorId);
   }
@@ -828,6 +876,11 @@ export class UserPersonalizationService {
     const current = this.loadContactPreferenceState(actorId);
     const next = contactPolicy.learnPreference(current, params);
     this.saveJsonState(actorId, USER_CONTACT_PREFERENCE_KEY, next);
+    this.contactOutcomeListener?.(actorId, {
+      responded: params.responded,
+      feedback: params.feedback,
+      at: new Date(),
+    });
   }
 
   getUnderstandingSnapshot(actorId: string): PersonalizationUnderstandingSnapshot {

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { registerAccountRoutes } from "./accounts.js";
+import { registerFinanceIngestRoutes } from "./finance-ingest.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
 import { registerBodyRoutes } from "./body.js";
 import { registerBrainRoutes } from "./brain.js";
@@ -90,6 +91,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAgentWorldWebUi(app);
   registerAgentCollaborationRoutes(app, deps);
   registerAccountRoutes(app, deps);
+  registerFinanceIngestRoutes(app, deps);
   registerFriendRoutes(app, deps);
   registerVoiceMessageRoutes(app, {
     voiceMessageService: deps.voiceMessageService,

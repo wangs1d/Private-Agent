@@ -42,6 +42,7 @@ import type {
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 import { dedupeMemoryLines, semanticFingerprint, contentTokenSet, tokenOverlapRatio } from "../services/memory-record-utils.js";
+import { markInjectedMemory } from "../services/memory-echo-guard.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import type { AdviceStore } from "../proactivity/advice-store.js";
 import { redactSensitiveText } from "../utils/redact.js";
@@ -863,6 +864,29 @@ export class PromptContextBuilder {
       ...(input.userLocation ? { userLocation: input.userLocation } : {}),
       ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
+
+    // 防召回循环：登记本轮实际注入的记忆条目。写入整合链路
+    // （memory-consolidation-service）会据此过滤"模型复述注入记忆"产生的
+    // 回声候选——注入回上下文的内容不再被提取为新记忆（OpenClaw 2.0 同款结构）。
+    try {
+      markInjectedMemory(input.actorId, promptMemory.narrativeRecall);
+      markInjectedMemory(input.actorId, promptMemory.memorySummary);
+      markInjectedMemory(input.actorId, promptMemory.memoryPreferences);
+      markInjectedMemory(input.actorId, promptMemory.memoryFacts);
+      markInjectedMemory(input.actorId, promptMemory.memoryCommitments);
+      markInjectedMemory(input.actorId, promptMemory.memoryOpenLoops);
+      markInjectedMemory(input.actorId, promptMemory.sessionRecap);
+      markInjectedMemory(input.actorId, promptMemory.userProfile);
+      markInjectedMemory(input.actorId, promptMemory.userProfileSummary);
+      markInjectedMemory(input.actorId, promptMemory.memoryContinuity);
+      markInjectedMemory(input.actorId, promptMemory.relationshipMemory);
+      markInjectedMemory(input.actorId, promptMemory.lifeThemeMemory);
+      markInjectedMemory(input.actorId, promptMemory.dreamMemory);
+      markInjectedMemory(input.actorId, promptMemory.yesterdayHighlight);
+      markInjectedMemory(input.actorId, promptMemory.dailyDigest);
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 注入记忆登记失败（忽略）: ${err}`);
+    }
 
     // 注入 prompt 前对 memory/facts 等用户内容字段做 PII 脱敏（手机号/邮箱/IP/身份证/银行卡）
     return this.redactMemoryFields(promptMemory);

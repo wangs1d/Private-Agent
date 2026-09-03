@@ -87,7 +87,7 @@ class _FoldListEffectCardState extends State<FoldListEffectCard> {
                     Text(
                       _expanded ? "收起" : "展开全部 ${items.length} 条",
                       style: TextStyle(
-                        fontSize: 12.5,
+                        fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: widget.cs.primary,
                         height: 1.3,

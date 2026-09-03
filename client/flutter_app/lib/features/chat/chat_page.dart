@@ -14,9 +14,11 @@ import "../../core/utils/content_summary_parser.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/agent_profile_overlay_launcher.dart";
 import "../../core/services/image_preview_launcher.dart";
+import "../../core/theme/app_typography.dart";
 import "agent_profile_page.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
+import "typewriter_reveal.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -1650,47 +1652,26 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   final GlobalKey _avatarKey = GlobalKey();
 
   // ===== 打字机式流式显示 =====
-  // 后端 chunk 可能整段/大块到达，这里在气泡渲染层把「已 reveal」的原文前缀
-  // 逐字放大，模拟真人打字；历史消息与用户消息直接显示全文。
-  // 节奏自适应（模拟真人语速）：短句打得快、长句放慢，句末按本句长度停顿再进下一句。
-  static const int _charsPerTick = 1;
-  static const Duration _cursorBlink = Duration(milliseconds: 480);
-  // 逐字步进间隔：短句(剩余≤12字)15ms 快打、中句(13-30字)20ms、长句(>30字)28ms 放慢
-  static const Duration _stepFast = Duration(milliseconds: 15);
-  static const Duration _stepNormal = Duration(milliseconds: 20);
-  static const Duration _stepSlow = Duration(milliseconds: 28);
-  // 句末停顿：本句越短停顿越短（260/380/500ms），长句收尾后多歇一会，像真人换气
-  static const Duration _pauseShort = Duration(milliseconds: 260);
-  static const Duration _pauseMid = Duration(milliseconds: 380);
-  static const Duration _pauseLong = Duration(milliseconds: 500);
-  // 句边界标点：命中并在其后还有内容时，进入句末停顿
-  static final RegExp _sentenceEnd = RegExp(r'[。！？!?；;\n]');
-
-  /// 原始文本（未 strip）的已显示前缀；仅 assistant 流式消息逐字增长。
-  String _revealedRaw = "";
-  /// 当前句已 reveal 的字符数，用于句末自适应停顿（遇句边界后清零）。
-  int _currentSentenceChars = 0;
-  Timer? _typeTimer;
-  Timer? _cursorTimer;
-  bool _typeCursorOn = false;
+  // 逐字 reveal 的节奏控制(自适应语速 + 句末停顿)已抽到共享控制器
+  // [TypewriterReveal],桌面端与手机端共用同一实现。
+  late final TypewriterReveal _typewriter = TypewriterReveal(
+    widget.mainMessage.text,
+    animate: widget.mainMessage.streaming && widget.mainMessage.text.isNotEmpty,
+  );
 
   String get _rawTarget => widget.mainMessage.text;
 
-  /// 是否处于打字机展示中（打字中或光标闪烁中）
-  bool get _typewriterActive => _typeTimer != null || _cursorTimer != null;
+  /// 是否处于打字机展示中(打字中或光标闪烁中)
+  bool get _typewriterActive => _typewriter.active;
 
   @override
   void initState() {
     super.initState();
-    if (widget.mainMessage.streaming && widget.mainMessage.text.isNotEmpty) {
-      // 流式接收中的新消息：从零开始逐字 reveal（覆盖整段一次性到达的场景）
-      _revealedRaw = "";
-      _currentSentenceChars = 0;
-      _scheduleTypeTick(_stepNormal);
-    } else {
-      // 历史消息 / 用户消息直接显示全文
-      _revealedRaw = _rawTarget;
-    }
+    _typewriter.addListener(_onTypewriterChanged);
+  }
+
+  void _onTypewriterChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -1703,130 +1684,17 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   @override
   void dispose() {
-    _typeTimer?.cancel();
-    _cursorTimer?.cancel();
+    _typewriter.dispose();
     super.dispose();
   }
 
   void _syncTypewriter() {
     if (widget.isUser) {
-      _revealedRaw = _rawTarget;
-      _stopTypeTimers();
+      // 用户消息:直接显示全文
+      _typewriter.showAll();
       return;
     }
-    final String target = _rawTarget;
-    if (target.startsWith(_revealedRaw)) {
-      // 前缀延伸 = 流式追加：继续逐字 reveal
-      if (_revealedRaw.length < target.length && _typeTimer == null) {
-        _currentSentenceChars = _countRevealedOfCurrentSentence(target);
-        _scheduleTypeTick(_stepForTarget(target));
-      }
-    } else {
-      // 内容被替换（如删除重发）：直接显示全文
-      _revealedRaw = target;
-      _stopTypeTimers();
-      _scheduleRebuild();
-    }
-  }
-
-  /// 用一次性 Timer 排定下一次 tick（替代固定周期 periodic，实现逐字变速 + 句末停顿）。
-  void _scheduleTypeTick(Duration delay) {
-    _typeTimer?.cancel();
-    if (!mounted) return;
-    _typeTimer = Timer(delay, () {
-      if (mounted) _typeTick();
-    });
-  }
-
-  /// 逐字步进 + 按句长变速 + 句末停顿，并自我重排下一个 tick。
-  void _typeTick() {
-    if (!mounted) {
-      _stopTypeTimers();
-      return;
-    }
-    final String target = _rawTarget;
-    if (_revealedRaw.length >= target.length) {
-      _stopTypeTimers();
-      return;
-    }
-    int end = _revealedRaw.length + _charsPerTick;
-    if (end > target.length) end = target.length;
-    final int added = end - _revealedRaw.length;
-    _revealedRaw = target.substring(0, end);
-    _currentSentenceChars += added;
-    _cursorTimer ??= Timer.periodic(_cursorBlink, (_) {
-      if (!mounted) return;
-      setState(() => _typeCursorOn = !_typeCursorOn);
-    });
-    setState(() {});
-
-    if (_revealedRaw.length >= target.length) {
-      _stopTypeTimers();
-      return;
-    }
-    // 打标点/换行收尾且后面还有内容 → 句末停顿（按本句长度成比例），否则按灵敏度续打。
-    if (_endedSentence(target)) {
-      _scheduleTypeTick(_pauseForCurrentSentence());
-      _currentSentenceChars = 0;
-    } else {
-      _scheduleTypeTick(_stepForTarget(target));
-    }
-  }
-
-  /// 本句剩余字数（预览到句边界前）。用于决定当前语速：剩得越少打得越快（尾声提速）。
-  int _charsUntilSentenceEnd(String target) {
-    for (int i = _revealedRaw.length; i < target.length; i++) {
-      if (_sentenceEnd.hasMatch(target[i])) return i - _revealedRaw.length;
-    }
-    return target.length - _revealedRaw.length;
-  }
-
-  /// 语速步进：长句放慢、短句/句尾加快。
-  Duration _stepForTarget(String target) {
-    final int remaining = _charsUntilSentenceEnd(target);
-    if (remaining > 30) return _stepSlow;
-    if (remaining >= 12) return _stepNormal;
-    return _stepFast;
-  }
-
-  /// 刚才 reveal 的最后一个字符是否为句边界，且其后还有内容（才会停顿）。
-  bool _endedSentence(String target) {
-    if (_revealedRaw.isEmpty) return false;
-    final lastChar = _revealedRaw[_revealedRaw.length - 1];
-    return _sentenceEnd.hasMatch(lastChar) && _revealedRaw.length < target.length;
-  }
-
-  /// 句末停顿：本句越短停顿越短，长句多歇一会换气。
-  Duration _pauseForCurrentSentence() {
-    if (_currentSentenceChars >= 30) return _pauseLong;
-    if (_currentSentenceChars >= 15) return _pauseMid;
-    return _pauseShort;
-  }
-
-  /// 从已 reveal 文本的尾部往当前句起点回数，算出"当前句已 reveal 字数"（同步中途进场时用）。
-  int _countRevealedOfCurrentSentence(String target) {
-    if (_revealedRaw.isEmpty) return 0;
-    int count = 0;
-    for (int i = _revealedRaw.length - 1; i >= 0; i--) {
-      final ch = target[i];
-      count++;
-      if (_sentenceEnd.hasMatch(ch) && count > 1) break;
-    }
-    return count;
-  }
-
-  void _stopTypeTimers() {
-    _typeTimer?.cancel();
-    _typeTimer = null;
-    _cursorTimer?.cancel();
-    _cursorTimer = null;
-    _typeCursorOn = false;
-  }
-
-  void _scheduleRebuild() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) setState(() {});
-    });
+    _typewriter.updateTarget(_rawTarget);
   }
 
   @override
@@ -1841,7 +1709,13 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             child: Align(
               alignment:
                   widget.isUser ? Alignment.centerRight : Alignment.centerLeft,
-              child: _buildMessageRow(context),
+              // Agent 消息整行（含头像）从左缘右移 36px，与窗口边缘留出呼吸感。
+              child: Padding(
+                padding: widget.isUser
+                    ? EdgeInsets.zero
+                    : const EdgeInsets.only(left: 36),
+                child: _buildMessageRow(context),
+              ),
             ),
           ),
           // 删除选择模式下的确认/取消按钮栏（仅在触发删除的用户消息下方显示）
@@ -1921,9 +1795,18 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         },
       );
     } else {
-      // Agent 消息去气泡：全宽平铺排版（结构化卡片/长 Markdown 可读性更好），
-      // 身份层级由头像 + 名称行承担。
-      bubble = _buildMessageCard(context, highlight: widget.isSelected);
+      // Agent 回复描边框：宽度收敛为可用宽度的 75%（2026-09-03 用户反馈，
+      // 相比全宽减少 1/4），文字与照片都框在内；短回复仍按内容自适应收窄。
+      // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
+      bubble = LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final double maxBubbleWidth = constraints.maxWidth * 0.75;
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+            child: _buildMessageCard(context, highlight: widget.isSelected),
+          );
+        },
+      );
     }
 
     if (widget.inSelectableRange) {
@@ -1977,8 +1860,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   Widget _buildMessageHeader() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final String timeStr = _formatTime(widget.mainMessage.timestamp);
+    // 时间戳:最小可读档(11),显式行高避免行盒过高/过矮
     final TextStyle timeStyle = TextStyle(
-      fontSize: 10,
+      fontSize: AppTypography.micro,
+      height: AppTypography.headingLineHeight,
       color: cs.onSurfaceVariant,
     );
 
@@ -1997,7 +1882,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           Text(
             widget.agentName ?? "AI 助手",
             style: TextStyle(
-              fontSize: 12,
+              fontSize: AppTypography.caption,
+              height: AppTypography.headingLineHeight,
               fontWeight: FontWeight.w600,
               color: cs.onSurface,
             ),
@@ -2014,12 +1900,15 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   }
 
   Widget _buildAvatar(BuildContext context, {required bool isUser}) {
+    // 头像顶部与「名称/时间行」的字形顶部对齐:
+    // 偏移由排版 token 推导(行盒半行距),字号/行高调整后自动跟随。
+    final double avatarTop = AppTypography.avatarHeaderOffset;
     if (isUser) {
       final bool isDark = Theme.of(context).brightness == Brightness.dark;
       return Container(
         width: 36,
         height: 36,
-        margin: const EdgeInsets.only(left: 10, top: 4),
+        margin: EdgeInsets.only(left: 10, top: avatarTop),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           gradient: const LinearGradient(
@@ -2081,7 +1970,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 「轨道光球」矢量头像：与桌面悬浮球形 Agent 的意象一致，
     // 配色跟随 Agent 自选的 avatarPreset（dawn/ember/tide/...）。
     return Padding(
-      padding: const EdgeInsets.only(right: 10, top: 4),
+      padding: EdgeInsets.only(right: 10, top: AppTypography.avatarHeaderOffset),
       child: AgentOrbAvatar(
         size: 36,
         palette: AgentAvatarPalette.fromPreset(widget.agentAvatarPreset),
@@ -2091,8 +1980,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
   /// 构建消息卡片（支持高亮态）。
   ///
-  /// 视觉分层：用户消息保留主题色气泡；Agent 消息去气泡平铺
-  /// （透明背景、零内边距），只有删除选择高亮时才出现描边容器。
+  /// 视觉分层：用户消息保留主题色气泡；Agent 消息用扣子（Coze）式描边容器——
+  /// 整个回复（正文、结果卡片、照片）包进同一个圆角描边框，与用户气泡形成
+  /// 对称的视觉分组；左侧内边距收紧，照片得以贴近左边框。
   Widget _buildMessageCard(BuildContext context, {bool highlight = false}) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final BorderRadius borderRadius = widget.isUser
@@ -2102,7 +1992,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             bottomLeft: Radius.circular(16),
             bottomRight: Radius.circular(16),
           )
-        : BorderRadius.zero;
+        : BorderRadius.circular(14);
 
     final Decoration decoration;
     if (widget.isUser) {
@@ -2118,15 +2008,19 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         ],
       );
     } else {
-      // Agent 消息：无底色无边框，正文直接落在聊天背景上
-      decoration = const BoxDecoration();
+      // Agent 回复：扣子式描边框（浅底 + 清晰描边），不再是「无底色无边框平铺」。
+      decoration = BoxDecoration(
+        borderRadius: borderRadius,
+        color: cs.surfaceContainerLow.withValues(alpha: 0.4),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.32)),
+      );
     }
 
     return Container(
       decoration: highlight
           ? BoxDecoration(
               borderRadius:
-                  widget.isUser ? borderRadius : BorderRadius.circular(12),
+                  widget.isUser ? borderRadius : BorderRadius.circular(14),
               color: Colors.red.withValues(alpha: 0.08),
               border: Border.all(
                 color: Colors.red.withValues(alpha: 0.4),
@@ -2135,11 +2029,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           : decoration,
       child: ClipRRect(
         borderRadius:
-            widget.isUser ? borderRadius : BorderRadius.circular(12),
+            widget.isUser ? borderRadius : BorderRadius.circular(14),
         child: Padding(
           padding: widget.isUser
               ? widget.cardPadding
-              : const EdgeInsets.symmetric(vertical: 2),
+              // 左 10：照片与描边框只留一点距离；右/上/下给文字留呼吸感。
+              : const EdgeInsets.fromLTRB(10, 8, 12, 10),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
@@ -2182,10 +2077,11 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 // 打字机：assistant 流式消息用「已 reveal」前缀渲染，
                 // 光标随打字闪烁；非打字场景传 null 走原文。
                 typewriterRawText:
-                    (!widget.isUser && _revealedRaw != _rawTarget)
-                        ? _revealedRaw
+                    (!widget.isUser && _typewriter.isPartial)
+                        ? _typewriter.revealed
                         : null,
-                typewriterCursor: _typeTimer != null && _typeCursorOn,
+                typewriterCursor:
+                    _typewriter.isRevealing && _typewriter.cursorOn,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后

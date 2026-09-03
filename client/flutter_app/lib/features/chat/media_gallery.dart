@@ -1,17 +1,18 @@
+import "dart:math" as math;
+
 import "package:flutter/material.dart";
 
 import "../../core/services/image_preview_launcher.dart";
 import "media_thumbnail.dart";
 
-/// 自适应媒体图片画廊（竖向大图流版式，2026-09-02）。
+/// 自适应媒体图片画廊（半宽贴左版式，2026-09-03）。
 ///
-/// 参考「一图一标题一句描述」的图片流排版：
-///   - 单张：全宽大图（优先按自然宽高比渲染，缺数据时 3:4 竖幅），
-///     底部带一句说明；
-///   - 多张：竖向逐张铺排——每张都是全宽大图 + 下方说明文字，
-///     不再压成方形九宫格缩略图（缩略图网格会丢掉每张图的说明、
-///     且 16:9 横幅裁切会切掉人像头部）。
-/// 格子宽度由可用宽度实时计算（LayoutBuilder），窄屏/宽屏都铺满不留残差。
+/// 此前是「全宽大图流」（一图占满整行），照片视觉过大；现改为：
+///   - 每张照片宽度 = 可用宽度（上限 [maxWidth]）的一半再扩大 1/4
+///     （即原上限的 5/8），高度随自然宽高比等比；
+///   - 照片不携带说明文字（2026-09-03 用户反馈删除）；
+///   - 整体靠左对齐——照片贴 agent 回复描边框的最左侧，
+///     与边框只留容器的一点内边距（参考用户提供的贴左排版截图）。
 ///
 /// 点击任意图经 [ImagePreviewLauncher] 进入右侧双栏预览，同一画廊内可前后切换。
 class MediaGallery extends StatelessWidget {
@@ -19,7 +20,6 @@ class MediaGallery extends StatelessWidget {
     super.key,
     required this.urls,
     required this.cs,
-    this.captions,
     this.aspects,
     this.previewGallery,
     this.spacing = 10,
@@ -30,9 +30,6 @@ class MediaGallery extends StatelessWidget {
 
   /// 需要展示的图片完整地址（已 resolve）。顺序即展示顺序。
   final List<String> urls;
-
-  /// 与 [urls] 对齐的说明文字（可为空列表）。逐张展示在图片下方。
-  final List<String>? captions;
 
   /// 与 [urls] 对齐的自然宽高比（width/height，可为空）。
   /// 缺数据或比例异常的图片回退 [fallbackAspectRatio]。
@@ -62,12 +59,6 @@ class MediaGallery extends StatelessWidget {
     }
     if (clean.isEmpty) return const SizedBox.shrink();
 
-    String captionOf(String url) {
-      final int i = clean.indexOf(url);
-      if (captions == null || i < 0 || i >= captions!.length) return "";
-      return captions![i].trim();
-    }
-
     double aspectOf(String url) {
       final int i = clean.indexOf(url);
       if (aspects == null || i < 0 || i >= aspects!.length) return fallbackAspectRatio;
@@ -76,21 +67,29 @@ class MediaGallery extends StatelessWidget {
 
     final List<String> pool = previewGallery ?? clean;
 
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxWidth),
-        child: LayoutBuilder(
-          builder: (BuildContext context, BoxConstraints constraints) {
-            final double w = constraints.maxWidth;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                for (int i = 0; i < clean.length; i++) ...<Widget>[
-                  if (i > 0) SizedBox(height: spacing),
-                  _PhotoFeedTile(
+    // 靠左对齐：照片贴回复描边框的最左（外层容器只留一点内边距）。
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          // 2026-09-03：半宽版式（可用宽度与上限取小后的一半）基础上
+          // 再扩大 1/4——即原全宽上限的 5/8；高度随自然宽高比等比放大，
+          // 说明文字与照片同宽。
+          final double w =
+              math.min(constraints.maxWidth, maxWidth) / 2 * 1.25;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              for (int i = 0; i < clean.length; i++) ...<Widget>[
+                if (i > 0) SizedBox(height: spacing),
+                // 必须用 SizedBox 把宽度变成紧约束：内部照片走 AspectRatio，
+                // 它会撑满可用宽度、无视子组件自报的 width——不锁死布局盒，
+                // 照片会被放大到整个回复框（2026-09-03 修「越改越大」的回归）。
+                SizedBox(
+                  width: w,
+                  child: _PhotoFeedTile(
                     url: clean[i],
-                    caption: captionOf(clean[i]),
                     aspect: aspectOf(clean[i]),
                     cs: cs,
                     width: w,
@@ -99,21 +98,20 @@ class MediaGallery extends StatelessWidget {
                     pool: pool,
                     index: pool.indexOf(clean[i]),
                   ),
-                ],
+                ),
               ],
-            );
-          },
-        ),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
-/// 单张照片块：全宽大图（自然宽高比）+ 可选底部说明。点击进入预览。
+/// 单张照片块：半宽照片（自然宽高比），靠左放置，不携带说明文字。点击进入预览。
 class _PhotoFeedTile extends StatelessWidget {
   const _PhotoFeedTile({
     required this.url,
-    required this.caption,
     required this.aspect,
     required this.cs,
     required this.width,
@@ -124,7 +122,6 @@ class _PhotoFeedTile extends StatelessWidget {
   });
 
   final String url;
-  final String caption;
   final double aspect;
   final ColorScheme cs;
   final double width;
@@ -135,7 +132,7 @@ class _PhotoFeedTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Widget photo = GestureDetector(
+    return GestureDetector(
       onTap: () => ImagePreviewLauncher.open(
         url: openUrl,
         title: "图片预览",
@@ -155,28 +152,6 @@ class _PhotoFeedTile extends StatelessWidget {
           ),
         ),
       ),
-    );
-    if (caption.isEmpty) return photo;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        photo,
-        const SizedBox(height: 6),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: Text(
-            caption,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 12.5,
-              color: cs.onSurfaceVariant,
-              height: 1.4,
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

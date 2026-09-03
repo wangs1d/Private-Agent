@@ -7,8 +7,6 @@ import {
   fetchDomesticNews,
   fetchDomesticOfficialNews,
   fetchDomesticTechNews,
-  filterItemsByRelevance,
-  searchBingChina,
   searchBingChinaRelaxed,
   searchWebMultiEngine,
   type DomesticFetchOptions,
@@ -22,7 +20,6 @@ import {
   sortByQuality,
   applySearchFreshness,
   withRetry,
-  type IntentAnalysis,
 } from "./search-enhancements.js";
 
 export type InfoSearchItem = {
@@ -214,61 +211,35 @@ export class InfoHubService {
     const searchDeadline = Date.now() + SEARCH_BUDGET_MS;
     const overBudget = (): boolean => Date.now() > searchDeadline;
 
-    // 主查询：保留完整原始 query 走向「API 优先 + 多引擎」链。
-    // 关键修复：不再把完整 query 截断成实体去搜——对搜索 API（AnySearch 等）而言完整语义召回更好，
-    // 短实体反而丢失上下文。实体仅作为必应的一条辅助查询，补足搜索引擎对长查询弱的问题。
-    const stopwordEntity = /^(最新|最近|今日|今天|现在|目前|刚刚|新闻|消息|资讯|事件|发生|动态|头条|怎么|如何|什么|情况)$/i;
-    const bestEntity = intent.entities.find((e) => e.length >= 2 && !stopwordEntity.test(e));
-    const bingEndpointQuery = bestEntity && bestEntity !== keyword ? bestEntity : null;
-
-    // 4. 第一轮：完整 query（主，含 API）+ 实体化必应（辅助）
-    //    同时并行发起，避免串行等待
-    const bingPromises: Promise<InfoSearchItem[]>[] = [
-      searchWebMultiEngine(keyword, effectiveLimit, domesticOpts),
-    ];
-    if (bingEndpointQuery) {
-      bingPromises.push(searchBingChina(bingEndpointQuery, effectiveLimit, domesticOpts));
-    }
+    // 主查询：完整原始 query 原样透传给「API 优先 + 多引擎」链。
+    // 不再把 query 截断/提取实体去搜——实体辅助查询曾把「A·B」这类完整描述拆成
+    // 碎片短词，搜回大量错误结果（2026-09 按用户反馈移除）。query 组织责任在 LLM。
     const [bingResults, tech, official] = await Promise.all([
-      Promise.all(bingPromises),
+      searchWebMultiEngine(keyword, effectiveLimit, domesticOpts),
       isTechKeyword ? fetchDomesticTechNews(keyword, Math.min(8, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
       isNewsKeyword ? fetchDomesticOfficialNews(keyword, Math.min(12, effectiveLimit), domesticOpts) : Promise.resolve([] as InfoSearchItem[]),
     ]);
 
-    let merged = dedupeByUrl([...official, ...bingResults.flat(), ...tech]); // 官方媒体 RSS 排前面（实时性更高）
+    let merged = dedupeByUrl([...official, ...bingResults, ...tech]); // 官方媒体 RSS 排前面（实时性更高）
     console.error(`[DEBUG-search] 首轮耗时=${Date.now() - __t0}ms items=${merged.length} keyword=${keyword.slice(0,20)}`);
 
-    // 5. 第二轮扩搜：结果偏少时就主动放宽，不等到完全 0 条
+    // 5. 第二轮扩搜：结果偏少时用完整 query 再宽松搜一轮（skipRelevanceFilter 时代保留的
+    //    兜底路径），不再用实体/短片段当 fallback query——那正是搜错内容的来源。
     const sparseThreshold = Math.min(effectiveLimit, Math.max(4, Math.ceil(effectiveLimit * 0.6)));
     if (merged.length < sparseThreshold && !overBudget()) {
-      const fallbackQueries = [
-        keyword,
-        bingEndpointQuery,
-        ...intent.entities.slice(1, 3),
-      ]
-        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-        .map((value) => value.trim());
       const relaxedBatches = await Promise.all(
-        [...new Set(fallbackQueries)].slice(0, 3).map((value) =>
-          searchBingChinaRelaxed(value, effectiveLimit, domesticOpts),
-        ),
+        [keyword].map((value) => searchBingChinaRelaxed(value, effectiveLimit, domesticOpts)),
       );
       const relaxedMerged = dedupeByUrl(relaxedBatches.flat());
       if (relaxedMerged.length > 0) {
-        // 宽松扩搜（skipRelevanceFilter）可能带回与主题无关的噪音（如必应对短实体/单字母的误匹配，
-        // 例：query「今天A股最新消息」会混入 AcFun/Ascii 等含「A」的结果）。
-        // 扩宽条数后这类噪音会被一起带进来，这里用相关性过滤兜底，保留真正相关的结果。
-        const relevant = filterItemsByRelevance(relaxedMerged, keyword);
-        if (relevant.length > 0) {
-          merged = dedupeByUrl([...merged, ...relevant]);
-        }
+        merged = dedupeByUrl([...merged, ...relaxedMerged]);
       }
     }
 
     // 动态源发现：当预定义源 + 必应结果不足时，从已有搜索结果中识别新闻网站，
     // 自动爬取其首页拿到实时新闻（必应索引有延迟，首页是实时更新的）
     console.error(`[DEBUG-search] 扩搜后耗时=${Date.now() - __t0}ms itemCount=${merged.length}`);
-    const allBingResults = dedupeByUrl(bingResults.flat());
+    const allBingResults = dedupeByUrl(bingResults);
     if (merged.length < effectiveLimit && allBingResults.length > 0 && !overBudget()) {
       const discovered = await discoverHtmlSourcesFromResults(allBingResults, keyword, domesticOpts);
       if (discovered.length > 0) {

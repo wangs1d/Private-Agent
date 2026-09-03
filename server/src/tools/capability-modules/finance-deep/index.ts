@@ -14,6 +14,7 @@
  */
 import type { ToolRegistry } from "../../tool-registry.js";
 import type { FinanceDeepService } from "../../../services/finance-deep-service.js";
+import type { SubscriptionAuditService } from "../../../services/subscription-audit-service.js";
 
 import { FINANCE_DEEP_CHAT_TOOLS } from "./chat-tools.js";
 import {
@@ -24,6 +25,9 @@ import {
   createFinanceReconcileHandler,
   createFinanceCategorizeHandler,
   createFinanceExportReportHandler,
+  createFinanceListSubscriptionsHandler,
+  createFinanceConfirmSubscriptionHandler,
+  createFinanceUpdateSubscriptionHandler,
 } from "./handlers.js";
 
 export { FINANCE_DEEP_CHAT_TOOLS } from "./chat-tools.js";
@@ -36,7 +40,10 @@ export { FINANCE_DEEP_INTENT_RULES } from "./intent.js";
  */
 export function registerFinanceDeepTools(
   registry: ToolRegistry,
-  deps: { financeDeepService: FinanceDeepService },
+  deps: {
+    financeDeepService: FinanceDeepService;
+    subscriptionAuditService?: SubscriptionAuditService;
+  },
 ): void {
   const service = deps.financeDeepService;
   registry.register("finance.import_transactions", createFinanceImportTransactionsHandler(service));
@@ -46,4 +53,11 @@ export function registerFinanceDeepTools(
   registry.register("finance.reconcile", createFinanceReconcileHandler(service));
   registry.register("finance.categorize", createFinanceCategorizeHandler(service));
   registry.register("finance.export_report", createFinanceExportReportHandler(service));
+  // 订阅盘点（未装配 SubscriptionAuditService 时不注册，避免 handler 空引用）
+  const audit = deps.subscriptionAuditService;
+  if (audit) {
+    registry.register("finance.list_subscriptions", createFinanceListSubscriptionsHandler(audit));
+    registry.register("finance.confirm_subscription", createFinanceConfirmSubscriptionHandler(audit));
+    registry.register("finance.update_subscription", createFinanceUpdateSubscriptionHandler(audit));
+  }
 }

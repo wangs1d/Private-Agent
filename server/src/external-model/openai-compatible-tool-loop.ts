@@ -574,7 +574,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 请简短（2-6 个核心词），时效话题请加当前年月或「最新」，如「科技新闻 2026年5月 最新」「兴义 梦乐城 电影 热映」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用口语化分段或小标题呈现，禁止使用 Markdown 表格、管道符；只有用户问单一事实判断时才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。",
+        "联网搜索公开网页信息（按发布时间从新到旧，默认剔除超过约 120 天的旧条目）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息时必须先调用本工具，禁止仅凭训练数据作答；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用口语化分段或小标题呈现，禁止使用 Markdown 表格、管道符；只有用户问单一事实判断时才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。",
       parameters: {
         type: "object",
         properties: {
@@ -614,7 +614,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "图片搜索关键词，尽量短而具体" },
+          query: { type: "string", description: "图片搜索词，按要找的图片内容具体描述（主体+外观特征+场景），完整具体，不要过度截短" },
           limit: { type: "integer", description: "返回数量，1-8，默认 4" },
         },
         required: ["query"],
@@ -656,7 +656,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "视频搜索关键词，尽量短而具体" },
+          query: { type: "string", description: "视频搜索词，完整具体，按要找的视频内容描述" },
           limit: { type: "integer", description: "返回数量，1-12，默认 8" },
         },
         required: ["query"],
@@ -707,7 +707,7 @@ const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "搜索关键词，简短具体（2-6 个核心词）" },
+          query: { type: "string", description: "搜索词，完整具体，按要查的主题语义组织" },
           limit: { type: "integer", description: "搜索返回条数，1-20，默认 8" },
           fetch_pages: { type: "integer", description: "抓取完整正文的 Top 条数，1-10，默认 3" },
           content_limit: { type: "integer", description: "单条正文最大字符数，1000-8000，默认 3000" },
@@ -1590,6 +1590,16 @@ let _brainChatTools: ChatCompletionTool[] = [];
 /** 动态注入的 Body Center 工具（由 bootstrap 阶段设置；body 未启用时为空数组） */
 let _bodyChatTools: ChatCompletionTool[] = [];
 
+/** 动态注入的记忆工具 schema（由 bootstrap 阶段设置；记忆网关未启用时为空数组） */
+let _memoryChatTools: ChatCompletionTool[] = [];
+
+/** 注入记忆工具 schema 列表（启动时调用一次；与 setBrainChatTools 对称） */
+export function setMemoryChatTools(tools: ChatCompletionTool[]): void {
+  _memoryChatTools = tools;
+  _builtinToolsCache = null;
+  _fastLaneToolsCache = null;
+}
+
 /** 注入 MCP ChatCompletionTool 列表（启动时调用一次） */
 export function setMcpChatTools(tools: ChatCompletionTool[]): void {
   _mcpChatTools = tools;
@@ -1685,6 +1695,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...capabilityModuleTools,
     ..._brainChatTools,
     ..._bodyChatTools,
+    ..._memoryChatTools,
     ..._mcpChatTools,
   ];
   return _builtinToolsCache;

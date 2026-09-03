@@ -376,7 +376,7 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 13.5,
+                        fontSize: 14,
                         fontWeight: FontWeight.w700,
                         color: cs.onSurface,
                         height: 1.35,
@@ -390,7 +390,7 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12,
                           color: cs.onSurfaceVariant,
                           height: 1.3,
                         ),
@@ -415,7 +415,7 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
                       _errorText ?? "内联播放失败",
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 11.5, color: cs.error),
+                      style: TextStyle(fontSize: 12, color: cs.error),
                     ),
                   ),
                   if (_pageUrl != null)

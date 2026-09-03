@@ -8,8 +8,10 @@
  *   当天对话的长期固化统一走 journal 单一入口；
  * - 本服务仅保留 RAM/磁盘层面的当日摘要：observeTurn 写入、prompt 读取、失忆清理。
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 import {
   getCalendarDay,
@@ -341,8 +343,7 @@ export class DailyDigestService {
   }
 
   private async flushToDisk(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(this.data, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(this.filePath, this.data);
   }
 }
 

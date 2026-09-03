@@ -197,7 +197,7 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 13.5,
+                              fontSize: 14,
                               fontWeight: FontWeight.w700,
                               color: cs.onSurface,
                               height: 1.4,
@@ -208,7 +208,7 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
                           Text(
                             "${_index + 1} / $_count",
                             style: TextStyle(
-                              fontSize: 12.5,
+                              fontSize: 13,
                               fontFeatures: const <FontFeature>[
                                 FontFeature.tabularFigures()
                               ],
@@ -269,7 +269,7 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
         const SizedBox(height: 8),
         Text(
           "图片加载失败",
-          style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant),
+          style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
         ),
       ],
     );

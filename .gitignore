@@ -78,3 +78,12 @@ __pycache__/
 # Test / temporary outputs
 server/test-results/
 server/.tmp-*
+
+# Test / temporary outputs (memory atomic-write backups)
+server/*.json.bak
+
+# Tool / session residue
+.trae/
+.zcode/
+.uploads/
+tmp/

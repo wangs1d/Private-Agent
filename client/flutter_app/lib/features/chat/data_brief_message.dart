@@ -359,11 +359,11 @@ class _ChangePill extends StatelessWidget {
         style: textTheme.labelSmall?.copyWith(
               color: c,
               fontWeight: FontWeight.w700,
-              fontSize: 10.5,
+              fontSize: 11,
               height: 1.1,
             ) ??
             const TextStyle(
-              fontSize: 10.5,
+              fontSize: 11,
               fontWeight: FontWeight.w700,
               height: 1.1,
             ),

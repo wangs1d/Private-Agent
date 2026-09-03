@@ -4,6 +4,8 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../../core/theme/app_typography.dart";
+import "code_highlight.dart";
 import "media_thumbnail.dart";
 
 class MarkdownTableCellData {
@@ -197,7 +199,7 @@ List<Widget> formatContentSummaryDetailLines(
                   trimmed.replaceFirst(listItem, ""),
                   textTheme.bodyMedium!.copyWith(
                     color: cs.onSurface,
-                    height: 1.6,
+                    height: AppTypography.bodyLineHeight,
                   ),
                   cs: cs,
                 ),
@@ -230,7 +232,7 @@ List<Widget> formatContentSummaryDetailLines(
                   itemText,
                   textTheme.bodyMedium!.copyWith(
                     color: cs.onSurface,
-                    height: 1.6,
+                    height: AppTypography.bodyLineHeight,
                   ),
                   cs: cs,
                 ),
@@ -268,7 +270,8 @@ List<Widget> formatContentSummaryDetailLines(
           trimmed,
           textTheme.bodyMedium!.copyWith(
             color: cs.onSurface,
-            height: trimmed.length > 100 ? 1.6 : 1.5,
+            // 正文行高全局统一 1.6(不再按段落长度切换,避免同屏行距不一致)
+            height: AppTypography.bodyLineHeight,
           ),
           cs: cs,
         ),
@@ -345,7 +348,7 @@ class _Level1Heading extends StatelessWidget {
         textTheme.titleMedium!.copyWith(
           color: cs.onSurface,
           fontWeight: FontWeight.w800,
-          height: 1.3,
+          height: AppTypography.headingLineHeight,
           letterSpacing: -0.2,
         ),
         cs: cs,
@@ -375,7 +378,7 @@ class _Level2Heading extends StatelessWidget {
       textTheme.titleSmall!.copyWith(
         color: tertiary ? cs.onSurfaceVariant : cs.onSurface,
         fontWeight: FontWeight.w700,
-        height: 1.35,
+        height: AppTypography.headingLineHeight,
       ),
       cs: cs,
     );
@@ -457,10 +460,10 @@ List<InlineSpan> parseInlineMarkdownSpans(
       spans.add(
         TextSpan(
           text: token.substring(1, token.length - 1),
-          style: baseStyle.copyWith(
-            fontFamily: "monospace",
-            fontSize: (baseStyle.fontSize ?? 14) - 1,
-            backgroundColor: cs.surfaceContainerHighest.withValues(alpha: 0.65),
+          // 行内 code:等宽字体 + 略缩一号 + 浅底色(基线对齐策略见 AppTypography.inlineCode)
+          style: AppTypography.inlineCode(
+            baseStyle,
+            cs.surfaceContainerHighest.withValues(alpha: 0.65),
           ),
         ),
       );
@@ -614,6 +617,11 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
   bool _copied = false;
   Timer? _resetTimer;
 
+  // 高亮结果缓存:同一段代码只在内容/语言变化时重新解析
+  String? _highlightedCode;
+  String? _highlightedLanguage;
+  TextSpan? _highlightSpan;
+
   @override
   void dispose() {
     _resetTimer?.cancel();
@@ -630,12 +638,37 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
     });
   }
 
+  /// 按当前亮度选择深色 / 浅色高亮主题;代码区用固定底色,
+  /// 保证高亮配色在桌面深色 / 暖色 / 移动端主题下都可读。
+  CodeHighlightTheme _highlightTheme(Brightness brightness) =>
+      brightness == Brightness.dark
+          ? CodeHighlightTheme.dark
+          : CodeHighlightTheme.light;
+
+  TextSpan _highlightSpanFor(TextStyle codeStyle, CodeHighlightTheme theme) {
+    if (_highlightSpan == null ||
+        _highlightedCode != widget.code ||
+        _highlightedLanguage != widget.language) {
+      _highlightSpan = buildHighlightedCode(
+        widget.code,
+        widget.language,
+        codeStyle,
+        theme,
+      );
+      _highlightedCode = widget.code;
+      _highlightedLanguage = widget.language;
+    }
+    return _highlightSpan!;
+  }
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = widget.cs;
     final TextTheme textTheme = widget.textTheme;
     final bool hasLanguage =
         (widget.language ?? "").isNotEmpty;
+    final Brightness brightness = Theme.of(context).brightness;
+    final CodeHighlightTheme theme = _highlightTheme(brightness);
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -680,7 +713,7 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
                             letterSpacing: 0.3,
                           ) ??
                           const TextStyle(
-                            fontSize: 11,
+                            fontSize: AppTypography.micro,
                             fontWeight: FontWeight.w600,
                             letterSpacing: 0.3,
                           ),
@@ -708,7 +741,7 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
                             fontWeight: FontWeight.w600,
                           ) ??
                           TextStyle(
-                            fontSize: 11,
+                            fontSize: AppTypography.micro,
                             color: _copied
                                 ? Colors.greenAccent
                                 : cs.primary,
@@ -719,16 +752,21 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
                 ],
               ),
             ),
-            // 代码体
+            // 代码体:语法高亮 + 横向滚动(长行不折行,保留代码缩进结构)
             Container(
               width: double.infinity,
+              color: theme.background,
               padding: const EdgeInsets.all(12),
-              child: SelectableText(
-                widget.code,
-                style: textTheme.bodySmall!.copyWith(
-                  fontFamily: "monospace",
-                  height: 1.5,
-                  color: cs.onSurface,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SelectableText.rich(
+                  _highlightSpanFor(
+                    textTheme.bodySmall!.copyWith(
+                      fontFamily: AppTypography.monoFontFamily,
+                      height: AppTypography.compactLineHeight,
+                    ),
+                    theme,
+                  ),
                 ),
               ),
             ),
@@ -766,7 +804,7 @@ class _BlockquoteWidget extends StatelessWidget {
           text,
           textTheme.bodyMedium!.copyWith(
             color: cs.onSurfaceVariant,
-            height: 1.6,
+            height: AppTypography.bodyLineHeight,
           ),
           cs: cs,
         ),
@@ -856,7 +894,7 @@ class MarkdownTableWidget extends StatelessWidget {
 
         final TextStyle cellStyle = textTheme.bodySmall!.copyWith(
           color: cs.onSurface,
-          height: 1.45,
+          height: AppTypography.compactLineHeight,
           fontWeight: isHeader ? FontWeight.w700 : FontWeight.w400,
         );
 
