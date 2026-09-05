@@ -275,16 +275,6 @@ export class MemoryConsolidationService {
     }
   }
 
-  /**
-   * decision 映射：unified.decision 与 decideMemoryWrite 的四值语义对齐
-   *（remember/decay/reject 直映；unified 无 overwrite，改造类语义由
-   * mutable_fact + 事实注册表级联承担）。
-   */
-  private static unifiedToDecision(decision: UnifiedExtraction["decision"]): MemoryDecisionResult["decision"] {
-    if (decision === "remember" || decision === "decay" || decision === "reject") return decision;
-    return "decay";
-  }
-
   /** 唯一落库出口：海马体 + Mem0（经 narrative port）+ KV summary 行。 */
   private async egress(actorId: string, decided: DecidedCandidate[]): Promise<void> {
     // Supersession：overwrite/mutable_fact 语义的候选先退役语义重合的旧记忆
@@ -294,14 +284,14 @@ export class MemoryConsolidationService {
       }
     }
 
-    // unified 候选逐条直存（facts/commitments/corrections 经钩子驱动下游）。
-    // reject 且无旁路数据（承诺/纠正/事实）的候选整体跳过；reject 但携带
+    // unified 候选逐条直存（understandings/commitments/corrections 经钩子驱动下游）。
+    // reject 且无旁路数据（承诺/纠正/理解）的候选整体跳过；reject 但携带
     // 旁路数据的仍要走 writeDecided——persistUnifiedExtraction 的 reject 分支
-    // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存的闲聊里的承诺/事实照样要抓）。
+    // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存的闲聊里的承诺/理解照样要抓）。
     for (const d of decided) {
       if (!d.unified) continue;
       const hasSideData =
-        d.unified.facts.length > 0 ||
+        d.unified.understandings.length > 0 ||
         d.unified.commitments.length > 0 ||
         d.unified.corrections.length > 0;
       if (d.decision.decision === "reject" && !hasSideData) continue;
@@ -435,6 +425,16 @@ function extractKeyLowSignalLines(text: string): string[] {
     .slice(0, 6);
 }
 
+/**
+ * decision 映射：unified.decision 与 decideMemoryWrite 的四值语义对齐
+ *（remember/decay/reject 直映；unified 无 overwrite，改造类语义由
+ * mutable_fact + 事实注册表级联承担）。
+ */
+function mapUnifiedDecision(decision: UnifiedExtraction["decision"]): MemoryDecisionResult["decision"] {
+  if (decision === "remember" || decision === "decay" || decision === "reject") return decision;
+  return "decay";
+}
+
 /** unified 中文语义类 → MemorySemanticClass（KV 行前缀 / supersession 触发沿用同一形状） */
 const UNIFIED_SEMANTIC_CLASS_MAP: Record<string, MemoryDecisionResult["semanticClass"]> = {
   事实: "mutable_fact",
@@ -449,7 +449,7 @@ const UNIFIED_SEMANTIC_CLASS_MAP: Record<string, MemoryDecisionResult["semanticC
 /** unified 抽取结果 → 决策结构（egress 判定与 KV 行前缀复用 decideMemoryWrite 的形状） */
 function unifiedDecisionResult(unified: UnifiedExtraction): MemoryDecisionResult {
   return {
-    decision: MemoryConsolidationService.unifiedToDecision(unified.decision),
+    decision: mapUnifiedDecision(unified.decision),
     confidence: 0.9,
     semanticClass:
       (unified.semanticClass && UNIFIED_SEMANTIC_CLASS_MAP[unified.semanticClass]) ||

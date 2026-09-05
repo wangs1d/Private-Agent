@@ -71,7 +71,6 @@ export class MoonshotKimiProvider extends AbstractChatProvider {
       memory: ctx.overrideSys ? undefined : ctx.promptMemory,
       finalizeOptions: {
         tools: Boolean(ctx.tools && !ctx.overrideSys),
-        masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
         agentAccessMode: ctx.streamOpts?.agentAccessMode,
         desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
         phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,

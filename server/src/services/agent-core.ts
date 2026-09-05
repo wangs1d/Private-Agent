@@ -131,7 +131,6 @@ import { getAgentTaskStore } from "./agent-task-store.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
-import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
 import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
 import {
@@ -201,7 +200,6 @@ export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
   private readonly turnLifecycle: TurnLifecycle;
   private readonly toolContextFactory: ToolContextFactory;
-  private readonly streamOptionsBuilder = new StreamOptionsBuilder();
   private readonly turnFinalizer: TurnFinalizer;
   private readonly toolPolicyResolver: ToolPolicyResolver;
   private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;

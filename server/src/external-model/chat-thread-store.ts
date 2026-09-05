@@ -7,7 +7,11 @@ import type { ChatThreadPersistence } from "./chat-thread-persist.js";
 import { getChatThreadPersistence } from "./chat-thread-persist.js";
 import type { ChatUserTurn } from "./types.js";
 import type { RecapSummarizer } from "../services/conversation-rolling-summarizer.js";
-import { layerRecapLinesByBudget } from "../services/conversation-rolling-summarizer.js";
+import {
+  formatRecapStamp,
+  layerRecapLinesByBudget,
+  migrateRecapContentLabels,
+} from "../services/conversation-rolling-summarizer.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
   compactValidChatMessages,
@@ -54,13 +58,19 @@ const DEFAULT_SMART_TRIM_CONFIG = {
   preserveRecentTurns: 3,
 };
 
-// ── 近期窗口裁剪参数（2026-09-05，替代「今天+昨天全文」策略）──
+// ── 滑动窗口裁剪参数（2026-09-05，替代「今天+昨天全文」策略）──
 /** 原样保留的近期消息窗口（≈6 轮 user/assistant 配对）。 */
 const RECENT_WINDOW_MESSAGES = 12;
-/** 折叠批次：窗口外攒够一批才折叠一次，recap 不随轮重写（保护 prefix cache）。 */
+/** 增量摘要批次：窗口外攒够一批才合并一次，摘要不随轮重写（保护 prefix cache）。 */
 const RECAP_BATCH_MESSAGES = 6;
-/** 已有 recap 行的单行 token 粗估（recap 上限 14 行/1600 字符）。 */
-const RECAP_LINE_TOKEN_ESTIMATE = 40;
+/** 摘要块整体 token 粗估（摘要区 30 行/2400 字符 + 待归纳区 24 行/2400 字符）。 */
+const RECAP_LINE_TOKEN_ESTIMATE = 55;
+
+function intEnv(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 // 条内压缩配置：对「非最近 N 轮」的超长 assistant 消息（LLM 已消费过的输出）做无损级压缩，
 // 让同一 token 预算保留更多轮次，减少整条 drop 进 recap（信息断层 + 额外一次 LLM 摘要调用）。
@@ -72,8 +82,20 @@ const CHAT_COMPRESS_PRESERVE_RECENT_TURNS = 2;
 
 const SESSION_RECAP_PREFIX = "[session-recap]";
 const SESSION_RECAP_TITLE = "Earlier conversation recap:";
-const SESSION_RECAP_MAX_LINES = 14;
-const SESSION_RECAP_MAX_CHARS = 1600;
+/** 待归纳区标记：其下为「已滑出窗口、尚未被 LLM 增量摘要吸收」的原文占位行（绝对时间标签）。 */
+const SESSION_UNSUMMARIZED_MARKER = "[unsummarized]";
+
+// ── 增量摘要预算（env 可调）：滑动窗口 + 增量摘要，不做「挤进固定 14 行」的折叠 ──
+/** LLM 滚动摘要区行数/字符预算（摘要器提示词使用同一预算，保证输出可完整落进线程）。 */
+const SESSION_SUMMARY_MAX_LINES = intEnv(process.env.SESSION_SUMMARY_MAX_LINES, 30);
+const SESSION_SUMMARY_MAX_CHARS = intEnv(process.env.SESSION_SUMMARY_MAX_CHARS, 2400);
+/**
+ * 待归纳区（[unsummarized]）行数/字符预算：窗口溢出批次在 LLM 合并成功前的原文占位。
+ * 超预算时淘汰最旧的行——这些行的全文仍在 turn WAL（全量 JSONL）与 daily journal，
+ * 检索层（journalRecall）可兜底；正常情况下 LLM 摘要每批都会吸收清空该区。
+ */
+const SESSION_PENDING_MAX_LINES = intEnv(process.env.SESSION_PENDING_MAX_LINES, 24);
+const SESSION_PENDING_MAX_CHARS = intEnv(process.env.SESSION_PENDING_MAX_CHARS, 2400);
 
 const TIME_FRAME_PREFIX = "[timeframe:";
 
@@ -397,15 +419,32 @@ function isSessionRecapMessage(msg: ChatCompletionMessageParam | undefined): boo
   return stripTimestampText(msg.content).startsWith(SESSION_RECAP_PREFIX);
 }
 
+/** 提取摘要区的行（[unsummarized] 标记之前，跳过标题行）。 */
 function extractSessionRecapLines(content: string | undefined): string[] {
   if (!content) return [];
   const text = stripTimestampText(content);
   if (!text.startsWith(SESSION_RECAP_PREFIX)) return [];
+  const lines: string[] = [];
+  for (const raw of text.split("\n").slice(1)) {
+    const line = raw.replace(/^-+\s*/, "").trim();
+    if (line === SESSION_UNSUMMARIZED_MARKER) break; // 待归纳区起点，归属 pending
+    if (line && line !== SESSION_RECAP_TITLE) lines.push(line);
+  }
+  return lines;
+}
+
+/** 提取待归纳区（[unsummarized] 标记之后）的原文占位行。 */
+function extractSessionPendingLines(content: string | undefined): string[] {
+  if (!content) return [];
+  const text = stripTimestampText(content);
+  if (!text.startsWith(SESSION_RECAP_PREFIX)) return [];
+  const markerIdx = text.split("\n").findIndex((l) => l.trim() === SESSION_UNSUMMARIZED_MARKER);
+  if (markerIdx < 0) return [];
   return text
     .split("\n")
-    .slice(1)
+    .slice(markerIdx + 1)
     .map((line) => line.replace(/^-+\s*/, "").trim())
-    .filter((line) => line && line !== SESSION_RECAP_TITLE);
+    .filter(Boolean);
 }
 
 function normalizeRecapLine(line: string): string {
@@ -419,106 +458,138 @@ function pushRecapLine(target: string[], line: string): void {
   target.push(normalized);
 }
 
-/** 把 recap 行数组渲染为 recap 消息的 content（与 extractSessionRecapLines 双向兼容）。 */
-function buildSessionRecapContent(lines: string[]): string {
-  // 事件化分层 + 预算裁剪（记忆连续性 Phase 2）：按行首时间标签（[今天]/[昨天]/[N天前]）
-  // 重新排序（今天 → 昨天 → 本周 → 更早），并按预算裁剪——近层全量、远层压缩，
-  // 避免简单 slice 丢失近因、时间线乱跳、跳转不可追溯。
-  const plain = lines.map((l) => l.replace(/^-+\s*/, "").trim()).filter(Boolean);
-  const ordered = layerRecapLinesByBudget(plain, SESSION_RECAP_MAX_LINES);
-  return `${SESSION_RECAP_PREFIX}\n${SESSION_RECAP_TITLE}\n${ordered.map((l) => `- ${l}`).join("\n")}`;
+/** 去重合并两列 recap 行，返回新数组（保持顺序：前者在前）。 */
+function pushRecapLinesUnique(base: string[], extra: string[]): string[] {
+  const merged = [...base];
+  for (const line of extra) pushRecapLine(merged, line);
+  return merged;
+}
+
+/** 把摘要行 + 待归纳行渲染为 recap 消息的 content（与 extract 双向兼容）。 */
+function buildSessionRecapContent(
+  summaryLines: string[],
+  pendingLines: string[],
+  now: Date = new Date(),
+): string {
+  // 事件化分层 + 预算裁剪：摘要行按时间标签（绝对日期优先，旧相对标签兼容）重排
+  // （今天 → 昨天 → 本周 → 更早），并按预算裁剪——近层全量、远层压缩。
+  const plain = summaryLines.map((l) => l.replace(/^-+\s*/, "").trim()).filter(Boolean);
+  const ordered = layerRecapLinesByBudget(plain, SESSION_SUMMARY_MAX_LINES, true, now);
+  const parts = [SESSION_RECAP_PREFIX, SESSION_RECAP_TITLE, ...ordered.map((l) => `- ${l}`)];
+  // 待归纳区：原文占位行原样追加（有自己的行数/字符预算，不挤占摘要区）——
+  // 在 LLM 增量摘要成功吸收前，这些行保证滑出窗口的内容始终在线程内可见。
+  if (pendingLines.length > 0) {
+    parts.push(SESSION_UNSUMMARIZED_MARKER, ...pendingLines.map((l) => `- ${l}`));
+  }
+  return parts.join("\n");
 }
 
 /**
- * 中文相对天数标签（与 recap 时间线前缀统一）：今天 / 昨天 / N天前。
- * 供无 LLM 摘要器时的兜底 recap 行使用，保证时间线可追溯。
+ * 待归纳原文行的时间标签：绝对本地时间 `2026/09/04 周四 14:32`。
+ * 不再用「今天/昨天」相对词——相对词在折叠时刻冻结落盘，跨天后变成错误时间线索
+ * （agent 会把前天的事当昨天/今天的说）；绝对日期任何时刻读取都不会失真。
  */
-function relativeDayCnLabel(at: Date, now: Date = new Date()): string {
-  const daysElapsed = dayDiff(at, now);
-  if (daysElapsed <= 0) return "今天";
-  if (daysElapsed === 1) return "昨天";
-  return `${daysElapsed}天前`;
+function formatRecapTimeLabel(at: Date): string {
+  return formatRecapStamp(at);
 }
 
 /**
- * 从被 trim 丢弃的消息中生成兜底 recap 行（无 LLM 摘要器时保证连续性）。
- * 每条 `[今天]/[昨天]/[N天前] 内容`，去重、限长、限条数。
- * 语义化精炼仍由异步 enhanceRecap（LLM 滚动摘要）负责，本函数只是「先用原文占位」，
- * 避免旧消息被丢弃后彻底无痕、跨天记忆断层。
+ * 从滑出窗口的消息生成待归纳原文行（无 LLM 合并时保证连续性的同步兜底）。
+ * 每条 `[绝对时间] user/assistant: 首行内容`，去重；预算裁剪由 buildSessionRecapMessage
+ * 统一做（本函数只做单批防爆上限）。语义化精炼由异步增量摘要（enhanceRecap）负责，
+ * 成功后这些行会被整体吸收进摘要区并清空。
  */
 function minimalRecapLinesFromDropped(
   droppedMessages: ChatCompletionMessageParam[],
   now: Date = new Date(),
 ): string[] {
+  void now;
   const out: string[] = [];
   const seen = new Set<string>();
   for (const msg of droppedMessages) {
     if (msg.role !== "user" && msg.role !== "assistant") continue;
     if (typeof msg.content !== "string") continue;
-    const ts = extractMessageTimestamp(msg) ?? now;
+    const ts = extractMessageTimestamp(msg) ?? new Date();
     const text = stripTimestampText(msg.content);
     if (!text || text.startsWith(SESSION_RECAP_PREFIX)) continue;
-    const label = relativeDayCnLabel(ts, now);
+    const label = formatRecapTimeLabel(ts);
     const norm = normalizeRecapLine(`[${label}] ${text}`);
-    if (!norm || norm.length > SESSION_RECAP_MAX_CHARS) continue;
+    if (!norm || norm.length > SESSION_PENDING_MAX_CHARS) continue;
     if (seen.has(norm)) continue;
     seen.add(norm);
     out.push(norm);
-    if (out.length >= SESSION_RECAP_MAX_LINES) break;
+    if (out.length >= SESSION_PENDING_MAX_LINES) break;
+  }
+  return out;
+}
+
+/**
+ * 待归纳区预算：保留最旧的行、淘汰最新的超限行。
+ * 最旧行在区里等待归纳最久（无摘要器的降级环境下不会再有机会），且早期事实/承诺
+ * 一旦丢占位就只剩检索层可查；被淘汰的新行紧邻窗口、时序上最接近当前语境，
+ * 且全文在 turn WAL（JSONL）可兜底。LLM 合并成功时整区被吸收清空，正常不会触顶。
+ */
+function capPendingLines(lines: string[]): string[] {
+  const out: string[] = [];
+  let totalChars = 0;
+  for (const line of lines) {
+    if (out.length >= SESSION_PENDING_MAX_LINES || totalChars + line.length > SESSION_PENDING_MAX_CHARS) break;
+    out.push(line);
+    totalChars += line.length;
   }
   return out;
 }
 
 function buildSessionRecapMessage(
-  existingLines: string[],
+  existingRecapLines: string[],
+  existingPendingLines: string[],
   droppedMessages: ChatCompletionMessageParam[],
+  now: Date = new Date(),
 ): ChatCompletionMessageParam | null {
-  // 同步路径只合并已有的 recap 行（去重、排序、预算裁剪），不再做旧的正则提取；
-  // 被丢弃消息的具体摘要交由 LLM 滚动摘要异步增强（enhanceRecap）。
-  // 但无已有行时不再返回 null：用被丢弃消息原文生成兜底 recap（含 [今天]/[昨天]/[N天前]
-  // 日期标签）占位，保证跨天连续性不因摘要器缺失/未完成而断层；异步增强完成后会替换为精炼版。
-  // 同步兜底：已有 recap 行 + 本次被丢弃历史消息生成的原文兜底行，二者合并（去重）。
-  // 修复原逻辑「已有 recap 行时完全忽略 droppedMessages」导致的跨天断层：
-  // 若仅靠异步 enhanceRecap（LLM 摘要）吸收新丢弃消息，而增强器缺失/失败时，
-  // 这些新历史消息将永久丢失。合并后即便无 LLM，也能以原文占位形式保留。
-  const merged: string[] = [];
-  for (const line of existingLines) pushRecapLine(merged, line);
-  for (const line of minimalRecapLinesFromDropped(droppedMessages)) pushRecapLine(merged, line);
+  // 增量摘要布局（滑动窗口 + 增量摘要，不做挤占式折叠）：
+  // - 摘要区：LLM 增量合并的结果（无 LLM 时为空）
+  // - 待归纳区：已有未归纳行 + 本次滑出窗口的原文占位行；LLM 合并成功后整体吸收清空
+  // 旧的「合并后统一截断到 14 行/1600 字符」会静默挤掉更早的行（等价遗忘），已废弃。
+  const mergedPending = pushRecapLinesUnique(existingPendingLines, minimalRecapLinesFromDropped(droppedMessages, now));
+  const cappedPending = capPendingLines(mergedPending);
 
-  const base = merged;
-  if (base.length === 0) return null;
-
-  // 字符预算截断（1600 chars）先行；行数预算交给 buildSessionRecapContent 的
-  // layerRecapLinesByBudget 按时间桶裁剪（近层全量、远层压缩），避免简单 slice 丢近因。
-  const lines: string[] = [];
+  const summaryPlain = existingRecapLines
+    .map((l) => l.replace(/^-+\s*/, "").trim())
+    .filter(Boolean)
+    .filter((l) => !l.startsWith(SESSION_UNSUMMARIZED_MARKER));
+  const summaryCharCapped: string[] = [];
   let totalChars = SESSION_RECAP_PREFIX.length + SESSION_RECAP_TITLE.length + 2;
-  for (const line of base) {
-    if (totalChars + line.length + 4 > SESSION_RECAP_MAX_CHARS) break;
-    lines.push(`- ${line}`);
+  for (const line of summaryPlain) {
+    if (totalChars + line.length + 4 > SESSION_SUMMARY_MAX_CHARS) break;
+    summaryCharCapped.push(line);
     totalChars += line.length + 4;
   }
-  if (lines.length === 0) return null;
+  if (summaryCharCapped.length === 0 && cappedPending.length === 0) return null;
 
   return {
     role: "assistant",
-    content: buildSessionRecapContent(lines),
+    content: buildSessionRecapContent(summaryCharCapped, cappedPending, now),
   };
 }
 
 function separateRecapMessages(messages: ChatCompletionMessageParam[]): {
   body: ChatCompletionMessageParam[];
   recapLines: string[];
+  pendingLines: string[];
 } {
   const body: ChatCompletionMessageParam[] = [];
   const recapLines: string[] = [];
+  const pendingLines: string[] = [];
   for (const msg of messages) {
     if (isSessionRecapMessage(msg)) {
-      recapLines.push(...extractSessionRecapLines(typeof msg.content === "string" ? msg.content : ""));
+      const content = typeof msg.content === "string" ? msg.content : "";
+      recapLines.push(...extractSessionRecapLines(content));
+      pendingLines.push(...extractSessionPendingLines(content));
       continue;
     }
     body.push(msg);
   }
-  return { body, recapLines };
+  return { body, recapLines, pendingLines };
 }
 
 function annotateMessageIfNeeded(
@@ -526,6 +597,18 @@ function annotateMessageIfNeeded(
   at: Date,
   now: Date = new Date(),
 ): ChatCompletionMessageParam {
+  // 摘要块（[session-recap]）不打 ts 帧：它没有单一发生时刻，行内自带绝对时间标签。
+  // 若在这里兜底打上 `now`，跨天恢复后整块会被标成「刚刚」，模型把历史当现事承接
+  // （「昨天聊的，刚开始对话还在说」的时间感知 bug 根源之一）。
+  if (isSessionRecapMessage(msg)) {
+    // 存量迁移：旧版折叠行带 [今天]/[昨天] 相对标签，折叠时刻计算后冻结落盘，跨天即失真。
+    // 用 recap 块上的旧 [ts:] 帧（旧版恢复时打的帧 ≈ 折叠/整理时刻）作锚点，确定性换算
+    // 为绝对日期标签；迁移后的内容随下一轮 afterTurnCompleted 落盘固化。
+    if (typeof msg.content !== "string") return msg;
+    const anchor = extractMessageTimestamp(msg);
+    const migrated = migrateRecapContentLabels(msg.content, anchor);
+    return migrated === msg.content ? msg : { ...msg, content: migrated };
+  }
   if ((msg.role === "user" || msg.role === "assistant") && typeof msg.content === "string") {
     return { ...msg, content: annotateTimeframe(msg.content, at, now) };
   }
@@ -696,37 +779,46 @@ export class ChatThreadStore {
   }
 
   /**
-   * 把「被 trim 丢弃的历史消息」异步交给 LLM 增强 recap。
+   * 把「滑出窗口的历史消息 + 待归纳原文行」异步交给 LLM 增量摘要合并。
    * - 不阻塞 trimThread 主链路（fire-and-forget）
-   * - 失败静默：保留同步生成的已有 recap 行
-   * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果
+   * - 失败静默：线程内保留摘要区原状 + [unsummarized] 待归纳区原文，不静默丢内容
+   * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果（其对应的待归纳行仍在区里，
+   *   由下一次合并吸收）
    */
   private async enhanceRecap(
     sessionId: string,
     existingLines: string[],
+    pendingLines: string[],
     droppedMessages: ChatCompletionMessageParam[],
   ): Promise<void> {
     const summarizer = this.recapSummarizer;
-    if (!summarizer || !sessionId || droppedMessages.length === 0) return;
+    if (!summarizer || !sessionId) return;
+    // 增量合并输入 = 已有摘要行 + 待归纳原文行（existingLines）+ 本次溢出批次；无新信息时不空跑
+    if (pendingLines.length === 0 && droppedMessages.length === 0) return;
     const seq = (this.recapEnhanceSeq.get(sessionId) ?? 0) + 1;
     this.recapEnhanceSeq.set(sessionId, seq);
     try {
-      const lines = await summarizer({ existingLines, droppedMessages });
+      const lines = await summarizer({
+        existingLines: [...existingLines, ...pendingLines],
+        droppedMessages,
+      });
       if (!lines || lines.length === 0) return;
-      // 期间又发生了 trim → recap 已有更新版本，丢弃本次结果，避免覆盖
+      // 期间又发生了 trim → 摘要已有更新版本，丢弃本次结果，避免覆盖
       if (this.recapEnhanceSeq.get(sessionId) !== seq) return;
       this.applyEnhancedRecap(sessionId, lines);
     } catch {
-      // 静默失败：保留同步生成的已有 recap 行
+      // 静默失败：保留同步生成的已有摘要行与待归纳区
     }
   }
 
   private applyEnhancedRecap(sessionId: string, lines: string[]): void {
     const msgs = this.history.get(sessionId);
     if (!msgs) return;
+    // 合并成功：摘要区替换为精炼结果，待归纳区清空（其内容已被本次合并吸收）。
+    // seq 守卫保证 apply 时线程内待归纳区与捕获时刻一致（期间有新 fold 会 bump seq 走丢弃分支）。
     const recapMsg: ChatCompletionMessageParam = {
       role: "assistant",
-      content: buildSessionRecapContent(lines),
+      content: buildSessionRecapContent(lines, []),
     };
     const index = msgs.findIndex(isSessionRecapMessage);
     if (index >= 0) {
@@ -830,19 +922,21 @@ export class ChatThreadStore {
       maxMessages: maxMessages ?? DEFAULT_SMART_TRIM_CONFIG.maxMessages,
     };
 
-    // 优先近期窗口切分：保留「最近 N 条」原文 +「更早（含当天早些时候）」压成 recap。
-    // 2026-09-05 策略替换：旧「今天+昨天全文」窗口会让长会话整天背着大历史
+    // 优先滑动窗口切分：保留「最近 N 条」原文，窗口外走「增量摘要」（不做挤占式折叠）。
+    // 2026-09-05 策略：旧「今天+昨天全文」窗口会让长会话整天背着大历史
     // （受 MAX_CONTEXT_TOKENS 兜底前最多 24 条原样重发）。
     // 记忆不丢的三层保障（与窗口大小无关）：
     //   1) 每轮 live turn 在 TurnLifecycle.finalizeTurn 已完成长期记忆种植
     //      （turn WAL / daily journal / 统一整合链路 / epitome），输入是轮次文本本身；
-    //   2) daily journal 保留当天全部对话原文，当日词法召回（journalRecall）不受影响；
-    //   3) 被折叠消息进入 recap（规则摘要 + enhanceRecap LLM 滚动摘要增强）。
+    //   2) 全量轮次原文在 turn WAL（JSONL，含 userText/assistantText）；daily journal
+    //      存首句 + 正则命中行（事实/偏好/承诺），当日词法召回（journalRecall）可用；
+    //   3) 窗口外内容先进 [unsummarized] 待归纳区（原文占位、始终在线程内可见），
+    //      再由 LLM 增量摘要逐批吸收进摘要区——归纳成功前不丢，归纳后语义保留。
     if (this.trimByRecentWindow(msgs, config, sessionId)) {
       return;
     }
 
-    // 近期窗口+recap 后仍超 token 上限（近期消息太大），降级到 token 维度裁剪
+    // 滑动窗口+摘要后仍超 token 上限（近期消息太大），降级到 token 维度裁剪
     if (msgs.length <= 1 + config.maxMessages) {
       const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
       if (totalTokens <= config.maxTokens) return;
@@ -850,18 +944,22 @@ export class ChatThreadStore {
       return;
     }
 
-    // 消息条数也超限（极少触发，今天消息爆量）：保留最近 N 条 + recap
+    // 消息条数也超限（极少触发，今天消息爆量）：保留最近 N 条 + 摘要
     const sys = msgs[0];
     const separated = separateRecapMessages(msgs.slice(1));
     const trimResult = trimPreservingToolPairs(separated.body, config.maxMessages);
-    const recap = buildSessionRecapMessage(separated.recapLines, trimResult.dropped);
+    const recap = buildSessionRecapMessage(
+      separated.recapLines,
+      separated.pendingLines,
+      trimResult.dropped,
+    );
     msgs.length = 0;
     msgs.push(sys);
     if (recap) msgs.push(recap);
     msgs.push(...trimResult.kept);
 
-    // 丢弃消息较多时异步交给 LLM 滚动摘要增强（不阻塞主链路）
-    this.enhanceRecap(sessionId ?? "", separated.recapLines, trimResult.dropped).catch(() => {});
+    // 溢出消息异步交给 LLM 增量摘要合并（不阻塞主链路）
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, trimResult.dropped).catch(() => {});
 
     const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
     if (totalTokens > config.maxTokens) {
@@ -870,14 +968,15 @@ export class ChatThreadStore {
   }
 
   /**
-   * 按近期窗口切分会话线程（2026-09-05，替代旧 trimByDayBoundary 的「今天+昨天全文」）：
+   * 滑动窗口 + 增量摘要（2026-09-05，替代旧 trimByDayBoundary 的「今天+昨天全文」）：
    * - 最近 RECENT_WINDOW_MESSAGES 条原样保留（含工具链成对保护）
-   * - 更早的消息（含当天早些时候）压成一条 [session-recap] 摘要
-   * - 折叠按 RECAP_BATCH_MESSAGES 批次触发：窗口满 + 攒够一批才折叠一次，
-   *   避免 recap 每轮重写导致 prefix cache 每轮全断
+   * - 更早的消息（含当天早些时候）滑出窗口：先进 [unsummarized] 待归纳区（原文占位，
+   *   始终可见），LLM 增量摘要成功吸收后转入摘要区并清空待归纳区
+   * - 合并按 RECAP_BATCH_MESSAGES 批次触发：窗口满 + 攒够一批才合并一次，
+   *   避免摘要每轮重写导致 prefix cache 每轮全断
    *
-   * 记忆连续性保障：被折叠轮次的长期记忆种植在 finalizeTurn 已完成（与线程无关），
-   * 当天原文仍在 daily journal，折叠内容进 recap 并由 enhanceRecap 增强。
+   * 记忆连续性保障：滑出窗口的轮次，其长期记忆种植在 finalizeTurn 已完成（与线程无关），
+   * 全量原文在 turn WAL，摘要合并前原文占位行始终在线程内。
    *
    * @returns true 表示已成功按窗口切分（无需上层再裁剪）；
    *          false 表示近期消息已使 token 超限，上层需降级到 smartTrimByTokens
@@ -894,27 +993,31 @@ export class ChatThreadStore {
     const body = separated.body;
     if (body.length === 0) return true;
 
-    // 未超「窗口 + 折批」阈值：不折叠，仅做 token 超限判定（超限交上层 smartTrimByTokens）
+    // 未超「窗口 + 合并批」阈值：不动摘要，仅做 token 超限判定（超限交上层 smartTrimByTokens）
     const foldThreshold = RECENT_WINDOW_MESSAGES + RECAP_BATCH_MESSAGES;
     if (body.length <= foldThreshold) {
       const totalTokens =
         estimateMessageTokens(sys) +
-        separated.recapLines.length * RECAP_LINE_TOKEN_ESTIMATE +
+        (separated.recapLines.length + separated.pendingLines.length) * RECAP_LINE_TOKEN_ESTIMATE +
         body.reduce((s, m) => s + estimateMessageTokens(m), 0);
       return totalTokens <= config.maxTokens;
     }
 
-    // 折叠最旧的 (body.length - RECENT_WINDOW_MESSAGES) 条进 recap；
-    // 折叠后窗口保持 RECENT_WINDOW_MESSAGES，recap 约每 RECAP_BATCH_MESSAGES 轮更新一次
+    // 最旧的 (body.length - RECENT_WINDOW_MESSAGES) 条滑出窗口进待归纳区；
+    // 稳态下窗口保持 RECENT_WINDOW_MESSAGES，摘要约每 RECAP_BATCH_MESSAGES 轮合并一次
     const foldCount = body.length - RECENT_WINDOW_MESSAGES;
     const foldedMessages = body.slice(0, foldCount);
     const keptMessages = body.slice(foldCount);
 
-    const recap = buildSessionRecapMessage(separated.recapLines, foldedMessages);
+    const recap = buildSessionRecapMessage(
+      separated.recapLines,
+      separated.pendingLines,
+      foldedMessages,
+    );
 
-    // 历史消息折叠后异步交给 LLM 滚动摘要增强（不阻塞主链路）。
-    // 不依赖同步 recap 是否存在：无已有 recap 行时由 enhanceRecap 完成后插入。
-    this.enhanceRecap(sessionId ?? "", separated.recapLines, foldedMessages).catch(() => {});
+    // 滑出窗口的内容异步交给 LLM 增量摘要合并（不阻塞主链路）。
+    // 失败/无摘要器时待归纳区原文行仍在线程内，不会静默丢失。
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, foldedMessages).catch(() => {});
 
     // 重组后 token 检查：若近期窗口消息本身就超限，让上层走 smartTrimByTokens
     const sysTokens = estimateMessageTokens(sys);
@@ -1001,11 +1104,15 @@ export class ChatThreadStore {
     }
 
     const droppedMessages = olderMessages.filter((msg) => !preservedOlder.includes(msg));
-    const recap = buildSessionRecapMessage(separated.recapLines, droppedMessages);
+    const recap = buildSessionRecapMessage(
+      separated.recapLines,
+      separated.pendingLines,
+      droppedMessages,
+    );
 
-    // 丢弃消息异步交给 LLM 滚动摘要增强（不阻塞主链路，失败保留已有 recap 行）
-    if (droppedMessages.length > 0) {
-      this.enhanceRecap(sessionId ?? "", separated.recapLines, droppedMessages).catch(() => {});
+    // 溢出消息异步交给 LLM 增量摘要合并（不阻塞主链路；失败保留待归纳区原文）
+    if (droppedMessages.length > 0 || separated.pendingLines.length > 0) {
+      this.enhanceRecap(sessionId ?? "", separated.recapLines, separated.pendingLines, droppedMessages).catch(() => {});
     }
 
     msgs.length = 0;

@@ -14,7 +14,7 @@ import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
   type UnifiedExtraction,
-  type UnifiedFact,
+  type UnifiedUnderstanding,
   type UnifiedLlmClient,
 } from "./unified-extractor.js";
 
@@ -52,8 +52,8 @@ export interface Mem0WriteEvent {
   commitments?: import("./commitment-board.js").ExtractedCommitment[];
   /** 统一抽取路径携带：用户纠正（钩子走 supersession + 溯源级联） */
   corrections?: import("./unified-extractor.js").UnifiedCorrection[];
-  /** 统一抽取路径携带：身份事实（钩子走事实注册表 upsert + 旧值级联作废） */
-  facts?: UnifiedFact[];
+  /** 统一抽取路径携带：对话理解（钩子走理解档案 topic 级 upsert + 演变历史） */
+  understandings?: UnifiedUnderstanding[];
 }
 
 export type Mem0WriteHook = (event: Mem0WriteEvent) => void;
@@ -147,10 +147,10 @@ export class AgenticMemoryIngestService {
     }
 
     // P0-2 承诺捕获与记忆路由解耦：低信号文本（临时上下文/decay）不值得长期
-    // 存储，但里面的承诺/身份事实照样要抓——"明天发你"是 decay 记忆 + 真承诺，
-    // "我老婆是刘浩存"是闲聊语气 + 身份事实。
+    // 存储，但里面的承诺/值得形成的理解照样要抓——"明天发你"是 decay 记忆 +
+    // 真承诺，"我老婆是刘浩存"是闲聊语气 + 一条对用户的理解（粉丝式称呼）。
     // fire-and-forget 抽取（无词表预筛，识别交给 LLM），只消费
-    // commitments/corrections/facts，不阻塞低信号缓冲主链路。
+    // commitments/corrections/understandings，不阻塞低信号缓冲主链路。
     if (
       context === "main" &&
       isMemoryUnifiedExtractEnabled() &&
@@ -162,7 +162,7 @@ export class AgenticMemoryIngestService {
           if (
             orphan.commitments.length === 0 &&
             orphan.corrections.length === 0 &&
-            orphan.facts.length === 0
+            orphan.understandings.length === 0
           ) {
             return;
           }
@@ -174,7 +174,8 @@ export class AgenticMemoryIngestService {
             results: [],
             commitments: orphan.commitments.length > 0 ? orphan.commitments : undefined,
             corrections: orphan.corrections.length > 0 ? orphan.corrections : undefined,
-            facts: orphan.facts.length > 0 ? orphan.facts : undefined,
+            understandings:
+              orphan.understandings.length > 0 ? orphan.understandings : undefined,
           });
         })
         .catch((err) =>
@@ -227,9 +228,9 @@ export class AgenticMemoryIngestService {
   /**
    * 统一抽取产物直存（所有 unified 路径共用的落库核心）：
    *   - memories 以 infer:false 直存（抽取已在 extractUnified 完成，Mem0 不再二次调 LLM）；
-   *   - 落库后 fire 钩子，携带 results + facts + commitments + corrections——
-   *     bootstrap 钩子据此做账本落账 / 事实注册表 upsert（含旧值级联作废）/ 承诺落板 / 纠正级联；
-   *   - decision=reject 时记忆不落库，但承诺/纠正/事实仍经钩子落地（P0-2 解耦语义）；
+   *   - 落库后 fire 钩子，携带 results + understandings + commitments + corrections——
+   *     bootstrap 钩子据此做账本落账 / 理解档案 upsert（含演变历史）/ 承诺落板 / 纠正级联；
+   *   - decision=reject 时记忆不落库，但承诺/纠正/理解仍经钩子落地（P0-2 解耦语义）；
    *   - memories 为空且非 reject 时回退 fallbackText（高信号=原句；整合路径传截断后的合并文本）。
    * 供 ingestHighSignal 与 memory-consolidation-service（统一写入者）复用。
    */
@@ -247,15 +248,16 @@ export class AgenticMemoryIngestService {
       return [];
     }
 
-    const facts = extraction.facts.length > 0 ? extraction.facts : undefined;
+    const understandings =
+      extraction.understandings.length > 0 ? extraction.understandings : undefined;
     const commitments =
       extraction.commitments.length > 0 ? extraction.commitments : undefined;
     const corrections =
       extraction.corrections.length > 0 ? extraction.corrections : undefined;
 
     if (extraction.decision === "reject") {
-      // 被拒存：results 为空（账本不落 claim），但承诺/纠正/事实仍要落地
-      if (facts || commitments || corrections) {
+      // 被拒存：results 为空（账本不落 claim），但承诺/纠正/理解仍要落地
+      if (understandings || commitments || corrections) {
         this.fireWriteHooks({
           actorId,
           sourceId,
@@ -264,7 +266,7 @@ export class AgenticMemoryIngestService {
           results: [],
           commitments,
           corrections,
-          facts,
+          understandings,
         });
       }
       return [];
@@ -305,8 +307,8 @@ export class AgenticMemoryIngestService {
         console.error("[agentic-memory] unified 直存失败（跳过该条）:", err);
       }
     }
-    // Mem0 全部写入失败但承诺/纠正/事实存在时也要触发钩子（承诺/事实不随存储失败丢失）
-    if (results.length > 0 || facts || commitments || corrections) {
+    // Mem0 全部写入失败但承诺/纠正/理解存在时也要触发钩子（不随存储失败丢失）
+    if (results.length > 0 || understandings || commitments || corrections) {
       this.fireWriteHooks({
         actorId,
         sourceId,
@@ -315,7 +317,7 @@ export class AgenticMemoryIngestService {
         results,
         commitments,
         corrections,
-        facts,
+        understandings,
       });
     }
     return results;

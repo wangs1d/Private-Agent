@@ -14,7 +14,7 @@ const MEMORY_MODULE = "../src/services/memory-manager-service.js";
 
 describe("记忆连续性集成测试", { concurrency: false }, () => {
   describe("优化1: recap 时间线前缀", () => {
-    it("recap 行应带 [昨天]/[2天前] 日期标签", async () => {
+    it("recap 行应带原消息日期的绝对时间标签（跨天不失效）", async () => {
       const mod = await import(MODULE);
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
@@ -37,7 +37,11 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
         { role: "assistant", content: `${tsNow} 今天晴天` },
       ];
 
-      // trimThread 原地修改，maxMessages=2 强制触发 recap
+      // 2026-09-05 滑动窗口+增量摘要策略：折叠按「窗口12+合并批6」计数触发，与消息日期无关。
+      // 追加 14 条今天消息使 body(20) 超过阈值 → 最旧 8 条（含前天/昨天）滑出窗口进待归纳区。
+      for (let i = 1; i <= 14; i++) {
+        messages.push({ role: "user", content: `${tsNow} 今天的事 ${i}` });
+      }
       store.trimThread(messages as any, 2);
       const recapMsg = messages.find((m: any) =>
         typeof m.content === "string" && m.content.includes("[session-recap]")
@@ -45,9 +49,13 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
 
       assert.ok(recapMsg, "应生成 recap 消息");
       const content = recapMsg!.content as string;
+      // 新契约：绝对时间标签（YYYY/MM/DD），跨天读取不会退化成错误相对词
+      const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+      const date2d = `${twoDaysAgo.getFullYear()}/${pad(twoDaysAgo.getMonth() + 1)}/${pad(twoDaysAgo.getDate())}`;
+      const date1d = `${yesterday.getFullYear()}/${pad(yesterday.getMonth() + 1)}/${pad(yesterday.getDate())}`;
       assert.ok(
-        content.includes("[2天前]") || content.includes("[昨天]"),
-        `recap 应带日期标签，实际: ${content}`
+        content.includes(date2d) || content.includes(date1d),
+        `recap 应带原消息日期的绝对标签（${date2d} 或 ${date1d}），实际: ${content}`
       );
     });
 
@@ -100,7 +108,11 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
         { role: "assistant", content: `${tsNow} 好的` },
       ];
 
-      // 4天前消息应为历史（>= 前天 → olderMessages → dropped → 合并进 recap）
+      // 2026-09-05 近期窗口策略：折叠按条数触发。追加 16 条今天消息使 body(20)
+      // 超过「窗口12+折叠批6」→ 最旧 8 条（含 4天前两条）合并进 recap。
+      for (let i = 1; i <= 16; i++) {
+        messages.push({ role: "user", content: `${tsNow} 今天的事 ${i}` });
+      }
       store.trimThread(messages as any, 3);
       const recapMsg = messages.find((m: any) =>
         typeof m.content === "string" && m.content.includes("[session-recap]")

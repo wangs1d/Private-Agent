@@ -95,19 +95,26 @@ function makeTsMsg(role: "user" | "assistant", date: Date, text: string): ChatCo
   return { role, content: `${buildMessageTimestampPrefix(date)}\n${text}` } as ChatCompletionMessageParam;
 }
 
-/** 构造一个触发 trimByDayBoundary 的 thread：今天+昨天原文，前天及更早压 recap。 */
+/**
+ * 构造一个触发「近期窗口折叠」的跨天 thread（2026-09-05 新裁剪策略）：
+ * 前天/昨天 4 条 + 今天 16 条 = body 20 > 窗口12+折叠批6 → 最旧 8 条折叠进 recap
+ * （前天×2 + 昨天×2 + 今天前 4 条被折叠）。
+ */
 function buildCrossDayThread(): ChatCompletionMessageParam[] {
   const now = new Date();
   const dayAgo = new Date(now.getTime() - 86_400_000);
   const twoDaysAgo = new Date(now.getTime() - 2 * 86_400_000);
-  return [
+  const msgs: ChatCompletionMessageParam[] = [
     { role: "system", content: "sys" },
     makeTsMsg("user", twoDaysAgo, "前天我计划去爬山"),
     makeTsMsg("assistant", twoDaysAgo, "好的，已记住"),
     makeTsMsg("user", dayAgo, "昨天帮我查天气"),
     makeTsMsg("assistant", dayAgo, "昨天晴"),
-    makeTsMsg("user", now, "今天帮我订机票"),
   ];
+  for (let i = 1; i <= 16; i++) {
+    msgs.push(makeTsMsg("user", now, `今天的事 ${i}`));
+  }
+  return msgs;
 }
 
 /** 通过 thread(sessionId) 把数组登记进 store.history，模拟真实调用链（trimThread 回写依赖 history）。 */
@@ -129,11 +136,15 @@ test("ChatThreadStore: LLM 增强完成后插入/回写 recap 消息", async () 
   const msgs = registeredThread(store, "session-a");
   store.trimThread(msgs, undefined, "session-a");
 
-  // 同步路径：无已有 recap 行时不再生成正则 recap（旧方式已移除，摘要交由 LLM）
+  // 同步路径：折叠发生时立即用被丢弃消息原文生成兜底 recap（占位，防摘要器缺失断层）
   const sys = msgs[0];
   const syncRecap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
   assert.ok(sys && sys.role === "system");
-  assert.equal(syncRecap, undefined, "无已有 recap 行时同步不应生成 recap");
+  assert.ok(syncRecap, "折叠发生时同步应生成兜底 recap（原文占位）");
+  assert.ok(
+    typeof syncRecap?.content === "string" && syncRecap.content.includes("爬山"),
+    "兜底 recap 应包含被折叠的原文行",
+  );
 
   // 异步增强完成：等待微任务
   await new Promise((r) => setTimeout(r, 10));
@@ -141,7 +152,7 @@ test("ChatThreadStore: LLM 增强完成后插入/回写 recap 消息", async () 
   assert.ok(enhanced!.some((l) => l.includes("爬山")), "丢弃消息应包含前天的对话");
 
   const recapAfter = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.ok(recapAfter, "增强完成后应插入 recap 消息");
+  assert.ok(recapAfter, "增强完成后应回写 recap 消息");
   assert.ok(
     typeof recapAfter?.content === "string" && recapAfter.content.includes("LLM增强"),
     "LLM 摘要应写入 recap 消息",
@@ -165,10 +176,12 @@ test("ChatThreadStore: seq 防覆盖——期间有新 trim 时丢弃旧增强�
   const msgs = registeredThread(store, "session-b");
   store.trimThread(msgs, undefined, "session-b"); // 触发第一次增强（慢）
 
-  // 期间又产生新的历史消息并再次 trim → 触发第二次增强（快）
-  const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
-  msgs.push(makeTsMsg("user", threeDaysAgo, "三天前聊过股票"));
-  msgs.push(makeTsMsg("assistant", threeDaysAgo, "当时建议观望"));
+  // 期间又产生新消息并再次 trim → 超过「窗口12+折叠批6」再次触发折叠/增强（快）。
+  // 首次折叠后剩 12 条，需再推 ≥7 条才会再次超过阈值。
+  const now2 = new Date();
+  for (let i = 1; i <= 8; i++) {
+    msgs.push(makeTsMsg("user", now2, `第二批消息 ${i}`));
+  }
   store.trimThread(msgs, undefined, "session-b");
 
   // 等待第二次增强完成并回写
@@ -234,21 +247,23 @@ test("ChatThreadStore: 未注入 summarizer 时保留已有 recap 行且不生�
   );
 });
 
-test("ChatThreadStore: 无同步 recap 时 LLM 增强插入到 system 之后", async () => {
+test("ChatThreadStore: LLM 增强后 recap 回写且位于 system 之后", async () => {
   const store = new ChatThreadStore(null);
   store.setRecapSummarizer(async () => ["用户前天计划爬山（LLM摘要）"]);
-  const msgs = registeredThread(store, "session-e"); // 首次跨天，无已有 recap 行
+  const msgs = registeredThread(store, "session-e"); // 首次折叠，无已有 recap 行
   store.trimThread(msgs, undefined, "session-e");
 
+  // 同步阶段已生成原文占位 recap，且位于 system 之后
   const before = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.equal(before, undefined, "同步阶段不应有 recap（无已有行）");
+  assert.ok(before, "同步阶段应有兜底 recap");
+  assert.equal(msgs.indexOf(before!), 1, "recap 应在 system 之后");
 
   await new Promise((r) => setTimeout(r, 20));
   const after = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.ok(after, "LLM 增强完成后应插入 recap 消息");
+  assert.ok(after, "LLM 增强完成后应保留 recap 消息");
   assert.ok(
     typeof after!.content === "string" && after!.content.includes("LLM摘要"),
-    "插入的 recap 应包含 LLM 摘要内容",
+    "recap 应更新为 LLM 摘要内容",
   );
-  assert.equal(msgs.indexOf(after!), 1, "recap 应插在 system 之后");
+  assert.equal(msgs.indexOf(after!), 1, "recap 应保持在 system 之后");
 });

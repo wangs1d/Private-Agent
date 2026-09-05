@@ -44,6 +44,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "abilities",
   "agentCaps",
   "worldCaps",
+  "userUnderstanding",
   "userProfileSummary",
   "memoryInventory",
   "relationshipMemory",
@@ -145,6 +146,9 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   const abilitiesCombined = [m.abilities, m.agentCaps].filter(Boolean).join("\n");
   if (abilitiesCombined) stablePrefix.push(`【能力与工具】\n${abilitiesCombined}`);
   if (m.worldCaps) stablePrefix.push(`【Agent World】\n${m.worldCaps}`);
+  // 用户理解档案（理解档案 store）：agent 对用户理解的结构化沉淀，先于派生画像
+  // 注入——块内自带使用指令（用户相关话题以此为准；玩笑/粉丝式称呼不当事实转述）。
+  if (m.userUnderstanding) stablePrefix.push(m.userUnderstanding);
   if (m.userProfileSummary) stablePrefix.push(`【用户长期画像】\n${m.userProfileSummary}`);
   if (m.memoryInventory) stablePrefix.push(`【记忆目录】\n${m.memoryInventory}`);
   // 记忆整理家族（5→1）：夜间整理的跨会话背景记忆。块内保留源标题作小节标签。

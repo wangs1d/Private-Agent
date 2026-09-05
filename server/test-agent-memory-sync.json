@@ -1,12 +1,13 @@
 {
   "sessions": {
-    "actor-4": {
-      "revision": 2,
+    "actor-2": {
+      "revision": 4,
       "entries": {
-        "memory_summary": "[2026-09-04T19:17:25.430Z] [topic:general] I live in Shanghai\n[2026-09-04T19:17:25.431Z] [topic:general] I live in Beijing",
+        "memory_summary": "[2026-09-05T07:34:59.941Z] [topic:general] I will continue following up on the context fix\n[2026-09-05T07:34:59.942Z] [topic:general] todo: verify continuity after 100 messages\n[2026-09-05T07:34:59.942Z] [topic:general] todo: prepare regression notes for memory rollout",
         "memory_summary_forgotten": "",
-        "memory_facts": "[2026-09-04T19:17:25.431Z] [topic:general] I live in Beijing",
-        "session_recap": "[2026-09-04T19:17:25.430Z] [topic:general] I live in Shanghai\n[2026-09-04T19:17:25.431Z] [topic:general] I live in Beijing"
+        "memory_commitments": "",
+        "session_recap": "[2026-09-05T07:34:59.942Z] [topic:general] todo: prepare regression notes for memory rollout",
+        "memory_open_loops": "[2026-09-05T07:34:59.942Z] [topic:general] todo: prepare regression notes for memory rollout"
       }
     }
   }

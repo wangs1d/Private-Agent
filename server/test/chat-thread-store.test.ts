@@ -38,23 +38,118 @@ test("default thread window keeps trimmed context via session recap", () => {
   const thread = store.thread("chat-thread-store-test", "system");
   const serialized = JSON.stringify(thread);
 
-  // 新设计：trimByDayBoundary 把当天消息全保留，历史压成 [session-recap]。
-  // 测试中所有 turn 都是"今天"创建（appendTurn 注入 now 时间戳），无历史消息，
-  // 不触发 recap，走 smartTrimByTokens 裁剪到 maxMessages 范围内。
+  // 2026-09-05 近期窗口策略：超过「窗口12+折叠批6」后，最旧消息折叠进
+  // [session-recap]，原文仅保留最近 12 条（≈6 轮）。
   assert.ok(thread.length >= 13, `thread 应至少 13 条，实际 ${thread.length}`);
   // 裁剪后保留最近的消息（turn 89+ 应在窗口内）
   assert.match(serialized, /user turn 9\d/, "应保留最近的消息");
 });
 
-test("larger maxThreadMessages can retain 100 short turns", () => {
+test("recent-window policy: 大 maxThreadMessages 下超窗内容折叠进 recap", () => {
   const store = buildStoreWithTurns(100, 200);
   const thread = store.thread("chat-thread-store-test", "system");
   const serialized = JSON.stringify(thread);
 
-  assert.equal(thread.length, 201);
+  // 2026-09-05 新契约：原文保留量按「近期窗口」而非 maxThreadMessages——
+  // 超过 窗口(12)+折叠批(6) 即把最旧消息折叠进 [session-recap]。
+  // 折叠按批触发 → 稳态窗口在 12~20 条间锯齿波动，thread = system + recap + 窗口。
+  // maxThreadMessages 退化为兜底上限（token/条数超限时才生效）。
+  assert.ok(thread.length <= 22, `thread 应 ≤ 22（system + recap + 窗口峰值20），实际 ${thread.length}`);
+  assert.ok(serialized.includes("[session-recap]"), "应有 recap 摘要消息");
+  // 折叠进 recap 的内容仍以原文占位行保留（turn 1 是最旧被折叠消息，进 recap 首行）
   assert.equal(serialized.includes("EARLY_SECRET=alpha-7319"), true);
-  assert.equal(serialized.includes("TENTH_KEY=beta-4821"), true);
-  assert.equal(serialized.includes("MIDDLE_KEY=gamma-2500"), true);
+  // 最近一轮原样保留
+  assert.ok(serialized.includes("user turn 100"), "最近一轮应原文保留");
+});
+
+// ---- 滑动窗口 + 增量摘要（2026-09-05 新契约）----
+
+test("增量摘要：LLM 合并成功后吸收待归纳区并清空 [unsummarized]", async () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "incremental-summary-test";
+  let capturedExisting: string[] = [];
+  let sawPendingInInput = false;
+  store.setRecapSummarizer(async (ctx) => {
+    capturedExisting = [...ctx.existingLines];
+    sawPendingInInput = capturedExisting.some((l) => l.includes("user turn 1"));
+    return ["[2026/09/05 10:00] 合并后的关键事实"];
+  });
+
+  for (let i = 1; i <= 20; i++) {
+    store.appendTurn(sessionId, "system", { text: `user turn ${i}` }, `assistant turn ${i}`, 200);
+  }
+  // enhanceRecap 为 fire-and-forget，等待微任务链完成
+  await new Promise((resolve) => setImmediate(() => setImmediate(() => resolve(null))));
+
+  const thread = store.thread(sessionId, "system");
+  const recap = thread.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap, "应存在摘要消息");
+  const content = String(recap!.content);
+  assert.ok(content.includes("合并后的关键事实"), `摘要区应替换为 LLM 合并结果，实际: ${content}`);
+  assert.ok(!content.includes("[unsummarized]"), "待归纳区应被增量摘要吸收清空");
+  assert.ok(sawPendingInInput, "合并输入应包含待归纳的原文占位行（不静默丢内容）");
+  assert.ok(capturedExisting.length > 0);
+});
+
+test("无摘要器降级：滑出窗口的内容以原文占位行保留在待归纳区，不静默丢失", () => {
+  const store = new ChatThreadStore(null);
+  const sessionId = "pending-fallback-test";
+  for (let i = 1; i <= 20; i++) {
+    store.appendTurn(sessionId, "system", { text: `FALLBACK_KEY_${i} 事件${i}` }, `assistant ${i}`, 200);
+  }
+  const serialized = JSON.stringify(store.thread(sessionId, "system"));
+  assert.ok(serialized.includes("[unsummarized]"), "应存在待归纳区");
+  assert.ok(serialized.includes("FALLBACK_KEY_1"), "最旧的滑出内容应以原文占位保留");
+});
+
+test("跨天恢复：recap 摘要块不被重打「刚刚」时间戳（时间感知）", () => {
+  const recapContent =
+    "[session-recap]\nEarlier conversation recap:\n- [2026/09/01 10:00] 用户提到计划A";
+  const persisted = [
+    { role: "user", content: "[ts:2026-09-01 09:58:00|周二|4d ago]\n你好" },
+    { role: "assistant", content: recapContent },
+  ];
+  const store = new ChatThreadStore({
+    loadRestoredMessages: () => persisted,
+    scheduleSave: () => {},
+    deleteSession: () => {},
+  } as never);
+  const thread = store.thread("restore-time-test", "system");
+  const recap = thread.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap, "恢复后应存在摘要消息");
+  const content = String(recap!.content);
+  assert.ok(!content.startsWith("[ts:"), `摘要块恢复时不应被打上当前时间戳（会被模型当「刚刚」），实际: ${content.slice(0, 60)}`);
+  assert.ok(content.includes("[2026/09/01 10:00]"), "摘要行绝对时间标签应原样保留");
+});
+
+test("跨天恢复：存量 recap 的相对标签按旧 ts 帧锚点迁移为绝对日期（时间感知）", () => {
+  // 旧版数据：折叠日 2026-09-03 落盘的相对标签行 + 旧版恢复时打的 [ts:] 帧
+  const recapContent =
+    "[session-recap]\nEarlier conversation recap:\n- [今天] 用户要出差杭州\n- [昨天] 完成V1交付";
+  const persisted = [
+    {
+      role: "assistant",
+      content: `[ts:2026-09-03 18:00:00|周四|2d ago]\n${recapContent}`,
+    },
+  ];
+  const store = new ChatThreadStore({
+    loadRestoredMessages: () => persisted,
+    scheduleSave: () => {},
+    deleteSession: () => {},
+  } as never);
+  const thread = store.thread("legacy-label-migrate-test", "system");
+  const recap = thread.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  assert.ok(recap, "恢复后应存在摘要消息");
+  const content = String(recap!.content);
+  assert.ok(
+    content.includes("[2026/09/03 周四] 用户要出差杭州"),
+    `「今天」应按锚点(09-03)换算为绝对日期，实际: ${content}`
+  );
+  assert.ok(
+    content.includes("[2026/09/02 周三] 完成V1交付"),
+    `「昨天」应按锚点(09-03)换算为绝对日期，实际: ${content}`
+  );
+  assert.ok(!content.includes("[今天]") && !content.includes("[昨天]"), "不应残留相对标签");
 });
 
 // ---- pin 回填（滑动窗口驱逐 → 优先级驱逐）----

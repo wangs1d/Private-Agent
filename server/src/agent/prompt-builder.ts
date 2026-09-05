@@ -1,4 +1,5 @@
-import { USER_AGENT_TOOL_SYSTEM_SUFFIX } from "@private-ai-agent/agent-world";
+import { buildUserAgentToolSystemSuffix } from "@private-ai-agent/agent-world";
+import { isAgentWorldSocialEnabled } from "../config/env.js";
 import {
   appendAgentAccessModeSystemSuffix,
   type AgentAccessMode,
@@ -66,8 +67,9 @@ const LIFE_STEWARD_SYSTEM_SUFFIX =
  *   agent-result-formatter 服务端生成卡片标记承担，不需要在 prompt 里教 LLM 自声明标记；
  * - 记忆块使用边界由 runtime-kernel buildSessionSystem 的 Memory 段 + prompt-assembler
  *   GLOBAL_MEMORY_RULE 承担。
+ * - MASTER_SUBAGENT_DELEGATE 死代码（marker + opts 字段）已删除：finalize 函数体
+ *   从未读取该字段，全仓库也无【主 Agent 调度】文本。
  */
-export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
 export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
 
 /**
@@ -151,7 +153,6 @@ export function buildCurrentTimePrompt(at: Date = new Date(), timezone?: string)
 
 export type FinalizeChatSystemPromptOpts = {
   tools?: boolean;
-  masterSubAgentDelegate?: boolean;
   /** 来自 `chat.user_message.agentAccessMode`；沙箱已废弃，恒为 full */
   agentAccessMode?: AgentAccessMode;
   desktopBridgeOnline?: boolean;
@@ -183,7 +184,7 @@ export function finalizeChatSystemPrompt(
   opts?: FinalizeChatSystemPromptOpts,
 ): string {
   // minimal 模式：只保留事实可靠性 + 访问权限说明。
-  // 【回复规则】【展示形式/富排版】已删除（见 MASTER_SUBAGENT_DELEGATE_MARKER 处说明）——
+  // 【回复规则】【展示形式/富排版】已删除（见文件顶部 MARKER 注释处说明）——
   // 回复风格由双模式人格承担，展示形式由 display-effect-router 服务端路由。
   // 工具调用规则（clock/search_web/voice/phone/master_invoke_sub_agent）已下沉到 tool schema description，
   // 通过 ToolSearch contextual profile 按需暴露给 LLM
@@ -219,7 +220,9 @@ export function finalizeChatSystemPrompt(
 export function appendAgentToolCallingSystemSuffix(systemContent: string): string {
   let out = systemContent;
   if (!out.includes(AGENT_TOOL_SYSTEM_SUFFIX_MARKER)) {
-    out += USER_AGENT_TOOL_SYSTEM_SUFFIX;
+    // Agent World 说明按社交开关组装（默认关）：省略被 filterSocialChatTools
+    // 过滤掉的 free_market/social/music 三行文案，避免教模型调用不存在的工具。
+    out += buildUserAgentToolSystemSuffix(isAgentWorldSocialEnabled());
   }
   if (!out.includes(CLOCK_TOOL_SYSTEM_SUFFIX_MARKER)) {
     out += CLOCK_TOOL_SYSTEM_SUFFIX;
@@ -534,7 +537,8 @@ export function sliceMemoryEntriesToPromptContext(
   if (memorySummary && memorySummary.length > maxChars) {
     memorySummary = `…（较早记录已截断）\n${memorySummary.slice(-maxChars)}`;
   }
-  const memoryCurrentMission = sortAndTruncateMemoryLines(str(entries["memory_current_mission"]), 240, 1, userQuery);
+  // memory_current_mission 不再产出 promptMemory.memoryCurrentMission 字段：
+  // prompt-assembler 从不渲染它（死路），KV mission 经 taskContext 一路注入生效。
   // #4 补齐相关度门槛：memory_facts / memory_preferences 与 commitments/open_loops 一致，
   // 仅在相关度 ≥ 0.3 时才注入（避免"用户档案"里的旧事实每轮无脑进当前上下文）。
   const memoryPreferences = sortAndTruncateMemoryLines(
@@ -575,7 +579,6 @@ export function sliceMemoryEntriesToPromptContext(
   if (values) out.values = values;
   if (abilities) out.abilities = abilities;
   if (memorySummary) out.memorySummary = memorySummary;
-  if (memoryCurrentMission) out.memoryCurrentMission = memoryCurrentMission;
   if (memoryPreferences) out.memoryPreferences = memoryPreferences;
   if (memoryFacts) out.memoryFacts = memoryFacts;
   if (memoryCommitments) out.memoryCommitments = memoryCommitments;

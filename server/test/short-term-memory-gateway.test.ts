@@ -38,8 +38,11 @@ test("casual follow-up does not inject stale task context", () => {
   );
 
   const promptContext = service.buildPromptContext(sessionId, "你在哪");
-  assert.ok(promptContext);
-  assert.doesNotMatch(promptContext!, /current-focus:/);
-  assert.doesNotMatch(promptContext!, /current-mission:/);
-  assert.doesNotMatch(promptContext!, /open-loops:/);
+  // 2026-09-05：incoming-turn 行（当前输入抄送）已删除——无任务延续的闲聊轮
+  // 可能没有任何可注入行而返回 undefined，语义上即「零过期上下文注入」。
+  if (promptContext) {
+    assert.doesNotMatch(promptContext, /current-focus:/);
+    assert.doesNotMatch(promptContext, /current-mission:/);
+    assert.doesNotMatch(promptContext, /open-loops:/);
+  }
 });

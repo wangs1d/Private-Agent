@@ -52,8 +52,13 @@ export type AgentPromptMemoryContext = {
   worldCaps?: string;
   /** BM25+Qdrant+RRF 融合后的履历/叙事摘录，供本轮推理引用 */
   narrativeRecall?: string;
+  /**
+   * 用户理解档案块（agent 对用户理解的结构化沉淀：topic + 理解句 + 性质标注
+   * + 演变历史）。被问及用户相关话题时以此为准，按性质回应（玩笑/粉丝式
+   * 称呼不当真实事实转述）。
+   */
+  userUnderstanding?: string;
   memorySummary?: string;
-  memoryCurrentMission?: string;
   memoryPreferences?: string;
   memoryFacts?: string;
   memoryCommitments?: string;
@@ -167,7 +172,6 @@ export type AgentPromptMemoryContext = {
    * 承诺注入【未兑现承诺】块——用户问"我这周要干嘛/有什么没办"时 agent
    * 直接可见，无需工具回查。无未兑现承诺时不注入（零开销）。
    */
-  commitmentBoard?: string;
   /**
    * 对话时间线事实（ConversationTimelineService）：首次对话时间 / 累计轮次 /
    * 最近一次对话时间。回答「第一次对话是什么时候 / 认识多久 / 上次聊什么」时
@@ -219,8 +223,6 @@ export type AgentStreamOptions = {
   chatToolsBuiltin?: ChatCompletionTool[];
   /** 替换默认内置工具列表（子 Agent 按能力过滤时使用） */
   chatToolsExtra?: ChatCompletionTool[];
-  /** 主 Agent 通过 function calling 委派子 Agent（追加调度说明 + master_invoke_sub_agent 工具） */
-  masterSubAgentDelegate?: boolean;
   /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
   agentAccessMode?: "sandbox" | "full";
   /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */

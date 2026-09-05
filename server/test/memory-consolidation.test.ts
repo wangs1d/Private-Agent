@@ -21,6 +21,13 @@ import {
 import { registerMemoryRecallTools } from "../src/tools/memory-recall-tools.js";
 import type { NarrativeMemoryPort } from "../src/services/narrative-memory-port.js";
 
+// 本文件全部为「unified 不可用回退路径」的行为锁定：统一抽取已默认启用，
+// 环境里有真实 API key 时高/低信号候选会走 extractUnified（决策由 LLM 给出，
+// 不再有本地启发式 overwrite）。关闭后 extractUnified 返回 null → 回退
+// decideMemoryWrite 启发式路径，测试恢复确定性（统一抽取路径的覆盖在
+// user-fact-registry.test.ts，注入 fake client）。
+process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED = "0";
+
 // ─── 原子写：pre-image .bak 备份 ───
 
 test("writeJsonAtomic: 覆盖写保留上一版完整 .bak 备份", async () => {
