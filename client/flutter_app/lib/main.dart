@@ -36,9 +36,11 @@ import "core/services/sphere_entity_controller.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
+import "core/services/window_bounds_preference.dart";
 import "core/services/ws_chat_service.dart";
 import "core/services/schedule_floating_launcher.dart";
 import "core/utils/play_url_utils.dart";
+import "features/gallery/gallery_page.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/chat/agent_profile_page.dart";
@@ -84,9 +86,17 @@ void main() async {
     unawaited(bootstrapWindowsWebView());
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
       await windowManager.ensureInitialized();
+      // 「固定打开时的大小」：首次启动（无历史）在默认 1280x800 基础上
+      // 向外扩展 0.1 倍（→1408x880，屏幕放不下则钳到工作区内）并居中；
+      // 之后按上次关闭前的窗口矩形还原（含最大化状态），大小不再被重置。
+      // WindowOptions 没有 position 字段，位置在 readyToShow 回调里还原。
+      final WindowBounds? savedBounds = await loadRestorableWindowBounds();
+      final Size initialSize = savedBounds == null
+          ? await firstLaunchWindowSize()
+          : Size(savedBounds.width, savedBounds.height);
       final WindowOptions options = WindowOptions(
-        size: const Size(1280, 800),
-        center: true,
+        size: initialSize,
+        center: savedBounds == null,
         backgroundColor: Colors.transparent,
         skipTaskbar: false,
         // 隐藏原生标题栏，由自绘的 AppWindowTitleBar 接管
@@ -94,8 +104,16 @@ void main() async {
         titleBarStyle: TitleBarStyle.hidden,
       );
       await windowManager.waitUntilReadyToShow(options, () async {
+        if (savedBounds != null) {
+          await windowManager.setPosition(Offset(savedBounds.x, savedBounds.y));
+        }
+        if (savedBounds?.maximized ?? false) {
+          // SW_MAXIMIZE 会顺带显示窗口，随后的 show() 是无害的幂等调用。
+          await windowManager.maximize();
+        }
         await windowManager.show();
         await windowManager.focus();
+        windowManager.addListener(WindowBoundsSaver.instance);
       });
     }
     runApp(const PrivateAiApp());
@@ -474,6 +492,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _calendarReloadSignal.dispose();
     _stopMessagePolling();
     _surfaceAutoHideTimer?.cancel();
+    _stopContinuousLocationTracking();
     _voiceOrbProcess?.kill();
     super.dispose();
   }
@@ -734,6 +753,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             });
           }
         }
+        // 持续定位配置（服务端 LOCATION_TRACKING_MODE=continuous 时随 session 绑定下发）：
+        // 客户端按 intervalSec 定时上报位置（source:"continuous"），供位置历史/
+        // 地理围栏/常去地点挖掘使用。隐私：服务端默认 ondemand 不下发本事件；
+        // 即使下发，用户未同意定位时定时器会自行停止。
+        if (type == "agent.location_tracking_config") {
+          _configureContinuousLocationTracking(payload);
+        }
         if (type == "connection_error") {
           SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
           final bool hadPendingTurn =
@@ -762,6 +788,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
         if (type == "ws_disconnected") {
           SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
+          // 断线时停掉持续定位定时器，避免离线期间的上报在重连后排队补发；
+          // 重连后服务端会随 session.init 重新下发 tracking_config 再启动。
+          _stopContinuousLocationTracking();
           if (_isAgentProcessing && _pendingAgentUserMessageId != null) {
             _disarmAgentReplyWatchdog();
             _handleAgentReplyTimeout(showSnackBar: false);
@@ -1586,7 +1615,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             unawaited(
               IncomingCallLauncher.show(
                 callerName: callerLabel,
-                subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
+                subtitle: (_agentName?.trim().isNotEmpty ?? false)
+                    ? _agentName!.trim()
+                    : "Agent",
                 callerInitial:
                     callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
                 ringTimeoutMs: ringMs,
@@ -1738,7 +1769,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             unawaited(
               IncomingCallLauncher.show(
                 callerName: callerLabel,
-                subtitle: ringStyle == "reminder" ? "语音提醒" : "来电中",
+                subtitle: (_agentName?.trim().isNotEmpty ?? false)
+                    ? _agentName!.trim()
+                    : "Agent",
                 callerInitial:
                     callerLabel.isNotEmpty ? callerLabel.characters.first : "A",
                 ringTimeoutMs: ringMs,
@@ -2794,6 +2827,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 图库入口：与好友/消息/日程一致，从右侧滑出 split 双栏面板
+  /// （照片网格浏览 / 上传 / 一键美颜）。
+  void _openGalleryPanel() {
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.gallery;
+      // 保存当前 splitRatio，关闭时恢复
+      _previousSplitRatio = _splitRatio;
+      // 保存 side 模式下的原右面板宽度，关闭时恢复
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.gallery.defaultSplitRatio;
+    });
+  }
+
   /// 常用工具「手机」入口：跳转到"真实手机"功能页
   /// 与"虚拟电话"区分——这里对接的是用户自己的手机（拨号/通讯录/短信等）。
   void _openPhoneDevicesDialog() {
@@ -3745,7 +3792,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       OutgoingCallLauncher.show(
         callerName: _phoneCallToActorId ?? "Agent",
         subtitle:
-            message?.trim().isNotEmpty == true ? message!.trim() : "姝ｅ湪鍛煎彨",
+            message?.trim().isNotEmpty == true ? message!.trim() : "正在接通",
         callerInitial: (_phoneCallToActorId?.isNotEmpty ?? false)
             ? _phoneCallToActorId!.characters.first
             : "A",
@@ -3789,6 +3836,56 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _ws.sendEvent("client.location_report", loc.toJson());
     } catch (_) {
       // 定位失败静默：Agent 运行中需要位置时会走 agent.location_request 按需再拉
+    }
+  }
+
+  /// 持续定位定时器（agent.location_tracking_config 驱动）。
+  Timer? _continuousLocationTimer;
+
+  /// 服务端持续定位配置：continuous 时启动定时上报，其余情况确保停止。
+  void _configureContinuousLocationTracking(Map<String, dynamic> payload) {
+    final String mode = payload["mode"]?.toString() ?? "";
+    if (mode != "continuous") {
+      _stopContinuousLocationTracking();
+      return;
+    }
+    int intervalSec = (payload["intervalSec"] as num?)?.toInt() ?? 300;
+    if (intervalSec < 30) intervalSec = 30;
+    if (intervalSec > 3600) intervalSec = 3600;
+    _startContinuousLocationTracking(intervalSec);
+  }
+
+  void _startContinuousLocationTracking(int intervalSec) {
+    _continuousLocationTimer?.cancel();
+    _continuousLocationTimer = Timer.periodic(
+      Duration(seconds: intervalSec),
+      (Timer t) => unawaited(_reportContinuousLocation()),
+    );
+  }
+
+  void _stopContinuousLocationTracking() {
+    _continuousLocationTimer?.cancel();
+    _continuousLocationTimer = null;
+  }
+
+  /// 持续模式单次上报：拉新 GPS（绕过展示缓存），静默失败，下个周期自然重试。
+  Future<void> _reportContinuousLocation() async {
+    try {
+      final bool? consent = await ClientLocationService.getLocationConsent();
+      if (consent != true) {
+        // 用户撤回定位同意：立刻停表，直到重新授权前不再产生任何位置上报
+        _stopContinuousLocationTracking();
+        return;
+      }
+      final ClientLocationPayload? loc =
+          await ClientLocationService.getCurrentLocationForChat();
+      if (loc == null) return;
+      _ws.sendEvent("client.location_report", <String, dynamic>{
+        "source": "continuous",
+        ...loc.toJson(),
+      });
+    } catch (_) {
+      // 单次失败静默
     }
   }
 
@@ -3984,8 +4081,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 处理服务端 surface.show：按 surface 名召唤对应悬浮卡（Surface-on-Demand）。
   /// 目前支持 today_schedule（今日安排悬浮窗）；未知 surface 静默忽略。
   /// 数据由客户端自取（_loadTodayScheduleFuture），服务端只下发指令不搬日程数据。
+  ///
+  /// 语音模式（voice-orb 常驻）下让位：悬浮卡改由 orb 在竖波悬浮件旁渲染
+  /// （orb 自己收 surface.show 并拉 /api/schedule/today），这里不再召唤
+  /// 原生日程悬浮窗，避免双份呈现。
   Future<void> _handleSurfaceShow(Map<String, dynamic> payload) async {
     if (kIsWeb || !Platform.isWindows) return;
+    if (_voiceOrbReady) {
+      debugPrint("[surface.show] voice mode active, delegated to voice orb");
+      return;
+    }
     final String surface = payload["surface"]?.toString().trim() ?? "";
     if (surface != "today_schedule") return;
     final int ttlSeconds =
@@ -4853,6 +4958,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onSchedule: _openSchedulePanel,
         onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
+        onGallery: _openGalleryPanel,
         messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
         // 天气面板实时位置 → 上报服务端缓存，供 Agent 按需复用（无 jobId 纯上报）
         onReportLocation: (location) {
@@ -4971,6 +5077,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         final AgentResultData? plan = _travelPlan;
         if (plan == null) return const SizedBox.shrink();
         return TravelPlanPanel(data: plan);
+      case RightPanelKind.gallery:
+        // 嵌入模式：面板顶栏已有"图库"标题，图库页不再渲染自带 AppBar
+        return const GalleryPage(embedded: true);
       case null:
         return const SizedBox.shrink();
     }

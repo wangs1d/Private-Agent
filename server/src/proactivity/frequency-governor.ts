@@ -22,6 +22,9 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   weather_alert: 30 * 60 * 1000,        // 恶劣天气预警：预警类需即时触达，30min 冷却防同一场雨连发
   life_reminder: 4 * 60 * 60 * 1000,    // 生活提醒（重要日子/预算超支/节律提醒等）：4h 冷却
   monthly_report: 24 * 60 * 60 * 1000,  // 月度报告（消费月报等）：每日最多 1 次
+  // ── 位置场景（方案 D）──
+  location_arrival: 6 * 60 * 60 * 1000, // 到达常去地点问候：同地点 6h 一次（别每次到家都唠叨）
+  geofence_event: 30 * 60 * 1000,       // 地理围栏动作的 speak 告知：30min 兜底（围栏层自有防抖）
 };
 
 /**

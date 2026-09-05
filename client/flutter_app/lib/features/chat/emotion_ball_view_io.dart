@@ -23,6 +23,8 @@ class EmotionBallView extends StatefulWidget {
     this.size,
     this.bodyColor,
     this.eyeColor,
+    this.showEffects = false,
+    this.eyeScale,
   });
 
   /// 当前表情 ID(emotion-ball 的 emotionId)。
@@ -35,6 +37,13 @@ class EmotionBallView extends StatefulWidget {
   /// 球体主题色(传入后眼球默认白色);null 时使用 emotion-ball 默认配色。
   final Color? bodyColor;
   final Color? eyeColor;
+
+  /// 彩带/撒花/zzz 等特效层,默认关闭:特效会画出球体范围之外,
+  /// 小尺寸下被裁切成杂色碎片。
+  final bool showEffects;
+
+  /// 眼睛占比放大系数(小尺寸下保证表情可读),null 时用引擎默认 1。
+  final double? eyeScale;
 
   @override
   State<EmotionBallView> createState() => _EmotionBallViewState();
@@ -57,11 +66,12 @@ class _EmotionBallViewState extends State<EmotionBallView> {
   /// 生成注入 boot 配置后的宿主 HTML(初始表情 / 体色在加载时一次性写入)。
   Future<String> _buildHostHtml() async {
     final String html = await _loadHostHtml();
-    final Map<String, String> boot = <String, String>{
+    final Map<String, Object?> boot = <String, Object?>{
       "emotion": widget.emotion,
-      if (widget.bodyColor != null)
-        "bodyColor": _hex(widget.bodyColor!),
+      if (widget.bodyColor != null) "bodyColor": _hex(widget.bodyColor!),
       if (widget.eyeColor != null) "eyeColor": _hex(widget.eyeColor!),
+      if (widget.showEffects) "effects": true,
+      if (widget.eyeScale != null) "eyeScale": widget.eyeScale,
     };
     return html.replaceAll("__BALL_BOOT_JSON__", jsonEncode(boot));
   }
@@ -107,8 +117,9 @@ class _EmotionBallViewState extends State<EmotionBallView> {
     super.didUpdateWidget(oldWidget);
     if (!Platform.isWindows) return;
     if (widget.bodyColor != oldWidget.bodyColor ||
-        widget.eyeColor != oldWidget.eyeColor) {
-      // 主题色只在引擎构造时生效,颜色变化需要重建页面。
+        widget.eyeColor != oldWidget.eyeColor ||
+        widget.showEffects != oldWidget.showEffects) {
+      // 主题色 / 特效开关只在引擎构造时生效,变化需要重建页面。
       _controller?.dispose();
       _controller = null;
       unawaited(_initWebView());
@@ -140,17 +151,14 @@ class _EmotionBallViewState extends State<EmotionBallView> {
         size: widget.size,
         bodyColor: widget.bodyColor,
         eyeColor: widget.eyeColor,
+        showEffects: widget.showEffects,
+        eyeScale: widget.eyeScale,
       );
     }
     final WebviewController? controller = _controller;
     if (_error != null || controller == null) {
-      // 初始化中或失败:渲染静态占位圆点,避免布局跳动。
-      return fallback.EmotionBallView(
-        emotion: widget.emotion,
-        size: widget.size,
-        bodyColor: widget.bodyColor,
-        eyeColor: widget.eyeColor,
-      );
+      // 初始化中或失败:保持占位尺寸但完全透明,避免出现任何杂色图形。
+      return SizedBox(width: widget.size, height: widget.size);
     }
     return SizedBox(
       width: widget.size,

@@ -7,7 +7,8 @@ import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
 import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
-import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
+import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
+import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sqlite-store.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
 import type { InferenceNode } from "../brain/types.js";
 
@@ -27,10 +28,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-/** 向量缓存（进程内），key = 文本指纹，TTL 30min，避免重复算 embedding */
-const embeddingCache = new Map<string, { vector: number[]; ts: number }>();
-const EMBEDDING_CACHE_TTL_MS = 30 * 60 * 1000;
-
 /**
  * 异步计算文本的真 embedding（方案 C 核心）。
  * 无 API key 或 key 是占位符时返回 null（调用方降级到原逻辑）。
@@ -40,24 +37,14 @@ async function computeEmbedding(text: string): Promise<number[] | null> {
   const apiKey =
     process.env.AGENT_EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
   if (isPlaceholderApiKey(apiKey)) return null;
-  const cacheKey = semanticFingerprint(text) || text.slice(0, 64);
-  const now = Date.now();
-  const cached = embeddingCache.get(cacheKey);
-  if (cached && now - cached.ts < EMBEDDING_CACHE_TTL_MS) {
-    return cached.vector;
-  }
+  // P1-8：缓存/并发去重统一走 openai-embedding-client 的 embedThroughCache
+  // （此前这里还有一层本地 Map 缓存，双重缓存且跨层不共享）
   try {
-    const model = resolveEmbeddingModel();
     // 不显式传 apiKey：让 client 内部 resolveEmbeddingEndpoint 统一走 AGENT_EMBEDDING_API_KEY，
     // 避免用对话 LLM key（OPENAI_API_KEY，如 DeepSeek）去打 embedding 端点导致 401。
-    const r = await fetchOpenAiCompatibleEmbedding({
-      model,
-      input: text,
-      // embedding 仅作检索增强：给短超时，慢/失败时降级到本地关键词检索（cosineLikeScore），
-      // 避免把 buildRecall 拖到数秒，进而导致对话链路的记忆注入（prepareNarrativeRecall）超时失败。
-      timeoutMs: 1200,
-    });
-    embeddingCache.set(cacheKey, { vector: r.vector, ts: now });
+    // embedding 仅作检索增强：给短超时，慢/失败时降级到本地关键词检索（cosineLikeScore），
+    // 避免把 buildRecall 拖到数秒，进而导致对话链路的记忆注入（prepareNarrativeRecall）超时失败。
+    const r = await fetchOpenAiCompatibleEmbedding({ input: text, timeoutMs: 1200 });
     return r.vector;
   } catch (err) {
     console.log(`[HumanLikeMemory] computeEmbedding 失败: ${err}`);
@@ -686,6 +673,8 @@ export class HumanLikeMemoryService {
   private store: HumanLikeMemoryStoreShape = structuredClone(DEFAULT_STORE);
   private policy: HumanLikeMemoryPolicyFile = structuredClone(DEFAULT_POLICY);
   private persistChain: Promise<void> = Promise.resolve();
+  /** P1-9：SQLite 行级持久化（null = JSON 文件模式） */
+  private graphPersist: GraphSqlitePersistence | null = null;
   private policyWatcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
   private readonly telemetry = {
@@ -736,15 +725,15 @@ export class HumanLikeMemoryService {
     text: string,
     source: string,
     opts?: { context?: MemoryContextKind; domain?: string; metadata?: Record<string, unknown> },
-  ): Promise<void> {
+  ): Promise<string | null> {
     const start = Date.now();
     const summary = text.trim().replace(/\s+/g, " ");
-    if (!summary || summary.length < 6) return;
+    if (!summary || summary.length < 6) return null;
 
     const context = opts?.context ?? "main";
     const domainId = opts?.domain ?? inferDomain(summary, source, context);
     const domainPolicy = this.policy.domains[domainId];
-    if (domainPolicy?.enabled === false || domainPolicy?.retired === true) return;
+    if (domainPolicy?.enabled === false || domainPolicy?.retired === true) return null;
 
     const kind = inferNodeKind(summary, source);
     const fingerprint = semanticFingerprint(summary) || normalizeMemoryLine(summary);
@@ -781,7 +770,7 @@ export class HumanLikeMemoryService {
       this.recordWriteLatency(start);
       // 方案 C：re-ingest 时也异步更新 embedding（summary 可能已变）
       void this.enhanceNodeWithEmbedding(existing.id, summary);
-      return;
+      return existing.id;
     }
 
     const nodeId = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -828,6 +817,7 @@ export class HumanLikeMemoryService {
     // 方案 C：异步计算真 embedding 覆盖 vectorFingerprint，并重建该节点边
     // 不阻塞主流程，计算完成后增强图谱语义关联质量
     void this.enhanceNodeWithEmbedding(nodeId, summary);
+    return nodeId;
   }
 
   /**
@@ -1059,6 +1049,20 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 合并写入节点 metadata（方案 A memory-bridge / 方案 D provenance 使用）：
+   * 记录 Mem0 linkage（mem0Ids）与作废标记（overridden）等跨层关联信息。
+   * 浅合并：同名 key 以 patch 为准；数组 key（如 mem0Ids）由调用方自行去重后传入。
+   */
+  attachNodeMetadata(actorId: string, nodeId: string, patch: Record<string, unknown>): boolean {
+    const node = this.store.nodes[nodeId];
+    if (!node || node.actorId !== actorId) return false;
+    node.metadata = { ...(node.metadata ?? {}), ...patch };
+    node.lastAccessedAt = nowIso();
+    this.schedulePersist();
+    return true;
+  }
+
+  /**
    * 查询给定节点中处于可再唤醒状态（downranked / cold）的节点 ID。
    * 供 MemoryCortex 召回后触发 ForgettingController.reawakenAndStrengthen：
    * 只有被召回命中的褪色记忆才值得反弹，其余节点维持遗忘曲线。
@@ -1262,6 +1266,26 @@ export class HumanLikeMemoryService {
   }
 
   private async loadStore(): Promise<void> {
+    // P1-9：SQLite 行级持久化（hash-diff，AGENT_HUMAN_MEMORY_STORE=json 回退旧文件）
+    if (resolveHumanMemoryStoreMode() === "sqlite") {
+      try {
+        this.graphPersist = new GraphSqlitePersistence(this.filePath);
+        const { data, hashes } = await this.graphPersist.load();
+        this.store = {
+          version: typeof data?.version === "number" ? data.version : DEFAULT_STORE.version,
+          domains: { ...this.policy.domains, ...((data?.domains ?? {}) as HumanLikeMemoryStoreShape["domains"]) },
+          nodes: (data?.nodes ?? {}) as HumanLikeMemoryStoreShape["nodes"],
+          edges: (data?.edges ?? {}) as HumanLikeMemoryStoreShape["edges"],
+          versions: (data?.versions ?? {}) as HumanLikeMemoryStoreShape["versions"],
+          communities: (data?.communities ?? {}) as HumanLikeMemoryStoreShape["communities"],
+        };
+        this.graphPersist.setHashes(hashes);
+        return;
+      } catch (err) {
+        console.warn("[HumanLikeMemory] SQLite 持久层初始化失败，回退 JSON:", err);
+        this.graphPersist = null;
+      }
+    }
     try {
       const raw = await readFile(this.filePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<HumanLikeMemoryStoreShape>;
@@ -1342,6 +1366,8 @@ export class HumanLikeMemoryService {
     }
     // 等待挂起的持久化链完成，避免测试目录被 rm 时丢数据
     await this.persistChain;
+    this.graphPersist?.close();
+    this.graphPersist = null;
   }
 
   private async persistPolicy(): Promise<void> {
@@ -1349,6 +1375,21 @@ export class HumanLikeMemoryService {
   }
 
   private schedulePersist(): void {
+    if (this.graphPersist) {
+      // SQLite 行级持久化：hash-diff 只写脏行（P1-9）
+      const snapshot = {
+        version: this.store.version,
+        domains: this.store.domains,
+        nodes: this.store.nodes,
+        edges: this.store.edges,
+        versions: this.store.versions,
+        communities: this.store.communities,
+      };
+      this.persistChain = this.persistChain.then(async () => {
+        this.graphPersist!.save(snapshot);
+      });
+      return;
+    }
     this.persistChain = this.persistChain.then(async () => {
       await writeJsonAtomic(this.filePath, this.store);
     });

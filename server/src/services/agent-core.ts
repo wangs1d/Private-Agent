@@ -11,13 +11,9 @@ import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
+import type { LocationHistoryService } from "./location-history-service.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
-import type { SemanticIntentParser, SemanticIntent } from "./semantic-intent-types.js";
-import type { SemanticIntentService } from "./semantic-intent-service.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
-
-/** 意图澄清置信度阈值：低于此值且 clarificationNeeded 时触发澄清反问 */
-const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 
 /**
  * 本模式职责人格（fast/complex 差异化 persona，2026-08-24 引入）。
@@ -38,7 +34,7 @@ const CLARIFY_CONFIDENCE_THRESHOLD = 0.55;
 // 写数据/多步/搜索办不完全——消除两套指令打架导致模型两头都不调的静默失败。
 const FAST_MODE_ROLE_GUIDANCE = `你现在是对话主导的那个"脑"，这轮聊天里你就是本人。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。别一上来就分类、列选项、反问三连。
-- 像朋友说话：日常闲聊用口语短句、一句一顿，两三句就够，不客服腔、不"首先其次"、不堆砌热情。但检索/查证/对比/攻略/整理类回复必须充分展开：信息用足、按主题分节，可用 Markdown 标题/加粗/表格排版，禁止为求短丢掉用户想看的细节；语气仍像朋友，不写汇报腔。
+- 像朋友说话：默认口语短句、一句一顿，多数回合两三句就够，拆成分条推送；不总结、不客服腔、不"首先其次"、不堆砌热情。唯一例外：本轮真的调了搜索/抓取工具拿到结果、或用户明确要攻略/对比/整理/报告——这时才充分展开（按主题分节、Markdown 排版，信息用足，语气仍像朋友，不写汇报腔）；拿不准就按短句回。
 - 要查实时信息（新闻、某人近况、价格、热搜等）先自己调 search_web 搜真实结果再答；要找照片/图片就调 search_images。不要凭印象猜，也不要不管什么都转交后台。只有纯闲聊、情绪交流、观点表达、以及你确信不查也能答的常识问题，才直接回答。
 - 搜索失败别含糊收场：先换个关键词或换 search_web 再试一次；确实办不成或要写数据（日程/提醒/发消息/下单）、要多步操作、要多来源核实深挖时，才调用 agent.escalate_to_complex（参数里写一句原因）转交后台，转交后这轮不再输出其他内容。绝不编造"我查到了/搜了下/结果是"。
 - 对方问得宽泛时别把球踢回去要方向：自己挑一个最可能的角度聊起来，末尾一句"你想聊哪块我再接着说"就够。一轮最多一个问句，且是真好奇才问。
@@ -78,6 +74,7 @@ import type {
 } from "./user-personalization/user-personalization-service.js";
 import {
   type TaskExecutionPlan,
+  isPlanExecuteLoopEnabled,
   planExecuteSessionId,
   runPlanExecuteLoop,
 } from "../agent/plan-execute-loop.js";
@@ -112,9 +109,7 @@ import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.
 import { getDailyJournalService, type JournalHit } from "./daily-journal-service.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
-import { determineSegmentable, type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
-import { isActionableTaskRequest } from "../agent/task-intent.js";
-import { shouldUseSimpleToolFastLane } from "../agent/simple-task.js";
+import { type LlmExecutionMode, type RouteDecision } from "../agent/task-router.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import {
   MEMORY_RECALL_HINT_RE,
@@ -133,25 +128,8 @@ import { stripInternalControlTags } from "../external-model/stream-chat-helpers.
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
 import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orchestrator.js";
 import { getAgentTaskStore } from "./agent-task-store.js";
-import { LoopOrchestrator } from "../agent/loop/loop-orchestrator.js";
-import {
-  ReactLoopStrategy,
-  PlanExecuteLoopStrategy,
-  type LoopStrategy,
-} from "../agent/loop/loop-strategy.js";
-import { DefaultTerminationPolicy } from "../agent/loop/default-termination.js";
-import { DefaultRecoveryPolicy } from "../agent/loop/default-recovery.js";
-import { DefaultProgressTracker } from "../agent/loop/default-progress.js";
-import { DefaultEscalationPolicy } from "../agent/loop/default-escalation.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
-import { getFastLaneTools } from "../external-model/openai-compatible-tool-loop.js";
-import {
-  ESCALATION_TOOL_NAME,
-  formatEscalationAttempts,
-  isEscalationSignal,
-  parseEscalationPayload,
-} from "../tools/escalation-tool.js";
-import { isLoopOrchestratorEnabled, getLoopMaxReplans } from "../config/env.js";
+import { getTaskHub } from "../task-plane/task-hub.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { StreamOptionsBuilder } from "../agent/execution/stream-options-builder.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
@@ -168,55 +146,8 @@ export type { AgentReply } from "../agent/types.js";
 const META_CONVERSATION_RECALL_RE =
   /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
 
-/* ------------------------------------------------------------------ *
- * fast 路径流式 delta 闸门（2026-08-29）                              *
- * ------------------------------------------------------------------ *
- * 背景：fast → complex 车道内升级路径在升级判定通过前，LLM 已经在
- * 流式回文本（"印尼一周..."），原实现在判定升级时也来不及撤销——已
- * 推给前端的气泡会留在屏幕上，造成"上一轮转入规划任务..."这种不
- * 一致体感。
- *
- * 解决：fast 路径的 onAssistantDelta 改为「暂存」：
- *   - 升级时整段丢弃（discard）
- *   - 未升级时一次性推给前端（flush）
- *
- * 之所以用暂存而非逐 chunk 直推：升级判定取决于 fast 完成后才能确认
- * 的「升级哨兵」（isEscalationSignal(full)），逐 chunk 直推会提早把
- * 内容暴露到前端，事后无法回收。
- * ------------------------------------------------------------------ */
-
-type FastPathDeltaGate = {
-  feed: (delta: string) => void;
-  flush: () => void;
-  discard: () => void;
-};
-
-let _activeFastGate: FastPathDeltaGate | null = null;
-
-function createFastPathDeltaGate(
-  real: ((delta: string) => void) | undefined,
-): (delta: string) => void {
-  let buffer = "";
-  const gate: FastPathDeltaGate = {
-    feed(delta: string) {
-      buffer += delta;
-    },
-    flush() {
-      if (buffer && real) real(buffer);
-      buffer = "";
-      _activeFastGate = null;
-    },
-    discard() {
-      buffer = "";
-      _activeFastGate = null;
-    },
-  };
-  _activeFastGate = gate;
-  return (delta) => gate.feed(delta);
-}
-
-/** P0 时间窗口查询感知：用户问"昨天/上周做了什么"或询问事件经过时，把时间词锚进召回 query，
- *  提高对应时间窗口内 episodic 记忆的召回概率（配合注入侧的相对时间标注闭环）。 */
+// P0 时间窗口查询感知：用户问"昨天/上周做了什么"或询问事件经过时，把时间词锚进召回 query，
+// 提高对应时间窗口内 episodic 记忆的召回概率（配合注入侧的相对时间标注闭环）。
 const TIME_WINDOW_WORD_RE = /昨天|前天|大前天|上周|上礼拜|上个月|前几天|这周|本周|今天早上|今天下午|今天晚上/;
 const EVENT_INQUIRY_RE = /做了|干了|说了|聊了|发生了|安排了|干了啥|做了什么|怎么样了/;
 
@@ -255,7 +186,7 @@ export type HandleUserMessageOptions = {
    */
   signal?: AbortSignal;
   /**
-   * 外层(WS 层)已计算的路由决策。传入时 agent-core 复用,避免重复调 routeLlmExecution。
+   * 外层(WS 层)已计算的路由决策。传入时 agent-core 复用，同轮不重复调语义路由（缓存兜底）。
    * 未传时 agent-core 内部自行调用(向后兼容)。
    */
   routeDecision?: RouteDecision;
@@ -266,8 +197,6 @@ type ShortTermTurnContext = {
   resumedTask: boolean;
 };
 
-// Loop Orchestrator 启用开关已移至 config/env.ts 的 isLoopOrchestratorEnabled（默认开启）。
-
 export class AgentCore {
   private readonly promptContextBuilder: PromptContextBuilder;
   private readonly turnLifecycle: TurnLifecycle;
@@ -276,17 +205,19 @@ export class AgentCore {
   private readonly turnFinalizer: TurnFinalizer;
   private readonly toolPolicyResolver: ToolPolicyResolver;
   private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;
-  private readonly loopOrchestrator: LoopOrchestrator | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
+  private locationHistory: LocationHistoryService | null = null;
+  /** prompt 按要 GPS 的上次尝试时间（失败冷却用，per-actor）。 */
+  private promptLocationLastAttemptAt = new Map<string, number>();
+  /** 常去地点文本的进程内缓存（DBSCAN 全量扫 7 天样本，不必每轮重算）。 */
+  private frequentPlacesCache = new Map<string, { text: string | undefined; at: number }>();
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: ClientPushPort | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
   /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
   private brainCenter: BrainCenter | null = null;
-  /** 语义意图解析器（LLM 理解用户真实意图；可选注入） */
-  private semanticIntentParser: SemanticIntentParser | null = null;
   /** 主动性模块（ProactivityHub）：对话轮观察等主动触发的统一入口 */
   private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
 
@@ -306,11 +237,9 @@ export class AgentCore {
     private readonly shortTermMemoryGateway: ShortTermMemoryGatewayService | null = null,
     moodInferenceService: MoodInferenceService | null = null,
     lifeSignalHubService: LifeSignalHubService | null = null,
-    semanticIntentParser: SemanticIntentParser | null = null,
   ) {
     this.moodInferenceService = moodInferenceService;
     this.lifeSignalHubService = lifeSignalHubService;
-    this.semanticIntentParser = semanticIntentParser;
     this.promptContextBuilder = new PromptContextBuilder({
       agentMemorySyncService: this.agentMemorySyncService,
       worldService: this.worldService,
@@ -349,21 +278,9 @@ export class AgentCore {
         toolRegistry: this.toolRegistry,
       };
       this.agentTaskOrchestrator = new AgentTaskOrchestrator(orchestratorDeps);
-
-      // 初始化 Loop Orchestrator（默认开启，feature flag 控制）。
-      // 双模式下：fast 走 ReactLoopStrategy，complex 走 PlanExecuteLoopStrategy + StateMachine。
-      // complex 内部自适应选择 plan_execute / state_machine，路由层不感知。
-      const loopStrategies = new Map<LlmExecutionMode, LoopStrategy>();
-      loopStrategies.set("fast", new ReactLoopStrategy(this.externalChat));
-      const maxReplans = getLoopMaxReplans();
-      loopStrategies.set("complex", new PlanExecuteLoopStrategy(this.externalChat, maxReplans));
-      this.loopOrchestrator = new LoopOrchestrator(loopStrategies, {
-        termination: new DefaultTerminationPolicy(),
-        recovery: new DefaultRecoveryPolicy(),
-        progress: new DefaultProgressTracker(this.externalChat),
-        escalation: new DefaultEscalationPolicy(),
-        maxReplans,
-      });
+      // 2026-09-05 双面架构：LoopOrchestrator（React/PlanExecute 双策略 + LLM 进展评估）
+      // 已删除。任务面唯一引擎 = 工具循环（波内一次性规划 + 并行工具 + 出口自检续波），
+      // 显式 plan 调用仅在 AGENT_PLAN_EXECUTE_LOOP 开启时叠加（见 runStandardLlmPath）。
     }
   }
 
@@ -382,6 +299,11 @@ export class AgentCore {
     this.locationCoordinator = coordinator;
   }
 
+  /** 在 bootstrap 注册位置历史后注入：常去地点背景由 DBSCAN 纯算法挖掘（零 LLM）。 */
+  setLocationHistory(service: LocationHistoryService | null): void {
+    this.locationHistory = service;
+  }
+
   /** 在 bootstrap 注册情绪感知后注入，用于按轮分析用户消息情绪。 */
   setMoodInferenceService(service: MoodInferenceService | null): void {
     this.moodInferenceService = service;
@@ -397,14 +319,9 @@ export class AgentCore {
     this.lifeSignalHubService = service;
   }
 
-  /** 注入语义意图解析器（LLM 理解用户真实意图）。未注入时跳过意图解析。 */
-  setSemanticIntentParser(parser: SemanticIntentParser | null): void {
-    this.semanticIntentParser = parser;
-  }
-
   /**
    * 注入 BrainCenter。可用时 handleUserMessage 走 cognize() 端到端认知入口，
-   * 替代原切片式 moodInference + routeLlmExecution + buildShortTermTurnContext。
+   * 替代原切片式 moodInference + buildShortTermTurnContext（路由已收口到 llm-task-router）。
    * BRAIN_CENTER_ENABLED=0 时 brainCenter 为 null，降级到原切片路径。
    */
   setBrainCenter(brain: BrainCenter | null): void {
@@ -412,27 +329,6 @@ export class AgentCore {
     if (brain) {
       brain.registerRuntimeKernel(getRuntimeKernel());
     }
-  }
-
-  private formatSemanticIntent(intent: SemanticIntent | undefined): string | undefined {
-    if (!intent) return undefined;
-    const lines: string[] = [
-      `用户真实意图：${intent.intent}`,
-      `类别：${intent.category}｜置信度：${intent.confidence.toFixed(2)}｜建议模式：${intent.preferredMode}`,
-    ];
-    if (intent.preferredToolDomain) {
-      lines.push(`建议工具域：${intent.preferredToolDomain}`);
-    }
-    if (intent.entities.length > 0) {
-      lines.push(`关键实体：${intent.entities.map((e) => `${e.type}=${e.value}`).join("；")}`);
-    }
-    if (intent.subIntents.length > 0) {
-      lines.push(`子意图：${intent.subIntents.join("；")}`);
-    }
-    if (intent.clarificationNeeded && intent.clarificationQuestion?.question) {
-      lines.push(`仍需澄清：${intent.clarificationQuestion.question}`);
-    }
-    return lines.join("\n");
   }
 
   /**
@@ -579,7 +475,13 @@ export class AgentCore {
     text: string,
     recentUserTurns: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
-    return routeTurnByLlm(this.externalChat, sessionId, text, recentUserTurns);
+    return routeTurnByLlm(
+      this.externalChat,
+      sessionId,
+      text,
+      recentUserTurns,
+      getTaskHub().activeSummary(sessionId),
+    );
   }
 
   /** 注入主动性模块（对话内主动触发等能力的统一入口） */
@@ -642,8 +544,6 @@ export class AgentCore {
     opts?: HandleUserMessageOptions,
   ): Promise<AgentReply> {
     const sessionId = opts?.sessionId ?? actorId;
-    /** 语义意图理解结果 */
-    let semanticIntent: SemanticIntent | undefined;
 
     // 身份/记忆 Markdown 文档懒种子：每个 actor 每进程只做一次（启动种子已覆盖老 actor），
     // 在构建 prompt 前确保 SOUL/USER/MEMORY.md 已写入 KV，让本轮回复即可感知。
@@ -660,58 +560,10 @@ export class AgentCore {
     // 小脑未注册时（BRAIN_NEURO_ENABLED=0）interruptProactive 为空操作。
     this.brainCenter?.interruptProactive(actorId);
 
-    // === 语义意图理解（入口层，路由之前）===
-    // 短输入（< 30 字，闲聊/快速问答）：完全跳过意图解析，首字不再额外等一次 LLM。
-    // 中长输入：与后续认知并行启动，200ms 内若返回低置信澄清则短路反问；
-    // 超时则不再等，让 tool-loop 主回复路径接管，语义意图作为可选 hint 稍后汇入。
-    const trimmedText = text?.trim() ?? "";
-    const PARSE_INTENT_RACE_MS = 200;
-    const SHORT_TEXT_SKIP_PARSE_CHARS = 30;
-    if (trimmedText && this.semanticIntentParser && trimmedText.length >= SHORT_TEXT_SKIP_PARSE_CHARS) {
-      const parsePromise = this.semanticIntentParser.parseIntent(sessionId, text).catch((err) => {
-        console.log(
-          `[SemanticIntent] 意图解析失败，降级到原路由路径：${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        return undefined;
-      });
-      const raceTimer = new Promise<undefined>((r) =>
-        setTimeout(() => r(undefined), PARSE_INTENT_RACE_MS),
-      );
-      try {
-        const maybeIntent = await Promise.race([parsePromise, raceTimer]);
-        if (maybeIntent) {
-          semanticIntent = maybeIntent;
-          if (
-            semanticIntent.clarificationNeeded &&
-            semanticIntent.confidence < CLARIFY_CONFIDENCE_THRESHOLD &&
-            semanticIntent.clarificationQuestion?.question
-          ) {
-            const q = semanticIntent.clarificationQuestion.question;
-            this.turnLifecycle.finalizeTurn({
-              actorId,
-              userText: text,
-              assistantText: q,
-              sessionId,
-            });
-            opts?.onAssistantDelta?.(q);
-            return {
-              text: q,
-              streamedChunks: true,
-              clarification: {
-                question: q,
-                options: semanticIntent.clarificationQuestion?.options,
-              },
-            };
-          }
-        }
-      } catch {
-        // 异常静默降级，不阻塞主流程
-      }
-    }
-
     // === 对话认知入口 ===
+    // 2026-09-05 清理：入口层「语义意图理解」LLM 解析已删除——其结果（semanticIntent）
+    // 从未传入下游（runStandardLlmPath 的 ctx.semanticIntent 恒为 undefined），每条中长
+    // 消息白付一次 LLM 调用。意图理解由 llm-task-router（L1 语义分类，唯一权威）承担。
     // fast（对话层）与 complex（后台任务执行器）均走轻量路由（routeLight），不调用完整 cognize：
     // - fast 负责对话（完整认知/情绪/记忆召回属对话层，此处仅做轻量路由 + 异步情绪推断）
     // - complex 仅作后台任务执行器，直接以轻量上下文进入工具循环，记忆由兜底路径自行拉取
@@ -730,8 +582,6 @@ export class AgentCore {
     let cognitiveWorkingMemorySummary = "";
     /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
     let cognitiveEmotion: import("../brain/types.js").EmotionVector | null = null;
-    /** cognize 阶段 1.5.1 拉取的最近 6 轮对话历史（注入 prompt【最近对话】块） */
-    let cognitiveRecentConversationHistory = "";
     /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
     let cognitiveUserPattern: {
       topics: string[];
@@ -750,12 +600,18 @@ export class AgentCore {
       // WS 层已算过（opts.routeDecision）则复用，避免同轮两次 LLM 路由调用。
       const recentUserTurns = this.getRecentUserTurnsForRouting(actorId, sessionId, text);
       const fastRoute = opts?.routeDecision ??
-        await routeTurnByLlm(this.externalChat, sessionId, text, recentUserTurns ?? []);
+        await routeTurnByLlm(
+          this.externalChat,
+          sessionId,
+          text,
+          recentUserTurns ?? [],
+          getTaskHub().activeSummary(actorId),
+        );
 
       // LLM 路由是唯一权威。rule-router 仅保留为诊断日志，不再参与门控
       // （其关键词词表与 task-router 一样存在信号盲区，交给语义判定替代）。
       const light = this.brainCenter.routeLight(text);
-      const shouldGoComplex = fastRoute.mode === "complex";
+      const shouldGoTaskPlane = fastRoute.plane === "task";
 
       let brainCognition: import("../brain/types.js").CognitiveResult | null = null;
       // 模糊指代/短追问判定提前：cognize 的 recall-gate 需要（anaphora_escalation 输入），
@@ -781,10 +637,10 @@ export class AgentCore {
       // 后台零 LLM 规则判决定是否主动 speak/act，不进入对话 prompt，不阻塞主回复。
       this.proactivityHub?.observeConversationTurn(actorId, text);
 
-      if (!shouldGoComplex) {
-        // Fast 模式：LLM 路由结果为最终判定；rule/brain 分类仅留作诊断日志
+      if (!shouldGoTaskPlane) {
+        // 对话面：LLM 路由结果为最终判定；rule/brain 分类仅留作诊断日志
         route = {
-          mode: fastRoute.mode,
+          ...fastRoute,
           reasons: [
             ...fastRoute.reasons,
             `rule=${light.mode}@${light.confidence.toFixed(2)}`,
@@ -797,7 +653,6 @@ export class AgentCore {
         cognitiveNeedsToolLoop = true; // 强制走 streamCompletion
         cognitiveRecallItems = brainCognition?.recallItems;
         cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
-        cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
         cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
         cognitiveToolPlan = brainCognition?.toolPlan;
@@ -819,17 +674,21 @@ export class AgentCore {
           });
         }
       } else {
-        // Complex 模式：对话认知归 fast（完整 cognize 只服务对话层），complex 仅作后台任务执行器。
-        // 不再 await 完整 cognize —— 省去感知阶段串行等待，让工具从对话一开始就启动；
-        // 记忆/工作记忆/位置/个性化由后续兜底路径（prepareNarrativeRecall 等）自行拉取。
-        // 情绪推送改为异步（不阻塞工具执行），MoodInferred 事件仍正常下发。
+        // 任务面（2026-09-05 P0 修复）：执行模式只由路由决策决定。
+        // ⚠️ 旧实现此处是 `mode: brainCognition?.route.mode ?? "complex"`——cognize 内部的
+        // 词法路由（rule-router/DecisionHub）会在路由层已判 task 后把执行模式覆盖回
+        // fast，导致"该走任务面的轮次永远用不上任务面工具"（静默失败）。
+        // cognize 的 route 现在只进诊断日志；plane/capabilities/budget/tier 全部
+        // 采纳路由层的 TurnPlan，任务面按预算执行。
         route = {
-          mode: brainCognition?.route.mode ?? "complex",
+          ...fastRoute,
+          plane: "task",
+          mode: "complex",
           reasons: [
             ...fastRoute.reasons,
             `rule=${light.mode}@${light.confidence.toFixed(2)}`,
             ...(brainCognition ? [`brain=${brainCognition.route.mode}:${brainCognition.rationale}`] : []),
-            "complex_background_executor",
+            "task_plane_background_executor",
           ],
           segmentable: false,
         };
@@ -838,7 +697,6 @@ export class AgentCore {
         cognitiveNeedsToolLoop = true; // 强制走工具循环
         cognitiveRecallItems = brainCognition?.recallItems;
         cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
-        cognitiveRecentConversationHistory = brainCognition?.recentConversationHistory ?? "";
         cognitiveEmotion = brainCognition?.emotion ?? null;
         cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
         cognitiveToolPlan = brainCognition?.toolPlan;
@@ -883,6 +741,7 @@ export class AgentCore {
         sessionId,
         text,
         this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
+        getTaskHub().activeSummary(actorId),
       );
       shortTermTurn = route.mode === "fast"
         ? this.buildFastShortTermTurnContext(sessionId, text)
@@ -941,12 +800,10 @@ export class AgentCore {
     // 性能监控：前置准备阶段
     const prepStartTime = Date.now();
 
-    // 2026-07-29 修复：用户陈述具体数据时（含温度/降水/行程/日期动作），跳过 userLocation 注入。
-    // 原 BUG：用户说"今天20到26度"时，userLocation prompt 会让 LLM 反问"你是不是在 XX"，
-    // 把"陈述"误判为"查询"，导致对话岔开。判定条件：route.reasons 包含"用户陈述具体数据"标识。
-    const userIsStatingData = route.reasons.some(
-      (r) => r.includes("用户陈述具体数据") || r.includes("user_stating_data"),
-    );
+    // 2026-09-05：userLocation / 常去地点改为每轮无条件注入（含 fast 模式）。
+    // 旧的两道闸门（fast 跳过、userIsStatingData 跳过）撤销——反问 bug 的根因是注入
+    // 文案没禁止反问，已在 resolveUserLocationPrompt 措辞层根治；再跳过注入只会让
+    // LLM 失去位置背景、反过来向用户问"你在哪"。
 
     // 2026-07-29 修复 C1：计算当前 thread store 中实际消息数（不含 system），
     // 用于判断 narrativeRecall 末尾的 [最近对话] 块是否与 msgs 重复。
@@ -956,7 +813,7 @@ export class AgentCore {
 
     // 2026-07-29 修复 D：fast_chat 也注入 narrativeRecall（复用 cognize 召回结果），
     // 解决追问被误判 fast_chat 时 LLM 只有 thread messages、缺乏长期记忆/工作记忆导致答非所问。
-    // 仍跳过 userLocation（保持速度，避免反问"你是不是在 XX"）和 personalization（fast_chat 不需要个性化语气）。
+    // （原"跳过 userLocation"已于 2026-09-05 撤销，fast 模式同样注入位置/常去地点背景。）
     //
     // 2026-08-11 修复 E（思路 A）：工作记忆摘要 + 最近对话回顾不再拼入 narrativeRecall，
     // 而是作为独立字段透传给 PromptContextBuilder，作为独立块注入 system prompt。
@@ -997,7 +854,7 @@ export class AgentCore {
       ? (getDailyJournalService()?.searchToday(actorId, text).catch(() => []) ?? Promise.resolve([]))
       : Promise.resolve([]);
 
-    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] = this
+    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization, frequentPlaces] = this
       .isFastMode(route.mode)
       ? await Promise.all([
           // Fast 模式记忆注入：
@@ -1010,19 +867,15 @@ export class AgentCore {
                 : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出（含错误卡片/数据快报）被 LLM 复读
+          // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
+          // 话题切换时也抑制，避免旧话题待办打断新话题
           suppressNarrativeRecall
             ? Promise.resolve(undefined)
-            : Promise.resolve(
-                this.buildRecentConversationHistoryBlock(
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                  actorId,
-                  text,
-                ),
-              ),
-          Promise.resolve(undefined),
+            : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
+          // 2026-09-05：fast 模式也注入位置背景（纯缓存/按需 RPC，零 LLM）
+          this.resolveUserLocationForPrompt(actorId, opts),
           Promise.resolve({} as PersonalizationPromptSlice),
+          Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
         ])
       : await Promise.all([
           // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
@@ -1033,23 +886,15 @@ export class AgentCore {
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
                 : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          // 最近对话回顾：话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
+          // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
+          // 话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
           suppressNarrativeRecall
             ? Promise.resolve(undefined)
-            : Promise.resolve(
-                this.buildRecentConversationHistoryBlock(
-                  cognitiveRecentConversationHistory,
-                  threadMessageCount,
-                  actorId,
-                  text,
-                ),
-              ),
-          // 2026-07-29：用户陈述数据时跳过 userLocation 注入，避免反问"你是不是在 XX"导致对话岔开。
-          // 位置只读缓存，不主动请求——实时 GPS 仅在位置类工具执行时（requestLocation）产生一次开销。
-          userIsStatingData
-            ? Promise.resolve(undefined)
-            : this.resolveUserLocationForPrompt(actorId, opts),
+            : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
+          // 2026-09-05：每轮无条件注入（缓存/按需 RPC，零 LLM；措辞层已禁止反问）
+          this.resolveUserLocationForPrompt(actorId, opts),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
+          Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
         ]);
     
     // 当日日志命中块：作为独立字段透传（当天问题优先命中今天日志，而非长期图）。
@@ -1097,14 +942,15 @@ export class AgentCore {
       // 在 complex 全量工具目录内，长链路 UI 操作由工具内部的多轮执行承担）。
 
 if (this.isComplexMode(route.mode)) {
-        // 异步并行：complex 多线程执行（子 Agent 委派 / plan_execute），
-        // fast 通过 StreamSegmenter 统一产出垫词 + 信息块分段先回复多步；
-        // complex 完成后结果无缝流式回传，最终结果作为完整回复。
+        // 任务面（2026-09-05 双面架构）：后台 plan-and-execute 执行，完成后结果作为
+        // 本轮完整回复回灌对话。执行期间用户可继续发消息（新消息走新 turn，
+        // 任务不继承外层 signal，不被中断）。
         const complexResult = await this.launchComplexBackgroundTask(actorId, text, opts, {
           narrativeRecall: enrichedNarrativeRecall,
           workingMemorySummary,
           recentConversationHistory,
           userLocation,
+          frequentPlaces,
           personalization,
           trajCap,
           orchestrateOpts,
@@ -1113,6 +959,7 @@ if (this.isComplexMode(route.mode)) {
           cognitiveEmotion,
           cognitiveUserPattern,
           cognitiveToolPlan,
+          turnPlan: { budget: route.budget, capabilities: route.capabilities, tier: route.tier },
         });
 
 // complex 任务已完成，返回最终结果
@@ -1131,6 +978,7 @@ if (this.isComplexMode(route.mode)) {
         workingMemorySummary,
         recentConversationHistory,
         userLocation,
+        frequentPlaces,
         personalization,
         trajCap,
         orchestrateToolCtx: orchestrateOpts,
@@ -1139,6 +987,7 @@ if (this.isComplexMode(route.mode)) {
         cognitiveEmotion,
         cognitiveUserPattern,
         cognitiveToolPlan,
+        routeIntent: route.intent,
       });
 
       const standardDuration = Date.now() - standardStartTime;
@@ -1185,6 +1034,7 @@ if (this.isComplexMode(route.mode)) {
             workingMemorySummary,
             recentConversationHistory,
             userLocation,
+            frequentPlaces,
             personalization,
             trajCap,
             orchestrateToolCtx: orchestrateOpts,
@@ -1326,6 +1176,51 @@ if (this.isComplexMode(route.mode)) {
     return restored;
   }
 
+  /**
+   * 外部触发器提交一个后台自主任务（地理围栏 agent_task 动作的执行面）。
+   * 复用任务状态机的完整骨架：持久化 + WS 进度推送 + 完成主动告知。
+   * 返回 taskId；orchestrator 未初始化（无 LLM 通道）时返回 null。
+   */
+  submitAutonomousTask(actorId: string, goal: string, sessionId?: string): string | null {
+    const orchestrator = this.agentTaskOrchestrator;
+    if (!orchestrator) {
+      console.warn("[agent-core] orchestrator 未初始化，丢弃外部提交的自主任务");
+      return null;
+    }
+    const registry = this.wsRegistry;
+    const sid = sessionId?.trim() || actorId;
+    const options: RunTaskOptions = {
+      onProgress: (event) => {
+        if (!registry) return;
+        try {
+          registry.trySend(
+            event.sessionId,
+            JSON.stringify({
+              type: ServerEventType.ChatExecutionEvent,
+              payload: {
+                kind: "task_progress",
+                ...event,
+              },
+            }),
+          );
+        } catch {
+          // 静默失败
+        }
+      },
+    };
+    const taskId = orchestrator.createAndRun(
+      {
+        actorId,
+        sessionId: sid,
+        goal,
+        tags: ["geofence"],
+      },
+      options,
+    );
+    console.log(`[agent-core] 外部自主任务已入队 ${taskId} (goal=${goal.slice(0, 60)})`);
+    return taskId;
+  }
+
   async runToolIfNeeded(
     actorId: string,
     reply: AgentReply,
@@ -1416,98 +1311,150 @@ if (this.isComplexMode(route.mode)) {
     return lines.length > 0 ? lines.join("\n") : undefined;
   }
 
+  /** prompt 位置新鲜窗口：窗口内直接用缓存，超窗才向客户端要一次 GPS（≤1 次/窗口/actor）。 */
+  private static readonly PROMPT_LOCATION_FRESH_MS = 5 * 60 * 1000;
+  /** 按要 GPS 的失败冷却：客户端离线/拒绝定位时，避免每条消息都白等 6s 超时。 */
+  private static readonly PROMPT_LOCATION_RETRY_MS = 10 * 60 * 1000;
+  /** 常去地点缓存 TTL。 */
+  private static readonly FREQUENT_PLACES_TTL_MS = 10 * 60 * 1000;
+
   /**
-   * Prompt 阶段的位置注入：优先用消息自带位置，否则读位置协调器缓存。
-   * 不主动请求客户端（避免普通对话被 GPS 阻塞）——实时位置只在位置类工具执行时
-   * 经 `requestLocation` 按需拉取一次。
+   * Prompt 阶段的位置注入（全链路零 LLM）：
+   * 消息自带位置 → 新鲜缓存 →（客户端在线且未在冷却期）按需拉一次实时 GPS
+   * （纯 WS RPC，6s 超时）→ 仍无则退回旧缓存并标注「定位于 N 前」。
+   * 旧策略"只读缓存不请求"导致缓存一空 LLM 就反问位置，2026-09-05 改为按需补拉。
    */
-  private resolveUserLocationForPrompt(
+  private async resolveUserLocationForPrompt(
     actorId: string,
     opts?: { clientIp?: string; clientLocation?: ClientLocationWire },
   ): Promise<string | undefined> {
-    const location = opts?.clientLocation ?? this.locationCoordinator?.getCached(actorId) ?? undefined;
-    return resolveUserLocationPrompt({
+    const coordinator = this.locationCoordinator;
+    let location: ClientLocationWire | undefined = opts?.clientLocation;
+    let observedAt = location ? Date.now() : undefined;
+
+    if (!location && coordinator) {
+      const cached = coordinator.getCachedWithTime(actorId);
+      if (cached && Date.now() - cached.at <= AgentCore.PROMPT_LOCATION_FRESH_MS) {
+        location = cached.payload;
+        observedAt = cached.at;
+      }
+    }
+
+    if (!location && coordinator?.hasSocket(actorId)) {
+      const lastAttempt = this.promptLocationLastAttemptAt.get(actorId) ?? 0;
+      if (Date.now() - lastAttempt >= AgentCore.PROMPT_LOCATION_RETRY_MS) {
+        this.promptLocationLastAttemptAt.set(actorId, Date.now());
+        const fetched = await coordinator.requestLocation(actorId, "prompt:chat-context");
+        if (fetched) {
+          location = fetched;
+          observedAt = Date.now();
+        }
+      }
+    }
+
+    if (!location && coordinator) {
+      const stale = coordinator.getCachedWithTime(actorId);
+      if (stale) {
+        location = stale.payload;
+        observedAt = stale.at;
+      }
+    }
+
+    const prompt = await resolveUserLocationPrompt({
       clientIp: opts?.clientIp,
       clientLocation: location,
     });
+    if (!prompt || observedAt == null) return prompt;
+    const ageMin = Math.floor((Date.now() - observedAt) / 60_000);
+    if (ageMin < 5) return prompt;
+    const ageText = ageMin < 60 ? `${ageMin} 分钟前` : `${Math.floor(ageMin / 60)} 小时前`;
+    return `${prompt}（定位时间：${ageText}，非实时）`;
   }
 
   /**
-   * 构建最近对话回顾独立块（不再拼入 narrativeRecall）。
-   *
-   * 2026-08-11 修复 E（思路 A）：原 appendRecentConversationHistory 把 [最近对话] 块
-   * 拼到 narrativeRecall 末尾，下游 formatNarrativeRecallPrompt 的 slice(0,4) 会把它
-   * 当作召回条目丢弃、hint 被正则误杀、多行块结构被拍平 → agent 上下文跳转。
-   * 现改为返回独立字符串，由 PromptContextBuilder 作为独立字段透传，
-   * buildLayeredSystemPrompt 作为【最近对话回顾】独立块注入，绕过 formatNarrativeRecallPrompt。
-   *
-   * 保留原 C1 dedup 判定：thread messages >= 12 条时返回 undefined（与消息数组重复）。
-   * "非用户最新指令"提示（原 C2 hint）由 buildLayeredSystemPrompt 统一添加，此处不再拼接。
+   * 常去地点背景块（零 LLM）：位置历史 DBSCAN 聚类结果直接格式化注入，
+   * 进程内按 actor 缓存 10 分钟。minPoints 放宽到 3——按需模式样本稀疏
+   * （每日启动/工具触发各 1 条），沿用持续模式的 20 会永远聚不出簇。
    */
-  private buildRecentConversationHistoryBlock(
-    recentConversationHistory: string,
-    threadMessageCount: number = -1,
-    actorId?: string,
-    userText?: string,
-  ): string | undefined {
-    if (!recentConversationHistory) return undefined;
-    const ambiguousFollowUp = Boolean(userText && isAmbiguousFollowUpMessage(userText));
+  private resolveFrequentPlacesPrompt(actorId: string): string | undefined {
+    const history = this.locationHistory;
+    if (!history) return undefined;
+    const cached = this.frequentPlacesCache.get(actorId);
+    if (cached && Date.now() - cached.at <= AgentCore.FREQUENT_PLACES_TTL_MS) return cached.text;
 
-    // C1: thread messages 里已有 ≥12 条（≈6 轮 user/assistant 配对）时，LLM 已能从 msgs
-    // 看到全部最近对话，再注入【最近对话回顾】块属于完全重复。
-    // 仅当 thread 较短（首次对话、新会话、长 context 被 trim 掉）时才返回。
-    if (threadMessageCount >= 12 && !ambiguousFollowUp) {
-      return undefined;
+    let text: string | undefined;
+    try {
+      const places = history.mineFrequentPlaces(actorId, { maxPlaces: 5, minPoints: 3 });
+      if (places.length > 0) {
+        const lines = places.map((p, i) => {
+          const name = p.label?.trim() || `${p.latitude.toFixed(3)}, ${p.longitude.toFixed(3)}`;
+          return `${i + 1}. ${name}｜到访 ${p.visitCount} 次 · 覆盖 ${p.distinctDays} 天 · 最近 ${p.lastSeenAt.slice(0, 10)}`;
+        });
+        text = [
+          "由用户位置历史自动聚类得出（系统背景，禁止主动向用户提及或反问本块；",
+          "回答「我常去哪/家/公司在哪」类问题时应以此为据，不确定时如实说明）：",
+          ...lines,
+        ].join("\n");
+      }
+    } catch {
+      text = undefined;
     }
+    this.frequentPlacesCache.set(actorId, { text, at: Date.now() });
+    return text;
+  }
 
-    let block = recentConversationHistory;
+  /**
+   * 构建跨会话衔接块（2026-09-05 token 优化：不再注入最近对话原文）。
+   *
+   * 原实现把 thread slice(-12) 格式化成【最近对话回顾】文本块注入 system——
+   * 但这些消息本就以 user/assistant 消息存在于 messages 数组（thread 未满时甚至是
+   * 全量复制），同一内容发两遍。现仅保留该块的唯一非重复职责：
+   * 跨会话开放环路（记忆连续性 Phase 2）——新会话开场并入上一会话未完成的
+   * 待办与承诺（来自 KV session_epitome，不在 messages 数组中）。
+   *
+   * 注入去重：KV 长期槽 memory_open_loops/memory_commitments 同轮也会注入
+   * 待办/承诺行，按语义指纹过滤避免同一事项出现两次。
+   */
+  private buildRecentConversationHistoryBlock(actorId?: string): string | undefined {
+    if (!actorId || !this.brainCenter?.getSessionEpitome) return undefined;
 
-    // 跨会话开放环路（记忆连续性 Phase 2）：新会话开场（thread 较短）时，
-    // 并入上一会话未完成的待办与承诺，让连续性跨会话延续（解决"换会话跳转"）。
-    // 注入去重（记忆架构收敛）：新会话开场必触发 recall gate，KV 长期槽
-    // memory_open_loops/memory_commitments 同轮也会注入待办/承诺行——
-    // 同一事项会出现在两个块里。按语义指纹过滤，KV 已有的不再经 epitome 重复注入。
-    if (actorId && this.brainCenter?.getSessionEpitome) {
-      try {
-        const epitome = this.brainCenter.getSessionEpitome(actorId);
-        if (epitome) {
-          const kvFingerprints = new Set<string>();
+    try {
+      const epitome = this.brainCenter.getSessionEpitome(actorId);
+      if (!epitome) return undefined;
+      const kvFingerprints = new Set<string>();
           try {
             const { entries } =
               this.agentMemorySyncService?.getSnapshot(actorId, [
                 "memory_open_loops",
                 "memory_commitments",
               ]) ?? { entries: {} as Record<string, unknown> };
-            for (const raw of [entries.memory_open_loops, entries.memory_commitments]) {
-              if (typeof raw !== "string") continue;
-              for (const line of raw.split("\n")) {
-                const fp = semanticFingerprint(line);
-                if (fp) kvFingerprints.add(fp);
-              }
-            }
-          } catch {
-            /* KV 读取失败时跳过去重，保持原注入行为 */
-          }
-          const isDuplicate = (line: string): boolean => {
+        for (const raw of [entries.memory_open_loops, entries.memory_commitments]) {
+          if (typeof raw !== "string") continue;
+          for (const line of raw.split("\n")) {
             const fp = semanticFingerprint(line);
-            return fp !== "" && kvFingerprints.has(fp);
-          };
-          const lines: string[] = [
-            ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`).filter((l) => !isDuplicate(l)),
-            ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`).filter((l) => !isDuplicate(l)),
-          ];
-          if (lines.length > 0) {
-            block +=
-              `\n\n【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}` +
-              `\n（管家提示：其中若有适合到点提醒的事项，可主动提议「要不要我到点提醒你」，经用户确认后用 reminder/日程工具落成定时提醒）`;
+            if (fp) kvFingerprints.add(fp);
           }
         }
       } catch {
-        /* epitome 读取失败静默降级 */
+        /* KV 读取失败时跳过去重，保持原注入行为 */
       }
+      const isDuplicate = (line: string): boolean => {
+        const fp = semanticFingerprint(line);
+        return fp !== "" && kvFingerprints.has(fp);
+      };
+      const lines: string[] = [
+        ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`).filter((l) => !isDuplicate(l)),
+        ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`).filter((l) => !isDuplicate(l)),
+      ];
+      if (lines.length === 0) return undefined;
+      return (
+        `【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}` +
+        `\n（管家提示：其中若有适合到点提醒的事项，可主动提议「要不要我到点提醒你」，经用户确认后用 reminder/日程工具落成定时提醒）`
+      );
+    } catch {
+      /* epitome 读取失败静默降级 */
+      return undefined;
     }
-
-    return block;
   }
 
   /**
@@ -1619,11 +1566,13 @@ if (this.isComplexMode(route.mode)) {
   }
 
   /**
-   * 后台执行复杂任务（子 Agent 委派 / plan_execute），返回最终结果文本。
+   * 任务面提交（2026-09-05 双面架构）：后台 plan-and-execute 执行任务，返回最终结果文本。
    *
-   * 异步并行：fast 通过 StreamSegmenter 统一产出垫词 + 信息块分段先回复，
-   * complex 在多线程中执行，完成后通过 Promise 返回最终结果文本。
-   * 流式结果通过 opts.onAssistantDelta 实时回传，最终结果由 caller await。
+   * 与对话面的衔接契约（TaskHub）：
+   *   - 提交即登记 TaskRecord（绑定 replyAnchorId），出口事件与结果都属于任务本身，
+   *     用户中途继续对话（新 turn）不会让结果丢失；
+   *   - 结果非空兜底：杜绝"调用工具但结果空转"→ 前端只有进度、正文缺失的残链；
+   *   - 后台执行不继承外层 signal（避免用户发新消息时中断后台任务）。
    */
   private launchComplexBackgroundTask(
     actorId: string,
@@ -1636,6 +1585,8 @@ if (this.isComplexMode(route.mode)) {
       /** 当日/近几天对话日志检索命中（独立块注入） */
       journalRecall?: string;
       userLocation?: string;
+      /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
+      frequentPlaces?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization: PersonalizationPromptSlice;
@@ -1649,166 +1600,75 @@ if (this.isComplexMode(route.mode)) {
         learningActive?: boolean;
       };
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
-      /** 升级继承（2026-09-02）：fast 车道已尝试工具调用记录块，注入 complex prompt */
-      inheritedToolContext?: string;
+      /** 路由层 TurnPlan：任务面预算/能力/档位 */
+      turnPlan?: { budget: number; capabilities: string[]; tier: string };
     },
   ): Promise<string> {
-    const registry = this.wsRegistry;
     const onDelta = opts?.onAssistantDelta;
     // 后台执行不继承外层 signal（turn 已返回占位，避免用户发新消息时中断后台任务）
     const bgOpts: HandleUserMessageOptions | undefined = opts
       ? { ...opts, signal: undefined }
       : opts;
 
-    // 返回 Promise，在 complex 任务完成时 resolve 最终结果文本
-    return new Promise<string>((resolve, reject) => {
-      const run = async (_taskId: string): Promise<void> => {
-        try {
-          // 共用 complex 上下文参数：三个分支都以"complex 全量工具目录"跑工具循环，
-          // 仅在是否跳过 plan-execute 慢车道上不同。抽成函数避免三份重复。
-          const runComplex = (simpleToolLane: boolean) =>
-            this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
-              narrativeRecall: ctx.narrativeRecall,
-              workingMemorySummary: ctx.workingMemorySummary,
-              recentConversationHistory: ctx.recentConversationHistory,
-              journalRecall: ctx.journalRecall,
-              userLocation: ctx.userLocation,
-              trajCap: ctx.trajCap,
-              orchestrateToolCtx: ctx.orchestrateOpts,
-              personalization: ctx.personalization,
-              sessionId: ctx.sessionId,
-              shortTermTurn: ctx.shortTermTurn,
-              cognitiveEmotion: ctx.cognitiveEmotion,
-              cognitiveUserPattern: ctx.cognitiveUserPattern,
-              cognitiveToolPlan: ctx.cognitiveToolPlan,
-              inheritedToolContext: ctx.inheritedToolContext,
-              ...(simpleToolLane ? { simpleToolLane: true } : {}),
-            });
-          // 结果兜底：任何 complex 分支必须产出非空最终文本，杜绝"调用工具但
-          // 结果空转"→ resolve("") → 前端只有垫词/进度、正文缺失的残链。
-          const finalize = async (raw: string): Promise<string> => {
-            const trimmed = (raw ?? "").trim();
-            if (trimmed) return trimmed;
-            // 原回复为空：尝试一次最小化 LLM 调用生成真实回复，避免把空串交到上层。
-            console.warn(`[AgentCore][complex-route] "${text}" 返回空结果，尝试应急重生成`);
-            const emergencyText = await this.emergencyRegenerate(actorId, text, onDelta);
-            return emergencyText.trim();
-          };
+    // TaskHub 登记：任务面对话面接缝的唯一记录（进度摘要注入路由、结果归属任务）
+    const taskHub = getTaskHub();
+    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const record = taskHub.submit({
+      taskId,
+      sessionId: ctx.sessionId,
+      ...(opts?.chatUserMessageId ? { replyAnchorId: opts.chatUserMessageId } : {}),
+      goal: text,
+    });
+    // 提交即出一条状态行，盖住路由/brief 装配/首次规划的无反馈窗口
+    opts?.onAgentPhaseStatus?.("开始处理任务…");
 
-          // 简单单点工具快车道：只需一次工具调用即可完成的任务，
-          // 跳过子 Agent 委派 / plan-execute 慢车道，直接跑单轮工具循环，
-          // 让"工具被极快找到并完成"，避免多轮编排的开销。
-          if (shouldUseSimpleToolFastLane(text)) {
-            console.log(
-              `[AgentCore][complex-route] "${text}" → simpleToolLane (fastLane判定结果)`,
-            );
-            const result = await runComplex(true);
-            resolve(await finalize(result.text ?? ""));
+    // 返回 Promise，在任务面完成时 resolve 最终结果文本
+    return new Promise<string>((resolve, reject) => {
+      const run = async (): Promise<void> => {
+        try {
+          const result = await this.runStandardLlmPath(actorId, text, "complex", bgOpts, {
+            narrativeRecall: ctx.narrativeRecall,
+            workingMemorySummary: ctx.workingMemorySummary,
+            recentConversationHistory: ctx.recentConversationHistory,
+            journalRecall: ctx.journalRecall,
+            userLocation: ctx.userLocation,
+            frequentPlaces: ctx.frequentPlaces,
+            trajCap: ctx.trajCap,
+            orchestrateToolCtx: ctx.orchestrateOpts,
+            personalization: ctx.personalization,
+            sessionId: ctx.sessionId,
+            shortTermTurn: ctx.shortTermTurn,
+            cognitiveEmotion: ctx.cognitiveEmotion,
+            cognitiveUserPattern: ctx.cognitiveUserPattern,
+            cognitiveToolPlan: ctx.cognitiveToolPlan,
+            turnPlan: ctx.turnPlan,
+            taskHubTaskId: taskId,
+          });
+          // 结果兜底：任务面必须产出非空最终文本
+          const trimmed = (result.text ?? "").trim();
+          if (trimmed) {
+            taskHub.setState(taskId, "done");
+            resolve(trimmed);
             return;
           }
-
-          // plan_execute：complex 的唯一执行路径（2026-08-29 master 委派层已删除：
-          // 任务轮统一走 plan-execute 全量工具循环，多子任务由波内并行工具调用承担；
-          // simpleToolLane 是 plan 的单步退化形态，不是独立编排层）。
-          console.log(`[AgentCore][complex-route] "${text}" → plan_execute`);
-          const result = await runComplex(false);
-          resolve(await finalize(result.text ?? ""));
+          console.warn(`[AgentCore][task-plane] "${text}" 返回空结果，尝试应急重生成`);
+          const emergencyText = await this.emergencyRegenerate(actorId, text, onDelta);
+          const finalText = emergencyText.trim();
+          taskHub.setState(taskId, finalText ? "done" : "failed");
+          resolve(finalText);
         } catch (err) {
+          taskHub.setState(taskId, "failed");
           reject(err);
         }
       };
 
-      const runOpts: import("./agent-task-orchestrator.js").RunTaskOptions = {
-        onProgress: (event) => {
-          if (!registry) return;
-          try {
-            registry.trySend(
-              event.sessionId,
-              JSON.stringify({
-                type: ServerEventType.ChatExecutionEvent,
-                payload: { kind: "task_progress", ...event },
-              }),
-            );
-          } catch {
-            // 静默失败
-          }
-          // 后台任务失败时推送 fallback 文案
-          if (event.type === "task_failed") {
-            try {
-              onDelta?.(FALLBACK_TEXT_BACKGROUND_FAILED());
-              resolve(""); // 任务失败时仍 resolve 空串，避免 caller 一直等待
-            } catch {
-              /* ignore */
-            }
-          }
-        },
-        onAssistantDelta: (delta) => {
-          onDelta?.(delta);
-        },
-        onToolExecuteStart: (info) => {
-          opts?.onExternalToolExecuteStart?.({
-            toolName: info.name,
-            input: info.args,
-          });
-        },
-        onToolExecuted: (info) => {
-          opts?.onExternalToolExecuted?.({
-            toolName: info.name,
-            input: {},
-            ok: info.ok,
-            result: (info.result as Record<string, unknown>) ?? {},
-          });
-        },
-      };
-
-      // 启动复杂任务（多线程包装）
-      void this.runComplexTaskInWorker(actorId, text, run, runOpts)
-        .then(() => {
-          // worker 已完成，run 内部的 resolve/reject 已处理
-        })
-        .catch((err) => {
-          console.error("[AgentCore] 复杂任务 worker 异常:", err);
-          if (!reject) {} // 标记使用，防止 lint
-          reject(err);
-        });
-    });
-  }
-
-  /**
-   * 在多线程 Worker 中执行复杂任务。
-   * 使用 node:worker_threads 将 LLM 密集调用隔离到独立线程，
-   * 主线程可继续处理 fast 模式的渐进式垫词。
-   *
-   * 当前实现：async/await 主线程并发执行（非阻塞 event loop），
-   * 可通过配置 useWorker 切换为真实 worker_threads 隔离。
-   */
-  private async runComplexTaskInWorker(
-    _actorId: string,
-    _text: string,
-    run: (taskId: string) => Promise<void>,
-    _runOpts: import("./agent-task-orchestrator.js").RunTaskOptions,
-  ): Promise<void> {
-    const taskId = `complex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    // 使用 worker_threads 隔离 LLM 密集调用
-    // 当前通过 async/await 在主线程并发执行，保持事件循环响应
-    const useWorker = false; // 暂设为 false，用 async/await 并发
-    if (useWorker) {
-      const { Worker } = await import("node:worker_threads");
-      const workerPath = new URL("./complex-worker.js", import.meta.url).href;
-      const worker = new Worker(workerPath, {
-        workerData: { actorId: _actorId, text: _text, taskId },
-        execArgv: ["--import", "data:text/javascript,import { register } from 'node:module'; globalThis.__WORKER_IMPORT_META_URL__ = " + JSON.stringify(import.meta.url)],
+      // 任务面在主线程并发执行（event loop 非阻塞，用户可继续对话）。
+      // 旧 runComplexTaskInWorker 的 worker_threads 包装从未启用（useWorker 恒 false），已删除。
+      void run().catch((err) => {
+        console.error("[AgentCore] 任务面执行异常:", err);
+        reject(err);
       });
-      try {
-        await run(taskId);
-      } finally {
-        await worker.terminate().catch(() => {});
-      }
-    } else {
-      // 主线程并发执行（event loop 非阻塞，progressive 垫词仍可推送）
-      await run(taskId);
-    }
+    });
   }
 
   private async runStandardLlmPath(
@@ -1825,6 +1685,8 @@ if (this.isComplexMode(route.mode)) {
       /** 当日/近几天对话日志检索命中（独立块注入，不复用 formatNarrativeRecallPrompt，防拍平） */
       journalRecall?: string;
       userLocation?: string;
+      /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
+      frequentPlaces?: string;
       trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization: PersonalizationPromptSlice;
@@ -1845,12 +1707,12 @@ if (this.isComplexMode(route.mode)) {
       };
       /** 深度优化：工具规划链（来自 ToolPlanningCortex），约束 LLM 工具选择顺序和范围 */
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
-      /** 语义意图理解结果（入口层 LLM 解析），注入 prompt 让主 LLM 明确用户真实意图 */
-      semanticIntent?: SemanticIntent;
-      /** 简单单点工具快车道：跳过 plan-execute，单轮工具循环即可完成 */
-      simpleToolLane?: boolean;
-      /** 升级继承（2026-09-02）：fast 车道已尝试工具调用记录块，complex prompt 注入 */
-      inheritedToolContext?: string;
+      /** 路由层 TurnPlan：任务面预算/能力/档位（对话面不传） */
+      turnPlan?: { budget: number; capabilities: string[]; tier: string };
+      /** TaskHub 任务记录 id（任务面传入，用于进度摘要回写） */
+      taskHubTaskId?: string;
+      /** 路由意图标签（对话面误判转任务的自检输入） */
+      routeIntent?: string;
     },
   ): Promise<AgentReply> {
     const provider = this.externalChat!;
@@ -1870,12 +1732,17 @@ if (this.isComplexMode(route.mode)) {
           phoneBridgeOnline: ctx.orchestrateToolCtx.phoneBridgeOnline,
 // 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
           requestLocation: () =>
-            this.locationCoordinator?.requestLocation(actorId, `tool:${name}`) ??
+            this.locationCoordinator?.requestLocation(actorId, "tool:standard-llm-path") ??
             Promise.resolve(null),
         },
       },
       {
-        onToolExecuteStart: (info) => opts?.onExternalToolExecuteStart?.(info),
+        onToolExecuteStart: (info) => {
+          if (ctx.taskHubTaskId) {
+            getTaskHub().setProgress(ctx.taskHubTaskId, `正在使用 ${info.toolName}`);
+          }
+          opts?.onExternalToolExecuteStart?.(info);
+        },
         onAgentStatusLine: opts?.onAgentPhaseStatus,
         onToolExecuted: ctx.orchestrateToolCtx.onToolExecuted,
       },
@@ -1884,10 +1751,9 @@ if (this.isComplexMode(route.mode)) {
     const onBatchWithEvolution = ctx.orchestrateToolCtx.onToolLoopAfterBatch;
     const toolExposureProfile = this.toolPolicyResolver.resolveExposureProfile(mode);
     const toolRankingHint = this.toolPolicyResolver.resolveRankingHint(actorId);
-    // 2026-07-29 修复 D2：fast_chat 也走 promptContextBuilder.build，把 narrativeRecall 注入 promptContext.memory，
-    // 让 LLM 能看到长期记忆 + 工作记忆 + [最近对话] recap。
-    // 2026-07-30 重构：Fast 模式作为表达层 + 轻量工具通道（clock/weather/calendar.list 只读工具）。
-    // Complex 模式负责重活（多步/写操作/子 Agent 委派），结果回传后由 Fast 统一输出。
+    // 2026-09-05 双面架构：对话面（chat）零工具——纯直答，无工具 schema、无工具循环。
+    // 时间/位置/日程快照由 system prompt 上下文注入覆盖；一切需要工具的轮次都在任务面。
+    // （旧 fast 车道的 getFastLaneTools + escalate 逃生舱 + maxRounds 已删除。）
     const baseStreamOpts = this.isFastMode(mode)
       ? ({
           ...(this.promptContextBuilder.build({
@@ -1900,36 +1766,24 @@ if (this.isComplexMode(route.mode)) {
             recentConversationHistory: ctx.recentConversationHistory,
             journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
-            // 2026-08-19 修复「天气/位置在 fast 模式失效」：fast 分支此前强制
-            // userLocation=undefined。天气工具（weather.get_local）已并入
-            // tool-router 延迟目录由检索召回（tool_discover → tool_call），
-            // 召回执行时同样需要位置；LLM 拿不到位置只能传空参数 → 天气查询失败。
-            // 改为复用已获取到的位置（ctx.userLocation），让 LLM 用默认/已有位置直接查，
-            // 而非反问用户或空跑工具。没有位置时值仍为 undefined（保持原行为）。
             userLocation: ctx.userLocation,
+            frequentPlaces: ctx.frequentPlaces,
             personalization: ctx.personalization,
-            onToolLoopAfterBatch: undefined, // fast_chat 无工具循环
+            onToolLoopAfterBatch: undefined, // 对话面无工具循环
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
-            semanticIntent: this.formatSemanticIntent(ctx.semanticIntent),
             // #1 统一门控单点：KV 长期字段与图谱走同一 gate
             longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
             semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
             recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
-          chatToolsBuiltin: getFastLaneTools(),
-          chatToolsExtra: [],
-          // 车道内升级逃生舱：escalate 工具在 fast 任何暴露策略下都不可被裁掉
-          // （升级通道本身不能依赖正则类别映射）。
-          pinnedToolNames: [ESCALATION_TOOL_NAME],
-          // fast maxRounds=1 下 tool_discover→tool_call 两波召回必断头：
-          // 禁用延迟目录，轻量工具全量可见，超出能力范围由 escalate 升级兜底。
-          disableToolSearch: true,
-          // 2026-08-25 输出 token 上限：fast 对话模式限制单次输出长度，
-          // 防止回复失控拉长（minimal 风格已要求简短，上限仅作兜底），
-          // 复用同一限制覆盖工具分支与普通分支。可用 FAST_MAX_OUTPUT_TOKENS 覆盖。
+          // 零工具：toolExposureProfile="none" 让 resolveChatTools 返回空工具列表，
+          // provider 不进工具循环——对话面 prompt 不含任何工具 schema（省 token + 提速）。
+          toolExposureProfile: "none" as const,
+          // 2026-08-25 输出 token 上限：对话模式限制单次输出长度，
+          // 防止回复失控拉长（minimal 风格已要求简短，上限仅作兜底）。
+          // 可用 FAST_MAX_OUTPUT_TOKENS 覆盖。
           maxOutputTokens: fastMaxOutputTokens(),
-          toolExposureProfile,
           toolRankingHint,
         } satisfies AgentStreamOptions)
       : {
@@ -1943,8 +1797,8 @@ if (this.isComplexMode(route.mode)) {
             recentConversationHistory: ctx.recentConversationHistory,
             journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
-            inheritedToolContext: ctx.inheritedToolContext,
             userLocation: ctx.userLocation,
+            frequentPlaces: ctx.frequentPlaces,
             personalization: ctx.personalization,
             onToolLoopAfterBatch: onBatchWithEvolution,
             userPattern: ctx.cognitiveUserPattern,
@@ -1996,11 +1850,11 @@ if (this.isComplexMode(route.mode)) {
       runtimePlan,
     );
     const isMinimalMode = runtimeKernel.isMinimalMode();
-    // 2026-08-02 模型路由：Fast mode → deepseek-chat（Flash），Complex mode → deepseek-reasoner（Pro）
-    const tierForMode: Record<LlmExecutionMode, TaskTier> = {
-      fast: TaskTier.FAST,
-      complex: TaskTier.COMPLEX,
-    };
+    // 2026-09-05 模型路由：对话面 → Flash；任务面按 TurnPlan.tier——轻预算单点任务
+    // （realtime/media，tier=fast）也走 Flash，仅多步/写操作（tier=complex）上 Pro。
+    // 取代旧"mode=complex 一律 reasoner"的粗粒度路由（省 token）。
+    const resolvedTier: TaskTier =
+      mode === "fast" || ctx.turnPlan?.tier === "fast" ? TaskTier.FAST : TaskTier.COMPLEX;
     const streamOpts: AgentStreamOptions = {
       ...baseStreamOpts,
       ...(sanitizedMemory ? { promptContext: { memory: sanitizedMemory } } : { promptContext: undefined }),
@@ -2029,29 +1883,24 @@ if (this.isComplexMode(route.mode)) {
       toolExposureProfile: this.isFastMode(mode)
         ? baseStreamOpts.toolExposureProfile
         : (runtimePlan.toolExposureProfile ?? baseStreamOpts.toolExposureProfile),
+      // 任务面能力束（2026-09-05）：路由层 TurnPlan.capabilities 透传给工具解析层，
+      // delegate profile 按它裁剪注入的工具族（search/media 轻任务不再全量注入），
+      // 其余工具进 BM25 延迟目录按需召回。
+      ...(this.isFastMode(mode) ? {} : { toolCapabilities: ctx.turnPlan?.capabilities }),
       pinnedToolNames: runtimePlan.enabled
         ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
         : baseStreamOpts.pinnedToolNames,
-      // 2026-08-01 性能优化：Fast 模式 maxRounds 限制为 1。
-      // Fast 模式以对话为主，单次工具调用足够（LLM 可基于 system prompt 的 currentTime/userLocation
-      // 直接答时间/位置/天气类问题）。Complex 模式交给 plan_execute / master_subagent 处理重活。
-      // 2026-08-29 修复：simpleToolLane 不再强制 maxRounds=1。它跑在 complex 的全量工具
-      // 目录下（大部分工具在 tool_discover 延迟目录里），"发现工具→执行工具"本身就要两波；
-      // 单波限制会让模型第一波只能拿到工具说明就被截断，产出"工具没返回内容都是功能说明"
-      // 的断头回复。保持 complex 默认波数（4），由充分性提示控制不浪费轮次。
-      // 2026-08-31 需求：fast 已直接携带搜索/联网工具（search_web/fetch_web/internet.*）。
-      // 2026-09-03 需求：搜索/任务型回复要求信息全面，maxRounds 2→3，
-      // 支撑「先搜→深读→补搜/核实」节奏；仍保留 fast 秒回定位，不放开到 complex 默认 4。
+      // 任务面工具波预算（2026-09-05）：由路由层 TurnPlan 决定（realtime/media=2，
+      // write/multi-step=3，词法 veto 升级=3），取代旧硬编码。对话面无工具循环，
+      // 不受此配置影响。保底 1、封顶 4，防预算失控。
       ...(this.isFastMode(mode)
-        ? {
+        ? {}
+        : {
             toolLoop: {
               ...(baseStreamOpts.toolLoop ?? {}),
-              maxRounds: 3,
+              maxRounds: Math.min(4, Math.max(1, ctx.turnPlan?.budget ?? 3)),
             },
-          }
-        : baseStreamOpts.toolLoop
-          ? { toolLoop: baseStreamOpts.toolLoop }
-          : {}),
+          }),
       maxThreadMessages: runtimePlan.promptMode === "conversation_only"
         ? Number.parseInt(process.env.AGENT_RUNTIME_KERNEL_MAX_THREAD_MESSAGES ?? "12", 10)
         : baseStreamOpts.maxThreadMessages,
@@ -2059,13 +1908,17 @@ if (this.isComplexMode(route.mode)) {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       // 2026-08-02 模型路由：根据 Fast/Complex 模式选择对应模型
       // Fast → deepseek-chat（Flash），Complex → deepseek-reasoner（Pro）
-      ...buildModelOverrideOpts(tierForMode[mode]),
+      ...buildModelOverrideOpts(resolvedTier),
     };
 
     let full = "";
     let modelCallsConsumed = 1;
-    // 简单单点工具快车道跳过 plan-execute，直接跑单轮工具循环（provider.streamCompletion）
-    const peUsed = mode === "complex" && !ctx.simpleToolLane;
+    // 任务面引擎选择（2026-09-05）：唯一引擎 = 工具循环（波内一次性规划 + 并行工具 +
+    // 出口自检续波）。显式 plan 调用（独立规划 LLM 请求）仅在 AGENT_PLAN_EXECUTE_LOOP
+    // 开启时叠加——默认关闭：one-shot 规划省一次带全量上下文的规划请求（省 token + 提速），
+    // 且出口自检的 NEED_MORE_TOOLS 探测已承担 replan 职责。
+    // 旧 ReactLoopStrategy / LoopOrchestrator（含每轮 LLM 进展评估）已删除。
+    const useExplicitPlanner = mode === "complex" && isPlanExecuteLoopEnabled();
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 
@@ -2082,52 +1935,26 @@ if (this.isComplexMode(route.mode)) {
       getAgentRuntimeConfig().masterDelegation.enabled,
     );
 
-    if (peUsed) {
+    if (useExplicitPlanner) {
       const chatKey = opts?.chatUserMessageId ?? randomUUID();
       const peSessionId = planExecuteSessionId(actorId, chatKey);
 
-      if (isLoopOrchestratorEnabled() && this.loopOrchestrator) {
-        // P4：编排器接管 plan_execute（多工具协同路径），驱动 plan→execute→评估→replan 循环。
-        // direct_llm / fast_chat 不进编排器（普通对话无需多轮控制流）。
-        const orchResult = await this.loopOrchestrator.run(
-          {
-            taskId: `loop-${chatKey}`,
-            actorId,
-            sessionId: peSessionId,
-            goal: text,
-            initialMode: "complex",
-          },
-          {
-            sessionId: peSessionId,
-            userTurn,
-            toolCtx,
-            streamOpts,
-            onDelta: (delta) => opts?.onAssistantDelta?.(delta),
-          },
-        );
-        full = orchResult.finalText;
-        modelCallsConsumed = Math.max(1, orchResult.modelCalls);
-        pePlan = orchResult.ctx.plan;
-        // 反思字段由编排器激活：exhaustedRetries 覆盖 replan 耗尽 / 预算耗尽两种终止。
-        peExhausted = orchResult.exhaustedRetries;
-      } else {
-        const result = await runPlanExecuteLoop({
-          provider,
-          planSessionId: peSessionId,
-          userText: text,
-          visionFrames: opts?.visionFrames,
-          onDelta: (delta) => opts?.onAssistantDelta?.(delta),
-          onPhaseStatus: opts?.onAgentPhaseStatus,
-          onPlanReady: opts?.onPlanReady,
-          toolCtx,
-          baseStreamOpts: streamOpts,
-          onToolBatchForExecute: onBatchWithEvolution,
-        });
-        full = result.finalText;
-        modelCallsConsumed = Math.max(1, result.modelCalls);
-        pePlan = result.plan;
-        peExhausted = result.exhaustedRetries;
-      }
+      const result = await runPlanExecuteLoop({
+        provider,
+        planSessionId: peSessionId,
+        userText: text,
+        visionFrames: opts?.visionFrames,
+        onDelta: (delta) => opts?.onAssistantDelta?.(delta),
+        onPhaseStatus: opts?.onAgentPhaseStatus,
+        onPlanReady: opts?.onPlanReady,
+        toolCtx,
+        baseStreamOpts: streamOpts,
+        onToolBatchForExecute: onBatchWithEvolution,
+      });
+      full = result.finalText;
+      modelCallsConsumed = Math.max(1, result.modelCalls);
+      pePlan = result.plan;
+      peExhausted = result.exhaustedRetries;
       provider.clearSession?.(peSessionId);
       provider.appendThreadTurn?.(chatSessionId, userTurn, full);
     } else {
@@ -2143,113 +1970,44 @@ if (this.isComplexMode(route.mode)) {
             }
           : undefined;
 
+      // 对话面（fast）：零工具直答，delta 直接透传（无升级路径，无需暂存闸门）。
+      // 任务面（complex，one-shot 引擎）：工具循环波内规划 + 出口自检续波。
       full = await provider.streamCompletion(
         chatSessionId,
         userTurn,
-        // ★ fast 路径流式 delta 必须暂存：只有确定不走 fast→complex 升级时
-        // 才一次性推到前端；升级场景下整段丢弃（注释见下方）。
-        createFastPathDeltaGate(opts?.onAssistantDelta),
+        (delta) => opts?.onAssistantDelta?.(delta),
         toolCtx,
         mergedStreamOpts,
       );
 
-      // ── 车道内升级（2026-08-29）：fast 轮办不成的事重放 complex ──
-      // 升级哨兵由工具循环在以下情形返回：模型调用 agent.escalate_to_complex、
-      // 统一出口仲裁判定「诉求未满足」（调了工具但失败/道歉式收场/需联网未搜）。
-      // 2026-09-02 起哨兵携带 fast 轮工具尝试记录（升级继承）：complex 重放时
-      // 注入【上游尝试记录】块，首波带着部分成果续办而非从头盲搜。fast 路径上
-      // 已产生的流式文本通过 createFastPathDeltaGate 暂存，升级时 gate.discard()
-      // 整段丢弃；非升级时 gate.flush() 一次性推前端。
-      if (this.isFastMode(mode) && isEscalationSignal(full)) {
-        const escalation = parseEscalationPayload(full);
-        const inheritedBlock = escalation?.attempts.length
-          ? formatEscalationAttempts(escalation.attempts)
-          : undefined;
-        console.info(
-          `[AgentCore] fast→complex 车道内升级：${text.slice(0, 48)}` +
-            (escalation?.attempts.length ? `（继承 ${escalation.attempts.length} 条工具尝试）` : ""),
-        );
-        (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
-          ._current?.discard();
-        full = await this.escalateFastTurnToComplex(actorId, text, opts, ctx, inheritedBlock);
-      } else {
-        (createFastPathDeltaGate as unknown as { _current?: FastPathDeltaGate | null })
-          ._current?.flush();
+      // ── 对话面误判出口自检（TurnOutcomeGate 的对话面一半，话题无关）──
+      // 仅当：路由判定为知识问答（预期可凭常识作答）但直答是道歉式兜底
+      //（风格判定，非话题词）→ 大概率实际需要工具，转任务面重跑。
+      // 纯 chat（情绪/闲聊）的"我不知道"不转换——避免情感对话被任务面改写节奏。
+      // 正常路由下 knowledge_qa 误判率低，此处是最后防线，极少触发。
+      if (
+        this.isFastMode(mode) &&
+        ctx.routeIntent === "knowledge_qa" &&
+        isApologyStyleFallback(full.trim())
+      ) {
+        console.info(`[AgentCore] 对话面误判转任务面：${text.slice(0, 48)}`);
+        return this.runStandardLlmPath(actorId, text, "complex", opts, {
+          ...ctx,
+          turnPlan: { budget: 2, capabilities: ["full"], tier: "fast" },
+        });
       }
     }
 
     return await this.turnFinalizer.finish(actorId, text, full, {
       streamedChunks: true,
       modelCallsConsumed,
-      planExecuteUsed: peUsed,
+      planExecuteUsed: useExplicitPlanner,
       pePlan,
       peExhausted,
       trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
     }, opts?.onAssistantDelta);
-  }
-
-  /**
-   * 车道内升级重放：fast 轮触发升级后，把整轮交给 complex 执行脑重跑。
-   *
-   * 先清掉 fast 轮写进主线程的残迹（user 消息 + 可能的工具链/部分回复，按
-   * clientMessageId 定位），再走 launchComplexBackgroundTask（plan-and-execute，
-   * complex 的唯一执行路径）。重放结果由 complex 分支自行落回主线程；调用方
-   * 拿到的文本走 runStandardLlmPath 的统一收尾（turnFinalizer 记忆写入只发生一次）。
-   *
-   * 不会无限递归：complex 分支内部所有路径（含 simpleToolLane 的直连
-   * streamCompletion）都不含 fastLane 的 escalate 工具，无法再次触发升级。
-   */
-  private async escalateFastTurnToComplex(
-    actorId: string,
-    text: string,
-    opts: HandleUserMessageOptions | undefined,
-    ctx: {
-      narrativeRecall?: string;
-      workingMemorySummary?: string;
-      recentConversationHistory?: string;
-      journalRecall?: string;
-      userLocation?: string;
-      trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
-      orchestrateToolCtx: ReturnType<AgentCore["buildOrchestrateOpts"]>;
-      personalization: PersonalizationPromptSlice;
-      sessionId: string;
-      shortTermTurn: ShortTermTurnContext;
-      cognitiveEmotion?: import("../brain/types.js").EmotionVector | null;
-      cognitiveUserPattern?: {
-        topics: string[];
-        preferredToolDomain?: string;
-        negativeFeedbackCount: number;
-        learningActive?: boolean;
-      };
-      cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
-    },
-    /** 升级继承：fast 轮已尝试工具调用的格式化记录块（可为空） */
-    inheritedToolContext?: string,
-  ): Promise<string> {
-    const provider = this.externalChat!;
-    const chatSessionId = resolvePrimaryChatSessionId(
-      actorId,
-      getAgentRuntimeConfig().masterDelegation.enabled,
-    );
-    provider.removeUserTurnAndAfter?.(chatSessionId, opts?.chatUserMessageId);
-    return this.launchComplexBackgroundTask(actorId, text, opts, {
-      narrativeRecall: ctx.narrativeRecall,
-      workingMemorySummary: ctx.workingMemorySummary,
-      recentConversationHistory: ctx.recentConversationHistory,
-      journalRecall: ctx.journalRecall,
-      userLocation: ctx.userLocation,
-      personalization: ctx.personalization,
-      trajCap: ctx.trajCap,
-      orchestrateOpts: ctx.orchestrateToolCtx,
-      sessionId: ctx.sessionId,
-      shortTermTurn: ctx.shortTermTurn,
-      cognitiveEmotion: ctx.cognitiveEmotion,
-      cognitiveUserPattern: ctx.cognitiveUserPattern,
-      cognitiveToolPlan: ctx.cognitiveToolPlan,
-      inheritedToolContext,
-    });
   }
 
   /**

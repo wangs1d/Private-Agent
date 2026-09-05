@@ -71,11 +71,7 @@ class IncomingCallWindow {
   void DestroyNativeWindow();
 
   void Paint(HWND hwnd, HDC hdc);
-  void DrawRoundedRect(HDC hdc, const RECT& rc, int radius, COLORREF fill,
-                       COLORREF border);
-  void DrawAvatar(HDC hdc, const RECT& rc, const std::wstring& initial,
-                  COLORREF bg, COLORREF letter_color);
-  // 自绘圆形图标按钮（新版设计：左侧红拒接 / 右侧绿接听）
+  // 自绘圆形图标按钮（豆包风：深底拒接 / 白底接听）
   void DrawRoundIconButton(HDC hdc, const RECT& rc, wchar_t glyph,
                            bool is_accept, bool hovered);
   // 用指定字体画一个居中字形（Segoe MDL2 Assets 图标）
@@ -88,14 +84,10 @@ class IncomingCallWindow {
   HWND window_handle_ = nullptr;
   HWND accept_btn_ = nullptr;
   HWND decline_btn_ = nullptr;
-  HBRUSH accept_brush_ = nullptr;   // 接听按钮背景刷
-  HBRUSH decline_brush_ = nullptr;  // 挂断按钮背景刷
 
   // 内容字段
   std::wstring caller_name_;
   std::wstring subtitle_;
-  std::wstring caller_initial_;
-  uint32_t accent_color_ = 0xFF22C55E;  // 默认绿
   int ring_timeout_ms_ = 30000;
 
   // 状态

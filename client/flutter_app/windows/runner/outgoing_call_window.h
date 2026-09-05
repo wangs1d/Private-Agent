@@ -37,18 +37,15 @@ class OutgoingCallWindow {
 
   HWND window_handle_ = nullptr;
   HWND hangup_btn_ = nullptr;
-  HBRUSH hangup_brush_ = nullptr;
   std::wstring caller_name_;
   std::wstring subtitle_;
-  std::wstring caller_initial_;
-  uint32_t accent_color_ = 0xFF22C55E;
   int pulse_phase_ = 0;
   HangUpCallback on_hangup_;
 
   static constexpr UINT_PTR kPulseTimerId = 4001;
   static constexpr int kIdHangup = 31;
-  static constexpr int kWindowWidth = 384;
-  static constexpr int kWindowHeight = 224;
+  static constexpr int kWindowWidth = 300;
+  static constexpr int kWindowHeight = 276;
   static constexpr int kMargin = 16;
   static constexpr const wchar_t* kClassName = L"PAI_OutgoingCall_Window";
 };

@@ -19,10 +19,31 @@ interface Mem0GetAllResult {
   results: Mem0MemoryItem[];
 }
 
+export type Mem0DeletedNotifier = (deletedIds: string[]) => void;
+
 export class AgenticMemoryLifecycleService {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private deletedNotifier: Mem0DeletedNotifier | null = null;
 
   constructor(private readonly memory: Memory) {}
+
+  /**
+   * 注入删除通知（P0-3）：TTL 清理/去重绕过 memory-bridge 直接删 Mem0 记录，
+   * bootstrap 把通知接到 bridge.handleMem0Deleted 做 linkage 调和（摘除被删 id /
+   * tombstone 摘空的链接），否则 bridge_links 里会积累永远扫不完的僵尸链接。
+   */
+  setDeletedNotifier(notifier: Mem0DeletedNotifier | null): void {
+    this.deletedNotifier = notifier;
+  }
+
+  private notifyDeleted(ids: string[]): void {
+    if (ids.length === 0) return;
+    try {
+      this.deletedNotifier?.(ids);
+    } catch (err) {
+      console.warn("[memory-lifecycle] deleted notifier 失败（忽略）:", err);
+    }
+  }
 
   start(): void {
     const ttlDays = getMemoryTTLDays();
@@ -81,11 +102,11 @@ export class AgenticMemoryLifecycleService {
         }
       }
 
-      for (const id of toDelete) {
-        await this.memory.delete(id).catch(() => {});
-      }
-
       if (toDelete.length > 0) {
+        for (const id of toDelete) {
+          await this.memory.delete(id).catch(() => {});
+        }
+        this.notifyDeleted(toDelete);
         console.info(
           `[memory-lifecycle] pruned ${toDelete.length} expired memories (cutoff=${new Date(cutoff).toISOString().slice(0, 10)})`,
         );
@@ -172,6 +193,7 @@ export class AgenticMemoryLifecycleService {
     for (const id of remove) {
       void this.memory.delete(id).catch(() => {});
     }
+    this.notifyDeleted([...remove]);
     return remove.size;
   }
 

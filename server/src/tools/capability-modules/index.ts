@@ -27,6 +27,7 @@ import type { SocialOutreachService } from "../../services/social-outreach-servi
 import type { CodeSandboxService } from "../../services/code-sandbox-service.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
 import type { AgentBrowserService } from "../../services/agent-browser-service.js";
+import type { BookingService } from "../../services/booking/booking-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
 import {
@@ -82,6 +83,30 @@ import {
   AGENT_BROWSER_CATEGORY_MAPPING,
   registerAgentBrowserTools,
 } from "./agent-browser/index.js";
+import {
+  RIDE_HAILING_CHAT_TOOLS,
+  RIDE_HAILING_INTENT_RULES,
+  RIDE_HAILING_CATEGORY_MAPPING,
+  registerRideHailingTools,
+} from "./ride-hailing/index.js";
+import {
+  HOME_SERVICES_CHAT_TOOLS,
+  HOME_SERVICES_INTENT_RULES,
+  HOME_SERVICES_CATEGORY_MAPPING,
+  registerHomeServicesTools,
+} from "./home-services/index.js";
+import {
+  RESTAURANT_BOOKING_CHAT_TOOLS,
+  RESTAURANT_BOOKING_INTENT_RULES,
+  RESTAURANT_BOOKING_CATEGORY_MAPPING,
+  registerRestaurantBookingTools,
+} from "./restaurant-booking/index.js";
+import {
+  PICTURE_CHAT_TOOLS,
+  PICTURE_INTENT_RULES,
+  registerPictureModuleTools,
+} from "./picture/index.js";
+import type { PictureKit } from "@private-ai-agent/picture";
 
 /**
  * 能力模块描述符：把一个能力域的所有挂载点打包成单一对象，
@@ -129,6 +154,10 @@ export interface CapabilityModuleDeps {
   codeSandboxService: CodeSandboxService;
   shoppingOrderService: ShoppingOrderService;
   agentBrowserService: AgentBrowserService;
+  /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
+  bookingService: BookingService;
+  /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
+  pictureKit: PictureKit;
 }
 
 /**
@@ -281,6 +310,46 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: AGENT_BROWSER_INTENT_RULES,
       register: (registry) => registerAgentBrowserTools(registry, { agentBrowserService: deps.agentBrowserService }),
       category: AGENT_BROWSER_CATEGORY_MAPPING,
+    },
+    {
+      domain: "ride_hailing",
+      label: "打车/网约车（统一预订抽象层）",
+      chatTools: RIDE_HAILING_CHAT_TOOLS,
+      intentRules: RIDE_HAILING_INTENT_RULES,
+      register: (registry) => registerRideHailingTools(registry, { bookingService: deps.bookingService }),
+      category: RIDE_HAILING_CATEGORY_MAPPING,
+    },
+    {
+      domain: "home_services",
+      label: "家政/本地生活预订（统一预订抽象层）",
+      chatTools: HOME_SERVICES_CHAT_TOOLS,
+      intentRules: HOME_SERVICES_INTENT_RULES,
+      register: (registry) => registerHomeServicesTools(registry, { bookingService: deps.bookingService }),
+      category: HOME_SERVICES_CATEGORY_MAPPING,
+    },
+    {
+      domain: "restaurant_booking",
+      label: "餐厅预订（统一预订抽象层）",
+      chatTools: RESTAURANT_BOOKING_CHAT_TOOLS,
+      intentRules: RESTAURANT_BOOKING_INTENT_RULES,
+      register: (registry) => registerRestaurantBookingTools(registry, { bookingService: deps.bookingService }),
+      category: RESTAURANT_BOOKING_CATEGORY_MAPPING,
+    },
+    {
+      domain: "picture",
+      label: "图片图库与人像美颜批图",
+      chatTools: PICTURE_CHAT_TOOLS,
+      intentRules: PICTURE_INTENT_RULES,
+      register: (registry) => registerPictureModuleTools(registry, { pictureKit: deps.pictureKit }),
+      category: {
+        name: "picture",
+        keywords: [
+          "gallery", "photo", "photos", "album", "beautify", "retouch",
+          "selfie", "skin", "whiten",
+          "照片", "相册", "图库", "修图", "美颜", "磨皮", "白皙", "冷白皮",
+          "红润", "气色", "批图", "p图", "自拍", "滤镜", "日系", "港风", "奶油肌",
+        ],
+      },
     },
   ];
 }

@@ -16,8 +16,13 @@ import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
 import { AGENT_TASKS_CHAT_TOOLS } from "../tools/agent-tasks-tools.js";
 import { RHYTHM_REMINDER_CHAT_TOOLS } from "../tools/rhythm-reminder-tools.js";
-import { PROACTIVITY_FEEDBACK_CHAT_TOOLS } from "../tools/proactivity-feedback-tools.js";
+import {
+  PROACTIVITY_CONFIRM_CHAT_TOOLS,
+  PROACTIVITY_FEEDBACK_CHAT_TOOLS,
+} from "../tools/proactivity-feedback-tools.js";
 import { CARE_REMINDER_CHAT_TOOLS } from "../tools/care-reminder-tools.js";
+import { COMMITMENT_CHAT_TOOLS } from "../tools/commitment-tools.js";
+import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
@@ -39,18 +44,7 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
-import { requiresFreshExternalInfo } from "../agent/task-router.js";
-import {
-  buildEscalationSentinel,
-  ESCALATE_TOOL_SCHEMA,
-  ESCALATION_TOOL_NAME,
-  type EscalationToolAttempt,
-} from "../tools/escalation-tool.js";
-import {
-  FRESH_FACT_TOOL_NAMES,
-  resolveForcedToolChoice,
-  shouldRequireFreshWebLookup,
-} from "../gateway/forced-tool.js";
+import { resolveForcedToolChoice } from "../gateway/forced-tool.js";
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isToolCallIdNotFoundError,
@@ -163,18 +157,6 @@ const META_TOOL_NAMES = new Set<string>([
   "aip.list_my_state",
 ]);
 
-/**
- * 满足「拿到外部实时/媒体内容」诉求的工具集（出口仲裁的 satisfied 判定用，2026-09-02）。
- * 比 FRESH_FACT_TOOL_NAMES（强制 search_web 的判定集）宽：图片/视频诉求由
- * search_images/search_videos 满足，不必强迫走文本搜索。
- */
-const FRESH_SATISFYING_TOOL_NAMES = new Set([
-  ...FRESH_FACT_TOOL_NAMES,
-  "search_images",
-  "search_images_batch",
-  "search_videos",
-]);
-
 function getToolResultBudget(toolName: string): number | undefined {
   return TOOL_RESULT_PRESET_MAX_CHARS[toolName];
 }
@@ -273,6 +255,11 @@ function isApologyStyleFallback(text: string): boolean {
     /刚走神/, // 用户明确要求删除"哈?刚走神了"风格的兜底
     /没反应过来/, // 用户明确要求删除"没反应过来"风格的兜底
     /我这会儿/, // 用户明确要求删除"我这会儿没反应过来"风格的兜底
+    // 通用"无能为力"句式（2026-09-05 出口自检话题无关化：只描述"答不了"的
+    // 语言形态，不描述任何话题——话题需求由路由层语义分类承担）
+    /(?:暂时|目前|现在)(?:没|无法|答不了|查不了|给不了)/,
+    /没有现成(?:数据|资料|信息|结果)/,
+    /(?:答不了|查不到|拿不到|给不了|掌握不到|无能为力)/,
   ];
   if (apologyPatterns.some((re) => re.test(t))) {
     // 仅当 LLM 没有在回复里整合任何事实（数字/链接/标题/日期）时，才判定为兜底
@@ -1545,9 +1532,9 @@ export function getFastLaneTools(): ChatCompletionTool[] {
     if (!("function" in t) || !t.function?.name) return false;
     return !seen.has(t.function.name);
   });
-  // 车道内升级逃生舱：fast 每轮必带。模型发现轻量工具办不完全这件事时
-  // 调用 agent.escalate_to_complex，工具循环短路返回哨兵，agent-core 重放 complex。
-  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique, ESCALATE_TOOL_SCHEMA];
+  // 2026-09-05 双面架构：escalate 逃生舱已删除（对话面零工具、任务面全量工具，
+  // 轨道内出口自检承担纠错，不再需要模型侧升级哨兵）。
+  _fastLaneToolsCache = [...builtinFastLane, ...dynamicUnique];
   return _fastLaneToolsCache;
 }
 
@@ -1683,7 +1670,10 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...AGENT_TASKS_CHAT_TOOLS,
     ...RHYTHM_REMINDER_CHAT_TOOLS,
     ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
+    ...PROACTIVITY_CONFIRM_CHAT_TOOLS,
     ...CARE_REMINDER_CHAT_TOOLS,
+    ...COMMITMENT_CHAT_TOOLS,
+    ...GEOFENCE_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
@@ -1824,6 +1814,18 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     toolNames: ['care.set_important_date', 'care.get_important_dates', 'care.delete_important_date']
   },
   {
+    // 方案 C 承诺草稿板：用户提到承诺/答应/兑现/欠的事时召回 commitment.* 工具
+    category: 'life',
+    keywords: ['承诺', '答应', '保证', '说好', '约好', '兑现', '爽约', '答应过', '答应我', '我保证', '欠着', '还没给', '说过要', '改主意了', '不算了', 'commitment', 'promise'],
+    toolNames: ['commitment.create', 'commitment.list', 'commitment.confirm', 'commitment.cancel', 'commitment.retract', 'commitment.update', 'commitment.fulfill']
+  },
+  {
+    // 方案 D 溯源作废：用户否认说过/要求删除记忆时召回 memory.invalidate
+    category: 'life',
+    keywords: ['我没说过', '我没有说过', '当我没说', '记错了', '那条记忆', '删掉记忆', '作废', '那条信息是错的', '我不是那个意思', 'invalidate'],
+    toolNames: ['memory.invalidate']
+  },
+  {
     // Task 19 健康关怀：健康数据确定性统计问答（这周跑了几次步/步数/睡眠）
     category: 'life',
     keywords: ['跑步', '跑了几次', '跑了多少', '步数', '步行', '锻炼', '健身', '运动量', '运动了几天', '睡眠时长', '体重', '健康数据', 'health'],
@@ -1934,9 +1936,7 @@ const ALWAYS_INCLUDED_TOOLS = [
   'agent.query_capabilities',
   'brain.list_capabilities',
   'phone.call_user',
-  // 车道内升级逃生舱：fast 轮无论命中哪个类别都可见（正则类别映射不可靠，
-  // 升级通道本身不能依赖它）。
-  ESCALATION_TOOL_NAME,
+  // 2026-09-05：escalate 哨兵工具已随车道内升级机制一起删除。
   // search_images 不再常驻：
   //   收敛误触发（2026-08-20，宁缺勿滥）——常驻会让模型在"对话前面搜过图、本轮并
   //   未要图"时仍被勾着调用。改为回落到 contextual 筛选：只有当当前轮用户意图命
@@ -2191,6 +2191,8 @@ export function safeTruncateDigest(raw: string, maxChars: number): string {
 
 /** summary 历史裁剪：保留最近 N 个用户回合（含其后的全部工具链），丢弃更早纯对话。 */
 const SUMMARY_KEEP_USER_TURNS = 4;
+/** summary 旧波折叠摘要长度：比 replan 折叠（160）更长，保住跨波对比的关键数据。 */
+const SUMMARY_FOLD_DIGEST_CHARS = 400;
 /** summary 历史裁剪生效的消息数阈值：短对话不裁剪（避免丢失引用上下文）。 */
 const SUMMARY_TRIM_MIN_MESSAGES = 14;
 /**
@@ -2247,10 +2249,13 @@ function assistantToolCallNames(m: ChatCompletionMessageParam): string {
  * replan 历史瘦身：把「早于当前波次」的已完成工具链（assistant tool_calls + 其 tool
  * 回复）折叠为一条确定性摘要 user 消息，仅保留最近一个波次的完整链。replan 规划只需
  * 「上一步拿到了什么」，不必重发全部细节。折叠是确定性截断（保留工具名 + 结果要点），
- * 不经过 LLM，杜绝幻觉；最终汇总（runSchemaLessSummary）仍用未折叠的完整历史作答，
- * 因此最终回答质量与完整数据不受影响。
+ * 不经过 LLM，杜绝幻觉；最终汇总（runSchemaLessSummary）对旧波用更长的摘要预算
+ * （SUMMARY_FOLD_DIGEST_CHARS）作答，尽量保住跨波取数需要的关键数据。
  */
-function foldOldWaveToolChains(msgs: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+function foldOldWaveToolChains(
+  msgs: ChatCompletionMessageParam[],
+  digestChars: number = REPLAN_FOLD_DIGEST_CHARS,
+): ChatCompletionMessageParam[] {
   // 定位所有工具链起点；最后一个链 = 当前波次（必须原样保留）
   const chainStarts: number[] = [];
   for (let i = 0; i < msgs.length; i++) {
@@ -2395,7 +2400,6 @@ export async function streamCompletionWithTools(
   );
   const registryTools = toolSearchPrepared.visibleTools;
   const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
-  const requiresFreshWebLookup = shouldRequireFreshWebLookup(userText, registryTools);
 
   if (toolSearchPrepared.toolSearchActive) {
     console.info(
@@ -2412,7 +2416,6 @@ export async function streamCompletionWithTools(
   let lastAssistantText = "";
   let lastToolOutputFallback = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
-  let satisfiedFreshWebLookup = false;
   // 累积所有工具调用结果，供 summary 调用时做数据质量评估 + 策略注入
   const allToolExecResults: Array<{
     toolName: string;
@@ -2421,75 +2424,45 @@ export async function streamCompletionWithTools(
     result: Record<string, unknown>;
   }> = [];
 
-  // ── 统一出口仲裁（2026-09-02）──
-  // 之前升级/重试判定散落在多个收尾分支出口，且判据用「allToolExecResults.length === 0」
-  // （零工具执行）——把「调了工具但失败」这种恰恰最需要升级的形态排除在外（真实案例：
-  // 「帮我搜索景甜的照片」search_images 失败后模型拿机制话收场，无任何兜底接住）。
-  // 现收敛为单一判定：有外部信息/媒体诉求（或收尾是道歉式机制话）+ 没有任何成功的
-  // 实质工具结果 → 诉求未满足。fast 车道在该出口升级 complex，complex 车道仅触发重试。
-  // 媒体诉求：找图/照片/视频类需求。保守起见「图」不单独成词（避免图书/地图误伤），
-  // 只匹配完整词。
-  const MEDIA_NEED_RE = /照片|图片|壁纸|表情包|头像|搜图|找图|出图|视频/i;
+  // ── 统一出口自检 TurnOutcomeGate（2026-09-05，话题无关）──
+  // 判定不使用任何话题关键词（价格/新闻/媒体词表已随话题路由一起删除）：
+  // "这轮是否需要工具"由路由层的语义分类决定，本门只负责事实核查——
+  // 任务面轮次结束时有「实质成功的工具结果」才算诉求被满足；
+  // 没有成功结果且收尾是道歉式/机制话（风格判定，话题无关）→ 换路续波一次。
+  // 置信而答的直答（含模型凭既有知识回答）不拦截，避免空转烧 token。
   /** 有实质产出的成功工具数：元工具（能力查询/目录检索）与失败执行不计入。 */
   const countSubstantiveOkResults = (): number =>
     allToolExecResults.filter((r) => r.ok && !META_TOOL_NAMES.has(r.toolName)).length;
-  /** fast 出口仲裁：本轮收尾是否「用户诉求未满足」。null = 满足，可正常收尾。 */
+  /** 出口自检：本轮收尾是否「用户诉求未满足」。null = 满足，可正常收尾。 */
   const assessTurnUnsatisfied = (finalText: string): string | null => {
     if (countSubstantiveOkResults() > 0) return null;
-    if (requiresFreshExternalInfo(userText) || MEDIA_NEED_RE.test(userText)) {
-      return "user_needs_external_info_but_no_tool_succeeded";
+    // 事实判定（话题无关）：任务面轮次尝试过实质工具但零成功 → 诉求未满足。
+    // 任务面本身由路由层语义分类选定（声明了能力需求），"有没有真的办成"
+    // 只看服务端工具执行结果，不猜话题、不看措辞。
+    if (allToolExecResults.length > 0) {
+      return "substantive_tools_attempted_but_none_succeeded";
     }
-    // 无外部信息/媒体诉求时，仅当「确实尝试过实质工具仍失败且道歉式收场」才升级；
-    // 纯闲聊里的一句「我不知道」不升级（避免情绪对话被重放 complex 改变人格节奏）。
-    const substantiveFailureSeen = allToolExecResults.some(
-      (r) => !r.ok && !META_TOOL_NAMES.has(r.toolName),
-    );
-    if (substantiveFailureSeen && isApologyStyleFallback(finalText.trim())) {
-      return "tool_attempted_but_failed_with_apology";
+    // 零尝试：仅当收尾是道歉式/机制话（风格判定，天然话题无关）才续波——
+    // 置信的知识直答与向用户追问澄清的轮次不拦截，避免空转烧 token。
+    if (isApologyStyleFallback(finalText.trim())) {
+      return "no_attempt_and_hedged";
     }
     return null;
   };
-  /** 压缩尝试记录的单字段：优先取 query/url/keyword/error 等关键键，截断到 120 字。 */
-  const compactAttemptField = (value: unknown): string | undefined => {
-    if (value == null) return undefined;
-    let s: string;
-    if (typeof value === "string") {
-      s = value;
-    } else if (typeof value === "object") {
-      const rec = value as Record<string, unknown>;
-      const key = rec.query ?? rec.keyword ?? rec.url ?? rec.searchTerm ?? rec.error;
-      s = typeof key === "string" ? key : JSON.stringify(value);
-    } else {
-      s = String(value);
-    }
-    s = s.replace(/\s+/g, " ").trim();
-    return s ? s.slice(0, 120) : undefined;
-  };
-  /** fast 轮工具尝试记录：随升级哨兵带给 complex，首波带着部分成果续办（升级继承）。 */
-  const buildAttemptRecords = (): EscalationToolAttempt[] =>
-    allToolExecResults.slice(-6).map((r) => ({
-      tool: r.toolName,
-      ok: r.ok,
-      input: compactAttemptField(r.input),
-      detail: compactAttemptField((r.result as Record<string, unknown> | undefined)?.error ?? r.result),
-    }));
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
   // 不跨轮持久——跨轮缓存由 ctx.getCachedToolResult 的 TTL 缓存负责）。
   // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
   // 消除并行重复执行；失败结果落定后立即摘除，后续 replan 波次仍可重新执行。
   const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
   // 强制联网兜底（模型未调搜索工具就收尾时注入提示重规划）只授予一次
-  let freshLookupEnforced = false;
   // 行动宣告未兑现兜底（模型只承诺要查/去办、却一个工具都没调就收尾）只授予一次。
-  // 与 freshLookupEnforced 区分：fresh 只看用户文本是否含搜索意图，管不到「LLM 宣告
-  // 了要办某件事却空手收尾」这条；此标志专治后者。
   let announcementEnforced = false;
   // 空正文整合兜底（2026-08-29）：模型调完工具只发 tool_calls 就收尾、零正文时，
   // 强制它基于工具结果说人话（而非把工具 JSON 原文糊给用户），只授予一次。
   let narrationEnforced = false;
-  // 车道内升级：fast 轮模型调用 agent.escalate_to_complex 后置位，本波工具批
-  // 结束即返回升级哨兵（agent-core 的 fast 分支据此重放 complex）。
-  let escalationRequested = false;
+  // 统一出口自检（2026-09-05 TurnOutcomeGate）：轨迹内「换路续波」只授予一次，
+  // 不再区分 fast/complex 车道（2026-09-05 双面架构后只有任务面进工具循环）。
+  let outcomeGateEnforced = false;
   // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
   // 前缀缓存命中统计（本调用内聚合，结束时打印一行，验证优化前后命中率变化）
   const prefixCacheStats = { hit: 0, miss: 0 };
@@ -2747,34 +2720,13 @@ export async function streamCompletionWithTools(
       //     search_images 常驻可见，服务端把工具结果确定性渲染成图廊（chat-user-message.ts）。
       //   - 普通问答时模型不该调图片工具就不调，从而彻底避免误返回照片。
 
-      // ── 收尾兜底链（2026-09-02 重构：先便宜重试，再统一仲裁升级）──
-      // 旧实现把「fast 零工具升级保底」放在最前，且判据 allToolExecResults.length===0
-      // 把「调了工具但失败」排除在升级之外。新顺序：
-      //   1) 强制联网重试（complex/fast 通用，一次）——比整轮升级便宜，优先给机会；
-      //   2) 宣告未兑现补打（零工具 + 纯宣告，一次）；
-      //   3) fast 统一出口仲裁——成功口径判据（无任何成功的实质工具结果 + 用户诉求
-      //      未满足），覆盖「调了但失败」「宣告」「假搜索」全部形态 → 升级 complex。
-      // 强制联网兜底：需要最新网络证据但模型未调任何搜索工具就收尾 → 注入提示
-      // 重规划一次（不额外消耗波次预算，全程最多授予一次）。
-      // 2026-08-28 修复：移除 `wave + 1 < maxWaves` 门槛。wave -= 1 已补偿波次预算。
-      if (
-        requiresFreshWebLookup &&
-        !satisfiedFreshWebLookup &&
-        !freshLookupEnforced
-      ) {
-        freshLookupEnforced = true;
-        wave -= 1; // 补回本次被消耗的波次： enforcement 轮不计入规划预算
-        messages.push({
-          role: "assistant",
-          content: finalText || fullText || "(需要调用搜索工具获取最新信息)",
-        });
-        messages.push({
-          role: "system",
-          content:
-            "This turn requires fresh web evidence. Do not send a final answer yet. Call search_web first, then use fetch_web or info.* if needed, and only answer after you have real search results.",
-        });
-        continue;
-      }
+      // ── 收尾兜底链（2026-09-05 根源化：全部话题无关）──
+      // 旧链中的「强制联网重试」依赖 FRESH_WEB_LOOKUP_RE 等话题词表判定"需要联网"，
+      // 属于关键词打地鼠，已删除——"需不需要外部信息"由路由层语义分类承担，
+      // "有没有真的查"由下方出口自检（风格判定）承担，不再需要话题词预判。
+      // 现顺序：
+      //   1) 行动宣告未兑现补打（零工具 + 纯宣告，风格判定，一次）；
+      //   2) 统一出口自检 TurnOutcomeGate（无实质成功结果 + 道歉式收场，一次）。
       // 行动宣告未兑现兜底（根治「回复了却没结果」）：文本命中行动宣告模式 且
       // 本轮从未执行过任何工具 且 未强制过 → 注入指令强制补打一波真实工具调用。
       // 全程最多授予一次。
@@ -2797,18 +2749,39 @@ export async function streamCompletionWithTools(
         });
         continue;
       }
-      // fast 统一出口仲裁：轨迹内便宜重试已用尽（或不可用）仍「诉求未满足」→
-      // 升级 complex 重放，携带本轮工具尝试记录供 complex 续办（升级继承）。
-      // 仅 fastProfile 生效：complex 是顶层车道，无再升级出口。
-      if (fastProfile) {
+      // 统一出口自检（2026-09-05 TurnOutcomeGate，不分车道）：「诉求未满足」且预算
+      // 还有余量 → 注入一次换路续波指令（换关键词/换工具/换数据源），在原轨迹内纠错。
+      // 预算耗尽 → 如实收尾（honest 策略），不再有升级哨兵/整轮重放。
+      // 仅当本轮有工具可调时生效——零工具轮（对话面）不在这里空转。
+      if (stableApiTools.length > 0) {
         const unsatisfiedReason = assessTurnUnsatisfied(finalText);
+        if (
+          unsatisfiedReason &&
+          !outcomeGateEnforced &&
+          wave + 1 < effectiveMaxWaves()
+        ) {
+          outcomeGateEnforced = true;
+          console.info(
+            `[openai-tool-loop] 出口自检：${unsatisfiedReason}` +
+              `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 换路续波`,
+          );
+          messages.push({
+            role: "assistant",
+            content: finalText || fullText || "",
+          });
+          messages.push({
+            role: "system",
+            content:
+              "出口自检：到目前为止还没有任何一次成功的工具结果能回答用户的问题。" +
+              "请换一个关键词重搜、换一个工具（如 search_web / fetch_web / internet.*）或换数据源再试一次，" +
+              "拿到真实结果后再回答。若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。",
+          });
+          continue;
+        }
         if (unsatisfiedReason) {
           console.info(
-            `[openai-tool-loop] fast 出口仲裁：${unsatisfiedReason}` +
-              `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 重放 complex`,
+            `[openai-tool-loop] 出口自检：${unsatisfiedReason}（预算耗尽）→ 如实收尾`,
           );
-          logPrefixCacheStats();
-          return buildEscalationSentinel(buildAttemptRecords());
         }
       }
       // 空正文整合兜底（2026-08-29）：isApologyStyleFallback("")=true，旧行为会
@@ -2925,22 +2898,6 @@ export async function streamCompletionWithTools(
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
-        // 车道内升级逃生舱：escalate 是控制信号不是真实工具，短路执行直接上报。
-        if (item.registryToolName === ESCALATION_TOOL_NAME) {
-          escalationRequested = true;
-          return {
-            exec: { ok: true, result: { escalated: true } },
-            compacted: {
-              content: JSON.stringify({ escalated: true }),
-              rawBytes: 0,
-              compactBytes: 0,
-              compacted: false,
-            },
-            injectFrames: undefined,
-            resultForWire: { escalated: true },
-            wireToolName: ESCALATION_TOOL_NAME,
-          } as const;
-        }
         let targetToolName = item.registryToolName;
         let targetArgs = item.parsedArgs;
 
@@ -3123,15 +3080,15 @@ export async function streamCompletionWithTools(
       }),
     );
 
-    // 车道内升级：escalate 被调用 → 立即终止 fast 工具循环，交还 agent-core 重放 complex。
-    // 不再向 messages 追加 tool 结果（本轮消息序列废弃，重放从干净线程重新开始）。
-    // 哨兵携带本轮工具尝试记录（升级继承）：complex 首波避免原样重试已失败的调用。
-    if (escalationRequested) {
-      console.info(
-        `[openai-tool-loop] fast 车道升级：${ESCALATION_TOOL_NAME} 被调用 → 重放 complex（携带 ${allToolExecResults.length} 条尝试记录）`,
-      );
-      logPrefixCacheStats();
-      return buildEscalationSentinel(buildAttemptRecords());
+    // 2026-09-05：escalate 哨兵短路已删除——升级/重放机制退役，
+    // 出口自检在 final-text 分支统一处理（见上方 outcomeGateEnforced）。
+
+    // 本波最后一条成功工具消息的下标：充分性提示只追加一次。
+    // 此前每条成功消息都重复追加同一段提示（5 个并行工具 = 5 份相同文本）。
+    let lastOkToolIndex = -1;
+    for (let i = 0; i < settledResults.length; i++) {
+      const s = settledResults[i];
+      if (s.status === "fulfilled" && s.value.exec.ok) lastOkToolIndex = i;
     }
 
     for (let i = 0; i < workItems.length; i++) {
@@ -3144,11 +3101,6 @@ export async function streamCompletionWithTools(
         settled.status === "fulfilled" ? settled.value.wireToolName : item.registryToolName;
 
       toolResults.push({ name: wireToolName, ok: exec.ok });
-      // B 判据修正（2026-09-02）：图片/视频诉求由 search_images/search_videos 满足，
-      // 不再只认 web 检索四件套——否则图片搜索成功也算「联网诉求未满足」被误升级。
-      if (exec.ok && FRESH_SATISFYING_TOOL_NAMES.has(wireToolName)) {
-        satisfiedFreshWebLookup = true;
-      }
       if (isInteractiveToolName(wireToolName)) {
         waveUsedInteractiveTool = true;
       }
@@ -3182,11 +3134,13 @@ export async function streamCompletionWithTools(
         roundToolOutputs.push(toolContent.trim());
       }
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
+      // 只追加在本波最后一条成功消息上（内容与具体工具无关，逐条重复纯烧 token）。
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
       // 明确告诉 LLM「结果已完整」，让它直接回答而非重复调用。
-      const sufficiencyHint = exec.ok
-        ? buildToolSufficiencyHint(wireToolName, fullToolContent)
-        : "";
+      const sufficiencyHint =
+        exec.ok && i === lastOkToolIndex
+          ? buildToolSufficiencyHint(wireToolName, fullToolContent)
+          : "";
       // 对失败的工具结果追加强约束 reminder，防止 LLM 忽略 error 字段后对用户撒谎。
       // 关键场景：desktop.open 派发进程但窗口未起来 → ok=false → LLM 必须如实承认失败。
       const failureReminder = !exec.ok
@@ -3233,9 +3187,8 @@ export async function streamCompletionWithTools(
 
     const allSucceeded = toolResults.length > 0 && toolResults.every((r) => r.ok);
     const hasMetaTool = toolResults.some((r) => META_TOOL_NAMES.has(r.name));
-    const freshSatisfied = !requiresFreshWebLookup || satisfiedFreshWebLookup;
 
-    if (allSucceeded && !hasMetaTool && freshSatisfied && !waveUsedInteractiveTool) {
+    if (allSucceeded && !hasMetaTool && !waveUsedInteractiveTool) {
       // 充分性探测（token 最省路径）：不带 schema 的轻量汇总调用。工具结果已完整
       // 存在于上方 tool 消息里（无压缩/折叠），汇总指令不再重复 dump。
       // 首行输出 NEED_MORE_TOOLS → 结果不足，升级一次 replan（带 schema）。
@@ -3257,18 +3210,15 @@ export async function streamCompletionWithTools(
   // ── 兜底 SUMMARIZE：波次耗尽仍未收尾的工具链（无逃生门的最终汇总，流式输出）──
   const finalSummary = await runSchemaLessSummary(false);
   logPrefixCacheStats();
-  // fast 统一出口仲裁（summary 路径，2026-09-02）：summary 收尾不经过上方
-  // final-text 分支的仲裁，这里补一道——「帮我搜索景甜的照片」案例的漏点：
-  // search_images 失败 → 波次耗尽 → schema-less summary 产出机制话直接返回，
-  // 既不重试也不升级。此处拦截后升级 complex 续办。
-  if (fastProfile) {
+  // 出口自检（summary 路径，2026-09-05 统一）：波次已耗尽、且最终汇总仍未满足诉求
+  // → 无预算续波，如实收尾（记录日志供观测；不再返回升级哨兵/整轮重放）。
+  {
     const summaryUnsatisfiedReason = assessTurnUnsatisfied(finalSummary.text);
     if (summaryUnsatisfiedReason) {
       console.info(
-        `[openai-tool-loop] fast summary 出口仲裁：${summaryUnsatisfiedReason}` +
-          `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 重放 complex`,
+        `[openai-tool-loop] summary 出口自检：${summaryUnsatisfiedReason}` +
+          `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 预算耗尽，如实收尾`,
       );
-      return buildEscalationSentinel(buildAttemptRecords());
     }
   }
   return finalSummary.text;
@@ -3276,8 +3226,9 @@ export async function streamCompletionWithTools(
   /**
    * SUMMARIZE 阶段：单次不带工具 schema 的汇总调用（流式）。
    *
-   * - 工具结果已完整存在于 messages 的 tool 消息里（Plan-and-Execute 不做
-   *   循环内压缩/折叠），汇总指令不再重复 dump 工具结果，省一份 token。
+   * - 工具结果存在于 messages 的 tool 消息里；旧波工具链折叠为确定性摘要
+   *   （SUMMARY_FOLD_DIGEST_CHARS），最近一波完整保留。汇总指令不再重复
+   *   dump 工具结果，省一份 token。
    * - escapeAllowed=true 时为「充分性探测」：首行输出 NEED_MORE_TOOLS 表示
    *   结果不足以回答，调用方据此升级一次 replan。为避免标记透出到前端，
    *   首行（或前 48 字符）先缓冲，判定不是标记后才 flush 给 onDelta。
@@ -3302,10 +3253,20 @@ export async function streamCompletionWithTools(
         return hasContent || hasToolCalls;
       });
 
+      // ① 旧波工具链折叠（2026-09-05）：多波任务此前把全部波次的工具结果原文
+      // 完整重发给汇总调用（replan 后甚至重发两次）。现仅保留最近一波完整链，
+      // 旧波折叠为 400 字符确定性摘要（工具名+结果要点，URL 安全截断）——
+      // 比 replan 折叠（160）更长，保住跨波对比需要的关键数据。
+      // 用户文本命中「指代早期对话」措辞时跳过折叠（与条数裁剪同一保护闸）。
+      const foldAllowed = !(userText && SUMMARY_TRIM_REFERENCE_CUES.test(userText));
+      const summaryBaseMessages = foldAllowed
+        ? foldOldWaveToolChains(sanitizedMessages, SUMMARY_FOLD_DIGEST_CHARS)
+        : sanitizedMessages;
+
       // ② summary 历史裁剪：只保留全部 system + 最近 N 个用户回合（含其后的全部工具链），
       // 丢弃更早纯对话。工具结果完整保留，最终回答的真实数据不丢；短对话为无操作。
       // 质量保护：当前用户文本命中指代早期对话的措辞（刚才/上面/继续等）时跳过裁剪。
-      const trimmedMessages = trimHistoryForSummary(sanitizedMessages, SUMMARY_KEEP_USER_TURNS, userText);
+      const trimmedMessages = trimHistoryForSummary(summaryBaseMessages, SUMMARY_KEEP_USER_TURNS, userText);
 
       // 数据驱动策略评估：根据工具收集到的真实数据质量选择回复策略
       const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText);

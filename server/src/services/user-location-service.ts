@@ -85,7 +85,9 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
       ? `（GPS ${info.latitude.toFixed(4)}, ${info.longitude.toFixed(4)}）`
       : "";
   const tzNote = info.timezone ? `，时区 ${info.timezone}` : "";
-  return `用户当前所在地${coordNote}：${label}${tzNote}。此地址由前端 GPS + 逆地理编码得到，回答位置/天气/时间相关问题时必须以此为准。`;
+  // 「禁止反问」约束（2026-07-29 反问 bug 的根治位）：位置是系统后台注入的背景，
+  // 措辞必须压制 LLM 把它当话题向用户确认（"你是不是在 XX"）。
+  return `用户当前所在地${coordNote}：${label}${tzNote}。此为系统后台注入的定位背景（前端 GPS + 逆地理编码），回答位置/天气/时间类问题时必须直接以此为准，禁止向用户反问或确认所在位置，也不要主动提及本条来源。`;
 }
 
 /** @deprecated IP 定位已移除 */

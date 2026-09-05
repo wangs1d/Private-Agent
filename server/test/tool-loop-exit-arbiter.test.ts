@@ -1,17 +1,20 @@
 /**
- * fast 车道统一出口仲裁（2026-09-02）行为测试。
+ * 统一出口自检 TurnOutcomeGate（2026-09-05 双面架构）行为测试。
  *
- * 背景：fast 车道「调了工具但失败」的轮次曾被所有兜底漏掉——升级保底判据是
- * 「零工具执行」（失败执行也计数 → 丧失升级资格），波次耗尽的 schema-less
- * summary 路径又完全绕过收尾检查。真实案例「帮我搜索景甜的照片」：search_images
- * 失败 → 模型拿机制话收场，无重试、无升级。
+ * 旧契约（2026-09-02 车道内升级）已退役：fast 车道出口仲裁返回升级哨兵 →
+ * agent-core 删线程整轮重放 complex。新契约：
+ *   - 只有任务面进工具循环（对话面零工具）；
+ *   - 出口自检不分车道：「诉求未满足」∧ 预算有余 → 注入一次换路续波指令，
+ *     在原轨迹内纠错；预算耗尽 → 如实收尾（honest），不再有哨兵/重放。
  *
  * 覆盖场景：
- *   A. 媒体诉求 + search_images 失败 → 出口仲裁升级 complex（哨兵携带尝试记录）
- *   B. search_images 成功 → 真实工具执行 + 正常收尾（不升级）
- *   C. 失败换路预算：失败后 fast 追加 1 波，search_web 重试真实执行并成功
- *   D. 零工具 + 联网诉求：强制联网重试一次后仍不满足 → 升级（旧保底行为保留）
- *   E. 升级继承负载：哨兵构造/解析/格式化回环
+ *   A. 媒体诉求 + search_images 失败 → 出口自检换路续波（不产生哨兵），
+ *      模型换 search_web 拿到真实结果后收尾
+ *   B. search_images 成功 → 真实工具执行 + 正常收尾（不触发自检）
+ *   C. 失败换路预算：失败后追加 1 波，重试轮带 schema（预算行为保留）
+ *   D. 零工具调用 + 联网诉求：强制联网重试一次仍不满足 → 换路续波一次，
+ *      预算耗尽后如实收尾（不再返回哨兵）
+ *   E. escalate 哨兵工具已从工具集中移除
  *
  * 用 mock LLM client（脚本化 chunk 流）+ 真实 executeTool 执行器驱动，
  * 断言工具是否被「真实调用」而非仅出现在模型文本里。
@@ -23,20 +26,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-const BENCH_DATA_DIR = mkdtempSync(join(tmpdir(), "tool-loop-arbiter-"));
+const BENCH_DATA_DIR = mkdtempSync(join(tmpdir(), "tool-loop-gate-"));
 process.env.PA_DATA_DIR = BENCH_DATA_DIR;
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
 
 const { streamCompletionWithTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"
 );
-const {
-  buildEscalationSentinel,
-  parseEscalationPayload,
-  formatEscalationAttempts,
-  isEscalationSignal,
-  ESCALATION_SENTINEL,
-} = await import("../src/tools/escalation-tool.js");
 
 /* ---------------- mock LLM client（脚本化 chunk 流） ---------------- */
 
@@ -158,14 +154,18 @@ function makeCtx(opts?: { fail?: string[] }) {
   };
 }
 
-/* ---------------- A. 媒体诉求 + 图片搜索失败 → 出口仲裁升级 ---------------- */
+/* ---------------- A. 媒体诉求 + 图片搜索失败 → 出口自检换路续波 ---------------- */
 
-test("A. search_images 失败 + 媒体诉求 → 出口仲裁升级，哨兵携带尝试记录", async () => {
+test("A. search_images 失败 + 媒体诉求 → 出口自检换路续波，search_web 拿到真实结果后收尾", async () => {
   const { client, requests } = makeFakeClient([
     // wave 0：模型调用 search_images（真实执行器返回失败）
     toolCallChunks([{ id: "call_a1", name: "search_images", args: { query: "景甜 近照" } }]),
-    // wave 1：模型拿机制话收场（复刻线上真实回复形态）
+    // wave 1：模型拿机制话收场（复刻线上真实回复形态）→ 出口自检判「诉求未满足」
     textChunks(HEDGE_REPLY),
+    // wave 2（出口自检换路续波）：模型换 search_web，成功
+    toolCallChunks([{ id: "call_a2", name: "search_web", args: { query: "景甜 最新 照片" } }]),
+    // 充分性探测（无 schema 汇总）：正常回答
+    textChunks(FINAL_ANSWER),
   ]);
 
   const { ctx, executed } = makeCtx({ fail: ["search_images"] });
@@ -177,28 +177,36 @@ test("A. search_images 失败 + 媒体诉求 → 出口仲裁升级，哨兵携�
     ctx,
     {
       tools: TOOLS as never,
-      maxRounds: 2,
+      maxRounds: 4,
       extraBody: { fastProfile: true },
-      audit: { sessionId: "arb-images-fail" },
+      audit: { sessionId: "gate-images-fail" },
     },
   );
 
-  // 工具被真实调用（失败 + 内置确定性重试 1 次 = 2 次真实执行）
-  assert.equal(executed.length, 2, "search_images 应被真实执行（失败 + 确定性重试）");
-  assert.equal(executed.every((e) => !e.ok), true, "两次执行均失败");
-  // 收尾不是机制话，而是升级哨兵
-  assert.equal(isEscalationSignal(out), true, `应返回升级哨兵，实际: ${out.slice(0, 60)}`);
-  const payload = parseEscalationPayload(out);
-  assert.ok(payload, "哨兵应可解析");
-  assert.equal(payload.attempts.length, 1);
-  assert.equal(payload.attempts[0].tool, "search_images");
-  assert.equal(payload.attempts[0].ok, false);
-  assert.ok(payload.attempts[0].input?.includes("景甜"), "尝试记录应携带关键入参");
+  // search_images 真实执行失败（+确定性重试）→ 出口自检续波 → search_web 真实成功
+  assert.equal(
+    executed.some((e) => e.name === "search_images" && !e.ok),
+    true,
+    "search_images 应被真实执行且失败",
+  );
+  assert.equal(
+    executed.some((e) => e.name === "search_web" && e.ok),
+    true,
+    `出口自检后应换 search_web 真实执行，实际: ${JSON.stringify(executed.map((e) => [e.name, e.ok]))}`,
+  );
+  // 不再产生升级哨兵——拿到真实结果后正常收尾
+  assert.ok(!out.includes("__ESCALATE_TO_COMPLEX__"), "不得返回升级哨兵");
+  assert.ok(out.includes("路透"), `应返回正常回答，实际: ${out.slice(0, 60)}`);
+  // 出口自检的换路指令确实注入过
+  const injected = requests.some((r) =>
+    JSON.stringify(r.messages ?? []).includes("出口自检"),
+  );
+  assert.ok(injected, "续波前应注入出口自检换路指令");
 });
 
 /* ---------------- B. 图片搜索成功 → 真实执行 + 正常收尾 ---------------- */
 
-test("B. search_images 成功 → 工具真实执行，正常收尾不升级", async () => {
+test("B. search_images 成功 → 工具真实执行，正常收尾不触发自检", async () => {
   const { client } = makeFakeClient([
     // wave 0：search_images 成功
     toolCallChunks([{ id: "call_b1", name: "search_images", args: { query: "景甜 近照" } }]),
@@ -217,19 +225,18 @@ test("B. search_images 成功 → 工具真实执行，正常收尾不升级", a
       tools: TOOLS as never,
       maxRounds: 2,
       extraBody: { fastProfile: true },
-      audit: { sessionId: "arb-images-ok" },
+      audit: { sessionId: "gate-images-ok" },
     },
   );
 
   assert.equal(executed.length, 1, "search_images 应被真实执行 1 次");
   assert.equal(executed[0].ok, true);
-  assert.equal(isEscalationSignal(out), false, "工具成功满足诉求，不应升级");
   assert.ok(out.includes("路透"), `应返回正常回答，实际: ${out.slice(0, 60)}`);
 });
 
-/* ---------------- C. 失败换路预算：失败后追加 1 波，换工具重试成功 ---------------- */
+/* ---------------- C. 失败换路预算：失败后追加 1 波，重试轮带 schema ---------------- */
 
-test("C. search_images 失败后换 search_web 重试：失败换路预算生效，重试轮带 schema", async () => {
+test("C. 失败换路预算保留：失败后追加 1 波，重试轮带 schema", async () => {
   const { client, requests } = makeFakeClient([
     // wave 0：search_images 失败（+内置确定性重试）
     toolCallChunks([{ id: "call_c1", name: "search_images", args: { query: "景甜 近照" } }]),
@@ -252,7 +259,7 @@ test("C. search_images 失败后换 search_web 重试：失败换路预算生效
       tools: TOOLS as never,
       maxRounds: 2,
       extraBody: { fastProfile: true },
-      audit: { sessionId: "arb-retry-budget" },
+      audit: { sessionId: "gate-retry-budget" },
     },
   );
 
@@ -263,21 +270,22 @@ test("C. search_images 失败后换 search_web 重试：失败换路预算生效
     `应真实执行 5 次，实际: ${JSON.stringify(executed.map((e) => [e.name, e.args.query, e.ok]))}`,
   );
   assert.equal(executed.filter((e) => e.name === "search_web").length, 1, "search_web 应真实执行 1 次");
-  assert.equal(isEscalationSignal(out), false, "重试成功拿到实质结果，不应升级");
-  assert.ok(out.includes("路透"), `应返回正常回答，实际: ${out.slice(0, 60)}`);
+  assert.ok(!out.includes("__ESCALATE_TO_COMPLEX__"), "不得返回升级哨兵");
   // 硬证据：第 3 轮（wave 2）是带 schema 的规划轮——没有失败换路预算时
   // wave 1 结束即波次耗尽，第 3 轮会是无 schema 的 summary（requests[2].tools === undefined）
   assert.ok(Array.isArray(requests[2]?.tools), "第 3 轮应为带 schema 的规划轮（失败换路预算生效）");
 });
 
-/* ---------------- D. 零工具 + 联网诉求：强制联网重试后仍不满足 → 升级 ---------------- */
+/* ---------------- D. 零工具调用 + 道歉式收场：续波后仍不满足 → 如实收尾 ---------------- */
 
-test("D. 零工具 + 联网诉求：强制联网重试一次仍不满足 → 出口仲裁升级", async () => {
+test("D. 零工具 + 道歉式收场：出口自检续波后仍不满足 → 如实收尾（不再有哨兵）", async () => {
   const HEDGE_NO_DATA = "王哥，这个我手头没有现成数据，暂时答不了你。";
   const { client, requests } = makeFakeClient([
-    // wave 0：模型一个工具都不调，直接含糊作答
+    // wave 0：模型一个工具都不调，含糊作答 → 出口自检判「诉求未满足」
     textChunks(HEDGE_NO_DATA),
-    // 强制联网重试轮：模型仍然不调工具、继续含糊
+    // 出口自检换路续波：模型仍然不调工具、继续含糊
+    textChunks(HEDGE_NO_DATA),
+    // 再次含糊 → 预算耗尽，如实收尾
     textChunks(HEDGE_NO_DATA),
   ]);
 
@@ -292,47 +300,33 @@ test("D. 零工具 + 联网诉求：强制联网重试一次仍不满足 → 出
       tools: TOOLS as never,
       maxRounds: 2,
       extraBody: { fastProfile: true },
-      audit: { sessionId: "arb-zero-tool" },
+      audit: { sessionId: "gate-zero-tool" },
     },
   );
 
   assert.equal(executed.length, 0, "模型始终未调工具");
-  assert.equal(isEscalationSignal(out), true, `含糊收场应升级 complex，实际: ${out.slice(0, 60)}`);
-  const payload = parseEscalationPayload(out);
-  assert.ok(payload);
-  assert.equal(payload.attempts.length, 0, "无工具执行 → 尝试记录为空");
-  // 强制联网重试确实发生过（system 注入出现任一请求中）
-  const injected = requests.some((r) =>
-    JSON.stringify(r.messages ?? []).includes("fresh web evidence"),
+  assert.ok(!out.includes("__ESCALATE_TO_COMPLEX__"), "预算耗尽后应如实收尾，不得返回哨兵");
+  // 出口自检换路指令发生过（话题无关：判定只看「无实质成功结果 + 道歉式风格」）
+  const gateNudge = requests.some((r) =>
+    JSON.stringify(r.messages ?? []).includes("出口自检"),
   );
-  assert.ok(injected, "升级前应先给过一次轨迹内强制联网重试");
+  assert.ok(gateNudge, "应给过一次出口自检换路续波");
+  // 预算封顶：续波后不再无限循环（调用数有界）
+  assert.ok(requests.length <= 5, `调用数应有界，实际 ${requests.length}`);
 });
 
-/* ---------------- E. 升级继承负载：构造/解析/格式化回环 ---------------- */
+/* ---------------- E. escalate 哨兵工具已移除 ---------------- */
 
-test("E. 升级哨兵负载：构造 → 解析 → 格式化回环", () => {
-  // 纯哨兵向后兼容
-  assert.equal(isEscalationSignal(ESCALATION_SENTINEL), true);
-  assert.equal(parseEscalationPayload(ESCALATION_SENTINEL)?.attempts.length, 0);
-
-  const attempts = [
-    { tool: "search_images", ok: false, input: "景甜 近照", detail: "图片搜索上游超时 (upstream 504)" },
-    { tool: "search_web", ok: true, input: "景甜 最新 消息" },
-  ];
-  const sentinel = buildEscalationSentinel(attempts);
-  assert.equal(isEscalationSignal(sentinel), true);
-  const parsed = parseEscalationPayload(sentinel);
-  assert.ok(parsed);
-  assert.equal(parsed.attempts.length, 2);
-  assert.equal(parsed.attempts[0].tool, "search_images");
-  assert.equal(parsed.attempts[1].ok, true);
-
-  // 正常回复文本绝不会被误判为升级
-  assert.equal(isEscalationSignal("好的，2分钟后叫你睡觉哦"), false);
-  assert.equal(parseEscalationPayload("正常回复"), null);
-
-  // 格式化输出供 complex prompt 注入
-  const block = formatEscalationAttempts(attempts);
-  assert.ok(block.includes("1. search_images(景甜 近照) → 执行失败：图片搜索上游超时"));
-  assert.ok(block.includes("2. search_web(景甜 最新 消息) → 执行成功但未满足诉求"));
+test("E. escalate 哨兵机制退役：fastLane 工具集与常驻列表不再包含它", async () => {
+  const { getFastLaneTools } = await import(
+    "../src/external-model/openai-compatible-tool-loop.js"
+  );
+  const names = getFastLaneTools().map(
+    (t) => (t as { function?: { name?: string } }).function?.name ?? "",
+  );
+  assert.equal(
+    names.includes("agent.escalate_to_complex"),
+    false,
+    "fastLane 工具集不得再包含 escalate 工具",
+  );
 });

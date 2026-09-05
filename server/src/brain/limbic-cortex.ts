@@ -14,6 +14,7 @@ import type {
   SafetyCheckResult,
   TonePolicyResult,
 } from "./types.js";
+import { TWO_PHASE_CONFIRM_TOOLS } from "../services/agent-task-safety.js";
 
 // ---- 子系统最小化接口（仅声明 LimbicCortex 实际用到的方法）------------
 
@@ -283,6 +284,27 @@ function convertSafetyResult(
       };
     }
     if (action === "require_approval") {
+      // 内置两阶段确认（ask_first）工具在聊天通道的特例：
+      //   阶段一 confirm=false 只是「问」——生成摘要+一次性 token，不执行不可逆动作；
+      //   阶段二 confirm=true+token —— token 即用户在会话内明确同意的凭证。
+      // 两者放行（否则两阶段确认在聊天通道永远无法走通）；自主任务通道
+      // 直接消费 AgentTaskSafety 的 require_approval 挂起审批，不经过本转换。
+      if (TWO_PHASE_CONFIRM_TOOLS.has(tool)) {
+        const isStage2 = args.confirm === true;
+        const hasToken = typeof args.confirmationToken === "string" && args.confirmationToken.length > 0;
+        if (!isStage2 || hasToken) {
+          return {
+            allowed: true,
+            severity: "allowed",
+            reason: isStage2
+              ? "两阶段确认阶段二：confirmationToken 即用户确认凭证"
+              : "两阶段确认阶段一：仅生成确认摘要（ask_first），不执行动作",
+            tool,
+            args,
+            checkedAt,
+          };
+        }
+      }
       return {
         allowed: false,
         severity: "high_risk",

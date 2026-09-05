@@ -13,27 +13,51 @@ test("路由表：每个意图标签都有确定的执行契约", () => {
   for (const label of INTENT_LABELS) {
     const plan = routePlanForIntent(label);
     assert.ok(plan, `标签 ${label} 必须在路由表中`);
-    assert.ok(["fast", "complex"].includes(plan.lane));
-    assert.ok(["light", "search", "media", "full"].includes(plan.toolset));
-    assert.ok(["strict", "standard"].includes(plan.arbiter));
+    assert.ok(["chat", "task"].includes(plan.plane), "必须有执行平面");
+    assert.ok(Array.isArray(plan.capabilities), "capabilities 必须是数组");
+    assert.ok(Number.isInteger(plan.budget) && plan.budget >= 0, "budget 必须是非负整数");
+    assert.ok(["fast", "complex"].includes(plan.tier), "必须有模型档位");
+    // 对话面零工具契约：无能力束、零预算
+    if (plan.plane === "chat") {
+      assert.equal(plan.capabilities.length, 0, "对话面不得携带能力束");
+      assert.equal(plan.budget, 0, "对话面预算必须为 0");
+    } else {
+      assert.ok(plan.capabilities.length > 0, "任务面必须声明能力束");
+      assert.ok(plan.budget > 0, "任务面必须有正预算");
+    }
   }
 });
 
-test("路由表：实时查询/媒体检索走 fast+严格仲裁，写数据/多步走 complex", () => {
-  assert.deepEqual(routePlanForIntent("realtime_lookup"), {
-    lane: "fast",
-    toolset: "search",
-    arbiter: "strict",
-  });
-  assert.deepEqual(routePlanForIntent("media_retrieval"), {
-    lane: "fast",
-    toolset: "media",
-    arbiter: "strict",
-  });
-  assert.equal(routePlanForIntent("action_write").lane, "complex");
-  assert.equal(routePlanForIntent("multi_step_task").lane, "complex");
-  assert.equal(routePlanForIntent("chat").lane, "fast");
-  assert.equal(routePlanForIntent("chat").arbiter, "standard");
+test("路由表：对话面三标签零工具；实时/媒体轻预算任务面；写数据/多步全量高预算", () => {
+  const chat = routePlanForIntent("chat");
+  assert.equal(chat.plane, "chat");
+  assert.equal(chat.tier, "fast");
+
+  for (const label of ["knowledge_qa", "meta_capability"] as const) {
+    assert.equal(routePlanForIntent(label).plane, "chat");
+  }
+
+  const realtime = routePlanForIntent("realtime_lookup");
+  assert.equal(realtime.plane, "task");
+  assert.deepEqual(realtime.capabilities, ["search"]);
+  assert.equal(realtime.budget, 2);
+  assert.equal(realtime.tier, "fast", "单点查询用 Flash 档，省 token");
+
+  const media = routePlanForIntent("media_retrieval");
+  assert.equal(media.plane, "task");
+  assert.deepEqual(media.capabilities, ["media", "search"]);
+  assert.equal(media.budget, 2);
+
+  const write = routePlanForIntent("action_write");
+  assert.equal(write.plane, "task");
+  assert.deepEqual(write.capabilities, ["full"]);
+  assert.equal(write.budget, 3);
+  assert.equal(write.tier, "complex");
+
+  const multi = routePlanForIntent("multi_step_task");
+  assert.equal(multi.plane, "task");
+  assert.deepEqual(multi.capabilities, ["full"]);
+  assert.equal(multi.budget, 3);
 });
 
 test("parseIntentJson：规范 JSON 输出", () => {
@@ -53,15 +77,13 @@ test("parseIntentJson：confidence 越界钳制与字符串数字", () => {
   assert.equal(parseIntentJson('{"intent":"chat"}')?.confidence, 0.75, "缺省置信度取中性默认");
 });
 
-test("parseIntentJson：JSON 失败时降级全文标签词扫描（含旧二值兼容）", () => {
+test("parseIntentJson：JSON 失败时降级全文标签词扫描", () => {
   assert.equal(parseIntentJson("realtime_lookup")?.intent, "realtime_lookup");
-  assert.equal(parseIntentJson("fast")?.intent, "chat");
-  assert.equal(parseIntentJson("complex")?.intent, "multi_step_task");
   // 降级扫描置信度打折（触发上游 fail-safe）
-  assert.equal(parseIntentJson("fast")?.confidence, 0.5);
+  assert.equal(parseIntentJson("media")?.confidence, 0.5);
 });
 
-test("parseIntentJson：完全无法解析 → null（调用方降级词法层）", () => {
+test("parseIntentJson：完全无法解析 → null（调用方保守降级任务面）", () => {
   assert.equal(parseIntentJson(""), null);
   assert.equal(parseIntentJson(undefined), null);
   assert.equal(parseIntentJson("嗯嗯好的"), null);

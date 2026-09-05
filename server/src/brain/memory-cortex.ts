@@ -117,6 +117,30 @@ interface AgenticMemoryLike {
   };
 }
 
+// 记忆桥接外观（P0-1/P1-7）：结构兼容 MemoryBridgeService 即可
+interface MemoryBridgeLike {
+  writeUnified(
+    actorId: string,
+    sourceId: string,
+    text: string,
+    opts: { context: "main" | "notes"; highSignal: boolean },
+  ): Promise<unknown>;
+  searchFused(
+    actorId: string,
+    query: string,
+    opts?: { context?: "main" | "notes" | "any"; topK?: number },
+  ): Promise<
+    Array<{
+      content: string;
+      fusedScore: number;
+      channels: string[];
+      mem0Score?: number;
+      graphNodeId?: string;
+      timestamp?: string;
+    }>
+  >;
+}
+
 // 海马体（HumanLikeMemoryService）外观接口
 interface HumanLikeMemoryLike {
   ingest(
@@ -128,7 +152,7 @@ interface HumanLikeMemoryLike {
       domain?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<void>;
+  ): Promise<unknown>;
   buildRecall(
     actorId: string,
     query: string,
@@ -421,6 +445,7 @@ export class MemoryCortex {
   private agentic: AgenticMemoryLike | null = null;
   private humanLike: HumanLikeMemoryLike | null = null;
   private narrative: NarrativeMemoryLike | null = null;
+  private bridge: MemoryBridgeLike | null = null;
   private kvSummary: KvSummaryLike | null = null;
   private memoryManager: MemoryManagerLike | null = null;
   private nightlyScheduler: NightlySchedulerLike | null = null;
@@ -481,6 +506,16 @@ export class MemoryCortex {
   registerAgentic(svc: AgenticMemoryLike): void {
     this.agentic = svc;
     console.log("[MemoryCortex] 已注册 AgenticMemory");
+  }
+
+  /**
+   * 注册记忆桥接（P0-1/P1-7）：写入 fallback 走 bridge.writeUnified（带 linkage，
+   * 不再产生遗忘同步扫不到的旁路记忆）；召回用 searchFused 单次融合
+   * （Mem0 × 认知图 RRF），替代原先两路各自检索再仲裁的双重融合。
+   */
+  registerBridge(svc: MemoryBridgeLike): void {
+    this.bridge = svc;
+    console.log("[MemoryCortex] 已注册 MemoryBridge");
   }
 
   registerHumanLike(svc: HumanLikeMemoryLike): void {
@@ -974,7 +1009,32 @@ export class MemoryCortex {
       }
     }
 
-    // Fallback：直接写 agentic
+    // Fallback：bridge 统一写入（P0-1 旁路收拢——认知图 + Mem0 + linkage 一次完成；
+    // 此前直写 agentic 的记忆没有 linkage，遗忘同步永远扫不到，成为僵尸记忆）
+    if (this.bridge) {
+      try {
+        await this.bridge.writeUnified(actorId, sourceId, effectiveContent, {
+          context: "main",
+          highSignal,
+        });
+        try {
+          this.synapseBus?.fire(
+            "memory.remember",
+            { actorId, kind: item.kind, domain: domain ?? "unknown", hasMedia: !!item.media },
+            { actorId, source: "memory" },
+          );
+        } catch {
+          /* fire 失败不影响主流程 */
+        }
+        this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        this.memoryInventory?.invalidate(actorId);
+        return;
+      } catch (err) {
+        console.log(`[MemoryCortex] bridge.writeUnified 失败: ${err}`);
+      }
+    }
+
+    // Fallback：直接写 agentic（无 bridge 时的旧行为）
     if (this.agentic) {
       try {
         await this.agentic.ingest.ingestText(actorId, sourceId, effectiveContent, {
@@ -1153,8 +1213,32 @@ export class MemoryCortex {
       };
     }
 
-    // episodic / semantic / procedural / emotional → 优先海马体，fallback agentic
+    // episodic / semantic / procedural / emotional → bridge 融合 > 海马体 > agentic
     if (domain) {
+      // P1-7：bridge 存在时单次融合召回（Mem0 × 认知图 RRF + 跨通道去重），
+      // 不再对两路各自检索后由仲裁器做重复融合
+      if (this.bridge) {
+        const fused =
+          (await this.safeRecall(() =>
+            this.bridge!.searchFused(actorId, query, { context: "main", topK: opts?.limit }),
+          )) ?? [];
+        this.triggerReawakenForFadedHits(actorId, {
+          recalledNodeIds: fused.map((f) => f.graphNodeId).filter((v): v is string => Boolean(v)),
+        });
+        return {
+          actorId,
+          query,
+          items: this.finalizeRecallItems(
+            actorId,
+            query,
+            this.fusedCandidatesToItems(fused, domain),
+            opts,
+          ),
+          domain,
+          mode: "single_domain",
+          recalledAt: now,
+        };
+      }
       if (this.humanLike) {
         const result = await this.safeRecall(() =>
           this.humanLike!.buildRecall(actorId, query, {
@@ -1222,7 +1306,31 @@ export class MemoryCortex {
     //    P2-2 多意图并行召回：subQueries 存在时对每个子 query 并行检索，
     //    各自合并去重（后续统一仲裁），单一 query 时保持原逻辑。
     let agenticItems: MemoryRecallItem[] = [];
-    if (this.agentic) {
+    if (this.bridge) {
+      // P1-7 统一召回：bridge 融合（Mem0×认知图 RRF + 跨通道去重）作为单一候选源。
+      // 此前 agentic 通道查 Mem0、narrative 通道再取一遍融合文本，同源内容双重计入。
+      const subQueries = (opts?.subQueries ?? [query])
+        .map((q) => (q ?? "").trim())
+        .filter((q) => q.length > 0 && q !== query)
+        .slice(0, 3);
+      const allQueries = [query, ...subQueries];
+      const candidateLists = await Promise.all(
+        allQueries.map((q) =>
+          this.safeRecall(() => this.bridge!.searchFused(actorId, q, { context: "main" })),
+        ),
+      );
+      const merged = new Map<string, MemoryRecallItem>();
+      for (const candidates of candidateLists) {
+        for (const item of this.fusedCandidatesToItems(candidates ?? [])) {
+          const key = item.content.trim().slice(0, 64);
+          const existing = merged.get(key);
+          if (!existing || (item.score ?? 0) > (existing.score ?? 0)) {
+            merged.set(key, item);
+          }
+        }
+      }
+      agenticItems = [...merged.values()];
+    } else if (this.agentic) {
       const subQueries = (opts?.subQueries ?? [query])
         .map((q) => (q ?? "").trim())
         .filter((q) => q.length > 0 && q !== query)
@@ -1270,7 +1378,8 @@ export class MemoryCortex {
       }
 
       const [narrativeText, kvSummaryText, associationItems] = await Promise.all([
-        this.narrative
+        // bridge 存在时 narrative 文本与融合候选同源（Mem0+图），跳过避免重复计入
+        this.narrative && !this.bridge
           ? this.safeRecall(() => this.narrative!.buildNarrativeRecall(actorId, query))
           : Promise.resolve<string | null>(null),
         this.kvSummary ? this.safeKvSnapshot(actorId) : Promise.resolve<string | null>(null),
@@ -2178,6 +2287,32 @@ export class MemoryCortex {
         domain,
         source: c.source ?? "agentic",
         score: c.score,
+        ...(c.timestamp ? { timestamp: c.timestamp } : {}),
+      }));
+  }
+
+  /** bridge 融合候选 → 召回条目（分数用 Mem0 原始分，缺失时回退 RRF 融合分） */
+  private fusedCandidatesToItems(
+    candidates: Array<{
+      content: string;
+      fusedScore: number;
+      channels: string[];
+      mem0Score?: number;
+      timestamp?: string;
+    }>,
+    domain: MemoryDomainKind = "semantic",
+  ): MemoryRecallItem[] {
+    return candidates
+      .filter((c) => typeof c.content === "string" && c.content.trim())
+      .map((c) => ({
+        content: c.content,
+        domain,
+        source: c.channels.includes("both")
+          ? "bridge_fused"
+          : c.channels.includes("mem0")
+            ? "mem0"
+            : "graph",
+        score: c.mem0Score ?? c.fusedScore,
         ...(c.timestamp ? { timestamp: c.timestamp } : {}),
       }));
   }

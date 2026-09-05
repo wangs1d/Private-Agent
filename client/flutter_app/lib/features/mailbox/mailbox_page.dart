@@ -3,8 +3,10 @@ import "dart:async";
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/presentation/emotion_ball_ids.dart";
 import "../../core/services/world_api_client.dart";
 import "../../core/services/ws_chat_service.dart";
+import "../chat/emotion_ball_view.dart";
 import "friend_chat_page.dart";
 
 /// 邮箱Tab主页面：包含好友列表、好友请求、聊天功能
@@ -434,7 +436,12 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.error),
+          // 出错表情小球替代静态云朵图标(体色随 error 色)。
+          EmotionBallView(
+            emotion: EmotionBallIds.error,
+            size: 96,
+            bodyColor: theme.colorScheme.error,
+          ),
           const SizedBox(height: 16),
           Text(
             "无法连接服务器",

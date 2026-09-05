@@ -13,8 +13,13 @@
     background: transparent; overflow: hidden;
     user-select: none; -webkit-user-select: none; cursor: default;
   }
-  #stage { position: absolute; inset: 0; pointer-events: none; }
-  #stage svg { width: 100% !important; height: 100% !important; }
+  #stage { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  /* overflow:hidden!important 压过 ball.js 的 inline 'visible':
+   * 彩带/撒花等特效会画出 viewBox 之外,小尺寸下会被裁成杂色碎片 */
+  #stage svg {
+    width: 100% !important; height: 100% !important;
+    overflow: hidden !important;
+  }
 </style>
 </head>
 <body>
@@ -1994,7 +1999,10 @@ window.EMOTION_SEED = [
     emotion: boot.emotion || '02',
     shape: 'blob',
     color: boot.bodyColor,
-    eyeColor: boot.eyeColor
+    eyeColor: boot.eyeColor,
+    /* 默认 lite:关闭彩带/撒花/zzz 特效层,只保留表情与眼神动画 */
+    lite: boot.effects !== true,
+    eyeScale: boot.eyeScale || 1
   });
 })();
 </script>

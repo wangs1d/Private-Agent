@@ -325,7 +325,13 @@ test("B. 纯对话：无工具调用 → 1 次调用直接返回", async () => {
   const out = await streamCompletionWithTools(
     client,
     "deepseek-chat",
-    makeMessages() as never,
+    // 2026-09-05 出口自检统一后：纯对话文本（无外部信息/媒体诉求）直答 1 次即收尾；
+    // 若用户文本含 查/搜/股价/图片 等诉求而模型零工具直答，会被出口自检续波拦截
+    //（见 tool-loop-exit-arbiter.test.ts 场景 A/D）。
+    [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: "在吗" },
+    ] as never,
     () => {},
     ctx,
     { tools: FAKE_TOOLS as never, maxRounds: 4, audit: { sessionId: "bench-chat" } },

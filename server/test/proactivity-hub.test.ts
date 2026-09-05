@@ -101,7 +101,7 @@ test("快路径：用户待办闭环 → speak 恭喜信号", async () => {
   assert.ok(signals[0].summary.includes("简历"));
 });
 
-test("快路径：过劳信号 → act 三步执行（放音乐+排休息日程）+ speak 告知", async () => {
+test("快路径：过劳信号 → act 三步静默执行（可逆+隐式授权+高价值，不通知）", async () => {
   const { deps, signals, toolCalls } = makeDeps({
     executeTool: async (tool, args) => {
       toolCalls.push({ tool, args });
@@ -123,8 +123,9 @@ test("快路径：过劳信号 → act 三步执行（放音乐+排休息日程�
   });
   await flush();
 
-  assert.equal(signals.length, 1); // act 完成后 speak 告知
-  assert.equal(signals[0].kind, "overwork_care");
+  // 三分支语义（方案 C）：过劳干预全部为可逆+已授权（rhythm 隐式）+高净效用
+  // → execute_silently，直接执行不通知（act 审计留痕）
+  assert.equal(signals.length, 0);
 
   const tools = toolCalls.map((c) => c.tool);
   assert.deepEqual(tools, ["media.search", "media.play", "calendar.create_task"]);
@@ -136,6 +137,7 @@ test("快路径：过劳信号 → act 三步执行（放音乐+排休息日程�
   // 休息日程排到明晚
   assert.equal(toolCalls[2].args.kind, "reminder");
   assert.ok(String(toolCalls[2].args.runAt).length > 10);
+  assert.ok(hub.getActAudit(ACTOR).length >= 3, "静默执行仍有 act 审计");
 });
 
 test("快路径：非 overwork 的节律信号被忽略", async () => {
@@ -202,7 +204,7 @@ test("通用路径：LLM 判定 speak → 发布 LifeSignal", async () => {
   assert.ok(signals[0].summary.includes("忙得怎么样"));
 });
 
-test("通用路径：LLM 判定 act → 静默执行工具 + speak 告知", async () => {
+test("通用路径：LLM 判定 act → 静默执行工具不通知（execute_silently）", async () => {
   const { signals, toolCalls } = await tickWithDecision(
     JSON.stringify({
       mode: "act",
@@ -215,12 +217,11 @@ test("通用路径：LLM 判定 act → 静默执行工具 + speak 告知", asyn
   );
   assert.equal(toolCalls.length, 1);
   assert.equal(toolCalls[0].tool, "calendar.create_task");
-  assert.equal(signals.length, 1); // act 后轻量告知
-  assert.ok(signals[0].title.includes("顺手做了点事"));
+  assert.equal(signals.length, 0); // 可逆+隐式授权+高净效用 → 静默执行不通知
 });
 
-test("通用路径：act 黑名单安全门 → 危险工具永不自动执行", async () => {
-  const { signals, toolCalls } = await tickWithDecision(
+test("通用路径：含危险工具的计划 → ask_first 挂起，确认后安全门仍拦截危险工具", async () => {
+  const { hub, signals, toolCalls } = await tickWithDecision(
     JSON.stringify({
       mode: "act",
       kind: "cleanup",
@@ -234,9 +235,16 @@ test("通用路径：act 黑名单安全门 → 危险工具永不自动执行",
       ],
     }),
   );
-  const tools = toolCalls.map((c) => c.tool);
-  assert.deepEqual(tools, ["media.play"]); // delete/shutdown 被安全门拦截，仅安全工具放行
-  assert.equal(signals.length, 1); // speak 告知仍发布（内部说明哪些被拦）
+  // file.delete 不可逆 → ask_first：未确认前整份计划挂起，确认请求即主动消息
+  assert.deepEqual(toolCalls.map((c) => c.tool), []);
+  assert.equal(signals.length, 1);
+  assert.match(signals[0].title, /^需要确认/);
+  assert.equal(hub.listPendingConfirmations(ACTOR).length, 1);
+
+  // 用户同意 → 执行挂起计划，但黑名单安全门仍兜底：delete/shutdown 永不放行
+  const resolved = await hub.resolveConfirmation(ACTOR, true);
+  assert.equal(resolved.executed, true);
+  assert.deepEqual(toolCalls.map((c) => c.tool), ["media.play"]);
 });
 
 test("通用路径：LLM 判定 advise → speak 主动投递（不入队）", async () => {

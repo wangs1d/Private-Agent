@@ -36,6 +36,9 @@ export const CAPABILITY_DOMAINS = [
   "code_sandbox",
   "shopping_order",
   "agent_browser",
+  "ride_hailing",
+  "home_services",
+  "restaurant_booking",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -70,6 +73,9 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   code_sandbox: "代码执行沙盒（python/node 子进程，工作目录隔离）",
   shopping_order: "购物/下单（后台无头浏览器代用户下单）",
   agent_browser: "Agent 虚拟浏览器（通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）",
+  ride_hailing: "打车/网约车（报价/两阶段确认下单/订单追踪/取消）",
+  home_services: "家政/本地生活预订（保洁/维修/搬家/美容/宠物，搜索/下单/改期/取消）",
+  restaurant_booking: "餐厅预订（附近搜索/订座/状态/取消）",
   all: "全部领域",
 };
 
@@ -372,6 +378,45 @@ function buildStaticSections(): CapabilitySection[] {
         "   - 安全：https 任意 URL / http 仅 localhost；沙箱下也可用；会话绑定 actorId 隔离；TTL 10 分钟 + LRU 上限 8 个自动清理；所有操作审计",
         "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）/ desktop.visual.run_task（操控桌面软件）的区别：本工具是通用多步浏览器操作",
         "   - 典型流程：open 打开页面 → extract_text 看页面结构和可点元素 → click/type 操作 → extract_text 确认结果 → close 关闭",
+      ],
+    },
+    {
+      domain: "ride_hailing",
+      lines: [
+        "🚕 打车/网约车（统一预订抽象层 services/booking/）：",
+        "   - ride_hailing.quote（报价）：车型（经济/舒适/商务）+ 价格预估；pickup 缺省自动取用户当前 GPS 定位",
+        "   - ride_hailing.book（下单）：两阶段确认。confirm=false 返回订单摘要+确认 token；confirm=true+token 真实（或模拟）下单",
+        "   - ride_hailing.status（追踪）：司机接单/行程中/完成，含司机/车牌等动态信息；不传 orderId 返回最近订单",
+        "   - ride_hailing.cancel（取消）：两阶段确认取消",
+        "   - Provider：BOOKING_MODE=mock（默认）为模拟数据（simulated=true，必须如实告知用户）；live 走高德打车（估价需 AMAP key，真实下单需企业版资质配置）",
+        "   - 安全护栏：单笔上限 BOOKING_MAX_AMOUNT_CNY（默认 1000）+ 单日累计上限 BOOKING_DAILY_BUDGET_CNY（默认 500）+ token 5 分钟 TTL + 审计；Agent 不代付",
+        "   - 与 meituan.create_order（跑腿）/ travel.compute-route（纯路线查询）的区别：本工具为叫车报价与下单",
+        "   - 下单前必须先返回确认摘要让用户确认，得到明确同意后再带 confirm=true+token 执行",
+      ],
+    },
+    {
+      domain: "home_services",
+      lines: [
+        "🧹 家政/本地生活预订（统一预订抽象层）：",
+        "   - home_service.search（搜套餐）：cleaning=保洁/repair=维修/moving=搬家/beauty=美容美发/pet=宠物照料，返回套餐价格/时长",
+        "   - home_service.book（下单）：两阶段确认，返回摘要+token 后须用户确认再执行",
+        "   - home_service.status（状态）：订单状态查询；不传 orderId 返回最近订单",
+        "   - home_service.reschedule（改期）：须用户明确给出新时间后调用",
+        "   - home_service.cancel（取消）：两阶段确认取消",
+        "   - Provider：BOOKING_MODE=mock（默认）为模拟套餐（simulated=true，必须如实告知）；真实平台（美团家政/58同城/天鹅到家）实现 BookingProvider 接口后即可接入",
+        "   - 安全护栏与 ride_hailing 相同（单笔/单日限额 + 两阶段确认 + 审计 + 承诺板跟踪）",
+      ],
+    },
+    {
+      domain: "restaurant_booking",
+      lines: [
+        "🍽️ 餐厅预订（统一预订抽象层）：",
+        "   - restaurant.search（搜餐厅）：菜系/人均/时段；客户端定位时优先附近推荐；可结合用户饮食偏好过滤",
+        "   - restaurant.book（订座）：两阶段确认，摘要含餐厅/人数/时间/预估消费",
+        "   - restaurant.status（状态）：订座状态查询；不传 orderId 返回最近订单",
+        "   - restaurant.cancel（取消）：两阶段确认取消",
+        "   - Provider：BOOKING_MODE=mock（默认）为模拟餐厅（simulated=true，必须如实告知）；真实平台（大众点评/美团/OpenTable）实现 BookingProvider 接口后即可接入",
+        "   - 与 meituan.create_order（外卖跑腿）/ travel.search-poi（旅行 POI 探索）的区别：本工具为到店订座",
       ],
     },
   ];

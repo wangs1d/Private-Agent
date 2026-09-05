@@ -1,6 +1,8 @@
 import "package:flutter/material.dart";
 
+import "../../core/presentation/emotion_ball_ids.dart";
 import "../../core/services/world_api_client.dart";
+import "../chat/emotion_ball_view.dart";
 
 class MessageHubPage extends StatefulWidget {
   const MessageHubPage({super.key, required this.api});
@@ -187,7 +189,12 @@ class _MessageHubPageState extends State<MessageHubPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.error),
+          // 出错表情小球替代静态云朵图标(体色随 error 色)。
+          EmotionBallView(
+            emotion: EmotionBallIds.error,
+            size: 96,
+            bodyColor: theme.colorScheme.error,
+          ),
           const SizedBox(height: 16),
           Text(
             "无法连接服务器",

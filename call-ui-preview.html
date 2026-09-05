@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>虚拟电话 UI 全览 — Agent 打电话 / 打给 Agent</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;
+    background:#0d1017; color:#e8eaed; padding:40px 24px 80px;
+  }
+  h1 { font-size:26px; text-align:center; margin-bottom:6px; }
+  .lead { text-align:center; color:#8b93a1; font-size:14px; margin-bottom:44px; }
+  h2 { font-size:17px; color:#cfd6e0; margin:0 0 18px; font-weight:600; }
+  h2 .ref { font-size:12px; color:#6b7280; font-weight:400; margin-left:10px; }
+  section { max-width:1180px; margin:0 auto 56px; }
+
+  /* ===== 桌面壁纸容器 ===== */
+  .wall {
+    background:linear-gradient(135deg,#1b2740 0%,#2a1f3d 55%,#173229 100%);
+    border-radius:18px; padding:56px 40px;
+    display:flex; flex-wrap:wrap; gap:48px; justify-content:center; align-items:flex-start;
+  }
+  .win-col { display:flex; flex-direction:column; align-items:center; gap:14px; }
+  .caption { font-size:12.5px; color:#9aa3b2; }
+  .caption b { color:#e8eaed; font-weight:600; }
+
+  /* ===== Win32 悬浮窗通用（白卡 + DWM 阴影 + 32px 圆角） ===== */
+  .win {
+    background:#fff; border-radius:32px;
+    box-shadow:0 10px 34px rgba(0,0,0,.45);
+    position:relative; color:#1d1d1f;
+    font-family:"Microsoft YaHei UI",sans-serif;
+  }
+  .glyph { font-family:"Segoe MDL2 Assets"; line-height:1; }
+
+  /* ── 1. 来电振铃窗 300x88 ── */
+  .win.incoming { width:300px; height:88px; display:flex; align-items:center; }
+  .incoming .avatar {
+    width:48px; height:48px; border-radius:50%; margin-left:16px; flex:none;
+    background:rgba(34,197,94,.12); color:#22c55e;
+    display:flex; align-items:center; justify-content:center;
+    font-size:22px; font-weight:600;
+  }
+  .incoming .txt { margin-left:12px; overflow:hidden; }
+  .incoming .name { font-size:16px; font-weight:600; color:#1d1d1f; white-space:nowrap; }
+  .incoming .sub { font-size:14px; color:#6e6e73; margin-top:3px; white-space:nowrap; }
+  .incoming .btns { margin-left:auto; margin-right:16px; display:flex; gap:12px; flex:none; }
+  .cbtn {
+    width:44px; height:44px; border-radius:50%; border:none; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; position:relative;
+  }
+  .cbtn.decline { background:#ff3b30; }
+  .cbtn.decline:hover { background:#e0332a; }
+  .cbtn.accept { background:#34c759; }
+  .cbtn.accept:hover { background:#2eb04f; }
+  .cbtn .glyph { color:#fff; font-size:19px; }
+  .phone-off { position:relative; }
+  .phone-off::after {
+    content:""; position:absolute; left:10px; top:21px; width:24px; height:2px;
+    background:#fff; transform:rotate(-45deg);
+  }
+  .glow-ring {
+    position:absolute; inset:-3px; border-radius:50%;
+    border:2px solid rgba(52,199,89,.55);
+    animation:glowPulse 1.5s ease-out infinite;
+  }
+  @keyframes glowPulse {
+    0% { transform:scale(.92); opacity:.9; }
+    100% { transform:scale(1.28); opacity:0; }
+  }
+
+  /* ── 2. 呼出等待窗 384x224 ── */
+  .win.outgoing { width:384px; height:224px; text-align:center; }
+  .outgoing .name { font-size:24px; font-weight:600; margin-top:14px; }
+  .outgoing .sub { font-size:14px; color:#6e6e73; margin-top:6px; }
+  .phone-circle { position:relative; width:76px; height:76px; margin:14px auto 0; }
+  .phone-circle .halo {
+    position:absolute; inset:0; border-radius:50%; background:#22c55e;
+    animation:halo 3s linear infinite; opacity:0;
+  }
+  .phone-circle .halo.h2 { animation-delay:-1.5s; }
+  @keyframes halo {
+    0% { transform:scale(1); opacity:.35; }
+    100% { transform:scale(1.55); opacity:0; }
+  }
+  .phone-circle .core {
+    position:absolute; inset:0; border-radius:50%; background:#22c55e;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .phone-circle .core .glyph { color:#fff; font-size:32px; }
+  .outgoing .hangup { margin-top:10px; }
+
+  /* ── 3. 通话中窗 384x296 ── */
+  .win.connected { width:384px; height:296px; text-align:center; }
+  .connected .name { font-size:24px; font-weight:600; margin-top:22px; }
+  .connected .status { font-family:Consolas,monospace; font-size:16px; color:#6e6e73; margin-top:4px; }
+  .connected .phone-circle { margin-top:4px; }
+  .talk-halo { animation-duration:1.5s !important; }
+  .btnrow { display:flex; justify-content:center; gap:26px; margin-top:8px; }
+  .col { display:flex; flex-direction:column; align-items:center; gap:5px; }
+  .abtn {
+    width:54px; height:54px; border-radius:50%; border:none; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .abtn .glyph { font-size:22px; }
+  .abtn.soft { background:#f2f2f7; color:#1d1d1f; }
+  .abtn.soft.on { background:#1d1d1f; color:#fff; }
+  .abtn.red { background:#ff3b30; }
+  .abtn.red:hover { background:#e0332a; }
+  .abtn.red .glyph { color:#fff; }
+  .col .lbl { font-size:12px; color:#6e6e73; }
+
+  /* ===== 手机端 ===== */
+  .phones { display:flex; gap:64px; justify-content:center; flex-wrap:wrap; }
+  .phone {
+    width:375px; height:780px; border-radius:44px; overflow:hidden; position:relative;
+    border:10px solid #17181c; box-shadow:0 16px 48px rgba(0,0,0,.55);
+    background:linear-gradient(180deg,#20242b 0%,#14161a 100%);
+    display:flex; flex-direction:column; color:#fff;
+  }
+  .notch {
+    position:absolute; top:10px; left:50%; transform:translateX(-50%);
+    width:110px; height:22px; background:#000; border-radius:12px; z-index:5;
+  }
+  .spacer3 { flex:3; } .spacer4 { flex:4; }
+
+  /* 来电页 */
+  .m-avatar {
+    width:112px; height:112px; border-radius:50%; background:#3b82f6; margin:0 auto;
+    display:flex; align-items:center; justify-content:center;
+    font-size:45px; font-weight:700;
+  }
+  .m-caller { text-align:center; font-size:24px; font-weight:600; margin-top:24px; }
+  .m-sub { text-align:center; font-size:15px; color:rgba(255,255,255,.6); margin-top:8px; }
+  .m-count { text-align:center; font-size:13px; color:rgba(255,255,255,.45); margin-top:16px; }
+  .m-actions { display:flex; justify-content:space-evenly; padding-bottom:48px; }
+  .m-btn-col { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .m-circle {
+    width:74px; height:74px; border-radius:50%; border:none; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .m-circle .glyph { font-size:32px; color:#fff; }
+  .m-btn-col .lbl { font-size:13px; color:rgba(255,255,255,.7); }
+
+  /* 通话中页 */
+  .m-title { text-align:center; font-size:18px; font-weight:600; margin-top:36px; }
+  .m-avatar.sm { width:96px; height:96px; font-size:38px; margin-top:20px; position:relative; }
+  .breathing { animation:breath 1.4s ease-in-out infinite alternate; }
+  @keyframes breath {
+    from { box-shadow:0 0 24px 2px rgba(59,130,246,.35); }
+    to   { box-shadow:0 0 42px 7px rgba(59,130,246,.05); }
+  }
+  .m-caller.sm { font-size:15px; color:rgba(255,255,255,.85); margin-top:10px; font-weight:400; }
+  .m-state { text-align:center; font-size:13px; color:rgba(255,255,255,.5); margin-top:4px; }
+  .transcript { flex:1; overflow:hidden; padding:16px 20px 8px; display:flex; flex-direction:column; gap:4px; }
+  .bubble {
+    max-width:72%; padding:9px 14px; border-radius:14px;
+    font-size:14px; line-height:1.35; width:fit-content;
+  }
+  .bubble.agent { align-self:flex-start; background:#2a2e35; }
+  .bubble.me { align-self:flex-end; background:#2f6fed; }
+  .replybar { display:flex; gap:8px; padding:0 16px; }
+  .replybar input {
+    flex:1; background:#262a31; border:none; outline:none; border-radius:22px;
+    padding:11px 14px; color:#fff; font-size:14px;
+  }
+  .replybar input::placeholder { color:rgba(255,255,255,.35); }
+  .send {
+    width:40px; height:40px; border-radius:50%; background:#2f6fed; border:none;
+    display:flex; align-items:center; justify-content:center; cursor:pointer; flex:none;
+  }
+  .send .glyph { color:#fff; font-size:18px; }
+  .m-hangup-wrap { display:flex; justify-content:center; padding:8px 0 28px; }
+  .m-circle.hangup { background:#ef4444; width:68px; height:68px; }
+
+  .foot { max-width:1180px; margin:0 auto; font-size:13px; color:#6b7280; line-height:2; }
+  .foot code { background:#1a1f29; padding:2px 7px; border-radius:6px; color:#9fb4d8; font-size:12px; }
+</style>
+</head>
+<body>
+
+<h1>虚拟电话 · 全部 UI 界面</h1>
+<p class="lead">桌面端 = Win32 原生悬浮窗（右下角，脱离主窗口） &nbsp;·&nbsp; 手机端 = Flutter 全屏通话页</p>
+
+<section>
+  <h2>桌面端 — 三种悬浮窗状态<span class="ref">windows/runner/*.cpp</span></h2>
+  <div class="wall">
+
+    <div class="win-col">
+      <div class="win incoming">
+        <div class="avatar">P</div>
+        <div class="txt">
+          <div class="name">PAI Agent</div>
+          <div class="sub">语音提醒</div>
+        </div>
+        <div class="btns">
+          <button class="cbtn decline"><span class="glyph phone-off">&#xE717;</span></button>
+          <button class="cbtn accept"><span class="glow-ring"></span><span class="glyph">&#xE717;</span></button>
+        </div>
+      </div>
+      <div class="caption"><b>1. Agent 来电振铃</b> · 300×88 · 循环铃声 + 任务栏闪烁 + 30s 超时</div>
+    </div>
+
+    <div class="win-col">
+      <div class="win outgoing">
+        <div class="name">PAI Agent</div>
+        <div class="sub">正在呼叫…</div>
+        <div class="phone-circle">
+          <div class="halo"></div><div class="halo h2"></div>
+          <div class="core"><span class="glyph">&#xE717;</span></div>
+        </div>
+        <button class="cbtn decline hangup"><span class="glyph phone-off">&#xE717;</span></button>
+      </div>
+      <div class="caption"><b>2. 用户呼叫 Agent（等待接听）</b> · 384×224 · 双层呼吸光环</div>
+    </div>
+
+    <div class="win-col">
+      <div class="win connected">
+        <div class="name">PAI Agent</div>
+        <div class="status">通话中&nbsp;&nbsp;00:42</div>
+        <div class="phone-circle">
+          <div class="halo talk-halo"></div><div class="halo talk-halo h2"></div>
+          <div class="core"><span class="glyph">&#xE717;</span></div>
+        </div>
+        <div class="btnrow">
+          <div class="col">
+            <button class="abtn soft"><span class="glyph">&#xE720;</span></button>
+            <span class="lbl">静音</span>
+          </div>
+          <div class="col">
+            <button class="abtn red"><span class="glyph phone-off">&#xE717;</span></button>
+            <span class="lbl">挂断</span>
+          </div>
+          <div class="col">
+            <button class="abtn soft"><span class="glyph">&#xE767;</span></button>
+            <span class="lbl">免提</span>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>3. 通话中</b> · 384×296 · 仿微信电话 · TTS 播报时光环呼吸</div>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <h2>手机端 — Flutter 全屏通话页<span class="ref">core/presentation/phone_call_page.dart</span></h2>
+  <div class="phones">
+
+    <div class="win-col">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="spacer3"></div>
+        <div class="m-avatar">P</div>
+        <div class="m-caller">PAI Agent</div>
+        <div class="m-sub">语音提醒</div>
+        <div class="m-count">27s 后自动挂断</div>
+        <div class="spacer4"></div>
+        <div class="m-actions">
+          <div class="m-btn-col">
+            <button class="m-circle" style="background:#ef4444"><span class="glyph">&#xE717;</span></button>
+            <span class="lbl">拒接</span>
+          </div>
+          <div class="m-btn-col">
+            <button class="m-circle" style="background:#22c55e"><span class="glyph">&#xE717;</span></button>
+            <span class="lbl">接听</span>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>4. 来电振铃页</b>（incoming 阶段）· 倒计时自动挂断</div>
+    </div>
+
+    <div class="win-col">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="m-title">通话中&nbsp;&nbsp;00:42</div>
+        <div class="m-avatar sm breathing">P</div>
+        <div class="m-caller sm">PAI Agent</div>
+        <div class="m-state">正在播报…</div>
+        <div class="transcript">
+          <div class="bubble agent">你好，我是 PAI，提醒你 15 分钟后有产品评审会议。</div>
+          <div class="bubble me">知道了，会前把评审文档发我一份。</div>
+          <div class="bubble agent">好的，文档已经发到你的邮箱了。</div>
+        </div>
+        <div class="replybar">
+          <input placeholder="输入回复，Agent 会语音回应…">
+          <button class="send"><span class="glyph">&#xE724;</span></button>
+        </div>
+        <div class="m-hangup-wrap">
+          <div class="m-btn-col">
+            <button class="m-circle hangup"><span class="glyph">&#xE717;</span></button>
+            <span class="lbl">挂断</span>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>5. 通话中页</b>（inCall 阶段）· 转写气泡 + 文字回复 + 呼吸光晕</div>
+    </div>
+
+  </div>
+</section>
+
+<div class="foot">
+  交互链路：用户说「打电话给 Agent」→ 意图识别 → 服务端生成 callId/TTS → WS 推
+  <code>agent.phone.ringing_start</code>（界面 1 / 4）→ <code>agent.phone.call_connecting</code>（界面 3 / 5）
+  → 通话中 <code>agent.phone.voice_reply</code> 持续推转写与 TTS → <code>phone.call_hangup</code> 结束。<br>
+  用户主动呼叫：界面 2（<code>OutgoingCallLauncher</code>）→ 接通后切到界面 3。
+</div>
+
+</body>
+</html>

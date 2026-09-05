@@ -21,6 +21,8 @@ import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "typewriter_reveal.dart";
 import "emotion_ball_view.dart";
+import "mood_driven_emotion_ball.dart";
+import "../../core/presentation/emotion_ball_ids.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -792,11 +794,18 @@ class _ChatPageState extends State<ChatPage>
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  // 思考动画首位:emotion-ball 小球(工具调用中切「检索资料」表情)。
-                  EmotionBallView(
-                    emotion: tool.isNotEmpty ? "40" : "30",
+                  // 思考动画首位:emotion-ball 小球,情绪跟随全局 MoodBridge
+                  // (listening/thinking/speaking/happy/alert 自动换表情);
+                  // 工具调用中优先显示「检索资料」,挂载初期按思考/检索兜底。
+                  MoodDrivenEmotionBall(
+                    fallback: tool.isNotEmpty
+                        ? EmotionBallIds.retrieving
+                        : EmotionBallIds.thinking,
+                    toolOverride:
+                        tool.isNotEmpty ? EmotionBallIds.retrieving : null,
                     size: 22,
                     bodyColor: cs.primary,
+                    eyeScale: 1.35,
                   ),
                   const SizedBox(width: 8),
                   ConstrainedBox(
@@ -954,7 +963,7 @@ class _ChatPageState extends State<ChatPage>
                   // 空会话背景:emotion-ball 小球待机(放空)动画作为背景展示。
                   Center(
                     child: EmotionBallView(
-                      emotion: "02",
+                      emotion: EmotionBallIds.idle,
                       size: 200,
                       bodyColor: cs.primary,
                     ),

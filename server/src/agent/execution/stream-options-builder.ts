@@ -1,5 +1,4 @@
 import type { AgentStreamOptions, ToolLoopAfterBatchInfo } from "../../external-model/types.js";
-import { getFastLaneTools } from "../../external-model/openai-compatible-tool-loop.js";
 import type { PromptContextBuilder } from "../prompt-context-builder.js";
 import type { PersonalizationPromptSlice } from "../../services/user-personalization/user-personalization-service.js";
 import type { LlmExecutionMode } from "../task-router.js";
@@ -53,9 +52,9 @@ export class StreamOptionsBuilder {
             userPattern: input.userPattern,
             toolPlan: input.toolPlan,
           }) ?? {}),
-          chatToolsBuiltin: getFastLaneTools(),
-          chatToolsExtra: [],
-          toolExposureProfile: input.toolExposureProfile,
+          // 2026-09-05 双面架构：对话面零工具——toolExposureProfile="none" 使
+          // resolveChatTools 返回空列表，provider 不进工具循环。
+          toolExposureProfile: "none" as const,
           toolRankingHint: input.toolRankingHint,
         } satisfies AgentStreamOptions)
       : {

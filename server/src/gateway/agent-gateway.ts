@@ -17,12 +17,6 @@
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import type { AgentRuntimeConfig } from "../agent/agent-runtime-config.js";
-import {
-  routeLlmExecution,
-  type RouteDecision,
-  type RouteLlmExecutionOptions,
-} from "../agent/task-router.js";
 import {
   classifyRenderHint,
   type RenderHint,
@@ -275,28 +269,6 @@ export function searchResources(
     ["tool-router 混合检索"],
     () => searchDeferredToolsViaToolRouter(catalog, query, limit, options),
   );
-}
-
-/**
- * 任务路由：Fast（前台秒回）vs Complex（后台并行 + 子 Agent 委派）。
- * 包装 routeLlmExecution 并记录 trace（phase: task_route）。
- */
-export function routeTask(
-  message: string,
-  config?: AgentRuntimeConfig,
-  options?: RouteLlmExecutionOptions,
-): RouteDecision {
-  const startedAt = Date.now();
-  const decision = routeLlmExecution(message, config, options);
-  recordGatewayTrace({
-    traceId: nextTraceId(),
-    phase: "task_route",
-    decision: `mode=${decision.mode} segmentable=${decision.segmentable}`,
-    reasons: decision.reasons.slice(0, 5),
-    durationMs: Date.now() - startedAt,
-    timestamp: startedAt,
-  });
-  return decision;
 }
 
 /**

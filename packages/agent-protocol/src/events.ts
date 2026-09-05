@@ -263,6 +263,13 @@ export const ServerEventType = {
    */
   LocationRequest: "agent.location_request",
   /**
+   * 持续定位配置（位置方案 A）：LOCATION_TRACKING_MODE=continuous 时随
+   * session.init 绑定下发。客户端按 intervalSec 定时上报 `client.location_report`
+   * （payload 带 source:"continuous"）；ondemand 模式不下发，客户端无定时器。
+   * payload: { mode: "ondemand"|"continuous", intervalSec: number }
+   */
+  LocationTrackingConfig: "agent.location_tracking_config",
+  /**
    * Surface-on-Demand：服务端（`surface.show` 工具）要求客户端展示一个
    * 按需召唤的信息面板（如"今日安排"悬浮窗）。客户端按 surface 名执行，
    * 不支持的面板静默忽略；ttlSeconds 后自动淡出。
@@ -274,6 +281,13 @@ export const ServerEventType = {
 // ============================================================
 // 「分阶段异步对话交互 v2」事件载荷类型
 // ============================================================
+
+/** agent.location_tracking_config 载荷（位置方案 A：持续定位配置） */
+export type LocationTrackingConfigPayload = {
+  mode: "ondemand" | "continuous";
+  /** 上报间隔（秒），服务端已夹紧到 30..3600 */
+  intervalSec: number;
+};
 
 /** rhythm.profile_updated 载荷：节律画像摘要（Task 20 生活节律引擎） */
 export type RhythmProfileUpdatedPayload = {

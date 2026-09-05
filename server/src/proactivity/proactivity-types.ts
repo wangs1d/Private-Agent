@@ -15,7 +15,10 @@ export type ProactiveIntentKind =
   // ── C 端生活管家场景（Task 20 统一频控注册）──
   | "weather_alert"    // 恶劣天气预警联动（暴雨/高温/寒潮等 + 当日有日程 → 合并提醒）
   | "life_reminder"    // 生活提醒（重要日子/预算超支/节律喝水睡觉运动等）
-  | "monthly_report";  // 月度报告（消费月报等，确定性数据拼接 + 单次 LLM 总结）
+  | "monthly_report"   // 月度报告（消费月报等，确定性数据拼接 + 单次 LLM 总结）
+  // ── 位置场景（方案 D：位置与主动性联动）──
+  | "location_arrival" // 到达常去地点的主动问候（DBSCAN 常去地点 + 冷却控制）
+  | "geofence_event";  // 地理围栏事件触发的主动告知（围栏动作的 speak 面）
 
 /** 主动行为模式：主动性不只表现为"发消息" */
 export type ProactiveBehaviorMode =
@@ -58,7 +61,8 @@ export type ProactiveIntent = {
     | "weather"       // 天气预警联动（晨报/天气服务检测）
     | "finance"       // 消费管家（自动入账/预算超支/月报）
     | "relationship"  // 人情关系（重要日子扫描/祝福草稿）
-    | "health";       // 健康关怀（节律提醒等）
+    | "health"        // 健康关怀（节律提醒等）
+    | "location";     // 位置场景（围栏事件 / 到达常去地点）
 };
 
 // ─── 通用主动性层（Jarvis 式：感知 → LLM 自主决策 → 通用执行） ───

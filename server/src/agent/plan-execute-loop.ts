@@ -10,7 +10,7 @@
  * - `AGENT_PLAN_EXECUTE_LOOP=1|true|yes` 启用（默认关闭）。
  * - `AGENT_PE_VERBOSE_STREAM=1`：将计划阶段标题写入用户可见流（默认仅推 phase 状态）。
  */
-import { requiresTaskDecomposition, isSimpleDirectTask } from "./simple-task.js";
+import { requiresTaskDecomposition } from "./simple-task.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -62,15 +62,6 @@ export function isPlanExecuteLoopEnabled(): boolean {
     return false;
   }
   return raw === "1" || raw === "true" || raw === "yes";
-}
-
-/** 仅在复杂/多步任务上启用 PE，避免简单问答多跑 2～3 轮模型。 */
-export function shouldUsePlanExecuteLoop(message: string): boolean {
-  if (!isPlanExecuteLoopEnabled()) return false;
-  const t = message.trim();
-  if (!t) return false;
-  if (isSimpleDirectTask(t)) return false;
-  return requiresTaskDecomposition(t);
 }
 
 function isPeVerboseStreamEnabled(): boolean {

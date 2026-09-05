@@ -97,7 +97,8 @@ function resolvedToolsCacheKey(userText?: string, streamOpts?: AgentStreamOption
     (streamOpts?.toolRankingHint?.cautiousNamespaces ?? []).join(","),
   ].join("|");
   const pinnedKey = (streamOpts?.pinnedToolNames ?? []).slice().sort().join(",");
-  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${phoneBridge}|${profile}|${textKey}|${rankingKey}|${pinnedKey}`;
+  const capsKey = (streamOpts?.toolCapabilities ?? []).slice().sort().join(",");
+  return `${builtinNames}|${extraNames}|${mode}|${bridge}|${phoneBridge}|${profile}|${textKey}|${rankingKey}|${pinnedKey}|${capsKey}`;
 }
 
 function contextualTextKey(userText: string | undefined, profile: ToolExposureProfile): string {
@@ -166,7 +167,13 @@ function pinDesktopVisualTools(
   // 倾向于调 desktop.visual.screenshot 等重路径工具而非 clock 轻量工具，
   // 导致响应慢 + 频繁触发"shell 被拦截""系统敏感文件不让读"等错误。
   // 桌面工具仅在 Complex/delegate 模式或显式 scoped 暴露时由用户主动 pin 进来。
-  if (streamOpts?.toolExposureProfile === "contextual" || streamOpts?.toolExposureProfile === "light") {
+  // 2026-09-05 双面架构：profile="none"（对话面零工具）绝对不注入——空列表 + 
+  // undefined accessMode（默认 full）会被误判为可注入，零工具契约被破坏。
+  if (
+    streamOpts?.toolExposureProfile === "contextual" ||
+    streamOpts?.toolExposureProfile === "light" ||
+    streamOpts?.toolExposureProfile === "none"
+  ) {
     return tools;
   }
   const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
@@ -230,9 +237,11 @@ function resolvePinnedToolNames(streamOpts?: AgentStreamOptions): Set<string> {
   const pinned = new Set<string>();
   // 2026-07-30 修复：Fast 模式（contextual/light 暴露策略）不把桌面工具视为 pinned。
   // 否则 token 预算核算会把 11 个桌面工具的 schema 优先保留，污染 LLM 视野。
+  // 2026-09-05：profile="none"（对话面零工具）同样不视为 pinned，与注入条件保持一致。
   const isFastProfile =
     streamOpts?.toolExposureProfile === "contextual" ||
-    streamOpts?.toolExposureProfile === "light";
+    streamOpts?.toolExposureProfile === "light" ||
+    streamOpts?.toolExposureProfile === "none";
   if (!isFastProfile) {
     const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
     const bridge = streamOpts?.desktopBridgeOnline === true;
@@ -282,6 +291,55 @@ function applyToolRankingHint(
   });
 }
 
+/**
+ * 能力束 → 工具名/命名空间前缀映射（delegate 裁剪用）。
+ * 只覆盖轻任务能力（realtime_lookup→search、media_retrieval→media+search）；
+ * write/multi_step 路由给的是 full，不走此表。
+ * 前缀匹配规则：工具名等于前缀或以 prefix 开头（"calendar." 匹配 calendar.create_task）。
+ */
+const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
+  search: [
+    "search_web",
+    "search",
+    "fetch_web",
+    "deep_search",
+    "hot_rankings",
+    "info.",
+    "weather.",
+    "clock.",
+  ],
+  media: ["search_images", "search_videos", "photo", "vision.", "media", "image"],
+  write: ["calendar.", "reminder", "voice.", "phone.", "shopping.", "commitment."],
+  desktop: ["desktop", "agent_browser", "screen"],
+};
+
+/** 元工具/能力查询桥：任何裁剪集合都保留，保证延迟目录（tool_discover→tool_call）可达。 */
+const CAPABILITY_BRIDGE_TOOLS = new Set([
+  "tool_search",
+  "tool_discover",
+  "tool_describe",
+  "tool_call",
+  "agent.query_capabilities",
+]);
+
+function toolMatchesCapability(toolName: string, capability: string): boolean {
+  const prefixes = CAPABILITY_TOOL_PREFIXES[capability];
+  if (!prefixes) return false;
+  return prefixes.some((p) => toolName === p || toolName.startsWith(p));
+}
+
+function filterToolsByCapabilities(
+  tools: ChatCompletionTool[],
+  capabilities: string[],
+): ChatCompletionTool[] {
+  return tools.filter((tool) => {
+    const name = tool.type === "function" ? tool.function?.name ?? "" : "";
+    if (!name) return true;
+    if (CAPABILITY_BRIDGE_TOOLS.has(name)) return true;
+    return capabilities.some((cap) => toolMatchesCapability(name, cap));
+  });
+}
+
 function applyToolExposureProfile(
   tools: ChatCompletionTool[],
   userText: string | undefined,
@@ -289,7 +347,18 @@ function applyToolExposureProfile(
   streamOpts?: AgentStreamOptions,
 ): ChatCompletionTool[] {
   if (profile === "none") return [];
-  if (profile === "full" || profile === "delegate") return tools;
+  // delegate（任务面默认 profile）：2026-09-05 起按路由层能力束（toolCapabilities）
+  // 裁剪——查天气/搜新闻这类轻任务不再全量注入 112+ 工具 schema（~64k 字符），
+  // 未注入工具经 searchableTools 全集进 BM25 延迟目录，LLM 用 tool_discover 桥
+  // 按需召回；路由判错由出口自检（TurnOutcomeGate）兜底。
+  if (profile === "delegate") {
+    const caps = streamOpts?.toolCapabilities?.map((c) => c?.trim()).filter(Boolean) ?? [];
+    if (caps.length === 0 || caps.includes("full")) return tools;
+    const filtered = filterToolsByCapabilities(tools, caps);
+    if (filtered.length === 0) return tools;
+    return mergePinnedTools(filtered, streamOpts);
+  }
+  if (profile === "full") return tools;
   if (profile === "scoped") return filterScopedTools(tools, streamOpts);
   if (!userText?.trim()) return tools;
 

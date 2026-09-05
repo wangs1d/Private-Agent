@@ -172,11 +172,30 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
 function isHighRiskFinancialTool(toolName: string): boolean {
   return (
     toolName === "shopping.order.place" ||
+    // 统一预订层（方案 A）：所有真实/模拟下单工具一律人工审批
+    toolName === "ride_hailing.book" ||
+    toolName === "home_service.book" ||
+    toolName === "restaurant.book" ||
     toolName.includes("payment") ||
     toolName.includes("transfer") ||
     toolName.includes("wallet")
   );
 }
+
+/**
+ * 内置两阶段确认（ask_first）工具：阶段一 confirm=false 只生成摘要+确认 token、
+ * 不执行任何不可逆动作；阶段二 confirm=true+token 的 token 即用户确认凭证。
+ *
+ * 聊天通道的 brain 安全门（limbic-cortex convertSafetyResult）据此放行：
+ * 阶段一 = ask_first 的「问」，阶段二 = 用户已在会话内明确同意。
+ * 自主任务通道不受影响（require_approval 照常挂起等 approveTask）。
+ */
+export const TWO_PHASE_CONFIRM_TOOLS: ReadonlySet<string> = new Set([
+  "shopping.order.place",
+  "ride_hailing.book",
+  "home_service.book",
+  "restaurant.book",
+]);
 
 // --------------------------------------------------------------------------- //
 // 辅助函数

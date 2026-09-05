@@ -26,6 +26,12 @@ import { isMemoryEcho } from "./memory-echo-guard.js";
 import { semanticFingerprint } from "./memory-record-utils.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import {
+  extractUnified,
+  isMemoryUnifiedExtractEnabled,
+  type UnifiedExtraction,
+  type UnifiedLlmClient,
+} from "../agentic-memory/unified-extractor.js";
+import {
   resolveOpenAiApiKey,
   getAgenticMemoryLlmModel,
 } from "../agentic-memory/env.js";
@@ -47,6 +53,12 @@ type DecidedCandidate = {
   decision: MemoryDecisionResult;
   /** 低信号合并摘要后 text 已被替换 */
   text: string;
+  /**
+   * 统一抽取产物（decide 融合后回填）。存在时 egress 走 writeDecided(unified)
+   * ——抽取产物直存（infer:false）且 facts/commitments/corrections 驱动
+   * 事实注册表等下游，不再让 Mem0 二次 LLM 抽取。
+   */
+  unified?: UnifiedExtraction;
 };
 
 type PersistedQueue = { candidates: MemoryCandidate[] };
@@ -84,6 +96,8 @@ export class MemoryConsolidationService {
   private readonly supersedeSimilarity: number;
   private readonly filePath: string;
   private loaded = false;
+  /** 统一抽取 LLM 客户端（测试注入 fake；生产为 null 走内部 OpenAI 构造） */
+  private unifiedClient: UnifiedLlmClient | null = null;
 
   constructor(private readonly deps: MemoryConsolidationDeps) {
     this.debounceMs = envNum("AGENT_MEMORY_CONSOLIDATION_DEBOUNCE_MS", 30_000);
@@ -92,6 +106,11 @@ export class MemoryConsolidationService {
       deps.filePath ??
       (process.env.AGENT_MEMORY_CANDIDATES_FILE?.trim() ||
         `${process.cwd()}/data/memory-candidates.json`);
+  }
+
+  /** 注入统一抽取客户端（测试用；生产不调用） */
+  setUnifiedClient(client: UnifiedLlmClient | null): void {
+    this.unifiedClient = client;
   }
 
   async load(): Promise<void> {
@@ -179,17 +198,33 @@ export class MemoryConsolidationService {
 
       const decided: DecidedCandidate[] = [];
 
-      // 高信号：逐条决策（heuristic + LLM 复判，与原 ingestHighSignal 一致）
-      for (const candidate of accepted.filter((c) => c.highSignal)) {
-        const decision = await decideMemoryWrite(candidate.text, {
-          actorId,
-          source: candidate.source,
-          heuristicHint: "remember",
-        });
-        decided.push({ candidate, decision, text: candidate.text });
+      // 统一抽取协议（高低信号同轨，消灭「低信号事实必须命中关键词才被
+      // 结构化对待」的双轨根因）：高信号逐条抽取；低信号按 context 分桶
+      // 合并后一次抽取（抽取产物 memories 即压缩后的独立陈述，不再单独摘要）。
+      // 抽取不可用（无 key/LLM 失败）时回退旧路径：高信号 decideMemoryWrite、
+      // 低信号 summarizeLowSignal + 启发式裁决。
+      const high = accepted.filter((c) => c.highSignal);
+      for (const candidate of high) {
+        const unified = isMemoryUnifiedExtractEnabled()
+          ? await extractUnified(candidate.text, { client: this.unifiedClient ?? undefined })
+          : null;
+        if (unified) {
+          decided.push({
+            candidate,
+            decision: unifiedDecisionResult(unified),
+            text: candidate.text,
+            unified,
+          });
+        } else {
+          const decision = await decideMemoryWrite(candidate.text, {
+            actorId,
+            source: candidate.source,
+            heuristicHint: "remember",
+          });
+          decided.push({ candidate, decision, text: candidate.text });
+        }
       }
 
-      // 低信号：按 context 分桶合并 → 摘要 → 单次决策（摘要已是 LLM 产物，不二次复判）
       const low = accepted.filter((c) => !c.highSignal);
       const lowByContext = new Map<"main" | "notes", MemoryCandidate[]>();
       for (const candidate of low) {
@@ -201,6 +236,24 @@ export class MemoryConsolidationService {
         const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
         const combined = sorted.map((e) => `[${e.source}] ${e.text}`).join("\n\n---\n\n");
         if (combined.length < 20) continue;
+
+        const unified = isMemoryUnifiedExtractEnabled()
+          ? await extractUnified(combined, { client: this.unifiedClient ?? undefined })
+          : null;
+        if (unified) {
+          const persistedText =
+            unified.memories.length > 0
+              ? unified.memories.join("\n")
+              : combined.slice(0, 2000);
+          decided.push({
+            candidate: { ...sorted[0]!, text: persistedText },
+            decision: unifiedDecisionResult(unified),
+            text: persistedText,
+            unified,
+          });
+          continue;
+        }
+
         const summarized = await this.summarizeLowSignal(combined);
         const decision = await decideMemoryWrite(
           summarized,
@@ -222,21 +275,51 @@ export class MemoryConsolidationService {
     }
   }
 
+  /**
+   * decision 映射：unified.decision 与 decideMemoryWrite 的四值语义对齐
+   *（remember/decay/reject 直映；unified 无 overwrite，改造类语义由
+   * mutable_fact + 事实注册表级联承担）。
+   */
+  private static unifiedToDecision(decision: UnifiedExtraction["decision"]): MemoryDecisionResult["decision"] {
+    if (decision === "remember" || decision === "decay" || decision === "reject") return decision;
+    return "decay";
+  }
+
   /** 唯一落库出口：海马体 + Mem0（经 narrative port）+ KV summary 行。 */
   private async egress(actorId: string, decided: DecidedCandidate[]): Promise<void> {
-    const toPersist = decided.filter((d) => d.decision.decision !== "reject");
-
     // Supersession：overwrite/mutable_fact 语义的候选先退役语义重合的旧记忆
-    for (const d of toPersist) {
+    for (const d of decided) {
       if (d.decision.decision === "overwrite" || d.decision.semanticClass === "mutable_fact") {
         await this.retireSuperseded(actorId, d.text);
       }
     }
 
-    if (toPersist.length > 0 && this.deps.narrative) {
-      const body = toPersist.map((d) => d.text).join("\n");
-      const context = toPersist[0]!.candidate.context;
-      await this.deps.narrative.writeDecided(actorId, body, toPersist[0]!.candidate.source, {
+    // unified 候选逐条直存（facts/commitments/corrections 经钩子驱动下游）。
+    // reject 且无旁路数据（承诺/纠正/事实）的候选整体跳过；reject 但携带
+    // 旁路数据的仍要走 writeDecided——persistUnifiedExtraction 的 reject 分支
+    // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存的闲聊里的承诺/事实照样要抓）。
+    for (const d of decided) {
+      if (!d.unified) continue;
+      const hasSideData =
+        d.unified.facts.length > 0 ||
+        d.unified.commitments.length > 0 ||
+        d.unified.corrections.length > 0;
+      if (d.decision.decision === "reject" && !hasSideData) continue;
+      await this.deps.narrative!.writeDecided(
+        actorId,
+        d.text,
+        d.candidate.source,
+        { context: d.candidate.context, highSignal: d.candidate.highSignal },
+        d.unified,
+      );
+    }
+
+    // 旧路径（unified 不可用回退）候选：非 reject 的整批一次 writeDecided
+    const legacy = decided.filter((d) => !d.unified && d.decision.decision !== "reject");
+    if (legacy.length > 0 && this.deps.narrative) {
+      const body = legacy.map((d) => d.text).join("\n");
+      const context = legacy[0]!.candidate.context;
+      await this.deps.narrative.writeDecided(actorId, body, legacy[0]!.candidate.source, {
         context,
         highSignal: true,
       });
@@ -350,6 +433,29 @@ function extractKeyLowSignalLines(text: string): string[] {
       /\[.*\]|喜欢|不喜欢|讨厌|偏好|记住|提醒|承诺|决定|计划|待办|重要|生日|纪念日/i.test(line),
     )
     .slice(0, 6);
+}
+
+/** unified 中文语义类 → MemorySemanticClass（KV 行前缀 / supersession 触发沿用同一形状） */
+const UNIFIED_SEMANTIC_CLASS_MAP: Record<string, MemoryDecisionResult["semanticClass"]> = {
+  事实: "mutable_fact",
+  偏好: "stable_preference",
+  人物: "stable_identity",
+  计划: "commitment_or_todo",
+  承诺: "commitment_or_todo",
+  事件: "temporary_context",
+  其他: "temporary_context",
+};
+
+/** unified 抽取结果 → 决策结构（egress 判定与 KV 行前缀复用 decideMemoryWrite 的形状） */
+function unifiedDecisionResult(unified: UnifiedExtraction): MemoryDecisionResult {
+  return {
+    decision: MemoryConsolidationService.unifiedToDecision(unified.decision),
+    confidence: 0.9,
+    semanticClass:
+      (unified.semanticClass && UNIFIED_SEMANTIC_CLASS_MAP[unified.semanticClass]) ||
+      (unified.decision === "decay" ? "temporary_context" : "stable_identity"),
+    reasons: ["unified_extract"],
+  };
 }
 
 let singleton: MemoryConsolidationService | null = null;

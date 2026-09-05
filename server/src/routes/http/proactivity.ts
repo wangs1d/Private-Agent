@@ -30,8 +30,20 @@ export function registerProactivityPipelineRoutes(
   const pipeline = deps.pipeline;
   if (!pipeline) return;
 
-  app.get("/api/proactivity/diagnostics", async () => {
-    return { ok: true, ...pipeline.diagnostics() };
+  // 诊断快照。可选查询参数（沉默决策反问）：
+  //   ?silenceKeyword=体检&silenceDays=7 → 附加 silenceSearch（效用评估沉默留痕检索）
+  app.get("/api/proactivity/diagnostics", async (request) => {
+    const result: Record<string, unknown> = { ok: true, ...pipeline.diagnostics() };
+    const q = request.query as { silenceKeyword?: string; silenceDays?: string };
+    if (q.silenceKeyword?.trim() || q.silenceDays) {
+      const days = Math.max(1, Math.min(90, Number(q.silenceDays) > 0 ? Number(q.silenceDays) : 7));
+      result.silenceSearch = pipeline.searchSilences({
+        keyword: q.silenceKeyword?.trim() || undefined,
+        sinceMs: Date.now() - days * 24 * 60 * 60 * 1000,
+        limit: 20,
+      });
+    }
+    return result;
   });
 
   app.post("/api/proactivity/outcome", async (request, reply) => {

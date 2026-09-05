@@ -12,6 +12,8 @@ export const clientLocationWireSchema = z.object({
   timezone: z.string().max(80).optional(),
   /** 展示用，如「贵州省 · 遵义市」 */
   label: z.string().max(200).optional(),
+  /** 上报来源标注：continuous=持续模式定时上报；缺省视为按需/面板主动上报 */
+  source: z.enum(["continuous", "ondemand", "report"]).optional(),
 });
 
 export type ClientLocationWire = z.infer<typeof clientLocationWireSchema>;

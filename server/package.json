@@ -17,7 +17,7 @@
     "start:server": "node dist/index.js",
     "start:runtime": "node dist/runtime-main.js",
     "start:gateway": "node dist/gateway-main.js",
-    "test": "tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "eval:recall": "tsx scripts/eval-memory-recall.ts",
     "eval:routing": "tsx scripts/eval-display-routing.ts",
     "test:master-agent": "tsx test/master-agent.test.ts",
@@ -29,7 +29,9 @@
     "@fastify/multipart": "^9.0.3",
     "@fastify/websocket": "^11.0.2",
     "@mozilla/readability": "^0.6.0",
+    "@private-ai-agent/agent-protocol": "0.1.0",
     "@private-ai-agent/agent-world": "0.1.0",
+    "@private-ai-agent/picture": "0.1.0",
     "@qdrant/js-client-rest": "^1.17.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.0.0",
@@ -45,10 +47,9 @@
     "redis": "^4.7.1",
     "sharp": "^0.35.3",
     "tokenjuice": "^0.7.1",
+    "ws": "^8.21.0",
     "xlsx": "^0.18.5",
-    "zod": "^3.23.8",
-    "@private-ai-agent/agent-protocol": "0.1.0",
-    "ws": "^8.21.0"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.3",

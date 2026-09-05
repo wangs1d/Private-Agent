@@ -7,6 +7,7 @@ import {
   type EventEnvelope,
   type WalletAction,
 } from "../protocol.js";
+import { parseClientLocation } from "../types/client-location.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { AuditService } from "../services/audit-service.js";
 import type { SessionService } from "../services/session-service.js";
@@ -38,6 +39,7 @@ import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.j
 import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "../services/location-coordinator.js";
+import type { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
 import {
   AgentWorldClientEventType,
   AgentWorldServerEventType,
@@ -174,6 +176,8 @@ export type WsRouteDeps = {
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   /** 按需位置协调器：Agent 需要位置时向客户端请求实时 GPS */
   locationCoordinator: LocationCoordinator;
+  /** 位置上报管线（方案 A-D）：历史落库 / 围栏判定 / 到达触发；null=未装配 */
+  locationIngest?: LocationIngestPipeline | null;
   virtualPhoneService: VirtualPhoneService;
   virtualPhoneIncomingCoordinator: VirtualPhoneIncomingCoordinator;
   userPersonalizationService: UserPersonalizationService;
@@ -207,6 +211,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     locationCoordinator,
+    locationIngest,
     virtualPhoneService,
     virtualPhoneIncomingCoordinator,
     userPersonalizationService,
@@ -694,6 +699,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             eveningDigestScheduler?.subscribe(actorId);
             // 按需位置：绑定 socket，Agent 需要位置时向该客户端请求实时 GPS
             locationCoordinator.bindSocket(actorId, socket);
+            // 持续模式（方案 A）：下发定时上报配置，客户端按 intervalSec 回传
+            // client.location_report(source:"continuous")；ondemand 不发，客户端无定时器
+            locationCoordinator.sendTrackingConfig(socket);
           } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
             desktopBridgeCoordinator.bindExecutor(actorId, socket);
             socket.send(
@@ -931,6 +939,15 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (!consumed) {
             const jobId = String(pl.jobId ?? "").trim();
             sendUnifiedError("BAD_LOCATION_REPORT", `jobId 与当前连接不匹配或已过期: ${jobId}`);
+          }
+          // 位置管线（方案 A-D）：历史落库 / 围栏 enter-leave / 到达主动触发。
+          // fire-and-forget：管线内部各自容错，不影响按需请求主链路。
+          const ingestedLoc = parseClientLocation(pl);
+          if (ingestedLoc && locationIngest) {
+            const source =
+              ingestedLoc.source ??
+              (String(pl.jobId ?? "").trim() ? "ondemand" : "report");
+            locationIngest.ingest(boundActorId, ingestedLoc, source);
           }
           return;
         }

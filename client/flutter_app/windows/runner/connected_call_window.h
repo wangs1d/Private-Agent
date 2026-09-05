@@ -98,8 +98,6 @@ class ConnectedCallWindow {
   HWND hangup_btn_ = nullptr;
 
   std::wstring caller_name_;
-  std::wstring caller_initial_;
-  uint32_t accent_color_ = 0xFF22C55E;
 
   // 状态
   int elapsed_seconds_ = 0;
@@ -107,12 +105,6 @@ class ConnectedCallWindow {
   bool speaker_on_ = true;
   bool talking_ = false;  // 头像是否在呼吸（TTS 播放中）
   int pulse_phase_ = 0;
-
-  // 按钮背景刷
-  HBRUSH mute_brush_ = nullptr;
-  HBRUSH speaker_brush_ = nullptr;
-  HBRUSH hangup_brush_ = nullptr;
-  HBRUSH action_border_brush_ = nullptr;
 
   HangUpCallback on_hangup_;
   MuteCallback on_mute_toggle_;
@@ -125,8 +117,8 @@ class ConnectedCallWindow {
   static constexpr UINT kMsgDeferredHide = WM_USER + 200;
 
   // 窗口尺寸
-  static constexpr int kWindowWidth = 384;
-  static constexpr int kWindowHeight = 296;
+  static constexpr int kWindowWidth = 320;
+  static constexpr int kWindowHeight = 304;
   static constexpr int kMargin = 16;
 
   static constexpr const wchar_t* kClassName =

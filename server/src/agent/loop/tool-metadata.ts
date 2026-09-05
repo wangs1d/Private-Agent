@@ -179,6 +179,10 @@ const TOOL_ALTERNATIVES: Record<string, string[]> = {
   "info.navigate_site": ["info.inspect_webpage", "fetch_web"],
   // shopping.order.place 失败 → search 先确认商品再重试
   "shopping.order.place": ["shopping.order.search"],
+  // 统一预订层（方案 A）：book 失败 → 先 quote/search 确认选项再重试
+  "ride_hailing.book": ["ride_hailing.quote"],
+  "home_service.book": ["home_service.search"],
+  "restaurant.book": ["restaurant.search"],
   // desktop.uia_query 失败（selector 找不到）→ 截图切视觉策略
   // （对齐状态机 prompt "uia_query count:0 时切视觉策略"）
   "desktop.uia_query": ["desktop.visual.screenshot"],
@@ -194,6 +198,10 @@ const HONEST_FAILURE_TOOLS = new Set<string>([
   "shopping.order.place",
   "wallet.transfer",
   "wallet.purchase",
+  // 统一预订层（方案 A）：下单工具禁止假成功（模拟模式必须如实标注 simulated）
+  "ride_hailing.book",
+  "home_service.book",
+  "restaurant.book",
 ]);
 
 // ────────────────────────────────────────────────────────────
@@ -245,7 +253,7 @@ function inferSideEffect(toolName: string): ToolMetadata["sideEffect"] {
 }
 
 function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
-  if (/wallet\.transfer|wallet\.purchase|shopping\.order\.place|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
+  if (/wallet\.transfer|wallet\.purchase|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
     return "high";
   }
   if (/desktop\.open|desktop\.run_preset|agent_browser\.click|agent_browser\.type|smart_home\.control/.test(toolName)) {

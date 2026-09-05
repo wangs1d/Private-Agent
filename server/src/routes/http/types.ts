@@ -28,6 +28,7 @@ import type { TtsService } from "../../services/tts-service.js";
 import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import type { ImageGenerationService } from "../../services/image-generation-service.js";
+import type { PictureKit } from "@private-ai-agent/picture";
 import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
@@ -87,6 +88,8 @@ export type HttpRouteDeps = {
   voiceCapabilityService?: VoiceCapabilityService;
   /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
   imageGenerationService: ImageGenerationService;
+  /** 图片能力套件(图库/美颜批图) */
+  pictureKit: PictureKit;
   /** 文件/文档处理服务（file.read_text 等工具 + 静态拉流共用） */
   fileProcessingService: FileProcessingService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;

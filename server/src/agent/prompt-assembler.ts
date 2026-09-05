@@ -57,6 +57,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "followUpAnchor",
   "toolPlan",
   "userLocation",
+  "frequentPlaces",
   "narrativeRecall",
   "workingMemorySummary",
   "recentConversationHistory",
@@ -70,7 +71,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "memoryOpenLoops",
   "sessionRecap",
   "interruptedContext",
-  "inheritedToolContext",
   "currentTime",
   "conversationTimeline",
   "skillIndex",
@@ -161,6 +161,23 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   );
   if (memoryConsolidated) stablePrefix.push(memoryConsolidated);
 
+  // ── 稳定层·慢变记忆（2026-09-05 token 优化）──
+  // 持久记忆/会话回顾/技能索引/兴趣列表在会话内多轮不变（夜间整理/技能注册节奏）。
+  // 此前它们落进动态沉底层，因字节位置随轮变化永远吃不到 prefix cache，每轮全价重发；
+  // 移入稳定层后只有内容真正变化的那一轮打破一次缓存。查询相关的记忆字段
+  // （事实/偏好/待办承诺，带 minRelevance 按轮过滤）仍留动态层。
+  const persistentMemoryBlock = buildFamilyBlock(
+    "【持久记忆与回顾】",
+    "（长期沉淀内容，会话内基本不变）",
+    [
+      { label: "持久记忆", content: m.memorySummary },
+      { label: "会话回顾", content: m.sessionRecap },
+    ],
+  );
+  if (persistentMemoryBlock) stablePrefix.push(persistentMemoryBlock);
+  if (m.skillIndex) stablePrefix.push(m.skillIndex);
+  if (m.interestList) stablePrefix.push(m.interestList);
+
   // ── 动态层 ──
   const dynamicContext: string[] = [];
   if (m.semanticIntent) dynamicContext.push(`【意图理解】\n${m.semanticIntent}`);
@@ -174,6 +191,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   ]);
   if (taskBlock) dynamicContext.push(taskBlock);
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
+  if (m.frequentPlaces) dynamicContext.push(`【常去地点】\n${m.frequentPlaces}`);
   // 记忆图联想检索：保留专属免责（项目硬约束：该块必须带免责声明）
   if (m.narrativeRecall) {
     dynamicContext.push(
@@ -188,13 +206,12 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
     { label: "今日摘要", content: m.dailyDigest },
   ]);
   if (shortTermBlock) dynamicContext.push(shortTermBlock);
-  // 用户档案家族（5→1）：画像 / 偏好 / 事实 / 持久记忆 / 会话回顾
+  // 用户档案家族（3→1）：画像 / 偏好 / 事实（查询相关的记忆字段留动态层；
+  // 持久记忆/会话回顾已上移稳定层）
   const userProfileBlock = buildFamilyBlock("【用户档案】", undefined, [
     { label: "画像", content: m.userProfile },
     { label: "偏好", content: m.memoryPreferences },
     { label: "事实", content: m.memoryFacts },
-    { label: "持久记忆", content: m.memorySummary },
-    { label: "会话回顾", content: m.sessionRecap },
   ]);
   if (userProfileBlock) dynamicContext.push(userProfileBlock);
   // 待办与承诺家族（2→1）
@@ -204,12 +221,9 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   ]);
   if (todoBlock) dynamicContext.push(todoBlock);
   if (m.interruptedContext) dynamicContext.push(m.interruptedContext);
-  if (m.inheritedToolContext) dynamicContext.push(m.inheritedToolContext);
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
-  if (m.skillIndex) dynamicContext.push(m.skillIndex);
   if (m.proactiveAdvice) dynamicContext.push(m.proactiveAdvice);
-  if (m.interestList) dynamicContext.push(m.interestList);
   dynamicContext.push(buildReplyStyleGuide(m));
 
   return { stablePrefix, dynamicContext };

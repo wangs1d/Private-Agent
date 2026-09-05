@@ -39,6 +39,13 @@ agent-world/dist/
 # Data directories (sensitive user data)
 server/data/
 data/
+
+# Picture kit default data dirs
+.picture_data/
+.batch_output/
+.generated/
+.thumbnails/
+.gallery_data/
 *.db
 *.sqlite
 *.sqlite3

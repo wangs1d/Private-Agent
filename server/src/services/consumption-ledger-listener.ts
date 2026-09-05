@@ -21,7 +21,7 @@ import type {
 
 /** 消费类工具判定（正则；仅这些工具成功后入账，查询/取消类不重复入账） */
 const CONSUMPTION_TOOL_RE =
-  /^(payment\.create_order|wallet\.(transfer|purchase|recharge)|meituan\.create_order|shopping\.order\.place)$/;
+  /^(payment\.create_order|wallet\.(transfer|purchase|recharge)|meituan\.create_order|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book)$/;
 
 /** 消费管家依赖（装配层注入，全部可 mock） */
 export interface ConsumptionLedgerListenerDeps {
@@ -233,6 +233,47 @@ export function extractLedgerEntry(info: {
         merchant: result.platform ? String(result.platform) : undefined,
         description: `网购下单：${String(result.item ?? input.item ?? "商品")}`,
         source: "shopping_tool",
+      };
+    }
+    case "ride_hailing.book": {
+      // 模拟模式订单（BOOKING_MODE=mock）不入真实账本，避免污染预算与异常检测基线
+      if (result.simulated === true) return null;
+      // 统一预订层（方案 A）：网约车下单（阶段二成功才有金额）
+      const amount = amountOf(result.amountCny);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "交通",
+        merchant: result.provider ? String(result.provider) : undefined,
+        description: `网约车：${String(result.summary ?? input.dropoff ?? "行程")}`,
+        source: "booking_tool",
+      };
+    }
+    case "home_service.book": {
+      if (result.simulated === true) return null;
+      const amount = amountOf(result.amountCny);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "居住",
+        merchant: result.provider ? String(result.provider) : undefined,
+        description: `家政预订：${String(result.summary ?? input.serviceType ?? "上门服务")}`,
+        source: "booking_tool",
+      };
+    }
+    case "restaurant.book": {
+      if (result.simulated === true) return null;
+      const amount = amountOf(result.amountCny);
+      if (!amount) return null;
+      return {
+        amount,
+        type: "expense",
+        category: "餐饮",
+        merchant: result.provider ? String(result.provider) : undefined,
+        description: `餐厅预订：${String(result.summary ?? input.optionId ?? "订座")}`,
+        source: "booking_tool",
       };
     }
     default:

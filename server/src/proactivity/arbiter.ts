@@ -1,6 +1,8 @@
-// 仲裁层（唯一决策口）：保质期 → 负反馈抑制 → 静默择时 → 分层预算 → 在场择时。
+// 仲裁层（唯一决策口）：效用评估（声明了 utility 的提案）→ 保质期 → 负反馈抑制
+// → 静默择时 → 分层预算 → 在场择时。
 // 纯规则零 LLM（LLM 只出现在 speak 话术生成与可选竞争仲裁），确定可测。
-import type { ArbitrationDecision, ProactiveImportance, ProactiveProposal, PresenceState } from "./pipeline-types.js";
+import { deriveNotifyValue, evaluateActionUtility, isUtilityEvalEnabled, type ActionUtilityResult } from "./action-utility.js";
+import type { ArbitrationDecision, ProactiveProposal, PresenceState } from "./pipeline-types.js";
 
 export type GovernorVerdict = { allowed: boolean; reason: string };
 
@@ -36,21 +38,51 @@ export function nextQuietEnd(now: Date): number {
 }
 
 export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): ArbitrationDecision {
+  // 效用评估（方案 A/B，仲裁链最前面）：声明了 utility 的提案先过三分支判定。
+  //   silence → verdict=silenced（与 suppressed 区分：效用评估后主动选择不动作）；
+  //   ask_first / execute_silently → 记入 reasonChain 继续走后续仲裁
+  //   （ask_first 的提案以确认请求文案投递；execute_silently 的通知类提案投递即执行）。
+  // 未声明 utility 的提案不评估——既有触发源仲裁行为完全不变。
+  let utilityResult: ActionUtilityResult | undefined;
+  if (p.utility && isUtilityEvalEnabled()) {
+    utilityResult = evaluateActionUtility({
+      kind: p.kind,
+      title: p.title,
+      risk: p.utility.risk,
+      authorization: p.utility.authorization,
+      value: p.utility.value ?? deriveNotifyValue(p.importance),
+    });
+    if (utilityResult.branch === "silence") {
+      return {
+        proposal: p,
+        verdict: "silenced",
+        reasonChain: [`action_utility_silence:${utilityResult.reason}`],
+        utility: utilityResult,
+      };
+    }
+  }
+  const chain: string[] = [];
+  if (utilityResult) chain.push(`action_utility:${utilityResult.branch}:${utilityResult.reason}`);
   if (p.expiresAt !== undefined && p.expiresAt < ctx.now) {
-    return { proposal: p, verdict: "expired", reasonChain: ["expired"] };
+    return { proposal: p, verdict: "expired", reasonChain: [...chain, "expired"], utility: utilityResult };
   }
   const suppression = ctx.isSuppressed(p.actorId, p.kind, `${p.title} ${p.summary}`);
   if (suppression.suppressed) {
-    return { proposal: p, verdict: "suppressed", reasonChain: [`negative_feedback:${suppression.reason}`] };
+    return {
+      proposal: p,
+      verdict: "suppressed",
+      reasonChain: [...chain, `negative_feedback:${suppression.reason}`],
+      utility: utilityResult,
+    };
   }
-  const chain: string[] = [];
   // 静默时段：非 critical 择时到静默结束（defer 而非丢弃——"没发"与"择机发"是两种体验）
   if (isQuietHourNow(new Date(ctx.now)) && p.importance !== "critical") {
     return {
       proposal: p,
       verdict: "deferred",
-      reasonChain: ["quiet_hours_defer_to_morning"],
+      reasonChain: [...chain, "quiet_hours_defer_to_morning"],
       deliverAfter: Math.max(nextQuietEnd(new Date(ctx.now)), p.deliverAfter ?? 0),
+      utility: utilityResult,
     };
   }
   // 分层频控：must 层（用户点名要的事）绕过社交预算，不占社交配额
@@ -58,7 +90,12 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
     const importance = (p.importance === "critical" ? "high" : p.importance) as "high" | "medium" | "low";
     const verdict = ctx.socialCanTrigger(p.actorId, p.kind, importance);
     if (!verdict.allowed) {
-      return { proposal: p, verdict: "throttled", reasonChain: [`frequency_governor:${verdict.reason}`] };
+      return {
+        proposal: p,
+        verdict: "throttled",
+        reasonChain: [...chain, `frequency_governor:${verdict.reason}`],
+        utility: utilityResult,
+      };
     }
   } else {
     chain.push("tier=must_bypass_social_budget");
@@ -67,7 +104,13 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
   // 对话中且不打断 → 短延迟（本轮对话结束再发，仅 social 层；must 层是用户点名要的事，即时直推）。
   // critical 默认允许打断。
   if (ctx.presence === "offline") {
-    return { proposal: p, verdict: "deferred", reasonChain: [...chain, "offline_wait_reconnect"], deliverAfter: p.deliverAfter };
+    return {
+      proposal: p,
+      verdict: "deferred",
+      reasonChain: [...chain, "offline_wait_reconnect"],
+      deliverAfter: p.deliverAfter,
+      utility: utilityResult,
+    };
   }
   const interruptible = p.interruptible ?? p.importance === "critical";
   if (ctx.inConversation && p.tier !== "must" && !interruptible) {
@@ -76,7 +119,8 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
       verdict: "deferred",
       reasonChain: [...chain, "in_conversation_defer_90s"],
       deliverAfter: ctx.now + CONVERSATION_DEFER_MS,
+      utility: utilityResult,
     };
   }
-  return { proposal: p, verdict: "delivered", reasonChain: [...chain, "deliver_now"] };
+  return { proposal: p, verdict: "delivered", reasonChain: [...chain, "deliver_now"], utility: utilityResult };
 }

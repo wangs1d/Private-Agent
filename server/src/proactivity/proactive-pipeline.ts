@@ -10,6 +10,8 @@ import type { ArbitrationDecision, ProactiveOutcome, ProactiveProposal } from ".
 import { OutcomeStore } from "./outcome-store.js";
 import type { PresenceService } from "./presence-service.js";
 import { ProposalStore } from "./proposal-store.js";
+import { SilenceLog } from "./silence-log.js";
+import { CONFIRMATION_TTL_MS, type PendingConfirmation, PendingConfirmationStore } from "./pending-confirmation-store.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -34,6 +36,19 @@ export type ProactivePipelineDeps = {
    * 改走手机系统推送（App 被杀也能收到）。未注入 = 通道禁用，离线一律挂起待重连。
    */
   mobilePush?: import("./mobile-push-service.js").MobilePushChannel;
+  /**
+   * 沉默日志（方案 B）：verdict=silenced 的效用评估留痕，支持
+   * 「你上周为什么没提醒我 XX」反问检索。未注入时管道内建一份
+   * （与 hub 共享同一实例由装配层注入，这里只兜底）。
+   */
+  silenceLog?: SilenceLog;
+  /**
+   * 挂起确认存储（与 hub 共享同一实例）：ask_first 且带 confirmAction 的提案
+   * 投递确认文案后在此登记，批准经 hub resolver 回流到 onProposalApproved。
+   */
+  confirmations?: PendingConfirmationStore;
+  /** 提案级确认的批准动作（装配层定义：如承诺代催的落地行为 + 助手动态留痕） */
+  onProposalApproved?: (p: ProactiveProposal) => void;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -44,12 +59,14 @@ const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
 
 export class ProactivePipeline {
   private readonly store: ProposalStore;
+  private readonly silenceLog: SilenceLog;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly flushIntervalMs: number;
   private pushSeq = 0;
 
   constructor(private readonly deps: ProactivePipelineDeps) {
     this.store = new ProposalStore(`${deps.dataPath}/proposals.json`);
+    this.silenceLog = deps.silenceLog ?? new SilenceLog(`${deps.dataPath}/silence-log.json`);
     this.flushIntervalMs = deps.flushIntervalMs ?? 30_000;
     // 重启恢复：频控状态（预算/冷却）+ 已知 actor —— 否则重启后 agent 永不主动
     const govSnapshot = readJson<import("./frequency-governor.js").GovernorSnapshot | null>(
@@ -131,7 +148,14 @@ export class ProactivePipeline {
         online: this.deps.presence.listOnline(),
       },
       offlinePush: { enabled: !!this.deps.mobilePush },
+      // 沉默决策留痕（方案 B）：最近效用评估后主动选择不动作的提案
+      recentSilences: this.silenceLog.recent(10),
     };
+  }
+
+  /** 沉默决策检索（支持「你上周为什么没提醒我 XX」反问） */
+  searchSilences(opts: Parameters<SilenceLog["search"]>[0]) {
+    return this.silenceLog.search(opts);
   }
 
   /**
@@ -169,6 +193,65 @@ export class ProactivePipeline {
       });
   }
 
+  /**
+   * 提案级 ask_first 登记：ask_first 分支 + 提案声明 confirmAction（如承诺代催
+   * 「发送前会先经你确认」）时，确认文案投递后在共享存储登记待确认——
+   * 用户回复「可以」经 hub resolver 回流 resolveProposalConfirmation。
+   * 普通通知类 ask_first 提案不登记（投递即完成，无后续动作可批准）。
+   */
+  private registerProposalConfirmationIfNeeded(p: ProactiveProposal, decision: ArbitrationDecision): void {
+    if (!this.deps.confirmations) return;
+    if (decision.utility?.branch !== "ask_first" || !p.confirmAction) return;
+    this.deps.confirmations.register({
+      actorId: p.actorId,
+      kind: p.kind,
+      steps: [],
+      rationale: p.title,
+      createdAt: this.deps.nowFn?.() ?? Date.now(),
+      expiresAt: (this.deps.nowFn?.() ?? Date.now()) + CONFIRMATION_TTL_MS,
+      origin: "pipeline",
+      proposal: p,
+    });
+    console.log(`[ProactivePipeline] 提案级待确认已登记 kind=${p.kind} label=${p.confirmAction.label}`);
+  }
+
+  /**
+   * 提案级确认推进（hub resolver 委托入口；条目已由 hub 从共享存储取出）：
+   * 批准 → onProposalApproved 落地动作 + speak 回执；拒绝静默关闭。
+   */
+  resolveProposalConfirmation(entry: PendingConfirmation, approved: boolean): { executed: boolean } {
+    if (!approved) return { executed: false };
+    const proposal =
+      entry.proposal ??
+      ({
+        proposalId: `confirm_${entry.confirmId}`,
+        actorId: entry.actorId,
+        kind: entry.kind,
+        tier: "must",
+        importance: "medium",
+        dedupKey: `confirm:${entry.confirmId}`,
+        title: entry.rationale,
+        summary: entry.rationale,
+        evidence: [],
+        createdAt: entry.createdAt,
+        source: "commitment-board",
+      } as ProactiveProposal);
+    try {
+      this.deps.onProposalApproved?.(proposal);
+    } catch (err) {
+      console.log(`[ProactivePipeline] 提案批准回调失败（忽略）kind=${proposal.kind}: ${err}`);
+    }
+    // 回执：经 speak 兜底车道告知用户「已按确认推进」
+    this.deps.speak?.({
+      ...proposal,
+      title: `已确认：${entry.rationale.slice(0, 40)}`,
+      summary: "好的，已按你的确认推进。",
+      directText: undefined,
+      dedupKey: `confirm_ack:${entry.confirmId}`,
+    });
+    return { executed: true };
+  }
+
   /** 仲裁并执行（提案已在待发区内；delivered 出队投递，deferred 更新时刻，其余出队） */
   private decide(p: ProactiveProposal, at?: number): ArbitrationDecision {
     const decision = arbitrate(p, this.buildContext(p, at));
@@ -178,6 +261,7 @@ export class ProactivePipeline {
         if (this.dispatch(p)) {
           this.store.take(p.dedupKey);
           this.store.markDelivered(p.dedupKey, this.deps.nowFn?.() ?? Date.now());
+          this.registerProposalConfirmationIfNeeded(p, decision);
         } else {
           // 竞态：仲裁时设备在线、发送时已全部掉线 → 保留待发区稍后重试（重连即达）
           this.store.reschedule(p.dedupKey, (this.deps.nowFn?.() ?? Date.now()) + DELIVERY_RETRY_MS);
@@ -188,6 +272,23 @@ export class ProactivePipeline {
       case "deferred":
         if (decision.deliverAfter !== undefined) this.store.reschedule(p.dedupKey, decision.deliverAfter);
         if (decision.reasonChain.includes("offline_wait_reconnect")) this.attemptOfflinePush(p);
+        break;
+      case "silenced":
+        // 效用评估后主动选择不动作（区别于 suppressed 的负反馈抑制）：出队 + 沉默日志留痕
+        this.store.take(p.dedupKey);
+        this.silenceLog.record({
+          at: this.deps.nowFn?.() ?? Date.now(),
+          actorId: p.actorId,
+          kind: p.kind,
+          title: p.title,
+          dedupKey: p.dedupKey,
+          source: p.source,
+          scope: "proposal",
+          netUtility: decision.utility?.netUtility ?? 0,
+          riskScore: decision.utility?.riskScore ?? 0,
+          valueScore: decision.utility?.valueScore ?? 0,
+          reason: decision.utility?.reason ?? decision.reasonChain.join(";"),
+        });
         break;
       default:
         this.store.take(p.dedupKey); // expired / suppressed / throttled：出队（原因已留痕）

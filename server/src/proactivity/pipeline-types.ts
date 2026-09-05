@@ -1,9 +1,18 @@
 // 统一主动性管道类型（架构见 docs/proactivity-architecture.md §4 L1-L5）
 // 所有触发源只提交 ProactiveProposal，仲裁/投递/反馈由管道统一承担。
 
+import type { ActionUtilityResult, AuthorizationLevel, RiskDimensions, ValueDimensions } from "./action-utility.js";
+
 export type ProactiveImportance = "critical" | "high" | "medium" | "low";
 
 export type PresenceState = "active" | "idle" | "offline";
+
+/** 效用评估元数据：声明了 utility 的提案在仲裁链最前面过三分支判定（方案 A/B） */
+export type ProposalUtilityMeta = {
+  risk: RiskDimensions;
+  authorization: AuthorizationLevel;
+  value: ValueDimensions;
+};
 
 /** 一次主动提案：发现"值得主动"的唯一提交格式（提案-仲裁分离，源只举证不投递） */
 export type ProactiveProposal = {
@@ -32,6 +41,10 @@ export type ProactiveProposal = {
   /** 代办结果详情（仅 action.* 提案）：键值对形式（商品/金额/渠道...），
    * 投递成功后随提案落入助手动态台账，客户端详情浮层直接展示 */
   detail?: Record<string, string>;
+  /** 效用评估输入（方案 A/B）：缺省不评估，既有提案仲裁行为不变 */
+  utility?: ProposalUtilityMeta;
+  /** 提案级确认（ask_first）：确认文案投递后登记待确认，批准回调 onProposalApproved */
+  confirmAction?: { label: string };
 };
 
 export type ProposalVerdict =
@@ -39,6 +52,7 @@ export type ProposalVerdict =
   | "deferred"
   | "merged"
   | "suppressed"
+  | "silenced"
   | "throttled"
   | "expired"
   | "dropped";
@@ -61,4 +75,6 @@ export type ArbitrationDecision = {
   verdict: ProposalVerdict;
   reasonChain: string[];
   deliverAfter?: number;
+  /** 效用评估结果（声明了 utility 的提案附带；silenced 判定的留痕数据源） */
+  utility?: ActionUtilityResult;
 };

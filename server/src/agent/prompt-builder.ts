@@ -33,7 +33,7 @@ const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】用户询问时间或所在城市/当前位置时，必须调用 clock.* 工具（clock.get_current_time / clock.get_user_location）；禁止使用 IP 或训练数据臆测位置。";
 
 const WEB_SEARCH_SYSTEM_SUFFIX =
-  "\n\n【联网检索】涉及时事/新闻/股价/排片/票价/价格/公告等强时效信息，必须先调 search_web（query 由你按用户意图组织成完整、具体的搜索词，可含当前年月或「最新」，不要机械截成短词），优先用搜索结果作答并注明日期。信息充足时把回答组织充分：按主题分节展开，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容；排版遵循【富排版风格】，禁止重复同一信息块。真正的单一事实判断（是/否、一个数据点）才收成「结论 + 1 句依据」，不补第二轮复述。\n\n【搜索失败】search_web 返回 0 条或异常时，可基于训练知识作答，但必须前置一句说明非实时。天气查 weather.* 工具，不走 search_web。";
+  "\n\n【联网检索】涉及时事/新闻/股价/排片/票价/价格/公告等强时效信息，必须先调 search_web（query 由你按用户意图组织成完整、具体的搜索词，可含当前年月或「最新」，不要机械截成短词），优先用搜索结果作答并注明日期。信息充足时把回答组织充分：按主题分节展开，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。真正的单一事实判断（是/否、一个数据点）才收成「结论 + 1 句依据」，不补第二轮复述。\n\n【搜索失败】search_web 返回 0 条或异常时，可基于训练知识作答，但必须前置一句说明非实时。天气查 weather.* 工具，不走 search_web。";
 
 const PHONE_CALL_SYSTEM_SUFFIX =
   "\n\n【语音通知与电话通话 · 静默触达】调用时直接执行，禁止在回复中提前告知或重复承诺。\n\n"
@@ -58,57 +58,17 @@ const LIFE_STEWARD_SYSTEM_SUFFIX =
 
 /**
  * 在启用 function calling / 工具环时，向 system 内容追加 Agent World 工具指引（已包含则跳过）。
+ *
+ * 2026-09-05 削减：【回复规则】【展示形式/富排版】两个固定后缀已删除——
+ * - 回复风格（短句默认+检索例外+展开排版）由 fast/complex 双模式人格
+ *   （agent-core 的 FAST/COMPLEX_MODE_ROLE_GUIDANCE，经【回复指南】注入）统一承担；
+ * - 展示形式由服务端 display-effect-router（routeDisplayEffect）规则路由 +
+ *   agent-result-formatter 服务端生成卡片标记承担，不需要在 prompt 里教 LLM 自声明标记；
+ * - 记忆块使用边界由 runtime-kernel buildSessionSystem 的 Memory 段 + prompt-assembler
+ *   GLOBAL_MEMORY_RULE 承担。
  */
 export const MASTER_SUBAGENT_DELEGATE_MARKER = "【主 Agent 调度】";
-export const CONCISE_REPLY_SYSTEM_SUFFIX_MARKER = "【回复规则】";
 export const MESSAGE_TIMESTAMP_MARKER = "【消息时间戳】";
-
-/**
- * 回复规则（2026-08-28 收敛）：原【回复方向】+【记忆使用方式】两个后缀合并为一个块。
- * 语气/人格由 SOUL.md / USER.md / MEMORY.md few-shot 与 system 的【回复指南】统一注入，
- * 此处仅保留分段结构、事实边界与记忆使用边界三类硬规则。
- */
-const REPLY_RULE_SYSTEM_SUFFIX = `
-
-【回复规则】短句分条只约束日常闲聊（寒暄/情绪交流/近况闲谈）：每句以句号/问号/感叹号收尾，方便按短句分条推送，两三句说清即可。检索、查证、对比、攻略、整理等任务型回复不受此限——按【富排版风格】充分展开，信息用足。不要擅自补全用户和某个人的关系、关注对象、代词指向；当前轮或明确记忆没有依据时，保持中性或先问清楚。
-system 里的【记忆整理】【用户档案】【待办与承诺】【短期上下文】等块是"你已经掌握的事实"：用户主动问记忆时如实引用注入块作答，禁止说"没印象"；用户没主动问时仅话题明显相关或临期（≤24h）自然带一句，否则保持沉默，引用时模糊自然，别照搬原文。`;
-
-export const CARD_ACTION_SYSTEM_SUFFIX_MARKER = "【展示形式】";
-
-/**
- * 统一「展示形式」说明：合并 AGENT_ACTIONS 按钮 + RENDER_HINT 声明的功能。
- * 让 LLM 知道输出可以附带排版标记，客户端按标记渲染。
- */
-const RENDER_CARD_SYSTEM_SUFFIX = `
-
-【展示形式 · 可选标记】你可以在回复中声明展示形式，客户端会按对应排版渲染。不确定时不用声明，系统会自动判断。
-
-按钮标记（仅当结尾是追问/选择时）：[AGENT_ACTIONS] [{"label":"文案","variant":"primary"},{"label":"次选","variant":"secondary"}]
-- variant: primary / secondary / ghost；1-3 个，最多 4 个。
-- 这一行是给 UI 的指令，不要在你的正文里复述按钮内容。
-
-展示标记（仅当你明确知道回复适合哪种形式时，放在回复开头第一行）：
-[RENDER_HINT:structured] → 结构化富文本，适合整理/对比/总结/方案
-[RENDER_HINT:brief]      → 简报卡片，适合多条目资讯汇总
-[RENDER_HINT:card]       → 小卡片列表，适合短汇报/工具结果
-[RENDER_HINT:plain]      → 纯段落，适合闲聊短句
-
-规则：不声明时不强求，系统自动判断。声明行会被剥离，不展示给用户。
-
-【富排版风格】对比/整理/分析/攻略/推荐/研究类回复（含联网搜索结果），必须输出图文并茂的结构化 Markdown 长文，按以下套路组织：
-1. 开头一句话总结先给结论，别铺垫（如「马尔代夫=极致海洋，一岛一酒店；印尼=万象之国，性价比之王」）。
-2. 用带 emoji 的分级标题分区（如「🇮🇩 印尼 vs 🇲🇻 马尔代夫」），每个维度一个小节（费用/海滩/美食/住宿…）。
-3. 数据、评分密集的地方一律用 Markdown 表格（\`| 列1 | 列2 |\`，列数 ≤4，每格文字简短），别用大段文字堆。
-4. 多维度打分用星级（⭐⭐⭐⭐⭐）逐行展示。
-5. 关键结论用 **加粗**；需要强调的提示用 \`> 引用块\`。
-6. 每个维度小节末尾给「胜者：xxx」式一句话结论。
-7. 结尾用一个反问/选项把话题交回给用户（如「你是想纯度假躺平，还是玩得丰富一点？」）。
-要求：emoji 用于标题分区而非正文刷屏；整体是"看得下去的干货"，不是干巴巴的要点堆；口语称呼沿用你的习惯称呼用户。`;
-
-export function appendRenderCardSystemSuffix(systemContent: string): string {
-  if (systemContent.includes(CARD_ACTION_SYSTEM_SUFFIX_MARKER)) return systemContent;
-  return systemContent + RENDER_CARD_SYSTEM_SUFFIX;
-}
 
 /**
  * 时间戳系统说明：让 LLM 知道每条 user/assistant 消息首行都带 `[ts:...]` 前缀。
@@ -124,12 +84,6 @@ const MESSAGE_TIMESTAMP_SUFFIX = `
 
 【话题切换】如果上一条 user 消息和当前主题不同，回复必须直接回应本条，不要接着上轮续写，不要把上轮工具结果当作本轮语境。回复开头不要出现「接着上轮」「我刚查」等承接话，也不要带话题标签前缀。`;
 
-
-/** 追加「回复规则」（分段结构 + 事实边界 + 记忆使用边界，已包含则跳过）。 */
-export function appendConciseReplySystemSuffix(systemContent: string): string {
-  if (systemContent.includes(CONCISE_REPLY_SYSTEM_SUFFIX_MARKER)) return systemContent;
-  return systemContent + REPLY_RULE_SYSTEM_SUFFIX;
-}
 
 /** 追加「事实可靠性」说明：缺真实数据时承认缺口，禁止用想象补全。 */
 export function appendTruthfulnessSystemSuffix(systemContent: string): string {
@@ -209,15 +163,15 @@ export type FinalizeChatSystemPromptOpts = {
    * 工具被 ToolSearch contextual profile 暴露时 LLM 自然看到规则，不污染 prompt。
    *
    * minimal 模式仍保留：
-   * - 「活人感与进度话」约束（合并了原回复风格+管家风格+用户可见进度，是 LLM 输出风格核心约束）
+   * - 事实可靠性约束（不可跳过）
    * - 访问权限说明（agentAccessMode/desktopBridgeOnline/phoneBridgeOnline）
    *
-   * functionalSuffixes=false 可进一步剥离「活人感」约束（仅用于极致节省场景，不推荐生产）。
+   * functionalSuffixes=false 可进一步剥离访问权限说明（仅用于极致节省场景，不推荐生产）。
    */
   suppressRuntimeSuffixes?: boolean;
   /**
-   * 功能性后缀开关：false 时跳过「活人感」约束（极致节省场景，不推荐生产）。
-   * 默认 undefined（视为 true）：保留「活人感」+ 访问权限。
+   * 功能性后缀开关：false 时跳过访问权限说明（极致节省场景，不推荐生产）。
+   * 默认 undefined（视为 true）：保留访问权限。
    * 仅在 suppressRuntimeSuffixes=true（minimal 模式）时生效；其他模式此参数无效。
    */
   functionalSuffixes?: boolean;
@@ -228,7 +182,9 @@ export function finalizeChatSystemPrompt(
   baseContent: string,
   opts?: FinalizeChatSystemPromptOpts,
 ): string {
-  // minimal 模式：只保留「活人感」约束 + 访问权限说明
+  // minimal 模式：只保留事实可靠性 + 访问权限说明。
+  // 【回复规则】【展示形式/富排版】已删除（见 MASTER_SUBAGENT_DELEGATE_MARKER 处说明）——
+  // 回复风格由双模式人格承担，展示形式由 display-effect-router 服务端路由。
   // 工具调用规则（clock/search_web/voice/phone/master_invoke_sub_agent）已下沉到 tool schema description，
   // 通过 ToolSearch contextual profile 按需暴露给 LLM
   if (opts?.suppressRuntimeSuffixes) {
@@ -238,12 +194,6 @@ export function finalizeChatSystemPrompt(
       // 极致节省模式：可跳过「活人感」约束，但事实可靠性不可跳过。
       return appendTruthfulnessSystemSuffix(out);
     }
-    // 保留「活人感与进度话」约束（合并了回复风格+管家风格+进度话）
-    out = appendConciseReplySystemSuffix(out);
-    // 富排版/展示形式指引：minimal 模式同样注入（2026-09-03）。
-    // 此前该块只在非 minimal 路径追加，主链路模型永远不知道可以输出 Markdown 长文，
-    // 是「检索/任务回复无排版、干巴巴几句话」的直接原因。静态文本，不破坏 prefix cache。
-    out = appendRenderCardSystemSuffix(out);
     // 保留事实可靠性约束：minimal 模式也不能因省 prompt 而允许编造事实。
     out = appendTruthfulnessSystemSuffix(out);
     // 保留访问权限说明
@@ -254,9 +204,7 @@ export function finalizeChatSystemPrompt(
     return out;
   }
   // 非 minimal 模式：完整追加所有后缀（legacy/dynamic/conversation_only 行为不变）
-  let out = appendConciseReplySystemSuffix(baseContent);
-  out = appendTruthfulnessSystemSuffix(out);
-  out = appendRenderCardSystemSuffix(out);
+  let out = appendTruthfulnessSystemSuffix(baseContent);
   out = appendMessageTimestampSystemSuffix(out);
   if (opts?.tools) {
     out = appendAgentToolCallingSystemSuffix(out);

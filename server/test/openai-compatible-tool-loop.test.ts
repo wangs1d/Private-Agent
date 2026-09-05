@@ -2,8 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { shouldRequireFreshWebLookup } from "../src/gateway/forced-tool.js";
-
 const SEARCH_WEB_TOOL: ChatCompletionTool = {
   type: "function",
   function: {
@@ -19,47 +17,20 @@ const SEARCH_WEB_TOOL: ChatCompletionTool = {
   },
 };
 
-test("requires fresh web lookup for time-sensitive market/news prompts", () => {
-  assert.equal(
-    shouldRequireFreshWebLookup("今天A股怎么样，帮我查一下最新消息", [SEARCH_WEB_TOOL]),
-    true,
-  );
-  assert.equal(
-    shouldRequireFreshWebLookup("最新电影排片和票价帮我搜一下", [SEARCH_WEB_TOOL]),
-    true,
-  );
-});
+// ── escalate 哨兵退役（2026-09-05 双面架构）回归 ──
+// 旧契约：fastLane 每轮必带 agent.escalate_to_complex，模型调用后返回哨兵、
+// agent-core 删线程整轮重放 complex。新契约：对话面零工具、任务面全量工具，
+// 轨道内出口自检承担纠错，哨兵机制整体删除。
 
-test("does not require fresh web lookup for clock-style prompts", () => {
-  assert.equal(
-    shouldRequireFreshWebLookup("现在几点了", [SEARCH_WEB_TOOL]),
-    false,
-  );
-  assert.equal(
-    shouldRequireFreshWebLookup("what time is it now", [SEARCH_WEB_TOOL]),
-    false,
-  );
-});
-
-test("does not require fresh web lookup when the tool is unavailable", () => {
-  assert.equal(
-    shouldRequireFreshWebLookup("帮我查一下今天股价", []),
-    false,
-  );
-});
-
-// ── 车道内升级（in-trajectory escalation）回归 ──
-
-test("fast lane toolset always carries the escalation escape hatch", async () => {
+test("fast lane toolset no longer carries the escalation escape hatch", async () => {
   const { getFastLaneTools } = await import(
     "../src/external-model/openai-compatible-tool-loop.js"
   );
-  const tools = getFastLaneTools();
-  const names = tools.map((t) => ("function" in t ? t.function?.name : undefined));
-  assert.ok(names.includes("agent.escalate_to_complex"));
+  const names = getFastLaneTools().map((t) => ("function" in t ? t.function?.name : undefined));
+  assert.equal(names.includes("agent.escalate_to_complex"), false);
 });
 
-test("selectRelevantTools keeps the escalation tool visible for any user text", async () => {
+test("selectRelevantTools never surfaces the retired escalation tool", async () => {
   const { getFastLaneTools, selectRelevantTools } = await import(
     "../src/external-model/openai-compatible-tool-loop.js"
   );
@@ -70,19 +41,10 @@ test("selectRelevantTools keeps the escalation tool visible for any user text", 
       includeAlwaysIncluded: true,
     });
     const names = selected.map((t) => ("function" in t ? t.function?.name : undefined));
-    assert.ok(
+    assert.equal(
       names.includes("agent.escalate_to_complex"),
-      `escalate tool must survive contextual selection for: ${userText}`,
+      false,
+      `retired tool must not resurface for: ${userText}`,
     );
   }
-});
-
-test("isEscalationSignal detects the sentinel and ignores normal replies", async () => {
-  const { isEscalationSignal, ESCALATION_SENTINEL } = await import(
-    "../src/tools/escalation-tool.js"
-  );
-  assert.equal(isEscalationSignal(ESCALATION_SENTINEL), true);
-  assert.equal(isEscalationSignal("好的，2分钟后叫你睡觉哦"), false);
-  assert.equal(isEscalationSignal(""), false);
-  assert.equal(isEscalationSignal(undefined), false);
 });

@@ -298,8 +298,7 @@ export class ToolRegistry {
         }
         this.toolCache.set(cacheKey, entry);
         return entry.result;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "工具执行失败";
+      } catch (error) {        const message = error instanceof Error ? error.message : "工具执行失败";
         return { ok: false, result: { error: message } };
       }
     }

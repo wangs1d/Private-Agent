@@ -475,9 +475,8 @@ export class ShortTermMemoryGatewayService {
       lines.push(...episodicLines);
     }
 
-    if (currentInput?.trim()) {
-      lines.push(`incoming-turn: ${normalizeInput(currentInput).slice(0, 180)}`);
-    }
+    // incoming-turn 行已删除：当前用户消息本身就以 user 消息角色进入 messages 数组，
+    // 在 STM 上下文块里再抄一份 ≤180 字符属纯重复注入。
 
     const { coreLines, compressedLines } = this.compressContext(lines);
     const merged = [...coreLines, ...compressedLines].slice(0, 12);

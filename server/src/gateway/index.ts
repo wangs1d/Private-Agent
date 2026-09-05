@@ -11,14 +11,11 @@ export {
   resolveForcedTool,
   executeBridge,
   searchResources,
-  routeTask,
   routeRender,
 } from "./agent-gateway.js";
 
 export {
   resolveForcedToolChoice,
-  shouldRequireFreshWebLookup,
-  FRESH_FACT_TOOL_NAMES,
   type ForcedToolChoice,
 } from "./forced-tool.js";
 

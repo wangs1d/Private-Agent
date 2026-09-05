@@ -1,69 +1,58 @@
+/**
+ * task-router（2026-09-05 双面架构）单元测试。
+ *
+ * 本模块只承担两件事：
+ *   1. 类型与执行计划派生（planFieldsForMode）；
+ *   2. 高精度纯闲聊短路（isHighPrecisionChatText）——锚定全文匹配，
+ *      不含任何话题关键词（价格/天气/新闻词表已删除，工具需求由 L1 语义分类判定）。
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldUsePhasedAsyncConversation } from "../src/agent/interim-ack.js";
-import { routeLlmExecution } from "../src/agent/task-router.js";
+import {
+  isHighPrecisionChatText,
+  determineSegmentable,
+  planFieldsForMode,
+} from "../src/agent/task-router.js";
 
-const config = {
-  masterDelegation: { enabled: true },
-} as Parameters<typeof routeLlmExecution>[1];
-
-test("routes greetings to fast", () => {
-  const result = routeLlmExecution("你好", config);
-  assert.equal(result.mode, "fast");
+test("高精度闲聊：寒暄/口头禅/应答词整句命中", () => {
+  for (const t of ["在吗", "还在吗", "哈哈", "好的", "收到", "晚安", "你好", "thanks"]) {
+    assert.equal(isHighPrecisionChatText(t), true, `「${t}」应为高精度闲聊`);
+  }
+  // 带标点/空白尾巴仍命中（锚定匹配允许尾随标点）
+  assert.equal(isHighPrecisionChatText("在吗？"), true);
+  assert.equal(isHighPrecisionChatText("哈哈！"), true);
 });
 
-test("routes explanatory requests to fast (主 Agent 自处理)", () => {
-  const result = routeLlmExecution("请简单解释一下什么是向量数据库", config);
-  assert.equal(result.mode, "fast");
+test("高精度闲聊：任何携带诉求/任务的句子都不得命中（无话题词表，靠锚定全文匹配保证）", () => {
+  for (const t of [
+    "现在比特币多少钱一个", // 未出现过的价格表达——不需要价格词表也不会误判闲聊
+    "今天天气怎么样",
+    "帮我订明天上午的机票",
+    "刘浩存最近的消息",
+    "在吗帮我查个东西", // 寒暄前缀 + 诉求拼接（非整句寒暄）
+    "好的，另外把明天的提醒改到八点",
+    "嗯嗯，那你帮我看看这个月的账单",
+  ]) {
+    assert.equal(isHighPrecisionChatText(t), false, `「${t}」不得被闲聊短路吞掉`);
+  }
 });
 
-test("routes code explanation requests to fast (主 Agent 自处理)", () => {
-  const result = routeLlmExecution("帮我解释一下 Python 里列表推导式和 for 循环的区别", config);
-  assert.equal(result.mode, "fast");
+test("高精度闲聊：超长文本不短路（防拼接绕过）", () => {
+  assert.equal(isHighPrecisionChatText("在吗".repeat(20)), false);
 });
 
-test("routes multi-step research to complex (requires sub-agent)", () => {
-  const result = routeLlmExecution("帮我调研对比一下三款主流向量数据库的优缺点", config);
-  assert.equal(result.mode, "complex");
+test("分段判定：对话面分段，任务面不分段", () => {
+  assert.equal(determineSegmentable("chat"), true);
+  assert.equal(determineSegmentable("task"), false);
 });
 
-test("routes shopping/orders to complex", () => {
-  const result = routeLlmExecution("帮我在京东下单买一个蓝牙耳机", config);
-  assert.equal(result.mode, "complex");
-});
+test("执行计划派生：fast=对话面零工具；complex=任务面保守预算", () => {
+  const chat = planFieldsForMode("fast");
+  assert.deepEqual(chat, { plane: "chat", capabilities: [], budget: 0, tier: "fast" });
 
-test("uses phased async conversation for complex mode (垫词 enabled for all modes)", () => {
-  const text = "帮我看看今天的新闻";
-  const result = routeLlmExecution(text, config);
-  assert.equal(result.mode, "complex");
-  assert.equal(shouldUsePhasedAsyncConversation(text, result.mode), true);
-});
-
-test("uses phased async conversation for complex mode", () => {
-  const text = "帮我调研对比一下三款主流向量数据库的优缺点";
-  const result = routeLlmExecution(text, config);
-  assert.equal(result.mode, "complex");
-  assert.equal(shouldUsePhasedAsyncConversation(text, result.mode), true);
-});
-
-// ── 媒体诉求路由回归（2026-09-02「性感一点的女生照片」案例）──
-import { shouldUseFastChatLane, determineSegmentable, requiresMediaRetrieval } from "../src/agent/task-router.js";
-
-test("media requests bypass the L0 chat short-circuit", () => {
-  // 线上真实案例：短（≤12 字）且不含任何既有硬信号词的找图请求，
-  // 被 L0 词法短路判成 chat——聊天语境没有媒体工具，模型只能凭空编
-  // 「给你找了几张」。修复：媒体诉求词法信号命中时不允许 L0 短路，
-  // 放行给 L1 语义分类（media_retrieval → fast + 媒体工具束 + strict 仲裁）。
-  assert.equal(requiresMediaRetrieval("性感一点的女生照片"), true);
-  assert.equal(shouldUseFastChatLane("性感一点的女生照片"), false);
-  assert.equal(shouldUseFastChatLane("来点性感一点的女生的照片"), false);
-  assert.equal(shouldUseFastChatLane("找几张海蓝色亮片薄纱裙的图"), false);
-});
-
-test("media request replies are not chat-segmented", () => {
-  // 媒体轮是信息性内容（照片墙 + 逐张介绍），不做闲聊式短句分段
-  assert.equal(determineSegmentable("性感一点的女生照片", "fast"), false);
-  // 纯寒暄仍分段
-  assert.equal(determineSegmentable("在吗", "fast"), true);
+  const task = planFieldsForMode("complex");
+  assert.equal(task.plane, "task");
+  assert.deepEqual(task.capabilities, ["full"]);
+  assert.ok(task.budget >= 1);
 });

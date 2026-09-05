@@ -9,15 +9,31 @@
  *  - 天气面板等客户端主动上报（无 jobId）时只写缓存，供后续 prompt/工具复用。
  *
  * 不主动请求：普通聊天消息不再附带位置，位置只在 Agent 真正需要时才产生一次 GPS 开销。
+ *
+ * 持续模式（位置方案 A）：LOCATION_TRACKING_MODE=continuous 时，WS 绑定
+ * socket 后向客户端下发 `agent.location_tracking_config`（mode + intervalSec），
+ * 客户端按间隔定时上报（source:"continuous"），服务端经 LocationIngestPipeline
+ * 写位置历史 / 判围栏 / 触发主动性。默认 ondemand（隐私优先）。
  */
 import { randomUUID } from "node:crypto";
 
+import {
+  getLocationReportIntervalSec,
+  getLocationTrackingMode,
+  type LocationTrackingMode,
+} from "../config/location-env.js";
 import { ServerEventType } from "../protocol.js";
 import { parseClientLocation, type ClientLocationWire } from "../types/client-location.js";
 
 export type WsSendLike = {
   send(data: string): void;
   readyState?: number;
+};
+
+/** 持续定位配置（下发 `agent.location_tracking_config` 的载荷） */
+export type LocationTrackingConfig = {
+  mode: LocationTrackingMode;
+  intervalSec: number;
 };
 
 type PendingRequest = {
@@ -40,10 +56,42 @@ export class LocationCoordinator {
   private readonly cacheTtlMs: number;
   /** 请求客户端回包的最大等待时间，超时返回 null（工具可回退到 city 参数）。 */
   private readonly requestTimeoutMs: number;
+  /** 持续定位配置（env 决定，进程级不变） */
+  private readonly trackingConfig: LocationTrackingConfig;
 
   constructor(opts?: { cacheTtlMs?: number; requestTimeoutMs?: number }) {
     this.cacheTtlMs = opts?.cacheTtlMs ?? 60_000;
     this.requestTimeoutMs = opts?.requestTimeoutMs ?? 6_000;
+    this.trackingConfig = {
+      mode: getLocationTrackingMode(),
+      intervalSec: getLocationReportIntervalSec(),
+    };
+  }
+
+  /** 当前追踪模式配置（WS 层绑定 socket 后据此下发客户端）。 */
+  getTrackingConfig(): LocationTrackingConfig {
+    return { ...this.trackingConfig };
+  }
+
+  /** 是否开启了持续上报模式。 */
+  isContinuousTrackingEnabled(): boolean {
+    return this.trackingConfig.mode === "continuous";
+  }
+
+  /** 持续模式下向客户端下发定时上报配置（ondemand 模式不发，客户端无定时器）。 */
+  sendTrackingConfig(socket: WsSendLike): boolean {
+    if (!this.isContinuousTrackingEnabled()) return false;
+    try {
+      socket.send(
+        JSON.stringify({
+          type: ServerEventType.LocationTrackingConfig,
+          payload: { ...this.trackingConfig },
+        }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   hasSocket(actorId: string): boolean {
@@ -79,6 +127,13 @@ export class LocationCoordinator {
     const hit = this.cache.get(actorId);
     if (!hit) return null;
     return hit.payload;
+  }
+
+  /** 读缓存并带写入时间：prompt 注入据此标注「定位于 N 分钟前」，避免把旧位置当实时。 */
+  getCachedWithTime(actorId: string): { payload: ClientLocationWire; at: number } | null {
+    const hit = this.cache.get(actorId);
+    if (!hit) return null;
+    return { payload: hit.payload, at: hit.at };
   }
 
   /** 读新鲜缓存：窗口期内返回，否则返回 null。 */

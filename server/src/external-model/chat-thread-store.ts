@@ -54,6 +54,14 @@ const DEFAULT_SMART_TRIM_CONFIG = {
   preserveRecentTurns: 3,
 };
 
+// ── 近期窗口裁剪参数（2026-09-05，替代「今天+昨天全文」策略）──
+/** 原样保留的近期消息窗口（≈6 轮 user/assistant 配对）。 */
+const RECENT_WINDOW_MESSAGES = 12;
+/** 折叠批次：窗口外攒够一批才折叠一次，recap 不随轮重写（保护 prefix cache）。 */
+const RECAP_BATCH_MESSAGES = 6;
+/** 已有 recap 行的单行 token 粗估（recap 上限 14 行/1600 字符）。 */
+const RECAP_LINE_TOKEN_ESTIMATE = 40;
+
 // 条内压缩配置：对「非最近 N 轮」的超长 assistant 消息（LLM 已消费过的输出）做无损级压缩，
 // 让同一 token 预算保留更多轮次，减少整条 drop 进 recap（信息断层 + 额外一次 LLM 摘要调用）。
 const CHAT_LONG_ASSISTANT_MAX_CHARS = parseInt(
@@ -119,7 +127,9 @@ function estimateMessageTokens(msg: ChatCompletionMessageParam | null | undefine
     tokens += 50 * ((msg as { tool_calls: unknown[] }).tool_calls?.length ?? 0);
   }
   if (msg.role === "tool" && typeof msg.content === "string") {
-    tokens += Math.min(estimateTokens(msg.content), 1000);
+    // 不设低封顶：压缩后的工具消息可达 4-7k 字符（≈3-5k token），按 1000 封顶会
+    // 低估占用、让 MAX_CONTEXT_TOKENS 预算判断偏松而放行超限内容。
+    tokens += estimateTokens(msg.content);
   }
   return tokens;
 }
@@ -243,7 +253,10 @@ function parseFrameDateLoose(text: string): Date | null {
 /** 时间轴单行条目。 */
 type TimelineEntry = { date: Date; roleLabel: string };
 
-const TIMELINE_MAX_ENTRIES = 80;
+// 2026-09-05 时间轴瘦身：线程裁剪后消息 ≤24 条 + recap，80 上限形同虚设；
+// 收紧到 24 与线程上限对齐，并去掉相对时间段（「3m ago」每轮重算 → 该块字节
+// 每轮全变、永远全价计费）。绝对时间 + system 当前时间已足够推算相对时间。
+const TIMELINE_MAX_ENTRIES = 24;
 const TIMELINE_HEADER =
   "【对话时间轴｜系统元数据】以下是此前各条消息的发生时间（本地时间），供时间关联推理使用；" +
   "「现在」以 system 提示中的当前时间为准。本块是系统注入的元数据，不是对话内容，严禁复述或引用本块格式。";
@@ -282,7 +295,6 @@ function cloneMessageWithClientId(
 
 export function buildTimestampFreeLlmView(
   msgs: ChatCompletionMessageParam[],
-  now: Date = new Date(),
 ): TimestampFreeLlmView {
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((msg) => {
@@ -330,8 +342,9 @@ export function buildTimestampFreeLlmView(
       }
     }
     const rows = timeline.slice(-TIMELINE_MAX_ENTRIES).map((entry) => {
-      const relative = describeRelativeTime(entry.date, now);
-      return `- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}（${relative}）`;
+      // 不再拼相对时间段：它每轮随请求时刻重算，导致整个时间轴块字节每轮变化，
+      // prefix cache 永远失配、按全价计费；绝对时间 + 当前时间足以推算相对时间。
+      return `- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}`;
     });
     const timelineMsg: ChatCompletionMessageParam = {
       role: "system",
@@ -817,13 +830,19 @@ export class ChatThreadStore {
       maxMessages: maxMessages ?? DEFAULT_SMART_TRIM_CONFIG.maxMessages,
     };
 
-    // 优先按天切分：保留「当天全部消息」+「历史按天整体 recap」。
-    // 这与前端「当天渲染、历史折叠」语义对齐：今天对话不丢，历史压成摘要。
-    if (this.trimByDayBoundary(msgs, config, sessionId)) {
+    // 优先近期窗口切分：保留「最近 N 条」原文 +「更早（含当天早些时候）」压成 recap。
+    // 2026-09-05 策略替换：旧「今天+昨天全文」窗口会让长会话整天背着大历史
+    // （受 MAX_CONTEXT_TOKENS 兜底前最多 24 条原样重发）。
+    // 记忆不丢的三层保障（与窗口大小无关）：
+    //   1) 每轮 live turn 在 TurnLifecycle.finalizeTurn 已完成长期记忆种植
+    //      （turn WAL / daily journal / 统一整合链路 / epitome），输入是轮次文本本身；
+    //   2) daily journal 保留当天全部对话原文，当日词法召回（journalRecall）不受影响；
+    //   3) 被折叠消息进入 recap（规则摘要 + enhanceRecap LLM 滚动摘要增强）。
+    if (this.trimByRecentWindow(msgs, config, sessionId)) {
       return;
     }
 
-    // 按天切分后仍超 token 上限（当天消息太多），降级到 token 维度裁剪
+    // 近期窗口+recap 后仍超 token 上限（近期消息太大），降级到 token 维度裁剪
     if (msgs.length <= 1 + config.maxMessages) {
       const totalTokens = msgs.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
       if (totalTokens <= config.maxTokens) return;
@@ -851,15 +870,19 @@ export class ChatThreadStore {
   }
 
   /**
-   * 按本地日期边界切分会话线程：
-   * - 「今天」的全部消息原样保留（含工具链成对保护）
-   * - 「今天之前」的所有消息整体压成一条 [session-recap] 摘要
-   * - 没有时间戳的消息按今天处理，避免误归入历史
+   * 按近期窗口切分会话线程（2026-09-05，替代旧 trimByDayBoundary 的「今天+昨天全文」）：
+   * - 最近 RECENT_WINDOW_MESSAGES 条原样保留（含工具链成对保护）
+   * - 更早的消息（含当天早些时候）压成一条 [session-recap] 摘要
+   * - 折叠按 RECAP_BATCH_MESSAGES 批次触发：窗口满 + 攒够一批才折叠一次，
+   *   避免 recap 每轮重写导致 prefix cache 每轮全断
    *
-   * @returns true 表示已成功按天切分（无需上层再裁剪）；
-   *          false 表示当天消息已使 token 超限，上层需降级到 smartTrimByTokens
+   * 记忆连续性保障：被折叠轮次的长期记忆种植在 finalizeTurn 已完成（与线程无关），
+   * 当天原文仍在 daily journal，折叠内容进 recap 并由 enhanceRecap 增强。
+   *
+   * @returns true 表示已成功按窗口切分（无需上层再裁剪）；
+   *          false 表示近期消息已使 token 超限，上层需降级到 smartTrimByTokens
    */
-  private trimByDayBoundary(
+  private trimByRecentWindow(
     msgs: ChatCompletionMessageParam[],
     config: typeof DEFAULT_SMART_TRIM_CONFIG,
     sessionId?: string,
@@ -871,47 +894,33 @@ export class ChatThreadStore {
     const body = separated.body;
     if (body.length === 0) return true;
 
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterdayStart = new Date(todayStart.getTime() - 86_400_000);
-
-    // 仿人记忆连续性：保留"今天 + 昨天"原文，只把前天及更早压成 recap。
-    // 人类对昨天的对话仍有清晰记忆，不应被压成 8 行摘要。
-    const recentMessages: ChatCompletionMessageParam[] = []; // 今天 + 昨天
-    const olderMessages: ChatCompletionMessageParam[] = []; // 前天及更早
-
-    for (const msg of body) {
-      const ts = extractMessageTimestamp(msg);
-      // 无时间戳（极旧数据或非 user/assistant）按今天处理，避免被错误归入历史 recap
-      if (!ts || ts.getTime() >= yesterdayStart.getTime()) {
-        recentMessages.push(msg);
-      } else {
-        olderMessages.push(msg);
-      }
-    }
-
-    // 无历史消息：不需要按天 recap，但仍可能 token 超限 → 让上层处理
-    if (olderMessages.length === 0) {
+    // 未超「窗口 + 折批」阈值：不折叠，仅做 token 超限判定（超限交上层 smartTrimByTokens）
+    const foldThreshold = RECENT_WINDOW_MESSAGES + RECAP_BATCH_MESSAGES;
+    if (body.length <= foldThreshold) {
       const totalTokens =
         estimateMessageTokens(sys) +
-        recentMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
+        separated.recapLines.length * RECAP_LINE_TOKEN_ESTIMATE +
+        body.reduce((s, m) => s + estimateMessageTokens(m), 0);
       return totalTokens <= config.maxTokens;
     }
 
-    // 仅"前天及更早"的历史整体压成一条 recap
-    const recap = buildSessionRecapMessage(separated.recapLines, olderMessages);
+    // 折叠最旧的 (body.length - RECENT_WINDOW_MESSAGES) 条进 recap；
+    // 折叠后窗口保持 RECENT_WINDOW_MESSAGES，recap 约每 RECAP_BATCH_MESSAGES 轮更新一次
+    const foldCount = body.length - RECENT_WINDOW_MESSAGES;
+    const foldedMessages = body.slice(0, foldCount);
+    const keptMessages = body.slice(foldCount);
 
-    // 历史消息丢弃后异步交给 LLM 滚动摘要增强（不阻塞主链路）。
+    const recap = buildSessionRecapMessage(separated.recapLines, foldedMessages);
+
+    // 历史消息折叠后异步交给 LLM 滚动摘要增强（不阻塞主链路）。
     // 不依赖同步 recap 是否存在：无已有 recap 行时由 enhanceRecap 完成后插入。
-    if (olderMessages.length > 0) {
-      this.enhanceRecap(sessionId ?? "", separated.recapLines, olderMessages).catch(() => {});
-    }
+    this.enhanceRecap(sessionId ?? "", separated.recapLines, foldedMessages).catch(() => {});
 
-    // 重组后 token 检查：若当天+昨天消息本身就超限，让上层走 smartTrimByTokens
+    // 重组后 token 检查：若近期窗口消息本身就超限，让上层走 smartTrimByTokens
     const sysTokens = estimateMessageTokens(sys);
     const recapTokens = recap ? estimateMessageTokens(recap) : 0;
-    const recentTokens = recentMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
-    if (sysTokens + recapTokens + recentTokens > config.maxTokens) {
+    const keptTokens = keptMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
+    if (sysTokens + recapTokens + keptTokens > config.maxTokens) {
       return false;
     }
 
@@ -919,7 +928,7 @@ export class ChatThreadStore {
     msgs.push(sys);
     if (recap) msgs.push(recap);
     msgs.push(
-      ...sanitizeToolCallMessageChain(recentMessages, "[chat-thread-store-day]"),
+      ...sanitizeToolCallMessageChain(keptMessages, "[chat-thread-store-window]"),
     );
     return true;
   }

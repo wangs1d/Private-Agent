@@ -16,6 +16,7 @@ import {
   type WorldRevisionEvent,
 } from "@private-ai-agent/agent-world";
 import { createExternalChatProviderFromEnv } from "../external-model/index.js";
+import { createPictureKit } from "@private-ai-agent/picture";
 import type { ChatToolExecutionContext } from "../external-model/types.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
@@ -45,7 +46,30 @@ import { createNarrativeMemoryPort, wrapNarrativeWithHybrid } from "../services/
 import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
 import { initMemoryManagerService, getMemoryManagerService } from "../services/memory-manager-service.js";
 import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
-import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
+import { getAgenticMemoryRuntime, registerMemoryComponents } from "../agentic-memory/index.js";
+import { createMemoryBridgeIfEnabled } from "../agentic-memory/memory-bridge-service.js";
+import { createAgenticLedgerIfEnabled } from "../agentic-memory/ledger.js";
+import { createCommitmentBoardIfEnabled } from "../agentic-memory/commitment-board.js";
+import { isCommitmentAutoExtractEnabled } from "../agentic-memory/env.js";
+import { extractCommitments } from "../agentic-memory/commitment-extractor.js";
+import { createProvenanceIfEnabled } from "../agentic-memory/provenance.js";
+import {
+  createUserFactRegistryIfEnabled,
+  factAttributeLabel,
+} from "../agentic-memory/user-fact-registry.js";
+import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
+import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
+import { registerGeofenceTools } from "../tools/geofence-tools.js";
+import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
+import { LocationHistoryService } from "../services/location-history-service.js";
+import { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
+import {
+  getLocationDbPath,
+  getLocationHistoryRetentionDays,
+  isLocationHistoryEnabled,
+} from "../config/location-env.js";
+import { LocationSensor } from "../rhythm/sensors/location-sensor.js";
+import { LocationTrigger } from "../proactivity/triggers/location-trigger.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
@@ -115,6 +139,12 @@ import { SocialOutreachService } from "../services/social-outreach-service.js";
 import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
+import {
+  BookingService,
+  BookingOrderStore,
+  buildDefaultBookingProviders,
+  getBookingConfig,
+} from "../services/booking/index.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { SiliconFlowTTSAdapter } from "../services/voice-dialogue/adapters/siliconflow-tts-adapter.js";
@@ -194,7 +224,7 @@ import {
 import { LocationCoordinator } from "../services/location-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
-import { MessageHubService } from "../services/message-hub-service.js";
+import { MessageHubService, type MessageHubPlatform } from "../services/message-hub-service.js";
 import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import { MessageBridgeService } from "../services/message-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
@@ -357,7 +387,6 @@ import {
   buildToneGuidance,
   type EmotionState,
 } from "../services/user-personalization/emotion-tone.js";
-import { routeTask } from "../gateway/index.js";
 import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-execute-loop.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
 import { setCapabilityCortex } from "../agent/agent-capabilities.js";
@@ -374,8 +403,16 @@ import { UpcomingScheduleWatcher } from "../proactivity/upcoming-schedule-watche
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
+import { SilenceLog } from "../proactivity/silence-log.js";
+import { PendingConfirmationStore } from "../proactivity/pending-confirmation-store.js";
+import { CommitmentTrigger, sendCommitmentNudge } from "../proactivity/triggers/commitment-trigger.js";
+import { PreferenceChangeTrigger } from "../proactivity/triggers/preference-change-trigger.js";
+import type { ProactiveProposal } from "../proactivity/pipeline-types.js";
 import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
-import { registerProactivityFeedbackTools } from "../tools/proactivity-feedback-tools.js";
+import {
+  registerProactivityConfirmTools,
+  registerProactivityFeedbackTools,
+} from "../tools/proactivity-feedback-tools.js";
 import { registerAgentTasksTools } from "../tools/agent-tasks-tools.js";
 import { registerRhythmReminderTools } from "../tools/rhythm-reminder-tools.js";
 import {
@@ -622,6 +659,20 @@ export async function createAppServices(): Promise<AppServices> {
     browserSessionService,
     audit: auditService,
   });
+  // 初始化统一预订服务（方案 A：网约车/家政/餐厅共用编排——两阶段确认 +
+  // 单笔/单日限额 + 订单落库 + 承诺板跟踪；Provider 按 BOOKING_MODE 组装）。
+  // 承诺板在下方 agentic-memory 装配段构造后经 setCommitmentBoard 注入。
+  const bookingConfig = getBookingConfig();
+  const bookingProviders = buildDefaultBookingProviders(bookingConfig);
+  const bookingService = new BookingService({
+    providers: bookingProviders,
+    store: new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json")),
+    audit: auditService,
+    config: bookingConfig,
+  });
+  app.log.info(
+    `[Booking] 统一预订层已启用（mode=${bookingConfig.mode}，providers=[${bookingProviders.map((p) => `${p.key}:${p.domain}`).join(",")}]，限额 ¥${bookingConfig.maxAmountCny}/单、¥${bookingConfig.dailyBudgetCny}/日）`,
+  );
   const voiceCapabilityService = new VoiceCapabilityService({
     ttsService,
     voiceDialogueService,
@@ -775,9 +826,15 @@ export async function createAppServices(): Promise<AppServices> {
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
   // registerAllCapabilityModules 把 handler 注册到 ToolRegistry。
+  // 图片能力套件(图库/美颜批图/解析/缩略图/存储管理),存储根 data/pictures
+  const pictureKit = await createPictureKit({
+    rootDir: join(process.cwd(), "data", "pictures"),
+    batchOutputDir: join(process.cwd(), "data", "pictures", "batch"),
+  });
   const capabilityModuleDeps: CapabilityModuleDeps = {
     imageGenerationService,
     fileProcessingService,
+    pictureKit,
     emailSmsService,
     mediaMusicService,
     wsConnectionRegistry,
@@ -788,6 +845,7 @@ export async function createAppServices(): Promise<AppServices> {
     codeSandboxService,
     shoppingOrderService,
     agentBrowserService,
+    bookingService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
   setExtraIntentRules(getAllCapabilityModuleIntentRules(capabilityModuleDeps));
@@ -880,12 +938,157 @@ export async function createAppServices(): Promise<AppServices> {
     initShortTermMemoryGatewayService(),
   ]);
   initDailyJournalService();
+
+  // ─── 方案 A/B/C/D：agentic-memory 四件套（桥接 / 账本 / 承诺板 / 溯源）───
+  // 共用同一 SQLite 文件（AGENT_AGENTIC_MEMORY_DB，缺省 data/agentic_memory/
+  // agentic-memory.db），各建各表；各自 env 开关独立回退，互不阻断。
+  const agenticLedger = createAgenticLedgerIfEnabled();
+  const commitmentBoard = createCommitmentBoardIfEnabled();
+  const provenance = createProvenanceIfEnabled({
+    memory: agenticMemoryRuntime?.memory ?? null,
+    graph: humanLikeMemory,
+    ledger: agenticLedger,
+  });
+  const userFactRegistry = createUserFactRegistryIfEnabled();
+  const memoryBridge = createMemoryBridgeIfEnabled({
+    memory: agenticMemoryRuntime?.memory ?? null,
+    graph: humanLikeMemory,
+    ingest: agenticMemoryRuntime?.ingest ?? null,
+    retrieval: agenticMemoryRuntime?.retrieval ?? null,
+  });
+
+  // Mem0 落库钩子（方案 B/C/D 的统一取数口）：账本落 claim → 溯源登记 →
+  // 承诺自动提取（旁路 LLM，不阻塞写入主链路）。
+  // P0-2：承诺捕获与记忆路由解耦——低信号/被拒存的文本也会带 commitments
+  // 进来（results 为空的 orphan 事件），钩子门只看 context 不看 highSignal。
+  agenticMemoryRuntime?.ingest.addWriteHook((event) => {
+    if (!agenticLedger && !provenance && !commitmentBoard) return;
+    if (event.results.length > 0) {
+      const records = agenticLedger
+        ? agenticLedger.appendBatch(
+            event.results.map((item) => ({
+              actorId: event.actorId,
+              claim: item.memory,
+              sourceRef: event.sourceId,
+              confidence: null,
+              mem0Id: item.id,
+              metadata: {
+                context: event.context,
+                highSignal: event.highSignal,
+                ...(item.metadata ?? {}),
+              },
+            })),
+          )
+        : [];
+      provenance?.recordDerivations(event.sourceId, event.actorId, {
+        mem0Ids: event.results.map((item) => item.id),
+        ledgerIds: records.map((r) => r.id),
+      });
+    }
+    if (commitmentBoard && isCommitmentAutoExtractEnabled() && event.context === "main") {
+      const sourceRef = event.sourceId;
+      // P1-6 统一抽取路径：承诺识别已在同一次 LLM 里完成，钩子直接落板（零额外调用）
+      if (event.commitments && event.commitments.length > 0) {
+        const created = commitmentBoard.ingestExtracted(event.actorId, event.commitments, {
+          sourceRef,
+          ledger: agenticLedger,
+        });
+        if (created.length > 0) {
+          provenance?.recordDerivations(sourceRef, event.actorId, {
+            ledgerIds: created.flatMap((c) => c.evidenceLedgerIds),
+          });
+        }
+      } else if (event.highSignal) {
+        // 回退路径：独立承诺提取 LLM（统一抽取关闭/失败时；仅高信号——
+        // 低信号在 unified 关闭时没有承诺抽取通道，scope 开关随之失效）
+        void extractCommitments(event.results.map((item) => item.memory).join("\n"))
+          .then((extracted) => {
+            if (extracted.length === 0) return;
+            const created = commitmentBoard.ingestExtracted(event.actorId, extracted, {
+              sourceRef,
+              ledger: agenticLedger,
+            });
+            if (created.length > 0) {
+              provenance?.recordDerivations(sourceRef, event.actorId, {
+                ledgerIds: created.flatMap((c) => c.evidenceLedgerIds),
+              });
+            }
+          })
+          .catch(() => {});
+      }
+    }
+    // P1-6 纠正闭环：用户否认/更正既有信息 → 旧 claim supersede +
+    // 溯源级联（账本 void、Mem0 删除、认知图 overridden、关联承诺 superseded）
+    for (const correction of event.corrections ?? []) {
+      const oldClaims = agenticLedger?.findActiveClaimsByText(event.actorId, correction.oldClaim, 3) ?? [];
+      for (const old of oldClaims) {
+        if (old.id === event.results.find((r) => r.memory === correction.newClaim)?.id) continue;
+        if (provenance) {
+          void provenance
+            .invalidateClaim(old.id, `用户纠正 → ${correction.newClaim}`)
+            .catch(() => {});
+        } else {
+          agenticLedger?.supersede(
+            old.id,
+            `void:correction:${Date.now().toString(36)}`,
+            `用户纠正 → ${correction.newClaim}`,
+          );
+        }
+      }
+    }
+  });
+
+  // ─── P0-3/P2-15：lifecycle 删除调和 + 存量 linkage 回填 ───
+  // lifecycle 绕过 bridge 删 Mem0（TTL/去重）→ 通知 bridge 摘除 linkage；
+  // 启动后 30s 做一次存量回填（旧记忆没有 linkage，遗忘同步扫不到）。
+  agenticMemoryRuntime?.lifecycle.setDeletedNotifier((ids) => memoryBridge?.handleMem0Deleted(ids));
+  if (memoryBridge && process.env.AGENT_MEMORY_BRIDGE_BACKFILL?.trim() !== "0") {
+    const backfillTimer = setTimeout(() => {
+      void memoryBridge.backfillLinks().catch(() => {});
+    }, 30_000);
+    backfillTimer.unref();
+  }
+
+  // 组件注册表：clear-service / prompt-context / health 快照从这里取实例
+  registerMemoryComponents({
+    ledger: agenticLedger,
+    commitmentBoard,
+    provenance,
+    bridge: memoryBridge,
+  });
+
+  // 承诺板提醒/升级出口：proactivity 管道装配后接线（见下方 proactivePipeline
+  // 构造之后的 commitmentBoard.setNotifier），未接上前由 board 内置日志降级。
+  if (commitmentBoard) {
+    registerCommitmentTools(toolRegistry, { board: commitmentBoard, provenance });
+    // 统一预订层（方案 A）：booking 结果写入承诺板跟踪状态
+    bookingService.setCommitmentBoard(commitmentBoard);
+  }
+
+  // ─── 方案 E：记忆写入 → 偏好变更触发链路 ───
+  // NarrativeMemoryFacade.ingest 写入后钩子（fire-and-forget）→ 检测偏好变更
+  // 信号（零 LLM 正则）→ 与事实主库版本化联动（同主题换值 = 反转 → 确认提案）。
+  // 事实库惰性共享 nightly 巩固服务的同一 UserFactStore 单例（getFactStore），
+  // 避免双实例缓存导致反转检测读到陈旧偏好。
+  // 提交口前向引用：统一管道在下方构造完成后回填（构造前的写入按冷却去重，
+  // 极早期丢失一次偏好提示无碍——记忆侧学习照常进行）。
+  const proactiveSubmitRef: { current?: (p: ProactiveProposal) => void } = {};
+  const preferenceChangeTrigger = new PreferenceChangeTrigger({
+    submit: (p) => proactiveSubmitRef.current?.(p),
+    getPreferenceFacts: (actorId) =>
+      getNightlyMemoryTaskService()?.getFactStore().getFacts(actorId, { kind: "preference" }) ?? [],
+  });
+
   const narrativeMemory = wrapNarrativeWithHybrid(
     createNarrativeMemoryPort({
       agenticIngest: agenticMemoryRuntime?.ingest ?? null,
       agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
       compressor: agenticMemoryRuntime?.compressor ?? null,
       humanLikeMemory,
+      bridge: memoryBridge,
+      onWrite: (actorId, text, source) => {
+        void preferenceChangeTrigger.noteMemoryWrite(actorId, text, { sourceRef: source });
+      },
     }),
     createNarrativeHybridRetrievalDefault(),
   );
@@ -914,7 +1117,7 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ─── 记忆回查工具：把会话情景台账暴露为 memory.recall_episodic（压缩+按需展开）───
   registerMemoryRecallTools(toolRegistry, { shortTermMemoryGateway });
-  setMemoryChatTools(MEMORY_RECALL_CHAT_TOOLS);
+  setMemoryChatTools([...MEMORY_RECALL_CHAT_TOOLS, ...MEMORY_INVALIDATION_CHAT_TOOLS]);
 
   // DailyDigest 仅承载当日 RAM 摘要（prompt 注入），长期归档已收敛到 journal 夜间固化
   const dailyDigestService = getDailyDigestService();
@@ -2223,6 +2426,29 @@ export async function createAppServices(): Promise<AppServices> {
   const locationCoordinator = new LocationCoordinator();
   agentCore.setLocationCoordinator(locationCoordinator);
 
+  // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
+  // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
+  const locationGeofenceService = new GeofenceService();
+  registerGeofenceTools(toolRegistry, { service: locationGeofenceService, audit: auditService });
+  // 方案 B 位置历史：默认开启（2026-09-05，本地 SQLite 不上云，LOCATION_HISTORY_ENABLED=0 关闭）。
+  // 常去地点挖掘（对话 prompt 的【常去地点】块，零 LLM）依赖历史样本。
+  const locationTrackingMode = locationCoordinator.getTrackingConfig().mode;
+  const locationHistoryEnabled = isLocationHistoryEnabled(locationTrackingMode);
+  const locationHistoryService = locationHistoryEnabled ? new LocationHistoryService() : null;
+  // 常去地点/移动信号注入 AgentCore：对话 prompt 的位置背景（实时位置 + 常去地点）。
+  agentCore.setLocationHistory(locationHistoryService);
+  // 方案 D 节律联动：位置历史（若有）作为 receptivity 的移动负信号喂入节律引擎
+  if (locationHistoryService && rhythmEngine) {
+    rhythmEngine.registerSensor(new LocationSensor(locationHistoryService));
+  }
+  if (locationHistoryEnabled) {
+    app.log.info(
+      `[Location] 位置历史已开启（tracking=${locationTrackingMode}，保留 ${getLocationHistoryRetentionDays()} 天，本地 ${getLocationDbPath()}）；常去地点将注入对话 prompt`,
+    );
+  } else {
+    app.log.info("[Location] 位置历史已关闭（LOCATION_HISTORY_ENABLED=0），仅按需定位与显式围栏生效");
+  }
+
   // ─── Task 4: desktop.event → LifeSignal 转换 ───
   // 将 Python 端推送的桌面事件转为 LifeSignal 并 publish 到 LifeSignalHub，
   // 供 BrainStem（sweepOnce → recentSignals）与 ProactionCortex 消费。
@@ -2621,6 +2847,10 @@ export async function createAppServices(): Promise<AppServices> {
       memoryCortex.registerAgentic(agenticMemoryRuntime);
     }
     memoryCortex.registerHumanLike(humanLikeMemory);
+    // P0-1/P1-7：写入 fallback 收拢到 bridge（带 linkage）；召回走单次融合
+    if (memoryBridge) {
+      memoryCortex.registerBridge(memoryBridge);
+    }
     if (narrativeMemory) {
       memoryCortex.registerNarrative(narrativeMemory);
     }
@@ -2686,7 +2916,8 @@ export async function createAppServices(): Promise<AppServices> {
 
     // PlannerCortex（额叶规划皮层）
     const plannerCortex = new PlannerCortex();
-    plannerCortex.registerTaskRouter({ routeLlmExecution: routeTask });
+    // 2026-09-05 双面架构：路由唯一权威是 llm-task-router（routeTurnByLlm），
+    // 不再向 PlannerCortex 注册词法路由（旧 routeTask 已删除）。
 
     // PlanExecuteLoop 适配器：将 runPlanExecuteLoop 函数包装为 { plan, execute, react } 对象。
     // - plan(goal): 调用 runPlanExecuteLoop 生成计划（函数内部已含执行），缓存结果。
@@ -3323,8 +3554,18 @@ export async function createAppServices(): Promise<AppServices> {
   const proactivityGovernor = new FrequencyGovernor();
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
   const proactivityPresence = new PresenceService();
+  // 沉默日志（方案 B）：hub act 沉默与管道 silenced 共用同一实例，落盘 data/proactivity/silence-log.json
+  const proactivitySilenceLog = new SilenceLog(
+    join(process.cwd(), "data", "proactivity", "silence-log.json"),
+  );
+  // 挂起确认存储（ask_first）：hub 行动级与管道提案级共用，落盘 data/proactivity/confirmations.json
+  const proactivityConfirmations = new PendingConfirmationStore(
+    join(process.cwd(), "data", "proactivity", "confirmations.json"),
+  );
   const proactivityHub = new ProactivityHub({
     frequencyGovernor: proactivityGovernor,
+    silenceLog: proactivitySilenceLog,
+    pendingConfirmations: proactivityConfirmations,
     publishSignal: (signal) => {
       lifeSignalHubService.publish({
         id: `proactivity:${signal.kind}:${signal.actorId}:${Date.now()}`,
@@ -3438,6 +3679,118 @@ export async function createAppServices(): Promise<AppServices> {
   });
   // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
   agentCore.setProactivityHub(proactivityHub);
+  // ── 位置方案 D：到达常去地点 → 主动问候（走 hub 统一频控/话术闭环）──
+  const locationTrigger = new LocationTrigger({
+    history: locationHistoryService,
+    submitIntent: (intent) => proactivityHub.submitIntent(intent),
+  });
+  // 用户清除位置历史时同步失效到达触发器的缓存：已删数据不再驱动主动行为
+  locationHistoryService?.setOnCleared((actorId) => locationTrigger.invalidate(actorId));
+  // ── 位置方案 C 出口：围栏事件 → 全量审计 + 按 actionType 分发动作 ──
+  locationGeofenceService.setNotifier((event) => {
+    void auditService
+      .record({
+        type: "geofence.triggered",
+        actorId: event.fence.actorId,
+        fenceId: event.fence.id,
+        fenceName: event.fence.name,
+        kind: event.kind,
+        actionType: event.fence.actionType,
+        distanceMeters: event.distanceMeters,
+        latitude: event.location.latitude,
+        longitude: event.location.longitude,
+        at: event.at,
+      })
+      .catch(() => {});
+    const { fence } = event;
+    const where = `${fence.latitude.toFixed(4)}, ${fence.longitude.toFixed(4)}`;
+    if (fence.actionType === "reminder") {
+      const title = String(fence.actionConfig.title ?? fence.name);
+      const note = String(fence.actionConfig.note ?? "").trim();
+      void toolRegistry
+        .execute(
+          "calendar.create_task",
+          {
+            kind: "reminder",
+            title,
+            shortTitle: title.slice(0, 12),
+            description:
+              note ||
+              `地理围栏「${fence.name}」${event.kind === "enter" ? "到达" : "离开"}时自动创建的提醒`,
+            runAt: new Date(Date.now() + 5000).toISOString(),
+          },
+          { sessionId: fence.actorId, userId: fence.actorId, agentAccessMode: "full" },
+        )
+        .catch((err) => {
+          app.log.warn(`[Location] 围栏提醒创建失败（${fence.name}）: ${err}`);
+        });
+      return;
+    }
+    if (fence.actionType === "agent_task") {
+      const goal = String(fence.actionConfig.goal ?? "").trim();
+      if (!goal) return;
+      const taskId = agentCore.submitAutonomousTask(
+        fence.actorId,
+        `${goal}（地理围栏「${fence.name}」${event.kind === "enter" ? "到达" : "离开"}触发，位置 ${where}）`,
+      );
+      if (taskId) {
+        proactivityHub.submitIntent({
+          actorId: fence.actorId,
+          kind: "geofence_event",
+          importance: "low",
+          title: `围栏任务已启动：${fence.name}`,
+          summary:
+            `你到${event.kind === "enter" ? "达" : "离开"}了「${fence.name}」，已按约定启动任务「${goal}」。` +
+            `用一句话轻声告知用户任务已经开始即可，不要展开细节。`,
+          mode: "speak",
+          source: "location",
+        });
+      }
+      return;
+    }
+    if (fence.actionType === "webhook") {
+      const url = String(fence.actionConfig.url ?? "");
+      // 创建时已校验；分发前复检（防旧数据绕过 SSRF 门槛）
+      if (!isPublicHttpUrl(url)) return;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const extra = fence.actionConfig.headers;
+      if (extra && typeof extra === "object") {
+        for (const [k, v] of Object.entries(extra as Record<string, unknown>)) {
+          if (typeof v === "string" && k.trim()) headers[k.trim()] = v;
+        }
+      }
+      const secret = String(fence.actionConfig.secret ?? "");
+      if (secret) headers["X-Geofence-Secret"] = secret;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      void fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          event: "geofence." + event.kind,
+          fence: { id: fence.id, name: fence.name, radiusMeters: fence.radiusMeters },
+          at: event.at,
+          location: event.location,
+          distanceMeters: event.distanceMeters,
+        }),
+        signal: controller.signal,
+      })
+        .then((res) => {
+          app.log.info(`[Location] 围栏 webhook 已回调（${fence.name}，status=${res.status}）`);
+        })
+        .catch((err) => {
+          app.log.warn(`[Location] 围栏 webhook 回调失败（${fence.name}）: ${err}`);
+        })
+        .finally(() => clearTimeout(timer));
+      return;
+    }
+  });
+  // 位置上报管线（WS 层消费）：历史落库 → 围栏判定 → 到达触发
+  const locationIngest = new LocationIngestPipeline({
+    history: locationHistoryService,
+    geofence: locationGeofenceService,
+    onLocationReported: (actorId, loc) => locationTrigger.handleLocationReport(actorId, loc),
+  });
   // 接线 2：session-epitome 待办闭环（完成检测 → hub.onUserLoopCompleted 恭喜）
   memoryCortex?.setEpitomeLoopClosedListener((actorId, loopText) => {
     proactivityHub.onUserLoopCompleted(actorId, loopText);
@@ -3477,6 +3830,9 @@ export async function createAppServices(): Promise<AppServices> {
   registerInterestWatchTools(toolRegistry, interestWatcher);
   // 工具：主对话识别负反馈（别再提醒/别推了）后写入抑制表（suppress/remove/list）
   registerProactivityFeedbackTools(toolRegistry, proactivitySuppressionStore);
+  // 工具：act 三分支 ask_first 确认闭环（用户回复"可以/不行"→ 推进挂起行动计划）
+  // + 沉默反问（"你上周为什么没提醒我 XX"→ 检索沉默日志的效用评估依据）
+  registerProactivityConfirmTools(toolRegistry, proactivityHub);
   // prompt 注入：每轮告知 agent 用户关注什么（【用户兴趣关注列表】块）
   agentCore.setInterestListProvider((actorId) => interestWatcher.listForPrompt(actorId));
   interestWatcher.start();
@@ -3642,6 +3998,60 @@ export async function createAppServices(): Promise<AppServices> {
     governor: proactivityGovernor,
     suppression: proactivitySuppressionStore,
     presence: proactivityPresence,
+    silenceLog: proactivitySilenceLog,
+    confirmations: proactivityConfirmations,
+    // 提案级确认批准动作：承诺代催 → 真实外发（MessagePlatformGateway → 微信/QQ/飞书 bridge）；
+    // 其余提案 → 助手动态留痕。外发结果（已送达/排队/失败）经 speak 回执告知用户。
+    onProposalApproved: (p) => {
+      if (p.kind === "action.commitment.nudge" && commitmentBoard) {
+        void sendCommitmentNudge(
+          {
+            createOutbound: (input) =>
+              messageHubService.createOutbound({
+                ...input,
+                platform: input.platform as MessageHubPlatform,
+              }),
+            gatewaySend: (input) =>
+              messagePlatformGateway.send({
+                ...input,
+                platform: input.platform as MessageHubPlatform,
+              }),
+            getCommitment: (id) => commitmentBoard.get(id),
+            updateCommitmentNotes: (id, notes) => commitmentBoard.update(id, { notes }),
+          },
+          p,
+        )
+          .then((r) => {
+            agentActivityStore.record({
+              actorId: p.actorId,
+              kind: p.kind,
+              title: r.sent ? `已代发催促（${r.delivered ? "已送达" : "排队中"}）` : `已确认：${p.title}`,
+              summary: r.detail,
+              dedupKey: `approved:${p.dedupKey}`,
+            });
+            proactivityHub.submitIntent({
+              actorId: p.actorId,
+              kind: "life_reminder",
+              importance: "low",
+              title: r.sent ? (r.delivered ? "催促消息已发出" : "催促消息已提交网关") : "代催未能执行",
+              summary: r.detail,
+              mode: "speak",
+              source: "relationship",
+            });
+          })
+          .catch((err) => {
+            console.log(`[commitment-board] 代发催促失败（忽略）: ${err}`);
+          });
+        return;
+      }
+      agentActivityStore.record({
+        actorId: p.actorId,
+        kind: p.kind,
+        title: `已确认：${p.title}`,
+        summary: p.summary,
+        dedupKey: `approved:${p.dedupKey}`,
+      });
+    },
     delivery: new ProactiveDeliveryService({
       trySend: (actorId, json) => wsConnectionRegistry.trySend(actorId, json),
       ledger: {
@@ -3676,6 +4086,14 @@ export async function createAppServices(): Promise<AppServices> {
     mobilePush: proactivePushService,
   });
   proactivePipeline.start();
+  // 管道级确认回流：hub 的确认解析入口对 origin=pipeline 条目委托管道（批准回调 + 回执）
+  proactivityHub.setPipelineConfirmationResolver((entry, approved) =>
+    proactivePipeline.resolveProposalConfirmation(entry, approved),
+  );
+  // 方案 E 回填：统一管道就绪后，偏好变更触发的提案开始进入仲裁链
+  proactiveSubmitRef.current = (p) => {
+    proactivePipeline.submitProposal(p);
+  };
   // 在场感知接线：任一设备连上即刷新在场并立即直推挂起的提醒（电脑不在线→手机一连就弹窗）；
   // 全部设备断开才判离线（提案挂起待重连，不落离线信箱）
   wsConnectionRegistry.onConnectionChange = (actorId, connected) => {
@@ -3784,7 +4202,34 @@ export async function createAppServices(): Promise<AppServices> {
     });
   });
 
+  // ─── 方案 D：承诺驱动的主动触发源（CommitmentTrigger 适配层）───
+  // 承诺板扫描事件（deadline 临近提醒 / 超时按 escalationPolicy 升级 / 依赖满足
+  // 通知推进）→ 带效用元数据的提案进统一管道：代催（needsAuthorization）映射为
+  // 不可逆+第三方+无授权 → ask_first；自动提取低置信承诺折算期望价值（可被
+  // 效用评估沉默）；信息性事件（superseded 等）不打扰。
+  provenance?.setEvidenceVoidedHook(({ ledgerIds, voidToken, reason }) => {
+    const superseded = commitmentBoard?.supersedeByEvidence(ledgerIds, voidToken, reason) ?? [];
+    if (superseded.length > 0) {
+      console.info(
+        `[commitment-board] 证据作废级联：${superseded.length} 条承诺标记 superseded（${reason}）`,
+      );
+    }
+  });
+  if (commitmentBoard) {
+    const commitmentTrigger = new CommitmentTrigger({
+      board: commitmentBoard,
+      submit: (p) => {
+        proactivePipeline.submitProposal(p);
+      },
+    });
+    commitmentTrigger.attach();
+  }
+
+  // ─── P2-16：记忆系统健康快照（调试用）───
+  app.get("/api/memory/health", async () => getMemoryHealthSnapshot());
+
   registerHttpRoutes(app, {
+    pictureKit,
     toolRegistry,
     skillManager,
     travelPlanningService,
@@ -3862,6 +4307,7 @@ export async function createAppServices(): Promise<AppServices> {
     desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     locationCoordinator,
+    locationIngest,
     virtualPhoneService,
     devicePairingService,
     virtualPhoneIncomingCoordinator,
@@ -3881,6 +4327,9 @@ export async function createAppServices(): Promise<AppServices> {
     consumptionLedgerListener.stop();
     subscriptionAuditService.stop();
     eveningDigestScheduler.stop();
+    // 位置子系统：停围栏判定 + 关本地 SQLite（WAL 落盘）
+    locationGeofenceService.close();
+    locationHistoryService?.close();
     try {
       await moodInferenceService.flush();
       app.log.info("[MoodInference] 持久化已 flush");

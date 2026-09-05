@@ -6,7 +6,8 @@
   "workspaces": [
     "server",
     "agent-world",
-    "packages/agent-protocol"
+    "packages/agent-protocol",
+    "packages/picture"
   ],
   "scripts": {
     "dev:all": "node scripts/dev-all.mjs",

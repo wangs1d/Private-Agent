@@ -88,6 +88,7 @@ class RightSidePanel extends StatefulWidget {
     this.onSchedule,
     this.onPhone,
     this.onMessages,
+    this.onGallery,
     this.onReportLocation,
     this.messagesUnread = 0,
   });
@@ -97,6 +98,9 @@ class RightSidePanel extends StatefulWidget {
   final VoidCallback? onSchedule;
   final VoidCallback? onPhone;
   final VoidCallback? onMessages;
+
+  /// 「图库」工具入口（照片浏览/上传/一键美颜）。
+  final VoidCallback? onGallery;
 
   /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
   final int messagesUnread;
@@ -1137,6 +1141,11 @@ class _RightSidePanelState extends State<RightSidePanel> {
           label: "日程",
           onTap: widget.onSchedule,
           subLabelBuilder: () => _scheduleSubLabel),
+      _ToolSpec(
+          id: "gallery",
+          icon: Icons.photo_library_outlined,
+          label: "图库",
+          onTap: widget.onGallery),
     ];
   }
 
@@ -1242,6 +1251,8 @@ class _RightSidePanelState extends State<RightSidePanel> {
   }
 
   /// 单行自适应：≤4 个一行铺满；超过 4 个时按每行 4 个折行。
+  /// 不足 4 个的尾行用空占位补齐，保证每个工具槽位等宽（如第 5 个工具
+  /// 单独一行时不应被 Expanded 拉满整行）。
   Widget _buildToolRows(ColorScheme cs, List<_ToolSpec> specs) {
     const int kPerRow = 4;
     final List<List<_ToolSpec>> rows = <List<_ToolSpec>>[
@@ -1256,6 +1267,8 @@ class _RightSidePanelState extends State<RightSidePanel> {
             children: <Widget>[
               for (final _ToolSpec spec in row)
                 Expanded(child: _ToolButton(spec: spec)),
+              for (int i = row.length; i < kPerRow; i += 1)
+                const Expanded(child: SizedBox.shrink()),
             ],
           ),
       ],

@@ -158,3 +158,82 @@ export function getDedupSimilarityThreshold(): number {
 export function getSleepAgentEnabled(): boolean {
   return envBool("AGENT_MEMORY_SLEEP_AGENT_ENABLED", true);
 }
+
+// ============================================================
+// 方案 A：记忆层间打通（memory-bridge）
+// ============================================================
+
+/** 桥接层开关（缺省开；关闭后 narrative 写入/召回回退旧双写行为） */
+export function isMemoryBridgeEnabled(): boolean {
+  return envBool("AGENT_MEMORY_BRIDGE_ENABLED", true);
+}
+
+/** 遗忘同步扫描间隔（分钟，0=关闭定时器，仅手动调用 syncForgetting） */
+export function getBridgeForgetSyncIntervalMin(): number {
+  const v = Number.parseInt(process.env.AGENT_MEMORY_BRIDGE_FORGET_SYNC_INTERVAL_MIN ?? "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : 30;
+}
+
+/** 融合召回最终保留条数 */
+export function getBridgeFusedTopK(): number {
+  return envPositiveInt("AGENT_MEMORY_BRIDGE_FUSED_TOP_K", 8);
+}
+
+// ============================================================
+// 方案 B：语义账本（ledger）
+// ============================================================
+
+export function isAgenticLedgerEnabled(): boolean {
+  return envBool("AGENT_MEMORY_LEDGER_ENABLED", true);
+}
+
+/** 账本保留策略：superseded/作废超过 N 天物理删除；0=永保留 */
+export function getLedgerRetentionDays(): number {
+  return envPositiveInt("AGENT_MEMORY_LEDGER_RETENTION_DAYS", 180);
+}
+
+// ============================================================
+// 用户事实注册表（User Fact Registry）
+// ============================================================
+
+export function isUserFactRegistryEnabled(): boolean {
+  return envBool("AGENT_USER_FACT_REGISTRY_ENABLED", true);
+}
+
+// ============================================================
+// 方案 C：承诺草稿板（commitment board）
+// ============================================================
+
+export function isCommitmentBoardEnabled(): boolean {
+  return envBool("AGENT_COMMITMENT_BOARD_ENABLED", true);
+}
+
+/** 扫描循环间隔（分钟） */
+export function getCommitmentScanIntervalMin(): number {
+  return envPositiveInt("AGENT_COMMITMENT_SCAN_INTERVAL_MIN", 5);
+}
+
+/** 对话自动提取承诺（LLM）开关；关闭后仅显式工具通道 */
+export function isCommitmentAutoExtractEnabled(): boolean {
+  return envBool("AGENT_COMMITMENT_AUTO_EXTRACT_ENABLED", true);
+}
+
+/**
+ * 承诺自动提取范围（P0-2 捕获与记忆路由解耦）：
+ *   high = 仅高信号路径抽取（旧行为，灰度回退档）
+ *   all  = 低信号写入也 fire-and-forget 抽取——口语承诺（"明天发你"）通常
+ *          被记忆侧判为临时上下文/decay，与存储价值无关，承诺照样要抓。
+ *          抽取是 LLM 通道自身产出，无词表预筛。
+ */
+export function getCommitmentExtractScope(): "high" | "all" {
+  const raw = process.env.AGENT_COMMITMENT_EXTRACT_SCOPE?.trim().toLowerCase();
+  return raw === "high" ? "high" : "all";
+}
+
+// ============================================================
+// 方案 D：溯源作废（provenance）
+// ============================================================
+
+export function isProvenanceEnabled(): boolean {
+  return envBool("AGENT_MEMORY_PROVENANCE_ENABLED", true);
+}

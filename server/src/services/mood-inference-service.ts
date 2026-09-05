@@ -259,7 +259,13 @@ export class MoodInferenceService {
         { text: prompt },
         () => {},
         undefined,
-        { systemPromptOverride: "你是一个情感分析助手，只输出 JSON，不要任何解释。" },
+        {
+          systemPromptOverride: "你是一个情感分析助手，只输出 JSON，不要任何解释。",
+          // 情绪分析自包含（prompt 携带全部所需输入），ephemeral 不落线程：
+          // 否则 mood 会话整天累积历史，每轮重发最多 MAX_CONTEXT_TOKENS 的陈旧分析。
+          ephemeralTurn: true,
+          disableThinking: true,
+        },
       );
       // Token 用量审计：情绪推断（每轮用户消息最多一次）
       try {

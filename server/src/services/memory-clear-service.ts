@@ -3,7 +3,7 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getHumanLikeMemoryService } from "./human-like-memory-service.js";
-import { getAgenticMemoryRuntime } from "../agentic-memory/index.js";
+import { getAgenticMemoryRuntime, getMemoryComponents } from "../agentic-memory/index.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { getConversationTimelineService } from "./conversation-timeline.js";
@@ -80,6 +80,20 @@ export async function clearAllMemoryForActor(
   const inventory = getGlobalMemoryInventory();
   if (inventory?.invalidate) {
     inventory.invalidate(actorId);
+  }
+
+  // 9. agentic-memory 四件套级联清理（P0-2 隐私闭环）：语义账本 / 承诺草稿板 /
+  //    溯源依赖图 / bridge_links——此前清空 actor 后这些表的数据会残留。
+  const components = getMemoryComponents();
+  const ledgerCleared = components.ledger?.purgeActor(actorId) ?? 0;
+  const commitmentsCleared = components.commitmentBoard?.purgeActor(actorId) ?? 0;
+  const provenanceCleared = components.provenance?.purgeActor(actorId) ?? 0;
+  const bridgeLinksCleared = components.bridge?.purgeActor(actorId) ?? 0;
+  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared > 0) {
+    console.info(
+      `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +
+        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared}`,
+    );
   }
 
   return {

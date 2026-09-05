@@ -1,6 +1,7 @@
 import type { AgenticMemoryIngestService } from "../agentic-memory/ingest.js";
 import type { AgenticMemoryRetrievalService } from "../agentic-memory/retrieval.js";
 import type { AgenticMemoryRecallCompressor } from "../agentic-memory/recall-compressor.js";
+import type { MemoryBridgeService } from "../agentic-memory/memory-bridge-service.js";
 import type {
   HumanLikeMemoryRecallResult,
   HumanLikeMemoryService,
@@ -20,12 +21,17 @@ export type NarrativeMemoryPort = {
    * 统一写入者出口：候选已经过整合链路裁决（decideMemoryWrite / 回声过滤 /
    * supersession），此处直接落库，不再二次决策。语义与 ingest 相同
    * （海马体 + Mem0 [+ hybrid 索引]），只是免去重复 LLM 裁决。
+   *
+   * unified 传入时为统一抽取产物（extraction 已含 memories/facts/commitments/
+   * corrections）：Mem0 侧直存（infer:false）并经写入钩子驱动事实注册表等
+   * 下游，text 仅作为认知图/hybrid 索引侧的内容。
    */
   writeDecided(
     actorId: string,
     text: string,
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
@@ -71,6 +77,18 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     private readonly agenticRetrieval: AgenticMemoryRetrievalService | null,
     private readonly compressor: AgenticMemoryRecallCompressor | null,
     private readonly humanLikeMemory: HumanLikeMemoryService | null,
+    /**
+     * 方案 A 记忆桥接（可选）。注入后写入走 bridge.writeUnified（认知图 + Mem0
+     * + 双向 linkage 一次完成），主召回走 buildFusedRecall（两路 RRF 融合）；
+     * 未注入（AGENT_MEMORY_BRIDGE_ENABLED=false / 单测）保持旧双写 + 短路召回。
+     */
+    private readonly bridge: MemoryBridgeService | null = null,
+    /**
+     * 记忆写入后钩子（方案 E 偏好变更触发链路）。fire-and-forget：
+     * 写入成功后异步通知（如 PreferenceChangeTrigger.noteMemoryWrite），
+     * 钩子失败不影响写入主链路。
+     */
+    private readonly onWrite?: (actorId: string, text: string, source: string) => void | Promise<void>,
   ) {}
 
   async ingest(
@@ -80,6 +98,15 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
   ): Promise<void> {
     const context = (opts?.context ?? "main") as MemoryContextKind;
+
+    if (this.bridge) {
+      await this.bridge.writeUnified(actorId, source, text, {
+        context,
+        highSignal: opts?.highSignal === true,
+      });
+      this.fireOnWrite(actorId, text, source);
+      return;
+    }
 
     if (this.humanLikeMemory) {
       await this.humanLikeMemory.ingest(actorId, text, source, {
@@ -94,6 +121,7 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
         context,
       });
     }
+    this.fireOnWrite(actorId, text, source);
   }
 
   async writeDecided(
@@ -101,8 +129,23 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     text: string,
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void> {
     const context = opts.context as MemoryContextKind;
+    if (this.bridge) {
+      await this.bridge.writeUnified(
+        actorId,
+        source,
+        text,
+        {
+          context,
+          highSignal: opts.highSignal,
+        },
+        unified,
+      );
+      this.fireOnWrite(actorId, text, source);
+      return;
+    }
     if (this.humanLikeMemory) {
       await this.humanLikeMemory.ingest(actorId, text, source, {
         context,
@@ -110,11 +153,40 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
       });
     }
     if (this.agenticIngest) {
-      await this.agenticIngest.writeDecided(actorId, source, text, context, opts.highSignal);
+      if (unified) {
+        await this.agenticIngest.persistUnifiedExtraction(
+          actorId,
+          source,
+          unified,
+          context,
+          opts.highSignal,
+          text,
+        );
+      } else {
+        await this.agenticIngest.writeDecided(actorId, source, text, context, opts.highSignal);
+      }
+    }
+    this.fireOnWrite(actorId, text, source);
+  }
+
+  /** 写入后钩子（fire-and-forget，异常只记日志不抛出） */
+  private fireOnWrite(actorId: string, text: string, source: string): void {
+    if (!this.onWrite) return;
+    try {
+      void Promise.resolve(this.onWrite(actorId, text, source)).catch((err) => {
+        console.log(`[NarrativeMemoryFacade] onWrite 钩子失败（忽略）: ${err}`);
+      });
+    } catch (err) {
+      console.log(`[NarrativeMemoryFacade] onWrite 钩子抛错（忽略）: ${err}`);
     }
   }
 
   async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
+    if (this.bridge) {
+      const fused = await this.bridge.buildFusedRecall(actorId, query, { context: "main" });
+      return this.compressor && fused ? this.compressor.compress(fused) : fused;
+    }
+
     if (this.humanLikeMemory) {
       return unwrapRecall(
         this.humanLikeMemory.buildRecall(actorId, query, {
@@ -132,6 +204,11 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
   }
 
   async buildCrossContextRecall(actorId: string, query: string): Promise<string> {
+    if (this.bridge) {
+      const fused = await this.bridge.buildFusedRecall(actorId, query, { context: "any" });
+      return this.compressor && fused ? this.compressor.compress(fused) : fused;
+    }
+
     if (this.humanLikeMemory) {
       return unwrapRecall(
         this.humanLikeMemory.buildRecall(actorId, query, {
@@ -216,13 +293,20 @@ export function createNarrativeMemoryPort(opts: {
   agenticRetrieval: AgenticMemoryRetrievalService | null;
   compressor: AgenticMemoryRecallCompressor | null;
   humanLikeMemory: HumanLikeMemoryService | null;
+  bridge?: MemoryBridgeService | null;
+  /** 写入后钩子（方案 E 偏好变更触发链路；fire-and-forget） */
+  onWrite?: (actorId: string, text: string, source: string) => void | Promise<void>;
 }): NarrativeMemoryPort | null {
-  if (!opts.agenticIngest && !opts.agenticRetrieval && !opts.humanLikeMemory) return null;
+  if (!opts.agenticIngest && !opts.agenticRetrieval && !opts.humanLikeMemory && !opts.bridge) {
+    return null;
+  }
   return new NarrativeMemoryFacade(
     opts.agenticIngest,
     opts.agenticRetrieval,
     opts.compressor,
     opts.humanLikeMemory,
+    opts.bridge ?? null,
+    opts.onWrite,
   );
 }
 
@@ -257,9 +341,10 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
     text: string,
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void> {
     await Promise.all([
-      this.facade.writeDecided(actorId, text, source, opts),
+      this.facade.writeDecided(actorId, text, source, opts, unified),
       this.hybrid.ingest(actorId, text, source),
     ]);
   }

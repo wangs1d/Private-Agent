@@ -45,10 +45,10 @@ test("Fast 模式跳过时间强制（system prompt 已注入 currentTime）", (
   assert.equal(choice, "auto");
 });
 
-test("时效性事实查询强制 search_web", () => {
+test("时效性查询不再强制 search_web（话题词强制已删，工具需求由语义路由 + 出口自检承担）", () => {
   const choice = resolveForcedToolChoice(
     "帮我查查最新的新闻",
     [fnTool("search_web")],
   );
-  assert.deepEqual(choice, { type: "function", function: { name: "search_web" } });
+  assert.equal(choice, "auto");
 });

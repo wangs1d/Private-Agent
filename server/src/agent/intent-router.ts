@@ -27,31 +27,42 @@ export const INTENT_LABELS: readonly IntentLabel[] = [
   "meta_capability",
 ];
 
-export type IntentLane = "fast" | "complex";
-export type IntentToolset = "light" | "search" | "media" | "full";
+// ── 双面架构路由契约（2026-09-05）──
+// 路由不再回答"走哪个脑"，只回答"这轮的执行计划"：
+//   plane        对话面（零工具直答）或 任务面（后台 plan-and-execute）
+//   capabilities 任务面需要的能力束（对话面恒空）
+//   budget       任务面工具波上限（对话面 0）
+//   tier         模型档位（fast=Flash / complex=Pro）
+// 旧二值车道字段（lane/toolset/arbiter）已随 fast/complex 双脑架构一起删除。
+export type TurnPlane = "chat" | "task";
+export type TurnCapability = "search" | "media" | "write" | "desktop" | "full";
+export type TurnTier = "fast" | "complex";
 
 export type IntentRoutePlan = {
-  lane: IntentLane;
-  /** 该意图应暴露的工具束（fast 已内置 light+search+media；complex 为全量） */
-  toolset: IntentToolset;
-  /** 出口仲裁严格度：strict = 无成功的实质工具结果即升级（防含糊收场） */
-  arbiter: "strict" | "standard";
+  /** 执行平面：对话面（零工具）或任务面（后台执行） */
+  plane: TurnPlane;
+  /** 任务面能力束 */
+  capabilities: TurnCapability[];
+  /** 任务面工具波预算 */
+  budget: number;
+  /** 模型档位 */
+  tier: TurnTier;
 };
 
 /**
  * 意图 → 执行契约路由表（唯一权威）。
- * realtime_lookup / media_retrieval 走 fast：搜索/媒体工具已在 fast 上下文
- * （链路 AnySearch 优先、多引擎兜底），配合 strict 出口仲裁保证"真的去搜"；
- * action_write / multi_step_task 涉及副作用或多步，下沉 complex 全量工具。
+ * 对话面（chat/knowledge_qa/meta_capability）：零工具直答，时间/位置走上下文注入。
+ * 任务面：realtime_lookup/media_retrieval 轻预算单点执行（tier fast）；
+ *         action_write/multi_step_task 全量能力 + 高预算（tier complex）。
  */
 export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
-  chat: { lane: "fast", toolset: "light", arbiter: "standard" },
-  knowledge_qa: { lane: "fast", toolset: "light", arbiter: "standard" },
-  realtime_lookup: { lane: "fast", toolset: "search", arbiter: "strict" },
-  media_retrieval: { lane: "fast", toolset: "media", arbiter: "strict" },
-  action_write: { lane: "complex", toolset: "full", arbiter: "standard" },
-  multi_step_task: { lane: "complex", toolset: "full", arbiter: "standard" },
-  meta_capability: { lane: "fast", toolset: "light", arbiter: "standard" },
+  chat: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
+  knowledge_qa: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
+  realtime_lookup: { plane: "task", capabilities: ["search"], budget: 2, tier: "fast" },
+  media_retrieval: { plane: "task", capabilities: ["media", "search"], budget: 2, tier: "fast" },
+  action_write: { plane: "task", capabilities: ["full"], budget: 3, tier: "complex" },
+  multi_step_task: { plane: "task", capabilities: ["full"], budget: 3, tier: "complex" },
+  meta_capability: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
 };
 
 export function isIntentLabel(value: unknown): value is IntentLabel {
@@ -62,10 +73,9 @@ export function routePlanForIntent(intent: IntentLabel): IntentRoutePlan {
   return INTENT_ROUTING_TABLE[intent];
 }
 
-/** 解析容错：宽松变体 → 规范标签（旧二值输出/近似词兼容）。 */
+/** 解析容错：宽松变体 → 规范标签（近似词兼容；旧二值输出已随双脑架构删除）。 */
 const INTENT_ALIASES: Record<string, IntentLabel> = {
   chat: "chat",
-  fast: "chat",
   smalltalk: "chat",
   chitchat: "chat",
   knowledge: "knowledge_qa",
@@ -87,7 +97,6 @@ const INTENT_ALIASES: Record<string, IntentLabel> = {
   reminder: "action_write",
   schedule: "action_write",
   task: "multi_step_task",
-  complex: "multi_step_task",
   multi_step: "multi_step_task",
   multi_step_task: "multi_step_task",
   desktop: "multi_step_task",

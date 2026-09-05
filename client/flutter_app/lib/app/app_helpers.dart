@@ -1,5 +1,5 @@
 /// 右侧抽屉要展示的内容种类。
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, travelPlan }
+enum RightPanelKind { friends, messages, devices, schedule, imagePreview, travelPlan, gallery }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -24,6 +24,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.52; // 图片预览：右栏显示原图，需较大空间
       case RightPanelKind.travelPlan:
         return 0.36; // 行程规划：右栏为双面板规划界面，需最大空间
+      case RightPanelKind.gallery:
+        return 0.45; // 图库：三列网格 + 一键美颜，需较大空间
     }
   }
 }
@@ -86,6 +88,8 @@ String rightPanelTitle(RightPanelKind kind) {
       return "图片预览";
     case RightPanelKind.travelPlan:
       return "行程规划";
+    case RightPanelKind.gallery:
+      return "图库";
   }
 }
 

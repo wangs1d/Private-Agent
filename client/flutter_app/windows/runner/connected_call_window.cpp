@@ -21,22 +21,71 @@
 
 namespace {
 
-// ── 新版配色（Apple 风格） ──
-constexpr COLORREF kBg           = RGB(0xFF, 0xFF, 0xFF);  // 白卡
-constexpr COLORREF kNameColor    = RGB(0x1D, 0x1D, 0x1F);  // 名称近黑
-constexpr COLORREF kMutedColor   = RGB(0x6E, 0x6E, 0x73);  // 状态中灰
-constexpr COLORREF kSecondaryBg  = RGB(0xF2, 0xF2, 0xF7);  // 静音/免提底
-constexpr COLORREF kActiveBg     = RGB(0x1D, 0x1D, 0x1F);  // 激活黑底
-constexpr COLORREF kHangupBg     = RGB(0xFF, 0x3B, 0x30);  // 挂断红
-constexpr COLORREF kHangupHover  = RGB(0xE0, 0x33, 0x2A);  // 挂断悬停深红
+// ── 配色（豆包风深色卡片） ──
+constexpr COLORREF kBg            = RGB(0x1A, 0x1A, 0x1C);  // 卡片底
+constexpr COLORREF kCircle        = RGB(0x2C, 0x2C, 0x2E);  // 波形圆底
+constexpr COLORREF kNameColor     = RGB(0xFF, 0xFF, 0xFF);  // 名称白
+constexpr COLORREF kMutedColor    = RGB(0x8E, 0x8E, 0x93);  // 状态/标签灰
+constexpr COLORREF kWhiteBtn      = RGB(0xFF, 0xFF, 0xFF);  // 挂断白钮/激活态
+constexpr COLORREF kWhiteBtnHover = RGB(0xE5, 0xE5, 0xEA);  // 白钮悬停
+constexpr COLORREF kDarkBtn       = RGB(0x2C, 0x2C, 0x2E);  // 静音/免提深钮
+constexpr COLORREF kDarkBtnHover  = RGB(0x3A, 0x3A, 0x3C);  // 深钮悬停
+constexpr COLORREF kGlyphOnWhite  = RGB(0x1A, 0x1A, 0x1C);  // 白钮上深图标
+
+// ── 内部布局 ──
+constexpr int kAvatarCx  = 160;  // 波形圆心 x
+constexpr int kAvatarCy  = 78;   // 波形圆心 y
+constexpr int kAvatarR   = 36;   // 波形圆半径
+constexpr int kNameTop   = 124;  // 名称 top
+constexpr int kStatusTop = 152;  // 状态行 top
+constexpr int kBtnCy     = 232;  // 按钮圆心 y
+constexpr int kSideBtn   = 52;   // 静音/免提直径
+constexpr int kMainBtn   = 60;   // 挂断直径
+constexpr int kMuteCx    = 92;   // 静音圆心 x
+constexpr int kHangupCx  = 160;  // 挂断圆心 x
+constexpr int kSpeakerCx = 228;  // 免提圆心 x
+constexpr int kLabelTop  = 266;  // 标签 top
 
 // 字形（Segoe MDL2 Assets）：E717 = Phone, E720 = Mic, E767 = Volume
 constexpr wchar_t kGlyphPhone   = L'\uE717';
 constexpr wchar_t kGlyphMic     = L'\uE720';
 constexpr wchar_t kGlyphVolume  = L'\uE767';
 
-COLORREF ParseArgb(uint32_t argb) {
-  return RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+COLORREF MixColor(COLORREF a, COLORREF b, double t) {
+  if (t < 0) t = 0;
+  if (t > 1) t = 1;
+  return RGB(
+      static_cast<int>(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+      static_cast<int>(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+      static_cast<int>(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+}
+
+// 在实心圆内画波形图标：5 根圆角竖条（phase < 0 为静态）
+void DrawWaveform(HDC hdc, int cx, int cy, int max_h, COLORREF color,
+                  int phase) {
+  constexpr int kBarHeights[5] = {45, 100, 62, 100, 45};
+  constexpr int kBarW = 4;
+  constexpr int kGap = 4;
+  const int total_w = 5 * kBarW + 4 * kGap;
+  int x = cx - total_w / 2;
+  for (int i = 0; i < 5; ++i) {
+    double k = kBarHeights[i] / 100.0;
+    if (phase >= 0) {
+      k *= 0.82 + 0.18 * std::sin((phase + i * 6) * 6.28318 / 30.0);
+    }
+    const int h = (std::max)(3, static_cast<int>(max_h * k));
+    RECT bar = {x, cy - h / 2, x + kBarW, cy + h / 2};
+    HBRUSH brush = CreateSolidBrush(color);
+    HPEN pen = CreatePen(PS_NULL, 0, 0);
+    HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
+    HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
+    RoundRect(hdc, bar.left, bar.top, bar.right, bar.bottom, kBarW, kBarW);
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+    x += kBarW + kGap;
+  }
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
@@ -51,10 +100,11 @@ std::wstring Utf8ToWide(const std::string& s) {
 
 std::wstring FormatDuration(int seconds) {
   if (seconds < 0) seconds = 0;
-  int mm = seconds / 60;
+  int hh = seconds / 3600;
+  int mm = (seconds % 3600) / 60;
   int ss = seconds % 60;
-  wchar_t buf[16];
-  swprintf_s(buf, L"%02d:%02d", mm, ss);
+  wchar_t buf[20];
+  swprintf_s(buf, L"%02d:%02d:%02d", hh, mm, ss);
   return std::wstring(buf);
 }
 
@@ -147,34 +197,26 @@ bool ConnectedCallWindow::CreateWindowIfNeeded() {
   SendMessage(speaker_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
   SendMessage(hangup_btn_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
 
-  mute_brush_ = CreateSolidBrush(kSecondaryBg);
-  speaker_brush_ = CreateSolidBrush(kSecondaryBg);
-  hangup_brush_ = CreateSolidBrush(kHangupBg);
-  action_border_brush_ = CreateSolidBrush(RGB(0xE5, 0xE5, 0xEA));
   EnableDwmShadow(hwnd);
   return true;
 }
 
 void ConnectedCallWindow::RepositionChildren() {
   if (!window_handle_) return;
-  // 底部三个圆形图标按钮 + 下方 12px 标签
-  constexpr int kBtnSize = 54;
-  constexpr int kBtnGap = 26;
-  constexpr int kBtnBottom = 17;  // 按钮中心距底部
-  const int total_w = kBtnSize * 3 + kBtnGap * 2;
-  const int start_x = (kWindowWidth - total_w) / 2;
-  const int btn_y = kWindowHeight - kBtnSize - kBtnBottom;
+  // 底部三钮：静音（左）· 挂断（中，略大白钮）· 免提（右）+ 下方标签
+  const int side_y = kBtnCy - kSideBtn / 2;
   if (mute_btn_) {
-    SetWindowPos(mute_btn_, nullptr, start_x, btn_y, kBtnSize, kBtnSize,
+    SetWindowPos(mute_btn_, nullptr, kMuteCx - kSideBtn / 2, side_y,
+                 kSideBtn, kSideBtn, SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  if (hangup_btn_) {
+    SetWindowPos(hangup_btn_, nullptr, kHangupCx - kMainBtn / 2,
+                 kBtnCy - kMainBtn / 2, kMainBtn, kMainBtn,
                  SWP_NOZORDER | SWP_NOACTIVATE);
   }
   if (speaker_btn_) {
-    SetWindowPos(speaker_btn_, nullptr, start_x + kBtnSize + kBtnGap, btn_y,
-                 kBtnSize, kBtnSize, SWP_NOZORDER | SWP_NOACTIVATE);
-  }
-  if (hangup_btn_) {
-    SetWindowPos(hangup_btn_, nullptr, start_x + (kBtnSize + kBtnGap) * 2,
-                 btn_y, kBtnSize, kBtnSize, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(speaker_btn_, nullptr, kSpeakerCx - kSideBtn / 2, side_y,
+                 kSideBtn, kSideBtn, SWP_NOZORDER | SWP_NOACTIVATE);
   }
 }
 
@@ -193,11 +235,9 @@ void ConnectedCallWindow::PositionAtBottomRight() {
 }
 
 void ConnectedCallWindow::Show(const std::string& caller_name,
-                               const std::string& caller_initial,
-                               uint32_t accent_color_hex) {
+                               const std::string& /*caller_initial*/,
+                               uint32_t /*accent_color_hex*/) {
   caller_name_ = Utf8ToWide(caller_name);
-  caller_initial_ = Utf8ToWide(caller_initial);
-  accent_color_ = accent_color_hex ? accent_color_hex : 0xFF34C759;
 
   if (!CreateWindowIfNeeded()) return;
   PositionAtBottomRight();
@@ -234,13 +274,6 @@ void ConnectedCallWindow::DestroyNativeWindow() {
       DestroyWindow(hangup_btn_);
     }
     hangup_btn_ = nullptr;
-  }
-  if (mute_brush_) { DeleteObject(mute_brush_); mute_brush_ = nullptr; }
-  if (speaker_brush_) { DeleteObject(speaker_brush_); speaker_brush_ = nullptr; }
-  if (hangup_brush_) { DeleteObject(hangup_brush_); hangup_brush_ = nullptr; }
-  if (action_border_brush_) {
-    DeleteObject(action_border_brush_);
-    action_border_brush_ = nullptr;
   }
   if (window_handle_) {
     if (IsWindow(window_handle_)) {
@@ -393,85 +426,63 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
   HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(mem, bmp));
 
-  // 白卡背景（32px 大圆角，DWM 阴影）
+  // 深色卡片背景（豆包风，28px 圆角，DWM 阴影）
   HBRUSH bg_brush = CreateSolidBrush(kBg);
   FillRect(mem, &rc, bg_brush);
   DeleteObject(bg_brush);
 
-  constexpr int kRadius = 32;
+  constexpr int kRadius = 28;
   HRGN clip_rgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1,
                                      kRadius, kRadius);
   SelectClipRgn(mem, clip_rgn);
 
-  COLORREF accent = ParseArgb(accent_color_);
-  SetBkMode(mem, TRANSPARENT);
-  HFONT old_font = nullptr;
+  // ── 中央波形圆 + 播报呼吸光环（双层相位错开） ──
+  if (talking_) {
+    double t = (pulse_phase_ % 30) / 30.0;
+    double t2 = fmod(t + 0.5, 1.0);
+    for (int i = 0; i < 2; ++i) {
+      const double tt = (i == 0) ? t : t2;
+      const int r = kAvatarR + 6 + static_cast<int>(16 * tt);
+      FillCircle(mem, kAvatarCx, kAvatarCy, r,
+                 MixColor(kBg, kCircle, 0.5 * (1 - tt)));
+    }
+  }
+  FillCircle(mem, kAvatarCx, kAvatarCy, kAvatarR, kCircle);
+  DrawWaveform(mem, kAvatarCx, kAvatarCy, 20, RGB(0xFF, 0xFF, 0xFF),
+               talking_ ? pulse_phase_ : -1);
 
-  // ── 名称（24px Semibold 近黑） ──
-  HFONT name_font = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+  // ── 名称（17px 白色 Semibold） ──
+  SetBkMode(mem, TRANSPARENT);
+  HFONT name_font = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_SWISS,
                                 L"Microsoft YaHei UI");
-  old_font = static_cast<HFONT>(SelectObject(mem, name_font));
+  HFONT old_font = static_cast<HFONT>(SelectObject(mem, name_font));
   SetTextColor(mem, kNameColor);
-  RECT name_rc = {20, 24, rc.right - 20, 54};
+  RECT name_rc = {20, kNameTop, rc.right - 20, kNameTop + 26};
   DrawTextW(mem, caller_name_.c_str(), -1, &name_rc,
             DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(name_font);
 
-  // ── 状态 + 计时（16px 中灰，mono 数字感） ──
-  std::wstring status_text = L"\u901A\u8BDD\u4E2D";  // 通话中
-  if (muted_) status_text = L"\u5DF2\u9759\u97F3";   // 已静音
-  std::wstring status_line = status_text + L"  " + FormatDuration(elapsed_seconds_);
-  HFONT status_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+  // ── 状态 + 计时（13px 中灰） ──
+  std::wstring status_text = muted_ ? L"\u5DF2\u9759\u97F3"   // 已静音
+                                    : L"\u901A\u8BDD\u4E2D";  // 通话中
+  std::wstring status_line =
+      status_text + L" \u00B7 " + FormatDuration(elapsed_seconds_);
+  HFONT status_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                   CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                  DEFAULT_PITCH | FF_SWISS, L"Consolas");
+                                  DEFAULT_PITCH | FF_SWISS,
+                                  L"Microsoft YaHei UI");
   old_font = static_cast<HFONT>(SelectObject(mem, status_font));
   SetTextColor(mem, kMutedColor);
-  RECT status_rc = {20, 56, rc.right - 20, 82};
+  RECT status_rc = {20, kStatusTop, rc.right - 20, kStatusTop + 22};
   DrawTextW(mem, status_line.c_str(), -1, &status_rc,
             DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
   SelectObject(mem, old_font);
   DeleteObject(status_font);
-
-  // ── 中央电话圆 + 呼吸光环 ──
-  const int cx = kWindowWidth / 2;
-  const int cy = 150;
-  const int base_r = 40;
-
-  if (talking_) {
-    // 呼吸光环（scale 1 → 1.55，两层相位错开）
-    double t = (pulse_phase_ % 30) / 30.0;
-    double t2 = fmod(t + 0.5, 1.0);
-    for (int i = 0; i < 2; ++i) {
-      double tt = (i == 0) ? t : t2;
-      double scale = 1.0 + 0.55 * tt;
-      double fade = 0.35 * (1.0 - tt);
-      int r = static_cast<int>(base_r * scale);
-      COLORREF ring = RGB(
-          static_cast<int>(GetRValue(accent) * fade + 255 * (1 - fade)),
-          static_cast<int>(GetGValue(accent) * fade + 255 * (1 - fade)),
-          static_cast<int>(GetBValue(accent) * fade + 255 * (1 - fade)));
-      FillCircle(mem, cx, cy, r, ring);
-    }
-  } else {
-    // 静态淡光环
-    COLORREF ring = RGB(
-        (GetRValue(accent) + 255 * 3) / 4,
-        (GetGValue(accent) + 255 * 3) / 4,
-        (GetBValue(accent) + 255 * 3) / 4);
-    FillCircle(mem, cx, cy, base_r + 10, ring);
-  }
-
-  FillCircle(mem, cx, cy, base_r, accent);
-  {
-    RECT icon_rc = {cx - base_r, cy - base_r, cx + base_r, cy + base_r};
-    DrawGlyph(mem, icon_rc, kGlyphPhone, RGB(255, 255, 255), 32,
-              L"Segoe MDL2 Assets");
-  }
 
   // ── 底部按钮标签（12px 中灰） ──
   HFONT label_font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -481,22 +492,10 @@ void ConnectedCallWindow::Paint(HWND hwnd, HDC hdc) {
                                  L"Microsoft YaHei UI");
   old_font = static_cast<HFONT>(SelectObject(mem, label_font));
   SetTextColor(mem, kMutedColor);
-  constexpr int kBtnSize = 54;
-  constexpr int kBtnGap = 26;
-  constexpr int kBtnBottom = 17;
-  const int total_w = kBtnSize * 3 + kBtnGap * 2;
-  const int start_x = (kWindowWidth - total_w) / 2;
-  const int center_y = kWindowHeight - kBtnBottom;
   RECT labels[3] = {
-      {start_x - kBtnSize / 2, center_y + kBtnSize / 2 + 2,
-       start_x + kBtnSize / 2, center_y + kBtnSize / 2 + 18},
-      {start_x + kBtnSize + kBtnGap - kBtnSize / 2,
-       center_y + kBtnSize / 2 + 2, start_x + kBtnSize + kBtnGap + kBtnSize / 2,
-       center_y + kBtnSize / 2 + 18},
-      {start_x + (kBtnSize + kBtnGap) * 2 - kBtnSize / 2,
-       center_y + kBtnSize / 2 + 2,
-       start_x + (kBtnSize + kBtnGap) * 2 + kBtnSize / 2,
-       center_y + kBtnSize / 2 + 18}};
+      {kMuteCx - 40, kLabelTop, kMuteCx + 40, kLabelTop + 18},
+      {kHangupCx - 40, kLabelTop, kHangupCx + 40, kLabelTop + 18},
+      {kSpeakerCx - 40, kLabelTop, kSpeakerCx + 40, kLabelTop + 18}};
   const wchar_t* label_texts[3] = {L"\u9759\u97F3", L"\u6302\u65AD",
                                    L"\u514D\u63D0"};  // 静音/挂断/免提
   for (int i = 0; i < 3; ++i) {
@@ -585,27 +584,27 @@ LRESULT ConnectedCallWindow::HandleMessage(HWND hwnd, UINT message,
         bool hovered = (dis->itemState & ODS_SELECTED) ||
                        (dis->itemState & ODS_HOTLIGHT);
         if (dis->CtlID == kIdMute) {
-          bool active = muted_;
-          DrawRoundActionButton(dis->hDC, dis->rcItem, kGlyphMic,
-                                active ? kActiveBg : kSecondaryBg,
-                                active ? RGB(255, 255, 255)
-                                       : RGB(0x1D, 0x1D, 0x1F),
-                                active);
+          const bool active = muted_;
+          DrawRoundActionButton(
+              dis->hDC, dis->rcItem, kGlyphMic,
+              active ? (hovered ? kWhiteBtnHover : kWhiteBtn)
+                     : (hovered ? kDarkBtnHover : kDarkBtn),
+              active ? kGlyphOnWhite : RGB(255, 255, 255), false);
           return TRUE;
         }
         if (dis->CtlID == kIdSpeaker) {
-          bool active = speaker_on_;
-          DrawRoundActionButton(dis->hDC, dis->rcItem, kGlyphVolume,
-                                active ? kActiveBg : kSecondaryBg,
-                                active ? RGB(255, 255, 255)
-                                       : RGB(0x1D, 0x1D, 0x1F),
-                                false);
+          const bool active = speaker_on_;
+          DrawRoundActionButton(
+              dis->hDC, dis->rcItem, kGlyphVolume,
+              active ? (hovered ? kWhiteBtnHover : kWhiteBtn)
+                     : (hovered ? kDarkBtnHover : kDarkBtn),
+              active ? kGlyphOnWhite : RGB(255, 255, 255), false);
           return TRUE;
         }
         if (dis->CtlID == kIdHangup) {
           DrawRoundActionButton(dis->hDC, dis->rcItem, kGlyphPhone,
-                                hovered ? kHangupHover : kHangupBg,
-                                RGB(255, 255, 255), true);
+                                hovered ? kWhiteBtnHover : kWhiteBtn,
+                                kGlyphOnWhite, true);
           return TRUE;
         }
       }
@@ -615,8 +614,20 @@ LRESULT ConnectedCallWindow::HandleMessage(HWND hwnd, UINT message,
       POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ScreenToClient(hwnd, &pt);
 
-      if (pt.y < 56 && pt.x < kWindowWidth && pt.y > 0) return HTCAPTION;
-      return HTCLIENT;
+      // 按钮区域外整卡可拖动
+      const int side_y = kBtnCy - kSideBtn / 2;
+      const bool in_mute = pt.x >= kMuteCx - kSideBtn / 2 &&
+                           pt.x <= kMuteCx + kSideBtn / 2 &&
+                           pt.y >= side_y && pt.y <= side_y + kSideBtn;
+      const bool in_speaker = pt.x >= kSpeakerCx - kSideBtn / 2 &&
+                              pt.x <= kSpeakerCx + kSideBtn / 2 &&
+                              pt.y >= side_y && pt.y <= side_y + kSideBtn;
+      const bool in_hangup = pt.x >= kHangupCx - kMainBtn / 2 &&
+                             pt.x <= kHangupCx + kMainBtn / 2 &&
+                             pt.y >= kBtnCy - kMainBtn / 2 &&
+                             pt.y <= kBtnCy + kMainBtn / 2;
+      if (in_mute || in_speaker || in_hangup) return HTCLIENT;
+      return HTCAPTION;
     }
     case kMsgDeferredHide:
       Hide();

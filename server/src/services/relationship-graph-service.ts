@@ -62,7 +62,7 @@ export interface RelationshipStorageLike {
       domain?: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<void>;
+  ): Promise<unknown>;
   buildRecall(
     actorId: string,
     query: string,

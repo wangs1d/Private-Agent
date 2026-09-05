@@ -33,6 +33,20 @@ import type {
   ProactiveBehaviorMode,
   ProactiveIntent,
 } from "./proactivity-types.js";
+import {
+  deriveActValue,
+  deriveRiskFromSteps,
+  evaluateActionUtility,
+  isUtilityEvalEnabled,
+  type ActionUtilityBranch,
+  type AuthorizationLevel,
+} from "./action-utility.js";
+import {
+  CONFIRMATION_TTL_MS,
+  PendingConfirmationStore,
+  type PendingConfirmation,
+} from "./pending-confirmation-store.js";
+import { SilenceLog, type SilenceLogEntry, type SilenceSearchOptions } from "./silence-log.js";
 import { FrequencyGovernor } from "./frequency-governor.js";
 import { PerceptionFeed } from "./perception-feed.js";
 import { InitiativeEngine, type LlmCompleteFn } from "./initiative-engine.js";
@@ -115,7 +129,21 @@ export interface ProactivityHubDeps {
       text?: string,
     ) => { suppressed: boolean; reason: string };
   };
+  /**
+   * 沉默日志（方案 B/C）：act 三分支判 silence 的留痕，与管道 silenced 共用
+   * 同一实例（装配层注入）。未注入时 hub 内建内存态（测试/降级）。
+   */
+  silenceLog?: SilenceLog;
+  /**
+   * 挂起确认存储（ask_first）：装配层注入与管道共享的同一实例（落盘可重启恢复）。
+   * 未注入时 hub 内建内存态。
+   */
+  pendingConfirmations?: PendingConfirmationStore;
 }
+
+/** 兼容别名：ask_first 挂起的确认条目（hub 行动级 + 管道提案级） */
+export type PendingActionConfirmation = PendingConfirmation;
+export { CONFIRMATION_TTL_MS };
 
 /**
  * act 模式危险工具黑名单（正则，工具名匹配即拒绝自动执行）。
@@ -147,6 +175,31 @@ function readEnvBool(name: string, fallback: boolean): boolean {
   return raw === "1" || raw.toLowerCase() === "true";
 }
 
+/**
+ * 触发源 → 授权档（act 三分支的授权维度输入，确定性映射）：
+ *   conversation = 用户原话触发（显式）；其余既有触发源由用户配置/长期偏好驱动
+ *   （隐式）；initiative 是用户显式开启的 LLM 主动性（env 开关 = 授权可逆自选
+ *   动作）；未知来源一律无授权（涉第三方必 ask_first）。
+ */
+const SOURCE_AUTHORIZATION: Record<string, AuthorizationLevel> = {
+  conversation: "explicit",
+  task: "implicit",
+  rhythm: "implicit",
+  profile: "implicit",
+  time: "implicit",
+  epitome: "implicit",
+  interest_watch: "implicit",
+  weather: "implicit",
+  finance: "implicit",
+  relationship: "implicit",
+  health: "implicit",
+  initiative: "implicit",
+};
+
+function authorizationForSource(source: string): AuthorizationLevel {
+  return SOURCE_AUTHORIZATION[source] ?? "none";
+}
+
 /** 从 media.search 结果解析第一条曲目（兼容数组 / {tracks:[]} / {result:{tracks:[]}} 结构） */
 export function parseFirstTrack(
   result: Record<string, unknown> | undefined,
@@ -170,6 +223,14 @@ export function parseFirstTrack(
 
 export class ProactivityHub {
   private readonly governor: FrequencyGovernor;
+  /** 沉默日志（act 三分支 silence 留痕；与管道共享实例由装配层注入） */
+  private readonly silenceLog: SilenceLog;
+  /** 挂起确认存储（ask_first；与管道共享实例由装配层注入，可落盘恢复） */
+  private readonly confirmations: PendingConfirmationStore;
+  /** 管道级确认回调（装配层在管道构造后接线：批准 → onProposalApproved + 回执） */
+  private pipelineConfirmationResolver:
+    | ((entry: PendingConfirmation, approved: boolean) => Promise<{ executed: boolean } | null> | { executed: boolean } | null)
+    | null = null;
   /** 通用感知层：所有源的统一观察流 */
   private readonly feed = new PerceptionFeed();
   /** 通用路径：LLM 自主决策引擎（llmComplete 未注入时禁用，静默只用快路径） */
@@ -194,8 +255,20 @@ export class ProactivityHub {
 
   constructor(private readonly deps: ProactivityHubDeps) {
     this.governor = deps.frequencyGovernor ?? new FrequencyGovernor();
+    this.silenceLog = deps.silenceLog ?? new SilenceLog();
+    this.confirmations = deps.pendingConfirmations ?? new PendingConfirmationStore();
     this.engine = new InitiativeEngine(deps.llmComplete ?? null);
     this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", false);
+  }
+
+  /**
+   * 接线管道级确认回调（装配层在管道构造后调用）：hub 的确认解析入口对
+   * origin=pipeline 的条目委托本回调（批准 → 管道 onProposalApproved + 回执）。
+   */
+  setPipelineConfirmationResolver(
+    fn: (entry: PendingConfirmation, approved: boolean) => Promise<{ executed: boolean } | null> | { executed: boolean } | null,
+  ): void {
+    this.pipelineConfirmationResolver = fn;
   }
 
   // ---- 已知 actor 持久化（重启恢复主动性资格：否则重启后 agent 永不主动） ----
@@ -568,16 +641,15 @@ export class ProactivityHub {
         } as ProactiveIntent);
         break;
       case "act":
-        await this.executeActs(actorId, decision.actions.map((a) => ({ tool: a.tool, args: a.args })));
-        // act 完成后附带轻量 speak 告知（让用户知道 agent 做了什么）
-        this.emitSpeakSignal({
+        await this.runActPlan({
           actorId,
           kind: decision.kind,
           importance: decision.importance,
-          title: `我刚才顺手做了点事：${rationale.slice(0, 40)}`,
-          summary: `行动计划：${decision.actions.map((a) => a.tool).join(" → ")}。${decision.messageHint}`,
+          steps: decision.actions.map((a) => ({ tool: a.tool, args: a.args })),
+          rationale,
+          messageHint: decision.messageHint,
           source,
-        } as ProactiveIntent);
+        });
         break;
       case "advise":
         // advise 不再注入对话 prompt，改由 fast speak 车道以主动对话形式投递。
@@ -651,9 +723,16 @@ export class ProactivityHub {
         this.emitSpeakSignal(intent);
         break;
       case "act":
-        await this.executeActs(intent.actorId, intent.actArgs ?? []);
-        // act 完成后附带 speak 告知（overwork_care 这类干预需要让用户知道做了什么）
-        this.emitSpeakSignal(intent);
+        // 三分支执行语义（方案 C）：效用评估 → 静默执行 / 先问 / 沉默
+        await this.runActPlan({
+          actorId: intent.actorId,
+          kind: intent.kind,
+          importance: intent.importance,
+          steps: intent.actArgs ?? [],
+          rationale: intent.title,
+          messageHint: intent.summary,
+          source: intent.source,
+        });
         break;
       case "advise":
         // advise 不再注入对话 prompt（会污染对话），改由 fast speak 车道以主动对话形式投递。
@@ -686,24 +765,197 @@ export class ProactivityHub {
     }
   }
 
+  // ─── 方案 C：三分支执行语义（execute_silently / ask_first / silence）───
+
+  /**
+   * 行动计划统一入口：先过 Action Utility 评估（零 LLM 确定性规则）再执行。
+   *   execute_silently —— 可逆 + 已授权 + 高净效用：直接执行不通知（act 审计留痕）
+   *   ask_first        —— 不可逆 / 高金融 / 无授权涉第三方：挂起计划，发确认请求等用户回复
+   *   silence          —— 净效用为负：什么都不做，但记入沉默日志（可反问追溯）
+   * PROACTIVITY_UTILITY_EVAL=0 时整体回退升级前行为：直接执行 + speak 告知。
+   */
+  private async runActPlan(input: {
+    actorId: string;
+    kind: string;
+    importance: "high" | "medium" | "low";
+    steps: Array<{ tool: string; args: Record<string, unknown> }>;
+    rationale: string;
+    messageHint: string;
+    source: string;
+  }): Promise<ActionUtilityBranch> {
+    if (input.steps.length === 0) return "silence"; // 空计划无可执行内容
+
+    // 回退开关：跳过效用评估，恢复「直接执行 + 事后告知」的升级前语义
+    if (!isUtilityEvalEnabled()) {
+      await this.executeActs(input.actorId, input.steps);
+      this.emitSpeakSignal({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: input.importance,
+        title: `我刚才顺手做了点事：${input.rationale.slice(0, 40)}`,
+        summary: `行动计划：${input.steps.map((s) => s.tool).join(" → ")}。${input.messageHint}`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
+      return "execute_silently";
+    }
+
+    const result = evaluateActionUtility({
+      kind: input.kind,
+      title: input.rationale,
+      risk: deriveRiskFromSteps(input.steps),
+      authorization: authorizationForSource(input.source),
+      value: deriveActValue(input.importance),
+    });
+
+    if (result.branch === "execute_silently") {
+      await this.executeActs(input.actorId, input.steps);
+      console.log(
+        `[ProactivityHub] act 静默执行 kind=${input.kind} tools=${input.steps.map((s) => s.tool).join(",")} netUtility=${result.netUtility}`,
+      );
+      return result.branch;
+    }
+    if (result.branch === "ask_first") {
+      const planSummary = input.steps.map((s) => s.tool).join(" → ");
+      const pending = this.confirmations.register({
+        actorId: input.actorId,
+        kind: input.kind,
+        steps: input.steps,
+        rationale: input.rationale,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+        origin: "hub",
+      });
+      // 暂停执行，确认请求即本次主动消息；回复「可以」走 resolveConfirmation 推进
+      this.emitSpeakSignal({
+        actorId: input.actorId,
+        kind: input.kind,
+        importance: input.importance,
+        title: `需要确认：${input.rationale.slice(0, 40)}`,
+        summary:
+          `我准备执行：${planSummary}。${input.messageHint} ` +
+          `${result.reason.startsWith("unauthorized_third_party") ? "这件事会影响第三方，" : ""}可以吗？`,
+        mode: "speak",
+        source: input.source,
+      } as ProactiveIntent);
+      console.log(
+        `[ProactivityHub] act 待确认（ask_first）kind=${input.kind} confirmId=${pending.confirmId} reason=${result.reason}`,
+      );
+      return result.branch;
+    }
+    // silence：什么都不做但记录决策（方案 B 沉默日志，支持反问追溯）
+    this.silenceLog.record({
+      at: Date.now(),
+      actorId: input.actorId,
+      kind: input.kind,
+      title: input.rationale.slice(0, 60),
+      source: input.source,
+      scope: "action",
+      netUtility: result.netUtility,
+      riskScore: result.riskScore,
+      valueScore: result.valueScore,
+      reason: result.reason,
+    });
+    console.log(
+      `[ProactivityHub] act 沉默 kind=${input.kind} netUtility=${result.netUtility} reason=${result.reason}`,
+    );
+    return result.branch;
+  }
+
+  /** 待确认条目列表（hub 行动级 + 管道提案级；对话工具/诊断接口读取，过期自动剔除） */
+  listPendingConfirmations(actorId: string): PendingActionConfirmation[] {
+    return this.confirmations.list(actorId);
+  }
+
+  /**
+   * 用户回复推进挂起的确认：approved=true 执行计划；false/超时作废。
+   * confirmId 省略时取该 actor 最新一条（语音回复「可以」的单活跃假设）。
+   *   origin=hub      → 执行工具步骤（黑名单安全门兜底）+ 结果 speak 反馈
+   *   origin=pipeline → 委托 setPipelineConfirmationResolver 注入的管道回调
+   */
+  async resolveConfirmation(
+    actorId: string,
+    approved: boolean,
+    confirmId?: string,
+  ): Promise<{ ok: boolean; executed: boolean; confirmId?: string; error?: string }> {
+    this.confirmations.pruneExpired();
+    let entry: PendingConfirmation | undefined;
+    if (confirmId) {
+      const found = this.confirmations.get(confirmId);
+      if (found && found.actorId === actorId) entry = found;
+    } else {
+      const mine = this.confirmations.list(actorId);
+      entry = mine[mine.length - 1];
+    }
+    if (!entry) return { ok: false, executed: false, error: "没有待确认的行动计划" };
+    this.confirmations.take(entry.confirmId);
+
+    if (!approved) return { ok: true, executed: false, confirmId: entry.confirmId };
+
+    if (entry.origin === "pipeline") {
+      const result = await this.pipelineConfirmationResolver?.(entry, true);
+      return { ok: true, executed: result?.executed ?? false, confirmId: entry.confirmId };
+    }
+
+    const results = await this.executeActs(actorId, entry.steps);
+    this.emitConfirmationFeedback(actorId, entry, results);
+    return { ok: true, executed: results.some((r) => r.ok), confirmId: entry.confirmId };
+  }
+
+  /** 确认后的执行结果反馈（用户显式参与过的动作必须闭环告知；静默分支不受影响） */
+  private emitConfirmationFeedback(
+    actorId: string,
+    entry: PendingConfirmation,
+    results: Array<{ tool: string; ok: boolean }>,
+  ): void {
+    const tools = entry.steps.map((s) => s.tool).join(" → ");
+    const okCount = results.filter((r) => r.ok).length;
+    let summary: string;
+    if (results.length === 0 || okCount === 0) {
+      summary = `你确认的操作（${tools}）未能执行：安全策略拦截或执行失败。`;
+    } else if (okCount < results.length) {
+      summary = `已按你的确认部分完成（${okCount}/${results.length}）：${tools}。失败部分我不再自动重试。`;
+    } else {
+      summary = `已按你的确认完成：${tools}。`;
+    }
+    this.emitSpeakSignal({
+      actorId,
+      kind: entry.kind,
+      importance: okCount === results.length ? "low" : "medium",
+      title: okCount === 0 ? "确认的操作未执行" : "确认的操作已完成",
+      summary,
+      mode: "speak",
+      source: "task",
+    } as ProactiveIntent);
+  }
+
+  /** 沉默决策检索（「你上周为什么没提醒我 XX」反问链路） */
+  searchSilences(opts: SilenceSearchOptions): SilenceLogEntry[] {
+    return this.silenceLog.search(opts);
+  }
+
   /**
    * act 模式：按序静默执行工具（黑名单安全门 + 步数上限，失败仅日志不抛出）。
    * 通用路径与快路径共用；LLM 自主选的工具只要不踩黑名单即可执行。
+   * 返回每个已尝试步骤的结果（确认闭环据此向用户反馈；blocked=安全门拦截）。
    */
   private async executeActs(
     actorId: string,
     steps: Array<{ tool: string; args: Record<string, unknown> }>,
-  ): Promise<void> {
+  ): Promise<Array<{ tool: string; ok: boolean; blocked?: boolean }>> {
     const results: Array<Record<string, unknown>> = [];
+    const outcomes: Array<{ tool: string; ok: boolean; blocked?: boolean }> = [];
     for (const step of steps.slice(0, ACT_MAX_STEPS)) {
       if (ACT_TOOL_DENY_RE.test(step.tool)) {
         console.log(`[ProactivityHub] act 步骤被安全门拦截（危险操作）: ${step.tool}`);
+        outcomes.push({ tool: step.tool, ok: false, blocked: true });
         continue;
       }
       const args = this.resolveStepArgs(step as ProactiveActStep, results);
       try {
         const ret = await this.deps.executeTool(step.tool, args, actorId);
         results.push(ret?.result ?? {});
+        outcomes.push({ tool: step.tool, ok: ret?.ok === true });
         console.log(
           `[ProactivityHub] act 执行 ${ret?.ok ? "成功" : "失败"} tool=${step.tool} actor=${actorId}`,
         );
@@ -712,9 +964,11 @@ export class ProactivityHub {
         if (!ret?.ok) break; // 前置步骤失败则中断链（如 search 失败不硬播）
       } catch (err) {
         console.log(`[ProactivityHub] act 执行异常 tool=${step.tool}（忽略）: ${err}`);
+        outcomes.push({ tool: step.tool, ok: false });
         break;
       }
     }
+    return outcomes;
   }
 
   /** 记录一次自主工具执行（act 审计；内存环形保留近 N 条） */

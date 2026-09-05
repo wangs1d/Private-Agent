@@ -65,3 +65,33 @@ export {
   getAgenticMemoryTopK,
   isAgenticMemoryEnabled,
 } from "./env.js";
+
+// ============================================================
+// 组件注册表：create-app-services 装配后登记四件套实例，
+// 供 memory-clear-service（级联清理）/ prompt-context（承诺注入）/
+// health 快照等无装配上下文的消费方获取。测试环境默认全 null。
+// ============================================================
+
+export interface AgenticMemoryComponents {
+  ledger: import("./ledger.js").AgenticLedger | null;
+  commitmentBoard: import("./commitment-board.js").CommitmentBoard | null;
+  provenance: import("./provenance.js").ProvenanceService | null;
+  bridge: import("./memory-bridge-service.js").MemoryBridgeService | null;
+  factRegistry: import("./user-fact-registry.js").UserFactRegistry | null;
+}
+
+const components: AgenticMemoryComponents = {
+  ledger: null,
+  commitmentBoard: null,
+  provenance: null,
+  bridge: null,
+  factRegistry: null,
+};
+
+export function registerMemoryComponents(part: Partial<AgenticMemoryComponents>): void {
+  Object.assign(components, part);
+}
+
+export function getMemoryComponents(): AgenticMemoryComponents {
+  return components;
+}

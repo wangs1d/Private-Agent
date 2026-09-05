@@ -1,10 +1,8 @@
 // Agent — TaskIntent（任务执行意图的"单一来源"判定）
 //
-// 收敛背景：此前 task-router / rule-router / 早期 isTaskExecutionRequest 各维护一套
-// 任务分类正则，彼此易漂移，大量"自由表达的任务指令"从关键词夹缝落到默认 fast 而失败。
-// 本模块作为唯一的"泛化任务意图"判定源，被以下两个权威共同消费，保证两条判定一致：
-//   - task-router.routeLlmExecution（WS 层的 routeTask，实际路由权威）
-//   - brain/rule-router.route（DecisionHub 声明的单一权威）
+// 收敛背景：本模块是 brain 侧（rule-router/DecisionHub）的"泛化任务意图"判定源。
+// 2026-09-05 双面架构后，对话执行路由已收口到 llm-task-router 的语义分类，
+// 本判定只服务于 brain 内部的诊断路由与工作记忆管理，不再参与执行平面决策。
 //
 // 设计原则（Option A）：
 //   - fast 是 maxRounds=1 + 轻量工具 的有损模式：fast 接任务 = 任务直接失败，fast 接闲聊只是

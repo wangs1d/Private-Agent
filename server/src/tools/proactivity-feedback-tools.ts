@@ -6,8 +6,17 @@
 // 检查抑制表，命中即放弃。用户改主意（「可以继续提醒我了」）用 action=remove
 // 解除。
 //
+// 工具：proactivity.confirmAction —— act 三分支 ask_first 的确认闭环（方案 C）。
+// agent 发出「需要确认：…」后，用户在对话中回复「可以/不行」，LLM 调本工具
+// approve/reject 推进挂起的行动计划。
+//
+// 工具：proactivity.whySilent —— 沉默决策反问（方案 B）。用户问「你上周为什么
+// 没提醒我 XX」时检索沉默日志，给出当时的效用评估依据。
+//
 // 安全性：只写本地抑制 JSON，无外部副作用，add/remove 均可逆。
 import type { ProactivitySuppressionStore } from "../proactivity/suppression-store.js";
+import type { PendingActionConfirmation } from "../proactivity/proactivity-hub.js";
+import type { SilenceLogEntry } from "../proactivity/silence-log.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -150,4 +159,176 @@ export function registerProactivityFeedbackTools(
       createdAt: e.createdAt,
     };
   }
+}
+
+// ============================================================
+// act 三分支确认闭环（方案 C）+ 沉默反问（方案 B）
+// ============================================================
+
+/** hub 侧最小接口（装配层注入 ProactivityHub 实例，避免工具层依赖装配细节） */
+export interface ProactivityHubToolFacade {
+  listPendingConfirmations(actorId: string): PendingActionConfirmation[];
+  resolveConfirmation(
+    actorId: string,
+    approved: boolean,
+    confirmId?: string,
+  ): Promise<{ ok: boolean; executed: boolean; confirmId?: string; error?: string }>;
+  searchSilences(opts: {
+    actorId?: string;
+    keyword?: string;
+    sinceMs?: number;
+    kind?: string;
+    limit?: number;
+  }): SilenceLogEntry[];
+}
+
+/** proactivity.confirmAction / proactivity.whySilent 的 LLM 工具声明 */
+export const PROACTIVITY_CONFIRM_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "proactivity.confirmAction",
+      description: [
+        "推进之前发出「需要确认：…」的挂起行动计划（ask_first 确认闭环）。",
+        "当你此前主动询问用户是否执行某行动（如发消息、下单、代催促），用户在对话中给出肯定/否定答复时调用：",
+        "approved=true（用户说「可以/行/做吧」）或 approved=false（用户说「不用了/别做」）；confirmId 省略时自动取最近一条待确认。",
+        "action=list 可查看当前所有待确认计划。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["resolve", "list"],
+            description: "resolve=推进确认（需 approved），list=查看待确认列表",
+          },
+          approved: {
+            type: "boolean",
+            description: "action=resolve 时必填：用户是否同意执行",
+          },
+          confirmId: {
+            type: "string",
+            description: "要推进的确认 ID（省略=最近一条待确认）",
+          },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "proactivity.whySilent",
+      description: [
+        "检索主动性系统的沉默决策日志：用户问「你为什么没提醒我 XX」「上次为什么不直接做」时调用。",
+        "返回效用评估后主动选择不动作的记录（净效用/风险分/命中规则），据此向用户解释当时的判断依据。",
+        "keyword 填用户提到的对象（如「体检」「刘浩存」），days 填回溯天数（默认 7）。",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: { type: "string", description: "检索关键词（匹配类别/标题/原因）" },
+          days: { type: "number", description: "回溯天数（默认 7，最大 90）" },
+          kind: { type: "string", description: "可选：限定触达类别" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+/**
+ * 注册 act 确认闭环与沉默反问工具。
+ * @param toolRegistry 统一工具注册中心
+ * @param hub ProactivityHub 的工具面（装配层注入）
+ */
+export function registerProactivityConfirmTools(
+  toolRegistry: ToolRegistry,
+  hub: ProactivityHubToolFacade,
+): void {
+  toolRegistry.register(
+    "proactivity.confirmAction",
+    async (input, context) => {
+      const action = String(input?.action ?? "").trim().toLowerCase();
+      const actorId = resolveActorId(context);
+      try {
+        if (action === "list") {
+          const list = hub.listPendingConfirmations(actorId);
+          return {
+            ok: true,
+            message: list.length
+              ? `当前有 ${list.length} 条待确认行动计划。`
+              : "当前没有待确认的行动计划。",
+            pending: list.map((c) => ({
+              confirmId: c.confirmId,
+              kind: c.kind,
+              rationale: c.rationale,
+              steps: c.steps.map((s) => s.tool),
+              expiresAt: new Date(c.expiresAt).toISOString(),
+            })),
+          };
+        }
+        if (action === "resolve") {
+          const approved = input?.approved === true;
+          if (typeof input?.approved !== "boolean") {
+            return { ok: false, error: "action=resolve 需要布尔 approved（用户是否同意）" };
+          }
+          const confirmId = input?.confirmId ? String(input.confirmId) : undefined;
+          const result = await hub.resolveConfirmation(actorId, approved, confirmId);
+          if (!result.ok) return { ok: false, error: result.error ?? "没有待确认的行动计划" };
+          return {
+            ok: true,
+            message: approved
+              ? `已执行确认 ${result.confirmId} 的行动计划。`
+              : `已取消确认 ${result.confirmId} 的行动计划（不执行）。`,
+            executed: result.executed,
+            confirmId: result.confirmId,
+          };
+        }
+        return { ok: false, error: `未知 action「${action}」。可选：resolve / list。` };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    { category: "life", sideEffect: "none", riskLevel: "low" },
+  );
+
+  toolRegistry.register(
+    "proactivity.whySilent",
+    async (input, context) => {
+      const actorId = resolveActorId(context);
+      const days = Math.max(1, Math.min(90, Number(input?.days) > 0 ? Number(input.days) : 7));
+      const keyword = input?.keyword ? String(input.keyword) : undefined;
+      const kind = input?.kind ? String(input.kind) : undefined;
+      try {
+        const entries = hub.searchSilences({
+          actorId,
+          keyword,
+          kind,
+          sinceMs: Date.now() - days * 24 * 60 * 60 * 1000,
+          limit: 10,
+        });
+        return {
+          ok: true,
+          message: entries.length
+            ? `最近 ${days} 天命中 ${entries.length} 条沉默决策（keyword=${keyword ?? "-"}）。`
+            : `最近 ${days} 天没有命中「${keyword ?? kind ?? "-"}」的沉默决策记录。`,
+          silences: entries.map((e) => ({
+            at: new Date(e.at).toISOString(),
+            kind: e.kind,
+            title: e.title,
+            scope: e.scope,
+            netUtility: e.netUtility,
+            riskScore: e.riskScore,
+            valueScore: e.valueScore,
+            reason: e.reason,
+          })),
+        };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    { category: "life", sideEffect: "none", riskLevel: "low" },
+  );
 }

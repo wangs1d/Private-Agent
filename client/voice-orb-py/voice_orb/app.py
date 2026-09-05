@@ -1,21 +1,32 @@
-# Agent 纯语音对话模式 —— PySide6 声纹波形（无常驻悬浮球）
+# Agent 纯语音对话模式 —— 常驻竖波悬浮件（桌面唯一可见形态）
 #
-# 形态：待机时桌面上"什么都没有"——orb 进程隐身运行，只跑唤醒监听；
-# 唤醒命中或对话进行时，屏幕下方浮现一块声纹波形（无框/透明/置顶/不抢焦点），
-# 对话结束自动淡出。设计详见 docs/voice-mode-architecture.md。
+# 形态：语音模式下桌面上没有任何画面，只有一个**常驻的竖波悬浮件**——
+# 一枚细长的竖向波纹胶囊（无框/透明/置顶/不抢焦点），波纹随对话状态起伏，
+# 即语音模式的"化身"。悬浮件是模式切换的唯一入口：
+#   - 鼠标悬停 → 右侧滑出「界面模式」选择组件，点击切回完整界面模式
+#   - 左键点击（未拖动）→ 直接开始聆听（免唤醒词说话）
+#   - 拖动 → 换位置；右键菜单 → 静音 / 打开主界面
 #
-# 职责：
-#   1. WaveformOverlay：四态声纹浮窗（聆听/思考/播报/提示），淡入淡出、可拖动、右键菜单
-#   2. WakeListener：语音唤醒（滑窗 ASR 匹配唤醒词；Phase 2 计划换本地热词模型）
-#   3. ListeningRecorder：VAD 端点检测录音（静默 700ms 自动说完，免按键连续对话）
-#   4. MicMonitor：TTS 播放期间的人声监视（barge-in lite：用户开口即停播）
-#   5. 语音链路：录音 → ASR /brain/sensory/listen → WS chat.user_message →
+# 对话直达所有能力（Surface-on-Demand）：悬浮件左侧浮现**临时浮层卡**
+# （自动淡出、可关闭、悬停暂停淡出）：
+#   - 今日安排：surface.show(today_schedule) → GET /api/schedule/today 自取数据
+#   - 图片/视频：chat.media_ready / chat.assistant_done(mediaCards) → 缩略图墙，
+#     点击用系统浏览器打开
+#
+# 职责清单：
+#   1. VerticalWaveOrb：竖向波纹胶囊（待机/聆听/思考/播报/提示五态）+ 悬停模式选择
+#   2. ToastCard / CardStack：浮层卡片（日程/媒体/文本），TTL 自动淡出
+#   3. WakeListener：语音唤醒（滑窗 ASR 匹配唤醒词；Phase 2 计划换本地热词模型）
+#   4. ListeningRecorder：VAD 端点检测录音（静默 700ms 自动说完，免按键连续对话）
+#   5. MicMonitor：TTS 播放期间的人声监视（barge-in lite：用户开口即停播）
+#   6. 语音链路：录音 → ASR /brain/sensory/listen → WS chat.user_message →
 #      chat.assistant_done → TTS /brain/sensory/speak → QMediaPlayer 播放
-#   6. 语音退出：识别到"打开界面/退出语音…" → PAGE_MODE_REQUESTED → 进程退出，
-#      父进程（Flutter）恢复主窗口
+#   7. 语音退出：识别到"打开界面/退出语音…" 或点击「界面模式」→
+#      PAGE_MODE_REQUESTED → 进程退出，父进程（Flutter）恢复主窗口
 #
 # 线程约定：QThread / QMediaPlayer / QWidget 只能在主线程操作。工作线程
-# （ASR、TTS 请求）一律通过 Signal 回主线程，不得直接触碰 UI / 播放器 / QTimer。
+# （ASR、TTS、日程/缩略图 HTTP 请求）一律通过 Signal 回主线程，
+# 不得直接触碰 UI / 播放器 / QTimer。
 from __future__ import annotations
 
 import asyncio
@@ -35,6 +46,7 @@ import traceback
 import wave
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum, auto
 from typing import Optional
 
@@ -48,28 +60,41 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    QPointF,
     Signal,
 )
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QDesktopServices,
     QFont,
+    QFontMetrics,
     QPainter,
+    QPainterPath,
     QPen,
-    QRadialGradient,
+    QPixmap,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 
-class WaveState(Enum):
-    """声纹浮窗状态机。HIDDEN = 隐身（仅唤醒监听）。"""
+class OrbState(Enum):
+    """竖波悬浮件状态机。语音模式下悬浮件常驻可见，IDLE = 待机呼吸。"""
 
-    HIDDEN = auto()
-    LISTENING = auto()   # 聆听：波形随麦克风实时响度起伏
-    THINKING = auto()    # 思考：波形缓慢行进（LLM 生成中）
-    SPEAKING = auto()    # 播报：波形随音节包络起伏（TTS 播放中）
-    NOTE = auto()        # 提示：短暂显示一句提示后淡出（如"没听清"）
+    IDLE = auto()        # 待机：呼吸波纹（悬浮件常驻的唯一"安静"形态）
+    LISTENING = auto()   # 聆听：波纹随麦克风实时响度起伏
+    THINKING = auto()    # 思考：波纹缓慢行进（识别 / LLM 生成中）
+    SPEAKING = auto()    # 播报：波纹随音节包络起伏（TTS 播放中）
+    NOTE = auto()        # 提示：短暂显示一句提示后回到待机（如"没听清"）
 
 
 @dataclass
@@ -95,8 +120,7 @@ class VoiceOrbConfig:
 
 
 # 语音退出口令：识别文本命中任意一条 → 请求父进程恢复页面并退出 orb。
-# 语音模式没有可见 UI，这是用户不说话时也能找回窗口的兜底之一
-#（另一个是波形右键菜单）。
+# 悬浮件的 hover「界面模式」按钮是图形入口，这里是语音入口，二者等价。
 EXIT_PHRASES = (
     "打开界面", "回到界面", "显示界面", "打开主界面", "显示主界面",
     "回到页面", "打开页面", "显示页面", "回到主页",
@@ -117,6 +141,16 @@ def rms_of(data: bytes) -> float:
     shorts = struct.unpack(f"{count}h", data)
     sum_squares = sum((s / 32768.0) ** 2 for s in shorts)
     return (sum_squares / count) ** 0.5 * 32768.0
+
+
+def resolve_media_url(http_base: str, url: str) -> str:
+    """把服务端相对路径（如 /agent/images/x.png）拼成完整 URL。"""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    return http_base.rstrip("/") + (u if u.startswith("/") else "/" + u)
 
 
 def transcribe_wav(cfg: VoiceOrbConfig, wav_path: str, timeout: float = 30) -> str:
@@ -209,7 +243,7 @@ class ListeningRecorder(MicStreamBase):
       - 响度连续 `SPEECH_START_CHUNKS` 块超阈值 → 判定开始说话；
       - 开始说话后，静默持续 `SILENCE_MS` → 判定说完，发出 finished(wav 路径)；
       - 未开始说话时等待超过 `pre_speech_timeout_s`（>0 时）→ aborted("no_speech")，
-        用于追问窗口（"继续说，或等我隐身"）；
+        用于追问窗口（"继续说，或等我待机"）；
       - 无论是否说完，开口后总时长超过 `MAX_DURATION_S` → 强制收尾。
     为避免吞字，wav 里包含说话前 0.5s 的预缓冲。
     """
@@ -489,13 +523,20 @@ class WakeListener(QThread):
 
 
 class WsClient(QThread):
-    """WebSocket 客户端：负责 session.init + 收发聊天事件。"""
+    """WebSocket 客户端：负责 session.init + 收发聊天事件。
+
+    语音模式下用户消息由 orb 自己的连接发出，因此 assistant_chunk/done、
+    chat.media_ready（边说边出图）都会回到本连接；surface.show 由服务端按
+    actor 广播（registry fan-out），orb 与 Flutter 主进程都会收到。
+    """
 
     connected = Signal()
     disconnected = Signal(str)
     assistant_chunk = Signal(str, str)   # message_id, text
-    assistant_done = Signal(str)         # message_id
+    assistant_done = Signal(dict)        # chat.assistant_done 完整 payload
     turn_started = Signal(str)
+    surface_show = Signal(dict)          # surface.show payload（对话召唤浮层卡）
+    media_ready = Signal(dict)           # chat.media_ready payload（边说边出图）
     error = Signal(str)
 
     def __init__(self, cfg: VoiceOrbConfig, parent: Optional[QObject] = None) -> None:
@@ -603,9 +644,13 @@ class WsClient(QThread):
                         payload.get("text", ""),
                     )
                 elif typ == "chat.assistant_done":
-                    self.assistant_done.emit(payload.get("messageId", ""))
+                    self.assistant_done.emit(payload if isinstance(payload, dict) else {})
                 elif typ == "chat.turn_started":
                     self.turn_started.emit(payload.get("messageId", ""))
+                elif typ == "surface.show":
+                    self.surface_show.emit(payload if isinstance(payload, dict) else {})
+                elif typ == "chat.media_ready":
+                    self.media_ready.emit(payload if isinstance(payload, dict) else {})
             except Exception as exc:  # noqa: BLE001
                 self.error.emit(f"解析消息失败：{exc}")
 
@@ -619,130 +664,319 @@ class WsClient(QThread):
             await asyncio.sleep(0.05)
 
 
-class WaveformOverlay(QWidget):
-    """声纹波形浮窗：语音模式在桌面上的全部"存在"。
+# ─────────────────────────────────────────────────────────────────────────────
+# 竖波悬浮件 + 模式选择 + 状态提示
+# ─────────────────────────────────────────────────────────────────────────────
 
-    - 无框 / 透明 / 置顶 / 不接受焦点（不抢键盘，不进任务栏）
-    - 显示/隐藏由 VoiceSession 控制：淡入 → 对话 → 淡出 → 隐身
-    - 左键拖动换位置；右键菜单：打开主界面 / 静音
+
+def _float_flags(widget: QWidget) -> None:
+    """浮层通用窗口旗标：无框 / 置顶 / 工具窗 / 不抢焦点 + 透明背景。"""
+    widget.setWindowFlags(
+        Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.WindowStaysOnTopHint
+        | Qt.WindowType.Tool
+        | Qt.WindowType.WindowDoesNotAcceptFocus
+    )
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+
+
+class ModeSelector(QWidget):
+    """模式选择组件：悬停竖波悬浮件时从其右侧滑出。
+
+    当前只有一个切换项「界面模式」→ 点击发出 page_mode_requested，
+    由 VoiceSession 上报父进程恢复 Flutter 主窗口（等价于语音说"打开界面"）。
+    """
+
+    page_mode_requested = Signal()
+
+    WIDTH = 150
+    HEIGHT = 48
+    HOVER_HIDE_DELAY_MS = 280
+
+    def __init__(self) -> None:
+        super().__init__()
+        _float_flags(self)
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+        self._hovered = False
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._maybe_hide)
+        self._fade = QPropertyAnimation(self, b"windowOpacity")
+        self._fade.setDuration(160)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    # ---- 展示 / 隐藏（主线程） ----
+
+    def popup_near(self, orb: "VerticalWaveOrb") -> None:
+        """出现在 orb 右侧；右侧放不下（贴边拖动过）则翻到左侧。"""
+        self._hide_timer.stop()
+        screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else None
+        gap = 10
+        x = orb.x() + orb.width() + gap
+        if geo is not None and x + self.WIDTH > geo.right() - 8:
+            x = orb.x() - gap - self.WIDTH
+        y = orb.y() + (orb.height() - self.HEIGHT) // 2
+        if geo is not None:
+            y = max(geo.top() + 8, min(y, geo.bottom() - self.HEIGHT - 8))
+        self.move(x, y)
+        if not self.isVisible():
+            self.setWindowOpacity(0.0)
+            self.show()
+        self._fade.stop()
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self.raise_()
+
+    def request_hide(self) -> None:
+        """离开悬浮件/本组件后延迟隐藏（给鼠标移入本组件留时间）。"""
+        self._hide_timer.start(self.HOVER_HIDE_DELAY_MS)
+
+    def _maybe_hide(self) -> None:
+        if self.isVisible() and not self.underMouse():
+            self._fade.stop()
+            self._fade.setStartValue(self.windowOpacity())
+            self._fade.setEndValue(0.0)
+            self._fade.start()
+            QTimer.singleShot(170, self._hide_if_faded)
+
+    def _hide_if_faded(self) -> None:
+        if self.isVisible() and self.windowOpacity() <= 0.02 and not self.underMouse():
+            self.hide()
+
+    # ---- 交互 ----
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hovered = True
+        self._hide_timer.stop()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hovered = False
+        self.update()
+        self.request_hide()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.page_mode_requested.emit()
+            event.accept()
+
+    # ---- 绘制 ----
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            w, h = self.WIDTH, self.HEIGHT
+            radius = 14.0
+            bg = QColor(15, 17, 26, 225) if not self._hovered else QColor(30, 34, 50, 235)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(0, 0, w, h, radius, radius)
+            border = QColor(96, 165, 250, 90) if self._hovered else QColor(255, 255, 255, 30)
+            painter.setPen(QPen(border, 1.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(0.5, 0.5, w - 1, h - 1, radius, radius)
+
+            # 左侧小"窗口"图标：圆角外框 + 底部任务条
+            icon = QColor(96, 165, 250, 230)
+            painter.setPen(QPen(icon, 1.6))
+            painter.drawRoundedRect(16, 14, 20, 15, 3.5, 3.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(icon))
+            painter.drawRoundedRect(16, 24, 20, 5, 2.0, 2.0)
+
+            painter.setPen(QPen(QColor(230, 233, 240, 235)))
+            painter.setFont(QFont("Microsoft YaHei", 11))
+            painter.drawText(
+                44, 0, w - 52, h,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                "界面模式",
+            )
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
+class StatusPill(QLabel):
+    """悬浮件上方的状态提示小药丸（"我在听，请说" / 识别预览 / 错误提示）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        _float_flags(self)
+        self.setStyleSheet(
+            "background-color: rgba(15,17,26,215);"
+            "color: #E6E9F0;"
+            "border: 1px solid rgba(255,255,255,28);"
+            "border-radius: 14px;"
+            "padding: 7px 14px;"
+            "font-size: 12px;"
+        )
+        self._fade = QPropertyAnimation(self, b"windowOpacity")
+        self._fade.setDuration(180)
+
+    def show_text(self, text: str) -> None:
+        if not text:
+            self.fade_out()
+            return
+        self.setText(text)
+        self.adjustSize()
+        if not self.isVisible():
+            self.setWindowOpacity(0.0)
+            self.show()
+        self._fade.stop()
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self.raise_()
+
+    def fade_out(self) -> None:
+        if not self.isVisible():
+            return
+        self._fade.stop()
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+        QTimer.singleShot(200, self._hide_if_faded)
+
+    def _hide_if_faded(self) -> None:
+        if self.isVisible() and self.windowOpacity() <= 0.02:
+            self.hide()
+
+    def position_near(self, orb: "VerticalWaveOrb") -> None:
+        """居中悬浮件上方；顶部放不下则翻到下方。"""
+        if not self.isVisible():
+            return
+        screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else None
+        x = orb.x() + (orb.width() - self.width()) // 2
+        y = orb.y() - self.height() - 10
+        if geo is not None:
+            x = max(geo.left() + 8, min(x, geo.right() - self.width() - 8))
+            if y < geo.top() + 8:
+                y = orb.y() + orb.height() + 10
+        self.move(x, y)
+
+
+class VerticalWaveOrb(QWidget):
+    """常驻竖波悬浮件：语音模式在桌面上的全部"存在"。
+
+    - 细长竖向胶囊，内部三条竖向行进的波纹曲线（"竖波纹路"），
+      颜色与振幅随 OrbState 变化：待机呼吸 / 聆听随麦 / 思考行进 / 播报包络
+    - 常驻可见（IDLE 呼吸），不再对话结束即消失
+    - 左键点击（未拖动）→ 点击说话；拖动 → 换位置
+    - 悬停 → 右侧滑出 ModeSelector（模式选择组件）
+    - 右键菜单：打开主界面 / 静音
     """
 
     open_page_requested = Signal()
     mute_toggled = Signal(bool)
+    talk_toggled = Signal()
+    moved = Signal()
 
-    WIDTH = 460
-    HEIGHT = 170
-    BAR_COUNT = 32
-    BAR_W = 6
-    BAR_GAP = 5
+    WIDTH = 72
+    HEIGHT = 340
+
+    # 停靠默认位：屏幕右缘留出模式选择组件的滑出空间（右侧出现）
+    SELECTOR_GAP = 10
+    SCREEN_EDGE = 16
+    DOCK_RIGHT_MARGIN = ModeSelector.WIDTH + SELECTOR_GAP + SCREEN_EDGE
 
     STATE_COLOR = {
-        WaveState.LISTENING: "#60A5FA",
-        WaveState.THINKING: "#FBBF24",
-        WaveState.SPEAKING: "#34D399",
-        WaveState.NOTE: "#9CA3AF",
+        OrbState.IDLE: "#7C8394",
+        OrbState.LISTENING: "#60A5FA",
+        OrbState.THINKING: "#FBBF24",
+        OrbState.SPEAKING: "#34D399",
+        OrbState.NOTE: "#9CA3AF",
     }
     STATE_TEXT = {
-        WaveState.LISTENING: "我在听",
-        WaveState.THINKING: "想一下…",
-        WaveState.SPEAKING: "",
-        WaveState.NOTE: "",
+        OrbState.LISTENING: "我在听，请说",
+        OrbState.THINKING: "想一下…",
+        OrbState.SPEAKING: "",
+        OrbState.IDLE: "",
+        OrbState.NOTE: "",
     }
+
+    _DRAG_THRESHOLD = 6  # px
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowDoesNotAcceptFocus
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        _float_flags(self)
         self.setFixedSize(self.WIDTH, self.HEIGHT)
 
-        self.state = WaveState.HIDDEN
+        self.state = OrbState.IDLE
         self.caption = ""
         self.volume = 0.0          # 聆听态实时响度（0~1，EMA 平滑后）
         self._raw_volume = 0.0
         self._t = 0.0
-        self._speak_levels = [0.3] * self.BAR_COUNT
-        self._speak_targets = [0.3] * self.BAR_COUNT
+        self._speak_env = 0.3      # 播报态音节包络（向随机目标缓动）
+        self._speak_target = 0.3
         self._target_tick = 0
         self._muted = False
+
+        self._selector = ModeSelector()
+        self._selector.page_mode_requested.connect(self.open_page_requested)
+        self._pill = StatusPill()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
         self._timer.start(33)
 
-        self._fade = QPropertyAnimation(self, b"windowOpacity")
-        self._fade.setDuration(200)
-        self._after_fade: Optional[str] = None  # "hide"：淡出结束后隐身
-
     # ---- 状态切换 ----
 
-    def show_state(self, state: WaveState, caption: str = "") -> None:
-        """淡入并进入指定状态（已可见则平滑切换）。主线程调用。"""
+    def show_state(self, state: OrbState, caption: str = "") -> None:
+        """切入指定状态（常驻可见，只换波形与提示）。主线程调用。"""
         self.state = state
-        self.caption = caption or self.STATE_TEXT.get(state, "")
+        self.caption = caption if caption else self.STATE_TEXT.get(state, "")
         if not self.isVisible():
             self._position()
-            self.setWindowOpacity(0.0)
             self.show()
-            self._start_fade(1.0, None)
+        self._pill.show_text(self.caption)
+        self._pill.position_near(self)
         self.update()
-
-    def fade_out(self) -> None:
-        """淡出后隐身（回到唤醒待命）。主线程调用。"""
-        if not self.isVisible():
-            return
-        self.state = WaveState.HIDDEN
-        self._start_fade(0.0, "hide")
 
     def set_volume(self, value: float) -> None:
         self._raw_volume = value
 
-    # ---- 内部 ----
-
     def _position(self) -> None:
+        """默认停靠：屏幕右缘、竖直居中，右侧给模式选择组件留出滑出空间。"""
         screen = QApplication.primaryScreen()
         if screen is None:
             return
         geo = screen.availableGeometry()  # 已排除任务栏
-        x = geo.x() + (geo.width() - self.WIDTH) // 2
-        y = geo.y() + geo.height() - self.HEIGHT - 24
+        x = geo.right() - self.WIDTH - self.DOCK_RIGHT_MARGIN
+        y = geo.y() + (geo.height() - self.HEIGHT) // 2
         self.move(x, y)
-
-    def _start_fade(self, to: float, after: Optional[str]) -> None:
-        self._fade.stop()
-        self._after_fade = after
-        self._fade.setStartValue(self.windowOpacity())
-        self._fade.setEndValue(to)
-        self._fade.start()
 
     def _on_tick(self) -> None:
         self._t += 0.033
-        # 聆听响度 EMA 平滑，波形不至于抖成噪声
+        # 聆听响度 EMA 平滑，波纹不至于抖成噪声
         self.volume += (self._raw_volume - self.volume) * 0.25
-        # 播报态：每 ~130ms 换一包随机目标（模拟音节包络），向目标缓动
+        # 播报态：每 ~130ms 换一个随机目标（模拟音节包络），向目标缓动
         self._target_tick += 1
         if self._target_tick >= 4:
             self._target_tick = 0
-            peak = 0.55 + 0.4 * random.random()
-            self._speak_targets = [
-                peak * (0.25 + 0.75 * random.random()) for _ in range(self.BAR_COUNT)
-            ]
-        for i in range(self.BAR_COUNT):
-            cur = self._speak_levels[i]
-            self._speak_levels[i] = cur + (self._speak_targets[i] - cur) * 0.35
-        if self._after_fade == "hide" and self.windowOpacity() <= 0.02:
-            self._after_fade = None
-            self.hide()
+            self._speak_target = 0.25 + 0.75 * random.random()
+        self._speak_env += (self._speak_target - self._speak_env) * 0.35
         self.update()
 
     # ---- 交互 ----
 
-    _DRAG_THRESHOLD = 6  # px
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._selector.popup_near(self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._selector.request_hide()
+        super().leaveEvent(event)
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        self.moved.emit()
+        self._pill.position_near(self)
+        super().moveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -768,8 +1002,13 @@ class WaveformOverlay(QWidget):
             traceback.print_exc()
 
     def mouseReleaseEvent(self, event) -> None:
+        was_drag = getattr(self, "_drag_started", False)
         self._press_global = None
         self._drag_started = False
+        # 点击（未拖动）= 点击说话开关
+        if event.button() == Qt.MouseButton.LeftButton and not was_drag:
+            self.talk_toggled.emit()
+            event.accept()
 
     def contextMenuEvent(self, event) -> None:
         try:
@@ -791,84 +1030,531 @@ class WaveformOverlay(QWidget):
         try:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            color = QColor(self.STATE_COLOR.get(self.state, "#60A5FA"))
+            color = QColor(self.STATE_COLOR.get(self.state, "#7C8394"))
+            w, h = self.WIDTH, self.HEIGHT
+            inset = 6.0
+            radius = (w - inset * 2) / 2
 
-            # 中央柔光
-            glow = QRadialGradient(self.WIDTH / 2, self.HEIGHT * 0.42, self.WIDTH * 0.42)
-            glow.setColorAt(0, QColor(color.red(), color.green(), color.blue(), 46))
-            glow.setColorAt(1, QColor(color.red(), color.green(), color.blue(), 0))
-            painter.setBrush(QBrush(glow))
+            # 胶囊底：深色毛玻璃 + 状态色描边微光
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(0, 0, self.WIDTH, self.HEIGHT)
+            painter.setBrush(QBrush(QColor(12, 14, 22, 185)))
+            painter.drawRoundedRect(inset, inset, w - inset * 2, h - inset * 2, radius, radius)
+            border = QColor(color)
+            border.setAlpha(80)
+            painter.setPen(QPen(border, 1.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(
+                inset + 0.5, inset + 0.5, w - inset * 2 - 1, h - inset * 2 - 1,
+                radius, radius,
+            )
 
-            # 声纹条
-            painter.setPen(Qt.PenStyle.NoPen)
-            total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
-            x0 = (self.WIDTH - total_w) / 2
-            cy = self.HEIGHT * 0.42
-            max_h = 74.0
-            for i in range(self.BAR_COUNT):
-                amp = self._bar_amplitude(i)
-                h = max(3.0, max_h * amp)
-                phase = self._t * 1.6 + i * 0.55
-                alpha = 150 + int(70 * (0.5 + 0.5 * math.sin(phase)))
+            # 竖向波纹：三条竖向行进的波纹曲线（层叠淡出，形成"纹路"质感）
+            pad_top, pad_bottom = 34.0, 22.0
+            usable = (h - inset * 2) - pad_top - pad_bottom
+            cx = w / 2
+            max_amp = w / 2 - 14
+            env = self._envelope()
+            speed = self._wave_speed()
+            freq = self._wave_freq()
+            steps = 56
+            for layer in range(3):
+                phase = self._t * speed + layer * 2.1
+                alpha = (210, 125, 60)[layer]
                 c = QColor(color)
                 c.setAlpha(alpha)
-                painter.setBrush(QBrush(c))
-                rect_x = x0 + i * (self.BAR_W + self.BAR_GAP)
-                painter.drawRoundedRect(
-                    int(rect_x), int(cy - h / 2), self.BAR_W, int(h),
-                    self.BAR_W // 2, self.BAR_W // 2,
-                )
+                painter.setPen(QPen(c, 2.6 - layer * 0.6))
+                path = QPainterPath()
+                for i in range(steps + 1):
+                    ratio = i / steps
+                    yy = inset + pad_top + usable * ratio
+                    taper = math.sin(math.pi * ratio)  # 两端收敛，贴合胶囊
+                    amp = max_amp * env * (1.0 - layer * 0.22) * taper
+                    xx = cx + amp * math.sin(yy * freq + phase)
+                    if i == 0:
+                        path.moveTo(xx, yy)
+                    else:
+                        path.lineTo(xx, yy)
+                painter.drawPath(path)
 
-            # 状态字幕
-            if self.caption:
-                painter.setPen(QPen(QColor(230, 233, 240, 210)))
-                painter.setFont(QFont("Microsoft YaHei", 10))
-                painter.drawText(
-                    0, int(self.HEIGHT * 0.72), self.WIDTH, 34,
-                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                    self.caption,
-                )
+            # 顶部状态呼吸点
+            dot = QColor(color)
+            dot.setAlpha(235)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(dot))
+            pulse = 3.2 + 1.1 * (0.5 + 0.5 * math.sin(self._t * 2.4))
+            painter.drawEllipse(QPointF(w / 2, inset + 14), pulse, pulse)
         except Exception:  # noqa: BLE001
             # 绘制异常不允许逃逸出事件循环，否则可能导致进程被 Qt 终止
             traceback.print_exc()
 
-    def _bar_amplitude(self, index: int) -> float:
-        """各状态下第 index 根声纹条的振幅（0~1）。"""
-        if self.state == WaveState.LISTENING:
-            jitter = 0.75 + 0.25 * (1 + math.sin(self._t * 3 + index * 0.9)) / 2
-            return max(0.06, min(1.0, self.volume * 2.2 * jitter))
-        if self.state == WaveState.THINKING:
-            wave_phase = math.sin(self._t * 2.2 - index * 0.45)
-            return 0.18 + 0.30 * (0.5 + 0.5 * wave_phase)
-        if self.state == WaveState.SPEAKING:
-            return max(0.08, min(1.0, self._speak_levels[index]))
-        # NOTE / HIDDEN：轻呼吸
-        return 0.12 + 0.10 * (1 + math.sin(self._t * 1.8)) / 2
+    def _envelope(self) -> float:
+        """当前状态的整体振幅包络（0~1）。"""
+        if self.state == OrbState.LISTENING:
+            jitter = 0.85 + 0.15 * (1 + math.sin(self._t * 7.0)) / 2
+            return max(0.18, min(1.0, (0.20 + self.volume * 2.2) * jitter))
+        if self.state == OrbState.THINKING:
+            return 0.32 + 0.10 * (0.5 + 0.5 * math.sin(self._t * 2.2))
+        if self.state == OrbState.SPEAKING:
+            return max(0.15, min(1.0, self._speak_env))
+        if self.state == OrbState.NOTE:
+            return 0.20
+        # IDLE：慢呼吸
+        return 0.15 + 0.08 * (0.5 + 0.5 * math.sin(self._t * 1.4))
+
+    def _wave_speed(self) -> float:
+        """波纹沿竖向行进的相位速度（rad/s）。"""
+        if self.state == OrbState.THINKING:
+            return 3.6
+        if self.state == OrbState.LISTENING:
+            return 2.2
+        if self.state == OrbState.SPEAKING:
+            return 2.8
+        return 1.1
+
+    def _wave_freq(self) -> float:
+        """波纹的空间频率（rad/px），决定竖向"纹路"的疏密。"""
+        return 0.055
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 浮层卡片（临时呈现，自动淡出、可关闭、悬停暂停）
+# ─────────────────────────────────────────────────────────────────────────────
+
+CARD_WIDTH = 304
+CARD_MAX_H = 440
+CARD_TTL_MEDIA_S = 20
+
+
+class ToastCard(QWidget):
+    """浮层卡片基类：深色圆角卡 + 标题行（含关闭按钮）+ 内容区。
+
+    生命周期：show → TTL 计时（鼠标悬停暂停）→ 淡出 → closed(card) → 销毁。
+    """
+
+    closed = Signal(object)
+
+    def __init__(self, title: str, ttl_seconds: float) -> None:
+        super().__init__()
+        _float_flags(self)
+        self.setFixedWidth(CARD_WIDTH)
+        self._dead = False
+        self._ttl_ms = max(3.0, float(ttl_seconds)) * 1000.0
+
+        self._fade = QPropertyAnimation(self, b"windowOpacity")
+        self._fade.setDuration(320)
+        self._after_fade = ""
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 12, 10, 12)
+        outer.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        title_label = QLabel(title)
+        title_label.setStyleSheet(
+            "color: #E6E9F0; font-size: 13px; font-weight: 600; background: transparent;"
+        )
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(24, 24)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton { color: rgba(230,233,240,150); background: transparent;"
+            "  border: none; font-size: 13px; }"
+            "QPushButton:hover { color: #F87171; background: rgba(255,255,255,18);"
+            "  border-radius: 12px; }"
+        )
+        close_btn.clicked.connect(self.dismiss)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        header.addWidget(close_btn)
+        outer.addLayout(header)
+
+        self._body = QVBoxLayout()
+        self._body.setSpacing(6)
+        outer.addLayout(self._body)
+
+        self._ttl = QTimer(self)
+        self._ttl.setSingleShot(True)
+        self._ttl.timeout.connect(self.dismiss)
+
+    def finish_build(self) -> None:
+        """内容装完后调用：按内容定高并显示（从悬浮件侧滑入）。"""
+        self.setFixedHeight(min(CARD_MAX_H, self.sizeHint().height()))
+        self._ttl.start(int(self._ttl_ms))
+        self.setWindowOpacity(0.0)
+        self.show()
+        self._fade.stop()
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self.raise_()
+
+    def add_body(self, widget: QWidget) -> None:
+        self._body.addWidget(widget)
+
+    def dismiss(self) -> None:
+        """淡出后关闭（关闭按钮 / TTL 到期共用）。"""
+        if self._dead or not self.isVisible():
+            return
+        self._dead = True
+        self._ttl.stop()
+        self._fade.stop()
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(0.0)
+        try:
+            self._fade.finished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._fade.finished.connect(self._close_after_fade)
+        self._fade.start()
+
+    def _close_after_fade(self) -> None:
+        self.hide()
+        self.closed.emit(self)
+        self.deleteLater()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        # 悬停阅读时暂停自动淡出，离开后重新计满
+        if not self._dead:
+            self._ttl.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if not self._dead and self.isVisible():
+            self._ttl.start(int(self._ttl_ms))
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(16, 18, 27, 236)))
+            painter.drawRoundedRect(0, 0, self.width(), self.height(), 16, 16)
+            painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(0.5, 0.5, self.width() - 1, self.height() - 1, 16, 16)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
+def _elide(text: str, width_px: int, font=None) -> str:
+    metrics = QFontMetrics(font or QFont("Microsoft YaHei", 11))
+    return metrics.elidedText(text, Qt.TextElideMode.ElideRight, width_px)
+
+
+class ScheduleCard(ToastCard):
+    """今日安排浮层卡：时间 + 标题 + 完成态。数据来自 /api/schedule/today。"""
+
+    MAX_ROWS = 8
+
+    def __init__(self, items: list[dict]) -> None:
+        super().__init__("今日安排", ttl_seconds=30)
+        if not items:
+            empty = QLabel("今天没有安排，好好休息 🌿")
+            empty.setStyleSheet(
+                "color: rgba(215,219,228,190); font-size: 12px; background: transparent;"
+            )
+            self.add_body(empty)
+            self.finish_build()
+            return
+
+        accent_more = len(items) - self.MAX_ROWS
+        for item in items[: self.MAX_ROWS]:
+            time_text, title = self._parse_item(item)
+            completed = item.get("completed") is True
+            if completed:
+                html = (
+                    f"<span style='color:#6B7280;'>✓ {time_text}</span>&nbsp;&nbsp;"
+                    f"<span style='color:#6B7280;'>{_elide(title, 220)}</span>"
+                )
+            else:
+                html = (
+                    f"<span style='color:#60A5FA;font-weight:600;'>{time_text}</span>"
+                    f"&nbsp;&nbsp;<span style='color:#D7DBE4;'>{_elide(title, 220)}</span>"
+                )
+            row = QLabel(html)
+            row.setStyleSheet("background: transparent; font-size: 12px;")
+            note = str(item.get("notes") or "").strip()
+            if note:
+                row.setToolTip(note)
+            self.add_body(row)
+        if accent_more > 0:
+            more = QLabel(f"… 还有 {accent_more} 项")
+            more.setStyleSheet(
+                "color: rgba(139,147,167,180); font-size: 11px; background: transparent;"
+            )
+            self.add_body(more)
+        self.finish_build()
+
+    @staticmethod
+    def _parse_item(item: dict) -> tuple[str, str]:
+        title = str(item.get("title") or "未命名").strip() or "未命名"
+        raw = str(item.get("startAt") or "")
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            time_text = dt.astimezone().strftime("%H:%M")
+        except ValueError:
+            time_text = "--:--"
+        return time_text, title
+
+
+class _MediaTile(QLabel):
+    """媒体缩略图块：加载占位 → 圆角图（视频加 ▶ 角标），点击用浏览器打开。"""
+
+    TILE_W, TILE_H = 136, 92
+
+    def __init__(self, open_url: str, is_video: bool = False) -> None:
+        super().__init__()
+        self._open_url = open_url
+        self._is_video = is_video
+        self.setFixedSize(self.TILE_W, self.TILE_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(
+            "background-color: rgba(255,255,255,14);"
+            "border: 1px solid rgba(255,255,255,18);"
+            "border-radius: 8px;"
+        )
+
+    def set_pixmap(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        scaled = pixmap.scaled(
+            self.TILE_W - 2, self.TILE_H - 2,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - (self.TILE_W - 2)) // 2)
+        y = max(0, (scaled.height() - (self.TILE_H - 2)) // 2)
+        cropped = scaled.copy(x, y, self.TILE_W - 2, self.TILE_H - 2)
+
+        out = QPixmap(self.TILE_W - 2, self.TILE_H - 2)
+        out.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, out.width(), out.height(), 8, 8)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        if self._is_video:
+            badge = QColor(0, 0, 0, 140)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(badge))
+            cx, cy, r = out.width() / 2, out.height() / 2, 16
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+            painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
+            tri = QPainterPath()
+            tri.moveTo(cx - 5, cy - 8)
+            tri.lineTo(cx - 5, cy + 8)
+            tri.lineTo(cx + 9, cy)
+            tri.closeSubpath()
+            painter.drawPath(tri)
+        painter.end()
+        self.setPixmap(out)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._open_url:
+            QDesktopServices.openUrl(QUrl(self._open_url))
+            event.accept()
+
+
+class MediaCard(ToastCard):
+    """图片/视频浮层卡：2 列缩略图墙（最多 6 块），点击系统浏览器打开。
+
+    缩略图在工作线程下载，经 Signal 回主线程解码圆角后上墙；
+    卡片可能先于下载完成被关闭（_dead / 已销毁），回调里全部兜住。
+    """
+
+    MAX_TILES = 6
+    _thumb_ready = Signal(int, bytes)
+
+    def __init__(self, cards: list[dict], http_base: str) -> None:
+        super().__init__(self._title_of(cards), ttl_seconds=CARD_TTL_MEDIA_S)
+        self._http_base = http_base
+        self._thumb_ready.connect(self._on_thumb_ready)
+
+        grid_holder = QWidget()
+        grid_holder.setStyleSheet("background: transparent;")
+        grid = QGridLayout(grid_holder)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(8)
+        self._tiles: list[_MediaTile] = []
+        for idx, card in enumerate(cards[: self.MAX_TILES]):
+            tile_spec = self._tile_spec(card)
+            tile = _MediaTile(tile_spec["open_url"], tile_spec["is_video"])
+            row, col = divmod(idx, 2)
+            grid.addWidget(tile, row, col)
+            self._tiles.append(tile)
+            self._load_thumb_async(idx, tile_spec["thumb_url"])
+        self.add_body(grid_holder)
+        if len(cards) > self.MAX_TILES:
+            more = QLabel(f"… 共 {len(cards)} 条，切换回界面模式可查看全部")
+            more.setStyleSheet(
+                "color: rgba(139,147,167,180); font-size: 11px; background: transparent;"
+            )
+            self.add_body(more)
+        self.finish_build()
+
+    @staticmethod
+    def _title_of(cards: list[dict]) -> str:
+        types = {str(c.get("type") or "").lower() for c in cards}
+        if types == {"image"}:
+            return f"图片 · {len(cards)}"
+        if types == {"video"}:
+            return f"视频 · {len(cards)}"
+        return f"媒体 · {len(cards)}"
+
+    @staticmethod
+    def _tile_spec(card: dict) -> dict:
+        is_video = str(card.get("type") or "").lower() == "video"
+        thumb = str(card.get("thumbnailUrl") or card.get("mediaUrl") or "")
+        media = str(card.get("mediaUrl") or "")
+        page = str(card.get("pageUrl") or "")
+        # 视频 ▶ 打开播放页；图片优先打开原图（mediaUrl），缺了退来源页/缩略图
+        open_url = (page if is_video else (media or page)) or thumb
+        return {"is_video": is_video, "thumb_url": thumb, "open_url": open_url}
+
+    def _load_thumb_async(self, idx: int, url: str) -> None:
+        full = resolve_media_url(self._http_base, url)
+        if not full:
+            return
+
+        def work(index: int = idx, target: str = full) -> None:
+            try:
+                resp = requests.get(target, timeout=12)
+                resp.raise_for_status()
+                data = resp.content
+            except Exception:  # noqa: BLE001
+                return
+            try:
+                self._thumb_ready.emit(index, data)
+            except RuntimeError:
+                # 卡片已销毁（TTL 到期/手动关闭），丢弃迟到的缩略图
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_thumb_ready(self, idx: int, data: bytes) -> None:
+        try:
+            if self._dead or idx >= len(self._tiles):
+                return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            self._tiles[idx].set_pixmap(pixmap)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
+class TextCard(ToastCard):
+    """通用文本浮层卡（预留：搜索摘要等未来 surface 的轻量呈现）。"""
+
+    def __init__(self, title: str, body: str, ttl_seconds: float = 12) -> None:
+        super().__init__(title, ttl_seconds=ttl_seconds)
+        label = QLabel(str(body))
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            "color: rgba(215,219,228,225); font-size: 12px; background: transparent;"
+        )
+        self.add_body(label)
+        self.finish_build()
+
+
+class CardStack(QObject):
+    """悬浮件左侧的浮层卡片栈：右对齐悬浮件、底部对齐、最新在上。
+
+    最多同时 3 张，超出立即挤掉最旧一张；悬浮件拖动时整体跟随。
+    """
+
+    MAX_CARDS = 3
+    GAP = 10
+    ORB_GAP = 12
+
+    def __init__(self, orb: VerticalWaveOrb) -> None:
+        super().__init__(orb)
+        self._orb = orb
+        self._cards: list[ToastCard] = []
+        orb.moved.connect(self._relayout)
+
+    # ---- 呈现入口 ----
+
+    def show_schedule(self, items: list[dict]) -> None:
+        card = ScheduleCard(items)
+        self._attach(card)
+
+    def show_media(self, cards: list[dict], http_base: str) -> None:
+        card = MediaCard(cards, http_base)
+        self._attach(card)
+
+    def show_text(self, title: str, body: str) -> None:
+        self._attach(TextCard(title, body))
+
+    # ---- 栈管理 ----
+
+    def _attach(self, card: ToastCard) -> None:
+        if len(self._cards) >= self.MAX_CARDS:
+            oldest = self._cards[-1]
+            oldest.dismiss()
+            self._cards.remove(oldest)
+        card.closed.connect(self._on_card_closed)
+        self._cards.insert(0, card)
+        self._relayout()
+
+    def _on_card_closed(self, card: object) -> None:
+        if isinstance(card, ToastCard) and card in self._cards:
+            self._cards.remove(card)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        if not self._cards:
+            return
+        screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else None
+        orb = self._orb
+        x = orb.x() - self.ORB_GAP - CARD_WIDTH
+        heights = [c.height() for c in self._cards]
+        total_h = sum(heights) + self.GAP * (len(self._cards) - 1)
+        orb_bottom = orb.y() + orb.height()
+        y = orb_bottom - total_h
+        if geo is not None:
+            y = max(geo.top() + 12, y)
+        for card, h in zip(self._cards, heights):
+            card.move(x, y)
+            card.raise_()
+            y += h + self.GAP
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 语音会话编排
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class VoiceSession(QObject):
-    """语音模式编排器：唤醒 → 聆听 → 识别 → 对话 → 播报 → 追问 → 隐身。
+    """语音模式编排器：唤醒/点击 → 聆听 → 识别 → 对话 → 播报 → 追问 → 待机。
 
     麦克风互斥编排（同一时刻只允许一个采集流）：
       唤醒监听 ──命中──▶ 停唤醒 ──▶ 录音(VAD) ──说完──▶ ASR ──▶ 播报
         ▲                                                        │
-        └──追问窗口超时/淡出 ◀──播报结束（或 barge-in 直接回录音）◀──┘
+        └──追问窗口超时 ◀──播报结束（或 barge-in 直接回录音）◀──────┘
 
-    线程约定：ASR/TTS 在 daemon 线程里跑，结果一律经 Signal 回主线程；
-    overlay / player / recorder / monitor 都只在主线程创建与驱动。
+    悬浮件交互：点击说话开关 / hover 右侧「界面模式」/ 右键静音。
+    浮层卡片：surface.show(today_schedule) 与 chat.media_ready /
+    assistant_done.mediaCards → CardStack（自动淡出、可关闭）。
+
+    线程约定：ASR/TTS/日程 HTTP 在 daemon 线程里跑，结果一律经 Signal 回主线程；
+    overlay / player / recorder / monitor / cards 都只在主线程创建与驱动。
     """
 
     # 跨线程信号（worker → 主线程）
-    _show_state = Signal(str, str)     # (WaveState 名, caption)
+    _show_state = Signal(str, str)     # (OrbState 名, caption)
     _play_requested = Signal(str)      # 播放本地音频文件
     _turn_failed = Signal(str)         # 本轮失败（识别/播报异常）
+    _schedule_ready = Signal(list, int)  # 今日安排列表, TTL 秒
 
     FOLLOWUP_WINDOW_S = 10.0           # 播报结束后保持追问聆听的时长
-    NOTE_DISPLAY_MS = 2600             # 提示文案显示多久后淡出
+    NOTE_DISPLAY_MS = 2600             # 提示文案显示多久后回待机
 
-    def __init__(self, cfg: VoiceOrbConfig, overlay: WaveformOverlay) -> None:
+    def __init__(self, cfg: VoiceOrbConfig, overlay: VerticalWaveOrb) -> None:
         super().__init__()
         self.cfg = cfg
         self.overlay = overlay
@@ -879,11 +1565,17 @@ class VoiceSession(QObject):
         self._wake: Optional[WakeListener] = None
         self._turn_active = False
         self._pending_text = ""
+        # 媒体去重：media_ready 先推、assistant_done 再带全量，按 (traceId, 图) 去重
+        self._seen_media: set[tuple[str, str]] = set()
+
+        self._cards = CardStack(overlay)
 
         self._ws = WsClient(cfg)
         self._ws.assistant_chunk.connect(self._on_assistant_chunk)
         self._ws.assistant_done.connect(self._on_assistant_done)
         self._ws.turn_started.connect(self._on_turn_started)
+        self._ws.surface_show.connect(self._on_surface_show)
+        self._ws.media_ready.connect(self._on_media_ready)
         self._ws.disconnected.connect(self._on_ws_disconnected)
         self._ws.error.connect(lambda _m: None)
         self._ws.start()
@@ -896,6 +1588,7 @@ class VoiceSession(QObject):
         self._show_state.connect(self._on_show_state)
         self._play_requested.connect(self._play_audio)
         self._turn_failed.connect(self._on_turn_failed)
+        self._schedule_ready.connect(self._on_schedule_ready)
         self._note_timer = QTimer(self)
         self._note_timer.setSingleShot(True)
         self._note_timer.timeout.connect(self._on_note_timeout)
@@ -909,34 +1602,37 @@ class VoiceSession(QObject):
 
         overlay.mute_toggled.connect(self._set_muted)
         overlay.open_page_requested.connect(self._request_open_page)
+        overlay.talk_toggled.connect(self._on_talk_toggled)
 
     def start(self) -> None:
+        # 常驻形态：启动即待机呼吸 + 唤醒监听（不再隐身）
+        self._show_state.emit("IDLE", "")
         self._resume_wake()
 
     # ---- 状态/提示（主线程槽） ----
 
     def _on_show_state(self, state_name: str, caption: str) -> None:
         try:
-            self.overlay.show_state(WaveState[state_name], caption)
+            self.overlay.show_state(OrbState[state_name], caption)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
-    def _show_note_and_fade(self, msg: str, display_ms: int = NOTE_DISPLAY_MS) -> None:
+    def _show_note(self, msg: str, display_ms: int = NOTE_DISPLAY_MS) -> None:
         try:
-            self.overlay.show_state(WaveState.NOTE, msg)
+            self.overlay.show_state(OrbState.NOTE, msg)
             self._note_timer.start(display_ms)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
     def _on_note_timeout(self) -> None:
         try:
-            if self.overlay.state == WaveState.NOTE:
-                self.overlay.fade_out()
+            if self.overlay.state == OrbState.NOTE:
+                self._show_state.emit("IDLE", "")
                 QTimer.singleShot(250, self._resume_wake)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
-    # ---- 唤醒 ----
+    # ---- 唤醒 / 点击说话 ----
 
     def _resume_wake(self) -> None:
         if self._muted:
@@ -959,7 +1655,7 @@ class VoiceSession(QObject):
         try:
             if self._turn_active or (self._recorder and self._recorder.isRunning()):
                 return
-            self.overlay.show_state(WaveState.LISTENING, "我在听，请说")
+            self.overlay.show_state(OrbState.LISTENING, "我在听，请说")
             # 唤醒线程自行退出释放麦克风；稍等再开录音，避免设备占用冲突
             QTimer.singleShot(350, self._start_listening)
         except Exception:  # noqa: BLE001
@@ -972,7 +1668,29 @@ class VoiceSession(QObject):
                 _print_event("MIC_UNAVAILABLE")
                 QTimer.singleShot(300, self._quit)
                 return
-            self._show_note_and_fade(msg)
+            self._show_note(msg)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def _on_talk_toggled(self) -> None:
+        """点击悬浮件（未拖动）：待机/提示态开录音；聆听中取消；播报中打断。"""
+        try:
+            if self.overlay.state == OrbState.SPEAKING:
+                self._on_barge_in()
+                return
+            if self._recorder is not None and self._recorder.isRunning():
+                # 正在聆听 → 再点一次取消本次录音，回待机
+                self._recorder.stop()
+                self._recorder = None
+                self._show_state.emit("IDLE", "")
+                QTimer.singleShot(250, self._resume_wake)
+                return
+            if self._turn_active:
+                return
+            self.overlay.show_state(OrbState.LISTENING, "我在听，请说")
+            QTimer.singleShot(120, lambda: self._start_listening(
+                followup_window_s=8.0, caption="我在听，请说",
+            ))
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
@@ -984,7 +1702,7 @@ class VoiceSession(QObject):
             if self._recorder is not None and self._recorder.isRunning():
                 return
             self._pause_wake()
-            self.overlay.show_state(WaveState.LISTENING, caption)
+            self.overlay.show_state(OrbState.LISTENING, caption)
             self._recorder = ListeningRecorder(
                 self.cfg, self, pre_speech_timeout_s=followup_window_s,
             )
@@ -998,8 +1716,8 @@ class VoiceSession(QObject):
 
     def _on_recording_aborted(self, _reason: str) -> None:
         try:
-            # 追问窗口没人说话（或空录音）→ 淡出回到隐身唤醒
-            self.overlay.fade_out()
+            # 追问窗口没人说话（或空录音）→ 回待机呼吸，继续唤醒监听
+            self._show_state.emit("IDLE", "")
             QTimer.singleShot(250, self._resume_wake)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
@@ -1011,7 +1729,14 @@ class VoiceSession(QObject):
 
     def _on_recording_finished(self, path: str) -> None:
         try:
-            self.overlay.show_state(WaveState.THINKING, "识别中…")
+            if self._recorder is not self.sender():
+                # 已被取消的旧录音迟到的 finished：丢弃，不进识别
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return
+            self.overlay.show_state(OrbState.THINKING, "识别中…")
             threading.Thread(
                 target=self._transcribe_and_chat, args=(path,), daemon=True,
             ).start()
@@ -1043,19 +1768,97 @@ class VoiceSession(QObject):
     # ---- WS 回调（主线程） ----
 
     def _on_turn_started(self, _message_id: str) -> None:
-        self.overlay.show_state(WaveState.THINKING, "想一下…")
+        self.overlay.show_state(OrbState.THINKING, "想一下…")
 
     def _on_assistant_chunk(self, _message_id: str, text: str) -> None:
         self._pending_text += text
 
-    def _on_assistant_done(self, _message_id: str) -> None:
-        full = self._pending_text
+    def _on_assistant_done(self, payload: dict) -> None:
+        # 边说边出图兜底：done 里的全量 mediaCards（media_ready 的去重补发）
+        cards = payload.get("mediaCards")
+        if isinstance(cards, list) and cards:
+            self._handle_media_cards(cards, str(payload.get("traceId") or ""))
+        full = str(payload.get("finalText") or "").strip() or self._pending_text
         self._pending_text = ""
         if full.strip():
-            self.overlay.show_state(WaveState.THINKING, "想一下…")
+            self.overlay.show_state(OrbState.THINKING, "想一下…")
             threading.Thread(target=self._speak, args=(full,), daemon=True).start()
         else:
             self._end_turn()
+
+    def _on_surface_show(self, payload: dict) -> None:
+        """对话召唤浮层卡：today_schedule 由 orb 自取数据渲染。
+
+        语音模式下 Flutter 主窗口隐藏且让位（main.dart 同名守卫），
+        悬浮卡统一在竖波悬浮件旁呈现。不改波形状态——surface.show
+        多在对话进行中到达，状态由对话链路（思考/播报）自己驱动。
+        """
+        try:
+            surface = str(payload.get("surface") or "").strip()
+            if surface != "today_schedule":
+                return
+            ttl_raw = payload.get("ttlSeconds")
+            try:
+                ttl = int(ttl_raw)
+            except (TypeError, ValueError):
+                ttl = 30
+            threading.Thread(
+                target=self._fetch_schedule, args=(ttl,), daemon=True,
+            ).start()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def _fetch_schedule(self, ttl: int) -> None:
+        """worker 线程：GET /api/schedule/today（服务端只存提醒任务侧数据）。"""
+        try:
+            resp = requests.get(
+                f"{self.cfg.http_base}/api/schedule/today",
+                params={"sessionId": self.cfg.actor_id or self.cfg.session_id},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data if isinstance(data, list) else []
+        except Exception as exc:  # noqa: BLE001
+            self._turn_failed.emit(f"日程获取失败：{exc}")
+            return
+        self._schedule_ready.emit(items, ttl)
+
+    def _on_schedule_ready(self, items: list, ttl: int) -> None:
+        try:
+            self._cards.show_schedule(list(items))
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def _on_media_ready(self, payload: dict) -> None:
+        try:
+            cards = payload.get("cards")
+            if isinstance(cards, list) and cards:
+                self._handle_media_cards(cards, str(payload.get("traceId") or ""))
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def _handle_media_cards(self, cards: list, trace_id: str) -> None:
+        """媒体卡片上墙（media_ready 先推、done 补全量，按 trace+图去重）。"""
+        try:
+            fresh: list[dict] = []
+            for card in cards:
+                if not isinstance(card, dict):
+                    continue
+                key = (
+                    trace_id,
+                    str(card.get("thumbnailUrl") or card.get("mediaUrl") or ""),
+                )
+                if not key[1] or key in self._seen_media:
+                    continue
+                self._seen_media.add(key)
+                fresh.append(card)
+            if len(self._seen_media) > 200:
+                self._seen_media.clear()
+            if fresh:
+                self._cards.show_media(fresh, self.cfg.http_base)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
 
     def _speak(self, text: str) -> None:
         """worker 线程：TTS 合成；成功后经 _play_requested 回主线程播放。"""
@@ -1090,7 +1893,7 @@ class VoiceSession(QObject):
         """主线程槽：启动人声监视（barge-in lite）后播放。"""
         try:
             self._start_monitor()
-            self.overlay.show_state(WaveState.SPEAKING)
+            self.overlay.show_state(OrbState.SPEAKING)
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
         except Exception:  # noqa: BLE001
@@ -1115,11 +1918,11 @@ class VoiceSession(QObject):
             traceback.print_exc()
 
     def _on_barge_in(self) -> None:
-        """用户在播报中开口：停播 → 直接回聆听（不等播完）。"""
+        """用户在播报中开口（或点击悬浮件）：停播 → 直接回聆听（不等播完）。"""
         try:
             self._stop_monitor()
             self._player.stop()
-            # 用追问窗口兜底：若"开口"是扬声器噪声误触发，10s 无声自动隐身
+            # 用追问窗口兜底：若"开口"是扬声器噪声误触发，10s 无声自动回待机
             QTimer.singleShot(250, lambda: self._start_listening(
                 followup_window_s=self.FOLLOWUP_WINDOW_S, caption="请讲",
             ))
@@ -1139,10 +1942,10 @@ class VoiceSession(QObject):
     def _end_turn(self) -> None:
         try:
             self._turn_active = False
-            # 追问窗口：保持聆听 10s，开口即继续（免唤醒词）；没人说话则隐身
+            # 追问窗口：保持聆听 10s，开口即继续（免唤醒词）；没人说话则回待机
             QTimer.singleShot(250, lambda: self._start_listening(
                 followup_window_s=self.FOLLOWUP_WINDOW_S,
-                caption="继续说，或等我隐身",
+                caption="继续说，或点一下悬浮件",
             ))
         except Exception:  # noqa: BLE001
             traceback.print_exc()
@@ -1151,14 +1954,14 @@ class VoiceSession(QObject):
         try:
             self._turn_active = False
             self._stop_monitor()
-            self._show_note_and_fade(msg)
+            self._show_note(msg)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
     def _on_ws_disconnected(self, msg: str) -> None:
         try:
             if self._turn_active:
-                self._show_note_and_fade(f"连接断开：{msg[:40]}")
+                self._show_note(f"连接断开：{msg[:40]}")
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
@@ -1168,19 +1971,24 @@ class VoiceSession(QObject):
         self._muted = muted
         if muted:
             self._pause_wake()
-            self._show_note_and_fade("已静音（右键取消）", display_ms=self.NOTE_DISPLAY_MS * 2)
+            self._show_note("已静音（右键取消）", display_ms=self.NOTE_DISPLAY_MS * 2)
         else:
-            self._show_note_and_fade("已取消静音")
+            self._show_note("已取消静音")
             QTimer.singleShot(300, self._resume_wake)
 
     def _request_open_page(self) -> None:
-        """请求父进程恢复页面模式，orb 淡出后退出。"""
+        """请求父进程恢复页面模式（hover「界面模式」/ 右键菜单 / 语音口令）。"""
         try:
             _print_event("PAGE_MODE_REQUESTED")
-            self.overlay.fade_out()
-            QTimer.singleShot(400, self._quit)
+            self._pause_wake()
+            self._stop_monitor()
+            self._ws.stop()
+            self._ws.wait(2000)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _quit(self) -> None:
         try:
@@ -1247,7 +2055,7 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     cfg = build_config_from_env()
     try:
-        overlay = WaveformOverlay()
+        overlay = VerticalWaveOrb()
         session = VoiceSession(cfg, overlay)
         session.start()
     except Exception:  # noqa: BLE001

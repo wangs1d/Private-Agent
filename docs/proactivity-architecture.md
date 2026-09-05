@@ -359,3 +359,97 @@ type ProactiveProposal = {
 - **安全**：act 黑名单门（`proactivity-hub.ts:125`）与输出脱敏（`checkOutputSafety`）原样保留；IM 出站仅发送文本，不接受入站外的写操作。
 - **微信风控**：出站走 OpenClaw 网关并限频（同类 ≤1 条/小时），失败降级离线补发，不做重试轰炸。
 - **数据膨胀**：提案/outcome 均按 TTL 与按日分文件治理（对齐现有 JSON 落盘模式，不引入 DB）。
+
+---
+
+## 9. 主动性系统升级：三分支执行语义与效用评估（2026-09-04）
+
+> 方案 A-E 落地：主动行为从「发/不发」二元判定升级为
+> **execute_silently / ask_first / silence** 三分支，全部决策规则确定性（零 LLM）、可测试、可反问。
+
+### 9.1 Action Utility 评估器（方案 A，`proactivity/action-utility.ts`）
+
+执行/投递前的统一效用评估，输入三组维度：
+
+- **风险**：可逆性 / 金融影响（none·low·high）/ 数据敏感性（none·personal·sensitive）/ 第三方影响 → 加权合成 `riskScore`（不可逆 0.4 + 高金融 0.3 + 敏感数据 0.2 + 第三方 0.1，封顶 1）；
+- **授权**：显式（用户点名）/ 隐式（长期偏好、既有配置）/ 无；
+- **价值**：期望价值 − 打扰成本 − 风险拖累（`riskScore × 0.5`）= `netUtility`。
+
+决策规则（顺序固定，先命中先出）：
+
+1. `netUtility < 0` → **silence**（不值得做，也不值得问）
+2. 不可逆 或 高金融影响 → **ask_first**
+3. 无授权 且 影响第三方 → **ask_first**
+4. 可逆 + 有授权 + `netUtility > 0.15` → **execute_silently**
+5. 其余 → **ask_first**（保守默认）
+
+辅助推导（生产默认，零 LLM）：`deriveRiskFromSteps`（工具名/参数模式 → 风险维度）、`deriveNotifyValue`（重要度 → 通知价值；low 净效用为负自动沉默）、`deriveActValue`（后台执行打扰成本 0.1）。
+
+### 9.2 silenced 判定与沉默日志（方案 B）
+
+- `ProposalVerdict` 新增 **`silenced`**：与 `suppressed` 严格区分——suppressed = 用户负反馈抑制；silenced = 效用评估后**主动选择不动作**。
+- `arbiter.ts` 仲裁链**最前面**插入效用评估：声明了 `utility` 元数据的提案先过三分支（silence → silenced 出队；ask_first/execute_silently 记入 reasonChain 继续后续仲裁）。未声明 utility 的提案不评估，既有触发源行为不变。
+- `proactivity/silence-log.ts`：每次沉默决策留痕（净效用/风险分/命中规则），hub（action 级）与管道（proposal 级）共用一份，落盘 `data/proactivity/silence-log.json`。诊断接口 `diagnostics().recentSilences` + `searchSilences({keyword, sinceMs, actorId})` 支持反问「你上周为什么没提醒我 XX」。
+
+### 9.3 三分支执行语义统一（方案 C，`proactivity-hub.ts`）
+
+act 模式行动计划统一入口 `runActPlan`（speak/advise 纯通知不走三分支，仍由抑制+频控治理）：
+
+| 分支 | 语义 | 条件 |
+|---|---|---|
+| execute_silently | 直接执行不通知（act 审计留痕） | 可逆 + 已授权 + 高净效用 |
+| ask_first | 暂停执行，确认请求即本次主动消息；用户回复后 `resolveConfirmation` 推进 | 不可逆 / 高金融 / 无授权涉第三方 / 低效用非负 |
+| silence | 什么都不做但记录沉默日志 | 净效用为负 |
+
+- ask_first 挂起计划有效期 10 分钟（`CONFIRMATION_TTL_MS`），过期作废不执行；
+- 对话工具 `proactivity.confirmAction`（approve/reject/list）推进确认；act 黑名单安全门在确认后仍兜底（危险工具永不自动执行）；
+- 对话工具 `proactivity.whySilent` 检索沉默日志，向用户解释当时的判断依据；
+- 授权映射：conversation=显式，既有触发源（task/rhythm/time/.../initiative）=隐式，未知来源=无。
+
+### 9.4 承诺驱动触发源（方案 D，`proactivity/triggers/commitment-trigger.ts`）
+
+承诺板扫描事件（deadline 临近梯度提醒 / 超时按 escalationPolicy 升级 / 依赖满足推进）→ 带效用元数据的提案进统一管道：代催（needsAuthorization）→ 不可逆+第三方+无授权 → ask_first；自动提取承诺按置信度折算期望价值（低置信可被沉默）；手动承诺 = 显式授权。装配层 `commitmentTrigger.attach()` 接线。
+
+### 9.5 记忆变更触发链路（方案 E，`proactivity/triggers/preference-change-trigger.ts`）
+
+`NarrativeMemoryFacade.ingest/writeDecided` 新增 `onWrite` 钩子（fire-and-forget）→ 确定性正则检测偏好变更信号（「我现在吃素了」「以后不喝咖啡了」）→：
+
+- **新偏好**（无冲突）：低价值提案，评估器判 silence——记忆照常学习，不打扰；
+- **偏好反转**（信念偏好图联动）：与 UserFactStore 版本化主键比对，subject 归一相等（句尾助词归一）或偏好领域桶重叠（饮食/作息/运动/通勤）且值不同 → must/high 确认提案，防上一版偏好幽灵残留。同主题 24h 冷却。
+
+**验收**：低价值推送被沉默且 `searchSilences` 可查；不可逆动作先问、同意后执行、拒绝不执行；「我现在吃素了」在既有「喜欢吃肉」偏好下触发确认；全部决策零 LLM。
+
+### 9.6 效用评估优化轮（2026-09-04 复审）
+
+正确性修复：
+- 不可逆推导正则对齐 act 黑名单（`run_shell`/`run_automation`/`\bkill`），黑名单级工具先走 ask_first——否则静默执行被安全门拦下后无声无息；`post(?!pone)` 修复 postpone（可逆）误判；`\bkill` 不误伤 skill。
+- 偏好事实库惰性共享 nightly 巩固服务的 `UserFactStore` 单例（`getNightlyMemoryTaskService().getFactStore()`），消除双实例缓存导致的反转漏检。
+- 管道级 ask_first 闭环：带 `confirmAction` 的提案（如承诺代催）投递确认文案后在共享 `PendingConfirmationStore` 登记，批准经 hub resolver 回流 `onProposalApproved`（助手动态留痕）+ speak 回执；无 confirmAction 的通知类 ask_first 不登记。
+- 承诺重要度映射收敛到 `commitmentProposalFromEvent` 草稿（单一事实源）。
+
+体验优化：
+- 反转精确化：同域（如饮食）还需动作动词相同（吃素 vs 吃红烧肉 → 确认；吃素 vs 喝奶茶 → 仅静默记录），消除同域误报。
+- 规则 5a「不值得问」：期望价值 < 0.3 的低价值可逆动作直接 silence（问比做更打扰）；不可逆动作不受此限（危险必须问）。
+- 确认执行结果 speak 反馈：成功/部分成功/全被拦截三档回执，确认闭环有始有终。
+- 偏好确认冷却改按领域桶（同域换措辞同窗只确认一次）；沉默日志按 dedupKey 24h 去重。
+
+工程质量：
+- `PROACTIVITY_UTILITY_EVAL=0` 一键回退升级前语义（arbiter 跳过评估；hub act 直接执行+speak 告知）。
+- `PendingConfirmationStore` 落盘 `data/proactivity/confirmations.json`，重启不丢挂起确认（步骤是纯数据，恢复后仍可执行）。
+- `GET /api/proactivity/diagnostics?silenceKeyword=XX&silenceDays=7` 暴露沉默检索。
+
+### 9.7 代催执行端闭环（2026-09-04，ask_last_mile）
+
+「提案-仲裁-确认」决策链此前已闭环，但代催批准后的执行端是留痕 stub。现已接通真实外发：
+
+- **CommitmentBoard** 新增 `contact` 字段（platform: wechat/qq/feishu/generic + channelId +
+  participantName，commitment.create/update 工具可登记，旧库自动迁移），升级文案点名代发对象；
+- **CommitmentTrigger** 代催提案的 `detail` 携带目标渠道，`sendCommitmentNudge` 执行端：
+  取渠道 → `composeCommitmentNudgeText` 确定性组装（【代催】标注 + 承诺内容 + 原定时间）→
+  `MessagePlatformGateway.send` 真实外发（HTTP bridge）→ `MessageHubService.createOutbound`
+  会话留档 → 板上 notes 审计（delivered=yes/queued）；
+- **装配层**：`onProposalApproved` 分流——代催提案走 `sendCommitmentNudge`，结果（已送达/排队/失败）
+  落助手动态 + speak 回执；执行前复核承诺必须仍为 active（改期/取消/兑现即跳过）。
+
+前提：`WECHAT_BRIDGE_SEND_URL` 等平台 bridge 环境变量已配置时消息真实送达对方；
+未配置时网关降级本地排队（消息落 message-hub 会话，delivered=false，回执明确告知"排队中"）。

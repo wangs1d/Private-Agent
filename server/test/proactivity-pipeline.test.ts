@@ -13,6 +13,7 @@ import { ProactivePipeline } from "../src/proactivity/proactive-pipeline.js";
 import { OutcomeStore } from "../src/proactivity/outcome-store.js";
 import { PresenceService } from "../src/proactivity/presence-service.js";
 import { ProposalStore } from "../src/proactivity/proposal-store.js";
+import { PendingConfirmationStore } from "../src/proactivity/pending-confirmation-store.js";
 import { UpcomingScheduleWatcher } from "../src/proactivity/upcoming-schedule-watcher.js";
 import { WsConnectionRegistry } from "../src/services/ws-connection-registry.js";
 import type { ScheduleTaskRecord } from "../src/services/schedule-task-service.js";
@@ -236,7 +237,7 @@ type Harness = {
   dir: string;
 };
 
-function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: boolean } = {}): Harness {
+function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: boolean; confirmations?: PendingConfirmationStore; onProposalApproved?: (p: ProactiveProposal) => void } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-pipe-"));
   const presence = new PresenceService();
   const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: opts.dailyBudget ?? 6 });
@@ -258,6 +259,8 @@ function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: bool
     outcomes: new OutcomeStore(join(dir, "outcomes.json")),
     speak: (p) => spoken.push(p),
     nowFn: () => opts.now ?? NOON,
+    confirmations: opts.confirmations,
+    onProposalApproved: opts.onProposalApproved,
   });
   return { pipeline, presence, governor, delivered, spoken, flags, dir };
 }
@@ -573,4 +576,220 @@ test("message_watch: 同会话 10 分钟冷却 + 同文本指纹去重", async (
   trigger.handleInbound(mk("会议推迟到明天上午十点"));   // 冷却期外，同文本 → 同 dedupKey 由管道去重
   assert.equal(submitted.length, 2);
   assert.equal(submitted[0]!.dedupKey, submitted[1]!.dedupKey);
+});
+
+// ─── 方案 A/B：效用评估前置 + silenced 判定 + 沉默日志 ───
+
+test("arbiter: 未声明 utility 的提案不评估（既有行为不变）", () => {
+  const d = arbitrate(proposal(), ctx());
+  assert.equal(d.verdict, "delivered");
+  assert.ok(!d.reasonChain.some((r) => r.startsWith("action_utility")));
+  assert.equal(d.utility, undefined);
+});
+
+test("arbiter: 效用评估在仲裁链最前面（净效用为负 → silenced，与 suppressed 区分）", () => {
+  const d = arbitrate(
+    proposal({
+      utility: {
+        risk: { reversible: true, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: false },
+        authorization: "implicit",
+        value: { expectedValue: 0.2, interruptionCost: 0.5 },
+      },
+    }),
+    ctx({ isSuppressed: () => ({ suppressed: true, reason: "user said stop" }) }),
+  );
+  assert.equal(d.verdict, "silenced", "效用评估优先于负反馈抑制（链首）");
+  assert.match(d.reasonChain[0], /^action_utility_silence:net_utility_negative/);
+  assert.ok(d.utility);
+  assert.ok(d.utility.netUtility < 0);
+});
+
+test("arbiter: 非 silence 分支记入 reasonChain 并继续仲裁（ask_first 投递确认请求文案）", () => {
+  const d = arbitrate(
+    proposal({
+      kind: "action.commitment.nudge",
+      utility: {
+        risk: { reversible: false, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: true },
+        authorization: "none",
+        value: { expectedValue: 0.9, interruptionCost: 0.3 },
+      },
+    }),
+    ctx(),
+  );
+  assert.equal(d.verdict, "delivered", "ask_first 的提案照常投递（文案即确认请求）");
+  assert.match(d.reasonChain[0], /^action_utility:ask_first:irreversible_action/);
+  assert.equal(d.utility?.branch, "ask_first");
+});
+
+test("arbiter: execute_silently 分支的提案投递不误伤（通知类提案投递即执行）", () => {
+  const d = arbitrate(
+    proposal({
+      utility: {
+        risk: { reversible: true, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: false },
+        authorization: "explicit",
+        value: { expectedValue: 0.9, interruptionCost: 0.2 },
+      },
+    }),
+    ctx(),
+  );
+  assert.equal(d.verdict, "delivered");
+  assert.match(d.reasonChain[0], /^action_utility:execute_silently/);
+});
+
+test("pipeline: silenced 提案出队不投递，沉默日志留痕可反问", () => {
+  const h = makeHarness();
+  try {
+    h.presence.markConnected("user-a", NOON - 5 * 60_000);
+    const d = h.pipeline.submitProposal(
+      proposal({
+        title: "低价值推送",
+        utility: {
+          risk: { reversible: true, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: false },
+          authorization: "implicit",
+          value: { expectedValue: 0.2, interruptionCost: 0.5 },
+        },
+      }),
+    );
+    assert.equal(d.verdict, "silenced");
+    assert.equal(h.delivered.length, 0, "不投递");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "出队");
+    const silences = h.pipeline.diagnostics().recentSilences;
+    assert.equal(silences.length, 1);
+    assert.equal(silences[0].title, "低价值推送");
+    assert.equal(silences[0].scope, "proposal");
+    // 反问检索：「为什么没提醒我低价值推送」
+    const hit = h.pipeline.searchSilences({ keyword: "低价值" });
+    assert.equal(hit.length, 1);
+    assert.ok(hit[0].netUtility < 0);
+    assert.match(hit[0].reason, /net_utility_negative/);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: 无 utility 提案投递不写沉默日志（suppressed 语义分离）", () => {
+  const h = makeHarness();
+  try {
+    h.presence.markConnected("user-a", NOON - 5 * 60_000);
+    const d = h.pipeline.submitProposal(proposal({ dedupKey: "sup-1" }));
+    assert.equal(d.verdict, "delivered");
+    assert.equal(h.delivered.length, 1);
+    assert.equal(h.pipeline.diagnostics().recentSilences.length, 0, "正常投递不产生沉默记录");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: 低价值承诺类提案（带 utility）端到端被沉默", () => {
+  const h = makeHarness();
+  try {
+    h.presence.markConnected("user-a", NOON - 5 * 60_000);
+    const d = h.pipeline.submitProposal(
+      proposal({
+        kind: "action.commitment",
+        tier: "social",
+        importance: "medium",
+        dedupKey: "cmt-low",
+        title: "承诺提醒",
+        utility: {
+          risk: { reversible: true, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: false },
+          authorization: "implicit",
+          value: { expectedValue: 0.2475, interruptionCost: 0.3 }, // 自动提取置信 0.55 折算
+        },
+      }),
+    );
+    assert.equal(d.verdict, "silenced");
+    assert.equal(h.delivered.length, 0);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+// ─── 提案级确认闭环（ask_first + confirmAction）与回退开关 ───
+
+const NUDGE_UTILITY = {
+  risk: { reversible: false, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: true },
+  authorization: "none",
+  value: { expectedValue: 0.9, interruptionCost: 0.3 },
+} as const;
+
+test("pipeline: ask_first+confirmAction 提案投递后登记待确认，批准走回调 + speak 回执", () => {
+  const store = new PendingConfirmationStore();
+  let approved: ProactiveProposal | null = null;
+  // 真实时钟：确认的 expiresAt 基于 nowFn，固定过去时刻的测试时钟会立即被判过期
+  const h = makeHarness({
+    now: Date.now(),
+    confirmations: store,
+    onProposalApproved: (p) => {
+      approved = p;
+    },
+  });
+  try {
+    h.presence.markConnected("user-a", Date.now() - 5 * 60_000);
+    const d = h.pipeline.submitProposal(
+      proposal({
+        kind: "action.commitment.nudge",
+        dedupKey: "nudge-1",
+        title: "第三方未履约",
+        importance: "critical", // 豁免仲裁器静默时段（真实时钟可能落在 23:00-07:00）
+        utility: NUDGE_UTILITY,
+        confirmAction: { label: "代发催促" },
+      }),
+    );
+    assert.equal(d.verdict, "delivered", "确认文案即本次投递");
+    assert.equal(h.delivered.length, 1);
+
+    const pending = store.list("user-a");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].origin, "pipeline");
+    assert.equal(pending[0].proposal?.dedupKey, "nudge-1");
+
+    const r = h.pipeline.resolveProposalConfirmation(pending[0], true);
+    assert.equal(r.executed, true);
+    assert.ok(approved, "onProposalApproved 已回调");
+    assert.equal((approved as ProactiveProposal | null).dedupKey, "nudge-1");
+    assert.equal(h.spoken.length, 1, "speak 回执");
+    assert.match(h.spoken[0].title, /^已确认/);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: 无 confirmAction 的 ask_first 提案不登记确认（投递即完成）", () => {
+  const store = new PendingConfirmationStore();
+  const h = makeHarness({ confirmations: store });
+  try {
+    h.presence.markConnected("user-a", NOON - 5 * 60_000);
+    const d = h.pipeline.submitProposal(
+      proposal({
+        kind: "action.commitment.nudge",
+        dedupKey: "nudge-2",
+        utility: NUDGE_UTILITY,
+      }),
+    );
+    assert.equal(d.verdict, "delivered");
+    assert.equal(store.size(), 0, "普通通知类 ask_first 不产生待确认");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("arbiter: PROACTIVITY_UTILITY_EVAL=0 时忽略 utility 元数据（一键回退）", () => {
+  process.env.PROACTIVITY_UTILITY_EVAL = "0";
+  try {
+    const d = arbitrate(
+      proposal({
+        utility: {
+          risk: { reversible: true, financialImpact: "none", dataSensitivity: "none", thirdPartyImpact: false },
+          authorization: "implicit",
+          value: { expectedValue: 0.2, interruptionCost: 0.5 }, // 开态本应 silenced
+        },
+      }),
+      ctx(),
+    );
+    assert.equal(d.verdict, "delivered");
+    assert.equal(d.utility, undefined, "回退态不产生效用评估结果");
+  } finally {
+    delete process.env.PROACTIVITY_UTILITY_EVAL;
+  }
 });

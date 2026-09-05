@@ -61,10 +61,10 @@ export type AgentPromptMemoryContext = {
   sessionRecap?: string;
   /** 用户打断的回复上下文，用于整合到下一次回复中 */
   interruptedContext?: string;
-  /** 升级继承（2026-09-02）：fast 车道已尝试未成功的工具调用记录，供 complex 续办 */
-  inheritedToolContext?: string;
-  /** 基于 IP 识别的用户所在地（注入 system，供位置相关问答使用） */
+  /** 用户当前所在地（前端 GPS + 逆地理，注入 system，供位置相关问答使用） */
   userLocation?: string;
+  /** 用户常去地点（位置历史 DBSCAN 聚类，程序化注入，零 LLM） */
+  frequentPlaces?: string;
   /** Per-turn task profile and operating policy injected into the system prompt. */
   taskContext?: string;
   /** `USER_PROFILE.md` 摘录：长期用户画像 */
@@ -163,6 +163,12 @@ export type AgentPromptMemoryContext = {
    */
   interestList?: string;
   /**
+   * 未兑现承诺摘要（P2-11 承诺草稿板接线）：active/pending_confirmation 的
+   * 承诺注入【未兑现承诺】块——用户问"我这周要干嘛/有什么没办"时 agent
+   * 直接可见，无需工具回查。无未兑现承诺时不注入（零开销）。
+   */
+  commitmentBoard?: string;
+  /**
    * 对话时间线事实（ConversationTimelineService）：首次对话时间 / 累计轮次 /
    * 最近一次对话时间。回答「第一次对话是什么时候 / 认识多久 / 上次聊什么」时
    * LLM 有确定信息可用。无记录时不注入（零开销）。
@@ -222,6 +228,12 @@ export type AgentStreamOptions = {
   /** 手机桥接在线时向 LLM 暴露 phone.*（远程控制真实手机，可不依赖完全访问） */
   phoneBridgeOnline?: boolean;
   toolExposureProfile?: ToolExposureProfile;
+  /**
+   * 任务面能力束（2026-09-05，来自路由层 TurnPlan.capabilities）。
+   * delegate profile 下按它裁剪注入的工具：search/media 等轻任务只注入对应工具族，
+   * 其余工具进 BM25 延迟目录按需召回；含 "full" 或未传时不裁剪（全量注入）。
+   */
+  toolCapabilities?: string[];
   toolRankingHint?: ToolRankingHint;
   /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
   pinnedToolNames?: string[];
