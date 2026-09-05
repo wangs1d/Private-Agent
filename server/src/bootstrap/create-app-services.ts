@@ -59,6 +59,7 @@ import {
 } from "../agentic-memory/user-fact-registry.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
+import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
 import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
@@ -822,6 +823,25 @@ export async function createAppServices(): Promise<AppServices> {
   registerSurfaceTools(toolRegistry, {
     trySend: (actorId, data) => wsConnectionRegistry.trySend(actorId, data),
   });
+  // task.dispatch（2026-09-05 前后台架构）：前台派后台任务原语。launch 晚绑定——
+  // 工具注册发生在 registry 装配期（agentCore 尚未创建），agentCore 就绪后接上。
+  const taskDispatchLauncherRef: {
+    fn: ((input: {
+      actorId: string;
+      sessionId?: string;
+      chatUserMessageId?: string;
+      goal: string;
+      note?: string;
+    }) => string | null) | null;
+  } = { fn: null };
+  registerTaskDispatchTool(toolRegistry, {
+    launch: (input) =>
+      taskDispatchLauncherRef.fn?.(input) ??
+      (() => {
+        console.warn("[task.dispatch] launch 未就绪（agentCore 未初始化），拒绝派发");
+        return null;
+      })(),
+  });
   // 注册能力模块（image-gen / file-doc / email-sms / ...）
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
@@ -1310,6 +1330,23 @@ export async function createAppServices(): Promise<AppServices> {
       );
       if (sent) {
         markMorningBriefingDelivered(sessionId, "scheduled");
+      } else {
+        // 两端都不在线：转统一管道挂起（directText 零 LLM，must 层必达），任一设备
+        // 重连 flushDue 直推；配置移动推送时升级系统通知。dedupKey 带日期防跨日重发。
+        proactivePipeline.submitProposal({
+          proposalId: `p_${Date.now().toString(36)}_mbrief`,
+          actorId: sessionId,
+          kind: "morning_briefing",
+          tier: "must",
+          importance: "medium",
+          dedupKey: `morning_briefing:${sessionId}:${new Date().toISOString().slice(0, 10)}`,
+          title: "早安简报",
+          summary: payload.narrationText.slice(0, 200),
+          evidence: ["morning_briefing_scheduled", "ws_push_failed"],
+          directText: payload.narrationText,
+          createdAt: Date.now(),
+          source: "time",
+        });
       }
     },
   });
@@ -1330,7 +1367,7 @@ export async function createAppServices(): Promise<AppServices> {
   const eveningDigestScheduler = new EveningDigestScheduler({
     digestService: eveningDigestService,
     onDigestTriggered: (sessionId, digest) => {
-      wsConnectionRegistry.trySend(
+      const sent = wsConnectionRegistry.trySend(
         sessionId,
         JSON.stringify({
           type: ServerEventType.EveningDigest,
@@ -1341,6 +1378,23 @@ export async function createAppServices(): Promise<AppServices> {
           },
         }),
       );
+      if (!sent) {
+        // 两端都不在线：转统一管道挂起（directText 零 LLM，must 层必达），重连即直推
+        proactivePipeline.submitProposal({
+          proposalId: `p_${Date.now().toString(36)}_edigest`,
+          actorId: sessionId,
+          kind: "evening_digest",
+          tier: "must",
+          importance: "medium",
+          dedupKey: `evening_digest:${sessionId}:${new Date().toISOString().slice(0, 10)}`,
+          title: "今日回顾与明日预告",
+          summary: digest.narrationText.slice(0, 200),
+          evidence: ["evening_digest_scheduled", "ws_push_failed"],
+          directText: digest.narrationText,
+          createdAt: Date.now(),
+          source: "time",
+        });
+      }
     },
   });
   eveningDigestScheduler.start();
@@ -1543,6 +1597,10 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
 
+  // task.dispatch launch 晚绑定（2026-09-05 前后台架构）：派发端接到 agentCore
+  taskDispatchLauncherRef.fn = (input) =>
+    agentCore.dispatchBackgroundTask(input.actorId, input);
+
   // Runtime 统一入口：进程无关契约。同进程模式直接包裹 AgentCore；
   // 拆进程后此处的实现可替换为 WsRuntimeClient（RUNTIME_MODE=remote）。
   const runtime: RuntimeFacade = new DirectRuntimeAdapter(agentCore);
@@ -1682,7 +1740,10 @@ export async function createAppServices(): Promise<AppServices> {
     }
 
     return wsConnectionRegistry.trySend(userId, JSON.stringify(payload));
-  });
+    // 第三参数 null = 无关系记忆写入（原构造即未传）；第四参数：统一管道提交入口（收敛改造）
+    // ——send() 组装提案转投 ProactivePipeline，自动获得去重/仲裁/离线挂起（重连直推）/
+    // outcome 反馈；proactivePipeline 在下方装配段创建，箭头函数惰性求值（无 TDZ 问题）。
+  }, null, (p) => proactivePipeline.submitProposal(p));
 
   // ─── Brain Center 开关 ───
   // BRAIN_CENTER_ENABLED 未设置或非 "0"/"false"/"off" → 默认启用 brain
@@ -4084,6 +4145,34 @@ export async function createAppServices(): Promise<AppServices> {
     // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
     // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
     mobilePush: proactivePushService,
+    // critical 提案升级链接线（Phase 3 待办落地）：送达 ≠ 被看到——critical 直投成功后
+    // 挂起 intelligent-reminder 的 popup→tts_alarm→phone_call 三级升级链（未确认按默认
+    // 规则 10/12 分钟逐级升级），用户确认（reminder.acknowledge）即停链。
+    escalate: (p, deliveryId) => {
+      void (async () => {
+        const service = intelligentReminder.reminderService;
+        const instance = await service.createReminder({
+          id: `pipeline_critical_${deliveryId}`,
+          title: p.title,
+          message: p.directText ?? p.summary,
+          priority: "urgent",
+          initialLevel: "popup",
+          scheduledAt: new Date(),
+          metadata: {
+            userId: p.actorId,
+            actorId: p.actorId,
+            deliveryId,
+            source: "pipeline-critical-escalation",
+          },
+        });
+        await service.triggerReminder(instance.config.id);
+        console.log(
+          `[ProactivePipeline] critical 提案已挂起升级链 kind=${p.kind} reminderId=${instance.config.id}`,
+        );
+      })().catch((err) => {
+        console.log(`[ProactivePipeline] critical 升级链挂起失败（忽略）kind=${p.kind}: ${err}`);
+      });
+    },
   });
   proactivePipeline.start();
   // 管道级确认回流：hub 的确认解析入口对 origin=pipeline 条目委托管道（批准回调 + 回执）

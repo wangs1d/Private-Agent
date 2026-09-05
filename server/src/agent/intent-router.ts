@@ -53,14 +53,17 @@ export type IntentRoutePlan = {
  * 意图 → 执行契约路由表（唯一权威）。
  * 对话面（chat/knowledge_qa/meta_capability）：零工具直答，时间/位置走上下文注入。
  * 任务面：realtime_lookup/media_retrieval 轻预算单点执行（tier fast）；
- *         action_write/multi_step_task 全量能力 + 高预算（tier complex）。
+ *         action_write 按 write 能力束裁剪注入（calendar/reminder/voice/phone/
+ *         shopping/wallet/agent 中继/surface + tool_discover 延迟目录桥），
+ *         不再全量注入 112+ 工具 schema；multi_step_task 全量能力 + 高预算
+ *         （tier complex）。
  */
 export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
   chat: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
   knowledge_qa: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
   realtime_lookup: { plane: "task", capabilities: ["search"], budget: 2, tier: "fast" },
   media_retrieval: { plane: "task", capabilities: ["media", "search"], budget: 2, tier: "fast" },
-  action_write: { plane: "task", capabilities: ["full"], budget: 3, tier: "complex" },
+  action_write: { plane: "task", capabilities: ["write"], budget: 3, tier: "complex" },
   multi_step_task: { plane: "task", capabilities: ["full"], budget: 3, tier: "complex" },
   meta_capability: { plane: "chat", capabilities: [], budget: 0, tier: "fast" },
 };

@@ -60,6 +60,7 @@ import {
   consumeNormalizedStream,
   materializeOpenAiToolCalls,
   StreamIdleTimeoutError,
+  stripInlineThinkBlocks,
   stripInternalControlTags,
   createStreamMetaSentenceFilter,
   type NormalChatChunk,
@@ -1353,6 +1354,27 @@ const SURFACE_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["surface"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "surface.dismiss",
+      description:
+        "【收起桌面展示页】用户要求关闭/收起桌面上展示的内容面板时调用。" +
+        "典型场景：语音模式下屏幕中央正在展示照片/视频，用户说「把图片收了」「关掉这个页面」「不想看了」" +
+        "→ 调用本工具收起展示页。内容面板不会自动消失，依赖本工具或用户手动关闭。",
+      parameters: {
+        type: "object",
+        properties: {
+          surface: {
+            type: "string",
+            enum: ["media", "all"],
+            description: "要收起的面板：media=媒体中央展示页（默认），all=全部浮层面板",
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -2828,8 +2850,10 @@ export async function streamCompletionWithTools(
       // 规划任务，执行脑已接手处理中"）写成完整句子的场景——这类整句与正常内容混编
       // 时整段丢弃，避免污染前端气泡。
       const metaFilter = createStreamMetaSentenceFilter();
+      // 兜底：consumeNormalizedStream 已在咽喉处剥过内联 <think> 块，这里再剥一次
+      // （防未来有路径绕过统一 consumer），思考原文绝不进入正式回复。
       const sanitizedFinalText = stripInternalControlTags(
-        metaFilter(effectiveFinalText),
+        metaFilter(stripInlineThinkBlocks(effectiveFinalText)),
       );
       if (sanitizedFinalText) {
         onDelta(sanitizedFinalText);

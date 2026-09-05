@@ -28,7 +28,7 @@ test("路由表：每个意图标签都有确定的执行契约", () => {
   }
 });
 
-test("路由表：对话面三标签零工具；实时/媒体轻预算任务面；写数据/多步全量高预算", () => {
+test("路由表：对话面三标签零工具；实时/媒体轻预算任务面；写数据按 write 束裁剪、多步全量高预算", () => {
   const chat = routePlanForIntent("chat");
   assert.equal(chat.plane, "chat");
   assert.equal(chat.tier, "fast");
@@ -50,7 +50,10 @@ test("路由表：对话面三标签零工具；实时/媒体轻预算任务面�
 
   const write = routePlanForIntent("action_write");
   assert.equal(write.plane, "task");
-  assert.deepEqual(write.capabilities, ["full"]);
+  // 2026-09-05：写轮按 write 能力束裁剪注入（calendar/reminder/voice/phone/
+  // shopping/wallet/agent/surface + tool_discover 延迟目录桥按需召回长尾），
+  // 不再全量注入 112+ 工具 schema（~64k 字符）。
+  assert.deepEqual(write.capabilities, ["write"]);
   assert.equal(write.budget, 3);
   assert.equal(write.tier, "complex");
 

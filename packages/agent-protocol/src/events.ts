@@ -276,6 +276,13 @@ export const ServerEventType = {
    * payload: { surface: string, ttlSeconds?: number, jobId?: string }
    */
   SurfaceShow: "surface.show",
+  /**
+   * Surface-on-Demand：服务端（`surface.dismiss` 工具）要求客户端收起已
+   * 展示的面板（如媒体中央展示页）。客户端按 surface 名执行，
+   * 不支持的面板静默忽略；未展示时为 no-op。
+   * payload: { surface?: string, jobId?: string }
+   */
+  SurfaceDismiss: "surface.dismiss",
 } as const;
 
 // ============================================================

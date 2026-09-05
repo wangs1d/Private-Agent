@@ -235,7 +235,7 @@ export class ProactivityHub {
   private readonly feed = new PerceptionFeed();
   /** 通用路径：LLM 自主决策引擎（llmComplete 未注入时禁用，静默只用快路径） */
   private readonly engine: InitiativeEngine;
-  /** 通用路径总开关：默认关（对话主动走 fast 规则车道；LLM 通用路径需显式开启） */
+  /** 通用路径总开关：默认开（fast 规则车道保留；LLM 通用路径需接入外部模型才实际生效） */
   private readonly llmInitiativeEnabled: boolean;
   /** act 审计：最近发起的自主工具执行（安全可查，最多保留近 N 条） */
   private readonly actAudit = new Map<string, Array<{ at: number; tool: string; args: Record<string, unknown> }>>();
@@ -258,7 +258,7 @@ export class ProactivityHub {
     this.silenceLog = deps.silenceLog ?? new SilenceLog();
     this.confirmations = deps.pendingConfirmations ?? new PendingConfirmationStore();
     this.engine = new InitiativeEngine(deps.llmComplete ?? null);
-    this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", false);
+    this.llmInitiativeEnabled = readEnvBool("PROACTIVITY_LLM_INITIATIVE", true);
   }
 
   /**
@@ -459,8 +459,8 @@ export class ProactivityHub {
       return; // 同一 tick 不叠加，单次主动最克制
     }
     // 通用路径：感知流增量消费 → 有新观察才调 LLM 自主决策。
-    // 默认关闭（LLM 参与需显式 PROACTIVITY_LLM_INITIATIVE=1）：
-    // 对话主动由 fast 规则车道 + complex→fast 主动独占，避免双路径重复主动。
+    // 默认开启（PROACTIVITY_LLM_INITIATIVE=0 可退回纯规则）；llmComplete 未接入
+    // 时引擎自动禁用（evaluateInitiative 内 isEnabled 兜底），等效快路径独占。
     if (this.llmInitiativeEnabled) {
       await this.evaluateInitiative(actorId, now, lastInteraction);
     }
@@ -477,6 +477,13 @@ export class ProactivityHub {
     now: Date,
     lastInteractionAt: number | null,
   ): Promise<void> {
+    // 预算前置短路：预算耗尽时任何决策都会被频控拦截（canTrigger 规则 1 无重要性豁免），
+    // 直接跳过本轮 LLM 评估。放在 consumeWindow 之前——观察不消费，预算跨零点
+    // 重置后仍可被下一 tick 评估，不丢感知。
+    if (this.governor.dailyCountOf(actorId, now) >= this.governor.getBudget()) {
+      console.log(`[ProactivityHub] 预算耗尽，跳过通用路径评估 actor=${actorId}`);
+      return;
+    }
     // 日程感知：拉今日快照，有变化才推观察（LLM 看到日程自主判断要不要做什么）
     const snapshot = this.deps.getScheduleSnapshot?.(actorId) ?? null;
     if (snapshot && snapshot !== this.lastScheduleSnapshot.get(actorId)) {
@@ -535,7 +542,7 @@ export class ProactivityHub {
       return;
     }
     this.teachMatcherFromDecision(observations, decision);
-    await this.routeDecision(actorId, decision, "initiative");
+    await this.routeDecision(actorId, decision, "initiative", fingerprint);
   }
 
   /**
@@ -600,11 +607,16 @@ export class ProactivityHub {
     }
   }
 
-  /** 把 LLM 决策路由到三种行为模式（抑制 → 频控 → speak/act/advise） */
+  /**
+   * 把 LLM 决策路由到三种行为模式（抑制 → 频控 → speak/act/advise）。
+   * observationFingerprint：本次评估的观察窗口指纹——决策被抑制/频控拦截时记入
+   * 负向决策缓存（同样的观察喂给 LLM 大概率还是同样的决策、同样的拦截，省 token）。
+   */
   private async routeDecision(
     actorId: string,
     decision: InitiativeDecision,
     source: string,
+    observationFingerprint?: string,
   ): Promise<void> {
     // 负反馈抑制检查（用户意愿优先于时间冷却）：kind 级或关键词级命中即放弃
     const suppression = this.deps.suppressionStore?.isSuppressed(
@@ -616,6 +628,7 @@ export class ProactivityHub {
       console.log(
         `[ProactivityHub] 负反馈抑制拦截（通用）kind=${decision.kind} actor=${actorId} reason=${suppression.reason}`,
       );
+      this.rememberBlockedDecision(actorId, observationFingerprint);
       return;
     }
     const verdict = this.governor.canTrigger(actorId, decision.kind, decision.importance);
@@ -623,6 +636,7 @@ export class ProactivityHub {
       console.log(
         `[ProactivityHub] 频控拦截（通用）kind=${decision.kind} actor=${actorId} reason=${verdict.reason}`,
       );
+      this.rememberBlockedDecision(actorId, observationFingerprint);
       return;
     }
     this.governor.record(actorId, decision.kind);
@@ -671,6 +685,16 @@ export class ProactivityHub {
     list.push(line.slice(0, 120));
     if (list.length > RECENT_INITIATIVES_LIMIT) list.shift();
     this.recentInitiatives.set(actorId, list);
+  }
+
+  /**
+   * LLM 判了主动但被抑制/频控拦截 → 记入负向决策缓存：同样的观察窗口再到达时
+   * 免重复 LLM 调用（结果大概率仍是同样的拦截）。高显著观察仍不跳过
+   * （shouldSkip 护栏），静默时段/预算类拦截由各自机制承担恢复。
+   */
+  private rememberBlockedDecision(actorId: string, observationFingerprint?: string): void {
+    if (!observationFingerprint) return;
+    this.decisionCache.recordBlocked(actorId, observationFingerprint);
   }
 
   // ---- 内部实现 ----

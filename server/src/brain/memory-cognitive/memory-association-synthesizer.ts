@@ -20,7 +20,7 @@
 
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig } from "../../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../../external-model/resolve-provider.js";
 
 export interface MemoryAssociation {
   conclusion: string;
@@ -185,6 +185,7 @@ export class MemoryAssociationSynthesizer {
         temperature: 0.3,
         max_tokens: this.config.maxTokens,
         messages: buildAssociationMessages(items, query, this.config.maxItems),
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) return [];

@@ -238,6 +238,10 @@ export async function consumeNormalizedStream(
   let finishReason: string | null = null;
   let usage: NormalUsage | undefined;
   const toolAccByIndex = new Map<number, NormalToolCall>();
+  // content 内联思考块净化：部分思考型模型把 `<think>…</think>` 直接写进 content
+  // （而非独立 reasoning 字段），在咽喉处统一剥除，保证所有 consumer 拿到的
+  // content / onContentDelta 都是「正式回复文本」（见 stripInlineThinkBlocks 注释）。
+  const thinkSanitizer = createStreamThinkSanitizer();
 
   const idleMs = resolveIdleTimeoutMs(options.idleTimeoutMs);
   const useIdleGuard = idleMs > 0;
@@ -283,8 +287,11 @@ export async function consumeNormalizedStream(
       const chunk = result.value;
 
       if (chunk.content && chunk.content.length > 0) {
-        content += chunk.content;
-        options.onContentDelta?.(chunk.content);
+        const visibleDelta = thinkSanitizer.feed(chunk.content);
+        if (visibleDelta) {
+          content += visibleDelta;
+          options.onContentDelta?.(visibleDelta);
+        }
       }
       if (chunk.reasoning && chunk.reasoning.length > 0) {
         reasoning += chunk.reasoning;
@@ -317,6 +324,14 @@ export async function consumeNormalizedStream(
     } catch {
       // ignore
     }
+  }
+
+  // 流结束：冲出净化器滞留的尾巴（正常正文，或从未补全的伪标签前缀）。
+  // 若思考块始终未闭合，flush 返回空——整段视为思考过程丢弃。
+  const thinkTail = thinkSanitizer.flush();
+  if (thinkTail) {
+    content += thinkTail;
+    options.onContentDelta?.(thinkTail);
   }
 
   let toolCalls: NormalToolCall[] = [...toolAccByIndex.entries()]
@@ -369,6 +384,143 @@ export function stripThinkTags(reasoning: string): string {
   // 收尾的多余换行
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
   return cleaned.trim();
+}
+
+/* ------------------------------------------------------------------ *
+ * content 内联 <think> 块净化（思考透出防御，2026-09-05）              *
+ * ------------------------------------------------------------------ */
+
+/**
+ * 部分"思考型"模型（Qwen3 / DeepSeek-R1 部分部署 / MiniMax M2.x 未走 reasoning_split
+ * 的通用 OpenAI 兼容通路等）会把推理过程以内联 `<think>…</think>` 文本形式直接写进
+ * `content` 字段，而不是放进独立的 `reasoning_content`。历史上的净化只覆盖：
+ *   1) 独立 reasoning 字段（normalizer 嗅探 + pickVisibleText 兜底时 stripThinkTags）；
+ *   2) Kimi 的 DSML 工具调用标记（stripDsmlToolCallMarkup）；
+ * 「content 非空且内联 think 标签」这条路径完全裸奔——思考原文逐字透出到前端气泡
+ * （实测截图：`<think>用户问了"几点了"…</think>晚上 11 点 25 分，星期六。`）。
+ *
+ * 与 stripThinkTags（只剥标签、保留内部文本，用于 reasoning 降级展示）不同，
+ * 这里把**整个思考块连同内容一起删除**——content 是对用户的正式回复，思考不该可见。
+ */
+
+const THINK_OPEN_TAG_RE = /<\s*(?:think(?:ing)?|reasoning)\s*>/i;
+const THINK_CLOSE_TAG_RE = /<\s*\/\s*(?:think(?:ing)?|reasoning)\s*>/i;
+const THINK_ANY_TAG_RE = /<\s*(\/?)\s*(?:think(?:ing)?|reasoning)\s*>/gi;
+
+/**
+ * 整串剥离 content 里内联的思考块：
+ *   - 成对的 `<think>…</think>`（含 thinking / reasoning 变体）：整块连同内容删除；
+ *   - 游离的闭合标签：删除；
+ *   - 未闭合的开标签（模型流被截断 / 忘了闭合）：其后内容视为思考过程，删到串尾。
+ * 注意：如果正文本身需要输出字面 `<think>`（例如教用户写 HTML），会被误删——
+ * 与 createStreamControlTagSanitizer 的取舍一致：内部信号防透出的优先级更高。
+ */
+export function stripInlineThinkBlocks(content: string): string {
+  if (!content || content.indexOf("<") < 0) return content;
+  let cleaned = content;
+  // 成对块（非贪婪，逐对删除）
+  cleaned = cleaned.replace(
+    /<\s*(?:think(?:ing)?|reasoning)\s*>[\s\S]*?<\s*\/\s*(?:think(?:ing)?|reasoning)\s*>/gi,
+    "",
+  );
+  // 游离闭合标签（嵌套 / 成对删除后剩下的）
+  cleaned = cleaned.replace(/<\s*\/\s*(?:think(?:ing)?|reasoning)\s*>/gi, "");
+  // 未闭合的开标签：删到串尾
+  cleaned = cleaned.replace(/<\s*(?:think(?:ing)?|reasoning)\s*>[\s\S]*$/i, "");
+  return cleaned;
+}
+
+/**
+ * 识别 pending 末尾是否为「可能是半截 think 标签的前缀」（如 `<th` / `</ reas`）。
+ * 是则返回应滞留的字符数（下一 chunk 到达后再判定），否则返回 0。
+ * 也接受完整的 `<think>` 形态——调用方保证只在「未匹配到完整标签」时调用，
+ * 此时完整形态不会出现；纯 `<` / `< `（比较运算等）会短暂滞留，下一 chunk 即放行。
+ */
+function thinkTagPartialSuffixLen(text: string): number {
+  const lt = text.lastIndexOf("<");
+  if (lt < 0) return 0;
+  const tail = text.slice(lt);
+  if (tail.length > 32) return 0;
+  const m = /^<\s*\/?\s*([A-Za-z]*)\s*>?$/.exec(tail);
+  if (!m) return 0;
+  const name = m[1].toLowerCase();
+  // 名称为空（如 "<" / "</"）或为 think/thinking/reasoning 的前缀 → 可能是标签，滞留待判
+  if (name === "" || "thinking".startsWith(name) || "reasoning".startsWith(name)) {
+    return tail.length;
+  }
+  return 0;
+}
+
+/**
+ * 流式内联思考块净化器（跨 chunk）。
+ *
+ * 用法：把 provider 推流的原始 content 增量喂给 `feed(delta)`，返回值是**可以推给
+ * 前端/累积为正式回复**的净化后增量；流结束后调 `flush()` 冲出滞留的尾巴。
+ *
+ * 状态机：
+ *   - 正常态：扫描 `<think>` / `<thinking>` / `<reasoning>` 开标签（含半角空白变体），
+ *     命中则删除并进入思考态；末尾可能是半截标签的前缀则滞留待判。
+ *   - 思考态：丢弃一切内容，直到出现闭合标签回到正常态；滞留可能是半截闭合标签的尾部。
+ *   - `flush()`：正常态下滞留的是正常正文 / 从未补全的伪标签前缀，原样放行；
+ *     思考态下说明模型始终未闭合（流被截断或忘了闭合），剩余内容全部视为思考丢弃。
+ *
+ * 内存有界：正常态每个 chunk 后 pending 只留 ≤32 字符的标签前缀尾巴；
+ * 思考态只留闭合标签判定所需的尾部，思考正文即时丢弃，不需要保险丝。
+ */
+export function createStreamThinkSanitizer() {
+  let pending = "";
+  let inThink = false;
+
+  function drain(): string {
+    let out = "";
+    while (true) {
+      if (inThink) {
+        const closeMatch = THINK_CLOSE_TAG_RE.exec(pending);
+        if (closeMatch) {
+          pending = pending.slice(closeMatch.index + closeMatch[0].length);
+          inThink = false;
+          continue;
+        }
+        // 未闭合：思考内容全部丢弃，只留可能是半截闭合标签的尾部
+        const hold = thinkTagPartialSuffixLen(pending);
+        pending = hold > 0 ? pending.slice(pending.length - hold) : "";
+        return out;
+      }
+      THINK_ANY_TAG_RE.lastIndex = 0;
+      const tagMatch = THINK_ANY_TAG_RE.exec(pending);
+      if (!tagMatch) {
+        const hold = thinkTagPartialSuffixLen(pending);
+        if (hold > 0) {
+          out += pending.slice(0, pending.length - hold);
+          pending = pending.slice(pending.length - hold);
+        } else {
+          out += pending;
+          pending = "";
+        }
+        return out;
+      }
+      out += pending.slice(0, tagMatch.index);
+      pending = pending.slice(tagMatch.index + tagMatch[0].length);
+      if (tagMatch[1]) {
+        // 游离闭合标签（正常态出现）：剥掉，保持与 stripInlineThinkBlocks 一致
+        continue;
+      }
+      inThink = true;
+    }
+  }
+
+  return {
+    feed(delta: string): string {
+      pending += delta;
+      return drain();
+    },
+    flush(): string {
+      const rest = pending;
+      pending = "";
+      if (inThink) return "";
+      return rest;
+    },
+  };
 }
 
 /**

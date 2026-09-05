@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 
 export type MemoryDecision = "remember" | "reject" | "overwrite" | "decay";
 
@@ -164,6 +164,7 @@ async function llmDecision(
       temperature: 0,
       response_format: { type: "json_object" },
       messages,
+      ...bypassChatRequestExtras(),
     });
 
     const content = response.choices[0]?.message?.content?.trim();

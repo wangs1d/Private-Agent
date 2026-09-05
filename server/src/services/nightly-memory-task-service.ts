@@ -2,7 +2,7 @@ import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { UserFactStore } from "./user-fact-store.js";
 import OpenAI from "openai";
 import { mkdir } from "node:fs/promises";
@@ -563,6 +563,7 @@ export class NightlyMemoryTaskService {
           },
           { role: "user", content: transcript.slice(0, 12_000) },
         ],
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) return [];

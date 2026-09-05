@@ -2,7 +2,9 @@
 // 唯一入口 submitProposal：去重 → 仲裁（纯规则零 LLM）→ 投递（在线 WS / 离线 MessageHub）
 // → 结果反馈（outcome 回灌自适应冷却）。周期 flush 推进延迟提案并落盘。
 // 与 ProactivityHub 分工：本管道承接确定性提案源（日程/提醒/预警等 must 层）；
-// hub 快路径（对话/问候/兴趣等 social 层）后续迁移为提案源，投递层已统一到 DeliveryService。
+// legacy 出站路径（ProactiveOutboundMessageService）已收敛为提案源（2026-09-05），
+// hub 快路径（对话/问候/兴趣等 social 层）仍走 LifeSignalHub→ProactionCortex 直发
+// （分段拟人节奏），投递层已统一到 DeliveryService。
 import { arbitrate, DELIVERY_RETRY_MS, IN_CONVERSATION_WINDOW_MS, type ArbiterContext } from "./arbiter.js";
 import type { ProactiveDeliveryService } from "./delivery-service.js";
 import { readJson, writeJson } from "./persist-file.js";
@@ -49,6 +51,12 @@ export type ProactivePipelineDeps = {
   confirmations?: PendingConfirmationStore;
   /** 提案级确认的批准动作（装配层定义：如承诺代催的落地行为 + 助手动态留痕） */
   onProposalApproved?: (p: ProactiveProposal) => void;
+  /**
+   * critical 提案升级钩子（接线 intelligent-reminder 的 popup→tts_alarm→phone_call
+   * 三级升级链）：送达 ≠ 被看到——critical 直投成功后调此钩子挂起「未确认即升级」
+   * 监听，用户确认（reminder.acknowledge）即停链。未注入 = 无升级链（仅投递）。
+   */
+  escalate?: (p: ProactiveProposal, deliveryId: string) => void;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -315,6 +323,14 @@ export class ProactivePipeline {
         at: Date.now(),
       });
       if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind);
+      // critical 提案挂起升级链（送达 ≠ 被看到；fire-and-forget 不影响投递主链路）
+      if (p.importance === "critical" && this.deps.escalate) {
+        try {
+          this.deps.escalate(p, result.deliveryId);
+        } catch (err) {
+          console.log(`[ProactivePipeline] 升级钩子失败（忽略）kind=${p.kind}: ${err}`);
+        }
+      }
       return true;
     }
     this.deps.speak?.(p);

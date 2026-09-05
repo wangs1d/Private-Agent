@@ -700,6 +700,11 @@ export class ChatThreadStore {
    * - 不阻塞 trimThread 主链路（fire-and-forget）
    * - 失败静默：保留同步生成的已有 recap 行
    * - seq 守卫：期间若又有新 trim 触发增强，丢弃本次旧结果
+   *
+   * 增量合并契约（2026-09-05 漂移修复）：summarizer 只为「新对话」产新行，
+   * 已有 recap 行在此原样保留、不经 LLM 重发。此前 LLM 全量重发 recap，
+   * 小模型改写会把事实逐步漂移（实测"七点提醒我开线上会议"在多次折叠重写后
+   * 变成"七点半线上会议"，错误随每次折叠复利传播并注入后续上下文）。
    */
   private async enhanceRecap(
     sessionId: string,
@@ -715,7 +720,10 @@ export class ChatThreadStore {
       if (!lines || lines.length === 0) return;
       // 期间又发生了 trim → recap 已有更新版本，丢弃本次结果，避免覆盖
       if (this.recapEnhanceSeq.get(sessionId) !== seq) return;
-      this.applyEnhancedRecap(sessionId, lines);
+      const merged = [...existingLines];
+      for (const line of lines) pushRecapLine(merged, line);
+      if (merged.length === existingLines.length) return; // 新行全部与已有行重复
+      this.applyEnhancedRecap(sessionId, merged);
     } catch {
       // 静默失败：保留同步生成的已有 recap 行
     }

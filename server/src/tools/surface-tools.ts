@@ -79,4 +79,30 @@ export function registerSurfaceTools(
         : `指令已生成，但用户当前不在线（未连接 WebSocket），悬浮卡未展示。请直接用文本回答。`,
     };
   });
+
+  // 对话移除：用户说"把图片收了/关掉这个页面"→ LLM 调用，客户端收起对应面板。
+  // 与 surface.show 对称；media = 中央媒体展示页（不会自动消失，靠本工具或
+  // 用户手动 ✕ 关闭），all = 全部浮层。
+  registry.register("surface.dismiss", async (input, context) => {
+    const actorId = resolveActorId(context);
+    const surface = String(input.surface ?? "").trim().toLowerCase();
+
+    const pushed = deps.trySend(
+      actorId,
+      JSON.stringify({
+        type: ServerEventType.SurfaceDismiss,
+        payload: { surface, jobId: randomUUID() },
+      }),
+    );
+
+    const target = surface === "all" ? "全部浮层面板" : `「${surface || "media"}」`;
+    return {
+      ok: true,
+      surface,
+      pushed,
+      summary: pushed
+        ? `已通知客户端收起${target}。`
+        : `指令已生成，但用户当前不在线（未连接 WebSocket），未生效。`,
+    };
+  });
 }

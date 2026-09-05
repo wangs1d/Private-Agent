@@ -4,20 +4,20 @@ import OpenAI from "openai";
 /**
  * 滚动摘要（rolling recap）增强器。
  *
- * 背景：thread 上下文窗口有限，`trimByDayBoundary` / `smartTrimByTokens` 会把较早期的
- * 对话压成一条 `[session-recap]` 摘要。旧的正则提取只取首句，信息损失大，导致 agent
- * 忘记关键事实、时间线错乱、追问答非所问（用户反馈的"上下文跳转"）。
+ * 背景：thread 上下文窗口有限，近期窗口裁剪会把较早期的对话压进一条 `[session-recap]`
+ * 摘要。旧的正则提取只取首句，信息损失大，导致 agent 忘记关键事实、时间线错乱、
+ * 追问答非所问（用户反馈的"上下文跳转"）。
  *
- * 本模块实现「LLM 增量滚动摘要」：输入已有 recap 行 + 新被丢弃的对话消息，由 LLM 整合
- * 成新的 recap 行，模拟人类记忆机制——保留用户偏好/事实/承诺/决策/时间线，丢弃琐碎细节。
- * 这是 recap 的唯一生成方式（旧的正则提取已移除）。与现有记忆架构（agentic-memory 召回、
- * KV 摘要、海马体图谱）并行互补：滚动摘要负责「上下文窗口内的短期→中期连续性」，
- * 外部记忆负责「长期召回」。
+ * 本模块实现「LLM 增量滚动摘要」：输入已有 recap 行 + 新被丢弃的对话消息，由 LLM
+ * **只为新对话生成新摘要行**（已有行不经 LLM 重发，由调用方原样保留合并），
+ * 模拟人类记忆机制——保留用户偏好/事实/承诺/决策/时间线，丢弃琐碎细节。
  *
- * 设计约束：
- * - 增量合并：已有 recap 行必须保留，只在上面吸收新消息，不重复、不丢失
- * - 输出格式与现有 recap 兼容：每行 `- 内容`，可被 extractSessionRecapLines 解析
- * - 失败降级：任何异常返回 null，调用方保留已有 recap 行（不影响对话主链路）
+ * 契约（2026-09-05 漂移修复，必须与 chat-thread-store.enhanceRecap 的合并逻辑对齐）：
+ * - 返回值是「新增摘要行」，不是全量 recap；
+ * - 已有行若交由 LLM 重发，小模型改写会合并/曲解/脑补事实（与 recall-compressor
+ *   去 LLM 化同源的幻觉注入口），且每次折叠都在上一版输出上改写，错误会随轮次
+ *   复利传播（实测："七点提醒我开线上会议" 被逐步改写成 "七点半线上会议"）；
+ * - 失败降级：任何异常返回 null，调用方保留已有 recap 行（不影响对话主链路）。
  */
 
 export type RecapSummarizerContext = {
@@ -30,7 +30,8 @@ export type RecapSummarizerContext = {
 export type RecapSummarizer = (ctx: RecapSummarizerContext) => Promise<string[] | null>;
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
-const DEFAULT_MAX_LINES = 14;
+/** 单批新摘要行上限（新对话通常 ≤ 一批折叠消息，超过配额的细节由预算裁剪兜底） */
+const DEFAULT_MAX_NEW_LINES = 8;
 const DEFAULT_MAX_LINE_CHARS = 120;
 
 /** 从消息里提取可进摘要的文本（跳过 tool 结果、空 content、已有 recap）。 */
@@ -60,10 +61,10 @@ function serializeDroppedMessages(messages: ChatCompletionMessageParam[], maxCha
   return lines.join("\n");
 }
 
-/** 解析 LLM 输出为 recap 行（兼容 `- 内容` 格式，去重、限长、限条数）。 */
+/** 解析 LLM 输出为摘要行（兼容 `- 内容` 格式，去重、限长、限条数）。 */
 export function parseRecapLinesFromLlmOutput(
   output: string,
-  maxLines = DEFAULT_MAX_LINES,
+  maxLines = DEFAULT_MAX_NEW_LINES,
   maxLineChars = DEFAULT_MAX_LINE_CHARS,
 ): string[] {
   if (!output) return [];
@@ -88,28 +89,27 @@ function buildSummarizeMessages(ctx: RecapSummarizerContext): OpenAI.Chat.Comple
   const existing = ctx.existingLines.length > 0 ? ctx.existingLines.map((l) => `- ${l}`).join("\n") : "（空）";
   const dropped = serializeDroppedMessages(ctx.droppedMessages);
   const system = [
-    "你是用户的长期记忆整理器。系统会把较早期的对话从上下文窗口中压缩出去，由你生成「滚动摘要」，模拟人类长期记忆：",
+    "你是用户的长期记忆整理器。系统会把较早期的对话从上下文窗口中折叠出去，由你为「新对话」生成摘要行，与「已有摘要」合并成滚动摘要：",
     "记得关键事实、用户偏好、承诺、请求、决策与时间线，忘掉琐碎细节。",
     "",
-    "任务：把下方「已有滚动摘要」与「新对话」增量合并，输出新的滚动摘要行。",
+    "任务：只针对下方「新对话」输出新的摘要行。「已有摘要」仅用于判断哪些内容已被覆盖，禁止复述、改写或补充它。",
     "要求：",
-    "1. 必须保留已有摘要中的关键信息，不要删除或改写其大意；",
-    "2. 从新对话中吸收尚未覆盖的关键事实（用户偏好/事实/请求/承诺/决策/具体时间或日期）；",
-    "3. 不重复已有内容，不编造不存在的信息；",
+    "1. 只输出新对话中尚未被已有摘要覆盖的关键事实（用户偏好/事实/请求/承诺/决策/具体时间或日期）；",
+    "2. 时间、数字、金额、人名、地名必须照抄新对话原文的表述，禁止换算、补全或改写（如原文「七点」不得写成「七点半」或「19:30」）；",
+    "3. 不编造不存在的信息；新对话没有可摘要的关键事实时，不输出任何内容；",
     "4. 每条一行，以「- 」开头，每行不超过 120 字；",
     "5. 每条必须带时间标签（[今天]/[昨天]/[N天前]），无明确时间的关键事实标 [历史]；",
-    "6. 总共不超过 14 行；",
-    "7. 时间线顺序：先近后远（[今天] → [昨天] → [N天前]），与时间线对齐，不要乱序；",
-    "8. 只输出这些摘要行本身，不要任何解释、标题或代码块。",
+    "6. 最多 8 行；",
+    "7. 只输出新摘要行本身，不要任何解释、标题或代码块，也不要输出「已有摘要」中的任何一行。",
   ].join("\n");
   const user = [
-    "已有滚动摘要：",
+    "已有摘要（已覆盖，仅供去重参考，禁止输出这些行）：",
     existing,
     "",
-    "新对话（即将从窗口中压缩）：",
+    "新对话（即将从窗口中折叠，需要你生成摘要）：",
     dropped || "（无有效内容）",
     "",
-    "请输出合并后的滚动摘要行：",
+    "请输出新对话的摘要行：",
   ].join("\n");
   return [
     { role: "system", content: system },
@@ -118,7 +118,7 @@ function buildSummarizeMessages(ctx: RecapSummarizerContext): OpenAI.Chat.Comple
 }
 
 /**
- * 创建基于 LLM 的滚动摘要增强器。
+ * 创建基于 LLM 的滚动摘要增强器（只返回新对话的增量摘要行，见模块头注释契约）。
  * - 跟随当前生效的 provider（DeepSeek / Kimi / OpenAI 等 OpenAI 兼容端点），
  *   不再硬编码模型名，避免在只支持 deepseek-v4-* 的代理下被 400 拒绝；
  *   显式入参 model / AGENT_RECAP_SUMMARIZE_MODEL 仍可覆盖。
@@ -140,13 +140,13 @@ export function createLlmRollingRecapSummarizer(opts?: {
     !!process.env.MOONSHOT_API_KEY?.trim() ||
     !!process.env.OPENAI_API_KEY?.trim();
   if (!hasAnyProviderKey) return null;
-  const maxLines = opts?.maxLines ?? DEFAULT_MAX_LINES;
+  const maxLines = opts?.maxLines ?? DEFAULT_MAX_NEW_LINES;
   const maxLineChars = opts?.maxLineChars ?? DEFAULT_MAX_LINE_CHARS;
 
   return async (ctx): Promise<string[] | null> => {
     try {
       // 懒加载避免静态循环依赖：external-model/providers → abstract-chat-provider → chat-thread-store → 本模块
-      const { resolvePrimaryLlmClientConfig } =
+      const { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } =
         await import("../external-model/resolve-provider.js");
       const binding = resolvePrimaryLlmClientConfig();
       const apiKey = opts?.apiKey?.trim() || binding?.apiKey?.trim();
@@ -165,6 +165,7 @@ export function createLlmRollingRecapSummarizer(opts?: {
         temperature: 0.2,
         max_tokens: 600,
         messages: buildSummarizeMessages(ctx),
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       {

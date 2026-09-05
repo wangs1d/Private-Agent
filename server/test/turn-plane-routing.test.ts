@@ -1,17 +1,19 @@
 /**
  * 双面路由（2026-09-05）黄金用例回归。
  *
- * 目标：真实对话中「需要工具的轮次必须落任务面（有工具可用）」，
- * 「纯对话轮次必须落对话面（零工具、零预算、不多花一步）」。
- * 用例全部来自线上真实事故句与高频句式。
+ * 默认前台自决模式下 routeTurnByLlm 被整体跳过（前台带 task.dispatch 原语自决），
+ * 本文件在 AGENT_FOREGROUND_DISPATCH=0 的遗留灰度模式下回归独立路由的黄金用例；
+ * 前台自决模式本身在 llm-task-router-veto.test.ts 覆盖。
  *
  * 根源化契约：
  *   - 路由层没有任何话题关键词（价格/天气/新闻词表已删除）；
- *   - L0 只认锚定全文的寒暄——带诉求的句子（无论多短）都进 L1 语义分类；
- *   - 正确性由「L1 语义分类 + 出口自检兜底」共同保证，不靠词表预判。
+ *   - 正确性由「L1 语义分类 + 出口诚实闸/TurnOutcomeGate 兜底」共同保证，不靠词表预判。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+
+// 遗留灰度模式：独立路由 LLM 判定
+process.env.AGENT_FOREGROUND_DISPATCH = "0";
 
 const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
 const { isHighPrecisionChatText } = await import("../src/agent/task-router.js");
@@ -30,7 +32,7 @@ function fakeProvider(intent: string, confidence = 0.9) {
 
 /* ---------------- 对话面：纯对话不多花一步 ---------------- */
 
-test("对话面：寒暄/闲聊 → chat 平面零工具零预算，L0 短路零 LLM 成本", async () => {
+test("对话面：寒暄/闲聊 → chat 平面零工具零预算（L1 语义分类判定）", async () => {
   for (const text of ["在吗", "哈哈笑死我了", "好的收到", "晚安"]) {
     const { provider, calls } = fakeProvider("chat");
     const d = await routeTurnByLlm(provider, `sess-chat-${text}`, text);
@@ -38,13 +40,8 @@ test("对话面：寒暄/闲聊 → chat 平面零工具零预算，L0 短路零
     assert.equal(d.capabilities.length, 0, `${text} 对话面不得携带能力束`);
     assert.equal(d.budget, 0, `${text} 对话面预算必须为 0`);
     assert.equal(d.tier, "fast");
+    assert.equal(calls.count, 1, `${text} 应恰好一次 L1 语义分类`);
   }
-});
-
-test("对话面：L0 短路命中时零 LLM 调用（不花路由 token）", async () => {
-  const { provider, calls } = fakeProvider("chat");
-  await routeTurnByLlm(provider, "sess-l0-cost", "在吗");
-  assert.equal(calls.count, 0);
 });
 
 /* ---------------- 任务面：需要工具的轮次必须落任务面 ---------------- */

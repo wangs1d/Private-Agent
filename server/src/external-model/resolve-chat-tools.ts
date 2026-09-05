@@ -167,12 +167,14 @@ function pinDesktopVisualTools(
   // 倾向于调 desktop.visual.screenshot 等重路径工具而非 clock 轻量工具，
   // 导致响应慢 + 频繁触发"shell 被拦截""系统敏感文件不让读"等错误。
   // 桌面工具仅在 Complex/delegate 模式或显式 scoped 暴露时由用户主动 pin 进来。
-  // 2026-09-05 双面架构：profile="none"（对话面零工具）绝对不注入——空列表 + 
+  // 2026-09-05 双面架构：profile="none"（对话面零工具）绝对不注入——空列表 +
   // undefined accessMode（默认 full）会被误判为可注入，零工具契约被破坏。
+  // 2026-09-05 前后台架构：profile="explicit"（精确白名单）同样不注入。
   if (
     streamOpts?.toolExposureProfile === "contextual" ||
     streamOpts?.toolExposureProfile === "light" ||
-    streamOpts?.toolExposureProfile === "none"
+    streamOpts?.toolExposureProfile === "none" ||
+    streamOpts?.toolExposureProfile === "explicit"
   ) {
     return tools;
   }
@@ -241,7 +243,8 @@ function resolvePinnedToolNames(streamOpts?: AgentStreamOptions): Set<string> {
   const isFastProfile =
     streamOpts?.toolExposureProfile === "contextual" ||
     streamOpts?.toolExposureProfile === "light" ||
-    streamOpts?.toolExposureProfile === "none";
+    streamOpts?.toolExposureProfile === "none" ||
+    streamOpts?.toolExposureProfile === "explicit";
   if (!isFastProfile) {
     const mode = parseAgentAccessMode(streamOpts?.agentAccessMode);
     const bridge = streamOpts?.desktopBridgeOnline === true;
@@ -293,8 +296,9 @@ function applyToolRankingHint(
 
 /**
  * 能力束 → 工具名/命名空间前缀映射（delegate 裁剪用）。
- * 只覆盖轻任务能力（realtime_lookup→search、media_retrieval→media+search）；
- * write/multi_step 路由给的是 full，不走此表。
+ * 轻任务能力（realtime_lookup→search、media_retrieval→media+search）与
+ * 写能力（action_write→write，2026-09-05 起路由层直给 write 不再给 full）
+ * 走前缀裁剪；只有 multi_step_task 仍给 full 不走此表。
  * 前缀匹配规则：工具名等于前缀或以 prefix 开头（"calendar." 匹配 calendar.create_task）。
  */
 const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
@@ -309,7 +313,20 @@ const CAPABILITY_TOOL_PREFIXES: Record<string, string[]> = {
     "clock.",
   ],
   media: ["search_images", "search_videos", "photo", "vision.", "media", "image"],
-  write: ["calendar.", "reminder", "voice.", "phone.", "shopping.", "commitment."],
+  // write 束：写数据/有副作用的工具族。wallet（下单/支付/转账）、agent（好友
+  // 中继发消息）、surface（召唤/收起桌面悬浮卡，语音"念+显"依赖）均为写动作
+  // 常配能力；未列全的长尾由 tool_discover/tool_call 延迟目录桥按需召回。
+  write: [
+    "calendar.",
+    "reminder",
+    "voice.",
+    "phone.",
+    "shopping.",
+    "commitment.",
+    "wallet.",
+    "agent.",
+    "surface.",
+  ],
   desktop: ["desktop", "agent_browser", "screen"],
 };
 
@@ -347,6 +364,9 @@ function applyToolExposureProfile(
   streamOpts?: AgentStreamOptions,
 ): ChatCompletionTool[] {
   if (profile === "none") return [];
+  // explicit（2026-09-05 前后台架构）：调用方已给出精确白名单（chatToolsBuiltin），
+  // 任何筛选/合并/pin 都是污染——原样返回。
+  if (profile === "explicit") return tools;
   // delegate（任务面默认 profile）：2026-09-05 起按路由层能力束（toolCapabilities）
   // 裁剪——查天气/搜新闻这类轻任务不再全量注入 112+ 工具 schema（~64k 字符），
   // 未注入工具经 searchableTools 全集进 BM25 延迟目录，LLM 用 tool_discover 桥
@@ -438,6 +458,13 @@ export function resolveChatToolPlanForStream(
   const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
   const extra = streamOpts?.chatToolsExtra ?? [];
   const merged = [...builtin, ...extra];
+  // explicit（2026-09-05 前后台架构）：chatToolsBuiltin 即最终可见工具集（精确
+  // 白名单，可能是前台的 dispatch+快查，也可能是任务面 plan 点名的工具），跳过
+  // 全部筛选/缓存；chatToolsExtra 只进延迟目录语料，白名单外工具仍可被
+  // tool_discover BM25 召回（plan 漏选工具的执行期自救通道）。
+  if (streamOpts?.toolExposureProfile === "explicit") {
+    return { visibleTools: builtin, searchableTools: merged };
+  }
   // Fast 模式：不全暴露，只选相关工具，其余走 tool search 延迟召回。
   // selectRelevantTools 基于用户文本做关键词匹配 + 分类映射，微秒级。
   // 未选中的工具通过 prepareToolsWithToolSearch 进入 deferred catalog，

@@ -1,10 +1,11 @@
-# 语音模式架构（Voice Mode / 竖波悬浮件）
+# 语音模式架构（Voice Mode / 声纹胶囊）
 
-> 目标：切入语音模式后，主窗口退场，**所有交互由对话完成**；桌面上没有任何画面，
-> 只有一枚**常驻的竖波悬浮件**——细长的竖向波纹胶囊（无框/透明/置顶/不抢焦点），
-> 波纹随对话状态起伏。悬停悬浮件 → 右侧滑出「界面模式」选择组件，点击切回界面模式。
-> 信息面板（今日安排、图片/视频等）不再依赖按钮/侧栏，而是**通过对话召唤**，
-> 以临时浮层卡呈现在悬浮件左侧（自动淡出、可关闭）。
+> 目标：切入语音模式后，主窗口退场，**所有交互由对话完成**；桌面上只有一枚
+> **常驻的横向玻璃胶囊**——白色半透明、黑白单色（无框/置顶/不抢焦点），
+> 左侧状态呼吸点 + 中部横向声纹条 + 右侧状态文字，停靠屏幕底部居中，
+> 声纹条随对话状态起伏。悬停胶囊 → 下方滑出「界面模式」选择组件，点击切回界面模式。
+> 信息面板（今日安排、图片/视频等）不再依赖按钮/侧栏，而是**通过对话召唤**：
+> 日程等轻量信息以浮层卡叠在胶囊上方，照片/视频走屏幕中央展示页。
 >
 > 本文基于现有代码实际链路（含文件行号），Phase 1 已按此落地。
 
@@ -14,13 +15,13 @@
 
 | 状态 | 桌面上可见的东西 |
 |---|---|
-| 待机 | **竖波悬浮件**（深灰波纹慢呼吸），常驻可见，orb 同步跑唤醒监听 |
-| 聆听 / 思考 / 播报 | 悬浮件波纹变色加速（蓝/琥珀/绿），随麦响度/音节包络起伏 |
-| 对话召唤 | 悬浮件左侧浮现**浮层卡**（今日安排 / 图片视频墙），TTL 自动淡出、可关闭 |
-| 悬停悬浮件 | 右侧滑出「界面模式」选择组件，点击切回完整界面模式 |
+| 待机 | **声纹胶囊**（半透白玻璃，声纹条慢呼吸），常驻可见，orb 同步跑唤醒监听 |
+| 聆听 / 思考 / 播报 | 声纹条动画随状态切换（响度/行进/音节包络），右侧状态文字 |
+| 对话召唤 | 日程浮层卡叠在胶囊上方；照片/视频在屏幕中央展示页 |
+| 悬停胶囊 | 下方滑出「界面模式」选择组件，点击切回完整界面模式 |
 | 主窗口 | 进入语音模式即 hide（进程保留、WS 保持），悬浮件/语音口令恢复 |
 
-语音模式 = `Flutter 主窗口隐藏 + 竖波悬浮件常驻 + 唤醒监听`；
+语音模式 = `Flutter 主窗口隐藏 + 声纹胶囊常驻 + 唤醒监听`；
 退出语音模式 = 恢复主窗口 + orb 进程结束。再次进入走 ChatPage 的 mic 按钮。
 
 ## 2. 组件与链路
@@ -45,9 +46,9 @@
 │  voice-mode-state.ts：记录 actor 当前是否处于语音模式         │
 └──────────────┬────────────────────────────────────────────┘
 ┌──────────────▼──────── client/voice-orb-py（独立进程）──────┐
-│  VerticalWaveOrb：常驻竖波悬浮件（待机/聆听/思考/播报/提示）   │
+│  VerticalWaveOrb：常驻声纹胶囊（待机/聆听/思考/播报/提示）   │
 │    · 左键点击 = 点击说话开关；拖动换位；右键静音/打开主界面     │
-│    · 悬停 → ModeSelector（「界面模式」，右侧滑出）           │
+│    · 悬停 → ModeSelector（「界面模式」，下方滑出）           │
 │    · 悬停 → StatusPill 状态提示（上方）                     │
 │  CardStack：悬浮件左侧浮层卡（日程/媒体/文本）               │
 │    · surface.show(today_schedule) → GET /api/schedule/today │
@@ -56,8 +57,9 @@
 │  ListeningRecorder：VAD 端点检测（静默 700ms / 上限 20s）     │
 │  ASR: POST /brain/sensory/listen → 文本                     │
 │  退出（「界面模式」/ 口令）→ PAGE_MODE_REQUESTED → 进程退出    │
-│  chat.user_message → assistant_chunk/done →                 │
-│  TTS: POST /brain/sensory/speak → QMediaPlayer 播放          │
+└─────────────────────────────────────────────────────────────┘
+│  chat.user_message → assistant_chunk（分句流式）→             │
+│  TTS 逐句合成 /brain/sensory/speak → 边合成边播（首句不等全文）│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,7 +82,9 @@
   `schedule.tasks_changed` → 客户端 `_syncScheduleFromServer()` 刷新本地数据。
 - 媒体结果（照片/视频）：`search_images` / `search_videos` 完成 →
   `chat.media_ready`（边说边出图）与 `chat.assistant_done.mediaCards` →
-  orb `MediaCard` 缩略图墙（最多 6 块，视频 ▶ 角标，点击浏览器打开），
+  orb `CenterStage` **屏幕中央大图展示**（3 列大块，视频 ▶ 角标，
+  点击浏览器打开）。**不自动消失**：用户 ✕ 关闭，或对话"把图片收了"→
+  LLM 调 `surface.dismiss` 工具 → WS `surface.dismiss` 事件 → orb 收起。
   `(traceId, thumbnailUrl)` 去重。页面模式下仍进聊天流卡片。
 - Phase 2 候选 surface：`morning_briefing`（早报卡）、`reminder_confirm`
   （提醒确认卡，语音 yes/no 回传 outcome）、`weather`（`TextCard` 即可承接）。
@@ -97,7 +101,7 @@
    AEC 全双工）。
 4. **追问窗口**：播报结束后保持聆听 ~10s，开口即继续（无需再喊唤醒词）；
    静默超时 → 悬浮件回待机呼吸，继续唤醒待命。
-5. **模式切换（两条等价入口）**：悬停悬浮件 → 右侧「界面模式」组件点击；
+5. **模式切换（两条等价入口）**：悬停胶囊 → 下方「界面模式」组件点击；
    或语音口令 `打开界面 / 回到页面 / 显示主界面 / 退出语音…`
    → 打印 `PAGE_MODE_REQUESTED` → orb 进程退出 → Flutter 恢复主窗口并上报
    `mode.changed(false)`。
@@ -115,9 +119,13 @@
 
 - **Phase 1（本次）**：波形形态改造、VAD 连续对话、`surface.show`/今日安排、
   语音退出、故障自愈、mode.changed 上报。
-- **Phase 2**：sherpa-onnx 本地唤醒热词（替换滑窗 ASR 唤醒）、分句流式 TTS
-  （降低首响应延迟）、新 Surface（早报/提醒确认）、主动消息语音化投递
-  （delivery-service 在 `voice-mode` 在场态改走 TTS + 悬浮卡）。
+- **Phase 2**：sherpa-onnx 本地唤醒热词（替换滑窗 ASR 唤醒）、新 Surface（早报/提醒确认）、
+  主动消息语音化投递（delivery-service 在 `voice-mode` 在场态改走 TTS + 悬浮卡）。
+  ✅ **分句流式 TTS 已落地（2026-09-05）**：服务端语音模式轮次（`isVoiceMode`）
+  分段器切零停顿档（`pauseMs=0`、`interimReplyGapMs=0`、关闭首句按住）；
+  orb 收到 `chat.assistant_chunk` 即清洗 Markdown、分句入队，TTS 工作线程
+  逐句合成、播放队列边合成边播——首句出声不再等全文生成 + 整段合成；
+  done 只冲残句收尾（含 chunk 全程缺失时的整段兜底）。
 - **Phase 3**：AEC 全双工、分句级 barge-in、orb 收编为 Win32 原生窗口、
   结合 `/brain/sensory/look` 的桌面视觉感知。
 
@@ -125,7 +133,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `client/voice-orb-py/voice_orb/app.py` | orb 全部：竖波悬浮件、模式选择、浮层卡、唤醒、录音、ASR/TTS、WS |
+| `client/voice-orb-py/voice_orb/app.py` | orb 全部：声纹胶囊、模式选择、浮层卡/中央展示页、唤醒、录音、ASR/TTS、WS |
 | `client/flutter_app/lib/main.dart` | orb 进程管理、stdout 事件、`surface.show` 处理（语音模式让位 orb）、`mode.changed` 上报 |
 | `server/src/tools/surface-tools.ts` | `surface.show` 工具（LLM 可调用） |
 | `server/src/proactivity/voice-mode-state.ts` | per-actor 语音模式状态（内存态，Phase 2 投递矩阵消费） |

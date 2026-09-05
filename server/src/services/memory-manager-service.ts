@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 
 /**
  * 真向量 cosine 相似度（替代 human-like-memory 里的假 cosineLikeScore）。
@@ -593,6 +593,7 @@ export class MemoryManagerService {
           },
           { role: "user", content: JSON.stringify({ query, forgotten_lines: lines }) },
         ],
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) return [];
@@ -1099,6 +1100,7 @@ export class MemoryManagerService {
         temperature: 0,
         response_format: { type: "json_object" },
         messages,
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) throw new Error("empty memory score response");

@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sqlite-store.js";
@@ -579,6 +579,7 @@ async function llmMergeLines(lines: string[]): Promise<string[] | null> {
         },
         { role: "user", content: JSON.stringify({ lines }) },
       ],
+      ...bypassChatRequestExtras(),
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;
@@ -608,6 +609,7 @@ async function llmExtractExperience(lines: string[]): Promise<string | null> {
         },
         { role: "user", content: JSON.stringify({ lines }) },
       ],
+      ...bypassChatRequestExtras(),
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;
@@ -657,6 +659,7 @@ async function llmPlanSleepActions(
           }),
         },
       ],
+      ...bypassChatRequestExtras(),
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;

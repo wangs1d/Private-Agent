@@ -36,6 +36,7 @@ import {
   resolvePrimaryChatSessionId,
 } from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
+import { isVoiceMode } from "../../proactivity/voice-mode-state.js";
 import { StreamSegmenter } from "../../agent/stream-segmenter.js";
 import {
   buildExecutionEventPayload,
@@ -576,27 +577,40 @@ async function processBatchedMessage(
   } catch {
     recentUserTurns = [];
   }
-  const decision = await deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns);
-  const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
-    enabled: cfg.interimAck.enabled,
-  });
-
-  // turn 面板 v2 阶段 0/1
-  if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
-    const t0 = Date.now();
-    turnEmitter.emitTurnStarted({
-      sessionId: msgActor,
-      traceId: batched.originalMessageId,
-      t0,
+  // 路由决策以 Promise 下传：WS 层不再串行等待路由 LLM 调用（此前在这里
+  // await 最多 3s），agent-core 侧与记忆认知（cognize）并行消费。
+  // 面板事件 / 实时流式开关等路由衍生配置在 .then 里就绪——首个主回复 delta
+  // 必然晚于路由决策（agent-core 的主 LLM 调用依赖平面/工具束），无竞态。
+  const decisionPromise = deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns);
+  // turn 面板 v2 阶段 0/1（路由结果就绪后补发，不阻塞主链路）
+  void decisionPromise
+    .then((decision) => {
+      const phasedAsyncEnabled = shouldUsePhasedAsyncConversation(batched.text, decision.mode, {
+        enabled: cfg.interimAck.enabled,
+      });
+      if (cfg.turnPanelV2.enabled && phasedAsyncEnabled) {
+        const t0 = Date.now();
+        turnEmitter.emitTurnStarted({
+          sessionId: msgActor,
+          traceId: batched.originalMessageId,
+          t0,
+        });
+        turnEmitter.emitIntentDetected(
+          buildIntentDetectedPayload({
+            sessionId: msgActor,
+            traceId: batched.originalMessageId,
+            decision,
+          }),
+        );
+      }
+      // 实时流式例外：knowledge_qa 是对话面唯一保留"出口自检重跑"兜底的意图
+      // ——重跑时第一版文本已经流出会造成气泡重复，该意图保持缓冲模式。
+      realtimeStream =
+        decision.plane !== "chat" || decision.intent !== "knowledge_qa";
+    })
+    .catch(() => {
+      /* 路由决策永不 reject（内部降级）；防御性忽略 */
     });
-    turnEmitter.emitIntentDetected(
-      buildIntentDetectedPayload({
-        sessionId: msgActor,
-        traceId: batched.originalMessageId,
-        decision,
-      }),
-    );
-  }
 
   // 统一分段器：主回复流式 delta 按"信息块"（同话题连贯短句）切分，像真人
   // 一句一句蹦出来（GPT live 节奏）。垫词、分段、层层递进全部由此模块统一产出：
@@ -607,14 +621,25 @@ async function processBatchedMessage(
   //   每块推送前剔除与已推送句级重复的内容，保证层层递进不重复。
   // - 重量上限 + 首段做结论锚：正文块数封顶（超限并入尾部块），首个信息块承载结论。
   // 全程同源（都来自主回复流式），天然连续、不重复。
+  // 语音模式轮次：分段器切零停顿档。文字聊天的 400ms 块间停顿 / 800ms 首句
+  // 间隔 / 首句按住是给前端打字机节奏用的；语音端（orb）拿 chunk 直接分句合成
+  // TTS，这些人为停顿只会把 assistant_done 和首句 TTS 一起拖慢——语音链路
+  // 的"节奏感"由真人语音本身的播放时长天然保证，不需要额外 sleep。
+  const voiceModeTurn = isVoiceMode(msgActor);
+  // 实时流式开关（2026-09-05）：主回复 delta 即刻喂分段器，前端打字机/语音 TTS
+  // 在生成过程中就拿到首个信息块，不再等整段生成完才推 chunk（此前 chunk 全部
+  // 滞留到 reply 完成后才一次性推出，是文字链路"回复慢"的最大单点）。
+  // 例外（knowledge_qa 缓冲）由上方路由 .then 里按决策改写；默认 true——
+  // 首个 delta 只会在路由决策就绪后到达，此时开关必然已被赋值。
+  let realtimeStream = true;
   const streamSegmenter = new StreamSegmenter(
     (segment, phase) => sendAssistantChunk(segment, phase),
     {
       // pauseMs：每条回复信息块之间的间隔，拉长到 400ms，
       // 配合前端打字机，让每块逐字打出后都有一段清晰的停顿再输出下一块。
-      pauseMs: 400,
+      pauseMs: voiceModeTurn ? 0 : 400,
       minSegmentChars: 6,
-      interimReplyGapMs: 800,
+      interimReplyGapMs: voiceModeTurn ? 0 : 800,
       // 2026-08-28 修复"分段回复一次性整段渲染"：原按路由决策
       // （decision.segmentable）关闭工具/搜索/知识问答轮的分段，工具循环的
       // 最终文本只在收尾时经一次 onDelta 整段喂入 → segmentationEnabled=false
@@ -628,6 +653,8 @@ async function processBatchedMessage(
       // 覆盖真实回复体量，尾部合并只对病态超长输出生效（保留为防刷屏极端阀）。
       blockCharTarget: 56,
       maxStreamSegments: 24,
+      // 语音模式关闭首句按住：首句（agent 的第一声回应）随到随发，TTS 立刻开播
+      holdFirstSentence: !voiceModeTurn,
     },
   );
 
@@ -773,13 +800,16 @@ async function processBatchedMessage(
       interruptedContext: batched.interruptedContext,
       sessionId: typeof batched.sessionId === "string" ? batched.sessionId : undefined,
       signal: turnAbortController.signal,
-      routeDecision: decision,
+      routeDecision: decisionPromise,
       onAssistantDelta: (delta) => {
-        // 方案1：只需累积原始流式文本作兜底；不再实时 feed 分段器，
-        // 避免多段流/工具边界打断 heldFirst 造成多个垫词与顺序错乱。
-        // 最终在 reply.text 完成后一次性 feed 进分段器（见下方 flush 前）。
+        // 实时流式：delta 即刻喂分段器（增量去重由分段器内部保证）；
+        // 同时累积原始流式文本，供最终残差计算与兜底。knowledge_qa 缓冲模式
+        // 下只累积、不喂（出口自检重跑后一次性喂最终文本，避免气泡重复）。
         if (isStale()) return;
         streamedText += delta;
+        if (realtimeStream && delta) {
+          streamSegmenter.feed(delta);
+        }
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
@@ -992,17 +1022,24 @@ async function processBatchedMessage(
 
     if (isStale()) return;
 
-    // 方案1：主回复流结束后，把"最终文本"一次性喂入分段器作为唯一内容源。
-    // - 优先用 reply.text（最终答复，确定性来源）；为空（如走兜底/工具拼接路径）时
-    //   用流式累积的 streamedText 兜底，保证至少有一段正文可分段。
-    // - 链路保证：只 feed 这一次，分段器内部据此裁决一个垫词 + 按信息块递进，
-    //   避免多段流/工具边界造成的重复、乱序与多个垫词。
+    // 主回复流结束后的分段器收尾（2026-09-05 实时流式版）：
+    // - 实时流式轮次：流式内容已随生成过程推出，这里只喂"最终答复里有、
+    //   流式里没说过"的残差（工具拼接/后处理清洗产生的差异），已发内容靠
+    //   分段器内部句级去重双保险，不重复推送。
+    // - 缓冲模式轮次（knowledge_qa）：沿用方案1——最终文本一次性喂入，
+    //   优先 reply.text，为空时用流式累积兜底。
     // - 入料前统一清一遍时间戳帧（streamedText 分支是原始流式累积、从未清洗过；
     //   复述的帧不在这里剥掉，就会成为独立信息块推给前端）。
     const finalFeedRaw = (reply.text && reply.text.trim()) ? reply.text : streamedText;
     const finalFeed = stripAllTimestampFrameLines(finalFeedRaw);
     if (finalFeed && finalFeed.trim()) {
-      streamSegmenter.feed(finalFeed);
+      if (realtimeStream && streamedText.trim()) {
+        const streamedClean = stripAllTimestampFrameLines(streamedText);
+        const residual = stripSentencesAlreadySaid(streamedClean, finalFeed);
+        if (residual.trim()) streamSegmenter.feed(residual);
+      } else {
+        streamSegmenter.feed(finalFeed);
+      }
     }
 
     // 主回复流结束：把分段器缓冲中剩余的半截文本作为最后一段推送

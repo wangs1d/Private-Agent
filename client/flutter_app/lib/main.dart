@@ -3966,9 +3966,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     env["PAI_ORB_PARENT_PID"] = "$pid";
 
     try {
+      final List<String>? pyCommand = await _resolveVoiceOrbPython();
+      if (pyCommand == null) {
+        debugPrint(
+            "[VoiceOrb] no usable python interpreter found, aborting launch");
+        return;
+      }
       _voiceOrbProcess = await Process.start(
-        "python",
-        <String>[script],
+        pyCommand.first,
+        <String>[...pyCommand.skip(1), script],
         workingDirectory: orbDir.path,
         environment: env,
       );
@@ -4050,6 +4056,39 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         final Directory parent = dir.parent;
         if (parent.path == dir.path) break;
         dir = parent;
+      }
+    }
+    return null;
+  }
+
+  /// 探测可用的 Python 解释器启动命令（结果缓存）。
+  /// Windows 上 PATH 里的 `python` 可能是 Microsoft Store 的占位 stub
+  /// （启动即报 "Python was not found" 并退出），因此优先走 py 启动器。
+  List<String>? _voiceOrbPythonCommand;
+
+  Future<List<String>?> _resolveVoiceOrbPython() async {
+    if (_voiceOrbPythonCommand != null) return _voiceOrbPythonCommand;
+    const List<List<String>> candidates = <List<String>>[
+      <String>["py", "-3"],
+      <String>["python"],
+    ];
+    for (final List<String> candidate in candidates) {
+      try {
+        final ProcessResult probe = await Process.run(
+          candidate.first,
+          <String>[...candidate.skip(1), "-c", "import sys"],
+        );
+        if (probe.exitCode == 0) {
+          debugPrint(
+              "[VoiceOrb] using python interpreter: ${candidate.join(" ")}");
+          _voiceOrbPythonCommand = candidate;
+          return candidate;
+        }
+        debugPrint("[VoiceOrb] python candidate "
+            "`${candidate.join(" ")}` rejected (exit ${probe.exitCode})");
+      } on Exception catch (e) {
+        debugPrint(
+            "[VoiceOrb] python candidate `${candidate.join(" ")}` failed: $e");
       }
     }
     return null;

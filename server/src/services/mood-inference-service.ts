@@ -221,6 +221,59 @@ export class MoodInferenceService {
   }
 
   /**
+   * 消费语义路由顺带产出的情绪/话题辅助分析（与路由 LLM 调用合并，省一次
+   * 每轮独立调用）。aux 缺失（路由超时/降级/未产出 sentiment）时回退到
+   * 独立 analyzeMessage 调用，保持旧行为。
+   *
+   * 返回本次记录的推断（回退路径无推断或缓存命中时返回 null）。
+   */
+  async ingestRouteAux(
+    sessionId: string,
+    userMessage: string,
+    aux?: { sentimentScore: number; emotionTags: string[]; topics: string[] },
+  ): Promise<MoodInference | null> {
+    const text = userMessage.trim();
+    if (!text) return null;
+
+    if (!aux || !Number.isFinite(aux.sentimentScore)) {
+      try {
+        return await this.analyzeMessage(sessionId, text);
+      } catch {
+        return null;
+      }
+    }
+
+    // 与 analyzeMessage 共用同一缓存键：同文本不重复记录（含降级路径重放）
+    const cacheKey = createHash("sha256").update(`${sessionId}:${text}`).digest("hex").slice(0, 32);
+    const cached = this.analysisCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < this.analysisCacheTtlMs) {
+      // 与 cognize 的 limbic 情绪通道并行竞速落败时（对方先登记缓存并发起
+      // 独立分析）：复用其已记录的同文本推断，保证调用方仍能拿到结果发
+      // MoodInferred，而不是静默丢失本轮情绪事件。
+      const preview = text.slice(0, 200);
+      const list = this.inferences.get(sessionId) ?? [];
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].rawSignals?.userMessagePreview === preview) return list[i];
+      }
+      return null;
+    }
+    this.analysisCache.set(cacheKey, { ts: Date.now(), topics: aux.topics ?? [] });
+
+    try {
+      return this.record({
+        sessionId,
+        sentimentScore: Math.max(-1, Math.min(1, aux.sentimentScore)),
+        confidence: 0.7,
+        emotionTags: (aux.emotionTags ?? []).slice(0, 3),
+        source: "conversation",
+        rawSignals: { userMessagePreview: text.slice(0, 200) },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Use LLM to analyze a user message and infer mood.
    * Returns null if LLM is unavailable, analysis fails, or message is cached.
    *

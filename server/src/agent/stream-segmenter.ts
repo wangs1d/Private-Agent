@@ -38,6 +38,12 @@ export type StreamSegmenterOptions = {
   blockCharTarget?: number;
   /** 正文信息块数量上限（重量上限）：超出后剩余内容并入尾部块。默认 4。 */
   maxStreamSegments?: number;
+  /**
+   * 是否按住首个分句做"先应一句"裁决。默认 true（文字聊天节奏）。
+   * 语音模式必须关闭：按住首句会让第一段文本延迟到第二块才发出，
+   * 直接拖慢 TTS 首句开播；关闭后首句随到随发。
+   */
+  holdFirstSentence?: boolean;
 };
 
 /** 句子 / 段落边界：中文/英文句末标点与换行。 */
@@ -65,6 +71,8 @@ export class StreamSegmenter {
   private interimReplyGapMs: number;
   /** 是否启用信息块分段 */
   private segmentationEnabled: boolean;
+  /** 是否按住首句（holdFirstSentence=false 时为 false，首句随到随发） */
+  private holdFirstSentence: boolean;
   /** 信息块目标字符数 */
   private blockCharTarget: number;
   /** 正文信息块数量上限 */
@@ -92,6 +100,10 @@ export class StreamSegmenter {
     this.segmentationEnabled = opts.segmentationEnabled ?? true;
     this.blockCharTarget = opts.blockCharTarget ?? 56;
     this.maxStreamSegments = opts.maxStreamSegments ?? 4;
+    this.holdFirstSentence = opts.holdFirstSentence ?? true;
+    // holdFirstSentence=false → 首句随到随发：interimDone 置位使首句按住逻辑
+    // 全程短路（flushCompleteBlocks 不按住、dispatchSegment/flushFinal 走普通分支）
+    this.interimDone = !this.holdFirstSentence;
   }
 
   /**
@@ -173,7 +185,7 @@ export class StreamSegmenter {
     this.blockBuffer = "";
     this.tailBuffer = "";
     this.heldFirst = null;
-    this.interimDone = false;
+    this.interimDone = !this.holdFirstSentence;
   }
 
   /** 按信息块逐块分发：每个完整语义块单独作为一段，串行、带块间停顿。

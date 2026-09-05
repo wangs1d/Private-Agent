@@ -1,5 +1,10 @@
 export type ProactiveOutboundChannel = "websocket" | "voice" | "phone_call" | "console";
 
+import type { ArbitrationDecision, ProactiveProposal } from "../proactivity/pipeline-types.js";
+
+/** 统一管道提交入口（ProactivePipeline.submitProposal 的薄包装类型） */
+export type ProactivePipelineSubmitter = (p: ProactiveProposal) => ArbitrationDecision;
+
 export type ProactiveOutboundMessage = {
   id: string;
   actorId: string;
@@ -89,6 +94,13 @@ export class ProactiveOutboundMessageService {
   constructor(
     private readonly sendToClient: ProactiveOutboundMessageSender | null,
     private readonly memoryWriter: ProactiveOutboundMemoryWriter | null = null,
+    /**
+     * 统一管道提交入口（收敛改造 2026-09-05）：注入后 send() 把消息组装为
+     * ProactiveProposal 转投 ProactivePipeline——去重/仲裁/离线挂起/outcome 反馈
+     * 全由管道承担（legacy 直发路径离线只 console.log，消息即丢）。
+     * 未注入时保持原直发行为（向后兼容，测试/独立场景）。
+     */
+    private readonly pipelineSubmit?: ProactivePipelineSubmitter,
   ) {}
 
   async send(message: Omit<ProactiveOutboundMessage, "id" | "createdAt" | "channel"> & {
@@ -106,14 +118,25 @@ export class ProactiveOutboundMessageService {
     if (list.length > 30) list.splice(0, list.length - 30);
     this.history.set(payload.actorId, list);
 
-    const envelope = {
-      type: "agent.proactive_message",
-      payload,
-    };
-
-    const sent = await Promise.resolve(this.sendToClient?.(payload.actorId, envelope) ?? false);
-    if (!sent) {
-      console.log(`[ProactiveOutbound] ${payload.actorId}: ${payload.title} - ${payload.text}`);
+    let sent: boolean;
+    if (this.pipelineSubmit) {
+      const decision = this.pipelineSubmit(this.toProposal(payload));
+      sent = decision.verdict === "delivered";
+      if (!sent) {
+        // merged=去重合并 / deferred=离线挂起择机发 —— 都不是丢消息，不打扰调用方
+        console.log(
+          `[ProactiveOutbound] 提案未即时投递（verdict=${decision.verdict}）: ${payload.title}`,
+        );
+      }
+    } else {
+      const envelope = {
+        type: "agent.proactive_message",
+        payload,
+      };
+      sent = await Promise.resolve(this.sendToClient?.(payload.actorId, envelope) ?? false);
+      if (!sent) {
+        console.log(`[ProactiveOutbound] ${payload.actorId}: ${payload.title} - ${payload.text}`);
+      }
     }
     await Promise.resolve(
       this.memoryWriter?.(
@@ -123,6 +146,43 @@ export class ProactiveOutboundMessageService {
       ) ?? null,
     );
     return sent;
+  }
+
+  /**
+   * 消息 → 统一管道提案：directText 直投（零 LLM）；urgency（0-10）映射重要性；
+   * reason 类别映射 kind（命中频控器的已知冷却表）；dedupKey 含 reason+标题指纹
+   * （同类话题短窗口内去重合并）。
+   */
+  private toProposal(m: ProactiveOutboundMessage): ProactiveProposal {
+    const urgency = typeof m.meta?.urgency === "number" ? (m.meta.urgency as number) : null;
+    const importance: ProactiveProposal["importance"] =
+      urgency === null ? "medium" : urgency >= 8 ? "high" : urgency >= 5 ? "medium" : "low";
+    const category = normalizeReasonCategory(m.reason);
+    const kind =
+      category === "care"
+        ? "care"
+        : category === "follow_up" || category === "planning"
+          ? "followup"
+          : "life_reminder";
+    const createdAtMs = Date.parse(m.createdAt);
+    return {
+      proposalId: m.id,
+      actorId: m.actorId,
+      kind,
+      tier: "social",
+      importance,
+      dedupKey: `outbound:${m.reason}:${m.actorId}:${compactText(m.title, 40)}`,
+      title: m.title,
+      summary: compactText(m.text, 200),
+      evidence: [
+        `reason=${m.reason}`,
+        `channel=${m.channel}`,
+        ...(urgency !== null ? [`urgency=${urgency.toFixed(1)}`] : []),
+      ],
+      directText: m.text,
+      createdAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+      source: "legacy-runtime",
+    };
   }
 
   getRecent(actorId: string, limit = 5): ProactiveOutboundMessage[] {

@@ -1,0 +1,118 @@
+import OpenAI from "openai";
+
+import { preparePromptCachePlan } from "../prefix-cache.js";
+import {
+  AbstractChatProvider,
+  type SystemAndPlanContext,
+  type SystemAndPlanResult,
+} from "../abstract-chat-provider.js";
+import type { AgentStreamOptions } from "../types.js";
+
+const SYSTEM_PROMPT =
+  "You are MiniMax AI, an AI assistant powered by the MiniMax large language model. You are proficient in Chinese and English conversations. You provide users with safe, helpful, and accurate answers. You will reject any requests involving terrorism, racism, or explicit content. MiniMax is a proper noun and should not be translated.";
+
+/**
+ * MiniMax M2.x 系（M2 / M2.1 / M2.5 / M2.7）思考无法关闭，默认把 `<think>` 内联在
+ * `content` 里逐字透出。请求体带 `reasoning_split: true` 后思考分流到
+ * `reasoning_content`（`reasoning_details` 伴随出现），与流式基建的
+ * reasoning 字段嗅探对齐：思考不进 onDelta，仅 content 为空时兜底。
+ *
+ * 思考开关：与 Kimi 同契约（`disableThinking !== false` 默认关）。M3 真支持
+ * `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0、正文直出）；M2.x
+ * 会 accept 该参数但照常思考（仅靠 reasoning_split 保证正文干净）。
+ * 默认关思考的动机：意图路由等旁路走 provider 时 maxOutputTokens 仅 192，
+ * M 系思考计入 max_tokens 预算，不关会把正文饿死（实测思考连"1+1"都上千 token）。
+ * @see https://platform.minimax.io/docs/api-reference/text-openai-api
+ */
+function minimaxExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> {
+  const body: Record<string, unknown> = { reasoning_split: true };
+  if (effectiveStreamOpts.disableThinking) {
+    body.thinking = { type: "disabled" };
+  }
+  return body;
+}
+
+/**
+ * MiniMax OpenAI 兼容 API（M 系文本模型）。
+ * 环境变量：`MINIMAX_API_KEY`（必填以启用）、`MINIMAX_MODEL`、`MINIMAX_BASE_URL`。
+ * 国内平台密钥仅对 `https://api.minimaxi.com/v1` 有效；海外平台
+ * （`https://api.minimax.io/v1`）需在 `MINIMAX_BASE_URL` 显式覆盖。
+ *
+ * 模型差异（2026-09-05 实测）：
+ * - M2.x（M2 / M2.1 / M2.5 / M2.7）：思考无法关闭（thinking 开关被 accept 但仍思考）；
+ * - M3：多模态模型但 OpenAI 兼容端点暂不接受 image_url（500 system error 1033），
+ *   思考默认 adaptive、同样无法经 reasoning_split 之外的手段关闭。
+ * 综上统一按纯文本 provider 处理（照片走基类 OCR 降级），思考一律经
+ * `reasoning_split` 分流到 `reasoning_content`，与流式基建的字段嗅探对齐。
+ *
+ * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、
+ * thread 维护等公共逻辑由基类模板方法固化，本类只实现 MiniMax 特有的 system prompt 构建与
+ * reasoning_split 开关。
+ */
+export class MiniMaxProvider extends AbstractChatProvider {
+  readonly id = "minimax";
+  readonly displayLabel = "MiniMax";
+  get capabilities() {
+    return {
+      toolCallingProtocol: "openai" as const,
+      supportsParallelToolCalls: true,
+      supportsVision: false,
+      supportsThinking: true,
+      supportsStreaming: true,
+      maxContextTokens: this.model.startsWith("MiniMax-M3") ? 1_000_000 : 204_800,
+    };
+  }
+
+  protected readonly systemPrompt = SYSTEM_PROMPT;
+  protected readonly notEnabledErrorMessage = "MINIMAX_API_KEY is not set";
+  protected readonly client: OpenAI | null;
+  protected readonly model: string;
+
+  constructor() {
+    super();
+    const apiKey = process.env.MINIMAX_API_KEY?.trim();
+    const baseURL = (process.env.MINIMAX_BASE_URL ?? "https://api.minimaxi.com/v1").trim();
+    this.model = (process.env.MINIMAX_MODEL ?? "MiniMax-M3").trim();
+    this.client = apiKey
+      ? new OpenAI({ apiKey, baseURL, timeout: 180_000, maxRetries: 2 })
+      : null;
+  }
+
+  /** 与 Kimi 同契约：默认关思考（M3 真生效；M2.x 忽略该参数但 reasoning_split 仍保证正文干净）。 */
+  protected resolveEffectiveStreamOpts(streamOpts: AgentStreamOptions | undefined): AgentStreamOptions {
+    return { ...(streamOpts ?? {}), disableThinking: streamOpts?.disableThinking !== false };
+  }
+
+  protected buildSystemAndPlan(ctx: SystemAndPlanContext): SystemAndPlanResult {
+    const promptPlan = preparePromptCachePlan({
+      providerId: this.id,
+      model: ctx.model,
+      baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
+      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
+      finalizeOptions: {
+        tools: Boolean(ctx.tools && !ctx.overrideSys),
+        masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
+        agentAccessMode: ctx.streamOpts?.agentAccessMode,
+        desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
+        phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,
+        ...(ctx.suppressSuffixes ? {
+          suppressRuntimeSuffixes: true,
+          functionalSuffixes: ctx.streamOpts?.functionalSuffixes !== false,
+        } : {}),
+      },
+      tools: ctx.toolSearchPrepared?.visibleTools,
+      variant: ctx.tools ? "chat-tools" : "chat",
+    });
+    return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
+  }
+
+  protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> {
+    return minimaxExtraBody(effectiveStreamOpts);
+  }
+
+  protected applyExtraBodyToPlainRequest(): boolean {
+    // reasoning_split 需 spread 到非工具分支 request 顶层
+    // （OpenAI Node SDK v6 不识别 Python 风格的 extra_body，直接 spread 到顶层 MiniMax 才能收到）
+    return true;
+  }
+}

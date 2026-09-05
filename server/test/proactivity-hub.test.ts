@@ -11,8 +11,8 @@ import type { LlmCompleteFn } from "../src/proactivity/initiative-engine.js";
 import { resetExemplars } from "../src/proactivity/semantic-trigger-matcher.js";
 import { detectConversationProactiveHook } from "../src/proactivity/triggers/conversation-triggers.js";
 
-// 通用 LLM 路径默认关闭（PROACTIVITY_LLM_INITIATIVE 默认 0，对话主动走 fast 规则车道）。
-// 本文件专门覆盖该路径，故显式开启；互不串扰的干扰已在 onTick 内按 greeting/快路径先行短路。
+// 通用 LLM 路径默认开启（PROACTIVITY_LLM_INITIATIVE 默认 1），但需 llmComplete 注入才实际生效。
+// 本文件显式设 1 以不依赖默认值；互不串扰的干扰已在 onTick 内按 greeting/快路径先行短路。
 process.env.PROACTIVITY_LLM_INITIATIVE = "1";
 
 // 语义范例是模块级状态（决策蒸馏会在线扩充）——每个用例前重置，

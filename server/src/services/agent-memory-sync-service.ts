@@ -284,7 +284,13 @@ export class AgentMemorySyncService {
     const factMatch =
       /(我是|我在做|我最近在|我的项目|我住在|我计划|我需要|my project|i am|i'm)/i.test(text) ||
       /(?:^|\s)(?:i|user)\s+(?:live|lives|am living|am based|based)\s+(?:in|at)\s+/i.test(text);
-    const commitmentMatch = /(我会|我将|已经帮你|已为你|稍后|接下来|i will|i can|i'll)/i.test(text);
+    // 承诺匹配（2026-09-05 扩充）：原词表漏掉管家的高频口头应承表述
+    // （"给你设个提醒/记下了/到点喊你"）与用户委托（"提醒我…"），这类话
+    // 承诺没进【待办与承诺】槽位，后续轮次 agent 会把约定细节说岔且无从对证
+    const commitmentMatch =
+      /(我会|我将|已经帮你|已为你|稍后|接下来|记下了|记着|给你设|帮你设|帮你记|给你记|提醒我|提醒你|到点喊|i will|i can|i'll)/i.test(
+        text,
+      );
     const loopMatch = /(待办|未完成|后续|继续|下一步|pending|todo|follow up)/i.test(text);
 
     const summaryAdd = (key: string, value: string, limitLines = 8): void => {

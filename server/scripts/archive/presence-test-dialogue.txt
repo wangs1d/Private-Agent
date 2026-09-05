@@ -1,9 +1,16 @@
-# presence 对话记录  query=你好呀，今天心情怎么样
-# user: 你好呀，今天心情怎么样
-[+315ms] USER: 你好呀，今天心情怎么样
-[+319ms] ack: 服务端已接收
-[+1764ms] interim垫词: 哈哈，谢谢关心～ 我天天在线，随时待命呢。你周五晚上这个点还找我，是想聊聊天还是有什么事？
-[+1769ms] done: finalText(45字)
-[stream 累积正文]: 哈哈，谢谢关心～ 我天天在线，随时待命呢。你周五晚上这个点还找我，是想聊聊天还是有什么事？
-[assistant_done finalText]: 哈哈，谢谢关心～ 我天天在线，随时待命呢。你周五晚上这个点还找我，是想聊聊天还是有什么事？
+# presence 对话记录  query=帮我看一下马尔代夫的消费情况
+# user: 帮我看一下马尔代夫的消费情况
+[+320ms] USER: 帮我看一下马尔代夫的消费情况
+[+328ms] ack: 服务端已接收
+[+8391ms] status: 开始处理任务…
+[+10463ms] tool.start: search_web input={"query":"马尔代夫旅游 消费 人均花费 2026 费用"}
+[+10464ms] tool.start: search_web input={"query":"马尔代夫 岛 预算人均 一晚 餐饮花费 攻略费用明细"}
+[+16973ms] tool.end: search_web ok=false
+[+16975ms] tool.end: search_web ok=false
+[+18393ms] tool.start: deep_search input={"query":"马尔代夫旅游人均消费多少 预算攻略 岛费用 餐饮 交通 2025 2026","limit":8}
+[+38653ms] tool.end: deep_search ok=true
+[+41792ms] done: finalText(139字)
+[stream 累积正文]: 这次搜出来的全是无关新闻，没拿到马尔代夫消费的实际数据。我再换个角度补一轮。<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="fetch_web"><｜｜DSML｜｜parameter name="url" string="true">https://www.zhihu.com/question/马尔代夫旅游花费</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke><｜｜DSML｜｜invoke name="deep_search"><｜｜DSML｜｜parameter name="query" string="true">马尔代夫选岛价格 人均2万 3万 4万 预算 一价全包 快艇 水飞 消费</｜｜DSML｜｜parameter><｜｜DSML｜｜parameter name="limit" string="false">8</｜｜DSML｜｜parameter></｜｜DSML｜｜tool_calls></｜｜DSML｜｜invoke>
+[assistant_done finalText]: [RENDER_AS:data_brief]
+[DATA_BRIEF_START]{"conclusion":"这次搜出来的全是无关新闻，没拿到马尔代夫消费的实际数据","kpis":[],"restText":"我再换个角度补一轮。\n\n"}[DATA_BRIEF_END]
 # 结束原因: assistant_done

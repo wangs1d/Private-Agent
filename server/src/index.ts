@@ -111,11 +111,11 @@ const runtime = getRuntimeConfig();
 const externalChatProbe = createExternalChatProviderFromEnv();
 if (externalChatProbe?.isEnabled()) {
   console.log(
-    `[external-model] 已启用 ${externalChatProbe.displayLabel}（${process.env.MOONSHOT_MODEL ?? process.env.OPENAI_MODEL ?? "default"}）`,
+    `[external-model] 已启用 ${externalChatProbe.displayLabel}（${process.env.MOONSHOT_MODEL ?? process.env.OPENAI_MODEL ?? process.env.MINIMAX_MODEL ?? "default"}）`,
   );
 } else {
   console.warn(
-    "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY 或 OPENAI_API_KEY 后重启服务",
+    "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY / MINIMAX_API_KEY 或 OPENAI_API_KEY 后重启服务",
   );
 }
 // ─── FunASR 自启动：必须在 createAppServices 之前，让 FunAsrAdapter.isEnabled() 返回 true ───

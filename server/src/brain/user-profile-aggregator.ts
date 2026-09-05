@@ -28,7 +28,7 @@
 
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
 
 /** 规则画像的最小接口（OnlineLearningCortex 子集，避免硬依赖） */
@@ -322,6 +322,7 @@ export class UserProfileAggregator {
         temperature: 0.2,
         max_tokens: this.config.maxTokens,
         messages,
+        ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
       if (content) {

@@ -22,7 +22,10 @@
 > ③ 决策：**不引入短信**，通道 = 两端应用内消息/弹窗 + MessageHub 离线信箱 + critical 电话升级；
 > ④ 电话升级链现状判定：仅作用于 intelligent-reminder 创建的提醒
 > （popup 后 10min 无响应→TTS，再 12min 无响应→电话，按用户响应历史自适应初始级与规则，
-> 响应即停）；统一管道的 critical 升级接线仍为 Phase 3 待办。测试 28/28。
+> 响应即停）；~~统一管道的 critical 升级接线仍为 Phase 3 待办~~
+> ✅ 2026-09-05 已接线：管道 `escalate` 钩子（critical 直投成功后触发）→ 装配层创建
+> urgent 提醒并立即 trigger，复用整条 popup→tts_alarm→phone_call 升级链，
+> reminder.acknowledge 停链。测试 28/28。
 >
 > **第三批（同日，按用户反馈）**：① **MessageHub 离线信箱从主动管道移除**——投递模型收敛为
 > "全部在线设备 fan-out 直推"；两端离线时提案挂起待发区，任一设备重连立即直推（重连触发 flushDue），
@@ -46,6 +49,23 @@
 > 收到 `agent.proactive_message`（高重要度）或 `schedule.reminder_fired` 一律走**系统通知**
 > （点开回前台并按 deliveryId 回传 outcome），前台仍走应用内弹窗不重复打扰；Windows 桌面
 > 不受影响（走原生弹窗）。后续项：Android 前台服务保活 WS（厂商杀进程场景由推送通道兜底）。
+>
+> **第六批（2026-09-05）：LLM 主动性默认开启 + 统一管道收敛（本批）**——
+> ① `PROACTIVITY_LLM_INITIATIVE` 默认 false→**true**（不设 env 即生效，设 0 回退纯规则；
+> 配套预算耗尽前置短路 + 抑制/频控拦截负向缓存，LLM 只在真有机会时被调用；
+> 回归测试 `proactivity-hub-default-on.test.ts`）。
+> ② **legacy 出站收敛**：`ProactiveOutboundMessageService` 增加可选管道提交入口（第三个构造参），
+> 注入后 send() 组装提案（directText 零 LLM，reason 类别→kind、urgency→importance 映射）
+> 转投 `submitProposal`——ProactiveAgentCenter / ProactiveLifeRuntime 两条 legacy 路径
+> 自动获得去重/仲裁/离线挂起/outcome 反馈（原先离线只 console.log 即丢）。测试
+> `proactive-outbound-pipeline.test.ts`。
+> ③ **早/晚报离线必达**：MorningBriefing / EveningDigest 调度器 WS 推送失败时转管道挂起
+> （dedupKey 带日期防跨日重发，重连直推），在线路径保持专用客户端事件不变。
+> ④ **critical 升级链接线**：管道新增 `escalate` 钩子（critical 直投成功后触发），装配层创建
+> urgent 提醒并立即 trigger，复用 intelligent-reminder 的 popup→tts_alarm→phone_call
+> 三级升级链，reminder.acknowledge 停链。测试 `proactive-pipeline-escalate.test.ts`。
+> 未收敛项：ProactionCortex 主链（executeProactiveDecision 的分段拟人节奏 + 专用客户端事件）
+> 暂保留直发，待分段能力下沉 DeliveryService 后再收敛。
 
 ---
 
@@ -55,11 +75,11 @@
 
 | # | 根因 | 证据（代码位置） | 影响 |
 |---|------|----------------|------|
-| 1 | **LLM 通用主动性默认关闭** | `proactivity/proactivity-hub.ts:198` `PROACTIVITY_LLM_INITIATIVE` 默认 false | 通用路径（LLM 自主判断"要不要主动"）从不运行，只剩少数快路径规则 |
+| 1 | **LLM 通用主动性默认关闭** | `proactivity/proactivity-hub.ts:198` `PROACTIVITY_LLM_INITIATIVE` 默认 false | 通用路径（LLM 自主判断"要不要主动"）从不运行，只剩少数快路径规则。✅ 2026-09-05 已修复：默认值翻为 true（不设 env 即生效），并补预算前置短路 + 拦截负向缓存（见 §5 更新） |
 | 2 | **感知依赖"已知 actor"+ 内存态，重启即失忆** | `proactivity-hub.ts:185` `knownActors` 仅在对话/事件时注入，纯内存 | 服务重启后没有任何用户是"已知的"，agent 在用户开口前永远不会主动；30min tick（`proactivity-hub.ts:134-139`）进一步拉长感知延迟 |
 | 3 | **日程只有"到点即发"，没有提前量与状态语义** | `schedule-task-service.ts:190` 1s tick 只判 `nextRunAt <= now`；日程仅作为快照在 LLM 通用路径中被消费（`proactivity-hub.ts:393-397`，而该路径默认关） | 没有"会前 15 分钟提醒""错过了提醒""今天 3 件事先说哪件"——主动性最有价值的场景全部缺失 |
 | 4 | **主动消息触达层级断裂** | `bootstrap/create-app-services.ts:1878-1892` 主动消息投 `agent.proactive_message`；客户端 `client/flutter_app/lib/main.dart:1354-1386` 只弹 SnackBar，而 `schedule.reminder_fired`（main.dart:948-975）才走原生 Acrylic 弹窗 | 即使 agent 主动了，用户也极容易看不见；客户端未连接（人不在电脑前）时只有 MessageHub 离线暂存，微信/飞书出站在 `message-platform-gateway.ts:76` 仅"queued locally"占位未接通 |
-| 5 | **多套主动体系并存，无统一权威** | ProactivityHub / proactive-agent-center.ts / proactive-life-runtime-service.ts / anticipation-engine-service.ts / embodiment-autonomy-service.ts / morning+evening digest / intelligent-reminder 各有触发源、频控与投递路径 | 无法整体调"分寸"；互相可能重复或互相压制；"为什么发了/为什么没发"无法回答 |
+| 5 | **多套主动体系并存，无统一权威** | ProactivityHub / proactive-agent-center.ts / proactive-life-runtime-service.ts / anticipation-engine-service.ts / embodiment-autonomy-service.ts / morning+evening digest / intelligent-reminder 各有触发源、频控与投递路径 | 无法整体调"分寸"；互相可能重复或互相压制；"为什么发了/为什么没发"无法回答。✅ 2026-09-05 部分收敛：① legacy 出站服务（ProactiveAgentCenter / ProactiveLifeRuntime 共用的 ProactiveOutboundMessageService）改为管道薄包装，send() 组装提案转投 submitProposal（自动获得去重/离线挂起/outcome 反馈）；② 早报/晚报调度器 WS 推送失败时转管道挂起（重连直推）；③ critical 升级链接线完成。ProactionCortex 主链（分段拟人节奏 + 专用客户端事件）暂保留直发，待分段能力下沉 DeliveryService 后再收敛 |
 | 6 | **没有反馈闭环与可解释性** | FrequencyGovernor 状态纯内存（`frequency-governor.ts:65`，重启清零）；主动消息的 accept/dismiss/ignore 结果没有统一落库回灌 | 无法自适应预算；排查"无感"只能翻日志 |
 
 结论：**部件齐全，缺的是一条"统一权威"的底层机制**——所有主动行为必须经过同一条管道：感知 → 提案 → 仲裁 → 执行 → 投递 → 反馈。下面按这条管道设计。
@@ -296,7 +316,7 @@ type ProactiveProposal = {
 
 | 项 | 现状 | 调整为 | 理由 |
 |---|---|---|---|
-| `PROACTIVITY_LLM_INITIATIVE` | false | true（职责改为竞争仲裁+机会发现） | 通用主动性从未运行过 |
+| `PROACTIVITY_LLM_INITIATIVE` | false → ✅ **已默认 true**（2026-09-05 落地：控制通用路径——tick 时 InitiativeEngine 消费感知流自主决策；需接入外部模型，未配置自动回退纯规则。同时补预算耗尽前置短路、抑制/频控拦截负向缓存，LLM 调用只在真有机会时发生） | — | 通用主动性从未运行过 |
 | ProactivityHub tick | 30min | 扫描类拆走后 5min（只跑问候/机会发现） | 提前量由 UpcomingScheduleWatcher 事件驱动承担，tick 降级为兜底 |
 | knownActors | 内存，重启清空 | 落盘 + 启动时从 chat-threads/schedule-tasks/user_profiles 恢复 | 重启后 agent 才能自主早问好（受静默时段+预算保护） |
 | 每日预算 | 6 次单一池 | **社交池 3**（用户反馈 6 太多；`PROACTIVITY_DAILY_BUDGET` 可调）+ 必达池独立 | 问候/兴趣/关怀合计每天至多两三次才像管家 |
@@ -325,7 +345,7 @@ type ProactiveProposal = {
 2. `UpcomingScheduleWatcher`：临近任务 T-15 提案 + 错过补发语义（快路径，零 LLM）。
 3. knownActors 持久化与启动恢复。
 4. FrequencyGovernor 状态落盘。
-5. 开启 `PROACTIVITY_LLM_INITIATIVE=1`（灰度观察日志）。
+5. ✅ 开启 `PROACTIVITY_LLM_INITIATIVE=1`——2026-09-05 已改为**默认开启**（不设 env 即生效，设 0 回退纯规则），配套回归测试 `test/proactivity-hub-default-on.test.ts`；灰度观察日志照旧。
 
 **验收**：重启服务后，早晨 agent 自主发来问好+今日安排；会议前 15 分钟收到原生弹窗提醒；离开电脑时主动消息不会"静默消失"（至少有原生弹窗或离线暂存）。
 

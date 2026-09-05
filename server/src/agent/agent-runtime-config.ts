@@ -89,6 +89,7 @@ function loadMasterDelegationConfig(): MasterDelegationConfig {
     (legacy !== undefined && legacy.trim() !== "");
   const hasExternalModel = Boolean(
     process.env.MOONSHOT_API_KEY?.trim() ||
+      process.env.MINIMAX_API_KEY?.trim() ||
       process.env.OPENAI_API_KEY?.trim() ||
       process.env.EXTERNAL_MODEL_PROVIDER?.trim(),
   );

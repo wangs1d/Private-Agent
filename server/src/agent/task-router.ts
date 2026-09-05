@@ -35,6 +35,16 @@ export type RouteDecision = {
   budget: number;
   /** 模型档位。 */
   tier: TurnTier;
+  /**
+   * 语义路由顺带产出的轻量情绪/话题分析（与每轮路由 LLM 调用合并，
+   * 省掉 MoodInferenceService 的独立每轮调用）。路由超时/降级/未产出时缺省，
+   * 消费方（agent-core → mood-inference-service.ingestRouteAux）缺省时回退独立分析。
+   */
+  auxAnalysis?: {
+    sentimentScore: number;
+    emotionTags: string[];
+    topics: string[];
+  };
 };
 
 /** 由二值 mode 派生词法级执行计划（降级路径用）。 */
@@ -48,6 +58,54 @@ export function planFieldsForMode(mode: LlmExecutionMode): {
     ? { plane: "task", capabilities: ["full"], budget: 2, tier: "fast" }
     : { plane: "chat", capabilities: [], budget: 0, tier: "fast" };
 }
+
+/* ────────────────────────────────────────────────────────────
+ * 前台自决模式（2026-09-05 前后台架构，默认开启）
+ *
+ * 契约：前台常驻对话，手里只有两个动作原语——task.dispatch（派后台）
+ * 与 search_web（快查）。「这轮要不要办事」由前台模型在一个调用里顺带
+ * 决定，不再需要独立路由 LLM 调用（每轮对话 LLM 调用收敛到恒 1 次）；
+ * 判错的兜底不在路由层，而在出口诚实闸（commitment-gate）与后台
+ * TurnOutcomeGate——前台不再是无能力平面，误判的代价只是多聊一句。
+ * AGENT_FOREGROUND_DISPATCH=0 可回退到独立路由 LLM 判定（遗留灰度）。
+ * ──────────────────────────────────────────────────────────── */
+
+export function isForegroundDispatchMode(): boolean {
+  const raw = process.env.AGENT_FOREGROUND_DISPATCH?.trim().toLowerCase();
+  return raw !== "0" && raw !== "off" && raw !== "false";
+}
+
+/** 前台自决模式的固定决策：plane=chat + 前台工具白名单（由 agent-core 注入）。 */
+export function foregroundSelfDispatchDecision(): RouteDecision {
+  return {
+    mode: "fast",
+    reasons: ["foreground_self_dispatch"],
+    segmentable: true,
+    plane: "chat",
+    capabilities: [],
+    budget: 0,
+    tier: "fast",
+  };
+}
+
+/* ────────────────────────────────────────────────────────────
+ * 任务面双通道（2026-09-05 前后台架构，先轻后重）
+ *
+ * 快速通道（默认起步）：跳过 planner，可见工具 = 桥工具（tool_discover/
+ * tool_call），一切业务工具由 tool router（BM25 目录）按需召回——执行侧
+ * 上下文零业务 schema，Flash 档单点查证直查直答。
+ * 完整通道：快速通道产出道歉式/空 → 升级 planner + 预算波 + Pro 档。
+ * 判定不在路由层：失败信号是执行结果本身（isApologyStyleFallback），由
+ * 派发方（dispatchBackgroundTask）裁决升级。
+ * ──────────────────────────────────────────────────────────── */
+
+/** 延迟目录桥（元工具，不算业务工具）：快速通道可见集的构成。 */
+export const TASK_TOOL_BRIDGE_NAMES: ReadonlySet<string> = new Set([
+  "tool_search",
+  "tool_discover",
+  "tool_describe",
+  "tool_call",
+]);
 
 /* ────────────────────────────────────────────────────────────
  * 高精度纯闲聊短路（唯一保留的词法信号）

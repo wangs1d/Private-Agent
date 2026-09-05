@@ -1,16 +1,17 @@
 import type { ExternalChatProvider } from "./types.js";
 import { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 import { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
+import { MiniMaxProvider } from "./providers/minimax-provider.js";
 import { FailoverChatProvider } from "./failover-chat-provider.js";
 import { instantiateKnownProvider } from "./instantiate-provider.js";
 import { resolveRegion } from "../config/load-server-env.js";
 
 /** 与 `EXTERNAL_MODEL_PROVIDER` 对齐 */
-export type ExternalModelMode = "auto" | "none" | "moonshot-kimi" | "openai" | "failover";
+export type ExternalModelMode = "auto" | "none" | "moonshot-kimi" | "openai" | "minimax" | "failover";
 
 /** 主服务当前生效的外部模型（供 OpenClaw 等下游同步） */
 export type PrimaryExternalModelBinding = {
-  providerId: "moonshot-kimi" | "openai";
+  providerId: "moonshot-kimi" | "openai" | "minimax";
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -22,6 +23,7 @@ function parseMode(env: NodeJS.ProcessEnv = process.env): ExternalModelMode {
   if (raw === "none" || raw === "off" || raw === "disabled") return "none";
   if (raw === "moonshot-kimi" || raw === "moonshot" || raw === "kimi") return "moonshot-kimi";
   if (raw === "openai") return "openai";
+  if (raw === "minimax") return "minimax";
   if (raw === "failover") return "failover";
   console.warn(
     `[external-model] Unknown EXTERNAL_MODEL_PROVIDER="${raw}", falling back to auto.`,
@@ -55,6 +57,17 @@ function openaiBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | nu
   };
 }
 
+function minimaxBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | null {
+  const apiKey = env.MINIMAX_API_KEY?.trim();
+  if (!apiKey) return null;
+  return {
+    providerId: "minimax",
+    model: (env.MINIMAX_MODEL ?? "MiniMax-M3").trim(),
+    apiKey,
+    baseUrl: (env.MINIMAX_BASE_URL ?? "https://api.minimaxi.com/v1").trim(),
+  };
+}
+
 function firstEnabledBinding(
   env: NodeJS.ProcessEnv,
   tokens: string[],
@@ -68,6 +81,10 @@ function firstEnabledBinding(
     }
     if (p.id === "openai") {
       const b = openaiBinding(env);
+      if (b) return b;
+    }
+    if (p.id === "minimax") {
+      const b = minimaxBinding(env);
       if (b) return b;
     }
   }
@@ -85,6 +102,7 @@ export function resolvePrimaryExternalModelBinding(
   if (mode === "none") return null;
   if (mode === "moonshot-kimi") return moonshotBinding(env);
   if (mode === "openai") return openaiBinding(env);
+  if (mode === "minimax") return minimaxBinding(env);
   if (mode === "failover") {
     const tokens = defaultFailoverChain(env)
       .split(",")
@@ -93,14 +111,14 @@ export function resolvePrimaryExternalModelBinding(
     return firstEnabledBinding(env, tokens);
   }
   // auto：按 REGION 决定优先级。
-  // - domestic（默认）：优先 Kimi，其次 OpenAI（保持向后兼容）
-  // - intl：优先 OpenAI，其次 Kimi
+  // - domestic（默认）：优先 Kimi，其次 MiniMax、OpenAI（保持向后兼容）
+  // - intl：优先 OpenAI，其次 MiniMax、Kimi
   // 显式设置 EXTERNAL_MODEL_PROVIDER 始终优先于本推断。
   const region = resolveRegion(env);
   if (region === "intl") {
-    return openaiBinding(env) ?? moonshotBinding(env);
+    return openaiBinding(env) ?? minimaxBinding(env) ?? moonshotBinding(env);
   }
-  return moonshotBinding(env) ?? openaiBinding(env);
+  return moonshotBinding(env) ?? minimaxBinding(env) ?? openaiBinding(env);
 }
 
 /** 供旁路 LLM（滚动摘要 / 记忆联想 / 记忆决策 / 记忆评分等）使用的客户端配置，跟随当前 provider。 */
@@ -136,12 +154,30 @@ function defaultFailoverChainLegacy(): string {
 }
 
 /**
+ * 旁路直答 LLM（滚动摘要 / 记忆决策 / 画像聚合等走裸 OpenAI SDK 的调用）的请求附加参数。
+ *
+ * MiniMax M 系默认强制思考，且思考计入 max_tokens 预算：旁路调用多为小 max_tokens
+ * 的结构化输出，不关思考会导致 `<think>` 混入 content（裸 SDK 无 reasoning_split
+ * 分流）或正文被思考饿死。M3 支持 `thinking: {"type": "disabled"}`（实测
+ * reasoning_tokens=0）；M2.x 会 accept 但仍思考——旁路模型建议保持 M3 或接受脏输出。
+ * 非 MiniMax provider 返回空对象，保持对 OpenAI/DeepSeek 零侵入。
+ */
+export function bypassChatRequestExtras(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  return resolvePrimaryExternalModelBinding(env)?.providerId === "minimax"
+    ? { thinking: { type: "disabled" } as const }
+    : {};
+}
+
+/**
  * 按 `EXTERNAL_MODEL_PROVIDER` 与各厂商密钥解析唯一的外部聊天实现。
  *
- * - `auto`（默认）：优先 `MOONSHOT_API_KEY`（Kimi），否则 `OPENAI_API_KEY`。
+ * - `auto`（默认）：优先 `MOONSHOT_API_KEY`（Kimi），其次 `MINIMAX_API_KEY`，否则 `OPENAI_API_KEY`。
  * - `none`：不启用外部模型。
  * - `moonshot-kimi`：仅 Kimi；缺密钥则 null 并警告。
  * - `openai`：仅 OpenAI；缺密钥则 null 并警告。
+ * - `minimax`：仅 MiniMax；缺密钥则 null 并警告。
  * - `failover`：按 `EXTERNAL_MODEL_FAILOVER_CHAIN`（默认 `moonshot-kimi,openai`）顺序尝试，链上至少一个已配置密钥才启用。
  */
 export function createExternalChatProviderFromEnv(): ExternalChatProvider | null {
@@ -150,6 +186,7 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
 
   const moonshot = new MoonshotKimiProvider();
   const openai = new OpenAiOfficialProvider();
+  const minimax = new MiniMaxProvider();
 
   if (mode === "moonshot-kimi") {
     if (moonshot.isEnabled()) return moonshot;
@@ -163,6 +200,14 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
     if (openai.isEnabled()) return openai;
     console.warn(
       "[external-model] EXTERNAL_MODEL_PROVIDER=openai but OPENAI_API_KEY is not set.",
+    );
+    return null;
+  }
+
+  if (mode === "minimax") {
+    if (minimax.isEnabled()) return minimax;
+    console.warn(
+      "[external-model] EXTERNAL_MODEL_PROVIDER=minimax but MINIMAX_API_KEY is not set.",
     );
     return null;
   }
@@ -194,14 +239,16 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
   }
 
   // auto：按 REGION 决定优先级。
-  // - domestic（默认）：优先 Kimi，其次 OpenAI（保持向后兼容）
-  // - intl：优先 OpenAI，其次 Kimi
+  // - domestic（默认）：优先 Kimi，其次 MiniMax、OpenAI（保持向后兼容）
+  // - intl：优先 OpenAI，其次 MiniMax、Kimi
   const region = resolveRegion();
   if (region === "intl") {
     if (openai.isEnabled()) return openai;
+    if (minimax.isEnabled()) return minimax;
     if (moonshot.isEnabled()) return moonshot;
   } else {
     if (moonshot.isEnabled()) return moonshot;
+    if (minimax.isEnabled()) return minimax;
     if (openai.isEnabled()) return openai;
   }
   return null;

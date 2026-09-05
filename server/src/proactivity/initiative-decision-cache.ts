@@ -4,7 +4,8 @@
 // TTL 内直接跳过 LLM 调用——重复场景重复问，答案大概率还是 none。
 //
 // 护栏（不影响质量）：
-//  - 仅缓存 none 决策（主动决策的防重复由 FrequencyGovernor 分 kind 冷却负责）
+//  - 仅缓存 none 决策与「判主动但被抑制/频控拦截」（主动决策的防重复由
+//    FrequencyGovernor 分 kind 冷却负责）
 //  - 当前窗口含 high 显著性观察时永不跳过（重要事件必须真评估）
 //  - TTL 过期自动失效（默认 6h）；条数上限滚动淘汰
 import type { Observation } from "./proactivity-types.js";
@@ -58,6 +59,15 @@ export class InitiativeDecisionCache {
       if (oldest === undefined) break;
       map.delete(oldest);
     }
+  }
+
+  /**
+   * 记录一次「LLM 判主动但被抑制/频控拦截」（后续同指纹窗口 TTL 内免 LLM——
+   * 同样的观察喂给 LLM 大概率还是同样的决策、同样的拦截）。
+   * 与 recordNone 共用存储；高显著观察仍不跳过（shouldSkip 护栏不变）。
+   */
+  recordBlocked(actorId: string, fingerprint: string): void {
+    this.recordNone(actorId, fingerprint);
   }
 
   /** 条数（诊断/测试） */

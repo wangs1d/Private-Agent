@@ -22,7 +22,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import OpenAI from "openai";
 
-import { resolvePrimaryLlmClientConfig } from "../external-model/resolve-provider.js";
+import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../external-model/vision-support.js";
 import type { MediaCardItem } from "./tool-result-processor.js";
 
@@ -176,6 +176,7 @@ async function describeImagesWithVlm(
       { role: "user", content },
     ],
     temperature: 0.3,
+    ...bypassChatRequestExtras(),
   });
 
   const raw = (resp.choices?.[0]?.message?.content ?? "").trim();

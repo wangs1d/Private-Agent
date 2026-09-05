@@ -190,7 +190,12 @@ export type ToolExposureProfile =
   | "contextual"
   | "full"
   | "delegate"
-  | "scoped";
+  | "scoped"
+  // 显式白名单（2026-09-05 前后台架构）：chatToolsBuiltin 即最终可见工具集，
+  // 不做任何筛选/合并；chatToolsExtra 仅进 searchableTools 延迟目录语料，供
+  // tool_discover 按需召回。前台（dispatch+快查）与任务面（plan 产出工具）
+  // 都走该 profile——「先 plan，再一次性注入计划工具」的唯一注入通道。
+  | "explicit";
 
 export type ToolRankingHint = {
   preferredNamespaces?: string[];
