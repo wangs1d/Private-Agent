@@ -299,7 +299,8 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     truncate(userText, 6000),
     "",
     "已批准的执行计划（必须以此为纲，逐步完成）：",
-    JSON.stringify(plan, null, 2),
+    // 紧凑序列化：pretty-print 比紧凑多 ~25-35% 字符（2026-09-05）。
+    JSON.stringify(plan),
     "",
     "请调用可用工具收集事实并完成任务；最后用自然语言向用户汇总结果（含关键数据依据）。若某工具失败应换策略或说明阻塞点。",
   ].filter(Boolean).join("\n");

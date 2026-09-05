@@ -54,9 +54,8 @@ import { isCommitmentAutoExtractEnabled } from "../agentic-memory/env.js";
 import { extractCommitments } from "../agentic-memory/commitment-extractor.js";
 import { createProvenanceIfEnabled } from "../agentic-memory/provenance.js";
 import {
-  createUserFactRegistryIfEnabled,
-  factAttributeLabel,
-} from "../agentic-memory/user-fact-registry.js";
+  createUserUnderstandingStoreIfEnabled,
+} from "../agentic-memory/user-understanding-store.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
@@ -969,7 +968,7 @@ export async function createAppServices(): Promise<AppServices> {
     graph: humanLikeMemory,
     ledger: agenticLedger,
   });
-  const userFactRegistry = createUserFactRegistryIfEnabled();
+  const userUnderstandingStore = createUserUnderstandingStoreIfEnabled();
   const memoryBridge = createMemoryBridgeIfEnabled({
     memory: agenticMemoryRuntime?.memory ?? null,
     graph: humanLikeMemory,
@@ -982,7 +981,7 @@ export async function createAppServices(): Promise<AppServices> {
   // P0-2：承诺捕获与记忆路由解耦——低信号/被拒存的文本也会带 commitments
   // 进来（results 为空的 orphan 事件），钩子门只看 context 不看 highSignal。
   agenticMemoryRuntime?.ingest.addWriteHook((event) => {
-    if (!agenticLedger && !provenance && !commitmentBoard) return;
+    if (!agenticLedger && !provenance && !commitmentBoard && !userUnderstandingStore) return;
     if (event.results.length > 0) {
       const records = agenticLedger
         ? agenticLedger.appendBatch(
@@ -1056,6 +1055,30 @@ export async function createAppServices(): Promise<AppServices> {
         }
       }
     }
+    // 用户理解档案：agent 对用户理解的结构化沉淀（topic + 理解句 + 性质标注）。
+    // 同 topic 新理解生效即旧理解入「演变历史」（同事务，不删除——旧对话是
+    // 真实发生的事，可追溯）；理解是「修订」而非「证伪」，不做跨存储抹除，
+    // 矛盾由注入层的理解权威块 + 演变历史消解。
+    for (const understanding of event.understandings ?? []) {
+      try {
+        const result = userUnderstandingStore?.applyUnderstanding({
+          actorId: event.actorId,
+          topic: understanding.topic,
+          note: understanding.note,
+          kind: understanding.kind,
+          sourceRef: event.sourceId,
+          confidence: understanding.confidence ?? null,
+        });
+        if (result?.changed) {
+          console.info(
+            `[user-understanding] 理解${result.previous.length > 0 ? "修订" : "新增"} ` +
+              `actor=${event.actorId} topic=${understanding.topic}: ${understanding.note}`,
+          );
+        }
+      } catch (err) {
+        console.warn("[user-understanding] 理解入档失败（忽略）:", err);
+      }
+    }
   });
 
   // ─── P0-3/P2-15：lifecycle 删除调和 + 存量 linkage 回填 ───
@@ -1075,6 +1098,7 @@ export async function createAppServices(): Promise<AppServices> {
     commitmentBoard,
     provenance,
     bridge: memoryBridge,
+    understandingStore: userUnderstandingStore,
   });
 
   // 承诺板提醒/升级出口：proactivity 管道装配后接线（见下方 proactivePipeline

@@ -77,7 +77,7 @@ export interface AgenticMemoryComponents {
   commitmentBoard: import("./commitment-board.js").CommitmentBoard | null;
   provenance: import("./provenance.js").ProvenanceService | null;
   bridge: import("./memory-bridge-service.js").MemoryBridgeService | null;
-  factRegistry: import("./user-fact-registry.js").UserFactRegistry | null;
+  understandingStore: import("./user-understanding-store.js").UserUnderstandingStore | null;
 }
 
 const components: AgenticMemoryComponents = {
@@ -85,7 +85,7 @@ const components: AgenticMemoryComponents = {
   commitmentBoard: null,
   provenance: null,
   bridge: null,
-  factRegistry: null,
+  understandingStore: null,
 };
 
 export function registerMemoryComponents(part: Partial<AgenticMemoryComponents>): void {

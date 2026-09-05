@@ -157,7 +157,6 @@ export class OpenAiOfficialProvider extends AbstractChatProvider {
   protected buildSystemAndPlan(ctx: SystemAndPlanContext): SystemAndPlanResult {
     const finalizeOptions = {
       tools: Boolean(ctx.tools && !ctx.overrideSys),
-      masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
       agentAccessMode: ctx.streamOpts?.agentAccessMode,
       desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
       phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,

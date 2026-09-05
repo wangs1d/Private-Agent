@@ -495,19 +495,33 @@ export const WORLD_FREE_MARKET_USER_CHAT_TOOLS = WORLD_FREE_MARKET_SKILL_CHAT_TO
 const USER_AGENT_LINK_SUFFIX =
   "\n\n【Agent Link · 好友联络】对应 App 侧栏「Agent Link」（与 Agent World 独立）。工具：agent.link.*；发消息 agent.send_to_peer / aip.dispatch。加好友前须用户同意。";
 
-/**
- * 主 Agent 工具说明（Agent World + Agent Link）。
- */
-const USER_AGENT_AGENT_WORLD_SUFFIX =
+/** Agent World 说明·核心段（open_registry 域，任何开关组合下工具都真实存在）。 */
+const USER_AGENT_AGENT_WORLD_SUFFIX_CORE =
   "\n\n【🌍 Agent World · 经济环境】\n" +
-  "如果用户提到「技能商店」「社交推文」「世界点数」「A2A 外包」，才使用以下工具：\n" +
-  "- world.open_registry.* （注册）\n" +
+  "如果用户提到「技能商店」「世界点数」「A2A 外包」，才使用以下工具：\n" +
+  "- world.open_registry.* （注册）";
+
+/** Agent World 说明·社交段（free_market/social/music 域；AGENT_WORLD_SOCIAL_ENABLED=0 时这些工具不注入 LLM 工具列表，文案跟着省略，避免教模型调用不存在的工具）。 */
+const USER_AGENT_AGENT_WORLD_SUFFIX_SOCIAL =
+  "\n" +
   "- world.free_market.* （技能商店/A2A 契约）\n" +
   "- world.social.* （社交动态）\n" +
   "- world.music.* （一起听音乐）";
 
-/** 注入主 Agent / 用户会话 system 的工具说明。 */
-export const USER_AGENT_TOOL_SYSTEM_SUFFIX = USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX;
+/**
+ * 按社交开关组装主 Agent 工具说明：socialEnabled=false 时省略社交域三行（~250 字符），
+ * 与工具列表侧的 filterSocialChatTools 过滤保持同一开关。
+ */
+export function buildUserAgentToolSystemSuffix(socialEnabled: boolean): string {
+  return socialEnabled
+    ? USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX_CORE + USER_AGENT_AGENT_WORLD_SUFFIX_SOCIAL
+    : USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX_CORE;
+}
 
-/** 独立 Agent World 进程等场景（与宿主对话说明一致）。 */
-export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX = USER_AGENT_AGENT_WORLD_SUFFIX;
+/** 注入主 Agent / 用户会话 system 的工具说明（全量版本；社交关闭的宿主请用 buildUserAgentToolSystemSuffix(false)）。 */
+export const USER_AGENT_TOOL_SYSTEM_SUFFIX =
+  USER_AGENT_LINK_SUFFIX + USER_AGENT_AGENT_WORLD_SUFFIX_CORE + USER_AGENT_AGENT_WORLD_SUFFIX_SOCIAL;
+
+/** 独立 Agent World 进程等场景（与宿主对话说明一致，社交域全开）。 */
+export const AGENT_WORLD_FULL_TOOL_SYSTEM_SUFFIX =
+  USER_AGENT_AGENT_WORLD_SUFFIX_CORE + USER_AGENT_AGENT_WORLD_SUFFIX_SOCIAL;

@@ -125,7 +125,6 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "dailyDigest",
   "narrativeRecall",
   "memorySummary",
-  "memoryCurrentMission",
   "memoryPreferences",
   "memoryFacts",
   "memoryCommitments",

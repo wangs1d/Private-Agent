@@ -24,24 +24,28 @@ export interface UnifiedCorrection {
 }
 
 /**
- * 原子身份事实（用户事实注册表入参）：attribute 用受控词表内的中文标签
- * （名字/配偶/父亲/生日/居住地/职业…），词表外标签由注册表归一失败后丢弃。
+ * 对话理解条目（用户理解档案入参）：不是字面事实归一，而是「我对这句话的理解」
+ * ——topic 用用户原话里的核心称谓/主题，note 必须保留语气与性质判断。
+ * 例：用户说"我的老婆是刘浩存"（刘浩存为明星）→
+ *   { topic: "老婆", kind: "fandom",
+ *     note: "用户半开玩笑地自称'老婆'是明星刘浩存——粉丝式称呼，并非真实关系" }
  */
-export interface UnifiedFact {
-  attribute: string;
-  value: string;
+export interface UnifiedUnderstanding {
+  topic: string;
+  note: string;
+  kind: "literal" | "joke" | "fandom" | "figurative" | "preference" | "correction" | "other";
   confidence?: number;
 }
 
 export interface UnifiedExtraction {
   decision: "remember" | "decay" | "reject";
   semanticClass?: string;
-  /** 独立、自包含、可长期召回的陈述条目（第三人称、含时间/人物等要素） */
+  /** 独立、自包含、可长期召回的陈述条目（第三人称、保留语气/性质/语境） */
   memories: string[];
   commitments: ExtractedCommitment[];
   corrections: UnifiedCorrection[];
-  /** 用户第一人称明确主张的身份事实（注册表属性级 upsert + 旧值级联作废） */
-  facts: UnifiedFact[];
+  /** 对话理解（理解档案 topic 级 upsert + 演变历史） */
+  understandings: UnifiedUnderstanding[];
 }
 
 export function isMemoryUnifiedExtractEnabled(): boolean {
@@ -51,15 +55,20 @@ export function isMemoryUnifiedExtractEnabled(): boolean {
 }
 
 const SYSTEM_PROMPT = [
-  "你是记忆写入处理器，一次完成五件事，输出严格 JSON（不要任何其他文字）：",
+  "你是记忆理解处理器，一次完成四件事，输出严格 JSON（不要任何其他文字）：",
   "{",
   '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文；reject=无价值/重复/敏感',
   '"semanticClass":"事实|偏好|计划|承诺|人物|事件|其他",',
-  '"memories":["独立、自包含、可长期召回的陈述（第三人称，保留时间/人物/因果要素；无则空数组）"],',
-  '"facts":[{"attribute":"属性标签","value":"属性值","confidence":0到1}]  // 用户身份事实，无则空数组',
-  "  // attribute 只能取：名字|配偶|父亲|母亲|儿子|女儿|孩子|兄弟姐妹|生日|老家|居住地|职业|公司|学校|宠物",
-  "  // 仅当用户以第一人称明确主张当前事实时收录（如「我老婆是刘浩存」「我叫小明」「我住在杭州」）；",
-  "  // 假设、玩笑、疑问、转述他人、影视剧情一律不收；同句主张多个属性逐条收录",
+  '"memories":["你对这段对话的理解记录（第三人称、自包含、可长期召回；无则空数组）"],',
+  "  // memories 必须保留语气与性质（玩笑/粉丝式称呼/比喻/正式），不要剥掉语境输出字面断言：",
+  "  // 例：用户说「我老婆是刘浩存」→「用户半开玩笑地自称'老婆'是明星刘浩存（粉丝式称呼）」，",
+  "  // 而不是「用户的老婆是刘浩存」",
+  '"understandings":[{"topic":"话题词","note":"你对这条内容的理解（第三人称，保留语气与性质判断）","kind":"literal|joke|fandom|figurative|preference|correction|other","confidence":0到1}]',
+  "  // 用户关于自身/关系/偏好的值得记住的表达，逐条写理解；topic 用用户原话里的核心称谓（如：老婆|工作|居住地）",
+  "  // kind 判断：公众人物/明星被冠以亲属称谓（老婆/老公/女儿…）默认是粉丝式称呼 kind=fandom，",
+  "  // note 必须写明「粉丝式称呼，并非真实关系」——除非用户明确表示是真实关系；",
+  "  // 玩笑/调侃 kind=joke；比喻夸张 kind=figurative；改口/更正 kind=correction（note 写明从什么改成什么）；",
+  "  // 字面陈述（我叫X/我住在X）kind=literal",
   '"commitments":[{"text":"承诺内容（第三人称）","committedBy":"user|agent|third_party","deadline":"ISO 8601 或 null","confidence":0到1,"evidence":"原文片段","category":"报价|交付|会面|转账|其他"}],',
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
@@ -78,7 +87,7 @@ interface RawUnified {
   memories?: unknown;
   commitments?: unknown;
   corrections?: unknown;
-  facts?: unknown;
+  understandings?: unknown;
 }
 
 function asStringArray(raw: unknown): string[] {
@@ -152,20 +161,25 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
         .slice(0, 3)
     : [];
 
-  const facts = Array.isArray(raw.facts)
-    ? (raw.facts as Array<Record<string, unknown>>)
-        .map((f) => {
-          const attribute = typeof f.attribute === "string" ? f.attribute.trim() : "";
-          const value = typeof f.value === "string" ? f.value.trim() : "";
-          if (!attribute || !value) return null;
-          const conf = Number(f.confidence);
+  const understandings = Array.isArray(raw.understandings)
+    ? (raw.understandings as Array<Record<string, unknown>>)
+        .map((u) => {
+          const topic = typeof u.topic === "string" ? u.topic.trim() : "";
+          const note = typeof u.note === "string" ? u.note.trim() : "";
+          if (!topic || !note) return null;
+          const conf = Number(u.confidence);
           return {
-            attribute,
-            value,
+            topic,
+            note,
+            kind:
+              typeof u.kind === "string" &&
+              ["literal", "joke", "fandom", "figurative", "preference", "correction", "other"].includes(u.kind)
+                ? u.kind
+                : "other",
             ...(Number.isFinite(conf) ? { confidence: Math.max(0, Math.min(1, conf)) } : {}),
-          } as UnifiedFact;
+          } as UnifiedUnderstanding;
         })
-        .filter((f): f is UnifiedFact => f !== null)
+        .filter((u): u is UnifiedUnderstanding => u !== null)
         .slice(0, 6)
     : [];
 
@@ -175,7 +189,7 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     memories: decision === "reject" ? [] : asStringArray(raw.memories),
     commitments,
     corrections,
-    facts,
+    understandings,
   };
 }
 

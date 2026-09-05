@@ -993,8 +993,10 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "reminder.plan",
+      // 2026-09-05 与 calendar.create_from_text/create_task 的重复行为规则互相去重：
+      // 每个 tool 只保留自身必需的最小说明（delegate 全量注入时 schema 按轮计费）。
       description:
-        "【生活助手】根据用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（如「2分钟后提醒我睡觉」「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具创建，不要追问、不要口头答应而不调用。仅当工具结果返回 needsRecurrenceConfirm=true（服务端判定重复方式确实无法推断）时，才根据返回的 suggestedQuestion 向用户追问一次，确认后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地时间，展示给用户时必须用此字段）、recurrence。\n**提醒方式规则（重要）**：默认使用弹窗（popup）方式通知用户。仅当用户明确要求时才使用 TTS 语音闹钟或电话呼叫方式，例如用户说「打电话提醒我」「语音喊我」「电话叫醒我」。不要主动升级到 TTS 或电话方式，除非用户有明确偏好或主动提出需求。",
+        "【生活助手】按用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具，不要追问、不要只口头答应。仅当返回 needsRecurrenceConfirm=true 时，按 suggestedQuestion 向用户追问一次后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示给用户必须用此字段）、recurrence。\n提醒方式默认弹窗（popup）；仅用户明确要求（「打电话提醒我」「语音喊我」）才用 TTS/电话，不要主动升级。",
       parameters: {
         type: "object",
         properties: {
@@ -1007,7 +1009,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
-          shortTitle: { type: "string", description: "简洁展示标题（用于「今日安排」紧凑列表）：去掉「记得/提醒我/帮我」等指令词与所有时间词，只保留核心事项，如用户说「明天9点提醒我吃药」→shortTitle=\"吃药\"。可选，缺省时服务端按核心事项自动生成。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"。缺省时服务端自动生成。" },
           category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
           reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
@@ -1022,7 +1024,7 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_from_text",
       description:
-        "【内置 Calendar】在对话中根据用户原句自动创建日程/提醒。带明确时间点的单次日程/提醒（如「明天 9:00 提醒我开会」）必须直接调用本工具创建，不要追问。仅当工具结果返回 needsRecurrenceConfirm=true（服务端判定重复方式无法推断）时，才根据返回的 suggestedQuestion 向用户追问一次，确认后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）；解析失败则 matched=false。",
+        "【内置 Calendar】按用户原句一句话创建日程/提醒。带明确时间点的单次日程/提醒必须直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 才按 suggestedQuestion 追问一次后重调。解析失败返回 matched=false；展示时间用返回的 nextRunAtLocal。",
       parameters: {
         type: "object",
         properties: {
@@ -1039,12 +1041,12 @@ const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "calendar.create_task",
       description:
-        "【内置 Calendar】在对话中按结构化字段自动创建定时任务：提醒（reminder）、HTTP 动作（action）、天气简报（weather_brief）、Agent 自动化任务（agent_task）。runAt 须为 ISO-8601 且为未来时间。用户已说清楚时间/类型时优先用本工具；含糊时可用 calendar.create_from_text。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（本地格式化时间，向用户展示时间时必须使用此字段）。",
+        "【内置 Calendar】按结构化字段创建定时任务：reminder（提醒）/action（HTTP 动作）/weather_brief（天气简报，需用户已在天气页保存定位）/agent_task（到点让 Agent 执行 prompt）。runAt 须为 ISO-8601 未来时间；时间/类型已明确时优先用本工具，含糊时用 calendar.create_from_text。返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示用）。",
       parameters: {
         type: "object",
         properties: {
           title: { type: "string", description: "完整任务标题（用于日程页完整列表；reminder 类型可选，由 reminderMessage 兜底）" },
-          shortTitle: { type: "string", description: "简洁展示标题（用于「今日安排」紧凑列表）：必须去掉「记得/提醒我/帮我/给我」等指令词和所有时间词，只保留核心事项，如用户说「明天9点提醒我吃药」→shortTitle=\"吃药\"。reminder 类型必填；其他类型缺省时服务端用 title 兜底。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"。reminder 类型必填；其他类型缺省用 title 兜底。" },
           description: { type: "string" },
           kind: {
             type: "string",

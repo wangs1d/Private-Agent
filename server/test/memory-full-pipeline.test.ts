@@ -423,7 +423,7 @@ describe("记忆模块全流程", () => {
         yesterday,
       );
 
-      // 写入今天的对话
+      // 写入今天的对话（多轮，保证超过「近期窗口12+折叠批6」触发折叠）
       threadStore.appendTurn(
         sessionId,
         "system prompt",
@@ -432,38 +432,51 @@ describe("记忆模块全流程", () => {
         24,
         now,
       );
+      for (let i = 1; i <= 14; i++) {
+        threadStore.appendTurn(
+          sessionId,
+          "system prompt",
+          { text: `今天的事 ${i}` },
+          `好的，事 ${i}`,
+          24,
+          now,
+        );
+      }
 
       const thread = threadStore.thread(sessionId, "system prompt");
       threadStore.trimThread(thread);
 
-      // 检查昨天和今天的对话是否完整保留
+      // 2026-09-05 近期窗口策略：超窗的昨天/前天对话折叠进 recap（原文占位行 +
+      // 日期标签），最近约 6 轮原文保留。全部信息仍在 thread 内可见。
       const allText = thread
         .map((m) => (typeof m.content === "string" ? m.content : ""))
         .join("\n");
 
       assert.ok(
         allText.includes("昨天聊了项目"),
-        "昨天的对话应完整保留",
+        "昨天的对话应经 recap 行保留",
       );
       assert.ok(
-        allText.includes("今天继续"),
-        "今天的对话应完整保留",
+        allText.includes("今天的事 14"),
+        "最近一轮应原文保留",
       );
 
-      // 前天的对话应该被压成 recap
+      // 超窗的跨天对话应该被压成 recap
       const hasRecap = thread.some(
         (m) => typeof m.content === "string" && m.content.includes("[session-recap]"),
       );
-      assert.ok(hasRecap, "前天的对话应被压成 recap");
+      assert.ok(hasRecap, "超窗的跨天对话应被压成 recap");
 
-      // recap 中应包含前天对话的摘要
+      // recap 预算（14 行 + 时间桶：近层全量、远层压缩）下，昨天行保留、
+      // 更远的「前天」行可能被桶预算压缩——前天内容由长期记忆种植（finalizeTurn）
+      // 与 daily journal 兜底，不依赖 recap 摘要行。
       const recapMsg = thread.find(
         (m) => typeof m.content === "string" && m.content.includes("[session-recap]"),
       );
       if (recapMsg && typeof recapMsg.content === "string") {
         assert.ok(
-          recapMsg.content.includes("前天"),
-          "recap 应包含前天对话的摘要",
+          recapMsg.content.includes("昨天聊了项目"),
+          "recap 应保留近层（昨天）的原文占位行",
         );
       }
     });

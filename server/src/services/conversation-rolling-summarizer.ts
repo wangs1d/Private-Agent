@@ -2,37 +2,77 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import OpenAI from "openai";
 
 /**
- * 滚动摘要（rolling recap）增强器。
+ * 滚动摘要（rolling recap）增强器——「滑动窗口 + 增量摘要」裁剪策略的摘要侧。
  *
  * 背景：thread 上下文窗口有限，近期窗口裁剪会把较早期的对话压进一条 `[session-recap]`
  * 摘要。旧的正则提取只取首句，信息损失大，导致 agent 忘记关键事实、时间线错乱、
  * 追问答非所问（用户反馈的"上下文跳转"）。
  *
- * 本模块实现「LLM 增量滚动摘要」：输入已有 recap 行 + 新被丢弃的对话消息，由 LLM
- * **只为新对话生成新摘要行**（已有行不经 LLM 重发，由调用方原样保留合并），
- * 模拟人类记忆机制——保留用户偏好/事实/承诺/决策/时间线，丢弃琐碎细节。
+ * 本模块实现「LLM 增量滚动摘要」：输入已有 recap 行 + [unsummarized] 待归纳原文行 +
+ * 新被丢弃的对话消息，由 LLM **只为「待归纳原文 + 新对话」生成新摘要行**（已有行不经
+ * LLM 重发，由调用方原样保留合并），模拟人类记忆机制——保留用户偏好/事实/承诺/决策/
+ * 时间线，丢弃琐碎细节。
+ *
+ * 与现有记忆架构（agentic-memory 召回、KV 摘要、海马体图谱）并行互补：滚动摘要负责
+ * 「上下文窗口内的短期→中期连续性」，外部记忆负责「长期召回」，turn WAL/journal
+ * 负责「全量归档与检索兜底」。
  *
  * 契约（2026-09-05 漂移修复，必须与 chat-thread-store.enhanceRecap 的合并逻辑对齐）：
  * - 返回值是「新增摘要行」，不是全量 recap；
  * - 已有行若交由 LLM 重发，小模型改写会合并/曲解/脑补事实（与 recall-compressor
  *   去 LLM 化同源的幻觉注入口），且每次折叠都在上一版输出上改写，错误会随轮次
  *   复利传播（实测："七点提醒我开线上会议" 被逐步改写成 "七点半线上会议"）；
- * - 失败降级：任何异常返回 null，调用方保留已有 recap 行（不影响对话主链路）。
+ * - 失败降级：任何异常返回 null，调用方保留已有摘要行与待归纳区（不影响对话主链路）。
  */
 
 export type RecapSummarizerContext = {
-  /** 当前 thread 中已有的 recap 行（已 strip 前缀） */
+  /** 已有摘要行（已 strip 前缀；仅供去重参考，禁止复述/改写） */
   existingLines: string[];
-  /** 本次被 trim 丢弃、需要被吸收进 recap 的历史消息 */
+  /** [unsummarized] 待归纳原文行（尚未被摘要过，需吸收进新摘要行） */
+  pendingLines?: string[];
+  /** 本次滑动窗口溢出、需要被吸收进摘要的历史消息 */
   droppedMessages: ChatCompletionMessageParam[];
 };
 
 export type RecapSummarizer = (ctx: RecapSummarizerContext) => Promise<string[] | null>;
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
-/** 单批新摘要行上限（新对话通常 ≤ 一批折叠消息，超过配额的细节由预算裁剪兜底） */
-const DEFAULT_MAX_NEW_LINES = 8;
-const DEFAULT_MAX_LINE_CHARS = 120;
+/** 单批摘要行上限默认值（新对话 + 待归纳原文吸收；可用环境变量覆盖） */
+const DEFAULT_MAX_LINES = 30;
+const DEFAULT_MAX_LINE_CHARS = 160;
+
+function parseIntEnv(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export function loadRecapSummarizerBudget(): { maxLines: number; maxLineChars: number } {
+  return {
+    maxLines: parseIntEnv(process.env.AGENT_RECAP_SUMMARY_MAX_LINES, DEFAULT_MAX_LINES),
+    maxLineChars: parseIntEnv(process.env.AGENT_RECAP_SUMMARY_MAX_LINE_CHARS, DEFAULT_MAX_LINE_CHARS),
+  };
+}
+
+const WEEKDAY_CN = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+/** 摘要行的绝对时间标签（不含秒，省预算）：`2026/09/04 周四 14:32`。 */
+export function formatRecapStamp(at: Date): string {
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  const date = `${at.getFullYear()}/${pad(at.getMonth() + 1)}/${pad(at.getDate())}`;
+  const weekday = WEEKDAY_CN[at.getDay()] ?? "";
+  const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  return `${date} ${weekday} ${time}`;
+}
+
+/** 从消息正文首行解析 `[ts:YYYY-MM-DD HH:MM:SS|...]` 帧（本地复制，避免与 store 循环依赖）。 */
+function parseTsFrameDate(content: string | null | undefined): Date | null {
+  if (!content) return null;
+  const m = content.match(/\[ts:(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}):\d{2}\|/);
+  if (!m?.[1]) return null;
+  const ts = Date.parse(`${m[1]}T${m[2]!}:00`);
+  return Number.isNaN(ts) ? null : new Date(ts);
+}
 
 /** 从消息里提取可进摘要的文本（跳过 tool 结果、空 content、已有 recap）。 */
 export function extractSummarizableText(msg: ChatCompletionMessageParam): string {
@@ -47,16 +87,18 @@ export function extractSummarizableText(msg: ChatCompletionMessageParam): string
   return `${role}: ${text}`;
 }
 
-/** 把对话消息序列化为 LLM 输入文本（限制总长，防 prompt 爆炸）。 */
-function serializeDroppedMessages(messages: ChatCompletionMessageParam[], maxChars = 4000): string {
+/** 把对话消息序列化为 LLM 输入文本：每行带绝对时间戳，限制总长防 prompt 爆炸。 */
+function serializeDroppedMessages(messages: ChatCompletionMessageParam[], maxChars = 8000): string {
   const lines: string[] = [];
   let total = 0;
   for (const msg of messages) {
     const line = extractSummarizableText(msg);
     if (!line) continue;
-    if (total + line.length > maxChars) break;
-    lines.push(line);
-    total += line.length;
+    const ts = typeof msg.content === "string" ? parseTsFrameDate(msg.content) : null;
+    const stamped = ts ? `[${formatRecapStamp(ts)}] ${line}` : line;
+    if (total + stamped.length > maxChars) break;
+    lines.push(stamped);
+    total += stamped.length;
   }
   return lines.join("\n");
 }
@@ -64,7 +106,7 @@ function serializeDroppedMessages(messages: ChatCompletionMessageParam[], maxCha
 /** 解析 LLM 输出为摘要行（兼容 `- 内容` 格式，去重、限长、限条数）。 */
 export function parseRecapLinesFromLlmOutput(
   output: string,
-  maxLines = DEFAULT_MAX_NEW_LINES,
+  maxLines = DEFAULT_MAX_LINES,
   maxLineChars = DEFAULT_MAX_LINE_CHARS,
 ): string[] {
   if (!output) return [];
@@ -85,31 +127,46 @@ export function parseRecapLinesFromLlmOutput(
   return lines;
 }
 
-function buildSummarizeMessages(ctx: RecapSummarizerContext): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+function buildSummarizeMessages(
+  ctx: RecapSummarizerContext,
+  budget: { maxLines: number; maxLineChars: number } = loadRecapSummarizerBudget(),
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   const existing = ctx.existingLines.length > 0 ? ctx.existingLines.map((l) => `- ${l}`).join("\n") : "（空）";
+  const pending = ctx.pendingLines && ctx.pendingLines.length > 0
+    ? ctx.pendingLines.map((l) => `- ${l}`).join("\n")
+    : "（无）";
   const dropped = serializeDroppedMessages(ctx.droppedMessages);
+  const now = new Date();
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  const nowLabel = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${WEEKDAY_CN[now.getDay()]} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
   const system = [
-    "你是用户的长期记忆整理器。系统会把较早期的对话从上下文窗口中折叠出去，由你为「新对话」生成摘要行，与「已有摘要」合并成滚动摘要：",
+    "你是用户的长期记忆整理器。系统以「滑动窗口 + 增量摘要」维护对话上下文：窗口外的事件由你生成摘要行，与「已有摘要」合并成滚动摘要，模拟人类长期记忆：",
     "记得关键事实、用户偏好、承诺、请求、决策与时间线，忘掉琐碎细节。",
     "",
-    "任务：只针对下方「新对话」输出新的摘要行。「已有摘要」仅用于判断哪些内容已被覆盖，禁止复述、改写或补充它。",
+    `当前时间：${nowLabel}（时间标签一律用它推算）。`,
+    "",
+    "任务：只针对下方「待归纳原文」与「新对话」输出新的摘要行。「已有摘要」仅用于判断哪些内容已被覆盖，禁止复述、改写或补充它。",
     "要求：",
-    "1. 只输出新对话中尚未被已有摘要覆盖的关键事实（用户偏好/事实/请求/承诺/决策/具体时间或日期）；",
-    "2. 时间、数字、金额、人名、地名必须照抄新对话原文的表述，禁止换算、补全或改写（如原文「七点」不得写成「七点半」或「19:30」）；",
-    "3. 不编造不存在的信息；新对话没有可摘要的关键事实时，不输出任何内容；",
-    "4. 每条一行，以「- 」开头，每行不超过 120 字；",
-    "5. 每条必须带时间标签（[今天]/[昨天]/[N天前]），无明确时间的关键事实标 [历史]；",
-    "6. 最多 8 行；",
-    "7. 只输出新摘要行本身，不要任何解释、标题或代码块，也不要输出「已有摘要」中的任何一行。",
+    "1. 必须吸收「待归纳原文」与「新对话」中尚未被已有摘要覆盖的关键事实（用户偏好/事实/请求/承诺/决策/具体时间或日期）；",
+    "2. 时间、数字、金额、人名、地名必须照抄原文表述，禁止换算、补全或改写（如原文「七点」不得写成「七点半」或「19:30」）；",
+    "3. 不重复、不编造；「待归纳原文」与「新对话」没有可摘要的关键事实时不输出任何内容；",
+    `4. 每条一行，以「- 」开头，每行不超过 ${budget.maxLineChars} 字；`,
+    "5. 每条必须带绝对时间标签 [YYYY/MM/DD 周X HH:MM]（时刻不明可省略时刻，日期不明标 [早期]），标签与内容之间留一个空格；",
+    `6. 总共不超过 ${budget.maxLines} 行；若空间不足，压缩最旧、最琐碎的细节，绝不丢用户偏好/承诺/决定；`,
+    "7. 时间线顺序：新事件在前、旧事件在后，不要乱序；",
+    "8. 只输出新摘要行本身，不要任何解释、标题或代码块，也不要输出「已有摘要」中的任何一行。",
   ].join("\n");
   const user = [
     "已有摘要（已覆盖，仅供去重参考，禁止输出这些行）：",
     existing,
     "",
+    "待归纳原文（此前滑出窗口、尚未摘要过的原文行，需吸收进新摘要行）：",
+    pending,
+    "",
     "新对话（即将从窗口中折叠，需要你生成摘要）：",
     dropped || "（无有效内容）",
     "",
-    "请输出新对话的摘要行：",
+    "请输出新摘要行：",
   ].join("\n");
   return [
     { role: "system", content: system },
@@ -140,8 +197,10 @@ export function createLlmRollingRecapSummarizer(opts?: {
     !!process.env.MOONSHOT_API_KEY?.trim() ||
     !!process.env.OPENAI_API_KEY?.trim();
   if (!hasAnyProviderKey) return null;
-  const maxLines = opts?.maxLines ?? DEFAULT_MAX_NEW_LINES;
-  const maxLineChars = opts?.maxLineChars ?? DEFAULT_MAX_LINE_CHARS;
+  const budget = {
+    maxLines: opts?.maxLines ?? loadRecapSummarizerBudget().maxLines,
+    maxLineChars: opts?.maxLineChars ?? loadRecapSummarizerBudget().maxLineChars,
+  };
 
   return async (ctx): Promise<string[] | null> => {
     try {
@@ -163,8 +222,8 @@ export function createLlmRollingRecapSummarizer(opts?: {
       const response = await openai.chat.completions.create({
         model,
         temperature: 0.2,
-        max_tokens: 600,
-        messages: buildSummarizeMessages(ctx),
+        max_tokens: 1500,
+        messages: buildSummarizeMessages(ctx, budget),
         ...bypassChatRequestExtras(),
       });
       const content = response.choices[0]?.message?.content?.trim();
@@ -179,7 +238,7 @@ export function createLlmRollingRecapSummarizer(opts?: {
         });
       }
       if (!content) return null;
-      const lines = parseRecapLinesFromLlmOutput(content, maxLines, maxLineChars);
+      const lines = parseRecapLinesFromLlmOutput(content, budget.maxLines, budget.maxLineChars);
       return lines.length > 0 ? lines : null;
     } catch (err) {
       console.warn(`[RollingRecap] LLM 摘要失败（降级保留旧 recap）: ${err instanceof Error ? err.message : err}`);
@@ -191,8 +250,10 @@ export function createLlmRollingRecapSummarizer(opts?: {
 // ── 事件化分层 recap（记忆连续性优化 Phase 2）───────────────
 
 /**
- * recap 行的时间桶。按行首 `[今天] / [昨天] / [N天前] / [N周前] / [N个月前]` 标签分层，
- * 让"时间线不拍平"——注入时近层全量、远层可压缩，跳转可追溯。
+ * recap 行的时间桶。按行首时间标签分层，让"时间线不拍平"——注入时近层全量、远层可压缩。
+ * 标签两种格式：
+ * - 绝对（现行）：`[2026/09/04 周四 14:32]` —— 跨天分桶不失效，按真实日期对 now 计算
+ * - 相对（旧数据兼容）：`[今天] / [昨天] / [N天前] / [N周前] / [N个月前]`
  */
 export type RecapTimeBucket = "today" | "yesterday" | "thisWeek" | "older" | "untagged";
 
@@ -205,16 +266,100 @@ export const RECAP_TIME_BUCKET_ORDER: RecapTimeBucket[] = [
 ];
 
 const RECAP_TIME_TAG_RE = /^\[(今天|昨天|(\d+)天前|(\d+)周前|(\d+)个月前)\]\s*/;
+const RECAP_ABSOLUTE_TAG_RE =
+  /^\[(\d{4})\/(\d{2})\/(\d{2})(?:\s+周[一二三四五六日天])?(?:\s+(\d{2}):(\d{2}))?\]\s*/;
 
-/** 解析 recap 行首的时间标签；无标签返回 null。 */
+function dayDiffDays(from: Date, to: Date): number {
+  const fromDay = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
+  const toDay = new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime();
+  return Math.round((toDay - fromDay) / 86_400_000);
+}
+
+/** 解析行首绝对时间标签为 Date；无标签返回 null。 */
+export function readRecapAbsoluteTag(line: string): Date | null {
+  const m = line.trim().match(RECAP_ABSOLUTE_TAG_RE);
+  if (!m?.[1]) return null;
+  const ts = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4] ?? "00"}:${m[5] ?? "00"}:00`);
+  return Number.isNaN(ts) ? null : new Date(ts);
+}
+
+/** 解析 recap 行首的时间标签（相对词原样返回）；无标签返回 null。 */
 export function readRecapTimeTag(line: string): string | null {
-  const m = line.trim().match(RECAP_TIME_TAG_RE);
+  const trimmed = line.trim();
+  const abs = trimmed.match(RECAP_ABSOLUTE_TAG_RE);
+  if (abs) return abs[0].trim();
+  const m = trimmed.match(RECAP_TIME_TAG_RE);
   return m ? m[0].trim() : null;
 }
 
-/** 把 recap 行归类到时间桶。 */
-export function bucketRecapLine(line: string): RecapTimeBucket {
-  const m = line.trim().match(RECAP_TIME_TAG_RE);
+/**
+ * 把旧数据 recap 行的相对时间标签确定性换算为绝对标签（不依赖 LLM）。
+ *
+ * 背景：旧版折叠行带 `[今天]/[昨天]/[N天前]` 相对标签，在折叠时刻计算后冻结落盘。
+ * 跨天加载后「[今天]」实际指折叠日，与系统提示词的当前时间矛盾——模型把旧事当现事
+ * 承接（「昨天聊的，今天刚开始对话还在当现事说」的病灶之一）。
+ *
+ * @param line recap 行（摘要行或待归纳原文行）
+ * @param anchor 标签计算基准时刻：取 recap 块的 [ts:] 帧（旧版恢复线程时打的帧，
+ *        近似折叠/整理时刻）。为 null 时无法换算，原样返回。
+ * 已带绝对标签的行原样返回；[历史] 统一改为 [早期]。
+ */
+export function migrateRecapLineLabel(line: string, anchor: Date | null): string {
+  // 行内容可能是渲染态（带 "- " bullet），剥掉后再匹配行首标签
+  const bullet = line.match(/^(\s*-\s*)/);
+  const prefix = bullet?.[1] ?? "";
+  const trimmed = prefix ? line.slice(prefix.length).trim() : line.trim();
+  if (RECAP_ABSOLUTE_TAG_RE.test(trimmed)) return line;
+  const m = trimmed.match(RECAP_TIME_TAG_RE);
+  if (!m) {
+    // 旧 [历史] 标签 → [早期]（与摘要器提示词的现行措辞一致）
+    if (trimmed.startsWith("[历史]")) return `${prefix}[早期]${trimmed.slice("[历史]".length)}`;
+    return line;
+  }
+  if (!anchor) return line;
+  const tag = m[1]!;
+  let days = 0;
+  if (tag === "今天") days = 0;
+  else if (tag === "昨天") days = 1;
+  else if (m[2]) days = parseInt(m[2], 10);
+  else if (m[3]) days = 7 * parseInt(m[3], 10);
+  else if (m[4]) days = 30 * parseInt(m[4], 10);
+  const shifted = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - days);
+  // 相对标签只精确到天，迁移时不伪造时刻：输出 [YYYY/MM/DD 周X]（时刻可省略，解析兼容）
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  const date = `${shifted.getFullYear()}/${pad(shifted.getMonth() + 1)}/${pad(shifted.getDate())}`;
+  const weekday = WEEKDAY_CN[shifted.getDay()] ?? "";
+  return `${prefix}[${date} ${weekday}] ${trimmed.slice(m[0].length)}`;
+}
+
+/**
+ * 对整块 recap content 逐行做相对→绝对标签迁移（标题/前缀/[unsummarized] 标记行
+ * 不匹配标签正则，逐行应用天然安全）。返回原串表示无变化。
+ */
+export function migrateRecapContentLabels(content: string, anchor: Date | null): string {
+  if (!anchor || !content.includes("[")) return content;
+  const lines = content.split("\n");
+  let changed = false;
+  const migrated = lines.map((line) => {
+    const next = migrateRecapLineLabel(line, anchor);
+    if (next !== line) changed = true;
+    return next;
+  });
+  return changed ? migrated.join("\n") : content;
+}
+
+/** 把 recap 行归类到时间桶（绝对标签按真实日期对 now 计算，相对标签直接映射）。 */
+export function bucketRecapLine(line: string, now: Date = new Date()): RecapTimeBucket {
+  const trimmed = line.trim();
+  const abs = readRecapAbsoluteTag(trimmed);
+  if (abs) {
+    const days = dayDiffDays(abs, now);
+    if (days <= 0) return "today";
+    if (days === 1) return "yesterday";
+    if (days >= 2 && days <= 6) return "thisWeek";
+    return "older";
+  }
+  const m = trimmed.match(RECAP_TIME_TAG_RE);
   if (!m) return "untagged";
   if (m[1] === "今天") return "today";
   if (m[1] === "昨天") return "yesterday";
@@ -230,16 +375,16 @@ export type RecapLayers = Record<RecapTimeBucket, string[]>;
 
 /**
  * 事件化分层：把 recap 行按时间标签分成 今天/昨天/本周/更早/无标签 五桶。
- * - 行内保留原标签（[今天]/[昨天]/[N天前]），保证 LLM 能区分时间线；
+ * - 绝对时间标签按真实日期对 now 分桶（跨天自动归位，不产生陈旧相对词）；
  * - 输出顺序固定（today → yesterday → thisWeek → older → untagged），
  *   与 buildSessionRecapContent 的写入顺序一致，避免 recap 消息内部时间乱跳。
  */
-export function layerRecapLines(lines: string[]): RecapLayers {
+export function layerRecapLines(lines: string[], now: Date = new Date()): RecapLayers {
   const layers: RecapLayers = { today: [], yesterday: [], thisWeek: [], older: [], untagged: [] };
   for (const line of lines) {
     const trimmed = typeof line === "string" ? line.trim() : "";
     if (!trimmed) continue;
-    const bucket = bucketRecapLine(trimmed);
+    const bucket = bucketRecapLine(trimmed, now);
     layers[bucket].push(trimmed);
   }
   return layers;
@@ -261,18 +406,20 @@ export function flattenRecapLayers(layers: RecapLayers): string[] {
  * 按注入预算裁剪分层 recap：近层（今天/昨天）优先全量保留，远层按需压缩。
  * 记忆连续性优先"最近的时间线"，token 紧张时牺牲更早的细节而非近因。
  *
- * @param lines 原始 recap 行（可无序）
+ * @param lines 原始 recap 行（可无序，绝对/相对时间标签均可）
  * @param maxLines 裁剪后总行数上限（≤0 表示不裁剪）
  * @param compressOldest 是否压缩最远层（保留每桶头部关键行，丢弃尾部细节）
+ * @param now 分桶基准时刻（默认当前时间；测试可注入）
  * @returns 按时间线顺序排列、受限后的行
  */
 export function layerRecapLinesByBudget(
   lines: string[],
   maxLines = 14,
   compressOldest = true,
+  now: Date = new Date(),
 ): string[] {
-  if (maxLines <= 0) return flattenRecapLayers(layerRecapLines(lines));
-  const layers = layerRecapLines(lines);
+  if (maxLines <= 0) return flattenRecapLayers(layerRecapLines(lines, now));
+  const layers = layerRecapLines(lines, now);
   // 近层配额：今天全量，昨天全量，本周最多 4，更早最多 3，无标签最多 3
   const quotas: Partial<Record<RecapTimeBucket, number>> = {
     today: Infinity,

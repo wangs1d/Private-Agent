@@ -193,11 +193,11 @@ export function getLedgerRetentionDays(): number {
 }
 
 // ============================================================
-// 用户事实注册表（User Fact Registry）
+// 用户理解档案（User Understanding Store）
 // ============================================================
 
-export function isUserFactRegistryEnabled(): boolean {
-  return envBool("AGENT_USER_FACT_REGISTRY_ENABLED", true);
+export function isUserUnderstandingEnabled(): boolean {
+  return envBool("AGENT_USER_UNDERSTANDING_ENABLED", true);
 }
 
 // ============================================================

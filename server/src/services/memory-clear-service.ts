@@ -82,17 +82,18 @@ export async function clearAllMemoryForActor(
     inventory.invalidate(actorId);
   }
 
-  // 9. agentic-memory 四件套级联清理（P0-2 隐私闭环）：语义账本 / 承诺草稿板 /
-  //    溯源依赖图 / bridge_links——此前清空 actor 后这些表的数据会残留。
+  // 9. agentic-memory 级联清理（P0-2 隐私闭环）：语义账本 / 承诺草稿板 /
+  //    溯源依赖图 / bridge_links / 用户理解档案——此前清空 actor 后这些表的数据会残留。
   const components = getMemoryComponents();
   const ledgerCleared = components.ledger?.purgeActor(actorId) ?? 0;
   const commitmentsCleared = components.commitmentBoard?.purgeActor(actorId) ?? 0;
   const provenanceCleared = components.provenance?.purgeActor(actorId) ?? 0;
   const bridgeLinksCleared = components.bridge?.purgeActor(actorId) ?? 0;
-  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared > 0) {
+  const understandingCleared = components.understandingStore?.purgeActor(actorId) ?? 0;
+  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared > 0) {
     console.info(
       `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +
-        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared}`,
+        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared}`,
     );
   }
 

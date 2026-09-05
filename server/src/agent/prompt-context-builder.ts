@@ -1,6 +1,7 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { getMemoryComponents } from "../agentic-memory/index.js";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { formatAgentStylePrompt, loadAgentStyleProfile } from "./agent-style-profile.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
@@ -12,7 +13,6 @@ import {
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
 import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
-import { getMemoryComponents } from "../agentic-memory/index.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
@@ -576,8 +576,9 @@ export class PromptContextBuilder {
       ].join("\n");
     }
 
+    // 压缩为一句指令（原头尾两段长指令 ~120 字符，语义不变）。
     const interruptedContext = input.interruptedContext?.trim()
-      ? `【上一轮回复被打断的残留内容——仅供背景参考，不要在回复中承接、提及或道歉它】\n${input.interruptedContext.trim()}\n【用户已发送新消息，请直接、干净地回答新消息，不要以"哈哈被你看穿""我刚查XX"之类的话开头】`
+      ? `【上一轮被打断的旧回复残留，仅供背景；不要承接/提及/道歉，直接干净地回答用户新消息】\n${input.interruptedContext.trim()}`
       : undefined;
 
     // 追问降权策略（记忆架构重构后简化）：长期记忆字段已由 longTermEnabled 单一门控，
@@ -721,7 +722,7 @@ export class PromptContextBuilder {
           ...tp.toolChain.map((t, i) =>
             `  ${i + 1}. ${t.name} — ${t.purpose}${t.critical ? '（关键路径）' : ''}`,
           ),
-          `预估调用次数：${tp.estimatedCalls}，预估 token：${tp.estimatedTokens}`,
+          // 「预估 token/调用次数」行已删：内部估算值对 LLM 决策无信息量，纯占字符。
         ];
         toolPlanBlock = lines.join("\n");
       } catch (err) {
@@ -738,7 +739,7 @@ export class PromptContextBuilder {
           const lines = advices.map((a) => `- ${a.text}`);
           proactiveAdviceBlock = [
             `【Agent 主动建议】`,
-            `（以下是你在后台主动观察到的建议，不要逐条宣读，选合适的时机用一两句自然带出即可）`,
+            `（后台观察到的建议；别逐条宣读，选合适时机一两句自然带出）`,
             ...lines,
           ].join("\n");
         }
@@ -757,8 +758,7 @@ export class PromptContextBuilder {
         if (list) {
           interestListBlock = [
             `【用户兴趣关注列表】`,
-            `（后台按你与用户常聊的话题维护；话题被提起时自然接住，别背诵清单；`,
-            `对话中出现新的长期兴趣时调用 interest.manage 工具的 add/touch 记录，明确不喜欢时用 remove）`,
+            `（后台按常聊话题维护；话题被提起时自然接住、别背诵清单；出现新的长期兴趣时用 interest.manage 的 add/touch 记录，明确不喜欢用 remove）`,
             list,
           ].join("\n");
         }
@@ -785,6 +785,10 @@ export class PromptContextBuilder {
       ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
     };
 
+    // 用户理解档案块：无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
+    // 门控）；userText 命中话题词的理解带"基于此回答"寻址标记。
+    const userUnderstandingBlock = this.buildUserUnderstandingBlock(input.actorId, userText);
+
     // 互斥：shortTermTaskContext 非空时跳过 taskContext，避免语义重叠字段同时以完整长度注入
     const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
 
@@ -805,6 +809,7 @@ export class PromptContextBuilder {
       ...(toneGuidance
         ? { toneGuidance }
         : {}),
+      ...(userUnderstandingBlock ? { userUnderstanding: userUnderstandingBlock } : {}),
       ...(userProfile
         ? { userProfile }
         : {}),
@@ -839,9 +844,8 @@ export class PromptContextBuilder {
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(proactiveAdviceBlock ? { proactiveAdvice: proactiveAdviceBlock } : {}),
       ...(interestListBlock ? { interestList: interestListBlock } : {}),
-      ...(this.buildCommitmentBlock(input.actorId)
-        ? { commitmentBoard: this.buildCommitmentBlock(input.actorId)! }
-        : {}),
+      // commitmentBoard（未兑现承诺块）不再构建：prompt-assembler 从不渲染该字段，
+      // 每轮白查一次承诺板。承诺信息仍经 KV memory_commitments 与 epitome 注入。
       ...(conversationTimeline ? { conversationTimeline } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       // 2026-08-20 修复「fast 模式第二句说没拿到定位」：
@@ -862,6 +866,7 @@ export class PromptContextBuilder {
     // （memory-consolidation-service）会据此过滤"模型复述注入记忆"产生的
     // 回声候选——注入回上下文的内容不再被提取为新记忆（OpenClaw 2.0 同款结构）。
     try {
+      markInjectedMemory(input.actorId, promptMemory.userUnderstanding);
       markInjectedMemory(input.actorId, promptMemory.narrativeRecall);
       markInjectedMemory(input.actorId, promptMemory.memorySummary);
       markInjectedMemory(input.actorId, promptMemory.memoryPreferences);
@@ -886,6 +891,26 @@ export class PromptContextBuilder {
   }
 
   /**
+   * 用户理解档案块：agent 对用户理解的结构化沉淀（topic + 理解句 + 性质标注
+   * + 演变历史）。无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
+   * 门控）；userText 命中话题词的理解带"基于此回答"寻址标记——"我老婆是谁"
+   * 直达当前理解，不依赖向量检索，也不会被旧画像/旧检索结果带偏。
+   */
+  private buildUserUnderstandingBlock(actorId: string, userText: string): string | undefined {
+    try {
+      const store = getMemoryComponents().understandingStore;
+      if (!store) return undefined;
+      const grounded = new Set(
+        store.matchTopicsInText(actorId, userText).map((n) => n.topic.trim()),
+      );
+      return store.renderForPrompt(actorId, grounded) ?? undefined;
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 用户理解块构建失败（忽略）: ${err}`);
+      return undefined;
+    }
+  }
+
+  /**
    * 构建可复用技能轻量索引（Level 0 渐进式召回）。
    *
    * 参考 skill_index 设计：只注入 name + description + skillType + tags 的
@@ -895,45 +920,6 @@ export class PromptContextBuilder {
    * 按相关性排序：userText 命中技能名/描述关键词的排在前面，其余按名称排序。
    * 无技能时返回空（不注入）。
    */
-  /**
-   * 未兑现承诺摘要（P2-11 承诺草稿板接线）。
-   * active/pending_confirmation 的承诺注入【未兑现承诺】块（≤6 条），
-   * 让 agent 在"我这周要干嘛/答应过什么"类问题下直接可见，无需工具回查。
-   * 板子未启用/无未兑现承诺时返回 undefined（零开销）。
-   */
-  private buildCommitmentBlock(actorId: string): string | undefined {
-    let board: import("../agentic-memory/commitment-board.js").CommitmentBoard | null = null;
-    try {
-      board = getMemoryComponents().commitmentBoard;
-    } catch {
-      return undefined;
-    }
-    if (!board) return undefined;
-    try {
-      const items = board.list({
-        actorId,
-        status: ["active", "pending_confirmation"],
-        limit: 6,
-      });
-      if (items.length === 0) return undefined;
-      const lines = items.map((c) => {
-        const who =
-          c.committedBy === "user" ? "用户" : c.committedBy === "agent" ? "你" : "第三方";
-        const due = c.deadline ? `，截止 ${c.deadline.slice(0, 16).replace("T", " ")}` : "，无明确期限";
-        const extra = c.status === "pending_confirmation" ? "（待确认）" : "";
-        const blocked = c.dependencyBlocked ? "（被依赖阻塞）" : "";
-        return `- [${who}] ${c.text}${due}${extra}${blocked}`;
-      });
-      return [
-        `【未兑现承诺】`,
-        `（承诺草稿板跟踪中的事项，用户问"要做什么/答应过什么"时优先参考；可用 commitment.* 工具查询与管理）`,
-        ...lines,
-      ].join("\n");
-    } catch {
-      return undefined;
-    }
-  }
-
   private buildSkillIndexPrompt(userText: string | undefined): { skillIndex: string } | undefined {
     if (!this.deps.skillManager) return undefined;
     let manifests;

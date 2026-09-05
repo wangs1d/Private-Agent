@@ -1839,6 +1839,13 @@ export class HumanLikeMemoryService {
   }
 
   private async executeSleepAction(action: SleepAction, report: HumanLikeMemorySleepReport): Promise<boolean> {
+    // LLM 返回的动作可能缺字段（幻觉/截断）：既无 nodeId 也无合法 nodeIds 时直接跳过，
+    // 不让坏动作崩溃整个 sleep cycle（真实 key 环境下 LLM 偶发漏字段）。
+    const hasNodeId = "nodeId" in action;
+    const nodeIds = "nodeIds" in action ? (action as { nodeIds?: unknown }).nodeIds : undefined;
+    const hasNodeIds = Array.isArray(nodeIds);
+    if (!hasNodeId && !hasNodeIds) return false;
+    if (hasNodeIds && nodeIds.length === 0) return false;
     if ("nodeId" in action) {
       const node = this.store.nodes[action.nodeId];
       if (!node) return false;

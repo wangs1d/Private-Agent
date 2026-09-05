@@ -12,7 +12,8 @@ import { resolveHumanMemoryStoreMode } from "../services/graph-sqlite-store.js";
 
 export function getMemoryHealthSnapshot(): Record<string, unknown> {
   const runtime = getAgenticMemoryRuntime();
-  const { ledger, commitmentBoard, provenance, bridge } = getMemoryComponents();
+  const { ledger, commitmentBoard, provenance, bridge, understandingStore } =
+    getMemoryComponents();
   const humanLike = getHumanLikeMemoryService();
 
   return {
@@ -32,6 +33,7 @@ export function getMemoryHealthSnapshot(): Record<string, unknown> {
           totalLinks: bridge.listLinks().length,
         }
       : null,
+    userUnderstanding: understandingStore?.stats() ?? null,
   };
 }
 
